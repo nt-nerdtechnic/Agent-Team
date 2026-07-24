@@ -6,6 +6,7 @@ import type { useBackend } from '../composables/useBackend'
 import type { useCliProfiles } from '../composables/useCliProfiles'
 import { extractDropPaths, shellEscape } from '../lib/drop'
 import { CLI_CONTEXT_MIME, PANE_ID_MIME, resolveCliDropSource, writeCliPaneDragPayload } from '../lib/cliContext'
+import { PLAN_REF_MIME, isPlanDrag, parsePlanRefPayload, type PlanDragRef } from '../lib/planDrag'
 import { formatLoopTime } from '../lib/loopPrompt'
 import RebuildIcon from './RebuildIcon.vue'
 import UsageBadge from './UsageBadge.vue'
@@ -63,6 +64,9 @@ const emit = defineEmits<{
   /** Another CLI pane was dropped onto this pane's terminal area — App.vue
    *  pastes that pane's recent output into this pane's input prompt. */
   (e: 'cli-context-drop', sourcePaneId: string): void
+  /** A plan document was dropped onto this pane's terminal area — App.vue
+   *  pastes the plan goal + execution instruction into this pane's input. */
+  (e: 'plan-drop', ref: PlanDragRef): void
   /** Loop button clicked — App.vue injects the loop prompt or clears the badge. */
   (e: 'toggle-loop'): void
   /** Waiting badge clicked — App.vue injects the resume prompt immediately
@@ -73,6 +77,8 @@ const containerRef = ref<HTMLElement | null>(null)
 const isDragOver = ref(false)
 /** Hovering a CLI pane over this terminal (context share), not files (path insert). */
 const isCliDragOver = ref(false)
+/** Hovering a plan document over this terminal (plan goal inject). */
+const isPlanDragOver = ref(false)
 
 // Inline title rename — double-click the header title to edit, Enter/blur to
 // commit, Escape to cancel. The committed name bubbles up as a 'rename' event.
@@ -151,6 +157,12 @@ function isCliPaneDrag(e: DragEvent): boolean {
 
 function onTerminalDragOver(e: DragEvent): void {
   e.preventDefault()
+  if (isPlanDrag(e.dataTransfer?.types)) {
+    isPlanDragOver.value = true
+    isCliDragOver.value = false
+    isDragOver.value = false
+    return
+  }
   const cli = isCliPaneDrag(e)
   // Dragging this pane's own header over its own terminal is a no-op — don't
   // advertise a drop target for it.
@@ -161,12 +173,21 @@ function onTerminalDragOver(e: DragEvent): void {
 function onTerminalDragLeave(): void {
   isDragOver.value = false
   isCliDragOver.value = false
+  isPlanDragOver.value = false
 }
 
 function onTerminalDrop(e: DragEvent): void {
   isDragOver.value = false
   isCliDragOver.value = false
+  isPlanDragOver.value = false
   if (terminal.displayStatus.value === 'exited' || terminal.displayStatus.value === 'error') return
+  // Plan document dropped onto this terminal: App.vue owns pane state, so it
+  // pastes the plan goal + execution instruction into this pane's input.
+  if (isPlanDrag(e.dataTransfer?.types)) {
+    const ref = parsePlanRefPayload(e.dataTransfer?.getData(PLAN_REF_MIME) || '')
+    if (ref) emit('plan-drop', ref)
+    return
+  }
   // CLI pane dropped onto this terminal: share its recent output with this pane.
   // App.vue owns pane state, so it resolves the buffer and does the paste.
   if (isCliPaneDrag(e)) {
@@ -347,9 +368,9 @@ onMounted(() => {
     <div
       ref="containerRef"
       class="xterm-host"
-      :class="{ 'drag-over': isDragOver, 'cli-drag-over': isCliDragOver, 'alt-buffer': terminal.isAltBuffer.value }"
+      :class="{ 'drag-over': isDragOver, 'cli-drag-over': isCliDragOver, 'plan-drag-over': isPlanDragOver, 'alt-buffer': terminal.isAltBuffer.value }"
       :data-pane-id="paneId"
-      @mousedown="emit('set-focus')"
+      @mousedown.left="emit('set-focus')"
       @dragover.prevent="onTerminalDragOver"
       @dragenter.prevent="onTerminalDragOver"
       @dragleave="onTerminalDragLeave"
@@ -570,11 +591,13 @@ onMounted(() => {
   transition: box-shadow 0.1s;
 }
 .xterm-host.drag-over,
-.xterm-host.cli-drag-over {
+.xterm-host.cli-drag-over,
+.xterm-host.plan-drag-over {
   box-shadow: inset 0 0 0 2px var(--accent-focus);
 }
 .xterm-host.drag-over::after,
-.xterm-host.cli-drag-over::after {
+.xterm-host.cli-drag-over::after,
+.xterm-host.plan-drag-over::after {
   content: 'Drop to insert path';
   position: absolute;
   inset: 0;
@@ -589,6 +612,9 @@ onMounted(() => {
 }
 .xterm-host.cli-drag-over::after {
   content: 'Drop to paste this pane context';
+}
+.xterm-host.plan-drag-over::after {
+  content: 'Drop to inject plan goal';
 }
 .prep-overlay {
   position: absolute;

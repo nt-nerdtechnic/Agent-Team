@@ -22,6 +22,7 @@ import {
 } from '../composables/usePlanHtml'
 import { sharePlanToGit } from '../composables/planShare'
 import { useNotify } from '../composables/useNotify'
+import { writePlanDragPayload } from '../lib/planDrag'
 
 const props = defineProps<{
   workspacePath: string
@@ -288,6 +289,15 @@ const archivedRows = computed<PlanStageRow[]>(() => {
 // Width of the row progress-bar fill; callers guard total > 0.
 function progressPercent(done: number, total: number): string {
   return `${Math.round((done / total) * 100)}%`
+}
+
+// Drag a plan row onto a CLI pane's terminal to inject its goal + execution
+// instruction into that pane's input prompt (TerminalPane's 'plan-drop').
+// overview is the plan goal; plain docs have none.
+function onPlanRowDragStart(e: DragEvent, relPath: string, name: string, overview?: string): void {
+  if (!e.dataTransfer) return
+  writePlanDragPayload(e.dataTransfer, { relPath, name, overview })
+  e.dataTransfer.effectAllowed = 'copy'
 }
 
 // "Archive all done": done plans not yet archived. Drives the button state and
@@ -823,6 +833,8 @@ async function ctxUpgradeToPlan(): Promise<void> {
             class="plan-row"
             role="button"
             tabindex="0"
+            draggable="true"
+            @dragstart="onPlanRowDragStart($event, item.relPath, item.name)"
             @click="openPlan(item)"
             @keydown.enter.prevent="openPlan(item)"
             @keydown.space.prevent="openPlan(item)"
@@ -871,6 +883,8 @@ async function ctxUpgradeToPlan(): Promise<void> {
             :class="{ 'plan-row--done': group.finished }"
             role="button"
             tabindex="0"
+            draggable="true"
+            @dragstart="onPlanRowDragStart($event, row.item.relPath, row.meta.name, row.meta.overview)"
             @click="openPlan(row.item)"
             @keydown.enter.prevent="openPlan(row.item)"
             @keydown.space.prevent="openPlan(row.item)"
@@ -932,6 +946,8 @@ async function ctxUpgradeToPlan(): Promise<void> {
             class="plan-row plan-row--done"
             role="button"
             tabindex="0"
+            draggable="true"
+            @dragstart="onPlanRowDragStart($event, row.item.relPath, row.meta.name, row.meta.overview)"
             @click="openPlan(row.item)"
             @keydown.enter.prevent="openPlan(row.item)"
             @keydown.space.prevent="openPlan(row.item)"

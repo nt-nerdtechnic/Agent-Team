@@ -66,6 +66,7 @@ import {
   CLI_CHIP_LINE_CAP,
   CLI_PASTE_LINE_CAP
 } from './lib/cliContext'
+import { planDropPrompt, type PlanDragRef } from './lib/planDrag'
 import { allSlotsFinished, isReplayedTurnComplete, turnCompleteDone, turnEndsWithSentinel, type SlotSignal } from './lib/completion'
 import { reorderByIds, sortByIdOrder } from './lib/paneOrder'
 import { AGENT_SPECS } from './lib/agentSpecs'
@@ -1439,6 +1440,13 @@ async function pastePaneContext(targetPaneId: string, text: string): Promise<voi
       return
     }
   }
+}
+
+// A plan dropped from PlansPane onto a CLI pane: paste the plan goal +
+// execution instruction into that pane's input prompt. No Enter is sent — the
+// text waits for the user to review and submit, matching injectPaneContext.
+async function injectPlanToPane(ref: PlanDragRef, targetPaneId: string): Promise<void> {
+  await pastePaneContext(targetPaneId, planDropPrompt(ref))
 }
 
 // Cross-WINDOW variant of injectPaneContext: the source pane lives in another
@@ -8593,6 +8601,7 @@ function paneIsCommander(p: ActivePane): boolean {
           @context-menu="(ev) => openPaneCtxMenu(ev, p.id)"
           @reorder-drop="(draggedId) => reorderPane(draggedId, p.id)"
           @cli-context-drop="(sourceId) => injectPaneContext(sourceId, p.id)"
+          @plan-drop="(ref) => injectPlanToPane(ref, p.id)"
           @toggle-loop="togglePaneLoop(p.id)"
           @loop-resume-now="resumeLoopNow(p.id)"
         />
