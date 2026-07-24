@@ -57,7 +57,7 @@ async def test_written_text_reaches_child_stdin():
             f"child never received the input; saw: {combined!r}"
         )
     finally:
-        svc.kill(session.id)
+        await svc.kill(session.id)
 
 
 async def test_write_to_dead_session_raises_not_silent():
@@ -130,4 +130,4 @@ async def test_text_then_enter_preserve_order():
         # The submitted line is exactly the content — Enter did not jump ahead of it.
         assert "LINE:[payload-here]" in combined, f"got: {combined!r}"
     finally:
-        svc.kill(session.id)
+        await svc.kill(session.id)

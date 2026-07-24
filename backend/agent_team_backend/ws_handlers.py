@@ -1490,12 +1490,16 @@ async def mcp_save_servers(session: "Session", msg_id: str, msg_type: str, paylo
 async def workspace_list_recent(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
 
+    # list() reads the JSON file and os.path.isdir()s every recent path; a stale
+    # or slow path would block the event loop. Offload it like the other fs
+    # handlers so it can't stall other requests.
+    recent = await asyncio.to_thread(app.recent_workspaces_store.list)
     await session.send_json(
         make_response(
             msg_id,
             msg_type,
             {
-                "recent": app.recent_workspaces_store.list(),
+                "recent": recent,
                 "path": str(app.recent_workspaces_store.path),
             },
         )
@@ -2928,7 +2932,7 @@ async def terminal_kill(session: "Session", msg_id: str, msg_type: str, payload:
         if sess.id == term_session_id:
             pane_id_for_unreg = sess.pane_id
             break
-    session.terminals.kill(term_session_id, force=force)
+    await session.terminals.kill(term_session_id, force=force)
     if pane_id_for_unreg:
         app.attribution.unregister_pane(pane_id_for_unreg)
     await session.send_json(make_response(msg_id, msg_type, {"ok": True}))

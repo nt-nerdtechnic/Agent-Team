@@ -200,7 +200,7 @@ async def test_close_schedules_reap_on_exit_but_not_on_kill(monkeypatch):
     # kill() path: must NOT queue for the exit reaper (it sweeps on its own).
     s2 = svc.create(pane_id="p2", agent_key=None, command=["sleep", "30"], cwd="/")
     s2.descendants = {222: ""}
-    svc.kill(s2.id, force=True)
+    await svc.kill(s2.id, force=True)
     await asyncio.sleep(0.2)
     assert reaped == [[111]]
     await svc.kill_all(grace=0.3)

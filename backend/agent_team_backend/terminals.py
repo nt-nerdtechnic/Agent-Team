@@ -524,7 +524,7 @@ class TerminalService:
         except OSError as err:
             log.warning("interrupt session %s failed: %s", session_id, err)
 
-    def kill(self, session_id: str, force: bool = False) -> None:
+    async def kill(self, session_id: str, force: bool = False) -> None:
         session = self._sessions.get(session_id)
         if not session or session.closed:
             return
@@ -533,7 +533,11 @@ class TerminalService:
         # the child's own process group, so a grandchild that called setsid
         # would survive. Capture the tree now — after the child dies its
         # grandchildren reparent to launchd and can no longer be found.
-        descendants = _descendant_pids(session.proc.pid)
+        # Offload the full-system `ps` snapshot (timeout 5s) to a thread so a
+        # slow snapshot never blocks the event loop — a batch of kills on
+        # workspace switch would otherwise stall unrelated requests (e.g. the
+        # Welcome screen's workspace.list_recent) past their 10s timeout.
+        descendants = await asyncio.to_thread(_descendant_pids, session.proc.pid)
         try:
             pgid = os.getpgid(session.proc.pid)
             if force:

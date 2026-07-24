@@ -375,7 +375,7 @@ async def test_terminal_service_registers_and_unregisters() -> None:
     session = svc.create(pane_id="p1", agent_key=None, command=["sleep", "30"], cwd="/")
     await _wait_registry_has(session.proc.pid)
 
-    svc.kill(session.id)
+    await svc.kill(session.id)
     session.proc.wait(timeout=5)
     await _wait_registry_empty()
 
@@ -394,7 +394,7 @@ async def test_kill_escalates_term_trapping_child_and_unregisters() -> None:
     await _wait_registry_has(session.proc.pid)
     # Give the shell a moment to install the TERM trap before signalling.
     await asyncio.sleep(0.3)
-    svc.kill(session.id)
+    await svc.kill(session.id)
     # Entry must survive while the child is still alive under SIGTERM.
     session.proc.wait(timeout=10)
     await _wait_registry_empty()
