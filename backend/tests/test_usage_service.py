@@ -160,13 +160,12 @@ def test_normalize_claude_scoped_filters_all_models_and_dedupes():
     assert len(windows) == 2  # all-models dropped, duplicate opus collapsed
 
 
-def test_normalize_claude_marks_null_id_promotional_scoped():
+def test_normalize_claude_shows_null_id_scoped_as_real_data():
     # Real /api/oauth/usage shape (2026-07): the only weekly_scoped entry is a
-    # promotional "Fable" bucket with scope.model.id=None — Anthropic reports it
-    # at 100% but does NOT enforce it (requests fall back to the main quota). It
-    # stays visible (CodexBar surfaces it too) but is marked "(promo)" so the
-    # exhausted row is not read as an account-wide block. Sibling limits[]
-    # entries (kind=session/weekly_all) must not become extra windows.
+    # "Fable" bucket with scope.model.id=None. The quota is real (Anthropic
+    # reports it), so it is surfaced as-is like any per-model window ("Fable
+    # only") — never hidden or relabeled. Sibling limits[] entries
+    # (kind=session/weekly_all) must not become extra windows.
     windows, _ = us.normalize_claude({
         "five_hour": {"utilization": 4.0, "resets_at": "2026-07-24T15:50:00Z"},
         "seven_day": {"utilization": 92.0, "resets_at": "2026-07-29T23:00:00Z"},
@@ -183,7 +182,7 @@ def test_normalize_claude_marks_null_id_promotional_scoped():
     labels = [w["label"] for w in windows]
     assert "Session (5h)" in labels
     assert "Weekly (all models)" in labels
-    assert any(w["label"] == "Fable (promo)" and w["usedPercent"] == 100.0 for w in windows)
+    assert any(w["label"] == "Fable only" and w["usedPercent"] == 100.0 for w in windows)
     assert len(windows) == 3
 
 

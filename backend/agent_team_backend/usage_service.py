@@ -435,15 +435,9 @@ def normalize_claude(data: dict) -> tuple[list[dict], str | None]:
         if slug in seen_models:
             continue
         seen_models.add(slug)
-        # A well-formed, enforceable per-model weekly limit carries a concrete
-        # model id. Entries with only a display_name and no id are Anthropic
-        # PROMOTIONAL per-model buckets (e.g. "Fable"): reported at 100% once the
-        # promo is spent but NOT enforced (requests fall back to the main quota).
-        # Keep showing them (CodexBar surfaces them too), but mark the label so
-        # an exhausted promo row is not mistaken for an account-wide block.
-        promotional = not (model_id and str(model_id).strip())
-        label = f"{model} (promo)" if promotional else f"{model} only"
-        windows.append(_window("weekly-model", label, pct, entry.get("resets_at")))
+        # Null-id "promotional" buckets (e.g. Fable) are surfaced as-is like any
+        # other per-model window: the quota is real, so never hide or relabel it.
+        windows.append(_window("weekly-model", f"{model} only", pct, entry.get("resets_at")))
     plan = None
     return windows, plan
 
