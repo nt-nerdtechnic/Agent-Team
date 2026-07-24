@@ -132,6 +132,7 @@ defineExpose({
   cleanBytesSeen: terminal.cleanBytesSeen,
   lastActivityAt: terminal.lastActivityAt,
   lastRawActivityAt: terminal.lastRawActivityAt,
+  isAltBuffer: terminal.isAltBuffer,
   markBufferPosition: terminal.markBufferPosition,
   recleanBuffer: terminal.recleanBuffer,
   readRenderedText: terminal.readRenderedText,

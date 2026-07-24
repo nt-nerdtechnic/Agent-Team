@@ -2954,9 +2954,28 @@ const rebuildableAllPaneCount = computed(
   () => panes.value.filter((p) => paneCanRebuild(p)).length
 )
 
-async function rebuildPaneViaResume(paneId: string): Promise<void> {
+async function rebuildPaneViaResume(
+  paneId: string,
+  opts?: { suppressBusyToast?: boolean }
+): Promise<'busy' | undefined> {
   const pane = panes.value.find((p) => p.id === paneId)
   if (!pane) return
+  // If the CLI is actively working, skip rebuild so we don't kill in-flight work.
+  // The PTY is alive and the pane is already bound — nothing to reattach, just leave it.
+  const paneStatus = paneRefs[paneId]?.displayStatus as string | undefined
+  const rawActivityAt = paneRefs[paneId]?.lastRawActivityAt as number | undefined
+  const altBuffer = paneRefs[paneId]?.isAltBuffer as boolean | undefined
+  const busy =
+    paneStatus === 'running' ||
+    paneStatus === 'starting' ||
+    (altBuffer === true && typeof rawActivityAt === 'number' && Date.now() - rawActivityAt < 2000)
+  if (busy) {
+    // In a batch (rebuild-all) the caller aggregates one toast; here just report.
+    if (!opts?.suppressBusyToast) {
+      notifyRestore.toast(i18n.global.t('pane.terminal.rebuild-busy-skipped'), { type: 'info' })
+    }
+    return 'busy'
+  }
   const sessionId = paneResumeSessionId(pane)
   if (!sessionId) return
   // Lock synchronously, before any await: a concurrent call (double-click, or
@@ -3077,10 +3096,11 @@ async function rebuildPanesViaResume(scope: 'tab' | 'all'): Promise<void> {
   pipelineLog(
     `↻ rebuilding ${ids.length} CLI pane(s) in ${scope === 'all' ? 'all tabs' : 'the active tab'}`
   )
+  let busyCount = 0
   try {
     for (const id of ids) {
       try {
-        await rebuildPaneViaResume(id)
+        if ((await rebuildPaneViaResume(id, { suppressBusyToast: true })) === 'busy') busyCount++
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         pipelineLog(`⚠ rebuild pane ${id.slice(0, 8)} failed: ${message}`)
@@ -3088,6 +3108,12 @@ async function rebuildPanesViaResume(scope: 'tab' | 'all'): Promise<void> {
     }
   } finally {
     rebuildingTabPanes.value = false
+  }
+  if (busyCount > 0) {
+    notifyRestore.toast(
+      i18n.global.t('pane.terminal.rebuild-busy-skipped-batch', { count: busyCount }),
+      { type: 'info' }
+    )
   }
 }
 
