@@ -232,6 +232,33 @@ class CliProfilesStore:
             )
 
 
+def credential_home_for(agent_key: str, store: CliProfilesStore) -> Path | None:
+    """Directory the usage poller should treat as ``agent_key``'s credential
+    base for the ACTIVE profile, or ``None`` when the built-in default (the real
+    home) is active — in which case the caller keeps its current default path
+    byte-for-byte.
+
+    The returned base mirrors ``build_spawn_plan``'s isolation env, resolved to
+    the exact layer each ``read_*_credentials`` reader expects::
+
+        claude  <base>/.credentials.json          base = CLAUDE_CONFIG_DIR = profile_home
+        codex   <base>/auth.json                   base = CODEX_HOME source = profile_home
+        kimi    <base>/credentials/kimi-code.json  base = KIMI_CODE_HOME    = profile_home
+        grok    <base>/.grok/auth.json             base = HOME shim         = profile_home/home
+
+    antigravity is never isolated (fixed-name Keychain entry), so it is not a
+    supported key here and always resolves to the real home upstream.
+    """
+    if agent_key not in SUPPORTED_AGENT_KEYS:
+        return None
+    profile = store.get_default_profile(agent_key)
+    if profile is None:
+        return None
+    home = store.home_path(profile)
+    # grok isolates via a HOME shim; its .grok dir lives one level in.
+    return home / "home" if agent_key == "grok" else home
+
+
 # ---- spawn-env planning ----
 
 

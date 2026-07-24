@@ -11,6 +11,8 @@ provider's own usage surface — no login flow, no credential writes:
   ``GET https://api.kimi.com/coding/v1/usages``
 - grok:   ``~/.grok/auth.json`` + ``grok agent stdio`` JSON-RPC
   method ``x.ai/billing``
+- antigravity: macOS Keychain (``gemini``/``antigravity``, stale-file fallback)
+  -> refresh the agy token in memory -> ``v1internal:retrieveUserQuotaSummary``
 
 Every credential file is read-only here; token refresh is left to the CLI
 that owns the file (refreshing ourselves would rotate the CLI's tokens).
@@ -29,6 +31,7 @@ reset-boundary refresh re-polls shortly after a window's ``resetsAt`` passes.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import shutil
@@ -38,9 +41,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .applog import app_data_dir
+
 log = logging.getLogger(__name__)
 
-PROVIDERS = ("claude", "codex", "kimi", "grok")
+PROVIDERS = ("claude", "codex", "kimi", "grok", "antigravity")
 
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CLAUDE_BETA_HEADER = "oauth-2025-04-20"
@@ -48,6 +53,28 @@ CLAUDE_UA_FALLBACK = "claude-code/2.1.0"
 CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 CODEX_DEFAULT_BASE = "https://chatgpt.com/backend-api"
 KIMI_DEFAULT_BASE = "https://api.kimi.com"
+# Antigravity (Google "agy" CLI). We only ever READ its credentials — never
+# write back to the Keychain or ~/.gemini, and the refreshed access token stays
+# in memory. client_id/secret live in a local Navide config, never in the repo.
+ANTIGRAVITY_KEYCHAIN_SERVICE = "gemini"
+ANTIGRAVITY_KEYCHAIN_ACCOUNT = "antigravity"
+ANTIGRAVITY_KEYRING_PREFIX = "go-keyring-base64:"
+ANTIGRAVITY_STALE_TOKEN_REL = (".gemini", "antigravity-cli", "antigravity-oauth-token")
+ANTIGRAVITY_OAUTH_CONFIG = "antigravity-oauth.json"
+ANTIGRAVITY_TOKEN_URL = "https://oauth2.googleapis.com/token"
+ANTIGRAVITY_API_BASE = "https://daily-cloudcode-pa.googleapis.com"
+ANTIGRAVITY_LOAD_URL = f"{ANTIGRAVITY_API_BASE}/v1internal:loadCodeAssist"
+ANTIGRAVITY_QUOTA_URL = f"{ANTIGRAVITY_API_BASE}/v1internal:retrieveUserQuotaSummary"
+# TODO(antigravity): endpoint bodies + clientMetadata values are not yet
+# empirically verified against a live agy session. These are best-effort
+# placeholders; a non-200 response falls through to status="error" and never
+# affects the other providers, so shipping them is safe until we can capture a
+# real request. Values to confirm before trusting the numbers:
+#   - clientMetadata.ideType / pluginType (exact enum strings agy sends)
+#   - whether retrieveUserQuotaSummary needs a body at all, and its shape
+#   - the x-goog-api-client version string
+ANTIGRAVITY_CLIENT_METADATA = {"ideType": "IDE_UNSPECIFIED", "pluginType": "GEMINI"}
+ANTIGRAVITY_GOOG_API_CLIENT = "gl-node/unknown gemini-cli/unknown"
 GROK_INIT_TIMEOUT = 4.0
 GROK_BILLING_TIMEOUT = 3.0
 HTTP_TIMEOUT = 30.0
@@ -112,10 +139,16 @@ def _snapshot(provider: str, status: str, *, windows: list[dict] | None = None,
 
 # ── Credential readers (pure; ``home`` injectable for tests) ────────────────
 
-def read_claude_credentials_file(home: Path) -> dict | None:
+def read_claude_credentials_file(home: Path, config_dir: Path | None = None) -> dict | None:
     """Parse ``~/.claude/.credentials.json``. Returns the claudeAiOauth dict
-    or None when absent/unusable (an mcpOAuth-only payload counts as absent)."""
-    path = home / ".claude" / ".credentials.json"
+    or None when absent/unusable (an mcpOAuth-only payload counts as absent).
+
+    ``config_dir`` overrides the lookup with an explicit ``CLAUDE_CONFIG_DIR``
+    (a profile's isolated home): the file is read from
+    ``<config_dir>/.credentials.json`` directly, without the ``.claude``
+    sub-directory. Default (``None``) keeps ``home/.claude``."""
+    base = config_dir if config_dir is not None else home / ".claude"
+    path = base / ".credentials.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -137,15 +170,19 @@ def claude_token_expired(oauth: dict, now_ms: float | None = None) -> bool:
 _keychain_failed = False
 
 
-async def read_claude_credentials(home: Path) -> dict | None:
+async def read_claude_credentials(home: Path, config_dir: Path | None = None) -> dict | None:
     """File first; on macOS fall back to the Keychain generic password the
     Claude Code CLI writes. A failed Keychain read is remembered for the
-    process lifetime (the prompt/denial would otherwise re-fire every poll)."""
+    process lifetime (the prompt/denial would otherwise re-fire every poll).
+
+    When ``config_dir`` is set (a profile's isolated ``CLAUDE_CONFIG_DIR``) the
+    read is file-only: the fixed-service Keychain entry belongs to the default
+    account, so falling back to it would report the wrong account's usage."""
     global _keychain_failed
-    oauth = read_claude_credentials_file(home)
+    oauth = read_claude_credentials_file(home, config_dir)
     if oauth is not None:
         return oauth
-    if sys.platform != "darwin" or _keychain_failed:
+    if config_dir is not None or sys.platform != "darwin" or _keychain_failed:
         return None
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -268,6 +305,92 @@ def read_grok_credentials(home: Path, env: dict | None = None) -> dict | None:
         return None
     return {"key": entry["key"], "email": entry.get("email"),
             "expires_at": entry.get("expires_at")}
+
+
+def _antigravity_refresh_token(raw: str) -> str | None:
+    """Extract ``token.refresh_token`` from a stored agy credential blob.
+
+    Accepts both the Keychain form (``go-keyring-base64:`` + base64(JSON)) and
+    a bare JSON file. The access_token is deliberately ignored — it is almost
+    always expired and we mint a fresh one in memory from the refresh token."""
+    raw = raw.strip()
+    if raw.startswith(ANTIGRAVITY_KEYRING_PREFIX):
+        try:
+            raw = base64.b64decode(
+                raw[len(ANTIGRAVITY_KEYRING_PREFIX):]).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    token = data.get("token") if isinstance(data, dict) else None
+    if isinstance(token, dict):
+        rt = token.get("refresh_token")
+        if isinstance(rt, str) and rt:
+            return rt
+    return None
+
+
+def read_antigravity_credentials_file(home: Path) -> str | None:
+    """Stale-file fallback: ``~/.gemini/antigravity-cli/antigravity-oauth-token``.
+    Returns the refresh_token or None."""
+    path = home.joinpath(*ANTIGRAVITY_STALE_TOKEN_REL)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return _antigravity_refresh_token(raw)
+
+
+_antigravity_keychain_failed = False
+
+
+async def read_antigravity_credentials(home: Path) -> str | None:
+    """Keychain first (macOS ``security find-generic-password``, read-only), then
+    the stale token file. Returns the agy refresh_token or None. A failed
+    Keychain read is remembered for the process lifetime so a denial does not
+    re-prompt every poll (mirrors ``read_claude_credentials``)."""
+    global _antigravity_keychain_failed
+    if sys.platform == "darwin" and not _antigravity_keychain_failed:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "/usr/bin/security", "find-generic-password",
+                "-s", ANTIGRAVITY_KEYCHAIN_SERVICE,
+                "-a", ANTIGRAVITY_KEYCHAIN_ACCOUNT, "-w",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
+            if proc.returncode == 0:
+                rt = _antigravity_refresh_token(out.decode("utf-8", "replace"))
+                if rt is not None:
+                    return rt
+            else:
+                _antigravity_keychain_failed = True
+        except (OSError, asyncio.TimeoutError):
+            _antigravity_keychain_failed = True
+    return read_antigravity_credentials_file(home)
+
+
+def _load_antigravity_oauth_config() -> dict | None:
+    """Read ``{client_id, client_secret}`` from the local Navide config at
+    ``app_data_dir()/antigravity-oauth.json``. The real secret values live only
+    in this user-data file, never in the repo. Missing/unusable -> None so the
+    fetch degrades to status="error" instead of crashing."""
+    path = app_data_dir() / ANTIGRAVITY_OAUTH_CONFIG
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    client_id = data.get("client_id")
+    client_secret = data.get("client_secret")
+    if not (isinstance(client_id, str) and client_id
+            and isinstance(client_secret, str) and client_secret):
+        return None
+    return {"client_id": client_id, "client_secret": client_secret}
 
 
 # ── Response normalizers (pure) ─────────────────────────────────────────────
@@ -485,6 +608,39 @@ def normalize_grok(billing: dict) -> tuple[list[dict], str | None]:
     return windows, None
 
 
+def normalize_antigravity(data: dict) -> tuple[list[dict], str | None]:
+    """``quotaSummaryGroups[].buckets[].quotaInfo`` -> windows. remainingFraction
+    is a 0..1 remaining ratio, so usedPercent = 100*(1-remainingFraction). Every
+    bucket becomes a window; the tightest (lowest remainingFraction) sorts first
+    so a windows[0]-only consumer surfaces the most-constrained bucket."""
+    ranked: list[tuple[float, dict]] = []
+    groups = data.get("quotaSummaryGroups")
+    if isinstance(groups, list):
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            group_name = group.get("groupName")
+            buckets = group.get("buckets")
+            if not isinstance(buckets, list):
+                continue
+            for bucket in buckets:
+                if not isinstance(bucket, dict):
+                    continue
+                info = bucket.get("quotaInfo")
+                if not isinstance(info, dict):
+                    continue
+                frac = _num(info.get("remainingFraction"))
+                if frac is None:
+                    continue
+                label = bucket.get("bucketName") or group_name or "Quota"
+                reset = info.get("resetTime")
+                ranked.append((frac, _window(
+                    "antigravity", str(label), 100.0 * (1.0 - frac),
+                    reset if isinstance(reset, str) else None)))
+    ranked.sort(key=lambda item: item[0])
+    return [w for _, w in ranked], None
+
+
 def parse_retry_after(value: str | None) -> float:
     try:
         return max(1.0, float(value))  # seconds form only; date form -> default
@@ -518,8 +674,8 @@ async def _claude_user_agent() -> str:
     return _claude_ua
 
 
-async def fetch_claude(home: Path) -> dict:
-    oauth = await read_claude_credentials(home)
+async def fetch_claude(home: Path, config_dir: Path | None = None) -> dict:
+    oauth = await read_claude_credentials(home, config_dir)
     if oauth is None:
         return _snapshot("claude", "no-credentials")
     if claude_token_expired(oauth):
@@ -613,15 +769,19 @@ async def fetch_kimi(home: Path, env: dict | None = None) -> dict:
     return _snapshot("kimi", "ok", windows=windows, plan_type=plan)
 
 
-async def grok_billing_rpc(binary: str) -> dict:
+async def grok_billing_rpc(binary: str, env: dict | None = None) -> dict:
     """Spawn ``grok agent stdio`` and ask ``x.ai/billing`` over newline-delimited
     JSON-RPC. The subprocess is short-lived — spawned, queried, terminated.
-    json.dumps never escapes ``/`` so the method name arrives intact."""
+    json.dumps never escapes ``/`` so the method name arrives intact.
+
+    ``env`` (``None`` = inherit the parent environment) lets a profile point the
+    CLI at its isolated ``HOME`` shim so billing reflects that account."""
     proc = await asyncio.create_subprocess_exec(
         binary, "agent", "stdio",
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
+        env=env,
     )
 
     async def rpc(req_id: int, method: str, params: dict, timeout: float) -> dict:
@@ -664,7 +824,8 @@ async def grok_billing_rpc(binary: str) -> dict:
                 proc.kill()
 
 
-async def fetch_grok(home: Path, env: dict | None = None) -> dict:
+async def fetch_grok(home: Path, env: dict | None = None,
+                     spawn_env: dict | None = None) -> dict:
     creds = read_grok_credentials(home, env)
     if creds is None:
         return _snapshot("grok", "no-credentials")
@@ -672,7 +833,7 @@ async def fetch_grok(home: Path, env: dict | None = None) -> dict:
     if not binary:
         return _snapshot("grok", "unavailable", error="grok CLI not found")
     try:
-        billing = await grok_billing_rpc(binary)
+        billing = await grok_billing_rpc(binary, spawn_env)
     except (OSError, ConnectionError, asyncio.TimeoutError) as err:
         return _snapshot("grok", "unavailable", error=str(err) or "grok agent stdio failed")
     windows, plan = normalize_grok(billing)
@@ -681,7 +842,109 @@ async def fetch_grok(home: Path, env: dict | None = None) -> dict:
     return _snapshot("grok", "ok", windows=windows, plan_type=plan)
 
 
+async def refresh_antigravity_token(refresh_token: str, cfg: dict) -> str | None:
+    """Exchange the agy refresh_token for a fresh access_token, held in memory
+    only (never written back to the Keychain or ~/.gemini). Returns the token,
+    or None on invalid_grant/400 (treated as expired, mirroring claude/kimi
+    401->expired). Other non-200s and network errors raise for the caller to
+    map to status="error"."""
+    import httpx
+
+    body = {
+        "grant_type": "refresh_token",
+        "client_id": cfg["client_id"],
+        "client_secret": cfg["client_secret"],
+        "refresh_token": refresh_token,
+    }
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        resp = await client.post(ANTIGRAVITY_TOKEN_URL, data=body)
+    if resp.status_code == 400:
+        return None
+    resp.raise_for_status()
+    token = resp.json().get("access_token")
+    if not isinstance(token, str) or not token:
+        raise ValueError("token response had no access_token")
+    return token
+
+
+async def fetch_antigravity(home: Path) -> dict:
+    # Config first: cheap, no side effects, and lets a machine without the
+    # local oauth config short-circuit before ever touching the Keychain.
+    cfg = _load_antigravity_oauth_config()
+    if cfg is None:
+        return _snapshot("antigravity", "error",
+                         error=f"missing {ANTIGRAVITY_OAUTH_CONFIG}")
+    refresh_token = await read_antigravity_credentials(home)
+    if refresh_token is None:
+        return _snapshot("antigravity", "no-credentials")
+    import httpx
+
+    try:
+        access_token = await refresh_antigravity_token(refresh_token, cfg)
+    except (httpx.HTTPError, ValueError) as err:
+        return _snapshot("antigravity", "error", error=f"token refresh: {err}")
+    if access_token is None:
+        return _snapshot("antigravity", "expired")
+
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "Navide",
+        "x-goog-api-client": ANTIGRAVITY_GOOG_API_CLIENT,
+    }
+    # TODO(antigravity): request bodies below are unverified placeholders.
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        # agy primes a session with loadCodeAssist first; treat it as best
+        # effort — a failure here must not block the quota read.
+        try:
+            await client.post(ANTIGRAVITY_LOAD_URL, headers=headers,
+                              json={"metadata": ANTIGRAVITY_CLIENT_METADATA})
+        except httpx.HTTPError:
+            pass
+        try:
+            resp = await client.post(
+                ANTIGRAVITY_QUOTA_URL, headers=headers,
+                json={"clientMetadata": ANTIGRAVITY_CLIENT_METADATA})
+        except httpx.HTTPError as err:
+            return _snapshot("antigravity", "error", error=str(err))
+    if resp.status_code in (401, 403):
+        return _snapshot("antigravity", "expired")
+    if resp.status_code == 429:
+        snap = _snapshot("antigravity", "rate-limited")
+        snap["retryAfterSec"] = parse_retry_after(resp.headers.get("Retry-After"))
+        return snap
+    if resp.status_code != 200:
+        return _snapshot("antigravity", "error", error=f"HTTP {resp.status_code}")
+    windows, plan = normalize_antigravity(resp.json())
+    return _snapshot("antigravity", "ok", windows=windows, plan_type=plan)
+
+
 # ── Poller service ──────────────────────────────────────────────────────────
+
+def _get_profiles_store():
+    """The app-wide CLI profiles store, or ``None`` when unavailable (unit
+    tests, early startup). Isolated behind a function so tests can stub profile
+    resolution without importing the whole app."""
+    try:
+        from . import app
+        return app.cli_profiles_store
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _profile_credential_home(store, agent_key: str) -> Path | None:
+    """The active profile's isolated credential base for ``agent_key`` (see
+    ``profiles_store.credential_home_for``), or ``None`` for the built-in
+    default. Never raises — a resolution failure falls back to the real home."""
+    if store is None:
+        return None
+    try:
+        from .profiles_store import credential_home_for
+        return credential_home_for(agent_key, store)
+    except Exception:  # noqa: BLE001
+        return None
+
 
 class UsageService:
     """Single app-wide poller. ``configure`` is idempotent and multi-window
@@ -720,13 +983,33 @@ class UsageService:
 
         codex_home = Path(os.environ["CODEX_HOME"]) if os.environ.get("CODEX_HOME") \
             else home / ".codex"
+        # Redirect each provider's credential read to the ACTIVE account
+        # profile's isolated home; None keeps the built-in default (real home).
+        store = _get_profiles_store()
+        claude_cfg = _profile_credential_home(store, "claude")
+        codex_profile = _profile_credential_home(store, "codex")
+        kimi_profile = _profile_credential_home(store, "kimi")
+        grok_shim = _profile_credential_home(store, "grok")
+        if codex_profile is not None:
+            codex_home = codex_profile
+        claude_call = (lambda: fetch_claude(home, claude_cfg)) if claude_cfg is not None \
+            else (lambda: fetch_claude(home))
+        kimi_call = (
+            (lambda: fetch_kimi(home, {**os.environ, "KIMI_CODE_HOME": str(kimi_profile)}))
+            if kimi_profile is not None else (lambda: fetch_kimi(home))
+        )
+        grok_call = (
+            (lambda: fetch_grok(grok_shim, spawn_env={**os.environ, "HOME": str(grok_shim)}))
+            if grok_shim is not None else (lambda: fetch_grok(home))
+        )
         now = time.monotonic()
         tasks: dict[str, Any] = {}
         for provider, coro in (
-            ("claude", lambda: fetch_claude(home)),
+            ("claude", claude_call),
             ("codex", lambda: fetch_codex(codex_home)),
-            ("kimi", lambda: fetch_kimi(home)),
-            ("grok", lambda: fetch_grok(home)),
+            ("kimi", kimi_call),
+            ("grok", grok_call),
+            ("antigravity", lambda: fetch_antigravity(home)),
         ):
             if self._blocked_until.get(provider, 0) > now:
                 continue
@@ -782,3 +1065,45 @@ class UsageService:
 
 
 service = UsageService()
+
+
+# ── One-time setup (manual only; never auto-run on import or in tests) ───────
+
+def setup_antigravity_oauth_config(binary: str | Path | None = None) -> Path:
+    """Extract the OAuth client_id/client_secret embedded in the ``agy`` binary
+    and write them to ``app_data_dir()/antigravity-oauth.json`` (chmod 600).
+
+    This is a manual, one-shot bootstrap — it is NOT called on import or during
+    fetches, so the repo never contains the secret values (only this reader).
+    Run once via ``python -m agent_team_backend.usage_service``. Prints only the
+    config path, never the extracted values."""
+    import re
+
+    path = binary or shutil.which("agy") or Path.home() / ".local" / "bin" / "agy"
+    blob = Path(path).read_bytes()
+    # Format-bounded so we don't over-capture into adjacent bytes of the Go
+    # string table: an OAuth client_id is ``<digits>-<hash>.apps...`` and a
+    # client_secret is exactly ``GOCSPX-`` + 28 chars. NOTE: the binary embeds
+    # more than one candidate (Gemini CLI vs Antigravity) — this takes the first
+    # match; verify it is the Antigravity pair before trusting live numbers.
+    id_match = re.search(
+        rb"[0-9]+-[0-9a-z]+\.apps\.googleusercontent\.com", blob)
+    secret_match = re.search(rb"GOCSPX-[0-9A-Za-z_\-]{28}", blob)
+    if not id_match or not secret_match:
+        raise SystemExit(f"could not find client_id/secret in {path}")
+    cfg = {
+        "client_id": id_match.group(0).decode("ascii"),
+        "client_secret": secret_match.group(0).decode("ascii"),
+    }
+    out = app_data_dir() / ANTIGRAVITY_OAUTH_CONFIG
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(cfg), encoding="utf-8")
+    out.chmod(0o600)
+    return out
+
+
+if __name__ == "__main__":
+    import sys as _sys
+
+    dest = setup_antigravity_oauth_config(_sys.argv[1] if len(_sys.argv) > 1 else None)
+    print(f"wrote {dest} (chmod 600)")

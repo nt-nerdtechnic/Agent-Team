@@ -3,10 +3,19 @@ and the poller's cooldown behavior. No network, no real CLI spawns."""
 
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 
 from agent_team_backend import usage_service as us
+from agent_team_backend.profiles_store import CliProfilesStore, credential_home_for
+
+
+def _isolated_store(tmp_path: Path) -> CliProfilesStore:
+    return CliProfilesStore(
+        path=tmp_path / "cli-profiles.json",
+        profiles_root=tmp_path / "cli-profiles",
+    )
 
 
 def _write(path: Path, data: dict) -> None:
@@ -327,6 +336,87 @@ def test_normalize_grok_empty():
     assert windows == []
 
 
+# ── Antigravity ─────────────────────────────────────────────────────────────
+
+def test_normalize_antigravity_used_percent_and_reset_passthrough():
+    windows, _ = us.normalize_antigravity({
+        "quotaSummaryGroups": [{
+            "groupName": "g1",
+            "buckets": [{
+                "bucketName": "Pro",
+                "quotaInfo": {"remainingFraction": 0.25,
+                              "resetTime": "2026-08-01T00:00:00Z"},
+            }],
+        }],
+    })
+    assert len(windows) == 1
+    assert windows[0]["kind"] == "antigravity"
+    assert windows[0]["label"] == "Pro"
+    assert windows[0]["usedPercent"] == 75.0  # 100 * (1 - 0.25)
+    assert windows[0]["resetsAt"] == "2026-08-01T00:00:00Z"
+
+
+def test_normalize_antigravity_sorts_tightest_first_and_falls_back_to_group_name():
+    windows, _ = us.normalize_antigravity({
+        "quotaSummaryGroups": [{
+            "groupName": "Group",
+            "buckets": [
+                {"quotaInfo": {"remainingFraction": 0.9}},   # loosest
+                {"bucketName": "Tight", "quotaInfo": {"remainingFraction": 0.1}},
+            ],
+        }],
+    })
+    # Lowest remainingFraction (most used) sorts first.
+    assert [w["usedPercent"] for w in windows] == [90.0, 10.0]
+    assert windows[0]["label"] == "Tight"
+    assert windows[1]["label"] == "Group"  # bucketName absent -> group name
+
+
+def test_normalize_antigravity_empty_and_malformed():
+    assert us.normalize_antigravity({}) == ([], None)
+    assert us.normalize_antigravity({"quotaSummaryGroups": [{"buckets": "x"}]}) == ([], None)
+
+
+def test_antigravity_refresh_token_from_keyring_blob():
+    # go-keyring-base64: + base64(JSON) — using a FAKE refresh token, not a real one.
+    inner = json.dumps({"token": {"access_token": "expired-ish",
+                                  "refresh_token": "fake-refresh-abc"}})
+    blob = us.ANTIGRAVITY_KEYRING_PREFIX + base64.b64encode(
+        inner.encode("utf-8")).decode("ascii")
+    assert us._antigravity_refresh_token(blob) == "fake-refresh-abc"
+
+
+def test_antigravity_refresh_token_from_bare_json_and_missing():
+    bare = json.dumps({"token": {"refresh_token": "fake-refresh-xyz"}})
+    assert us._antigravity_refresh_token(bare) == "fake-refresh-xyz"
+    assert us._antigravity_refresh_token("not json") is None
+    assert us._antigravity_refresh_token(json.dumps({"token": {}})) is None
+
+
+def test_antigravity_stale_file_fallback(tmp_path):
+    path = tmp_path.joinpath(*us.ANTIGRAVITY_STALE_TOKEN_REL)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"token": {"refresh_token": "fake-stale-tok"}}),
+                    encoding="utf-8")
+    assert us.read_antigravity_credentials_file(tmp_path) == "fake-stale-tok"
+    assert us.read_antigravity_credentials_file(tmp_path / "nope") is None
+
+
+async def test_fetch_antigravity_missing_config_returns_error(tmp_path, monkeypatch):
+    # No antigravity-oauth.json in the isolated data dir -> error, no network,
+    # no Keychain read. Guard the network/Keychain paths so a leak would fail loud.
+    async def _forbidden(*a, **k):  # pragma: no cover - must not be reached
+        raise AssertionError("fetch_antigravity touched credentials/network")
+
+    monkeypatch.setattr(us, "read_antigravity_credentials", _forbidden)
+    monkeypatch.setattr(us, "refresh_antigravity_token", _forbidden)
+
+    snap = await us.fetch_antigravity(tmp_path)
+    assert snap["provider"] == "antigravity"
+    assert snap["status"] == "error"
+    assert snap["windows"] == []
+
+
 def test_parse_retry_after():
     assert us.parse_retry_after("42") == 42.0
     assert us.parse_retry_after("0") == 1.0
@@ -348,10 +438,12 @@ async def test_poll_once_rate_limit_sets_cooldown(tmp_path, monkeypatch):
     async def fake_ok(provider):
         return us._snapshot(provider, "no-credentials")
 
+    monkeypatch.setattr(us, "_get_profiles_store", lambda: None)
     monkeypatch.setattr(us, "fetch_claude", fake_claude)
     monkeypatch.setattr(us, "fetch_codex", lambda home: fake_ok("codex"))
     monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_ok("kimi"))
     monkeypatch.setattr(us, "fetch_grok", lambda home: fake_ok("grok"))
+    monkeypatch.setattr(us, "fetch_antigravity", lambda home: fake_ok("antigravity"))
 
     svc = us.UsageService()
     payload = await svc.poll_once(tmp_path)
@@ -373,15 +465,148 @@ async def test_poll_once_survives_fetcher_exception(tmp_path, monkeypatch):
     async def fake_ok(provider):
         return us._snapshot(provider, "no-credentials")
 
+    monkeypatch.setattr(us, "_get_profiles_store", lambda: None)
     monkeypatch.setattr(us, "fetch_claude", boom)
     monkeypatch.setattr(us, "fetch_codex", lambda home: fake_ok("codex"))
     monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_ok("kimi"))
     monkeypatch.setattr(us, "fetch_grok", lambda home: fake_ok("grok"))
+    monkeypatch.setattr(us, "fetch_antigravity", lambda home: fake_ok("antigravity"))
 
     svc = us.UsageService()
     payload = await svc.poll_once(tmp_path)
     assert payload["providers"]["claude"]["status"] == "error"
     assert payload["providers"]["codex"]["status"] == "no-credentials"
+
+
+# ── Active-profile credential resolution ────────────────────────────────────
+
+def test_credential_home_for_default_is_none(tmp_path):
+    store = _isolated_store(tmp_path)  # no defaults set
+    for key in ("claude", "codex", "kimi", "grok"):
+        assert credential_home_for(key, store) is None
+    # antigravity is never isolated.
+    assert credential_home_for("antigravity", store) is None
+
+
+def test_credential_home_for_profile_paths(tmp_path):
+    store = _isolated_store(tmp_path)
+    for key in ("claude", "codex", "kimi", "grok"):
+        prof = store.create(agent_key=key, name="Acct")
+        store.set_default(key, prof["id"])
+        home = store.home_path(prof)
+        # grok isolates via a HOME shim; .grok lives one level in.
+        expected = home / "home" if key == "grok" else home
+        assert credential_home_for(key, store) == expected
+
+
+def test_read_claude_credentials_file_profile_config_dir(tmp_path):
+    """A profile's creds live flat in CLAUDE_CONFIG_DIR (no ``.claude`` layer)."""
+    profile_dir = tmp_path / "profile"
+    _write(profile_dir / ".credentials.json", {"claudeAiOauth": {"accessToken": "prof"}})
+    assert us.read_claude_credentials_file(tmp_path, profile_dir)["accessToken"] == "prof"
+    # Default lookup (no override) reads home/.claude and must NOT see it.
+    assert us.read_claude_credentials_file(tmp_path) is None
+
+
+async def test_read_claude_credentials_profile_skips_keychain(tmp_path, monkeypatch):
+    """A profile read is file-only: the fixed-service Keychain entry belongs to
+    the default account, so it must never be consulted for a profile."""
+    monkeypatch.setattr(us.sys, "platform", "darwin")
+    monkeypatch.setattr(us, "_keychain_failed", False)
+
+    async def boom(*a, **k):
+        raise AssertionError("keychain must not be consulted for a profile")
+
+    monkeypatch.setattr(us.asyncio, "create_subprocess_exec", boom)
+    # No file present under the profile config dir -> None, no Keychain fallback.
+    assert await us.read_claude_credentials(tmp_path, tmp_path / "profile") is None
+
+
+async def test_poll_once_default_reads_real_home(tmp_path, monkeypatch):
+    """Regression: with no active profile every provider resolves to its
+    original real-home path (claude cfg None, codex ~/.codex, kimi env default,
+    grok inherited spawn env)."""
+    monkeypatch.setattr(us, "_get_profiles_store", lambda: _isolated_store(tmp_path))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    seen: dict = {}
+
+    async def spy_claude(home, config_dir=None):
+        seen["claude_home"], seen["claude_cfg"] = home, config_dir
+        return us._snapshot("claude", "no-credentials")
+
+    async def spy_codex(codex_home):
+        seen["codex"] = codex_home
+        return us._snapshot("codex", "no-credentials")
+
+    async def spy_kimi(home, env=None):
+        seen["kimi_home"], seen["kimi_env"] = home, env
+        return us._snapshot("kimi", "no-credentials")
+
+    async def spy_grok(home, env=None, spawn_env=None):
+        seen["grok_home"], seen["grok_spawn"] = home, spawn_env
+        return us._snapshot("grok", "no-credentials")
+
+    async def spy_ag(home):
+        return us._snapshot("antigravity", "no-credentials")
+
+    monkeypatch.setattr(us, "fetch_claude", spy_claude)
+    monkeypatch.setattr(us, "fetch_codex", spy_codex)
+    monkeypatch.setattr(us, "fetch_kimi", spy_kimi)
+    monkeypatch.setattr(us, "fetch_grok", spy_grok)
+    monkeypatch.setattr(us, "fetch_antigravity", spy_ag)
+
+    real = tmp_path / "realhome"
+    await us.UsageService().poll_once(real)
+    assert seen["claude_home"] == real and seen["claude_cfg"] is None
+    assert seen["codex"] == real / ".codex"
+    assert seen["kimi_home"] == real and seen["kimi_env"] is None
+    assert seen["grok_home"] == real and seen["grok_spawn"] is None
+
+
+async def test_poll_once_reads_active_profile_credentials(tmp_path, monkeypatch):
+    """Each provider with an active profile resolves to that profile's isolated
+    credential home rather than the real home."""
+    store = _isolated_store(tmp_path)
+    homes: dict = {}
+    for key in ("claude", "codex", "kimi", "grok"):
+        prof = store.create(agent_key=key, name="Acct")
+        store.set_default(key, prof["id"])
+        homes[key] = store.home_path(prof)
+    monkeypatch.setattr(us, "_get_profiles_store", lambda: store)
+    seen: dict = {}
+
+    async def spy_claude(home, config_dir=None):
+        seen["claude"] = config_dir
+        return us._snapshot("claude", "no-credentials")
+
+    async def spy_codex(codex_home):
+        seen["codex"] = codex_home
+        return us._snapshot("codex", "no-credentials")
+
+    async def spy_kimi(home, env=None):
+        seen["kimi"] = (env or {}).get("KIMI_CODE_HOME")
+        return us._snapshot("kimi", "no-credentials")
+
+    async def spy_grok(home, env=None, spawn_env=None):
+        seen["grok_home"] = home
+        seen["grok_spawn_home"] = (spawn_env or {}).get("HOME")
+        return us._snapshot("grok", "no-credentials")
+
+    async def spy_ag(home):
+        return us._snapshot("antigravity", "no-credentials")
+
+    monkeypatch.setattr(us, "fetch_claude", spy_claude)
+    monkeypatch.setattr(us, "fetch_codex", spy_codex)
+    monkeypatch.setattr(us, "fetch_kimi", spy_kimi)
+    monkeypatch.setattr(us, "fetch_grok", spy_grok)
+    monkeypatch.setattr(us, "fetch_antigravity", spy_ag)
+
+    await us.UsageService().poll_once(tmp_path / "realhome")
+    assert seen["claude"] == homes["claude"]
+    assert seen["codex"] == homes["codex"]
+    assert Path(seen["kimi"]) == homes["kimi"]
+    assert seen["grok_home"] == homes["grok"] / "home"
+    assert seen["grok_spawn_home"] == str(homes["grok"] / "home")
 
 
 async def test_grok_billing_rpc_with_fake_stdio(tmp_path, monkeypatch):
