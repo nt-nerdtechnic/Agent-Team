@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import {
   useAgentMessaging,
   _resetMessagingForTest,
+  isBroadcastTarget,
   RATE_LIMIT_MAX,
   QUEUE_CAP,
   type MessagingDeps,
@@ -209,6 +210,45 @@ describe('useAgentMessaging', () => {
       expect(msg.status).toBe('failed')
       expect(msg.reason).toContain('closed')
       expect(m.paneIdOf('codex-1')).toBeNull()
+    })
+  })
+
+  describe('broadcast', () => {
+    it('isBroadcastTarget matches all/* case-insensitively, not real names', () => {
+      expect(isBroadcastTarget('all')).toBe(true)
+      expect(isBroadcastTarget('ALL')).toBe(true)
+      expect(isBroadcastTarget(' * ')).toBe(true)
+      expect(isBroadcastTarget('codex-1')).toBe(false)
+      expect(isBroadcastTarget('')).toBe(false)
+    })
+
+    it('sendBroadcast fans out to every pane except the sender', async () => {
+      m.registerPane('p1', 'claude') // claude-1
+      m.registerPane('p2', 'codex') // codex-1
+      m.registerPane('p3', 'grok') // grok-1
+      idlePanes.add('p3') // harness seeds only p1/p2 as idle
+      const msgs = m.sendBroadcast('claude-1', 'hello all')
+      expect(msgs.map((x) => x.to).sort()).toEqual(['codex-1', 'grok-1'])
+      expect(msgs.every((x) => x.status === 'queued')).toBe(true)
+      m.pump()
+      await flush()
+      expect(delivered.map((d) => d.paneId).sort()).toEqual(['p2', 'p3'])
+      expect(delivered.every((d) => d.text.includes('hello all'))).toBe(true)
+    })
+
+    it('sendBroadcast returns empty when the sender is the only pane', () => {
+      m.registerPane('p1', 'claude')
+      expect(m.sendBroadcast('claude-1', 'anyone?')).toEqual([])
+    })
+
+    it('broadcast still honours the per-pair rate limit', () => {
+      idlePanes.clear() // keep everything queued
+      m.registerPane('p1', 'claude') // claude-1
+      m.registerPane('p2', 'codex') // codex-1
+      for (let i = 0; i < RATE_LIMIT_MAX; i++) {
+        expect(m.sendBroadcast('claude-1', `n${i}`)[0].status).toBe('queued')
+      }
+      expect(m.sendBroadcast('claude-1', 'over')[0].status).toBe('failed')
     })
   })
 })

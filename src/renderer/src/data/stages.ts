@@ -65,6 +65,8 @@ ${MSG_START} to: <對方名稱>
 <訊息內容，可多行>
 ${MSG_END}
 
+要一次廣播給所有其他 agent，把對方名稱寫成 all（即 ${MSG_START} to: all）。
+
 收到開頭為 ${MSG_ENVELOPE_PREFIX} <名稱> 的輸入時，那是其他 agent 傳來的訊息；需要回覆就用上述 MSG 區塊指名對方。
 沒有溝通需求時不要輸出 MSG 區塊。
 

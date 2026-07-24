@@ -46,6 +46,13 @@ export const RATE_LIMIT_WINDOW_MS = 60_000
 export const QUEUE_CAP = 10
 const LOG_CAP = 500
 
+/** Reserved `to:` keywords that fan a message out to every other pane instead
+ *  of a single named target. `all` (case-insensitive) or `*`. */
+export function isBroadcastTarget(to: string): boolean {
+  const t = to.trim().toLowerCase()
+  return t === 'all' || t === '*'
+}
+
 // ── Module-level singleton state ──────────────────────────────────────────
 let deps: MessagingDeps | null = null
 let seq = 0
@@ -216,6 +223,17 @@ function sendMessage(from: string, to: string, content: string, opts: SendOption
 }
 
 /**
+ * Broadcast: fan `content` out to every registered pane except `from`, each as
+ * an ordinary single-target message (so per-pair rate limit, queue cap, idle
+ * gate and the delivery log all apply per recipient). Returns one log entry per
+ * recipient; empty when there is no one else to send to.
+ */
+function sendBroadcast(from: string, content: string, opts: SendOptions = {}): AgentMessage[] {
+  const targets = [...paneByName.keys()].filter((name) => name !== from)
+  return targets.map((to) => sendMessage(from, to, content, opts))
+}
+
+/**
  * Try to deliver queue heads. Safe to call often (interval + turn events);
  * per-pane in-flight guard makes it re-entrant.
  */
@@ -298,6 +316,7 @@ export function useAgentMessaging() {
     paneIdOf,
     suggestName,
     sendMessage,
+    sendBroadcast,
     pump,
     pauseMessaging,
     resumeMessaging,

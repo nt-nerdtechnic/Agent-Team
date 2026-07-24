@@ -20,7 +20,7 @@ import TokenStatsPanel from './components/TokenStatsPanel.vue'
 import NotificationHost from './components/NotificationHost.vue'
 import Welcome from './components/Welcome.vue'
 import { useNotify } from './composables/useNotify'
-import { useAgentMessaging } from './composables/useAgentMessaging'
+import { useAgentMessaging, isBroadcastTarget } from './composables/useAgentMessaging'
 import { parseMessages } from './lib/agentMessaging'
 import StageTabBar, { type TabItem } from './components/StageTabBar.vue'
 import { useBackend } from './composables/useBackend'
@@ -1102,7 +1102,11 @@ function onTurnCompleteForMessaging(paneId: string, text: string, timestamp: str
     if (fresh) {
       if (!Number.isNaN(eventMs)) paneMsgProcessedAt.set(paneId, eventMs)
       for (const msg of parseMessages(text)) {
-        messaging.sendMessage(senderName, msg.target, msg.content)
+        if (isBroadcastTarget(msg.target)) {
+          messaging.sendBroadcast(senderName, msg.content)
+        } else {
+          messaging.sendMessage(senderName, msg.target, msg.content)
+        }
       }
     }
   }
@@ -1376,9 +1380,12 @@ function readPaneShareText(ref: NonNullable<(typeof paneRefs)[string]>, maxLines
 // Messaging names offered by pane `paneId`'s @-mention autocomplete menu: every
 // OTHER pane that has a messaging name (self excluded).
 function mentionCandidatesFor(paneId: string): string[] {
-  return panes.value
+  const others = panes.value
     .filter((x) => x.id !== paneId && x.messagingName)
     .map((x) => x.messagingName as string)
+  // Offer the broadcast keyword first once there are ≥2 recipients — picking it
+  // sends to every other pane at once (see isBroadcastTarget / sendBroadcast).
+  return others.length >= 2 ? ['all', ...others] : others
 }
 
 // Cross-pane context share: pane A dragged onto pane B's terminal area pastes a
