@@ -44,8 +44,6 @@ interface Props {
   loopEstimateResetAt?: number | null
   backend: ReturnType<typeof useBackend>
   workspacePath?: string
-  /** Inter-CLI messaging address of this pane. Absent for plain terminals. */
-  messagingName?: string
 }
 
 const props = defineProps<Props>()
@@ -65,8 +63,6 @@ const emit = defineEmits<{
   /** Waiting badge clicked — App.vue injects the resume prompt immediately
    *  instead of waiting for the scheduled quota reset. */
   (e: 'loop-resume-now'): void
-  /** Messaging-name badge edited — App.vue renames the pane in the registry. */
-  (e: 'rename-messaging', name: string): void
 }>()
 const containerRef = ref<HTMLElement | null>(null)
 const isDragOver = ref(false)
@@ -97,34 +93,6 @@ function commitTitleEdit(): void {
 function onTitleKeydown(e: KeyboardEvent): void {
   if (e.key === 'Enter') { e.preventDefault(); commitTitleEdit() }
   if (e.key === 'Escape') { e.preventDefault(); _cancelledTitle = true; editingTitle.value = false }
-}
-
-// Inline messaging-name rename — same interaction as the title: double-click
-// the badge to edit, Enter/blur commits (bubbles up as 'rename-messaging'),
-// Escape cancels.
-const editingMsgName = ref(false)
-const msgNameDraft = ref('')
-const msgNameInput = ref<HTMLInputElement | null>(null)
-let _cancelledMsgName = false
-
-async function startMsgNameEdit(): Promise<void> {
-  _cancelledMsgName = false
-  msgNameDraft.value = props.messagingName ?? ''
-  editingMsgName.value = true
-  await nextTick()
-  msgNameInput.value?.select()
-}
-
-function commitMsgNameEdit(): void {
-  if (_cancelledMsgName) return
-  editingMsgName.value = false
-  const name = msgNameDraft.value.trim()
-  if (name && name !== props.messagingName) emit('rename-messaging', name)
-}
-
-function onMsgNameKeydown(e: KeyboardEvent): void {
-  if (e.key === 'Enter') { e.preventDefault(); commitMsgNameEdit() }
-  if (e.key === 'Escape') { e.preventDefault(); _cancelledMsgName = true; editingMsgName.value = false }
 }
 
 const terminal = useTerminal(props.paneId, props.backend, {
@@ -315,7 +283,7 @@ onMounted(() => {
     <button class="minimize-btn" @click.stop="emit('minimize')" :title="$t('pane.terminal.minimize-tooltip')">⊟</button>
     <header
       :class="['pane-header', { 'drag-over': isReorderDragOver }]"
-      :draggable="!editingTitle && !editingMsgName"
+      :draggable="!editingTitle"
       :title="$t('pane.terminal.drag-to-tab-tooltip')"
       @click="emit('set-focus')"
       @dragstart="onHeaderDragStart"
@@ -344,22 +312,6 @@ onMounted(() => {
           :title="$t('pane.terminal.rename-title-tooltip')"
           @dblclick.stop="startTitleEdit"
         >{{ title }}</span>
-        <input
-          v-if="messagingName && editingMsgName"
-          ref="msgNameInput"
-          class="title-edit msg-name-edit"
-          v-model="msgNameDraft"
-          @keydown="onMsgNameKeydown"
-          @blur="commitMsgNameEdit"
-          @click.stop
-          @dblclick.stop
-        />
-        <span
-          v-else-if="messagingName"
-          class="msg-name"
-          :title="$t('msg.rename-title')"
-          @dblclick.stop="startMsgNameEdit"
-        >@{{ messagingName }}</span>
         <span v-if="isCommander" class="commander-inline" :title="$t('pane.terminal.commander-tooltip')">🎯 Mgr</span>
         <span
           v-if="loopActive"
@@ -556,22 +508,6 @@ onMounted(() => {
 .loop-inline.waiting:hover {
   opacity: 1;
   border-color: var(--success-fg);
-}
-.msg-name {
-  font-size: 9px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  background: var(--bg-muted);
-  border-radius: 999px;
-  padding: 1px 6px;
-  white-space: nowrap;
-  flex-shrink: 0;
-  cursor: text;
-}
-.msg-name-edit {
-  font-size: 10px;
-  font-weight: 400;
-  max-width: 110px;
 }
 .loop-btn {
   font-size: 9px;

@@ -1040,11 +1040,12 @@ function dropPersistedMessagingName(paneId: string): void {
  *  pipeline slot label, then to the `<agentKey>-<n>` default. */
 function registerPaneMessaging(pane: ActivePane, preferredName?: string): void {
   if (pane.agentKey === 'terminal') return
-  // Handle preference: persisted name (restore) → the pane's own title
-  // (customName) → pipeline slot label → the `<agent>-N` default. So the name
-  // you gave the pane IS its messaging address; the auto handle only appears
-  // for panes you never named.
-  const preferred = preferredName || pane.customName || pane.slotLabel || undefined
+  // The handle IS the pane's displayed name: persisted (restore) → your title
+  // (customName) → auto-title → pipeline slot label → the vendor label. A
+  // duplicate gets a `-N` suffix, which shows in the title too — so there is
+  // only ever ONE name per pane, no separate address to track.
+  const preferred =
+    preferredName || pane.customName || pane.autoName || pane.slotLabel || pane.agentLabel
   pane.messagingName = messaging.registerPane(pane.id, pane.agentKey, preferred)
   persistMessagingName(pane.id, pane.messagingName)
 }
@@ -1132,18 +1133,6 @@ async function resolveManualHandle(paneId: string, desired: string): Promise<str
   )
   if (answer === null) return null // cancelled → abandon
   return resolveManualHandle(paneId, answer) // re-validate the entered name
-}
-
-async function onRenameMessaging(paneId: string, rawName: string): Promise<void> {
-  const pane = panes.value.find((p) => p.id === paneId)
-  if (!pane || pane.agentKey === 'terminal') return
-  const resolved = await resolveManualHandle(paneId, rawName)
-  if (resolved === null) return // empty / cancelled → abandon
-  const applied = messaging.setDerivedName(paneId, resolved, pane.agentKey)
-  if (applied) {
-    pane.messagingName = applied
-    persistMessagingName(paneId, applied)
-  }
 }
 
 let _msgPumpTimer = 0
@@ -7594,7 +7583,7 @@ async function setPaneCustomName(paneId: string, rawName: string): Promise<void>
   // Keep the messaging handle in sync with the title — the name you see IS the
   // address CLIs use. A non-empty title that collides with another pane's
   // handle prompts for a unique name (cancel abandons the whole rename);
-  // clearing the title reverts the handle to `<agent>-N`.
+  // clearing the title reverts the handle to the auto-title or vendor label.
   if (pane.agentKey !== 'terminal') {
     if (nextCustomName) {
       const resolved = await resolveManualHandle(paneId, nextCustomName)
@@ -7605,7 +7594,7 @@ async function setPaneCustomName(paneId: string, rawName: string): Promise<void>
         persistMessagingName(pane.id, applied)
       }
     } else {
-      const reverted = messaging.setDerivedName(pane.id, null, pane.agentKey)
+      const reverted = messaging.setDerivedName(pane.id, pane.autoName || pane.agentLabel, pane.agentKey)
       if (reverted) {
         pane.messagingName = reverted
         persistMessagingName(pane.id, reverted)
@@ -7638,6 +7627,16 @@ function setPaneAutoName(paneId: string, name: string): void {
   if (!pane || !name) return
   if (pane.customName || pane.autoName) return
   pane.autoName = name
+  // The auto-title becomes the pane's name, so sync the messaging handle to it
+  // (silently — auto-naming is not a manual rename, so no collision prompt;
+  // duplicates just take a -N suffix).
+  if (pane.agentKey !== 'terminal') {
+    const derived = messaging.setDerivedName(pane.id, name, pane.agentKey)
+    if (derived) {
+      pane.messagingName = derived
+      persistMessagingName(pane.id, derived)
+    }
+  }
   syncViews()
   // No workspace → the backend has no project.json to persist into; keep it
   // as in-memory state only (mirrors setPaneCustomName).
@@ -8571,7 +8570,7 @@ function paneIsCommander(p: ActivePane): boolean {
           :ref="(el) => setPaneRef(p.id, el)"
           :data-pane-id="p.id"
           :pane-id="p.id"
-          :title="p.customName || p.autoName || p.agentLabel"
+          :title="p.messagingName || p.customName || p.autoName || p.agentLabel"
           :agent-key="p.agentKey"
           :cli-session-id="p.pinnedSessionId"
           :session-home-id="p.sessionHomeId"
@@ -8590,8 +8589,6 @@ function paneIsCommander(p: ActivePane): boolean {
           :loop-active="p.loopActive"
           :loop-wait-until="p.loopWaitUntil"
           :loop-estimate-reset-at="p.loopEstimateResetAt"
-          :messaging-name="p.messagingName"
-          @rename-messaging="(name) => onRenameMessaging(p.id, name)"
           @set-focus="onSetFocus(p.id)"
           @minimize="minimizePane(p.id)"
           @rebuild="rebuildPaneViaResume(p.id)"

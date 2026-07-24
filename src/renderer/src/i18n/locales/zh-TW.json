@@ -10,7 +10,6 @@
     "status-delivering": "投遞中",
     "status-delivered": "已投遞",
     "status-failed": "失敗",
-    "rename-title": "訊息名稱",
     "rename-collision-title": "訊息名稱重複",
     "rename-collision-body": "名稱「{name}」已被其他 CLI 使用。請設定另一個訊息名稱：",
     "rename-collision-confirm": "確認",

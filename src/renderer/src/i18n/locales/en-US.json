@@ -10,7 +10,6 @@
     "status-delivering": "Delivering",
     "status-delivered": "Delivered",
     "status-failed": "Failed",
-    "rename-title": "Messaging name",
     "rename-collision-title": "Messaging name in use",
     "rename-collision-body": "The name “{name}” is already used by another CLI. Choose a different messaging name:",
     "rename-collision-confirm": "Rename",
