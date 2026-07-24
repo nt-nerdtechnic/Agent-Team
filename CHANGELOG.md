@@ -4,6 +4,29 @@ All notable released changes to Navide will be documented in this file. The form
 
 ## [Unreleased]
 
+## [0.1.59] — 2026-07-24 — signed release
+
+### Added
+
+- Multi-select CLI panes (Cmd/Ctrl/Shift-click a pane header) for batch context-menu actions: interrupt, rebuild, minimize, restore, or remove the whole selection at once.
+- @-mention autocomplete menu that lists other panes' messaging names on `@`, plus broadcast a message to every pane with `to: all`.
+- Drag a plan row onto a CLI pane to inject the plan's goal into that pane.
+- Switch a CLI account per pane from the usage badge, with colored per-account avatars and a shortcut to manage accounts in Settings.
+
+### Changed
+
+- Usage badges: Codex quota reflects its rate-limit windows and credits; per-model promotional rows are shown as real data (marked accordingly); usage is polled from the active CLI profile's isolated credentials.
+
+### Fixed
+
+- Offload blocking work off the event loop so `workspace.list_recent` no longer times out.
+- Skip rebuild-via-resume when a CLI is busy, preserving in-flight work.
+- De-duplicate redraw content instead of relying on a timing-window grace.
+
+### Distribution note
+
+- Signed with a Developer ID and notarized by Apple; published as a stable release eligible for the in-app updater.
+
 ## [0.1.58] — 2026-07-24 — signed release
 
 ### Added
