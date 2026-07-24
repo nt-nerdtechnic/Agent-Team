@@ -130,10 +130,19 @@ export function usageFor(agentKey: string | undefined | null): UsageSnapshot | u
   return state.providers[agentKey]
 }
 
-/** Remaining percentage of the snapshot's first (most important) window. */
+/** Kinds that represent a GENERAL account limit (not a per-model bucket). */
+const HEADLINE_KINDS = new Set(['session', 'weekly', 'monthly'])
+
+/** Remaining percentage of the snapshot's headline window. Per-model windows
+ *  (kind 'weekly-model', e.g. an exhausted promotional "Fable only" bucket that
+ *  Anthropic reports at 100% used but does not actually enforce) must never
+ *  drive the badge — otherwise a spent promo makes an otherwise-healthy pane
+ *  read as blocked. Prefer the first general window; fall back to the first
+ *  window only when no general one exists. */
 export function remainingPercent(snap: UsageSnapshot | undefined): number | null {
   if (!snap || snap.status !== 'ok' || snap.windows.length === 0) return null
-  return Math.max(0, Math.min(100, 100 - snap.windows[0].usedPercent))
+  const headline = snap.windows.find((w) => HEADLINE_KINDS.has(w.kind)) ?? snap.windows[0]
+  return Math.max(0, Math.min(100, 100 - headline.usedPercent))
 }
 
 /** Severity by REMAINING quota: >40 ok (grey), 15–40 warn (orange), <15 crit (red). */

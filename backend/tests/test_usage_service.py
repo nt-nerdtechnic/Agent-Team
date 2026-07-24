@@ -151,6 +151,32 @@ def test_normalize_claude_scoped_filters_all_models_and_dedupes():
     assert len(windows) == 2  # all-models dropped, duplicate opus collapsed
 
 
+def test_normalize_claude_hides_null_id_promotional_scoped():
+    # Real /api/oauth/usage shape (2026-07): the only weekly_scoped entry is a
+    # promotional "Fable" bucket with scope.model.id=None — Anthropic reports it
+    # at 100% but does NOT enforce it (requests fall back to the main quota), so
+    # it must be hidden, not shown as an exhausted "0% remaining" row. Sibling
+    # limits[] entries (kind=session/weekly_all) must not become extra windows.
+    windows, _ = us.normalize_claude({
+        "five_hour": {"utilization": 4.0, "resets_at": "2026-07-24T15:50:00Z"},
+        "seven_day": {"utilization": 92.0, "resets_at": "2026-07-29T23:00:00Z"},
+        "seven_day_opus": None,
+        "seven_day_sonnet": None,
+        "limits": [
+            {"kind": "session", "group": "session", "percent": 4},
+            {"kind": "weekly_all", "group": "weekly", "percent": 92},
+            {"kind": "weekly_scoped", "group": "weekly", "percent": 100,
+             "is_active": True, "severity": "critical",
+             "scope": {"model": {"id": None, "display_name": "Fable"}}},
+        ],
+    })
+    labels = [w["label"] for w in windows]
+    assert "Session (5h)" in labels
+    assert "Weekly (all models)" in labels
+    assert not any("Fable" in w["label"] for w in windows)
+    assert len(windows) == 2
+
+
 def test_normalize_codex_epoch_and_plan():
     windows, plan = us.normalize_codex({
         "plan_type": "plus",

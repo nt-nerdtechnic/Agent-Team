@@ -306,7 +306,16 @@ def normalize_claude(data: dict) -> tuple[list[dict], str | None]:
         model_id = scope_model.get("id")
         if pct is None or not model:
             continue
-        slug = (model_id or model).strip().lower()
+        # A well-formed, enforceable per-model weekly limit carries a concrete
+        # model id. Entries with only a display_name and no id are Anthropic
+        # PROMOTIONAL per-model buckets (e.g. "Fable"): they report percent=100
+        # once the promo is spent but are NOT enforced — requests fall back to
+        # the main weekly/session quota. Surfacing them as an exhausted
+        # "0% remaining" row is misleading (observed: user still sends Fable
+        # requests while this shows 100%), so skip them.
+        if not (model_id and str(model_id).strip()):
+            continue
+        slug = str(model_id).strip().lower()
         if slug in ("all models", "all-models") or slug.endswith("-all-models"):
             continue
         if slug in seen_models:

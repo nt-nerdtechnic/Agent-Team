@@ -87,6 +87,24 @@ describe('useUsage store', () => {
     expect(remainingPercent(undefined)).toBeNull()
   })
 
+  it('remainingPercent headline skips per-model windows (spent Fable promo)', () => {
+    // A maxed promotional "Fable only" (weekly-model, 100% used, not enforced)
+    // must not drive the badge when a healthy general window exists.
+    const withFable = snap({
+      windows: [
+        { kind: 'session', label: 'Session (5h)', usedPercent: 4, resetsAt: null },
+        { kind: 'weekly', label: 'Weekly (all models)', usedPercent: 92, resetsAt: null },
+        { kind: 'weekly-model', label: 'Fable only', usedPercent: 100, resetsAt: null }
+      ]
+    })
+    expect(remainingPercent(withFable)).toBe(96) // session, never Fable's 0%
+    // Degenerate: only a per-model window → fall back to it.
+    const onlyFable = snap({
+      windows: [{ kind: 'weekly-model', label: 'Fable only', usedPercent: 100, resetsAt: null }]
+    })
+    expect(remainingPercent(onlyFable)).toBe(0)
+  })
+
   it('remainingTier thresholds: >40 ok, 15-40 warn, <15 crit', () => {
     expect(remainingTier(58)).toBe('ok')
     expect(remainingTier(41)).toBe('ok')
