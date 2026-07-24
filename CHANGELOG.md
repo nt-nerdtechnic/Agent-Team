@@ -4,6 +4,23 @@ All notable released changes to Navide will be documented in this file. The form
 
 ## [Unreleased]
 
+## [0.1.58] — 2026-07-24 — signed release
+
+### Added
+
+- Codex quota badges now reflect its rate-limit windows and credits.
+- Drive update download and restart-install directly from the status-bar update badge (one click, no detour through Settings).
+- Renaming a pane to a messaging name another CLI already holds opens a collision-resolution prompt instead of failing.
+
+### Changed
+
+- CLI accounts: replace per-pane account binding with a single global active account per vendor, switchable from the titlebar. (Removes the per-pane profile picker and per-account token attribution introduced in 0.1.56.)
+- The pane's messaging handle is now derived from its own name and stays in sync on rename/auto-title; the separate inline messaging-name editor is gone.
+
+### Distribution note
+
+- Signed with a Developer ID and notarized by Apple; published as a stable release eligible for the in-app updater.
+
 ## [0.1.57] — 2026-07-24 — signed release
 
 ### Added
