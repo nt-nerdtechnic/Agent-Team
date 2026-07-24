@@ -1195,6 +1195,7 @@
     "switch-title": "Switch account",
     "switch-default": "Default (built-in)",
     "switch-low": "Quota low — switch account",
+    "switch-manage": "Add / manage accounts…",
     "settings-title": "CLI quota badge",
     "settings-enabled": "Show remaining quota in CLI pane headers",
     "settings-refresh": "Refresh interval",

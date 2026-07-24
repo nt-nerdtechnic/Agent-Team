@@ -11,6 +11,7 @@ import {
   type UsageWindow
 } from '../composables/useUsage'
 import type { useCliProfiles } from '../composables/useCliProfiles'
+import { executeCommand } from '../keybindings/commandRegistry'
 
 // Compact remaining-quota badge for a CLI pane header. Renders nothing when
 // the agent has no usage provider or nothing was fetched yet; shows ⚠ when
@@ -78,6 +79,13 @@ async function selectProfile(id: string): Promise<void> {
   refreshUsage()
 }
 
+// Jump straight to Settings › Accounts (CLI account manager) so a new account
+// can be added. Close the popover first — the modal opens on top of it.
+function openAccountSettings(): void {
+  open.value = false
+  executeCommand('workbench.action.openSettingsAccounts')
+}
+
 onBeforeUnmount(() => {
   if (openTimer) clearTimeout(openTimer)
   if (closeTimer) clearTimeout(closeTimer)
@@ -99,6 +107,21 @@ function rowReset(w: UsageWindow): string {
   const countdown = formatResetCountdown(w.resetsAt)
   if (!countdown) return ''
   return `${countdown} · ${formatResetAbsolute(w.resetsAt)}`
+}
+
+// Per-account avatar: first character over a deterministic color picked from
+// the profile id, so the same account always gets the same tint.
+const AVATAR_COLORS = ['#1f6feb', '#8957e5', '#2da44e', '#bc4c00', '#bf3989', '#1b7c83', '#9e6a03']
+
+function avatarColor(key: string): string {
+  let h = 0
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0
+  return AVATAR_COLORS[h % AVATAR_COLORS.length]
+}
+
+function avatarInitial(label: string): string {
+  const t = label.trim()
+  return t ? t.charAt(0).toUpperCase() : '?'
 }
 </script>
 
@@ -143,11 +166,11 @@ function rowReset(w: UsageWindow): string {
           {{ $t('usage.resets-in', { time: rowReset(w) }) }}
         </div>
       </div>
-      <div v-if="canSwitch" class="usage-pop-switch">
-        <div class="usage-pop-switch-title" :class="{ crit: critSwitch }">
+      <div class="usage-pop-switch">
+        <div v-if="canSwitch" class="usage-pop-switch-title" :class="{ crit: critSwitch }">
           {{ critSwitch ? $t('usage.switch-low') : $t('usage.switch-title') }}
         </div>
-        <div class="usage-acct-list" role="listbox">
+        <div v-if="canSwitch" class="usage-acct-list" role="listbox">
           <button
             class="usage-acct"
             role="option"
@@ -155,8 +178,9 @@ function rowReset(w: UsageWindow): string {
             :aria-selected="activeProfileId === ''"
             @click="selectProfile('')"
           >
-            <span class="usage-acct-check">{{ activeProfileId === '' ? '✓' : '' }}</span>
+            <span class="usage-acct-av default">{{ avatarInitial($t('usage.switch-default')) }}</span>
             <span class="usage-acct-name">{{ $t('usage.switch-default') }}</span>
+            <span v-if="activeProfileId === ''" class="usage-acct-tick">✓</span>
           </button>
           <button
             v-for="p in switchProfiles"
@@ -167,10 +191,17 @@ function rowReset(w: UsageWindow): string {
             :aria-selected="activeProfileId === p.id"
             @click="selectProfile(p.id)"
           >
-            <span class="usage-acct-check">{{ activeProfileId === p.id ? '✓' : '' }}</span>
+            <span class="usage-acct-av" :style="{ background: avatarColor(p.id) }">{{
+              avatarInitial(p.name)
+            }}</span>
             <span class="usage-acct-name">{{ p.name }}</span>
+            <span v-if="activeProfileId === p.id" class="usage-acct-tick">✓</span>
           </button>
         </div>
+        <button class="usage-acct-manage" @click="openAccountSettings">
+          <span class="usage-acct-manage-icon">＋</span>
+          <span>{{ $t('usage.switch-manage') }}</span>
+        </button>
       </div>
       <div class="usage-pop-updated">
         {{ $t('usage.updated', { time: formatResetAbsolute(snap.fetchedAt) }) }}
@@ -298,17 +329,17 @@ function rowReset(w: UsageWindow): string {
 .usage-acct-list {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 2px;
 }
 .usage-acct {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   width: 100%;
   text-align: left;
-  padding: 4px 6px;
+  padding: 5px 6px;
   border: none;
-  border-radius: 5px;
+  border-radius: 6px;
   background: transparent;
   color: var(--text-secondary);
   font-size: 11px;
@@ -319,23 +350,69 @@ function rowReset(w: UsageWindow): string {
 }
 .usage-acct:hover {
   background: var(--bg-hover);
-  color: var(--text-bright);
 }
 .usage-acct.active {
-  color: var(--accent-fg);
+  color: var(--text-bright);
   font-weight: 600;
 }
-.usage-acct-check {
+.usage-acct-av {
   flex-shrink: 0;
-  width: 12px;
-  text-align: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   font-size: 10px;
-  color: var(--accent-fg);
+  font-weight: 700;
+  color: #fff;
+}
+.usage-acct-av.default {
+  background: var(--border-strong);
+}
+.usage-acct.active .usage-acct-av {
+  box-shadow:
+    0 0 0 2px var(--bg-overlay),
+    0 0 0 3px var(--accent-fg);
 }
 .usage-acct-name {
+  flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.usage-acct-tick {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--accent-fg);
+}
+.usage-acct-manage {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin-top: 4px;
+  padding: 5px 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+.usage-acct-manage:hover {
+  background: var(--bg-hover);
+  color: var(--accent-fg);
+}
+.usage-acct-manage-icon {
+  flex-shrink: 0;
+  width: 20px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 600;
 }
 .usage-pop-updated {
   margin-top: 4px;

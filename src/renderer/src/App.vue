@@ -3451,6 +3451,7 @@ registerCommand('workbench.action.newWindow', async () => {
   await api?.openMainWindow?.({})
 })
 registerCommand('workbench.action.openSettings', () => { showSettings.value = true })
+registerCommand('workbench.action.openSettingsAccounts', () => openSettingsAccounts())
 registerCommand('workbench.action.closeModal', () => {
   if (previewLogOpen.value) previewLogOpen.value = false
   else if (showSettings.value) showSettings.value = false

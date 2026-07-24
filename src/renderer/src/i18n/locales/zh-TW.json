@@ -1195,6 +1195,7 @@
     "switch-title": "切換帳號",
     "switch-default": "Default（內建）",
     "switch-low": "額度不足，可切換帳號",
+    "switch-manage": "新增／管理帳號…",
     "settings-title": "CLI 額度徽章",
     "settings-enabled": "在 CLI pane 標題列顯示剩餘額度",
     "settings-refresh": "刷新間隔",
