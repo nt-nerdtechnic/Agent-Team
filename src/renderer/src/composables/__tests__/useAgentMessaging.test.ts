@@ -63,6 +63,13 @@ describe('useAgentMessaging', () => {
       expect(m.renamePane('p2', '   ')).toBe(false)
     })
 
+    it('suggestName returns the base when free, else a suffixed variant', () => {
+      m.registerPane('p1', 'claude') // claude-1
+      m.renamePane('p1', '後端')
+      expect(m.suggestName('前端')).toBe('前端')
+      expect(m.suggestName('後端')).toBe('後端-2')
+    })
+
     it('setDerivedName syncs the handle to a new title, suffixing collisions', () => {
       m.registerPane('p1', 'claude') // claude-1
       m.registerPane('p2', 'codex') // codex-1

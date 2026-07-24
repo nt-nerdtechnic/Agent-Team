@@ -116,4 +116,29 @@ describe('useNotify', () => {
       vi.useRealTimers()
     }
   })
+
+  // ── Prompt ────────────────────────────────────────────────────────────────
+  it('prompt resolves with the entered text on confirm', async () => {
+    const p = n.prompt('Name?', { defaultValue: 'seed' })
+    expect(n.dialog.value?.kind).toBe('prompt')
+    expect(n.promptValue.value).toBe('seed')
+    n.promptValue.value = 'edited'
+    n.resolveDialog(true)
+    await expect(p).resolves.toBe('edited')
+    expect(n.dialog.value).toBeNull()
+  })
+
+  it('prompt resolves null on cancel', async () => {
+    const p = n.prompt('Name?', { defaultValue: 'seed' })
+    n.resolveDialog(false)
+    await expect(p).resolves.toBeNull()
+  })
+
+  it('superseding a prompt resolves the old one with null', async () => {
+    const first = n.prompt('First?')
+    const second = n.prompt('Second?')
+    await expect(first).resolves.toBeNull()
+    n.resolveDialog(true)
+    await expect(second).resolves.toBe('')
+  })
 })

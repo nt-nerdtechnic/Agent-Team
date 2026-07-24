@@ -1,7 +1,7 @@
 import { readonly, ref } from 'vue'
 
 /**
- * Modular notification system — Toast / Alert / Confirm.
+ * Modular notification system — Toast / Alert / Confirm / Prompt.
  *
  * Singleton module-level state so any component can `useNotify()` and fire
  * notifications without prop drilling. Rendering lives in NotificationHost.vue
@@ -17,18 +17,23 @@ export interface Toast {
 }
 
 export interface DialogState {
-  kind: 'alert' | 'confirm'
+  kind: 'alert' | 'confirm' | 'prompt'
   title: string
   message: string
   confirmText: string
   cancelText: string
-  /** Resolves the alert()/confirm() promise. alert ignores the boolean. */
-  resolve: (value: boolean) => void
+  /** Prompt only: placeholder for the text field. */
+  placeholder?: string
+  /** alert/confirm resolve with a boolean; prompt with the entered string (or
+   *  null when cancelled). */
+  resolve: (value: boolean | string | null) => void
 }
 
 // ── Module-level singleton state ──────────────────────────────────────────
 const toasts = ref<Toast[]>([])
 const dialog = ref<DialogState | null>(null)
+/** Live value of the prompt text field, bound by NotificationHost via v-model. */
+const promptValue = ref('')
 let seq = 0
 const _toastTimers = new Map<number, ReturnType<typeof setTimeout>>()
 const MAX_TOASTS = 6
@@ -61,14 +66,22 @@ function dismissToast(id: number): void {
   toasts.value = toasts.value.filter((t) => t.id !== id)
 }
 
+/** Cancel-resolve any dialog currently on screen so its promise never hangs
+ *  when a new one supersedes it (prompt → null, alert/confirm → false). */
+function supersedeDialog(): void {
+  const d = dialog.value
+  if (!d) return
+  dialog.value = null
+  d.resolve(d.kind === 'prompt' ? null : false)
+}
+
 // ── Alert (blocking, single button) ────────────────────────────────────────
 function alert(
   message: string,
   opts: { title?: string; confirmText?: string } = {}
 ): Promise<void> {
   return new Promise<void>((resolve) => {
-    // Resolve any existing dialog with false (cancel) so its promise doesn't hang.
-    if (dialog.value) dialog.value.resolve(false)
+    supersedeDialog()
     dialog.value = {
       kind: 'alert',
       title: opts.title ?? 'Alert',
@@ -86,34 +99,63 @@ function confirm(
   opts: { title?: string; confirmText?: string; cancelText?: string } = {}
 ): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
-    // Resolve any existing dialog with false (cancel) so its promise doesn't hang.
-    if (dialog.value) dialog.value.resolve(false)
+    supersedeDialog()
     dialog.value = {
       kind: 'confirm',
       title: opts.title ?? 'Confirm',
       message,
       confirmText: opts.confirmText ?? 'OK',
       cancelText: opts.cancelText ?? 'Cancel',
-      resolve
+      resolve: resolve as (v: boolean | string | null) => void
     }
   })
 }
 
-/** Called by the host when a dialog button is pressed (or dismissed). */
-function resolveDialog(value: boolean): void {
+// ── Prompt (blocking, text input → Promise<string|null>) ────────────────────
+function prompt(
+  message: string,
+  opts: {
+    title?: string
+    defaultValue?: string
+    placeholder?: string
+    confirmText?: string
+    cancelText?: string
+  } = {}
+): Promise<string | null> {
+  return new Promise<string | null>((resolve) => {
+    supersedeDialog()
+    promptValue.value = opts.defaultValue ?? ''
+    dialog.value = {
+      kind: 'prompt',
+      title: opts.title ?? '',
+      message,
+      confirmText: opts.confirmText ?? 'OK',
+      cancelText: opts.cancelText ?? 'Cancel',
+      placeholder: opts.placeholder ?? '',
+      resolve: resolve as (v: boolean | string | null) => void
+    }
+  })
+}
+
+/** Called by the host when a dialog button is pressed (or dismissed). For a
+ *  prompt, `ok` maps to the entered text; cancel/backdrop maps to null. */
+function resolveDialog(ok: boolean): void {
   const d = dialog.value
   dialog.value = null
-  d?.resolve(value)
+  if (!d) return
+  d.resolve(d.kind === 'prompt' ? (ok ? promptValue.value : null) : ok)
 }
 
 export function useNotify() {
   return {
     toasts: readonly(toasts),
     dialog: readonly(dialog),
+    promptValue,
     toast,
     dismissToast,
     alert,
     confirm,
+    prompt,
     resolveDialog
   }
 }

@@ -1118,14 +1118,37 @@ function openMessagingPanel(): void {
   showMessagesPanel.value = true
 }
 
-function onRenameMessaging(paneId: string, rawName: string): void {
+/** Resolve a manual handle rename against collisions. Returns the handle to
+ *  apply (free / this pane's own), or null when the user cancels. On collision
+ *  with ANOTHER pane it opens a prompt pre-filled with a unique suggestion the
+ *  user can accept or edit; cancel abandons the rename. Empty input → null. */
+async function resolveManualHandle(paneId: string, desired: string): Promise<string | null> {
+  const norm = desired.trim()
+  if (!norm) return null
+  const owner = messaging.paneIdOf(norm)
+  if (owner === null || owner === paneId) return norm // free, or already ours
+  const answer = await notifyRestore.prompt(
+    i18n.global.t('msg.rename-collision-body', { name: norm }),
+    {
+      title: i18n.global.t('msg.rename-collision-title'),
+      defaultValue: messaging.suggestName(norm),
+      confirmText: i18n.global.t('msg.rename-collision-confirm'),
+      cancelText: i18n.global.t('msg.rename-collision-cancel'),
+    },
+  )
+  if (answer === null) return null // cancelled → abandon
+  return resolveManualHandle(paneId, answer) // re-validate the entered name
+}
+
+async function onRenameMessaging(paneId: string, rawName: string): Promise<void> {
   const pane = panes.value.find((p) => p.id === paneId)
-  if (!pane) return
-  if (messaging.renamePane(paneId, rawName)) {
-    pane.messagingName = messaging.nameOf(paneId) ?? pane.messagingName
-    if (pane.messagingName) persistMessagingName(paneId, pane.messagingName)
-  } else {
-    notifyRestore.toast(i18n.global.t('msg.rename-invalid'), { type: 'error' })
+  if (!pane || pane.agentKey === 'terminal') return
+  const resolved = await resolveManualHandle(paneId, rawName)
+  if (resolved === null) return // empty / cancelled → abandon
+  const applied = messaging.setDerivedName(paneId, resolved, pane.agentKey)
+  if (applied) {
+    pane.messagingName = applied
+    persistMessagingName(paneId, applied)
   }
 }
 
@@ -7589,21 +7612,33 @@ function onInlineRenameKeydown(e: KeyboardEvent): void {
 
 // Applies a custom display name to a pane and persists it. Shared by the
 // context-menu rename dialog and the inline (double-click) header edit.
-function setPaneCustomName(paneId: string, rawName: string): void {
+async function setPaneCustomName(paneId: string, rawName: string): Promise<void> {
   const pane = panes.value.find((p) => p.id === paneId)
   if (!pane) return
   const name = rawName.trim()
-  // Empty name resets to the default label.
-  pane.customName = name && name !== pane.agentLabel ? name : undefined
+  const nextCustomName = name && name !== pane.agentLabel ? name : undefined
   // Keep the messaging handle in sync with the title — the name you see IS the
-  // address CLIs use. Clearing the title reverts the handle to `<agent>-N`.
+  // address CLIs use. A non-empty title that collides with another pane's
+  // handle prompts for a unique name (cancel abandons the whole rename);
+  // clearing the title reverts the handle to `<agent>-N`.
   if (pane.agentKey !== 'terminal') {
-    const derived = messaging.setDerivedName(pane.id, pane.customName ?? null, pane.agentKey)
-    if (derived) {
-      pane.messagingName = derived
-      persistMessagingName(pane.id, derived)
+    if (nextCustomName) {
+      const resolved = await resolveManualHandle(paneId, nextCustomName)
+      if (resolved === null) return // cancelled → abandon (title unchanged too)
+      const applied = messaging.setDerivedName(pane.id, resolved, pane.agentKey)
+      if (applied) {
+        pane.messagingName = applied
+        persistMessagingName(pane.id, applied)
+      }
+    } else {
+      const reverted = messaging.setDerivedName(pane.id, null, pane.agentKey)
+      if (reverted) {
+        pane.messagingName = reverted
+        persistMessagingName(pane.id, reverted)
+      }
     }
   }
+  pane.customName = nextCustomName
   updateHistoryCustomName(spawnHistory.value, {
     paneId,
     agentKey: pane.agentKey,

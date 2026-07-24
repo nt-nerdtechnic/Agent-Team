@@ -2,15 +2,19 @@
 import { nextTick, ref, watch } from 'vue'
 import { useNotify } from '../composables/useNotify'
 
-const { toasts, dialog, dismissToast, resolveDialog } = useNotify()
+const { toasts, dialog, promptValue, dismissToast, resolveDialog } = useNotify()
 
 const toastIcon = { success: '✓', error: '✕', info: 'ℹ' } as const
 
 const modalEl = ref<HTMLDivElement | null>(null)
+const promptInput = ref<HTMLInputElement | null>(null)
 watch(dialog, async (d) => {
   if (d) {
     await nextTick()
-    modalEl.value?.focus()
+    // Focus the text field for a prompt so the user can type immediately;
+    // otherwise focus the modal so Enter/Esc are handled.
+    if (d.kind === 'prompt') promptInput.value?.select()
+    else modalEl.value?.focus()
   }
 })
 </script>
@@ -42,10 +46,20 @@ watch(dialog, async (d) => {
         </header>
         <div class="body">
           <pre>{{ dialog.message }}</pre>
+          <input
+            v-if="dialog.kind === 'prompt'"
+            ref="promptInput"
+            v-model="promptValue"
+            class="prompt-input"
+            type="text"
+            :placeholder="dialog.placeholder"
+            @keydown.enter.stop.prevent="resolveDialog(true)"
+            @keydown.esc.stop.prevent="resolveDialog(false)"
+          />
         </div>
         <footer>
           <button
-            v-if="dialog.kind === 'confirm'"
+            v-if="dialog.kind === 'confirm' || dialog.kind === 'prompt'"
             class="ghost"
             @click="resolveDialog(false)"
           >
@@ -194,6 +208,21 @@ header strong {
   font-size: 12px;
   line-height: 1.5;
   color: var(--text-bright);
+}
+.prompt-input {
+  margin-top: 12px;
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-default);
+  border-radius: 5px;
+  color: var(--text-bright);
+  font-family: inherit;
+  font-size: 13px;
+}
+.prompt-input:focus {
+  outline: none;
+  border-color: var(--accent-fg);
 }
 footer {
   display: flex;

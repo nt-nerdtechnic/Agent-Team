@@ -131,6 +131,12 @@ function paneIdOf(name: string): string | null {
   return paneByName.get(name) ?? null
 }
 
+/** A free handle near `base` (base itself, or `base-2`, `base-3`…). Used to
+ *  pre-fill the collision-resolution prompt on a manual rename. */
+function suggestName(base: string): string {
+  return uniqueMessagingName(base, paneByName.keys())
+}
+
 // ── Queue ──────────────────────────────────────────────────────────────────
 function findMessage(id: number): AgentMessage | undefined {
   return messages.value.find((m) => m.id === id)
@@ -290,6 +296,7 @@ export function useAgentMessaging() {
     unregisterPane,
     nameOf,
     paneIdOf,
+    suggestName,
     sendMessage,
     pump,
     pauseMessaging,
