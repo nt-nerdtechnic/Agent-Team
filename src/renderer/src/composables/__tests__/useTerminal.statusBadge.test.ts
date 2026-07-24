@@ -5,20 +5,20 @@ import { createMockBackend, withScope } from './mockBackend'
 // The RUNNING/idle badge is driven by useTerminal's clean-content quiescence
 // heuristic: a sustained burst of CLEANED PTY output (>MIN_BURST_MS ~2s) shows
 // RUNNING. Two things must NOT count as agent activity:
-//   1. A repaint WE trigger (focusing/clicking a pane, or a refit) — otherwise
-//      the badge flips to RUNNING on a mere click.
+//   1. A repaint that replays content already on screen — a focus/click or a
+//      refit makes the CLI re-emit its current frame. isRedrawReplay drops it
+//      (content-level dedup, reflow-tolerant) so a mere click/resize can't flip
+//      the badge to RUNNING. Genuine NEW output during a focus is not masked.
 //   2. An idle CLI's own footer/cursor repaints — raw bytes that are empty
 //      after ANSI/noise stripping. This is why the badge tracks CLEANED
 //      content, not raw bytes: an idle Claude repainting its prompt must read
 //      as idle, not RUNNING.
-// These tests pin all three: real clean output → RUNNING; a focus/refit grace
-// → non-running; and a pure-ANSI repaint stream → non-running.
-//
-// (Note: spawn() focuses the pane, so a fresh pane is graced for FOCUS_GRACE_MS;
-// the control streams long enough to outlast that initial grace.)
+// These tests pin: real clean output → RUNNING (even while focused); an
+// on-screen content replay → non-running; and a pure-ANSI repaint stream →
+// non-running.
 //
 // xterm won't boot in happy-dom, so it's mocked; ctrl.requestResizeRedraw is a
-// no-op stub (the fitTerminal redraw grace is set before it runs).
+// no-op stub.
 
 const ctrl = vi.hoisted(() => ({
   applyFit: vi.fn(),
@@ -107,25 +107,37 @@ describe('useTerminal — RUNNING badge vs self-triggered repaints', () => {
 
   it('shows RUNNING for a genuine sustained output burst', async () => {
     const { result, mock, scope } = await spawned()
-    // Long enough to outlast spawn's initial focus grace (~3s) AND then sustain
-    // a burst past MIN_BURST_MS (~2s) → ~5.5s+.
+    // Sustain a burst well past MIN_BURST_MS (~2s).
     await stream(mock, 6000)
     expect(result.displayStatus.value).toBe('running')
     scope.stop()
   }, 12_000)
 
-  it('stays non-running while a focus grace is continuously active', async () => {
+  it('shows RUNNING for a real burst even while the pane is repeatedly focused', async () => {
     const { result, mock, scope } = await spawned()
-    // Identical byte pattern and duration, but the pane is re-focused each tick
-    // — every chunk lands inside the focus grace, so no RUNNING burst forms.
+    // Re-focusing every tick used to arm a grace that suppressed RUNNING even
+    // for genuine output. With content-level dedup, a real burst is no longer
+    // masked by focus — only actual on-screen replays are dropped (next test).
     await stream(mock, 6000, () => result.focus())
-    expect(result.displayStatus.value).not.toBe('running')
+    expect(result.displayStatus.value).toBe('running')
     scope.stop()
   }, 12_000)
 
-  it('stays non-running while a refit-triggered redraw grace is active', async () => {
+  it('stays non-running when a focus/refit repaint replays on-screen content', async () => {
     const { result, mock, scope } = await spawned()
-    await stream(mock, 6000, () => result.fitTerminal({ redrawAfterSettle: true }))
+    // A distinctive screenful the CLI has already emitted (becomes cleanBuffer).
+    const screen = 'Reading the terminal composable and wiring the new helper into place here.'
+    mock.emit('terminal.output', { terminal_session_id: 'sess-1', data: screen })
+    await sleep(2500) // let any burst decay to idle
+    // User clicks / a refit fires; the CLI repaints the SAME frame verbatim over
+    // and over. isRedrawReplay drops each repaint, so no RUNNING burst forms.
+    const deadline = Date.now() + 6000
+    do {
+      result.focus()
+      result.fitTerminal({ redrawAfterSettle: true })
+      mock.emit('terminal.output', { terminal_session_id: 'sess-1', data: screen })
+      await sleep(250)
+    } while (Date.now() < deadline)
     expect(result.displayStatus.value).not.toBe('running')
     scope.stop()
   }, 12_000)

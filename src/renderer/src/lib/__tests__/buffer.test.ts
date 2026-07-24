@@ -7,7 +7,8 @@ import {
   splitNumberedPrompt,
   findConsecutiveQuestionBlocks,
   findSentinel,
-  bufferTail
+  bufferTail,
+  isRedrawReplay
 } from '../buffer'
 
 describe('stripAnsi', () => {
@@ -262,5 +263,42 @@ describe('bufferTail', () => {
     expect(tail).toBe('bcd')
     const first = tail.charCodeAt(0)
     expect(first >= 0xdc00 && first <= 0xdfff).toBe(false)
+  })
+})
+
+describe('isRedrawReplay', () => {
+  // A screenful of prose already on screen; a click/resize repaints it verbatim.
+  const screen =
+    'Analyzing the request and planning the change across several files.\n' +
+    'First I will read the terminal composable, then wire the new helper.\n' +
+    'Running the test suite to confirm nothing regressed after the edit.'
+
+  it('flags a verbatim repaint of on-screen content', () => {
+    expect(isRedrawReplay(screen, screen)).toBe(true)
+  })
+
+  it('flags a repaint after reflow (newlines moved, characters unchanged)', () => {
+    // A resize rewraps the same characters onto different line boundaries.
+    const reflowed = screen.replace(/\n/g, ' ').replace(/ /g, '\n')
+    expect(isRedrawReplay(screen, reflowed)).toBe(true)
+  })
+
+  it('flags a repaint of just the visible tail (scrolled viewport)', () => {
+    expect(isRedrawReplay(screen, screen.slice(-90))).toBe(true)
+  })
+
+  it('does not flag genuinely new output', () => {
+    expect(isRedrawReplay(screen, 'Here is a completely different fresh line of agent output now.')).toBe(false)
+  })
+
+  it('does not flag output that only partly overlaps then adds new content', () => {
+    // Tail of the screen replayed, then real new work appended → not a pure replay.
+    const mixed = screen.slice(-90) + ' and now writing brand new content that was never shown before.'
+    expect(isRedrawReplay(screen, mixed)).toBe(false)
+  })
+
+  it('ignores short chunks that could collide by coincidence', () => {
+    // < REDRAW_MIN_CHARS of non-whitespace, even though it is a substring.
+    expect(isRedrawReplay(screen, 'Analyzing')).toBe(false)
   })
 })

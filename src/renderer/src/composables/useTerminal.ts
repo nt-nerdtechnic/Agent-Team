@@ -4,10 +4,11 @@ import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import '@xterm/xterm/css/xterm.css'
 import type { useBackend } from './useBackend'
-import { bufferTail, dropTuiNoise, stripAnsi } from '../lib/buffer'
+import { bufferTail, dropTuiNoise, isRedrawReplay, stripAnsi } from '../lib/buffer'
 import { createResizeController, type ResizeController } from './useTerminalResize'
 import { installTerminalZoomShortcuts, terminalFontSize } from './useTerminalFontSize'
 import { getResumeConcurrency } from '../lib/resumeConcurrency'
+import { shouldOpenMentionMenu } from '../lib/cliContext'
 import { setContext } from '../keybindings/contextService'
 import {
   formatTerminalExit,
@@ -585,11 +586,6 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // short window after a focus event so the badge stays honest.
   const lastFocusAt = ref<number>(0)
   const FOCUS_GRACE_MS = 3_000
-  // A refit/redraw WE trigger (window focus, layout switch, resize safety net)
-  // makes the CLI repaint. Those bytes must not build a RUNNING burst, so we
-  // grace them like focus. Kept separate from lastFocusAt so it does not also
-  // gate lastActivityAt, which stage quiet-detection relies on.
-  const lastSelfRedrawAt = ref<number>(0)
 
   // ── RUNNING vs IDLE ──────────────────────────────────────────────────────────
   // We want RUNNING only when the CLI is genuinely executing — not for brief
@@ -645,16 +641,16 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     if (chunk.length > 0) lastRawActivityAt.value = Date.now()
     const cleaned = dropTuiNoise(stripAnsi(chunk))
     if (!cleaned) return
-    // Badge burst tracking, driven by CLEANED content only. A focus- or
-    // refit-triggered redraw that still yields clean bytes is graced so a mere
-    // click/resize can't flip the badge to RUNNING. Resetting the burst start
-    // inside the grace keeps it below MIN_BURST_MS.
+    // A focus/resize repaint re-emits content already on screen; after noise
+    // stripping it looks like fresh output and would flip the badge to RUNNING
+    // for a mere click/resize. Drop replays here — the raw-activity clock above
+    // already marked the process alive, but a replay must not build a burst or
+    // double the buffer. Genuinely new content isn't a replay and falls through.
+    if (isRedrawReplay(cleanBuffer.value, cleaned)) return
+    // Badge burst tracking, driven by CLEANED content only.
     const now = Date.now()
-    const inRedrawGrace =
-      now - lastFocusAt.value < FOCUS_GRACE_MS ||
-      now - lastSelfRedrawAt.value < FOCUS_GRACE_MS
     // A gap > BURST_GAP_MS in clean output starts a new burst.
-    if (inRedrawGrace || now - lastCleanBurstAt.value > BURST_GAP_MS) activityBurstStartAt.value = now
+    if (now - lastCleanBurstAt.value > BURST_GAP_MS) activityBurstStartAt.value = now
     lastCleanBurstAt.value = now
     // Monotonic total — unlike cleanBuffer.length, this keeps growing after
     // the buffer hits BUFFER_CAP, so quiet-detection (waitForQuiet etc.) can
@@ -1748,9 +1744,6 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // gated once-per-settle redraw the observer path uses. Default (no flag)
     // keeps spawn/reconciler call sites byte-for-byte unchanged.
     if (opts?.redrawAfterSettle) {
-      // Grace the impending self-triggered repaint so its bytes don't register
-      // as agent activity on the status badge.
-      lastSelfRedrawAt.value = Date.now()
       resizeCtrl.requestResizeRedraw()
     }
   }
@@ -1769,8 +1762,6 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
    */
   function redraw(): void {
     if (!sessionId.value) return
-    // Grace this manual repaint so it doesn't register as agent activity.
-    lastSelfRedrawAt.value = Date.now()
     void backend.send('terminal.redraw', {
       terminal_session_id: sessionId.value,
       cols: term.cols,

@@ -313,3 +313,21 @@ export function bufferTail(text: string, maxBytes: number = 64 * 1024): string {
   if (code >= 0xdc00 && code <= 0xdfff) start++
   return text.slice(start)
 }
+
+// A focus/resize repaint makes the CLI re-emit content already on screen. After
+// ANSI + TUI-noise stripping those bytes look like fresh output and would flip
+// the RUNNING badge on for a mere click or resize. Detect the replay by
+// normalizing both sides to a whitespace-free character stream — a resize only
+// moves newlines around (reflow), it doesn't change the characters, so this
+// survives one — and checking whether the incoming chunk is a substring of the
+// recent tail. Short chunks are ignored: they'd collide by coincidence and
+// can't build a RUNNING burst anyway.
+const REDRAW_MIN_CHARS = 40
+const REDRAW_TAIL_WINDOW = 64 * 1024
+
+export function isRedrawReplay(existingTail: string, incoming: string): boolean {
+  const inc = incoming.replace(/\s+/g, '')
+  if (inc.length < REDRAW_MIN_CHARS) return false
+  const tail = bufferTail(existingTail, REDRAW_TAIL_WINDOW).replace(/\s+/g, '')
+  return tail.includes(inc)
+}
