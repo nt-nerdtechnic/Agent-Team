@@ -1372,6 +1372,14 @@ function readPaneShareText(ref: NonNullable<(typeof paneRefs)[string]>, maxLines
   return rendered.trim() ? rendered : ((ref.cleanBuffer as unknown as string) ?? '')
 }
 
+// Messaging names offered by pane `paneId`'s @-mention autocomplete menu: every
+// OTHER pane that has a messaging name (self excluded).
+function mentionCandidatesFor(paneId: string): string[] {
+  return panes.value
+    .filter((x) => x.id !== paneId && x.messagingName)
+    .map((x) => x.messagingName as string)
+}
+
 // Cross-pane context share: pane A dragged onto pane B's terminal area pastes a
 // tail excerpt of A's rendered scrollback into B's input prompt (TerminalPane's
 // 'cli-context-drop'). Deliberately NOT injectText: no Enter is sent — the text
@@ -5273,27 +5281,6 @@ async function titlebarRevealWorkspace(): Promise<void> {
   await window.agentTeam.openPath(currentWorkspace.value)
 }
 
-// ── Titlebar CLI account quick-switch ────────────────────────────────────────
-// One global active account per CLI vendor. Picking a different account sets the
-// backend-wide default (cli_profiles.set_default); it only affects panes opened
-// afterwards, never already-running ones. Shown only for vendors that have at
-// least one extra account.
-const showAccountMenu = ref(false)
-const accountSwitchAgents = computed(() =>
-  AGENT_SPECS
-    .filter((spec) => spec.agentKey !== 'terminal' && cliProfilesApi.hasProfiles(spec.agentKey))
-    .map((spec) => ({
-      agentKey: spec.agentKey,
-      label: spec.label,
-      activeId: cliProfilesApi.defaultProfileId(spec.agentKey) ?? '',
-      profiles: cliProfilesApi.profilesForAgent(spec.agentKey),
-    })),
-)
-function onAccountMenuSelect(agentKey: string, e: Event): void {
-  const value = (e.target as HTMLSelectElement).value
-  void cliProfilesApi.setDefault(agentKey, value || null)
-}
-
 // Titlebar 📋 button: reveal the current workspace's plans. Plans now live in
 // the main-window left sidebar as their own tab (embedded PlanPane), not a
 // detached window — so this just switches ControlPane's sidebar tab to 'plans'
@@ -8253,25 +8240,6 @@ function paneIsCommander(p: ActivePane): boolean {
         </div>
       </template>
       <span v-else class="titlebar-name">{{ workspaceBaseName }}</span>
-      <div v-if="accountSwitchAgents.length" class="titlebar-accounts">
-        <button
-          class="titlebar-ws-btn"
-          @mousedown.stop
-          @click="showAccountMenu = !showAccountMenu"
-          :title="$t('cli-account.quick-switch-tooltip')"
-        >🔑</button>
-        <div v-if="showAccountMenu" class="account-menu-backdrop" @mousedown.stop="showAccountMenu = false"></div>
-        <div v-if="showAccountMenu" class="account-menu" @mousedown.stop>
-          <div class="account-menu-title">{{ $t('cli-account.quick-switch-title') }}</div>
-          <div v-for="a in accountSwitchAgents" :key="a.agentKey" class="account-menu-row">
-            <span class="account-menu-agent">{{ a.label }}</span>
-            <select class="account-menu-select" :value="a.activeId" @change="onAccountMenuSelect(a.agentKey, $event)">
-              <option value="">{{ $t('cli-account.default') }}</option>
-              <option v-for="p in a.profiles" :key="p.id" :value="p.id">{{ p.name }}</option>
-            </select>
-          </div>
-        </div>
-      </div>
       <button class="titlebar-gear" @mousedown.stop @click="showSettings = true" title="Settings (⌘,)">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="3"/>
@@ -8585,7 +8553,9 @@ function paneIsCommander(p: ActivePane): boolean {
           :is-preparing="paneShowsPrepOverlay(p)"
           :preparing-label="panePreparationLabel(p)"
           :backend="backend"
+          :cli-profiles="cliProfilesApi"
           :workspace-path="p.workspacePath"
+          :mention-candidates="mentionCandidatesFor(p.id)"
           :loop-active="p.loopActive"
           :loop-wait-until="p.loopWaitUntil"
           :loop-estimate-reset-at="p.loopEstimateResetAt"
@@ -9150,64 +9120,6 @@ function paneIsCommander(p: ActivePane): boolean {
 .titlebar-ws-btn:hover {
   background: var(--bg-hover);
   color: var(--text-bright);
-}
-.titlebar-accounts {
-  position: relative;
-  -webkit-app-region: no-drag;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-}
-.account-menu-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 300;
-}
-.account-menu {
-  position: absolute;
-  top: 30px;
-  right: 0;
-  z-index: 301;
-  min-width: 220px;
-  padding: 8px;
-  background: var(--bg-elevated, var(--bg-subtle));
-  border: 1px solid var(--border-default);
-  border-radius: 8px;
-  box-shadow: 0 8px 24px color-mix(in srgb, var(--bg-inverse) 14%, transparent);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.account-menu-title {
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--text-muted);
-  padding: 2px 2px 4px;
-}
-.account-menu-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-.account-menu-agent {
-  font-size: 12px;
-  color: var(--text-primary);
-  white-space: nowrap;
-}
-.account-menu-select {
-  flex-shrink: 0;
-  max-width: 120px;
-  height: 24px;
-  font-size: 11px;
-  background: var(--bg-inset, var(--bg-base));
-  border: 1px solid var(--border-muted);
-  border-radius: 5px;
-  color: var(--text-primary);
-  padding: 0 4px;
-  cursor: pointer;
 }
 .titlebar-gear {
   -webkit-app-region: no-drag;

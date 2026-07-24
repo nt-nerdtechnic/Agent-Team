@@ -1388,6 +1388,11 @@ async def cli_profiles_set_default(session: "Session", msg_id: str, msg_type: st
             {"profiles": doc["profiles"], "defaults": doc["defaults"], "reason": "set_default"},
         )
     )
+    # The usage badges read the active account's credentials — force the poller
+    # to re-fetch now so the badge reflects the switch immediately.
+    from .usage_service import service
+
+    service.request_refresh()
 
 
 # ── Agent session / orphans (agent.*) ───────────────────────────────────────

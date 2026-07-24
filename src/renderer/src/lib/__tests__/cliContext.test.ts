@@ -3,6 +3,7 @@ import {
   buildCliPaneBufferReply,
   buildExternalPaneContextPaste,
   endsWithMentionTrigger,
+  shouldOpenMentionMenu,
   parseCliContextPayload,
   resolveCliDropPayload,
   writeCliPaneDragPayload,
@@ -461,6 +462,11 @@ describe('endsWithMentionTrigger', () => {
     expect(endsWithMentionTrigger('@')).toBe(true)
   })
 
+  it('matches the full-width "＠" a CJK IME emits', () => {
+    expect(endsWithMentionTrigger('傳給 ＠')).toBe(true)
+    expect(endsWithMentionTrigger('＠')).toBe(true)
+  })
+
   it('does not match without a trailing "@"', () => {
     expect(endsWithMentionTrigger('')).toBe(false)
     expect(endsWithMentionTrigger('tell someone')).toBe(false)
@@ -469,5 +475,33 @@ describe('endsWithMentionTrigger', () => {
 
   it('opts back out when a space follows the "@"', () => {
     expect(endsWithMentionTrigger('傳給 @ ')).toBe(false)
+    expect(endsWithMentionTrigger('傳給 ＠ ')).toBe(false)
+  })
+})
+
+describe('shouldOpenMentionMenu', () => {
+  it('triggers on "@" at the start of the line', () => {
+    expect(shouldOpenMentionMenu('@', '')).toBe(true)
+  })
+
+  it('triggers on "@" right after whitespace', () => {
+    expect(shouldOpenMentionMenu('@', 'tell ')).toBe(true)
+    expect(shouldOpenMentionMenu('@', '傳給 ')).toBe(true)
+  })
+
+  it('triggers on the full-width "＠" a CJK IME emits', () => {
+    expect(shouldOpenMentionMenu('＠', '')).toBe(true)
+    expect(shouldOpenMentionMenu('＠', 'tell ')).toBe(true)
+  })
+
+  it('does NOT trigger mid-word (a non-space precedes the "@")', () => {
+    expect(shouldOpenMentionMenu('@', 'a')).toBe(false)
+    expect(shouldOpenMentionMenu('@', 'tell someone')).toBe(false)
+    expect(shouldOpenMentionMenu('＠', 'a')).toBe(false)
+  })
+
+  it('ignores non-"@" characters', () => {
+    expect(shouldOpenMentionMenu('a', '')).toBe(false)
+    expect(shouldOpenMentionMenu(' ', 'tell ')).toBe(false)
   })
 })

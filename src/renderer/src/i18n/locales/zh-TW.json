@@ -1130,9 +1130,7 @@
     "failed": "無法接回這段對話，其歷史紀錄可能已不存在"
   },
   "cli-account": {
-    "default": "預設",
-    "quick-switch-title": "使用中的 CLI 帳號",
-    "quick-switch-tooltip": "切換使用中的 CLI 帳號（套用到之後新開的 pane）"
+    "default": "預設"
   },
   "cliDrop": {
     "source-closed": "來源 CLI pane 已關閉",
@@ -1192,6 +1190,9 @@
     "remaining": "剩餘 {pct}",
     "resets-in": "{time} 後重置",
     "updated": "更新於 {time}",
+    "switch-title": "切換帳號",
+    "switch-default": "Default（內建）",
+    "switch-low": "額度不足，可切換帳號",
     "settings-title": "CLI 額度徽章",
     "settings-enabled": "在 CLI pane 標題列顯示剩餘額度",
     "settings-refresh": "刷新間隔",

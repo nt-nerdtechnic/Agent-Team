@@ -1130,9 +1130,7 @@
     "failed": "Could not reconnect that conversation — its transcript may no longer exist"
   },
   "cli-account": {
-    "default": "Default",
-    "quick-switch-title": "Active CLI account",
-    "quick-switch-tooltip": "Switch the active CLI account (applies to newly opened panes)"
+    "default": "Default"
   },
   "cliDrop": {
     "source-closed": "CLI pane is no longer open",
@@ -1192,6 +1190,9 @@
     "remaining": "{pct} left",
     "resets-in": "resets in {time}",
     "updated": "updated {time}",
+    "switch-title": "Switch account",
+    "switch-default": "Default (built-in)",
+    "switch-low": "Quota low — switch account",
     "settings-title": "CLI quota badge",
     "settings-enabled": "Show remaining quota in CLI pane headers",
     "settings-refresh": "Refresh interval",

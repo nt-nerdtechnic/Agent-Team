@@ -26,9 +26,17 @@ export const CLI_CHIP_LINE_CAP = 1000
 /** True when the text left of the cursor ends with a bare "@" — the user is
  *  asking the pane drop to insert just the pane's messaging name (mention
  *  mode) instead of the full scrollback excerpt. Strict: the "@" must sit
- *  immediately before the cursor, so "@ " (space typed after) opts back out. */
+ *  immediately before the cursor, so "@ " (space typed after) opts back out.
+ *  Accepts the full-width "＠" (U+FF20) a CJK IME emits, not just ASCII "@". */
 export function endsWithMentionTrigger(lineBeforeCursor: string): boolean {
-  return lineBeforeCursor.endsWith('@')
+  return lineBeforeCursor.endsWith('@') || lineBeforeCursor.endsWith('＠')
+}
+
+/** True when typing `ch` (the just-typed char) at end of `lineBeforeCursor`
+ *  should open the mention menu: ch is '@' or '＠', and the text before it is
+ *  empty or ends with whitespace (so "a@b" mid-word does NOT trigger). */
+export function shouldOpenMentionMenu(ch: string, lineBeforeCursor: string): boolean {
+  return (ch === '@' || ch === '＠') && (lineBeforeCursor === '' || /\s$/.test(lineBeforeCursor))
 }
 
 /** Drag payload carried under CLI_CONTEXT_MIME (set in TerminalPane.vue). */

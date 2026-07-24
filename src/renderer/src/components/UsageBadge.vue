@@ -4,24 +4,35 @@ import {
   formatRemaining,
   formatResetAbsolute,
   formatResetCountdown,
+  refreshUsage,
   remainingPercent,
   remainingTier,
   usageFor,
   type UsageWindow
 } from '../composables/useUsage'
+import type { useCliProfiles } from '../composables/useCliProfiles'
 
 // Compact remaining-quota badge for a CLI pane header. Renders nothing when
 // the agent has no usage provider or nothing was fetched yet; shows ⚠ when
 // the CLI's stored credentials are expired. Hover opens a fixed-position
 // detail popover (teleported to body so the pane header can't clip it).
 
-const props = defineProps<{ agentKey: string }>()
+const props = defineProps<{
+  agentKey: string
+  cliProfiles: ReturnType<typeof useCliProfiles>
+}>()
 
 const snap = computed(() => usageFor(props.agentKey))
 const remaining = computed(() => remainingPercent(snap.value))
 const tier = computed(() => (remaining.value === null ? 'ok' : remainingTier(remaining.value)))
 const expired = computed(() => snap.value?.status === 'expired')
 const visible = computed(() => remaining.value !== null || expired.value)
+
+// Account-switch block: only shown when this agent has ≥1 extra profile.
+const canSwitch = computed(() => props.cliProfiles.hasProfiles(props.agentKey))
+const switchProfiles = computed(() => props.cliProfiles.profilesForAgent(props.agentKey))
+const activeProfileId = computed(() => props.cliProfiles.defaultProfileId(props.agentKey) ?? '')
+const critSwitch = computed(() => tier.value === 'crit')
 
 const open = ref(false)
 const popStyle = ref<{ top: string; left: string }>({ top: '0px', left: '0px' })
@@ -58,6 +69,13 @@ function onLeave(): void {
     closeTimer = null
     open.value = false
   }, 120)
+}
+
+async function selectProfile(id: string): Promise<void> {
+  if (id === activeProfileId.value) return
+  await props.cliProfiles.setDefault(props.agentKey, id || null)
+  // Re-poll so the badge reflects the newly active account's quota promptly.
+  refreshUsage()
 }
 
 onBeforeUnmount(() => {
@@ -123,6 +141,35 @@ function rowReset(w: UsageWindow): string {
         </div>
         <div v-if="rowReset(w)" class="usage-row-reset">
           {{ $t('usage.resets-in', { time: rowReset(w) }) }}
+        </div>
+      </div>
+      <div v-if="canSwitch" class="usage-pop-switch">
+        <div class="usage-pop-switch-title" :class="{ crit: critSwitch }">
+          {{ critSwitch ? $t('usage.switch-low') : $t('usage.switch-title') }}
+        </div>
+        <div class="usage-acct-list" role="listbox">
+          <button
+            class="usage-acct"
+            role="option"
+            :class="{ active: activeProfileId === '' }"
+            :aria-selected="activeProfileId === ''"
+            @click="selectProfile('')"
+          >
+            <span class="usage-acct-check">{{ activeProfileId === '' ? '✓' : '' }}</span>
+            <span class="usage-acct-name">{{ $t('usage.switch-default') }}</span>
+          </button>
+          <button
+            v-for="p in switchProfiles"
+            :key="p.id"
+            class="usage-acct"
+            role="option"
+            :class="{ active: activeProfileId === p.id }"
+            :aria-selected="activeProfileId === p.id"
+            @click="selectProfile(p.id)"
+          >
+            <span class="usage-acct-check">{{ activeProfileId === p.id ? '✓' : '' }}</span>
+            <span class="usage-acct-name">{{ p.name }}</span>
+          </button>
         </div>
       </div>
       <div class="usage-pop-updated">
@@ -233,6 +280,62 @@ function rowReset(w: UsageWindow): string {
   margin-top: 2px;
   font-size: 10px;
   opacity: 0.8;
+}
+.usage-pop-switch {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-default);
+}
+.usage-pop-switch-title {
+  font-size: 10px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  color: var(--text-secondary);
+}
+.usage-pop-switch-title.crit {
+  color: var(--danger-fg);
+}
+.usage-acct-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.usage-acct {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  padding: 4px 6px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+.usage-acct:hover {
+  background: var(--bg-hover);
+  color: var(--text-bright);
+}
+.usage-acct.active {
+  color: var(--accent-fg);
+  font-weight: 600;
+}
+.usage-acct-check {
+  flex-shrink: 0;
+  width: 12px;
+  text-align: center;
+  font-size: 10px;
+  color: var(--accent-fg);
+}
+.usage-acct-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .usage-pop-updated {
   margin-top: 4px;

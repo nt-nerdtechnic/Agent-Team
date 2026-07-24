@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useTerminal } from '../composables/useTerminal'
 import { useTheme } from '../composables/useTheme'
 import type { useBackend } from '../composables/useBackend'
+import type { useCliProfiles } from '../composables/useCliProfiles'
 import { extractDropPaths, shellEscape } from '../lib/drop'
 import { CLI_CONTEXT_MIME, PANE_ID_MIME, resolveCliDropSource, writeCliPaneDragPayload } from '../lib/cliContext'
 import { formatLoopTime } from '../lib/loopPrompt'
@@ -43,7 +44,11 @@ interface Props {
    *  session window) shown on the running badge as an approximate time. */
   loopEstimateResetAt?: number | null
   backend: ReturnType<typeof useBackend>
+  cliProfiles: ReturnType<typeof useCliProfiles>
   workspacePath?: string
+  /** Messaging names of the OTHER CLI panes (self excluded), for the
+   *  @-mention autocomplete menu inside this pane's terminal. */
+  mentionCandidates?: string[]
 }
 
 const props = defineProps<Props>()
@@ -98,6 +103,7 @@ function onTitleKeydown(e: KeyboardEvent): void {
 const terminal = useTerminal(props.paneId, props.backend, {
   workspacePath: props.workspacePath,
   onClear: () => emit('rebuild-clean'),
+  mentionCandidates: () => props.mentionCandidates ?? [],
 })
 const { theme } = useTheme()
 watch(theme, () => terminal.updateXtermTheme())
@@ -333,7 +339,7 @@ onMounted(() => {
           :data-status="displayStatus"
           :title="displayStatus === 'idle' ? $t('pane.terminal.idle-status-tooltip') : ''"
         >{{ displayStatus }}</span>
-        <UsageBadge v-if="agentKey" :agent-key="agentKey" />
+        <UsageBadge v-if="agentKey" :agent-key="agentKey" :cli-profiles="cliProfiles" />
       </div>
       <div v-if="subtitle" class="header-sub">{{ subtitle }}</div>
     </header>

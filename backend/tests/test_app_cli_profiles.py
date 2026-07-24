@@ -196,6 +196,30 @@ async def test_cli_profiles_rename_delete_set_default_flow(
     ]
 
 
+async def test_set_default_triggers_usage_refresh(
+    store: CliProfilesStore,
+    events: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Switching the active account forces the usage poller to re-fetch now so
+    the quota badge reflects the new account immediately."""
+    from agent_team_backend import usage_service
+
+    calls: list[int] = []
+    monkeypatch.setattr(usage_service.service, "request_refresh", lambda: calls.append(1))
+    session = _session()
+    profile = store.create(agent_key="codex", name="Work")
+
+    await app.handle_message(session, {
+        "id": "sd1",
+        "type": "cli_profiles.set_default",
+        "payload": {"agent_key": "codex", "profile_id": profile["id"]},
+    })
+
+    assert session.websocket.sent[0]["ok"] is True  # type: ignore[attr-defined]
+    assert calls == [1]
+
+
 async def test_cli_profiles_delete_clears_default(
     store: CliProfilesStore, events: list[dict[str, Any]]
 ) -> None:

@@ -481,6 +481,10 @@ function buildFileLinkProvider(
 interface UseTerminalOptions {
   workspacePath?: string
   onClear?: () => void
+  /** Getter for the OTHER CLI panes' messaging names (already excluding self).
+   *  Feeds the @-mention autocomplete menu. Read lazily at trigger time so the
+   *  list stays current as panes come and go. */
+  mentionCandidates?: () => string[]
 }
 
 // Throttle for RESUME spawns' terminal.create across all panes. A session
@@ -688,6 +692,151 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
    *  the source pane's messaging name, not its scrollback). */
   function readLineBeforeCursor(): string {
     return readBufferLineBeforeCursor(term)
+  }
+
+  // ── @-mention floating autocomplete ──────────────────────────────────────────
+  // Imperative-DOM overlay (mirrors showTerminalFilePicker) listing the OTHER CLI
+  // panes' messaging names. It steals DOM focus to its own card AND handles keys
+  // at the document capture layer, so ↑/↓/Enter/Esc never reach xterm while open.
+  // Picking a name sends `name + ' '` straight to the PTY, completing `@codex-1 `.
+  let _mentionMenuCleanup: (() => void) | null = null
+
+  function closeMentionMenu(): void {
+    if (_mentionMenuCleanup) {
+      const fn = _mentionMenuCleanup
+      _mentionMenuCleanup = null
+      fn()
+    }
+  }
+
+  function openMentionMenu(candidates: string[]): void {
+    if (_mentionMenuCleanup) return          // one menu at a time
+    if (!candidates.length) return           // nothing to offer
+    const host = mountedEl
+    const screen = host?.querySelector('.xterm-screen') as HTMLElement | null
+    if (!screen) return
+    const rect = screen.getBoundingClientRect()
+    const cellW = (term as any)._core?._renderService?.dimensions?.css?.cell?.width || 0
+    const cellH = (term as any)._core?._renderService?.dimensions?.css?.cell?.height || 0
+    if (!cellW || !cellH) return
+    const buf = term.buffer.active
+    // buf.cursorX / buf.cursorY are viewport-relative (cursorY counts rows from
+    // the top of the visible area), matching the .xterm-screen rect origin.
+    const cellLeft = rect.left + buf.cursorX * cellW
+    const cellTop = rect.top + buf.cursorY * cellH
+    const cellBottom = cellTop + cellH
+
+    const root = document.createElement('div')
+    root.className = 'term-mention-menu-root'
+    Object.assign(root.style, {
+      position: 'fixed', inset: '0', zIndex: '99999', background: 'transparent',
+    })
+
+    const card = document.createElement('div')
+    card.tabIndex = 0
+    Object.assign(card.style, {
+      position: 'fixed', left: `${cellLeft}px`, top: `${cellBottom}px`,
+      width: '200px', maxHeight: '240px', overflowY: 'auto',
+      background: '#161b22', border: '1px solid #30363d', borderRadius: '6px',
+      boxShadow: '0 8px 24px rgba(0,0,0,0.6)', outline: 'none',
+      padding: '4px 0', boxSizing: 'border-box',
+    })
+
+    let selectedIdx = 0
+    const rows: HTMLElement[] = []
+
+    function renderSelection(): void {
+      rows.forEach((row, i) => {
+        row.style.background = i === selectedIdx ? 'rgba(56,139,253,0.2)' : ''
+      })
+      rows[selectedIdx]?.scrollIntoView({ block: 'nearest' })
+    }
+
+    function pick(idx: number): void {
+      const name = candidates[idx]
+      closeMentionMenu()
+      term.focus()
+      if (name) {
+        void backend.send('terminal.input', {
+          terminal_session_id: sessionId.value,
+          data: name + ' ',
+        })
+      }
+    }
+
+    candidates.forEach((name, i) => {
+      const row = document.createElement('div')
+      row.textContent = name
+      Object.assign(row.style, {
+        padding: '6px 12px', cursor: 'pointer', color: '#e6edf3', fontSize: '13px',
+        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+      })
+      row.addEventListener('mouseenter', () => { selectedIdx = i; renderSelection() })
+      row.addEventListener('mousedown', (e) => { e.preventDefault(); pick(i) })
+      rows.push(row)
+      card.appendChild(row)
+    })
+
+    root.appendChild(card)
+    document.body.appendChild(root)
+
+    // Clamp to the viewport now that the card has a measured size.
+    const cardRect = card.getBoundingClientRect()
+    let left = cellLeft
+    let top = cellBottom
+    if (left + cardRect.width > window.innerWidth) left = window.innerWidth - cardRect.width - 8
+    if (left < 4) left = 4
+    if (top + cardRect.height > window.innerHeight) top = cellTop - cardRect.height  // flip above
+    if (top < 4) top = 4
+    card.style.left = `${left}px`
+    card.style.top = `${top}px`
+
+    // Document-capture keydown: intercept the menu's keys before xterm's textarea
+    // can see them (capture phase + stopPropagation), so the CLI receives nothing
+    // while the menu is open. Any other printable key / Backspace dismisses the
+    // menu and is re-sent to the PTY so typing continues uninterrupted.
+    const onDocKeydown = (e: KeyboardEvent): void => {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault(); e.stopPropagation()
+        if (selectedIdx < candidates.length - 1) { selectedIdx++; renderSelection() }
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault(); e.stopPropagation()
+        if (selectedIdx > 0) { selectedIdx--; renderSelection() }
+      } else if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault(); e.stopPropagation()
+        pick(selectedIdx)
+      } else if (e.key === 'Escape') {
+        e.preventDefault(); e.stopPropagation()
+        closeMentionMenu(); term.focus()
+      } else if (e.metaKey || e.ctrlKey || e.altKey) {
+        // A shortcut chord (Cmd+A, etc.) — cancel the menu but let the chord
+        // through rather than mangling it into a literal PTY keystroke. Refocus
+        // the terminal so the chord (e.g. Cmd+V paste) lands there and typing
+        // continues — closing the focused card would otherwise drop focus to
+        // <body>, swallowing the chord and every keystroke after it.
+        closeMentionMenu(); term.focus()
+      } else if (e.key === 'Backspace') {
+        e.preventDefault(); e.stopPropagation()
+        closeMentionMenu(); term.focus()
+        void backend.send('terminal.input', { terminal_session_id: sessionId.value, data: '\x7f' })
+      } else if (e.key.length === 1) {
+        e.preventDefault(); e.stopPropagation()
+        closeMentionMenu(); term.focus()
+        void backend.send('terminal.input', { terminal_session_id: sessionId.value, data: e.key })
+      }
+    }
+
+    root.addEventListener('mousedown', (e) => { if (e.target === root) { closeMentionMenu(); term.focus() } })
+    card.addEventListener('blur', () => closeMentionMenu())
+    document.addEventListener('keydown', onDocKeydown, true)
+
+    _mentionMenuCleanup = (): void => {
+      document.removeEventListener('keydown', onDocKeydown, true)
+      root.remove()
+    }
+
+    renderSelection()
+    card.focus()
   }
 
   let inputDisposer: { dispose(): void } | null = null
@@ -1308,6 +1457,17 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         terminal_session_id: sessionId.value,
         data
       })
+
+      // @-mention trigger. Capture the line BEFORE the '@' echoes (onData fires
+      // before the PTY round-trips the echo, so readLineBeforeCursor still shows
+      // the pre-'@' state). Defer the open one tick so the '@' echoes and the
+      // cursor advances first, then position the menu at the new cursor cell.
+      if (data === '@' || data === '＠') {
+        const candidates = opts?.mentionCandidates?.() ?? []
+        if (candidates.length && shouldOpenMentionMenu(data, readLineBeforeCursor())) {
+          setTimeout(() => openMentionMenu(candidates), 0)
+        }
+      }
     })
 
     outputUnsub = backend.on('terminal.output', (raw) => {
@@ -1815,6 +1975,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     if (mountedEl && _mousePosTracker) mountedEl.removeEventListener('mousemove', _mousePosTracker)
     if (mountedEl && _cmdClickHandler) mountedEl.removeEventListener('mousedown', _cmdClickHandler, { capture: true })
     document.querySelector('.term-file-picker-root')?.remove()
+    closeMentionMenu()  // tear down any open @-mention menu (detaches doc listeners)
     term.textarea?.removeEventListener('focus', _onTermFocus)
     term.textarea?.removeEventListener('blur', _onTermBlur)
     // A pane disposed while focused never fires blur — clear the context so
