@@ -1054,7 +1054,9 @@
     "major-update-title": "有新版本可用",
     "major-update-body": "Agent-Team v{version} 已推出（目前版本為 v{current}）。要現在下載嗎？",
     "download-now": "下載更新",
-    "later": "稍後再說"
+    "later": "稍後再說",
+    "restart-confirm-title": "重新啟動以安裝更新？",
+    "restart-confirm-body": "Agent-Team v{version} 已下載完成。App 會關閉並重新開啟以完成安裝。要現在重新啟動嗎？"
   },
   "preview": {
     "binary-file": "二進位檔案",

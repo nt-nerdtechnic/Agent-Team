@@ -3301,7 +3301,32 @@ function openSettingsAccounts(): void {
   showSettings.value = true
 }
 // Status-bar update indicator: shares the updater state machine with ControlPane.
-const { state: updateState } = useUpdater()
+const { state: updateState, startDownload: startUpdateDownload, installUpdate } = useUpdater()
+// Drive the whole update flow from the status-bar badge instead of only opening
+// Settings: available → start the download; downloaded → confirm then restart to
+// install; downloading/error → open the Updates tab for progress or details.
+async function onUpdateBadgeClick(): Promise<void> {
+  const status = updateState.value.status
+  if (status === 'available') {
+    await startUpdateDownload()
+    return
+  }
+  if (status === 'downloaded') {
+    const ok = await notifyRestore.confirm(
+      i18n.global.t('updater.restart-confirm-body', { version: updateState.value.availableVersion ?? '' }),
+      {
+        title: i18n.global.t('updater.restart-confirm-title'),
+        confirmText: i18n.global.t('updater.install'),
+        cancelText: i18n.global.t('updater.later'),
+      }
+    )
+    if (!ok) return
+    await installUpdate()
+    return
+  }
+  settingsInitialTab.value = 'updates'
+  showSettings.value = true
+}
 // Native application menu actions routed from main (menu:action). Existing
 // bridge listeners in this file never unsubscribe — App.vue lives for the
 // window's lifetime, so follow suit.
@@ -8928,9 +8953,15 @@ function paneIsCommander(p: ActivePane): boolean {
           :class="'sb-update-' + updateState.status"
           role="button"
           tabindex="0"
-          :title="updateState.status === 'error' ? updateState.message : (updateState.availableVersion ? `v${updateState.availableVersion}` : undefined)"
-          @click="settingsInitialTab = 'updates'; showSettings = true"
-          @keydown.enter="settingsInitialTab = 'updates'; showSettings = true"
+          :title="updateState.status === 'error'
+            ? updateState.message
+            : updateState.status === 'downloaded'
+              ? $t('updater.install')
+              : updateState.status === 'available'
+                ? $t('updater.download')
+                : (updateState.availableVersion ? `v${updateState.availableVersion}` : undefined)"
+          @click="onUpdateBadgeClick"
+          @keydown.enter="onUpdateBadgeClick"
         >
           <span class="sb-dot" />
           <template v-if="updateState.status === 'downloading'">↓{{ updateState.percent ?? 0 }}%</template>

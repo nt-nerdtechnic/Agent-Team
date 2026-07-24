@@ -1054,7 +1054,9 @@
     "major-update-title": "Update available",
     "major-update-body": "Agent-Team v{version} is available (you're on v{current}). Download it now?",
     "download-now": "Download update",
-    "later": "Later"
+    "later": "Later",
+    "restart-confirm-title": "Restart to install update?",
+    "restart-confirm-body": "Agent-Team v{version} is downloaded. The app will close and reopen to finish installing. Restart now?"
   },
   "preview": {
     "binary-file": "Binary file",
