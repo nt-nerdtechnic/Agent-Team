@@ -24,6 +24,9 @@ interface Props {
   pipeTag?: string
   isCommander?: boolean
   isFocus?: boolean
+  /** True when this pane is part of the multi-select set (Cmd/Ctrl/Shift-click
+   *  on the header), so batch context-menu actions target it. */
+  isSelected?: boolean
   /** True when this pane's agent is resume-capable — RENDERS the rebuild button
    *  (disabled until canRebuild), so the control is discoverable from spawn. */
   rebuildVisible?: boolean
@@ -54,7 +57,7 @@ interface Props {
 
 const props = defineProps<Props>()
 const emit = defineEmits<{
-  (e: 'set-focus'): void
+  (e: 'set-focus', ev?: MouseEvent): void
   (e: 'minimize'): void
   (e: 'rebuild'): void
   (e: 'rebuild-clean'): void
@@ -299,7 +302,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div :class="['pane', { 'pane-focus': isFocus }]">
+  <div :class="['pane', { 'pane-focus': isFocus, 'pane-selected': isSelected }]">
     <button
       v-if="rebuildVisible"
       class="rebuild-btn"
@@ -313,7 +316,7 @@ onMounted(() => {
       :class="['pane-header', { 'drag-over': isReorderDragOver }]"
       :draggable="!editingTitle"
       :title="$t('pane.terminal.drag-to-tab-tooltip')"
-      @click="emit('set-focus')"
+      @click="emit('set-focus', $event)"
       @dragstart="onHeaderDragStart"
       @dragend="onHeaderDragEnd"
       @dragover="onHeaderDragOver"
@@ -423,6 +426,13 @@ onMounted(() => {
 }
 .pane.pane-focus .pane-header {
   background: var(--bg-elevated);
+}
+.pane.pane-selected {
+  border-color: var(--accent-focus);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-focus) 45%, transparent);
+}
+.pane.pane-selected .pane-header {
+  background: color-mix(in srgb, var(--accent-focus) 18%, var(--bg-elevated));
 }
 .minimize-btn,
 .rebuild-btn {

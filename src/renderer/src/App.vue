@@ -3226,6 +3226,45 @@ async function onKillAll(): Promise<void> {
   for (const p of [...panes.value]) await onKill(p.id, { markRemoved: false })
 }
 
+// ── Batch actions on the multi-select set (right-click a selected pane) ───────
+async function batchInterrupt(ids: string[]): Promise<void> {
+  for (const id of ids) await onInterrupt(id)
+}
+
+function batchMinimize(ids: string[]): void {
+  for (const id of ids) minimizePane(id)
+}
+
+function batchRestore(ids: string[]): void {
+  for (const id of ids) restorePane(id)
+}
+
+async function batchKill(ids: string[]): Promise<void> {
+  for (const id of [...ids]) await onKill(id)
+  selectedPaneIds.value = new Set()
+}
+
+async function batchRebuild(ids: string[]): Promise<void> {
+  // Rebuild replaces pane ids, so capture the resumable subset up front.
+  const targets = panes.value.filter((p) => ids.includes(p.id) && paneCanRebuild(p)).map((p) => p.id)
+  if (!targets.length) return
+  let busyCount = 0
+  for (const id of targets) {
+    try {
+      if ((await rebuildPaneViaResume(id, { suppressBusyToast: true })) === 'busy') busyCount++
+    } catch {
+      /* ignore — individual rebuild failures are logged in rebuildPaneViaResume */
+    }
+  }
+  selectedPaneIds.value = new Set()
+  if (busyCount > 0) {
+    notifyRestore.toast(
+      i18n.global.t('pane.terminal.rebuild-busy-skipped-batch', { count: busyCount }),
+      { type: 'info' }
+    )
+  }
+}
+
 // ────────────────────────── Pipeline ──────────────────────────
 
 interface GlobalManagerRef {
@@ -6978,6 +7017,9 @@ function truncate(s: string, n: number): string {
 const layoutMode = ref<LayoutMode>('grid')
 const focusPaneId = ref<string | null>(null)
 const minimizedPanes = ref(new Set<string>())
+// Multi-select set for batch context-menu actions (Cmd/Ctrl/Shift-click a pane
+// header). Pruned to live pane ids by the panes watcher; a plain click clears it.
+const selectedPaneIds = ref(new Set<string>())
 
 // Focusing a pane while the app is in the foreground means the user is now
 // looking at it — clear its Dock badge pending state. markSeen itself gates on
@@ -7499,6 +7541,12 @@ watch(panes, (newPanes, oldPanes) => {
   if (focusPaneId.value && !ids.has(focusPaneId.value)) {
     focusPaneId.value = newPanes[0]?.id ?? null
   }
+  // Drop selected ids for panes that were removed or had their id replaced by a
+  // rebuild, so batch actions never reference stale panes.
+  if (selectedPaneIds.value.size > 0) {
+    const pruned = new Set([...selectedPaneIds.value].filter((id) => ids.has(id)))
+    if (pruned.size !== selectedPaneIds.value.size) selectedPaneIds.value = pruned
+  }
   if (layoutMode.value !== 'grid' && newPanes.length > (oldPanes?.length ?? 0)) {
     focusPaneId.value = newPanes[newPanes.length - 1].id
   }
@@ -7518,7 +7566,24 @@ watch(activeTab, () => {
   void nextTick(() => refitAllTerminals())
 })
 
-function onSetFocus(paneId: string): void {
+function onSetFocus(paneId: string, ev?: MouseEvent): void {
+  // Cmd/Ctrl/Shift-click toggles the pane in the multi-select set instead of
+  // replacing focus, so the right-click menu can act on the whole batch.
+  if (ev && (ev.metaKey || ev.ctrlKey || ev.shiftKey)) {
+    const next = new Set(selectedPaneIds.value)
+    // Seed with the pane the user was already focused on, so the first
+    // modifier-click extends from the current single selection.
+    if (next.size === 0 && focusPaneId.value && focusPaneId.value !== paneId) {
+      next.add(focusPaneId.value)
+    }
+    if (next.has(paneId)) next.delete(paneId)
+    else next.add(paneId)
+    selectedPaneIds.value = next
+    revealPaneTab(paneId)
+    focusPaneId.value = paneId
+    return
+  }
+  selectedPaneIds.value = new Set()
   revealPaneTab(paneId)
   focusPaneId.value = paneId
 }
@@ -7532,6 +7597,18 @@ const paneCtxMenuEl = ref<HTMLElement | null>(null)
 const paneCtxView = computed<ActivePaneView | null>(() =>
   paneCtxMenu.value ? paneViews.value.find((v) => v.id === paneCtxMenu.value!.paneId) ?? null : null
 )
+
+// When the right-clicked pane is part of a multi-select of >1, the menu targets
+// the whole (still-live) selection; otherwise it targets just that one pane.
+const ctxTargetIds = computed<string[]>(() => {
+  const m = paneCtxMenu.value
+  if (!m) return []
+  if (selectedPaneIds.value.has(m.paneId) && selectedPaneIds.value.size > 1) {
+    return panes.value.map((p) => p.id).filter((id) => selectedPaneIds.value.has(id))
+  }
+  return [m.paneId]
+})
+const ctxIsBatch = computed(() => ctxTargetIds.value.length > 1)
 
 function openPaneCtxMenu(e: MouseEvent, paneId: string): void {
   e.preventDefault()
@@ -8589,6 +8666,7 @@ function paneIsCommander(p: ActivePane): boolean {
           :pipe-tag="p.origin === 'pipeline' && p.stageId ? `P${p.stageId}` : undefined"
           :is-commander="paneIsCommander(p)"
           :is-focus="p.id === effectiveFocusPaneId"
+          :is-selected="selectedPaneIds.has(p.id)"
           :rebuild-visible="paneRebuildVisible(p)"
           :can-rebuild="paneCanRebuild(p)"
           :rebuilding="paneRebuilding(p)"
@@ -8601,7 +8679,7 @@ function paneIsCommander(p: ActivePane): boolean {
           :loop-active="p.loopActive"
           :loop-wait-until="p.loopWaitUntil"
           :loop-estimate-reset-at="p.loopEstimateResetAt"
-          @set-focus="onSetFocus(p.id)"
+          @set-focus="(ev) => onSetFocus(p.id, ev)"
           @minimize="minimizePane(p.id)"
           @rebuild="rebuildPaneViaResume(p.id)"
           @rebuild-clean="rebuildPaneClean(p.id)"
@@ -8619,7 +8697,7 @@ function paneIsCommander(p: ActivePane): boolean {
             v-for="p in paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id))"
             :key="p.id"
             class="meeting-item"
-            :class="{ 'meeting-item--active': p.id === effectiveFocusPaneId, 'pane-drag-over': auxiliaryDragOverPaneId === p.id, 'pane-dragging': auxiliaryDraggingPaneId === p.id }"
+            :class="{ 'meeting-item--active': p.id === effectiveFocusPaneId, 'meeting-item--selected': selectedPaneIds.has(p.id), 'pane-drag-over': auxiliaryDragOverPaneId === p.id, 'pane-dragging': auxiliaryDraggingPaneId === p.id }"
             draggable="true"
             title="Drag to reorder or click to focus"
             @dragstart="onAuxiliaryPaneDragStart($event, p.id)"
@@ -8628,10 +8706,9 @@ function paneIsCommander(p: ActivePane): boolean {
             @dragenter="onAuxiliaryPaneDragOver($event, p.id)"
             @dragleave="onAuxiliaryPaneDragLeave($event, p.id)"
             @drop.prevent="onAuxiliaryPaneDrop($event, p.id)"
-            @click="onSetFocus(p.id)"
+            @click="(ev) => onSetFocus(p.id, ev)"
             @contextmenu.prevent="openPaneCtxMenu($event, p.id)"
           >
-            <span class="meeting-avatar">{{ p.agentLabel.charAt(0).toUpperCase() }}</span>
             <div class="meeting-info">
               <div class="meeting-name-row">
                 <span v-if="p.origin === 'pipeline' && p.stageId" class="meeting-pipe-tag">P{{ p.stageId }}</span>
@@ -8674,7 +8751,7 @@ function paneIsCommander(p: ActivePane): boolean {
           v-for="p in paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id))"
           :key="p.id"
           class="spotlight-thumb"
-          :class="{ 'spotlight-thumb--active': p.id === effectiveFocusPaneId, 'pane-drag-over': auxiliaryDragOverPaneId === p.id, 'pane-dragging': auxiliaryDraggingPaneId === p.id }"
+          :class="{ 'spotlight-thumb--active': p.id === effectiveFocusPaneId, 'spotlight-thumb--selected': selectedPaneIds.has(p.id), 'pane-drag-over': auxiliaryDragOverPaneId === p.id, 'pane-dragging': auxiliaryDraggingPaneId === p.id }"
           draggable="true"
           title="Drag to reorder or click to focus"
           @dragstart="onAuxiliaryPaneDragStart($event, p.id)"
@@ -8683,7 +8760,7 @@ function paneIsCommander(p: ActivePane): boolean {
           @dragenter="onAuxiliaryPaneDragOver($event, p.id)"
           @dragleave="onAuxiliaryPaneDragLeave($event, p.id)"
           @drop.prevent="onAuxiliaryPaneDrop($event, p.id)"
-          @click="onSetFocus(p.id)"
+          @click="(ev) => onSetFocus(p.id, ev)"
           @contextmenu.prevent="openPaneCtxMenu($event, p.id)"
         >
           <div class="spotlight-thumb-info">
@@ -8742,7 +8819,7 @@ function paneIsCommander(p: ActivePane): boolean {
             v-for="p in paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id))"
             :key="p.id"
             class="meeting-item"
-            :class="{ 'meeting-item--active': p.id === effectiveFocusPaneId, 'pane-drag-over': auxiliaryDragOverPaneId === p.id, 'pane-dragging': auxiliaryDraggingPaneId === p.id }"
+            :class="{ 'meeting-item--active': p.id === effectiveFocusPaneId, 'meeting-item--selected': selectedPaneIds.has(p.id), 'pane-drag-over': auxiliaryDragOverPaneId === p.id, 'pane-dragging': auxiliaryDraggingPaneId === p.id }"
             draggable="true"
             title="Drag to reorder or click to focus"
             @dragstart="onAuxiliaryPaneDragStart($event, p.id)"
@@ -8751,10 +8828,9 @@ function paneIsCommander(p: ActivePane): boolean {
             @dragenter="onAuxiliaryPaneDragOver($event, p.id)"
             @dragleave="onAuxiliaryPaneDragLeave($event, p.id)"
             @drop.prevent="onAuxiliaryPaneDrop($event, p.id)"
-            @click="onSetFocus(p.id)"
+            @click="(ev) => onSetFocus(p.id, ev)"
             @contextmenu.prevent="openPaneCtxMenu($event, p.id)"
           >
-            <span class="meeting-avatar">{{ p.agentLabel.charAt(0).toUpperCase() }}</span>
             <div class="meeting-info">
               <div class="meeting-name-row">
                 <span v-if="p.origin === 'pipeline' && p.stageId" class="meeting-pipe-tag">P{{ p.stageId }}</span>
@@ -8835,6 +8911,16 @@ function paneIsCommander(p: ActivePane): boolean {
     <Teleport v-if="paneCtxMenu" to="body">
       <div class="pane-ctx-backdrop" @mousedown="closePaneCtxMenu" @contextmenu.prevent="closePaneCtxMenu" />
       <div ref="paneCtxMenuEl" class="pane-ctx" :style="{ left: paneCtxMenu.x + 'px', top: paneCtxMenu.y + 'px' }" @click.stop @mousedown.stop>
+        <template v-if="ctxIsBatch">
+          <div class="pane-ctx-header">{{ $t('action.selected-count', { count: ctxTargetIds.length }) }}</div>
+          <div class="pane-ctx-item" @click="batchInterrupt(ctxTargetIds); closePaneCtxMenu()">{{ $t('action.interrupt-selected') }}</div>
+          <div class="pane-ctx-item" @click="batchRebuild(ctxTargetIds); closePaneCtxMenu()">{{ $t('action.rebuild-selected') }}</div>
+          <div class="pane-ctx-item" @click="batchMinimize(ctxTargetIds); closePaneCtxMenu()">{{ $t('action.minimize-selected') }}</div>
+          <div class="pane-ctx-item" @click="batchRestore(ctxTargetIds); closePaneCtxMenu()">{{ $t('action.restore-selected') }}</div>
+          <div class="pane-ctx-sep"></div>
+          <div class="pane-ctx-item danger" @click="batchKill(ctxTargetIds); closePaneCtxMenu()">{{ $t('action.remove-selected') }}</div>
+        </template>
+        <template v-else>
         <div class="pane-ctx-item" @click="onSetFocus(paneCtxMenu!.paneId); closePaneCtxMenu()">{{ $t('action.focus') }}</div>
         <div
           v-if="paneCtxView?.isMinimized"
@@ -8860,6 +8946,7 @@ function paneIsCommander(p: ActivePane): boolean {
         >{{ $t('action.reapply-role') }}</div>
         <div class="pane-ctx-sep"></div>
         <div class="pane-ctx-item danger" @click="onKill(paneCtxMenu!.paneId); closePaneCtxMenu()">{{ $t('action.remove') }}</div>
+        </template>
       </div>
     </Teleport>
     <!-- Pane rename dialog -->
@@ -9640,6 +9727,11 @@ function paneIsCommander(p: ActivePane): boolean {
   box-shadow: 0 0 0 2px var(--accent-focus);
   background: color-mix(in srgb, var(--accent-focus) 8%, var(--bg-elevated));
 }
+.spotlight-thumb--selected {
+  border-color: var(--accent-focus);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-focus) 55%, transparent);
+  background: color-mix(in srgb, var(--accent-focus) 16%, var(--bg-elevated));
+}
 .spotlight-thumb-info {
   flex: 1;
   min-width: 0;
@@ -9766,6 +9858,11 @@ function paneIsCommander(p: ActivePane): boolean {
   background: color-mix(in srgb, var(--accent-focus) 8%, var(--bg-elevated));
   box-shadow: 0 0 0 2px var(--accent-focus);
 }
+.meeting-item--selected {
+  border-color: var(--accent-focus);
+  background: color-mix(in srgb, var(--accent-focus) 16%, var(--bg-elevated));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-focus) 55%, transparent);
+}
 .meeting-item.pane-drag-over,
 .spotlight-thumb.pane-drag-over {
   border-color: var(--accent-focus);
@@ -9775,20 +9872,6 @@ function paneIsCommander(p: ActivePane): boolean {
 .meeting-item.pane-dragging,
 .spotlight-thumb.pane-dragging {
   opacity: 0.55;
-}
-.meeting-avatar {
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-default);
-  color: var(--accent-fg);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 12px;
-  font-weight: 600;
-  flex-shrink: 0;
 }
 .meeting-info {
   flex: 1;
@@ -10124,6 +10207,15 @@ function paneIsCommander(p: ActivePane): boolean {
   padding: 4px 0;
   min-width: 170px;
   user-select: none;
+}
+.pane-ctx-header {
+  padding: 5px 14px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border-default);
+  margin-bottom: 4px;
 }
 .pane-ctx-item {
   padding: 6px 14px;
