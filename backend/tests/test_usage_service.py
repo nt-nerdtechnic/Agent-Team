@@ -128,6 +128,29 @@ def test_normalize_claude_named_and_scoped_windows():
     assert len(windows) == 3
 
 
+def test_normalize_claude_scoped_filters_all_models_and_dedupes():
+    windows, _ = us.normalize_claude({
+        "limits": [
+            # "all models" aggregate row must be dropped.
+            {"kind": "weekly_scoped", "group": "weekly", "percent": 50,
+             "scope": {"model": {"id": "all-models", "display_name": "All Models"}}},
+            {"kind": "weekly_scoped", "group": "weekly", "percent": 7.5,
+             "resets_at": "2026-07-28T00:00:00Z",
+             "scope": {"model": {"id": "opus", "display_name": "Opus"}}},
+            # duplicate opus slug must be de-duplicated (first wins).
+            {"kind": "weekly_scoped", "group": "weekly", "percent": 99,
+             "scope": {"model": {"id": "opus", "display_name": "Opus"}}},
+            {"kind": "weekly_scoped", "group": "weekly", "percent": 3,
+             "scope": {"model": {"id": "sonnet", "display_name": "Sonnet"}}},
+        ],
+    })
+    labels = [(w["label"], w["usedPercent"]) for w in windows]
+    assert ("Opus only", 7.5) in labels
+    assert ("Sonnet only", 3.0) in labels
+    assert not any("All Models" in w["label"] for w in windows)
+    assert len(windows) == 2  # all-models dropped, duplicate opus collapsed
+
+
 def test_normalize_codex_epoch_and_plan():
     windows, plan = us.normalize_codex({
         "plan_type": "plus",
@@ -142,19 +165,117 @@ def test_normalize_codex_epoch_and_plan():
     session = next(w for w in windows if w["kind"] == "session")
     assert session["usedPercent"] == 37.0
     assert session["resetsAt"].startswith("2025-07-24T")  # epoch converted to ISO
-    assert any(w["kind"] == "weekly" for w in windows)
+    assert session["windowMinutes"] == 300
+    weekly = next(w for w in windows if w["kind"] == "weekly")
+    assert weekly["windowMinutes"] == 10080
+
+
+def test_normalize_codex_classifies_by_window_length_when_reversed():
+    # primary carries the 7-day window, secondary the 5-hour one: roles must
+    # follow limit_window_seconds, not position.
+    windows, _ = us.normalize_codex({
+        "rate_limit": {
+            "primary_window": {"used_percent": 12, "reset_at": 1753900000,
+                               "limit_window_seconds": 604800},
+            "secondary_window": {"used_percent": 37, "reset_at": 1753350000,
+                                 "limit_window_seconds": 18000},
+        },
+    })
+    weekly = next(w for w in windows if w["kind"] == "weekly")
+    session = next(w for w in windows if w["kind"] == "session")
+    assert weekly["usedPercent"] == 12.0
+    assert session["usedPercent"] == 37.0
+
+
+def test_normalize_codex_positional_fallback_without_window_minutes():
+    # No limit_window_seconds -> fall back to primary=session, secondary=weekly.
+    windows, _ = us.normalize_codex({
+        "rate_limit": {
+            "primary_window": {"used_percent": 5},
+            "secondary_window": {"used_percent": 9},
+        },
+    })
+    assert [(w["kind"], w["usedPercent"]) for w in windows] == [
+        ("session", 5.0), ("weekly", 9.0)]
+    assert all(w["windowMinutes"] is None for w in windows)
+
+
+def test_codex_credits_parsing():
+    windows, _ = us.normalize_codex({"rate_limit": {}})
+    assert windows == []
+    assert us._codex_credits({}) is None
+    assert us._codex_credits({
+        "credits": {"has_credits": True, "unlimited": False, "balance": "12.5"},
+    }) == {"hasCredits": True, "unlimited": False, "balance": 12.5}
+    # Non-numeric balance is preserved as-is.
+    assert us._codex_credits({"credits": {"balance": "n/a"}}) == {
+        "hasCredits": False, "unlimited": False, "balance": "n/a"}
+
+
+def test_codex_extra_windows_parsing():
+    extra = us._codex_extra_windows({
+        "additional_rate_limits": [
+            {"limit_name": "gpt-image", "metered_feature": "image_gen",
+             "rate_limit": {
+                 "primary_window": {"used_percent": 20,
+                                    "limit_window_seconds": 18000},
+                 "secondary_window": {"used_percent": 80,
+                                      "limit_window_seconds": 604800},
+             }},
+        ],
+    })
+    assert len(extra) == 1
+    assert extra[0]["name"] == "gpt-image"
+    kinds = {w["kind"]: w["usedPercent"] for w in extra[0]["windows"]}
+    assert kinds == {"session": 20.0, "weekly": 80.0}
+    assert us._codex_extra_windows({}) == []
 
 
 def test_normalize_kimi_string_numbers_and_session():
+    # CodexBar's Code-API model nests the 5h rate-limit under limits[0].detail.
     windows, _ = us.normalize_kimi({
         "usage": {"limit": "200", "used": "50", "resetTime": "2026-07-28T00:00:00Z"},
-        "limits": [{"limit": 10, "used": 2, "reset_time": "2026-07-24T08:00:00Z"}],
+        "limits": [{"window": "5h",
+                    "detail": {"limit": 10, "used": 2,
+                               "reset_time": "2026-07-24T08:00:00Z"}}],
     })
     weekly = next(w for w in windows if w["kind"] == "weekly")
     assert weekly["usedPercent"] == 25.0
     session = next(w for w in windows if w["kind"] == "session")
     assert session["usedPercent"] == 20.0
     assert session["resetsAt"] == "2026-07-24T08:00:00Z"
+
+
+def test_normalize_kimi_session_window_reads_nested_detail():
+    # Core regression guard: with the 5h window nested in detail, the session
+    # window must still emit (top-level limit/used are absent).
+    windows, _ = us.normalize_kimi({
+        "limits": [{"window": "5h",
+                    "detail": {"limit": 100, "used": 40,
+                               "resetTime": "2026-07-24T12:00:00Z"}}],
+    })
+    session = next(w for w in windows if w["kind"] == "session")
+    assert session["label"] == "Rate limit (5h)"
+    assert session["usedPercent"] == 40.0
+    assert session["resetsAt"] == "2026-07-24T12:00:00Z"
+
+
+def test_normalize_kimi_weekly_remaining_fallback():
+    # No "used" — derive it from limit - remaining.
+    windows, _ = us.normalize_kimi({
+        "usage": {"limit": 200, "remaining": 150},
+    })
+    weekly = next(w for w in windows if w["kind"] == "weekly")
+    assert weekly["usedPercent"] == 25.0
+
+
+def test_normalize_kimi_reset_at_key():
+    windows, _ = us.normalize_kimi({
+        "limits": [{"detail": {"limit": 10, "used": 1,
+                               "reset_at": "2026-07-24T09:00:00Z"}}],
+    })
+    session = next(w for w in windows if w["kind"] == "session")
+    assert session["resetsAt"] == "2026-07-24T09:00:00Z"
 
 
 def test_normalize_kimi_zero_limit_is_skipped():

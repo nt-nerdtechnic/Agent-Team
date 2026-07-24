@@ -82,13 +82,20 @@ def _clamp_pct(v: float) -> float:
     return max(0.0, min(100.0, v))
 
 
-def _window(kind: str, label: str, used_percent: float, resets_at: str | None) -> dict:
-    return {
+_UNSET = object()
+
+
+def _window(kind: str, label: str, used_percent: float, resets_at: str | None,
+            window_minutes: Any = _UNSET) -> dict:
+    w = {
         "kind": kind,
         "label": label,
         "usedPercent": round(_clamp_pct(used_percent), 1),
         "resetsAt": resets_at,
     }
+    if window_minutes is not _UNSET:
+        w["windowMinutes"] = window_minutes
+    return w
 
 
 def _snapshot(provider: str, status: str, *, windows: list[dict] | None = None,
@@ -283,6 +290,9 @@ def normalize_claude(data: dict) -> tuple[list[dict], str | None]:
         if pct is None:
             continue
         windows.append(_window(kind, label, pct, entry.get("resets_at")))
+    # Mirrors CodexBar's ClaudeScopedWeeklyLimitMapper: drop the "all models"
+    # aggregate row and de-duplicate by model slug.
+    seen_models: set[str] = set()
     for entry in data.get("limits") or []:
         if not isinstance(entry, dict):
             continue
@@ -291,28 +301,139 @@ def normalize_claude(data: dict) -> tuple[list[dict], str | None]:
         if entry.get("kind") != "weekly_scoped" or entry.get("group") != "weekly":
             continue
         pct = _num(entry.get("percent"))
-        model = (((entry.get("scope") or {}).get("model")) or {}).get("display_name")
+        scope_model = ((entry.get("scope") or {}).get("model")) or {}
+        model = scope_model.get("display_name")
+        model_id = scope_model.get("id")
         if pct is None or not model:
             continue
+        slug = (model_id or model).strip().lower()
+        if slug in ("all models", "all-models") or slug.endswith("-all-models"):
+            continue
+        if slug in seen_models:
+            continue
+        seen_models.add(slug)
         windows.append(_window("weekly-model", f"{model} only", pct, entry.get("resets_at")))
     plan = None
     return windows, plan
 
 
-def normalize_codex(data: dict) -> tuple[list[dict], str | None]:
-    windows: list[dict] = []
-    rate = data.get("rate_limit") or {}
-    for key, kind, label in (("primary_window", "session", "Session (5h)"),
-                             ("secondary_window", "weekly", "Weekly")):
+# Codex classifies a rate window by its ``limit_window_seconds`` (mirrors
+# CodexBar's CodexRateWindowNormalizer), not by position — the API does not
+# guarantee primary=Session / secondary=Weekly ordering.
+_CODEX_WINDOW_ROLES = {
+    300: ("session", "Session (5h)"),
+    10080: ("weekly", "Weekly"),
+}
+# Positional fallback for entries whose window length can't classify them.
+_CODEX_POSITIONAL = (
+    ("primary_window", ("session", "Session (5h)")),
+    ("secondary_window", ("weekly", "Weekly")),
+)
+
+
+def _codex_window_minutes(entry: dict) -> int | None:
+    secs = _num(entry.get("limit_window_seconds"))
+    return int(secs // 60) if secs is not None else None
+
+
+def _codex_window_role(entry: dict) -> tuple[str, str] | None:
+    minutes = _codex_window_minutes(entry)
+    if minutes is None:
+        return None
+    return _CODEX_WINDOW_ROLES.get(minutes)
+
+
+def _resolve_codex_roles(rate: dict) -> list[tuple[dict, tuple[str, str]]]:
+    """Assign (kind, label) to each present window. Prefer classification by
+    window length; fall back to position only when length can't decide or
+    would collide, so two windows never share a role."""
+    present: list[tuple[int, dict, tuple[str, str]]] = []
+    for index, (key, pos_role) in enumerate(_CODEX_POSITIONAL):
         entry = rate.get(key)
-        if not isinstance(entry, dict):
-            continue
+        if isinstance(entry, dict):
+            present.append((index, entry, pos_role))
+
+    resolved: dict[int, tuple[dict, tuple[str, str]]] = {}
+    taken: set[str] = set()
+    pending: list[tuple[int, dict, tuple[str, str]]] = []
+    for index, entry, pos_role in present:
+        role = _codex_window_role(entry)
+        if role is not None and role[0] not in taken:
+            taken.add(role[0])
+            resolved[index] = (entry, role)
+        else:
+            pending.append((index, entry, pos_role))
+
+    all_roles = [pos_role for _, pos_role in _CODEX_POSITIONAL]
+    for index, entry, pos_role in pending:
+        if pos_role[0] not in taken:
+            role = pos_role
+        else:
+            remaining = [r for r in all_roles if r[0] not in taken]
+            role = remaining[0] if remaining else pos_role
+        taken.add(role[0])
+        resolved[index] = (entry, role)
+    return [resolved[i] for i in sorted(resolved)]
+
+
+def _codex_windows(rate: dict) -> list[dict]:
+    windows: list[dict] = []
+    for entry, (kind, label) in _resolve_codex_roles(rate):
         pct = _num(entry.get("used_percent"))
         if pct is None:
             continue
-        windows.append(_window(kind, label, pct, _epoch_to_iso(entry.get("reset_at"))))
+        windows.append(_window(kind, label, pct,
+                               _epoch_to_iso(entry.get("reset_at")),
+                               window_minutes=_codex_window_minutes(entry)))
+    return windows
+
+
+def _codex_credits(data: dict) -> dict | None:
+    credits = data.get("credits")
+    if not isinstance(credits, dict):
+        return None
+    balance = credits.get("balance")
+    parsed = _num(balance)
+    return {
+        "hasCredits": bool(credits.get("has_credits")),
+        "unlimited": bool(credits.get("unlimited")),
+        "balance": parsed if parsed is not None else balance,
+    }
+
+
+def _codex_extra_windows(data: dict) -> list[dict]:
+    extra: list[dict] = []
+    for item in data.get("additional_rate_limits") or []:
+        if not isinstance(item, dict):
+            continue
+        rate = item.get("rate_limit")
+        if not isinstance(rate, dict):
+            continue
+        windows = _codex_windows(rate)
+        if windows:
+            extra.append({"name": item.get("limit_name"), "windows": windows})
+    return extra
+
+
+def normalize_codex(data: dict) -> tuple[list[dict], str | None]:
+    windows = _codex_windows(data.get("rate_limit") or {})
     plan = data.get("plan_type") if isinstance(data.get("plan_type"), str) else None
     return windows, plan
+
+
+def _kimi_used(detail: dict, limit):
+    used = _num(detail.get("used"))
+    if used is None:
+        rem = _num(detail.get("remaining"))
+        if rem is not None and limit is not None:
+            used = max(0.0, limit - rem)
+    return used
+
+
+def _kimi_resets(detail: dict):
+    r = (detail.get("resetTime") or detail.get("resetAt")
+         or detail.get("reset_time") or detail.get("reset_at"))
+    return r if isinstance(r, str) else None
 
 
 def normalize_kimi(data: dict) -> tuple[list[dict], str | None]:
@@ -320,20 +441,21 @@ def normalize_kimi(data: dict) -> tuple[list[dict], str | None]:
     usage = data.get("usage")
     if isinstance(usage, dict):
         limit = _num(usage.get("limit"))
-        used = _num(usage.get("used"))
-        resets = usage.get("resetTime") or usage.get("resetAt") or usage.get("reset_time")
+        used = _kimi_used(usage, limit)
         if limit and used is not None:
             windows.append(_window("weekly", "Weekly", used / limit * 100,
-                                   resets if isinstance(resets, str) else None))
+                                   _kimi_resets(usage)))
+    # CodexBar's Code-API model nests the 5h rate-limit under
+    # ``limits[0].detail`` (KimiRateLimit { window, detail }), not at top level.
     limits = data.get("limits")
     if isinstance(limits, list) and limits and isinstance(limits[0], dict):
-        entry = limits[0]
-        limit = _num(entry.get("limit"))
-        used = _num(entry.get("used"))
-        resets = entry.get("resetTime") or entry.get("resetAt") or entry.get("reset_time")
-        if limit and used is not None:
-            windows.append(_window("session", "Rate limit (5h)", used / limit * 100,
-                                   resets if isinstance(resets, str) else None))
+        detail = limits[0].get("detail")
+        if isinstance(detail, dict):
+            limit = _num(detail.get("limit"))
+            used = _kimi_used(detail, limit)
+            if limit and used is not None:
+                windows.append(_window("session", "Rate limit (5h)",
+                                       used / limit * 100, _kimi_resets(detail)))
     return windows, None
 
 
@@ -441,8 +563,16 @@ async def fetch_codex(codex_home: Path) -> dict:
         return snap
     if resp.status_code != 200:
         return _snapshot("codex", "error", error=f"HTTP {resp.status_code}")
-    windows, plan = normalize_codex(resp.json())
-    return _snapshot("codex", "ok", windows=windows, plan_type=plan)
+    payload = resp.json()
+    windows, plan = normalize_codex(payload)
+    snap = _snapshot("codex", "ok", windows=windows, plan_type=plan)
+    credits = _codex_credits(payload)
+    if credits is not None:
+        snap["credits"] = credits
+    extra = _codex_extra_windows(payload)
+    if extra:
+        snap["extraWindows"] = extra
+    return snap
 
 
 async def fetch_kimi(home: Path, env: dict | None = None) -> dict:
