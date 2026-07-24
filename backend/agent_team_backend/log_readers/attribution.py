@@ -49,7 +49,6 @@ class AttributedUsage:
     workspace_path: str | None
     stage_id: str | None
     slot_key: str | None = None  # stable "stageId:slotLabel" — use as tokens_store by_pane key
-    profile_id: str | None = None  # CLI account profile of the owning pane (None → default)
 
 
 @dataclass
@@ -76,7 +75,6 @@ class _PaneRegistration:
     workspace_path: str
     stage_id: str | None
     slot_key: str = ""        # stable "stageId:slotLabel" (for tokens_store by_pane key)
-    profile_id: str = ""      # CLI account profile of this pane ("" → default)
     registered_at: float = field(default_factory=time.time)
     baseline_files: set[Path] = field(default_factory=set)
     claimed_session_ids: set[str] = field(default_factory=set)
@@ -222,7 +220,6 @@ class Attribution:
         workspace_path: str = "",
         stage_id: str | None = None,
         slot_key: str = "",
-        profile_id: str = "",
         explicit_session_id: str = "",
         session_marker: str = "",
         session_home_id: str = "",
@@ -268,7 +265,6 @@ class Attribution:
         reg = _PaneRegistration(
             pane_id=pane_id, vendor=vendor, cwd=cwd,
             workspace_path=ws, stage_id=stage_id, slot_key=slot_key,
-            profile_id=profile_id,
             baseline_files=baseline, session_marker=session_marker,
             session_home_id=session_home_id,
         )
@@ -309,14 +305,13 @@ class Attribution:
                 )
 
             # Pane attribution within the current run (best-effort for "By Pane")
-            pane_id, stage_id, slot_key, profile_id = self._lookup_pane_for(usage)
+            pane_id, stage_id, slot_key = self._lookup_pane_for(usage)
             return AttributedUsage(
                 usage=usage,
                 pane_id=pane_id,
                 workspace_path=ws_path,
                 stage_id=stage_id,
                 slot_key=slot_key,
-                profile_id=profile_id,
             )
 
     def maybe_announce_session(self, usage: TokenUsage) -> SessionBinding | None:
@@ -664,19 +659,18 @@ class Attribution:
 
     def _lookup_pane_for(
         self, usage: TokenUsage
-    ) -> tuple[str | None, str | None, str | None, str | None]:
+    ) -> tuple[str | None, str | None, str | None]:
         """Best-effort current-run pane lookup. Doesn't gate workspace attr.
 
-        Returns (pane_id, stage_id, slot_key, profile_id).
+        Returns (pane_id, stage_id, slot_key).
         pane_id    — ephemeral frontend UUID, used for event routing.
         slot_key   — stable "stageId:slotLabel", used as tokens_store by_pane key.
-        profile_id — owning pane's CLI account profile (None → default account).
         """
         owner = self._session_owner.get(usage.session_id)
         if owner is not None:
             reg = self._panes.get(owner)
             if reg:
-                return reg.pane_id, reg.stage_id, reg.slot_key or None, reg.profile_id or None
+                return reg.pane_id, reg.stage_id, reg.slot_key or None
 
         if usage.vendor == "codex":
             pane_id = self._pane_id_from_codex_home_path(usage.file_path)
@@ -684,7 +678,7 @@ class Attribution:
             if reg and reg.vendor == usage.vendor:
                 self._session_owner[usage.session_id] = reg.pane_id
                 reg.claimed_session_ids.add(usage.session_id)
-                return reg.pane_id, reg.stage_id, reg.slot_key or None, reg.profile_id or None
+                return reg.pane_id, reg.stage_id, reg.slot_key or None
 
         # Try to claim with a freshly-spawned pane
         file_path = Path(usage.file_path)
@@ -703,11 +697,11 @@ class Attribution:
             # session. Do nothing; only a deterministic path (explicit
             # --session-id, per-pane home dir, kickoff marker) may bind it.
             # Mirrors _bind_new_session_single_candidate's exactly-one rule.
-            return None, None, None, None
+            return None, None, None
         reg = candidates[0]
         self._session_owner[usage.session_id] = reg.pane_id
         reg.claimed_session_ids.add(usage.session_id)
-        return reg.pane_id, reg.stage_id, reg.slot_key or None, reg.profile_id or None
+        return reg.pane_id, reg.stage_id, reg.slot_key or None
 
     def _cwd_matches(self, pane_cwd: str, usage: TokenUsage) -> bool:
         if not pane_cwd:

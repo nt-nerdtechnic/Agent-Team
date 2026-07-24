@@ -612,7 +612,7 @@
       "delete-confirm": "確定刪除此帳號？",
       "cli": {
         "title": "CLI 帳號",
-        "hint": "為每個 CLI agent 建立獨立的登入 profile，各自使用隔離的家目錄。開啟 pane 時可選擇帳號，執行中也能切換。",
+        "hint": "為每個 CLI agent 建立獨立的登入 profile，各自使用隔離的家目錄。可從標題列或這裡設定使用中的帳號，套用到之後新開的 pane。",
         "new-account": "＋ 新增帳號",
         "name-placeholder": "帳號名稱",
         "default-hint": "你真實的家目錄",
@@ -624,7 +624,6 @@
         "cancel": "取消",
         "delete-confirm": "確定刪除此帳號？登入資料目錄會保留在磁碟上，不會被刪除。",
         "unsupported": "此 agent 不支援多帳號。",
-        "usage-title": "累計 tokens：↑ 輸入 · ↓ 輸出",
         "in-use-error": "此帳號正被執行中的 pane 使用，無法刪除。請先將該 pane 切換到其他帳號。"
       }
     },
@@ -1133,11 +1132,8 @@
   },
   "cli-account": {
     "default": "預設",
-    "pane-tooltip": "CLI 帳號 — 切換會重啟此 pane 的 CLI",
-    "switch-title": "切換 CLI 帳號",
-    "switch-confirm": "要將此 pane 切換到「{account}」嗎？CLI 會重新啟動，目前的對話會中斷。",
-    "switch-confirm-action": "切換並重啟",
-    "archived": "（已封存帳號）"
+    "quick-switch-title": "使用中的 CLI 帳號",
+    "quick-switch-tooltip": "切換使用中的 CLI 帳號（套用到之後新開的 pane）"
   },
   "cliDrop": {
     "source-closed": "來源 CLI pane 已關閉",

@@ -6,7 +6,6 @@ import ViewPanel, { type LayoutMode } from './ViewPanel.vue'
 import RebuildIcon from './RebuildIcon.vue'
 import ExplorerPane from './ExplorerPane.vue'
 import type { BackendStatus, useBackend } from '../composables/useBackend'
-import type { useCliProfiles } from '../composables/useCliProfiles'
 import type { Role, RoleKey } from '../data/roles'
 import type { Stage, StageId } from '../data/stages'
 import type { Issue, IssueDetail, IssueProvider, IssueHandlerMode } from '../composables/useIssues'
@@ -80,8 +79,6 @@ export interface SpawnPayload {
   stageId: StageId
   workspacePath: string
   customName?: string
-  // CLI account profile id chosen at spawn; null/undefined = built-in Default.
-  profileId?: string | null
 }
 
 export interface ResumePayload {
@@ -197,8 +194,6 @@ interface Props {
   rebuildingAll?: boolean
   /** Issue dispatch/handle status — forwarded to GitPane for badges. */
   issueHandoffs?: Record<string, { paneId: string; mode: string; state: string }>
-  /** CLI account profiles — drives the per-agent account picker in the spawn card. */
-  cliProfilesApi?: ReturnType<typeof useCliProfiles>
 }
 
 const props = defineProps<Props>()
@@ -454,19 +449,6 @@ const availableAgents = computed(() =>
 
 const pickedAgent = ref<string>(manualAgentSpecs.value[0]?.agentKey ?? 'claude')
 const pickedRole = ref<RoleKey>('')
-
-// CLI account profiles for the picked agent (empty = agent has no extra
-// accounts, so the account picker stays hidden). `pickedProfileId` = '' means
-// the built-in Default (real home); it is seeded from the agent's global
-// default and reset whenever the picked agent changes.
-const agentProfiles = computed(() =>
-  props.cliProfilesApi?.profilesForAgent(pickedAgent.value) ?? []
-)
-const pickedProfileId = ref<string>('')
-function seedPickedProfile(): void {
-  pickedProfileId.value = props.cliProfilesApi?.defaultProfileId(pickedAgent.value) ?? ''
-}
-watch(pickedAgent, seedPickedProfile, { immediate: true })
 
 // CLI availability for the spawn dropdown — onboarding dep ids match agentKeys.
 // Refreshed on backend connect and on dropdown focus (throttled: the status
@@ -732,8 +714,7 @@ function spawn(): void {
     agentKey: pickedAgent.value,
     roleKey: pickedRole.value,
     stageId: '',
-    workspacePath: workspacePath.value,
-    profileId: pickedProfileId.value || null
+    workspacePath: workspacePath.value
   })
 }
 
@@ -1246,12 +1227,6 @@ function onPipelineDividerEnd(): void {
             <select v-model="pickedRole">
               <option value="">{{ $t('label.select-role') }}</option>
               <option v-for="r in roles" :key="r.key" :value="r.key">{{ r.label }}</option>
-            </select>
-          </div>
-          <div v-if="agentProfiles.length" class="row">
-            <select v-model="pickedProfileId">
-              <option value="">{{ $t('cli-account.default') }}</option>
-              <option v-for="p in agentProfiles" :key="p.id" :value="p.id">{{ p.name }}</option>
             </select>
           </div>
           <div class="row spawn-actions">

@@ -46,11 +46,6 @@ interface Props {
   workspacePath?: string
   /** Inter-CLI messaging address of this pane. Absent for plain terminals. */
   messagingName?: string
-  /** CLI account picker options (id '' = built-in Default). Empty = the agent
-   *  has no extra accounts, so the account control stays hidden. */
-  accountOptions?: Array<{ id: string; name: string }>
-  /** The pane's current account profile id ('' = built-in Default). */
-  currentProfileId?: string
 }
 
 const props = defineProps<Props>()
@@ -72,9 +67,6 @@ const emit = defineEmits<{
   (e: 'loop-resume-now'): void
   /** Messaging-name badge edited — App.vue renames the pane in the registry. */
   (e: 'rename-messaging', name: string): void
-  /** Account picker changed — App.vue confirms + restarts the CLI under the
-   *  chosen profile id ('' = built-in Default). */
-  (e: 'switch-account', profileId: string): void
 }>()
 const containerRef = ref<HTMLElement | null>(null)
 const isDragOver = ref(false)
@@ -105,16 +97,6 @@ function commitTitleEdit(): void {
 function onTitleKeydown(e: KeyboardEvent): void {
   if (e.key === 'Enter') { e.preventDefault(); commitTitleEdit() }
   if (e.key === 'Escape') { e.preventDefault(); _cancelledTitle = true; editingTitle.value = false }
-}
-
-// Account picker changed — bubble the chosen profile id to App.vue, which
-// confirms and restarts the CLI. The <select> stays bound to the prop, so if the
-// user cancels the confirm the control snaps back to the current account.
-function onAccountChange(e: Event): void {
-  const next = (e.target as HTMLSelectElement).value
-  if (next === (props.currentProfileId || '')) return
-  emit('switch-account', next)
-  ;(e.target as HTMLSelectElement).value = props.currentProfileId || ''
 }
 
 // Inline messaging-name rename — same interaction as the title: double-click
@@ -378,16 +360,6 @@ onMounted(() => {
           :title="$t('msg.rename-title')"
           @dblclick.stop="startMsgNameEdit"
         >@{{ messagingName }}</span>
-        <select
-          v-if="accountOptions && accountOptions.length"
-          class="account-inline"
-          :value="currentProfileId || ''"
-          :title="$t('cli-account.pane-tooltip')"
-          @click.stop
-          @change="onAccountChange"
-        >
-          <option v-for="opt in accountOptions" :key="opt.id" :value="opt.id">{{ opt.name }}</option>
-        </select>
         <span v-if="isCommander" class="commander-inline" :title="$t('pane.terminal.commander-tooltip')">🎯 Mgr</span>
         <span
           v-if="loopActive"
@@ -561,18 +533,6 @@ onMounted(() => {
   white-space: nowrap;
   flex-shrink: 0;
 }
-.account-inline {
-  font-size: 10px;
-  color: var(--text-secondary);
-  background: var(--bg-subtle);
-  border: 1px solid var(--border-default);
-  border-radius: 4px;
-  padding: 0 4px;
-  max-width: 120px;
-  flex-shrink: 0;
-  cursor: pointer;
-}
-.account-inline:hover { border-color: var(--border-strong); color: var(--text-primary); }
 .loop-inline {
   font-size: 9px;
   font-weight: 600;

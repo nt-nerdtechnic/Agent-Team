@@ -33,6 +33,7 @@ from .tokens_store import (
     TOKENS_SCHEMA_VERSION,
     WORKSPACES_SUBDIR,
     migrate_tokens_v1_to_v2,
+    migrate_tokens_v2_to_v3,
 )
 
 log = logging.getLogger("agent_team_backend.store_migrations")
@@ -62,7 +63,7 @@ _TARGET_VERSION: dict[str, int] = {
 # return a NEW dict when it changes anything (so the writer knows to persist)
 # and the same object once no upgrade applies (idempotent, gated on version).
 _MIGRATIONS: dict[str, dict[int, Callable[[Any], Any]]] = {
-    TOKENS_FILE: {1: migrate_tokens_v1_to_v2},
+    TOKENS_FILE: {1: migrate_tokens_v1_to_v2, 2: migrate_tokens_v2_to_v3},
 }
 
 
@@ -182,8 +183,8 @@ def _run_migrations(base: Path) -> None:
     """Apply forward migrations to each versioned store file in place.
 
     Covers the top-level canonical stores AND every per-workspace tokens.json
-    under ``<base>/workspaces/<sha>/`` (tokens' per-profile dimension lives in
-    both). Docs that come back unchanged are not rewritten; files newer than we
+    under ``<base>/workspaces/<sha>/`` (the tokens schema versions in both).
+    Docs that come back unchanged are not rewritten; files newer than we
     understand are left untouched.
     """
     for name in STORE_FILENAMES:

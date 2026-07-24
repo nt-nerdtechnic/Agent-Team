@@ -17,14 +17,6 @@ export interface CliProfile {
 // (the user's real home directory).
 export type CliProfileDefaults = Record<string, string | null>
 
-// All-time token usage for one CLI account. `profileId: null` = the built-in
-// Default account. Fields are camelCase; the WS payload is snake_case.
-export interface CliProfileUsage {
-  agentKey: string
-  profileId: string | null
-  totals: { input: number; output: number; calls: number }
-}
-
 /**
  * Per-window cache of CLI account profiles. Loads from the backend on mount and
  * refreshes whenever any window broadcasts `cli_profiles.changed`. Reconnect-safe.
@@ -34,7 +26,6 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
   const profiles = ref<CliProfile[]>([])
   const defaults = ref<CliProfileDefaults>({})
   const supportedAgents = ref<string[]>([])
-  const usage = ref<CliProfileUsage[]>([])
   const loaded = ref<boolean>(false)
   const loading = ref<boolean>(false)
   const error = ref<string>('')
@@ -64,33 +55,6 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
     } finally {
       loading.value = false
     }
-  }
-
-  // All-time per-account token usage for the Settings view. Fetched on demand
-  // (when the accounts section opens) rather than eagerly — it is display-only
-  // and does not need to stay live.
-  async function loadUsage(): Promise<void> {
-    try {
-      const resp = await backend.send<{
-        usage: { agent_key: string; profile_id: string | null; totals: CliProfileUsage['totals'] }[]
-      }>('cli_profiles.usage', {})
-      if (!resp.ok || !resp.payload) {
-        error.value = resp.error?.message ?? 'failed to load usage'
-        return
-      }
-      usage.value = resp.payload.usage.map((u) => ({
-        agentKey: u.agent_key,
-        profileId: u.profile_id,
-        totals: u.totals,
-      }))
-    } catch (err) {
-      error.value = String((err as Error).message ?? err)
-    }
-  }
-
-  /** All-time usage for one account (built-in Default when profileId is null). */
-  function usageFor(agentKey: string, profileId: string | null): CliProfileUsage['totals'] | undefined {
-    return usage.value.find((u) => u.agentKey === agentKey && u.profileId === (profileId ?? null))?.totals
   }
 
   async function create(agentKey: string, name: string): Promise<CliProfile | null> {
@@ -225,13 +189,10 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
     profiles,
     defaults,
     supportedAgents,
-    usage,
     loaded,
     loading,
     error,
     refresh,
-    loadUsage,
-    usageFor,
     create,
     rename,
     remove,

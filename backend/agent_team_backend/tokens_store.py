@@ -34,10 +34,12 @@ log = logging.getLogger("agent_team_backend.tokens")
 
 TOKENS_FILE = "tokens.json"
 # Persisted-store schema version for tokens.json (see store_migrations.py).
-# v2 adds the cli-source `by_profile` dimension (CLI account attribution).
-TOKENS_SCHEMA_VERSION = 2
-# Storage key for cli usage from a pane that carries no CLI account profile
-# (built-in default home). Translated to `null` in the read API.
+# v2 added the cli-source `by_profile` dimension (per-CLI-account attribution);
+# v3 drops it again — accounts are now just alternate auth stores with a single
+# global active one, so per-account usage is no longer tracked.
+TOKENS_SCHEMA_VERSION = 3
+# Legacy storage key the retired v1→v2 migration credits historic cli usage to.
+# Still referenced by that migration; v2→v3 folds the whole dimension away.
 DEFAULT_PROFILE_KEY = "default"
 RECORDED_KEYS_FILE = "recorded-event-keys.json"
 LEGACY_READER_KEYS_FILE = "log-readers-seen.json"
@@ -89,15 +91,6 @@ def _add(into: dict[str, int], delta: dict[str, int]) -> None:
     into["calls"] += int(delta.get("calls", 0))
 
 
-def _add_profile(
-    root: dict[str, Any], agent_key: str, profile_key: str, delta: dict[str, int]
-) -> None:
-    """Credit a delta into root["by_profile"][agent_key][profile_key]."""
-    by_profile = root.setdefault("by_profile", {})
-    agent_bucket = by_profile.setdefault(agent_key, {})
-    _add(agent_bucket.setdefault(profile_key, _empty_bucket()), delta)
-
-
 def _coerce_schema(value: Any) -> int:
     try:
         return int(value)
@@ -129,6 +122,27 @@ def migrate_tokens_v1_to_v2(doc: Any) -> Any:
     return doc
 
 
+def migrate_tokens_v2_to_v3(doc: Any) -> Any:
+    """Drop the v2 `by_profile` dimension. Per-account usage is no longer
+    tracked (accounts are just alternate auth stores with one global active).
+
+    No totals are lost: `by_profile` was always a redundant sub-ledger of
+    `by_vendor`/`all_time` — every cli event credited both from the same delta —
+    so the account totals already live in those global/provider dimensions.
+    Removing the key preserves every total. Handles both the global doc
+    (top-level `by_profile`) and a per-workspace doc (`cumulative.by_profile`).
+    Idempotent: gated on schemaVersion, returns the doc untouched once >= v3.
+    Returns a new dict when it changes anything so the disk migrator writes."""
+    if not isinstance(doc, dict) or _coerce_schema(doc.get("schemaVersion", 1)) >= 3:
+        return doc
+    doc = deepcopy(doc)
+    doc.pop("by_profile", None)
+    if isinstance(doc.get("cumulative"), dict):
+        doc["cumulative"].pop("by_profile", None)
+    doc["schemaVersion"] = 3
+    return doc
+
+
 def _empty_workspace_doc() -> dict[str, Any]:
     return {
         "schemaVersion": TOKENS_SCHEMA_VERSION,
@@ -138,7 +152,6 @@ def _empty_workspace_doc() -> dict[str, Any]:
             "totals": _empty_bucket(),
             "by_vendor": {},
             "by_stage": {},
-            "by_profile": {},   # cli-only: {agent_key: {profile_key: bucket}}
         },
     }
 
@@ -149,7 +162,6 @@ def _empty_global_doc() -> dict[str, Any]:
         "all_time": _empty_bucket(),
         "by_vendor": {},
         "by_day": {},
-        "by_profile": {},   # cli-only: {agent_key: {profile_key: bucket}}
     }
 
 
@@ -314,12 +326,10 @@ class TokensStore:
                 # masked as v2 by the empty-doc default. The disk migration in
                 # store_migrations does the same; both are gated on schemaVersion
                 # so they converge idempotently.
-                doc = migrate_tokens_v1_to_v2(doc)
+                doc = migrate_tokens_v2_to_v3(migrate_tokens_v1_to_v2(doc))
                 # Forward-compat: fill in any missing top-level keys.
                 for k, v in _empty_workspace_doc().items():
                     doc.setdefault(k, v)
-                if isinstance(doc.get("cumulative"), dict):
-                    doc["cumulative"].setdefault("by_profile", {})
             except Exception as err:  # noqa: BLE001
                 log.warning("tokens.json at %s is corrupt (%s); starting fresh", wp, err)
                 doc = _empty_workspace_doc()
@@ -341,10 +351,10 @@ class TokensStore:
         try:
             doc = json.loads(self._global_path.read_text(encoding="utf-8"))
             # Forward-migrate in memory (global doc is loaded at import time,
-            # before store_migrations runs on disk — so the store must seed
-            # by_profile itself or the eager load would clobber the migrated
-            # file on next flush). Gated on schemaVersion → idempotent.
-            doc = migrate_tokens_v1_to_v2(doc)
+            # before store_migrations runs on disk — so the store must run the
+            # migration chain itself or the eager load would clobber the
+            # migrated file on next flush). Gated on schemaVersion → idempotent.
+            doc = migrate_tokens_v2_to_v3(migrate_tokens_v1_to_v2(doc))
             for k, v in _empty_global_doc().items():
                 doc.setdefault(k, v)
             schema = doc.get("schemaVersion", TOKENS_SCHEMA_VERSION)
@@ -639,7 +649,6 @@ class TokensStore:
         source: str,           # "analyzer" | "cli"
         vendor: str,           # "claude" | "codex" | "analyzer"
         agent_key: str | None = None,
-        profile_id: str | None = None,  # cli CLI-account; None → default account
         pane_id: str | None = None,
         stage_id: str | None = None,
         input_tokens: int = 0,
@@ -670,11 +679,6 @@ class TokensStore:
             "output": output_tokens,
             "calls": 1,
         }
-        # cli-only account dimension. For cli events agent_key == vendor; a pane
-        # with no profile records under the default account.
-        record_profile = source == "cli"
-        profile_agent_key = (agent_key or vendor) if record_profile else ""
-        profile_key = profile_id or DEFAULT_PROFILE_KEY
 
         with self._lock:
             scope = f"workspace:{replay_workspace}" if replay_workspace else "global"
@@ -736,8 +740,6 @@ class TokensStore:
                 _add(cum["by_vendor"].setdefault(vendor, _empty_bucket()), delta)
                 if stage_id:
                     _add(cum["by_stage"].setdefault(stage_id, _empty_bucket()), delta)
-                if record_profile:
-                    _add_profile(cum, profile_agent_key, profile_key, delta)
                 self._dirty_workspaces.add(workspace_path)
 
             # --- global state ---
@@ -747,8 +749,6 @@ class TokensStore:
                 _add(g["by_vendor"].setdefault(vendor, _empty_bucket()), delta)
                 day = _today()
                 _add(g["by_day"].setdefault(day, _empty_bucket()), delta)
-                if record_profile:
-                    _add_profile(g, profile_agent_key, profile_key, delta)
                 self._dirty_global = True
 
             if ingestion_checkpoint:
@@ -791,25 +791,6 @@ class TokensStore:
                 },
                 "global": dict(self._global_data),
             }
-
-    def profile_usage(self) -> list[dict[str, Any]]:
-        """Flat per-account all-time cli usage for the Settings view.
-
-        Returns one row per (agent_key, profile). `profile_id` is None for the
-        built-in/default account (stored under DEFAULT_PROFILE_KEY)."""
-        with self._lock:
-            by_profile = self._global_data.get("by_profile", {})
-            rows: list[dict[str, Any]] = []
-            for agent_key, profiles in by_profile.items():
-                if not isinstance(profiles, dict):
-                    continue
-                for profile_key, bucket in profiles.items():
-                    rows.append({
-                        "agent_key": agent_key,
-                        "profile_id": None if profile_key == DEFAULT_PROFILE_KEY else profile_key,
-                        "totals": dict(bucket),
-                    })
-            return rows
 
     # ───────────────────────── Reset ────────────────────────────────
 

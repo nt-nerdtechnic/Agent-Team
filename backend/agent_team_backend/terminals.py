@@ -376,20 +376,6 @@ class TerminalService:
         )
         return session
 
-    def live_pane_profiles(self) -> dict[str, str]:
-        """Map pane_id -> CLI account profile_id for every still-running PTY that
-        was spawned under a profile. Lets a reloaded renderer restore each pane's
-        account: project.json does not persist profile_id, but the PTY (and its
-        metadata) survives the WS disconnect, so it is the source of truth."""
-        result: dict[str, str] = {}
-        for session in self._sessions.values():
-            if session.closed:
-                continue
-            profile_id = str((session.metadata or {}).get("profile_id") or "")
-            if profile_id:
-                result[session.pane_id] = profile_id
-        return result
-
     def write(self, session_id: str, data: str) -> None:
         session = self._require(session_id)
         if session.closed:

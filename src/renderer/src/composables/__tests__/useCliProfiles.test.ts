@@ -98,28 +98,6 @@ describe('useCliProfiles', () => {
     scope.stop()
   })
 
-  it('loadUsage maps snake_case rows and usageFor looks them up (null = Default)', async () => {
-    const mock = createMockBackend('connected')
-    mock.setResponse('cli_profiles.list', { profiles: [], defaults: {}, supported_agents: SUPPORTED })
-    mock.setResponse('cli_profiles.usage', {
-      usage: [
-        { agent_key: 'claude', profile_id: null, totals: { input: 1200, output: 340, calls: 5 } },
-        { agent_key: 'claude', profile_id: 'p1', totals: { input: 2_000_000, output: 9000, calls: 12 } },
-      ],
-    })
-    const { result, scope } = withScope(() => useCliProfiles(mock.backend))
-    await flush()
-
-    await result.loadUsage()
-    const call = mock.sent.find((s) => s.type === 'cli_profiles.usage')
-    expect(call?.payload).toEqual({})
-    expect(result.usage.value.map((u) => u.profileId)).toEqual([null, 'p1'])
-    expect(result.usageFor('claude', null)).toEqual({ input: 1200, output: 340, calls: 5 })
-    expect(result.usageFor('claude', 'p1')?.input).toBe(2_000_000)
-    expect(result.usageFor('claude', 'missing')).toBeUndefined()
-    scope.stop()
-  })
-
   it('hasProfiles / profilesForAgent partition by agent', async () => {
     const mock = createMockBackend('connected')
     mock.setResponse('cli_profiles.list', {

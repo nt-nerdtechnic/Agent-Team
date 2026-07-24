@@ -723,9 +723,6 @@ async def _on_log_token_usage(usage: TokenUsage) -> TokenSinkResult:
             source="cli",
             vendor=usage.vendor,
             agent_key=usage.vendor,
-            # CLI account of the owning pane (None → default account). Ephemeral,
-            # like pane attribution — events with no bound pane record as default.
-            profile_id=attributed.profile_id,
             # Prefer stable slot_key as the by_pane bucket so data survives
             # frontend restarts; fall back to ephemeral pane_id for manual panes.
             pane_id=attributed.slot_key or attributed.pane_id,
@@ -1113,15 +1110,6 @@ def _project_payload(project) -> dict[str, Any]:
     # "runs/20260528-020041-task". Empty string for projects with no active run.
     run_dir = log_file_name.rsplit("/", 1)[0] if "/" in log_file_name else ""
     project_dict = asdict(project)
-    # Backfill each pane's live CLI account profile from the running PTY's
-    # metadata. profile_id is not persisted to project.json, so without this a
-    # full renderer reload would show every pane back on the built-in Default.
-    live_profiles = get_terminals().live_pane_profiles()
-    if live_profiles:
-        for pane in project_dict.get("panes", []) or []:
-            profile_id = live_profiles.get(pane.get("pane_id"))
-            if profile_id:
-                pane["profile_id"] = profile_id
     return {
         "project": project_dict,
         "paths": {

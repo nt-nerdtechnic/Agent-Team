@@ -106,10 +106,6 @@ export interface SpawnOptions {
   cwd: string
   env?: Record<string, string>
   agentKey?: string
-  // CLI account profile id; null/undefined uses the built-in Default (real home).
-  // Passed to terminal.create as `profile_id` so the backend spawns the CLI
-  // against that account's isolated home directory.
-  profileId?: string | null
   metadata?: Record<string, unknown>
   outputLogFile?: string  // if set, backend writes ANSI-stripped output to this path
   // Stable CLI session id (e.g. claude --session-id). Used as the reattach
@@ -1568,7 +1564,6 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       }>('terminal.create', {
         pane_id: paneId,
         agent_key: opts.agentKey ?? null,
-        profile_id: opts.profileId ?? null,
         command: opts.command,
         cwd: opts.cwd,
         env: opts.env ?? null,

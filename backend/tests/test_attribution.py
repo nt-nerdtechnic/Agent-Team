@@ -326,34 +326,6 @@ def test_explicit_session_id_routes_to_correct_pane(claude_attr: tuple[Attributi
     assert r2.pane_id == "pane-2", f"sess-b should map to pane-2, got {r2.pane_id}"
 
 
-def test_profile_id_propagates_from_pane_to_attributed_usage(
-    claude_attr: tuple[Attribution, Path],
-) -> None:
-    """A profile pane's CLI account (metadata.profile_id) must surface on the
-    AttributedUsage so the token sink can record it per account."""
-    attr, root = claude_attr
-    cwd = "/ws3"
-    proj = root / "-ws3"; proj.mkdir()
-    f = proj / "sess-p.jsonl"; f.write_text("")
-    attr.register_pane("pane-p", vendor="claude", cwd=cwd, workspace_path=cwd,
-                       profile_id="acc1", explicit_session_id="sess-p")
-    r = attr.attribute(_make_usage("claude", session_id="sess-p", file_path=str(f)))
-    assert r.pane_id == "pane-p"
-    assert r.profile_id == "acc1"
-
-
-def test_no_profile_pane_yields_none_profile_id(
-    claude_attr: tuple[Attribution, Path],
-) -> None:
-    attr, root = claude_attr
-    cwd = "/ws4"
-    proj = root / "-ws4"; proj.mkdir()
-    f = proj / "sess-d.jsonl"; f.write_text("")
-    attr.register_pane("pane-d", vendor="claude", cwd=cwd, workspace_path=cwd,
-                       explicit_session_id="sess-d")
-    r = attr.attribute(_make_usage("claude", session_id="sess-d", file_path=str(f)))
-    assert r.pane_id == "pane-d"
-    assert r.profile_id is None
 
 
 def test_pane_for_session_returns_correct_pane_after_explicit_register(

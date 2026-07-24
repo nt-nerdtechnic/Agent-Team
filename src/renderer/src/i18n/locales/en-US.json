@@ -612,7 +612,7 @@
       "delete-confirm": "Delete this account?",
       "cli": {
         "title": "CLI Accounts",
-        "hint": "Create separate login profiles for each CLI agent, each with its own isolated home directory. Pick an account when opening a pane, or switch it while a pane is running.",
+        "hint": "Create separate login profiles for each CLI agent, each with its own isolated home directory. Set which account is active from the title bar or here — it applies to newly opened panes.",
         "new-account": "+ New account",
         "name-placeholder": "Account name",
         "default-hint": "Your real home directory",
@@ -624,7 +624,6 @@
         "cancel": "Cancel",
         "delete-confirm": "Delete this account? Its login data directory is kept on disk and will not be removed.",
         "unsupported": "This agent does not support multiple accounts.",
-        "usage-title": "All-time tokens: ↑ input · ↓ output",
         "in-use-error": "This account is in use by a running pane and cannot be deleted. Switch that pane to another account first."
       }
     },
@@ -1133,11 +1132,8 @@
   },
   "cli-account": {
     "default": "Default",
-    "pane-tooltip": "CLI account — switching restarts this pane's CLI",
-    "switch-title": "Switch CLI account",
-    "switch-confirm": "Switch this pane to \"{account}\"? The CLI restarts and the current conversation is interrupted.",
-    "switch-confirm-action": "Switch & restart",
-    "archived": "(archived account)"
+    "quick-switch-title": "Active CLI account",
+    "quick-switch-tooltip": "Switch the active CLI account (applies to newly opened panes)"
   },
   "cliDrop": {
     "source-closed": "CLI pane is no longer open",

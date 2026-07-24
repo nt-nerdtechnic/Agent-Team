@@ -630,12 +630,6 @@ interface ActivePane {
   messagingName?: string
   roleKey: RoleKey
   stageId: StageId
-  /** CLI account profile id this pane's CLI runs under; null/absent = built-in
-   *  Default (real home). Runtime-only front-end state — preserved across
-   *  in-session respawn/reattach. project.json does not persist it; on a full
-   *  app reload it is restored from the live PTY's metadata, which the backend
-   *  backfills into each pane record (ProjectPane.profile_id). */
-  profileId?: string | null
   /** Human-readable slot label, e.g. "Architecture" or "UI/UX".
    *  Empty string for single-agent stages or manually-spawned panes. */
   slotLabel: string
@@ -2333,9 +2327,6 @@ interface SpawnInternal {
    *  cold-start rebuild reuses the SAME id instead of minting a new ghost id
    *  on every restart. Ignored when isResume or for other agents. */
   freshSessionId?: string
-  /** CLI account profile id to run this pane's CLI under; null/absent = built-in
-   *  Default. Carried forward on rebuild/switch so the account survives respawn. */
-  profileId?: string | null
   /** Instructs spawnPane to atomically replace an existing pane's position in the UI array. */
   replacePaneId?: string
   /** Persisted messaging name carried through a restore so inter-CLI messaging
@@ -2435,7 +2426,6 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
     autoName: opts.autoName,
     roleKey: opts.roleKey,
     stageId: opts.stageId,
-    profileId: opts.profileId ?? null,
     slotLabel: opts.slotLabel ?? '',
     command,
     workspacePath: opts.workspacePath,
@@ -2538,7 +2528,6 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
       command: [userShell, userShell.endsWith('zsh') ? '-ilc' : '-lc', command],
       cwd: opts.workspacePath,
       agentKey: opts.agentKey,
-      profileId: opts.profileId ?? null,
       metadata: {
         roleKey: opts.roleKey,
         stageId: opts.stageId,
@@ -2605,7 +2594,6 @@ async function onManualSpawn(payload: SpawnPayload): Promise<void> {
     roleKey: payload.roleKey,
     stageId: payload.stageId,
     customName: payload.customName,
-    profileId: payload.profileId ?? null,
     commandOverride: '',
     workspacePath: payload.workspacePath,
     origin: 'manual',
@@ -3018,7 +3006,6 @@ async function rebuildPaneViaResume(paneId: string): Promise<void> {
       origin: pane.origin,
       runGroupId: pane.runGroupId,
       sessionHomeId: pane.sessionHomeId,
-      profileId: pane.profileId ?? null,
     }
     try { localStorage.removeItem(`terminal-scroll:${sessionId}`) } catch {}
     // Preserve layout order: keep the old pane as a dummy to avoid layout
@@ -3035,7 +3022,6 @@ async function rebuildPaneViaResume(paneId: string): Promise<void> {
       workspacePath: snap.workspacePath,
       origin: snap.origin,
       runGroupId: snap.runGroupId || undefined,
-      profileId: snap.profileId,
       isResume: true,
       skipRoleInjection: true,
       restoreMode: 'fresh',
@@ -3108,10 +3094,7 @@ async function rebuildPanesViaResume(scope: 'tab' | 'all'): Promise<void> {
   }
 }
 
-async function rebuildPaneClean(
-  paneId: string,
-  profileIdOverride?: string | null,
-): Promise<void> {
+async function rebuildPaneClean(paneId: string): Promise<void> {
   const pane = panes.value.find((p) => p.id === paneId)
   if (!pane) return
   // Same session-aware lock as rebuildPaneViaResume: mid-resume the
@@ -3132,8 +3115,6 @@ async function rebuildPaneClean(
     workspacePath: pane.workspacePath,
     origin: pane.origin,
     runGroupId: pane.runGroupId,
-    // Account switch overrides the profile; a plain rebuild keeps the current one.
-    profileId: profileIdOverride !== undefined ? profileIdOverride : (pane.profileId ?? null),
   }
   for (const key of lockKeys) rebuildingPanes.add(key)
   try {
@@ -3149,7 +3130,6 @@ async function rebuildPaneClean(
       workspacePath: snap.workspacePath,
       origin: snap.origin,
       runGroupId: snap.runGroupId || undefined,
-      profileId: snap.profileId,
       isResume: false,
       replacePaneId: paneId, // Atomic swap to prevent layout shift
     })
@@ -3192,51 +3172,6 @@ async function rebuildPaneClean(
   } finally {
     for (const key of lockKeys) rebuildingPanes.delete(key)
   }
-}
-
-// Switch the CLI account a running pane uses. Restarts the pane's CLI under the
-// new profile (a clean relaunch — the current conversation is interrupted, since
-// the account's home directory changes). Reuses rebuildPaneClean's kill+respawn
-// path with a profile override.
-async function switchPaneAccount(paneId: string, profileId: string | null): Promise<void> {
-  const pane = panes.value.find((p) => p.id === paneId)
-  if (!pane) return
-  const current = pane.profileId ?? null
-  if (current === (profileId ?? null)) return
-  const target = cliProfilesApi.findProfile(profileId)
-  const accountName = target?.name ?? i18n.global.t('cli-account.default')
-  const ok = await notifyRestore.confirm(
-    i18n.global.t('cli-account.switch-confirm', { account: accountName }),
-    {
-      title: i18n.global.t('cli-account.switch-title'),
-      confirmText: i18n.global.t('cli-account.switch-confirm-action'),
-      cancelText: i18n.global.t('restore.dismiss'),
-    },
-  )
-  if (!ok) return
-  await rebuildPaneClean(paneId, profileId ?? null)
-}
-
-// Account picker options for a pane's header. Empty array = the agent has no
-// extra accounts, so TerminalPane hides the account control entirely. The
-// leading '' option is the built-in Default (real home).
-function paneAccountOptions(pane: ActivePane): Array<{ id: string; name: string }> {
-  if (pane.agentKey === 'terminal') return []
-  const profiles = cliProfilesApi.profilesForAgent(pane.agentKey)
-  // A profile deleted in another window leaves this pane still running under an
-  // archived account. Surface it as an explicit option so the select reflects
-  // reality instead of silently snapping to Default while a different account
-  // is actually live; the user can still switch away to another account.
-  const archived = !!pane.profileId && !profiles.some((p) => p.id === pane.profileId)
-  if (!profiles.length && !archived) return []
-  const options = [
-    { id: '', name: i18n.global.t('cli-account.default') },
-    ...profiles.map((p) => ({ id: p.id, name: p.name })),
-  ]
-  if (archived) {
-    options.push({ id: pane.profileId as string, name: i18n.global.t('cli-account.archived') })
-  }
-  return options
 }
 
 async function onInterrupt(paneId: string): Promise<void> {
@@ -3737,10 +3672,6 @@ interface ProjectPane {
   auto_name?: string
   is_minimized?: boolean
   output_log_file?: string
-  /** CLI account profile the pane's still-running PTY was spawned under. Not
-   *  persisted to project.json — the backend backfills it from live terminal
-   *  metadata so a reload restores the pane's account (absent = built-in Default). */
-  profile_id?: string
 }
 
 interface ProjectPayload {
@@ -4271,9 +4202,6 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
       slotLabel: saved.slot_label,
       customName: saved.custom_name || undefined,
       autoName: saved.auto_name || undefined,
-      // Restore the CLI account the pane's live PTY runs under (backend
-      // backfills profile_id from terminal metadata); absent = built-in Default.
-      profileId: saved.profile_id || null,
       commandOverride,
       workspacePath,
       origin: saved.origin,
@@ -5354,6 +5282,27 @@ async function doCloseWorkspace(): Promise<void> {
 async function titlebarRevealWorkspace(): Promise<void> {
   if (!currentWorkspace.value || !window.agentTeam?.openPath) return
   await window.agentTeam.openPath(currentWorkspace.value)
+}
+
+// ── Titlebar CLI account quick-switch ────────────────────────────────────────
+// One global active account per CLI vendor. Picking a different account sets the
+// backend-wide default (cli_profiles.set_default); it only affects panes opened
+// afterwards, never already-running ones. Shown only for vendors that have at
+// least one extra account.
+const showAccountMenu = ref(false)
+const accountSwitchAgents = computed(() =>
+  AGENT_SPECS
+    .filter((spec) => spec.agentKey !== 'terminal' && cliProfilesApi.hasProfiles(spec.agentKey))
+    .map((spec) => ({
+      agentKey: spec.agentKey,
+      label: spec.label,
+      activeId: cliProfilesApi.defaultProfileId(spec.agentKey) ?? '',
+      profiles: cliProfilesApi.profilesForAgent(spec.agentKey),
+    })),
+)
+function onAccountMenuSelect(agentKey: string, e: Event): void {
+  const value = (e.target as HTMLSelectElement).value
+  void cliProfilesApi.setDefault(agentKey, value || null)
 }
 
 // Titlebar 📋 button: reveal the current workspace's plans. Plans now live in
@@ -8305,6 +8254,25 @@ function paneIsCommander(p: ActivePane): boolean {
         </div>
       </template>
       <span v-else class="titlebar-name">{{ workspaceBaseName }}</span>
+      <div v-if="accountSwitchAgents.length" class="titlebar-accounts">
+        <button
+          class="titlebar-ws-btn"
+          @mousedown.stop
+          @click="showAccountMenu = !showAccountMenu"
+          :title="$t('cli-account.quick-switch-tooltip')"
+        >🔑</button>
+        <div v-if="showAccountMenu" class="account-menu-backdrop" @mousedown.stop="showAccountMenu = false"></div>
+        <div v-if="showAccountMenu" class="account-menu" @mousedown.stop>
+          <div class="account-menu-title">{{ $t('cli-account.quick-switch-title') }}</div>
+          <div v-for="a in accountSwitchAgents" :key="a.agentKey" class="account-menu-row">
+            <span class="account-menu-agent">{{ a.label }}</span>
+            <select class="account-menu-select" :value="a.activeId" @change="onAccountMenuSelect(a.agentKey, $event)">
+              <option value="">{{ $t('cli-account.default') }}</option>
+              <option v-for="p in a.profiles" :key="p.id" :value="p.id">{{ p.name }}</option>
+            </select>
+          </div>
+        </div>
+      </div>
       <button class="titlebar-gear" @mousedown.stop @click="showSettings = true" title="Settings (⌘,)">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="3"/>
@@ -8363,7 +8331,6 @@ function paneIsCommander(p: ActivePane): boolean {
       @switch-workspace="onSwitchWorkspace"
       @workspace-browse="onWorkspaceBrowse"
       :issue-handoffs="issueHandoffView"
-      :cli-profiles-api="cliProfilesApi"
       @dispatch-issue="onDispatchIssue"
       @spawn-for-issue="onHandleIssue"
       @rename-pane="setPaneCustomName"
@@ -8624,9 +8591,6 @@ function paneIsCommander(p: ActivePane): boolean {
           :loop-wait-until="p.loopWaitUntil"
           :loop-estimate-reset-at="p.loopEstimateResetAt"
           :messaging-name="p.messagingName"
-          :account-options="paneAccountOptions(p)"
-          :current-profile-id="p.profileId || ''"
-          @switch-account="(id) => switchPaneAccount(p.id, id || null)"
           @rename-messaging="(name) => onRenameMessaging(p.id, name)"
           @set-focus="onSetFocus(p.id)"
           @minimize="minimizePane(p.id)"
@@ -9189,6 +9153,64 @@ function paneIsCommander(p: ActivePane): boolean {
 .titlebar-ws-btn:hover {
   background: var(--bg-hover);
   color: var(--text-bright);
+}
+.titlebar-accounts {
+  position: relative;
+  -webkit-app-region: no-drag;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+.account-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+}
+.account-menu {
+  position: absolute;
+  top: 30px;
+  right: 0;
+  z-index: 301;
+  min-width: 220px;
+  padding: 8px;
+  background: var(--bg-elevated, var(--bg-subtle));
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--bg-inverse) 14%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.account-menu-title {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  padding: 2px 2px 4px;
+}
+.account-menu-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.account-menu-agent {
+  font-size: 12px;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+.account-menu-select {
+  flex-shrink: 0;
+  max-width: 120px;
+  height: 24px;
+  font-size: 11px;
+  background: var(--bg-inset, var(--bg-base));
+  border: 1px solid var(--border-muted);
+  border-radius: 5px;
+  color: var(--text-primary);
+  padding: 0 4px;
+  cursor: pointer;
 }
 .titlebar-gear {
   -webkit-app-region: no-drag;

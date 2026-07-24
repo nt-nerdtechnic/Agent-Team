@@ -10,8 +10,6 @@ import pytest
 
 from agent_team_backend import app
 from agent_team_backend import profiles_store as profiles_mod
-from agent_team_backend import projects
-from agent_team_backend import terminals as terminals_mod
 from agent_team_backend import ws_handlers
 from agent_team_backend.profiles_store import CliProfilesStore
 
@@ -27,8 +25,6 @@ class FakeWebSocket:
 class FakeTerminals:
     def __init__(self) -> None:
         self.created: list[dict[str, Any]] = []
-        # pane_id -> profile_id for live PTYs; empty = nothing in use.
-        self.pane_profiles: dict[str, str] = {}
 
     def create(self, **kwargs: Any) -> SimpleNamespace:
         self.created.append(kwargs)
@@ -38,9 +34,6 @@ class FakeTerminals:
             command=kwargs["command"],
             proc=SimpleNamespace(pid=1234),
         )
-
-    def live_pane_profiles(self) -> dict[str, str]:
-        return dict(self.pane_profiles)
 
 
 class FakeAttribution:
@@ -203,28 +196,6 @@ async def test_cli_profiles_rename_delete_set_default_flow(
     ]
 
 
-async def test_cli_profiles_delete_rejects_in_use_profile(
-    store: CliProfilesStore, events: list[dict[str, Any]]
-) -> None:
-    session = _session()
-    profile = store.create(agent_key="claude", name="Work")
-    # A live pane is running under this profile → delete must be refused.
-    session.terminals.pane_profiles = {"pane-a": profile["id"]}  # type: ignore[attr-defined]
-
-    await app.handle_message(session, {
-        "id": "x2",
-        "type": "cli_profiles.delete",
-        "payload": {"id": profile["id"]},
-    })
-
-    response = session.websocket.sent[0]  # type: ignore[attr-defined]
-    assert response["ok"] is False
-    assert response["error"]["code"] == "PROFILE_IN_USE"
-    # Registry untouched and nothing broadcast.
-    assert store.list()["profiles"] == [profile]
-    assert events == []
-
-
 async def test_cli_profiles_delete_clears_default(
     store: CliProfilesStore, events: list[dict[str, Any]]
 ) -> None:
@@ -262,39 +233,14 @@ async def test_cli_profiles_rename_unknown_is_bad_request(
     assert response["error"]["code"] == "BAD_REQUEST"
 
 
-# ---- terminal.create profile injection ----
+# ---- terminal.create global-active-account injection ----
 
 
-async def test_terminal_create_claude_profile_injects_config_dir(
+async def test_terminal_create_claude_default_injects_config_dir(
     store: CliProfilesStore, spawn_stubs: FakeAttribution
 ) -> None:
-    profile = store.create(agent_key="claude", name="Work")
-    session = _session()
-
-    await app.handle_message(session, {
-        "id": "m1",
-        "type": "terminal.create",
-        "payload": {
-            "pane_id": "claude-pane",
-            "agent_key": "claude",
-            "command": "claude",
-            "cwd": "/ws",
-            "profile_id": profile["id"],
-            "metadata": {"workspace_path": "/ws"},
-        },
-    })
-
-    created = session.terminals.created[0]  # type: ignore[attr-defined]
-    home = str(store.home_path(profile))
-    assert created["env"]["CLAUDE_CONFIG_DIR"] == home
-    assert created["env_remove"] == ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
-    assert created["metadata"]["profile_id"] == profile["id"]
-    assert Path(home).is_dir()  # lazily created at spawn
-
-
-async def test_terminal_create_uses_stored_default_profile(
-    store: CliProfilesStore, spawn_stubs: FakeAttribution
-) -> None:
+    """The global active account (the agent's stored default) is injected on
+    every spawn — panes are no longer bound per-pane."""
     profile = store.create(agent_key="claude", name="Work")
     store.set_default("claude", profile["id"])
     session = _session()
@@ -312,15 +258,45 @@ async def test_terminal_create_uses_stored_default_profile(
     })
 
     created = session.terminals.created[0]  # type: ignore[attr-defined]
-    assert created["env"]["CLAUDE_CONFIG_DIR"] == str(store.home_path(profile))
-    assert created["metadata"]["profile_id"] == profile["id"]
+    home = str(store.home_path(profile))
+    assert created["env"]["CLAUDE_CONFIG_DIR"] == home
+    assert created["env_remove"] == ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
+    assert "profile_id" not in created["metadata"]
+    assert Path(home).is_dir()  # lazily created at spawn
+
+
+async def test_terminal_create_ignores_payload_profile_id(
+    store: CliProfilesStore, spawn_stubs: FakeAttribution
+) -> None:
+    """A per-pane payload profile_id is ignored: with no global default set, the
+    spawn env is the built-in Default (unchanged)."""
+    profile = store.create(agent_key="claude", name="Work")
+    session = _session()
+
+    await app.handle_message(session, {
+        "id": "m1",
+        "type": "terminal.create",
+        "payload": {
+            "pane_id": "claude-pane",
+            "agent_key": "claude",
+            "command": "claude",
+            "cwd": "/ws",
+            "profile_id": profile["id"],
+            "metadata": {"workspace_path": "/ws"},
+        },
+    })
+
+    created = session.terminals.created[0]  # type: ignore[attr-defined]
+    assert created["env"] is None
+    assert created["env_remove"] is None
+    assert "profile_id" not in created["metadata"]
 
 
 async def test_terminal_create_without_profile_is_unchanged(
     store: CliProfilesStore, spawn_stubs: FakeAttribution
 ) -> None:
-    """Hard regression gate: no profile (built-in default) must spawn with the
-    exact pre-profile arguments — no env, no env_remove, no metadata key."""
+    """Hard regression gate: no active account (built-in default) must spawn
+    with the exact pre-profile arguments — no env, no env_remove, no metadata."""
     session = _session()
 
     await app.handle_message(session, {
@@ -341,58 +317,11 @@ async def test_terminal_create_without_profile_is_unchanged(
     assert "profile_id" not in created["metadata"]
 
 
-async def test_terminal_create_unknown_profile_errors(
-    store: CliProfilesStore, spawn_stubs: FakeAttribution
-) -> None:
-    session = _session()
-
-    await app.handle_message(session, {
-        "id": "m4",
-        "type": "terminal.create",
-        "payload": {
-            "pane_id": "claude-pane",
-            "agent_key": "claude",
-            "command": "claude",
-            "cwd": "/ws",
-            "profile_id": "nope1234",
-            "metadata": {"workspace_path": "/ws"},
-        },
-    })
-
-    response = session.websocket.sent[0]  # type: ignore[attr-defined]
-    assert response["ok"] is False
-    assert response["error"]["code"] == "PROFILE_NOT_FOUND"
-    assert session.terminals.created == []  # type: ignore[attr-defined]
-
-
-async def test_terminal_create_rejects_cross_agent_profile(
-    store: CliProfilesStore, spawn_stubs: FakeAttribution
-) -> None:
-    kimi_profile = store.create(agent_key="kimi", name="Work")
-    session = _session()
-
-    await app.handle_message(session, {
-        "id": "m5",
-        "type": "terminal.create",
-        "payload": {
-            "pane_id": "claude-pane",
-            "agent_key": "claude",
-            "command": "claude",
-            "cwd": "/ws",
-            "profile_id": kimi_profile["id"],
-            "metadata": {"workspace_path": "/ws"},
-        },
-    })
-
-    response = session.websocket.sent[0]  # type: ignore[attr-defined]
-    assert response["ok"] is False
-    assert response["error"]["code"] == "PROFILE_NOT_FOUND"
-
-
-async def test_terminal_create_kimi_profile_injects_code_home(
+async def test_terminal_create_kimi_default_injects_code_home(
     store: CliProfilesStore, spawn_stubs: FakeAttribution
 ) -> None:
     profile = store.create(agent_key="kimi", name="Work")
+    store.set_default("kimi", profile["id"])
     session = _session()
 
     await app.handle_message(session, {
@@ -403,23 +332,23 @@ async def test_terminal_create_kimi_profile_injects_code_home(
             "agent_key": "kimi",
             "command": "kimi",
             "cwd": "/ws",
-            "profile_id": profile["id"],
             "metadata": {"workspace_path": "/ws"},
         },
     })
 
     created = session.terminals.created[0]  # type: ignore[attr-defined]
     assert created["env"]["KIMI_CODE_HOME"] == str(store.home_path(profile))
-    assert created["metadata"]["profile_id"] == profile["id"]
+    assert "profile_id" not in created["metadata"]
 
 
-async def test_terminal_create_grok_profile_injects_home_shim(
+async def test_terminal_create_grok_default_injects_home_shim(
     store: CliProfilesStore,
     spawn_stubs: FakeAttribution,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     profile = store.create(agent_key="grok", name="Work")
+    store.set_default("grok", profile["id"])
     real_home = tmp_path / "fake-real-home"
     real_home.mkdir()
     (real_home / ".zshrc").write_text("x", encoding="utf-8")
@@ -442,7 +371,6 @@ async def test_terminal_create_grok_profile_injects_home_shim(
             "agent_key": "grok",
             "command": "grok",
             "cwd": "/ws",
-            "profile_id": profile["id"],
             "metadata": {"workspace_path": "/ws"},
         },
     })
@@ -455,13 +383,14 @@ async def test_terminal_create_grok_profile_injects_home_shim(
     assert (shim / ".zshrc").is_symlink()
 
 
-async def test_terminal_create_codex_profile_switches_symlink_source(
+async def test_terminal_create_codex_default_switches_symlink_source(
     store: CliProfilesStore,
     spawn_stubs: FakeAttribution,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     profile = store.create(agent_key="codex", name="Work")
+    store.set_default("codex", profile["id"])
     fake_home = FakeCodexHomeManager(tmp_path / "codex-panes")
     monkeypatch.setattr(app, "codex_home_manager", fake_home)
     session = _session()
@@ -474,7 +403,6 @@ async def test_terminal_create_codex_profile_switches_symlink_source(
             "agent_key": "codex",
             "command": "codex",
             "cwd": "/ws",
-            "profile_id": profile["id"],
             "metadata": {"workspace_path": "/ws", "session_home_id": "stable-home"},
         },
     })
@@ -482,46 +410,7 @@ async def test_terminal_create_codex_profile_switches_symlink_source(
     created = session.terminals.created[0]  # type: ignore[attr-defined]
     assert fake_home.prepared == [("stable-home", store.home_path(profile))]
     assert created["env"]["CODEX_HOME"] == str(tmp_path / "codex-panes" / "stable-home")
-    assert created["metadata"]["profile_id"] == profile["id"]
-
-
-# ---- reload backfill: live pane -> profile_id ----
-
-
-async def test_live_pane_profiles_maps_only_running_profiled_panes() -> None:
-    async def _noop_emit(_event: dict[str, Any]) -> None:
-        return None
-
-    service = terminals_mod.TerminalService(emit=_noop_emit)
-    service._sessions = {  # type: ignore[assignment]
-        "t1": SimpleNamespace(pane_id="pane-a", closed=False, metadata={"profile_id": "prof-1"}),
-        "t2": SimpleNamespace(pane_id="pane-b", closed=False, metadata={}),  # Default (no profile)
-        "t3": SimpleNamespace(pane_id="pane-c", closed=True, metadata={"profile_id": "prof-x"}),  # dead
-    }
-
-    assert service.live_pane_profiles() == {"pane-a": "prof-1"}
-
-
-def test_project_payload_backfills_live_profile_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    project = projects.Project(
-        id="p", name="n", workspace_path="/ws",
-        created_at="t0", updated_at="t0",
-        panes=[
-            projects.PaneRecord(pane_id="pane-a", agent="claude"),
-            projects.PaneRecord(pane_id="pane-b", agent="codex"),
-        ],
-    )
-    monkeypatch.setattr(
-        app, "get_terminals",
-        lambda: SimpleNamespace(live_pane_profiles=lambda: {"pane-a": "prof-1"}),
-    )
-
-    payload = app._project_payload(project)
-
-    panes = {p["pane_id"]: p for p in payload["project"]["panes"]}
-    assert panes["pane-a"]["profile_id"] == "prof-1"
-    # A pane with no live profile is untouched — reload leaves it on Default.
-    assert "profile_id" not in panes["pane-b"]
+    assert "profile_id" not in created["metadata"]
 
 
 async def test_terminal_create_codex_without_profile_prepare_unchanged(

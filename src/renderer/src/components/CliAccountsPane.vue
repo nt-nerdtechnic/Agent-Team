@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { ref } from 'vue'
 import { CLI_AGENT_SPECS } from '../lib/agentSpecs'
 import type { useCliProfiles, CliProfile } from '../composables/useCliProfiles'
 
@@ -9,25 +9,8 @@ const props = defineProps<{
 
 const { error } = props.api
 
-// Load all-time per-account token usage once when the section opens.
-onMounted(() => void props.api.loadUsage())
-
 function supported(agentKey: string): boolean {
   return props.api.supportedAgents.value.includes(agentKey)
-}
-
-// Compact token count, e.g. 940, 12k, 3.4M (mirrors TokenStatsPanel's fmt).
-function fmtTokens(n: number): string {
-  if (n < 1000) return String(n)
-  if (n < 1_000_000) return (n / 1000).toFixed(n < 10_000 ? 1 : 0) + 'k'
-  return (n / 1_000_000).toFixed(1) + 'M'
-}
-
-/** One-line usage summary for an account, or '' when it has no recorded usage. */
-function usageLabel(agentKey: string, profileId: string | null): string {
-  const t = props.api.usageFor(agentKey, profileId)
-  if (!t || (t.input === 0 && t.output === 0)) return ''
-  return `↑ ${fmtTokens(t.input)} · ↓ ${fmtTokens(t.output)}`
 }
 
 // ── Add form (per agent) ─────────────────────────────────────────────────────
@@ -121,11 +104,6 @@ async function remove(id: string): Promise<void> {
             <div class="cli-row-main">
               <span class="cli-row-name">{{ $t('cli-account.default') }}</span>
               <span class="cli-row-meta">{{ $t('settings.accounts.cli.default-hint') }}</span>
-              <span
-                v-if="usageLabel(spec.agentKey, null)"
-                class="cli-row-usage"
-                :title="$t('settings.accounts.cli.usage-title')"
-              >{{ usageLabel(spec.agentKey, null) }}</span>
             </div>
             <div class="cli-row-actions">
               <span v-if="api.defaultProfileId(spec.agentKey) === null" class="cli-badge">
@@ -160,11 +138,6 @@ async function remove(id: string): Promise<void> {
             <template v-else>
               <div class="cli-row-main">
                 <span class="cli-row-name">{{ p.name }}</span>
-                <span
-                  v-if="usageLabel(spec.agentKey, p.id)"
-                  class="cli-row-usage"
-                  :title="$t('settings.accounts.cli.usage-title')"
-                >{{ usageLabel(spec.agentKey, p.id) }}</span>
               </div>
               <div class="cli-row-actions">
                 <template v-if="confirmRemoveId === p.id">
@@ -264,12 +237,6 @@ async function remove(id: string): Promise<void> {
 .cli-row-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .cli-row-name { font-size: 12.5px; font-weight: 600; color: var(--text-primary); }
 .cli-row-meta { font-size: 11px; color: var(--text-secondary); }
-.cli-row-usage {
-  font-size: 10.5px;
-  color: var(--text-muted);
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.02em;
-}
 .cli-row-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .cli-confirm-text { font-size: 11px; color: var(--text-secondary); }
 .cli-badge {
