@@ -61,6 +61,17 @@ _IGNORE_GIT_FIRST_LEVEL = frozenset({"objects", "logs", "hooks", "lfs"})
 # still reports changes normally.
 _IGNORE_STORAGE_SUBDIRS = frozenset({"framework", "logs"})
 
+# Directories monitored for plan and report documents.
+PLAN_DOC_DIRS = frozenset({
+    (".agent-team", "plans"),
+    (".agent-team", "reports"),
+    (".claude", "loop-reports"),
+    (".claude", "plans"),
+    (".cursor", "plans"),
+    ("docs", "plans"),
+    ("docs", "reports"),
+})
+
 
 class _RepoHandler(FileSystemEventHandler):
     """watchdog handler bound to one repo root. Filters noise, then bridges
@@ -96,19 +107,21 @@ class _RepoHandler(FileSystemEventHandler):
             self._on_dirty(self._ws_path)
 
     def _is_plan_doc(self, src: str) -> bool:
-        """True for a user-facing plan document (HTML or markdown) directly
-        under `.agent-team/plans/` — infra files (`_` prefix), hidden files and
-        `.history/` snapshots are excluded, so snapshot writes triggered by a
-        plans event can never re-trigger it."""
+        """True for a user-facing plan or report document (HTML or markdown) directly
+        under one of the supported plan/report directories — infra files (`_` prefix),
+        hidden files and `.history/` snapshots are excluded, so snapshot writes
+        triggered by a plans event can never re-trigger it."""
         try:
             rel = Path(src).resolve().relative_to(self._root)
         except (ValueError, OSError):
             return False
         parts = rel.parts
-        if len(parts) != 3 or parts[0] != ".agent-team" or parts[1] != "plans":
+        if len(parts) != 3:
+            return False
+        if (parts[0], parts[1]) not in PLAN_DOC_DIRS:
             return False
         name = parts[2]
-        return name.endswith((".html", ".plan.md")) and not name.startswith(("_", "."))
+        return name.endswith((".html", ".plan.md", ".md")) and not name.startswith(("_", "."))
 
     def _is_relevant(self, src: str) -> bool:
         try:

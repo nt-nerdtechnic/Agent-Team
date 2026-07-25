@@ -19,6 +19,33 @@ def test_working_tree_file_is_relevant(tmp_path: Path) -> None:
     assert h._is_relevant(str(tmp_path / "src" / "main.py")) is True
 
 
+def test_is_plan_doc_covers_all_supported_dirs(tmp_path: Path) -> None:
+    h = _handler(tmp_path)
+    valid_paths = [
+        ".agent-team/plans/feature.html",
+        ".agent-team/plans/legacy.plan.md",
+        ".agent-team/reports/summary.html",
+        ".agent-team/reports/notes.md",
+        ".claude/loop-reports/loop1.html",
+        ".claude/plans/task.md",
+        ".cursor/plans/arch.plan.md",
+        "docs/plans/roadmap.md",
+        "docs/reports/analysis.html",
+    ]
+    for p in valid_paths:
+        assert h._is_plan_doc(str(tmp_path / p)) is True, p
+
+    invalid_paths = [
+        ".agent-team/plans/_spec.md",       # infra file
+        ".agent-team/plans/.hidden.md",     # dot file
+        ".agent-team/other/doc.md",         # unsupported sub-dir
+        "other/plans/doc.md",               # root dir not in allowed list
+        ".agent-team/plans/sub/deep.md",    # nested sub-dir
+    ]
+    for p in invalid_paths:
+        assert h._is_plan_doc(str(tmp_path / p)) is False, p
+
+
 def test_build_dirs_are_ignored(tmp_path: Path) -> None:
     h = _handler(tmp_path)
     for noise in ("node_modules/x/y.js", ".venv/lib/z.py", "dist/bundle.js",

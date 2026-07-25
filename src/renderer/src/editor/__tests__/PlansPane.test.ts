@@ -136,6 +136,8 @@ function makeBackend(opts?: {
   htmlFiles?: Record<string, string>
   htmlListError?: string
   readFailures?: string[]
+  dirEntries?: Record<string, MockEntry[]>
+  customFiles?: Record<string, string>
   /** Per-rel-path mtimes echoed by fs.read_file (for the last-updated sort). */
   mtimes?: Record<string, number>
 }) {
@@ -165,7 +167,11 @@ function makeBackend(opts?: {
     emit: (type: string, payload: unknown) => listeners.get(type)?.forEach((cb) => cb(payload)),
     send: vi.fn(async (channel: string, payload: Record<string, unknown>) => {
       if (channel === 'fs.list_dir') {
-        if (payload.rel_path === '.cursor/plans') {
+        const rel = payload.rel_path as string
+        if (opts?.dirEntries && opts.dirEntries[rel]) {
+          return { payload: { ok: true, entries: opts.dirEntries[rel] } }
+        }
+        if (rel === '.cursor/plans') {
           return {
             payload: {
               ok: true,
@@ -176,7 +182,7 @@ function makeBackend(opts?: {
             },
           }
         }
-        if (payload.rel_path === '.agent-team/plans') {
+        if (rel === '.agent-team/plans') {
           if (opts?.htmlListError) return { payload: { ok: false, error: opts.htmlListError } }
           if (!opts?.htmlEntries) return { payload: { ok: false, error: 'not a directory' } }
           return { payload: { ok: true, entries: opts.htmlEntries } }
@@ -185,6 +191,9 @@ function makeBackend(opts?: {
       }
       if (channel === 'fs.read_file') {
         const rel = payload.rel_path as string
+        if (opts?.customFiles && rel in opts.customFiles) {
+          return { payload: { ok: true, content: opts.customFiles[rel], mtime: opts?.mtimes?.[rel] ?? 100 } }
+        }
         if (rel.startsWith('.agent-team/')) {
           htmlReads.inflight++
           htmlReads.max = Math.max(htmlReads.max, htmlReads.inflight)
@@ -1677,5 +1686,30 @@ describe('PlansPane – search, stage filter, sort', () => {
     await wrapper.find('.plans-sort-select').setValue('progress')
     const names = wrapper.findAll('.plan-row-name').map((n) => n.text())
     expect(names.indexOf('Zeta High')).toBeLessThan(names.indexOf('Alpha Low'))
+  })
+
+  it('aggregates files from multiple directories including .agent-team/reports and .claude/loop-reports', async () => {
+    const backend = makeBackend({
+      dirEntries: {
+        '.agent-team/reports': [
+          { name: 'summary.html', rel_path: '.agent-team/reports/summary.html', is_dir: false },
+          { name: '_infra.html', rel_path: '.agent-team/reports/_infra.html', is_dir: false },
+        ],
+        '.claude/loop-reports': [
+          { name: 'loop1.md', rel_path: '.claude/loop-reports/loop1.md', is_dir: false },
+        ],
+      },
+      customFiles: {
+        '.agent-team/reports/summary.html': '<html><head><title>Summary Report</title></head><body></body></html>',
+        '.claude/loop-reports/loop1.md': '# Loop 1 Notes\n\nSome detail',
+      },
+    })
+    const wrapper = mountPane(backend)
+    await flushPromises()
+
+    const text = wrapper.text()
+    expect(text).toContain('summary.html')
+    expect(text).toContain('loop1.md')
+    expect(text).not.toContain('_infra.html')
   })
 })

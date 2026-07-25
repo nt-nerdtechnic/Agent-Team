@@ -393,10 +393,21 @@ async def _broadcast_plans_changed(ws_path: str) -> None:
     await broadcast(make_event("plans.changed", {"workspace_path": ws_path}))
 
 
+_PLAN_DOC_PREFIXES = (
+    ".agent-team/plans",
+    ".agent-team/reports",
+    ".claude/loop-reports",
+    ".claude/plans",
+    ".cursor/plans",
+    "docs/plans",
+    "docs/reports",
+)
+
+
 def _watch_plans_workspace(ws_path: str, rel_path: str) -> None:
-    """A plans-subtree fs access means a plan surface is open — start watching
+    """A plan/report subtree fs access means a plan surface is open — start watching
     that workspace (idempotent) so plan edits push `plans.changed`."""
-    if _git_watcher is not None and rel_path.startswith(".agent-team/plans"):
+    if _git_watcher is not None and any(rel_path.startswith(prefix) for prefix in _PLAN_DOC_PREFIXES):
         _git_watcher.watch(ws_path)
 
 

@@ -65,6 +65,21 @@ def test_plans_subtree_read_allowed(tmp_path: Path) -> None:
     assert res["content"] == "<h1>plan</h1>"
 
 
+def test_reports_subtree_allowed(tmp_path: Path) -> None:
+    ws = _ws(tmp_path)
+    reports = tmp_path / ".agent-team" / "reports"
+    reports.mkdir()
+    (reports / "report.html").write_text("<h1>report</h1>", encoding="utf-8")
+
+    res = fs_service.read_file(ws, ".agent-team/reports/report.html")
+    assert res["ok"] is True
+    assert res["content"] == "<h1>report</h1>"
+
+    list_res = fs_service.list_dir(ws, ".agent-team/reports")
+    assert list_res["ok"] is True
+    assert "report.html" in [e["name"] for e in list_res["entries"]]
+
+
 def test_plans_subtree_write_allowed(tmp_path: Path) -> None:
     ws = _ws_with_plans(tmp_path)
     assert fs_service.write_file(ws, ".agent-team/plans/new.html", "<p>x</p>")["ok"] is True

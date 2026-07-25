@@ -80,22 +80,47 @@ async function loadPlans(): Promise<void> {
   try {
     const loaded: PlanItem[] = []
 
-    // Legacy markdown plans: .cursor/plans/*.plan.md
-    const list = await props.backend.send<{ ok: boolean; entries?: FsEntry[]; error?: string }>('fs.list_dir', {
-      workspace_path: props.workspacePath,
-      rel_path: '.cursor/plans',
-      show_hidden: true,
-    })
-    if (!list.payload?.ok) {
-      error.value = list.payload?.error === 'not a directory'
-        ? ''
-        : (list.payload?.error || t('pane.plans.list-failed'))
-    } else {
+    const PLAN_DOC_DIRS = [
+      '.agent-team/plans',
+      '.agent-team/reports',
+      '.claude/loop-reports',
+      '.claude/plans',
+      '.cursor/plans',
+      'docs/plans',
+      'docs/reports',
+    ]
+
+    const seenRelPaths = new Set<string>()
+
+    for (const dir of PLAN_DOC_DIRS) {
+      const list = await props.backend.send<{ ok: boolean; entries?: FsEntry[]; error?: string }>('fs.list_dir', {
+        workspace_path: props.workspacePath,
+        rel_path: dir,
+        show_hidden: true,
+      })
+      if (!list.payload?.ok) {
+        if (list.payload?.error !== 'not a directory') {
+          error.value = list.payload?.error || t('pane.plans.list-failed')
+        }
+        continue
+      }
+
       const entries = (list.payload.entries ?? [])
-        .filter((entry) => !entry.is_dir && entry.name.endsWith('.plan.md'))
+        .filter(
+          (entry) =>
+            !entry.is_dir &&
+            !entry.name.startsWith('_') &&
+            !entry.name.startsWith('.') &&
+            /\.(html|plan\.md|md)$/i.test(entry.name) &&
+            !seenRelPaths.has(entry.rel_path),
+        )
         .sort((a, b) => a.name.localeCompare(b.name))
 
-      const mdItems = await Promise.all(
+      for (const entry of entries) {
+        seenRelPaths.add(entry.rel_path)
+      }
+
+      const items = await Promise.all(
         entries.map(async (entry): Promise<PlanItem | null> => {
           const read = await props.backend.send<{ ok: boolean; content?: string; mtime?: number; error?: string }>('fs.read_file', {
             workspace_path: props.workspacePath,
@@ -110,49 +135,7 @@ async function loadPlans(): Promise<void> {
           }
         })
       )
-      loaded.push(...mdItems.filter((item): item is PlanItem => item !== null))
-    }
-
-    // HTML plans: .agent-team/plans/*.html (underscore-prefixed files are
-    // infrastructure — spec/template — never listed). Missing directory is
-    // simply an empty set, no error surfaced.
-    const htmlList = await props.backend.send<{ ok: boolean; entries?: FsEntry[]; error?: string }>('fs.list_dir', {
-      workspace_path: props.workspacePath,
-      rel_path: '.agent-team/plans',
-      show_hidden: true,
-    })
-    if (!htmlList.payload?.ok) {
-      // Missing directory is intentional silence; real errors surface.
-      if (htmlList.payload?.error !== 'not a directory') {
-        error.value = htmlList.payload?.error || t('pane.plans.list-failed')
-      }
-    } else {
-      const htmlEntries = (htmlList.payload.entries ?? [])
-        .filter(
-          (entry) =>
-            !entry.is_dir &&
-            entry.name.endsWith('.html') &&
-            !entry.name.startsWith('_') &&
-            !entry.name.startsWith('.'),
-        )
-        .sort((a, b) => a.name.localeCompare(b.name))
-
-      const htmlItems = await Promise.all(
-        htmlEntries.map(async (entry): Promise<PlanItem | null> => {
-          const read = await props.backend.send<{ ok: boolean; content?: string; mtime?: number; error?: string }>('fs.read_file', {
-            workspace_path: props.workspacePath,
-            rel_path: entry.rel_path,
-          })
-          if (!read.payload?.ok) return null
-          return {
-            relPath: entry.rel_path,
-            name: entry.name,
-            meta: resolvePlanStore(entry.rel_path).parseMeta(read.payload.content ?? ''),
-            mtime: read.payload.mtime,
-          }
-        })
-      )
-      loaded.push(...htmlItems.filter((item): item is PlanItem => item !== null))
+      loaded.push(...items.filter((item): item is PlanItem => item !== null))
     }
 
     plans.value = loaded
