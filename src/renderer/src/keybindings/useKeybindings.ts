@@ -17,6 +17,11 @@ function buildResolver(): void {
 }
 
 function handleKeydown(e: KeyboardEvent): void {
+  // Mid-composition keys (zhuyin/pinyin/kana) must never match shortcuts nor
+  // start chords; intercepting them breaks composition and lags typing. Don't
+  // also gate on keyCode 229: non-composing IME-intercepted events ("Process")
+  // carry 229 too and must still resolve via e.code (ctrl+digit leak fix).
+  if (e.isComposing) return
   const rule = _resolver.resolve(e, getContext())
   if (!rule) {
     // Chord started: consume the first key so it doesn't reach bubble-phase

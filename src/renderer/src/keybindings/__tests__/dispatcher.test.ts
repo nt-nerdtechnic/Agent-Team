@@ -197,6 +197,36 @@ describe('ctrl+digit CLI quick-select resolves via physical key (IME leak fix)',
   })
 })
 
+describe('IME composition guard', () => {
+  it('ignores mid-composition keydowns entirely (no resolve, no chord, falls through)', () => {
+    const spy = vi.fn()
+    registerCommand('workbench.action.showCommands', spy)
+    const e = dispatch({ key: 'p', metaKey: true, shiftKey: true, isComposing: true })
+    expect(spy).not.toHaveBeenCalled()
+    expect(e.defaultPrevented).toBe(false)
+    expect(probeEvents).toHaveLength(1)
+  })
+
+  it('a composing chord prefix does not start a pending chord', () => {
+    const spy = vi.fn()
+    registerCommand('workbench.action.openKeyboardShortcuts', spy)
+    const first = dispatch({ key: 'k', metaKey: true, isComposing: true })
+    expect(first.defaultPrevented).toBe(false)
+    // The next key must resolve standalone, not as a chord second key.
+    const second = dispatch({ key: 's', metaKey: true })
+    expect(spy).not.toHaveBeenCalled()
+    expect(second.defaultPrevented).toBe(false)
+  })
+
+  it('still resolves ctrl+digit "Process" events when not composing (leak-fix intact)', () => {
+    const spy = vi.fn()
+    registerCommand('controlPane.selectCliType2', spy)
+    const e = dispatch({ key: 'Process', code: 'Digit2', ctrlKey: true, isComposing: false })
+    expect(spy).toHaveBeenCalledTimes(1)
+    expect(e.defaultPrevented).toBe(true)
+  })
+})
+
 describe('mod key cross-platform (audit issue 7)', () => {
   it('a "mod" rule matches ctrl on non-mac and meta on mac', () => {
     const spy = vi.fn()
