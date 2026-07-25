@@ -777,6 +777,25 @@ async function shareToGit(): Promise<void> {
   }
 }
 
+const openingInBrowser = ref(false)
+
+// Open the plan's raw .html file in the OS default handler for .html
+// (normally the default browser). Uses shell:openPath — openExternal rejects
+// file:// URLs in the main process, so it can't open a local file.
+async function openInBrowser(): Promise<void> {
+  if (openingInBrowser.value) return
+  openingInBrowser.value = true
+  try {
+    const absPath = `${props.workspacePath.replace(/\/+$/, '')}/${props.relPath}`
+    const result = await window.agentTeam?.openPath(absPath)
+    if (!result?.ok) toast(result?.error ?? t('pane.plans.open-in-browser-failed'))
+  } catch (err) {
+    toast(err instanceof Error ? err.message : t('pane.plans.open-in-browser-failed'))
+  } finally {
+    openingInBrowser.value = false
+  }
+}
+
 // In-document interactions (validated by the host) reuse these existing
 // write paths — the injected runtime never writes to disk on its own.
 defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverlay })
@@ -852,6 +871,13 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
         :title="t('pane.plans.share-git-tooltip')"
         @click="shareToGit"
       >{{ t('pane.plans.share-git') }}</button>
+      <button
+        v-if="props.relPath.endsWith('.html')"
+        class="prt-open-browser"
+        :disabled="openingInBrowser"
+        :title="t('pane.plans.open-in-browser-tooltip')"
+        @click="openInBrowser"
+      >{{ t('pane.plans.open-in-browser') }}</button>
       <button
         v-if="canExecute"
         class="prt-execute"
@@ -1207,6 +1233,7 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
 .prt-history-btn,
 .prt-history-action,
 .prt-share,
+.prt-open-browser,
 .prt-approve,
 .prt-abandon,
 .prt-reopen,
@@ -1251,6 +1278,7 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
 .prt-history-btn:hover,
 .prt-history-action:hover,
 .prt-share:hover:not(:disabled),
+.prt-open-browser:hover:not(:disabled),
 .prt-reopen:hover:not(:disabled),
 .prt-note-resolve:hover:not(:disabled),
 .prt-send:hover:not(:disabled) {
@@ -1495,6 +1523,7 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
 }
 
 .prt-share:disabled,
+.prt-open-browser:disabled,
 .prt-approve:disabled,
 .prt-note-resolve:disabled,
 .prt-send:disabled {
