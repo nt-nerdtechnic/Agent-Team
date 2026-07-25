@@ -4,6 +4,29 @@ All notable released changes to Navide will be documented in this file. The form
 
 ## [Unreleased]
 
+## [0.1.60] — 2026-07-25 — signed release
+
+### Added
+
+- Sign in to a CLI account from within Navide: a dedicated isolated login pane captures the new account's credentials and identity without disturbing the currently active account, and each account's signed-in identity is shown in the UI.
+- Cmd+click a URL or file path in any CLI pane to open it — URLs open in your default browser, file paths open in the editor; bare domains are now linkified too.
+- Open an HTML plan in your default browser from the plan review.
+
+### Changed
+
+- CLI account switching now swaps each account's credentials in place instead of isolating separate config homes, making switches faster and more reliable; swaps are hardened against concurrent switches and terminate the old process before handing over.
+- Clearer wording on the app-update restart button.
+
+### Fixed
+
+- Cmd+click path hit-testing now handles CJK/wide-character paths and folder names that contain spaces or parentheses.
+- Ignore IME composition keystrokes in the global shortcut dispatcher, so composing Chinese/Japanese/Korean text no longer fires shortcuts.
+- Stop-pane messaging handles no longer accumulate `-2` suffixes across restarts.
+
+### Distribution note
+
+- Signed with a Developer ID and notarized by Apple; published as a stable release eligible for the in-app updater.
+
 ## [0.1.59] — 2026-07-24 — signed release
 
 ### Added
