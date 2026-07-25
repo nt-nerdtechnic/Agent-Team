@@ -9189,9 +9189,9 @@ function paneIsCommander(p: ActivePane): boolean {
           :title="updateState.status === 'error'
             ? updateState.message
             : updateState.status === 'downloaded'
-              ? $t('updater.install')
+              ? (updateState.availableVersion ? `v${updateState.availableVersion} — ${$t('updater.install')}` : $t('updater.install'))
               : updateState.status === 'available'
-                ? $t('updater.download')
+                ? (updateState.availableVersion ? `v${updateState.availableVersion} — ${$t('updater.download')}` : $t('updater.download'))
                 : (updateState.availableVersion ? `v${updateState.availableVersion}` : undefined)"
           @click="onUpdateBadgeClick"
           @keydown.enter="onUpdateBadgeClick"
