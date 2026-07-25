@@ -1077,7 +1077,7 @@ ipcMain.on(
 // renderer which pane to switch to via `notify:focusPane`.
 ipcMain.handle(
   'window:notify',
-  (_event, args: { paneId?: string; title?: string; body?: string }): { ok: boolean } => {
+  (event, args: { paneId?: string; title?: string; body?: string }): { ok: boolean } => {
     if (!Notification.isSupported()) return { ok: false }
     const title = String(args?.title ?? '').trim()
     if (!title) return { ok: false }
@@ -1088,11 +1088,11 @@ ipcMain.handle(
     })
     const paneId = String(args?.paneId ?? '')
     notification.on('click', () => {
-      const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
+      const win =
+        BrowserWindow.fromWebContents(event.sender) ??
+        (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null)
       if (!win) return
-      if (win.isMinimized()) win.restore()
-      win.show()
-      win.focus()
+      revealMainWindow(win)
       if (paneId) win.webContents.send('notify:focusPane', paneId)
     })
     notification.show()

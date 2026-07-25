@@ -1169,7 +1169,10 @@ function onPipelineDividerEnd(): void {
             >{{ p.agentLabel }}</span>
             <span v-if="p.isCommander" class="manager-inline" title="Stage manager — controls flow and decides ---STAGE-DONE---">🎯 Mgr</span>
             <span v-if="expandedPaneId !== p.id" class="agent-line-sub">{{ agentTypeLabel(p.agentKey) }}<template v-if="p.roleLabel"> · {{ p.roleLabel }}</template></span>
-            <span v-if="p.isMinimized" class="minimized-tag">▪ sidebar</span>
+            <span v-if="p.isMinimized" class="minimized-tag" title="Docked in sidebar">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="9" y1="3" x2="9" y2="21"></line></svg>
+              Docked
+            </span>
             <span class="expand-caret" aria-hidden="true">▶</span>
             <span class="agent-line-actions">
               <button
@@ -2481,6 +2484,19 @@ button.icon-btn.muted:hover {
   background: var(--accent-muted);
   color: var(--accent-bright);
 }
+.minimized-tag {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: transparent;
+  border: none;
+  padding: 0;
+}
 .manager-inline {
   font-size: 9px;
   font-weight: 600;
@@ -2527,15 +2543,7 @@ button.icon-btn.muted:hover {
 .agent-item.minimized {
   opacity: 0.7;
 }
-.minimized-tag {
-  margin-left: auto;
-  font-size: 10px;
-  color: var(--accent-fg);
-  background: var(--accent-subtle);
-  border: 1px solid color-mix(in srgb, var(--accent-emphasis) 33%, transparent);
-  border-radius: 999px;
-  padding: 2px 8px;
-}
+
 .agent-cmd {
   margin-bottom: 4px;
   overflow: hidden;
