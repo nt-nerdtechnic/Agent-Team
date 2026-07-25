@@ -125,6 +125,28 @@ watch(totalChangesCount, (n) => {
   if (isMulti.value) emit('changes-count', n)
 })
 
+// Prune per-repo bookkeeping when a tab leaves (workspace switch, repo removed,
+// or a commit drops it from discovery). Without this, a departed repo's last
+// non-zero count lingers in repoChangesCounts and totalChangesCount keeps
+// summing a repo that no longer exists — a stale sidebar badge.
+watch(allTabs, (tabs) => {
+  const live = new Set(tabs.map((r) => r.abs_path))
+  for (const key of Object.keys(repoChangesCounts.value)) {
+    if (!live.has(key)) delete repoChangesCounts.value[key]
+  }
+  for (const key of [...mounted.value]) {
+    if (!live.has(key)) mounted.value.delete(key)
+  }
+})
+
+// On a mode flip (repo count crossing 2), re-emit the active mode's count. The
+// totalChangesCount / singleChangesCount watchers only fire on value change, so
+// a flip where the value happens to match would otherwise freeze the sidebar
+// badge on the previous mode's number.
+watch(isMulti, (multi) => {
+  emit('changes-count', multi ? totalChangesCount.value : singleChangesCount.value)
+})
+
 // When the tab list or the restored selection changes, ensure activeRepo is valid.
 watch(
   [allTabs, savedRepo],
