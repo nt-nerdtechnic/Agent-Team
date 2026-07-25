@@ -117,13 +117,19 @@ export function normalizeMessagingName(raw: string): string | null {
   return name
 }
 
-/** `base` if free in `taken`, else the first free `base-2`, `base-3`… Used to
- *  honour a requested handle (a pane's title) while keeping addresses unique. */
+/** `base` if free in `taken`, else the first free suffixed variant. A base
+ *  already ending in `-<n>` bumps that counter (`X-2` → `X-3`, never `X-2-2`),
+ *  and a run of identical counters (`X-2-2-2`, persisted by the old compounding
+ *  bug) collapses to one before matching. Used to honour a requested handle
+ *  (a pane's title) while keeping addresses unique. */
 export function uniqueMessagingName(base: string, taken: Iterable<string>): string {
   const used = new Set(taken)
-  if (!used.has(base)) return base
-  for (let n = 2; ; n++) {
-    const candidate = `${base}-${n}`
+  const collapsed = base.replace(/(-\d+)\1+$/, '$1')
+  if (!used.has(collapsed)) return collapsed
+  const m = /^(.*)-(\d+)$/.exec(collapsed)
+  const root = m ? m[1] : collapsed
+  for (let n = m ? Number(m[2]) + 1 : 2; ; n++) {
+    const candidate = `${root}-${n}`
     if (!used.has(candidate)) return candidate
   }
 }

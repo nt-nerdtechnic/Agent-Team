@@ -156,4 +156,19 @@ describe('uniqueMessagingName', () => {
     expect(uniqueMessagingName('後端', ['後端', '後端-2'])).toBe('後端-3')
     expect(uniqueMessagingName('後端', ['後端', '後端-3'])).toBe('後端-2')
   })
+  it('keeps a free suffixed base as-is', () => {
+    expect(uniqueMessagingName('後端-2', [])).toBe('後端-2')
+  })
+  it('bumps an existing -N suffix on collision instead of stacking', () => {
+    expect(uniqueMessagingName('後端-2', ['後端-2'])).toBe('後端-3')
+    expect(uniqueMessagingName('後端-2', ['後端-2', '後端-3'])).toBe('後端-4')
+  })
+  it('collapses a compounded suffix run persisted by the old stacking bug', () => {
+    expect(uniqueMessagingName('修正應聘到員工-2-2-2', [])).toBe('修正應聘到員工-2')
+    expect(uniqueMessagingName('修正應聘到員工-2-2-2', ['修正應聘到員工-2'])).toBe('修正應聘到員工-3')
+  })
+  it('leaves differing numeric groups untouched (not a run)', () => {
+    expect(uniqueMessagingName('v1-2-3', [])).toBe('v1-2-3')
+    expect(uniqueMessagingName('v1-2-3', ['v1-2-3'])).toBe('v1-2-4')
+  })
 })
