@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -141,6 +141,15 @@ describe('GitAccountsStore', () => {
     expect(() => store.add({ label: 'a', host: 'github.com', username: 'u', token: 't' })).toThrow(
       EncryptionUnavailableError
     )
+  })
+
+  it('writes the store file with 0600 permissions, tightening an existing lax file', () => {
+    // Simulate a file left behind by an older build with default permissions.
+    writeFileSync(file, JSON.stringify({ version: 1, accounts: [], bindings: {} }), 'utf-8')
+    chmodSync(file, 0o644)
+    const store = new GitAccountsStore(file, fakeCrypto())
+    store.add({ label: 'a', host: 'github.com', username: 'u', token: 'tok-0600' })
+    expect(statSync(file).mode & 0o777).toBe(0o600)
   })
 
   it('survives a corrupt file on disk (→ empty store)', () => {

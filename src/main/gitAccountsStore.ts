@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
@@ -221,8 +221,11 @@ export class GitAccountsStore {
   private write(doc: GitAccountsDoc): void {
     mkdirSync(dirname(this.filePath), { recursive: true })
     const tmp = join(dirname(this.filePath), '.git-accounts.json.tmp')
-    writeFileSync(tmp, JSON.stringify(doc, null, 2), 'utf-8')
+    writeFileSync(tmp, JSON.stringify(doc, null, 2), { encoding: 'utf-8', mode: 0o600 })
     renameSync(tmp, this.filePath)
+    // mode only applies at creation; tighten files written by older builds
+    // (and any stale tmp) on their first write after upgrade.
+    chmodSync(this.filePath, 0o600)
   }
 }
 
