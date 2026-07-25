@@ -10,6 +10,8 @@ import {
   findUrlLinkMatchAt,
   findUrlMatches,
   trimUrlTrailing,
+  shedCjkProse,
+  shedCjkPieces,
   splitMatchAtRowStarts,
   cellColToStrCol,
   strColToCellCol,
@@ -173,6 +175,54 @@ describe('findFileLinkAt', () => {
   })
 })
 
+describe('shedCjkProse', () => {
+  it('sheds CJK prose glued to both ends of a path (real CLI output)', () => {
+    // The regex swallows prose joined by full-width punctuation; shedding
+    // splits on that punctuation and keeps the piece with a '/'.
+    const raw =
+      '報告書：Leankoo1/.claude/loop-reports/loop-report-2026-07-22-recruit-status-complete.html（盤點結果、六項實作、輪次紀錄、7'
+    expect(shedCjkProse(raw)).toBe(
+      'Leankoo1/.claude/loop-reports/loop-report-2026-07-22-recruit-status-complete.html'
+    )
+  })
+
+  it('keeps ideograph (Chinese) filenames intact', () => {
+    expect(shedCjkProse('說明：文件/會議記錄.md。')).toBe('文件/會議記錄.md')
+    expect(shedCjkProse('文件/會議記錄.md')).toBeUndefined() // no punctuation → no variant
+  })
+
+  it('never splits on CJK word characters inside path segments', () => {
+    // U+3005 々 (iteration mark), U+3007 〇, and full-width alphanumerics
+    // (０-９Ａ-Ｚａ-ｚ) are word characters, not punctuation seams.
+    expect(shedCjkProse('報告書：佐々木/notes.md。')).toBe('佐々木/notes.md')
+    expect(shedCjkProse('說明：第２章/draft.md（草稿）')).toBe('第２章/draft.md')
+    expect(shedCjkProse('見：〇塾/ＡＢｃ９.md！')).toBe('〇塾/ＡＢｃ９.md')
+  })
+
+  it('still sheds genuine trailing CJK punctuation', () => {
+    expect(shedCjkProse('路徑：a/b.md。」！？')).toBe('a/b.md')
+  })
+
+  it('returns undefined for plain ASCII paths', () => {
+    expect(shedCjkProse('/Users/a/b.md')).toBeUndefined()
+  })
+
+  it('sheds to the path under the click when two paths are joined by 、', () => {
+    const raw = '結果：src/a.ts、src/b.ts'
+    const bPos = raw.indexOf('src/b')
+    expect(shedCjkProse(raw, bPos + 2)).toBe('src/b.ts')
+    expect(shedCjkProse(raw, raw.indexOf('src/a') + 2)).toBe('src/a.ts')
+    expect(shedCjkProse(raw)).toBe('src/a.ts') // no position → first piece
+    expect(shedCjkPieces(raw).map((p) => p.text)).toEqual(['src/a.ts', 'src/b.ts'])
+  })
+
+  it('treats full-width alphanumerics and iteration marks as word chars', () => {
+    // １ (U+FF11) and 々 are legitimate CJK filename characters — never split.
+    expect(shedCjkProse('報告：第１章/内容.md')).toBe('第１章/内容.md')
+    expect(shedCjkProse('日々の記録/memo.md')).toBeUndefined()
+  })
+})
+
 describe('trimUrlTrailing', () => {
   it('sheds sentence punctuation the prose contributed', () => {
     expect(trimUrlTrailing('https://example.com/a.')).toBe('https://example.com/a')
@@ -193,6 +243,7 @@ describe('findUrlLinkMatchAt', () => {
     const text = 'open https://example.com/a?x=1&y=2 now'
     expect(findUrlLinkMatchAt(text, 10)).toEqual({
       text: 'https://example.com/a?x=1&y=2',
+      href: 'https://example.com/a?x=1&y=2',
       index: 5,
     })
   })
@@ -215,7 +266,9 @@ describe('findUrlMatches with heuristic breaks', () => {
     // Pre-wrap glue: 'see https://example.com/docs' + 'and then run …' joined
     // with no separator. The break offset caps the URL at the row boundary.
     const text = 'see https://example.com/docsand then run'
-    expect(findUrlMatches(text, [28])).toEqual([{ index: 4, text: 'https://example.com/docs' }])
+    expect(findUrlMatches(text, [28])).toEqual([
+      { index: 4, text: 'https://example.com/docs', href: 'https://example.com/docs' },
+    ])
     // Without the break the glue would poison the URL.
     expect(findUrlMatches(text)[0].text).toBe('https://example.com/docsand')
   })
@@ -227,27 +280,82 @@ describe('findUrlMatches with heuristic breaks', () => {
     ])
     const g = getWrappedLineGroup(wrapped, 0)
     expect(findUrlMatches(g.fullText, g.heuristicBreaks)).toEqual([
-      { index: 0, text: 'https://example.com/very/long/path?q=1' },
+      {
+        index: 0,
+        text: 'https://example.com/very/long/path?q=1',
+        href: 'https://example.com/very/long/path?q=1',
+      },
     ])
   })
 
   it('finds a URL that starts after a break', () => {
     const text = 'https://a.com/xhttps://b.com/y'
     expect(findUrlMatches(text, [15])).toEqual([
-      { index: 0, text: 'https://a.com/x' },
-      { index: 15, text: 'https://b.com/y' },
+      { index: 0, text: 'https://a.com/x', href: 'https://a.com/x' },
+      { index: 15, text: 'https://b.com/y', href: 'https://b.com/y' },
     ])
   })
 })
 
+describe('bare-domain URLs', () => {
+  it('detects a bare domain in CJK prose (the reported line)', () => {
+    const text =
+      '- 上線：ef11923 已部署至正式站 leankoo.com（HEAD 已更新、view cache 已刷、6 個 x-cloak 確認在線上）、站點 200。'
+    const urls = findUrlMatches(text)
+    expect(urls).toHaveLength(1)
+    expect(urls[0].text).toBe('leankoo.com')
+    expect(urls[0].href).toBe('https://leankoo.com')
+  })
+
+  it('accepts www-prefixed dotted hosts and bare ports, but never a path tail', () => {
+    expect(findUrlMatches('see www.example.foo now')[0]?.text).toBe('www.example.foo')
+    expect(findUrlMatches('api on leankoo.com:8080 up')[0]?.text).toBe('leankoo.com:8080')
+    // A following '/' means "relative file path in a domain-named checkout
+    // dir" — the file pipeline can stat-verify that; a URL guess cannot.
+    expect(findUrlMatches('grep leankoo.com/app/config.php hit')).toEqual([])
+  })
+
+  it('does not double-match the host inside a scheme URL', () => {
+    const urls = findUrlMatches('open https://leankoo.com/x now')
+    expect(urls).toHaveLength(1)
+    expect(urls[0].href).toBe('https://leankoo.com/x')
+  })
+
+  it('never linkifies filenames whose extension looks like a TLD', () => {
+    expect(findUrlMatches('run deploy.sh now')).toEqual([])
+    expect(findUrlMatches('deploy.sh:12: warning')).toEqual([])
+    expect(findUrlMatches('open Electron.app bundle')).toEqual([])
+    expect(findUrlMatches('install socket.io v4')).toEqual([])
+  })
+
+  it('rejects domain-shaped filenames, junk www, glued ports, and e-mail hosts', () => {
+    expect(findUrlMatches('edit package.json and config.yaml')).toEqual([])
+    expect(findUrlMatches('bundle is dist/index.com.js here')).toEqual([])
+    expect(findUrlMatches('mail user@leankoo.com please')).toEqual([])
+    expect(findUrlMatches('see www.a now')).toEqual([])
+    expect(findUrlMatches('id is leankoo.com:8080abc here')).toEqual([])
+  })
+
+  it('does not re-match the severed tail of a break-capped scheme URL', () => {
+    // "https://lean" | "koo.com" glued at a heuristic break: the tail must
+    // not become a clickable https://koo.com on a different host.
+    const text = 'https://leankoo.com'
+    const urls = findUrlMatches(text, [12])
+    expect(urls).toHaveLength(1)
+    expect(urls[0].text).toBe('https://lean')
+  })
+})
+
 describe('cell column ↔ string offset mapping', () => {
-  // A buffer line surface with per-cell widths: CJK chars occupy two cells
-  // (width 2 then width 0) but one translateToString position.
+  // A buffer line surface with per-cell widths/chars: CJK chars and emoji
+  // occupy two cells (width 2 then width 0); an emoji additionally spans two
+  // string code units (surrogate pair) in its single glyph cell.
   function mockTermWithCells(text: string): Terminal {
-    const cells: number[] = []
+    const cells: Array<{ w: number; ch: string }> = []
     for (const ch of text) {
-      if (/[\u1100-\uFFFF]/.test(ch)) cells.push(2, 0)
-      else cells.push(1)
+      // for..of iterates code points: a non-BMP emoji arrives as one ch of length 2
+      if (ch.length > 1 || /[\u1100-\uFFFF]/.test(ch)) cells.push({ w: 2, ch }, { w: 0, ch: '' })
+      else cells.push({ w: 1, ch })
     }
     return {
       buffer: {
@@ -256,7 +364,7 @@ describe('cell column ↔ string offset mapping', () => {
             isWrapped: false,
             length: cells.length,
             translateToString: () => text,
-            getCell: (x: number) => ({ getWidth: () => cells[x] }),
+            getCell: (x: number) => ({ getWidth: () => cells[x].w, getChars: () => cells[x].ch }),
           }),
         },
       },
@@ -277,6 +385,18 @@ describe('cell column ↔ string offset mapping', () => {
     expect(strColToCellCol(term, 0, 0)).toBe(0)
     expect(strColToCellCol(term, 0, 1)).toBe(2)
     expect(strColToCellCol(term, 0, 3)).toBe(5)
+  })
+
+  it('accounts for multi-code-unit glyphs (emoji surrogate pairs)', () => {
+    // '😀 https://x.com': 😀 = 2 string code units in 1 glyph cell (+spacer).
+    // String: 😀=0-1, ' '=2, 'h'=3. Cells: 😀=0-1, ' '=2, 'h'=3.
+    const term = mockTermWithCells('😀 https://x.com')
+    expect(cellColToStrCol(term, 0, 0)).toBe(0)
+    expect(cellColToStrCol(term, 0, 1)).toBe(0) // spacer half-cell → same glyph
+    expect(cellColToStrCol(term, 0, 2)).toBe(2) // the space
+    expect(cellColToStrCol(term, 0, 3)).toBe(3) // 'h' — width-only counting would say 2
+    expect(strColToCellCol(term, 0, 1)).toBe(0) // second surrogate → emoji's cell
+    expect(strColToCellCol(term, 0, 3)).toBe(3)
   })
 
   it('is the identity for pure-ASCII rows and getCell-less mocks', () => {

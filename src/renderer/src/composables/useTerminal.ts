@@ -121,6 +121,9 @@ export interface SpawnOptions {
   restoreMode?: 'memory-resume' | 'fresh'
   // If true, prevents reattaching to an existing PTY (useful for explicit rebuilds).
   skipReattach?: boolean
+  // CLI account profile id for an isolated LOGIN pane: the backend runs the
+  // CLI inside that profile's login home (see credential_vault login homes).
+  loginProfileId?: string
 }
 
 /**
@@ -193,6 +196,30 @@ export function trimUrlTrailing(raw: string): string {
   return url
 }
 
+// Scheme-less ("bare") domains like `leankoo.com`. Inherently guessy —
+// `檔名.com` is also a valid filename — so the match is deliberately
+// conservative; a false positive HIJACKS a click into the browser, so missing
+// beats guessing on every axis:
+//   • TLD allowlist holds only TLDs that are not plausible file extensions
+//     (`deploy.sh`, `Electron.app`, `socket.io` must never linkify). Rarer
+//     TLDs (io/dev/ai/…) linkify only with an explicit scheme or www. prefix.
+//   • www. requires a dotted, TLD-shaped tail (`www.a` is prose, not a host).
+//   • No path tail, and a following '/' kills the match: `leankoo.com/app/x.php`
+//     is a relative file path (a checkout dir named after its domain) — the
+//     pre-existing file-link pipeline can stat-verify it; a URL guess can't be
+//     verified at all.
+// The lookbehind keeps scheme URLs, path segments, and e-mail hosts from
+// re-matching; the lookahead also rejects domain-shaped filenames
+// (`index.com.js`) and prose glued after a port (`host:8080abc`).
+const _BARE_TLDS = 'com|net|org|edu|gov|tw|jp'
+const BARE_URL_RE = new RegExp(
+  '(?<![A-Za-z0-9@.\\-/])' +
+    `(?:www\\.[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)*\\.[A-Za-z]{2,}|[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)*\\.(?:${_BARE_TLDS}))` +
+    '(?::\\d+)?' +
+    '(?![A-Za-z0-9\\-/:]|\\.[A-Za-z0-9])',
+  'gi'
+)
+
 type _AgentApi = {
   openEditorWindow?: (a: Record<string, unknown>) => Promise<unknown>
   openPlansWindow?: (a: { workspace_path: string; rel_path?: string }) => Promise<unknown>
@@ -206,6 +233,49 @@ type _AgentApi = {
 const _PLAN_DOC_RE = /\.agent-team\/plans\/[A-Za-z0-9.-][A-Za-z0-9._-]*\.html/
 export function extractPlanDocRelPath(raw: string): string | undefined {
   return raw.match(_PLAN_DOC_RE)?.[0]
+}
+
+// Full-width CJK punctuation (（）、。：「」…) marks the seam between a CLI's
+// CJK sentence and an embedded path ("報告書：foo/bar.html（說明）") — the
+// path regex can't exclude it outright because CJK ideographs must stay legal
+// path chars (Chinese filenames). Instead, candidates are re-cut here: split
+// on punctuation, keep the piece that still has a '/'. Ideographs and CJK
+// word characters (iteration marks U+3005-3007, Hangzhou numerals / kana
+// repeat marks U+3021-302F and U+3031-303C, full-width alphanumerics U+FF10-FF19 / FF21-FF3A
+// / FF41-FF5A) are never split on. Returns undefined when the string carries
+// no such punctuation.
+const _CJK_PUNCT_RE =
+  /[\u3000-\u3004\u3008-\u3020\u3030\u303D-\u303F\uFF01-\uFF0F\uFF1A-\uFF20\uFF3B-\uFF40\uFF5B-\uFF65]+/
+/** All '/'-containing pieces of `raw` after splitting on full-width CJK
+ *  punctuation, with their offsets in `raw`. Empty when `raw` carries no such
+ *  punctuation (caller keeps the raw token) or no piece has a '/'. */
+export function shedCjkPieces(raw: string): Array<{ index: number; text: string }> {
+  const re = new RegExp(_CJK_PUNCT_RE.source, 'g')
+  const out: Array<{ index: number; text: string }> = []
+  let last = 0
+  let sawPunct = false
+  let m: RegExpExecArray | null
+  while ((m = re.exec(raw)) !== null) {
+    sawPunct = true
+    const t = raw.slice(last, m.index)
+    if (t.includes('/')) out.push({ index: last, text: t })
+    last = m.index + m[0].length
+  }
+  if (!sawPunct) return []
+  const tail = raw.slice(last)
+  if (tail.includes('/')) out.push({ index: last, text: tail })
+  return out
+}
+
+/** The shed piece containing 0-based `pos` in `raw` — so a click on the
+ *  second of two punctuation-joined paths ("結果:a.ts、b.ts" in full-width)
+ *  sheds to THAT path — falling back to the first '/'-containing piece when
+ *  `pos` sits on the punctuation/prose itself. Undefined when `raw` carries
+ *  no full-width punctuation. */
+export function shedCjkProse(raw: string, pos = -1): string | undefined {
+  const pieces = shedCjkPieces(raw)
+  if (!pieces.length) return undefined
+  return (pieces.find((p) => pos >= p.index && pos < p.index + p.text.length) ?? pieces[0]).text
 }
 
 function openInEditor(absPath: string, line: number | undefined): void {
@@ -432,11 +502,17 @@ export function groupRowColToPos(group: WrappedLineGroup, bufferRow: number, col
   return pos
 }
 
-// Cell column ↔ translateToString offset for one buffer row. A double-width
-// glyph (CJK, full-width punctuation) occupies two cells but one string
-// position — translateToString emits nothing for the trailing half-cell — so
-// the two coordinate spaces diverge after any wide character. Identity when
-// the line surface lacks getCell (unit-test mocks); pure-ASCII rows map 1:1.
+// Cell column ↔ translateToString offset for one buffer row. Two corrections
+// (same pair as VS Code's convertLinkRangeToBuffer):
+//   • a double-width glyph (CJK) occupies two cells but one string position —
+//     translateToString emits nothing for the width-0 trailing half-cell;
+//   • a multi-code-unit glyph (emoji, surrogate pairs) occupies one glyph cell
+//     but getChars().length string positions.
+// (VS Code's third term — the empty spacer cell a wide glyph leaves when it
+// early-wraps at the row edge — needs no handling here: per-row lengths come
+// from the trimmed translateToString, so the spacer is trailing whitespace
+// that already maps past the row's content.) Identity when the line surface
+// lacks getCell (unit-test mocks); pure-ASCII rows map 1:1.
 export function cellColToStrCol(
   term: import('@xterm/xterm').Terminal,
   bufferRow: number,
@@ -444,11 +520,16 @@ export function cellColToStrCol(
 ): number {
   const line = term.buffer.active.getLine(bufferRow)
   if (!line || typeof line.getCell !== 'function') return cellCol
-  let str = -1
+  let str = 0
+  let glyphStart = 0
   for (let x = 0; x <= cellCol && x < line.length; x++) {
-    if ((line.getCell(x)?.getWidth() ?? 1) !== 0) str++
+    const cell = line.getCell(x)
+    if (!cell) break
+    if (cell.getWidth() === 0) continue // trailing half-cell → previous glyph
+    glyphStart = str
+    str += Math.max(1, cell.getChars().length)
   }
-  return Math.max(0, str)
+  return glyphStart
 }
 
 export function strColToCellCol(
@@ -458,12 +539,14 @@ export function strColToCellCol(
 ): number {
   const line = term.buffer.active.getLine(bufferRow)
   if (!line || typeof line.getCell !== 'function') return strCol
-  let str = -1
+  let str = 0
   for (let x = 0; x < line.length; x++) {
-    if ((line.getCell(x)?.getWidth() ?? 1) !== 0) {
-      str++
-      if (str === strCol) return x
-    }
+    const cell = line.getCell(x)
+    if (!cell) break
+    if (cell.getWidth() === 0) continue
+    const len = Math.max(1, cell.getChars().length)
+    if (strCol < str + len) return x // strCol falls inside this glyph
+    str += len
   }
   return strCol
 }
@@ -484,31 +567,54 @@ export function findFileLinkAt(text: string, pos: number): string | null {
   return findFileLinkMatchAt(text, pos)?.text ?? null
 }
 
-/** Every URL in `text`, trailing punctuation trimmed. `breaks` (fullText
- *  offsets of heuristic row joins, see WrappedLineGroup.heuristicBreaks) are
- *  hard boundaries a URL never crosses. Shared by the link provider and the
- *  click handler so the underline range and the click hitbox always agree. */
-export function findUrlMatches(text: string, breaks: number[] = []): Array<{ index: number; text: string }> {
+export interface UrlMatch {
+  index: number
+  text: string // the visible span (what gets underlined)
+  href: string // what openExternal receives — bare domains get https:// prefixed
+}
+
+/** Every URL in `text` — scheme URLs plus conservative bare domains —
+ *  trailing punctuation trimmed. `breaks` (fullText offsets of heuristic row
+ *  joins, see WrappedLineGroup.heuristicBreaks) are hard boundaries a URL
+ *  never crosses. Shared by the link provider and the click handler so the
+ *  underline range and the click hitbox always agree. */
+export function findUrlMatches(text: string, breaks: number[] = []): UrlMatch[] {
   const bounds = [0, ...breaks.filter((b) => b > 0 && b < text.length), text.length]
-  const out: Array<{ index: number; text: string }> = []
+  const out: UrlMatch[] = []
+  // When a scheme URL runs into a heuristic break, the next segment's head is
+  // that URL's severed tail ("https://lean" | "koo.com/x") — it must not
+  // re-match as a standalone bare domain on a different host.
+  let prevSegCapped = false
   for (let i = 0; i < bounds.length - 1; i++) {
     const seg = text.slice(bounds[i], bounds[i + 1])
-    URL_LINK_RE.lastIndex = 0
+    const segOut: UrlMatch[] = []
+    let capped = false
     let m: RegExpExecArray | null
+    URL_LINK_RE.lastIndex = 0
     while ((m = URL_LINK_RE.exec(seg)) !== null) {
-      out.push({ index: bounds[i] + m.index, text: trimUrlTrailing(m[0]) })
+      const trimmed = trimUrlTrailing(m[0])
+      segOut.push({ index: bounds[i] + m.index, text: trimmed, href: trimmed })
+      if (m.index + m[0].length === seg.length) capped = true
     }
+    BARE_URL_RE.lastIndex = 0
+    while ((m = BARE_URL_RE.exec(seg)) !== null) {
+      if (m.index === 0 && prevSegCapped) continue
+      const trimmed = trimUrlTrailing(m[0])
+      const start = bounds[i] + m.index
+      const end = start + trimmed.length
+      if (segOut.some((u) => start < u.index + u.text.length && end > u.index)) continue
+      segOut.push({ index: start, text: trimmed, href: `https://${trimmed}` })
+    }
+    segOut.sort((a, b) => a.index - b.index)
+    out.push(...segOut)
+    prevSegCapped = capped
   }
   return out
 }
 
 /** The URL match containing 0-based `pos` in `text` (trailing punctuation
  *  already trimmed), or null. */
-export function findUrlLinkMatchAt(
-  text: string,
-  pos: number,
-  breaks: number[] = []
-): { text: string; index: number } | null {
+export function findUrlLinkMatchAt(text: string, pos: number, breaks: number[] = []): UrlMatch | null {
   if (pos < 0) return null
   return findUrlMatches(text, breaks).find((u) => pos >= u.index && pos < u.index + u.text.length) ?? null
 }
@@ -581,7 +687,12 @@ function buildFileLinkProvider(
         const e = m.index + m[0].length
         if (urls.some((u) => s < u.index + u.text.length && e > u.index)) continue
         for (const piece of splitMatchAtRowStarts(group, m.index, m[0])) {
-          pushLink(piece.index, piece.text)
+          // Underline each punctuation-shed span (two paths joined by 、 get
+          // two underlines), matching what a click would open; clicks on the
+          // shed prose still hit-test the raw match.
+          const shed = shedCjkPieces(piece.text)
+          if (!shed.length) pushLink(piece.index, piece.text)
+          else for (const s of shed) pushLink(piece.index + s.index, s.text)
         }
       }
       callback(links.length ? links : undefined)
@@ -1409,7 +1520,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       if (urlMatch && openExternal) {
         event.preventDefault()
         event.stopPropagation()
-        void openExternal(urlMatch.text)
+        void openExternal(urlMatch.href)
         return
       }
 
@@ -1426,8 +1537,10 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       const piece = splitMatchAtRowStarts(group, match.index, match.text)
         .find((p) => clickPos >= p.index && clickPos < p.index + p.text.length)
       const pieceRaw = piece?.text ?? match.text
+      const pieceStart = piece?.index ?? match.index
       const rowText = term.buffer.active.getLine(bufferRow)?.translateToString(true) ?? ''
-      const singleRaw = findFileLinkAt(rowText, strCol)
+      const singleMatch = findFileLinkMatchAt(rowText, strCol)
+      const singleRaw = singleMatch?.text
       const wsPath = opts?.workspacePath
 
       // A plan doc reference routes to its dedicated review window, not the
@@ -1461,13 +1574,21 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
             ? expanded
             : wsPath ? `${wsPath}/${expanded.replace(/^\.\//, '')}` : undefined
         }
-        const cands = [pieceRaw, match.text, singleRaw].filter(
-          (c, i, arr): c is string => !!c && arr.indexOf(c) === i
-        )
+        // Raw tokens stat first — a filename that genuinely contains
+        // full-width punctuation must beat its punctuation-shed prefix
+        // (docs/README（中文）.md vs docs/README). The shed variants that
+        // follow are cut around the CLICK POSITION, so of two paths joined
+        // by 、 the one under the cursor is the candidate.
+        const shedPiece = shedCjkProse(pieceRaw, clickPos - pieceStart)
+        const cands = [
+          pieceRaw, shedPiece,
+          match.text, shedCjkProse(match.text, clickPos - match.index),
+          singleRaw, singleMatch ? shedCjkProse(singleMatch.text, strCol - singleMatch.index) : undefined,
+        ].filter((c, i, arr): c is string => !!c && arr.indexOf(c) === i)
         const absList = cands.map((c) => resolveAbs(splitSuffix(c).filepath))
         const stats = await Promise.all(absList.map(statOk))
         const okIdx = stats.findIndex(Boolean)
-        const chosenRaw = okIdx >= 0 ? cands[okIdx] : pieceRaw
+        const chosenRaw = okIdx >= 0 ? cands[okIdx] : (shedPiece ?? pieceRaw)
         const { filepath, line: lineNum } = splitSuffix(chosenRaw)
         if (!filepath) return
         const basename = filepath.split('/').filter(Boolean).pop() ?? filepath
@@ -1855,6 +1976,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         rows: term.rows || 24,
         metadata: opts.metadata ?? null,
         output_log_file: opts.outputLogFile ?? null,
+        login_profile_id: opts.loginProfileId ?? null,
       }, TERMINAL_CREATE_TIMEOUT_MS)
       if (isDisposed) {
         // If the composable was torn down while the spawn was in flight,
