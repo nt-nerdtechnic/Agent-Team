@@ -82,6 +82,7 @@ This is first-party dogfooding evidence, not independent customer validation. Th
 ## Available today
 
 - **Multi-agent workspaces:** run Claude Code, Codex, Antigravity CLI, Grok CLI, or a plain terminal in independent panes.
+- **CLI management:** detect installed coding CLIs, their versions and install methods, and run each CLI's own official update and diagnostic commands.
 - **Session lifecycle:** detect, persist, rebuild, and resume supported CLI sessions.
 - **Configurable pipelines:** define stages, parallel slots, agents, roles, kickoff prompts, questions, documentation queries, and completion sentinels.
 - **Manager coordination:** route structured dispatches and worker questions and carry context across stages.

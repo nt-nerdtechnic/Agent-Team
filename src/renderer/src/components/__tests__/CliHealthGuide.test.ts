@@ -11,6 +11,9 @@ const health: CliHealthStatus = {
     agent_key: 'claude',
     label: 'Claude Code',
     diagnostic_command: 'claude doctor',
+    update_command: 'claude update',
+    docs_url: '',
+    update_state: [],
     candidates: [
       {
         path: '/Users/test/.nvm/bin/claude',

@@ -46,6 +46,8 @@ Onboarding Wizard が必要な Runtime を確認し、利用可能な Agent CLI 
 
 Agent と Terminal が Workspace を操作する方法によって、Navide は Automation、Files and Folders、Full Disk Access を要求する場合があります。権限を付与する前に、macOS が表示する理由を確認してください。
 
+Onboarding 後は Settings → CLI Agents に、検出された各 CLI のバージョン・Install 方法・最後の更新結果が一覧表示され、その CLI 自身の更新コマンドと診断コマンドを実行できます。
+
 ## 最初の Task を実行する
 
 最小構成で動作を確認するには：

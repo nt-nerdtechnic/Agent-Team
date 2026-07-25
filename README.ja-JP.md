@@ -82,6 +82,7 @@ Navide はすでに、創設者がこのプロジェクトを進化させるた�
 ## 現在利用できる機能
 
 - **Multi-agent Workspace：** Claude Code、Codex、Antigravity CLI、Grok CLI、または通常の Terminal を、それぞれ独立した Pane で実行できます。
+- **CLI 管理：** Install 済みの Coding CLI とそのバージョン・Install 方法を検出し、各 CLI 公式の更新コマンドと診断コマンドを実行できます。
 - **Session Lifecycle：** 対応 CLI の Session を検出、保存、再構築、再開できます。
 - **設定可能な Pipeline：** Stage、並列 Slot、Agent、Role、Kickoff Prompt、Question、Documentation Query、完了 Sentinel を定義できます。
 - **Manager Coordination：** 構造化された Dispatch と Worker Question を転送し、Stage 間で文脈を引き継ぎます。

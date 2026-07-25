@@ -48,6 +48,11 @@ def canonical_path_str(path: Path | str) -> str:
     return unicodedata.normalize("NFC", os.path.normpath(os.path.abspath(str(path))))
 
 
+def default_profiles_root() -> Path:
+    """Root that holds every persisted profile home, one subdir per agent key."""
+    return Path.home() / ".navide" / "cli-profiles"
+
+
 def _empty_doc() -> dict[str, Any]:
     return {
         "schemaVersion": PROFILES_SCHEMA_VERSION,
@@ -65,7 +70,7 @@ class CliProfilesStore:
     ) -> None:
         self._path = path or (app_data_dir() / PROFILES_FILE)
         self._profiles_root = Path(
-            canonical_path_str(profiles_root or (Path.home() / ".navide" / "cli-profiles"))
+            canonical_path_str(profiles_root or default_profiles_root())
         )
         self._lock = threading.Lock()
 

@@ -28,6 +28,15 @@ English | [繁體中文](../zh-TW/troubleshooting.md) | [日本語](../ja-JP/tro
 - Complete the CLI's own authentication flow before spawning it in Navide.
 - Confirm the executable name: `claude`, `codex`, `agy`, or `grok`.
 
+## A CLI reports that its own auto-update failed
+
+A pane may show a vendor message such as `✘ Auto-update failed`. Several panes updating the same CLI at once can collide, because a CLI's installation directory is shared across every pane and profile.
+
+- Open Settings → CLI Agents. A failed update is reported there with the time, the versions involved, and which config home recorded it.
+- Use the update action on that row. It runs the CLI's own update command (`claude update`, `codex update`, `agy update`, `grok update`) in a terminal; Navide never updates a CLI itself. A CLI without an update subcommand links to its vendor documentation instead.
+- Set Auto-update to Manual for that CLI if collisions repeat. Navide then passes the vendor's own opt-out variable to every spawn, and you update from this panel instead.
+- A running session keeps the binary it started with; restart the pane after an update.
+
 ## A pane remains on “detecting session”
 
 Codex, Antigravity, and Grok rely on log or database discovery to bind a new CLI session to a Navide pane.

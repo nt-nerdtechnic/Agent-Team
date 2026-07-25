@@ -212,7 +212,7 @@ This historical section is retired. Use `git status` for the current working tre
 │  ├─ projects.py         per-workspace state                 │
 │  ├─ fs_service.py       Explorer safe file CRUD             │
 │  ├─ editor_service.py   editor AI rewrite/complete (LLM)    │
-│  ├─ onboarding_deps.py  env detection + install gate        │
+│  ├─ onboarding_deps.py  env detect + gate + CLI maintenance │
 │  ├─ tokens_store.py     dedup + persist                     │
 │  ├─ roles_store.py      registry                            │
 │  ├─ stages_store.py     registry (slots-based)              │

@@ -1153,6 +1153,48 @@
     "confirmBtn": "全部關閉",
     "done": "已關閉 {count} 個 session"
   },
+  "cli-manage": {
+    "title": "安裝與更新",
+    "hint": "Navide 只執行各 CLI 官方自己的指令，不自行更新它們。指令一律來自內建 registry，執行前會先顯示實際指令。",
+    "redetect": "重新偵測",
+    "detecting": "偵測中…",
+    "opening": "開啟中…",
+    "update": "更新（{command}）",
+    "update-via-docs": "依官方文件更新",
+    "doctor": "診斷（{command}）",
+    "install": "安裝",
+    "last-update": "上次更新：",
+    "duplicates": "偵測到 {count} 套實體安裝",
+    "active": "作用中",
+    "use-this": "改用這個",
+    "remove": "移除",
+    "autoupdate": "自動更新",
+    "terminal-opened": "已在終端機開啟：{command}。完成後請按「重新偵測」。",
+    "terminal-failed": "無法開啟終端機：{error}",
+    "command-unavailable": "{label} 沒有提供這個動作的官方指令。",
+    "footnote": "更新會替換 binary；已在執行中的 session 要重新啟動才會套用新版本。",
+    "status": {
+      "ok": "已安裝",
+      "missing": "未安裝",
+      "outdated": "版本過舊"
+    },
+    "method": {
+      "npm": "npm",
+      "homebrew": "Homebrew",
+      "native": "官方安裝程式",
+      "script": "官方安裝腳本",
+      "unknown": "來源不明"
+    },
+    "outcome": {
+      "success": "成功",
+      "failed": "失敗",
+      "unknown": "未知"
+    },
+    "policy": {
+      "vendor": "維持官方預設",
+      "manual": "手動（在此更新）"
+    }
+  },
   "cli-health": {
     "kicker": "CLI 健康檢查",
     "title": "Navide 發現 Agent CLI 設定問題",
@@ -1169,7 +1211,8 @@
     "verify-desc": "在終端機完成處理後重新偵測；問題消失時，這個導覽會自動關閉。",
     "finding": {
       "duplicate_install": "偵測到多套實體安裝",
-      "probe_failed": "啟動探針失敗"
+      "probe_failed": "啟動探針失敗",
+      "update_failed": "CLI 自己的更新失敗"
     },
     "active": "目前作用中的 binary",
     "alternate": "其他安裝",

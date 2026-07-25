@@ -43,6 +43,7 @@ import type { UpdateChannel } from '../../../shared/updater'
 import { useGitAccounts } from '../composables/useGitAccounts'
 import GitAccountsPane from './GitAccountsPane.vue'
 import CliAccountsPane from './CliAccountsPane.vue'
+import CliManagementPanel from './CliManagementPanel.vue'
 import type { useCliProfiles } from '../composables/useCliProfiles'
 import KeyboardShortcutsHelp from './KeyboardShortcutsHelp.vue'
 import ExtensionsPane from './ExtensionsPane.vue'
@@ -2150,6 +2151,9 @@ async function plDelete(id: string, name: string) {
                 <span v-if="spec.hint" class="cli-agent-hint">{{ spec.hint }}</span>
               </li>
             </ul>
+          </section>
+          <section class="ap-section" data-settings-section="cli-agents-maintenance">
+            <CliManagementPanel v-if="activeTab === 'cliAgents'" :backend="props.backend" />
           </section>
         </div>
 

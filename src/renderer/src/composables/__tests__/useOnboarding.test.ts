@@ -2,6 +2,12 @@ import { describe, it, expect } from 'vitest'
 import { cliHealthGuideForLaunch, useOnboarding, type OnboardStatus } from '../useOnboarding'
 import { createMockBackend, withScope, flush } from './mockBackend'
 
+// Fields every backend-sent dep carries; irrelevant to the gate assertions here.
+const depBase = {
+  binary_path: '', resolved_path: '', install_method: '', update_cmd: '',
+  doctor_cmd: '', autoupdate_env: '', autoupdate_policy: '',
+} as const
+
 function status(opts: { found?: boolean; cli?: boolean; ollama?: boolean; models?: string[] }): OnboardStatus {
   const found = opts.found ?? true
   const cli = opts.cli ?? true
@@ -11,9 +17,9 @@ function status(opts: { found?: boolean; cli?: boolean; ollama?: boolean; models
   const all = found && cli && analyzer
   return {
     deps: [
-      { id: 'node', label: 'Node', description: '', group: 'foundation', status: found ? 'ok' : 'missing', version: '22.0.0', min_version: '22.0.0', optional: false, needs_terminal: false, can_install: true, docs_url: '' },
-      { id: 'claude', label: 'Claude', description: '', group: 'agent_cli', status: cli ? 'ok' : 'missing', version: '', min_version: '', optional: true, needs_terminal: true, can_install: true, docs_url: '' },
-      { id: 'ollama', label: 'Ollama', description: '', group: 'analyzer', status: ollama ? 'ok' : 'missing', version: '', min_version: '', optional: false, needs_terminal: false, can_install: true, docs_url: '' },
+      { ...depBase, id: 'node', label: 'Node', description: '', group: 'foundation', status: found ? 'ok' : 'missing', version: '22.0.0', min_version: '22.0.0', optional: false, needs_terminal: false, can_install: true, docs_url: '' },
+      { ...depBase, id: 'claude', label: 'Claude', description: '', group: 'agent_cli', status: cli ? 'ok' : 'missing', version: '', min_version: '', optional: true, needs_terminal: true, can_install: true, docs_url: '' },
+      { ...depBase, id: 'ollama', label: 'Ollama', description: '', group: 'analyzer', status: ollama ? 'ok' : 'missing', version: '', min_version: '', optional: false, needs_terminal: false, can_install: true, docs_url: '' },
     ],
     models,
     model_catalog: [
@@ -119,5 +125,68 @@ describe('useOnboarding', () => {
     ready.complete = true
     ready.cli_health.needs_attention = false
     expect(cliHealthGuideForLaunch(ready)).toBeNull()
+  })
+
+  it('does not open the repair guide for a failed vendor update alone', () => {
+    const ready = status({})
+    ready.complete = true
+    ready.cli_health = {
+      entries: [],
+      findings: [{
+        type: 'update_failed',
+        agent_key: 'claude',
+        label: 'Claude',
+        records: [{
+          scope: 'profile:4ad13e88', home: '/tmp/p', timestamp: '2026-07-25T00:07:12.372Z',
+          outcome: 'failed', status: 'install_failed', version_from: '2.1.219', version_to: '',
+        }],
+      }],
+      fingerprint: '0123456789abcdef',
+      dismissed: false,
+      needs_attention: true,
+    }
+    expect(cliHealthGuideForLaunch(ready)).toBeNull()
+
+    ready.cli_health.findings.push({ type: 'probe_failed', agent_key: 'codex', label: 'Codex' })
+    expect(cliHealthGuideForLaunch(ready)?.fingerprint).toBe('0123456789abcdef')
+  })
+
+  it('maintenance runs the vendor command in a terminal and never composes one', async () => {
+    const calls: string[] = []
+    ;(globalThis as unknown as { window: { agentTeam: { openTerminal: (c: string) => Promise<{ ok: boolean }> } } }).window = {
+      agentTeam: { openTerminal: (c: string) => { calls.push(c); return Promise.resolve({ ok: true }) } },
+    }
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', status({}))
+    mock.setResponse('onboarding.cli_maintenance', { ok: true, needs_terminal: true, command: 'claude update' })
+    const { result, scope } = withScope(() => useOnboarding(mock.backend))
+    await result.refresh()
+
+    await result.runMaintenance('claude', 'update')
+    await flush()
+
+    expect(calls).toEqual(['claude update'])
+    const sent = mock.sent.find((s) => s.type === 'onboarding.cli_maintenance')
+    expect(sent?.payload).toEqual({ agent_key: 'claude', action: 'update' })
+    scope.stop()
+  })
+
+  it('maintenance opens no terminal when the vendor ships no such command', async () => {
+    const calls: string[] = []
+    ;(globalThis as unknown as { window: { agentTeam: { openTerminal: (c: string) => Promise<{ ok: boolean }> } } }).window = {
+      agentTeam: { openTerminal: (c: string) => { calls.push(c); return Promise.resolve({ ok: true }) } },
+    }
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', status({}))
+    mock.setResponse('onboarding.cli_maintenance', { ok: false, error: 'no official update command', docs_url: 'https://docs' })
+    const { result, scope } = withScope(() => useOnboarding(mock.backend))
+    await result.refresh()
+
+    const outcome = await result.runMaintenance('kimi', 'update')
+    await flush()
+
+    expect(calls).toEqual([])
+    expect(outcome?.ok).toBe(false)
+    scope.stop()
   })
 })

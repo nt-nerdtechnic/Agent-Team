@@ -43,6 +43,57 @@ def test_detect_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     assert r["status"] == "missing" and r["version"] == ""
 
 
+# ── install-method classification (picks which official command applies) ──────
+def _home(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
+    monkeypatch.setattr(ob.Path, "home", classmethod(lambda _cls: home))
+
+
+def test_install_method_npm_wins_over_prefix(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _home(monkeypatch, tmp_path)
+    npm_in_brew = "/opt/homebrew/lib/node_modules/@openai/codex/bin/codex.js"
+    assert ob._install_method(npm_in_brew) == "npm"
+
+
+def test_install_method_homebrew() -> None:
+    assert ob._install_method("/opt/homebrew/bin/ollama") == "homebrew"
+    assert ob._install_method("/usr/local/Cellar/uv/0.5.0/bin/uv") == "homebrew"
+
+
+def test_install_method_native_vendor_installer(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _home(monkeypatch, tmp_path)
+    assert ob._install_method(f"{tmp_path}/.local/share/claude/versions/2.1.219") == "native"
+
+
+def test_install_method_vendor_script(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _home(monkeypatch, tmp_path)
+    assert ob._install_method(f"{tmp_path}/.grok/bin/grok") == "script"
+    assert ob._install_method(f"{tmp_path}/.local/bin/agy") == "script"
+
+
+def test_install_method_unknown_is_not_guessed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _home(monkeypatch, tmp_path)
+    assert ob._install_method("/usr/bin/claude") == "unknown"
+    assert ob._install_method("") == ""
+
+
+def test_detect_dep_exposes_official_maintenance_commands(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ob.shutil, "which", lambda _x: "/usr/local/bin/claude")
+    monkeypatch.setattr(ob.subprocess, "run", _fake_run("2.1.219 (Claude Code)"))
+    r = ob.detect_dep(ob.DEPS_BY_ID["claude"])
+    assert r["update_cmd"] == "claude update"
+    assert r["doctor_cmd"] == "claude doctor"
+    assert "install_method" in r
+
+
+def test_registry_carries_update_command_or_docs_for_every_agent_cli() -> None:
+    """Every agent CLI must offer an official update path or vendor docs —
+    never a Navide-invented command."""
+    for dep in ob.DEPS:
+        if dep.group != "agent_cli":
+            continue
+        assert dep.update_cmd or dep.docs_url, dep.id
+
+
 # ── gate computation ──────────────────────────────────────────────────────────
 def _deps(found_ok: bool, cli_ok: bool, ollama_ok: bool) -> list[dict]:
     return [
@@ -93,6 +144,30 @@ def test_install_needs_terminal_returns_command_without_running(monkeypatch: pyt
     r = ob.install_dep("homebrew")
     assert r["ok"] is True and r["needs_terminal"] is True and r["command"]
     assert called["ran"] is False
+
+
+def test_maintenance_command_returns_the_vendor_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    ran = []
+    monkeypatch.setattr(ob.subprocess, "run", lambda *a, **k: ran.append(a))
+
+    result = ob.maintenance_command("claude", "update")
+
+    assert result == {"ok": True, "needs_terminal": True, "command": "claude update",
+                      "docs_url": "https://docs.anthropic.com/claude-code"}
+    assert ran == []  # resolving a command must never execute it
+
+
+def test_maintenance_command_rejects_unknown_agent_and_action() -> None:
+    assert ob.maintenance_command("nope", "update")["ok"] is False
+    assert ob.maintenance_command("claude", "rm -rf /")["ok"] is False
+    assert ob.maintenance_command("claude", "")["ok"] is False
+
+
+def test_maintenance_command_points_at_docs_when_vendor_has_none() -> None:
+    result = ob.maintenance_command("kimi", "update")
+    assert result["ok"] is False
+    assert result["docs_url"] == "https://moonshotai.github.io/kimi-cli/en/"
+    assert "command" not in result
 
 
 def test_pull_model_rejects_bad_name() -> None:
@@ -428,3 +503,160 @@ def test_cli_binary_selection_persists_path_and_fingerprint_atomically(
         "cli_binary_overrides": {"claude": str(binary)},
         "dismissed_cli_health": "0123456789abcdef",
     }
+
+
+# ── update state: read back what the CLI itself recorded ─────────────────────
+def _write_update_result(home: Path, **fields: object) -> None:
+    home.mkdir(parents=True, exist_ok=True)
+    record = {"timestamp": "2026-07-25T00:07:12.372Z", "path": "native",
+              "outcome": "failed", "status": "install_failed",
+              "version_from": "2.1.219", "version_to": None}
+    record.update(fields)
+    (home / ".last-update-result.json").write_text(json.dumps(record), encoding="utf-8")
+
+
+def _patch_homes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, Path]:
+    """Return (default claude home, profiles root for claude)."""
+    _home(monkeypatch, tmp_path)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    root = tmp_path / ".navide" / "cli-profiles"
+    monkeypatch.setattr(ob, "default_profiles_root", lambda: root)
+    return tmp_path / ".claude", root / "claude"
+
+
+def test_read_update_state_covers_default_and_profile_homes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    default_home, profiles = _patch_homes(monkeypatch, tmp_path)
+    _write_update_result(default_home, timestamp="2026-07-24T17:37:51.096Z",
+                         outcome="success", status="success", version_to="2.1.211")
+    _write_update_result(profiles / "4ad13e88")
+
+    records = ob.read_update_state(ob.DEPS_BY_ID["claude"])
+
+    assert [r["scope"] for r in records] == ["profile:4ad13e88", "default"]  # newest first
+    assert records[0]["status"] == "install_failed"
+
+
+def test_read_update_state_ignores_missing_and_corrupt_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    default_home, profiles = _patch_homes(monkeypatch, tmp_path)
+    default_home.mkdir(parents=True)
+    (default_home / ".last-update-result.json").write_text("{not json", encoding="utf-8")
+    (profiles / "empty").mkdir(parents=True)
+
+    assert ob.read_update_state(ob.DEPS_BY_ID["claude"]) == []
+
+
+def test_read_update_state_is_empty_for_cli_without_state_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _patch_homes(monkeypatch, tmp_path)
+    assert ob.read_update_state(ob.DEPS_BY_ID["grok"]) == []
+
+
+def _claude_health(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, version: str) -> dict:
+    binary = _make_executable(tmp_path / "bin" / "claude")
+    monkeypatch.setattr(ob, "_distinct_executables", lambda command: (
+        [_candidate_entry(binary)] if command == "claude" else []
+    ))
+    monkeypatch.setattr(ob, "_dismissed_cli_health_fingerprint", lambda: "")
+    status = _claude_status(binary)
+    status["version"] = version
+    return ob.build_cli_health([status])
+
+
+def test_cli_health_surfaces_a_failed_vendor_update(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _default, profiles = _patch_homes(monkeypatch, tmp_path)
+    _write_update_result(profiles / "4ad13e88")
+
+    health = _claude_health(monkeypatch, tmp_path, version="2.1.219")
+
+    finding = next(f for f in health["findings"] if f["type"] == "update_failed")
+    assert finding["records"][0]["status"] == "install_failed"
+    assert finding["records"][0]["scope"] == "profile:4ad13e88"
+    assert health["needs_attention"] is True
+    entry = next(e for e in health["entries"] if e["agent_key"] == "claude")
+    assert entry["update_state"][0]["outcome"] == "failed"
+
+
+def test_cli_health_ignores_a_failure_the_cli_has_since_moved_past(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _default, profiles = _patch_homes(monkeypatch, tmp_path)
+    _write_update_result(profiles / "4ad13e88", version_from="2.1.219")
+
+    health = _claude_health(monkeypatch, tmp_path, version="2.1.230")
+
+    assert [f["type"] for f in health["findings"]] == []
+    assert health["needs_attention"] is False
+
+
+def test_update_failure_fingerprint_changes_on_a_newer_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _default, profiles = _patch_homes(monkeypatch, tmp_path)
+    _write_update_result(profiles / "4ad13e88")
+    first = _claude_health(monkeypatch, tmp_path, version="2.1.219")["fingerprint"]
+
+    _write_update_result(profiles / "4ad13e88", timestamp="2026-07-26T01:00:00.000Z")
+    second = _claude_health(monkeypatch, tmp_path, version="2.1.219")["fingerprint"]
+
+    assert first and second and first != second
+
+
+# ── auto-update policy (the vendor's own switch) ─────────────────────────────
+def test_autoupdate_defaults_to_vendor_behaviour(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_flag_paths(monkeypatch, tmp_path)
+    assert ob.cli_autoupdate_policy("claude") == "vendor"
+    assert ob.spawn_env_for("claude") == {}
+
+
+def test_autoupdate_manual_injects_the_vendor_env_var(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_flag_paths(monkeypatch, tmp_path)
+    assert ob.set_cli_autoupdate_policy("claude", "manual")["ok"] is True
+    assert ob.cli_autoupdate_policy("claude") == "manual"
+    assert ob.spawn_env_for("claude") == {"DISABLE_AUTOUPDATER": "1"}
+
+    ob.set_cli_autoupdate_policy("claude", "vendor")
+    assert ob.spawn_env_for("claude") == {}
+
+
+def test_autoupdate_rejects_agents_without_a_vendor_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_flag_paths(monkeypatch, tmp_path)
+    assert ob.set_cli_autoupdate_policy("grok", "manual")["ok"] is False
+    assert ob.set_cli_autoupdate_policy("claude", "off")["ok"] is False
+    assert ob.spawn_env_for("grok") == {}
+    assert ob.spawn_env_for("unknown") == {}
+
+
+def test_cli_health_entries_carry_registry_commands(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Entry commands come from the registry, never from a per-agent hardcode."""
+    installed = {"kimi": _make_executable(tmp_path / "bin" / "kimi"),
+                 "grok": _make_executable(tmp_path / "bin" / "grok")}
+    monkeypatch.setattr(ob, "_distinct_executables", lambda command: (
+        [_candidate_entry(installed[command])] if command in installed else []
+    ))
+    monkeypatch.setattr(ob, "_probe_alternate", _probe_ok)
+    monkeypatch.setattr(ob, "_dismissed_cli_health_fingerprint", lambda: "")
+
+    entries = {e["agent_key"]: e for e in ob.build_cli_health([])["entries"]}
+
+    # kimi ships a doctor but no update subcommand — no invented command.
+    assert entries["kimi"]["diagnostic_command"] == "kimi doctor"
+    assert entries["kimi"]["update_command"] == ""
+    assert entries["kimi"]["docs_url"]
+    # grok ships an update but no doctor — diagnostics fall back to the probe.
+    assert entries["grok"]["update_command"] == "grok update"
+    assert entries["grok"]["diagnostic_command"] == "grok --version"

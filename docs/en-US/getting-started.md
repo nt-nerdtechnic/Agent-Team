@@ -46,6 +46,8 @@ The onboarding wizard checks the required runtimes and detects available agent C
 
 Navide may request Automation, Files and Folders, or Full Disk Access depending on how agents and terminals interact with the workspace. Review the reason shown by macOS before granting a permission.
 
+After onboarding, Settings → CLI Agents lists every detected CLI with its version, install method, and last update result, and runs that CLI's own update and diagnostic commands.
+
 ## Run a first task
 
 For the smallest successful test:

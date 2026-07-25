@@ -28,6 +28,15 @@
 - 在 Navide 啟動 CLI 前，先完成該 CLI 自己的 Authentication Flow。
 - 確認 Executable Name：`claude`、`codex`、`agy` 或 `grok`。
 
+## CLI 回報自己的 Auto-update 失敗
+
+Pane 內可能出現 CLI 自己的訊息，例如 `✘ Auto-update failed`。同一個 CLI 的安裝目錄由所有 Pane 與 Profile 共用，多個 Pane 同時更新時可能互相衝突。
+
+- 開啟 Settings → CLI Agents。失敗的更新會列在該 CLI 的那一列，含時間、版本與記錄該結果的 Config Home。
+- 使用該列的更新動作。它會在終端機執行 CLI 自己的更新指令（`claude update`、`codex update`、`agy update`、`grok update`）；Navide 不會自行更新 CLI。沒有更新子指令的 CLI 則改為連結到官方文件。
+- 若衝突反覆發生，可把該 CLI 的 Auto-update 設為手動。Navide 會在每次 Spawn 帶入該 CLI 官方提供的關閉變數，改由這個面板更新。
+- 執行中的 Session 會沿用啟動時的 Binary；更新後請重新啟動該 Pane。
+
 ## Pane 一直停在「detecting session」
 
 Codex、Antigravity 與 Grok 依賴 Log 或 Database Discovery，將新的 CLI Session 綁定到 Navide Pane。

@@ -130,18 +130,20 @@ Role and kickoff injection waits for the CLI's input box to become ready
 (CLI-quiet + echo tail-match), but a CLI with unusual prompt rendering may
 need tuning. Verify manually with a role-assigned spawn.
 
-### 10. Onboarding dependency entry (install assistance)
+### 10. Support registry entry (install, update, diagnose)
 
-**`backend/agent_team_backend/onboarding_deps.py:44`** — `DEPS` registry
+**`backend/agent_team_backend/onboarding_deps.py`** — `DEPS` registry
 
-Register the CLI so the onboarding wizard can detect it, offer one-click
-install, and re-check after installation:
+One declaration drives onboarding detection, one-click install, and the CLI
+management panel (Settings → CLI Agents). Adding a CLI here is a data change:
+the panel renders whatever the registry declares, with no UI code per CLI.
 
 ```python
 Dep("grok", "Grok CLI", "superagent-ai Grok coding agent", "agent_cli",
     ["grok", "--version"], r"(\d+\.\d+\.\d+)",
     install_cmd="curl -fsSL https://raw.githubusercontent.com/superagent-ai/grok-cli/main/install.sh | bash",
-    needs_terminal=True, optional=True, docs_url="https://grokcli.io"),
+    needs_terminal=True, optional=True, docs_url="https://grokcli.io",
+    update_cmd="grok update"),
 ```
 
 `needs_terminal=True` makes the wizard run the install in a real pane so the
@@ -149,6 +151,36 @@ user can complete any interactive auth. API-key-based CLIs (Grok needs
 `GROK_API_KEY`) can additionally be wired to the AI-chat settings store
 (`ai_chat_settings.py` already holds an `xai_api_key` field) and injected into
 the spawn env — see the per-pane env pattern in layer 8.
+
+**Maintenance fields — research these before adding the CLI.** Navide does not
+operate a CLI: it surfaces and runs the vendor's own commands, and never
+substitutes one of its own. Every field below is optional, and leaving it empty
+is the correct answer when the vendor ships nothing — the UI then points at
+`docs_url` instead of guessing.
+
+| Field | What to fill in | Find it with |
+|-------|-----------------|--------------|
+| `update_cmd` | The CLI's own update subcommand | `<cli> --help` |
+| `doctor_cmd` | The CLI's own diagnostic | `<cli> --help` |
+| `npm_package` | npm package name, when npm is a supported install route | `npm ls -g` |
+| `update_state_file` | File where the CLI records its own update outcome, relative to a config home | vendor docs / inspect the config dir |
+| `config_home_env` / `config_home_default` | Env var that relocates the config home, and its default under `$HOME` | vendor docs |
+| `autoupdate_env` | The vendor's own auto-update opt-out env var | vendor docs / `strings` on the binary |
+
+Verified at the time of writing: `claude update` / `claude doctor`,
+`codex update` / `codex doctor`, `agy update`, `grok update`, `kimi doctor`
+(Kimi Code ships no update subcommand, so its `update_cmd` stays empty).
+
+Two derived behaviours come for free once the fields are set:
+
+- **Install method** (`_install_method`) is classified from where the binary
+  physically resolves — npm / homebrew / native / script — and shown in the
+  panel. Anything unrecognised stays `unknown` rather than being guessed.
+- **Failed vendor updates** are read back from `update_state_file` across the
+  default home, `config_home_env`, and every profile home under
+  `~/.navide/cli-profiles/<agent>/`, and raised as an `update_failed` finding.
+  A failure whose `version_from` no longer matches the installed version is
+  treated as stale and dropped.
 
 ### Effort summary
 
@@ -163,7 +195,8 @@ the spawn env — see the per-pane env pattern in layer 8.
 | Token stats | `src/renderer/src/components/TokenStatsPanel.vue` | trivial |
 | Per-pane home | `backend/agent_team_backend/codex_home.py` pattern | none–medium (CLI-dependent) |
 | Settle heuristics | `App.vue` injection path | usually none |
-| Onboarding install | `backend/agent_team_backend/onboarding_deps.py` | trivial |
+| Support registry (install/update/doctor) | `backend/agent_team_backend/onboarding_deps.py` | trivial (research: low) |
+| CLI management panel | `src/renderer/src/components/CliManagementPanel.vue` | none (registry-driven) |
 
 ---
 

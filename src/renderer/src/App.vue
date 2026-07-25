@@ -224,7 +224,11 @@ async function checkOnboarding(): Promise<void> {
     // One-time migration for selections made by renderer versions that stored
     // only UI settings. Persist the same path + fingerprint in the backend so
     // startup probing and reminder suppression survive every kind of restart.
-    if (health?.needs_attention && health.fingerprint) {
+    // Only findings the repair guide can act on: a failed vendor update raises
+    // needs_attention too, but it is handled in CLI management and must not be
+    // silently dismissed here.
+    const repairable = health?.findings.some((finding) => finding.type !== 'update_failed') ?? false
+    if (repairable && health?.needs_attention && health.fingerprint) {
       for (const entry of health.entries) {
         const selectedPath = settingsGet(`agentTeam.cliBinary.${entry.agent_key}`, '').trim()
         if (!selectedPath || !entry.candidates.some((candidate) => candidate.path === selectedPath)) continue

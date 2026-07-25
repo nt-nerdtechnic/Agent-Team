@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from .applog import app_data_dir
+from .profiles_store import default_profiles_root
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,18 @@ class Dep:
     needs_terminal: bool = False     # interactive (sudo / OAuth) → external Terminal
     optional: bool = False
     docs_url: str = ""
+    # Maintenance — the CLI's OWN official commands. Navide never wraps, parses
+    # or replaces them; it only surfaces and runs them. '' = the vendor ships no
+    # such command, in which case the UI points at docs_url instead of guessing.
+    update_cmd: str = ""             # e.g. 'claude update'
+    doctor_cmd: str = ""             # e.g. 'claude doctor'
+    npm_package: str = ""            # npm package name when installable via npm
+    # Where the CLI itself records the outcome of its own auto-update. Navide
+    # only reads what the vendor already wrote to disk.
+    update_state_file: str = ""      # relative to a config home, e.g. '.last-update-result.json'
+    config_home_env: str = ""        # env var overriding the config home, e.g. 'CLAUDE_CONFIG_DIR'
+    config_home_default: str = ""    # default config home relative to $HOME, e.g. '.claude'
+    autoupdate_env: str = ""         # vendor's own opt-out env var, e.g. 'DISABLE_AUTOUPDATER'
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────
@@ -70,24 +83,36 @@ DEPS: list[Dep] = [
     Dep("claude", "Claude Code", "Anthropic Claude CLI", "agent_cli",
         ["claude", "--version"], r"(\d+\.\d+\.\d+)",
         install_cmd="npm install -g @anthropic-ai/claude-code", needs_terminal=True,
-        optional=True, docs_url="https://docs.anthropic.com/claude-code"),
+        optional=True, docs_url="https://docs.anthropic.com/claude-code",
+        update_cmd="claude update", doctor_cmd="claude doctor",
+        npm_package="@anthropic-ai/claude-code",
+        update_state_file=".last-update-result.json",
+        config_home_env="CLAUDE_CONFIG_DIR", config_home_default=".claude",
+        autoupdate_env="DISABLE_AUTOUPDATER"),
     Dep("codex", "Codex", "OpenAI Codex CLI", "agent_cli",
         ["codex", "--version"], r"(\d+\.\d+\.\d+)",
         install_cmd="npm install -g @openai/codex", needs_terminal=True,
-        optional=True, docs_url=""),
+        optional=True, docs_url="",
+        update_cmd="codex update", doctor_cmd="codex doctor",
+        npm_package="@openai/codex"),
     Dep("antigravity", "Antigravity", "Google Antigravity CLI", "agent_cli",
         ["agy", "--version"], r"(\d+\.\d+\.\d+)",
         install_cmd="curl -fsSL https://antigravity.google/cli/install.sh | bash",
         needs_terminal=True, optional=True,
-        docs_url="https://antigravity.google/docs/cli-getting-started"),
+        docs_url="https://antigravity.google/docs/cli-getting-started",
+        update_cmd="agy update"),
     Dep("grok", "Grok CLI", "superagent-ai Grok coding agent", "agent_cli",
         ["grok", "--version"], r"(\d+\.\d+\.\d+)",
         install_cmd="curl -fsSL https://raw.githubusercontent.com/superagent-ai/grok-cli/main/install.sh | bash",
-        needs_terminal=True, optional=True, docs_url="https://grokcli.io"),
+        needs_terminal=True, optional=True, docs_url="https://grokcli.io",
+        update_cmd="grok update"),
+    # Kimi Code ships `kimi doctor` but no update subcommand — update_cmd stays
+    # empty so the UI sends the user to the vendor docs instead of inventing one.
     Dep("kimi", "Kimi Code", "Moonshot AI Kimi Code CLI", "agent_cli",
         ["kimi", "--version"], r"(\d+\.\d+\.\d+)",
         install_cmd="curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash",
-        needs_terminal=True, optional=True, docs_url="https://moonshotai.github.io/kimi-cli/en/"),
+        needs_terminal=True, optional=True, docs_url="https://moonshotai.github.io/kimi-cli/en/",
+        doctor_cmd="kimi doctor"),
     Dep("ollama", "Ollama", "Local LLM runtime (required for Analyzer)", "analyzer",
         ["ollama", "--version"], r"(\d+\.\d+\.\d+)",
         install_cmd="brew install ollama", docs_url="https://ollama.com"),
@@ -187,6 +212,31 @@ def _meets_min(version: str, min_version: str) -> bool:
     return _version_tuple(version) >= _version_tuple(min_version)
 
 
+def _install_method(resolved_path: str) -> str:
+    """Classify HOW a binary got installed, from where it physically lives.
+
+    Drives which official maintenance command applies, so it must not guess:
+    anything unrecognised stays 'unknown' and the UI falls back to vendor docs.
+
+        npm       .../node_modules/<pkg>/...   (nvm, brew-node, system npm alike)
+        homebrew  /opt/homebrew/... | /usr/local/Cellar/...
+        native    ~/.local/share/<tool>/...    (vendor's own installer)
+        script    ~/.<tool>/bin/... | ~/.local/bin/...  (vendor install script)
+    """
+    if not resolved_path:
+        return ""
+    if "/node_modules/" in resolved_path:
+        return "npm"
+    if resolved_path.startswith(("/opt/homebrew/", "/usr/local/Cellar/")):
+        return "homebrew"
+    home = str(Path.home())
+    if resolved_path.startswith(f"{home}/.local/share/"):
+        return "native"
+    if resolved_path.startswith(f"{home}/.") and "/bin/" in resolved_path:
+        return "script"
+    return "unknown"
+
+
 def detect_dep(dep: Dep) -> dict[str, Any]:
     """Run the dep's check_cmd and classify ok | missing | outdated."""
     binary_path = shutil.which(dep.check_cmd[0]) or ""
@@ -235,6 +285,11 @@ def detect_dep(dep: Dep) -> dict[str, Any]:
         "docs_url": dep.docs_url,
         "binary_path": binary_path,
         "resolved_path": os.path.realpath(binary_path) if binary_path else "",
+        "install_method": _install_method(os.path.realpath(binary_path) if binary_path else ""),
+        "update_cmd": dep.update_cmd,
+        "doctor_cmd": dep.doctor_cmd,
+        "autoupdate_env": dep.autoupdate_env,
+        "autoupdate_policy": cli_autoupdate_policy(dep.id) if dep.autoupdate_env else "",
         "exit_code": exit_code,
         "signal": signal_name,
         "duration_ms": duration_ms,
@@ -296,12 +351,6 @@ def _probe_alternate(dep: Dep, executable: str) -> dict[str, Any]:
     }
 
 
-_NPM_AGENT_PACKAGES = {
-    "claude": "@anthropic-ai/claude-code",
-    "codex": "@openai/codex",
-}
-
-
 def _same_npm_install(first: dict[str, Any], second: dict[str, Any], package: str) -> bool:
     """True when both candidates resolve into the same npm prefix of `package`."""
     if not package:
@@ -316,7 +365,7 @@ def _same_npm_install(first: dict[str, Any], second: dict[str, Any], package: st
 
 def _candidate_removal(candidate: dict[str, Any], dep: Dep, version: str) -> dict[str, str]:
     """Return a confirmed removal command only when ownership is unambiguous."""
-    package = _NPM_AGENT_PACKAGES.get(dep.id, "")
+    package = dep.npm_package
     resolved = str(candidate.get("resolved_path") or "")
     path = str(candidate.get("path") or "")
     package_marker = f"/node_modules/{package}/" if package else ""
@@ -332,6 +381,71 @@ def _candidate_removal(candidate: dict[str, Any], dep: Dep, version: str) -> dic
         f"case \"$answer\" in [Yy]*) {uninstall} ;; *) echo 'Cancelled.' ;; esac"
     )
     return {"manager": "npm", "command": confirmed}
+
+
+def _config_homes(dep: Dep) -> list[tuple[str, Path]]:
+    """Every config home where ``dep`` may have written state, deduped by path.
+
+    A CLI writes its update result into whichever config home the run used, so
+    a profile pane's failure lands in that profile's home and is invisible from
+    the default one — all of them have to be checked.
+    """
+    homes: list[tuple[str, Path]] = []
+    if dep.config_home_default:
+        homes.append(("default", Path.home() / dep.config_home_default))
+    env_home = os.environ.get(dep.config_home_env, "") if dep.config_home_env else ""
+    if env_home:
+        homes.append(("env", Path(env_home)))
+    try:
+        for entry in sorted((default_profiles_root() / dep.id).iterdir()):
+            if entry.is_dir():
+                homes.append((f"profile:{entry.name}", entry))
+    except OSError:
+        pass  # no profiles for this agent
+    seen: set[str] = set()
+    unique: list[tuple[str, Path]] = []
+    for scope, home in homes:
+        key = os.path.realpath(home)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append((scope, home))
+    return unique
+
+
+def read_update_state(dep: Dep) -> list[dict[str, Any]]:
+    """The CLI's own last-update records across its config homes, newest first.
+
+    Pure read-back of what the vendor already wrote — Navide never authors these
+    files and never infers an outcome the CLI did not record.
+    """
+    if not dep.update_state_file:
+        return []
+    records: list[dict[str, Any]] = []
+    for scope, home in _config_homes(dep):
+        try:
+            data = json.loads((home / dep.update_state_file).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        records.append({
+            "scope": scope,
+            "home": str(home),
+            "timestamp": str(data.get("timestamp") or ""),
+            "outcome": str(data.get("outcome") or ""),
+            "status": str(data.get("status") or ""),
+            "version_from": str(data.get("version_from") or ""),
+            "version_to": str(data.get("version_to") or ""),
+        })
+    records.sort(key=lambda record: record["timestamp"], reverse=True)
+    return records
+
+
+def _stale_update_failure(record: dict[str, Any], current_version: str) -> bool:
+    """True when a failure predates the version now installed (already moved on)."""
+    recorded_from = str(record.get("version_from") or "")
+    return bool(recorded_from and current_version and recorded_from != current_version)
 
 
 def build_cli_health(dep_statuses: list[dict[str, Any]]) -> dict[str, Any]:
@@ -364,7 +478,7 @@ def build_cli_health(dep_statuses: list[dict[str, Any]]) -> dict[str, Any]:
             # candidates are always removable (removing them cannot lose a
             # working CLI), working ones only when a different physical
             # install also probes ok.
-            package = _NPM_AGENT_PACKAGES.get(dep.id, "")
+            package = dep.npm_package
             removable = probe.get("status") != "ok" or any(
                 other_probe.get("status") == "ok"
                 and not _same_npm_install(candidate, other_candidate, package)
@@ -380,17 +494,34 @@ def build_cli_health(dep_statuses: list[dict[str, Any]]) -> dict[str, Any]:
                 **candidate,
                 **probe,
                 "is_primary": is_primary,
+                "install_method": _install_method(str(candidate.get("resolved_path") or "")),
                 "install_manager": removal["manager"],
                 "removal_command": removal["command"],
             })
+        update_records = read_update_state(dep)
         entry = {
             "agent_key": dep.id,
             "label": dep.label,
-            "diagnostic_command": f"{dep.check_cmd[0]} doctor" if dep.id == "claude" else " ".join(dep.check_cmd),
+            "diagnostic_command": dep.doctor_cmd or " ".join(dep.check_cmd),
+            "update_command": dep.update_cmd,
+            "docs_url": dep.docs_url,
+            "update_state": update_records,
             "candidates": detailed_candidates,
         }
         cli_entries.append(entry)
         primary = next((candidate for candidate in detailed_candidates if candidate["is_primary"]), detailed_candidates[0])
+        failed_updates = [
+            record for record in update_records
+            if record["outcome"] == "failed"
+            and not _stale_update_failure(record, str(primary.get("version") or ""))
+        ]
+        if failed_updates:
+            findings.append({
+                "type": "update_failed",
+                "agent_key": dep.id,
+                "label": dep.label,
+                "records": failed_updates,
+            })
         if primary["status"] != "ok":
             findings.append({
                 "type": "probe_failed",
@@ -410,6 +541,13 @@ def build_cli_health(dep_statuses: list[dict[str, Any]]) -> dict[str, Any]:
         {
             "type": finding["type"],
             "agent_key": finding["agent_key"],
+            # Only update_failed carries records; keeping the key absent
+            # otherwise preserves existing fingerprints (and dismissals).
+            **({"records": [
+                {"home": record["home"], "timestamp": record["timestamp"],
+                 "status": record["status"]}
+                for record in finding["records"]
+            ]} if finding.get("records") else {}),
             "candidates": [
                 {
                     "resolved_path": candidate["resolved_path"],
@@ -504,6 +642,38 @@ def get_status() -> dict[str, Any]:
         "model_catalog": MODEL_CATALOG,
         "cli_health": build_cli_health(deps),
     }
+
+
+# ── Maintenance (registry-driven, official commands only) ────────────────────
+MAINTENANCE_ACTIONS = ("update", "doctor", "install")
+
+
+def maintenance_command(dep_id: str, action: str) -> dict[str, Any]:
+    """Resolve the vendor's own maintenance command for ``dep_id``.
+
+    The caller passes an action id, never a command string: everything runnable
+    comes from the registry. A vendor that ships no such command yields an
+    error plus its docs URL — Navide does not substitute one of its own.
+    """
+    dep = DEPS_BY_ID.get(dep_id)
+    if dep is None:
+        return {"ok": False, "error": f"unknown dependency: {dep_id!r}"}
+    if action not in MAINTENANCE_ACTIONS:
+        return {"ok": False, "error": f"unknown action: {action!r}"}
+    command = {
+        "update": dep.update_cmd,
+        "doctor": dep.doctor_cmd,
+        "install": dep.install_cmd,
+    }[action]
+    if not command:
+        return {
+            "ok": False,
+            "error": f"{dep.label} has no official {action} command",
+            "docs_url": dep.docs_url,
+        }
+    # Always interactive: an update may prompt, authenticate or need sudo, so it
+    # belongs in a terminal the user can see and answer.
+    return {"ok": True, "needs_terminal": True, "command": command, "docs_url": dep.docs_url}
 
 
 # ── Install (whitelist-driven) ────────────────────────────────────────────────
@@ -692,3 +862,51 @@ def select_cli_binary(agent_key: str, path: str, fingerprint: str) -> dict[str, 
     except OSError as error:
         return {"ok": False, "error": str(error)}
     return {"ok": True, "agent_key": agent_key, "path": canonical_path}
+
+
+# ── Auto-update policy (the vendor's own switch, not a Navide mechanism) ──────
+AUTOUPDATE_POLICIES = ("vendor", "manual")
+
+
+def cli_autoupdate_policy(agent_key: str) -> str:
+    """'vendor' (default — the CLI updates itself as it always has) or 'manual'."""
+    _migrate_legacy_flag()
+    policies = _read_state().get("cli_autoupdate")
+    if not isinstance(policies, dict):
+        return "vendor"
+    policy = str(policies.get(agent_key) or "")
+    return policy if policy in AUTOUPDATE_POLICIES else "vendor"
+
+
+def set_cli_autoupdate_policy(agent_key: str, policy: str) -> dict[str, Any]:
+    dep = DEPS_BY_ID.get(agent_key)
+    if dep is None or not dep.autoupdate_env:
+        return {"ok": False, "error": "agent has no vendor auto-update switch"}
+    if policy not in AUTOUPDATE_POLICIES:
+        return {"ok": False, "error": f"unknown policy: {policy!r}"}
+    state_path = _flag_path()
+    _migrate_legacy_flag()
+    try:
+        with _STATE_LOCK:
+            data = _read_state(state_path)
+            policies = data.get("cli_autoupdate")
+            if not isinstance(policies, dict):
+                policies = {}
+            policies[agent_key] = policy
+            data["cli_autoupdate"] = policies
+            _write_state(data, state_path)
+    except OSError as error:
+        return {"ok": False, "error": str(error)}
+    return {"ok": True, "agent_key": agent_key, "policy": policy}
+
+
+def spawn_env_for(agent_key: str) -> dict[str, str]:
+    """Env the CLI's own auto-update switch needs for this spawn.
+
+    Empty unless the user explicitly chose 'manual', so the default spawn stays
+    byte-for-byte what the vendor expects.
+    """
+    dep = DEPS_BY_ID.get(agent_key)
+    if dep is None or not dep.autoupdate_env:
+        return {}
+    return {dep.autoupdate_env: "1"} if cli_autoupdate_policy(agent_key) == "manual" else {}

@@ -28,6 +28,15 @@
 - Navide で Spawn する前に CLI 独自の Authentication Flow を完了します。
 - Executable Name が `claude`、`codex`、`agy`、`grok` のいずれかであることを確認します。
 
+## CLI が自身の Auto-update の失敗を報告する
+
+Pane に `✘ Auto-update failed` のような CLI 自身のメッセージが表示されることがあります。CLI の Installation Directory はすべての Pane と Profile で共有されるため、複数の Pane が同時に更新すると衝突する場合があります。
+
+- Settings → CLI Agents を開きます。失敗した更新は該当 CLI の行に、時刻・バージョン・記録した Config Home とともに表示されます。
+- その行の更新アクションを使用します。CLI 自身の更新コマンド（`claude update`、`codex update`、`agy update`、`grok update`）を Terminal で実行します。Navide が CLI を更新することはありません。更新サブコマンドを持たない CLI は、代わりに公式ドキュメントへリンクします。
+- 衝突が繰り返す場合は、その CLI の Auto-update を手動に設定します。Navide は Spawn ごとにベンダー自身の Opt-out 変数を渡し、更新はこのパネルから行います。
+- 実行中の Session は起動時の Binary を保持します。更新後は Pane を再起動してください。
+
 ## Pane が「detecting session」のままになる
 
 Codex、Antigravity、Grok は、Log または Database Discovery を利用して新しい CLI Session を Navide Pane に関連付けます。

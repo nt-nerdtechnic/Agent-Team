@@ -99,6 +99,6 @@ These tools are the Intervention surface of the wider engineering environment. N
 
 ## Settings and portability
 
-Settings cover roles, pipelines, MCP servers, analyzer behavior, AI providers, appearance, and keyboard shortcuts. Exported settings redact API keys and tokens. Review MCP commands and environment variables before enabling third-party servers.
+Settings cover roles, pipelines, MCP servers, analyzer behavior, AI providers, appearance, and keyboard shortcuts. CLI Agents additionally manages the installed coding CLIs: version, install method, duplicate installations, the result of the CLI's own last update, and buttons that run that CLI's official update and diagnostic commands in a terminal. Navide surfaces and runs vendor commands; it never updates a CLI itself. Exported settings redact API keys and tokens. Review MCP commands and environment variables before enabling third-party servers.
 
 `.agent-team/` is not currently a portability mechanism. Any future migration between machines should use an explicit local export/import flow with redaction and retention controls rather than Git synchronization.

@@ -1153,6 +1153,48 @@
     "confirmBtn": "Close all",
     "done": "Closed {count} session(s)"
   },
+  "cli-manage": {
+    "title": "Installation and updates",
+    "hint": "Navide runs each CLI's own official commands and never updates them itself. Commands come from the built-in registry; the exact command is shown before it runs.",
+    "redetect": "Re-detect",
+    "detecting": "Detecting…",
+    "opening": "Opening…",
+    "update": "Update ({command})",
+    "update-via-docs": "Update via vendor docs",
+    "doctor": "Diagnose ({command})",
+    "install": "Install",
+    "last-update": "Last update:",
+    "duplicates": "{count} physical installations found",
+    "active": "active",
+    "use-this": "Use this one",
+    "remove": "Remove",
+    "autoupdate": "Auto-update",
+    "terminal-opened": "Opened in Terminal: {command}. Click Re-detect when it finishes.",
+    "terminal-failed": "Could not open Terminal: {error}",
+    "command-unavailable": "{label} ships no official command for this action.",
+    "footnote": "Updates replace the binary; sessions already running keep the old one until they restart.",
+    "status": {
+      "ok": "installed",
+      "missing": "not installed",
+      "outdated": "outdated"
+    },
+    "method": {
+      "npm": "npm",
+      "homebrew": "Homebrew",
+      "native": "native installer",
+      "script": "vendor script",
+      "unknown": "unknown source"
+    },
+    "outcome": {
+      "success": "succeeded",
+      "failed": "failed",
+      "unknown": "unknown"
+    },
+    "policy": {
+      "vendor": "Vendor default",
+      "manual": "Manual (I update here)"
+    }
+  },
   "cli-health": {
     "kicker": "CLI health check",
     "title": "Navide found an agent CLI setup issue",
@@ -1169,7 +1211,8 @@
     "verify-desc": "After finishing in Terminal, run detection again. This guide closes automatically when the issue is gone.",
     "finding": {
       "duplicate_install": "Multiple physical installations",
-      "probe_failed": "Startup probe failed"
+      "probe_failed": "Startup probe failed",
+      "update_failed": "The CLI's own update failed"
     },
     "active": "Active binary",
     "alternate": "Alternate installation",

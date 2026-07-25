@@ -46,6 +46,8 @@ Onboarding Wizard 會檢查必要 Runtime，並偵測可用的 Agent CLI。依�
 
 Navide 可能依照 Agent 與 Terminal 存取 Workspace 的方式，要求 Automation、Files and Folders 或 Full Disk Access。授予權限前，請先閱讀 macOS 顯示的原因。
 
+完成 Onboarding 後，Settings → CLI Agents 會列出每個偵測到的 CLI，包含版本、安裝方式與上次更新結果，並可執行該 CLI 自己的更新與診斷指令。
+
 ## 執行第一個任務
 
 最小成功測試：

@@ -2320,6 +2320,28 @@ async def onboarding_cli_health_dismiss(session: "Session", msg_id: str, msg_typ
     await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
 
 
+@handler("onboarding.cli_maintenance")
+async def onboarding_cli_maintenance(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    from . import app
+
+    result = app.onboarding_deps.maintenance_command(
+        str(payload.get("agent_key") or ""),
+        str(payload.get("action") or ""),
+    )
+    await session.send_json(make_response(msg_id, msg_type, result))
+
+
+@handler("onboarding.cli_autoupdate")
+async def onboarding_cli_autoupdate(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    from . import app
+
+    result = app.onboarding_deps.set_cli_autoupdate_policy(
+        str(payload.get("agent_key") or ""),
+        str(payload.get("policy") or ""),
+    )
+    await session.send_json(make_response(msg_id, msg_type, result))
+
+
 @handler("onboarding.cli_health.select_binary")
 async def onboarding_cli_health_select_binary(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
@@ -2766,6 +2788,8 @@ async def terminal_create(session: "Session", msg_id: str, msg_type: str, payloa
     )
     if startup_probe:
         metadata["startup_probe"] = startup_probe
+    # The vendor's own auto-update switch, only when the user opted out of it.
+    env.update(app.onboarding_deps.spawn_env_for(agent_key))
     # CLI account: panes are no longer bound per-pane. Every spawn uses the
     # agent's single global active account (the stored default). No default
     # (defaults[agent]=null → built-in Default, the user's real home) leaves

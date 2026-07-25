@@ -23,11 +23,17 @@ const health = ref(props.initialHealth)
 const checking = ref(false)
 const message = ref('')
 
-const affectedKeys = computed(() => new Set(health.value.findings.map((finding) => finding.agent_key)))
+// update_failed is reported by the CLI itself and is fixed by re-running the
+// vendor's update from CLI management — not by this repair guide.
+const affectedKeys = computed(() => new Set(
+  health.value.findings.filter((finding) => finding.type !== 'update_failed')
+    .map((finding) => finding.agent_key)))
 const affectedEntries = computed(() => health.value.entries.filter((entry) => affectedKeys.value.has(entry.agent_key)))
 
 function findingType(entry: CliHealthEntry): 'probe_failed' | 'duplicate_install' {
-  return health.value.findings.find((finding) => finding.agent_key === entry.agent_key)?.type ?? 'duplicate_install'
+  const finding = health.value.findings.find(
+    (item) => item.agent_key === entry.agent_key && item.type !== 'update_failed')
+  return finding?.type === 'probe_failed' ? 'probe_failed' : 'duplicate_install'
 }
 
 async function openDiagnostics(entry: CliHealthEntry): Promise<void> {

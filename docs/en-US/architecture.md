@@ -160,7 +160,7 @@ An agent integration currently spans:
 - Frontend agent key and launch specification
 - CLI readiness and session-marker behavior
 - Resume-command syntax
-- Backend whitelist and onboarding dependency
+- Backend whitelist and support-registry entry (detection, install, and the CLI's own update and diagnostic commands)
 - Provider log or database reader
 - Session attribution and token display
 - CLI-specific concurrency or home-directory handling when required
