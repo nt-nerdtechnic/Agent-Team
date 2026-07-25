@@ -7,7 +7,12 @@ import {
   groupRowColToPos,
   findFileLinkAt,
   findFileLinkMatchAt,
+  findUrlLinkMatchAt,
+  findUrlMatches,
+  trimUrlTrailing,
   splitMatchAtRowStarts,
+  cellColToStrCol,
+  strColToCellCol,
 } from '../useTerminal'
 
 // Minimal stand-in for the xterm buffer surface getWrappedLineGroup reads.
@@ -39,7 +44,9 @@ describe('getWrappedLineGroup', () => {
   it('keeps an isolated line as its own group', () => {
     const term = mockTerm([{ text: 'hello world' }, { text: '' }])
     const g = getWrappedLineGroup(term, 0)
-    expect(g).toEqual({ groupStart: 0, lineLengths: [11], strips: [0], fullText: 'hello world' })
+    expect(g).toEqual({
+      groupStart: 0, lineLengths: [11], strips: [0], fullText: 'hello world', heuristicBreaks: [],
+    })
   })
 
   it('joins genuine xterm wraps via isWrapped regardless of content', () => {
@@ -47,12 +54,14 @@ describe('getWrappedLineGroup', () => {
     const g = getWrappedLineGroup(term, 0)
     expect(g.fullText).toBe('abc defghi')
     expect(g.strips).toEqual([0, 0])
+    expect(g.heuristicBreaks).toEqual([])
   })
 
   it('joins CLI pre-wrapped rows and strips the continuation gutter', () => {
     const g = getWrappedLineGroup(mockTerm(PREWRAP_ROWS), 0)
     expect(g.fullText).toContain(PREWRAP_FULL)
     expect(g.strips).toEqual([0, 5])
+    expect(g.heuristicBreaks).toEqual([PREWRAP_ROWS[0].text.length])
   })
 
   it('finds the same group when starting from the continuation row', () => {
@@ -161,5 +170,121 @@ describe('findFileLinkAt', () => {
   it('ignores URLs and out-of-range positions', () => {
     expect(findFileLinkAt('see https://example.com/x', 10)).toBeNull()
     expect(findFileLinkAt('/Users/a/b.md', -1)).toBeNull()
+  })
+})
+
+describe('trimUrlTrailing', () => {
+  it('sheds sentence punctuation the prose contributed', () => {
+    expect(trimUrlTrailing('https://example.com/a.')).toBe('https://example.com/a')
+    expect(trimUrlTrailing('https://example.com/a,')).toBe('https://example.com/a')
+    expect(trimUrlTrailing('https://example.com/a?x=1;')).toBe('https://example.com/a?x=1')
+  })
+
+  it('drops an unbalanced closing bracket but keeps a matched one', () => {
+    expect(trimUrlTrailing('https://example.com/a)')).toBe('https://example.com/a')
+    expect(trimUrlTrailing('https://en.wikipedia.org/wiki/Foo_(bar)')).toBe(
+      'https://en.wikipedia.org/wiki/Foo_(bar)'
+    )
+  })
+})
+
+describe('findUrlLinkMatchAt', () => {
+  it('returns the URL under the click with query string intact', () => {
+    const text = 'open https://example.com/a?x=1&y=2 now'
+    expect(findUrlLinkMatchAt(text, 10)).toEqual({
+      text: 'https://example.com/a?x=1&y=2',
+      index: 5,
+    })
+  })
+
+  it('stops at CJK prose glued after the URL', () => {
+    const text = '請看 https://example.com/docs。謝謝'
+    expect(findUrlLinkMatchAt(text, 5)?.text).toBe('https://example.com/docs')
+  })
+
+  it('returns null off the URL, on trimmed punctuation, and for non-URLs', () => {
+    const text = 'open https://example.com/a. now'
+    expect(findUrlLinkMatchAt(text, 0)).toBeNull()
+    expect(findUrlLinkMatchAt(text, 26)).toBeNull() // the trimmed '.'
+    expect(findUrlLinkMatchAt('/Users/a/b.md', 3)).toBeNull()
+  })
+})
+
+describe('findUrlMatches with heuristic breaks', () => {
+  it('never lets a URL cross a heuristic row join (glued prose)', () => {
+    // Pre-wrap glue: 'see https://example.com/docs' + 'and then run …' joined
+    // with no separator. The break offset caps the URL at the row boundary.
+    const text = 'see https://example.com/docsand then run'
+    expect(findUrlMatches(text, [28])).toEqual([{ index: 4, text: 'https://example.com/docs' }])
+    // Without the break the glue would poison the URL.
+    expect(findUrlMatches(text)[0].text).toBe('https://example.com/docsand')
+  })
+
+  it('lets a URL span a genuine xterm wrap (no break recorded)', () => {
+    const wrapped = mockTerm([
+      { text: 'https://example.com/very/long' },
+      { text: '/path?q=1', wrapped: true },
+    ])
+    const g = getWrappedLineGroup(wrapped, 0)
+    expect(findUrlMatches(g.fullText, g.heuristicBreaks)).toEqual([
+      { index: 0, text: 'https://example.com/very/long/path?q=1' },
+    ])
+  })
+
+  it('finds a URL that starts after a break', () => {
+    const text = 'https://a.com/xhttps://b.com/y'
+    expect(findUrlMatches(text, [15])).toEqual([
+      { index: 0, text: 'https://a.com/x' },
+      { index: 15, text: 'https://b.com/y' },
+    ])
+  })
+})
+
+describe('cell column ↔ string offset mapping', () => {
+  // A buffer line surface with per-cell widths: CJK chars occupy two cells
+  // (width 2 then width 0) but one translateToString position.
+  function mockTermWithCells(text: string): Terminal {
+    const cells: number[] = []
+    for (const ch of text) {
+      if (/[\u1100-\uFFFF]/.test(ch)) cells.push(2, 0)
+      else cells.push(1)
+    }
+    return {
+      buffer: {
+        active: {
+          getLine: () => ({
+            isWrapped: false,
+            length: cells.length,
+            translateToString: () => text,
+            getCell: (x: number) => ({ getWidth: () => cells[x] }),
+          }),
+        },
+      },
+    } as unknown as Terminal
+  }
+
+  it('maps cell columns past CJK glyphs back to string offsets', () => {
+    const term = mockTermWithCells('請看 https://x.com')
+    // '請'=cells 0-1, '看'=cells 2-3, ' '=cell 4, 'h'=cell 5.
+    expect(cellColToStrCol(term, 0, 0)).toBe(0)
+    expect(cellColToStrCol(term, 0, 1)).toBe(0) // trailing half-cell → same char
+    expect(cellColToStrCol(term, 0, 2)).toBe(1)
+    expect(cellColToStrCol(term, 0, 5)).toBe(3) // 'h' of https
+  })
+
+  it('maps string offsets to the glyph-leading cell column', () => {
+    const term = mockTermWithCells('請看 https://x.com')
+    expect(strColToCellCol(term, 0, 0)).toBe(0)
+    expect(strColToCellCol(term, 0, 1)).toBe(2)
+    expect(strColToCellCol(term, 0, 3)).toBe(5)
+  })
+
+  it('is the identity for pure-ASCII rows and getCell-less mocks', () => {
+    const ascii = mockTermWithCells('plain ascii row')
+    expect(cellColToStrCol(ascii, 0, 7)).toBe(7)
+    expect(strColToCellCol(ascii, 0, 7)).toBe(7)
+    const bare = mockTerm([{ text: 'no cells here' }])
+    expect(cellColToStrCol(bare, 0, 4)).toBe(4)
+    expect(strColToCellCol(bare, 0, 4)).toBe(4)
   })
 })

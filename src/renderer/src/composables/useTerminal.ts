@@ -169,6 +169,30 @@ function splitSuffix(raw: string): { filepath: string; line?: number } {
   return { filepath: raw.slice(0, m.index), line: lineStr ? parseInt(lineStr, 10) : undefined }
 }
 
+// URLs are matched separately from file paths: raw terminal URLs are ASCII, so
+// stopping at any non-ASCII naturally sheds CJK prose glued around them. The
+// trailing punctuation the surrounding prose contributed (".", ",", ")") is
+// trimmed off afterwards; closing brackets survive only while a matching
+// opener exists inside the URL itself.
+const URL_LINK_RE = /https?:\/\/[^\s<>"'`\u00A0-\uFFFF]+/gi
+const _URL_TRAIL = new Set(['.', ',', ';', ':', '!', '?'])
+const _URL_BRACKETS: Record<string, string> = { ')': '(', ']': '[', '}': '{' }
+export function trimUrlTrailing(raw: string): string {
+  let url = raw
+  while (url.length) {
+    const last = url[url.length - 1]
+    if (_URL_TRAIL.has(last)) { url = url.slice(0, -1); continue }
+    const open = _URL_BRACKETS[last]
+    if (open) {
+      const opens = url.split(open).length - 1
+      const closes = url.split(last).length - 1
+      if (closes > opens) { url = url.slice(0, -1); continue }
+    }
+    break
+  }
+  return url
+}
+
 type _AgentApi = {
   openEditorWindow?: (a: Record<string, unknown>) => Promise<unknown>
   openPlansWindow?: (a: { workspace_path: string; rel_path?: string }) => Promise<unknown>
@@ -285,6 +309,11 @@ export interface WrappedLineGroup {
   lineLengths: number[] // per-row contribution length in fullText (gutter stripped)
   strips: number[] // per-row count of leading gutter chars dropped from fullText
   fullText: string // concatenated text of every row in the group
+  // fullText offsets where a content-heuristic (non-isWrapped) join occurred.
+  // Paths may cross these (the click handler disambiguates via fs.stat_path);
+  // URLs must not — an unverifiable URL absorbing the next row's prose would
+  // open a wrong address, so URL matching treats these as hard breaks.
+  heuristicBreaks: number[]
 }
 
 // A line made of nothing but box-drawing glyphs and spaces — the frame of a
@@ -359,6 +388,7 @@ export function getWrappedLineGroup(term: import('@xterm/xterm').Terminal, buffe
 
   const lineLengths: number[] = []
   const strips: number[] = []
+  const heuristicBreaks: number[] = []
   let fullText = ''
   for (let r = groupStart, steps = 0; steps < 16; r++, steps++) {
     const lineText = lineTextAt(r)
@@ -370,9 +400,10 @@ export function getWrappedLineGroup(term: import('@xterm/xterm').Terminal, buffe
     lineLengths.push(lineText.length - strip)
     fullText += lineText.slice(strip)
     if (!continuesFromPrev(r + 1)) break
+    if (!buffer.getLine(r + 1)?.isWrapped) heuristicBreaks.push(fullText.length)
   }
 
-  return { groupStart, lineLengths, strips, fullText }
+  return { groupStart, lineLengths, strips, fullText, heuristicBreaks }
 }
 
 /** Convert a 0-based offset into `group.fullText` back to an absolute buffer row/col. */
@@ -401,6 +432,42 @@ export function groupRowColToPos(group: WrappedLineGroup, bufferRow: number, col
   return pos
 }
 
+// Cell column ↔ translateToString offset for one buffer row. A double-width
+// glyph (CJK, full-width punctuation) occupies two cells but one string
+// position — translateToString emits nothing for the trailing half-cell — so
+// the two coordinate spaces diverge after any wide character. Identity when
+// the line surface lacks getCell (unit-test mocks); pure-ASCII rows map 1:1.
+export function cellColToStrCol(
+  term: import('@xterm/xterm').Terminal,
+  bufferRow: number,
+  cellCol: number
+): number {
+  const line = term.buffer.active.getLine(bufferRow)
+  if (!line || typeof line.getCell !== 'function') return cellCol
+  let str = -1
+  for (let x = 0; x <= cellCol && x < line.length; x++) {
+    if ((line.getCell(x)?.getWidth() ?? 1) !== 0) str++
+  }
+  return Math.max(0, str)
+}
+
+export function strColToCellCol(
+  term: import('@xterm/xterm').Terminal,
+  bufferRow: number,
+  strCol: number
+): number {
+  const line = term.buffer.active.getLine(bufferRow)
+  if (!line || typeof line.getCell !== 'function') return strCol
+  let str = -1
+  for (let x = 0; x < line.length; x++) {
+    if ((line.getCell(x)?.getWidth() ?? 1) !== 0) {
+      str++
+      if (str === strCol) return x
+    }
+  }
+  return strCol
+}
+
 /** The FILE_LINK_RE match containing 0-based `pos` in `text`, or null. */
 export function findFileLinkMatchAt(text: string, pos: number): { text: string; index: number } | null {
   if (pos < 0) return null
@@ -415,6 +482,35 @@ export function findFileLinkMatchAt(text: string, pos: number): { text: string; 
 
 export function findFileLinkAt(text: string, pos: number): string | null {
   return findFileLinkMatchAt(text, pos)?.text ?? null
+}
+
+/** Every URL in `text`, trailing punctuation trimmed. `breaks` (fullText
+ *  offsets of heuristic row joins, see WrappedLineGroup.heuristicBreaks) are
+ *  hard boundaries a URL never crosses. Shared by the link provider and the
+ *  click handler so the underline range and the click hitbox always agree. */
+export function findUrlMatches(text: string, breaks: number[] = []): Array<{ index: number; text: string }> {
+  const bounds = [0, ...breaks.filter((b) => b > 0 && b < text.length), text.length]
+  const out: Array<{ index: number; text: string }> = []
+  for (let i = 0; i < bounds.length - 1; i++) {
+    const seg = text.slice(bounds[i], bounds[i + 1])
+    URL_LINK_RE.lastIndex = 0
+    let m: RegExpExecArray | null
+    while ((m = URL_LINK_RE.exec(seg)) !== null) {
+      out.push({ index: bounds[i] + m.index, text: trimUrlTrailing(m[0]) })
+    }
+  }
+  return out
+}
+
+/** The URL match containing 0-based `pos` in `text` (trailing punctuation
+ *  already trimmed), or null. */
+export function findUrlLinkMatchAt(
+  text: string,
+  pos: number,
+  breaks: number[] = []
+): { text: string; index: number } | null {
+  if (pos < 0) return null
+  return findUrlMatches(text, breaks).find((u) => pos >= u.index && pos < u.index + u.text.length) ?? null
 }
 
 /** Split a fullText regex match back into per-path pieces at row boundaries
@@ -454,23 +550,38 @@ function buildFileLinkProvider(
     provideLinks(y, callback) {
       if (!isCmdHeld()) { callback(undefined); return }
       const group = getWrappedLineGroup(term, y - 1)
-      FILE_LINK_RE.lastIndex = 0
       const links: import('@xterm/xterm').ILink[] = []
+
+      // groupPosToRowCol yields string columns; xterm ranges are cell columns,
+      // and the two diverge after any double-width (CJK) glyph on the row.
+      const pushLink = (index: number, text: string): void => {
+        const start = groupPosToRowCol(group, index)
+        const end = groupPosToRowCol(group, index + text.length - 1)
+        links.push({
+          range: {
+            start: { x: strColToCellCol(term, start.row, start.col) + 1, y: start.row + 1 },
+            end: { x: strColToCellCol(term, end.row, end.col) + 1, y: end.row + 1 },
+          },
+          text,
+          decorations: { underline: true, pointerCursor: true },
+          activate: () => { /* click handled by _cmdClickHandler */ },
+        })
+      }
+
+      // URLs first — their path segment would otherwise also match
+      // FILE_LINK_RE, so file matches overlapping a URL range are skipped.
+      const urls = findUrlMatches(group.fullText, group.heuristicBreaks)
+      for (const u of urls) pushLink(u.index, u.text)
+
+      FILE_LINK_RE.lastIndex = 0
       let m: RegExpExecArray | null
       while ((m = FILE_LINK_RE.exec(group.fullText)) !== null) {
         if (m[0].includes('://')) continue
+        const s = m.index
+        const e = m.index + m[0].length
+        if (urls.some((u) => s < u.index + u.text.length && e > u.index)) continue
         for (const piece of splitMatchAtRowStarts(group, m.index, m[0])) {
-          const start = groupPosToRowCol(group, piece.index)
-          const end = groupPosToRowCol(group, piece.index + piece.text.length - 1)
-          links.push({
-            range: {
-              start: { x: start.col + 1, y: start.row + 1 },
-              end: { x: end.col + 1, y: end.row + 1 },
-            },
-            text: piece.text,
-            decorations: { underline: true, pointerCursor: true },
-            activate: () => { /* click handled by _cmdClickHandler */ },
-          })
+          pushLink(piece.index, piece.text)
         }
       }
       callback(links.length ? links : undefined)
@@ -1286,7 +1397,21 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       if (col < 0 || row < 0 || col >= term.cols || row >= term.rows) return
       const bufferRow = term.buffer.active.viewportY + row
       const group = getWrappedLineGroup(term, bufferRow)
-      const clickPos = groupRowColToPos(group, bufferRow, col)
+      // The click lands on a cell; the group's text positions are string
+      // offsets, which drift apart after any double-width (CJK) glyph.
+      const strCol = cellColToStrCol(term, bufferRow, col)
+      const clickPos = groupRowColToPos(group, bufferRow, strCol)
+
+      // A URL under the click routes straight to the default browser — checked
+      // before file paths, since a URL's path segment also matches FILE_LINK_RE.
+      const urlMatch = findUrlLinkMatchAt(group.fullText, clickPos, group.heuristicBreaks)
+      const openExternal = window.agentTeam?.openExternal
+      if (urlMatch && openExternal) {
+        event.preventDefault()
+        event.stopPropagation()
+        void openExternal(urlMatch.text)
+        return
+      }
 
       const match = findFileLinkMatchAt(group.fullText, clickPos)
       if (!match) return
@@ -1302,7 +1427,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         .find((p) => clickPos >= p.index && clickPos < p.index + p.text.length)
       const pieceRaw = piece?.text ?? match.text
       const rowText = term.buffer.active.getLine(bufferRow)?.translateToString(true) ?? ''
-      const singleRaw = findFileLinkAt(rowText, col)
+      const singleRaw = findFileLinkAt(rowText, strCol)
       const wsPath = opts?.workspacePath
 
       // A plan doc reference routes to its dedicated review window, not the
