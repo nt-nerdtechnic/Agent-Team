@@ -12,6 +12,8 @@ import {
   trimUrlTrailing,
   shedCjkProse,
   shedCjkPieces,
+  rootedTailCandidate,
+  visualWidth,
   splitMatchAtRowStarts,
   cellColToStrCol,
   strColToCellCol,
@@ -83,6 +85,20 @@ describe('getWrappedLineGroup', () => {
   it('does not join across a blank row', () => {
     const term = mockTerm([{ text: '/Users/a/one.md' }, { text: '' }, { text: '/Users/a/two.md' }])
     expect(getWrappedLineGroup(term, 0).fullText).toBe('/Users/a/one.md')
+  })
+
+  it('joins CJK-heavy pre-wrapped rows measured by cell width, not string length', () => {
+    // A CJK row near the 80-cell limit holds ~half the string characters of
+    // an ASCII neighbour; string-length comparison used to reject this join,
+    // truncating Chinese paths at every wrap point.
+    const rows = [
+      { text: 'x'.repeat(79) + '!' }, // long ASCII prose neighbour ('!' blocks gluing)
+      { text: '/Users/nt/' + '客'.repeat(34) }, // 78 cells but only 44 chars
+      { text: '戶'.repeat(28) + '/報告書 (1).html' },
+    ]
+    expect(visualWidth(rows[1].text)).toBe(78)
+    const g = getWrappedLineGroup(mockTerm(rows), 1)
+    expect(g.fullText).toBe(rows[1].text + rows[2].text)
   })
 
   it('keeps the clicked path intact in column-aligned output (git create mode)', () => {
@@ -220,6 +236,25 @@ describe('shedCjkProse', () => {
     // １ (U+FF11) and 々 are legitimate CJK filename characters — never split.
     expect(shedCjkProse('報告：第１章/内容.md')).toBe('第１章/内容.md')
     expect(shedCjkProse('日々の記録/memo.md')).toBeUndefined()
+  })
+})
+
+describe('rootedTailCandidate', () => {
+  // The real reported path: Chinese folder names containing spaces and
+  // half-width parens, which FILE_LINK_RE must exclude and so truncates.
+  const FULL =
+    '/Users/neillu/Library/CloudStorage/SynologyDrive-NT/01.客戶資料/003-執行中/恩典健康事業/01.專案管理/看護媒合平台 (1)/01.規劃開發/03.設計相關/報告書/20260725-測試帳號清單(含後台管理).html'
+
+  it('offers the whole tail from the rooted start, spaces and parens included', () => {
+    const text = '報告存放在：' + FULL
+    const t = rootedTailCandidate(text, text.indexOf('看護'))
+    expect(t?.text).toBe(FULL)
+    expect(t?.index).toBe(text.indexOf('/Users'))
+  })
+
+  it('returns undefined when there is no rooted path at/before the click', () => {
+    expect(rootedTailCandidate('相對路徑 src/foo.ts 而已', 6)).toBeUndefined()
+    expect(rootedTailCandidate('前面文字 /tmp/x.md', 2)).toBeUndefined() // click before the root
   })
 })
 

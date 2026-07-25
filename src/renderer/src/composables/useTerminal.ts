@@ -421,6 +421,17 @@ export function serializeRenderedBuffer(term: import('@xterm/xterm').Terminal, m
   return lines.join('\n')
 }
 
+// Approximate rendered cell width of a string: CJK/full-width glyphs and
+// non-BMP glyphs (emoji) take two cells, everything else one. Mirrors the
+// wide ranges xterm's Unicode service treats as width 2 closely enough for
+// the pre-wrap width comparisons; exactness is not required there (slack 8).
+const _WIDE_CH_RE = /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]/
+export function visualWidth(s: string): number {
+  let w = 0
+  for (const ch of s) w += ch.length > 1 || _WIDE_CH_RE.test(ch) ? 2 : 1
+  return w
+}
+
 export function getWrappedLineGroup(term: import('@xterm/xterm').Terminal, bufferRow: number): WrappedLineGroup {
   const buffer = term.buffer.active
   const lineTextAt = (r: number): string | null => {
@@ -429,11 +440,14 @@ export function getWrappedLineGroup(term: import('@xterm/xterm').Terminal, buffe
   }
   const leadingWs = (s: string): number => s.length - s.trimStart().length
   // Whether row `r` could have been broken by the CLI's width limit: no row
-  // within the window is measurably longer than it.
+  // within the window is measurably longer than it. Lengths are VISUAL cell
+  // widths, not string lengths — the CLI wraps by cells, and a CJK-heavy row
+  // near the width limit holds roughly half the string characters of an ASCII
+  // row, so string-length comparison wrongly rejects the join for CJK paths.
   const nearWidthLimit = (r: number): boolean => {
-    const len = lineTextAt(r)?.length ?? 0
+    const len = visualWidth(lineTextAt(r) ?? '')
     for (let i = r - _PREWRAP_WINDOW; i <= r + _PREWRAP_WINDOW; i++) {
-      if (i !== r && (lineTextAt(i)?.length ?? 0) > len + _PREWRAP_SLACK) return false
+      if (i !== r && visualWidth(lineTextAt(i) ?? '') > len + _PREWRAP_SLACK) return false
     }
     return true
   }
@@ -565,6 +579,35 @@ export function findFileLinkMatchAt(text: string, pos: number): { text: string; 
 
 export function findFileLinkAt(text: string, pos: number): string | null {
   return findFileLinkMatchAt(text, pos)?.text ?? null
+}
+
+/** Whole-tail candidate for paths whose folder names contain characters the
+ *  path regex must exclude — spaces and half-width parens ("看護媒合平台 (1)")
+ *  truncate the regex match mid-path. From the FIRST rooted ('/' or '~') path
+ *  start at/before `pos`, the entire remaining logical line is offered as one
+ *  candidate; fs.stat arbitrates, so a line with trailing prose simply fails
+ *  through to the precise regex-match candidates. */
+export function rootedTailCandidate(
+  text: string,
+  pos: number
+): { index: number; text: string } | undefined {
+  FILE_LINK_RE.lastIndex = 0
+  let m: RegExpExecArray | null
+  while ((m = FILE_LINK_RE.exec(text)) !== null) {
+    if (m[0].includes('://')) continue
+    // The rooted start may hide inside a CJK-prefixed match
+    // ("報告存放在：/Users/…") — shed pieces recover the '/'-anchored piece.
+    let root = -1
+    if (m[0][0] === '/' || m[0][0] === '~') root = m.index
+    else {
+      const piece = shedCjkPieces(m[0]).find((p) => p.text[0] === '/' || p.text[0] === '~')
+      if (piece) root = m.index + piece.index
+    }
+    if (root < 0) continue
+    if (root > pos) return undefined
+    return { index: root, text: text.slice(root).trimEnd() }
+  }
+  return undefined
 }
 
 export interface UrlMatch {
@@ -1580,10 +1623,15 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         // follow are cut around the CLICK POSITION, so of two paths joined
         // by 、 the one under the cursor is the candidate.
         const shedPiece = shedCjkProse(pieceRaw, clickPos - pieceStart)
+        // Last resort: the whole tail from the first rooted path start —
+        // rescues folder names containing spaces/parens that truncate the
+        // regex match ("看護媒合平台 (1)/…"). Precise candidates keep priority.
+        const tail = rootedTailCandidate(group.fullText, clickPos)
         const cands = [
           pieceRaw, shedPiece,
           match.text, shedCjkProse(match.text, clickPos - match.index),
           singleRaw, singleMatch ? shedCjkProse(singleMatch.text, strCol - singleMatch.index) : undefined,
+          tail?.text, tail ? shedCjkProse(tail.text, clickPos - tail.index) : undefined,
         ].filter((c, i, arr): c is string => !!c && arr.indexOf(c) === i)
         const absList = cands.map((c) => resolveAbs(splitSuffix(c).filepath))
         const stats = await Promise.all(absList.map(statOk))
