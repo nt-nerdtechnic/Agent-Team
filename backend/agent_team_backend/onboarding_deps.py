@@ -21,6 +21,7 @@ import signal
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -485,8 +486,17 @@ def compute_gate(dep_statuses: list[dict[str, Any]], models: list[str]) -> dict[
 def get_status() -> dict[str, Any]:
     """Full onboarding status: every dep + installed models + gate."""
     _refresh_path_from_login_shell()
-    deps = [detect_dep(d) for d in DEPS]
-    models = detect_ollama_models()
+    # Probe every dep concurrently. Each detect_dep runs an independent
+    # `--version` subprocess (up to 8s each), so serial execution scaled the
+    # whole call with dep count — long enough that a concurrent WS request
+    # (e.g. workspace.list_recent) could time out. Fan out so the total cost
+    # is the slowest single probe, not their sum, and overlap the ollama probe.
+    with ThreadPoolExecutor(
+        max_workers=min(len(DEPS) + 1, 8), thread_name_prefix="dep-probe"
+    ) as pool:
+        models_future = pool.submit(detect_ollama_models)
+        deps = list(pool.map(detect_dep, DEPS))
+        models = models_future.result()
     return {
         "deps": deps,
         "models": models,

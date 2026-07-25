@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Awaitable, Callable
 
 from .ipc import make_error, make_event, make_response
@@ -29,6 +30,18 @@ if TYPE_CHECKING:
 Handler = Callable[["Session", str, str, dict], Awaitable[None]]
 
 _REGISTRY: dict[str, Handler] = {}
+
+# Dedicated pool for onboarding.status, whose dep probing (version subprocesses
+# + config-home scans) can run for seconds. Keeping it off asyncio's shared
+# default executor stops it from starving latency-sensitive requests such as
+# workspace.list_recent, which fire concurrently on the same connect event.
+# A single worker suffices: this pool only provides isolation — the actual
+# dep fan-out happens inside get_status's own pool — so concurrent
+# onboarding.status calls (multi-window connect) queue here rather than
+# racing, which also avoids doubling up first-run state migrations.
+_ONBOARDING_EXECUTOR = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="onboarding"
+)
 
 
 def handler(*msg_types: str) -> Callable[[Handler], Handler]:
@@ -2264,7 +2277,10 @@ async def shell_run(session: "Session", msg_id: str, msg_type: str, payload: dic
 async def onboarding_status(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
 
-    status = await asyncio.to_thread(app.onboarding_deps.get_status)
+    loop = asyncio.get_running_loop()
+    status = await loop.run_in_executor(
+        _ONBOARDING_EXECUTOR, app.onboarding_deps.get_status
+    )
     status["complete"] = app.onboarding_deps.is_complete()
     status["skip"] = app.onboarding_deps.should_skip()
     await session.send_json(make_response(msg_id, msg_type, status))
