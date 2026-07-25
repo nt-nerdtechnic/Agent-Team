@@ -151,7 +151,20 @@ export function createUpdaterService(
   async function check({ silent = false }: { silent?: boolean } = {}): Promise<UpdateActionResult> {
     if (!supported) return failure(state.message ?? 'Updates are not supported in this build.')
     if (checkPromise) return checkPromise
-    if (downloadPromise || state.status === 'downloaded' || state.status === 'installing') return success()
+    if (downloadPromise || state.status === 'installing') return success()
+    // Re-checking while an update is already downloaded is allowed — a newer
+    // release may have shipped since. Snapshot the ready-to-install state so
+    // anything short of a strictly newer version restores it (the provider
+    // re-emits 'update-available' even for the version we already hold).
+    const downloadedBefore = state.status === 'downloaded' ? snapshot() : null
+    const restoreDownloaded = (): void => {
+      if (!downloadedBefore) return
+      // Leave the state alone when the check surfaced a strictly newer version
+      // or a download cycle is already running/complete.
+      if (state.status === 'downloading' || state.status === 'downloaded') return
+      if (state.status === 'available' && state.availableVersion !== downloadedBefore.availableVersion) return
+      setState({ ...downloadedBefore })
+    }
 
     checkPromise = (async () => {
       silentActive = silent
@@ -175,6 +188,7 @@ export function createUpdaterService(
             setState({ status: 'not-available', currentVersion, checkedAt: new Date().toISOString() })
           }
         }
+        restoreDownloaded()
         if (state.status === 'error') return failure(state.message ?? 'Update check failed.')
         return success()
       } catch (error) {
@@ -186,11 +200,13 @@ export function createUpdaterService(
           if (state.status === 'checking') {
             setState({ status: 'not-available', currentVersion, checkedAt: new Date().toISOString() })
           }
+          restoreDownloaded()
           return failure(message)
         }
         if (state.status !== 'error' || state.message !== message) {
           setState({ status: 'error', currentVersion, message })
         }
+        restoreDownloaded()
         return failure(message)
       } finally {
         silentActive = false

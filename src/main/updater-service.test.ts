@@ -176,4 +176,45 @@ describe('createUpdaterService', () => {
     expect(result).toMatchObject({ ok: false, error: 'feed unavailable' })
     expect(service.getState()).toMatchObject({ status: 'error', message: 'feed unavailable' })
   })
+
+  it('re-checks while downloaded and moves to a strictly newer version', async () => {
+    const { client, raw, emit } = fakeClient()
+    const service = createUpdaterService(client, '1.0.0', true, vi.fn())
+    emit('update-downloaded', { version: '1.0.1' })
+
+    raw.checkForUpdates.mockImplementation(async () => {
+      emit('update-available', { version: '1.0.2' })
+      return { isUpdateAvailable: true, updateInfo: { version: '1.0.2' } }
+    })
+    expect((await service.check({ silent: true })).ok).toBe(true)
+    expect(raw.checkForUpdates).toHaveBeenCalledOnce()
+    expect(service.getState()).toMatchObject({ status: 'available', availableVersion: '1.0.2' })
+  })
+
+  it('keeps the downloaded state when a re-check finds the same version', async () => {
+    const { client, raw, emit } = fakeClient()
+    const service = createUpdaterService(client, '1.0.0', true, vi.fn())
+    emit('update-downloaded', { version: '1.0.1' })
+
+    raw.checkForUpdates.mockImplementation(async () => {
+      // The provider re-announces the version we already hold.
+      emit('update-available', { version: '1.0.1' })
+      return { isUpdateAvailable: true, updateInfo: { version: '1.0.1' } }
+    })
+    expect((await service.check({ silent: true })).ok).toBe(true)
+    expect(service.getState()).toMatchObject({ status: 'downloaded', availableVersion: '1.0.1', percent: 100 })
+  })
+
+  it('restores the downloaded state when a re-check fails', async () => {
+    const { client, raw, emit } = fakeClient()
+    const service = createUpdaterService(client, '1.0.0', true, vi.fn())
+    emit('update-downloaded', { version: '1.0.1' })
+
+    raw.checkForUpdates.mockRejectedValue(new Error('feed unavailable'))
+    expect((await service.check({ silent: true })).ok).toBe(false)
+    expect(service.getState()).toMatchObject({ status: 'downloaded', availableVersion: '1.0.1' })
+
+    expect((await service.check({ silent: false })).ok).toBe(false)
+    expect(service.getState()).toMatchObject({ status: 'downloaded', availableVersion: '1.0.1' })
+  })
 })
