@@ -3005,13 +3005,11 @@ async function rebuildPaneViaResume(
   if (!pane) return
   // If the CLI is actively working, skip rebuild so we don't kill in-flight work.
   // The PTY is alive and the pane is already bound — nothing to reattach, just leave it.
+  // Judged purely on displayStatus: it is built from CLEANED output bursts, so an
+  // idle TUI that keeps repainting its footer/cursor reads idle. (A raw-activity
+  // alt-buffer heuristic here flagged every idle Claude pane as busy.)
   const paneStatus = paneRefs[paneId]?.displayStatus as string | undefined
-  const rawActivityAt = paneRefs[paneId]?.lastRawActivityAt as number | undefined
-  const altBuffer = paneRefs[paneId]?.isAltBuffer as boolean | undefined
-  const busy =
-    paneStatus === 'running' ||
-    paneStatus === 'starting' ||
-    (altBuffer === true && typeof rawActivityAt === 'number' && Date.now() - rawActivityAt < 2000)
+  const busy = paneStatus === 'running' || paneStatus === 'starting'
   if (busy) {
     // In a batch (rebuild-all) the caller aggregates one toast; here just report.
     if (!opts?.suppressBusyToast) {
