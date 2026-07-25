@@ -1045,7 +1045,7 @@
     "downloaded": "更新已下載完成 — 重新啟動即可安裝。",
     "download": "下載",
     "install": "重新啟動以安裝",
-    "restart": "重新啟動",
+    "restart": "重新啟動以安裝新版本",
     "restarting": "正在重新啟動…",
     "update": "更新",
     "badge-ready": "v{version} 已就緒",

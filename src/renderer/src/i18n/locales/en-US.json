@@ -1045,7 +1045,7 @@
     "downloaded": "Update downloaded — restart to install.",
     "download": "Download",
     "install": "Restart to install",
-    "restart": "Restart",
+    "restart": "Restart for new version",
     "restarting": "Restarting…",
     "update": "Update",
     "badge-ready": "v{version} ready",
