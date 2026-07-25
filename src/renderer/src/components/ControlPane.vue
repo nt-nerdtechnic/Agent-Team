@@ -79,6 +79,14 @@ export interface SpawnPayload {
   stageId: StageId
   workspacePath: string
   customName?: string
+  /** CLI account profile id for an isolated LOGIN pane (Settings → CLI
+   *  accounts). Only set by that flow — never by the control pane itself. */
+  loginProfileId?: string
+  /** True for a LOGIN pane (Settings → CLI accounts sign-in, with or without
+   *  loginProfileId). Suppresses the session-marker bootstrap — the pane sits
+   *  at an interactive sign-in wizard, so nothing may inject input into it.
+   *  Only set by that flow — never by the control pane itself. */
+  isLogin?: boolean
 }
 
 export interface ResumePayload {

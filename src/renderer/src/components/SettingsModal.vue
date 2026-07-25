@@ -53,6 +53,9 @@ const props = defineProps<{
   backend: ReturnType<typeof useBackend>
   rolesApi: ReturnType<typeof useRoles>
   cliProfilesApi: ReturnType<typeof useCliProfiles>
+  /** True when a workspace is open — CLI account sign-in needs one to spawn
+   *  the login pane. */
+  workspaceOpen?: boolean
   stagesApi: ReturnType<typeof useStages>
   analyzerApi: ReturnType<typeof useAnalyzer>
   pipelinesApi?: ReturnType<typeof usePipelines>
@@ -63,6 +66,7 @@ const emit = defineEmits<{
   (e: 'close'): void
   (e: 'open-pipeline', id: string): void
   (e: 'reopen-onboarding'): void
+  (e: 'cli-login', agentKey: string, loginProfileId?: string): void
   (e: 'update:confirmBeforeClose', v: boolean): void
 }>()
 const confirmBeforeCloseModel = computed({
@@ -2408,14 +2412,14 @@ async function plDelete(id: string, name: string) {
 
         </div>
 
-        <div v-show="activeTab === 'accounts'" class="s-body" data-settings-section="accounts">
+        <div v-show="activeTab === 'accounts'" class="s-body accounts-body" data-settings-section="accounts">
           <div class="settings-meta-row">
             <span class="scope-badge">{{ settingsScopeNotes.accounts.scope }}</span>
             <span class="settings-path">{{ pathForTab('accounts') }}</span>
           </div>
           <GitAccountsPane :api="accountsApi" />
           <div data-settings-section="cli-accounts" style="margin: 4px 22px 22px; padding-top: 22px; border-top: 1px solid var(--border-default);">
-            <CliAccountsPane :api="cliProfilesApi" />
+            <CliAccountsPane :api="cliProfilesApi" :workspace-open="workspaceOpen ?? false" @login="(agentKey: string, loginProfileId?: string) => emit('cli-login', agentKey, loginProfileId)" />
           </div>
         </div>
 
@@ -2746,6 +2750,9 @@ async function plDelete(id: string, name: string) {
 }
 .cli-agents-body { overflow-y: auto; padding: 18px 22px; }
 .updates-body { overflow-y: auto; padding: 18px 22px; }
+/* Accounts tab stacks two tall blocks (git + CLI accounts); scroll the tab so
+   neither squeezes the other to zero height inside the overflow-hidden s-body. */
+.accounts-body { display: block; overflow-y: auto; }
 .settings-meta-row {
   display: flex;
   align-items: center;

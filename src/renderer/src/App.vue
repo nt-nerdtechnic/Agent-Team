@@ -2362,6 +2362,16 @@ interface SpawnInternal {
   /** Persisted messaging name carried through a restore so inter-CLI messaging
    *  addresses survive restart. */
   preferredMessagingName?: string
+  /** CLI account profile id for an isolated LOGIN pane: the backend spawns the
+   *  CLI inside that profile's login home so signing in never touches the live
+   *  credentials or running panes. Never persisted — a restored pane respawns
+   *  as a normal (live-home) pane. */
+  loginProfileId?: string
+  /** True for a LOGIN pane (Settings → CLI accounts sign-in, isolated or
+   *  live). Suppresses the Codex/Grok/Kimi session marker — and with it the
+   *  marker bootstrap, whose dismissStartupDialog + pasted marker + Enter
+   *  would inject input into the CLI's interactive sign-in wizard. */
+  isLogin?: boolean
 }
 
 /** Trailing line embedded in a Codex/Antigravity kickoff so the backend can match
@@ -2452,8 +2462,11 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
   // only resumes existing ids) — marker-based binding via ~/.grok/grok.db.
   // Kimi likewise can't pin an id (`kimi --session` only resumes existing ids);
   // its session id is captured from the wire.jsonl containing the marker.
+  // Login panes get NO marker: they sit at an interactive sign-in wizard, and
+  // the marker bootstrap (dismissStartupDialog + pasted marker + Enter) would
+  // inject input into it. No marker also means no session overlay for them.
   const sessionMarker =
-    !opts.isResume &&
+    !opts.isResume && !opts.isLogin &&
     (opts.agentKey === 'codex' || opts.agentKey === 'antigravity' || opts.agentKey === 'grok' || opts.agentKey === 'kimi')
       ? `at-pane:${id}`
       : ''
@@ -2590,6 +2603,7 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
       isResume: opts.isResume,
       restoreMode: opts.restoreMode,
       skipReattach: opts.restoreMode === 'fresh',
+      loginProfileId: opts.loginProfileId,
     })
 
     if ((ref.status as unknown as string) === 'running') {
@@ -2619,7 +2633,7 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
   return id
 }
 
-async function onManualSpawn(payload: SpawnPayload): Promise<void> {
+async function onManualSpawn(payload: SpawnPayload): Promise<string | null> {
   // Spawn into the tab the user is LOOKING AT. currentRunGroupId lags behind
   // activeTab for the synthetic "手動" tab (the sync watcher skips it), which
   // sent panes to a different tab than the one being viewed.
@@ -2638,6 +2652,8 @@ async function onManualSpawn(payload: SpawnPayload): Promise<void> {
     workspacePath: payload.workspacePath,
     origin: 'manual',
     runGroupId: spawnGroupId || undefined,
+    loginProfileId: payload.loginProfileId,
+    isLogin: payload.isLogin,
   })
   if (paneId) {
     await sendQuiet<ProjectPayload>('manual_pane.spawn', {
@@ -2670,6 +2686,47 @@ async function onManualSpawn(payload: SpawnPayload): Promise<void> {
       void sendSessionMarkerBootstrap(pane, `[pane ${pane.id.slice(0, 8)}]`)
     }
   }
+  return paneId
+}
+
+// Settings → CLI accounts "login": spawn a manual pane whose CLI runs its
+// direct sign-in flow (the backend rewrites the command, e.g. `claude auth
+// login`). With `loginProfileId`, the pane runs in that profile's isolated
+// login home (sign-in lands in the profile's slot; the active account and
+// running panes are untouched). Settings closes only after the pane actually
+// spawned — a failed spawn keeps the modal open and surfaces the error.
+// Login panes pending browser authorization, keyed by profile id. Only THIS
+// window (the one that spawned the pane) holds an entry, so exactly one
+// window closes the pane and toasts when the harvest broadcast arrives.
+const pendingLoginPanes = new Map<string, { paneId: string; agentKey: string }>()
+
+async function onCliLoginSpawn(agentKey: string, loginProfileId?: string): Promise<void> {
+  if (!currentWorkspace.value) {
+    notifyRestore.toast(i18n.global.t('settings.accounts.cli.login-no-workspace'), { type: 'error' })
+    return
+  }
+  const paneId = await onManualSpawn({
+    agentKey,
+    roleKey: '' as RoleKey,
+    stageId: '' as StageId,
+    workspacePath: currentWorkspace.value,
+    loginProfileId,
+    isLogin: true,
+  })
+  const ref = paneId ? paneRefs[paneId] : null
+  if (!paneId || (ref?.status as unknown as string) === 'error') {
+    const reason = (ref?.error as unknown as string) || ''
+    notifyRestore.toast(
+      i18n.global.t('settings.accounts.cli.login-spawn-failed') + (reason ? ` (${reason})` : ''),
+      { type: 'error' }
+    )
+    if (paneId) void onKill(paneId)
+    return
+  }
+  showSettings.value = false
+  if (loginProfileId) pendingLoginPanes.set(loginProfileId, { paneId, agentKey })
+  // The user must see the pane that is waiting for the browser authorization.
+  onFocusPane(paneId)
 }
 
 // Plan window "execute" dispatch: inject the plan-execution prompt into an
@@ -5827,6 +5884,32 @@ backend.on('terminal.exit', (raw) => {
   }
 })
 
+// CLI account login: the backend harvested a profile's isolated login home
+// the moment the browser sign-in completed. Close the disposable login pane
+// and confirm with the signed-in identity. Only the window that spawned the
+// pane holds a pendingLoginPanes entry, so exactly one window reacts.
+backend.on('cli_profiles.changed', (raw) => {
+  const ev = raw as {
+    reason?: string
+    harvestedProfileIds?: string[]
+    identities?: Record<string, Record<string, { email?: string | null }>>
+  }
+  if (ev?.reason !== 'login-harvest') return
+  for (const profileId of ev.harvestedProfileIds ?? []) {
+    const pending = pendingLoginPanes.get(profileId)
+    if (!pending) continue
+    pendingLoginPanes.delete(profileId)
+    if (panes.value.some((p) => p.id === pending.paneId)) void onKill(pending.paneId)
+    const email = ev.identities?.[pending.agentKey]?.[profileId]?.email || ''
+    notifyRestore.toast(
+      email
+        ? i18n.global.t('settings.accounts.cli.login-complete', { email })
+        : i18n.global.t('settings.accounts.cli.login-complete-no-email'),
+      { type: 'success' }
+    )
+  }
+})
+
 // One prompt per agent at a time: several panes of the same CLI exiting 127
 // together (e.g. a pipeline stage) must not stack identical dialogs.
 const cliInstallPromptOpen = new Set<string>()
@@ -8564,11 +8647,13 @@ function paneIsCommander(p: ActivePane): boolean {
       :analyzer-api="analyzerApi"
       :pipelines-api="pipelinesApi"
       :cli-profiles-api="cliProfilesApi"
+      :workspace-open="!!currentWorkspace"
       :initial-tab="settingsInitialTab"
       v-model:confirm-before-close="confirmBeforeClose"
       @close="showSettings = false; settingsInitialTab = 'roles'"
       @open-pipeline="(id) => { showSettings = false; controlPaneRef?.openPipelineDetail(id) }"
       @reopen-onboarding="() => { showSettings = false; reopenOnboarding() }"
+      @cli-login="onCliLoginSpawn"
     />
     <div v-if="showKbPanel" class="kb-overlay" @mousedown.self="showKbPanel = false">
       <div class="kb-panel">

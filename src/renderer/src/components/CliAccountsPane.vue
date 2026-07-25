@@ -7,7 +7,19 @@ import { i18n } from '../i18n'
 
 const props = defineProps<{
   api: ReturnType<typeof useCliProfiles>
+  /** True when a workspace is open. Sign-in spawns a login pane inside the
+   *  workspace, so without one the flow dead-ends — block it up front
+   *  (before the profile row is created) instead of leaving an orphan row. */
+  workspaceOpen?: boolean
 }>()
+
+// Asks the app shell to open a terminal pane running the agent's CLI so the
+// user can complete the CLI's own sign-in flow (it opens the browser itself).
+// With `loginProfileId` set, the pane runs in that profile's isolated login
+// home: the credentials land in the profile's slot without switching the
+// active account or touching running panes. Without it, the login runs live
+// (active account / built-in Default).
+const emit = defineEmits<{ (e: 'login', agentKey: string, loginProfileId?: string): void }>()
 
 const { error } = props.api
 
@@ -15,61 +27,86 @@ function supported(agentKey: string): boolean {
   return props.api.supportedAgents.value.includes(agentKey)
 }
 
-// ── Add form (per agent) ─────────────────────────────────────────────────────
-const addingAgent = ref<string | null>(null)
-const addName = ref('')
+// ── Row identity (rows are named by who is signed in, not a custom label) ────
+function rowIdentity(agentKey: string, profileId: string | null) {
+  return props.api.identityFor(agentKey, profileId)
+}
+
+function rowName(agentKey: string, profile: CliProfile | null): string {
+  const identity = rowIdentity(agentKey, profile?.id ?? null)
+  if (identity?.email) return identity.email
+  // Signed in but the CLI stores no identity (kimi): fall back to the label.
+  if (identity?.signedIn) return profile?.name ?? t('cli-account.default')
+  return profile ? t('settings.accounts.cli.not-signed-in') : t('cli-account.default')
+}
+
+// Sign-in spawns a login pane inside the current workspace; without one the
+// flow dead-ends in the app shell. Block early — BEFORE creating a profile
+// row — so a click can't leave an orphan "Not signed in" row behind.
+function requireWorkspace(): boolean {
+  if (props.workspaceOpen) return true
+  toast(t('settings.accounts.cli.login-no-workspace'), { type: 'error' })
+  return false
+}
+
+// ── Add account: create an empty slot, then start its isolated CLI login ────
 const saving = ref(false)
 
-function openAdd(agentKey: string): void {
-  addingAgent.value = agentKey
-  addName.value = ''
-}
-function closeAdd(): void {
-  addingAgent.value = null
-}
-async function saveAdd(): Promise<void> {
-  if (!addingAgent.value || !addName.value.trim() || saving.value) return
+async function addAccount(agentKey: string): Promise<void> {
+  if (saving.value) return
+  if (!requireWorkspace()) return
   saving.value = true
   try {
-    const created = await props.api.create(addingAgent.value, addName.value.trim())
-    if (created) closeAdd()
+    // Auto-named — rows display the signed-in identity, names are internal.
+    // Unique against EXISTING auto names (max N + 1, "Account 1" being the
+    // built-in Default): deletions leave gaps, so length-based numbering
+    // could mint a duplicate label — indistinguishable rows for agents whose
+    // credentials carry no identity (kimi falls back to the name).
+    const nums = props.api
+      .profilesForAgent(agentKey)
+      .map((p) => /^Account (\d+)$/.exec(p.name))
+      .filter((m): m is RegExpExecArray => m !== null)
+      .map((m) => Number(m[1]))
+    const name = `Account ${nums.length ? Math.max(...nums) + 1 : 2}`
+    const created = await props.api.create(agentKey, name)
+    if (!created) return
+    emit('login', agentKey, created.id)
   } finally {
     saving.value = false
   }
 }
 
-// ── Rename form (per profile) ────────────────────────────────────────────────
-const renamingId = ref<string | null>(null)
-const renameName = ref('')
-
-function openRename(profile: CliProfile): void {
-  renamingId.value = profile.id
-  renameName.value = profile.name
-}
-function closeRename(): void {
-  renamingId.value = null
-}
-async function saveRename(): Promise<void> {
-  if (!renamingId.value || !renameName.value.trim() || saving.value) return
-  saving.value = true
-  try {
-    const ok = await props.api.rename(renamingId.value, renameName.value.trim())
-    if (ok) closeRename()
-  } finally {
-    saving.value = false
+// ── Sign in on an existing row (fresh Default, or retry an abandoned login) ──
+async function signIn(agentKey: string, profileId: string | null): Promise<void> {
+  if (!requireWorkspace()) return
+  const activeId = props.api.defaultProfileId(agentKey)
+  if (profileId !== null && profileId !== activeId) {
+    // Non-active profile: isolated login — no account switch, running panes
+    // keep their credentials.
+    emit('login', agentKey, profileId)
+    return
   }
+  // Active profile or built-in Default: live login (harvested into the slot
+  // by the usage poller). Signing in on a non-active Default row still
+  // switches to it first, as before.
+  if (activeId !== profileId) {
+    if (!(await requestSetDefault(agentKey, profileId))) return
+  }
+  emit('login', agentKey)
 }
 
 // ── Set default (confirm when running panes block the switch) ────────────────
-const { confirm: notifyConfirm } = useNotify()
+const { confirm: notifyConfirm, toast } = useNotify()
 const t = i18n.global.t
 
-async function requestSetDefault(agentKey: string, profileId: string | null): Promise<void> {
-  const res = await props.api.setDefault(agentKey, profileId)
-  if (res.ok || res.code !== 'PROFILE_IN_USE') return
-  // Running panes block the switch. Offer to interrupt them (backend sends
-  // Esc to each live pane) and retry with force. Other failures surface via
-  // the composable `error` banner above.
+async function requestSetDefault(agentKey: string, profileId: string | null): Promise<boolean> {
+  let res = await props.api.setDefault(agentKey, profileId)
+  if (res.ok) return true
+  if (res.code !== 'PROFILE_IN_USE') return false
+  // Running panes block the switch. Offer to terminate them (backend kills
+  // each live pane's CLI process and waits for exit before swapping) and
+  // retry with force. Other failures surface via the composable `error`
+  // banner above.
   const label = CLI_AGENT_SPECS.find((s) => s.agentKey === agentKey)?.label ?? agentKey
   const ok = await notifyConfirm(
     t('cli-account.switch-in-use', { count: res.runningCount ?? 0, agent: label }),
@@ -79,8 +116,9 @@ async function requestSetDefault(agentKey: string, profileId: string | null): Pr
       cancelText: t('cli-account.switch-cancel'),
     },
   )
-  if (!ok) return
-  await props.api.setDefault(agentKey, profileId, { force: true })
+  if (!ok) return false
+  res = await props.api.setDefault(agentKey, profileId, { force: true })
+  return res.ok
 }
 
 // ── Delete confirm ───────────────────────────────────────────────────────────
@@ -88,10 +126,7 @@ const confirmRemoveId = ref<string | null>(null)
 
 async function remove(id: string): Promise<void> {
   const ok = await props.api.remove(id)
-  if (ok) {
-    confirmRemoveId.value = null
-    if (renamingId.value === id) closeRename()
-  }
+  if (ok) confirmRemoveId.value = null
 }
 </script>
 
@@ -110,8 +145,8 @@ async function remove(id: string): Promise<void> {
         <button
           v-if="supported(spec.agentKey)"
           class="cli-btn ghost sm"
-          :disabled="addingAgent === spec.agentKey"
-          @click="openAdd(spec.agentKey)"
+          :disabled="saving"
+          @click="addAccount(spec.agentKey)"
         >
           {{ $t('settings.accounts.cli.new-account') }}
         </button>
@@ -127,8 +162,12 @@ async function remove(id: string): Promise<void> {
           <!-- Built-in Default (the user's real home). -->
           <div class="cli-row">
             <div class="cli-row-main">
-              <span class="cli-row-name">{{ $t('cli-account.default') }}</span>
-              <span class="cli-row-meta">{{ $t('settings.accounts.cli.default-hint') }}</span>
+              <span class="cli-row-name">{{ rowName(spec.agentKey, null) }}</span>
+              <span class="cli-row-meta">{{
+                rowIdentity(spec.agentKey, null)?.signedIn
+                  ? $t('settings.accounts.cli.default-hint')
+                  : $t('settings.accounts.cli.not-signed-in')
+              }}</span>
             </div>
             <div class="cli-row-actions">
               <span v-if="api.defaultProfileId(spec.agentKey) === null" class="cli-badge">
@@ -137,80 +176,55 @@ async function remove(id: string): Promise<void> {
               <button v-else class="cli-btn ghost sm" @click="requestSetDefault(spec.agentKey, null)">
                 {{ $t('settings.accounts.cli.set-default') }}
               </button>
+              <button
+                v-if="!rowIdentity(spec.agentKey, null)?.signedIn"
+                class="cli-btn ghost sm"
+                @click="signIn(spec.agentKey, null)"
+              >
+                {{ $t('settings.accounts.cli.sign-in') }}
+              </button>
             </div>
           </div>
 
           <!-- Created profiles. -->
           <div v-for="p in api.profilesForAgent(spec.agentKey)" :key="p.id" class="cli-row">
-            <template v-if="renamingId === p.id">
-              <input
-                v-model="renameName"
-                class="cli-input"
-                type="text"
-                spellcheck="false"
-                @keydown.enter="saveRename"
-                @keydown.esc="closeRename"
-              />
-              <div class="cli-row-actions">
-                <button class="cli-btn ghost sm" @click="closeRename">
+            <div class="cli-row-main">
+              <span
+                class="cli-row-name"
+                :class="{ dim: !rowIdentity(spec.agentKey, p.id)?.signedIn }"
+              >
+                {{ rowName(spec.agentKey, p) }}
+              </span>
+            </div>
+            <div class="cli-row-actions">
+              <template v-if="confirmRemoveId === p.id">
+                <span class="cli-confirm-text">{{ $t('settings.accounts.cli.delete-confirm') }}</span>
+                <button class="cli-btn danger sm" @click="remove(p.id)">
+                  {{ $t('settings.accounts.cli.delete') }}
+                </button>
+                <button class="cli-btn ghost sm" @click="confirmRemoveId = null">
                   {{ $t('settings.accounts.cli.cancel') }}
                 </button>
-                <button class="cli-btn primary sm" :disabled="!renameName.trim() || saving" @click="saveRename">
-                  {{ $t('settings.accounts.cli.save') }}
+              </template>
+              <template v-else>
+                <span v-if="api.defaultProfileId(spec.agentKey) === p.id" class="cli-badge">
+                  {{ $t('settings.accounts.cli.is-default') }}
+                </span>
+                <button v-else class="cli-btn ghost sm" @click="requestSetDefault(spec.agentKey, p.id)">
+                  {{ $t('settings.accounts.cli.set-default') }}
                 </button>
-              </div>
-            </template>
-            <template v-else>
-              <div class="cli-row-main">
-                <span class="cli-row-name">{{ p.name }}</span>
-              </div>
-              <div class="cli-row-actions">
-                <template v-if="confirmRemoveId === p.id">
-                  <span class="cli-confirm-text">{{ $t('settings.accounts.cli.delete-confirm') }}</span>
-                  <button class="cli-btn danger sm" @click="remove(p.id)">
-                    {{ $t('settings.accounts.cli.delete') }}
-                  </button>
-                  <button class="cli-btn ghost sm" @click="confirmRemoveId = null">
-                    {{ $t('settings.accounts.cli.cancel') }}
-                  </button>
-                </template>
-                <template v-else>
-                  <span v-if="api.defaultProfileId(spec.agentKey) === p.id" class="cli-badge">
-                    {{ $t('settings.accounts.cli.is-default') }}
-                  </span>
-                  <button v-else class="cli-btn ghost sm" @click="requestSetDefault(spec.agentKey, p.id)">
-                    {{ $t('settings.accounts.cli.set-default') }}
-                  </button>
-                  <button class="cli-btn ghost sm" @click="openRename(p)">
-                    {{ $t('settings.accounts.cli.rename') }}
-                  </button>
-                  <button class="cli-btn ghost sm" @click="confirmRemoveId = p.id">
-                    {{ $t('settings.accounts.cli.delete') }}
-                  </button>
-                </template>
-              </div>
-            </template>
-          </div>
-        </div>
-
-        <!-- Add form. -->
-        <div v-if="addingAgent === spec.agentKey" class="cli-form">
-          <input
-            v-model="addName"
-            class="cli-input"
-            type="text"
-            spellcheck="false"
-            :placeholder="$t('settings.accounts.cli.name-placeholder')"
-            @keydown.enter="saveAdd"
-            @keydown.esc="closeAdd"
-          />
-          <div class="cli-form-actions">
-            <button class="cli-btn ghost sm" @click="closeAdd">
-              {{ $t('settings.accounts.cli.cancel') }}
-            </button>
-            <button class="cli-btn primary sm" :disabled="!addName.trim() || saving" @click="saveAdd">
-              {{ $t('settings.accounts.cli.save') }}
-            </button>
+                <button
+                  v-if="!rowIdentity(spec.agentKey, p.id)?.signedIn"
+                  class="cli-btn ghost sm"
+                  @click="signIn(spec.agentKey, p.id)"
+                >
+                  {{ $t('settings.accounts.cli.sign-in') }}
+                </button>
+                <button class="cli-btn ghost sm" @click="confirmRemoveId = p.id">
+                  {{ $t('settings.accounts.cli.delete') }}
+                </button>
+              </template>
+            </div>
           </div>
         </div>
       </template>
@@ -261,6 +275,7 @@ async function remove(id: string): Promise<void> {
 }
 .cli-row-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .cli-row-name { font-size: 12.5px; font-weight: 600; color: var(--text-primary); }
+.cli-row-name.dim { font-weight: 400; color: var(--text-muted); }
 .cli-row-meta { font-size: 11px; color: var(--text-secondary); }
 .cli-row-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .cli-confirm-text { font-size: 11px; color: var(--text-secondary); }
@@ -273,28 +288,6 @@ async function remove(id: string): Promise<void> {
   border-radius: 999px;
   padding: 1px 8px;
 }
-
-.cli-form {
-  margin-top: 8px;
-  padding: 10px;
-  border: 1px solid var(--border-default);
-  border-radius: 8px;
-  background: var(--bg-inset, var(--bg-subtle));
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.cli-form-actions { display: flex; gap: 8px; margin-left: auto; }
-.cli-input {
-  flex: 1;
-  background: var(--bg-base);
-  border: 1px solid var(--border-default);
-  border-radius: 4px;
-  color: var(--text-primary);
-  font-size: 12px;
-  padding: 5px 8px;
-}
-.cli-input:focus { outline: none; border-color: var(--accent-focus); }
 
 .cli-btn {
   border-radius: 5px;

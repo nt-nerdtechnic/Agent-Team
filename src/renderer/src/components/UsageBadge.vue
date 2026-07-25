@@ -153,6 +153,11 @@ function avatarInitial(label: string): string {
   const t = label.trim()
   return t ? t.charAt(0).toUpperCase() : '?'
 }
+
+// Rows are labeled by the signed-in identity when the backend resolved one.
+function accountLabel(profileId: string | null, fallback: string): string {
+  return props.cliProfiles.identityFor(props.agentKey, profileId)?.email ?? fallback
+}
 </script>
 
 <template>
@@ -208,8 +213,10 @@ function avatarInitial(label: string): string {
             :aria-selected="activeProfileId === ''"
             @click="selectProfile('')"
           >
-            <span class="usage-acct-av default">{{ avatarInitial($t('usage.switch-default')) }}</span>
-            <span class="usage-acct-name">{{ $t('usage.switch-default') }}</span>
+            <span class="usage-acct-av default">{{
+              avatarInitial(accountLabel(null, $t('usage.switch-default')))
+            }}</span>
+            <span class="usage-acct-name">{{ accountLabel(null, $t('usage.switch-default')) }}</span>
             <span v-if="activeProfileId === ''" class="usage-acct-tick">✓</span>
           </button>
           <button
@@ -222,9 +229,9 @@ function avatarInitial(label: string): string {
             @click="selectProfile(p.id)"
           >
             <span class="usage-acct-av" :style="{ background: avatarColor(p.id) }">{{
-              avatarInitial(p.name)
+              avatarInitial(accountLabel(p.id, p.name))
             }}</span>
-            <span class="usage-acct-name">{{ p.name }}</span>
+            <span class="usage-acct-name">{{ accountLabel(p.id, p.name) }}</span>
             <span v-if="activeProfileId === p.id" class="usage-acct-tick">✓</span>
           </button>
         </div>

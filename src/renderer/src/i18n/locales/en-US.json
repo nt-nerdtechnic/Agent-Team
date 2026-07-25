@@ -626,15 +626,18 @@
       "delete-confirm": "Delete this account?",
       "cli": {
         "title": "CLI Accounts",
-        "hint": "All accounts share your real home directory (sessions and history are shared); switching accounts swaps the stored credentials in place. Set the active account from the title bar or here — already-open panes keep the previous account until reopened, and a new account signs in through the CLI's own login flow the next time you open a pane.",
+        "hint": "Click \"Sign in\" or \"+ New account\" and a temporary login pane opens, launching the CLI's browser sign-in automatically. Authorize in the browser: the account then shows as signed in and the pane closes by itself — the active account and running panes are untouched. All accounts share your real home directory (sessions and history are shared); switching accounts swaps the stored credentials in place. Use \"Set as default\" to switch the active account; already-open panes keep the previous account until reopened.",
+        "login-no-workspace": "Open a workspace first — signing in launches a temporary login pane.",
+        "login-spawn-failed": "Could not start the login pane.",
+        "login-complete": "Signed in as {email}. Account saved.",
+        "login-complete-no-email": "Sign-in complete. Account saved.",
         "new-account": "+ New account",
-        "name-placeholder": "Account name",
         "default-hint": "Your original login credentials",
         "is-default": "Default",
         "set-default": "Set as default",
-        "rename": "Rename",
+        "not-signed-in": "Not signed in",
+        "sign-in": "Sign in",
         "delete": "Delete",
-        "save": "Save",
         "cancel": "Cancel",
         "delete-confirm": "Delete this account? Its saved credentials are kept on disk and will not be removed.",
         "unsupported": "This agent does not support multiple accounts.",
@@ -1147,10 +1150,10 @@
   "cli-account": {
     "default": "Default",
     "switch-title": "Switch account",
-    "switch-in-use": "There are {count} running {agent} panes. Switching now interrupts their current actions; panes already open keep the previous account until reopened.",
-    "switch-force": "Stop all actions and switch",
+    "switch-in-use": "There are {count} running {agent} panes. Switching now terminates their CLI processes; restart the panes to continue with the new account.",
+    "switch-force": "Terminate and switch",
     "switch-cancel": "Cancel",
-    "swap-failed": "Account switch failed — the previous credentials have been restored."
+    "swap-failed": "Account switch failed — the previous account is still active."
   },
   "cliDrop": {
     "source-closed": "CLI pane is no longer open",

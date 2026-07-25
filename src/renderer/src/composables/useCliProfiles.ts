@@ -25,6 +25,20 @@ export type SetDefaultResult =
 // (the user's real home directory).
 export type CliProfileDefaults = Record<string, string | null>
 
+// Display-only identity of one account slot, resolved by the backend from the
+// CLI's own credential files. `email` is null when the CLI stores no identity
+// (kimi) or nobody is signed in.
+export interface CliAccountIdentity {
+  email: string | null
+  signedIn: boolean
+}
+
+// agentKey -> slotId -> identity; the built-in Default row is keyed
+// "__default__" (mirrors the backend's reserved slot id).
+export type CliProfileIdentities = Record<string, Record<string, CliAccountIdentity>>
+
+const DEFAULT_SLOT_ID = '__default__'
+
 /**
  * Per-window cache of CLI account profiles. Loads from the backend on mount and
  * refreshes whenever any window broadcasts `cli_profiles.changed`. Reconnect-safe.
@@ -33,6 +47,7 @@ export type CliProfileDefaults = Record<string, string | null>
 export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
   const profiles = ref<CliProfile[]>([])
   const defaults = ref<CliProfileDefaults>({})
+  const identities = ref<CliProfileIdentities>({})
   const supportedAgents = ref<string[]>([])
   const loaded = ref<boolean>(false)
   const loading = ref<boolean>(false)
@@ -48,6 +63,7 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
       const resp = await backend.send<{
         profiles: CliProfile[]
         defaults: CliProfileDefaults
+        identities?: CliProfileIdentities
         supported_agents: string[]
       }>('cli_profiles.list', {})
       if (!resp.ok || !resp.payload) {
@@ -56,6 +72,7 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
       }
       profiles.value = resp.payload.profiles
       defaults.value = resp.payload.defaults
+      identities.value = resp.payload.identities ?? {}
       supportedAgents.value = resp.payload.supported_agents
       loaded.value = true
     } catch (err) {
@@ -181,11 +198,21 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
     return profiles.value.find((p) => p.id === id)
   }
 
+  /** Display identity of one account row; `profileId` null = built-in Default. */
+  function identityFor(agentKey: string, profileId: string | null): CliAccountIdentity | null {
+    return identities.value[agentKey]?.[profileId ?? DEFAULT_SLOT_ID] ?? null
+  }
+
   // Keep every window's cache in sync: any mutation broadcasts `cli_profiles.changed`.
   unsubChanged = backend.on('cli_profiles.changed', (raw) => {
-    const payload = raw as { profiles?: CliProfile[]; defaults?: CliProfileDefaults }
+    const payload = raw as {
+      profiles?: CliProfile[]
+      defaults?: CliProfileDefaults
+      identities?: CliProfileIdentities
+    }
     if (payload?.profiles) profiles.value = payload.profiles
     if (payload?.defaults) defaults.value = payload.defaults
+    if (payload?.identities) identities.value = payload.identities
   })
 
   // Initial load once connected; re-fetch on reconnect (mirrors useRoles).
@@ -212,6 +239,7 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
   return {
     profiles,
     defaults,
+    identities,
     supportedAgents,
     loaded,
     loading,
@@ -225,5 +253,6 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
     hasProfiles,
     defaultProfileId,
     findProfile,
+    identityFor,
   }
 }
