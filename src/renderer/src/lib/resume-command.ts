@@ -92,6 +92,20 @@ export function dedupeRestorablePanes<T extends { agent?: string; session_id?: s
 /** CLIs whose panes can be re-spawned via `<cli> --resume <id>`. */
 export const REBUILD_CAPABLE_AGENTS = ['claude', 'codex', 'antigravity', 'grok', 'kimi']
 
+/** CLIs whose panes may keep the SAVED session id pinned when a restore
+ * spawns them fresh (spawn opt sessionKnownOnDisk) so the Rebuild button
+ * stays enabled. Restricted to agents whose stale restore-pin reliably
+ * self-heals to the pane's real session once one exists: claude (the turn
+ * event's attributed id is adopted directly for restore pins) and codex
+ * (per-pane CODEX_HOME announces the new session deterministically). Grok
+ * binds only via a typed marker — a roleless restored pane never types one —
+ * and antigravity/kimi fall back to a single-unclaimed-candidate heuristic
+ * that fails with 2+ same-vendor panes in one cwd; their stale pin could
+ * never heal, and Rebuild would swap the user's live conversation for the
+ * abandoned pre-restart one. Those agents keep the pre-existing behavior:
+ * button disabled until session.detected. */
+export const RESTORE_PIN_AGENTS = ['claude', 'codex']
+
 /** Whether the Rebuild (resume) button is RENDERED for a pane. Purely by
  * agentKey, so a resume-capable pane shows the button from spawn (disabled
  * until it becomes rebuildable) for discoverability. Non-resumable agents

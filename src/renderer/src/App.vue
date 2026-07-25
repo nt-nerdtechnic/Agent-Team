@@ -80,6 +80,7 @@ import {
   normalizeResumeSessionId,
   paneCanRebuild,
   paneRebuildVisible,
+  RESTORE_PIN_AGENTS,
   shouldPreserveMissingSessionOnRestore,
   shouldWarnMissingResume,
 } from './lib/resume-command'
@@ -660,10 +661,17 @@ interface ActivePane {
    *  their CLI-generated id is detected from the session file. */
   pinnedSessionId?: string
   /** True once the CLI transcript for pinnedSessionId is known to exist on
-   *  disk (resume spawn, first Claude turn event, or session.detected).
-   *  Gates the Rebuild (resume) buttons for Claude, whose pinnedSessionId is
-   *  minted at spawn — before any transcript is written. Runtime-only. */
+   *  disk (resume spawn, restore whose probe confirmed the saved transcript
+   *  even though the pane spawned fresh, first Claude turn event, or
+   *  session.detected). Gates the Rebuild (resume) buttons for Claude, whose
+   *  pinnedSessionId is minted at spawn — before any transcript is written.
+   *  Runtime-only. */
   sessionOnDisk?: boolean
+  /** True when pinnedSessionId was pre-filled from a SAVED session during a
+   *  fresh (non-resume) restore: the pin is NOT the pane's launch identity and
+   *  must be replaced (flag cleared) once the pane's real session is
+   *  attributed/detected. Runtime-only. */
+  pinnedFromRestore?: boolean
   /** Stable Codex CODEX_HOME id. It can differ from the live pane id after restore. */
   sessionHomeId?: string
   /** Unique marker embedded in this pane's kickoff (Codex/Antigravity only) so the
@@ -2338,6 +2346,12 @@ interface SpawnInternal {
   restoreMode?: 'memory-resume' | 'fresh'
   sessionHomeId?: string
   resumeSessionId?: string
+  /** True when the caller PROBED the saved session (canResumeSession === true)
+   *  and confirmed its transcript exists on disk, but this spawn is NOT a
+   *  resume (restore where the user chose "start fresh"). Pins resumeSessionId
+   *  on the pane with sessionOnDisk so the Rebuild (resume) button stays
+   *  enabled. Never set for brand-new (non-restored) panes. */
+  sessionKnownOnDisk?: boolean
   /** Explicit --session-id for a FRESH (non-resume) Claude spawn. The restore
    *  fallback for a not-resumable session passes the saved id here so a
    *  cold-start rebuild reuses the SAME id instead of minting a new ghost id
@@ -2423,6 +2437,15 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
   const pinnedSessionId = opts.isResume
     ? (opts.resumeSessionId?.trim() || undefined)
     : (opts.agentKey === 'claude' ? explicitSessionId || undefined : undefined)
+  // Restore-with-confirmed-transcript: the caller probed the saved session and
+  // its transcript exists on disk, but this spawn is fresh (user chose "start
+  // fresh"). Pin the saved id on the PANE (any agent) so the Rebuild (resume)
+  // button stays enabled after restart. The backend metadata/resumeKey below
+  // keep using pinnedSessionId — the LAUNCH identity — so attribution still
+  // binds the CLI's actual session, not the saved one.
+  const restoredPinnedId = !opts.isResume && opts.sessionKnownOnDisk
+    ? (opts.resumeSessionId?.trim() || undefined)
+    : undefined
   // Codex keeps a marker fallback during rollout. Antigravity can't pin an id
   // at launch (`agy --conversation` only resumes existing ids), so the marker
   // is its ONLY session-binding path. Grok likewise can't pin an id (`grok -s`
@@ -2453,8 +2476,9 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
     kickoffStatus: opts.kickoffPrompt ? 'pending' : 'none',
     kickoffPrompt: opts.kickoffPrompt ?? '',
     skipRoleInjection: opts.skipRoleInjection ?? false,
-    pinnedSessionId,
-    sessionOnDisk: opts.isResume ? true : undefined,
+    pinnedSessionId: restoredPinnedId ?? pinnedSessionId,
+    sessionOnDisk: opts.isResume || restoredPinnedId ? true : undefined,
+    pinnedFromRestore: restoredPinnedId ? true : undefined,
     sessionHomeId: sessionHomeId || undefined,
     sessionMarker: sessionMarker || undefined,
   }
@@ -2996,7 +3020,12 @@ async function rebuildPaneViaResume(
     return 'busy'
   }
   const sessionId = paneResumeSessionId(pane)
-  if (!sessionId) return
+  if (!sessionId) {
+    if (!opts?.suppressBusyToast) {
+      notifyRestore.toast(i18n.global.t('pane.terminal.rebuild-no-session'), { type: 'error' })
+    }
+    return
+  }
   // Lock synchronously, before any await: a concurrent call (double-click, or
   // overlap with the rebuild-all batch) would otherwise pass the has() check
   // during canResumeSession/has_session and double kill/spawn the same pane.
@@ -3004,20 +3033,41 @@ async function rebuildPaneViaResume(
   // replacement pane in (new pane id, same session) before the backend spawn
   // resolves — a second click landing on the replacement must be blocked too.
   const lockKeys = [paneId, sessionId]
-  if (lockKeys.some((key) => rebuildingPanes.has(key))) return
+  if (lockKeys.some((key) => rebuildingPanes.has(key))) {
+    if (!opts?.suppressBusyToast) {
+      notifyRestore.toast(i18n.global.t('pane.terminal.rebuild-in-progress'), { type: 'info' })
+    }
+    return
+  }
   for (const key of lockKeys) rebuildingPanes.add(key)
   try {
     const ws = pane.workspacePath
     // Fail-safe: abort on false AND on null (probe failed) — never kill a
-    // live pane on an unverified resumability answer.
-    if (!(await canResumeSession(pane.agentKey, ws, sessionId))) {
+    // live pane on an unverified resumability answer. The toast distinguishes
+    // them: false = the session is definitively absent, null = the probe
+    // itself failed (the session may well exist — the user should retry).
+    const resumable = await canResumeSession(pane.agentKey, ws, sessionId)
+    if (resumable !== true) {
       pipelineLog(`⚠ rebuild ${pane.agentLabel}: session ${sessionId} not resumable`)
+      if (!opts?.suppressBusyToast) {
+        notifyRestore.toast(
+          i18n.global.t(resumable === false
+            ? 'pane.terminal.rebuild-not-resumable'
+            : 'pane.terminal.rebuild-probe-failed'),
+          { type: 'error' }
+        )
+      }
       return
     }
     const spec = agentSpecs.find((s) => s.agentKey === pane.agentKey)
     const skipFlag = yoloEnabled.value ? (spec?.skipPermissionFlag ?? '') : ''
     const resumeCmd = buildResumeCommand(pane.agentKey, sessionId, skipFlag)
-    if (!resumeCmd) return
+    if (!resumeCmd) {
+      if (!opts?.suppressBusyToast) {
+        notifyRestore.toast(i18n.global.t('pane.terminal.rebuild-no-session'), { type: 'error' })
+      }
+      return
+    }
 
     // Safety: Ensure the requested session actually exists on disk.
     const hasSession = await backend.send('terminals.has_session', {
@@ -3026,6 +3076,9 @@ async function rebuildPaneViaResume(
     })
     if (!hasSession) {
       pipelineLog(`⚠ rebuild session ${sessionId.slice(0, 8)} not found`)
+      if (!opts?.suppressBusyToast) {
+        notifyRestore.toast(i18n.global.t('pane.terminal.rebuild-not-resumable'), { type: 'error' })
+      }
       return
     }
     // Snapshot identity before onKill removes the pane from the list.
@@ -3806,7 +3859,8 @@ function looksLikeResumeCommand(agentKey: string, command: string): boolean {
 async function canResumeSession(
   agentKey: string,
   workspacePath: string,
-  sessionId: string
+  sessionId: string,
+  opts?: { timeoutMs?: number }
 ): Promise<boolean | null> {
   const normalizedId = normalizeResumeSessionId(agentKey, sessionId)
   if (!normalizedId) return false
@@ -3814,7 +3868,7 @@ async function canResumeSession(
     agent: agentKey,
     workspace_path: workspacePath,
     session_id: normalizedId,
-  })
+  }, opts?.timeoutMs)
   return classifySessionExistsResponse(resp)
 }
 
@@ -4208,10 +4262,18 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
 
     // Unified session-resume logic for all pane types. Tri-state: true /
     // false (definitively absent) / null (probe failed — unknown).
-    // forceFresh (user chose "start fresh"): skip the probe and take the
-    // fresh-spawn path for every pane — including Codex, which is normally
-    // preserved when its rollout is missing.
-    const canResume = forceFresh ? false : await canResumeSession(saved.agent, workspacePath, sessionId)
+    // forceFresh (user chose "start fresh") takes the fresh-spawn path for
+    // every pane — including Codex, which is normally preserved when its
+    // rollout is missing — but the probe still runs: a CONFIRMED transcript
+    // (=== true) is pinned on the fresh pane via sessionKnownOnDisk below so
+    // the Rebuild (resume) button stays enabled after restart. Under
+    // forceFresh the probe is best-effort — cap it at 2.5s so a cold-boot
+    // backend storm can't stall every fresh spawn for the full 10s default
+    // (a timed-out null is discarded on this path anyway).
+    const canResume = await canResumeSession(
+      saved.agent, workspacePath, sessionId,
+      forceFresh ? { timeoutMs: 2500 } : undefined
+    )
     // Codex preserve-untouched applies whenever the rollout is not CONFIRMED
     // present (false and null alike) — unchanged pre-tri-state behavior.
     if (!forceFresh && shouldPreserveMissingSessionOnRestore(saved.agent, rawSessionId, canResume === true)) {
@@ -4226,7 +4288,8 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
     // saved id (if the transcript exists it resumes perfectly; if not the CLI
     // errors for one boot, but the id mapping survives); only a definitive
     // false falls back to a fresh spawn reusing the saved id below.
-    const attemptResume = shouldAttemptResume(canResume)
+    // forceFresh always routes fresh regardless of the probe.
+    const attemptResume = !forceFresh && shouldAttemptResume(canResume)
     let resumeCmd = attemptResume ? buildResumeCommand(saved.agent, sessionId, skipFlag) : ''
     // A pane whose transcript is DEFINITIVELY gone would otherwise fall back to
     // a fresh conversation. Before that, attempt a deterministic reconnect from
@@ -4294,6 +4357,12 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
       restoreMode: isResume ? 'memory-resume' : 'fresh',
       sessionHomeId,
       resumeSessionId: effectiveResumeId,
+      // Probe CONFIRMED the saved transcript on disk but the spawn is fresh
+      // (forceFresh): keep the saved id pinned so Rebuild stays enabled.
+      // Strictly === true — null (probe failed) is unknown, not known-on-disk.
+      // Only for agents whose stale pin self-heals (see RESTORE_PIN_AGENTS).
+      sessionKnownOnDisk:
+        !isResume && canResume === true && RESTORE_PIN_AGENTS.includes(saved.agent),
       // Not-resumable fallback ("opened a fresh one"): reuse the saved id for
       // the fresh spawn so cold-start restore is idempotent instead of
       // rotating a new ghost id every boot. No-op when isResume. Duplicate
@@ -4330,9 +4399,11 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
         pane_id: paneId,
         agent: saved.agent,
         role: saved.role,
-        // forceFresh abandons the saved conversation: persist only a freshly
-        // pinned id (empty until a non-Claude CLI's new session is detected),
-        // never the old id we deliberately did not resume.
+        // forceFresh abandons the saved conversation: persist the pane's
+        // pinned id — the saved id when its transcript was CONFIRMED on disk
+        // (kept for the Rebuild button, see sessionKnownOnDisk), else a
+        // freshly pinned id (empty until a non-Claude CLI's new session is
+        // detected).
         session_id: isResume ? effectiveResumeId : (newPinnedId || (forceFresh ? '' : sessionId)),
         session_home_id: sessionHomeId,
         run_group_id: runGroupId,
@@ -4496,7 +4567,8 @@ const uiStateSeqGuard = createUiStateSeqGuard()
 
 async function sendQuiet<T = unknown>(
   type: string,
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  timeoutMs?: number
 ): Promise<T | null> {
   try {
     // project.set_ui_state gets exactly one retry on timeout: it carries
@@ -4506,7 +4578,7 @@ async function sendQuiet<T = unknown>(
     // field(s) was issued during the delay — the retry's stale snapshot must
     // not win a last-writer-wins race against fresher state.
     const resp = await sendWithUiStateRetry(
-      (t, p) => backend.send<T>(t, p),
+      (t, p) => backend.send<T>(t, p, timeoutMs),
       type,
       payload,
       500,
@@ -5612,13 +5684,23 @@ backend.on('agent.activity', (raw) => {
         const h = spawnHistory.value.find((e) => e.paneId === pane.id)
         if (h) h.sessionId = attributedId
       }
+      // A restore-pinned id (pinnedFromRestore) is NOT the pane's launch
+      // identity — it points at the SAVED conversation, kept only so the
+      // Rebuild button stays enabled until the pane's real session shows up.
+      // Its transcript exists by construction, so the ghost-heal gate below
+      // would refuse adoption forever; adopt the attributed id directly and
+      // clear the flag (the pin now matches reality either way).
+      if (pane.pinnedFromRestore) {
+        pane.pinnedFromRestore = undefined
+        if (pane.pinnedSessionId !== attributedId) adopt()
+      }
       // Attribution can mis-route an unowned session to a sibling pane in the
       // same cwd — never let that overwrite a HEALTHY pinned id. But a pinned
       // id with NO transcript (ghost — e.g. /clear re-rolled the CLI's real
       // id) must stay replaceable, or the pane can never learn its real id:
       // verify the pinned id first and adopt only when it is a ghost. The
       // gate serializes concurrent events; first confirmed adoption wins.
-      if (classifyAttributedSession(pane.pinnedSessionId, attributedId) === 'adopt') {
+      else if (classifyAttributedSession(pane.pinnedSessionId, attributedId) === 'adopt') {
         adopt()
       } else {
         const pinnedId = pane.pinnedSessionId!
@@ -5701,6 +5783,9 @@ backend.on('session.detected', (raw) => {
   if (!sessionId) return
   pane.pinnedSessionId = sessionId
   pane.sessionOnDisk = true
+  // The detected id IS the pane's real session — a restore-pinned placeholder
+  // (pinnedFromRestore) was just overwritten, so drop the stale flag.
+  pane.pinnedFromRestore = undefined
   syncViews()
   const histSd = spawnHistory.value.find((e) => e.paneId === ev.pane_id)
   if (histSd) histSd.sessionId = sessionId
