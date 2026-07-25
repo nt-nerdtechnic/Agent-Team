@@ -14,6 +14,7 @@ import {
   shedCjkPieces,
   rootedTailCandidate,
   visualWidth,
+  htmlReportRoute,
   splitMatchAtRowStarts,
   cellColToStrCol,
   strColToCellCol,
@@ -255,6 +256,27 @@ describe('rootedTailCandidate', () => {
   it('returns undefined when there is no rooted path at/before the click', () => {
     expect(rootedTailCandidate('相對路徑 src/foo.ts 而已', 6)).toBeUndefined()
     expect(rootedTailCandidate('前面文字 /tmp/x.md', 2)).toBeUndefined() // click before the root
+  })
+})
+
+describe('htmlReportRoute', () => {
+  it('routes a workspace-internal html report (sub-project included) to the Plan window', () => {
+    expect(
+      htmlReportRoute('/ws/Leankoo1/.claude/loop-reports/loop-report-x.html', '/ws')
+    ).toEqual({
+      workspace_path: '/ws',
+      rel_path: 'Leankoo1/.claude/loop-reports/loop-report-x.html',
+    })
+    expect(htmlReportRoute('/ws/report.HTM', '/ws/')).toEqual({
+      workspace_path: '/ws',
+      rel_path: 'report.HTM',
+    })
+  })
+
+  it('returns undefined outside the workspace, for non-html, or without a workspace', () => {
+    expect(htmlReportRoute('/elsewhere/r.html', '/ws')).toBeUndefined()
+    expect(htmlReportRoute('/ws/notes.md', '/ws')).toBeUndefined()
+    expect(htmlReportRoute('/ws/r.html', undefined)).toBeUndefined()
   })
 })
 

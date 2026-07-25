@@ -278,6 +278,21 @@ export function shedCjkProse(raw: string, pos = -1): string | undefined {
   return (pieces.find((p) => pos >= p.index && pos < p.index + p.text.length) ?? pieces[0]).text
 }
 
+/** Route a stat-verified workspace-internal .html file to the Plan window's
+ *  rendered preview (its non-plan-doc branch mounts FilePreviewPane): report
+ *  files live outside `.agent-team/plans/` — loop reports, exported docs —
+ *  and the mini-IDE would only show their raw source. Undefined for files
+ *  outside the pane's workspace (no workspace to anchor the Plan window). */
+export function htmlReportRoute(
+  absPath: string,
+  wsPath: string | undefined
+): { workspace_path: string; rel_path: string } | undefined {
+  if (!wsPath || !/\.html?$/i.test(absPath)) return undefined
+  const root = wsPath.replace(/\/+$/, '')
+  if (!absPath.startsWith(`${root}/`)) return undefined
+  return { workspace_path: root, rel_path: absPath.slice(root.length + 1) }
+}
+
 function openInEditor(absPath: string, line: number | undefined): void {
   const api = (window as Window & { agentTeam?: _AgentApi }).agentTeam
   if (!api?.openEditorWindow) return
@@ -1636,6 +1651,16 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         const absList = cands.map((c) => resolveAbs(splitSuffix(c).filepath))
         const stats = await Promise.all(absList.map(statOk))
         const okIdx = stats.findIndex(Boolean)
+        // A verified .html inside this workspace opens rendered in the Plan
+        // window (same surface as plan docs), not as source in the mini-IDE.
+        if (okIdx >= 0) {
+          const reportRoute = htmlReportRoute(absList[okIdx]!, wsPath)
+          const agentApi = (window as Window & { agentTeam?: _AgentApi }).agentTeam
+          if (reportRoute && agentApi?.openPlansWindow) {
+            void agentApi.openPlansWindow(reportRoute)
+            return
+          }
+        }
         const chosenRaw = okIdx >= 0 ? cands[okIdx] : (shedPiece ?? pieceRaw)
         const { filepath, line: lineNum } = splitSuffix(chosenRaw)
         if (!filepath) return
