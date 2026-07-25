@@ -2,16 +2,24 @@ import { onScopeDispose, ref } from 'vue'
 import { i18n } from '../i18n'
 import type { useBackend } from './useBackend'
 
-// A CLI account profile: an isolated login/home directory for one agent CLI so
-// the user can keep several accounts per agent (claude/codex/kimi/grok). The
-// object fields are camelCase (backend serializes them that way); the WS request
-// payloads below are snake_case per the backend contract.
+// A CLI account profile: a stored credential slot for one agent CLI so the
+// user can keep several accounts per agent (claude/codex/kimi/grok). All
+// accounts share the real home directory; switching swaps credentials in
+// place. The object fields are camelCase (backend serializes them that way);
+// the WS request payloads below are snake_case per the backend contract.
 export interface CliProfile {
   id: string
   agentKey: string
   name: string
   createdAt: string
 }
+
+// Outcome of `setDefault`. `PROFILE_IN_USE` (running panes block the switch,
+// `runningCount` populated) is returned without touching `error` so callers
+// can show a confirm UI and retry with `force: true`.
+export type SetDefaultResult =
+  | { ok: true }
+  | { ok: false; code?: string; message?: string; runningCount?: number }
 
 // Map of agentKey -> default profile id, or null for the built-in Default
 // (the user's real home directory).
@@ -119,21 +127,37 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
     }
   }
 
-  async function setDefault(agentKey: string, profileId: string | null): Promise<boolean> {
+  async function setDefault(
+    agentKey: string,
+    profileId: string | null,
+    opts?: { force?: boolean },
+  ): Promise<SetDefaultResult> {
     try {
       const resp = await backend.send<{ defaults: CliProfileDefaults }>('cli_profiles.set_default', {
         agent_key: agentKey,
         profile_id: profileId,
+        ...(opts?.force ? { force: true } : {}),
       })
       if (!resp.ok || !resp.payload) {
-        error.value = resp.error?.message ?? 'set default failed'
-        return false
+        const code = resp.error?.code
+        if (code === 'PROFILE_IN_USE') {
+          // Not surfaced via `error` — callers show a confirm UI instead.
+          const runningCount = Number(resp.error?.details?.running_count ?? 0)
+          return { ok: false, code, runningCount }
+        }
+        const message =
+          code === 'PROFILE_SWAP_FAILED'
+            ? i18n.global.t('cli-account.swap-failed')
+            : (resp.error?.message ?? 'set default failed')
+        error.value = message
+        return { ok: false, code, message }
       }
       defaults.value = resp.payload.defaults
-      return true
+      return { ok: true }
     } catch (err) {
-      error.value = err instanceof Error ? err.message : 'set default failed'
-      return false
+      const message = err instanceof Error ? err.message : 'set default failed'
+      error.value = message
+      return { ok: false, message }
     }
   }
 

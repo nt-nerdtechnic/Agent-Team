@@ -37,7 +37,6 @@ from typing import Iterable
 from ..applog import app_data_dir
 from .base import LogReader, TokenUsage
 from .claude import encode_claude_cwd
-from .profile_registry import profile_homes
 
 log = logging.getLogger("agent_team_backend.log_readers.attribution")
 
@@ -624,20 +623,6 @@ class Attribution:
                     or file_path.startswith(mapping.claude_dir + os.sep)
                 ):
                     return ws_path
-                # Profile panes write under a per-account config home
-                # (~/.navide/cli-profiles/claude/<id>/projects/<encoded>), which
-                # the default-root claude_dir never covers. Match the encoded-cwd
-                # folder under any active profile home. Empty when no profile pane
-                # ran → this loop is skipped and behavior is unchanged.
-                encoded = encode_claude_cwd(ws_path)
-                for home in profile_homes("claude"):
-                    cand = str(home / "projects" / encoded)
-                    if (
-                        file_path == cand
-                        or file_path.startswith(cand + "/")
-                        or file_path.startswith(cand + os.sep)
-                    ):
-                        return ws_path
             elif usage.vendor == "codex":
                 # Codex puts cwd in session_meta → usage.cwd
                 if usage.cwd and usage.cwd == ws_path:

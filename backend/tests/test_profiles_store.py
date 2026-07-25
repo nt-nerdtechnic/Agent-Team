@@ -1,4 +1,4 @@
-"""CliProfilesStore CRUD + spawn-env planning (profiles_store.py)."""
+"""CliProfilesStore CRUD + path canonicalisation (profiles_store.py)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ import pytest
 from agent_team_backend import profiles_store as profiles_mod
 from agent_team_backend.profiles_store import (
     CliProfilesStore,
-    build_spawn_plan,
     canonical_path_str,
 )
 
@@ -189,8 +188,9 @@ def test_corrupt_registry_starts_empty(tmp_path: Path) -> None:
 
 
 def test_home_path_absolute_nfc_stable(tmp_path: Path) -> None:
-    """Claude's Keychain entry hashes the literal CLAUDE_CONFIG_DIR string —
-    the path must be absolute, NFC, no trailing slash, identical every call."""
+    """The legacy-home migration hashes the literal path string for Keychain
+    service names — the path must be absolute, NFC, no trailing slash,
+    identical every call."""
     nfd_root = tmp_path / unicodedata.normalize("NFD", "café-profiles")
     store = CliProfilesStore(path=tmp_path / "reg.json", profiles_root=nfd_root)
     profile = store.create(agent_key="claude", name="Work")
@@ -206,64 +206,3 @@ def test_home_path_absolute_nfc_stable(tmp_path: Path) -> None:
 
 def test_canonical_path_str_strips_trailing_slash() -> None:
     assert canonical_path_str("/tmp/a/b/") == "/tmp/a/b"
-
-
-# ---- spawn plans ----
-
-
-def test_build_spawn_plan_claude(tmp_path: Path) -> None:
-    plan = build_spawn_plan("claude", tmp_path / "home")
-    assert plan.env_set == {"CLAUDE_CONFIG_DIR": str(tmp_path / "home")}
-    assert plan.env_remove == ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
-    assert plan.codex_source_home is None
-
-
-def test_build_spawn_plan_kimi(tmp_path: Path) -> None:
-    plan = build_spawn_plan("kimi", tmp_path / "home")
-    assert plan.env_set == {"KIMI_CODE_HOME": str(tmp_path / "home")}
-    assert plan.env_remove == []
-
-
-def test_build_spawn_plan_codex(tmp_path: Path) -> None:
-    plan = build_spawn_plan("codex", tmp_path / "home")
-    assert plan.env_set == {}
-    assert plan.codex_source_home == tmp_path / "home"
-
-
-def test_build_spawn_plan_rejects_unsupported(tmp_path: Path) -> None:
-    with pytest.raises(ValueError):
-        build_spawn_plan("antigravity", tmp_path / "home")
-
-
-def test_grok_shim_structure_and_refresh(tmp_path: Path) -> None:
-    real_home = tmp_path / "real-home"
-    real_home.mkdir()
-    (real_home / ".zshrc").write_text("x", encoding="utf-8")
-    (real_home / "Documents").mkdir()
-    (real_home / ".grok").mkdir()
-    (real_home / ".grok" / "auth.json").write_text("{}", encoding="utf-8")
-    profile_home = tmp_path / "profiles" / "grok" / "abcd1234"
-    profile_home.mkdir(parents=True)
-
-    plan = build_spawn_plan("grok", profile_home, real_home=real_home)
-    shim = Path(plan.env_set["HOME"])
-
-    assert shim == profile_home / "home"
-    assert (shim / ".zshrc").is_symlink()
-    assert (shim / "Documents").is_symlink()
-    assert (shim / "Documents").readlink() == real_home / "Documents"
-    # .grok is the isolation point: a REAL directory, never a link to the
-    # user's real ~/.grok.
-    assert (shim / ".grok").is_dir()
-    assert not (shim / ".grok").is_symlink()
-    assert not (shim / ".grok" / "auth.json").exists()
-
-    # Refresh on next spawn: picks up new entries, drops dangling links.
-    (real_home / ".newfile").write_text("y", encoding="utf-8")
-    (real_home / ".zshrc").unlink()
-    plan2 = build_spawn_plan("grok", profile_home, real_home=real_home)
-
-    assert plan2.env_set["HOME"] == str(shim)
-    assert (shim / ".newfile").is_symlink()
-    assert not (shim / ".zshrc").is_symlink()
-    assert not (shim / ".zshrc").exists()

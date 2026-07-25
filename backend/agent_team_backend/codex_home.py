@@ -28,10 +28,10 @@ class CodexHomeManager:
             "memories",
         )
 
-    def prepare(self, home_id: str, *, source_home: Path | None = None) -> Path:
-        """Create the per-pane home, symlinking shared entries from
-        ``source_home`` (a CLI account profile home) or the real ~/.codex."""
-        source = source_home or self.real_home
+    def prepare(self, home_id: str) -> Path:
+        """Create the per-pane home, symlinking shared entries from the real
+        ~/.codex."""
+        source = self.real_home
         safe_id = self._safe_home_id(home_id)
         pane_home = self.panes_root / safe_id
         pane_home.mkdir(parents=True, exist_ok=True)

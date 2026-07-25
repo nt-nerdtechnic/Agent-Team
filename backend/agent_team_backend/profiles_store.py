@@ -1,14 +1,16 @@
-"""CLI account profile registry + spawn-env planning.
+"""CLI account profile registry.
 
 Each supported CLI agent (claude/codex/kimi/grok) can register multiple named
-account profiles. A profile only reserves an isolated config-home directory
-under ``~/.navide/cli-profiles/<agentKey>/<profileId>``; the CLI performs its
-own login inside the terminal, and the app never stores or reads credentials.
+account profiles. Every agent runs against the user's real home (sessions and
+settings are shared); a profile is only a credential slot under
+``~/.navide/cli-profiles/<agentKey>/<profileId>`` — switching the active
+account swaps credentials between that slot and the real home (see
+``credential_vault``). Spawns get no per-profile env isolation.
 
-Path strings handed to CLIs must be stable byte-for-byte across spawns:
-Claude Code derives its macOS Keychain entry name from the literal
-``CLAUDE_CONFIG_DIR`` string (sha256 prefix), so the same profile must always
-produce the identical absolute, NFC-normalised, no-trailing-slash path.
+Path strings must be stable byte-for-byte across calls: the legacy-home
+migration derives Keychain service names from the literal path string
+(sha256 prefix), so the same profile must always produce the identical
+absolute, NFC-normalised, no-trailing-slash path.
 """
 
 from __future__ import annotations
@@ -19,7 +21,6 @@ import os
 import threading
 import time
 import unicodedata
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -35,7 +36,8 @@ PROFILES_SCHEMA_VERSION = 1
 # macOS Keychain entry, so config-home isolation cannot separate accounts.
 SUPPORTED_AGENT_KEYS = ("claude", "codex", "kimi", "grok")
 # Env vars that override Claude Code's OAuth login when they leak in from the
-# parent environment — they must never reach a profile spawn.
+# parent environment — they must never reach a spawn while a managed claude
+# account (a non-null default profile) is active.
 CLAUDE_ENV_OVERRIDES = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 
 
@@ -77,6 +79,10 @@ class CliProfilesStore:
     @property
     def path(self) -> Path:
         return self._path
+
+    @property
+    def profiles_root(self) -> Path:
+        return self._profiles_root
 
     # ---- disk I/O ----
 
@@ -235,100 +241,3 @@ class CliProfilesStore:
                 f"unsupported agent for CLI profiles: {agent_key!r} "
                 f"(supported: {', '.join(SUPPORTED_AGENT_KEYS)})"
             )
-
-
-def credential_home_for(agent_key: str, store: CliProfilesStore) -> Path | None:
-    """Directory the usage poller should treat as ``agent_key``'s credential
-    base for the ACTIVE profile, or ``None`` when the built-in default (the real
-    home) is active — in which case the caller keeps its current default path
-    byte-for-byte.
-
-    The returned base mirrors ``build_spawn_plan``'s isolation env, resolved to
-    the exact layer each ``read_*_credentials`` reader expects::
-
-        claude  <base>/.credentials.json          base = CLAUDE_CONFIG_DIR = profile_home
-        codex   <base>/auth.json                   base = CODEX_HOME source = profile_home
-        kimi    <base>/credentials/kimi-code.json  base = KIMI_CODE_HOME    = profile_home
-        grok    <base>/.grok/auth.json             base = HOME shim         = profile_home/home
-
-    antigravity is never isolated (fixed-name Keychain entry), so it is not a
-    supported key here and always resolves to the real home upstream.
-    """
-    if agent_key not in SUPPORTED_AGENT_KEYS:
-        return None
-    profile = store.get_default_profile(agent_key)
-    if profile is None:
-        return None
-    home = store.home_path(profile)
-    # grok isolates via a HOME shim; its .grok dir lives one level in.
-    return home / "home" if agent_key == "grok" else home
-
-
-# ---- spawn-env planning ----
-
-
-@dataclass
-class ProfileSpawnPlan:
-    """Env overrides a selected profile applies to one terminal spawn."""
-
-    env_set: dict[str, str] = field(default_factory=dict)
-    env_remove: list[str] = field(default_factory=list)
-    codex_source_home: Path | None = None
-
-
-def refresh_grok_home_shim(profile_home: Path, real_home: Path) -> Path:
-    """Build/refresh the HOME shim for a grok profile.
-
-    The shim mirrors every top-level entry of the real home via symlink so the
-    CLI still sees the user's shell config, except ``.grok`` which is a real
-    directory inside the profile — that's where grok keeps its credentials.
-    Refreshing on every spawn picks up new real-home entries and drops
-    dangling symlinks (mirrors codex_home's shared-entry symlinking).
-    """
-    shim = profile_home / "home"
-    shim.mkdir(parents=True, exist_ok=True)
-    (shim / ".grok").mkdir(exist_ok=True)
-    try:
-        for entry in shim.iterdir():
-            if entry.is_symlink() and not entry.exists():
-                entry.unlink(missing_ok=True)
-    except OSError as err:
-        log.warning("grok shim cleanup in %s failed: %s", shim, err)
-    try:
-        real_entries = list(real_home.iterdir())
-    except OSError as err:
-        log.warning("cannot list real home %s for grok shim: %s", real_home, err)
-        real_entries = []
-    for src in real_entries:
-        if src.name == ".grok":
-            continue
-        dst = shim / src.name
-        if dst.exists() or dst.is_symlink():
-            continue
-        try:
-            dst.symlink_to(src, target_is_directory=src.is_dir())
-        except OSError as err:
-            log.warning("grok shim symlink %s -> %s failed: %s", dst, src, err)
-    return shim
-
-
-def build_spawn_plan(
-    agent_key: str, profile_home: Path, *, real_home: Path | None = None
-) -> ProfileSpawnPlan:
-    """Compute the env overrides for spawning ``agent_key`` under a profile."""
-    home_str = canonical_path_str(profile_home)
-    if agent_key == "claude":
-        return ProfileSpawnPlan(
-            env_set={"CLAUDE_CONFIG_DIR": home_str},
-            env_remove=list(CLAUDE_ENV_OVERRIDES),
-        )
-    if agent_key == "kimi":
-        return ProfileSpawnPlan(env_set={"KIMI_CODE_HOME": home_str})
-    if agent_key == "codex":
-        # The per-pane CODEX_HOME mechanism stays; only its symlink source
-        # switches from ~/.codex to the profile home.
-        return ProfileSpawnPlan(codex_source_home=Path(home_str))
-    if agent_key == "grok":
-        shim = refresh_grok_home_shim(Path(home_str), real_home or Path.home())
-        return ProfileSpawnPlan(env_set={"HOME": canonical_path_str(shim)})
-    raise ValueError(f"unsupported agent for CLI profiles: {agent_key!r}")

@@ -120,7 +120,6 @@ class LogWatcher:
         self._drain_task: asyncio.Task[None] | None = None
         self._rescan_task: asyncio.Task[None] | None = None
         self._watched_dirs: set[Path] = set()
-        self._handler: _Handler | None = None
         self._started = False
 
     def add_reader(self, reader: LogReader) -> None:
@@ -155,7 +154,6 @@ class LogWatcher:
                 pass
 
         handler = _Handler(on_path)
-        self._handler = handler
 
         # Watch every existing watch root from every reader. Skip duplicates.
         # Most readers watch the same dirs they scan; Codex also watches the
@@ -179,33 +177,6 @@ class LogWatcher:
             "LogWatcher started · %d reader(s) · %d dir(s) · rescan %.0fs",
             len(self._readers), len(self._watched_dirs), self._rescan_interval_s,
         )
-
-    def watch_dir(self, directory: Path) -> bool:
-        """Subscribe the observer to an extra directory at runtime.
-
-        Profile config homes (Phase B) appear only when a profile pane spawns —
-        after start() already scheduled the static watch roots. Watching the
-        profile home recursively covers claude's <home>/projects, kimi's
-        <home>/sessions and grok's <home>/home/.grok in one subscription; the
-        home dir always exists (ensure_home) so the schedule can't fail on a
-        not-yet-created session subdir. Lazy + deduped: only homes with a live
-        pane are added, and an already-watched dir is a no-op. Returns True when
-        a new subscription was created."""
-        if not self._started or self._observer is None or self._handler is None:
-            return False
-        d = Path(directory)
-        if d in self._watched_dirs:
-            return False
-        try:
-            if not d.exists():
-                return False
-            self._observer.schedule(self._handler, str(d), recursive=True)
-            self._watched_dirs.add(d)
-            log.info("watching %s (profile config home)", d)
-            return True
-        except Exception as err:  # noqa: BLE001
-            log.warning("schedule watch on %s failed: %s", d, err)
-            return False
 
     def stop(self) -> None:
         if not self._started:

@@ -52,7 +52,10 @@ export function createMockBackend(initialStatus: BackendStatus = 'connected') {
   function setResponse<T>(
     type: string,
     payload: T,
-    opts: { ok?: boolean; error?: { code: string; message: string } } = {}
+    opts: {
+      ok?: boolean
+      error?: { code: string; message: string; details?: Record<string, unknown> }
+    } = {}
   ): void {
     const ok = opts.ok ?? true
     responses.set(type, {

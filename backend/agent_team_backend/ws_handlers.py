@@ -20,8 +20,9 @@ from typing import TYPE_CHECKING, Awaitable, Callable
 
 from .ipc import make_error, make_event, make_response
 from .log_readers.claude import ClaudeLogReader, first_user_prompts
+from .credential_vault import DEFAULT_SLOT_ID
+from .profiles_store import CLAUDE_ENV_OVERRIDES
 from .profiles_store import SUPPORTED_AGENT_KEYS as PROFILE_AGENT_KEYS
-from .profiles_store import build_spawn_plan
 from .spawn_history import canonical_workspace_path, filter_foreign_entries
 
 if TYPE_CHECKING:
@@ -1376,16 +1377,109 @@ async def cli_profiles_delete(session: "Session", msg_id: str, msg_type: str, pa
     )
 
 
-@handler("cli_profiles.set_default")
-async def cli_profiles_set_default(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+# Settle time after nudging running CLIs with ESC on a forced switch, so they
+# can abort their in-flight generation before the credentials swap under them.
+FORCE_SWITCH_ESC_SETTLE_S = 0.4
+
+
+def _running_agent_terminals(agent_key: str) -> list[tuple[str, "Session"]]:
+    """(terminal_id, owner session) for every live PTY of ``agent_key``."""
     from . import app
 
-    profile_id = payload.get("profile_id")
-    try:
-        defaults = app.cli_profiles_store.set_default(
-            str(payload.get("agent_key") or ""),
-            str(profile_id) if profile_id else None,
+    running: list[tuple[str, "Session"]] = []
+    for tid, owner in list(app._PTY_OWNERS.items()):
+        term = owner.terminals.get(tid)
+        if term is not None and not term.closed and term.agent_key == agent_key:
+            running.append((tid, owner))
+    return running
+
+
+@handler("cli_profiles.set_default")
+async def cli_profiles_set_default(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Switch the agent's active account: capture the live credentials into the
+    outgoing account's slot, then restore the target slot into the real home.
+    Refused while the agent has running panes, unless ``force`` is set — the
+    force path only sends each running pane an ESC (as if the user pressed Esc)
+    and swaps after a short settle; the old CLI processes keep the previous
+    account's token in memory, an accepted residual risk."""
+    from . import app
+
+    agent_key = str(payload.get("agent_key") or "")
+    raw_profile_id = payload.get("profile_id")
+    profile_id = str(raw_profile_id) if raw_profile_id else None
+    force = bool(payload.get("force"))
+
+    # Validate before touching any credentials.
+    if agent_key not in PROFILE_AGENT_KEYS:
+        await session.send_json(
+            make_error(
+                msg_id, msg_type, "BAD_REQUEST",
+                f"unsupported agent for CLI profiles: {agent_key!r}",
+            )
         )
+        return
+    if profile_id is not None:
+        profile = app.cli_profiles_store.get(profile_id)
+        if profile is None:
+            await session.send_json(
+                make_error(
+                    msg_id, msg_type, "BAD_REQUEST",
+                    f"profile not found: {profile_id}",
+                )
+            )
+            return
+        if profile.get("agentKey") != agent_key:
+            await session.send_json(
+                make_error(
+                    msg_id, msg_type, "BAD_REQUEST",
+                    f"profile {profile_id} does not belong to agent {agent_key!r}",
+                )
+            )
+            return
+
+    current_id = app.cli_profiles_store.list()["defaults"].get(agent_key)
+    if current_id == profile_id:
+        # Already active — nothing to swap, nothing changed.
+        await session.send_json(
+            make_response(
+                msg_id, msg_type, {"defaults": app.cli_profiles_store.list()["defaults"]}
+            )
+        )
+        return
+
+    running = _running_agent_terminals(agent_key)
+    if running and not force:
+        await session.send_json(
+            make_error(
+                msg_id, msg_type, "PROFILE_IN_USE",
+                f"close running {agent_key} panes first",
+                {"running_count": len(running)},
+            )
+        )
+        return
+    if running:
+        for tid, owner in running:
+            try:
+                owner.terminals.write(tid, "\x1b")
+            except Exception as err:  # noqa: BLE001 — a dead pane must not block the switch
+                app.log.warning("ESC nudge to terminal %s failed: %s", tid, err)
+        await asyncio.sleep(FORCE_SWITCH_ESC_SETTLE_S)
+
+    try:
+        await asyncio.to_thread(
+            app.credential_vault.switch,
+            agent_key,
+            current_id or DEFAULT_SLOT_ID,
+            profile_id or DEFAULT_SLOT_ID,
+        )
+    except Exception as err:  # noqa: BLE001 — switch() already rolled the live state back
+        await session.send_json(
+            make_error(msg_id, msg_type, "PROFILE_SWAP_FAILED", _profile_error(err))
+        )
+        return
+
+    try:
+        defaults = app.cli_profiles_store.set_default(agent_key, profile_id)
     except (KeyError, ValueError) as err:
         await session.send_json(
             make_error(msg_id, msg_type, "BAD_REQUEST", _profile_error(err))
@@ -2790,21 +2884,16 @@ async def terminal_create(session: "Session", msg_id: str, msg_type: str, payloa
         metadata["startup_probe"] = startup_probe
     # The vendor's own auto-update switch, only when the user opted out of it.
     env.update(app.onboarding_deps.spawn_env_for(agent_key))
-    # CLI account: panes are no longer bound per-pane. Every spawn uses the
-    # agent's single global active account (the stored default). No default
-    # (defaults[agent]=null → built-in Default, the user's real home) leaves
-    # the spawn env exactly as before.
-    profile = None
-    profile_plan = None
-    if agent_key in PROFILE_AGENT_KEYS:
-        profile = app.cli_profiles_store.get_default_profile(agent_key)
-    if profile is not None:
-        profile_home = app.cli_profiles_store.ensure_home(profile)
-        profile_plan = build_spawn_plan(agent_key, profile_home)
-        env.update(profile_plan.env_set)
-        # Make the log readers + watcher aware of this account's config home so
-        # the pane's session logs are read, attributed and resumed (Phase D).
-        app._register_profile_home(agent_key, profile["id"], profile_home)
+    # CLI accounts share the real home — spawns get no profile env isolation
+    # (sessions and settings are global; profiles only swap credentials). The
+    # one account-driven env effect: while a managed claude account is active,
+    # drop inherited Anthropic API overrides so they can't shadow its OAuth.
+    env_remove: list[str] | None = None
+    if (
+        agent_key == "claude"
+        and app.cli_profiles_store.get_default_profile("claude") is not None
+    ):
+        env_remove = list(CLAUDE_ENV_OVERRIDES)
     if agent_key == "codex":
         # Compatibility: `codex resume <id>` only works inside the home
         # that recorded the session. Resume in whichever home owns it;
@@ -2815,12 +2904,7 @@ async def terminal_create(session: "Session", msg_id: str, msg_type: str, payloa
         )
         if session_home is None:
             home_id = str(metadata.get("session_home_id") or payload["pane_id"])
-            if profile_plan is not None and profile_plan.codex_source_home is not None:
-                codex_home = app.codex_home_manager.prepare(
-                    home_id, source_home=profile_plan.codex_source_home
-                )
-            else:
-                codex_home = app.codex_home_manager.prepare(home_id)
+            codex_home = app.codex_home_manager.prepare(home_id)
             env["CODEX_HOME"] = str(codex_home)
             metadata["session_home_id"] = home_id
         elif session_home != app.codex_home_manager.real_home:
@@ -2836,7 +2920,7 @@ async def terminal_create(session: "Session", msg_id: str, msg_type: str, payloa
         cols=int(payload.get("cols", 100)),
         rows=int(payload.get("rows", 30)),
         env=env or None,
-        env_remove=(profile_plan.env_remove if profile_plan else None) or None,
+        env_remove=env_remove,
         metadata=metadata,
         output_log_file=payload.get("output_log_file") or "",
     )

@@ -9,17 +9,7 @@ import time
 import pytest
 
 from agent_team_backend import app
-from agent_team_backend.log_readers.profile_registry import clear_profile_homes
-
-
-@pytest.fixture(autouse=True)
-def _reset_profile_registry():
-    """The CLI-profile home registry is process-global (readers consult it); a
-    spawn-path test that registers a profile home would otherwise leak into
-    later tests that assert default reader scan roots."""
-    clear_profile_homes()
-    yield
-    clear_profile_homes()
+from agent_team_backend.credential_vault import CredentialVault
 
 
 @pytest.fixture(autouse=True)
@@ -30,16 +20,33 @@ def _isolated_data_dir(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_credential_vault(tmp_path, monkeypatch):
+    """Tests must NEVER touch the real home or the real Keychain: swap the
+    app-wide vault for one rooted in tmp with a security runner that always
+    reports 'not found'."""
+    vault = CredentialVault(
+        root=tmp_path / "vault-root",
+        real_home=tmp_path / "vault-home",
+        security_runner=lambda args, input_text=None: (1, ""),
+    )
+    monkeypatch.setattr(app, "credential_vault", vault)
+
+
+@pytest.fixture(autouse=True)
 def _reset_terminal_singleton():
     """The TerminalService is an app-level singleton (terminals outlive a single
     ws connection) bound to the running event loop. pytest-asyncio uses a fresh
     loop per test, so reset the singleton and the active-session pointer before
-    and after each test to keep them isolated and bound to the current loop."""
+    and after each test to keep them isolated and bound to the current loop.
+    _PTY_OWNERS is likewise process-global (cli_profiles.set_default consults it
+    for the running-pane guard) and must not leak between tests."""
     app._TERMINALS = None
     app._active_session = None
+    app._PTY_OWNERS.clear()
     yield
     app._TERMINALS = None
     app._active_session = None
+    app._PTY_OWNERS.clear()
 
 
 # ---- shared helpers for the PTY kill/reap tests ----

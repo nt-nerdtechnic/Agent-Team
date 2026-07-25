@@ -30,7 +30,6 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from .base import IncrementalParseResult, LogReader, TokenUsage
-from .profile_registry import profile_homes
 
 log = logging.getLogger("agent_team_backend.log_readers.grok")
 
@@ -73,15 +72,9 @@ class GrokLogReader(LogReader):
         return Path.home() / ".grok" / _DB_NAME
 
     def _grok_dirs(self) -> list[Path]:
-        """The ``.grok`` dir(s) holding a grok.db: the default ~/.grok plus each
-        active profile's shim ``<home>/home/.grok`` (Phase B). A grok profile
-        pane runs with HOME pointed at the shim, so its ENTIRELY separate db
-        lives inside the shim — the default ~/.grok never sees those sessions.
-        With no profile pane this session the list is exactly [~/.grok]."""
-        dirs: list[Path] = [Path.home() / ".grok"]
-        for home in profile_homes("grok"):
-            dirs.append(home / "home" / ".grok")
-        return dirs
+        """The single ``.grok`` dir holding grok.db (accounts share the real
+        home)."""
+        return [Path.home() / ".grok"]
 
     def _db_paths(self) -> list[Path]:
         return [d / _DB_NAME for d in self._grok_dirs()]

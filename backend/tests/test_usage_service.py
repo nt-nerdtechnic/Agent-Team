@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 
 from agent_team_backend import usage_service as us
-from agent_team_backend.profiles_store import CliProfilesStore, credential_home_for
+from agent_team_backend.profiles_store import CliProfilesStore
 
 
 def _isolated_store(tmp_path: Path) -> CliProfilesStore:
@@ -477,72 +477,44 @@ async def test_poll_once_survives_fetcher_exception(tmp_path, monkeypatch):
     assert payload["providers"]["codex"]["status"] == "no-credentials"
 
 
-# ── Active-profile credential resolution ────────────────────────────────────
+# ── Real-home credential reads + opportunistic slot harvest ─────────────────
 
-def test_credential_home_for_default_is_none(tmp_path):
-    store = _isolated_store(tmp_path)  # no defaults set
-    for key in ("claude", "codex", "kimi", "grok"):
-        assert credential_home_for(key, store) is None
-    # antigravity is never isolated.
-    assert credential_home_for("antigravity", store) is None
+class _RecordingVault:
+    def __init__(self):
+        self.harvested: list[tuple[str, str]] = []
+
+    def harvest(self, agent_key: str, slot_id: str) -> bool:
+        self.harvested.append((agent_key, slot_id))
+        return True
 
 
-def test_credential_home_for_profile_paths(tmp_path):
+async def test_poll_once_always_reads_real_home(tmp_path, monkeypatch):
+    """Every provider reads its original real-home path even while managed
+    accounts (non-null defaults) are active — profiles no longer redirect
+    credential reads anywhere."""
     store = _isolated_store(tmp_path)
     for key in ("claude", "codex", "kimi", "grok"):
         prof = store.create(agent_key=key, name="Acct")
         store.set_default(key, prof["id"])
-        home = store.home_path(prof)
-        # grok isolates via a HOME shim; .grok lives one level in.
-        expected = home / "home" if key == "grok" else home
-        assert credential_home_for(key, store) == expected
-
-
-def test_read_claude_credentials_file_profile_config_dir(tmp_path):
-    """A profile's creds live flat in CLAUDE_CONFIG_DIR (no ``.claude`` layer)."""
-    profile_dir = tmp_path / "profile"
-    _write(profile_dir / ".credentials.json", {"claudeAiOauth": {"accessToken": "prof"}})
-    assert us.read_claude_credentials_file(tmp_path, profile_dir)["accessToken"] == "prof"
-    # Default lookup (no override) reads home/.claude and must NOT see it.
-    assert us.read_claude_credentials_file(tmp_path) is None
-
-
-async def test_read_claude_credentials_profile_skips_keychain(tmp_path, monkeypatch):
-    """A profile read is file-only: the fixed-service Keychain entry belongs to
-    the default account, so it must never be consulted for a profile."""
-    monkeypatch.setattr(us.sys, "platform", "darwin")
-    monkeypatch.setattr(us, "_keychain_failed", False)
-
-    async def boom(*a, **k):
-        raise AssertionError("keychain must not be consulted for a profile")
-
-    monkeypatch.setattr(us.asyncio, "create_subprocess_exec", boom)
-    # No file present under the profile config dir -> None, no Keychain fallback.
-    assert await us.read_claude_credentials(tmp_path, tmp_path / "profile") is None
-
-
-async def test_poll_once_default_reads_real_home(tmp_path, monkeypatch):
-    """Regression: with no active profile every provider resolves to its
-    original real-home path (claude cfg None, codex ~/.codex, kimi env default,
-    grok inherited spawn env)."""
-    monkeypatch.setattr(us, "_get_profiles_store", lambda: _isolated_store(tmp_path))
+    monkeypatch.setattr(us, "_get_profiles_store", lambda: store)
+    monkeypatch.setattr(us, "_get_credential_vault", lambda: _RecordingVault())
     monkeypatch.delenv("CODEX_HOME", raising=False)
     seen: dict = {}
 
-    async def spy_claude(home, config_dir=None):
-        seen["claude_home"], seen["claude_cfg"] = home, config_dir
+    async def spy_claude(home):
+        seen["claude"] = home
         return us._snapshot("claude", "no-credentials")
 
     async def spy_codex(codex_home):
         seen["codex"] = codex_home
         return us._snapshot("codex", "no-credentials")
 
-    async def spy_kimi(home, env=None):
-        seen["kimi_home"], seen["kimi_env"] = home, env
+    async def spy_kimi(home):
+        seen["kimi"] = home
         return us._snapshot("kimi", "no-credentials")
 
-    async def spy_grok(home, env=None, spawn_env=None):
-        seen["grok_home"], seen["grok_spawn"] = home, spawn_env
+    async def spy_grok(home):
+        seen["grok"] = home
         return us._snapshot("grok", "no-credentials")
 
     async def spy_ag(home):
@@ -556,56 +528,34 @@ async def test_poll_once_default_reads_real_home(tmp_path, monkeypatch):
 
     real = tmp_path / "realhome"
     await us.UsageService().poll_once(real)
-    assert seen["claude_home"] == real and seen["claude_cfg"] is None
+    assert seen["claude"] == real
     assert seen["codex"] == real / ".codex"
-    assert seen["kimi_home"] == real and seen["kimi_env"] is None
-    assert seen["grok_home"] == real and seen["grok_spawn"] is None
+    assert seen["kimi"] == real
+    assert seen["grok"] == real
 
 
-async def test_poll_once_reads_active_profile_credentials(tmp_path, monkeypatch):
-    """Each provider with an active profile resolves to that profile's isolated
-    credential home rather than the real home."""
+async def test_poll_once_harvests_active_slots(tmp_path, monkeypatch):
+    """Each poll opportunistically offers the ACTIVE accounts a harvest (fills
+    an empty slot from live credentials after an in-pane login). Agents on the
+    built-in default (null) are never harvested."""
     store = _isolated_store(tmp_path)
-    homes: dict = {}
-    for key in ("claude", "codex", "kimi", "grok"):
-        prof = store.create(agent_key=key, name="Acct")
-        store.set_default(key, prof["id"])
-        homes[key] = store.home_path(prof)
+    prof = store.create(agent_key="claude", name="Acct")
+    store.set_default("claude", prof["id"])
+    vault = _RecordingVault()
     monkeypatch.setattr(us, "_get_profiles_store", lambda: store)
-    seen: dict = {}
+    monkeypatch.setattr(us, "_get_credential_vault", lambda: vault)
 
-    async def spy_claude(home, config_dir=None):
-        seen["claude"] = config_dir
-        return us._snapshot("claude", "no-credentials")
+    async def fake_ok(provider):
+        return us._snapshot(provider, "no-credentials")
 
-    async def spy_codex(codex_home):
-        seen["codex"] = codex_home
-        return us._snapshot("codex", "no-credentials")
+    monkeypatch.setattr(us, "fetch_claude", lambda home: fake_ok("claude"))
+    monkeypatch.setattr(us, "fetch_codex", lambda home: fake_ok("codex"))
+    monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_ok("kimi"))
+    monkeypatch.setattr(us, "fetch_grok", lambda home: fake_ok("grok"))
+    monkeypatch.setattr(us, "fetch_antigravity", lambda home: fake_ok("antigravity"))
 
-    async def spy_kimi(home, env=None):
-        seen["kimi"] = (env or {}).get("KIMI_CODE_HOME")
-        return us._snapshot("kimi", "no-credentials")
-
-    async def spy_grok(home, env=None, spawn_env=None):
-        seen["grok_home"] = home
-        seen["grok_spawn_home"] = (spawn_env or {}).get("HOME")
-        return us._snapshot("grok", "no-credentials")
-
-    async def spy_ag(home):
-        return us._snapshot("antigravity", "no-credentials")
-
-    monkeypatch.setattr(us, "fetch_claude", spy_claude)
-    monkeypatch.setattr(us, "fetch_codex", spy_codex)
-    monkeypatch.setattr(us, "fetch_kimi", spy_kimi)
-    monkeypatch.setattr(us, "fetch_grok", spy_grok)
-    monkeypatch.setattr(us, "fetch_antigravity", spy_ag)
-
-    await us.UsageService().poll_once(tmp_path / "realhome")
-    assert seen["claude"] == homes["claude"]
-    assert seen["codex"] == homes["codex"]
-    assert Path(seen["kimi"]) == homes["kimi"]
-    assert seen["grok_home"] == homes["grok"] / "home"
-    assert seen["grok_spawn_home"] == str(homes["grok"] / "home")
+    await us.UsageService().poll_once(tmp_path)
+    assert vault.harvested == [("claude", prof["id"])]
 
 
 async def test_grok_billing_rpc_with_fake_stdio(tmp_path, monkeypatch):

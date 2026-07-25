@@ -626,17 +626,17 @@
       "delete-confirm": "確定刪除此帳號？",
       "cli": {
         "title": "CLI 帳號",
-        "hint": "為每個 CLI agent 建立獨立的登入 profile，各自使用隔離的家目錄。可從標題列或這裡設定使用中的帳號，套用到之後新開的 pane。",
+        "hint": "所有帳號共用你真實的家目錄（session 與歷史共通），切換帳號時就地替換儲存的憑證。可從標題列或這裡設定使用中的帳號——已開啟的 pane 在重開前仍使用原帳號；尚未登入過的新帳號會在下次開啟該 CLI 的 pane 時進入其登入流程。",
         "new-account": "＋ 新增帳號",
         "name-placeholder": "帳號名稱",
-        "default-hint": "你真實的家目錄",
+        "default-hint": "你原本的登入憑證",
         "is-default": "預設",
         "set-default": "設為預設",
         "rename": "重新命名",
         "delete": "刪除",
         "save": "儲存",
         "cancel": "取消",
-        "delete-confirm": "確定刪除此帳號？登入資料目錄會保留在磁碟上，不會被刪除。",
+        "delete-confirm": "確定刪除此帳號？其儲存的憑證會保留在磁碟上，不會被刪除。",
         "unsupported": "此 agent 不支援多帳號。",
         "in-use-error": "此帳號正被執行中的 pane 使用，無法刪除。請先將該 pane 切換到其他帳號。"
       }
@@ -1145,7 +1145,12 @@
     "failed": "無法接回這段對話，其歷史紀錄可能已不存在"
   },
   "cli-account": {
-    "default": "預設"
+    "default": "預設",
+    "switch-title": "切換帳號",
+    "switch-in-use": "有 {count} 個執行中的 {agent} pane。現在切換會中斷它們目前的動作；已開啟的 pane 在重開前仍使用原帳號。",
+    "switch-force": "停止所有動作並切換",
+    "switch-cancel": "取消",
+    "swap-failed": "帳號切換失敗，已還原原本的憑證。"
   },
   "cliDrop": {
     "source-closed": "來源 CLI pane 已關閉",

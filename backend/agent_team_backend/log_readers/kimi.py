@@ -20,7 +20,6 @@ import time
 from pathlib import Path
 
 from .base import ActivityEvent, IncrementalParseResult, LogReader, TokenUsage, read_jsonl_tail
-from .profile_registry import profile_homes
 
 log = logging.getLogger("agent_team_backend.log_readers.kimi")
 
@@ -90,26 +89,10 @@ class KimiLogReader(LogReader):
     def _sessions_root(self) -> Path:
         return _kimi_home() / "sessions"
 
-    def _all_sessions_roots(self) -> list[Path]:
-        """Default sessions root plus every active profile's ``<home>/sessions``.
-
-        Profile panes run with KIMI_CODE_HOME pointed at a per-account home
-        (Phase B); their sessions live outside the default root. With no profile
-        pane this session the list is exactly the default root — unchanged
-        behavior. Only existing dirs are returned (a fresh profile has none yet).
-        """
-        roots: list[Path] = []
-        default = self._sessions_root()
-        if default.is_dir():
-            roots.append(default)
-        for home in profile_homes("kimi"):
-            p = home / "sessions"
-            if p.is_dir() and p not in roots:
-                roots.append(p)
-        return roots
-
     def project_dirs(self) -> list[Path]:
-        return self._all_sessions_roots()
+        """The single default sessions root (accounts share the real home)."""
+        default = self._sessions_root()
+        return [default] if default.is_dir() else []
 
     def session_files(self) -> list[Path]:
         out: list[Path] = []
@@ -130,9 +113,7 @@ class KimiLogReader(LogReader):
         session_id = session_id.strip()
         if not session_id.startswith("session_"):
             return False
-        # Check the default root AND any active profile root: a resumed profile
-        # pane's session dir lives under its per-account sessions root.
-        for root in self._all_sessions_roots():
+        for root in self.project_dirs():
             try:
                 if any((wd / session_id).is_dir() for wd in root.glob("wd_*")):
                     return True

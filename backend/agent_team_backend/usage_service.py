@@ -139,16 +139,10 @@ def _snapshot(provider: str, status: str, *, windows: list[dict] | None = None,
 
 # ── Credential readers (pure; ``home`` injectable for tests) ────────────────
 
-def read_claude_credentials_file(home: Path, config_dir: Path | None = None) -> dict | None:
+def read_claude_credentials_file(home: Path) -> dict | None:
     """Parse ``~/.claude/.credentials.json``. Returns the claudeAiOauth dict
-    or None when absent/unusable (an mcpOAuth-only payload counts as absent).
-
-    ``config_dir`` overrides the lookup with an explicit ``CLAUDE_CONFIG_DIR``
-    (a profile's isolated home): the file is read from
-    ``<config_dir>/.credentials.json`` directly, without the ``.claude``
-    sub-directory. Default (``None``) keeps ``home/.claude``."""
-    base = config_dir if config_dir is not None else home / ".claude"
-    path = base / ".credentials.json"
+    or None when absent/unusable (an mcpOAuth-only payload counts as absent)."""
+    path = home / ".claude" / ".credentials.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -167,22 +161,27 @@ def claude_token_expired(oauth: dict, now_ms: float | None = None) -> bool:
     return now >= expires
 
 
-_keychain_failed = False
+# A failed Keychain read (denied prompt, timeout) is remembered so we don't
+# re-prompt every poll — but only for a cooldown window, so a transient failure
+# (e.g. a slow security call during an account switch) self-heals without an app
+# restart. monotonic timestamp; None means no active cooldown.
+_KEYCHAIN_COOLDOWN_S = 300.0
+_keychain_failed_at: float | None = None
 
 
-async def read_claude_credentials(home: Path, config_dir: Path | None = None) -> dict | None:
+async def read_claude_credentials(home: Path) -> dict | None:
     """File first; on macOS fall back to the Keychain generic password the
-    Claude Code CLI writes. A failed Keychain read is remembered for the
-    process lifetime (the prompt/denial would otherwise re-fire every poll).
-
-    When ``config_dir`` is set (a profile's isolated ``CLAUDE_CONFIG_DIR``) the
-    read is file-only: the fixed-service Keychain entry belongs to the default
-    account, so falling back to it would report the wrong account's usage."""
-    global _keychain_failed
-    oauth = read_claude_credentials_file(home, config_dir)
+    Claude Code CLI writes. A failed Keychain read is remembered for
+    ``_KEYCHAIN_COOLDOWN_S`` (the prompt/denial would otherwise re-fire every
+    poll), then retried so a transient failure self-heals."""
+    global _keychain_failed_at
+    oauth = read_claude_credentials_file(home)
     if oauth is not None:
         return oauth
-    if config_dir is not None or sys.platform != "darwin" or _keychain_failed:
+    if sys.platform != "darwin":
+        return None
+    now = time.monotonic()
+    if _keychain_failed_at is not None and now - _keychain_failed_at < _KEYCHAIN_COOLDOWN_S:
         return None
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -192,15 +191,16 @@ async def read_claude_credentials(home: Path, config_dir: Path | None = None) ->
         )
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
         if proc.returncode != 0:
-            _keychain_failed = True
+            _keychain_failed_at = now
             return None
+        _keychain_failed_at = None
         data = json.loads(out.decode("utf-8", "replace").strip())
         oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
         if not isinstance(oauth, dict) or not oauth.get("accessToken"):
             return None
         return oauth
     except (OSError, ValueError, asyncio.TimeoutError):
-        _keychain_failed = True
+        _keychain_failed_at = now
         return None
 
 
@@ -668,8 +668,8 @@ async def _claude_user_agent() -> str:
     return _claude_ua
 
 
-async def fetch_claude(home: Path, config_dir: Path | None = None) -> dict:
-    oauth = await read_claude_credentials(home, config_dir)
+async def fetch_claude(home: Path) -> dict:
+    oauth = await read_claude_credentials(home)
     if oauth is None:
         return _snapshot("claude", "no-credentials")
     if claude_token_expired(oauth):
@@ -927,15 +927,12 @@ def _get_profiles_store():
         return None
 
 
-def _profile_credential_home(store, agent_key: str) -> Path | None:
-    """The active profile's isolated credential base for ``agent_key`` (see
-    ``profiles_store.credential_home_for``), or ``None`` for the built-in
-    default. Never raises — a resolution failure falls back to the real home."""
-    if store is None:
-        return None
+def _get_credential_vault():
+    """The app-wide credential vault, or ``None`` when unavailable (unit
+    tests, early startup)."""
     try:
-        from .profiles_store import credential_home_for
-        return credential_home_for(agent_key, store)
+        from . import app
+        return app.credential_vault
     except Exception:  # noqa: BLE001
         return None
 
@@ -971,38 +968,43 @@ class UsageService:
         self._blocked_until.clear()
         self._wake.set()
 
+    async def _harvest_active_slots(self) -> None:
+        """Opportunistic harvest: when an agent's ACTIVE account slot is still
+        empty but live credentials exist (the user just logged in inside a
+        pane), copy them into the slot so a later switch can bring the account
+        back. Best effort — failures are silent."""
+        store = _get_profiles_store()
+        vault = _get_credential_vault()
+        if store is None or vault is None:
+            return
+        try:
+            defaults = store.list()["defaults"]
+        except Exception:  # noqa: BLE001
+            return
+        for agent_key, profile_id in defaults.items():
+            if not profile_id:
+                continue
+            try:
+                await asyncio.to_thread(vault.harvest, agent_key, profile_id)
+            except Exception:  # noqa: BLE001
+                pass
+
     async def poll_once(self, home: Path | None = None) -> dict:
         home = home or Path.home()
         import os
 
         codex_home = Path(os.environ["CODEX_HOME"]) if os.environ.get("CODEX_HOME") \
             else home / ".codex"
-        # Redirect each provider's credential read to the ACTIVE account
-        # profile's isolated home; None keeps the built-in default (real home).
-        store = _get_profiles_store()
-        claude_cfg = _profile_credential_home(store, "claude")
-        codex_profile = _profile_credential_home(store, "codex")
-        kimi_profile = _profile_credential_home(store, "kimi")
-        grok_shim = _profile_credential_home(store, "grok")
-        if codex_profile is not None:
-            codex_home = codex_profile
-        claude_call = (lambda: fetch_claude(home, claude_cfg)) if claude_cfg is not None \
-            else (lambda: fetch_claude(home))
-        kimi_call = (
-            (lambda: fetch_kimi(home, {**os.environ, "KIMI_CODE_HOME": str(kimi_profile)}))
-            if kimi_profile is not None else (lambda: fetch_kimi(home))
-        )
-        grok_call = (
-            (lambda: fetch_grok(grok_shim, spawn_env={**os.environ, "HOME": str(grok_shim)}))
-            if grok_shim is not None else (lambda: fetch_grok(home))
-        )
+        # Every provider reads the real home — accounts share it; profiles only
+        # swap credentials (see credential_vault).
+        await self._harvest_active_slots()
         now = time.monotonic()
         tasks: dict[str, Any] = {}
         for provider, coro in (
-            ("claude", claude_call),
+            ("claude", lambda: fetch_claude(home)),
             ("codex", lambda: fetch_codex(codex_home)),
-            ("kimi", kimi_call),
-            ("grok", grok_call),
+            ("kimi", lambda: fetch_kimi(home)),
+            ("grok", lambda: fetch_grok(home)),
             ("antigravity", lambda: fetch_antigravity(home)),
         ):
             if self._blocked_until.get(provider, 0) > now:

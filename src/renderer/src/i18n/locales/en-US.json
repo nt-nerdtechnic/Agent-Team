@@ -626,17 +626,17 @@
       "delete-confirm": "Delete this account?",
       "cli": {
         "title": "CLI Accounts",
-        "hint": "Create separate login profiles for each CLI agent, each with its own isolated home directory. Set which account is active from the title bar or here — it applies to newly opened panes.",
+        "hint": "All accounts share your real home directory (sessions and history are shared); switching accounts swaps the stored credentials in place. Set the active account from the title bar or here — already-open panes keep the previous account until reopened, and a new account signs in through the CLI's own login flow the next time you open a pane.",
         "new-account": "+ New account",
         "name-placeholder": "Account name",
-        "default-hint": "Your real home directory",
+        "default-hint": "Your original login credentials",
         "is-default": "Default",
         "set-default": "Set as default",
         "rename": "Rename",
         "delete": "Delete",
         "save": "Save",
         "cancel": "Cancel",
-        "delete-confirm": "Delete this account? Its login data directory is kept on disk and will not be removed.",
+        "delete-confirm": "Delete this account? Its saved credentials are kept on disk and will not be removed.",
         "unsupported": "This agent does not support multiple accounts.",
         "in-use-error": "This account is in use by a running pane and cannot be deleted. Switch that pane to another account first."
       }
@@ -1145,7 +1145,12 @@
     "failed": "Could not reconnect that conversation — its transcript may no longer exist"
   },
   "cli-account": {
-    "default": "Default"
+    "default": "Default",
+    "switch-title": "Switch account",
+    "switch-in-use": "There are {count} running {agent} panes. Switching now interrupts their current actions; panes already open keep the previous account until reopened.",
+    "switch-force": "Stop all actions and switch",
+    "switch-cancel": "Cancel",
+    "swap-failed": "Account switch failed — the previous credentials have been restored."
   },
   "cliDrop": {
     "source-closed": "CLI pane is no longer open",

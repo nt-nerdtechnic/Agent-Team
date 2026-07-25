@@ -376,6 +376,10 @@ class TerminalService:
         )
         return session
 
+    def get(self, session_id: str) -> TerminalSession | None:
+        """The session for ``session_id``, or None when unknown."""
+        return self._sessions.get(session_id)
+
     def write(self, session_id: str, data: str) -> None:
         session = self._require(session_id)
         if session.closed:

@@ -62,11 +62,12 @@ from .log_readers import (
 )
 from .log_readers.attribution import Attribution
 from .log_readers.claude import encode_claude_cwd
-from .log_readers.profile_registry import register_profile_home
+from .credential_vault import CredentialVault
 from .doc_injector import fetch_stage_docs
 from .mcp_manager import MCPManager
 from .mcp_settings import MCPServersDocument, MCPSettingsStore
 from .plan_provisioning import ensure_plan_assets, plan_spec_exists
+from .profile_migration import migrate_legacy_claude_homes
 from .profiles_store import CliProfilesStore
 from .chat_store import ChatStore
 from .projects import ProjectStore
@@ -105,6 +106,7 @@ tokens_store = TokensStore()
 history_store = HistoryStore()
 codex_home_manager = CodexHomeManager()
 cli_profiles_store = CliProfilesStore()
+credential_vault = CredentialVault()
 mcp_manager = MCPManager()
 mcp_settings_store = MCPSettingsStore()
 analyzer_settings_store = AnalyzerSettingsStore()
@@ -791,27 +793,26 @@ def _register_workspace_and_backfill(workspace_path: str) -> None:
             watcher.force_rescan(workspace_path)
 
 
-def _register_profile_home(agent_key: str, profile_id: str, profile_home: Path) -> None:
-    """Make the log readers + watcher aware of a profile pane's config home.
+_INHERITED_CLI_HOME_VARS = ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "KIMI_CODE_HOME", "GROK_HOME")
 
-    Phase B moves a profile pane's sessions under ~/.navide/cli-profiles/<agent>/
-    <id>; without this the singleton readers only look at the default roots and
-    silently miss the pane (tokens/RUNNING/resume all break). Codex is excluded:
-    its sessions still land in ~/.codex-panes regardless of the symlink source,
-    which the codex reader already watches. Idempotent."""
-    if agent_key not in ("claude", "kimi", "grok"):
-        return
-    register_profile_home(agent_key, profile_id, profile_home)
-    # Recursive watch on the home dir (which always exists post ensure_home)
-    # covers claude's projects/, kimi's sessions/ and grok's home/.grok in one
-    # subscription. No-op before the watcher has started (startup rescan will
-    # still pick the sessions up from the reader's now-extended scan roots).
-    if _log_watcher is not None:
-        _log_watcher.watch_dir(profile_home)
+
+def _sanitize_inherited_cli_env() -> None:
+    """Drop CLI home-relocating vars inherited from whatever launched us.
+
+    The account design assumes every CLI reads its real home; an inherited
+    relocation (e.g. `pnpm dev` run from a pane that still carried
+    CLAUDE_CONFIG_DIR) would silently poison every spawned pane and
+    log-reader scan with a home nobody's sessions live in.
+    """
+    for key in _INHERITED_CLI_HOME_VARS:
+        if os.environ.pop(key, None) is not None:
+            log.info("dropped inherited %s from backend environment", key)
 
 
 @app.on_event("startup")
 async def _start_log_watcher() -> None:
+    _sanitize_inherited_cli_env()
+
     # One-time data protection on a version upgrade: back up the persisted JSON
     # stores and forward-migrate their schema. Idempotent and best-effort —
     # run_startup_migrations never raises, so it can't block startup. File I/O
@@ -820,6 +821,17 @@ async def _start_log_watcher() -> None:
         await asyncio.to_thread(run_startup_migrations)
     except Exception as err:  # noqa: BLE001
         log.warning("store backup/migration failed: %s", err)
+
+    # One-time: fold legacy isolated claude profile homes back into the real
+    # home (session logs + credential harvest). Idempotent — migrated homes
+    # are archived, so a restart finds nothing to do. Runs before the log
+    # watcher starts so the merged sessions are in its very first scan.
+    try:
+        await asyncio.to_thread(
+            migrate_legacy_claude_homes, cli_profiles_store, credential_vault
+        )
+    except Exception as err:  # noqa: BLE001
+        log.warning("legacy CLI profile home migration failed: %s", err)
 
     # Reap PTY children left behind by a previous run that died without its
     # shutdown sweep (SIGKILL, crash). Blocking ps/sleep — off the loop.

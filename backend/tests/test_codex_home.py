@@ -71,37 +71,6 @@ def test_find_session_home_rejects_unsafe_or_empty_id(tmp_path: Path) -> None:
     assert manager.find_session_home("../escape") is None
 
 
-def test_prepare_source_home_symlinks_from_profile_home(tmp_path: Path) -> None:
-    """A selected CLI account profile switches the symlink SOURCE to the
-    profile home; the real ~/.codex must not be touched."""
-    real = tmp_path / "real-codex"
-    real.mkdir()
-    (real / "auth.json").write_text('{"who": "real"}', encoding="utf-8")
-    source = tmp_path / "profile-home"
-    source.mkdir()
-    (source / "auth.json").write_text('{"who": "profile"}', encoding="utf-8")
-    (source / "config.toml").write_text("model = 'p'\n", encoding="utf-8")
-    manager = CodexHomeManager(real_home=real, panes_root=tmp_path / "panes")
-
-    home = manager.prepare("pane-1", source_home=source)
-
-    assert (home / "auth.json").is_symlink()
-    assert (home / "auth.json").readlink() == source / "auth.json"
-    assert (home / "config.toml").readlink() == source / "config.toml"
-
-
-def test_prepare_without_source_home_uses_real_home(tmp_path: Path) -> None:
-    """Invariance: no source_home keeps the pre-profile behavior exactly."""
-    real = tmp_path / "real-codex"
-    real.mkdir()
-    (real / "auth.json").write_text("{}", encoding="utf-8")
-    manager = CodexHomeManager(real_home=real, panes_root=tmp_path / "panes")
-
-    home = manager.prepare("pane-1")
-
-    assert (home / "auth.json").readlink() == real / "auth.json"
-
-
 def test_cleanup_rejects_unsafe_home_id(tmp_path: Path) -> None:
     manager = CodexHomeManager(real_home=tmp_path / "real", panes_root=tmp_path / "panes")
 

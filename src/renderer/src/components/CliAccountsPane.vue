@@ -2,6 +2,8 @@
 import { ref } from 'vue'
 import { CLI_AGENT_SPECS } from '../lib/agentSpecs'
 import type { useCliProfiles, CliProfile } from '../composables/useCliProfiles'
+import { useNotify } from '../composables/useNotify'
+import { i18n } from '../i18n'
 
 const props = defineProps<{
   api: ReturnType<typeof useCliProfiles>
@@ -58,6 +60,29 @@ async function saveRename(): Promise<void> {
   }
 }
 
+// ── Set default (confirm when running panes block the switch) ────────────────
+const { confirm: notifyConfirm } = useNotify()
+const t = i18n.global.t
+
+async function requestSetDefault(agentKey: string, profileId: string | null): Promise<void> {
+  const res = await props.api.setDefault(agentKey, profileId)
+  if (res.ok || res.code !== 'PROFILE_IN_USE') return
+  // Running panes block the switch. Offer to interrupt them (backend sends
+  // Esc to each live pane) and retry with force. Other failures surface via
+  // the composable `error` banner above.
+  const label = CLI_AGENT_SPECS.find((s) => s.agentKey === agentKey)?.label ?? agentKey
+  const ok = await notifyConfirm(
+    t('cli-account.switch-in-use', { count: res.runningCount ?? 0, agent: label }),
+    {
+      title: t('cli-account.switch-title'),
+      confirmText: t('cli-account.switch-force'),
+      cancelText: t('cli-account.switch-cancel'),
+    },
+  )
+  if (!ok) return
+  await props.api.setDefault(agentKey, profileId, { force: true })
+}
+
 // ── Delete confirm ───────────────────────────────────────────────────────────
 const confirmRemoveId = ref<string | null>(null)
 
@@ -109,7 +134,7 @@ async function remove(id: string): Promise<void> {
               <span v-if="api.defaultProfileId(spec.agentKey) === null" class="cli-badge">
                 {{ $t('settings.accounts.cli.is-default') }}
               </span>
-              <button v-else class="cli-btn ghost sm" @click="api.setDefault(spec.agentKey, null)">
+              <button v-else class="cli-btn ghost sm" @click="requestSetDefault(spec.agentKey, null)">
                 {{ $t('settings.accounts.cli.set-default') }}
               </button>
             </div>
@@ -153,7 +178,7 @@ async function remove(id: string): Promise<void> {
                   <span v-if="api.defaultProfileId(spec.agentKey) === p.id" class="cli-badge">
                     {{ $t('settings.accounts.cli.is-default') }}
                   </span>
-                  <button v-else class="cli-btn ghost sm" @click="api.setDefault(spec.agentKey, p.id)">
+                  <button v-else class="cli-btn ghost sm" @click="requestSetDefault(spec.agentKey, p.id)">
                     {{ $t('settings.accounts.cli.set-default') }}
                   </button>
                   <button class="cli-btn ghost sm" @click="openRename(p)">

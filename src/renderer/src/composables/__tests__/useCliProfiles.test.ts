@@ -58,11 +58,66 @@ describe('useCliProfiles', () => {
     const { result, scope } = withScope(() => useCliProfiles(mock.backend))
     await flush()
 
-    const ok = await result.setDefault('claude', null)
-    expect(ok).toBe(true)
+    const res = await result.setDefault('claude', null)
+    expect(res).toEqual({ ok: true })
     const call = mock.sent.find((s) => s.type === 'cli_profiles.set_default')
     expect(call?.payload).toEqual({ agent_key: 'claude', profile_id: null })
     expect(result.defaultProfileId('claude')).toBe(null)
+    scope.stop()
+  })
+
+  it('set_default passes force: true through to the backend payload', async () => {
+    const mock = createMockBackend('connected')
+    mock.setResponse('cli_profiles.list', { profiles: [], defaults: {}, supported_agents: SUPPORTED })
+    mock.setResponse('cli_profiles.set_default', { defaults: { claude: 'p1' } })
+    const { result, scope } = withScope(() => useCliProfiles(mock.backend))
+    await flush()
+
+    const res = await result.setDefault('claude', 'p1', { force: true })
+    expect(res).toEqual({ ok: true })
+    const call = mock.sent.find((s) => s.type === 'cli_profiles.set_default')
+    expect(call?.payload).toEqual({ agent_key: 'claude', profile_id: 'p1', force: true })
+    scope.stop()
+  })
+
+  it('set_default surfaces PROFILE_IN_USE with running_count and leaves error empty', async () => {
+    const mock = createMockBackend('connected')
+    mock.setResponse('cli_profiles.list', { profiles: [], defaults: {}, supported_agents: SUPPORTED })
+    mock.setResponse('cli_profiles.set_default', null as unknown as object, {
+      ok: false,
+      error: {
+        code: 'PROFILE_IN_USE',
+        message: 'profile in use',
+        details: { running_count: 3 },
+      },
+    })
+    const { result, scope } = withScope(() => useCliProfiles(mock.backend))
+    await flush()
+
+    const res = await result.setDefault('claude', 'p1')
+    expect(res).toEqual({ ok: false, code: 'PROFILE_IN_USE', runningCount: 3 })
+    // Callers show a confirm UI for this code — no error banner.
+    expect(result.error.value).toBe('')
+    scope.stop()
+  })
+
+  it('set_default maps PROFILE_SWAP_FAILED to a localized error', async () => {
+    const mock = createMockBackend('connected')
+    mock.setResponse('cli_profiles.list', { profiles: [], defaults: {}, supported_agents: SUPPORTED })
+    mock.setResponse('cli_profiles.set_default', null as unknown as object, {
+      ok: false,
+      error: { code: 'PROFILE_SWAP_FAILED', message: 'swap failed, rolled back' },
+    })
+    const { result, scope } = withScope(() => useCliProfiles(mock.backend))
+    await flush()
+
+    const res = await result.setDefault('claude', 'p1')
+    expect(res.ok).toBe(false)
+    if (!res.ok) {
+      expect(res.code).toBe('PROFILE_SWAP_FAILED')
+      expect(res.message).toBeTruthy()
+      expect(result.error.value).toBe(res.message)
+    }
     scope.stop()
   })
 

@@ -29,7 +29,6 @@ from .base import (
     join_text_blocks,
     read_jsonl_tail,
 )
-from .profile_registry import profile_homes
 
 log = logging.getLogger("agent_team_backend.log_readers.claude")
 
@@ -126,23 +125,9 @@ class ClaudeLogReader(LogReader):
         return None
 
     def project_dirs(self) -> list[Path]:
-        """The default root plus every active profile's ``<home>/projects``.
-
-        Profile panes run with CLAUDE_CONFIG_DIR pointed at a per-account home
-        (Phase B), so their sessions live outside the default root. Each active
-        profile home (profile_registry) contributes its own projects dir. With
-        no profile pane this session the list is exactly [default_root] — byte
-        for byte the pre-profile behavior.
-        """
-        roots: list[Path] = []
+        """The single default projects root (accounts share the real home)."""
         default = self._default_root()
-        if default is not None:
-            roots.append(default)
-        for home in profile_homes("claude"):
-            p = home / "projects"
-            if p.is_dir() and p not in roots:
-                roots.append(p)
-        return roots
+        return [default] if default is not None else []
 
     def session_files(self) -> list[Path]:
         out: list[Path] = []

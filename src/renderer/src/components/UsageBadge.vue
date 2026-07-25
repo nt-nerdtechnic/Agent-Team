@@ -11,7 +11,10 @@ import {
   type UsageWindow
 } from '../composables/useUsage'
 import type { useCliProfiles } from '../composables/useCliProfiles'
+import { useNotify } from '../composables/useNotify'
 import { executeCommand } from '../keybindings/commandRegistry'
+import { CLI_AGENT_SPECS } from '../lib/agentSpecs'
+import { i18n } from '../i18n'
 
 // Compact remaining-quota badge for a CLI pane header. Renders nothing when
 // the agent has no usage provider or nothing was fetched yet; shows ⚠ when
@@ -72,9 +75,36 @@ function onLeave(): void {
   }, 120)
 }
 
+const { confirm: notifyConfirm, alert: notifyAlert } = useNotify()
+const t = i18n.global.t
+
+const agentLabel = computed(
+  () => CLI_AGENT_SPECS.find((s) => s.agentKey === props.agentKey)?.label ?? props.agentKey,
+)
+
 async function selectProfile(id: string): Promise<void> {
   if (id === activeProfileId.value) return
-  await props.cliProfiles.setDefault(props.agentKey, id || null)
+  const target = id || null
+  let res = await props.cliProfiles.setDefault(props.agentKey, target)
+  if (!res.ok && res.code === 'PROFILE_IN_USE') {
+    // Running panes block the switch. Offer to interrupt them (backend sends
+    // Esc to each live pane) and retry with force.
+    open.value = false
+    const ok = await notifyConfirm(
+      t('cli-account.switch-in-use', { count: res.runningCount ?? 0, agent: agentLabel.value }),
+      {
+        title: t('cli-account.switch-title'),
+        confirmText: t('cli-account.switch-force'),
+        cancelText: t('cli-account.switch-cancel'),
+      },
+    )
+    if (!ok) return
+    res = await props.cliProfiles.setDefault(props.agentKey, target, { force: true })
+  }
+  if (!res.ok) {
+    if (res.message) void notifyAlert(res.message, { title: t('cli-account.switch-title') })
+    return
+  }
   // Re-poll so the badge reflects the newly active account's quota promptly.
   refreshUsage()
 }
