@@ -129,10 +129,13 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
         defaults: CliProfileDefaults
       }>('cli_profiles.delete', { id })
       if (!resp.ok || !resp.payload) {
+        const code = resp.error?.code
         error.value =
-          resp.error?.code === 'PROFILE_IN_USE'
-            ? i18n.global.t('settings.accounts.cli.in-use-error')
-            : (resp.error?.message ?? 'delete failed')
+          code === 'PROFILE_ACTIVE'
+            ? i18n.global.t('settings.accounts.cli.active-error')
+            : code === 'LOGIN_IN_PROGRESS'
+              ? i18n.global.t('settings.accounts.cli.login-in-progress-error')
+              : (resp.error?.message ?? 'delete failed')
         return false
       }
       profiles.value = resp.payload.profiles

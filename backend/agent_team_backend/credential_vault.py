@@ -525,6 +525,25 @@ class CredentialVault:
         self.write_slot(agent_key, slot_id, creds)
         return True
 
+    def delete_slot_secrets(self, agent_key: str, slot_id: str) -> None:
+        """Cleanup for a profile deletion: remove the secrets the store's
+        archive-by-rename cannot carry, plus any pending login home. The store
+        keeps file-based slot secrets inside the renamed slot directory, but
+        claude's macOS slot Keychain item (and a claude login home's
+        path-hashed item) would be stranded forever. Idempotent; call inside
+        ``switch_lock(agent_key)`` BEFORE the store renames the slot dir."""
+        home = self.login_home_path(agent_key, slot_id)
+        if home.is_dir():
+            if agent_key == "claude" and self._is_macos:
+                self._keychain_delete(legacy_claude_keychain_service(home))
+            shutil.rmtree(home, ignore_errors=True)
+        if agent_key == "claude":
+            if self._is_macos:
+                self._keychain_delete(self._slot_service(agent_key, slot_id))
+            (self.slot_dir(agent_key, slot_id) / _OAUTH_ACCOUNT_SLOT_FILE).unlink(
+                missing_ok=True
+            )
+
     def harvest_legacy_claude_home(self, slot_id: str, legacy_home: Path) -> bool:
         """Capture a legacy CLAUDE_CONFIG_DIR home's credentials into a slot.
 
@@ -631,16 +650,48 @@ class CredentialVault:
             return False
         return self.login_home_path(agent_key, slot_id).joinpath(*segments).is_file()
 
+    def _login_home_is_stale(self, agent_key: str, slot_id: str, home: Path) -> bool:
+        """True when the slot already holds a NEWER credential than the login
+        home — an old leftover home (e.g. found by the startup sweep long
+        after a later re-login) must not overwrite it. Conservative: an empty
+        slot or any missing mtime keeps the normal overwrite behavior.
+        claude's Keychain entries carry no mtime, so the home directory itself
+        stands in for the home's secret and the slot's ``oauth-account.json``
+        for the slot's."""
+        try:
+            if self.read_slot(agent_key, slot_id).secret is None:
+                return False
+            slot = self.slot_dir(agent_key, slot_id)
+            if agent_key == "claude":
+                home_mtime = home.stat().st_mtime
+                slot_mtime = (slot / _OAUTH_ACCOUNT_SLOT_FILE).stat().st_mtime
+            else:
+                home_mtime = home.joinpath(
+                    *_LOGIN_HOME_SECRET_FILES[agent_key]
+                ).stat().st_mtime
+                slot_mtime = (slot / _SLOT_FILES[agent_key]).stat().st_mtime
+        except OSError:
+            return False
+        return home_mtime < slot_mtime
+
     def harvest_login_home(self, agent_key: str, slot_id: str) -> bool:
         """Capture a finished isolated login into the profile's slot.
 
-        Overwrites the slot unconditionally — the user just re-logged this
-        account, so the login home's credentials win over whatever the slot
-        held. On success the login home is deleted; a login home without
-        credentials yet (login still in progress or abandoned) is a no-op and
-        stays for a later poll. Call inside ``switch_lock(agent_key)``."""
+        Overwrites the slot — the user just re-logged this account, so the
+        login home's credentials win over whatever the slot held — unless the
+        home is STALE (the slot was re-signed after the home was written), in
+        which case the home is discarded untouched. On success the login home
+        is deleted; a login home without credentials yet (login still in
+        progress or abandoned) is a no-op and stays for a later poll. Call
+        inside ``switch_lock(agent_key)``."""
         home = self.login_home_path(agent_key, slot_id)
         if not home.is_dir():
+            return False
+        if self._login_home_is_stale(agent_key, slot_id, home):
+            log.info("discarding stale %s login home for slot %s", agent_key, slot_id)
+            if agent_key == "claude" and self._is_macos:
+                self._keychain_delete(legacy_claude_keychain_service(home))
+            shutil.rmtree(home, ignore_errors=True)
             return False
         if agent_key == "claude":
             # Same locations as a legacy CLAUDE_CONFIG_DIR home: path-hashed

@@ -1388,13 +1388,61 @@ async def cli_profiles_delete(session: "Session", msg_id: str, msg_type: str, pa
     from . import app
 
     profile_id = str(payload.get("id") or "")
-    try:
-        doc = app.cli_profiles_store.delete(profile_id)
-    except KeyError as err:
+    profile = app.cli_profiles_store.get(profile_id)
+    if profile is None:
         await session.send_json(
-            make_error(msg_id, msg_type, "BAD_REQUEST", _profile_error(err))
+            make_error(
+                msg_id, msg_type, "BAD_REQUEST", f"profile not found: {profile_id}"
+            )
         )
         return
+    agent_key = str(profile.get("agentKey") or "")
+    if _running_login_terminals(agent_key, profile_id):
+        # Deleting the login home under a running login CLI breaks it; the
+        # user finishes or closes the pane first (no auto-kill).
+        await session.send_json(
+            make_error(
+                msg_id, msg_type, "LOGIN_IN_PROGRESS",
+                f"a {agent_key} sign-in for this account is still running; "
+                "finish or close its pane first",
+            )
+        )
+        return
+    # Serialize with account switches: the active check must see the latest
+    # persisted default, and the secret cleanup must not interleave with a
+    # credential swap on the same agent.
+    async with app.credential_vault.switch_lock(agent_key):
+        if app.cli_profiles_store.list()["defaults"].get(agent_key) == profile_id:
+            # The active account's credentials ARE the live state; deleting it
+            # would orphan them (the next switch would capture into a slot
+            # nobody can select any more).
+            await session.send_json(
+                make_error(
+                    msg_id, msg_type, "PROFILE_ACTIVE",
+                    f"this {agent_key} account is currently active; "
+                    "switch to another account before deleting it",
+                )
+            )
+            return
+        # Remove secrets the archived slot dir cannot carry (claude's slot
+        # Keychain item + oauth-account.json) and any leftover login home,
+        # BEFORE the store renames the slot dir away. Cleanup failures must
+        # never block the delete.
+        try:
+            await asyncio.to_thread(
+                app.credential_vault.delete_slot_secrets, agent_key, profile_id
+            )
+        except Exception as err:  # noqa: BLE001
+            app.log.warning(
+                "slot secret cleanup for %s/%s failed: %s", agent_key, profile_id, err
+            )
+        try:
+            doc = app.cli_profiles_store.delete(profile_id)
+        except KeyError as err:
+            await session.send_json(
+                make_error(msg_id, msg_type, "BAD_REQUEST", _profile_error(err))
+            )
+            return
     await session.send_json(
         make_response(
             msg_id,

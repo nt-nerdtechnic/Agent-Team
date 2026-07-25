@@ -993,6 +993,54 @@ async def _harvest_login_home_locked(vault, agent_key: str, profile_id: str) -> 
         return harvested
 
 
+async def _harvest_pending_login_homes(store, vault) -> list[str]:
+    """Harvest every profile's pending isolated login home (skipping profiles
+    whose login pane CLI still runs). Best effort — per-profile failures are
+    silent. Returns the profile ids that were harvested."""
+    try:
+        profiles = store.list()["profiles"]
+    except Exception:  # noqa: BLE001
+        return []
+    harvested_ids: list[str] = []
+    for profile in profiles:
+        agent_key = str(profile.get("agentKey") or "")
+        profile_id = str(profile.get("id") or "")
+        if not agent_key or not profile_id:
+            continue
+        try:
+            # Cheap pre-check outside the lock: most profiles have no
+            # pending login home.
+            if not vault.login_home_path(agent_key, profile_id).is_dir():
+                continue
+            if await _harvest_login_home_locked(vault, agent_key, profile_id):
+                harvested_ids.append(profile_id)
+        except Exception:  # noqa: BLE001
+            pass
+    return harvested_ids
+
+
+async def sweep_pending_login_homes() -> None:
+    """One-shot sweep of leftover isolated login homes, independent of the
+    usage poller (which also harvests, but only while usage polling is
+    enabled). A login that completed right before a backend restart would
+    otherwise stay unharvested forever with usage disabled. Called from the
+    app startup hook as a background task."""
+    store = _get_profiles_store()
+    vault = _get_credential_vault()
+    if store is None or vault is None:
+        return
+    harvested_ids = await _harvest_pending_login_homes(store, vault)
+    if harvested_ids:
+        try:
+            from .ws_handlers import _broadcast_profiles_changed
+
+            await _broadcast_profiles_changed(
+                "login-harvest", harvested_profile_ids=harvested_ids
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def start_login_watch(agent_key: str, profile_id: str) -> None:
     """Begin the harvest watch for one profile's login home (idempotent while
     a watch for the same profile is still running)."""
@@ -1098,9 +1146,7 @@ class UsageService:
         if store is None or vault is None:
             return
         try:
-            doc = store.list()
-            defaults = doc["defaults"]
-            profiles = doc["profiles"]
+            defaults = store.list()["defaults"]
         except Exception:  # noqa: BLE001
             return
         harvested = False
@@ -1114,21 +1160,7 @@ class UsageService:
                     harvested = await asyncio.to_thread(vault.harvest, agent_key, profile_id) or harvested
             except Exception:  # noqa: BLE001
                 pass
-        login_harvested_ids: list[str] = []
-        for profile in profiles:
-            agent_key = str(profile.get("agentKey") or "")
-            profile_id = str(profile.get("id") or "")
-            if not agent_key or not profile_id:
-                continue
-            try:
-                # Cheap pre-check outside the lock: most profiles have no
-                # pending login home.
-                if not vault.login_home_path(agent_key, profile_id).is_dir():
-                    continue
-                if await _harvest_login_home_locked(vault, agent_key, profile_id):
-                    login_harvested_ids.append(profile_id)
-            except Exception:  # noqa: BLE001
-                pass
+        login_harvested_ids = await _harvest_pending_login_homes(store, vault)
         if harvested or login_harvested_ids:
             # A pane login just landed in a slot — let the accounts UI pick up
             # the new identity.

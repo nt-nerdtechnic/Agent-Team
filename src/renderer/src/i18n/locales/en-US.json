@@ -639,9 +639,10 @@
         "sign-in": "Sign in",
         "delete": "Delete",
         "cancel": "Cancel",
-        "delete-confirm": "Delete this account? Its saved credentials are kept on disk and will not be removed.",
+        "delete-confirm": "Delete this account? Its saved sign-in will also be removed.",
         "unsupported": "This agent does not support multiple accounts.",
-        "in-use-error": "This account is in use by a running pane and cannot be deleted. Switch that pane to another account first."
+        "active-error": "This account is currently active and cannot be deleted. Switch to another account first.",
+        "login-in-progress-error": "A sign-in for this account is still running. Finish or close its login pane first."
       }
     },
     "color": {

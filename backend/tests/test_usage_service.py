@@ -625,6 +625,51 @@ async def test_poll_once_harvests_pending_login_homes(tmp_path, monkeypatch):
     assert reasons == [("login-harvest", [pending["id"]])]
 
 
+async def test_sweep_pending_login_homes_independent_of_poller(tmp_path, monkeypatch):
+    """The one-shot startup sweep harvests leftover login homes without any
+    UsageService poll (usage polling disabled) and broadcasts the result."""
+    store = _isolated_store(tmp_path)
+    pending = store.create(agent_key="claude", name="Second")
+    store.create(agent_key="codex", name="NoLogin")
+    vault = _RecordingVault(root=tmp_path / "slots")
+    vault.login_home_path("claude", pending["id"]).mkdir(parents=True)
+    monkeypatch.setattr(us, "_get_profiles_store", lambda: store)
+    monkeypatch.setattr(us, "_get_credential_vault", lambda: vault)
+    reasons: list[tuple[str, list[str] | None]] = []
+
+    async def record_changed(
+        reason: str, harvested_profile_ids: list[str] | None = None
+    ) -> None:
+        reasons.append((reason, harvested_profile_ids))
+
+    from agent_team_backend import ws_handlers
+
+    monkeypatch.setattr(ws_handlers, "_broadcast_profiles_changed", record_changed)
+
+    await us.sweep_pending_login_homes()
+
+    assert vault.login_harvested == [("claude", pending["id"])]
+    assert reasons == [("login-harvest", [pending["id"]])]
+
+
+async def test_sweep_pending_login_homes_skips_running_login_pane(
+    tmp_path, monkeypatch
+):
+    """A login home whose pane CLI still runs is left alone by the sweep."""
+    store = _isolated_store(tmp_path)
+    pending = store.create(agent_key="claude", name="Second")
+    vault = _RecordingVault(root=tmp_path / "slots")
+    vault.login_home_path("claude", pending["id"]).mkdir(parents=True)
+    monkeypatch.setattr(us, "_get_profiles_store", lambda: store)
+    monkeypatch.setattr(us, "_get_credential_vault", lambda: vault)
+    monkeypatch.setattr(us, "_login_pane_running", lambda agent_key, profile_id: True)
+
+    await us.sweep_pending_login_homes()
+
+    assert vault.login_harvested == []
+    assert vault.login_home_path("claude", pending["id"]).is_dir()
+
+
 async def test_poll_once_skips_login_harvest_while_login_pane_runs(
     tmp_path, monkeypatch
 ):

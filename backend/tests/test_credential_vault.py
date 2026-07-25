@@ -479,6 +479,125 @@ def test_login_spawn_env_grok_builds_home_shim(tmp_path: Path) -> None:
     assert (shim / ".zshrc").resolve() == (real_home / ".zshrc").resolve()
 
 
+# ── slot secret cleanup on profile deletion ─────────────────────────────────
+
+
+def test_mac_delete_slot_secrets_removes_keychain_and_account_file(tmp_path: Path) -> None:
+    """Deleting a claude profile removes its backend-owned slot Keychain item
+    and the display-only oauth-account.json — the store only archives files,
+    so the Keychain token would otherwise be stranded forever."""
+    vault, sec = _mac_vault(tmp_path)
+    vault.write_slot(
+        "claude", "acct1",
+        LiveCredentials(secret="S", account={"emailAddress": "a@x.com"}),
+    )
+    assert "Navide CLI account claude-acct1" in sec.items
+    account_file = vault.slot_dir("claude", "acct1") / "oauth-account.json"
+    assert account_file.exists()
+
+    vault.delete_slot_secrets("claude", "acct1")
+
+    assert "Navide CLI account claude-acct1" not in sec.items
+    assert not account_file.exists()
+    # Idempotent — a second call is a no-op, never an error.
+    vault.delete_slot_secrets("claude", "acct1")
+
+
+def test_mac_delete_slot_secrets_removes_login_home_and_its_keychain(
+    tmp_path: Path,
+) -> None:
+    """A pending claude login home goes with the deleted profile, including
+    the login home's path-hashed Keychain item."""
+    vault, sec = _mac_vault(tmp_path)
+    home = vault.login_home_path("claude", "acct1")
+    home.mkdir(parents=True)
+    sec.items[legacy_claude_keychain_service(home)] = "PENDING-SECRET"
+
+    vault.delete_slot_secrets("claude", "acct1")
+
+    assert not home.exists()
+    assert legacy_claude_keychain_service(home) not in sec.items
+
+
+def test_delete_slot_secrets_non_claude_keeps_slot_files(tmp_path: Path) -> None:
+    """File-based agents keep their slot secret inside the slot dir (archived
+    by the store's rename); only a leftover login home is removed."""
+    vault = _file_vault(tmp_path)
+    vault.write_slot("codex", "acct1", LiveCredentials(secret='{"who": "A"}'))
+    home = vault.login_home_path("codex", "acct1")
+    home.mkdir(parents=True)
+
+    vault.delete_slot_secrets("codex", "acct1")
+
+    assert not home.exists()
+    assert (vault.slot_dir("codex", "acct1") / "auth.json").exists()
+
+
+# ── stale login-home protection ─────────────────────────────────────────────
+
+
+def test_harvest_login_home_stale_discarded(tmp_path: Path) -> None:
+    """A login home OLDER than the slot's signed-in credential (e.g. found by
+    the startup sweep long after a later re-login) is discarded, never
+    harvested over the newer secret."""
+    vault = _file_vault(tmp_path)
+    home = vault.login_home_path("codex", "slot1")
+    _write(home / "auth.json", '{"who": "stale"}')
+    vault.write_slot("codex", "slot1", LiveCredentials(secret='{"who": "newer"}'))
+    slot_file = vault.slot_dir("codex", "slot1") / "auth.json"
+    os.utime(home / "auth.json", (slot_file.stat().st_mtime - 100,) * 2)
+
+    assert vault.harvest_login_home("codex", "slot1") is False
+    assert vault.read_slot("codex", "slot1").secret == '{"who": "newer"}'
+    assert not home.exists()
+
+
+def test_harvest_login_home_newer_than_slot_overwrites(tmp_path: Path) -> None:
+    vault = _file_vault(tmp_path)
+    vault.write_slot("codex", "slot1", LiveCredentials(secret='{"who": "old"}'))
+    home = vault.login_home_path("codex", "slot1")
+    _write(home / "auth.json", '{"who": "fresh"}')
+    slot_file = vault.slot_dir("codex", "slot1") / "auth.json"
+    os.utime(home / "auth.json", (slot_file.stat().st_mtime + 100,) * 2)
+
+    assert vault.harvest_login_home("codex", "slot1") is True
+    assert vault.read_slot("codex", "slot1").secret == '{"who": "fresh"}'
+    assert not home.exists()
+
+
+def test_mac_harvest_login_home_stale_claude_uses_dir_mtime(tmp_path: Path) -> None:
+    """claude's Keychain entries carry no mtime: the login home dir stands in
+    for the home's secret, the slot's oauth-account.json for the slot's. A
+    stale home is discarded together with its path-hashed Keychain item."""
+    vault, sec = _mac_vault(tmp_path)
+    home = vault.login_home_path("claude", "slot1")
+    home.mkdir(parents=True)
+    sec.items[legacy_claude_keychain_service(home)] = "STALE-SECRET"
+    vault.write_slot(
+        "claude", "slot1",
+        LiveCredentials(secret="NEWER", account={"emailAddress": "n@x.com"}),
+    )
+    account_file = vault.slot_dir("claude", "slot1") / "oauth-account.json"
+    os.utime(home, (account_file.stat().st_mtime - 100,) * 2)
+
+    assert vault.harvest_login_home("claude", "slot1") is False
+    assert vault.read_slot("claude", "slot1").secret == "NEWER"
+    assert not home.exists()
+    assert legacy_claude_keychain_service(home) not in sec.items
+
+
+def test_harvest_login_home_missing_mtime_keeps_overwrite(tmp_path: Path) -> None:
+    """Conservative fallback: without a comparable slot mtime (claude slot
+    lacking oauth-account.json) the normal overwrite behavior stays."""
+    vault = _file_vault(tmp_path)
+    vault.write_slot("claude", "slot1", LiveCredentials(secret="OLD"))
+    home = vault.login_home_path("claude", "slot1")
+    _write(home / ".credentials.json", "FRESH")
+
+    assert vault.harvest_login_home("claude", "slot1") is True
+    assert vault.read_slot("claude", "slot1").secret == "FRESH"
+
+
 # ── display identities (signedIn = an actual credential secret exists) ──────
 
 

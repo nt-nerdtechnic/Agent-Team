@@ -639,9 +639,10 @@
         "sign-in": "登入",
         "delete": "刪除",
         "cancel": "取消",
-        "delete-confirm": "確定刪除此帳號？其儲存的憑證會保留在磁碟上，不會被刪除。",
+        "delete-confirm": "確定刪除此帳號？其儲存的登入憑證也會一併移除。",
         "unsupported": "此 agent 不支援多帳號。",
-        "in-use-error": "此帳號正被執行中的 pane 使用，無法刪除。請先將該 pane 切換到其他帳號。"
+        "active-error": "此帳號目前使用中，請先切換到其他帳號再刪除。",
+        "login-in-progress-error": "此帳號的登入程序仍在進行中，請先完成或關閉其登入 pane。"
       }
     },
     "color": {

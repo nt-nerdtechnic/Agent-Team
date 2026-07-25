@@ -94,6 +94,8 @@ class FakeVault:
     def __init__(self, fail: bool = False, root: Path | None = None) -> None:
         self.switch_calls: list[tuple[str, str, str]] = []
         self.login_harvests: list[tuple[str, str]] = []
+        self.slot_secrets_deleted: list[tuple[str, str]] = []
+        self.delete_slot_secrets_fail = False
         self.fail = fail
         self.root = root
         self._locks: dict[str, asyncio.Lock] = {}
@@ -122,6 +124,11 @@ class FakeVault:
             return False
         shutil.rmtree(home)
         return True
+
+    def delete_slot_secrets(self, agent_key: str, slot_id: str) -> None:
+        if self.delete_slot_secrets_fail:
+            raise RuntimeError("cleanup boom")
+        self.slot_secrets_deleted.append((agent_key, slot_id))
 
     def identity(self, agent_key: str, slot_id: str | None = None) -> dict[str, Any]:
         return {"email": None, "signedIn": False}
@@ -420,11 +427,12 @@ async def test_concurrent_switches_serialize_no_slot_clobber(
     assert store.list()["defaults"]["codex"] == second[2]
 
 
-async def test_cli_profiles_delete_clears_default(
-    store: CliProfilesStore, events: list[dict[str, Any]]
+async def test_cli_profiles_delete_active_refused(
+    store: CliProfilesStore, events: list[dict[str, Any]], vault: FakeVault
 ) -> None:
-    """Deleting the profile that was an agent's default resets that default to
-    the built-in Default (null)."""
+    """Deleting the agent's ACTIVE profile is refused (PROFILE_ACTIVE): its
+    credentials are the live state, and deleting would orphan them. The store
+    stays untouched."""
     session = _session()
     profile = store.create(agent_key="claude", name="Work")
     store.set_default("claude", profile["id"])
@@ -436,9 +444,99 @@ async def test_cli_profiles_delete_clears_default(
     })
 
     response = session.websocket.sent[0]  # type: ignore[attr-defined]
+    assert response["ok"] is False
+    assert response["error"]["code"] == "PROFILE_ACTIVE"
+    assert store.list()["profiles"] == [profile]
+    assert store.list()["defaults"]["claude"] == profile["id"]
+    assert vault.slot_secrets_deleted == []
+    assert events == []
+
+
+async def test_cli_profiles_delete_cleans_slot_secrets(
+    store: CliProfilesStore, events: list[dict[str, Any]], vault: FakeVault
+) -> None:
+    """Deleting a non-active profile removes its stranded slot secrets
+    (claude's Keychain item etc.) through the vault before the store archives
+    the slot dir."""
+    session = _session()
+    profile = store.create(agent_key="claude", name="Work")
+
+    await app.handle_message(session, {
+        "id": "x4",
+        "type": "cli_profiles.delete",
+        "payload": {"id": profile["id"]},
+    })
+
+    response = session.websocket.sent[0]  # type: ignore[attr-defined]
     assert response["ok"] is True
-    assert response["payload"]["defaults"]["claude"] is None
-    assert events[-1]["payload"]["defaults"]["claude"] is None
+    assert vault.slot_secrets_deleted == [("claude", profile["id"])]
+    assert store.list()["profiles"] == []
+
+
+async def test_cli_profiles_delete_survives_cleanup_failure(
+    store: CliProfilesStore, events: list[dict[str, Any]], vault: FakeVault
+) -> None:
+    """A failing secret cleanup must never block the delete itself."""
+    session = _session()
+    profile = store.create(agent_key="claude", name="Work")
+    vault.delete_slot_secrets_fail = True
+
+    await app.handle_message(session, {
+        "id": "x5",
+        "type": "cli_profiles.delete",
+        "payload": {"id": profile["id"]},
+    })
+
+    response = session.websocket.sent[0]  # type: ignore[attr-defined]
+    assert response["ok"] is True
+    assert store.list()["profiles"] == []
+
+
+async def test_cli_profiles_delete_login_in_progress_refused(
+    store: CliProfilesStore, events: list[dict[str, Any]], vault: FakeVault
+) -> None:
+    """A profile whose isolated login pane CLI still runs cannot be deleted:
+    removing the login home under a live CLI breaks it."""
+    session = _session()
+    profile = store.create(agent_key="claude", name="Work")
+    _register_running_terminal(
+        session, "t-login", "claude", login_profile_id=profile["id"]
+    )
+
+    await app.handle_message(session, {
+        "id": "x6",
+        "type": "cli_profiles.delete",
+        "payload": {"id": profile["id"]},
+    })
+
+    response = session.websocket.sent[0]  # type: ignore[attr-defined]
+    assert response["ok"] is False
+    assert response["error"]["code"] == "LOGIN_IN_PROGRESS"
+    assert store.list()["profiles"] == [profile]
+    assert vault.slot_secrets_deleted == []
+    assert events == []
+
+
+async def test_cli_profiles_delete_removes_leftover_login_home(
+    store: CliProfilesStore, events: list[dict[str, Any]], real_vault: CredentialVault
+) -> None:
+    """A leftover login home (abandoned sign-in, no running pane) goes with
+    the deleted profile — removed before the store renames the slot dir."""
+    session = _session()
+    profile = store.create(agent_key="codex", name="Work")
+    home = real_vault.login_home_path("codex", profile["id"])
+    home.mkdir(parents=True)
+
+    await app.handle_message(session, {
+        "id": "x7",
+        "type": "cli_profiles.delete",
+        "payload": {"id": profile["id"]},
+    })
+
+    response = session.websocket.sent[0]  # type: ignore[attr-defined]
+    assert response["ok"] is True
+    assert not home.exists()
+    assert store.list()["profiles"] == []
 
 
 async def test_cli_profiles_rename_unknown_is_bad_request(

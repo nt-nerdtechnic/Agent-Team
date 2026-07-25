@@ -833,6 +833,13 @@ async def _start_log_watcher() -> None:
     except Exception as err:  # noqa: BLE001
         log.warning("legacy CLI profile home migration failed: %s", err)
 
+    # Sweep leftover isolated login homes into their slots, independently of
+    # the usage poller (which only harvests while usage polling is enabled).
+    # Background task — credential I/O must never block startup.
+    from .usage_service import sweep_pending_login_homes
+
+    asyncio.create_task(sweep_pending_login_homes())
+
     # Reap PTY children left behind by a previous run that died without its
     # shutdown sweep (SIGKILL, crash). Blocking ps/sleep — off the loop.
     try:
