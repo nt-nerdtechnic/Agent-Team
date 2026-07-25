@@ -32,18 +32,21 @@ never touch the real Keychain.
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import getpass
 import hashlib
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from .profiles_store import canonical_path_str, default_profiles_root
+from .profiles_store import CLAUDE_ENV_OVERRIDES, canonical_path_str, default_profiles_root
 
 log = logging.getLogger("agent_team_backend.credential_vault")
 
@@ -70,6 +73,84 @@ _LIVE_FILES = {
 }
 
 _OAUTH_ACCOUNT_SLOT_FILE = "oauth-account.json"
+
+# Isolated config home a login pane runs in, inside the profile's slot dir.
+# The CLI completes its login there without touching the live credentials;
+# the usage poller then harvests it into the slot and removes it.
+LOGIN_HOME_DIRNAME = "login-home"
+
+# Where each CLI writes its secret inside an isolated login home, relative to
+# the login-home dir. Env vars and layouts mirror the pre-refactor config-home
+# isolation (verified in commit 0bcfcf8^): claude uses CLAUDE_CONFIG_DIR (macOS
+# secret in a path-hashed Keychain item — see harvest_legacy_claude_home),
+# codex CODEX_HOME, kimi KIMI_CODE_HOME, grok a HOME shim with a real ``.grok``
+# dir one level in.
+_LOGIN_HOME_SECRET_FILES = {
+    "codex": ("auth.json",),
+    "kimi": ("credentials", "kimi-code.json"),
+    "grok": ("home", ".grok", "auth.json"),
+}
+
+
+def _parse_json_dict(raw: str | None) -> dict | None:
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _codex_identity_email(secret: str | None) -> str | None:
+    """Best-effort login email from codex ``auth.json``: the ``id_token`` JWT
+    payload carries it. Display only — the signature is not verified."""
+    data = _parse_json_dict(secret)
+    tokens = data.get("tokens") if data else None
+    id_token = tokens.get("id_token") if isinstance(tokens, dict) else None
+    if not isinstance(id_token, str) or id_token.count(".") < 2:
+        return None
+    payload = id_token.split(".")[1]
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    except ValueError:
+        return None
+    if not isinstance(claims, dict):
+        return None
+    email = claims.get("email")
+    if isinstance(email, str) and email:
+        return email
+    profile = claims.get("https://api.openai.com/profile")
+    if isinstance(profile, dict) and isinstance(profile.get("email"), str):
+        return profile["email"] or None
+    return None
+
+
+def _codex_signed_in(secret: str | None) -> bool:
+    data = _parse_json_dict(secret)
+    if data is None:
+        return False
+    tokens = data.get("tokens")
+    if isinstance(tokens, dict) and (tokens.get("access_token") or tokens.get("accessToken")):
+        return True
+    return bool(data.get("OPENAI_API_KEY"))
+
+
+def _grok_auth_entry(secret: str | None) -> dict | None:
+    """Grok's ``auth.json`` is a map keyed by scope URL; prefer the OIDC entry,
+    fall back to the legacy ``/sign-in`` scope (mirrors usage_service)."""
+    data = _parse_json_dict(secret)
+    if data is None:
+        return None
+    oidc, legacy = None, None
+    for scope, entry in data.items():
+        if not isinstance(entry, dict) or not entry.get("key"):
+            continue
+        if str(scope).startswith("https://auth.x.ai::"):
+            oidc = oidc or entry
+        elif "/sign-in" in str(scope):
+            legacy = legacy or entry
+    return oidc or legacy
 
 # runner(args_after_security, stdin_text) -> (returncode, stdout)
 SecurityRunner = Callable[[list[str], "str | None"], "tuple[int, str]"]
@@ -103,9 +184,22 @@ def _read_text(path: Path) -> str | None:
 
 
 def _write_private(path: Path, text: str) -> None:
+    """Atomically write a 0600 file: the content lands in a same-directory
+    tmp file (created 0600) that then replaces the target, so a crash or a
+    full disk mid-write can never leave a truncated or world-readable
+    secret."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-    os.chmod(path, 0o600)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.unlink(missing_ok=True)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fp:
+            fp.write(text)
+        os.chmod(tmp, 0o600)  # umask-proof: the final file must be exactly 0600
+        os.replace(tmp, path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def legacy_claude_keychain_service(config_dir: Path | str) -> str:
@@ -140,6 +234,22 @@ class CredentialVault:
         self._real_home = Path(real_home or Path.home())
         self._security = security_runner or _default_security_runner
         self._platform = platform or sys.platform
+        self._switch_locks: dict[str, asyncio.Lock] = {}
+
+    def switch_lock(self, agent_key: str) -> asyncio.Lock:
+        """Per-agent lock serializing credential swaps and opportunistic
+        harvests against the shared OS credential locations (Keychain / files).
+        Concurrent switches on the same agent — multiple windows, or a switch
+        racing the usage poller's harvest — would otherwise interleave their
+        capture/restore steps and clobber a slot (worst case: the ``__default__``
+        original login). Acquire in the event loop before any ``switch``/
+        ``harvest`` call. Kept on the instance so each test gets a fresh lock
+        bound to its own event loop."""
+        lock = self._switch_locks.get(agent_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._switch_locks[agent_key] = lock
+        return lock
 
     # ---- locations ----
 
@@ -241,7 +351,10 @@ class CredentialVault:
 
     def _write_live_oauth_account(self, account: dict | None) -> None:
         """Set/remove the top-level ``oauthAccount`` in ``~/.claude.json``,
-        preserving every other key."""
+        preserving every other key. Written atomically (same-directory tmp
+        file + ``os.replace``, keeping the original file's mode) — this file
+        is the user's whole Claude config, and a crash or full disk mid-write
+        must never corrupt it."""
         path = self._claude_config_json()
         raw = _read_text(path)
         try:
@@ -257,9 +370,18 @@ class CredentialVault:
             data.pop("oauthAccount")
         else:
             data["oauthAccount"] = account
+        tmp = path.with_name(path.name + ".tmp")
         try:
-            path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            mode = path.stat().st_mode & 0o777
+        except OSError:
+            mode = None
+        try:
+            tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            if mode is not None:
+                os.chmod(tmp, mode)
+            os.replace(tmp, path)
         except OSError as err:
+            tmp.unlink(missing_ok=True)
             raise CredentialVaultError(f"cannot update {path}: {err}") from err
 
     # ---- slots ----
@@ -312,6 +434,51 @@ class CredentialVault:
     def slot_account(self, agent_key: str, slot_id: str) -> dict | None:
         """The slot's display-only account info (claude's ``oauthAccount``)."""
         return self.read_slot(agent_key, slot_id).account
+
+    def identity(self, agent_key: str, slot_id: str | None = None) -> dict:
+        """Display-only identity for one account slot (``slot_id=None`` = the
+        live state, i.e. the currently active account). ``signedIn`` reflects
+        whether an actual credential secret exists; claude's ``oauthAccount``
+        email is display-only (a long-lived-token login carries no
+        oauthAccount but is still signed in). Reads files — plus, for claude
+        on macOS, the Keychain — so call off the event loop.
+        Returns ``{"email": str | None, "signedIn": bool}``; never raises."""
+        try:
+            if agent_key == "claude":
+                creds = (
+                    self.read_live("claude") if slot_id is None
+                    else self.read_slot("claude", slot_id)
+                )
+                email = (
+                    creds.account.get("emailAddress")
+                    if isinstance(creds.account, dict) else None
+                )
+                email = email if isinstance(email, str) and email else None
+                return {"email": email, "signedIn": creds.secret is not None}
+            if slot_id is None:
+                secret = _read_text(self._live_file(agent_key))
+            else:
+                secret = _read_text(
+                    self.slot_dir(agent_key, slot_id) / _SLOT_FILES[agent_key]
+                )
+            if agent_key == "codex":
+                return {
+                    "email": _codex_identity_email(secret),
+                    "signedIn": _codex_signed_in(secret),
+                }
+            if agent_key == "grok":
+                entry = _grok_auth_entry(secret)
+                email = entry.get("email") if entry else None
+                return {
+                    "email": email if isinstance(email, str) and email else None,
+                    "signedIn": entry is not None,
+                }
+            # kimi (and any future agent without an identity field): presence
+            # of a token is all we can show.
+            data = _parse_json_dict(secret)
+            return {"email": None, "signedIn": bool(data and data.get("access_token"))}
+        except Exception:  # noqa: BLE001 — identity is display-only, never fatal
+            return {"email": None, "signedIn": False}
 
     # ---- account switching ----
 
@@ -389,4 +556,102 @@ class CredentialVault:
             # a token copy in the Keychain forever (its config dir is archived
             # and no CLI reads it again). Deletion is idempotent.
             self._keychain_delete(legacy_claude_keychain_service(legacy_home))
+        return True
+
+    # ---- isolated login homes ----
+
+    def login_home_path(self, agent_key: str, slot_id: str) -> Path:
+        return self.slot_dir(agent_key, slot_id) / LOGIN_HOME_DIRNAME
+
+    def _refresh_grok_login_shim(self, login_home: Path) -> Path:
+        """Build/refresh the HOME shim for a grok login pane.
+
+        The shim mirrors every top-level entry of the real home via symlink so
+        the CLI (and the pane's login shell) still sees the user's shell
+        config, except ``.grok`` which is a real directory inside the login
+        home — that's where grok keeps its credentials. Refreshing on every
+        spawn picks up new real-home entries and drops dangling symlinks
+        (ported from the pre-refactor ``refresh_grok_home_shim``)."""
+        shim = login_home / "home"
+        shim.mkdir(parents=True, exist_ok=True)
+        (shim / ".grok").mkdir(exist_ok=True)
+        try:
+            for entry in shim.iterdir():
+                if entry.is_symlink() and not entry.exists():
+                    entry.unlink(missing_ok=True)
+        except OSError as err:
+            log.warning("grok shim cleanup in %s failed: %s", shim, err)
+        try:
+            real_entries = list(self._real_home.iterdir())
+        except OSError as err:
+            log.warning("cannot list real home %s for grok shim: %s", self._real_home, err)
+            real_entries = []
+        for src in real_entries:
+            if src.name == ".grok":
+                continue
+            dst = shim / src.name
+            if dst.exists() or dst.is_symlink():
+                continue
+            try:
+                dst.symlink_to(src, target_is_directory=src.is_dir())
+            except OSError as err:
+                log.warning("grok shim symlink %s -> %s failed: %s", dst, src, err)
+        return shim
+
+    def login_spawn_env(self, agent_key: str, slot_id: str) -> tuple[dict[str, str], list[str]]:
+        """Env for spawning ``agent_key``'s login pane inside the profile's
+        isolated login home: ``(env_set, env_remove)``. Creates the login home
+        (0700 — it will hold fresh credentials). Blocking I/O — call off the
+        event loop."""
+        if agent_key not in _SLOT_FILES:
+            raise ValueError(f"unsupported agent for CLI login homes: {agent_key!r}")
+        home = self.login_home_path(agent_key, slot_id)
+        home.mkdir(parents=True, exist_ok=True)
+        os.chmod(home, 0o700)  # umask-proof: the home will hold fresh secrets
+        home_str = canonical_path_str(home)
+        if agent_key == "claude":
+            # Claude derives its Keychain item name from the literal
+            # CLAUDE_CONFIG_DIR string; the canonical path here must match the
+            # one harvest_login_home hashes later, byte for byte.
+            return {"CLAUDE_CONFIG_DIR": home_str}, list(CLAUDE_ENV_OVERRIDES)
+        if agent_key == "codex":
+            return {"CODEX_HOME": home_str}, []
+        if agent_key == "kimi":
+            return {"KIMI_CODE_HOME": home_str}, []
+        # grok: HOME shim; its .grok dir lives one level in.
+        shim = self._refresh_grok_login_shim(Path(home_str))
+        return {"HOME": canonical_path_str(shim)}, []
+
+    def login_secret_present(self, agent_key: str, slot_id: str) -> bool:
+        """True when the isolated login home already holds the CLI's secret
+        file (file-based agents only — claude's Keychain secret has no cheap
+        peek and its sign-in command exits on completion anyway)."""
+        segments = _LOGIN_HOME_SECRET_FILES.get(agent_key)
+        if segments is None:
+            return False
+        return self.login_home_path(agent_key, slot_id).joinpath(*segments).is_file()
+
+    def harvest_login_home(self, agent_key: str, slot_id: str) -> bool:
+        """Capture a finished isolated login into the profile's slot.
+
+        Overwrites the slot unconditionally — the user just re-logged this
+        account, so the login home's credentials win over whatever the slot
+        held. On success the login home is deleted; a login home without
+        credentials yet (login still in progress or abandoned) is a no-op and
+        stays for a later poll. Call inside ``switch_lock(agent_key)``."""
+        home = self.login_home_path(agent_key, slot_id)
+        if not home.is_dir():
+            return False
+        if agent_key == "claude":
+            # Same locations as a legacy CLAUDE_CONFIG_DIR home: path-hashed
+            # Keychain item (deleted after capture) or .credentials.json, plus
+            # the home's own .claude.json for the display-only oauthAccount.
+            if not self.harvest_legacy_claude_home(slot_id, home):
+                return False
+        else:
+            secret = _read_text(home.joinpath(*_LOGIN_HOME_SECRET_FILES[agent_key]))
+            if secret is None:
+                return False
+            self.write_slot(agent_key, slot_id, LiveCredentials(secret=secret))
+        shutil.rmtree(home, ignore_errors=True)
         return True

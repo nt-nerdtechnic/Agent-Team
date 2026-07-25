@@ -1273,6 +1273,48 @@ def _profile_error(err: Exception) -> str:
     return str(err.args[0]) if err.args else str(err)
 
 
+def _profile_identities() -> dict:
+    """{agentKey: {slotId: {email, signedIn}}} for every account row the UI
+    shows. The active slot's identity comes from the live credential state
+    (slot storage lags live until the next capture/harvest); ``__default__``
+    keys the built-in Default row. Blocking reads (files, plus the Keychain
+    for claude secrets) — run in a thread."""
+    from . import app
+
+    doc = app.cli_profiles_store.list()
+    out: dict[str, dict] = {}
+    for agent_key in PROFILE_AGENT_KEYS:
+        active = doc["defaults"].get(agent_key) or DEFAULT_SLOT_ID
+        slot_ids = [DEFAULT_SLOT_ID] + [
+            p["id"] for p in doc["profiles"] if p.get("agentKey") == agent_key
+        ]
+        out[agent_key] = {
+            sid: app.credential_vault.identity(agent_key, None if sid == active else sid)
+            for sid in slot_ids
+        }
+    return out
+
+
+async def _broadcast_profiles_changed(
+    reason: str, harvested_profile_ids: list[str] | None = None
+) -> None:
+    from . import app
+
+    doc = app.cli_profiles_store.list()
+    payload = {
+        "profiles": doc["profiles"],
+        "defaults": doc["defaults"],
+        "identities": await asyncio.to_thread(_profile_identities),
+        "reason": reason,
+    }
+    if harvested_profile_ids:
+        # login-harvest: which profiles just captured a completed isolated
+        # login — the initiating window uses this to close the login pane
+        # and toast the signed-in identity.
+        payload["harvestedProfileIds"] = harvested_profile_ids
+    await app.broadcast(make_event("cli_profiles.changed", payload))
+
+
 @handler("cli_profiles.list")
 async def cli_profiles_list(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
@@ -1285,6 +1327,7 @@ async def cli_profiles_list(session: "Session", msg_id: str, msg_type: str, payl
             {
                 "profiles": doc["profiles"],
                 "defaults": doc["defaults"],
+                "identities": await asyncio.to_thread(_profile_identities),
                 "supported_agents": list(PROFILE_AGENT_KEYS),
             },
         )
@@ -1313,12 +1356,7 @@ async def cli_profiles_create(session: "Session", msg_id: str, msg_type: str, pa
             {"profile": profile, "profiles": doc["profiles"], "defaults": doc["defaults"]},
         )
     )
-    await app.broadcast(
-        make_event(
-            "cli_profiles.changed",
-            {"profiles": doc["profiles"], "defaults": doc["defaults"], "reason": "create"},
-        )
-    )
+    await _broadcast_profiles_changed("create")
 
 
 @handler("cli_profiles.rename")
@@ -1342,12 +1380,7 @@ async def cli_profiles_rename(session: "Session", msg_id: str, msg_type: str, pa
             {"profile": profile, "profiles": doc["profiles"], "defaults": doc["defaults"]},
         )
     )
-    await app.broadcast(
-        make_event(
-            "cli_profiles.changed",
-            {"profiles": doc["profiles"], "defaults": doc["defaults"], "reason": "rename"},
-        )
-    )
+    await _broadcast_profiles_changed("rename")
 
 
 @handler("cli_profiles.delete")
@@ -1369,27 +1402,53 @@ async def cli_profiles_delete(session: "Session", msg_id: str, msg_type: str, pa
             {"profiles": doc["profiles"], "defaults": doc["defaults"]},
         )
     )
-    await app.broadcast(
-        make_event(
-            "cli_profiles.changed",
-            {"profiles": doc["profiles"], "defaults": doc["defaults"], "reason": "delete"},
-        )
-    )
+    await _broadcast_profiles_changed("delete")
 
 
-# Settle time after nudging running CLIs with ESC on a forced switch, so they
-# can abort their in-flight generation before the credentials swap under them.
-FORCE_SWITCH_ESC_SETTLE_S = 0.4
+# On a forced switch the agent's running CLI processes are terminated; wait up
+# to this long for them to actually exit before swapping credentials. A CLI
+# still alive across the swap shares the real home and can refresh its token,
+# writing the OLD account's credentials over the incoming account's (a later
+# harvest would then copy them into the wrong slot).
+FORCE_SWITCH_EXIT_TIMEOUT_S = 5.0
 
 
 def _running_agent_terminals(agent_key: str) -> list[tuple[str, "Session"]]:
-    """(terminal_id, owner session) for every live PTY of ``agent_key``."""
+    """(terminal_id, owner session) for every live PTY of ``agent_key``.
+    Isolated LOGIN panes are excluded: they run inside a profile's login home
+    and can never touch the live credentials, so they neither block a switch
+    (PROFILE_IN_USE) nor get killed by the force path."""
     from . import app
 
     running: list[tuple[str, "Session"]] = []
     for tid, owner in list(app._PTY_OWNERS.items()):
         term = owner.terminals.get(tid)
-        if term is not None and not term.closed and term.agent_key == agent_key:
+        if (
+            term is not None
+            and not term.closed
+            and term.agent_key == agent_key
+            and not term.metadata.get("login_profile_id")
+        ):
+            running.append((tid, owner))
+    return running
+
+
+def _running_login_terminals(agent_key: str, profile_id: str) -> list[tuple[str, "Session"]]:
+    """(terminal_id, owner session) for every live isolated LOGIN pane of the
+    given profile. While one runs, its login home must not be harvested: the
+    CLI could still rotate the token after the snapshot, and deleting the
+    config home under a running CLI breaks it."""
+    from . import app
+
+    running: list[tuple[str, "Session"]] = []
+    for tid, owner in list(app._PTY_OWNERS.items()):
+        term = owner.terminals.get(tid)
+        if (
+            term is not None
+            and not term.closed
+            and term.agent_key == agent_key
+            and term.metadata.get("login_profile_id") == profile_id
+        ):
             running.append((tid, owner))
     return running
 
@@ -1399,9 +1458,14 @@ async def cli_profiles_set_default(session: "Session", msg_id: str, msg_type: st
     """Switch the agent's active account: capture the live credentials into the
     outgoing account's slot, then restore the target slot into the real home.
     Refused while the agent has running panes, unless ``force`` is set — the
-    force path only sends each running pane an ESC (as if the user pressed Esc)
-    and swaps after a short settle; the old CLI processes keep the previous
-    account's token in memory, an accepted residual risk."""
+    force path terminates every running pane's CLI process through the standard
+    kill path (SIGTERM, escalating to SIGKILL; the pane UI shows the exit via
+    the normal terminal.exit flow) and waits for the processes to actually exit
+    before swapping. Every refusable check runs BEFORE any pane is killed; the
+    only post-kill failure left is the rare SIGKILL survivor past
+    FORCE_SWITCH_EXIT_TIMEOUT_S, which fails closed (PROFILE_SWAP_FAILED) with
+    credentials untouched — swapping under a live CLI would let it write the
+    old account's refreshed token over the new account's."""
     from . import app
 
     agent_key = str(payload.get("agent_key") or "")
@@ -1437,64 +1501,137 @@ async def cli_profiles_set_default(session: "Session", msg_id: str, msg_type: st
             )
             return
 
-    current_id = app.cli_profiles_store.list()["defaults"].get(agent_key)
-    if current_id == profile_id:
-        # Already active — nothing to swap, nothing changed.
-        await session.send_json(
-            make_response(
-                msg_id, msg_type, {"defaults": app.cli_profiles_store.list()["defaults"]}
+    # Serialize the whole read-current → swap → persist-default sequence per
+    # agent: concurrent switches (multiple windows, or a switch racing the usage
+    # poller's harvest) would otherwise both read the same current_id and clobber
+    # a slot. Reading current_id inside the lock is essential — a second waiter
+    # must see the first switch's persisted result.
+    async with app.credential_vault.switch_lock(agent_key):
+        current_id = app.cli_profiles_store.list()["defaults"].get(agent_key)
+        if current_id == profile_id:
+            # Already active — nothing to swap, nothing changed.
+            await session.send_json(
+                make_response(
+                    msg_id, msg_type, {"defaults": app.cli_profiles_store.list()["defaults"]}
+                )
             )
-        )
-        return
+            return
 
-    running = _running_agent_terminals(agent_key)
-    if running and not force:
-        await session.send_json(
-            make_error(
-                msg_id, msg_type, "PROFILE_IN_USE",
-                f"close running {agent_key} panes first",
-                {"running_count": len(running)},
-            )
-        )
-        return
-    if running:
-        for tid, owner in running:
+        # A pending isolated login home for the target profile must land in
+        # its slot BEFORE restore() — restoring the still-empty slot would
+        # sign the live state out and the next capture() would erase the
+        # completed login. While the login pane's CLI is still running the
+        # home cannot be harvested safely (token rotation, config home
+        # deleted under a live CLI), so refuse the switch. Runs before any
+        # pane is killed: no refusal may follow the force path's kills.
+        if profile_id is not None and await asyncio.to_thread(
+            app.credential_vault.login_home_path(agent_key, profile_id).is_dir
+        ):
+            if _running_login_terminals(agent_key, profile_id):
+                await session.send_json(
+                    make_error(
+                        msg_id, msg_type, "LOGIN_IN_PROGRESS",
+                        f"a {agent_key} sign-in for this account is still running; "
+                        "finish or close its pane first",
+                    )
+                )
+                return
             try:
-                owner.terminals.write(tid, "\x1b")
-            except Exception as err:  # noqa: BLE001 — a dead pane must not block the switch
-                app.log.warning("ESC nudge to terminal %s failed: %s", tid, err)
-        await asyncio.sleep(FORCE_SWITCH_ESC_SETTLE_S)
+                await asyncio.to_thread(
+                    app.credential_vault.harvest_login_home, agent_key, profile_id
+                )
+            except Exception as err:  # noqa: BLE001 — credentials untouched, refuse cleanly
+                await session.send_json(
+                    make_error(msg_id, msg_type, "PROFILE_SWAP_FAILED", _profile_error(err))
+                )
+                return
 
-    try:
-        await asyncio.to_thread(
-            app.credential_vault.switch,
-            agent_key,
-            current_id or DEFAULT_SLOT_ID,
-            profile_id or DEFAULT_SLOT_ID,
-        )
-    except Exception as err:  # noqa: BLE001 — switch() already rolled the live state back
-        await session.send_json(
-            make_error(msg_id, msg_type, "PROFILE_SWAP_FAILED", _profile_error(err))
-        )
-        return
+        running = _running_agent_terminals(agent_key)
+        if running and not force:
+            await session.send_json(
+                make_error(
+                    msg_id, msg_type, "PROFILE_IN_USE",
+                    f"close running {agent_key} panes first",
+                    {"running_count": len(running)},
+                )
+            )
+            return
+        if running:
+            # Point of no refusal: every ordinary failure path ran above, so
+            # panes are never destroyed by a switch that then fails anyway.
+            # Terminate through the standard kill path (SIGTERM, escalating to
+            # SIGKILL after a grace period). kill() marks the terminal closed
+            # immediately, so exit must be confirmed on the child processes
+            # themselves — _running_agent_terminals empties before they die.
+            procs: list = []
+            killed: set[str] = set()
 
-    try:
-        defaults = app.cli_profiles_store.set_default(agent_key, profile_id)
-    except (KeyError, ValueError) as err:
+            async def _kill_terminals(targets: list[tuple[str, "Session"]]) -> None:
+                for tid, owner in targets:
+                    killed.add(tid)
+                    term = owner.terminals.get(tid)
+                    if term is not None:
+                        procs.append(term.proc)
+                    try:
+                        await owner.terminals.kill(tid)
+                    except Exception as err:  # noqa: BLE001 — a dead pane must not block the switch
+                        app.log.warning(
+                            "terminating terminal %s for account switch failed: %s", tid, err
+                        )
+
+            await _kill_terminals(running)
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + FORCE_SWITCH_EXIT_TIMEOUT_S
+            while loop.time() < deadline:  # noqa: ASYNC110 — bounded poll; no event source for child exit here
+                # A pane spawned mid-wait also holds the old account's token —
+                # sweep it into the kill set instead of failing after the fact.
+                newcomers = [
+                    (tid, owner)
+                    for tid, owner in _running_agent_terminals(agent_key)
+                    if tid not in killed
+                ]
+                if newcomers:
+                    await _kill_terminals(newcomers)
+                if all(p.poll() is not None for p in procs):
+                    break
+                await asyncio.sleep(0.05)
+            # Fail closed only for a true SIGKILL survivor: a CLI still alive
+            # across the swap would write the old account's refreshed token
+            # back over the incoming account's credentials.
+            if any(p.poll() is None for p in procs):
+                await session.send_json(
+                    make_error(
+                        msg_id, msg_type, "PROFILE_SWAP_FAILED",
+                        f"running {agent_key} processes did not exit in time; "
+                        "credentials left unchanged",
+                    )
+                )
+                return
+
+        try:
+            await asyncio.to_thread(
+                app.credential_vault.switch,
+                agent_key,
+                current_id or DEFAULT_SLOT_ID,
+                profile_id or DEFAULT_SLOT_ID,
+            )
+        except Exception as err:  # noqa: BLE001 — switch() already rolled the live state back
+            await session.send_json(
+                make_error(msg_id, msg_type, "PROFILE_SWAP_FAILED", _profile_error(err))
+            )
+            return
+
+        try:
+            defaults = app.cli_profiles_store.set_default(agent_key, profile_id)
+        except (KeyError, ValueError) as err:
+            await session.send_json(
+                make_error(msg_id, msg_type, "BAD_REQUEST", _profile_error(err))
+            )
+            return
         await session.send_json(
-            make_error(msg_id, msg_type, "BAD_REQUEST", _profile_error(err))
+            make_response(msg_id, msg_type, {"defaults": defaults})
         )
-        return
-    doc = app.cli_profiles_store.list()
-    await session.send_json(
-        make_response(msg_id, msg_type, {"defaults": defaults})
-    )
-    await app.broadcast(
-        make_event(
-            "cli_profiles.changed",
-            {"profiles": doc["profiles"], "defaults": doc["defaults"], "reason": "set_default"},
-        )
-    )
+    await _broadcast_profiles_changed("set_default")
     # The usage badges read the active account's credentials — force the poller
     # to re-fetch now so the badge reflects the switch immediately.
     from .usage_service import service
@@ -2884,17 +3021,51 @@ async def terminal_create(session: "Session", msg_id: str, msg_type: str, payloa
         metadata["startup_probe"] = startup_probe
     # The vendor's own auto-update switch, only when the user opted out of it.
     env.update(app.onboarding_deps.spawn_env_for(agent_key))
-    # CLI accounts share the real home — spawns get no profile env isolation
-    # (sessions and settings are global; profiles only swap credentials). The
-    # one account-driven env effect: while a managed claude account is active,
-    # drop inherited Anthropic API overrides so they can't shadow its OAuth.
+    # CLI accounts share the real home — regular spawns get no profile env
+    # isolation (sessions and settings are global; profiles only swap
+    # credentials). Two account-driven exceptions:
+    #   - a LOGIN pane (login_profile_id set) runs the CLI inside the profile's
+    #     isolated login home, so completing the login never touches the live
+    #     credentials or any running pane; the usage poller later harvests the
+    #     home into the profile's slot (see credential_vault.harvest_login_home)
+    #   - while a managed claude account is active, inherited Anthropic API
+    #     overrides are dropped so they can't shadow its OAuth login
     env_remove: list[str] | None = None
-    if (
+    login_profile_id = str(payload.get("login_profile_id") or "")
+    if login_profile_id:
+        profile = app.cli_profiles_store.get(login_profile_id)
+        if (
+            agent_key not in PROFILE_AGENT_KEYS
+            or profile is None
+            or profile.get("agentKey") != agent_key
+        ):
+            await session.send_json(
+                make_error(
+                    msg_id, msg_type, "BAD_REQUEST",
+                    f"invalid login profile for agent {agent_key!r}: {login_profile_id}",
+                )
+            )
+            return
+        login_set, login_remove = await asyncio.to_thread(
+            app.credential_vault.login_spawn_env, agent_key, login_profile_id
+        )
+        env.update(login_set)
+        env_remove = login_remove or None
+        # Mark the terminal as an isolated LOGIN pane: it cannot touch the
+        # live credentials, so account-switch guards (PROFILE_IN_USE, the
+        # force-kill sweep) must ignore it, and the login-home harvest must
+        # wait for it to exit (see _running_login_terminals).
+        metadata["login_profile_id"] = login_profile_id
+        # Run the CLI's direct sign-in trigger (e.g. `claude auth login`) so
+        # the browser authorization opens by itself — the user never types a
+        # command in the login pane.
+        payload["command"] = app._login_spawn_command(agent_key, payload["command"])
+    elif (
         agent_key == "claude"
         and app.cli_profiles_store.get_default_profile("claude") is not None
     ):
         env_remove = list(CLAUDE_ENV_OVERRIDES)
-    if agent_key == "codex":
+    if agent_key == "codex" and not login_profile_id:
         # Compatibility: `codex resume <id>` only works inside the home
         # that recorded the session. Resume in whichever home owns it;
         # only unknown/fresh sessions get a (new) per-pane home.
@@ -2988,6 +3159,13 @@ async def terminal_create(session: "Session", msg_id: str, msg_type: str, payloa
             f"Process died {getattr(term, 'uptime_ms', None)}ms after spawn ({cause})",
             details,
         )
+    if login_profile_id:
+        # Fast login feedback: watch the isolated login home and harvest the
+        # moment the browser authorization completes — the usage poll alone is
+        # too slow for the accounts UI to flip to signed-in.
+        from .usage_service import start_login_watch
+
+        start_login_watch(agent_key, login_profile_id)
     await session.send_json(
         make_response(
             msg_id,

@@ -1303,6 +1303,46 @@ def _command_with_persisted_cli_binary(agent_key: str, command: Any) -> Any:
     return replaced
 
 
+# Direct sign-in trigger per CLI, appended to the pane's resolved binary. A
+# login pane must jump straight into the vendor's browser/device sign-in flow
+# instead of sitting at a bare REPL waiting for the user to type a command.
+# grok has no login subcommand — its TUI starts first-run auth by itself
+# inside the empty isolated login home (verified against the locally installed
+# CLIs' --help output, 2026-07-25).
+_LOGIN_COMMAND_ARGS = {
+    "claude": "auth login",
+    "codex": "login",
+    "kimi": "login",
+    "grok": "",
+}
+
+
+def _login_spawn_command(agent_key: str, command: Any) -> Any:
+    """Rewrite a login pane's command to the CLI's direct sign-in trigger.
+
+    Keeps the first token (the resolved binary, possibly an override path from
+    _command_with_persisted_cli_binary) and drops every other flag — YOLO
+    flags like --dangerously-skip-permissions don't apply to auth subcommands.
+    Preserves the frontend's [shell, -lc, cmd] wrapper.
+    """
+    args = _LOGIN_COMMAND_ARGS.get(agent_key)
+    if args is None:
+        return command
+    text = _command_text(command)
+    first_token = re.match(r"^\s*(?:'[^']*'|\"[^\"]*\"|\S+)", text)
+    if first_token is None:
+        return command
+    replaced = first_token.group(0).strip()
+    if args:
+        replaced = f"{replaced} {args}"
+    if isinstance(command, list):
+        updated = list(command)
+        if updated:
+            updated[-1] = replaced
+        return updated
+    return replaced
+
+
 # Aligned with onboarding_deps' detection probe (was 3s here — too tight, so a
 # momentarily overloaded machine timed out and made EVERY CLI unlaunchable).
 _SPAWN_PROBE_TIMEOUT_S = 8

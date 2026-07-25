@@ -937,6 +937,124 @@ def _get_credential_vault():
         return None
 
 
+# ── Login watch ─────────────────────────────────────────────────────────────
+# A login pane just spawned into a profile's isolated login home. Poll that
+# home on a short interval so the account row flips to signed-in the moment
+# the browser authorization completes, instead of waiting for the next usage
+# poll. Reuses the poller's switch lock + harvest; an abandoned login (pane
+# closed, never authorized) simply times out and leaves the login home in
+# place for the next attempt.
+
+LOGIN_WATCH_INTERVAL_SEC = 2.0
+LOGIN_WATCH_TIMEOUT_SEC = 600.0
+
+_login_watches: dict[tuple[str, str], asyncio.Task] = {}
+
+
+def _login_pane_running(agent_key: str, profile_id: str) -> bool:
+    """True while the profile's isolated login pane still runs its CLI.
+    Harvesting under a running login CLI is unsafe: the CLI can rotate its
+    OAuth token after the snapshot (invalidating the harvested refresh token)
+    and loses its config home mid-run. False when the ws layer is unavailable
+    (unit tests, early startup)."""
+    try:
+        from .ws_handlers import _running_login_terminals
+
+        return bool(_running_login_terminals(agent_key, profile_id))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _active_profile_id(agent_key: str) -> str | None:
+    store = _get_profiles_store()
+    if store is None:
+        return None
+    try:
+        return store.list()["defaults"].get(agent_key)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def _harvest_login_home_locked(vault, agent_key: str, profile_id: str) -> bool:
+    """Harvest the profile's pending login home under the agent's switch lock.
+    Skipped (False) while the profile's login pane CLI is still running. When
+    the harvested profile is the ACTIVE account, the slot is immediately
+    restored to live — the active row's identity is read from the live state,
+    and the next capture() mirrors live into the slot, which would otherwise
+    erase the fresh login. Returns True when something was harvested."""
+    if _login_pane_running(agent_key, profile_id):
+        return False
+    async with vault.switch_lock(agent_key):
+        harvested = await asyncio.to_thread(
+            vault.harvest_login_home, agent_key, profile_id
+        )
+        if harvested and _active_profile_id(agent_key) == profile_id:
+            await asyncio.to_thread(vault.restore, agent_key, profile_id)
+        return harvested
+
+
+def start_login_watch(agent_key: str, profile_id: str) -> None:
+    """Begin the harvest watch for one profile's login home (idempotent while
+    a watch for the same profile is still running)."""
+    key = (agent_key, profile_id)
+    task = _login_watches.get(key)
+    if task is not None and not task.done():
+        return
+    task = asyncio.create_task(_login_watch(agent_key, profile_id))
+    _login_watches[key] = task
+    task.add_done_callback(
+        lambda t, key=key: _login_watches.pop(key, None)
+        if _login_watches.get(key) is t
+        else None
+    )
+
+
+async def _kill_completed_login_panes(agent_key: str, profile_id: str) -> None:
+    """Kill the profile's still-running login pane once its sign-in secret
+    exists. claude/codex/kimi sign-in commands exit on completion, but grok's
+    TUI keeps running after auth and would defer the harvest until the user
+    closes the pane. The pane is disposable — kill it through the standard
+    terminals kill path; the harvest then proceeds on a later check."""
+    try:
+        from .ws_handlers import _running_login_terminals
+
+        panes = _running_login_terminals(agent_key, profile_id)
+    except Exception:  # noqa: BLE001
+        return
+    for tid, owner in panes:
+        try:
+            await owner.terminals.kill(tid, force=True)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def _login_watch(agent_key: str, profile_id: str) -> None:
+    deadline = time.monotonic() + LOGIN_WATCH_TIMEOUT_SEC
+    while time.monotonic() < deadline:
+        await asyncio.sleep(LOGIN_WATCH_INTERVAL_SEC)
+        vault = _get_credential_vault()
+        if vault is None:
+            continue
+        try:
+            if not vault.login_home_path(agent_key, profile_id).is_dir():
+                return  # harvested elsewhere (usage poll) or profile deleted
+            if vault.login_secret_present(agent_key, profile_id):
+                await _kill_completed_login_panes(agent_key, profile_id)
+            harvested = await _harvest_login_home_locked(vault, agent_key, profile_id)
+        except Exception:  # noqa: BLE001 — retry on the next tick
+            continue
+        if harvested:
+            try:
+                from .ws_handlers import _broadcast_profiles_changed
+
+                await _broadcast_profiles_changed(
+                    "login-harvest", harvested_profile_ids=[profile_id]
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return
+
+
 class UsageService:
     """Single app-wide poller. ``configure`` is idempotent and multi-window
     safe (last write wins); results are cached and broadcast on change."""
@@ -969,23 +1087,58 @@ class UsageService:
         self._wake.set()
 
     async def _harvest_active_slots(self) -> None:
-        """Opportunistic harvest: when an agent's ACTIVE account slot is still
-        empty but live credentials exist (the user just logged in inside a
-        pane), copy them into the slot so a later switch can bring the account
-        back. Best effort — failures are silent."""
+        """Opportunistic harvest: (a) when an agent's ACTIVE account slot is
+        still empty but live credentials exist (the user just logged in inside
+        a pane), copy them into the slot so a later switch can bring the
+        account back; (b) when a profile has a pending isolated login home (a
+        login pane completed its sign-in there), capture it into the profile's
+        slot and clear the home. Best effort — failures are silent."""
         store = _get_profiles_store()
         vault = _get_credential_vault()
         if store is None or vault is None:
             return
         try:
-            defaults = store.list()["defaults"]
+            doc = store.list()
+            defaults = doc["defaults"]
+            profiles = doc["profiles"]
         except Exception:  # noqa: BLE001
             return
+        harvested = False
         for agent_key, profile_id in defaults.items():
             if not profile_id:
                 continue
             try:
-                await asyncio.to_thread(vault.harvest, agent_key, profile_id)
+                # Same lock as the switch handler: a harvest must not interleave
+                # with a live credential swap for this agent.
+                async with vault.switch_lock(agent_key):
+                    harvested = await asyncio.to_thread(vault.harvest, agent_key, profile_id) or harvested
+            except Exception:  # noqa: BLE001
+                pass
+        login_harvested_ids: list[str] = []
+        for profile in profiles:
+            agent_key = str(profile.get("agentKey") or "")
+            profile_id = str(profile.get("id") or "")
+            if not agent_key or not profile_id:
+                continue
+            try:
+                # Cheap pre-check outside the lock: most profiles have no
+                # pending login home.
+                if not vault.login_home_path(agent_key, profile_id).is_dir():
+                    continue
+                if await _harvest_login_home_locked(vault, agent_key, profile_id):
+                    login_harvested_ids.append(profile_id)
+            except Exception:  # noqa: BLE001
+                pass
+        if harvested or login_harvested_ids:
+            # A pane login just landed in a slot — let the accounts UI pick up
+            # the new identity.
+            try:
+                from .ws_handlers import _broadcast_profiles_changed
+
+                await _broadcast_profiles_changed(
+                    "login-harvest" if login_harvested_ids else "harvest",
+                    harvested_profile_ids=login_harvested_ids or None,
+                )
             except Exception:  # noqa: BLE001
                 pass
 

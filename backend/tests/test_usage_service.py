@@ -3,6 +3,7 @@ and the poller's cooldown behavior. No network, no real CLI spawns."""
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from pathlib import Path
@@ -480,12 +481,36 @@ async def test_poll_once_survives_fetcher_exception(tmp_path, monkeypatch):
 # ── Real-home credential reads + opportunistic slot harvest ─────────────────
 
 class _RecordingVault:
-    def __init__(self):
+    def __init__(self, root: Path | None = None):
         self.harvested: list[tuple[str, str]] = []
+        self.login_harvested: list[tuple[str, str]] = []
+        self.restored: list[tuple[str, str]] = []
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._root = root
+
+    def switch_lock(self, agent_key: str) -> asyncio.Lock:
+        lock = self._locks.get(agent_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[agent_key] = lock
+        return lock
 
     def harvest(self, agent_key: str, slot_id: str) -> bool:
         self.harvested.append((agent_key, slot_id))
         return True
+
+    def login_home_path(self, agent_key: str, slot_id: str) -> Path:
+        return (self._root or Path("/nonexistent")) / agent_key / slot_id / "login-home"
+
+    def harvest_login_home(self, agent_key: str, slot_id: str) -> bool:
+        self.login_harvested.append((agent_key, slot_id))
+        return True
+
+    def login_secret_present(self, agent_key: str, slot_id: str) -> bool:
+        return False
+
+    def restore(self, agent_key: str, slot_id: str) -> None:
+        self.restored.append((agent_key, slot_id))
 
 
 async def test_poll_once_always_reads_real_home(tmp_path, monkeypatch):
@@ -556,6 +581,289 @@ async def test_poll_once_harvests_active_slots(tmp_path, monkeypatch):
 
     await us.UsageService().poll_once(tmp_path)
     assert vault.harvested == [("claude", prof["id"])]
+
+
+async def test_poll_once_harvests_pending_login_homes(tmp_path, monkeypatch):
+    """A profile with a pending isolated login home is harvested even while
+    NOT active (the whole point of isolated logins), and the accounts UI is
+    told with reason 'login-harvest'. Profiles without a login home are
+    skipped."""
+    store = _isolated_store(tmp_path)
+    pending = store.create(agent_key="claude", name="Second")
+    store.create(agent_key="codex", name="NoLogin")
+    vault = _RecordingVault(root=tmp_path / "slots")
+    vault.login_home_path("claude", pending["id"]).mkdir(parents=True)
+    monkeypatch.setattr(us, "_get_profiles_store", lambda: store)
+    monkeypatch.setattr(us, "_get_credential_vault", lambda: vault)
+    reasons: list[tuple[str, list[str] | None]] = []
+
+    async def record_changed(
+        reason: str, harvested_profile_ids: list[str] | None = None
+    ) -> None:
+        reasons.append((reason, harvested_profile_ids))
+
+    from agent_team_backend import ws_handlers
+
+    monkeypatch.setattr(ws_handlers, "_broadcast_profiles_changed", record_changed)
+
+    async def fake_ok(provider):
+        return us._snapshot(provider, "no-credentials")
+
+    monkeypatch.setattr(us, "fetch_claude", lambda home: fake_ok("claude"))
+    monkeypatch.setattr(us, "fetch_codex", lambda home: fake_ok("codex"))
+    monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_ok("kimi"))
+    monkeypatch.setattr(us, "fetch_grok", lambda home: fake_ok("grok"))
+    monkeypatch.setattr(us, "fetch_antigravity", lambda home: fake_ok("antigravity"))
+
+    await us.UsageService().poll_once(tmp_path)
+
+    assert vault.login_harvested == [("claude", pending["id"])]
+    assert vault.harvested == []  # neither profile is the active account
+    assert vault.restored == []  # inactive profile: slot-only, live untouched
+    # The broadcast names the harvested profile so the initiating window can
+    # close its login pane and toast the identity.
+    assert reasons == [("login-harvest", [pending["id"]])]
+
+
+async def test_poll_once_skips_login_harvest_while_login_pane_runs(
+    tmp_path, monkeypatch
+):
+    """A login home is never harvested while the profile's login pane CLI is
+    still running: the CLI could rotate the token right after the snapshot
+    (stranding a dead refresh token in the slot) and would lose its config
+    home underneath it."""
+    store = _isolated_store(tmp_path)
+    pending = store.create(agent_key="claude", name="Second")
+    vault = _RecordingVault(root=tmp_path / "slots")
+    vault.login_home_path("claude", pending["id"]).mkdir(parents=True)
+    monkeypatch.setattr(us, "_get_profiles_store", lambda: store)
+    monkeypatch.setattr(us, "_get_credential_vault", lambda: vault)
+
+    from agent_team_backend import ws_handlers
+
+    monkeypatch.setattr(
+        ws_handlers,
+        "_running_login_terminals",
+        lambda agent_key, profile_id: ["t-login"]
+        if (agent_key, profile_id) == ("claude", pending["id"]) else [],
+    )
+    reasons: list = []
+
+    async def record_changed(reason, harvested_profile_ids=None):
+        reasons.append((reason, harvested_profile_ids))
+
+    monkeypatch.setattr(ws_handlers, "_broadcast_profiles_changed", record_changed)
+
+    async def fake_ok(provider):
+        return us._snapshot(provider, "no-credentials")
+
+    monkeypatch.setattr(us, "fetch_claude", lambda home: fake_ok("claude"))
+    monkeypatch.setattr(us, "fetch_codex", lambda home: fake_ok("codex"))
+    monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_ok("kimi"))
+    monkeypatch.setattr(us, "fetch_grok", lambda home: fake_ok("grok"))
+    monkeypatch.setattr(us, "fetch_antigravity", lambda home: fake_ok("antigravity"))
+
+    await us.UsageService().poll_once(tmp_path)
+
+    assert vault.login_harvested == []
+    assert vault.login_home_path("claude", pending["id"]).is_dir()
+    assert reasons == []
+
+
+async def test_login_harvest_for_active_profile_restores_live(tmp_path, monkeypatch):
+    """When the harvested profile is the ACTIVE account its slot is restored
+    to live right away — the active row's identity is read from the live
+    state, and the next capture() mirrors live into the slot, which would
+    otherwise silently erase the completed sign-in."""
+    store = _isolated_store(tmp_path)
+    prof = store.create(agent_key="claude", name="Acct")
+    store.set_default("claude", prof["id"])
+    vault = _RecordingVault(root=tmp_path / "slots")
+    vault.login_home_path("claude", prof["id"]).mkdir(parents=True)
+    monkeypatch.setattr(us, "_get_profiles_store", lambda: store)
+    monkeypatch.setattr(us, "_get_credential_vault", lambda: vault)
+    reasons: list = []
+
+    async def record_changed(reason, harvested_profile_ids=None):
+        reasons.append((reason, harvested_profile_ids))
+
+    from agent_team_backend import ws_handlers
+
+    monkeypatch.setattr(ws_handlers, "_broadcast_profiles_changed", record_changed)
+
+    async def fake_ok(provider):
+        return us._snapshot(provider, "no-credentials")
+
+    monkeypatch.setattr(us, "fetch_claude", lambda home: fake_ok("claude"))
+    monkeypatch.setattr(us, "fetch_codex", lambda home: fake_ok("codex"))
+    monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_ok("kimi"))
+    monkeypatch.setattr(us, "fetch_grok", lambda home: fake_ok("grok"))
+    monkeypatch.setattr(us, "fetch_antigravity", lambda home: fake_ok("antigravity"))
+
+    await us.UsageService().poll_once(tmp_path)
+
+    assert vault.login_harvested == [("claude", prof["id"])]
+    assert vault.restored == [("claude", prof["id"])]
+    assert reasons == [("login-harvest", [prof["id"]])]
+
+
+# ── Login watch (fast harvest right after a login pane spawn) ───────────────
+
+
+def _capture_profile_broadcasts(monkeypatch) -> list[tuple[str, list[str] | None]]:
+    calls: list[tuple[str, list[str] | None]] = []
+
+    async def record_changed(
+        reason: str, harvested_profile_ids: list[str] | None = None
+    ) -> None:
+        calls.append((reason, harvested_profile_ids))
+
+    from agent_team_backend import ws_handlers
+
+    monkeypatch.setattr(ws_handlers, "_broadcast_profiles_changed", record_changed)
+    return calls
+
+
+async def test_login_watch_harvests_and_broadcasts(tmp_path, monkeypatch):
+    """The watch polls the login home, harvests as soon as the vault reports
+    credentials, broadcasts login-harvest with the profile id, and stops."""
+    vault = _RecordingVault(root=tmp_path / "slots")
+    vault.login_home_path("claude", "p1").mkdir(parents=True)
+    monkeypatch.setattr(us, "_get_credential_vault", lambda: vault)
+    monkeypatch.setattr(us, "LOGIN_WATCH_INTERVAL_SEC", 0.01)
+    calls = _capture_profile_broadcasts(monkeypatch)
+
+    us.start_login_watch("claude", "p1")
+    task = us._login_watches[("claude", "p1")]
+    await asyncio.wait_for(task, timeout=2.0)
+    await asyncio.sleep(0)  # let the done callback clean the registry
+
+    assert vault.login_harvested == [("claude", "p1")]
+    assert calls == [("login-harvest", ["p1"])]
+    assert ("claude", "p1") not in us._login_watches
+
+
+async def test_login_watch_stops_when_login_home_gone(tmp_path, monkeypatch):
+    """A login home harvested elsewhere (usage poll) or a deleted profile ends
+    the watch without a harvest attempt or broadcast."""
+    vault = _RecordingVault(root=tmp_path / "slots")  # home never created
+    monkeypatch.setattr(us, "_get_credential_vault", lambda: vault)
+    monkeypatch.setattr(us, "LOGIN_WATCH_INTERVAL_SEC", 0.01)
+    calls = _capture_profile_broadcasts(monkeypatch)
+
+    us.start_login_watch("claude", "p1")
+    await asyncio.wait_for(us._login_watches[("claude", "p1")], timeout=2.0)
+
+    assert vault.login_harvested == []
+    assert calls == []
+
+
+async def test_login_watch_times_out_quietly(tmp_path, monkeypatch):
+    """An abandoned login (pane closed, never authorized) expires without a
+    broadcast; the login home stays for the next attempt."""
+
+    class _NeverReady(_RecordingVault):
+        def harvest_login_home(self, agent_key: str, slot_id: str) -> bool:
+            super().harvest_login_home(agent_key, slot_id)
+            return False
+
+    vault = _NeverReady(root=tmp_path / "slots")
+    vault.login_home_path("claude", "p1").mkdir(parents=True)
+    monkeypatch.setattr(us, "_get_credential_vault", lambda: vault)
+    monkeypatch.setattr(us, "LOGIN_WATCH_INTERVAL_SEC", 0.01)
+    monkeypatch.setattr(us, "LOGIN_WATCH_TIMEOUT_SEC", 0.05)
+    calls = _capture_profile_broadcasts(monkeypatch)
+
+    us.start_login_watch("claude", "p1")
+    await asyncio.wait_for(us._login_watches[("claude", "p1")], timeout=2.0)
+
+    assert vault.login_harvested  # it kept trying until the deadline
+    assert calls == []
+    assert vault.login_home_path("claude", "p1").is_dir()
+
+
+async def test_login_watch_dedupes_running_watch(tmp_path, monkeypatch):
+    """start_login_watch is idempotent while a watch for the same profile is
+    still running — a respawned login pane must not stack watchers."""
+    vault = _RecordingVault(root=tmp_path / "slots")
+    monkeypatch.setattr(us, "_get_credential_vault", lambda: vault)
+    monkeypatch.setattr(us, "LOGIN_WATCH_INTERVAL_SEC", 0.01)
+    _capture_profile_broadcasts(monkeypatch)
+
+    us.start_login_watch("claude", "p1")
+    first = us._login_watches[("claude", "p1")]
+    us.start_login_watch("claude", "p1")
+    assert us._login_watches[("claude", "p1")] is first
+    await asyncio.wait_for(first, timeout=2.0)
+
+
+async def test_login_watch_waits_for_login_pane_exit(tmp_path, monkeypatch):
+    """The watch never harvests under a still-running login pane CLI; it
+    harvests on the first tick after the pane exits."""
+    vault = _RecordingVault(root=tmp_path / "slots")
+    vault.login_home_path("claude", "p1").mkdir(parents=True)
+    monkeypatch.setattr(us, "_get_credential_vault", lambda: vault)
+    monkeypatch.setattr(us, "LOGIN_WATCH_INTERVAL_SEC", 0.01)
+    calls = _capture_profile_broadcasts(monkeypatch)
+
+    pane_running = [True]
+    from agent_team_backend import ws_handlers
+
+    monkeypatch.setattr(
+        ws_handlers,
+        "_running_login_terminals",
+        lambda agent_key, profile_id: ["t-login"] if pane_running[0] else [],
+    )
+
+    us.start_login_watch("claude", "p1")
+    task = us._login_watches[("claude", "p1")]
+    await asyncio.sleep(0.1)
+    assert vault.login_harvested == []  # CLI still running: no harvest
+
+    pane_running[0] = False
+    await asyncio.wait_for(task, timeout=2.0)
+    assert vault.login_harvested == [("claude", "p1")]
+    assert calls == [("login-harvest", ["p1"])]
+
+
+async def test_login_watch_kills_lingering_pane_once_secret_present(tmp_path, monkeypatch):
+    """grok's TUI keeps running after auth: once the login home holds its
+    secret file, the watch kills the disposable pane through the standard
+    terminals kill path so the harvest can proceed."""
+    from types import SimpleNamespace
+
+    class _SecretReady(_RecordingVault):
+        def login_secret_present(self, agent_key: str, slot_id: str) -> bool:
+            return True
+
+    vault = _SecretReady(root=tmp_path / "slots")
+    vault.login_home_path("grok", "p1").mkdir(parents=True)
+    monkeypatch.setattr(us, "_get_credential_vault", lambda: vault)
+    monkeypatch.setattr(us, "_get_profiles_store", lambda: None)
+    monkeypatch.setattr(us, "LOGIN_WATCH_INTERVAL_SEC", 0.01)
+    calls = _capture_profile_broadcasts(monkeypatch)
+
+    killed: list[tuple[str, bool]] = []
+    panes: list = []
+
+    class _Terminals:
+        async def kill(self, tid: str, force: bool = False) -> None:
+            killed.append((tid, force))
+            panes.clear()
+
+    panes.append(("t-login", SimpleNamespace(terminals=_Terminals())))
+    from agent_team_backend import ws_handlers
+
+    monkeypatch.setattr(
+        ws_handlers, "_running_login_terminals", lambda agent_key, profile_id: list(panes)
+    )
+
+    us.start_login_watch("grok", "p1")
+    await asyncio.wait_for(us._login_watches[("grok", "p1")], timeout=2.0)
+
+    assert killed == [("t-login", True)]
+    assert vault.login_harvested == [("grok", "p1")]
+    assert calls == [("login-harvest", ["p1"])]
 
 
 async def test_grok_billing_rpc_with_fake_stdio(tmp_path, monkeypatch):
