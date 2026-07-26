@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
+from starlette.routing import Route as StarletteRoute
 from pydantic import ValidationError
 from uvicorn.protocols.utils import ClientDisconnected
 
@@ -88,6 +89,8 @@ from . import search_service
 from . import editor_service
 from . import onboarding_deps
 from . import plan_history
+from . import plan_mcp
+from . import plan_mcp_wiring
 from . import ws_handlers
 from .git_watcher import GitWatcher
 
@@ -96,6 +99,14 @@ log = logging.getLogger("agent_team_backend")
 STARTED_AT = datetime.now(timezone.utc).isoformat()
 
 app = FastAPI(title="navide-backend", version=__version__)
+
+# Plan MCP server (read-only plan tools) served in-process over streamable
+# HTTP; its session manager is started/stopped in the lifespan events below.
+# A Route (ASGI endpoint) instead of a Mount so POST /plan-mcp is served
+# directly — a Mount would 307-redirect the slashless path.
+app.router.routes.append(
+    StarletteRoute("/plan-mcp", endpoint=plan_mcp.asgi_app, methods=["GET", "POST", "DELETE"])
+)
 
 project_store = ProjectStore()
 spawn_history_store = SpawnHistoryStore()
@@ -885,6 +896,13 @@ async def _start_log_watcher() -> None:
     # Start MCP servers in the background so they're ready for the first pipeline run.
     asyncio.create_task(mcp_manager.startup())
 
+    # Plan MCP endpoint (mounted at /plan-mcp): start its session manager.
+    # Guarded — a broken MCP mount must never block backend startup.
+    try:
+        await plan_mcp.startup()
+    except Exception as err:  # noqa: BLE001
+        log.warning("plan MCP startup failed: %s", err)
+
     # Best-effort install Claude Code hooks pointing at this backend so we
     # get reliable "agent active / turn complete" signals (independent of
     # buffer scanning). Failure is non-fatal — the orchestrator falls back
@@ -894,6 +912,16 @@ async def _start_log_watcher() -> None:
         log.info("claude hooks install: %s", result)
     except Exception as err:  # noqa: BLE001
         log.warning("claude hooks install failed: %s", err)
+
+    # Refresh the app-owned MCP config handed to claude panes via
+    # --mcp-config (see plan_mcp_wiring): its /plan-mcp URL must carry this
+    # run's dynamic port. Best-effort — panes just spawn unwired on failure.
+    try:
+        port = plan_mcp_wiring.backend_port()
+        if port is not None:
+            plan_mcp_wiring.write_claude_config(port)
+    except Exception as err:  # noqa: BLE001
+        log.warning("plan MCP claude config write failed: %s", err)
 
 
 @app.on_event("shutdown")
@@ -916,6 +944,10 @@ async def _stop_log_watcher() -> None:
     if _git_watcher is not None:
         _git_watcher.stop()
     await mcp_manager.shutdown()
+    try:
+        await plan_mcp.shutdown()
+    except Exception as err:  # noqa: BLE001
+        log.warning("plan MCP shutdown failed: %s", err)
     _log_watcher = None
     _git_watcher = None
 
