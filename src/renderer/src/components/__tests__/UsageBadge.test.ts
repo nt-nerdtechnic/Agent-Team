@@ -257,51 +257,6 @@ describe('UsageBadge – selectProfile', () => {
     expect(usage.refreshUsage).not.toHaveBeenCalled()
   })
 
-  it('PROFILE_IN_USE: confirm accepted → retries with force:true and refreshes', async () => {
-    usage.usageFor.mockReturnValue(snapshot())
-    const setDefault = vi
-      .fn()
-      .mockResolvedValueOnce({ ok: false, code: 'PROFILE_IN_USE', runningCount: 2 })
-      .mockResolvedValueOnce({ ok: true })
-    notify.confirm.mockResolvedValue(true)
-    const { fake } = makeCliProfiles({
-      profiles: [profile('p1', 'Work')],
-      defaultId: null,
-      setDefault,
-    })
-    wrapper = mountBadge(fake)
-    await openPopover(wrapper)
-    await wrapper.findAll('.usage-acct')[1].trigger('click')
-    await settle()
-    expect(notify.confirm).toHaveBeenCalledTimes(1)
-    expect(setDefault).toHaveBeenCalledTimes(2)
-    expect(setDefault).toHaveBeenNthCalledWith(1, 'claude', 'p1')
-    expect(setDefault).toHaveBeenNthCalledWith(2, 'claude', 'p1', { force: true })
-    expect(usage.refreshUsage).toHaveBeenCalledTimes(1)
-    // The popover was closed before showing the confirm dialog.
-    expect(wrapper.find('.usage-pop').exists()).toBe(false)
-  })
-
-  it('PROFILE_IN_USE: confirm declined → no retry, no refresh', async () => {
-    usage.usageFor.mockReturnValue(snapshot())
-    const setDefault = vi
-      .fn()
-      .mockResolvedValueOnce({ ok: false, code: 'PROFILE_IN_USE', runningCount: 1 })
-    notify.confirm.mockResolvedValue(false)
-    const { fake } = makeCliProfiles({
-      profiles: [profile('p1', 'Work')],
-      defaultId: null,
-      setDefault,
-    })
-    wrapper = mountBadge(fake)
-    await openPopover(wrapper)
-    await wrapper.findAll('.usage-acct')[1].trigger('click')
-    await settle()
-    expect(notify.confirm).toHaveBeenCalledTimes(1)
-    expect(setDefault).toHaveBeenCalledTimes(1)
-    expect(usage.refreshUsage).not.toHaveBeenCalled()
-  })
-
   it('failure with a message shows an alert and skips the refresh', async () => {
     usage.usageFor.mockReturnValue(snapshot())
     const setDefault = vi.fn().mockResolvedValue({ ok: false, message: 'switch failed' })

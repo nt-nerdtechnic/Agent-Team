@@ -1183,9 +1183,6 @@
   "cli-account": {
     "default": "Default",
     "switch-title": "Switch account",
-    "switch-in-use": "There are {count} running {agent} panes. Switching now terminates their CLI processes; restart the panes to continue with the new account.",
-    "switch-force": "Terminate and switch",
-    "switch-cancel": "Cancel",
     "swap-failed": "Account switch failed — the previous account is still active."
   },
   "cliDrop": {

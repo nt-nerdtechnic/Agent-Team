@@ -1,8 +1,9 @@
-"""cli_profiles.* WS handlers + the no-isolation spawn contract.
+"""cli_profiles.* WS handlers + the per-pane profile-isolation spawn contract.
 
-Accounts share the real home: terminal.create must not inject any profile
-config-home env, and cli_profiles.set_default swaps credentials through the
-vault (guarded against running panes)."""
+Managed accounts run each pane inside the profile's persistent isolated home
+(pinned at spawn, so a resume returns to the SAME account). cli_profiles.
+set_default swaps the live credentials through the vault and only decides which
+account NEW panes bind to — it never kills or disturbs running panes."""
 
 from __future__ import annotations
 
@@ -81,9 +82,11 @@ class FakeCodexHomeManager:
         self.root = root
         self.real_home = root / "real-codex"
         self.prepared: list[str] = []
+        self.prepared_sources: list[Path | None] = []
 
-    def prepare(self, home_id: str) -> Path:
+    def prepare(self, home_id: str, *, source_home: Path | None = None) -> Path:
         self.prepared.append(home_id)
+        self.prepared_sources.append(source_home)
         return self.root / home_id
 
     def find_session_home(self, resume_id: str) -> Path | None:
@@ -601,13 +604,16 @@ async def test_set_default_noop_when_already_active(
     assert events == []
 
 
-async def test_set_default_rejected_while_agent_pane_running(
+async def test_set_default_does_not_kill_running_agent_panes(
     store: CliProfilesStore, events: list[dict[str, Any]], vault: FakeVault
 ) -> None:
+    """Phase 2: switching the active account NEVER kills running panes. The
+    panes are pinned to the isolated home they were spawned with, so the swap
+    only decides which account new panes bind to; the switch just succeeds."""
     session = _session()
     profile = store.create(agent_key="claude", name="Work")
-    _register_running_terminal(session, "t1", "claude")
-    _register_running_terminal(session, "t2", "claude")
+    t1 = _register_running_terminal(session, "t1", "claude")
+    t2 = _register_running_terminal(session, "t2", "claude")
 
     await app.handle_message(session, {
         "id": "b1",
@@ -616,11 +622,12 @@ async def test_set_default_rejected_while_agent_pane_running(
     })
 
     response = session.websocket.sent[0]  # type: ignore[attr-defined]
-    assert response["ok"] is False
-    assert response["error"]["code"] == "PROFILE_IN_USE"
-    assert response["error"]["details"]["running_count"] == 2
-    assert vault.switch_calls == []
-    assert store.list()["defaults"]["claude"] is None
+    assert response["ok"] is True
+    # No pane killed; both still alive.
+    assert session.terminals.killed == []  # type: ignore[attr-defined]
+    assert t1.proc.poll() is None and t2.proc.poll() is None
+    assert vault.switch_calls == [("claude", "__default__", profile["id"])]
+    assert store.list()["defaults"]["claude"] == profile["id"]
 
 
 async def test_set_default_other_agent_pane_does_not_block(
@@ -638,71 +645,8 @@ async def test_set_default_other_agent_pane_does_not_block(
     })
 
     assert session.websocket.sent[0]["ok"] is True  # type: ignore[attr-defined]
+    assert session.terminals.killed == []  # type: ignore[attr-defined]
     assert vault.switch_calls == [("claude", "__default__", profile["id"])]
-
-
-async def test_set_default_force_kills_running_panes_then_swaps(
-    store: CliProfilesStore,
-    events: list[dict[str, Any]],
-    vault: FakeVault,
-) -> None:
-    """force=true terminates the agent's running CLI processes (other agents'
-    panes untouched) and only swaps after they have actually exited — a CLI
-    alive across the swap would write the old token back over the new one."""
-    session = _session()
-    profile = store.create(agent_key="claude", name="Work")
-    term = _register_running_terminal(session, "t1", "claude")
-    _register_running_terminal(session, "t2", "codex")
-
-    dead_at_swap: list[bool] = []
-    orig_switch = vault.switch
-
-    def switch_spy(*args: str) -> None:
-        dead_at_swap.append(term.proc.poll() is not None)
-        orig_switch(*args)
-
-    vault.switch = switch_spy  # type: ignore[method-assign]
-
-    await app.handle_message(session, {
-        "id": "f1",
-        "type": "cli_profiles.set_default",
-        "payload": {"agent_key": "claude", "profile_id": profile["id"], "force": True},
-    })
-
-    response = session.websocket.sent[0]  # type: ignore[attr-defined]
-    assert response["ok"] is True
-    assert session.terminals.killed == ["t1"]  # type: ignore[attr-defined]
-    assert vault.switch_calls == [("claude", "__default__", profile["id"])]
-    assert dead_at_swap == [True]  # process exit confirmed before the swap
-
-
-async def test_set_default_force_timeout_fails_closed(
-    store: CliProfilesStore,
-    events: list[dict[str, Any]],
-    vault: FakeVault,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A CLI process that survives the kill past the exit timeout must abort
-    the switch with credentials untouched — swapping under a live CLI risks
-    cross-account credential contamination."""
-    monkeypatch.setattr(ws_handlers, "FORCE_SWITCH_EXIT_TIMEOUT_S", 0)
-    session = _session()
-    profile = store.create(agent_key="claude", name="Work")
-    _register_running_terminal(session, "t1", "claude", survives_kill=True)
-
-    await app.handle_message(session, {
-        "id": "f2",
-        "type": "cli_profiles.set_default",
-        "payload": {"agent_key": "claude", "profile_id": profile["id"], "force": True},
-    })
-
-    response = session.websocket.sent[0]  # type: ignore[attr-defined]
-    assert response["ok"] is False
-    assert response["error"]["code"] == "PROFILE_SWAP_FAILED"
-    assert session.terminals.killed == ["t1"]  # type: ignore[attr-defined]
-    assert vault.switch_calls == []
-    assert store.list()["defaults"]["claude"] is None
-    assert events == []
 
 
 async def test_set_default_ignores_running_login_pane(
@@ -729,13 +673,12 @@ async def test_set_default_ignores_running_login_pane(
     assert vault.switch_calls == [("claude", "__default__", target["id"])]
 
 
-async def test_set_default_login_in_progress_refused_before_any_kill(
+async def test_set_default_login_in_progress_refused(
     store: CliProfilesStore, events: list[dict[str, Any]], vault: FakeVault
 ) -> None:
     """Switching to a profile whose login pane CLI is still running must be
     refused (LOGIN_IN_PROGRESS) — restoring its still-empty slot would sign
-    the live state out — and the refusal must land BEFORE the force path
-    kills any pane."""
+    the live state out. No pane is ever killed."""
     session = _session()
     profile = store.create(agent_key="claude", name="New")
     vault.login_home_path("claude", profile["id"]).mkdir(parents=True)
@@ -747,7 +690,7 @@ async def test_set_default_login_in_progress_refused_before_any_kill(
     await app.handle_message(session, {
         "id": "lp2",
         "type": "cli_profiles.set_default",
-        "payload": {"agent_key": "claude", "profile_id": profile["id"], "force": True},
+        "payload": {"agent_key": "claude", "profile_id": profile["id"]},
     })
 
     response = session.websocket.sent[0]  # type: ignore[attr-defined]
@@ -792,36 +735,6 @@ async def test_set_default_harvests_pending_login_before_restore(
     assert harvested_before_swap == [True]
 
 
-async def test_set_default_force_sweeps_pane_spawned_mid_wait(
-    store: CliProfilesStore, events: list[dict[str, Any]], vault: FakeVault
-) -> None:
-    """A pane spawned while the force path waits for exits is swept into the
-    kill set and the switch still succeeds — forcing must never destroy panes
-    and then fail anyway (the old post-kill re-check did exactly that)."""
-    session = _session()
-    profile = store.create(agent_key="claude", name="Work")
-    _register_running_terminal(session, "t1", "claude")
-    orig_kill = session.terminals.kill  # type: ignore[attr-defined]
-
-    async def kill_and_spawn(tid: str, force: bool = False) -> None:
-        await orig_kill(tid)
-        if tid == "t1":
-            _register_running_terminal(session, "t2", "claude")
-
-    session.terminals.kill = kill_and_spawn  # type: ignore[attr-defined]
-
-    await app.handle_message(session, {
-        "id": "f3",
-        "type": "cli_profiles.set_default",
-        "payload": {"agent_key": "claude", "profile_id": profile["id"], "force": True},
-    })
-
-    response = session.websocket.sent[0]  # type: ignore[attr-defined]
-    assert response["ok"] is True
-    assert session.terminals.killed == ["t1", "t2"]  # type: ignore[attr-defined]
-    assert vault.switch_calls == [("claude", "__default__", profile["id"])]
-
-
 async def test_set_default_swap_failure_keeps_old_default(
     store: CliProfilesStore,
     events: list[dict[str, Any]],
@@ -848,12 +761,13 @@ async def test_set_default_swap_failure_keeps_old_default(
 # ---- terminal.create: accounts share the real home (no env isolation) ----
 
 
-async def test_terminal_create_claude_default_only_drops_api_overrides(
-    store: CliProfilesStore, spawn_stubs: FakeAttribution
+async def test_terminal_create_claude_active_account_injects_isolated_home(
+    store: CliProfilesStore, spawn_stubs: FakeAttribution, real_vault: CredentialVault
 ) -> None:
-    """With a managed claude account active the spawn gets NO config-home env;
-    the only effect is dropping inherited Anthropic API overrides so they
-    cannot shadow the managed OAuth login."""
+    """A managed claude account's regular pane runs inside the profile's
+    persistent isolated config home (CLAUDE_CONFIG_DIR), seeded from the slot,
+    with inherited Anthropic API overrides dropped so they can't shadow the
+    managed OAuth login."""
     profile = store.create(agent_key="claude", name="Work")
     store.set_default("claude", profile["id"])
     session = _session()
@@ -871,11 +785,12 @@ async def test_terminal_create_claude_default_only_drops_api_overrides(
     })
 
     created = session.terminals.created[0]  # type: ignore[attr-defined]
-    assert created["env"] is None
+    home = real_vault.profile_home_path("claude", profile["id"])
+    assert created["env"]["CLAUDE_CONFIG_DIR"] == str(home)
     assert created["env_remove"] == ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
-    assert "profile_id" not in created["metadata"]
-    # No isolated home is created at spawn any more.
-    assert not store.home_path(profile).exists()
+    # The persistent home is created and distinct from the disposable login home.
+    assert home.is_dir()
+    assert home != real_vault.login_home_path("claude", profile["id"])
 
 
 async def test_terminal_create_without_profile_is_unchanged(
@@ -903,12 +818,20 @@ async def test_terminal_create_without_profile_is_unchanged(
     assert "profile_id" not in created["metadata"]
 
 
-@pytest.mark.parametrize("agent_key", ["kimi", "grok"])
-async def test_terminal_create_active_account_injects_nothing(
-    store: CliProfilesStore, spawn_stubs: FakeAttribution, agent_key: str
+@pytest.mark.parametrize(
+    "agent_key,env_var",
+    [("kimi", "KIMI_CODE_HOME"), ("grok", "HOME")],
+)
+async def test_terminal_create_active_account_injects_isolated_home(
+    store: CliProfilesStore,
+    spawn_stubs: FakeAttribution,
+    real_vault: CredentialVault,
+    agent_key: str,
+    env_var: str,
 ) -> None:
-    """kimi/grok spawns are env-identical with and without an active account:
-    no KIMI_CODE_HOME, no HOME shim."""
+    """A managed kimi/grok account's regular pane runs relocated: kimi via
+    KIMI_CODE_HOME = the profile home, grok via a HOME shim that IS the profile
+    home (its .grok holds the account's db)."""
     profile = store.create(agent_key=agent_key, name="Work")
     store.set_default(agent_key, profile["id"])
     session = _session()
@@ -926,19 +849,22 @@ async def test_terminal_create_active_account_injects_nothing(
     })
 
     created = session.terminals.created[0]  # type: ignore[attr-defined]
-    assert created["env"] is None
+    home = real_vault.profile_home_path(agent_key, profile["id"])
+    assert created["env"][env_var] == str(home)
     assert created["env_remove"] is None
-    assert "profile_id" not in created["metadata"]
+    assert home.is_dir()
 
 
-async def test_terminal_create_codex_active_account_uses_real_home_source(
+async def test_terminal_create_codex_active_account_sources_profile_home(
     store: CliProfilesStore,
     spawn_stubs: FakeAttribution,
+    real_vault: CredentialVault,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The per-pane CODEX_HOME mechanism stays, but its symlink source is
-    always the real ~/.codex — an active account changes nothing."""
+    """The per-pane CODEX_HOME mechanism stays, but with a managed account
+    active its symlink source switches from the real ~/.codex to the profile's
+    persistent isolated home (which holds the account's own auth.json)."""
     profile = store.create(agent_key="codex", name="Work")
     store.set_default("codex", profile["id"])
     fake_home = FakeCodexHomeManager(tmp_path / "codex-panes")
@@ -959,9 +885,123 @@ async def test_terminal_create_codex_active_account_uses_real_home_source(
 
     created = session.terminals.created[0]  # type: ignore[attr-defined]
     assert fake_home.prepared == ["stable-home"]
+    assert fake_home.prepared_sources == [
+        real_vault.profile_home_path("codex", profile["id"])
+    ]
     assert created["env"]["CODEX_HOME"] == str(tmp_path / "codex-panes" / "stable-home")
     assert created["env_remove"] is None
-    assert "profile_id" not in created["metadata"]
+
+
+# ---- terminal.create: per-pane profile pin (phase 2) ----
+
+
+async def test_terminal_create_pinned_profile_survives_account_switch(
+    store: CliProfilesStore, spawn_stubs: FakeAttribution, real_vault: CredentialVault
+) -> None:
+    """A pane pinned to profile A (its recorded metadata profile_id) resumes
+    into A's isolated home even though the active default is now B — the pin,
+    not the current active account, decides the home. This is the cross-profile
+    resume crash-loop guard: a switch must never migrate a pane's home."""
+    profile_a = store.create(agent_key="claude", name="A")
+    profile_b = store.create(agent_key="claude", name="B")
+    store.set_default("claude", profile_b["id"])  # active account is now B
+    session = _session()
+
+    await app.handle_message(session, {
+        "id": "pin1",
+        "type": "terminal.create",
+        "payload": {
+            "pane_id": "claude-pane",
+            "agent_key": "claude",
+            "command": "claude",
+            "cwd": "/ws",
+            "metadata": {"workspace_path": "/ws", "profile_id": profile_a["id"]},
+        },
+    })
+
+    created = session.terminals.created[0]  # type: ignore[attr-defined]
+    assert created["env"]["CLAUDE_CONFIG_DIR"] == str(
+        real_vault.profile_home_path("claude", profile_a["id"])
+    )
+    # NOT B's home.
+    assert created["env"]["CLAUDE_CONFIG_DIR"] != str(
+        real_vault.profile_home_path("claude", profile_b["id"])
+    )
+
+
+async def test_terminal_create_pinned_default_stays_on_real_home(
+    store: CliProfilesStore, spawn_stubs: FakeAttribution, real_vault: CredentialVault
+) -> None:
+    """A pane pinned to the unmanaged Default ("__default__") runs on the real
+    home even while a managed account is active — a pane spawned before the
+    account was created must not be dragged into a managed home on resume."""
+    profile = store.create(agent_key="claude", name="Work")
+    store.set_default("claude", profile["id"])  # active managed account
+    session = _session()
+
+    await app.handle_message(session, {
+        "id": "pin2",
+        "type": "terminal.create",
+        "payload": {
+            "pane_id": "claude-pane",
+            "agent_key": "claude",
+            "command": "claude",
+            "cwd": "/ws",
+            "metadata": {"workspace_path": "/ws", "profile_id": "__default__"},
+        },
+    })
+
+    created = session.terminals.created[0]  # type: ignore[attr-defined]
+    assert created["env"] is None
+    assert created["env_remove"] is None
+
+
+async def test_terminal_create_fresh_spawn_after_switch_uses_new_account(
+    store: CliProfilesStore, spawn_stubs: FakeAttribution, real_vault: CredentialVault
+) -> None:
+    """A fresh (unpinned) spawn binds to the CURRENT active default — after a
+    switch, new panes use the newly active account's home."""
+    profile_a = store.create(agent_key="claude", name="A")
+    profile_b = store.create(agent_key="claude", name="B")
+    store.set_default("claude", profile_a["id"])
+    store.set_default("claude", profile_b["id"])  # switched active to B
+    session = _session()
+
+    await app.handle_message(session, {
+        "id": "fresh1",
+        "type": "terminal.create",
+        "payload": {
+            "pane_id": "claude-pane",
+            "agent_key": "claude",
+            "command": "claude",
+            "cwd": "/ws",
+            "metadata": {"workspace_path": "/ws"},  # no pin → active default
+        },
+    })
+
+    created = session.terminals.created[0]  # type: ignore[attr-defined]
+    assert created["env"]["CLAUDE_CONFIG_DIR"] == str(
+        real_vault.profile_home_path("claude", profile_b["id"])
+    )
+
+
+def test_profile_pin_for_spawn_resolves_active_default(
+    store: CliProfilesStore,
+) -> None:
+    """The persisted pin: an explicit value (restore) is kept verbatim; a fresh
+    spawn resolves the active default (managed id, or "__default__" for the
+    unmanaged Default); non-account agents are never pinned."""
+    profile = store.create(agent_key="claude", name="Work")
+
+    # Fresh spawn, no active managed account → Default sentinel.
+    assert ws_handlers._profile_pin_for_spawn("claude", None) == "__default__"
+    # Fresh spawn with a managed account active → its id.
+    store.set_default("claude", profile["id"])
+    assert ws_handlers._profile_pin_for_spawn("claude", None) == profile["id"]
+    # Restore carries the recorded pin verbatim.
+    assert ws_handlers._profile_pin_for_spawn("claude", "some-pin") == "some-pin"
+    # Non-account agents are never pinned.
+    assert ws_handlers._profile_pin_for_spawn("terminal", None) == ""
 
 
 # ---- terminal.create: isolated LOGIN panes (login_profile_id) ----

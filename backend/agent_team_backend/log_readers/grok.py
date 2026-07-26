@@ -29,6 +29,7 @@ import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
 
+from ..profiles_store import profile_config_homes
 from .base import IncrementalParseResult, LogReader, TokenUsage
 
 log = logging.getLogger("agent_team_backend.log_readers.grok")
@@ -72,9 +73,18 @@ class GrokLogReader(LogReader):
         return Path.home() / ".grok" / _DB_NAME
 
     def _grok_dirs(self) -> list[Path]:
-        """The single ``.grok`` dir holding grok.db (accounts share the real
-        home)."""
-        return [Path.home() / ".grok"]
+        """The default ``.grok`` dir plus each managed profile's shim
+        ``<home>/.grok``.
+
+        A regular grok pane on a managed account runs with HOME pointed at that
+        account's persistent isolated home (the HOME shim), so its ENTIRELY
+        separate grok.db lives inside the shim's ``.grok`` — the default
+        ~/.grok never sees those sessions. With no profile home the list is
+        exactly [~/.grok]."""
+        dirs: list[Path] = [Path.home() / ".grok"]
+        for home in profile_config_homes("grok"):
+            dirs.append(home / ".grok")
+        return dirs
 
     def _db_paths(self) -> list[Path]:
         return [d / _DB_NAME for d in self._grok_dirs()]

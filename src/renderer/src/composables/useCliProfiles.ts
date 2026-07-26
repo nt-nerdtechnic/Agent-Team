@@ -14,12 +14,10 @@ export interface CliProfile {
   createdAt: string
 }
 
-// Outcome of `setDefault`. `PROFILE_IN_USE` (running panes block the switch,
-// `runningCount` populated) is returned without touching `error` so callers
-// can show a confirm UI and retry with `force: true`.
+// Outcome of `setDefault`.
 export type SetDefaultResult =
   | { ok: true }
-  | { ok: false; code?: string; message?: string; runningCount?: number }
+  | { ok: false; code?: string; message?: string }
 
 // Map of agentKey -> default profile id, or null for the built-in Default
 // (the user's real home directory).
@@ -150,21 +148,14 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
   async function setDefault(
     agentKey: string,
     profileId: string | null,
-    opts?: { force?: boolean },
   ): Promise<SetDefaultResult> {
     try {
       const resp = await backend.send<{ defaults: CliProfileDefaults }>('cli_profiles.set_default', {
         agent_key: agentKey,
         profile_id: profileId,
-        ...(opts?.force ? { force: true } : {}),
       })
       if (!resp.ok || !resp.payload) {
         const code = resp.error?.code
-        if (code === 'PROFILE_IN_USE') {
-          // Not surfaced via `error` — callers show a confirm UI instead.
-          const runningCount = Number(resp.error?.details?.running_count ?? 0)
-          return { ok: false, code, runningCount }
-        }
         const message =
           code === 'PROFILE_SWAP_FAILED'
             ? i18n.global.t('cli-account.swap-failed')

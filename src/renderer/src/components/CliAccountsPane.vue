@@ -104,35 +104,18 @@ async function signIn(agentKey: string, profileId: string | null): Promise<void>
   emit('login', agentKey)
 }
 
-// ── Set default (confirm when running panes block the switch) ────────────────
-const { confirm: notifyConfirm, toast } = useNotify()
+// ── Set default ──────────────────────────────────────────────────────────────
+const { toast } = useNotify()
 const t = i18n.global.t
 
 async function requestSetDefault(agentKey: string, profileId: string | null): Promise<boolean> {
-  let res = await props.api.setDefault(agentKey, profileId)
+  const res = await props.api.setDefault(agentKey, profileId)
   if (res.ok) {
     // Re-poll so the card's quota reflects the newly active account.
     refreshUsage()
     return true
   }
-  if (res.code !== 'PROFILE_IN_USE') return false
-  // Running panes block the switch. Offer to terminate them (backend kills
-  // each live pane's CLI process and waits for exit before swapping) and
-  // retry with force. Other failures surface via the composable `error`
-  // banner above.
-  const label = CLI_AGENT_SPECS.find((s) => s.agentKey === agentKey)?.label ?? agentKey
-  const ok = await notifyConfirm(
-    t('cli-account.switch-in-use', { count: res.runningCount ?? 0, agent: label }),
-    {
-      title: t('cli-account.switch-title'),
-      confirmText: t('cli-account.switch-force'),
-      cancelText: t('cli-account.switch-cancel'),
-    },
-  )
-  if (!ok) return false
-  res = await props.api.setDefault(agentKey, profileId, { force: true })
-  if (res.ok) refreshUsage()
-  return res.ok
+  return false
 }
 
 // ── Delete confirm ───────────────────────────────────────────────────────────

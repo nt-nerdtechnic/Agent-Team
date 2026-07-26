@@ -683,3 +683,63 @@ def test_identity_logged_out_and_garbage_never_raise(tmp_path: Path) -> None:
     assert vault.identity("codex") == {"email": None, "signedIn": False}
     assert vault.identity("grok") == {"email": None, "signedIn": False}
     assert vault.identity("kimi", "slot1") == {"email": None, "signedIn": False}
+
+
+# ── persistent profile homes (Phase 1 isolation) ─────────────────────────────
+
+
+def test_prepare_profile_home_seeds_and_isolates_file_agents(tmp_path: Path) -> None:
+    """kimi/grok/codex profile homes are seeded from the slot into the CLI's
+    native location and the returned env points the spawn at that home,
+    separate from the disposable login home."""
+    vault = _file_vault(tmp_path)
+    # kimi: KIMI_CODE_HOME=home, secret at <home>/credentials/kimi-code.json
+    vault.write_slot("kimi", "acct1", LiveCredentials(secret='{"access_token": "kt"}'))
+    plan = vault.prepare_profile_home("kimi", "acct1")
+    home = vault.profile_home_path("kimi", "acct1")
+    assert plan.env_set == {"KIMI_CODE_HOME": str(home)}
+    assert plan.env_remove == []
+    assert (home / "credentials" / "kimi-code.json").read_text() == '{"access_token": "kt"}'
+    assert home != vault.login_home_path("kimi", "acct1")
+
+    # grok: HOME shim IS the home; secret at <home>/.grok/auth.json
+    vault.write_slot("grok", "acct1", LiveCredentials(secret='{"x": 1}'))
+    gplan = vault.prepare_profile_home("grok", "acct1")
+    ghome = vault.profile_home_path("grok", "acct1")
+    assert gplan.env_set == {"HOME": str(ghome)}
+    assert (ghome / ".grok" / "auth.json").read_text() == '{"x": 1}'
+
+    # codex: no env_set; codex_source_home points at the seeded home w/ auth.json
+    vault.write_slot("codex", "acct1", LiveCredentials(secret='{"tokens": {}}'))
+    cplan = vault.prepare_profile_home("codex", "acct1")
+    chome = vault.profile_home_path("codex", "acct1")
+    assert cplan.env_set == {}
+    assert cplan.codex_source_home == chome
+    assert (chome / "auth.json").read_text() == '{"tokens": {}}'
+
+
+def test_prepare_profile_home_claude_file_backend(tmp_path: Path) -> None:
+    vault = _file_vault(tmp_path)
+    vault.write_slot(
+        "claude", "acct1",
+        LiveCredentials(secret='{"t": 1}', account={"emailAddress": "a@b.com"}),
+    )
+    plan = vault.prepare_profile_home("claude", "acct1")
+    home = vault.profile_home_path("claude", "acct1")
+    assert plan.env_set == {"CLAUDE_CONFIG_DIR": str(home)}
+    assert plan.env_remove == ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
+    assert (home / ".credentials.json").read_text() == '{"t": 1}'
+    doc = json.loads((home / ".claude.json").read_text())
+    assert doc["oauthAccount"] == {"emailAddress": "a@b.com"}
+
+
+def test_prepare_profile_home_claude_macos_uses_path_hashed_keychain(tmp_path: Path) -> None:
+    """On macOS the seed lands in the path-hashed Keychain item Claude Code
+    reads under CLAUDE_CONFIG_DIR — the same service harvest_legacy hashes."""
+    vault, sec = _mac_vault(tmp_path)
+    vault.write_slot("claude", "acct1", LiveCredentials(secret='{"t": 1}'))
+    vault.prepare_profile_home("claude", "acct1")
+    home = vault.profile_home_path("claude", "acct1")
+    assert sec.items.get(legacy_claude_keychain_service(home)) == '{"t": 1}'
+    # No plaintext .credentials.json file on macOS.
+    assert not (home / ".credentials.json").exists()

@@ -55,6 +55,39 @@ def default_profiles_root() -> Path:
     return Path.home() / ".navide" / "cli-profiles"
 
 
+# Persistent per-profile config-home subdir inside a slot dir. A managed
+# account's regular panes run with their CLI config home relocated here
+# (credential_vault.prepare_profile_home), kept separate from the disposable
+# login-home and from the slot's own credential bookkeeping. The log readers,
+# attribution and resume preflight enumerate these homes so a profile pane's
+# sessions are still read, attributed and resumable.
+PROFILE_HOME_DIRNAME = "home"
+
+
+def profile_config_homes(agent_key: str, root: Path | None = None) -> list[Path]:
+    """Existing persistent config homes for every profile of ``agent_key``.
+
+    Each is ``<profiles_root>/<agentKey>/<profileId>/home`` — the directory a
+    managed pane runs its CLI config home in. Scan-based (mirrors codex's
+    ``~/.codex-panes/*`` enumeration) so it is stateless across restarts and
+    needs no spawn-time registration: the process-global readers and resume
+    preflight can see every home without any per-pane context. Returns [] when
+    the agent has no profile homes yet.
+    """
+    base = (root or default_profiles_root()) / agent_key
+    if not base.is_dir():
+        return []
+    homes: list[Path] = []
+    try:
+        for slot in sorted(base.iterdir()):
+            home = slot / PROFILE_HOME_DIRNAME
+            if home.is_dir():
+                homes.append(home)
+    except OSError:
+        pass
+    return homes
+
+
 def _empty_doc() -> dict[str, Any]:
     return {
         "schemaVersion": PROFILES_SCHEMA_VERSION,

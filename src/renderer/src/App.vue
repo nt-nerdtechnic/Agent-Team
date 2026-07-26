@@ -680,6 +680,9 @@ interface ActivePane {
   pinnedFromRestore?: boolean
   /** Stable Codex CODEX_HOME id. It can differ from the live pane id after restore. */
   sessionHomeId?: string
+  /** CLI account pin this pane was spawned on ('__default__' = real home);
+   *  carried so an in-session rebuild resumes on the same account. */
+  profileId?: string
   /** Unique marker embedded in this pane's kickoff (Codex/Antigravity only) so the
    *  backend can match the right session file to this pane when several
    *  same-vendor panes share a workspace. */
@@ -2354,6 +2357,12 @@ interface SpawnInternal {
   /** Restore mode label for the agent history badge. */
   restoreMode?: 'memory-resume' | 'fresh'
   sessionHomeId?: string
+  /** CLI account pin carried through a restore: the profile_id this pane was
+   *  spawned on ("__default__" = unmanaged real home). Sent to the backend so
+   *  the pane re-spawns on the SAME account regardless of the current active
+   *  default. Undefined for a fresh spawn (backend binds+records the active
+   *  default). */
+  profileId?: string
   resumeSessionId?: string
   /** True when the caller PROBED the saved session (canResumeSession === true)
    *  and confirmed its transcript exists on disk, but this spawn is NOT a
@@ -2502,6 +2511,7 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
     sessionOnDisk: opts.isResume || restoredPinnedId ? true : undefined,
     pinnedFromRestore: restoredPinnedId ? true : undefined,
     sessionHomeId: sessionHomeId || undefined,
+    profileId: opts.profileId || undefined,
     sessionMarker: sessionMarker || undefined,
   }
   // If this spawn carries its kickoff directly (fallback path), embed the
@@ -2599,7 +2609,8 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
         explicit_session_id: pinnedSessionId || explicitSessionId,  // Claude/Antigravity --session-id → precise pane attribution
         session_marker: sessionMarker,           // Codex → marker fallback session detection
         session_home_id: sessionHomeId,           // Codex per-pane CODEX_HOME id
-        slot_label: opts.slotLabel ?? ''          // stable by_pane key survives frontend restarts
+        slot_label: opts.slotLabel ?? '',         // stable by_pane key survives frontend restarts
+        profile_id: opts.profileId ?? '',        // CLI account pin (restore) → per-pane isolated home
       },
       outputLogFile,
       // Stable reattach key: the pinned CLI session id is identical on first
@@ -2665,7 +2676,7 @@ async function onManualSpawn(payload: SpawnPayload): Promise<string | null> {
     isLogin: payload.isLogin,
   })
   if (paneId) {
-    await sendQuiet<ProjectPayload>('manual_pane.spawn', {
+    const resp = await sendQuiet<ProjectPayload>('manual_pane.spawn', {
       workspace_path: payload.workspacePath,
       pane_id: paneId,
       agent: payload.agentKey,
@@ -2679,6 +2690,12 @@ async function onManualSpawn(payload: SpawnPayload): Promise<string | null> {
       run_group_id: spawnGroupId,
       output_log_file: panes.value.find((p) => p.id === paneId)?.outputLogFile ?? '',
     })
+    // The backend resolved+recorded the active default account for this fresh
+    // spawn; read it back onto the local pane so an in-session rebuild resumes
+    // on the same account even if the active default is switched meanwhile.
+    const recordedPin = resp?.project?.panes?.find((p) => p.pane_id === paneId)?.profile_id
+    const spawnedPane = panes.value.find((p) => p.id === paneId)
+    if (spawnedPane && recordedPin) spawnedPane.profileId = recordedPin
     if (payload.customName) {
       await sendQuiet('project.rename_pane', {
         workspace_path: payload.workspacePath,
@@ -3158,6 +3175,7 @@ async function rebuildPaneViaResume(
       origin: pane.origin,
       runGroupId: pane.runGroupId,
       sessionHomeId: pane.sessionHomeId,
+      profileId: pane.profileId,
     }
     try { localStorage.removeItem(`terminal-scroll:${sessionId}`) } catch {}
     // Preserve layout order: keep the old pane as a dummy to avoid layout
@@ -3178,6 +3196,7 @@ async function rebuildPaneViaResume(
       skipRoleInjection: true,
       restoreMode: 'fresh',
       sessionHomeId: snap.sessionHomeId,
+      profileId: snap.profileId,
       resumeSessionId: sessionId,
       replacePaneId: paneId, // Atomic swap to prevent layout shift
     })
@@ -3860,6 +3879,7 @@ interface ProjectPane {
   command?: string
   session_id?: string
   session_home_id?: string
+  profile_id?: string
   spawn_status: string   // 'pending' | 'spawned' | 'removed'
   run_group_id?: string
   origin: 'pipeline' | 'manual'
@@ -4432,6 +4452,7 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
       stageIndex: saved.stage_index ?? -1,
       restoreMode: isResume ? 'memory-resume' : 'fresh',
       sessionHomeId,
+      profileId: saved.profile_id,
       resumeSessionId: effectiveResumeId,
       // Probe CONFIRMED the saved transcript on disk but the spawn is fresh
       // (forceFresh): keep the saved id pinned so Rebuild stays enabled.
@@ -4482,6 +4503,7 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
         // detected).
         session_id: isResume ? effectiveResumeId : (newPinnedId || (forceFresh ? '' : sessionId)),
         session_home_id: sessionHomeId,
+        profile_id: saved.profile_id ?? '',
         run_group_id: runGroupId,
       })
     } else {
@@ -4494,6 +4516,7 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
         command: fallbackCommand,
         session_id: isResume ? effectiveResumeId : newPinnedId,
         session_home_id: sessionHomeId,
+        profile_id: saved.profile_id ?? '',
         run_group_id: runGroupId,
         output_log_file: panes.value.find((p) => p.id === paneId)?.outputLogFile ?? '',
       })

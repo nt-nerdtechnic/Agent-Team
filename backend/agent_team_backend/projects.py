@@ -118,6 +118,7 @@ class PaneRecord:
     command: str = ""
     session_id: str = ""
     session_home_id: str = ""       # Codex per-pane CODEX_HOME id; stable across restored pane ids
+    profile_id: str = ""            # CLI account pin: the profile this pane was spawned on ("__default__" = real home; "" = legacy/unpinned). Restore re-spawns in the SAME account regardless of the current active default.
     spawn_status: str = "pending"   # pending / spawned / removed
     run_group_id: str = ""
     origin: str = "manual"          # "pipeline" | "manual"
@@ -500,6 +501,7 @@ class ProjectStore:
         role: str = "",
         session_id: str = "",
         session_home_id: str = "",
+        profile_id: str = "",
         run_group_id: str = "",
     ) -> Project:
         project = self.load_or_create(workspace_path)
@@ -519,6 +521,7 @@ class ProjectStore:
         # Claude pins its session id at spawn; Codex/Gemini use record_slot_session() later.
         if session_id: pane.session_id = session_id
         if session_home_id: pane.session_home_id = session_home_id
+        if profile_id: pane.profile_id = profile_id
         if run_group_id: pane.run_group_id = run_group_id
         self.save(project)
         return project
@@ -597,6 +600,7 @@ class ProjectStore:
         command: str = "",
         session_id: str = "",
         session_home_id: str = "",
+        profile_id: str = "",
         run_group_id: str = "",
         output_log_file: str = "",
     ) -> Project:
@@ -613,6 +617,7 @@ class ProjectStore:
         pane.spawn_status = "spawned"
         if session_id: pane.session_id = session_id
         if session_home_id: pane.session_home_id = session_home_id
+        if profile_id: pane.profile_id = profile_id
         if run_group_id: pane.run_group_id = run_group_id
         if output_log_file: pane.output_log_file = output_log_file
         # A rebuild hop owns its session: retire any OTHER spawned manual

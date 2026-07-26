@@ -213,6 +213,37 @@ def test_manual_pane_spawn_persists_session_home_id(store_with_stage: tuple[Proj
     assert pane.session_home_id == "home-1"
 
 
+def test_manual_pane_spawn_persists_profile_id(store_with_stage: tuple[ProjectStore, str]) -> None:
+    """The account pin survives to disk so a resume re-spawns on the same
+    account regardless of the current active default."""
+    store, ws = store_with_stage
+    store.record_manual_pane_spawn(
+        ws, pane_id="pane-1", agent="claude", profile_id="prof-A",
+    )
+    pane = next(p for p in store.peek(ws).panes if p.origin == "manual")
+    assert pane.profile_id == "prof-A"
+    # A later record for the same pane keeps the pin when none is passed.
+    store.record_manual_pane_spawn(
+        ws, pane_id="pane-1", previous_pane_id="pane-1", agent="claude",
+    )
+    pane = next(p for p in store.peek(ws).panes if p.origin == "manual")
+    assert pane.profile_id == "prof-A"
+
+
+def test_record_slot_spawn_persists_profile_id(store_with_stage: tuple[ProjectStore, str]) -> None:
+    store, ws = store_with_stage
+    store.record_slot_spawn(
+        ws, stage_index=0, slot_label="Build",
+        pane_id="pane-1", agent="claude", profile_id="__default__",
+    )
+    pane = next(p for p in store.peek(ws).panes if p.slot_label == "Build")
+    assert pane.profile_id == "__default__"
+
+
+def test_pane_record_profile_id_defaults_empty() -> None:
+    assert PaneRecord(pane_id="p").profile_id == ""
+
+
 def test_manual_pane_unspawn_marks_removed(store_with_stage: tuple[ProjectStore, str]) -> None:
     store, ws = store_with_stage
     store.record_manual_pane_spawn(ws, pane_id="pane-1", agent="codex")

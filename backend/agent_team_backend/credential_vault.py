@@ -42,11 +42,16 @@ import os
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from .profiles_store import CLAUDE_ENV_OVERRIDES, canonical_path_str, default_profiles_root
+from .profiles_store import (
+    CLAUDE_ENV_OVERRIDES,
+    PROFILE_HOME_DIRNAME,
+    canonical_path_str,
+    default_profiles_root,
+)
 
 log = logging.getLogger("agent_team_backend.credential_vault")
 
@@ -219,6 +224,16 @@ class LiveCredentials:
 
     secret: str | None = None
     account: dict | None = None
+
+
+@dataclass
+class ProfileHomePlan:
+    """Env overrides a managed account's persistent isolated home applies to
+    one regular (non-login) terminal spawn."""
+
+    env_set: dict[str, str] = field(default_factory=dict)
+    env_remove: list[str] = field(default_factory=list)
+    codex_source_home: Path | None = None
 
 
 class CredentialVault:
@@ -583,15 +598,19 @@ class CredentialVault:
         return self.slot_dir(agent_key, slot_id) / LOGIN_HOME_DIRNAME
 
     def _refresh_grok_login_shim(self, login_home: Path) -> Path:
-        """Build/refresh the HOME shim for a grok login pane.
+        """Build/refresh the HOME shim for a grok login pane (shim lives one
+        level in, at ``<login_home>/home``)."""
+        return self._populate_grok_shim(login_home / "home")
+
+    def _populate_grok_shim(self, shim: Path) -> Path:
+        """Build/refresh a grok HOME shim at ``shim``.
 
         The shim mirrors every top-level entry of the real home via symlink so
         the CLI (and the pane's login shell) still sees the user's shell
-        config, except ``.grok`` which is a real directory inside the login
-        home — that's where grok keeps its credentials. Refreshing on every
-        spawn picks up new real-home entries and drops dangling symlinks
-        (ported from the pre-refactor ``refresh_grok_home_shim``)."""
-        shim = login_home / "home"
+        config, except ``.grok`` which is a real directory inside the shim —
+        that's where grok keeps its credentials. Refreshing on every spawn
+        picks up new real-home entries and drops dangling symlinks (ported from
+        the pre-refactor ``refresh_grok_home_shim``)."""
         shim.mkdir(parents=True, exist_ok=True)
         (shim / ".grok").mkdir(exist_ok=True)
         try:
@@ -706,3 +725,98 @@ class CredentialVault:
             self.write_slot(agent_key, slot_id, LiveCredentials(secret=secret))
         shutil.rmtree(home, ignore_errors=True)
         return True
+
+    # ---- persistent isolated homes (regular panes) ----
+
+    def profile_home_path(self, agent_key: str, slot_id: str) -> Path:
+        """The persistent config home a managed account's regular panes run in.
+
+        Unlike ``login_home_path`` (disposable, harvested + removed after a
+        login), this home lives for the profile's lifetime and holds a working
+        copy of the slot's credentials so panes stay signed in. Kept as a
+        subdir of the slot dir so slot bookkeeping and the login home never
+        collide with the CLI's own config-home files (projects/, sessions/,
+        .grok/). The literal path must be byte-for-byte stable: claude derives
+        its Keychain item name from a hash of ``CLAUDE_CONFIG_DIR``."""
+        return self.slot_dir(agent_key, slot_id) / PROFILE_HOME_DIRNAME
+
+    def _write_home_oauth_account(self, path: Path, account: dict | None) -> None:
+        """Write claude's display-only ``oauthAccount`` into a home's own
+        ``.claude.json`` (created if absent, other keys preserved)."""
+        raw = _read_text(path)
+        try:
+            data = json.loads(raw) if raw is not None else {}
+        except ValueError:
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        if account is None:
+            data.pop("oauthAccount", None)
+        else:
+            data["oauthAccount"] = account
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    def _seed_claude_profile_home(self, home: Path, creds: LiveCredentials) -> None:
+        """Seed a claude persistent home from the slot so a pane run with
+        ``CLAUDE_CONFIG_DIR=home`` is already signed in. macOS keeps the secret
+        in the path-hashed Keychain item Claude Code reads under that config
+        dir; elsewhere the ``.credentials.json`` file. The display-only
+        ``oauthAccount`` goes into the home's ``.claude.json``."""
+        if creds.secret is not None:
+            if self._is_macos:
+                self._keychain_write(legacy_claude_keychain_service(home), creds.secret)
+            else:
+                _write_private(home / ".credentials.json", creds.secret)
+        self._write_home_oauth_account(home / ".claude.json", creds.account)
+
+    def _seed_codex_profile_home(self, home: Path, creds: LiveCredentials) -> None:
+        """Seed a codex persistent home: the account's own ``auth.json`` plus
+        symlinks to the real ``~/.codex`` config so profile panes keep the
+        shared settings. ``home`` is then the CodexHomeManager source, whose
+        per-pane home symlinks these entries in turn."""
+        if creds.secret is not None:
+            _write_private(home / "auth.json", creds.secret)
+        real_codex = self._real_home / ".codex"
+        for name in ("config.toml", "AGENTS.md", "skills", "plugins", "rules", "memories"):
+            src = real_codex / name
+            dst = home / name
+            if not src.exists() or dst.exists() or dst.is_symlink():
+                continue
+            try:
+                dst.symlink_to(src, target_is_directory=src.is_dir())
+            except OSError as err:
+                log.warning("codex profile-home symlink %s -> %s failed: %s", dst, src, err)
+
+    def prepare_profile_home(self, agent_key: str, slot_id: str) -> ProfileHomePlan:
+        """Create + seed the profile's persistent isolated home and return the
+        spawn env pointing at it (mirrors the pre-refactor ``build_spawn_plan``,
+        but the home persists and is seeded from the slot rather than harvested).
+        Blocking I/O — call off the event loop."""
+        if agent_key not in _SLOT_FILES:
+            raise ValueError(f"unsupported agent for CLI profile homes: {agent_key!r}")
+        home = self.profile_home_path(agent_key, slot_id)
+        home.mkdir(parents=True, exist_ok=True)
+        os.chmod(home, 0o700)  # umask-proof: the home holds live secrets
+        home_str = canonical_path_str(home)
+        creds = self.read_slot(agent_key, slot_id)
+        if agent_key == "claude":
+            self._seed_claude_profile_home(Path(home_str), creds)
+            return ProfileHomePlan(
+                env_set={"CLAUDE_CONFIG_DIR": home_str},
+                env_remove=list(CLAUDE_ENV_OVERRIDES),
+            )
+        if agent_key == "codex":
+            self._seed_codex_profile_home(Path(home_str), creds)
+            # The per-pane CODEX_HOME mechanism stays; only its symlink source
+            # switches from ~/.codex to this profile home.
+            return ProfileHomePlan(codex_source_home=Path(home_str))
+        if agent_key == "kimi":
+            if creds.secret is not None:
+                _write_private(Path(home_str) / "credentials" / "kimi-code.json", creds.secret)
+            return ProfileHomePlan(env_set={"KIMI_CODE_HOME": home_str})
+        # grok: the persistent home IS the HOME shim; its .grok dir holds the db.
+        shim = self._populate_grok_shim(Path(home_str))
+        if creds.secret is not None:
+            _write_private(shim / ".grok" / "auth.json", creds.secret)
+        return ProfileHomePlan(env_set={"HOME": canonical_path_str(shim)})

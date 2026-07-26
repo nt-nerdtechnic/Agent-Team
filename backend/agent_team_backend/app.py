@@ -68,7 +68,7 @@ from .mcp_manager import MCPManager
 from .mcp_settings import MCPServersDocument, MCPSettingsStore
 from .plan_provisioning import ensure_plan_assets, plan_spec_exists
 from .profile_migration import migrate_legacy_claude_homes
-from .profiles_store import CliProfilesStore
+from .profiles_store import CliProfilesStore, profile_config_homes
 from .chat_store import ChatStore
 from .projects import ProjectStore
 from .spawn_history import SpawnHistoryStore
@@ -945,6 +945,19 @@ async def _stop_log_watcher() -> None:
     _git_watcher = None
 
 
+def _watch_profile_home(agent_key: str, profile_id: str) -> None:
+    """Subscribe the log watcher to a managed account's persistent config home
+    so a just-spawned profile pane's sessions are watched immediately (the
+    periodic rescan would catch them eventually; this is for latency). No-op
+    when the watcher isn't up. Best-effort — never breaks a spawn."""
+    if _log_watcher is None:
+        return
+    try:
+        _log_watcher.watch_dir(credential_vault.profile_home_path(agent_key, profile_id))
+    except Exception as err:  # noqa: BLE001
+        log.debug("watch profile home %s/%s failed: %s", agent_key, profile_id, err)
+
+
 @app.get("/health")
 async def health() -> dict[str, Any]:
     return {
@@ -1251,6 +1264,21 @@ def _session_exists(agent: str, workspace_path: str, session_id: str) -> bool:
     session_id = session_id.strip()
     if not session_id:
         return False
+    if agent == "claude":
+        # A managed-account pane resumes inside its profile's isolated config
+        # home (CLAUDE_CONFIG_DIR), where its session jsonl lives — the default
+        # ~/.claude/projects never sees it. Preflight MUST check the same homes
+        # the pane spawns into, or it approves a resume that dies with
+        # "No conversation found" (crash-loop, 2026-07-25). Check the default
+        # location first, then every profile home's projects dir.
+        if _claude_session_file(workspace_path, session_id).is_file():
+            return True
+        encoded = encode_claude_cwd(workspace_path)
+        fname = f"{session_id}.jsonl"
+        return any(
+            (home / "projects" / encoded / fname).is_file()
+            for home in profile_config_homes("claude")
+        )
     if agent == "codex":
         # Agent History stores only a pointer to the vendor-owned rollout. A
         # stale pointer must not pass preflight and launch a doomed

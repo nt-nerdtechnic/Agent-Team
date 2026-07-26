@@ -279,39 +279,17 @@ describe('CliAccountsPane', () => {
     expect(w.emitted('login')).toEqual([['claude']])
   })
 
-  // ── setDefault / PROFILE_IN_USE confirm flow ───────────────────────────────
-
-  it('retries setDefault with force after confirming PROFILE_IN_USE', async () => {
+  it('sets a profile as default via the Set as default button', async () => {
     const api = makeApi({ profiles: [profile('p1', 'claude', 'Account 2')] })
     const setDefault = api.setDefault as ReturnType<typeof vi.fn>
-    setDefault.mockResolvedValueOnce({ ok: false, code: 'PROFILE_IN_USE', runningCount: 2 })
-    notify.confirm.mockResolvedValueOnce(true)
     const w = mountPane(api)
 
     // Default is null, so the profile row shows "Set as default".
     await buttonByText(section(w, 0), 'Set as default')!.trigger('click')
     await flushPromises()
 
-    expect(notify.confirm).toHaveBeenCalledTimes(1)
-    expect(notify.confirm.mock.calls[0][0]).toContain('2 running Claude Code panes')
-    expect(setDefault).toHaveBeenCalledTimes(2)
-    expect(setDefault).toHaveBeenNthCalledWith(1, 'claude', 'p1')
-    expect(setDefault).toHaveBeenNthCalledWith(2, 'claude', 'p1', { force: true })
-  })
-
-  it('does not retry when the PROFILE_IN_USE confirm is cancelled', async () => {
-    const api = makeApi({ profiles: [profile('p1', 'claude', 'Account 2')] })
-    const setDefault = api.setDefault as ReturnType<typeof vi.fn>
-    setDefault.mockResolvedValueOnce({ ok: false, code: 'PROFILE_IN_USE', runningCount: 1 })
-    notify.confirm.mockResolvedValueOnce(false)
-    const w = mountPane(api)
-
-    await buttonByText(section(w, 0), 'Set as default')!.trigger('click')
-    await flushPromises()
-
-    expect(notify.confirm).toHaveBeenCalledTimes(1)
     expect(setDefault).toHaveBeenCalledTimes(1)
-    expect(w.emitted('login')).toBeUndefined()
+    expect(setDefault).toHaveBeenCalledWith('claude', 'p1')
   })
 
   // ── remove ─────────────────────────────────────────────────────────────────
