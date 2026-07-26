@@ -2151,7 +2151,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
       <!-- Branch panel -->
       <div v-if="branchExpanded" class="collapsible-body">
         <div class="input-row">
-          <input v-model="newBranchName" class="git-input" :placeholder="$t('label.new-branch-placeholder')" @keydown.enter="doCreateBranch" />
+          <input v-model="newBranchName" class="git-input" :placeholder="$t('label.create-branch-placeholder')" @keydown.enter="doCreateBranch" />
           <button class="btn-ghost sm" :disabled="branchCreating || !newBranchName.trim() || /\s|\.\./.test(newBranchName.trim()) || newBranchName.trim().startsWith('-')" @click="doCreateBranch">＋</button>
           <button class="btn-ghost sm" :class="{ active: showRemoteBranches }" :title="showRemoteBranches ? $t('action.hide-remote-branches') : $t('action.show-remote-branches')" @click="showRemoteBranches = !showRemoteBranches">⇅</button>
         </div>
@@ -2391,7 +2391,7 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
             <button class="btn-ghost sm icon-only" :title="$t('action.browse-folder')" @click="pickWorktreeDir">
               <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M1.75 1A1.75 1.75 0 0 0 0 2.75v10.5C0 14.216.784 15 1.75 15h12.5A1.75 1.75 0 0 0 16 13.25v-8.5A1.75 1.75 0 0 0 14.25 3H7.5a.25.25 0 0 1-.2-.1l-.9-1.2C6.07 1.26 5.55 1 5 1H1.75z"/></svg>
             </button>
-            <input v-if="newWtIsNew" v-model="newWtBranch" class="git-input" :placeholder="$t('label.new-branch-placeholder')" style="flex:1" />
+            <input v-if="newWtIsNew" v-model="newWtBranch" class="git-input" :placeholder="$t('label.new-worktree-branch-placeholder')" style="flex:1" />
             <select v-else v-model="newWtBranch" class="git-input" style="flex:1">
               <option value="" disabled>{{ $t('label.branch-placeholder') }}</option>
               <option v-for="b in worktreeBranchOptions" :key="b" :value="b">{{ b }}</option>
