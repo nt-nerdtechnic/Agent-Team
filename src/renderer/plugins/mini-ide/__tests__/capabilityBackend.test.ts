@@ -36,7 +36,7 @@ const MINI_IDE_SENT_TYPES = [
   'git.credential_submit', 'git.credential_cancel', 'git.discover_repositories',
   'git.compare_branches', 'git.clean', 'git.discard', 'git.stage', 'git.unstage',
   'git.stage_all', 'git.commit', 'git.sync', 'git.init', 'git.generate_message',
-  'git.check_staged', 'git.connect_to_remote', 'git.ignore', 'git.diff_all',
+  'git.check_staged', 'git.connect_to_remote', 'git.ignore', 'git.diff_all', 'git.reset',
   // search
   'search.find_in_files', 'search.replace_in_files',
   // shell
@@ -48,8 +48,10 @@ const MINI_IDE_SENT_TYPES = [
   'ai.chat.settings.get', 'ai.chat.settings.set', 'ai.chat.test_connection',
   'ai.chat.accept_edit', 'ai.chat.approve_command', 'ai.chat.reject_command',
   'ai.chat.notes.get', 'ai.chat.notes.set', 'ai.chat.threads.get', 'ai.chat.threads.set',
-  // ui / settings
-  'ui.settings.set',
+  // ai.review / analyzer (useReview + ReviewPane — Branch-Diff AI code review)
+  'ai.review.start', 'ai.review.stop', 'analyzer.models',
+  // ui / settings (set + the connect-time reconcile read in lib/settings.ts)
+  'ui.settings.set', 'ui.settings.get',
   // issues (GitPane → useIssues, gh/glab CRUD)
   'issues.provider', 'issues.list', 'issues.get', 'issues.create', 'issues.comment',
   'issues.set_state',
@@ -84,6 +86,14 @@ describe('TYPE_TO_CAP coverage', () => {
     expect(resolveCapability('ai.chat.settings.get')).toEqual({ ns: 'chat', method: 'settings_get' })
     expect(resolveCapability('ai.web.search')).toEqual({ ns: 'chat', method: 'web_search' })
     expect(resolveCapability('ui.settings.set')).toEqual({ ns: 'ui', method: 'settings_set' })
+    // Settings reconcile read — without this the plugin's settings cache stays
+    // empty on connect and the theme falls back to the dark default.
+    expect(resolveCapability('ui.settings.get')).toEqual({ ns: 'ui', method: 'settings_get' })
+    // Branch-Diff AI code review requests ride the chat namespace, matching the
+    // chat-gated ai.review.* result events in CAP_EVENTS.
+    expect(resolveCapability('ai.review.start')).toEqual({ ns: 'chat', method: 'review_start' })
+    expect(resolveCapability('ai.review.stop')).toEqual({ ns: 'chat', method: 'review_stop' })
+    expect(resolveCapability('analyzer.models')).toEqual({ ns: 'chat', method: 'analyzer_models' })
   })
 
   it('splits the uniform issues namespace on the dotted method', () => {

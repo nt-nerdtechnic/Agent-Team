@@ -137,6 +137,16 @@ function notifyChanged(keys: string[]): void {
   }
 }
 
+/** Seed cache entries without queueing a backend write. Used by plugin views,
+ *  whose origin has no bootstrap snapshot, to inject host-provided initial
+ *  values (e.g. the theme from the entry query) before the app mounts. Keys
+ *  already present are kept — the connect-time reconcile stays authoritative. */
+export function seedSettings(entries: Record<string, unknown>): void {
+  for (const [key, value] of Object.entries(entries)) {
+    if (!(key in cache)) cache[key] = value
+  }
+}
+
 /** Synchronous cache read. Returns `fallback` when the key is absent. */
 export function settingsGet<T>(key: string, fallback: T): T {
   return key in cache ? (cache[key] as T) : fallback

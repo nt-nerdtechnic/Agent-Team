@@ -73,6 +73,12 @@ export async function startBackend(healthCheckTimeoutMs = 45_000): Promise<Backe
     }
   }
 
+  // Backend plugin discovery scans the same directory the frontend installs
+  // plugins into (see pluginsRoot in index.ts; honour a pre-set value).
+  if (!env.AGENT_TEAM_PLUGINS_DIR) {
+    env.AGENT_TEAM_PLUGINS_DIR = join(app.getPath('userData'), 'plugins')
+  }
+
   let proc: ChildProcess
   if (app.isPackaged) {
     const binaryPath = join(process.resourcesPath, 'bin', 'agent_team_backend')

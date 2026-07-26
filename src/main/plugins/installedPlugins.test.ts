@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import {
   parseInstalledManifest,
   manifestToDescriptor,
+  loadPluginDir,
   scanInstalledPlugins,
   InstalledPluginError,
 } from './installedPlugins'
@@ -51,6 +52,31 @@ describe('manifestToDescriptor', () => {
     expect(d.devUrl).toBe('')
     expect(d.entryFile).toBe('/plugins/acme.demo/dist/main.js')
     expect(d.requires).toEqual(['fs', 'git'])
+  })
+})
+
+describe('loadPluginDir', () => {
+  let root: string
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'plugin-dir-'))
+  })
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  it('returns a descriptor for a valid plugin dir', () => {
+    writeFileSync(join(root, 'manifest.json'), JSON.stringify(VALID))
+    const loaded = loadPluginDir(root)
+    expect(loaded.error).toBeUndefined()
+    expect(loaded.descriptor?.id).toBe('acme.demo')
+    expect(loaded.descriptor?.entryFile).toBe(join(root, 'dist/main.js'))
+  })
+
+  it('returns an error (never throws) for a missing or invalid manifest', () => {
+    expect(loadPluginDir(join(root, 'nope')).error).toBeTruthy()
+    writeFileSync(join(root, 'manifest.json'), '{ not json')
+    expect(loadPluginDir(root).error).toBeTruthy()
+    expect(loadPluginDir(root).descriptor).toBeUndefined()
   })
 })
 

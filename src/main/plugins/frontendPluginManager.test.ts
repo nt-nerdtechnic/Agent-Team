@@ -1,19 +1,287 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { generateKeyPairSync, sign as edSign } from 'node:crypto'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 
-// The manager imports electron for its view lifecycle; the registry logic under
-// test touches none of it, so a minimal stub lets the module load under Vitest's
-// node environment.
-vi.mock('electron', () => ({
-  WebContentsView: class {},
-  ipcMain: { handle: () => {}, on: () => {} },
-  app: {},
-}))
+// The manager imports electron for its view lifecycle. A functional stub backs
+// both the registry tests (which touch none of it) and the view-lifecycle tests
+// below, which drive open/hide/resize/death paths against fakes. The factory
+// exports its captured state as `__mock` (hoisted, so it must be self-contained).
+vi.mock('electron', () => {
+  type Handler = (...args: unknown[]) => unknown
+  const ipcHandlers = new Map<string, Handler>()
+  const ipcListeners = new Map<string, Handler>()
+  const views: unknown[] = []
+  const windows: unknown[] = []
+  let nextWebContentsId = 1000
 
+  class FakeWebContents {
+    id = nextWebContentsId++
+    sent: Array<{ channel: string; args: unknown[] }> = []
+    loads: string[] = []
+    private destroyed = false
+    private listeners = new Map<string, Handler[]>()
+    isDestroyed(): boolean {
+      return this.destroyed
+    }
+    send(channel: string, ...args: unknown[]): void {
+      this.sent.push({ channel, args })
+    }
+    loadURL(url: string): Promise<void> {
+      this.loads.push(url)
+      return Promise.resolve()
+    }
+    loadFile(file: string, opts?: { search?: string }): Promise<void> {
+      this.loads.push(`${file}${opts?.search ?? ''}`)
+      return Promise.resolve()
+    }
+    on(event: string, cb: Handler): this {
+      const list = this.listeners.get(event) ?? []
+      list.push(cb)
+      this.listeners.set(event, list)
+      return this
+    }
+    once(event: string, cb: Handler): this {
+      const wrapper: Handler = (...args) => {
+        this.removeListener(event, wrapper)
+        return cb(...args)
+      }
+      return this.on(event, wrapper)
+    }
+    removeListener(event: string, cb: Handler): this {
+      this.listeners.set(
+        event,
+        (this.listeners.get(event) ?? []).filter((l) => l !== cb)
+      )
+      return this
+    }
+    emit(event: string, ...args: unknown[]): void {
+      for (const cb of [...(this.listeners.get(event) ?? [])]) cb(...args)
+    }
+    close(): void {
+      if (this.destroyed) return
+      this.destroyed = true
+      this.emit('destroyed')
+    }
+  }
+
+  class WebContentsView {
+    webContents = new FakeWebContents()
+    bounds: unknown = null
+    visible = false
+    constructor(_opts?: unknown) {
+      views.push(this)
+    }
+    setBounds(b: unknown): void {
+      this.bounds = b
+    }
+    setVisible(v: boolean): void {
+      this.visible = v
+    }
+  }
+
+  // Constructed by the manager for dedicated plugin host windows (mini-IDE).
+  class BrowserWindow {
+    options: Record<string, unknown>
+    destroyed = false
+    minimized = false
+    shown = false
+    focusCount = 0
+    contentBounds = { x: 0, y: 0, width: 1000, height: 700 }
+    children: unknown[] = []
+    private listeners = new Map<string, Handler[]>()
+    contentView = {
+      addChildView: (v: unknown): void => {
+        this.children.push(v)
+      },
+      removeChildView: (v: unknown): void => {
+        this.children = this.children.filter((c) => c !== v)
+      },
+    }
+    constructor(options?: Record<string, unknown>) {
+      this.options = options ?? {}
+      windows.push(this)
+    }
+    isDestroyed(): boolean {
+      return this.destroyed
+    }
+    isMinimized(): boolean {
+      return this.minimized
+    }
+    restore(): void {
+      this.minimized = false
+    }
+    show(): void {
+      this.shown = true
+    }
+    focus(): void {
+      this.focusCount++
+    }
+    getContentBounds(): { x: number; y: number; width: number; height: number } {
+      return { ...this.contentBounds }
+    }
+    on(event: string, cb: Handler): this {
+      const list = this.listeners.get(event) ?? []
+      list.push(cb)
+      this.listeners.set(event, list)
+      return this
+    }
+    once(event: string, cb: Handler): this {
+      const wrapper: Handler = (...args) => {
+        this.removeListener(event, wrapper)
+        return cb(...args)
+      }
+      return this.on(event, wrapper)
+    }
+    removeListener(event: string, cb: Handler): this {
+      this.listeners.set(
+        event,
+        (this.listeners.get(event) ?? []).filter((l) => l !== cb)
+      )
+      return this
+    }
+    emit(event: string, ...args: unknown[]): void {
+      for (const cb of [...(this.listeners.get(event) ?? [])]) cb(...args)
+    }
+    close(): void {
+      if (this.destroyed) return
+      this.destroyed = true
+      this.emit('closed')
+    }
+  }
+
+  const ipcMain = {
+    handle: (channel: string, fn: Handler): void => {
+      ipcHandlers.set(channel, fn)
+    },
+    on: (channel: string, fn: Handler): void => {
+      ipcListeners.set(channel, fn)
+    },
+  }
+
+  return {
+    WebContentsView,
+    BrowserWindow,
+    ipcMain,
+    app: {},
+    __mock: { ipcHandlers, ipcListeners, views, windows },
+  }
+})
+
+import * as electron from 'electron'
+import type { BrowserWindow } from 'electron'
 import {
   FrontendPluginManager,
+  frontendPluginManager,
   isReservedPluginId,
+  devPlansPluginDescriptor,
+  openMiniIdePluginView,
+  PLANS_PLUGIN_ID,
+  MINI_IDE_PLUGIN_ID,
+  bundledMiniIdeDir,
+  registerBundledMiniIde,
   type PluginLaunchDescriptor,
 } from './frontendPluginManager'
+
+interface FakeWebContentsLike {
+  id: number
+  sent: Array<{ channel: string; args: unknown[] }>
+  loads: string[]
+  isDestroyed(): boolean
+  emit(event: string, ...args: unknown[]): void
+  close(): void
+}
+interface FakeViewLike {
+  webContents: FakeWebContentsLike
+  bounds: { x: number; y: number; width: number; height: number } | null
+  visible: boolean
+}
+interface FakeWindowLike {
+  options: Record<string, unknown>
+  destroyed: boolean
+  minimized: boolean
+  shown: boolean
+  focusCount: number
+  children: unknown[]
+  isDestroyed(): boolean
+  close(): void
+  emit(event: string, ...args: unknown[]): void
+}
+const { ipcListeners, views, windows } = (
+  electron as unknown as {
+    __mock: {
+      ipcHandlers: Map<string, (...args: unknown[]) => unknown>
+      ipcListeners: Map<string, (...args: unknown[]) => unknown>
+      views: FakeViewLike[]
+      windows: FakeWindowLike[]
+    }
+  }
+).__mock
+
+/** Host-window fake with just the surface the manager touches. */
+class FakeBrowserWindow {
+  destroyed = false
+  minimized = false
+  shown = false
+  focusCount = 0
+  contentBounds = { x: 0, y: 0, width: 1000, height: 700 }
+  children: unknown[] = []
+  private listeners = new Map<string, Array<(...args: unknown[]) => void>>()
+  contentView = {
+    addChildView: (v: unknown): void => {
+      this.children.push(v)
+    },
+    removeChildView: (v: unknown): void => {
+      this.children = this.children.filter((c) => c !== v)
+    },
+  }
+  isDestroyed(): boolean {
+    return this.destroyed
+  }
+  isMinimized(): boolean {
+    return this.minimized
+  }
+  restore(): void {
+    this.minimized = false
+  }
+  show(): void {
+    this.shown = true
+  }
+  focus(): void {
+    this.focusCount++
+  }
+  getContentBounds(): { x: number; y: number; width: number; height: number } {
+    return { ...this.contentBounds }
+  }
+  on(event: string, cb: (...args: unknown[]) => void): this {
+    const list = this.listeners.get(event) ?? []
+    list.push(cb)
+    this.listeners.set(event, list)
+    return this
+  }
+  once(event: string, cb: (...args: unknown[]) => void): this {
+    const wrapper = (...args: unknown[]): void => {
+      this.removeListener(event, wrapper)
+      cb(...args)
+    }
+    return this.on(event, wrapper)
+  }
+  removeListener(event: string, cb: (...args: unknown[]) => void): this {
+    this.listeners.set(
+      event,
+      (this.listeners.get(event) ?? []).filter((l) => l !== cb)
+    )
+    return this
+  }
+  emit(event: string, ...args: unknown[]): void {
+    for (const cb of [...(this.listeners.get(event) ?? [])]) cb(...args)
+  }
+}
+
+function asHost(win: FakeBrowserWindow): BrowserWindow {
+  return win as unknown as BrowserWindow
+}
 
 function descriptor(id: string): PluginLaunchDescriptor {
   return { id, requires: [], devUrl: '', entryFile: `/plugins/${id}/index.html` }
@@ -23,7 +291,29 @@ describe('isReservedPluginId', () => {
   it('flags the built-in navide.* namespace, not third-party ids', () => {
     expect(isReservedPluginId('navide.mini-ide')).toBe(true)
     expect(isReservedPluginId('navide.noop')).toBe(true)
+    expect(isReservedPluginId('navide.plans')).toBe(true)
     expect(isReservedPluginId('acme.demo')).toBe(false)
+  })
+})
+
+describe('devPlansPluginDescriptor', () => {
+  it('describes the navide.plans dev bundle with the plans-only event grant', () => {
+    const desc = devPlansPluginDescriptor()
+    expect(desc.id).toBe(PLANS_PLUGIN_ID)
+    expect(desc.id).toBe('navide.plans')
+    expect(desc.requires).toEqual(['fs', 'ui', 'plans'])
+    // Built separately (vite.plans.config.ts) — never served by the dev server.
+    expect(desc.devUrl).toBe('')
+    expect(desc.entryFile.endsWith('dist-plugins/plans/index.html')).toBe(true)
+  })
+
+  it('registers only via the builtin/official path (reserved id)', () => {
+    const mgr = new FrontendPluginManager()
+    expect(() => mgr.registerDescriptor(devPlansPluginDescriptor())).toThrow(/reserved/)
+    expect(() =>
+      mgr.registerDescriptor(devPlansPluginDescriptor(), { builtin: true })
+    ).not.toThrow()
+    expect(mgr.getDescriptor(PLANS_PLUGIN_ID)?.id).toBe('navide.plans')
   })
 })
 
@@ -42,9 +332,497 @@ describe('registerDescriptor reserved-id guard', () => {
     expect(mgr.getDescriptor('navide.mini-ide')?.id).toBe('navide.mini-ide')
   })
 
+  it('allows an officially-verified install to register a reserved id', () => {
+    const mgr = new FrontendPluginManager()
+    expect(() =>
+      mgr.registerDescriptor(descriptor('navide.mini-ide'), { official: true })
+    ).not.toThrow()
+    expect(mgr.getDescriptor('navide.mini-ide')?.id).toBe('navide.mini-ide')
+  })
+
   it('registers an ordinary third-party descriptor', () => {
     const mgr = new FrontendPluginManager()
     mgr.registerDescriptor(descriptor('acme.demo'))
     expect(mgr.getDescriptor('acme.demo')?.id).toBe('acme.demo')
+  })
+})
+
+describe('loadInstalledPlugins official receipt gate', () => {
+  const official = generateKeyPairSync('ed25519')
+  const officialPem = official.publicKey.export({ type: 'spki', format: 'pem' }).toString()
+  let root: string
+  let envBefore: string | undefined
+
+  function writePlugin(id: string, receipt?: Record<string, unknown>): void {
+    const dir = join(root, id)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, 'manifest.json'),
+      JSON.stringify({ id, version: '1.0.0', entry: 'index.html', requires: [] })
+    )
+    writeFileSync(join(dir, 'index.html'), '<!doctype html>')
+    if (receipt) writeFileSync(join(dir, '.navide-receipt.json'), JSON.stringify(receipt))
+  }
+
+  function officialReceipt(id: string): Record<string, unknown> {
+    const digest = 'ab'.repeat(32)
+    const signature = edSign(null, Buffer.from(digest, 'ascii'), official.privateKey).toString(
+      'base64'
+    )
+    return { id, version: '1.0.0', digest, signature }
+  }
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'navide-plugins-'))
+    envBefore = process.env['AGENT_TEAM_OFFICIAL_PLUGIN_KEY']
+    process.env['AGENT_TEAM_OFFICIAL_PLUGIN_KEY'] = officialPem
+  })
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true })
+    if (envBefore === undefined) delete process.env['AGENT_TEAM_OFFICIAL_PLUGIN_KEY']
+    else process.env['AGENT_TEAM_OFFICIAL_PLUGIN_KEY'] = envBefore
+  })
+
+  it('registers a navide. plugin whose receipt verifies against the pinned key', () => {
+    writePlugin('navide.mini-ide', officialReceipt('navide.mini-ide'))
+    const mgr = new FrontendPluginManager()
+    const { loaded, errors } = mgr.loadInstalledPlugins(root)
+    expect(errors).toEqual([])
+    expect(loaded).toContain('navide.mini-ide')
+    expect(mgr.getDescriptor('navide.mini-ide')).toBeDefined()
+  })
+
+  it('refuses a navide. plugin without a receipt', () => {
+    writePlugin('navide.mini-ide')
+    const mgr = new FrontendPluginManager()
+    const { loaded, errors } = mgr.loadInstalledPlugins(root)
+    expect(loaded).toEqual([])
+    expect(errors.join(' ')).toMatch(/receipt/)
+    expect(mgr.getDescriptor('navide.mini-ide')).toBeUndefined()
+  })
+
+  it('refuses a navide. plugin whose receipt was signed by a different key', () => {
+    const rogue = generateKeyPairSync('ed25519')
+    const digest = 'cd'.repeat(32)
+    const signature = edSign(null, Buffer.from(digest, 'ascii'), rogue.privateKey).toString(
+      'base64'
+    )
+    writePlugin('navide.mini-ide', { id: 'navide.mini-ide', version: '1.0.0', digest, signature })
+    const mgr = new FrontendPluginManager()
+    const { loaded, errors } = mgr.loadInstalledPlugins(root)
+    expect(loaded).toEqual([])
+    expect(errors.join(' ')).toMatch(/pinned official key/)
+  })
+
+  it('refuses every navide. plugin when no pinned key is configured (fail-closed)', () => {
+    delete process.env['AGENT_TEAM_OFFICIAL_PLUGIN_KEY']
+    writePlugin('navide.mini-ide', officialReceipt('navide.mini-ide'))
+    const mgr = new FrontendPluginManager()
+    const { loaded, errors } = mgr.loadInstalledPlugins(root)
+    expect(loaded).toEqual([])
+    expect(errors.join(' ')).toMatch(/no pinned official/)
+  })
+
+  it('loads third-party plugins with no receipt requirement', () => {
+    writePlugin('acme.demo')
+    const mgr = new FrontendPluginManager()
+    const { loaded, errors } = mgr.loadInstalledPlugins(root)
+    expect(errors).toEqual([])
+    expect(loaded).toEqual(['acme.demo'])
+  })
+})
+
+describe('bundled mini-IDE builtin resolution', () => {
+  let root: string
+
+  /** Write a valid bundled mini-IDE dir (manifest + entry) under `dir`. */
+  function writeBundled(dir: string, manifest?: Record<string, unknown>): void {
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, 'manifest.json'),
+      JSON.stringify(
+        manifest ?? {
+          id: MINI_IDE_PLUGIN_ID,
+          version: '1.0.0',
+          entry: 'index.html',
+          requires: ['fs', 'git'],
+        }
+      )
+    )
+    writeFileSync(join(dir, 'index.html'), '<!doctype html>')
+  }
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'navide-bundled-'))
+  })
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  it('resolves resourcesPath/plugins/mini-ide when packaged', () => {
+    expect(bundledMiniIdeDir({ isPackaged: true, resourcesPath: '/res' })).toBe(
+      join('/res', 'plugins', 'mini-ide')
+    )
+  })
+
+  it('resolves dist-plugins/mini-ide under the dev root when unpackaged', () => {
+    expect(
+      bundledMiniIdeDir({ isPackaged: false, resourcesPath: '/res', devRoot: '/repo' })
+    ).toBe(join('/repo', 'dist-plugins', 'mini-ide'))
+  })
+
+  it('registers the bundled copy as builtin when nothing is installed (packaged)', () => {
+    const dir = join(root, 'plugins', 'mini-ide')
+    writeBundled(dir)
+    const mgr = new FrontendPluginManager()
+    const result = registerBundledMiniIde(mgr, { isPackaged: true, resourcesPath: root })
+    expect(result.registered).toBe(true)
+    const desc = mgr.getDescriptor(MINI_IDE_PLUGIN_ID)
+    expect(desc?.entryFile).toBe(join(dir, 'index.html'))
+    expect(desc?.requires).toEqual(['fs', 'git'])
+  })
+
+  it('registers the dev dist-plugins copy when unpackaged', () => {
+    const dir = join(root, 'dist-plugins', 'mini-ide')
+    writeBundled(dir)
+    const mgr = new FrontendPluginManager()
+    const result = registerBundledMiniIde(mgr, {
+      isPackaged: false,
+      resourcesPath: '/unused',
+      devRoot: root,
+    })
+    expect(result.registered).toBe(true)
+    expect(mgr.getDescriptor(MINI_IDE_PLUGIN_ID)?.entryFile).toBe(join(dir, 'index.html'))
+  })
+
+  it('an already-installed (official) copy takes precedence over the bundled copy', () => {
+    const dir = join(root, 'plugins', 'mini-ide')
+    writeBundled(dir)
+    const mgr = new FrontendPluginManager()
+    const installed: PluginLaunchDescriptor = {
+      id: MINI_IDE_PLUGIN_ID,
+      requires: ['fs'],
+      devUrl: '',
+      entryFile: '/userData/plugins/navide.mini-ide/index.html',
+    }
+    mgr.registerDescriptor(installed, { official: true })
+
+    const result = registerBundledMiniIde(mgr, { isPackaged: true, resourcesPath: root })
+    expect(result.registered).toBe(true)
+    // Installed copy stays active; the bundled one is only the fallback.
+    expect(mgr.getDescriptor(MINI_IDE_PLUGIN_ID)?.entryFile).toBe(installed.entryFile)
+  })
+
+  it('removing the installed override reverts to the bundled builtin', () => {
+    const dir = join(root, 'plugins', 'mini-ide')
+    writeBundled(dir)
+    const mgr = new FrontendPluginManager()
+    mgr.registerDescriptor(
+      {
+        id: MINI_IDE_PLUGIN_ID,
+        requires: ['fs'],
+        devUrl: '',
+        entryFile: '/userData/plugins/navide.mini-ide/index.html',
+      },
+      { official: true }
+    )
+    registerBundledMiniIde(mgr, { isPackaged: true, resourcesPath: root })
+
+    mgr.removeInstalledPlugin(MINI_IDE_PLUGIN_ID)
+    expect(mgr.getDescriptor(MINI_IDE_PLUGIN_ID)?.entryFile).toBe(join(dir, 'index.html'))
+  })
+
+  it('a missing bundled dir is refused without crashing (dialog fallback)', () => {
+    const mgr = new FrontendPluginManager()
+    const result = registerBundledMiniIde(mgr, { isPackaged: true, resourcesPath: root })
+    expect(result.registered).toBe(false)
+    expect(result.reason).toBeTruthy()
+    expect(mgr.getDescriptor(MINI_IDE_PLUGIN_ID)).toBeUndefined()
+  })
+
+  it('an invalid bundled manifest is refused without crashing', () => {
+    const dir = join(root, 'plugins', 'mini-ide')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'manifest.json'), 'not json at all')
+    const mgr = new FrontendPluginManager()
+    const result = registerBundledMiniIde(mgr, { isPackaged: true, resourcesPath: root })
+    expect(result.registered).toBe(false)
+    expect(mgr.getDescriptor(MINI_IDE_PLUGIN_ID)).toBeUndefined()
+  })
+
+  it('a bundled manifest claiming a different id is refused', () => {
+    const dir = join(root, 'plugins', 'mini-ide')
+    writeBundled(dir, {
+      id: 'acme.impostor',
+      version: '1.0.0',
+      entry: 'index.html',
+      requires: [],
+    })
+    const mgr = new FrontendPluginManager()
+    const result = registerBundledMiniIde(mgr, { isPackaged: true, resourcesPath: root })
+    expect(result.registered).toBe(false)
+    expect(result.reason).toMatch(/acme\.impostor/)
+    expect(mgr.getDescriptor(MINI_IDE_PLUGIN_ID)).toBeUndefined()
+  })
+
+  it('a bundled dir whose entry file is missing is refused', () => {
+    const dir = join(root, 'plugins', 'mini-ide')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, 'manifest.json'),
+      JSON.stringify({ id: MINI_IDE_PLUGIN_ID, version: '1.0.0', entry: 'index.html', requires: [] })
+    )
+    const mgr = new FrontendPluginManager()
+    const result = registerBundledMiniIde(mgr, { isPackaged: true, resourcesPath: root })
+    expect(result.registered).toBe(false)
+    expect(result.reason).toMatch(/entry file missing/)
+    expect(mgr.getDescriptor(MINI_IDE_PLUGIN_ID)).toBeUndefined()
+  })
+})
+
+describe('view lifecycle (open / hideSelf / resize / death paths)', () => {
+  const OPEN_TARGET = 'plugin:openTarget'
+
+  function openView(
+    mgr: FrontendPluginManager,
+    host: FakeBrowserWindow,
+    id: string,
+    query?: string
+  ): FakeViewLike {
+    const before = views.length
+    mgr.open(asHost(host), { ...descriptor(id), query }, 'fill')
+    // Existing-view opens create no new fake; return the plugin's current view.
+    return views.length > before ? views[views.length - 1] : views[before - 1]
+  }
+
+  function openTargets(view: FakeViewLike): Record<string, string>[] {
+    return view.webContents.sent
+      .filter((m) => m.channel === OPEN_TARGET)
+      .map((m) => m.args[0] as Record<string, string>)
+  }
+
+  it('hideSelf hides only the calling sender view', () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    const viewA = openView(mgr, host, 'acme.a', '?workspace_path=/ws')
+    const before = views.length
+    mgr.open(asHost(host), descriptor('acme.b'), { x: 0, y: 0, width: 10, height: 10 })
+    const viewB = views[before]
+    expect(viewA.visible).toBe(true)
+    expect(viewB.visible).toBe(true)
+
+    const hide = ipcListeners.get('plugin:hideSelf')
+    expect(hide).toBeDefined()
+    hide!({ sender: { id: viewA.webContents.id } })
+    expect(viewA.visible).toBe(false)
+    expect(viewB.visible).toBe(true)
+
+    // Unknown sender → no-op (never hides someone else's view).
+    hide!({ sender: { id: 999999 } })
+    expect(viewB.visible).toBe(true)
+  })
+
+  it('drops the running record when the webContents dies and reopen recreates', () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    const first = openView(mgr, host, 'acme.editor', '?workspace_path=/ws')
+    expect(first.webContents.loads).toHaveLength(1)
+
+    // Simulate renderer death (any path other than manager.destroy()).
+    first.webContents.close()
+
+    const countBefore = views.length
+    const second = openView(mgr, host, 'acme.editor', '?workspace_path=/ws')
+    expect(views.length).toBe(countBefore + 1) // recreated, not reused
+    expect(second).not.toBe(first)
+    expect(second.webContents.loads).toHaveLength(1)
+  })
+
+  it('delivers a changed open target to the running view without reloading', () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    const view = openView(mgr, host, 'acme.editor', '?workspace_path=/ws&http_url=http://x')
+    view.webContents.emit('did-finish-load')
+
+    openView(mgr, host, 'acme.editor', '?workspace_path=/ws&filepath=src/a.ts&line=7')
+    expect(view.webContents.loads).toHaveLength(1) // no reload
+    expect(openTargets(view)).toEqual([
+      { workspace_path: '/ws', filepath: 'src/a.ts', line: '7' },
+    ])
+  })
+
+  it('queues an open target racing the first load and flushes on did-finish-load', () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    const view = openView(mgr, host, 'acme.editor', '?workspace_path=/ws')
+    // Second open arrives before the entry finished loading.
+    openView(mgr, host, 'acme.editor', '?workspace_path=/ws&filepath=b.ts')
+    expect(openTargets(view)).toEqual([])
+
+    view.webContents.emit('did-finish-load')
+    expect(openTargets(view)).toEqual([{ workspace_path: '/ws', filepath: 'b.ts' }])
+  })
+
+  it('reloads the entry when the workspace changes (legacy routing)', () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    const view = openView(mgr, host, 'acme.editor', '?workspace_path=/ws-a')
+    view.webContents.emit('did-finish-load')
+
+    openView(mgr, host, 'acme.editor', '?workspace_path=/ws-b')
+    expect(view.webContents.loads).toHaveLength(2) // reloaded with new params
+    expect(openTargets(view)).toEqual([]) // no in-page delivery on reload
+  })
+
+  it('sizes a fill view to the host content bounds and tracks host resize', () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    host.contentBounds = { x: 0, y: 0, width: 800, height: 600 }
+    const view = openView(mgr, host, 'acme.editor', '?workspace_path=/ws')
+    expect(view.bounds).toEqual({ x: 0, y: 0, width: 800, height: 600 })
+
+    host.contentBounds = { x: 0, y: 0, width: 1024, height: 768 }
+    host.emit('resize')
+    expect(view.bounds).toEqual({ x: 0, y: 0, width: 1024, height: 768 })
+
+    // Hidden views stop tracking (listener removed on hide).
+    mgr.deactivate('acme.editor')
+    host.contentBounds = { x: 0, y: 0, width: 500, height: 400 }
+    host.emit('resize')
+    expect(view.bounds).toEqual({ x: 0, y: 0, width: 1024, height: 768 })
+  })
+
+  it('re-opening a running view reveals and focuses the hosting window', () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    const view = openView(mgr, host, 'acme.editor', '?workspace_path=/ws')
+    host.minimized = true
+    host.shown = false
+
+    openView(mgr, host, 'acme.editor', '?workspace_path=/ws')
+    expect(view.visible).toBe(true)
+    expect(host.minimized).toBe(false)
+    expect(host.shown).toBe(true)
+    expect(host.focusCount).toBeGreaterThan(0)
+  })
+
+  it('cross-window open keeps the view on its original host and focuses that host', () => {
+    const mgr = new FrontendPluginManager()
+    const hostA = new FakeBrowserWindow()
+    const hostB = new FakeBrowserWindow()
+    const view = openView(mgr, hostA, 'acme.editor', '?workspace_path=/ws')
+
+    openView(mgr, hostB, 'acme.editor', '?workspace_path=/ws&filepath=c.ts')
+    expect(hostA.children).toContain(view)
+    expect(hostB.children).not.toContain(view)
+    expect(hostA.focusCount).toBeGreaterThan(0)
+    expect(hostB.focusCount).toBe(0)
+  })
+})
+
+describe('mini-IDE dedicated window (openMiniIdePluginView)', () => {
+  // These tests exercise the module-level singleton + dedicated-window path, so
+  // each test must close the live window (module state resets via 'closed').
+  beforeEach(() => {
+    frontendPluginManager.registerBuiltin({
+      id: MINI_IDE_PLUGIN_ID,
+      requires: [],
+      devUrl: '',
+      entryFile: '/plugins/mini-ide/index.html',
+    })
+  })
+
+  afterEach(() => {
+    for (const win of windows) {
+      if (!win.isDestroyed()) win.close()
+    }
+    frontendPluginManager.destroy(MINI_IDE_PLUGIN_ID)
+  })
+
+  function lastWindow(): FakeWindowLike {
+    return windows[windows.length - 1]
+  }
+  function lastView(): FakeViewLike {
+    return views[views.length - 1]
+  }
+
+  it('creates a dedicated host window with the legacy editor options', () => {
+    const winsBefore = windows.length
+    const ok = openMiniIdePluginView('/ws', 'http://h:1')
+    expect(ok).toBe(true)
+    expect(windows.length).toBe(winsBefore + 1)
+    const win = lastWindow()
+    expect(win.options).toMatchObject({
+      width: 1100,
+      height: 760,
+      title: 'Navide · Editor',
+      titleBarStyle: 'hidden',
+      backgroundColor: '#0d1117',
+    })
+    // The view attaches to the dedicated window and fills its content bounds.
+    const view = lastView()
+    expect(win.children).toContain(view)
+    expect(view.bounds).toEqual({ x: 0, y: 0, width: 1000, height: 700 })
+  })
+
+  it('passes the current theme in the entry query', () => {
+    openMiniIdePluginView('/ws', '', {}, 'light')
+    expect(lastView().webContents.loads[0]).toContain('theme=light')
+  })
+
+  it('reopen restores and focuses the dedicated window without reloading', () => {
+    openMiniIdePluginView('/ws', '', {}, 'light')
+    const win = lastWindow()
+    const view = lastView()
+    view.webContents.emit('did-finish-load')
+    win.minimized = true
+
+    const winsBefore = windows.length
+    openMiniIdePluginView('/ws', '', { filepath: 'a.ts' }, 'light')
+    expect(windows.length).toBe(winsBefore) // same window reused
+    expect(win.minimized).toBe(false)
+    expect(win.focusCount).toBeGreaterThan(0)
+    expect(view.webContents.loads).toHaveLength(1) // no reload
+    const targets = view.webContents.sent.filter((m) => m.channel === 'plugin:openTarget')
+    expect(targets).toHaveLength(1)
+    expect(targets[0].args[0]).toMatchObject({ workspace_path: '/ws', filepath: 'a.ts' })
+  })
+
+  it('a theme change alone does not reload the running view', () => {
+    openMiniIdePluginView('/ws', '', {}, 'light')
+    const view = lastView()
+    view.webContents.emit('did-finish-load')
+
+    openMiniIdePluginView('/ws', '', {}, 'dark-github')
+    expect(view.webContents.loads).toHaveLength(1) // still the first load
+  })
+
+  it('hideSelf closes the dedicated window and tears the view down', () => {
+    openMiniIdePluginView('/ws')
+    const win = lastWindow()
+    const view = lastView()
+
+    const hide = ipcListeners.get('plugin:hideSelf')
+    expect(hide).toBeDefined()
+    hide!({ sender: { id: view.webContents.id } })
+    expect(win.destroyed).toBe(true)
+    expect(view.webContents.isDestroyed()).toBe(true)
+  })
+
+  it('close then reopen recreates the window and view cleanly', () => {
+    openMiniIdePluginView('/ws')
+    const win1 = lastWindow()
+    win1.close()
+
+    const winsBefore = windows.length
+    const viewsBefore = views.length
+    const ok = openMiniIdePluginView('/ws')
+    expect(ok).toBe(true)
+    expect(windows.length).toBe(winsBefore + 1) // fresh window
+    expect(views.length).toBe(viewsBefore + 1) // fresh view
+    expect(lastWindow()).not.toBe(win1)
+    expect(lastView().webContents.loads).toHaveLength(1)
   })
 })

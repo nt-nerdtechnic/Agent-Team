@@ -1,7 +1,7 @@
-import { defineConfig } from 'vite'
+import { defineConfig, type Plugin } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { resolve } from 'node:path'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 
 // ── Mini-IDE plugin bundle (Phase 2 M4) ──────────────────────────────────────
 // A SEPARATE Vite build from the core renderer (electron.vite.config.ts). The
@@ -11,9 +11,12 @@ import { readFileSync } from 'node:fs'
 // module per entry — EditorWindowApp is one module in the graph — so the design
 // calls for core and plugin to "each build their own copy, not runtime-shared".)
 //
-// Output: out/renderer/plugins/mini-ide/ — the host loads it via `loadFile`
-// exactly like the noop/fs_probe plugins. Wired into `pnpm build` after
-// `electron-vite build` so out/renderer already exists.
+// Output: dist-plugins/mini-ide/ — shipped inside the app package as the
+// bundled builtin copy (electron-builder `extraResources` → resources/plugins/
+// mini-ide; `pnpm build` chains this build so packaging always has it). The
+// same bundle is also distributed as a marketplace extension
+// (`scripts/package-mini-ide.sh` — the future update path); in dev the app
+// resolves the builtin straight from this local build.
 
 const APP_VERSION: string = JSON.parse(
   readFileSync(resolve(__dirname, 'package.json'), 'utf-8')
@@ -24,13 +27,39 @@ const APP_VERSION: string = JSON.parse(
 // outside this root into src/ — fine for a build (no dev-server fs restriction).
 const pluginRoot = resolve(__dirname, 'src/renderer/plugins/mini-ide')
 const capabilityBackend = resolve(pluginRoot, 'capabilityBackend')
+const outDir = resolve(__dirname, 'dist-plugins/mini-ide')
+
+// Emit manifest.json into the bundle so the SAME output serves as the app's
+// bundled builtin copy (validated by installedPlugins.loadPluginDir at
+// startup) and as the marketplace package staged by package-mini-ide.sh.
+// Registry-schema superset of the loader fields (id/version/entry/requires).
+function emitManifest(): Plugin {
+  return {
+    name: 'emit-mini-ide-manifest',
+    closeBundle() {
+      const manifest = {
+        id: 'navide.mini-ide',
+        name: 'Mini IDE',
+        displayName: 'Navide Mini-IDE',
+        description: 'Editor, diff, git and terminal surface for Navide workspaces.',
+        version: APP_VERSION,
+        publisher: 'navide',
+        engines: { navide: '^0.1.0' },
+        entry: 'index.html',
+        requires: ['fs', 'git', 'terminal', 'search', 'chat', 'ui', 'issues'],
+        activationEvents: ['onStartup'],
+      }
+      writeFileSync(resolve(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n')
+    },
+  }
+}
 
 export default defineConfig({
   root: pluginRoot,
   // Relative base so emitted asset URLs resolve under file:// in the packaged
   // WebContentsView (no dev server here — this entry is always loadFile'd).
   base: './',
-  plugins: [vue()],
+  plugins: [vue(), emitManifest()],
   resolve: {
     // Redirect the mini-IDE's `useBackend` to the capability shim — for THIS
     // bundle only. Covers every relative form the tree uses:
@@ -47,7 +76,7 @@ export default defineConfig({
     include: ['monaco-editor'],
   },
   build: {
-    outDir: resolve(__dirname, 'out/renderer/plugins/mini-ide'),
+    outDir,
     emptyOutDir: true,
     rollupOptions: {
       input: { index: resolve(pluginRoot, 'index.html') },

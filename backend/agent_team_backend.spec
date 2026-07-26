@@ -21,11 +21,24 @@ a = Analysis(
         # so onefile builds must ship the real files.
         ('agent_team_backend/plan_assets/_spec.md', 'agent_team_backend/plan_assets'),
         ('agent_team_backend/plan_assets/_template.html', 'agent_team_backend/plan_assets'),
+        # Builtin backend plugins: the host discovers plugin dirs on disk
+        # (plugin.json + backend.py) and imports backend.py by file path, so
+        # both must exist as real files next to the extracted package.
+        ('agent_team_backend/plugins/builtin/navide_plans/plugin.json',
+         'agent_team_backend/plugins/builtin/navide_plans'),
+        ('agent_team_backend/plugins/builtin/navide_plans/backend.py',
+         'agent_team_backend/plugins/builtin/navide_plans'),
     ],
     hiddenimports=[
         # The top-level app object (imported by name in __main__.py, but listed
         # here as belt-and-suspenders for PyInstaller's graph walk).
         'agent_team_backend.app',
+        # Builtin navide.plans plugin modules: its backend.py is loaded by
+        # file path at runtime (never a static import), so PyInstaller's graph
+        # walk cannot see these — list them (their own imports, e.g.
+        # plan_meta and the MCP server modules, are then traced normally).
+        'agent_team_backend.plugins.builtin.navide_plans.plan_mcp',
+        'agent_team_backend.plugins.builtin.navide_plans.plan_mcp_wiring',
         # uvicorn internals that are resolved at runtime, not import-time.
         'uvicorn.main',
         'uvicorn.lifespan.on',

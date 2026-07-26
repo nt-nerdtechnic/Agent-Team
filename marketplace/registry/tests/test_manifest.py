@@ -51,6 +51,13 @@ def test_unknown_capability_rejected() -> None:
         parse_manifest(valid_manifest(requires=["fs", "bogus"]))
 
 
+def test_all_client_capabilities_accepted() -> None:
+    # Mirrors backend plugins/manifest.py and client pluginVerify.ts.
+    all_caps = ["fs", "git", "terminal", "search", "chat", "ui", "issues"]
+    m = parse_manifest(valid_manifest(requires=all_caps))
+    assert m.requires == all_caps
+
+
 def test_bad_activation_event_rejected() -> None:
     with pytest.raises(ManifestError, match="activation"):
         parse_manifest(valid_manifest(activationEvents=["whenever"]))

@@ -1,7 +1,7 @@
-// capabilityBackend — Phase 2 M4.
+// capabilityBackend — Plans plugin.
 //
-// The keystone seam that lets the unmodified mini-IDE (EditorWindowApp.vue,
-// AIChatPane.vue, useGit, the panes …) run inside an isolated plugin
+// The seam that lets the unmodified Plans UI (PlanWindowApp.vue, PlansPane,
+// PlanReviewToolbar, the plan stores …) run inside an isolated plugin
 // WebContentsView. It re-implements the exact public surface of the renderer's
 // `useBackend()` composable, but instead of owning a WebSocket it routes every
 // `send(type, payload)` through the host capability broker (`window.nav`):
@@ -13,8 +13,8 @@
 //     ← CapabilityResponse, remapped to the WsResponse shape pane code expects
 //
 // The plugin build aliases `composables/useBackend` to this module (see
-// vite.mini-ide.config.ts), so EditorWindowApp's `import { useBackend }` and
-// every `ReturnType<typeof useBackend>` prop type resolve here with zero source
+// vite.plans.config.ts), so PlanWindowApp's `import { useBackend }` and every
+// `ReturnType<typeof useBackend>` prop type resolve here with zero source
 // changes. This module is Vue-aware (it owns the reactive `status` ref) but must
 // stay free of any `electron`/`window.agentTeam` reference — a plugin's only
 // host surface is `window.nav`.
@@ -29,19 +29,19 @@ interface CapabilityResponse {
   result?: unknown
   error?: { code: string; message?: string }
 }
-// NOTE: this must stay structurally identical to the other plugin modules'
-// `Window.nav` augmentations (noop/fs_probe mounts) or vue-tsc raises TS2717.
-// The extended bridge surface (hideSelf / onOpenTarget) is consumed through
-// local casts where needed (see EditorWindowApp.vue) rather than widened here.
 interface NavBridge {
   callCapability(ns: string, method: string, args?: unknown): Promise<CapabilityResponse>
   on(type: string, cb: (data: unknown) => void): () => void
   ready(): void
 }
-declare global {
-  interface Window {
-    nav: NavBridge
-  }
+
+// Deliberately NOT a `declare global` Window augmentation: the other plugin
+// modules already augment `Window.nav`, and their bridge surfaces are evolving
+// independently — a structurally different re-declaration here would break
+// vue-tsc (TS2717). A local cast reads the same runtime bridge without
+// coupling this bundle to the global declaration's exact shape.
+function navBridge(): NavBridge {
+  return (window as unknown as { nav: NavBridge }).nav
 }
 
 // ── Capability mapping ───────────────────────────────────────────────────────
@@ -52,108 +52,43 @@ export interface CapabilityRef {
 }
 
 /** Build `{ "<ns>.<method>": { ns, method } }` for a namespace whose WS types
- *  are exactly `"<ns>.<method>"` (fs / git / search — the uniform namespaces). */
+ *  are exactly `"<ns>.<method>"` (fs — the uniform namespace the Plans UI uses). */
 function fromNs(ns: string, methods: readonly string[]): Record<string, CapabilityRef> {
   const out: Record<string, CapabilityRef> = {}
   for (const method of methods) out[`${ns}.${method}`] = { ns, method }
   return out
 }
 
-// fs.* WS types are `fs.<FsCapability method>` one-for-one.
+// fs.* WS types the Plans UI actually sends (PlansPane list/rename/delete,
+// planStore/planShare read+write, PlanFileView/PlanMarkdownBody/PlanDocPreview
+// reads, FilePreviewPane's bundled archive/office previews).
 const FS_METHODS = [
   'read_file',
   'write_file',
   'list_dir',
-  'list_files_flat',
-  'glob_files',
-  'create_file',
   'delete',
-  'mkdir',
   'rename',
-  'convert_office',
   'list_archive',
-  'read_image',
+  'convert_office',
 ] as const
 
-// git.* WS types are `git.<method>` one-for-one. The backend WS handlers for
-// these already exist (direct mode drives them via useGit), so the broker
-// dispatches each mapped type straight through.
-const GIT_METHODS = [
-  'status', 'log', 'diff_branches', 'rebase', 'restore_from_branch', 'show_commit',
-  'worktrees', 'add_worktree', 'remove_worktree', 'prune_worktrees', 'lock_worktree',
-  'unlock_worktree', 'move_worktree', 'repair_worktrees', 'config_set', 'config_get',
-  'blame', 'tags', 'create_tag', 'delete_tag', 'cherry_pick', 'file_log', 'show_file',
-  'resolve_ours', 'resolve_theirs', 'remotes', 'diff_file', 'diff_blame', 'merge',
-  'merge_into', 'revert', 'add_remote', 'remove_remote', 'branches', 'stash_list',
-  'fetch', 'pull', 'push', 'create_branch', 'switch_branch', 'checkout_remote_branch',
-  'checkout_commit', 'commit_file_diff', 'delete_branch', 'stash', 'stash_pop',
-  'stash_drop', 'amend', 'undo_commit', 'apply_patch', 'clone', 'check_ignore', 'abort',
-  'stash_apply', 'pull_rebase', 'push_force', 'push_upstream', 'credential_submit',
-  'credential_cancel', 'discover_repositories', 'compare_branches', 'clean', 'discard',
-  'stage', 'unstage', 'stage_all', 'commit', 'sync', 'init', 'generate_message',
-  'check_staged', 'connect_to_remote', 'ignore', 'diff_all', 'reset',
-] as const
-
-// search.* WS types are `search.<SearchCapability method>` one-for-one.
-const SEARCH_METHODS = ['find_in_files', 'replace_in_files'] as const
-
-// issues.* WS types are `issues.<method>` one-for-one (GitPane → useIssues,
-// gh/glab CRUD). The backend handlers already exist; the plugin just needs the
-// `issues` namespace granted in its manifest `requires` for the broker to route.
-const ISSUES_METHODS = ['provider', 'list', 'get', 'create', 'comment', 'set_state'] as const
-
-// Non-uniform WS types: the type string differs from `<ns>.<method>`. These are
-// the shell/editor/ai/ui families, remapped explicitly onto the M3 capability
-// namespaces (terminal / chat / ui).
+// Non-uniform WS types: the type string differs from `<ns>.<method>`. Settings
+// persistence (lib/settings.ts theme sync) remaps onto the ui namespace.
 const EXPLICIT: Record<string, CapabilityRef> = {
-  // shell → TerminalCapability
-  'shell.run': { ns: 'terminal', method: 'run' },
-  // editor inline AI → ChatCapability
-  'editor.rewrite': { ns: 'chat', method: 'editor_rewrite' },
-  'editor.complete': { ns: 'chat', method: 'editor_complete' },
-  // ai / ai.chat → ChatCapability
-  'ai.enhance_prompt': { ns: 'chat', method: 'enhance_prompt' },
-  'ai.web.search': { ns: 'chat', method: 'web_search' },
-  'ai.chat.start': { ns: 'chat', method: 'start' },
-  'ai.chat.stop': { ns: 'chat', method: 'stop' },
-  'ai.chat.settings.get': { ns: 'chat', method: 'settings_get' },
-  'ai.chat.settings.set': { ns: 'chat', method: 'settings_set' },
-  'ai.chat.test_connection': { ns: 'chat', method: 'test_connection' },
-  'ai.chat.accept_edit': { ns: 'chat', method: 'accept_edit' },
-  'ai.chat.approve_command': { ns: 'chat', method: 'approve_command' },
-  'ai.chat.reject_command': { ns: 'chat', method: 'reject_command' },
-  'ai.chat.notes.set': { ns: 'chat', method: 'notes_set' },
-  'ai.chat.notes.get': { ns: 'chat', method: 'notes_get' },
-  'ai.chat.threads.set': { ns: 'chat', method: 'threads_set' },
-  'ai.chat.threads.get': { ns: 'chat', method: 'threads_get' },
-  // ai.review / analyzer → ChatCapability (Branch-Diff AI code review). The
-  // result events (ai.review.result/end/error) are already chat-gated in
-  // CAP_EVENTS; these route the request side through the same namespace.
-  'ai.review.start': { ns: 'chat', method: 'review_start' },
-  'ai.review.stop': { ns: 'chat', method: 'review_stop' },
-  'analyzer.models': { ns: 'chat', method: 'analyzer_models' },
-  // settings persistence → UiCapability (ui.settings.set backend handler exists).
-  'ui.settings.set': { ns: 'ui', method: 'settings_set' },
-  // settings read → UiCapability. lib/settings' connect-time reconcile sends
-  // `ui.settings.get` to repopulate the whole cache (theme + other prefs) —
-  // the plugin origin has no bootstrap snapshot, so without this mapping the
-  // cache stays empty and useTheme falls back to the default dark theme.
   'ui.settings.get': { ns: 'ui', method: 'settings_get' },
+  'ui.settings.set': { ns: 'ui', method: 'settings_set' },
 }
 
 /**
- * Complete WS-type → capability map for every `type` the mini-IDE sends.
+ * Complete WS-type → capability map for every `type` the Plans UI sends.
  * Pure data so it is trivially unit-testable. A `type` absent here is an
  * explicit "unmapped" (see {@link resolveCapability}).
  *
- * `issues.*` (GitPane → useIssues) maps to the `issues` namespace the manifest
- * grants; the backend gh/glab handlers already exist, so it routes like fs/git.
+ * The `plans` namespace carries no request types — it exists solely to gate
+ * the `plans.changed` server-push event (see capabilityMap.ts CAP_EVENTS).
  */
 export const TYPE_TO_CAP: Readonly<Record<string, CapabilityRef>> = {
   ...fromNs('fs', FS_METHODS),
-  ...fromNs('git', GIT_METHODS),
-  ...fromNs('search', SEARCH_METHODS),
-  ...fromNs('issues', ISSUES_METHODS),
   ...EXPLICIT,
 }
 
@@ -196,9 +131,9 @@ function errorWsResponse<T>(type: string, code: string, message: string): WsResp
 
 // ── The useBackend-compatible shim ───────────────────────────────────────────
 /**
- * Drop-in replacement for `useBackend()` inside the mini-IDE plugin bundle.
+ * Drop-in replacement for `useBackend()` inside the Plans plugin bundle.
  * Returns the identical public surface; the plugin build aliases the real
- * composable to this so EditorWindowApp and every pane use it unchanged.
+ * composable to this so PlanWindowApp and every pane use it unchanged.
  */
 export function useBackend(): {
   status: Ref<BackendStatus>
@@ -241,7 +176,7 @@ export function useBackend(): {
       return errorWsResponse<T>(type, 'UNMAPPED_CAPABILITY', `no capability mapping for '${type}'`)
     }
     try {
-      const resp = await window.nav.callCapability(cap.ns, cap.method, payload)
+      const resp = await navBridge().callCapability(cap.ns, cap.method, payload)
       return toWsResponse<T>(type, resp)
     } catch (err) {
       return errorWsResponse<T>(
@@ -253,7 +188,7 @@ export function useBackend(): {
   }
 
   function on(type: string, cb: (payload: unknown) => void): () => void {
-    return window.nav.on(type, cb)
+    return navBridge().on(type, cb)
   }
 
   // No lifecycle control from inside a plugin view — the host owns the backend.

@@ -10,6 +10,19 @@ import type {
   CliProfileDefaults,
   CliProfileIdentities,
 } from '../../composables/useCliProfiles'
+import type { UsageSnapshot } from '../../composables/useUsage'
+
+// Partial-mock useUsage: stub the store reader (usageFor) and the backend
+// call (refreshUsage), keep the pure formatters (same pattern as
+// UsageBadge.test.ts).
+const usage = vi.hoisted(() => ({
+  usageFor: vi.fn<(agentKey: string | undefined | null) => UsageSnapshot | undefined>(),
+  refreshUsage: vi.fn(),
+}))
+vi.mock('../../composables/useUsage', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../composables/useUsage')>()
+  return { ...actual, usageFor: usage.usageFor, refreshUsage: usage.refreshUsage }
+})
 
 // Stub useNotify (module-level singleton) so confirm dialogs resolve without
 // rendering NotificationHost. Shared spies, reset between tests.
@@ -112,7 +125,7 @@ describe('CliAccountsPane', () => {
 
     const claude = section(w, 0)
     expect(claude.text()).toContain('Claude Code')
-    expect(claude.findAll('.cli-row')).toHaveLength(3) // Default + 2 profiles
+    expect(claude.findAll('.cli-card')).toHaveLength(3) // Default + 2 profiles
     expect(buttonByText(claude, '+ New account')).toBeDefined()
     expect(claude.find('.cli-unsupported').exists()).toBe(false)
   })
@@ -124,7 +137,7 @@ describe('CliAccountsPane', () => {
     expect(antigravity.get('.cli-unsupported').text()).toBe(
       'This agent does not support multiple accounts.',
     )
-    expect(antigravity.findAll('.cli-row')).toHaveLength(0)
+    expect(antigravity.findAll('.cli-card')).toHaveLength(0)
     expect(buttonByText(antigravity, '+ New account')).toBeUndefined()
   })
 
@@ -148,7 +161,7 @@ describe('CliAccountsPane', () => {
     const w = mountPane(api)
 
     const names = section(w, 0)
-      .findAll('.cli-row-name')
+      .findAll('.cli-card-id')
       .map((n) => n.text())
     // Row 0 is the built-in Default (no identity -> "Default" label).
     expect(names).toEqual(['Default', 'me@example.com', 'Account 3', 'Not signed in'])
@@ -212,7 +225,7 @@ describe('CliAccountsPane', () => {
     const api = makeApi({ profiles: [profile('p1', 'claude', 'Account 2')] })
     const w = mountPane(api, { workspaceOpen: false })
 
-    const row = section(w, 0).findAll('.cli-row')[1]
+    const row = section(w, 0).findAll('.cli-card')[1]
     await row.findAll('button').find((b) => b.text() === 'Sign in')!.trigger('click')
     await flushPromises()
 
@@ -228,7 +241,7 @@ describe('CliAccountsPane', () => {
     const w = mountPane(api)
 
     // Row 0 is the built-in Default; row 1 is p1 (not signed in, not active).
-    const row = section(w, 0).findAll('.cli-row')[1]
+    const row = section(w, 0).findAll('.cli-card')[1]
     await row.findAll('button').find((b) => b.text() === 'Sign in')!.trigger('click')
     await flushPromises()
 
@@ -243,7 +256,7 @@ describe('CliAccountsPane', () => {
     })
     const w = mountPane(api)
 
-    const row = section(w, 0).findAll('.cli-row')[1]
+    const row = section(w, 0).findAll('.cli-card')[1]
     await row.findAll('button').find((b) => b.text() === 'Sign in')!.trigger('click')
     await flushPromises()
 
@@ -258,7 +271,7 @@ describe('CliAccountsPane', () => {
     })
     const w = mountPane(api)
 
-    const defaultRow = section(w, 0).findAll('.cli-row')[0]
+    const defaultRow = section(w, 0).findAll('.cli-card')[0]
     await defaultRow.findAll('button').find((b) => b.text() === 'Sign in')!.trigger('click')
     await flushPromises()
 
@@ -333,5 +346,75 @@ describe('CliAccountsPane', () => {
   it('shows no banner when there is no error', () => {
     const w = mountPane(makeApi())
     expect(w.find('.cli-banner').exists()).toBe(false)
+  })
+
+  // ── usage chips (active row only) ──────────────────────────────────────────
+
+  function usageSnapshot(over: Partial<UsageSnapshot> = {}): UsageSnapshot {
+    return {
+      provider: 'claude',
+      status: 'ok',
+      planType: 'max',
+      windows: [
+        { kind: 'session', label: 'Session', usedPercent: 30, resetsAt: null },
+        { kind: 'weekly', label: 'Weekly', usedPercent: 85, resetsAt: null },
+      ],
+      fetchedAt: '2026-07-26T04:00:00Z',
+      error: null,
+      ...over,
+    }
+  }
+
+  it('shows headline number, per-window bars and footer on the active card only', () => {
+    usage.usageFor.mockImplementation((key) => (key === 'claude' ? usageSnapshot() : undefined))
+    // 'p1' is claude's active profile → the Default card must show no quota.
+    const api = makeApi({
+      profiles: [profile('p1', 'claude', 'Account 2')],
+      defaults: { claude: 'p1' },
+    })
+    const w = mountPane(api)
+
+    const cards = section(w, 0).findAll('.cli-card')
+    expect(cards[0].find('.cli-card-big').exists()).toBe(false)
+    expect(cards[1].classes()).toContain('active')
+    expect(cards[1].get('.cli-card-big').text().replace(/\s+/g, ' ')).toBe('70% Session')
+    expect(cards[1].findAll('.cli-mini-bar')).toHaveLength(2)
+    // Footer carries the non-headline window (Weekly at 15% left).
+    expect(cards[1].get('.cli-card-foot').text()).toBe('Weekly 15%')
+  })
+
+  it('shows an expired warning on the active card when credentials are expired', () => {
+    usage.usageFor.mockImplementation((key) =>
+      key === 'claude' ? usageSnapshot({ status: 'expired', windows: [] }) : undefined,
+    )
+    const w = mountPane(makeApi())
+
+    expect(section(w, 0).get('.cli-card-expired').text()).toContain('⚠')
+  })
+
+  it('shows a no-live-quota placeholder on a signed-in non-active card', () => {
+    usage.usageFor.mockReturnValue(undefined)
+    const api = makeApi({
+      profiles: [profile('p1', 'claude', 'Account 2')],
+      defaults: { claude: 'p1' },
+      identities: { claude: { __default__: { email: 'me@x.com', signedIn: true } } },
+    })
+    const w = mountPane(api)
+
+    const cards = section(w, 0).findAll('.cli-card')
+    // Default card: signed in but not active → placeholder; active card: none.
+    expect(cards[0].find('.cli-card-none').exists()).toBe(true)
+    expect(cards[1].find('.cli-card-none').exists()).toBe(false)
+  })
+
+  it('re-polls usage on mount and after a successful default switch', async () => {
+    usage.usageFor.mockReturnValue(undefined)
+    const api = makeApi({ profiles: [profile('p1', 'claude', 'Account 2')] })
+    const w = mountPane(api)
+    expect(usage.refreshUsage).toHaveBeenCalledTimes(1)
+
+    await buttonByText(section(w, 0), 'Set as default')!.trigger('click')
+    await flushPromises()
+    expect(usage.refreshUsage).toHaveBeenCalledTimes(2)
   })
 })

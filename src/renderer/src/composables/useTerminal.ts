@@ -147,7 +147,7 @@ export function encodeShiftEnter(agentKey?: string): string {
   return '\x16\x0a'
 }
 
-export type TerminalStatus = 'idle' | 'starting' | 'running' | 'exited' | 'error'
+export type TerminalStatus = 'idle' | 'starting' | 'running' | 'exited' | 'error' | 'stopped'
 
 // Cached dimensions from any visible terminal. Hidden resumed tabs use these
 // to start their PTY immediately at the correct layout size without waiting
@@ -896,7 +896,11 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   const nowTick = ref<number>(Date.now())
   const tickInterval = window.setInterval(() => { nowTick.value = Date.now() }, 1_000)
 
+  const isStopped = ref(false)
+
   const displayStatus = computed<string>(() => {
+    if (status.value === 'exited' || status.value === 'error') return status.value
+    if (isStopped.value) return 'stopped'
     // A resume parked for a hidden tab hasn't created its PTY yet — a resumed
     // agent comes up idle, so show 'idle' instead of a stuck 'starting' in the
     // agent list until the tab is shown. (Fresh spawns create immediately, so
@@ -1756,7 +1760,10 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   function bindSessionHandlers(): void {
     let inputBuffer = ''
     inputDisposer = term.onData((data) => {
-      if (data === '\r' || data === '\n' || data === '\r\n') {
+      if (data === '\x1b' || data === '\x03') {
+        isStopped.value = true
+      } else if (data === '\r' || data === '\n' || data === '\r\n') {
+        isStopped.value = false
         if (inputBuffer.trim() === '/clear' && opts?.onClear) {
           inputBuffer = ''
           opts.onClear()
@@ -1766,8 +1773,10 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       } else if (data === '\x7f' || data === '\b') {
         inputBuffer = inputBuffer.slice(0, -1)
       } else if (data.length === 1 && data.charCodeAt(0) >= 32) {
+        if (isStopped.value) isStopped.value = false
         inputBuffer += data
       } else if (data.length > 1) {
+        if (isStopped.value) isStopped.value = false
         inputBuffer += data.replace(/[\x00-\x1f\x7f]/g, '')
       }
       if (inputBuffer.length > 100) inputBuffer = inputBuffer.slice(-100)
@@ -2163,6 +2172,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     if (status.value === 'starting' || status.value === 'running') {
       throw new Error('terminal already running')
     }
+    isStopped.value = false
     error.value = ''
     status.value = 'starting'
     activeAgentKey = opts.agentKey
@@ -2203,6 +2213,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
 
   async function interrupt(): Promise<void> {
     if (!sessionId.value) return
+    isStopped.value = true
     await backend.send('terminal.interrupt', { terminal_session_id: sessionId.value })
   }
 
@@ -2321,6 +2332,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     pasteText,
     status,
     displayStatus,
+    isStopped,
     sessionId,
     error,
     lastCommand,

@@ -1,8 +1,17 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { CLI_AGENT_SPECS } from '../lib/agentSpecs'
 import type { useCliProfiles, CliProfile } from '../composables/useCliProfiles'
 import { useNotify } from '../composables/useNotify'
+import {
+  formatRemaining,
+  formatResetCountdown,
+  refreshUsage,
+  remainingTier,
+  usageFor,
+  type UsageSnapshot,
+  type UsageWindow,
+} from '../composables/useUsage'
 import { i18n } from '../i18n'
 
 const props = defineProps<{
@@ -27,7 +36,7 @@ function supported(agentKey: string): boolean {
   return props.api.supportedAgents.value.includes(agentKey)
 }
 
-// ── Row identity (rows are named by who is signed in, not a custom label) ────
+// ── Card identity (cards are named by who is signed in, not a custom label) ──
 function rowIdentity(agentKey: string, profileId: string | null) {
   return props.api.identityFor(agentKey, profileId)
 }
@@ -101,7 +110,11 @@ const t = i18n.global.t
 
 async function requestSetDefault(agentKey: string, profileId: string | null): Promise<boolean> {
   let res = await props.api.setDefault(agentKey, profileId)
-  if (res.ok) return true
+  if (res.ok) {
+    // Re-poll so the card's quota reflects the newly active account.
+    refreshUsage()
+    return true
+  }
   if (res.code !== 'PROFILE_IN_USE') return false
   // Running panes block the switch. Offer to terminate them (backend kills
   // each live pane's CLI process and waits for exit before swapping) and
@@ -118,6 +131,7 @@ async function requestSetDefault(agentKey: string, profileId: string | null): Pr
   )
   if (!ok) return false
   res = await props.api.setDefault(agentKey, profileId, { force: true })
+  if (res.ok) refreshUsage()
   return res.ok
 }
 
@@ -128,6 +142,92 @@ async function remove(id: string): Promise<void> {
   const ok = await props.api.remove(id)
   if (ok) confirmRemoveId.value = null
 }
+
+// ── Quota on the ACTIVE card ─────────────────────────────────────────────────
+// The backend poller only reads live credentials, so only the currently
+// active account of each agent has a snapshot; other profiles show a
+// "no live quota" placeholder when signed in.
+function activeUsage(agentKey: string, profileId: string | null): UsageSnapshot | undefined {
+  if (props.api.defaultProfileId(agentKey) !== profileId) return undefined
+  const snap = usageFor(agentKey)
+  if (!snap || (snap.status !== 'ok' && snap.status !== 'expired')) return undefined
+  return snap
+}
+
+function windowRemaining(w: UsageWindow): number {
+  return Math.max(0, Math.min(100, 100 - w.usedPercent))
+}
+
+/** General account windows (not per-model buckets) — same headline pick as
+ *  UsageBadge so both surfaces agree on the big number. */
+const HEADLINE_KINDS = new Set(['session', 'weekly', 'monthly'])
+
+function headlineWindow(snap: UsageSnapshot): UsageWindow | undefined {
+  return snap.windows.find((w) => HEADLINE_KINDS.has(w.kind)) ?? snap.windows[0]
+}
+
+interface CardUsage {
+  expired: boolean
+  big: string
+  tier: 'ok' | 'warn' | 'crit'
+  headLabel: string
+  windows: UsageWindow[]
+  foot: string
+}
+
+/** Display model for a card's quota area; undefined hides the area. */
+function cardUsage(agentKey: string, profileId: string | null): CardUsage | undefined {
+  const snap = activeUsage(agentKey, profileId)
+  if (!snap) return undefined
+  if (snap.status === 'expired')
+    return { expired: true, big: '', tier: 'crit', headLabel: '', windows: [], foot: '' }
+  const head = headlineWindow(snap)
+  if (!head) return undefined
+  const rem = windowRemaining(head)
+  return {
+    expired: false,
+    big: formatRemaining(rem),
+    tier: remainingTier(rem),
+    headLabel: head.label,
+    windows: snap.windows,
+    foot: cardFoot(snap, head),
+  }
+}
+
+/** Card footer: the non-headline windows plus the headline reset countdown. */
+function cardFoot(snap: UsageSnapshot, head: UsageWindow): string {
+  const parts = snap.windows
+    .filter((w) => w !== head)
+    .map((w) => `${w.label} ${formatRemaining(windowRemaining(w))}`)
+  const countdown = formatResetCountdown(head.resetsAt)
+  if (countdown) parts.push(t('usage.resets-in', { time: countdown }))
+  return parts.join(' · ')
+}
+
+function barTitle(w: UsageWindow): string {
+  const base = `${w.label} ${formatRemaining(windowRemaining(w))}`
+  const countdown = formatResetCountdown(w.resetsAt)
+  return countdown ? `${base} · ${t('usage.resets-in', { time: countdown })}` : base
+}
+
+// Per-account avatar: first character over a deterministic color picked from
+// the profile id, so the same account always gets the same tint (same
+// palette as UsageBadge's account switcher).
+const AVATAR_COLORS = ['#1f6feb', '#8957e5', '#2da44e', '#bc4c00', '#bf3989', '#1b7c83', '#9e6a03']
+
+function avatarColor(key: string): string {
+  let h = 0
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0
+  return AVATAR_COLORS[h % AVATAR_COLORS.length]
+}
+
+function avatarInitial(label: string): string {
+  const s = label.trim()
+  return s ? s.charAt(0).toUpperCase() : '?'
+}
+
+// Fresh numbers when the pane opens (same nudge UsageBadge sends on switch).
+onMounted(() => refreshUsage())
 </script>
 
 <template>
@@ -158,46 +258,82 @@ async function remove(id: string): Promise<void> {
       </p>
 
       <template v-else>
-        <div class="cli-list">
-          <!-- Built-in Default (the user's real home). -->
-          <div class="cli-row">
-            <div class="cli-row-main">
-              <span class="cli-row-name">{{ rowName(spec.agentKey, null) }}</span>
-              <span class="cli-row-meta">{{
-                rowIdentity(spec.agentKey, null)?.signedIn
-                  ? $t('settings.accounts.cli.default-hint')
-                  : $t('settings.accounts.cli.not-signed-in')
-              }}</span>
-            </div>
-            <div class="cli-row-actions">
-              <span v-if="api.defaultProfileId(spec.agentKey) === null" class="cli-badge">
-                {{ $t('settings.accounts.cli.is-default') }}
-              </span>
-              <button v-else class="cli-btn ghost sm" @click="requestSetDefault(spec.agentKey, null)">
-                {{ $t('settings.accounts.cli.set-default') }}
-              </button>
-              <button
-                v-if="!rowIdentity(spec.agentKey, null)?.signedIn"
-                class="cli-btn ghost sm"
-                @click="signIn(spec.agentKey, null)"
-              >
-                {{ $t('settings.accounts.cli.sign-in') }}
-              </button>
-            </div>
-          </div>
-
-          <!-- Created profiles. -->
-          <div v-for="p in api.profilesForAgent(spec.agentKey)" :key="p.id" class="cli-row">
-            <div class="cli-row-main">
+        <div class="cli-card-grid">
+          <!-- First card is the built-in Default (the user's real home). -->
+          <div
+            v-for="p in [null, ...api.profilesForAgent(spec.agentKey)]"
+            :key="p?.id ?? '__default__'"
+            class="cli-card"
+            :class="{ active: api.defaultProfileId(spec.agentKey) === (p?.id ?? null) }"
+          >
+            <div class="cli-card-head">
               <span
-                class="cli-row-name"
-                :class="{ dim: !rowIdentity(spec.agentKey, p.id)?.signedIn }"
+                class="cli-card-av"
+                :class="{ default: !p }"
+                :style="p ? { background: avatarColor(p.id) } : undefined"
+              >
+                {{ avatarInitial(rowName(spec.agentKey, p)) }}
+              </span>
+              <span
+                class="cli-card-id"
+                :class="{ dim: p && !rowIdentity(spec.agentKey, p.id)?.signedIn }"
               >
                 {{ rowName(spec.agentKey, p) }}
               </span>
+              <span
+                v-if="api.defaultProfileId(spec.agentKey) === (p?.id ?? null)"
+                class="cli-badge"
+              >
+                {{ $t('settings.accounts.cli.is-default') }}
+              </span>
             </div>
-            <div class="cli-row-actions">
-              <template v-if="confirmRemoveId === p.id">
+            <span v-if="!p" class="cli-card-meta">{{
+              rowIdentity(spec.agentKey, null)?.signedIn
+                ? $t('settings.accounts.cli.default-hint')
+                : $t('settings.accounts.cli.not-signed-in')
+            }}</span>
+
+            <!-- Quota area: live numbers on the active card, a placeholder on
+                 signed-in non-active cards (single-element v-for = alias). -->
+            <template v-for="u in [cardUsage(spec.agentKey, p?.id ?? null)]" :key="'usage'">
+              <div v-if="u?.expired" class="cli-card-expired">
+                ⚠ {{ $t('usage.expired-tooltip') }}
+              </div>
+              <template v-else-if="u">
+                <div class="cli-card-big" :class="u.tier">
+                  {{ u.big }}
+                  <small>{{ u.headLabel }}</small>
+                </div>
+                <div class="cli-card-bars">
+                  <div
+                    v-for="w in u.windows"
+                    :key="w.kind + w.label"
+                    class="cli-mini-bar"
+                    :title="barTitle(w)"
+                  >
+                    <div
+                      class="cli-mini-fill"
+                      :class="remainingTier(windowRemaining(w))"
+                      :style="{ width: windowRemaining(w) + '%' }"
+                    ></div>
+                  </div>
+                </div>
+                <div v-if="u.foot" class="cli-card-foot">{{ u.foot }}</div>
+              </template>
+              <div
+                v-else-if="
+                  rowIdentity(spec.agentKey, p?.id ?? null)?.signedIn &&
+                  api.defaultProfileId(spec.agentKey) !== (p?.id ?? null)
+                "
+                class="cli-card-none"
+              >
+                <span class="cli-card-dash">—</span>
+                <span class="cli-card-foot">{{ $t('settings.accounts.cli.no-live-quota') }}</span>
+              </div>
+            </template>
+
+            <div class="cli-card-actions">
+              <template v-if="p && confirmRemoveId === p.id">
                 <span class="cli-confirm-text">{{ $t('settings.accounts.cli.delete-confirm') }}</span>
                 <button class="cli-btn danger sm" @click="remove(p.id)">
                   {{ $t('settings.accounts.cli.delete') }}
@@ -207,20 +343,21 @@ async function remove(id: string): Promise<void> {
                 </button>
               </template>
               <template v-else>
-                <span v-if="api.defaultProfileId(spec.agentKey) === p.id" class="cli-badge">
-                  {{ $t('settings.accounts.cli.is-default') }}
-                </span>
-                <button v-else class="cli-btn ghost sm" @click="requestSetDefault(spec.agentKey, p.id)">
+                <button
+                  v-if="api.defaultProfileId(spec.agentKey) !== (p?.id ?? null)"
+                  class="cli-btn ghost sm"
+                  @click="requestSetDefault(spec.agentKey, p?.id ?? null)"
+                >
                   {{ $t('settings.accounts.cli.set-default') }}
                 </button>
                 <button
-                  v-if="!rowIdentity(spec.agentKey, p.id)?.signedIn"
+                  v-if="!rowIdentity(spec.agentKey, p?.id ?? null)?.signedIn"
                   class="cli-btn ghost sm"
-                  @click="signIn(spec.agentKey, p.id)"
+                  @click="signIn(spec.agentKey, p?.id ?? null)"
                 >
                   {{ $t('settings.accounts.cli.sign-in') }}
                 </button>
-                <button class="cli-btn ghost sm" @click="confirmRemoveId = p.id">
+                <button v-if="p" class="cli-btn ghost sm" @click="confirmRemoveId = p.id">
                   {{ $t('settings.accounts.cli.delete') }}
                 </button>
               </template>
@@ -262,24 +399,95 @@ async function remove(id: string): Promise<void> {
 .cli-agent-name { font-size: 12px; font-weight: 600; color: var(--text-primary); }
 .cli-unsupported { margin: 0; font-size: 11px; color: var(--text-muted); font-style: italic; }
 
-.cli-list { display: flex; flex-direction: column; gap: 6px; }
-.cli-row {
+.cli-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 8px;
+}
+.cli-card {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 7px 10px;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
   border: 1px solid var(--border-default);
-  border-radius: 6px;
+  border-radius: 8px;
   background: var(--bg-subtle);
 }
-.cli-row-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.cli-row-name { font-size: 12.5px; font-weight: 600; color: var(--text-primary); }
-.cli-row-name.dim { font-weight: 400; color: var(--text-muted); }
-.cli-row-meta { font-size: 11px; color: var(--text-secondary); }
-.cli-row-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.cli-card.active {
+  border-color: var(--accent-emphasis);
+  box-shadow: 0 0 0 1px var(--accent-emphasis);
+}
+.cli-card-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.cli-card-av {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+}
+.cli-card-av.default { background: var(--border-strong); }
+.cli-card-id {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cli-card-id.dim { font-weight: 400; color: var(--text-muted); }
+.cli-card-meta { font-size: 10.5px; color: var(--text-secondary); }
+
+.cli-card-big {
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--text-primary);
+}
+.cli-card-big small {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-left: 4px;
+}
+.cli-card-big.warn { color: var(--attention-fg); }
+.cli-card-big.crit { color: var(--danger-fg); }
+.cli-card-bars { display: flex; flex-direction: column; gap: 3px; }
+.cli-mini-bar {
+  height: 3px;
+  border-radius: 999px;
+  background: var(--bg-muted);
+  overflow: hidden;
+}
+.cli-mini-fill { height: 100%; border-radius: 999px; background: var(--success-fg); }
+.cli-mini-fill.warn { background: var(--attention-fg); }
+.cli-mini-fill.crit { background: var(--danger-fg); }
+.cli-card-foot { font-size: 10px; color: var(--text-muted); }
+.cli-card-expired { font-size: 11px; font-weight: 600; color: var(--danger-fg); }
+.cli-card-none { display: flex; flex-direction: column; gap: 2px; }
+.cli-card-dash {
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--text-muted);
+}
+
+.cli-card-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: auto;
+}
 .cli-confirm-text { font-size: 11px; color: var(--text-secondary); }
 .cli-badge {
+  flex-shrink: 0;
   font-size: 10px;
   font-weight: 600;
   color: var(--accent-fg);

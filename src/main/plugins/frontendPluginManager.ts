@@ -1,14 +1,14 @@
-// Frontend plugin runtime (main process) — Phase 2 M1 skeleton.
+// Frontend plugin runtime (main process).
 //
 // Runs a plugin's UI inside an isolated `WebContentsView` attached to a host
 // BrowserWindow, with a minimal, dedicated preload (`plugin-preload.js`). The
-// only capability wired in M1 is the in-process `ping` no-op; the pure broker
-// logic lives in `pluginCapabilityBroker.ts` (unit-tested, electron-free).
-//
-// M2 replaces the `ping` branch of the broker with a dispatch to the backend
-// plugin host over WebSocket. Nothing here talks to the backend yet.
+// pure broker logic lives in `pluginCapabilityBroker.ts` (unit-tested,
+// electron-free): it enforces manifest scoping, resolves `ping`/unknown calls
+// in-process, and routes everything else to the backend plugin host over the
+// shared WebSocket transport below.
 
-import { WebContentsView, ipcMain, type BrowserWindow, type WebContents } from 'electron'
+import { BrowserWindow, WebContentsView, ipcMain, type WebContents } from 'electron'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { WebSocket as NodeWebSocket } from 'ws'
 import {
@@ -20,7 +20,8 @@ import {
   type CapabilityResponse,
 } from './pluginCapabilityBroker'
 import { CAP_EVENTS, eventNamespace } from './capabilityMap'
-import { scanInstalledPlugins } from './installedPlugins'
+import { loadPluginDir, scanInstalledPlugins, verifyOfficialInstall } from './installedPlugins'
+import { resolveOfficialPublisherKey } from './pluginVerify'
 import { createWsClient, type WsClient, type WsConstructor } from '../../shared/wsClient'
 
 /** Everything the manager needs to launch one plugin view. */
@@ -45,21 +46,65 @@ export interface PluginBounds {
   height: number
 }
 
+/** `'fill'` sizes the view to the host window's content bounds and keeps it
+ *  in sync on host `resize` (full-overlay views like the mini-IDE editor). */
+export type PluginViewBounds = PluginBounds | 'fill'
+
 interface RunningPlugin {
   id: string
   requires: string[]
   view: WebContentsView
   hostWindow: BrowserWindow
+  /** Query string the entry was last loaded with (drives reload-on-change). */
+  query: string
+  /** webContents.id captured at creation (not readable after destroy). */
+  senderId: number
+  /** Whether the view overlays the host's full content area (see {@link PluginViewBounds}). */
+  fill: boolean
+  /** Removes the host `resize` listener; null when none is attached. */
+  detachHostResize: (() => void) | null
+  /** True when the host window exists solely for this view (dedicated plugin
+   *  window): `hideSelf` then closes the window (legacy editor Esc semantics)
+   *  instead of hiding the view under a still-visible host. */
+  closeHostOnHide: boolean
+  /** True once the entry finished loading — open targets sent before that are
+   *  queued in {@link pendingTargets} (mirrors the legacy editor window's
+   *  pendingEditorOpenFiles flush on did-finish-load). */
+  ready: boolean
+  pendingTargets: Record<string, string>[]
 }
 
 const IPC_CALL = 'plugin:cap:call'
 const IPC_EVENT = 'plugin:cap:event'
 const IPC_READY = 'plugin:ready'
+const IPC_HIDE_SELF = 'plugin:hideSelf'
+const IPC_OPEN_TARGET = 'plugin:openTarget'
 
-/** The `navide.` publisher namespace is reserved for host built-ins (mini-IDE,
- *  noop, fs_probe). No installed third-party plugin may register an id here, so
- *  a marketplace package cannot masquerade as — or overwrite — a trusted
- *  built-in like `navide.mini-ide`. */
+/** `workspace_path` param of an entry query ('' when absent). */
+function workspaceOf(query: string): string {
+  return new URLSearchParams(query).get('workspace_path') ?? ''
+}
+
+/** Entry query string → plain params record (as sent over IPC_OPEN_TARGET). */
+function queryToParams(query: string): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [key, value] of new URLSearchParams(query)) out[key] = value
+  return out
+}
+
+/** Bring a host window to the front (restore if minimized), legacy-editor style. */
+function revealHostWindow(win: BrowserWindow): void {
+  if (win.isDestroyed()) return
+  if (win.isMinimized()) win.restore()
+  win.show()
+  win.focus()
+}
+
+/** The `navide.` publisher namespace is reserved for first-party plugins
+ *  (mini-IDE, noop, fs_probe). An id here may only be registered by the host
+ *  itself (built-in/dev) or by an install whose official-key verification
+ *  passed, so a third-party marketplace package cannot masquerade as — or
+ *  overwrite — a trusted plugin like `navide.mini-ide`. */
 export function isReservedPluginId(id: string): boolean {
   return id === 'navide.mini-ide' || id.startsWith('navide.')
 }
@@ -82,6 +127,10 @@ export class FrontendPluginManager {
    *  mini-IDE is registered here as the first built-in; third-party installs are
    *  added by {@link loadInstalledPlugins} / {@link registerDescriptor}. */
   private readonly descriptors = new Map<string, PluginLaunchDescriptor>()
+  /** Host-bundled builtin descriptors kept as fallbacks: removing a marketplace
+   *  override of a bundled plugin reverts to the bundled copy instead of
+   *  leaving the surface unavailable (see {@link removeInstalledPlugin}). */
+  private readonly builtinFallbacks = new Map<string, PluginLaunchDescriptor>()
   private ipcReady = false
   /** Backend WS url as last reported by main, or null when no backend is up. */
   private backendWsUrl: string | null = null
@@ -130,10 +179,26 @@ export class FrontendPluginManager {
       }
     })
 
-    // M1: plugins announce readiness; we only log it. M2 may gate activation on it.
+    // Plugins announce readiness; it is only logged (activation is not gated on it).
     ipcMain.on(IPC_READY, (event) => {
       const pluginId = this.bySender.get(event.sender.id)
       if (pluginId) console.log(`[plugin] ${pluginId} ready`)
+    })
+
+    // A plugin dismisses its own view (e.g. the mini-IDE's Esc-close). Scoped
+    // to the sender: only the view a webContents belongs to can be hidden by it.
+    // A view hosted in a dedicated plugin window closes that window instead
+    // (legacy editor Esc behavior; the `closed` hook runs the normal teardown);
+    // main-window-hosted views keep the plain view-hide.
+    ipcMain.on(IPC_HIDE_SELF, (event) => {
+      const pluginId = this.bySender.get(event.sender.id)
+      if (!pluginId) return
+      const plugin = this.running.get(pluginId)
+      if (plugin?.closeHostOnHide && !plugin.hostWindow.isDestroyed()) {
+        plugin.hostWindow.close()
+      } else {
+        this.deactivate(pluginId)
+      }
     })
   }
 
@@ -202,16 +267,51 @@ export class FrontendPluginManager {
 
   /**
    * create → attach → activate. If the plugin is already running it is brought
-   * back to visible and re-bounded (idempotent open).
+   * back to visible and re-bounded (idempotent open); a new open target for the
+   * same workspace is delivered in-page (no reload), while a workspace change
+   * reloads the entry — mirroring the legacy editor window's routing.
    */
-  open(hostWindow: BrowserWindow, descriptor: PluginLaunchDescriptor, bounds: PluginBounds): void {
+  open(
+    hostWindow: BrowserWindow,
+    descriptor: PluginLaunchDescriptor,
+    bounds: PluginViewBounds,
+    opts: { closeHostOnHide?: boolean } = {}
+  ): void {
     this.registerIpc()
 
     const existing = this.running.get(descriptor.id)
     if (existing) {
-      existing.view.setBounds(bounds)
-      this.activate(descriptor.id)
-      return
+      if (existing.view.webContents.isDestroyed() || existing.hostWindow.isDestroyed()) {
+        // Stale record (renderer crash / host teardown race) — drop it and fall
+        // through to a fresh create; loadEntry on a dead webContents would brick.
+        this.destroy(descriptor.id)
+      } else {
+        const query = descriptor.query ?? ''
+        const prevQuery = existing.query
+        existing.query = query
+        if (workspaceOf(query) !== workspaceOf(prevQuery)) {
+          // Different workspace → reload the entry with the new params (matches
+          // legacy routeEditorWindowOpen's `reload` branch). In-flight queued
+          // targets belong to the old workspace and are dropped with it.
+          existing.ready = false
+          existing.pendingTargets = []
+          this.loadEntry(existing.view, descriptor)
+        } else if (query) {
+          // Same workspace → deliver the open target in-page (legacy
+          // `editor:openFile`/`editor:openDiff` semantics: add/reveal the tab
+          // without reloading, so open tabs and unsaved buffers survive).
+          this.sendOpenTarget(existing, queryToParams(query))
+        }
+        existing.fill = bounds === 'fill'
+        this.applyBounds(existing, bounds)
+        this.trackHostResize(existing)
+        existing.view.setVisible(true)
+        // Surface the window that actually hosts the view. Cross-window opens
+        // keep the view on its original host, so focus that one — the open
+        // must never land invisibly behind another window.
+        revealHostWindow(existing.hostWindow)
+        return
+      }
     }
 
     const preload = join(__dirname, '../preload/plugin-preload.js')
@@ -220,7 +320,9 @@ export class FrontendPluginManager {
         preload,
         contextIsolation: true,
         nodeIntegration: false,
-        sandbox: false,
+        // The plugin preload is node-free (webcrypto only), so views run fully
+        // sandboxed.
+        sandbox: true,
         // Injected so the preload can stamp calls with an authoritative plugin id.
         additionalArguments: [`--plugin-id=${descriptor.id}`],
       },
@@ -228,46 +330,128 @@ export class FrontendPluginManager {
 
     // attach
     hostWindow.contentView.addChildView(view)
-    view.setBounds(bounds)
 
     const record: RunningPlugin = {
       id: descriptor.id,
       requires: descriptor.requires,
       view,
       hostWindow,
+      query: descriptor.query ?? '',
+      senderId: view.webContents.id,
+      fill: bounds === 'fill',
+      detachHostResize: null,
+      closeHostOnHide: opts.closeHostOnHide ?? false,
+      ready: false,
+      pendingTargets: [],
     }
     this.running.set(descriptor.id, record)
-    this.bySender.set(view.webContents.id, descriptor.id)
+    this.bySender.set(record.senderId, descriptor.id)
+    this.applyBounds(record, bounds)
+    this.trackHostResize(record)
 
     // A plugin needing the backend gets the shared transport connected now (if
     // the backend url is already known) so server-push events reach it without
     // waiting for its first capability call.
     if (descriptor.requires.length > 0) this.ensureBackend()
 
-    // If the host window goes away, tear the view down with it.
-    hostWindow.once('closed', () => this.destroy(descriptor.id))
+    // If the host window goes away, tear the view down with it. Guarded so a
+    // later record (view recreated on another window) is never torn down by a
+    // stale hook.
+    hostWindow.once('closed', () => {
+      if (this.running.get(descriptor.id)?.view === view) this.destroy(descriptor.id)
+    })
 
-    // load entry (dev server when available, built file otherwise). A plugin
-    // with an empty devUrl (e.g. the separately-built mini-IDE) always loadFiles.
-    const devUrl = process.env['ELECTRON_RENDERER_URL'] ? descriptor.devUrl : null
-    const query = descriptor.query ?? ''
-    if (devUrl) void view.webContents.loadURL(devUrl + query)
-    else void view.webContents.loadFile(descriptor.entryFile, query ? { search: query } : undefined)
+    // Defensive cleanup: if the view's webContents dies through any path other
+    // than destroy() (renderer crash, Electron teardown), drop the record so
+    // the next open() recreates instead of loading into a destroyed view.
+    view.webContents.once('destroyed', () => {
+      const current = this.running.get(descriptor.id)
+      if (current?.view !== view) return
+      current.detachHostResize?.()
+      current.detachHostResize = null
+      this.running.delete(descriptor.id)
+      this.bySender.delete(current.senderId)
+    })
+
+    // Open targets sent before the entry finished loading are queued and
+    // flushed here (mirrors the legacy editor window's did-finish-load flush).
+    view.webContents.on('did-finish-load', () => {
+      const current = this.running.get(descriptor.id)
+      if (current?.view !== view) return
+      current.ready = true
+      for (const params of current.pendingTargets.splice(0)) {
+        view.webContents.send(IPC_OPEN_TARGET, params)
+      }
+    })
+
+    this.loadEntry(view, descriptor)
 
     // activate (show)
     view.setVisible(true)
   }
 
-  /** Show a plugin view without recreating it. */
-  activate(pluginId: string): void {
-    const plugin = this.running.get(pluginId)
-    if (plugin) plugin.view.setVisible(true)
+  /** Deliver a new open target to a running view, queueing until its entry has
+   *  finished loading (so a target racing the first load is never lost). */
+  private sendOpenTarget(record: RunningPlugin, params: Record<string, string>): void {
+    if (record.ready) record.view.webContents.send(IPC_OPEN_TARGET, params)
+    else record.pendingTargets.push(params)
   }
 
-  /** Hide a plugin view without destroying its WebContents. */
+  /** Apply a bounds spec: `'fill'` overlays the host's full content area. */
+  private applyBounds(record: RunningPlugin, bounds: PluginViewBounds): void {
+    if (bounds === 'fill') {
+      const { width, height } = record.hostWindow.getContentBounds()
+      record.view.setBounds({ x: 0, y: 0, width, height })
+    } else {
+      record.view.setBounds(bounds)
+    }
+  }
+
+  /** (Re)attach the host `resize` listener for a fill view — the overlay tracks
+   *  the host's content bounds. Fixed-rect views detach and don't track. */
+  private trackHostResize(record: RunningPlugin): void {
+    record.detachHostResize?.()
+    record.detachHostResize = null
+    if (!record.fill) return
+    const host = record.hostWindow
+    const onResize = (): void => {
+      if (host.isDestroyed() || record.view.webContents.isDestroyed()) return
+      this.applyBounds(record, 'fill')
+    }
+    host.on('resize', onResize)
+    record.detachHostResize = () => host.removeListener('resize', onResize)
+  }
+
+  /** Load the plugin entry (dev server when available, built file otherwise).
+   *  A plugin with an empty devUrl (e.g. the separately-built mini-IDE) always
+   *  loadFiles. */
+  private loadEntry(view: WebContentsView, descriptor: PluginLaunchDescriptor): void {
+    const devUrl = process.env['ELECTRON_RENDERER_URL'] ? descriptor.devUrl : null
+    const query = descriptor.query ?? ''
+    if (devUrl) void view.webContents.loadURL(devUrl + query)
+    else void view.webContents.loadFile(descriptor.entryFile, query ? { search: query } : undefined)
+  }
+
+  /** Show a plugin view without recreating it. A fill view re-syncs to the
+   *  host's content bounds and resumes tracking host resizes. */
+  activate(pluginId: string): void {
+    const plugin = this.running.get(pluginId)
+    if (!plugin) return
+    if (plugin.fill && !plugin.hostWindow.isDestroyed()) {
+      this.applyBounds(plugin, 'fill')
+      this.trackHostResize(plugin)
+    }
+    plugin.view.setVisible(true)
+  }
+
+  /** Hide a plugin view without destroying its WebContents. Stops tracking
+   *  host resizes while hidden (open()/activate re-attach the listener). */
   deactivate(pluginId: string): void {
     const plugin = this.running.get(pluginId)
-    if (plugin) plugin.view.setVisible(false)
+    if (!plugin) return
+    plugin.detachHostResize?.()
+    plugin.detachHostResize = null
+    plugin.view.setVisible(false)
   }
 
   /** Update the plugin view's rect (host-driven layout). */
@@ -280,8 +464,10 @@ export class FrontendPluginManager {
   destroy(pluginId: string): void {
     const plugin = this.running.get(pluginId)
     if (!plugin) return
+    plugin.detachHostResize?.()
+    plugin.detachHostResize = null
     this.running.delete(pluginId)
-    this.bySender.delete(plugin.view.webContents.id)
+    this.bySender.delete(plugin.senderId)
     try {
       if (!plugin.hostWindow.isDestroyed()) {
         plugin.hostWindow.contentView.removeChildView(plugin.view)
@@ -298,17 +484,34 @@ export class FrontendPluginManager {
 
   /**
    * Register (or replace) an available plugin descriptor. Ids under the
-   * reserved built-in `navide.` namespace may only be registered by the host
-   * itself (`opts.builtin`); an installed third-party plugin claiming such an id
-   * (e.g. spoofing `navide.mini-ide` to hijack the trusted mini-IDE) is refused.
+   * reserved `navide.` namespace may only be registered by the host itself
+   * (`opts.builtin`) or by an install whose pinned-official-key verification
+   * passed (`opts.official`); a third-party plugin claiming such an id (e.g.
+   * spoofing `navide.mini-ide` to hijack the trusted mini-IDE) is refused.
    */
-  registerDescriptor(descriptor: PluginLaunchDescriptor, opts: { builtin?: boolean } = {}): void {
-    if (!opts.builtin && isReservedPluginId(descriptor.id)) {
+  registerDescriptor(
+    descriptor: PluginLaunchDescriptor,
+    opts: { builtin?: boolean; official?: boolean } = {}
+  ): void {
+    if (!opts.builtin && !opts.official && isReservedPluginId(descriptor.id)) {
       throw new Error(
-        `refusing to register reserved built-in plugin id '${descriptor.id}' from an installed plugin`
+        `refusing to register reserved plugin id '${descriptor.id}' without official verification`
       )
     }
     this.descriptors.set(descriptor.id, descriptor)
+  }
+
+  /**
+   * Register a host-bundled builtin descriptor. If a descriptor for the id is
+   * already registered (an officially-verified marketplace install scanned
+   * before this call), the installed copy stays active and the builtin is only
+   * remembered as the fallback {@link removeInstalledPlugin} reverts to.
+   */
+  registerBuiltin(descriptor: PluginLaunchDescriptor): void {
+    this.builtinFallbacks.set(descriptor.id, descriptor)
+    if (!this.descriptors.has(descriptor.id)) {
+      this.registerDescriptor(descriptor, { builtin: true })
+    }
   }
 
   /** Look up a registered descriptor by id. */
@@ -332,8 +535,24 @@ export class FrontendPluginManager {
     const errors: string[] = []
     for (const scanned of scanInstalledPlugins(root)) {
       if (scanned.descriptor) {
+        // A reserved `navide.` id must prove its install receipt still verifies
+        // against the pinned official key before it may register (fail-closed:
+        // no receipt / no pin / bad signature → skipped, reported as an error).
+        let opts: { official?: boolean } = {}
+        if (isReservedPluginId(scanned.descriptor.id)) {
+          const check = verifyOfficialInstall(
+            scanned.dir,
+            scanned.descriptor.id,
+            resolveOfficialPublisherKey()
+          )
+          if (!check.ok) {
+            errors.push(`${scanned.dir}: ${check.reason}`)
+            continue
+          }
+          opts = { official: true }
+        }
         try {
-          this.registerDescriptor(scanned.descriptor)
+          this.registerDescriptor(scanned.descriptor, opts)
           loaded.push(scanned.descriptor.id)
         } catch (err) {
           // A reserved-id spoof (or other registration refusal) is reported and
@@ -348,13 +567,18 @@ export class FrontendPluginManager {
   }
 
   /** Unregister a descriptor and tear down its view if it is open. Used by the
-   *  remove/update flow so a removed plugin's window does not linger. */
+   *  remove/update flow so a removed plugin's window does not linger. Removing
+   *  a marketplace override of a bundled builtin re-registers the bundled copy
+   *  (recorded by {@link registerBuiltin}) so the surface keeps working. */
   removeInstalledPlugin(id: string): void {
     this.destroy(id)
     this.descriptors.delete(id)
+    const fallback = this.builtinFallbacks.get(id)
+    if (fallback) this.registerDescriptor(fallback, { builtin: true })
   }
 
-  /** Push an event to a plugin view (M1 has no producers; wired for M2). */
+  /** Push an event to a plugin view (fed by the backend server-push fan-out
+   *  in {@link dispatchEvent}). */
   emit(pluginId: string, type: string, data: unknown): void {
     const plugin = this.running.get(pluginId)
     if (plugin && !plugin.view.webContents.isDestroyed()) {
@@ -419,49 +643,229 @@ export function openFsProbePluginView(hostWindow: BrowserWindow): void {
   })
 }
 
+/** Id of the mini-IDE extension (the editor surface). The official example
+ *  plugin: it ships bundled with the app and is registered at startup as a
+ *  builtin (see {@link registerBundledMiniIde}); an officially-verified
+ *  marketplace install overrides the bundled copy. */
+export const MINI_IDE_PLUGIN_ID = 'navide.mini-ide'
+
+/** Where {@link registerBundledMiniIde} looks for the bundled copy. */
+export interface BundledMiniIdeSource {
+  /** `app.isPackaged` — selects resourcesPath vs the local dev build. */
+  isPackaged: boolean
+  /** `process.resourcesPath` (packaged builds only). */
+  resourcesPath: string
+  /** Repo root holding `dist-plugins/` when unpackaged. Defaults to the
+   *  built main bundle's `../..` (`out/main` → repo root). */
+  devRoot?: string
+}
+
+/** Directory of the bundled mini-IDE copy: `resources/plugins/mini-ide` inside
+ *  the app package (shipped via electron-builder `extraResources`), or the
+ *  local `dist-plugins/mini-ide` build output when running unpackaged. */
+export function bundledMiniIdeDir(source: BundledMiniIdeSource): string {
+  return source.isPackaged
+    ? join(source.resourcesPath, 'plugins', 'mini-ide')
+    : join(source.devRoot ?? join(__dirname, '../..'), 'dist-plugins', 'mini-ide')
+}
+
 /**
- * The M4 mini-IDE plugin descriptor. Declares all seven capability namespaces so
- * its brokered `fs`/`git`/`terminal`/`search`/`chat`/`ui`/`issues` calls are
- * authorized (issues drives GitPane's gh/glab cloud-issue pane).
+ * Register the app-bundled mini-IDE as a builtin descriptor at startup.
  *
- * Unlike noop/fs_probe, this bundle is built SEPARATELY (vite.mini-ide.config.ts)
- * with the `useBackend` → capabilityBackend alias, so it is NOT served by the
- * electron-vite dev server. `devUrl` is therefore empty and it always loadFiles
- * the built entry — run `pnpm build` (or `pnpm run build:mini-ide`) first.
- * `workspacePath` (and the backend `httpUrl`) are passed as a query the app
- * reads from window.location.search — the shim resolves `httpUrl` from it so
- * panes can build backend HTTP URLs inside the isolated view.
+ * Precedence for the mini-IDE editor surface (resolved here, once):
+ *   1. an officially-verified marketplace install under `userData/plugins`
+ *      (scanned by `loadInstalledPlugins` BEFORE this call, gated by the
+ *      fail-closed pinned-key receipt check) — the future update path always
+ *      wins over the copy frozen into the app package;
+ *   2. the bundled builtin copy ({@link bundledMiniIdeDir}: resourcesPath in
+ *      packaged builds, `dist-plugins/mini-ide` when unpackaged), validated
+ *      through the SAME manifest parsing as an installed plugin;
+ *   3. nothing registered → `openMiniIdePluginView` returns false and callers
+ *      fall back to the "Mini-IDE unavailable" dialog.
+ * (`AGENT_TEAM_PLUGIN_DEV=1` additionally force-registers the dist-plugins
+ * copy later in startup, overriding 1–2 for that run — unchanged semantics.)
+ *
+ * Never throws: a missing dir, invalid manifest, spoofed id, or missing entry
+ * file returns `registered: false` with a reason (caller logs; dialog fallback
+ * stays), so a corrupt bundle degrades instead of crashing startup.
  */
-export function miniIdePluginDescriptor(
+export function registerBundledMiniIde(
+  manager: FrontendPluginManager,
+  source: BundledMiniIdeSource
+): { registered: boolean; reason?: string } {
+  const dir = bundledMiniIdeDir(source)
+  const scanned = loadPluginDir(dir)
+  if (!scanned.descriptor) {
+    return { registered: false, reason: `${dir}: ${scanned.error ?? 'invalid plugin dir'}` }
+  }
+  if (scanned.descriptor.id !== MINI_IDE_PLUGIN_ID) {
+    return {
+      registered: false,
+      reason: `${dir}: manifest id '${scanned.descriptor.id}' is not '${MINI_IDE_PLUGIN_ID}'`,
+    }
+  }
+  if (!existsSync(scanned.descriptor.entryFile)) {
+    return { registered: false, reason: `${dir}: entry file missing (${scanned.descriptor.entryFile})` }
+  }
+  manager.registerBuiltin(scanned.descriptor)
+  return { registered: true }
+}
+
+/** Build the entry query the mini-IDE reads from `window.location.search`:
+ *  `workspacePath` plus the backend `httpUrl` (the capabilityBackend shim
+ *  resolves backend HTTP URLs from it), `extraParams` forwarding editor
+ *  open params (`filepath`/`line`/`sidebar`/`diff_*`/`branch_diff_*`)
+ *  EditorWindowApp also reads from the search string, and the current `theme`
+ *  id so the plugin paints with the app theme before its first settings
+ *  reconcile (zero-flash; see plugins/mini-ide/mount.ts). A theme change alone
+ *  never reloads a running view — open() only compares `workspace_path`. */
+function miniIdeQuery(
   workspacePath: string,
-  httpUrl = ''
-): PluginLaunchDescriptor {
+  httpUrl: string,
+  extraParams: Record<string, string>,
+  theme: string
+): string {
   const params = new URLSearchParams()
   if (workspacePath) params.set('workspace_path', workspacePath)
   if (httpUrl) params.set('http_url', httpUrl)
+  for (const [key, value] of Object.entries(extraParams)) {
+    if (value) params.set(key, value)
+  }
+  if (theme) params.set('theme', theme)
   const qs = params.toString()
+  return qs ? `?${qs}` : ''
+}
+
+/** The dedicated mini-IDE host window (one at a time, recreated after close).
+ *  The plugin WebContentsView fills its content bounds; the main window is
+ *  never overlaid. */
+let miniIdeWindow: BrowserWindow | null = null
+
+/** Reuse the live dedicated window or create a fresh one. Window options
+ *  mirror the retired legacy editor BrowserWindow (`openEditorWindow` in git
+ *  history: 1100x760, hidden title bar, `Navide · Editor`, #0d1117). The
+ *  window's own webContents stays blank — the plugin view carries the UI, so
+ *  no preload/webPreferences are needed here. */
+function ensureMiniIdeWindow(): BrowserWindow {
+  if (miniIdeWindow && !miniIdeWindow.isDestroyed()) return miniIdeWindow
+  const win = new BrowserWindow({
+    width: 1100,
+    height: 760,
+    title: 'Navide · Editor',
+    titleBarStyle: 'hidden',
+    backgroundColor: '#0d1117',
+  })
+  miniIdeWindow = win
+  win.on('closed', () => {
+    if (miniIdeWindow === win) miniIdeWindow = null
+  })
+  return win
+}
+
+/**
+ * Dev-only mini-IDE descriptor pointing at the LOCAL build output
+ * (`dist-plugins/mini-ide/`, produced by `pnpm run build:mini-ide`). Registered
+ * at startup only under `AGENT_TEAM_PLUGIN_DEV=1` so development never needs a
+ * registry install. The bundle is built separately (vite.mini-ide.config.ts)
+ * with the `useBackend` → capabilityBackend alias, so it is not served by the
+ * electron-vite dev server: `devUrl` is empty and it always loadFiles.
+ */
+export function devMiniIdePluginDescriptor(): PluginLaunchDescriptor {
   return {
-    id: 'navide.mini-ide',
+    id: MINI_IDE_PLUGIN_ID,
     requires: ['fs', 'git', 'terminal', 'search', 'chat', 'ui', 'issues'],
-    devUrl: '', // separate build → not on the dev server; always loadFile
-    entryFile: join(__dirname, '../renderer/plugins/mini-ide/index.html'),
-    query: qs ? `?${qs}` : '',
+    devUrl: '',
+    // __dirname is out/main in dev, so ../../ is the repo root.
+    entryFile: join(__dirname, '../../dist-plugins/mini-ide/index.html'),
   }
 }
 
-/** Open the mini-IDE plugin view for a workspace. Used by the dev menu and, when
- *  `AGENT_TEAM_MINI_IDE_PLUGIN=1`, by the flag-gated `window:openEditor` path
- *  (see index.ts). Coexists with the legacy editor window; the old path stays
- *  the default until the user validates this one. */
+/**
+ * Open the mini-IDE plugin view — the `window:openEditor` / `window:openDiff` /
+ * branch-diff surface (see index.ts) and the dev menu. The view lives in its
+ * own dedicated BrowserWindow (legacy editor parity): opening never touches or
+ * covers the main window, reopening restores/focuses the live window and
+ * delivers the target incrementally, and closing the window tears the view
+ * down so the next open recreates both cleanly.
+ * Looks the descriptor up in the loader registry; returns false when the
+ * mini-IDE extension is not installed (the caller surfaces the install hint).
+ */
 export function openMiniIdePluginView(
+  workspacePath: string,
+  httpUrl = '',
+  extraParams: Record<string, string> = {},
+  theme = ''
+): boolean {
+  const base = frontendPluginManager.getDescriptor(MINI_IDE_PLUGIN_ID)
+  if (!base) return false
+  frontendPluginManager.open(
+    ensureMiniIdeWindow(),
+    { ...base, query: miniIdeQuery(workspacePath, httpUrl, extraParams, theme) },
+    // Fill the dedicated window's content bounds and track its resizes.
+    'fill',
+    // Esc (nav.hideSelf) closes the dedicated window, like the legacy editor.
+    { closeHostOnHide: true }
+  )
+  return true
+}
+
+/** Id of the Plans extension (the plan review surface). */
+export const PLANS_PLUGIN_ID = 'navide.plans'
+
+/** Build the entry query PlanWindowApp reads from `window.location.search`:
+ *  `workspace_path`, the backend `http_url` (resolved by the plans
+ *  capabilityBackend shim), and the optional `rel_path` of a plan to auto-open. */
+function plansQuery(workspacePath: string, httpUrl: string, relPath: string): string {
+  const params = new URLSearchParams()
+  if (workspacePath) params.set('workspace_path', workspacePath)
+  if (httpUrl) params.set('http_url', httpUrl)
+  if (relPath) params.set('rel_path', relPath)
+  const qs = params.toString()
+  return qs ? `?${qs}` : ''
+}
+
+/**
+ * Dev-only Plans descriptor pointing at the LOCAL build output
+ * (`dist-plugins/plans/`, produced by `pnpm run build:plans`). Registered at
+ * startup only under `AGENT_TEAM_PLUGIN_DEV=1`, mirroring
+ * {@link devMiniIdePluginDescriptor}. The bundle is built separately
+ * (vite.plans.config.ts) with the `useBackend` → capabilityBackend alias, so it
+ * is not served by the electron-vite dev server: `devUrl` is empty and it
+ * always loadFiles. `plans` grants only the `plans.changed` live-refresh event.
+ */
+export function devPlansPluginDescriptor(): PluginLaunchDescriptor {
+  return {
+    id: PLANS_PLUGIN_ID,
+    requires: ['fs', 'ui', 'plans'],
+    devUrl: '',
+    // __dirname is out/main in dev, so ../../ is the repo root.
+    entryFile: join(__dirname, '../../dist-plugins/plans/index.html'),
+  }
+}
+
+/**
+ * Open the Plans plugin view for a workspace (dev menu / future plan-window
+ * surface). Looks the descriptor up in the loader registry; returns false when
+ * the Plans extension is not registered. The core `?window=plans` BrowserWindow
+ * path (plan-windows.ts) is untouched — this is a parallel, opt-in surface.
+ */
+export function openPlansPluginView(
   hostWindow: BrowserWindow,
   workspacePath: string,
-  httpUrl = ''
-): void {
-  frontendPluginManager.open(hostWindow, miniIdePluginDescriptor(workspacePath, httpUrl), {
-    x: 0,
-    y: 0,
-    width: 1200,
-    height: 800,
-  })
+  httpUrl = '',
+  relPath = ''
+): boolean {
+  const base = frontendPluginManager.getDescriptor(PLANS_PLUGIN_ID)
+  if (!base) return false
+  frontendPluginManager.open(
+    hostWindow,
+    { ...base, query: plansQuery(workspacePath, httpUrl, relPath) },
+    {
+      x: 0,
+      y: 0,
+      width: 1200,
+      height: 800,
+    }
+  )
+  return true
 }

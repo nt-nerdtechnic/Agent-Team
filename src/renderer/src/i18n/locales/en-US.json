@@ -367,7 +367,10 @@
     "remove": "Remove",
     "focus": "Focus",
     "interrupt": "Interrupt",
+    "interrupt-not-running": "Cannot interrupt: agent is not running",
     "reapply-role": "Reapply role",
+    "reapply-role-no-role": "Cannot reapply: no role assigned to this agent",
+    "reapply-role-not-running": "Cannot reapply: agent is not running",
     "selected-count": "{count} selected",
     "interrupt-selected": "Interrupt selected",
     "rebuild-selected": "Rebuild selected",
@@ -641,6 +644,7 @@
         "cancel": "Cancel",
         "delete-confirm": "Delete this account? Its saved sign-in will also be removed.",
         "unsupported": "This agent does not support multiple accounts.",
+        "no-live-quota": "Not active — no live quota",
         "active-error": "This account is currently active and cannot be deleted. Switch to another account first.",
         "login-in-progress-error": "A sign-in for this account is still running. Finish or close its login pane first."
       }

@@ -24,6 +24,18 @@ import '../../src/styles/tokens/themes/light.css'
 import '../../src/styles/tokens/themes/high-contrast.css'
 
 import EditorWindowApp from '../../src/EditorWindowApp.vue'
+import { seedSettings } from '../../src/lib/settings'
+
+// Zero-flash initial theme: the host passes the current app theme as `?theme=`
+// (the plugin origin has no `window.agentTeam.getBootstrapSettings`, so the
+// settings cache seeds empty here). Stamp `data-theme` before mount and seed
+// the cache with the store's JSON-string encoding so useTheme.loadTheme()
+// keeps it; the connect-time `ui.settings.get` reconcile then takes over.
+const initialTheme = new URLSearchParams(window.location.search).get('theme')
+if (initialTheme) {
+  document.documentElement.setAttribute('data-theme', initialTheme)
+  seedSettings({ 'agent-team:theme': JSON.stringify(initialTheme) })
+}
 
 // Announce readiness to the host broker (mirrors the noop/fs_probe plugins).
 window.nav?.ready?.()

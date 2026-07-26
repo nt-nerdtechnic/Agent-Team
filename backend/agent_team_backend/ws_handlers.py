@@ -3132,11 +3132,11 @@ async def terminal_create(session: "Session", msg_id: str, msg_type: str, payloa
         # else: session lives in the real ~/.codex — resume with the
         # default env so codex can find it.
     if not login_profile_id:
-        # Wire the pane CLI to the backend's Plan MCP endpoint (/plan-mcp) by
-        # appending spawn-time flags — claude/codex only, no-op otherwise;
-        # user config files are never modified (see plan_mcp_wiring).
-        payload["command"] = app.plan_mcp_wiring.wire_command(
-            agent_key, payload["command"], app.plan_mcp_wiring.backend_port()
+        # Run plugin-registered spawn transformers over the command (e.g. the
+        # builtin navide.plans plugin appends Plan-MCP flags for claude/codex);
+        # no-op with no plugins, and a failing transformer never breaks a spawn.
+        payload["command"] = app.plugin_wiring.apply_spawn_wiring(
+            app.plugin_host, agent_key, payload["command"]
         )
     term = session.terminals.create(
         pane_id=payload["pane_id"],

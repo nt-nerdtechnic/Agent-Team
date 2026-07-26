@@ -35,7 +35,7 @@ import importlib.util
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from packaging.version import InvalidVersion, Version
 
@@ -63,6 +63,15 @@ class PluginError(Exception):
 
 
 @dataclass
+class RegisteredRoute:
+    """An HTTP route a plugin contributes: a raw ASGI app served at ``path``."""
+
+    path: str
+    asgi_app: Any
+    methods: list[str]
+
+
+@dataclass
 class PluginContext:
     """What a plugin receives on activation.
 
@@ -72,11 +81,51 @@ class PluginContext:
     to its capability object. The host fills this at load time from
     ``manifest.requires`` (see :func:`.capabilities.build_capabilities`), so a
     plugin only finds the capabilities it declared -- and nothing it did not.
+
+    The ``register_*`` methods are how an ``activate(context)`` hook plugs into
+    the backend without app.py knowing the plugin: HTTP routes, startup/shutdown
+    hooks (sync or async), and pane spawn-command transformers. The wiring layer
+    aggregates and applies them (see :mod:`.wiring`); registrations are cleared
+    on deactivate.
     """
 
     manifest: Manifest
     plugin_dir: Path
     capabilities: dict[str, Any] = field(default_factory=dict)
+    routes: list[RegisteredRoute] = field(default_factory=list)
+    startup_hooks: list[Callable[[], Any]] = field(default_factory=list)
+    shutdown_hooks: list[Callable[[], Any]] = field(default_factory=list)
+    spawn_transformers: list[Callable[[str, Any, int | None], Any]] = field(
+        default_factory=list
+    )
+
+    def register_route(self, path: str, asgi_app: Any, methods: list[str]) -> None:
+        """Ask the host to serve ``asgi_app`` (raw ASGI) at ``path``."""
+        self.routes.append(
+            RegisteredRoute(path=path, asgi_app=asgi_app, methods=list(methods))
+        )
+
+    def register_startup(self, hook: Callable[[], Any]) -> None:
+        """Register a callable (sync or async) run at backend startup."""
+        self.startup_hooks.append(hook)
+
+    def register_shutdown(self, hook: Callable[[], Any]) -> None:
+        """Register a callable (sync or async) run at backend shutdown."""
+        self.shutdown_hooks.append(hook)
+
+    def register_spawn_transformer(
+        self, transformer: Callable[[str, Any, int | None], Any]
+    ) -> None:
+        """Register a ``(agent_key, command, port) -> command`` transformer
+        applied to pane spawn commands at terminal.create time."""
+        self.spawn_transformers.append(transformer)
+
+    def clear_registrations(self) -> None:
+        """Drop everything registered during activation (used on deactivate)."""
+        self.routes.clear()
+        self.startup_hooks.clear()
+        self.shutdown_hooks.clear()
+        self.spawn_transformers.clear()
 
 
 @dataclass
@@ -160,6 +209,7 @@ class PluginHost:
                     f"plugin {plugin_id!r} failed to deactivate: {err}"
                 ) from err
         loaded.activated = False
+        loaded.context.clear_registrations()
 
     def unload(self, plugin_id: str) -> None:
         """Deactivate (if needed) and remove the plugin from the host."""
@@ -177,7 +227,42 @@ class PluginHost:
         """Return the manifests of all currently loaded plugins."""
         return [loaded.manifest for loaded in self._loaded.values()]
 
+    # -- aggregates over activated plugins (applied by the wiring layer) ----
+
+    def registered_routes(self) -> list[RegisteredRoute]:
+        """Routes contributed by currently activated plugins, in load order."""
+        return [route for lp in self._activated() for route in lp.context.routes]
+
+    def startup_hooks(self) -> list[tuple[str, Callable[[], Any]]]:
+        """``(plugin_id, hook)`` pairs from activated plugins, in load order."""
+        return [
+            (lp.manifest.id, hook)
+            for lp in self._activated()
+            for hook in lp.context.startup_hooks
+        ]
+
+    def shutdown_hooks(self) -> list[tuple[str, Callable[[], Any]]]:
+        """``(plugin_id, hook)`` pairs from activated plugins, in load order."""
+        return [
+            (lp.manifest.id, hook)
+            for lp in self._activated()
+            for hook in lp.context.shutdown_hooks
+        ]
+
+    def spawn_transformers(
+        self,
+    ) -> list[tuple[str, Callable[[str, Any, int | None], Any]]]:
+        """``(plugin_id, transformer)`` pairs from activated plugins."""
+        return [
+            (lp.manifest.id, transformer)
+            for lp in self._activated()
+            for transformer in lp.context.spawn_transformers
+        ]
+
     # -- internals ---------------------------------------------------------
+
+    def _activated(self) -> list[LoadedPlugin]:
+        return [lp for lp in self._loaded.values() if lp.activated]
 
     def _grant_capabilities(self, context: PluginContext) -> None:
         """Populate ``context.capabilities`` per the manifest's declared needs.

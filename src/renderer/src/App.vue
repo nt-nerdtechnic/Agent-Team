@@ -8953,7 +8953,7 @@ function paneIsCommander(p: ActivePane): boolean {
               class="meeting-loop"
               :class="{ waiting: p.loopWaitUntil != null }"
             >∞ Loop</span>
-            <span class="meeting-badge" :data-status="p.status">{{ p.status }}</span>
+            <span class="meeting-badge" :data-status="p.status">{{ p.status === 'stopped' ? 'STOP' : p.status }}</span>
           </div>
           <div v-if="paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id)).length === 0" class="meeting-empty">
             只有一個 agent
@@ -9008,7 +9008,7 @@ function paneIsCommander(p: ActivePane): boolean {
               class="spotlight-thumb-loop"
               :class="{ waiting: p.loopWaitUntil != null }"
             >∞ Loop</span>
-            <span class="spotlight-thumb-badge" :data-status="p.status">{{ p.status }}</span>
+            <span class="spotlight-thumb-badge" :data-status="p.status">{{ p.status === 'stopped' ? 'STOP' : p.status }}</span>
           </div>
         </div>
         <div v-if="paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id)).length === 0" class="spotlight-strip-empty">
@@ -9075,7 +9075,7 @@ function paneIsCommander(p: ActivePane): boolean {
               class="meeting-loop"
               :class="{ waiting: p.loopWaitUntil != null }"
             >∞ Loop</span>
-            <span class="meeting-badge" :data-status="p.status">{{ p.status }}</span>
+            <span class="meeting-badge" :data-status="p.status">{{ p.status === 'stopped' ? 'STOP' : p.status }}</span>
           </div>
           <div v-if="paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id)).length === 0" class="meeting-empty">
             只有一個 agent
@@ -10012,8 +10012,8 @@ function paneIsCommander(p: ActivePane): boolean {
 .spotlight-thumb-badge[data-status="running"]  { background: var(--success-subtle); color: var(--success-fg); border: 1px solid var(--success-emphasis); }
 .spotlight-thumb-badge[data-status="idle"]     { background: var(--attention-subtle); color: var(--attention-bright); border: 1px solid var(--attention-emphasis); }
 .spotlight-thumb-badge[data-status="starting"] { background: var(--status-starting-subtle); color: var(--status-starting-fg); border: 1px solid var(--status-starting-emphasis); }
-.spotlight-thumb-badge[data-status="error"],
-.spotlight-thumb-badge[data-status="stopped"]  { background: var(--danger-subtle); color: var(--danger-fg); border: 1px solid var(--danger-emphasis); }
+.spotlight-thumb-badge[data-status="error"]    { background: var(--danger-subtle); color: var(--danger-fg); border: 1px solid var(--danger-emphasis); }
+.spotlight-thumb-badge[data-status="stopped"]  { background: #000000; color: #ffffff; border: 1px solid #3f3f46; }
 .spotlight-thumb-loop {
   font-size: 9px;
   padding: 1px 5px;
@@ -10134,7 +10134,7 @@ function paneIsCommander(p: ActivePane): boolean {
 }
 .meeting-badge[data-status="running"]  { background: var(--success-subtle); color: var(--success-fg); border: 1px solid var(--success-emphasis); }
 .meeting-badge[data-status="idle"]     { background: var(--attention-subtle); color: var(--attention-bright); border: 1px solid var(--attention-emphasis); }
-.meeting-badge[data-status="stopped"]  { background: var(--danger-subtle); color: var(--danger-fg); border: 1px solid var(--danger-emphasis); }
+.meeting-badge[data-status="stopped"]  { background: #000000; color: #ffffff; border: 1px solid #3f3f46; }
 .meeting-badge[data-status="starting"] { background: var(--status-starting-subtle); color: var(--status-starting-fg); border: 1px solid var(--status-starting-emphasis); }
 .meeting-badge[data-status="error"]    { background: var(--danger-subtle); color: var(--danger-bright); border: 1px solid var(--danger-emphasis); }
 .meeting-loop {

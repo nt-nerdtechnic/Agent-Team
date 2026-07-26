@@ -32,9 +32,9 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-from .applog import app_data_dir, backend_port_file
+from agent_team_backend.applog import app_data_dir, backend_port_file
 
-log = logging.getLogger("agent_team_backend.plan_mcp_wiring")
+log = logging.getLogger("agent_team_backend.plugins.builtin.navide_plans.plan_mcp_wiring")
 
 SERVER_NAME = "navide-plans"
 CLAUDE_CONFIG_FILENAME = "plan-mcp.json"

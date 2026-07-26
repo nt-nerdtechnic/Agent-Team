@@ -367,7 +367,10 @@
     "remove": "移除",
     "focus": "聚焦",
     "interrupt": "中斷",
+    "interrupt-not-running": "無法中斷：Agent 目前未在執行中",
     "reapply-role": "重新套用角色",
+    "reapply-role-no-role": "無法套用：此 Agent 未設定角色",
+    "reapply-role-not-running": "無法套用：Agent 目前未在執行中",
     "selected-count": "已選 {count} 個",
     "interrupt-selected": "中斷所選",
     "rebuild-selected": "重建所選",
@@ -641,6 +644,7 @@
         "cancel": "取消",
         "delete-confirm": "確定刪除此帳號？其儲存的登入憑證也會一併移除。",
         "unsupported": "此 agent 不支援多帳號。",
+        "no-live-quota": "非使用中，無即時額度",
         "active-error": "此帳號目前使用中，請先切換到其他帳號再刪除。",
         "login-in-progress-error": "此帳號的登入程序仍在進行中，請先完成或關閉其登入 pane。"
       }

@@ -6,6 +6,10 @@ import {
   assertKnownCapabilities,
   assertSafeEntryPath,
   assertRegistryUrlAllowed,
+  assertOfficialPublisher,
+  isOfficialPluginId,
+  publicKeysEqual,
+  resolveOfficialPublisherKey,
   sensitiveCapabilities,
   verifyPackage,
   PluginVerifyError,
@@ -191,5 +195,69 @@ describe('verifyPackage policy', () => {
     } catch (err) {
       expect((err as PluginVerifyError).code).toBe('CAP_UNKNOWN')
     }
+  })
+})
+
+describe('official publisher pinning', () => {
+  const officialKey = generateKeyPairSync('ed25519')
+  const officialPem = officialKey.publicKey.export({ type: 'spki', format: 'pem' }).toString()
+  const otherKey = generateKeyPairSync('ed25519')
+  const otherPem = otherKey.publicKey.export({ type: 'spki', format: 'pem' }).toString()
+
+  it('isOfficialPluginId flags only the navide. namespace', () => {
+    expect(isOfficialPluginId('navide.mini-ide')).toBe(true)
+    expect(isOfficialPluginId('acme.demo')).toBe(false)
+  })
+
+  it('resolveOfficialPublisherKey: env override wins, empty → null (fail-closed)', () => {
+    expect(resolveOfficialPublisherKey({ AGENT_TEAM_OFFICIAL_PLUGIN_KEY: officialPem })).toBe(
+      officialPem.trim()
+    )
+    // No env override and an empty build-time constant → no pinned key at all.
+    expect(resolveOfficialPublisherKey({})).toBeNull()
+    expect(resolveOfficialPublisherKey({ AGENT_TEAM_OFFICIAL_PLUGIN_KEY: '   ' })).toBeNull()
+  })
+
+  it('publicKeysEqual compares DER bytes, tolerating whitespace, never throwing', () => {
+    expect(publicKeysEqual(officialPem, officialPem.trim() + '\n')).toBe(true)
+    expect(publicKeysEqual(officialPem, otherPem)).toBe(false)
+    expect(publicKeysEqual('not-a-pem', officialPem)).toBe(false)
+  })
+
+  it('allows an official-namespace plugin signed by the pinned key', () => {
+    expect(() =>
+      assertOfficialPublisher('navide.mini-ide', officialPem, TRUST_SIGNED, officialPem)
+    ).not.toThrow()
+  })
+
+  it('rejects a navide. plugin signed by a different (non-official) key', () => {
+    try {
+      assertOfficialPublisher('navide.mini-ide', otherPem, TRUST_SIGNED, officialPem)
+      throw new Error('expected throw')
+    } catch (err) {
+      expect((err as PluginVerifyError).code).toBe('NOT_OFFICIAL')
+    }
+  })
+
+  it('rejects an unsigned navide. plugin', () => {
+    try {
+      assertOfficialPublisher('navide.mini-ide', null, TRUST_UNSIGNED, officialPem)
+      throw new Error('expected throw')
+    } catch (err) {
+      expect((err as PluginVerifyError).code).toBe('NOT_OFFICIAL')
+    }
+  })
+
+  it('rejects any navide. plugin when no pinned key is configured (fail-closed)', () => {
+    try {
+      assertOfficialPublisher('navide.mini-ide', officialPem, TRUST_SIGNED, null)
+      throw new Error('expected throw')
+    } catch (err) {
+      expect((err as PluginVerifyError).code).toBe('NOT_OFFICIAL')
+    }
+  })
+
+  it('is a no-op for third-party ids regardless of trust or pin', () => {
+    expect(() => assertOfficialPublisher('acme.demo', null, TRUST_UNSIGNED, null)).not.toThrow()
   })
 })

@@ -1,7 +1,6 @@
 // Per-workspace registry for plan review windows: one window per workspace,
 // reopening the same workspace focuses the existing window. Kept free of
-// Electron imports so the single-instance semantics are unit-testable
-// (same pattern as editor-window-routing.ts).
+// Electron imports so the single-instance semantics are unit-testable.
 
 export interface DestroyableWindow {
   isDestroyed(): boolean

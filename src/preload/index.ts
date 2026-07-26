@@ -419,7 +419,6 @@ contextBridge.exposeInMainWorld('agentTeam', {
       ipcRenderer.invoke('permissions:open-settings', key),
   },
   plugins: {
-    isEnabled: (): Promise<boolean> => ipcRenderer.invoke('plugins:isEnabled'),
     listInstalled: (): Promise<InstalledPluginSummary[]> =>
       ipcRenderer.invoke('plugins:listInstalled'),
     marketplaceSearch: (query?: string): Promise<MarketplaceListResponse> =>

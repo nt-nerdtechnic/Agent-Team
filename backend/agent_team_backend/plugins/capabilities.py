@@ -30,6 +30,10 @@ class CapabilityError(Exception):
     """Raised when a capability cannot be built or used."""
 
 
+class CapabilityNotAvailable(CapabilityError):
+    """Raised when a capability method has no backend implementation yet."""
+
+
 class FsCapability:
     """Scoped filesystem access, delegating to ``app.fs_service``.
 
@@ -207,22 +211,53 @@ class GitCapability:
         )
 
 
+# terminal.run subprocess guard rails: hard wall-clock timeout and output cap
+# (mirrors the shell.run WS handler's 30s / 8000-char limits).
+_RUN_TIMEOUT_SECONDS = 30
+_RUN_OUTPUT_LIMIT = 8000
+
+
+def _validate_workspace_cwd(ws_path: str | None) -> "Path | None":
+    """Resolve and validate a ``terminal.run`` cwd against known workspaces.
+
+    ``None``/empty passes through as None (inherit the backend's cwd).
+    Otherwise the resolved path must be a registered workspace root (per
+    ``app.attribution.known_workspaces()``) or a subdirectory of one, and an
+    existing directory. Mirrors the shell.run WS handler's validation;
+    TODO(Phase 2): share one code path via an extracted ShellService.
+    """
+    if not ws_path:
+        return None
+    from pathlib import Path
+
+    from .. import app
+
+    resolved = Path(ws_path).resolve()
+    known_roots = [Path(w).resolve() for w in app.attribution.known_workspaces()]
+    if not any(
+        resolved == root or resolved.is_relative_to(root) for root in known_roots
+    ):
+        raise CapabilityError("workspace path not registered")
+    if not resolved.is_dir():
+        raise CapabilityError("invalid workspace path")
+    return resolved
+
+
 class TerminalCapability:
     """Scoped terminal access, delegating to the app terminal service.
 
     Interface shell: terminal creation is tightly coupled to a PTY and the
     running event loop (``TerminalService.create`` needs a pane id, cwd, PTY
     wiring), so this façade exposes only a query-type method -- ``list`` of live
-    session ids -- to prove the delegation path. It reads the service's private
-    ``_sessions`` because no public accessor exists yet; Phase 2 should add a
-    public listing API and a properly scoped ``create`` façade.
+    session ids (via the service's public ``list_session_ids``) -- to prove the
+    delegation path. Phase 2 should add a properly scoped ``create`` façade.
     """
 
     def list(self) -> list[str]:
         # Signature provisional -- interface shell, filled in during Phase 2.
         from .. import app
 
-        return list(app.get_terminals()._sessions.keys())
+        return app.get_terminals().list_session_ids()
 
     async def run(self, command: str, cwd: str | None = None) -> dict[str, Any]:
         # Signature provisional -- interface shell, filled in during Phase 2.
@@ -230,23 +265,33 @@ class TerminalCapability:
         # The ``shell.run`` WS handler has no backing service: it inlines
         # ``asyncio.create_subprocess_exec('/bin/sh', '-c', cmd)`` after
         # validating that ``cwd`` is a registered workspace. This façade wraps
-        # the same restricted subprocess call. Workspace-path validation is the
-        # host's responsibility and is intentionally NOT duplicated here; Phase
-        # 2 should extract a proper ShellService and route both through it.
+        # the same restricted subprocess call with the same cwd validation and
+        # timeout. TODO(Phase 2): extract a proper ShellService and route both
+        # the shell.run WS handler and this façade through it.
         import asyncio
 
+        resolved_cwd = _validate_workspace_cwd(cwd)
         proc = await asyncio.create_subprocess_exec(
             "/bin/sh",
             "-c",
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
-            cwd=cwd,
+            cwd=str(resolved_cwd) if resolved_cwd else None,
         )
-        stdout, _ = await proc.communicate()
+        try:
+            stdout, _ = await asyncio.wait_for(
+                proc.communicate(), timeout=_RUN_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError as err:
+            proc.kill()
+            await proc.wait()  # reap; leaves no zombie/transport behind
+            raise CapabilityError(
+                f"terminal.run timed out after {_RUN_TIMEOUT_SECONDS}s"
+            ) from err
         return {
             "ok": True,
-            "output": stdout.decode("utf-8", errors="replace"),
+            "output": stdout.decode("utf-8", errors="replace")[:_RUN_OUTPUT_LIMIT],
             "exit_code": proc.returncode,
         }
 
@@ -389,33 +434,37 @@ class ChatCapability:
     # HTTP inside their WS handler. They raise until Phase 2 extracts a service.
 
     def start(self, *args: Any, **kwargs: Any) -> Any:
-        raise CapabilityError(
-            "chat.start is provisional: session/agent-loop coupled, "
-            "no core service to delegate to yet (Phase 2)"
+        raise CapabilityNotAvailable(
+            "capability not available: chat.start is provisional — "
+            "session/agent-loop coupled, no core service to delegate to yet "
+            "(Phase 2)"
         )
 
     def stop(self, *args: Any, **kwargs: Any) -> Any:
-        raise CapabilityError(
-            "chat.stop is provisional: session-task coupled, "
-            "no core service to delegate to yet (Phase 2)"
+        raise CapabilityNotAvailable(
+            "capability not available: chat.stop is provisional — "
+            "session-task coupled, no core service to delegate to yet (Phase 2)"
         )
 
     def test_connection(self, *args: Any, **kwargs: Any) -> Any:
-        raise CapabilityError(
-            "chat.test_connection is provisional: per-provider HTTP inlined in "
-            "the WS handler, no core service to delegate to yet (Phase 2)"
+        raise CapabilityNotAvailable(
+            "capability not available: chat.test_connection is provisional — "
+            "per-provider HTTP inlined in the WS handler, no core service to "
+            "delegate to yet (Phase 2)"
         )
 
     def enhance_prompt(self, *args: Any, **kwargs: Any) -> Any:
-        raise CapabilityError(
-            "chat.enhance_prompt is provisional: streaming inlined in the WS "
-            "handler, no core service to delegate to yet (Phase 2)"
+        raise CapabilityNotAvailable(
+            "capability not available: chat.enhance_prompt is provisional — "
+            "streaming inlined in the WS handler, no core service to delegate "
+            "to yet (Phase 2)"
         )
 
     def web_search(self, *args: Any, **kwargs: Any) -> Any:
-        raise CapabilityError(
-            "chat.web_search is provisional: HTTP inlined in the WS handler, "
-            "no core service to delegate to yet (Phase 2)"
+        raise CapabilityNotAvailable(
+            "capability not available: chat.web_search is provisional — "
+            "HTTP inlined in the WS handler, no core service to delegate to "
+            "yet (Phase 2)"
         )
 
 
@@ -477,10 +526,10 @@ class UiCapability:
     programming error and raises.
     """
 
-    def _host_side(self, name: str) -> "CapabilityError":
-        return CapabilityError(
-            f"ui.{name} is host-side, brokered in the Electron main process; "
-            "the backend has no implementation"
+    def _host_side(self, name: str) -> "CapabilityNotAvailable":
+        return CapabilityNotAvailable(
+            f"capability not available: ui.{name} is host-side, brokered in "
+            "the Electron main process; the backend has no implementation"
         )
 
     def get_cli_pane_buffer(self, *args: Any, **kwargs: Any) -> Any:
@@ -499,6 +548,15 @@ class UiCapability:
         raise self._host_side("get_path_for_file")
 
 
+class PlansCapability:
+    """Marker capability for the plans namespace.
+
+    The builtin ``navide.plans`` plugin *provides* the plan feature rather
+    than consuming a core service, so this capability carries no methods yet;
+    it exists so ``requires: ["plans"]`` validates and is granted.
+    """
+
+
 # Maps a capability namespace (as declared in ``manifest.requires``) to its
 # capability class. Manifest validation already restricts ``requires`` to
 # KNOWN_CAPABILITIES, so this stays in lock-step with that set.
@@ -510,6 +568,7 @@ _CAPABILITY_CLASSES: dict[str, type] = {
     "chat": ChatCapability,
     "ui": UiCapability,
     "issues": IssuesCapability,
+    "plans": PlansCapability,
 }
 
 

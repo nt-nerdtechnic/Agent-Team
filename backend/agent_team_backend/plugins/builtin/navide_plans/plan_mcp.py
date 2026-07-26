@@ -13,8 +13,9 @@ Lifecycle: the SDK's ``StreamableHTTPSessionManager.run()`` is once-only per
 instance, so instead of ``FastMCP.streamable_http_app()`` (which caches one
 manager forever) this module exposes a thin ASGI endpoint that delegates to
 the manager created by the latest :func:`startup` call. ``startup`` /
-``shutdown`` are invoked from app.py's startup/shutdown events, which Starlette
-runs in the same lifespan task — safe for the anyio task group inside.
+``shutdown`` are registered as plugin lifecycle hooks (see backend.py) and run
+from app.py's startup/shutdown events, which Starlette runs in the same
+lifespan task — safe for the anyio task group inside.
 """
 
 from __future__ import annotations
@@ -33,9 +34,14 @@ from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.responses import PlainTextResponse
 from starlette.types import Receive, Scope, Send
 
-from .fs_service import FsError, _resolve_safe, write_file
-from .plan_meta import PLAN_STAGES, TODO_STATUSES, parse_plan_meta, write_plan_meta
-from .plan_provisioning import TEMPLATE_FILENAME, ensure_plan_assets
+from agent_team_backend.fs_service import FsError, _resolve_safe, write_file
+from agent_team_backend.plan_meta import (
+    PLAN_STAGES,
+    TODO_STATUSES,
+    parse_plan_meta,
+    write_plan_meta,
+)
+from agent_team_backend.plan_provisioning import TEMPLATE_FILENAME, ensure_plan_assets
 
 PLANS_REL_DIR = ".agent-team/plans"
 
@@ -429,7 +435,7 @@ def _terminal_service() -> Any:
     app.py imports this module, and the singleton binds to the running loop).
     Maps an unavailable service to a clear tool error.
     """
-    from . import app as _app  # local import: app.py imports plan_mcp
+    from agent_team_backend import app as _app  # local import, resolved at call time
 
     try:
         service = _app.get_terminals()

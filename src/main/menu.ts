@@ -57,6 +57,8 @@ export interface AppMenuHooks {
   onOpenFsProbePlugin?: () => void
   /** Same dev-only submenu: opens the M4 mini-IDE plugin view. */
   onOpenMiniIdePlugin?: () => void
+  /** Same dev-only submenu: opens the Plans plugin view. */
+  onOpenPlansPlugin?: () => void
 }
 
 export function installApplicationMenu(
@@ -193,7 +195,7 @@ export function installApplicationMenu(
   // Dev-only, flag-gated: a Developer submenu to launch the M1 plugin view.
   // Never present unless the caller passes the hook (see index.ts gating), so
   // the default UI is untouched.
-  if (hooks.onOpenNoopPlugin || hooks.onOpenFsProbePlugin || hooks.onOpenMiniIdePlugin) {
+  if (hooks.onOpenNoopPlugin || hooks.onOpenFsProbePlugin || hooks.onOpenMiniIdePlugin || hooks.onOpenPlansPlugin) {
     const submenu: MenuItemConstructorOptions[] = []
     if (hooks.onOpenNoopPlugin) {
       submenu.push({ label: 'Open no-op plugin view', click: () => hooks.onOpenNoopPlugin?.() })
@@ -203,6 +205,9 @@ export function installApplicationMenu(
     }
     if (hooks.onOpenMiniIdePlugin) {
       submenu.push({ label: 'Open mini-IDE plugin view', click: () => hooks.onOpenMiniIdePlugin?.() })
+    }
+    if (hooks.onOpenPlansPlugin) {
+      submenu.push({ label: 'Open Plans plugin view', click: () => hooks.onOpenPlansPlugin?.() })
     }
     template.push({ label: 'Developer', submenu })
   }

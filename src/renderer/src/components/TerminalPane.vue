@@ -362,7 +362,7 @@ onMounted(() => {
           class="status"
           :data-status="displayStatus"
           :title="displayStatus === 'idle' ? $t('pane.terminal.idle-status-tooltip') : ''"
-        >{{ displayStatus }}</span>
+        >{{ displayStatus === 'stopped' ? 'STOP' : displayStatus }}</span>
         <UsageBadge v-if="agentKey" :agent-key="agentKey" :cli-profiles="cliProfiles" />
       </div>
       <div v-if="subtitle" class="header-sub">{{ subtitle }}</div>
@@ -591,6 +591,11 @@ onMounted(() => {
 .status[data-status='idle'] {
   background: var(--attention-muted);
   color: var(--attention-fg);
+}
+.status[data-status='stopped'] {
+  background: #000000;
+  color: #ffffff;
+  border: 1px solid #3f3f46;
 }
 .xterm-host {
   flex: 1;

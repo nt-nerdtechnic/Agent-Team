@@ -19,7 +19,7 @@
 // Ed25519 signature over the ascii-encoded sha256 *hex* digest; `trust.py`
 // flags `fs`/`terminal` as sensitive. Kept in sync deliberately.
 
-import { createHash, createPublicKey, verify as cryptoVerify } from 'node:crypto'
+import { createHash, createPublicKey, timingSafeEqual, verify as cryptoVerify } from 'node:crypto'
 
 /** Capability namespaces the host can authorize. Mirror of the backend
  *  `manifest.KNOWN_CAPABILITIES` (fs/git/terminal/search/chat/ui/issues). */
@@ -47,6 +47,7 @@ export type VerifyErrorCode =
   | 'SIGNATURE_INVALID'
   | 'CAP_UNKNOWN'
   | 'ZIP_SLIP'
+  | 'NOT_OFFICIAL'
 
 export class PluginVerifyError extends Error {
   constructor(
@@ -82,6 +83,83 @@ export function verifyEd25519(
     return cryptoVerify(null, Buffer.from(digest, 'ascii'), key, sig)
   } catch {
     return false
+  }
+}
+
+// ── Official publisher trust (the `navide.` namespace) ──────────────────────
+//
+// Ids under `navide.` (e.g. `navide.mini-ide`) name plugins the host treats as
+// first-party: they may replace core surfaces like the editor. Installing one
+// therefore requires MORE than a valid publisher signature — the signing key
+// must equal the PINNED official publisher key. Fail-closed: with no pinned
+// key configured, no `navide.` package can be installed at all.
+//
+// Pinned key sources, in precedence order:
+//   1. `AGENT_TEAM_OFFICIAL_PLUGIN_KEY` env (PEM) — dev/test override.
+//   2. `OFFICIAL_PUBLISHER_KEY_PEM` build-time constant below.
+
+/** Publisher namespace prefix reserved for first-party plugins. */
+export const OFFICIAL_PLUGIN_PREFIX = 'navide.'
+
+/**
+ * Build-time pinned official publisher public key (PEM SubjectPublicKeyInfo,
+ * Ed25519). Intentionally EMPTY until the production official keypair is
+ * minted — an empty pin means every `navide.` install is refused (fail-closed),
+ * it never means "skip the check".
+ */
+export const OFFICIAL_PUBLISHER_KEY_PEM = ''
+
+/** True when `id` claims the official first-party namespace. */
+export function isOfficialPluginId(id: string): boolean {
+  return id.startsWith(OFFICIAL_PLUGIN_PREFIX)
+}
+
+/** Resolve the effective pinned official key (env override → build constant),
+ *  or null when neither is configured. */
+export function resolveOfficialPublisherKey(
+  env: Record<string, string | undefined> = process.env
+): string | null {
+  const override = env['AGENT_TEAM_OFFICIAL_PLUGIN_KEY']?.trim()
+  const pem = override || OFFICIAL_PUBLISHER_KEY_PEM
+  return pem ? pem : null
+}
+
+/** Compare two PEM public keys by their DER (SPKI) bytes, so incidental
+ *  whitespace/encoding differences never matter. False on any malformed key. */
+export function publicKeysEqual(a: string, b: string): boolean {
+  try {
+    const da = createPublicKey(a).export({ type: 'spki', format: 'der' })
+    const db = createPublicKey(b).export({ type: 'spki', format: 'der' })
+    return da.length === db.length && timingSafeEqual(da, db)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Enforce the official-namespace policy for an install. No-op for third-party
+ * ids. For a `navide.` id, throws `NOT_OFFICIAL` unless the package earned
+ * `signed-verified` AND its publisher key equals the pinned official key.
+ * A missing pinned key also throws (fail-closed).
+ */
+export function assertOfficialPublisher(
+  id: string,
+  publicKey: string | null | undefined,
+  trustTier: TrustTier,
+  pinnedKey: string | null
+): void {
+  if (!isOfficialPluginId(id)) return
+  if (!pinnedKey) {
+    throw new PluginVerifyError(
+      'NOT_OFFICIAL',
+      `no pinned official publisher key is configured; refusing official-namespace plugin '${id}'`
+    )
+  }
+  if (trustTier !== TRUST_SIGNED || !publicKey || !publicKeysEqual(publicKey, pinnedKey)) {
+    throw new PluginVerifyError(
+      'NOT_OFFICIAL',
+      `plugin '${id}' claims the official 'navide.' namespace but is not signed by the pinned official publisher key`
+    )
   }
 }
 

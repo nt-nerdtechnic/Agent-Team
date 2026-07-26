@@ -6,12 +6,17 @@
 // An installed plugin lives at `<root>/<id>/` and contains:
 //   * `manifest.json` — the same trimmed manifest the backend host validates.
 //   * the built frontend entry the manifest's `entry` field points at.
-// The mini-IDE stays a separately-built *built-in* descriptor (see
-// frontendPluginManager); this loader covers third-party installs.
+// This loader covers third-party installs; the bundled builtin mini-IDE dir is
+// validated through the same code via `loadPluginDir` (see frontendPluginManager).
 
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { assertKnownCapabilities, assertSafeEntryPath, PluginVerifyError } from './pluginVerify'
+import {
+  assertKnownCapabilities,
+  assertSafeEntryPath,
+  verifyEd25519,
+  PluginVerifyError,
+} from './pluginVerify'
 import type { PluginLaunchDescriptor } from './frontendPluginManager'
 
 const ID_RE = /^[a-z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9-]*$/
@@ -94,6 +99,68 @@ export function manifestToDescriptor(
   }
 }
 
+// ── Official install receipt ────────────────────────────────────────────────
+//
+// How install-time verification reaches load-time: when `commitInstall` writes
+// an official (`navide.`) package it also writes `.navide-receipt.json` into
+// the plugin dir, recording the package digest and its Ed25519 signature. At
+// load time the loader re-verifies that signature against the CURRENT pinned
+// official key — so a `navide.` dir with a missing/forged receipt, or a pin
+// that has since changed/been removed, is refused (fail-closed). The receipt is
+// evidence carried forward, not a trusted flag: nothing trusts a bare
+// `official: true` boolean.
+
+/** Receipt filename written by commitInstall into an official plugin's dir. */
+export const OFFICIAL_RECEIPT_NAME = '.navide-receipt.json'
+
+export interface OfficialReceipt {
+  id: string
+  version: string
+  /** sha256 hex digest of the installed package bytes. */
+  digest: string
+  /** Detached base64 Ed25519 signature over the digest (official key). */
+  signature: string
+}
+
+/**
+ * Decide whether an installed `navide.` plugin dir may register: read its
+ * receipt, check it names this plugin id, and re-verify the recorded package
+ * signature against the pinned official key. Returns `ok: false` with a reason
+ * on ANY failure (no receipt, malformed, id mismatch, no pinned key, bad
+ * signature) — the caller must then refuse to register the descriptor.
+ */
+export function verifyOfficialInstall(
+  pluginDir: string,
+  pluginId: string,
+  pinnedKey: string | null
+): { ok: true } | { ok: false; reason: string } {
+  if (!pinnedKey) {
+    return { ok: false, reason: 'no pinned official publisher key configured' }
+  }
+  let receipt: Partial<OfficialReceipt>
+  try {
+    receipt = JSON.parse(readFileSync(join(pluginDir, OFFICIAL_RECEIPT_NAME), 'utf8'))
+  } catch {
+    return { ok: false, reason: `missing or unreadable ${OFFICIAL_RECEIPT_NAME}` }
+  }
+  if (
+    typeof receipt !== 'object' ||
+    receipt === null ||
+    typeof receipt.digest !== 'string' ||
+    typeof receipt.signature !== 'string' ||
+    receipt.id !== pluginId
+  ) {
+    return { ok: false, reason: `malformed ${OFFICIAL_RECEIPT_NAME}` }
+  }
+  if (!verifyEd25519(receipt.digest, receipt.signature, pinnedKey)) {
+    return {
+      ok: false,
+      reason: 'install receipt signature failed verification against the pinned official key',
+    }
+  }
+  return { ok: true }
+}
+
 export interface ScannedPlugin {
   /** The plugin's on-disk directory. */
   dir: string
@@ -101,6 +168,23 @@ export interface ScannedPlugin {
   descriptor?: PluginLaunchDescriptor
   /** The parse/validation error message, when the directory was rejected. */
   error?: string
+}
+
+/**
+ * Read one plugin directory: parse + validate its `manifest.json` and derive a
+ * launch descriptor. Any failure (missing dir, unreadable/invalid manifest) is
+ * returned as an `error` instead of thrown. Shared by the installed-root scan
+ * below and by the bundled builtin mini-IDE resolution, so the bundled copy
+ * goes through exactly the same manifest validation as a marketplace install.
+ */
+export function loadPluginDir(dir: string): ScannedPlugin {
+  try {
+    const raw = JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8'))
+    const manifest = parseInstalledManifest(raw)
+    return { dir, descriptor: manifestToDescriptor(manifest, dir) }
+  } catch (err) {
+    return { dir, error: err instanceof Error ? err.message : String(err) }
+  }
 }
 
 /**
@@ -124,13 +208,7 @@ export function scanInstalledPlugins(root: string): ScannedPlugin[] {
     } catch {
       continue
     }
-    try {
-      const raw = JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8'))
-      const manifest = parseInstalledManifest(raw)
-      out.push({ dir, descriptor: manifestToDescriptor(manifest, dir) })
-    } catch (err) {
-      out.push({ dir, error: err instanceof Error ? err.message : String(err) })
-    }
+    out.push(loadPluginDir(dir))
   }
   return out
 }

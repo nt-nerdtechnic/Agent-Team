@@ -16,13 +16,18 @@ import { dirname, join } from 'node:path'
 import {
   verifyPackage,
   assertSafeEntryPath,
+  assertOfficialPublisher,
+  isOfficialPluginId,
+  resolveOfficialPublisherKey,
   type TrustTier,
 } from './pluginVerify'
 import { readZipEntries, readManifestFromEntries, type ZipEntry } from './pluginPackage'
 import {
   parseInstalledManifest,
   manifestToDescriptor,
+  OFFICIAL_RECEIPT_NAME,
   type InstalledManifest,
+  type OfficialReceipt,
 } from './installedPlugins'
 import type { PluginLaunchDescriptor } from './frontendPluginManager'
 
@@ -55,6 +60,13 @@ export interface PreparedInstall {
   /** True when the plugin declares a sensitive capability and the UI must
    *  obtain a second confirmation before {@link commitInstall}. */
   requiresConfirmation: boolean
+  /** True only for a `navide.` package that passed the pinned-official-key
+   *  check in prepareInstall. Drives the receipt write + trusted registration. */
+  official: boolean
+  /** Verified sha256 hex digest of the package bytes (receipt material). */
+  digest: string
+  /** Detached signature over the digest, when present (receipt material). */
+  signature: string | null
 }
 
 export class InstallError extends Error {
@@ -134,7 +146,7 @@ export async function prepareInstall(
     )
   }
 
-  const { trustTier, sensitive } = verifyPackage({
+  const { digest, trustTier, sensitive } = verifyPackage({
     bytes,
     expectedDigest: req.expectedDigest,
     signature: req.signature,
@@ -142,6 +154,11 @@ export async function prepareInstall(
     claimedTrustTier: req.claimedTrustTier,
     requires: manifest.requires,
   })
+
+  // Official-namespace policy: a `navide.` package must be signed by the
+  // pinned official publisher key (throws NOT_OFFICIAL otherwise, including
+  // when no pin is configured — fail-closed).
+  assertOfficialPublisher(manifest.id, req.publicKey, trustTier, resolveOfficialPublisherKey())
 
   return {
     id: manifest.id,
@@ -151,6 +168,9 @@ export async function prepareInstall(
     trustTier,
     sensitive,
     requiresConfirmation: sensitive.length > 0,
+    official: isOfficialPluginId(manifest.id),
+    digest,
+    signature: req.signature ?? null,
   }
 }
 
@@ -169,9 +189,30 @@ export function commitInstall(
   deps.rmrf(dir) // idempotent replace (fresh install or update)
   for (const entry of prepared.entries) {
     assertSafeEntryPath(entry.path)
+    // The receipt name is written exclusively by the host below — a package
+    // must not be able to smuggle its own (forged) install receipt.
+    if (entry.path === OFFICIAL_RECEIPT_NAME) {
+      throw new InstallError(`package must not contain ${OFFICIAL_RECEIPT_NAME}`)
+    }
     const target = join(dir, entry.path)
     deps.mkdirp(dirname(target))
     deps.writeFile(target, entry.data)
+  }
+  // Official installs persist the verified digest + signature so the loader
+  // can re-verify against the pinned key on every startup (see
+  // `verifyOfficialInstall` in installedPlugins.ts).
+  if (prepared.official && prepared.signature) {
+    const receipt: OfficialReceipt = {
+      id: prepared.id,
+      version: prepared.version,
+      digest: prepared.digest,
+      signature: prepared.signature,
+    }
+    deps.mkdirp(dir)
+    deps.writeFile(
+      join(dir, OFFICIAL_RECEIPT_NAME),
+      new TextEncoder().encode(JSON.stringify(receipt, null, 2))
+    )
   }
   return manifestToDescriptor(prepared.manifest, dir)
 }

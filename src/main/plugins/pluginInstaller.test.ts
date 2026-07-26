@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest'
-import { generateKeyPairSync, sign as edSign } from 'node:crypto'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { generateKeyPairSync, sign as edSign, type KeyObject } from 'node:crypto'
 import {
   prepareInstall,
   commitInstall,
@@ -166,6 +166,131 @@ describe('commitInstall', () => {
     const { deps } = fakeDeps(bytes, digest)
     const prepared = await prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
     expect(() => commitInstall(prepared, '/plugins', deps)).toThrow(/unsafe archive entry/)
+  })
+})
+
+describe('official (navide.) install policy', () => {
+  const REQ_OFFICIAL = {
+    registryUrl: 'http://localhost:8787',
+    namespace: 'navide',
+    name: 'mini-ide',
+    version: '1.0.0',
+  }
+
+  function officialPkg(): { bytes: Uint8Array; digest: string } {
+    return pkg([
+      {
+        name: 'manifest.json',
+        data: manifest({ id: 'navide.mini-ide', name: 'Mini IDE', publisher: 'navide', entry: 'index.html' }),
+      },
+      { name: 'index.html', data: '<!doctype html>' },
+    ])
+  }
+
+  function pem(key: KeyObject): string {
+    return key.export({ type: 'spki', format: 'pem' }).toString()
+  }
+
+  function signWith(privateKey: KeyObject, digest: string): string {
+    return edSign(null, Buffer.from(digest, 'ascii'), privateKey).toString('base64')
+  }
+
+  const official = generateKeyPairSync('ed25519')
+  const rogue = generateKeyPairSync('ed25519')
+  let envBefore: string | undefined
+
+  beforeEach(() => {
+    envBefore = process.env['AGENT_TEAM_OFFICIAL_PLUGIN_KEY']
+    process.env['AGENT_TEAM_OFFICIAL_PLUGIN_KEY'] = pem(official.publicKey)
+  })
+
+  afterEach(() => {
+    if (envBefore === undefined) delete process.env['AGENT_TEAM_OFFICIAL_PLUGIN_KEY']
+    else process.env['AGENT_TEAM_OFFICIAL_PLUGIN_KEY'] = envBefore
+  })
+
+  it('allows a navide. package signed by the pinned official key and writes a receipt', async () => {
+    const { bytes, digest } = officialPkg()
+    const { deps, writes } = fakeDeps(bytes, digest)
+    const prepared = await prepareInstall(
+      {
+        ...REQ_OFFICIAL,
+        expectedDigest: digest,
+        signature: signWith(official.privateKey, digest),
+        publicKey: pem(official.publicKey),
+      },
+      deps
+    )
+    expect(prepared.official).toBe(true)
+    expect(prepared.trustTier).toBe('signed-verified')
+
+    commitInstall(prepared, '/plugins', deps)
+    const receiptRaw = writes.get('/plugins/navide.mini-ide/.navide-receipt.json')
+    expect(receiptRaw).toBeDefined()
+    const receipt = JSON.parse(Buffer.from(receiptRaw!).toString('utf8'))
+    expect(receipt).toMatchObject({ id: 'navide.mini-ide', version: '1.0.0', digest })
+    expect(typeof receipt.signature).toBe('string')
+  })
+
+  it('rejects a navide. package signed by a non-official key', async () => {
+    const { bytes, digest } = officialPkg()
+    const { deps } = fakeDeps(bytes, digest)
+    await expect(
+      prepareInstall(
+        {
+          ...REQ_OFFICIAL,
+          expectedDigest: digest,
+          signature: signWith(rogue.privateKey, digest),
+          publicKey: pem(rogue.publicKey),
+        },
+        deps
+      )
+    ).rejects.toThrow(/official/)
+  })
+
+  it('rejects an unsigned navide. package', async () => {
+    const { bytes, digest } = officialPkg()
+    const { deps } = fakeDeps(bytes, digest)
+    await expect(
+      prepareInstall({ ...REQ_OFFICIAL, expectedDigest: digest }, deps)
+    ).rejects.toThrow(/official/)
+  })
+
+  it('rejects any navide. package when no pinned key is configured (fail-closed)', async () => {
+    delete process.env['AGENT_TEAM_OFFICIAL_PLUGIN_KEY']
+    const { bytes, digest } = officialPkg()
+    const { deps } = fakeDeps(bytes, digest)
+    await expect(
+      prepareInstall(
+        {
+          ...REQ_OFFICIAL,
+          expectedDigest: digest,
+          signature: signWith(official.privateKey, digest),
+          publicKey: pem(official.publicKey),
+        },
+        deps
+      )
+    ).rejects.toThrow(/no pinned official/)
+  })
+
+  it('does not write a receipt for a third-party install', async () => {
+    const { bytes, digest } = pkg()
+    const { deps, writes } = fakeDeps(bytes, digest)
+    const prepared = await prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
+    expect(prepared.official).toBe(false)
+    commitInstall(prepared, '/plugins', deps)
+    expect([...writes.keys()].some((p) => p.endsWith('.navide-receipt.json'))).toBe(false)
+  })
+
+  it('refuses a package that smuggles its own .navide-receipt.json', async () => {
+    const { bytes, digest } = pkg([
+      { name: 'manifest.json', data: manifest() },
+      { name: 'dist/main.js', data: 'x' },
+      { name: '.navide-receipt.json', data: '{"id":"acme.demo"}' },
+    ])
+    const { deps } = fakeDeps(bytes, digest)
+    const prepared = await prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
+    expect(() => commitInstall(prepared, '/plugins', deps)).toThrow(/must not contain/)
   })
 })
 

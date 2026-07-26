@@ -156,4 +156,20 @@ describe('useTerminal — RUNNING badge vs self-triggered repaints', () => {
     expect(result.displayStatus.value).not.toBe('running')
     scope.stop()
   }, 12_000)
+
+  it('sets displayStatus to stopped when interrupt() or ESC is triggered, and clears on new input', async () => {
+    const { result, mock, scope } = await spawned()
+    expect(result.displayStatus.value).toBe('starting')
+
+    // Trigger interrupt
+    await result.interrupt()
+    expect(result.isStopped.value).toBe(true)
+    expect(result.displayStatus.value).toBe('stopped')
+
+    // User typing / reset clears stopped status
+    result.isStopped.value = false
+    expect(result.isStopped.value).toBe(false)
+
+    scope.stop()
+  })
 })

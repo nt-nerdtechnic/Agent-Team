@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 # ws_handlers registry prefixes (``fs.*``, ``git.*``, terminal handlers) that a
 # future plugin host will grant to a plugin. Extend as new contracts land.
 KNOWN_CAPABILITIES: frozenset[str] = frozenset(
-    {"fs", "git", "terminal", "search", "chat", "ui", "issues"}
+    {"fs", "git", "terminal", "search", "chat", "ui", "issues", "plans"}
 )
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9-]*$")

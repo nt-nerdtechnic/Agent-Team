@@ -1613,6 +1613,13 @@ async function closeEditorWindow(): Promise<void> {
     })
     if (!ok) return
   }
+  // Inside the plugin view there is no window to close — ask the host to hide
+  // the view. The residual `?window=editor` window still closes itself.
+  const navBridge = (window as unknown as { nav?: { hideSelf?: () => void } }).nav
+  if (navBridge?.hideSelf) {
+    navBridge.hideSelf()
+    return
+  }
   window.close()
 }
 
@@ -1645,6 +1652,42 @@ function onAppKeydown(e: KeyboardEvent): void {
 // broadcasts over this window's ws connection (they used to be cross-window
 // localStorage `storage` events); re-apply on any theme key change.
 let offThemeSettingsChange: (() => void) | null = null
+
+// ── Incremental opens pushed by the host (plugin view only) ──────────────────
+// The host delivers a new open target (entry-query-shaped params) to the
+// already-running view instead of reloading it — mirroring the legacy
+// `editor:openFile` / `editor:openDiff` / `editor:openBranchDiff` channels:
+// add/reveal the tab in place so open tabs and unsaved buffers survive.
+let offOpenTarget: (() => void) | null = null
+
+function applyOpenTarget(p: Record<string, string>): void {
+  const sidebar = p.sidebar
+  if (sidebar === 'explorer' || sidebar === 'search' || sidebar === 'git') {
+    sidebarView.value = sidebar
+    sidebarHidden.value = false
+  }
+  if (p.diff_filepath) {
+    openDiff({
+      filepath: p.diff_filepath,
+      staged: p.diff_staged === 'true',
+      name: p.diff_name || undefined,
+      commit: p.diff_commit || undefined,
+    })
+    return
+  }
+  if (p.branch_diff_base) {
+    openBranchDiff({ base: p.branch_diff_base, compare: p.branch_diff_compare ?? '' })
+    return
+  }
+  if (p.filepath) {
+    const line = Number(p.line)
+    openFile({
+      filepath: p.filepath,
+      name: p.name || undefined,
+      line: Number.isFinite(line) && line > 0 ? line : undefined,
+    })
+  }
+}
 
 onMounted(() => {
   loadTheme()
@@ -1689,11 +1732,17 @@ onMounted(() => {
   api?.onOpenEditorBranchDiff?.((params) => {
     openBranchDiff({ base: params.branch_diff_base ?? 'main', compare: params.branch_diff_compare ?? '', workspacePath: params.workspace_path })
   })
+  const navBridge = (window as unknown as {
+    nav?: { onOpenTarget?: (cb: (params: Record<string, string>) => void) => () => void }
+  }).nav
+  offOpenTarget = navBridge?.onOpenTarget?.(applyOpenTarget) ?? null
   if (initialBranchDiffBase) openBranchDiff({ base: initialBranchDiffBase, compare: initialBranchDiffCompare })
 })
 onUnmounted(() => {
   offThemeSettingsChange?.()
   offThemeSettingsChange = null
+  offOpenTarget?.()
+  offOpenTarget = null
   window.removeEventListener('keydown', onAppKeydown)
   window.removeEventListener('keydown', onBcCaptureKeydown, { capture: true })
   document.removeEventListener('click', closeBcDropdown)

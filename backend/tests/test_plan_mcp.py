@@ -10,9 +10,11 @@ import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
 
 from agent_team_backend import app as backend_app
-from agent_team_backend import plan_mcp
 from agent_team_backend.app import app
 from agent_team_backend.plan_meta import parse_plan_meta
+from agent_team_backend.plugins import wiring as plugin_wiring
+from agent_team_backend.plugins.builtin.navide_plans import plan_mcp
+from agent_team_backend.plugins.host import PluginHost
 
 
 def _plan_html(meta: dict) -> str:
@@ -483,7 +485,14 @@ async def test_list_dispatch_targets_filters(
 
 
 async def test_mounted_endpoint_serves_mcp(workspace: Path) -> None:
-    await plan_mcp.startup()
+    # Full plugin path: activate the builtin plugin, apply its registered
+    # route to the real app router, run its startup hooks, then speak MCP.
+    host = PluginHost()
+    host.load(plugin_wiring.builtin_plugins_root() / "navide_plans")
+    host.activate("navide.plans")
+    routes_before = list(app.router.routes)
+    plugin_wiring.apply_routes(host, app.router)
+    await plugin_wiring.run_startup_hooks(host)
     try:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -505,4 +514,6 @@ async def test_mounted_endpoint_serves_mcp(workspace: Path) -> None:
             body = resp.json()
             assert body["result"]["serverInfo"]["name"] == "navide-plans"
     finally:
-        await plan_mcp.shutdown()
+        await plugin_wiring.run_shutdown_hooks(host)
+        app.router.routes[:] = routes_before
+        host.unload("navide.plans")

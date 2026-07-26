@@ -641,6 +641,17 @@ async function openStagesWindow(): Promise<void> {
   await window.agentTeam.openStagesWindow()
 }
 
+function reapplyRoleTooltip(p: ActivePaneView): string {
+  if (!p.roleKey) return i18n.global.t('action.reapply-role-no-role')
+  if (p.status !== 'running') return i18n.global.t('action.reapply-role-not-running')
+  return i18n.global.t('action.reapply-role')
+}
+
+function interruptTooltip(p: ActivePaneView): string {
+  if (p.status !== 'running') return i18n.global.t('action.interrupt-not-running')
+  return i18n.global.t('action.interrupt')
+}
+
 const canSpawn = computed(
   () => props.backendStatus === 'connected' && workspacePath.value.trim().length > 0
 )
@@ -1211,10 +1222,10 @@ function onPipelineDividerEnd(): void {
                 <button class="danger" @click="emit('kill', p.id)">{{ $t('action.remove') }}</button>
               </template>
               <template v-else>
-                <button class="ghost" @click="emit('interrupt', p.id)" :disabled="p.status !== 'running'">
+                <button class="ghost" @click="emit('interrupt', p.id)" :disabled="p.status !== 'running'" :title="interruptTooltip(p)">
                   {{ $t('action.interrupt') }}
                 </button>
-                <button class="ghost" @click="emit('reinject', p.id)" :disabled="p.status !== 'running' || !p.roleKey">
+                <button class="ghost" @click="emit('reinject', p.id)" :disabled="p.status !== 'running' || !p.roleKey" :title="reapplyRoleTooltip(p)">
                   {{ $t('action.reapply-role') }}
                 </button>
                 <button class="danger" @click="emit('kill', p.id)">{{ $t('action.remove') }}</button>

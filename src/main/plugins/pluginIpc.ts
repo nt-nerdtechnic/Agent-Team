@@ -18,7 +18,6 @@ import {
   type PreparedInstall,
 } from './pluginInstaller'
 import { sensitiveCapabilities, assertRegistryUrlAllowed } from './pluginVerify'
-import { miniIdePluginEnabled } from './pluginFlags'
 import type { FrontendPluginManager } from './frontendPluginManager'
 
 const DEFAULT_MARKETPLACE_URL = 'http://localhost:8787'
@@ -46,11 +45,6 @@ export function registerPluginIpc(
 ): void {
   // Packages verified by prepareInstall, awaiting a commit, keyed by plugin id.
   const prepared = new Map<string, PreparedInstall>()
-
-  // Whether the plugin layer is opted in (AGENT_TEAM_MINI_IDE_PLUGIN=1). The
-  // renderer gates the Extensions entry on this so the whole surface is absent
-  // when the flag is off.
-  ipcMain.handle('plugins:isEnabled', (): boolean => miniIdePluginEnabled())
 
   ipcMain.handle('plugins:listInstalled', (): InstalledSummary[] => {
     return manager.listDescriptors().map((d) => ({
@@ -121,7 +115,9 @@ export function registerPluginIpc(
     const pkg = prepared.get(args.id)
     if (!pkg) throw new Error(`no prepared install for ${args.id}; call prepareInstall first`)
     const descriptor = commitInstall(pkg, pluginsRoot)
-    manager.registerDescriptor(descriptor)
+    // `official` was earned in prepareInstall (pinned-official-key check); it
+    // is what allows a verified `navide.` install to claim its reserved id.
+    manager.registerDescriptor(descriptor, { official: pkg.official })
     prepared.delete(args.id)
     return { id: descriptor.id, requires: descriptor.requires }
   })

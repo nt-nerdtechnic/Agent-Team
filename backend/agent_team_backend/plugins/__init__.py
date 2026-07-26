@@ -12,6 +12,7 @@ from .host import (
     PluginContext,
     PluginError,
     PluginHost,
+    RegisteredRoute,
 )
 from .manifest import (
     KNOWN_CAPABILITIES,
@@ -30,6 +31,7 @@ __all__ = [
     "PluginContext",
     "PluginError",
     "PluginHost",
+    "RegisteredRoute",
     "load_manifest",
     "parse_manifest",
 ]

@@ -1,0 +1,12 @@
+{
+  "id": "navide.plans",
+  "name": "Plans",
+  "version": "0.1.0",
+  "publisher": "navide",
+  "engines": {
+    "navide": "^0.1.0"
+  },
+  "entry": "index.html",
+  "requires": ["fs", "ui", "plans"],
+  "activationEvents": ["onStartup"]
+}

@@ -47,7 +47,6 @@ import CliManagementPanel from './CliManagementPanel.vue'
 import type { useCliProfiles } from '../composables/useCliProfiles'
 import KeyboardShortcutsHelp from './KeyboardShortcutsHelp.vue'
 import ExtensionsPane from './ExtensionsPane.vue'
-import { useMiniIdePluginEnabled } from '../composables/useMiniIdePluginEnabled'
 
 const props = defineProps<{
   backend: ReturnType<typeof useBackend>
@@ -77,10 +76,6 @@ const confirmBeforeCloseModel = computed({
 // ── Tab ───────────────────────────────────────────────────────────────────────
 type Tab = 'roles' | 'pipelines' | 'mcp' | 'analyzer' | 'cliAgents' | 'general' | 'updates' | 'appearance' | 'accounts' | 'shortcuts' | 'extensions'
 const activeTab = ref<Tab>(props.initialTab ?? 'roles')
-
-// Extensions/plugin layer is opt-in (AGENT_TEAM_MINI_IDE_PLUGIN=1). The tab and
-// its panel are hidden entirely until the main process confirms the flag is on.
-const extensionsEnabled = useMiniIdePluginEnabled()
 
 // ── CLI Agents (enable/disable + reorder for the manual spawn dropdown) ────────
 const { order: cliOrder, disabled: cliDisabled } = useCliAgentPrefs()
@@ -1359,7 +1354,7 @@ async function plDelete(id: string, name: string) {
             <button :class="['s-tab', { active: activeTab === 'appearance' }]" @click="activeTab = 'appearance'">{{ $t('settings.tab.appearance') }}</button>
             <button :class="['s-tab', { active: activeTab === 'accounts' }]" @click="activeTab = 'accounts'">{{ $t('settings.tab.accounts') }}</button>
             <button :class="['s-tab', { active: activeTab === 'shortcuts' }]" @click="activeTab = 'shortcuts'">{{ $t('settings.tab.shortcuts') }}</button>
-            <button v-if="extensionsEnabled" :class="['s-tab', { active: activeTab === 'extensions' }]" @click="activeTab = 'extensions'">{{ $t('settings.tab.extensions') }}</button>
+            <button :class="['s-tab', { active: activeTab === 'extensions' }]" @click="activeTab = 'extensions'">{{ $t('settings.tab.extensions') }}</button>
           </div>
           <div class="s-search-box">
             <input
@@ -2429,7 +2424,7 @@ async function plDelete(id: string, name: string) {
         </div>
 
         <!-- ── EXTENSIONS TAB (flag-gated) ───────────────────────────────── -->
-        <div v-if="extensionsEnabled" v-show="activeTab === 'extensions'" class="s-body" data-settings-section="extensions">
+        <div v-show="activeTab === 'extensions'" class="s-body" data-settings-section="extensions">
           <ExtensionsPane />
         </div>
 

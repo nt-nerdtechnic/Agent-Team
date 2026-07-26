@@ -6,9 +6,8 @@ import { tmpdir } from 'node:os'
 import { spawn } from 'node:child_process'
 import { startBackend, type BackendHandle } from './backend'
 import { installApplicationMenu, type AppMenuHooks, type RecentMenuEntry } from './menu'
-import { openNoopPluginView, openFsProbePluginView, openMiniIdePluginView, frontendPluginManager } from './plugins/frontendPluginManager'
+import { openNoopPluginView, openFsProbePluginView, openMiniIdePluginView, devMiniIdePluginDescriptor, openPlansPluginView, devPlansPluginDescriptor, registerBundledMiniIde, frontendPluginManager } from './plugins/frontendPluginManager'
 import { registerPluginIpc } from './plugins/pluginIpc'
-import { miniIdePluginEnabled } from './plugins/pluginFlags'
 import { lockPageZoom } from './web-contents-zoom'
 import { initUpdater } from './updater'
 import { WindowRegistry, type WindowBounds, type WindowEntry } from './window-registry'
@@ -28,6 +27,7 @@ import {
   type CandidateWindow
 } from './cross-window-drag'
 import { readHealthCheckTimeoutSec, writeHealthCheckTimeoutSec } from './health-timeout'
+import { classifyEditorOpen, resolveExternalOpenTarget } from './editor-fallback'
 import { findManualLogFile } from './manual-log-search'
 import { searchLogFiles } from './log-content-search'
 import {
@@ -37,7 +37,6 @@ import {
   type PermissionKey,
 } from './permissions'
 import { resolveBackendDataDir, readUiSettingsText, UI_SETTINGS_FILE } from './ui-settings-bootstrap'
-import { routeEditorWindowOpen } from './editor-window-routing'
 import { PlanWindowRegistry } from './plan-windows'
 import {
   GitAccountsStore,
@@ -195,15 +194,6 @@ let pendingRestore: WindowEntry[] | null = null
 let pendingRestoreClaimed = false
 let rolesWindow: BrowserWindow | null = null
 let stagesWindow: BrowserWindow | null = null
-let editorWindow: BrowserWindow | null = null
-let editorWindowWorkspacePath = ''
-let editorWindowReady = false
-let pendingEditorOpenFiles: Record<string, string>[] = []
-
-function sendEditorOpenFile(win: BrowserWindow, params: Record<string, string>): void {
-  if (editorWindowReady) win.webContents.send('editor:openFile', params)
-  else pendingEditorOpenFiles.push(params)
-}
 
 function loadWindow(win: BrowserWindow, params: Record<string, string>): void {
   const qs = new URLSearchParams(params).toString()
@@ -269,9 +259,6 @@ async function createWindow(
     if (mainWindow === win) {
       const remaining = [...mainWindows]
       mainWindow = remaining.length ? remaining[remaining.length - 1] : null
-    }
-    if (mainWindows.size === 0) {
-      if (editorWindow && !editorWindow.isDestroyed()) editorWindow.close()
     }
     broadcastOpenWorkspacesChanged()
   })
@@ -381,6 +368,18 @@ app.on('browser-window-created', (_event, win) => {
 const pluginsRoot = (): string => join(app.getPath('userData'), 'plugins')
 registerPluginIpc(frontendPluginManager, pluginsRoot())
 frontendPluginManager.loadInstalledPlugins(pluginsRoot())
+
+// Bundled mini-IDE — the official builtin editor surface, shipped inside the
+// app package (resources/plugins/mini-ide) and built from dist-plugins in dev.
+// An officially-verified marketplace install scanned above takes precedence;
+// see registerBundledMiniIde for the full precedence order.
+const bundledMiniIde = registerBundledMiniIde(frontendPluginManager, {
+  isPackaged: app.isPackaged,
+  resourcesPath: process.resourcesPath,
+})
+if (!bundledMiniIde.registered) {
+  console.warn(`[main] bundled mini-IDE unavailable: ${bundledMiniIde.reason}`)
+}
 
 ipcMain.handle('backend:info', () => backendInfoPayload())
 
@@ -511,22 +510,99 @@ function openStagesWindow(): void {
   loadWindow(win, { window: 'stages' })
 }
 
-function openDiffWindow(params: Record<string, string>): void {
-  // Editor window already open — send IPC so it opens a diff tab without reload.
-  if (editorWindow && !editorWindow.isDestroyed()) {
-    editorWindow.webContents.send('editor:openDiff', params)
-    editorWindow.webContents.send('editor:switchSidebar', 'git')
-    if (editorWindow.isMinimized()) editorWindow.restore()
-    editorWindow.focus()
-    return
+/**
+ * Read the current UI theme id from the backend-owned ui_settings.json ('' when
+ * unset/unreadable). Store values are JSON-encoded strings (lib/settings keeps
+ * the legacy localStorage encoding), so the raw value needs a second parse.
+ */
+function currentUiTheme(): string {
+  try {
+    const dataDir = resolveBackendDataDir({
+      envOverride: process.env.AGENT_TEAM_DATA_DIR,
+      isPackaged: app.isPackaged,
+      appDataPath: app.getPath('appData'),
+      platform: process.platform,
+      homeDir: app.getPath('home'),
+      xdgDataHome: process.env.XDG_DATA_HOME
+    })
+    const settings = JSON.parse(readUiSettingsText(join(dataDir, UI_SETTINGS_FILE))) as Record<
+      string,
+      unknown
+    >
+    const raw = settings['agent-team:theme']
+    const theme: unknown = typeof raw === 'string' ? JSON.parse(raw) : ''
+    return typeof theme === 'string' ? theme : ''
+  } catch {
+    return ''
   }
-  // No editor window yet — open one with the diff pre-loaded via URL params.
-  // EditorWindowApp reads diff_filepath/diff_staged on startup and opens the tab.
-  openEditorWindow({
-    workspace_path: params.workspace_path,
-    diff_filepath: params.filepath,
-    diff_staged: params.staged,
-    diff_name: params.name ?? params.filepath,
+}
+
+/**
+ * Open the mini-IDE plugin view (the editor surface) in its dedicated window,
+ * forwarding editor open params (`filepath`/`line`/`sidebar`/`diff_*`/
+ * `branch_diff_*`) as the entry query EditorWindowApp reads from
+ * `window.location.search`. A changed workspace reloads the running view (see
+ * FrontendPluginManager.open); `host` only parents the unavailable-fallback
+ * dialog.
+ */
+function openMiniIdeEditor(host: BrowserWindow | null, params: Record<string, string>): boolean {
+  const { workspace_path: workspacePath = '', ...extraParams } = params
+  const httpUrl = backend ? `http://${backend.host}:${backend.port}` : ''
+  const opened = openMiniIdePluginView(workspacePath, httpUrl, extraParams, currentUiTheme())
+  if (!opened) {
+    // Last-resort fallback: the mini-IDE ships bundled with the app, so this
+    // only fires when the bundled assets are missing/invalid and no verified
+    // marketplace install is present.
+    const target = host && !host.isDestroyed() ? host : mainWindow
+    if (target && !target.isDestroyed()) {
+      void handleMiniIdeUnavailable(target, workspacePath, extraParams)
+    }
+  }
+  return opened
+}
+
+/**
+ * Fallback when the mini-IDE plugin view could not be opened: plain file opens
+ * go to the OS default application; diff/branch-diff and bare opens keep a
+ * dialog (no external equivalent).
+ */
+async function handleMiniIdeUnavailable(
+  target: BrowserWindow,
+  workspacePath: string,
+  params: Record<string, string>
+): Promise<void> {
+  const kind = classifyEditorOpen(params)
+  if (kind === 'file') {
+    const abs = resolveExternalOpenTarget(workspacePath, params.filepath ?? '')
+    if (abs) {
+      // shell.openPath returns an empty string on success, or an error message.
+      const err = await shell.openPath(abs)
+      if (err) shell.showItemInFolder(abs)
+      return
+    }
+    // Missing/unsafe target (e.g. stale reference) — fall through to the dialog.
+  }
+  void dialog.showMessageBox(target, {
+    type: 'info',
+    title: 'Mini-IDE unavailable',
+    message: kind === 'diff' ? 'Diff view requires the Mini-IDE' : 'Mini-IDE could not be loaded',
+    detail:
+      (kind === 'diff'
+        ? 'Diff views can only be shown in the Mini-IDE, and its bundled assets are missing or invalid. '
+        : 'The bundled Mini-IDE assets are missing or invalid. ') +
+      'Reinstall Navide, or install the Mini-IDE extension from Settings → Extensions. ' +
+      '(Development: run `pnpm run build:mini-ide` to produce dist-plugins/mini-ide.)',
+  })
+}
+
+function openDiffWindow(host: BrowserWindow | null, params: Record<string, string>): void {
+  // EditorWindowApp reads diff_filepath/diff_staged from the entry query on
+  // startup (or after the query-change reload) and opens the diff tab.
+  openMiniIdeEditor(host, {
+    workspace_path: params.workspace_path ?? '',
+    diff_filepath: params.filepath ?? '',
+    diff_staged: params.staged ?? '',
+    diff_name: params.name ?? params.filepath ?? '',
     diff_commit: params.commit ?? '',
     sidebar: 'git',
   })
@@ -691,27 +767,23 @@ ipcMain.handle('window:openStages', () => {
   return { ok: true }
 })
 
-ipcMain.handle('window:openDiff', (_event, args: Record<string, string>) => {
-  openDiffWindow(args ?? {})
+ipcMain.handle('window:openDiff', (event, args: Record<string, string>) => {
+  openDiffWindow(BrowserWindow.fromWebContents(event.sender), args ?? {})
   return { ok: true }
 })
 
-function openBranchDiffWindow(params: Record<string, string>): void {
-  if (editorWindow && !editorWindow.isDestroyed()) {
-    editorWindow.webContents.send('editor:openBranchDiff', params)
-    if (editorWindow.isMinimized()) editorWindow.restore()
-    editorWindow.focus()
-    return
-  }
-  openEditorWindow({
-    workspace_path: params.workspace_path,
+function openBranchDiffWindow(host: BrowserWindow | null, params: Record<string, string>): void {
+  // EditorWindowApp reads branch_diff_base/branch_diff_compare from the entry
+  // query on startup (or after the query-change reload) and opens the tab.
+  openMiniIdeEditor(host, {
+    workspace_path: params.workspace_path ?? '',
     branch_diff_base: params.branch_diff_base ?? 'main',
     branch_diff_compare: params.branch_diff_compare ?? '',
   })
 }
 
-ipcMain.handle('window:openBranchDiff', (_event, args: Record<string, string>) => {
-  openBranchDiffWindow(args ?? {})
+ipcMain.handle('window:openBranchDiff', (event, args: Record<string, string>) => {
+  openBranchDiffWindow(BrowserWindow.fromWebContents(event.sender), args ?? {})
   return { ok: true }
 })
 
@@ -770,83 +842,26 @@ ipcMain.handle('git:diff-head', async (_event, args: { workspace_path: string; b
   }
 })
 
-function openEditorWindow(params: Record<string, string>): void {
-  const search = { window: 'editor', ...params }
-  if (editorWindow && !editorWindow.isDestroyed()) {
-    const route = routeEditorWindowOpen(editorWindowWorkspacePath, params)
-    if (route.kind === 'reload') {
-      editorWindowWorkspacePath = route.workspacePath
-      editorWindowReady = false
-      pendingEditorOpenFiles = []
-      loadWindow(editorWindow, search)
-    } else {
-      if (route.openFileParams) {
-        sendEditorOpenFile(editorWindow, route.openFileParams)
-      }
-      if (route.sidebar) {
-        editorWindow.webContents.send('editor:switchSidebar', route.sidebar)
-      }
-    }
-    if (editorWindow.isMinimized()) editorWindow.restore()
-    editorWindow.focus()
-    return
-  }
-  const win = new BrowserWindow({
-    width: 1100,
-    height: 760,
-    title: 'Navide · Editor',
-    titleBarStyle: 'hidden',
-    backgroundColor: '#0d1117',
-    webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false
-    }
-  })
-  editorWindow = win
-  editorWindowWorkspacePath = params.workspace_path ?? ''
-  editorWindowReady = false
-  pendingEditorOpenFiles = []
-  win.webContents.on('did-finish-load', () => {
-    if (editorWindow !== win) return
-    editorWindowReady = true
-    for (const queued of pendingEditorOpenFiles.splice(0)) {
-      win.webContents.send('editor:openFile', queued)
-    }
-  })
-  win.on('closed', () => {
-    if (editorWindow === win) {
-      editorWindow = null
-      editorWindowWorkspacePath = ''
-      editorWindowReady = false
-      pendingEditorOpenFiles = []
-    }
-  })
-  loadWindow(win, search)
+// Reviewable plan doc: top-level, non-infrastructure `.agent-team/plans/*.html`
+// (mirrors PlanWindowApp's isHtmlPlanDoc). Such opens route to the Plan window,
+// which renders them; the mini-IDE would only show their raw HTML source.
+function isHtmlPlanDocPath(relPath: string): boolean {
+  const normalized = relPath.replace(/\\/g, '/') // tolerate Windows separators
+  if (!normalized.startsWith('.agent-team/plans/')) return false
+  const name = normalized.slice('.agent-team/plans/'.length)
+  return name.endsWith('.html') && !name.startsWith('_') && !name.includes('/')
 }
 
 ipcMain.handle('window:openEditor', (event, args: Record<string, string>) => {
   const params = args ?? {}
-  // M5 (flag-gated, default OFF): open the mini-IDE as an isolated plugin
-  // WebContentsView instead of the legacy editor BrowserWindow. Both paths
-  // coexist; AGENT_TEAM_MINI_IDE_PLUGIN=1 opts in. The legacy path below stays
-  // the default and is deliberately NOT removed until the user validates the
-  // plugin path in the running app.
-  // TODO(post-M5-validation): once the plugin path is accepted, retire
-  // openEditorWindow + this branch, and route plan-file opens to openPlanWindow
-  // (PlanFileView delegation, deferred — see M6 notes: it also powers plain .md
-  // preview, so a clean split needs a plugin-mode branch in EditorWindowApp).
-  if (miniIdePluginEnabled()) {
-    const host = BrowserWindow.fromWebContents(event.sender) ?? mainWindow
-    if (host) {
-      const httpUrl = backend ? `http://${backend.host}:${backend.port}` : ''
-      openMiniIdePluginView(host, params.workspace_path ?? '', httpUrl)
-      return { ok: true }
-    }
+  const workspacePath = params.workspace_path ?? ''
+  const filepath = params.filepath ?? ''
+  if (workspacePath && isHtmlPlanDocPath(filepath)) {
+    openPlanWindow(workspacePath, filepath)
+    return { ok: true }
   }
-  openEditorWindow(params)
-  return { ok: true }
+  const ok = openMiniIdeEditor(BrowserWindow.fromWebContents(event.sender), params)
+  return { ok }
 })
 
 // Plan review windows: one per workspace; reopening focuses the existing one.
@@ -1043,7 +1058,6 @@ ipcMain.on(
       }
     }
     const validTargets = new Set<BrowserWindow>(mainWindows)
-    if (editorWindow && !editorWindow.isDestroyed()) validTargets.add(editorWindow)
     const windows: CandidateWindow<BrowserWindow>[] = []
     for (const win of BrowserWindow.getAllWindows()) {
       if (win.isDestroyed()) continue
@@ -1379,7 +1393,7 @@ ipcMain.on('app:setQuitConfirm', (_event, cfg: Partial<typeof quitConfirm>) => {
 })
 
 ipcMain.on('settings:language-changed', (_event, locale: string) => {
-  for (const win of [mainWindow, rolesWindow, stagesWindow, editorWindow]) {
+  for (const win of [mainWindow, rolesWindow, stagesWindow]) {
     if (win && !win.isDestroyed()) {
       win.webContents.send('settings:language-changed', locale)
     }
@@ -1641,6 +1655,29 @@ app.whenReady().then(async () => {
   // The plugin-view dev entry is opt-in via AGENT_TEAM_PLUGIN_DEV=1 so the
   // default menu / UI is unchanged for every normal launch (dev or packaged).
   const pluginDevEnabled = process.env['AGENT_TEAM_PLUGIN_DEV'] === '1'
+  if (pluginDevEnabled) {
+    // Dev-only: register the locally built mini-IDE (dist-plugins/mini-ide) so
+    // editor/diff opens work without a marketplace install. Overrides any
+    // installed copy for this run (registerDescriptor replaces by id).
+    const devDescriptor = devMiniIdePluginDescriptor()
+    if (existsSync(devDescriptor.entryFile)) {
+      frontendPluginManager.registerDescriptor(devDescriptor, { builtin: true })
+    } else {
+      console.warn(
+        '[main] AGENT_TEAM_PLUGIN_DEV=1 but mini-IDE dev bundle is missing — run `pnpm run build:mini-ide`'
+      )
+    }
+    // Dev-only: register the locally built Plans plugin (dist-plugins/plans),
+    // same gate and override semantics as the mini-IDE above.
+    const devPlansDescriptor = devPlansPluginDescriptor()
+    if (existsSync(devPlansDescriptor.entryFile)) {
+      frontendPluginManager.registerDescriptor(devPlansDescriptor, { builtin: true })
+    } else {
+      console.warn(
+        '[main] AGENT_TEAM_PLUGIN_DEV=1 but Plans dev bundle is missing — run `pnpm run build:plans`'
+      )
+    }
+  }
   appMenuHooks = {
     onOpenSettings: () => sendMenuAction('open-settings'),
     onCheckUpdates: () => sendMenuAction('check-updates'),
@@ -1663,11 +1700,22 @@ app.whenReady().then(async () => {
             if (host) openFsProbePluginView(host)
           },
           onOpenMiniIdePlugin: () => {
+            // Dev-only: workspace via AGENT_TEAM_PLUGIN_WORKSPACE, else empty.
+            // Opens in the dedicated mini-IDE window (no host needed).
+            const httpUrl = backend ? `http://${backend.host}:${backend.port}` : ''
+            openMiniIdePluginView(
+              process.env['AGENT_TEAM_PLUGIN_WORKSPACE'] ?? '',
+              httpUrl,
+              {},
+              currentUiTheme()
+            )
+          },
+          onOpenPlansPlugin: () => {
             const host = BrowserWindow.getFocusedWindow() ?? mainWindow
             // Dev-only: workspace via AGENT_TEAM_PLUGIN_WORKSPACE, else empty.
             if (host) {
               const httpUrl = backend ? `http://${backend.host}:${backend.port}` : ''
-              openMiniIdePluginView(host, process.env['AGENT_TEAM_PLUGIN_WORKSPACE'] ?? '', httpUrl)
+              openPlansPluginView(host, process.env['AGENT_TEAM_PLUGIN_WORKSPACE'] ?? '', httpUrl)
             }
           }
         }

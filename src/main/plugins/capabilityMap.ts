@@ -42,7 +42,7 @@ const GIT_METHODS = [
   'stash_apply', 'pull_rebase', 'push_force', 'push_upstream', 'credential_submit',
   'credential_cancel', 'discover_repositories', 'compare_branches', 'clean', 'discard',
   'stage', 'unstage', 'stage_all', 'commit', 'sync', 'init', 'generate_message',
-  'check_staged', 'connect_to_remote', 'ignore', 'diff_all',
+  'check_staged', 'connect_to_remote', 'ignore', 'diff_all', 'reset',
 ] as const
 
 // search capability methods → backend `search.<method>` one-for-one.
@@ -76,8 +76,17 @@ const EXPLICIT_CAP_MAP: Readonly<Record<string, string>> = {
   'chat.notes_get': 'ai.chat.notes.get',
   'chat.threads_set': 'ai.chat.threads.set',
   'chat.threads_get': 'ai.chat.threads.get',
+  // ChatCapability — ai.review / analyzer (Branch-Diff AI code review). The
+  // result events (ai.review.result/end/error) are already chat-gated in
+  // CAP_EVENTS; these invert the shim's request-side remaps.
+  'chat.review_start': 'ai.review.start',
+  'chat.review_stop': 'ai.review.stop',
+  'chat.analyzer_models': 'analyzer.models',
   // UiCapability — settings persistence
   'ui.settings_set': 'ui.settings.set',
+  // UiCapability — settings read (lib/settings.ts reconcile; the Plans plugin
+  // needs it for theme sync). Backend handler already exists.
+  'ui.settings_get': 'ui.settings.get',
 }
 
 /** `(ns, method)` → backend WS message type. The full mini-IDE call surface
@@ -129,6 +138,10 @@ export const CAP_EVENTS: Readonly<Record<string, string>> = {
   'ai.review.result': 'chat',
   'ai.review.end': 'chat',
   'ai.review.error': 'chat',
+  // Plan documents changed on disk (backend broadcast). Gated on the dedicated
+  // `plans` namespace — event-only, it maps no request types — so the Plans
+  // plugin can live-refresh without being granted broader fs event surface.
+  'plans.changed': 'plans',
 }
 
 /** The namespace gating a server-push event, or `null` when not forwardable. */

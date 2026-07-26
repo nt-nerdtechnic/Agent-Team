@@ -70,7 +70,7 @@ def test_build_unknown_capability_rejected() -> None:
 
 def test_known_capabilities_is_full_set() -> None:
     assert KNOWN_CAPABILITIES == frozenset(
-        {"fs", "git", "terminal", "search", "chat", "ui", "issues"}
+        {"fs", "git", "terminal", "search", "chat", "ui", "issues", "plans"}
     )
 
 
@@ -224,6 +224,57 @@ def test_chat_notes_set_delegates_to_chat_store(monkeypatch: pytest.MonkeyPatch)
 def test_chat_provisional_method_raises() -> None:
     with pytest.raises(CapabilityError, match="provisional"):
         ChatCapability().start()
+
+
+# -- terminal capability ---------------------------------------------------
+
+
+def test_terminal_list_uses_public_accessor(monkeypatch: pytest.MonkeyPatch) -> None:
+    class StubTerminals:
+        def list_session_ids(self) -> list[str]:
+            return ["s1", "s2"]
+
+    monkeypatch.setattr(app, "get_terminals", lambda: StubTerminals())
+
+    assert TerminalCapability().list() == ["s1", "s2"]
+
+
+def test_terminal_run_rejects_unregistered_cwd(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import asyncio
+
+    monkeypatch.setattr(app.attribution, "known_workspaces", lambda: [])
+
+    with pytest.raises(CapabilityError, match="not registered"):
+        asyncio.run(TerminalCapability().run("echo hi", cwd=str(tmp_path)))
+
+
+def test_terminal_run_allows_registered_subdir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import asyncio
+
+    monkeypatch.setattr(app.attribution, "known_workspaces", lambda: [str(tmp_path)])
+    subdir = tmp_path / "sub"
+    subdir.mkdir()
+
+    result = asyncio.run(TerminalCapability().run("echo hi", cwd=str(subdir)))
+
+    assert result["ok"] is True
+    assert "hi" in result["output"]
+    assert result["exit_code"] == 0
+
+
+def test_terminal_run_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    from agent_team_backend.plugins import capabilities as capabilities_module
+
+    monkeypatch.setattr(capabilities_module, "_RUN_TIMEOUT_SECONDS", 0.1)
+
+    with pytest.raises(CapabilityError, match="timed out"):
+        asyncio.run(TerminalCapability().run("sleep 5"))
 
 
 # -- ui capability: host-side placeholder --------------------------------

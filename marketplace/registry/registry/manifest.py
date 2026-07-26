@@ -14,7 +14,7 @@ import re
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 KNOWN_CAPABILITIES: frozenset[str] = frozenset(
-    {"fs", "git", "terminal", "search", "chat", "ui"}
+    {"fs", "git", "terminal", "search", "chat", "ui", "issues"}
 )
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9-]*$")

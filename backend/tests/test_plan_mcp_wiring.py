@@ -9,7 +9,8 @@ from typing import Any
 import pytest
 
 from agent_team_backend import app
-from agent_team_backend import plan_mcp_wiring
+from agent_team_backend.plugins import wiring as plugin_wiring
+from agent_team_backend.plugins.builtin.navide_plans import plan_mcp_wiring
 
 
 # ---- write_claude_config ----
@@ -190,17 +191,23 @@ async def test_terminal_create_wires_claude_pane(
     session = app.Session(FakeWebSocket())  # type: ignore[arg-type]
     session.terminals = FakeTerminals()  # type: ignore[assignment]
 
-    await app.handle_message(session, {
-        "id": "m1",
-        "type": "terminal.create",
-        "payload": {
-            "pane_id": "pane-1",
-            "agent_key": "claude",
-            "command": ["/bin/zsh", "-ilc", "claude --dangerously-skip-permissions"],
-            "cwd": "/ws",
-            "metadata": {"workspace_path": "/ws"},
-        },
-    })
+    # Spawn wiring now runs through the plugin host: boot the builtin
+    # navide.plans plugin on the app-level host, then tear it down again.
+    plugin_wiring.startup(app.plugin_host)
+    try:
+        await app.handle_message(session, {
+            "id": "m1",
+            "type": "terminal.create",
+            "payload": {
+                "pane_id": "pane-1",
+                "agent_key": "claude",
+                "command": ["/bin/zsh", "-ilc", "claude --dangerously-skip-permissions"],
+                "cwd": "/ws",
+                "metadata": {"workspace_path": "/ws"},
+            },
+        })
+    finally:
+        plugin_wiring.shutdown(app.plugin_host)
 
     created = session.terminals.created[0]  # type: ignore[attr-defined]
     assert created["command"][2] == (

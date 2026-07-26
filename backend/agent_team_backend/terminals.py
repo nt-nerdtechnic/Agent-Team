@@ -380,6 +380,10 @@ class TerminalService:
         """The session for ``session_id``, or None when unknown."""
         return self._sessions.get(session_id)
 
+    def list_session_ids(self) -> list[str]:
+        """Ids of all live (not closed) sessions."""
+        return [s.id for s in self._sessions.values() if not s.closed]
+
     def write(self, session_id: str, data: str) -> None:
         session = self._require(session_id)
         if session.closed:
