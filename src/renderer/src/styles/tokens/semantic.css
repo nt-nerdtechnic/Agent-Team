@@ -10,6 +10,24 @@
  * [data-theme="..."] selector.
  */
 
+/*
+ * Layout scalars — theme-independent. Corner radii, spacing rhythm and
+ * font sizes don't change with the color theme, so they live in a plain
+ * :root block (no [data-theme] variant) to apply under every theme.
+ */
+:root {
+  /* ── Layout scalars (theme-independent) ─────────────────────── */
+  --radius-card: 12px;
+  --radius-control: 7px;
+  --radius-pill: 999px;
+  --space-row-y: 12px;
+  --space-row-x: 16px;
+  --space-group: 24px;
+  --font-page-title: 20px;
+  --font-row-title: 15px;
+  --font-row-desc: 13px;
+}
+
 :root,
 :root[data-theme='dark-github'] {
   /* ── Backgrounds ──────────────────────────────────────────── */

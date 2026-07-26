@@ -564,6 +564,34 @@
       "shortcuts": "⌨️ Keyboard Shortcuts",
       "extensions": "🧩 Extensions"
     },
+    "nav": {
+      "current-workspace": "Current Workspace",
+      "group": {
+        "general": "General",
+        "accountsAgents": "Accounts & Agents",
+        "integration": "Integrations",
+        "system": "System"
+      },
+      "general": "General",
+      "appearance": "Appearance",
+      "accounts": "Accounts",
+      "cliAgents": "CLI Agents",
+      "roles": "Roles",
+      "pipelines": "Pipelines",
+      "mcp": "Tools & MCP",
+      "analyzer": "Analyzer",
+      "extensions": "Extensions",
+      "shortcuts": "Shortcuts",
+      "updates": "Updates"
+    },
+    "section": {
+      "general-behavior": "General behavior",
+      "settings-management": "Settings management",
+      "theme": "Theme",
+      "language": "Language",
+      "other": "Other",
+      "updates": "Updates"
+    },
     "cliAgents": {
       "title": "CLI Agents",
       "hint": "Enable, disable, and reorder which CLI agents appear in the manual spawn dropdown. At least one must stay enabled.",

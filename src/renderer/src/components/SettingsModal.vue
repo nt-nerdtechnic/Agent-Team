@@ -47,6 +47,11 @@ import CliManagementPanel from './CliManagementPanel.vue'
 import type { useCliProfiles } from '../composables/useCliProfiles'
 import KeyboardShortcutsHelp from './KeyboardShortcutsHelp.vue'
 import ExtensionsPane from './ExtensionsPane.vue'
+import SettingsNavItem from './settings/SettingsNavItem.vue'
+import SettingsSection from './settings/SettingsSection.vue'
+import SettingsCard from './settings/SettingsCard.vue'
+import SettingRow from './settings/SettingRow.vue'
+import ToggleSwitch from './settings/ToggleSwitch.vue'
 
 const props = defineProps<{
   backend: ReturnType<typeof useBackend>
@@ -55,6 +60,9 @@ const props = defineProps<{
   /** True when a workspace is open — CLI account sign-in needs one to spawn
    *  the login pane. */
   workspaceOpen?: boolean
+  /** Basename of the currently open workspace, shown in the sidebar header.
+   *  Falls back to the app name when not provided. */
+  workspaceName?: string
   stagesApi: ReturnType<typeof useStages>
   analyzerApi: ReturnType<typeof useAnalyzer>
   pipelinesApi?: ReturnType<typeof usePipelines>
@@ -76,6 +84,10 @@ const confirmBeforeCloseModel = computed({
 // ── Tab ───────────────────────────────────────────────────────────────────────
 type Tab = 'roles' | 'pipelines' | 'mcp' | 'analyzer' | 'cliAgents' | 'general' | 'updates' | 'appearance' | 'accounts' | 'shortcuts' | 'extensions'
 const activeTab = ref<Tab>(props.initialTab ?? 'roles')
+
+// Sidebar workspace header label — the open workspace's basename, falling back
+// to the app name when no workspace is passed in.
+const workspaceLabel = computed(() => props.workspaceName?.trim() || 'Agent-Team')
 
 // ── CLI Agents (enable/disable + reorder for the manual spawn dropdown) ────────
 const { order: cliOrder, disabled: cliDisabled } = useCliAgentPrefs()
@@ -1341,21 +1353,16 @@ async function plDelete(id: string, name: string) {
     <div class="s-overlay" @click.self="emit('close')">
       <div class="s-modal">
 
-        <!-- Header -->
-        <div class="s-header">
-          <div class="s-tabs">
-            <button :class="['s-tab', { active: activeTab === 'roles' }]" @click="activeTab = 'roles'">{{ $t('settings.tab.roles') }}</button>
-            <button :class="['s-tab', { active: activeTab === 'pipelines' }]" @click="activeTab = 'pipelines'">{{ $t('settings.tab.pipelines') }}</button>
-            <button :class="['s-tab', { active: activeTab === 'mcp' }]" @click="activeTab = 'mcp'">{{ $t('settings.tab.mcp') }}</button>
-            <button :class="['s-tab', { active: activeTab === 'analyzer' }]" @click="activeTab = 'analyzer'">{{ $t('settings.tab.analyzer') }}</button>
-            <button :class="['s-tab', { active: activeTab === 'cliAgents' }]" @click="activeTab = 'cliAgents'">{{ $t('settings.tab.cliAgents') }}</button>
-            <button :class="['s-tab', { active: activeTab === 'general' }]" @click="activeTab = 'general'">{{ $t('settings.tab.general') }}</button>
-            <button :class="['s-tab', { active: activeTab === 'updates' }]" @click="activeTab = 'updates'">{{ $t('settings.tab.updates') }}</button>
-            <button :class="['s-tab', { active: activeTab === 'appearance' }]" @click="activeTab = 'appearance'">{{ $t('settings.tab.appearance') }}</button>
-            <button :class="['s-tab', { active: activeTab === 'accounts' }]" @click="activeTab = 'accounts'">{{ $t('settings.tab.accounts') }}</button>
-            <button :class="['s-tab', { active: activeTab === 'shortcuts' }]" @click="activeTab = 'shortcuts'">{{ $t('settings.tab.shortcuts') }}</button>
-            <button :class="['s-tab', { active: activeTab === 'extensions' }]" @click="activeTab = 'extensions'">{{ $t('settings.tab.extensions') }}</button>
+        <!-- ── Sidebar (workspace header + search + grouped nav) ─────────── -->
+        <aside class="s-sidebar">
+          <div class="s-ws-header">
+            <div class="s-ws-avatar" aria-hidden="true">{{ workspaceLabel.charAt(0) }}</div>
+            <div class="s-ws-meta">
+              <span class="s-ws-name" :title="workspaceLabel">{{ workspaceLabel }}</span>
+              <span class="s-ws-sub">{{ $t('settings.nav.current-workspace') }}</span>
+            </div>
           </div>
+
           <div class="s-search-box">
             <input
               v-model="settingsSearchQuery"
@@ -1383,11 +1390,88 @@ async function plDelete(id: string, name: string) {
               </div>
             </div>
           </div>
+
+          <nav class="s-nav" aria-label="Settings sections">
+            <div class="s-nav-group">
+              <div class="s-nav-group-title">{{ $t('settings.nav.group.general') }}</div>
+              <SettingsNavItem :label="$t('settings.nav.general')" :active="activeTab === 'general'" @select="activeTab = 'general'">
+                <template #icon>
+                  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v1.8M8 12.7v1.8M14.5 8h-1.8M3.3 8H1.5M12.6 3.4l-1.3 1.3M4.7 11.3l-1.3 1.3M12.6 12.6l-1.3-1.3M4.7 4.7 3.4 3.4"/></svg>
+                </template>
+              </SettingsNavItem>
+              <SettingsNavItem :label="$t('settings.nav.appearance')" :active="activeTab === 'appearance'" @select="activeTab = 'appearance'">
+                <template #icon>
+                  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10.5 2.5 13.5 5.5 6.5 12.5 3.5 12.5 3.5 9.5 10.5 2.5Z"/><path d="M9 4l3 3"/></svg>
+                </template>
+              </SettingsNavItem>
+            </div>
+
+            <div class="s-nav-group">
+              <div class="s-nav-group-title">{{ $t('settings.nav.group.accountsAgents') }}</div>
+              <SettingsNavItem :label="$t('settings.nav.accounts')" :active="activeTab === 'accounts'" @select="activeTab = 'accounts'">
+                <template #icon>
+                  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="5.2" r="2.6"/><path d="M3.3 13c0-2.5 2.1-4 4.7-4s4.7 1.5 4.7 4"/></svg>
+                </template>
+              </SettingsNavItem>
+              <SettingsNavItem :label="$t('settings.nav.cliAgents')" :active="activeTab === 'cliAgents'" @select="activeTab = 'cliAgents'">
+                <template #icon>
+                  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3.3" y="5" width="9.4" height="7" rx="1.6"/><path d="M8 2.3V5"/><circle cx="8" cy="2.1" r="0.6"/><path d="M6 8.3v0.01M10 8.3v0.01"/></svg>
+                </template>
+              </SettingsNavItem>
+              <SettingsNavItem :label="$t('settings.nav.roles')" :active="activeTab === 'roles'" @select="activeTab = 'roles'">
+                <template #icon>
+                  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.8 3.8h10.4v3.4c0 3-2.3 5.5-5.2 5.5S2.8 10.2 2.8 7.2V3.8Z"/><path d="M6 7v0.01M10 7v0.01"/><path d="M6.2 9.8c1.1 0.9 2.5 0.9 3.6 0"/></svg>
+                </template>
+              </SettingsNavItem>
+              <SettingsNavItem :label="$t('settings.nav.pipelines')" :active="activeTab === 'pipelines'" @select="activeTab = 'pipelines'">
+                <template #icon>
+                  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="4.5" cy="4" r="1.7"/><circle cx="4.5" cy="12" r="1.7"/><circle cx="11.5" cy="4" r="1.7"/><path d="M4.5 5.7v4.6M4.5 8h4.3c1.6 0 2.7-.8 2.7-2.3"/></svg>
+                </template>
+              </SettingsNavItem>
+            </div>
+
+            <div class="s-nav-group">
+              <div class="s-nav-group-title">{{ $t('settings.nav.group.integration') }}</div>
+              <SettingsNavItem :label="$t('settings.nav.mcp')" :active="activeTab === 'mcp'" @select="activeTab = 'mcp'">
+                <template #icon>
+                  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5 2.3v3M10.5 2.3v3"/><path d="M4 5.3h8v2.2a4 4 0 0 1-8 0V5.3Z"/><path d="M8 11.5v2.2"/></svg>
+                </template>
+              </SettingsNavItem>
+              <SettingsNavItem :label="$t('settings.nav.analyzer')" :active="activeTab === 'analyzer'" @select="activeTab = 'analyzer'">
+                <template #icon>
+                  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3.2C6.6 2.2 4.2 2.8 4.2 4.8 2.7 5.1 2.7 7.3 4.2 7.8c0 2 1.9 2.6 3.8 2.1"/><path d="M8 3.2c1.4-1 3.8-.4 3.8 1.6 1.5.3 1.5 2.5 0 3 0 2-1.9 2.6-3.8 2.1"/><path d="M8 3.2v9.6"/></svg>
+                </template>
+              </SettingsNavItem>
+              <SettingsNavItem :label="$t('settings.nav.extensions')" :active="activeTab === 'extensions'" @select="activeTab = 'extensions'">
+                <template #icon>
+                  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6.4 2.6h3.2v1.5a1.3 1.3 0 0 0 2.4 0V2.6h1.4v3.2h-1.5a1.3 1.3 0 0 0 0 2.4h1.5v3.2H6.4v-1.5a1.3 1.3 0 0 0-2.4 0v1.5H2.6V8.2h1.5a1.3 1.3 0 0 0 0-2.4H2.6V2.6h3.8Z"/></svg>
+                </template>
+              </SettingsNavItem>
+            </div>
+
+            <div class="s-nav-group">
+              <div class="s-nav-group-title">{{ $t('settings.nav.group.system') }}</div>
+              <SettingsNavItem :label="$t('settings.nav.shortcuts')" :active="activeTab === 'shortcuts'" @select="activeTab = 'shortcuts'">
+                <template #icon>
+                  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="1.8" y="4.3" width="12.4" height="7.4" rx="1.4"/><path d="M4.4 7v0.01M6.8 7v0.01M9.2 7v0.01M11.6 7v0.01M4.4 9.2v0.01M11.6 9.2v0.01"/><path d="M6.4 9.2h3.2"/></svg>
+                </template>
+              </SettingsNavItem>
+              <SettingsNavItem :label="$t('settings.nav.updates')" :active="activeTab === 'updates'" @select="activeTab = 'updates'">
+                <template #icon>
+                  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 10.3V2.8M8 2.8 5.3 5.5M8 2.8l2.7 2.7"/><path d="M3.3 10.5v1.6a1.2 1.2 0 0 0 1.2 1.2h7a1.2 1.2 0 0 0 1.2-1.2v-1.6"/></svg>
+                </template>
+              </SettingsNavItem>
+            </div>
+          </nav>
+        </aside>
+
+        <!-- ── Content (close button + all tab bodies) ───────────────────── -->
+        <div class="s-content">
           <button class="s-close" @click="emit('close')" title="Close (ESC)">✕</button>
-        </div>
 
         <!-- ── ROLES TAB ─────────────────────────────────────────────────── -->
         <div v-show="activeTab === 'roles'" class="s-body roles-body" data-settings-section="roles">
+          <h1 class="s-page-title">{{ $t('settings.nav.roles') }}</h1>
           <div class="settings-meta-row">
             <span class="scope-badge">{{ settingsScopeNotes.roles.scope }}</span>
             <span class="settings-path" :title="pathForTab('roles')">{{ pathForTab('roles') }}</span>
@@ -1451,6 +1535,7 @@ async function plDelete(id: string, name: string) {
         <!-- ── STAGES TAB ────────────────────────────────────────────────── -->
         <!-- ── MCP TAB ───────────────────────────────────────────────────── -->
         <div v-show="activeTab === 'mcp'" class="s-body mcp-body">
+          <h1 class="s-page-title">{{ $t('settings.nav.mcp') }}</h1>
 
           <!-- ── LIST VIEW ──────────────────────────────────────────────── -->
           <template v-if="mView === 'list'">
@@ -1481,9 +1566,11 @@ async function plDelete(id: string, name: string) {
                   <span class="mcp-spacer"></span>
                   <button class="mcp-delete-btn" @click="mRemoveServer(idx)" title="Remove">🗑</button>
                   <!-- Toggle switch -->
-                  <button class="mcp-toggle" :class="{ on: srv.enabled }" @click="mToggleEnabled(srv)" :title="srv.enabled ? 'Disable' : 'Enable'">
-                    <span class="mcp-toggle-thumb"></span>
-                  </button>
+                  <ToggleSwitch
+                    :model-value="srv.enabled"
+                    :aria-label="srv.enabled ? 'Disable' : 'Enable'"
+                    @update:model-value="mToggleEnabled(srv)"
+                  />
                 </div>
 
                 <!-- Tools row (collapsible) -->
@@ -1580,6 +1667,7 @@ async function plDelete(id: string, name: string) {
 
         <!-- ── ANALYZER TAB ─────────────────────────────────────────────── -->
         <div v-show="activeTab === 'analyzer'" class="s-body analyzer-body">
+          <h1 class="s-page-title">{{ $t('settings.nav.analyzer') }}</h1>
           <div class="settings-meta-row">
             <span class="scope-badge">{{ settingsScopeNotes.analyzer.scope }}</span>
             <span class="settings-path" :title="settingsPaths.analyzer">{{ settingsPaths.analyzer }}</span>
@@ -1924,6 +2012,7 @@ async function plDelete(id: string, name: string) {
 
         <!-- ── PIPELINES TAB ────────────────────────────────────────────── -->
         <div v-show="activeTab === 'pipelines'" class="s-body pipelines-body" data-settings-section="pipelines">
+          <h1 class="s-page-title">{{ $t('settings.nav.pipelines') }}</h1>
           <div class="settings-meta-row">
             <span class="scope-badge">{{ settingsScopeNotes.pipelines.scope }}</span>
             <span class="settings-path" :title="pathForTab('pipelines')">{{ pathForTab('pipelines') }}</span>
@@ -2121,6 +2210,7 @@ async function plDelete(id: string, name: string) {
 
         <!-- ══ CLI AGENTS TAB ══ -->
         <div v-show="activeTab === 'cliAgents'" class="s-body cli-agents-body">
+          <h1 class="s-page-title">{{ $t('settings.nav.cliAgents') }}</h1>
           <section class="ap-section" data-settings-section="cli-agents-list">
             <h3 class="ap-title">{{ $t('settings.cliAgents.title') }}</h3>
             <p class="ap-hint">{{ $t('settings.cliAgents.hint') }}</p>
@@ -2158,256 +2248,320 @@ async function plDelete(id: string, name: string) {
 
         <!-- ══ GENERAL TAB ══ -->
         <div v-show="activeTab === 'general'" class="s-body appearance-body">
-          <section class="ap-section" data-settings-section="general-confirm-close">
-            <h3 class="ap-title">{{ $t('confirm-close.setting-title') }}</h3>
-            <p class="ap-hint">{{ $t('confirm-close.setting-hint') }}</p>
-            <label class="check-row">
-              <input type="checkbox" v-model="confirmBeforeCloseModel" />
-              <span>{{ $t('confirm-close.setting-label') }}</span>
-            </label>
-          </section>
-          <section class="ap-section" data-settings-section="general-loop-prompt">
-            <h3 class="ap-title">{{ $t('settings.appearance.loop-prompt') }}</h3>
-            <p class="ap-hint">{{ $t('settings.appearance.loop-prompt-hint') }}</p>
-            <textarea v-model="loopPromptText" rows="4" spellcheck="false" @change="onLoopPromptChange"></textarea>
-            <p class="ap-hint">{{ $t('settings.appearance.loop-resume-hint') }}</p>
-            <textarea v-model="loopResumeText" rows="2" spellcheck="false" @change="onLoopResumeChange"></textarea>
-          </section>
+          <h1 class="s-page-title">{{ $t('settings.nav.general') }}</h1>
 
-          <section class="ap-section" data-settings-section="general-resume-behavior">
-            <h3 class="ap-title">{{ $t('settings.appearance.resume-behavior') }}</h3>
-            <p class="ap-hint">{{ $t('settings.appearance.resume-behavior-hint') }}</p>
-            <div class="field ap-timeout-field">
-              <label class="lbl">{{ $t('settings.appearance.resume-behavior-label') }}</label>
-              <select :value="resumeBehaviorModel" @change="onResumeBehaviorChange(($event.target as HTMLSelectElement).value)">
-                <option value="always">{{ $t('settings.appearance.resume-behavior-always') }}</option>
-                <option value="never">{{ $t('settings.appearance.resume-behavior-never') }}</option>
-                <option value="ask">{{ $t('settings.appearance.resume-behavior-ask') }}</option>
-              </select>
-            </div>
-          </section>
-
-          <section class="ap-section" data-settings-section="general-resume-concurrency">
-            <h3 class="ap-title">{{ $t('settings.appearance.resume-concurrency') }}</h3>
-            <p class="ap-hint">{{ $t('settings.appearance.resume-concurrency-hint') }}</p>
-            <div class="field ap-timeout-field">
-              <label class="lbl">{{ $t('settings.appearance.resume-concurrency-label') }}</label>
-              <input
-                type="number"
-                :min="MIN_RESUME_CONCURRENCY"
-                :max="MAX_RESUME_CONCURRENCY"
-                :value="resumeConcurrencyModel"
-                @change="onResumeConcurrencyChange(($event.target as HTMLInputElement).value)"
-              />
-            </div>
-          </section>
-
-          <section class="ap-section" data-settings-section="general-usage-badge">
-            <h3 class="ap-title">{{ $t('usage.settings-title') }}</h3>
-            <p class="ap-hint">{{ $t('usage.settings-hint') }}</p>
-            <label class="check-row">
-              <input type="checkbox" v-model="usageEnabledModel" @change="onUsageEnabledChange" />
-              <span>{{ $t('usage.settings-enabled') }}</span>
-            </label>
-            <div class="field ap-timeout-field">
-              <label class="lbl">{{ $t('usage.settings-refresh') }}</label>
-              <select
-                :value="usageRefreshModel"
-                @change="onUsageRefreshChange(($event.target as HTMLSelectElement).value)"
+          <SettingsSection :label="$t('settings.section.general-behavior')">
+            <SettingsCard>
+              <SettingRow
+                data-settings-section="general-confirm-close"
+                :title="$t('confirm-close.setting-title')"
+                :description="$t('confirm-close.setting-hint')"
               >
-                <option v-for="sec in USAGE_REFRESH_OPTIONS" :key="sec" :value="sec">
-                  {{ `${sec / 60} min` }}
-                </option>
-              </select>
-            </div>
-          </section>
+                <template #control>
+                  <ToggleSwitch v-model="confirmBeforeCloseModel" :aria-label="$t('confirm-close.setting-label')" />
+                </template>
+              </SettingRow>
 
-          <section class="ap-section" data-settings-section="general-environment">
-            <h3 class="ap-title">{{ $t('settings.appearance.environment') }}</h3>
-            <p class="ap-hint">{{ $t('settings.appearance.environment-hint') }}</p>
-            <button class="ap-reset" @click="emit('reopen-onboarding')">{{ $t('settings.appearance.rerun-env-check') }}</button>
-          </section>
+              <SettingRow
+                data-settings-section="general-resume-behavior"
+                :title="$t('settings.appearance.resume-behavior')"
+                :description="$t('settings.appearance.resume-behavior-hint')"
+              >
+                <template #control>
+                  <select :value="resumeBehaviorModel" @change="onResumeBehaviorChange(($event.target as HTMLSelectElement).value)">
+                    <option value="always">{{ $t('settings.appearance.resume-behavior-always') }}</option>
+                    <option value="never">{{ $t('settings.appearance.resume-behavior-never') }}</option>
+                    <option value="ask">{{ $t('settings.appearance.resume-behavior-ask') }}</option>
+                  </select>
+                </template>
+              </SettingRow>
 
-          <section class="ap-section" data-settings-section="general-backend-timeout">
-            <h3 class="ap-title">{{ $t('settings.appearance.backend-timeout') }}</h3>
-            <p class="ap-hint">{{ $t('settings.appearance.backend-timeout-hint') }}</p>
-            <div class="field ap-timeout-field">
-              <label class="lbl">{{ $t('settings.appearance.backend-timeout-label') }}</label>
-              <input
-                type="number"
-                min="15"
-                max="120"
-                :value="healthCheckTimeoutSec"
-                @change="onHealthTimeoutChange(($event.target as HTMLInputElement).value)"
-              />
-            </div>
-          </section>
+              <SettingRow
+                data-settings-section="general-resume-concurrency"
+                :title="$t('settings.appearance.resume-concurrency')"
+                :description="$t('settings.appearance.resume-concurrency-hint')"
+              >
+                <template #control>
+                  <input
+                    type="number"
+                    :min="MIN_RESUME_CONCURRENCY"
+                    :max="MAX_RESUME_CONCURRENCY"
+                    :value="resumeConcurrencyModel"
+                    @change="onResumeConcurrencyChange(($event.target as HTMLInputElement).value)"
+                  />
+                </template>
+              </SettingRow>
 
-          <section class="ap-section" data-settings-section="settings-management">
-            <div class="ap-section-head">
-              <h3 class="ap-title">{{ $t('settings.management.title') }}</h3>
-              <div class="row-g gap">
-                <button class="ap-reset" :disabled="settingsBundleBusy" @click="exportSettingsBundle">{{ $t('settings.management.export-bundle') }}</button>
-                <button class="ap-reset" :disabled="settingsBundleBusy" @click="importSettingsBundle">{{ $t('settings.management.import-bundle') }}</button>
+              <SettingRow
+                data-settings-section="general-usage-badge"
+                :title="$t('usage.settings-title')"
+                :description="$t('usage.settings-hint')"
+              >
+                <template #control>
+                  <div class="row-g gap">
+                    <ToggleSwitch v-model="usageEnabledModel" @update:modelValue="onUsageEnabledChange" :aria-label="$t('usage.settings-enabled')" />
+                    <span class="s-ctrl-label">{{ $t('usage.settings-refresh') }}</span>
+                    <select
+                      :value="usageRefreshModel"
+                      @change="onUsageRefreshChange(($event.target as HTMLSelectElement).value)"
+                    >
+                      <option v-for="sec in USAGE_REFRESH_OPTIONS" :key="sec" :value="sec">
+                        {{ `${sec / 60} min` }}
+                      </option>
+                    </select>
+                  </div>
+                </template>
+              </SettingRow>
+
+              <SettingRow
+                data-settings-section="general-environment"
+                :title="$t('settings.appearance.environment')"
+                :description="$t('settings.appearance.environment-hint')"
+              >
+                <template #control>
+                  <button class="ap-reset" @click="emit('reopen-onboarding')">{{ $t('settings.appearance.rerun-env-check') }}</button>
+                </template>
+              </SettingRow>
+
+              <SettingRow
+                data-settings-section="general-backend-timeout"
+                :title="$t('settings.appearance.backend-timeout')"
+                :description="$t('settings.appearance.backend-timeout-hint')"
+              >
+                <template #control>
+                  <input
+                    type="number"
+                    min="15"
+                    max="120"
+                    :value="healthCheckTimeoutSec"
+                    @change="onHealthTimeoutChange(($event.target as HTMLInputElement).value)"
+                  />
+                </template>
+              </SettingRow>
+            </SettingsCard>
+          </SettingsSection>
+
+          <SettingsSection :label="$t('settings.appearance.loop-prompt')">
+            <SettingsCard>
+              <div class="s-fullrow" data-settings-section="general-loop-prompt">
+                <p class="ap-hint">{{ $t('settings.appearance.loop-prompt-hint') }}</p>
+                <textarea v-model="loopPromptText" rows="4" spellcheck="false" @change="onLoopPromptChange"></textarea>
+                <p class="ap-hint">{{ $t('settings.appearance.loop-resume-hint') }}</p>
+                <textarea v-model="loopResumeText" rows="2" spellcheck="false" @change="onLoopResumeChange"></textarea>
               </div>
-            </div>
-            <p class="ap-hint">{{ $t('settings.management.bundle-hint') }}</p>
-            <div class="settings-meta-row inline">
-              <span class="scope-badge">{{ settingsScopeNotes.general.scope }}</span>
-              <span class="settings-path" :title="pathForTab('general')">{{ pathForTab('general') }}</span>
-            </div>
-            <p v-if="settingsBundleSummary" class="summary-ok">{{ settingsBundleSummary }}</p>
-            <p v-if="settingsBundleError" class="err-msg">{{ settingsBundleError }}</p>
-          </section>
+            </SettingsCard>
+          </SettingsSection>
+
+          <SettingsSection :label="$t('settings.section.settings-management')">
+            <SettingsCard data-settings-section="settings-management">
+              <SettingRow
+                :title="$t('settings.management.title')"
+                :description="$t('settings.management.bundle-hint')"
+              >
+                <template #control>
+                  <div class="row-g gap">
+                    <button class="ap-reset" :disabled="settingsBundleBusy" @click="exportSettingsBundle">{{ $t('settings.management.export-bundle') }}</button>
+                    <button class="ap-reset" :disabled="settingsBundleBusy" @click="importSettingsBundle">{{ $t('settings.management.import-bundle') }}</button>
+                  </div>
+                </template>
+              </SettingRow>
+              <div class="s-fullrow">
+                <div class="settings-meta-row inline">
+                  <span class="scope-badge">{{ settingsScopeNotes.general.scope }}</span>
+                  <span class="settings-path" :title="pathForTab('general')">{{ pathForTab('general') }}</span>
+                </div>
+                <p v-if="settingsBundleSummary" class="summary-ok">{{ settingsBundleSummary }}</p>
+                <p v-if="settingsBundleError" class="err-msg">{{ settingsBundleError }}</p>
+              </div>
+            </SettingsCard>
+          </SettingsSection>
         </div>
 
         <!-- ══ UPDATES TAB ══ -->
         <div v-show="activeTab === 'updates'" class="s-body updates-body">
-          <section class="ap-section" data-settings-section="updates">
-            <div class="ap-section-head">
-              <h3 class="ap-title">{{ $t('updater.section-title') }}</h3>
-              <button class="ap-reset" :disabled="updIsBusy || updateState.status === 'unsupported'" @click="checkForUpdates">{{ $t('updater.check') }}</button>
-            </div>
-            <p class="ap-hint">{{ $t('updater.section-hint') }}</p>
-            <div class="settings-meta-row inline">
-              <span class="scope-badge">{{ $t('updater.current-version') }}</span>
-              <span class="settings-path">v{{ updateState.currentVersion }}</span>
-            </div>
+          <h1 class="s-page-title">{{ $t('settings.nav.updates') }}</h1>
 
-            <p v-if="updateState.status === 'checking'" class="ap-hint">{{ $t('updater.checking') }}</p>
-            <p v-else-if="updateState.status === 'not-available'" class="summary-ok">{{ $t('updater.up-to-date') }}</p>
-            <p v-else-if="updateState.status === 'error'" class="err-msg">{{ $t('updater.error', { message: updateState.message }) }}</p>
-            <p v-else-if="updateState.status === 'unsupported'" class="ap-hint">{{ $t('updater.unsupported') }}</p>
+          <SettingsSection :label="$t('settings.section.updates')">
+            <SettingsCard data-settings-section="updates">
+              <SettingRow :title="$t('updater.section-title')" :description="$t('updater.section-hint')">
+                <template #control>
+                  <button class="ap-reset" :disabled="updIsBusy || updateState.status === 'unsupported'" @click="checkForUpdates">{{ $t('updater.check') }}</button>
+                </template>
+              </SettingRow>
+              <div class="s-fullrow">
+                <div class="settings-meta-row inline">
+                  <span class="scope-badge">{{ $t('updater.current-version') }}</span>
+                  <span class="settings-path">v{{ updateState.currentVersion }}</span>
+                </div>
 
-            <div v-if="['available', 'downloading', 'downloaded', 'installing'].includes(updateState.status)" class="upd-available">
-              <p class="summary-ok">{{ $t('updater.available', { version: updateState.availableVersion }) }}</p>
-              <p v-if="updateState.status === 'downloading'" class="ap-hint">{{ $t('updater.downloading', { percent: updateState.percent ?? 0 }) }}</p>
-              <p v-else-if="updateState.status === 'downloaded'" class="ap-hint">{{ $t('updater.downloaded') }}</p>
-              <p v-else-if="updateState.status === 'installing'" class="ap-hint">{{ $t('updater.restarting') }}</p>
-              <div v-if="updateState.releaseNotes" class="upd-notes">
-                <div class="ap-hint">{{ $t('updater.release-notes') }}</div>
-                <pre class="upd-notes-body">{{ updateState.releaseNotes }}</pre>
+                <p v-if="updateState.status === 'checking'" class="ap-hint">{{ $t('updater.checking') }}</p>
+                <p v-else-if="updateState.status === 'not-available'" class="summary-ok">{{ $t('updater.up-to-date') }}</p>
+                <p v-else-if="updateState.status === 'error'" class="err-msg">{{ $t('updater.error', { message: updateState.message }) }}</p>
+                <p v-else-if="updateState.status === 'unsupported'" class="ap-hint">{{ $t('updater.unsupported') }}</p>
+
+                <div v-if="['available', 'downloading', 'downloaded', 'installing'].includes(updateState.status)" class="upd-available">
+                  <p class="summary-ok">{{ $t('updater.available', { version: updateState.availableVersion }) }}</p>
+                  <p v-if="updateState.status === 'downloading'" class="ap-hint">{{ $t('updater.downloading', { percent: updateState.percent ?? 0 }) }}</p>
+                  <p v-else-if="updateState.status === 'downloaded'" class="ap-hint">{{ $t('updater.downloaded') }}</p>
+                  <p v-else-if="updateState.status === 'installing'" class="ap-hint">{{ $t('updater.restarting') }}</p>
+                  <div v-if="updateState.releaseNotes" class="upd-notes">
+                    <div class="ap-hint">{{ $t('updater.release-notes') }}</div>
+                    <pre class="upd-notes-body">{{ updateState.releaseNotes }}</pre>
+                  </div>
+                  <div class="row-g gap">
+                    <button v-if="updateState.status === 'available'" class="ap-reset" @click="startDownload">{{ $t('updater.download') }}</button>
+                    <button v-else-if="updateState.status === 'downloaded'" class="ap-reset" @click="installUpdate">{{ $t('updater.install') }}</button>
+                  </div>
+                </div>
               </div>
-              <div class="row-g gap">
-                <button v-if="updateState.status === 'available'" class="ap-reset" @click="startDownload">{{ $t('updater.download') }}</button>
-                <button v-else-if="updateState.status === 'downloaded'" class="ap-reset" @click="installUpdate">{{ $t('updater.install') }}</button>
+            </SettingsCard>
+
+            <SettingsCard>
+              <SettingRow :title="$t('updater.auto-check')" :description="$t('updater.auto-check-hint')">
+                <template #control>
+                  <ToggleSwitch
+                    :model-value="updSettings.autoCheck"
+                    :aria-label="$t('updater.auto-check')"
+                    @update:model-value="(v) => updUpdateSettings({ autoCheck: v })"
+                  />
+                </template>
+              </SettingRow>
+              <SettingRow :title="$t('updater.auto-download')" :description="$t('updater.auto-download-hint')">
+                <template #control>
+                  <ToggleSwitch
+                    :model-value="updSettings.autoDownload"
+                    :aria-label="$t('updater.auto-download')"
+                    @update:model-value="(v) => updUpdateSettings({ autoDownload: v })"
+                  />
+                </template>
+              </SettingRow>
+              <SettingRow :title="$t('updater.channel')" :description="$t('updater.channel-hint')">
+                <template #control>
+                  <select :value="updSettings.channel" @change="updUpdateSettings({ channel: ($event.target as HTMLSelectElement).value as UpdateChannel })">
+                    <option value="stable">{{ $t('updater.channel-stable') }}</option>
+                    <option value="beta">{{ $t('updater.channel-beta') }}</option>
+                  </select>
+                </template>
+              </SettingRow>
+              <div v-if="updSettings.channel === 'beta'" class="s-fullrow">
+                <p class="ap-hint">{{ $t('updater.beta-warning') }}</p>
               </div>
-            </div>
-
-            <label class="check-row">
-              <input type="checkbox" :checked="updSettings.autoCheck" @change="updUpdateSettings({ autoCheck: ($event.target as HTMLInputElement).checked })" />
-              <span>{{ $t('updater.auto-check') }}</span>
-            </label>
-            <p class="ap-hint">{{ $t('updater.auto-check-hint') }}</p>
-            <label class="check-row">
-              <input type="checkbox" :checked="updSettings.autoDownload" @change="updUpdateSettings({ autoDownload: ($event.target as HTMLInputElement).checked })" />
-              <span>{{ $t('updater.auto-download') }}</span>
-            </label>
-            <p class="ap-hint">{{ $t('updater.auto-download-hint') }}</p>
-
-            <div class="field ap-timeout-field">
-              <label class="lbl">{{ $t('updater.channel') }}</label>
-              <select :value="updSettings.channel" @change="updUpdateSettings({ channel: ($event.target as HTMLSelectElement).value as UpdateChannel })">
-                <option value="stable">{{ $t('updater.channel-stable') }}</option>
-                <option value="beta">{{ $t('updater.channel-beta') }}</option>
-              </select>
-            </div>
-            <p class="ap-hint">{{ $t('updater.channel-hint') }}</p>
-            <p v-if="updSettings.channel === 'beta'" class="ap-hint">{{ $t('updater.beta-warning') }}</p>
-          </section>
+            </SettingsCard>
+          </SettingsSection>
         </div>
 
         <!-- ══ APPEARANCE TAB ══ -->
         <div v-show="activeTab === 'appearance'" class="s-body appearance-body">
-          <section class="ap-section" data-settings-section="appearance-theme">
-            <h3 class="ap-title">{{ $t('settings.appearance.theme') }}</h3>
-            <p class="ap-hint">{{ $t('settings.appearance.theme-hint') }}</p>
-            <div class="ap-theme-grid">
-              <button
-                v-for="t in BUILTIN_THEMES"
-                :key="t.id"
-                :class="['ap-theme-card', { active: currentTheme === t.id }]"
-                @click="setTheme(t.id)"
-              >
-                <div class="ap-swatches">
-                  <span
-                    v-for="(c, i) in (THEME_SWATCHES[t.id] || [])"
-                    :key="i"
-                    class="ap-swatch"
-                    :style="{ background: c }"
-                  />
-                </div>
-                <span class="ap-theme-label">{{ t.label }}</span>
-                <span v-if="currentTheme === t.id" class="ap-check">✓</span>
-              </button>
-            </div>
-          </section>
+          <h1 class="s-page-title">{{ $t('settings.nav.appearance') }}</h1>
 
-          <section class="ap-section" data-settings-section="appearance-language">
-            <h3 class="ap-title">{{ $t('settings.appearance.language') }}</h3>
-            <p class="ap-hint">{{ $t('settings.appearance.language-hint') }}</p>
-            <div class="ap-lang-row">
-              <button
-                v-for="lang in SUPPORTED_LANGUAGES"
-                :key="lang.value"
-                :class="['ap-lang-btn', { active: currentLanguage === lang.value }]"
-                @click="setLanguage(lang.value)"
-              >
-                {{ lang.label }}
-                <span v-if="currentLanguage === lang.value" class="ap-check">✓</span>
-              </button>
-            </div>
-          </section>
-
-          <section class="ap-section" data-settings-section="appearance-runtime">
-            <h3 class="ap-title">{{ $t('settings.appearance.restore-windows') }}</h3>
-            <p class="ap-hint">{{ $t('settings.appearance.restore-windows-hint') }}</p>
-            <label class="ap-toggle-row">
-              <input type="checkbox" v-model="autoRestoreWindows" @change="onAutoRestoreChange" />
-              <span>{{ $t('settings.appearance.restore-windows-label') }}</span>
-            </label>
-          </section>
-
-          <section class="ap-section" data-settings-section="appearance-theme">
-            <div class="ap-section-head">
-              <h3 class="ap-title">{{ $t('settings.appearance.custom-colors') }}</h3>
-              <button
-                v-if="hasCustomOverrides"
-                class="ap-reset"
-                @click="resetCustom"
-                title="Reset all custom colors to the built-in theme"
-              >
-                {{ $t('settings.appearance.reset-to-defaults') }}
-              </button>
-            </div>
-            <p class="ap-hint">{{ $t('settings.appearance.tweaks-hint') }}</p>
-            <div class="ap-color-list">
-              <label
-                v-for="tok in CUSTOMIZABLE_TOKENS"
-                :key="tok.id"
-                class="ap-color-row"
-              >
-                <input
-                  type="color"
-                  class="ap-color-input"
-                  :value="resolvedTokenValue(tok.id)"
-                  @input="onPickColor(tok.id, ($event.target as HTMLInputElement).value)"
-                />
-                <span class="ap-color-name">{{ $t('settings.color.' + tok.id.slice(2)) }}</span>
-                <span class="ap-color-token">{{ tok.id }}</span>
+          <SettingsSection :label="$t('settings.section.theme')">
+            <div class="ap-section" data-settings-section="appearance-theme">
+              <p class="ap-hint">{{ $t('settings.appearance.theme-hint') }}</p>
+              <div class="ap-theme-grid">
                 <button
-                  v-if="customOverrides[tok.id]"
-                  class="ap-color-clear"
-                  @click.prevent="setCustomOverride(tok.id, null)"
-                  :title="$t('action.clear-color-override')"
-                >✕</button>
-              </label>
+                  v-for="t in BUILTIN_THEMES"
+                  :key="t.id"
+                  :class="['ap-theme-card', { active: currentTheme === t.id }]"
+                  @click="setTheme(t.id)"
+                >
+                  <div class="ap-swatches">
+                    <span
+                      v-for="(c, i) in (THEME_SWATCHES[t.id] || [])"
+                      :key="i"
+                      class="ap-swatch"
+                      :style="{ background: c }"
+                    />
+                  </div>
+                  <span class="ap-theme-label">{{ t.label }}</span>
+                  <span v-if="currentTheme === t.id" class="ap-check">✓</span>
+                </button>
+              </div>
             </div>
-          </section>
+
+            <div class="ap-section" data-settings-section="appearance-theme">
+              <div class="ap-section-head">
+                <h3 class="ap-title">{{ $t('settings.appearance.custom-colors') }}</h3>
+                <button
+                  v-if="hasCustomOverrides"
+                  class="ap-reset"
+                  @click="resetCustom"
+                  title="Reset all custom colors to the built-in theme"
+                >
+                  {{ $t('settings.appearance.reset-to-defaults') }}
+                </button>
+              </div>
+              <p class="ap-hint">{{ $t('settings.appearance.tweaks-hint') }}</p>
+              <div class="ap-color-list">
+                <label
+                  v-for="tok in CUSTOMIZABLE_TOKENS"
+                  :key="tok.id"
+                  class="ap-color-row"
+                >
+                  <input
+                    type="color"
+                    class="ap-color-input"
+                    :value="resolvedTokenValue(tok.id)"
+                    @input="onPickColor(tok.id, ($event.target as HTMLInputElement).value)"
+                  />
+                  <span class="ap-color-name">{{ $t('settings.color.' + tok.id.slice(2)) }}</span>
+                  <span class="ap-color-token">{{ tok.id }}</span>
+                  <button
+                    v-if="customOverrides[tok.id]"
+                    class="ap-color-clear"
+                    @click.prevent="setCustomOverride(tok.id, null)"
+                    :title="$t('action.clear-color-override')"
+                  >✕</button>
+                </label>
+              </div>
+            </div>
+          </SettingsSection>
+
+          <SettingsSection :label="$t('settings.section.language')">
+            <SettingsCard>
+              <SettingRow
+                data-settings-section="appearance-language"
+                :title="$t('settings.appearance.language')"
+                :description="$t('settings.appearance.language-hint')"
+              >
+                <template #control>
+                  <div class="ap-lang-row">
+                    <button
+                      v-for="lang in SUPPORTED_LANGUAGES"
+                      :key="lang.value"
+                      :class="['ap-lang-btn', { active: currentLanguage === lang.value }]"
+                      @click="setLanguage(lang.value)"
+                    >
+                      {{ lang.label }}
+                      <span v-if="currentLanguage === lang.value" class="ap-check">✓</span>
+                    </button>
+                  </div>
+                </template>
+              </SettingRow>
+            </SettingsCard>
+          </SettingsSection>
+
+          <SettingsSection :label="$t('settings.section.other')">
+            <SettingsCard>
+              <SettingRow
+                data-settings-section="appearance-runtime"
+                :title="$t('settings.appearance.restore-windows')"
+                :description="$t('settings.appearance.restore-windows-hint')"
+              >
+                <template #control>
+                  <ToggleSwitch
+                    v-model="autoRestoreWindows"
+                    :aria-label="$t('settings.appearance.restore-windows-label')"
+                    @update:modelValue="onAutoRestoreChange"
+                  />
+                </template>
+              </SettingRow>
+            </SettingsCard>
+          </SettingsSection>
 
         </div>
 
         <div v-show="activeTab === 'accounts'" class="s-body accounts-body" data-settings-section="accounts">
+          <h1 class="s-page-title">{{ $t('settings.nav.accounts') }}</h1>
           <div class="settings-meta-row">
             <span class="scope-badge">{{ settingsScopeNotes.accounts.scope }}</span>
             <span class="settings-path">{{ pathForTab('accounts') }}</span>
@@ -2420,14 +2574,18 @@ async function plDelete(id: string, name: string) {
 
         <!-- ── KEYBOARD SHORTCUTS TAB ────────────────────────────────────── -->
         <div v-show="activeTab === 'shortcuts'" class="s-body shortcuts-body" data-settings-section="shortcuts">
+          <h1 class="s-page-title">{{ $t('settings.nav.shortcuts') }}</h1>
           <KeyboardShortcutsHelp />
         </div>
 
         <!-- ── EXTENSIONS TAB (flag-gated) ───────────────────────────────── -->
         <div v-show="activeTab === 'extensions'" class="s-body" data-settings-section="extensions">
+          <h1 class="s-page-title">{{ $t('settings.nav.extensions') }}</h1>
           <ExtensionsPane />
         </div>
 
+        </div>
+        <!-- /.s-content -->
 
       </div>
     </div>
@@ -2490,57 +2648,120 @@ async function plDelete(id: string, name: string) {
   width: 92vw;
   max-width: 1100px;
   height: 88vh;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr);
   overflow: hidden;
   box-shadow: 0 24px 60px rgba(0,0,0,0.7);
 }
 
-/* ── Header ──────────────────────────────────────────────────────────────────  */
-.s-header {
+/* ── Sidebar ─────────────────────────────────────────────────────────────────  */
+.s-sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--bg-inset);
+  border-right: 1px solid var(--border-default);
+  padding: var(--space-3, 12px) var(--space-2, 8px);
+  gap: var(--space-2, 8px);
+}
+.s-ws-header {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--border-muted);
-  background: var(--bg-inset);
-  flex-shrink: 0;
+  gap: 10px;
+  padding: 4px var(--space-row-x);
+  min-width: 0;
 }
-.s-title {
+.s-ws-avatar {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-selected);
+  color: var(--accent-fg);
   font-size: 14px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.s-ws-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.25;
+}
+.s-ws-name {
+  font-size: 13px;
   font-weight: 600;
   color: var(--text-bright);
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
-.s-tabs {
-  display: flex;
-  gap: 4px;
-  flex: 1;
-  min-width: 0;
-  overflow-x: auto;
-  scrollbar-width: thin;
-}
-.s-tab {
-  border: 1px solid transparent;
-  background: transparent;
+.s-ws-sub {
+  font-size: 11px;
   color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 500;
-  padding: 6px 14px;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: all 0.15s;
-  white-space: nowrap;
-  flex-shrink: 0;
 }
-.s-tab:hover { background: var(--bg-subtle); color: var(--text-bright); }
-.s-tab.active { background: var(--bg-muted); border-color: var(--border-default); color: var(--accent-fg); }
-.s-tab:focus-visible { outline: 2px solid var(--accent-focus); outline-offset: 1px; }
+
+/* ── Grouped nav ─────────────────────────────────────────────────────────────  */
+.s-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 0;
+}
+.s-nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px 0;
+}
+.s-nav-group + .s-nav-group {
+  border-top: 1px solid var(--border-muted);
+}
+.s-nav-group-title {
+  padding: 4px var(--space-row-x) 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+/* ── Content pane ────────────────────────────────────────────────────────────  */
+.s-content {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
 
 .s-search-box {
   position: relative;
-  width: min(280px, 28vw);
-  flex-shrink: 0;
+  width: 100%;
+}
+
+/* Narrow viewport: collapse the sidebar to an icon-only rail so the content
+   pane keeps its width. Labels stay accessible (visually hidden inside each
+   nav item, with a title tooltip); grouping is preserved by the dividers. */
+@media (max-width: 720px) {
+  .s-modal {
+    grid-template-columns: 56px minmax(0, 1fr);
+  }
+  .s-sidebar {
+    padding: var(--space-2, 8px) 4px;
+  }
+  .s-ws-header {
+    justify-content: center;
+    padding: 4px 0;
+  }
+  .s-ws-meta { display: none; }
+  .s-search-box { display: none; }
+  .s-nav-group-title { display: none; }
 }
 .s-search-input {
   width: 100%;
@@ -2560,7 +2781,7 @@ async function plDelete(id: string, name: string) {
 .s-search-results {
   position: absolute;
   top: calc(100% + 8px);
-  right: 0;
+  left: 0;
   z-index: 9100;
   width: min(420px, 78vw);
   max-height: min(420px, 64vh);
@@ -2620,11 +2841,28 @@ async function plDelete(id: string, name: string) {
 }
 
 /* ── Appearance tab ─────────────────────────────────────────────────────────── */
-.appearance-body { padding: 18px 22px; }
+.appearance-body { overflow-y: auto; padding: 18px 22px; }
 .ap-section { margin-bottom: 26px; }
 .ap-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .ap-title { margin: 0 0 4px; font-size: 13px; font-weight: 600; color: var(--text-bright); }
 .ap-hint { margin: 0 0 14px; font-size: 11.5px; color: var(--text-secondary); }
+
+/* ── Two-column settings layout (page title / full-width rows / control labels) ── */
+.s-page-title {
+  margin: 0 0 var(--space-group);
+  font-size: var(--font-page-title);
+  font-weight: 700;
+  color: var(--text-bright);
+}
+.s-fullrow {
+  padding: var(--space-row-y) var(--space-row-x);
+}
+.s-fullrow > :last-child { margin-bottom: 0; }
+.s-ctrl-label { font-size: 11.5px; color: var(--text-secondary); }
+/* Controls placed in a SettingRow #control slot: keep them compact and
+   right-aligned instead of the full-width default used inside cards/fields. */
+.setting-row-control select { width: auto; min-width: 120px; }
+.setting-row-control input[type='number'] { width: 96px; }
 
 /* CLI Agents tab — enable/disable + drag-reorder list */
 .cli-agent-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
@@ -2724,13 +2962,17 @@ async function plDelete(id: string, name: string) {
 }
 .ap-color-clear:hover { color: var(--danger-fg); background: var(--bg-muted); }
 .s-close {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  z-index: 30;
   border: none;
-  background: transparent;
+  background: var(--bg-base);
   color: var(--text-secondary);
   font-size: 16px;
   cursor: pointer;
   padding: 4px 8px;
-  border-radius: 4px;
+  border-radius: var(--radius-control);
   line-height: 1;
 }
 .s-close:hover { background: var(--bg-muted); color: var(--text-bright); }
@@ -3022,21 +3264,6 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 .mcp-delete-btn:hover { color: var(--danger-fg); background: color-mix(in srgb, var(--danger-fg) 10%, transparent); }
 .mcp-delete-btn.small { font-size: 10px; color: var(--text-muted); }
 .mcp-delete-btn.small:hover { color: var(--danger-fg); }
-
-/* Toggle switch (iOS-style) */
-.mcp-toggle {
-  width: 40px; height: 22px; border-radius: 11px; border: none;
-  background: var(--text-disabled); padding: 0; cursor: pointer;
-  display: flex; align-items: center; transition: background 0.2s;
-  flex-shrink: 0; position: relative;
-}
-.mcp-toggle.on { background: var(--accent-emphasis); }
-.mcp-toggle-thumb {
-  width: 18px; height: 18px; border-radius: 50%; background: var(--text-on-emphasis);
-  position: absolute; left: 2px; transition: left 0.2s;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.4);
-}
-.mcp-toggle.on .mcp-toggle-thumb { left: 20px; }
 
 /* Tools row */
 .mcp-tools-row {

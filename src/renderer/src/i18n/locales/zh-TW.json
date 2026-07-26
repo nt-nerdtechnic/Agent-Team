@@ -564,6 +564,34 @@
       "shortcuts": "⌨️ 快捷鍵",
       "extensions": "🧩 擴充功能"
     },
+    "nav": {
+      "current-workspace": "目前工作區",
+      "group": {
+        "general": "一般",
+        "accountsAgents": "帳號與代理",
+        "integration": "整合",
+        "system": "系統"
+      },
+      "general": "一般",
+      "appearance": "外觀",
+      "accounts": "帳號",
+      "cliAgents": "CLI Agents",
+      "roles": "角色",
+      "pipelines": "流程",
+      "mcp": "工具與 MCP",
+      "analyzer": "分析器",
+      "extensions": "擴充功能",
+      "shortcuts": "快捷鍵",
+      "updates": "更新"
+    },
+    "section": {
+      "general-behavior": "一般行為",
+      "settings-management": "設定管理",
+      "theme": "主題",
+      "language": "語言",
+      "other": "其他",
+      "updates": "更新"
+    },
     "cliAgents": {
       "title": "CLI Agents",
       "hint": "啟用、停用並排序主視窗手動生成（manual spawn）下拉選單中出現的 CLI agent，順序也會套用到 Ctrl+數字快捷鍵。至少須保留一個啟用。",
