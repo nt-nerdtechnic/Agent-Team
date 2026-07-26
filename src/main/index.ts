@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { spawn } from 'node:child_process'
 import { startBackend, type BackendHandle } from './backend'
 import { installApplicationMenu, type AppMenuHooks, type RecentMenuEntry } from './menu'
-import { openNoopPluginView, openFsProbePluginView, openMiniIdePluginView, devMiniIdePluginDescriptor, openPlansPluginView, devPlansPluginDescriptor, openGitPluginView, devGitPluginDescriptor, registerBundledMiniIde, registerBundledGit, frontendPluginManager } from './plugins/frontendPluginManager'
+import { openNoopPluginView, openFsProbePluginView, openMiniIdePluginView, devMiniIdePluginDescriptor, openPlansPluginView, devPlansPluginDescriptor, openGitPluginView, devGitPluginDescriptor, registerBundledMiniIde, registerBundledPlans, registerBundledGit, frontendPluginManager } from './plugins/frontendPluginManager'
 import { registerPluginIpc } from './plugins/pluginIpc'
 import { lockPageZoom } from './web-contents-zoom'
 import { initUpdater } from './updater'
@@ -379,6 +379,17 @@ const bundledMiniIde = registerBundledMiniIde(frontendPluginManager, {
 })
 if (!bundledMiniIde.registered) {
   console.warn(`[main] bundled mini-IDE unavailable: ${bundledMiniIde.reason}`)
+}
+
+// Bundled Plans — the official builtin plan surface, shipped inside the app
+// package (resources/plugins/plans) and built from dist-plugins in dev. Mirrors
+// the mini-IDE registration above; see registerBundledPlans for precedence.
+const bundledPlans = registerBundledPlans(frontendPluginManager, {
+  isPackaged: app.isPackaged,
+  resourcesPath: process.resourcesPath,
+})
+if (!bundledPlans.registered) {
+  console.warn(`[main] bundled Plans unavailable: ${bundledPlans.reason}`)
 }
 
 // Bundled Git — the official builtin standalone Git client surface, shipped
@@ -1752,7 +1763,7 @@ app.whenReady().then(async () => {
             // Dev-only: workspace via AGENT_TEAM_PLUGIN_WORKSPACE, else empty.
             if (host) {
               const httpUrl = backend ? `http://${backend.host}:${backend.port}` : ''
-              openPlansPluginView(host, process.env['AGENT_TEAM_PLUGIN_WORKSPACE'] ?? '', httpUrl)
+              openPlansPluginView(host, process.env['AGENT_TEAM_PLUGIN_WORKSPACE'] ?? '', httpUrl, '', currentUiTheme())
             }
           }
         }

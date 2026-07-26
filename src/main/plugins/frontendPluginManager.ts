@@ -812,14 +812,56 @@ export function openMiniIdePluginView(
 /** Id of the Plans extension (the plan review surface). */
 export const PLANS_PLUGIN_ID = 'navide.plans'
 
+/** Directory of the bundled Plans copy: `resources/plugins/plans` inside the
+ *  app package (shipped via electron-builder `extraResources`), or the local
+ *  `dist-plugins/plans` build output when running unpackaged. Mirrors
+ *  {@link bundledMiniIdeDir}. */
+export function bundledPlansDir(source: BundledMiniIdeSource): string {
+  return source.isPackaged
+    ? join(source.resourcesPath, 'plugins', 'plans')
+    : join(source.devRoot ?? join(__dirname, '../..'), 'dist-plugins', 'plans')
+}
+
+/**
+ * Register the app-bundled Plans surface as a builtin descriptor at startup,
+ * mirroring {@link registerBundledMiniIde} exactly (same precedence order and
+ * fail-closed validation). Never throws: a missing dir, invalid manifest,
+ * spoofed id, or missing entry file returns `registered: false` with a reason
+ * (caller logs), so a corrupt bundle degrades instead of crashing startup.
+ */
+export function registerBundledPlans(
+  manager: FrontendPluginManager,
+  source: BundledMiniIdeSource
+): { registered: boolean; reason?: string } {
+  const dir = bundledPlansDir(source)
+  const scanned = loadPluginDir(dir)
+  if (!scanned.descriptor) {
+    return { registered: false, reason: `${dir}: ${scanned.error ?? 'invalid plugin dir'}` }
+  }
+  if (scanned.descriptor.id !== PLANS_PLUGIN_ID) {
+    return {
+      registered: false,
+      reason: `${dir}: manifest id '${scanned.descriptor.id}' is not '${PLANS_PLUGIN_ID}'`,
+    }
+  }
+  if (!existsSync(scanned.descriptor.entryFile)) {
+    return { registered: false, reason: `${dir}: entry file missing (${scanned.descriptor.entryFile})` }
+  }
+  manager.registerBuiltin(scanned.descriptor)
+  return { registered: true }
+}
+
 /** Build the entry query PlanWindowApp reads from `window.location.search`:
  *  `workspace_path`, the backend `http_url` (resolved by the plans
- *  capabilityBackend shim), and the optional `rel_path` of a plan to auto-open. */
-function plansQuery(workspacePath: string, httpUrl: string, relPath: string): string {
+ *  capabilityBackend shim), the optional `rel_path` of a plan to auto-open, and
+ *  the current `theme` id so the plugin paints with the app theme before its
+ *  first settings reconcile (zero-flash; see plugins/plans/mount.ts). */
+function plansQuery(workspacePath: string, httpUrl: string, relPath: string, theme: string): string {
   const params = new URLSearchParams()
   if (workspacePath) params.set('workspace_path', workspacePath)
   if (httpUrl) params.set('http_url', httpUrl)
   if (relPath) params.set('rel_path', relPath)
+  if (theme) params.set('theme', theme)
   const qs = params.toString()
   return qs ? `?${qs}` : ''
 }
@@ -853,13 +895,14 @@ export function openPlansPluginView(
   hostWindow: BrowserWindow,
   workspacePath: string,
   httpUrl = '',
-  relPath = ''
+  relPath = '',
+  theme = ''
 ): boolean {
   const base = frontendPluginManager.getDescriptor(PLANS_PLUGIN_ID)
   if (!base) return false
   frontendPluginManager.open(
     hostWindow,
-    { ...base, query: plansQuery(workspacePath, httpUrl, relPath) },
+    { ...base, query: plansQuery(workspacePath, httpUrl, relPath, theme) },
     {
       x: 0,
       y: 0,
