@@ -349,15 +349,15 @@ function shortDate(iso?: string): string {
 </template>
 
 <style scoped>
-/* GitHub-dark palette, matched to the plugin pre-splash (#0d1117 / #30363d /
- * #58a6ff). Full theme-token wiring is follow-up; the skeleton commits to one
- * look so it renders before the settings reconcile. */
+/* Colors follow the app theme via semantic tokens (styles/tokens/semantic.css),
+ * so the standalone Git window re-themes with the rest of the app. The default
+ * dark-github values reproduce the original hardcoded palette. */
 .git-window {
   height: 100vh;
   display: flex;
   flex-direction: column;
-  background: #0d1117;
-  color: #c9d1d9;
+  background: var(--bg-base);
+  color: var(--text-primary);
   font: 13px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   overflow: hidden;
 }
@@ -369,7 +369,7 @@ function shortDate(iso?: string): string {
   gap: 16px;
   height: 44px;
   padding: 0 14px;
-  border-bottom: 1px solid #21262d;
+  border-bottom: 1px solid var(--border-muted);
   -webkit-app-region: drag;
   padding-left: 78px; /* clear the hidden-titlebar traffic lights */
 }
@@ -381,12 +381,12 @@ function shortDate(iso?: string): string {
 }
 .tb-branch {
   font-weight: 600;
-  color: #e6edf3;
+  color: var(--text-bright);
 }
 .tb-track {
   display: flex;
   gap: 6px;
-  color: #58a6ff;
+  color: var(--accent-fg);
   font-size: 12px;
 }
 .tb-actions {
@@ -400,15 +400,15 @@ function shortDate(iso?: string): string {
   gap: 5px;
   height: 28px;
   padding: 0 10px;
-  background: #21262d;
-  color: #c9d1d9;
-  border: 1px solid #30363d;
+  background: var(--bg-muted);
+  color: var(--text-primary);
+  border: 1px solid var(--border-default);
   border-radius: 6px;
   cursor: pointer;
   font-size: 12px;
 }
 .tb-btn:hover:not(:disabled) {
-  background: #30363d;
+  background: var(--bg-hover-strong);
 }
 .tb-btn:disabled {
   opacity: 0.45;
@@ -421,15 +421,15 @@ function shortDate(iso?: string): string {
   flex: 1;
 }
 .tb-busy {
-  color: #8b949e;
+  color: var(--text-secondary);
   font-size: 12px;
   -webkit-app-region: no-drag;
 }
 
 .err-bar {
   padding: 6px 14px;
-  background: #3d1c1c;
-  color: #ff9a9a;
+  background: var(--danger-subtle);
+  color: var(--danger-bright);
   font-size: 12px;
 }
 
@@ -438,7 +438,7 @@ function shortDate(iso?: string): string {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #8b949e;
+  color: var(--text-secondary);
 }
 
 /* Body layout */
@@ -452,7 +452,7 @@ function shortDate(iso?: string): string {
 .sidebar {
   width: 220px;
   flex-shrink: 0;
-  border-right: 1px solid #21262d;
+  border-right: 1px solid var(--border-muted);
   overflow-y: auto;
   padding: 8px 0;
 }
@@ -466,7 +466,7 @@ function shortDate(iso?: string): string {
   padding: 4px 12px;
   font-size: 10.5px;
   letter-spacing: 0.6px;
-  color: #6e7681;
+  color: var(--text-muted);
   font-weight: 600;
 }
 .sb-item {
@@ -477,7 +477,7 @@ function shortDate(iso?: string): string {
   padding: 4px 12px;
   background: none;
   border: none;
-  color: #c9d1d9;
+  color: var(--text-primary);
   font-size: 12.5px;
   text-align: left;
   cursor: pointer;
@@ -486,34 +486,34 @@ function shortDate(iso?: string): string {
   cursor: default;
 }
 button.sb-item:hover {
-  background: #161b22;
+  background: var(--bg-subtle);
 }
 .sb-item.active {
-  background: #1f6feb33;
-  color: #e6edf3;
+  background: var(--bg-selected);
+  color: var(--text-bright);
 }
 .sb-item.current {
-  color: #58a6ff;
+  color: var(--accent-fg);
   font-weight: 600;
 }
 .sb-dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: #58a6ff;
+  background: var(--accent-fg);
   flex-shrink: 0;
 }
 .sb-badge {
   margin-left: auto;
-  background: #30363d;
+  background: var(--bg-muted);
   border-radius: 9px;
   padding: 0 6px;
   font-size: 11px;
-  color: #c9d1d9;
+  color: var(--text-primary);
 }
 .sb-empty {
   padding: 2px 12px;
-  color: #484f58;
+  color: var(--text-disabled);
   font-size: 12px;
 }
 
@@ -535,7 +535,7 @@ button.sb-item:hover {
 .diff-empty,
 .detail-empty {
   padding: 16px;
-  color: #8b949e;
+  color: var(--text-secondary);
 }
 
 /* History table */
@@ -547,23 +547,23 @@ button.sb-item:hover {
 .hist-table thead th {
   position: sticky;
   top: 0;
-  background: #0d1117;
+  background: var(--bg-base);
   text-align: left;
   padding: 6px 10px;
-  color: #6e7681;
+  color: var(--text-muted);
   font-weight: 600;
-  border-bottom: 1px solid #21262d;
+  border-bottom: 1px solid var(--border-muted);
   font-size: 11px;
 }
 .hist-row {
   cursor: pointer;
-  border-bottom: 1px solid #161b22;
+  border-bottom: 1px solid var(--border-muted);
 }
 .hist-row:hover {
-  background: #161b22;
+  background: var(--bg-subtle);
 }
 .hist-row.selected {
-  background: #1f6feb33;
+  background: var(--bg-selected);
 }
 .hist-table td {
   padding: 5px 10px;
@@ -576,19 +576,19 @@ button.sb-item:hover {
   width: 100%;
 }
 .c-hash {
-  color: #8b949e;
+  color: var(--text-secondary);
 }
 .c-author {
-  color: #8b949e;
+  color: var(--text-secondary);
   max-width: 140px;
 }
 .c-date {
-  color: #6e7681;
+  color: var(--text-muted);
 }
 .ref-pill {
   display: inline-block;
-  background: #1f6feb;
-  color: #fff;
+  background: var(--accent-emphasis);
+  color: var(--text-on-emphasis);
   border-radius: 8px;
   padding: 0 7px;
   font-size: 11px;
@@ -606,7 +606,7 @@ button.sb-item:hover {
   padding: 4px 12px;
   font-size: 10.5px;
   letter-spacing: 0.6px;
-  color: #6e7681;
+  color: var(--text-muted);
   font-weight: 600;
 }
 .status-row {
@@ -620,47 +620,47 @@ button.sb-item:hover {
   display: inline-flex;
   width: 16px;
   justify-content: center;
-  color: #d29922;
+  color: var(--attention-fg);
   font-weight: 600;
 }
 .st-badge.staged {
-  color: #3fb950;
+  color: var(--success-fg);
 }
 .st-badge.new {
-  color: #58a6ff;
+  color: var(--accent-fg);
 }
 
 /* Bottom detail (commit detail + diff) */
 .detail {
   height: 44%;
   min-height: 160px;
-  border-top: 1px solid #21262d;
+  border-top: 1px solid var(--border-muted);
   display: flex;
 }
 .detail-left {
   width: 300px;
   flex-shrink: 0;
-  border-right: 1px solid #21262d;
+  border-right: 1px solid var(--border-muted);
   overflow: auto;
 }
 .dt-meta {
   padding: 10px 12px;
-  border-bottom: 1px solid #21262d;
+  border-bottom: 1px solid var(--border-muted);
 }
 .dt-subject {
   font-weight: 600;
-  color: #e6edf3;
+  color: var(--text-bright);
   margin-bottom: 4px;
 }
 .dt-sub {
-  color: #8b949e;
+  color: var(--text-secondary);
   font-size: 12px;
 }
 .dt-back {
   margin-top: 8px;
   background: none;
   border: none;
-  color: #58a6ff;
+  color: var(--accent-fg);
   font-size: 12px;
   cursor: pointer;
   padding: 0;
@@ -680,11 +680,11 @@ button.sb-item:hover {
   text-overflow: ellipsis;
 }
 .dt-file:hover {
-  background: #161b22;
+  background: var(--bg-subtle);
 }
 .dt-file.active {
-  background: #1f6feb33;
-  color: #e6edf3;
+  background: var(--bg-selected);
+  color: var(--text-bright);
 }
 .detail-right {
   flex: 1;
@@ -693,19 +693,19 @@ button.sb-item:hover {
 }
 .diff-file {
   padding: 8px 12px;
-  color: #8b949e;
-  border-bottom: 1px solid #21262d;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-muted);
   position: sticky;
   top: 0;
-  background: #0d1117;
+  background: var(--bg-base);
 }
 .diff-hunk {
-  border-bottom: 1px solid #161b22;
+  border-bottom: 1px solid var(--border-muted);
 }
 .hunk-head {
   padding: 3px 12px;
-  color: #58a6ff;
-  background: #161b2288;
+  color: var(--accent-fg);
+  background: var(--bg-subtle);
 }
 .diff-line {
   display: flex;
@@ -717,29 +717,29 @@ button.sb-item:hover {
   flex-shrink: 0;
   text-align: right;
   padding-right: 8px;
-  color: #484f58;
+  color: var(--text-disabled);
   user-select: none;
 }
 .diff-line .lc {
   width: 16px;
   flex-shrink: 0;
   text-align: center;
-  color: #6e7681;
+  color: var(--text-muted);
 }
 .diff-line .lt {
   flex: 1;
 }
 .dl-add {
-  background: #12261e;
+  background: var(--diff-add-bg);
 }
 .dl-add .lt {
-  color: #3fb950;
+  color: var(--diff-add-fg);
 }
 .dl-del {
-  background: #25171c;
+  background: var(--diff-del-bg);
 }
 .dl-del .lt {
-  color: #f85149;
+  color: var(--diff-del-fg);
 }
 
 .mono {
