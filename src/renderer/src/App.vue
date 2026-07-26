@@ -2,6 +2,7 @@
 import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import ViewPanel, { type LayoutMode } from './components/ViewPanel.vue'
 import TerminalPane from './components/TerminalPane.vue'
+import RestoredPanePlaceholder from './components/RestoredPanePlaceholder.vue'
 import AgentHistoryModal from './components/AgentHistoryModal.vue'
 import ReconnectSessionModal, { type OrphanSession } from './components/ReconnectSessionModal.vue'
 import ControlPane, {
@@ -172,8 +173,10 @@ onMounted(() => {
   // user disabling it from the native quit dialog's "don't show again".
   pushQuitConfirmConfig()
   window.agentTeam?.onQuitConfirmDisabled?.(() => { confirmBeforeClose.value = false })
-  // Clicking a system notification focuses the window on the originating pane.
-  window.agentTeam?.onFocusPane?.((paneId) => { onFocusPane(paneId) })
+  // Clicking a system notification focuses and activates the originating pane.
+  window.agentTeam?.onFocusPane?.((paneId) => {
+    onFocusPane(paneId)
+  })
   // Plan window "execute" dispatch routed to this workspace's window.
   window.agentTeam?.onPlanExecutionDispatch?.((payload) => { void onPlanExecutionDispatch(payload) })
   // Editor-window AI Chat fetches a CLI pane's scrollback through the main
@@ -368,6 +371,9 @@ const currentWorkspace = ref<string>(
     }
   })()
 )
+// Placeholder creation changes the visible-pane computed state. Suppress its
+// watcher until hydration has selected and painted the initial screen.
+let hydratingColdRestore = false
 const workspaceSelected = ref<boolean>(
   _bootWorkspace !== '' ||
   (() => {
@@ -628,6 +634,10 @@ interface RunGroup {
 
 interface ActivePane {
   id: string
+  /** False while a persisted pane is represented by a cold-restore placeholder. */
+  realized: boolean
+  /** Runtime-only restore marker cleared after the first live output. */
+  restoring?: boolean
   agentKey: string
   agentLabel: string
   /** User-set display name from the rename action. Overrides agentLabel in all
@@ -702,6 +712,8 @@ interface ActivePane {
   /** Epoch ms of the heuristic quota-reset estimate (runtime-only): loop start
    *  + 5h Claude session window, shown on the running badge as approximate. */
   loopEstimateResetAt?: number | null
+  /** Cold-restore metadata retained until the placeholder is explicitly opened. */
+  deferredRestore?: DeferredRestoreMetadata
 }
 
 const panes = ref<ActivePane[]>([])
@@ -1185,7 +1197,9 @@ function syncViews(): void {
       roleLabel: roleLabel(p.roleKey),
       stageId: p.stageId,
       command: p.command,
-      status: (ref?.displayStatus as string | undefined) ?? (ref?.status as string | undefined) ?? 'starting',
+      status: p.realized
+        ? (ref?.displayStatus as string | undefined) ?? (ref?.status as string | undefined) ?? 'starting'
+        : 'waiting',
       error: ref?.error as string | undefined,
       injectionStatus: p.injectionStatus,
       preparationStatus: p.preparationStatus,
@@ -1197,11 +1211,18 @@ function syncViews(): void {
       isMinimized: minimizedPanes.value.has(p.id),
       loopActive: p.loopActive,
       loopWaitUntil: p.loopWaitUntil,
-      rebuildVisible: paneRebuildVisible(p),
-      canRebuild: paneCanRebuild(p),
-      rebuilding: paneRebuilding(p)
+      rebuildVisible: p.realized && paneRebuildVisible(p),
+      canRebuild: p.realized && paneCanRebuild(p),
+      rebuilding: p.realized && paneRebuilding(p)
     }
   })
+}
+
+function onPaneFirstOutput(paneId: string): void {
+  const pane = panes.value.find((p) => p.id === paneId)
+  if (!pane?.restoring) return
+  pane.restoring = false
+  syncViews()
 }
 
 let _syncViewsTimer: number | null = null
@@ -1382,6 +1403,7 @@ async function injectPane(
   preserveNewlines = false,
   shouldAbort?: () => boolean
 ): Promise<boolean> {
+  if (!panes.value.find((p) => p.id === paneId)?.realized) return false
   const ref = paneRefs[paneId]
   if (!ref?.sessionId) return false
   return injectText(ref.sessionId, text, logLabel, preserveNewlines, shouldAbort)
@@ -1417,7 +1439,19 @@ function mentionCandidatesFor(paneId: string): string[] {
 async function injectPaneContext(sourcePaneId: string, targetPaneId: string): Promise<void> {
   const sourcePane = panes.value.find((p) => p.id === sourcePaneId)
   const sourceRef = paneRefs[sourcePaneId]
-
+  const targetSessionId = paneRefs[targetPaneId]?.sessionId as string | undefined
+  // Preserve the established relay fallback for an absent source or a live
+  // source whose local ref was torn down. A local placeholder has no buffer to
+  // share, however, so never ask another window to provide stale context for it.
+  if (!sourcePane || !sourceRef) {
+    if (!sourcePane || sourcePane.realized) {
+      await injectExternalPaneContext(sourcePaneId, targetPaneId)
+    }
+    return
+  }
+  // Placeholders have no live PTY/buffer. A target placeholder cannot accept a
+  // paste either.
+  if (!sourcePane.realized || !panes.value.find((p) => p.id === targetPaneId)?.realized || !targetSessionId) return
   // Mention mode: an "@" typed immediately before the drop means "insert just
   // this pane's messaging name", completing e.g. "傳給 @" + drop → "傳給 @codex-1 ".
   // Falls through to the full context share when the source has no name
@@ -1425,17 +1459,6 @@ async function injectPaneContext(sourcePaneId: string, targetPaneId: string): Pr
   const lineBeforeCursor = paneRefs[targetPaneId]?.readLineBeforeCursor?.()
   if (lineBeforeCursor !== undefined && endsWithMentionTrigger(lineBeforeCursor) && sourcePane?.messagingName) {
     await pastePaneContext(targetPaneId, sourcePane.messagingName + ' ')
-    return
-  }
-
-  if (!sourcePane || !sourceRef) {
-    // Source pane is not in this window: Chromium DOES deliver same-app
-    // cross-window drops directly to this window's drop targets, so a drag
-    // from another workspace window lands here with a pane id this window
-    // does not own. Fetch its context through the pane-buffer relay instead.
-    // (Also covers source-closed-mid-drag: the relay answers not-found and
-    // the user gets a toast rather than silence.)
-    await injectExternalPaneContext(sourcePaneId, targetPaneId)
     return
   }
 
@@ -1524,7 +1547,7 @@ function bumpLoopGen(paneId: string): number {
 
 async function togglePaneLoop(paneId: string): Promise<void> {
   const pane = panes.value.find((p) => p.id === paneId)
-  if (!pane) return
+  if (!pane?.realized) return
   if (pane.loopActive) {
     pane.loopActive = false
     pane.loopWaitUntil = null
@@ -2390,6 +2413,8 @@ interface SpawnInternal {
    *  marker bootstrap, whose dismissStartupDialog + pasted marker + Enter
    *  would inject input into the CLI's interactive sign-in wizard. */
   isLogin?: boolean
+  /** Runtime-only restore marker kept on replacement panes until first output. */
+  restoring?: boolean
 }
 
 /** Trailing line embedded in a Codex/Antigravity kickoff so the backend can match
@@ -2490,6 +2515,8 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
       : ''
   const pane: ActivePane = {
     id,
+    realized: true,
+    restoring: opts.restoring,
     agentKey: opts.agentKey,
     agentLabel: spec.label,
     customName: opts.customName,
@@ -2519,13 +2546,13 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
   if (sessionMarker && pane.kickoffPrompt) {
     pane.kickoffPrompt += sessionMarkerLine(sessionMarker)
   }
-  
+
   if (opts.replacePaneId) {
     const wasFocused = focusPaneId.value === opts.replacePaneId
     const idx = panes.value.findIndex(p => p.id === opts.replacePaneId)
     if (idx >= 0) panes.value.splice(idx, 1, pane)
     else panes.value.push(pane)
-    if (wasFocused) focusPaneId.value = id
+    if (wasFocused) selectPane(id, { userInitiated: false })
   } else {
     panes.value.push(pane)
   }
@@ -2792,7 +2819,7 @@ async function dispatchPlanToPane(relPath: string, agentKey: string): Promise<Pl
     currentWorkspace.value
   )
   if (reusable) {
-    onFocusPane(reusable.id)
+    selectPane(reusable.id, { userInitiated: false })
     const injected = await injectPane(reusable.id, prompt, 'plan-execute', true)
     return injected ? { ok: true } : { ok: false, reason: 'inject-failed' }
   }
@@ -2834,7 +2861,7 @@ async function dispatchPlanToPane(relPath: string, agentKey: string): Promise<Pl
   })
   const pane = panes.value.find((p) => p.id === paneId)
   if (!pane) return { ok: false, reason: 'pane-spawn-failed' }
-  onFocusPane(paneId)
+  selectPane(paneId, { userInitiated: false })
   const bootstrapped = await sendSessionMarkerBootstrap(pane, `[pane ${paneId.slice(0, 8)}]`)
   if (!bootstrapped) {
     // No marker/hint text to send (or the send failed): settle CLI startup
@@ -2921,7 +2948,7 @@ async function onManualResume(payload: { agentKey: string, workspacePath: string
  */
 async function onAnalyzeNow(paneId: string): Promise<void> {
   const pane = panes.value.find((p) => p.id === paneId)
-  if (!pane) return
+  if (!pane?.realized) return
   const stageIndex = stagesApi.stages.value.findIndex((s) => s.id === pane.stageId)
   const stage = stagesApi.stages.value[stageIndex]
   if (!stage) return
@@ -2959,7 +2986,7 @@ async function onAnalyzeNow(paneId: string): Promise<void> {
 
 async function onReinject(paneId: string): Promise<void> {
   const pane = panes.value.find((p) => p.id === paneId)
-  if (!pane) return
+  if (!pane?.realized) return
   if (pane.injectionTimer !== null) {
     window.clearTimeout(pane.injectionTimer)
     pane.injectionTimer = null
@@ -2994,7 +3021,10 @@ async function onKill(paneId: string, opts: { markRemoved?: boolean, force?: boo
   }
   let stageIndex = -1
   if (pane) {
-    stageIndex = stagesApi.stages.value.findIndex((s) => s.id === pane.stageId)
+    const savedStageIndex = pane.deferredRestore?.saved.stage_index
+    stageIndex = typeof savedStageIndex === 'number' && savedStageIndex >= 0
+      ? savedStageIndex
+      : stagesApi.stages.value.findIndex((s) => s.id === pane.stageId)
     if (stageIndex >= 0) cancelWatcher(paneId)
   }
   if (activeQuestion.value?.paneId === paneId) activeQuestion.value = null
@@ -3072,12 +3102,12 @@ function paneRebuilding(pane: ActivePane): boolean {
 
 /** Rebuildable panes in the active tab only — drives the tab bar's rebuild button. */
 const rebuildablePaneCount = computed(
-  () => panes.value.filter((p) => tabFilteredPaneIds.value.has(p.id) && paneCanRebuild(p)).length
+  () => panes.value.filter((p) => p.realized && tabFilteredPaneIds.value.has(p.id) && paneCanRebuild(p)).length
 )
 
 /** Rebuildable panes across all tabs — drives the sidebar's rebuild-all button. */
 const rebuildableAllPaneCount = computed(
-  () => panes.value.filter((p) => paneCanRebuild(p)).length
+  () => panes.value.filter((p) => p.realized && paneCanRebuild(p)).length
 )
 
 async function rebuildPaneViaResume(
@@ -3085,7 +3115,7 @@ async function rebuildPaneViaResume(
   opts?: { suppressBusyToast?: boolean }
 ): Promise<'busy' | undefined> {
   const pane = panes.value.find((p) => p.id === paneId)
-  if (!pane) return
+  if (!pane?.realized) return
   // If the CLI is actively working, skip rebuild so we don't kill in-flight work.
   // The PTY is alive and the pane is already bound — nothing to reattach, just leave it.
   // Judged purely on displayStatus: it is built from CLEANED output bursts, so an
@@ -3243,7 +3273,7 @@ async function rebuildPanesViaResume(scope: 'tab' | 'all'): Promise<void> {
   if (rebuildingTabPanes.value) return
   // Rebuild replaces pane ids, so capture the batch up front.
   const ids = panes.value
-    .filter((p) => (scope === 'all' || tabFilteredPaneIds.value.has(p.id)) && paneCanRebuild(p))
+    .filter((p) => p.realized && (scope === 'all' || tabFilteredPaneIds.value.has(p.id)) && paneCanRebuild(p))
     .map((pane) => pane.id)
   if (!ids.length) return
 
@@ -3274,7 +3304,7 @@ async function rebuildPanesViaResume(scope: 'tab' | 'all'): Promise<void> {
 
 async function rebuildPaneClean(paneId: string): Promise<void> {
   const pane = panes.value.find((p) => p.id === paneId)
-  if (!pane) return
+  if (!pane?.realized) return
   // Same session-aware lock as rebuildPaneViaResume: mid-resume the
   // replacement pane (new id, same session) is already live, and its clear
   // shortcut / respawn button route here — without the session key a clean
@@ -3353,6 +3383,7 @@ async function rebuildPaneClean(paneId: string): Promise<void> {
 }
 
 async function onInterrupt(paneId: string): Promise<void> {
+  if (!panes.value.find((p) => p.id === paneId)?.realized) return
   const ref = paneRefs[paneId]
   if (!ref?.sessionId) return
   try {
@@ -3671,13 +3702,25 @@ function revealPaneTab(paneId: string): void {
   if (stageTabs.value.some((t) => t.key === key)) activeTab.value = key
 }
 
+interface PaneSelectionOptions {
+  userInitiated: boolean
+  scrollIntoView?: boolean
+}
+
+function selectPane(paneId: string | null, options: PaneSelectionOptions): void {
+  focusPaneId.value = paneId
+  if (paneId && options.userInitiated) void realizeRestoredPane(paneId)
+  if (paneId && options.scrollIntoView) {
+    void nextTick(() => {
+      const el = document.querySelector(`[data-pane-id="${paneId}"]`)
+      el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    })
+  }
+}
+
 function onFocusPane(paneId: string): void {
   revealPaneTab(paneId)
-  focusPaneId.value = paneId
-  nextTick(() => {
-    const el = document.querySelector(`[data-pane-id="${paneId}"]`)
-    el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
-  })
+  selectPane(paneId, { userInitiated: true, scrollIntoView: true })
 }
 
 const previewLogContent = ref<string>('')
@@ -3927,6 +3970,122 @@ interface ProjectPayload {
   resume_index?: number
 }
 
+interface ColdRestoreBatch {
+  workspacePath: string
+  records: ProjectPane[]
+  /** All persisted claims stay available for reconnect exclusion checks. */
+  savedClaims: ProjectPane[]
+  usedFreshSessionIds: Set<string>
+  decisionPromise?: Promise<RestoreDecision>
+}
+
+interface DeferredRestoreMetadata {
+  saved: ProjectPane
+  workspacePath: string
+  batch: ColdRestoreBatch
+}
+
+interface RestoredPaneSpawnOptions {
+  saved: ProjectPane
+  workspacePath: string
+  runGroupId?: string
+  sessionHomeId?: string
+  /** Persisted CLI account pin; restores must stay on the same isolated home. */
+  profileId?: string
+  commandOverride: string
+  fallbackCommand: string
+  isResume: boolean
+  resumeSessionId: string
+  sessionKnownOnDisk: boolean
+  freshSessionId?: string
+  freshPipelineFallbackSessionId: string
+  replacePaneId?: string
+  restoring?: boolean
+  /** Check replacement ownership before its new record is persisted. */
+  shouldPersist?: (paneId: string) => boolean
+}
+
+interface RestoredPaneSpawnResult {
+  paneId: string
+}
+
+/** Spawn an already-decided restore and persist its new pane record. Restore
+ * policy (probe, resume/fresh choice, reconnect, and stale checks) stays with
+ * the eager/lazy callers; this only keeps their spawn metadata in sync. */
+async function spawnRestoredPane(opts: RestoredPaneSpawnOptions): Promise<RestoredPaneSpawnResult | null> {
+  const { saved } = opts
+  const paneId = await spawnPane({
+    agentKey: saved.agent as AgentKey,
+    roleKey: saved.role,
+    stageId: (saved.stage_id ?? '') as StageId,
+    slotLabel: saved.slot_label,
+    customName: saved.custom_name || undefined,
+    autoName: saved.auto_name || undefined,
+    commandOverride: opts.commandOverride,
+    workspacePath: opts.workspacePath,
+    origin: saved.origin,
+    runGroupId: opts.runGroupId,
+    isResume: opts.isResume,
+    skipRoleInjection: opts.isResume,
+    stageIndex: saved.stage_index ?? -1,
+    restoreMode: opts.isResume ? 'memory-resume' : 'fresh',
+    sessionHomeId: opts.sessionHomeId,
+    profileId: opts.profileId,
+    resumeSessionId: opts.resumeSessionId,
+    sessionKnownOnDisk: opts.sessionKnownOnDisk,
+    freshSessionId: opts.freshSessionId,
+    preferredMessagingName: persistedMessagingName(saved.pane_id),
+    replacePaneId: opts.replacePaneId,
+    restoring: opts.restoring,
+  })
+  if (!paneId) return null
+  if (opts.shouldPersist && !opts.shouldPersist(paneId)) {
+    await onKill(paneId, { markRemoved: false })
+    return null
+  }
+  if (saved.pane_id !== paneId) dropPersistedMessagingName(saved.pane_id)
+
+  const pinnedSessionId = panes.value.find((p) => p.id === paneId)?.pinnedSessionId ?? ''
+  if (saved.origin === 'pipeline') {
+    await sendQuiet('pipeline.slot_spawn', {
+      workspace_path: opts.workspacePath,
+      stage_index: saved.stage_index,
+      slot_label: saved.slot_label,
+      pane_id: paneId,
+      agent: saved.agent,
+      role: saved.role,
+      session_id: opts.isResume
+        ? opts.resumeSessionId
+        : (pinnedSessionId || opts.freshPipelineFallbackSessionId),
+      session_home_id: opts.sessionHomeId ?? '',
+      profile_id: opts.profileId ?? '',
+      run_group_id: opts.runGroupId ?? '',
+    })
+  } else {
+    await sendQuiet<ProjectPayload>('manual_pane.spawn', {
+      workspace_path: opts.workspacePath,
+      pane_id: paneId,
+      previous_pane_id: saved.pane_id,
+      agent: saved.agent,
+      role: saved.role,
+      command: opts.fallbackCommand,
+      session_id: opts.isResume ? opts.resumeSessionId : pinnedSessionId,
+      session_home_id: opts.sessionHomeId ?? '',
+      profile_id: opts.profileId ?? '',
+      run_group_id: opts.runGroupId,
+      output_log_file: panes.value.find((p) => p.id === paneId)?.outputLogFile ?? '',
+    })
+    if (opts.resumeSessionId && !opts.isResume && !pinnedSessionId) {
+      await sendQuiet('manual_pane.session', {
+        workspace_path: opts.workspacePath,
+        pane_id: paneId,
+        session_id: '',
+      })
+    }
+  }
+  return { paneId }
+}
+
 interface SessionExistsPayload {
   exists: boolean
 }
@@ -4148,32 +4307,42 @@ async function onWorkspaceCheck(path: string): Promise<void> {
         })
       }
     }
-    activeTab.value = (savedTab && stageTabs.value.some((t) => t.key === savedTab))
-      ? savedTab
-      : (stageTabs.value[0]?.key ?? '')
-    if (suppressPaneRestoreOnce) {
-      // First load of a duplicated window: open the same workspace as a clean
-      // view without re-resuming the source window's live agent sessions.
-      suppressPaneRestoreOnce = false
-    } else {
-      // isStale lets restore bail if a newer workspace-check superseded this one
-      // while the 'ask' resume dialog was open (the await can span a user pause).
-      await restoreWorkspacePanes(resp, path, undefined, () => seq !== workspaceCheckSeq)
-    }
-    // If the active tab has no panes (e.g. old project.json panes landed in a
-    // different group via fallback), switch to the first tab that has panes so
-    // the user is not greeted with an empty grid.
-    if (activeTab.value && stageTabs.value.length > 0) {
-      const paneCountByGroup: Record<string, number> = {}
-      for (const p of panes.value) {
-        const groupKey = p.runGroupId || 'manual'
-        paneCountByGroup[groupKey] = (paneCountByGroup[groupKey] ?? 0) + 1
+    hydratingColdRestore = true
+    try {
+      activeTab.value = (savedTab && stageTabs.value.some((t) => t.key === savedTab))
+        ? savedTab
+        : (stageTabs.value[0]?.key ?? '')
+      if (suppressPaneRestoreOnce) {
+        // First load of a duplicated window: open the same workspace as a clean
+        // view without re-resuming the source window's live agent sessions.
+        suppressPaneRestoreOnce = false
+      } else {
+        // isStale lets restore bail if a newer workspace-check superseded this one
+        // before or during restore (the await can span a user pause).
+        await restoreWorkspacePanes(resp, path, undefined, () => seq !== workspaceCheckSeq)
       }
-      const activeHasPanes = (paneCountByGroup[activeTab.value] ?? 0) > 0
-      if (!activeHasPanes) {
-        const firstFull = stageTabs.value.find((t) => (paneCountByGroup[t.key] ?? 0) > 0)
-        if (firstFull) activeTab.value = firstFull.key
+      // If the active tab has no panes (e.g. old project.json panes landed in a
+      // different group via fallback), switch to the first tab that has panes so
+      // the user is not greeted with an empty grid.
+      if (activeTab.value && stageTabs.value.length > 0) {
+        const paneCountByGroup: Record<string, number> = {}
+        for (const p of panes.value) {
+          const groupKey = p.runGroupId || 'manual'
+          paneCountByGroup[groupKey] = (paneCountByGroup[groupKey] ?? 0) + 1
+        }
+        const activeHasPanes = (paneCountByGroup[activeTab.value] ?? 0) > 0
+        if (!activeHasPanes) {
+          const firstFull = stageTabs.value.find((t) => (paneCountByGroup[t.key] ?? 0) > 0)
+          if (firstFull) activeTab.value = firstFull.key
+        }
       }
+      // Let the selected tab/layout paint before starting only the panes that
+      // are actually on screen. Minimized panes and other tabs stay lazy.
+      focusPaneId.value = tabVisiblePanes.value[0]?.id ?? null
+      await nextTick()
+      realizeOnScreenPanes()
+    } finally {
+      hydratingColdRestore = false
     }
   }
 }
@@ -4189,18 +4358,14 @@ watch(
   }
 )
 
-/** Re-spawn CLI panes for all slots recorded in project.json.
- *  Called on workspace load so terminal screens appear immediately without
- *  waiting for the user to click Resume.
- *
- *  Slots with a persisted session_id are relaunched with the CLI's resume
- *  command so the agent's prior conversation memory is restored — but nothing
- *  is injected (no role, no kickoff): the pane sits idle with memory loaded
- *  until the user drives it. Slots without an id fall back to a fresh spawn
- *  (role re-injected), the same as before this feature. */
+/** Restore panes recorded in project.json.
+ *  Full cold loads create placeholders; explicit activation realizes and
+ *  resumes (or fresh-spawns) one record at a time. Detached/group reattachments
+ *  remain eager so their live PTYs reconnect immediately. */
 async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: string, onlyGroupId?: string, isStale?: () => boolean): Promise<void> {
   // Don't restore if pipeline is active or paused — panes are already alive.
   if (pipeline.state === 'running' || pipeline.state === 'aborted') return
+  if (isStale?.() || currentWorkspace.value !== workspacePath) return
 
   // Build unified pane list. Prefer project.panes[] (new format); fall back to
   // migrating stages[].slots[] + manual_panes[] for old project.json files that
@@ -4271,31 +4436,9 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
   if (toRestore.length > 0) pipelineLog(`↩ Restoring ${toRestore.length} pane(s)`)
   pipeline.workspacePath = workspacePath
 
-  // Resume-behavior preference: 'always' resumes (legacy behavior), 'never'
-  // spawns every pane fresh, 'ask' prompts once. Only a full cold restore is
-  // subject to it — a group reattach (onlyGroupId) or detached child window is
-  // handing back panes whose PTYs are already alive, never a resume decision.
-  let forceFresh = false
-  if (onlyGroupId === undefined && !isDetachedWindow) {
-    const decision = await resolveRestoreDecision({
-      behavior: normalizeResumeBehavior(settingsGet(RESUME_BEHAVIOR_SETTING_KEY, 'always')),
-      restorableCount: toRestore.length,
-      workspacePath,
-      decisionCache: restoreDecisionCache,
-      ask: () => notifyRestore.confirm(
-        i18n.global.t('restore.resume-prompt-message', { count: toRestore.length }),
-        {
-          title: i18n.global.t('restore.resume-prompt-title'),
-          confirmText: i18n.global.t('restore.resume-prompt-confirm'),
-          cancelText: i18n.global.t('restore.resume-prompt-cancel'),
-        }
-      ),
-    })
-    // The 'ask' dialog can span a user pause; bail if a newer workspace-check
-    // superseded this restore so we don't spawn panes into a stale workspace.
-    if (isStale?.()) return
-    forceFresh = decision === 'fresh'
-  }
+  // Ghost/reconnect detection applies only to a full cold restore — a group
+  // reattach or detached child window hands back panes whose PTYs are alive.
+  const fullRestore = onlyGroupId === undefined && !isDetachedWindow
 
   // Lazily create one group to house restored pipeline panes whose saved
   // run_group_id no longer maps to an existing tab (e.g. localStorage cleared
@@ -4333,15 +4476,78 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
   // reuse it — a second `--session-id <same>` would collide.
   const usedFreshSessionIds = new Set<string>()
 
-  // Ghost/reconnect detection applies only to a full cold restore — a group
-  // reattach or detached child window hands back panes whose PTYs are alive.
-  const fullRestore = onlyGroupId === undefined && !isDetachedWindow
+  const coldBatch: ColdRestoreBatch | null = fullRestore
+    ? {
+        workspacePath,
+        records: toRestore,
+        savedClaims: allProjectPanes,
+        usedFreshSessionIds,
+      }
+    : null
   if (fullRestore) {
     reconnectedCount.value = 0
     disconnectedPaneIds.value = []
     reconnectBannerDismissed.value = false
+
+    // Cold restore is deliberately split: persisted records become inert UI
+    // rows now, while probes/decision/spawn happen only from explicit activation.
+    for (const saved of toRestore) {
+      const existing = panes.value.find((p) => p.id === saved.pane_id)
+      if (existing?.realized) continue
+      const spec = agentSpecs.find((s) => s.agentKey === saved.agent)
+      const rawSessionId = (saved.session_id ?? '').trim()
+      const sessionId = normalizeResumeSessionId(saved.agent, rawSessionId)
+      const sessionHomeId = saved.agent === 'codex'
+        ? ((saved.session_home_id ?? '').trim() || saved.pane_id)
+        : ''
+      const savedGid = saved.run_group_id || ''
+      const runGroupId = savedGid
+        ? ensureSavedGroup(savedGid)
+        : (saved.origin === 'pipeline' ? ensureRestoreGroup() : '')
+      const placeholder: ActivePane = {
+        id: saved.pane_id,
+        realized: false,
+        agentKey: saved.agent,
+        agentLabel: spec?.label ?? saved.agent,
+        customName: saved.custom_name || undefined,
+        autoName: saved.auto_name || undefined,
+        roleKey: saved.role as RoleKey,
+        stageId: (saved.stage_id ?? '') as StageId,
+        slotLabel: saved.slot_label ?? '',
+        command: saved.command ?? '',
+        workspacePath,
+        origin: saved.origin,
+        outputLogFile: saved.output_log_file || undefined,
+        runGroupId: runGroupId || undefined,
+        injectionStatus: 'pending',
+        preparationStatus: 'starting',
+        injectionTimer: null,
+        kickoffStatus: saved.kickoff_status === 'sent' || saved.kickoff_status === 'failed'
+          ? saved.kickoff_status
+          : 'none',
+        kickoffPrompt: '',
+        skipRoleInjection: true,
+        pinnedSessionId: sessionId || undefined,
+        sessionHomeId: sessionHomeId || undefined,
+        deferredRestore: { saved, workspacePath, batch: coldBatch! },
+      }
+      if (existing) {
+        const index = panes.value.findIndex((p) => p.id === saved.pane_id)
+        if (index >= 0) panes.value.splice(index, 1, placeholder)
+      } else {
+        panes.value.push(placeholder)
+      }
+      if (saved.is_minimized) {
+        minimizedPanes.value = new Set([...minimizedPanes.value, saved.pane_id])
+      }
+    }
+    syncViews()
   }
 
+  // Detached/only-group restores keep the existing eager behaviour. Cold
+  // placeholders return through the history backfill below without probing or
+  // creating any PTY.
+  if (!fullRestore) {
   await Promise.all(toRestore.map(async (saved, restoreIdx) => {
     const rawSessionId = (saved.session_id ?? '').trim()
     const sessionId = normalizeResumeSessionId(saved.agent, rawSessionId)
@@ -4356,25 +4562,14 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
     const savedGid = saved.run_group_id || ''
     const runGroupId = savedGid
       ? ensureSavedGroup(savedGid)
-      : (saved.origin === 'pipeline' ? ensureRestoreGroup() : (runGroups.value[0]?.id ?? ''))
+      : (saved.origin === 'pipeline' ? ensureRestoreGroup() : '')
 
     // Unified session-resume logic for all pane types. Tri-state: true /
     // false (definitively absent) / null (probe failed — unknown).
-    // forceFresh (user chose "start fresh") takes the fresh-spawn path for
-    // every pane — including Codex, which is normally preserved when its
-    // rollout is missing — but the probe still runs: a CONFIRMED transcript
-    // (=== true) is pinned on the fresh pane via sessionKnownOnDisk below so
-    // the Rebuild (resume) button stays enabled after restart. Under
-    // forceFresh the probe is best-effort — cap it at 2.5s so a cold-boot
-    // backend storm can't stall every fresh spawn for the full 10s default
-    // (a timed-out null is discarded on this path anyway).
-    const canResume = await canResumeSession(
-      saved.agent, workspacePath, sessionId,
-      forceFresh ? { timeoutMs: 2500 } : undefined
-    )
+    const canResume = await canResumeSession(saved.agent, workspacePath, sessionId)
     // Codex preserve-untouched applies whenever the rollout is not CONFIRMED
     // present (false and null alike) — unchanged pre-tri-state behavior.
-    if (!forceFresh && shouldPreserveMissingSessionOnRestore(saved.agent, rawSessionId, canResume === true)) {
+    if (shouldPreserveMissingSessionOnRestore(saved.agent, rawSessionId, canResume === true)) {
       // Never turn a saved Codex conversation into a replacement conversation
       // merely because its rollout is temporarily unavailable. In particular,
       // do not reach manual_pane.spawn/session below, which would overwrite the
@@ -4386,99 +4581,32 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
     // saved id (if the transcript exists it resumes perfectly; if not the CLI
     // errors for one boot, but the id mapping survives); only a definitive
     // false falls back to a fresh spawn reusing the saved id below.
-    // forceFresh always routes fresh regardless of the probe.
-    const attemptResume = !forceFresh && shouldAttemptResume(canResume)
+    const attemptResume = shouldAttemptResume(canResume)
     let resumeCmd = attemptResume ? buildResumeCommand(saved.agent, sessionId, skipFlag) : ''
-    // A pane whose transcript is DEFINITIVELY gone would otherwise fall back to
-    // a fresh conversation. Before that, attempt a deterministic reconnect from
-    // spawn-history provenance (Claude only — it alone carries the pinned-id
-    // provenance the resolver uses). A unique still-resumable match is adopted
-    // and resumed; zero/ambiguous is deferred to the manual reconnect banner.
-    // Never touch a pane whose own id resumes (attemptResume) — I1 invariant.
-    const ghostConfirmed = !forceFresh && shouldWarnMissingResume(
-      saved.agent, rawSessionId, attemptResume,
-      looksLikeResumeCommand(saved.agent, saved.command || '')
-    )
-    let reconnectId = ''
-    if (fullRestore && ghostConfirmed && saved.agent === 'claude') {
-      reconnectId = await resolveReconnectForPane(saved, workspacePath, allProjectPanes)
-    }
-    let wasDisconnected = false
-    if (reconnectId) {
-      // Unique provenance match: point the saved record at the resolved id
-      // (backend backs up project.json first) and resume it in place.
-      await sendQuiet('pane.reconnect_session', {
-        workspace_path: workspacePath,
-        pane_id: saved.pane_id,
-        session_id: reconnectId,
-      })
-      resumeCmd = buildResumeCommand(saved.agent, reconnectId, skipFlag)
-      reconnectedCount.value++
-      pipelineLog(`↩ ${saved.agent}: auto-reconnected ${saved.pane_id} → ${reconnectId}`)
-    } else if (ghostConfirmed) {
-      // Zero/ambiguous provenance: keep the fresh fallback (surface instead of
-      // silently swapping a new conversation) and flag the pane for the manual
-      // reconnect banner/picker.
-      wasDisconnected = fullRestore
-      pipelineLog(
-        `⚠ ${saved.agent}: previous conversation ${sessionId} not found at ${workspacePath}; opened a fresh one`
-      )
-      notifyRestore.toast(
-        i18n.global.t('restore.session-not-found', { agent: saved.agent }),
-        { type: 'error', duration: 8000 }
-      )
-    }
-    const effectiveResumeId = reconnectId || sessionId
+    const effectiveResumeId = sessionId
     const savedFallbackCommand = saved.command && !looksLikeResumeCommand(saved.agent, saved.command)
       ? saved.command : ''
-    // Start-fresh must not inherit a hand-written --session-id from the saved
-    // command: that id's transcript still exists, so it would resume (and
-    // re-persist) the old conversation instead of minting a new one.
-    const fallbackCommand = forceFresh ? stripPinnedSessionId(savedFallbackCommand) : savedFallbackCommand
+    const fallbackCommand = savedFallbackCommand
     const commandOverride = resumeCmd || fallbackCommand || ''
     const isResume = !!resumeCmd
 
-    const paneId = await spawnPane({
-      agentKey: saved.agent as AgentKey,
-      roleKey: saved.role,
-      stageId: (saved.stage_id ?? '') as StageId,
-      slotLabel: saved.slot_label,
-      customName: saved.custom_name || undefined,
-      autoName: saved.auto_name || undefined,
-      commandOverride,
+    const restored = await spawnRestoredPane({
+      saved,
       workspacePath,
-      origin: saved.origin,
       runGroupId: runGroupId || undefined,
-      isResume,
-      skipRoleInjection: isResume,
-      stageIndex: saved.stage_index ?? -1,
-      restoreMode: isResume ? 'memory-resume' : 'fresh',
       sessionHomeId,
       profileId: saved.profile_id,
+      commandOverride,
+      fallbackCommand,
+      isResume,
       resumeSessionId: effectiveResumeId,
-      // Probe CONFIRMED the saved transcript on disk but the spawn is fresh
-      // (forceFresh): keep the saved id pinned so Rebuild stays enabled.
-      // Strictly === true — null (probe failed) is unknown, not known-on-disk.
-      // Only for agents whose stale pin self-heals (see RESTORE_PIN_AGENTS).
-      sessionKnownOnDisk:
-        !isResume && canResume === true && RESTORE_PIN_AGENTS.includes(saved.agent),
-      // Not-resumable fallback ("opened a fresh one"): reuse the saved id for
-      // the fresh spawn so cold-start restore is idempotent instead of
-      // rotating a new ghost id every boot. No-op when isResume. Duplicate
-      // saved ids: only the first record claims the id; later ones get '' and
-      // mint a new uuid (claim is synchronous — safe across the Promise.all).
-      // forceFresh is different: the saved transcript still exists, so reusing
-      // its id would collide — mint a brand-new id instead.
-      freshSessionId: forceFresh ? undefined : claimFreshSessionId(usedFreshSessionIds, sessionId),
-      preferredMessagingName: persistedMessagingName(saved.pane_id),
+      sessionKnownOnDisk: !isResume && canResume === true && RESTORE_PIN_AGENTS.includes(saved.agent),
+      freshSessionId: claimFreshSessionId(usedFreshSessionIds, sessionId),
+      freshPipelineFallbackSessionId: sessionId,
     })
-
-    if (!paneId) return
+    if (!restored) return
+    const { paneId } = restored
     restoredPaneIds[restoreIdx] = paneId
-    // The messaging name is now re-keyed under the fresh pane id — drop the
-    // stale entry for the previous id.
-    if (saved.pane_id !== paneId) dropPersistedMessagingName(saved.pane_id)
-    if (wasDisconnected) disconnectedPaneIds.value = [...disconnectedPaneIds.value, paneId]
 
     // Re-apply the persisted collapsed-to-sidebar state to the new pane id.
     if (saved.is_minimized) {
@@ -4490,52 +4618,6 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
     // sets the composable AFTER that reset. No persist here — reading stored
     // truth, not issuing a new stop action (see loop-avoidance invariants).
     if (saved.stopped) paneRefs[paneId]?.setStopped(true)
-
-    // Fresh (non-resume) Claude spawns pin a brand-new --session-id; persist
-    // it with the record so the next restart can resume the new conversation
-    // instead of keeping a stale (or empty) id.
-    const newPinnedId = panes.value.find((p) => p.id === paneId)?.pinnedSessionId ?? ''
-
-    if (saved.origin === 'pipeline') {
-      await sendQuiet('pipeline.slot_spawn', {
-        workspace_path: workspacePath,
-        stage_index: saved.stage_index,
-        slot_label: saved.slot_label,
-        pane_id: paneId,
-        agent: saved.agent,
-        role: saved.role,
-        // forceFresh abandons the saved conversation: persist the pane's
-        // pinned id — the saved id when its transcript was CONFIRMED on disk
-        // (kept for the Rebuild button, see sessionKnownOnDisk), else a
-        // freshly pinned id (empty until a non-Claude CLI's new session is
-        // detected).
-        session_id: isResume ? effectiveResumeId : (newPinnedId || (forceFresh ? '' : sessionId)),
-        session_home_id: sessionHomeId,
-        profile_id: saved.profile_id ?? '',
-        run_group_id: runGroupId,
-      })
-    } else {
-      await sendQuiet<ProjectPayload>('manual_pane.spawn', {
-        workspace_path: workspacePath,
-        pane_id: paneId,
-        previous_pane_id: saved.pane_id,
-        agent: saved.agent,
-        role: saved.role,
-        command: fallbackCommand,
-        session_id: isResume ? effectiveResumeId : newPinnedId,
-        session_home_id: sessionHomeId,
-        profile_id: saved.profile_id ?? '',
-        run_group_id: runGroupId,
-        output_log_file: panes.value.find((p) => p.id === paneId)?.outputLogFile ?? '',
-      })
-      if (sessionId && !isResume && !newPinnedId) {
-        await sendQuiet('manual_pane.session', {
-          workspace_path: workspacePath,
-          pane_id: paneId,
-          session_id: '',
-        })
-      }
-    }
   }))
 
   // The parallel spawns above push into panes.value in completion order, which
@@ -4544,13 +4626,6 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
   // (e.g. already-live ones on a group reattach) keep their positions.
   sortByIdOrder(panes.value, restoredPaneIds.filter((id): id is string => !!id))
 
-  // Notify once for the batch: auto-reconnected ghosts get a success toast;
-  // the disconnected (deferred) panes are surfaced by the status-bar banner.
-  if (fullRestore && reconnectedCount.value > 0) {
-    notifyRestore.toast(
-      i18n.global.t('reconnect.auto-toast', { count: reconnectedCount.value }),
-      { type: 'success' }
-    )
   }
 
   // Backfill removed manual panes into spawnHistory so Agent History shows past sessions.
@@ -4618,6 +4693,187 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
   }
 }
 
+function deferredPaneStillCurrent(
+  paneId: string,
+  workspacePath: string,
+  batch: ColdRestoreBatch,
+): ActivePane | null {
+  if (currentWorkspace.value !== workspacePath) return null
+  const pane = panes.value.find((p) => p.id === paneId)
+  if (!pane || pane.realized || pane.workspacePath !== workspacePath) return null
+  return pane.deferredRestore?.batch === batch ? pane : null
+}
+
+// A placeholder can receive activation from both a click and a pipeline resume
+// path in the same tick. Keep one completion promise per pane so every caller
+// waits for the same restore attempt instead of treating an in-flight restore as
+// an immediate no-op.
+const restoringPanePromises = new Map<string, Promise<void>>()
+
+async function coldRestoreDecision(batch: ColdRestoreBatch): Promise<RestoreDecision> {
+  if (!batch.decisionPromise) {
+    batch.decisionPromise = resolveRestoreDecision({
+      behavior: normalizeResumeBehavior(settingsGet(RESUME_BEHAVIOR_SETTING_KEY, 'always')),
+      restorableCount: batch.records.length,
+      workspacePath: batch.workspacePath,
+      decisionCache: restoreDecisionCache,
+      ask: () => notifyRestore.confirm(
+        i18n.global.t('restore.resume-prompt-message', { count: batch.records.length }),
+        {
+          title: i18n.global.t('restore.resume-prompt-title'),
+          confirmText: i18n.global.t('restore.resume-prompt-confirm'),
+          cancelText: i18n.global.t('restore.resume-prompt-cancel'),
+        }
+      ),
+    })
+  }
+  return batch.decisionPromise
+}
+
+/** Realize one cold-restore record after explicit user activation. */
+async function realizeRestoredPane(paneId: string): Promise<void> {
+  const pending = restoringPanePromises.get(paneId)
+  if (pending) return pending
+  const promise = performRealizeRestoredPane(paneId)
+  restoringPanePromises.set(paneId, promise)
+  void promise.then(
+    () => {
+      if (restoringPanePromises.get(paneId) === promise) restoringPanePromises.delete(paneId)
+    },
+    () => {
+      if (restoringPanePromises.get(paneId) === promise) restoringPanePromises.delete(paneId)
+    },
+  )
+  return promise
+}
+
+async function performRealizeRestoredPane(paneId: string): Promise<void> {
+  const placeholder = panes.value.find((p) => p.id === paneId)
+  const deferred = placeholder?.deferredRestore
+  if (!placeholder || placeholder.realized || placeholder.restoring || !deferred) return
+
+  const saved = deferred.saved
+  const batch = deferred.batch
+  const sessionId = normalizeResumeSessionId(saved.agent, (saved.session_id ?? '').trim())
+  const lockKeys = [...new Set([paneId, sessionId].filter(Boolean))]
+  if (lockKeys.some((key) => rebuildingPanes.has(key))) return
+  for (const key of lockKeys) rebuildingPanes.add(key)
+  placeholder.restoring = true
+  syncViews()
+
+  try {
+    const decision = await coldRestoreDecision(batch)
+    if (!deferredPaneStillCurrent(paneId, batch.workspacePath, batch)) return
+    const forceFresh = decision === 'fresh'
+    const rawSessionId = (saved.session_id ?? '').trim()
+    const spec = agentSpecs.find((s) => s.agentKey === saved.agent)
+    const skipFlag = yoloEnabled.value ? (spec?.skipPermissionFlag ?? '') : ''
+    const canResume = await canResumeSession(
+      saved.agent,
+      batch.workspacePath,
+      sessionId,
+      forceFresh ? { timeoutMs: 2500 } : undefined,
+    )
+    if (!deferredPaneStillCurrent(paneId, batch.workspacePath, batch)) return
+
+    // Codex records are preserved when the rollout is not confirmed present;
+    // leaving the placeholder intact lets a later activation retry the probe.
+    if (!forceFresh && shouldPreserveMissingSessionOnRestore(saved.agent, rawSessionId, canResume === true)) {
+      pipelineLog(`⚠ ${saved.agent} session ${sessionId} is unavailable; preserving saved pane`)
+      return
+    }
+
+    const attemptResume = !forceFresh && shouldAttemptResume(canResume)
+    let resumeCmd = attemptResume ? buildResumeCommand(saved.agent, sessionId, skipFlag) : ''
+    const ghostConfirmed = !forceFresh && shouldWarnMissingResume(
+      saved.agent,
+      rawSessionId,
+      attemptResume,
+      looksLikeResumeCommand(saved.agent, saved.command || '')
+    )
+    let reconnectId = ''
+    if (ghostConfirmed && saved.agent === 'claude') {
+      reconnectId = await resolveReconnectForPane(saved, batch.workspacePath, batch.savedClaims)
+      if (!deferredPaneStillCurrent(paneId, batch.workspacePath, batch)) return
+    }
+
+    let wasDisconnected = false
+    if (reconnectId) {
+      const repointed = await sendQuiet('pane.reconnect_session', {
+        workspace_path: batch.workspacePath,
+        pane_id: saved.pane_id,
+        session_id: reconnectId,
+      })
+      if (!deferredPaneStillCurrent(paneId, batch.workspacePath, batch)) return
+      if (repointed === null) return
+      resumeCmd = buildResumeCommand(saved.agent, reconnectId, skipFlag)
+      reconnectedCount.value++
+      pipelineLog(`↩ ${saved.agent}: auto-reconnected ${saved.pane_id} → ${reconnectId}`)
+      notifyRestore.toast(
+        i18n.global.t('reconnect.auto-toast', { count: reconnectedCount.value }),
+        { type: 'success' }
+      )
+    } else if (ghostConfirmed) {
+      wasDisconnected = true
+      pipelineLog(
+        `⚠ ${saved.agent}: previous conversation ${sessionId} not found at ${batch.workspacePath}; opened a fresh one`
+      )
+      notifyRestore.toast(
+        i18n.global.t('restore.session-not-found', { agent: saved.agent }),
+        { type: 'error', duration: 8000 }
+      )
+    }
+
+    const effectiveResumeId = reconnectId || sessionId
+    const savedFallbackCommand = saved.command && !looksLikeResumeCommand(saved.agent, saved.command)
+      ? saved.command
+      : ''
+    const fallbackCommand = forceFresh ? stripPinnedSessionId(savedFallbackCommand) : savedFallbackCommand
+    const commandOverride = resumeCmd || fallbackCommand || ''
+    const isResume = !!resumeCmd
+    const wasMinimized = minimizedPanes.value.has(paneId)
+    const restored = await spawnRestoredPane({
+      saved,
+      workspacePath: batch.workspacePath,
+      runGroupId: placeholder.runGroupId || undefined,
+      sessionHomeId: placeholder.sessionHomeId,
+      profileId: saved.profile_id,
+      commandOverride,
+      fallbackCommand,
+      isResume,
+      resumeSessionId: effectiveResumeId,
+      sessionKnownOnDisk: !isResume && canResume === true && RESTORE_PIN_AGENTS.includes(saved.agent),
+      freshSessionId: forceFresh ? undefined : claimFreshSessionId(batch.usedFreshSessionIds, sessionId),
+      freshPipelineFallbackSessionId: forceFresh ? '' : sessionId,
+      replacePaneId: paneId,
+      restoring: true,
+      shouldPersist: (newPaneId) =>
+        currentWorkspace.value === batch.workspacePath && panes.value.some((p) => p.id === newPaneId),
+    })
+    if (!restored) return
+    const { paneId: newId } = restored
+
+    // Replacement panes get a fresh runtime id; carry the user's layout state
+    // across the atomic swap and persist it against the new id.
+    const minimized = new Set(minimizedPanes.value)
+    minimized.delete(paneId)
+    if (wasMinimized) minimized.add(newId)
+    minimizedPanes.value = minimized
+    if (wasMinimized) persistPaneMinimized(newId, true)
+
+    disconnectedPaneIds.value = disconnectedPaneIds.value.filter((id) => id !== paneId)
+    if (wasDisconnected) disconnectedPaneIds.value = [...disconnectedPaneIds.value, newId]
+
+  } finally {
+    const current = panes.value.find((p) => p.id === paneId)
+    if (current && !current.realized && current.deferredRestore === deferred) {
+      current.restoring = false
+    }
+    for (const key of lockKeys) rebuildingPanes.delete(key)
+    syncViews()
+  }
+}
+
 async function onRefreshAnalyzer(): Promise<void> {
   pipelineLog('🧠 refreshing analyzer health + model list')
   const h = await analyzerApi.refreshHealth()
@@ -4663,7 +4919,21 @@ async function onPipelineResume(): Promise<void> {
   applyProjectPaths(resp ?? undefined)
   // Refresh the peek so the banner disappears now that we're running.
   existingProject.value = null
-  // Panes were already restored by restoreWorkspacePanes on workspace load.
+  // Cold restore keeps pipeline panes as placeholders; an explicit pipeline
+  // resume realizes those records before activateStage injects any kickoff.
+  const pendingPipeline = panes.value
+    .filter((p) => !p.realized && p.origin === 'pipeline')
+    .map((p) => p.id)
+  await Promise.all(pendingPipeline.map((id) => realizeRestoredPane(id)))
+  if (pipeline.state !== 'running') return
+  const unresolvedPipeline = panes.value.filter((p) => !p.realized && p.origin === 'pipeline')
+  if (unresolvedPipeline.length > 0) {
+    pipelineLog(
+      `Pipeline resume paused: ${unresolvedPipeline.length} restored pane(s) still await activation or session availability`
+    )
+    await onPipelineAbort('restore-unavailable')
+    return
+  }
   // activateStage builds context from prior stages and injects kickoffs.
   await activateStage(info.nextStageIndex)
 }
@@ -4974,7 +5244,7 @@ function buildStageContext(index: number, forManager: boolean): string {
     const prevStage = stagesApi.stages.value[i]
     if (!prevStage) continue
     const prevPanes = panes.value.filter(
-      (p) => p.stageId === prevStage.id && p.origin === 'pipeline'
+      (p) => p.realized && p.stageId === prevStage.id && p.origin === 'pipeline'
     )
     for (const prevPane of prevPanes) {
       const label = prevPane.slotLabel
@@ -5041,7 +5311,11 @@ async function activateStage(index: number): Promise<void> {
       (p) => p.stageId === stage.id && p.slotLabel === slot.label && p.origin === 'pipeline'
     )
 
-    if (!pane) {
+    if (!pane || !pane.realized) {
+      if (pane && !pane.realized) {
+        pipelineLog(`Stage ${stage.id}/${slot.label} ⏸ waiting for restored pane activation`)
+        return
+      }
       // Fallback: slot was never pre-spawned — spawn it now with kickoff
       pipelineLog(`Stage ${stage.id}/${slot.label} → not pre-spawned, spawning now`)
       const kickoff =
@@ -5359,7 +5633,7 @@ async function waitForStagePanesSettled(
   const stage = stagesApi.stages.value[stageIndex]
   if (!stage) return
   const stagePanes = panes.value.filter(
-    (p) => p.stageId === stage.id && p.origin === 'pipeline'
+    (p) => p.realized && p.stageId === stage.id && p.origin === 'pipeline'
   )
   if (stagePanes.length === 0) return
 
@@ -5396,7 +5670,7 @@ function globalManagerPaneId(): string | null {
   const gm = pipeline.globalManager
   if (!gm) return null
   const pane = panes.value.find(
-    (p) => p.stageId === gm.stageId && p.slotLabel === gm.slotLabel && p.origin === 'pipeline'
+    (p) => p.realized && p.stageId === gm.stageId && p.slotLabel === gm.slotLabel && p.origin === 'pipeline'
   )
   return pane?.id ?? null
 }
@@ -5440,10 +5714,14 @@ async function onPipelineNext(): Promise<void> {
   await activateStage(nextIndex)
 }
 
-async function onPipelineAbort(): Promise<void> {
+async function onPipelineAbort(reason: 'user' | 'restore-unavailable' = 'user'): Promise<void> {
   if (pipeline.state !== 'running') return
   pipeline.state = 'aborted'
-  pipelineLog('Pipeline aborted by user')
+  pipelineLog(
+    reason === 'user'
+      ? 'Pipeline aborted by user'
+      : 'Pipeline paused: restored pane session is unavailable'
+  )
   stopGlobalManagerRouter()
   cancelAllWatchers()
   stageCompletions.clear()
@@ -5457,7 +5735,7 @@ async function onPipelineAbort(): Promise<void> {
   // resumed later via the Resume banner. (Reset is the destructive one.)
   const resp = await sendQuiet<ProjectPayload>('pipeline.abort', {
     workspace_path: pipeline.workspacePath,
-    reason: 'user'
+    reason
   })
   applyProjectPaths(resp ?? undefined)
   // Refresh existingProject so the Resume banner appears immediately in the
@@ -6033,7 +6311,7 @@ function computeStageSlotSignals(stageIndex: number): SlotSignal[] {
   const tracker = stageCompletions.get(stageIndex)
   if (!stage || !tracker) return []
   const stagePanes = panes.value.filter(
-    (p) => p.stageId === stage.id && p.origin === 'pipeline'
+    (p) => p.realized && p.stageId === stage.id && p.origin === 'pipeline'
   )
   // Fewer live panes than slots → some slot never spawned; never "all finished".
   if (stagePanes.length < tracker.expected) return []
@@ -6633,7 +6911,7 @@ async function globalManagerRouterScan(): Promise<void> {
 
   // Scan all active Worker panes (any stage, not the Manager itself) for ASK/REPORT
   const workerPanes = panes.value.filter(
-    (p) => p.origin === 'pipeline' && p.id !== managerPaneId &&
+    (p) => p.realized && p.origin === 'pipeline' && p.id !== managerPaneId &&
            !(p.stageId === gm.stageId && p.slotLabel === gm.slotLabel)
   )
   for (const wp of workerPanes) {
@@ -6664,7 +6942,7 @@ async function globalManagerRouterScan(): Promise<void> {
   if (mNew > mCursor) globalRouterCursors.set(managerPaneId, mNew)
   for (const d of dispatches) {
     const target = panes.value.find(
-      (p) => p.origin === 'pipeline' && p.id !== managerPaneId &&
+      (p) => p.realized && p.origin === 'pipeline' && p.id !== managerPaneId &&
              p.slotLabel.toLowerCase() === d.to.toLowerCase()
     )
     if (!target) {
@@ -6733,6 +7011,7 @@ function onStageSlotCompleted(
       // Find sibling panes that are still running (not in done set)
       const siblingPanes = panes.value.filter(
         (p) =>
+          p.realized &&
           p.stageId === stage.id &&
           p.origin === 'pipeline' &&
           p.id !== paneId &&
@@ -7702,6 +7981,15 @@ const tabVisiblePanes = computed(() =>
   panes.value.filter((p) => tabFilteredPaneIds.value.has(p.id) && !minimizedPanes.value.has(p.id))
 )
 
+async function onUserSelectTab(tabId: string): Promise<void> {
+  activeTab.value = tabId
+  await nextTick()
+  const visible = tabVisiblePanes.value
+  const target = visible.find((p) => p.id === focusPaneId.value)?.id ?? visible[0]?.id
+  if (target) selectPane(target, { userInitiated: false })
+  realizeOnScreenPanes()
+}
+
 // Persist activeTab to project.json keyed by workspace path
 watch(activeTab, (v) => {
   // Detached child windows never own the shared activeTab state; a
@@ -7722,7 +8010,8 @@ watch(activeTab, (v) => {
 function minimizePane(id: string): void {
   minimizedPanes.value = new Set([...minimizedPanes.value, id])
   if (focusPaneId.value === id) {
-    focusPaneId.value = panes.value.find((p) => p.id !== id && !minimizedPanes.value.has(p.id))?.id ?? null
+    const fallback = panes.value.find((p) => p.id !== id && !minimizedPanes.value.has(p.id))?.id ?? null
+    selectPane(fallback, { userInitiated: false })
   }
   persistPaneMinimized(id, true)
   syncViews()
@@ -7732,7 +8021,8 @@ function restorePane(id: string): void {
   const next = new Set(minimizedPanes.value)
   next.delete(id)
   minimizedPanes.value = next
-  if (layoutMode.value !== 'grid') focusPaneId.value = id
+  if (layoutMode.value !== 'grid') selectPane(id, { userInitiated: true })
+  else void realizeRestoredPane(id)
   persistPaneMinimized(id, false)
   syncViews()
 }
@@ -7805,7 +8095,7 @@ function persistPaneStopped(id: string, stopped: boolean): void {
 watch(panes, (newPanes, oldPanes) => {
   const ids = new Set(newPanes.map((p) => p.id))
   if (focusPaneId.value && !ids.has(focusPaneId.value)) {
-    focusPaneId.value = newPanes[0]?.id ?? null
+    selectPane(newPanes[0]?.id ?? null, { userInitiated: false })
   }
   // Drop selected ids for panes that were removed or had their id replaced by a
   // rebuild, so batch actions never reference stale panes.
@@ -7814,7 +8104,7 @@ watch(panes, (newPanes, oldPanes) => {
     if (pruned.size !== selectedPaneIds.value.size) selectedPaneIds.value = pruned
   }
   if (layoutMode.value !== 'grid' && newPanes.length > (oldPanes?.length ?? 0)) {
-    focusPaneId.value = newPanes[newPanes.length - 1].id
+    selectPane(newPanes[newPanes.length - 1].id, { userInitiated: false })
   }
   // If the current tab's run group was removed, fall back to first available group
   if (activeTab.value && stageTabs.value.length > 0) {
@@ -7827,7 +8117,7 @@ watch(panes, (newPanes, oldPanes) => {
 watch(activeTab, () => {
   const visible = tabVisiblePanes.value
   if (focusPaneId.value && !visible.some((p) => p.id === focusPaneId.value)) {
-    focusPaneId.value = visible[0]?.id ?? null
+    selectPane(visible[0]?.id ?? null, { userInitiated: false })
   }
   void nextTick(() => refitAllTerminals())
 })
@@ -7846,14 +8136,13 @@ function onSetFocus(paneId: string, ev?: MouseEvent): void {
     else next.add(paneId)
     selectedPaneIds.value = next
     revealPaneTab(paneId)
-    focusPaneId.value = paneId
+    selectPane(paneId, { userInitiated: true })
     return
   }
   selectedPaneIds.value = new Set()
   revealPaneTab(paneId)
-  focusPaneId.value = paneId
+  selectPane(paneId, { userInitiated: true })
 }
-
 // Pane right-click context menu, shared by the agent list, spotlight thumbnails,
 // and pane headers. The menu is rendered once in this component; each surface only
 // raises an open request with the pane id and pointer coords.
@@ -8434,6 +8723,34 @@ const dualFocusActive = computed(
 const dualFocusSecondaryId = computed<string | null>(
   () => (dualFocusActive.value ? runningPaneIds.value[1] : null)
 )
+
+// Single source of truth for panes currently rendered in the stage. Fullscreen
+// deliberately keeps its existing v-show behavior; floatPaneStyle handles its
+// visual hiding separately.
+const onScreenPaneIds = computed<Set<string>>(() => {
+  const visibleIds = new Set(tabVisiblePanes.value.map((p) => p.id))
+  if (effectiveLayoutMode.value === 'grid') {
+    return new Set([...gridPagePaneIds.value].filter((id) => visibleIds.has(id)))
+  }
+  if (effectiveLayoutMode.value === 'sidebar' || effectiveLayoutMode.value === 'spotlight') {
+    const ids = new Set<string>()
+    if (effectiveFocusPaneId.value && visibleIds.has(effectiveFocusPaneId.value)) ids.add(effectiveFocusPaneId.value)
+    if (dualFocusSecondaryId.value && visibleIds.has(dualFocusSecondaryId.value)) ids.add(dualFocusSecondaryId.value)
+    return ids
+  }
+  return visibleIds
+})
+
+// User-driven layout or grid navigation is the lazy-restore activation
+// boundary. Focus changes can be automatic, so they must not start a CLI.
+function realizeOnScreenPanes(): void {
+  for (const paneId of onScreenPaneIds.value) void realizeRestoredPane(paneId)
+}
+
+watch([effectiveLayoutMode, gridPreset, gridPage], () => {
+  if (!hydratingColdRestore) realizeOnScreenPanes()
+})
+
 const dualFocusHandlePos = computed(() => {
   if (dualFocusSplitPx.value > 0) return `${dualFocusSplitPx.value}px`
   const meetingW = effectiveLayoutMode.value === 'sidebar' ? 220 : 0
@@ -8676,7 +8993,7 @@ function paneIsCommander(p: ActivePane): boolean {
       @pipeline-resume="onPipelineResume"
       @pipeline-restart="onPipelineRestart"
       @refresh-analyzer="onRefreshAnalyzer"
-      @focus-pane="onFocusPane"
+      @focus-pane="selectPane($event, { userInitiated: true, scrollIntoView: true })"
       @reorder-pane="reorderPane"
       @open-settings="showSettings = true"
       @open-git-accounts="openSettingsAccounts"
@@ -8812,7 +9129,7 @@ function paneIsCommander(p: ActivePane): boolean {
       <StageTabBar
         v-if="stageTabs.length > 0"
         :tabs="stageTabs"
-        v-model="activeTab"
+        :model-value="activeTab"
         :can-rebuild-all="rebuildablePaneCount > 0"
         :rebuilding-all="rebuildingTabPanes"
         :rebuild-all-title="$t('action.rebuild-tab-cli-panes')"
@@ -8824,6 +9141,7 @@ function paneIsCommander(p: ActivePane): boolean {
         @move-pane="(paneId, targetKey) => movePaneToGroup(paneId, targetKey)"
         @reorder-tab="(fromKey, toKey) => reorderRunGroupTab(fromKey, toKey)"
         @detach="(key, x, y) => onDetachGroup(key, x, y)"
+        @update:model-value="onUserSelectTab"
       />
       <div v-if="panes.length === 0" class="empty">
         <!-- Pipeline is starting but the first pane hasn't appeared yet.
@@ -8919,10 +9237,10 @@ function paneIsCommander(p: ActivePane): boolean {
           :style="{ left: dualFocusHandlePos }"
           @mousedown.prevent="onGridHandleStart($event, 'dual-focus', 0)"
         />
+        <template v-for="p in panes" :key="p.id">
         <TerminalPane
-          v-for="p in panes"
-          :key="p.id"
-          v-show="tabFilteredPaneIds.has(p.id) && !minimizedPanes.has(p.id) && !(effectiveLayoutMode === 'grid' && !gridPagePaneIds.has(p.id)) && !(effectiveLayoutMode === 'sidebar' && p.id !== effectiveFocusPaneId && p.id !== dualFocusSecondaryId) && !(effectiveLayoutMode === 'spotlight' && p.id !== effectiveFocusPaneId && p.id !== dualFocusSecondaryId)"
+          v-if="p.realized"
+          v-show="onScreenPaneIds.has(p.id)"
           :style="{ ...floatPaneStyle(p.id), ...dualFocusStyle(p.id) }"
           :ref="(el) => setPaneRef(p.id, el)"
           :data-pane-id="p.id"
@@ -8949,7 +9267,9 @@ function paneIsCommander(p: ActivePane): boolean {
           :loop-active="p.loopActive"
           :loop-wait-until="p.loopWaitUntil"
           :loop-estimate-reset-at="p.loopEstimateResetAt"
+          :restoring="p.restoring"
           @set-focus="(ev) => onSetFocus(p.id, ev)"
+          @first-output="onPaneFirstOutput(p.id)"
           @minimize="minimizePane(p.id)"
           @rebuild="rebuildPaneViaResume(p.id)"
           @rebuild-clean="rebuildPaneClean(p.id)"
@@ -8962,6 +9282,22 @@ function paneIsCommander(p: ActivePane): boolean {
           @loop-resume-now="resumeLoopNow(p.id)"
           @user-resume="persistPaneStopped(p.id, false)"
         />
+        <RestoredPanePlaceholder
+          v-else
+          v-show="onScreenPaneIds.has(p.id)"
+          :style="{ ...floatPaneStyle(p.id), ...dualFocusStyle(p.id) }"
+          :data-pane-id="p.id"
+          :pane-id="p.id"
+          :title="p.customName || p.agentLabel"
+          :subtitle="paneSubtitle(p)"
+          :pipe-tag="p.origin === 'pipeline' && p.stageId ? `P${p.stageId}` : undefined"
+          :is-focus="p.id === effectiveFocusPaneId"
+          :realizing="p.restoring"
+          @activate="selectPane(p.id, { userInitiated: true })"
+          @minimize="minimizePane(p.id)"
+          @context-menu="(ev) => openPaneCtxMenu(ev, p.id)"
+        />
+        </template>
         <!-- Auto/sidebar mode: meeting-style agent list on the right -->
         <div v-if="effectiveLayoutMode === 'sidebar'" class="auto-meeting-list" :style="dualFocusActive ? { gridColumn: '3' } : {}">
           <div

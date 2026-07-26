@@ -33,9 +33,11 @@ describe('App grid layout preset bar', () => {
   })
 
   it('hides paged-out panes via v-show without unmounting terminals', () => {
-    expect(appSource).toContain(
-      "!(effectiveLayoutMode === 'grid' && !gridPagePaneIds.has(p.id))"
-    )
+    expect(appSource).toContain('v-show="onScreenPaneIds.has(p.id)"')
+    const onScreenAt = appSource.indexOf('const onScreenPaneIds = computed')
+    const onScreenEnd = appSource.indexOf('\nconst dualFocusHandlePos', onScreenAt)
+    const onScreen = appSource.slice(onScreenAt, onScreenEnd)
+    expect(onScreen).toContain('gridPagePaneIds.value')
   })
 
   it('persists the preset under agentTeam.gridPreset', () => {

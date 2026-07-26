@@ -201,6 +201,8 @@
       "sort-progress": "進度"
     },
     "terminal": {
+      "click-to-resume": "點擊以續接",
+      "resuming": "續接中…",
       "rebuild-tooltip": "重建 (resume) ⌘⇧B — 殺掉並用 --resume 在當前尺寸重新開,清除無法重畫的疊影/跑版。會中斷進行中的回合、重印對話。",
       "rebuild-tooltip-disabled": "重建需要一段可 resume 的對話。請先送出一則訊息，逐字稿會在第一次對話後建立。",
       "rebuild-busy-skipped": "CLI 正在執行中,已保留現有工作,略過重建",

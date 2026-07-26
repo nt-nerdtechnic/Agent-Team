@@ -201,6 +201,8 @@
       "sort-progress": "Progress"
     },
     "terminal": {
+      "click-to-resume": "Click to resume",
+      "resuming": "Resuming…",
       "rebuild-tooltip": "Rebuild (resume) ⌘⇧B — kill and re-spawn via --resume at the current size to clear ghosting/overlap that can't be repainted. Interrupts the in-progress turn and reprints the conversation.",
       "rebuild-tooltip-disabled": "Rebuild needs an existing session to resume. Send a message first — the conversation transcript is created after the first turn.",
       "rebuild-busy-skipped": "CLI is busy — kept the running work, skipped rebuild",
