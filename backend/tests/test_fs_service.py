@@ -86,7 +86,8 @@ def test_plans_subtree_write_allowed(tmp_path: Path) -> None:
     assert (tmp_path / ".agent-team" / "plans" / "new.html").read_text() == "<p>x</p>"
 
 
-def test_plans_subtree_delete_allowed(tmp_path: Path) -> None:
+def test_plans_subtree_delete_allowed(tmp_path: Path, monkeypatch) -> None:
+    _fake_trash(monkeypatch)
     ws = _ws_with_plans(tmp_path)
     assert fs_service.delete(ws, ".agent-team/plans/my-plan.html")["ok"] is True
     assert not (tmp_path / ".agent-team" / "plans" / "my-plan.html").exists()
@@ -182,23 +183,75 @@ def test_rename_into_internal_is_blocked(tmp_path: Path) -> None:
     assert res["ok"] is False
 
 
-def test_delete_file(tmp_path: Path) -> None:
+def _fake_trash(monkeypatch) -> list[str]:
+    """Patch send2trash so tests don't move files into the developer's real
+    Trash; the fake actually removes the path so 'gone from disk' still holds.
+    Returns the list of paths it was called with."""
+    import shutil as _shutil
+
+    calls: list[str] = []
+
+    def fake(path: str) -> None:
+        calls.append(path)
+        p = Path(path)
+        if p.is_dir():
+            _shutil.rmtree(p)
+        else:
+            p.unlink()
+
+    monkeypatch.setattr(fs_service, "send2trash", fake)
+    return calls
+
+
+def test_delete_file(tmp_path: Path, monkeypatch) -> None:
+    _fake_trash(monkeypatch)
     ws = _ws(tmp_path)
     assert fs_service.delete(ws, "README.md")["ok"] is True
     assert not (Path(ws) / "README.md").exists()
 
 
-def test_delete_nonempty_dir_ok(tmp_path: Path) -> None:
+def test_delete_nonempty_dir_ok(tmp_path: Path, monkeypatch) -> None:
+    _fake_trash(monkeypatch)
     ws = _ws(tmp_path)
     res = fs_service.delete(ws, "src")  # contains main.ts
     assert res["ok"] is True
     assert not (Path(ws) / "src").exists()
 
 
-def test_delete_empty_dir_ok(tmp_path: Path) -> None:
+def test_delete_empty_dir_ok(tmp_path: Path, monkeypatch) -> None:
+    _fake_trash(monkeypatch)
     ws = _ws(tmp_path)
     fs_service.mkdir(ws, "emptydir")
     assert fs_service.delete(ws, "emptydir")["ok"] is True
+
+
+def test_delete_sends_resolved_path_to_trash(tmp_path: Path, monkeypatch) -> None:
+    """delete routes the resolved absolute target to send2trash rather than
+    hard-removing it, so the file is recoverable from the OS Trash."""
+    calls = _fake_trash(monkeypatch)
+    ws = _ws(tmp_path)
+    assert fs_service.delete(ws, "README.md")["ok"] is True
+    assert calls == [str((Path(ws) / "README.md").resolve())]
+
+
+def test_delete_preserves_targets_when_trash_unavailable(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """If the trash is unavailable, delete returns an error and preserves the
+    original file or directory so the operation remains recoverable."""
+    def boom(path: str) -> None:
+        raise OSError("no trash here")
+
+    monkeypatch.setattr(fs_service, "send2trash", boom)
+    ws = _ws(tmp_path)
+    with caplog.at_level("WARNING"):
+        file_result = fs_service.delete(ws, "README.md")
+        dir_result = fs_service.delete(ws, "src")
+    assert file_result == {"ok": False, "error": "no trash here"}
+    assert dir_result == {"ok": False, "error": "no trash here"}
+    assert (Path(ws) / "README.md").read_text(encoding="utf-8") == "hi"
+    assert (Path(ws) / "src" / "main.ts").read_text(encoding="utf-8") == "x"
+    assert sum("keeping original" in r.message for r in caplog.records) == 2
 
 
 # ── read / write (editor) ────────────────────────────────────────────────────

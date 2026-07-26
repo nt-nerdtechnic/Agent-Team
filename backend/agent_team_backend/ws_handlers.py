@@ -200,7 +200,7 @@ async def fs_delete(session: "Session", msg_id: str, msg_type: str, payload: dic
     from . import app
 
     ws_path = payload.get("workspace_path") or ""
-    # to_thread: shutil.rmtree on a big dir would block the event loop.
+    # to_thread: moving a large directory to the filesystem Trash may block.
     result = await asyncio.to_thread(app.fs_service.delete, ws_path, payload.get("rel_path", "") or "")
     await session.send_json(make_response(msg_id, msg_type, result))
     if result.get("ok"):

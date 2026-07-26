@@ -10,8 +10,8 @@ contents are listed; git status is only an overlay decided elsewhere.
 from __future__ import annotations
 
 import base64
+import logging
 import os
-import shutil
 import stat as stat_mod
 import tarfile
 import zipfile
@@ -20,6 +20,7 @@ from typing import Any
 
 import mammoth
 import openpyxl
+from send2trash import send2trash
 
 try:
     import chardet as _chardet
@@ -28,6 +29,8 @@ except ImportError:
     _HAVE_CHARDET = False
 
 from .projects import PROJECT_DIR_NAME
+
+_log = logging.getLogger(__name__)
 
 # User-facing plan documents live under <workspace>/.agent-team/plans/ and reports
 # live under <workspace>/.agent-team/reports/ (see plan_provisioning).
@@ -679,17 +682,27 @@ def stat_path(abs_path: str) -> dict[str, Any]:
 
 
 def delete(workspace_path: str, rel_path: str) -> dict[str, Any]:
-    """Delete a file or directory (including non-empty directories)."""
+    """Move a file or directory (including non-empty ones) to the OS Trash.
+
+    Recoverable by design: an accidental delete can be restored from the
+    system Trash/Recycle Bin instead of being gone forever. If the trash is
+    unavailable, leave the original in place and return an error.
+    """
     try:
         target = _resolve_safe(workspace_path, rel_path)
         if target == Path(workspace_path).resolve():
             raise FsError("cannot delete the workspace root")
         if not target.exists():
             raise FsError("not found")
-        if target.is_dir():
-            shutil.rmtree(target)
-        else:
-            target.unlink()
+        try:
+            send2trash(str(target))
+        except Exception as trash_exc:  # noqa: BLE001 -- log any trash failure before propagating
+            _log.warning(
+                "send2trash failed for %s (%s); keeping original",
+                target,
+                trash_exc,
+            )
+            raise
     except (FsError, OSError) as exc:
         return {"ok": False, "error": str(exc)}
     return {"ok": True}

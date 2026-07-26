@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -27,10 +28,13 @@ def _session() -> app.Session:
 async def test_fs_delete_handler_runs_in_worker_thread(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """fs.delete must go through asyncio.to_thread — shutil.rmtree on a big
-    directory would otherwise block the shared event loop."""
+    """fs.delete must go through asyncio.to_thread because moving a large
+    directory to the filesystem Trash may block the shared event loop."""
     (tmp_path / "junk").mkdir()
     (tmp_path / "junk" / "a.txt").write_text("x", encoding="utf-8")
+    # Redirect trash to a real removal so the test stays deterministic and
+    # doesn't move fixtures into the developer's actual Trash.
+    monkeypatch.setattr(fs_service, "send2trash", lambda p: shutil.rmtree(p))
     threaded_fns: list[Any] = []
     orig_to_thread = asyncio.to_thread
 
@@ -51,6 +55,30 @@ async def test_fs_delete_handler_runs_in_worker_thread(
     assert not (tmp_path / "junk").exists()
     assert session.websocket.sent[0]["payload"]["ok"] is True  # type: ignore[attr-defined]
     await asyncio.sleep(0)  # let the git.changed broadcast task run out
+
+
+@pytest.mark.asyncio
+async def test_fs_delete_handler_reports_trash_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "keep.txt"
+    target.write_text("keep", encoding="utf-8")
+
+    def fail_trash(path: str) -> None:
+        raise OSError("trash unavailable")
+
+    monkeypatch.setattr(fs_service, "send2trash", fail_trash)
+    session = _session()
+
+    await app.handle_message(session, {
+        "id": "d2",
+        "type": "fs.delete",
+        "payload": {"workspace_path": str(tmp_path), "rel_path": "keep.txt"},
+    })
+
+    payload = session.websocket.sent[0]["payload"]  # type: ignore[attr-defined]
+    assert payload == {"ok": False, "error": "trash unavailable"}
+    assert target.read_text(encoding="utf-8") == "keep"
 
 
 @pytest.mark.asyncio

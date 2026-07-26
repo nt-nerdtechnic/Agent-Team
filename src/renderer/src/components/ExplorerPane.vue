@@ -179,7 +179,7 @@ function openSelected(): void {
 
 async function deleteSelected(): Promise<void> {
   const count = selectedKeys.value.size
-  const ok = await confirm(`Delete ${count} selected items? This action cannot be undone.`, {
+  const ok = await confirm(`Delete ${count} selected items? They will be moved to the Trash.`, {
     title: 'Delete',
     confirmText: 'Delete',
   })
@@ -353,7 +353,7 @@ async function submitPrompt(): Promise<void> {
 }
 
 async function doDelete(entry: FsEntry): Promise<void> {
-  const ok = await confirm(`Delete "${entry.name}"? This action cannot be undone.`, {
+  const ok = await confirm(`Delete "${entry.name}"? It will be moved to the Trash.`, {
     title: 'Delete',
     confirmText: 'Delete',
   })
