@@ -4,6 +4,48 @@ All notable released changes to Navide will be documented in this file. The form
 
 ## [Unreleased]
 
+## [0.1.62] — 2026-07-26 — signed release
+
+### Added
+
+- Navigate Agent History log-search matches with Arrow Up/Down and clearer active-match highlighting.
+- Add an in-process Plan MCP with plan CRUD, optimistic updates, dispatch, and Claude/Codex wiring; ship it as a built-in plugin.
+- Finalize the built-in plugin system with a sandboxed mini-IDE, verified marketplace precedence, completed plugin capabilities, and an OS-editor fallback when the mini-IDE is unavailable.
+
+### Changed
+
+- Re-check updater state after a release has been downloaded.
+- Align Active Agents rows and replace the remove action with minimize.
+- Move Explorer deletions to the OS Trash so files and non-empty folders remain recoverable; preserve the original and report an error if Trash is unavailable.
+
+### Fixed
+
+- Scope CLI Agents ordering and disabled preferences per workspace, and close workspace-switch race and silent-loss gaps.
+
+### Distribution note
+
+- Signed with a Developer ID and notarized by Apple; published as a stable release eligible for the in-app updater.
+
+## [0.1.61] — 2026-07-25 — signed release
+
+### Added
+
+- Aggregate plan and report documents across seven supported workspace directories.
+- Harden Cmd+click links for CJK and emoji output, bare domains, wrapped paths, and workspace HTML reports.
+
+### Changed
+
+- Improve update-notification window restore and focus handling, show the available version in the update badge, and make minimized-agent state clearer.
+
+### Fixed
+
+- Harden CLI-account profile deletion and login-home credential harvesting and cleanup.
+- Store Git account data with owner-only (`0600`) permissions.
+
+### Distribution note
+
+- Signed with a Developer ID and notarized by Apple; published as a stable release eligible for the in-app updater.
+
 ## [0.1.60] — 2026-07-25 — signed release
 
 ### Added
