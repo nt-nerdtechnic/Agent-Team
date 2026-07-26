@@ -74,6 +74,7 @@ declare global {
       openStagesWindow: () => Promise<{ ok: boolean }>
       openPlansWindow: (args: { workspace_path: string; rel_path?: string }) => Promise<{ ok: boolean }>
       openGitHistoryWindow: (args: { workspace_path: string }) => Promise<{ ok: boolean }>
+      openGitWindow: (args: { workspace_path: string }) => Promise<{ ok: boolean }>
       onPlanOpenDoc: (handler: (relPath: string) => void) => () => void
       openDiffWindow: (args: {
         workspace_path: string
