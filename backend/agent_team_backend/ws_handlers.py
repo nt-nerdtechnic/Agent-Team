@@ -3467,6 +3467,18 @@ async def project_set_ui_state(session: "Session", msg_id: str, msg_type: str, p
         if isinstance(raw_history, list)
         else None
     )
+    raw_cli_order = payload.get("cli_agent_order")
+    cli_agent_order = (
+        [k for k in raw_cli_order if isinstance(k, str)]
+        if isinstance(raw_cli_order, list)
+        else None
+    )
+    raw_cli_disabled = payload.get("cli_agent_disabled")
+    cli_agent_disabled = (
+        [k for k in raw_cli_disabled if isinstance(k, str)]
+        if isinstance(raw_cli_disabled, list)
+        else None
+    )
     if full_history is not None and ws_raw:
         # Workspace isolation at the write layer: never persist entries that
         # belong to another workspace, in the full store or the mirror.
@@ -3498,6 +3510,8 @@ async def project_set_ui_state(session: "Session", msg_id: str, msg_type: str, p
             active_tab=active_tab,
             git_tab_repo=git_tab_repo,
             spawn_history=spawn_history,
+            cli_agent_order=cli_agent_order,
+            cli_agent_disabled=cli_agent_disabled,
         )
 
     project = await asyncio.to_thread(_persist)
@@ -3513,6 +3527,10 @@ async def project_set_ui_state(session: "Session", msg_id: str, msg_type: str, p
             delta["git_tab_repo"] = git_tab_repo
         if spawn_history is not None:
             delta["spawn_history"] = spawn_history
+        if cli_agent_order is not None:
+            delta["cli_agent_order"] = cli_agent_order
+        if cli_agent_disabled is not None:
+            delta["cli_agent_disabled"] = cli_agent_disabled
         await app.broadcast(
             make_event("project.ui_state_changed", delta), exclude=session
         )

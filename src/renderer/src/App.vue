@@ -70,7 +70,12 @@ import { planDropPrompt, type PlanDragRef } from './lib/planDrag'
 import { allSlotsFinished, isReplayedTurnComplete, turnCompleteDone, turnEndsWithSentinel, type SlotSignal } from './lib/completion'
 import { reorderByIds, sortByIdOrder } from './lib/paneOrder'
 import { AGENT_SPECS } from './lib/agentSpecs'
-import { orderedAgentKeys, isAgentEnabled } from './composables/useCliAgentPrefs'
+import {
+  orderedAgentKeys,
+  isAgentEnabled,
+  useCliAgentPrefs,
+  loadCliAgentPrefsFromProject
+} from './composables/useCliAgentPrefs'
 import { pickReusablePane, runReportedDispatch, validatePlanDispatch, type PlanDispatchOutcome, type PlanDispatchPayload } from './lib/planDispatch'
 import { planExecutionPrompt } from './lib/planExecutePrompt'
 import { quickClassify } from './lib/quick-classify'
@@ -438,6 +443,7 @@ const agentSpecs: AgentSpec[] = AGENT_SPECS
 // spawn UI. Only non-terminal specs are filtered/ordered; terminal is kept as-is
 // (ControlPane filters it out of the dropdown itself). Reactive via
 // useCliAgentPrefs so a Settings edit updates the dropdown live.
+const { order: cliAgentOrder, disabled: cliAgentDisabled } = useCliAgentPrefs()
 const enabledAgentSpecs = computed<AgentSpec[]>(() => {
   const byKey = new Map(agentSpecs.map((s) => [s.agentKey, s]))
   const cliKeys = agentSpecs.filter((s) => s.agentKey !== 'terminal').map((s) => s.agentKey)
@@ -3886,6 +3892,8 @@ interface ProjectPayload {
     ui_run_groups?: RunGroup[] | null
     ui_active_tab?: string  // last active run-group tab id ('' = frontend default)
     ui_spawn_history?: SpawnHistoryEntry[] | null
+    cli_agent_order?: string[] | null  // Settings → CLI Agents order; null = never persisted (frontend falls back to legacy default)
+    cli_agent_disabled?: string[] | null  // Settings → CLI Agents disabled list; null = never persisted
     run_count?: number
     theme?: string
     theme_custom?: Record<string, string>
@@ -4070,6 +4078,12 @@ async function onWorkspaceCheck(path: string): Promise<void> {
       }
     }
     _loadRunGroups(path, resp.project)
+    // Apply this workspace's persisted CLI Agents order/disabled list. Guarded
+    // by applyingRemoteCliPrefs so adopting the loaded value doesn't immediately
+    // echo straight back through the save watcher below.
+    applyingRemoteCliPrefs.value = true
+    loadCliAgentPrefsFromProject(resp.project.cli_agent_order, resp.project.cli_agent_disabled)
+    void nextTick(() => { applyingRemoteCliPrefs.value = false })
     // Apply the persisted tab order from project.json. Groups not listed (or
     // an absent field) keep their stored order.
     const savedTabOrder = resp.project.tab_order
@@ -7240,6 +7254,22 @@ function _saveRunGroups(): void {
   })
 }
 
+// True while adopting a workspace-load or peer-window CLI Agents prefs value,
+// so that adoption doesn't immediately echo back through the watcher below.
+const applyingRemoteCliPrefs = ref(false)
+
+function _saveCliAgentPrefs(): void {
+  if (applyingRemoteCliPrefs.value || isDetachedWindow) return
+  const ws = currentWorkspace.value
+  if (!ws) return
+  void sendQuiet('project.set_ui_state', {
+    workspace_path: ws,
+    cli_agent_order: cliAgentOrder.value,
+    cli_agent_disabled: cliAgentDisabled.value,
+  })
+}
+watch([cliAgentOrder, cliAgentDisabled], _saveCliAgentPrefs, { deep: true })
+
 /** Cross-window sync: when another window persists this workspace's runGroups
  *  (project.set_ui_state), the backend broadcasts project.ui_state_changed to
  *  the peer windows (the sender is excluded), so both stay consistent (fixes
@@ -7254,6 +7284,8 @@ function onRunGroupsRemoteSync(raw: unknown): void {
     spawn_history?: SpawnHistoryEntry[]
     renamed_pane?: { pane_id?: string; custom_name?: string; auto_name?: string }
     auto_named_pane?: { pane_id?: string; auto_name?: string }
+    cli_agent_order?: string[]
+    cli_agent_disabled?: string[]
   } | null
   const ws = currentWorkspace.value
   if (!ws || !d || d.workspace_path !== ws) return
@@ -7281,6 +7313,12 @@ function onRunGroupsRemoteSync(raw: unknown): void {
     if (pane) {
       pane.autoName = d.auto_named_pane.auto_name.trim() || undefined
     }
+  }
+  if (Array.isArray(d.cli_agent_order) || Array.isArray(d.cli_agent_disabled)) {
+    applyingRemoteCliPrefs.value = true
+    if (Array.isArray(d.cli_agent_order)) cliAgentOrder.value = d.cli_agent_order
+    if (Array.isArray(d.cli_agent_disabled)) cliAgentDisabled.value = d.cli_agent_disabled
+    void nextTick(() => { applyingRemoteCliPrefs.value = false })
   }
   if (Array.isArray(d.spawn_history)) {
     // Apply the peer window's persisted workspace history without echoing it

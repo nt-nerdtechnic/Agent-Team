@@ -7,7 +7,13 @@ vi.mock('../../lib/settings', () => ({
   settingsSet: vi.fn(),
 }))
 
-import { orderedAgentKeys, isAgentEnabled, useCliAgentPrefs } from '../useCliAgentPrefs'
+import { settingsGet } from '../../lib/settings'
+import {
+  orderedAgentKeys,
+  isAgentEnabled,
+  useCliAgentPrefs,
+  loadCliAgentPrefsFromProject
+} from '../useCliAgentPrefs'
 
 describe('useCliAgentPrefs', () => {
   beforeEach(() => {
@@ -41,5 +47,27 @@ describe('useCliAgentPrefs', () => {
     const input = ['claude', 'kimi']
     orderedAgentKeys(input)
     expect(input).toEqual(['claude', 'kimi'])
+  })
+
+  describe('loadCliAgentPrefsFromProject', () => {
+    it('adopts the workspace-persisted value, including an explicit empty array', () => {
+      loadCliAgentPrefsFromProject(['kimi', 'claude'], ['codex'])
+      expect(useCliAgentPrefs().order.value).toEqual(['kimi', 'claude'])
+      expect(useCliAgentPrefs().disabled.value).toEqual(['codex'])
+
+      loadCliAgentPrefsFromProject([], [])
+      expect(useCliAgentPrefs().order.value).toEqual([])
+      expect(useCliAgentPrefs().disabled.value).toEqual([])
+    })
+
+    it('falls back to the legacy global default when the workspace never persisted its own', () => {
+      vi.mocked(settingsGet).mockImplementation((key) =>
+        key === 'agentTeam.cliAgents.order' ? JSON.stringify(['grok', 'claude']) : ''
+      )
+      loadCliAgentPrefsFromProject(null, undefined)
+      expect(useCliAgentPrefs().order.value).toEqual(['grok', 'claude'])
+      expect(useCliAgentPrefs().disabled.value).toEqual([])
+      vi.mocked(settingsGet).mockReset().mockReturnValue('')
+    })
   })
 })

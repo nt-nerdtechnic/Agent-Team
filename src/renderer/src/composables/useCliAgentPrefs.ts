@@ -3,16 +3,19 @@
 // App.vue (reader) share one reactive source — a plain settingsGet() is not
 // reactive, so a shared ref is what makes a settings edit reflect live.
 //
-// Persistence: backend-owned KV via settings.ts (settingsGet/settingsSet), keyed
-// per-user (not per-workspace). Unset → all enabled, order = agentSpecs order
-// (backward compatible: a fresh install sees today's behaviour unchanged).
+// Persistence: per-workspace, in project.json (App.vue watches `order`/`disabled`
+// and calls project.set_ui_state, mirroring how run-group tabs are persisted).
+// App.vue calls loadCliAgentPrefsFromProject() on every workspace switch to load
+// that workspace's saved value. The old global per-user KV (settings.ts) is kept
+// as a read-only fallback default for a workspace that has never persisted its
+// own value yet, so existing users don't lose their current customization.
 
-import { ref, watch } from 'vue'
+import { ref } from 'vue'
 
-import { settingsGet, settingsSet } from '../lib/settings'
+import { settingsGet } from '../lib/settings'
 
-const ORDER_KEY = 'agentTeam.cliAgents.order' // string[] of agentKeys, custom order
-const DISABLED_KEY = 'agentTeam.cliAgents.disabled' // string[] of disabled agentKeys
+const ORDER_KEY = 'agentTeam.cliAgents.order' // legacy global fallback default
+const DISABLED_KEY = 'agentTeam.cliAgents.disabled' // legacy global fallback default
 
 function readStringArray(key: string): string[] {
   try {
@@ -27,8 +30,19 @@ function readStringArray(key: string): string[] {
 const order = ref<string[]>(readStringArray(ORDER_KEY))
 const disabled = ref<string[]>(readStringArray(DISABLED_KEY))
 
-watch(order, (v) => settingsSet(ORDER_KEY, JSON.stringify(v)), { deep: true })
-watch(disabled, (v) => settingsSet(DISABLED_KEY, JSON.stringify(v)), { deep: true })
+/**
+ * Apply the workspace's persisted CLI agent order/disabled list (from
+ * project.cli_agent_order / project.cli_agent_disabled). null/undefined
+ * (never persisted for this workspace) falls back to the legacy global
+ * default; [] is a valid "explicitly cleared to default" value.
+ */
+export function loadCliAgentPrefsFromProject(
+  cliAgentOrder: string[] | null | undefined,
+  cliAgentDisabled: string[] | null | undefined
+): void {
+  order.value = Array.isArray(cliAgentOrder) ? cliAgentOrder : readStringArray(ORDER_KEY)
+  disabled.value = Array.isArray(cliAgentDisabled) ? cliAgentDisabled : readStringArray(DISABLED_KEY)
+}
 
 /**
  * Order `agentKeys` by the user's custom order; keys not in the order keep their

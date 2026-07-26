@@ -177,6 +177,11 @@ class Project:
     # user-level settings entry mixed projects and could lose custom titles
     # when that global cache was rebuilt.
     ui_spawn_history: list[dict[str, Any]] | None = None
+    # Renderer-owned CLI Agents dropdown prefs (Settings modal). None = never
+    # persisted for this workspace (frontend falls back to its legacy global
+    # per-user default); [] is a valid "explicitly cleared to default" value.
+    cli_agent_order: list[str] | None = None
+    cli_agent_disabled: list[str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -917,13 +922,22 @@ class ProjectStore:
         active_tab: str | None = None,
         git_tab_repo: str | None = None,
         spawn_history: list[dict[str, Any]] | None = None,
+        cli_agent_order: list[str] | None = None,
+        cli_agent_disabled: list[str] | None = None,
     ) -> Project | None:
         """Persist renderer-owned per-workspace UI state (partial update).
 
         Only the arguments that are not None are applied. Returns None when no
         project exists for the workspace (peek semantics — never creates one).
         """
-        if run_groups is None and active_tab is None and git_tab_repo is None and spawn_history is None:
+        if (
+            run_groups is None
+            and active_tab is None
+            and git_tab_repo is None
+            and spawn_history is None
+            and cli_agent_order is None
+            and cli_agent_disabled is None
+        ):
             return None
         # Runs on a worker thread (asyncio.to_thread from ws_handlers): hold
         # the save lock across the whole read-modify-write so concurrent
@@ -940,6 +954,10 @@ class ProjectStore:
                 project.ui_git_tab_repo = git_tab_repo
             if spawn_history is not None:
                 project.ui_spawn_history = list(spawn_history)
+            if cli_agent_order is not None:
+                project.cli_agent_order = list(cli_agent_order)
+            if cli_agent_disabled is not None:
+                project.cli_agent_disabled = list(cli_agent_disabled)
             self.save(project)
             return project
 
