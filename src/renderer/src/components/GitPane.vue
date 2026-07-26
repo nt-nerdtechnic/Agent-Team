@@ -1432,6 +1432,12 @@ function openHistoryWindow(): void {
   void window.agentTeam?.openGitHistoryWindow?.({ workspace_path: props.workspacePath })
 }
 
+// Pop the standalone Git client (navide.git plugin) into its own window —
+// parallel to this in-panel Git surface, not a replacement. Main window only.
+function openStandaloneGitWindow(): void {
+  void window.agentTeam?.openGitWindow?.({ workspace_path: props.workspacePath })
+}
+
 // ── section expand states ─────────────────────────────────────────────────────
 const stagedExpanded = ref(true)
 const changesExpanded = ref(true)
@@ -1602,6 +1608,15 @@ function isHeadCommit(c: import('../composables/useGit').GitCommit): boolean {
         </button>
         <button class="hdr-btn" :title="$t('action.refresh')" @click.stop="loadStatus">
           <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M1.5 7.5A6 6 0 0 1 13 5.185V2.75a.75.75 0 0 1 1.5 0V7a.75.75 0 0 1-.75.75H9.25a.75.75 0 0 1 0-1.5h2.565A4.5 4.5 0 1 0 12 10a.75.75 0 1 1 1.261.815A6 6 0 1 1 1.5 7.5z"/></svg>
+        </button>
+        <!-- Open standalone Git client window (main window only; parallel to this panel) -->
+        <button
+          v-if="!embedded && workspacePath"
+          class="hdr-btn"
+          :title="$t('action.open-in-new-window')"
+          @click.stop="openStandaloneGitWindow"
+        >
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="1.5" width="13" height="13" rx="1.5"/><path d="M5.5 1.5v13M1.5 5.5h4"/></svg>
         </button>
         <!-- Diff Review button (mini-IDE only) — opens combined diff+review in editor tab -->
         <button

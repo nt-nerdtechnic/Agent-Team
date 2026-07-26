@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { spawn } from 'node:child_process'
 import { startBackend, type BackendHandle } from './backend'
 import { installApplicationMenu, type AppMenuHooks, type RecentMenuEntry } from './menu'
-import { openNoopPluginView, openFsProbePluginView, openMiniIdePluginView, devMiniIdePluginDescriptor, openPlansPluginView, devPlansPluginDescriptor, registerBundledMiniIde, frontendPluginManager } from './plugins/frontendPluginManager'
+import { openNoopPluginView, openFsProbePluginView, openMiniIdePluginView, devMiniIdePluginDescriptor, openPlansPluginView, devPlansPluginDescriptor, openGitPluginView, devGitPluginDescriptor, registerBundledMiniIde, registerBundledGit, frontendPluginManager } from './plugins/frontendPluginManager'
 import { registerPluginIpc } from './plugins/pluginIpc'
 import { lockPageZoom } from './web-contents-zoom'
 import { initUpdater } from './updater'
@@ -379,6 +379,18 @@ const bundledMiniIde = registerBundledMiniIde(frontendPluginManager, {
 })
 if (!bundledMiniIde.registered) {
   console.warn(`[main] bundled mini-IDE unavailable: ${bundledMiniIde.reason}`)
+}
+
+// Bundled Git — the official builtin standalone Git client surface, shipped
+// inside the app package (resources/plugins/git) and built from dist-plugins in
+// dev. Mirrors the mini-IDE / Plans registration above; see registerBundledGit
+// for precedence.
+const bundledGit = registerBundledGit(frontendPluginManager, {
+  isPackaged: app.isPackaged,
+  resourcesPath: process.resourcesPath,
+})
+if (!bundledGit.registered) {
+  console.warn(`[main] bundled Git unavailable: ${bundledGit.reason}`)
 }
 
 ipcMain.handle('backend:info', () => backendInfoPayload())
@@ -770,6 +782,21 @@ ipcMain.handle('window:openStages', () => {
 ipcMain.handle('window:openDiff', (event, args: Record<string, string>) => {
   openDiffWindow(BrowserWindow.fromWebContents(event.sender), args ?? {})
   return { ok: true }
+})
+
+// The standalone Git client plugin view — its own dedicated window (mini-IDE
+// parity), opened from the main window's "open standalone Git" entry. Resolves
+// the backend HTTP base + current theme like openMiniIdeEditor.
+function openGitWindow(workspacePath: string): boolean {
+  const httpUrl = backend ? `http://${backend.host}:${backend.port}` : ''
+  return openGitPluginView(workspacePath, httpUrl, currentUiTheme())
+}
+
+ipcMain.handle('window:openGit', (_event, args: { workspace_path?: string }) => {
+  const workspacePath = (args?.workspace_path ?? '').trim()
+  if (!workspacePath) return { ok: false }
+  const ok = openGitWindow(workspacePath)
+  return { ok }
 })
 
 function openBranchDiffWindow(host: BrowserWindow | null, params: Record<string, string>): void {
@@ -1675,6 +1702,16 @@ app.whenReady().then(async () => {
     } else {
       console.warn(
         '[main] AGENT_TEAM_PLUGIN_DEV=1 but Plans dev bundle is missing — run `pnpm run build:plans`'
+      )
+    }
+    // Dev-only: register the locally built Git plugin (dist-plugins/git), same
+    // gate and override semantics as the mini-IDE / Plans above.
+    const devGitDescriptor = devGitPluginDescriptor()
+    if (existsSync(devGitDescriptor.entryFile)) {
+      frontendPluginManager.registerDescriptor(devGitDescriptor, { builtin: true })
+    } else {
+      console.warn(
+        '[main] AGENT_TEAM_PLUGIN_DEV=1 but Git dev bundle is missing — run `pnpm run build:git`'
       )
     }
   }

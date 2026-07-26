@@ -15,9 +15,10 @@
   },
   "scripts": {
     "dev": "electron-vite dev",
-    "build": "electron-vite build && pnpm run build:mini-ide",
+    "build": "electron-vite build && pnpm run build:mini-ide && pnpm run build:git",
     "build:mini-ide": "vite build --config vite.mini-ide.config.ts",
     "build:plans": "vite build --config vite.plans.config.ts",
+    "build:git": "vite build --config vite.git.config.ts",
     "start": "electron-vite preview",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "vue-tsc --noEmit -p tsconfig.web.json",
@@ -53,6 +54,10 @@
       {
         "from": "dist-plugins/mini-ide",
         "to": "plugins/mini-ide"
+      },
+      {
+        "from": "dist-plugins/git",
+        "to": "plugins/git"
       }
     ],
     "publish": [

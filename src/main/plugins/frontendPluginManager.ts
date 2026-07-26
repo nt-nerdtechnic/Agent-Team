@@ -869,3 +869,123 @@ export function openPlansPluginView(
   )
   return true
 }
+
+/** Id of the Git extension (the standalone Git client surface). */
+export const GIT_PLUGIN_ID = 'navide.git'
+
+/** Directory of the bundled Git copy: `resources/plugins/git` inside the app
+ *  package (shipped via electron-builder `extraResources`), or the local
+ *  `dist-plugins/git` build output when running unpackaged. Mirrors
+ *  {@link bundledPlansDir}. */
+export function bundledGitDir(source: BundledMiniIdeSource): string {
+  return source.isPackaged
+    ? join(source.resourcesPath, 'plugins', 'git')
+    : join(source.devRoot ?? join(__dirname, '../..'), 'dist-plugins', 'git')
+}
+
+/**
+ * Register the app-bundled Git surface as a builtin descriptor at startup,
+ * mirroring {@link registerBundledPlans} exactly (same precedence order and
+ * fail-closed validation). Never throws: a missing dir, invalid manifest,
+ * spoofed id, or missing entry file returns `registered: false` with a reason
+ * (caller logs), so a corrupt bundle degrades instead of crashing startup.
+ */
+export function registerBundledGit(
+  manager: FrontendPluginManager,
+  source: BundledMiniIdeSource
+): { registered: boolean; reason?: string } {
+  const dir = bundledGitDir(source)
+  const scanned = loadPluginDir(dir)
+  if (!scanned.descriptor) {
+    return { registered: false, reason: `${dir}: ${scanned.error ?? 'invalid plugin dir'}` }
+  }
+  if (scanned.descriptor.id !== GIT_PLUGIN_ID) {
+    return {
+      registered: false,
+      reason: `${dir}: manifest id '${scanned.descriptor.id}' is not '${GIT_PLUGIN_ID}'`,
+    }
+  }
+  if (!existsSync(scanned.descriptor.entryFile)) {
+    return { registered: false, reason: `${dir}: entry file missing (${scanned.descriptor.entryFile})` }
+  }
+  manager.registerBuiltin(scanned.descriptor)
+  return { registered: true }
+}
+
+/** Build the entry query GitWindowApp reads from `window.location.search`:
+ *  `workspace_path`, the backend `http_url` (resolved by the git
+ *  capabilityBackend shim), and the current `theme` id so the plugin paints
+ *  with the app theme before its first settings reconcile (zero-flash; see
+ *  plugins/git/mount.ts). */
+function gitQuery(workspacePath: string, httpUrl: string, theme: string): string {
+  const params = new URLSearchParams()
+  if (workspacePath) params.set('workspace_path', workspacePath)
+  if (httpUrl) params.set('http_url', httpUrl)
+  if (theme) params.set('theme', theme)
+  const qs = params.toString()
+  return qs ? `?${qs}` : ''
+}
+
+/**
+ * Dev-only Git descriptor pointing at the LOCAL build output
+ * (`dist-plugins/git/`, produced by `pnpm run build:git`). Registered at
+ * startup only under `AGENT_TEAM_PLUGIN_DEV=1`, mirroring
+ * {@link devPlansPluginDescriptor}. The bundle is built separately
+ * (vite.git.config.ts) with the `useBackend` → capabilityBackend alias, so it
+ * is not served by the electron-vite dev server: `devUrl` is empty and it
+ * always loadFiles. `fs` grants the git.changed working-tree event; `ui` the
+ * theme settings sync.
+ */
+export function devGitPluginDescriptor(): PluginLaunchDescriptor {
+  return {
+    id: GIT_PLUGIN_ID,
+    requires: ['git', 'fs', 'ui'],
+    devUrl: '',
+    // __dirname is out/main in dev, so ../../ is the repo root.
+    entryFile: join(__dirname, '../../dist-plugins/git/index.html'),
+  }
+}
+
+/** The dedicated Git host window (one at a time, recreated after close). The
+ *  plugin WebContentsView fills its content bounds; the main window is never
+ *  overlaid. Mirrors {@link ensureMiniIdeWindow} — the standalone SourceTree-
+ *  style Git client lives in its own window, wider (1280x820) than the editor. */
+let gitWindow: BrowserWindow | null = null
+
+function ensureGitWindow(): BrowserWindow {
+  if (gitWindow && !gitWindow.isDestroyed()) return gitWindow
+  const win = new BrowserWindow({
+    width: 1280,
+    height: 820,
+    title: 'Navide · Git',
+    titleBarStyle: 'hidden',
+    backgroundColor: '#0d1117',
+  })
+  gitWindow = win
+  win.on('closed', () => {
+    if (gitWindow === win) gitWindow = null
+  })
+  return win
+}
+
+/**
+ * Open the Git plugin view in its own dedicated BrowserWindow (mini-IDE
+ * parity): opening never touches or covers the main window, reopening
+ * restores/focuses the live window and re-points its workspace, and closing the
+ * window tears the view down so the next open recreates both cleanly. Looks the
+ * descriptor up in the loader registry; returns false when the Git extension is
+ * not registered (the caller surfaces the fallback).
+ */
+export function openGitPluginView(workspacePath: string, httpUrl = '', theme = ''): boolean {
+  const base = frontendPluginManager.getDescriptor(GIT_PLUGIN_ID)
+  if (!base) return false
+  frontendPluginManager.open(
+    ensureGitWindow(),
+    { ...base, query: gitQuery(workspacePath, httpUrl, theme) },
+    // Fill the dedicated window's content bounds and track its resizes.
+    'fill',
+    // Esc (nav.hideSelf) closes the dedicated window, like the mini-IDE editor.
+    { closeHostOnHide: true }
+  )
+  return true
+}
