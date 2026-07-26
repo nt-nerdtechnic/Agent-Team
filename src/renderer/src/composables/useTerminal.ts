@@ -761,6 +761,7 @@ function buildFileLinkProvider(
 interface UseTerminalOptions {
   workspacePath?: string
   onClear?: () => void
+  onUserResume?: () => void
   /** Getter for the OTHER CLI panes' messaging names (already excluding self).
    *  Feeds the @-mention autocomplete menu. Read lazily at trigger time so the
    *  list stays current as panes come and go. */
@@ -1760,10 +1761,8 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   function bindSessionHandlers(): void {
     let inputBuffer = ''
     inputDisposer = term.onData((data) => {
-      if (data === '\x1b' || data === '\x03') {
-        isStopped.value = true
-      } else if (data === '\r' || data === '\n' || data === '\r\n') {
-        isStopped.value = false
+      if (data === '\r' || data === '\n' || data === '\r\n') {
+        if (isStopped.value) { isStopped.value = false; opts?.onUserResume?.() }
         if (inputBuffer.trim() === '/clear' && opts?.onClear) {
           inputBuffer = ''
           opts.onClear()
@@ -1773,10 +1772,10 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       } else if (data === '\x7f' || data === '\b') {
         inputBuffer = inputBuffer.slice(0, -1)
       } else if (data.length === 1 && data.charCodeAt(0) >= 32) {
-        if (isStopped.value) isStopped.value = false
+        if (isStopped.value) { isStopped.value = false; opts?.onUserResume?.() }
         inputBuffer += data
       } else if (data.length > 1) {
-        if (isStopped.value) isStopped.value = false
+        if (isStopped.value) { isStopped.value = false; opts?.onUserResume?.() }
         inputBuffer += data.replace(/[\x00-\x1f\x7f]/g, '')
       }
       if (inputBuffer.length > 100) inputBuffer = inputBuffer.slice(-100)

@@ -528,7 +528,8 @@ class TerminalService:
         if session.closed:
             return
         try:
-            os.write(session.master_fd, b"\x03")
+            seq = b"\x1b" if session.agent_key == "codex" else b"\x03"
+            os.write(session.master_fd, seq)
         except OSError as err:
             log.warning("interrupt session %s failed: %s", session_id, err)
 

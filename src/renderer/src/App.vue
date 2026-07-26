@@ -3357,6 +3357,7 @@ async function onInterrupt(paneId: string): Promise<void> {
   if (!ref?.sessionId) return
   try {
     await ref.interrupt()
+    persistPaneStopped(paneId, true)
   } catch {
     /* ignore */
   }
@@ -3891,6 +3892,7 @@ interface ProjectPane {
   auto_name?: string
   is_minimized?: boolean
   output_log_file?: string
+  stopped?: boolean
 }
 
 interface ProjectPayload {
@@ -4482,6 +4484,12 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
     if (saved.is_minimized) {
       minimizedPanes.value = new Set([...minimizedPanes.value, paneId])
     }
+
+    // Reflect the persisted STOP badge onto the freshly-spawned pane. spawnPane
+    // above already awaited ref.spawn() (which resets isStopped=false), so this
+    // sets the composable AFTER that reset. No persist here — reading stored
+    // truth, not issuing a new stop action (see loop-avoidance invariants).
+    if (saved.stopped) paneRefs[paneId]?.setStopped(true)
 
     // Fresh (non-resume) Claude spawns pin a brand-new --session-id; persist
     // it with the record so the next restart can resume the new conversation
@@ -5871,6 +5879,16 @@ backend.on('backfill.changed', (raw) => {
   if ((ev?.workspace_path || '') !== (currentWorkspace.value || '')) return
   backfill.active = !!ev?.active
   backfill.count = ev?.count ?? 0
+})
+
+// STOP badge broadcast from the backend (another window issued/cleared a stop,
+// or this window's own persist echoed back). Reflect stored truth into the
+// pane's composable ONLY — never persist here (would loop: broadcast → set →
+// persist → broadcast).
+backend.on('pane.stopped', (raw) => {
+  const ev = raw as { pane_id?: string; stopped?: boolean }
+  if (!ev?.pane_id) return
+  paneRefs[ev.pane_id]?.setStopped(!!ev.stopped)
 })
 
 backend.on('session.detected', (raw) => {
@@ -7773,6 +7791,16 @@ function persistPaneMinimized(id: string, isMinimized: boolean): void {
   })
 }
 
+function persistPaneStopped(id: string, stopped: boolean): void {
+  const pane = panes.value.find((p) => p.id === id)
+  if (!pane) return
+  backend.send('project.set_pane_stopped', {
+    workspace_path: pane.workspacePath,
+    pane_id: pane.id,
+    stopped,
+  })
+}
+
 // Keep focusPaneId valid as panes are added/removed
 watch(panes, (newPanes, oldPanes) => {
   const ids = new Set(newPanes.map((p) => p.id))
@@ -8932,6 +8960,7 @@ function paneIsCommander(p: ActivePane): boolean {
           @plan-drop="(ref) => injectPlanToPane(ref, p.id)"
           @toggle-loop="togglePaneLoop(p.id)"
           @loop-resume-now="resumeLoopNow(p.id)"
+          @user-resume="persistPaneStopped(p.id, false)"
         />
         <!-- Auto/sidebar mode: meeting-style agent list on the right -->
         <div v-if="effectiveLayoutMode === 'sidebar'" class="auto-meeting-list" :style="dualFocusActive ? { gridColumn: '3' } : {}">
@@ -8983,7 +9012,7 @@ function paneIsCommander(p: ActivePane): boolean {
             <span class="meeting-badge" :data-status="p.status">{{ p.status === 'stopped' ? 'STOP' : p.status }}</span>
           </div>
           <div v-if="paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id)).length === 0" class="meeting-empty">
-            只有一個 agent
+            {{ $t('label.no-agents-yet') }}
           </div>
         </div>
       </div>
@@ -9039,7 +9068,7 @@ function paneIsCommander(p: ActivePane): boolean {
           </div>
         </div>
         <div v-if="paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id)).length === 0" class="spotlight-strip-empty">
-          只有一個 agent
+          {{ $t('label.no-agents-yet') }}
         </div>
       </div>
       <!-- Fullscreen mode: collapsible PiP agent list (draggable) -->
@@ -9105,7 +9134,7 @@ function paneIsCommander(p: ActivePane): boolean {
             <span class="meeting-badge" :data-status="p.status">{{ p.status === 'stopped' ? 'STOP' : p.status }}</span>
           </div>
           <div v-if="paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id)).length === 0" class="meeting-empty">
-            只有一個 agent
+            {{ $t('label.no-agents-yet') }}
           </div>
         </div>
         <div v-if="floatPipExpanded" class="float-pip-resize" @mousedown="onPipResizeStart" />

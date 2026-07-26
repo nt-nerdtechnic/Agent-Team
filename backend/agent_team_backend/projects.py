@@ -129,6 +129,7 @@ class PaneRecord:
     custom_name: str = ""           # user-set display name; empty falls back to the default label
     auto_name: str = ""             # auto-generated display name; set once, custom_name wins
     output_log_file: str = ""       # conversation log path recorded at spawn time
+    stopped: bool = False           # STOP badge: a stop action was issued and the user hasn't taken over yet
 
 
 @dataclass
@@ -870,6 +871,22 @@ class ProjectStore:
         if pane is None:
             return project
         pane.run_group_id = run_group_id
+        self.save(project)
+        return project
+
+    def set_pane_stopped(
+        self,
+        workspace_path: str,
+        *,
+        pane_id: str,
+        stopped: bool,
+    ) -> Project:
+        """Set/clear a pane's STOP badge flag (persisted). No-op if pane not found."""
+        project = self.load_or_create(workspace_path)
+        pane = next((p for p in project.panes if p.pane_id == pane_id), None)
+        if pane is None:
+            return project
+        pane.stopped = stopped
         self.save(project)
         return project
 

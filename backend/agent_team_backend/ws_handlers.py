@@ -3395,6 +3395,23 @@ async def project_set_pane_order(session: "Session", msg_id: str, msg_type: str,
     await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
 
 
+@handler("project.set_pane_stopped")
+async def project_set_pane_stopped(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    from . import app
+
+    ws_raw = payload.get("workspace_path", "") or ""
+    pane_id = payload.get("pane_id", "") or ""
+    stopped = bool(payload.get("stopped", False))
+    if ws_raw and pane_id:
+        app.project_store.set_pane_stopped(ws_raw, pane_id=pane_id, stopped=stopped)
+        asyncio.create_task(
+            app.broadcast(make_event("pane.stopped", {
+                "workspace_path": ws_raw, "pane_id": pane_id, "stopped": stopped,
+            }))
+        )
+    await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
+
+
 @handler("project.set_tab_order")
 async def project_set_tab_order(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app

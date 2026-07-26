@@ -75,6 +75,9 @@ const emit = defineEmits<{
   /** Waiting badge clicked — App.vue injects the resume prompt immediately
    *  instead of waiting for the scheduled quota reset. */
   (e: 'loop-resume-now'): void
+  /** The user typed into a STOPped pane (Enter/printable), taking over — App.vue
+   *  clears + un-persists the STOP badge. */
+  (e: 'user-resume'): void
 }>()
 const containerRef = ref<HTMLElement | null>(null)
 const isDragOver = ref(false)
@@ -112,6 +115,7 @@ function onTitleKeydown(e: KeyboardEvent): void {
 const terminal = useTerminal(props.paneId, props.backend, {
   workspacePath: props.workspacePath,
   onClear: () => emit('rebuild-clean'),
+  onUserResume: () => emit('user-resume'),
   mentionCandidates: () => props.mentionCandidates ?? [],
 })
 const { theme } = useTheme()
@@ -146,7 +150,10 @@ defineExpose({
   readRenderedText: terminal.readRenderedText,
   readLineBeforeCursor: terminal.readLineBeforeCursor,
   fitTerminal: terminal.fitTerminal,
-  redraw: terminal.redraw
+  redraw: terminal.redraw,
+  // STOP badge: App.vue owns persistence; it reflects stored/broadcast truth
+  // into this pane's composable ref via setStopped (no persist side-effect).
+  setStopped: (v: boolean) => { terminal.isStopped.value = v }
 })
 
 /** True when the drag carries a CLI pane's identity (pane→pane context share)
