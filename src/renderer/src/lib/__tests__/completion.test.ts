@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { slotFinished, allSlotsFinished, turnCompleteDone, turnEndsWithSentinel, parseEventMs, isReplayedTurnComplete, type SlotSignal } from '../completion'
+import { slotFinished, allSlotsFinished, turnCompleteDone, loopContinueReady, turnEndsWithSentinel, parseEventMs, isReplayedTurnComplete, type SlotSignal } from '../completion'
 
 // Fixed reference time for the watcher arming. turn_complete only counts when
 // its timestamp is strictly AFTER this.
@@ -101,6 +101,46 @@ describe('turnCompleteDone', () => {
     expect(turnCompleteDone({
       turnCompleteAt: 0, lastActiveAt: 0, armedAt: ARMED,
       now: 999_999, settleMs: SETTLE
+    })).toBe(false)
+  })
+})
+
+describe('loopContinueReady', () => {
+  const SETTLE = 1500
+
+  it('is true when the continue woke the CLI: agent_active landed after arm', () => {
+    // armed=1000, active=1500 (>arm), turn_complete=2000, settled.
+    expect(loopContinueReady({
+      turnCompleteAt: 2000, lastActiveAt: 1500, armedAt: ARMED,
+      now: 2000 + SETTLE, settleMs: SETTLE
+    })).toBe(true)
+  })
+
+  it('is false for an empty turn_complete with NO agent_active after arm (the infinite-loop bug)', () => {
+    // turnCompleteDone alone would be TRUE here (post-arm, latest, settled), but
+    // lastActiveAt (from before arm) never advanced — the injected continue did
+    // not wake the CLI, so a re-fire would spam "繼續" forever.
+    expect(turnCompleteDone({
+      turnCompleteAt: 2000, lastActiveAt: 500, armedAt: ARMED,
+      now: 2000 + SETTLE, settleMs: SETTLE
+    })).toBe(true)
+    expect(loopContinueReady({
+      turnCompleteAt: 2000, lastActiveAt: 500, armedAt: ARMED,
+      now: 2000 + SETTLE, settleMs: SETTLE
+    })).toBe(false)
+  })
+
+  it('is false when agent_active landed exactly at arm time (must be strictly after)', () => {
+    expect(loopContinueReady({
+      turnCompleteAt: 2000, lastActiveAt: ARMED, armedAt: ARMED,
+      now: 2000 + SETTLE, settleMs: SETTLE
+    })).toBe(false)
+  })
+
+  it('inherits turnCompleteDone gating: false before settle even with a post-arm agent_active', () => {
+    expect(loopContinueReady({
+      turnCompleteAt: 2000, lastActiveAt: 1500, armedAt: ARMED,
+      now: 2000 + 1000, settleMs: SETTLE
     })).toBe(false)
   })
 })

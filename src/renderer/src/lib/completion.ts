@@ -59,6 +59,19 @@ export function turnCompleteDone(s: TurnCompleteState): boolean {
   )
 }
 
+/** The loop auto-continue verdict — STRICTER than turnCompleteDone. On top of a
+ *  settled, post-arm, latest turn_complete it also requires that the injected
+ *  "continue" prompt actually WOKE the CLI: an agent_active must have landed
+ *  after the watcher (re-)armed (lastActiveAt > armedAt). Without this, an
+ *  empty-text turn_complete that arrives with NO intervening agent_active —
+ *  Claude's Stop hook, a thinking-only record, a vendor's weak turn signal —
+ *  re-satisfies turnCompleteDone on every 5s poll, so the loop resends the
+ *  continue prompt forever. This guard is loop-only; the done-notification and
+ *  pipeline paths keep using turnCompleteDone unchanged. */
+export function loopContinueReady(s: TurnCompleteState): boolean {
+  return turnCompleteDone(s) && s.lastActiveAt > s.armedAt
+}
+
 /** Parse a CLI event timestamp into epoch ms. Accepts ISO-8601 (Claude/Codex
  *  emit their log's ISO timestamp) and a bare epoch-ms string (Kimi emits the
  *  wire.jsonl `time` field). Returns NaN when unparseable. */

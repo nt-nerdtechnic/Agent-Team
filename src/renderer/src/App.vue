@@ -67,7 +67,7 @@ import {
   CLI_PASTE_LINE_CAP
 } from './lib/cliContext'
 import { planDropPrompt, type PlanDragRef } from './lib/planDrag'
-import { allSlotsFinished, isReplayedTurnComplete, turnCompleteDone, turnEndsWithSentinel, type SlotSignal } from './lib/completion'
+import { allSlotsFinished, isReplayedTurnComplete, loopContinueReady, turnCompleteDone, turnEndsWithSentinel, type SlotSignal } from './lib/completion'
 import { reorderByIds, sortByIdOrder } from './lib/paneOrder'
 import { AGENT_SPECS } from './lib/agentSpecs'
 import {
@@ -1814,15 +1814,18 @@ function startLoopLimitWatcher(paneId: string): void {
       )
       return
     }
-    // No session limit — unattended auto-continue. When the CLI's turn has
-    // genuinely ended (turn_complete after arm, the LATEST signal, settled — so
-    // a mid-turn thinking record or a turn that asked a question never counts),
-    // resend the resume prompt so the loop keeps going. Task COMPLETION is
-    // handled separately in the agent.activity handler: LOOP_DONE_MARKER stops
-    // the loop (loopActive=false) before this poll can fire another continue.
+    // No session limit — unattended auto-continue. Use loopContinueReady (not
+    // plain turnCompleteDone): on top of a settled, post-arm, latest
+    // turn_complete it also requires that the LAST continue actually woke the
+    // CLI (an agent_active landed after arm). Without that guard an empty-text
+    // turn_complete with no intervening agent_active — Claude's Stop hook, a
+    // thinking-only record — re-satisfies the verdict every poll and the loop
+    // resends "繼續" forever. Task COMPLETION is handled separately in the
+    // agent.activity handler: LOOP_DONE_MARKER stops the loop (loopActive=false)
+    // before this poll can fire another continue.
     if (
       !watcher.continuing &&
-      turnCompleteDone({
+      loopContinueReady({
         turnCompleteAt: paneTurnCompleteAt.get(paneId) ?? 0,
         lastActiveAt: paneLastActiveAt.get(paneId) ?? 0,
         armedAt: watcher.armedAt,
@@ -8691,6 +8694,7 @@ function paneIsCommander(p: ActivePane): boolean {
       :pipelines-api="pipelinesApi"
       :cli-profiles-api="cliProfilesApi"
       :workspace-open="!!currentWorkspace"
+      :workspace-name="currentWorkspace ? workspaceBaseName : undefined"
       :initial-tab="settingsInitialTab"
       v-model:confirm-before-close="confirmBeforeClose"
       @close="showSettings = false; settingsInitialTab = 'roles'"
