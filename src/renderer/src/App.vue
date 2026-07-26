@@ -4049,6 +4049,16 @@ async function onWorkspaceCheck(path: string): Promise<void> {
   // under one workspace is unreadable under the other and silently vanishes on
   // reload.
   currentWorkspace.value = path
+  // Apply this workspace's persisted CLI Agents order/disabled list right away,
+  // before any await below — otherwise `currentWorkspace` already points at the
+  // new workspace while `order`/`disabled` still hold the previous workspace's
+  // values, and a Settings edit or peer-window broadcast landing in that gap
+  // would persist stale/blended prefs into the new workspace's project.json.
+  // Guarded by applyingRemoteCliPrefs so adopting the loaded value doesn't
+  // immediately echo straight back through the save watcher below.
+  applyingRemoteCliPrefs.value = true
+  loadCliAgentPrefsFromProject(resp?.project?.cli_agent_order, resp?.project?.cli_agent_disabled)
+  void nextTick(() => { applyingRemoteCliPrefs.value = false })
   existingProject.value = resp ? buildExistingProjectInfo(resp) : null
   currentMode.value = detectMode(resp)
   applyProjectPaths(resp ?? undefined)
@@ -4078,12 +4088,6 @@ async function onWorkspaceCheck(path: string): Promise<void> {
       }
     }
     _loadRunGroups(path, resp.project)
-    // Apply this workspace's persisted CLI Agents order/disabled list. Guarded
-    // by applyingRemoteCliPrefs so adopting the loaded value doesn't immediately
-    // echo straight back through the save watcher below.
-    applyingRemoteCliPrefs.value = true
-    loadCliAgentPrefsFromProject(resp.project.cli_agent_order, resp.project.cli_agent_disabled)
-    void nextTick(() => { applyingRemoteCliPrefs.value = false })
     // Apply the persisted tab order from project.json. Groups not listed (or
     // an absent field) keep their stored order.
     const savedTabOrder = resp.project.tab_order

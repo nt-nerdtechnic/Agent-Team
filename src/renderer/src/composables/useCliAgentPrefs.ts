@@ -3,16 +3,19 @@
 // App.vue (reader) share one reactive source — a plain settingsGet() is not
 // reactive, so a shared ref is what makes a settings edit reflect live.
 //
-// Persistence: per-workspace, in project.json (App.vue watches `order`/`disabled`
-// and calls project.set_ui_state, mirroring how run-group tabs are persisted).
-// App.vue calls loadCliAgentPrefsFromProject() on every workspace switch to load
-// that workspace's saved value. The old global per-user KV (settings.ts) is kept
-// as a read-only fallback default for a workspace that has never persisted its
-// own value yet, so existing users don't lose their current customization.
+// Persistence: primarily per-workspace, in project.json (App.vue watches
+// `order`/`disabled` and calls project.set_ui_state, mirroring how run-group
+// tabs are persisted); App.vue calls loadCliAgentPrefsFromProject() on every
+// workspace switch to load that workspace's saved value. The global per-user
+// KV (settings.ts) is still written unconditionally here as a backstop — it's
+// the only persistence when no workspace is open yet or the window is
+// detached (App.vue's workspace-scoped save silently no-ops in both cases) —
+// and doubles as the fallback default for a workspace that never persisted
+// its own value, so existing users don't lose their current customization.
 
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 
-import { settingsGet } from '../lib/settings'
+import { settingsGet, settingsSet } from '../lib/settings'
 
 const ORDER_KEY = 'agentTeam.cliAgents.order' // legacy global fallback default
 const DISABLED_KEY = 'agentTeam.cliAgents.disabled' // legacy global fallback default
@@ -29,6 +32,9 @@ function readStringArray(key: string): string[] {
 
 const order = ref<string[]>(readStringArray(ORDER_KEY))
 const disabled = ref<string[]>(readStringArray(DISABLED_KEY))
+
+watch(order, (v) => settingsSet(ORDER_KEY, JSON.stringify(v)), { deep: true })
+watch(disabled, (v) => settingsSet(DISABLED_KEY, JSON.stringify(v)), { deep: true })
 
 /**
  * Apply the workspace's persisted CLI agent order/disabled list (from
