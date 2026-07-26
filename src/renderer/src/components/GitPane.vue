@@ -1248,15 +1248,16 @@ const diffBlamePath = ref(''), diffBlameStaged = ref(false)
 const diffBlameHunks = ref<import('../composables/useGit').DiffBlameHunk[]>([]), diffBlameLoading = ref(false)
 
 // ── diff ──────────────────────────────────────────────────────────────────────
-// Open the standalone side-by-side diff window (kept the `toggleDiff` name so
-// every call site stays unchanged). Staging happens inside that window; the
-// backend broadcasts git.changed afterwards so this pane refreshes itself.
+// Open the file's diff in the standalone Git window's own diff panel (NOT the
+// mini-IDE — that is reserved for "open file in editor"). Kept the `toggleDiff`
+// name so every call site stays unchanged. The Git window reads the git_diff_*
+// target from its entry query / incremental openTarget; the backend broadcasts
+// git.changed afterwards so this pane refreshes itself.
 function toggleDiff(path: string, staged: boolean): void {
-  void window.agentTeam?.openDiffWindow({
+  void window.agentTeam?.openGitWindow({
     workspace_path: props.workspacePath,
     filepath: path,
     staged,
-    name: fileName(path),
   })
 }
 
@@ -1405,17 +1406,17 @@ async function toggleCommitFileDiff(hash: string, file: string): Promise<void> {
     commitDiffLoading.value = false
   }
 }
-// Open a commit's file diff in the mini-IDE, mirroring how the stage/changes
-// rows open working-tree diffs (embedded → diff tab, standalone → diff window).
+// Open a commit's file diff, mirroring how the stage/changes rows open diffs:
+// embedded (inside mini-IDE) → diff tab; standalone → the standalone Git
+// window's own diff panel (not the mini-IDE).
 function openCommitFileDiffInIDE(hash: string, file: string): void {
   if (props.embedded) {
     emit('open-diff', { filepath: file, staged: false, name: fileName(file), commit: hash })
   } else {
-    void window.agentTeam?.openDiffWindow({
+    void window.agentTeam?.openGitWindow({
       workspace_path: props.workspacePath,
       filepath: file,
       staged: false,
-      name: fileName(file),
       commit: hash,
     })
   }

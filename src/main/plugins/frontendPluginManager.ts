@@ -957,13 +957,23 @@ export function registerBundledGit(
 
 /** Build the entry query GitWindowApp reads from `window.location.search`:
  *  `workspace_path`, the backend `http_url` (resolved by the git
- *  capabilityBackend shim), and the current `theme` id so the plugin paints
- *  with the app theme before its first settings reconcile (zero-flash; see
- *  plugins/git/mount.ts). */
-function gitQuery(workspacePath: string, httpUrl: string, theme: string): string {
+ *  capabilityBackend shim), the current `theme` id so the plugin paints with
+ *  the app theme before its first settings reconcile (zero-flash; see
+ *  plugins/git/mount.ts), plus `extraParams` forwarding an optional diff target
+ *  (`git_diff_filepath`/`git_diff_staged`/`git_diff_commit`) GitWindowApp reads
+ *  to show a file diff in its own panel instead of the mini-IDE. */
+function gitQuery(
+  workspacePath: string,
+  httpUrl: string,
+  theme: string,
+  extraParams: Record<string, string> = {}
+): string {
   const params = new URLSearchParams()
   if (workspacePath) params.set('workspace_path', workspacePath)
   if (httpUrl) params.set('http_url', httpUrl)
+  for (const [key, value] of Object.entries(extraParams)) {
+    if (value) params.set(key, value)
+  }
   if (theme) params.set('theme', theme)
   const qs = params.toString()
   return qs ? `?${qs}` : ''
@@ -1019,12 +1029,17 @@ function ensureGitWindow(): BrowserWindow {
  * descriptor up in the loader registry; returns false when the Git extension is
  * not registered (the caller surfaces the fallback).
  */
-export function openGitPluginView(workspacePath: string, httpUrl = '', theme = ''): boolean {
+export function openGitPluginView(
+  workspacePath: string,
+  httpUrl = '',
+  theme = '',
+  extraParams: Record<string, string> = {}
+): boolean {
   const base = frontendPluginManager.getDescriptor(GIT_PLUGIN_ID)
   if (!base) return false
   frontendPluginManager.open(
     ensureGitWindow(),
-    { ...base, query: gitQuery(workspacePath, httpUrl, theme) },
+    { ...base, query: gitQuery(workspacePath, httpUrl, theme, extraParams) },
     // Fill the dedicated window's content bounds and track its resizes.
     'fill',
     // Esc (nav.hideSelf) closes the dedicated window, like the mini-IDE editor.

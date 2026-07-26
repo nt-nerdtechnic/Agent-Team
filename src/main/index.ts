@@ -798,15 +798,24 @@ ipcMain.handle('window:openDiff', (event, args: Record<string, string>) => {
 // The standalone Git client plugin view — its own dedicated window (mini-IDE
 // parity), opened from the main window's "open standalone Git" entry. Resolves
 // the backend HTTP base + current theme like openMiniIdeEditor.
-function openGitWindow(workspacePath: string): boolean {
+function openGitWindow(workspacePath: string, extraParams: Record<string, string> = {}): boolean {
   const httpUrl = backend ? `http://${backend.host}:${backend.port}` : ''
-  return openGitPluginView(workspacePath, httpUrl, currentUiTheme())
+  return openGitPluginView(workspacePath, httpUrl, currentUiTheme(), extraParams)
 }
 
-ipcMain.handle('window:openGit', (_event, args: { workspace_path?: string }) => {
+ipcMain.handle('window:openGit', (_event, args: Record<string, string>) => {
   const workspacePath = (args?.workspace_path ?? '').trim()
   if (!workspacePath) return { ok: false }
-  const ok = openGitWindow(workspacePath)
+  // Optional diff target: focus the Git window on a file's diff (shown in its
+  // own panel, not the mini-IDE). GitWindowApp reads these git_diff_* keys on
+  // load and via the incremental openTarget delivery when already open.
+  const extraParams: Record<string, string> = {}
+  if (args.filepath) {
+    extraParams.git_diff_filepath = args.filepath
+    extraParams.git_diff_staged = args.staged ?? ''
+    extraParams.git_diff_commit = args.commit ?? ''
+  }
+  const ok = openGitWindow(workspacePath, extraParams)
   return { ok }
 })
 

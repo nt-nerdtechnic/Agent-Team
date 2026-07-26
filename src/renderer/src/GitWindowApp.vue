@@ -43,6 +43,7 @@ const {
   loadTags,
   showCommit,
   commitFileDiff,
+  diffBlame,
   fetchRemote,
   pullOnly,
   pushOnly,
@@ -654,6 +655,18 @@ button.sb-item:hover {
 .dt-sub {
   color: #8b949e;
   font-size: 12px;
+}
+.dt-back {
+  margin-top: 8px;
+  background: none;
+  border: none;
+  color: #58a6ff;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0;
+}
+.dt-back:hover {
+  text-decoration: underline;
 }
 .dt-files {
   padding: 6px 0;
