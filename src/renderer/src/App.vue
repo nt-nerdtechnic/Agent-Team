@@ -8563,6 +8563,7 @@ function paneIsCommander(p: ActivePane): boolean {
       @spawn="onManualSpawn"
       @spawn-resume="onManualResume"
       @kill="onKill"
+      @minimize="minimizePane"
       @interrupt="onInterrupt"
       @kill-all="onKillAll"
       @reinject="onReinject"

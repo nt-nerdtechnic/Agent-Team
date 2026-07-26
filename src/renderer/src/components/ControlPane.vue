@@ -255,6 +255,7 @@ const emit = defineEmits<{
   (e: 'spawn-resume', payload: ResumePayload): void
   (e: 'kill', paneId: string): void
   (e: 'kill-all'): void
+  (e: 'minimize', paneId: string): void
   (e: 'interrupt', paneId: string): void
   (e: 'reinject', paneId: string): void
   (e: 'rebuild', paneId: string): void
@@ -1142,7 +1143,7 @@ function onPipelineDividerEnd(): void {
           v-for="p in panes"
           :key="p.id"
           class="agent-item"
-          :class="{ pipeline: p.origin === 'pipeline', manager: p.isCommander, minimized: p.isMinimized, 'agent-item--focus': p.id === props.focusPaneId, 'drag-over': reorderDragOverId === p.id, expanded: expandedPaneId === p.id }"
+          :class="{ pipeline: p.origin === 'pipeline', manager: p.isCommander, minimized: p.isMinimized, 'agent-item--focus': p.id === props.focusPaneId, 'drag-over': reorderDragOverId === p.id, expanded: expandedPaneId === p.id || props.focusPaneId === p.id }"
           @dragover="onAgentDragOver($event, p.id)"
           @dragenter="onAgentDragOver($event, p.id)"
           @dragleave="onAgentDragLeave(p.id)"
@@ -1168,7 +1169,7 @@ function onPipelineDividerEnd(): void {
               @dblclick.stop="startRename(p)"
             >{{ p.agentLabel }}</span>
             <span v-if="p.isCommander" class="manager-inline" title="Stage manager — controls flow and decides ---STAGE-DONE---">🎯 Mgr</span>
-            <span v-if="expandedPaneId !== p.id" class="agent-line-sub">{{ agentTypeLabel(p.agentKey) }}<template v-if="p.roleLabel"> · {{ p.roleLabel }}</template></span>
+            <span v-if="expandedPaneId !== p.id && props.focusPaneId !== p.id" class="agent-line-sub">{{ agentTypeLabel(p.agentKey) }} · {{ p.roleLabel || 'No role' }}</span>
             <span v-if="p.isMinimized" class="minimized-tag" title="Docked in sidebar">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="9" y1="3" x2="9" y2="21"></line></svg>
               Docked
@@ -1185,10 +1186,10 @@ function onPipelineDividerEnd(): void {
               >
                 <RebuildIcon />
               </button>
-              <button class="icon-btn agent-close-btn" :title="$t('action.remove')" @click.stop="emit('kill', p.id)">✕</button>
+              <button class="icon-btn agent-minimize-btn" :title="$t('pane.terminal.minimize-tooltip')" @click.stop="emit('minimize', p.id)">⊟</button>
             </span>
           </div>
-          <template v-if="expandedPaneId === p.id">
+          <template v-if="expandedPaneId === p.id || props.focusPaneId === p.id">
             <div class="agent-role-line">
               <span>{{ agentTypeLabel(p.agentKey) }}<span v-if="p.roleLabel"> · {{ p.roleLabel }}</span></span>
               <span class="state" :data-state="p.status">{{ p.status }}</span>
@@ -2423,15 +2424,20 @@ button.icon-btn.muted:hover {
   margin-left: 18px;
   margin-right: 6px;
 }
+.agent-minimize-btn,
 .agent-close-btn {
   margin-left: 4px;
   padding: 0 4px;
-  font-size: 10px;
+  font-size: 11px;
   display: flex;
   align-items: center;
   justify-content: center;
   height: 18px;
   width: 18px;
+}
+.agent-minimize-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-muted);
 }
 .agent-rebuild-btn {
   flex: 0 0 auto;

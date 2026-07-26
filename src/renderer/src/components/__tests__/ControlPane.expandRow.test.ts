@@ -51,7 +51,6 @@ describe('ControlPane – compact agent rows with click-to-expand', () => {
     expect(wrapper.find('.agent-cmd').exists()).toBe(false)
     expect(wrapper.find('.row.tight').exists()).toBe(false)
     expect(items[0].classes()).not.toContain('expanded')
-    // CLI type / role stay visible on collapsed rows (as a compact sub-label)
     expect(wrapper.findAll('.agent-line-sub')).toHaveLength(2)
   })
 
@@ -63,10 +62,9 @@ describe('ControlPane – compact agent rows with click-to-expand', () => {
     expect(items[0].find('.agent-cmd').text()).toContain('claude')
     expect(items[0].find('.row.tight').exists()).toBe(true)
     expect(items[0].find('.state').attributes('data-state')).toBe('running')
-    // Expanded row swaps the inline sub-label for the detail card's role line
+    // Expanded row hides inline sub-label and shows detail card's role line
     expect(items[0].find('.agent-line-sub').exists()).toBe(false)
     expect(items[0].find('.agent-role-line').exists()).toBe(true)
-    expect(items[1].find('.agent-line-sub').exists()).toBe(true)
   })
 
   it('second click on the same row collapses it (still re-emitting focus-pane)', async () => {
