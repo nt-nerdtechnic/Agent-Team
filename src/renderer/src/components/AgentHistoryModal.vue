@@ -363,6 +363,12 @@ function onLogSearchKeydown(e: KeyboardEvent): void {
   if (e.key === 'Enter') {
     e.preventDefault()
     gotoMatch(e.shiftKey ? -1 : 1)
+  } else if (e.key === 'ArrowDown') {
+    e.preventDefault()
+    gotoMatch(1)
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault()
+    gotoMatch(-1)
   } else if (e.key === 'Escape') {
     // Only clear/blur here — never let Escape bubble into any modal-close
     // handling while the search field is focused.
@@ -1354,7 +1360,9 @@ async function copyLogText(): Promise<void> {
   background: var(--bg-selected);
   border-radius: 2px;
 }
-.ah-log-match-active {
+.ah-log-pre .ah-log-match-active {
+  background: var(--accent-bright);
+  color: var(--bg-inset);
   outline: 1px solid var(--accent-bright);
 }
 .ansi-bold { font-weight: 700; }
