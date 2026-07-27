@@ -1296,11 +1296,14 @@ def _profile_identities() -> dict:
 
 def _profile_pin_for_spawn(agent_key: str, payload_profile_id: object) -> str:
     """The profile a pane is pinned to, persisted in its restore record so a
-    resume re-spawns on the same account (see terminal.create's profile pin).
-    A restore carries the pane's recorded pin (``payload_profile_id``); a fresh
-    spawn pins to the agent's currently active default. Returns "" for
-    non-account agents, "__default__" when the active account is the unmanaged
-    Default (real home), else the managed profile id."""
+    resume re-spawns under the same account's credentials (see terminal.create's
+    profile pin). Sessions are shared across accounts, so this is a
+    credential-account continuity hint, not a resume-correctness gate — a resume
+    finds its conversation from the real home either way. A restore carries the
+    pane's recorded pin (``payload_profile_id``); a fresh spawn pins to the
+    agent's currently active default. Returns "" for non-account agents,
+    "__default__" when the active account is the unmanaged Default (real home),
+    else the managed profile id."""
     from . import app
 
     if agent_key not in PROFILE_AGENT_KEYS:
@@ -3033,20 +3036,22 @@ async def terminal_create(session: "Session", msg_id: str, msg_type: str, payloa
     elif agent_key in PROFILE_AGENT_KEYS:
         # A regular pane on a managed account (a non-null default profile) runs
         # its CLI config home relocated into that account's persistent isolated
-        # home, seeded from the profile's credential slot. This keeps the
-        # account's sessions/settings apart from the real home and from other
-        # accounts. The log readers, attribution and resume preflight all
-        # enumerate these homes (profile_config_homes), so the pane's sessions
-        # stay read, attributed and resumable — the crash-loop guard of
-        # pitfalls.md. Default (null profile) leaves the spawn on the real home.
+        # home, seeded from the profile's credential slot. Only the credentials
+        # stay isolated: sessions/settings are symlinked back to the real home,
+        # so the log readers, attribution and resume preflight all see the
+        # session under the single real home regardless of which account wrote
+        # it. Default (null profile) leaves the spawn on the real home.
         #
         # Profile pin: a restore carries the pane's recorded profile_id in
-        # metadata, so the pane re-spawns in the SAME account it was created on
-        # regardless of the current active default — a later account switch must
-        # not migrate a running/resumed pane's home out from under its session
-        # (the cross-profile resume crash-loop). A fresh spawn has no pin and
-        # binds to the active default; "__default__" pins to the unmanaged real
-        # home; an unknown pin (deleted account) falls back to the real home.
+        # metadata, so the pane re-spawns under the SAME account's credentials
+        # it was created on regardless of the current active default. Because
+        # sessions are shared, this is no longer a resume-correctness gate (a
+        # missing/wrong pin still resumes the conversation from the real home) —
+        # it only continues the credential account a resumed pane authenticates
+        # as, so "resume" stays on the same account. A fresh spawn has no pin
+        # and binds to the active default; "__default__" pins to the unmanaged
+        # real home; an unknown pin (deleted account) falls back to the real
+        # home.
         pinned_profile_id = str(metadata.get("profile_id") or "")
         if pinned_profile_id == DEFAULT_SLOT_ID:
             profile = None
@@ -3061,8 +3066,6 @@ async def terminal_create(session: "Session", msg_id: str, msg_type: str, payloa
             env.update(profile_plan.env_set)
             if profile_plan.env_remove:
                 env_remove = list(profile_plan.env_remove)
-            # Watch the new home right away (rescan would catch it eventually).
-            app._watch_profile_home(agent_key, profile["id"])
     if agent_key == "codex" and not login_profile_id:
         # Compatibility: `codex resume <id>` only works inside the home
         # that recorded the session. Resume in whichever home owns it;

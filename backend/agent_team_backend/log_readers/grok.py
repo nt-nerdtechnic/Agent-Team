@@ -29,7 +29,6 @@ import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
 
-from ..profiles_store import profile_config_homes
 from .base import IncrementalParseResult, LogReader, TokenUsage
 
 log = logging.getLogger("agent_team_backend.log_readers.grok")
@@ -73,18 +72,14 @@ class GrokLogReader(LogReader):
         return Path.home() / ".grok" / _DB_NAME
 
     def _grok_dirs(self) -> list[Path]:
-        """The default ``.grok`` dir plus each managed profile's shim
-        ``<home>/.grok``.
+        """The single default ``~/.grok`` dir (as a list for callers that
+        iterate it).
 
-        A regular grok pane on a managed account runs with HOME pointed at that
-        account's persistent isolated home (the HOME shim), so its ENTIRELY
-        separate grok.db lives inside the shim's ``.grok`` — the default
-        ~/.grok never sees those sessions. With no profile home the list is
-        exactly [~/.grok]."""
-        dirs: list[Path] = [Path.home() / ".grok"]
-        for home in profile_config_homes("grok"):
-            dirs.append(home / ".grok")
-        return dirs
+        A managed grok pane runs under a HOME shim, but the shim's
+        ``.grok/grok.db`` is symlinked back to the real ``~/.grok``
+        (credential_vault), so every account's sessions live in this one
+        database — no separate shim ``.grok`` scan is needed."""
+        return [Path.home() / ".grok"]
 
     def _db_paths(self) -> list[Path]:
         return [d / _DB_NAME for d in self._grok_dirs()]
@@ -205,8 +200,8 @@ class GrokLogReader(LogReader):
         wanted = [m for m in markers if m]
         if not wanted:
             return {}
-        # A profile pane's session lives in its own shim db, so scan the default
-        # db AND every active profile db; first match across them wins.
+        # Every account's sessions share the real ~/.grok/grok.db (the shim db
+        # is symlinked back), so a single db scan covers them all.
         found: dict[str, tuple[str, str]] = {}
         for db in self._db_paths():
             if not db.is_file():

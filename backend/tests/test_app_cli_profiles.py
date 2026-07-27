@@ -899,9 +899,11 @@ async def test_terminal_create_pinned_profile_survives_account_switch(
     store: CliProfilesStore, spawn_stubs: FakeAttribution, real_vault: CredentialVault
 ) -> None:
     """A pane pinned to profile A (its recorded metadata profile_id) resumes
-    into A's isolated home even though the active default is now B — the pin,
-    not the current active account, decides the home. This is the cross-profile
-    resume crash-loop guard: a switch must never migrate a pane's home."""
+    into A's isolated credential home even though the active default is now B —
+    the pin, not the current active account, decides the home. Sessions are
+    shared, so this keeps a resumed pane authenticated as the same account it
+    was created on (credential-account continuity), not a resume-correctness
+    gate: a switch must never migrate a pane's credential home."""
     profile_a = store.create(agent_key="claude", name="A")
     profile_b = store.create(agent_key="claude", name="B")
     store.set_default("claude", profile_b["id"])  # active account is now B

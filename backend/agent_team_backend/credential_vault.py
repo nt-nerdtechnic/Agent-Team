@@ -613,6 +613,13 @@ class CredentialVault:
         the pre-refactor ``refresh_grok_home_shim``)."""
         shim.mkdir(parents=True, exist_ok=True)
         (shim / ".grok").mkdir(exist_ok=True)
+        # ``.grok`` stays a real dir (it holds the isolated ``auth.json``), but
+        # the session database is shared: symlink grok.db (+ its sqlite -wal /
+        # -shm sidecars) back to the real ~/.grok so sessions follow the user,
+        # not the account.
+        real_grok = self._real_home / ".grok"
+        for name in ("grok.db", "grok.db-wal", "grok.db-shm"):
+            self._link_shared(shim / ".grok" / name, real_grok / name, is_dir=False)
         try:
             for entry in shim.iterdir():
                 if entry.is_symlink() and not entry.exists():
@@ -740,35 +747,122 @@ class CredentialVault:
         its Keychain item name from a hash of ``CLAUDE_CONFIG_DIR``."""
         return self.slot_dir(agent_key, slot_id) / PROFILE_HOME_DIRNAME
 
-    def _write_home_oauth_account(self, path: Path, account: dict | None) -> None:
-        """Write claude's display-only ``oauthAccount`` into a home's own
-        ``.claude.json`` (created if absent, other keys preserved)."""
-        raw = _read_text(path)
+    # ---- shared-home symlinks (only credentials stay isolated) ----
+    #
+    # A managed account's persistent home isolates ONLY the credential secret;
+    # session history and settings are symlinked back to the user's real home
+    # so panes share one session store regardless of which account is active.
+    # That store-sharing is also what fixes cross-profile resume: every home's
+    # ``projects``/``sessions`` resolves to the same real dir, so a resume
+    # preflight (and the CLI itself) always finds the session no matter which
+    # home the pane runs in — no more "No conversation found" crash-loop.
+
+    def _ensure_target_base(self, target: Path, *, is_dir: bool) -> None:
+        """Make sure a shared symlink can be written through: the target dir
+        itself for a directory link, or the target's parent for a file link
+        (the file is created by the CLI on first write, through the symlink)."""
         try:
-            data = json.loads(raw) if raw is not None else {}
-        except ValueError:
-            data = {}
-        if not isinstance(data, dict):
-            data = {}
-        if account is None:
-            data.pop("oauthAccount", None)
-        else:
-            data["oauthAccount"] = account
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            (target if is_dir else target.parent).mkdir(parents=True, exist_ok=True)
+        except OSError as err:
+            log.warning("cannot ensure shared target base %s: %s", target, err)
+
+    def _migrate_file(self, src: Path, target: Path) -> bool:
+        """Move a real file that shadows a shared link into the real home.
+        Never overwrites an existing real-home file; a clash keeps the real
+        copy and leaves ``src`` unshared. Returns True only when ``src`` was
+        moved away (so the caller may replace it with a symlink)."""
+        try:
+            if target.exists():
+                log.warning(
+                    "shared target %s already exists; leaving %s unshared", target, src
+                )
+                return False
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(os.fspath(src), os.fspath(target))
+            return True
+        except OSError as err:
+            log.warning("migrating %s -> %s failed: %s", src, target, err)
+            return False
+
+    def _migrate_dir(self, src: Path, target: Path) -> bool:
+        """Merge a real directory that shadows a shared link (session/projects
+        data written under the old whole-home isolation) into the real home.
+        Session files are uuid-unique, so a name clash keeps the real copy and
+        never overwrites it. ``src`` is removed only once every file drained;
+        a src that could not be fully merged is left in place unshared. Returns
+        True only when ``src`` was fully drained and removed."""
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            drained = True
+            for root, _dirs, files in os.walk(src):
+                rel = Path(root).relative_to(src)
+                for name in files:
+                    dest = target / rel / name
+                    if dest.exists():
+                        drained = False  # keep the real copy, never overwrite
+                        continue
+                    try:
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(os.fspath(Path(root) / name), os.fspath(dest))
+                    except OSError as err:
+                        log.warning("migrating %s -> %s failed: %s", Path(root) / name, dest, err)
+                        drained = False
+            if not drained:
+                log.warning("kept %s unshared: could not fully merge into %s", src, target)
+                return False
+            shutil.rmtree(src, ignore_errors=True)
+            return True
+        except OSError as err:
+            log.warning("migrating dir %s -> %s failed: %s", src, target, err)
+            return False
+
+    def _link_shared(self, dst: Path, target: Path, *, is_dir: bool) -> None:
+        """Point ``dst`` at the shared real-home ``target`` via symlink.
+
+        Idempotent (refreshed on every spawn) and data-safe: an already-correct
+        symlink is a no-op; a dangling/wrong symlink is repointed; a real
+        dir/file left by an earlier whole-home-isolation build is migrated back
+        into the real home first (see ``_migrate_dir``/``_migrate_file``) and,
+        only if fully drained, replaced with the symlink. Every IO path is
+        guarded — a failure only logs and lets the spawn proceed against the
+        isolated home, never raising."""
+        try:
+            if dst.is_symlink():
+                if os.readlink(dst) == os.fspath(target):
+                    self._ensure_target_base(target, is_dir=is_dir)
+                    return
+                dst.unlink()  # stale/wrong link -> repoint
+            elif dst.exists():
+                migrated = (
+                    self._migrate_dir(dst, target) if is_dir
+                    else self._migrate_file(dst, target)
+                )
+                if not migrated:
+                    return  # could not drain safely; leave unshared
+            self._ensure_target_base(target, is_dir=is_dir)
+            dst.symlink_to(target, target_is_directory=is_dir)
+        except OSError as err:
+            log.warning("shared-home link %s -> %s failed: %s", dst, target, err)
 
     def _seed_claude_profile_home(self, home: Path, creds: LiveCredentials) -> None:
         """Seed a claude persistent home from the slot so a pane run with
         ``CLAUDE_CONFIG_DIR=home`` is already signed in. macOS keeps the secret
         in the path-hashed Keychain item Claude Code reads under that config
-        dir; elsewhere the ``.credentials.json`` file. The display-only
-        ``oauthAccount`` goes into the home's ``.claude.json``."""
+        dir; elsewhere the ``.credentials.json`` file. Only the credential is
+        isolated: sessions and settings are symlinked back to the real home so
+        every account shares one session store (``creds.account`` is display
+        info the slot's ``oauth-account.json`` already carries, so nothing is
+        written into the shared ``.claude.json``)."""
         if creds.secret is not None:
             if self._is_macos:
                 self._keychain_write(legacy_claude_keychain_service(home), creds.secret)
             else:
                 _write_private(home / ".credentials.json", creds.secret)
-        self._write_home_oauth_account(home / ".claude.json", creds.account)
+        real_claude = self._real_home / ".claude"
+        for name in ("projects", "todos", "shell-snapshots"):
+            self._link_shared(home / name, real_claude / name, is_dir=True)
+        self._link_shared(home / "settings.json", real_claude / "settings.json", is_dir=False)
+        self._link_shared(home / ".claude.json", self._real_home / ".claude.json", is_dir=False)
 
     def _seed_codex_profile_home(self, home: Path, creds: LiveCredentials) -> None:
         """Seed a codex persistent home: the account's own ``auth.json`` plus
@@ -787,6 +881,9 @@ class CredentialVault:
                 dst.symlink_to(src, target_is_directory=src.is_dir())
             except OSError as err:
                 log.warning("codex profile-home symlink %s -> %s failed: %s", dst, src, err)
+        # Session history is shared, not isolated: symlink it back to ~/.codex.
+        self._link_shared(home / "sessions", real_codex / "sessions", is_dir=True)
+        self._link_shared(home / "history.jsonl", real_codex / "history.jsonl", is_dir=False)
 
     def prepare_profile_home(self, agent_key: str, slot_id: str) -> ProfileHomePlan:
         """Create + seed the profile's persistent isolated home and return the
@@ -812,8 +909,24 @@ class CredentialVault:
             # switches from ~/.codex to this profile home.
             return ProfileHomePlan(codex_source_home=Path(home_str))
         if agent_key == "kimi":
+            khome = Path(home_str)
             if creds.secret is not None:
-                _write_private(Path(home_str) / "credentials" / "kimi-code.json", creds.secret)
+                _write_private(khome / "credentials" / "kimi-code.json", creds.secret)
+            real_kimi = self._real_home / ".kimi-code"
+            # Sessions are shared: symlink back to ~/.kimi-code/sessions. Only
+            # the credentials dir stays isolated; every other existing kimi
+            # config entry is mirrored so settings follow the account too.
+            self._link_shared(khome / "sessions", real_kimi / "sessions", is_dir=True)
+            if real_kimi.is_dir():
+                try:
+                    entries = sorted(real_kimi.iterdir())
+                except OSError as err:
+                    log.warning("cannot list %s for kimi shim: %s", real_kimi, err)
+                    entries = []
+                for src in entries:
+                    if src.name in ("credentials", "sessions"):
+                        continue
+                    self._link_shared(khome / src.name, src, is_dir=src.is_dir())
             return ProfileHomePlan(env_set={"KIMI_CODE_HOME": home_str})
         # grok: the persistent home IS the HOME shim; its .grok dir holds the db.
         shim = self._populate_grok_shim(Path(home_str))

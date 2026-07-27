@@ -21,7 +21,6 @@ import os
 import re
 from pathlib import Path
 
-from ..profiles_store import profile_config_homes
 from .base import (
     ActivityEvent,
     IncrementalParseResult,
@@ -126,23 +125,15 @@ class ClaudeLogReader(LogReader):
         return None
 
     def project_dirs(self) -> list[Path]:
-        """The default root plus every managed profile's ``<home>/projects``.
+        """The single default projects root (empty list when none exists).
 
-        A regular pane on a managed account runs with CLAUDE_CONFIG_DIR pointed
-        at that account's persistent isolated home (credential_vault.
-        prepare_profile_home), so its sessions live outside the default root.
-        Each existing profile home contributes its own projects dir. With no
-        profile home the list is exactly [default_root] — byte for byte the
-        pre-profile behavior."""
-        roots: list[Path] = []
+        Managed-account panes run with CLAUDE_CONFIG_DIR pointed at an isolated
+        home, but that home's ``projects`` is symlinked back to the real home
+        (credential_vault), so every account's sessions resolve into this one
+        root — no separate profile-home scan is needed. Returned as a list for
+        the callers that iterate it."""
         default = self._default_root()
-        if default is not None:
-            roots.append(default)
-        for home in profile_config_homes("claude"):
-            p = home / "projects"
-            if p.is_dir() and p not in roots:
-                roots.append(p)
-        return roots
+        return [default] if default is not None else []
 
     def session_files(self) -> list[Path]:
         out: list[Path] = []

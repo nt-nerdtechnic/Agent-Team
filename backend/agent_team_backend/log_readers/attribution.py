@@ -35,7 +35,6 @@ from threading import Lock
 from typing import Iterable
 
 from ..applog import app_data_dir
-from ..profiles_store import profile_config_homes
 from .base import LogReader, TokenUsage
 from .claude import encode_claude_cwd
 
@@ -618,26 +617,15 @@ class Attribution:
         for ws_path, mapping in self._workspaces.items():
             if usage.vendor == "claude":
                 # Path-prefix match against claude_dir (default config home).
+                # Managed-account panes write via a symlinked profile home whose
+                # ``projects`` resolves back into this same default root, so the
+                # single prefix check covers every account.
                 if mapping.claude_dir and (
                     file_path == mapping.claude_dir
                     or file_path.startswith(mapping.claude_dir + "/")
                     or file_path.startswith(mapping.claude_dir + os.sep)
                 ):
                     return ws_path
-                # Managed-account panes write under a per-account config home
-                # (<profile home>/projects/<encoded>), which the default-root
-                # claude_dir never covers. Match the encoded-cwd folder under
-                # any profile home. Empty when no profile exists → this loop is
-                # skipped and behavior is unchanged.
-                encoded = encode_claude_cwd(ws_path)
-                for home in profile_config_homes("claude"):
-                    cand = str(home / "projects" / encoded)
-                    if (
-                        file_path == cand
-                        or file_path.startswith(cand + "/")
-                        or file_path.startswith(cand + os.sep)
-                    ):
-                        return ws_path
             elif usage.vendor == "codex":
                 # Codex puts cwd in session_meta → usage.cwd
                 if usage.cwd and usage.cwd == ws_path:

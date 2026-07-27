@@ -19,7 +19,6 @@ import os
 import time
 from pathlib import Path
 
-from ..profiles_store import profile_config_homes
 from .base import ActivityEvent, IncrementalParseResult, LogReader, TokenUsage, read_jsonl_tail
 
 log = logging.getLogger("agent_team_backend.log_readers.kimi")
@@ -91,22 +90,15 @@ class KimiLogReader(LogReader):
         return _kimi_home() / "sessions"
 
     def project_dirs(self) -> list[Path]:
-        """The default sessions root plus every managed profile's
-        ``<home>/sessions``.
+        """The single default sessions root (empty list when it doesn't exist).
 
-        A regular pane on a managed account runs with KIMI_CODE_HOME pointed at
-        that account's persistent isolated home, so its sessions live outside
-        the default root. Only existing dirs are returned; with no profile home
-        the list is exactly the default root — unchanged behavior."""
-        roots: list[Path] = []
+        Managed-account panes run with KIMI_CODE_HOME pointed at an isolated
+        home, but that home's ``sessions`` is symlinked back to the real home
+        (credential_vault), so every account's sessions resolve into this one
+        root — no separate profile-home scan is needed. Returned as a list for
+        the callers that iterate it."""
         default = self._sessions_root()
-        if default.is_dir():
-            roots.append(default)
-        for home in profile_config_homes("kimi"):
-            p = home / "sessions"
-            if p.is_dir() and p not in roots:
-                roots.append(p)
-        return roots
+        return [default] if default.is_dir() else []
 
     def session_files(self) -> list[Path]:
         out: list[Path] = []

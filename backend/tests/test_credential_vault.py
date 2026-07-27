@@ -728,9 +728,21 @@ def test_prepare_profile_home_claude_file_backend(tmp_path: Path) -> None:
     home = vault.profile_home_path("claude", "acct1")
     assert plan.env_set == {"CLAUDE_CONFIG_DIR": str(home)}
     assert plan.env_remove == ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
+    # Only the credential is isolated (a real file inside the home).
     assert (home / ".credentials.json").read_text() == '{"t": 1}'
-    doc = json.loads((home / ".claude.json").read_text())
-    assert doc["oauthAccount"] == {"emailAddress": "a@b.com"}
+    assert not (home / ".credentials.json").is_symlink()
+    # Sessions and settings are symlinked back to the real home, not copied.
+    real_claude = tmp_path / "home" / ".claude"
+    for name in ("projects", "todos", "shell-snapshots"):
+        assert (home / name).is_symlink()
+        assert (home / name).resolve() == (real_claude / name).resolve()
+    assert (home / "settings.json").is_symlink()
+    assert (home / ".claude.json").is_symlink()
+    assert (home / ".claude.json").resolve() == (tmp_path / "home" / ".claude.json").resolve()
+    # The display account is NOT written into the shared .claude.json (it would
+    # pollute the real file through the symlink); the slot carries it instead.
+    assert not (tmp_path / "home" / ".claude.json").exists()
+    assert vault.slot_account("claude", "acct1") == {"emailAddress": "a@b.com"}
 
 
 def test_prepare_profile_home_claude_macos_uses_path_hashed_keychain(tmp_path: Path) -> None:
@@ -743,3 +755,140 @@ def test_prepare_profile_home_claude_macos_uses_path_hashed_keychain(tmp_path: P
     assert sec.items.get(legacy_claude_keychain_service(home)) == '{"t": 1}'
     # No plaintext .credentials.json file on macOS.
     assert not (home / ".credentials.json").exists()
+
+
+# ── Phase A: shared session store (only credentials isolated) ────────────────
+
+
+def test_prepare_profile_home_claude_shares_projects_for_resume(tmp_path: Path) -> None:
+    """The crash fix: a session written to the real ~/.claude/projects is
+    visible through the profile home's symlinked projects dir, so resume
+    preflight finds it no matter which home the pane runs in."""
+    vault = _file_vault(tmp_path)
+    real_ws = tmp_path / "home" / ".claude" / "projects" / "-enc-ws"
+    _write(real_ws / "sess-uuid.jsonl", '{"line": 1}')
+    vault.write_slot("claude", "acct1", LiveCredentials(secret='{"t": 1}'))
+
+    vault.prepare_profile_home("claude", "acct1")
+    home = vault.profile_home_path("claude", "acct1")
+
+    linked = home / "projects" / "-enc-ws" / "sess-uuid.jsonl"
+    assert (home / "projects").is_symlink()
+    assert linked.is_file()
+    assert linked.read_text() == '{"line": 1}'
+
+
+def test_prepare_profile_home_claude_migrates_legacy_projects_clean(tmp_path: Path) -> None:
+    """Old whole-home-isolation data (a real projects/ dir inside the home) is
+    merged back into the real home and projects/ becomes a symlink — nothing
+    lost when every session file is unique."""
+    vault = _file_vault(tmp_path)
+    home = vault.profile_home_path("claude", "acct1")
+    _write(home / "projects" / "-enc-ws" / "u1.jsonl", "A")
+    _write(home / "projects" / "-enc-ws" / "u2.jsonl", "B")
+    vault.write_slot("claude", "acct1", LiveCredentials(secret='{"t": 1}'))
+
+    vault.prepare_profile_home("claude", "acct1")
+
+    real_ws = tmp_path / "home" / ".claude" / "projects" / "-enc-ws"
+    assert (home / "projects").is_symlink()
+    assert (real_ws / "u1.jsonl").read_text() == "A"
+    assert (real_ws / "u2.jsonl").read_text() == "B"
+
+
+def test_prepare_profile_home_claude_migration_never_overwrites(tmp_path: Path) -> None:
+    """A name clash keeps the real copy (never overwrites), and because the
+    source could not be fully drained the home keeps its own projects/ dir
+    unshared — the home copy is preserved, not destroyed."""
+    vault = _file_vault(tmp_path)
+    home = vault.profile_home_path("claude", "acct1")
+    _write(home / "projects" / "-enc-ws" / "moved.jsonl", "OLD")
+    _write(home / "projects" / "-enc-ws" / "clash.jsonl", "HOME-VERSION")
+    real_ws = tmp_path / "home" / ".claude" / "projects" / "-enc-ws"
+    _write(real_ws / "clash.jsonl", "REAL-VERSION")
+    vault.write_slot("claude", "acct1", LiveCredentials(secret='{"t": 1}'))
+
+    vault.prepare_profile_home("claude", "acct1")
+
+    # Unique file migrated; the clash kept the real copy untouched.
+    assert (real_ws / "moved.jsonl").read_text() == "OLD"
+    assert (real_ws / "clash.jsonl").read_text() == "REAL-VERSION"
+    # Not fully drained -> the home dir stays real (unshared) with its copy.
+    assert not (home / "projects").is_symlink()
+    assert (home / "projects" / "-enc-ws" / "clash.jsonl").read_text() == "HOME-VERSION"
+
+
+def test_prepare_profile_home_claude_idempotent(tmp_path: Path) -> None:
+    """Two consecutive prepares leave the same symlinks and never re-migrate."""
+    vault = _file_vault(tmp_path)
+    real_ws = tmp_path / "home" / ".claude" / "projects" / "-enc-ws"
+    _write(real_ws / "s.jsonl", "X")
+    vault.write_slot("claude", "acct1", LiveCredentials(secret='{"t": 1}'))
+
+    vault.prepare_profile_home("claude", "acct1")
+    home = vault.profile_home_path("claude", "acct1")
+    target = os.readlink(home / "projects")
+
+    vault.prepare_profile_home("claude", "acct1")
+    assert (home / "projects").is_symlink()
+    assert os.readlink(home / "projects") == target
+    assert (home / "projects" / "-enc-ws" / "s.jsonl").read_text() == "X"
+
+
+def test_prepare_profile_home_codex_shares_sessions_isolates_auth(tmp_path: Path) -> None:
+    vault = _file_vault(tmp_path)
+    vault.write_slot("codex", "acct1", LiveCredentials(secret='{"tokens": {}}'))
+    vault.prepare_profile_home("codex", "acct1")
+    home = vault.profile_home_path("codex", "acct1")
+
+    assert (home / "sessions").is_symlink()
+    assert (home / "sessions").resolve() == (tmp_path / "home" / ".codex" / "sessions").resolve()
+    assert (home / "history.jsonl").is_symlink()
+    assert not (home / "auth.json").is_symlink()
+    assert (home / "auth.json").read_text() == '{"tokens": {}}'
+
+
+def test_prepare_profile_home_kimi_shares_sessions_and_config(tmp_path: Path) -> None:
+    vault = _file_vault(tmp_path)
+    _write(tmp_path / "home" / ".kimi-code" / "config.json", '{"cfg": 1}')
+    vault.write_slot("kimi", "acct1", LiveCredentials(secret='{"access_token": "kt"}'))
+    vault.prepare_profile_home("kimi", "acct1")
+    home = vault.profile_home_path("kimi", "acct1")
+
+    assert (home / "sessions").is_symlink()
+    assert (home / "sessions").resolve() == (tmp_path / "home" / ".kimi-code" / "sessions").resolve()
+    # Existing kimi config follows the account (shared), credentials stay isolated.
+    assert (home / "config.json").is_symlink()
+    assert (home / "config.json").resolve() == (tmp_path / "home" / ".kimi-code" / "config.json").resolve()
+    assert not (home / "credentials").is_symlink()
+    assert (home / "credentials" / "kimi-code.json").read_text() == '{"access_token": "kt"}'
+
+
+def test_prepare_profile_home_grok_shares_db_isolates_auth(tmp_path: Path) -> None:
+    vault = _file_vault(tmp_path)
+    vault.write_slot("grok", "acct1", LiveCredentials(secret='{"x": 1}'))
+    vault.prepare_profile_home("grok", "acct1")
+    home = vault.profile_home_path("grok", "acct1")
+
+    # .grok is a real dir; auth.json inside it is an isolated real file.
+    assert (home / ".grok").is_dir() and not (home / ".grok").is_symlink()
+    assert not (home / ".grok" / "auth.json").is_symlink()
+    assert (home / ".grok" / "auth.json").read_text() == '{"x": 1}'
+    # The session db (and sqlite sidecars) is shared back to the real ~/.grok.
+    assert (home / ".grok" / "grok.db").is_symlink()
+    assert (home / ".grok" / "grok.db").resolve() == (
+        tmp_path / "home" / ".grok" / "grok.db"
+    ).resolve()
+
+
+def test_prepare_profile_home_grok_migrates_legacy_db(tmp_path: Path) -> None:
+    """A real grok.db left in the shim is moved back to ~/.grok, then shared."""
+    vault = _file_vault(tmp_path)
+    home = vault.profile_home_path("grok", "acct1")
+    _write(home / ".grok" / "grok.db", "DBDATA")
+    vault.write_slot("grok", "acct1", LiveCredentials(secret='{"x": 1}'))
+
+    vault.prepare_profile_home("grok", "acct1")
+
+    assert (tmp_path / "home" / ".grok" / "grok.db").read_text() == "DBDATA"
+    assert (home / ".grok" / "grok.db").is_symlink()
