@@ -32,11 +32,11 @@ describe('App lazy cold restore', () => {
     expect(select).toContain('options.userInitiated')
     expect(select).toContain('void realizeRestoredPane(paneId)')
     expect(appSource).toContain('@activate="selectPane(p.id, { userInitiated: true })"')
-    expect(appSource).toContain('@focus-pane="selectPane($event, { userInitiated: true')
+    expect(appSource).toContain('@focus-pane="onFocusPane"')
     expect(appSource).toContain('selectPane(visible[0]?.id ?? null, { userInitiated: false })')
   })
 
-  it('a user-selected tab focuses its prior pane and realizes its on-screen panes', () => {
+  it('a user-selected tab focuses its prior pane without realizing it', () => {
     const tabAt = appSource.indexOf('async function onUserSelectTab')
     const tabEnd = appSource.indexOf('// Persist activeTab', tabAt)
     const tabSelect = appSource.slice(tabAt, tabEnd)
@@ -44,11 +44,11 @@ describe('App lazy cold restore', () => {
     expect(tabSelect).toContain('const visible = tabVisiblePanes.value')
     expect(tabSelect).toContain('visible.find((p) => p.id === focusPaneId.value)?.id ?? visible[0]?.id')
     expect(tabSelect).toContain('selectPane(target, { userInitiated: false })')
-    expect(tabSelect).toContain('realizeOnScreenPanes()')
+    expect(tabSelect).not.toContain('realizeRestoredPane(')
     expect(appSource).toContain('@update:model-value="onUserSelectTab"')
   })
 
-  it('uses one on-screen pane set for rendering and user-driven lazy activation', () => {
+  it('uses one on-screen pane set for rendering without automatic activation', () => {
     const helperAt = appSource.indexOf('const onScreenPaneIds = computed')
     const helperEnd = appSource.indexOf('\nconst dualFocusHandlePos', helperAt)
     const helper = appSource.slice(helperAt, helperEnd)
@@ -57,10 +57,9 @@ describe('App lazy cold restore', () => {
     expect(helper).toContain('gridPagePaneIds.value')
     expect(helper).toContain("effectiveLayoutMode.value === 'sidebar'")
     expect(helper).toContain("effectiveLayoutMode.value === 'spotlight'")
-    expect(helper).toContain('function realizeOnScreenPanes()')
-    expect(helper).toContain('void realizeRestoredPane(paneId)')
-    expect(helper).toContain('watch([effectiveLayoutMode, gridPreset, gridPage]')
-    expect(helper).toContain('if (!hydratingColdRestore) realizeOnScreenPanes()')
+    expect(helper).not.toContain('realizeRestoredPane(')
+    expect(appSource).not.toContain('function realizeOnScreenPanes()')
+    expect(appSource).not.toContain('watch([effectiveLayoutMode, gridPreset, gridPage]')
     expect(appSource).not.toContain('watch(onScreenPaneIds')
     expect(appSource).toContain('v-show="onScreenPaneIds.has(p.id)"')
   })
@@ -131,15 +130,15 @@ describe('App lazy cold restore', () => {
     expect(restorePane).toContain('else void realizeRestoredPane(id)')
   })
 
-  it('restores only the initial on-screen panes after the active tab paints', () => {
-    const workspaceAt = appSource.indexOf('hydratingColdRestore = true')
+  it('keeps cold hydration free of session probes and terminal realization', () => {
+    const workspaceAt = appSource.indexOf('async function onWorkspaceCheck')
     const workspaceEnd = appSource.indexOf('\n  }\n}\n\n// Fire the deferred workspace', workspaceAt)
     const workspace = appSource.slice(workspaceAt, workspaceEnd)
 
     expect(workspace).toContain('focusPaneId.value = tabVisiblePanes.value[0]?.id ?? null')
-    expect(workspace).toContain('await nextTick()')
-    expect(workspace).toContain('realizeOnScreenPanes()')
-    expect(workspace).toContain('hydratingColdRestore = false')
+    expect(workspace).not.toContain('canResumeSession(')
+    expect(workspace).not.toContain('realizeRestoredPane(')
+    expect(appSource).not.toContain('hydratingColdRestore')
     expect(appSource).not.toContain('focus_pane_id: id ?? \'\'')
   })
 
@@ -151,6 +150,20 @@ describe('App lazy cold restore', () => {
     expect(realize).toContain('const wasMinimized = minimizedPanes.value.has(paneId)')
     expect(realize).toContain('if (wasMinimized) minimized.add(newId)')
     expect(realize).not.toContain('wasMinimized || saved.is_minimized')
+  })
+
+  it('preserves an unknown saved pointer when Start fresh launches a new CLI', () => {
+    const helperAt = appSource.indexOf('async function spawnRestoredPane')
+    const helperEnd = appSource.indexOf('\ninterface SessionExistsPayload', helperAt)
+    const helper = appSource.slice(helperAt, helperEnd)
+    const realizeAt = appSource.indexOf('async function performRealizeRestoredPane')
+    const realizeEnd = appSource.indexOf('\nasync function onRefreshAnalyzer', realizeAt)
+    const realize = appSource.slice(realizeAt, realizeEnd)
+
+    expect(helper).toContain('preserveSessionPointer?: boolean')
+    expect(helper).toContain('opts.isResume || opts.preserveSessionPointer')
+    expect(helper).toContain('!opts.preserveSessionPointer')
+    expect(realize).toContain('preserveSessionPointer: forceFresh && canResume !== false')
   })
 
   it('locks pane and session identities before the first async decision', () => {

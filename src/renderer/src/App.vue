@@ -371,9 +371,6 @@ const currentWorkspace = ref<string>(
     }
   })()
 )
-// Placeholder creation changes the visible-pane computed state. Suppress its
-// watcher until hydration has selected and painted the initial screen.
-let hydratingColdRestore = false
 const workspaceSelected = ref<boolean>(
   _bootWorkspace !== '' ||
   (() => {
@@ -3999,6 +3996,8 @@ interface RestoredPaneSpawnOptions {
   sessionKnownOnDisk: boolean
   freshSessionId?: string
   freshPipelineFallbackSessionId: string
+  /** Keep a saved session pointer when a fresh CLI follows an unknown probe. */
+  preserveSessionPointer?: boolean
   replacePaneId?: string
   restoring?: boolean
   /** Check replacement ownership before its new record is persisted. */
@@ -4054,7 +4053,7 @@ async function spawnRestoredPane(opts: RestoredPaneSpawnOptions): Promise<Restor
       pane_id: paneId,
       agent: saved.agent,
       role: saved.role,
-      session_id: opts.isResume
+      session_id: opts.isResume || opts.preserveSessionPointer
         ? opts.resumeSessionId
         : (pinnedSessionId || opts.freshPipelineFallbackSessionId),
       session_home_id: opts.sessionHomeId ?? '',
@@ -4069,13 +4068,13 @@ async function spawnRestoredPane(opts: RestoredPaneSpawnOptions): Promise<Restor
       agent: saved.agent,
       role: saved.role,
       command: opts.fallbackCommand,
-      session_id: opts.isResume ? opts.resumeSessionId : pinnedSessionId,
+      session_id: opts.isResume || opts.preserveSessionPointer ? opts.resumeSessionId : pinnedSessionId,
       session_home_id: opts.sessionHomeId ?? '',
       profile_id: opts.profileId ?? '',
       run_group_id: opts.runGroupId,
       output_log_file: panes.value.find((p) => p.id === paneId)?.outputLogFile ?? '',
     })
-    if (opts.resumeSessionId && !opts.isResume && !pinnedSessionId) {
+    if (opts.resumeSessionId && !opts.isResume && !pinnedSessionId && !opts.preserveSessionPointer) {
       await sendQuiet('manual_pane.session', {
         workspace_path: opts.workspacePath,
         pane_id: paneId,
@@ -4307,43 +4306,34 @@ async function onWorkspaceCheck(path: string): Promise<void> {
         })
       }
     }
-    hydratingColdRestore = true
-    try {
-      activeTab.value = (savedTab && stageTabs.value.some((t) => t.key === savedTab))
-        ? savedTab
-        : (stageTabs.value[0]?.key ?? '')
-      if (suppressPaneRestoreOnce) {
-        // First load of a duplicated window: open the same workspace as a clean
-        // view without re-resuming the source window's live agent sessions.
-        suppressPaneRestoreOnce = false
-      } else {
-        // isStale lets restore bail if a newer workspace-check superseded this one
-        // before or during restore (the await can span a user pause).
-        await restoreWorkspacePanes(resp, path, undefined, () => seq !== workspaceCheckSeq)
-      }
-      // If the active tab has no panes (e.g. old project.json panes landed in a
-      // different group via fallback), switch to the first tab that has panes so
-      // the user is not greeted with an empty grid.
-      if (activeTab.value && stageTabs.value.length > 0) {
-        const paneCountByGroup: Record<string, number> = {}
-        for (const p of panes.value) {
-          const groupKey = p.runGroupId || 'manual'
-          paneCountByGroup[groupKey] = (paneCountByGroup[groupKey] ?? 0) + 1
-        }
-        const activeHasPanes = (paneCountByGroup[activeTab.value] ?? 0) > 0
-        if (!activeHasPanes) {
-          const firstFull = stageTabs.value.find((t) => (paneCountByGroup[t.key] ?? 0) > 0)
-          if (firstFull) activeTab.value = firstFull.key
-        }
-      }
-      // Let the selected tab/layout paint before starting only the panes that
-      // are actually on screen. Minimized panes and other tabs stay lazy.
-      focusPaneId.value = tabVisiblePanes.value[0]?.id ?? null
-      await nextTick()
-      realizeOnScreenPanes()
-    } finally {
-      hydratingColdRestore = false
+    activeTab.value = (savedTab && stageTabs.value.some((t) => t.key === savedTab))
+      ? savedTab
+      : (stageTabs.value[0]?.key ?? '')
+    if (suppressPaneRestoreOnce) {
+      // First load of a duplicated window: open the same workspace as a clean
+      // view without re-resuming the source window's live agent sessions.
+      suppressPaneRestoreOnce = false
+    } else {
+      // isStale lets restore bail if a newer workspace-check superseded this one
+      // before or during restore (the await can span a user pause).
+      await restoreWorkspacePanes(resp, path, undefined, () => seq !== workspaceCheckSeq)
     }
+    // If the active tab has no panes (e.g. old project.json panes landed in a
+    // different group via fallback), switch to the first tab that has panes so
+    // the user is not greeted with an empty grid.
+    if (activeTab.value && stageTabs.value.length > 0) {
+      const paneCountByGroup: Record<string, number> = {}
+      for (const p of panes.value) {
+        const groupKey = p.runGroupId || 'manual'
+        paneCountByGroup[groupKey] = (paneCountByGroup[groupKey] ?? 0) + 1
+      }
+      const activeHasPanes = (paneCountByGroup[activeTab.value] ?? 0) > 0
+      if (!activeHasPanes) {
+        const firstFull = stageTabs.value.find((t) => (paneCountByGroup[t.key] ?? 0) > 0)
+        if (firstFull) activeTab.value = firstFull.key
+      }
+    }
+    focusPaneId.value = tabVisiblePanes.value[0]?.id ?? null
   }
 }
 
@@ -4845,6 +4835,7 @@ async function performRealizeRestoredPane(paneId: string): Promise<void> {
       sessionKnownOnDisk: !isResume && canResume === true && RESTORE_PIN_AGENTS.includes(saved.agent),
       freshSessionId: forceFresh ? undefined : claimFreshSessionId(batch.usedFreshSessionIds, sessionId),
       freshPipelineFallbackSessionId: forceFresh ? '' : sessionId,
+      preserveSessionPointer: forceFresh && canResume !== false,
       replacePaneId: paneId,
       restoring: true,
       shouldPersist: (newPaneId) =>
@@ -7987,7 +7978,6 @@ async function onUserSelectTab(tabId: string): Promise<void> {
   const visible = tabVisiblePanes.value
   const target = visible.find((p) => p.id === focusPaneId.value)?.id ?? visible[0]?.id
   if (target) selectPane(target, { userInitiated: false })
-  realizeOnScreenPanes()
 }
 
 // Persist activeTab to project.json keyed by workspace path
@@ -8741,16 +8731,6 @@ const onScreenPaneIds = computed<Set<string>>(() => {
   return visibleIds
 })
 
-// User-driven layout or grid navigation is the lazy-restore activation
-// boundary. Focus changes can be automatic, so they must not start a CLI.
-function realizeOnScreenPanes(): void {
-  for (const paneId of onScreenPaneIds.value) void realizeRestoredPane(paneId)
-}
-
-watch([effectiveLayoutMode, gridPreset, gridPage], () => {
-  if (!hydratingColdRestore) realizeOnScreenPanes()
-})
-
 const dualFocusHandlePos = computed(() => {
   if (dualFocusSplitPx.value > 0) return `${dualFocusSplitPx.value}px`
   const meetingW = effectiveLayoutMode.value === 'sidebar' ? 220 : 0
@@ -8993,7 +8973,7 @@ function paneIsCommander(p: ActivePane): boolean {
       @pipeline-resume="onPipelineResume"
       @pipeline-restart="onPipelineRestart"
       @refresh-analyzer="onRefreshAnalyzer"
-      @focus-pane="selectPane($event, { userInitiated: true, scrollIntoView: true })"
+      @focus-pane="onFocusPane"
       @reorder-pane="reorderPane"
       @open-settings="showSettings = true"
       @open-git-accounts="openSettingsAccounts"
