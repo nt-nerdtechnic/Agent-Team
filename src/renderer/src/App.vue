@@ -4333,7 +4333,12 @@ async function onWorkspaceCheck(path: string): Promise<void> {
         if (firstFull) activeTab.value = firstFull.key
       }
     }
-    focusPaneId.value = tabVisiblePanes.value[0]?.id ?? null
+    // Cold load seeds a focus so a placeholder is on screen in sidebar/spotlight.
+    // onWorkspaceCheck also runs on a pipeline abort and on WS reconnect, so only
+    // seed when the current focus is gone — never steal a focus the user set.
+    if (!focusPaneId.value || !tabVisiblePanes.value.some((p) => p.id === focusPaneId.value)) {
+      focusPaneId.value = tabVisiblePanes.value[0]?.id ?? null
+    }
   }
 }
 
@@ -4538,84 +4543,83 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
   // placeholders return through the history backfill below without probing or
   // creating any PTY.
   if (!fullRestore) {
-  await Promise.all(toRestore.map(async (saved, restoreIdx) => {
-    const rawSessionId = (saved.session_id ?? '').trim()
-    const sessionId = normalizeResumeSessionId(saved.agent, rawSessionId)
-    const sessionHomeId = saved.agent === 'codex'
-      ? ((saved.session_home_id ?? '').trim() || saved.pane_id)
-      : ''
-    const spec = agentSpecs.find((s) => s.agentKey === saved.agent)
-    const skipFlag = yoloEnabled.value ? (spec?.skipPermissionFlag ?? '') : ''
-    // A pane with a saved group keeps it, recreating the tab if it is missing
-    // (ensureSavedGroup). Only panes that never had a group fall back: pipeline
-    // panes collapse into one restore group, manual panes go to the first tab.
-    const savedGid = saved.run_group_id || ''
-    const runGroupId = savedGid
-      ? ensureSavedGroup(savedGid)
-      : (saved.origin === 'pipeline' ? ensureRestoreGroup() : '')
+    await Promise.all(toRestore.map(async (saved, restoreIdx) => {
+      const rawSessionId = (saved.session_id ?? '').trim()
+      const sessionId = normalizeResumeSessionId(saved.agent, rawSessionId)
+      const sessionHomeId = saved.agent === 'codex'
+        ? ((saved.session_home_id ?? '').trim() || saved.pane_id)
+        : ''
+      const spec = agentSpecs.find((s) => s.agentKey === saved.agent)
+      const skipFlag = yoloEnabled.value ? (spec?.skipPermissionFlag ?? '') : ''
+      // A pane with a saved group keeps it, recreating the tab if it is missing
+      // (ensureSavedGroup). Only panes that never had a group fall back: pipeline
+      // panes collapse into one restore group, manual panes go to the first tab.
+      const savedGid = saved.run_group_id || ''
+      const runGroupId = savedGid
+        ? ensureSavedGroup(savedGid)
+        : (saved.origin === 'pipeline' ? ensureRestoreGroup() : '')
 
-    // Unified session-resume logic for all pane types. Tri-state: true /
-    // false (definitively absent) / null (probe failed — unknown).
-    const canResume = await canResumeSession(saved.agent, workspacePath, sessionId)
-    // Codex preserve-untouched applies whenever the rollout is not CONFIRMED
-    // present (false and null alike) — unchanged pre-tri-state behavior.
-    if (shouldPreserveMissingSessionOnRestore(saved.agent, rawSessionId, canResume === true)) {
-      // Never turn a saved Codex conversation into a replacement conversation
-      // merely because its rollout is temporarily unavailable. In particular,
-      // do not reach manual_pane.spawn/session below, which would overwrite the
-      // persisted id with an empty fresh-session value.
-      pipelineLog(`⚠ ${saved.agent} session ${sessionId} is unavailable; preserving saved pane`)
-      return
-    }
-    // Routing: true → resume; null (unknown) → STILL attempt --resume with the
-    // saved id (if the transcript exists it resumes perfectly; if not the CLI
-    // errors for one boot, but the id mapping survives); only a definitive
-    // false falls back to a fresh spawn reusing the saved id below.
-    const attemptResume = shouldAttemptResume(canResume)
-    let resumeCmd = attemptResume ? buildResumeCommand(saved.agent, sessionId, skipFlag) : ''
-    const effectiveResumeId = sessionId
-    const savedFallbackCommand = saved.command && !looksLikeResumeCommand(saved.agent, saved.command)
-      ? saved.command : ''
-    const fallbackCommand = savedFallbackCommand
-    const commandOverride = resumeCmd || fallbackCommand || ''
-    const isResume = !!resumeCmd
+      // Unified session-resume logic for all pane types. Tri-state: true /
+      // false (definitively absent) / null (probe failed — unknown).
+      const canResume = await canResumeSession(saved.agent, workspacePath, sessionId)
+      // Codex preserve-untouched applies whenever the rollout is not CONFIRMED
+      // present (false and null alike) — unchanged pre-tri-state behavior.
+      if (shouldPreserveMissingSessionOnRestore(saved.agent, rawSessionId, canResume === true)) {
+        // Never turn a saved Codex conversation into a replacement conversation
+        // merely because its rollout is temporarily unavailable. In particular,
+        // do not reach manual_pane.spawn/session below, which would overwrite the
+        // persisted id with an empty fresh-session value.
+        pipelineLog(`⚠ ${saved.agent} session ${sessionId} is unavailable; preserving saved pane`)
+        return
+      }
+      // Routing: true → resume; null (unknown) → STILL attempt --resume with the
+      // saved id (if the transcript exists it resumes perfectly; if not the CLI
+      // errors for one boot, but the id mapping survives); only a definitive
+      // false falls back to a fresh spawn reusing the saved id below.
+      const attemptResume = shouldAttemptResume(canResume)
+      let resumeCmd = attemptResume ? buildResumeCommand(saved.agent, sessionId, skipFlag) : ''
+      const effectiveResumeId = sessionId
+      const savedFallbackCommand = saved.command && !looksLikeResumeCommand(saved.agent, saved.command)
+        ? saved.command : ''
+      const fallbackCommand = savedFallbackCommand
+      const commandOverride = resumeCmd || fallbackCommand || ''
+      const isResume = !!resumeCmd
 
-    const restored = await spawnRestoredPane({
-      saved,
-      workspacePath,
-      runGroupId: runGroupId || undefined,
-      sessionHomeId,
-      profileId: saved.profile_id,
-      commandOverride,
-      fallbackCommand,
-      isResume,
-      resumeSessionId: effectiveResumeId,
-      sessionKnownOnDisk: !isResume && canResume === true && RESTORE_PIN_AGENTS.includes(saved.agent),
-      freshSessionId: claimFreshSessionId(usedFreshSessionIds, sessionId),
-      freshPipelineFallbackSessionId: sessionId,
-    })
-    if (!restored) return
-    const { paneId } = restored
-    restoredPaneIds[restoreIdx] = paneId
+      const restored = await spawnRestoredPane({
+        saved,
+        workspacePath,
+        runGroupId: runGroupId || undefined,
+        sessionHomeId,
+        profileId: saved.profile_id,
+        commandOverride,
+        fallbackCommand,
+        isResume,
+        resumeSessionId: effectiveResumeId,
+        sessionKnownOnDisk: !isResume && canResume === true && RESTORE_PIN_AGENTS.includes(saved.agent),
+        freshSessionId: claimFreshSessionId(usedFreshSessionIds, sessionId),
+        freshPipelineFallbackSessionId: sessionId,
+      })
+      if (!restored) return
+      const { paneId } = restored
+      restoredPaneIds[restoreIdx] = paneId
 
-    // Re-apply the persisted collapsed-to-sidebar state to the new pane id.
-    if (saved.is_minimized) {
-      minimizedPanes.value = new Set([...minimizedPanes.value, paneId])
-    }
+      // Re-apply the persisted collapsed-to-sidebar state to the new pane id.
+      if (saved.is_minimized) {
+        minimizedPanes.value = new Set([...minimizedPanes.value, paneId])
+      }
 
-    // Reflect the persisted STOP badge onto the freshly-spawned pane. spawnPane
-    // above already awaited ref.spawn() (which resets isStopped=false), so this
-    // sets the composable AFTER that reset. No persist here — reading stored
-    // truth, not issuing a new stop action (see loop-avoidance invariants).
-    if (saved.stopped) paneRefs[paneId]?.setStopped(true)
-  }))
+      // Reflect the persisted STOP badge onto the freshly-spawned pane. spawnPane
+      // above already awaited ref.spawn() (which resets isStopped=false), so this
+      // sets the composable AFTER that reset. No persist here — reading stored
+      // truth, not issuing a new stop action (see loop-avoidance invariants).
+      if (saved.stopped) paneRefs[paneId]?.setStopped(true)
+    }))
 
-  // The parallel spawns above push into panes.value in completion order, which
-  // is nondeterministic — re-sort the restored panes back to the saved
-  // project.panes order (toRestore mirrors it). Panes outside this restore
-  // (e.g. already-live ones on a group reattach) keep their positions.
-  sortByIdOrder(panes.value, restoredPaneIds.filter((id): id is string => !!id))
-
+    // The parallel spawns above push into panes.value in completion order, which
+    // is nondeterministic — re-sort the restored panes back to the saved
+    // project.panes order (toRestore mirrors it). Panes outside this restore
+    // (e.g. already-live ones on a group reattach) keep their positions.
+    sortByIdOrder(panes.value, restoredPaneIds.filter((id): id is string => !!id))
   }
 
   // Backfill removed manual panes into spawnHistory so Agent History shows past sessions.
@@ -4799,8 +4803,11 @@ async function performRealizeRestoredPane(paneId: string): Promise<void> {
       resumeCmd = buildResumeCommand(saved.agent, reconnectId, skipFlag)
       reconnectedCount.value++
       pipelineLog(`↩ ${saved.agent}: auto-reconnected ${saved.pane_id} → ${reconnectId}`)
+      // Lazy restore realizes one record at a time, so this toast reports THIS
+      // activation — not the running total, which would read "1", "2", "3…"
+      // across a batch. reconnectedCount still feeds the status-bar banner.
       notifyRestore.toast(
-        i18n.global.t('reconnect.auto-toast', { count: reconnectedCount.value }),
+        i18n.global.t('reconnect.auto-toast', { count: 1 }),
         { type: 'success' }
       )
     } else if (ghostConfirmed) {
@@ -5290,6 +5297,26 @@ async function activateStage(index: number): Promise<void> {
     (managerSlot ? ` · 🎯 Manager: ${managerSlot.label}` : '')
   )
 
+  // A cold-restore placeholder has no PTY, so its slot can never report done —
+  // stageCompletions below expects EVERY slot, and skipping one would stall the
+  // stage forever. Decide this before any kickoff goes out: aborting from inside
+  // the parallel loop below would race the siblings that are already injecting.
+  // Aborting (rather than waiting) matches onPipelineResume, which already
+  // refuses to resume a pipeline whose restored panes are not activated.
+  const unrealizedSlot = stage.slots.find((slot) => {
+    const pane = panes.value.find(
+      (p) => p.stageId === stage.id && p.slotLabel === slot.label && p.origin === 'pipeline'
+    )
+    return pane && !pane.realized
+  })
+  if (unrealizedSlot) {
+    pipelineLog(
+      `Stage ${stage.id}/${unrealizedSlot.label} ⏸ restored pane not activated — pausing pipeline`
+    )
+    await onPipelineAbort('restore-unavailable')
+    return
+  }
+
   // Reset completion tracker in case it was partially consumed
   stageCompletions.set(index, { expected: stage.slots.length, done: new Set() })
 
@@ -5302,11 +5329,9 @@ async function activateStage(index: number): Promise<void> {
       (p) => p.stageId === stage.id && p.slotLabel === slot.label && p.origin === 'pipeline'
     )
 
-    if (!pane || !pane.realized) {
-      if (pane && !pane.realized) {
-        pipelineLog(`Stage ${stage.id}/${slot.label} ⏸ waiting for restored pane activation`)
-        return
-      }
+    // Unrealized panes were ruled out above, so this is the genuine
+    // never-pre-spawned case.
+    if (!pane) {
       // Fallback: slot was never pre-spawned — spawn it now with kickoff
       pipelineLog(`Stage ${stage.id}/${slot.label} → not pre-spawned, spawning now`)
       const kickoff =
@@ -8126,7 +8151,9 @@ function onSetFocus(paneId: string, ev?: MouseEvent): void {
     else next.add(paneId)
     selectedPaneIds.value = next
     revealPaneTab(paneId)
-    selectPane(paneId, { userInitiated: true })
+    // Adding a pane to a batch selection is not "open this pane" — a modifier
+    // click must never spawn the CLI behind a cold-restore placeholder.
+    selectPane(paneId, { userInitiated: false })
     return
   }
   selectedPaneIds.value = new Set()
@@ -8806,6 +8833,11 @@ function paneSubtitle(p: ActivePane): string {
 }
 
 function panePreparationLabel(p: ActivePane): string {
+  // A cold-restore placeholder carries preparationStatus 'starting' as a seed for
+  // the pane it will become — nothing is starting yet, so report the real state.
+  if (!p.realized) {
+    return i18n.global.t(p.restoring ? 'pane.terminal.resuming' : 'pane.terminal.click-to-resume')
+  }
   if (paneWaitingForSessionId(p)) {
     return i18n.global.t('pane.prep.detecting-session')
   }

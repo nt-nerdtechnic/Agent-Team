@@ -135,6 +135,11 @@ describe('App lazy cold restore', () => {
     const workspaceEnd = appSource.indexOf('\n  }\n}\n\n// Fire the deferred workspace', workspaceAt)
     const workspace = appSource.slice(workspaceAt, workspaceEnd)
 
+    // onWorkspaceCheck also runs on a pipeline abort and a WS reconnect, so the
+    // cold-load focus seed must never overwrite a focus the user already set.
+    expect(workspace).toContain(
+      'if (!focusPaneId.value || !tabVisiblePanes.value.some((p) => p.id === focusPaneId.value)) {'
+    )
     expect(workspace).toContain('focusPaneId.value = tabVisiblePanes.value[0]?.id ?? null')
     expect(workspace).not.toContain('canResumeSession(')
     expect(workspace).not.toContain('realizeRestoredPane(')
@@ -153,7 +158,9 @@ describe('App lazy cold restore', () => {
   })
 
   it('preserves an unknown saved pointer when Start fresh launches a new CLI', () => {
-    const helperAt = appSource.indexOf('async function spawnRestoredPane')
+    // Slice from the options interface, not the function: preserveSessionPointer
+    // is declared above spawnRestoredPane.
+    const helperAt = appSource.indexOf('interface RestoredPaneSpawnOptions {')
     const helperEnd = appSource.indexOf('\ninterface SessionExistsPayload', helperAt)
     const helper = appSource.slice(helperAt, helperEnd)
     const realizeAt = appSource.indexOf('async function performRealizeRestoredPane')
@@ -186,6 +193,57 @@ describe('App lazy cold restore', () => {
 
     expect(restoreGuard).toContain('isStale?.()')
     expect(restoreGuard).toContain('currentWorkspace.value !== workspacePath')
+  })
+
+  it('never realizes a placeholder added to a batch selection', () => {
+    const focusAt = appSource.indexOf('function onSetFocus(')
+    const focusEnd = appSource.indexOf('// Pane right-click context menu', focusAt)
+    const setFocus = appSource.slice(focusAt, focusEnd)
+    const batchBranch = setFocus.slice(0, setFocus.indexOf('selectedPaneIds.value = new Set()'))
+
+    expect(batchBranch).toContain('selectPane(paneId, { userInitiated: false })')
+    expect(batchBranch).not.toContain('selectPane(paneId, { userInitiated: true })')
+    // The plain (non-modifier) click below it still opens the pane.
+    expect(setFocus).toContain('selectPane(paneId, { userInitiated: true })')
+  })
+
+  it('stops the pipeline before any kickoff when a slot is still a placeholder', () => {
+    const stageAt = appSource.indexOf('async function activateStage(')
+    const stageEnd = appSource.indexOf('\nasync function waitForStagePanesSettled', stageAt)
+    const stage = appSource.slice(stageAt, stageEnd)
+
+    const abortAt = stage.indexOf("await onPipelineAbort('restore-unavailable')")
+    const trackerAt = stage.indexOf('stageCompletions.set(index,')
+    const parallelAt = stage.indexOf('await Promise.all(stage.slots.map(')
+
+    expect(stage).toContain('const unrealizedSlot = stage.slots.find(')
+    expect(abortAt).toBeGreaterThan(-1)
+    // Aborting from inside the parallel slot loop would race the siblings that
+    // are already injecting their kickoff — the check must precede both the
+    // completion tracker and the loop.
+    expect(abortAt).toBeLessThan(trackerAt)
+    expect(abortAt).toBeLessThan(parallelAt)
+    // The loop itself no longer needs an unrealized branch.
+    expect(stage.slice(parallelAt)).not.toContain('!pane.realized')
+  })
+
+  it('reports one reconnect per realization rather than a running total', () => {
+    const realizeAt = appSource.indexOf('async function performRealizeRestoredPane')
+    const realizeEnd = appSource.indexOf('\nasync function onRefreshAnalyzer', realizeAt)
+    const realize = appSource.slice(realizeAt, realizeEnd)
+
+    expect(realize).toContain("i18n.global.t('reconnect.auto-toast', { count: 1 })")
+    expect(realize).not.toContain('auto-toast\', { count: reconnectedCount.value }')
+  })
+
+  it('labels an unrealized pane by its resume state, not a preparation status', () => {
+    const labelAt = appSource.indexOf('function panePreparationLabel(')
+    const labelEnd = appSource.indexOf('function paneWaitingForSessionId(', labelAt)
+    const label = appSource.slice(labelAt, labelEnd)
+
+    expect(label).toContain('if (!p.realized) {')
+    expect(label).toContain("p.restoring ? 'pane.terminal.resuming' : 'pane.terminal.click-to-resume'")
+    expect(label.indexOf('if (!p.realized) {')).toBeLessThan(label.indexOf('paneWaitingForSessionId(p)'))
   })
 
   it('uses persisted stage identity when closing a pipeline placeholder', () => {

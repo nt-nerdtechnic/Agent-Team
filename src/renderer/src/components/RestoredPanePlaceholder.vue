@@ -14,6 +14,10 @@ const emit = defineEmits<{
   'context-menu': [event: MouseEvent]
 }>()
 
+// The container stays a plain div: clicking anywhere in it resumes (mouse
+// convenience), while the keyboard entry point is the real <button> in the
+// body. Declaring the container role="button" instead would nest the minimize
+// button inside it, and a keydown on minimize would bubble up and resume too.
 function activate(): void {
   if (!props.realizing) emit('activate')
 }
@@ -39,10 +43,15 @@ function activate(): void {
       </div>
       <span v-if="subtitle" class="header-sub">{{ subtitle }}</span>
     </header>
-    <div class="resume-prompt">
+    <button
+      class="resume-prompt"
+      type="button"
+      :disabled="realizing"
+      @click.stop="activate"
+    >
       <span class="resume-icon">↩</span>
       <span>{{ $t(realizing ? 'pane.terminal.resuming' : 'pane.terminal.click-to-resume') }}</span>
-    </div>
+    </button>
   </div>
 </template>
 
@@ -62,6 +71,11 @@ function activate(): void {
 .pane.pane-focus {
   border-color: var(--accent-focus);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-focus) 27%, transparent);
+}
+
+.resume-prompt:focus-visible {
+  outline: 2px solid var(--accent-focus);
+  outline-offset: -2px;
 }
 
 .pane-header {
@@ -133,8 +147,13 @@ function activate(): void {
   align-items: center;
   justify-content: center;
   gap: 8px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
   color: var(--text-secondary);
   cursor: pointer;
+  font-family: inherit;
   font-size: 13px;
 }
 

@@ -39,22 +39,32 @@ describe('RestoredPanePlaceholder', () => {
     expect(wrapper.find('.xterm').exists()).toBe(false)
   })
 
-  it('activates only from a mouse click while idle', async () => {
+  it('offers a real button so resuming is not mouse-only', async () => {
     const wrapper = mountPlaceholder()
+    const resume = wrapper.get('button.resume-prompt')
 
+    // A native <button> gets Enter/Space from the browser — no keydown handler
+    // on the container, which is what made the minimize button double-fire.
+    expect(resume.attributes('type')).toBe('button')
+    expect(wrapper.attributes('role')).toBeUndefined()
+    expect(wrapper.attributes('tabindex')).toBeUndefined()
+
+    await resume.trigger('click')
+    expect(wrapper.emitted('activate')).toHaveLength(1)
+
+    // Clicking the surrounding pane still resumes, and the button's own click
+    // must not bubble into a second activate.
     await wrapper.trigger('click')
-    expect(wrapper.emitted('activate')).toHaveLength(1)
-
-    await wrapper.trigger('keydown', { key: 'Enter' })
-    await wrapper.trigger('keydown', { key: ' ' })
-    expect(wrapper.emitted('activate')).toHaveLength(1)
+    expect(wrapper.emitted('activate')).toHaveLength(2)
   })
 
   it('does not activate while realization is already in flight', async () => {
     const wrapper = mountPlaceholder(true)
 
     await wrapper.trigger('click')
+    await wrapper.get('button.resume-prompt').trigger('click')
     expect(wrapper.emitted('activate')).toBeUndefined()
+    expect(wrapper.get('button.resume-prompt').attributes('disabled')).toBeDefined()
     expect(wrapper.text()).toContain('Resuming…')
     expect(wrapper.attributes('aria-busy')).toBe('true')
   })
@@ -68,6 +78,21 @@ describe('RestoredPanePlaceholder', () => {
 
     await wrapper.trigger('contextmenu')
     expect(wrapper.emitted('context-menu')).toHaveLength(1)
+    expect(wrapper.emitted('activate')).toBeUndefined()
+  })
+
+  // Keyboard-activating the nested minimize button must not also resume the
+  // pane: a bubbling keydown would fire both actions from one press.
+  it('does not activate when the minimize button is used from the keyboard', async () => {
+    const wrapper = mountPlaceholder()
+    const minimize = wrapper.get('.minimize-btn')
+
+    await minimize.trigger('keydown', { key: 'Enter' })
+    await minimize.trigger('keydown', { key: ' ' })
+    expect(wrapper.emitted('activate')).toBeUndefined()
+
+    await minimize.trigger('click')
+    expect(wrapper.emitted('minimize')).toHaveLength(1)
     expect(wrapper.emitted('activate')).toBeUndefined()
   })
 })
