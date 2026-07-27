@@ -981,41 +981,16 @@ ipcMain.handle('window:openPlans', (_event, args: { workspace_path?: string; rel
   return { ok: true }
 })
 
-// Git History window: one per workspace, mirroring the plan window pattern.
-const gitHistoryWindows = new Map<string, BrowserWindow>()
-
+// Git History window: routes to the unified standalone Git client window.
 function openGitHistoryWindow(workspacePath: string): void {
-  const existing = gitHistoryWindows.get(workspacePath)
-  if (existing && !existing.isDestroyed()) {
-    if (existing.isMinimized()) existing.restore()
-    existing.show()
-    existing.focus()
-    return
-  }
-  const win = new BrowserWindow({
-    width: 1200,
-    height: 800,
-    title: 'Navide · Git History',
-    backgroundColor: '#0d1117',
-    webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false
-    }
-  })
-  gitHistoryWindows.set(workspacePath, win)
-  win.on('closed', () => {
-    if (gitHistoryWindows.get(workspacePath) === win) gitHistoryWindows.delete(workspacePath)
-  })
-  loadWindow(win, { window: 'githistory', workspace_path: workspacePath })
+  openGitWindow(workspacePath)
 }
 
 ipcMain.handle('window:openGitHistory', (_event, args: { workspace_path?: string }) => {
   const workspacePath = (args?.workspace_path ?? '').trim()
   if (!workspacePath) return { ok: false }
-  openGitHistoryWindow(workspacePath)
-  return { ok: true }
+  const ok = openGitWindow(workspacePath)
+  return { ok }
 })
 
 // Plan execute dispatch: the plan window hands an approved plan to a CLI

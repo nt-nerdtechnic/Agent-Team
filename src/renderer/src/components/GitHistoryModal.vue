@@ -17,6 +17,8 @@ const props = defineProps<{
   show: boolean
   // Standalone-window mode: fill the viewport, no backdrop (?window=githistory).
   standalone?: boolean
+  // Inline component mode: render inside container without Teleport or popup header.
+  inline?: boolean
   backend: ReturnType<typeof useBackend>
   workspacePath: string
   gitLog: GitCommit[]
@@ -250,12 +252,12 @@ watch(() => props.show, (visible) => {
 </script>
 
 <template>
-  <Teleport to="body">
+  <Teleport to="body" :disabled="inline">
     <template v-if="show">
-      <div v-if="!standalone" class="tp-backdrop" @click="emit('close')" />
-      <div class="history-modal" :class="{ standalone }" @click="closeCtxMenu()">
+      <div v-if="!standalone && !inline" class="tp-backdrop" @click="emit('close')" />
+      <div class="history-modal" :class="{ standalone, inline }" @click="closeCtxMenu()">
         <!-- Header -->
-        <div class="hm-hdr">
+        <div v-if="!inline" class="hm-hdr">
           <span class="hm-title">{{ $t('label.history') }}</span>
           <div class="spacer" />
           <button class="hm-close" :title="$t('action.close')" @click="emit('close')">✕</button>
@@ -471,6 +473,11 @@ watch(() => props.show, (visible) => {
 .history-modal.standalone {
   top: 0; left: 0; transform: none;
   width: 100vw; height: 100vh;
+  border: none; border-radius: 0; box-shadow: none;
+}
+.history-modal.inline {
+  position: relative; top: 0; left: 0; transform: none;
+  width: 100%; height: 100%;
   border: none; border-radius: 0; box-shadow: none;
 }
 .hm-hdr {

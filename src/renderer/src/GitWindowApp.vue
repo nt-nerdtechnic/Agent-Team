@@ -15,6 +15,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useBackend } from './composables/useBackend'
 import { useGit, type GitCommitDetail, type DiffBlameHunk } from './composables/useGit'
+import GitHistoryModal from './components/GitHistoryModal.vue'
 
 // The host sets ?workspace_path= when it loads this entry (frontendPluginManager
 // gitQuery). A getter is what useGit expects.
@@ -30,8 +31,11 @@ const {
   gitStashes,
   gitRemotes,
   gitTags,
+  logScope,
+  logOrder,
   isLoadingStatus,
   isLoadingLog,
+  canLoadMoreLog,
   isFetching,
   isSyncing,
   gitError,
@@ -41,6 +45,10 @@ const {
   loadStashes,
   loadRemotes,
   loadTags,
+  setLogScope,
+  setLogOrder,
+  loadMoreLog,
+  logSearch,
   showCommit,
   commitFileDiff,
   diffBlame,
@@ -48,6 +56,13 @@ const {
   pullOnly,
   pushOnly,
   sync,
+  cherryPick,
+  revertCommit,
+  checkoutCommit,
+  createBranch,
+  createTag,
+  mergeBranch,
+  resetToCommit
 } = git
 
 // ── View state ───────────────────────────────────────────────────────────────
@@ -298,132 +313,130 @@ function shortDate(iso?: string): string {
 
       <!-- Center + bottom detail -->
       <section class="center">
-        <!-- History table -->
-        <div v-if="view === 'history'" class="pane history">
-          <div v-if="isLoadingLog && !gitLog.length" class="pane-loading">Loading history…</div>
-          <table v-else class="hist-table">
-            <thead>
-              <tr>
-                <th class="c-desc">Description</th>
-                <th class="c-hash">Commit</th>
-                <th class="c-author">Author</th>
-                <th class="c-date">Date</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr
-                v-for="c in gitLog"
-                :key="c.hash"
-                class="hist-row"
-                :class="{ selected: c.hash === selectedHash }"
-                @click="selectCommit(c.hash)"
-              >
-                <td class="c-desc">
-                  <span v-for="ref in c.branches" :key="ref" class="ref-pill">{{ ref }}</span>
-                  {{ c.message }}
-                </td>
-                <td class="c-hash mono">{{ c.short_hash }}</td>
-                <td class="c-author">{{ c.author }}</td>
-                <td class="c-date">{{ shortDate(c.date) }}</td>
-              </tr>
-            </tbody>
-          </table>
+        <!-- History (full rich history with graph, search, context menu, and split detail) -->
+        <div v-if="view === 'history'" class="pane history-full">
+          <GitHistoryModal
+            show
+            inline
+            :backend="backend"
+            :workspace-path="workspacePath"
+            :git-log="gitLog"
+            :log-scope="logScope"
+            :log-order="logOrder"
+            :is-loading-log="isLoadingLog"
+            :can-load-more-log="canLoadMoreLog"
+            :set-log-scope="setLogScope"
+            :set-log-order="setLogOrder"
+            :load-more-log="loadMoreLog"
+            :log-search="logSearch"
+            :show-commit="showCommit"
+            :commit-file-diff="commitFileDiff"
+            :cherry-pick="cherryPick"
+            :revert-commit="revertCommit"
+            :checkout-commit="checkoutCommit"
+            :create-branch="createBranch"
+            :create-tag="createTag"
+            :merge-into-current="mergeBranch"
+            :reset-to-commit="resetToCommit"
+          />
         </div>
 
         <!-- File status -->
-        <div v-else class="pane status">
-          <div class="status-group">
-            <div class="status-head">STAGED ({{ gitStatus.staged.length }})</div>
-            <div v-for="f in gitStatus.staged" :key="'s' + f.path" class="status-row">
-              <span class="st-badge staged">{{ f.status }}</span>{{ f.path }}
+        <template v-else>
+          <div class="pane status">
+            <div class="status-group">
+              <div class="status-head">STAGED ({{ gitStatus.staged.length }})</div>
+              <div v-for="f in gitStatus.staged" :key="'s' + f.path" class="status-row">
+                <span class="st-badge staged">{{ f.status }}</span>{{ f.path }}
+              </div>
+            </div>
+            <div class="status-group">
+              <div class="status-head">CHANGES ({{ gitStatus.unstaged.length + gitStatus.untracked.length }})</div>
+              <div v-for="f in gitStatus.unstaged" :key="'u' + f.path" class="status-row">
+                <span class="st-badge">{{ f.status }}</span>{{ f.path }}
+              </div>
+              <div v-for="f in gitStatus.untracked" :key="'n' + f.path" class="status-row">
+                <span class="st-badge new">?</span>{{ f.path }}
+              </div>
             </div>
           </div>
-          <div class="status-group">
-            <div class="status-head">CHANGES ({{ gitStatus.unstaged.length + gitStatus.untracked.length }})</div>
-            <div v-for="f in gitStatus.unstaged" :key="'u' + f.path" class="status-row">
-              <span class="st-badge">{{ f.status }}</span>{{ f.path }}
-            </div>
-            <div v-for="f in gitStatus.untracked" :key="'n' + f.path" class="status-row">
-              <span class="st-badge new">?</span>{{ f.path }}
-            </div>
-          </div>
-        </div>
 
-        <!-- Bottom: commit detail + per-file diff -->
-        <div class="detail">
-          <template v-if="externalDiff">
-            <div class="detail-left">
-              <div class="dt-meta">
-                <div class="dt-subject mono">{{ externalDiff.name }}</div>
-                <div class="dt-sub">
-                  {{
-                    externalDiff.commit
-                      ? 'commit ' + externalDiff.commit.slice(0, 8)
-                      : externalDiff.staged
-                        ? 'staged changes'
-                        : 'working tree'
-                  }}
+          <!-- Bottom: commit detail + per-file diff -->
+          <div class="detail">
+            <template v-if="externalDiff">
+              <div class="detail-left">
+                <div class="dt-meta">
+                  <div class="dt-subject mono">{{ externalDiff.name }}</div>
+                  <div class="dt-sub">
+                    {{
+                      externalDiff.commit
+                        ? 'commit ' + externalDiff.commit.slice(0, 8)
+                        : externalDiff.staged
+                          ? 'staged changes'
+                          : 'working tree'
+                    }}
+                  </div>
+                  <button class="dt-back" @click="clearExternalDiff">← back to commits</button>
                 </div>
-                <button class="dt-back" @click="clearExternalDiff">← back to commits</button>
               </div>
-            </div>
-            <div class="detail-right">
-              <div v-if="isLoadingExternalDiff" class="diff-loading">Loading diff…</div>
-              <div v-else-if="!externalDiff.hunks.length" class="diff-empty">No changes.</div>
-              <div v-else class="diff">
-                <div class="diff-file mono">{{ externalDiff.name }}</div>
-                <div v-for="(h, hi) in externalDiff.hunks" :key="hi" class="diff-hunk">
-                  <div class="hunk-head mono">{{ h.header }}</div>
-                  <div v-for="(l, li) in h.lines" :key="li" class="diff-line mono" :class="lineClass(l.kind)">
-                    <span class="ln">{{ l.old_no ?? '' }}</span>
-                    <span class="ln">{{ l.new_no ?? '' }}</span>
-                    <span class="lc">{{ l.kind }}</span>
-                    <span class="lt">{{ l.text }}</span>
+              <div class="detail-right">
+                <div v-if="isLoadingExternalDiff" class="diff-loading">Loading diff…</div>
+                <div v-else-if="!externalDiff.hunks.length" class="diff-empty">No changes.</div>
+                <div v-else class="diff">
+                  <div class="diff-file mono">{{ externalDiff.name }}</div>
+                  <div v-for="(h, hi) in externalDiff.hunks" :key="hi" class="diff-hunk">
+                    <div class="hunk-head mono">{{ h.header }}</div>
+                    <div v-for="(l, li) in h.lines" :key="li" class="diff-line mono" :class="lineClass(l.kind)">
+                      <span class="ln">{{ l.old_no ?? '' }}</span>
+                      <span class="ln">{{ l.new_no ?? '' }}</span>
+                      <span class="lc">{{ l.kind }}</span>
+                      <span class="lt">{{ l.text }}</span>
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
-          </template>
-          <div v-else-if="isLoadingDetail" class="detail-loading">Loading commit…</div>
-          <template v-else-if="commitDetail">
-            <div class="detail-left">
-              <div class="dt-meta">
-                <div class="dt-subject">{{ commitDetail.message }}</div>
-                <div class="dt-sub mono">{{ commitDetail.short_hash }}</div>
-                <div class="dt-sub">{{ commitDetail.author_name }} &lt;{{ commitDetail.author_email }}&gt;</div>
-                <div class="dt-sub">{{ commitDetail.date }}</div>
-              </div>
-              <div class="dt-files">
-                <div
-                  v-for="f in commitDetail.files"
-                  :key="f"
-                  class="dt-file"
-                  :class="{ active: f === selectedFile }"
-                  @click="selectFile(f)"
-                >
-                  {{ f }}
+            </template>
+            <div v-else-if="isLoadingDetail" class="detail-loading">Loading commit…</div>
+            <template v-else-if="commitDetail">
+              <div class="detail-left">
+                <div class="dt-meta">
+                  <div class="dt-subject">{{ commitDetail.message }}</div>
+                  <div class="dt-sub mono">{{ commitDetail.short_hash }}</div>
+                  <div class="dt-sub">{{ commitDetail.author_name }} &lt;{{ commitDetail.author_email }}&gt;</div>
+                  <div class="dt-sub">{{ commitDetail.date }}</div>
                 </div>
-              </div>
-            </div>
-            <div class="detail-right">
-              <div v-if="isLoadingDiff" class="diff-loading">Loading diff…</div>
-              <div v-else-if="!selectedFile" class="diff-empty">Select a file to view its diff.</div>
-              <div v-else class="diff">
-                <div class="diff-file mono">{{ selectedFile }}</div>
-                <div v-for="(h, hi) in diffHunks" :key="hi" class="diff-hunk">
-                  <div class="hunk-head mono">{{ h.header }}</div>
-                  <div v-for="(l, li) in h.lines" :key="li" class="diff-line mono" :class="lineClass(l.kind)">
-                    <span class="ln">{{ l.old_no ?? '' }}</span>
-                    <span class="ln">{{ l.new_no ?? '' }}</span>
-                    <span class="lc">{{ l.kind }}</span>
-                    <span class="lt">{{ l.text }}</span>
+                <div class="dt-files">
+                  <div
+                    v-for="f in commitDetail.files"
+                    :key="f"
+                    class="dt-file"
+                    :class="{ active: f === selectedFile }"
+                    @click="selectFile(f)"
+                  >
+                    {{ f }}
                   </div>
                 </div>
               </div>
-            </div>
-          </template>
-          <div v-else class="detail-empty">Select a commit to see its changes.</div>
-        </div>
+              <div class="detail-right">
+                <div v-if="isLoadingDiff" class="diff-loading">Loading diff…</div>
+                <div v-else-if="!selectedFile" class="diff-empty">Select a file to view its diff.</div>
+                <div v-else class="diff">
+                  <div class="diff-file mono">{{ selectedFile }}</div>
+                  <div v-for="(h, hi) in diffHunks" :key="hi" class="diff-hunk">
+                    <div class="hunk-head mono">{{ h.header }}</div>
+                    <div v-for="(l, li) in h.lines" :key="li" class="diff-line mono" :class="lineClass(l.kind)">
+                      <span class="ln">{{ l.old_no ?? '' }}</span>
+                      <span class="ln">{{ l.new_no ?? '' }}</span>
+                      <span class="lc">{{ l.kind }}</span>
+                      <span class="lt">{{ l.text }}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </template>
+            <div v-else class="detail-empty">Select a commit to see its changes.</div>
+          </div>
+        </template>
       </section>
     </div>
   </div>
@@ -609,6 +622,9 @@ button.sb-item:hover {
   flex: 1;
   overflow: auto;
   min-height: 0;
+}
+.pane.history-full {
+  overflow: hidden;
 }
 .pane-loading,
 .detail-loading,
