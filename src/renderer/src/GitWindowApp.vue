@@ -61,6 +61,19 @@ const diffHunks = ref<DiffBlameHunk[]>([])
 const isLoadingDetail = ref(false)
 const isLoadingDiff = ref(false)
 
+// ── External diff target (from the main GitPane) ─────────────────────────────
+// The main process forwards a git_diff_* target (see window:openGit) so a file
+// clicked in the main-window GitPane shows its diff in *this* window's panel
+// rather than the mini-IDE. We read it on load and via nav.onOpenTarget.
+interface ExternalDiff {
+  name: string
+  staged: boolean
+  commit: string
+  hunks: DiffBlameHunk[]
+}
+const externalDiff = ref<ExternalDiff | null>(null)
+const isLoadingExternalDiff = ref(false)
+
 // Local busy flags for actions useGit doesn't expose a dedicated ref for.
 const isPulling = ref(false)
 const isPushing = ref(false)
@@ -86,6 +99,16 @@ async function refreshAll(): Promise<void> {
 
 onMounted(() => {
   if (hasWorkspace.value) void refreshAll()
+  // Initial diff target from the entry query, then incremental deliveries.
+  void showDiffTarget(Object.fromEntries(new URLSearchParams(window.location.search)))
+  const nav = (
+    window as unknown as {
+      nav?: { onOpenTarget?: (cb: (p: Record<string, string>) => void) => () => void }
+    }
+  ).nav
+  nav?.onOpenTarget?.((p) => {
+    void showDiffTarget(p)
+  })
 })
 
 // ── Commit selection → detail → per-file diff ────────────────────────────────
@@ -111,6 +134,31 @@ async function selectFile(filepath: string): Promise<void> {
   } finally {
     isLoadingDiff.value = false
   }
+}
+
+async function showDiffTarget(params: Record<string, string>): Promise<void> {
+  const filepath = params['git_diff_filepath'] ?? ''
+  if (!filepath) return
+  const staged = params['git_diff_staged'] === 'true'
+  const commit = params['git_diff_commit'] ?? ''
+  externalDiff.value = { name: filepath, staged, commit, hunks: [] }
+  isLoadingExternalDiff.value = true
+  try {
+    const hunks = commit
+      ? await commitFileDiff(commit, filepath)
+      : await diffBlame(filepath, staged)
+    // Stale-guard: only apply if the target hasn't changed while awaiting.
+    const cur = externalDiff.value
+    if (cur && cur.name === filepath && cur.commit === commit) {
+      cur.hunks = hunks
+    }
+  } finally {
+    isLoadingExternalDiff.value = false
+  }
+}
+
+function clearExternalDiff(): void {
+  externalDiff.value = null
 }
 
 function lineClass(kind: DiffBlameHunk['lines'][number]['kind']): string {
@@ -303,7 +351,40 @@ function shortDate(iso?: string): string {
 
         <!-- Bottom: commit detail + per-file diff -->
         <div class="detail">
-          <div v-if="isLoadingDetail" class="detail-loading">Loading commit…</div>
+          <template v-if="externalDiff">
+            <div class="detail-left">
+              <div class="dt-meta">
+                <div class="dt-subject mono">{{ externalDiff.name }}</div>
+                <div class="dt-sub">
+                  {{
+                    externalDiff.commit
+                      ? 'commit ' + externalDiff.commit.slice(0, 8)
+                      : externalDiff.staged
+                        ? 'staged changes'
+                        : 'working tree'
+                  }}
+                </div>
+                <button class="dt-back" @click="clearExternalDiff">← back to commits</button>
+              </div>
+            </div>
+            <div class="detail-right">
+              <div v-if="isLoadingExternalDiff" class="diff-loading">Loading diff…</div>
+              <div v-else-if="!externalDiff.hunks.length" class="diff-empty">No changes.</div>
+              <div v-else class="diff">
+                <div class="diff-file mono">{{ externalDiff.name }}</div>
+                <div v-for="(h, hi) in externalDiff.hunks" :key="hi" class="diff-hunk">
+                  <div class="hunk-head mono">{{ h.header }}</div>
+                  <div v-for="(l, li) in h.lines" :key="li" class="diff-line mono" :class="lineClass(l.kind)">
+                    <span class="ln">{{ l.old_no ?? '' }}</span>
+                    <span class="ln">{{ l.new_no ?? '' }}</span>
+                    <span class="lc">{{ l.kind }}</span>
+                    <span class="lt">{{ l.text }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
+          <div v-else-if="isLoadingDetail" class="detail-loading">Loading commit…</div>
           <template v-else-if="commitDetail">
             <div class="detail-left">
               <div class="dt-meta">
