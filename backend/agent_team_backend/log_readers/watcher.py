@@ -50,12 +50,20 @@ class _Handler(FileSystemEventHandler):
         if event.is_directory:
             return
         s = str(event.src_path)
-        # Antigravity/Grok stores are SQLite: live writes land in the -wal
-        # journal first, so accept it but enqueue the canonical .db path.
+        # Antigravity/Grok/OpenCode stores are SQLite: live writes land in the
+        # -wal journal first, so accept it but enqueue the canonical .db path.
         if s.endswith(".db-wal"):
             self._on_path(Path(s[: -len("-wal")]))
             return
-        # .db = Antigravity conversations / Grok's shared grok.db.
+        # Aider's per-project history file is Markdown; only this exact
+        # filename is accepted so ordinary workspace .md edits can never
+        # flood the queue (aider is otherwise driven by the rescan loop —
+        # workspace roots get no watchdog subscription).
+        if s.endswith("/.aider.chat.history.md"):
+            self._on_path(Path(s))
+            return
+        # .db = Antigravity conversations / Grok's grok.db / OpenCode's
+        # opencode.db / Kilo's kilo.db.
         if not s.endswith((".jsonl", ".json", ".db")):
             return
         self._on_path(Path(s))
@@ -391,7 +399,7 @@ class LogWatcher:
         # independent of token parsing so it works even for session-file formats
         # the token reader doesn't (yet) understand — it only needs the file to
         # exist + contain the pane marker.
-        if self._session_sink is not None and reader.vendor in ("codex", "antigravity", "grok", "kimi"):
+        if self._session_sink is not None and reader.vendor in ("codex", "antigravity", "grok", "kimi", "opencode", "qwen", "kilo", "pi", "copilot", "cursor", "aider"):
             try:
                 await self._session_sink(reader.vendor, path)
             except Exception as err:  # noqa: BLE001
@@ -450,12 +458,14 @@ class LogWatcher:
                     log.warning("activity sink raised: %s", err)
 
     def _reader_for(self, path: Path) -> LogReader | None:
-        s = str(path.resolve())
+        try:
+            resolved = path.resolve()
+        except OSError:
+            resolved = path
         for reader in self._readers:
-            for d in reader.project_dirs():
-                try:
-                    if s.startswith(str(d.resolve()) + "/"):
-                        return reader
-                except OSError:
-                    continue
+            try:
+                if reader.claims_path(resolved):
+                    return reader
+            except OSError:
+                continue
         return None

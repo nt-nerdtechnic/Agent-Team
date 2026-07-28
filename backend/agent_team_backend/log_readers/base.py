@@ -228,6 +228,22 @@ class LogReader(ABC):
         """
         return self.project_dirs()
 
+    def claims_path(self, path: Path) -> bool:
+        """True when this reader owns `path` (the watcher's routing test).
+
+        Default: the path lives under one of project_dirs(). Readers whose
+        files sit outside any fixed root (Aider's per-workspace history
+        file) override with their own match. `path` arrives resolved.
+        """
+        s = str(path)
+        for d in self.project_dirs():
+            try:
+                if s.startswith(str(d.resolve()) + "/"):
+                    return True
+            except OSError:
+                continue
+        return False
+
     def parse_activity(
         self, path: Path, seen_keys: set[str]
     ) -> list[ActivityEvent]:

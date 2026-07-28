@@ -35,8 +35,10 @@ from threading import Lock
 from typing import Iterable
 
 from ..applog import app_data_dir
+from .aider import aider_history_path
 from .base import LogReader, TokenUsage
 from .claude import encode_claude_cwd
+from .cursor import cursor_project_hash
 
 log = logging.getLogger("agent_team_backend.log_readers.attribution")
 
@@ -332,10 +334,44 @@ class Attribution:
         name (= usage.session_id).
         Grok relies on markers exclusively, but stores every session in
         one shared SQLite db — its binding queries the db via the reader.
+        OpenCode works the same way (`opencode --session <id>` can only
+        resume, and all sessions live in one shared db), as does Kilo Code
+        (an OpenCode fork — `kilo --session <id>`, shared kilo.db).
+        Qwen writes one jsonl per session (like Claude) and preserves user
+        text verbatim, so the kickoff marker lands in the session file —
+        marker matching plus the single-candidate fallback bind it; the
+        resume id is the file stem accepted by `qwen --resume <id>`
+        (= usage.session_id).
+        Pi likewise writes one jsonl per session and preserves user text
+        verbatim, so marker matching plus the single-candidate fallback
+        bind it — but the file only appears after the FIRST assistant reply
+        completes (lazy flush), so its binding lands later than other
+        vendors'. The resume id is the header id `pi --session-id <id>`
+        accepts (= usage.session_id; the filename stem carries a timestamp
+        prefix and is NOT the id).
+        Copilot writes one events.jsonl per session dir and preserves user
+        text verbatim (user.message data.content), so the kickoff marker
+        lands in the session file — marker matching plus the
+        single-candidate fallback bind it; the resume id is the session dir
+        name accepted by `copilot --resume=<id>` (= usage.session_id).
+        Cursor writes one store.db per session, but its content is opaque
+        protobuf blobs, so marker resolution belongs to the reader (a raw
+        bytes scan via find_sessions_by_marker) — the same reader-driven
+        binding path as the shared-db vendors, even though the dbs are
+        per-session; the resume id is the session dir name accepted by
+        `agent --resume=<id>`.
+        Aider appends every session to ONE per-project Markdown history file
+        and preserves user text verbatim (`#### ` lines), so the kickoff
+        marker lands in the file — but only the file's LAST started-at
+        section is the live session, so marker matching scans just that
+        section and there is no single-candidate fallback (the shared file
+        usually pre-exists in the pane's baseline). Aider has no session id;
+        the announced "resume id" is the section's started-at slug, and
+        resume itself is the id-less, lossy `aider --restore-chat-history`.
         """
-        if usage.vendor == "grok":
-            return self._bind_grok_by_marker(usage)
-        if usage.vendor not in ("codex", "antigravity", "kimi"):
+        if usage.vendor in ("grok", "opencode", "kilo", "cursor"):
+            return self._bind_shared_db_by_marker(usage)
+        if usage.vendor not in ("codex", "antigravity", "kimi", "qwen", "pi", "copilot", "aider"):
             return None
 
         try:
@@ -365,7 +401,7 @@ class Attribution:
         marker_binding = self.maybe_bind_by_marker(usage)
         if marker_binding:
             pane_id, resume_id = marker_binding
-        elif usage.vendor in ("antigravity", "kimi"):
+        elif usage.vendor in ("antigravity", "kimi", "qwen", "pi", "copilot"):
             return self._bind_new_session_single_candidate(usage)
         else:
             return None
@@ -396,7 +432,7 @@ class Attribution:
         unowned session — once bound, the session_owner short-circuit means no
         further reads. The file read happens outside the lock.
         """
-        if usage.vendor not in ("codex", "antigravity", "kimi"):
+        if usage.vendor not in ("codex", "antigravity", "kimi", "qwen", "pi", "copilot", "aider"):
             return None
         sid = usage.session_id
         with self._lock:
@@ -413,6 +449,15 @@ class Attribution:
                     text = reader._metadata_text(Path(usage.file_path))[:524_288]
                 else:
                     text = Path(usage.file_path).read_text(encoding="utf-8", errors="ignore")[:524_288]
+            elif usage.vendor == "aider":
+                # Shared per-project history file: only the LAST started-at
+                # section is the live session — an earlier section's marker
+                # belongs to a historic session and must never bind.
+                reader = self._readers.get("aider")
+                text = (
+                    reader.last_section(Path(usage.file_path))[1][:524_288]
+                    if reader is not None else ""
+                )
             else:
                 text = Path(usage.file_path).read_text(encoding="utf-8", errors="ignore")[:524_288]
         except OSError:
@@ -450,20 +495,25 @@ class Attribution:
         log.info("bound session=%s → pane=%s via marker (resume_id=%s)", sid, matched_pane, resume_id)
         return matched_pane, resume_id
 
-    def _bind_grok_by_marker(self, usage: TokenUsage) -> SessionBinding | None:
-        """Grok keeps ALL sessions in one shared SQLite db (~/.grok/grok.db),
-        so marker binding asks the reader to resolve markers → session ids in
-        the db instead of scanning a per-session file. Binds at most one
-        session per call; the watcher fires again on every db write, so any
-        remaining markers resolve on subsequent events. Resume id is the
-        sessions.id (12-hex) that `grok -s <id>` accepts."""
-        reader = self._readers.get("grok")
+    def _bind_shared_db_by_marker(self, usage: TokenUsage) -> SessionBinding | None:
+        """Grok/OpenCode/Kilo keep ALL sessions in one shared SQLite db, so marker
+        binding asks the reader to resolve markers → session ids in the db
+        instead of scanning a per-session file. Cursor keeps one db PER
+        session, but its blobs are opaque protobuf, so it uses the same
+        reader-driven resolution (with ws_root always '' — the store records
+        no cwd — which intentionally keeps the workspace gate below
+        permissive for it). Binds at most one session per
+        call; the watcher fires again on every db write, so any remaining
+        markers resolve on subsequent events. Resume id is the db's session id
+        that `grok -s <id>` / `opencode --session <id>` accepts."""
+        vendor = usage.vendor
+        reader = self._readers.get(vendor)
         if reader is None:
             return None
         with self._lock:
             markers = [
                 marker for marker, pid in self._unbound_markers.items()
-                if (reg := self._panes.get(pid)) is not None and reg.vendor == "grok"
+                if (reg := self._panes.get(pid)) is not None and reg.vendor == vendor
             ]
         if not markers:
             return None
@@ -477,11 +527,13 @@ class Attribution:
                 if pane_id is None or session_id in self._session_owner:
                     continue  # bound meanwhile / pane killed
                 reg = self._panes.get(pane_id)
-                if reg is None or reg.vendor != "grok":
+                if reg is None or reg.vendor != vendor:
                     continue
-                # Workspace gate: grok scopes sessions by git root / canonical
-                # cwd (workspaces.scope_key); require it to match the pane so a
-                # marker echoed in another project can't cross-bind.
+                # Workspace gate: the reader reports the session's workspace
+                # root (grok: workspaces.scope_key, opencode/kilo:
+                # session.directory);
+                # require it to match the pane so a marker echoed in another
+                # project can't cross-bind.
                 if ws_root and ws_root not in (reg.cwd, reg.workspace_path):
                     continue
                 self._session_owner[session_id] = pane_id
@@ -495,7 +547,7 @@ class Attribution:
                     session_file=usage.file_path,
                 )
             log.info(
-                "bound grok session=%s → pane=%s via marker", session_id, pane_id
+                "bound %s session=%s → pane=%s via marker", vendor, session_id, pane_id
             )
             return binding
         return None
@@ -514,7 +566,7 @@ class Attribution:
         unbound so marker matching can resolve them later without cross-pane
         corruption.
         """
-        if usage.vendor not in ("antigravity", "kimi") or not usage.session_id:
+        if usage.vendor not in ("antigravity", "kimi", "qwen", "pi", "copilot") or not usage.session_id:
             return None
         file_path = Path(usage.file_path)
         key = f"{usage.vendor}:{usage.session_id}:{usage.session_id}"
@@ -643,6 +695,49 @@ class Attribution:
                 # Kimi reader emits cwd = the session state.json workDir.
                 if usage.cwd and usage.cwd == ws_path:
                     return ws_path
+            elif usage.vendor == "opencode":
+                # OpenCode reader emits cwd = session.directory (the cwd the
+                # session was started in).
+                if usage.cwd and usage.cwd == ws_path:
+                    return ws_path
+            elif usage.vendor == "kilo":
+                # Kilo (OpenCode fork) likewise emits cwd = session.directory.
+                if usage.cwd and usage.cwd == ws_path:
+                    return ws_path
+            elif usage.vendor == "qwen":
+                # Qwen reader emits cwd = the record's own cwd field (every
+                # jsonl line carries the session's exact cwd).
+                if usage.cwd and usage.cwd == ws_path:
+                    return ws_path
+            elif usage.vendor == "pi":
+                # Pi reader emits cwd = the session header's cwd field.
+                if usage.cwd and usage.cwd == ws_path:
+                    return ws_path
+            elif usage.vendor == "copilot":
+                # Copilot reader emits cwd = the session's workspace.yaml cwd.
+                if usage.cwd and usage.cwd == ws_path:
+                    return ws_path
+            elif usage.vendor == "aider":
+                # Aider reader emits cwd = the history file's directory (the
+                # session's git root). A workspace registered at a
+                # subdirectory of that root still maps to the same file.
+                if usage.cwd and usage.cwd == ws_path:
+                    return ws_path
+                if usage.file_path and usage.file_path == str(aider_history_path(ws_path)):
+                    return ws_path
+            elif usage.vendor == "cursor":
+                # Cursor stores NO cwd anywhere. A session already bound to a
+                # pane (marker hit) attributes to that pane's workspace, so
+                # the gate can never drop a marker-bound session; otherwise
+                # fall back to the community-documented md5(cwd) project-hash
+                # dir name in the file path (best-effort — unconfirmed hash).
+                owner = self._session_owner.get(usage.session_id)
+                reg = self._panes.get(owner) if owner else None
+                if reg is not None and reg.workspace_path == ws_path:
+                    return ws_path
+                hash_dir = cursor_project_hash(ws_path)
+                if hash_dir and f"/{hash_dir}/" in file_path:
+                    return ws_path
         return None
 
     def _lookup_pane_for(
@@ -698,7 +793,18 @@ class Attribution:
         if usage.vendor == "claude":
             expected_dir = encode_claude_cwd(pane_cwd)
             return f"/{expected_dir}/" in file_path
-        if usage.vendor in ("codex", "antigravity", "grok", "kimi"):
+        if usage.vendor == "cursor":
+            # No cwd in the store; match the md5(cwd) project-hash dir in the
+            # file path instead. Only the claim fallbacks use this — marker
+            # binding never depends on it (the hash scheme is unconfirmed).
+            hash_dir = cursor_project_hash(pane_cwd)
+            return bool(hash_dir) and f"/{hash_dir}/" in file_path
+        if usage.vendor == "aider":
+            # One shared per-project file: it is this pane's exactly when it
+            # is the history file of the pane cwd's git root (or the cwd
+            # itself without one).
+            return usage.file_path == str(aider_history_path(pane_cwd))
+        if usage.vendor in ("codex", "antigravity", "grok", "kimi", "opencode", "qwen", "kilo", "pi", "copilot"):
             return usage.cwd == pane_cwd
         return False
 
