@@ -1,0 +1,31 @@
+from __future__ import annotations
+
+from collections.abc import Iterator
+
+import pytest
+
+from agent_team_backend.plugins import wiring
+from agent_team_backend.plugins.host import PluginHost
+
+
+@pytest.fixture
+def host(monkeypatch: pytest.MonkeyPatch) -> Iterator[PluginHost]:
+    monkeypatch.delenv(wiring.PLUGINS_DIR_ENV, raising=False)
+    host = PluginHost()
+    yield host
+    wiring.shutdown(host)
+
+
+def test_builtin_root_contains_navide_skills() -> None:
+    dirs = wiring.discover_backend_plugin_dirs(wiring.builtin_plugins_root())
+    assert wiring.builtin_plugins_root() / "navide_skills" in dirs
+
+
+def test_startup_activates_skills_plugin_and_registers_transformer(
+    host: PluginHost,
+) -> None:
+    assert wiring.startup(host) == ["navide.plans", "navide.skills"]
+    assert [plugin_id for plugin_id, _ in host.spawn_transformers()] == [
+        "navide.plans",
+        "navide.skills",
+    ]
