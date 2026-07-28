@@ -6,6 +6,7 @@ no npx/network is required for the unit test suite.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 from pathlib import Path
@@ -52,12 +53,37 @@ class TestLoadMcpConfig:
         assert len(result) == 1
         assert result[0].name == "active"
 
-    def test_corrupt_json_falls_back_to_defaults(self, tmp_path):
+    def test_corrupt_json_is_preserved_and_loads_no_servers(self, tmp_path):
         cfg_path = tmp_path / "mcp_servers.json"
-        cfg_path.write_text("NOT VALID JSON {{{{")
+        content = "NOT VALID JSON {{{{"
+        cfg_path.write_text(content)
         result = load_mcp_config(cfg_path)
-        assert len(result) >= 1
-        assert result[0].name == "context7"
+        assert result == []
+        assert cfg_path.read_text() == content
+
+    def test_reads_remote_transports(self, tmp_path):
+        cfg_path = tmp_path / "mcp_servers.json"
+        cfg_path.write_text(json.dumps([
+            {
+                "name": "remote",
+                "transport": "http",
+                "url": "https://example.test/mcp",
+                "headers": {"Authorization": "Bearer token"},
+            },
+            {
+                "name": "events",
+                "transport": "sse",
+                "url": "https://example.test/sse",
+            },
+        ]))
+
+        result = load_mcp_config(cfg_path)
+
+        assert [(item.name, item.transport) for item in result] == [
+            ("remote", "http"),
+            ("events", "sse"),
+        ]
+        assert result[0].headers == {"Authorization": "Bearer token"}
 
     def test_default_config_has_context7(self):
         defaults = _default_config()
@@ -79,6 +105,9 @@ class TestMCPServerConfig:
         assert cfg.args == []
         assert cfg.env == {}
         assert cfg.enabled is True
+        assert cfg.transport == "stdio"
+        assert cfg.url == ""
+        assert cfg.headers == {}
 
 
 # ── MCPClient ─────────────────────────────────────────────────────────────────
@@ -124,6 +153,107 @@ class TestMCPClient:
         assert client.ready is True
 
     @pytest.mark.asyncio
+    async def test_stdio_passes_argv_and_merged_environment(self):
+        cfg = MCPServerConfig(
+            name="stdio",
+            command="node",
+            args=["--path", "/My Docs", '--label="two words"'],
+            env={"MCP_TEST_TOKEN": "secret"},
+        )
+        client = MCPClient(cfg)
+        mock_session = AsyncMock()
+        mock_session.initialize = AsyncMock()
+        mock_session_cm = AsyncMock()
+        mock_session_cm.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_transport_cm = AsyncMock()
+        mock_transport_cm.__aenter__ = AsyncMock(return_value=(AsyncMock(), AsyncMock()))
+        server_params = MagicMock()
+
+        with patch("agent_team_backend.mcp_manager.stdio_client", return_value=mock_transport_cm), \
+             patch("agent_team_backend.mcp_manager.ClientSession", return_value=mock_session_cm), \
+             patch(
+                 "agent_team_backend.mcp_manager.StdioServerParameters",
+                 return_value=server_params,
+             ) as make_params, \
+             patch("agent_team_backend.mcp_manager._MCP_AVAILABLE", True):
+            await client.start()
+
+        make_params.assert_called_once()
+        call = make_params.call_args.kwargs
+        assert call["command"] == "node"
+        assert call["args"] == ["--path", "/My Docs", '--label="two words"']
+        assert call["env"]["MCP_TEST_TOKEN"] == "secret"
+
+    @pytest.mark.asyncio
+    async def test_streamable_http_uses_headers_and_ignores_session_id_callback(self):
+        cfg = MCPServerConfig(
+            name="remote",
+            transport="http",
+            url="https://example.test/mcp",
+            headers={"Authorization": "Bearer token"},
+        )
+        client = MCPClient(cfg)
+        read, write, get_session_id = AsyncMock(), AsyncMock(), MagicMock()
+        mock_transport_cm = AsyncMock()
+        mock_transport_cm.__aenter__ = AsyncMock(
+            return_value=(read, write, get_session_id)
+        )
+        mock_transport_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_session = AsyncMock()
+        mock_session.initialize = AsyncMock()
+        mock_session_cm = AsyncMock()
+        mock_session_cm.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session_cm.__aexit__ = AsyncMock(return_value=None)
+
+        with patch(
+            "agent_team_backend.mcp_manager.streamablehttp_client",
+            return_value=mock_transport_cm,
+        ) as make_transport, patch(
+            "agent_team_backend.mcp_manager.ClientSession", return_value=mock_session_cm
+        ) as make_session, patch("agent_team_backend.mcp_manager._MCP_AVAILABLE", True):
+            await client.start()
+            await client.stop()
+
+        make_transport.assert_called_once_with(
+            "https://example.test/mcp",
+            headers={"Authorization": "Bearer token"},
+        )
+        make_session.assert_called_once_with(read, write)
+        mock_session_cm.__aexit__.assert_awaited_once_with(None, None, None)
+        mock_transport_cm.__aexit__.assert_awaited_once_with(None, None, None)
+
+    @pytest.mark.asyncio
+    async def test_sse_uses_two_streams_and_headers(self):
+        cfg = MCPServerConfig(
+            name="events",
+            transport="sse",
+            url="https://example.test/sse",
+            headers={"X-Api-Key": "secret"},
+        )
+        client = MCPClient(cfg)
+        read, write = AsyncMock(), AsyncMock()
+        mock_transport_cm = AsyncMock()
+        mock_transport_cm.__aenter__ = AsyncMock(return_value=(read, write))
+        mock_session = AsyncMock()
+        mock_session.initialize = AsyncMock()
+        mock_session_cm = AsyncMock()
+        mock_session_cm.__aenter__ = AsyncMock(return_value=mock_session)
+
+        with patch(
+            "agent_team_backend.mcp_manager.sse_client",
+            return_value=mock_transport_cm,
+        ) as make_transport, patch(
+            "agent_team_backend.mcp_manager.ClientSession", return_value=mock_session_cm
+        ) as make_session, patch("agent_team_backend.mcp_manager._MCP_AVAILABLE", True):
+            await client.start()
+
+        assert client.ready is True
+        make_transport.assert_called_once_with(
+            "https://example.test/sse", headers={"X-Api-Key": "secret"}
+        )
+        make_session.assert_called_once_with(read, write)
+
+    @pytest.mark.asyncio
     async def test_start_sets_not_ready_on_failure(self):
         client = self._make_client()
 
@@ -131,6 +261,35 @@ class TestMCPClient:
              patch("agent_team_backend.mcp_manager.stdio_client", side_effect=OSError("npx not found")):
             await client.start()
 
+        assert client.ready is False
+
+    @pytest.mark.asyncio
+    async def test_initialize_cancellation_exits_session_and_transport_then_reraises(self):
+        client = self._make_client()
+        mock_session = AsyncMock()
+        mock_session.initialize = AsyncMock(side_effect=asyncio.CancelledError)
+        mock_session_cm = AsyncMock()
+        mock_session_cm.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_transport_cm = AsyncMock()
+        mock_transport_cm.__aenter__ = AsyncMock(return_value=(AsyncMock(), AsyncMock()))
+        mock_transport_cm.__aexit__ = AsyncMock(return_value=None)
+
+        with patch(
+            "agent_team_backend.mcp_manager.stdio_client",
+            return_value=mock_transport_cm,
+        ), patch(
+            "agent_team_backend.mcp_manager.ClientSession",
+            return_value=mock_session_cm,
+        ), patch(
+            "agent_team_backend.mcp_manager.StdioServerParameters",
+            return_value=MagicMock(),
+        ), patch("agent_team_backend.mcp_manager._MCP_AVAILABLE", True):
+            with pytest.raises(asyncio.CancelledError):
+                await client.start()
+
+        mock_session_cm.__aexit__.assert_awaited_once_with(None, None, None)
+        mock_transport_cm.__aexit__.assert_awaited_once_with(None, None, None)
         assert client.ready is False
 
     @pytest.mark.asyncio

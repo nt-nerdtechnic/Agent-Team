@@ -1,6 +1,6 @@
 """Generic MCP (Model Context Protocol) client manager.
 
-Manages persistent stdio connections to one or more MCP servers.
+Manages persistent connections to one or more MCP servers.
 Config lives at app_data_dir() / "mcp_servers.json" — written with defaults
 on first launch so users can customise without touching source code.
 """
@@ -14,19 +14,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .mcp_settings import MCP_CONFIG_FILE, MCPSettingsStore, default_mcp_servers
+from .mcp_settings import MCPSettingsStore, default_mcp_servers
 
 log = logging.getLogger("agent_team_backend.mcp_manager")
 
 try:
     from mcp import ClientSession
+    from mcp.client.sse import sse_client
     from mcp.client.stdio import StdioServerParameters, stdio_client
+    from mcp.client.streamable_http import streamablehttp_client
     _MCP_AVAILABLE = True
 except ImportError:
     _MCP_AVAILABLE = False
     ClientSession = None  # type: ignore[assignment,misc]
     StdioServerParameters = None  # type: ignore[assignment,misc]
+    sse_client = None  # type: ignore[assignment]
     stdio_client = None  # type: ignore[assignment]
+    streamablehttp_client = None  # type: ignore[assignment]
 
 _CALL_TIMEOUT = 30.0  # seconds per tool call
 
@@ -36,10 +40,13 @@ _CALL_TIMEOUT = 30.0  # seconds per tool call
 @dataclass
 class MCPServerConfig:
     name: str
-    command: str
+    command: str = ""
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
     enabled: bool = True
+    transport: str = "stdio"
+    url: str = ""
+    headers: dict[str, str] = field(default_factory=dict)
 
 
 def _default_config() -> list[dict[str, Any]]:
@@ -47,58 +54,85 @@ def _default_config() -> list[dict[str, Any]]:
 
 
 def load_mcp_config(path: Path | None = None) -> list[MCPServerConfig]:
-    raw = MCPSettingsStore(path).list_enabled()
+    try:
+        raw = MCPSettingsStore(path).list_enabled()
+    except ValueError as err:
+        log.warning("MCP config not loaded: %s", err)
+        return []
     return [MCPServerConfig(**item) for item in raw]
 
 
 # ── Single server client ───────────────────────────────────────────────────────
 
 class MCPClient:
-    """Persistent stdio connection to one MCP server process."""
+    """Persistent connection to one MCP server."""
 
     def __init__(self, config: MCPServerConfig) -> None:
         self.name = config.name
         self._config = config
         self._session: Any = None
-        self._stdio_cm: Any = None
+        self._transport_cm: Any = None
         self._session_cm: Any = None
         self._lock = asyncio.Lock()
         self.ready = False
 
     async def start(self) -> None:
-        """Spawn the MCP server process and perform the MCP handshake."""
+        """Connect to the MCP server and perform the MCP handshake."""
         if not _MCP_AVAILABLE:
             log.warning("MCP '%s' skipped — mcp package not installed", self.name)
             return
         try:
-            final_env = os.environ.copy()
-            final_env.update(self._config.env)
-
-            server_params = StdioServerParameters(
-                command=self._config.command,
-                args=self._config.args,
-                env=final_env,
-            )
-            self._stdio_cm = stdio_client(server_params)
-            read, write = await self._stdio_cm.__aenter__()
-            self._session_cm = ClientSession(read, write)
-            self._session = await self._session_cm.__aenter__()
+            if self._config.transport == "stdio":
+                final_env = os.environ.copy()
+                final_env.update(self._config.env)
+                server_params = StdioServerParameters(
+                    command=self._config.command,
+                    args=self._config.args,
+                    env=final_env,
+                )
+                transport_cm = stdio_client(server_params)
+            elif self._config.transport == "http":
+                transport_cm = streamablehttp_client(
+                    self._config.url,
+                    headers=self._config.headers or None,
+                )
+            elif self._config.transport == "sse":
+                transport_cm = sse_client(
+                    self._config.url,
+                    headers=self._config.headers or None,
+                )
+            else:
+                raise ValueError(f"unsupported MCP transport: {self._config.transport}")
+            streams = await transport_cm.__aenter__()
+            self._transport_cm = transport_cm
+            # mcp>=1.27 streamable HTTP yields (read, write, get_session_id),
+            # while stdio and SSE yield only (read, write).
+            read, write = streams[:2]
+            session_cm = ClientSession(read, write)
+            self._session = await session_cm.__aenter__()
+            self._session_cm = session_cm
             await asyncio.wait_for(self._session.initialize(), timeout=15.0)
             self.ready = True
             log.info("MCP '%s' connected", self.name)
+        except asyncio.CancelledError:
+            await self.stop()
+            raise
         except Exception as err:  # noqa: BLE001
             log.warning("MCP '%s' failed to start: %s", self.name, err)
             self.ready = False
             await self.stop()  # ensure spawned subprocess is cleaned up
 
     async def stop(self) -> None:
-        """Tear down the session and kill the child process."""
-        for cm in (self._session_cm, self._stdio_cm):
+        """Tear down the session and its underlying transport."""
+        for cm in (self._session_cm, self._transport_cm):
             if cm is not None:
                 try:
                     await cm.__aexit__(None, None, None)
-                except Exception:  # noqa: BLE001
+                except (Exception, asyncio.CancelledError):  # noqa: BLE001
                     pass
+        self._session = None
+        self._session_cm = None
+        self._transport_cm = None
         self.ready = False
         log.info("MCP '%s' stopped", self.name)
 
