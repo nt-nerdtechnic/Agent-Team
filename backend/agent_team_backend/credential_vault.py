@@ -419,6 +419,27 @@ class CredentialVault:
             return LiveCredentials(secret=secret, account=account)
         return LiveCredentials(secret=_read_text(slot / _SLOT_FILES[agent_key]))
 
+    def resolve_claude_credentials(
+        self, slot_id: str, *, active: bool
+    ) -> LiveCredentials:
+        """Read the credential a managed Claude pane currently uses.
+
+        A profile's persistent runtime home can contain a token refreshed by a
+        running Claude CLI, so it takes precedence over the older live/slot
+        copy. The built-in default has no managed runtime home. This method is
+        read-only: it never captures, restores, switches, or writes credentials.
+        """
+        if slot_id != DEFAULT_SLOT_ID:
+            home = self.profile_home_path("claude", slot_id)
+            runtime_secret = (
+                self._keychain_read(legacy_claude_keychain_service(home))
+                if self._is_macos
+                else _read_text(home / ".credentials.json")
+            )
+            if runtime_secret is not None:
+                return LiveCredentials(secret=runtime_secret)
+        return self.read_live("claude") if active else self.read_slot("claude", slot_id)
+
     def write_slot(self, agent_key: str, slot_id: str, creds: LiveCredentials) -> None:
         slot = self.slot_dir(agent_key, slot_id)
         if agent_key == "claude":
@@ -859,7 +880,7 @@ class CredentialVault:
             else:
                 _write_private(home / ".credentials.json", creds.secret)
         real_claude = self._real_home / ".claude"
-        for name in ("projects", "todos", "shell-snapshots"):
+        for name in ("projects", "todos", "shell-snapshots", "skills"):
             self._link_shared(home / name, real_claude / name, is_dir=True)
         self._link_shared(home / "settings.json", real_claude / "settings.json", is_dir=False)
         self._link_shared(home / ".claude.json", self._real_home / ".claude.json", is_dir=False)

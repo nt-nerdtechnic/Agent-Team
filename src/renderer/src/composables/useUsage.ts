@@ -29,6 +29,7 @@ export interface UsageWindow {
   label: string
   usedPercent: number
   resetsAt: string | null
+  expired?: boolean
 }
 
 export interface UsageSnapshot {
@@ -38,17 +39,26 @@ export interface UsageSnapshot {
   windows: UsageWindow[]
   fetchedAt: string
   error: string | null
+  stale?: boolean
+  lastSuccessAt?: string | null
+  refreshStatus?: UsageStatus | 'not-refreshed'
+  refreshAttemptedAt?: string | null
+  staleExpired?: boolean
 }
 
 interface UsagePayload {
   providers?: Record<string, UsageSnapshot>
+  accounts?: Record<string, Record<string, UsageSnapshot>>
   enabled?: boolean
   intervalSec?: number
 }
 
 type Backend = ReturnType<typeof useBackend>
 
-const state = reactive<{ providers: Record<string, UsageSnapshot> }>({ providers: {} })
+const state = reactive<{
+  providers: Record<string, UsageSnapshot>
+  accounts: Record<string, Record<string, UsageSnapshot>>
+}>({ providers: {}, accounts: {} })
 
 let backend: Backend | null = null
 let offChanged: (() => void) | null = null
@@ -58,6 +68,13 @@ function applyPayload(payload: UsagePayload | null | undefined): void {
   if (!payload || typeof payload !== 'object') return
   if (payload.providers && typeof payload.providers === 'object') {
     state.providers = { ...payload.providers }
+  }
+  if (payload.accounts && typeof payload.accounts === 'object') {
+    state.accounts = { ...payload.accounts }
+  } else if (payload.providers && typeof payload.providers === 'object') {
+    // A providers-only payload comes from a legacy backend. Do not retain
+    // per-account snapshots from a previously connected newer backend.
+    state.accounts = {}
   }
 }
 
@@ -130,6 +147,17 @@ export function usageFor(agentKey: string | undefined | null): UsageSnapshot | u
   return state.providers[agentKey]
 }
 
+/** Snapshot for one stable account slot. `null` addresses the built-in Default
+ *  row, whose backend slot id is `__default__`. */
+export function accountUsageFor(
+  agentKey: string | undefined | null,
+  profileId: string | null,
+): UsageSnapshot | undefined {
+  if (!agentKey || !usageEnabled()) return undefined
+  const slotId = profileId ?? '__default__'
+  return state.accounts[agentKey]?.[slotId]
+}
+
 /** Kinds that represent a GENERAL account limit (not a per-model bucket). */
 const HEADLINE_KINDS = new Set(['session', 'weekly', 'monthly'])
 
@@ -141,7 +169,9 @@ const HEADLINE_KINDS = new Set(['session', 'weekly', 'monthly'])
  *  window only when no general one exists. */
 export function remainingPercent(snap: UsageSnapshot | undefined): number | null {
   if (!snap || snap.status !== 'ok' || snap.windows.length === 0) return null
-  const headline = snap.windows.find((w) => HEADLINE_KINDS.has(w.kind)) ?? snap.windows[0]
+  const current = snap.windows.filter((w) => !w.expired)
+  if (current.length === 0) return null
+  const headline = current.find((w) => HEADLINE_KINDS.has(w.kind)) ?? current[0]
   return Math.max(0, Math.min(100, 100 - headline.usedPercent))
 }
 
@@ -192,4 +222,5 @@ export function __resetUsageForTest(): void {
   stopStatusWatch = null
   backend = null
   state.providers = {}
+  state.accounts = {}
 }

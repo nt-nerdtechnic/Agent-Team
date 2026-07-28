@@ -32,14 +32,16 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import json
 import logging
+import os
 import shutil
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .applog import app_data_dir
 
@@ -82,6 +84,8 @@ RATE_LIMIT_COOLDOWN = 300.0
 RESET_BOUNDARY_GRACE = 30.0
 DEFAULT_INTERVAL = 300.0
 MIN_INTERVAL = 60.0
+USAGE_CACHE_FILE = "usage-cache.json"
+USAGE_CACHE_SCHEMA_VERSION = 1
 
 
 def _now_iso() -> str:
@@ -146,6 +150,20 @@ def read_claude_credentials_file(home: Path) -> dict | None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
+        return None
+    oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
+    if not isinstance(oauth, dict) or not oauth.get("accessToken"):
+        return None
+    return oauth
+
+
+def parse_claude_credentials(raw: str | None) -> dict | None:
+    """Extract Claude OAuth data from a vault credential payload."""
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
         return None
     oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
     if not isinstance(oauth, dict) or not oauth.get("accessToken"):
@@ -668,8 +686,7 @@ async def _claude_user_agent() -> str:
     return _claude_ua
 
 
-async def fetch_claude(home: Path) -> dict:
-    oauth = await read_claude_credentials(home)
+async def fetch_claude_oauth(oauth: dict | None) -> dict:
     if oauth is None:
         return _snapshot("claude", "no-credentials")
     if claude_token_expired(oauth):
@@ -695,6 +712,10 @@ async def fetch_claude(home: Path) -> dict:
         return _snapshot("claude", "error", error=f"HTTP {resp.status_code}")
     windows, plan = normalize_claude(resp.json())
     return _snapshot("claude", "ok", windows=windows, plan_type=plan)
+
+
+async def fetch_claude(home: Path) -> dict:
+    return await fetch_claude_oauth(await read_claude_credentials(home))
 
 
 async def fetch_codex(codex_home: Path) -> dict:
@@ -1107,17 +1128,239 @@ class UsageService:
     """Single app-wide poller. ``configure`` is idempotent and multi-window
     safe (last write wins); results are cached and broadcast on change."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        cache_path: Path | None = None,
+        active_claude_slot_reader: Callable[[], str | None] | None = None,
+    ) -> None:
         self.enabled = False
         self.interval = DEFAULT_INTERVAL
         self.snapshots: dict[str, dict] = {}
-        self._blocked_until: dict[str, float] = {}
+        self.account_snapshots: dict[str, dict[str, dict]] = {}
+        self._last_good: dict[str, dict[str, dict]] = {}
+        self._active_claude_slot = "__default__"
+        self._cache_path = cache_path
+        self._active_claude_slot_reader = active_claude_slot_reader
+        self._blocked_until: dict[object, float] = {}
         self._task: asyncio.Task | None = None
         self._wake = asyncio.Event()
+        self._load_cache()
+        if self._active_claude_slot_reader is not None:
+            try:
+                self._active_claude_slot = self._active_claude_slot_reader() or "__default__"
+            except Exception:  # noqa: BLE001 — cached data remains usable with the default
+                pass
 
     def payload(self) -> dict:
-        return {"providers": self.snapshots, "enabled": self.enabled,
-                "intervalSec": self.interval}
+        for accounts in self.account_snapshots.values():
+            for snap in accounts.values():
+                if snap.get("stale"):
+                    self._refresh_stale_expiry(snap)
+        providers = dict(self.snapshots)
+        active = self.account_snapshots.get("claude", {}).get(self._active_claude_slot)
+        if active is not None:
+            providers["claude"] = active
+        return {
+            "providers": providers,
+            "accounts": self.account_snapshots,
+            "enabled": self.enabled,
+            "intervalSec": self.interval,
+        }
+
+    def _load_cache(self) -> None:
+        if self._cache_path is None:
+            return
+        try:
+            raw = json.loads(self._cache_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(raw, dict) or raw.get("schemaVersion") != USAGE_CACHE_SCHEMA_VERSION:
+            return
+        accounts = raw.get("accounts")
+        claude = accounts.get("claude") if isinstance(accounts, dict) else None
+        if not isinstance(claude, dict):
+            return
+        valid: dict[str, dict] = {}
+        for slot_id, snap in claude.items():
+            if (
+                isinstance(slot_id, str)
+                and isinstance(snap, dict)
+                and snap.get("provider") == "claude"
+                and snap.get("status") == "ok"
+                and isinstance(snap.get("windows"), list)
+                and all(isinstance(window, dict) for window in snap["windows"])
+                and isinstance(snap.get("fetchedAt"), str)
+            ):
+                valid[slot_id] = self._cache_safe_snapshot(snap)
+        if valid:
+            self._last_good["claude"] = valid
+            self.account_snapshots["claude"] = {
+                slot_id: self._merge_cached(snap, "not-refreshed", None)
+                for slot_id, snap in valid.items()
+            }
+
+    @staticmethod
+    def _cache_safe_snapshot(snap: dict) -> dict:
+        windows = []
+        for window in snap.get("windows", []):
+            kind = window.get("kind")
+            label = window.get("label")
+            used = window.get("usedPercent")
+            resets = window.get("resetsAt")
+            minutes = window.get("windowMinutes")
+            if (
+                not isinstance(kind, str)
+                or not isinstance(label, str)
+                or isinstance(used, bool)
+                or not isinstance(used, (int, float))
+                or (resets is not None and not isinstance(resets, str))
+                or (minutes is not None and (
+                    isinstance(minutes, bool) or not isinstance(minutes, (int, float))
+                ))
+            ):
+                continue
+            safe_window = {
+                "kind": kind,
+                "label": label,
+                "usedPercent": used,
+                "resetsAt": resets,
+            }
+            if "windowMinutes" in window:
+                safe_window["windowMinutes"] = minutes
+            windows.append(safe_window)
+        plan_type = snap.get("planType")
+        return {
+            "provider": "claude",
+            "status": "ok",
+            "planType": plan_type if isinstance(plan_type, str) else None,
+            "windows": windows,
+            "fetchedAt": str(snap.get("fetchedAt") or _now_iso()),
+            "error": None,
+        }
+
+    def _save_cache(self) -> None:
+        if self._cache_path is None:
+            return
+        doc = {
+            "schemaVersion": USAGE_CACHE_SCHEMA_VERSION,
+            "accounts": self._last_good,
+        }
+        path = self._cache_path
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.unlink(missing_ok=True)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fp:
+                    json.dump(doc, fp, indent=2, ensure_ascii=False)
+                os.chmod(tmp, 0o600)
+                os.replace(tmp, path)
+            except Exception:
+                tmp.unlink(missing_ok=True)
+                raise
+        except Exception as err:  # noqa: BLE001 — cache failure must not sink polling
+            log.warning("usage cache write failed: %s", err)
+
+    @staticmethod
+    def _reset_datetime(raw: object) -> datetime | None:
+        if not raw:
+            return None
+        try:
+            reset = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if reset.tzinfo is None:
+            reset = reset.replace(tzinfo=timezone.utc)
+        return reset
+
+    @classmethod
+    def _window_reset_passed(cls, window: dict) -> bool:
+        reset = cls._reset_datetime(window.get("resetsAt"))
+        return reset is not None and reset <= datetime.now(timezone.utc)
+
+    def _refresh_stale_expiry(self, snap: dict) -> None:
+        expired = False
+        for window in snap.get("windows", []):
+            window_expired = self._window_reset_passed(window)
+            if window_expired:
+                window["expired"] = True
+                expired = True
+            else:
+                window.pop("expired", None)
+        snap["staleExpired"] = expired
+
+    def _merge_cached(
+        self, cached: dict, refresh_status: str, attempted_at: str | None,
+        error: str | None = None,
+    ) -> dict:
+        merged = copy.deepcopy(cached)
+        merged.update({
+            "stale": True,
+            "lastSuccessAt": cached.get("fetchedAt"),
+            "refreshStatus": refresh_status,
+            "refreshAttemptedAt": attempted_at,
+            "error": error,
+        })
+        self._refresh_stale_expiry(merged)
+        return merged
+
+    def _record_claude_snapshot(self, slot_id: str, fresh: dict) -> bool:
+        account = self.account_snapshots.setdefault("claude", {})
+        if fresh.get("status") == "ok":
+            good = self._cache_safe_snapshot(fresh)
+            self._last_good.setdefault("claude", {})[slot_id] = good
+            account[slot_id] = {**copy.deepcopy(good), "stale": False,
+                                "lastSuccessAt": good["fetchedAt"]}
+            return True
+        cached = self._last_good.get("claude", {}).get(slot_id)
+        if cached is None:
+            account[slot_id] = fresh
+        else:
+            account[slot_id] = self._merge_cached(
+                cached,
+                str(fresh.get("status") or "error"),
+                fresh.get("fetchedAt"),
+                fresh.get("error"),
+            )
+        return False
+
+    async def _claude_credentials_by_slot(self) -> tuple[str, dict[str, dict | None]] | None:
+        store = _get_profiles_store()
+        vault = _get_credential_vault()
+        resolver = getattr(vault, "resolve_claude_credentials", None) if vault else None
+        if store is None or not callable(resolver):
+            return None
+        async with vault.switch_lock("claude"):
+            doc = await asyncio.to_thread(store.list)
+            active = str(doc["defaults"].get("claude") or "__default__")
+            slot_ids = ["__default__"] + [
+                str(profile["id"])
+                for profile in doc["profiles"]
+                if profile.get("agentKey") == "claude" and profile.get("id")
+            ]
+
+            def _read_all() -> dict[str, dict | None]:
+                return {
+                    slot_id: parse_claude_credentials(
+                        resolver(slot_id, active=slot_id == active).secret
+                    )
+                    for slot_id in slot_ids
+                }
+
+            credentials = await asyncio.to_thread(_read_all)
+        allowed = set(slot_ids)
+        removed = False
+        for mapping in (
+            self._last_good.get("claude", {}),
+            self.account_snapshots.get("claude", {}),
+        ):
+            for slot_id in set(mapping) - allowed:
+                mapping.pop(slot_id, None)
+                removed = True
+        if removed:
+            await asyncio.to_thread(self._save_cache)
+        return active, credentials
 
     def configure(self, enabled: bool, interval_sec: float | None) -> None:
         self.enabled = bool(enabled)
@@ -1176,17 +1419,32 @@ class UsageService:
 
     async def poll_once(self, home: Path | None = None) -> dict:
         home = home or Path.home()
-        import os
-
         codex_home = Path(os.environ["CODEX_HOME"]) if os.environ.get("CODEX_HOME") \
             else home / ".codex"
-        # Every provider reads the real home — accounts share it; profiles only
-        # swap credentials (see credential_vault).
+        # Non-Claude providers retain their real-home reads. Claude resolves
+        # every account independently without switching the active profile.
         await self._harvest_active_slots()
         now = time.monotonic()
+        claude_accounts = await self._claude_credentials_by_slot()
+        cache_changed = False
+        if claude_accounts is None:
+            claude_active = "__default__"
+            claude_coros = {claude_active: lambda: fetch_claude(home)}
+        else:
+            claude_active, credentials = claude_accounts
+            claude_coros = {
+                slot_id: (lambda oauth=oauth: fetch_claude_oauth(oauth))
+                for slot_id, oauth in credentials.items()
+            }
+        self._active_claude_slot = claude_active
+        claude_tasks: dict[str, asyncio.Task] = {}
+        for slot_id, coro in claude_coros.items():
+            key = ("claude", slot_id)
+            if self._blocked_until.get(key, 0) <= now:
+                claude_tasks[slot_id] = asyncio.create_task(coro())
+
         tasks: dict[str, Any] = {}
         for provider, coro in (
-            ("claude", lambda: fetch_claude(home)),
             ("codex", lambda: fetch_codex(codex_home)),
             ("kimi", lambda: fetch_kimi(home)),
             ("grok", lambda: fetch_grok(home)),
@@ -1195,6 +1453,18 @@ class UsageService:
             if self._blocked_until.get(provider, 0) > now:
                 continue
             tasks[provider] = asyncio.create_task(coro())
+        for slot_id, task in claude_tasks.items():
+            try:
+                snap = await task
+            except Exception as err:  # noqa: BLE001 — one account must not sink the rest
+                log.warning("usage poll failed for claude account %s: %s", slot_id, err)
+                snap = _snapshot("claude", "error", error=str(err))
+            retry_after = snap.pop("retryAfterSec", None)
+            cooldown = retry_after if snap["status"] == "rate-limited" else \
+                (RATE_LIMIT_COOLDOWN if snap["status"] == "unavailable" else None)
+            if cooldown:
+                self._blocked_until[("claude", slot_id)] = time.monotonic() + cooldown
+            cache_changed = self._record_claude_snapshot(slot_id, snap) or cache_changed
         for provider, task in tasks.items():
             try:
                 snap = await task
@@ -1207,6 +1477,8 @@ class UsageService:
             if cooldown:
                 self._blocked_until[provider] = time.monotonic() + cooldown
             self.snapshots[provider] = snap
+        if cache_changed:
+            await asyncio.to_thread(self._save_cache)
         return self.payload()
 
     def _next_sleep(self) -> float:
@@ -1214,14 +1486,15 @@ class UsageService:
         reset (CodexBar's reset-boundary refresh)."""
         sleep = self.interval
         now = datetime.now(timezone.utc)
-        for snap in self.snapshots.values():
+        snapshots = list(self.snapshots.values()) + [
+            snap
+            for accounts in self.account_snapshots.values()
+            for snap in accounts.values()
+        ]
+        for snap in snapshots:
             for win in snap.get("windows", []):
-                raw = win.get("resetsAt")
-                if not raw:
-                    continue
-                try:
-                    resets = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-                except ValueError:
+                resets = self._reset_datetime(win.get("resetsAt"))
+                if resets is None:
                     continue
                 delta = (resets - now).total_seconds() + RESET_BOUNDARY_GRACE
                 if 5.0 < delta < sleep:
@@ -1233,19 +1506,24 @@ class UsageService:
         from .ipc import make_event
 
         while self.enabled:
+            # Consume the wake that led to this poll. A refresh requested while
+            # the poll is running remains set and triggers the next iteration.
+            self._wake.clear()
             try:
                 payload = await self.poll_once()
                 await app.broadcast(make_event("usage.changed", payload))
             except Exception as err:  # noqa: BLE001 — poller must survive anything
                 log.warning("usage poll cycle failed: %s", err)
-            self._wake.clear()
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=self._next_sleep())
             except asyncio.TimeoutError:
                 pass
 
 
-service = UsageService()
+service = UsageService(
+    cache_path=app_data_dir() / USAGE_CACHE_FILE,
+    active_claude_slot_reader=lambda: _active_profile_id("claude"),
+)
 
 
 # ── One-time setup (manual only; never auto-run on import or in tests) ───────

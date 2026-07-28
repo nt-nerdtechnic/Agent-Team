@@ -29,7 +29,8 @@ const snap = computed(() => usageFor(props.agentKey))
 const remaining = computed(() => remainingPercent(snap.value))
 const tier = computed(() => (remaining.value === null ? 'ok' : remainingTier(remaining.value)))
 const expired = computed(() => snap.value?.status === 'expired')
-const visible = computed(() => remaining.value !== null || expired.value)
+const cached = computed(() => snap.value?.stale === true)
+const visible = computed(() => remaining.value !== null || expired.value || cached.value)
 
 // Account-switch block: only shown when this agent has ≥1 extra profile.
 const canSwitch = computed(() => props.cliProfiles.hasProfiles(props.agentKey))
@@ -119,6 +120,20 @@ function rowReset(w: UsageWindow): string {
   return `${countdown} · ${formatResetAbsolute(w.resetsAt)}`
 }
 
+function refreshStatusLabel(status: string | undefined): string {
+  if (!status) return ''
+  const known = new Set([
+    'not-refreshed',
+    'no-credentials',
+    'expired',
+    'rate-limited',
+    'unavailable',
+    'error',
+    'ok',
+  ])
+  return known.has(status) ? t(`usage.refresh-status-${status}`) : status
+}
+
 // Per-account avatar: first character over a deterministic color picked from
 // the profile id, so the same account always gets the same tint.
 const AVATAR_COLORS = ['#1f6feb', '#8957e5', '#2da44e', '#bc4c00', '#bf3989', '#1b7c83', '#9e6a03']
@@ -145,13 +160,20 @@ function accountLabel(profileId: string | null, fallback: string): string {
     v-if="visible"
     ref="badgeRef"
     class="usage-badge"
-    :class="tier"
-    :title="open ? '' : $t(expired ? 'usage.expired-tooltip' : 'usage.badge-tooltip')"
+    :class="[tier, { cached }]"
+    :title="
+      open
+        ? ''
+        : $t(expired ? 'usage.expired-tooltip' : cached ? 'usage.cached-tooltip' : 'usage.badge-tooltip')
+    "
     @mouseenter="onEnter"
     @mouseleave="onLeave"
     @click.stop
   >
-    <template v-if="remaining !== null">{{ formatRemaining(remaining) }}</template>
+    <template v-if="remaining !== null">
+      {{ formatRemaining(remaining) }}
+      <small v-if="cached">{{ $t('usage.cached-short') }}</small>
+    </template>
     <template v-else>⚠</template>
   </span>
   <Teleport to="body">
@@ -167,17 +189,27 @@ function accountLabel(profileId: string | null, fallback: string): string {
         <span v-if="snap.planType" class="usage-pop-plan">{{ snap.planType }}</span>
       </div>
       <div v-if="expired" class="usage-pop-expired">{{ $t('usage.expired-tooltip') }}</div>
+      <div v-if="cached" class="usage-pop-cached">
+        {{ $t('usage.cached-at', { time: formatResetAbsolute(snap.lastSuccessAt ?? snap.fetchedAt) }) }}
+        · {{ $t('usage.refresh-status', { status: refreshStatusLabel(snap.refreshStatus) }) }}
+      </div>
+      <div v-if="cached && snap.staleExpired" class="usage-pop-expired">
+        {{ $t('usage.cached-reset-expired') }}
+      </div>
       <div v-for="w in snap.windows" :key="w.kind + w.label" class="usage-row">
         <div class="usage-row-top">
           <span class="usage-row-label">{{ w.label }}</span>
-          <span class="usage-row-left" :class="rowTier(w)">
+          <span v-if="w.expired" class="usage-row-left crit">
+            {{ $t('usage.cached-window-expired') }}
+          </span>
+          <span v-else class="usage-row-left" :class="rowTier(w)">
             {{ $t('usage.remaining', { pct: rowRemaining(w) }) }}
           </span>
         </div>
-        <div class="usage-bar">
+        <div v-if="!w.expired" class="usage-bar">
           <div class="usage-bar-fill" :class="rowTier(w)" :style="{ width: rowBarWidth(w) }" />
         </div>
-        <div v-if="rowReset(w)" class="usage-row-reset">
+        <div v-if="!w.expired && rowReset(w)" class="usage-row-reset">
           {{ $t('usage.resets-in', { time: rowReset(w) }) }}
         </div>
       </div>
@@ -251,6 +283,14 @@ function accountLabel(profileId: string | null, fallback: string): string {
   background: var(--danger-deep);
   border-color: var(--danger-fg);
 }
+.usage-badge.cached {
+  border-style: dashed;
+}
+.usage-badge small {
+  margin-left: 2px;
+  font-size: 8px;
+  font-weight: 500;
+}
 .usage-pop {
   position: fixed;
   z-index: 300;
@@ -281,6 +321,10 @@ function accountLabel(profileId: string | null, fallback: string): string {
 }
 .usage-pop-expired {
   color: var(--danger-fg);
+  margin-bottom: 6px;
+}
+.usage-pop-cached {
+  color: var(--attention-fg);
   margin-bottom: 6px;
 }
 .usage-row {

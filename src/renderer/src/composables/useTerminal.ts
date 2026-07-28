@@ -9,6 +9,7 @@ import { createResizeController, type ResizeController } from './useTerminalResi
 import { installTerminalZoomShortcuts, terminalFontSize } from './useTerminalFontSize'
 import { getResumeConcurrency } from '../lib/resumeConcurrency'
 import { shouldOpenMentionMenu } from '../lib/cliContext'
+import { TERMINAL_CREATE_TIMEOUT_MS } from '../lib/resume-command'
 import { setContext } from '../keybindings/contextService'
 import {
   formatTerminalExit,
@@ -784,7 +785,6 @@ interface UseTerminalOptions {
 // Raised from wsClient's 10s default: the backend's near-8s CLI probe plus PTY
 // fork and attribution scan is legitimately heavier than an average request, so
 // 10s was too tight even for a single healthy spawn.
-const TERMINAL_CREATE_TIMEOUT_MS = 30_000
 let _resumeSpawnActive = 0
 const _resumeSpawnWaiters: Array<() => void> = []
 
@@ -896,6 +896,16 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // Tick so displayStatus re-evaluates after output goes quiet.
   const nowTick = ref<number>(Date.now())
   const tickInterval = window.setInterval(() => { nowTick.value = Date.now() }, 1_000)
+
+  // Starts when spawn() enters the raw STARTING state, before any reattach,
+  // layout, or resume-semaphore wait. App uses this to unlock recovery at the
+  // same deadline as terminal.create itself.
+  const startingStartedAt = ref<number | null>(null)
+  const startingAgeMs = computed<number | null>(() => (
+    status.value === 'starting' && startingStartedAt.value != null
+      ? Math.max(0, nowTick.value - startingStartedAt.value)
+      : null
+  ))
 
   const isStopped = ref(false)
 
@@ -1951,6 +1961,39 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // container is genuinely measurable — i.e. when the tab is shown.
   // A ref so displayStatus can reflect a parked (deferred) spawn as idle.
   const pendingSpawn = shallowRef<SpawnOptions | null>(null)
+  let activeCreateGeneration: string | null = null
+  let pendingCreateCancel: Promise<void> | null = null
+  const createCancelRequests = new Map<string, Promise<void>>()
+
+  function newCreateGeneration(): string {
+    return crypto.randomUUID()
+  }
+
+  function requestCreateCancel(generation: string): Promise<void> {
+    const existing = createCancelRequests.get(generation)
+    if (existing) return existing
+    const request = backend.send('terminal.create.cancel', {
+      pane_id: paneId,
+      create_generation: generation,
+    }).then(() => undefined, () => undefined)
+    createCancelRequests.set(generation, request)
+    return request
+  }
+
+  /** Invalidate the current create locally, then wait for backend rollback. */
+  async function cancelPendingCreate(): Promise<void> {
+    const generation = activeCreateGeneration
+    if (!generation) {
+      if (pendingCreateCancel) await pendingCreateCancel
+      return
+    }
+    activeCreateGeneration = null
+    pendingSpawn.value = null
+    const request = requestCreateCancel(generation)
+    pendingCreateCancel = request
+    await request
+    if (pendingCreateCancel === request) pendingCreateCancel = null
+  }
 
   // Create the PTY for a parked spawn, but only when the container has a real,
   // measurable width. Returns silently (leaving it parked) until then; the
@@ -1970,6 +2013,8 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   async function _doCreate(): Promise<void> {
     const opts = pendingSpawn.value
     if (!opts) return
+    const createGeneration = activeCreateGeneration
+    if (!createGeneration) return
     let el = containerRef.value
     const visible = !!el && el.clientWidth > 0
     // A resume reprints the prior conversation and MUST paint at the real width,
@@ -2040,12 +2085,16 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     const throttled = !!opts.isResume
     if (throttled) await acquireResumeSpawnSlot()
     try {
+      // The pane may have been cancelled while waiting for the shared resume
+      // semaphore. Never send a create for an invalidated generation.
+      if (activeCreateGeneration !== createGeneration || isDisposed) return
       const resp = await backend.send<{
         terminal_session_id: string
         pid: number
         startup_probe?: TerminalStartupProbe | null
       }>('terminal.create', {
         pane_id: paneId,
+        create_generation: createGeneration,
         agent_key: opts.agentKey ?? null,
         command: opts.command,
         cwd: opts.cwd,
@@ -2059,15 +2108,16 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         output_log_file: opts.outputLogFile ?? null,
         login_profile_id: opts.loginProfileId ?? null,
       }, TERMINAL_CREATE_TIMEOUT_MS)
-      if (isDisposed) {
-        // If the composable was torn down while the spawn was in flight,
-        // kill the orphaned terminal session immediately so it doesn't leak.
-        if (resp.ok && resp.payload?.terminal_session_id) {
-          backend.send('terminal.kill', { terminal_session_id: resp.payload.terminal_session_id }).catch(() => {})
-        }
+      // A cancellation or replacement can land while the RPC is in flight.
+      // The backend cancellation owns rollback; a late result must never bind
+      // its PTY or overwrite the newer pane state.
+      if (isDisposed || activeCreateGeneration !== createGeneration) {
+        void requestCreateCancel(createGeneration)
         return
       }
       if (!resp.ok || !resp.payload) {
+        activeCreateGeneration = null
+        void requestCreateCancel(createGeneration)
         status.value = 'error'
         error.value = resp.error?.message ?? 'spawn failed'
         term.writeln(`\r\n\x1b[31m[error] ${error.value}\x1b[0m`)
@@ -2077,6 +2127,8 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         }
         return
       }
+      activeCreateGeneration = null
+      startingStartedAt.value = null
       sessionId.value = resp.payload.terminal_session_id
       rememberSessionId(sessionId.value)  // enable reattach after a reload
       status.value = 'running'
@@ -2104,6 +2156,9 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       queueMicrotask(() => focus())
       bindSessionHandlers()
     } catch (err) {
+      if (activeCreateGeneration !== createGeneration) return
+      activeCreateGeneration = null
+      void requestCreateCancel(createGeneration)
       status.value = 'error'
       error.value = String((err as Error).message ?? err)
       term.writeln(`\r\n\x1b[31m[error] ${error.value}\x1b[0m`)
@@ -2174,6 +2229,9 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     isStopped.value = false
     error.value = ''
     status.value = 'starting'
+    startingStartedAt.value = Date.now()
+    const createGeneration = newCreateGeneration()
+    activeCreateGeneration = createGeneration
     activeAgentKey = opts.agentKey
     activeCrashKey = terminalCrashKey({
       agentKey: opts.agentKey,
@@ -2182,6 +2240,8 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       command: opts.command,
     })
     if (opts.isResume && isTerminalCrashLoopOpen(activeCrashKey)) {
+      activeCreateGeneration = null
+      startingStartedAt.value = null
       status.value = 'error'
       error.value = 'Automatic rebuild stopped after 3 fast crashes. Use Respawn after fixing the CLI.'
       term.writeln(`\r\n\x1b[31m[error] ${error.value}\x1b[0m`)
@@ -2194,7 +2254,12 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // True persistence: a PTY from before a reload may still be running. Reattach
     // to it (recovering bash/build panes too, with no --resume round-trip) before
     // spawning anew. Falls through to a fresh spawn if the PTY is gone.
-    if (!opts.skipReattach && await tryReattach()) return
+    if (!opts.skipReattach && await tryReattach()) {
+      if (activeCreateGeneration === createGeneration) activeCreateGeneration = null
+      startingStartedAt.value = null
+      return
+    }
+    if (activeCreateGeneration !== createGeneration || isDisposed) return
     // Park the spawn and create the PTY only once the container is measurable, so
     // the CLI paints at the real width. Visible panes create immediately; a
     // hidden-tab pane creates when its tab is first shown (reconciler/observer).
@@ -2293,6 +2358,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
 
   onScopeDispose(() => {
     isDisposed = true
+    void cancelPendingCreate()
     saveScrollSnapshot()  // persist scrollback before the pane is torn down
     cleanupSession()
     clearInterval(tickInterval)
@@ -2331,6 +2397,9 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     pasteText,
     status,
     displayStatus,
+    startingStartedAt,
+    startingAgeMs,
+    cancelPendingCreate,
     isStopped,
     sessionId,
     error,

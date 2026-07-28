@@ -4,7 +4,7 @@
 import { MSG_START, MSG_END, MSG_ENVELOPE_PREFIX } from '../lib/agentMessaging'
 
 export type StageId = string
-export type AgentKey = 'claude' | 'codex' | 'antigravity' | 'grok' | 'kimi'
+export type AgentKey = 'claude' | 'codex' | 'antigravity' | 'grok' | 'kimi' | 'opencode' | 'qwen' | 'kilo' | 'pi' | 'copilot' | 'cursor' | 'aider'
 
 /**
  * One participant in a multi-agent parallel stage.

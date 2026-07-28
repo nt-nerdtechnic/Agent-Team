@@ -79,9 +79,17 @@ const VENDOR_LABELS: Record<string, string> = {
   antigravity: 'Antigravity',
   grok: 'Grok',
   kimi: 'Kimi',
+  opencode: 'OpenCode',
+  qwen: 'Qwen Code',
+  kilo: 'Kilo Code',
+  pi: 'Pi',
+  copilot: 'Copilot CLI',
+  // Cursor CLI stores no token data locally; label shown, stats stay empty.
+  cursor: 'Cursor CLI',
+  aider: 'Aider',
   analyzer: 'Local analyzer'
 }
-const KNOWN_VENDORS = ['claude', 'codex', 'antigravity', 'grok', 'kimi', 'analyzer']
+const KNOWN_VENDORS = ['claude', 'codex', 'antigravity', 'grok', 'kimi', 'opencode', 'qwen', 'kilo', 'pi', 'copilot', 'cursor', 'aider', 'analyzer']
 
 // Vendor / Stage breakdowns come from workspace CUMULATIVE (not just current run)
 // so they remain visible even when no pipeline is actively running. The current

@@ -8,6 +8,16 @@
 //   • agy --conversation <id>
 //   • grok -s <id>           ← short flag (12-hex session id)
 //   • kimi --session <id>    ← id is the `session_<uuid>` dir name
+//   • opencode --session <id> ← id is `ses_`-prefixed
+//   • qwen --resume <id>      ← id is a UUID (default `--resume` branch)
+//   • kilo --session <id>     ← id is `ses_`-prefixed
+//   • pi --session-id <id>    ← id is a UUID (creates a NEW session when the
+//                                id doesn't exist, resumes when it does)
+//   • copilot --resume=<id>   ← id is a UUID; NOTE the `=` form (creates a NEW
+//                                session when the id doesn't exist)
+//   • cursor-agent --resume=<id> ← id is a UUID; `=` form
+//   • aider --restore-chat-history ← NO session ids at all; lossy restore from
+//                                the project's .aider.chat.history.md
 //
 // `skipFlag` is the vendor's permission-bypass flag (or "" when YOLO is off),
 // appended verbatim — same flags resolveCommand() uses for a fresh launch.
@@ -89,8 +99,14 @@ export function dedupeRestorablePanes<T extends { agent?: string; session_id?: s
   return out
 }
 
-/** CLIs whose panes can be re-spawned via `<cli> --resume <id>`. */
-export const REBUILD_CAPABLE_AGENTS = ['claude', 'codex', 'antigravity', 'grok', 'kimi']
+/** CLIs whose panes can be re-spawned via `<cli> --resume <id>`. Aider is
+ * excluded: it has no session ids, so paneCanRebuild's pinnedSessionId +
+ * sessionOnDisk gates (set only by session.detected / resume spawns) can
+ * never be satisfied — the button would render permanently disabled. */
+export const REBUILD_CAPABLE_AGENTS = ['claude', 'codex', 'antigravity', 'grok', 'kimi', 'opencode', 'qwen', 'kilo', 'pi', 'copilot', 'cursor']
+
+/** Shared deadline for a terminal create RPC and the STARTING rebuild guard. */
+export const TERMINAL_CREATE_TIMEOUT_MS = 30_000
 
 /** CLIs whose panes may keep the SAVED session id pinned when a restore
  * spawns them fresh (spawn opt sessionKnownOnDisk) so the Rebuild button
@@ -134,11 +150,57 @@ export function paneCanRebuild(pane: {
   return REBUILD_CAPABLE_AGENTS.includes(pane.agentKey)
 }
 
+/** Protect active work and terminal creation, but allow rebuilding a silent
+ * PTY that is already running while its display badge still says starting. */
+export function paneBusyForRebuild(
+  displayStatus?: string,
+  terminalStatus?: string,
+  startingAgeMs?: number | null,
+): boolean {
+  if (displayStatus === 'running') return true
+  if (displayStatus !== 'starting' || terminalStatus !== 'starting') return false
+  return startingAgeMs == null || startingAgeMs < TERMINAL_CREATE_TIMEOUT_MS
+}
+
+/** Acquire every rebuild identity atomically; null means another rebuild owns one. */
+export function acquirePaneRebuildLock(
+  locks: Set<string>,
+  keys: string[],
+): (() => void) | null {
+  if (keys.some((key) => locks.has(key))) return null
+  for (const key of keys) locks.add(key)
+  return () => { for (const key of keys) locks.delete(key) }
+}
+
+/** Wait for rollback only when raw STARTING has reached the create deadline. */
+export async function cancelStalePendingCreate(
+  terminalStatus: string | undefined,
+  startingAgeMs: number | null | undefined,
+  cancel: (() => Promise<void>) | undefined,
+): Promise<void> {
+  if (
+    terminalStatus === 'starting' &&
+    startingAgeMs != null &&
+    startingAgeMs >= TERMINAL_CREATE_TIMEOUT_MS
+  ) {
+    await cancel?.()
+  }
+}
+
 export function buildResumeCommand(
   agentKey: string,
   sessionId: string,
   skipFlag = ''
 ): string {
+  // Aider has no session ids: resume is always the lossy
+  // `--restore-chat-history` (reads the project's .aider.chat.history.md),
+  // so the passed id — always empty for aider — is ignored.
+  if (agentKey === 'aider') {
+    const aiderFlag = skipFlag.trim()
+    return aiderFlag
+      ? `aider --restore-chat-history ${aiderFlag}`
+      : 'aider --restore-chat-history'
+  }
   const id = normalizeResumeSessionId(agentKey, sessionId)
   if (!id) return '' // no id → caller falls back to a fresh spawn
   const base =
@@ -150,6 +212,16 @@ export function buildResumeCommand(
           ? `grok -s ${id}`
           : agentKey === 'kimi'
             ? `kimi --session ${id}`
+            : agentKey === 'opencode'
+              ? `opencode --session ${id}`
+              : agentKey === 'kilo'
+                ? `kilo --session ${id}`
+                : agentKey === 'pi'
+                  ? `pi --session-id ${id}`
+                  : agentKey === 'copilot'
+                    ? `copilot --resume=${id}`
+                    : agentKey === 'cursor'
+                      ? `cursor-agent --resume=${id}`
       : `${agentKey} --resume ${id}`
   const flag = skipFlag.trim()
   return flag ? `${base} ${flag}` : base

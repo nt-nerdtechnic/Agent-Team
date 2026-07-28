@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { ref } from 'vue'
 import {
   __resetUsageForTest,
+  accountUsageFor,
   formatRemaining,
   formatResetCountdown,
   initUsage,
@@ -80,6 +81,39 @@ describe('useUsage store', () => {
     expect(usageFor(undefined)).toBeUndefined()
   })
 
+  it('stores account snapshots by provider and stable slot id', () => {
+    const { backend, emit } = fakeBackend()
+    initUsage(backend as never)
+    emit('usage.changed', {
+      providers: { claude: snap({ fetchedAt: '2026-07-24T03:00:00Z' }) },
+      accounts: {
+        claude: {
+          __default__: snap({ windows: [{ kind: 'session', label: 'Session', usedPercent: 20, resetsAt: null }] }),
+          p1: snap({ windows: [{ kind: 'session', label: 'Session', usedPercent: 70, resetsAt: null }] }),
+        },
+      },
+    })
+
+    expect(accountUsageFor('claude', null)?.windows[0].usedPercent).toBe(20)
+    expect(accountUsageFor('claude', 'p1')?.windows[0].usedPercent).toBe(70)
+    expect(accountUsageFor('claude', 'missing')).toBeUndefined()
+    expect(usageFor('claude')?.fetchedAt).toBe('2026-07-24T03:00:00Z')
+  })
+
+  it('clears account snapshots when a legacy backend sends providers only', () => {
+    const { backend, emit } = fakeBackend()
+    initUsage(backend as never)
+    emit('usage.changed', {
+      providers: { claude: snap() },
+      accounts: { claude: { p1: snap() } },
+    })
+    expect(accountUsageFor('claude', 'p1')).toBeDefined()
+
+    emit('usage.changed', { providers: { claude: snap({ fetchedAt: '2026-07-24T04:00:00Z' }) } })
+    expect(accountUsageFor('claude', 'p1')).toBeUndefined()
+    expect(usageFor('claude')?.fetchedAt).toBe('2026-07-24T04:00:00Z')
+  })
+
   it('remainingPercent inverts the first window and gates on status', () => {
     expect(remainingPercent(snap())).toBe(58)
     expect(remainingPercent(snap({ status: 'expired' }))).toBeNull()
@@ -103,6 +137,19 @@ describe('useUsage store', () => {
       windows: [{ kind: 'weekly-model', label: 'Fable only', usedPercent: 100, resetsAt: null }]
     })
     expect(remainingPercent(onlyFable)).toBe(0)
+  })
+
+  it('remainingPercent ignores cached windows whose reset has passed', () => {
+    const stale = snap({
+      stale: true,
+      staleExpired: true,
+      windows: [
+        { kind: 'session', label: 'Session', usedPercent: 20, resetsAt: null, expired: true },
+        { kind: 'weekly', label: 'Weekly', usedPercent: 60, resetsAt: null },
+      ],
+    })
+    expect(remainingPercent(stale)).toBe(40)
+    expect(remainingPercent({ ...stale, windows: [stale.windows[0]] })).toBeNull()
   })
 
   it('remainingTier thresholds: >40 ok, 15-40 warn, <15 crit', () => {

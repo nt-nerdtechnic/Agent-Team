@@ -15,6 +15,13 @@ import { describe, expect, it } from 'vitest'
 const localesDir = resolve('src/renderer/src/i18n/locales')
 const localeFiles = readdirSync(localesDir).filter((fileName) => fileName.endsWith('.json')).sort()
 
+function leafKeys(value: unknown, prefix = ''): string[] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return [prefix]
+  return Object.entries(value).flatMap(([key, child]) =>
+    leafKeys(child, prefix ? `${prefix}.${key}` : key)
+  )
+}
+
 describe('locale JSON files', () => {
   it.each(localeFiles)('%s contains no duplicate object keys', (fileName) => {
     const sourceFile = parseJsonText(fileName, readFileSync(resolve(localesDir, fileName), 'utf8'))
@@ -45,5 +52,14 @@ describe('locale JSON files', () => {
 
     visit(sourceFile)
     expect(duplicates, duplicates.join('\n')).toEqual([])
+  })
+
+  it('keeps every locale key set in parity', () => {
+    const [baseFile, ...otherFiles] = localeFiles
+    const base = leafKeys(JSON.parse(readFileSync(resolve(localesDir, baseFile), 'utf8'))).sort()
+    for (const fileName of otherFiles) {
+      const keys = leafKeys(JSON.parse(readFileSync(resolve(localesDir, fileName), 'utf8'))).sort()
+      expect(keys, `${fileName} keys differ from ${baseFile}`).toEqual(base)
+    }
   })
 })

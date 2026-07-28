@@ -51,24 +51,41 @@ from .codex_home import CodexHomeManager
 from .ipc import make_error, make_event, make_response
 from .log_readers import (
     ActivityEvent,
+    AiderLogReader,
     AntigravityLogReader,
     ClaudeLogReader,
     CodexLogReader,
+    CopilotLogReader,
+    CursorLogReader,
     GrokLogReader,
+    KiloLogReader,
     KimiLogReader,
     LogWatcher,
+    OpencodeLogReader,
+    PiLogReader,
+    QwenLogReader,
     TokenSinkResult,
     TokenUsage,
 )
+from .log_readers.aider import aider_history_path
 from .log_readers.attribution import Attribution
 from .log_readers.claude import encode_claude_cwd
+from .log_readers.copilot import copilot_root
+from .log_readers.qwen import qwen_root
 from .credential_vault import CredentialVault
 from .doc_injector import fetch_stage_docs
 from .mcp_manager import MCPManager
-from .mcp_settings import MCPServersDocument, MCPSettingsStore
+from .mcp_settings import (
+    MCPServersDocument,
+    MCPSettingsConflictError,
+    MCPSettingsError,
+    MCPSettingsStore,
+    redact_mcp_server_secrets,
+)
 from .plan_provisioning import ensure_plan_assets, plan_spec_exists
 from .profile_migration import migrate_legacy_claude_homes
 from .profiles_store import CliProfilesStore
+from .skills_store import SkillsStore
 from .chat_store import ChatStore
 from .projects import ProjectStore
 from .spawn_history import SpawnHistoryStore
@@ -112,6 +129,7 @@ credential_vault = CredentialVault()
 mcp_manager = MCPManager()
 plugin_host = PluginHost()
 mcp_settings_store = MCPSettingsStore()
+skills_store = SkillsStore()
 analyzer_settings_store = AnalyzerSettingsStore()
 ai_chat_settings_store = AIChatSettingsStore()
 ui_settings_store = UiSettingsStore()
@@ -154,6 +172,8 @@ def _settings_paths() -> dict[str, str]:
         "roles": str(roles_store.path),
         "pipelines": str(stages_store.path),
         "mcp": str(mcp_settings_store.path),
+        "skills": str(skills_store.root),
+        "skills_state": str(skills_store.state_path),
         "analyzer": str(analyzer_settings_store.path),
         "ai_chat": str(ai_chat_settings_store.path),
         "backend_log": str(backend_log_path()),
@@ -175,11 +195,11 @@ def _settings_bundle() -> dict[str, Any]:
         "paths": _settings_paths(),
         "roles": roles_store.list(),
         "pipelines_document": stages_store.export_document(),
-        "mcp_servers": mcp_settings_store.list_servers(),
+        "mcp_servers": redact_mcp_server_secrets(mcp_settings_store.list_servers()),
         "analyzer": analyzer_settings_store.get(),
         "ai_chat": _redact_ai_chat_settings(ai_chat_settings_store.get()),
         "notes": {
-            "secrets": "API keys and tokens are redacted and are not restored on import.",
+            "secrets": "API keys and tokens are redacted; local values are preserved on import.",
         },
     }
 
@@ -289,7 +309,7 @@ async def analyzer_benchmark(progress_cb=None) -> list:
     return await _llama_benchmark(progress_cb=progress_cb)
 
 # Log readers: one per vendor. Attribution maps log session files to panes.
-_readers = [ClaudeLogReader(), CodexLogReader(), AntigravityLogReader(), GrokLogReader(), KimiLogReader()]
+_readers = [ClaudeLogReader(), CodexLogReader(), AntigravityLogReader(), GrokLogReader(), KimiLogReader(), OpencodeLogReader(), QwenLogReader(), KiloLogReader(), PiLogReader(), CopilotLogReader(), CursorLogReader(), AiderLogReader()]
 attribution = Attribution(_readers)
 _log_watcher: LogWatcher | None = None
 _git_watcher: GitWatcher | None = None
@@ -336,6 +356,13 @@ class Session:
         # In-flight handle_message tasks; cancelled in ws() finally so handlers
         # never outlive the connection and drain onto a closed socket.
         self._handler_tasks: set[asyncio.Task] = set()
+        # terminal.create is transactional until its result is sent.  Gates
+        # serialize generations for one pane; tombstones let a concurrent
+        # terminal.create.cancel stop work before Popen; transactions hold the
+        # post-Popen resources that cancellation must roll back.
+        self._terminal_create_gates: dict[str, asyncio.Lock] = {}
+        self._terminal_create_tombstones: set[tuple[str, str]] = set()
+        self._terminal_create_transactions: dict[tuple[str, str], dict[str, Any]] = {}
         # In-flight find_in_files cancellation handle: a newer search from
         # this session sets the event so the superseded scan stops early.
         self._search_cancel: threading.Event | None = None
@@ -568,7 +595,7 @@ def _claim_ptys(session: "Session", terminal_session_ids: list[str]) -> None:
 
 
 async def _maybe_announce_session(usage: TokenUsage) -> None:
-    """Codex/Antigravity/Grok: when a session file is first matched to its pane,
+    """Codex/Antigravity/Grok/OpenCode: when a session file is first matched to its pane,
     tell the frontend so it can persist the id/path for resume-on-restart."""
     bound = await asyncio.to_thread(attribution.maybe_announce_session, usage)
     if not bound:
@@ -583,7 +610,7 @@ async def _maybe_announce_session(usage: TokenUsage) -> None:
 
 
 async def _on_session_file(vendor: str, path: Path) -> None:
-    """Watcher session sink: a Codex/Antigravity/Grok/Kimi session file changed.
+    """Watcher session sink: a Codex/Antigravity/Grok/Kimi/OpenCode session file changed.
     Attempt marker binding directly off the file (decoupled from token parsing,
     so it works for session-file formats the token reader doesn't understand)."""
     reader = next((r for r in _readers if r.vendor == vendor), None)
@@ -807,7 +834,25 @@ def _register_workspace_and_backfill(workspace_path: str) -> None:
             watcher.force_rescan(workspace_path)
 
 
-_INHERITED_CLI_HOME_VARS = ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "KIMI_CODE_HOME", "GROK_HOME")
+_INHERITED_CLI_HOME_VARS = (
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME",
+    "KIMI_CODE_HOME",
+    "GROK_HOME",
+    "OPENCODE_CONFIG_DIR",
+    "OPENCODE_CONFIG",
+    "PI_CODING_AGENT_DIR",
+    "PI_CODING_AGENT_SESSION_DIR",
+    "PI_PACKAGE_DIR",
+    "QWEN_HOME",
+    "QWEN_RUNTIME_DIR",
+    "KILO_CONFIG_DIR",
+    "KILO_CONFIG",
+    "KILO_DB",
+    "COPILOT_HOME",
+    "AIDER_CHAT_HISTORY_FILE",
+    "AIDER_INPUT_HISTORY_FILE",
+)
 
 
 def _sanitize_inherited_cli_env() -> None:
@@ -1034,31 +1079,120 @@ async def fs_page(ws_b64: str, rel: str) -> FileResponse:
 
 @app.get("/mcp/servers")
 async def list_mcp_servers() -> dict[str, Any]:
+    try:
+        servers = await asyncio.to_thread(mcp_settings_store.list_servers)
+    except MCPSettingsError as err:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "MCP_SETTINGS_INVALID",
+                "message": str(err),
+                "details": {"path": str(mcp_settings_store.path)},
+            },
+        ) from err
     return {
-        "servers": mcp_settings_store.list_servers(),
+        "servers": servers,
         "path": str(mcp_settings_store.path),
+        "revision": str(mcp_settings_store.revision),
     }
 
 
-@app.put("/mcp/servers")
-async def replace_mcp_servers(document: MCPServersDocument) -> dict[str, Any]:
-    try:
-        servers = mcp_settings_store.replace_servers(
-            [server.model_dump() for server in document.servers]
+def _mcp_expected_revision(payload: dict[str, Any]) -> int:
+    raw = payload.get("expected_revision")
+    if raw is None:
+        raise HTTPException(
+            status_code=428,
+            detail={
+                "code": "MCP_REVISION_REQUIRED",
+                "message": "expected_revision is required",
+                "details": {"field": "expected_revision"},
+            },
         )
-        await mcp_manager.reload(mcp_settings_store.path)
-        return {"ok": True, "servers": servers}
+    if isinstance(raw, bool) or not isinstance(raw, (str, int)):
+        revision = None
+    else:
+        try:
+            revision = int(raw)
+        except ValueError:
+            revision = None
+    if revision is None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "MCP_VALIDATION_ERROR",
+                "message": "expected_revision must be an integer revision string",
+                "details": {"field": "expected_revision"},
+            },
+        )
+    return revision
+
+
+def _raise_mcp_http_store_error(err: MCPSettingsError) -> None:
+    if isinstance(err, MCPSettingsConflictError):
+        detail = {
+            "code": "MCP_SETTINGS_CONFLICT",
+            "message": str(err),
+            "details": {
+                "expected_revision": str(err.expected_revision),
+                "actual_revision": str(err.actual_revision),
+                "path": str(mcp_settings_store.path),
+            },
+        }
+    else:
+        detail = {
+            "code": "MCP_SETTINGS_INVALID",
+            "message": str(err),
+            "details": {"path": str(mcp_settings_store.path)},
+        }
+    raise HTTPException(status_code=409, detail=detail) from err
+
+
+@app.put("/mcp/servers")
+async def replace_mcp_servers(payload: dict[str, Any]) -> dict[str, Any]:
+    expected_revision = _mcp_expected_revision(payload)
+    try:
+        document = MCPServersDocument.model_validate(payload)
     except ValidationError as err:
-        raise HTTPException(status_code=422, detail=err.errors()) from err
-    except ValueError as err:
-        raise HTTPException(status_code=400, detail=str(err)) from err
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "MCP_VALIDATION_ERROR",
+                "message": "invalid MCP server settings",
+                "details": {"errors": err.errors()},
+            },
+        ) from err
+    try:
+        servers = await asyncio.to_thread(
+            mcp_settings_store.replace_servers,
+            [server.model_dump() for server in document.servers],
+            expected_revision,
+        )
+    except MCPSettingsError as err:
+        _raise_mcp_http_store_error(err)
+    await mcp_manager.reload(mcp_settings_store.path)
+    return {
+        "ok": True,
+        "servers": servers,
+        "revision": str(mcp_settings_store.revision),
+    }
 
 
 @app.post("/mcp/servers/reset")
-async def reset_mcp_servers() -> dict[str, Any]:
-    servers = mcp_settings_store.reset()
+async def reset_mcp_servers(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    expected_revision = _mcp_expected_revision(payload or {})
+    try:
+        servers = await asyncio.to_thread(
+            mcp_settings_store.reset,
+            expected_revision,
+        )
+    except MCPSettingsError as err:
+        _raise_mcp_http_store_error(err)
     await mcp_manager.reload(mcp_settings_store.path)
-    return {"ok": True, "servers": servers}
+    return {
+        "ok": True,
+        "servers": servers,
+        "revision": str(mcp_settings_store.revision),
+    }
 
 
 @app.post("/hooks/claude")
@@ -1185,6 +1319,13 @@ def _claude_session_file(workspace_path: str, session_id: str) -> Path:
     return Path.home() / ".claude" / "projects" / project_dir / f"{session_id}.jsonl"
 
 
+def _qwen_session_file(workspace_path: str, session_id: str) -> Path:
+    # Qwen Code reuses Claude's cwd encoding for its per-project dirs; the
+    # session file is named after the id `qwen --resume <id>` accepts.
+    project_dir = encode_claude_cwd(workspace_path)
+    return qwen_root() / "projects" / project_dir / "chats" / f"{session_id}.jsonl"
+
+
 _CODEX_RESUME_RE = re.compile(r"^codex\s+resume\s+(\S+)")
 
 
@@ -1225,17 +1366,97 @@ def _kimi_resume_id(command: Any) -> str:
     return m.group(1) if m else ""
 
 
+# Same optional-id guard as Kimi: the capture must not swallow a following flag.
+_OPENCODE_RESUME_RE = re.compile(r"^opencode\s+(?:\S+\s+)*(?:--session|-s)\s+([^-\s]\S*)")
+
+
+def _opencode_resume_id(command: Any) -> str:
+    """Session id from an `opencode ... --session <id>` / `-s <id>` command ('' otherwise)."""
+    m = _OPENCODE_RESUME_RE.match(_command_text(command).strip())
+    return m.group(1) if m else ""
+
+
+# Kilo Code is an OpenCode fork and keeps its resume flags — same
+# optional-id guard so the capture never swallows a following flag.
+_KILO_RESUME_RE = re.compile(r"^kilo\s+(?:\S+\s+)*(?:--session|-s)\s+([^-\s]\S*)")
+
+
+def _kilo_resume_id(command: Any) -> str:
+    """Session id from a `kilo ... --session <id>` / `-s <id>` command ('' otherwise)."""
+    m = _KILO_RESUME_RE.match(_command_text(command).strip())
+    return m.group(1) if m else ""
+
+
+# Same optional-id guard as Kimi: `--resume` can appear bare (interactive
+# picker), so the capture must not swallow a following flag.
+_QWEN_RESUME_RE = re.compile(r"^qwen\s+(?:\S+\s+)*(?:--resume|-r)\s+([^-\s]\S*)")
+
+
+def _qwen_resume_id(command: Any) -> str:
+    """Session id from a `qwen ... --resume <id>` / `-r <id>` command ('' otherwise)."""
+    m = _QWEN_RESUME_RE.match(_command_text(command).strip())
+    return m.group(1) if m else ""
+
+
+# `pi --session-id <id>` resumes when the id exists and creates a NEW session
+# under that id otherwise — either way the id names this pane's session, so
+# it is claimed like Claude's --session-id. Same flag guard as Kimi so the
+# capture never swallows a following flag (Pi ids can't start with "-").
+_PI_RESUME_RE = re.compile(r"^pi\s+(?:\S+\s+)*--session-id\s+([^-\s]\S*)")
+
+
+def _pi_resume_id(command: Any) -> str:
+    """Session id from a `pi ... --session-id <id>` command ('' otherwise)."""
+    m = _PI_RESUME_RE.match(_command_text(command).strip())
+    return m.group(1) if m else ""
+
+
+# `copilot --resume=<id>` (or `--resume <id>`) resumes when the id exists and
+# creates a NEW session under that UUID otherwise — either way the id names
+# this pane's session, so it is claimed like Pi's --session-id. `--resume`
+# can also appear bare (interactive picker), so the space form must not
+# swallow a following flag.
+_COPILOT_RESUME_RE = re.compile(
+    r"^copilot\s+(?:\S+\s+)*--resume(?:=(\S+)|\s+([^-\s]\S*))"
+)
+
+
+def _copilot_resume_id(command: Any) -> str:
+    """Session id from a `copilot ... --resume=<id>` / `--resume <id>` command ('' otherwise)."""
+    m = _COPILOT_RESUME_RE.match(_command_text(command).strip())
+    return (m.group(1) or m.group(2)) if m else ""
+
+
+# Cursor CLI's binary is `agent` (legacy installs: `cursor-agent`); both take
+# `--resume=<chatId>` / `--resume <chatId>`. `--resume` can also appear bare
+# (= is optional), so the space form must not swallow a following flag.
+_CURSOR_RESUME_RE = re.compile(
+    r"^(?:agent|cursor-agent)\s+(?:\S+\s+)*--resume(?:=(\S+)|\s+([^-\s]\S*))"
+)
+
+
+def _cursor_resume_id(command: Any) -> str:
+    """Session id from an `agent ... --resume=<id>` / `cursor-agent ... --resume <id>` command ('' otherwise)."""
+    m = _CURSOR_RESUME_RE.match(_command_text(command).strip())
+    return (m.group(1) or m.group(2)) if m else ""
+
+
 def _session_lookup_path(agent: str, workspace_path: str, session_id: str) -> str:
     """The filesystem path the resume preflight checks for this session — logged
     and returned so a failed resume is diagnosable (e.g. a cwd whose non-ASCII
     chars encode to a colliding claude projects dir). '' when the vendor owns
-    the location and there is no single stable path (codex/grok)."""
+    the location and there is no single stable path (codex/grok/opencode/kilo,
+    pi — whose filename carries a timestamp prefix the id alone can't
+    reconstruct — and cursor, whose path has a project-hash segment the id
+    alone can't name)."""
     agent = agent.strip().lower()
     session_id = session_id.strip()
     if not session_id:
         return ""
     if agent == "claude":
         return str(_claude_session_file(workspace_path, session_id))
+    if agent == "qwen":
+        return str(_qwen_session_file(workspace_path, session_id))
     if agent == "antigravity":
         # Antigravity stores each conversation as a SQLite db; the id is the
         # filename stem accepted by `agy --conversation <id>`.
@@ -1243,6 +1464,21 @@ def _session_lookup_path(agent: str, workspace_path: str, session_id: str) -> st
             Path.home() / ".gemini" / "antigravity-cli" / "conversations"
             / f"{session_id}.db"
         )
+    if agent == "copilot":
+        # Copilot stores each session at <root>/session-state/<id>/
+        # events.jsonl, so the id alone names the path. Preflight matters
+        # here like Pi's: `copilot --resume=<stale-id>` would not fail, it
+        # would silently start a blank NEW session under that UUID.
+        return str(copilot_root() / "session-state" / session_id / "events.jsonl")
+    if agent == "aider":
+        # Aider has NO session id: resume is the id-less, lossy
+        # `aider --restore-chat-history`, which re-reads the workspace's
+        # history file. The path is derivable from the workspace alone; the
+        # recorded id (a started-at section slug) is informational and never
+        # names the file — a slug that no longer matches any section after
+        # aider summarizes history is still restorable by design, so the
+        # generic is_file() check on this path is the whole preflight.
+        return str(aider_history_path(workspace_path))
     return ""
 
 
@@ -1270,6 +1506,42 @@ def _session_exists(agent: str, workspace_path: str, session_id: str) -> bool:
         # `kimi --session <id>` that dead-ends the pane at startup.
         reader = next((r for r in _readers if r.vendor == "kimi"), None)
         return reader.has_session(session_id) if isinstance(reader, KimiLogReader) else False
+    if agent == "opencode":
+        # OpenCode keeps every session in one shared SQLite db; ask the reader
+        # so a stale persisted id fails preflight instead of launching a
+        # doomed `opencode --session <id>`.
+        reader = next((r for r in _readers if r.vendor == "opencode"), None)
+        return reader.has_session(session_id) if isinstance(reader, OpencodeLogReader) else False
+    if agent == "kilo":
+        # Kilo Code (OpenCode fork) likewise keeps every session in one shared
+        # SQLite db; ask the reader so a stale persisted id fails preflight
+        # instead of launching a doomed `kilo --session <id>`.
+        reader = next((r for r in _readers if r.vendor == "kilo"), None)
+        return reader.has_session(session_id) if isinstance(reader, KiloLogReader) else False
+    if agent == "qwen":
+        # Qwen stores each session at <root>/projects/<encoded-cwd>/chats/
+        # <id>.jsonl; ask the reader (which also scans chats/archive/ and
+        # other project dirs) so an archived-but-resumable session still
+        # passes preflight.
+        reader = next((r for r in _readers if r.vendor == "qwen"), None)
+        return reader.has_session(session_id) if isinstance(reader, QwenLogReader) else False
+    if agent == "pi":
+        # Pi stores each session at ~/.pi/agent/sessions/<encoded-cwd>/
+        # <timestamp>_<id>.jsonl — the timestamp prefix means the id alone
+        # can't name the file, so ask the reader (filename glob + header-id
+        # check). Preflight matters doubly here: `pi --session-id <stale-id>`
+        # would not fail, it would silently start a blank NEW session.
+        reader = next((r for r in _readers if r.vendor == "pi"), None)
+        return reader.has_session(session_id) if isinstance(reader, PiLogReader) else False
+    if agent == "cursor":
+        # Cursor stores each session at ~/.cursor/chats/<project-hash>/<id>/
+        # store.db; the project-hash segment is not reliably derivable from
+        # the workspace (community-documented md5(cwd), unconfirmed), so the
+        # reader globs across every project dir. Preflight matters here: the
+        # behaviour of `agent --resume=<stale-id>` is unverified, so a stale
+        # id must fail fast instead of launching a doomed resume.
+        reader = next((r for r in _readers if r.vendor == "cursor"), None)
+        return reader.has_session(session_id) if isinstance(reader, CursorLogReader) else False
     path = _session_lookup_path(agent, workspace_path, session_id)
     if path:
         return Path(path).is_file()

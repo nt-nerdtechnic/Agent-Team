@@ -318,18 +318,30 @@ class TerminalService:
             os.close(master)
             os.close(slave)
             raise
-        os.close(slave)
+        try:
+            os.close(slave)
+        except BaseException:
+            self._abort_failed_create(proc, master, registry_future=None)
+            raise
         # Record the child so a future backend start can reap it if this
         # process dies without running its shutdown sweep. register runs a ps
         # probe + registry-file I/O — keep it off the event loop so the
         # terminal.create ack isn't delayed behind it.
+        registry_future: asyncio.Future[Any] | None = None
         try:
-            asyncio.get_running_loop().run_in_executor(
+            registry_future = asyncio.get_running_loop().run_in_executor(
                 None, pty_registry.register, proc.pid, argv
             )
         except RuntimeError:
             # No running loop (non-async caller) — fall back to inline.
-            pty_registry.register(proc.pid, argv)
+            try:
+                pty_registry.register(proc.pid, argv)
+            except BaseException:
+                self._abort_failed_create(proc, master, registry_future=None)
+                raise
+        except BaseException:
+            self._abort_failed_create(proc, master, registry_future=None)
+            raise
 
         # Open output log file if requested (pipeline panes pass a path).
         log_fp: IO[str] | None = None
@@ -340,20 +352,32 @@ class TerminalService:
             except Exception as err:  # noqa: BLE001
                 log.warning("cannot open output log %s: %s", output_log_file, err)
 
-        session = TerminalSession(
-            id=str(uuid4()),
-            pane_id=pane_id,
-            agent_key=agent_key,
-            command=argv,
-            cwd=cwd,
-            master_fd=master,
-            proc=proc,
-            started_monotonic=started_monotonic,
-            metadata=metadata or {},
-            output_log_fp=log_fp,
-        )
-        self._sessions[session.id] = session
-        self._loop.add_reader(master, self._on_readable, session)
+        session: TerminalSession | None = None
+        try:
+            session = TerminalSession(
+                id=str(uuid4()),
+                pane_id=pane_id,
+                agent_key=agent_key,
+                command=argv,
+                cwd=cwd,
+                master_fd=master,
+                proc=proc,
+                started_monotonic=started_monotonic,
+                metadata=metadata or {},
+                output_log_fp=log_fp,
+            )
+            self._sessions[session.id] = session
+            self._loop.add_reader(master, self._on_readable, session)
+        except BaseException:
+            if session is not None:
+                self._sessions.pop(session.id, None)
+            if log_fp:
+                try:
+                    log_fp.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            self._abort_failed_create(proc, master, registry_future=registry_future)
+            raise
         if self._snapshot_task is None or self._snapshot_task.done():
             try:
                 self._snapshot_task = asyncio.get_running_loop().create_task(
@@ -375,6 +399,43 @@ class TerminalService:
             argv,
         )
         return session
+
+    def _abort_failed_create(
+        self,
+        proc: subprocess.Popen[bytes],
+        master_fd: int,
+        *,
+        registry_future: asyncio.Future[Any] | None,
+    ) -> None:
+        """Undo a Popen whose TerminalSession setup did not complete."""
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            proc.wait(timeout=1.0)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+        def unregister(_future: asyncio.Future[Any] | None = None) -> None:
+            try:
+                pty_registry.unregister(proc.pid)
+            except Exception as err:  # noqa: BLE001
+                log.warning("failed-create registry cleanup failed for pid %s: %s", proc.pid, err)
+
+        # register() may already be running in the executor.  Queue unregister
+        # only after it settles, or its eventual write could resurrect the
+        # failed child in the crash-recovery registry.
+        if registry_future is not None:
+            registry_future.add_done_callback(
+                lambda future: self._loop.run_in_executor(None, unregister, future)
+            )
+        else:
+            unregister()
 
     def get(self, session_id: str) -> TerminalSession | None:
         """The session for ``session_id``, or None when unknown."""

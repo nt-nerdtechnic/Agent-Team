@@ -155,6 +155,43 @@ describe('UsageBadge – badge rendering', () => {
     wrapper = mountBadge(makeCliProfiles().fake)
     expect(wrapper.find('.usage-badge').exists()).toBe(false)
   })
+
+  it('keeps cached quota visible and marks its refresh state', async () => {
+    usage.usageFor.mockReturnValue(
+      snapshot({
+        stale: true,
+        lastSuccessAt: '2026-07-25T00:00:00Z',
+        refreshStatus: 'rate-limited',
+      }),
+    )
+    wrapper = mountBadge(makeCliProfiles().fake)
+    const badge = wrapper.get('.usage-badge')
+    expect(badge.text()).toContain('70%')
+    expect(badge.text()).toContain('cached')
+    expect(badge.classes()).toContain('cached')
+
+    await openPopover(wrapper)
+    expect(wrapper.get('.usage-pop-cached').text()).toContain('rate limited')
+  })
+
+  it('does not present cached remaining quota after the reset has passed', async () => {
+    usage.usageFor.mockReturnValue(
+      snapshot({
+        stale: true,
+        staleExpired: true,
+        refreshStatus: 'unavailable',
+        windows: [
+          { kind: 'session', label: 'Session', usedPercent: 30, resetsAt: null, expired: true },
+        ],
+      }),
+    )
+    wrapper = mountBadge(makeCliProfiles().fake)
+    expect(wrapper.get('.usage-badge').text()).toBe('⚠')
+
+    await openPopover(wrapper)
+    expect(wrapper.get('.usage-pop-expired').text()).toContain('Cached quota reset has passed')
+    expect(wrapper.find('.usage-bar').exists()).toBe(false)
+  })
 })
 
 describe('UsageBadge – popover account list', () => {

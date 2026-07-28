@@ -64,7 +64,7 @@ def test_plugins_root_env_absent_returns_none(
     assert wiring.plugins_root() is None
     # startup with no env still boots the bundled builtin plugins.
     host = PluginHost()
-    assert wiring.startup(host) == ["navide.plans"]
+    assert wiring.startup(host) == ["navide.plans", "navide.skills"]
     wiring.shutdown(host)
 
     monkeypatch.setenv(wiring.PLUGINS_DIR_ENV, "  ")

@@ -20,6 +20,7 @@ class FakeWebSocket:
 class FakeTerminals:
     def __init__(self) -> None:
         self.created: list[dict[str, Any]] = []
+        self.killed: list[tuple[str, bool]] = []
 
     def create(self, **kwargs: Any) -> SimpleNamespace:
         self.created.append(kwargs)
@@ -29,6 +30,9 @@ class FakeTerminals:
             command=kwargs["command"],
             proc=SimpleNamespace(pid=1234),
         )
+
+    async def kill(self, session_id: str, force: bool = False) -> None:
+        self.killed.append((session_id, force))
 
 
 class FakeAttribution:
@@ -278,6 +282,118 @@ def test_kimi_resume_id_parses_resume_commands() -> None:
     assert app._kimi_resume_id(["/bin/zsh", "-lc", "kimi"]) == ""
 
 
+def test_opencode_resume_id_parses_resume_commands() -> None:
+    sid = "ses_18d0acbcaffe3eXy2s3zezEmix"
+    assert app._opencode_resume_id(f"opencode --session {sid}") == sid
+    assert app._opencode_resume_id(f"opencode -s {sid}") == sid
+    assert app._opencode_resume_id(f"opencode --session {sid} --print-logs") == sid
+    assert app._opencode_resume_id(f"opencode --print-logs --session {sid}") == sid
+    assert app._opencode_resume_id("opencode") == ""
+    # A following flag must not be captured as the id.
+    assert app._opencode_resume_id("opencode --session --print-logs") == ""
+    assert app._opencode_resume_id("opencode --session") == ""
+    assert app._opencode_resume_id("") == ""
+    assert app._opencode_resume_id(None) == ""
+    # Shell-wrapped list — the shape the frontend actually sends.
+    assert app._opencode_resume_id(
+        ["/bin/zsh", "-lc", f"opencode --session {sid}"]
+    ) == sid
+    assert app._opencode_resume_id(["/bin/zsh", "-lc", "opencode"]) == ""
+
+
+def test_kilo_resume_id_parses_resume_commands() -> None:
+    sid = "ses_29e1bcdcaffe3eXy2s3zezKilo"
+    assert app._kilo_resume_id(f"kilo --session {sid}") == sid
+    assert app._kilo_resume_id(f"kilo -s {sid}") == sid
+    assert app._kilo_resume_id(f"kilo --session {sid} --print-logs") == sid
+    assert app._kilo_resume_id(f"kilo --print-logs --session {sid}") == sid
+    assert app._kilo_resume_id("kilo") == ""
+    # A following flag must not be captured as the id.
+    assert app._kilo_resume_id("kilo --session --print-logs") == ""
+    assert app._kilo_resume_id("kilo --session") == ""
+    assert app._kilo_resume_id("") == ""
+    assert app._kilo_resume_id(None) == ""
+    # Shell-wrapped list — the shape the frontend actually sends.
+    assert app._kilo_resume_id(["/bin/zsh", "-lc", f"kilo --session {sid}"]) == sid
+    assert app._kilo_resume_id(["/bin/zsh", "-lc", "kilo"]) == ""
+
+
+def test_qwen_resume_id_parses_resume_commands() -> None:
+    sid = "1f0b9d5e-2f4a-4c0e-9b7d-3a5c8e9f0a1b"
+    assert app._qwen_resume_id(f"qwen --resume {sid}") == sid
+    assert app._qwen_resume_id(f"qwen -r {sid}") == sid
+    assert app._qwen_resume_id(f"qwen --resume {sid} --yolo") == sid
+    assert app._qwen_resume_id(f"qwen --yolo --resume {sid}") == sid
+    assert app._qwen_resume_id("qwen") == ""
+    # A following flag must not be captured as the id (bare --resume = latest).
+    assert app._qwen_resume_id("qwen --resume --yolo") == ""
+    assert app._qwen_resume_id("qwen --resume") == ""
+    assert app._qwen_resume_id("") == ""
+    assert app._qwen_resume_id(None) == ""
+    # Shell-wrapped list — the shape the frontend actually sends.
+    assert app._qwen_resume_id(["/bin/zsh", "-lc", f"qwen --resume {sid}"]) == sid
+    assert app._qwen_resume_id(["/bin/zsh", "-lc", "qwen"]) == ""
+
+
+def test_pi_resume_id_parses_session_id_commands() -> None:
+    """`pi --session-id <id>` both resumes an existing id and pins a NEW
+    session's id — either way it names the pane's session, so it is claimed."""
+    sid = "pi-sess.01_a"
+    assert app._pi_resume_id(f"pi --session-id {sid}") == sid
+    assert app._pi_resume_id(f"pi --session-id {sid} --no-color") == sid
+    assert app._pi_resume_id(f"pi --no-color --session-id {sid}") == sid
+    assert app._pi_resume_id("pi") == ""
+    # Flag guard: a following flag must never be captured as the id.
+    assert app._pi_resume_id("pi --session-id --no-color") == ""
+    assert app._pi_resume_id("pi --session-id") == ""
+    assert app._pi_resume_id("") == ""
+    assert app._pi_resume_id(None) == ""
+    # Frontend wraps commands as [shell, '-lc', '<cmd>'].
+    assert app._pi_resume_id(["/bin/zsh", "-lc", f"pi --session-id {sid}"]) == sid
+    assert app._pi_resume_id(["/bin/zsh", "-lc", "pi"]) == ""
+
+
+def test_copilot_resume_id_parses_resume_commands() -> None:
+    """`copilot --resume=<id>` both resumes an existing id and pins a NEW
+    session under that UUID — either way it names the pane's session, so it
+    is claimed. Both the `=` and space forms are accepted."""
+    sid = "e6495800-dfd4-4a75-b2ab-d70980f83b89"
+    assert app._copilot_resume_id(f"copilot --resume={sid}") == sid
+    assert app._copilot_resume_id(f"copilot --resume {sid}") == sid
+    assert app._copilot_resume_id(f"copilot --resume={sid} --yolo") == sid
+    assert app._copilot_resume_id(f"copilot --yolo --resume={sid}") == sid
+    assert app._copilot_resume_id(f"copilot --yolo --resume {sid}") == sid
+    assert app._copilot_resume_id("copilot") == ""
+    # Flag guard: bare --resume (interactive picker) must not swallow a flag.
+    assert app._copilot_resume_id("copilot --resume --yolo") == ""
+    assert app._copilot_resume_id("copilot --resume") == ""
+    assert app._copilot_resume_id("") == ""
+    assert app._copilot_resume_id(None) == ""
+    # Frontend wraps commands as [shell, '-lc', '<cmd>'].
+    assert app._copilot_resume_id(["/bin/zsh", "-lc", f"copilot --resume={sid}"]) == sid
+    assert app._copilot_resume_id(["/bin/zsh", "-lc", "copilot"]) == ""
+
+
+def test_cursor_resume_id_parses_resume_commands() -> None:
+    """Cursor CLI resumes with `agent --resume=<chatId>` (legacy binary name
+    `cursor-agent`); both the `=` and space forms are accepted."""
+    sid = "e6495800-dfd4-4a75-b2ab-d70980f83b89"
+    assert app._cursor_resume_id(f"agent --resume={sid}") == sid
+    assert app._cursor_resume_id(f"agent --resume {sid}") == sid
+    assert app._cursor_resume_id(f"cursor-agent --resume={sid}") == sid
+    assert app._cursor_resume_id(f"cursor-agent --resume {sid}") == sid
+    assert app._cursor_resume_id(f"agent --force --resume={sid}") == sid
+    assert app._cursor_resume_id("agent") == ""
+    # Flag guard: bare --resume (picker) must not swallow a following flag.
+    assert app._cursor_resume_id("agent --resume --force") == ""
+    assert app._cursor_resume_id("agent --resume") == ""
+    assert app._cursor_resume_id("") == ""
+    assert app._cursor_resume_id(None) == ""
+    # Frontend wraps commands as [shell, '-lc', '<cmd>'].
+    assert app._cursor_resume_id(["/bin/zsh", "-lc", f"agent --resume={sid}"]) == sid
+    assert app._cursor_resume_id(["/bin/zsh", "-lc", "agent"]) == ""
+
+
 @pytest.mark.asyncio
 async def test_terminal_create_claude_resume_claims_resume_id(
     monkeypatch: pytest.MonkeyPatch,
@@ -363,6 +479,116 @@ async def test_terminal_create_kimi_resume_claims_resume_id(
     })
 
     assert fake_attr.registered[0]["explicit_session_id"] == "session_resumed-uuid"
+
+
+@pytest.mark.asyncio
+async def test_terminal_create_qwen_resume_claims_resume_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resumed Qwen panes claim their resume id at registration so live events
+    route back to them and the new-session single-candidate fallback excludes
+    them (a fresh sibling pane in the same cwd stays bindable)."""
+    fake_attr = FakeAttribution()
+    monkeypatch.setattr(app, "attribution", fake_attr)
+    monkeypatch.setattr(app, "_register_workspace_and_backfill", lambda _ws: None)
+    session = _session()
+
+    await app.handle_message(session, {
+        "id": "m9",
+        "type": "terminal.create",
+        "payload": {
+            "pane_id": "qwen-pane",
+            "agent_key": "qwen",
+            "command": ["/bin/zsh", "-lc", "qwen --resume resumed-uuid --yolo"],
+            "cwd": "/ws",
+            "metadata": {"workspace_path": "/ws"},
+        },
+    })
+
+    assert fake_attr.registered[0]["explicit_session_id"] == "resumed-uuid"
+
+
+@pytest.mark.asyncio
+async def test_terminal_create_pi_session_id_claims_resume_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pi panes launched with `--session-id <id>` claim that id at
+    registration (it names the session whether it resumes or creates), so
+    live events route back to this pane and the new-session single-candidate
+    fallback excludes it."""
+    fake_attr = FakeAttribution()
+    monkeypatch.setattr(app, "attribution", fake_attr)
+    monkeypatch.setattr(app, "_register_workspace_and_backfill", lambda _ws: None)
+    session = _session()
+
+    await app.handle_message(session, {
+        "id": "m10",
+        "type": "terminal.create",
+        "payload": {
+            "pane_id": "pi-pane",
+            "agent_key": "pi",
+            "command": ["/bin/zsh", "-lc", "pi --session-id resumed-uuid"],
+            "cwd": "/ws",
+            "metadata": {"workspace_path": "/ws"},
+        },
+    })
+
+    assert fake_attr.registered[0]["explicit_session_id"] == "resumed-uuid"
+
+
+@pytest.mark.asyncio
+async def test_terminal_create_copilot_resume_claims_resume_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Copilot panes launched with `--resume=<id>` claim that id at
+    registration (it names the session whether it resumes or creates), so
+    live events route back to this pane and the new-session single-candidate
+    fallback excludes it."""
+    fake_attr = FakeAttribution()
+    monkeypatch.setattr(app, "attribution", fake_attr)
+    monkeypatch.setattr(app, "_register_workspace_and_backfill", lambda _ws: None)
+    session = _session()
+
+    await app.handle_message(session, {
+        "id": "m11",
+        "type": "terminal.create",
+        "payload": {
+            "pane_id": "copilot-pane",
+            "agent_key": "copilot",
+            "command": ["/bin/zsh", "-lc", "copilot --resume=resumed-uuid --yolo"],
+            "cwd": "/ws",
+            "metadata": {"workspace_path": "/ws"},
+        },
+    })
+
+    assert fake_attr.registered[0]["explicit_session_id"] == "resumed-uuid"
+
+
+@pytest.mark.asyncio
+async def test_terminal_create_cursor_resume_claims_resume_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cursor panes launched with `agent --resume=<chatId>` claim that id at
+    registration (markers only appear in a fresh kickoff), so the resumed
+    session's events route back to this pane."""
+    fake_attr = FakeAttribution()
+    monkeypatch.setattr(app, "attribution", fake_attr)
+    monkeypatch.setattr(app, "_register_workspace_and_backfill", lambda _ws: None)
+    session = _session()
+
+    await app.handle_message(session, {
+        "id": "m12",
+        "type": "terminal.create",
+        "payload": {
+            "pane_id": "cursor-pane",
+            "agent_key": "cursor",
+            "command": ["/bin/zsh", "-lc", "agent --resume=resumed-uuid --force"],
+            "cwd": "/ws",
+            "metadata": {"workspace_path": "/ws"},
+        },
+    })
+
+    assert fake_attr.registered[0]["explicit_session_id"] == "resumed-uuid"
 
 
 @pytest.mark.asyncio

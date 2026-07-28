@@ -81,8 +81,11 @@ import { planExecutionPrompt } from './lib/planExecutePrompt'
 import { quickClassify } from './lib/quick-classify'
 import {
   buildResumeCommand,
+  acquirePaneRebuildLock,
+  cancelStalePendingCreate,
   dedupeRestorablePanes,
   normalizeResumeSessionId,
+  paneBusyForRebuild,
   paneCanRebuild,
   paneRebuildVisible,
   RESTORE_PIN_AGENTS,
@@ -2480,12 +2483,32 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
   // only resumes existing ids) — marker-based binding via ~/.grok/grok.db.
   // Kimi likewise can't pin an id (`kimi --session` only resumes existing ids);
   // its session id is captured from the wire.jsonl containing the marker.
+  // OpenCode likewise can't pin an id (`opencode --session` only resumes
+  // existing ids) — marker-based binding.
+  // Qwen Code joins the marker camp too (launch-time id pinning is not relied
+  // on; `qwen --resume` only resumes existing ids).
+  // Kilo Code likewise can't pin an id (`kilo --session` only resumes existing
+  // ids) — marker-based binding.
+  // Pi COULD pin an id at launch (`pi --session-id` creates the session when
+  // the id doesn't exist) but joins the marker camp for now; launch-time
+  // pinning is a later unified refactor.
+  // Copilot COULD pin an id at launch too (`copilot --resume=<id>` creates the
+  // session when the id doesn't exist) but joins the marker camp for now;
+  // launch-time pinning is a later unified refactor.
+  // Cursor joins the marker camp: its create-chat pin path has a known hang
+  // bug, so launch-time id pinning is not used.
+  // Aider joins the marker camp: it has no session ids, but the typed marker
+  // is written verbatim (`#### at-pane:<id>`) into the project's
+  // .aider.chat.history.md, so a future backend reader can bind the pane.
+  // No "detecting session" overlay for aider (see paneWaitingForSessionId):
+  // with no id to detect, session.detected never fires and the overlay would
+  // only ever expire via its grace timeout.
   // Login panes get NO marker: they sit at an interactive sign-in wizard, and
   // the marker bootstrap (dismissStartupDialog + pasted marker + Enter) would
   // inject input into it. No marker also means no session overlay for them.
   const sessionMarker =
     !opts.isResume && !opts.isLogin &&
-    (opts.agentKey === 'codex' || opts.agentKey === 'antigravity' || opts.agentKey === 'grok' || opts.agentKey === 'kimi')
+    (opts.agentKey === 'codex' || opts.agentKey === 'antigravity' || opts.agentKey === 'grok' || opts.agentKey === 'kimi' || opts.agentKey === 'opencode' || opts.agentKey === 'qwen' || opts.agentKey === 'kilo' || opts.agentKey === 'pi' || opts.agentKey === 'copilot' || opts.agentKey === 'cursor' || opts.agentKey === 'aider')
       ? `at-pane:${id}`
       : ''
   const pane: ActivePane = {
@@ -3088,11 +3111,14 @@ async function rebuildPaneViaResume(
   if (!pane) return
   // If the CLI is actively working, skip rebuild so we don't kill in-flight work.
   // The PTY is alive and the pane is already bound — nothing to reattach, just leave it.
-  // Judged purely on displayStatus: it is built from CLEANED output bursts, so an
-  // idle TUI that keeps repainting its footer/cursor reads idle. (A raw-activity
-  // alt-buffer heuristic here flagged every idle Claude pane as busy.)
-  const paneStatus = paneRefs[paneId]?.displayStatus as string | undefined
-  const busy = paneStatus === 'running' || paneStatus === 'starting'
+  // displayStatus detects active work from CLEANED output bursts. Raw status
+  // distinguishes an in-flight terminal create from a running PTY that has not
+  // emitted its first byte and therefore still displays as starting.
+  const paneRef = paneRefs[paneId]
+  const paneStatus = paneRef?.displayStatus as string | undefined
+  const terminalStatus = paneRef?.status as string | undefined
+  const startingAgeMs = paneRef?.startingAgeMs as number | null | undefined
+  const busy = paneBusyForRebuild(paneStatus, terminalStatus, startingAgeMs)
   if (busy) {
     // In a batch (rebuild-all) the caller aggregates one toast; here just report.
     if (!opts?.suppressBusyToast) {
@@ -3114,14 +3140,22 @@ async function rebuildPaneViaResume(
   // replacement pane in (new pane id, same session) before the backend spawn
   // resolves — a second click landing on the replacement must be blocked too.
   const lockKeys = [paneId, sessionId]
-  if (lockKeys.some((key) => rebuildingPanes.has(key))) {
+  const releaseRebuildLock = acquirePaneRebuildLock(rebuildingPanes, lockKeys)
+  if (!releaseRebuildLock) {
     if (!opts?.suppressBusyToast) {
       notifyRestore.toast(i18n.global.t('pane.terminal.rebuild-in-progress'), { type: 'info' })
     }
     return
   }
-  for (const key of lockKeys) rebuildingPanes.add(key)
   try {
+    // A stale STARTING pane may still have terminal.create queued or in flight.
+    // Wait for generation-scoped backend rollback before probing/killing and
+    // spawning its replacement, so a late ACK cannot leave an orphan PTY.
+    await cancelStalePendingCreate(
+      terminalStatus,
+      startingAgeMs,
+      paneRef?.cancelPendingCreate as (() => Promise<void>) | undefined,
+    )
     const ws = pane.workspacePath
     // Fail-safe: abort on false AND on null (probe failed) — never kill a
     // live pane on an unverified resumability answer. The toast distinguishes
@@ -3235,7 +3269,7 @@ async function rebuildPaneViaResume(
       panes.value = panes.value.filter((p) => p.id !== paneId)
     }
   } finally {
-    for (const key of lockKeys) rebuildingPanes.delete(key)
+    releaseRebuildLock()
   }
 }
 
@@ -3937,6 +3971,17 @@ function looksLikeResumeCommand(agentKey: string, command: string): boolean {
   if (agentKey === 'codex') return /^codex\s+resume\s+\S+/.test(cmd)
   if (agentKey === 'antigravity') return /^agy\s+--conversation\s+\S+/.test(cmd)
   if (agentKey === 'grok') return /^grok\s+-s\s+\S+/.test(cmd)
+  if (agentKey === 'opencode') return /^opencode\s+(?:--session|-s)\s+\S+/.test(cmd)
+  if (agentKey === 'kilo') return /^kilo\s+(?:--session|-s)\s+\S+/.test(cmd)
+  if (agentKey === 'pi') return /^pi\s+--session-id\s+\S+/.test(cmd)
+  // Explicit branch: copilot uses the `=` form, which the generic --resume
+  // regex below would not match.
+  if (agentKey === 'copilot') return /^copilot\s+--resume(?:=|\s+)\S+/.test(cmd)
+  // Cursor's executable is `cursor-agent` (newer installs also ship `agent`);
+  // accept both, `=` and space forms.
+  if (agentKey === 'cursor') return /^(?:cursor-)?agent\s+--resume(?:=|\s+)\S+/.test(cmd)
+  // Aider has no session ids; its resume command is id-less.
+  if (agentKey === 'aider') return /^aider\b.*--restore-chat-history\b/.test(cmd)
   return new RegExp(`^${agentKey}\\s+--resume\\s+\\S+`).test(cmd)
 }
 
@@ -8531,7 +8576,7 @@ function panePreparationLabel(p: ActivePane): string {
 }
 
 function paneWaitingForSessionId(p: ActivePane): boolean {
-  return !!p.sessionMarker && !p.pinnedSessionId && ['codex', 'antigravity', 'grok', 'kimi'].includes(p.agentKey)
+  return !!p.sessionMarker && !p.pinnedSessionId && ['codex', 'antigravity', 'grok', 'kimi', 'opencode', 'qwen', 'kilo', 'pi', 'copilot', 'cursor'].includes(p.agentKey)
 }
 
 // Session detection has PRECONDITIONS the user may have to satisfy in the

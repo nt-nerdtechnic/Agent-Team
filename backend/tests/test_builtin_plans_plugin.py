@@ -39,7 +39,7 @@ def test_builtin_root_contains_navide_plans() -> None:
 def test_startup_activates_builtin_and_registers_contributions(
     host: PluginHost,
 ) -> None:
-    assert wiring.startup(host) == ["navide.plans"]
+    assert wiring.startup(host) == ["navide.plans", "navide.skills"]
 
     routes = host.registered_routes()
     assert [(r.path, r.methods) for r in routes] == [
@@ -50,7 +50,10 @@ def test_startup_activates_builtin_and_registers_contributions(
     # shutdown hook, one spawn transformer — all attributed to the plugin.
     assert [pid for pid, _ in host.startup_hooks()] == ["navide.plans"] * 2
     assert [pid for pid, _ in host.shutdown_hooks()] == ["navide.plans"]
-    assert [pid for pid, _ in host.spawn_transformers()] == ["navide.plans"]
+    assert [pid for pid, _ in host.spawn_transformers()] == [
+        "navide.plans",
+        "navide.skills",
+    ]
 
 
 async def test_lifecycle_hooks_drive_plan_mcp_and_claude_config(
@@ -111,5 +114,5 @@ def test_spawn_wiring_untouched_after_deactivate(
 
     host.deactivate("navide.plans")
 
-    assert host.spawn_transformers() == []
+    assert [pid for pid, _ in host.spawn_transformers()] == ["navide.skills"]
     assert wiring.apply_spawn_wiring(host, "claude", "claude") == "claude"

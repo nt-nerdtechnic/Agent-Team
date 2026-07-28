@@ -28,9 +28,30 @@ def test_antigravity_path_is_the_conversation_db():
     assert p.endswith("/.gemini/antigravity-cli/conversations/conv9.db")
 
 
+def test_qwen_path_is_the_project_chats_file(monkeypatch):
+    """Qwen reuses Claude's cwd encoding under <root>/projects/<encoded>/chats/."""
+    monkeypatch.delenv("QWEN_RUNTIME_DIR", raising=False)
+    p = _session_lookup_path("qwen", "/Users/x/Desktop/proj/", "sid1")
+    assert p.endswith("/.qwen/projects/-Users-x-Desktop-proj/chats/sid1.jsonl")
+
+
+def test_copilot_path_is_the_session_events_file(monkeypatch):
+    """Copilot's session dir is named by the id alone, so the path is
+    directly constructible: <root>/session-state/<id>/events.jsonl."""
+    monkeypatch.delenv("COPILOT_HOME", raising=False)
+    p = _session_lookup_path("copilot", "/ws", "sid1")
+    assert p.endswith("/.copilot/session-state/sid1/events.jsonl")
+
+
 def test_vendor_managed_agents_have_no_single_path():
     assert _session_lookup_path("codex", "/ws", "sid1") == ""
     assert _session_lookup_path("grok", "/ws", "sid1") == ""
+    assert _session_lookup_path("opencode", "/ws", "sid1") == ""
+    assert _session_lookup_path("kilo", "/ws", "sid1") == ""
+    # Pi's filename carries a timestamp prefix the id alone can't reconstruct.
+    assert _session_lookup_path("pi", "/ws", "sid1") == ""
+    # Cursor's path has a <project-hash> segment the id alone can't name.
+    assert _session_lookup_path("cursor", "/ws", "sid1") == ""
 
 
 def test_empty_session_has_no_path():

@@ -113,6 +113,80 @@ DEPS: list[Dep] = [
         install_cmd="curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash",
         needs_terminal=True, optional=True, docs_url="https://moonshotai.github.io/kimi-cli/en/",
         doctor_cmd="kimi doctor"),
+    # OpenCode ships `opencode upgrade` but no doctor subcommand.
+    Dep("opencode", "OpenCode", "OpenCode terminal coding agent", "agent_cli",
+        ["opencode", "--version"], r"(\d+\.\d+\.\d+)",
+        install_cmd="curl -fsSL https://opencode.ai/install | bash",
+        needs_terminal=True, optional=True, docs_url="https://opencode.ai/docs",
+        update_cmd="opencode upgrade",
+        npm_package="opencode-ai",
+        config_home_env="OPENCODE_CONFIG_DIR",
+        autoupdate_env="OPENCODE_DISABLE_AUTOUPDATE"),
+    # Kilo Code (OpenCode fork) ships `kilo upgrade` but no doctor subcommand
+    # (`kilo debug` is diagnostics-adjacent, not a doctor — no invented command).
+    Dep("kilo", "Kilo Code", "Kilo Code terminal coding agent (OpenCode fork)", "agent_cli",
+        ["kilo", "--version"], r"(\d+\.\d+\.\d+)",
+        install_cmd="npm install -g @kilocode/cli",
+        needs_terminal=True, optional=True,
+        docs_url="https://kilo.ai/docs/code-with-ai/platforms/cli",
+        update_cmd="kilo upgrade",
+        npm_package="@kilocode/cli",
+        config_home_env="KILO_CONFIG_DIR",
+        autoupdate_env="KILO_DISABLE_AUTOUPDATE"),
+    # Qwen Code ships `qwen update` but no doctor subcommand; its autoupdate
+    # opt-out is a settings.json key, not an env var — autoupdate_env stays empty.
+    Dep("qwen", "Qwen Code", "Alibaba Qwen Code coding agent CLI", "agent_cli",
+        ["qwen", "--version"], r"(\d+\.\d+\.\d+)",
+        install_cmd="npm install -g @qwen-code/qwen-code", needs_terminal=True,
+        optional=True, docs_url="https://qwenlm.github.io/qwen-code-docs/",
+        update_cmd="qwen update",
+        npm_package="@qwen-code/qwen-code"),
+    # Pi ships `pi update` but no doctor subcommand; PI_SKIP_VERSION_CHECK is
+    # its own opt-out for the startup version check.
+    Dep("pi", "Pi", "Pi coding agent CLI", "agent_cli",
+        ["pi", "--version"], r"(\d+\.\d+\.\d+)",
+        install_cmd="npm install -g @earendil-works/pi-coding-agent",
+        needs_terminal=True, optional=True, docs_url="https://pi.dev/docs",
+        update_cmd="pi update",
+        npm_package="@earendil-works/pi-coding-agent",
+        config_home_env="PI_CODING_AGENT_DIR",
+        autoupdate_env="PI_SKIP_VERSION_CHECK"),
+    # Copilot CLI ships `copilot update` but no doctor subcommand;
+    # COPILOT_AUTO_UPDATE=false is its autoupdate opt-out and COPILOT_HOME
+    # relocates its config/session root.
+    Dep("copilot", "Copilot CLI", "GitHub Copilot coding agent CLI", "agent_cli",
+        ["copilot", "--version"], r"(\d+\.\d+\.\d+)",
+        install_cmd="brew install --cask copilot-cli",
+        needs_terminal=True, optional=True,
+        docs_url="https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-copilot-cli",
+        update_cmd="copilot update",
+        npm_package="@github/copilot",
+        config_home_env="COPILOT_HOME",
+        autoupdate_env="COPILOT_AUTO_UPDATE"),
+    # Cursor CLI (closed source; binary `agent`, legacy installs `cursor-agent`)
+    # ships `agent update` but no doctor subcommand. Autoupdate is on by default
+    # with no confirmed opt-out env, and its data home is fixed at ~/.cursor
+    # (no config-home env) — both stay empty. Dep detection probes a single
+    # executable, so only the current `agent` binary is checked (no
+    # cursor-agent fallback — the dataclass has no alternate-binary support).
+    Dep("cursor", "Cursor CLI", "Cursor terminal coding agent CLI", "agent_cli",
+        ["agent", "--version"], r"(\d+\.\d+\.\d+)",
+        install_cmd="curl https://cursor.com/install -fsS | bash",
+        needs_terminal=True, optional=True,
+        docs_url="https://cursor.com/docs/cli",
+        update_cmd="agent update"),
+    # Aider updates via the `--upgrade` FLAG (not a subcommand) and ships no
+    # doctor. AIDER_CHECK_UPDATE=false is its own startup update-check
+    # opt-out; its global state home is fixed at ~/.aider (no relocating
+    # env), so config_home_env stays empty. `aider --version` prints
+    # `aider X.Y.Z`.
+    Dep("aider", "Aider", "Aider AI pair-programming CLI", "agent_cli",
+        ["aider", "--version"], r"(\d+\.\d+\.\d+)",
+        install_cmd="curl -LsSf https://aider.chat/install.sh | sh",
+        needs_terminal=True, optional=True,
+        docs_url="https://aider.chat",
+        update_cmd="aider --upgrade",
+        autoupdate_env="AIDER_CHECK_UPDATE"),
     Dep("ollama", "Ollama", "Local LLM runtime (required for Analyzer)", "analyzer",
         ["ollama", "--version"], r"(\d+\.\d+\.\d+)",
         install_cmd="brew install ollama", docs_url="https://ollama.com"),

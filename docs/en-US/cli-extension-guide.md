@@ -8,12 +8,13 @@ The codebase uses a consistent key — `agentKey` in the frontend, `agent_key` i
 the backend — to identify which CLI is running in a pane. Adding a new CLI
 means registering that key in each of the following layers.
 
-Current built-in agent keys are `claude`, `codex`, `antigravity`, and `grok`.
+Current built-in agent keys are `claude`, `codex`, `antigravity`, `grok`,
+`kimi`, and `opencode`.
 The current integration surface is distributed across the application; a
 declarative, capability-based adapter contract is planned in the
 [Product Roadmap](roadmap.md).
 
-Last verified against the codebase: 2026-07-15.
+Last verified against the codebase: 2026-07-27.
 
 ---
 
@@ -31,7 +32,8 @@ export type AgentKey = 'claude' | 'codex' | 'antigravity' | 'grok' | 'your-cli'
 
 ### 2. Agent spec
 
-**`src/renderer/src/App.vue`** — `agentSpecs` array (~line 280)
+**`src/renderer/src/lib/agentSpecs.ts`** — `AGENT_SPECS` array
+(extracted from `App.vue` in July 2026)
 
 ```ts
 {
@@ -81,7 +83,9 @@ Also check `canResumeSession` gating in the same module.
 
 ### 5. Backend whitelist
 
-**`backend/agent_team_backend/app.py:902`**
+**`backend/agent_team_backend/ws_handlers.py`** — pane-registration
+attribution whitelist (moved from `app.py` in July 2026; search for the
+`agent_key in (` tuple)
 
 The backend validates `agent_key` before registering a pane with the
 attribution layer:
@@ -187,10 +191,10 @@ Two derived behaviours come for free once the fields are set:
 | Layer | File | Effort |
 |-------|------|--------|
 | Type | `src/renderer/src/data/stages.ts` | trivial |
-| Spec | `src/renderer/src/App.vue` (agentSpecs) | trivial |
+| Spec | `src/renderer/src/lib/agentSpecs.ts` | trivial |
 | Session startup | `src/renderer/src/App.vue` (sessionMarker) | low |
 | Resume syntax | `src/renderer/src/lib/resume-command.ts` | low |
-| Backend whitelist | `backend/agent_team_backend/app.py` | trivial |
+| Backend whitelist | `backend/agent_team_backend/ws_handlers.py` | trivial |
 | Log reader | `backend/agent_team_backend/log_readers/` | **medium–high** |
 | Token stats | `src/renderer/src/components/TokenStatsPanel.vue` | trivial |
 | Per-pane home | `backend/agent_team_backend/codex_home.py` pattern | none–medium (CLI-dependent) |
@@ -311,3 +315,29 @@ Env vars: `GROK_API_KEY` (auth), `GROK_BASE_URL`, `GROK_MODEL`,
 `GROK_MAX_TOKENS`, `GROK_TRUST_WORKSPACE` (skips sandbox trust prompt —
 useful for spawn env). Runtime note: built on Bun (`bun:sqlite`); the
 official install.sh handles runtime setup.
+
+### OpenCode (`opencode`) — added 2026-07-27
+
+Source: https://opencode.ai/docs/cli/ (sst/opencode). Research verified
+against installed v1.15.12.
+
+- Core integration: agent spec, marker-based session binding,
+  `opencode --session <id>` resume, SQLite log reader, token stats,
+  onboarding registry entry.
+- Deliberately skipped layers: CLI profiles / credential vault (account
+  isolation not yet researched), usage/quota provider (no vendor quota API),
+  plan-MCP wiring, per-pane home isolation (WAL DB is concurrency-safe).
+
+| Question | Finding (v1.15.12) |
+|---|---|
+| Install | `curl -fsSL https://opencode.ai/install \| bash`; npm package `opencode-ai`; binary **`opencode`** |
+| Launch | `opencode` (interactive TUI), `opencode [project]`; headless `opencode run [message..]` |
+| YOLO flag | **None for the TUI** — `--dangerously-skip-permissions` exists only on the `run` subcommand; the default TUI command rejects it (verified empirically). Permissions are config-driven (`OPENCODE_PERMISSION` env / permission config) → omit `skipPermissionFlag`. |
+| Resume | `opencode --session <id>` / `-s <id>`; also `-c/--continue` (last session) and `--fork` |
+| Pin id at launch | Not supported (`--session` only continues existing sessions) → marker-based binding |
+| Session storage | Single shared SQLite DB `~/.local/share/opencode/opencode.db` (WAL). Legacy `storage/` JSON dirs are stale except `session_diff/`. Tables: `session` (id `ses_…`, `directory` = cwd, per-session token totals), `message` (`data` JSON with role/tokens/modelID), `part` (`data` JSON; user text verbatim → `at-pane:` marker works), `project` (worktree path). |
+| Token usage | Per assistant message in `message.data.tokens` (input/output/reasoning/cache.read/cache.write) and aggregated on the `session` row |
+| Workspace filter | `session.directory` equals the pane cwd directly (no hash lookup needed) |
+| Concurrency | WAL + per-directory sessions → safe, no home isolation |
+| Update / doctor | `opencode upgrade`; no doctor subcommand |
+| Env vars | `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR` (both scrubbed from inherited spawn env), `OPENCODE_DISABLE_AUTOUPDATE`, `OPENCODE_PERMISSION` |

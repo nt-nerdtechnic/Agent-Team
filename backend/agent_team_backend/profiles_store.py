@@ -121,6 +121,24 @@ class CliProfilesStore:
 
     def _read(self) -> dict[str, Any]:
         if not self._path.exists():
+            main_dir_file = self._path.parent.parent / "Agent-Team" / PROFILES_FILE
+            if main_dir_file.exists():
+                try:
+                    data = json.loads(main_dir_file.read_text(encoding="utf-8"))
+                    if isinstance(data, dict):
+                        doc = _empty_doc()
+                        profiles = data.get("profiles")
+                        if isinstance(profiles, list):
+                            doc["profiles"] = [p for p in profiles if isinstance(p, dict)]
+                        defaults = data.get("defaults")
+                        if isinstance(defaults, dict):
+                            for key in SUPPORTED_AGENT_KEYS:
+                                value = defaults.get(key)
+                                doc["defaults"][key] = str(value) if value else None
+                        self._write(doc)
+                        return doc
+                except Exception as seed_err:  # noqa: BLE001
+                    log.warning("seeding cli-profiles.json from %s failed: %s", main_dir_file, seed_err)
             return _empty_doc()
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))

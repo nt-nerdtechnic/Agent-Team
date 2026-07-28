@@ -16,12 +16,25 @@ import asyncio
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
+
+from pydantic import ValidationError
 
 from .ipc import make_error, make_event, make_response
 from .log_readers.claude import ClaudeLogReader, first_user_prompts
 from .credential_vault import DEFAULT_SLOT_ID
+from .mcp_settings import (
+    MCPSettingsConflictError,
+    MCPSettingsError,
+    restore_mcp_server_secrets,
+)
 from .profiles_store import SUPPORTED_AGENT_KEYS as PROFILE_AGENT_KEYS
+from .skills_store import (
+    SkillConflictError,
+    SkillNotFoundError,
+    SkillValidationError,
+    SkillsStoreError,
+)
 from .spawn_history import canonical_workspace_path, filter_foreign_entries
 
 if TYPE_CHECKING:
@@ -1662,7 +1675,20 @@ async def agent_reap_orphans(session: "Session", msg_id: str, msg_type: str, pay
 async def mcp_list_servers(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
 
-    configured = app.mcp_settings_store.list_servers()
+    try:
+        configured = app.mcp_settings_store.list_servers()
+    except MCPSettingsError as err:
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "MCP_SETTINGS_INVALID",
+                str(err),
+                {"path": str(app.mcp_settings_store.path)},
+            )
+        )
+        return
+    revision = str(app.mcp_settings_store.revision)
     live = await app.mcp_manager.list_status()
     live_map = {s["name"]: s for s in live}
     merged = []
@@ -1685,6 +1711,7 @@ async def mcp_list_servers(session: "Session", msg_id: str, msg_type: str, paylo
             {
                 "servers": merged,
                 "path": str(app.mcp_settings_store.path),
+                "revision": revision,
             },
         )
     )
@@ -1695,11 +1722,227 @@ async def mcp_save_servers(session: "Session", msg_id: str, msg_type: str, paylo
     from . import app
 
     servers_raw = payload.get("servers", [])
-    servers = app.mcp_settings_store.replace_servers(servers_raw)
+    expected_raw = payload.get("expected_revision")
+    if expected_raw is None:
+        expected_revision = None
+    elif isinstance(expected_raw, (str, int)) and not isinstance(expected_raw, bool):
+        try:
+            expected_revision = int(expected_raw)
+        except ValueError:
+            expected_revision = None
+    else:
+        expected_revision = None
+    if expected_raw is not None and expected_revision is None:
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "MCP_VALIDATION_ERROR",
+                "expected_revision must be an integer revision string",
+                {"field": "expected_revision"},
+            )
+        )
+        return
+    try:
+        servers = app.mcp_settings_store.replace_servers(
+            servers_raw,
+            expected_revision=expected_revision,
+        )
+    except MCPSettingsConflictError as err:
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "MCP_SETTINGS_CONFLICT",
+                str(err),
+                {
+                    "expected_revision": str(err.expected_revision),
+                    "actual_revision": str(err.actual_revision),
+                    "path": str(app.mcp_settings_store.path),
+                },
+            )
+        )
+        return
+    except ValidationError as err:
+        await session.send_json(
+            make_error(msg_id, msg_type, "MCP_VALIDATION_ERROR", str(err))
+        )
+        return
+    except MCPSettingsError as err:
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "MCP_SETTINGS_INVALID",
+                str(err),
+                {"path": str(app.mcp_settings_store.path)},
+            )
+        )
+        return
     await app.mcp_manager.reload(app.mcp_settings_store.path)
     await session.send_json(
-        make_response(msg_id, msg_type, {"ok": True, "servers": servers})
+        make_response(
+            msg_id,
+            msg_type,
+            {
+                "ok": True,
+                "servers": servers,
+                "revision": str(app.mcp_settings_store.revision),
+            },
+        )
     )
+
+
+# ── Managed Skills (skills.*) ────────────────────────────────────────────────
+async def _run_skill_operation(
+    session: "Session",
+    msg_id: str,
+    msg_type: str,
+    operation: Callable[..., dict[str, Any]],
+    *args: Any,
+    name: str = "",
+    expected_revision: Any = None,
+) -> dict[str, Any] | None:
+    try:
+        return await asyncio.to_thread(operation, *args)
+    except SkillNotFoundError as err:
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "SKILL_NOT_FOUND",
+                str(err),
+                {"name": name},
+            )
+        )
+    except SkillConflictError as err:
+        from . import app
+
+        details = {"name": name, "expected_revision": expected_revision}
+        try:
+            current = await asyncio.to_thread(app.skills_store.get_skill, name)
+            details["actual_revision"] = current["skill"]["revision"]
+        except SkillsStoreError:
+            pass
+        await session.send_json(
+            make_error(msg_id, msg_type, "SKILL_CONFLICT", str(err), details)
+        )
+    except SkillValidationError as err:
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "SKILL_VALIDATION_ERROR",
+                str(err),
+                {"name": name},
+            )
+        )
+    except SkillsStoreError as err:
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "SKILLS_STORE_ERROR",
+                str(err),
+                {"name": name},
+            )
+        )
+    return None
+
+
+@handler("skills.list")
+async def skills_list(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    from . import app
+
+    result = await _run_skill_operation(
+        session, msg_id, msg_type, app.skills_store.list_skills
+    )
+    if result is not None:
+        await session.send_json(make_response(msg_id, msg_type, result))
+
+
+@handler("skills.get")
+async def skills_get(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    from . import app
+
+    name = payload.get("name", "")
+    result = await _run_skill_operation(
+        session, msg_id, msg_type, app.skills_store.get_skill, name, name=name
+    )
+    if result is not None:
+        await session.send_json(make_response(msg_id, msg_type, result))
+
+
+@handler("skills.create")
+async def skills_create(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    from . import app
+
+    name = payload.get("name", "")
+    result = await _run_skill_operation(
+        session,
+        msg_id,
+        msg_type,
+        app.skills_store.create_skill,
+        name,
+        payload.get("description", ""),
+        name=name,
+    )
+    if result is not None:
+        await session.send_json(make_response(msg_id, msg_type, result))
+
+
+@handler("skills.save")
+async def skills_save(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    from . import app
+
+    name = payload.get("name", "")
+    expected_revision = payload.get("expected_revision")
+    result = await _run_skill_operation(
+        session,
+        msg_id,
+        msg_type,
+        app.skills_store.save_skill,
+        name,
+        payload.get("fields", {}),
+        payload.get("body", ""),
+        expected_revision,
+        name=name,
+        expected_revision=expected_revision,
+    )
+    if result is not None:
+        await session.send_json(make_response(msg_id, msg_type, result))
+
+
+@handler("skills.set_enabled")
+async def skills_set_enabled(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    from . import app
+
+    name = payload.get("name", "")
+    result = await _run_skill_operation(
+        session,
+        msg_id,
+        msg_type,
+        app.skills_store.set_enabled,
+        name,
+        payload.get("enabled"),
+        name=name,
+    )
+    if result is not None:
+        await session.send_json(make_response(msg_id, msg_type, result))
+
+
+@handler("skills.delete")
+async def skills_delete(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    from . import app
+
+    name = payload.get("name", "")
+    result = await _run_skill_operation(
+        session, msg_id, msg_type, app.skills_store.delete_skill, name, name=name
+    )
+    if result is not None:
+        await session.send_json(make_response(msg_id, msg_type, result))
 
 
 # ── Recent workspaces (workspace.*) ─────────────────────────────────────────
@@ -1822,7 +2065,20 @@ async def settings_paths(session: "Session", msg_id: str, msg_type: str, payload
 async def settings_bundle_export(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
 
-    await session.send_json(make_response(msg_id, msg_type, {"bundle": app._settings_bundle()}))
+    try:
+        bundle = app._settings_bundle()
+    except MCPSettingsError as err:
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "MCP_SETTINGS_INVALID",
+                str(err),
+                {"path": str(app.mcp_settings_store.path)},
+            )
+        )
+        return
+    await session.send_json(make_response(msg_id, msg_type, {"bundle": bundle}))
 
 
 @handler("settings.bundle.import")
@@ -1854,7 +2110,40 @@ async def settings_bundle_import(session: "Session", msg_id: str, msg_type: str,
             "reason": "bundle_import",
         }))
     if isinstance(bundle.get("mcp_servers"), list):
-        app.mcp_settings_store.replace_servers(bundle["mcp_servers"])
+        incoming_servers = bundle["mcp_servers"]
+        if not all(isinstance(server, dict) for server in incoming_servers):
+            await session.send_json(
+                make_error(
+                    msg_id,
+                    msg_type,
+                    "MCP_VALIDATION_ERROR",
+                    "mcp_servers must contain only server objects",
+                )
+            )
+            return
+        try:
+            existing_servers = app.mcp_settings_store.list_servers()
+            restored_servers = restore_mcp_server_secrets(
+                incoming_servers,
+                existing_servers,
+            )
+            app.mcp_settings_store.replace_servers(restored_servers)
+        except ValidationError as err:
+            await session.send_json(
+                make_error(msg_id, msg_type, "MCP_VALIDATION_ERROR", str(err))
+            )
+            return
+        except MCPSettingsError as err:
+            await session.send_json(
+                make_error(
+                    msg_id,
+                    msg_type,
+                    "MCP_SETTINGS_INVALID",
+                    str(err),
+                    {"path": str(app.mcp_settings_store.path)},
+                )
+            )
+            return
         await app.mcp_manager.reload(app.mcp_settings_store.path)
         applied.append("mcp")
     if isinstance(bundle.get("analyzer"), dict):
@@ -2980,6 +3269,115 @@ async def ping(session: "Session", msg_id: str, msg_type: str, payload: dict) ->
 async def terminal_create(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
 
+    pane_id = str(payload["pane_id"])
+    generation = str(payload.get("create_generation") or msg_id)
+    key = (pane_id, generation)
+    gate = session._terminal_create_gates.setdefault(pane_id, asyncio.Lock())
+    async with gate:
+        existing = session._terminal_create_transactions.get(key)
+        if existing and existing.get("committed"):
+            app._PTY_OWNERS[existing["term_id"]] = session
+            await session.send_json(
+                make_response(msg_id, msg_type, existing["response_payload"])
+            )
+            return
+        if key in session._terminal_create_tombstones:
+            await session.send_json(
+                make_error(
+                    msg_id,
+                    msg_type,
+                    "CREATE_CANCELLED",
+                    "terminal create was cancelled",
+                    {"pane_id": pane_id, "create_generation": generation},
+                )
+            )
+            return
+
+        transaction: dict[str, Any] = {
+            "pane_id": pane_id,
+            "generation": generation,
+            "cancelled": False,
+            "committed": False,
+            "term_id": "",
+            "attribution_future": None,
+            "attribution_started": False,
+            "cleanup_task": None,
+        }
+        session._terminal_create_transactions[key] = transaction
+        try:
+            await _terminal_create_impl(
+                session, msg_id, msg_type, payload, transaction, generation
+            )
+        except asyncio.CancelledError:
+            await _rollback_terminal_create(session, transaction)
+            raise
+        except _TerminalCreateCancelled:
+            await _rollback_terminal_create(session, transaction)
+            if not session.dead:
+                await session.send_json(
+                    make_error(
+                        msg_id,
+                        msg_type,
+                        "CREATE_CANCELLED",
+                        "terminal create was cancelled",
+                        {"pane_id": pane_id, "create_generation": generation},
+                    )
+                )
+        except BaseException:
+            await _rollback_terminal_create(session, transaction)
+            session._terminal_create_transactions.pop(key, None)
+            raise
+
+
+class _TerminalCreateCancelled(Exception):
+    pass
+
+
+async def _rollback_terminal_create(
+    session: "Session", transaction: dict[str, Any]
+) -> None:
+    async def cleanup() -> None:
+        from . import app
+
+        attribution_future = transaction.get("attribution_future")
+        if attribution_future is not None:
+            try:
+                await asyncio.shield(attribution_future)
+            except Exception:  # noqa: BLE001
+                pass
+        if transaction.get("attribution_started"):
+            # register_pane runs in an executor and keeps running if its asyncio
+            # waiter is cancelled.  Queue unregister behind it and await the
+            # shared attribution lock so a late registration cannot revive.
+            try:
+                await asyncio.to_thread(
+                    app.attribution.unregister_pane, transaction["pane_id"]
+                )
+            except Exception as err:  # noqa: BLE001
+                app.log.warning("terminal create attribution rollback failed: %s", err)
+        term_id = str(transaction.get("term_id") or "")
+        if term_id:
+            if app._PTY_OWNERS.get(term_id) is session:
+                app._PTY_OWNERS.pop(term_id, None)
+            await session.terminals.kill(term_id, force=True)
+
+    cleanup_task = transaction.get("cleanup_task")
+    if cleanup_task is None:
+        cleanup_task = asyncio.create_task(cleanup())
+        transaction["cleanup_task"] = cleanup_task
+    await asyncio.shield(cleanup_task)
+
+
+async def _terminal_create_impl(
+    session: "Session",
+    msg_id: str,
+    msg_type: str,
+    payload: dict,
+    transaction: dict[str, Any],
+    generation: str,
+) -> None:
+    from . import app
+
     metadata = payload.get("metadata") or {}
     agent_key = payload.get("agent_key") or ""
     env = dict(payload.get("env") or {})
@@ -3072,16 +3470,23 @@ async def terminal_create(session: "Session", msg_id: str, msg_type: str, payloa
         # only unknown/fresh sessions get a (new) per-pane home.
         resume_id = app._codex_resume_id(payload.get("command"))
         session_home = (
-            app.codex_home_manager.find_session_home(resume_id) if resume_id else None
+            await asyncio.to_thread(app.codex_home_manager.find_session_home, resume_id)
+            if resume_id
+            else None
         )
         if session_home is None:
             home_id = str(metadata.get("session_home_id") or payload["pane_id"])
             if profile_plan is not None and profile_plan.codex_source_home is not None:
-                codex_home = app.codex_home_manager.prepare(
-                    home_id, source_home=profile_plan.codex_source_home
+                codex_home = await asyncio.to_thread(
+                    app.codex_home_manager.prepare,
+                    home_id,
+                    source_home=profile_plan.codex_source_home,
                 )
             else:
-                codex_home = app.codex_home_manager.prepare(home_id)
+                codex_home = await asyncio.to_thread(
+                    app.codex_home_manager.prepare,
+                    home_id,
+                )
             env["CODEX_HOME"] = str(codex_home)
             metadata["session_home_id"] = home_id
         elif session_home != app.codex_home_manager.real_home:
@@ -3093,9 +3498,14 @@ async def terminal_create(session: "Session", msg_id: str, msg_type: str, payloa
         # Run plugin-registered spawn transformers over the command (e.g. the
         # builtin navide.plans plugin appends Plan-MCP flags for claude/codex);
         # no-op with no plugins, and a failing transformer never breaks a spawn.
-        payload["command"] = app.plugin_wiring.apply_spawn_wiring(
-            app.plugin_host, agent_key, payload["command"]
+        payload["command"] = await asyncio.to_thread(
+            app.plugin_wiring.apply_spawn_wiring,
+            app.plugin_host,
+            agent_key,
+            payload["command"],
         )
+    if transaction["cancelled"]:
+        raise _TerminalCreateCancelled
     term = session.terminals.create(
         pane_id=payload["pane_id"],
         agent_key=agent_key,
@@ -3108,12 +3518,13 @@ async def terminal_create(session: "Session", msg_id: str, msg_type: str, payloa
         metadata=metadata,
         output_log_file=payload.get("output_log_file") or "",
     )
+    transaction["term_id"] = term.id
     # Claim immediately. A CLI can die while attribution registration is
     # still running; its terminal.exit must still reach this renderer.
     app._PTY_OWNERS[term.id] = session
     # Register the pane with the log-attribution layer so any session
     # file appearing after this point can be attributed back to us.
-    if agent_key in ("claude", "codex", "antigravity", "grok", "kimi"):
+    if agent_key in ("claude", "codex", "antigravity", "grok", "kimi", "opencode", "qwen", "kilo", "pi", "copilot", "cursor", "aider"):
         ws_for_pane = str(metadata.get("workspace_path") or payload["cwd"])
         # Workspace registration via helper triggers a force-rescan
         # if the workspace is newly known — so historic CLI sessions
@@ -3132,6 +3543,43 @@ async def terminal_create(session: "Session", msg_id: str, msg_type: str, payloa
             # from the new-session single-candidate fallback's candidate set,
             # so a sibling fresh pane in the same cwd can still fallback-bind.
             explicit_session_id = app._kimi_resume_id(payload.get("command"))
+        elif agent_key == "opencode" and not explicit_session_id:
+            # Resumed OpenCode panes carry no marker (markers only appear in a
+            # fresh kickoff), so claim the resume id from the launch command —
+            # otherwise the resumed session's events can't be routed back.
+            explicit_session_id = app._opencode_resume_id(payload.get("command"))
+        elif agent_key == "kilo" and not explicit_session_id:
+            # Resumed Kilo panes (OpenCode fork) likewise: markers only appear
+            # in a fresh kickoff, so claim the resume id from the launch
+            # command to route the resumed session's events back to this pane.
+            explicit_session_id = app._kilo_resume_id(payload.get("command"))
+        elif agent_key == "qwen" and not explicit_session_id:
+            # Resumed Qwen panes likewise: claim the resume id up front so the
+            # session's events route back to this pane and the new-session
+            # single-candidate fallback excludes it.
+            explicit_session_id = app._qwen_resume_id(payload.get("command"))
+        elif agent_key == "pi" and not explicit_session_id:
+            # Pi's `--session-id <id>` names the pane's session whether it
+            # resumes an existing id or (id unknown) creates a new one under
+            # it — claim it up front like Claude's --session-id so the
+            # session's events route back to this pane.
+            explicit_session_id = app._pi_resume_id(payload.get("command"))
+        elif agent_key == "copilot" and not explicit_session_id:
+            # Copilot's `--resume=<id>` names the pane's session whether it
+            # resumes an existing id or (id unknown) creates a new one under
+            # that UUID — claim it up front so the session's events route
+            # back to this pane.
+            explicit_session_id = app._copilot_resume_id(payload.get("command"))
+        elif agent_key == "cursor" and not explicit_session_id:
+            # Resumed Cursor panes (`agent --resume=<chatId>`, legacy
+            # `cursor-agent`) carry no marker (markers only appear in a fresh
+            # kickoff), so claim the resume id from the launch command to
+            # route the resumed session's events back to this pane.
+            explicit_session_id = app._cursor_resume_id(payload.get("command"))
+        # Aider deliberately has NO resume-id claim: its lossy resume
+        # (`aider --restore-chat-history`) takes no id, so there is nothing
+        # to parse from the launch command — a resumed aider pane binds via
+        # the kickoff marker in the history file's new section instead.
         # A re-created pane (renderer reload respawn keeps its pane id)
         # must not lose its fresh registration to a pending grace-period
         # cleanup from the previous PTY's exit.
@@ -3141,7 +3589,7 @@ async def terminal_create(session: "Session", msg_id: str, msg_type: str, payloa
         # thread-safe via attribution._lock) so the create ack below
         # isn't delayed past the frontend's timeout. Awaited so the
         # pane is registered before the ack, as before.
-        await asyncio.get_running_loop().run_in_executor(
+        attribution_future = asyncio.get_running_loop().run_in_executor(
             None,
             app.functools.partial(
                 app.attribution.register_pane,
@@ -3156,6 +3604,11 @@ async def terminal_create(session: "Session", msg_id: str, msg_type: str, payloa
                 session_home_id=str(metadata.get("session_home_id") or ""),
             ),
         )
+        transaction["attribution_future"] = attribution_future
+        transaction["attribution_started"] = True
+        await asyncio.shield(attribution_future)
+    if transaction["cancelled"]:
+        raise _TerminalCreateCancelled
     if getattr(term, "closed", False):
         app._PTY_OWNERS.pop(term.id, None)
         details = {
@@ -3179,16 +3632,46 @@ async def terminal_create(session: "Session", msg_id: str, msg_type: str, payloa
         from .usage_service import start_login_watch
 
         start_login_watch(agent_key, login_profile_id)
+    response_payload = {
+        "terminal_session_id": term.id,
+        "pane_id": term.pane_id,
+        "pid": term.proc.pid,
+        "command": term.command,
+        "startup_probe": startup_probe,
+        "create_generation": generation,
+    }
+    await session.send_json(make_response(msg_id, msg_type, response_payload))
+    if session.dead or transaction["cancelled"]:
+        raise _TerminalCreateCancelled
+    transaction["response_payload"] = response_payload
+    transaction["committed"] = True
+
+
+@handler("terminal.create.cancel")
+async def terminal_create_cancel(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    pane_id = str(payload["pane_id"])
+    generation = str(payload["create_generation"])
+    key = (pane_id, generation)
+    transaction = session._terminal_create_transactions.get(key)
+    cancelled = bool(transaction and not transaction.get("committed"))
+    if transaction and not transaction.get("committed"):
+        transaction["cancelled"] = True
+        session._terminal_create_tombstones.add(key)
+        await _rollback_terminal_create(session, transaction)
+    elif transaction is None:
+        session._terminal_create_tombstones.add(key)
+        cancelled = True
     await session.send_json(
         make_response(
             msg_id,
             msg_type,
             {
-                "terminal_session_id": term.id,
-                "pane_id": term.pane_id,
-                "pid": term.proc.pid,
-                "command": term.command,
-                "startup_probe": startup_probe,
+                "ok": True,
+                "pane_id": pane_id,
+                "create_generation": generation,
+                "cancelled": cancelled,
             },
         )
     )
@@ -3242,14 +3725,30 @@ async def terminal_kill(session: "Session", msg_id: str, msg_type: str, payload:
     # release the attribution registration.
     term_session_id = payload["terminal_session_id"]
     force = bool(payload.get("force", False))
+    owner = app._PTY_OWNERS.get(term_session_id)
+    if owner is not session:
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "TERMINAL_NOT_OWNED",
+                "terminal session is not owned by this connection; reattach it first",
+                {"terminal_session_id": term_session_id},
+            )
+        )
+        return
     pane_id_for_unreg = ""
     for sess in session.terminals._sessions.values():  # noqa: SLF001
         if sess.id == term_session_id:
             pane_id_for_unreg = sess.pane_id
             break
-    await session.terminals.kill(term_session_id, force=force)
-    if pane_id_for_unreg:
-        app.attribution.unregister_pane(pane_id_for_unreg)
+    try:
+        await session.terminals.kill(term_session_id, force=force)
+        if pane_id_for_unreg:
+            app.attribution.unregister_pane(pane_id_for_unreg)
+    finally:
+        if app._PTY_OWNERS.get(term_session_id) is session:
+            app._PTY_OWNERS.pop(term_session_id, None)
     await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
 
 

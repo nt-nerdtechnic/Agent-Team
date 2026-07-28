@@ -351,6 +351,72 @@ def test_mac_harvest_legacy_home_without_credentials(tmp_path: Path) -> None:
     assert vault.slot_is_empty("claude", "4ad13e88")
 
 
+def test_resolve_claude_credentials_prefers_runtime_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _file_vault(tmp_path)
+    vault.write_slot(
+        "claude", "acct1",
+        LiveCredentials(secret="SLOT", account={"emailAddress": "slot@example.com"}),
+    )
+    _write(vault.profile_home_path("claude", "acct1") / ".credentials.json", "RUNTIME")
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("runtime credential unexpectedly used a fallback")
+
+    monkeypatch.setattr(vault, "read_slot", forbidden)
+    monkeypatch.setattr(vault, "read_live", forbidden)
+
+    resolved = vault.resolve_claude_credentials("acct1", active=False)
+
+    assert resolved.secret == "RUNTIME"
+    assert resolved.account is None
+
+
+def test_resolve_claude_credentials_prefers_runtime_keychain(tmp_path: Path) -> None:
+    vault, sec = _mac_vault(tmp_path)
+    vault.write_slot("claude", "acct1", LiveCredentials(secret="SLOT"))
+    home = vault.profile_home_path("claude", "acct1")
+    sec.items[legacy_claude_keychain_service(home)] = "RUNTIME"
+    sec.calls.clear()
+
+    resolved = vault.resolve_claude_credentials("acct1", active=False)
+
+    assert resolved.secret == "RUNTIME"
+    assert all(call[0] == "find-generic-password" for call in sec.calls)
+
+
+def test_resolve_claude_credentials_falls_back_to_active_live(tmp_path: Path) -> None:
+    vault = _file_vault(tmp_path)
+    _write(tmp_path / "home" / ".claude" / ".credentials.json", "LIVE")
+    _write(
+        tmp_path / "home" / ".claude.json",
+        '{"oauthAccount": {"emailAddress": "live@example.com"}}',
+    )
+
+    resolved = vault.resolve_claude_credentials("acct1", active=True)
+
+    assert resolved.secret == "LIVE"
+    assert resolved.account == {"emailAddress": "live@example.com"}
+
+
+def test_resolve_claude_credentials_falls_back_to_inactive_slot_without_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _file_vault(tmp_path)
+    vault.write_slot("claude", "acct1", LiveCredentials(secret="SLOT"))
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("credential resolver attempted a mutation")
+
+    for name in ("capture", "restore", "switch", "write_live", "write_slot"):
+        monkeypatch.setattr(vault, name, forbidden)
+
+    resolved = vault.resolve_claude_credentials("acct1", active=False)
+
+    assert resolved.secret == "SLOT"
+
+
 # ── isolated login homes ────────────────────────────────────────────────────
 
 
@@ -733,7 +799,7 @@ def test_prepare_profile_home_claude_file_backend(tmp_path: Path) -> None:
     assert not (home / ".credentials.json").is_symlink()
     # Sessions and settings are symlinked back to the real home, not copied.
     real_claude = tmp_path / "home" / ".claude"
-    for name in ("projects", "todos", "shell-snapshots"):
+    for name in ("projects", "todos", "shell-snapshots", "skills"):
         assert (home / name).is_symlink()
         assert (home / name).resolve() == (real_claude / name).resolve()
     assert (home / "settings.json").is_symlink()

@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from agent_team_backend.codex_home import CodexHomeManager
+from agent_team_backend.skills_store import SkillsStore
 
 
 def test_prepare_symlinks_shared_codex_state(tmp_path: Path) -> None:
@@ -61,6 +62,30 @@ def test_find_session_home_locates_pane_home_sessions(tmp_path: Path) -> None:
     assert manager.find_session_home("pane-id-9") == panes / "old-pane-home"
 
 
+def test_find_session_home_refreshes_managed_skills_for_resume(tmp_path: Path) -> None:
+    real = tmp_path / "real-codex"
+    (real / "skills" / "native").mkdir(parents=True)
+    managed = tmp_path / "managed"
+    (managed / "enabled").mkdir(parents=True)
+    panes = tmp_path / "panes"
+    manager = CodexHomeManager(
+        real_home=real,
+        panes_root=panes,
+        managed_skills_root=managed,
+    )
+    home = manager.prepare("pane-1")
+    sessions = home / "sessions"
+    sessions.mkdir()
+    (sessions / "rollout-resume-id.jsonl").write_text("{}", encoding="utf-8")
+    assert (home / "skills" / "enabled").exists()
+
+    (managed / "enabled").rmdir()
+
+    assert manager.find_session_home("resume-id") == home
+    assert not (home / "skills" / "enabled").exists()
+    assert (home / "skills" / "native").exists()
+
+
 def test_find_session_home_rejects_unsafe_or_empty_id(tmp_path: Path) -> None:
     real = tmp_path / "real-codex"
     (real / "sessions").mkdir(parents=True)
@@ -80,3 +105,83 @@ def test_cleanup_rejects_unsafe_home_id(tmp_path: Path) -> None:
         pass
     else:
         raise AssertionError("unsafe home id should be rejected")
+
+
+def test_prepare_merges_native_and_managed_skills_with_native_precedence(
+    tmp_path: Path,
+) -> None:
+    real = tmp_path / "real-codex"
+    native = real / "skills"
+    managed = tmp_path / "managed"
+    for root, names in (
+        (native, ("native", "same")),
+        (managed, ("managed", "same", "file-conflict")),
+    ):
+        for name in names:
+            (root / name).mkdir(parents=True)
+    (native / "file-conflict").write_text("reserved", encoding="utf-8")
+    manager = CodexHomeManager(
+        real_home=real,
+        panes_root=tmp_path / "panes",
+        managed_skills_root=managed,
+    )
+
+    home = manager.prepare("pane-1")
+
+    skills = home / "skills"
+    assert skills.is_symlink()
+    assert sorted(path.name for path in skills.iterdir()) == ["managed", "native", "same"]
+    assert (skills / "same").resolve() == (native / "same").resolve()
+    assert (skills / "managed").resolve() == (managed / "managed").resolve()
+
+
+def test_prepare_removes_disabled_managed_skill_on_next_spawn(tmp_path: Path) -> None:
+    real = tmp_path / "real-codex"
+    (real / "skills" / "native").mkdir(parents=True)
+    managed = tmp_path / "managed"
+    (managed / "enabled").mkdir(parents=True)
+    manager = CodexHomeManager(
+        real_home=real,
+        panes_root=tmp_path / "panes",
+        managed_skills_root=managed,
+    )
+    home = manager.prepare("pane-1")
+    assert (home / "skills" / "enabled").exists()
+
+    (managed / "enabled").rmdir()
+    manager.prepare("pane-1")
+
+    assert not (home / "skills" / "enabled").exists()
+    assert (home / "skills" / "native").exists()
+
+
+def test_prepare_refreshes_default_central_projection(tmp_path: Path) -> None:
+    real = tmp_path / "real-codex"
+    (real / "skills" / "native").mkdir(parents=True)
+    store = SkillsStore()
+    store.create_skill("managed", "Managed")
+    manager = CodexHomeManager(real_home=real, panes_root=tmp_path / "panes")
+
+    home = manager.prepare("pane-1")
+
+    assert (home / "skills" / "native").exists()
+    assert (home / "skills" / "managed" / "SKILL.md").exists()
+
+
+def test_prepare_skill_view_failure_does_not_block_spawn(
+    tmp_path: Path, monkeypatch
+) -> None:
+    real = tmp_path / "real-codex"
+    (real / "skills" / "native").mkdir(parents=True)
+    manager = CodexHomeManager(real_home=real, panes_root=tmp_path / "panes")
+
+    def fail_mkdtemp(*_args, **_kwargs):
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr("agent_team_backend.codex_home.tempfile.mkdtemp", fail_mkdtemp)
+
+    home = manager.prepare("pane-1")
+
+    assert home == tmp_path / "panes" / "pane-1"
+    assert (home / "skills").is_symlink()
+    assert (home / "skills" / "native").exists()

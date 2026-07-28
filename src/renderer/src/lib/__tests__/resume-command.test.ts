@@ -1,10 +1,14 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
+  acquirePaneRebuildLock,
   buildResumeCommand,
+  cancelStalePendingCreate,
   dedupeRestorablePanes,
   normalizeResumeSessionId,
+  paneBusyForRebuild,
   paneCanRebuild,
   paneRebuildVisible,
+  TERMINAL_CREATE_TIMEOUT_MS,
   shouldPreserveMissingSessionOnRestore,
   shouldWarnMissingResume,
 } from '../resume-command'
@@ -125,7 +129,7 @@ describe('dedupeRestorablePanes', () => {
 
 describe('paneRebuildVisible', () => {
   it('renders the button for every resume-capable CLI, regardless of session state', () => {
-    for (const agentKey of ['claude', 'codex', 'antigravity', 'grok', 'kimi']) {
+    for (const agentKey of ['claude', 'codex', 'antigravity', 'grok', 'kimi', 'opencode']) {
       expect(paneRebuildVisible({ agentKey })).toBe(true)
     }
   })
@@ -155,7 +159,7 @@ describe('paneCanRebuild', () => {
   })
 
   it('unlocks other CLIs only when both the pinned id and the flag are present', () => {
-    for (const agentKey of ['codex', 'antigravity', 'grok', 'kimi']) {
+    for (const agentKey of ['codex', 'antigravity', 'grok', 'kimi', 'opencode']) {
       expect(paneCanRebuild({ agentKey, pinnedSessionId: 's1', sessionOnDisk: true })).toBe(true)
     }
   })
@@ -166,6 +170,51 @@ describe('paneCanRebuild', () => {
 
   it('excludes non-resumable agents (plain terminal)', () => {
     expect(paneCanRebuild({ agentKey: 'terminal', pinnedSessionId: 's1', sessionOnDisk: true })).toBe(false)
+  })
+})
+
+describe('paneBusyForRebuild', () => {
+  it.each([
+    { displayStatus: 'running', terminalStatus: 'running', age: 99_000, expected: true },
+    { displayStatus: 'starting', terminalStatus: 'starting', age: null, expected: true },
+    { displayStatus: 'starting', terminalStatus: 'starting', age: TERMINAL_CREATE_TIMEOUT_MS - 1, expected: true },
+    { displayStatus: 'starting', terminalStatus: 'starting', age: TERMINAL_CREATE_TIMEOUT_MS, expected: false },
+    { displayStatus: 'starting', terminalStatus: 'running', age: 0, expected: false },
+    { displayStatus: 'idle', terminalStatus: 'running', age: 0, expected: false },
+  ])(
+    'returns $expected for display=$displayStatus terminal=$terminalStatus age=$age',
+    ({ displayStatus, terminalStatus, age, expected }) => {
+      expect(paneBusyForRebuild(displayStatus, terminalStatus, age)).toBe(expected)
+    }
+  )
+})
+
+describe('stale create rebuild coordination', () => {
+  it('holds both pane and session locks synchronously against a double-click', () => {
+    const locks = new Set<string>()
+    const release = acquirePaneRebuildLock(locks, ['pane-1', 'session-1'])
+    expect(release).toBeTypeOf('function')
+    expect(acquirePaneRebuildLock(locks, ['pane-1', 'session-1'])).toBeNull()
+    release!()
+    expect(acquirePaneRebuildLock(locks, ['pane-1', 'session-1'])).toBeTypeOf('function')
+  })
+
+  it('waits for stale create rollback before allowing rebuild work to continue', async () => {
+    let finishCancel!: () => void
+    const cancel = vi.fn(() => new Promise<void>((resolve) => { finishCancel = resolve }))
+    let continued = false
+    const recovery = cancelStalePendingCreate(
+      'starting',
+      TERMINAL_CREATE_TIMEOUT_MS,
+      cancel,
+    ).then(() => { continued = true })
+
+    await Promise.resolve()
+    expect(cancel).toHaveBeenCalledOnce()
+    expect(continued).toBe(false)
+    finishCancel()
+    await recovery
+    expect(continued).toBe(true)
   })
 })
 
@@ -193,6 +242,53 @@ describe('buildResumeCommand', () => {
   it('uses kimi --session for kimi (id keeps its session_ prefix)', () => {
     expect(buildResumeCommand('kimi', 'session_4d4a11fe-b08a-46df-9f86-685589531e65')).toBe(
       'kimi --session session_4d4a11fe-b08a-46df-9f86-685589531e65'
+    )
+  })
+
+  it('uses opencode --session for opencode (id keeps its ses_ prefix)', () => {
+    expect(buildResumeCommand('opencode', 'ses_18d0acbcaffe3eXy2s3zezEmix')).toBe(
+      'opencode --session ses_18d0acbcaffe3eXy2s3zezEmix'
+    )
+  })
+
+  it('uses the default --resume branch for qwen (UUID id)', () => {
+    expect(buildResumeCommand('qwen', '4d4a11fe-b08a-46df-9f86-685589531e65')).toBe(
+      'qwen --resume 4d4a11fe-b08a-46df-9f86-685589531e65'
+    )
+  })
+
+  it('uses kilo --session for kilo (id keeps its ses_ prefix)', () => {
+    expect(buildResumeCommand('kilo', 'ses_18d0acbcaffe3eXy2s3zezEmix')).toBe(
+      'kilo --session ses_18d0acbcaffe3eXy2s3zezEmix'
+    )
+  })
+
+  it('uses pi --session-id for pi (UUID id)', () => {
+    expect(buildResumeCommand('pi', '4d4a11fe-b08a-46df-9f86-685589531e65')).toBe(
+      'pi --session-id 4d4a11fe-b08a-46df-9f86-685589531e65'
+    )
+  })
+
+  it('uses copilot --resume=<id> for copilot (UUID id, `=` form)', () => {
+    expect(buildResumeCommand('copilot', '4d4a11fe-b08a-46df-9f86-685589531e65')).toBe(
+      'copilot --resume=4d4a11fe-b08a-46df-9f86-685589531e65'
+    )
+  })
+
+  it('uses cursor-agent --resume=<id> for cursor (UUID id, `=` form)', () => {
+    expect(buildResumeCommand('cursor', '4d4a11fe-b08a-46df-9f86-685589531e65')).toBe(
+      'cursor-agent --resume=4d4a11fe-b08a-46df-9f86-685589531e65'
+    )
+  })
+
+  it('uses the id-less --restore-chat-history for aider (no session ids)', () => {
+    const id = '4d4a11fe-b08a-46df-9f86-685589531e65'
+    expect(buildResumeCommand('aider', id)).toBe('aider --restore-chat-history')
+    expect(buildResumeCommand('aider', id)).not.toContain(id)
+    // aider ignores the id entirely — an empty id still yields the command
+    expect(buildResumeCommand('aider', '')).toBe('aider --restore-chat-history')
+    expect(buildResumeCommand('aider', '', '--yes-always')).toBe(
+      'aider --restore-chat-history --yes-always'
     )
   })
 

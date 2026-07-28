@@ -77,6 +77,7 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 
 describe('useTerminal — RUNNING badge vs self-triggered repaints', () => {
   afterEach(() => {
+    vi.useRealTimers()
     vi.clearAllMocks()
     localStorage.clear()
   })
@@ -159,6 +160,7 @@ describe('useTerminal — RUNNING badge vs self-triggered repaints', () => {
 
   it('sets displayStatus to stopped when interrupt() or ESC is triggered, and clears on new input', async () => {
     const { result, mock, scope } = await spawned()
+    expect(result.status.value).toBe('running')
     expect(result.displayStatus.value).toBe('starting')
 
     // Trigger interrupt
@@ -170,6 +172,100 @@ describe('useTerminal — RUNNING badge vs self-triggered repaints', () => {
     result.isStopped.value = false
     expect(result.isStopped.value).toBe(false)
 
+    scope.stop()
+  })
+
+  it('tracks STARTING from before create, cancels once, and ignores a late create result', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_000)
+    const mock = createMockBackend()
+    let resolveCreate!: (value: any) => void
+    let resolveCancel!: (value: any) => void
+    const createReply = new Promise<any>((resolve) => { resolveCreate = resolve })
+    const cancelReply = new Promise<any>((resolve) => { resolveCancel = resolve })
+    const send = vi.fn((type: string, _payload?: Record<string, unknown>) => {
+      if (type === 'terminal.create') return createReply
+      if (type === 'terminal.create.cancel') return cancelReply
+      return Promise.resolve({ ok: true, payload: null, error: null })
+    })
+    ;(mock.backend as any).send = send
+    const { result, scope } = withScope(() => useTerminal('pane-1', mock.backend))
+    result.mount(document.createElement('div'))
+
+    const spawnPromise = result.spawn({ command: 'bash', cwd: '/tmp', skipReattach: true })
+    await Promise.resolve()
+    const createCall = send.mock.calls.find(([type]) => type === 'terminal.create')
+    expect(createCall).toBeTruthy()
+    const generation = createCall![1]!.create_generation
+    expect(typeof generation).toBe('string')
+    expect(generation).not.toBe('')
+    expect(result.startingStartedAt.value).toBe(1_000)
+    expect(result.startingAgeMs.value).toBe(0)
+
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(result.startingAgeMs.value).toBe(30_000)
+
+    let rollbackFinished = false
+    const firstCancel = result.cancelPendingCreate().then(() => { rollbackFinished = true })
+    const secondCancel = result.cancelPendingCreate()
+    await Promise.resolve()
+    expect(rollbackFinished).toBe(false)
+    expect(send.mock.calls.filter(([type]) => type === 'terminal.create.cancel')).toEqual([
+      ['terminal.create.cancel', { pane_id: 'pane-1', create_generation: generation }],
+    ])
+
+    resolveCancel({ ok: true, payload: { cancelled: true }, error: null })
+    await Promise.all([firstCancel, secondCancel])
+    expect(rollbackFinished).toBe(true)
+
+    resolveCreate({
+      ok: true,
+      payload: { terminal_session_id: 'late-session', pid: 42 },
+      error: null,
+    })
+    await spawnPromise
+    expect(result.sessionId.value).toBe('')
+    expect(result.status.value).toBe('starting')
+    expect(send.mock.calls.filter(([type]) => type === 'terminal.create.cancel')).toHaveLength(1)
+    scope.stop()
+  })
+
+  it('uses a new create generation after a prior terminal exits', async () => {
+    const mock = createMockBackend()
+    mock.setResponse('terminal.create', { terminal_session_id: 'sess-1', pid: 42 })
+    const { result, scope } = withScope(() => useTerminal('pane-1', mock.backend))
+    result.mount(document.createElement('div'))
+    await result.spawn({ command: 'bash', cwd: '/tmp', skipReattach: true })
+    const firstGeneration = mock.sent.find((call) => call.type === 'terminal.create')?.payload.create_generation
+
+    mock.emit('terminal.exit', { terminal_session_id: 'sess-1', exit_code: 0 })
+    await result.spawn({ command: 'bash', cwd: '/tmp', skipReattach: true })
+    const generations = mock.sent
+      .filter((call) => call.type === 'terminal.create')
+      .map((call) => call.payload.create_generation)
+    expect(generations).toHaveLength(2)
+    expect(generations[1]).not.toBe(firstGeneration)
+    scope.stop()
+  })
+
+  it('best-effort cancels the matching generation when create fails', async () => {
+    const mock = createMockBackend()
+    const send = vi.fn((type: string, payload: Record<string, unknown>) => {
+      if (type === 'terminal.create') return Promise.reject(new Error('request terminal.create timeout'))
+      return Promise.resolve({ ok: true, payload: null, error: null })
+    })
+    ;(mock.backend as any).send = send
+    const { result, scope } = withScope(() => useTerminal('pane-1', mock.backend))
+    result.mount(document.createElement('div'))
+
+    await result.spawn({ command: 'bash', cwd: '/tmp', skipReattach: true })
+    await Promise.resolve()
+    const createGeneration = send.mock.calls.find(([type]) => type === 'terminal.create')![1].create_generation
+    expect(send).toHaveBeenCalledWith('terminal.create.cancel', {
+      pane_id: 'pane-1',
+      create_generation: createGeneration,
+    })
+    expect(result.status.value).toBe('error')
     scope.stop()
   })
 })

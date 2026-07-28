@@ -7,6 +7,7 @@ import asyncio
 import base64
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from agent_team_backend import usage_service as us
 from agent_team_backend.profiles_store import CliProfilesStore
@@ -476,6 +477,238 @@ async def test_poll_once_survives_fetcher_exception(tmp_path, monkeypatch):
     payload = await svc.poll_once(tmp_path)
     assert payload["providers"]["claude"]["status"] == "error"
     assert payload["providers"]["codex"]["status"] == "no-credentials"
+
+
+def test_usage_cache_loads_last_good_and_ignores_invalid_files(tmp_path):
+    cache = tmp_path / "usage-cache.json"
+    good = us._snapshot(
+        "claude", "ok",
+        windows=[us._window("session", "Session", 25, "2099-01-01T00:00:00Z")],
+        plan_type="pro",
+    )
+    good["windows"][0]["accessToken"] = "must-not-persist"
+    first = us.UsageService(cache_path=cache)
+    assert first._record_claude_snapshot("acct-a", good) is True
+    first._save_cache()
+
+    raw = cache.read_text(encoding="utf-8")
+    assert "accessToken" not in raw
+    assert "refreshToken" not in raw
+    assert "must-not-persist" not in raw
+    assert cache.stat().st_mode & 0o777 == 0o600
+    loaded = us.UsageService(
+        cache_path=cache,
+        active_claude_slot_reader=lambda: "acct-a",
+    )
+    snap = loaded.payload()["accounts"]["claude"]["acct-a"]
+    assert snap["windows"][0]["usedPercent"] == 25
+    assert snap["stale"] is True
+    assert snap["refreshStatus"] == "not-refreshed"
+    assert loaded.payload()["providers"]["claude"] == snap
+
+    cache.write_text("not json", encoding="utf-8")
+    assert us.UsageService(cache_path=cache).payload()["accounts"] == {}
+    cache.write_text(json.dumps({"schemaVersion": 999, "accounts": {}}), encoding="utf-8")
+    assert us.UsageService(cache_path=cache).payload()["accounts"] == {}
+
+
+def test_usage_cache_merges_failure_and_marks_reset_windows_expired(tmp_path):
+    svc = us.UsageService(cache_path=tmp_path / "usage-cache.json")
+    good = us._snapshot(
+        "claude", "ok",
+        windows=[us._window("session", "Session", 70, "2000-01-01T00:00:00Z")],
+    )
+    svc._record_claude_snapshot("acct-a", good)
+    failure = us._snapshot("claude", "expired")
+
+    assert svc._record_claude_snapshot("acct-a", failure) is False
+    snap = svc.payload()["accounts"]["claude"]["acct-a"]
+    assert snap["status"] == "ok"
+    assert snap["refreshStatus"] == "expired"
+    assert snap["refreshAttemptedAt"] == failure["fetchedAt"]
+    assert snap["lastSuccessAt"] == good["fetchedAt"]
+    assert snap["windows"][0]["usedPercent"] == 70
+    assert snap["windows"][0]["expired"] is True
+    assert snap["staleExpired"] is True
+
+
+def test_stale_expiry_recomputes_while_polling_is_blocked(tmp_path):
+    svc = us.UsageService(cache_path=tmp_path / "usage-cache.json")
+    good = us._snapshot(
+        "claude", "ok",
+        windows=[us._window("session", "Session", 70, "2099-01-01T00:00:00")],
+    )
+    svc._record_claude_snapshot("acct-a", good)
+    svc._record_claude_snapshot("acct-a", us._snapshot("claude", "rate-limited"))
+    snap = svc.payload()["accounts"]["claude"]["acct-a"]
+    assert snap["staleExpired"] is False
+
+    snap["windows"][0]["resetsAt"] = "2000-01-01T00:00:00"
+    refreshed = svc.payload()["accounts"]["claude"]["acct-a"]
+    assert refreshed["staleExpired"] is True
+    assert refreshed["windows"][0]["expired"] is True
+
+
+def test_next_sleep_accepts_naive_reset_timestamp():
+    svc = us.UsageService()
+    svc.account_snapshots = {
+        "claude": {
+            "acct-a": us._snapshot(
+                "claude", "ok",
+                windows=[us._window("session", "Session", 10, "2099-01-01T00:00:00")],
+            )
+        }
+    }
+    assert svc._next_sleep() == us.DEFAULT_INTERVAL
+
+
+async def test_poll_once_claude_accounts_are_independent_and_pruned(tmp_path, monkeypatch):
+    store = _isolated_store(tmp_path)
+    active = store.create(agent_key="claude", name="Active")
+    inactive = store.create(agent_key="claude", name="Inactive")
+    store.set_default("claude", active["id"])
+
+    class AccountVault:
+        def __init__(self):
+            self.lock = asyncio.Lock()
+            self.calls: list[tuple[str, bool]] = []
+
+        def switch_lock(self, agent_key: str):
+            assert agent_key == "claude"
+            return self.lock
+
+        def resolve_claude_credentials(self, slot_id: str, *, active: bool):
+            self.calls.append((slot_id, active))
+            secret = json.dumps({"claudeAiOauth": {"accessToken": slot_id}})
+            return SimpleNamespace(secret=secret)
+
+    vault = AccountVault()
+    monkeypatch.setattr(us, "_get_profiles_store", lambda: store)
+    monkeypatch.setattr(us, "_get_credential_vault", lambda: vault)
+    calls: dict[str, int] = {}
+
+    async def fake_claude(oauth):
+        token = oauth["accessToken"]
+        calls[token] = calls.get(token, 0) + 1
+        if token == inactive["id"]:
+            snap = us._snapshot("claude", "rate-limited")
+            snap["retryAfterSec"] = 120
+            return snap
+        return us._snapshot(
+            "claude", "ok",
+            windows=[us._window("session", "Session", len(calls), None)],
+        )
+
+    async def fake_other(provider):
+        return us._snapshot(provider, "no-credentials")
+
+    monkeypatch.setattr(us, "fetch_claude_oauth", fake_claude)
+    monkeypatch.setattr(us, "fetch_codex", lambda home: fake_other("codex"))
+    monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_other("kimi"))
+    monkeypatch.setattr(us, "fetch_grok", lambda home: fake_other("grok"))
+    monkeypatch.setattr(us, "fetch_antigravity", lambda home: fake_other("antigravity"))
+
+    cache = tmp_path / "usage-cache.json"
+    svc = us.UsageService(cache_path=cache)
+    first = await svc.poll_once(tmp_path)
+    assert set(first["accounts"]["claude"]) == {
+        "__default__", active["id"], inactive["id"],
+    }
+    assert first["providers"]["claude"] == first["accounts"]["claude"][active["id"]]
+    assert sorted(vault.calls) == sorted([
+        ("__default__", False), (active["id"], True), (inactive["id"], False),
+    ])
+
+    await svc.poll_once(tmp_path)
+    assert calls[inactive["id"]] == 1
+    assert calls[active["id"]] == 2
+    assert calls["__default__"] == 2
+
+    store.delete(inactive["id"])
+    third = await svc.poll_once(tmp_path)
+    assert inactive["id"] not in third["accounts"]["claude"]
+    persisted = json.loads(cache.read_text(encoding="utf-8"))
+    assert inactive["id"] not in persisted["accounts"]["claude"]
+
+
+async def test_refresh_during_poll_runs_next_cycle_with_new_active_account(
+    tmp_path, monkeypatch
+):
+    from agent_team_backend import app
+
+    store = _isolated_store(tmp_path)
+    first = store.create(agent_key="claude", name="First")
+    second = store.create(agent_key="claude", name="Second")
+    store.set_default("claude", first["id"])
+
+    class AccountVault:
+        def __init__(self):
+            self.lock = asyncio.Lock()
+
+        def switch_lock(self, agent_key: str):
+            return self.lock
+
+        def resolve_claude_credentials(self, slot_id: str, *, active: bool):
+            secret = json.dumps({"claudeAiOauth": {"accessToken": slot_id}})
+            return SimpleNamespace(secret=secret)
+
+        def login_home_path(self, agent_key: str, slot_id: str) -> Path:
+            return tmp_path / "missing-login-home"
+
+        def harvest(self, agent_key: str, slot_id: str) -> bool:
+            return False
+
+    vault = AccountVault()
+    monkeypatch.setattr(us, "_get_profiles_store", lambda: store)
+    monkeypatch.setattr(us, "_get_credential_vault", lambda: vault)
+    started = asyncio.Event()
+    release_first_poll = asyncio.Event()
+
+    async def fake_claude(oauth):
+        if not release_first_poll.is_set():
+            started.set()
+            await release_first_poll.wait()
+        used = 10 if oauth["accessToken"] == first["id"] else 20
+        return us._snapshot(
+            "claude", "ok",
+            windows=[us._window("session", "Session", used, None)],
+        )
+
+    async def fake_other(provider):
+        return us._snapshot(provider, "no-credentials")
+
+    monkeypatch.setattr(us, "fetch_claude_oauth", fake_claude)
+    monkeypatch.setattr(us, "fetch_codex", lambda home: fake_other("codex"))
+    monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_other("kimi"))
+    monkeypatch.setattr(us, "fetch_grok", lambda home: fake_other("grok"))
+    monkeypatch.setattr(us, "fetch_antigravity", lambda home: fake_other("antigravity"))
+
+    broadcasts: list[dict] = []
+    completed = asyncio.Event()
+    svc = us.UsageService(cache_path=tmp_path / "usage-cache.json")
+    svc.enabled = True
+
+    async def record_broadcast(event):
+        broadcasts.append(event)
+        if len(broadcasts) == 2:
+            svc.enabled = False
+            svc.request_refresh()
+            completed.set()
+
+    monkeypatch.setattr(app, "broadcast", record_broadcast)
+    task = asyncio.create_task(svc._run())
+    await asyncio.wait_for(started.wait(), timeout=1)
+    store.set_default("claude", second["id"])
+    svc.request_refresh()
+    release_first_poll.set()
+    await asyncio.wait_for(completed.wait(), timeout=1)
+    await asyncio.wait_for(task, timeout=1)
+
+    assert len(broadcasts) == 2
+    first_payload = broadcasts[0]["payload"]
+    second_payload = broadcasts[1]["payload"]
+    assert first_payload["providers"]["claude"]["windows"][0]["usedPercent"] == 10
+    assert second_payload["providers"]["claude"]["windows"][0]["usedPercent"] == 20
 
 
 # ── Real-home credential reads + opportunistic slot harvest ─────────────────

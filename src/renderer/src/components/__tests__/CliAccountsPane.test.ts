@@ -17,11 +17,19 @@ import type { UsageSnapshot } from '../../composables/useUsage'
 // UsageBadge.test.ts).
 const usage = vi.hoisted(() => ({
   usageFor: vi.fn<(agentKey: string | undefined | null) => UsageSnapshot | undefined>(),
+  accountUsageFor: vi.fn<
+    (agentKey: string | undefined | null, profileId: string | null) => UsageSnapshot | undefined
+  >(),
   refreshUsage: vi.fn(),
 }))
 vi.mock('../../composables/useUsage', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../composables/useUsage')>()
-  return { ...actual, usageFor: usage.usageFor, refreshUsage: usage.refreshUsage }
+  return {
+    ...actual,
+    usageFor: usage.usageFor,
+    accountUsageFor: usage.accountUsageFor,
+    refreshUsage: usage.refreshUsage,
+  }
 })
 
 // Stub useNotify (module-level singleton) so confirm dialogs resolve without
@@ -93,6 +101,8 @@ describe('CliAccountsPane', () => {
     wrapper?.unmount()
     wrapper = undefined
     vi.clearAllMocks()
+    usage.usageFor.mockReset()
+    usage.accountUsageFor.mockReset()
   })
 
   function mountPane(
@@ -343,17 +353,29 @@ describe('CliAccountsPane', () => {
     }
   }
 
-  it('shows headline number, per-window bars and footer on the active card only', () => {
-    usage.usageFor.mockImplementation((key) => (key === 'claude' ? usageSnapshot() : undefined))
-    // 'p1' is claude's active profile → the Default card must show no quota.
+  it('shows each signed-in account card its own quota snapshot', () => {
+    usage.accountUsageFor.mockImplementation((key, profileId) => {
+      if (key !== 'claude') return undefined
+      return profileId === null
+        ? usageSnapshot({
+            windows: [{ kind: 'session', label: 'Session', usedPercent: 10, resetsAt: null }],
+          })
+        : usageSnapshot()
+    })
     const api = makeApi({
       profiles: [profile('p1', 'claude', 'Account 2')],
       defaults: { claude: 'p1' },
+      identities: {
+        claude: {
+          __default__: { email: 'default@example.com', signedIn: true },
+          p1: { email: 'work@example.com', signedIn: true },
+        },
+      },
     })
     const w = mountPane(api)
 
     const cards = section(w, 0).findAll('.cli-card')
-    expect(cards[0].find('.cli-card-big').exists()).toBe(false)
+    expect(cards[0].get('.cli-card-big').text().replace(/\s+/g, ' ')).toBe('90% Session')
     expect(cards[1].classes()).toContain('active')
     expect(cards[1].get('.cli-card-big').text().replace(/\s+/g, ' ')).toBe('70% Session')
     expect(cards[1].findAll('.cli-mini-bar')).toHaveLength(2)
@@ -361,17 +383,69 @@ describe('CliAccountsPane', () => {
     expect(cards[1].get('.cli-card-foot').text()).toBe('Weekly 15%')
   })
 
-  it('shows an expired warning on the active card when credentials are expired', () => {
-    usage.usageFor.mockImplementation((key) =>
-      key === 'claude' ? usageSnapshot({ status: 'expired', windows: [] }) : undefined,
-    )
-    const w = mountPane(makeApi())
+  it('falls back to a providers-only snapshot for the active row only', () => {
+    usage.accountUsageFor.mockReturnValue(undefined)
+    usage.usageFor.mockImplementation((key) => (key === 'claude' ? usageSnapshot() : undefined))
+    const api = makeApi({
+      profiles: [profile('p1', 'claude', 'Account 2')],
+      defaults: { claude: 'p1' },
+      identities: {
+        claude: { __default__: { email: 'default@example.com', signedIn: true } },
+      },
+    })
+    const w = mountPane(api)
 
-    expect(section(w, 0).get('.cli-card-expired').text()).toContain('⚠')
+    const cards = section(w, 0).findAll('.cli-card')
+    expect(cards[0].find('.cli-card-big').exists()).toBe(false)
+    expect(cards[1].get('.cli-card-big').text()).toContain('70%')
   })
 
-  it('shows a no-live-quota placeholder on a signed-in non-active card', () => {
-    usage.usageFor.mockReturnValue(undefined)
+  it('shows account snapshots when display identity is missing or signed out', () => {
+    usage.accountUsageFor.mockImplementation((key, profileId) => {
+      if (key !== 'claude') return undefined
+      return profileId === null
+        ? usageSnapshot({
+            windows: [{ kind: 'session', label: 'Session', usedPercent: 10, resetsAt: null }],
+          })
+        : usageSnapshot({
+            windows: [{ kind: 'session', label: 'Session', usedPercent: 20, resetsAt: null }],
+          })
+    })
+    const api = makeApi({
+      profiles: [profile('p1', 'claude', 'Account 2')],
+      identities: { claude: { p1: { email: null, signedIn: false } } },
+    })
+    const w = mountPane(api)
+
+    const cards = section(w, 0).findAll('.cli-card')
+    expect(cards[0].get('.cli-card-big').text()).toContain('90%')
+    expect(cards[1].get('.cli-card-big').text()).toContain('80%')
+  })
+
+  it('shows an expired snapshot when display identity reports signed out', () => {
+    usage.accountUsageFor.mockImplementation((key) =>
+      key === 'claude' ? usageSnapshot({ status: 'expired', windows: [] }) : undefined,
+    )
+    const w = mountPane(
+      makeApi({
+        identities: { claude: { __default__: { email: null, signedIn: false } } },
+      }),
+    )
+
+    expect(section(w, 0).get('.cli-card-expired').text()).toContain('⚠')
+    expect(section(w, 0).get('.cli-card-none').text()).toContain('No quota data yet')
+  })
+
+  it('shows cached quota, last success and refresh state on a non-active card', () => {
+    usage.accountUsageFor.mockImplementation((_key, profileId) =>
+      profileId === null
+        ? usageSnapshot({
+            stale: true,
+            lastSuccessAt: '2026-07-26T04:00:00Z',
+            refreshStatus: 'rate-limited',
+          })
+        : undefined,
+    )
     const api = makeApi({
       profiles: [profile('p1', 'claude', 'Account 2')],
       defaults: { claude: 'p1' },
@@ -380,8 +454,44 @@ describe('CliAccountsPane', () => {
     const w = mountPane(api)
 
     const cards = section(w, 0).findAll('.cli-card')
-    // Default card: signed in but not active → placeholder; active card: none.
-    expect(cards[0].find('.cli-card-none').exists()).toBe(true)
+    expect(cards[0].get('.cli-card-big').text()).toContain('70%')
+    expect(cards[0].get('.cli-card-cache').text()).toContain('Cached')
+    expect(cards[0].get('.cli-card-refresh').text()).toContain('rate limited')
+  })
+
+  it('does not present a cached window after its reset has passed', () => {
+    usage.accountUsageFor.mockReturnValue(
+      usageSnapshot({
+        stale: true,
+        staleExpired: true,
+        lastSuccessAt: '2026-07-26T04:00:00Z',
+        refreshStatus: 'unavailable',
+        windows: [
+          { kind: 'session', label: 'Session', usedPercent: 30, resetsAt: null, expired: true },
+        ],
+      }),
+    )
+    const w = mountPane(
+      makeApi({
+        identities: { claude: { __default__: { email: 'me@example.com', signedIn: true } } },
+      }),
+    )
+    const card = section(w, 0).findAll('.cli-card')[0]
+    expect(card.find('.cli-card-big').exists()).toBe(false)
+    expect(card.get('.cli-card-none').text()).toContain('Cached quota reset has passed')
+    expect(card.get('.cli-card-cache').text()).toContain('Cached')
+  })
+
+  it('shows no data only for a signed-in account without a snapshot', () => {
+    usage.accountUsageFor.mockReturnValue(undefined)
+    const api = makeApi({
+      profiles: [profile('p1', 'claude', 'Account 2')],
+      identities: { claude: { __default__: { email: 'me@x.com', signedIn: true } } },
+    })
+    const w = mountPane(api)
+
+    const cards = section(w, 0).findAll('.cli-card')
+    expect(cards[0].get('.cli-card-none').text()).toContain('No quota data yet')
     expect(cards[1].find('.cli-card-none').exists()).toBe(false)
   })
 

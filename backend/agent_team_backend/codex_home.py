@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
+import tempfile
 from pathlib import Path
+
+from .applog import app_data_dir
+from .skills_store import SkillsStore
 
 log = logging.getLogger("agent_team_backend.codex_home")
 
@@ -15,14 +20,21 @@ _SAFE_HOME_ID = re.compile(r"^[A-Za-z0-9_.:-]+$")
 class CodexHomeManager:
     """Create isolated CODEX_HOME dirs while sharing stable user config."""
 
-    def __init__(self, *, real_home: Path | None = None, panes_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        real_home: Path | None = None,
+        panes_root: Path | None = None,
+        managed_skills_root: Path | None = None,
+    ) -> None:
         self.real_home = real_home or (Path.home() / ".codex")
         self.panes_root = panes_root or (Path.home() / ".codex-panes")
+        self.managed_skills_root = managed_skills_root or (app_data_dir() / "runtime" / "skills")
+        self._refresh_managed_skills = managed_skills_root is None
         self.shared_entries = (
             "auth.json",
             "config.toml",
             "AGENTS.md",
-            "skills",
             "plugins",
             "rules",
             "memories",
@@ -44,7 +56,88 @@ class CodexHomeManager:
                 dst.symlink_to(src, target_is_directory=src.is_dir())
             except OSError as err:
                 log.warning("codex home symlink %s -> %s failed: %s", dst, src, err)
+        self._prepare_skills_view(pane_home, source / "skills")
         return pane_home
+
+    def _prepare_skills_view(self, pane_home: Path, native_root: Path) -> None:
+        """Expose native and enabled managed skills under ``CODEX_HOME/skills``.
+
+        The generated view is rebuilt on every prepare so disabled managed
+        skills disappear on the next spawn. Native entries are linked first;
+        a managed skill with the same name is skipped. Every failure is logged
+        and contained so optional skill wiring can never block a pane spawn.
+        """
+        view = pane_home / ".navide-skills"
+        skills_link = pane_home / "skills"
+        tmp: Path | None = None
+        backup = pane_home / ".navide-skills.old"
+        try:
+            managed_root = self.managed_skills_root
+            if self._refresh_managed_skills:
+                try:
+                    managed_root = SkillsStore().rebuild_runtime_projection()
+                except Exception as err:  # noqa: BLE001 - optional wiring cannot block spawn
+                    log.warning("refreshing managed Skills projection failed: %s", err)
+                    managed_root = pane_home / ".navide-skills-unavailable"
+            tmp = Path(tempfile.mkdtemp(prefix=".navide-skills-", dir=pane_home))
+            native_entries = (
+                sorted(native_root.iterdir(), key=lambda path: path.name)
+                if native_root.is_dir()
+                else []
+            )
+            native_names = {
+                entry.name
+                for entry in native_entries
+                if entry.is_dir() or entry.is_file() or entry.is_symlink()
+            }
+            for entry in native_entries:
+                if entry.is_dir():
+                    (tmp / entry.name).symlink_to(entry, target_is_directory=True)
+            if managed_root.is_dir():
+                for entry in sorted(managed_root.iterdir(), key=lambda path: path.name):
+                    if not entry.is_dir() or entry.name in native_names:
+                        continue
+                    (tmp / entry.name).symlink_to(entry, target_is_directory=True)
+
+            if backup.exists() or backup.is_symlink():
+                self._remove_generated_path(backup)
+            if view.exists() or view.is_symlink():
+                os.replace(view, backup)
+            os.replace(tmp, view)
+            tmp = None
+
+            if skills_link.is_symlink():
+                if os.readlink(skills_link) != os.fspath(view):
+                    skills_link.unlink()
+            elif skills_link.exists():
+                log.warning("leaving real Codex skills directory unmodified: %s", skills_link)
+                return
+            if not skills_link.is_symlink():
+                skills_link.symlink_to(view, target_is_directory=True)
+            if backup.exists() or backup.is_symlink():
+                self._remove_generated_path(backup)
+        except OSError as err:
+            log.warning("codex managed-skills view failed for %s: %s", pane_home, err)
+            if not view.exists() and backup.exists():
+                try:
+                    os.replace(backup, view)
+                except OSError:
+                    pass
+            if not skills_link.exists() and not skills_link.is_symlink() and native_root.is_dir():
+                try:
+                    skills_link.symlink_to(native_root, target_is_directory=True)
+                except OSError:
+                    pass
+        finally:
+            if tmp is not None:
+                self._remove_generated_path(tmp)
+
+    @staticmethod
+    def _remove_generated_path(path: Path) -> None:
+        if path.is_symlink() or path.is_file():
+            path.unlink(missing_ok=True)
+        elif path.exists():
+            shutil.rmtree(path)
 
     def find_session_home(self, resume_id: str) -> Path | None:
         """Locate the CODEX_HOME that recorded this session, if any.
@@ -73,6 +166,7 @@ class CodexHomeManager:
                     if not sessions.is_dir():
                         continue
                     if next(sessions.rglob(pattern), None) is not None:
+                        self._prepare_skills_view(pane_home, self.real_home / "skills")
                         return pane_home
             except OSError:
                 pass

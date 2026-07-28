@@ -4,7 +4,9 @@ import { CLI_AGENT_SPECS } from '../lib/agentSpecs'
 import type { useCliProfiles, CliProfile } from '../composables/useCliProfiles'
 import { useNotify } from '../composables/useNotify'
 import {
+  accountUsageFor,
   formatRemaining,
+  formatResetAbsolute,
   formatResetCountdown,
   refreshUsage,
   remainingTier,
@@ -126,17 +128,6 @@ async function remove(id: string): Promise<void> {
   if (ok) confirmRemoveId.value = null
 }
 
-// ── Quota on the ACTIVE card ─────────────────────────────────────────────────
-// The backend poller only reads live credentials, so only the currently
-// active account of each agent has a snapshot; other profiles show a
-// "no live quota" placeholder when signed in.
-function activeUsage(agentKey: string, profileId: string | null): UsageSnapshot | undefined {
-  if (props.api.defaultProfileId(agentKey) !== profileId) return undefined
-  const snap = usageFor(agentKey)
-  if (!snap || (snap.status !== 'ok' && snap.status !== 'expired')) return undefined
-  return snap
-}
-
 function windowRemaining(w: UsageWindow): number {
   return Math.max(0, Math.min(100, 100 - w.usedPercent))
 }
@@ -151,30 +142,69 @@ function headlineWindow(snap: UsageSnapshot): UsageWindow | undefined {
 
 interface CardUsage {
   expired: boolean
+  noData: boolean
+  cached: boolean
+  resetExpired: boolean
   big: string
   tier: 'ok' | 'warn' | 'crit'
   headLabel: string
   windows: UsageWindow[]
   foot: string
+  lastSuccess: string
+  refreshStatus: string
 }
 
 /** Display model for a card's quota area; undefined hides the area. */
 function cardUsage(agentKey: string, profileId: string | null): CardUsage | undefined {
-  const snap = activeUsage(agentKey, profileId)
+  const accountSnap = accountUsageFor(agentKey, profileId)
+  const isActive = props.api.defaultProfileId(agentKey) === profileId
+  const snap = accountSnap ?? (isActive ? usageFor(agentKey) : undefined)
   if (!snap) return undefined
-  if (snap.status === 'expired')
-    return { expired: true, big: '', tier: 'crit', headLabel: '', windows: [], foot: '' }
-  const head = headlineWindow(snap)
-  if (!head) return undefined
+  const cached = snap.stale === true
+  const windows = snap.windows.filter((w) => !w.expired)
+  const currentSnap = { ...snap, windows }
+  const head = headlineWindow(currentSnap)
+  const refreshStatus = refreshStatusLabel(snap.refreshStatus ?? snap.status)
+  const base = {
+    expired: snap.status === 'expired' || snap.refreshStatus === 'expired',
+    cached,
+    resetExpired: cached && windows.length === 0 && snap.windows.length > 0,
+    lastSuccess: formatResetAbsolute(snap.lastSuccessAt ?? snap.fetchedAt),
+    refreshStatus,
+  }
+  if (!head)
+    return {
+      ...base,
+      noData: !base.resetExpired,
+      big: '',
+      tier: 'ok',
+      headLabel: '',
+      windows: [],
+      foot: '',
+    }
   const rem = windowRemaining(head)
   return {
-    expired: false,
+    ...base,
+    noData: false,
     big: formatRemaining(rem),
     tier: remainingTier(rem),
     headLabel: head.label,
-    windows: snap.windows,
-    foot: cardFoot(snap, head),
+    windows,
+    foot: cardFoot(currentSnap, head),
   }
+}
+
+function refreshStatusLabel(status: string): string {
+  const known = new Set([
+    'not-refreshed',
+    'no-credentials',
+    'expired',
+    'rate-limited',
+    'unavailable',
+    'error',
+    'ok',
+  ])
+  return known.has(status) ? t(`usage.refresh-status-${status}`) : status
 }
 
 /** Card footer: the non-headline windows plus the headline reset countdown. */
@@ -276,42 +306,56 @@ onMounted(() => refreshUsage())
                 : $t('settings.accounts.cli.not-signed-in')
             }}</span>
 
-            <!-- Quota area: live numbers on the active card, a placeholder on
-                 signed-in non-active cards (single-element v-for = alias). -->
-            <template v-for="u in [cardUsage(spec.agentKey, p?.id ?? null)]" :key="'usage'">
-              <div v-if="u?.expired" class="cli-card-expired">
-                ⚠ {{ $t('usage.expired-tooltip') }}
-              </div>
-              <template v-else-if="u">
-                <div class="cli-card-big" :class="u.tier">
-                  {{ u.big }}
-                  <small>{{ u.headLabel }}</small>
+            <!-- Quota area (single-element v-for = local display-model alias). -->
+            <template
+              v-for="u in [cardUsage(spec.agentKey, p?.id ?? null)]"
+              :key="'usage'"
+            >
+              <template v-if="u && !u.noData">
+                <div v-if="u.resetExpired" class="cli-card-none">
+                  <span class="cli-card-dash">—</span>
+                  <span class="cli-card-foot">{{ $t('usage.cached-reset-expired') }}</span>
                 </div>
-                <div class="cli-card-bars">
-                  <div
-                    v-for="w in u.windows"
-                    :key="w.kind + w.label"
-                    class="cli-mini-bar"
-                    :title="barTitle(w)"
-                  >
-                    <div
-                      class="cli-mini-fill"
-                      :class="remainingTier(windowRemaining(w))"
-                      :style="{ width: windowRemaining(w) + '%' }"
-                    ></div>
+                <template v-else>
+                  <div class="cli-card-big" :class="u.tier">
+                    {{ u.big }}
+                    <small>{{ u.headLabel }}</small>
                   </div>
+                  <div class="cli-card-bars">
+                    <div
+                      v-for="w in u.windows"
+                      :key="w.kind + w.label"
+                      class="cli-mini-bar"
+                      :title="barTitle(w)"
+                    >
+                      <div
+                        class="cli-mini-fill"
+                        :class="remainingTier(windowRemaining(w))"
+                        :style="{ width: windowRemaining(w) + '%' }"
+                      ></div>
+                    </div>
+                  </div>
+                  <div v-if="u.foot" class="cli-card-foot">{{ u.foot }}</div>
+                </template>
+                <div v-if="u.cached" class="cli-card-cache">
+                  {{ $t('usage.cached-at', { time: u.lastSuccess }) }}
                 </div>
-                <div v-if="u.foot" class="cli-card-foot">{{ u.foot }}</div>
+                <div v-if="u.cached" class="cli-card-refresh">
+                  {{ $t('usage.refresh-status', { status: u.refreshStatus }) }}
+                </div>
               </template>
               <div
-                v-else-if="
-                  rowIdentity(spec.agentKey, p?.id ?? null)?.signedIn &&
-                  api.defaultProfileId(spec.agentKey) !== (p?.id ?? null)
-                "
+                v-else-if="u || rowIdentity(spec.agentKey, p?.id ?? null)?.signedIn"
                 class="cli-card-none"
               >
                 <span class="cli-card-dash">—</span>
-                <span class="cli-card-foot">{{ $t('settings.accounts.cli.no-live-quota') }}</span>
+                <span class="cli-card-foot">{{ $t('usage.no-data') }}</span>
+                <span v-if="u?.expired" class="cli-card-expired">
+                  ⚠ {{ $t('usage.expired-tooltip') }}
+                </span>
+                <span v-if="u?.refreshStatus" class="cli-card-refresh">
+                  {{ $t('usage.refresh-status', { status: u.refreshStatus }) }}
+                </span>
               </div>
             </template>
 
@@ -452,6 +496,8 @@ onMounted(() => refreshUsage())
 .cli-mini-fill.warn { background: var(--attention-fg); }
 .cli-mini-fill.crit { background: var(--danger-fg); }
 .cli-card-foot { font-size: 10px; color: var(--text-muted); }
+.cli-card-cache { font-size: 10px; font-weight: 600; color: var(--attention-fg); }
+.cli-card-refresh { font-size: 10px; color: var(--text-muted); }
 .cli-card-expired { font-size: 11px; font-weight: 600; color: var(--danger-fg); }
 .cli-card-none { display: flex; flex-direction: column; gap: 2px; }
 .cli-card-dash {

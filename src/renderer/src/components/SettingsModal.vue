@@ -47,11 +47,21 @@ import CliManagementPanel from './CliManagementPanel.vue'
 import type { useCliProfiles } from '../composables/useCliProfiles'
 import KeyboardShortcutsHelp from './KeyboardShortcutsHelp.vue'
 import ExtensionsPane from './ExtensionsPane.vue'
+import SkillsPane from './SkillsPane.vue'
 import SettingsNavItem from './settings/SettingsNavItem.vue'
 import SettingsSection from './settings/SettingsSection.vue'
 import SettingsCard from './settings/SettingsCard.vue'
 import SettingRow from './settings/SettingRow.vue'
 import ToggleSwitch from './settings/ToggleSwitch.vue'
+import {
+  isSecretSettingKey,
+  nextRecordKey,
+  RevisionedMcpSaveQueue,
+  shouldReloadMcpAfterBundleImport,
+  switchMcpTransportShape,
+  type RevisionedMcpSaveOutcome,
+  type McpTransport,
+} from '../lib/mcp-settings-editor'
 
 const props = defineProps<{
   backend: ReturnType<typeof useBackend>
@@ -82,7 +92,7 @@ const confirmBeforeCloseModel = computed({
 })
 
 // ── Tab ───────────────────────────────────────────────────────────────────────
-type Tab = 'roles' | 'pipelines' | 'mcp' | 'analyzer' | 'cliAgents' | 'general' | 'updates' | 'appearance' | 'accounts' | 'shortcuts' | 'extensions'
+type Tab = 'roles' | 'pipelines' | 'mcp' | 'skills' | 'analyzer' | 'cliAgents' | 'general' | 'updates' | 'appearance' | 'accounts' | 'shortcuts' | 'extensions'
 const activeTab = ref<Tab>(props.initialTab ?? 'roles')
 
 // Sidebar workspace header label — the open workspace's basename, falling back
@@ -203,6 +213,15 @@ const settingsSearchItems = computed<SettingsSearchItem[]>(() => [
     summary: 'Search and add context-reading MCP servers from the catalog.',
     keywords: 'mcp catalog add install search context reading 新增 安裝 搜尋 目錄',
     mcpView: 'catalog',
+  },
+  {
+    id: 'skills',
+    tab: 'skills',
+    section: 'skills',
+    title: 'Skills / 技能',
+    group: 'Integrations',
+    summary: 'Create, edit, enable, disable, and inspect app-managed agent skills.',
+    keywords: 'skills skill agent instructions markdown enable disable attachments 技能 指令 啟用 停用 附件',
   },
   {
     id: 'analyzer-backend',
@@ -523,6 +542,7 @@ interface SettingsPaths {
   roles?: string
   pipelines?: string
   mcp?: string
+  skills?: string
   analyzer?: string
   ai_chat?: string
   backend_log?: string
@@ -536,6 +556,7 @@ const settingsScopeNotes: Record<Tab, { scope: string; storage: keyof SettingsPa
   roles: { scope: 'User', storage: 'roles' },
   pipelines: { scope: 'User', storage: 'pipelines' },
   mcp: { scope: 'User', storage: 'mcp' },
+  skills: { scope: 'User', storage: 'skills' },
   analyzer: { scope: 'User', storage: 'analyzer' },
   cliAgents: { scope: 'User', storage: 'localStorage' },
   general: { scope: 'User', storage: 'localStorage' },
@@ -637,8 +658,9 @@ async function importSettingsBundle(): Promise<void> {
       props.analyzerApi.refreshSettings(),
     ])
     fetchAiChatSettings()
-    if (mServers.value.length > 0) await mLoad()
-    settingsBundleSummary.value = `Imported: ${(resp.payload?.applied ?? []).join(', ') || 'appearance'}`
+    const applied = resp.payload?.applied ?? []
+    if (shouldReloadMcpAfterBundleImport(applied)) await mLoad(true)
+    settingsBundleSummary.value = `Imported: ${applied.join(', ') || 'appearance'}`
   } catch (err) {
     settingsBundleError.value = err instanceof Error ? err.message : 'Import failed'
   } finally {
@@ -1109,8 +1131,14 @@ async function sImport() {
 
 interface McpTool { name: string; description: string }
 interface McpServer {
-  name: string; command: string; args: string[]
-  env: Record<string, string>; enabled: boolean
+  name: string
+  transport: McpTransport
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  url?: string
+  headers?: Record<string, string>
+  enabled: boolean
   // Live fields (returned by backend, not saved):
   status?: 'connected' | 'error' | 'disabled' | 'unknown'
   tool_count?: number; tools?: McpTool[]
@@ -1118,7 +1146,7 @@ interface McpServer {
 // CatalogEntry type alias (re-exported from mcpCatalog.ts)
 type CatalogEntry = McpCatalogEntry
 
-type MView = 'list' | 'catalog'
+type MView = 'list' | 'catalog' | 'custom'
 const mView = ref<MView>('list')
 const mSearch = ref('')
 const mServers = ref<McpServer[]>([])
@@ -1127,6 +1155,15 @@ const mSaving = ref(false)
 const mError = ref('')
 const mSummary = ref('')
 const mConfigPath = ref('')
+const mRevision = ref<string | null>(null)
+const mConflict = ref(false)
+const mCustomName = ref('')
+const mCustomTransport = ref<McpTransport>('stdio')
+const mCustomCommand = ref('')
+const mCustomUrl = ref('')
+const mVisibleSecrets = ref<Set<string>>(new Set())
+const mDirty = ref(false)
+let mEditVersion = 0
 const mExpanded = ref<Set<string>>(new Set())   // servers with tools list open
 const mExpandedEnv = ref<Set<string>>(new Set()) // servers with env editor open
 
@@ -1140,39 +1177,179 @@ function mIsInstalled(name: string) {
   return isMcpInstalled(mServers.value.map(s => s.name), name)
 }
 
-async function mLoad() {
-  mLoading.value = true; mError.value = ''
+function mNormalizeServer(server: Partial<McpServer> & { name: string; enabled: boolean }): McpServer {
+  const transport: McpTransport = server.transport === 'http' || server.transport === 'sse'
+    ? server.transport
+    : 'stdio'
+  if (transport === 'stdio') {
+    return {
+      ...server,
+      transport,
+      command: server.command ?? '',
+      args: Array.isArray(server.args) ? server.args : [],
+      env: server.env ?? {},
+    }
+  }
+  return {
+    ...server,
+    transport,
+    url: server.url ?? '',
+    headers: server.headers ?? {},
+  }
+}
+
+function mSerializedServer(server: McpServer): Record<string, unknown> {
+  const common = { name: server.name, transport: server.transport, enabled: server.enabled }
+  if (server.transport === 'stdio') {
+    return {
+      ...common,
+      command: server.command ?? '',
+      args: [...(server.args ?? [])],
+      env: { ...(server.env ?? {}) },
+    }
+  }
+  return { ...common, url: server.url ?? '', headers: { ...(server.headers ?? {}) } }
+}
+
+function mServerForTransport(name: string, transport: McpTransport, endpoint: string): McpServer {
+  return transport === 'stdio'
+    ? { name, transport, command: endpoint, args: [], env: {}, enabled: true }
+    : { name, transport, url: endpoint, headers: {}, enabled: true }
+}
+
+interface McpQueuedDraft {
+  servers: Record<string, unknown>[]
+  silent: boolean
+  editVersion: number
+}
+
+function mMarkDirty(): void {
+  mDirty.value = true
+  mEditVersion += 1
+}
+
+async function mLoad(force = false) {
+  if (!force && (mDirty.value || mAutosaveQueue.pending > 0)) return
+  if (force) mDirty.value = false
+  mLoading.value = true; mError.value = ''; mConflict.value = false
   try {
-    const resp = await props.backend.send<{ servers: McpServer[]; path: string }>('mcp.list_servers', {})
+    const resp = await props.backend.send<{ servers: McpServer[]; path?: string; revision: string }>('mcp.list_servers', {})
     if (resp.ok && resp.payload) {
-      mServers.value = resp.payload.servers
+      mServers.value = resp.payload.servers.map(mNormalizeServer)
       mConfigPath.value = resp.payload.path ?? ''
+      mRevision.value = resp.payload.revision
     } else { mError.value = resp.error?.message ?? 'Load failed' }
   } catch (err) { mError.value = String((err as Error).message ?? err) }
   finally { mLoading.value = false }
 }
 
-async function mSave(silent = false) {
-  mSaving.value = true; mError.value = ''
-  // Strip live-only fields before sending
-  const payload = mServers.value.map(({ name, command, args, env, enabled }) =>
-    ({ name, command, args, env, enabled }))
+async function mRefreshLive(): Promise<void> {
   try {
-    const resp = await props.backend.send<{ ok: boolean }>('mcp.save_servers', { servers: payload })
-    if (resp.ok) { if (!silent) mSummary.value = 'Saved — MCP Manager restarting…' }
-    else mError.value = resp.error?.message ?? 'Save failed'
+    const resp = await props.backend.send<{ servers: McpServer[]; path?: string; revision: string }>('mcp.list_servers', {})
+    if (!resp.ok || !resp.payload) {
+      mError.value = resp.error?.message ?? 'Load failed'
+      return
+    }
+    const liveByName = new Map(resp.payload.servers.map((server) => [server.name, server]))
+    for (const server of mServers.value) {
+      const live = liveByName.get(server.name)
+      server.status = live?.status ?? 'unknown'
+      server.tool_count = live?.tool_count
+      server.tools = live?.tools
+    }
+    mConfigPath.value = resp.payload.path ?? mConfigPath.value
+    mRevision.value = resp.payload.revision
+  } catch (err) {
+    mError.value = String((err as Error).message ?? err)
+  }
+}
+
+const mAutosaveQueue = new RevisionedMcpSaveQueue<McpQueuedDraft>(
+  (snapshot, expectedRevision) => mSaveNow(snapshot, expectedRevision),
+  async (lastSnapshot) => {
+    if (mEditVersion === lastSnapshot.editVersion) mDirty.value = false
+    await mRefreshLive()
+  }
+)
+
+function mSave(silent = false): Promise<boolean> {
+  mMarkDirty()
+  return mAutosaveQueue.enqueue(
+    {
+      servers: mServers.value.map(mSerializedServer),
+      silent,
+      editVersion: mEditVersion,
+    },
+    mRevision.value
+  )
+}
+
+async function mSaveNow(
+  snapshot: McpQueuedDraft,
+  expectedRevision: string | null
+): Promise<RevisionedMcpSaveOutcome> {
+  mSaving.value = true; mError.value = ''; mSummary.value = ''; mConflict.value = false
+  try {
+    const resp = await props.backend.send<{ ok?: boolean; revision?: string; conflict?: boolean; error?: string }>(
+      'mcp.save_servers',
+      { servers: snapshot.servers, expected_revision: expectedRevision }
+    )
+    if (resp.ok && resp.payload?.ok !== false) {
+      mRevision.value = resp.payload?.revision ?? mRevision.value
+      if (!snapshot.silent) mSummary.value = 'Saved — MCP Manager restarting…'
+      return { ok: true, revision: mRevision.value }
+    }
+    mConflict.value = resp.payload?.conflict === true || resp.error?.code === 'MCP_SETTINGS_CONFLICT'
+    mError.value = resp.payload?.error
+      ?? resp.error?.message
+      ?? (mConflict.value ? 'The MCP settings changed on disk. Reload before saving.' : 'Save failed')
+    return { ok: false }
   } catch (err) { mError.value = String((err as Error).message ?? err) }
   finally { mSaving.value = false }
+  return { ok: false }
 }
 
 async function mAddFromCatalog(entry: CatalogEntry) {
   if (mIsInstalled(entry.name)) return
-  mServers.value.push({ name: entry.name, command: entry.command, args: [...entry.args], env: { ...entry.env }, enabled: true })
-  await mSave(true)
-  mView.value = 'list'
+  const server: McpServer = { name: entry.name, transport: 'stdio', command: entry.command, args: [...entry.args], env: { ...entry.env }, enabled: true }
+  mServers.value.push(server)
+  if (await mSave(true)) {
+    mView.value = 'list'
+    mSummary.value = `Added ${entry.label}`
+  } else {
+    mServers.value = mServers.value.filter((item) => item !== server)
+  }
   // Auto-expand env editor if this server needs env vars filled
   if (entry.requiresEnv?.length) mExpandedEnv.value = new Set([...mExpandedEnv.value, entry.name])
-  mSummary.value = `Added ${entry.label}`
+}
+
+async function mCreateCustom() {
+  const name = mCustomName.value.trim()
+  if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name)) {
+    mError.value = 'Server name must use lowercase letters, digits, dashes, or underscores.'
+    return
+  }
+  if (mIsInstalled(name)) {
+    mError.value = `A server named "${name}" already exists.`
+    return
+  }
+  const endpoint = mCustomTransport.value === 'stdio' ? mCustomCommand.value.trim() : mCustomUrl.value.trim()
+  if (!endpoint) {
+    mError.value = mCustomTransport.value === 'stdio' ? 'Command is required.' : 'URL is required.'
+    return
+  }
+  const server = mServerForTransport(name, mCustomTransport.value, endpoint)
+  mServers.value.push(server)
+  if (await mSave(true)) {
+    mCustomName.value = ''
+    mCustomTransport.value = 'stdio'
+    mCustomCommand.value = ''
+    mCustomUrl.value = ''
+    mExpandedEnv.value = new Set([...mExpandedEnv.value, name])
+    mView.value = 'list'
+  } else {
+    mServers.value = mServers.value.filter((item) => item !== server)
+  }
 }
 
 async function mRemoveServer(idx: number) {
@@ -1202,16 +1379,46 @@ function mToggleEnv(name: string) {
   mExpandedEnv.value = s
 }
 
-function mEnvEntries(srv: McpServer): [string, string][] { return Object.entries(srv.env) }
-function mSetEnvKey(srv: McpServer, oldKey: string, newKey: string) {
-  const val = srv.env[oldKey] ?? ''
-  delete srv.env[oldKey]; srv.env[newKey] = val
+function mChangeTransport(server: McpServer, transport: McpTransport) {
+  switchMcpTransportShape(server, transport)
+  void mSave(true)
 }
-function mSetEnvVal(srv: McpServer, key: string, val: string) { srv.env[key] = val }
-function mAddEnvEntry(srv: McpServer) { srv.env['NEW_KEY'] = '' }
-function mDeleteEnvEntry(srv: McpServer, key: string) { delete srv.env[key] }
-function mArgString(srv: McpServer) { return srv.args.join(' ') }
-function mSetArgs(srv: McpServer, val: string) { srv.args = val.split(/\s+/).filter(Boolean) }
+
+function mRecordEntries(record?: Record<string, string>): [string, string][] {
+  return Object.entries(record ?? {})
+}
+function mEnvRecord(server: McpServer): Record<string, string> { return (server.env ??= {}) }
+function mHeaderRecord(server: McpServer): Record<string, string> { return (server.headers ??= {}) }
+function mSetRecordKey(record: Record<string, string>, oldKey: string, newKey: string) {
+  const key = newKey.trim()
+  if (!key || (key !== oldKey && key in record)) return
+  const val = record[oldKey] ?? ''
+  delete record[oldKey]; record[key] = val
+}
+function mAddRecordEntry(record: Record<string, string>, base: string) {
+  record[nextRecordKey(record, base)] = ''
+  mMarkDirty()
+}
+function mDeleteRecordEntry(record: Record<string, string>, key: string) { delete record[key] }
+function mAddArg(server: McpServer) { (server.args ??= []).push(''); mMarkDirty() }
+function mSetArg(server: McpServer, index: number, value: string) { (server.args ??= [])[index] = value; mMarkDirty() }
+function mDeleteArg(server: McpServer, index: number) { server.args?.splice(index, 1) }
+function mSetRecordValue(record: Record<string, string>, key: string, value: string) {
+  record[key] = value
+  mMarkDirty()
+}
+function mSecretId(server: McpServer, kind: 'env' | 'header', key: string) {
+  return `${server.name}\u0000${kind}\u0000${key}`
+}
+function mSecretVisible(server: McpServer, kind: 'env' | 'header', key: string): boolean {
+  return mVisibleSecrets.value.has(mSecretId(server, kind, key))
+}
+function mToggleSecret(server: McpServer, kind: 'env' | 'header', key: string) {
+  const id = mSecretId(server, kind, key)
+  const next = new Set(mVisibleSecrets.value)
+  next.has(id) ? next.delete(id) : next.add(id)
+  mVisibleSecrets.value = next
+}
 
 async function mOpenConfig() {
   if (mConfigPath.value) await (window as any).agentTeam.openPath(mConfigPath.value)
@@ -1437,6 +1644,11 @@ async function plDelete(id: string, name: string) {
                   <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5 2.3v3M10.5 2.3v3"/><path d="M4 5.3h8v2.2a4 4 0 0 1-8 0V5.3Z"/><path d="M8 11.5v2.2"/></svg>
                 </template>
               </SettingsNavItem>
+              <SettingsNavItem :label="$t('settings.nav.skills')" :active="activeTab === 'skills'" @select="activeTab = 'skills'">
+                <template #icon>
+                  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3.2h4.2v4.2H3zM8.8 3.2H13v4.2H8.8zM3 9H7.2v3.8H3z"/><path d="M10.9 9v3.8M9 10.9h3.8"/></svg>
+                </template>
+              </SettingsNavItem>
               <SettingsNavItem :label="$t('settings.nav.analyzer')" :active="activeTab === 'analyzer'" @select="activeTab = 'analyzer'">
                 <template #icon>
                   <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3.2C6.6 2.2 4.2 2.8 4.2 4.8 2.7 5.1 2.7 7.3 4.2 7.8c0 2 1.9 2.6 3.8 2.1"/><path d="M8 3.2c1.4-1 3.8-.4 3.8 1.6 1.5.3 1.5 2.5 0 3 0 2-1.9 2.6-3.8 2.1"/><path d="M8 3.2v9.6"/></svg>
@@ -1543,7 +1755,8 @@ async function plDelete(id: string, name: string) {
               <span class="mcp-page-title">{{ $t('label.installed-mcp-servers') }}</span>
               <div class="mcp-topbar-actions">
                 <button class="mcp-action-btn" @click="mView = 'catalog'">{{ $t('action.add-mcp') }}</button>
-                <button class="mcp-action-btn" @click="mLoad" :disabled="mLoading">{{ $t('action.refresh') }}</button>
+                <button class="mcp-action-btn" @click="mView = 'custom'">{{ $t('settings.mcp.add-custom') }}</button>
+                <button class="mcp-action-btn" @click="mLoad()" :disabled="mLoading">{{ $t('action.refresh') }}</button>
                 <button class="mcp-action-btn" @click="mOpenConfig" :disabled="!mConfigPath">{{ $t('action.open-mcp-config') }}</button>
               </div>
             </div>
@@ -1553,6 +1766,10 @@ async function plDelete(id: string, name: string) {
               <button class="settings-path-btn" :disabled="!settingsPaths.mcp" @click="openSettingsPath(settingsPaths.mcp)">{{ $t('action.open') }}</button>
             </div>
             <p v-if="mError" class="err-msg" style="margin:6px 16px 0">{{ mError }}</p>
+            <div v-if="mConflict" class="mcp-conflict">
+              <span>{{ $t('settings.mcp.conflict') }}</span>
+              <button class="mcp-action-btn" @click="mLoad(true)">{{ $t('settings.mcp.reload') }}</button>
+            </div>
             <span v-if="mSummary" class="mcp-summary-ok">{{ mSummary }}</span>
 
             <div class="mcp-server-list">
@@ -1563,6 +1780,7 @@ async function plDelete(id: string, name: string) {
                 <div class="mcp-server-row">
                   <span class="mcp-dot" :class="srv.status ?? 'unknown'"></span>
                   <span class="mcp-server-name">{{ srv.name }}</span>
+                  <span class="mcp-transport-badge">{{ srv.transport }}</span>
                   <span class="mcp-spacer"></span>
                   <button class="mcp-delete-btn" @click="mRemoveServer(idx)" title="Remove">🗑</button>
                   <!-- Toggle switch -->
@@ -1601,27 +1819,98 @@ async function plDelete(id: string, name: string) {
                   <span>{{ $t('action.settings') }}</span>
                 </div>
                 <div v-if="mExpandedEnv.has(srv.name)" class="mcp-config-form">
-                  <div class="two-col">
+                  <div class="field mcp-transport-field">
+                    <label class="lbl">{{ $t('settings.mcp.transport') }}</label>
+                    <select
+                      :value="srv.transport"
+                      @change="mChangeTransport(srv, ($event.target as HTMLSelectElement).value as McpTransport)"
+                    >
+                      <option value="stdio">stdio</option>
+                      <option value="http">HTTP</option>
+                      <option value="sse">SSE</option>
+                    </select>
+                  </div>
+
+                  <template v-if="srv.transport === 'stdio'">
                     <div class="field">
                       <label class="lbl">{{ $t('label.mcp-command') }}</label>
-                      <input v-model="srv.command" type="text" spellcheck="false" placeholder="npx" @blur="mSave(true)" />
+                      <input v-model="srv.command" type="text" spellcheck="false" placeholder="npx" @input="mMarkDirty" @blur="mSave(true)" />
                     </div>
                     <div class="field">
-                      <label class="lbl">Args</label>
-                      <input :value="mArgString(srv)" @input="mSetArgs(srv, ($event.target as HTMLInputElement).value)" type="text" spellcheck="false" @blur="mSave(true)" />
+                      <label class="lbl">
+                        {{ $t('settings.mcp.arguments') }}
+                        <button class="mcp-add-env-btn" @click.stop="mAddArg(srv)">+ {{ $t('action.add') }}</button>
+                      </label>
+                      <div v-for="(arg, argIndex) in (srv.args ?? [])" :key="argIndex" class="mcp-env-row">
+                        <span class="mcp-arg-index">{{ argIndex + 1 }}</span>
+                        <input
+                          :value="arg"
+                          type="text"
+                          class="mcp-env-val"
+                          spellcheck="false"
+                          @input="mSetArg(srv, argIndex, ($event.target as HTMLInputElement).value)"
+                          @blur="mSave(true)"
+                        />
+                        <button class="mcp-delete-btn small" @click.stop="mDeleteArg(srv, argIndex); mSave(true)">✕</button>
+                      </div>
+                      <p v-if="!(srv.args?.length)" class="hint-msg">{{ $t('settings.mcp.no-arguments') }}</p>
                     </div>
-                  </div>
-                  <!-- Env vars -->
-                  <div class="field">
-                    <label class="lbl">Env vars <button class="mcp-add-env-btn" @click.stop="mAddEnvEntry(srv)">+ Add</button></label>
-                    <div v-for="[k, v] in mEnvEntries(srv)" :key="k" class="mcp-env-row">
-                      <input :value="k" @change="mSetEnvKey(srv, k, ($event.target as HTMLInputElement).value)" type="text" spellcheck="false" placeholder="KEY" class="mcp-env-key" />
-                      <span>=</span>
-                      <input :value="v" @input="mSetEnvVal(srv, k, ($event.target as HTMLInputElement).value)" type="text" spellcheck="false" placeholder="value" class="mcp-env-val" @blur="mSave(true)" />
-                      <button class="mcp-delete-btn small" @click.stop="mDeleteEnvEntry(srv, k)">✕</button>
+                    <div class="field">
+                      <label class="lbl">
+                        {{ $t('settings.mcp.env') }}
+                        <button class="mcp-add-env-btn" @click.stop="mAddRecordEntry(mEnvRecord(srv), 'NEW_KEY')">+ {{ $t('action.add') }}</button>
+                      </label>
+                      <div v-for="[k, v] in mRecordEntries(srv.env)" :key="k" class="mcp-env-row">
+                        <input :value="k" @change="mSetRecordKey(mEnvRecord(srv), k, ($event.target as HTMLInputElement).value); mSave(true)" type="text" spellcheck="false" placeholder="KEY" class="mcp-env-key" />
+                        <span>=</span>
+                        <input
+                          :value="v"
+                          @input="mSetRecordValue(mEnvRecord(srv), k, ($event.target as HTMLInputElement).value)"
+                          :type="isSecretSettingKey(k) && !mSecretVisible(srv, 'env', k) ? 'password' : 'text'"
+                          spellcheck="false"
+                          placeholder="value"
+                          class="mcp-env-val"
+                          @blur="mSave(true)"
+                        />
+                        <button v-if="isSecretSettingKey(k)" class="mcp-reveal-btn" @click.stop="mToggleSecret(srv, 'env', k)">
+                          {{ mSecretVisible(srv, 'env', k) ? $t('settings.mcp.hide') : $t('settings.mcp.show') }}
+                        </button>
+                        <button class="mcp-delete-btn small" @click.stop="mDeleteRecordEntry(mEnvRecord(srv), k); mSave(true)">✕</button>
+                      </div>
+                      <p v-if="!Object.keys(srv.env ?? {}).length" class="hint-msg">{{ $t('settings.mcp.no-env') }}</p>
                     </div>
-                    <p v-if="!Object.keys(srv.env).length" class="hint-msg" style="margin:4px 0 0">No environment variables</p>
-                  </div>
+                  </template>
+
+                  <template v-else>
+                    <div class="field">
+                      <label class="lbl">URL</label>
+                      <input v-model="srv.url" type="url" spellcheck="false" placeholder="https://example.com/mcp" @input="mMarkDirty" @blur="mSave(true)" />
+                    </div>
+                    <div class="field">
+                      <label class="lbl">
+                        {{ $t('settings.mcp.headers') }}
+                        <button class="mcp-add-env-btn" @click.stop="mAddRecordEntry(mHeaderRecord(srv), 'Authorization')">+ {{ $t('action.add') }}</button>
+                      </label>
+                      <div v-for="[k, v] in mRecordEntries(srv.headers)" :key="k" class="mcp-env-row">
+                        <input :value="k" @change="mSetRecordKey(mHeaderRecord(srv), k, ($event.target as HTMLInputElement).value); mSave(true)" type="text" spellcheck="false" placeholder="Header" class="mcp-env-key" />
+                        <span>:</span>
+                        <input
+                          :value="v"
+                          @input="mSetRecordValue(mHeaderRecord(srv), k, ($event.target as HTMLInputElement).value)"
+                          :type="isSecretSettingKey(k) && !mSecretVisible(srv, 'header', k) ? 'password' : 'text'"
+                          spellcheck="false"
+                          placeholder="value"
+                          class="mcp-env-val"
+                          @blur="mSave(true)"
+                        />
+                        <button v-if="isSecretSettingKey(k)" class="mcp-reveal-btn" @click.stop="mToggleSecret(srv, 'header', k)">
+                          {{ mSecretVisible(srv, 'header', k) ? $t('settings.mcp.hide') : $t('settings.mcp.show') }}
+                        </button>
+                        <button class="mcp-delete-btn small" @click.stop="mDeleteRecordEntry(mHeaderRecord(srv), k); mSave(true)">✕</button>
+                      </div>
+                      <p v-if="!Object.keys(srv.headers ?? {}).length" class="hint-msg">{{ $t('settings.mcp.no-headers') }}</p>
+                    </div>
+                  </template>
                 </div>
               </div>
 
@@ -1632,7 +1921,7 @@ async function plDelete(id: string, name: string) {
           </template>
 
           <!-- ── CATALOG VIEW ────────────────────────────────────────────── -->
-          <template v-else>
+          <template v-else-if="mView === 'catalog'">
             <div class="mcp-topbar" data-settings-section="mcp-catalog">
               <button class="mcp-back-btn" @click="mView = 'list'">← Back</button>
               <span class="mcp-page-title">Add MCP Servers</span>
@@ -1663,6 +1952,55 @@ async function plDelete(id: string, name: string) {
             </div>
           </template>
 
+          <template v-else>
+            <div class="mcp-topbar" data-settings-section="mcp-custom">
+              <button class="mcp-back-btn" @click="mView = 'list'">← {{ $t('action.back') }}</button>
+              <span class="mcp-page-title">{{ $t('settings.mcp.custom-title') }}</span>
+            </div>
+            <form class="mcp-custom-form" @submit.prevent="mCreateCustom">
+              <p>{{ $t('settings.mcp.custom-hint') }}</p>
+              <div class="field">
+                <label class="lbl">{{ $t('settings.mcp.server-name') }}</label>
+                <input v-model="mCustomName" required pattern="[a-z0-9][a-z0-9_-]{0,63}" maxlength="64" spellcheck="false" autocomplete="off" placeholder="my-server" />
+              </div>
+              <div class="field">
+                <label class="lbl">{{ $t('settings.mcp.transport') }}</label>
+                <select v-model="mCustomTransport">
+                  <option value="stdio">stdio</option>
+                  <option value="http">HTTP</option>
+                  <option value="sse">SSE</option>
+                </select>
+              </div>
+              <div v-if="mCustomTransport === 'stdio'" class="field">
+                <label class="lbl">{{ $t('label.mcp-command') }}</label>
+                <input v-model="mCustomCommand" required spellcheck="false" placeholder="npx" />
+              </div>
+              <div v-else class="field">
+                <label class="lbl">URL</label>
+                <input v-model="mCustomUrl" required type="url" spellcheck="false" placeholder="https://example.com/mcp" />
+              </div>
+              <div class="mcp-custom-actions">
+                <button type="button" class="mcp-action-btn" @click="mView = 'list'">{{ $t('action.cancel') }}</button>
+                <button
+                  type="submit"
+                  class="mcp-add-btn"
+                  :disabled="mSaving || !mCustomName.trim() || (mCustomTransport === 'stdio' ? !mCustomCommand.trim() : !mCustomUrl.trim())"
+                >{{ $t('settings.mcp.create-server') }}</button>
+              </div>
+            </form>
+          </template>
+
+        </div>
+
+        <!-- ── SKILLS TAB ───────────────────────────────────────────────── -->
+        <div v-show="activeTab === 'skills'" class="s-body" data-settings-section="skills">
+          <h1 class="s-page-title">{{ $t('settings.nav.skills') }}</h1>
+          <div class="settings-meta-row">
+            <span class="scope-badge">{{ settingsScopeNotes.skills.scope }}</span>
+            <span class="settings-path" :title="pathForTab('skills')">{{ pathForTab('skills') }}</span>
+            <button class="settings-path-btn" :disabled="!settingsPaths.skills" @click="openSettingsPath(settingsPaths.skills)">{{ $t('action.open') }}</button>
+          </div>
+          <SkillsPane :backend="props.backend" />
         </div>
 
         <!-- ── ANALYZER TAB ─────────────────────────────────────────────── -->
@@ -3227,6 +3565,12 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 }
 .mcp-back-btn:hover { background: var(--bg-muted); color: var(--text-bright); }
 .mcp-summary-ok { font-size: 11px; color: var(--success-fg); padding: 4px 16px; }
+.mcp-conflict {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin: 8px 16px 0; padding: 7px 9px; border-left: 3px solid var(--attention-fg);
+  background: color-mix(in srgb, var(--attention-fg) 8%, var(--bg-subtle));
+  color: var(--attention-fg); font-size: 11px;
+}
 
 /* Server list */
 .mcp-server-list { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; flex: 1; min-height: 0; }
@@ -3246,6 +3590,11 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 }
 .mcp-spacer { flex: 1; }
 .mcp-server-name { font-weight: 700; font-size: 13px; color: var(--text-bright); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-transport-badge {
+  padding: 2px 6px; border: 1px solid var(--border-default); border-radius: var(--radius-pill);
+  color: var(--text-secondary); background: var(--bg-muted); font-family: Menlo, Monaco, monospace;
+  font-size: 9px; text-transform: uppercase;
+}
 
 /* Status dot */
 .mcp-dot {
@@ -3298,16 +3647,28 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
   padding: 10px 14px; border-top: 1px solid var(--border-muted);
   display: flex; flex-direction: column; gap: 8px; background: var(--bg-base);
 }
+.mcp-config-form select,
+.mcp-custom-form select {
+  padding: 6px 8px; border: 1px solid var(--border-default); border-radius: 5px;
+  background: var(--bg-base); color: var(--text-primary);
+}
+.mcp-transport-field { max-width: 220px; }
 
 /* Env vars editor */
 .mcp-env-row { display: flex; align-items: center; gap: 6px; }
 .mcp-env-key { width: 140px; flex-shrink: 0; font-family: Menlo, Monaco, monospace; font-size: 11px; }
 .mcp-env-val { flex: 1; min-width: 0; font-family: Menlo, Monaco, monospace; font-size: 11px; }
+.mcp-arg-index { width: 18px; color: var(--text-muted); font-family: Menlo, Monaco, monospace; font-size: 10px; text-align: right; }
 .mcp-add-env-btn {
   font-size: 10px; padding: 2px 7px; border-radius: 4px;
   background: transparent; border: 1px solid var(--border-default); color: var(--text-secondary); cursor: pointer; margin-left: 6px;
 }
 .mcp-add-env-btn:hover { background: var(--bg-muted); color: var(--text-bright); }
+.mcp-reveal-btn {
+  border: 1px solid var(--border-default); border-radius: 4px; background: transparent;
+  color: var(--text-secondary); padding: 3px 6px; font-size: 9px; cursor: pointer;
+}
+.mcp-reveal-btn:hover { color: var(--text-bright); background: var(--bg-muted); }
 
 /* Catalog view */
 .mcp-search-wrap {
@@ -3351,6 +3712,13 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
   font-size: 11px; padding: 6px 14px; border-radius: 6px; white-space: nowrap; flex-shrink: 0;
   background: var(--bg-muted); border: 1px solid var(--border-default); color: var(--text-muted); cursor: not-allowed;
 }
+.mcp-custom-form {
+  width: min(520px, calc(100% - 32px)); margin: 16px; padding: 14px;
+  display: flex; flex-direction: column; gap: 12px;
+  border: 1px solid var(--border-default); border-radius: var(--radius-card); background: var(--bg-subtle);
+}
+.mcp-custom-form > p { margin: 0; color: var(--text-secondary); font-size: 11px; line-height: 1.5; }
+.mcp-custom-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
 /* ── Confirm dialog ───────────────────────────────────────────────────────── */
 .confirm-card {
