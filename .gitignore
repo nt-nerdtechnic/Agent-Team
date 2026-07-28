@@ -29,6 +29,7 @@ backend/build/
 dist-local/
 dist-release/
 dist-plugins/
+dist-updatetest/
 backend/*.egg-info/
 backend/.mypy_cache/
 backend/.ruff_cache/

@@ -34,7 +34,7 @@
   },
   "build": {
     "appId": "com.nerdtechnic.agent-team",
-    "productName": "Navide (Agent-Team)",
+    "productName": "Navide",
     "directories": {
       "output": "dist-release"
     },

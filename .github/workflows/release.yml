@@ -110,6 +110,15 @@ jobs:
           # The notarization ticket is stapled to the app.
           stapler validate "${app_path}"
 
+      - name: Repackage macOS update zip (preserve framework symlinks)
+        # electron-builder 26.15.0's zip target flattens the Electron Framework
+        # symlinks, so Squirrel.Mac rejects the extracted app during auto-update
+        # with "bundle format is ambiguous (could be app or framework)". Re-zip the
+        # signed + notarized .app with ditto (which keeps the symlinks) and refresh
+        # latest-mac.yml's sha512/size to match.
+        shell: bash
+        run: node scripts/fix-mac-update-zip.mjs dist-release
+
       - name: Validate update artifacts
         shell: bash
         run: |
@@ -119,6 +128,17 @@ jobs:
           test "$(find dist-release -maxdepth 1 -name '*.blockmap' | wc -l | tr -d ' ')" -ge 2
           app_path="$(find dist-release -maxdepth 2 -name '*.app' -type d -print -quit)"
           test -n "${app_path}"
+          # Regression guard: the update zip must extract to a codesign-valid app.
+          # electron-builder's raw zip fails this with "bundle format is ambiguous";
+          # the ditto repackage step above is what makes it pass. This is the check
+          # that was missing when the broken zip shipped.
+          zip_path="$(find dist-release -maxdepth 1 -name 'Navide-*.zip' -print -quit)"
+          work="$(mktemp -d)"
+          ditto -x -k "${zip_path}" "${work}"
+          extracted="$(find "${work}" -maxdepth 1 -name '*.app' -type d -print -quit)"
+          test -n "${extracted}"
+          codesign --verify --deep --strict --verbose=2 "${extracted}"
+          rm -rf "${work}"
 
       - name: Publish GitHub Release
         # Manual (workflow_dispatch) runs dry-run the signing chain only.

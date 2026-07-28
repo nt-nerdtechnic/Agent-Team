@@ -29,7 +29,7 @@ done
 pnpm release:check
 VERSION="$(node -p "require('./package.json').version")"
 OUTPUT_DIR="$ROOT/dist-local"
-APP_NAME="Navide (Agent-Team).app"
+APP_NAME="Navide.app"
 APP_PATH="$OUTPUT_DIR/mac-arm64/$APP_NAME"
 
 echo ""
