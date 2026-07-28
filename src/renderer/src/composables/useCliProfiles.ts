@@ -150,10 +150,14 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
     profileId: string | null,
   ): Promise<SetDefaultResult> {
     try {
-      const resp = await backend.send<{ defaults: CliProfileDefaults }>('cli_profiles.set_default', {
-        agent_key: agentKey,
-        profile_id: profileId,
-      })
+      const resp = await backend.send<{ defaults: CliProfileDefaults }>(
+        'cli_profiles.set_default',
+        {
+          agent_key: agentKey,
+          profile_id: profileId,
+        },
+        30_000,
+      )
       if (!resp.ok || !resp.payload) {
         const code = resp.error?.code
         const message =

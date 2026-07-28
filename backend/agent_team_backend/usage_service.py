@@ -1331,24 +1331,23 @@ class UsageService:
         resolver = getattr(vault, "resolve_claude_credentials", None) if vault else None
         if store is None or not callable(resolver):
             return None
-        async with vault.switch_lock("claude"):
-            doc = await asyncio.to_thread(store.list)
-            active = str(doc["defaults"].get("claude") or "__default__")
-            slot_ids = ["__default__"] + [
-                str(profile["id"])
-                for profile in doc["profiles"]
-                if profile.get("agentKey") == "claude" and profile.get("id")
-            ]
+        doc = await asyncio.to_thread(store.list)
+        active = str(doc["defaults"].get("claude") or "__default__")
+        slot_ids = ["__default__"] + [
+            str(profile["id"])
+            for profile in doc["profiles"]
+            if profile.get("agentKey") == "claude" and profile.get("id")
+        ]
 
-            def _read_all() -> dict[str, dict | None]:
-                return {
-                    slot_id: parse_claude_credentials(
-                        resolver(slot_id, active=slot_id == active).secret
-                    )
-                    for slot_id in slot_ids
-                }
+        def _read_all() -> dict[str, dict | None]:
+            return {
+                slot_id: parse_claude_credentials(
+                    resolver(slot_id, active=slot_id == active).secret
+                )
+                for slot_id in slot_ids
+            }
 
-            credentials = await asyncio.to_thread(_read_all)
+        credentials = await asyncio.to_thread(_read_all)
         allowed = set(slot_ids)
         removed = False
         for mapping in (
