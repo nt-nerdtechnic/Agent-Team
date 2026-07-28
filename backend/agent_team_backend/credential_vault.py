@@ -42,6 +42,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -157,7 +158,9 @@ def _grok_auth_entry(secret: str | None) -> dict | None:
             legacy = legacy or entry
     return oidc or legacy
 
-# runner(args_after_security, stdin_text) -> (returncode, stdout)
+# runner(args_after_security, stdin_text) -> (returncode, output). Output is
+# stdout; on failure the runner appends stderr so callers can surface the
+# actual `security` error instead of a bare exit code.
 SecurityRunner = Callable[[list[str], "str | None"], "tuple[int, str]"]
 
 
@@ -173,7 +176,10 @@ def _default_security_runner(args: list[str], input_text: str | None = None) -> 
         text=True,
         timeout=10,
     )
-    return proc.returncode, proc.stdout
+    out = proc.stdout
+    if proc.returncode != 0 and proc.stderr:
+        out = (out + "\n" if out else "") + proc.stderr.strip()
+    return proc.returncode, out
 
 
 def _kc_quote(value: str) -> str:
@@ -250,6 +256,10 @@ class CredentialVault:
         self._security = security_runner or _default_security_runner
         self._platform = platform or sys.platform
         self._switch_locks: dict[str, asyncio.Lock] = {}
+        # Serializes Keychain check-then-write pairs across the spawn threads
+        # (prepare_profile_home runs off the event loop; a restore spawns
+        # several panes of one profile concurrently).
+        self._keychain_lock = threading.Lock()
 
     def switch_lock(self, agent_key: str) -> asyncio.Lock:
         """Per-agent lock serializing credential swaps and opportunistic
@@ -313,9 +323,16 @@ class CredentialVault:
                 "-w", _kc_quote(secret),
             ]
         )
-        rc, _ = self._security(["-i"], command + "\n")
+        rc, out = self._security(["-i"], command + "\n")
         if rc != 0:
-            raise CredentialVaultError(f"keychain write failed for {service!r}")
+            # Last line only, truncated: enough for the security error message
+            # while guaranteeing the secret (a long JSON blob) is never logged.
+            lines = out.strip().splitlines()
+            detail = lines[-1][:200] if lines else ""
+            raise CredentialVaultError(
+                f"keychain write failed for {service!r}"
+                + (f": {detail}" if detail else "")
+            )
 
     def _keychain_delete(self, service: str) -> None:
         # A missing item is fine — deletion is idempotent.
@@ -789,15 +806,20 @@ class CredentialVault:
 
     def _migrate_file(self, src: Path, target: Path) -> bool:
         """Move a real file that shadows a shared link into the real home.
-        Never overwrites an existing real-home file; a clash keeps the real
-        copy and leaves ``src`` unshared. Returns True only when ``src`` was
+        Never overwrites an existing real-home file; a clash moves ``src``
+        aside into a sibling ``<name>.unmerged`` quarantine so it stops
+        shadowing the shared link (leaving it in place would keep the file
+        unshared on every future spawn). Returns True only when ``src`` was
         moved away (so the caller may replace it with a symlink)."""
         try:
             if target.exists():
+                quarantine = src.with_name(src.name + ".unmerged")
                 log.warning(
-                    "shared target %s already exists; leaving %s unshared", target, src
+                    "shared target %s already exists; quarantining %s at %s",
+                    target, src, quarantine,
                 )
-                return False
+                shutil.move(os.fspath(src), os.fspath(quarantine))
+                return True
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(os.fspath(src), os.fspath(target))
             return True
@@ -808,10 +830,15 @@ class CredentialVault:
     def _migrate_dir(self, src: Path, target: Path) -> bool:
         """Merge a real directory that shadows a shared link (session/projects
         data written under the old whole-home isolation) into the real home.
-        Session files are uuid-unique, so a name clash keeps the real copy and
-        never overwrites it. ``src`` is removed only once every file drained;
-        a src that could not be fully merged is left in place unshared. Returns
-        True only when ``src`` was fully drained and removed."""
+        A name clash never overwrites the real copy: the clashing file is
+        moved into a sibling ``<name>.unmerged`` quarantine instead of being
+        left in place, so one stale file cannot keep the whole store unshared
+        forever (an unshared ``projects`` hides every resumable session from
+        the CLI — the "No conversation found" restart loop). ``src`` is
+        removed only once every file drained; a src that could not be fully
+        merged is left in place unshared. Returns True only when ``src`` was
+        fully drained and removed."""
+        quarantine = src.with_name(src.name + ".unmerged")
         try:
             target.mkdir(parents=True, exist_ok=True)
             drained = True
@@ -820,8 +847,12 @@ class CredentialVault:
                 for name in files:
                     dest = target / rel / name
                     if dest.exists():
-                        drained = False  # keep the real copy, never overwrite
-                        continue
+                        # Never overwrite the real copy; quarantine ours.
+                        dest = quarantine / rel / name
+                        log.warning(
+                            "shared target already has %s; quarantining at %s",
+                            rel / name, dest,
+                        )
                     try:
                         dest.parent.mkdir(parents=True, exist_ok=True)
                         shutil.move(os.fspath(Path(root) / name), os.fspath(dest))
@@ -875,10 +906,29 @@ class CredentialVault:
         info the slot's ``oauth-account.json`` already carries, so nothing is
         written into the shared ``.claude.json``)."""
         if creds.secret is not None:
-            if self._is_macos:
-                self._keychain_write(legacy_claude_keychain_service(home), creds.secret)
-            else:
-                _write_private(home / ".credentials.json", creds.secret)
+            try:
+                if self._is_macos:
+                    service = legacy_claude_keychain_service(home)
+                    # Idempotency: every restart re-seeds the profile home,
+                    # and a redundant add-generic-password from a
+                    # non-interactive child process can fail on macOS even
+                    # though the stored secret is already current — skip the
+                    # write when nothing changed. The lock serializes the
+                    # check-then-write pair: a restore spawns several panes of
+                    # one profile concurrently, and racing -U rewrites of the
+                    # same item fail for every spawn but the first.
+                    with self._keychain_lock:
+                        if self._keychain_read(service) != creds.secret:
+                            self._keychain_write(service, creds.secret)
+                else:
+                    _write_private(home / ".credentials.json", creds.secret)
+            except (CredentialVaultError, OSError) as err:
+                # A failed credential seed must not skip the shared-home links
+                # below — an unshared ``projects`` hides the real session
+                # store from the pane and breaks resume for every session.
+                # The pane can still sign in off whatever the item already
+                # holds (the CLI refreshes it in place on its own).
+                log.warning("claude profile home credential seed failed: %s", err)
         real_claude = self._real_home / ".claude"
         for name in ("projects", "todos", "shell-snapshots", "skills"):
             self._link_shared(home / name, real_claude / name, is_dir=True)

@@ -120,12 +120,12 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
     }
   }
 
-  async function remove(id: string): Promise<boolean> {
+  async function remove(id: string | null, agentKey?: string): Promise<boolean> {
     try {
       const resp = await backend.send<{
         profiles: CliProfile[]
         defaults: CliProfileDefaults
-      }>('cli_profiles.delete', { id })
+      }>('cli_profiles.delete', { id, agent_key: agentKey })
       if (!resp.ok || !resp.payload) {
         const code = resp.error?.code
         error.value =

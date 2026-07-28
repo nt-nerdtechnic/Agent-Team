@@ -317,9 +317,29 @@ describe('CliAccountsPane', () => {
     await section(w, 0).get('.cli-btn.danger').trigger('click')
     await flushPromises()
 
-    expect(api.remove).toHaveBeenCalledWith('p1')
+    expect(api.remove).toHaveBeenCalledWith('p1', 'claude')
     // Confirm state is cleared after a successful remove.
     expect(section(w, 0).find('.cli-confirm-text').exists()).toBe(false)
+  })
+
+  it('allows clearing default profile credentials via the delete button', async () => {
+    const api = makeApi({
+      identities: {
+        claude: {
+          __default__: { signedIn: true, email: 'a@b.c' } as any,
+        },
+      },
+    })
+    const w = mountPane(api)
+
+    // Default card has Delete button when signed in
+    await buttonByText(section(w, 0), 'Delete')!.trigger('click')
+    expect(section(w, 0).get('.cli-confirm-text').text()).toContain('Delete this account?')
+
+    await section(w, 0).get('.cli-btn.danger').trigger('click')
+    await flushPromises()
+
+    expect(api.remove).toHaveBeenCalledWith(null, 'claude')
   })
 
   // ── error banner ───────────────────────────────────────────────────────────

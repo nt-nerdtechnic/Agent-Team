@@ -123,8 +123,8 @@ async function requestSetDefault(agentKey: string, profileId: string | null): Pr
 // ── Delete confirm ───────────────────────────────────────────────────────────
 const confirmRemoveId = ref<string | null>(null)
 
-async function remove(id: string): Promise<void> {
-  const ok = await props.api.remove(id)
+async function remove(id: string | null, agentKey: string): Promise<void> {
+  const ok = await props.api.remove(id, agentKey)
   if (ok) confirmRemoveId.value = null
 }
 
@@ -360,9 +360,9 @@ onMounted(() => refreshUsage())
             </template>
 
             <div class="cli-card-actions">
-              <template v-if="p && confirmRemoveId === p.id">
+              <template v-if="confirmRemoveId === (p?.id ?? '__default__')">
                 <span class="cli-confirm-text">{{ $t('settings.accounts.cli.delete-confirm') }}</span>
-                <button class="cli-btn danger sm" @click="remove(p.id)">
+                <button class="cli-btn danger sm" @click="remove(p?.id ?? null, spec.agentKey)">
                   {{ $t('settings.accounts.cli.delete') }}
                 </button>
                 <button class="cli-btn ghost sm" @click="confirmRemoveId = null">
@@ -378,13 +378,17 @@ onMounted(() => refreshUsage())
                   {{ $t('settings.accounts.cli.set-default') }}
                 </button>
                 <button
-                  v-if="!rowIdentity(spec.agentKey, p?.id ?? null)?.signedIn"
+                  v-if="!rowIdentity(spec.agentKey, p?.id ?? null)?.signedIn || cardUsage(spec.agentKey, p?.id ?? null)?.expired"
                   class="cli-btn ghost sm"
                   @click="signIn(spec.agentKey, p?.id ?? null)"
                 >
                   {{ $t('settings.accounts.cli.sign-in') }}
                 </button>
-                <button v-if="p" class="cli-btn ghost sm" @click="confirmRemoveId = p.id">
+                <button
+                  v-if="p || rowIdentity(spec.agentKey, null)?.signedIn"
+                  class="cli-btn ghost sm"
+                  @click="confirmRemoveId = (p?.id ?? '__default__')"
+                >
                   {{ $t('settings.accounts.cli.delete') }}
                 </button>
               </template>

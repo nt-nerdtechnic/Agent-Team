@@ -1420,7 +1420,45 @@ async def cli_profiles_rename(session: "Session", msg_id: str, msg_type: str, pa
 async def cli_profiles_delete(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
 
-    profile_id = str(payload.get("id") or "")
+    raw_id = payload.get("id")
+    profile_id = str(raw_id) if raw_id else ""
+    if not profile_id or profile_id == "__default__":
+        agent_key = str(payload.get("agent_key") or payload.get("agentKey") or "")
+        if not agent_key:
+            await session.send_json(
+                make_error(msg_id, msg_type, "BAD_REQUEST", "missing agent_key for default clear")
+            )
+            return
+        if _running_login_terminals(agent_key, "__default__"):
+            await session.send_json(
+                make_error(
+                    msg_id, msg_type, "LOGIN_IN_PROGRESS",
+                    f"a {agent_key} sign-in for this account is still running; "
+                    "finish or close its pane first",
+                )
+            )
+            return
+        async with app.credential_vault.switch_lock(agent_key):
+            active_id = app.cli_profiles_store.list()["defaults"].get(agent_key)
+            if active_id is None:
+                clear_fn = getattr(app.credential_vault, "clear_live", None)
+                if callable(clear_fn):
+                    await asyncio.to_thread(clear_fn, agent_key)
+            else:
+                await asyncio.to_thread(
+                    app.credential_vault.delete_slot_secrets, agent_key, "__default__"
+                )
+        await _broadcast_profiles_changed("delete")
+        doc = app.cli_profiles_store.list()
+        await session.send_json(
+            make_response(
+                msg_id,
+                msg_type,
+                {"profiles": doc["profiles"], "defaults": doc["defaults"]},
+            )
+        )
+        return
+
     profile = app.cli_profiles_store.get(profile_id)
     if profile is None:
         await session.send_json(
@@ -1476,6 +1514,7 @@ async def cli_profiles_delete(session: "Session", msg_id: str, msg_type: str, pa
                 make_error(msg_id, msg_type, "BAD_REQUEST", _profile_error(err))
             )
             return
+    await _broadcast_profiles_changed("delete")
     await session.send_json(
         make_response(
             msg_id,
@@ -1483,7 +1522,6 @@ async def cli_profiles_delete(session: "Session", msg_id: str, msg_type: str, pa
             {"profiles": doc["profiles"], "defaults": doc["defaults"]},
         )
     )
-    await _broadcast_profiles_changed("delete")
 
 
 def _running_login_terminals(agent_key: str, profile_id: str) -> list[tuple[str, "Session"]]:

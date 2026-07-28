@@ -102,6 +102,15 @@ class FakeVault:
         self.fail = fail
         self.root = root
         self._locks: dict[str, asyncio.Lock] = {}
+        self.cleared_live: list[str] = []
+
+    def clear_live(self, agent_key: str) -> None:
+        self.cleared_live.append(agent_key)
+
+    def delete_slot_secrets(self, agent_key: str, slot_id: str) -> None:
+        self.slot_secrets_deleted.append((agent_key, slot_id))
+        if self.delete_slot_secrets_fail:
+            raise RuntimeError("cleanup boom")
 
     def switch_lock(self, agent_key: str) -> asyncio.Lock:
         lock = self._locks.get(agent_key)
@@ -369,6 +378,19 @@ async def test_cli_profiles_rename_delete_set_default_flow(
     assert [e["payload"]["reason"] for e in events] == [
         "rename", "set_default", "set_default", "delete",
     ]
+
+
+async def test_cli_profiles_delete_default_clears_credentials(
+    store: CliProfilesStore, events: list[dict[str, Any]], vault: FakeVault
+) -> None:
+    session = _session()
+    await app.handle_message(session, {
+        "id": "x_default",
+        "type": "cli_profiles.delete",
+        "payload": {"agent_key": "claude", "id": None},
+    })
+    assert "profiles" in session.websocket.sent[0]["payload"]  # type: ignore[attr-defined]
+    assert events[-1]["payload"]["reason"] == "delete"
 
 
 async def test_set_default_triggers_usage_refresh(

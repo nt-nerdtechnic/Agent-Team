@@ -823,6 +823,23 @@ def test_prepare_profile_home_claude_macos_uses_path_hashed_keychain(tmp_path: P
     assert not (home / ".credentials.json").exists()
 
 
+def test_prepare_profile_home_claude_macos_skips_redundant_keychain_write(tmp_path: Path) -> None:
+    """Re-seeding an already-current profile home must not touch the Keychain:
+    the redundant add-generic-password is what failed on every Navide restart."""
+    vault, sec = _mac_vault(tmp_path)
+    vault.write_slot("claude", "acct1", LiveCredentials(secret='{"t": 1}'))
+    vault.prepare_profile_home("claude", "acct1")
+    sec.stdin_commands.clear()
+    vault.prepare_profile_home("claude", "acct1")
+    assert not any("add-generic-password" in c for c in sec.stdin_commands)
+    # A changed slot secret still propagates to the Keychain.
+    vault.write_slot("claude", "acct1", LiveCredentials(secret='{"t": 2}'))
+    sec.stdin_commands.clear()
+    vault.prepare_profile_home("claude", "acct1")
+    home = vault.profile_home_path("claude", "acct1")
+    assert sec.items.get(legacy_claude_keychain_service(home)) == '{"t": 2}'
+
+
 # ── Phase A: shared session store (only credentials isolated) ────────────────
 
 
@@ -863,9 +880,10 @@ def test_prepare_profile_home_claude_migrates_legacy_projects_clean(tmp_path: Pa
 
 
 def test_prepare_profile_home_claude_migration_never_overwrites(tmp_path: Path) -> None:
-    """A name clash keeps the real copy (never overwrites), and because the
-    source could not be fully drained the home keeps its own projects/ dir
-    unshared — the home copy is preserved, not destroyed."""
+    """A name clash keeps the real copy (never overwrites); the home's copy is
+    quarantined aside so the store still fully drains and becomes a symlink —
+    one stale file must not leave every session unshared (the
+    "No conversation found" restart loop)."""
     vault = _file_vault(tmp_path)
     home = vault.profile_home_path("claude", "acct1")
     _write(home / "projects" / "-enc-ws" / "moved.jsonl", "OLD")
@@ -879,9 +897,70 @@ def test_prepare_profile_home_claude_migration_never_overwrites(tmp_path: Path) 
     # Unique file migrated; the clash kept the real copy untouched.
     assert (real_ws / "moved.jsonl").read_text() == "OLD"
     assert (real_ws / "clash.jsonl").read_text() == "REAL-VERSION"
-    # Not fully drained -> the home dir stays real (unshared) with its copy.
-    assert not (home / "projects").is_symlink()
-    assert (home / "projects" / "-enc-ws" / "clash.jsonl").read_text() == "HOME-VERSION"
+    # The clash was quarantined (preserved), the store drained and is shared.
+    assert (home / "projects").is_symlink()
+    quarantined = home / "projects.unmerged" / "-enc-ws" / "clash.jsonl"
+    assert quarantined.read_text() == "HOME-VERSION"
+
+
+def test_prepare_profile_home_claude_settings_clash_quarantined(tmp_path: Path) -> None:
+    """A real settings.json shadowing the shared link is quarantined so the
+    file still becomes a symlink instead of staying forked forever."""
+    vault = _file_vault(tmp_path)
+    home = vault.profile_home_path("claude", "acct1")
+    _write(home / "settings.json", '{"home": true}')
+    _write(tmp_path / "home" / ".claude" / "settings.json", '{"real": true}')
+    vault.write_slot("claude", "acct1", LiveCredentials(secret='{"t": 1}'))
+
+    vault.prepare_profile_home("claude", "acct1")
+
+    assert (home / "settings.json").is_symlink()
+    assert (home / "settings.json").read_text() == '{"real": true}'
+    assert (home / "settings.json.unmerged").read_text() == '{"home": true}'
+
+
+def test_prepare_profile_home_claude_keychain_failure_still_shares(tmp_path: Path) -> None:
+    """A failed Keychain seed must not abort the spawn or skip the shared-home
+    symlinks — an unshared projects dir hides every resumable session from the
+    pane (and the CLI keeps the Keychain item fresh on its own anyway)."""
+    sec = FakeSecurity()
+
+    def runner(args: list[str], input_text: str | None = None) -> tuple[int, str]:
+        # Only the profile home's path-hashed item is denied; slot bookkeeping
+        # writes still work so the scenario is exactly "seed write fails".
+        if "Claude Code-credentials-" in (input_text or ""):
+            return 36, "security: ACL denied"
+        return sec(args, input_text)
+
+    vault = CredentialVault(
+        root=tmp_path / "root",
+        real_home=tmp_path / "home",
+        security_runner=runner,
+        platform="darwin",
+    )
+    vault.write_slot("claude", "acct1", LiveCredentials(secret='{"t": 1}'))
+
+    plan = vault.prepare_profile_home("claude", "acct1")  # must not raise
+
+    home = vault.profile_home_path("claude", "acct1")
+    assert plan.env_set == {"CLAUDE_CONFIG_DIR": str(home)}
+    assert (home / "projects").is_symlink()
+
+
+def test_keychain_write_failure_surfaces_security_error(tmp_path: Path) -> None:
+    """The raised error carries the last line of the `security` output so the
+    log shows WHY the write failed, never just the exit code — and never the
+    secret (the detail is a single truncated line)."""
+    vault = CredentialVault(
+        root=tmp_path / "root",
+        real_home=tmp_path / "home",
+        security_runner=lambda args, input_text=None: (
+            36, "security: The specified item already exists."
+        ),
+        platform="darwin",
+    )
+    with pytest.raises(CredentialVaultError, match="item already exists"):
+        vault.write_live("claude", LiveCredentials(secret='{"t": 1}'))
 
 
 def test_prepare_profile_home_claude_idempotent(tmp_path: Path) -> None:
