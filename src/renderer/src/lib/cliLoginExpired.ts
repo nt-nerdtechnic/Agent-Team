@@ -11,16 +11,22 @@ interface LoginExpiredSpec {
 
 const LOGIN_EXPIRED_SPECS: Record<string, LoginExpiredSpec> = {
   // Claude Code prints "Login expired · Please run /login" (also seen as
-  // "Error during compaction: Login expired"). A bare "/login" typed by the
-  // user must NOT match — only the "Please run" phrasing or "Login expired".
-  claude: { pattern: /Login expired|Please run \/login/i, loginCommand: '/login' },
+  // "Error during compaction: Login expired · Please run /login"). Key on the
+  // "Please run /login" instruction phrase — tolerant of any whitespace run
+  // between the words (a narrow pane hard-wraps mid-phrase) — so a bare
+  // "Login expired" in ordinary output / catted logs and a user-typed bare
+  // "/login" both stay below the match threshold.
+  claude: { pattern: /please run\s+\/login/i, loginCommand: '/login' },
 }
 
 /** True when `tail` contains agentKey's login-expired message. Always false
  *  for CLIs without a spec in the table. */
 export function matchLoginExpired(agentKey: string, tail: string): boolean {
   const spec = LOGIN_EXPIRED_SPECS[agentKey]
-  return spec !== undefined && spec.pattern.test(tail)
+  // Collapse whitespace runs to a single space before matching (mirrors
+  // matchSessionLimit): cleanBuffer keeps the TUI hard-wrap `\n` a narrow pane
+  // inserts mid-phrase, so an unnormalized "Please run\n/login" never matches.
+  return spec !== undefined && spec.pattern.test(tail.replace(/\s+/g, ' '))
 }
 
 /** The login command to send into agentKey's pane, or null when the CLI has

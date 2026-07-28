@@ -1860,8 +1860,15 @@ interface LoginExpiredWatcher {
   /** Consumed-position baseline in monotonic cleanBytesSeen units — only text
    *  appended after it is matched (see LoopLimitWatcher.baseline). */
   baseline: number
+  /** False until the initial output (spawn banner / reattach scrollback replay)
+   *  has settled; matching is suppressed while false so stale historical text
+   *  can't spuriously light the badge. */
+  warmedUp: boolean
 }
 const loginExpiredWatchers = new Map<string, LoginExpiredWatcher>()
+// Panes with an in-flight fix-login injection, so a second badge click can't
+// start a concurrent second "/login" injection during the multi-second await.
+const loginFixInFlight = new Set<string>()
 const LOGIN_EXPIRED_POLL_MS = 5000
 const LOGIN_EXPIRED_TAIL_CHARS = 2000
 
@@ -1878,6 +1885,7 @@ function startLoginExpiredWatcher(paneId: string): void {
   const watcher: LoginExpiredWatcher = {
     timer: 0,
     baseline: paneCleanBytes(paneId),
+    warmedUp: false,
   }
   watcher.timer = window.setInterval(() => {
     const pane = panes.value.find((p) => p.id === paneId)
@@ -1889,20 +1897,31 @@ function startLoginExpiredWatcher(paneId: string): void {
     if (!ref) return
     const status = ref.displayStatus as string | undefined
     if (status === 'exited' || status === 'error') {
+      // Dead pane: clear the flag so a lit badge whose click does nothing
+      // doesn't linger, then stop the watcher.
+      pane.loginExpired = false
       stopLoginExpiredWatcher(paneId)
       return
+    }
+    const bytes = paneCleanBytes(paneId)
+    if (!watcher.warmedUp) {
+      // Consume spawn banner / reattach scrollback replay without matching so
+      // stale historical "login expired" text can't spuriously light the badge;
+      // start matching once output settles for one interval.
+      if (bytes > watcher.baseline) { watcher.baseline = bytes; return }
+      watcher.warmedUp = true
     }
     if (pane.loginExpired) {
       // Badge already lit: keep consuming output so the same (repainted) error
       // text can't instantly re-light the badge after a fix-login clears it.
-      watcher.baseline = paneCleanBytes(paneId)
+      watcher.baseline = bytes
       return
     }
     const buf = ((ref.cleanBuffer as unknown as string) ?? '')
-    const tail = unseenTail(buf, paneCleanBytes(paneId), watcher.baseline, LOGIN_EXPIRED_TAIL_CHARS)
+    const tail = unseenTail(buf, bytes, watcher.baseline, LOGIN_EXPIRED_TAIL_CHARS)
     if (!matchLoginExpired(pane.agentKey, tail)) return
     // Consume the matched region so a later poll can't re-match the same text.
-    watcher.baseline = paneCleanBytes(paneId)
+    watcher.baseline = bytes
     pane.loginExpired = true
     sysNotify.notifyPaneState(
       paneId,
@@ -1920,10 +1939,26 @@ function startLoginExpiredWatcher(paneId: string): void {
 async function fixPaneLogin(paneId: string): Promise<void> {
   const pane = panes.value.find((p) => p.id === paneId)
   if (!pane || !pane.loginExpired) return
+  // Guard the multi-second injectPane await: pane.loginExpired stays true until
+  // success, so without this a second badge click would start a concurrent
+  // second "/login" injection into the just-opened login dialog.
+  if (loginFixInFlight.has(paneId)) return
   const command = loginCommandFor(pane.agentKey)
   if (command == null) return
-  const ok = await injectPane(paneId, command, 'login-fix')
-  if (ok) pane.loginExpired = false
+  loginFixInFlight.add(paneId)
+  try {
+    const ok = await injectPane(paneId, command, 'login-fix')
+    if (ok) {
+      // Advance the watcher's consumed baseline so error text repainted between
+      // the last lit-tick and this clear can't re-match on the next poll and
+      // re-light the badge. Failure keeps the badge lit for retry.
+      const w = loginExpiredWatchers.get(paneId)
+      if (w) w.baseline = paneCleanBytes(paneId)
+      pane.loginExpired = false
+    }
+  } finally {
+    loginFixInFlight.delete(paneId)
+  }
 }
 
 

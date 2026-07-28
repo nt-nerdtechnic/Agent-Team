@@ -12,8 +12,19 @@ describe('lib/cliLoginExpired matchLoginExpired', () => {
     ).toBe(true)
   })
 
-  it('matches a bare "Login expired" message', () => {
-    expect(matchLoginExpired('claude', 'Login expired')).toBe(true)
+  it('matches when the instruction phrase is hard-wrapped across a line', () => {
+    // A narrow pane hard-wraps mid-phrase; cleanBuffer keeps that `\n`. The
+    // matcher normalizes whitespace, so "Please run\n/login" still matches —
+    // this is the regression the whitespace-normalize fix targets.
+    expect(
+      matchLoginExpired('claude', 'Login expired · Please run\n/login now')
+    ).toBe(true)
+  })
+
+  it('does not match a bare "Login expired" with no "Please run /login"', () => {
+    // Design tightened: keying on the instruction phrase avoids spuriously
+    // matching the bare "Login expired" string in ordinary output / catted logs.
+    expect(matchLoginExpired('claude', 'Login expired')).toBe(false)
   })
 
   it('does not match ordinary output', () => {
