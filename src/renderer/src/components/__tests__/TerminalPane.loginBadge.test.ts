@@ -1,0 +1,71 @@
+// @vitest-environment happy-dom
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import { mount, type VueWrapper } from '@vue/test-utils'
+import type { Ref } from 'vue'
+import TerminalPane from '../TerminalPane.vue'
+
+// Coverage for the login-expired badge: hidden by default, rendered while the
+// loginExpired prop is set, and clicking it emits 'fix-login' (App.vue owns
+// the login-command injection and flag clearing). useTerminal is mocked out —
+// no xterm instance, no backend traffic (same setup as
+// TerminalPane.loopButton.test.ts).
+
+const mockTerminal = vi.hoisted(() => ({ displayStatus: null as unknown as Ref<string> }))
+
+vi.mock('../../composables/useTerminal', async () => {
+  const { ref } = await import('vue')
+  mockTerminal.displayStatus = ref('idle')
+  return {
+    useTerminal: () => ({
+      mount: vi.fn(),
+      pasteText: vi.fn(),
+      updateXtermTheme: vi.fn(),
+      setDisableStdin: vi.fn(),
+      displayStatus: mockTerminal.displayStatus,
+      sessionId: { value: '' },
+      isAltBuffer: ref(false)
+    })
+  }
+})
+
+function tMock(key: string): string {
+  return key
+}
+
+function mountPane(props: Record<string, unknown>): VueWrapper {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return mount(TerminalPane as any, {
+    props: { paneId: 'pane-1', title: 'Claude', backend: {}, ...props },
+    global: { mocks: { $t: tMock } }
+  })
+}
+
+describe('TerminalPane – login-expired badge', () => {
+  let wrapper: VueWrapper
+
+  afterEach(() => {
+    wrapper.unmount()
+    mockTerminal.displayStatus.value = 'idle'
+  })
+
+  it('does not render the badge by default', () => {
+    wrapper = mountPane({})
+    expect(wrapper.find('.login-expired-inline').exists()).toBe(false)
+  })
+
+  it('renders the badge when loginExpired is set and hides it when cleared', async () => {
+    wrapper = mountPane({ loginExpired: true })
+    const badge = wrapper.find('.login-expired-inline')
+    expect(badge.exists()).toBe(true)
+    expect(badge.attributes('role')).toBe('button')
+
+    await wrapper.setProps({ loginExpired: false })
+    expect(wrapper.find('.login-expired-inline').exists()).toBe(false)
+  })
+
+  it('emits fix-login when the badge is clicked', async () => {
+    wrapper = mountPane({ loginExpired: true })
+    await wrapper.find('.login-expired-inline').trigger('click')
+    expect(wrapper.emitted('fix-login')).toHaveLength(1)
+  })
+})

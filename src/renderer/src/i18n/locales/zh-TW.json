@@ -226,7 +226,11 @@
       "loop-unparseable-notify-title": "Loop 已達工作階段上限",
       "loop-unparseable-notify-body": "無法解析額度重置時間，因此不會排程自動續跑——請於額度重置後手動續跑",
       "loop-complete-notify-title": "Loop 已完成",
-      "loop-complete-notify-body": "Agent 回報任務已全部完成——Loop 已自動停止"
+      "loop-complete-notify-body": "Agent 回報任務已全部完成——Loop 已自動停止",
+      "login-expired-badge": "⚠ 登入過期",
+      "login-expired-tooltip": "CLI 登入已過期——點擊送出其登入指令重新登入",
+      "login-expired-notify-title": "CLI 登入已過期",
+      "login-expired-notify-body": "CLI 回報登入已過期——點擊該 pane 的標籤重新登入"
     },
     "prep": {
       "starting": "啟動 CLI 中",

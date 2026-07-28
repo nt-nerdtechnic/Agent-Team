@@ -131,6 +131,7 @@ import {
   unseenTail,
   formatLoopTime,
 } from './lib/loopPrompt'
+import { loginCommandFor, matchLoginExpired } from './lib/cliLoginExpired'
 import { entryBelongsToWorkspace, filterWorkspaceEntries, historyEntryLabel, legacyHistoryLogPath, manualLogFileName, updateHistoryCustomName, type HistoryCleanupMode, type SpawnHistoryEntry, type WorkspaceIdentity } from './lib/spawnHistory'
 import { useKeybindings, registerCommand, setContext } from './keybindings/useKeybindings'
 
@@ -705,6 +706,10 @@ interface ActivePane {
   /** Epoch ms of the heuristic quota-reset estimate (runtime-only): loop start
    *  + 5h Claude session window, shown on the running badge as approximate. */
   loopEstimateResetAt?: number | null
+  /** Runtime-only login-expired badge — lit when the pane's CLI printed its
+   *  expired-login message (see lib/cliLoginExpired); cleared once the login
+   *  command is re-sent via the badge click. Not persisted to PaneRecord. */
+  loginExpired?: boolean
 }
 
 const panes = ref<ActivePane[]>([])
@@ -1845,6 +1850,82 @@ function startLoopLimitWatcher(paneId: string): void {
   loopLimitWatchers.set(paneId, watcher)
 }
 
+// Always-on watcher for CLIs with a login-expired spec (lib/cliLoginExpired):
+// polls the pane's clean buffer tail for the CLI's expired-login message and
+// lights the pane's re-login badge on match. Same consumed-position baseline
+// discipline as the loop-limit watcher, so TUI repaints can't re-match. The
+// interval self-cleans when the pane is gone or its terminal exited.
+interface LoginExpiredWatcher {
+  timer: number
+  /** Consumed-position baseline in monotonic cleanBytesSeen units — only text
+   *  appended after it is matched (see LoopLimitWatcher.baseline). */
+  baseline: number
+}
+const loginExpiredWatchers = new Map<string, LoginExpiredWatcher>()
+const LOGIN_EXPIRED_POLL_MS = 5000
+const LOGIN_EXPIRED_TAIL_CHARS = 2000
+
+function stopLoginExpiredWatcher(paneId: string): void {
+  const watcher = loginExpiredWatchers.get(paneId)
+  if (watcher !== undefined) {
+    clearInterval(watcher.timer)
+    loginExpiredWatchers.delete(paneId)
+  }
+}
+
+function startLoginExpiredWatcher(paneId: string): void {
+  stopLoginExpiredWatcher(paneId)
+  const watcher: LoginExpiredWatcher = {
+    timer: 0,
+    baseline: paneCleanBytes(paneId),
+  }
+  watcher.timer = window.setInterval(() => {
+    const pane = panes.value.find((p) => p.id === paneId)
+    if (!pane) {
+      stopLoginExpiredWatcher(paneId)
+      return
+    }
+    const ref = paneRefs[paneId]
+    if (!ref) return
+    const status = ref.displayStatus as string | undefined
+    if (status === 'exited' || status === 'error') {
+      stopLoginExpiredWatcher(paneId)
+      return
+    }
+    if (pane.loginExpired) {
+      // Badge already lit: keep consuming output so the same (repainted) error
+      // text can't instantly re-light the badge after a fix-login clears it.
+      watcher.baseline = paneCleanBytes(paneId)
+      return
+    }
+    const buf = ((ref.cleanBuffer as unknown as string) ?? '')
+    const tail = unseenTail(buf, paneCleanBytes(paneId), watcher.baseline, LOGIN_EXPIRED_TAIL_CHARS)
+    if (!matchLoginExpired(pane.agentKey, tail)) return
+    // Consume the matched region so a later poll can't re-match the same text.
+    watcher.baseline = paneCleanBytes(paneId)
+    pane.loginExpired = true
+    sysNotify.notifyPaneState(
+      paneId,
+      'attention',
+      i18n.global.t('pane.terminal.login-expired-notify-title'),
+      i18n.global.t('pane.terminal.login-expired-notify-body')
+    )
+  }, LOGIN_EXPIRED_POLL_MS)
+  loginExpiredWatchers.set(paneId, watcher)
+}
+
+/** Login-expired badge clicked: send the CLI's login command into the pane.
+ *  The badge clears only when the injection lands; on failure it stays lit so
+ *  the user can click again. */
+async function fixPaneLogin(paneId: string): Promise<void> {
+  const pane = panes.value.find((p) => p.id === paneId)
+  if (!pane || !pane.loginExpired) return
+  const command = loginCommandFor(pane.agentKey)
+  if (command == null) return
+  const ok = await injectPane(paneId, command, 'login-fix')
+  if (ok) pane.loginExpired = false
+}
+
 
 // Dispatch a cloud issue into a running agent pane as a task (one-way: no
 // write-back to the issue). Reuses the pipeline-kickoff injection path.
@@ -2649,6 +2730,10 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
       loginProfileId: opts.loginProfileId,
     })
 
+    // Arm the always-on login-expired watcher for CLIs with a detection spec
+    // (the interval self-cleans once the pane is gone or its terminal exited).
+    if (loginCommandFor(opts.agentKey) != null) startLoginExpiredWatcher(id)
+
     if ((ref.status as unknown as string) === 'running') {
       if (pane.origin === 'manual' && !pane.roleKey && !pane.kickoffPrompt) {
         pane.injectionStatus = 'skipped'
@@ -3062,6 +3147,7 @@ async function onKill(paneId: string, opts: { markRemoved?: boolean, force?: boo
   paneMsgProcessedAt.delete(paneId)
   clearDoneNotifyTimer(paneId)
   stopLoopLimitWatcher(paneId)
+  stopLoginExpiredWatcher(paneId)
   if (pane) {
     pane.loopActive = false
     pane.loopWaitUntil = null
@@ -9002,6 +9088,7 @@ function paneIsCommander(p: ActivePane): boolean {
           :loop-active="p.loopActive"
           :loop-wait-until="p.loopWaitUntil"
           :loop-estimate-reset-at="p.loopEstimateResetAt"
+          :login-expired="p.loginExpired"
           @set-focus="(ev) => onSetFocus(p.id, ev)"
           @minimize="minimizePane(p.id)"
           @rebuild="rebuildPaneViaResume(p.id)"
@@ -9013,6 +9100,7 @@ function paneIsCommander(p: ActivePane): boolean {
           @plan-drop="(ref) => injectPlanToPane(ref, p.id)"
           @toggle-loop="togglePaneLoop(p.id)"
           @loop-resume-now="resumeLoopNow(p.id)"
+          @fix-login="fixPaneLogin(p.id)"
           @user-resume="persistPaneStopped(p.id, false)"
         />
         <!-- Auto/sidebar mode: meeting-style agent list on the right -->

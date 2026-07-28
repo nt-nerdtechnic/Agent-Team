@@ -226,7 +226,11 @@
       "loop-unparseable-notify-title": "Loop hit a session limit",
       "loop-unparseable-notify-body": "The reset time could not be parsed, so no auto-resume is scheduled — resume the loop manually once the quota resets",
       "loop-complete-notify-title": "Loop complete",
-      "loop-complete-notify-body": "The agent reported the task is fully done — the loop has stopped"
+      "loop-complete-notify-body": "The agent reported the task is fully done — the loop has stopped",
+      "login-expired-badge": "⚠ Login expired",
+      "login-expired-tooltip": "The CLI's login has expired — click to send its login command",
+      "login-expired-notify-title": "CLI login expired",
+      "login-expired-notify-body": "The CLI reported an expired login — click the pane's badge to re-login"
     },
     "prep": {
       "starting": "starting CLI",

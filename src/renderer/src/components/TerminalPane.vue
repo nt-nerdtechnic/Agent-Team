@@ -47,6 +47,9 @@ interface Props {
   /** Epoch ms of the heuristic quota-reset estimate (loop start + 5h Claude
    *  session window) shown on the running badge as an approximate time. */
   loopEstimateResetAt?: number | null
+  /** Runtime-only login-expired badge — lit when the pane's CLI reported an
+   *  expired login; clicking it asks App.vue to re-send the login command. */
+  loginExpired?: boolean
   backend: ReturnType<typeof useBackend>
   cliProfiles: ReturnType<typeof useCliProfiles>
   workspacePath?: string
@@ -75,6 +78,9 @@ const emit = defineEmits<{
   /** Waiting badge clicked — App.vue injects the resume prompt immediately
    *  instead of waiting for the scheduled quota reset. */
   (e: 'loop-resume-now'): void
+  /** Login-expired badge clicked — App.vue sends the CLI's login command into
+   *  this pane and clears the badge. */
+  (e: 'fix-login'): void
   /** The user typed into a STOPped pane (Enter/printable), taking over — App.vue
    *  clears + un-persists the STOP badge. */
   (e: 'user-resume'): void
@@ -369,6 +375,13 @@ onMounted(() => {
           :aria-label="$t('pane.terminal.loop-tooltip')"
         >∞</button>
         <span
+          v-if="loginExpired"
+          class="login-expired-inline"
+          role="button"
+          :title="$t('pane.terminal.login-expired-tooltip')"
+          @click.stop="emit('fix-login')"
+        >{{ $t('pane.terminal.login-expired-badge') }}</span>
+        <span
           class="status"
           :data-status="displayStatus"
           :title="displayStatus === 'idle' ? $t('pane.terminal.idle-status-tooltip') : ''"
@@ -555,6 +568,22 @@ onMounted(() => {
 .loop-inline.waiting:hover {
   opacity: 1;
   border-color: var(--success-fg);
+}
+.login-expired-inline {
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--attention-fg);
+  background: var(--attention-subtle);
+  border: 1px solid var(--attention-muted);
+  border-radius: 4px;
+  padding: 1px 6px;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.login-expired-inline:hover {
+  border-color: var(--attention-fg);
 }
 .loop-btn {
   font-size: 9px;
