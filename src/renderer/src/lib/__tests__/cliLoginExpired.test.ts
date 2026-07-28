@@ -35,6 +35,19 @@ describe('lib/cliLoginExpired matchLoginExpired', () => {
     expect(matchLoginExpired('claude', '> /login')).toBe(false)
   })
 
+  it('does not match a bare "Please run /login" with no "Login expired" context', () => {
+    // Assistant/ordinary output that merely mentions the instruction phrase
+    // (e.g. this CLI discussing its own /login flow) must not match — the real
+    // error always carries the "Login expired" context alongside it.
+    expect(matchLoginExpired('claude', 'To re-auth, please run /login when ready')).toBe(false)
+  })
+
+  it('does not match when /login has a trailing word boundary (subcommand)', () => {
+    // "/login-helper" / "/login2" are distinct tokens, not the recovery command.
+    expect(matchLoginExpired('claude', 'Login expired · Please run /login-helper')).toBe(false)
+    expect(matchLoginExpired('claude', 'Login expired · Please run /login2')).toBe(false)
+  })
+
   it('never matches for an agentKey without a spec', () => {
     expect(matchLoginExpired('codex', 'Login expired · Please run /login')).toBe(false)
     expect(matchLoginExpired('unknown-cli', 'Login expired')).toBe(false)

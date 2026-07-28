@@ -11,12 +11,17 @@ interface LoginExpiredSpec {
 
 const LOGIN_EXPIRED_SPECS: Record<string, LoginExpiredSpec> = {
   // Claude Code prints "Login expired · Please run /login" (also seen as
-  // "Error during compaction: Login expired · Please run /login"). Key on the
-  // "Please run /login" instruction phrase — tolerant of any whitespace run
-  // between the words (a narrow pane hard-wraps mid-phrase) — so a bare
-  // "Login expired" in ordinary output / catted logs and a user-typed bare
-  // "/login" both stay below the match threshold.
-  claude: { pattern: /please run\s+\/login/i, loginCommand: '/login' },
+  // "Error during compaction: Login expired · Please run /login"). Require BOTH
+  // "Login expired" and the nearby "Please run /login" instruction so ordinary
+  // output that merely mentions the phrase (e.g. this very CLI's assistant text
+  // discussing /login) can't spuriously match — the real error always carries
+  // both, separated only by " · ". Tolerant of any whitespace run between words
+  // (a narrow pane hard-wraps mid-phrase); a trailing boundary after /login
+  // keeps "/login-helper" / "/login2" below the threshold.
+  claude: {
+    pattern: /login\s+expired.{0,40}?please run\s+\/login(?:\s|$)/i,
+    loginCommand: '/login',
+  },
 }
 
 /** True when `tail` contains agentKey's login-expired message. Always false
