@@ -3151,11 +3151,19 @@ async function rebuildPaneViaResume(
     // A stale STARTING pane may still have terminal.create queued or in flight.
     // Wait for generation-scoped backend rollback before probing/killing and
     // spawning its replacement, so a late ACK cannot leave an orphan PTY.
-    await cancelStalePendingCreate(
-      terminalStatus,
-      startingAgeMs,
-      paneRef?.cancelPendingCreate as (() => Promise<void>) | undefined,
-    )
+    try {
+      await cancelStalePendingCreate(
+        terminalStatus,
+        startingAgeMs,
+        paneRef?.cancelPendingCreate as (() => Promise<void>) | undefined,
+      )
+    } catch (error) {
+      pipelineLog(`⚠ rebuild ${pane.agentLabel}: stale terminal create rollback failed`)
+      if (!opts?.suppressBusyToast) {
+        notifyRestore.toast(i18n.global.t('pane.terminal.rebuild-probe-failed'), { type: 'error' })
+      }
+      return
+    }
     const ws = pane.workspacePath
     // Fail-safe: abort on false AND on null (probe failed) — never kill a
     // live pane on an unverified resumability answer. The toast distinguishes

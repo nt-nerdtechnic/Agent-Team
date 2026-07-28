@@ -9,12 +9,12 @@ the backend — to identify which CLI is running in a pane. Adding a new CLI
 means registering that key in each of the following layers.
 
 Current built-in agent keys are `claude`, `codex`, `antigravity`, `grok`,
-`kimi`, and `opencode`.
+`kimi`, `opencode`, `qwen`, `kilo`, `pi`, `copilot`, `cursor`, and `aider`.
 The current integration surface is distributed across the application; a
 declarative, capability-based adapter contract is planned in the
 [Product Roadmap](roadmap.md).
 
-Last verified against the codebase: 2026-07-27.
+Last verified against the codebase: 2026-07-28.
 
 ---
 
@@ -341,3 +341,21 @@ against installed v1.15.12.
 | Concurrency | WAL + per-directory sessions → safe, no home isolation |
 | Update / doctor | `opencode upgrade`; no doctor subcommand |
 | Env vars | `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR` (both scrubbed from inherited spawn env), `OPENCODE_DISABLE_AUTOUPDATE`, `OPENCODE_PERMISSION` |
+
+### Batch of six — added 2026-07-28
+
+Six CLIs were integrated in one pass (easy → hard), each via a parallel
+frontend + backend agent pair with full test-suite gates between rounds.
+MiniMax CLI (`mmx`, a media-generation CLI, not a coding agent) and Z.ai
+(no first-party CLI; GLM Coding Plan is a model subscription that plugs
+into third-party CLIs) were researched and rejected as agent types — if
+supported later, they belong as provider/env profiles on existing CLIs.
+
+| Key | Resume | YOLO | Session storage / reader notes |
+|---|---|---|---|
+| `qwen` (Qwen Code, npm `@qwen-code/qwen-code`) | `qwen --resume <uuid>` | `--yolo` | Near-clone of Claude Code's JSONL: `~/.qwen/projects/<sanitized-cwd>/chats/<uuid>.jsonl` (+`archive/`); root via `QWEN_RUNTIME_DIR`. Assistant records carry `usageMetadata` (input = `promptTokenCount`, which already includes cached; output = candidates + thoughts). Filter user subtypes `mid_turn_user_message`/`cron`/`notification`. NOT the old Gemini format — the removed gemini reader's assumptions are all stale. |
+| `kilo` (Kilo Code, npm `@kilocode/cli`) | `kilo --session <ses_…>` | none for the TUI (`--auto` is `kilo run`-only) | OpenCode fork with an identical schema — `KiloLogReader` subclasses `OpencodeLogReader`, pointing at `~/.local/share/kilo/kilo.db`. `message`/`part` are V1 compatibility projections; re-verify on major Kilo upgrades. |
+| `pi` (Pi, npm `@earendil-works/pi-coding-agent`) | `pi --session-id <id>` (also pins new ids at launch) | none — Pi has no permission system at all | JSONL at `~/.pi/agent/sessions/--<encoded-cwd>--/<ts>_<id>.jsonl`; header line holds id + cwd. Two traps handled: lazy flush (file only appears after the first assistant reply) and in-place whole-file rewrites (never assume append-only). Tokens per assistant `usage`. |
+| `copilot` (Copilot CLI, brew cask `copilot-cli` / npm `@github/copilot`) | `copilot --resume=<uuid>` (unknown id ⇒ starts a new session with that UUID) | `--yolo` | `~/.copilot/session-state/<uuid>/events.jsonl` + `workspace.yaml` (cwd); root via `COPILOT_HOME`. Format captured live from v1.0.75: tokens ONLY on `session.shutdown` `modelMetrics` (input already includes cache, output already includes reasoning) — handled codex-style as cumulative deltas. `assistant.turn_end` is an explicit turn_complete signal. |
+| `cursor` (Cursor CLI, closed-source; binary `agent`, older `cursor-agent`) | `cursor-agent --resume=<uuid>` | `--force` (alias `--yolo`) | Hardest reader, entirely defensive: per-session `~/.cursor/chats/<hash>/<uuid>/store.db` with undocumented protobuf `blobs` — marker binding is a raw UTF-8 bytes scan (capped), workspace filter treats md5(cwd) as best-effort only, and **no token data exists locally** (empty stats are expected). Community-reverse-engineered layout, NOT yet validated against a live install; the IDE's `~/.cursor/projects/*/agent-transcripts/*.jsonl` is a different store — do not read it. |
+| `aider` (Aider, pip `aider-chat`) | `aider --restore-chat-history` (no session id — lossy, may be LLM-summarized) | `--yes-always` | Only Markdown reader: per-project `<git root>/.aider.chat.history.md`, sections split on `# aider chat started at …` (session id = started-at slug), user lines `#### ` (markers bind against the LAST section only), tokens from `> Tokens: X sent, Y received` lines. Watcher routes via the `LogReader.claims_path()` hook added for this; events are rescan-driven (~30s latency). No Rebuild button and no detecting-session overlay on the frontend — both depend on real session ids. |

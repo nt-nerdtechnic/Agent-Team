@@ -268,4 +268,26 @@ describe('useTerminal — RUNNING badge vs self-triggered repaints', () => {
     expect(result.status.value).toBe('error')
     scope.stop()
   })
+
+  it('rejects an explicit stale-create cancellation when backend rollback fails', async () => {
+    const mock = createMockBackend()
+    let resolveCreate!: (value: unknown) => void
+    const send = vi.fn((type: string) => {
+      if (type === 'terminal.create') return new Promise((resolve) => { resolveCreate = resolve })
+      if (type === 'terminal.create.cancel') return Promise.reject(new Error('ws not open'))
+      return Promise.resolve({ ok: true, payload: null, error: null })
+    })
+    ;(mock.backend as any).send = send
+    const { result, scope } = withScope(() => useTerminal('pane-1', mock.backend))
+    result.mount(document.createElement('div'))
+
+    const spawnPromise = result.spawn({ command: 'bash', cwd: '/tmp', skipReattach: true })
+    await Promise.resolve()
+    await expect(result.cancelPendingCreate()).rejects.toThrow('terminal create cancellation failed')
+
+    resolveCreate({ ok: true, payload: { terminal_session_id: 'late-session', pid: 42 }, error: null })
+    await spawnPromise
+    expect(result.sessionId.value).toBe('')
+    scope.stop()
+  })
 })

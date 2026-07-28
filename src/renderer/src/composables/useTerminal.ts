@@ -1962,36 +1962,40 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // A ref so displayStatus can reflect a parked (deferred) spawn as idle.
   const pendingSpawn = shallowRef<SpawnOptions | null>(null)
   let activeCreateGeneration: string | null = null
-  let pendingCreateCancel: Promise<void> | null = null
-  const createCancelRequests = new Map<string, Promise<void>>()
+  let pendingCreateCancel: Promise<boolean> | null = null
+  const createCancelRequests = new Map<string, Promise<boolean>>()
 
   function newCreateGeneration(): string {
     return crypto.randomUUID()
   }
 
-  function requestCreateCancel(generation: string): Promise<void> {
+  function requestCreateCancel(generation: string): Promise<boolean> {
     const existing = createCancelRequests.get(generation)
     if (existing) return existing
     const request = backend.send('terminal.create.cancel', {
       pane_id: paneId,
       create_generation: generation,
-    }).then(() => undefined, () => undefined)
+    }).then((response) => response.ok, () => false)
     createCancelRequests.set(generation, request)
     return request
+  }
+
+  async function requireCreateCancel(request: Promise<boolean>): Promise<void> {
+    if (!await request) throw new Error('terminal create cancellation failed')
   }
 
   /** Invalidate the current create locally, then wait for backend rollback. */
   async function cancelPendingCreate(): Promise<void> {
     const generation = activeCreateGeneration
     if (!generation) {
-      if (pendingCreateCancel) await pendingCreateCancel
+      if (pendingCreateCancel) await requireCreateCancel(pendingCreateCancel)
       return
     }
     activeCreateGeneration = null
     pendingSpawn.value = null
     const request = requestCreateCancel(generation)
     pendingCreateCancel = request
-    await request
+    await requireCreateCancel(request)
     if (pendingCreateCancel === request) pendingCreateCancel = null
   }
 
@@ -2358,7 +2362,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
 
   onScopeDispose(() => {
     isDisposed = true
-    void cancelPendingCreate()
+    void cancelPendingCreate().catch(() => {})
     saveScrollSnapshot()  // persist scrollback before the pane is torn down
     cleanupSession()
     clearInterval(tickInterval)

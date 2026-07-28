@@ -228,3 +228,22 @@ def test_cursor_session_globs_across_project_hashes(
         "cursor", "/ws", "0198f6a2-71aa-4d02-9c11-2233445566aa"
     ) is False
     assert _session_exists("cursor", "/ws", "not-a-uuid") is False
+
+
+def test_aider_session_exists_iff_workspace_history_file_exists(
+    tmp_path: Path,
+) -> None:
+    """Aider's resume (`aider --restore-chat-history`) takes no id, so ANY
+    recorded slug is restorable exactly when the workspace's history file
+    exists — a slug matching no section still passes (lossy by design)."""
+    ws = tmp_path / "proj"
+    ws.mkdir()
+    slug = "aider-20260728-213045"
+    assert _session_exists("aider", str(ws), slug) is False
+
+    (ws / ".aider.chat.history.md").write_text(
+        "# aider chat started at 2026-07-28 21:30:45\n", encoding="utf-8"
+    )
+    assert _session_exists("aider", str(ws), slug) is True
+    # Mismatched id is still restorable — restore reads the whole file.
+    assert _session_exists("aider", str(ws), "aider-19990101-000000") is True

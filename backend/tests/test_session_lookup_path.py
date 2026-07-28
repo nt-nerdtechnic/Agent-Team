@@ -54,6 +54,18 @@ def test_vendor_managed_agents_have_no_single_path():
     assert _session_lookup_path("cursor", "/ws", "sid1") == ""
 
 
+def test_aider_path_is_the_workspace_history_file(tmp_path):
+    """Aider has no session id: the path is the workspace git root's
+    history file, derivable from the workspace alone — the recorded
+    started-at slug never names it."""
+    root = tmp_path / "proj"
+    (root / ".git").mkdir(parents=True)
+    sub = root / "sub"
+    sub.mkdir()
+    expected = str(root / ".aider.chat.history.md")
+    assert _session_lookup_path("aider", str(sub), "aider-20260728-213045") == expected
+
+
 def test_empty_session_has_no_path():
     assert _session_lookup_path("claude", "/ws", "") == ""
     assert _session_lookup_path("claude", "/ws", "   ") == ""

@@ -209,7 +209,7 @@ class CursorLogReader(LogReader):
             stat = path.stat()
         except OSError:
             return []
-        token = f"{int(stat.st_mtime * 1000)}:{stat.st_size}"
+        token = f"{stat.st_mtime_ns}:{stat.st_size}"
         prev = next(
             (k[len(_STAT_PREFIX):] for k in seen_keys if k.startswith(_STAT_PREFIX)),
             None,

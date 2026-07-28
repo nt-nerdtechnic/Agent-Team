@@ -592,6 +592,35 @@ async def test_terminal_create_cursor_resume_claims_resume_id(
 
 
 @pytest.mark.asyncio
+async def test_terminal_create_aider_registers_without_resume_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Aider panes pass the attribution whitelist but claim NO resume id —
+    `aider --restore-chat-history` takes no id, so there is nothing to parse
+    from the launch command; binding relies on the kickoff marker."""
+    fake_attr = FakeAttribution()
+    monkeypatch.setattr(app, "attribution", fake_attr)
+    monkeypatch.setattr(app, "_register_workspace_and_backfill", lambda _ws: None)
+    session = _session()
+
+    await app.handle_message(session, {
+        "id": "m13",
+        "type": "terminal.create",
+        "payload": {
+            "pane_id": "aider-pane",
+            "agent_key": "aider",
+            "command": ["/bin/zsh", "-lc", "aider --restore-chat-history"],
+            "cwd": "/ws",
+            "metadata": {"workspace_path": "/ws"},
+        },
+    })
+
+    assert fake_attr.registered[0]["pane_id"] == "aider-pane"
+    assert fake_attr.registered[0]["vendor"] == "aider"
+    assert fake_attr.registered[0]["explicit_session_id"] == ""
+
+
+@pytest.mark.asyncio
 async def test_spawn_path_refresh_throttles(monkeypatch: pytest.MonkeyPatch) -> None:
     """Agent-CLI spawns refresh the backend PATH (so a just-installed CLI is
     found), but at most once per interval — the probe shells out."""
