@@ -10,6 +10,7 @@ import { PLAN_REF_MIME, isPlanDrag, parsePlanRefPayload, type PlanDragRef } from
 import { formatLoopTime } from '../lib/loopPrompt'
 import RebuildIcon from './RebuildIcon.vue'
 import UsageBadge from './UsageBadge.vue'
+import RestoredPanePlaceholder from './RestoredPanePlaceholder.vue'
 
 interface Props {
   paneId: string
@@ -39,6 +40,8 @@ interface Props {
   rebuilding?: boolean
   isPreparing?: boolean
   preparingLabel?: string
+  /** A cold-restored terminal is mounted but has not rendered its first PTY output yet. */
+  restoring?: boolean
   /** Runtime-only LOOP badge state — lit after the loop prompt was injected. */
   loopActive?: boolean
   /** Epoch ms of the scheduled session-limit auto-resume; set while the loop
@@ -84,6 +87,7 @@ const emit = defineEmits<{
   /** The user typed into a STOPped pane (Enter/printable), taking over — App.vue
    *  clears + un-persists the STOP badge. */
   (e: 'user-resume'): void
+  (e: 'first-output'): void
 }>()
 const containerRef = ref<HTMLElement | null>(null)
 const isDragOver = ref(false)
@@ -123,6 +127,7 @@ const terminal = useTerminal(props.paneId, props.backend, {
   onClear: () => emit('rebuild-clean'),
   onUserResume: () => emit('user-resume'),
   mentionCandidates: () => props.mentionCandidates ?? [],
+  onFirstOutput: () => emit('first-output'),
 })
 const { theme } = useTheme()
 watch(theme, () => terminal.updateXtermTheme())
@@ -414,6 +419,18 @@ onMounted(() => {
       class="respawn-btn"
       @click.stop="emit('rebuild-clean')"
     >↻ {{ $t('pane.terminal.respawn') }}</button>
+    <RestoredPanePlaceholder
+      v-if="restoring && displayStatus !== 'exited' && displayStatus !== 'error'"
+      class="restoring-overlay"
+      :pane-id="paneId"
+      :title="title"
+      :subtitle="subtitle"
+      :pipe-tag="pipeTag"
+      :is-focus="isFocus"
+      realizing
+      @minimize="emit('minimize')"
+      @context-menu="emit('context-menu', $event)"
+    />
   </div>
 </template>
 
@@ -679,6 +696,11 @@ onMounted(() => {
   background: color-mix(in srgb, var(--bg-base) 78%, transparent);
   backdrop-filter: blur(1px);
   pointer-events: auto;
+}
+.restoring-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
 }
 .prep-panel {
   display: inline-flex;

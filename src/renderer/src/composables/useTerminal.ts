@@ -767,6 +767,7 @@ interface UseTerminalOptions {
    *  Feeds the @-mention autocomplete menu. Read lazily at trigger time so the
    *  list stays current as panes come and go. */
   mentionCandidates?: () => string[]
+  onFirstOutput?: () => void
 }
 
 // Throttle for RESUME spawns' terminal.create across all panes. A session
@@ -1137,6 +1138,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   let inputDisposer: { dispose(): void } | null = null
   let outputUnsub: (() => void) | null = null
   let exitUnsub: (() => void) | null = null
+  let firstOutputSeen = false
   // Pending terminal output coalescing. The focused pane flushes immediately
   // on arrival — keystroke echo must not wait for a frame (worst for IME
   // input, where the whole commit waits on it). Unfocused panes coalesce
@@ -1153,7 +1155,9 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     const chunk = _pendingOutput
     _pendingOutput = ''
     if (!chunk) return
-    term.write(chunk)
+    const onFirstOutput = !firstOutputSeen ? opts?.onFirstOutput : undefined
+    firstOutputSeen = true
+    term.write(chunk, onFirstOutput)
     appendClean(chunk)
     appendToScrollBuffer(chunk)
   }
@@ -2288,7 +2292,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   async function kill(opts?: { force?: boolean }): Promise<void> {
     if (!sessionId.value) return
     rememberSessionId('')  // explicit kill — never reattach to this PTY
-    await backend.send('terminal.kill', { 
+    await backend.send('terminal.kill', {
       terminal_session_id: sessionId.value,
       force: opts?.force ?? false
     })

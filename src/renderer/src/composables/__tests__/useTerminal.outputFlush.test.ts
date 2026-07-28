@@ -2,6 +2,16 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { createMockBackend, withScope } from './mockBackend'
 
+vi.hoisted(() => {
+  const values = new Map<string, string>()
+  vi.stubGlobal('localStorage', {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => { values.set(key, String(value)) },
+    removeItem: (key: string) => { values.delete(key) },
+    clear: () => { values.clear() },
+  })
+})
+
 // Output flush policy: the focused pane writes echo immediately (typing must
 // not wait for a coalescing window — worst for IME input, where the whole
 // commit waits on it), while unfocused panes coalesce writes so a streaming
@@ -25,6 +35,7 @@ vi.mock('../useTerminalResize', () => ({
 
 const captured = vi.hoisted(() => ({
   writes: [] as string[],
+  writeCallbacks: [] as Array<() => void>,
   textarea: undefined as HTMLTextAreaElement | undefined,
 }))
 
@@ -54,8 +65,9 @@ vi.mock('@xterm/xterm', () => {
     onData(): { dispose(): void } {
       return { dispose(): void {} }
     }
-    write(data: string): void {
+    write(data: string, callback?: () => void): void {
       captured.writes.push(data)
+      if (callback) captured.writeCallbacks.push(callback)
     }
     writeln(): void {}
     resize(): void {}
@@ -84,14 +96,15 @@ describe('useTerminal — output flush policy', () => {
   afterEach(() => {
     vi.clearAllMocks()
     captured.writes = []
+    captured.writeCallbacks = []
     captured.textarea = undefined
     localStorage.clear() // drop the persisted PTY id so the next spawn is fresh
   })
 
-  async function spawnedTerminal() {
+  async function spawnedTerminal(onFirstOutput?: () => void) {
     const mock = createMockBackend()
     mock.setResponse('terminal.create', { terminal_session_id: 'sess-1', pid: 42 })
-    const { result, scope } = withScope(() => useTerminal('pane-1', mock.backend))
+    const { result, scope } = withScope(() => useTerminal('pane-1', mock.backend, { onFirstOutput }))
     result.mount(document.createElement('div'))
     await result.spawn({ command: 'bash', cwd: '/tmp' })
     captured.writes = [] // discard anything written during spawn
@@ -110,6 +123,23 @@ describe('useTerminal — output flush policy', () => {
     expect(captured.writes).toEqual(['a'])
     emitOutput(mock, '中')
     expect(captured.writes).toEqual(['a', '中'])
+    scope.stop()
+  })
+
+  it('reports the first rendered PTY output exactly once', async () => {
+    const onFirstOutput = vi.fn()
+    const { mock, scope } = await spawnedTerminal(onFirstOutput)
+    captured.textarea!.dispatchEvent(new Event('focus'))
+
+    expect(onFirstOutput).not.toHaveBeenCalled()
+    emitOutput(mock, 'first')
+    emitOutput(mock, 'second')
+
+    expect(captured.writes).toEqual(['first', 'second'])
+    expect(onFirstOutput).not.toHaveBeenCalled()
+    expect(captured.writeCallbacks).toHaveLength(1)
+    captured.writeCallbacks[0]()
+    expect(onFirstOutput).toHaveBeenCalledTimes(1)
     scope.stop()
   })
 

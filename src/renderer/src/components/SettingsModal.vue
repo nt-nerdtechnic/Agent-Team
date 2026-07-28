@@ -19,8 +19,11 @@ import {
 } from '../composables/useUsage'
 import {
   RESUME_BEHAVIOR_SETTING_KEY,
+  RESTORE_SCOPE_SETTING_KEY,
   normalizeResumeBehavior,
+  normalizeRestoreScope,
   type ResumeBehavior,
+  type RestoreScope,
 } from '../lib/resumeBehavior'
 import {
   RESUME_CONCURRENCY_SETTING_KEY,
@@ -510,6 +513,13 @@ const resumeBehaviorModel = ref<ResumeBehavior>(
 function onResumeBehaviorChange(value: string): void {
   resumeBehaviorModel.value = normalizeResumeBehavior(value)
   settingsSet(RESUME_BEHAVIOR_SETTING_KEY, resumeBehaviorModel.value)
+}
+const restoreScopeModel = ref<RestoreScope>(
+  normalizeRestoreScope(settingsGet(RESTORE_SCOPE_SETTING_KEY, 'single'))
+)
+function onRestoreScopeChange(value: string): void {
+  restoreScopeModel.value = normalizeRestoreScope(value)
+  settingsSet(RESTORE_SCOPE_SETTING_KEY, restoreScopeModel.value)
 }
 
 // Max resume spawns that run terminal.create concurrently (the rest queue).
@@ -2610,6 +2620,21 @@ async function plDelete(id: string, name: string) {
                     <option value="always">{{ $t('settings.appearance.resume-behavior-always') }}</option>
                     <option value="never">{{ $t('settings.appearance.resume-behavior-never') }}</option>
                     <option value="ask">{{ $t('settings.appearance.resume-behavior-ask') }}</option>
+                  </select>
+                </template>
+              </SettingRow>
+
+              <SettingRow
+                v-if="resumeBehaviorModel === 'always'"
+                data-settings-section="general-restore-scope"
+                :title="$t('settings.appearance.restore-scope')"
+                :description="$t('settings.appearance.restore-scope-hint')"
+              >
+                <template #control>
+                  <select :value="restoreScopeModel" @change="onRestoreScopeChange(($event.target as HTMLSelectElement).value)">
+                    <option value="single">{{ $t('settings.appearance.restore-scope-single') }}</option>
+                    <option value="page">{{ $t('settings.appearance.restore-scope-page') }}</option>
+                    <option value="tab">{{ $t('settings.appearance.restore-scope-tab') }}</option>
                   </select>
                 </template>
               </SettingRow>

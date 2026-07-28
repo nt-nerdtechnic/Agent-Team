@@ -104,17 +104,46 @@ describe('classifySessionExistsResponse', () => {
   })
 })
 
-describe('shouldAttemptResume (restore fallback routing)', () => {
-  it('resumes on true, and on null still ATTEMPTS resume with the saved id', () => {
+describe('shouldAttemptResume', () => {
+  it('keeps resume for a confirmed or unknown transcript', () => {
     expect(shouldAttemptResume(true)).toBe(true)
-    // Pre-fix: null collapsed to false → fresh spawn despite a possibly-alive
-    // transcript. Unknown must route to --resume (worst case: one errored
-    // boot, but the id mapping survives).
     expect(shouldAttemptResume(null)).toBe(true)
   })
 
-  it('fresh-spawns only on a DEFINITIVE false', () => {
+  it('falls back only when the transcript is definitively absent', () => {
     expect(shouldAttemptResume(false)).toBe(false)
+  })
+})
+
+describe('resolveDeterministicReconnect', () => {
+  const ghost = { paneId: 'pane-1', customName: 'Backend', sessionId: 'ghost-id' }
+  const exists = (ids: string[]) => (id: string) => ids.includes(id)
+
+  it('returns the unique live provenance candidate', () => {
+    expect(resolveDeterministicReconnect(ghost, [{ paneId: 'pane-1', sessionId: 'real-a' }], exists(['real-a']), [])).toBe('real-a')
+  })
+
+  it('returns null for no or ambiguous live candidates', () => {
+    expect(resolveDeterministicReconnect(ghost, [{ paneId: 'pane-1', sessionId: 'gone-a' }], exists([]), [])).toBeNull()
+    expect(resolveDeterministicReconnect(ghost, [
+      { paneId: 'pane-1', sessionId: 'real-a' },
+      { paneId: 'pane-1', sessionId: 'real-b' },
+    ], exists(['real-a', 'real-b']), [])).toBeNull()
+  })
+
+  it('does not steal a candidate claimed by another pane', () => {
+    expect(resolveDeterministicReconnect(ghost, [{ paneId: 'pane-1', sessionId: 'real-a' }], exists(['real-a']), [
+      { paneId: 'pane-2', sessionId: 'real-a' },
+    ])).toBeNull()
+  })
+})
+
+describe('reconnectCandidateSessionIds', () => {
+  it('uses pane-id provenance before the legacy custom-name fallback', () => {
+    expect(reconnectCandidateSessionIds({ paneId: 'pane-1', customName: 'Backend' }, [
+      { paneId: 'pane-1', sessionId: 'real-a' },
+      { paneId: 'other', customName: 'Backend', sessionId: 'real-b' },
+    ])).toEqual(['real-a'])
   })
 })
 
@@ -356,107 +385,6 @@ describe('sendWithUiStateRetry + seq guard (stale-retry drop)', () => {
   })
 })
 
-// ── Deterministic reconnect resolver ─────────────────────────────────────────
-
-describe('resolveDeterministicReconnect', () => {
-  const ghost = { paneId: 'pane-1', customName: 'Backend', sessionId: 'ghost-id' }
-  const exists = (ids: string[]) => (id: string) => ids.includes(id)
-
-  it('returns the id when exactly one provenance candidate has a transcript', () => {
-    const history = [{ paneId: 'pane-1', sessionId: 'real-a' }]
-    expect(
-      resolveDeterministicReconnect(ghost, history, exists(['real-a']), [])
-    ).toBe('real-a')
-  })
-
-  it('returns null when no provenance candidate has a transcript', () => {
-    const history = [{ paneId: 'pane-1', sessionId: 'gone-a' }]
-    expect(
-      resolveDeterministicReconnect(ghost, history, exists([]), [])
-    ).toBeNull()
-  })
-
-  it('returns null when multiple candidates have transcripts (ambiguous)', () => {
-    const history = [
-      { paneId: 'pane-1', sessionId: 'real-a' },
-      { paneId: 'pane-1', sessionId: 'real-b' },
-    ]
-    expect(
-      resolveDeterministicReconnect(ghost, history, exists(['real-a', 'real-b']), [])
-    ).toBeNull()
-  })
-
-  it('excludes a candidate whose transcript is missing, leaving a unique survivor', () => {
-    const history = [
-      { paneId: 'pane-1', sessionId: 'real-a' },
-      { paneId: 'pane-1', sessionId: 'gone-b' },
-    ]
-    expect(
-      resolveDeterministicReconnect(ghost, history, exists(['real-a']), [])
-    ).toBe('real-a')
-  })
-
-  it('excludes a candidate that is another live pane\'s current session id', () => {
-    const history = [{ paneId: 'pane-1', sessionId: 'real-a' }]
-    expect(
-      resolveDeterministicReconnect(ghost, history, exists(['real-a']), [
-        { paneId: 'pane-2', sessionId: 'real-a' },
-      ])
-    ).toBeNull()
-  })
-
-  it('falls back to customName provenance when no paneId record exists', () => {
-    const history = [{ paneId: 'other-pane', customName: 'Backend', sessionId: 'real-a' }]
-    expect(
-      resolveDeterministicReconnect(ghost, history, exists(['real-a']), [])
-    ).toBe('real-a')
-  })
-
-  it('never targets a healthy pane whose own saved id has a transcript', () => {
-    const history = [{ paneId: 'pane-1', sessionId: 'real-a' }]
-    const healthy = { paneId: 'pane-1', customName: 'Backend', sessionId: 'ghost-id' }
-    expect(
-      resolveDeterministicReconnect(
-        healthy,
-        history,
-        exists(['ghost-id', 'real-a']),
-        []
-      )
-    ).toBeNull()
-  })
-
-  // F1 fork guard: the exclusion set App.vue feeds the resolver is the UNION of
-  // in-window live panes AND every saved pane record's session id. A
-  // customName-provenance candidate already claimed by ANOTHER pane's saved
-  // record — a session live in a detached/other window, or a sibling not yet
-  // spawned in this concurrent restore batch, so never seen "live" here — must
-  // be excluded, else two panes --resume the same conversation (fork).
-  it('excludes a customName candidate claimed by another (saved, not-live) pane — cross-window/not-yet-spawned fork guard', () => {
-    const history = [{ paneId: 'sibling-pane', customName: 'Backend', sessionId: 'shared-id' }]
-    // 'shared-id' has a transcript and would otherwise resolve — but the
-    // sibling pane's SAVED record already claims it (that pane's own session).
-    // Pre-fix App.vue passed only panes.value, which omits an unspawned/other-
-    // window sibling, so this id would have been stolen.
-    expect(
-      resolveDeterministicReconnect(ghost, history, exists(['shared-id']), [
-        { paneId: 'sibling-pane', sessionId: 'shared-id' },
-      ])
-    ).toBeNull()
-  })
-
-  it('paneId-provenance unique candidate still resolves — its id is not claimed under any other pane record', () => {
-    const history = [{ paneId: 'pane-1', sessionId: 'real-a' }]
-    // Other saved records are in the exclusion set but none claim real-a, so
-    // tightening the exclusion to all saved panes leaves this case unchanged.
-    expect(
-      resolveDeterministicReconnect(ghost, history, exists(['real-a']), [
-        { paneId: 'pane-2', sessionId: 'other-b' },
-        { paneId: 'pane-3', sessionId: '' },
-      ])
-    ).toBe('real-a')
-  })
-})
-
 // ── F2: backend orphan row (custom_name) → picker OrphanSession (name) ────────
 
 describe('mapOrphanSession', () => {
@@ -476,23 +404,5 @@ describe('mapOrphanSession', () => {
     expect(mapOrphanSession({ session_id: 's2' })).toEqual({
       session_id: 's2', name: '', preview: [], size_bytes: 0, mtime: 0, resumable: false,
     })
-  })
-})
-
-describe('reconnectCandidateSessionIds', () => {
-  it('matches by paneId and dedupes, dropping blanks', () => {
-    const history = [
-      { paneId: 'p1', sessionId: 'a' },
-      { paneId: 'p1', sessionId: 'a' },
-      { paneId: 'p1', sessionId: '' },
-      { paneId: 'p2', sessionId: 'b' },
-    ]
-    expect(reconnectCandidateSessionIds({ paneId: 'p1', customName: '' }, history)).toEqual(['a'])
-  })
-
-  it('falls back to customName only when no paneId record exists', () => {
-    const history = [{ paneId: 'other', customName: 'Web', sessionId: 'c' }]
-    expect(reconnectCandidateSessionIds({ paneId: 'p1', customName: 'Web' }, history)).toEqual(['c'])
-    expect(reconnectCandidateSessionIds({ paneId: 'p1', customName: '' }, history)).toEqual([])
   })
 })

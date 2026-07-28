@@ -201,6 +201,8 @@
       "sort-progress": "進度"
     },
     "terminal": {
+      "click-to-resume": "點擊以續接",
+      "resuming": "續接中…",
       "rebuild-tooltip": "重建 (resume) ⌘⇧B — 殺掉並用 --resume 在當前尺寸重新開,清除無法重畫的疊影/跑版。會中斷進行中的回合、重印對話。",
       "rebuild-tooltip-disabled": "重建需要一段可 resume 的對話。請先送出一則訊息，逐字稿會在第一次對話後建立。",
       "rebuild-busy-skipped": "CLI 正在執行中,已保留現有工作,略過重建",
@@ -534,6 +536,11 @@
       "resume-behavior-always": "總是恢復",
       "resume-behavior-never": "一律開新對話",
       "resume-behavior-ask": "每次詢問",
+      "restore-scope": "恢復範圍",
+      "restore-scope-hint": "選擇「總是恢復」時，可自動開啟單一 CLI、目前的 Grid 頁面或目前分頁。",
+      "restore-scope-single": "單一 CLI",
+      "restore-scope-page": "目前 Grid 頁面",
+      "restore-scope-tab": "目前分頁",
       "resume-concurrency": "同時恢復上限",
       "resume-concurrency-hint": "開啟工作區或還原版面時，最多可同時恢復幾個 CLI pane，其餘依序排隊。若一次恢復太多 pane 導致「terminal.create timeout」錯誤，就把這個值調小（1–10）。",
       "resume-concurrency-label": "同時恢復數上限"
@@ -1221,11 +1228,15 @@
     "dialog-message": "偵測到上次未正常關閉。要重新開啟 {count} 個 workspace 嗎？",
     "apply": "恢復",
     "dismiss": "忽略",
+    "scope-title": "恢復先前的對話",
+    "scope-message": "此工作區有 {count} 個先前的對話。請選擇要恢復的範圍。",
+    "scope-single": "恢復單一 CLI",
+    "scope-page": "恢復目前 Grid 頁面",
+    "scope-tab": "恢復目前分頁",
+    "scope-fresh": "全部全新開始",
     "session-not-found": "找不到 {agent} 的先前對話，已改開新對話。",
-    "resume-prompt-title": "恢復先前的對話？",
-    "resume-prompt-message": "此工作區有 {count} 個先前的對話，要恢復它們還是全新開始？",
-    "resume-prompt-confirm": "恢復對話",
-    "resume-prompt-cancel": "全新開始"
+    "codex-session-unavailable": "Codex 已儲存的對話無法使用，因此保留 placeholder。",
+    "codex-session-unknown": "無法確認 Codex 已儲存的對話，因此保留 placeholder。"
   },
   "backfill": {
     "title": "背景整理歷史 token 用量",

@@ -2361,6 +2361,12 @@ button.icon-btn.muted:hover {
 .status-dot[data-state='idle'] {
   background: var(--attention-fg);
 }
+/* Cold-restore placeholder: nothing spawned yet — a hollow ring, so it never
+   reads as a live-but-quiet pane. */
+.status-dot[data-state='waiting'] {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--text-secondary);
+}
 .status-dot[data-state='error'] {
   background: var(--danger-fg);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--danger-fg) 25%, transparent);
