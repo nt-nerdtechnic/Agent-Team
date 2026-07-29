@@ -45,6 +45,9 @@ class FakeTerminals:
         self.killed.append((session_id, force))
         self._sessions.pop(session_id, None)
 
+    def find_live_by_resume_id(self, *args: Any, **kwargs: Any) -> list[Any]:
+        return []
+
 
 class BlockingAttribution:
     def __init__(self) -> None:

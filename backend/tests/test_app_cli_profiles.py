@@ -57,6 +57,9 @@ class FakeTerminals:
     def get(self, session_id: str) -> SimpleNamespace | None:
         return self.registry.get(session_id)
 
+    def find_live_by_resume_id(self, *args: Any, **kwargs: Any) -> list[Any]:
+        return []
+
     async def kill(self, session_id: str, force: bool = False) -> None:
         # Mirrors TerminalService.kill: the terminal closes immediately; the
         # child process dies unless the term is marked as surviving SIGKILL.

@@ -489,6 +489,23 @@ class TerminalService:
         """Ids of all live (not closed) sessions."""
         return [s.id for s in self._sessions.values() if not s.closed]
 
+    def find_live_by_resume_id(
+        self,
+        agent_key: str,
+        resume_id: str,
+        extract_resume_id: Callable[[list[str]], str],
+    ) -> list[TerminalSession]:
+        """Live sessions of ``agent_key`` whose launch command resumes
+        ``resume_id`` (extractor injected to keep argv parsing out of this
+        module)."""
+        return [
+            s
+            for s in self._sessions.values()
+            if not s.closed
+            and s.agent_key == agent_key
+            and extract_resume_id(s.command) == resume_id
+        ]
+
     def write(self, session_id: str, data: str) -> None:
         session = self._require(session_id)
         if session.closed:

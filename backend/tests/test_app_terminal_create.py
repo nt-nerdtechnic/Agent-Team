@@ -34,6 +34,9 @@ class FakeTerminals:
     async def kill(self, session_id: str, force: bool = False) -> None:
         self.killed.append((session_id, force))
 
+    def find_live_by_resume_id(self, *args: Any, **kwargs: Any) -> list[Any]:
+        return []
+
 
 class FakeAttribution:
     def __init__(self) -> None:

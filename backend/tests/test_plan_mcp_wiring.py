@@ -166,6 +166,9 @@ class FakeTerminals:
             proc=SimpleNamespace(pid=1234),
         )
 
+    def find_live_by_resume_id(self, *args: Any, **kwargs: Any) -> list[Any]:
+        return []
+
 
 class FakeAttribution:
     def register_pane(self, pane_id: str, **kwargs: Any) -> None:

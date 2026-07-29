@@ -1441,6 +1441,26 @@ def _cursor_resume_id(command: Any) -> str:
     return (m.group(1) or m.group(2)) if m else ""
 
 
+_RESUME_ID_EXTRACTORS = {
+    "codex": _codex_resume_id,
+    "claude": _claude_resume_id,
+    "kimi": _kimi_resume_id,
+    "opencode": _opencode_resume_id,
+    "kilo": _kilo_resume_id,
+    "qwen": _qwen_resume_id,
+    "pi": _pi_resume_id,
+    "copilot": _copilot_resume_id,
+    "cursor": _cursor_resume_id,
+}
+
+
+def _resume_id_for_agent(agent_key: str, command: Any) -> str:
+    """Resume/session id a launch command targets for this agent ('' when the
+    agent has no id-carrying resume flag or the command doesn't resume)."""
+    extract = _RESUME_ID_EXTRACTORS.get(agent_key)
+    return extract(command) if extract else ""
+
+
 def _session_lookup_path(agent: str, workspace_path: str, session_id: str) -> str:
     """The filesystem path the resume preflight checks for this session — logged
     and returned so a failed resume is diagnosable (e.g. a cwd whose non-ASCII

@@ -3526,6 +3526,24 @@ async def _terminal_create_impl(
         )
     if transaction["cancelled"]:
         raise _TerminalCreateCancelled
+    # One live CLI per resume id: a --resume spawn can race a still-live PTY
+    # resuming the same session (cross-window restore, cleared localStorage —
+    # tryReattach only sees the spawning window's own PTY id), leaving two
+    # CLIs appending to one session file. Reap the survivor first.
+    resume_dedup_id = app._resume_id_for_agent(agent_key, payload.get("command"))
+    if resume_dedup_id:
+        for stale in session.terminals.find_live_by_resume_id(
+            agent_key,
+            resume_dedup_id,
+            lambda cmd: app._resume_id_for_agent(agent_key, cmd),
+        ):
+            app.log.info(
+                "terminal.create: reaping stale PTY %s resuming %s/%s",
+                stale.id,
+                agent_key,
+                resume_dedup_id,
+            )
+            await session.terminals.kill(stale.id, force=True)
     term = session.terminals.create(
         pane_id=payload["pane_id"],
         agent_key=agent_key,
