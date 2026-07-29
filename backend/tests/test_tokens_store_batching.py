@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
+import time
 from pathlib import Path
 
-from agent_team_backend.tokens_store import RECENT_EVENT_KEYS_LIMIT, TokensStore
+from agent_team_backend.tokens_store import (
+    COLD_FILE_DAYS,
+    RECENT_EVENT_KEYS_LIMIT,
+    TokensStore,
+)
 
 
 def _store(tmp_path: Path) -> TokensStore:
@@ -353,3 +359,166 @@ def test_interrupted_workspace_reset_recovers_totals_and_checkpoint_together(
         "/logs/session.jsonl", workspace
     )["offset"] == 20
     recovered.flush()
+
+
+def test_unchanged_checkpoint_does_not_trigger_a_rewrite(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A rescan that finds no new bytes must not dirty the ingestion state.
+
+    The watcher re-submits a checkpoint for every file it scans, so treating an
+    unadvanced offset as "newer" rewrote the whole (multi-megabyte) state file
+    every save interval even when nothing had changed.
+    """
+    store = _store(tmp_path)
+    checkpoint = {"kind": "jsonl", "offset": 40, "identity": "1:1"}
+    store.advance_ingestion_checkpoint("/logs/session.jsonl", checkpoint)
+    store.flush()
+
+    writes: list[Path] = []
+    original = store._atomic_write
+
+    def counted(path: Path, data: dict) -> None:
+        writes.append(path)
+        original(path, data)
+
+    monkeypatch.setattr(store, "_atomic_write", counted)
+
+    # Same offset re-submitted (idle rescan) — nothing to persist.
+    store.advance_ingestion_checkpoint("/logs/session.jsonl", dict(checkpoint))
+    store.flush()
+    assert writes == []
+
+    # A genuine advance still persists.
+    store.advance_ingestion_checkpoint(
+        "/logs/session.jsonl", {"kind": "jsonl", "offset": 41, "identity": "1:1"}
+    )
+    store.flush()
+    assert [path.name for path in writes] == [
+        "token-persistence-journal.json",
+        "token-ingestion-state.json",
+    ]
+    assert store.get_ingestion_checkpoint("/logs/session.jsonl")["offset"] == 41
+
+    # A rotated file (new identity) at a lower offset must still be accepted.
+    store.advance_ingestion_checkpoint(
+        "/logs/session.jsonl", {"kind": "jsonl", "offset": 5, "identity": "1:2"}
+    )
+    assert store.get_ingestion_checkpoint("/logs/session.jsonl")["offset"] == 5
+    store.flush()
+
+
+def test_ingestion_state_is_written_without_indentation(tmp_path: Path) -> None:
+    """The state file dominates write volume; indentation is ~30% of its bytes."""
+    store = _store(tmp_path)
+    store.record(
+        str(tmp_path / "workspace"),
+        source="cli",
+        vendor="claude",
+        input_tokens=10,
+        dedup_key="event",
+        ingestion_file="/logs/session.jsonl",
+        ingestion_checkpoint={"kind": "jsonl", "offset": 40, "identity": "1:1"},
+    )
+    store.flush()
+
+    raw = (tmp_path / "token-ingestion-state.json").read_text()
+    assert "\n" not in raw
+    assert ", " not in raw
+    assert json.loads(raw)["files"]["/logs/session.jsonl"]["global"]["offset"] == 40
+
+    # Ledger files stay indented — they are small and get read by humans.
+    assert "\n" in (tmp_path / "tokens.json").read_text()
+    store.flush()
+
+
+def _state_with_files(tmp_path: Path, files: dict) -> Path:
+    path = tmp_path / "token-ingestion-state.json"
+    path.write_text(json.dumps({"version": 2, "files": files}), encoding="utf-8")
+    return path
+
+
+def test_startup_prune_strips_cold_dedup_windows(tmp_path: Path) -> None:
+    """`files` has no other eviction path, so the windows accumulate (7.5 MB
+    on a real machine) and get rewritten whole on every flush."""
+    old = tmp_path / "cold.jsonl"
+    old.write_text("{}\n", encoding="utf-8")
+    cold_mtime = time.time() - (COLD_FILE_DAYS + 1) * 86400
+    os.utime(old, (cold_mtime, cold_mtime))
+    fresh = tmp_path / "hot.jsonl"
+    fresh.write_text("{}\n", encoding="utf-8")
+
+    _state_with_files(tmp_path, {
+        str(old): {
+            "global": {
+                "kind": "jsonl", "offset": 10, "identity": "1:1",
+                "recent_keys": ["a", "b"],
+            },
+            "workspaces": {
+                "/ws": {
+                    "kind": "jsonl", "offset": 10, "identity": "1:1",
+                    "recent_keys": ["a"],
+                }
+            },
+        },
+        str(fresh): {
+            "global": {
+                "kind": "jsonl", "offset": 20, "identity": "2:2",
+                "recent_keys": ["c"],
+            },
+            "workspaces": {},
+        },
+        # Unreadable path: left strictly alone, so a transient I/O fault
+        # cannot wipe the dedup state and trigger a full re-read.
+        "/gone/session.jsonl": {
+            "global": {
+                "kind": "jsonl", "offset": 5, "identity": "3:3",
+                "recent_keys": ["z"],
+            },
+            "workspaces": {},
+        },
+    })
+    store = _store(tmp_path)
+    files = store._ingestion_state["files"]
+
+    assert files["/gone/session.jsonl"]["global"]["recent_keys"] == ["z"]
+    # Cold: window stripped in every scope, but position preserved.
+    cold_entry = files[str(old)]
+    assert "recent_keys" not in cold_entry["global"]
+    assert "recent_keys" not in cold_entry["workspaces"]["/ws"]
+    assert cold_entry["global"]["offset"] == 10
+    assert cold_entry["global"]["identity"] == "1:1"
+    # Hot files are untouched — their window is still doing work.
+    assert files[str(fresh)]["global"]["recent_keys"] == ["c"]
+
+    # The prune is itself a mutation, so it must reach disk.
+    store.flush()
+    persisted = json.loads((tmp_path / "token-ingestion-state.json").read_text())
+    assert "recent_keys" not in persisted["files"][str(old)]["global"]
+
+
+def test_startup_prune_keeps_windows_readers_carry_across_rotation(
+    tmp_path: Path,
+) -> None:
+    """pi keeps its window across an in-place rewrite (pi.py:280-288) — that
+    window is the only thing stopping a re-read from double counting, so a
+    cold pi log must keep it. Its checkpoints are marked by `session_id`."""
+    cold_pi = tmp_path / "pi.jsonl"
+    cold_pi.write_text("{}\n", encoding="utf-8")
+    stamp = time.time() - (COLD_FILE_DAYS + 30) * 86400
+    os.utime(cold_pi, (stamp, stamp))
+
+    _state_with_files(tmp_path, {
+        str(cold_pi): {
+            "global": {
+                "kind": "jsonl", "offset": 30, "identity": "4:4",
+                "session_id": "sess-1", "recent_keys": ["p1", "p2"],
+            },
+            "workspaces": {},
+        },
+    })
+    store = _store(tmp_path)
+    assert store._ingestion_state["files"][str(cold_pi)]["global"][
+        "recent_keys"
+    ] == ["p1", "p2"]
+    store.flush()

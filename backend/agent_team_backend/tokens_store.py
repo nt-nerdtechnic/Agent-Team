@@ -53,6 +53,12 @@ RECENT_EVENT_KEYS_LIMIT = 512
 # set gets fully rewritten to disk every save interval.
 LEGACY_EVENT_KEYS_LIMIT = 4096
 LEGACY_EVENT_KEYS_TTL_DAYS = 14
+# A session log untouched for this long will not be appended to again in
+# practice, so the per-file dedup window readers stash in its checkpoint is
+# dead weight — and it dominates the state file, which is rewritten whole on
+# every flush. Stripping it is self-healing: the offset and identity stay, so
+# a file that does come back to life rebuilds its window on the next read.
+COLD_FILE_DAYS = 7
 
 
 def _ws_dir_name(workspace_path: str) -> str:
@@ -228,6 +234,7 @@ class TokensStore:
         self._workspace_cache: dict[str, dict[str, Any]] = {}
         self._global_data: dict[str, Any] = self._load_global()
         self._legacy_paths_to_remove: set[Path] = set()
+        self._files_pruned = False
         self._ingestion_state = self._load_ingestion_state()
         self._legacy_event_keys: set[str] = set(
             str(k) for k in self._ingestion_state.get("legacy_event_keys", [])
@@ -238,7 +245,9 @@ class TokensStore:
         legacy_pruned = self._enforce_legacy_key_bounds()
 
         # Dirty flags (set inside _lock, consumed by save loop outside _lock)
-        self._dirty_ingestion_state: bool = bool(self._legacy_paths_to_remove) or legacy_pruned
+        self._dirty_ingestion_state: bool = (
+            bool(self._legacy_paths_to_remove) or legacy_pruned or self._files_pruned
+        )
         self._dirty_workspaces: set[str] = set()
         self._dirty_global: bool = False
 
@@ -252,10 +261,19 @@ class TokensStore:
     # ───────────────────────── Disk I/O ────────────────────────────
 
     def _atomic_write(self, path: Path, data: dict[str, Any]) -> None:
+        # The ingestion state and its journal are machine-only and dominate disk
+        # write volume (megabytes per flush), so they are stored unindented.
+        # Ledger files stay indented — they are small and get eyeballed.
+        compact = path.name in (INGESTION_STATE_FILE, PERSISTENCE_JOURNAL_FILE)
+        dump_kwargs: dict[str, Any] = (
+            {"separators": (",", ":")} if compact else {"indent": 2}
+        )
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
         try:
-            tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            tmp.write_text(
+                json.dumps(data, ensure_ascii=False, **dump_kwargs), encoding="utf-8"
+            )
             os.replace(tmp, path)
         except Exception:
             tmp.unlink(missing_ok=True)
@@ -458,6 +476,7 @@ class TokensStore:
                     doc.update(data)
                     if not isinstance(doc.get("files"), dict):
                         doc["files"] = {}
+                    self._files_pruned = self._prune_ingestion_files(doc)
                     for path in (self._recorded_keys_path, self._legacy_reader_keys_path):
                         if path.exists():
                             self._legacy_paths_to_remove.add(path)
@@ -476,6 +495,45 @@ class TokensStore:
         doc = _empty_ingestion_state()
         doc["legacy_event_keys"] = sorted(legacy)
         return doc
+
+    def _prune_ingestion_files(self, doc: dict[str, Any]) -> bool:
+        """Strip the dedup window from checkpoints of logs long gone cold.
+
+        Runs once at load: `files` has no other eviction path, so the windows
+        accumulate (7.5 MB on a real machine) and every flush rewrites the lot.
+
+        Only a *successful* stat can strip anything. An unreadable path is
+        left alone: treating one as prunable would let a transient I/O fault
+        (an unmounted network home, say) wipe the whole dedup state at once,
+        and the next scan would re-read every log from offset 0.
+
+        A reader that carries its window across a rotation must be exempt —
+        pi.py keeps it deliberately so an in-place rewrite is not double
+        counted, and marks its checkpoints with `session_id` (pi.py:336).
+        Readers that clear the window themselves on rotation (claude, qwen)
+        never set that field.
+        """
+        files = doc.get("files")
+        if not isinstance(files, dict):
+            return False
+        cutoff = datetime.now(timezone.utc).timestamp() - COLD_FILE_DAYS * 86400
+        changed = False
+        for path, entry in files.items():
+            if not isinstance(entry, dict):
+                continue
+            try:
+                if os.stat(path).st_mtime >= cutoff:
+                    continue
+            except OSError:
+                continue
+            scopes = [entry.get("global")]
+            scopes.extend((entry.get("workspaces") or {}).values())
+            for scope in scopes:
+                if not isinstance(scope, dict) or scope.get("session_id"):
+                    continue
+                if scope.pop("recent_keys", None) is not None:
+                    changed = True
+        return changed
 
     def _enforce_legacy_key_bounds(self) -> bool:
         """Bound the one-time migration dedup set. Returns True if it changed.
@@ -569,11 +627,11 @@ class TokensStore:
         if candidate.get("kind") == "sqlite" and current.get("kind") == "sqlite":
             if candidate.get("identity") != current.get("identity"):
                 return True
-            return int(candidate.get("row_id") or 0) >= int(current.get("row_id") or 0)
+            return int(candidate.get("row_id") or 0) > int(current.get("row_id") or 0)
         if candidate.get("kind") == "jsonl" and current.get("kind") == "jsonl":
             if candidate.get("identity") != current.get("identity"):
                 return True
-            return int(candidate.get("offset") or 0) >= int(current.get("offset") or 0)
+            return int(candidate.get("offset") or 0) > int(current.get("offset") or 0)
         return True
 
     @staticmethod
