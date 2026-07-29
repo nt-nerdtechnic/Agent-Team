@@ -108,6 +108,31 @@ def _parse_json_dict(raw: str | None) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def _claude_oauth_expires_at(secret: str | None) -> float | None:
+    """Epoch-ms token expiry from a claude credentials JSON
+    (``claudeAiOauth.expiresAt``); None when absent or unparsable."""
+    data = _parse_json_dict(secret)
+    oauth = data.get("claudeAiOauth") if data else None
+    expires = oauth.get("expiresAt") if isinstance(oauth, dict) else None
+    if isinstance(expires, bool) or not isinstance(expires, (int, float)):
+        return None
+    return float(expires)
+
+
+def _claude_home_secret_is_fresher(home_secret: str | None, slot_secret: str) -> bool:
+    """True when the profile home already holds a token the running CLI
+    refreshed past the slot snapshot. Anthropic OAuth refresh tokens rotate,
+    and the slot is only updated on capture/harvest — never from an in-place
+    runtime refresh — so re-seeding from the slot would hand the pane a dead
+    token pair ("Login expired"). Seeding is therefore runtime-first: the
+    slot wins only when it is strictly newer (a fresh re-login harvest).
+    When either side has no parsable expiry the comparison is impossible and
+    the caller falls back to writing the slot value."""
+    home_exp = _claude_oauth_expires_at(home_secret)
+    slot_exp = _claude_oauth_expires_at(slot_secret)
+    return home_exp is not None and slot_exp is not None and home_exp >= slot_exp
+
+
 def _codex_identity_email(secret: str | None) -> str | None:
     """Best-effort login email from codex ``auth.json``: the ``id_token`` JWT
     payload carries it. Display only — the signature is not verified."""
@@ -763,6 +788,32 @@ class CredentialVault:
             # the home's own .claude.json for the display-only oauthAccount.
             if not self.harvest_legacy_claude_home(slot_id, home):
                 return False
+            # The user just re-logged this account, so the login must win the
+            # next seed. Runtime-first seeding keeps the profile home's copy
+            # when its expiry is not older — an obsolete copy whose expiresAt
+            # outlives the new login's (e.g. a revoked long-lived token with a
+            # far-future expiry) would shadow the fresh login forever. Drop
+            # the home copy only in that case; otherwise leave it for any
+            # still-running panes of this profile.
+            profile_home = self.profile_home_path(agent_key, slot_id)
+            new_secret = self.read_slot("claude", slot_id).secret
+            home_service = legacy_claude_keychain_service(profile_home)
+            home_file = profile_home / ".credentials.json"
+            home_secret = (
+                self._keychain_read(home_service) if self._is_macos else _read_text(home_file)
+            )
+            if (
+                new_secret is not None
+                and home_secret != new_secret
+                and _claude_home_secret_is_fresher(home_secret, new_secret)
+            ):
+                if self._is_macos:
+                    self._keychain_delete(home_service)
+                else:
+                    try:
+                        home_file.unlink(missing_ok=True)
+                    except OSError as err:
+                        log.warning("stale profile-home credential cleanup failed: %s", err)
         else:
             secret = _read_text(home.joinpath(*_LOGIN_HOME_SECRET_FILES[agent_key]))
             if secret is None:
@@ -917,11 +968,21 @@ class CredentialVault:
                     # check-then-write pair: a restore spawns several panes of
                     # one profile concurrently, and racing -U rewrites of the
                     # same item fail for every spawn but the first.
+                    # Runtime-first: a home token the CLI refreshed past the
+                    # slot snapshot must survive re-seeding (see
+                    # _claude_home_secret_is_fresher).
                     with self._keychain_lock:
-                        if self._keychain_read(service) != creds.secret:
+                        current = self._keychain_read(service)
+                        if current != creds.secret and not _claude_home_secret_is_fresher(
+                            current, creds.secret
+                        ):
                             self._keychain_write(service, creds.secret)
                 else:
-                    _write_private(home / ".credentials.json", creds.secret)
+                    current = _read_text(home / ".credentials.json")
+                    if current != creds.secret and not _claude_home_secret_is_fresher(
+                        current, creds.secret
+                    ):
+                        _write_private(home / ".credentials.json", creds.secret)
             except (CredentialVaultError, OSError) as err:
                 # A failed credential seed must not skip the shared-home links
                 # below — an unshared ``projects`` hides the real session

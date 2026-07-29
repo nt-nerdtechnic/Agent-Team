@@ -510,6 +510,41 @@ def test_mac_harvest_login_home_claude(tmp_path: Path) -> None:
     assert not home.exists()
 
 
+def test_mac_harvest_login_home_drops_obsolete_profile_home_copy(tmp_path: Path) -> None:
+    """A re-login must win the next seed. A profile-home copy whose expiresAt
+    outlives the new login's (e.g. a revoked long-lived token) would shadow it
+    under runtime-first seeding, so harvest drops that copy; a copy that is
+    NOT fresher than the new login stays (still-running panes keep using it,
+    and the next seed overwrites it anyway)."""
+    def secret(expires_at: int, token: str) -> str:
+        return json.dumps(
+            {"claudeAiOauth": {"accessToken": token, "expiresAt": expires_at}}
+        )
+
+    vault, sec = _mac_vault(tmp_path)
+    profile_home = vault.profile_home_path("claude", "slot1")
+    profile_service = legacy_claude_keychain_service(profile_home)
+
+    # Case 1: obsolete-but-far-future home copy → dropped, new login seeds.
+    sec.items[profile_service] = secret(9_999, "obsolete-long-lived")
+    login_home = vault.login_home_path("claude", "slot1")
+    login_home.mkdir(parents=True)
+    sec.items[legacy_claude_keychain_service(login_home)] = secret(5_000, "fresh-login")
+    assert vault.harvest_login_home("claude", "slot1") is True
+    assert profile_service not in sec.items
+    vault.prepare_profile_home("claude", "slot1")
+    assert sec.items[profile_service] == secret(5_000, "fresh-login")
+
+    # Case 2: home copy older than the new login → left in place for running
+    # panes (the next seed replaces it with the newer slot).
+    login_home.mkdir(parents=True)
+    sec.items[legacy_claude_keychain_service(login_home)] = secret(8_000, "newer-login")
+    assert vault.harvest_login_home("claude", "slot1") is True
+    assert sec.items[profile_service] == secret(5_000, "fresh-login")
+    vault.prepare_profile_home("claude", "slot1")
+    assert sec.items[profile_service] == secret(8_000, "newer-login")
+
+
 def test_login_spawn_env_per_agent(tmp_path: Path) -> None:
     vault = _file_vault(tmp_path)
 
@@ -838,6 +873,51 @@ def test_prepare_profile_home_claude_macos_skips_redundant_keychain_write(tmp_pa
     vault.prepare_profile_home("claude", "acct1")
     home = vault.profile_home_path("claude", "acct1")
     assert sec.items.get(legacy_claude_keychain_service(home)) == '{"t": 2}'
+
+
+def _oauth_secret(expires_at: int, token: str) -> str:
+    return json.dumps({"claudeAiOauth": {"accessToken": token, "expiresAt": expires_at}})
+
+
+def test_prepare_profile_home_claude_macos_keeps_runtime_refreshed_token(
+    tmp_path: Path,
+) -> None:
+    """A token the running CLI refreshed inside the profile home must survive
+    re-seeding: the slot snapshot is stale and its rotated refresh token is
+    dead — overwriting it caused "Login expired" on every restart/switch."""
+    vault, sec = _mac_vault(tmp_path)
+    vault.write_slot("claude", "acct1", LiveCredentials(secret=_oauth_secret(1_000, "old")))
+    vault.prepare_profile_home("claude", "acct1")
+    home = vault.profile_home_path("claude", "acct1")
+    service = legacy_claude_keychain_service(home)
+    refreshed = _oauth_secret(2_000, "refreshed")
+    sec.items[service] = refreshed  # the CLI refreshed the token in place
+    sec.stdin_commands.clear()
+    vault.prepare_profile_home("claude", "acct1")
+    assert sec.items[service] == refreshed
+    assert not any("add-generic-password" in c for c in sec.stdin_commands)
+    # A genuinely newer slot (fresh re-login harvest) still wins.
+    relogin = _oauth_secret(3_000, "relogin")
+    vault.write_slot("claude", "acct1", LiveCredentials(secret=relogin))
+    vault.prepare_profile_home("claude", "acct1")
+    assert sec.items[service] == relogin
+
+
+def test_prepare_profile_home_claude_file_backend_keeps_runtime_refreshed_token(
+    tmp_path: Path,
+) -> None:
+    vault = _file_vault(tmp_path)
+    vault.write_slot("claude", "acct1", LiveCredentials(secret=_oauth_secret(1_000, "old")))
+    vault.prepare_profile_home("claude", "acct1")
+    home = vault.profile_home_path("claude", "acct1")
+    refreshed = _oauth_secret(2_000, "refreshed")
+    (home / ".credentials.json").write_text(refreshed, encoding="utf-8")
+    vault.prepare_profile_home("claude", "acct1")
+    assert (home / ".credentials.json").read_text() == refreshed
+    relogin = _oauth_secret(3_000, "relogin")
+    vault.write_slot("claude", "acct1", LiveCredentials(secret=relogin))
+    vault.prepare_profile_home("claude", "acct1")
+    assert (home / ".credentials.json").read_text() == relogin
 
 
 # ── Phase A: shared session store (only credentials isolated) ────────────────
