@@ -284,6 +284,32 @@ describe('buildResumeCommand', () => {
     )
   })
 
+  it('restores aider from the pane-private chat-history file when given one', () => {
+    expect(
+      buildResumeCommand('aider', '', '--yes-always', '/repo/.aider.chat.history.4d4a11fe.md')
+    ).toBe(
+      "aider --chat-history-file '/repo/.aider.chat.history.4d4a11fe.md' --restore-chat-history --yes-always"
+    )
+    // YOLO off → no trailing permission flag
+    expect(
+      buildResumeCommand('aider', '', '', '/repo/.aider.chat.history.4d4a11fe.md')
+    ).toBe(
+      "aider --chat-history-file '/repo/.aider.chat.history.4d4a11fe.md' --restore-chat-history"
+    )
+  })
+
+  it('quotes a spaced workspace path in the aider resume command', () => {
+    expect(
+      buildResumeCommand(
+        'aider', '', '--yes-always',
+        '/Users/me/My Projects/agent team/.aider.chat.history.4d4a11fe.md'
+      )
+    ).toBe(
+      "aider --chat-history-file '/Users/me/My Projects/agent team/.aider.chat.history.4d4a11fe.md'"
+      + ' --restore-chat-history --yes-always'
+    )
+  })
+
   it('appends the permission-bypass flag when given', () => {
     expect(buildResumeCommand('claude', 'abc', '--dangerously-skip-permissions')).toBe(
       'claude --resume abc --dangerously-skip-permissions'

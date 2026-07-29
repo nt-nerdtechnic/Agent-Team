@@ -7,11 +7,25 @@
  * (structurally identical so either import site typechecks).
  */
 
+import { aiderChatHistoryFlag, aiderHistoryPath } from './aider-history'
+
+/** Inputs a spec's `paneArg` is computed from. */
+export interface PaneArgContext {
+  /** Pane UUID — the identity the per-pane file is named after. */
+  paneId: string
+  /** Directory the pane's per-pane files live in: its git root, else its cwd. */
+  historyRoot: string
+}
+
 export interface AgentSpec {
   agentKey: string
   label: string
   defaultCommand: string
   skipPermissionFlag?: string
+  /** Argument computed per pane, inserted between the base command and
+   *  skipPermissionFlag. Only aider defines one (its private chat-history
+   *  file); no other CLI shares state across panes by default. */
+  paneArg?: (ctx: PaneArgContext) => string
   hint?: string
 }
 
@@ -109,6 +123,9 @@ export const AGENT_SPECS: AgentSpec[] = [
     defaultCommand: 'aider',
     // --yes-always auto-confirms every prompt (edits, shell commands, adds)
     skipPermissionFlag: '--yes-always',
+    // Give every pane its own chat history: the default shared
+    // `<git-root>/.aider.chat.history.md` merges all panes' token accounting.
+    paneArg: (ctx) => aiderChatHistoryFlag(aiderHistoryPath(ctx.historyRoot, ctx.paneId)),
     hint: 'generalist'
   },
   {

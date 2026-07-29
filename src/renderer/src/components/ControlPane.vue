@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch, defineAsyncComponent } from 'vue'
+import type { PaneArgContext } from '../lib/agentSpecs'
 import { extractDropPaths } from '../lib/drop'
 import { settingsGet, settingsSet } from '../lib/settings'
 import ViewPanel, { type LayoutMode } from './ViewPanel.vue'
@@ -28,6 +29,7 @@ export interface AgentSpec {
   label: string
   defaultCommand: string
   skipPermissionFlag?: string
+  paneArg?: (ctx: PaneArgContext) => string
   hint?: string
 }
 

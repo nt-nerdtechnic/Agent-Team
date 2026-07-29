@@ -16,11 +16,14 @@
 //   • copilot --resume=<id>   ← id is a UUID; NOTE the `=` form (creates a NEW
 //                                session when the id doesn't exist)
 //   • cursor-agent --resume=<id> ← id is a UUID; `=` form
-//   • aider --restore-chat-history ← NO session ids at all; lossy restore from
-//                                the project's .aider.chat.history.md
+//   • aider --chat-history-file <path> --restore-chat-history
+//                             ← NO session ids at all; lossy restore from the
+//                               pane's own chat-history file
 //
 // `skipFlag` is the vendor's permission-bypass flag (or "" when YOLO is off),
 // appended verbatim — same flags resolveCommand() uses for a fresh launch.
+
+import { aiderChatHistoryFlag } from './aider-history'
 
 const CODEX_UUID_AT_END = /([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})(?:\.jsonl)?$/i
 
@@ -172,19 +175,26 @@ export async function cancelStalePendingCreate(
   }
 }
 
+/** `chatHistoryFile` (aider only): absolute path to the pane's own chat-history
+ *  file. `--restore-chat-history` restores from whatever `--chat-history-file`
+ *  points at, so passing it makes aider resume per-pane. Empty falls back to
+ *  aider's default shared `<git-root>/.aider.chat.history.md`. */
 export function buildResumeCommand(
   agentKey: string,
   sessionId: string,
-  skipFlag = ''
+  skipFlag = '',
+  chatHistoryFile = ''
 ): string {
   // Aider has no session ids: resume is always the lossy
-  // `--restore-chat-history` (reads the project's .aider.chat.history.md),
-  // so the passed id — always empty for aider — is ignored.
+  // `--restore-chat-history` (reads the pane's chat-history file), so the
+  // passed id — always empty for aider — is ignored.
   if (agentKey === 'aider') {
+    const parts = ['aider']
+    if (chatHistoryFile) parts.push(aiderChatHistoryFlag(chatHistoryFile))
+    parts.push('--restore-chat-history')
     const aiderFlag = skipFlag.trim()
-    return aiderFlag
-      ? `aider --restore-chat-history ${aiderFlag}`
-      : 'aider --restore-chat-history'
+    if (aiderFlag) parts.push(aiderFlag)
+    return parts.join(' ')
   }
   const id = normalizeResumeSessionId(agentKey, sessionId)
   if (!id) return '' // no id → caller falls back to a fresh spawn
