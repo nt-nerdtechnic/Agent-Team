@@ -320,6 +320,22 @@ def test_workspace_without_agent_team_dir_is_skipped(
     assert ws_group["rootPath"] == ""
 
 
+def test_a_workspace_reached_by_two_paths_is_scanned_once(
+    roots: dict[str, Path], tmp_path: Path
+) -> None:
+    """A symlink alias must not double-count the workspace's bytes."""
+    ws = tmp_path / "ws"
+    _write(ws / ".agent-team" / "manual" / "20200101" / "claude-aaaa1111.log", 900)
+    alias = tmp_path / "alias"
+    alias.symlink_to(ws)
+
+    once = storage_service.collect_usage([str(ws)], 30)
+    twice = storage_service.collect_usage([str(ws), str(alias)], 30)
+
+    assert _item(twice, "manualLogsOrphan")["bytes"] == _item(once, "manualLogsOrphan")["bytes"]
+    assert _item(twice, "manualLogsOrphan")["fileCount"] == 1
+
+
 # ── codex pane homes ────────────────────────────────────────────────────────
 
 

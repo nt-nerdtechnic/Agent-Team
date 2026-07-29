@@ -707,9 +707,17 @@ def _workspaces_group(
     scanned: list[tuple[str, Path]] = []
     for raw in workspace_paths:
         data_dir = Path(raw) / PROJECT_DIR_NAME
-        if data_dir.is_dir() and data_dir not in seen:
-            seen.add(data_dir)
-            scanned.append((raw, data_dir))
+        if not data_dir.is_dir():
+            continue
+        # Dedupe on the resolved dir, not the literal one: the same workspace
+        # reaches the renderer under several spellings (a symlinked worktree,
+        # /tmp vs /private/tmp), and scanning it twice double-counts every
+        # byte while cleanup only ever frees them once.
+        key = data_dir.resolve()
+        if key in seen:
+            continue
+        seen.add(key)
+        scanned.append((raw, data_dir))
     data_dirs = [d for _, d in scanned]
 
     orphan: list[Path] = []
