@@ -45,7 +45,12 @@ from .profiles_store import PROFILE_HOME_DIRNAME, default_profiles_root
 from .projects import PROJECT_DIR_NAME, PROJECT_FILE, RUNS_SUBDIR
 from .recent_workspaces import RECENT_FILE
 from .skills_store import SKILLS_DIR, SKILLS_RUNTIME_DIR
-from .spawn_history import SPAWN_HISTORY_FILE, entry_manual_log_names, read_stored_entries
+from .spawn_history import (
+    SPAWN_HISTORY_FILE,
+    entry_manual_log_names,
+    read_stored_entries,
+    read_stored_entries_checked,
+)
 from .store_migrations import BACKUP_DIR
 from .terminals import live_output_log_paths
 from .tokens_store import (
@@ -58,6 +63,11 @@ from .usage_service import USAGE_CACHE_FILE
 
 DEFAULT_STALE_DAYS = 30
 MAX_REPORTED_PATHS = 5
+
+# Mirrors the path built in plugins/builtin/navide_skills/skills_wiring.py; the
+# plugin has no constant to import and importing a plugin from here would be
+# the wrong direction.
+CLAUDE_SKILLS_RUNTIME_DIR = "runtime/claude-managed-skills"
 
 MANUAL_LOGS_DIRNAME = "manual"
 PIPELINE_LOG_FILE = "pipeline.log"
@@ -460,11 +470,18 @@ def _appdata_and_electron_groups(
     runtime = _measured(
         _Item(
             "runtimeArtifacts",
-            risk="safe",
+            # Regenerated on the next app *start*, but this runs mid-session:
+            # an open Codex pane symlinks its skills view into the projection,
+            # so clearing it now leaves that pane pointing at nothing.
+            risk="caution",
             cleanable=True,
             root=root,
-            paths=[root / Path(SKILLS_RUNTIME_DIR).parts[0]],
-            note="Regenerated on the next app start.",
+            # Deliberately the skill projections only, not the whole `runtime`
+            # dir: git_askpass_helper.py lives beside them and its path is
+            # resolved once at import, so removing it breaks every
+            # authenticated git operation until the backend restarts.
+            paths=[root / SKILLS_RUNTIME_DIR, root / CLAUDE_SKILLS_RUNTIME_DIR],
+            note="Skill projections; rebuilt on the next app start.",
         ),
         errors,
     )
@@ -934,18 +951,31 @@ def _cli_homes_group(workspace_paths: list[str], errors: list[dict[str, str]]) -
 # ── workspace group ─────────────────────────────────────────────────────────
 
 
-def _referenced_manual_logs(workspace_path: str) -> set[str]:
-    """Manual-log *filenames* still referenced by a spawn-history entry.
+def _referenced_manual_logs(
+    workspace_path: str, errors: list[dict[str, str]]
+) -> tuple[set[str], bool]:
+    """``(filenames, readable)`` for the logs a spawn-history entry still names.
 
     Matching is by filename, not full path: the renderer rewrites an entry's
     ``spawnedAt`` on restore, so the date folder derived from it is unreliable
     while ``<agentKey>-<paneId[:8]>.log`` is stable (see
     ``spawn_history.entry_manual_log_names``).
+
+    Fails closed on an unreadable store rather than reporting an empty set:
+    "no entry names this file" is what makes a transcript an orphan, and
+    orphans are cleanable from the one-click safe sweep.
     """
+    entries, readable = read_stored_entries_checked(workspace_path)
+    if not readable:
+        errors.append({
+            "path": str(Path(workspace_path) / PROJECT_DIR_NAME / SPAWN_HISTORY_FILE),
+            "message": "spawn history unreadable; manual logs kept",
+        })
+        return set(), False
     names: set[str] = set()
-    for entry in read_stored_entries(workspace_path):
+    for entry in entries:
         names |= entry_manual_log_names(entry)
-    return names
+    return names, True
 
 
 def _live_log_targets() -> tuple[set[str], set[Path]]:
@@ -996,12 +1026,38 @@ def _is_live_manual_log(
         return False
 
 
+def _removable_run_dirs(
+    data_dir: Path, errors: list[dict[str, str]]
+) -> list[Path]:
+    """Pipeline run dirs that are not the one currently being written to.
+
+    ``runs/`` was listed whole, which took the in-progress run with it — its
+    timeline and log are appended per event, so the files come back but
+    everything the run had recorded so far is gone.
+
+    Fails closed: if project.json cannot be read there is no way to tell which
+    run is live, so no run is offered.
+    """
+    project, readable = _read_json_object(data_dir / PROJECT_FILE, errors)
+    if not readable:
+        return []
+    active = str((project or {}).get("log_file_name") or "")
+    # e.g. "runs/<run>/pipeline.log" — the run is its parent.
+    active_dir = (data_dir / active).parent if active else None
+    removable: list[Path] = []
+    for run_dir in _iter_dirs(data_dir / RUNS_SUBDIR, errors):
+        if active_dir is not None and run_dir.name == active_dir.name:
+            continue
+        removable.append(run_dir)
+    return removable
+
+
 def _manual_log_buckets(
     workspace_path: str, data_dir: Path, stale_days: int, errors: list[dict[str, str]]
 ) -> tuple[list[Path], list[Path], list[Path]]:
     """Split ``manual/**`` files into (orphan, stale, recent)."""
     manual = data_dir / MANUAL_LOGS_DIRNAME
-    referenced = _referenced_manual_logs(workspace_path)
+    referenced, referenced_known = _referenced_manual_logs(workspace_path, errors)
     live_names, live_paths = _live_log_targets()
     now = time.time()
     cutoff = datetime.now(timezone.utc) - timedelta(days=stale_days)
@@ -1031,6 +1087,10 @@ def _manual_log_buckets(
             # no history entry yet — both would otherwise land in a cleanable
             # bucket and be unlinked out from under the open fd.
             if _is_live_manual_log(path, mtime, now, live_names, live_paths):
+                recent.append(path)
+            elif not referenced_known:
+                # Nothing established which transcripts are still owned, so
+                # none of them may be called an orphan.
                 recent.append(path)
             elif path.name not in referenced:
                 orphan.append(path)
@@ -1075,7 +1135,7 @@ def _workspaces_group(
         recent.extend(r)
         pipeline_history.append(data_dir / HISTORY_FILE)
         pipeline_logs.append(data_dir / PIPELINE_LOG_FILE)
-        pipeline_logs.append(data_dir / RUNS_SUBDIR)
+        pipeline_logs.extend(_removable_run_dirs(data_dir, errors))
         plan_history.append(data_dir / PLANS_DIRNAME / PLAN_HISTORY_DIR_NAME)
 
     # Each workspace guards against its own .agent-team dir, so multi-workspace

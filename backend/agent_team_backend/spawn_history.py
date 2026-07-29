@@ -120,12 +120,18 @@ def manual_logs_dir(workspace_path: str) -> Path:
     )
 
 
-def read_stored_entries(workspace_path: str) -> list[dict[str, Any]]:
-    """Side-effect-free read of the full store; ``[]`` when missing or bad.
+def read_stored_entries_checked(
+    workspace_path: str,
+) -> tuple[list[dict[str, Any]], bool]:
+    """``(entries, readable)`` from a side-effect-free read of the full store.
 
-    Unlike ``SpawnHistoryStore._load`` this never quarantines a corrupt file
-    and never seeds from the project.json mirror — it exists for read-only
-    consumers such as the storage-usage scan.
+    An absent store is readable and simply empty — "this workspace has no
+    records" is an answer. A permission error, a half-written file or an
+    ``entries`` that is not an array yields ``readable=False``.
+
+    Callers that read this to decide what may be deleted must not treat an
+    unreadable store as an empty one: no entry naming a file would then look
+    like permission to remove it.
     """
     hf = (
         Path(canonical_workspace_path(workspace_path))
@@ -134,10 +140,30 @@ def read_stored_entries(workspace_path: str) -> list[dict[str, Any]]:
     )
     try:
         data = json.loads(hf.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return [], True
     except (OSError, ValueError):
-        return []
-    entries = data.get("entries") if isinstance(data, dict) else None
-    return [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
+        return [], False
+    if not isinstance(data, dict):
+        return [], False
+    entries = data.get("entries")
+    if entries is None:
+        return [], True
+    if not isinstance(entries, list):
+        return [], False
+    return [e for e in entries if isinstance(e, dict)], True
+
+
+def read_stored_entries(workspace_path: str) -> list[dict[str, Any]]:
+    """Side-effect-free read of the full store; ``[]`` when missing or bad.
+
+    Unlike ``SpawnHistoryStore._load`` this never quarantines a corrupt file
+    and never seeds from the project.json mirror — it exists for read-only
+    consumers such as the storage-usage scan. Use
+    ``read_stored_entries_checked`` when an unreadable store must not pass for
+    an empty one.
+    """
+    return read_stored_entries_checked(workspace_path)[0]
 
 
 def _collect_manual_logs(

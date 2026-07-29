@@ -79,7 +79,7 @@ def test_scan_does_not_follow_symlinks(roots: dict[str, Path], tmp_path: Path) -
     """~/.codex-panes and runtime/skills are symlink farms pointing back at
     shared config; following them double-counts and can loop forever."""
     outside = _write(tmp_path / "outside" / "huge.bin", 5000)
-    runtime = roots["app_data"] / "runtime"
+    runtime = roots["app_data"] / "runtime" / "skills"
     _write(runtime / "real.txt", 10)
     (runtime / "linked-file").symlink_to(outside)
     (runtime / "linked-dir").symlink_to(outside.parent, target_is_directory=True)
@@ -770,3 +770,97 @@ async def test_storage_cleanup_handler_returns_per_item_results(
     assert by_id["usageCache"]["ok"] is True
     assert by_id["browserState"]["ok"] is False
     assert not (roots["app_data"] / "usage-cache.json").exists()
+
+
+def test_an_unreadable_spawn_history_protects_every_manual_log(
+    roots: dict[str, Path], tmp_path: Path
+) -> None:
+    """Nothing established which transcripts are still owned, so none of them
+    may be called an orphan. An orphan is cleanable from the one-click safe
+    sweep, so conflating "could not read" with "no entries" would offer a
+    workspace's whole agent history for deletion without a warning."""
+    ws = _workspace(tmp_path, [])
+    (ws / ".agent-team" / "spawn-history.json").write_text("{trunc", encoding="utf-8")
+    manual = ws / ".agent-team" / "manual"
+    transcript = _cold_log(manual / "20200101" / "claude-aaaa1111.log", 90)
+
+    report = storage_service.collect_usage([str(ws)], 30)
+
+    assert _item(report, "manualLogsOrphan")["bytes"] == 0
+    assert _item(report, "manualLogsStale")["bytes"] == 0
+    assert _item(report, "manualLogsRecent")["bytes"] == 90
+
+    storage_service.cleanup(["manualLogsOrphan", "manualLogsStale"], [str(ws)], 30)
+    assert transcript.exists()
+
+
+def test_a_store_with_no_entries_still_orphans(
+    roots: dict[str, Path], tmp_path: Path
+) -> None:
+    """The guard is for unreadable stores only. A store that genuinely holds no
+    entries is an answer, and its logs really are unowned."""
+    ws = _workspace(tmp_path, [])
+    orphan = _cold_log(
+        ws / ".agent-team" / "manual" / "20200101" / "claude-aaaa1111.log", 90
+    )
+
+    report = storage_service.collect_usage([str(ws)], 30)
+
+    assert _item(report, "manualLogsOrphan")["bytes"] == 90
+    assert orphan.exists()
+
+
+def test_the_running_pipeline_run_is_never_offered(
+    roots: dict[str, Path], tmp_path: Path
+) -> None:
+    """runs/ was listed whole, taking the in-progress run with it. Its log and
+    timeline are appended per event, so the files come back — but everything
+    the run had recorded so far is gone."""
+    ws = _workspace(tmp_path, [])
+    data = ws / ".agent-team"
+    (data / "project.json").write_text(
+        json.dumps({"id": "p", "log_file_name": "runs/live-run/pipeline.log"}),
+        encoding="utf-8",
+    )
+    live = _write(data / "runs" / "live-run" / "pipeline.log", 70)
+    finished = _write(data / "runs" / "old-run" / "pipeline.log", 30)
+
+    report = storage_service.collect_usage([str(ws)], 30)
+    assert _item(report, "pipelineLogs")["bytes"] == 30
+
+    storage_service.cleanup(["pipelineLogs"], [str(ws)], 30)
+    assert live.exists()
+    assert not finished.exists()
+
+
+def test_an_unreadable_project_offers_no_pipeline_run(
+    roots: dict[str, Path], tmp_path: Path
+) -> None:
+    """With project.json unreadable there is no way to tell which run is live."""
+    ws = _workspace(tmp_path, [])
+    data = ws / ".agent-team"
+    (data / "project.json").write_text("{trunc", encoding="utf-8")
+    run = _write(data / "runs" / "some-run" / "pipeline.log", 30)
+
+    storage_service.cleanup(["pipelineLogs"], [str(ws)], 30)
+    assert run.exists()
+
+
+def test_runtime_cleanup_spares_the_git_askpass_helper(
+    roots: dict[str, Path], tmp_path: Path
+) -> None:
+    """Its path is resolved once at import, so removing it breaks every
+    authenticated git operation until the backend restarts."""
+    runtime = roots["app_data"] / "runtime"
+    helper = _write(runtime / "git_askpass_helper.py", 20)
+    projection = _write(runtime / "skills" / "demo" / "SKILL.md", 40)
+
+    item = _item(storage_service.collect_usage([], 30), "runtimeArtifacts")
+    assert item["bytes"] == 40
+    # Not part of the one-click safe sweep: an open Codex pane symlinks into
+    # the projection this clears.
+    assert item["risk"] == "caution"
+
+    storage_service.cleanup(["runtimeArtifacts"], [], 30)
+    assert helper.exists()
+    assert not projection.exists()
