@@ -99,6 +99,6 @@ Editor 使用 Monaco，並提供 File Editing、Diagnostics、Plan Rendering、D
 
 ## Settings 與可攜性
 
-Settings 涵蓋 Role、Pipeline、MCP Server、Analyzer Behavior、AI Provider、Appearance 與 Keyboard Shortcut。CLI Agents 另外管理已安裝的 Coding CLI：版本、安裝方式、重複安裝、該 CLI 上次自我更新的結果，以及在終端機執行該 CLI 官方更新與診斷指令的按鈕。Navide 只呈現並執行官方指令，不會自行更新 CLI。Exported Setting 會遮蔽 API Key 與 Token。啟用第三方 Server 前，請先檢查 MCP Command 與 Environment Variable。
+Settings 涵蓋 Role、Pipeline、MCP Server、Analyzer Behavior、AI Provider、Appearance 與 Keyboard Shortcut。CLI Agents 另外管理已安裝的 Coding CLI：版本、安裝方式、重複安裝、該 CLI 上次自我更新的結果，以及在終端機執行該 CLI 官方更新與診斷指令的按鈕。開啟工作區時可設定恢復單一 CLI、第一個 Grid 頁面或目前分頁；即使上次不是 Grid layout，Grid 頁面仍會依 Grid preset 計算。Navide 只呈現並執行官方指令，不會自行更新 CLI。Exported Setting 會遮蔽 API Key 與 Token。啟用第三方 Server 前，請先檢查 MCP Command 與 Environment Variable。
 
 `.agent-team/` 目前不是可攜機制。未來在不同裝置間移轉時，應使用具有 Redaction 與 Retention Control 的明確本機 Export／Import，而不是透過 Git 同步。

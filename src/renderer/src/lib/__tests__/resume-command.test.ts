@@ -41,41 +41,33 @@ describe('normalizeResumeSessionId', () => {
 })
 
 describe('shouldPreserveMissingSessionOnRestore', () => {
-  it('protects a saved Codex session that fails preflight', () => {
-    expect(shouldPreserveMissingSessionOnRestore('codex', 'missing-id', false)).toBe(true)
+  it('protects a saved Codex session when its transcript is unavailable', () => {
+    expect(shouldPreserveMissingSessionOnRestore('codex', 'saved-id', false)).toBe(true)
   })
 
-  it('does not block valid Codex resumes or ordinary fresh launches', () => {
-    expect(shouldPreserveMissingSessionOnRestore('codex', 'valid-id', true)).toBe(false)
-    expect(shouldPreserveMissingSessionOnRestore('codex', '', false)).toBe(false)
+  it('keeps a confirmed Codex session and other agents restorable', () => {
+    expect(shouldPreserveMissingSessionOnRestore('codex', 'saved-id', true)).toBe(false)
+    expect(shouldPreserveMissingSessionOnRestore('claude', 'saved-id', false)).toBe(false)
   })
 
-  it('does not change the existing restore policy for other agents', () => {
-    expect(shouldPreserveMissingSessionOnRestore('claude', 'missing-id', false)).toBe(false)
+  it('does not block a genuinely fresh Codex pane', () => {
+    expect(shouldPreserveMissingSessionOnRestore('codex', '   ', false)).toBe(false)
   })
 })
 
 describe('shouldWarnMissingResume', () => {
-  it('warns when a resuming claude pane loses its transcript', () => {
-    // was continuing a conversation (last cmd resumed), now the file is gone
-    expect(shouldWarnMissingResume('claude', 'sess-1', false, true)).toBe(true)
+  it('warns only for a confirmed-missing prior resume', () => {
+    expect(shouldWarnMissingResume('claude', 'saved-id', false, true)).toBe(true)
   })
 
-  it('does not warn a genuinely fresh pane (last command was not a resume)', () => {
-    expect(shouldWarnMissingResume('claude', 'sess-1', false, false)).toBe(false)
+  it('keeps unknown and healthy transcripts on the resume route', () => {
+    expect(shouldWarnMissingResume('claude', 'saved-id', null, true)).toBe(false)
+    expect(shouldWarnMissingResume('claude', 'saved-id', true, true)).toBe(false)
   })
 
-  it('does not warn when the session is resumable', () => {
-    expect(shouldWarnMissingResume('claude', 'sess-1', true, true)).toBe(false)
-  })
-
-  it('does not warn without a saved session id', () => {
-    expect(shouldWarnMissingResume('claude', '', false, true)).toBe(false)
-    expect(shouldWarnMissingResume('claude', '   ', false, true)).toBe(false)
-  })
-
-  it('excludes codex (preserved untouched, never silently replaced)', () => {
-    expect(shouldWarnMissingResume('codex', 'sess-1', false, true)).toBe(false)
+  it('excludes fresh launches and Codex preservation', () => {
+    expect(shouldWarnMissingResume('claude', 'saved-id', false, false)).toBe(false)
+    expect(shouldWarnMissingResume('codex', 'saved-id', false, true)).toBe(false)
   })
 })
 
