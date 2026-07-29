@@ -28,6 +28,15 @@ class _Reader(LogReader):
         return []
 
 
+class _FilesReader(_Reader):
+    def __init__(self, vendor: str, root: Path, files: list[Path]) -> None:
+        super().__init__(vendor, root)
+        self._files = files
+
+    def session_files(self) -> list[Path]:
+        return list(self._files)
+
+
 def _noop(_usage):  # pragma: no cover - unused token sink
     return None
 
@@ -88,3 +97,45 @@ async def test_drain_counts_down_even_when_processing_early_returns(tmp_path: Pa
     drain.cancel()
     assert events[-1] == ("/ws", 0)  # done fired
     assert "/ws" not in watcher._backfill_remaining
+
+
+@pytest.mark.asyncio
+async def test_force_rescan_queues_a_flush_sentinel_behind_its_batch(
+    tmp_path: Path,
+) -> None:
+    """Opening a workspace fires force_rescan long after startup, so it can't
+    rely on the startup sentinel. The count only decrements in
+    _flush_pending_tokens, so without a sentinel of its own the indicator sticks
+    for a whole _token_interval_s (5 min)."""
+    watcher = LogWatcher(sink=_noop, progress_sink=lambda ws, n: None)
+    watcher._loop = asyncio.get_running_loop()
+    a, b = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
+    watcher._readers = [_FilesReader("claude", tmp_path, [a, b])]
+
+    watcher.force_rescan("/ws")
+    await asyncio.sleep(0)  # let the call_soon_threadsafe callbacks land
+
+    queued = []
+    while not watcher._queue.empty():
+        queued.append(watcher._queue.get_nowait())
+    assert queued == [(a, "/ws"), (b, "/ws"), (None, "")]
+
+
+@pytest.mark.asyncio
+async def test_force_rescan_without_workspace_queues_no_sentinel(
+    tmp_path: Path,
+) -> None:
+    """Legacy full rescans don't drive the indicator, so they get no sentinel —
+    their token paths ride the normal interval instead of forcing a flush."""
+    watcher = LogWatcher(sink=_noop, progress_sink=lambda ws, n: None)
+    watcher._loop = asyncio.get_running_loop()
+    a = tmp_path / "a.jsonl"
+    watcher._readers = [_FilesReader("claude", tmp_path, [a])]
+
+    watcher.force_rescan()
+    await asyncio.sleep(0)
+
+    queued = []
+    while not watcher._queue.empty():
+        queued.append(watcher._queue.get_nowait())
+    assert queued == [(a, "")]

@@ -134,7 +134,7 @@ class LogWatcher:
         self._drain_task: asyncio.Task[None] | None = None
         self._rescan_task: asyncio.Task[None] | None = None
         self._token_task: asyncio.Task[None] | None = None
-        self._startup_token_task: asyncio.Task[None] | None = None
+        self._token_flush_tasks: set[asyncio.Task[None]] = set()
         self._watched_dirs: set[Path] = set()
         self._handler: _Handler | None = None
         self._started = False
@@ -233,7 +233,7 @@ class LogWatcher:
             self._drain_task,
             self._rescan_task,
             self._token_task,
-            self._startup_token_task,
+            *self._token_flush_tasks,
         ):
             if t:
                 t.cancel()
@@ -268,9 +268,11 @@ class LogWatcher:
             except asyncio.CancelledError:
                 return
             if path is None:
-                self._startup_token_task = asyncio.create_task(
-                    self._flush_pending_tokens(), name="logwatcher.tokens.startup"
+                task = asyncio.create_task(
+                    self._flush_pending_tokens(), name="logwatcher.tokens.flush"
                 )
+                self._token_flush_tasks.add(task)
+                task.add_done_callback(self._token_flush_tasks.discard)
                 continue
             try:
                 await self._process_realtime_path(path)
@@ -373,6 +375,14 @@ class LogWatcher:
                 self._loop.call_soon_threadsafe(
                     self._queue.put_nowait, (p, workspace_path or "")
                 )
+            except RuntimeError:
+                return
+        # Flush sentinel behind the batch. The backfill count only decrements in
+        # _flush_pending_tokens, and the periodic token loop is _token_interval_s
+        # (5 min) away — without this the "tidying" indicator sticks until then.
+        if workspace_path and files:
+            try:
+                self._loop.call_soon_threadsafe(self._queue.put_nowait, (None, ""))
             except RuntimeError:
                 return
         log.info(
