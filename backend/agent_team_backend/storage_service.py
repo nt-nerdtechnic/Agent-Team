@@ -44,6 +44,7 @@ from .spawn_history import entry_manual_log_names, read_stored_entries
 from .store_migrations import BACKUP_DIR
 from .terminals import live_output_log_paths
 from .tokens_store import (
+    INGESTION_DELTA_FILE,
     INGESTION_STATE_FILE,
     PERSISTENCE_JOURNAL_FILE,
     WORKSPACES_SUBDIR,
@@ -404,7 +405,14 @@ def _appdata_and_electron_groups(
             risk="caution",
             cleanable=True,
             root=root,
-            paths=[root / INGESTION_STATE_FILE, root / PERSISTENCE_JOURNAL_FILE],
+            paths=[
+                root / INGESTION_STATE_FILE,
+                # The delta log carries checkpoints the snapshot has not
+                # absorbed yet. Leaving it behind would both strand megabytes
+                # and let the cleared accounting come back on the next load.
+                root / INGESTION_DELTA_FILE,
+                root / PERSISTENCE_JOURNAL_FILE,
+            ],
             note=(
                 "Token ingestion restarts from scratch; already-counted CLI "
                 "usage may be ingested again and double-count."
