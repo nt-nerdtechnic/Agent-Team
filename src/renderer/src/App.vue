@@ -117,6 +117,7 @@ import {
   type RestoreDecision,
 } from './lib/resumeBehavior'
 import { initSettingsBackend, settingsGet, settingsSet } from './lib/settings'
+import { pickWhatsNew, type WhatsNewEntry } from './lib/whatsNew'
 import { initUsage } from './composables/useUsage'
 import {
   LOOP_PROMPT_SETTING_KEY,
@@ -140,6 +141,7 @@ import { useKeybindings, registerCommand, setContext } from './keybindings/useKe
 const CompletionModal = defineAsyncComponent(() => import('./components/CompletionModal.vue'))
 const SettingsModal = defineAsyncComponent(() => import('./components/SettingsModal.vue'))
 const OnboardingWizard = defineAsyncComponent(() => import('./components/OnboardingWizard.vue'))
+const WhatsNewModal = defineAsyncComponent(() => import('./components/WhatsNewModal.vue'))
 const CliHealthGuide = defineAsyncComponent(() => import('./components/CliHealthGuide.vue'))
 const AgentMessagesPanel = defineAsyncComponent(() => import('./components/AgentMessagesPanel.vue'))
 
@@ -226,6 +228,9 @@ onMounted(() => {
 // environment setup is complete; if not, OnboardingWizard hard-blocks the shell.
 const onboardingComplete = ref<boolean | null>(null)
 const cliHealthGuide = ref<CliHealthStatus | null>(null)
+// "What's New" announcement to show once after updating to a version that has
+// an entry (see lib/whatsNew.ts). Null = nothing to show.
+const whatsNewEntry = ref<WhatsNewEntry | null>(null)
 async function checkOnboarding(): Promise<void> {
   try {
     const resp = await backend.send<OnboardStatus>('onboarding.status', {})
@@ -260,6 +265,39 @@ async function checkOnboarding(): Promise<void> {
     onboardingComplete.value = true
   }
 }
+
+// Show the "What's New" announcement once, the first time onboarding resolves.
+// Gate on onboarding so it never overlaps the first-run wizard, and so a fresh
+// install (wizard shown) is only baselined — never told about changes, like the
+// rename, that it never lived through. Existing users (wizard already done) see
+// the current version's announcement once.
+let whatsNewChecked = false
+function evaluateWhatsNew(complete: boolean): void {
+  const current = window.agentTeam?.version ?? ''
+  if (!current) return
+  const seen = settingsGet('agentTeam.whatsNew.lastSeenVersion', '')
+  if (!complete) {
+    if (seen !== current) settingsSet('agentTeam.whatsNew.lastSeenVersion', current)
+    return
+  }
+  const entry = pickWhatsNew(current, seen)
+  if (entry) whatsNewEntry.value = entry
+  else if (seen !== current) settingsSet('agentTeam.whatsNew.lastSeenVersion', current)
+}
+function dismissWhatsNew(): void {
+  const current = window.agentTeam?.version ?? ''
+  if (current) settingsSet('agentTeam.whatsNew.lastSeenVersion', current)
+  whatsNewEntry.value = null
+}
+watch(
+  onboardingComplete,
+  (value) => {
+    if (whatsNewChecked || value === null) return
+    whatsNewChecked = true
+    evaluateWhatsNew(value)
+  },
+  { immediate: true },
+)
 // First-boot loading overlay: shown until the backend first settles, then
 // dismissed for good (later reconnects use the status-bar indicator, not this).
 const booting = ref(true)
@@ -9423,6 +9461,7 @@ function paneIsCommander(p: ActivePane): boolean {
     <div class="resize-handle resize-handle-left" @mousedown="onResizeStart($event, 'left')" />
     <div v-if="tokenPanelExpanded" class="resize-handle resize-handle-right" @mousedown="onResizeStart($event, 'right')" />
     <NotificationHost />
+    <WhatsNewModal v-if="whatsNewEntry" :entry="whatsNewEntry" @close="dismissWhatsNew" />
     <AgentMessagesPanel
       v-if="showMessagesPanel"
       @close="showMessagesPanel = false"
