@@ -4838,3 +4838,49 @@ async def usage_configure(session: "Session", msg_id: str, msg_type: str, payloa
         interval_sec=payload.get("intervalSec"),
     )
     await session.send_json(make_response(msg_id, msg_type, service.payload()))
+
+
+@handler("usage.secrets.write")
+async def usage_secrets_write(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Dev/maintainer-only: persist Antigravity's public installed-app OAuth
+    constants to ``~/navide-signing/usage_secrets.py`` so the next release build
+    bundles them (see usage_service.py / usage_secrets.example.py). The file
+    lives outside the repo and is never committed.
+
+    The two values are emitted as ``repr()`` literals — never interpolated raw —
+    so a pasted value cannot inject code into the generated module."""
+    from pathlib import Path
+
+    client_id = str(payload.get("client_id", "")).strip()
+    client_secret = str(payload.get("client_secret", "")).strip()
+    if not client_id or not client_secret:
+        await session.send_json(
+            make_error(
+                msg_id, msg_type, "BAD_REQUEST",
+                "client_id and client_secret are both required",
+            )
+        )
+        return
+
+    target = Path.home() / "navide-signing" / "usage_secrets.py"
+    body = (
+        '"""Local, untracked Antigravity OAuth constants '
+        "(see usage_secrets.example.py). GITIGNORED — never commit.\"\"\"\n\n"
+        f"ANTIGRAVITY_CLIENT_ID = {client_id!r}\n"
+        f"ANTIGRAVITY_CLIENT_SECRET = {client_secret!r}\n"
+    )
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(target.suffix + ".tmp")
+        tmp.write_text(body, encoding="utf-8")
+        tmp.replace(target)
+    except OSError as err:
+        await session.send_json(
+            make_error(msg_id, msg_type, "WRITE_FAILED", f"write failed: {err}")
+        )
+        return
+    await session.send_json(
+        make_response(msg_id, msg_type, {"ok": True, "path": str(target)})
+    )

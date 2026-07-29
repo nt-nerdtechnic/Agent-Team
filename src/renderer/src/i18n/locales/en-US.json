@@ -1393,7 +1393,14 @@
     "settings-title": "CLI quota badge",
     "settings-enabled": "Show remaining quota in CLI pane headers",
     "settings-refresh": "Refresh interval",
-    "settings-hint": "Reads local CLI credentials to query each provider's usage API (claude / codex / kimi / grok). Read-only — credentials are never written."
+    "settings-hint": "Reads local CLI credentials to query each provider's usage API (claude / codex / kimi / grok). Read-only — credentials are never written.",
+    "settings-signing-title": "Antigravity credentials (maintainer)",
+    "settings-signing-hint": "Dev-only. Writes ~/navide-signing/usage_secrets.py so the next release build bundles Antigravity's public installed-app OAuth constants. Never stored in the repo.",
+    "settings-signing-id": "client_id",
+    "settings-signing-secret": "client_secret",
+    "settings-signing-save": "Save",
+    "settings-signing-saved": "Saved ✓",
+    "settings-signing-error": "Failed"
   },
   "onboard": {
     "step": {

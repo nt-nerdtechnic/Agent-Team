@@ -442,6 +442,28 @@ function saveAiChatSettings(): void {
   aiKeysDirty.value = false
 }
 
+// ── Antigravity credential provisioning (dev/maintainer only) ────────────────
+// Writes ~/navide-signing/usage_secrets.py so the next release build bundles
+// Antigravity's public installed-app OAuth constants. Gated to dev builds via
+// import.meta.env.DEV, so packaged end-user builds never show it.
+const isDev = import.meta.env.DEV
+const signingClientId = ref('')
+const signingClientSecret = ref('')
+const signingSaveStatus = ref<'idle' | 'saving' | 'saved' | 'error'>('idle')
+function saveSigningSecrets(): void {
+  if (!signingClientId.value.trim() || !signingClientSecret.value.trim()) {
+    signingSaveStatus.value = 'error'
+    return
+  }
+  signingSaveStatus.value = 'saving'
+  props.backend.send<{ ok: boolean }>('usage.secrets.write', {
+    client_id: signingClientId.value.trim(),
+    client_secret: signingClientSecret.value.trim(),
+  })
+    .then(r => { signingSaveStatus.value = r?.ok ? 'saved' : 'error' })
+    .catch(() => { signingSaveStatus.value = 'error' })
+}
+
 // ── Appearance (theme) ────────────────────────────────────────────────────────
 const {
   theme: currentTheme,
@@ -2672,6 +2694,39 @@ async function plDelete(id: string, name: string) {
                         {{ `${sec / 60} min` }}
                       </option>
                     </select>
+                  </div>
+                </template>
+              </SettingRow>
+
+              <SettingRow
+                v-if="isDev"
+                data-settings-section="general-antigravity-secrets"
+                :title="$t('usage.settings-signing-title')"
+                :description="$t('usage.settings-signing-hint')"
+              >
+                <template #control>
+                  <div class="row-g gap">
+                    <input
+                      v-model="signingClientId"
+                      type="text"
+                      :placeholder="$t('usage.settings-signing-id')"
+                      spellcheck="false"
+                    />
+                    <input
+                      v-model="signingClientSecret"
+                      type="password"
+                      :placeholder="$t('usage.settings-signing-secret')"
+                      spellcheck="false"
+                    />
+                    <button class="ap-reset" @click="saveSigningSecrets">
+                      {{ $t('usage.settings-signing-save') }}
+                    </button>
+                    <span v-if="signingSaveStatus === 'saved'" class="s-ctrl-label">
+                      {{ $t('usage.settings-signing-saved') }}
+                    </span>
+                    <span v-else-if="signingSaveStatus === 'error'" class="s-ctrl-label">
+                      {{ $t('usage.settings-signing-error') }}
+                    </span>
                   </div>
                 </template>
               </SettingRow>

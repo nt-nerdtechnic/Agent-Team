@@ -1393,7 +1393,14 @@
     "settings-title": "CLI 額度徽章",
     "settings-enabled": "在 CLI pane 標題列顯示剩餘額度",
     "settings-refresh": "刷新間隔",
-    "settings-hint": "讀取本機 CLI 憑證查詢官方用量 API（claude / codex / kimi / grok），僅讀取、不寫入憑證。"
+    "settings-hint": "讀取本機 CLI 憑證查詢官方用量 API（claude / codex / kimi / grok），僅讀取、不寫入憑證。",
+    "settings-signing-title": "Antigravity 憑證（maintainer）",
+    "settings-signing-hint": "僅開發模式顯示。寫入 ~/navide-signing/usage_secrets.py，讓下次 release build 打包 Antigravity 的公開 installed-app OAuth 常數。不會存進 repo。",
+    "settings-signing-id": "client_id",
+    "settings-signing-secret": "client_secret",
+    "settings-signing-save": "儲存",
+    "settings-signing-saved": "已儲存 ✓",
+    "settings-signing-error": "失敗"
   },
   "onboard": {
     "step": {
