@@ -3022,7 +3022,7 @@ async function plDelete(id: string, name: string) {
         </div>
 
         <!-- ── STORAGE TAB ───────────────────────────────────────────────── -->
-        <div v-show="activeTab === 'storage'" class="s-body" data-settings-section="storage">
+        <div v-show="activeTab === 'storage'" class="s-body storage-body" data-settings-section="storage">
           <h1 class="s-page-title">{{ $t('settings.nav.storage') }}</h1>
           <!-- Lazy-mounted: the scan is expensive, so it only runs once the
                user actually opens this tab. -->
@@ -3439,6 +3439,9 @@ async function plDelete(id: string, name: string) {
 /* Accounts tab stacks two tall blocks (git + CLI accounts); scroll the tab so
    neither squeezes the other to zero height inside the overflow-hidden s-body. */
 .accounts-body { display: block; overflow-y: auto; }
+/* Storage tab is a two-column settings page like appearance/general: the bare
+   .s-body clips instead of scrolling, so it needs its own scroll + padding. */
+.storage-body { overflow-y: auto; padding: 18px 22px; }
 .settings-meta-row {
   display: flex;
   align-items: center;

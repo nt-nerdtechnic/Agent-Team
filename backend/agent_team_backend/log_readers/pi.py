@@ -293,11 +293,19 @@ class PiLogReader(LogReader):
         records, final_checkpoint, rotated = read_jsonl_tail(path, checkpoint)
         recent = [str(k) for k in checkpoint.get("recent_keys", [])][-_RECENT_KEYS_WINDOW:]
         recent_set = set(recent)
-        prior_credited = max(0, int(checkpoint.get("credited_count") or 0))
+        prior_raw = checkpoint.get("credited_count")  # absent ≠ 0
+        prior_credited = max(0, int(prior_raw or 0))
         # A full re-read recounts from zero, suppressing the entries the old
         # count already covers; the append path just carries the count forward.
         skip_remaining = prior_credited if rotated else 0
         credited = 0 if rotated else prior_credited
+        # Checkpoints persisted before credited_count existed carry no count at
+        # all (rotated already implies a non-zero prior offset, i.e. a tracked
+        # file). How many entries were credited is unknowable, so this one
+        # re-read suppresses everything and just records the true count: losing
+        # the entries that single rewrite added beats re-crediting the whole
+        # session. The count is durable from the next poll on.
+        legacy_reread = rotated and prior_raw is None
         header_cached = bool(checkpoint.get("session_id")) and not rotated
         if header_cached:
             session_id = str(checkpoint.get("session_id") or "")
@@ -322,8 +330,8 @@ class PiLogReader(LogReader):
                 continue
             # From here the entry qualifies: it is one of the entries the
             # credited count counts.
-            if skip_remaining > 0:
-                skip_remaining -= 1
+            if legacy_reread or skip_remaining > 0:
+                skip_remaining = max(0, skip_remaining - 1)
                 credited += 1
                 recent.append(dedup_key)
                 recent = recent[-_RECENT_KEYS_WINDOW:]

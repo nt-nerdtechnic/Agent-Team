@@ -342,6 +342,40 @@ def test_rewrite_beyond_recent_window_does_not_recredit(
             for e in parsed2.events] == [("newentry", 33, 7)]
 
 
+def test_legacy_checkpoint_suppresses_first_rewrite_only(
+    fake_pi_root: Path,
+) -> None:
+    """Checkpoints written before credited_count existed carry no count. The
+    first full re-read on such a checkpoint must emit nothing (the credit
+    history is unknowable) and record the true count — then behave normally."""
+    reader = PiLogReader()
+    f = _session_file(fake_pi_root)
+    entries = [_assistant(f"e{n:07d}", input=10, output=1) for n in range(300)]
+    _write_jsonl(f, [_header(), *entries])
+    parsed1 = reader.parse_incremental(f, {})
+    assert len(parsed1.events) == 300
+    legacy = dict(parsed1.checkpoint)
+    del legacy["credited_count"]
+    assert legacy["offset"] > 0
+
+    tmp = f.with_suffix(".jsonl.tmp")
+    _write_jsonl(tmp, [
+        _header(), *entries, _assistant("newentry", input=33, output=7),
+    ])
+    os.replace(tmp, f)
+    parsed2 = reader.parse_incremental(f, legacy)
+    assert parsed2.events == []
+    assert parsed2.checkpoint["credited_count"] == 301
+
+    # One-shot: the count is durable now, so the next append emits normally.
+    with f.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(_assistant("laterentry", input=5, output=2)) + "\n")
+    parsed3 = reader.parse_incremental(f, parsed2.checkpoint)
+    assert [(e.dedup_key, e.input_tokens, e.output_tokens)
+            for e in parsed3.events] == [("laterentry", 5, 2)]
+    assert parsed3.checkpoint["credited_count"] == 302
+
+
 # ─────────────────────────── activity ────────────────────────────────────────
 
 def test_parse_activity_user_and_assistant_only(fake_pi_root: Path) -> None:
