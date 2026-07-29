@@ -6,6 +6,18 @@
 # Output: backend/dist/agent_team_backend  (single executable)
 # Electron copies it to resources/bin/ via package.json extraResources.
 
+import os
+
+# usage_secrets.py is gitignored (Antigravity's public installed-app OAuth
+# constants — see agent_team_backend/usage_secrets.example.py). Bundle it only
+# when present so release builds ship the working provider while source-only
+# checkouts still build (usage_service.py degrades gracefully without it).
+_usage_secrets = (
+    ['agent_team_backend.usage_secrets']
+    if os.path.exists('agent_team_backend/usage_secrets.py')
+    else []
+)
+
 a = Analysis(
     ['run.py'],
     pathex=['.'],
@@ -33,6 +45,9 @@ a = Analysis(
         # The top-level app object (imported by name in __main__.py, but listed
         # here as belt-and-suspenders for PyInstaller's graph walk).
         'agent_team_backend.app',
+        # Optional untracked usage_secrets (present only in release builds); the
+        # import in usage_service.py is guarded, so this is empty when absent.
+        *_usage_secrets,
         # Builtin navide.plans plugin modules: its backend.py is loaded by
         # file path at runtime (never a static import), so PyInstaller's graph
         # walk cannot see these — list them (their own imports, e.g.

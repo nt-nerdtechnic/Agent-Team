@@ -114,13 +114,25 @@ ANTIGRAVITY_TOKEN_URL = "https://oauth2.googleapis.com/token"
 ANTIGRAVITY_API_BASE = "https://cloudcode-pa.googleapis.com"
 ANTIGRAVITY_LOAD_URL = f"{ANTIGRAVITY_API_BASE}/v1internal:loadCodeAssist"
 ANTIGRAVITY_QUOTA_URL = f"{ANTIGRAVITY_API_BASE}/v1internal:retrieveUserQuotaSummary"
-# The Antigravity CLI's OAuth client credentials are deliberately NOT hardcoded
-# in this open-source repo. At runtime they come from the user's Antigravity
-# install (antigravity-oauth.json, read in _load_antigravity_oauth_config) and
-# fall back to these env vars; when both are unset the token refresh returns
-# 401 and the Antigravity quota provider degrades to an error/expired status.
-ANTIGRAVITY_CLIENT_ID = os.environ.get("NAVIDE_ANTIGRAVITY_CLIENT_ID", "")
-ANTIGRAVITY_CLIENT_SECRET = os.environ.get("NAVIDE_ANTIGRAVITY_CLIENT_SECRET", "")
+# Antigravity's public installed-app OAuth constants are deliberately NOT
+# committed to this open-source repo. They are resolved at runtime from, in
+# order: an untracked usage_secrets.py (gitignored, bundled into release builds
+# — see usage_secrets.example.py), then env-var overrides, then empty. When
+# empty the token refresh returns 401 and the Antigravity quota provider
+# degrades to an error status. The per-user antigravity-oauth.json override
+# (_load_antigravity_oauth_config) still takes precedence over all of these.
+try:
+    from .usage_secrets import (
+        ANTIGRAVITY_CLIENT_ID as _ANTIGRAVITY_CLIENT_ID,
+        ANTIGRAVITY_CLIENT_SECRET as _ANTIGRAVITY_CLIENT_SECRET,
+    )
+except ImportError:
+    _ANTIGRAVITY_CLIENT_ID = ""
+    _ANTIGRAVITY_CLIENT_SECRET = ""
+ANTIGRAVITY_CLIENT_ID = _ANTIGRAVITY_CLIENT_ID or os.environ.get(
+    "NAVIDE_ANTIGRAVITY_CLIENT_ID", "")
+ANTIGRAVITY_CLIENT_SECRET = _ANTIGRAVITY_CLIENT_SECRET or os.environ.get(
+    "NAVIDE_ANTIGRAVITY_CLIENT_SECRET", "")
 ANTIGRAVITY_LOAD_METADATA = {
     "ideType": "ANTIGRAVITY",
     "platform": "PLATFORM_UNSPECIFIED",
