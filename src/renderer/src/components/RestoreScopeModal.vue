@@ -10,11 +10,15 @@ const emit = defineEmits<{
 }>()
 
 const dialog = ref<HTMLDivElement | null>(null)
-watch(() => props.open, async (open) => {
-  if (!open) return
-  await nextTick()
-  dialog.value?.focus()
-})
+watch(
+  () => props.open,
+  async (open) => {
+    if (!open) return
+    await nextTick()
+    dialog.value?.focus()
+  },
+  { immediate: true }
+)
 </script>
 
 <template>

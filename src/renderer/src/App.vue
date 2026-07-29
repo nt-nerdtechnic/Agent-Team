@@ -9549,7 +9549,7 @@ function paneIsCommander(p: ActivePane): boolean {
           :style="{ ...floatPaneStyle(p.id), ...dualFocusStyle(p.id) }"
           :data-pane-id="p.id"
           :pane-id="p.id"
-          :title="p.customName || p.agentLabel"
+          :title="p.customName || p.autoName || p.agentLabel"
           :subtitle="paneSubtitle(p)"
           :pipe-tag="p.origin === 'pipeline' && p.stageId ? `P${p.stageId}` : undefined"
           :is-focus="p.id === effectiveFocusPaneId"
