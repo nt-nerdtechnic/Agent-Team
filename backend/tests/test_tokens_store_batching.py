@@ -522,3 +522,100 @@ def test_startup_prune_keeps_windows_readers_carry_across_rotation(
         "recent_keys"
     ] == ["p1", "p2"]
     store.flush()
+
+
+def _go_cold(path: Path) -> None:
+    stamp = time.time() - (COLD_FILE_DAYS + 1) * 86400
+    os.utime(path, (stamp, stamp))
+
+
+def test_periodic_prune_strips_windows_that_went_cold_after_startup(
+    tmp_path: Path,
+) -> None:
+    """Pruning only at load leaves a long-running session rewriting the window
+    of every log that went quiet since startup."""
+    log = tmp_path / "later-cold.jsonl"
+    log.write_text("{}\n", encoding="utf-8")
+    _state_with_files(tmp_path, {
+        str(log): {
+            "global": {
+                "kind": "jsonl", "offset": 10, "identity": "1:1",
+                "recent_keys": ["a", "b"],
+            },
+            "workspaces": {
+                "/ws": {
+                    "kind": "jsonl", "offset": 10, "identity": "1:1",
+                    "recent_keys": ["a"],
+                }
+            },
+        },
+    })
+    store = _store(tmp_path)
+    # Hot at startup, so the load-time prune leaves it alone.
+    assert store._ingestion_state["files"][str(log)]["global"]["recent_keys"] == [
+        "a", "b",
+    ]
+
+    _go_cold(log)
+    store._dirty_ingestion_state = False
+    store._prune_cold_windows()
+
+    entry = store._ingestion_state["files"][str(log)]
+    assert "recent_keys" not in entry["global"]
+    assert "recent_keys" not in entry["workspaces"]["/ws"]
+    assert entry["global"]["offset"] == 10
+    assert entry["global"]["identity"] == "1:1"
+    # The prune is a mutation, so it has to reach disk on the next flush.
+    assert store._dirty_ingestion_state is True
+    store.flush()
+    persisted = json.loads((tmp_path / "token-ingestion-state.json").read_text())
+    assert "recent_keys" not in persisted["files"][str(log)]["global"]
+
+
+def test_periodic_prune_keeps_windows_readers_carry_across_rotation(
+    tmp_path: Path,
+) -> None:
+    """The `session_id` exemption (pi.py) must hold on the periodic path too."""
+    pi_log = tmp_path / "pi.jsonl"
+    pi_log.write_text("{}\n", encoding="utf-8")
+    _state_with_files(tmp_path, {
+        str(pi_log): {
+            "global": {
+                "kind": "jsonl", "offset": 30, "identity": "4:4",
+                "session_id": "sess-1", "recent_keys": ["p1", "p2"],
+            },
+            "workspaces": {},
+        },
+    })
+    store = _store(tmp_path)
+    _go_cold(pi_log)
+    store._dirty_ingestion_state = False
+    store._prune_cold_windows()
+
+    assert store._ingestion_state["files"][str(pi_log)]["global"][
+        "recent_keys"
+    ] == ["p1", "p2"]
+    assert store._dirty_ingestion_state is False
+    store.flush()
+
+
+def test_periodic_prune_leaves_hot_files_alone(tmp_path: Path) -> None:
+    """A live log's window is still doing dedup work."""
+    hot = tmp_path / "hot.jsonl"
+    hot.write_text("{}\n", encoding="utf-8")
+    _state_with_files(tmp_path, {
+        str(hot): {
+            "global": {
+                "kind": "jsonl", "offset": 20, "identity": "2:2",
+                "recent_keys": ["c"],
+            },
+            "workspaces": {},
+        },
+    })
+    store = _store(tmp_path)
+    store._dirty_ingestion_state = False
+    store._prune_cold_windows()
+
+    assert store._ingestion_state["files"][str(hot)]["global"]["recent_keys"] == ["c"]
+    assert store._dirty_ingestion_state is False
+    store.flush()

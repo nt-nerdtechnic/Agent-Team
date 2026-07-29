@@ -45,6 +45,19 @@ RECORDED_KEYS_FILE = "recorded-event-keys.json"
 LEGACY_READER_KEYS_FILE = "log-readers-seen.json"
 INGESTION_STATE_FILE = "token-ingestion-state.json"
 PERSISTENCE_JOURNAL_FILE = "token-persistence-journal.json"
+# Append-only companion to the ingestion state. The state is megabytes and was
+# rewritten whole to record a handful of advanced offsets; mutations now append
+# here instead, and the snapshot is only rebuilt once the log grows past
+# DELTA_COMPACT_LINES.
+#
+# The snapshot's own format is deliberately untouched, so a downgraded build
+# reads it and simply ignores this file — it sees state as of the last
+# compaction, which is stale but valid. Guarding the other direction is why the
+# header pins the snapshot's identity: any writer that does not know about the
+# log (an older build) leaves a stat the header no longer matches, and the log
+# is discarded rather than replayed over a newer snapshot.
+INGESTION_DELTA_FILE = "token-ingestion-delta.jsonl"
+DELTA_COMPACT_LINES = 5000
 WORKSPACES_SUBDIR = "workspaces"
 INGESTION_STATE_VERSION = 2
 RECENT_EVENT_KEYS_LIMIT = 512
@@ -196,6 +209,7 @@ def _new_run(run_id: str, task: str, run_dir: str) -> dict[str, Any]:
 
 
 _SAVE_INTERVAL_S = 10  # batch window for dirty-flag saves
+_PRUNE_INTERVAL_S = 3600  # how often the save loop rescans `files` for cold logs
 
 
 class TokensStore:
@@ -223,6 +237,7 @@ class TokensStore:
             ingestion_state_path or (data_root / INGESTION_STATE_FILE)
         )
         self._persistence_journal_path = data_root / PERSISTENCE_JOURNAL_FILE
+        self._ingestion_delta_path = data_root / INGESTION_DELTA_FILE
         self._workspace_base_dir = workspace_base_dir or (data_root / WORKSPACES_SUBDIR)
         self._recover_persistence_journal()
         # RLock because reset() calls snapshot() while holding the lock.
@@ -235,6 +250,12 @@ class TokensStore:
         self._global_data: dict[str, Any] = self._load_global()
         self._legacy_paths_to_remove: set[Path] = set()
         self._files_pruned = False
+        # Ingestion mutations awaiting an append, and how many lines the log
+        # already holds. A change the log cannot express (legacy-key pruning,
+        # a reset, the startup prune) sets _force_compaction instead.
+        self._pending_delta: list[dict[str, Any]] = []
+        self._delta_lines = 0
+        self._force_compaction = False
         self._ingestion_state = self._load_ingestion_state()
         self._legacy_event_keys: set[str] = set(
             str(k) for k in self._ingestion_state.get("legacy_event_keys", [])
@@ -247,6 +268,11 @@ class TokensStore:
         # Dirty flags (set inside _lock, consumed by save loop outside _lock)
         self._dirty_ingestion_state: bool = (
             bool(self._legacy_paths_to_remove) or legacy_pruned or self._files_pruned
+        )
+        # Neither prune is expressible as a delta record — both remove state —
+        # so the next commit has to rebuild the snapshot.
+        self._force_compaction = (
+            self._force_compaction or legacy_pruned or self._files_pruned
         )
         self._dirty_workspaces: set[str] = set()
         self._dirty_global: bool = False
@@ -279,6 +305,103 @@ class TokensStore:
             tmp.unlink(missing_ok=True)
             raise
 
+    # ─────────────────── Ingestion delta log ───────────────────────
+
+    def _snapshot_identity(self) -> dict[str, Any]:
+        """Stat pin tying a delta log to the snapshot it was branched from."""
+        try:
+            st = self._ingestion_state_path.stat()
+        except OSError:
+            return {"mtime_ns": 0, "size": 0}
+        return {"mtime_ns": st.st_mtime_ns, "size": st.st_size}
+
+    def _read_ingestion_delta(self) -> list[dict[str, Any]]:
+        """Return the log's records, or nothing if it is not ours to replay.
+
+        A mismatched header means something rewrote the snapshot without
+        touching the log — an older build, most likely. Replaying then would
+        drag checkpoints backwards, so the log is dropped and the snapshot
+        stands on its own.
+        """
+        if not self._ingestion_delta_path.exists():
+            return []
+        try:
+            lines = self._ingestion_delta_path.read_text(encoding="utf-8").splitlines()
+        except OSError as err:
+            log.warning("ingestion delta unreadable (%s); ignoring it", err)
+            return []
+        if not lines:
+            return []
+        try:
+            header = json.loads(lines[0])
+        except json.JSONDecodeError:
+            log.warning("ingestion delta header corrupt; ignoring the log")
+            return []
+        if header.get("base") != self._snapshot_identity():
+            log.info("ingestion delta does not match the snapshot; ignoring the log")
+            return []
+        records: list[dict[str, Any]] = []
+        for line in lines[1:]:
+            if not line.strip():
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                # Only the tail can be torn — a crash mid-append. Everything
+                # before it is still good, but appending past the tear would
+                # strand the new records behind it, so rebuild instead.
+                log.info("ingestion delta truncated; replaying %d record(s)", len(records))
+                self._force_compaction = True
+                break
+        return records
+
+    @staticmethod
+    def _apply_delta_record(doc: dict[str, Any], record: dict[str, Any]) -> None:
+        """Replay one record onto a snapshot. Must stay idempotent: a journal
+        recovery can append the same records twice."""
+        kind = record.get("t")
+        if kind == "ckpt":
+            path = str(record.get("p") or "")
+            checkpoint = record.get("c")
+            if not path or not isinstance(checkpoint, dict):
+                return
+            files = doc.setdefault("files", {})
+            entry = files.setdefault(path, {"global": {}, "workspaces": {}})
+            workspace = str(record.get("w") or "")
+            if workspace:
+                entry.setdefault("workspaces", {})[workspace] = checkpoint
+            else:
+                entry["global"] = checkpoint
+        elif kind == "rek":
+            key = str(record.get("k") or "")
+            if not key:
+                return
+            keys = [k for k in doc.get("recent_event_keys", []) if k != key]
+            keys.append(key)
+            doc["recent_event_keys"] = keys[-RECENT_EVENT_KEYS_LIMIT:]
+
+    def _append_ingestion_delta(self, records: list[dict[str, Any]]) -> None:
+        """Append records, starting a fresh header when the log is empty."""
+        chunks: list[str] = []
+        if self._delta_lines == 0:
+            chunks.append(
+                json.dumps(
+                    {"t": "hdr", "base": self._snapshot_identity()},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
+        for record in records:
+            chunks.append(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+        self._ingestion_delta_path.parent.mkdir(parents=True, exist_ok=True)
+        # Starting a new header truncates: whatever was there belonged to a
+        # snapshot we no longer track, and appending past it would bury the
+        # header mid-file.
+        mode = "a" if self._delta_lines else "w"
+        with open(self._ingestion_delta_path, mode, encoding="utf-8") as fh:
+            fh.write("\n".join(chunks) + "\n")
+        self._delta_lines += len(records)
+
     def _recover_persistence_journal(self) -> bool:
         """Finish a previously interrupted batched commit before loading state."""
         if not self._persistence_journal_path.exists():
@@ -296,6 +419,13 @@ class TokensStore:
                 ):
                     continue
                 self._atomic_write(Path(str(item.get("path") or "")), item["data"])
+            pending = journal.get("delta") if isinstance(journal, dict) else None
+            if isinstance(pending, list) and pending:
+                # Safe to re-apply: delta records are idempotent, so a batch
+                # that partly landed before the crash just lands again.
+                self._append_ingestion_delta(
+                    [r for r in pending if isinstance(r, dict)]
+                )
             self._persistence_journal_path.unlink(missing_ok=True)
             log.info("recovered interrupted token persistence batch")
             return True
@@ -398,8 +528,29 @@ class TokensStore:
 
     def _save_loop(self) -> None:
         """Background thread: flush dirty state every _SAVE_INTERVAL_S seconds."""
+        ticks_per_prune = max(1, _PRUNE_INTERVAL_S // _SAVE_INTERVAL_S)
+        tick = 0
         while not self._stop_event.wait(timeout=_SAVE_INTERVAL_S):
+            tick += 1
+            if tick % ticks_per_prune == 0:
+                self._prune_cold_windows()
             self._flush_dirty()
+
+    def _prune_cold_windows(self) -> None:
+        """Rescan `files` for logs that went cold since the last scan.
+
+        Pruning only at load is not enough: a long-running session keeps
+        writing to logs that later go quiet, and their dedup windows only ever
+        grow from that point on. Rescanning on a timer lets the next flush drop
+        them instead of rewriting them for the rest of the process lifetime.
+        """
+        with self._lock:
+            if self._prune_ingestion_files(self._ingestion_state):
+                self._dirty_ingestion_state = True
+                # Removing state is not expressible as a delta record, so the
+                # next commit has to rebuild the snapshot — same reason the
+                # startup prune forces it.
+                self._force_compaction = True
 
     def _flush_dirty(self) -> None:
         """Write any dirty state to disk (called from save loop or flush())."""
@@ -427,22 +578,46 @@ class TokensStore:
                     writes.append({"path": str(self._workspace_path(ws)), "data": deepcopy(doc)})
             if dirty_global:
                 writes.append({"path": str(self._global_path), "data": deepcopy(self._global_data)})
-            if dirty_ingestion:
-                writes.append({
-                    "path": str(self._ingestion_state_path),
-                    "data": self._state_snapshot_locked(),
-                })
-        if not writes:
+            delta: list[dict[str, Any]] = []
+            compacting = False
+            # A forced rebuild still has to run when nothing is dirty: shutdown
+            # compacts so the snapshot stands alone, and the log it replaces may
+            # have been written by an earlier commit.
+            if dirty_ingestion or (self._force_compaction and self._delta_lines):
+                # Rebuild the snapshot only when the log has grown past its
+                # bound, or when a change happened that the log cannot express.
+                compacting = self._force_compaction or (
+                    self._delta_lines + len(self._pending_delta) > DELTA_COMPACT_LINES
+                )
+                if compacting:
+                    writes.append({
+                        "path": str(self._ingestion_state_path),
+                        "data": self._state_snapshot_locked(),
+                    })
+                else:
+                    delta = self._pending_delta
+                self._pending_delta = []
+                self._force_compaction = False
+        if not writes and not delta:
             return
         try:
-            # Write-ahead snapshot makes totals + checkpoints recoverable as a
-            # unit when the process dies between individual JSON replacements.
+            # Write-ahead record makes totals + checkpoints recoverable as a
+            # unit when the process dies between individual writes. Replaying
+            # it is safe: the snapshot writes are whole-file, and the delta
+            # records are idempotent.
             self._atomic_write(
                 self._persistence_journal_path,
-                {"version": 1, "writes": writes},
+                {"version": 2, "writes": writes, "delta": delta},
             )
             for item in writes:
                 self._atomic_write(Path(item["path"]), item["data"])
+            if compacting:
+                # The snapshot just moved, so the old log's header no longer
+                # matches it — stale content is inert even if this unlink fails.
+                self._ingestion_delta_path.unlink(missing_ok=True)
+                self._delta_lines = 0
+            if delta:
+                self._append_ingestion_delta(delta)
             self._persistence_journal_path.unlink(missing_ok=True)
             if dirty_ingestion:
                 self._remove_legacy_paths()
@@ -450,7 +625,14 @@ class TokensStore:
             log.warning("failed to commit token persistence batch: %s", err)
 
     def flush(self) -> None:
-        """Flush all pending dirty state synchronously. Call before shutdown."""
+        """Flush all pending dirty state synchronously. Call before shutdown.
+
+        Compacts rather than appending: this is the shutdown path, so paying
+        one snapshot write here leaves the state whole on disk with no log
+        beside it — which is also what a downgraded build needs to read.
+        """
+        with self._lock:
+            self._force_compaction = True
         self._stop_event.set()
         if threading.current_thread() is not self._save_thread:
             self._save_thread.join()
@@ -468,6 +650,21 @@ class TokensStore:
         return set()
 
     def _load_ingestion_state(self) -> dict[str, Any]:
+        """Rebuild the state: snapshot first, then the delta log on top.
+
+        The log has to be replayed even when no snapshot exists — until the
+        first compaction that is the only place checkpoints live, and skipping
+        it would send every reader back to offset 0.
+        """
+        doc = self._load_ingestion_snapshot()
+        replayed = self._read_ingestion_delta()
+        for record in replayed:
+            self._apply_delta_record(doc, record)
+        self._delta_lines = len(replayed)
+        self._files_pruned = self._prune_ingestion_files(doc)
+        return doc
+
+    def _load_ingestion_snapshot(self) -> dict[str, Any]:
         if self._ingestion_state_path.exists():
             try:
                 data = json.loads(self._ingestion_state_path.read_text(encoding="utf-8"))
@@ -476,7 +673,6 @@ class TokensStore:
                     doc.update(data)
                     if not isinstance(doc.get("files"), dict):
                         doc["files"] = {}
-                    self._files_pruned = self._prune_ingestion_files(doc)
                     for path in (self._recorded_keys_path, self._legacy_reader_keys_path):
                         if path.exists():
                             self._legacy_paths_to_remove.add(path)
@@ -499,8 +695,10 @@ class TokensStore:
     def _prune_ingestion_files(self, doc: dict[str, Any]) -> bool:
         """Strip the dedup window from checkpoints of logs long gone cold.
 
-        Runs once at load: `files` has no other eviction path, so the windows
-        accumulate (7.5 MB on a real machine) and every flush rewrites the lot.
+        Runs at load and then on a _PRUNE_INTERVAL_S timer from the save loop:
+        `files` has no other eviction path, so the windows accumulate (7.5 MB
+        on a real machine) and every flush rewrites the lot. Logs that go cold
+        after startup only get stripped because of the periodic pass.
 
         Only a *successful* stat can strip anything. An unreadable path is
         left alone: treating one as prunable would let a transient I/O fault
@@ -618,6 +816,12 @@ class TokensStore:
             if not self._checkpoint_is_newer(entry.get("global", {}), checkpoint):
                 return
             entry["global"] = deepcopy(checkpoint)
+        self._pending_delta.append({
+            "t": "ckpt",
+            "p": file_path,
+            "w": workspace_path or "",
+            "c": deepcopy(checkpoint),
+        })
         self._dirty_ingestion_state = True
 
     @staticmethod
@@ -666,6 +870,7 @@ class TokensStore:
         while len(self._recent_event_keys) > RECENT_EVENT_KEYS_LIMIT:
             old = self._recent_event_keys.popleft()
             self._recent_event_key_set.discard(old)
+        self._pending_delta.append({"t": "rek", "k": scoped_key})
         self._dirty_ingestion_state = True
 
     # ───────────────────────── Run lifecycle ────────────────────────
@@ -873,6 +1078,10 @@ class TokensStore:
                     if isinstance(entry, dict):
                         entry.get("workspaces", {}).pop(workspace_path, None)
                 self._dirty_ingestion_state = True
+                # A reset removes state, which no delta record can express, and
+                # any queued record would resurrect what was just dropped.
+                self._pending_delta.clear()
+                self._force_compaction = True
             elif scope == "global":
                 self._global_data = _empty_global_doc()
                 self._dirty_global = True
@@ -881,6 +1090,8 @@ class TokensStore:
                 self._recent_event_keys.clear()
                 self._recent_event_key_set.clear()
                 self._dirty_ingestion_state = True
+                self._pending_delta.clear()
+                self._force_compaction = True
             else:
                 raise ValueError(f"unknown reset scope: {scope!r}")
             result = self.snapshot(workspace_path)
