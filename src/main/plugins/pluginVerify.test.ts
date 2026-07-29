@@ -59,8 +59,8 @@ describe('verifyEd25519', () => {
 })
 
 describe('assertKnownCapabilities', () => {
-  it('accepts the known set including issues', () => {
-    expect(() => assertKnownCapabilities(['fs', 'git', 'issues'])).not.toThrow()
+  it('accepts the known set including issues and plans', () => {
+    expect(() => assertKnownCapabilities(['fs', 'git', 'issues', 'plans'])).not.toThrow()
   })
 
   it('rejects an unknown namespace (scope over-reach)', () => {

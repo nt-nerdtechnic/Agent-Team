@@ -22,7 +22,7 @@
 import { createHash, createPublicKey, timingSafeEqual, verify as cryptoVerify } from 'node:crypto'
 
 /** Capability namespaces the host can authorize. Mirror of the backend
- *  `manifest.KNOWN_CAPABILITIES` (fs/git/terminal/search/chat/ui/issues). */
+ *  `manifest.KNOWN_CAPABILITIES` (fs/git/terminal/search/chat/ui/issues/plans). */
 export const KNOWN_CAPABILITIES: readonly string[] = [
   'fs',
   'git',
@@ -31,6 +31,7 @@ export const KNOWN_CAPABILITIES: readonly string[] = [
   'chat',
   'ui',
   'issues',
+  'plans',
 ]
 
 /** Capabilities that grant filesystem / shell reach and warrant a second
