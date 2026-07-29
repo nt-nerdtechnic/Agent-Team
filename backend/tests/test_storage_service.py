@@ -429,46 +429,291 @@ def test_a_workspace_reached_by_two_paths_is_scanned_once(
 # ── codex pane homes ────────────────────────────────────────────────────────
 
 
-def test_codex_pane_homes_split_by_mtime(roots: dict[str, Path]) -> None:
-    import os
-    import time
+def _registry(roots: dict[str, Path], workspaces: list[Path | str]) -> None:
+    """Write the recent-workspaces registry the referenced set is built from.
 
-    old = roots["panes"] / "pane-old"
-    new = roots["panes"] / "pane-new"
-    _write(old / "auth.json", 30)
-    _write(new / "auth.json", 40)
-    long_ago = time.time() - 90 * 86400
-    os.utime(old, (long_ago, long_ago))
+    Without it the scan cannot establish which homes are still reachable and
+    fails closed, so every codex-pane test has to declare its workspaces.
+    """
+    (roots["app_data"] / "recent-workspaces.json").write_text(
+        json.dumps(
+            {"version": 1, "max_size": 20, "recent": [{"path": str(w)} for w in workspaces]}
+        ),
+        encoding="utf-8",
+    )
+
+
+def _pane_home(roots: dict[str, Path], name: str, size: int, *, age_days: int = 90) -> Path:
+    """A pane home whose mtime is old enough to clear the grace window."""
+    home = roots["panes"] / name
+    _write(home / "auth.json", size)
+    old = time.time() - age_days * 86400
+    os.utime(home, (old, old))
+    return home
+
+
+def _pane_workspace(
+    tmp_path: Path,
+    *,
+    panes: list[dict[str, Any]] | None = None,
+    history: list[dict[str, Any]] | None = None,
+) -> Path:
+    ws = tmp_path / "pane-ws"
+    data = ws / ".agent-team"
+    data.mkdir(parents=True, exist_ok=True)
+    (data / "project.json").write_text(
+        json.dumps({"id": "proj_x", "panes": panes or []}), encoding="utf-8"
+    )
+    if history is not None:
+        (data / "spawn-history.json").write_text(
+            json.dumps({"version": 1, "entries": history}), encoding="utf-8"
+        )
+    return ws
+
+
+def test_a_home_a_pane_record_names_is_never_cleanable(
+    roots: dict[str, Path], tmp_path: Path
+) -> None:
+    """Orphan-ness is decided by the panes that exist, not by mtime: a home
+    whose pane record is still on file stays protected however old it is."""
+    ws = _pane_workspace(tmp_path, panes=[{"pane_id": "kept", "spawn_status": "spawned"}])
+    _registry(roots, [ws])
+    kept = _pane_home(roots, "kept", 30)
+    orphan = _pane_home(roots, "orphan", 40)
+
+    report = storage_service.collect_usage([str(ws)], 30)
+
+    assert _item(report, "codexPanesRecent")["bytes"] == 30
+    assert _item(report, "codexPanesRecent")["cleanable"] is False
+    assert _item(report, "codexPanesStale")["bytes"] == 40
+    assert _item(report, "codexPanesStale")["risk"] == "caution"
+
+    storage_service.cleanup(["codexPanesStale"], [str(ws)], 30)
+    assert kept.exists()
+    assert not orphan.exists()
+
+
+def test_a_removed_pane_record_still_protects_its_home(
+    roots: dict[str, Path], tmp_path: Path
+) -> None:
+    """A pane the user closed keeps its record — and the App restores from it,
+    so the home behind it is not an orphan."""
+    ws = _pane_workspace(
+        tmp_path,
+        panes=[{"pane_id": "closed", "spawn_status": "removed", "session_home_id": "drifted"}],
+    )
+    _registry(roots, [ws])
+    _pane_home(roots, "closed", 30)
+    _pane_home(roots, "drifted", 15)
+
+    report = storage_service.collect_usage([str(ws)], 30)
+
+    assert _item(report, "codexPanesStale")["bytes"] == 0
+    assert _item(report, "codexPanesRecent")["bytes"] == 45
+
+
+def test_an_agent_history_entry_protects_its_home(
+    roots: dict[str, Path], tmp_path: Path
+) -> None:
+    """Agent History's resume re-enters the home that recorded the rollout, so
+    a history entry keeps its home alive after the pane record is gone."""
+    ws = _pane_workspace(
+        tmp_path,
+        panes=[],
+        history=[{"paneId": "from-history", "agentKey": "codex", "sessionId": "s1"}],
+    )
+    _registry(roots, [ws])
+    _pane_home(roots, "from-history", 30)
+    _pane_home(roots, "orphan", 40)
+
+    report = storage_service.collect_usage([str(ws)], 30)
+
+    assert _item(report, "codexPanesRecent")["bytes"] == 30
+    assert _item(report, "codexPanesStale")["bytes"] == 40
+
+
+def test_a_home_nothing_references_is_cleanable_but_never_safe(
+    roots: dict[str, Path], tmp_path: Path
+) -> None:
+    ws = _pane_workspace(tmp_path, panes=[], history=[])
+    _registry(roots, [ws])
+    orphan = _pane_home(roots, "orphan", 40)
+
+    report = storage_service.collect_usage([str(ws)], 30)
+    item = _item(report, "codexPanesStale")
+
+    assert item["bytes"] == 40
+    assert item["cleanable"] is True
+    # "caution" keeps it out of the one-click sweep; sessions die with it.
+    assert item["risk"] == "caution"
+    assert item["paths"] == [str(orphan)]
+
+
+def test_a_freshly_modified_unreferenced_home_stays_protected(
+    roots: dict[str, Path], tmp_path: Path
+) -> None:
+    """A spawn creates the home before the pane record is persisted; a scan
+    racing that window must not call the new home an orphan."""
+    ws = _pane_workspace(tmp_path, panes=[], history=[])
+    _registry(roots, [ws])
+    fresh = _pane_home(roots, "mid-spawn", 40, age_days=0)
+
+    report = storage_service.collect_usage([str(ws)], 30)
+
+    assert _item(report, "codexPanesStale")["bytes"] == 0
+    assert _item(report, "codexPanesRecent")["bytes"] == 40
+
+    storage_service.cleanup(["codexPanesStale"], [str(ws)], 30)
+    assert fresh.exists()
+
+
+def test_an_unreadable_project_json_protects_every_home(
+    roots: dict[str, Path], tmp_path: Path
+) -> None:
+    """Fail closed: a home id never records which workspace made it, so one
+    unreadable record file poisons the whole answer."""
+    ws = _pane_workspace(tmp_path, panes=[])
+    (ws / ".agent-team" / "project.json").write_text("{ truncated", encoding="utf-8")
+    _registry(roots, [ws])
+    orphan = _pane_home(roots, "orphan", 40)
+
+    report = storage_service.collect_usage([str(ws)], 30)
+
+    assert _item(report, "codexPanesStale")["bytes"] == 0
+    assert _item(report, "codexPanesRecent")["bytes"] == 40
+    assert any(str(ws / ".agent-team" / "project.json") == e["path"] for e in report["errors"])
+
+    storage_service.cleanup(["codexPanesStale"], [str(ws)], 30)
+    assert orphan.exists()
+
+
+def test_an_unreadable_spawn_history_protects_every_home(
+    roots: dict[str, Path], tmp_path: Path
+) -> None:
+    ws = _pane_workspace(tmp_path, panes=[])
+    (ws / ".agent-team" / "spawn-history.json").write_text("[]", encoding="utf-8")
+    _registry(roots, [ws])
+    _pane_home(roots, "orphan", 40)
+
+    report = storage_service.collect_usage([str(ws)], 30)
+
+    assert _item(report, "codexPanesStale")["bytes"] == 0
+
+
+def test_a_deleted_workspace_contributes_no_references(
+    roots: dict[str, Path], tmp_path: Path
+) -> None:
+    """A deleted folder took its record files with it: it has no references
+    left to contribute, and one dead bookmark must not freeze the scan."""
+    live = _pane_workspace(tmp_path, panes=[{"pane_id": "kept"}])
+    _registry(roots, [live, tmp_path / "gone" / "ws"])
+    _pane_home(roots, "kept", 30)
+    orphan = _pane_home(roots, "orphan", 40)
 
     report = storage_service.collect_usage([], 30)
 
-    assert _item(report, "codexPanesStale")["bytes"] == 30
-    assert _item(report, "codexPanesRecent")["bytes"] == 40
-    assert _item(report, "codexPanesRecent")["cleanable"] is False
+    assert _item(report, "codexPanesStale")["bytes"] == 40
+    assert _item(report, "codexPanesRecent")["bytes"] == 30
+    assert any(str(tmp_path / "gone" / "ws") == e["path"] for e in report["errors"])
 
     storage_service.cleanup(["codexPanesStale"], [], 30)
-    assert not old.exists()
-    assert new.exists()
+    assert not orphan.exists()
 
 
-def test_loose_files_next_to_the_codex_pane_homes_are_counted(
-    roots: dict[str, Path]
+def test_an_unmounted_volume_still_protects_every_home(
+    roots: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Only subdirectories are pane homes; a stray .DS_Store still has to land
-    in a bucket or the cliHomes total under-reports it."""
-    _write(roots["panes"] / "pane-new" / "auth.json", 40)
-    stray = _write(roots["panes"] / ".DS_Store", 14)
+    """A disk nobody plugged in is not a deleted workspace: its records would
+    have named some of these homes, so nothing is an orphan this scan."""
+    volumes = tmp_path / "Volumes"
+    volumes.mkdir()
+    monkeypatch.setattr(storage_service, "MOUNT_HOST_DIRS", (str(volumes),))
+    _registry(roots, [volumes / "Backup" / "ws"])
+    orphan = _pane_home(roots, "orphan", 40)
 
     report = storage_service.collect_usage([], 30)
 
+    assert _item(report, "codexPanesStale")["bytes"] == 0
+    assert _item(report, "codexPanesRecent")["bytes"] == 40
+    assert any(str(volumes / "Backup" / "ws") == e["path"] for e in report["errors"])
+
+    storage_service.cleanup(["codexPanesStale"], [], 30)
+    assert orphan.exists()
+
+
+def test_an_unreadable_ancestor_is_unknown_not_deleted(
+    roots: dict[str, Path], tmp_path: Path
+) -> None:
+    """The walk up must not turn a permission error into "deleted"."""
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    # Nested one level down: stat'ing ``locked/sub`` needs +x on ``locked``,
+    # which is exactly the ancestor the walk cannot read.
+    _registry(roots, [locked / "sub" / "ws"])
+    orphan = _pane_home(roots, "orphan", 40)
+    locked.chmod(0o000)
+    try:
+        report = storage_service.collect_usage([], 30)
+        storage_service.cleanup(["codexPanesStale"], [], 30)
+    finally:
+        locked.chmod(0o700)
+
+    assert _item(report, "codexPanesStale")["bytes"] == 0
+    assert orphan.exists()
+
+
+def test_a_missing_workspace_registry_protects_every_home(roots: dict[str, Path]) -> None:
+    """No registry, no referenced set — every home is kept."""
+    orphan = _pane_home(roots, "orphan", 40)
+
+    report = storage_service.collect_usage([], 30)
+
+    assert _item(report, "codexPanesStale")["bytes"] == 0
+    assert _item(report, "codexPanesRecent")["bytes"] == 40
+
+    storage_service.cleanup(["codexPanesStale"], [], 30)
+    assert orphan.exists()
+
+
+def test_a_workspace_without_records_contributes_no_references(
+    roots: dict[str, Path], tmp_path: Path
+) -> None:
+    """A workspace that never spawned a pane has no record files; that is an
+    answer (no references), not a failure."""
+    ws = tmp_path / "never-used"
+    ws.mkdir()
+    _registry(roots, [ws])
+    _pane_home(roots, "orphan", 40)
+
+    report = storage_service.collect_usage([str(ws)], 30)
+
+    assert _item(report, "codexPanesStale")["bytes"] == 40
+
+
+def test_loose_entries_next_to_the_codex_pane_homes_are_counted_not_cleaned(
+    roots: dict[str, Path], tmp_path: Path
+) -> None:
+    """Only pane-id subdirectories are homes; a stray .DS_Store and a hidden
+    dir somebody else owns still have to land in a bucket or the cliHomes
+    total under-reports them."""
+    ws = _pane_workspace(tmp_path, panes=[], history=[])
+    _registry(roots, [ws])
+    _pane_home(roots, "pane-new", 40, age_days=0)
+    stray = _write(roots["panes"] / ".DS_Store", 14)
+    hidden = _write(roots["panes"] / ".agents" / "skills" / "x.md", 9)
+
+    report = storage_service.collect_usage([str(ws)], 30)
+
     recent = _item(report, "codexPanesRecent")
-    assert recent["bytes"] == 40 + 14
+    assert recent["bytes"] == 40 + 14 + 9
     assert recent["cleanable"] is False
+    assert _item(report, "codexPanesStale")["bytes"] == 0
     group = next(g for g in report["groups"] if g["id"] == "cliHomes")
     assert group["totalBytes"] == sum(i["bytes"] for i in group["items"])
 
-    storage_service.cleanup(["codexPanesStale"], [], 30)
+    storage_service.cleanup(["codexPanesStale"], [str(ws)], 30)
     assert stray.exists()
+    assert hidden.exists()
 
 
 # ── ws handlers ─────────────────────────────────────────────────────────────

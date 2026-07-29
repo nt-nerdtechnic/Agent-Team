@@ -778,12 +778,12 @@
           "desc": "Credentials and config for the CLI accounts in use."
         },
         "codexPanesStale": {
-          "label": "Stale Codex pane homes",
-          "desc": "Per-pane Codex homes past the stale threshold."
+          "label": "Orphaned Codex pane homes",
+          "desc": "Per-pane Codex homes no pane record or Agent History entry names."
         },
         "codexPanesRecent": {
-          "label": "Recent Codex pane homes",
-          "desc": "Per-pane Codex homes used within the stale threshold."
+          "label": "Referenced Codex pane homes",
+          "desc": "Per-pane Codex homes a pane or Agent History entry can still resume."
         },
         "manualLogsOrphan": {
           "label": "Orphaned agent logs",

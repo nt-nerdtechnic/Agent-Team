@@ -7,7 +7,7 @@ Two entry points, both blocking (callers offload with ``asyncio.to_thread``):
   reports the bytes each bucket costs.
 - ``cleanup()`` deletes the buckets the caller names.
 
-Two invariants the whole module is built around:
+Three invariants the whole module is built around:
 
 1. **Symlinks are never followed.** ``~/.codex-panes/*`` and
    ``<app_data>/runtime/skills/*`` are dense symlink farms pointing back at
@@ -17,6 +17,9 @@ Two invariants the whole module is built around:
 2. **Every deletion is root-guarded.** A path is resolved and asserted to be
    strictly inside the root its bucket declares before anything is removed —
    the same shape as ``CodexHomeManager.cleanup``.
+3. **Unknown is never orphan.** Buckets that mean "nothing references this any
+   more" are only filled when every source the reference set is built from was
+   readable; one unreadable source protects the whole bucket.
 
 Scan errors (permissions, races) are collected into an ``errors`` list rather
 than raised: a single unreadable directory must not blank the whole page.
@@ -24,6 +27,7 @@ than raised: a single unreadable directory must not blank the whole page.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
@@ -38,9 +42,10 @@ from .credential_vault import LOGIN_HOME_DIRNAME
 from .history_store import HISTORY_FILE
 from .plan_history import HISTORY_DIR_NAME as PLAN_HISTORY_DIR_NAME
 from .profiles_store import PROFILE_HOME_DIRNAME, default_profiles_root
-from .projects import PROJECT_DIR_NAME, RUNS_SUBDIR
+from .projects import PROJECT_DIR_NAME, PROJECT_FILE, RUNS_SUBDIR
+from .recent_workspaces import RECENT_FILE
 from .skills_store import SKILLS_DIR, SKILLS_RUNTIME_DIR
-from .spawn_history import entry_manual_log_names, read_stored_entries
+from .spawn_history import SPAWN_HISTORY_FILE, entry_manual_log_names, read_stored_entries
 from .store_migrations import BACKUP_DIR
 from .terminals import live_output_log_paths
 from .tokens_store import (
@@ -89,6 +94,16 @@ ARCHIVED_SLOT_MARKERS = (".deleted-", ".migrated-")
 # cannot cover: a pane whose backend was restarted under it, or a scan racing
 # a spawn that has not registered its log yet.
 LIVE_LOG_MTIME_WINDOW_SECONDS = 15 * 60
+
+# A Codex pane home touched this recently counts as in use even when no pane
+# record names it: ``CodexHomeManager.prepare`` creates the home before the
+# renderer persists the pane record, so a scan racing a spawn would otherwise
+# call a brand-new home an orphan.
+CODEX_HOME_GRACE_SECONDS = 24 * 3600
+
+# Directories the OS mounts volumes under. A missing child of one of these is
+# a disk that is not plugged in, not a folder somebody deleted.
+MOUNT_HOST_DIRS = ("/Volumes", "/mnt", "/media", "/net")
 
 
 class StorageGuardError(Exception):
@@ -564,7 +579,210 @@ def _top_level_entries(root: Path, errors: list[dict[str, str]]) -> list[Path]:
         return []
 
 
-def _cli_homes_group(stale_days: int, errors: list[dict[str, str]]) -> _Group:
+def _read_json_object(
+    path: Path, errors: list[dict[str, str]]
+) -> tuple[dict[str, Any] | None, bool]:
+    """``(document, readable)`` for a JSON object on disk.
+
+    A file that is simply absent yields ``(None, True)``: "this workspace has
+    no records" is an answer, not a failure. Everything else — a permission
+    error, a half-written file, a document that is not an object — yields
+    ``(None, False)`` plus an entry in ``errors``, so callers can fail closed.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, True
+    except (OSError, ValueError) as err:
+        _record_error(errors, path, err)
+        return None, False
+    if not isinstance(data, dict):
+        errors.append({"path": str(path), "message": "expected a JSON object"})
+        return None, False
+    return data, True
+
+
+def _workspace_codex_home_ids(
+    data_dir: Path, errors: list[dict[str, str]]
+) -> tuple[set[str], bool]:
+    """``(home ids this workspace still points at, readable)``.
+
+    Two record files matter, and both are consulted in full:
+
+    - ``project.json`` — every pane record, including the ones marked
+      ``removed``: the id survives the removal and the App restores from it.
+      Both ``pane_id`` (the home name a fresh Codex pane gets) and
+      ``session_home_id`` (the home a restored pane keeps using) count.
+    - ``spawn-history.json`` — Agent History's "resume session" re-spawns from
+      an entry's ``sessionId``, and Codex can only resume inside the home that
+      recorded the rollout, so a history entry keeps its ``paneId`` home alive
+      long after the pane record stopped mattering.
+    """
+    ids: set[str] = set()
+    readable = True
+
+    project, ok = _read_json_object(data_dir / PROJECT_FILE, errors)
+    readable = readable and ok
+    if project is not None:
+        for key in ("panes", "manual_panes"):
+            records = project.get(key)
+            if not isinstance(records, list):
+                continue
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                for name in ("pane_id", "session_home_id"):
+                    value = record.get(name)
+                    if isinstance(value, str) and value:
+                        ids.add(value)
+
+    history, ok = _read_json_object(data_dir / SPAWN_HISTORY_FILE, errors)
+    readable = readable and ok
+    if history is not None:
+        entries = history.get("entries")
+        if isinstance(entries, list):
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                value = entry.get("paneId")
+                if isinstance(value, str) and value:
+                    ids.add(value)
+        else:
+            errors.append(
+                {
+                    "path": str(data_dir / SPAWN_HISTORY_FILE),
+                    "message": "expected an 'entries' array",
+                }
+            )
+            readable = False
+
+    return ids, readable
+
+
+def _is_deleted_path(path: str) -> bool:
+    """True when a missing ``path`` is gone for good, not just away.
+
+    Walks up to the nearest ancestor that still exists — never following a
+    symlink, always stopping at the filesystem root. A deleted folder leaves a
+    live ancestor behind on a mounted volume. Two shapes say "away" instead,
+    and both answer False so the caller keeps failing closed:
+
+    - the first missing component is a child of a mount host (``/Volumes/…``):
+      that is a disk nobody plugged in, not a folder anybody deleted;
+    - an ancestor cannot be stat'd at all (permissions, a dead network mount):
+      an un-stat-able parent is unknown, and unknown is never "deleted".
+    """
+    current = Path(path)
+    while True:
+        parent = current.parent
+        if parent == current:
+            # Walked past every component without finding a live ancestor.
+            return False
+        try:
+            os.lstat(parent)
+        except FileNotFoundError:
+            current = parent
+            continue
+        except OSError:
+            return False
+        return os.fspath(parent) not in MOUNT_HOST_DIRS
+
+
+def _referenced_codex_home_ids(
+    workspace_paths: list[str], errors: list[dict[str, str]]
+) -> tuple[set[str], bool]:
+    """``(home ids a pane can still reach, established)``.
+
+    The referenced set is the union over the workspaces we know about — the
+    ones the caller has open plus the recent-workspaces registry — of the ids
+    their records name.
+
+    ``established`` is the fail-closed switch. ``~/.codex-panes/<id>`` carries
+    nothing that says which workspace created it, so one unreadable source
+    poisons the whole answer: the records that would have named a home may be
+    exactly the ones we could not read, and the caller must then treat *every*
+    home as referenced. A workspace that was *deleted* is not such a source —
+    its records are gone for good, so it simply contributes nothing (see
+    ``_is_deleted_path``).
+    """
+    registry_path = app_data_root() / RECENT_FILE
+    registry, ok = _read_json_object(registry_path, errors)
+    if not ok:
+        return set(), False
+    if registry is None:
+        errors.append(
+            {
+                "path": str(registry_path),
+                "message": "no workspace registry; Codex pane homes stay protected",
+            }
+        )
+        return set(), False
+    recent = registry.get("recent")
+    if not isinstance(recent, list):
+        errors.append({"path": str(registry_path), "message": "expected a 'recent' array"})
+        return set(), False
+
+    candidates = list(workspace_paths)
+    candidates += [
+        entry["path"]
+        for entry in recent
+        if isinstance(entry, dict) and isinstance(entry.get("path"), str) and entry["path"]
+    ]
+
+    ids: set[str] = set()
+    established = True
+    seen: set[str] = set()
+    for raw in candidates:
+        # Same dedupe key as the workspace group: one folder reaches us under
+        # several spellings (a symlinked worktree, /tmp vs /private/tmp).
+        key = os.path.realpath(os.path.expanduser(raw))
+        if key in seen:
+            continue
+        seen.add(key)
+        if not os.path.isdir(key):
+            if _is_deleted_path(key):
+                # The folder is gone and its record files went with it, so it
+                # has no references left to contribute — a deleted workspace
+                # must not freeze the whole scan.
+                #
+                # Considered tradeoff: a workspace that was *moved or renamed*
+                # is indistinguishable from a deleted one at its old path, so
+                # until the user reopens it at the new location its homes read
+                # as orphans. Accepted because the bucket stays ``caution`` —
+                # never part of the one-click sweep, always a manual pick plus
+                # a confirmation — and the 24h grace still covers anything in
+                # active use.
+                errors.append(
+                    {
+                        "path": raw,
+                        "message": (
+                            "workspace is gone; its Codex pane homes count as orphaned "
+                            "— drop it from the recent list to stop this warning"
+                        ),
+                    }
+                )
+                continue
+            # Not reachable rather than deleted (an unplugged disk, an ancestor
+            # we cannot stat): its records would have named some of these
+            # homes, so nothing is an orphan this scan.
+            errors.append(
+                {
+                    "path": raw,
+                    "message": (
+                        "workspace unavailable; every Codex pane home stays protected "
+                        "until it is back or dropped from the recent list"
+                    ),
+                }
+            )
+            established = False
+            continue
+        found, readable = _workspace_codex_home_ids(Path(key) / PROJECT_DIR_NAME, errors)
+        ids |= found
+        established = established and readable
+    return ids, established
+
+
+def _cli_homes_group(workspace_paths: list[str], errors: list[dict[str, str]]) -> _Group:
     root = profiles_root()
     panes = codex_panes_root()
 
@@ -636,34 +854,56 @@ def _cli_homes_group(stale_days: int, errors: list[dict[str, str]]) -> _Group:
         [archived_item, caches_item, history_item],
     )
 
-    cutoff = time.time() - stale_days * 86400
-    stale_panes: list[Path] = []
+    referenced, established = _referenced_codex_home_ids(workspace_paths, errors)
+    grace_cutoff = time.time() - CODEX_HOME_GRACE_SECONDS
+    grace_hours = CODEX_HOME_GRACE_SECONDS // 3600
+    orphan_panes: list[Path] = []
     # Loose top-level entries (a stray .DS_Store, a dangling symlink) are not
     # pane homes, so they are never cleanable — but they still have to land in
     # a bucket or the group total under-reports them.
-    recent_panes: list[Path] = [
+    kept_panes: list[Path] = [
         p for p in _top_level_entries(panes, errors) if p.is_symlink() or not p.is_dir()
     ]
     for pane in _iter_dirs(panes, errors):
+        if pane.name.startswith("."):
+            # Pane homes are named after a pane id; ``prepare()`` never makes a
+            # dotted one. A hidden dir in the panes root belongs to something
+            # else, so it is counted but never offered for deletion.
+            kept_panes.append(pane)
+            continue
         try:
             mtime = pane.lstat().st_mtime
         except OSError as err:
+            # Fail closed: a home we cannot even stat is never offered up.
             _record_error(errors, pane, err)
+            kept_panes.append(pane)
             continue
-        (stale_panes if mtime < cutoff else recent_panes).append(pane)
+        if established and pane.name not in referenced and mtime < grace_cutoff:
+            orphan_panes.append(pane)
+        else:
+            kept_panes.append(pane)
 
+    orphan_note = (
+        "Codex pane homes no pane still points at: no pane record and no Agent "
+        "History entry in the known workspaces names them, and none was touched "
+        f"in the last {grace_hours} hours. Deleting one ends every Codex session "
+        "it holds, for good."
+        if established
+        else (
+            "Codex pane homes no pane still points at. Nothing is listed: a "
+            "workspace or one of its record files could not be read this scan "
+            "(see the errors below), and a home never records which workspace "
+            "made it, so every home is being kept."
+        )
+    )
     stale_item = _measured(
         _Item(
             "codexPanesStale",
             risk="caution",
             cleanable=True,
             root=panes,
-            paths=stale_panes,
-            note=(
-                f"Per-pane Codex homes untouched for over {stale_days} days. "
-                "Staleness is judged by mtime only — resuming any Codex session "
-                "that still uses one of these homes will break."
-            ),
+            paths=orphan_panes,
+            note=orphan_note,
         ),
         errors,
     )
@@ -673,10 +913,12 @@ def _cli_homes_group(stale_days: int, errors: list[dict[str, str]]) -> _Group:
             risk="caution",
             cleanable=False,
             root=panes,
-            paths=recent_panes,
+            paths=kept_panes,
             note=(
-                "Recently used Codex pane homes; likely still resumable. "
-                "Loose files sitting next to them are counted here too."
+                "Codex pane homes a pane record or an Agent History entry still "
+                f"names, homes touched in the last {grace_hours} hours, and loose "
+                "files sitting next to them. Only workspaces the App has open or "
+                "still lists as recent are consulted."
             ),
         ),
         errors,
@@ -953,7 +1195,7 @@ def _scan(
     groups = [
         app_group,
         electron_group,
-        _cli_homes_group(stale_days, errors),
+        _cli_homes_group(workspace_paths, errors),
         _workspaces_group(workspace_paths, stale_days, errors),
     ]
     return groups, errors
