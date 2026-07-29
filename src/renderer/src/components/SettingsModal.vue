@@ -1733,7 +1733,7 @@ async function plDelete(id: string, name: string) {
           <button class="s-close" @click="emit('close')" title="Close (ESC)">✕</button>
 
         <!-- ── ROLES TAB ─────────────────────────────────────────────────── -->
-        <div v-show="activeTab === 'roles'" class="s-body roles-body" data-settings-section="roles">
+        <div v-show="activeTab === 'roles'" class="s-body s-body--bleed roles-body" data-settings-section="roles">
           <h1 class="s-page-title">{{ $t('settings.nav.roles') }}</h1>
           <div class="settings-meta-row">
             <span class="scope-badge">{{ settingsScopeNotes.roles.scope }}</span>
@@ -1797,7 +1797,7 @@ async function plDelete(id: string, name: string) {
 
         <!-- ── STAGES TAB ────────────────────────────────────────────────── -->
         <!-- ── MCP TAB ───────────────────────────────────────────────────── -->
-        <div v-show="activeTab === 'mcp'" class="s-body mcp-body">
+        <div v-show="activeTab === 'mcp'" class="s-body s-body--bleed mcp-body">
           <h1 class="s-page-title">{{ $t('settings.nav.mcp') }}</h1>
 
           <!-- ── LIST VIEW ──────────────────────────────────────────────── -->
@@ -1816,7 +1816,7 @@ async function plDelete(id: string, name: string) {
               <span class="settings-path" :title="pathForTab('mcp')">{{ pathForTab('mcp') }}</span>
               <button class="settings-path-btn" :disabled="!settingsPaths.mcp" @click="openSettingsPath(settingsPaths.mcp)">{{ $t('action.open') }}</button>
             </div>
-            <p v-if="mError" class="err-msg" style="margin:6px 16px 0">{{ mError }}</p>
+            <p v-if="mError" class="err-msg" style="margin:6px 22px 0">{{ mError }}</p>
             <div v-if="mConflict" class="mcp-conflict">
               <span>{{ $t('settings.mcp.conflict') }}</span>
               <button class="mcp-action-btn" @click="mLoad(true)">{{ $t('settings.mcp.reload') }}</button>
@@ -2044,7 +2044,7 @@ async function plDelete(id: string, name: string) {
         </div>
 
         <!-- ── SKILLS TAB ───────────────────────────────────────────────── -->
-        <div v-show="activeTab === 'skills'" class="s-body" data-settings-section="skills">
+        <div v-show="activeTab === 'skills'" class="s-body s-body--bleed" data-settings-section="skills">
           <h1 class="s-page-title">{{ $t('settings.nav.skills') }}</h1>
           <div class="settings-meta-row">
             <span class="scope-badge">{{ settingsScopeNotes.skills.scope }}</span>
@@ -2055,7 +2055,7 @@ async function plDelete(id: string, name: string) {
         </div>
 
         <!-- ── ANALYZER TAB ─────────────────────────────────────────────── -->
-        <div v-show="activeTab === 'analyzer'" class="s-body analyzer-body">
+        <div v-show="activeTab === 'analyzer'" class="s-body s-body--bleed analyzer-body">
           <h1 class="s-page-title">{{ $t('settings.nav.analyzer') }}</h1>
           <div class="settings-meta-row">
             <span class="scope-badge">{{ settingsScopeNotes.analyzer.scope }}</span>
@@ -2400,7 +2400,7 @@ async function plDelete(id: string, name: string) {
         </div>
 
         <!-- ── PIPELINES TAB ────────────────────────────────────────────── -->
-        <div v-show="activeTab === 'pipelines'" class="s-body pipelines-body" data-settings-section="pipelines">
+        <div v-show="activeTab === 'pipelines'" class="s-body s-body--bleed pipelines-body" data-settings-section="pipelines">
           <h1 class="s-page-title">{{ $t('settings.nav.pipelines') }}</h1>
           <div class="settings-meta-row">
             <span class="scope-badge">{{ settingsScopeNotes.pipelines.scope }}</span>
@@ -2997,7 +2997,7 @@ async function plDelete(id: string, name: string) {
 
         </div>
 
-        <div v-show="activeTab === 'accounts'" class="s-body accounts-body" data-settings-section="accounts">
+        <div v-show="activeTab === 'accounts'" class="s-body s-body--bleed accounts-body" data-settings-section="accounts">
           <h1 class="s-page-title">{{ $t('settings.nav.accounts') }}</h1>
           <div class="settings-meta-row">
             <span class="scope-badge">{{ settingsScopeNotes.accounts.scope }}</span>
@@ -3016,7 +3016,7 @@ async function plDelete(id: string, name: string) {
         </div>
 
         <!-- ── EXTENSIONS TAB (flag-gated) ───────────────────────────────── -->
-        <div v-show="activeTab === 'extensions'" class="s-body" data-settings-section="extensions">
+        <div v-show="activeTab === 'extensions'" class="s-body s-body--bleed" data-settings-section="extensions">
           <h1 class="s-page-title">{{ $t('settings.nav.extensions') }}</h1>
           <ExtensionsPane />
         </div>
@@ -3303,6 +3303,9 @@ async function plDelete(id: string, name: string) {
   font-weight: 700;
   color: var(--text-bright);
 }
+/* The title already reserves --space-group below it; the section's own top
+   margin would double the gap on the tabs that open with a SettingsSection. */
+.s-page-title + .settings-section { margin-top: 0; }
 .s-fullrow {
   padding: var(--space-row-y) var(--space-row-x);
 }
@@ -3442,11 +3445,16 @@ async function plDelete(id: string, name: string) {
 /* Storage tab is a two-column settings page like appearance/general: the bare
    .s-body clips instead of scrolling, so it needs its own scroll + padding. */
 .storage-body { overflow-y: auto; padding: 18px 22px; }
+/* Full-bleed tabs (roles/pipelines/mcp/skills/analyzer/accounts/extensions) keep
+   edge-to-edge bars and split panes, so their body cannot carry the page gutter.
+   The page title carries it instead, matching the 18px/22px inset the padded tab
+   bodies above apply to their whole content. */
+.s-body--bleed > .s-page-title { padding: 18px 22px 0; flex-shrink: 0; }
 .settings-meta-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 16px;
+  padding: 8px 22px;
   border-bottom: 1px solid var(--border-muted);
   background: var(--bg-inset);
   color: var(--text-secondary);
@@ -3498,7 +3506,7 @@ async function plDelete(id: string, name: string) {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 14px;
+  padding: 8px 22px;
   border-bottom: 1px solid var(--border-muted);
   flex-shrink: 0;
 }
@@ -3654,7 +3662,7 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 
 /* ── Appearance tab ─────────────────────────────────────────────────────────── */
 .appearance-body { overflow-y: auto; }
-.shortcuts-body { overflow-y: auto; padding: 16px 18px; }
+.shortcuts-body { overflow-y: auto; padding: 18px 22px; }
 
 /* ── MCP tab ──────────────────────────────────────────────────────────────── */
 .mcp-body { overflow-y: auto; display: flex; flex-direction: column; }
@@ -3662,7 +3670,7 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 /* Top bar */
 .mcp-topbar {
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-  padding: 12px 16px; border-bottom: 1px solid var(--border-muted);
+  padding: 12px 22px; border-bottom: 1px solid var(--border-muted);
   flex-shrink: 0; background: var(--bg-inset);
 }
 .mcp-page-title { font-size: 13px; font-weight: 700; color: var(--text-bright); flex: 1; min-width: 0; }
@@ -3678,10 +3686,10 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
   background: transparent; border: 1px solid var(--border-default); color: var(--text-secondary); cursor: pointer;
 }
 .mcp-back-btn:hover { background: var(--bg-muted); color: var(--text-bright); }
-.mcp-summary-ok { font-size: 11px; color: var(--success-fg); padding: 4px 16px; }
+.mcp-summary-ok { font-size: 11px; color: var(--success-fg); padding: 4px 22px; }
 .mcp-conflict {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
-  margin: 8px 16px 0; padding: 7px 9px; border-left: 3px solid var(--attention-fg);
+  margin: 8px 22px 0; padding: 7px 9px; border-left: 3px solid var(--attention-fg);
   background: color-mix(in srgb, var(--attention-fg) 8%, var(--bg-subtle));
   color: var(--attention-fg); font-size: 11px;
 }
@@ -3851,7 +3859,7 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 .analyzer-body { display: flex; flex-direction: column; gap: 0; overflow-y: auto; padding: 0; }
 
 .az-section {
-  padding: 14px 20px;
+  padding: 14px 22px;
   border-bottom: 1px solid var(--border-muted);
   flex-shrink: 0;
 }
@@ -4022,13 +4030,19 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 }
 /* ── Pipelines tab ─────────────────────────────────────────────────────────── */
 .pipelines-body { display: flex; flex-direction: column; gap: 12px; overflow: hidden; }
-.pl-create-row { display: flex; gap: 6px; align-items: center; padding: 0 16px; }
+/* The 12px flex gap already sits below the title, so trim its margin to keep the
+   title→content gap at --space-group like every other tab. */
+.pipelines-body > .s-page-title { margin-bottom: calc(var(--space-group) - 12px); }
+.pl-create-row { display: flex; gap: 6px; align-items: center; padding: 0 22px; }
+/* Empty/loading placeholders in this tab are bare <p>/<div>; give them the same
+   gutter as the list so they are not flush against the modal edge. */
+.pipelines-body > .hint { padding: 0 22px; }
 .pl-input {
   background: var(--bg-inset); border: 1px solid var(--accent-emphasis); border-radius: 4px;
   color: var(--text-bright); font-size: 12px; padding: 5px 8px; flex: 1;
 }
 .pl-rename { max-width: 180px; }
-.pl-list { list-style: none; margin: 0; padding: 0 16px; display: flex; flex-direction: column; gap: 6px; overflow-y: auto; min-height: 0; }
+.pl-list { list-style: none; margin: 0; padding: 0 22px; display: flex; flex-direction: column; gap: 6px; overflow-y: auto; min-height: 0; }
 .pl-item {
   background: var(--bg-subtle); border: 1px solid var(--border-muted); border-radius: 6px;
   padding: 10px 12px; display: flex; flex-direction: column; gap: 6px;
@@ -4077,7 +4091,7 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 .pl-delete-icon:disabled { opacity: 0.2; cursor: not-allowed; }
 .pl-detail-header {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  padding: 4px 16px 12px; border-bottom: 1px solid var(--border-muted); margin-bottom: 6px; min-height: 36px;
+  padding: 4px 22px 12px; border-bottom: 1px solid var(--border-muted); margin-bottom: 6px; min-height: 36px;
 }
 .pl-detail-title { font-size: 15px; font-weight: 600; color: var(--accent-bright); margin: 0; flex: 1; display: flex; align-items: center; gap: 6px; }
 .pl-rename-icon {

@@ -539,7 +539,9 @@ onMounted(() => void loadSkills())
   flex: 1;
   min-height: 0;
   flex-direction: column;
-  padding: 16px 18px 18px;
+  /* Horizontal gutter matches the settings page gutter so the pane lines up with
+     the <h1> and the scope band the settings modal renders above it. */
+  padding: 16px 22px 18px;
   gap: 12px;
   overflow: hidden;
   color: var(--text-primary);

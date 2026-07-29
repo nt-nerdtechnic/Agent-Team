@@ -93,8 +93,6 @@ onMounted(refreshInstalled)
 
 <template>
   <div class="extensions-pane">
-    <h2 class="ext-title">Extensions</h2>
-
     <p v-if="error" class="ext-error" role="alert">{{ error }}</p>
 
     <section class="ext-section">
@@ -157,15 +155,14 @@ onMounted(refreshInstalled)
 
 <style scoped>
 .extensions-pane {
-  padding: 12px 16px;
+  /* Horizontal gutter matches the settings page gutter so the pane lines up with
+     the <h1> the settings modal renders above it; the modal already reserves the
+     gap below that title, so no top padding here. */
+  padding: 0 22px 12px;
   font-size: 13px;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-}
-.ext-title {
-  font-size: 16px;
-  margin-bottom: 12px;
 }
 .ext-section {
   margin-bottom: 20px;
