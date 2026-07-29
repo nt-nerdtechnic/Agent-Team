@@ -6,6 +6,7 @@ import {
   pendingRestorePaneIds,
   resolveWorkspaceRestoreSession,
   restoreScopeTargetIds,
+  runWithConcurrency,
   settleWorkspaceRestoreSession,
   stripPinnedSessionId,
 } from '../resumeBehavior'
@@ -30,6 +31,7 @@ describe('normalizeRestoreScope', () => {
     expect(normalizeRestoreScope('single')).toBe('single')
     expect(normalizeRestoreScope('page')).toBe('page')
     expect(normalizeRestoreScope('tab')).toBe('tab')
+    expect(normalizeRestoreScope('all')).toBe('all')
   })
 
   it('defaults missing or invalid values to one CLI', () => {
@@ -60,6 +62,43 @@ describe('restoreScopeTargetIds', () => {
 
   it('uses every eligible pane in the active tab', () => {
     expect(restoreScopeTargetIds({ ...base, scope: 'tab' })).toEqual(['a', 'b'])
+  })
+
+  it('uses every eligible pending pane for all, active tab first', () => {
+    expect(restoreScopeTargetIds({ ...base, scope: 'all' })).toEqual(['a', 'b', 'd'])
+  })
+})
+
+describe('runWithConcurrency', () => {
+  it('runs at most the given number of tasks at once, in id order', async () => {
+    const started: string[] = []
+    let active = 0
+    let peak = 0
+    const resolvers = new Map<string, () => void>()
+    const run = runWithConcurrency(['a', 'b', 'c', 'd'], 2, (id) => {
+      started.push(id)
+      active += 1
+      peak = Math.max(peak, active)
+      return new Promise<void>((resolve) => {
+        resolvers.set(id, () => { active -= 1; resolve() })
+      })
+    })
+    await Promise.resolve()
+    expect(started).toEqual(['a', 'b'])
+    resolvers.get('a')!()
+    await Promise.resolve()
+    expect(started).toEqual(['a', 'b', 'c'])
+    resolvers.get('b')!()
+    resolvers.get('c')!()
+    await Promise.resolve()
+    resolvers.get('d')!()
+    await run
+    expect(started).toEqual(['a', 'b', 'c', 'd'])
+    expect(peak).toBe(2)
+  })
+
+  it('resolves immediately with no ids', async () => {
+    await expect(runWithConcurrency([], 2, async () => {})).resolves.toBeUndefined()
   })
 })
 

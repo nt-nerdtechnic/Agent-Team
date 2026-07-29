@@ -113,12 +113,14 @@ import {
 import { gridPageCount, gridPageSlice, gridPresetDims, parseGridPreset, type GridPreset } from './lib/gridLayout'
 import { parseLegacyRunGroups, resolveActiveTab, resolveManualSpawnGroupId } from './lib/runGroups'
 import {
+  ALL_SCOPE_RESTORE_CONCURRENCY,
   RESUME_BEHAVIOR_SETTING_KEY,
   RESTORE_SCOPE_SETTING_KEY,
   createWorkspaceRestoreSession,
   pendingRestorePaneIds,
   resolveWorkspaceRestoreSession,
   restoreScopeTargetIds,
+  runWithConcurrency,
   stripPinnedSessionId,
   type RestoreScope,
   type RestoreSessionDecision,
@@ -5227,7 +5229,11 @@ async function advanceRestoreSession(trigger: RestoreSessionTrigger, coldBatch?:
       : [])
     : restoreSessionScopeTargets(session, trigger)
   const reconnectStart = reconnectedCount.value
-  await Promise.all(ids.map((paneId) => realizeRestoredPane(paneId, true)))
+  if (decision === 'resume' && session.scope === 'all') {
+    await runWithConcurrency(ids, ALL_SCOPE_RESTORE_CONCURRENCY, (paneId) => realizeRestoredPane(paneId, true))
+  } else {
+    await Promise.all(ids.map((paneId) => realizeRestoredPane(paneId, true)))
+  }
   const reconnected = reconnectedCount.value - reconnectStart
   if (reconnected > 0) {
     notifyRestore.toast(i18n.global.t('reconnect.auto-toast', { count: reconnected }), { type: 'success' })

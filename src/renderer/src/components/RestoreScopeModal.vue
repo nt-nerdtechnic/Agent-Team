@@ -31,6 +31,7 @@ watch(
           <button @click="emit('select', 'single')">{{ $t('restore.scope-single') }}</button>
           <button @click="emit('select', 'page')">{{ $t('restore.scope-page') }}</button>
           <button @click="emit('select', 'tab')">{{ $t('restore.scope-tab') }}</button>
+          <button @click="emit('select', 'all')">{{ $t('restore.scope-all') }}</button>
         </div>
         <button class="fresh" @click="emit('fresh')">{{ $t('restore.scope-fresh') }}</button>
       </section>

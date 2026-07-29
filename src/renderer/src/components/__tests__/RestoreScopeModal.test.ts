@@ -15,6 +15,7 @@ function mountModal(open = true) {
           'restore.scope-single': 'Resume one CLI',
           'restore.scope-page': 'Resume current Grid page',
           'restore.scope-tab': 'Resume active tab',
+          'restore.scope-all': 'Resume all CLIs',
           'restore.scope-fresh': 'Start all fresh',
         })[key] ?? key,
       },
@@ -30,8 +31,9 @@ describe('RestoreScopeModal', () => {
     await buttons[0].trigger('click')
     await buttons[1].trigger('click')
     await buttons[2].trigger('click')
+    await buttons[3].trigger('click')
 
-    expect(wrapper.emitted('select')?.map(([scope]) => scope)).toEqual(['single', 'page', 'tab'])
+    expect(wrapper.emitted('select')?.map(([scope]) => scope)).toEqual(['single', 'page', 'tab', 'all'])
   })
 
   it('keeps explicit fresh separate from cancelling or dismissing', async () => {

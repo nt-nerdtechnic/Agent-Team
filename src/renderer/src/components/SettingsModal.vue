@@ -2676,6 +2676,7 @@ async function plDelete(id: string, name: string) {
                     <option value="single">{{ $t('settings.appearance.restore-scope-single') }}</option>
                     <option value="page">{{ $t('settings.appearance.restore-scope-page') }}</option>
                     <option value="tab">{{ $t('settings.appearance.restore-scope-tab') }}</option>
+                    <option value="all">{{ $t('settings.appearance.restore-scope-all') }}</option>
                   </select>
                 </template>
               </SettingRow>

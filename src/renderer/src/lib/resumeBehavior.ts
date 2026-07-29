@@ -5,7 +5,7 @@
 // confirm-dialog `ask`.
 
 export type ResumeBehavior = 'always' | 'never' | 'ask'
-export type RestoreScope = 'single' | 'page' | 'tab'
+export type RestoreScope = 'single' | 'page' | 'tab' | 'all'
 
 /** Settings-store key (ui_settings.json via lib/settings.ts). */
 export const RESUME_BEHAVIOR_SETTING_KEY = 'agentTeam.resumeBehavior'
@@ -19,7 +19,7 @@ export function normalizeResumeBehavior(v: unknown): ResumeBehavior {
 
 /** Scope for an automatic resume. Old installs safely restore one CLI only. */
 export function normalizeRestoreScope(v: unknown): RestoreScope {
-  return v === 'page' || v === 'tab' ? v : 'single'
+  return v === 'page' || v === 'tab' || v === 'all' ? v : 'single'
 }
 
 export type RestoreDecision = 'resume' | 'fresh'
@@ -100,7 +100,34 @@ export function restoreScopeTargetIds(opts: {
     return (focused ? [focused] : candidates.slice(0, 1))
   }
   if (opts.scope === 'page') return eligible(opts.gridPagePaneIds)
+  if (opts.scope === 'all') {
+    // Visible panes first so the user sees progress in the active tab.
+    const rest = eligible(opts.pendingPaneIds).filter((id) => !activeTab.includes(id))
+    return [...activeTab, ...rest]
+  }
   return activeTab
+}
+
+/** An 'all' restore starts at most this many panes at once; each next pane
+ *  waits for a prior spawn to complete (backend spawn ack). */
+export const ALL_SCOPE_RESTORE_CONCURRENCY = 2
+
+/** Run task over ids with a fixed worker count, preserving start order. */
+export async function runWithConcurrency(
+  ids: readonly string[],
+  limit: number,
+  task: (id: string) => Promise<void>,
+): Promise<void> {
+  let next = 0
+  const worker = async (): Promise<void> => {
+    while (next < ids.length) {
+      const id = ids[next]
+      next += 1
+      await task(id)
+    }
+  }
+  const workers = Math.max(1, Math.min(limit, ids.length))
+  await Promise.all(Array.from({ length: workers }, () => worker()))
 }
 
 /** Remove a hand-written `--session-id <uuid>` (or `--session-id=<uuid>`) from a
