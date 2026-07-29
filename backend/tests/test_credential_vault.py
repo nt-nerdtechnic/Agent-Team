@@ -89,18 +89,21 @@ def _write(path: Path, text: str) -> None:
     ("claude", ".claude/.credentials.json"),
 ])
 def test_capture_and_restore_round_trip(tmp_path: Path, agent_key: str, live_rel: str) -> None:
+    # __default__ is the slot that owns the live location for every agent
+    # (a managed claude profile keeps its secret in its own profile home —
+    # see test_switch_to_managed_claude_profile_keeps_live_secret).
     vault = _file_vault(tmp_path)
     live = tmp_path / "home" / live_rel
     _write(live, '{"who": "acct-a"}')
 
-    assert vault.slot_is_empty(agent_key, "slot1")
-    vault.capture(agent_key, "slot1")
-    assert not vault.slot_is_empty(agent_key, "slot1")
+    assert vault.slot_is_empty(agent_key, DEFAULT_SLOT_ID)
+    vault.capture(agent_key, DEFAULT_SLOT_ID)
+    assert not vault.slot_is_empty(agent_key, DEFAULT_SLOT_ID)
 
     vault.clear_live(agent_key)
     assert not live.exists()
 
-    vault.restore(agent_key, "slot1")
+    vault.restore(agent_key, DEFAULT_SLOT_ID)
     assert live.read_text(encoding="utf-8") == '{"who": "acct-a"}'
 
 
@@ -220,6 +223,298 @@ def test_claude_oauth_account_round_trip(tmp_path: Path) -> None:
     assert config["theme"] == "dark"
 
 
+# ── managed claude profiles keep their token out of the live location ───────
+#
+# Claude Code serializes OAuth refreshes per CLAUDE_CONFIG_DIR and rotates
+# refresh tokens without a grace period, so the same token present in both the
+# real home and a profile home is refreshed twice by locks that cannot see each
+# other and one side ends up dead ("Login expired").
+
+
+def _claude_live_file(tmp_path: Path) -> Path:
+    return tmp_path / "home" / ".claude" / ".credentials.json"
+
+
+def test_switch_to_managed_claude_profile_keeps_live_secret(tmp_path: Path) -> None:
+    """Switching to a managed profile publishes only its display-only account:
+    the live secret (the default account's own token) must stay untouched, and
+    the profile's token must never be copied there."""
+    vault = _file_vault(tmp_path)
+    live = _claude_live_file(tmp_path)
+    _write(live, "DEFAULT-TOKEN")
+    _write(
+        tmp_path / "home" / ".claude.json",
+        json.dumps({"oauthAccount": {"emailAddress": "default@x.com"}, "theme": "dark"}),
+    )
+    vault.write_slot(
+        "claude", "acct1",
+        LiveCredentials(secret="ACCT1-TOKEN", account={"emailAddress": "acct1@x.com"}),
+    )
+
+    vault.switch("claude", DEFAULT_SLOT_ID, "acct1")
+
+    assert live.read_text(encoding="utf-8") == "DEFAULT-TOKEN"
+    assert vault.read_slot("claude", DEFAULT_SLOT_ID).secret == "DEFAULT-TOKEN"
+    config = json.loads((tmp_path / "home" / ".claude.json").read_text(encoding="utf-8"))
+    assert config["oauthAccount"] == {"emailAddress": "acct1@x.com"}
+    assert config["theme"] == "dark"
+
+
+def test_mac_switch_to_managed_claude_profile_keeps_live_keychain_item(
+    tmp_path: Path,
+) -> None:
+    vault, sec = _mac_vault(tmp_path)
+    sec.items[CLAUDE_LIVE_KEYCHAIN_SERVICE] = "DEFAULT-TOKEN"
+    vault.write_slot("claude", "acct1", LiveCredentials(secret="ACCT1-TOKEN"))
+
+    vault.switch("claude", DEFAULT_SLOT_ID, "acct1")
+
+    assert sec.items[CLAUDE_LIVE_KEYCHAIN_SERVICE] == "DEFAULT-TOKEN"
+    assert sec.items["Navide CLI account claude-acct1"] == "ACCT1-TOKEN"
+
+
+def test_capture_managed_claude_profile_reads_profile_home(tmp_path: Path) -> None:
+    """The profile's panes refresh their token inside the profile home, so a
+    capture must snapshot that token — not the live one, which belongs to the
+    default account — while the account display still comes from live."""
+    vault = _file_vault(tmp_path)
+    _write(_claude_live_file(tmp_path), "DEFAULT-TOKEN")
+    _write(
+        tmp_path / "home" / ".claude.json",
+        '{"oauthAccount": {"emailAddress": "acct1@x.com"}}',
+    )
+    vault.write_slot("claude", "acct1", LiveCredentials(secret="OLD-SNAPSHOT"))
+    _write(vault.profile_home_path("claude", "acct1") / ".credentials.json", "REFRESHED")
+
+    captured = vault.capture("claude", "acct1")
+
+    assert captured.secret == "REFRESHED"
+    slot = vault.read_slot("claude", "acct1")
+    assert slot.secret == "REFRESHED"
+    assert slot.account == {"emailAddress": "acct1@x.com"}
+
+
+def test_capture_managed_claude_profile_never_imports_live_secret(tmp_path: Path) -> None:
+    """No pane has run for this profile yet (empty profile home): the slot
+    keeps its own snapshot instead of adopting the live account's token."""
+    vault = _file_vault(tmp_path)
+    _write(_claude_live_file(tmp_path), "DEFAULT-TOKEN")
+    vault.write_slot("claude", "acct1", LiveCredentials(secret="ACCT1-TOKEN"))
+
+    assert vault.capture("claude", "acct1").secret == "ACCT1-TOKEN"
+    assert vault.read_slot("claude", "acct1").secret == "ACCT1-TOKEN"
+
+
+def test_harvest_managed_claude_profile_reads_profile_home(tmp_path: Path) -> None:
+    vault = _file_vault(tmp_path)
+    _write(_claude_live_file(tmp_path), "DEFAULT-TOKEN")
+
+    # Never signed in: the live default token must not leak into the slot.
+    assert vault.harvest("claude", "acct1") is False
+    assert vault.slot_is_empty("claude", "acct1")
+
+    _write(vault.profile_home_path("claude", "acct1") / ".credentials.json", "PANE-LOGIN")
+    assert vault.harvest("claude", "acct1") is True
+    assert vault.read_slot("claude", "acct1").secret == "PANE-LOGIN"
+
+
+def test_switch_back_to_default_restores_live_and_captures_profile_home(
+    tmp_path: Path,
+) -> None:
+    """__default__ still owns the live location: a round trip republishes its
+    snapshot verbatim, while the outgoing profile's refreshed token is captured
+    from its profile home."""
+    vault = _file_vault(tmp_path)
+    live = _claude_live_file(tmp_path)
+    _write(live, "DEFAULT-TOKEN")
+    _write(
+        tmp_path / "home" / ".claude.json",
+        '{"oauthAccount": {"emailAddress": "default@x.com"}}',
+    )
+    vault.write_slot(
+        "claude", "acct1",
+        LiveCredentials(secret="ACCT1-TOKEN", account={"emailAddress": "acct1@x.com"}),
+    )
+
+    vault.switch("claude", DEFAULT_SLOT_ID, "acct1")
+    # A pane of acct1 refreshes the token inside the profile home.
+    _write(vault.profile_home_path("claude", "acct1") / ".credentials.json", "ACCT1-REFRESHED")
+    vault.switch("claude", "acct1", DEFAULT_SLOT_ID)
+
+    assert live.read_text(encoding="utf-8") == "DEFAULT-TOKEN"
+    assert vault.read_slot("claude", "acct1").secret == "ACCT1-REFRESHED"
+    config = json.loads((tmp_path / "home" / ".claude.json").read_text(encoding="utf-8"))
+    assert config["oauthAccount"] == {"emailAddress": "default@x.com"}
+
+
+def _claude_secret(token: str, expires_at: object | None = None) -> str:
+    oauth: dict = {"accessToken": token}
+    if expires_at is not None:
+        oauth["expiresAt"] = expires_at
+    return json.dumps({"claudeAiOauth": oauth})
+
+
+def _oauth_account(tmp_path: Path) -> object:
+    config = json.loads((tmp_path / "home" / ".claude.json").read_text(encoding="utf-8"))
+    return config.get("oauthAccount")
+
+
+def _seed_default_restore(
+    tmp_path: Path, *, live: str | None, slot: str | None
+) -> CredentialVault:
+    """A managed profile is active; restoring __default__ brings the built-in
+    login back. ``live`` is what the default account's own storage holds now,
+    ``slot`` the snapshot taken when the user switched away."""
+    vault = _file_vault(tmp_path)
+    if live is not None:
+        _write(_claude_live_file(tmp_path), live)
+    _write(
+        tmp_path / "home" / ".claude.json",
+        '{"oauthAccount": {"emailAddress": "acct1@x.com"}, "theme": "dark"}',
+    )
+    vault.write_slot(
+        "claude", DEFAULT_SLOT_ID,
+        LiveCredentials(secret=slot, account={"emailAddress": "default@x.com"}),
+    )
+    return vault
+
+
+def test_restore_default_keeps_fresher_live_secret(tmp_path: Path) -> None:
+    """An unmanaged pane refreshed the default account's token in place while a
+    managed profile was active, so the snapshot is stale. Republishing it would
+    rotate-kill the account; only the display-only account is published."""
+    vault = _seed_default_restore(
+        tmp_path, live=_claude_secret("ROTATED", 2000), slot=_claude_secret("STALE", 1000)
+    )
+
+    vault.restore("claude", DEFAULT_SLOT_ID)
+
+    assert _claude_live_file(tmp_path).read_text(encoding="utf-8") == \
+        _claude_secret("ROTATED", 2000)
+    assert _oauth_account(tmp_path) == {"emailAddress": "default@x.com"}
+
+
+def test_restore_default_keeps_live_secret_on_equal_expiry(tmp_path: Path) -> None:
+    """Equal expiry means live is not older, so it is kept — the same >=
+    comparison the profile-home seeding path uses."""
+    vault = _seed_default_restore(
+        tmp_path, live=_claude_secret("LIVE", 1500), slot=_claude_secret("SNAPSHOT", 1500)
+    )
+
+    vault.restore("claude", DEFAULT_SLOT_ID)
+
+    assert _claude_live_file(tmp_path).read_text(encoding="utf-8") == \
+        _claude_secret("LIVE", 1500)
+    assert _oauth_account(tmp_path) == {"emailAddress": "default@x.com"}
+
+
+def test_restore_default_publishes_newer_slot_secret(tmp_path: Path) -> None:
+    """The ordinary case: the snapshot is newer than what is live (e.g. a fresh
+    re-login was harvested into the slot), so it is published."""
+    vault = _seed_default_restore(
+        tmp_path, live=_claude_secret("OLD", 1000), slot=_claude_secret("RELOGIN", 2000)
+    )
+
+    vault.restore("claude", DEFAULT_SLOT_ID)
+
+    assert _claude_live_file(tmp_path).read_text(encoding="utf-8") == \
+        _claude_secret("RELOGIN", 2000)
+    assert _oauth_account(tmp_path) == {"emailAddress": "default@x.com"}
+
+
+def test_restore_default_rescues_missing_live_secret(tmp_path: Path) -> None:
+    """The live credential is gone (an external `claude logout`, a wiped
+    Keychain item): the snapshot is the only rescue path and must be written."""
+    vault = _seed_default_restore(tmp_path, live=None, slot=_claude_secret("SNAPSHOT", 1000))
+
+    vault.restore("claude", DEFAULT_SLOT_ID)
+
+    assert _claude_live_file(tmp_path).read_text(encoding="utf-8") == \
+        _claude_secret("SNAPSHOT", 1000)
+    assert _oauth_account(tmp_path) == {"emailAddress": "default@x.com"}
+
+
+def test_restore_default_writes_when_expiry_unparsable(tmp_path: Path) -> None:
+    """No comparable expiry (not JSON, or no claudeAiOauth.expiresAt) means the
+    freshness question cannot be answered — stay conservative and publish."""
+    vault = _seed_default_restore(
+        tmp_path, live="not-json", slot=_claude_secret("SNAPSHOT", 1000)
+    )
+
+    vault.restore("claude", DEFAULT_SLOT_ID)
+
+    assert _claude_live_file(tmp_path).read_text(encoding="utf-8") == \
+        _claude_secret("SNAPSHOT", 1000)
+
+    vault = _seed_default_restore(
+        tmp_path, live=_claude_secret("LIVE", 2000), slot=_claude_secret("SNAPSHOT")
+    )
+
+    vault.restore("claude", DEFAULT_SLOT_ID)
+
+    assert _claude_live_file(tmp_path).read_text(encoding="utf-8") == \
+        _claude_secret("SNAPSHOT")
+
+
+def test_restore_empty_default_slot_still_clears_live(tmp_path: Path) -> None:
+    """The guard never changes the logged-out semantics: an empty __default__
+    slot still clears the live credentials and the account display, however
+    fresh the live secret is."""
+    vault = _file_vault(tmp_path)
+    _write(_claude_live_file(tmp_path), _claude_secret("LIVE", 2000))
+    _write(
+        tmp_path / "home" / ".claude.json",
+        '{"oauthAccount": {"emailAddress": "acct1@x.com"}, "theme": "dark"}',
+    )
+
+    vault.restore("claude", DEFAULT_SLOT_ID)
+
+    assert not _claude_live_file(tmp_path).exists()
+    assert _oauth_account(tmp_path) is None
+    config = json.loads((tmp_path / "home" / ".claude.json").read_text(encoding="utf-8"))
+    assert config["theme"] == "dark"
+
+
+def test_mac_restore_default_keeps_fresher_live_keychain_item(tmp_path: Path) -> None:
+    vault, sec = _mac_vault(tmp_path)
+    sec.items[CLAUDE_LIVE_KEYCHAIN_SERVICE] = _claude_secret("ROTATED", 2000)
+    vault.write_slot(
+        "claude", DEFAULT_SLOT_ID, LiveCredentials(secret=_claude_secret("STALE", 1000))
+    )
+
+    vault.restore("claude", DEFAULT_SLOT_ID)
+
+    assert sec.items[CLAUDE_LIVE_KEYCHAIN_SERVICE] == _claude_secret("ROTATED", 2000)
+
+
+def test_switch_rollback_from_managed_profile_keeps_live_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed restore must not write the outgoing profile's token into the
+    live location — that would plant the very duplicate this split prevents.
+    Only the display-only account reverts to the still-active profile."""
+    vault = _file_vault(tmp_path)
+    live = _claude_live_file(tmp_path)
+    _write(live, "DEFAULT-TOKEN")
+    _write(
+        tmp_path / "home" / ".claude.json",
+        '{"oauthAccount": {"emailAddress": "acct1@x.com"}}',
+    )
+    _write(vault.profile_home_path("claude", "acct1") / ".credentials.json", "ACCT1-TOKEN")
+
+    def boom(agent_key: str, slot_id: str) -> None:
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(vault, "restore", boom)
+    with pytest.raises(CredentialVaultError):
+        vault.switch("claude", "acct1", DEFAULT_SLOT_ID)
+
+    assert live.read_text(encoding="utf-8") == "DEFAULT-TOKEN"
+    assert vault.read_slot("claude", "acct1").secret == "ACCT1-TOKEN"
+    config = json.loads((tmp_path / "home" / ".claude.json").read_text(encoding="utf-8"))
+    assert config["oauthAccount"] == {"emailAddress": "acct1@x.com"}
+
+
 # ── atomic writes ───────────────────────────────────────────────────────────
 
 
@@ -275,11 +570,13 @@ def test_mac_switch_moves_secret_between_keychain_services(tmp_path: Path) -> No
 
     vault.switch("claude", DEFAULT_SLOT_ID, "acct1")
 
-    # Old login parked in the backend-owned slot item; live item gone (acct1
-    # slot was empty -> logged-out live state).
+    # Old login snapshotted into the backend-owned slot item. The live item
+    # keeps it too: it is the default account's own storage, and a managed
+    # profile runs off its profile home instead of the live location.
     assert sec.items["Navide CLI account claude-__default__"] == \
         '{"claudeAiOauth": {"accessToken": "A"}}'
-    assert "Claude Code-credentials" not in sec.items
+    assert sec.items["Claude Code-credentials"] == \
+        '{"claudeAiOauth": {"accessToken": "A"}}'
 
     # Switching back restores the live item from the slot.
     vault.switch("claude", "acct1", DEFAULT_SLOT_ID)

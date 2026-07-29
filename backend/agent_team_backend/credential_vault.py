@@ -7,6 +7,11 @@ account's slot and restores the incoming account's slot into the live
 location. The reserved slot ``__default__`` holds the unmanaged original
 login while a managed account is active.
 
+Claude is the exception: a managed claude profile's token stays in that
+profile's own home and is never copied to the live location (see
+``_live_owns_slot_secret``), so switching only publishes its display-only
+``oauthAccount``.
+
 Live credential locations (relative to the real home):
 
     claude  macOS: Keychain generic password, service
@@ -461,6 +466,17 @@ class CredentialVault:
             return LiveCredentials(secret=secret, account=account)
         return LiveCredentials(secret=_read_text(slot / _SLOT_FILES[agent_key]))
 
+    def _claude_profile_home_secret(self, slot_id: str) -> str | None:
+        """The credential a managed claude profile's own persistent home holds
+        — the copy a running CLI refreshes in place. None when the home has
+        none (no pane has run for this profile yet)."""
+        home = self.profile_home_path("claude", slot_id)
+        return (
+            self._keychain_read(legacy_claude_keychain_service(home))
+            if self._is_macos
+            else _read_text(home / ".credentials.json")
+        )
+
     def resolve_claude_credentials(
         self, slot_id: str, *, active: bool
     ) -> LiveCredentials:
@@ -472,12 +488,7 @@ class CredentialVault:
         read-only: it never captures, restores, switches, or writes credentials.
         """
         if slot_id != DEFAULT_SLOT_ID:
-            home = self.profile_home_path("claude", slot_id)
-            runtime_secret = (
-                self._keychain_read(legacy_claude_keychain_service(home))
-                if self._is_macos
-                else _read_text(home / ".credentials.json")
-            )
+            runtime_secret = self._claude_profile_home_secret(slot_id)
             if runtime_secret is not None:
                 return LiveCredentials(secret=runtime_secret)
         return self.read_live("claude") if active else self.read_slot("claude", slot_id)
@@ -560,28 +571,101 @@ class CredentialVault:
 
     # ---- account switching ----
 
-    def capture(self, agent_key: str, slot_id: str) -> LiveCredentials:
-        """Mirror the live credential state into ``slot_id`` (a logged-out
-        live state empties the slot). Returns the captured snapshot."""
+    def _live_owns_slot_secret(self, agent_key: str, slot_id: str) -> bool:
+        """True when ``slot_id``'s credential secret belongs in the live
+        location.
+
+        Claude Code scopes its whole OAuth refresh serialization (the
+        cross-process file lock, the ``.storage-write`` lock, the CAS guard) to
+        ``CLAUDE_CONFIG_DIR``, and its refresh tokens rotate without a grace
+        period. One refresh token copied into both the real home and a managed
+        profile home therefore gets rotated twice by locks that cannot see each
+        other, and whichever side refreshes first kills the other ("Login
+        expired"). So a managed claude profile keeps its token in its own
+        profile home only, and the slot is a backup snapshot; only the reserved
+        default slot owns the live location. Agents without that
+        refresh-locking behaviour keep using the live location as before.
+        """
+        return agent_key != "claude" or slot_id == DEFAULT_SLOT_ID
+
+    def _slot_source_credentials(self, agent_key: str, slot_id: str) -> LiveCredentials:
+        """The credential state a capture/harvest of ``slot_id`` should store.
+
+        A managed claude profile's panes refresh their token inside the profile
+        home, so that copy — not the live location, which belongs to the default
+        account — is the profile's current credential. An empty profile home
+        means no pane has run yet: the slot keeps what it already holds rather
+        than importing the live secret, which belongs to another account.
+        ``account`` is display info and always comes from the live
+        ``~/.claude.json``, which the active profile owns.
+        """
         creds = self.read_live(agent_key)
+        if self._live_owns_slot_secret(agent_key, slot_id):
+            return creds
+        secret = self._claude_profile_home_secret(slot_id)
+        if secret is None:
+            secret = self.read_slot(agent_key, slot_id).secret
+        return LiveCredentials(secret=secret, account=creds.account)
+
+    def capture(self, agent_key: str, slot_id: str) -> LiveCredentials:
+        """Mirror the credential state ``slot_id`` currently runs on into the
+        slot (a logged-out state empties the slot). Returns the snapshot."""
+        creds = self._slot_source_credentials(agent_key, slot_id)
         self.write_slot(agent_key, slot_id, creds)
         return creds
 
     def restore(self, agent_key: str, slot_id: str) -> None:
-        """Make ``slot_id``'s content the live credentials. An empty slot
-        clears the live credentials (the CLI then prompts a fresh login)."""
-        self.write_live(agent_key, self.read_slot(agent_key, slot_id))
+        """Make ``slot_id`` the active account. For a slot that owns the live
+        location its content becomes the live credentials, and an empty slot
+        clears them (the CLI then prompts a fresh login) — unless the live
+        secret is already at least as fresh as the snapshot (see below). A
+        managed claude profile keeps its secret in its own profile home, so only
+        the display-only ``oauthAccount`` is published. ``oauthAccount`` is
+        display info and is always published, whichever branch runs."""
+        creds = self.read_slot(agent_key, slot_id)
+        if not self._live_owns_slot_secret(agent_key, slot_id):
+            self._write_live_oauth_account(creds.account)
+            return
+        if (
+            agent_key == "claude"
+            and creds.secret is not None
+            # Expiry comparison: True when the first secret is not older than
+            # the second (same helper, same >= semantics, as the profile-home
+            # seeding path).
+            and _claude_home_secret_is_fresher(self.read_live("claude").secret, creds.secret)
+        ):
+            # The live location is the default account's own storage: it keeps
+            # the token while a managed profile is active, and an unmanaged pane
+            # (or the user's own terminal, or `claude doctor`) refreshes it in
+            # place there, leaving this snapshot behind. Anthropic's refresh
+            # tokens rotate without a grace period, so republishing a stale
+            # snapshot over a newer live token kills the account ("Login
+            # expired"). A missing or unparsable expiry on either side makes the
+            # comparison impossible and falls through to the write on purpose:
+            # the snapshot is the only rescue path when the live credential is
+            # gone (an external `claude logout`, a wiped Keychain item), and
+            # losing that is worse than a redundant write.
+            self._write_live_oauth_account(creds.account)
+            return
+        self.write_live(agent_key, creds)
 
     def switch(self, agent_key: str, from_slot_id: str, to_slot_id: str) -> None:
-        """Atomically move the live credentials into ``from_slot_id`` and bring
-        ``to_slot_id`` live. On a restore failure the captured snapshot is
+        """Atomically capture the outgoing account into ``from_slot_id`` and
+        bring ``to_slot_id`` live. On a restore failure the captured snapshot is
         written back so the live state is never lost."""
         outgoing = self.capture(agent_key, from_slot_id)
         try:
             self.restore(agent_key, to_slot_id)
         except Exception as err:
             try:
-                self.write_live(agent_key, outgoing)
+                if self._live_owns_slot_secret(agent_key, from_slot_id):
+                    self.write_live(agent_key, outgoing)
+                else:
+                    # The outgoing profile's secret was never in the live
+                    # location (it lives in that profile's home), so writing it
+                    # back would plant exactly the duplicate this split exists
+                    # to prevent. Only the display-only account has to revert.
+                    self._write_live_oauth_account(outgoing.account)
             except Exception as rollback_err:  # noqa: BLE001
                 log.error(
                     "credential rollback for %s failed after restore error: %s",
@@ -592,12 +676,13 @@ class CredentialVault:
             ) from err
 
     def harvest(self, agent_key: str, slot_id: str) -> bool:
-        """Opportunistically fill an EMPTY slot from live credentials (the user
-        just logged in inside a pane). No-op when the slot already holds a
-        secret or nothing is live. Returns True when something was harvested."""
+        """Opportunistically fill an EMPTY slot from the credentials the account
+        currently runs on (the user just logged in inside a pane). No-op when
+        the slot already holds a secret or nothing is signed in. Returns True
+        when something was harvested."""
         if not self.slot_is_empty(agent_key, slot_id):
             return False
-        creds = self.read_live(agent_key)
+        creds = self._slot_source_credentials(agent_key, slot_id)
         if creds.secret is None:
             return False
         self.write_slot(agent_key, slot_id, creds)
