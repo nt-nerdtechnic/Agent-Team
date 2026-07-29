@@ -81,7 +81,11 @@ const renameEditing = ref(false)
 const renameDraft = ref('')
 const sessionIdCopied = ref(false)
 let copiedTimer: number | undefined
-const confirmDelete = ref(false)
+// Captured target of the delete confirmation (null = no dialog). Holding the
+// entry instead of a boolean keeps the dialog's label, its figures and the
+// emitted delete pinned to the entry the dry-run actually ran for, even when
+// the selection moves while the probe is in flight.
+const confirmDeleteEntry = ref<SpawnHistoryEntry | null>(null)
 const cleanupMenuOpen = ref(false)
 // Snapshotted when the menu opens so the displayed counts and the emitted
 // cutoff agree exactly.
@@ -93,6 +97,10 @@ const confirmCleanup = ref<{ mode: HistoryCleanupMode; count: number } | null>(n
 // dialog then confirms without the figures rather than blocking the delete.
 const deletePreview = ref<HistoryDeletePreview | null>(null)
 const deletePreviewPending = ref(false)
+// Bumped whenever the modal closes. A dry-run captures it before awaiting and
+// bails when it no longer matches, so an in-flight probe can never resurrect a
+// confirmation over a closed modal.
+let confirmSeq = 0
 
 // Autofocus + select the inline rename input the moment it mounts (same
 // pattern as App.vue's pane-header inline rename).
@@ -110,10 +118,12 @@ watch(() => props.show, (open) => {
     originFilter.value = 'all'
     starredOnly.value = false
     selectedPaneId.value = ''
-    confirmDelete.value = false
+    confirmDeleteEntry.value = null
     cleanupMenuOpen.value = false
     confirmCleanup.value = null
+    cleanupCutoffIso.value = ''
     deletePreview.value = null
+    confirmSeq++
     if (contentSearchDebounceTimer !== undefined) { window.clearTimeout(contentSearchDebounceTimer); contentSearchDebounceTimer = undefined }
     contentSearchSeq++
     contentMatchedIds.value = new Set()
@@ -162,7 +172,7 @@ async function runContentSearch(query: string, seq: number): Promise<void> {
 watch(selectedPaneId, () => {
   renameEditing.value = false
   sessionIdCopied.value = false
-  confirmDelete.value = false
+  confirmDeleteEntry.value = null
 })
 
 const filteredSessionHistory = computed(() =>
@@ -275,7 +285,9 @@ async function runDeletePreview(target: HistoryDeleteTarget): Promise<HistoryDel
 async function openDeleteConfirm(): Promise<void> {
   const entry = selectedEntry.value
   if (!entry || deletePreviewPending.value) return
+  const seq = confirmSeq
   const preview = await runDeletePreview({ mode: 'ids', paneIds: [entry.paneId] })
+  if (seq !== confirmSeq) return // modal closed mid-probe: leave the reset state alone
   // Nothing left to destroy backend-side — there is nothing to warn about,
   // so skip the dialog but still let the record leave the loaded list.
   if (preview && preview.entries === 0) {
@@ -283,12 +295,12 @@ async function openDeleteConfirm(): Promise<void> {
     return
   }
   deletePreview.value = preview
-  confirmDelete.value = true
+  confirmDeleteEntry.value = entry
 }
 
 function onDeleteConfirmed(): void {
-  const entry = selectedEntry.value
-  confirmDelete.value = false
+  const entry = confirmDeleteEntry.value
+  confirmDeleteEntry.value = null
   deletePreview.value = null
   if (entry) emit('delete', entry)
 }
@@ -313,12 +325,18 @@ async function openCleanupConfirm(mode: HistoryCleanupMode): Promise<void> {
   if (deletePreviewPending.value) return
   const count = mode === 'removed' ? cleanupRemovedCount.value : cleanupOlderCount.value
   if (count === 0) return
+  const seq = confirmSeq
   const preview = await runDeletePreview({ mode, cutoffIso: cleanupCutoffIso.value })
-  if (preview && preview.entries === 0) return
+  if (seq !== confirmSeq) return // modal closed mid-probe: leave the reset state alone
   deletePreview.value = preview
   // The dry-run counted the full store, the local count only the loaded
-  // window — prefer it when we have it.
-  confirmCleanup.value = { mode, count: preview?.entries ?? count }
+  // window — prefer it when we have it. A dry-run of 0 is NOT "nothing to do":
+  // the loaded window can still hold entries the canonical store no longer has
+  // (mirror-only records, a peer that already cleaned, a failed store load), so
+  // fall back to the local count and let the confirmed cleanup re-sync the list
+  // rather than dead-ending the click.
+  const storeCount = preview?.entries ?? 0
+  confirmCleanup.value = { mode, count: storeCount > 0 ? storeCount : count }
 }
 
 function onCleanupConfirmed(): void {
@@ -737,15 +755,17 @@ async function copyLogText(): Promise<void> {
       </div>
     </div>
   </Teleport>
-  <Teleport v-if="confirmDelete && selectedEntry" to="body">
-    <div class="history-overlay" @click.self="confirmDelete = false">
+  <!-- `show &&` guards: a destructive confirmation must never outlive the
+       modal it was opened from. -->
+  <Teleport v-if="show && confirmDeleteEntry" to="body">
+    <div class="history-overlay" @click.self="confirmDeleteEntry = null">
       <div class="history-modal" style="height: auto; max-width: 400px;">
         <div class="history-modal-header">
           <span>{{ $t('action.delete') }}</span>
-          <button class="history-close" @click="confirmDelete = false">✕</button>
+          <button class="history-close" @click="confirmDeleteEntry = null">✕</button>
         </div>
         <div style="padding: 16px 14px; font-size: 13px; color: var(--text-primary);">
-          {{ $t('label.history-delete-confirm', { name: historyEntryLabel(selectedEntry) }) }}
+          {{ $t('label.history-delete-confirm', { name: historyEntryLabel(confirmDeleteEntry) }) }}
           <div
             v-if="deletePreview && deletePreview.logFiles > 0"
             class="ah-delete-logs"
@@ -755,13 +775,13 @@ async function copyLogText(): Promise<void> {
           </div>
         </div>
         <div style="display: flex; gap: 8px; padding: 0 14px 14px; justify-content: flex-end;">
-          <button class="history-close" style="border: 1px solid var(--border-default); padding: 4px 12px; border-radius: 6px;" @click="confirmDelete = false">{{ $t('action.cancel') }}</button>
+          <button class="history-close" style="border: 1px solid var(--border-default); padding: 4px 12px; border-radius: 6px;" @click="confirmDeleteEntry = null">{{ $t('action.cancel') }}</button>
           <button class="danger" style="padding: 4px 14px; border-radius: 6px; font-size: 12px;" @click="onDeleteConfirmed">{{ $t('action.delete') }}</button>
         </div>
       </div>
     </div>
   </Teleport>
-  <Teleport v-if="confirmCleanup" to="body">
+  <Teleport v-if="show && confirmCleanup" to="body">
     <div class="history-overlay" @click.self="confirmCleanup = null">
       <div class="history-modal" style="height: auto; max-width: 400px;">
         <div class="history-modal-header">

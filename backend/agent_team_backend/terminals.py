@@ -14,6 +14,7 @@ import signal
 import struct
 import subprocess
 import termios
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -119,6 +120,36 @@ class TerminalSession:
     # a stale entry from ever matching a recycled pid (same pattern as
     # pty_registry).
     descendants: dict[int, str] = field(default_factory=dict)
+
+
+# Output logs currently held open for append by a live session (terminal
+# session id -> path). Process-wide on purpose: every WebSocket session owns
+# its own TerminalService, while the storage scan that consults this runs
+# without any session context. Mutated from the event loop and read from
+# worker threads (asyncio.to_thread), hence the lock.
+_live_output_logs: dict[str, str] = {}
+_live_output_logs_lock = threading.Lock()
+
+
+def _register_live_log(session_id: str, path: str) -> None:
+    with _live_output_logs_lock:
+        _live_output_logs[session_id] = path
+
+
+def _forget_live_log(session_id: str) -> None:
+    with _live_output_logs_lock:
+        _live_output_logs.pop(session_id, None)
+
+
+def live_output_log_paths() -> set[str]:
+    """Paths of the transcript logs live panes are writing into right now.
+
+    The storage scan uses this to keep such a log out of every cleanable
+    bucket: unlinking it would send the PTY's ongoing writes to a deleted
+    inode, so the transcript silently stops growing and the file is gone.
+    """
+    with _live_output_logs_lock:
+        return set(_live_output_logs.values())
 
 
 # Batch PTY output chunks for up to this many milliseconds before sending a
@@ -367,10 +398,13 @@ class TerminalService:
                 output_log_fp=log_fp,
             )
             self._sessions[session.id] = session
+            if log_fp is not None:
+                _register_live_log(session.id, output_log_file)
             self._loop.add_reader(master, self._on_readable, session)
         except BaseException:
             if session is not None:
                 self._sessions.pop(session.id, None)
+                _forget_live_log(session.id)
             if log_fp:
                 try:
                     log_fp.close()
@@ -1042,6 +1076,7 @@ class TerminalService:
             except Exception:  # noqa: BLE001
                 pass
             session.output_log_fp = None
+        _forget_live_log(session.id)
         event = make_event(
             "terminal.exit",
             {

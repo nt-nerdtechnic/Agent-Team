@@ -5,14 +5,13 @@ import { app, ipcMain, session } from 'electron'
 import {
   resolveOsCacheRoot,
   clearElectronCaches,
+  clearSessionCaches,
   type ClearElectronCachesOptions,
   type ClearElectronCachesResult,
   type StorageCleanupDeps
 } from './storage-cleanup'
-import { isUpdateDownloading } from './updater'
+import { updaterCacheBusyStatus } from './updater'
 
-/** electron-builder `build.appId`; namespaces the OS-level cache directories. */
-const APP_ID = 'com.nerdtechnic.agent-team'
 /** package.json `name` — electron-updater names its cache `<name>-updater`. */
 const PACKAGE_NAME = 'agent-team'
 
@@ -44,25 +43,16 @@ function removeDir(path: string): void {
   rmSync(path, { recursive: true, force: true })
 }
 
-async function clearSessionCaches(): Promise<void> {
-  const current = session.defaultSession
-  await current.clearCache()
-  // Present since Electron 22 but guarded so an older runtime still clears the
-  // HTTP cache instead of failing the whole operation.
-  if (typeof current.clearCodeCaches === 'function') current.clearCodeCaches({})
-}
-
 function storageDeps(): StorageCleanupDeps {
   return {
     userData: app.getPath('userData'),
     cacheRoot: resolveOsCacheRoot(process.platform, homedir()),
     appNames: [PACKAGE_NAME, app.getName()],
-    appId: APP_ID,
     dirSize,
     removeDir,
     listDir,
-    clearSessionCaches,
-    isUpdateDownloading
+    clearSessionCaches: () => clearSessionCaches(session.defaultSession),
+    updaterCacheBusyStatus
   }
 }
 

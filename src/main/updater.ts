@@ -3,7 +3,7 @@ import { autoUpdater } from 'electron-updater'
 import { app, ipcMain, BrowserWindow } from 'electron'
 import { createUpdaterService, type UpdaterService } from './updater-service'
 import { readUpdaterSettings, writeUpdaterSettings } from './updater-settings'
-import type { UpdateSettingsResult, UpdaterSettings, UpdateState } from '../shared/updater'
+import type { UpdateSettingsResult, UpdaterSettings, UpdateState, UpdateStatus } from '../shared/updater'
 
 let service: UpdaterService | null = null
 let settings: UpdaterSettings | null = null
@@ -54,12 +54,21 @@ function stopPeriodicCheck(): void {
 }
 
 /**
- * Whether an update download is currently running. Download state is purely
+ * Updater states in which the download cache still holds a payload the app
+ * needs: the transfer in flight, the finished installer waiting for the user
+ * to restart, and the install already running. Updater state is purely
  * in-memory in the updater service, so this is the single source of truth —
  * callers that delete the updater cache must check it first.
  */
-export function isUpdateDownloading(): boolean {
-  return service?.getState().status === 'downloading'
+const CACHE_BUSY_STATUSES: readonly UpdateStatus[] = ['downloading', 'downloaded', 'installing']
+
+/**
+ * The updater status that currently owns the download cache, or `null` when
+ * the cache is free to delete.
+ */
+export function updaterCacheBusyStatus(): UpdateStatus | null {
+  const status = service?.getState().status
+  return status && CACHE_BUSY_STATUSES.includes(status) ? status : null
 }
 
 export function initUpdater(options: {

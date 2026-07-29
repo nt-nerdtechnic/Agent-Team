@@ -88,10 +88,23 @@ function report() {
   }
 }
 
-async function mountPane() {
+async function mountPane(opts: { rejectCleanup?: Error } = {}) {
   const mock = createMockBackend('connected')
   mock.setResponse('storage.usage', report())
   mock.setResponse('storage.cleanup', { totalFreedBytes: 1_200_000_000, results: [] })
+  if (opts.rejectCleanup) {
+    // The real backend.send REJECTS on timeout — it does not resolve ok:false.
+    const inner = mock.backend.send
+    const failure = opts.rejectCleanup
+    ;(mock.backend as { send: typeof inner }).send = ((
+      type: string,
+      payload: Record<string, unknown>,
+      timeoutMs?: number
+    ) =>
+      type === 'storage.cleanup'
+        ? Promise.reject(failure)
+        : inner(type, payload, timeoutMs)) as typeof inner
+  }
   const wrapper = mount(StorageUsagePane, {
     props: { backend: mock.backend, workspacePaths: ['/Users/test/code/demo'] },
     global: { plugins: [i18n] },
@@ -220,6 +233,30 @@ describe('StorageUsagePane', () => {
     expect(wrapper.get('.su-result').text()).toContain('1.9 GB')
     expect(wrapper.get('.su-cleanup-warning').text()).toContain('update download is in progress')
     expect(wrapper.find('.su-failures').exists()).toBe(false)
+  })
+
+  it('still clears the electron caches when the backend cleanup request rejects', async () => {
+    const clearElectronCaches = vi
+      .fn()
+      .mockResolvedValue({ ok: true, freedBytes: 800_000_000, error: null })
+    ;(window as unknown as Record<string, unknown>).agentTeam = {
+      storage: { clearElectronCaches },
+    }
+    const mounted = await mountPane({ rejectCleanup: new Error('request timed out') })
+    wrapper = mounted.wrapper
+
+    await wrapper.get('.su-clean-safe').trigger('click')
+    await flushPromises()
+    await wrapper.get('.su-confirm-ok').trigger('click')
+    await flushPromises()
+
+    // The two passes are independent: the electron pass still ran and its
+    // bytes still counted…
+    expect(clearElectronCaches).toHaveBeenCalledWith({ chromium: true, updater: false })
+    expect(wrapper.get('.su-result').text()).toContain('763 MB')
+    // …while the failing pass is named so the user knows which one it was.
+    expect(wrapper.get('.su-error').text()).toContain('Backend cleanup failed')
+    expect(wrapper.get('.su-error').text()).toContain('request timed out')
   })
 
   it('enables "Clean selected" only once a non-safe item is checked', async () => {

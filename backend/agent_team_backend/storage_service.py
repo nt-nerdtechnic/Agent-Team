@@ -42,6 +42,7 @@ from .projects import PROJECT_DIR_NAME, RUNS_SUBDIR
 from .skills_store import SKILLS_DIR, SKILLS_RUNTIME_DIR
 from .spawn_history import entry_manual_log_names, read_stored_entries
 from .store_migrations import BACKUP_DIR
+from .terminals import live_output_log_paths
 from .tokens_store import (
     INGESTION_STATE_FILE,
     PERSISTENCE_JOURNAL_FILE,
@@ -82,6 +83,12 @@ PROFILE_CACHE_HOME_ENTRIES = ("cache", ".cache", "shell-snapshots", "file-histor
 PROFILE_HISTORY_HOME_ENTRY = "projects"
 ARCHIVED_SLOT_MARKERS = (".deleted-", ".migrated-")
 
+# A manual log touched this recently counts as live even when the terminal
+# service does not claim it. Safety net for the cases the in-process set
+# cannot cover: a pane whose backend was restarted under it, or a scan racing
+# a spawn that has not registered its log yet.
+LIVE_LOG_MTIME_WINDOW_SECONDS = 15 * 60
+
 
 class StorageGuardError(Exception):
     """A deletion target resolved outside the root its bucket declares."""
@@ -103,12 +110,19 @@ def codex_panes_root() -> Path:
 
 
 def updater_cache_paths() -> list[Path]:
-    """Electron updater scratch dirs. Empty on platforms without them."""
+    """The updater scratch dir. Empty on platforms without it.
+
+    Deliberately *only* ``<appName>-updater``, matching exactly what the main
+    process clears. The appId-namespaced neighbours are never cleared — one is
+    the live CFNetwork HTTP cache (unsafe to remove while the app runs), the
+    other Squirrel's install state machine (removing it mid-install breaks the
+    update) — so reporting their bytes under a cleanable item would promise
+    space that no cleanup can ever free.
+    """
     caches = Path.home() / "Library" / "Caches"
-    if not caches.is_dir():
-        return []
-    found = [caches / "agent-team-updater"]
-    found.extend(sorted(caches.glob("com.nerdtechnic.agent-team*")))
+    # Both spellings, because main matches `<appName>-updater` for the package
+    # name *and* the (renamed) product name.
+    found = [caches / f"{name}-updater" for name in ("agent-team", "Navide")]
     return [p for p in found if p.exists()]
 
 
@@ -555,9 +569,18 @@ def _cli_homes_group(stale_days: int, errors: list[dict[str, str]]) -> _Group:
                 archived.append(slot)
                 continue
             home = slot / PROFILE_HOME_DIRNAME
-            caches.extend(home / name for name in PROFILE_CACHE_HOME_ENTRIES)
-            caches.append(slot / LOGIN_HOME_DIRNAME)
-            history.append(home / PROFILE_HISTORY_HOME_ENTRY)
+            # Symlinked entries are skipped: a live slot wires ``home/projects``
+            # and ``home/shell-snapshots`` to the shared ``~/.claude`` dirs, so
+            # they weigh zero bytes here and unlinking one frees nothing while
+            # breaking the profile the provisioner set up.
+            candidates = [
+                *(home / name for name in PROFILE_CACHE_HOME_ENTRIES),
+                slot / LOGIN_HOME_DIRNAME,
+            ]
+            caches.extend(p for p in candidates if not p.is_symlink())
+            transcripts = home / PROFILE_HISTORY_HOME_ENTRY
+            if not transcripts.is_symlink():
+                history.append(transcripts)
 
     archived_item = _measured(
         _Item(
@@ -607,7 +630,12 @@ def _cli_homes_group(stale_days: int, errors: list[dict[str, str]]) -> _Group:
 
     cutoff = time.time() - stale_days * 86400
     stale_panes: list[Path] = []
-    recent_panes: list[Path] = []
+    # Loose top-level entries (a stray .DS_Store, a dangling symlink) are not
+    # pane homes, so they are never cleanable — but they still have to land in
+    # a bucket or the group total under-reports them.
+    recent_panes: list[Path] = [
+        p for p in _top_level_entries(panes, errors) if p.is_symlink() or not p.is_dir()
+    ]
     for pane in _iter_dirs(panes, errors):
         try:
             mtime = pane.lstat().st_mtime
@@ -638,7 +666,10 @@ def _cli_homes_group(stale_days: int, errors: list[dict[str, str]]) -> _Group:
             cleanable=False,
             root=panes,
             paths=recent_panes,
-            note="Recently used Codex pane homes; likely still resumable.",
+            note=(
+                "Recently used Codex pane homes; likely still resumable. "
+                "Loose files sitting next to them are counted here too."
+            ),
         ),
         errors,
     )
@@ -667,12 +698,62 @@ def _referenced_manual_logs(workspace_path: str) -> set[str]:
     return names
 
 
+def _live_log_targets() -> tuple[set[str], set[Path]]:
+    """``(filenames, resolved paths)`` of the logs live panes hold open.
+
+    The filename set is the cheap pre-filter; the resolved set is what
+    actually decides, because the same log is reachable under several
+    spellings (``/tmp`` vs ``/private/tmp``, a symlinked worktree).
+    """
+    resolved: set[Path] = set()
+    for raw in live_output_log_paths():
+        path = Path(raw)
+        try:
+            resolved.add(path.parent.resolve() / path.name)
+        except OSError:
+            resolved.add(path)
+    return {p.name for p in resolved}, resolved
+
+
+def _entry_mtime(entry: os.DirEntry[str], errors: list[dict[str, str]]) -> float | None:
+    """Modification time of a scandir entry; ``None`` when it cannot be read."""
+    try:
+        return entry.stat(follow_symlinks=False).st_mtime
+    except OSError as err:
+        _record_error(errors, entry.path, err)
+        return None
+
+
+def _is_live_manual_log(
+    path: Path, mtime: float | None, now: float, names: set[str], resolved: set[Path]
+) -> bool:
+    """Is a pane still writing into ``path``?
+
+    Two independent signals, because either one alone loses data: the
+    terminal service's set is authoritative but only covers panes this
+    backend process spawned, while a fresh mtime catches the rest (a pane
+    that survived a backend restart, a log written between two scans). An
+    unreadable mtime counts as live — an unverifiable file is never offered
+    for deletion.
+    """
+    if mtime is None or now - mtime < LIVE_LOG_MTIME_WINDOW_SECONDS:
+        return True
+    if path.name not in names:
+        return False
+    try:
+        return (path.parent.resolve() / path.name) in resolved
+    except OSError:
+        return False
+
+
 def _manual_log_buckets(
     workspace_path: str, data_dir: Path, stale_days: int, errors: list[dict[str, str]]
 ) -> tuple[list[Path], list[Path], list[Path]]:
     """Split ``manual/**`` files into (orphan, stale, recent)."""
     manual = data_dir / MANUAL_LOGS_DIRNAME
     referenced = _referenced_manual_logs(workspace_path)
+    live_names, live_paths = _live_log_targets()
+    now = time.time()
     cutoff = datetime.now(timezone.utc) - timedelta(days=stale_days)
     orphan: list[Path] = []
     stale: list[Path] = []
@@ -682,15 +763,26 @@ def _manual_log_buckets(
         try:
             with os.scandir(day_dir) as it:
                 files = sorted(
-                    Path(e.path) for e in it if not e.is_dir(follow_symlinks=False)
+                    (
+                        (Path(e.path), _entry_mtime(e, errors))
+                        for e in it
+                        if not e.is_dir(follow_symlinks=False)
+                    ),
+                    key=lambda pair: pair[0],
                 )
         except FileNotFoundError:
             continue
         except OSError as err:
             _record_error(errors, day_dir, err)
             continue
-        for path in files:
-            if path.name not in referenced:
+        for path, mtime in files:
+            # Live first: a pane alive longer than staleDays keeps writing into
+            # the day folder its *spawn* date named, and a just-spawned pane has
+            # no history entry yet — both would otherwise land in a cleanable
+            # bucket and be unlinked out from under the open fd.
+            if _is_live_manual_log(path, mtime, now, live_names, live_paths):
+                recent.append(path)
+            elif path.name not in referenced:
                 orphan.append(path)
             elif day is not None and day < cutoff:
                 stale.append(path)
@@ -771,7 +863,12 @@ def _workspaces_group(
                 cleanable=False,
                 root=Path("/"),
                 paths=recent,
-                note="Recent agent logs still reachable from Agent History.",
+                note=(
+                    "Recent agent logs still reachable from Agent History, plus "
+                    "the transcripts panes are writing into right now — deleting "
+                    "a log a pane still holds open would lose the rest of it, so "
+                    "they are never offered for cleanup."
+                ),
             ),
             errors,
         ),

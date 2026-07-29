@@ -4,7 +4,7 @@
 // the real delete is only emitted after the user confirms.
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 import AgentHistoryModal from '../AgentHistoryModal.vue'
 import type {
@@ -149,6 +149,77 @@ describe('AgentHistoryModal delete confirmation', () => {
 
     await wrapper.get('.danger').trigger('click')
 
+    expect(wrapper.emitted('cleanup')).toHaveLength(1)
+  })
+
+  // The dry-run is awaited, so the modal can close (or the selection can move)
+  // while it is in flight. A late result must never resurrect or re-target a
+  // destructive confirmation.
+  it('never resurrects the cleanup confirmation after the modal closes', async () => {
+    let resolvePreview!: (preview: HistoryDeletePreview) => void
+    const previewDelete = vi.fn(
+      () => new Promise<HistoryDeletePreview | null>((resolve) => { resolvePreview = resolve })
+    )
+    const wrapper = mountModal(previewDelete)
+
+    await wrapper.get('.ah-cleanup-btn').trigger('click')
+    await wrapper.get('.ah-cleanup-item').trigger('click')
+    // Modal closed while the dry-run is still in flight.
+    await wrapper.setProps({ show: false })
+    resolvePreview({ entries: 12, logFiles: 9, freedBytes: 1024 })
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('label.history-cleanup-confirm-count')
+    // …and it must not be waiting to pop up the next time the modal opens.
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('label.history-cleanup-confirm-count')
+    expect(wrapper.emitted('cleanup')).toBeUndefined()
+  })
+
+  it('keeps the delete dialog on the entry the dry-run ran for', async () => {
+    let resolvePreview!: (preview: HistoryDeletePreview) => void
+    const previewDelete = vi.fn(
+      () => new Promise<HistoryDeletePreview | null>((resolve) => { resolvePreview = resolve })
+    )
+    const wrapper = mountModal(previewDelete, [
+      entry('aaaa1111-2222', { customName: 'Alpha' }),
+      entry('bbbb3333-4444', { customName: 'Bravo' }),
+    ])
+    const rows = wrapper.findAll('.agent-history-row')
+    const alphaRow = rows.find((r) => r.text().includes('Alpha'))!
+    const bravoRow = rows.find((r) => r.text().includes('Bravo'))!
+
+    await alphaRow.trigger('click')
+    await wrapper.get('.ah-revive.ah-delete').trigger('click')
+    // Selection moves to another entry while Alpha's dry-run is in flight.
+    await bravoRow.trigger('click')
+    resolvePreview({ entries: 1, logFiles: 2, freedBytes: 4096 })
+    await flushPromises()
+
+    expect(previewDelete).toHaveBeenCalledWith({ mode: 'ids', paneIds: ['aaaa1111-2222'] })
+    expect(wrapper.text()).toContain('label.history-delete-confirm {"name":"Alpha"}')
+    expect(wrapper.text()).not.toContain('"name":"Bravo"')
+    expect(wrapper.get('[data-testid="history-delete-logs"]').text()).toContain('4.0 KB')
+
+    await wrapper.get('.danger').trigger('click')
+    expect(wrapper.emitted('delete')).toHaveLength(1)
+    expect((wrapper.emitted('delete')![0][0] as SpawnHistoryEntry).paneId).toBe('aaaa1111-2222')
+  })
+
+  it('still confirms the cleanup when the dry-run finds nothing in the store', async () => {
+    // Mirror-only entries (or a peer that already cleaned) make the store
+    // count 0 while the loaded window still shows them — the user must get a
+    // dialog, and confirming re-syncs the list.
+    const previewDelete = vi.fn(async () => ({ entries: 0, logFiles: 0, freedBytes: 0 }))
+    const wrapper = mountModal(previewDelete)
+
+    await wrapper.get('.ah-cleanup-btn').trigger('click')
+    await wrapper.get('.ah-cleanup-item').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('label.history-cleanup-confirm-count {"count":1}')
+    await wrapper.get('.danger').trigger('click')
     expect(wrapper.emitted('cleanup')).toHaveLength(1)
   })
 })

@@ -1,4 +1,5 @@
 import { join, resolve, sep } from 'node:path'
+import type { UpdateStatus } from '../shared/updater'
 
 /**
  * Clearing Electron-owned caches. Kept electron-free so it runs under Vitest;
@@ -58,8 +59,6 @@ export interface StorageCleanupDeps {
   cacheRoot: string
   /** App name candidates used by electron-updater for `<name>-updater`. */
   appNames: string[]
-  /** electron-builder appId, e.g. `com.nerdtechnic.agent-team`. */
-  appId: string
   /** Recursive size in bytes; 0 when the path is missing. */
   dirSize(path: string): number
   /** Recursive delete; no-op when the path is missing. */
@@ -68,8 +67,27 @@ export interface StorageCleanupDeps {
   listDir(path: string): string[]
   /** `session.defaultSession.clearCache()` + `clearCodeCaches({})`. */
   clearSessionCaches(): Promise<void>
-  /** True while electron-updater is downloading an update. */
-  isUpdateDownloading(): boolean
+  /** Updater status owning the download cache, or null when it is free. */
+  updaterCacheBusyStatus(): UpdateStatus | null
+}
+
+/** Session-side cache clearing, narrowed to what this module calls. */
+export interface SessionCacheClearer {
+  clearCache(): Promise<void>
+  clearCodeCaches?(options: { urls?: string[] }): Promise<void>
+}
+
+/**
+ * Empty the caches Chromium holds open fds on. Both calls are awaited: the
+ * `Code Cache/` bytes are part of the before/after measurement, and an
+ * unawaited rejection would escape as an unhandled rejection in the main
+ * process.
+ */
+export async function clearSessionCaches(current: SessionCacheClearer): Promise<void> {
+  await current.clearCache()
+  // Present since Electron 22 but guarded so an older runtime still clears the
+  // HTTP cache instead of failing the whole operation.
+  if (typeof current.clearCodeCaches === 'function') await current.clearCodeCaches({})
 }
 
 /**
@@ -90,37 +108,73 @@ export function assertInsideRoot(target: string, roots: string[]): string {
 }
 
 /**
- * Whether a cache-root entry belongs to electron-updater / Squirrel. Matches
- * `<appName>-updater` and anything namespaced under the appId (e.g.
- * `com.nerdtechnic.agent-team.ShipIt`).
+ * Whether a cache-root entry is an electron-updater download cache — only
+ * `<appName>-updater`, which holds nothing but re-downloadable artifacts.
+ *
+ * appId-namespaced siblings are deliberately excluded: on macOS
+ * `<appId>/` is the live CFNetwork HTTP cache (an open SQLite database with
+ * `-wal`/`-shm` sidecars — the same hazard that keeps `Cache/` off the rmSync
+ * path), and `<appId>.ShipIt/` is Squirrel's install state, which a pending
+ * or resumable update still needs.
  */
-export function isUpdaterCacheEntry(name: string, appNames: string[], appId: string): boolean {
-  if (appNames.some((appName) => name === `${appName}-updater`)) return true
-  return name === appId || name.startsWith(`${appId}.`) || name.startsWith(`${appId}-`)
+export function isUpdaterCacheEntry(name: string, appNames: string[]): boolean {
+  return appNames.some((appName) => name === `${appName}-updater`)
 }
 
-async function clearChromiumCaches(deps: StorageCleanupDeps): Promise<number> {
+function errorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e)
+}
+
+/**
+ * Every step is attempted even when an earlier one fails: a directory that is
+ * locked (EPERM/EBUSY/EACCES) must not discard the bytes already reclaimed nor
+ * skip the directories after it. Failures come back in `errors`, never silent.
+ */
+async function clearChromiumCaches(
+  deps: StorageCleanupDeps
+): Promise<{ freedBytes: number; errors: string[] }> {
   const measured = [
     ...SESSION_MANAGED_CACHE_DIRS.map((dir) => join(deps.userData, dir)),
     ...REMOVABLE_CACHE_DIRS.map((dir) => join(deps.userData, dir))
   ]
   const sizeOfAll = (): number => measured.reduce((total, dir) => total + deps.dirSize(dir), 0)
 
+  const errors: string[] = []
   const before = sizeOfAll()
-  await deps.clearSessionCaches()
-  for (const dir of REMOVABLE_CACHE_DIRS) {
-    deps.removeDir(assertInsideRoot(join(deps.userData, dir), [deps.userData]))
+  try {
+    await deps.clearSessionCaches()
+  } catch (e) {
+    errors.push(errorMessage(e))
   }
-  return Math.max(0, before - sizeOfAll())
+  for (const dir of REMOVABLE_CACHE_DIRS) {
+    try {
+      deps.removeDir(assertInsideRoot(join(deps.userData, dir), [deps.userData]))
+    } catch (e) {
+      errors.push(errorMessage(e))
+    }
+  }
+  return { freedBytes: Math.max(0, before - sizeOfAll()), errors }
+}
+
+/** Why the updater cache must survive, per updater status. */
+const UPDATER_BUSY_REASON: Record<string, string> = {
+  downloading: 'An update download is in progress — the updater cache was left untouched.',
+  downloaded:
+    'An update is downloaded and waiting to install — the updater cache was left untouched so the pending install keeps working. Restart to install it, then clear again.',
+  installing: 'An update is installing — the updater cache was left untouched.'
 }
 
 function clearUpdaterCache(deps: StorageCleanupDeps): number {
-  if (deps.isUpdateDownloading()) {
-    throw new Error('An update download is in progress — the updater cache was left untouched.')
+  const busy = deps.updaterCacheBusyStatus()
+  if (busy) {
+    throw new Error(
+      UPDATER_BUSY_REASON[busy] ??
+        `The updater is busy (${busy}) — the updater cache was left untouched.`
+    )
   }
   let freed = 0
   for (const name of deps.listDir(deps.cacheRoot)) {
-    if (!isUpdaterCacheEntry(name, deps.appNames, deps.appId)) continue
+    if (!isUpdaterCacheEntry(name, deps.appNames)) continue
     const target = assertInsideRoot(join(deps.cacheRoot, name), [deps.cacheRoot])
     const before = deps.dirSize(target)
     deps.removeDir(target)
@@ -143,9 +197,11 @@ export async function clearElectronCaches(
 
   if (options.chromium) {
     try {
-      freedBytes += await clearChromiumCaches(deps)
+      const chromium = await clearChromiumCaches(deps)
+      freedBytes += chromium.freedBytes
+      errors.push(...chromium.errors)
     } catch (e) {
-      errors.push(e instanceof Error ? e.message : String(e))
+      errors.push(errorMessage(e))
     }
   }
 
@@ -153,7 +209,7 @@ export async function clearElectronCaches(
     try {
       freedBytes += clearUpdaterCache(deps)
     } catch (e) {
-      errors.push(e instanceof Error ? e.message : String(e))
+      errors.push(errorMessage(e))
     }
   }
 

@@ -228,23 +228,33 @@ async function confirmCleanup(): Promise<void> {
   try {
     const backendIds = items.filter((i) => i.handledBy === 'backend').map((i) => i.id)
     if (backendIds.length) {
-      const resp = await props.backend.send<{
-        totalFreedBytes: number
-        results: CleanupResult[]
-      }>(
-        'storage.cleanup',
-        {
-          itemIds: backendIds,
-          workspacePaths: props.workspacePaths ?? [],
-          staleDays: staleDays.value,
-        },
-        SCAN_TIMEOUT_MS
-      )
-      if (!resp.ok || !resp.payload) {
-        cleanupError.value = resp.error?.message ?? 'storage cleanup failed'
-      } else {
-        freed += resp.payload.totalFreedBytes
-        failures.push(...resp.payload.results.filter((r) => !r.ok))
+      // Scoped try: backend.send REJECTS on timeout, and a dead backend must
+      // not cancel the Electron pass — the two are independent.
+      try {
+        const resp = await props.backend.send<{
+          totalFreedBytes: number
+          results: CleanupResult[]
+        }>(
+          'storage.cleanup',
+          {
+            itemIds: backendIds,
+            workspacePaths: props.workspacePaths ?? [],
+            staleDays: staleDays.value,
+          },
+          SCAN_TIMEOUT_MS
+        )
+        if (!resp.ok || !resp.payload) {
+          cleanupError.value = t('settings.storage.backend-failed', {
+            message: resp.error?.message ?? 'storage cleanup failed',
+          })
+        } else {
+          freed += resp.payload.totalFreedBytes
+          failures.push(...resp.payload.results.filter((r) => !r.ok))
+        }
+      } catch (err) {
+        cleanupError.value = t('settings.storage.backend-failed', {
+          message: err instanceof Error ? err.message : String(err),
+        })
       }
     }
     const electronItems = items.filter((i) => i.handledBy === 'electron')

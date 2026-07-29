@@ -700,6 +700,7 @@
       "freed": "Freed {size}.",
       "failed-items": "{count} items could not be cleaned.",
       "bridge-missing": "This build cannot clear Electron caches — the desktop bridge is unavailable.",
+      "backend-failed": "Backend cleanup failed: {message}",
       "errors-title": "Some locations could not be read",
       "group": {
         "appData": "App data",

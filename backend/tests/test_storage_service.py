@@ -8,12 +8,14 @@ touch (let alone delete from) the developer's real home.
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from agent_team_backend import app, storage_service
+from agent_team_backend import app, storage_service, terminals
 from agent_team_backend.storage_service import StorageGuardError
 
 
@@ -55,6 +57,18 @@ def _item(report: dict[str, Any], item_id: str) -> dict[str, Any]:
 def _write(path: Path, size: int) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"x" * size)
+    return path
+
+
+def _cold_log(path: Path, size: int) -> Path:
+    """A manual log no pane has written to for a long time.
+
+    A freshly written log is presumed live (see LIVE_LOG_MTIME_WINDOW_SECONDS),
+    so every test about the *cleanable* buckets has to back-date its mtime.
+    """
+    _write(path, size)
+    long_ago = time.time() - 30 * 86400
+    os.utime(path, (long_ago, long_ago))
     return path
 
 
@@ -220,6 +234,37 @@ def test_cleanup_removes_archived_cli_profile_slots_only(
     assert live.exists()
 
 
+def test_cleanup_never_unlinks_a_live_slots_shared_symlinks(
+    roots: dict[str, Path], tmp_path: Path
+) -> None:
+    """A live slot wires ``home/projects`` and ``home/shell-snapshots`` at the
+    shared ``~/.claude`` dirs. They weigh zero bytes, so offering them for
+    cleanup can only break the profile — the buckets must skip them."""
+    shared = tmp_path / "dot-claude"
+    _write(shared / "projects" / "a.jsonl", 90)
+    _write(shared / "shell-snapshots" / "snap.sh", 30)
+    home = roots["profiles"] / "claude" / "slot-1" / "home"
+    real_cache = _write(home / "cache" / "blob", 12)
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "projects").symlink_to(shared / "projects", target_is_directory=True)
+    (home / "shell-snapshots").symlink_to(
+        shared / "shell-snapshots", target_is_directory=True
+    )
+
+    report = storage_service.collect_usage([], 30)
+    assert _item(report, "cliProfileHistory")["paths"] == []
+    assert _item(report, "cliProfileCaches")["paths"] == [str(real_cache.parent)]
+
+    result = storage_service.cleanup(["cliProfileHistory", "cliProfileCaches"], [], 30)
+
+    assert (home / "projects").is_symlink()
+    assert (home / "shell-snapshots").is_symlink()
+    assert (shared / "projects" / "a.jsonl").exists()
+    assert (shared / "shell-snapshots" / "snap.sh").exists()
+    assert result["totalFreedBytes"] == 12
+    assert not real_cache.exists()
+
+
 # ── workspace manual logs ───────────────────────────────────────────────────
 
 
@@ -243,8 +288,8 @@ def test_orphan_manual_logs_are_detected_by_filename(
         [{"paneId": "aaaa1111-2222-3333-4444-555555555555", "agentKey": "claude"}],
     )
     manual = ws / ".agent-team" / "manual"
-    kept = _write(manual / "20200101" / "claude-aaaa1111.log", 10)
-    orphan = _write(manual / "20200101" / "claude-bbbb2222.log", 90)
+    kept = _cold_log(manual / "20200101" / "claude-aaaa1111.log", 10)
+    orphan = _cold_log(manual / "20200101" / "claude-bbbb2222.log", 90)
 
     report = storage_service.collect_usage([str(ws)], 30)
 
@@ -288,8 +333,8 @@ def test_cleanup_removes_orphan_manual_logs(
         [{"paneId": "aaaa1111-2222-3333-4444-555555555555", "agentKey": "claude"}],
     )
     manual = ws / ".agent-team" / "manual"
-    kept = _write(manual / "20200101" / "claude-aaaa1111.log", 10)
-    orphan = _write(manual / "20200102" / "claude-bbbb2222.log", 90)
+    kept = _cold_log(manual / "20200101" / "claude-aaaa1111.log", 10)
+    orphan = _cold_log(manual / "20200102" / "claude-bbbb2222.log", 90)
 
     result = storage_service.cleanup(["manualLogsOrphan"], [str(ws)], 30)
 
@@ -309,6 +354,51 @@ def test_cleanup_removes_orphan_manual_logs(
     assert kept.exists()
 
 
+def test_a_live_panes_log_is_never_stale_even_in_an_old_day_folder(
+    roots: dict[str, Path], tmp_path: Path
+) -> None:
+    """A pane alive longer than staleDays keeps writing into the day folder its
+    *spawn* date named, so mtime alone would not save it — the terminal
+    service's live set has to."""
+    ws = _workspace(
+        tmp_path,
+        [{"paneId": "aaaa1111-2222-3333-4444-555555555555", "agentKey": "claude"}],
+    )
+    live = _cold_log(
+        ws / ".agent-team" / "manual" / "20200101" / "claude-aaaa1111.log", 70
+    )
+    terminals._register_live_log("term-1", str(live))
+    try:
+        report = storage_service.collect_usage([str(ws)], 30)
+        assert _item(report, "manualLogsStale")["bytes"] == 0
+        assert _item(report, "manualLogsOrphan")["bytes"] == 0
+        assert _item(report, "manualLogsRecent")["bytes"] == 70
+
+        storage_service.cleanup(["manualLogsStale", "manualLogsOrphan"], [str(ws)], 30)
+        assert live.exists()
+    finally:
+        terminals._forget_live_log("term-1")
+
+
+def test_a_just_spawned_panes_log_is_never_orphan(
+    roots: dict[str, Path], tmp_path: Path
+) -> None:
+    """Its spawn-history entry is not persisted yet, so nothing references the
+    log — but it is being written *right now*, and manualLogsOrphan is in the
+    one-click "clean safe items" action."""
+    ws = _workspace(tmp_path, [])
+    fresh = _write(
+        ws / ".agent-team" / "manual" / "20200101" / "claude-cccc3333.log", 55
+    )
+
+    report = storage_service.collect_usage([str(ws)], 30)
+    assert _item(report, "manualLogsOrphan")["bytes"] == 0
+    assert _item(report, "manualLogsRecent")["bytes"] == 55
+
+    storage_service.cleanup(["manualLogsOrphan"], [str(ws)], 30)
+    assert fresh.exists()
+
+
 def test_workspace_without_agent_team_dir_is_skipped(
     roots: dict[str, Path], tmp_path: Path
 ) -> None:
@@ -325,7 +415,7 @@ def test_a_workspace_reached_by_two_paths_is_scanned_once(
 ) -> None:
     """A symlink alias must not double-count the workspace's bytes."""
     ws = tmp_path / "ws"
-    _write(ws / ".agent-team" / "manual" / "20200101" / "claude-aaaa1111.log", 900)
+    _cold_log(ws / ".agent-team" / "manual" / "20200101" / "claude-aaaa1111.log", 900)
     alias = tmp_path / "alias"
     alias.symlink_to(ws)
 
@@ -359,6 +449,26 @@ def test_codex_pane_homes_split_by_mtime(roots: dict[str, Path]) -> None:
     storage_service.cleanup(["codexPanesStale"], [], 30)
     assert not old.exists()
     assert new.exists()
+
+
+def test_loose_files_next_to_the_codex_pane_homes_are_counted(
+    roots: dict[str, Path]
+) -> None:
+    """Only subdirectories are pane homes; a stray .DS_Store still has to land
+    in a bucket or the cliHomes total under-reports it."""
+    _write(roots["panes"] / "pane-new" / "auth.json", 40)
+    stray = _write(roots["panes"] / ".DS_Store", 14)
+
+    report = storage_service.collect_usage([], 30)
+
+    recent = _item(report, "codexPanesRecent")
+    assert recent["bytes"] == 40 + 14
+    assert recent["cleanable"] is False
+    group = next(g for g in report["groups"] if g["id"] == "cliHomes")
+    assert group["totalBytes"] == sum(i["bytes"] for i in group["items"])
+
+    storage_service.cleanup(["codexPanesStale"], [], 30)
+    assert stray.exists()
 
 
 # ── ws handlers ─────────────────────────────────────────────────────────────

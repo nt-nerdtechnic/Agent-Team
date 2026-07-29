@@ -700,6 +700,7 @@
       "freed": "已釋出 {size}。",
       "failed-items": "有 {count} 個項目清理失敗。",
       "bridge-missing": "此版本無法清除 Electron 快取——桌面橋接不可用。",
+      "backend-failed": "後端清理失敗：{message}",
       "errors-title": "部分位置無法讀取",
       "group": {
         "appData": "App 資料",
