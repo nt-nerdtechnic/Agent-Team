@@ -18,6 +18,7 @@ from agent_team_backend.terminals import (
     _FAST_PATH_MAX_CHUNKS,
     _FAST_PATH_WINDOW_S,
     _OUTPUT_BATCH_MS,
+    _READ_CHUNK_BYTES,
     TerminalService,
 )
 
@@ -116,6 +117,37 @@ async def test_sustained_stream_falls_back_to_batching_end_to_end():
             svc._loop.remove_reader(r)  # re-added by the first flush's drain task
         except (ValueError, KeyError):
             pass
+        os.close(r)
+        os.close(w)
+
+
+@pytest.mark.asyncio
+async def test_one_viewport_repaint_stays_on_the_fast_path():
+    """A full-screen CLI rewrites its whole viewport on every keystroke — tens
+    of KB at once. Read 4 KB at a time that became enough chunks to saturate
+    the window, so a typist's echo paid the 50ms batch delay on every key and
+    the window never cooled down while they kept typing."""
+    svc = TerminalService(_emit)
+    r, w = os.pipe()
+    _nonblocking(r)
+    _nonblocking(w)  # a repaint must not block on the pipe's capacity
+    session = _make_session("t-repaint", r)
+    svc._sessions["t-repaint"] = session
+    try:
+        written = os.write(w, b"x" * (_READ_CHUNK_BYTES // 2))
+        if written <= _FAST_PATH_MAX_CHUNKS * 4096:
+            pytest.skip(f"pipe capacity {written}B too small to model a repaint")
+        # The loop's reader callback is level-triggered: it keeps firing until
+        # the fd is drained, which is what turned one repaint into many chunks.
+        for _ in range(_FAST_PATH_MAX_CHUNKS + 2):
+            svc._on_readable(session)
+
+        # One repaint = one chunk, so the next flush stays interactive.
+        assert len(svc._chunk_times["t-repaint"]) == 1
+        assert svc._flush_delay("t-repaint") == 0.0
+        assert _pending_delay(svc, "t-repaint") < _OUTPUT_BATCH_MS / 1000 / 2
+    finally:
+        _cancel_pending_flush(svc, "t-repaint")
         os.close(r)
         os.close(w)
 

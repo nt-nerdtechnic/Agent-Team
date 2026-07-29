@@ -160,7 +160,17 @@ def live_output_log_paths() -> set[str]:
 # the message rate by ~10-20x vs unbatched — empirically prevents the crash.
 _OUTPUT_BATCH_MS = 50
 
-# Interactive fast path: keystroke echo is a handful of tiny chunks per second,
+# How much we take from the PTY per readable callback.  This has to be larger
+# than one TUI viewport repaint: a full-screen CLI (Claude Code, Codex) rewrites
+# its whole viewport plus cursor-positioning escapes on every single keystroke,
+# which easily runs past 20 KB.  Reading it 4 KB at a time turned one repaint
+# into enough chunks to saturate the fast-path window below, so every keystroke
+# echo paid the full batch delay for as long as the user kept typing — the
+# window never got a chance to cool down.  Chunk count only means "sustained
+# stream" if a chunk is big enough to represent real throughput.
+_READ_CHUNK_BYTES = 64 * 1024
+
+# Interactive fast path: keystroke echo is a handful of chunks per second,
 # and delaying it the full batch window makes typing feel laggy (worst for IME
 # input, where the wait lands on the commit).  When a session produced fewer
 # than _FAST_PATH_MAX_CHUNKS PTY chunks within _FAST_PATH_WINDOW_S, flush on
@@ -885,7 +895,7 @@ class TerminalService:
         if session.closed:
             return
         try:
-            chunk = os.read(session.master_fd, 4096)
+            chunk = os.read(session.master_fd, _READ_CHUNK_BYTES)
         except BlockingIOError:
             return
         except OSError as err:
