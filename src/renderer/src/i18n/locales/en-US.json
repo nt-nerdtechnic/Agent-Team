@@ -201,6 +201,8 @@
       "sort-progress": "Progress"
     },
     "terminal": {
+      "click-to-resume": "Click to resume",
+      "resuming": "Resuming…",
       "rebuild-tooltip": "Rebuild (resume) ⌘⇧B — kill and re-spawn via --resume at the current size to clear ghosting/overlap that can't be repainted. Interrupts the in-progress turn and reprints the conversation.",
       "rebuild-tooltip-disabled": "Rebuild needs an existing session to resume. Send a message first — the conversation transcript is created after the first turn.",
       "rebuild-busy-skipped": "CLI is busy — kept the running work, skipped rebuild",
@@ -534,6 +536,11 @@
       "resume-behavior-always": "Always resume",
       "resume-behavior-never": "Always start fresh",
       "resume-behavior-ask": "Ask each time",
+      "restore-scope": "Resume scope",
+      "restore-scope-hint": "When always resuming, choose one CLI, the current Grid page, or the active tab.",
+      "restore-scope-single": "One CLI",
+      "restore-scope-page": "Current Grid page",
+      "restore-scope-tab": "Active tab",
       "resume-concurrency": "Concurrent resume limit",
       "resume-concurrency-hint": "How many CLI panes may resume at the same time when opening a workspace or restoring a layout; the rest queue. Lower this if resuming many panes at once causes 'terminal.create timeout' errors (1–10).",
       "resume-concurrency-label": "Max concurrent resumes"
@@ -1221,11 +1228,15 @@
     "dialog-message": "The app didn't close properly last time. Reopen {count} workspace(s)?",
     "apply": "Restore",
     "dismiss": "Dismiss",
+    "scope-title": "Resume previous conversations",
+    "scope-message": "This workspace has {count} previous session(s). Choose what to resume.",
+    "scope-single": "Resume one CLI",
+    "scope-page": "Resume current Grid page",
+    "scope-tab": "Resume active tab",
+    "scope-fresh": "Start all fresh",
     "session-not-found": "Couldn't find {agent}'s previous conversation — opened a new one instead.",
-    "resume-prompt-title": "Resume previous conversations?",
-    "resume-prompt-message": "This workspace has {count} previous session(s). Resume them, or start fresh?",
-    "resume-prompt-confirm": "Resume",
-    "resume-prompt-cancel": "Start fresh"
+    "codex-session-unavailable": "Codex's saved conversation is unavailable, so its placeholder was kept.",
+    "codex-session-unknown": "Couldn't verify Codex's saved conversation, so its placeholder was kept."
   },
   "backfill": {
     "title": "Backfilling historical token usage in the background",

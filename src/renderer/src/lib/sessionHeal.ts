@@ -24,11 +24,9 @@ export function classifySessionExistsResponse(
   return null
 }
 
-/** Restore routing: attempt --resume unless the transcript is DEFINITIVELY
- *  absent. On null (unknown) resuming is the safe bet — if the transcript
- *  exists it resumes perfectly; if not, the CLI errors for one boot but the
- *  saved id mapping is preserved either way. Only a definitive false falls
- *  back to a fresh spawn reusing the saved id. */
+/** Restore routing: attempt --resume unless the transcript is definitively
+ * absent. A failed probe is unknown, so retaining the saved resume command is
+ * safer than silently replacing the conversation with a fresh process. */
 export function shouldAttemptResume(canResume: SessionResumability): boolean {
   return canResume !== false
 }
@@ -193,75 +191,43 @@ export async function sendWithUiStateRetry<T>(
   }
 }
 
-/** A pane considered for deterministic reconnect: its id, current display name
- *  (customName), and its own saved session id (the ghost pointer). */
 export interface ReconnectPane {
   paneId: string
   customName: string
   sessionId: string
 }
 
-/** Provenance record: spawn-history's memory of "this pane used session X".
- *  Only paneId / customName / sessionId are consulted here. */
 export interface ReconnectProvenanceEntry {
   paneId: string
   customName?: string
   sessionId?: string
 }
 
-/** Session ids this pane's spawn-history provenance points at — matched by
- *  paneId first (definitive), else by the pane's current customName (a weaker
- *  signal used only when no paneId record exists). Deduped, blanks dropped.
- *  These are the ids a caller should probe for transcript existence before
- *  calling resolveDeterministicReconnect. */
+/** Prefer pane-id provenance; a name is only a legacy fallback. */
 export function reconnectCandidateSessionIds(
   pane: Pick<ReconnectPane, 'paneId' | 'customName'>,
-  spawnHistory: ReconnectProvenanceEntry[]
+  spawnHistory: ReconnectProvenanceEntry[],
 ): string[] {
-  const byPaneId = spawnHistory.filter((e) => e.paneId === pane.paneId)
-  const source =
-    byPaneId.length > 0
-      ? byPaneId
-      : pane.customName
-        ? spawnHistory.filter((e) => (e.customName ?? '') === pane.customName)
-        : []
-  const ids: string[] = []
-  for (const e of source) {
-    const id = (e.sessionId ?? '').trim()
-    if (id && !ids.includes(id)) ids.push(id)
-  }
-  return ids
+  const byPaneId = spawnHistory.filter((entry) => entry.paneId === pane.paneId)
+  const source = byPaneId.length > 0 ? byPaneId : pane.customName
+    ? spawnHistory.filter((entry) => (entry.customName ?? '') === pane.customName) : []
+  return [...new Set(source.map((entry) => (entry.sessionId ?? '').trim()).filter(Boolean))]
 }
 
-/** Deterministic auto-reconnect resolver (pure). Given a ghost pane, returns the
- *  ONE session id its spawn-history provenance uniquely points at — but only
- *  when the evidence is unambiguous:
- *   - the pane's own saved id is NOT itself resumable (else it is healthy, not a
- *     ghost, and must never be touched — returns null),
- *   - candidates come from provenance (paneId, else customName), never content,
- *   - each candidate's transcript must exist (`transcriptExists` — a caller
- *     supplies the awaited agent.session_exists result as a sync lookup),
- *   - a candidate that is another live pane's current session id is excluded
- *     (it belongs to that pane).
- *  Returns the id IFF exactly one candidate survives; zero or ambiguous → null.
- */
+/** Resolve only one live, unclaimed provenance candidate for a ghost pane. */
 export function resolveDeterministicReconnect(
   pane: ReconnectPane,
   spawnHistory: ReconnectProvenanceEntry[],
   transcriptExists: (sessionId: string) => boolean,
-  livePanes: { paneId: string; sessionId: string }[]
+  livePanes: { paneId: string; sessionId: string }[],
 ): string | null {
-  // A healthy pane (own id has a transcript) is never a reconnect target.
   const ownId = pane.sessionId.trim()
   if (ownId && transcriptExists(ownId)) return null
   const claimedElsewhere = new Set(
-    livePanes
-      .filter((p) => p.paneId !== pane.paneId)
-      .map((p) => p.sessionId.trim())
-      .filter(Boolean)
+    livePanes.filter((other) => other.paneId !== pane.paneId).map((other) => other.sessionId.trim()).filter(Boolean),
   )
   const candidates = reconnectCandidateSessionIds(pane, spawnHistory).filter(
-    (id) => id !== ownId && transcriptExists(id) && !claimedElsewhere.has(id)
+    (id) => id !== ownId && transcriptExists(id) && !claimedElsewhere.has(id),
   )
   return candidates.length === 1 ? candidates[0] : null
 }

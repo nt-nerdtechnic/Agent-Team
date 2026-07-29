@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { parseLegacyRunGroups, resolveActiveTab } from '../runGroups'
+import { parseLegacyRunGroups, resolveActiveTab, resolveManualSpawnGroupId } from '../runGroups'
 
 describe('resolveActiveTab', () => {
   const groups = [{ id: 'rg-default' }, { id: 'rg-1' }, { id: 'rg-2' }]
@@ -25,6 +25,22 @@ describe('resolveActiveTab', () => {
   it("treats an empty current id as invalid and falls back", () => {
     expect(resolveActiveTab(groups, '')).toBe('rg-2')
     expect(resolveActiveTab([], '')).toBe('manual')
+  })
+})
+
+describe('resolveManualSpawnGroupId', () => {
+  const groups = [{ id: 'run-a' }, { id: 'run-b' }]
+
+  it('keeps a manual pane in the currently viewed run tab', () => {
+    expect(resolveManualSpawnGroupId(groups, 'run-b')).toBe('run-b')
+  })
+
+  it('leaves panes unassigned in the synthetic manual tab', () => {
+    expect(resolveManualSpawnGroupId(groups, 'manual')).toBe('')
+  })
+
+  it('does not assign a stale tab to an unrelated run', () => {
+    expect(resolveManualSpawnGroupId(groups, 'missing')).toBe('')
   })
 })
 

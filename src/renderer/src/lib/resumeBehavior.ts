@@ -5,9 +5,11 @@
 // confirm-dialog `ask`.
 
 export type ResumeBehavior = 'always' | 'never' | 'ask'
+export type RestoreScope = 'single' | 'page' | 'tab'
 
 /** Settings-store key (ui_settings.json via lib/settings.ts). */
 export const RESUME_BEHAVIOR_SETTING_KEY = 'agentTeam.resumeBehavior'
+export const RESTORE_SCOPE_SETTING_KEY = 'agentTeam.restoreScope'
 
 /** Guard for values read from the settings store: anything but a known
  *  behavior falls back to 'always' (the pre-preference behavior). */
@@ -15,7 +17,91 @@ export function normalizeResumeBehavior(v: unknown): ResumeBehavior {
   return v === 'never' || v === 'ask' ? v : 'always'
 }
 
+/** Scope for an automatic resume. Old installs safely restore one CLI only. */
+export function normalizeRestoreScope(v: unknown): RestoreScope {
+  return v === 'page' || v === 'tab' ? v : 'single'
+}
+
 export type RestoreDecision = 'resume' | 'fresh'
+export type RestoreSessionDecision = RestoreDecision | 'cancelled'
+export type RestoreSessionTrigger = 'cold' | 'tab' | 'layout' | 'grid-page'
+
+/** One cold-open decision snapshot. Settings are read only when this session is
+ * created; a workspace re-check reuses it, while opening another workspace
+ * creates a new snapshot. */
+export interface WorkspaceRestoreSession {
+  workspacePath: string
+  behavior: ResumeBehavior
+  scope: RestoreScope
+  decision?: RestoreSessionDecision
+}
+
+export function createWorkspaceRestoreSession(opts: {
+  workspacePath: string
+  behavior: unknown
+  scope: unknown
+}): WorkspaceRestoreSession {
+  return {
+    workspacePath: opts.workspacePath,
+    behavior: normalizeResumeBehavior(opts.behavior),
+    scope: normalizeRestoreScope(opts.scope),
+  }
+}
+
+export function settleWorkspaceRestoreSession(
+  session: WorkspaceRestoreSession,
+  decision: RestoreSessionDecision,
+  scope?: RestoreScope,
+): RestoreSessionDecision {
+  session.decision = decision
+  if (decision === 'resume' && scope) session.scope = scope
+  return decision
+}
+
+/** Return unrealized deferred panes for one workspace. Deferred metadata is
+ * the stable marker that a persisted pane is still awaiting cold restore. */
+export function pendingRestorePaneIds(
+  panes: readonly {
+    id: string
+    workspacePath: string
+    realized?: boolean
+    deferredRestore?: unknown
+  }[],
+  workspacePath: string,
+): string[] {
+  return panes
+    .filter((pane) =>
+      pane.workspacePath === workspacePath &&
+      !pane.realized &&
+      pane.deferredRestore != null
+    )
+    .map((pane) => pane.id)
+}
+
+/** Pick pending, non-minimized pane ids for one automatic restore scope.
+ * App.vue supplies the already-tab-filtered and Grid-page-filtered order. */
+export function restoreScopeTargetIds(opts: {
+  scope: RestoreScope
+  pendingPaneIds: readonly string[]
+  activeTabPaneIds: readonly string[]
+  gridPagePaneIds: readonly string[]
+  minimizedPaneIds: ReadonlySet<string>
+  focusedPaneId?: string | null
+  trigger?: RestoreSessionTrigger
+}): string[] {
+  const pending = new Set(opts.pendingPaneIds)
+  const eligible = (ids: readonly string[]): string[] => ids.filter(
+    (id) => pending.has(id) && !opts.minimizedPaneIds.has(id)
+  )
+  const activeTab = eligible(opts.activeTabPaneIds)
+  if (opts.scope === 'single') {
+    const candidates = opts.trigger === 'grid-page' ? eligible(opts.gridPagePaneIds) : activeTab
+    const focused = candidates.find((id) => id === opts.focusedPaneId)
+    return (focused ? [focused] : candidates.slice(0, 1))
+  }
+  if (opts.scope === 'page') return eligible(opts.gridPagePaneIds)
+  return activeTab
+}
 
 /** Remove a hand-written `--session-id <uuid>` (or `--session-id=<uuid>`) from a
  *  saved custom command. Used only on the start-fresh path: that id's transcript
@@ -26,29 +112,25 @@ export function stripPinnedSessionId(command: string): string {
   return command.replace(/\s*--session-id[=\s]+\S+/g, '').trim()
 }
 
-/** Decide whether a workspace-open restore resumes saved conversations or
- *  spawns fresh ones.
- *
- *  'ask' prompts at most once per workspace per window: onWorkspaceCheck
- *  re-runs on comm-failure retries and duplicate restores re-enter the restore
- *  path, so the first answer is cached under the workspace path and reused
- *  instead of re-prompting. With nothing restorable there is nothing to ask
- *  about — return 'resume' (a no-op) without prompting. */
-export async function resolveRestoreDecision(opts: {
-  behavior: ResumeBehavior
+/** Resolve and persist the one decision for a workspace cold-open session.
+ * A cancelled automatic restore stays cancelled until an explicit pane click
+ * asks again. */
+export async function resolveWorkspaceRestoreSession(opts: {
+  session: WorkspaceRestoreSession
   restorableCount: number
-  workspacePath: string
-  decisionCache: Map<string, RestoreDecision>
-  ask: () => Promise<boolean>
-}): Promise<RestoreDecision> {
-  if (opts.behavior === 'always') return 'resume'
-  if (opts.behavior === 'never') return 'fresh'
-  if (opts.restorableCount === 0) return 'resume'
-  const cached = opts.decisionCache.get(opts.workspacePath)
-  if (cached) return cached
-  // Dialog dismissal resolves false — treated as "start fresh" (the cancel
-  // button), never as silent resume.
-  const decision: RestoreDecision = (await opts.ask()) ? 'resume' : 'fresh'
-  opts.decisionCache.set(opts.workspacePath, decision)
-  return decision
+  retryCancelled?: boolean
+  ask: () => Promise<RestoreScope | 'fresh' | null>
+}): Promise<RestoreSessionDecision> {
+  if (opts.session.decision === 'cancelled' && !opts.retryCancelled) return 'cancelled'
+  if (opts.session.decision && opts.session.decision !== 'cancelled') return opts.session.decision
+  if (opts.session.behavior === 'always' || opts.restorableCount === 0) {
+    return settleWorkspaceRestoreSession(opts.session, 'resume')
+  }
+  if (opts.session.behavior === 'never') {
+    return settleWorkspaceRestoreSession(opts.session, 'fresh')
+  }
+  const selection = await opts.ask()
+  if (selection === null) return settleWorkspaceRestoreSession(opts.session, 'cancelled')
+  if (selection === 'fresh') return settleWorkspaceRestoreSession(opts.session, 'fresh')
+  return settleWorkspaceRestoreSession(opts.session, 'resume', selection)
 }

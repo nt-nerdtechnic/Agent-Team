@@ -8,6 +8,12 @@ export function resolveActiveTab(groups: { id: string }[], current: string): str
   return groups[groups.length - 1]?.id ?? 'manual'
 }
 
+/** Manual panes belong to the tab the user is viewing. The synthetic manual
+ * tab has no run-group id, while a real run tab keeps its own id. */
+export function resolveManualSpawnGroupId(groups: { id: string }[], activeTab: string): string {
+  return groups.some((group) => group.id === activeTab) ? activeTab : ''
+}
+
 /** Parse the legacy per-workspace `agentTeam.runGroups.<ws>` localStorage blob
  *  (one-time migration into project.json's ui_run_groups). Returns null when
  *  nothing was stored; corrupt / non-array data yields [] — matching the old

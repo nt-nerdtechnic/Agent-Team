@@ -22,20 +22,22 @@ describe('App grid layout preset bar', () => {
     )
   })
 
-  it('wires preset buttons to gridPreset', () => {
+  it('wires explicit Grid controls through user-change handlers', () => {
     const barAt = appSource.indexOf('class="grid-layout-bar"')
     const sectionEnd = appSource.indexOf('Sidebar/auto mode vertical handle', barAt)
     const section = appSource.slice(barAt, sectionEnd)
     expect(section).toContain('v-for="opt in gridPresetOptions"')
-    expect(section).toContain('@click="gridPreset = opt.key"')
-    expect(section).toContain('@click="gridPage--"')
-    expect(section).toContain('@click="gridPage++"')
+    expect(section).toContain('@click="onUserChangeGridPreset(opt.key)"')
+    expect(section).toContain('@click="onUserChangeGridPage(gridPage - 1)"')
+    expect(section).toContain('@click="onUserChangeGridPage(gridPage + 1)"')
   })
 
   it('hides paged-out panes via v-show without unmounting terminals', () => {
-    expect(appSource).toContain(
-      "!(effectiveLayoutMode === 'grid' && !gridPagePaneIds.has(p.id))"
-    )
+    expect(appSource).toContain('v-show="onScreenPaneIds.has(p.id)"')
+    const onScreenAt = appSource.indexOf('const onScreenPaneIds = computed')
+    const onScreenEnd = appSource.indexOf('\nconst dualFocusHandlePos', onScreenAt)
+    const onScreen = appSource.slice(onScreenAt, onScreenEnd)
+    expect(onScreen).toContain('gridPagePaneIds.value')
   })
 
   it('persists the preset under agentTeam.gridPreset', () => {

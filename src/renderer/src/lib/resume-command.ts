@@ -38,8 +38,7 @@ export function normalizeResumeSessionId(agentKey: string, sessionId: string): s
 
 /** A saved Codex conversation is data, not permission to start a replacement.
  * Keep the record untouched when its rollout is unavailable; fresh spawn must
- * remain an explicit user action from Agent History.
- */
+ * remain an explicit user action from Agent History. */
 export function shouldPreserveMissingSessionOnRestore(
   agentKey: string,
   savedSessionId: string,
@@ -48,29 +47,15 @@ export function shouldPreserveMissingSessionOnRestore(
   return agentKey === 'codex' && !!savedSessionId.trim() && !canResume
 }
 
-/** A pane that was continuing a conversation (its last command resumed a
- * session) but whose session file is now gone falls back to a fresh pane on
- * restore. Return true to warn the user instead of silently swapping in a new
- * conversation — a resume that can't find its transcript (moved home, deleted,
- * or a transient failure under load) otherwise looks like the app lost it.
- *
- * Requires `lastCommandWasResume` so a genuinely new pane (last launched with a
- * pinned --session-id, no transcript yet) is NOT flagged. Codex is excluded:
- * it is preserved untouched (see shouldPreserveMissingSessionOnRestore), never
- * silently replaced, so it needs no warning here.
- */
+/** A prior resume that is definitively missing needs a visible fallback warning.
+ * Unknown probe results retain --resume, and Codex is preserved in place. */
 export function shouldWarnMissingResume(
   agentKey: string,
   savedSessionId: string,
-  canResume: boolean,
+  canResume: boolean | null,
   lastCommandWasResume: boolean,
 ): boolean {
-  return (
-    agentKey !== 'codex' &&
-    !!savedSessionId.trim() &&
-    !canResume &&
-    lastCommandWasResume
-  )
+  return agentKey !== 'codex' && !!savedSessionId.trim() && canResume === false && lastCommandWasResume
 }
 
 /** Collapse restorable panes that point at the SAME conversation. Legacy
