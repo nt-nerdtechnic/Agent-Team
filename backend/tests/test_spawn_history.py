@@ -370,7 +370,7 @@ def test_patch_entry_seeds_migration_from_mirror(tmp_path: Path) -> None:
 def test_delete_entries_ids_mode_ignores_unknown_ids(tmp_path: Path) -> None:
     store = SpawnHistoryStore()
     store.merge(str(tmp_path), [_entry("p0"), _entry("p1"), _entry("p2")])
-    deleted, total = store.delete_entries(
+    deleted, total, *_ = store.delete_entries(
         str(tmp_path), mode="ids", pane_ids=["p1", "ghost"]
     )
     assert deleted == ["p1"]
@@ -385,7 +385,7 @@ def test_delete_entries_removed_mode_keeps_active(tmp_path: Path) -> None:
         _entry("gone-1", removedAt="2026-07-01T00:00:00Z"),
         _entry("gone-2", removedAt="2026-07-02T00:00:00Z"),
     ])
-    deleted, total = store.delete_entries(str(tmp_path), mode="removed")
+    deleted, total, *_ = store.delete_entries(str(tmp_path), mode="removed")
     assert deleted == ["gone-1", "gone-2"]
     assert total == 1
     assert [e["paneId"] for e in _stored_entries(store, tmp_path)] == ["active"]
@@ -403,7 +403,7 @@ def test_delete_entries_older_than_boundary(tmp_path: Path) -> None:
         _entry("old-active", spawnedAt="2026-07-01T00:00:00Z"),
         _entry("bad-ts", spawnedAt="not-a-date", removedAt="2026-07-01T00:00:00Z"),
     ])
-    deleted, total = store.delete_entries(
+    deleted, total, *_ = store.delete_entries(
         str(tmp_path), mode="older_than", cutoff_iso=cutoff
     )
     assert deleted == ["old-removed"]
@@ -416,11 +416,11 @@ def test_delete_entries_older_than_boundary(tmp_path: Path) -> None:
 def test_delete_entries_unknown_mode_and_empty_store_are_safe(tmp_path: Path) -> None:
     store = SpawnHistoryStore()
     # Empty store: nothing deleted and no file created.
-    deleted, total = store.delete_entries(str(tmp_path), mode="removed")
+    deleted, total, *_ = store.delete_entries(str(tmp_path), mode="removed")
     assert (deleted, total) == ([], 0)
     assert not store.history_file(str(tmp_path)).exists()
     store.merge(str(tmp_path), [_entry("p1", removedAt="2026-07-01T00:00:00Z")])
-    deleted, total = store.delete_entries(str(tmp_path), mode="bogus")
+    deleted, total, *_ = store.delete_entries(str(tmp_path), mode="bogus")
     assert (deleted, total) == ([], 1)
 
 
@@ -434,7 +434,7 @@ def test_delete_entries_other_workspace_untouched(tmp_path: Path) -> None:
     store = SpawnHistoryStore()
     store.merge(str(ws_a), [_entry("shared-id", workspacePath=str(ws_a))])
     store.merge(str(ws_b), [_entry("shared-id", workspacePath=str(ws_b))])
-    deleted, _ = store.delete_entries(str(ws_a), mode="ids", pane_ids=["shared-id"])
+    deleted, *_ = store.delete_entries(str(ws_a), mode="ids", pane_ids=["shared-id"])
     assert deleted == ["shared-id"]
     assert [e["paneId"] for e in _stored_entries(store, ws_b)] == ["shared-id"]
 
@@ -446,10 +446,166 @@ def test_delete_entries_via_symlink_alias_hits_the_shared_store(tmp_path: Path) 
     alias.symlink_to(real, target_is_directory=True)
     store = SpawnHistoryStore()
     store.merge(str(real), [_entry("p1", removedAt="2026-07-01T00:00:00Z")])
-    deleted, total = store.delete_entries(str(alias), mode="removed")
+    deleted, total, *_ = store.delete_entries(str(alias), mode="removed")
     assert deleted == ["p1"]
     assert total == 0
     assert _stored_entries(store, real) == []
+
+
+# ── manual log files deleted with their entries ─────────────────────────────
+# Deleting an Agent History entry used to be record-only, stranding its
+# `.agent-team/manual/<ymd>/<agentKey>-<paneId8>.log` forever (1.3 GB measured
+# on one machine).
+
+
+def _manual_log(ws: Path, ymd: str, name: str, size: int = 100) -> Path:
+    path = ws / ".agent-team" / "manual" / ymd / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"x" * size)
+    return path
+
+
+def test_delete_entries_removes_the_matching_manual_log(tmp_path: Path) -> None:
+    store = SpawnHistoryStore()
+    store.merge(str(tmp_path), [_entry("aaaa1111-2222"), _entry("bbbb3333-4444")])
+    doomed = _manual_log(tmp_path, "20260101", "claude-aaaa1111.log", 100)
+    keeper = _manual_log(tmp_path, "20260101", "claude-bbbb3333.log", 50)
+
+    result = store.delete_entries(str(tmp_path), mode="ids", pane_ids=["aaaa1111-2222"])
+
+    assert result.deleted_ids == ["aaaa1111-2222"]
+    assert result.total == 1
+    assert result.freed_bytes == 100
+    assert result.removed_log_files == 1
+    assert not doomed.exists()
+    assert keeper.exists()
+
+
+def test_delete_entries_finds_the_log_in_any_day_folder(tmp_path: Path) -> None:
+    """spawnedAt is rewritten on restore, so the day folder derived from it is
+    unreliable — the filename is the stable key."""
+    store = SpawnHistoryStore()
+    store.merge(
+        str(tmp_path),
+        [_entry("aaaa1111-2222", spawnedAt="2026-07-20T00:00:00Z",
+                removedAt="2026-07-21T00:00:00Z")],
+    )
+    stray = _manual_log(tmp_path, "20250315", "claude-aaaa1111.log", 30)
+
+    result = store.delete_entries(str(tmp_path), mode="removed")
+
+    assert result.removed_log_files == 1
+    assert result.freed_bytes == 30
+    assert not stray.exists()
+
+
+def test_delete_entries_uses_the_stored_output_log_file_name(tmp_path: Path) -> None:
+    store = SpawnHistoryStore()
+    store.merge(
+        str(tmp_path),
+        [_entry("p1", outputLogFile=str(
+            tmp_path / ".agent-team" / "manual" / "20260101" / "legacy-name.log"
+        ))],
+    )
+    legacy = _manual_log(tmp_path, "20260101", "legacy-name.log", 70)
+
+    result = store.delete_entries(str(tmp_path), mode="ids", pane_ids=["p1"])
+
+    assert result.removed_log_files == 1
+    assert not legacy.exists()
+
+
+def test_delete_entries_never_touches_a_log_outside_the_manual_dir(
+    tmp_path: Path
+) -> None:
+    outsider = tmp_path / ".agent-team" / "runs" / "r1" / "claude-aaaa1111.log"
+    outsider.parent.mkdir(parents=True)
+    outsider.write_bytes(b"y" * 10)
+    store = SpawnHistoryStore()
+    store.merge(str(tmp_path), [_entry("aaaa1111-2222", outputLogFile=str(outsider))])
+
+    result = store.delete_entries(str(tmp_path), mode="ids", pane_ids=["aaaa1111-2222"])
+
+    assert result.removed_log_files == 0
+    assert result.freed_bytes == 0
+    assert outsider.exists()
+
+
+def test_delete_entries_tolerates_a_missing_log_file(tmp_path: Path) -> None:
+    store = SpawnHistoryStore()
+    store.merge(str(tmp_path), [_entry("aaaa1111-2222")])
+    result = store.delete_entries(str(tmp_path), mode="ids", pane_ids=["aaaa1111-2222"])
+    assert result.deleted_ids == ["aaaa1111-2222"]
+    assert (result.freed_bytes, result.removed_log_files) == (0, 0)
+
+
+def test_delete_entries_does_not_follow_a_symlinked_log(tmp_path: Path) -> None:
+    real = tmp_path / "outside.log"
+    real.write_bytes(b"z" * 40)
+    link = tmp_path / ".agent-team" / "manual" / "20260101" / "claude-aaaa1111.log"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(real)
+    store = SpawnHistoryStore()
+    store.merge(str(tmp_path), [_entry("aaaa1111-2222")])
+
+    result = store.delete_entries(str(tmp_path), mode="ids", pane_ids=["aaaa1111-2222"])
+
+    assert result.removed_log_files == 0
+    assert real.exists()
+    assert link.is_symlink()
+
+
+# ── dry run (delete confirmation preview) ───────────────────────────────────
+# The renderer has to tell the user which transcript logs a delete destroys
+# and how much space it frees *before* they agree, so the same selection runs
+# once with nothing written and nothing unlinked.
+
+
+def test_delete_entries_dry_run_reports_what_a_real_run_would_free(
+    tmp_path: Path,
+) -> None:
+    store = SpawnHistoryStore()
+    entries = [
+        _entry("aaaa1111-2222", removedAt="2026-07-01T00:00:00Z"),
+        _entry("bbbb3333-4444", removedAt="2026-07-01T00:00:00Z"),
+        _entry("cccc5555-6666"),
+    ]
+    store.merge(str(tmp_path), entries)
+    doomed_a = _manual_log(tmp_path, "20260101", "claude-aaaa1111.log", 100)
+    doomed_b = _manual_log(tmp_path, "20250315", "claude-bbbb3333.log", 40)
+    keeper = _manual_log(tmp_path, "20260101", "claude-cccc5555.log", 7)
+
+    preview = store.delete_entries(str(tmp_path), mode="removed", dry_run=True)
+
+    assert preview.deleted_ids == ["aaaa1111-2222", "bbbb3333-4444"]
+    assert preview.total == 1
+    assert preview.freed_bytes == 140
+    assert preview.removed_log_files == 2
+    # Nothing happened: store intact, every log still on disk.
+    assert [e["paneId"] for e in _stored_entries(store, tmp_path)] == [
+        "aaaa1111-2222", "bbbb3333-4444", "cccc5555-6666",
+    ]
+    assert doomed_a.exists() and doomed_b.exists() and keeper.exists()
+
+    real = store.delete_entries(str(tmp_path), mode="removed")
+
+    assert real == preview
+    assert not doomed_a.exists() and not doomed_b.exists()
+    assert keeper.exists()
+
+
+def test_delete_entries_dry_run_honours_starred_immunity(tmp_path: Path) -> None:
+    store = SpawnHistoryStore()
+    store.merge(str(tmp_path), [
+        _entry("aaaa1111-2222", removedAt="2026-07-01T00:00:00Z", starred=True),
+    ])
+    starred_log = _manual_log(tmp_path, "20260101", "claude-aaaa1111.log", 100)
+
+    preview = store.delete_entries(str(tmp_path), mode="removed", dry_run=True)
+
+    assert preview.deleted_ids == []
+    assert (preview.freed_bytes, preview.removed_log_files) == (0, 0)
+    assert starred_log.exists()
 
 
 # ── project.delete_spawn_history / project.rename_spawn_history handlers ────
@@ -486,7 +642,9 @@ async def test_delete_spawn_history_handler_syncs_mirror_and_broadcasts(
     })
 
     resp = session.websocket.sent[0]  # type: ignore[attr-defined]
-    assert resp["payload"] == {"deleted": 1, "total": 2}
+    assert resp["payload"] == {
+        "deleted": 1, "total": 2, "freed_bytes": 0, "removed_log_files": 0,
+    }
     # Full store (seeded from the mirror) and mirror both lost p1.
     stored = _stored_entries(app.spawn_history_store, tmp_path)
     assert [e["paneId"] for e in stored] == ["p0", "p2"]
@@ -497,6 +655,58 @@ async def test_delete_spawn_history_handler_syncs_mirror_and_broadcasts(
     assert len(events) == 1
     assert events[0]["type"] == "project.ui_state_changed"
     assert [e["paneId"] for e in events[0]["payload"]["spawn_history"]] == ["p0", "p2"]
+
+
+async def test_delete_spawn_history_handler_dry_run_previews_then_deletes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`dry_run: true` answers with the real figures but changes nothing; the
+    same request without it (the user confirmed) then goes through."""
+    from agent_team_backend import app, ws_handlers
+
+    store = ProjectStore()
+    store.save(store.load_or_create(str(tmp_path)))
+    store.set_ui_state(str(tmp_path), spawn_history=[
+        _entry("aaaa1111-2222", workspacePath=str(tmp_path),
+               removedAt="2026-07-01T00:00:00Z"),
+        _entry("cccc5555-6666", workspacePath=str(tmp_path)),
+    ])
+    monkeypatch.setattr(app, "project_store", store)
+    doomed = _manual_log(tmp_path, "20260101", "claude-aaaa1111.log", 100)
+
+    events: list[dict[str, Any]] = []
+
+    async def capture(event: dict[str, Any], exclude: Any = None) -> None:
+        events.append(event)
+
+    monkeypatch.setattr(app, "broadcast", capture)
+
+    session = app.Session(FakeWebSocket())  # type: ignore[arg-type]
+    fn = ws_handlers.lookup("project.delete_spawn_history")
+    assert fn is not None
+    request = {"workspace_path": str(tmp_path), "mode": "removed"}
+    await fn(session, "m1", "project.delete_spawn_history", {**request, "dry_run": True})
+
+    preview = session.websocket.sent[0]["payload"]  # type: ignore[attr-defined]
+    assert preview == {
+        "deleted": 1, "total": 1, "freed_bytes": 100, "removed_log_files": 1,
+    }
+    assert doomed.exists()
+    assert events == []
+    mirror = ProjectStore().peek(str(tmp_path))
+    assert mirror is not None
+    assert [e["paneId"] for e in mirror.ui_spawn_history or []] == [
+        "aaaa1111-2222", "cccc5555-6666",
+    ]
+
+    await fn(session, "m2", "project.delete_spawn_history", request)
+
+    assert session.websocket.sent[1]["payload"] == preview  # type: ignore[attr-defined]
+    assert not doomed.exists()
+    assert [e["paneId"] for e in _stored_entries(app.spawn_history_store, tmp_path)] == [
+        "cccc5555-6666",
+    ]
+    assert len(events) == 1
 
 
 async def test_delete_spawn_history_handler_rejects_bad_requests(
@@ -709,14 +919,14 @@ def test_delete_entries_bulk_modes_skip_starred(tmp_path: Path) -> None:
         _entry("starred-removed", spawnedAt="2026-07-01T00:00:00Z", removedAt="2026-07-01T00:00:00Z", starred=True),
         _entry("active"),
     ])
-    deleted, total = store.delete_entries(str(tmp_path), mode="removed")
+    deleted, total, *_ = store.delete_entries(str(tmp_path), mode="removed")
     assert deleted == ["plain-removed"]
     assert total == 2
     assert [e["paneId"] for e in _stored_entries(store, tmp_path)] == [
         "starred-removed", "active",
     ]
     # older_than: the starred entry is old and removed, yet still kept.
-    deleted, total = store.delete_entries(
+    deleted, total, *_ = store.delete_entries(
         str(tmp_path), mode="older_than", cutoff_iso=cutoff
     )
     assert deleted == []
@@ -730,7 +940,7 @@ def test_delete_entries_ids_mode_still_deletes_starred(tmp_path: Path) -> None:
         _entry("starred", removedAt="2026-07-01T00:00:00Z", starred=True),
         _entry("other"),
     ])
-    deleted, total = store.delete_entries(
+    deleted, total, *_ = store.delete_entries(
         str(tmp_path), mode="ids", pane_ids=["starred"]
     )
     assert deleted == ["starred"]
@@ -774,7 +984,9 @@ async def test_delete_spawn_history_handler_keeps_starred_in_store_and_mirror(
     })
 
     resp = session.websocket.sent[0]  # type: ignore[attr-defined]
-    assert resp["payload"] == {"deleted": 1, "total": 1}
+    assert resp["payload"] == {
+        "deleted": 1, "total": 1, "freed_bytes": 0, "removed_log_files": 0,
+    }
     # Full store: only the unstarred removed entry was cleaned.
     stored = _stored_entries(app.spawn_history_store, tmp_path)
     assert [e["paneId"] for e in stored] == ["starred-gone"]

@@ -53,6 +53,15 @@ function stopPeriodicCheck(): void {
   }
 }
 
+/**
+ * Whether an update download is currently running. Download state is purely
+ * in-memory in the updater service, so this is the single source of truth —
+ * callers that delete the updater cache must check it first.
+ */
+export function isUpdateDownloading(): boolean {
+  return service?.getState().status === 'downloading'
+}
+
 export function initUpdater(options: {
   enabled: boolean
   currentVersion: string

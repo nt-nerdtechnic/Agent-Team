@@ -8,6 +8,7 @@ import { startBackend, type BackendHandle } from './backend'
 import { installApplicationMenu, type AppMenuHooks, type RecentMenuEntry } from './menu'
 import { openNoopPluginView, openFsProbePluginView, openMiniIdePluginView, devMiniIdePluginDescriptor, openPlansPluginView, devPlansPluginDescriptor, openGitPluginView, devGitPluginDescriptor, registerBundledMiniIde, registerBundledPlans, registerBundledGit, frontendPluginManager } from './plugins/frontendPluginManager'
 import { registerPluginIpc } from './plugins/pluginIpc'
+import { registerStorageIpc } from './storage-ipc'
 import { lockPageZoom } from './web-contents-zoom'
 import { initUpdater } from './updater'
 import { WindowRegistry, type WindowBounds, type WindowEntry } from './window-registry'
@@ -360,6 +361,10 @@ app.on('browser-window-created', (_event, win) => {
 const pluginsRoot = (): string => join(app.getPath('userData'), 'plugins')
 registerPluginIpc(frontendPluginManager, pluginsRoot())
 frontendPluginManager.loadInstalledPlugins(pluginsRoot())
+
+// Storage usage & cleanup: clears only Electron-owned caches (Chromium HTTP/
+// code/GPU caches, electron-updater downloads). Never user state.
+registerStorageIpc()
 
 // Bundled mini-IDE — the official builtin editor surface, shipped inside the
 // app package (resources/plugins/mini-ide) and built from dist-plugins in dev.

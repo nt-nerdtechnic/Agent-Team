@@ -50,6 +50,7 @@ import CliManagementPanel from './CliManagementPanel.vue'
 import type { useCliProfiles } from '../composables/useCliProfiles'
 import KeyboardShortcutsHelp from './KeyboardShortcutsHelp.vue'
 import ExtensionsPane from './ExtensionsPane.vue'
+import StorageUsagePane from './StorageUsagePane.vue'
 import SkillsPane from './SkillsPane.vue'
 import SettingsNavItem from './settings/SettingsNavItem.vue'
 import SettingsSection from './settings/SettingsSection.vue'
@@ -76,6 +77,9 @@ const props = defineProps<{
   /** Basename of the currently open workspace, shown in the sidebar header.
    *  Falls back to the app name when not provided. */
   workspaceName?: string
+  /** Workspaces the app knows about — the Storage tab scans them for
+   *  reclaimable build output and logs. */
+  workspacePaths?: string[]
   stagesApi: ReturnType<typeof useStages>
   analyzerApi: ReturnType<typeof useAnalyzer>
   pipelinesApi?: ReturnType<typeof usePipelines>
@@ -95,7 +99,7 @@ const confirmBeforeCloseModel = computed({
 })
 
 // ── Tab ───────────────────────────────────────────────────────────────────────
-type Tab = 'roles' | 'pipelines' | 'mcp' | 'skills' | 'analyzer' | 'cliAgents' | 'general' | 'updates' | 'appearance' | 'accounts' | 'shortcuts' | 'extensions'
+type Tab = 'roles' | 'pipelines' | 'mcp' | 'skills' | 'analyzer' | 'cliAgents' | 'general' | 'updates' | 'appearance' | 'accounts' | 'shortcuts' | 'extensions' | 'storage'
 const activeTab = ref<Tab>(props.initialTab ?? 'roles')
 
 // Sidebar workspace header label — the open workspace's basename, falling back
@@ -370,6 +374,15 @@ const settingsSearchItems = computed<SettingsSearchItem[]>(() => [
     summary: 'Read-only reference of all keyboard shortcuts across workbench, AI chat, editor, terminal, and native menu.',
     keywords: 'keyboard shortcuts keys keybinding hotkey 快捷鍵 鍵盤 按鍵 workbench editor terminal cli ctrl cmd shift option',
   },
+  {
+    id: 'storage',
+    tab: 'storage',
+    section: 'storage',
+    title: 'Storage / 儲存空間',
+    group: 'System',
+    summary: 'Scan disk usage across app data, Electron caches, CLI homes and workspaces, then clean up reclaimable space.',
+    keywords: 'storage disk space usage cache caches cleanup clean logs node_modules stale free 儲存 空間 磁碟 快取 清理 清除 日誌 佔用 釋出',
+  },
 ])
 
 const settingsSearchResults = computed(() => {
@@ -597,6 +610,7 @@ const settingsScopeNotes: Record<Tab, { scope: string; storage: keyof SettingsPa
   accounts: { scope: 'User / Workspace bindings', storage: 'safeStorage' },
   shortcuts: { scope: 'User', storage: 'localStorage' },
   extensions: { scope: 'User', storage: 'mainProcess' },
+  storage: { scope: 'User', storage: 'app_data_dir' },
 }
 
 async function loadSettingsPaths(): Promise<void> {
@@ -1698,6 +1712,11 @@ async function plDelete(id: string, name: string) {
               <SettingsNavItem :label="$t('settings.nav.shortcuts')" :active="activeTab === 'shortcuts'" @select="activeTab = 'shortcuts'">
                 <template #icon>
                   <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="1.8" y="4.3" width="12.4" height="7.4" rx="1.4"/><path d="M4.4 7v0.01M6.8 7v0.01M9.2 7v0.01M11.6 7v0.01M4.4 9.2v0.01M11.6 9.2v0.01"/><path d="M6.4 9.2h3.2"/></svg>
+                </template>
+              </SettingsNavItem>
+              <SettingsNavItem :label="$t('settings.nav.storage')" :active="activeTab === 'storage'" @select="activeTab = 'storage'">
+                <template #icon>
+                  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="3.8" rx="5.2" ry="2"/><path d="M2.8 3.8v4.4c0 1.1 2.3 2 5.2 2s5.2-.9 5.2-2V3.8"/><path d="M2.8 8.2v4c0 1.1 2.3 2 5.2 2s5.2-.9 5.2-2v-4"/></svg>
                 </template>
               </SettingsNavItem>
               <SettingsNavItem :label="$t('settings.nav.updates')" :active="activeTab === 'updates'" @select="activeTab = 'updates'">
@@ -3000,6 +3019,18 @@ async function plDelete(id: string, name: string) {
         <div v-show="activeTab === 'extensions'" class="s-body" data-settings-section="extensions">
           <h1 class="s-page-title">{{ $t('settings.nav.extensions') }}</h1>
           <ExtensionsPane />
+        </div>
+
+        <!-- ── STORAGE TAB ───────────────────────────────────────────────── -->
+        <div v-show="activeTab === 'storage'" class="s-body" data-settings-section="storage">
+          <h1 class="s-page-title">{{ $t('settings.nav.storage') }}</h1>
+          <!-- Lazy-mounted: the scan is expensive, so it only runs once the
+               user actually opens this tab. -->
+          <StorageUsagePane
+            v-if="activeTab === 'storage'"
+            :backend="props.backend"
+            :workspace-paths="props.workspacePaths"
+          />
         </div>
 
         </div>

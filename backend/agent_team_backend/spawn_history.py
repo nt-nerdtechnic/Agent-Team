@@ -18,7 +18,7 @@ import os
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from .projects import PROJECT_DIR_NAME, ensure_workspace_data_dir
 
@@ -28,6 +28,11 @@ SPAWN_HISTORY_FILE = "spawn-history.json"
 # Hard cap so a runaway client cannot grow the file forever; entries past it
 # are dropped from the oldest end with a warning.
 MAX_ENTRIES = 5000
+
+# `<workspace>/.agent-team/manual/<YYYYMMDD>/<agentKey>-<paneId[:8]>.log` —
+# the renderer builds these paths (App.vue) and hands them to terminal.create
+# as `output_log_file`.
+MANUAL_LOGS_DIRNAME = "manual"
 
 
 def canonical_workspace_path(workspace_path: str) -> str:
@@ -76,6 +81,163 @@ def filter_foreign_entries(
             dropped, workspace_path, context,
         )
     return kept
+
+
+def manual_log_file_name(agent_key: str, pane_id: str) -> str:
+    """The renderer's manual-log filename for a pane (spawnHistory.ts)."""
+    return f"{agent_key}-{pane_id[:8]}.log"
+
+
+def entry_manual_log_names(entry: dict[str, Any]) -> set[str]:
+    """Every manual-log filename ``entry`` can be reached by.
+
+    The date folder is *not* usable as a key: ``spawnedAt`` is rewritten when
+    a pane is restored or re-recorded, so an entry's log can sit under a day
+    other than the one its timestamp names. The filename is the stable key —
+    ``paneId`` is a UUID, so its first 8 hex chars identify the pane. Entries
+    that carry an explicit ``outputLogFile`` contribute its basename too, in
+    case the renderer ever stored a name we would not derive.
+    """
+    names: set[str] = set()
+    agent_key = entry.get("agentKey")
+    pane_id = entry.get("paneId")
+    if (
+        isinstance(agent_key, str) and agent_key
+        and isinstance(pane_id, str) and pane_id
+    ):
+        names.add(manual_log_file_name(agent_key, pane_id))
+    stored = entry.get("outputLogFile")
+    if isinstance(stored, str) and stored:
+        names.add(os.path.basename(stored))
+    return names
+
+
+def manual_logs_dir(workspace_path: str) -> Path:
+    return (
+        Path(canonical_workspace_path(workspace_path))
+        / PROJECT_DIR_NAME
+        / MANUAL_LOGS_DIRNAME
+    )
+
+
+def read_stored_entries(workspace_path: str) -> list[dict[str, Any]]:
+    """Side-effect-free read of the full store; ``[]`` when missing or bad.
+
+    Unlike ``SpawnHistoryStore._load`` this never quarantines a corrupt file
+    and never seeds from the project.json mirror — it exists for read-only
+    consumers such as the storage-usage scan.
+    """
+    hf = (
+        Path(canonical_workspace_path(workspace_path))
+        / PROJECT_DIR_NAME
+        / SPAWN_HISTORY_FILE
+    )
+    try:
+        data = json.loads(hf.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    entries = data.get("entries") if isinstance(data, dict) else None
+    return [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
+
+
+def _collect_manual_logs(
+    workspace_path: str, entries: list[dict[str, Any]]
+) -> list[tuple[Path, int]]:
+    """The manual log files of ``entries`` as ``(path, size)`` pairs.
+
+    Best-effort by design: a missing file, an unreadable day folder or a
+    permission error must never fail the history deletion that triggered it.
+    Every candidate is resolved and asserted to stay inside the workspace's
+    ``.agent-team/manual/`` dir before it is returned, so callers can unlink
+    what they get without re-checking.
+    """
+    names: set[str] = set()
+    for entry in entries:
+        names |= entry_manual_log_names(entry)
+    if not names:
+        return []
+    manual_root = manual_logs_dir(workspace_path)
+    try:
+        root = manual_root.resolve(strict=True)
+    except OSError:
+        return []
+
+    day_dirs: list[Path] = []
+    try:
+        with os.scandir(root) as it:
+            for entry_it in it:
+                if entry_it.is_dir(follow_symlinks=False):
+                    day_dirs.append(Path(entry_it.path))
+    except OSError as err:
+        log.warning("cannot list manual logs under %s: %s", root, err)
+        return []
+
+    found: list[tuple[Path, int]] = []
+    for day_dir in day_dirs:
+        try:
+            with os.scandir(day_dir) as it:
+                targets = [
+                    (Path(e.path), e)
+                    for e in it
+                    if e.name in names and e.is_file(follow_symlinks=False)
+                ]
+        except OSError as err:
+            log.warning("cannot list manual logs in %s: %s", day_dir, err)
+            continue
+        for path, dir_entry in targets:
+            resolved = path.parent.resolve() / path.name
+            try:
+                resolved.relative_to(root)
+            except ValueError:
+                log.warning("refusing to delete log outside %s: %s", root, resolved)
+                continue
+            try:
+                size = dir_entry.stat(follow_symlinks=False).st_size
+            except OSError:
+                continue
+            found.append((path, size))
+    return found
+
+
+def _measure_manual_logs(
+    workspace_path: str, entries: list[dict[str, Any]]
+) -> tuple[int, int]:
+    """``(freed bytes, files)`` a real delete of ``entries`` would reclaim."""
+    logs = _collect_manual_logs(workspace_path, entries)
+    return sum(size for _, size in logs), len(logs)
+
+
+def _delete_manual_logs(
+    workspace_path: str, entries: list[dict[str, Any]]
+) -> tuple[int, int]:
+    """Remove the manual log files of ``entries``; ``(freed bytes, files)``."""
+    freed = 0
+    removed = 0
+    for path, size in _collect_manual_logs(workspace_path, entries):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError as err:
+            log.warning("cannot delete manual log %s: %s", path, err)
+            continue
+        freed += size
+        removed += 1
+    return freed, removed
+
+
+class DeleteResult(NamedTuple):
+    """What a ``delete_entries()`` call removed.
+
+    ``freed_bytes``/``removed_log_files`` cover the manual log files that went
+    with the deleted entries; the first two fields are the historical return
+    value.
+    """
+
+    deleted_ids: list[str]
+    total: int
+    freed_bytes: int
+    removed_log_files: int
 
 
 def _parse_entry_timestamp(value: Any) -> datetime | None:
@@ -245,8 +407,15 @@ class SpawnHistoryStore:
         pane_ids: list[str] | None = None,
         cutoff_iso: str | None = None,
         seed: list[dict[str, Any]] | None = None,
-    ) -> tuple[list[str], int]:
-        """Delete entries from the full store; returns (deleted ids, total left).
+        dry_run: bool = False,
+    ) -> DeleteResult:
+        """Delete entries from the full store and their manual log files.
+
+        Returns ``DeleteResult(deleted_ids, total_left, freed_bytes,
+        removed_log_files)``. Deleting a history entry used to be record-only,
+        which stranded its ``.agent-team/manual/<ymd>/<agentKey>-<paneId8>.log``
+        forever — those logs are now removed alongside the entry (guarded to
+        stay inside the workspace's manual dir, tolerant of missing files).
 
         Modes:
         - ``"ids"``: entries whose paneId is in ``pane_ids`` (record-only —
@@ -259,6 +428,12 @@ class SpawnHistoryStore:
 
         Starred entries (``starred`` truthy) survive both bulk modes; only
         an explicit ``"ids"`` delete removes them.
+
+        ``dry_run=True`` answers "what would this delete?" — same selection
+        and same log-file resolution, but nothing is written and nothing is
+        unlinked. It backs the renderer's delete confirmation, which has to
+        name the transcript files and the disk space at stake before the user
+        agrees.
 
         Unknown mode deletes nothing. The rewrite is atomic (tmp +
         os.replace) and skipped entirely when nothing matched. Each
@@ -288,15 +463,25 @@ class SpawnHistoryStore:
             stored = self._load(workspace_path, seed)
             kept: list[dict[str, Any]] = []
             deleted: list[str] = []
+            gone: list[dict[str, Any]] = []
             for entry in stored:
                 if doomed(entry):
                     pane_id = entry.get("paneId")
                     deleted.append(pane_id if isinstance(pane_id, str) else "")
+                    gone.append(entry)
                 else:
                     kept.append(entry)
-            if deleted:
-                self._write(workspace_path, kept)
-            return deleted, len(kept)
+            if not deleted:
+                return DeleteResult([], len(kept), 0, 0)
+            if dry_run:
+                freed, removed = _measure_manual_logs(workspace_path, gone)
+                return DeleteResult(deleted, len(kept), freed, removed)
+            self._write(workspace_path, kept)
+            # Logs go after the store rewrite: if unlinking fails half-way the
+            # entries are still gone, and the leftovers show up as orphans in
+            # the storage-usage page rather than as a failed delete.
+            freed, removed = _delete_manual_logs(workspace_path, gone)
+            return DeleteResult(deleted, len(kept), freed, removed)
 
     def read_page(
         self,

@@ -16,6 +16,8 @@ import {
   historyEntryLabel,
   type HistoryCleanupMode,
   type HistoryDayGroupKey,
+  type HistoryDeletePreview,
+  type HistoryDeleteTarget,
   type HistoryOriginFilter,
   type HistoryStatusFilter,
   type SpawnHistoryEntry,
@@ -39,6 +41,7 @@ const props = defineProps<{
   loadMoreHistory?: () => Promise<void>
   fetchHistoryLog?: (entry: SpawnHistoryEntry) => Promise<{ title: string; content: string } | null>
   searchHistoryLogContent?: (entries: SpawnHistoryEntry[], query: string) => Promise<Set<string>>
+  previewDelete?: (target: HistoryDeleteTarget) => Promise<HistoryDeletePreview | null>
 }>()
 
 const emit = defineEmits<{
@@ -84,6 +87,12 @@ const cleanupMenuOpen = ref(false)
 // cutoff agree exactly.
 const cleanupCutoffIso = ref('')
 const confirmCleanup = ref<{ mode: HistoryCleanupMode; count: number } | null>(null)
+// Dry-run figures behind both confirmations: deleting a record also unlinks
+// its CLI transcript log, so the user is told how many files and how much
+// disk space go with it. null = the probe failed or is unavailable; the
+// dialog then confirms without the figures rather than blocking the delete.
+const deletePreview = ref<HistoryDeletePreview | null>(null)
+const deletePreviewPending = ref(false)
 
 // Autofocus + select the inline rename input the moment it mounts (same
 // pattern as App.vue's pane-header inline rename).
@@ -104,6 +113,7 @@ watch(() => props.show, (open) => {
     confirmDelete.value = false
     cleanupMenuOpen.value = false
     confirmCleanup.value = null
+    deletePreview.value = null
     if (contentSearchDebounceTimer !== undefined) { window.clearTimeout(contentSearchDebounceTimer); contentSearchDebounceTimer = undefined }
     contentSearchSeq++
     contentMatchedIds.value = new Set()
@@ -236,9 +246,50 @@ async function copySessionId(sessionId: string): Promise<void> {
   copiedTimer = window.setTimeout(() => { sessionIdCopied.value = false }, 1500)
 }
 
+function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = n
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  return `${unit === 0 ? value : value.toFixed(1)} ${units[unit]}`
+}
+
+/** Ask the backend what this delete would cost. Never throws: a failed probe
+ *  degrades to a confirmation without figures, it must not block the delete. */
+async function runDeletePreview(target: HistoryDeleteTarget): Promise<HistoryDeletePreview | null> {
+  if (!props.previewDelete) return null
+  deletePreviewPending.value = true
+  try {
+    return await props.previewDelete(target)
+  } catch {
+    return null
+  } finally {
+    deletePreviewPending.value = false
+  }
+}
+
+async function openDeleteConfirm(): Promise<void> {
+  const entry = selectedEntry.value
+  if (!entry || deletePreviewPending.value) return
+  const preview = await runDeletePreview({ mode: 'ids', paneIds: [entry.paneId] })
+  // Nothing left to destroy backend-side — there is nothing to warn about,
+  // so skip the dialog but still let the record leave the loaded list.
+  if (preview && preview.entries === 0) {
+    emit('delete', entry)
+    return
+  }
+  deletePreview.value = preview
+  confirmDelete.value = true
+}
+
 function onDeleteConfirmed(): void {
   const entry = selectedEntry.value
   confirmDelete.value = false
+  deletePreview.value = null
   if (entry) emit('delete', entry)
 }
 
@@ -257,16 +308,23 @@ const cleanupOlderCount = computed(() =>
   countHistoryCleanupEntries(props.sessionHistory, 'older_than', cleanupCutoffIso.value)
 )
 
-function openCleanupConfirm(mode: HistoryCleanupMode): void {
+async function openCleanupConfirm(mode: HistoryCleanupMode): Promise<void> {
   cleanupMenuOpen.value = false
+  if (deletePreviewPending.value) return
   const count = mode === 'removed' ? cleanupRemovedCount.value : cleanupOlderCount.value
   if (count === 0) return
-  confirmCleanup.value = { mode, count }
+  const preview = await runDeletePreview({ mode, cutoffIso: cleanupCutoffIso.value })
+  if (preview && preview.entries === 0) return
+  deletePreview.value = preview
+  // The dry-run counted the full store, the local count only the loaded
+  // window — prefer it when we have it.
+  confirmCleanup.value = { mode, count: preview?.entries ?? count }
 }
 
 function onCleanupConfirmed(): void {
   const pending = confirmCleanup.value
   confirmCleanup.value = null
+  deletePreview.value = null
   if (pending) emit('cleanup', pending.mode, cleanupCutoffIso.value)
 }
 
@@ -602,11 +660,13 @@ async function copyLogText(): Promise<void> {
                   class="ah-revive ah-preview"
                   @click="emit('preview', selectedEntry)"
                 >{{ $t('action.open-full-log') }}</button>
-                <!-- Record-only delete; active entries never show it (their
-                     pane keeps running, so deleting the record is ambiguous). -->
+                <!-- Deletes the record *and* its CLI transcript log; active
+                     entries never show it (their pane keeps running, so
+                     deleting the record is ambiguous). -->
                 <button
                   class="ah-revive ah-delete"
-                  @click="confirmDelete = true"
+                  :disabled="deletePreviewPending"
+                  @click="openDeleteConfirm"
                 >{{ $t('action.delete') }}</button>
               </div>
               <!-- Phase F: inline log preview (independent scroll region) -->
@@ -686,6 +746,13 @@ async function copyLogText(): Promise<void> {
         </div>
         <div style="padding: 16px 14px; font-size: 13px; color: var(--text-primary);">
           {{ $t('label.history-delete-confirm', { name: historyEntryLabel(selectedEntry) }) }}
+          <div
+            v-if="deletePreview && deletePreview.logFiles > 0"
+            class="ah-delete-logs"
+            data-testid="history-delete-logs"
+          >
+            {{ $t('label.history-delete-logs', { files: deletePreview.logFiles, size: formatBytes(deletePreview.freedBytes) }) }}
+          </div>
         </div>
         <div style="display: flex; gap: 8px; padding: 0 14px 14px; justify-content: flex-end;">
           <button class="history-close" style="border: 1px solid var(--border-default); padding: 4px 12px; border-radius: 6px;" @click="confirmDelete = false">{{ $t('action.cancel') }}</button>
@@ -703,6 +770,13 @@ async function copyLogText(): Promise<void> {
         </div>
         <div style="padding: 16px 14px; font-size: 13px; color: var(--text-primary);">
           {{ $t('label.history-cleanup-confirm-count', { count: confirmCleanup.count }) }}
+          <div
+            v-if="deletePreview && deletePreview.logFiles > 0"
+            class="ah-delete-logs"
+            data-testid="history-cleanup-logs"
+          >
+            {{ $t('label.history-delete-logs', { files: deletePreview.logFiles, size: formatBytes(deletePreview.freedBytes) }) }}
+          </div>
           <div style="margin-top: 6px; font-size: 12px; color: var(--text-secondary);">
             {{ $t('label.history-cleanup-starred-kept') }}
           </div>
@@ -1181,6 +1255,11 @@ async function copyLogText(): Promise<void> {
 .ah-revive.ah-delete:hover {
   background: var(--danger-subtle);
   border-color: var(--danger-fg);
+}
+.ah-delete-logs {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--danger-fg);
 }
 .ah-icon-btn {
   background: transparent;

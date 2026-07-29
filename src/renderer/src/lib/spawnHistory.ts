@@ -156,6 +156,23 @@ export function groupHistoryByDay<T extends { spawnedAt?: string }>(
 
 export type HistoryCleanupMode = 'removed' | 'older_than'
 
+/** What a delete asks the backend to remove — the renderer half of a
+ *  `project.delete_spawn_history` payload (mode + its selector). */
+export interface HistoryDeleteTarget {
+  mode: 'ids' | HistoryCleanupMode
+  paneIds?: string[]
+  cutoffIso?: string
+}
+
+/** Dry-run answer for a `HistoryDeleteTarget`: deleting a history entry also
+ *  unlinks its CLI transcript log, so the confirmation has to name the files
+ *  and the bytes at stake before the user agrees. */
+export interface HistoryDeletePreview {
+  entries: number
+  logFiles: number
+  freedBytes: number
+}
+
 export const HISTORY_CLEANUP_DAYS = 7
 
 /** ISO cutoff for the "older than" cleanup: `days` before `now`. */

@@ -6,6 +6,18 @@ import type {
   UpdateState,
 } from '../shared/updater'
 
+/** Which Electron-owned cache groups to clear. Never touches user state. */
+export interface ClearElectronCachesOptions {
+  chromium: boolean
+  updater: boolean
+}
+
+export interface ClearElectronCachesResult {
+  ok: boolean
+  freedBytes: number
+  error: string | null
+}
+
 export interface BackendInfo {
   status: 'starting' | 'ready' | 'error'
   host?: string
@@ -383,6 +395,10 @@ contextBridge.exposeInMainWorld('agentTeam', {
     getAutoRestore: (): Promise<boolean> => ipcRenderer.invoke('restore:getAutoRestore'),
     setAutoRestore: (value: boolean): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke('restore:setAutoRestore', value),
+  },
+  storage: {
+    clearElectronCaches: (opts: ClearElectronCachesOptions): Promise<ClearElectronCachesResult> =>
+      ipcRenderer.invoke('storage:clear-electron-caches', opts),
   },
   updater: {
     getState: (): Promise<UpdateState> => ipcRenderer.invoke('updater:get-state'),

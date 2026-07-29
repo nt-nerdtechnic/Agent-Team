@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from pydantic import ValidationError
 
+from . import storage_service
 from .ipc import make_error, make_event, make_response
 from .log_readers.claude import ClaudeLogReader, first_user_prompts
 from .credential_vault import DEFAULT_SLOT_ID
@@ -4257,14 +4258,21 @@ async def project_delete_spawn_history(session: "Session", msg_id: str, msg_type
     """Delete spawn-history entries from the full store and the mirror.
 
     Modes: "ids" (explicit pane_ids), "removed" (every removed entry),
-    "older_than" (removed entries spawned before cutoff_iso). Record-only —
-    a live pane is never killed, only its history entry disappears. Peers
-    get the updated mirror via project.ui_state_changed.
+    "older_than" (removed entries spawned before cutoff_iso). A live pane is
+    never killed, but the entry's CLI transcript log is unlinked with it.
+    Peers get the updated mirror via project.ui_state_changed.
+
+    ``dry_run: true`` reports what the same request would delete — identical
+    response shape, no store rewrite, no unlink, no broadcast — so the
+    renderer can confirm the log loss and the reclaimed space first.
     """
     from . import app
 
     ws_raw = payload.get("workspace_path", "") or ""
     mode = payload.get("mode")
+    # Truthy (not strictly `True`) so a sloppy client errs toward previewing
+    # rather than toward an unconfirmed destructive delete.
+    dry_run = bool(payload.get("dry_run"))
     raw_ids = payload.get("pane_ids")
     pane_ids = (
         [p for p in raw_ids if isinstance(p, str) and p]
@@ -4288,24 +4296,30 @@ async def project_delete_spawn_history(session: "Session", msg_id: str, msg_type
     def _delete():
         project = app.project_store.peek(ws_raw)
         seed = project.ui_spawn_history if project is not None else None
-        deleted_ids, total = app.spawn_history_store.delete_entries(
-            ws_raw, mode=mode, pane_ids=pane_ids, cutoff_iso=cutoff_iso, seed=seed
+        result = app.spawn_history_store.delete_entries(
+            ws_raw,
+            mode=mode,
+            pane_ids=pane_ids,
+            cutoff_iso=cutoff_iso,
+            seed=seed,
+            dry_run=dry_run,
         )
         # Keep the project.json mirror consistent: drop exactly the entries
         # the store deleted (the store is a superset of the mirror after the
         # seed migration above, so filtering by id is complete).
-        if deleted_ids and project is not None and project.ui_spawn_history:
-            gone = set(deleted_ids)
+        if not dry_run and result.deleted_ids and project is not None and project.ui_spawn_history:
+            gone = set(result.deleted_ids)
             mirror = [
                 e
                 for e in project.ui_spawn_history
                 if not (isinstance(e, dict) and e.get("paneId") in gone)
             ]
             project = app.project_store.set_ui_state(ws_raw, spawn_history=mirror)
-        return deleted_ids, total, project
+        return result, project
 
-    deleted_ids, total, project = await asyncio.to_thread(_delete)
-    if deleted_ids and project is not None:
+    result, project = await asyncio.to_thread(_delete)
+    deleted_ids = result.deleted_ids
+    if not dry_run and deleted_ids and project is not None:
         await app.broadcast(
             make_event(
                 "project.ui_state_changed",
@@ -4316,8 +4330,20 @@ async def project_delete_spawn_history(session: "Session", msg_id: str, msg_type
             ),
             exclude=session,
         )
+    # `deleted`/`total` are what the existing renderer reads; the two log
+    # fields are additive so the Storage settings page can show what the
+    # delete reclaimed.
     await session.send_json(
-        make_response(msg_id, msg_type, {"deleted": len(deleted_ids), "total": total})
+        make_response(
+            msg_id,
+            msg_type,
+            {
+                "deleted": len(deleted_ids),
+                "total": result.total,
+                "freed_bytes": result.freed_bytes,
+                "removed_log_files": result.removed_log_files,
+            },
+        )
     )
 
 
@@ -4863,3 +4889,60 @@ async def usage_secrets_write(
     await session.send_json(
         make_response(msg_id, msg_type, {"ok": True, "path": str(target)})
     )
+
+
+# ── Storage usage & cleanup (storage.*) ─────────────────────────────────────
+def _storage_request_args(payload: dict) -> tuple[list[str], int]:
+    raw_paths = payload.get("workspacePaths")
+    paths = (
+        [p for p in raw_paths if isinstance(p, str) and p]
+        if isinstance(raw_paths, list)
+        else []
+    )
+    return paths, storage_service.coerce_stale_days(payload.get("staleDays"))
+
+
+@handler("storage.usage")
+async def storage_usage(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Disk-usage report for the Storage settings page.
+
+    Walks several large trees (app data, CLI profile homes, codex pane homes,
+    every open workspace), so it always runs on a worker thread.
+    """
+    workspace_paths, stale_days = _storage_request_args(payload)
+    try:
+        report = await asyncio.to_thread(
+            storage_service.collect_usage, workspace_paths, stale_days
+        )
+    except OSError as err:
+        await session.send_json(
+            make_error(msg_id, msg_type, "SCAN_FAILED", f"storage scan failed: {err}")
+        )
+        return
+    await session.send_json(make_response(msg_id, msg_type, report))
+
+
+@handler("storage.cleanup")
+async def storage_cleanup(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Delete the storage buckets named by ``itemIds``.
+
+    Unknown, info-only and Electron-owned ids come back as ``ok: false`` rows
+    instead of failing the whole request.
+    """
+    raw_ids = payload.get("itemIds")
+    item_ids = (
+        [i for i in raw_ids if isinstance(i, str) and i]
+        if isinstance(raw_ids, list)
+        else []
+    )
+    workspace_paths, stale_days = _storage_request_args(payload)
+    try:
+        result = await asyncio.to_thread(
+            storage_service.cleanup, item_ids, workspace_paths, stale_days
+        )
+    except OSError as err:
+        await session.send_json(
+            make_error(msg_id, msg_type, "CLEANUP_FAILED", f"cleanup failed: {err}")
+        )
+        return
+    await session.send_json(make_response(msg_id, msg_type, result))

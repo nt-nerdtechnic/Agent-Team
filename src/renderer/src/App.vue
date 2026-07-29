@@ -141,7 +141,7 @@ import {
   formatLoopTime,
 } from './lib/loopPrompt'
 import { loginCommandFor, matchLoginExpired } from './lib/cliLoginExpired'
-import { entryBelongsToWorkspace, filterWorkspaceEntries, historyEntryLabel, legacyHistoryLogPath, manualLogFileName, updateHistoryCustomName, type HistoryCleanupMode, type SpawnHistoryEntry, type WorkspaceIdentity } from './lib/spawnHistory'
+import { entryBelongsToWorkspace, filterWorkspaceEntries, historyEntryLabel, legacyHistoryLogPath, manualLogFileName, updateHistoryCustomName, type HistoryCleanupMode, type HistoryDeletePreview, type HistoryDeleteTarget, type SpawnHistoryEntry, type WorkspaceIdentity } from './lib/spawnHistory'
 import { useKeybindings, registerCommand, setContext } from './keybindings/useKeybindings'
 
 // Modals/wizard that only render behind a v-if (settings opened, run completed,
@@ -1003,9 +1003,37 @@ function onToggleStarHistoryEntry(entry: SpawnHistoryEntry, starred: boolean): v
   })
 }
 
+/** Dry-run of a history delete: what the backend *would* remove for this
+ *  target, including the CLI transcript logs it would unlink. Feeds the
+ *  modal's delete confirmation. `null` means the probe failed — the modal
+ *  then confirms without the figures instead of blocking the delete. */
+async function previewHistoryDelete(target: HistoryDeleteTarget): Promise<HistoryDeletePreview | null> {
+  const ws = currentWorkspace.value
+  if (!ws) return null
+  const payload: Record<string, unknown> = {
+    workspace_path: ws,
+    mode: target.mode,
+    dry_run: true,
+  }
+  if (target.paneIds) payload.pane_ids = target.paneIds
+  if (target.cutoffIso) payload.cutoff_iso = target.cutoffIso
+  const resp = await sendQuiet<{
+    deleted: number
+    freed_bytes?: number
+    removed_log_files?: number
+  }>('project.delete_spawn_history', payload)
+  if (!resp) return null
+  return {
+    entries: resp.deleted,
+    logFiles: resp.removed_log_files ?? 0,
+    freedBytes: resp.freed_bytes ?? 0,
+  }
+}
+
 /** Deletes one history record (never kills a pane — the modal only offers
  *  delete on removed entries). Backend removes it from the full store and
- *  the project.json mirror; locally we drop it and fix the paging counters. */
+ *  the project.json mirror — and unlinks its CLI transcript log — while
+ *  locally we drop it and fix the paging counters. */
 async function onDeleteHistoryEntry(entry: SpawnHistoryEntry): Promise<void> {
   const ws = currentWorkspace.value
   if (!ws) return
@@ -3807,7 +3835,13 @@ watch(currentWorkspace, (workspacePath) => {
   }
 })
 
-const settingsInitialTab = ref<'roles' | 'pipelines' | 'mcp' | 'analyzer' | 'updates' | 'appearance' | 'accounts'>('roles')
+const settingsInitialTab = ref<'roles' | 'pipelines' | 'mcp' | 'analyzer' | 'updates' | 'appearance' | 'accounts' | 'storage'>('roles')
+// Workspaces the Storage tab scans: the open one first, then the recents that
+// still exist on disk.
+const knownWorkspacePaths = computed<string[]>(() => {
+  const paths = [currentWorkspace.value, ...recentWorkspaces.value.filter((w) => w.exists).map((w) => w.path)]
+  return [...new Set(paths.filter(Boolean))]
+})
 function openSettingsAccounts(): void {
   settingsInitialTab.value = 'accounts'
   showSettings.value = true
@@ -9466,6 +9500,7 @@ function paneIsCommander(p: ActivePane): boolean {
       :cli-profiles-api="cliProfilesApi"
       :workspace-open="!!currentWorkspace"
       :workspace-name="currentWorkspace ? workspaceBaseName : undefined"
+      :workspace-paths="knownWorkspacePaths"
       :initial-tab="settingsInitialTab"
       v-model:confirm-before-close="confirmBeforeClose"
       @close="showSettings = false; settingsInitialTab = 'roles'"
@@ -9507,6 +9542,7 @@ function paneIsCommander(p: ActivePane): boolean {
       :load-more-history="loadMoreSpawnHistory"
       :fetch-history-log="fetchHistoryLog"
       :search-history-log-content="searchHistoryLogsContent"
+      :preview-delete="previewHistoryDelete"
       @close="showHistory = false"
       @kill-all="onKillAll"
       @resume="onResumeHistoryAgent"

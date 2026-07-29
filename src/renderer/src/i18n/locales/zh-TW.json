@@ -596,6 +596,7 @@
       "analyzer": "分析器",
       "extensions": "擴充功能",
       "shortcuts": "快捷鍵",
+      "storage": "儲存空間",
       "updates": "更新"
     },
     "mcp": {
@@ -672,6 +673,147 @@
       "language": "語言",
       "other": "其他",
       "updates": "更新"
+    },
+    "storage": {
+      "intro": "本 app、CLI agent 家目錄，以及你開過的工作區所佔用的磁碟空間。",
+      "rescan": "重新掃描",
+      "scanning": "掃描中…",
+      "scan-failed": "儲存空間掃描失敗：{message}",
+      "total-used": "本 app 佔用",
+      "disk": "磁碟",
+      "disk-value": "可用 {free} / 共 {total}",
+      "stale-days": "陳舊判定天數",
+      "stale-days-desc": "超過這個天數未被存取的資料視為陳舊，才會列入可清理範圍。",
+      "stale-days-option": "{days} 天",
+      "files": "{count} 個檔案",
+      "not-cleanable": "無法移除",
+      "show-paths": "路徑",
+      "hide-paths": "收合",
+      "clean-safe": "清理安全項目",
+      "clean-selected": "清理已選項目",
+      "cleaning": "清理中…",
+      "confirm-title": "確認清理",
+      "confirm-body": "以下項目將被永久刪除，可釋出約 {size}。",
+      "confirm-danger": "其中含有標示為危險的項目，刪除後可能遺失工作內容，請仔細確認清單。",
+      "confirm-cancel": "取消",
+      "confirm-ok": "永久刪除",
+      "freed": "已釋出 {size}。",
+      "failed-items": "有 {count} 個項目清理失敗。",
+      "bridge-missing": "此版本無法清除 Electron 快取——桌面橋接不可用。",
+      "errors-title": "部分位置無法讀取",
+      "group": {
+        "appData": "App 資料",
+        "electron": "Electron 快取",
+        "cliHomes": "CLI agent 家目錄",
+        "workspaces": "工作區"
+      },
+      "risk": {
+        "safe": "安全",
+        "caution": "注意",
+        "danger": "危險"
+      },
+      "item": {
+        "rotatedLogs": {
+          "label": "已輪替的後端日誌",
+          "desc": "後端日誌的舊編號備份檔。"
+        },
+        "currentLog": {
+          "label": "目前的後端日誌",
+          "desc": "執行中的後端正在寫入的日誌檔。"
+        },
+        "tokenIngestionState": {
+          "label": "Token 匯入進度",
+          "desc": "記錄哪些 CLI 用量已被統計過的書籤。"
+        },
+        "workspaceTokenStats": {
+          "label": "各工作區 Token 統計",
+          "desc": "依工作區記錄的 token 用量歷史。"
+        },
+        "storeBackups": {
+          "label": "設定檔備份",
+          "desc": "設定儲存檔的自動備份副本。"
+        },
+        "runtimeArtifacts": {
+          "label": "執行期產物",
+          "desc": "App 執行時產生的暫存檔案。"
+        },
+        "usageCache": {
+          "label": "CLI 額度快取",
+          "desc": "額度徽章背後快取的查詢結果。"
+        },
+        "installedSkills": {
+          "label": "已安裝的 Skills",
+          "desc": "安裝在 app 資料目錄下的所有 skill 套件。"
+        },
+        "appDataOther": {
+          "label": "其他 App 資料",
+          "desc": "App 資料目錄中的其餘內容。"
+        },
+        "chromiumCache": {
+          "label": "Chromium 快取",
+          "desc": "由 Electron session 管理的網頁內容快取。"
+        },
+        "updaterCache": {
+          "label": "已下載的更新檔",
+          "desc": "留在系統快取目錄中的更新安裝包。"
+        },
+        "browserState": {
+          "label": "瀏覽器狀態",
+          "desc": "App 外殼的 cookie、local storage 與視窗狀態。"
+        },
+        "cliProfilesArchived": {
+          "label": "封存的 CLI 設定檔",
+          "desc": "已刪除或已搬移帳號留下的 profile 家目錄。"
+        },
+        "cliProfileCaches": {
+          "label": "CLI 設定檔快取",
+          "desc": "各 CLI profile 內的快取與登入用暫存家目錄。"
+        },
+        "cliProfileHistory": {
+          "label": "CLI 對話歷史",
+          "desc": "CLI agent 為續接工作階段保留的逐字稿。"
+        },
+        "cliProfileOther": {
+          "label": "其他 CLI 設定檔資料",
+          "desc": "使用中 CLI 帳號的憑證與設定。"
+        },
+        "codexPanesStale": {
+          "label": "閒置的 Codex pane 家目錄",
+          "desc": "超過陳舊天數的每 pane Codex 家目錄。"
+        },
+        "codexPanesRecent": {
+          "label": "近期的 Codex pane 家目錄",
+          "desc": "陳舊天數內仍有使用的每 pane Codex 家目錄。"
+        },
+        "manualLogsOrphan": {
+          "label": "孤兒 agent 日誌",
+          "desc": "在 Agent History 已找不到對應紀錄的日誌檔。"
+        },
+        "manualLogsStale": {
+          "label": "陳舊的 agent 日誌",
+          "desc": "超過陳舊天數的 agent 執行日誌。"
+        },
+        "manualLogsRecent": {
+          "label": "近期的 agent 日誌",
+          "desc": "陳舊天數內的 agent 執行日誌。"
+        },
+        "pipelineHistory": {
+          "label": "流程歷史",
+          "desc": "各工作區記錄的流程事件。"
+        },
+        "pipelineLogs": {
+          "label": "流程執行日誌",
+          "desc": "每次流程執行擷取的輸出。"
+        },
+        "planHistory": {
+          "label": "計畫歷史",
+          "desc": "計畫文件的版本快照。"
+        },
+        "workspaceOther": {
+          "label": "其他工作區資料",
+          "desc": "各工作區 .agent-team 目錄中的其餘內容。"
+        }
+      }
     },
     "cliAgents": {
       "title": "CLI Agents",
@@ -974,7 +1116,8 @@
     "kill-all-confirm-count": "{count} 個 agent",
     "kill-all-confirm-suffix": "，所有進行中的工作將遺失。",
     "copied": "已複製",
-    "history-delete-confirm": "刪除歷史紀錄「{name}」？只會移除紀錄本身。",
+    "history-delete-confirm": "刪除歷史紀錄「{name}」？",
+    "history-delete-logs": "對應的 CLI 對話記錄檔也會從磁碟刪除 — 共 {files} 個檔案，可釋放 {size}。",
     "history-cleanup-removed": "清除所有已移除",
     "history-cleanup-older": "清除 7 天前的紀錄",
     "history-cleanup-confirm-count": "這將刪除 {count} 筆歷史紀錄。",

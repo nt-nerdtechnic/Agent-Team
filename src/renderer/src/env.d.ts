@@ -64,6 +64,15 @@ declare global {
       onOpenWorkspacesChanged: (cb: () => void) => () => void
       openPath: (target: string) => Promise<{ ok: boolean; revealed?: boolean; error?: string }>
       revealPath: (target: string) => Promise<{ ok: boolean; error?: string }>
+      /** Optional: absent on main processes built before the Storage tab.
+       *  `freedBytes` is real even when `ok` is false (e.g. the updater cache
+       *  was skipped because an update is downloading). */
+      storage?: {
+        clearElectronCaches: (opts: {
+          chromium: boolean
+          updater: boolean
+        }) => Promise<{ ok: boolean; freedBytes: number; error: string | null }>
+      }
       openTerminal: (command: string) => Promise<{ ok: boolean; error?: string }>
       openTempFile: (filename: string, content: string) => Promise<{ ok: boolean; path?: string; error?: string }>
       detachGroup: (args: { groupId: string; workspacePath: string; bounds?: { x: number; y: number; width: number; height: number } }) => Promise<{ ok: boolean }>

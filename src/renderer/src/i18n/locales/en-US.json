@@ -596,6 +596,7 @@
       "analyzer": "Analyzer",
       "extensions": "Extensions",
       "shortcuts": "Shortcuts",
+      "storage": "Storage",
       "updates": "Updates"
     },
     "mcp": {
@@ -672,6 +673,147 @@
       "language": "Language",
       "other": "Other",
       "updates": "Updates"
+    },
+    "storage": {
+      "intro": "Disk space used by this app, its CLI agent homes, and the workspaces you have opened.",
+      "rescan": "Rescan",
+      "scanning": "Scanning…",
+      "scan-failed": "Storage scan failed: {message}",
+      "total-used": "Used by this app",
+      "disk": "Disk",
+      "disk-value": "{free} free of {total}",
+      "stale-days": "Stale threshold",
+      "stale-days-desc": "Data untouched for longer than this counts as stale and becomes cleanable.",
+      "stale-days-option": "{days} days",
+      "files": "{count} files",
+      "not-cleanable": "Not removable",
+      "show-paths": "Paths",
+      "hide-paths": "Hide",
+      "clean-safe": "Clean safe items",
+      "clean-selected": "Clean selected",
+      "cleaning": "Cleaning…",
+      "confirm-title": "Confirm cleanup",
+      "confirm-body": "These items will be deleted permanently, freeing about {size}.",
+      "confirm-danger": "Some of these items are marked dangerous — deleting them may lose work. Review the list carefully.",
+      "confirm-cancel": "Cancel",
+      "confirm-ok": "Delete permanently",
+      "freed": "Freed {size}.",
+      "failed-items": "{count} items could not be cleaned.",
+      "bridge-missing": "This build cannot clear Electron caches — the desktop bridge is unavailable.",
+      "errors-title": "Some locations could not be read",
+      "group": {
+        "appData": "App data",
+        "electron": "Electron caches",
+        "cliHomes": "CLI agent homes",
+        "workspaces": "Workspaces"
+      },
+      "risk": {
+        "safe": "Safe",
+        "caution": "Caution",
+        "danger": "Danger"
+      },
+      "item": {
+        "rotatedLogs": {
+          "label": "Rotated backend logs",
+          "desc": "Older numbered copies of the backend log."
+        },
+        "currentLog": {
+          "label": "Current backend log",
+          "desc": "The log file the running backend is writing to."
+        },
+        "tokenIngestionState": {
+          "label": "Token ingestion state",
+          "desc": "Bookmarks tracking which CLI usage has already been counted."
+        },
+        "workspaceTokenStats": {
+          "label": "Per-workspace token stats",
+          "desc": "Token usage history recorded per workspace."
+        },
+        "storeBackups": {
+          "label": "Store backups",
+          "desc": "Automatic copies of the settings stores."
+        },
+        "runtimeArtifacts": {
+          "label": "Runtime artifacts",
+          "desc": "Scratch files the app builds while running."
+        },
+        "usageCache": {
+          "label": "CLI quota cache",
+          "desc": "Cached quota responses behind the pane usage badges."
+        },
+        "installedSkills": {
+          "label": "Installed skills",
+          "desc": "Every skill package installed into the app data dir."
+        },
+        "appDataOther": {
+          "label": "Other app data",
+          "desc": "Everything else in the app data directory."
+        },
+        "chromiumCache": {
+          "label": "Chromium cache",
+          "desc": "Web content cache owned by the Electron session."
+        },
+        "updaterCache": {
+          "label": "Downloaded updates",
+          "desc": "Update packages left in the OS cache directory."
+        },
+        "browserState": {
+          "label": "Browser state",
+          "desc": "Cookies, local storage and window state for the app shell."
+        },
+        "cliProfilesArchived": {
+          "label": "Archived CLI profiles",
+          "desc": "Profile homes left behind by deleted or migrated accounts."
+        },
+        "cliProfileCaches": {
+          "label": "CLI profile caches",
+          "desc": "Caches and login scratch homes inside each CLI profile."
+        },
+        "cliProfileHistory": {
+          "label": "CLI conversation history",
+          "desc": "Transcripts the CLI agents keep for session resume."
+        },
+        "cliProfileOther": {
+          "label": "Other CLI profile data",
+          "desc": "Credentials and config for the CLI accounts in use."
+        },
+        "codexPanesStale": {
+          "label": "Stale Codex pane homes",
+          "desc": "Per-pane Codex homes past the stale threshold."
+        },
+        "codexPanesRecent": {
+          "label": "Recent Codex pane homes",
+          "desc": "Per-pane Codex homes used within the stale threshold."
+        },
+        "manualLogsOrphan": {
+          "label": "Orphaned agent logs",
+          "desc": "Log files with no matching Agent History entry."
+        },
+        "manualLogsStale": {
+          "label": "Stale agent logs",
+          "desc": "Agent run logs past the stale threshold."
+        },
+        "manualLogsRecent": {
+          "label": "Recent agent logs",
+          "desc": "Agent run logs inside the stale threshold."
+        },
+        "pipelineHistory": {
+          "label": "Pipeline history",
+          "desc": "Recorded pipeline events per workspace."
+        },
+        "pipelineLogs": {
+          "label": "Pipeline run logs",
+          "desc": "Output captured from each pipeline run."
+        },
+        "planHistory": {
+          "label": "Plan history",
+          "desc": "Version snapshots of your plan documents."
+        },
+        "workspaceOther": {
+          "label": "Other workspace data",
+          "desc": "The rest of each workspace's .agent-team directory."
+        }
+      }
     },
     "cliAgents": {
       "title": "CLI Agents",
@@ -974,7 +1116,8 @@
     "kill-all-confirm-count": "{count} agents",
     "kill-all-confirm-suffix": " — all work in progress will be lost.",
     "copied": "Copied",
-    "history-delete-confirm": "Delete history entry \"{name}\"? This only removes the record.",
+    "history-delete-confirm": "Delete history entry \"{name}\"?",
+    "history-delete-logs": "The CLI transcript logs are deleted from disk too — {files} file(s), freeing {size}.",
     "history-cleanup-removed": "Clear all removed",
     "history-cleanup-older": "Clear entries older than 7 days",
     "history-cleanup-confirm-count": "This will delete {count} history entries.",
