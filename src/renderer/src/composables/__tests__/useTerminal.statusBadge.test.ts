@@ -129,7 +129,9 @@ describe('useTerminal — RUNNING badge vs self-triggered repaints', () => {
     // A distinctive screenful the CLI has already emitted (becomes cleanBuffer).
     const screen = 'Reading the terminal composable and wiring the new helper into place here.'
     mock.emit('terminal.output', { terminal_session_id: 'sess-1', data: screen })
-    await sleep(2500) // let any burst decay to idle
+    // A single chunk can never sustain a burst, so RUNNING is never latched;
+    // the pause just separates it from the replay stream that follows.
+    await sleep(2500)
     // User clicks / a refit fires; the CLI repaints the SAME frame verbatim over
     // and over. isRedrawReplay drops each repaint, so no RUNNING burst forms.
     const deadline = Date.now() + 6000
@@ -157,6 +159,61 @@ describe('useTerminal — RUNNING badge vs self-triggered repaints', () => {
     expect(result.displayStatus.value).not.toBe('running')
     scope.stop()
   }, 12_000)
+
+  // Fake-timer variant of spawned(): the hysteresis windows are 3–10s, far too
+  // slow to sleep through for real.
+  async function spawnedFake() {
+    vi.useFakeTimers()
+    vi.setSystemTime(1_000_000)
+    const mock = createMockBackend()
+    mock.setResponse('terminal.create', { terminal_session_id: 'sess-1', pid: 42 })
+    const { result, scope } = withScope(() => useTerminal('pane-1', mock.backend))
+    result.mount(document.createElement('div'))
+    const spawning = result.spawn({ command: 'bash', cwd: '/tmp', skipReattach: true })
+    await vi.advanceTimersByTimeAsync(200)
+    await spawning
+    return { result, mock, scope }
+  }
+
+  // Distinct content per chunk: identical text would be dropped as a redraw
+  // replay and never build a burst.
+  async function chunkThenWait(
+    mock: ReturnType<typeof createMockBackend>,
+    n: number,
+    gapMs: number,
+  ): Promise<void> {
+    mock.emit('terminal.output', { terminal_session_id: 'sess-1', data: `line ${n}: agent output\r\n` })
+    await vi.advanceTimersByTimeAsync(gapMs)
+  }
+
+  it('reaches RUNNING for a choppy burst whose chunks are 1.5s apart', async () => {
+    // Regression: BURST_GAP_MS used to be shorter than MIN_BURST_MS, so a gap
+    // in between (here 1.5s) reset the burst start before it could ever reach
+    // the threshold — the badge stayed idle forever while the agent worked.
+    const { result, mock, scope } = await spawnedFake()
+    for (let i = 0; i < 5; i++) await chunkThenWait(mock, i, 1_500)
+    expect(result.displayStatus.value).toBe('running')
+    scope.stop()
+  })
+
+  it('stays RUNNING through a 3s tool-call silence once latched', async () => {
+    const { result, mock, scope } = await spawnedFake()
+    for (let i = 0; i < 5; i++) await chunkThenWait(mock, i, 1_500)
+    expect(result.displayStatus.value).toBe('running')
+    // A tool call produces no output for seconds; the badge must not flicker.
+    await vi.advanceTimersByTimeAsync(3_000)
+    expect(result.displayStatus.value).toBe('running')
+    scope.stop()
+  })
+
+  it('drops to idle immediately when markTurnComplete() fires', async () => {
+    const { result, mock, scope } = await spawnedFake()
+    for (let i = 0; i < 5; i++) await chunkThenWait(mock, i, 1_500)
+    expect(result.displayStatus.value).toBe('running')
+    result.markTurnComplete()
+    expect(result.displayStatus.value).toBe('idle')
+    scope.stop()
+  })
 
   it('sets displayStatus to stopped when interrupt() or ESC is triggered, and clears on new input', async () => {
     const { result, mock, scope } = await spawned()

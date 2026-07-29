@@ -6401,6 +6401,8 @@ backend.on('agent.activity', (raw) => {
   if (!ev?.pane_id) return
   if (ev.event_type === 'turn_complete') {
     paneTurnCompleteAt.set(ev.pane_id, Date.now())
+    // Badge: authoritative turn end → drop the RUNNING hysteresis latch now.
+    paneRefs[ev.pane_id]?.markTurnComplete?.()
     scheduleDoneNotify(ev.pane_id, ev.timestamp ?? '')
     // Judge THIS turn's own text (not a retained map): an empty-text
     // turn_complete (Claude Stop hook, thinking-only record, Codex cross-batch)

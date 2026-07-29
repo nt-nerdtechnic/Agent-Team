@@ -138,8 +138,10 @@ watch(() => props.isPreparing, (isPrep) => {
   }
 }, { immediate: true })
 
-// RUNNING vs IDLE is driven entirely by the CLI-execution signal inside
-// useTerminal (agent.activity events), not by guessing from the output buffer.
+// RUNNING vs IDLE is derived inside useTerminal from the pane's own clean
+// output, with hysteresis: a sustained burst enters RUNNING, and only a long
+// clean silence leaves it. The CLI's turn_complete (routed here by App.vue via
+// markTurnComplete) is the one authoritative signal, used to drop to idle early.
 const displayStatus = terminal.displayStatus
 
 defineExpose({
@@ -159,6 +161,7 @@ defineExpose({
   cleanBytesSeen: terminal.cleanBytesSeen,
   lastActivityAt: terminal.lastActivityAt,
   lastRawActivityAt: terminal.lastRawActivityAt,
+  markTurnComplete: terminal.markTurnComplete,
   markBufferPosition: terminal.markBufferPosition,
   recleanBuffer: terminal.recleanBuffer,
   readRenderedText: terminal.readRenderedText,

@@ -877,23 +877,39 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // We want RUNNING only when the CLI is genuinely executing — not for brief
   // nudges, TUI redraws, or prompt echoes that last a second or two.
   //
-  // Strategy: track the start of each CONTINUOUS burst of PTY activity.
-  // A gap > BURST_GAP_MS in raw output resets the burst start. Only bursts
-  // that have lasted > MIN_BURST_MS are shown as RUNNING. Short nudge
-  // responses (1–2 s) never reach the threshold; real work (tool chains,
-  // file edits, long responses) easily exceeds it.
+  // The design is deliberately ASYMMETRIC: entering RUNNING is strict, leaving
+  // it is slow (hysteresis). Entry still needs a CONTINUOUS burst of clean
+  // output lasting MIN_BURST_MS, so short nudge responses never qualify. Exit
+  // needs IDLE_CONFIRM_MS of clean silence, because an agent running a tool
+  // call goes quiet for many seconds at a time and must not flicker to idle.
   //
-  // No external signals (hooks, attribution, focus) are involved — this
-  // purely tracks what the PTY itself emits.
-  const BURST_GAP_MS   = 1_000   // gap that splits two separate bursts
-  const MIN_BURST_MS   = 2_000   // burst must last this long to show RUNNING
-  const STALE_MS       = 2_000   // no output for this long → not running
+  // INVARIANT: BURST_GAP_MS > MIN_BURST_MS. If the gap that splits two bursts
+  // were shorter than the time a burst must last, chunky output landing in
+  // between would reset the burst start before it could ever reach the
+  // threshold — a dead zone where the badge stays idle forever.
+  //
+  // The PTY stream is the primary source; the only external signal involved is
+  // the CLI's own turn_complete (see markTurnComplete), which lets the badge
+  // drop to idle early instead of waiting out IDLE_CONFIRM_MS.
+  const BURST_GAP_MS      = 3_000    // gap that splits two separate bursts
+  const MIN_BURST_MS      = 2_000    // burst must last this long to ENTER running
+  const IDLE_CONFIRM_MS   = 10_000   // clean silence required to LEAVE running
   const activityBurstStartAt = ref<number>(0)
   // Clean-content activity clock for the RUNNING badge (see appendClean). Kept
   // separate from lastRawActivityAt so an idle CLI that only repaints its
   // footer/cursor (raw bytes, but empty after noise-stripping) can't keep the
   // badge stuck on RUNNING.
   const lastCleanBurstAt = ref<number>(0)
+  // Hysteresis latch: entering RUNNING is strict (a burst must last
+  // MIN_BURST_MS), but leaving it is deliberately slow — an agent running a
+  // tool call goes quiet for seconds at a time and must not flicker back to
+  // idle. Once latched, only IDLE_CONFIRM_MS of clean silence (or an
+  // authoritative turn_complete) clears it.
+  const runningLatched = ref(false)
+  // Authoritative turn end from the CLI's own log (agent.activity
+  // turn_complete), fed in by App.vue. Lets claude/copilot drop to idle
+  // immediately instead of waiting out IDLE_CONFIRM_MS.
+  const turnCompleteAt = ref<number>(0)
   // Tick so displayStatus re-evaluates after output goes quiet.
   const nowTick = ref<number>(Date.now())
   const tickInterval = window.setInterval(() => { nowTick.value = Date.now() }, 1_000)
@@ -926,9 +942,22 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     if (lastRawActivityAt.value === 0) return 'starting'
     // RUNNING/idle is judged on CLEANED activity, not raw bytes: an idle CLI
     // repainting its footer/cursor emits raw bytes but no clean content, so it
-    // goes idle after STALE_MS instead of sticking on RUNNING.
-    if (nowTick.value - lastCleanBurstAt.value > STALE_MS) return 'idle'
-    return (nowTick.value - activityBurstStartAt.value) >= MIN_BURST_MS ? 'running' : 'idle'
+    // goes idle after IDLE_CONFIRM_MS instead of sticking on RUNNING.
+    //
+    // Authoritative turn end wins — but only while no newer clean output has
+    // arrived. A trailing chunk that lands after the event pushes
+    // lastCleanBurstAt past it and falls through to the hysteresis path.
+    //
+    // runningLatched is the ONLY entry into RUNNING. The MIN_BURST_MS test
+    // lives entirely in appendClean, which is the only place that knows output
+    // is still arriving. Do not re-add a burst-age check here: measured from a
+    // computed it just counts wall time since the burst started, so a single
+    // clean chunk would light the badge 2 s later and hold it until the
+    // IDLE_CONFIRM_MS timeout. The timeout below stays because silence never
+    // calls appendClean, so nothing else can drop the latch.
+    if (turnCompleteAt.value > lastCleanBurstAt.value) return 'idle'
+    if (nowTick.value - lastCleanBurstAt.value > IDLE_CONFIRM_MS) return 'idle'
+    return runningLatched.value ? 'running' : 'idle'
   })
   const BUFFER_CAP = 128 * 1024
 
@@ -949,9 +978,16 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     if (isRedrawReplay(cleanBuffer.value, cleaned)) return
     // Badge burst tracking, driven by CLEANED content only.
     const now = Date.now()
+    const sinceLastClean = now - lastCleanBurstAt.value
+    // Silence past the confirm window ends the run: drop the latch so the next
+    // burst has to re-earn RUNNING rather than resuming it on a single byte.
+    if (sinceLastClean > IDLE_CONFIRM_MS) runningLatched.value = false
     // A gap > BURST_GAP_MS in clean output starts a new burst.
-    if (now - lastCleanBurstAt.value > BURST_GAP_MS) activityBurstStartAt.value = now
+    if (sinceLastClean > BURST_GAP_MS) activityBurstStartAt.value = now
     lastCleanBurstAt.value = now
+    if (!runningLatched.value && now - activityBurstStartAt.value >= MIN_BURST_MS) {
+      runningLatched.value = true
+    }
     // Monotonic total — unlike cleanBuffer.length, this keeps growing after
     // the buffer hits BUFFER_CAP, so quiet-detection (waitForQuiet etc.) can
     // tell "still streaming" from "quiet" during large session replays.
@@ -964,6 +1000,15 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // genuine output isn't lost; only the timestamp is held back.
     const inFocusGrace = now - lastFocusAt.value < FOCUS_GRACE_MS
     if (!inFocusGrace) lastActivityAt.value = now
+  }
+
+  /** Authoritative turn end from the CLI's own conversation log. Drops the
+   *  hysteresis latch so the badge goes idle now instead of waiting out
+   *  IDLE_CONFIRM_MS. Only claude/copilot emit a reliable turn_complete; the
+   *  other vendors fall back to the silence timeout. */
+  function markTurnComplete(): void {
+    turnCompleteAt.value = Date.now()
+    runningLatched.value = false
   }
 
   function markBufferPosition(): number {
@@ -2235,6 +2280,8 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       throw new Error('terminal already running')
     }
     isStopped.value = false
+    runningLatched.value = false
+    turnCompleteAt.value = 0
     error.value = ''
     status.value = 'starting'
     startingStartedAt.value = Date.now()
@@ -2416,6 +2463,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     cleanBytesSeen,
     lastActivityAt,
     lastRawActivityAt,
+    markTurnComplete,
     markBufferPosition,
     recleanBuffer,
     readRenderedText,
