@@ -11,11 +11,54 @@ provider's own usage surface — no login flow, no credential writes:
   ``GET https://api.kimi.com/coding/v1/usages``
 - grok:   ``~/.grok/auth.json`` + ``grok agent stdio`` JSON-RPC
   method ``x.ai/billing``
-- antigravity: macOS Keychain (``gemini``/``antigravity``, stale-file fallback)
-  -> refresh the agy token in memory -> ``v1internal:retrieveUserQuotaSummary``
+- antigravity: refresh token from macOS Keychain ``gemini``/``antigravity``
+  (stale-file fallback ``~/.gemini/antigravity-cli/antigravity-oauth-token``)
+  -> in-memory Google OAuth refresh grant ->
+  ``POST https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary``
+- opencode: ``~/.local/share/opencode/auth.json`` is an aggregator (a map of
+  providerID -> credential); each supported entry is mapped to that
+  provider's own usage endpoint: ``minimax-coding-plan`` ->
+  ``GET https://api.minimax.io/v1/token_plan/remains``; ``anthropic`` oauth
+  reuses the Claude flow. opencode Zen and plain BYOK API keys expose no
+  usage surface -> unavailable.
+- qwen: Alibaba ModelStudio Coding Plan API key (``sk-sp-...``) from the
+  process env (``BAILIAN_CODING_PLAN_API_KEY`` + CodexBar's aliases),
+  ``~/.qwen/.env`` or the ``env`` block of ``~/.qwen/settings.json`` ->
+  ``POST <console gateway>/data/api.json queryCodingPlanInstanceInfoV2``
+  (international region first, China-mainland retry). The legacy Qwen OAuth
+  file has no usage API (free tier discontinued) -> unavailable.
+- kilo: ``~/.local/share/kilo/auth.json`` (the ``kilo`` entry: api key, or the
+  long-lived oauth access token + accountId org; legacy fallback
+  ``~/.kilocode/cli/config.json``) ->
+  ``GET https://api.kilo.ai/api/profile/balance`` (prepaid credit balance) +
+  best-effort ``GET /api/trpc/kiloPass.getState`` (Kilo Pass period usage).
+- pi: ``~/.pi/agent/auth.json`` (root overridable via ``PI_CODING_AGENT_DIR``)
+  is an aggregator (a map of provider id -> credential); pi has no server of
+  its own, so each supported entry is mapped to that provider's own usage
+  endpoint: ``anthropic`` oauth reuses the Claude flow (pi's OAuth uses Claude
+  Code's client id, so the token is interchangeable), ``openai-codex`` oauth
+  -> ChatGPT ``wham/usage``, ``openrouter`` ->
+  ``GET https://openrouter.ai/api/v1/key`` (credit usage). Plain BYOK API
+  keys and github-copilot/xai/radius expose no usage surface -> unavailable.
+- copilot: ``~/.copilot/config.json`` (JSONC) names the signed-in GitHub
+  account; the CLI's own OAuth token lives in the macOS Keychain (not probed),
+  so the token is read via ``gh auth token -u <login>`` (fallbacks: the
+  VS Code-style ``~/.config/github-copilot/{apps,hosts}.json`` oauth_token,
+  then ``GH_TOKEN``/``GITHUB_TOKEN`` env) ->
+  ``GET https://api.github.com/copilot_internal/user``
+- cursor: session JWT from the macOS Keychain generic password
+  ``cursor-access-token`` (cursor-agent CLI; fallback: the Cursor IDE's
+  ``~/Library/Application Support/Cursor/User/globalStorage/state.vscdb``
+  sqlite row ``cursorAuth/accessToken``) ->
+  ``GET https://cursor.com/api/usage-summary`` authenticated by a
+  ``WorkosCursorSessionToken={userId}%3A%3A{jwt}`` cookie (userId = the JWT
+  ``sub`` after the last ``|``)
 
 Every credential file is read-only here; token refresh is left to the CLI
 that owns the file (refreshing ourselves would rotate the CLI's tokens).
+antigravity is the one exception: Google's refresh grant returns no new
+refresh token (verified), so a fresh access token is minted in memory
+without rotating anything the CLI owns.
 Snapshots are normalized to one shape so the frontend never sees provider
 quirks (epoch seconds, used/limit ratios, cent amounts are converted here):
 
@@ -47,7 +90,8 @@ from .applog import app_data_dir
 
 log = logging.getLogger(__name__)
 
-PROVIDERS = ("claude", "codex", "kimi", "grok", "antigravity")
+PROVIDERS = ("claude", "codex", "kimi", "grok", "antigravity", "opencode", "qwen",
+             "kilo", "pi", "copilot", "cursor")
 
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CLAUDE_BETA_HEADER = "oauth-2025-04-20"
@@ -55,28 +99,120 @@ CLAUDE_UA_FALLBACK = "claude-code/2.1.0"
 CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 CODEX_DEFAULT_BASE = "https://chatgpt.com/backend-api"
 KIMI_DEFAULT_BASE = "https://api.kimi.com"
-# Antigravity (Google "agy" CLI). We only ever READ its credentials — never
-# write back to the Keychain or ~/.gemini, and the refreshed access token stays
-# in memory. client_id/secret live in a local Navide config, never in the repo.
+# Antigravity (Google). Credentials are READ-ONLY: the refresh token comes
+# from the CLI's Keychain entry (stale-file fallback) and the minted access
+# token stays in memory — Google's refresh grant returns no new refresh token
+# (verified live), so nothing the CLI owns ever rotates. client_id/secret are
+# Antigravity's public installed-app OAuth constants (the same values ship in
+# its OSS auth plugin); an optional app-data override file can replace them.
 ANTIGRAVITY_KEYCHAIN_SERVICE = "gemini"
 ANTIGRAVITY_KEYCHAIN_ACCOUNT = "antigravity"
 ANTIGRAVITY_KEYRING_PREFIX = "go-keyring-base64:"
-ANTIGRAVITY_STALE_TOKEN_REL = (".gemini", "antigravity-cli", "antigravity-oauth-token")
+ANTIGRAVITY_TOKEN_FILE_REL = (".gemini", "antigravity-cli", "antigravity-oauth-token")
 ANTIGRAVITY_OAUTH_CONFIG = "antigravity-oauth.json"
 ANTIGRAVITY_TOKEN_URL = "https://oauth2.googleapis.com/token"
-ANTIGRAVITY_API_BASE = "https://daily-cloudcode-pa.googleapis.com"
+ANTIGRAVITY_API_BASE = "https://cloudcode-pa.googleapis.com"
 ANTIGRAVITY_LOAD_URL = f"{ANTIGRAVITY_API_BASE}/v1internal:loadCodeAssist"
 ANTIGRAVITY_QUOTA_URL = f"{ANTIGRAVITY_API_BASE}/v1internal:retrieveUserQuotaSummary"
-# TODO(antigravity): endpoint bodies + clientMetadata values are not yet
-# empirically verified against a live agy session. These are best-effort
-# placeholders; a non-200 response falls through to status="error" and never
-# affects the other providers, so shipping them is safe until we can capture a
-# real request. Values to confirm before trusting the numbers:
-#   - clientMetadata.ideType / pluginType (exact enum strings agy sends)
-#   - whether retrieveUserQuotaSummary needs a body at all, and its shape
-#   - the x-goog-api-client version string
-ANTIGRAVITY_CLIENT_METADATA = {"ideType": "IDE_UNSPECIFIED", "pluginType": "GEMINI"}
-ANTIGRAVITY_GOOG_API_CLIENT = "gl-node/unknown gemini-cli/unknown"
+ANTIGRAVITY_CLIENT_ID = (
+    ""
+)
+ANTIGRAVITY_CLIENT_SECRET = ""
+ANTIGRAVITY_LOAD_METADATA = {
+    "ideType": "ANTIGRAVITY",
+    "platform": "PLATFORM_UNSPECIFIED",
+    "pluginType": "GEMINI",
+}
+OPENCODE_AUTH_FILE_REL = (".local", "share", "opencode", "auth.json")
+OPENCODE_MINIMAX_USAGE_URL = "https://api.minimax.io/v1/token_plan/remains"
+# qwen (Alibaba ModelStudio Coding Plan). The quota endpoint is the console
+# gateway API CodexBar's Alibaba provider ships against — undocumented, so the
+# request mirrors the console (browser UA + Origin/Referer) and the alternate
+# region is retried on failure, exactly like CodexBar.
+_QWEN_USAGE_QUERY = (
+    "?action=zeldaEasy.broadscope-bailian.codingPlan.queryCodingPlanInstanceInfoV2"
+    "&product=broadscope-bailian&api=queryCodingPlanInstanceInfoV2"
+)
+QWEN_INTL_USAGE_URL = (
+    "https://modelstudio.console.alibabacloud.com/data/api.json"
+    + _QWEN_USAGE_QUERY + "&currentRegionId=ap-southeast-1"
+)
+QWEN_CN_USAGE_URL = (
+    "https://bailian.console.aliyun.com/data/api.json"
+    + _QWEN_USAGE_QUERY + "&currentRegionId=cn-beijing"
+)
+# (url, commodityCode, Origin, Referer) per region, tried in order.
+QWEN_REGIONS = (
+    (QWEN_INTL_USAGE_URL, "sfm_codingplan_public_intl",
+     "https://modelstudio.console.alibabacloud.com",
+     "https://modelstudio.console.alibabacloud.com/ap-southeast-1/"
+     "?tab=coding-plan#/efm/coding_plan"),
+    (QWEN_CN_USAGE_URL, "sfm_codingplan_public_cn",
+     "https://bailian.console.aliyun.com",
+     "https://bailian.console.aliyun.com/"),
+)
+QWEN_BROWSER_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
+# The env key qwen-code itself resolves, then CodexBar's accepted aliases.
+QWEN_ENV_KEYS = (
+    "BAILIAN_CODING_PLAN_API_KEY",
+    "ALIBABA_CODING_PLAN_API_KEY",
+    "ALIBABA_QWEN_API_KEY",
+    "DASHSCOPE_API_KEY",
+)
+# kilo (Kilo CLI, @kilocode/cli). auth.json is a map keyed by provider id; the
+# "kilo" entry holds either an api key or a long-lived oauth access token that
+# IS the Kilo bearer token (1-year expiry, no refresh rotation needed for
+# reads). The Kilo Pass query string is tRPC batch syntax for input {"0":null}.
+KILO_DEFAULT_BASE = "https://api.kilo.ai"
+KILO_AUTH_FILE_REL = (".local", "share", "kilo", "auth.json")
+KILO_LEGACY_CONFIG_REL = (".kilocode", "cli", "config.json")
+KILO_BALANCE_PATH = "/api/profile/balance"
+KILO_PASS_PATH = "/api/trpc/kiloPass.getState?batch=1&input=%7B%220%22%3Anull%7D"
+# pi (Pi coding agent, @mariozechner/pi-coding-agent). auth.json is keyed by
+# provider id; oauth entries are {type: "oauth", access, refresh, expires
+# (epoch ms)}, BYOK keys are {type: "api_key", key}. Credentials are read-only
+# here and never refreshed (pi rotates its own refresh tokens): an expired
+# oauth entry maps to status=expired.
+PI_AGENT_DIR_ENV = "PI_CODING_AGENT_DIR"
+PI_OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
+# copilot (GitHub Copilot CLI). ``~/.copilot/config.json`` is metadata only —
+# the CLI keeps its OAuth token in the macOS Keychain (never probed here), so
+# the token is resolved read-only via ``gh auth token -u <login>`` (gh shares
+# the same gho_ GitHub OAuth scope; verified to print without rotating
+# anything), then the VS Code/JetBrains-style ~/.config/github-copilot files,
+# then GH_TOKEN/GITHUB_TOKEN env. ``copilot_internal/user`` is the surface
+# CodexBar and the JetBrains quota monitor use; the Copilot-client headers
+# are required for it to answer.
+COPILOT_CONFIG_FILE_REL = (".copilot", "config.json")
+COPILOT_HOSTS_FILES_REL = (
+    (".config", "github-copilot", "apps.json"),
+    (".config", "github-copilot", "hosts.json"),
+)
+COPILOT_DEFAULT_HOST = "github.com"
+COPILOT_ENV_KEYS = ("GH_TOKEN", "GITHUB_TOKEN")
+COPILOT_HEADERS = {
+    "Accept": "application/json",
+    "Editor-Version": "vscode/1.96.2",
+    "Editor-Plugin-Version": "copilot-chat/0.26.7",
+    "User-Agent": "GitHubCopilotChat/0.26.7",
+    "X-Github-Api-Version": "2025-04-01",
+}
+COPILOT_GH_TOKEN_TIMEOUT = 5.0
+# cursor (Cursor / cursor-agent CLI). The session JWT the CLI stores in the
+# macOS Keychain (fallback: the Cursor IDE's state.vscdb sqlite row)
+# authenticates the dashboard's usage-summary endpoint via a
+# WorkosCursorSessionToken cookie — unofficial but stable, the same surface
+# cursor.com's own dashboard and CodexBar's Cursor provider use. The legacy
+# Bearer endpoint (api2.cursor.sh/auth/usage) returns null limits on modern
+# dollar-based plans, so usage-summary is the one normalized here.
+CURSOR_KEYCHAIN_SERVICE = "cursor-access-token"
+CURSOR_IDE_STATE_DB_REL = ("Library", "Application Support", "Cursor",
+                           "User", "globalStorage", "state.vscdb")
+CURSOR_IDE_TOKEN_KEY = "cursorAuth/accessToken"
+CURSOR_USAGE_SUMMARY_URL = "https://cursor.com/api/usage-summary"
 GROK_INIT_TIMEOUT = 4.0
 GROK_BILLING_TIMEOUT = 3.0
 HTTP_TIMEOUT = 30.0
@@ -326,11 +462,11 @@ def read_grok_credentials(home: Path, env: dict | None = None) -> dict | None:
 
 
 def _antigravity_refresh_token(raw: str) -> str | None:
-    """Extract ``token.refresh_token`` from a stored agy credential blob.
-
-    Accepts both the Keychain form (``go-keyring-base64:`` + base64(JSON)) and
-    a bare JSON file. The access_token is deliberately ignored — it is almost
-    always expired and we mint a fresh one in memory from the refresh token."""
+    """Extract ``token.refresh_token`` from a stored Antigravity credential
+    blob. Accepts both the Keychain form (``go-keyring-base64:`` + base64(JSON))
+    and the bare JSON token file. The stored access_token is deliberately
+    ignored — it is almost always expired and a fresh one is minted in memory
+    from the refresh token."""
     raw = raw.strip()
     if raw.startswith(ANTIGRAVITY_KEYRING_PREFIX):
         try:
@@ -353,7 +489,7 @@ def _antigravity_refresh_token(raw: str) -> str | None:
 def read_antigravity_credentials_file(home: Path) -> str | None:
     """Stale-file fallback: ``~/.gemini/antigravity-cli/antigravity-oauth-token``.
     Returns the refresh_token or None."""
-    path = home.joinpath(*ANTIGRAVITY_STALE_TOKEN_REL)
+    path = home.joinpath(*ANTIGRAVITY_TOKEN_FILE_REL)
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError:
@@ -361,16 +497,20 @@ def read_antigravity_credentials_file(home: Path) -> str | None:
     return _antigravity_refresh_token(raw)
 
 
-_antigravity_keychain_failed = False
+_agy_keychain_failed_at: float | None = None
 
 
 async def read_antigravity_credentials(home: Path) -> str | None:
-    """Keychain first (macOS ``security find-generic-password``, read-only), then
-    the stale token file. Returns the agy refresh_token or None. A failed
-    Keychain read is remembered for the process lifetime so a denial does not
-    re-prompt every poll (mirrors ``read_claude_credentials``)."""
-    global _antigravity_keychain_failed
-    if sys.platform == "darwin" and not _antigravity_keychain_failed:
+    """Keychain first (macOS ``security find-generic-password``, read-only),
+    then the stale token file. Returns the refresh_token or None. A failed
+    Keychain read is remembered for ``_KEYCHAIN_COOLDOWN_S`` so a denial does
+    not re-prompt every poll (mirrors ``read_claude_credentials``)."""
+    global _agy_keychain_failed_at
+    now = time.monotonic()
+    if sys.platform == "darwin" and (
+        _agy_keychain_failed_at is None
+        or now - _agy_keychain_failed_at >= _KEYCHAIN_COOLDOWN_S
+    ):
         try:
             proc = await asyncio.create_subprocess_exec(
                 "/usr/bin/security", "find-generic-password",
@@ -381,34 +521,484 @@ async def read_antigravity_credentials(home: Path) -> str | None:
             )
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
             if proc.returncode == 0:
+                _agy_keychain_failed_at = None
                 rt = _antigravity_refresh_token(out.decode("utf-8", "replace"))
                 if rt is not None:
                     return rt
             else:
-                _antigravity_keychain_failed = True
+                _agy_keychain_failed_at = now
         except (OSError, asyncio.TimeoutError):
-            _antigravity_keychain_failed = True
+            _agy_keychain_failed_at = now
     return read_antigravity_credentials_file(home)
 
 
-def _load_antigravity_oauth_config() -> dict | None:
-    """Read ``{client_id, client_secret}`` from the local Navide config at
-    ``app_data_dir()/antigravity-oauth.json``. The real secret values live only
-    in this user-data file, never in the repo. Missing/unusable -> None so the
-    fetch degrades to status="error" instead of crashing."""
-    path = app_data_dir() / ANTIGRAVITY_OAUTH_CONFIG
+def _load_antigravity_oauth_config() -> dict:
+    """Antigravity's public installed-app OAuth client. An optional override
+    file ``app_data_dir()/antigravity-oauth.json`` ({client_id, client_secret})
+    wins when present and complete."""
+    try:
+        data = json.loads(
+            (app_data_dir() / ANTIGRAVITY_OAUTH_CONFIG).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = None
+    if isinstance(data, dict):
+        client_id = data.get("client_id")
+        client_secret = data.get("client_secret")
+        if (isinstance(client_id, str) and client_id
+                and isinstance(client_secret, str) and client_secret):
+            return {"client_id": client_id, "client_secret": client_secret}
+    return {"client_id": ANTIGRAVITY_CLIENT_ID,
+            "client_secret": ANTIGRAVITY_CLIENT_SECRET}
+
+
+def read_opencode_credentials(home: Path) -> dict | None:
+    """Parse ``~/.local/share/opencode/auth.json``: a map of providerID ->
+    credential entry ({type: "api", key} or {type: "oauth", access, refresh,
+    expires}). Returns the dict-valued entries, or None when the file is
+    absent/malformed/empty."""
+    path = home.joinpath(*OPENCODE_AUTH_FILE_REL)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(data, dict):
         return None
-    client_id = data.get("client_id")
-    client_secret = data.get("client_secret")
-    if not (isinstance(client_id, str) and client_id
-            and isinstance(client_secret, str) and client_secret):
+    entries = {k: v for k, v in data.items() if isinstance(v, dict)}
+    return entries or None
+
+
+def opencode_minimax_key(auth: dict) -> str | None:
+    """The MiniMax coding-plan API key from an opencode auth map, or None."""
+    entry = auth.get("minimax-coding-plan")
+    if not isinstance(entry, dict) or entry.get("type") != "api":
         return None
-    return {"client_id": client_id, "client_secret": client_secret}
+    key = entry.get("key")
+    return key if isinstance(key, str) and key else None
+
+
+def opencode_anthropic_oauth(auth: dict) -> dict | None:
+    """Map an ``anthropic`` {type: "oauth"} entry to the claudeAiOauth shape
+    (accessToken + epoch-ms expiresAt) so the existing Claude usage flow can
+    be reused as-is."""
+    entry = auth.get("anthropic")
+    if not isinstance(entry, dict) or entry.get("type") != "oauth":
+        return None
+    access = entry.get("access")
+    if not isinstance(access, str) or not access:
+        return None
+    return {"accessToken": access, "expiresAt": entry.get("expires")}
+
+
+def _qwen_env_lookup(mapping: dict) -> str | None:
+    for key in QWEN_ENV_KEYS:
+        value = mapping.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _parse_dotenv(text: str) -> dict:
+    """Minimal ``KEY=VALUE`` .env parse (comments/blank lines skipped,
+    ``export`` prefix and surrounding quotes stripped) — enough for the .env
+    files qwen-code resolves its API key from."""
+    result: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key.startswith("export "):
+            key = key[len("export "):].strip()
+        result[key] = value.strip().strip("'\"")
+    return result
+
+
+def read_qwen_credentials(home: Path, env: dict | None = None) -> str | None:
+    """The Alibaba ModelStudio Coding Plan API key, resolved the way qwen-code
+    does (read-only): process env first, then ``~/.qwen/.env``, then the
+    ``env`` object in ``~/.qwen/settings.json``."""
+    key = _qwen_env_lookup(env or {})
+    if key is not None:
+        return key
+    qwen_home = home / ".qwen"
+    try:
+        key = _qwen_env_lookup(
+            _parse_dotenv((qwen_home / ".env").read_text(encoding="utf-8")))
+    except OSError:
+        key = None
+    if key is not None:
+        return key
+    try:
+        settings = json.loads(
+            (qwen_home / "settings.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    env_obj = settings.get("env") if isinstance(settings, dict) else None
+    return _qwen_env_lookup(env_obj) if isinstance(env_obj, dict) else None
+
+
+def qwen_legacy_oauth_present(home: Path) -> bool:
+    """True when the defunct Qwen OAuth credential file exists. The free tier
+    it belonged to was discontinued and no quota endpoint accepts the token,
+    so it maps to status=unavailable rather than inventing client-side counts."""
+    return (home / ".qwen" / "oauth_creds.json").is_file()
+
+
+def _kilo_entry_credentials(entry: Any) -> dict | None:
+    """One auth.json provider entry -> {token, org_id} or None. ``api`` keys
+    and ``oauth`` access tokens are both Kilo bearer tokens; oauth carries the
+    organization id as ``accountId``. Local expiry is deliberately not checked
+    (the token lives ~1 year) — a genuinely expired token maps to
+    status=expired via the endpoint's 401."""
+    if not isinstance(entry, dict):
+        return None
+    if entry.get("type") == "api":
+        key = entry.get("key")
+        return {"token": key, "org_id": None} \
+            if isinstance(key, str) and key else None
+    if entry.get("type") == "oauth":
+        access = entry.get("access")
+        if not isinstance(access, str) or not access:
+            return None
+        org = entry.get("accountId")
+        return {"token": access,
+                "org_id": org if isinstance(org, str) and org else None}
+    return None
+
+
+def _kilo_legacy_credentials(home: Path) -> dict | None:
+    """Legacy ``~/.kilocode/cli/config.json``: providers[] entries with
+    provider == "kilocode" carry kilocodeToken (+ kilocodeOrganizationId)."""
+    try:
+        data = json.loads(
+            home.joinpath(*KILO_LEGACY_CONFIG_REL).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    providers = data.get("providers") if isinstance(data, dict) else None
+    if not isinstance(providers, list):
+        return None
+    for entry in providers:
+        if not isinstance(entry, dict) or entry.get("provider") != "kilocode":
+            continue
+        token = entry.get("kilocodeToken")
+        if isinstance(token, str) and token:
+            org = entry.get("kilocodeOrganizationId")
+            return {"token": token,
+                    "org_id": org if isinstance(org, str) and org else None}
+    return None
+
+
+def read_kilo_credentials(home: Path, env: dict | None = None) -> dict | None:
+    """The Kilo bearer token + optional organization id, resolved the way the
+    Kilo CLI does (read-only): ``KILO_AUTH_CONTENT`` env injects the whole
+    auth.json content, otherwise ``~/.local/share/kilo/auth.json`` is read;
+    the legacy ``~/.kilocode/cli/config.json`` is the last fallback. Returns
+    ``{token, org_id}`` or None."""
+    env = env or {}
+    raw = env.get("KILO_AUTH_CONTENT")
+    if raw:
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            data = None
+    else:
+        try:
+            data = json.loads(
+                home.joinpath(*KILO_AUTH_FILE_REL).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = None
+    creds = _kilo_entry_credentials(data.get("kilo")) \
+        if isinstance(data, dict) else None
+    if creds is not None:
+        return creds
+    return _kilo_legacy_credentials(home)
+
+
+def kilo_base_url(token: str, env: dict | None = None) -> str:
+    """``KILO_API_URL`` env wins; a token prefixed ``https://host:`` re-points
+    the base itself (the CLI's getKiloUrlFromToken — the token is still sent
+    unmodified); default api.kilo.ai."""
+    env = env or {}
+    override = env.get("KILO_API_URL")
+    if override:
+        return override.rstrip("/")
+    if token.startswith("https://"):
+        base = token.rsplit(":", 1)[0]
+        if base != "https":  # a ":" existed beyond the scheme
+            return base.rstrip("/")
+    return KILO_DEFAULT_BASE
+
+
+def read_pi_credentials(home: Path, env: dict | None = None) -> dict | None:
+    """Parse pi's ``auth.json`` (under ``$PI_CODING_AGENT_DIR``, default
+    ``~/.pi/agent`` — mirroring the pi log reader's root resolution): a map of
+    provider id -> credential entry. Returns the dict-valued entries, or None
+    when the file is absent/malformed/empty."""
+    env = env or {}
+    root = Path(env[PI_AGENT_DIR_ENV]) if env.get(PI_AGENT_DIR_ENV) \
+        else home / ".pi" / "agent"
+    try:
+        data = json.loads((root / "auth.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    entries = {k: v for k, v in data.items() if isinstance(v, dict)}
+    return entries or None
+
+
+def pi_oauth_expired(entry: dict, now_ms: float | None = None) -> bool:
+    """True when an oauth entry's ``expires`` (epoch ms) has passed. Tokens
+    are never refreshed here — pi serializes its own refresh flow and Anthropic
+    rotates refresh tokens, so refreshing would invalidate the CLI's copy."""
+    expires = _num(entry.get("expires"))
+    if expires is None:
+        return False
+    now = time.time() * 1000 if now_ms is None else now_ms
+    return now >= expires
+
+
+def pi_anthropic_oauth(auth: dict) -> dict | None:
+    """Map an ``anthropic`` {type: "oauth"} entry to the claudeAiOauth shape
+    (accessToken + epoch-ms expiresAt) so the existing Claude usage flow can
+    be reused as-is — pi's Anthropic OAuth uses Claude Code's client id, so
+    the stored token works against the same oauth/usage endpoint."""
+    entry = auth.get("anthropic")
+    if not isinstance(entry, dict) or entry.get("type") != "oauth":
+        return None
+    access = entry.get("access")
+    if not isinstance(access, str) or not access:
+        return None
+    return {"accessToken": access, "expiresAt": entry.get("expires")}
+
+
+def pi_codex_oauth(auth: dict) -> dict | None:
+    """The ``openai-codex`` {type: "oauth"} entry -> {access_token, account_id,
+    expires} for the ChatGPT ``wham/usage`` flow. api_key entries are BYOK and
+    have no usage surface -> None."""
+    entry = auth.get("openai-codex")
+    if not isinstance(entry, dict) or entry.get("type") != "oauth":
+        return None
+    access = entry.get("access")
+    if not isinstance(access, str) or not access:
+        return None
+    account = entry.get("accountId") or entry.get("account_id")
+    return {"access_token": access,
+            "account_id": account if isinstance(account, str) and account else None,
+            "expires": entry.get("expires")}
+
+
+def pi_openrouter_key(auth: dict) -> str | None:
+    """The ``openrouter`` bearer credential: the oauth access token (the PKCE
+    exchange yields a long-lived key) or a plain api key — both are accepted
+    by ``GET /api/v1/key``."""
+    entry = auth.get("openrouter")
+    if not isinstance(entry, dict):
+        return None
+    if entry.get("type") == "oauth":
+        access = entry.get("access")
+        return access if isinstance(access, str) and access else None
+    if entry.get("type") == "api_key":
+        key = entry.get("key")
+        return key if isinstance(key, str) and key else None
+    return None
+
+
+def read_copilot_config(home: Path) -> dict | None:
+    """Parse ``~/.copilot/config.json`` (JSONC: ``//`` comment lines before the
+    JSON body). Returns {host, login} for ``lastLoggedInUser`` (host reduced to
+    a bare hostname, default github.com), or None when absent/malformed/logged
+    out. The file is metadata only — the CLI's token lives in the Keychain."""
+    path = home.joinpath(*COPILOT_CONFIG_FILE_REL)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    body = "\n".join(line for line in text.splitlines()
+                     if not line.lstrip().startswith("//"))
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return None
+    user = data.get("lastLoggedInUser") if isinstance(data, dict) else None
+    if not isinstance(user, dict):
+        return None
+    login = user.get("login")
+    if not isinstance(login, str) or not login:
+        return None
+    hostname = COPILOT_DEFAULT_HOST
+    host = user.get("host")
+    if isinstance(host, str) and host.strip():
+        stripped = host.strip().split("://", 1)[-1].split("/", 1)[0]
+        hostname = stripped or COPILOT_DEFAULT_HOST
+    return {"host": hostname, "login": login}
+
+
+def read_copilot_hosts_token(home: Path, host: str = COPILOT_DEFAULT_HOST) -> str | None:
+    """The VS Code/JetBrains-style Copilot credential fallback:
+    ``~/.config/github-copilot/apps.json`` then ``hosts.json``, each a map of
+    host key (bare, or suffixed like ``github.com:Iv1.xxx``) -> {oauth_token}.
+    Returns the first matching host's token, or None."""
+    for rel in COPILOT_HOSTS_FILES_REL:
+        try:
+            data = json.loads(home.joinpath(*rel).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        for key, entry in data.items():
+            if not isinstance(entry, dict) or host not in str(key):
+                continue
+            token = entry.get("oauth_token")
+            if isinstance(token, str) and token:
+                return token
+    return None
+
+
+def copilot_env_token(env: dict) -> str | None:
+    for key in COPILOT_ENV_KEYS:
+        value = env.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def copilot_usage_url(host: str) -> str:
+    """github.com -> api.github.com; enterprise hosts use ``api.<host>`` the
+    same way (CodexBar's Copilot host mapping)."""
+    return f"https://api.{host}/copilot_internal/user"
+
+
+async def _copilot_gh_token(login: str, host: str) -> str | None:
+    """``gh auth token -u <login>`` — gh keeps GitHub OAuth tokens in the
+    Keychain and prints them read-only without prompting or rotating anything
+    (verified live). None when gh is missing, fails or prints nothing; gh's
+    active account may differ from Copilot's, hence the explicit ``--user``."""
+    binary = shutil.which("gh")
+    if not binary:
+        return None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            binary, "auth", "token", "--user", login, "--hostname", host,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(
+            proc.communicate(), timeout=COPILOT_GH_TOKEN_TIMEOUT)
+    except (OSError, asyncio.TimeoutError):
+        return None
+    if proc.returncode != 0:
+        return None
+    token = out.decode("utf-8", "replace").strip()
+    return token or None
+
+
+def _cursor_jwt_claims(token: str) -> dict | None:
+    """Decode a JWT's payload (no signature check — the claims are only used
+    to build the session cookie and pre-check expiry)."""
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    payload = parts[1]
+    try:
+        raw = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
+        data = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def cursor_user_id(token: str) -> str | None:
+    """The WorkosCursorSessionToken user id: the JWT ``sub`` after the last
+    ``|`` (e.g. ``google-oauth2|user_xxx`` -> ``user_xxx``)."""
+    claims = _cursor_jwt_claims(token)
+    sub = claims.get("sub") if claims else None
+    if not isinstance(sub, str) or not sub:
+        return None
+    return sub.split("|")[-1] or None
+
+
+def cursor_token_expired(token: str, now: float | None = None) -> bool:
+    """True when the JWT ``exp`` (epoch seconds) has passed. Tokens are never
+    refreshed here — the CLI/IDE rotate their own; missing/unreadable claims
+    assume valid and let the endpoint's 401 decide."""
+    claims = _cursor_jwt_claims(token)
+    exp = _num(claims.get("exp")) if claims else None
+    if exp is None:
+        return False
+    now = time.time() if now is None else now
+    return now >= exp
+
+
+def read_cursor_ide_token(home: Path) -> str | None:
+    """The Cursor IDE fallback: the ``cursorAuth/accessToken`` ItemTable row of
+    ``state.vscdb`` (sqlite, opened read-only) holds the raw session JWT."""
+    import sqlite3
+
+    path = home.joinpath(*CURSOR_IDE_STATE_DB_REL)
+    if not path.is_file():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+    try:
+        row = conn.execute("SELECT value FROM ItemTable WHERE key = ?",
+                           (CURSOR_IDE_TOKEN_KEY,)).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+    if not row:
+        return None
+    value = row[0]
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", "replace")
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if value.startswith('"'):  # some rows store JSON-encoded strings
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return None
+    return value if isinstance(value, str) and value else None
+
+
+_cursor_keychain_failed_at: float | None = None
+
+
+async def read_cursor_credentials(home: Path) -> str | None:
+    """cursor-agent CLI Keychain first (macOS ``security
+    find-generic-password``, read-only), then the Cursor IDE state db. Returns
+    the raw session JWT or None. A failed Keychain read is remembered for
+    ``_KEYCHAIN_COOLDOWN_S`` (mirrors ``read_claude_credentials``). The CLI's
+    Keychain slot is per-user, so per-pane isolated homes do not isolate
+    cursor-agent credentials."""
+    global _cursor_keychain_failed_at
+    now = time.monotonic()
+    if sys.platform == "darwin" and (
+        _cursor_keychain_failed_at is None
+        or now - _cursor_keychain_failed_at >= _KEYCHAIN_COOLDOWN_S
+    ):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "/usr/bin/security", "find-generic-password",
+                "-s", CURSOR_KEYCHAIN_SERVICE, "-w",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
+            if proc.returncode == 0:
+                _cursor_keychain_failed_at = None
+                token = out.decode("utf-8", "replace").strip()
+                if token:
+                    return token
+            else:
+                _cursor_keychain_failed_at = now
+        except (OSError, asyncio.TimeoutError):
+            _cursor_keychain_failed_at = now
+    return read_cursor_ide_token(home)
 
 
 # ── Response normalizers (pure) ─────────────────────────────────────────────
@@ -620,37 +1210,284 @@ def normalize_grok(billing: dict) -> tuple[list[dict], str | None]:
     return windows, None
 
 
+_ANTIGRAVITY_WINDOW_KINDS = {"5h": "session", "weekly": "weekly"}
+
+
 def normalize_antigravity(data: dict) -> tuple[list[dict], str | None]:
-    """``quotaSummaryGroups[].buckets[].quotaInfo`` -> windows. remainingFraction
-    is a 0..1 remaining ratio, so usedPercent = 100*(1-remainingFraction). Every
-    bucket becomes a window; the tightest (lowest remainingFraction) sorts first
-    so a windows[0]-only consumer surfaces the most-constrained bucket."""
+    """``groups[].buckets[]`` from retrieveUserQuotaSummary. remainingFraction
+    is a 0..1 remaining ratio (omitted when a full quota is implied -> 0 used);
+    ``window`` is "5h"/"weekly". The tightest (lowest remaining) bucket sorts
+    first so a windows[0]-only consumer surfaces the most-constrained quota."""
     ranked: list[tuple[float, dict]] = []
-    groups = data.get("quotaSummaryGroups")
-    if isinstance(groups, list):
-        for group in groups:
-            if not isinstance(group, dict):
+    for group in data.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        group_name = group.get("displayName")
+        for bucket in group.get("buckets") or []:
+            if not isinstance(bucket, dict):
                 continue
-            group_name = group.get("groupName")
-            buckets = group.get("buckets")
-            if not isinstance(buckets, list):
-                continue
-            for bucket in buckets:
-                if not isinstance(bucket, dict):
-                    continue
-                info = bucket.get("quotaInfo")
-                if not isinstance(info, dict):
-                    continue
-                frac = _num(info.get("remainingFraction"))
-                if frac is None:
-                    continue
-                label = bucket.get("bucketName") or group_name or "Quota"
-                reset = info.get("resetTime")
-                ranked.append((frac, _window(
-                    "antigravity", str(label), 100.0 * (1.0 - frac),
-                    reset if isinstance(reset, str) else None)))
+            frac = _num(bucket.get("remainingFraction"))
+            if frac is None:
+                frac = 1.0  # omitted when the quota is untouched
+            window = bucket.get("window")
+            kind = _ANTIGRAVITY_WINDOW_KINDS.get(window) or (
+                window if isinstance(window, str) and window else "other")
+            names = [n for n in (group_name, bucket.get("displayName"))
+                     if isinstance(n, str) and n]
+            label = " — ".join(names) or str(bucket.get("bucketId") or "Quota")
+            reset = bucket.get("resetTime")
+            ranked.append((frac, _window(
+                kind, label, 100.0 * (1.0 - frac),
+                reset if isinstance(reset, str) else None)))
     ranked.sort(key=lambda item: item[0])
     return [w for _, w in ranked], None
+
+
+def antigravity_plan(data: dict) -> str | None:
+    """loadCodeAssist ``currentTier`` -> plan label (name, falling back to id),
+    surfaced as-is."""
+    tier = data.get("currentTier")
+    if not isinstance(tier, dict):
+        return None
+    for key in ("name", "id"):
+        value = tier.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def antigravity_project(data: dict) -> str | None:
+    """loadCodeAssist ``cloudaicompanionProject`` is a plain string or ``{id}``."""
+    project = data.get("cloudaicompanionProject")
+    if isinstance(project, str) and project:
+        return project
+    if isinstance(project, dict):
+        pid = project.get("id")
+        if isinstance(pid, str) and pid:
+            return pid
+    return None
+
+
+def normalize_opencode_minimax(data: dict) -> list[dict]:
+    """MiniMax ``token_plan/remains``: ``model_remains[]`` per model; the
+    coding plan is the ``model_name == "general"`` entry. Percents are
+    remaining -> used; epoch-ms end times -> ISO resetsAt."""
+    for entry in data.get("model_remains") or []:
+        if not isinstance(entry, dict) or entry.get("model_name") != "general":
+            continue
+        windows: list[dict] = []
+        interval = _num(entry.get("current_interval_remaining_percent"))
+        if interval is not None:
+            end = _num(entry.get("end_time"))
+            windows.append(_window(
+                "session", "MiniMax (5h)", 100.0 - interval,
+                _epoch_to_iso(end / 1000) if end is not None else None))
+        weekly = _num(entry.get("current_weekly_remaining_percent"))
+        if weekly is not None:
+            end = _num(entry.get("weekly_end_time"))
+            windows.append(_window(
+                "weekly", "MiniMax weekly", 100.0 - weekly,
+                _epoch_to_iso(end / 1000) if end is not None else None))
+        return windows
+    return []
+
+
+_QWEN_WINDOWS = (
+    ("per5Hour", "session", "Session (5h)"),
+    ("perWeek", "weekly", "Weekly"),
+    ("perBillMonth", "monthly", "Monthly"),
+)
+
+
+def _qwen_reset_iso(raw: Any) -> str | None:
+    """``*QuotaNextRefreshTime`` arrives as epoch ms, epoch s, ISO8601 or
+    ``yyyy-MM-dd HH:mm[:ss]`` depending on gateway version."""
+    num = _num(raw)
+    if num is not None:
+        return _epoch_to_iso(num / 1000 if num > 1e11 else num)
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.isoformat()
+
+
+def _qwen_instance_infos(data: Any, depth: int = 0) -> list | None:
+    """Deep-search the console-gateway envelope for
+    ``codingPlanInstanceInfos`` — the data/statusCode wrapping shifts between
+    gateway versions, so CodexBar searches by key and so do we."""
+    if depth > 6 or not isinstance(data, dict):
+        return None
+    infos = data.get("codingPlanInstanceInfos")
+    if isinstance(infos, list):
+        return infos
+    for value in data.values():
+        found = _qwen_instance_infos(value, depth + 1)
+        if found is not None:
+            return found
+    return None
+
+
+def normalize_qwen(data: dict) -> tuple[list[dict], str | None]:
+    """First usable ``codingPlanInstanceInfos[]`` entry: per5Hour/perWeek/
+    perBillMonth Used/Total quota pairs -> session/weekly/monthly windows;
+    planName (falling back to instanceName/packageName) -> planType."""
+    for info in _qwen_instance_infos(data) or []:
+        if not isinstance(info, dict):
+            continue
+        windows: list[dict] = []
+        for prefix, kind, label in _QWEN_WINDOWS:
+            total = _num(info.get(f"{prefix}TotalQuota"))
+            used = _num(info.get(f"{prefix}UsedQuota"))
+            if not total or used is None:
+                continue
+            windows.append(_window(
+                kind, label, used / total * 100,
+                _qwen_reset_iso(info.get(f"{prefix}QuotaNextRefreshTime"))))
+        if not windows:
+            continue
+        plan = next(
+            (info[k] for k in ("planName", "instanceName", "packageName")
+             if isinstance(info.get(k), str) and info[k]), None)
+        return windows, plan
+    return [], None
+
+
+def normalize_kilo_balance(data: dict) -> list[dict]:
+    """``/api/profile/balance``: {"balance": USD remaining} — a prepaid credit
+    pool with no reset window and no used/limit ratio, so the raw balance is
+    surfaced as-is on a "credits" window (usedPercent is pinned to 0 because
+    the window shape requires one; the balance field is the real datum)."""
+    balance = _num(data.get("balance"))
+    if balance is None:
+        return []
+    window = _window("credits", "Credits", 0.0, None)
+    window["balance"] = balance
+    return [window]
+
+
+def kilo_pass_subscription(data: Any) -> dict | None:
+    """The ``subscription`` object from a kiloPass.getState response. The tRPC
+    envelope varies (batched array, result/data/json nesting), so wrappers are
+    unwrapped level by level; a null subscription means no Kilo Pass."""
+    node = data[0] if isinstance(data, list) and data else data
+    for _ in range(4):
+        if not isinstance(node, dict):
+            return None
+        sub = node.get("subscription")
+        if isinstance(sub, dict):
+            return sub
+        for key in ("result", "data", "json"):
+            if isinstance(node.get(key), dict):
+                node = node[key]
+                break
+        else:
+            return None
+    return None
+
+
+def normalize_kilo_pass(data: Any) -> list[dict]:
+    """Kilo Pass subscription: currentPeriodUsageUsd against base + bonus
+    period credits -> one "period" window resetting at nextBillingAt."""
+    sub = kilo_pass_subscription(data)
+    if sub is None:
+        return []
+    base = _num(sub.get("currentPeriodBaseCreditsUsd")) or 0.0
+    bonus = _num(sub.get("currentPeriodBonusCreditsUsd")) or 0.0
+    used = _num(sub.get("currentPeriodUsageUsd"))
+    total = base + bonus
+    if not total or used is None:
+        return []
+    resets = sub.get("nextBillingAt")
+    return [_window("period", "Kilo Pass period", used / total * 100,
+                    resets if isinstance(resets, str) else None)]
+
+
+def normalize_pi_openrouter(data: dict) -> list[dict]:
+    """OpenRouter ``GET /api/v1/key``: ``{"data": {"usage": <credits used>,
+    "limit": <credit limit|null>}}`` — dollar/credit based, no reset window.
+    With a limit the used/limit ratio is real; a null limit (unlimited key)
+    pins usedPercent to 0 and the raw fields are surfaced as-is."""
+    entry = data.get("data")
+    if not isinstance(entry, dict):
+        return []
+    used = _num(entry.get("usage"))
+    if used is None:
+        return []
+    limit = _num(entry.get("limit"))
+    window = _window("credits", "OpenRouter credits",
+                     used / limit * 100 if limit else 0.0, None)
+    window["usage"] = used
+    window["limit"] = limit
+    return [window]
+
+
+_COPILOT_QUOTA_KEYS = (
+    ("chat", "Chat"),
+    ("completions", "Completions"),
+    ("premium_interactions", "Premium requests"),
+)
+
+
+def normalize_copilot(data: dict) -> tuple[list[dict], str | None]:
+    """``copilot_internal/user``: one monthly window per ``quota_snapshots``
+    entry with has_quota=true (usedPercent = 100 - percent_remaining), all
+    resetting at ``quota_reset_date_utc``; ``copilot_plan`` -> planType.
+    Entitlements without quota (has_quota=false) are skipped."""
+    plan = data.get("copilot_plan")
+    plan = plan if isinstance(plan, str) and plan else None
+    snapshots = data.get("quota_snapshots")
+    if not isinstance(snapshots, dict):
+        return [], plan
+    resets = data.get("quota_reset_date_utc")
+    resets = resets if isinstance(resets, str) and resets else None
+    windows: list[dict] = []
+    for key, label in _COPILOT_QUOTA_KEYS:
+        entry = snapshots.get(key)
+        if not isinstance(entry, dict) or not entry.get("has_quota"):
+            continue
+        remaining = _num(entry.get("percent_remaining"))
+        if remaining is None:
+            continue
+        windows.append(_window("monthly", label, 100.0 - remaining, resets))
+    return windows, plan
+
+
+def normalize_cursor(data: dict) -> tuple[list[dict], str | None]:
+    """``usage-summary``: ``individualUsage.plan`` (cent amounts;
+    ``totalPercentUsed`` is already in percent units, used/limit is the
+    fallback) -> one billing-cycle window resetting at ``billingCycleEnd``;
+    an enabled, limited ``individualUsage.onDemand`` adds an on-demand
+    window; ``membershipType`` -> planType."""
+    plan = data.get("membershipType")
+    plan = plan if isinstance(plan, str) and plan else None
+    resets = data.get("billingCycleEnd")
+    resets = resets if isinstance(resets, str) and resets else None
+    individual = data.get("individualUsage")
+    individual = individual if isinstance(individual, dict) else {}
+    windows: list[dict] = []
+    plan_usage = individual.get("plan")
+    if isinstance(plan_usage, dict):
+        pct = _num(plan_usage.get("totalPercentUsed"))
+        if pct is None:
+            limit = _num(plan_usage.get("limit"))
+            used = _num(plan_usage.get("used"))
+            if limit and used is not None:
+                pct = used / limit * 100
+        if pct is not None:
+            windows.append(_window("cycle", "Plan usage", pct, resets))
+    on_demand = individual.get("onDemand")
+    if isinstance(on_demand, dict) and on_demand.get("enabled"):
+        limit = _num(on_demand.get("limit"))
+        used = _num(on_demand.get("used"))
+        if limit and used is not None:
+            windows.append(_window("on-demand", "On-demand",
+                                   used / limit * 100, resets))
+    return windows, plan
 
 
 def parse_retry_after(value: str | None) -> float:
@@ -857,14 +1694,15 @@ async def fetch_grok(home: Path, env: dict | None = None,
     return _snapshot("grok", "ok", windows=windows, plan_type=plan)
 
 
-async def refresh_antigravity_token(refresh_token: str, cfg: dict) -> str | None:
-    """Exchange the agy refresh_token for a fresh access_token, held in memory
-    only (never written back to the Keychain or ~/.gemini). Returns the token,
-    or None on invalid_grant/400 (treated as expired, mirroring claude/kimi
-    401->expired). Other non-200s and network errors raise for the caller to
-    map to status="error"."""
+async def refresh_antigravity_token(refresh_token: str) -> str | None:
+    """Exchange the Antigravity refresh_token for a fresh access_token, held in
+    memory only (never written back to the Keychain or ``~/.gemini``; the grant
+    response carries no new refresh token, so nothing rotates). Returns the
+    token, or None on 400/401 (invalid_grant -> expired). Other non-200s and
+    network errors raise for the caller to map to status="error"."""
     import httpx
 
+    cfg = _load_antigravity_oauth_config()
     body = {
         "grant_type": "refresh_token",
         "client_id": cfg["client_id"],
@@ -873,7 +1711,7 @@ async def refresh_antigravity_token(refresh_token: str, cfg: dict) -> str | None
     }
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         resp = await client.post(ANTIGRAVITY_TOKEN_URL, data=body)
-    if resp.status_code == 400:
+    if resp.status_code in (400, 401):
         return None
     resp.raise_for_status()
     token = resp.json().get("access_token")
@@ -883,19 +1721,13 @@ async def refresh_antigravity_token(refresh_token: str, cfg: dict) -> str | None
 
 
 async def fetch_antigravity(home: Path) -> dict:
-    # Config first: cheap, no side effects, and lets a machine without the
-    # local oauth config short-circuit before ever touching the Keychain.
-    cfg = _load_antigravity_oauth_config()
-    if cfg is None:
-        return _snapshot("antigravity", "error",
-                         error=f"missing {ANTIGRAVITY_OAUTH_CONFIG}")
     refresh_token = await read_antigravity_credentials(home)
     if refresh_token is None:
         return _snapshot("antigravity", "no-credentials")
     import httpx
 
     try:
-        access_token = await refresh_antigravity_token(refresh_token, cfg)
+        access_token = await refresh_antigravity_token(refresh_token)
     except (httpx.HTTPError, ValueError) as err:
         return _snapshot("antigravity", "error", error=f"token refresh: {err}")
     if access_token is None:
@@ -905,25 +1737,31 @@ async def fetch_antigravity(home: Path) -> dict:
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "User-Agent": "Navide",
-        "x-goog-api-client": ANTIGRAVITY_GOOG_API_CLIENT,
+        "User-Agent": "antigravity",
     }
-    # TODO(antigravity): request bodies below are unverified placeholders.
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        # agy primes a session with loadCodeAssist first; treat it as best
-        # effort — a failure here must not block the quota read.
-        try:
-            await client.post(ANTIGRAVITY_LOAD_URL, headers=headers,
-                              json={"metadata": ANTIGRAVITY_CLIENT_METADATA})
-        except httpx.HTTPError:
-            pass
-        try:
+    plan: str | None = None
+    project: str | None = None
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+            # loadCodeAssist supplies the project id + tier. Best effort — a
+            # failure must not block the quota read ({} still works there).
+            try:
+                load = await client.post(
+                    ANTIGRAVITY_LOAD_URL, headers=headers,
+                    json={"metadata": ANTIGRAVITY_LOAD_METADATA})
+                if load.status_code == 200:
+                    payload = load.json()
+                    if isinstance(payload, dict):
+                        project = antigravity_project(payload)
+                        plan = antigravity_plan(payload)
+            except (httpx.HTTPError, ValueError):
+                pass
             resp = await client.post(
                 ANTIGRAVITY_QUOTA_URL, headers=headers,
-                json={"clientMetadata": ANTIGRAVITY_CLIENT_METADATA})
-        except httpx.HTTPError as err:
-            return _snapshot("antigravity", "error", error=str(err))
-    if resp.status_code in (401, 403):
+                json={"project": project} if project else {})
+    except httpx.HTTPError as err:
+        return _snapshot("antigravity", "error", error=str(err))
+    if resp.status_code == 401:
         return _snapshot("antigravity", "expired")
     if resp.status_code == 429:
         snap = _snapshot("antigravity", "rate-limited")
@@ -931,8 +1769,352 @@ async def fetch_antigravity(home: Path) -> dict:
         return snap
     if resp.status_code != 200:
         return _snapshot("antigravity", "error", error=f"HTTP {resp.status_code}")
-    windows, plan = normalize_antigravity(resp.json())
+    windows, _ = normalize_antigravity(resp.json())
     return _snapshot("antigravity", "ok", windows=windows, plan_type=plan)
+
+
+async def _fetch_opencode_minimax(key: str) -> dict:
+    import httpx
+
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Accept": "application/json",
+        "User-Agent": "Navide",
+    }
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        resp = await client.get(OPENCODE_MINIMAX_USAGE_URL, headers=headers)
+    if resp.status_code in (401, 403):
+        return _snapshot("opencode", "expired")
+    if resp.status_code == 429:
+        snap = _snapshot("opencode", "rate-limited")
+        snap["retryAfterSec"] = parse_retry_after(resp.headers.get("Retry-After"))
+        return snap
+    if resp.status_code != 200:
+        return _snapshot("opencode", "error", error=f"HTTP {resp.status_code}")
+    payload = resp.json()
+    base = payload.get("base_resp") if isinstance(payload, dict) else None
+    status_code = _num((base or {}).get("status_code"))
+    if status_code is not None and status_code != 0:
+        msg = (base or {}).get("status_msg")
+        return _snapshot("opencode", "error",
+                         error=str(msg or f"MiniMax status {int(status_code)}"))
+    return _snapshot("opencode", "ok", windows=normalize_opencode_minimax(payload))
+
+
+async def fetch_opencode(home: Path) -> dict:
+    """opencode is an aggregator: each supported ``auth.json`` entry is asked
+    its own provider's usage endpoint. Any source that answers makes the
+    snapshot "ok" (windows combined); with none answering the first failure
+    is surfaced; entries without a usage surface (Zen, BYOK keys) alone ->
+    unavailable."""
+    auth = read_opencode_credentials(home)
+    if auth is None:
+        return _snapshot("opencode", "no-credentials")
+    sub_snaps: list[dict] = []
+    key = opencode_minimax_key(auth)
+    if key is not None:
+        sub_snaps.append(await _fetch_opencode_minimax(key))
+    oauth = opencode_anthropic_oauth(auth)
+    if oauth is not None:
+        snap = await fetch_claude_oauth(oauth)
+        snap["provider"] = "opencode"
+        snap["windows"] = [dict(w, label=f"Claude — {w['label']}")
+                           for w in snap["windows"]]
+        sub_snaps.append(snap)
+    if not sub_snaps:
+        return _snapshot(
+            "opencode", "unavailable",
+            error="no auth.json entry has a usage API "
+                  "(opencode Zen and plain API keys expose none)")
+    ok = [s for s in sub_snaps if s["status"] == "ok"]
+    if ok:
+        return _snapshot("opencode", "ok",
+                         windows=[w for s in ok for w in s["windows"]])
+    return sub_snaps[0]
+
+
+async def _fetch_qwen_region(client, key: str, region: tuple) -> dict:
+    """One region's console-gateway query -> snapshot."""
+    url, commodity_code, origin, referer = region
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "x-api-key": key,
+        "X-DashScope-API-Key": key,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": QWEN_BROWSER_UA,
+        "Origin": origin,
+        "Referer": referer,
+    }
+    resp = await client.post(
+        url, headers=headers,
+        json={"queryCodingPlanInstanceInfoRequest":
+              {"commodityCode": commodity_code}})
+    if resp.status_code in (401, 403):
+        return _snapshot("qwen", "expired")
+    if resp.status_code == 429:
+        snap = _snapshot("qwen", "rate-limited")
+        snap["retryAfterSec"] = parse_retry_after(resp.headers.get("Retry-After"))
+        return snap
+    if resp.status_code != 200:
+        return _snapshot("qwen", "error", error=f"HTTP {resp.status_code}")
+    try:
+        payload = resp.json()
+    except ValueError:
+        return _snapshot("qwen", "error", error="non-JSON response")
+    # The gateway tunnels auth failures (invalid key, api-key mode unavailable
+    # in this region) through HTTP 200 + a NeedLogin marker in the body.
+    if "NeedLogin" in json.dumps(payload):
+        return _snapshot("qwen", "expired")
+    windows, plan = normalize_qwen(payload if isinstance(payload, dict) else {})
+    if not windows:
+        return _snapshot("qwen", "error",
+                         error="response had no usable quota fields")
+    return _snapshot("qwen", "ok", windows=windows, plan_type=plan)
+
+
+async def fetch_qwen(home: Path, env: dict | None = None) -> dict:
+    env = env if env is not None else dict(os.environ)
+    key = read_qwen_credentials(home, env)
+    if key is None:
+        if qwen_legacy_oauth_present(home):
+            return _snapshot(
+                "qwen", "unavailable",
+                error="legacy Qwen OAuth has no usage API (free tier "
+                      "discontinued; a Coding Plan API key is required)")
+        return _snapshot("qwen", "no-credentials")
+    import httpx
+
+    first: dict | None = None
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        for region in QWEN_REGIONS:
+            try:
+                snap = await _fetch_qwen_region(client, key, region)
+            except httpx.HTTPError as err:
+                snap = _snapshot("qwen", "error", error=str(err))
+            # ok answers; 429 means the key works, so the alternate region
+            # would not help. Everything else retries the other region
+            # (CodexBar's alternate-region fallback), surfacing the FIRST
+            # failure when both refuse.
+            if snap["status"] in ("ok", "rate-limited"):
+                return snap
+            first = first or snap
+    return first
+
+
+async def fetch_kilo(home: Path, env: dict | None = None) -> dict:
+    env = env if env is not None else dict(os.environ)
+    creds = read_kilo_credentials(home, env)
+    if creds is None:
+        return _snapshot("kilo", "no-credentials")
+    import httpx
+
+    base = kilo_base_url(creds["token"], env)
+    headers = {
+        "Authorization": f"Bearer {creds['token']}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "Navide",
+    }
+    if creds.get("org_id"):
+        # Switches the balance to the team's when the auth carries an org.
+        headers["X-KILOCODE-ORGANIZATIONID"] = creds["org_id"]
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        resp = await client.get(f"{base}{KILO_BALANCE_PATH}", headers=headers)
+        if resp.status_code in (401, 403):
+            return _snapshot("kilo", "expired")
+        if resp.status_code == 429:
+            snap = _snapshot("kilo", "rate-limited")
+            snap["retryAfterSec"] = parse_retry_after(resp.headers.get("Retry-After"))
+            return snap
+        if resp.status_code != 200:
+            return _snapshot("kilo", "error", error=f"HTTP {resp.status_code}")
+        try:
+            payload = resp.json()
+        except ValueError:
+            return _snapshot("kilo", "error", error="non-JSON response")
+        windows = normalize_kilo_balance(payload if isinstance(payload, dict) else {})
+        # Kilo Pass period usage is best effort — a Pass endpoint failure must
+        # not block the credit balance (the CLI treats non-OK as no Pass too).
+        try:
+            pass_resp = await client.get(f"{base}{KILO_PASS_PATH}", headers=headers)
+            if pass_resp.status_code == 200:
+                windows += normalize_kilo_pass(pass_resp.json())
+        except (httpx.HTTPError, ValueError):
+            pass
+    if not windows:
+        return _snapshot("kilo", "error", error="response had no usable fields")
+    return _snapshot("kilo", "ok", windows=windows)
+
+
+async def _fetch_pi_codex(creds: dict) -> dict:
+    """pi's ``openai-codex`` oauth token against ChatGPT ``wham/usage`` (the
+    same endpoint the codex provider uses; pi has no config.toml base
+    override, so the default base applies)."""
+    if pi_oauth_expired(creds):
+        return _snapshot("pi", "expired")
+    import httpx
+
+    headers = {
+        "Authorization": f"Bearer {creds['access_token']}",
+        "User-Agent": "Navide",
+        "Accept": "application/json",
+    }
+    if creds.get("account_id"):
+        headers["ChatGPT-Account-Id"] = creds["account_id"]
+    url = codex_usage_url(CODEX_DEFAULT_BASE)
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        resp = await client.get(url, headers=headers)
+    if resp.status_code in (401, 403):
+        return _snapshot("pi", "expired")
+    if resp.status_code == 429:
+        snap = _snapshot("pi", "rate-limited")
+        snap["retryAfterSec"] = parse_retry_after(resp.headers.get("Retry-After"))
+        return snap
+    if resp.status_code != 200:
+        return _snapshot("pi", "error", error=f"HTTP {resp.status_code}")
+    windows, plan = normalize_codex(resp.json())
+    windows = [dict(w, label=f"Codex — {w['label']}") for w in windows]
+    return _snapshot("pi", "ok", windows=windows, plan_type=plan)
+
+
+async def _fetch_pi_openrouter(key: str) -> dict:
+    import httpx
+
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Accept": "application/json",
+        "User-Agent": "Navide",
+    }
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        resp = await client.get(PI_OPENROUTER_KEY_URL, headers=headers)
+    if resp.status_code in (401, 403):
+        return _snapshot("pi", "expired")
+    if resp.status_code == 429:
+        snap = _snapshot("pi", "rate-limited")
+        snap["retryAfterSec"] = parse_retry_after(resp.headers.get("Retry-After"))
+        return snap
+    if resp.status_code != 200:
+        return _snapshot("pi", "error", error=f"HTTP {resp.status_code}")
+    try:
+        payload = resp.json()
+    except ValueError:
+        return _snapshot("pi", "error", error="non-JSON response")
+    windows = normalize_pi_openrouter(payload if isinstance(payload, dict) else {})
+    if not windows:
+        return _snapshot("pi", "error", error="response had no usable fields")
+    return _snapshot("pi", "ok", windows=windows)
+
+
+async def fetch_pi(home: Path, env: dict | None = None) -> dict:
+    """pi is an aggregator with no server of its own: each supported
+    ``auth.json`` credential is asked its own provider's usage endpoint. Any
+    source that answers makes the snapshot "ok" (windows combined); with none
+    answering the first failure is surfaced; entries without a usage surface
+    (BYOK api keys, github-copilot/xai/radius) alone -> unavailable."""
+    env = env if env is not None else dict(os.environ)
+    auth = read_pi_credentials(home, env)
+    if auth is None:
+        return _snapshot("pi", "no-credentials")
+    sub_snaps: list[dict] = []
+    oauth = pi_anthropic_oauth(auth)
+    if oauth is not None:
+        snap = await fetch_claude_oauth(oauth)
+        snap["provider"] = "pi"
+        snap["windows"] = [dict(w, label=f"Claude — {w['label']}")
+                           for w in snap["windows"]]
+        sub_snaps.append(snap)
+    codex_creds = pi_codex_oauth(auth)
+    if codex_creds is not None:
+        sub_snaps.append(await _fetch_pi_codex(codex_creds))
+    key = pi_openrouter_key(auth)
+    if key is not None:
+        sub_snaps.append(await _fetch_pi_openrouter(key))
+    if not sub_snaps:
+        return _snapshot(
+            "pi", "unavailable",
+            error="no auth.json credential has a usage API "
+                  "(plain API keys and github-copilot/xai/radius expose none)")
+    ok = [s for s in sub_snaps if s["status"] == "ok"]
+    if ok:
+        return _snapshot("pi", "ok",
+                         windows=[w for s in ok for w in s["windows"]])
+    return sub_snaps[0]
+
+
+async def fetch_copilot(home: Path, env: dict | None = None) -> dict:
+    env = env if env is not None else dict(os.environ)
+    config = read_copilot_config(home)
+    host = config["host"] if config else COPILOT_DEFAULT_HOST
+    token = None
+    if config is not None:
+        token = await _copilot_gh_token(config["login"], host)
+    if token is None:
+        token = read_copilot_hosts_token(home, host)
+    if token is None:
+        token = copilot_env_token(env)
+    if token is None:
+        return _snapshot("copilot", "no-credentials")
+    import httpx
+
+    headers = {"Authorization": f"token {token}", **COPILOT_HEADERS}
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        resp = await client.get(copilot_usage_url(host), headers=headers)
+    if resp.status_code in (401, 403):
+        return _snapshot("copilot", "expired")
+    if resp.status_code == 429:
+        snap = _snapshot("copilot", "rate-limited")
+        snap["retryAfterSec"] = parse_retry_after(resp.headers.get("Retry-After"))
+        return snap
+    if resp.status_code != 200:
+        return _snapshot("copilot", "error", error=f"HTTP {resp.status_code}")
+    try:
+        payload = resp.json()
+    except ValueError:
+        return _snapshot("copilot", "error", error="non-JSON response")
+    windows, plan = normalize_copilot(payload if isinstance(payload, dict) else {})
+    if not windows:
+        return _snapshot("copilot", "error",
+                         error="response had no usable quota fields")
+    return _snapshot("copilot", "ok", windows=windows, plan_type=plan)
+
+
+async def fetch_cursor(home: Path) -> dict:
+    token = await read_cursor_credentials(home)
+    if token is None:
+        return _snapshot("cursor", "no-credentials")
+    if cursor_token_expired(token):
+        return _snapshot("cursor", "expired")
+    user_id = cursor_user_id(token)
+    if user_id is None:
+        return _snapshot("cursor", "error",
+                         error="session token has no usable sub claim")
+    import httpx
+
+    headers = {
+        "Cookie": f"WorkosCursorSessionToken={user_id}%3A%3A{token}",
+        "Accept": "application/json",
+        "User-Agent": "Navide",
+    }
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        resp = await client.get(CURSOR_USAGE_SUMMARY_URL, headers=headers)
+    if resp.status_code in (401, 403):
+        return _snapshot("cursor", "expired")
+    if resp.status_code == 429:
+        snap = _snapshot("cursor", "rate-limited")
+        snap["retryAfterSec"] = parse_retry_after(resp.headers.get("Retry-After"))
+        return snap
+    if resp.status_code != 200:
+        return _snapshot("cursor", "error", error=f"HTTP {resp.status_code}")
+    try:
+        payload = resp.json()
+    except ValueError:
+        return _snapshot("cursor", "error", error="non-JSON response")
+    windows, plan = normalize_cursor(payload if isinstance(payload, dict) else {})
+    if not windows:
+        return _snapshot("cursor", "error",
+                         error="response had no usable quota fields")
+    return _snapshot("cursor", "ok", windows=windows, plan_type=plan)
 
 
 # ── Poller service ──────────────────────────────────────────────────────────
@@ -1448,6 +2630,12 @@ class UsageService:
             ("kimi", lambda: fetch_kimi(home)),
             ("grok", lambda: fetch_grok(home)),
             ("antigravity", lambda: fetch_antigravity(home)),
+            ("opencode", lambda: fetch_opencode(home)),
+            ("qwen", lambda: fetch_qwen(home)),
+            ("kilo", lambda: fetch_kilo(home)),
+            ("pi", lambda: fetch_pi(home)),
+            ("copilot", lambda: fetch_copilot(home)),
+            ("cursor", lambda: fetch_cursor(home)),
         ):
             if self._blocked_until.get(provider, 0) > now:
                 continue
@@ -1523,45 +2711,3 @@ service = UsageService(
     cache_path=app_data_dir() / USAGE_CACHE_FILE,
     active_claude_slot_reader=lambda: _active_profile_id("claude"),
 )
-
-
-# ── One-time setup (manual only; never auto-run on import or in tests) ───────
-
-def setup_antigravity_oauth_config(binary: str | Path | None = None) -> Path:
-    """Extract the OAuth client_id/client_secret embedded in the ``agy`` binary
-    and write them to ``app_data_dir()/antigravity-oauth.json`` (chmod 600).
-
-    This is a manual, one-shot bootstrap — it is NOT called on import or during
-    fetches, so the repo never contains the secret values (only this reader).
-    Run once via ``python -m agent_team_backend.usage_service``. Prints only the
-    config path, never the extracted values."""
-    import re
-
-    path = binary or shutil.which("agy") or Path.home() / ".local" / "bin" / "agy"
-    blob = Path(path).read_bytes()
-    # Format-bounded so we don't over-capture into adjacent bytes of the Go
-    # string table: an OAuth client_id is ``<digits>-<hash>.apps...`` and a
-    # client_secret is exactly ``GOCSPX-`` + 28 chars. NOTE: the binary embeds
-    # more than one candidate (Gemini CLI vs Antigravity) — this takes the first
-    # match; verify it is the Antigravity pair before trusting live numbers.
-    id_match = re.search(
-        rb"[0-9]+-[0-9a-z]+\.apps\.googleusercontent\.com", blob)
-    secret_match = re.search(rb"GOCSPX-[0-9A-Za-z_\-]{28}", blob)
-    if not id_match or not secret_match:
-        raise SystemExit(f"could not find client_id/secret in {path}")
-    cfg = {
-        "client_id": id_match.group(0).decode("ascii"),
-        "client_secret": secret_match.group(0).decode("ascii"),
-    }
-    out = app_data_dir() / ANTIGRAVITY_OAUTH_CONFIG
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(cfg), encoding="utf-8")
-    out.chmod(0o600)
-    return out
-
-
-if __name__ == "__main__":
-    import sys as _sys
-
-    dest = setup_antigravity_oauth_config(_sys.argv[1] if len(_sys.argv) > 1 else None)
-    print(f"wrote {dest} (chmod 600)")
