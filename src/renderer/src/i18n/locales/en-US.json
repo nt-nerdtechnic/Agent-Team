@@ -14,7 +14,8 @@
     "rename-collision-body": "The name “{name}” is already used by another CLI. Choose a different messaging name:",
     "rename-collision-confirm": "Rename",
     "rename-collision-cancel": "Cancel",
-    "paused-banner": "Delivery paused — messages queue but are not sent"
+    "paused-banner": "Delivery paused — messages queue but are not sent",
+    "spawn-toast": "“{parent}” spawned “{child}”"
   },
   "confirm-close": {
     "ws-title": "Close workspace?",

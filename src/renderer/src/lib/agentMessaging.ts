@@ -13,6 +13,15 @@ export const MSG_START = '---MSG-START---'
 export const MSG_END = '---MSG-END---'
 export const MSG_ENVELOPE_PREFIX = '[Navide MSG] from:'
 
+// Agent-initiated pane spawning (same bare-line wire format):
+//   ---SPAWN-START---
+//   agent: <agentSpecs key>
+//   name: <messagingName for the new pane>
+//   task: <task text; everything after `task:` down to SPAWN-END is the task>
+//   ---SPAWN-END---
+export const SPAWN_START = '---SPAWN-START---'
+export const SPAWN_END = '---SPAWN-END---'
+
 export interface ParsedAgentMessage {
   /** Raw target messagingName from the `to:` field (trimmed). */
   target: string
@@ -71,6 +80,91 @@ export function parseMessages(turnText: string): ParsedAgentMessage[] {
   }
   close()
   return out
+}
+
+export interface ParsedSpawnRequest {
+  /** Raw `agent:` field (trimmed); '' when the field is missing. */
+  agent: string
+  /** Raw `name:` field (trimmed); '' when the field is missing. */
+  name: string
+  /** Task text from `task:` down to the block end (trimmed); '' when missing. */
+  task: string
+}
+
+const SPAWN_START_RE = /^---SPAWN-START---\s*$/
+const SPAWN_END_RE = /^---SPAWN-END---\s*$/
+const SPAWN_FIELD_RE = /^(agent|name|task)\s*:\s*(.*)$/
+
+/**
+ * Extract spawn-request blocks from one turn's assistant text. Same line
+ * discipline as parseMessages: bare-line markers, fenced code ignored,
+ * tolerant of a missing SPAWN-END. Blocks keep whatever fields they carry
+ * ('' when absent) so the caller can report the specific validation failure
+ * back to the requesting agent instead of dropping the block silently.
+ */
+export function parseSpawns(turnText: string): ParsedSpawnRequest[] {
+  const out: ParsedSpawnRequest[] = []
+  if (!turnText) return out
+
+  let inFence = false
+  let current: { agent: string; name: string; taskLines: string[] | null } | null = null
+
+  const close = (): void => {
+    if (!current) return
+    out.push({
+      agent: current.agent.trim(),
+      name: current.name.trim(),
+      task: (current.taskLines ?? []).join('\n').trim(),
+    })
+    current = null
+  }
+
+  for (const line of turnText.split('\n')) {
+    if (FENCE_RE.test(line)) {
+      inFence = !inFence
+      if (current?.taskLines) current.taskLines.push(line)
+      continue
+    }
+    if (inFence) {
+      if (current?.taskLines) current.taskLines.push(line)
+      continue
+    }
+    if (SPAWN_START_RE.test(line)) {
+      close()
+      current = { agent: '', name: '', taskLines: null }
+      continue
+    }
+    if (!current) continue
+    if (SPAWN_END_RE.test(line)) {
+      close()
+      continue
+    }
+    if (current.taskLines) {
+      current.taskLines.push(line)
+      continue
+    }
+    const field = SPAWN_FIELD_RE.exec(line)
+    if (field) {
+      if (field[1] === 'agent') current.agent = field[2]
+      else if (field[1] === 'name') current.name = field[2]
+      else current.taskLines = [field[2]]
+    }
+  }
+  close()
+  return out
+}
+
+/**
+ * Kickoff prompt for a SPAWN-created pane: the task followed by a report-back
+ * instruction pointing at the parent's messaging name. The instruction stays
+ * on a single line so it can never parse as a bare marker.
+ */
+export function renderSpawnKickoff(task: string, parentName: string): string {
+  return (
+    `${task}\n\n` +
+    `（任務完成後回報方式：輸出裸行區塊 ${MSG_START} to: ${parentName}，下一行起為結果回報，` +
+    `最後一行 ${MSG_END}；marker 必須獨立整行且不可放在 code block 內）`
+  )
 }
 
 /**

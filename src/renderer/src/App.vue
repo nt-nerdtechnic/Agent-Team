@@ -21,7 +21,8 @@ import NotificationHost from './components/NotificationHost.vue'
 import Welcome from './components/Welcome.vue'
 import { useNotify } from './composables/useNotify'
 import { useAgentMessaging, isBroadcastTarget } from './composables/useAgentMessaging'
-import { parseMessages } from './lib/agentMessaging'
+import { parseMessages, parseSpawns, renderSpawnKickoff } from './lib/agentMessaging'
+import { evaluateTurnSpawns, computeSpawnDepth } from './lib/agentSpawnGate'
 import StageTabBar, { type TabItem } from './components/StageTabBar.vue'
 import { useBackend } from './composables/useBackend'
 import { useTheme } from './composables/useTheme'
@@ -682,6 +683,10 @@ interface ActivePane {
    *  terminal panes. Persisted to localStorage keyed by pane id so names
    *  survive restart (see persistMessagingName). */
   messagingName?: string
+  /** Pane id of the parent that spawned this pane via a SPAWN block. Runtime
+   *  only — deliberately NOT persisted: after a restart every pane counts as
+   *  root (spawn depth 0) again, accepted for the MVP. */
+  spawnedBy?: string
   roleKey: RoleKey
   stageId: StageId
   /** Human-readable slot label, e.g. "Architecture" or "UI/UX".
@@ -1175,10 +1180,105 @@ function onTurnCompleteForMessaging(paneId: string, text: string, timestamp: str
           messaging.sendMessage(senderName, msg.target, msg.content)
         }
       }
+      // Same turn-complete path handles SPAWN blocks (freshness-deduped above,
+      // so a turn replayed by both the hook and the watcher spawns only once).
+      void handleSpawnRequestsForTurn(paneId, senderName, text)
     }
   }
   // A turn ending is exactly when this pane's queue can flush.
   messaging.pump()
+}
+
+// ── Agent-initiated pane spawning (SPAWN blocks) ────────────────────────────
+const SPAWN_FEEDBACK_SENDER = 'Navide'
+
+/** Feedback to the requesting pane through the ordinary messaging queue (idle
+ *  gate, delivery log) — no reply hint, Navide is not an addressable pane. */
+function sendSpawnFeedback(parentName: string, text: string): void {
+  messaging.sendMessage(SPAWN_FEEDBACK_SENDER, parentName, text, { includeReplyHint: false })
+}
+
+async function handleSpawnRequestsForTurn(
+  parentPaneId: string,
+  parentName: string,
+  text: string,
+): Promise<void> {
+  const requests = parseSpawns(text)
+  if (requests.length === 0) return
+  const parent = panes.value.find((p) => p.id === parentPaneId)
+  if (!parent) return
+  const results = evaluateTurnSpawns(requests, {
+    validAgentKeys: agentSpecs.filter((s) => s.agentKey !== 'terminal').map((s) => s.agentKey),
+    isNameTaken: (name) => messaging.paneIdOf(name) !== null,
+    parentDepth: computeSpawnDepth(
+      parentPaneId,
+      (id) => panes.value.find((p) => p.id === id)?.spawnedBy ?? null,
+    ),
+    parentChildCount: panes.value.filter((p) => p.spawnedBy === parentPaneId).length,
+    cliPaneCount: panes.value.filter((p) => p.agentKey !== 'terminal').length,
+  })
+  for (const result of results) {
+    if (!result.ok) {
+      sendSpawnFeedback(parentName, `SPAWN 失敗：${result.reason}`)
+      continue
+    }
+    const ok = await spawnRequestedPane(parent, parentName, result)
+    if (!ok) {
+      sendSpawnFeedback(parentName, `SPAWN 失敗：pane「${result.name}」啟動或任務注入失敗`)
+    }
+  }
+}
+
+/** Spawn + kick off a pane requested by a SPAWN block. Mirrors
+ *  dispatchPlanToPane's create path: the kickoff is injected directly because
+ *  scheduleInjection never injects a roleless manual pane's kickoffPrompt. */
+async function spawnRequestedPane(
+  parent: ActivePane,
+  parentName: string,
+  req: { agentKey: string; name: string; task: string },
+): Promise<boolean> {
+  const paneId = await spawnPane({
+    agentKey: req.agentKey,
+    roleKey: '' as RoleKey,
+    stageId: '' as StageId,
+    customName: req.name,
+    commandOverride: '',
+    workspacePath: parent.workspacePath,
+    origin: 'manual',
+    runGroupId: parent.runGroupId,
+    preferredMessagingName: req.name,
+    spawnedBy: parent.id,
+  })
+  if (!paneId) return false
+  await sendQuiet<ProjectPayload>('manual_pane.spawn', {
+    workspace_path: parent.workspacePath,
+    pane_id: paneId,
+    agent: req.agentKey,
+    role: '',
+    command: '',
+    session_id: panes.value.find((p) => p.id === paneId)?.pinnedSessionId ?? '',
+    session_home_id: panes.value.find((p) => p.id === paneId)?.sessionHomeId ?? '',
+    run_group_id: parent.runGroupId ?? '',
+    output_log_file: panes.value.find((p) => p.id === paneId)?.outputLogFile ?? '',
+  })
+  await sendQuiet('project.rename_pane', {
+    workspace_path: parent.workspacePath,
+    pane_id: paneId,
+    custom_name: req.name,
+  })
+  const pane = panes.value.find((p) => p.id === paneId)
+  if (!pane) return false
+  notifyRestore.toast(
+    i18n.global.t('msg.spawn-toast', { parent: parentName, child: pane.messagingName ?? req.name }),
+  )
+  const bootstrapped = await sendSessionMarkerBootstrap(pane, `[pane ${paneId.slice(0, 8)}]`)
+  if (!bootstrapped) {
+    await dismissStartupDialog(paneId, DISMISS_TIMEOUT_MS)
+    await waitForStartupActivity(paneId)
+  }
+  await waitForQuiet(paneId, 1000, 8000)
+  if (!paneAlive(paneId)) return false
+  return await injectPane(paneId, renderSpawnKickoff(req.task, parentName), 'agent-spawn', true)
 }
 
 function openMessagingPanel(): void {
@@ -2537,6 +2637,9 @@ interface SpawnInternal {
   /** Persisted messaging name carried through a restore so inter-CLI messaging
    *  addresses survive restart. */
   preferredMessagingName?: string
+  /** Parent pane id for an agent-requested spawn (SPAWN block). Runtime-only
+   *  lineage for the spawn-depth/quota gate; never persisted. */
+  spawnedBy?: string
   /** CLI account profile id for an isolated LOGIN pane: the backend spawns the
    *  CLI inside that profile's login home so signing in never touches the live
    *  credentials or running panes. Never persisted — a restored pane respawns
@@ -2690,6 +2793,7 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
     sessionHomeId: sessionHomeId || undefined,
     profileId: opts.profileId || undefined,
     sessionMarker: sessionMarker || undefined,
+    spawnedBy: opts.spawnedBy,
   }
   // If this spawn carries its kickoff directly (fallback path), embed the
   // marker now. Pre-spawned panes get it at activateStage injection time.

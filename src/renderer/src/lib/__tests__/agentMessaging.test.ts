@@ -3,7 +3,11 @@ import {
   MSG_START,
   MSG_END,
   MSG_ENVELOPE_PREFIX,
+  SPAWN_START,
+  SPAWN_END,
   parseMessages,
+  parseSpawns,
+  renderSpawnKickoff,
   sanitizeMessageContent,
   renderEnvelope,
   defaultMessagingName,
@@ -87,6 +91,95 @@ ${MSG_END}`
   })
 })
 
+describe('parseSpawns', () => {
+  it('parses a full block', () => {
+    const text = `前言
+${SPAWN_START}
+agent: claude
+name: worker-2
+task: 跑一次前端測試並回報結果
+${SPAWN_END}
+後記`
+    expect(parseSpawns(text)).toEqual([
+      { agent: 'claude', name: 'worker-2', task: '跑一次前端測試並回報結果' },
+    ])
+  })
+
+  it('keeps everything after task: down to SPAWN-END as a multiline task', () => {
+    const text = `${SPAWN_START}
+agent: codex
+name: builder
+task: 第一步
+第二步
+name: 這行屬於 task，不是欄位
+${SPAWN_END}`
+    expect(parseSpawns(text)).toEqual([
+      { agent: 'codex', name: 'builder', task: '第一步\n第二步\nname: 這行屬於 task，不是欄位' },
+    ])
+  })
+
+  it('returns missing fields as empty strings so failures can be reported', () => {
+    const text = `${SPAWN_START}
+agent: claude
+${SPAWN_END}`
+    expect(parseSpawns(text)).toEqual([{ agent: 'claude', name: '', task: '' }])
+  })
+
+  it('tolerates a missing SPAWN-END (closes at end of text)', () => {
+    const text = `${SPAWN_START}
+agent: claude
+name: w
+task: tail`
+    expect(parseSpawns(text)).toEqual([{ agent: 'claude', name: 'w', task: 'tail' }])
+  })
+
+  it('closes the previous block when a new SPAWN-START appears', () => {
+    const text = `${SPAWN_START}
+agent: claude
+name: a
+task: one
+${SPAWN_START}
+agent: codex
+name: b
+task: two
+${SPAWN_END}`
+    expect(parseSpawns(text)).toEqual([
+      { agent: 'claude', name: 'a', task: 'one' },
+      { agent: 'codex', name: 'b', task: 'two' },
+    ])
+  })
+
+  it('ignores blocks inside fenced code blocks', () => {
+    const text = ['```', SPAWN_START, 'agent: claude', 'name: x', 'task: nope', SPAWN_END, '```'].join('\n')
+    expect(parseSpawns(text)).toEqual([])
+  })
+
+  it('requires markers to be bare lines (no leading whitespace)', () => {
+    const text = `  ${SPAWN_START}
+agent: claude
+name: x
+task: y
+${SPAWN_END}`
+    expect(parseSpawns(text)).toEqual([])
+  })
+
+  it('handles empty input', () => {
+    expect(parseSpawns('')).toEqual([])
+  })
+})
+
+describe('renderSpawnKickoff', () => {
+  it('keeps the task verbatim and appends a one-line MSG report instruction', () => {
+    const kickoff = renderSpawnKickoff('修好登入 bug\n然後跑測試', 'boss-1')
+    expect(kickoff.startsWith('修好登入 bug\n然後跑測試\n\n')).toBe(true)
+    const hint = kickoff.split('\n').at(-1) as string
+    expect(hint).toContain(`${MSG_START} to: boss-1`)
+    expect(hint).toContain(MSG_END)
+    // The instruction must never itself parse as a bare MSG marker line.
+    expect(parseMessages(kickoff)).toEqual([])
+  })
+})
+
 describe('sanitizeMessageContent', () => {
   it('breaks control-marker tokens so they cannot re-trigger parsers', () => {
     const dirty = `before\n---ASK-START---\nquestion\n---ASK-END---\nafter`
@@ -99,6 +192,14 @@ describe('sanitizeMessageContent', () => {
   it('breaks MSG markers embedded mid-line too', () => {
     const clean = sanitizeMessageContent(`quote: ${MSG_START} to: x`)
     expect(clean).not.toContain(MSG_START)
+  })
+
+  it('breaks SPAWN markers so forwarded content cannot trigger a spawn', () => {
+    const dirty = `${SPAWN_START}\nagent: claude\nname: x\ntask: y\n${SPAWN_END}`
+    const clean = sanitizeMessageContent(dirty)
+    expect(clean).not.toContain(SPAWN_START)
+    expect(clean).not.toContain(SPAWN_END)
+    expect(parseSpawns(clean)).toEqual([])
   })
 
   it('leaves normal text untouched', () => {

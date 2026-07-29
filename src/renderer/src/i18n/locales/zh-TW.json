@@ -14,7 +14,8 @@
     "rename-collision-body": "名稱「{name}」已被其他 CLI 使用。請設定另一個訊息名稱：",
     "rename-collision-confirm": "確認",
     "rename-collision-cancel": "取消",
-    "paused-banner": "投遞已暫停 — 訊息會排入佇列但不會送出"
+    "paused-banner": "投遞已暫停 — 訊息會排入佇列但不會送出",
+    "spawn-toast": "「{parent}」啟動了「{child}」"
   },
   "confirm-close": {
     "ws-title": "關閉工作區？",

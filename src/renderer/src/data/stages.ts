@@ -1,7 +1,7 @@
 // Pipeline stage type definitions and utility functions.
 // The actual stage data is loaded dynamically from the backend via useStages().
 
-import { MSG_START, MSG_END, MSG_ENVELOPE_PREFIX } from '../lib/agentMessaging'
+import { MSG_START, MSG_END, MSG_ENVELOPE_PREFIX, SPAWN_START, SPAWN_END } from '../lib/agentMessaging'
 
 export type StageId = string
 export type AgentKey = 'claude' | 'codex' | 'antigravity' | 'grok' | 'kimi' | 'opencode' | 'qwen' | 'kilo' | 'pi' | 'copilot' | 'cursor' | 'aider'
@@ -69,6 +69,22 @@ ${MSG_END}
 
 收到開頭為 ${MSG_ENVELOPE_PREFIX} <名稱> 的輸入時，那是其他 agent 傳來的訊息；需要回覆就用上述 MSG 區塊指名對方。
 沒有溝通需求時不要輸出 MSG 區塊。
+
+`
+
+// Agent-initiated pane spawning — taught alongside the messaging protocol so
+// agents can delegate a task to a fresh CLI pane and get results back via MSG.
+export const SPAWN_PROTOCOL = `[CLI Pane Spawn Protocol]
+你可以請 Navide 開一個新的 CLI pane 並指派任務。輸出：
+${SPAWN_START}
+agent: <agent key，例如 claude、codex>
+name: <新 pane 的名稱，不可與現有名稱重複>
+task: <任務內容；task: 之後到區塊結尾全是任務，可多行>
+${SPAWN_END}
+
+規則：每個 turn 只會處理第一個 SPAWN 區塊；每個 pane 最多啟動 3 個子 pane，工作區 CLI pane 總數上限 8，spawn 鏈深度上限 2。
+新 pane 完成任務後會用 MSG 區塊回報結果給你；spawn 被拒絕時你會收到說明原因的訊息。
+沒有派工需求時不要輸出 SPAWN 區塊。
 
 `
 
@@ -274,5 +290,5 @@ export function renderSlotKickoff(
   } else {
     protocol = INTERACTION_PROTOCOL_AUTO
   }
-  return MESSAGING_PROTOCOL + protocol + body
+  return MESSAGING_PROTOCOL + SPAWN_PROTOCOL + protocol + body
 }
