@@ -1248,27 +1248,6 @@ async def git_push_force(session: "Session", msg_id: str, msg_type: str, payload
         asyncio.create_task(app.broadcast(make_event("git.changed", {"workspace_path": ws_path})))
 
 
-# ── Diagnostics (debug.log) ─────────────────────────────────────────────────
-@handler("debug.log")
-async def debug_log(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
-    # TEMP: append a frontend diagnostic line to a file the dev can read
-    # directly (renderer console logs aren't otherwise reachable). Remove
-    # with the matching frontend diagnostics once resize is confirmed.
-    try:
-        import time as _t
-
-        line = str(payload.get("line", ""))
-
-        def _append_debug_line() -> None:
-            with open("/tmp/agent-team-resize.log", "a") as _f:
-                _f.write(f"{_t.strftime('%H:%M:%S')} {line}\n")
-
-        await asyncio.to_thread(_append_debug_line)
-    except Exception:
-        pass
-    await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
-
-
 # ── Codex home cleanup (codex_home.cleanup) ─────────────────────────────────
 @handler("codex_home.cleanup")
 async def codex_home_cleanup(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:

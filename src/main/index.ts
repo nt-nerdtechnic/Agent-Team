@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, nativeImage, Notification, safeStorage, session, shell } from 'electron'
 import { join, dirname } from 'node:path'
 import { writeFile, readFile, mkdir } from 'node:fs/promises'
-import { appendFileSync, readFileSync, statSync, existsSync, realpathSync } from 'node:fs'
+import { readFileSync, statSync, existsSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { spawn } from 'node:child_process'
 import { startBackend, type BackendHandle } from './backend'
@@ -43,14 +43,6 @@ import {
   type GitAccountCrypto,
   type GitAccountInput
 } from './gitAccountsStore'
-
-// TEMP diagnostics for the Dock-tile badge: file-based so the trail is
-// readable regardless of how the app was launched. Remove once verified.
-function logDockThumb(msg: string): void {
-  const line = `${new Date().toISOString()} ${msg}`
-  console.log(`[dock-thumb] ${line}`)
-  try { appendFileSync(join(tmpdir(), 'agent-team-dock-thumb.log'), line + '\n') } catch { /* diagnostics only */ }
-}
 
 if (process.platform === 'darwin') {
   app.dock.setIcon(nativeImage.createFromPath(join(__dirname, '../../resources/icon.png')))
@@ -1146,8 +1138,7 @@ ipcMain.on('window:setBadgeCount', (event, count: number) => {
   // the system red badge shows on its thumbnail while the window is minimized.
   const win = BrowserWindow.fromWebContents(event.sender)
   if (win && !win.isDestroyed()) {
-    const ok = setWindowDockTileBadge(win, count > 0 ? String(count) : '')
-    logDockThumb(`badge count=${count} minimized=${win.isMinimized()} dockTile=${ok}`)
+    setWindowDockTileBadge(win, count > 0 ? String(count) : '')
   }
 })
 

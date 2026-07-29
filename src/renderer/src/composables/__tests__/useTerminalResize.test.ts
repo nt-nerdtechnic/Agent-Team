@@ -42,7 +42,6 @@ describe('createResizeController — requestResizeRedraw gates', () => {
       shallowRef<HTMLElement | null>(null),
       lastRawActivityAt,
       mock.backend.send,
-      () => {},
       () => false,
       () => {}
     )

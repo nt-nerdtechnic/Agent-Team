@@ -25,7 +25,6 @@ export function createResizeController(
   containerRef: ShallowRef<HTMLElement | null>,
   lastRawActivityAt: Ref<number>,
   send: BackendSend,
-  dbgLog: (line: string) => void,
   getPendingSpawn: () => boolean,
   onCreateWhenMeasurable: () => void,
 ): ResizeController {
@@ -130,12 +129,7 @@ export function createResizeController(
         // drains output around its resize ack, so ordering is preserved server
         // side; the brief client window where xterm is narrower than the PTY is
         // the same tradeoff VSCode's integrated terminal accepts.
-        const cwBefore = el.clientWidth
-        const colsBefore = term.cols
         fit.fit()
-        // TEMP diagnostic (remove once resize is confirmed working): proves the
-        // VSCode-aligned path ran and shows the widths it computed.
-        dbgLog(`resize cw=${cwBefore} cols ${colsBefore}->${term.cols} rows=${term.rows} acked=${_ackedCols}x${_ackedRows}`)
         sendResizeNow()
       } catch { /* ignore transient fit errors during teardown */ }
     }
@@ -185,16 +179,12 @@ export function createResizeController(
       const altBuffer = term.buffer?.active?.type === 'alternate'
       const quiet = altBuffer || Date.now() - lastRawActivityAt.value >= RESIZE_QUIET_MS
       if (!quiet && Date.now() < resizeRedrawDeadline) { armResizeRedraw(); return }
-      const previousRedrawCols = lastRedrawCols
-      const shrank = previousRedrawCols > 0 && term.cols < previousRedrawCols
       lastRedrawCols = term.cols
       // NOTE: we deliberately do NOT term.clear() on a width shrink. Wiping the
       // scrollback drops the user's conversation history (and, on a rebuild/
       // resume, the freshly reprinted transcript). Per user decision
       // (2026-06-23): never clear history — accept any reflow residue, repaint
       // the current frame via the SIGWINCH redraw below instead.
-      // TEMP diagnostic (remove once resize is confirmed working).
-      dbgLog(`redraw fire cols=${term.cols} rows=${term.rows} shrank=${shrank}`)
       void send('terminal.redraw', {
         terminal_session_id: sessionId.value,
         cols: term.cols,

@@ -1230,14 +1230,6 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // width instead of stranding a narrow one in scrollback.
   let pendingReattachRedraw = false
 
-  // TEMP diagnostic sink: route resize/redraw traces to a file the dev can read
-  // directly (/tmp/agent-team-resize.log via the backend), instead of the
-  // renderer console. Remove with the call sites once resize is confirmed.
-  function dbgLog(line: string): void {
-    if (!sessionId.value) return
-    void backend.send('debug.log', { line: `${paneId} ${line}` }).catch(() => {})
-  }
-
   // Declared here (assigned after createWhenMeasurable is defined below) so the
   // reconciler interval and other async closures can reference it safely.
   // eslint-disable-next-line prefer-const
@@ -1773,16 +1765,51 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // resumeKey, the snapshot is replayed into the fresh xterm instance before
   // the new PTY starts writing — giving instant scrollback access to prior work.
   const SCROLL_SNAP_MAX = 256 * 1024  // 256 KB rolling cap
+  const SCROLL_SNAP_MIN = 8 * 1024
   let rawScrollBuffer = ''
   function scrollSnapKey(): string { return `terminal-scroll:${persistKey}` }
   function loadScrollSnapshot(): string {
     try { return localStorage.getItem(scrollSnapKey()) ?? '' } catch { return '' }
   }
-  function saveScrollSnapshot(): void {
+  // localStorage quota is shared across every pane's snapshot, and snapshots
+  // of closed panes linger. On overflow, evict another pane's stale snapshot
+  // and retry — dropping old history beats silently losing the newest.
+  function evictLargestOtherSnapshot(selfKey: string): boolean {
+    let victim = ''
+    let victimLen = -1
     try {
-      if (rawScrollBuffer) localStorage.setItem(scrollSnapKey(), rawScrollBuffer)
-      else localStorage.removeItem(scrollSnapKey())
-    } catch { /* quota exceeded — skip */ }
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i)
+        if (!k || k === selfKey || !k.startsWith('terminal-scroll:')) continue
+        const len = (localStorage.getItem(k) ?? '').length
+        if (len > victimLen) { victim = k; victimLen = len }
+      }
+      if (!victim) return false
+      localStorage.removeItem(victim)
+      return true
+    } catch { return false }
+  }
+  function saveScrollSnapshot(): void {
+    const key = scrollSnapKey()
+    if (!rawScrollBuffer) {
+      try { localStorage.removeItem(key) } catch { /* ignore */ }
+      return
+    }
+    let payload = rawScrollBuffer
+    for (;;) {
+      try {
+        localStorage.setItem(key, payload)
+        return
+      } catch {
+        if (evictLargestOtherSnapshot(key)) continue
+        if (payload.length > SCROLL_SNAP_MIN) {
+          payload = payload.slice(-Math.floor(payload.length / 2))
+          continue
+        }
+        console.warn(`[terminal] scrollback snapshot dropped for ${persistKey}: localStorage quota exhausted`)
+        return
+      }
+    }
   }
   function appendToScrollBuffer(data: string): void {
     rawScrollBuffer += data
@@ -2191,9 +2218,6 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         const duration = typeof probe.duration_ms === 'number' ? `, ${probe.duration_ms}ms` : ''
         term.writeln(`\x1b[2m[startup probe] ${probe.binary_path}${version}${duration}\x1b[0m`)
       }
-      // TEMP diagnostic: marks a fresh pane spawn so we can confirm the new code
-      // is actually loaded (opening a pane writes a line even without resizing).
-      dbgLog(`spawn cols=${term.cols} rows=${term.rows}`)
       resizeCtrl.applyFit()  // sync the real size to the backend on first paint
       // The width measured above can still be a mid-layout snapshot (e.g. this
       // spawn's own pane is still settling into a freshly reflowed grid) that
@@ -2255,7 +2279,6 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     containerRef,
     lastRawActivityAt,
     backend.send,
-    dbgLog,
     () => !!pendingSpawn.value,
     () => { void createWhenMeasurable() },
   )
