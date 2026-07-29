@@ -259,11 +259,14 @@ class OpencodeLogReader(LogReader):
             max_rows = self._query(path, "SELECT COALESCE(MAX(rowid), 0) FROM message")
             max_row_id = int(max_rows[0][0]) if max_rows else last_row_id
             if max_row_id < last_row_id:
-                last_row_id = 0
+                # Watermark dropped (session deleted with ON DELETE CASCADE, or
+                # a Drizzle table rebuild on upgrade): re-anchor, never rescan —
+                # everything at or below the new max was already credited under
+                # the old numbering. Trade-off: a message created between the
+                # drop and this poll goes uncredited (bounded, tiny), which is
+                # strictly preferable to re-crediting the whole history.
+                last_row_id = max_row_id
                 pending = set()
-                rows = self._query(path, _USAGE_SQL.format(where=_where(0, set())))
-                if rows is None:
-                    return IncrementalParseResult([], dict(checkpoint))
 
         out: list[TokenUsage] = []
         next_row_id = last_row_id

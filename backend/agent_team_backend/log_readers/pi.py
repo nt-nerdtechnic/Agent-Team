@@ -282,13 +282,22 @@ class PiLogReader(LogReader):
         Pi files are NOT append-only: version migrations and /tree branch
         operations rewrite the whole file in place, so mtime/size can go
         backwards and the inode can change. read_jsonl_tail detects both
-        (identity/shrink) and resets the offset for a full re-read. Unlike
-        qwen, the recent-id window is KEPT across that reset: the path names
-        one session forever and entry ids are stable across rewrites, so the
-        window is what stops the re-read from double counting."""
+        (identity/shrink) and resets the offset for a full re-read. The
+        recent-id window is KEPT across that reset (the path names one session
+        forever and entry ids are stable across rewrites), but it is bounded
+        and therefore CANNOT stop a re-read of a session with more credited
+        entries than the window holds. The durable `credited_count` is what
+        stops the double counting: on a full re-read the first
+        `credited_count` usage-bearing entries are replayed silently and only
+        what follows them is emitted."""
         records, final_checkpoint, rotated = read_jsonl_tail(path, checkpoint)
         recent = [str(k) for k in checkpoint.get("recent_keys", [])][-_RECENT_KEYS_WINDOW:]
         recent_set = set(recent)
+        prior_credited = max(0, int(checkpoint.get("credited_count") or 0))
+        # A full re-read recounts from zero, suppressing the entries the old
+        # count already covers; the append path just carries the count forward.
+        skip_remaining = prior_credited if rotated else 0
+        credited = 0 if rotated else prior_credited
         header_cached = bool(checkpoint.get("session_id")) and not rotated
         if header_cached:
             session_id = str(checkpoint.get("session_id") or "")
@@ -306,11 +315,23 @@ class PiLogReader(LogReader):
             if usage is None:
                 continue
             dedup_key = str(rec.get("id") or "")
-            if not dedup_key or dedup_key in recent_set:
+            if not dedup_key:
                 continue
             input_tokens, output_tokens = _usage_tokens(usage)
             if input_tokens == 0 and output_tokens == 0:
                 continue
+            # From here the entry qualifies: it is one of the entries the
+            # credited count counts.
+            if skip_remaining > 0:
+                skip_remaining -= 1
+                credited += 1
+                recent.append(dedup_key)
+                recent = recent[-_RECENT_KEYS_WINDOW:]
+                recent_set = set(recent)
+                continue
+            if dedup_key in recent_set:
+                continue
+            credited += 1
             recent.append(dedup_key)
             recent = recent[-_RECENT_KEYS_WINDOW:]
             recent_set = set(recent)
@@ -319,6 +340,7 @@ class PiLogReader(LogReader):
             event_checkpoint["recent_keys"] = list(recent)
             event_checkpoint["session_id"] = session_id
             event_checkpoint["cwd"] = cwd
+            event_checkpoint["credited_count"] = credited
             out.append(TokenUsage(
                 vendor="pi",
                 input_tokens=input_tokens,
@@ -335,6 +357,7 @@ class PiLogReader(LogReader):
         final_checkpoint["recent_keys"] = recent
         final_checkpoint["session_id"] = session_id
         final_checkpoint["cwd"] = cwd
+        final_checkpoint["credited_count"] = credited
         return IncrementalParseResult(out, final_checkpoint)
 
     def parse_activity(

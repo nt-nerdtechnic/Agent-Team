@@ -304,6 +304,35 @@ def test_incremental_parse_rechecks_pending_streaming_rows(
     assert reader.parse_incremental(db, second.checkpoint).events == []
 
 
+def test_incremental_parse_reanchors_when_watermark_drops(
+    data_dir: Path,
+) -> None:
+    """MAX(rowid) below the stored watermark (a session deleted via
+    ON DELETE CASCADE, or a Drizzle table rebuild on upgrade) must re-anchor,
+    never rescan — a rescan re-credits the whole surviving history."""
+    reader = OpencodeLogReader()
+    db = data_dir / "opencode.db"
+    con = _create_db(db)
+    _add_session(con, _SID, "/ws")
+    for n in range(1, 5):
+        _add_message(con, f"msg_a{n}", _SID,
+                     _assistant_data({"input": 10 * n, "output": n}))
+    first = reader.parse_incremental(db, {})
+    assert sum(e.input_tokens for e in first.events) == 100
+    assert first.checkpoint["row_id"] == 4
+
+    con.execute("DELETE FROM message WHERE rowid = 4")
+    con.commit()
+    second = reader.parse_incremental(db, first.checkpoint)
+    assert second.events == []
+    assert second.checkpoint["row_id"] == 3
+
+    _add_message(con, "msg_a5", _SID, _assistant_data({"input": 7, "output": 3}))
+    con.close()
+    third = reader.parse_incremental(db, second.checkpoint)
+    assert [(e.input_tokens, e.output_tokens) for e in third.events] == [(7, 3)]
+
+
 def test_incremental_parse_resets_watermark_for_replaced_db(
     data_dir: Path,
 ) -> None:

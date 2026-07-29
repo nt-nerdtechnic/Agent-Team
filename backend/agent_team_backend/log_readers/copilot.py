@@ -110,12 +110,17 @@ def _metrics_totals(data: dict) -> tuple[int, int] | None:
     metrics = data.get("modelMetrics")
     if isinstance(metrics, dict) and metrics:
         total_in = total_out = 0
+        usable = False
         for per_model in metrics.values():
             usage = per_model.get("usage") if isinstance(per_model, dict) else None
             if isinstance(usage, dict):
+                usable = True
                 total_in += _int(usage.get("inputTokens"))
                 total_out += _int(usage.get("outputTokens"))
-        return total_in, total_out
+        # No per-model entry carried a usage dict — that is "no reading", not
+        # a genuine zero total; fall through to the tokenDetails branch.
+        if usable:
+            return total_in, total_out
     details = data.get("tokenDetails")
     if isinstance(details, dict):
         def bucket(name: str) -> int:
@@ -267,7 +272,8 @@ class CopilotLogReader(LogReader):
 
         Metrics snapshots land only at shutdown/compaction, so most polls
         emit nothing; when one lands, emit its delta against the persisted
-        totals (negative/zero deltas advance the baseline silently).
+        totals, which are a high-water mark: a downward blip emits nothing and
+        leaves the baseline where it was.
         """
         records, next_checkpoint, rotated = read_jsonl_tail(path, checkpoint)
         replaced = bool(
@@ -300,9 +306,14 @@ class CopilotLogReader(LogReader):
             latest_end = end
             model = str(data.get("currentModel") or "") or model
 
+        # High-water mark: a downward blip must not lower the baseline, or the
+        # tokens already credited above it get credited a second time when the
+        # counter climbs back.
+        next_in = max(prev_in, latest_in)
+        next_out = max(prev_out, latest_out)
         next_checkpoint.update({
-            "input_total": latest_in,
-            "output_total": latest_out,
+            "input_total": next_in,
+            "output_total": next_out,
             "cwd": cwd,
             "model": model,
         })
@@ -323,7 +334,7 @@ class CopilotLogReader(LogReader):
             cwd=cwd,
             session_id=session_id,
             file_path=str(path),
-            dedup_key=f"copilot_cumulative::{session_id}::{latest_in}::{latest_out}",
+            dedup_key=f"copilot_cumulative::{session_id}::{next_in}::{next_out}",
             timestamp=str(latest_event.get("timestamp") or ""),
             model=model,
             checkpoint=event_checkpoint,
@@ -357,11 +368,15 @@ class CopilotLogReader(LogReader):
                 key = f"act:{line_no}"
                 if key in seen_keys:
                     continue
-                seen_keys.add(key)
                 try:
                     rec = json.loads(raw)
                 except json.JSONDecodeError:
+                    # Text iteration yields the partial trailing line of a
+                    # file mid-write; leave it unseen so the completed line is
+                    # parsed on a later poll (a permanently malformed line is
+                    # just re-attempted each poll — cheap).
                     continue
+                seen_keys.add(key)
 
                 rtype = str(rec.get("type") or "")
                 data = rec.get("data")

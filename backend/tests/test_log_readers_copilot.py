@@ -14,7 +14,11 @@ import pytest
 
 from agent_team_backend.log_readers.attribution import Attribution
 from agent_team_backend.log_readers.base import TokenUsage
-from agent_team_backend.log_readers.copilot import CopilotLogReader, copilot_root
+from agent_team_backend.log_readers.copilot import (
+    CopilotLogReader,
+    _metrics_totals,
+    copilot_root,
+)
 
 _SID = "e6495800-dfd4-4a75-b2ab-d70980f83b89"
 _CWD = "/Users/me/proj"
@@ -264,6 +268,16 @@ def test_token_details_fallback_without_model_metrics(
     ]
 
 
+def test_usageless_model_buckets_are_not_zero_totals() -> None:
+    """modelMetrics entries carrying no usage dict are not a "totals are zero"
+    reading — fall through to tokenDetails, else report no totals at all."""
+    assert _metrics_totals({"modelMetrics": {"gpt-x": {}}}) is None
+    assert _metrics_totals({
+        "modelMetrics": {"gpt-x": {}},
+        "tokenDetails": _buckets(50, 200, 30, 7),
+    }) == (50 + 200 + 30, 7)
+
+
 def test_malformed_and_metricless_lines_skipped(fake_copilot_root: Path) -> None:
     reader = CopilotLogReader()
     f = _write_session(fake_copilot_root)
@@ -324,6 +338,30 @@ def test_incremental_replacement_resets_baseline(fake_copilot_root: Path) -> Non
     assert [(e.input_tokens, e.output_tokens) for e in parsed2.events] == [(130, 58)]
 
 
+def test_incremental_dip_never_lowers_the_baseline(
+    fake_copilot_root: Path,
+) -> None:
+    """Cumulative snapshots can blip downward; the persisted baseline is a
+    high-water mark, so the dip emits nothing AND the following rise emits
+    only what is genuinely new (total credited == the true total)."""
+    reader = CopilotLogReader()
+    f = _write_session(fake_copilot_root, events=[
+        _shutdown(input=100000, cache_read=0, cache_write=0, output=10000,
+                  eid="ev-s1"),
+    ])
+    p1 = reader.parse_incremental(f, {})
+    _append(f, [_shutdown(input=30000, cache_read=0, cache_write=0,
+                          output=3000, eid="ev-s2")])
+    p2 = reader.parse_incremental(f, p1.checkpoint)
+    _append(f, [_shutdown(input=250000, cache_read=0, cache_write=0,
+                          output=25000, eid="ev-s3")])
+    p3 = reader.parse_incremental(f, p2.checkpoint)
+
+    emitted = p1.events + p2.events + p3.events
+    assert sum(e.input_tokens for e in emitted) == 250000
+    assert sum(e.output_tokens for e in emitted) == 25000
+
+
 # ─────────────────────────── activity ────────────────────────────────────────
 
 def test_parse_activity_messages_tools_and_turn_end(
@@ -375,6 +413,25 @@ def test_turn_text_survives_split_poll_batches(fake_copilot_root: Path) -> None:
     events = reader.parse_activity(f, seen)
     assert [(e.event_type, e.text) for e in events] == [
         ("turn_complete", "answer text"),
+    ]
+
+
+def test_truncated_trailing_line_is_retried_once_complete(
+    fake_copilot_root: Path,
+) -> None:
+    """Text iteration yields a still-being-written trailing line; marking it
+    seen would drop the assistant.turn_end forever and stall /loop."""
+    reader = CopilotLogReader()
+    seen: set[str] = set()
+    f = _write_session(fake_copilot_root, events=[])
+    raw = json.dumps(_event("assistant.turn_end", {"turnId": "0"}, eid="ev-te"))
+    f.write_text(raw[:20], encoding="utf-8")
+    assert reader.parse_activity(f, seen) == []
+
+    f.write_text(raw + "\n", encoding="utf-8")
+    events = reader.parse_activity(f, seen)
+    assert [(e.event_type, e.detail) for e in events] == [
+        ("turn_complete", "turn_end"),
     ]
 
 

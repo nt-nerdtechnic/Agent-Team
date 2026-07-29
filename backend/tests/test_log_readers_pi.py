@@ -319,6 +319,29 @@ def test_incremental_survives_replacement_rewrite(fake_pi_root: Path) -> None:
     ]
 
 
+def test_rewrite_beyond_recent_window_does_not_recredit(
+    fake_pi_root: Path,
+) -> None:
+    """A wholesale rewrite re-reads from offset 0. With more already-credited
+    entries than the recent-id window holds, the window alone cannot stop the
+    re-emit — the durable credited count must."""
+    reader = PiLogReader()
+    f = _session_file(fake_pi_root)
+    entries = [_assistant(f"e{n:07d}", input=10, output=1) for n in range(300)]
+    _write_jsonl(f, [_header(), *entries])
+    parsed1 = reader.parse_incremental(f, {})
+    assert len(parsed1.events) == 300
+
+    tmp = f.with_suffix(".jsonl.tmp")
+    _write_jsonl(tmp, [
+        _header(), *entries, _assistant("newentry", input=33, output=7),
+    ])
+    os.replace(tmp, f)
+    parsed2 = reader.parse_incremental(f, parsed1.checkpoint)
+    assert [(e.dedup_key, e.input_tokens, e.output_tokens)
+            for e in parsed2.events] == [("newentry", 33, 7)]
+
+
 # ─────────────────────────── activity ────────────────────────────────────────
 
 def test_parse_activity_user_and_assistant_only(fake_pi_root: Path) -> None:
