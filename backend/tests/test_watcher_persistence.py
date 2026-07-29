@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from agent_team_backend.log_readers.base import (
+    ActivityEvent,
     IncrementalParseResult,
     LogReader,
     TokenSinkResult,
@@ -234,3 +235,172 @@ async def test_workspace_replay_continues_past_foreign_shared_source_rows(
     assert handled == ["/ws/other", "/ws/target"]
     checkpoint = watcher._local_checkpoint(str(source.resolve()), "/ws/target")
     assert checkpoint["row_id"] == 2
+
+
+@pytest.mark.asyncio
+async def test_only_tokens_wait_for_ingestion_interval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "logs"
+    root.mkdir()
+    source = root / "a.jsonl"
+    source.write_text("")
+
+    class _Observer:
+        def schedule(self, *args, **kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+        def join(self, timeout: float) -> None:
+            pass
+
+    monkeypatch.setattr("agent_team_backend.log_readers.watcher.Observer", _Observer)
+
+    token_events: list[str] = []
+    activity_events: list[str] = []
+    session_events: list[str] = []
+    checkpoints: list[tuple[str | None, int]] = []
+    checkpoint_state: dict[str, dict] = {}
+
+    async def sink(usage: TokenUsage) -> TokenSinkResult:
+        token_events.append(usage.dedup_key)
+        return TokenSinkResult(True, "/x")
+
+    async def activity_sink(event: ActivityEvent) -> None:
+        activity_events.append(event.dedup_key)
+
+    async def session_sink(_vendor: str, path: Path) -> None:
+        session_events.append(str(path))
+
+    class _LiveReader(_StaticReader):
+        def __init__(self, root: Path) -> None:
+            super().__init__(root)
+            self.vendor = "codex"
+
+        def parse_incremental(
+            self, path: Path, checkpoint: dict
+        ) -> IncrementalParseResult:
+            self.call_count += 1
+            offset = int(checkpoint.get("offset") or 0) + 1
+            event = TokenUsage(
+                vendor="codex", input_tokens=10, output_tokens=1, cwd="/x",
+                session_id="s1", file_path=str(path), dedup_key=f"event-{offset}",
+                checkpoint={"kind": "jsonl", "offset": offset, "identity": "1:1"},
+            )
+            return IncrementalParseResult([event], event.checkpoint)
+
+        def parse_activity(
+            self, path: Path, seen_keys: set[str]
+        ) -> list[ActivityEvent]:
+            key = f"activity-{self.call_count}"
+            return [ActivityEvent(
+                vendor="codex", event_type="agent_active", cwd="/x",
+                session_id="s1", file_path=str(path), dedup_key=key,
+            )]
+
+    def checkpoint_sink(_path: str, checkpoint: dict, workspace: str | None) -> None:
+        checkpoint_state[workspace or ""] = dict(checkpoint)
+        checkpoints.append((workspace, int(checkpoint["offset"])))
+
+    def checkpoint_provider(_path: str, workspace: str | None) -> dict:
+        return dict(checkpoint_state.get(workspace or "", {}))
+
+    reader = _LiveReader(root)
+    watcher = LogWatcher(
+        sink=sink,
+        activity_sink=activity_sink,
+        session_sink=session_sink,
+        rescan_interval_s=60,
+        token_interval_s=60,
+        checkpoint_provider=checkpoint_provider,
+        checkpoint_sink=checkpoint_sink,
+    )
+    watcher.add_reader(reader)
+    watcher.start()
+    try:
+        for _ in range(500):
+            if token_events == ["event-1"]:
+                break
+            await asyncio.sleep(0.002)
+        assert token_events == ["event-1"]  # startup token catch-up is immediate
+
+        assert watcher._handler is not None
+        watcher._handler._on_path(source)
+        watcher._handler._on_path(source)
+        for _ in range(500):
+            if len(session_events) == 3 and len(activity_events) == 3:
+                break
+            await asyncio.sleep(0.002)
+        assert reader.call_count == 1
+        assert len(session_events) == 3
+        assert len(activity_events) == 3
+        assert token_events == ["event-1"]
+        assert checkpoints == [(None, 1), ("/x", 1)]
+
+        await watcher._flush_pending_tokens()
+        assert token_events == ["event-1", "event-2"]
+        assert checkpoints == [
+            (None, 1), ("/x", 1),
+            (None, 2), ("/x", 2),
+        ]
+    finally:
+        watcher.stop()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_before_token_window_replays_on_next_start(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "logs"
+    root.mkdir()
+    first = root / "a.jsonl"
+    first.write_text("")
+    received: list[str] = []
+
+    async def sink(usage: TokenUsage) -> TokenSinkResult:
+        received.append(Path(usage.file_path).name)
+        return TokenSinkResult(True, "/x")
+
+    store1 = _checkpoint_store(tmp_path)
+    watcher1 = _watcher(
+        store1, sink, rescan_interval_s=60, token_interval_s=60
+    )
+    watcher1.add_reader(_StaticReader(root))
+    watcher1.start()
+    for _ in range(500):
+        if received == ["a.jsonl"]:
+            break
+        await asyncio.sleep(0.002)
+    assert received == ["a.jsonl"]
+
+    second = root / "b.jsonl"
+    second.write_text("")
+    await watcher1._queue.put((second, ""))
+    for _ in range(500):
+        if (str(second.resolve()), "") in watcher1._pending_token_paths:
+            break
+        await asyncio.sleep(0.002)
+    assert received == ["a.jsonl"]
+    watcher1.stop()
+    store1.flush()
+
+    store2 = _checkpoint_store(tmp_path)
+    watcher2 = _watcher(
+        store2, sink, rescan_interval_s=60, token_interval_s=60
+    )
+    watcher2.add_reader(_StaticReader(root))
+    watcher2.start()
+    try:
+        for _ in range(500):
+            if received == ["a.jsonl", "b.jsonl"]:
+                break
+            await asyncio.sleep(0.002)
+        assert received == ["a.jsonl", "b.jsonl"]
+    finally:
+        watcher2.stop()
+        store2.flush()

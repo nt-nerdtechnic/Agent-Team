@@ -9,9 +9,10 @@ Architecture:
 
     LogWatcher.start()
         ├─ observer (watchdog Observer) — async file events → enqueue(path)
-        ├─ rescan loop (asyncio) — every N s → enqueue all session files
-        └─ drain loop (asyncio) — pop queue → reader.parse_incremental()
-                                            → emit each TokenUsage to sink
+        ├─ drain loop (asyncio) — immediate session/activity processing
+        ├─ rescan loop (asyncio) — every N s → enqueue changed session files
+        └─ token loop (asyncio) — every 300s → parse coalesced paths
+                                             → emit TokenUsage to sink
 
 The sink callback runs on the asyncio loop. It MUST be fast (just enqueue
 to tokens_store + broadcast); long work blocks the drain.
@@ -75,8 +76,8 @@ class _Handler(FileSystemEventHandler):
 class LogWatcher:
     """Orchestrates one Observer + multiple LogReaders.
 
-    Lifecycle: `start()` spawns the watchdog observer + an asyncio drain
-    task. `stop()` shuts both down cleanly. Safe to call start() twice
+    Lifecycle: `start()` spawns the watchdog observer + asyncio worker
+    tasks. `stop()` shuts them down cleanly. Safe to call start() twice
     (subsequent calls are no-ops).
     """
 
@@ -87,6 +88,7 @@ class LogWatcher:
         activity_sink: ActivitySink | None = None,
         session_sink: SessionSink | None = None,
         rescan_interval_s: float = 30.0,
+        token_interval_s: float = 300.0,
         seen_path: Path | None = None,
         save_interval_s: float = 10.0,
         workspace_provider: Callable[[], list[str]] | None = None,
@@ -108,6 +110,7 @@ class LogWatcher:
         self._activity_sink = activity_sink
         self._session_sink = session_sink
         self._rescan_interval_s = rescan_interval_s
+        self._token_interval_s = token_interval_s
         # seen_path/save_interval_s remain accepted for compatibility with
         # third-party callers; token persistence now belongs to the unified
         # checkpoint store supplied below.
@@ -122,11 +125,16 @@ class LogWatcher:
         # newly-started watcher anyway.
         self._activity_seen: dict[str, set[str]] = {}
         self._scan_mtimes: dict[str, float] = {}
-        self._queue: asyncio.Queue[tuple[Path, str]] = asyncio.Queue()
+        self._queue: asyncio.Queue[tuple[Path | None, str]] = asyncio.Queue()
+        self._pending_token_paths: dict[tuple[str, str], Path] = {}
+        self._pending_token_backfills: dict[tuple[str, str], int] = {}
+        self._token_flush_lock = asyncio.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._observer: Observer | None = None
         self._drain_task: asyncio.Task[None] | None = None
         self._rescan_task: asyncio.Task[None] | None = None
+        self._token_task: asyncio.Task[None] | None = None
+        self._startup_token_task: asyncio.Task[None] | None = None
         self._watched_dirs: set[Path] = set()
         self._handler: _Handler | None = None
         self._started = False
@@ -183,9 +191,11 @@ class LogWatcher:
         self._observer.start()
         self._drain_task = asyncio.create_task(self._drain_loop(), name="logwatcher.drain")
         self._rescan_task = asyncio.create_task(self._rescan_loop(), name="logwatcher.rescan")
+        self._token_task = asyncio.create_task(self._token_loop(), name="logwatcher.tokens")
         log.info(
-            "LogWatcher started · %d reader(s) · %d dir(s) · rescan %.0fs",
-            len(self._readers), len(self._watched_dirs), self._rescan_interval_s,
+            "LogWatcher started · %d reader(s) · %d dir(s) · rescan %.0fs · tokens %.0fs",
+            len(self._readers), len(self._watched_dirs),
+            self._rescan_interval_s, self._token_interval_s,
         )
 
     def watch_dir(self, directory: Path) -> bool:
@@ -219,7 +229,12 @@ class LogWatcher:
         if not self._started:
             return
         self._started = False
-        for t in (self._drain_task, self._rescan_task):
+        for t in (
+            self._drain_task,
+            self._rescan_task,
+            self._token_task,
+            self._startup_token_task,
+        ):
             if t:
                 t.cancel()
         if self._observer:
@@ -232,25 +247,68 @@ class LogWatcher:
 
     # ───────────────────────── workers ────────────────────────────────────
 
+    def _queue_token_path(self, path: Path, replay_workspace: str = "") -> None:
+        """Coalesce one path for the next token-ingestion pass."""
+        try:
+            path_key = str(path.resolve())
+        except OSError:
+            path_key = str(path)
+        key = (path_key, replay_workspace)
+        self._pending_token_paths[key] = path
+        if replay_workspace:
+            self._pending_token_backfills[key] = (
+                self._pending_token_backfills.get(key, 0) + 1
+            )
+
     async def _drain_loop(self) -> None:
-        """Pop file paths, route to the right reader, emit events."""
+        """Process session/activity immediately and defer only token ingestion."""
         while True:
             try:
                 path, replay_workspace = await self._queue.get()
             except asyncio.CancelledError:
                 return
+            if path is None:
+                self._startup_token_task = asyncio.create_task(
+                    self._flush_pending_tokens(), name="logwatcher.tokens.startup"
+                )
+                continue
             try:
-                await self._process_path(path, replay_workspace)
+                await self._process_realtime_path(path)
             except Exception as err:  # noqa: BLE001
-                log.warning("processing %s failed: %s", path, err)
+                log.warning("processing realtime signals from %s failed: %s", path, err)
             finally:
-                # Decrement here (not inside _process_path) so EVERY dequeued
-                # backfill file counts down exactly once — even when processing
-                # early-returns (zero-token event, missing file, parse error).
-                # Otherwise the remaining count never hits 0 and the "tidying"
-                # indicator sticks on forever.
-                if replay_workspace:
-                    self._emit_backfill(replay_workspace, -1)
+                # Token retry/progress is independent of session/activity
+                # parsing. Even an unclaimed replay path must reach the token
+                # pass so its backfill count can complete.
+                self._queue_token_path(path, replay_workspace)
+
+    async def _token_loop(self) -> None:
+        """Commit coalesced token paths at most once per configured interval."""
+        while True:
+            try:
+                await asyncio.sleep(self._token_interval_s)
+            except asyncio.CancelledError:
+                return
+            await self._flush_pending_tokens()
+
+    async def _flush_pending_tokens(self) -> None:
+        async with self._token_flush_lock:
+            pending, self._pending_token_paths = self._pending_token_paths, {}
+            backfills, self._pending_token_backfills = self._pending_token_backfills, {}
+            for key, path in pending.items():
+                replay_workspace = key[1]
+                try:
+                    handled = await self._process_token_path(path, replay_workspace)
+                    if not handled:
+                        self._pending_token_paths.setdefault(key, path)
+                except Exception as err:  # noqa: BLE001
+                    self._pending_token_paths.setdefault(key, path)
+                    log.warning("processing tokens from %s failed: %s", path, err)
+                finally:
+                    if replay_workspace:
+                        self._emit_backfill(
+                            replay_workspace, -backfills.get(key, 0)
+                        )
 
     def _emit_backfill(self, workspace_path: str, delta: int) -> None:
         """Adjust a workspace's remaining backfill count and notify the UI.
@@ -374,27 +432,34 @@ class LogWatcher:
         return out
 
     async def _rescan_loop(self) -> None:
-        """Periodically re-enqueue session files for opened workspaces.
-
-        Catches watchdog misses (e.g. on network FS where INotify isn't
-        delivered) and brand-new files since startup. Scope comes from
-        _files_to_scan() so this never walks the whole CLI history.
-        """
-        # First scan happens immediately (initial backfill).
-        delay = 0.5
+        """Enqueue changed files immediately at startup, then every rescan."""
+        first_scan = True
+        delay = 0.0
         while True:
             try:
                 await asyncio.sleep(delay)
             except asyncio.CancelledError:
                 return
-            for p in self._files_to_scan():
-                self._queue.put_nowait((p, ""))
+            for path in self._files_to_scan():
+                self._queue.put_nowait((path, ""))
+            if first_scan:
+                # The drain processes all startup paths before this marker, so
+                # historic token usage catches up immediately and atomically
+                # through the existing sink/checkpoint path.
+                self._queue.put_nowait((None, ""))
+                first_scan = False
             delay = self._rescan_interval_s
 
     async def _process_path(self, path: Path, replay_workspace: str = "") -> None:
+        """Compatibility helper: process every concern immediately."""
+        await self._process_realtime_path(path)
+        await self._process_token_path(path, replay_workspace)
+
+    async def _process_realtime_path(self, path: Path) -> bool:
+        """Capture session identity and activity without token batching delay."""
         reader = self._reader_for(path)
         if reader is None:
-            return
+            return False
         # Session-id capture for resume (Codex/Antigravity). Runs
         # independent of token parsing so it works even for session-file formats
         # the token reader doesn't (yet) understand — it only needs the file to
@@ -405,14 +470,43 @@ class LogWatcher:
             except Exception as err:  # noqa: BLE001
                 log.warning("session sink raised: %s", err)
         key = str(path.resolve())
+
+        # Activity parsing stays realtime even though token accounting is
+        # intentionally delayed.
+        if self._activity_sink is not None:
+            act_seen = self._activity_seen.setdefault(key, set())
+            try:
+                activity_events = await asyncio.to_thread(
+                    reader.parse_activity, path, act_seen
+                )
+            except FileNotFoundError:
+                return False
+            except Exception as err:  # noqa: BLE001
+                log.warning("parse_activity %s (%s) failed: %s", path, reader.vendor, err)
+                return False
+            for aev in activity_events:
+                try:
+                    await self._activity_sink(aev)
+                except Exception as err:  # noqa: BLE001
+                    log.warning("activity sink raised: %s", err)
+        return True
+
+    async def _process_token_path(
+        self, path: Path, replay_workspace: str = ""
+    ) -> bool:
+        """Parse and commit token usage plus its durable checkpoint."""
+        reader = self._reader_for(path)
+        if reader is None:
+            return True
+        key = str(path.resolve())
         checkpoint = self._checkpoint_provider(key, replay_workspace or None)
         try:
             parsed = await asyncio.to_thread(reader.parse_incremental, path, checkpoint)
         except FileNotFoundError:
-            return
+            return True
         except Exception as err:  # noqa: BLE001
             log.warning("parse %s (%s) failed: %s", path, reader.vendor, err)
-            return
+            return False
         handled_workspaces: set[str] = set()
         for ev in parsed.events:
             try:
@@ -421,41 +515,24 @@ class LogWatcher:
                 )
             except Exception as err:  # noqa: BLE001
                 log.warning("token sink raised: %s", err)
-                return
+                return False
             if isinstance(result, TokenSinkResult):
                 if not result.handled:
-                    return
+                    return False
                 if result.workspace_path:
                     handled_workspaces.add(result.workspace_path)
 
         if replay_workspace:
             self._checkpoint_sink(key, parsed.checkpoint, replay_workspace)
             # Yield so a big history backfill doesn't starve startup spawns /
-            # live events queued behind it on the loop. (The remaining-count
-            # decrement happens in _drain_loop's finally, once per dequeued file.)
+            # live events queued behind it on the loop. Backfill progress is
+            # decremented by _flush_pending_tokens after this pass finishes.
             await asyncio.sleep(0)
         else:
             self._checkpoint_sink(key, parsed.checkpoint, None)
             for workspace_path in handled_workspaces:
                 self._checkpoint_sink(key, parsed.checkpoint, workspace_path)
-
-        # Activity parsing runs on the same file but with its own dedup set.
-        if self._activity_sink is not None:
-            act_seen = self._activity_seen.setdefault(key, set())
-            try:
-                activity_events = await asyncio.to_thread(
-                    reader.parse_activity, path, act_seen
-                )
-            except FileNotFoundError:
-                return
-            except Exception as err:  # noqa: BLE001
-                log.warning("parse_activity %s (%s) failed: %s", path, reader.vendor, err)
-                return
-            for aev in activity_events:
-                try:
-                    await self._activity_sink(aev)
-                except Exception as err:  # noqa: BLE001
-                    log.warning("activity sink raised: %s", err)
+        return True
 
     def _reader_for(self, path: Path) -> LogReader | None:
         try:

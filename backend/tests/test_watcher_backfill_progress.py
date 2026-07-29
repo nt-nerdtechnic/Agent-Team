@@ -79,6 +79,7 @@ async def test_drain_counts_down_even_when_processing_early_returns(tmp_path: Pa
     watcher._emit_backfill("/ws", 2)  # force_rescan announced 2 files
     await watcher._queue.put((tmp_path / "a.jsonl", "/ws"))
     await watcher._queue.put((tmp_path / "b.jsonl", "/ws"))
+    await watcher._queue.put((None, ""))  # startup token pass
     drain = asyncio.create_task(watcher._drain_loop())
     for _ in range(200):
         await asyncio.sleep(0)
