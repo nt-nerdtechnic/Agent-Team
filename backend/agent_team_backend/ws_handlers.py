@@ -1281,7 +1281,9 @@ def _profile_identities() -> dict:
             p["id"] for p in doc["profiles"] if p.get("agentKey") == agent_key
         ]
         out[agent_key] = {
-            sid: app.credential_vault.identity(agent_key, None if sid == active else sid)
+            sid: app.credential_vault.identity(
+                agent_key, None if sid == active else sid, active_slot_id=active
+            )
             for sid in slot_ids
         }
     return out

@@ -524,26 +524,52 @@ class CredentialVault:
         """The slot's display-only account info (claude's ``oauthAccount``)."""
         return self.read_slot(agent_key, slot_id).account
 
-    def identity(self, agent_key: str, slot_id: str | None = None) -> dict:
+    def identity(
+        self,
+        agent_key: str,
+        slot_id: str | None = None,
+        *,
+        active_slot_id: str = DEFAULT_SLOT_ID,
+    ) -> dict:
         """Display-only identity for one account slot (``slot_id=None`` = the
         live state, i.e. the currently active account). ``signedIn`` reflects
         whether an actual credential secret exists; claude's ``oauthAccount``
         email is display-only (a long-lived-token login carries no
-        oauthAccount but is still signed in). Reads files — plus, for claude
-        on macOS, the Keychain — so call off the event loop.
+        oauthAccount but is still signed in). ``active_slot_id`` names which
+        slot the live state belongs to: a managed claude profile keeps its
+        secret in its own profile home rather than the live location, so the
+        active row cannot be read from live alone. Reads files — plus, for
+        claude on macOS, the Keychain — so call off the event loop.
         Returns ``{"email": str | None, "signedIn": bool}``; never raises."""
         try:
             if agent_key == "claude":
-                creds = (
-                    self.read_live("claude") if slot_id is None
-                    else self.read_slot("claude", slot_id)
+                active = slot_id is None
+                resolved = active_slot_id if active else slot_id
+                # The email is display-only: the active row takes it from the
+                # live ~/.claude.json, a parked row from its slot snapshot.
+                base = (
+                    self.read_live("claude") if active
+                    else self.read_slot("claude", resolved)
                 )
+                if resolved == DEFAULT_SLOT_ID:
+                    secret = base.secret
+                else:
+                    # A managed profile keeps its token in its own home, and the
+                    # live location belongs to the default account, so a profile
+                    # row must never read it (see _live_owns_slot_secret). The
+                    # slot holds the backup snapshot when no pane has run yet.
+                    secret = self._claude_profile_home_secret(resolved)
+                    if secret is None:
+                        snapshot = (
+                            self.read_slot("claude", resolved) if active else base
+                        )
+                        secret = snapshot.secret
                 email = (
-                    creds.account.get("emailAddress")
-                    if isinstance(creds.account, dict) else None
+                    base.account.get("emailAddress")
+                    if isinstance(base.account, dict) else None
                 )
                 email = email if isinstance(email, str) and email else None
-                return {"email": email, "signedIn": creds.secret is not None}
+                return {"email": email, "signedIn": secret is not None}
             if slot_id is None:
                 secret = _read_text(self._live_file(agent_key))
             else:

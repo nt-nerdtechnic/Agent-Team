@@ -1021,6 +1021,32 @@ def test_identity_claude_live_and_slot(tmp_path: Path) -> None:
     assert vault.identity("claude", "missing") == {"email": None, "signedIn": False}
 
 
+def test_identity_active_managed_profile_reads_its_own_home(tmp_path: Path) -> None:
+    """The active row asks for the live location, but a managed claude profile
+    keeps its token in its own profile home — the live copy belongs to the
+    default account. Reading live for an active managed profile reports the
+    wrong account's login state in both directions."""
+    vault = _file_vault(tmp_path)
+    _write(tmp_path / "home" / ".claude.json",
+           '{"oauthAccount": {"emailAddress": "acct1@x.com"}}')
+
+    # Signed in through its own home, while the live location has nothing.
+    _write(vault.profile_home_path("claude", "acct1") / ".credentials.json", "TOKEN")
+    assert vault.identity("claude", None, active_slot_id="acct1") == {
+        "email": "acct1@x.com", "signedIn": True
+    }
+
+    # The reverse: a live secret belongs to __default__, not to this profile.
+    vault.profile_home_path("claude", "acct2").mkdir(parents=True, exist_ok=True)
+    _write(tmp_path / "home" / ".claude" / ".credentials.json", '{"tok": 1}')
+    assert vault.identity("claude", None, active_slot_id="acct2") == {
+        "email": "acct1@x.com", "signedIn": False
+    }
+
+    # The reserved default slot does own the live location.
+    assert vault.identity("claude") == {"email": "acct1@x.com", "signedIn": True}
+
+
 def test_mac_identity_claude_signed_in_reflects_secret(tmp_path: Path) -> None:
     """signedIn comes from the actual credential secret (Keychain item);
     the oauthAccount email is display-only. A long-lived-token login carries

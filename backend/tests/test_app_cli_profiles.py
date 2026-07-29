@@ -142,7 +142,13 @@ class FakeVault:
             raise RuntimeError("cleanup boom")
         self.slot_secrets_deleted.append((agent_key, slot_id))
 
-    def identity(self, agent_key: str, slot_id: str | None = None) -> dict[str, Any]:
+    def identity(
+        self,
+        agent_key: str,
+        slot_id: str | None = None,
+        *,
+        active_slot_id: str = "__default__",
+    ) -> dict[str, Any]:
         return {"email": None, "signedIn": False}
 
 
@@ -272,13 +278,20 @@ async def test_cli_profiles_create_and_list(
 
 
 async def test_cli_profiles_list_includes_identities(
-    store: CliProfilesStore, events: list[dict[str, Any]], tmp_path: Path
+    store: CliProfilesStore,
+    events: list[dict[str, Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The list payload carries per-slot display identities; the ACTIVE slot's
-    identity is read from the live credential state, inactive slots from their
-    slot storage. (conftest roots the vault's real home at tmp_path.)"""
+    """The list payload carries per-slot display identities. The email always
+    comes from the live ~/.claude.json, but a managed claude profile's secret
+    lives in its own profile home — the live credential belongs to the built-in
+    Default. (conftest roots the vault's real home at tmp_path.)"""
     import json
 
+    # File mode: a profile home's secret is only read from disk off macOS (on
+    # macOS claude keeps it in the Keychain, covered in test_credential_vault).
+    monkeypatch.setattr(app.credential_vault, "_platform", "linux")
     home = tmp_path / "vault-home"
     home.mkdir(parents=True, exist_ok=True)
     (home / ".claude.json").write_text(
@@ -291,6 +304,10 @@ async def test_cli_profiles_list_includes_identities(
     (home / ".claude" / ".credentials.json").write_text('{"tok": 1}', encoding="utf-8")
     profile = store.create(agent_key="claude", name="Work")
     store.set_default("claude", profile["id"])
+    # The active managed profile is signed in through its own home, not live.
+    profile_home = app.credential_vault.profile_home_path("claude", profile["id"])
+    profile_home.mkdir(parents=True, exist_ok=True)
+    (profile_home / ".credentials.json").write_text('{"tok": 2}', encoding="utf-8")
     session = _session()
 
     await app.handle_message(session, {
@@ -298,7 +315,7 @@ async def test_cli_profiles_list_includes_identities(
     })
 
     identities = session.websocket.sent[0]["payload"]["identities"]  # type: ignore[attr-defined]
-    # The managed profile is active -> it owns the live login.
+    # Active managed profile: secret from its own home, email from live.
     assert identities["claude"][profile["id"]] == {
         "email": "live@example.com", "signedIn": True,
     }
