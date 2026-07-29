@@ -29,6 +29,7 @@ from pathlib import Path
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
+from .aider import is_history_name as is_aider_history_name
 from .base import ActivityEvent, LogReader, TokenSinkResult, TokenUsage
 
 log = logging.getLogger("agent_team_backend.log_readers.watcher")
@@ -56,11 +57,11 @@ class _Handler(FileSystemEventHandler):
         if s.endswith(".db-wal"):
             self._on_path(Path(s[: -len("-wal")]))
             return
-        # Aider's per-project history file is Markdown; only this exact
-        # filename is accepted so ordinary workspace .md edits can never
-        # flood the queue (aider is otherwise driven by the rescan loop —
-        # workspace roots get no watchdog subscription).
-        if s.endswith("/.aider.chat.history.md"):
+        # Aider's history files (shared + per-pane) are Markdown; only those
+        # exact filenames are accepted so ordinary workspace .md edits can
+        # never flood the queue (aider is otherwise driven by the rescan loop
+        # — workspace roots get no watchdog subscription).
+        if "/.aider.chat.history." in s and is_aider_history_name(s.rsplit("/", 1)[-1]):
             self._on_path(Path(s))
             return
         # .db = Antigravity conversations / Grok's grok.db / OpenCode's

@@ -4,16 +4,22 @@ Aider is the only Markdown-format vendor here, and it has NO session-id
 concept — this is a deliberately partial integration (marker binding + token
 display work; resume is lossy):
 
-  - History is ONE per-project Markdown file, default
-    `<git-root>/.aider.chat.history.md` (the cwd itself when there is no git
-    root). Every session APPENDS to the same file; each append is an
-    open-write-close, so content lands on disk immediately.
+  - History is a Markdown file at the git root above the pane cwd (the cwd
+    itself when there is no git root). Navide spawns each pane with its OWN
+    file there, `.aider.chat.history.<pane-token>.md` (pane-token = the first
+    8 chars of the pane UUID), via `--chat-history-file`; aider's own default,
+    the per-project shared `.aider.chat.history.md`, is still read for panes
+    started before that and for aider runs outside Navide. Every session
+    APPENDS to its file; each append is an open-write-close, so content lands
+    on disk immediately.
   - A session's boundary is the line aider writes at startup:
         `# aider chat started at YYYY-MM-DD HH:MM:SS`
     This reader defines a session as "the last such section of a history
-    file" and coins the session id from the header timestamp
-    (`aider-YYYYMMDD-HHMMSS`). Same-second collisions are tolerated — the
-    last section wins the id.
+    file" and coins the session id from the header timestamp plus a
+    per-FILE namespace (`aider-<ns>-YYYYMMDD-HHMMSS`; ns = the pane token, or
+    a hash of the file path for the shared file) — without it two panes
+    starting in the same second collide on one id. Same-second collisions
+    WITHIN one file are still tolerated — the last section wins the id.
   - User input is written verbatim with a `#### ` prefix (multi-line input
     continues as `  \\n#### ...`), so the pane kickoff's `at-pane:<paneId>`
     marker is searchable. Markers are honoured ONLY in the file's last
@@ -37,6 +43,7 @@ arrive with up-to-rescan-interval latency.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from pathlib import Path
@@ -47,6 +54,13 @@ from .base import ActivityEvent, IncrementalParseResult, LogReader, TokenUsage
 log = logging.getLogger("agent_team_backend.log_readers.aider")
 
 HISTORY_NAME = ".aider.chat.history.md"
+
+# Per-pane history file (`aider --chat-history-file`): the legacy name with the
+# pane token spliced in. Anchored to exactly 8 lowercase hex chars so aider's
+# sibling dotfiles (.aider.input.history, .aider.llm.history, .aider.tags.cache*)
+# and user backups (.aider.chat.history.md.bak) are never mistaken for one.
+_PANE_FILE_RE = re.compile(r"^\.aider\.chat\.history\.([0-9a-f]{8})\.md$")
+_PANE_TOKEN_RE = re.compile(r"^[0-9a-f]{8}$")
 
 _SECTION_RE = re.compile(
     r"^# aider chat started at (\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})"
@@ -71,21 +85,61 @@ _TEXT_PREFIX = "aider_text::"
 _PENDING_TEXT_MAX_CHARS = 32_000
 
 
-def aider_history_path(cwd: str) -> Path:
-    """`<git-root>/.aider.chat.history.md` for `cwd` (cwd itself when no git
-    root exists above it) — mirrors where aider itself puts the file."""
+def _history_dir(cwd: str) -> Path:
+    """The git root above `cwd` (the cwd itself when there is none) — where
+    aider puts its history file, per-pane or shared."""
     base = Path(cwd)
     for candidate in (base, *base.parents):
         try:
             if (candidate / ".git").exists():
-                return candidate / HISTORY_NAME
+                return candidate
         except OSError:
             break
-    return base / HISTORY_NAME
+    return base
 
 
-def _slug(m: re.Match[str]) -> str:
-    return f"aider-{m[1]}{m[2]}{m[3]}-{m[4]}{m[5]}{m[6]}"
+def aider_history_path(cwd: str) -> Path:
+    """`<git-root>/.aider.chat.history.md` for `cwd` (cwd itself when no git
+    root exists above it) — mirrors where aider itself puts the file."""
+    return _history_dir(cwd) / HISTORY_NAME
+
+
+def pane_history_name(pane_id: str) -> str:
+    """`.aider.chat.history.<pane-token>.md` — the per-pane history file name
+    for `pane_id` (first 8 chars of the pane UUID, lowercased). '' when the
+    pane id has no usable token (not a UUID), i.e. no per-pane file exists."""
+    token = pane_id.strip()[:8].lower()
+    return f".aider.chat.history.{token}.md" if _PANE_TOKEN_RE.match(token) else ""
+
+
+def aider_pane_history_path(cwd: str, pane_id: str) -> Path | None:
+    """The pane's OWN history file next to where the shared one would live.
+    None when `pane_id` yields no token (pane predates per-pane files)."""
+    name = pane_history_name(pane_id)
+    return (_history_dir(cwd) / name) if name else None
+
+
+def history_namespace(path: Path) -> str:
+    """Namespace that makes a session slug unique per history FILE: the pane
+    token when the name carries one, else a hash of the file's own path (two
+    panes in different workspaces can start in the same second)."""
+    m = _PANE_FILE_RE.match(path.name)
+    if m:
+        return m[1]
+    try:
+        resolved = str(path.resolve())
+    except OSError:
+        resolved = str(path)
+    return hashlib.md5(resolved.encode("utf-8")).hexdigest()[:8]
+
+
+def is_history_name(name: str) -> bool:
+    """True for the legacy shared history file and every per-pane one."""
+    return name == HISTORY_NAME or _PANE_FILE_RE.match(name) is not None
+
+
+def _slug(m: re.Match[str], ns: str) -> str:
+    return f"aider-{ns}-{m[1]}{m[2]}{m[3]}-{m[4]}{m[5]}{m[6]}"
 
 
 def _iso(m: re.Match[str]) -> str:
@@ -177,20 +231,28 @@ class AiderLogReader(LogReader):
         return []
 
     def session_files_for_workspace(self, workspace_path: str) -> list[Path]:
-        """The workspace's single history file (empty when absent). Never
-        returns None: an aider scan can't be widened beyond the workspace."""
+        """The workspace's history files — the legacy shared one plus every
+        per-pane one (empty when none exist). Never returns None: an aider
+        scan can't be widened beyond the workspace."""
         if not workspace_path:
             return []
-        p = aider_history_path(workspace_path)
+        legacy = aider_history_path(workspace_path)
+        out: list[Path] = []
         try:
-            return [p] if p.is_file() else []
+            if legacy.is_file():
+                out.append(legacy)
+            for p in sorted(legacy.parent.glob(".aider.chat.history.*.md")):
+                if _PANE_FILE_RE.match(p.name) and p.is_file():
+                    out.append(p)
         except OSError:
-            return []
+            pass
+        return out
 
     def claims_path(self, path: Path) -> bool:
-        """Own every `.aider.chat.history.md`, wherever it lives — the file
-        sits inside arbitrary workspaces, outside any fixed root."""
-        return path.name == HISTORY_NAME
+        """Own every `.aider.chat.history.md` and `.aider.chat.history.
+        <pane-token>.md`, wherever they live — the files sit inside arbitrary
+        workspaces, outside any fixed root."""
+        return is_history_name(path.name)
 
     def cwd_from_file(self, path: Path) -> str:
         """The history file sits at the session's git root (aider's cwd)."""
@@ -198,8 +260,8 @@ class AiderLogReader(LogReader):
 
     def session_id_from_path(self, path: Path) -> str:
         """The LAST section's started-at slug — the only 'current session'
-        a shared append-only history file can name. '' for other files."""
-        if path.name != HISTORY_NAME:
+        an append-only history file can name. '' for other files."""
+        if not is_history_name(path.name):
             return ""
         return self.last_section(path)[0]
 
@@ -239,7 +301,7 @@ class AiderLogReader(LogReader):
         else:
             return "", ""
         m = _SECTION_RE.match(section)
-        return (_slug(m) if m else ""), section
+        return (_slug(m, history_namespace(path)) if m else ""), section
 
     # ── token events ────────────────────────────────────────────────────────
 
@@ -248,6 +310,7 @@ class AiderLogReader(LogReader):
     ) -> list[TokenUsage]:
         out: list[TokenUsage] = []
         cwd = self.cwd_from_file(path)
+        ns = history_namespace(path)
         section = ""
         section_ts = ""
         try:
@@ -261,7 +324,7 @@ class AiderLogReader(LogReader):
                 line = raw.rstrip("\r\n")
                 m = _SECTION_RE.match(line)
                 if m:
-                    section, section_ts = _slug(m), _iso(m)
+                    section, section_ts = _slug(m, ns), _iso(m)
                     continue
                 tm = _TOKENS_RE.match(line)
                 if tm is None or not section:
@@ -304,12 +367,13 @@ class AiderLogReader(LogReader):
             section = str(checkpoint.get("section") or "")
             section_ts = str(checkpoint.get("section_ts") or "")
         cwd = self.cwd_from_file(path)
+        ns = history_namespace(path)
         out: list[TokenUsage] = []
 
         for end, line in lines:
             m = _SECTION_RE.match(line)
             if m:
-                section, section_ts = _slug(m), _iso(m)
+                section, section_ts = _slug(m, ns), _iso(m)
                 continue
             tm = _TOKENS_RE.match(line)
             if tm is None or not section:
@@ -357,6 +421,7 @@ class AiderLogReader(LogReader):
         """
         out: list[ActivityEvent] = []
         cwd = self.cwd_from_file(path)
+        ns = history_namespace(path)
         section = ""
         pending = _read_pending_text(seen_keys)
         prev_prompt = False
@@ -381,7 +446,7 @@ class AiderLogReader(LogReader):
                 if m:
                     # Header must update the section even when already seen —
                     # every walk restarts from line 1.
-                    section = _slug(m)
+                    section = _slug(m, ns)
                     if key not in seen_keys:
                         seen_keys.add(key)
                         pending = ""

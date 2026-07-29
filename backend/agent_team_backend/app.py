@@ -1492,12 +1492,20 @@ def _session_lookup_path(agent: str, workspace_path: str, session_id: str) -> st
         return str(copilot_root() / "session-state" / session_id / "events.jsonl")
     if agent == "aider":
         # Aider has NO session id: resume is the id-less, lossy
-        # `aider --restore-chat-history`, which re-reads the workspace's
-        # history file. The path is derivable from the workspace alone; the
-        # recorded id (a started-at section slug) is informational and never
-        # names the file — a slug that no longer matches any section after
-        # aider summarizes history is still restorable by design, so the
-        # generic is_file() check on this path is the whole preflight.
+        # `aider --restore-chat-history`, which re-reads a history file of the
+        # workspace. The recorded id (a started-at section slug) is
+        # informational and never names the file — a slug that no longer
+        # matches any section after aider summarizes history is still
+        # restorable by design, so the generic is_file() check on this path is
+        # the whole preflight. Report the first history file that exists (the
+        # shared one or any per-pane `--chat-history-file`); with none, the
+        # shared path, which then fails the is_file() check as before.
+        reader = next((r for r in _readers if r.vendor == "aider"), None)
+        existing = (
+            reader.session_files_for_workspace(workspace_path) if reader else []
+        )
+        if existing:
+            return str(existing[0])
         return str(aider_history_path(workspace_path))
     return ""
 

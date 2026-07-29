@@ -35,7 +35,7 @@ from threading import Lock
 from typing import Iterable
 
 from ..applog import app_data_dir
-from .aider import aider_history_path
+from .aider import aider_history_path, aider_pane_history_path, is_history_name
 from .base import LogReader, TokenUsage
 from .claude import encode_claude_cwd
 from .cursor import cursor_project_hash
@@ -450,9 +450,10 @@ class Attribution:
                 else:
                     text = Path(usage.file_path).read_text(encoding="utf-8", errors="ignore")[:524_288]
             elif usage.vendor == "aider":
-                # Shared per-project history file: only the LAST started-at
-                # section is the live session — an earlier section's marker
-                # belongs to a historic session and must never bind.
+                # Only the LAST started-at section is the live session — an
+                # earlier section's marker belongs to a historic session and
+                # must never bind. Still true for a per-pane file: it too is
+                # appended to by every aider run of that pane.
                 reader = self._readers.get("aider")
                 text = (
                     reader.last_section(Path(usage.file_path))[1][:524_288]
@@ -579,7 +580,7 @@ class Attribution:
             candidates = [
                 reg for reg in self._panes.values()
                 if reg.vendor == usage.vendor
-                and self._cwd_matches(reg.cwd, usage)
+                and self._cwd_matches(reg.cwd, usage, reg.pane_id)
                 and file_path not in reg.baseline_files
                 and not reg.claimed_session_ids
             ]
@@ -723,8 +724,13 @@ class Attribution:
                 # subdirectory of that root still maps to the same file.
                 if usage.cwd and usage.cwd == ws_path:
                     return ws_path
-                if usage.file_path and usage.file_path == str(aider_history_path(ws_path)):
-                    return ws_path
+                if usage.file_path:
+                    fp = Path(usage.file_path)
+                    if (
+                        is_history_name(fp.name)
+                        and fp.parent == aider_history_path(ws_path).parent
+                    ):
+                        return ws_path
             elif usage.vendor == "cursor":
                 # Cursor stores NO cwd anywhere. A session already bound to a
                 # pane (marker hit) attributes to that pane's workspace, so
@@ -768,7 +774,7 @@ class Attribution:
         candidates = [
             reg for reg in self._panes.values()
             if reg.vendor == usage.vendor
-            and self._cwd_matches(reg.cwd, usage)
+            and self._cwd_matches(reg.cwd, usage, reg.pane_id)
             and file_path not in reg.baseline_files
             and not reg.claimed_session_ids
         ]
@@ -786,7 +792,7 @@ class Attribution:
         reg.claimed_session_ids.add(usage.session_id)
         return reg.pane_id, reg.stage_id, reg.slot_key or None
 
-    def _cwd_matches(self, pane_cwd: str, usage: TokenUsage) -> bool:
+    def _cwd_matches(self, pane_cwd: str, usage: TokenUsage, pane_id: str = "") -> bool:
         if not pane_cwd:
             return False
         file_path = usage.file_path
@@ -800,9 +806,20 @@ class Attribution:
             hash_dir = cursor_project_hash(pane_cwd)
             return bool(hash_dir) and f"/{hash_dir}/" in file_path
         if usage.vendor == "aider":
-            # One shared per-project file: it is this pane's exactly when it
-            # is the history file of the pane cwd's git root (or the cwd
-            # itself without one).
+            # The pane's OWN `--chat-history-file` is its file — that is what
+            # lets two aider panes in ONE repo discriminate at all. The
+            # per-project shared file is claimable only by a pane that has no
+            # per-pane file (started before per-pane files existed), never by
+            # one that does.
+            own = aider_pane_history_path(pane_cwd, pane_id)
+            if own is not None:
+                if usage.file_path == str(own):
+                    return True
+                try:
+                    if own.exists():
+                        return False
+                except OSError:
+                    return False
             return usage.file_path == str(aider_history_path(pane_cwd))
         if usage.vendor in ("codex", "antigravity", "grok", "kimi", "opencode", "qwen", "kilo", "pi", "copilot"):
             return usage.cwd == pane_cwd
