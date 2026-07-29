@@ -14,7 +14,19 @@ export const USAGE_REFRESH_OPTIONS = [60, 300, 900, 1800] as const
 export const USAGE_DEFAULT_REFRESH_SEC = 300
 
 /** Agent keys with a backend usage fetcher (same-name provider mapping). */
-export const USAGE_PROVIDERS = ['claude', 'codex', 'kimi', 'grok'] as const
+export const USAGE_PROVIDERS = [
+  'claude',
+  'codex',
+  'kimi',
+  'grok',
+  'antigravity',
+  'opencode',
+  'qwen',
+  'kilo',
+  'pi',
+  'copilot',
+  'cursor'
+] as const
 
 export type UsageStatus =
   | 'ok'
@@ -140,7 +152,7 @@ export function refreshUsage(): void {
 }
 
 /** Snapshot for a pane's agent key, or undefined when the agent has no
- *  usage provider (antigravity/terminal) or nothing was fetched yet. */
+ *  usage provider (aider/terminal) or nothing was fetched yet. */
 export function usageFor(agentKey: string | undefined | null): UsageSnapshot | undefined {
   if (!agentKey || !usageEnabled()) return undefined
   if (!(USAGE_PROVIDERS as readonly string[]).includes(agentKey)) return undefined

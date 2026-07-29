@@ -10,6 +10,7 @@ import {
   remainingPercent,
   remainingTier,
   usageFor,
+  USAGE_PROVIDERS,
   type UsageSnapshot
 } from '../useUsage'
 import { __resetSettingsForTest } from '../../lib/settings'
@@ -73,10 +74,13 @@ describe('useUsage store', () => {
   it('usageFor maps only supported agent keys', () => {
     const { backend, emit } = fakeBackend()
     initUsage(backend as never)
-    emit('usage.changed', { providers: { claude: snap(), grok: snap({ provider: 'grok' }) } })
-    expect(usageFor('claude')).toBeDefined()
-    expect(usageFor('grok')).toBeDefined()
-    expect(usageFor('antigravity')).toBeUndefined()
+    const providers: Record<string, UsageSnapshot> = {}
+    for (const key of USAGE_PROVIDERS) providers[key] = snap({ provider: key })
+    emit('usage.changed', { providers })
+    for (const key of USAGE_PROVIDERS) {
+      expect(usageFor(key), key).toBeDefined()
+    }
+    expect(usageFor('aider')).toBeUndefined()
     expect(usageFor('terminal')).toBeUndefined()
     expect(usageFor(undefined)).toBeUndefined()
   })
