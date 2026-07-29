@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from 'vue'
 import {
+  accountUsageFor,
   formatRemaining,
   formatResetAbsolute,
   formatResetCountdown,
@@ -153,6 +154,18 @@ function avatarInitial(label: string): string {
 function accountLabel(profileId: string | null, fallback: string): string {
   return props.cliProfiles.identityFor(props.agentKey, profileId)?.email ?? fallback
 }
+
+// Per-account remaining quota, shown as a plain number on each switch row.
+// Empty when that slot has no fetched snapshot (e.g. never signed in).
+function acctPct(profileId: string | null): string {
+  const r = remainingPercent(accountUsageFor(props.agentKey, profileId))
+  return r === null ? '' : formatRemaining(r)
+}
+
+function acctTier(profileId: string | null): 'ok' | 'warn' | 'crit' {
+  const r = remainingPercent(accountUsageFor(props.agentKey, profileId))
+  return r === null ? 'ok' : remainingTier(r)
+}
 </script>
 
 <template>
@@ -229,6 +242,9 @@ function accountLabel(profileId: string | null, fallback: string): string {
               avatarInitial(accountLabel(null, $t('usage.switch-default')))
             }}</span>
             <span class="usage-acct-name">{{ accountLabel(null, $t('usage.switch-default')) }}</span>
+            <span v-if="acctPct(null)" class="usage-acct-pct" :class="acctTier(null)">{{
+              acctPct(null)
+            }}</span>
             <span v-if="activeProfileId === ''" class="usage-acct-tick">✓</span>
           </button>
           <button
@@ -244,6 +260,9 @@ function accountLabel(profileId: string | null, fallback: string): string {
               avatarInitial(accountLabel(p.id, p.name))
             }}</span>
             <span class="usage-acct-name">{{ accountLabel(p.id, p.name) }}</span>
+            <span v-if="acctPct(p.id)" class="usage-acct-pct" :class="acctTier(p.id)">{{
+              acctPct(p.id)
+            }}</span>
             <span v-if="activeProfileId === p.id" class="usage-acct-tick">✓</span>
           </button>
         </div>
@@ -446,6 +465,18 @@ function accountLabel(profileId: string | null, fallback: string): string {
   flex-shrink: 0;
   font-size: 10px;
   color: var(--accent-fg);
+}
+.usage-acct-pct {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.usage-acct-pct.warn {
+  color: var(--attention-fg);
+}
+.usage-acct-pct.crit {
+  color: var(--danger-fg);
 }
 .usage-acct-manage {
   display: flex;

@@ -16,11 +16,20 @@ import type {
 // readers (usageFor) and the backend call (refreshUsage) with controllable fns.
 const usage = vi.hoisted(() => ({
   usageFor: vi.fn<(agentKey: string | undefined | null) => UsageSnapshot | undefined>(),
+  accountUsageFor:
+    vi.fn<
+      (agentKey: string | undefined | null, profileId: string | null) => UsageSnapshot | undefined
+    >(),
   refreshUsage: vi.fn(),
 }))
 vi.mock('../../composables/useUsage', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../composables/useUsage')>()
-  return { ...actual, usageFor: usage.usageFor, refreshUsage: usage.refreshUsage }
+  return {
+    ...actual,
+    usageFor: usage.usageFor,
+    accountUsageFor: usage.accountUsageFor,
+    refreshUsage: usage.refreshUsage,
+  }
 })
 
 const notify = vi.hoisted(() => ({
@@ -110,6 +119,7 @@ beforeAll(() => {
 beforeEach(() => {
   vi.useFakeTimers()
   usage.usageFor.mockReset()
+  usage.accountUsageFor.mockReset()
   usage.refreshUsage.mockClear()
   notify.alert.mockClear()
   notify.confirm.mockReset()
@@ -246,6 +256,30 @@ describe('UsageBadge – popover account list', () => {
     expect(rows[0].classes()).toContain('active')
     expect(rows[0].find('.usage-acct-tick').exists()).toBe(true)
     expect(rows[1].classes()).not.toContain('active')
+  })
+
+  it('shows each row remaining percent from its own account slot', async () => {
+    usage.usageFor.mockReturnValue(snapshot())
+    usage.accountUsageFor.mockImplementation((_agent, profileId) =>
+      profileId === 'p1'
+        ? snapshot({
+            windows: [{ kind: 'session', label: 'Session', usedPercent: 90, resetsAt: null }],
+          })
+        : snapshot(), // default slot: 30% used → 70% left
+    )
+    wrapper = mountBadge(makeCliProfiles({ profiles: [profile('p1', 'Work')] }).fake)
+    await openPopover(wrapper)
+    const pcts = wrapper.findAll('.usage-acct-pct')
+    expect(pcts.map((p) => p.text())).toEqual(['70%', '10%'])
+    expect(pcts[1].classes()).toContain('crit')
+  })
+
+  it('omits the row percent when a slot has no fetched snapshot', async () => {
+    usage.usageFor.mockReturnValue(snapshot())
+    usage.accountUsageFor.mockReturnValue(undefined)
+    wrapper = mountBadge(makeCliProfiles({ profiles: [profile('p1', 'Work')] }).fake)
+    await openPopover(wrapper)
+    expect(wrapper.findAll('.usage-acct-pct')).toHaveLength(0)
   })
 })
 
