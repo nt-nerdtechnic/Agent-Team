@@ -3625,7 +3625,7 @@ async function rebuildPaneClean(paneId: string): Promise<void> {
   if (!pane?.realized) return
   // Same session-aware lock as rebuildPaneViaResume: mid-resume the
   // replacement pane (new id, same session) is already live, and its clear
-  // shortcut / respawn button route here — without the session key a clean
+  // shortcut routes here — without the session key a clean
   // spawn could run concurrently and clobber the in-flight resume.
   const sessionId = paneResumeSessionId(pane)
   const lockKeys = sessionId ? [paneId, sessionId] : [paneId]

@@ -217,7 +217,6 @@
       "commander-tooltip": "全域管理者 — 跨階段協調,決定 ---STAGE-DONE---",
       "idle-status-tooltip": "程序仍存活,但 Agent 已完成最後一個回合,正停在互動提示字元",
       "rename-title-tooltip": "雙擊可重新命名此 pane",
-      "respawn": "重新啟動",
       "loop-tooltip": "Loop — 將設定的 Loop 提示詞送入此 pane",
       "loop-badge-tooltip": "已對此 pane 送出 Loop 提示詞——點擊標籤可關閉 Loop",
       "loop-waiting-tooltip": "Loop 暫停 — 已達工作階段上限；將於 {time} 自動續跑，點擊標籤可立即續跑",

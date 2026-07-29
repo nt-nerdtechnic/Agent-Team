@@ -415,13 +415,6 @@ onMounted(() => {
         <div class="prep-text">{{ preparingLabel || 'Preparing CLI' }}</div>
       </div>
     </div>
-    <!-- Exited or probe-failed CLIs get an in-place clean restart. Error output
-         and the resolved binary path stay readable behind the button. -->
-    <button
-      v-if="(displayStatus === 'exited' || displayStatus === 'error') && !isPreparing"
-      class="respawn-btn"
-      @click.stop="emit('rebuild-clean')"
-    >↻ {{ $t('pane.terminal.respawn') }}</button>
     <RestoredPanePlaceholder
       v-if="restoring && displayStatus !== 'exited' && displayStatus !== 'error'"
       class="restoring-overlay"
@@ -738,26 +731,6 @@ onMounted(() => {
 @keyframes prep-spin {
   to { transform: rotate(360deg); }
 }
-.respawn-btn {
-  position: absolute;
-  bottom: 16px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 8;
-  padding: 6px 16px;
-  border: 1px solid var(--accent-emphasis);
-  border-radius: 6px;
-  background: var(--accent-emphasis);
-  color: var(--text-on-emphasis);
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  box-shadow: 0 4px 12px color-mix(in srgb, var(--accent-emphasis) 30%, transparent);
-}
-.respawn-btn:hover {
-  filter: brightness(1.1);
-}
-
 /* xterm.js Monaco scrollbar: show track vs thumb contrast in main buffer.
    xterm injects --vscode-scrollbarSlider-background from ITheme but the track
    has no background — add a dim track so the thumb position is distinguishable. */

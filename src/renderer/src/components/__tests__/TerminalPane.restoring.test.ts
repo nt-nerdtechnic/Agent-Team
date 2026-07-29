@@ -80,6 +80,5 @@ describe('TerminalPane restored-session startup', () => {
     await wrapper.vm.$nextTick()
 
     expect(wrapper.find('.restoring-overlay').exists()).toBe(false)
-    expect(wrapper.find('.respawn-btn').exists()).toBe(true)
   })
 })

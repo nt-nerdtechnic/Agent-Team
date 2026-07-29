@@ -217,7 +217,6 @@
       "commander-tooltip": "Global Manager — coordinates across stages, decides ---STAGE-DONE---",
       "idle-status-tooltip": "Process still alive, but agent has finished the last turn and is at an interactive prompt",
       "rename-title-tooltip": "Double-click to rename this pane",
-      "respawn": "Respawn",
       "loop-tooltip": "Loop — send the configured loop prompt to this pane",
       "loop-badge-tooltip": "Loop prompt was sent to this pane — click to turn the loop off",
       "loop-waiting-tooltip": "Loop paused — session limit hit; auto-resume at {time}. Click to resume now",
@@ -247,7 +246,7 @@
     },
     "cli-missing": {
       "title": "CLI not installed",
-      "message": "{label} exited with \"command not found\" — the CLI is not installed. Install it now? The install command runs in an external terminal; respawn the pane once it finishes.",
+      "message": "{label} exited with \"command not found\" — the CLI is not installed. Install it now? The install command runs in an external terminal; reopen the pane once it finishes.",
       "install": "Install in terminal"
     }
   },
