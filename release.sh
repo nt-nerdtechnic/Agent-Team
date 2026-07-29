@@ -106,6 +106,21 @@ pnpm test:run
 uv --project backend run pytest backend/tests
 
 echo ""
+echo "=== Provisioning Antigravity usage secrets (untracked) ==="
+# Antigravity's public installed-app OAuth constants are not in the tree. Copy
+# the gitignored usage_secrets.py from the signing-assets dir so the bundled
+# provider works; skip gracefully (provider disabled) when it is unavailable.
+if [ -f "$HOME/navide-signing/usage_secrets.py" ]; then
+  cp "$HOME/navide-signing/usage_secrets.py" \
+    backend/agent_team_backend/usage_secrets.py
+  echo "usage_secrets.py provisioned from ~/navide-signing"
+elif [ -f backend/agent_team_backend/usage_secrets.py ]; then
+  echo "usage_secrets.py already present; using existing file"
+else
+  echo "WARNING: no usage_secrets.py found — Antigravity quota disabled in this build"
+fi
+
+echo ""
 echo "=== Building release artifacts ==="
 (
   cd backend

@@ -67,6 +67,24 @@ jobs:
           pnpm test:run
           uv --project backend run pytest backend/tests
 
+      - name: Provision Antigravity usage secrets
+        # Antigravity's public installed-app OAuth constants live in repo
+        # secrets, never in the tree. Write the gitignored usage_secrets.py the
+        # PyInstaller spec bundles. If the secrets are unset the file is skipped
+        # and usage_service.py degrades gracefully (provider disabled).
+        env:
+          ANTIGRAVITY_CLIENT_ID: ${{ secrets.ANTIGRAVITY_CLIENT_ID }}
+          ANTIGRAVITY_CLIENT_SECRET: ${{ secrets.ANTIGRAVITY_CLIENT_SECRET }}
+        run: |
+          if [ -n "$ANTIGRAVITY_CLIENT_ID" ] && [ -n "$ANTIGRAVITY_CLIENT_SECRET" ]; then
+            printf 'ANTIGRAVITY_CLIENT_ID = "%s"\nANTIGRAVITY_CLIENT_SECRET = "%s"\n' \
+              "$ANTIGRAVITY_CLIENT_ID" "$ANTIGRAVITY_CLIENT_SECRET" \
+              > backend/agent_team_backend/usage_secrets.py
+            echo "usage_secrets.py provisioned"
+          else
+            echo "Antigravity secrets not set; provider disabled in this build"
+          fi
+
       - name: Build Python backend
         working-directory: backend
         run: uv run pyinstaller agent_team_backend.spec
