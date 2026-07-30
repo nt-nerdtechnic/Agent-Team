@@ -2641,3 +2641,35 @@ async def test_grok_billing_rpc_with_fake_stdio(tmp_path, monkeypatch):
     billing = await us.grok_billing_rpc("grok")
     windows, _ = us.normalize_grok(billing)
     assert windows and windows[0]["usedPercent"] == 10.0
+
+
+# ── Codex fetch: stranded in-pane login promotion ───────────────────────────
+
+async def test_fetch_codex_promotes_stranded_pane_login(monkeypatch, tmp_path):
+    """Fresh install: login done inside a manual pane sits in
+    ~/.codex-panes/<pane>/auth.json; the poll must adopt it instead of
+    reporting no-credentials forever."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    real = tmp_path / ".codex"
+    pane_auth = tmp_path / ".codex-panes" / "pane-1" / "auth.json"
+    pane_auth.parent.mkdir(parents=True)
+    pane_auth.write_text(
+        json.dumps({"tokens": {"access_token": "tok", "account_id": "acc"}}),
+        encoding="utf-8",
+    )
+    calls = _fake_httpx(monkeypatch, {
+        us.codex_usage_url(us.codex_base_url(real)): _FakeResponse(200, {}),
+    })
+
+    snap = await us.fetch_codex(real)
+
+    assert snap["status"] == "ok"
+    assert calls  # promotion produced usable creds; the usage call went out
+    assert (real / "auth.json").is_file()
+    assert pane_auth.is_symlink()
+
+
+async def test_fetch_codex_no_credentials_without_stranded_login(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    snap = await us.fetch_codex(tmp_path / ".codex")
+    assert snap["status"] == "no-credentials"

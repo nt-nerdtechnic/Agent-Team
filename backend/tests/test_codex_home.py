@@ -1,3 +1,5 @@
+import json
+import os
 from pathlib import Path
 
 from agent_team_backend.codex_home import CodexHomeManager
@@ -185,3 +187,77 @@ def test_prepare_skill_view_failure_does_not_block_spawn(
     assert home == tmp_path / "panes" / "pane-1"
     assert (home / "skills").is_symlink()
     assert (home / "skills" / "native").exists()
+
+
+# ── stranded in-pane login promotion ─────────────────────────────────────────
+
+def _write_pane_auth(path: Path, token: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"tokens": {"access_token": token}}), encoding="utf-8"
+    )
+
+
+def test_promote_stranded_auth_adopts_newest_pane_login(tmp_path: Path) -> None:
+    real = tmp_path / "real-codex"
+    panes = tmp_path / "panes"
+    manager = CodexHomeManager(real_home=real, panes_root=panes)
+    old = panes / "pane-old" / "auth.json"
+    _write_pane_auth(old, "old-token")
+    os.utime(old, (1, 1))
+    new = panes / "pane-new" / "auth.json"
+    _write_pane_auth(new, "new-token")
+
+    assert manager.promote_stranded_auth() is True
+
+    real_auth = real / "auth.json"
+    assert real_auth.is_file() and not real_auth.is_symlink()
+    assert "new-token" in real_auth.read_text(encoding="utf-8")
+    # The promoted pane now writes through to the shared credential.
+    assert new.is_symlink()
+    assert new.resolve() == real_auth
+    # Other stranded logins are left untouched (they may be other accounts).
+    assert old.is_file() and not old.is_symlink()
+    # Idempotent once the real credential exists.
+    assert manager.promote_stranded_auth() is False
+
+
+def test_promote_stranded_auth_never_overwrites_real_auth(tmp_path: Path) -> None:
+    real = tmp_path / "real-codex"
+    real.mkdir()
+    (real / "auth.json").write_text('{"keep": true}', encoding="utf-8")
+    panes = tmp_path / "panes"
+    manager = CodexHomeManager(real_home=real, panes_root=panes)
+    stranded = panes / "pane-1" / "auth.json"
+    _write_pane_auth(stranded, "pane-token")
+
+    assert manager.promote_stranded_auth() is False
+
+    assert (real / "auth.json").read_text(encoding="utf-8") == '{"keep": true}'
+    assert stranded.is_file() and not stranded.is_symlink()
+
+
+def test_promote_stranded_auth_noop_without_candidates(tmp_path: Path) -> None:
+    manager = CodexHomeManager(
+        real_home=tmp_path / "real", panes_root=tmp_path / "panes"
+    )
+    # Neither the panes root nor any stranded login exists (fresh install
+    # before any codex pane spawned).
+    assert manager.promote_stranded_auth() is False
+    assert (tmp_path / "real" / "auth.json").exists() is False
+
+
+def test_prepare_adopts_stranded_login_for_new_pane(tmp_path: Path) -> None:
+    real = tmp_path / "real-codex"
+    panes = tmp_path / "panes"
+    manager = CodexHomeManager(real_home=real, panes_root=panes)
+    stranded = panes / "pane-1" / "auth.json"
+    _write_pane_auth(stranded, "pane1-token")
+
+    home = manager.prepare("pane-2")
+
+    # pane-1's in-pane login became the shared credential and pane-2
+    # spawns already logged in.
+    assert (real / "auth.json").is_file()
+    assert (home / "auth.json").is_symlink()
+    assert stranded.is_symlink()

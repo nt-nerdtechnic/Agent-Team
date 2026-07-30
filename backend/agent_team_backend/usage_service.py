@@ -1573,6 +1573,17 @@ async def fetch_claude(home: Path) -> dict:
 async def fetch_codex(codex_home: Path) -> dict:
     creds = read_codex_credentials(codex_home)
     if creds is None:
+        # Fresh-install rescue: an OAuth login completed inside a manual pane
+        # sits stranded in ~/.codex-panes/<pane>/auth.json (no real auth.json
+        # existed to symlink at spawn). Adopt it so the credential is shared
+        # and the badge lights without waiting for a new pane spawn.
+        from .codex_home import CodexHomeManager
+
+        if await asyncio.to_thread(
+            CodexHomeManager(real_home=codex_home).promote_stranded_auth
+        ):
+            creds = read_codex_credentials(codex_home)
+    if creds is None:
         return _snapshot("codex", "no-credentials")
     import httpx
 

@@ -44,6 +44,11 @@ class CodexHomeManager:
         """Create the per-pane home, symlinking shared entries from
         ``source_home`` (a CLI account profile home) or the real ~/.codex."""
         source = source_home or self.real_home
+        if source_home is None:
+            # A prior in-pane login may sit stranded in another pane's home
+            # (fresh install: no real auth.json existed to symlink at that
+            # pane's spawn). Adopt it first so this pane seeds logged-in.
+            self.promote_stranded_auth()
         safe_id = self._safe_home_id(home_id)
         pane_home = self.panes_root / safe_id
         pane_home.mkdir(parents=True, exist_ok=True)
@@ -131,6 +136,52 @@ class CodexHomeManager:
         finally:
             if tmp is not None:
                 self._remove_generated_path(tmp)
+
+    def promote_stranded_auth(self) -> bool:
+        """Adopt an in-pane Codex login as the shared credential.
+
+        On a fresh install the real ~/.codex/auth.json does not exist when a
+        pane home is prepared, so prepare() seeds no auth.json symlink; an
+        OAuth login completed INSIDE that pane then writes a real auth.json
+        into the per-pane home — invisible to every other pane and to usage
+        polling. While the real file is still absent, promote the newest such
+        stranded credential: hard-link it into the real home (atomic; a
+        concurrent writer beating us simply wins) and swap the pane's copy
+        for the standard symlink so codex token refreshes write through to
+        the shared file. Returns True when the real home gained the
+        credential."""
+        real_auth = self.real_home / "auth.json"
+        try:
+            if real_auth.exists() or real_auth.is_symlink():
+                return False
+            if not self.panes_root.is_dir():
+                return False
+            stranded = [
+                p for p in self.panes_root.glob("*/auth.json")
+                if p.is_file() and not p.is_symlink()
+            ]
+            if not stranded:
+                return False
+            newest = max(stranded, key=lambda p: p.stat().st_mtime)
+            self.real_home.mkdir(parents=True, exist_ok=True)
+            try:
+                os.link(newest, real_auth)
+            except FileExistsError:
+                return False
+        except OSError as err:
+            log.warning("promoting in-pane codex login failed: %s", err)
+            return False
+        try:
+            tmp = newest.with_name(".auth.json.promote-tmp")
+            tmp.unlink(missing_ok=True)
+            tmp.symlink_to(real_auth)
+            os.replace(tmp, newest)
+        except OSError as err:
+            # Promotion itself succeeded; the pane keeps its own copy and
+            # will diverge on refresh until its next prepare() re-links it.
+            log.warning("relinking %s to shared codex auth failed: %s", newest, err)
+        log.info("promoted in-pane codex login %s -> %s", newest, real_auth)
+        return True
 
     @staticmethod
     def _remove_generated_path(path: Path) -> None:

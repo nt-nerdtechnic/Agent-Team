@@ -479,6 +479,38 @@ def test_codex_home_path_binds_to_session_home_id(monkeypatch: pytest.MonkeyPatc
     assert attr.attribute(usage).pane_id == "live-pane"
 
 
+def test_codex_home_path_rebinds_new_rollout_after_rotation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """In-pane login rotates Codex to a fresh rollout file; the new session
+    must bind to the same pane and announce the new resume id (so the
+    frontend re-pins instead of staying on the dead pre-login session)."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    root = tmp_path / ".codex-panes" / "home-old" / "sessions" / "2026" / "07" / "30"
+    root.mkdir(parents=True)
+    a = root / "rollout-2026-07-30T22-00-00-sid-a.jsonl"
+    a.write_text(json.dumps({"type": "session_meta", "payload": {"id": "resume-a", "cwd": "/ws"}}) + "\n")
+    attr = Attribution([FakeReader("codex", tmp_path / ".codex")], workspaces_path=tmp_path / "ws.json")
+    attr.register_pane(
+        "live-pane", vendor="codex", cwd="/ws", workspace_path="/ws",
+        session_home_id="home-old",
+    )
+    first = attr.maybe_announce_session(
+        _make_usage("codex", session_id=a.stem, file_path=str(a), cwd="/ws")
+    )
+    assert first is not None
+    assert first.resume_id == "resume-a"
+
+    b = root / "rollout-2026-07-30T22-30-11-sid-b.jsonl"
+    b.write_text(json.dumps({"type": "session_meta", "payload": {"id": "resume-b", "cwd": "/ws"}}) + "\n")
+    second = attr.maybe_announce_session(
+        _make_usage("codex", session_id=b.stem, file_path=str(b), cwd="/ws")
+    )
+    assert second is not None
+    assert second.pane_id == "live-pane"
+    assert second.resume_id == "resume-b"
+
+
 def test_codex_home_path_waits_for_session_meta(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
