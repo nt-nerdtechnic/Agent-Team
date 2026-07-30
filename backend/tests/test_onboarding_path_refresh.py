@@ -11,6 +11,7 @@ import subprocess
 import pytest
 
 # Import the private function directly for unit testing
+from agent_team_backend import onboarding_deps
 from agent_team_backend.onboarding_deps import (
     _path_probe_command,
     _refresh_path_from_login_shell,
@@ -73,7 +74,8 @@ def test_dedup_within_shell_output(monkeypatch):
 
 
 def test_timeout_swallowed(monkeypatch):
-    """TimeoutExpired must not propagate; PATH must be unchanged."""
+    """TimeoutExpired must not propagate; PATH unchanged (fallback disabled)."""
+    monkeypatch.setattr(onboarding_deps, "_FALLBACK_PATH_DIRS", ())
     original = "/usr/bin:/bin"
     monkeypatch.setenv("PATH", original)
     with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="bash", timeout=3)):
@@ -83,6 +85,7 @@ def test_timeout_swallowed(monkeypatch):
 
 def test_oserror_swallowed(monkeypatch):
     """OSError (e.g. bash not found) must not propagate."""
+    monkeypatch.setattr(onboarding_deps, "_FALLBACK_PATH_DIRS", ())
     original = "/usr/bin:/bin"
     monkeypatch.setenv("PATH", original)
     with patch("subprocess.run", side_effect=OSError("not found")):
@@ -102,11 +105,49 @@ def test_garbage_output_no_crash(monkeypatch):
 
 def test_empty_stdout_no_crash(monkeypatch):
     """Empty stdout must not crash."""
+    monkeypatch.setattr(onboarding_deps, "_FALLBACK_PATH_DIRS", ())
     original = "/usr/bin"
     monkeypatch.setenv("PATH", original)
     with patch("subprocess.run", return_value=_make_run_result("")):
         _refresh_path_from_login_shell()
     assert os.environ["PATH"] == original
+
+
+# ── fallback install prefixes ────────────────────────────────────────────────
+
+
+def test_fallback_dirs_merged_when_probe_fails(monkeypatch, tmp_path):
+    """Standard install prefixes are merged even when the login-shell probe fails."""
+    fallback = tmp_path / "brew-bin"
+    fallback.mkdir()
+    monkeypatch.setattr(onboarding_deps, "_FALLBACK_PATH_DIRS", (str(fallback),))
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="zsh", timeout=3)):
+        _refresh_path_from_login_shell()
+    assert os.environ["PATH"].split(":")[0] == str(fallback)
+
+
+def test_fallback_dir_skipped_when_missing(monkeypatch, tmp_path):
+    """A fallback prefix that does not exist on disk is not added."""
+    monkeypatch.setattr(onboarding_deps, "_FALLBACK_PATH_DIRS", (str(tmp_path / "nope"),))
+    original = "/usr/bin:/bin"
+    monkeypatch.setenv("PATH", original)
+    with patch("subprocess.run", side_effect=OSError("not found")):
+        _refresh_path_from_login_shell()
+    assert os.environ["PATH"] == original
+
+
+def test_shell_paths_ordered_before_fallback(monkeypatch, tmp_path):
+    """Shell-derived paths are prepended ahead of fallback prefixes."""
+    fallback = tmp_path / "fb"
+    fallback.mkdir()
+    monkeypatch.setattr(onboarding_deps, "_FALLBACK_PATH_DIRS", (str(fallback),))
+    monkeypatch.setenv("PATH", "/usr/bin")
+    with patch("subprocess.run", return_value=_make_run_result("/shell/bin:/usr/bin\n")):
+        _refresh_path_from_login_shell()
+    parts = os.environ["PATH"].split(":")
+    assert parts[0] == "/shell/bin"
+    assert parts[1] == str(fallback)
 
 
 def test_last_line_used_when_banner_present(monkeypatch):

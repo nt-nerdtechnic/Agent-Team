@@ -146,6 +146,19 @@ def test_install_needs_terminal_returns_command_without_running(monkeypatch: pyt
     assert called["ran"] is False
 
 
+def test_python_install_uses_unversioned_formula() -> None:
+    # Versioned kegs (python@3.12) only link `python3.12`, never `python3`,
+    # so detection (`python3 --version`) would stay missing after a successful
+    # install. The unversioned alias links `python3` into the brew prefix.
+    assert ob.DEPS_BY_ID["python"].install_cmd == "brew install python3"
+
+
+def test_node_install_uses_unversioned_formula() -> None:
+    # node@22 is keg-only: it never links `node` into the brew prefix, so
+    # detection (`node --version`) would stay missing after a successful install.
+    assert ob.DEPS_BY_ID["node"].install_cmd == "brew install node"
+
+
 def test_maintenance_command_returns_the_vendor_command(monkeypatch: pytest.MonkeyPatch) -> None:
     ran = []
     monkeypatch.setattr(ob.subprocess, "run", lambda *a, **k: ran.append(a))

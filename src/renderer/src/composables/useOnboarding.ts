@@ -126,6 +126,11 @@ interface InstallResult {
   docs_url?: string
 }
 
+// Inline installs (brew) block the WS reply until the command finishes; the
+// backend caps them at 900s, so the request deadline must outlive that —
+// the default 10s send timeout aborts every real install mid-download.
+const INSTALL_TIMEOUT_MS = 910_000
+
 /**
  * useOnboarding — drives the first-run environment wizard. The backend is the
  * single source of truth for dep definitions + status; this composable only
@@ -159,7 +164,11 @@ export function useOnboarding(backend: ReturnType<typeof useBackend>) {
     installing.value = dep.id
     log(`▶ Installing ${dep.label}…`)
     try {
-      const resp = await backend.send<InstallResult>('onboarding.install', { dep_id: dep.id })
+      const resp = await backend.send<InstallResult>(
+        'onboarding.install',
+        { dep_id: dep.id },
+        INSTALL_TIMEOUT_MS
+      )
       const r = resp.payload
       if (!r?.ok) {
         log(`✗ ${dep.label} installation failed: ${r?.error || resp.error?.message || 'unknown'}`)

@@ -98,6 +98,20 @@ describe('useOnboarding', () => {
     scope.stop()
   })
 
+  it('install sends a request timeout that outlives inline brew installs', async () => {
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', status({ cli: false }))
+    mock.setResponse('onboarding.install', { ok: true, output: 'installed' })
+    const { result, scope } = withScope(() => useOnboarding(mock.backend))
+    await result.refresh()
+    await result.install(result.cliDeps.value[0])
+    const sent = mock.sent.find((s) => s.type === 'onboarding.install')
+    // Backend caps inline installs at 900s; the default 10s WS timeout would
+    // abort every real install mid-download.
+    expect(sent?.timeoutMs).toBeGreaterThan(900_000)
+    scope.stop()
+  })
+
   it('markComplete sends onboarding.complete', async () => {
     const mock = createMockBackend('connected')
     mock.setResponse('onboarding.status', status({}))

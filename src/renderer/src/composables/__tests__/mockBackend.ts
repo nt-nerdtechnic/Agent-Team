@@ -10,6 +10,7 @@ import type { useBackend, WsResponse, BackendStatus } from '../useBackend'
 export interface SentRecord {
   type: string
   payload: Record<string, unknown>
+  timeoutMs?: number
 }
 
 type Backend = ReturnType<typeof useBackend>
@@ -41,9 +42,10 @@ export function createMockBackend(initialStatus: BackendStatus = 'connected') {
 
   async function send<T = unknown>(
     type: string,
-    payload: Record<string, unknown> = {}
+    payload: Record<string, unknown> = {},
+    timeoutMs?: number
   ): Promise<WsResponse<T>> {
-    sent.push({ type, payload })
+    sent.push({ type, payload, timeoutMs })
     const preset = responses.get(type)
     if (preset) return preset as WsResponse<T>
     return { id: 't', type, ok: true, payload: null, error: null, timestamp: '' } as WsResponse<T>

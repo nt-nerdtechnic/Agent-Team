@@ -68,15 +68,20 @@ DEPS: list[Dep] = [
         ["brew", "--version"], r"Homebrew (\d+\.\d+\.\d+)",
         install_cmd='/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"',
         needs_terminal=True, docs_url="https://brew.sh"),
+    # Unversioned formula on purpose: node@22 is keg-only, so `node` would
+    # stay off PATH after a successful install and detection would never pass.
     Dep("node", "Node.js", "JavaScript runtime (≥ 22)", "foundation",
         ["node", "--version"], r"v?(\d+\.\d+\.\d+)", min_version="22.0.0",
-        install_cmd="brew install node@22", docs_url="https://nodejs.org"),
+        install_cmd="brew install node", docs_url="https://nodejs.org"),
     Dep("pnpm", "pnpm", "Package manager", "foundation",
         ["pnpm", "--version"], r"(\d+\.\d+\.\d+)",
         install_cmd="brew install pnpm", docs_url="https://pnpm.io"),
+    # Unversioned formula on purpose: versioned kegs (python@3.12) only link
+    # `python3.12`, never `python3`, so detection (`python3 --version`) would
+    # keep failing after a successful install.
     Dep("python", "Python", "Python 3.12+", "foundation",
         ["python3", "--version"], r"Python (\d+\.\d+\.\d+)", min_version="3.12.0",
-        install_cmd="brew install python@3.12", docs_url="https://python.org"),
+        install_cmd="brew install python3", docs_url="https://python.org"),
     Dep("uv", "uv", "Python package and environment manager", "foundation",
         ["uv", "--version"], r"uv (\d+\.\d+\.\d+)",
         install_cmd="brew install uv", docs_url="https://docs.astral.sh/uv"),
@@ -237,6 +242,12 @@ def _path_probe_command() -> list[str]:
     return [shell, "-lc", "echo $PATH"]
 
 
+# Standard install prefixes merged into PATH even when the login-shell probe
+# fails (slow shell config hits the 3s timeout, GUI launches get launchd's
+# minimal PATH) — otherwise brew itself is invisible to detection and installs.
+_FALLBACK_PATH_DIRS = ("/opt/homebrew/bin", "/usr/local/bin")
+
+
 def _refresh_path_from_login_shell() -> None:
     """Merge PATH from a login shell into os.environ so newly-installed CLIs are visible.
 
@@ -244,6 +255,7 @@ def _refresh_path_from_login_shell() -> None:
     """
     if os.name != "posix":
         return
+    shell_paths: list[str] = []
     try:
         proc = subprocess.run(
             _path_probe_command(),
@@ -254,21 +266,21 @@ def _refresh_path_from_login_shell() -> None:
         raw = proc.stdout or ""
         # Take the last non-empty line (login shells may emit banner text first)
         lines = [l for l in raw.splitlines() if l.strip()]
-        if not lines:
-            return
-        shell_paths = lines[-1].split(":")
-        current_paths = os.environ.get("PATH", "").split(":")
-        current_set = set(current_paths)
-        seen: set[str] = set()
-        new_paths: list[str] = []
-        for p in shell_paths:
-            if p and p not in current_set and p not in seen:
-                seen.add(p)
-                new_paths.append(p)
-        if new_paths:
-            os.environ["PATH"] = ":".join(new_paths + current_paths)
+        if lines:
+            shell_paths = lines[-1].split(":")
     except Exception:  # noqa: BLE001
         pass
+    shell_paths.extend(d for d in _FALLBACK_PATH_DIRS if os.path.isdir(d))
+    current_paths = os.environ.get("PATH", "").split(":")
+    current_set = set(current_paths)
+    seen: set[str] = set()
+    new_paths: list[str] = []
+    for p in shell_paths:
+        if p and p not in current_set and p not in seen:
+            seen.add(p)
+            new_paths.append(p)
+    if new_paths:
+        os.environ["PATH"] = ":".join(new_paths + current_paths)
 
 
 def _parse_version(text: str, regex: str) -> str:
