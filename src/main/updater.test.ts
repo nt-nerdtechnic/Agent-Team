@@ -36,7 +36,7 @@ vi.mock('electron', () => ({
   BrowserWindow: { getAllWindows: () => [] },
 }))
 
-const PERIODIC_MS = 4 * 60 * 60 * 1000
+const PERIODIC_MS = 30 * 60 * 1000
 
 function emit(event: string, value?: unknown): void {
   for (const listener of h.listeners.get(event) ?? []) listener(value)
@@ -159,6 +159,25 @@ describe('initUpdater lifecycle', () => {
     await setSettings({}, { autoDownload: true } as Partial<UpdaterSettings>)
     await flush()
     expect(h.autoUpdater.downloadUpdate).toHaveBeenCalledTimes(1)
+  })
+
+  it('checks immediately when autoCheck is switched on, but not when it was already on', async () => {
+    const initUpdater = await loadInitUpdater()
+    initUpdater({ enabled: true, currentVersion: '1.0.0' })
+    const setSettings = h.ipcHandlers.get('updater:set-settings')!
+
+    // A change that leaves autoCheck on (it starts on) must not re-check.
+    await setSettings({}, { autoDownload: false } as Partial<UpdaterSettings>)
+    await flush()
+    expect(h.autoUpdater.checkForUpdates).not.toHaveBeenCalled()
+
+    // Off, then on again → exactly one immediate check.
+    await setSettings({}, { autoCheck: false } as Partial<UpdaterSettings>)
+    await flush()
+    h.autoUpdater.checkForUpdates.mockClear()
+    await setSettings({}, { autoCheck: true } as Partial<UpdaterSettings>)
+    await flush()
+    expect(h.autoUpdater.checkForUpdates).toHaveBeenCalledTimes(1)
   })
 
   it('persists channel changes and re-applies them to autoUpdater', async () => {

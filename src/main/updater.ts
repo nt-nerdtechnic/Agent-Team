@@ -10,9 +10,11 @@ let settings: UpdaterSettings | null = null
 let settingsFile = ''
 let periodicTimer: ReturnType<typeof setInterval> | null = null
 
-// Re-check for updates every 4 hours in addition to the one-shot startup check.
-// Both are silent so a transient feed/network error never pops an error badge.
-const PERIODIC_CHECK_MS = 4 * 60 * 60 * 1000
+// Re-check for updates every 30 minutes in addition to the one-shot startup
+// check, so a release published while the app is already running is picked up
+// without waiting hours. Both are silent so a transient feed/network error
+// never pops an error badge.
+const PERIODIC_CHECK_MS = 30 * 60 * 1000
 
 function broadcast(channel: string, payload: unknown): void {
   for (const win of BrowserWindow.getAllWindows()) {
@@ -97,11 +99,18 @@ export function initUpdater(options: {
   ipcMain.handle('updater:get-settings', (): UpdaterSettings => settings!)
   ipcMain.handle('updater:set-settings', (_event, patch: Partial<UpdaterSettings>): UpdateSettingsResult => {
     try {
+      const wasAutoCheck = settings?.autoCheck ?? false
       settings = writeUpdaterSettings(settingsFile, patch ?? {})
       if (options.enabled) {
         applyChannel(settings)
-        if (settings.autoCheck) startPeriodicCheck()
-        else stopPeriodicCheck()
+        if (settings.autoCheck) {
+          startPeriodicCheck()
+          // Turned on at runtime: check right away instead of waiting for the
+          // next periodic tick, so ticking the box feels like it does something.
+          if (!wasAutoCheck) void service!.check({ silent: true })
+        } else {
+          stopPeriodicCheck()
+        }
         // If auto-download was just enabled and a patch update is already
         // waiting, start it now rather than waiting for the next check.
         // Minor/major updates always wait for the user's decision.
