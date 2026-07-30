@@ -1008,21 +1008,8 @@ class TokensStore:
 
     @staticmethod
     def _checkpoint_is_newer(current: dict[str, Any], candidate: dict[str, Any]) -> bool:
-        if not current:
-            return True
-        if candidate.get("kind") == "sqlite" and current.get("kind") == "sqlite":
-            if candidate.get("identity") != current.get("identity"):
-                return True
-            return int(candidate.get("row_id") or 0) > int(current.get("row_id") or 0)
-        if candidate.get("kind") == "jsonl" and current.get("kind") == "jsonl":
-            if candidate.get("identity") != current.get("identity"):
-                return True
-            return int(candidate.get("offset") or 0) > int(current.get("offset") or 0)
-        return True
-
-    @staticmethod
-    def _checkpoint_is_ahead(current: dict[str, Any], candidate: dict[str, Any]) -> bool:
-        """Strict position comparison used to decide whether Global needs replay."""
+        """Position comparison for both the advance guard and the Global
+        replay-credit decision — one comparator so the two can never drift."""
         if not current:
             return True
         if candidate.get("kind") == "sqlite" and current.get("kind") == "sqlite":
@@ -1146,7 +1133,7 @@ class TokensStore:
                 replay_workspace
                 and not legacy_duplicate
                 and ingestion_checkpoint
-                and self._checkpoint_is_ahead(global_checkpoint, ingestion_checkpoint)
+                and self._checkpoint_is_newer(global_checkpoint, ingestion_checkpoint)
             )
 
             if legacy_duplicate:

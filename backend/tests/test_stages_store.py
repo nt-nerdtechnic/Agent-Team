@@ -90,7 +90,7 @@ class TestMigration:
             "schemaVersion": 1,
             "active_pipeline_id": "custom",
             "pipelines": [
-                {"id": "custom", "name": "自訂", "builtin": False,
+                {"id": "custom", "name": "Custom", "builtin": False,
                  "stages": default_stages()[:2]},
             ],
         }

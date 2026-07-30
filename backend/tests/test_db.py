@@ -38,12 +38,6 @@ def test_kv_set_overwrites(db):
     assert db.kv_get("k") == {"v": 2}
 
 
-def test_kv_delete(db):
-    db.kv_set("k", 1, now=1)
-    db.kv_delete("k")
-    assert db.kv_get("k") is None
-
-
 def test_kv_survives_reopen(tmp_path):
     path = tmp_path / "navide.db"
     d1 = Database(path)

@@ -132,10 +132,6 @@ class Database:
                 (key, payload, now),
             )
 
-    def kv_delete(self, key: str) -> None:
-        with self.transaction() as cur:
-            cur.execute("DELETE FROM kv WHERE key = ?", (key,))
-
     def kv_updated_at(self, key: str) -> int | None:
         """The ``updated_at`` stamp of a kv row, or None when absent.
 
@@ -355,13 +351,6 @@ class WorkspaceDatabases:
         from .projects import PROJECT_DIR_NAME
 
         return Path(ws) / PROJECT_DIR_NAME / DB_FILENAME
-
-    def db_path(self, workspace_path: str) -> Path | None:
-        """Where the workspace's database lives (without creating it)."""
-        ws = self._canonical(workspace_path)
-        if ws is None:
-            return None
-        return self._db_file(ws)
 
     def peek(self, workspace_path: str) -> Database | None:
         """The workspace's Database only if it already exists on disk.

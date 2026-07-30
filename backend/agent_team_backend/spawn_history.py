@@ -681,7 +681,7 @@ class SpawnHistoryStore:
         with self._lock:
             db = self._db(workspace_path, create=False)
             stored = self._load(workspace_path, seed, db)
-            if stored and (db is None or db.kv_get(_KV_KEY) is None):
+            if stored and (db is None or db.kv_updated_at(_KV_KEY) is None):
                 # Persist the migration so later reads no longer depend on
                 # the mirror being passed in.
                 db = self._db(workspace_path, create=True)
