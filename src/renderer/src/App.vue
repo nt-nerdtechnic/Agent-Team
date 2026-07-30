@@ -910,6 +910,20 @@ const spawnHistoryFetched = ref(0)
 const spawnHistoryHasMore = computed(() => spawnHistoryFetched.value < spawnHistoryTotal.value)
 let spawnHistoryLoadingMore = false
 
+/** Liveness reconciliation: `removedAt` is only ever stamped by an explicit
+ *  per-pane kill (onKill), so entries still open when the app quits — updater
+ *  relaunch, crash, force quit — reload as "active" forever. A loaded entry
+ *  whose paneId has no live pane is dead by definition (every spawn, including
+ *  a restore, generates a fresh paneId), so stamp it removed on load. */
+function reconcileSpawnHistoryLiveness(entries: SpawnHistoryEntry[]): void {
+  if (isDetachedWindow) return
+  const livePaneIds = new Set(panes.value.map((p) => p.id))
+  const reconciledAt = new Date().toISOString()
+  for (const e of entries) {
+    if (!e.removedAt && !livePaneIds.has(e.paneId)) e.removedAt = reconciledAt
+  }
+}
+
 async function hydrateSpawnHistory(
   workspacePath: string,
   persisted: SpawnHistoryEntry[] | null | undefined,
@@ -951,6 +965,7 @@ async function hydrateSpawnHistory(
   }
   // Reuse the parser for normalization and workspace filtering.
   const hydrated = parseSpawnHistory(JSON.stringify(source), spawnHistoryWorkspaceIdentity(workspacePath))
+  reconcileSpawnHistoryLiveness(hydrated)
   // Keep entries pushed while the page was in flight (e.g. restore backfill).
   const hydratedIds = new Set(hydrated.map((e) => e.paneId))
   const inFlight = spawnHistory.value
@@ -1002,6 +1017,7 @@ async function loadMoreSpawnHistory(): Promise<void> {
           : entry.sessionId,
       }))
       .reverse() // newest→oldest page → oldest→newest for storage order
+    reconcileSpawnHistoryLiveness(older)
     if (older.length > 0) spawnHistory.value = [...older, ...spawnHistory.value]
   } finally {
     spawnHistoryLoadingMore = false
