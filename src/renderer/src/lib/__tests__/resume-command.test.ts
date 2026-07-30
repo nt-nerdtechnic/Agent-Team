@@ -167,9 +167,9 @@ describe('paneCanRebuild', () => {
 
 describe('paneBusyForRebuild', () => {
   it.each([
-    { displayStatus: 'running', terminalStatus: 'running', age: 99_000, expected: true },
-    { displayStatus: 'starting', terminalStatus: 'starting', age: null, expected: true },
-    { displayStatus: 'starting', terminalStatus: 'starting', age: TERMINAL_CREATE_TIMEOUT_MS - 1, expected: true },
+    { displayStatus: 'running', terminalStatus: 'running', age: 99_000, expected: 'running' },
+    { displayStatus: 'starting', terminalStatus: 'starting', age: null, expected: 'starting' },
+    { displayStatus: 'starting', terminalStatus: 'starting', age: TERMINAL_CREATE_TIMEOUT_MS - 1, expected: 'starting' },
     { displayStatus: 'starting', terminalStatus: 'starting', age: TERMINAL_CREATE_TIMEOUT_MS, expected: false },
     { displayStatus: 'starting', terminalStatus: 'running', age: 0, expected: false },
     { displayStatus: 'idle', terminalStatus: 'running', age: 0, expected: false },

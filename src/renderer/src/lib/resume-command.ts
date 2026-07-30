@@ -139,15 +139,19 @@ export function paneCanRebuild(pane: {
 }
 
 /** Protect active work and terminal creation, but allow rebuilding a silent
- * PTY that is already running while its display badge still says starting. */
+ * PTY that is already running while its display badge still says starting.
+ * Returns WHY the pane is busy so callers can confirm-through a running CLI
+ * ('running') while still hard-skipping an in-flight terminal create
+ * ('starting'), or false when the pane is free to rebuild. */
 export function paneBusyForRebuild(
   displayStatus?: string,
   terminalStatus?: string,
   startingAgeMs?: number | null,
-): boolean {
-  if (displayStatus === 'running') return true
+): 'running' | 'starting' | false {
+  if (displayStatus === 'running') return 'running'
   if (displayStatus !== 'starting' || terminalStatus !== 'starting') return false
-  return startingAgeMs == null || startingAgeMs < TERMINAL_CREATE_TIMEOUT_MS
+  if (startingAgeMs == null || startingAgeMs < TERMINAL_CREATE_TIMEOUT_MS) return 'starting'
+  return false
 }
 
 /** Acquire every rebuild identity atomically; null means another rebuild owns one. */

@@ -3490,7 +3490,7 @@ const rebuildableAllPaneCount = computed(
 
 async function rebuildPaneViaResume(
   paneId: string,
-  opts?: { suppressBusyToast?: boolean }
+  opts?: { suppressBusyToast?: boolean; forceWhenRunning?: boolean }
 ): Promise<'busy' | undefined> {
   const pane = panes.value.find((p) => p.id === paneId)
   if (!pane?.realized) return
@@ -3504,7 +3504,22 @@ async function rebuildPaneViaResume(
   const terminalStatus = paneRef?.status as string | undefined
   const startingAgeMs = paneRef?.startingAgeMs as number | null | undefined
   const busy = paneBusyForRebuild(paneStatus, terminalStatus, startingAgeMs)
-  if (busy) {
+  if (busy === 'running' && !opts?.forceWhenRunning) {
+    // Batch callers pre-confirm running panes themselves (forceWhenRunning);
+    // reaching here in a batch means the user declined — keep the skip.
+    if (opts?.suppressBusyToast) return 'busy'
+    // Single-pane path: ask before killing an in-flight turn.
+    const ok = await notifyRestore.confirm(
+      i18n.global.t('pane.terminal.rebuild-running-confirm-body'),
+      {
+        title: i18n.global.t('pane.terminal.rebuild-running-confirm-title'),
+        confirmText: i18n.global.t('pane.terminal.rebuild-running-confirm-confirm'),
+        cancelText: i18n.global.t('pane.terminal.rebuild-running-confirm-cancel')
+      }
+    )
+    if (!ok) return
+  } else if (busy === 'starting') {
+    // An in-flight terminal create is never rebuilt over — skip unconditionally.
     // In a batch (rebuild-all) the caller aggregates one toast; here just report.
     if (!opts?.suppressBusyToast) {
       notifyRestore.toast(i18n.global.t('pane.terminal.rebuild-busy-skipped'), { type: 'info' })
@@ -3666,6 +3681,28 @@ async function rebuildPaneViaResume(
   }
 }
 
+/** Batch pre-scan: ask once before rebuilding over running CLIs. Returns
+ *  whether running panes should be force-rebuilt (false = keep skipping them). */
+async function confirmBatchRebuildOverRunning(ids: string[]): Promise<boolean> {
+  const runningCount = ids.filter((id) => {
+    const paneRef = paneRefs[id]
+    return paneBusyForRebuild(
+      paneRef?.displayStatus as string | undefined,
+      paneRef?.status as string | undefined,
+      paneRef?.startingAgeMs as number | null | undefined,
+    ) === 'running'
+  }).length
+  if (runningCount === 0) return false
+  return notifyRestore.confirm(
+    i18n.global.t('pane.terminal.rebuild-running-confirm-body-batch', { count: runningCount }),
+    {
+      title: i18n.global.t('pane.terminal.rebuild-running-confirm-title'),
+      confirmText: i18n.global.t('pane.terminal.rebuild-running-confirm-confirm'),
+      cancelText: i18n.global.t('pane.terminal.rebuild-running-confirm-cancel')
+    }
+  )
+}
+
 async function rebuildPanesViaResume(scope: 'tab' | 'all'): Promise<void> {
   if (rebuildingTabPanes.value) return
   // Rebuild replaces pane ids, so capture the batch up front.
@@ -3673,6 +3710,7 @@ async function rebuildPanesViaResume(scope: 'tab' | 'all'): Promise<void> {
     .filter((p) => p.realized && (scope === 'all' || tabFilteredPaneIds.value.has(p.id)) && paneCanRebuild(p))
     .map((pane) => pane.id)
   if (!ids.length) return
+  const forceWhenRunning = await confirmBatchRebuildOverRunning(ids)
 
   rebuildingTabPanes.value = true
   pipelineLog(
@@ -3682,7 +3720,7 @@ async function rebuildPanesViaResume(scope: 'tab' | 'all'): Promise<void> {
   try {
     for (const id of ids) {
       try {
-        if ((await rebuildPaneViaResume(id, { suppressBusyToast: true })) === 'busy') busyCount++
+        if ((await rebuildPaneViaResume(id, { suppressBusyToast: true, forceWhenRunning })) === 'busy') busyCount++
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         pipelineLog(`⚠ rebuild pane ${id.slice(0, 8)} failed: ${message}`)
@@ -3817,10 +3855,11 @@ async function batchRebuild(ids: string[]): Promise<void> {
   // Rebuild replaces pane ids, so capture the resumable subset up front.
   const targets = panes.value.filter((p) => ids.includes(p.id) && paneCanRebuild(p)).map((p) => p.id)
   if (!targets.length) return
+  const forceWhenRunning = await confirmBatchRebuildOverRunning(targets)
   let busyCount = 0
   for (const id of targets) {
     try {
-      if ((await rebuildPaneViaResume(id, { suppressBusyToast: true })) === 'busy') busyCount++
+      if ((await rebuildPaneViaResume(id, { suppressBusyToast: true, forceWhenRunning })) === 'busy') busyCount++
     } catch {
       /* ignore — individual rebuild failures are logged in rebuildPaneViaResume */
     }
