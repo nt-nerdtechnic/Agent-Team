@@ -872,6 +872,16 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // short window after a focus event so the badge stays honest.
   const lastFocusAt = ref<number>(0)
   const FOCUS_GRACE_MS = 3_000
+  // Wheel events forwarded to the PTY (alt buffer + mouse tracking, see the
+  // custom wheel handler in mount()) make the TUI repaint a SHIFTED viewport.
+  // That repaint is real content lines, so noise-stripping keeps it, and it is
+  // reassembled/reflowed (often from history already past the replay tail), so
+  // isRedrawReplay can't recognize it either — a sustained scroll used to
+  // latch the RUNNING badge. Output landing inside this window after a
+  // forwarded wheel event is excluded from burst/latch tracking and the
+  // activity clock; each wheel notch re-arms the window.
+  const lastScrollAt = ref<number>(0)
+  const SCROLL_GRACE_MS = 1_000
 
   // ── RUNNING vs IDLE ──────────────────────────────────────────────────────────
   // We want RUNNING only when the CLI is genuinely executing — not for brief
@@ -976,17 +986,26 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // already marked the process alive, but a replay must not build a burst or
     // double the buffer. Genuinely new content isn't a replay and falls through.
     if (isRedrawReplay(cleanBuffer.value, cleaned)) return
-    // Badge burst tracking, driven by CLEANED content only.
+    // Badge burst tracking, driven by CLEANED content only. Output inside the
+    // scroll grace window is a shifted-viewport repaint the replay check above
+    // can't recognize — it must neither build a burst nor drop/raise the
+    // latch. Unlike the focus grace below, this must gate the LATCH, not just
+    // the activity clock: the latch update is what flips the badge. Bytes are
+    // still kept (buffer/liveness) so genuine output isn't lost; a latched
+    // RUNNING simply coasts through the scroll on hysteresis.
     const now = Date.now()
-    const sinceLastClean = now - lastCleanBurstAt.value
-    // Silence past the confirm window ends the run: drop the latch so the next
-    // burst has to re-earn RUNNING rather than resuming it on a single byte.
-    if (sinceLastClean > IDLE_CONFIRM_MS) runningLatched.value = false
-    // A gap > BURST_GAP_MS in clean output starts a new burst.
-    if (sinceLastClean > BURST_GAP_MS) activityBurstStartAt.value = now
-    lastCleanBurstAt.value = now
-    if (!runningLatched.value && now - activityBurstStartAt.value >= MIN_BURST_MS) {
-      runningLatched.value = true
+    const inScrollGrace = now - lastScrollAt.value < SCROLL_GRACE_MS
+    if (!inScrollGrace) {
+      const sinceLastClean = now - lastCleanBurstAt.value
+      // Silence past the confirm window ends the run: drop the latch so the next
+      // burst has to re-earn RUNNING rather than resuming it on a single byte.
+      if (sinceLastClean > IDLE_CONFIRM_MS) runningLatched.value = false
+      // A gap > BURST_GAP_MS in clean output starts a new burst.
+      if (sinceLastClean > BURST_GAP_MS) activityBurstStartAt.value = now
+      lastCleanBurstAt.value = now
+      if (!runningLatched.value && now - activityBurstStartAt.value >= MIN_BURST_MS) {
+        runningLatched.value = true
+      }
     }
     // Monotonic total — unlike cleanBuffer.length, this keeps growing after
     // the buffer hits BUFFER_CAP, so quiet-detection (waitForQuiet etc.) can
@@ -999,7 +1018,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // redraw, not real agent output. Buffer content is still kept so any
     // genuine output isn't lost; only the timestamp is held back.
     const inFocusGrace = now - lastFocusAt.value < FOCUS_GRACE_MS
-    if (!inFocusGrace) lastActivityAt.value = now
+    if (!inFocusGrace && !inScrollGrace) lastActivityAt.value = now
   }
 
   /** Authoritative turn end from the CLI's own conversation log. Drops the
@@ -1299,7 +1318,11 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       // the input line. Swallow the event instead (scrollLines is a no-op in
       // alt buffer, so there is nothing else useful to do with it).
       if (term.buffer.active.type === 'alternate') {
-        return term.modes.mouseTrackingMode !== 'none'
+        const forward = term.modes.mouseTrackingMode !== 'none'
+        // A forwarded wheel event triggers a shifted-viewport repaint that
+        // must not read as agent work — arm the scroll grace (see appendClean).
+        if (forward) lastScrollAt.value = Date.now()
+        return forward
       }
       // Main buffer: accumulate pixel-delta for smooth trackpad scrollback.
       // deltaY units depend on deltaMode: LINE → lines, PAGE → pages, PIXEL →
