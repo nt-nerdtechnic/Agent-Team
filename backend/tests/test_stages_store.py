@@ -70,7 +70,7 @@ class TestMigration:
         # Should have migrated old 3 stages into default pipeline
         assert len(stages) == 3
 
-    def test_migration_creates_bak(self, tmp_path):
+    def test_migration_retires_legacy_stages_file(self, tmp_path):
         legacy = tmp_path / STAGES_FILE
         old_stages = default_stages()[:2]
         legacy.write_text(json.dumps(old_stages, ensure_ascii=False), encoding="utf-8")
@@ -78,8 +78,33 @@ class TestMigration:
         store = StagesStore(tmp_path / PIPELINES_FILE)
         store.list()  # trigger migration
 
-        bak = tmp_path / "stages.json.bak"
-        assert bak.exists()
+        assert not legacy.exists()
+        assert (tmp_path / (STAGES_FILE + ".migrated-v1")).exists()
+        # One-time only: a second instance keeps the migrated data.
+        assert len(StagesStore(tmp_path / PIPELINES_FILE).list("default")) == 2
+
+    def test_legacy_pipelines_json_imported_once_and_retired(self, tmp_path):
+        legacy = tmp_path / PIPELINES_FILE
+        doc = {
+            "version": 2,
+            "schemaVersion": 1,
+            "active_pipeline_id": "custom",
+            "pipelines": [
+                {"id": "custom", "name": "自訂", "builtin": False,
+                 "stages": default_stages()[:2]},
+            ],
+        }
+        legacy.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+
+        store = StagesStore(legacy)
+        assert store.get_active_pipeline_id() == "custom"
+        assert [s["id"] for s in store.list("custom")] == [
+            s["id"] for s in default_stages()[:2]
+        ]
+        assert not legacy.exists()
+        assert (tmp_path / (PIPELINES_FILE + ".migrated-v1")).exists()
+        # Second instance re-reads the imported document.
+        assert StagesStore(legacy).get_active_pipeline_id() == "custom"
 
     def test_handles_corrupt_file_gracefully(self, tmp_path):
         pipelines_file = tmp_path / PIPELINES_FILE

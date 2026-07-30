@@ -722,17 +722,13 @@
           "label": "Current backend log",
           "desc": "The log file the running backend is writing to."
         },
-        "tokenIngestionState": {
-          "label": "Token ingestion state",
-          "desc": "Bookmarks tracking which CLI usage has already been counted."
-        },
-        "workspaceTokenStats": {
-          "label": "Per-workspace token stats",
-          "desc": "Token usage history recorded per workspace."
+        "navideDatabase": {
+          "label": "Navide database",
+          "desc": "The main database holding settings, token stats and registries."
         },
         "storeBackups": {
           "label": "Store backups",
-          "desc": "Automatic copies of the settings stores."
+          "desc": "Automatic copies of the settings stores, including JSON files retired by the SQLite migration."
         },
         "runtimeArtifacts": {
           "label": "Runtime artifacts",

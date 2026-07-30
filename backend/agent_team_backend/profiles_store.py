@@ -27,10 +27,12 @@ from typing import Any
 from uuid import uuid4
 
 from .applog import app_data_dir
+from .db import DB_FILENAME, Database
 
 log = logging.getLogger("agent_team_backend.cli_profiles")
 
 PROFILES_FILE = "cli-profiles.json"
+_KV_KEY = "cli_profiles"
 PROFILES_SCHEMA_VERSION = 1
 # antigravity is excluded on purpose: its OAuth token lives in a fixed-name
 # macOS Keychain entry, so config-home isolation cannot separate accounts.
@@ -98,12 +100,16 @@ def _empty_doc() -> dict[str, Any]:
 
 
 class CliProfilesStore:
-    """JSON-file registry of CLI account profiles (atomic writes, lazy dirs)."""
+    """SQLite-backed registry of CLI account profiles (kv document, lazy dirs)."""
 
     def __init__(
-        self, path: Path | None = None, profiles_root: Path | None = None
+        self,
+        path: Path | None = None,
+        profiles_root: Path | None = None,
+        db: Database | None = None,
     ) -> None:
         self._path = path or (app_data_dir() / PROFILES_FILE)
+        self._db = db or Database(self._path.parent / DB_FILENAME)
         self._profiles_root = Path(
             canonical_path_str(profiles_root or default_profiles_root())
         )
@@ -111,62 +117,63 @@ class CliProfilesStore:
 
     @property
     def path(self) -> Path:
-        return self._path
+        return self._db.path
 
     @property
     def profiles_root(self) -> Path:
         return self._profiles_root
 
-    # ---- disk I/O ----
+    # ---- persistence ----
+
+    @staticmethod
+    def _normalize_doc(data: Any) -> dict[str, Any] | None:
+        if not isinstance(data, dict):
+            return None
+        doc = _empty_doc()
+        profiles = data.get("profiles")
+        if isinstance(profiles, list):
+            doc["profiles"] = [p for p in profiles if isinstance(p, dict)]
+        defaults = data.get("defaults")
+        if isinstance(defaults, dict):
+            for key in SUPPORTED_AGENT_KEYS:
+                value = defaults.get(key)
+                doc["defaults"][key] = str(value) if value else None
+        return doc
+
+    def _import_legacy(self, cur: Any, data: Any) -> None:
+        doc = self._normalize_doc(data)
+        if doc is not None:
+            self._db.kv_set(_KV_KEY, doc, now=int(time.time()))
+        else:
+            log.warning("legacy cli-profiles.json malformed; starting empty")
 
     def _read(self) -> dict[str, Any]:
-        if not self._path.exists():
+        data = self._db.kv_get(_KV_KEY)
+        if data is None:
+            self._db.import_json(_KV_KEY, self._path, self._import_legacy)
+            data = self._db.kv_get(_KV_KEY)
+        if data is None:
+            # Dev-mode seeding: copy the installed app's registry the first
+            # time a dev data dir starts empty (kept from the JSON era).
             main_dir_file = self._path.parent.parent / "Agent-Team" / PROFILES_FILE
             if main_dir_file.exists():
                 try:
-                    data = json.loads(main_dir_file.read_text(encoding="utf-8"))
-                    if isinstance(data, dict):
-                        doc = _empty_doc()
-                        profiles = data.get("profiles")
-                        if isinstance(profiles, list):
-                            doc["profiles"] = [p for p in profiles if isinstance(p, dict)]
-                        defaults = data.get("defaults")
-                        if isinstance(defaults, dict):
-                            for key in SUPPORTED_AGENT_KEYS:
-                                value = defaults.get(key)
-                                doc["defaults"][key] = str(value) if value else None
+                    seed = json.loads(main_dir_file.read_text(encoding="utf-8"))
+                    doc = self._normalize_doc(seed)
+                    if doc is not None:
                         self._write(doc)
                         return doc
                 except Exception as seed_err:  # noqa: BLE001
-                    log.warning("seeding cli-profiles.json from %s failed: %s", main_dir_file, seed_err)
+                    log.warning("seeding cli profiles from %s failed: %s", main_dir_file, seed_err)
             return _empty_doc()
-        try:
-            data = json.loads(self._path.read_text(encoding="utf-8"))
-            if not isinstance(data, dict):
-                raise ValueError("cli-profiles.json must contain a JSON object")
-            doc = _empty_doc()
-            profiles = data.get("profiles")
-            if isinstance(profiles, list):
-                doc["profiles"] = [p for p in profiles if isinstance(p, dict)]
-            defaults = data.get("defaults")
-            if isinstance(defaults, dict):
-                for key in SUPPORTED_AGENT_KEYS:
-                    value = defaults.get(key)
-                    doc["defaults"][key] = str(value) if value else None
-            return doc
-        except Exception as err:  # noqa: BLE001
-            log.warning("cli-profiles.json corrupt (%s); starting empty", err)
+        doc = self._normalize_doc(data)
+        if doc is None:
+            log.warning("stored cli-profiles document malformed; starting empty")
             return _empty_doc()
+        return doc
 
     def _write(self, doc: dict[str, Any]) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
-        try:
-            tmp.write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
-            os.replace(tmp, self._path)
-        except Exception:
-            tmp.unlink(missing_ok=True)
-            raise
+        self._db.kv_set(_KV_KEY, doc, now=int(time.time()))
 
     # ---- public API ----
 

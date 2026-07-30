@@ -722,17 +722,13 @@
           "label": "目前的後端日誌",
           "desc": "執行中的後端正在寫入的日誌檔。"
         },
-        "tokenIngestionState": {
-          "label": "Token 匯入進度",
-          "desc": "記錄哪些 CLI 用量已被統計過的書籤。"
-        },
-        "workspaceTokenStats": {
-          "label": "各工作區 Token 統計",
-          "desc": "依工作區記錄的 token 用量歷史。"
+        "navideDatabase": {
+          "label": "Navide 資料庫",
+          "desc": "設定、token 統計與各項登錄資料的主資料庫。"
         },
         "storeBackups": {
           "label": "設定檔備份",
-          "desc": "設定儲存檔的自動備份副本。"
+          "desc": "設定儲存檔的自動備份副本，含 SQLite 遷移後退役的 JSON 檔。"
         },
         "runtimeArtifacts": {
           "label": "執行期產物",

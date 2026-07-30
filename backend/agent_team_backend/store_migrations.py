@@ -20,12 +20,16 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Any, Callable
 
 from . import __version__
 from .applog import app_data_dir
+from .db import DB_FILENAME
 from .roles_store import ROLES_FILE
 from .stages_store import PIPELINES_FILE, SCHEMA_VERSION as STORE_SCHEMA_VERSION
 from .tokens_store import (
@@ -48,6 +52,8 @@ KEEP_BACKUPS = 2
 # The canonical user-data JSON stores that live directly under app-data.
 # Derived token caches (recorded-event-keys.json, ingestion-state, journal) and
 # per-workspace project.json are intentionally excluded — they self-heal.
+# After the SQLite migration these files are retired (*.migrated-v1) and the
+# live data sits in navide.db, which _backup_stores snapshots separately.
 STORE_FILENAMES: tuple[str, ...] = (PIPELINES_FILE, ROLES_FILE, TOKENS_FILE)
 
 # Each store carries its own schemaVersion and target. Roles is a bare list
@@ -133,8 +139,35 @@ def _backup_stores(base: Path, version: str) -> None:
         if src.exists():
             shutil.copy2(src, dest / name)
             copied += 1
+    if _backup_database(base, dest):
+        copied += 1
     log.info("backed up %d store file(s) to %s", copied, dest)
     _prune_backups(base / BACKUP_DIR)
+
+
+def _backup_database(base: Path, dest: Path) -> bool:
+    """Snapshot navide.db into the version backup dir. Returns True on success.
+
+    Uses SQLite's online backup API rather than a file copy: by the time this
+    runs (startup task), the app's own connection is already live and writing,
+    so a plain copy2 could capture a torn page image.
+    """
+    src = base / DB_FILENAME
+    if not src.exists():
+        return False
+    out_file = dest / DB_FILENAME
+    try:
+        with closing(sqlite3.connect(str(src))) as conn, closing(
+            sqlite3.connect(str(out_file))
+        ) as out:
+            conn.backup(out)
+        # The backup holds the same secrets as the live database (which gets
+        # 0600 from AIChatSettingsStore); don't leave it at the umask default.
+        os.chmod(out_file, 0o600)
+        return True
+    except (sqlite3.Error, OSError) as err:  # noqa: BLE001
+        log.warning("navide.db backup failed (%s); continuing", err)
+        return False
 
 
 def _prune_backups(backup_root: Path) -> None:

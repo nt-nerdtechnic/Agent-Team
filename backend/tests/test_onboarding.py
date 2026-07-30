@@ -206,8 +206,8 @@ def test_legacy_flag_migrated_to_new_path(tmp_path: Path, monkeypatch: pytest.Mo
     legacy.parent.mkdir(parents=True, exist_ok=True)
     legacy.write_text('{"complete": true}', encoding="utf-8")
     assert ob.is_complete() is True
-    # First read copies the legacy file to the new location.
-    assert flag.exists()
+    # First read seeds the stored state, so the legacy file is no longer needed.
+    legacy.unlink()
     assert ob.is_complete() is True
 
 
@@ -233,8 +233,27 @@ def test_new_flag_wins_over_legacy(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 def test_set_complete_writes_new_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     flag, legacy = _patch_flag_paths(monkeypatch, tmp_path)
     ob.set_complete(True)
-    assert flag.exists()
+    # State lands in the app-data database, never in the legacy home file.
+    assert (flag.parent / "navide.db").exists()
     assert not legacy.exists()
+    assert ob.is_complete() is True
+
+
+def test_legacy_app_data_json_imported_once_and_retired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    flag, _legacy = _patch_flag_paths(monkeypatch, tmp_path)
+    flag.parent.mkdir(parents=True, exist_ok=True)
+    flag.write_text(
+        '{"complete": true, "dismissed_cli_health": "0123456789abcdef"}',
+        encoding="utf-8",
+    )
+    assert ob.is_complete() is True
+    assert ob._dismissed_cli_health_fingerprint() == "0123456789abcdef"
+    assert not flag.exists()
+    assert flag.with_name(flag.name + ".migrated-v1").exists()
+    # Data survives the retired source file.
+    assert ob.is_complete() is True
 
 
 def _make_executable(path: Path) -> Path:
@@ -498,7 +517,7 @@ def test_cli_binary_selection_persists_path_and_fingerprint_atomically(
     assert result == {"ok": True, "agent_key": "claude", "path": str(binary)}
     assert ob.cli_binary_override("claude") == str(binary)
     assert ob._dismissed_cli_health_fingerprint() == "0123456789abcdef"
-    assert json.loads(flag.read_text(encoding="utf-8")) == {
+    assert ob._read_state() == {
         "complete": True,
         "cli_binary_overrides": {"claude": str(binary)},
         "dismissed_cli_health": "0123456789abcdef",

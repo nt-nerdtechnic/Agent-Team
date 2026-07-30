@@ -7,20 +7,21 @@ Defaults are seeded on first load.
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 import re
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .applog import app_data_dir
+from .db import DB_FILENAME, Database
 
 log = logging.getLogger("agent_team_backend.roles")
 
 ROLES_FILE = "roles.json"
+_KV_KEY = "roles"
 
 _KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 
@@ -86,44 +87,37 @@ def default_roles() -> list[dict[str, Any]]:
 
 
 class RolesStore:
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(self, path: Path | None = None, db: Database | None = None) -> None:
         self._path = path or (app_data_dir() / ROLES_FILE)
+        self._db = db or Database(self._path.parent / DB_FILENAME)
         self._lock = threading.Lock()
 
     @property
     def path(self) -> Path:
-        return self._path
+        return self._db.path
 
-    def _ensure_dir(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+    def _import_legacy(self, cur: Any, data: Any) -> None:
+        if isinstance(data, list):
+            self._db.kv_set(_KV_KEY, data, now=int(time.time()))
 
     def _read(self) -> list[dict[str, Any]]:
-        if not self._path.exists():
+        data = self._db.kv_get(_KV_KEY)
+        if data is None:
+            self._db.import_json(_KV_KEY, self._path, self._import_legacy)
+            data = self._db.kv_get(_KV_KEY)
+        if data is None:
             seed = default_roles()
             self._write(seed)
             return seed
-        try:
-            if self._path.stat().st_size > 1_048_576:  # 1 MB sanity cap
-                raise ValueError("roles.json exceeds size limit")
-            data = json.loads(self._path.read_text(encoding="utf-8"))
-            if not isinstance(data, list):
-                raise ValueError("roles.json must contain a JSON array")
-            return data
-        except Exception as err:  # noqa: BLE001
-            log.warning("roles.json corrupt (%s); regenerating defaults", err)
+        if not isinstance(data, list):
+            log.warning("stored roles document is not a list; regenerating defaults")
             seed = default_roles()
             self._write(seed)
             return seed
+        return data
 
     def _write(self, roles: list[dict[str, Any]]) -> None:
-        self._ensure_dir()
-        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
-        try:
-            tmp.write_text(json.dumps(roles, indent=2, ensure_ascii=False), encoding="utf-8")
-            os.replace(tmp, self._path)
-        except Exception:
-            tmp.unlink(missing_ok=True)
-            raise
+        self._db.kv_set(_KV_KEY, roles, now=int(time.time()))
 
     # ---- public API ----
 

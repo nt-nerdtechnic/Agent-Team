@@ -1,8 +1,11 @@
 """Per-workspace project metadata + per-run pipeline event logs.
 
 Each workspace gets a `.agent-team/` directory containing:
-  - project.json                                 current pipeline state, atomic-write
+  - navide.db                                    project document (kv "project")
   - pipeline-YYYYMMDD-HHMMSS-<task-slug>.log    one log file per pipeline run
+
+The legacy `project.json` is imported into the database on first access and
+renamed `project.json.migrated-v1`.
 """
 
 from __future__ import annotations
@@ -12,18 +15,24 @@ import json
 import logging
 import os
 import re
-import shutil
 import threading
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .db import DB_FILENAME, WorkspaceDatabases
+
 log = logging.getLogger("agent_team_backend.projects")
 
 PROJECT_DIR_NAME = ".agent-team"
-PROJECT_FILE = "project.json"
+PROJECT_FILE = "project.json"  # legacy JSON name, still used for import
 RUNS_SUBDIR = "runs"
+_KV_KEY = "project"
+# Same sanity cap the JSON reader enforced; oversize legacy files are treated
+# as unreadable at import time (kept on disk for inspection).
+_LEGACY_MAX_BYTES = 524_288
 
 
 def _now_iso() -> str:
@@ -48,23 +57,6 @@ def _make_log_filename(task_description: str) -> str:
 def _project_id_for(workspace_path: str) -> str:
     h = hashlib.sha1(workspace_path.encode("utf-8")).hexdigest()[:10]
     return f"proj_{h}"
-
-
-def _backup_project_json(workspace_path: str) -> None:
-    """Copy project.json to a sibling project.json.bak (best-effort).
-
-    Called before reconnect_pane_session rewrites a pane's session id, so the
-    prior mapping can be recovered. No-op when the source is missing; a backup
-    failure logs and returns rather than blocking the reconnect. Mirrors the
-    shutil.copy2 style of store_migrations._backup_stores.
-    """
-    src = Path(workspace_path) / PROJECT_DIR_NAME / PROJECT_FILE
-    if not src.exists():
-        return
-    try:
-        shutil.copy2(src, src.with_suffix(src.suffix + ".bak"))
-    except OSError as err:  # noqa: BLE001
-        log.warning("project.json backup failed for %s (%s); continuing", workspace_path, err)
 
 
 def ensure_workspace_data_dir(workspace_path: str) -> Path:
@@ -249,9 +241,10 @@ class Project:
 
 
 class ProjectStore:
-    """Manages project.json + pipeline.log under each workspace."""
+    """Manages the project document (workspace navide.db) + pipeline.log."""
 
-    def __init__(self) -> None:
+    def __init__(self, databases: WorkspaceDatabases | None = None) -> None:
+        self._databases = databases or WorkspaceDatabases()
         # Serializes project.json writes. Most mutations run on the asyncio
         # event loop (implicitly serialized); set_ui_state is offloaded to a
         # worker thread (see ws_handlers), so its read-modify-write and every
@@ -268,6 +261,10 @@ class ProjectStore:
         return Path(workspace_path) / PROJECT_DIR_NAME
 
     def project_file(self, workspace_path: str) -> Path:
+        """Where the project document lives now: the workspace database."""
+        return self.project_dir(workspace_path) / DB_FILENAME
+
+    def _legacy_file(self, workspace_path: str) -> Path:
         return self.project_dir(workspace_path) / PROJECT_FILE
 
     def log_file(self, workspace_path: str, log_file_name: str = "") -> Path:
@@ -282,33 +279,107 @@ class ProjectStore:
     def _ensure_dir(self, workspace_path: str) -> Path:
         return ensure_workspace_data_dir(workspace_path)
 
+    def _parse_legacy(self, text: str) -> Any:
+        if len(text.encode("utf-8")) > _LEGACY_MAX_BYTES:
+            raise ValueError("project.json exceeds size limit")
+        return json.loads(text)
+
+    def _import_legacy(self, workspace_path: str) -> None:
+        """One-time import of the legacy project.json into the workspace db."""
+        db = self._databases.get(workspace_path)
+        if db is None:
+            return
+        source = self._legacy_file(workspace_path)
+
+        def load(cur: Any, data: Any) -> None:
+            if isinstance(data, dict):
+                # kv_set joins the surrounding import transaction (reentrant).
+                db.kv_set(_KV_KEY, data, now=int(time.time()))
+            else:
+                # Raising rolls the import back (no marker, file kept), so
+                # fail-closed readers (storage_service) keep reporting the
+                # malformed file unreadable instead of seeing an empty store.
+                raise ValueError("legacy project.json is not an object")
+
+        def merge(cur: Any, data: Any) -> None:
+            # Legacy-writer coexistence: an older app version regenerated
+            # project.json after the import. The project document cannot be
+            # merged field-by-field, so this is last-writer-wins at document
+            # granularity: the regenerated file replaces the kv document only
+            # when its mtime is newer than the kv row's updated_at.
+            if not isinstance(data, dict):
+                log.warning(
+                    "regenerated project.json for %s is not an object; ignored",
+                    workspace_path,
+                )
+                return
+            try:
+                mtime = source.stat().st_mtime
+            except OSError:
+                return
+            stamp = db.kv_updated_at(_KV_KEY)
+            if stamp is None or mtime > stamp:
+                db.kv_set(_KV_KEY, data, now=int(time.time()))
+
+        try:
+            db.import_json(
+                _KV_KEY, source, load, parse=self._parse_legacy, merge=merge
+            )
+        except ValueError as err:
+            # Malformed shape: the import rolled back and will retry on the
+            # next access; the file stays in place for inspection.
+            log.warning(
+                "legacy project.json for %s not imported: %s", workspace_path, err
+            )
+
+    def _read_doc(self, workspace_path: str) -> dict[str, Any] | None:
+        """The stored project document after the one-time legacy import."""
+        db = self._databases.get(workspace_path)
+        if db is None:
+            return None
+        self._import_legacy(workspace_path)
+        doc = db.kv_get(_KV_KEY)
+        return doc if isinstance(doc, dict) else None
+
     def peek(self, workspace_path: str) -> Project | None:
         """Return the existing project for this workspace WITHOUT creating one.
 
         Returns None when:
           - the workspace path is empty / does not exist
-          - no .agent-team/project.json is present
-          - the JSON file is corrupt (we don't auto-recreate during peek so
-            the user isn't surprised by hidden file writes from typing in
+          - neither the workspace db nor a legacy project.json is present
+          - the stored document is corrupt (we don't auto-recreate during peek
+            so the user isn't surprised by hidden file writes from typing in
             the workspace input)
+
+        Peek stays write-free: when only the legacy project.json exists it is
+        read directly and the import is left to the first mutating access.
         """
         if not workspace_path:
             return None
         ws = os.path.abspath(workspace_path)
         if not os.path.isdir(ws):
             return None
-        pf = self.project_file(ws)
-        if not pf.exists():
+        db = self._databases.peek(ws)
+        if db is not None:
+            self._import_legacy(ws)
+            data = db.kv_get(_KV_KEY)
+        else:
+            pf = self._legacy_file(ws)
+            if not pf.exists():
+                return None
+            try:
+                data = self._parse_legacy(pf.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as err:
+                log.warning("project.json at %s is corrupt during peek (%s)", pf, err)
+                return None
+        if not isinstance(data, dict):
             return None
         try:
-            if pf.stat().st_size > 524_288:  # 512 KB sanity cap
-                raise ValueError("project.json exceeds size limit")
-            data = json.loads(pf.read_text(encoding="utf-8"))
             project = Project.from_dict(data)
             project.workspace_path = ws
             return project
         except Exception as err:  # noqa: BLE001
-            log.warning("project.json at %s is corrupt during peek (%s)", pf, err)
+            log.warning("project document for %s is corrupt during peek (%s)", ws, err)
             return None
 
     def load_or_create(
@@ -317,18 +388,15 @@ class ProjectStore:
         ws = os.path.abspath(workspace_path)
         if not os.path.isdir(ws):
             raise FileNotFoundError(f"workspace does not exist: {ws}")
-        pf = self.project_file(ws)
-        if pf.exists():
+        data = self._read_doc(ws)
+        if data is not None:
             try:
-                if pf.stat().st_size > 524_288:
-                    raise ValueError("project.json exceeds size limit")
-                data = json.loads(pf.read_text(encoding="utf-8"))
                 project = Project.from_dict(data)
                 # Keep workspace_path canonical in case the user moved the folder.
                 project.workspace_path = ws
                 return project
             except Exception as err:  # noqa: BLE001
-                log.warning("project.json at %s is corrupt (%s); recreating", pf, err)
+                log.warning("project document for %s is corrupt (%s); recreating", ws, err)
 
         now = _now_iso()
         project = Project(
@@ -353,12 +421,21 @@ class ProjectStore:
     def save(self, project: Project) -> Path:
         with self._save_lock:
             project.updated_at = _now_iso()
-            self._ensure_dir(project.workspace_path)
             pf = self.project_file(project.workspace_path)
-            tmp = pf.with_suffix(pf.suffix + ".tmp")
-            payload = json.dumps(project.to_dict(), indent=2, ensure_ascii=False)
-            tmp.write_text(payload, encoding="utf-8")
-            os.replace(tmp, pf)
+            db = self._databases.get(project.workspace_path)
+            if db is None:
+                # The data dir may have vanished mid-session; recreate it
+                # (the old file store's _ensure_dir behavior) and retry.
+                ensure_workspace_data_dir(project.workspace_path)
+                db = self._databases.get(project.workspace_path)
+            if db is None:
+                raise OSError(
+                    f"cannot save project: workspace "
+                    f"{project.workspace_path} is not a directory"
+                )
+            # Import first so a later first-read import cannot clobber this save.
+            self._import_legacy(project.workspace_path)
+            db.kv_set(_KV_KEY, project.to_dict(), now=int(time.time()))
             return pf
 
     def append_event(
@@ -838,17 +915,15 @@ class ProjectStore:
         """Point a single pane at a chosen transcript's session id.
 
         Deterministic reconnect for a ghost pane (its own id has no transcript):
-        under the save lock, back up project.json first, then rewrite ONLY the
-        matching pane's session_id and save — the same write shape as
-        record_manual_pane_session. Raises KeyError when pane_id is unknown.
-        Never touches any other pane.
+        under the save lock, rewrite ONLY the matching pane's session_id and
+        save — the same write shape as record_manual_pane_session. Raises
+        KeyError when pane_id is unknown. Never touches any other pane.
         """
         with self._save_lock:
             project = self.load_or_create(workspace_path)
             pane = next((p for p in project.panes if p.pane_id == pane_id), None)
             if pane is None:
                 raise KeyError(f"pane {pane_id!r} not found in project {project.id}")
-            _backup_project_json(workspace_path)
             pane.session_id = session_id
             self.save(project)
             return project

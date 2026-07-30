@@ -1,12 +1,11 @@
 """ProjectStore.reconnect_pane_session — deterministic pane→transcript rebind.
 
-Backs up project.json, rewrites ONLY the target pane's session_id, leaves
-siblings untouched, and raises on an unknown pane_id.
+Rewrites ONLY the target pane's session_id, leaves siblings untouched, and
+raises on an unknown pane_id.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -23,17 +22,6 @@ def _store_with_two_panes(ws: Path) -> ProjectStore:
     ]
     store.save(project)
     return store
-
-
-def test_backs_up_project_json_with_old_content(tmp_path: Path) -> None:
-    store = _store_with_two_panes(tmp_path)
-    store.reconnect_pane_session(str(tmp_path), pane_id="A", session_id="new-a")
-
-    bak = tmp_path / ".agent-team" / "project.json.bak"
-    assert bak.exists()
-    backed_up = json.loads(bak.read_text(encoding="utf-8"))
-    pane_a = next(p for p in backed_up["panes"] if p["pane_id"] == "A")
-    assert pane_a["session_id"] == "old-a"  # backup captured the pre-rewrite id
 
 
 def test_rewrites_only_target_pane(tmp_path: Path) -> None:

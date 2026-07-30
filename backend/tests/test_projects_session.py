@@ -7,6 +7,9 @@ all spawn / detect / unspawn write paths populate panes[] correctly.
 
 from __future__ import annotations
 
+import json
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -84,6 +87,84 @@ def test_old_project_json_migrates_manual_panes(tmp_path: Path) -> None:
     assert len(restored.panes) == 1
     assert restored.panes[0].origin == "manual"
     assert restored.panes[0].session_id == "manual-sess"
+
+
+def _regenerated_project_json(tmp_path: Path, project: Project) -> Path:
+    """Write a legacy project.json as an older, still-running app would."""
+    doc = project.to_dict()
+    doc["name"] = "from-legacy"
+    legacy = tmp_path / ".agent-team" / "project.json"
+    legacy.write_text(json.dumps(doc), encoding="utf-8")
+    return legacy
+
+
+def test_legacy_writer_regenerated_project_json_newer_wins(tmp_path: Path) -> None:
+    """Coexistence: an older app version recreates project.json after the
+    import — last-writer-wins at document granularity, by file mtime vs the
+    kv row's updated_at."""
+    ws = str(tmp_path)
+    project = ProjectStore().load_or_create(ws, name="from-db")
+    legacy = _regenerated_project_json(tmp_path, project)
+    os.utime(legacy, (time.time() + 100,) * 2)  # regenerated after the kv write
+    reloaded = ProjectStore().load_or_create(ws)
+    assert reloaded.name == "from-legacy"
+    assert not legacy.exists()
+    assert legacy.with_name(legacy.name + ".migrated-v1").exists()
+
+
+def test_legacy_writer_regenerated_project_json_older_is_discarded(tmp_path: Path) -> None:
+    ws = str(tmp_path)
+    project = ProjectStore().load_or_create(ws, name="from-db")
+    legacy = _regenerated_project_json(tmp_path, project)
+    os.utime(legacy, (time.time() - 100,) * 2)  # stale copy, kv is newer
+    reloaded = ProjectStore().load_or_create(ws)
+    assert reloaded.name == "from-db"
+    assert not legacy.exists()  # retired without merging
+
+
+def test_malformed_legacy_project_json_is_kept_and_not_marked_imported(
+    tmp_path: Path,
+) -> None:
+    """A parseable legacy file that is not an object rolls the import back:
+    no marker, file left in place — fail-closed readers (storage_service)
+    must keep seeing it as unreadable rather than as an empty store."""
+    legacy = tmp_path / ".agent-team" / "project.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+    project = ProjectStore().load_or_create(str(tmp_path), name="fresh")
+    assert project.name == "fresh"
+    assert legacy.exists()
+    assert not legacy.with_name(legacy.name + ".migrated-v1").exists()
+
+
+def test_save_recreates_a_vanished_workspace_data_dir(tmp_path: Path) -> None:
+    """The old file store's _ensure_dir recreated a data dir that vanished
+    mid-session; save() must do the same instead of pretending success."""
+    import shutil
+
+    ws = str(tmp_path / "ws")
+    (tmp_path / "ws").mkdir()
+    project = ProjectStore().load_or_create(ws, name="kept")
+    shutil.rmtree(tmp_path / "ws")
+
+    store = ProjectStore()
+    store.save(project)
+
+    assert (tmp_path / "ws" / ".agent-team" / "navide.db").exists()
+    assert ProjectStore().load_or_create(ws).name == "kept"
+
+
+def test_save_raises_when_the_workspace_cannot_be_a_directory(tmp_path: Path) -> None:
+    """When even recreating the data dir fails, save() raises (the old file
+    store's behavior) instead of silently dropping the document."""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("", encoding="utf-8")
+    project = Project(
+        id="p", name="n", workspace_path=str(blocker),
+        created_at="t", updated_at="t",
+    )
+    with pytest.raises(OSError):
+        ProjectStore().save(project)
 
 
 @pytest.fixture

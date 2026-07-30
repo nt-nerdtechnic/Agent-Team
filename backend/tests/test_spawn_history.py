@@ -1,8 +1,9 @@
 """SpawnHistoryStore — full per-workspace spawn history + pagination.
 
 Covers merge upsert semantics (replace by paneId, never delete), the one-time
-migration seeded from the project.json mirror, newest-first page reads with
-offset/limit edge cases, corrupt-file recovery, the runaway-size cap, and the
+migration seeded from the project mirror, newest-first page reads with
+offset/limit edge cases, the legacy spawn-history.json import (including
+corrupt-file tolerance), the runaway-size cap, and the
 project.get_spawn_history ws handler.
 """
 
@@ -14,16 +15,20 @@ from typing import Any
 
 from agent_team_backend import spawn_history as spawn_history_module
 from agent_team_backend.projects import ProjectStore
-from agent_team_backend.spawn_history import SpawnHistoryStore
+from agent_team_backend.spawn_history import (
+    SpawnHistoryStore,
+    read_stored_entries_checked,
+)
 
 
 def _entry(pane_id: str, **fields: Any) -> dict[str, Any]:
     return {"paneId": pane_id, "agentKey": "claude", **fields}
 
 
-def _stored_entries(store: SpawnHistoryStore, ws: Path) -> list[dict[str, Any]]:
-    data = json.loads(store.history_file(str(ws)).read_text(encoding="utf-8"))
-    return data["entries"]
+def _stored_entries(ws: Path) -> list[dict[str, Any]]:
+    """The persisted entries, read back through a fresh read-only connection —
+    equivalent to what a restarted backend would see."""
+    return spawn_history_module.read_stored_entries(str(ws))
 
 
 # ── merge ────────────────────────────────────────────────────────────────────
@@ -33,14 +38,14 @@ def test_merge_appends_new_entries_in_order(tmp_path: Path) -> None:
     store = SpawnHistoryStore()
     total = store.merge(str(tmp_path), [_entry("p1"), _entry("p2")])
     assert total == 2
-    assert [e["paneId"] for e in _stored_entries(store, tmp_path)] == ["p1", "p2"]
+    assert [e["paneId"] for e in _stored_entries(tmp_path)] == ["p1", "p2"]
 
 
 def test_merge_upserts_existing_entry_in_place(tmp_path: Path) -> None:
     store = SpawnHistoryStore()
     store.merge(str(tmp_path), [_entry("p1"), _entry("p2")])
     store.merge(str(tmp_path), [_entry("p1", customName="Renamed", sessionId="s-1")])
-    entries = _stored_entries(store, tmp_path)
+    entries = _stored_entries(tmp_path)
     # Position preserved (oldest → newest by spawn), fields updated.
     assert [e["paneId"] for e in entries] == ["p1", "p2"]
     assert entries[0]["customName"] == "Renamed"
@@ -53,7 +58,7 @@ def test_merge_replacement_clears_fields_the_renderer_removed(tmp_path: Path) ->
     store = SpawnHistoryStore()
     store.merge(str(tmp_path), [_entry("p1", customName="Old name")])
     store.merge(str(tmp_path), [_entry("p1")])
-    assert "customName" not in _stored_entries(store, tmp_path)[0]
+    assert "customName" not in _stored_entries(tmp_path)[0]
 
 
 def test_merge_never_deletes_entries_absent_from_payload(tmp_path: Path) -> None:
@@ -61,7 +66,7 @@ def test_merge_never_deletes_entries_absent_from_payload(tmp_path: Path) -> None
     store.merge(str(tmp_path), [_entry(f"p{i}") for i in range(5)])
     # A later (windowed) snapshot containing only the newest entry.
     store.merge(str(tmp_path), [_entry("p4", removedAt="2026-07-22T00:00:00Z")])
-    entries = _stored_entries(store, tmp_path)
+    entries = _stored_entries(tmp_path)
     assert [e["paneId"] for e in entries] == ["p0", "p1", "p2", "p3", "p4"]
     assert entries[4]["removedAt"] == "2026-07-22T00:00:00Z"
 
@@ -72,7 +77,7 @@ def test_merge_skips_entries_without_pane_id(tmp_path: Path) -> None:
         str(tmp_path), [_entry("p1"), {"agentKey": "claude"}, {"paneId": ""}, "junk"]  # type: ignore[list-item]
     )
     assert total == 1
-    assert [e["paneId"] for e in _stored_entries(store, tmp_path)] == ["p1"]
+    assert [e["paneId"] for e in _stored_entries(tmp_path)] == ["p1"]
 
 
 def test_merge_cap_drops_oldest_and_warns(tmp_path: Path, monkeypatch, caplog) -> None:
@@ -81,22 +86,50 @@ def test_merge_cap_drops_oldest_and_warns(tmp_path: Path, monkeypatch, caplog) -
     with caplog.at_level("WARNING", logger="agent_team_backend.spawn_history"):
         total = store.merge(str(tmp_path), [_entry(f"p{i}") for i in range(5)])
     assert total == 3
-    assert [e["paneId"] for e in _stored_entries(store, tmp_path)] == ["p2", "p3", "p4"]
+    assert [e["paneId"] for e in _stored_entries(tmp_path)] == ["p2", "p3", "p4"]
     assert any("dropped 2 oldest" in r.message for r in caplog.records)
 
 
-def test_merge_seeds_from_mirror_only_when_file_missing(tmp_path: Path) -> None:
+def test_merge_seeds_from_mirror_only_when_store_missing(tmp_path: Path) -> None:
     store = SpawnHistoryStore()
     seed = [_entry("old-1"), _entry("old-2")]
     store.merge(str(tmp_path), [_entry("new-1")], seed=seed)
-    assert [e["paneId"] for e in _stored_entries(store, tmp_path)] == [
+    assert [e["paneId"] for e in _stored_entries(tmp_path)] == [
         "old-1", "old-2", "new-1",
     ]
-    # Once the file exists the seed is ignored — no duplicate resurrection.
+    # Once the document exists the seed is ignored — no duplicate resurrection.
     store.merge(str(tmp_path), [_entry("new-2")], seed=seed)
-    assert [e["paneId"] for e in _stored_entries(store, tmp_path)] == [
+    assert [e["paneId"] for e in _stored_entries(tmp_path)] == [
         "old-1", "old-2", "new-1", "new-2",
     ]
+
+
+def test_legacy_writer_regenerated_file_merges_by_pane_id(tmp_path: Path) -> None:
+    """Coexistence: an older app version recreates spawn-history.json after
+    the import completed. Unknown paneIds are appended; when both sides have
+    an entry the newer last-touched one wins — in either direction."""
+    store = SpawnHistoryStore()
+    store.merge(str(tmp_path), [
+        _entry("stale", spawnedAt="2026-07-30T10:00:00Z", customName="kv-old"),
+        _entry("fresh", spawnedAt="2026-07-30T12:00:00Z", customName="kv-new"),
+    ])
+    legacy = tmp_path / ".agent-team" / "spawn-history.json"
+    legacy.write_text(
+        json.dumps({"version": 1, "entries": [
+            _entry("stale", spawnedAt="2026-07-30T11:00:00Z", customName="json-new"),
+            _entry("fresh", spawnedAt="2026-07-30T11:00:00Z", customName="json-old"),
+            _entry("added", spawnedAt="2026-07-30T11:30:00Z"),
+        ]}),
+        encoding="utf-8",
+    )
+    page, total = SpawnHistoryStore().read_page(str(tmp_path))
+    by_id = {e["paneId"]: e for e in page}
+    assert total == 3
+    assert by_id["stale"]["customName"] == "json-new"  # regenerated side newer
+    assert by_id["fresh"]["customName"] == "kv-new"    # stored side newer
+    assert "added" in by_id                            # new paneId appended
+    assert not legacy.exists()
+    assert legacy.with_name(legacy.name + ".migrated-v1").exists()
 
 
 # ── read_page ────────────────────────────────────────────────────────────────
@@ -153,33 +186,67 @@ def test_read_page_seeds_migration_from_mirror_and_persists(tmp_path: Path) -> N
     assert [e["paneId"] for e in page2] == ["m2", "m1"]
 
 
-# ── corrupt-file recovery ────────────────────────────────────────────────────
+# ── legacy JSON import + corrupt-file tolerance ──────────────────────────────
 
 
-def test_corrupt_file_is_backed_up_and_store_starts_empty(tmp_path: Path) -> None:
+def _legacy_file(ws: Path) -> Path:
+    return ws / ".agent-team" / "spawn-history.json"
+
+
+def test_legacy_json_imported_once_and_retired(tmp_path: Path) -> None:
+    legacy = _legacy_file(tmp_path)
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(
+        json.dumps({"version": 1, "entries": [_entry("p1"), _entry("p2")]}),
+        encoding="utf-8",
+    )
+    page, total = SpawnHistoryStore().read_page(str(tmp_path), offset=0, limit=10)
+    assert total == 2
+    assert [e["paneId"] for e in page] == ["p2", "p1"]
+    assert not legacy.exists()
+    assert legacy.with_name(legacy.name + ".migrated-v1").exists()
+    # A fresh store reads the imported data (no re-import, no duplication).
+    page2, total2 = SpawnHistoryStore().read_page(str(tmp_path), offset=0, limit=10)
+    assert total2 == 2
+    assert [e["paneId"] for e in page2] == ["p2", "p1"]
+
+
+def test_corrupt_legacy_file_starts_empty_and_is_kept_for_inspection(
+    tmp_path: Path,
+) -> None:
+    """An unreadable legacy file is left in place (never renamed) and the
+    store starts empty; merging works again on the fresh document."""
     store = SpawnHistoryStore()
-    hf = store.history_file(str(tmp_path))
-    hf.parent.mkdir(parents=True)
-    hf.write_text("{ not json", encoding="utf-8")
+    legacy = _legacy_file(tmp_path)
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("{ not json", encoding="utf-8")
     page, total = store.read_page(str(tmp_path), offset=0, limit=10)
     assert page == []
     assert total == 0
-    backup = hf.with_suffix(hf.suffix + ".corrupt")
-    assert backup.read_text(encoding="utf-8") == "{ not json"
-    # The store recovers: merging works again on the fresh file.
+    assert legacy.read_text(encoding="utf-8") == "{ not json"
+    # The store recovers: merging works again on the fresh document.
     store.merge(str(tmp_path), [_entry("p1")])
-    assert [e["paneId"] for e in _stored_entries(store, tmp_path)] == ["p1"]
+    assert [e["paneId"] for e in _stored_entries(tmp_path)] == ["p1"]
 
 
-def test_wrong_shape_is_treated_as_corrupt(tmp_path: Path) -> None:
-    store = SpawnHistoryStore()
-    hf = store.history_file(str(tmp_path))
-    hf.parent.mkdir(parents=True)
-    hf.write_text(json.dumps({"entries": "nope"}), encoding="utf-8")
-    page, total = store.read_page(str(tmp_path), offset=0, limit=10)
+def test_wrong_shape_legacy_file_is_kept_and_stays_fail_closed(
+    tmp_path: Path,
+) -> None:
+    """A parseable legacy document whose entries is not a list rolls the
+    import back: the store reads empty (never crashes), the file stays in
+    place for inspection, and checked readers keep reporting it unreadable
+    — cleanup must not mistake it for an empty store."""
+    legacy = _legacy_file(tmp_path)
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(json.dumps({"entries": "nope"}), encoding="utf-8")
+    page, total = SpawnHistoryStore().read_page(str(tmp_path), offset=0, limit=10)
     assert page == []
     assert total == 0
-    assert hf.with_suffix(hf.suffix + ".corrupt").exists()
+    assert legacy.exists()
+    assert not legacy.with_name(legacy.name + ".migrated-v1").exists()
+    entries, readable = read_stored_entries_checked(str(tmp_path))
+    assert entries == []
+    assert readable is False
 
 
 # ── project.get_spawn_history ws handler ─────────────────────────────────────
@@ -220,7 +287,7 @@ async def test_get_spawn_history_handler_pages_and_migrates(
     assert resp["payload"]["offset"] == 1
     assert [e["paneId"] for e in resp["payload"]["entries"]] == ["p1"]
     # First paged read migrated the mirror into the full store.
-    assert app.spawn_history_store.history_file(str(tmp_path)).exists()
+    assert [e["paneId"] for e in _stored_entries(tmp_path)] == ["p0", "p1", "p2"]
 
 
 async def test_get_spawn_history_handler_defaults_bad_params(
@@ -268,7 +335,7 @@ def test_merge_drops_foreign_workspace_entries_and_warns(
             _entry("legacy"),
         ])
     assert total == 2
-    assert [e["paneId"] for e in _stored_entries(store, ws)] == ["mine", "legacy"]
+    assert [e["paneId"] for e in _stored_entries(ws)] == ["mine", "legacy"]
     assert any(
         "dropped 1 foreign spawn-history entries" in r.message for r in caplog.records
     )
@@ -340,10 +407,10 @@ def test_patch_entry_sets_and_removes_fields(tmp_path: Path) -> None:
     store = SpawnHistoryStore()
     store.merge(str(tmp_path), [_entry("p1"), _entry("p2")])
     assert store.patch_entry(str(tmp_path), "p1", {"customName": "Renamed"})
-    assert _stored_entries(store, tmp_path)[0]["customName"] == "Renamed"
+    assert _stored_entries(tmp_path)[0]["customName"] == "Renamed"
     # A None value removes the key (customName reset).
     assert store.patch_entry(str(tmp_path), "p1", {"customName": None})
-    entries = _stored_entries(store, tmp_path)
+    entries = _stored_entries(tmp_path)
     assert "customName" not in entries[0]
     assert [e["paneId"] for e in entries] == ["p1", "p2"]
 
@@ -351,9 +418,9 @@ def test_patch_entry_sets_and_removes_fields(tmp_path: Path) -> None:
 def test_patch_entry_unknown_pane_id_writes_nothing(tmp_path: Path) -> None:
     store = SpawnHistoryStore()
     store.merge(str(tmp_path), [_entry("p1")])
-    before = store.history_file(str(tmp_path)).read_text(encoding="utf-8")
+    before = _stored_entries(tmp_path)
     assert not store.patch_entry(str(tmp_path), "ghost", {"customName": "X"})
-    assert store.history_file(str(tmp_path)).read_text(encoding="utf-8") == before
+    assert _stored_entries(tmp_path) == before
 
 
 def test_patch_entry_seeds_migration_from_mirror(tmp_path: Path) -> None:
@@ -361,7 +428,7 @@ def test_patch_entry_seeds_migration_from_mirror(tmp_path: Path) -> None:
     assert store.patch_entry(
         str(tmp_path), "m1", {"customName": "Renamed"}, seed=[_entry("m1")]
     )
-    assert _stored_entries(store, tmp_path)[0]["customName"] == "Renamed"
+    assert _stored_entries(tmp_path)[0]["customName"] == "Renamed"
 
 
 # ── delete_entries ───────────────────────────────────────────────────────────
@@ -375,7 +442,7 @@ def test_delete_entries_ids_mode_ignores_unknown_ids(tmp_path: Path) -> None:
     )
     assert deleted == ["p1"]
     assert total == 2
-    assert [e["paneId"] for e in _stored_entries(store, tmp_path)] == ["p0", "p2"]
+    assert [e["paneId"] for e in _stored_entries(tmp_path)] == ["p0", "p2"]
 
 
 def test_delete_entries_removed_mode_keeps_active(tmp_path: Path) -> None:
@@ -388,7 +455,7 @@ def test_delete_entries_removed_mode_keeps_active(tmp_path: Path) -> None:
     deleted, total, *_ = store.delete_entries(str(tmp_path), mode="removed")
     assert deleted == ["gone-1", "gone-2"]
     assert total == 1
-    assert [e["paneId"] for e in _stored_entries(store, tmp_path)] == ["active"]
+    assert [e["paneId"] for e in _stored_entries(tmp_path)] == ["active"]
 
 
 def test_delete_entries_older_than_boundary(tmp_path: Path) -> None:
@@ -408,17 +475,17 @@ def test_delete_entries_older_than_boundary(tmp_path: Path) -> None:
     )
     assert deleted == ["old-removed"]
     assert total == 4
-    assert [e["paneId"] for e in _stored_entries(store, tmp_path)] == [
+    assert [e["paneId"] for e in _stored_entries(tmp_path)] == [
         "at-cutoff", "new-removed", "old-active", "bad-ts",
     ]
 
 
 def test_delete_entries_unknown_mode_and_empty_store_are_safe(tmp_path: Path) -> None:
     store = SpawnHistoryStore()
-    # Empty store: nothing deleted and no file created.
+    # Empty store: nothing deleted, nothing recorded.
     deleted, total, *_ = store.delete_entries(str(tmp_path), mode="removed")
     assert (deleted, total) == ([], 0)
-    assert not store.history_file(str(tmp_path)).exists()
+    assert _stored_entries(tmp_path) == []
     store.merge(str(tmp_path), [_entry("p1", removedAt="2026-07-01T00:00:00Z")])
     deleted, total, *_ = store.delete_entries(str(tmp_path), mode="bogus")
     assert (deleted, total) == ([], 1)
@@ -436,7 +503,7 @@ def test_delete_entries_other_workspace_untouched(tmp_path: Path) -> None:
     store.merge(str(ws_b), [_entry("shared-id", workspacePath=str(ws_b))])
     deleted, *_ = store.delete_entries(str(ws_a), mode="ids", pane_ids=["shared-id"])
     assert deleted == ["shared-id"]
-    assert [e["paneId"] for e in _stored_entries(store, ws_b)] == ["shared-id"]
+    assert [e["paneId"] for e in _stored_entries(ws_b)] == ["shared-id"]
 
 
 def test_delete_entries_via_symlink_alias_hits_the_shared_store(tmp_path: Path) -> None:
@@ -449,7 +516,7 @@ def test_delete_entries_via_symlink_alias_hits_the_shared_store(tmp_path: Path) 
     deleted, total, *_ = store.delete_entries(str(alias), mode="removed")
     assert deleted == ["p1"]
     assert total == 0
-    assert _stored_entries(store, real) == []
+    assert _stored_entries(real) == []
 
 
 # ── manual log files deleted with their entries ─────────────────────────────
@@ -582,7 +649,7 @@ def test_delete_entries_dry_run_reports_what_a_real_run_would_free(
     assert preview.freed_bytes == 140
     assert preview.removed_log_files == 2
     # Nothing happened: store intact, every log still on disk.
-    assert [e["paneId"] for e in _stored_entries(store, tmp_path)] == [
+    assert [e["paneId"] for e in _stored_entries(tmp_path)] == [
         "aaaa1111-2222", "bbbb3333-4444", "cccc5555-6666",
     ]
     assert doomed_a.exists() and doomed_b.exists() and keeper.exists()
@@ -646,7 +713,7 @@ async def test_delete_spawn_history_handler_syncs_mirror_and_broadcasts(
         "deleted": 1, "total": 2, "freed_bytes": 0, "removed_log_files": 0,
     }
     # Full store (seeded from the mirror) and mirror both lost p1.
-    stored = _stored_entries(app.spawn_history_store, tmp_path)
+    stored = _stored_entries(tmp_path)
     assert [e["paneId"] for e in stored] == ["p0", "p2"]
     fresh = ProjectStore().peek(str(tmp_path))
     assert fresh is not None
@@ -703,7 +770,7 @@ async def test_delete_spawn_history_handler_dry_run_previews_then_deletes(
 
     assert session.websocket.sent[1]["payload"] == preview  # type: ignore[attr-defined]
     assert not doomed.exists()
-    assert [e["paneId"] for e in _stored_entries(app.spawn_history_store, tmp_path)] == [
+    assert [e["paneId"] for e in _stored_entries(tmp_path)] == [
         "cccc5555-6666",
     ]
     assert len(events) == 1
@@ -766,7 +833,7 @@ async def test_rename_spawn_history_handler_patches_store_and_mirror(
     await fn(session, "m1", "project.rename_spawn_history", {
         "workspace_path": str(tmp_path), "pane_id": "p-old", "custom_name": "Oldie",
     })
-    stored = _stored_entries(app.spawn_history_store, tmp_path)
+    stored = _stored_entries(tmp_path)
     assert stored[0]["customName"] == "Oldie"
     assert events == []
 
@@ -774,7 +841,7 @@ async def test_rename_spawn_history_handler_patches_store_and_mirror(
     await fn(session, "m2", "project.rename_spawn_history", {
         "workspace_path": str(tmp_path), "pane_id": "p1", "custom_name": "Newie",
     })
-    stored = _stored_entries(app.spawn_history_store, tmp_path)
+    stored = _stored_entries(tmp_path)
     assert stored[1]["customName"] == "Newie"
     fresh = ProjectStore().peek(str(tmp_path))
     assert fresh is not None
@@ -786,15 +853,15 @@ async def test_rename_spawn_history_handler_patches_store_and_mirror(
     await fn(session, "m3", "project.rename_spawn_history", {
         "workspace_path": str(tmp_path), "pane_id": "p-old", "custom_name": "",
     })
-    stored = _stored_entries(app.spawn_history_store, tmp_path)
+    stored = _stored_entries(tmp_path)
     assert "customName" not in stored[0]
 
 
 async def test_rename_pane_handler_patches_full_store(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """A live-pane rename must reach spawn-history.json at the source, not
-    only via the renderer's debounced snapshot merge."""
+    """A live-pane rename must reach the full spawn-history store at the
+    source, not only via the renderer's debounced snapshot merge."""
     from agent_team_backend import app, ws_handlers
 
     store = ProjectStore()
@@ -819,7 +886,7 @@ async def test_rename_pane_handler_patches_full_store(
         "workspace_path": str(tmp_path), "pane_id": "p1", "custom_name": "Live name",
     })
 
-    stored = _stored_entries(app.spawn_history_store, tmp_path)
+    stored = _stored_entries(tmp_path)
     assert stored[0]["customName"] == "Live name"
 
 
@@ -869,10 +936,10 @@ async def test_set_pane_auto_name_handler_broadcasts_once_and_skips_history(
     pane = next(p for p in store.peek(str(tmp_path)).panes if p.pane_id == "p1")
     assert pane.auto_name == "Fix login"
 
-    # Unlike rename_pane, neither the mirror nor spawn-history.json changed.
+    # Unlike rename_pane, neither the mirror nor the full store changed.
     history = store.peek(str(tmp_path)).ui_spawn_history
     assert "autoName" not in history[0] and "customName" not in history[0]
-    assert not app.spawn_history_store.history_file(str(tmp_path)).exists()
+    assert _stored_entries(tmp_path) == []
 
     ok_responses = session.websocket.sent  # type: ignore[attr-defined]
     assert [r["payload"] for r in ok_responses] == [{"ok": True}, {"ok": True}]
@@ -922,7 +989,7 @@ def test_delete_entries_bulk_modes_skip_starred(tmp_path: Path) -> None:
     deleted, total, *_ = store.delete_entries(str(tmp_path), mode="removed")
     assert deleted == ["plain-removed"]
     assert total == 2
-    assert [e["paneId"] for e in _stored_entries(store, tmp_path)] == [
+    assert [e["paneId"] for e in _stored_entries(tmp_path)] == [
         "starred-removed", "active",
     ]
     # older_than: the starred entry is old and removed, yet still kept.
@@ -945,7 +1012,7 @@ def test_delete_entries_ids_mode_still_deletes_starred(tmp_path: Path) -> None:
     )
     assert deleted == ["starred"]
     assert total == 1
-    assert [e["paneId"] for e in _stored_entries(store, tmp_path)] == ["other"]
+    assert [e["paneId"] for e in _stored_entries(tmp_path)] == ["other"]
 
 
 async def test_delete_spawn_history_handler_keeps_starred_in_store_and_mirror(
@@ -988,7 +1055,7 @@ async def test_delete_spawn_history_handler_keeps_starred_in_store_and_mirror(
         "deleted": 1, "total": 1, "freed_bytes": 0, "removed_log_files": 0,
     }
     # Full store: only the unstarred removed entry was cleaned.
-    stored = _stored_entries(app.spawn_history_store, tmp_path)
+    stored = _stored_entries(tmp_path)
     assert [e["paneId"] for e in stored] == ["starred-gone"]
     # project.json mirror: same survivor set.
     fresh = ProjectStore().peek(str(tmp_path))
@@ -1028,7 +1095,7 @@ async def test_star_spawn_history_handler_patches_store_and_mirror(
     await fn(session, "m1", "project.star_spawn_history", {
         "workspace_path": str(tmp_path), "pane_id": "p-old", "starred": True,
     })
-    stored = _stored_entries(app.spawn_history_store, tmp_path)
+    stored = _stored_entries(tmp_path)
     assert stored[0]["starred"] is True
     assert events == []
 
@@ -1036,7 +1103,7 @@ async def test_star_spawn_history_handler_patches_store_and_mirror(
     await fn(session, "m2", "project.star_spawn_history", {
         "workspace_path": str(tmp_path), "pane_id": "p1", "starred": True,
     })
-    stored = _stored_entries(app.spawn_history_store, tmp_path)
+    stored = _stored_entries(tmp_path)
     assert stored[1]["starred"] is True
     fresh = ProjectStore().peek(str(tmp_path))
     assert fresh is not None
@@ -1048,7 +1115,7 @@ async def test_star_spawn_history_handler_patches_store_and_mirror(
     await fn(session, "m3", "project.star_spawn_history", {
         "workspace_path": str(tmp_path), "pane_id": "p1", "starred": False,
     })
-    stored = _stored_entries(app.spawn_history_store, tmp_path)
+    stored = _stored_entries(tmp_path)
     assert "starred" not in stored[1]
     fresh = ProjectStore().peek(str(tmp_path))
     assert fresh is not None

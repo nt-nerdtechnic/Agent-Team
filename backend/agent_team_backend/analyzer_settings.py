@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
-import json
 import logging
-import os
+import time
 from pathlib import Path
 from typing import Any
 
 from .applog import app_data_dir
+from .db import DB_FILENAME, Database
 
 log = logging.getLogger("agent_team_backend.analyzer_settings")
 
 SETTINGS_FILE = "analyzer_settings.json"
+_KV_KEY = "analyzer_settings"
 
 DEFAULTS: dict[str, Any] = {
     "backend": "ollama",              # "llama_cpp" | "ollama"
@@ -23,28 +24,30 @@ DEFAULTS: dict[str, Any] = {
 
 
 class AnalyzerSettingsStore:
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(self, path: Path | None = None, db: Database | None = None) -> None:
         self._path = path or (app_data_dir() / SETTINGS_FILE)
+        self._db = db or Database(self._path.parent / DB_FILENAME)
 
     @property
     def path(self) -> Path:
-        return self._path
+        return self._db.path
+
+    def _import_legacy(self, cur: Any, data: Any) -> None:
+        if isinstance(data, dict):
+            self._db.kv_set(_KV_KEY, data, now=int(time.time()))
 
     def get(self) -> dict[str, Any]:
-        if not self._path.exists():
+        raw = self._db.kv_get(_KV_KEY)
+        if raw is None:
+            self._db.import_json(_KV_KEY, self._path, self._import_legacy)
+            raw = self._db.kv_get(_KV_KEY)
+        if not isinstance(raw, dict):
             return dict(DEFAULTS)
-        try:
-            raw = json.loads(self._path.read_text(encoding="utf-8"))
-            if not isinstance(raw, dict):
-                return dict(DEFAULTS)
-            merged = dict(DEFAULTS)
-            for k in DEFAULTS:
-                if k in raw:
-                    merged[k] = raw[k]
-            return merged
-        except Exception as err:
-            log.warning("analyzer settings read error (%s); using defaults", err)
-            return dict(DEFAULTS)
+        merged = dict(DEFAULTS)
+        for k in DEFAULTS:
+            if k in raw:
+                merged[k] = raw[k]
+        return merged
 
     def set(self, updates: dict[str, Any]) -> dict[str, Any]:
         current = self.get()
@@ -53,12 +56,6 @@ class AnalyzerSettingsStore:
                 current[key] = value
         if current.get("backend") not in ("llama_cpp", "ollama"):
             current["backend"] = "llama_cpp"
-        self._write(current)
+        self._db.kv_set(_KV_KEY, current, now=int(time.time()))
         log.info("analyzer settings saved: %s", current)
         return current
-
-    def _write(self, data: dict[str, Any]) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
-        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, self._path)

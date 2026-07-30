@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import stat
 import time
 from dataclasses import dataclass, field
@@ -39,26 +40,28 @@ from typing import Any, Iterable
 
 from .applog import app_data_dir
 from .credential_vault import LOGIN_HOME_DIRNAME
+from .db import DB_FILENAME, MIGRATED_SUFFIX
 from .history_store import HISTORY_FILE
 from .plan_history import HISTORY_DIR_NAME as PLAN_HISTORY_DIR_NAME
 from .profiles_store import PROFILE_HOME_DIRNAME, default_profiles_root
-from .projects import PROJECT_DIR_NAME, PROJECT_FILE, RUNS_SUBDIR
-from .recent_workspaces import RECENT_FILE
+from .projects import (
+    PROJECT_DIR_NAME,
+    PROJECT_FILE,
+    RUNS_SUBDIR,
+    _KV_KEY as PROJECT_KV_KEY,
+)
+from .recent_workspaces import RECENT_FILE, _KV_KEY as RECENT_KV_KEY
 from .skills_store import SKILLS_DIR, SKILLS_RUNTIME_DIR
 from .spawn_history import (
     SPAWN_HISTORY_FILE,
+    _KV_KEY as SPAWN_HISTORY_KV_KEY,
     entry_manual_log_names,
     read_stored_entries,
     read_stored_entries_checked,
 )
 from .store_migrations import BACKUP_DIR
 from .terminals import live_output_log_paths
-from .tokens_store import (
-    INGESTION_DELTA_FILE,
-    INGESTION_STATE_FILE,
-    PERSISTENCE_JOURNAL_FILE,
-    WORKSPACES_SUBDIR,
-)
+from .tokens_store import WORKSPACES_SUBDIR
 from .usage_service import USAGE_CACHE_FILE
 
 DEFAULT_STALE_DAYS = 30
@@ -424,35 +427,14 @@ def _appdata_and_electron_groups(
         ),
         errors,
     )
-    ingestion = _measured(
+    navide_db = _measured(
         _Item(
-            "tokenIngestionState",
-            risk="caution",
-            cleanable=True,
+            "navideDatabase",
+            risk="danger",
+            cleanable=False,
             root=root,
-            paths=[
-                root / INGESTION_STATE_FILE,
-                # The delta log carries checkpoints the snapshot has not
-                # absorbed yet. Leaving it behind would both strand megabytes
-                # and let the cleared accounting come back on the next load.
-                root / INGESTION_DELTA_FILE,
-                root / PERSISTENCE_JOURNAL_FILE,
-            ],
-            note=(
-                "Token ingestion restarts from scratch; already-counted CLI "
-                "usage may be ingested again and double-count."
-            ),
-        ),
-        errors,
-    )
-    ws_tokens = _measured(
-        _Item(
-            "workspaceTokenStats",
-            risk="caution",
-            cleanable=True,
-            root=root,
-            paths=[root / WORKSPACES_SUBDIR],
-            note="Per-workspace token history is lost; lifetime totals survive.",
+            paths=[root / DB_FILENAME],
+            note="Settings, token accounting and registries; never cleaned from here.",
         ),
         errors,
     )
@@ -462,7 +444,14 @@ def _appdata_and_electron_groups(
             risk="safe",
             cleanable=True,
             root=root,
-            paths=[root / BACKUP_DIR, *sorted(root.glob("_pipeline-backup-*"))],
+            paths=[
+                root / BACKUP_DIR,
+                *sorted(root.glob("_pipeline-backup-*")),
+                # JSON stores retired by the SQLite import; kept only as a
+                # rollback safety net.
+                *sorted(root.glob(f"*{MIGRATED_SUFFIX}")),
+                *sorted((root / WORKSPACES_SUBDIR).glob(f"*/*{MIGRATED_SUFFIX}")),
+            ],
             note="Pre-migration copies of the store files; only needed to roll back.",
         ),
         errors,
@@ -551,8 +540,7 @@ def _appdata_and_electron_groups(
     app_items = [
         rotated,
         current,
-        ingestion,
-        ws_tokens,
+        navide_db,
         backups,
         runtime,
         usage_cache,
@@ -619,18 +607,64 @@ def _read_json_object(
     return data, True
 
 
+def _read_kv_object(
+    data_dir: Path, kv_key: str, legacy_name: str, errors: list[dict[str, str]]
+) -> tuple[dict[str, Any] | None, bool]:
+    """A kv document from ``<data_dir>/navide.db``, with legacy JSON fallback.
+
+    Read-only connection so a scan never blocks (or mutates) the app's own
+    handle. Falls back to ``<data_dir>/<legacy_name>`` while the kv row does
+    not exist yet (a data dir the running backend has not touched since the
+    SQLite migration). Same ``(document, readable)`` contract as
+    ``_read_json_object`` — an unreadable database, an unparseable row or a
+    row that is not an object fails closed.
+    """
+    db_path = data_dir / DB_FILENAME
+    if db_path.exists():
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            try:
+                row = conn.execute(
+                    "SELECT value FROM kv WHERE key = ?", (kv_key,)
+                ).fetchone()
+            finally:
+                conn.close()
+        except sqlite3.Error as err:
+            _record_error(errors, db_path, err)
+            return None, False
+        if row is not None:
+            try:
+                data = json.loads(row[0])
+            except ValueError as err:
+                _record_error(errors, db_path, err)
+                return None, False
+            if not isinstance(data, dict):
+                errors.append({"path": str(db_path), "message": "expected a JSON object"})
+                return None, False
+            return data, True
+    return _read_json_object(data_dir / legacy_name, errors)
+
+
+def _read_recent_registry(
+    errors: list[dict[str, str]]
+) -> tuple[dict[str, Any] | None, bool]:
+    """The recent-workspaces document, from ``navide.db``'s kv table."""
+    return _read_kv_object(app_data_root(), RECENT_KV_KEY, RECENT_FILE, errors)
+
+
 def _workspace_codex_home_ids(
     data_dir: Path, errors: list[dict[str, str]]
 ) -> tuple[set[str], bool]:
     """``(home ids this workspace still points at, readable)``.
 
-    Two record files matter, and both are consulted in full:
+    Two record stores matter (both in the workspace navide.db, with the
+    retired JSON files as import-era fallback), and both are consulted in full:
 
-    - ``project.json`` — every pane record, including the ones marked
+    - the project document — every pane record, including the ones marked
       ``removed``: the id survives the removal and the App restores from it.
       Both ``pane_id`` (the home name a fresh Codex pane gets) and
       ``session_home_id`` (the home a restored pane keeps using) count.
-    - ``spawn-history.json`` — Agent History's "resume session" re-spawns from
+    - spawn history — Agent History's "resume session" re-spawns from
       an entry's ``sessionId``, and Codex can only resume inside the home that
       recorded the rollout, so a history entry keeps its ``paneId`` home alive
       long after the pane record stopped mattering.
@@ -638,7 +672,7 @@ def _workspace_codex_home_ids(
     ids: set[str] = set()
     readable = True
 
-    project, ok = _read_json_object(data_dir / PROJECT_FILE, errors)
+    project, ok = _read_kv_object(data_dir, PROJECT_KV_KEY, PROJECT_FILE, errors)
     readable = readable and ok
     if project is not None:
         for key in ("panes", "manual_panes"):
@@ -653,7 +687,9 @@ def _workspace_codex_home_ids(
                     if isinstance(value, str) and value:
                         ids.add(value)
 
-    history, ok = _read_json_object(data_dir / SPAWN_HISTORY_FILE, errors)
+    history, ok = _read_kv_object(
+        data_dir, SPAWN_HISTORY_KV_KEY, SPAWN_HISTORY_FILE, errors
+    )
     readable = readable and ok
     if history is not None:
         entries = history.get("entries")
@@ -723,7 +759,7 @@ def _referenced_codex_home_ids(
     ``_is_deleted_path``).
     """
     registry_path = app_data_root() / RECENT_FILE
-    registry, ok = _read_json_object(registry_path, errors)
+    registry, ok = _read_recent_registry(errors)
     if not ok:
         return set(), False
     if registry is None:
@@ -1035,10 +1071,11 @@ def _removable_run_dirs(
     timeline and log are appended per event, so the files come back but
     everything the run had recorded so far is gone.
 
-    Fails closed: if project.json cannot be read there is no way to tell which
-    run is live, so no run is offered.
+    Fails closed: if the project document (workspace navide.db, retired
+    project.json as import-era fallback) cannot be read there is no way to
+    tell which run is live, so no run is offered.
     """
-    project, readable = _read_json_object(data_dir / PROJECT_FILE, errors)
+    project, readable = _read_kv_object(data_dir, PROJECT_KV_KEY, PROJECT_FILE, errors)
     if not readable:
         return []
     active = str((project or {}).get("log_file_name") or "")

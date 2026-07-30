@@ -7,7 +7,6 @@ untouched."""
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
@@ -20,7 +19,7 @@ from agent_team_backend.terminals import TerminalService
 
 
 def _registry() -> dict:
-    return json.loads(pty_registry._registry_path().read_text(encoding="utf-8"))
+    return pty_registry._load()
 
 
 def _set_owner(pid: int, owner: int) -> None:
@@ -65,6 +64,22 @@ def test_scan_orphans_lists_dead_backend_children_read_only() -> None:
 
 def test_scan_orphans_empty_registry() -> None:
     assert pty_registry.scan_orphans() == []
+
+
+def test_legacy_json_imported_once_and_retired() -> None:
+    import json
+
+    legacy = pty_registry._registry_path()
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(
+        json.dumps({"123": {"argv0": "zsh", "lstart": "x", "owner": 1}}),
+        encoding="utf-8",
+    )
+    assert pty_registry._load() == {"123": {"argv0": "zsh", "lstart": "x", "owner": 1}}
+    assert not legacy.exists()
+    assert legacy.with_name(legacy.name + ".migrated-v1").exists()
+    # Import runs once; the imported data survives a re-read.
+    assert "123" in pty_registry._load()
 
 
 def test_scan_orphans_skips_live_sibling_owned(monkeypatch) -> None:

@@ -8,7 +8,6 @@ because seen_keys starts empty.
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 
 import pytest
@@ -123,8 +122,6 @@ async def test_seen_keys_persist_between_watcher_starts(tmp_path: Path) -> None:
         received.append(u)
         return TokenSinkResult(True, "/x")
 
-    state_path = tmp_path / "token-ingestion-state.json"
-
     # ── First watcher run: should emit 1 event ────────────────────────────
     reader1 = _StaticReader(root)
     store1 = _checkpoint_store(tmp_path)
@@ -136,13 +133,14 @@ async def test_seen_keys_persist_between_watcher_starts(tmp_path: Path) -> None:
     store1.flush()
     assert len(received) == 1, f"expected 1 event from initial backfill, got {len(received)}"
 
-    assert state_path.exists(), "TokensStore should persist the unified checkpoint"
-    data = json.loads(state_path.read_text(encoding="utf-8"))
-    assert data["version"] == 2
+    # The unified checkpoint (with the reader's seen-keys window) must have
+    # been persisted — a fresh store reads it back.
+    probe = _checkpoint_store(tmp_path)
     assert any(
-        "event-for-a.jsonl" in entry["global"].get("legacy_seen", [])
-        for entry in data["files"].values()
-    )
+        "event-for-a.jsonl" in (entry.get("global") or {}).get("legacy_seen", [])
+        for entry in probe._files.values()
+    ), "TokensStore should persist the unified checkpoint"
+    probe.flush()
 
     # ── Second watcher run with same files: should emit 0 events ──────────
     received.clear()

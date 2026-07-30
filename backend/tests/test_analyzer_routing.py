@@ -67,13 +67,10 @@ def test_gguf_path_set_and_persist(tmp_path):
     assert store.get()["gguf_path"] == "/models/qwen2.5.gguf"
 
 
-def test_atomic_write_creates_file(tmp_path):
+def test_persists_across_store_instances(tmp_path):
     path = tmp_path / "settings.json"
-    store = AnalyzerSettingsStore(path)
-    store.set({"backend": "ollama"})
-    assert path.exists()
-    data = json.loads(path.read_text())
-    assert data["backend"] == "ollama"
+    AnalyzerSettingsStore(path).set({"backend": "ollama"})
+    assert AnalyzerSettingsStore(path).get()["backend"] == "ollama"
 
 
 def test_corrupted_file_returns_defaults(tmp_path):
@@ -82,6 +79,22 @@ def test_corrupted_file_returns_defaults(tmp_path):
     store = AnalyzerSettingsStore(path)
     s = store.get()
     assert s["backend"] == DEFAULTS["backend"]
+
+
+def test_legacy_json_imported_once_and_retired(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(
+        json.dumps({"backend": "llama_cpp", "gguf_path": "/models/a.gguf"}),
+        encoding="utf-8",
+    )
+    store = AnalyzerSettingsStore(path)
+    s = store.get()
+    assert s["backend"] == "llama_cpp"
+    assert s["gguf_path"] == "/models/a.gguf"
+    assert not path.exists()
+    assert path.with_name(path.name + ".migrated-v1").exists()
+    # Second instance reads the imported document, not defaults.
+    assert AnalyzerSettingsStore(path).get()["gguf_path"] == "/models/a.gguf"
 
 
 # ── Routing helpers (app.py) ──────────────────────────────────────────────────

@@ -150,3 +150,30 @@ def test_corrupt_json_recovers(tmp_path: Path) -> None:
     # And it can be written to afterwards
     store.touch(_mkdir(tmp_path, "a"))
     assert len(store.list()) == 1
+
+
+def test_legacy_json_imported_once_and_retired(tmp_path: Path) -> None:
+    path = tmp_path / "recent.json"
+    a = _mkdir(tmp_path, "a")
+    b = _mkdir(tmp_path, "b")
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "max_size": 20,
+                "recent": [
+                    {"path": b, "name": "b", "last_opened_at": "2026-01-02T00:00:00Z", "pinned": True},
+                    {"path": a, "name": "a", "last_opened_at": "2026-01-01T00:00:00Z", "pinned": False},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = RecentWorkspacesStore(path=path)
+    # MRU order preserved through the import.
+    assert [e["name"] for e in store.list()] == ["b", "a"]
+    assert store.list()[0]["pinned"] is True
+    assert not path.exists()
+    assert path.with_name(path.name + ".migrated-v1").exists()
+    # Second instance reads the imported data (no re-import, no data loss).
+    assert [e["name"] for e in RecentWorkspacesStore(path=path).list()] == ["b", "a"]

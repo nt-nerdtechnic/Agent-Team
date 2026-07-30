@@ -1,14 +1,23 @@
-"""Token aggregator + atomic JSON persistence tests."""
+"""Token aggregator + SQLite persistence tests."""
 
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 
 import pytest
 
+from agent_team_backend.db import Database
 from agent_team_backend.tokens_store import LEGACY_EVENT_KEYS_LIMIT, TokensStore
+
+
+def _kv(tmp_path: Path, key: str):
+    """Read one kv value straight from the store's database file."""
+    db = Database(tmp_path / "navide.db")
+    try:
+        return db.kv_get(key)
+    finally:
+        db.close()
 
 
 @pytest.fixture
@@ -96,11 +105,6 @@ def test_persistence_roundtrip(tmp_path: Path) -> None:
               input_tokens=10, output_tokens=20)
     s1.flush()
 
-    # Both files exist on disk at their new global locations
-    assert global_path.exists()
-    sha = hashlib.sha256(str(workspace).encode()).hexdigest()[:8]
-    assert (workspace_base_dir / sha / "tokens.json").exists()
-
     # Fresh store reads back the same values
     s2 = TokensStore(global_path=global_path, workspace_base_dir=workspace_base_dir)
     snap = s2.snapshot(str(workspace))
@@ -108,8 +112,8 @@ def test_persistence_roundtrip(tmp_path: Path) -> None:
     assert snap["global"]["all_time"]["output"] == 20
 
 
-def test_atomic_write_uses_tmp_then_replace(tmp_path: Path) -> None:
-    """The .tmp file shouldn't survive after a successful save."""
+def test_flush_leaves_no_json_artifacts(tmp_path: Path) -> None:
+    """Persistence is the database alone — no legacy JSON files reappear."""
     global_path = tmp_path / "global.json"
     workspace_base_dir = tmp_path / "workspaces"
     workspace = tmp_path / "ws"
@@ -120,10 +124,11 @@ def test_atomic_write_uses_tmp_then_replace(tmp_path: Path) -> None:
              input_tokens=5, output_tokens=5)
     s.flush()
 
-    sha = hashlib.sha256(str(workspace).encode()).hexdigest()[:8]
-    files = list((workspace_base_dir / sha).iterdir())
-    # Only tokens.json should remain — no leftover .tmp
-    assert {f.name for f in files} == {"tokens.json"}
+    assert not global_path.exists()
+    assert not workspace_base_dir.exists()
+    # The data still round-trips through the database.
+    s2 = TokensStore(global_path=global_path, workspace_base_dir=workspace_base_dir)
+    assert s2.snapshot(str(workspace))["workspace"]["cumulative"]["totals"]["calls"] == 1
 
 
 def test_reset_run_clears_current_but_keeps_cumulative(store: TokensStore, workspace: str) -> None:
@@ -228,11 +233,11 @@ def test_legacy_event_keys_capped_on_load(tmp_path: Path) -> None:
     )
     store = _legacy_store(tmp_path)
     store.flush()
-    saved = json.loads(state_path.read_text(encoding="utf-8"))
-    assert len(saved["legacy_event_keys"]) == LEGACY_EVENT_KEYS_LIMIT
+    saved = _kv(tmp_path, "tokens.legacy_event_keys")
+    assert len(saved["keys"]) == LEGACY_EVENT_KEYS_LIMIT
     # Expiry gets stamped the first time keys are seen without one.
-    assert isinstance(saved["legacy_event_keys_expires_at"], str)
-    assert saved["legacy_event_keys_expires_at"] > "2026"
+    assert isinstance(saved["expires_at"], str)
+    assert saved["expires_at"] > "2026"
 
 
 def test_legacy_event_keys_cleared_after_expiry(tmp_path: Path) -> None:
@@ -242,8 +247,7 @@ def test_legacy_event_keys_cleared_after_expiry(tmp_path: Path) -> None:
     )
     store = _legacy_store(tmp_path)
     store.flush()
-    saved = json.loads(state_path.read_text(encoding="utf-8"))
-    assert saved["legacy_event_keys"] == []
+    assert _kv(tmp_path, "tokens.legacy_event_keys")["keys"] == []
 
 
 def test_legacy_event_keys_expiry_stamped_once(tmp_path: Path) -> None:
@@ -251,12 +255,12 @@ def test_legacy_event_keys_expiry_stamped_once(tmp_path: Path) -> None:
     _write_ingestion_state(state_path, ["a"])
     store = _legacy_store(tmp_path)
     store.flush()
-    first = json.loads(state_path.read_text(encoding="utf-8"))
-    assert first["legacy_event_keys"] == ["a"]  # under cap, not expired → kept
+    first = _kv(tmp_path, "tokens.legacy_event_keys")
+    assert first["keys"] == ["a"]  # under cap, not expired → kept
     store2 = _legacy_store(tmp_path)
     store2.flush()
-    second = json.loads(state_path.read_text(encoding="utf-8"))
-    assert second["legacy_event_keys_expires_at"] == first["legacy_event_keys_expires_at"]
+    second = _kv(tmp_path, "tokens.legacy_event_keys")
+    assert second["expires_at"] == first["expires_at"]
 
 
 def test_legacy_event_key_still_drains_via_record(tmp_path: Path) -> None:
@@ -273,5 +277,4 @@ def test_legacy_event_key_still_drains_via_record(tmp_path: Path) -> None:
                         input_tokens=5, output_tokens=5, dedup_key="dup1")
     assert store.snapshot(None)["global"]["all_time"]["calls"] == 1
     store.flush()
-    saved = json.loads(state_path.read_text(encoding="utf-8"))
-    assert saved["legacy_event_keys"] == []
+    assert _kv(tmp_path, "tokens.legacy_event_keys")["keys"] == []

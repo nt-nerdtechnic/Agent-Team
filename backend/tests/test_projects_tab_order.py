@@ -4,8 +4,8 @@ The run groups themselves live in the renderer; the backend just persists the
 id list as an ordering hint. Covers the happy path (store + round-trip through
 disk), overwriting a previous order, unknown/stale ids being kept verbatim
 (the frontend skips them on restore), peek semantics (no project → None,
-nothing created on disk), and the backward-compatible default (project.json
-without the field → empty list).
+nothing created on disk), and the backward-compatible default (a legacy
+project.json without the field → empty list).
 """
 
 from __future__ import annotations
@@ -57,13 +57,14 @@ def test_no_project_returns_none_and_creates_nothing(tmp_path: Path) -> None:
     assert not store.project_file(str(tmp_path)).exists()
 
 
-def test_project_json_without_field_defaults_to_empty(tmp_path: Path) -> None:
-    """Backward compat: old project.json without tab_order loads as []."""
-    store = _store_with_project(tmp_path)
-    project_file = store.project_file(str(tmp_path))
-    data = json.loads(project_file.read_text(encoding="utf-8"))
-    data.pop("tab_order", None)
-    project_file.write_text(json.dumps(data), encoding="utf-8")
+def test_legacy_project_json_without_field_defaults_to_empty(tmp_path: Path) -> None:
+    """Backward compat: a legacy project.json without tab_order loads as []."""
+    legacy = tmp_path / ".agent-team" / "project.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(json.dumps({
+        "id": "p1", "name": "x", "workspace_path": str(tmp_path),
+        "created_at": "t", "updated_at": "t",
+    }), encoding="utf-8")
     fresh = ProjectStore().peek(str(tmp_path))
     assert fresh is not None
     assert fresh.tab_order == []

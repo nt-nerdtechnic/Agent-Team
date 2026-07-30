@@ -39,9 +39,9 @@ def test_create_and_list(tmp_path: Path) -> None:
     assert doc["profiles"] == [profile]
     assert doc["defaults"] == {"claude": None, "codex": None, "kimi": None, "grok": None}
     assert store.get(profile["id"]) == profile
-    # Registry file carries the schema version.
-    on_disk = json.loads(store.path.read_text(encoding="utf-8"))
-    assert on_disk["schemaVersion"] == 1
+    # Stored document carries the schema version.
+    stored = store._db.kv_get(profiles_mod._KV_KEY)
+    assert stored["schemaVersion"] == 1
 
 
 @pytest.mark.parametrize("agent_key", ["antigravity", "terminal", "", "gemini"])
@@ -176,12 +176,37 @@ def test_set_default_validates_agent_and_profile(tmp_path: Path) -> None:
 
 def test_corrupt_registry_starts_empty(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    store.path.parent.mkdir(parents=True, exist_ok=True)
-    store.path.write_text("{not json", encoding="utf-8")
+    legacy = tmp_path / "cli-profiles.json"
+    legacy.write_text("{not json", encoding="utf-8")
     assert store.list() == {
         "profiles": [],
         "defaults": {"claude": None, "codex": None, "kimi": None, "grok": None},
     }
+
+
+def test_legacy_json_imported_once_and_retired(tmp_path: Path) -> None:
+    legacy = tmp_path / "cli-profiles.json"
+    legacy.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "profiles": [
+                    {"id": "abcd1234", "agentKey": "claude", "name": "Work",
+                     "createdAt": "2026-01-01T00:00:00Z"},
+                ],
+                "defaults": {"claude": "abcd1234"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = _store(tmp_path)
+    doc = store.list()
+    assert [p["id"] for p in doc["profiles"]] == ["abcd1234"]
+    assert doc["defaults"]["claude"] == "abcd1234"
+    assert not legacy.exists()
+    assert legacy.with_name(legacy.name + ".migrated-v1").exists()
+    # Second instance reads the imported registry.
+    assert _store(tmp_path).get_default_profile("claude")["id"] == "abcd1234"
 
 
 # ---- path canonicalisation ----

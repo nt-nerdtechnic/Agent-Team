@@ -78,8 +78,32 @@ def test_register_workspace_then_attribute_succeeds(claude_attr: tuple[Attributi
     assert result.workspace_path == cwd
 
 
+def test_register_workspace_survives_a_database_write_failure(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """A failed persistence write degrades like the old JSON file store:
+    the registration keeps working in memory, the failure is only logged."""
+    import sqlite3
+
+    root = tmp_path / "claude_projects"
+    root.mkdir()
+    attr = Attribution([FakeReader("claude", root)], workspaces_path=tmp_path / "ws.json")
+
+    def boom(*args, **kwargs):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(attr._db, "kv_set", boom)
+    ws = str(tmp_path / "wsA")
+    with caplog.at_level("WARNING"):
+        attr.register_workspace(ws)
+    assert ws in attr.known_workspaces()
+    assert any(
+        "workspace-associations save failed" in r.message for r in caplog.records
+    )
+
+
 def test_workspace_persists_across_restarts(tmp_path: Path) -> None:
-    """workspace-associations.json round-trip."""
+    """Workspace-associations round-trip through the database."""
     root = tmp_path / "claude_projects"; root.mkdir()
     ws_path = "/Users/me/proj"
 
@@ -87,7 +111,6 @@ def test_workspace_persists_across_restarts(tmp_path: Path) -> None:
     attr1 = Attribution([FakeReader("claude", root)], workspaces_path=tmp_path / "ws.json")
     attr1.register_workspace(ws_path)
     assert ws_path in attr1.known_workspaces()
-    assert (tmp_path / "ws.json").exists()
 
     # Run 2: load from disk
     attr2 = Attribution([FakeReader("claude", root)], workspaces_path=tmp_path / "ws.json")
@@ -97,6 +120,23 @@ def test_workspace_persists_across_restarts(tmp_path: Path) -> None:
     f = proj_dir / "s.jsonl"; f.write_text("")
     result = attr2.attribute(_make_usage("claude", session_id="s", file_path=str(f)))
     assert result.workspace_path == ws_path
+
+
+def test_legacy_workspace_json_imported_once_and_retired(tmp_path: Path) -> None:
+    root = tmp_path / "claude_projects"; root.mkdir()
+    ws_json = tmp_path / "ws.json"
+    ws_path = "/Users/me/proj"
+    ws_json.write_text(
+        json.dumps({ws_path: {"claude_dir": str(root / "-Users-me-proj"), "registered_at": 1.0}}),
+        encoding="utf-8",
+    )
+    attr = Attribution([FakeReader("claude", root)], workspaces_path=ws_json)
+    assert ws_path in attr.known_workspaces()
+    assert not ws_json.exists()
+    assert ws_json.with_name(ws_json.name + ".migrated-v1").exists()
+    # Second instance loads from the database, not the retired file.
+    attr2 = Attribution([FakeReader("claude", root)], workspaces_path=ws_json)
+    assert ws_path in attr2.known_workspaces()
 
 
 def test_workspace_only_matches_files_under_its_folder(claude_attr: tuple[Attribution, Path]) -> None:
@@ -613,7 +653,7 @@ def test_reregistration_corrects_stale_claude_dir(tmp_path: Path) -> None:
     attr = Attribution([FakeReader("claude", root)], workspaces_path=ws_json)
     attr.register_workspace(CJK_WS)
 
-    data = json.loads(ws_json.read_text(encoding="utf-8"))
+    data = attr._db.kv_get("workspace_associations")
     assert data[CJK_WS]["claude_dir"] == str(root / CJK_ENCODED)
     # And attribution now works against the corrected dir.
     proj_dir = root / CJK_ENCODED; proj_dir.mkdir()

@@ -48,8 +48,8 @@ class TestStagesSchemaVersion:
     def test_write_adds_schema_version(self, tmp_path):
         store = StagesStore(tmp_path / PIPELINES_FILE)
         store._read_doc()  # triggers seed + write
-        on_disk = json.loads((tmp_path / PIPELINES_FILE).read_text(encoding="utf-8"))
-        assert on_disk["schemaVersion"] == SCHEMA_VERSION
+        stored = store._db.kv_get("pipelines")
+        assert stored["schemaVersion"] == SCHEMA_VERSION
 
     def test_load_tolerates_missing_schema_version(self, tmp_path):
         path = tmp_path / PIPELINES_FILE
@@ -64,15 +64,18 @@ class TestStagesSchemaVersion:
         future = _valid_pipelines_doc(schema=99)
         future["pipelines"][0]["name"] = "FROM_FUTURE"
         _write_json(path, future)
-        before = path.read_bytes()
 
         store = StagesStore(path)
         doc = store._read_doc()
 
         # Loaded as-is, not regenerated to defaults.
         assert doc["pipelines"][0]["name"] == "FROM_FUTURE"
-        # File on disk untouched (no truncate/overwrite).
-        assert path.read_bytes() == before
+        # Stored document untouched (no regenerate/truncate) — forward data
+        # survives a re-read with its future schemaVersion intact.
+        stored = store._db.kv_get("pipelines")
+        assert stored["schemaVersion"] == 99
+        assert stored["pipelines"][0]["name"] == "FROM_FUTURE"
+        assert store._read_doc()["pipelines"][0]["name"] == "FROM_FUTURE"
 
 
 # ─────────────────── tokens_store schemaVersion ───────────────────
@@ -138,6 +141,59 @@ class TestStartupBackup:
         # No marker file.
         sm.run_startup_migrations(tmp_path, "2.0.0")
         assert (tmp_path / sm.BACKUP_DIR / "2.0.0" / PIPELINES_FILE).exists()
+
+    def test_version_change_snapshots_navide_db(self, tmp_path):
+        # Post-SQLite-migration layout: JSON stores retired, data in navide.db.
+        from agent_team_backend.db import DB_FILENAME, Database
+
+        db = Database(tmp_path / DB_FILENAME)
+        db.kv_set("roles", [{"key": "dev"}], now=1)
+        db.close()
+        (tmp_path / sm.MARKER_FILE).write_text("1.0.0", encoding="utf-8")
+
+        sm.run_startup_migrations(tmp_path, "1.0.1")
+
+        snap = tmp_path / sm.BACKUP_DIR / "1.0.1" / DB_FILENAME
+        assert snap.exists()
+        restored = Database(snap)
+        try:
+            assert restored.kv_get("roles") == [{"key": "dev"}]
+        finally:
+            restored.close()
+
+    def test_navide_db_backup_is_owner_only(self, tmp_path):
+        # The backup carries the same secrets (API keys) as the live
+        # database, which is chmod'd 0600 — the snapshot must match.
+        from agent_team_backend.db import DB_FILENAME, Database
+
+        db = Database(tmp_path / DB_FILENAME)
+        db.kv_set("k", {"v": 1}, now=1)
+        db.close()
+        (tmp_path / sm.MARKER_FILE).write_text("1.0.0", encoding="utf-8")
+
+        sm.run_startup_migrations(tmp_path, "1.0.1")
+
+        snap = tmp_path / sm.BACKUP_DIR / "1.0.1" / DB_FILENAME
+        assert snap.exists()
+        assert snap.stat().st_mode & 0o777 == 0o600
+
+    def test_backup_survives_live_db_connection(self, tmp_path):
+        # The app's connection is open and mid-write when the startup task
+        # backs up; the online backup API must still produce a valid snapshot.
+        from agent_team_backend.db import DB_FILENAME, Database
+
+        db = Database(tmp_path / DB_FILENAME)
+        db.kv_set("k", {"v": 1}, now=1)
+        try:
+            (tmp_path / sm.MARKER_FILE).write_text("1.0.0", encoding="utf-8")
+            sm.run_startup_migrations(tmp_path, "1.0.1")
+            snap = Database(tmp_path / sm.BACKUP_DIR / "1.0.1" / DB_FILENAME)
+            try:
+                assert snap.kv_get("k") == {"v": 1}
+            finally:
+                snap.close()
+        finally:
+            db.close()
 
     def test_fresh_install_no_backup_but_marker_written(self, tmp_path):
         # No marker, no stores.

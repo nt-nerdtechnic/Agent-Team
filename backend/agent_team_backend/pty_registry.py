@@ -22,53 +22,79 @@ on their own while the backend was down (their orphans outlive them).
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import signal
+import sqlite3
 import subprocess
 import threading
 import time
 from pathlib import Path
 
 from .applog import app_data_dir
+from .db import DB_FILENAME, Database
 
 log = logging.getLogger(__name__)
+
+_KV_KEY = "pty_registry"
 
 # Force a fixed locale so the lstart string captured at register time compares
 # equal to the one read back at reap time.
 _PS_ENV = {**os.environ, "LC_ALL": "C"}
 
 # register/unregister run on executor threads (terminals.py keeps their ps +
-# file I/O off the event loop), so every load-modify-save must be atomic.
+# db I/O off the event loop), so every load-modify-save must be atomic.
 _lock = threading.Lock()
+
+# Lazily-opened database handle. The app injects its shared instance at
+# startup (set_database); when the resolved app-data dir changes (tests
+# repoint AGENT_TEAM_DATA_DIR per test) a fresh handle is opened for it.
+_db: Database | None = None
+
+
+def set_database(db: Database | None) -> None:
+    """Share the app's Database instance instead of opening a second one."""
+    global _db
+    _db = db
 
 
 def _registry_path() -> Path:
     return app_data_dir() / "pty-registry.json"
 
 
+def _get_db() -> Database:
+    global _db
+    path = app_data_dir() / DB_FILENAME
+    db = _db
+    if db is None or db.path != path:
+        db = Database(path)
+        _db = db
+    return db
+
+
+def _import_legacy(cur: object, data: object) -> None:
+    if isinstance(data, dict):
+        _get_db().kv_set(_KV_KEY, data, now=int(time.time()))
+
+
 def _load() -> dict[str, dict]:
     try:
-        data = json.loads(_registry_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        db = _get_db()
+        data = db.kv_get(_KV_KEY)
+        if data is None:
+            db.import_json(_KV_KEY, _registry_path(), _import_legacy)
+            data = db.kv_get(_KV_KEY)
+    except (sqlite3.Error, OSError) as err:
+        log.warning("pty registry read failed: %s", err)
         return {}
     return data if isinstance(data, dict) else {}
 
 
 def _save(entries: dict[str, dict]) -> None:
-    path = _registry_path()
-    tmp = path.with_name(path.name + ".tmp")
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(json.dumps(entries), encoding="utf-8")
-        os.replace(tmp, path)
-    except OSError as err:
+        _get_db().kv_set(_KV_KEY, entries, now=int(time.time()))
+    except (sqlite3.Error, OSError) as err:
         log.warning("pty registry write failed: %s", err)
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 def _ps(pid: int, fields: str) -> str | None:

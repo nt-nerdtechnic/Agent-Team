@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
 from agent_team_backend.history_store import (
     HistoryStore,
@@ -10,17 +11,35 @@ from agent_team_backend.history_store import (
 )
 
 
-def test_record_appends_jsonl_and_returns_event(tmp_path):
+def test_record_persists_and_returns_event(tmp_path):
     ws = str(tmp_path)
     store = HistoryStore()
     ev = store.record(ws, run_dir="runs/r1", type="sentinel_detected", summary="---SPEC-DONE---")
     assert ev["type"] == "sentinel_detected"
     assert ev["id"] and ev["ts"]
-    path = tmp_path / ".agent-team" / "runs" / "r1" / "history.jsonl"
-    assert path.exists()
-    lines = path.read_text(encoding="utf-8").strip().splitlines()
-    assert len(lines) == 1
-    assert json.loads(lines[0])["summary"] == "---SPEC-DONE---"
+    # A fresh store (new instance, same workspace db) reads the event back.
+    cold = HistoryStore()
+    got = cold.tail(ws, "runs/r1")
+    assert [e["summary"] for e in got] == ["---SPEC-DONE---"]
+
+
+def test_record_survives_a_database_write_failure(tmp_path, monkeypatch, caplog):
+    """A failed database write degrades like the old JSONL append: the event
+    stays in the in-memory tail and the failure is only logged."""
+    ws = str(tmp_path)
+    store = HistoryStore()
+    store.record(ws, type="log", summary="first")
+    db = store._databases.get(ws)
+
+    def boom():
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(db, "transaction", boom)
+    with caplog.at_level("WARNING"):
+        event = store.record(ws, type="log", summary="second")
+    assert event["summary"] == "second"
+    assert [e["summary"] for e in store.tail(ws)] == ["first", "second"]
+    assert any("history append failed" in r.message for r in caplog.records)
 
 
 def test_tail_serves_memory_then_disk(tmp_path):
@@ -38,16 +57,44 @@ def test_tail_serves_memory_then_disk(tmp_path):
     assert [e["summary"] for e in got] == [f"line {i}" for i in range(5)]
 
 
-def test_tail_skips_corrupt_trailing_line(tmp_path):
+def test_legacy_jsonl_imported_once_and_retired(tmp_path):
+    """A legacy history.jsonl is imported on first access of its run: torn
+    trailing lines are skipped and the source is renamed .migrated-v1."""
     ws = str(tmp_path)
-    store = HistoryStore()
-    store.record(ws, run_dir="runs/r1", type="log", summary="good")
     path = tmp_path / ".agent-team" / "runs" / "r1" / "history.jsonl"
-    with path.open("a", encoding="utf-8") as fh:
+    path.parent.mkdir(parents=True)
+    with path.open("w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"id": "e1", "ts": "t", "type": "log", "summary": "good"}) + "\n")
         fh.write("{ this is not valid json\n")
     cold = HistoryStore()
     got = cold.tail(ws, "runs/r1")
     assert [e["summary"] for e in got] == ["good"]
+    assert not path.exists()
+    assert path.with_name(path.name + ".migrated-v1").exists()
+    # A second cold store serves the imported rows (no re-import, no dupes).
+    assert [e["summary"] for e in HistoryStore().tail(ws, "runs/r1")] == ["good"]
+
+
+def test_legacy_writer_regenerated_jsonl_is_appended(tmp_path):
+    """Coexistence: an older app version recreates history.jsonl after the
+    import completed. Its events are new (recorded post-migration), so they
+    are appended as fresh rows and the file is retired again."""
+    ws = str(tmp_path)
+    store = HistoryStore()
+    store.record(ws, run_dir="runs/r1", type="log", summary="from db")
+
+    path = tmp_path / ".agent-team" / "runs" / "r1" / "history.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps({"id": "e2", "ts": "t", "type": "log", "summary": "from legacy"})
+        + "\n",
+        encoding="utf-8",
+    )
+    cold = HistoryStore()
+    got = cold.tail(ws, "runs/r1")
+    assert [e["summary"] for e in got] == ["from db", "from legacy"]
+    assert not path.exists()
+    assert path.with_name(path.name + ".migrated-v1").exists()
 
 
 def test_record_line_classifies_and_extracts_stage(tmp_path):

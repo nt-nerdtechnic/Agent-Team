@@ -1,13 +1,15 @@
-"""Full per-workspace spawn history — `.agent-team/spawn-history.json`.
+"""Full per-workspace spawn history — kv "spawn_history" in the workspace db.
 
-project.json keeps only a 100-entry mirror of the renderer's spawn history
-(``Project.ui_spawn_history``) so its read-size cap stays safe. This store
-keeps the complete history: ``merge()`` upserts every snapshot the renderer
-sends and never deletes older entries, and ``read_page()`` serves pages back
-newest-first for the Agent History modal.
+The project document keeps only a 100-entry mirror of the renderer's spawn
+history (``Project.ui_spawn_history``) so its read-size cap stays safe. This
+store keeps the complete history: ``merge()`` upserts every snapshot the
+renderer sends and never deletes older entries, and ``read_page()`` serves
+pages back newest-first for the Agent History modal.
 
-File shape: ``{"version": 1, "entries": [...]}`` with entries ordered
-oldest → newest (matching the renderer's in-memory order).
+Document shape: ``{"version": 1, "entries": [...]}`` with entries ordered
+oldest → newest (matching the renderer's in-memory order). The legacy
+`.agent-team/spawn-history.json` is imported on first access and renamed
+`spawn-history.json.migrated-v1`.
 """
 
 from __future__ import annotations
@@ -15,16 +17,20 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from .projects import PROJECT_DIR_NAME, ensure_workspace_data_dir
+from .db import DB_FILENAME, Database, WorkspaceDatabases
+from .projects import PROJECT_DIR_NAME
 
 log = logging.getLogger("agent_team_backend.spawn_history")
 
-SPAWN_HISTORY_FILE = "spawn-history.json"
+SPAWN_HISTORY_FILE = "spawn-history.json"  # legacy JSON name, still used for import
+_KV_KEY = "spawn_history"
 # Hard cap so a runaway client cannot grow the file forever; entries past it
 # are dropped from the oldest end with a warning.
 MAX_ENTRIES = 5000
@@ -120,30 +126,8 @@ def manual_logs_dir(workspace_path: str) -> Path:
     )
 
 
-def read_stored_entries_checked(
-    workspace_path: str,
-) -> tuple[list[dict[str, Any]], bool]:
-    """``(entries, readable)`` from a side-effect-free read of the full store.
-
-    An absent store is readable and simply empty — "this workspace has no
-    records" is an answer. A permission error, a half-written file or an
-    ``entries`` that is not an array yields ``readable=False``.
-
-    Callers that read this to decide what may be deleted must not treat an
-    unreadable store as an empty one: no entry naming a file would then look
-    like permission to remove it.
-    """
-    hf = (
-        Path(canonical_workspace_path(workspace_path))
-        / PROJECT_DIR_NAME
-        / SPAWN_HISTORY_FILE
-    )
-    try:
-        data = json.loads(hf.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return [], True
-    except (OSError, ValueError):
-        return [], False
+def _checked_entries(data: Any) -> tuple[list[dict[str, Any]], bool]:
+    """Validate a store document with read_stored_entries_checked semantics."""
     if not isinstance(data, dict):
         return [], False
     entries = data.get("entries")
@@ -152,6 +136,52 @@ def read_stored_entries_checked(
     if not isinstance(entries, list):
         return [], False
     return [e for e in entries if isinstance(e, dict)], True
+
+
+def read_stored_entries_checked(
+    workspace_path: str,
+) -> tuple[list[dict[str, Any]], bool]:
+    """``(entries, readable)`` from a side-effect-free read of the full store.
+
+    An absent store is readable and simply empty — "this workspace has no
+    records" is an answer. A permission error, an unreadable database or an
+    ``entries`` that is not an array yields ``readable=False``.
+
+    Reads the workspace database first (read-only connection, so this never
+    blocks or mutates the app's own handle) and falls back to the legacy JSON
+    file while the kv document does not exist yet.
+
+    Callers that read this to decide what may be deleted must not treat an
+    unreadable store as an empty one: no entry naming a file would then look
+    like permission to remove it.
+    """
+    data_dir = Path(canonical_workspace_path(workspace_path)) / PROJECT_DIR_NAME
+    db_path = data_dir / DB_FILENAME
+    if db_path.exists():
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            try:
+                row = conn.execute(
+                    "SELECT value FROM kv WHERE key = ?", (_KV_KEY,)
+                ).fetchone()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return [], False
+        if row is not None:
+            try:
+                data = json.loads(row[0])
+            except ValueError:
+                return [], False
+            return _checked_entries(data)
+    hf = data_dir / SPAWN_HISTORY_FILE
+    try:
+        data = json.loads(hf.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return [], True
+    except (OSError, ValueError):
+        return [], False
+    return _checked_entries(data)
 
 
 def read_stored_entries(workspace_path: str) -> list[dict[str, Any]]:
@@ -281,51 +311,163 @@ def _parse_entry_timestamp(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
-class SpawnHistoryStore:
-    """Manages the full spawn-history file for each workspace."""
+def _entry_touched_at(entry: dict[str, Any]) -> datetime | None:
+    """An entry's last-touched time, for coexistence conflict resolution.
 
-    def __init__(self) -> None:
+    Entries carry no updatedAt; ``spawnedAt`` is rewritten when a pane is
+    restored or re-recorded and ``removedAt`` is stamped later, so the max
+    of the two is the closest equivalent.
+    """
+    removed = _parse_entry_timestamp(entry.get("removedAt"))
+    spawned = _parse_entry_timestamp(entry.get("spawnedAt"))
+    if removed is not None and spawned is not None:
+        return max(removed, spawned)
+    return removed if removed is not None else spawned
+
+
+class SpawnHistoryStore:
+    """Manages the full spawn-history document for each workspace."""
+
+    def __init__(self, databases: WorkspaceDatabases | None = None) -> None:
         # merge() runs on worker threads (the ws set_ui_state offload), so
         # every read-modify-write is serialized like ProjectStore's saves.
         self._lock = threading.RLock()
+        self._databases = databases or WorkspaceDatabases()
 
     def history_file(self, workspace_path: str) -> Path:
+        """Where the store lives now: the workspace database file."""
         # Canonical (symlink-resolved) location so every spelling of the same
-        # workspace reads and writes the same store file.
+        # workspace reads and writes the same store.
+        ws = canonical_workspace_path(workspace_path)
+        return Path(ws) / PROJECT_DIR_NAME / DB_FILENAME
+
+    def _legacy_file(self, workspace_path: str) -> Path:
         ws = canonical_workspace_path(workspace_path)
         return Path(ws) / PROJECT_DIR_NAME / SPAWN_HISTORY_FILE
 
+    def _db(self, workspace_path: str, *, create: bool) -> Database | None:
+        """The workspace db; read paths only materialize it for a legacy import."""
+        if create:
+            return self._databases.get(workspace_path)
+        db = self._databases.peek(workspace_path)
+        if db is None and self._legacy_file(workspace_path).exists():
+            db = self._databases.get(workspace_path)
+        return db
+
+    def _import_legacy(self, db: Database, workspace_path: str) -> None:
+        """One-time import of the legacy spawn-history.json into the db.
+
+        The old file store quarantined a corrupt file as ``.corrupt``; the
+        import keeps an unreadable file in place for inspection instead and
+        starts empty — the kv layer's own reads are corrupt-tolerant. A file
+        with a malformed shape raises out of the import so it rolls back
+        whole: no marker, file left in place, and fail-closed readers
+        (``read_stored_entries_checked``) keep reporting it unreadable.
+        """
+
+        def load(cur: Any, data: Any) -> None:
+            entries = data.get("entries") if isinstance(data, dict) else None
+            if not isinstance(entries, list):
+                # Raising rolls the import back (no marker, file kept), so
+                # the fallback read still fails closed on the malformed file.
+                raise ValueError("malformed legacy spawn-history.json")
+            # kv_set joins the surrounding import transaction (reentrant).
+            db.kv_set(
+                _KV_KEY,
+                {"version": 1, "entries": [e for e in entries if isinstance(e, dict)]},
+                now=int(time.time()),
+            )
+
+        def merge(cur: Any, data: Any) -> None:
+            # Legacy-writer coexistence: an older app version regenerated
+            # spawn-history.json after the import. Fold its entries into the
+            # kv document by paneId (merge()'s upsert key): unknown paneIds
+            # are appended; when both sides have an entry, the one with the
+            # newer last-touched timestamp wins, ties and unparseable
+            # timestamps keeping the stored side.
+            incoming = data.get("entries") if isinstance(data, dict) else None
+            if not isinstance(incoming, list):
+                log.warning(
+                    "regenerated spawn-history.json for %s malformed; ignored",
+                    workspace_path,
+                )
+                return
+            incoming = filter_foreign_entries(
+                workspace_path,
+                [e for e in incoming if isinstance(e, dict)],
+                context="coexistence merge",
+            )
+            doc = db.kv_get(_KV_KEY)
+            stored_entries = doc.get("entries") if isinstance(doc, dict) else None
+            stored = [
+                e for e in stored_entries if isinstance(e, dict)
+            ] if isinstance(stored_entries, list) else []
+            index = {
+                e.get("paneId"): i
+                for i, e in enumerate(stored)
+                if isinstance(e.get("paneId"), str)
+            }
+            for entry in incoming:
+                pane_id = entry.get("paneId")
+                if not isinstance(pane_id, str) or not pane_id:
+                    continue
+                i = index.get(pane_id)
+                if i is None:
+                    index[pane_id] = len(stored)
+                    stored.append(entry)
+                    continue
+                theirs = _entry_touched_at(entry)
+                ours = _entry_touched_at(stored[i])
+                if theirs is not None and (ours is None or theirs > ours):
+                    stored[i] = entry
+            if len(stored) > MAX_ENTRIES:
+                dropped = len(stored) - MAX_ENTRIES
+                stored = stored[dropped:]
+                log.warning(
+                    "spawn history for %s exceeded %d entries; dropped %d oldest",
+                    workspace_path, MAX_ENTRIES, dropped,
+                )
+            # kv_set joins the surrounding merge transaction (reentrant).
+            db.kv_set(
+                _KV_KEY, {"version": 1, "entries": stored}, now=int(time.time())
+            )
+
+        try:
+            db.import_json(
+                _KV_KEY, self._legacy_file(workspace_path), load, merge=merge
+            )
+        except ValueError as err:
+            # Malformed shape: the import rolled back and will retry on the
+            # next access; the file stays in place for inspection.
+            log.warning(
+                "legacy spawn-history.json for %s not imported: %s",
+                workspace_path, err,
+            )
+
     def _load(
-        self, workspace_path: str, seed: list[dict[str, Any]] | None
+        self,
+        workspace_path: str,
+        seed: list[dict[str, Any]] | None,
+        db: Database | None,
     ) -> list[dict[str, Any]]:
         """Return the stored entries (oldest → newest).
 
-        Missing file → seeded from ``seed`` (the project.json mirror) when
+        Missing document → seeded from ``seed`` (the project mirror) when
         given: the one-time migration for projects created before the full
-        store existed. A corrupt file is preserved as a ``.corrupt`` sibling
-        and then treated as missing — never crash on bad data.
+        store existed. A corrupt document is logged and treated as missing —
+        never crash on bad data.
         """
-        hf = self.history_file(workspace_path)
-        if hf.exists():
-            try:
-                data = json.loads(hf.read_text(encoding="utf-8"))
+        if db is not None:
+            self._import_legacy(db, workspace_path)
+            data = db.kv_get(_KV_KEY)
+            if data is not None:
                 entries = data.get("entries") if isinstance(data, dict) else None
-                if not isinstance(entries, list):
-                    raise ValueError("'entries' is not a list")
-                return [e for e in entries if isinstance(e, dict)]
-            except Exception as err:  # noqa: BLE001
-                backup = hf.with_suffix(hf.suffix + ".corrupt")
-                try:
-                    os.replace(hf, backup)
-                    log.warning(
-                        "spawn-history.json at %s is corrupt (%s); kept as %s, starting empty",
-                        hf, err, backup.name,
-                    )
-                except OSError as bak_err:
-                    log.warning(
-                        "spawn-history.json at %s is corrupt (%s) and backup failed (%s); starting empty",
-                        hf, err, bak_err,
-                    )
+                if isinstance(entries, list):
+                    return [e for e in entries if isinstance(e, dict)]
+                log.warning(
+                    "stored spawn-history document for %s malformed; starting empty",
+                    workspace_path,
+                )
         if seed:
             # The mirror may predate the write-layer filter, so a foreign
             # entry could have been persisted there — never migrate it in.
@@ -336,13 +478,12 @@ class SpawnHistoryStore:
             )
         return []
 
-    def _write(self, workspace_path: str, entries: list[dict[str, Any]]) -> None:
-        ensure_workspace_data_dir(canonical_workspace_path(workspace_path))
-        hf = self.history_file(workspace_path)
-        tmp = hf.with_suffix(hf.suffix + ".tmp")
-        payload = json.dumps({"version": 1, "entries": entries}, ensure_ascii=False)
-        tmp.write_text(payload, encoding="utf-8")
-        os.replace(tmp, hf)
+    def _write(
+        self, workspace_path: str, entries: list[dict[str, Any]], db: Database
+    ) -> None:
+        db.kv_set(
+            _KV_KEY, {"version": 1, "entries": entries}, now=int(time.time())
+        )
 
     def merge(
         self,
@@ -366,7 +507,14 @@ class SpawnHistoryStore:
         """
         entries = filter_foreign_entries(workspace_path, entries, context="merge")
         with self._lock:
-            stored = self._load(workspace_path, seed)
+            db = self._db(workspace_path, create=True)
+            if db is None:
+                log.warning(
+                    "cannot merge spawn history: workspace %s is not a directory",
+                    workspace_path,
+                )
+                return 0
+            stored = self._load(workspace_path, seed, db)
             index = {
                 e.get("paneId"): i
                 for i, e in enumerate(stored)
@@ -391,7 +539,7 @@ class SpawnHistoryStore:
                     "spawn history for %s exceeded %d entries; dropped %d oldest",
                     workspace_path, MAX_ENTRIES, dropped,
                 )
-            self._write(workspace_path, stored)
+            self._write(workspace_path, stored, db)
             return len(stored)
 
     def patch_entry(
@@ -407,11 +555,14 @@ class SpawnHistoryStore:
         A ``None`` value removes the key (e.g. resetting a customName); any
         other value is set. Returns False — and writes nothing — when no
         entry matches ``pane_id``. ``seed`` mirrors merge()/read_page(): a
-        missing file is first migrated from the project.json mirror so
+        missing document is first migrated from the project mirror so
         pre-store projects can still be patched.
         """
         with self._lock:
-            stored = self._load(workspace_path, seed)
+            db = self._db(workspace_path, create=True)
+            if db is None:
+                return False
+            stored = self._load(workspace_path, seed, db)
             target = next(
                 (e for e in stored if e.get("paneId") == pane_id), None
             )
@@ -422,7 +573,7 @@ class SpawnHistoryStore:
                     target.pop(key, None)
                 else:
                     target[key] = value
-            self._write(workspace_path, stored)
+            self._write(workspace_path, stored, db)
             return True
 
     def delete_entries(
@@ -461,11 +612,11 @@ class SpawnHistoryStore:
         name the transcript files and the disk space at stake before the user
         agrees.
 
-        Unknown mode deletes nothing. The rewrite is atomic (tmp +
-        os.replace) and skipped entirely when nothing matched. Each
-        workspace's file is keyed by its canonical path, so entries of other
+        Unknown mode deletes nothing. The rewrite is atomic (one kv
+        transaction) and skipped entirely when nothing matched. Each
+        workspace's store is keyed by its canonical path, so entries of other
         workspaces are never affected. ``seed`` mirrors read_page(): a
-        missing file is first migrated from the project.json mirror so the
+        missing document is first migrated from the project mirror so the
         deletion also covers pre-store entries.
         """
         ids = {p for p in pane_ids or [] if isinstance(p, str) and p}
@@ -486,7 +637,10 @@ class SpawnHistoryStore:
             return False
 
         with self._lock:
-            stored = self._load(workspace_path, seed)
+            db = self._db(workspace_path, create=True)
+            if db is None:
+                return DeleteResult([], 0, 0, 0)
+            stored = self._load(workspace_path, seed, db)
             kept: list[dict[str, Any]] = []
             deleted: list[str] = []
             gone: list[dict[str, Any]] = []
@@ -502,7 +656,7 @@ class SpawnHistoryStore:
             if dry_run:
                 freed, removed = _measure_manual_logs(workspace_path, gone)
                 return DeleteResult(deleted, len(kept), freed, removed)
-            self._write(workspace_path, kept)
+            self._write(workspace_path, kept, db)
             # Logs go after the store rewrite: if unlinking fails half-way the
             # entries are still gone, and the leftovers show up as orphans in
             # the storage-usage page rather than as a failed delete.
@@ -520,16 +674,20 @@ class SpawnHistoryStore:
         """Return ``(page, total)`` where the page is newest → oldest.
 
         ``offset`` counts from the newest end (0 = latest entry); an
-        out-of-range offset yields an empty page. When the full file is
-        missing and the project.json mirror (``seed``) has data, the file is
+        out-of-range offset yields an empty page. When the full store is
+        missing and the project mirror (``seed``) has data, the store is
         seeded first — the same one-time migration merge() performs.
         """
         with self._lock:
-            stored = self._load(workspace_path, seed)
-            if stored and not self.history_file(workspace_path).exists():
+            db = self._db(workspace_path, create=False)
+            stored = self._load(workspace_path, seed, db)
+            if stored and (db is None or db.kv_get(_KV_KEY) is None):
                 # Persist the migration so later reads no longer depend on
                 # the mirror being passed in.
-                self._write(workspace_path, stored)
+                db = self._db(workspace_path, create=True)
+                if db is not None:
+                    self._import_legacy(db, workspace_path)
+                    self._write(workspace_path, stored, db)
             offset = max(0, offset)
             limit = max(0, limit)
             newest_first = list(reversed(stored))

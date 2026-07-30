@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
 
 from .applog import app_data_dir
+from .db import DB_FILENAME, Database
 
 log = logging.getLogger("agent_team_backend.ai_chat_settings")
 
 SETTINGS_FILE = "ai_chat_settings.json"
+_KV_KEY = "ai_chat_settings"
 
 DEFAULTS: dict[str, Any] = {
     "provider": "ollama",
@@ -71,29 +73,37 @@ _PROVIDER_MODEL_FIELD: dict[str, str] = {
 
 
 class AIChatSettingsStore:
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(self, path: Path | None = None, db: Database | None = None) -> None:
         self._path = path or (app_data_dir() / SETTINGS_FILE)
+        self._db = db or Database(self._path.parent / DB_FILENAME)
+        # The document holds API keys; the legacy JSON was chmod 0o600, so
+        # keep the database file equally private (best-effort).
+        try:
+            os.chmod(self._db.path, 0o600)
+        except OSError:
+            pass
 
     @property
     def path(self) -> Path:
-        return self._path
+        return self._db.path
+
+    def _import_legacy(self, cur: Any, data: Any) -> None:
+        if isinstance(data, dict):
+            self._db.kv_set(_KV_KEY, data, now=int(time.time()))
+
+    def _read(self) -> dict[str, Any]:
+        doc = self._db.kv_get(_KV_KEY)
+        if doc is None:
+            self._db.import_json(_KV_KEY, self._path, self._import_legacy)
+            doc = self._db.kv_get(_KV_KEY)
+        return doc if isinstance(doc, dict) else {}
 
     def get(self) -> dict[str, Any]:
-        if not self._path.exists():
-            result = dict(DEFAULTS)
-        else:
-            try:
-                raw = json.loads(self._path.read_text(encoding="utf-8"))
-                if not isinstance(raw, dict):
-                    result = dict(DEFAULTS)
-                else:
-                    result = dict(DEFAULTS)
-                    for k in DEFAULTS:
-                        if k in raw:
-                            result[k] = raw[k]
-            except Exception as err:
-                log.warning("ai_chat settings read error (%s); using defaults", err)
-                result = dict(DEFAULTS)
+        raw = self._read()
+        result = dict(DEFAULTS)
+        for k in DEFAULTS:
+            if k in raw:
+                result[k] = raw[k]
         # Add computed `model` alias so the frontend receives a single key.
         provider = result.get("provider", "ollama")
         model_field = _PROVIDER_MODEL_FIELD.get(provider, "ollama_model")
@@ -118,7 +128,7 @@ class AIChatSettingsStore:
             current["max_tokens"] = DEFAULTS["max_tokens"]
         # Persist without the computed `model` alias (it's derived on read).
         to_save = {k: v for k, v in current.items() if k != "model"}
-        self._write(to_save)
+        self._db.kv_set(_KV_KEY, to_save, now=int(time.time()))
         # Recompute alias so the return value is fresh.
         provider = current.get("provider", "ollama")
         model_field = _PROVIDER_MODEL_FIELD.get(provider, "ollama_model")
@@ -126,19 +136,3 @@ class AIChatSettingsStore:
         log.info("ai_chat settings saved: provider=%s model=%s",
                  current.get("provider"), current.get("model"))
         return current
-
-    def _write(self, data: dict[str, Any]) -> None:
-        # 0o700 on dir so other users can't list it; 0o600 on file so they can't read the API key.
-        self._path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-        encoded = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
-        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
-        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            os.write(fd, encoded)
-        finally:
-            os.close(fd)
-        try:
-            os.replace(tmp, self._path)
-        except Exception:
-            tmp.unlink(missing_ok=True)
-            raise

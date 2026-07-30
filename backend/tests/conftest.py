@@ -4,9 +4,18 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 import pytest
+
+# Importing `app` below instantiates the module-level stores; since the SQLite
+# migration that import moves real JSON stores into navide.db (renaming the
+# sources). Point app-data at a throwaway dir BEFORE the import so collecting
+# tests can never migrate the developer's real app data.
+os.environ.setdefault(
+    "AGENT_TEAM_DATA_DIR", tempfile.mkdtemp(prefix="agent-team-tests-")
+)
 
 from agent_team_backend import app
 from agent_team_backend.credential_vault import CredentialVault

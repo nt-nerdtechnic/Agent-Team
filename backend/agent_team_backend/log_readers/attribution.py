@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -35,12 +36,15 @@ from threading import Lock
 from typing import Iterable
 
 from ..applog import app_data_dir
+from ..db import DB_FILENAME, Database
 from .aider import aider_history_path, aider_pane_history_path, is_history_name
 from .base import LogReader, TokenUsage
 from .claude import encode_claude_cwd
 from .cursor import cursor_project_hash
 
 log = logging.getLogger("agent_team_backend.log_readers.attribution")
+
+_KV_KEY = "workspace_associations"
 
 
 @dataclass
@@ -122,10 +126,12 @@ class Attribution:
         readers: Iterable[LogReader],
         *,
         workspaces_path: Path | None = None,
+        db: Database | None = None,
     ) -> None:
         self._readers: dict[str, LogReader] = {r.vendor: r for r in readers}
         self._workspaces: dict[str, WorkspaceMapping] = {}
         self._workspaces_path = workspaces_path or (app_data_dir() / "workspace-associations.json")
+        self._db = db or Database(self._workspaces_path.parent / DB_FILENAME)
         self._panes: dict[str, _PaneRegistration] = {}
         self._session_owner: dict[str, str] = {}  # session_id → pane_id (ephemeral)
         self._unbound_markers: dict[str, str] = {}  # session_marker → pane_id (Codex/Antigravity)
@@ -135,14 +141,15 @@ class Attribution:
 
     # ───────────────────────── persistence ─────────────────────────────────
 
+    def _import_legacy(self, cur: object, data: object) -> None:
+        if isinstance(data, dict):
+            self._db.kv_set(_KV_KEY, data, now=int(time.time()))
+
     def _load_workspaces(self) -> None:
-        try:
-            data = json.loads(self._workspaces_path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return
-        except (OSError, json.JSONDecodeError) as err:
-            log.warning("workspace-associations file unreadable (%s); starting empty", err)
-            return
+        data = self._db.kv_get(_KV_KEY)
+        if data is None:
+            self._db.import_json(_KV_KEY, self._workspaces_path, self._import_legacy)
+            data = self._db.kv_get(_KV_KEY)
         if isinstance(data, dict):
             for ws_path, body in data.items():
                 if not isinstance(body, dict):
@@ -155,13 +162,12 @@ class Attribution:
         log.info("loaded %d workspace association(s)", len(self._workspaces))
 
     def _save_workspaces(self) -> None:
+        data = {ws: asdict(m) for ws, m in self._workspaces.items()}
         try:
-            self._workspaces_path.parent.mkdir(parents=True, exist_ok=True)
-            data = {ws: asdict(m) for ws, m in self._workspaces.items()}
-            tmp = self._workspaces_path.with_suffix(self._workspaces_path.suffix + ".tmp")
-            tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-            os.replace(tmp, self._workspaces_path)
-        except OSError as err:
+            self._db.kv_set(_KV_KEY, data, now=int(time.time()))
+        except sqlite3.Error as err:
+            # Same degradation as the old JSON file store: registration keeps
+            # working in memory and the persistence failure is only logged.
             log.warning("workspace-associations save failed: %s", err)
 
     # ───────────────────────── workspace lifecycle ─────────────────────────

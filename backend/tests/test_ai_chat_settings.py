@@ -10,6 +10,7 @@ import pytest
 from agent_team_backend.ai_chat_settings import (
     AIChatSettingsStore,
     DEFAULTS,
+    _KV_KEY,
     _VALID_PROVIDERS,
     _PROVIDER_MODEL_FIELD,
 )
@@ -56,10 +57,10 @@ def test_set_model_without_provider_change(tmp_path: Path) -> None:
 
 
 def test_model_key_not_persisted_to_disk(tmp_path: Path) -> None:
-    """The computed `model` alias must NOT be written to the JSON file."""
+    """The computed `model` alias must NOT be written to the stored document."""
     store = make_store(tmp_path)
     store.set({"provider": "anthropic", "model": "claude-sonnet-4-6"})
-    raw = json.loads((tmp_path / "settings.json").read_text())
+    raw = store._db.kv_get(_KV_KEY)
     assert "model" not in raw
 
 
@@ -126,12 +127,28 @@ def test_api_keys_not_in_defaults_values() -> None:
 
 
 def test_model_key_not_persisted_for_new_providers(tmp_path: Path) -> None:
-    """The computed `model` alias must NOT appear in the persisted JSON for any provider."""
+    """The computed `model` alias must NOT appear in the persisted document for any provider."""
     for prov in _VALID_PROVIDERS:
-        store = AIChatSettingsStore(path=tmp_path / f"s_{prov}.json")
+        store = AIChatSettingsStore(path=tmp_path / prov / "s.json")
         store.set({"provider": prov, "model": "test-model"})
-        raw = json.loads((tmp_path / f"s_{prov}.json").read_text())
-        assert "model" not in raw, f"'model' alias leaked to disk for provider={prov}"
+        raw = store._db.kv_get(_KV_KEY)
+        assert "model" not in raw, f"'model' alias leaked for provider={prov}"
+
+
+def test_legacy_json_imported_once_and_retired(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    path.write_text(
+        json.dumps({"provider": "anthropic", "anthropic_api_key": "sk-ant-test"}),
+        encoding="utf-8",
+    )
+    store = make_store(tmp_path)
+    result = store.get()
+    assert result["provider"] == "anthropic"
+    assert result["anthropic_api_key"] == "sk-ant-test"
+    assert not path.exists()
+    assert path.with_name(path.name + ".migrated-v1").exists()
+    # Second instance sees the imported data without re-importing.
+    assert make_store(tmp_path).get()["anthropic_api_key"] == "sk-ant-test"
 
 
 def test_switch_provider_preserves_other_keys(tmp_path: Path) -> None:

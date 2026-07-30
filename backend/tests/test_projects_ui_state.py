@@ -131,16 +131,14 @@ def test_no_project_returns_none_and_creates_nothing(tmp_path: Path) -> None:
     assert not store.project_file(str(tmp_path)).exists()
 
 
-def test_project_json_without_fields_defaults(tmp_path: Path) -> None:
-    """Backward compat: old project.json without the fields → None / ''."""
-    store = _store_with_project(tmp_path)
-    project_file = store.project_file(str(tmp_path))
-    data = json.loads(project_file.read_text(encoding="utf-8"))
-    data.pop("ui_run_groups", None)
-    data.pop("ui_active_tab", None)
-    data.pop("ui_git_tab_repo", None)
-    data.pop("ui_spawn_history", None)
-    project_file.write_text(json.dumps(data), encoding="utf-8")
+def test_legacy_project_json_without_fields_defaults(tmp_path: Path) -> None:
+    """Backward compat: legacy project.json without the fields → None / ''."""
+    legacy = tmp_path / ".agent-team" / "project.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(json.dumps({
+        "id": "p1", "name": "x", "workspace_path": str(tmp_path),
+        "created_at": "t", "updated_at": "t",
+    }), encoding="utf-8")
     fresh = ProjectStore().peek(str(tmp_path))
     assert fresh is not None
     assert fresh.ui_run_groups is None
@@ -193,11 +191,10 @@ async def test_set_ui_state_handler_offloads_and_round_trips(
 async def test_set_ui_state_handler_merges_full_spawn_history_store(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """spawn_history payloads land in the full store (spawn-history.json,
-    upsert-only) while project.json keeps its 100-entry mirror."""
-    import json as _json
-
+    """spawn_history payloads land in the full store (workspace db,
+    upsert-only) while the project document keeps its 100-entry mirror."""
     from agent_team_backend import app, ws_handlers
+    from agent_team_backend.spawn_history import read_stored_entries
 
     store = _store_with_project(tmp_path)
     # Pre-existing mirror from before the full store existed → seeds it.
@@ -229,8 +226,7 @@ async def test_set_ui_state_handler_merges_full_spawn_history_store(
     fresh = ProjectStore().peek(str(tmp_path))
     assert fresh is not None
     assert fresh.ui_spawn_history == history[-100:]
-    full_file = app.spawn_history_store.history_file(str(tmp_path))
-    stored = _json.loads(full_file.read_text(encoding="utf-8"))["entries"]
+    stored = read_stored_entries(str(tmp_path))
     # legacy-1 was seeded from the old mirror, then all 150 merged after it.
     assert [e["paneId"] for e in stored] == ["legacy-1"] + [f"p{i}" for i in range(150)]
 
@@ -239,7 +235,7 @@ async def test_set_ui_state_handler_merges_full_spawn_history_store(
         "workspace_path": str(tmp_path),
         "spawn_history": [{"paneId": "p149", "customName": "Renamed"}],
     })
-    stored = _json.loads(full_file.read_text(encoding="utf-8"))["entries"]
+    stored = read_stored_entries(str(tmp_path))
     assert len(stored) == 151
     assert stored[-1] == {"paneId": "p149", "customName": "Renamed"}
 
@@ -248,11 +244,10 @@ async def test_set_ui_state_handler_filters_foreign_spawn_history(
     tmp_path: Path, monkeypatch
 ) -> None:
     """Workspace isolation at the write layer: entries whose workspacePath
-    belongs to another workspace reach neither the project.json mirror nor
+    belongs to another workspace reach neither the project mirror nor
     the full store."""
-    import json as _json
-
     from agent_team_backend import app, ws_handlers
+    from agent_team_backend.spawn_history import read_stored_entries
 
     store = _store_with_project(tmp_path)
     monkeypatch.setattr(app, "project_store", store)
@@ -284,15 +279,14 @@ async def test_set_ui_state_handler_filters_foreign_spawn_history(
     assert fresh is not None
     assert fresh.ui_spawn_history is not None
     assert [e["paneId"] for e in fresh.ui_spawn_history] == ["mine"]
-    full_file = app.spawn_history_store.history_file(str(tmp_path))
-    stored = _json.loads(full_file.read_text(encoding="utf-8"))["entries"]
+    stored = read_stored_entries(str(tmp_path))
     assert [e["paneId"] for e in stored] == ["mine"]
 
 
 async def test_concurrent_offloaded_saves_serialize(tmp_path: Path) -> None:
     """Concurrent set_ui_state calls on worker threads (the ws handler offloads
-    via asyncio.to_thread) must serialize: the surviving file is valid JSON and
-    each writer's field pair lands atomically (no torn read-modify-write)."""
+    via asyncio.to_thread) must serialize: each writer's field pair lands
+    atomically (no torn read-modify-write)."""
     store = _store_with_project(tmp_path)
     # Bulk payload widens the write window so unserialized saves would tear.
     filler = [{"paneId": f"p{i}", "agentLabel": "x" * 200} for i in range(50)]
@@ -307,12 +301,10 @@ async def test_concurrent_offloaded_saves_serialize(tmp_path: Path) -> None:
 
     await asyncio.gather(*(asyncio.to_thread(write, i) for i in range(30)))
 
-    raw = store.project_file(str(tmp_path)).read_text(encoding="utf-8")
-    data = json.loads(raw)  # last-writer-wins, but always valid JSON
-    # The winning writer's two fields must be from the SAME call.
-    assert data["ui_run_groups"] == [{"id": data["ui_active_tab"]}]
-    assert data["ui_active_tab"].startswith("rg-")
-    assert data["ui_spawn_history"] == filler
-    # No orphaned temp file left behind by interleaved writers.
-    tmp_file = store.project_file(str(tmp_path)).with_suffix(".json.tmp")
-    assert not tmp_file.exists()
+    # Last-writer-wins, but the winning writer's two fields must be from the
+    # SAME call, and a fresh store must read a consistent document back.
+    fresh = ProjectStore().peek(str(tmp_path))
+    assert fresh is not None
+    assert fresh.ui_run_groups == [{"id": fresh.ui_active_tab}]
+    assert fresh.ui_active_tab.startswith("rg-")
+    assert fresh.ui_spawn_history == filler

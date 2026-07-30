@@ -600,6 +600,117 @@ def test_an_unreadable_spawn_history_protects_every_home(
     assert _item(report, "codexPanesStale")["bytes"] == 0
 
 
+def _pane_workspace_db(
+    tmp_path: Path,
+    *,
+    project: dict[str, Any] | None = None,
+    history: dict[str, Any] | None = None,
+) -> Path:
+    """A workspace whose records live in navide.db's kv (post-migration)."""
+    from agent_team_backend.db import Database
+
+    ws = tmp_path / "pane-ws"
+    data = ws / ".agent-team"
+    data.mkdir(parents=True, exist_ok=True)
+    db = Database(data / "navide.db")
+    if project is not None:
+        db.kv_set("project", project, now=1)
+    if history is not None:
+        db.kv_set("spawn_history", history, now=1)
+    db.close()
+    return ws
+
+
+def test_pane_records_in_the_workspace_database_protect_homes(
+    roots: dict[str, Path], tmp_path: Path
+) -> None:
+    """Post-migration the project and spawn-history documents live in the
+    workspace navide.db; references must come from there, not from the
+    retired (absent) JSON files — else every home reads as orphaned."""
+    ws = _pane_workspace_db(
+        tmp_path,
+        project={"id": "p", "panes": [{"pane_id": "kept"}]},
+        history={"version": 1, "entries": [{"paneId": "resumable"}]},
+    )
+    _registry(roots, [ws])
+    kept = _pane_home(roots, "kept", 30)
+    _pane_home(roots, "resumable", 20)
+    orphan = _pane_home(roots, "orphan", 40)
+
+    report = storage_service.collect_usage([str(ws)], 30)
+
+    assert _item(report, "codexPanesRecent")["bytes"] == 50
+    assert _item(report, "codexPanesStale")["bytes"] == 40
+    assert _item(report, "codexPanesStale")["paths"] == [str(orphan)]
+
+    storage_service.cleanup(["codexPanesStale"], [str(ws)], 30)
+    assert kept.exists()
+    assert not orphan.exists()
+
+
+def test_empty_database_documents_are_a_legal_empty_state(
+    roots: dict[str, Path], tmp_path: Path
+) -> None:
+    """A workspace whose kv documents exist but name nothing is genuinely
+    empty — its unnamed homes are orphans, not protected unknowns."""
+    ws = _pane_workspace_db(
+        tmp_path,
+        project={"id": "p", "panes": []},
+        history={"version": 1, "entries": []},
+    )
+    _registry(roots, [ws])
+    _pane_home(roots, "orphan", 40)
+
+    report = storage_service.collect_usage([str(ws)], 30)
+
+    assert _item(report, "codexPanesStale")["bytes"] == 40
+    assert _item(report, "codexPanesStale")["cleanable"] is True
+
+
+def test_an_unreadable_workspace_database_protects_every_home(
+    roots: dict[str, Path], tmp_path: Path
+) -> None:
+    """Fail closed: a workspace database that cannot be read may hold the
+    very records that would have named these homes."""
+    ws = tmp_path / "pane-ws"
+    data = ws / ".agent-team"
+    data.mkdir(parents=True)
+    (data / "navide.db").write_text("this is not a database", encoding="utf-8")
+    _registry(roots, [ws])
+    orphan = _pane_home(roots, "orphan", 40)
+
+    report = storage_service.collect_usage([str(ws)], 30)
+
+    assert _item(report, "codexPanesStale")["bytes"] == 0
+    assert _item(report, "codexPanesRecent")["bytes"] == 40
+    assert any(str(data / "navide.db") == e["path"] for e in report["errors"])
+
+    storage_service.cleanup(["codexPanesStale"], [str(ws)], 30)
+    assert orphan.exists()
+
+
+def test_a_workspace_database_without_documents_falls_back_to_legacy_json(
+    roots: dict[str, Path], tmp_path: Path
+) -> None:
+    """Transition window: the database exists (another store created it) but
+    the project/spawn-history documents were not imported yet — the legacy
+    JSON files still answer."""
+    from agent_team_backend.db import Database
+
+    ws = _pane_workspace(tmp_path, panes=[{"pane_id": "kept"}])
+    db = Database(ws / ".agent-team" / "navide.db")
+    db.kv_set("chat_threads", [], now=1)
+    db.close()
+    _registry(roots, [ws])
+    _pane_home(roots, "kept", 30)
+    _pane_home(roots, "orphan", 40)
+
+    report = storage_service.collect_usage([str(ws)], 30)
+
+    assert _item(report, "codexPanesRecent")["bytes"] == 30
+    assert _item(report, "codexPanesStale")["bytes"] == 40
+
+
 def test_a_deleted_workspace_contributes_no_references(
     roots: dict[str, Path], tmp_path: Path
 ) -> None:
@@ -772,6 +883,60 @@ async def test_storage_cleanup_handler_returns_per_item_results(
     assert not (roots["app_data"] / "usage-cache.json").exists()
 
 
+def test_migrated_json_backups_are_cleanable(roots: dict[str, Path]) -> None:
+    """Retired ``*.migrated-v1`` sources count under storeBackups and clean."""
+    top = _write(roots["app_data"] / "roles.json.migrated-v1", 7)
+    ws_backup = _write(
+        roots["app_data"] / "workspaces" / "abc123" / "tokens.json.migrated-v1", 5
+    )
+
+    report = storage_service.collect_usage([], 30)
+    assert _item(report, "storeBackups")["bytes"] == 12
+
+    storage_service.cleanup(["storeBackups"], [], 30)
+    assert not top.exists()
+    assert not ws_backup.exists()
+
+
+def test_navide_database_is_reported_but_never_cleanable(
+    roots: dict[str, Path]
+) -> None:
+    db_file = _write(roots["app_data"] / "navide.db", 100)
+
+    report = storage_service.collect_usage([], 30)
+    item = _item(report, "navideDatabase")
+    assert item["bytes"] == 100
+    assert item["cleanable"] is False
+
+    result = storage_service.cleanup(["navideDatabase"], [], 30)
+    assert result["results"][0]["ok"] is False
+    assert db_file.exists()
+
+
+def test_recent_registry_is_read_from_the_database(
+    roots: dict[str, Path], tmp_path: Path
+) -> None:
+    """After the SQLite migration the recent list lives in navide.db's kv."""
+    from agent_team_backend.db import Database
+
+    ws = _pane_workspace(tmp_path, panes=[{"pane_id": "kept", "spawn_status": "spawned"}])
+    db = Database(roots["app_data"] / "navide.db")
+    db.kv_set(
+        "recent_workspaces",
+        {"version": 1, "max_size": 20, "recent": [{"path": str(ws)}]},
+        now=1,
+    )
+    db.close()
+    kept = _pane_home(roots, "kept", 30)
+    orphan = _pane_home(roots, "orphan", 40)
+
+    report = storage_service.collect_usage([str(ws)], 30)
+
+    assert _item(report, "codexPanesRecent")["bytes"] == 30
+    assert _item(report, "codexPanesStale")["bytes"] == 40
+    assert kept.exists() and orphan.exists()
+
+
 def test_an_unreadable_spawn_history_protects_every_manual_log(
     roots: dict[str, Path], tmp_path: Path
 ) -> None:
@@ -840,6 +1005,43 @@ def test_an_unreadable_project_offers_no_pipeline_run(
     ws = _workspace(tmp_path, [])
     data = ws / ".agent-team"
     (data / "project.json").write_text("{trunc", encoding="utf-8")
+    run = _write(data / "runs" / "some-run" / "pipeline.log", 30)
+
+    storage_service.cleanup(["pipelineLogs"], [str(ws)], 30)
+    assert run.exists()
+
+
+def test_the_running_run_is_read_from_the_workspace_database(
+    roots: dict[str, Path], tmp_path: Path
+) -> None:
+    """Post-migration the live run's name comes from the kv project document;
+    with project.json retired the in-progress run must still be spared."""
+    from agent_team_backend.db import Database
+
+    ws = _workspace(tmp_path, [])
+    data = ws / ".agent-team"
+    db = Database(data / "navide.db")
+    db.kv_set(
+        "project", {"id": "p", "log_file_name": "runs/live-run/pipeline.log"}, now=1
+    )
+    db.close()
+    live = _write(data / "runs" / "live-run" / "pipeline.log", 70)
+    finished = _write(data / "runs" / "old-run" / "pipeline.log", 30)
+
+    report = storage_service.collect_usage([str(ws)], 30)
+    assert _item(report, "pipelineLogs")["bytes"] == 30
+
+    storage_service.cleanup(["pipelineLogs"], [str(ws)], 30)
+    assert live.exists()
+    assert not finished.exists()
+
+
+def test_an_unreadable_workspace_database_offers_no_pipeline_run(
+    roots: dict[str, Path], tmp_path: Path
+) -> None:
+    ws = _workspace(tmp_path, [])
+    data = ws / ".agent-team"
+    (data / "navide.db").write_text("this is not a database", encoding="utf-8")
     run = _write(data / "runs" / "some-run" / "pipeline.log", 30)
 
     storage_service.cleanup(["pipelineLogs"], [str(ws)], 30)

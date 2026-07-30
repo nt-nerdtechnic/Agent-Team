@@ -18,6 +18,7 @@ import re
 import shlex
 import shutil
 import signal
+import sqlite3
 import subprocess
 import threading
 import time
@@ -27,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from .applog import app_data_dir
+from .db import DB_FILENAME, Database
 from .profiles_store import default_profiles_root
 
 
@@ -789,35 +791,66 @@ def pull_model(model: str) -> dict[str, Any]:
 
 
 # ── Completion flag ───────────────────────────────────────────────────────────
+_KV_KEY = "onboarding"
+
+
 def _flag_path() -> Path:
     return app_data_dir() / "onboarding.json"
 
 
 _STATE_LOCK = threading.Lock()
 
+# Lazily-opened database handle. The app injects its shared instance at
+# startup (set_database); when the resolved flag dir changes (tests patch
+# _flag_path per test) a fresh handle is opened for it.
+_db: Database | None = None
 
-def _read_state(path: Path | None = None) -> dict[str, Any]:
-    target = path or _flag_path()
+
+def set_database(db: Database | None) -> None:
+    """Share the app's Database instance instead of opening a second one."""
+    global _db
+    _db = db
+
+
+def _get_db() -> Database:
+    global _db
+    path = _flag_path().parent / DB_FILENAME
+    db = _db
+    if db is None or db.path != path:
+        db = Database(path)
+        _db = db
+    return db
+
+
+def _import_legacy_state(cur: object, data: object) -> None:
+    if isinstance(data, dict):
+        _get_db().kv_set(_KV_KEY, data, now=int(time.time()))
+
+
+def _kv_state() -> dict[str, Any] | None:
+    """Stored onboarding document, importing the legacy app-data JSON once.
+
+    None means "nothing stored yet" — distinct from an (imported) empty dict,
+    so is_complete() knows when to fall back to the legacy home-dir flag.
+    """
+    db = _get_db()
+    data = db.kv_get(_KV_KEY)
+    if data is None:
+        db.import_json(_KV_KEY, _flag_path(), _import_legacy_state)
+        data = db.kv_get(_KV_KEY)
+    return data if isinstance(data, dict) else None
+
+
+def _read_state() -> dict[str, Any]:
+    return _kv_state() or {}
+
+
+def _write_state(data: dict[str, Any]) -> None:
     try:
-        data = json.loads(target.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
-        return {}
-
-
-def _write_state(data: dict[str, Any], path: Path | None = None) -> None:
-    """Atomically replace onboarding state so a restart cannot observe a partial write."""
-    target = path or _flag_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
-    try:
-        temporary.write_text(json.dumps(data), encoding="utf-8")
-        os.replace(temporary, target)
-    finally:
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
+        _get_db().kv_set(_KV_KEY, data, now=int(time.time()))
+    except sqlite3.Error as err:
+        # Callers guard with OSError, matching the old file-write contract.
+        raise OSError(str(err)) from err
 
 
 def _legacy_flag_path() -> Path:
@@ -825,21 +858,21 @@ def _legacy_flag_path() -> Path:
 
 
 def _migrate_legacy_flag() -> None:
-    """One-time copy of the legacy ~/.agent-team/onboarding.json to app_data_dir().
+    """One-time seed of the stored state from ~/.agent-team/onboarding.json.
 
-    Best-effort: existing users must not see onboarding again, so on copy
+    Best-effort: existing users must not see onboarding again, so on seed
     failure `is_complete()` still falls back to reading the legacy path.
     """
-    new = _flag_path()
-    if new.exists():
+    if _kv_state() is not None:
         return
     legacy = _legacy_flag_path()
     if not legacy.exists():
         return
     try:
-        new.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(legacy, new)
-    except OSError:
+        data = json.loads(legacy.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            _write_state(data)
+    except (OSError, ValueError):
         pass
 
 
@@ -851,45 +884,42 @@ def is_complete() -> bool:
     if should_skip():
         return True
     _migrate_legacy_flag()
-    for path in (_flag_path(), _legacy_flag_path()):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            return bool(data.get("complete"))
-        except (OSError, ValueError):
-            continue
-    return False
+    state = _kv_state()
+    if state is not None:
+        return bool(state.get("complete"))
+    # Read-only fallback: the legacy home-dir flag (kept even though the seed
+    # above normally captures it — a failed seed must not re-show onboarding).
+    try:
+        data = json.loads(_legacy_flag_path().read_text(encoding="utf-8"))
+        return bool(data.get("complete"))
+    except (OSError, ValueError):
+        return False
 
 
 def set_complete(value: bool) -> None:
-    path = _flag_path()
     try:
         with _STATE_LOCK:
-            data = _read_state(path)
+            data = _read_state()
             data["complete"] = value
-            _write_state(data, path)
+            _write_state(data)
     except OSError:
         pass
 
 
 def _dismissed_cli_health_fingerprint() -> str:
     _migrate_legacy_flag()
-    try:
-        data = json.loads(_flag_path().read_text(encoding="utf-8"))
-        return str(data.get("dismissed_cli_health") or "") if isinstance(data, dict) else ""
-    except (OSError, ValueError):
-        return ""
+    return str(_read_state().get("dismissed_cli_health") or "")
 
 
 def dismiss_cli_health(fingerprint: str) -> None:
     if not re.fullmatch(r"[0-9a-f]{16}", fingerprint or ""):
         return
-    path = _flag_path()
     _migrate_legacy_flag()
     try:
         with _STATE_LOCK:
-            data = _read_state(path)
+            data = _read_state()
             data["dismissed_cli_health"] = fingerprint
-            _write_state(data, path)
+            _write_state(data)
     except OSError:
         pass
 
@@ -921,18 +951,17 @@ def select_cli_binary(agent_key: str, path: str, fingerprint: str) -> dict[str, 
         return {"ok": False, "error": "binary is not an installed PATH candidate"}
 
     canonical_path = path
-    state_path = _flag_path()
     _migrate_legacy_flag()
     try:
         with _STATE_LOCK:
-            data = _read_state(state_path)
+            data = _read_state()
             overrides = data.get("cli_binary_overrides")
             if not isinstance(overrides, dict):
                 overrides = {}
             overrides[agent_key] = canonical_path
             data["cli_binary_overrides"] = overrides
             data["dismissed_cli_health"] = fingerprint
-            _write_state(data, state_path)
+            _write_state(data)
     except OSError as error:
         return {"ok": False, "error": str(error)}
     return {"ok": True, "agent_key": agent_key, "path": canonical_path}
@@ -958,17 +987,16 @@ def set_cli_autoupdate_policy(agent_key: str, policy: str) -> dict[str, Any]:
         return {"ok": False, "error": "agent has no vendor auto-update switch"}
     if policy not in AUTOUPDATE_POLICIES:
         return {"ok": False, "error": f"unknown policy: {policy!r}"}
-    state_path = _flag_path()
     _migrate_legacy_flag()
     try:
         with _STATE_LOCK:
-            data = _read_state(state_path)
+            data = _read_state()
             policies = data.get("cli_autoupdate")
             if not isinstance(policies, dict):
                 policies = {}
             policies[agent_key] = policy
             data["cli_autoupdate"] = policies
-            _write_state(data, state_path)
+            _write_state(data)
     except OSError as error:
         return {"ok": False, "error": str(error)}
     return {"ok": True, "agent_key": agent_key, "policy": policy}

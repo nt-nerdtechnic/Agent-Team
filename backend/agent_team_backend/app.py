@@ -92,6 +92,7 @@ from .spawn_history import SpawnHistoryStore
 from .recent_workspaces import RecentWorkspacesStore
 from .roles_store import RolesStore
 from .stages_store import StagesStore
+from .db import DB_FILENAME, Database, WorkspaceDatabases
 from .store_migrations import run_startup_migrations
 from .terminals import TerminalService
 from .tokens_store import TokensStore
@@ -116,24 +117,29 @@ STARTED_AT = datetime.now(timezone.utc).isoformat()
 
 app = FastAPI(title="navide-backend", version=__version__)
 
-project_store = ProjectStore()
-spawn_history_store = SpawnHistoryStore()
-recent_workspaces_store = RecentWorkspacesStore()
-roles_store = RolesStore()
-stages_store = StagesStore()
-tokens_store = TokensStore()
-history_store = HistoryStore()
+database = Database(app_data_dir() / DB_FILENAME)
+workspace_databases = WorkspaceDatabases()
+project_store = ProjectStore(databases=workspace_databases)
+spawn_history_store = SpawnHistoryStore(databases=workspace_databases)
+recent_workspaces_store = RecentWorkspacesStore(db=database)
+roles_store = RolesStore(db=database)
+stages_store = StagesStore(db=database)
+tokens_store = TokensStore(db=database)
+history_store = HistoryStore(databases=workspace_databases)
 codex_home_manager = CodexHomeManager()
-cli_profiles_store = CliProfilesStore()
+cli_profiles_store = CliProfilesStore(db=database)
 credential_vault = CredentialVault()
 mcp_manager = MCPManager()
 plugin_host = PluginHost()
 mcp_settings_store = MCPSettingsStore()
 skills_store = SkillsStore()
-analyzer_settings_store = AnalyzerSettingsStore()
-ai_chat_settings_store = AIChatSettingsStore()
-ui_settings_store = UiSettingsStore()
-chat_store = ChatStore()
+analyzer_settings_store = AnalyzerSettingsStore(db=database)
+ai_chat_settings_store = AIChatSettingsStore(db=database)
+ui_settings_store = UiSettingsStore(db=database)
+chat_store = ChatStore(databases=workspace_databases)
+# Module-level stores share the same database handle.
+pty_registry.set_database(database)
+onboarding_deps.set_database(database)
 
 # ─── Analyzer backend routing ────────────────────────────────────────────────
 
@@ -310,7 +316,7 @@ async def analyzer_benchmark(progress_cb=None) -> list:
 
 # Log readers: one per vendor. Attribution maps log session files to panes.
 _readers = [ClaudeLogReader(), CodexLogReader(), AntigravityLogReader(), GrokLogReader(), KimiLogReader(), OpencodeLogReader(), QwenLogReader(), KiloLogReader(), PiLogReader(), CopilotLogReader(), CursorLogReader(), AiderLogReader()]
-attribution = Attribution(_readers)
+attribution = Attribution(_readers, db=database)
 _log_watcher: LogWatcher | None = None
 _git_watcher: GitWatcher | None = None
 
@@ -986,6 +992,15 @@ async def _stop_log_watcher() -> None:
         plugin_wiring.shutdown(plugin_host)
     except Exception as err:  # noqa: BLE001
         log.warning("plugin host shutdown failed: %s", err)
+    # Last: nothing may touch the databases after this point.
+    try:
+        workspace_databases.close_all()
+    except Exception as err:  # noqa: BLE001
+        log.warning("workspace database close failed: %s", err)
+    try:
+        database.close()
+    except Exception as err:  # noqa: BLE001
+        log.warning("database close failed: %s", err)
     _log_watcher = None
     _git_watcher = None
 

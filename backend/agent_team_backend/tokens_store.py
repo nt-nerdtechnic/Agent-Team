@@ -4,11 +4,20 @@ Records token deltas from two sources:
   - source="analyzer": local llama-cli classify / auto_answer real counts
   - source="cli":      vendor parser scraped from agent TUI output
 
-Per-workspace state lives in `<app_data>/workspaces/<sha256_8>/tokens.json`
-  where sha256_8 = first 8 hex chars of sha256(abs_workspace_path).
-  Keyed on the workspace identity rather than its path so tokens survive
-  workspace renames and moves.
-Global lifetime state lives in `<app_data>/tokens.json`.
+Persistence lives in the shared SQLite database (`<app_data>/navide.db`):
+  - kv ``tokens.global``           — global lifetime ledger
+  - kv ``tokens.workspace.<sha8>`` — per-workspace ledger, where sha8 =
+    first 8 hex chars of sha256(abs_workspace_path). Keyed on the workspace
+    identity rather than its path so tokens survive renames and moves.
+  - table ``ingestion_checkpoints`` — one row per (log file, scope) cursor,
+    so advancing one offset costs one row UPSERT instead of rewriting a
+    multi-megabyte state file.
+  - kv ``tokens.legacy_event_keys`` / ``tokens.recent_event_keys`` — dedup
+    windows, written only when they change.
+
+The legacy JSON stores (tokens.json, token-ingestion-state.json plus its
+delta log and write-ahead journal) are imported once at startup and retired
+(renamed ``*.migrated-v1`` / removed).
 
 We never estimate — if a source can't produce a real number, we record 0.
 """
@@ -19,7 +28,9 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 import threading
+import time
 from collections import deque
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -28,50 +39,86 @@ from threading import RLock
 from typing import Any
 
 from .applog import app_data_dir
+from .db import DB_FILENAME, Database
 from .projects import PROJECT_DIR_NAME
 
 log = logging.getLogger("agent_team_backend.tokens")
 
 TOKENS_FILE = "tokens.json"
-# Persisted-store schema version for tokens.json (see store_migrations.py).
-# v2 added the cli-source `by_profile` dimension (per-CLI-account attribution);
-# v3 drops it again — accounts are now just alternate auth stores with a single
-# global active one, so per-account usage is no longer tracked.
+# Persisted-store schema version for the tokens documents (see
+# store_migrations.py). v2 added the cli-source `by_profile` dimension
+# (per-CLI-account attribution); v3 drops it again — accounts are now just
+# alternate auth stores with a single global active one, so per-account usage
+# is no longer tracked.
 TOKENS_SCHEMA_VERSION = 3
 # Legacy storage key the retired v1→v2 migration credits historic cli usage to.
 # Still referenced by that migration; v2→v3 folds the whole dimension away.
 DEFAULT_PROFILE_KEY = "default"
+# Legacy JSON artifacts, kept as constants for the one-time import path and
+# for storage_service's disk-usage accounting.
 RECORDED_KEYS_FILE = "recorded-event-keys.json"
 LEGACY_READER_KEYS_FILE = "log-readers-seen.json"
 INGESTION_STATE_FILE = "token-ingestion-state.json"
 PERSISTENCE_JOURNAL_FILE = "token-persistence-journal.json"
-# Append-only companion to the ingestion state. The state is megabytes and was
-# rewritten whole to record a handful of advanced offsets; mutations now append
-# here instead, and the snapshot is only rebuilt once the log grows past
-# DELTA_COMPACT_LINES.
-#
-# The snapshot's own format is deliberately untouched, so a downgraded build
-# reads it and simply ignores this file — it sees state as of the last
-# compaction, which is stale but valid. Guarding the other direction is why the
-# header pins the snapshot's identity: any writer that does not know about the
-# log (an older build) leaves a stat the header no longer matches, and the log
-# is discarded rather than replayed over a newer snapshot.
 INGESTION_DELTA_FILE = "token-ingestion-delta.jsonl"
-DELTA_COMPACT_LINES = 5000
 WORKSPACES_SUBDIR = "workspaces"
 INGESTION_STATE_VERSION = 2
 RECENT_EVENT_KEYS_LIMIT = 512
 # The legacy migration dedup set must stay bounded: evicting a key only risks
-# a one-off global double count if its event ever replays, while an unbounded
-# set gets fully rewritten to disk every save interval.
+# a one-off global double count if its event ever replays.
 LEGACY_EVENT_KEYS_LIMIT = 4096
 LEGACY_EVENT_KEYS_TTL_DAYS = 14
 # A session log untouched for this long will not be appended to again in
 # practice, so the per-file dedup window readers stash in its checkpoint is
-# dead weight — and it dominates the state file, which is rewritten whole on
-# every flush. Stripping it is self-healing: the offset and identity stay, so
+# dead weight. Stripping it is self-healing: the offset and identity stay, so
 # a file that does come back to life rebuilds its window on the next read.
 COLD_FILE_DAYS = 7
+# A checkpoint row whose log file has been unreadable (stat fails) for this
+# long is dead and is deleted outright. Both conditions must hold — the stat
+# failure alone is not enough, so a transient I/O fault (an unmounted network
+# home, say) cannot wipe live checkpoints.
+DEAD_ENTRY_DAYS = 30
+
+# kv keys inside navide.db.
+_KV_GLOBAL = "tokens.global"
+_KV_WORKSPACE_PREFIX = "tokens.workspace."
+_KV_LEGACY_KEYS = "tokens.legacy_event_keys"
+_KV_RECENT_KEYS = "tokens.recent_event_keys"
+
+# import_json markers (schema_meta) for the one-time JSON import.
+_IMPORT_INGESTION = "tokens-ingestion"
+_IMPORT_GLOBAL = "tokens-global"
+
+_UPSERT_CHECKPOINT = (
+    "INSERT INTO ingestion_checkpoints (path, scope, data, last_seen)"
+    " VALUES (?, ?, ?, ?)"
+    " ON CONFLICT(path, scope) DO UPDATE SET"
+    " data = excluded.data, last_seen = excluded.last_seen"
+)
+
+# Raw kv upsert for payloads serialized ahead of the flush transaction
+# (kv_set would json.dumps multi-MB documents while holding the shared
+# Database lock; the flush path serializes before entering it).
+_UPSERT_KV = (
+    "INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?)"
+    " ON CONFLICT(key) DO UPDATE SET"
+    " value = excluded.value, updated_at = excluded.updated_at"
+)
+
+# A successful stat only rewrites a row's last_seen when the stored value is
+# older than this, so the hourly prune scan does not re-UPSERT every row.
+_LAST_SEEN_REFRESH_S = 86400
+
+
+def _create_tokens_schema(cur: sqlite3.Cursor) -> None:
+    cur.execute(
+        "CREATE TABLE ingestion_checkpoints ("
+        " path TEXT NOT NULL,"       # log file absolute path
+        " scope TEXT NOT NULL,"      # '' for global, else workspace path
+        " data TEXT NOT NULL,"       # checkpoint dict as JSON
+        " last_seen INTEGER NOT NULL,"  # unix ts of last successful stat/advance
+        " PRIMARY KEY (path, scope))"
+    )
 
 
 def _ws_dir_name(workspace_path: str) -> str:
@@ -162,6 +209,10 @@ def migrate_tokens_v2_to_v3(doc: Any) -> Any:
     return doc
 
 
+def _apply_tokens_migrations(doc: Any) -> Any:
+    return migrate_tokens_v2_to_v3(migrate_tokens_v1_to_v2(doc))
+
+
 def _empty_workspace_doc() -> dict[str, Any]:
     return {
         "schemaVersion": TOKENS_SCHEMA_VERSION,
@@ -185,6 +236,7 @@ def _empty_global_doc() -> dict[str, Any]:
 
 
 def _empty_ingestion_state() -> dict[str, Any]:
+    """Shape of the retired token-ingestion-state.json (import path only)."""
     return {
         "version": INGESTION_STATE_VERSION,
         "files": {},
@@ -209,14 +261,15 @@ def _new_run(run_id: str, task: str, run_dir: str) -> dict[str, Any]:
 
 
 _SAVE_INTERVAL_S = 10  # batch window for dirty-flag saves
-_PRUNE_INTERVAL_S = 3600  # how often the save loop rescans `files` for cold logs
+_PRUNE_INTERVAL_S = 3600  # how often the save loop rescans checkpoints for cold logs
 
 
 class TokensStore:
-    """Thread-safe in-memory aggregator with atomic JSON persistence.
+    """Thread-safe in-memory aggregator persisted to SQLite.
 
-    Writes are batched: record() marks dirty flags and a background thread
-    flushes every _SAVE_INTERVAL_S seconds. Call flush() before shutdown.
+    Writes are batched: record() marks dirty state under _lock and a
+    background thread commits only the dirty rows every _SAVE_INTERVAL_S
+    seconds inside one transaction. Call flush() before shutdown.
     """
 
     def __init__(
@@ -226,8 +279,10 @@ class TokensStore:
         workspace_base_dir: Path | None = None,
         ingestion_state_path: Path | None = None,
         legacy_reader_keys_path: Path | None = None,
+        db: Database | None = None,
     ) -> None:
         data_root = global_path.parent if global_path is not None else app_data_dir()
+        # Legacy JSON locations, consumed only by the one-time import below.
         self._global_path = global_path or (data_root / TOKENS_FILE)
         self._recorded_keys_path = recorded_keys_path or (data_root / RECORDED_KEYS_FILE)
         self._legacy_reader_keys_path = (
@@ -239,43 +294,51 @@ class TokensStore:
         self._persistence_journal_path = data_root / PERSISTENCE_JOURNAL_FILE
         self._ingestion_delta_path = data_root / INGESTION_DELTA_FILE
         self._workspace_base_dir = workspace_base_dir or (data_root / WORKSPACES_SUBDIR)
-        self._recover_persistence_journal()
+
+        self._db = db or Database(data_root / DB_FILENAME)
+        self._db.migrate("tokens", 1, _create_tokens_schema)
+
         # RLock because reset() calls snapshot() while holding the lock.
         self._lock = RLock()
-        # Serialize complete disk commits. In-memory mutations only need
-        # _lock, but two writers must never share the fixed .tmp/journal paths
-        # or let an older snapshot land after a newer synchronous lifecycle save.
+        # Serialize complete commits. In-memory mutations only need _lock;
+        # _flush_lock keeps a synchronous lifecycle save from interleaving
+        # with an in-flight background batch.
         self._flush_lock = RLock()
         self._workspace_cache: dict[str, dict[str, Any]] = {}
+
+        # Dirty tracking (mutated inside _lock, consumed by the flush path).
+        self._dirty_workspaces: set[str] = set()
+        self._dirty_global = False
+        # (path, scope) pairs whose row must be UPSERTed; scope '' = global.
+        self._dirty_checkpoints: set[tuple[str, str]] = set()
+        self._deleted_checkpoints: set[tuple[str, str]] = set()
+        self._deleted_scopes: set[str] = set()
+        self._delete_all_checkpoints = False
+        self._dirty_legacy_keys = False
+        self._dirty_recent_keys = False
+
+        self._import_legacy_json()
+
         self._global_data: dict[str, Any] = self._load_global()
-        self._legacy_paths_to_remove: set[Path] = set()
-        self._files_pruned = False
-        # Ingestion mutations awaiting an append, and how many lines the log
-        # already holds. A change the log cannot express (legacy-key pruning,
-        # a reset, the startup prune) sets _force_compaction instead.
-        self._pending_delta: list[dict[str, Any]] = []
-        self._delta_lines = 0
-        self._force_compaction = False
-        self._ingestion_state = self._load_ingestion_state()
+        # In-memory checkpoint cache: path -> {"global": ckpt, "workspaces":
+        # {workspace_path: ckpt}} — the shape record()/prune operate on.
+        self._files: dict[str, dict[str, Any]] = {}
+        self._last_seen: dict[str, int] = {}
+        self._load_checkpoints()
+
+        legacy_doc = self._db.kv_get(_KV_LEGACY_KEYS) or {}
         self._legacy_event_keys: set[str] = set(
-            str(k) for k in self._ingestion_state.get("legacy_event_keys", [])
+            str(k) for k in legacy_doc.get("keys", []) if k
         )
-        recent = [str(k) for k in self._ingestion_state.get("recent_event_keys", [])]
+        self._legacy_expires_at: str | None = (
+            str(legacy_doc.get("expires_at")) if legacy_doc.get("expires_at") else None
+        )
+        recent = [str(k) for k in (self._db.kv_get(_KV_RECENT_KEYS) or [])]
         self._recent_event_keys = deque(recent[-RECENT_EVENT_KEYS_LIMIT:])
         self._recent_event_key_set = set(self._recent_event_keys)
-        legacy_pruned = self._enforce_legacy_key_bounds()
-
-        # Dirty flags (set inside _lock, consumed by save loop outside _lock)
-        self._dirty_ingestion_state: bool = (
-            bool(self._legacy_paths_to_remove) or legacy_pruned or self._files_pruned
-        )
-        # Neither prune is expressible as a delta record — both remove state —
-        # so the next commit has to rebuild the snapshot.
-        self._force_compaction = (
-            self._force_compaction or legacy_pruned or self._files_pruned
-        )
-        self._dirty_workspaces: set[str] = set()
-        self._dirty_global: bool = False
+        if self._enforce_legacy_key_bounds():
+            self._dirty_legacy_keys = True
+        self._prune_ingestion_files()
 
         # Background save loop
         self._stop_event = threading.Event()
@@ -284,44 +347,124 @@ class TokensStore:
         )
         self._save_thread.start()
 
-    # ───────────────────────── Disk I/O ────────────────────────────
+    # ────────────────── One-time legacy JSON import ──────────────────
 
-    def _atomic_write(self, path: Path, data: dict[str, Any]) -> None:
-        # The ingestion state and its journal are machine-only and dominate disk
-        # write volume (megabytes per flush), so they are stored unindented.
-        # Ledger files stay indented — they are small and get eyeballed.
-        compact = path.name in (INGESTION_STATE_FILE, PERSISTENCE_JOURNAL_FILE)
-        dump_kwargs: dict[str, Any] = (
-            {"separators": (",", ":")} if compact else {"indent": 2}
-        )
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
+    def _import_legacy_json(self) -> None:
+        """Import the retired JSON stores into the database, once.
+
+        Order matters: an interrupted pre-SQLite batched commit (the
+        write-ahead journal) is finished first so its whole-file writes land
+        on the JSON files the import then reads, and its pending delta
+        records are folded into the merged ingestion state.
+        """
+        journal_records = self._recover_legacy_journal()
         try:
-            tmp.write_text(
-                json.dumps(data, ensure_ascii=False, **dump_kwargs), encoding="utf-8"
+            self._import_legacy_ingestion(journal_records)
+        except Exception as err:  # noqa: BLE001
+            log.warning("legacy ingestion-state import failed: %s", err)
+        try:
+            self._db.import_json(
+                _IMPORT_GLOBAL, self._global_path, self._load_global_import
             )
-            os.replace(tmp, path)
-        except Exception:
-            tmp.unlink(missing_ok=True)
-            raise
+        except Exception as err:  # noqa: BLE001
+            log.warning("legacy global tokens import failed: %s", err)
+        try:
+            self._import_legacy_workspaces()
+        except Exception as err:  # noqa: BLE001
+            log.warning("legacy workspace tokens import failed: %s", err)
 
-    # ─────────────────── Ingestion delta log ───────────────────────
+    def _import_legacy_ingestion(self, journal_records: list[dict[str, Any]]) -> None:
+        if self._db.import_completed(_IMPORT_INGESTION):
+            # Finish a rename a previous run crashed before; drop side files.
+            self._db.import_json(
+                _IMPORT_INGESTION, self._ingestion_state_path, self._load_ingestion_import
+            )
+            self._remove_ingestion_side_files()
+            return
+        doc, materialize = self._read_legacy_ingestion_state(journal_records)
+        if materialize:
+            # Give import_json a single crash-safe source that already has
+            # the delta log and journal folded in.
+            self._write_json_atomic(self._ingestion_state_path, doc)
+        self._db.import_json(
+            _IMPORT_INGESTION, self._ingestion_state_path, self._load_ingestion_import
+        )
+        if self._db.import_completed(_IMPORT_INGESTION):
+            self._remove_ingestion_side_files()
+
+    def _remove_ingestion_side_files(self) -> None:
+        # The delta log's records are folded into the imported state; the
+        # legacy key caches were migrated into legacy_event_keys.
+        self._ingestion_delta_path.unlink(missing_ok=True)
+        self._recorded_keys_path.unlink(missing_ok=True)
+        self._legacy_reader_keys_path.unlink(missing_ok=True)
+
+    def _read_legacy_ingestion_state(
+        self, journal_records: list[dict[str, Any]]
+    ) -> tuple[dict[str, Any], bool]:
+        """Merge snapshot + delta log + journal records into one state doc.
+
+        Returns (doc, materialize): materialize is True when the merged doc
+        holds data the snapshot file alone does not (so it must be rewritten
+        before import_json reads it). A corrupt snapshot with nothing else is
+        left in place for import_json's keep-for-inspection path.
+        """
+        doc, snapshot_valid = self._read_legacy_snapshot()
+        records = [r for r in self._read_legacy_delta()]
+        records.extend(r for r in journal_records if isinstance(r, dict))
+        for record in records:
+            self._apply_delta_record(doc, record)
+        has_content = bool(doc.get("files")) or bool(doc.get("legacy_event_keys"))
+        materialize = bool(records) or (not snapshot_valid and has_content)
+        return doc, materialize
+
+    def _read_legacy_snapshot(self) -> tuple[dict[str, Any], bool]:
+        if self._ingestion_state_path.exists():
+            try:
+                data = json.loads(self._ingestion_state_path.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and data.get("version") == INGESTION_STATE_VERSION:
+                    doc = _empty_ingestion_state()
+                    doc.update(data)
+                    if not isinstance(doc.get("files"), dict):
+                        doc["files"] = {}
+                    return doc, True
+            except (OSError, json.JSONDecodeError) as err:
+                log.warning("token ingestion state unreadable (%s); rebuilding", err)
+        # No usable snapshot: fall back to the even older per-purpose key
+        # files. log-readers-seen.json was only a parser performance cache
+        # that can contain events the accounting sink rejected as external,
+        # so its bare keys must never suppress a migration replay.
+        doc = _empty_ingestion_state()
+        doc["legacy_event_keys"] = sorted(self._load_legacy_recorded_keys())
+        return doc, False
+
+    def _load_legacy_recorded_keys(self) -> set[str]:
+        if not self._recorded_keys_path.exists():
+            return set()
+        try:
+            data = json.loads(self._recorded_keys_path.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return set(str(k) for k in data)
+        except (OSError, json.JSONDecodeError) as err:
+            log.warning("recorded-keys file unreadable (%s); starting empty", err)
+        return set()
 
     def _snapshot_identity(self) -> dict[str, Any]:
-        """Stat pin tying a delta log to the snapshot it was branched from."""
+        """Stat pin tying a legacy delta log to the snapshot it branched from."""
         try:
             st = self._ingestion_state_path.stat()
         except OSError:
             return {"mtime_ns": 0, "size": 0}
         return {"mtime_ns": st.st_mtime_ns, "size": st.st_size}
 
-    def _read_ingestion_delta(self) -> list[dict[str, Any]]:
-        """Return the log's records, or nothing if it is not ours to replay.
+    def _read_legacy_delta(self) -> list[dict[str, Any]]:
+        """Return the legacy delta log's records, or nothing if not ours.
 
         A mismatched header means something rewrote the snapshot without
         touching the log — an older build, most likely. Replaying then would
         drag checkpoints backwards, so the log is dropped and the snapshot
-        stands on its own.
+        stands on its own. A torn tail (crash mid-append) only invalidates
+        the records after the tear.
         """
         if not self._ingestion_delta_path.exists():
             return []
@@ -345,20 +488,17 @@ class TokensStore:
             if not line.strip():
                 continue
             try:
-                records.append(json.loads(line))
+                record = json.loads(line)
             except json.JSONDecodeError:
-                # Only the tail can be torn — a crash mid-append. Everything
-                # before it is still good, but appending past the tear would
-                # strand the new records behind it, so rebuild instead.
                 log.info("ingestion delta truncated; replaying %d record(s)", len(records))
-                self._force_compaction = True
                 break
+            if isinstance(record, dict):
+                records.append(record)
         return records
 
     @staticmethod
     def _apply_delta_record(doc: dict[str, Any], record: dict[str, Any]) -> None:
-        """Replay one record onto a snapshot. Must stay idempotent: a journal
-        recovery can append the same records twice."""
+        """Replay one legacy delta record onto a state doc. Idempotent."""
         kind = record.get("t")
         if kind == "ckpt":
             path = str(record.get("p") or "")
@@ -380,32 +520,16 @@ class TokensStore:
             keys.append(key)
             doc["recent_event_keys"] = keys[-RECENT_EVENT_KEYS_LIMIT:]
 
-    def _append_ingestion_delta(self, records: list[dict[str, Any]]) -> None:
-        """Append records, starting a fresh header when the log is empty."""
-        chunks: list[str] = []
-        if self._delta_lines == 0:
-            chunks.append(
-                json.dumps(
-                    {"t": "hdr", "base": self._snapshot_identity()},
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
-            )
-        for record in records:
-            chunks.append(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
-        self._ingestion_delta_path.parent.mkdir(parents=True, exist_ok=True)
-        # Starting a new header truncates: whatever was there belonged to a
-        # snapshot we no longer track, and appending past it would bury the
-        # header mid-file.
-        mode = "a" if self._delta_lines else "w"
-        with open(self._ingestion_delta_path, mode, encoding="utf-8") as fh:
-            fh.write("\n".join(chunks) + "\n")
-        self._delta_lines += len(records)
+    def _recover_legacy_journal(self) -> list[dict[str, Any]]:
+        """Finish an interrupted pre-SQLite batched commit.
 
-    def _recover_persistence_journal(self) -> bool:
-        """Finish a previously interrupted batched commit before loading state."""
+        Whole-file writes are replayed onto the JSON files (which the import
+        reads right after); the pending delta records are returned so the
+        caller folds them into the merged ingestion state. An unreadable
+        journal is kept in place for inspection — no build can apply it.
+        """
         if not self._persistence_journal_path.exists():
-            return True
+            return []
         try:
             journal = json.loads(
                 self._persistence_journal_path.read_text(encoding="utf-8")
@@ -418,111 +542,190 @@ class TokensStore:
                     or not isinstance(item.get("data"), dict)
                 ):
                     continue
-                self._atomic_write(Path(str(item.get("path") or "")), item["data"])
+                self._write_json_atomic(Path(str(item.get("path") or "")), item["data"])
             pending = journal.get("delta") if isinstance(journal, dict) else None
-            if isinstance(pending, list) and pending:
-                # Safe to re-apply: delta records are idempotent, so a batch
-                # that partly landed before the crash just lands again.
-                self._append_ingestion_delta(
-                    [r for r in pending if isinstance(r, dict)]
-                )
+            records = (
+                [r for r in pending if isinstance(r, dict)]
+                if isinstance(pending, list)
+                else []
+            )
             self._persistence_journal_path.unlink(missing_ok=True)
             log.info("recovered interrupted token persistence batch")
-            return True
+            return records
         except (OSError, TypeError, ValueError, json.JSONDecodeError) as err:
             log.warning("token persistence journal recovery failed: %s", err)
-            return False
+            return []
 
-    def _workspace_path(self, workspace_path: str) -> Path:
-        return self._workspace_base_dir / _ws_dir_name(workspace_path) / TOKENS_FILE
-
-    def _migrate_workspace_tokens(self, old_path: Path, new_path: Path) -> None:
-        """Copy old per-workspace tokens.json to the new global path, then delete old.
-
-        Uses atomic write (write-tmp → replace) so the new file is never partial.
-        Only deletes the source after verifying the destination exists.
-        """
+    @staticmethod
+    def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
         try:
-            content = old_path.read_bytes()
-            new_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = new_path.with_suffix(new_path.suffix + ".tmp")
-            tmp.write_bytes(content)
-            os.replace(tmp, new_path)
-            if new_path.exists():
-                old_path.unlink()
-                log.info("migrated tokens.json from %s to %s", old_path, new_path)
-        except Exception as err:  # noqa: BLE001
-            log.warning("failed to migrate tokens.json from %s: %s", old_path, err)
+            tmp.write_text(
+                json.dumps(data, ensure_ascii=False, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+
+    def _load_ingestion_import(self, cur: sqlite3.Cursor, data: Any) -> None:
+        if not isinstance(data, dict) or data.get("version") != INGESTION_STATE_VERSION:
+            return
+        now = int(time.time())
+        files = data.get("files")
+        if isinstance(files, dict):
+            for path, entry in files.items():
+                if not isinstance(entry, dict):
+                    continue
+                checkpoint = entry.get("global")
+                if isinstance(checkpoint, dict) and checkpoint:
+                    cur.execute(
+                        _UPSERT_CHECKPOINT,
+                        (str(path), "", _dump_compact(checkpoint), now),
+                    )
+                workspaces = entry.get("workspaces")
+                if isinstance(workspaces, dict):
+                    for workspace, ws_checkpoint in workspaces.items():
+                        if isinstance(ws_checkpoint, dict) and ws_checkpoint:
+                            cur.execute(
+                                _UPSERT_CHECKPOINT,
+                                (str(path), str(workspace), _dump_compact(ws_checkpoint), now),
+                            )
+        legacy = sorted(str(k) for k in (data.get("legacy_event_keys") or []) if k)
+        expires_at = data.get("legacy_event_keys_expires_at") or None
+        if legacy or expires_at:
+            # kv_set joins the surrounding import transaction (reentrant).
+            self._db.kv_set(
+                _KV_LEGACY_KEYS, {"keys": legacy, "expires_at": expires_at}, now=now
+            )
+        recent = [str(k) for k in (data.get("recent_event_keys") or []) if k]
+        if recent:
+            self._db.kv_set(
+                _KV_RECENT_KEYS, recent[-RECENT_EVENT_KEYS_LIMIT:], now=now
+            )
+
+    def _load_global_import(self, cur: sqlite3.Cursor, data: Any) -> None:
+        if not isinstance(data, dict):
+            return
+        self._db.kv_set(
+            _KV_GLOBAL, _apply_tokens_migrations(data), now=int(time.time())
+        )
+
+    def _import_legacy_workspaces(self) -> None:
+        if not self._workspace_base_dir.is_dir():
+            return
+        for ws_dir in sorted(self._workspace_base_dir.iterdir()):
+            if not ws_dir.is_dir():
+                continue
+            source = ws_dir / TOKENS_FILE
+            if not source.exists() and not self._db.import_completed(
+                f"tokens-workspace-{ws_dir.name}"
+            ):
+                continue
+            kv_key = _KV_WORKSPACE_PREFIX + ws_dir.name
+
+            def load(cur: sqlite3.Cursor, data: Any, key: str = kv_key) -> None:
+                if not isinstance(data, dict):
+                    return
+                # A late-appearing file (e.g. restored from a backup) must
+                # not clobber state the database has since accumulated.
+                if self._db.kv_get(key) is not None:
+                    return
+                self._db.kv_set(
+                    key, _apply_tokens_migrations(data), now=int(time.time())
+                )
+
+            try:
+                self._db.import_json(f"tokens-workspace-{ws_dir.name}", source, load)
+            except Exception as err:  # noqa: BLE001
+                log.warning("workspace tokens import failed for %s: %s", ws_dir.name, err)
+
+    # ───────────────────────── Loading ──────────────────────────────
+
+    def _workspace_kv_key(self, workspace_path: str) -> str:
+        return _KV_WORKSPACE_PREFIX + _ws_dir_name(workspace_path)
 
     def _load_workspace(self, workspace_path: str) -> dict[str, Any]:
         if workspace_path in self._workspace_cache:
             return self._workspace_cache[workspace_path]
-        wp = self._workspace_path(workspace_path)
-        # Migrate from the old per-workspace location on first access if the new
-        # global path doesn't exist yet.
-        if not wp.exists():
-            old_wp = Path(workspace_path) / PROJECT_DIR_NAME / TOKENS_FILE
-            if old_wp.exists():
-                self._migrate_workspace_tokens(old_wp, wp)
-        if not wp.exists():
+        doc = self._db.kv_get(self._workspace_kv_key(workspace_path))
+        if doc is None:
+            doc = self._migrate_legacy_workspace_file(workspace_path)
+        if not isinstance(doc, dict):
             doc = _empty_workspace_doc()
         else:
-            try:
-                doc = json.loads(wp.read_text(encoding="utf-8"))
-                # Forward-migrate in memory BEFORE the setdefault fill, so an
-                # un-migrated doc (no schemaVersion) is seeded rather than being
-                # masked as v2 by the empty-doc default. The disk migration in
-                # store_migrations does the same; both are gated on schemaVersion
-                # so they converge idempotently.
-                doc = migrate_tokens_v2_to_v3(migrate_tokens_v1_to_v2(doc))
-                # Forward-compat: fill in any missing top-level keys.
-                for k, v in _empty_workspace_doc().items():
-                    doc.setdefault(k, v)
-            except Exception as err:  # noqa: BLE001
-                log.warning("tokens.json at %s is corrupt (%s); starting fresh", wp, err)
-                doc = _empty_workspace_doc()
+            doc = _apply_tokens_migrations(doc)
+            # Forward-compat: fill in any missing top-level keys.
+            for k, v in _empty_workspace_doc().items():
+                doc.setdefault(k, v)
         self._workspace_cache[workspace_path] = doc
         return doc
 
-    def _save_workspace(self, workspace_path: str) -> None:
-        doc = self._workspace_cache.get(workspace_path)
-        if doc is None:
-            return
+    def _migrate_legacy_workspace_file(self, workspace_path: str) -> dict[str, Any] | None:
+        """First access: carry over the old `<workspace>/.agent-team/tokens.json`."""
+        old_wp = Path(workspace_path) / PROJECT_DIR_NAME / TOKENS_FILE
+        if not old_wp.exists():
+            return None
         try:
-            self._atomic_write(self._workspace_path(workspace_path), doc)
-        except Exception as err:  # noqa: BLE001
-            log.warning("failed to write workspace tokens.json: %s", err)
-
-    def _load_global(self) -> dict[str, Any]:
-        if not self._global_path.exists():
-            return _empty_global_doc()
-        try:
-            doc = json.loads(self._global_path.read_text(encoding="utf-8"))
-            # Forward-migrate in memory (global doc is loaded at import time,
-            # before store_migrations runs on disk — so the store must run the
-            # migration chain itself or the eager load would clobber the
-            # migrated file on next flush). Gated on schemaVersion → idempotent.
-            doc = migrate_tokens_v2_to_v3(migrate_tokens_v1_to_v2(doc))
-            for k, v in _empty_global_doc().items():
-                doc.setdefault(k, v)
-            schema = doc.get("schemaVersion", TOKENS_SCHEMA_VERSION)
-            try:
-                schema = int(schema)
-            except (TypeError, ValueError):
-                schema = TOKENS_SCHEMA_VERSION
-            if schema > TOKENS_SCHEMA_VERSION:
-                # Written by a newer app version; load as-is (unknown keys are
-                # preserved) and don't crash.
-                log.warning(
-                    "global tokens.json schemaVersion %s is newer than supported "
-                    "%s; loading as-is",
-                    schema,
-                    TOKENS_SCHEMA_VERSION,
-                )
+            doc = json.loads(old_wp.read_text(encoding="utf-8"))
+            if not isinstance(doc, dict):
+                return None
+            doc = _apply_tokens_migrations(doc)
+            self._db.kv_set(
+                self._workspace_kv_key(workspace_path), doc, now=int(time.time())
+            )
+            old_wp.unlink()
+            log.info("migrated workspace tokens.json from %s into the database", old_wp)
             return doc
         except Exception as err:  # noqa: BLE001
-            log.warning("global tokens.json corrupt (%s); starting fresh", err)
+            log.warning("failed to migrate tokens.json from %s: %s", old_wp, err)
+            return None
+
+    def _load_global(self) -> dict[str, Any]:
+        doc = self._db.kv_get(_KV_GLOBAL)
+        if not isinstance(doc, dict):
             return _empty_global_doc()
+        doc = _apply_tokens_migrations(doc)
+        for k, v in _empty_global_doc().items():
+            doc.setdefault(k, v)
+        schema = _coerce_schema(doc.get("schemaVersion", TOKENS_SCHEMA_VERSION))
+        if schema > TOKENS_SCHEMA_VERSION:
+            # Written by a newer app version; load as-is (unknown keys are
+            # preserved) and don't crash.
+            log.warning(
+                "global tokens schemaVersion %s is newer than supported %s; loading as-is",
+                schema,
+                TOKENS_SCHEMA_VERSION,
+            )
+        return doc
+
+    def _load_checkpoints(self) -> None:
+        with self._db.transaction() as cur:
+            rows = cur.execute(
+                "SELECT path, scope, data, last_seen FROM ingestion_checkpoints"
+            ).fetchall()
+        for row in rows:
+            try:
+                checkpoint = json.loads(row["data"])
+            except json.JSONDecodeError:
+                log.warning("checkpoint row for %r holds invalid JSON; dropped", row["path"])
+                self._deleted_checkpoints.add((row["path"], row["scope"]))
+                continue
+            if not isinstance(checkpoint, dict):
+                continue
+            entry = self._files.setdefault(
+                row["path"], {"global": {}, "workspaces": {}}
+            )
+            if row["scope"]:
+                entry["workspaces"][row["scope"]] = checkpoint
+            else:
+                entry["global"] = checkpoint
+            last_seen = int(row["last_seen"] or 0)
+            self._last_seen[row["path"]] = max(
+                self._last_seen.get(row["path"], 0), last_seen
+            )
 
     # ───────────────────────── Batch save loop ──────────────────────
 
@@ -537,221 +740,214 @@ class TokensStore:
             self._flush_dirty()
 
     def _prune_cold_windows(self) -> None:
-        """Rescan `files` for logs that went cold since the last scan.
+        """Rescan checkpoints for logs that went cold since the last scan.
 
         Pruning only at load is not enough: a long-running session keeps
         writing to logs that later go quiet, and their dedup windows only ever
-        grow from that point on. Rescanning on a timer lets the next flush drop
-        them instead of rewriting them for the rest of the process lifetime.
+        grow from that point on.
         """
         with self._lock:
-            if self._prune_ingestion_files(self._ingestion_state):
-                self._dirty_ingestion_state = True
-                # Removing state is not expressible as a delta record, so the
-                # next commit has to rebuild the snapshot — same reason the
-                # startup prune forces it.
-                self._force_compaction = True
+            self._prune_ingestion_files()
 
     def _flush_dirty(self) -> None:
-        """Write any dirty state to disk (called from save loop or flush())."""
+        """Commit any dirty state (called from the save loop or flush())."""
         with self._flush_lock:
             self._flush_dirty_serialized()
 
     def _flush_dirty_serialized(self) -> None:
-        """Commit one dirty snapshot while the caller owns _flush_lock."""
-        # Never replace an unfinished journal with a newer batch. Apply it
-        # first; if the underlying I/O problem persists, keep it for retry or
-        # next-start recovery and leave newer mutations dirty in memory.
-        if not self._recover_persistence_journal():
-            return
+        """Commit one dirty batch while the caller owns _flush_lock."""
+        now = int(time.time())
         with self._lock:
-            dirty_ingestion = self._dirty_ingestion_state
+            if self._enforce_legacy_key_bounds():
+                self._dirty_legacy_keys = True
+            ws_docs = {
+                self._workspace_kv_key(ws): deepcopy(doc)
+                for ws in self._dirty_workspaces
+                if (doc := self._workspace_cache.get(ws)) is not None
+            }
             dirty_workspaces = set(self._dirty_workspaces)
-            dirty_global = self._dirty_global
-            self._dirty_ingestion_state = False
+            global_doc = deepcopy(self._global_data) if self._dirty_global else None
+            checkpoint_pairs = set(self._dirty_checkpoints)
+            rows: list[tuple[str, str, str, int]] = []
+            for path, scope in checkpoint_pairs:
+                checkpoint = self._checkpoint_for_locked(path, scope)
+                if checkpoint:
+                    rows.append(
+                        (
+                            path,
+                            scope,
+                            _dump_compact(checkpoint),
+                            self._last_seen.get(path) or now,
+                        )
+                    )
+            deletes = set(self._deleted_checkpoints)
+            deleted_scopes = set(self._deleted_scopes)
+            delete_all = self._delete_all_checkpoints
+            legacy_payload = (
+                {
+                    "keys": sorted(self._legacy_event_keys),
+                    "expires_at": self._legacy_expires_at,
+                }
+                if self._dirty_legacy_keys
+                else None
+            )
+            recent_payload = (
+                list(self._recent_event_keys) if self._dirty_recent_keys else None
+            )
             self._dirty_workspaces.clear()
             self._dirty_global = False
-            writes: list[dict[str, Any]] = []
-            for ws in dirty_workspaces:
-                doc = self._workspace_cache.get(ws)
-                if doc is not None:
-                    writes.append({"path": str(self._workspace_path(ws)), "data": deepcopy(doc)})
-            if dirty_global:
-                writes.append({"path": str(self._global_path), "data": deepcopy(self._global_data)})
-            delta: list[dict[str, Any]] = []
-            compacting = False
-            # A forced rebuild still has to run when nothing is dirty: shutdown
-            # compacts so the snapshot stands alone, and the log it replaces may
-            # have been written by an earlier commit.
-            if dirty_ingestion or (self._force_compaction and self._delta_lines):
-                # Rebuild the snapshot only when the log has grown past its
-                # bound, or when a change happened that the log cannot express.
-                compacting = self._force_compaction or (
-                    self._delta_lines + len(self._pending_delta) > DELTA_COMPACT_LINES
-                )
-                if compacting:
-                    writes.append({
-                        "path": str(self._ingestion_state_path),
-                        "data": self._state_snapshot_locked(),
-                    })
-                else:
-                    delta = self._pending_delta
-                self._pending_delta = []
-                self._force_compaction = False
-        if not writes and not delta:
+            self._dirty_checkpoints.clear()
+            self._deleted_checkpoints.clear()
+            self._deleted_scopes.clear()
+            self._delete_all_checkpoints = False
+            self._dirty_legacy_keys = False
+            self._dirty_recent_keys = False
+        if not (
+            ws_docs
+            or global_doc is not None
+            or rows
+            or deletes
+            or deleted_scopes
+            or delete_all
+            or legacy_payload is not None
+            or recent_payload is not None
+        ):
             return
         try:
-            # Write-ahead record makes totals + checkpoints recoverable as a
-            # unit when the process dies between individual writes. Replaying
-            # it is safe: the snapshot writes are whole-file, and the delta
-            # records are idempotent.
-            self._atomic_write(
-                self._persistence_journal_path,
-                {"version": 2, "writes": writes, "delta": delta},
-            )
-            for item in writes:
-                self._atomic_write(Path(item["path"]), item["data"])
-            if compacting:
-                # The snapshot just moved, so the old log's header no longer
-                # matches it — stale content is inert even if this unlink fails.
-                self._ingestion_delta_path.unlink(missing_ok=True)
-                self._delta_lines = 0
-            if delta:
-                self._append_ingestion_delta(delta)
-            self._persistence_journal_path.unlink(missing_ok=True)
-            if dirty_ingestion:
-                self._remove_legacy_paths()
-        except (OSError, TypeError, ValueError) as err:
+            # Serialize before entering the transaction: the workspace/global
+            # documents can be multiple MB, and dumping them while holding the
+            # shared Database lock would stall every other store on it.
+            kv_payloads: list[tuple[str, str]] = [
+                (kv_key, _dump_compact(doc)) for kv_key, doc in ws_docs.items()
+            ]
+            if global_doc is not None:
+                kv_payloads.append((_KV_GLOBAL, _dump_compact(global_doc)))
+            if legacy_payload is not None:
+                kv_payloads.append((_KV_LEGACY_KEYS, _dump_compact(legacy_payload)))
+            if recent_payload is not None:
+                kv_payloads.append((_KV_RECENT_KEYS, _dump_compact(recent_payload)))
+            with self._db.transaction() as cur:
+                if delete_all:
+                    cur.execute("DELETE FROM ingestion_checkpoints")
+                for scope in deleted_scopes:
+                    cur.execute(
+                        "DELETE FROM ingestion_checkpoints WHERE scope = ?", (scope,)
+                    )
+                for path, scope in deletes:
+                    cur.execute(
+                        "DELETE FROM ingestion_checkpoints WHERE path = ? AND scope = ?",
+                        (path, scope),
+                    )
+                for row in rows:
+                    cur.execute(_UPSERT_CHECKPOINT, row)
+                for kv_key, payload in kv_payloads:
+                    cur.execute(_UPSERT_KV, (kv_key, payload, now))
+        except (sqlite3.Error, OSError, TypeError, ValueError) as err:
             log.warning("failed to commit token persistence batch: %s", err)
+            # Re-mark everything so the next interval retries with the
+            # newest in-memory state.
+            with self._lock:
+                self._dirty_workspaces.update(dirty_workspaces)
+                self._dirty_global = self._dirty_global or global_doc is not None
+                self._dirty_checkpoints.update(checkpoint_pairs)
+                self._deleted_checkpoints.update(deletes)
+                self._deleted_scopes.update(deleted_scopes)
+                self._delete_all_checkpoints = self._delete_all_checkpoints or delete_all
+                self._dirty_legacy_keys = (
+                    self._dirty_legacy_keys or legacy_payload is not None
+                )
+                self._dirty_recent_keys = (
+                    self._dirty_recent_keys or recent_payload is not None
+                )
 
     def flush(self) -> None:
-        """Flush all pending dirty state synchronously. Call before shutdown.
-
-        Compacts rather than appending: this is the shutdown path, so paying
-        one snapshot write here leaves the state whole on disk with no log
-        beside it — which is also what a downgraded build needs to read.
-        """
-        with self._lock:
-            self._force_compaction = True
+        """Flush all pending dirty state synchronously. Call before shutdown."""
         self._stop_event.set()
         if threading.current_thread() is not self._save_thread:
             self._save_thread.join()
         self._flush_dirty()
 
-    def _load_legacy_recorded_keys(self) -> set[str]:
-        if not self._recorded_keys_path.exists():
-            return set()
-        try:
-            data = json.loads(self._recorded_keys_path.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                return set(str(k) for k in data)
-        except (OSError, json.JSONDecodeError) as err:
-            log.warning("recorded-keys file unreadable (%s); starting empty", err)
-        return set()
+    def _checkpoint_for_locked(self, path: str, scope: str) -> dict[str, Any] | None:
+        entry = self._files.get(path)
+        if not isinstance(entry, dict):
+            return None
+        if scope:
+            value = (entry.get("workspaces") or {}).get(scope)
+        else:
+            value = entry.get("global")
+        return value if isinstance(value, dict) and value else None
 
-    def _load_ingestion_state(self) -> dict[str, Any]:
-        """Rebuild the state: snapshot first, then the delta log on top.
+    @staticmethod
+    def _row_scopes(entry: dict[str, Any]) -> list[str]:
+        """Scopes of `entry` that exist as database rows."""
+        scopes: list[str] = []
+        if entry.get("global"):
+            scopes.append("")
+        scopes.extend((entry.get("workspaces") or {}).keys())
+        return scopes
 
-        The log has to be replayed even when no snapshot exists — until the
-        first compaction that is the only place checkpoints live, and skipping
-        it would send every reader back to offset 0.
+    def _prune_ingestion_files(self) -> None:
+        """Prune the in-memory checkpoint cache; call with _lock held.
+
+        - A log that went cold (mtime older than COLD_FILE_DAYS) has the
+          dedup window stripped from its checkpoints: the offset and identity
+          stay, so a file that comes back to life rebuilds its window on the
+          next read. Only a *successful* stat can strip anything.
+          A reader that carries its window across a rotation is exempt —
+          pi.py keeps it deliberately so an in-place rewrite is not double
+          counted, and marks its checkpoints with `session_id` (pi.py:336).
+        - A successful stat refreshes last_seen (throttled to once per
+          _LAST_SEEN_REFRESH_S so the hourly scan does not rewrite every row).
+        - A path that has been unreadable (stat OSError) for DEAD_ENTRY_DAYS
+          straight (per last_seen) is deleted outright; a transient I/O fault
+          alone cannot remove anything.
         """
-        doc = self._load_ingestion_snapshot()
-        replayed = self._read_ingestion_delta()
-        for record in replayed:
-            self._apply_delta_record(doc, record)
-        self._delta_lines = len(replayed)
-        self._files_pruned = self._prune_ingestion_files(doc)
-        return doc
-
-    def _load_ingestion_snapshot(self) -> dict[str, Any]:
-        if self._ingestion_state_path.exists():
-            try:
-                data = json.loads(self._ingestion_state_path.read_text(encoding="utf-8"))
-                if isinstance(data, dict) and data.get("version") == INGESTION_STATE_VERSION:
-                    doc = _empty_ingestion_state()
-                    doc.update(data)
-                    if not isinstance(doc.get("files"), dict):
-                        doc["files"] = {}
-                    for path in (self._recorded_keys_path, self._legacy_reader_keys_path):
-                        if path.exists():
-                            self._legacy_paths_to_remove.add(path)
-                    return doc
-            except (OSError, json.JSONDecodeError) as err:
-                log.warning("token ingestion state unreadable (%s); rebuilding", err)
-
-        legacy = self._load_legacy_recorded_keys()
-        if self._recorded_keys_path.exists():
-            self._legacy_paths_to_remove.add(self._recorded_keys_path)
-        if self._legacy_reader_keys_path.exists():
-            # This was only a parser performance cache. It can contain events
-            # the accounting sink rejected as external, so its bare keys must
-            # never suppress a migration replay.
-            self._legacy_paths_to_remove.add(self._legacy_reader_keys_path)
-        doc = _empty_ingestion_state()
-        doc["legacy_event_keys"] = sorted(legacy)
-        return doc
-
-    def _prune_ingestion_files(self, doc: dict[str, Any]) -> bool:
-        """Strip the dedup window from checkpoints of logs long gone cold.
-
-        Runs at load and then on a _PRUNE_INTERVAL_S timer from the save loop:
-        `files` has no other eviction path, so the windows accumulate (7.5 MB
-        on a real machine) and every flush rewrites the lot. Logs that go cold
-        after startup only get stripped because of the periodic pass.
-
-        Only a *successful* stat can strip anything. An unreadable path is
-        left alone: treating one as prunable would let a transient I/O fault
-        (an unmounted network home, say) wipe the whole dedup state at once,
-        and the next scan would re-read every log from offset 0.
-
-        A reader that carries its window across a rotation must be exempt —
-        pi.py keeps it deliberately so an in-place rewrite is not double
-        counted, and marks its checkpoints with `session_id` (pi.py:336).
-        Readers that clear the window themselves on rotation (claude, qwen)
-        never set that field.
-        """
-        files = doc.get("files")
-        if not isinstance(files, dict):
-            return False
-        cutoff = datetime.now(timezone.utc).timestamp() - COLD_FILE_DAYS * 86400
-        changed = False
-        for path, entry in files.items():
+        now = time.time()
+        cold_cutoff = now - COLD_FILE_DAYS * 86400
+        dead_cutoff = now - DEAD_ENTRY_DAYS * 86400
+        for path in list(self._files):
+            entry = self._files[path]
             if not isinstance(entry, dict):
                 continue
             try:
-                if os.stat(path).st_mtime >= cutoff:
-                    continue
+                mtime = os.stat(path).st_mtime
             except OSError:
+                last_seen = self._last_seen.get(path, 0)
+                if last_seen and last_seen < dead_cutoff:
+                    for scope in self._row_scopes(entry):
+                        self._deleted_checkpoints.add((path, scope))
+                        self._dirty_checkpoints.discard((path, scope))
+                    del self._files[path]
+                    self._last_seen.pop(path, None)
                 continue
-            scopes = [entry.get("global")]
-            scopes.extend((entry.get("workspaces") or {}).values())
-            for scope in scopes:
-                if not isinstance(scope, dict) or scope.get("session_id"):
+            if now - self._last_seen.get(path, 0) > _LAST_SEEN_REFRESH_S:
+                self._last_seen[path] = int(now)
+                for scope in self._row_scopes(entry):
+                    self._dirty_checkpoints.add((path, scope))
+            if mtime >= cold_cutoff:
+                continue
+            scoped: list[tuple[str, Any]] = [("", entry.get("global"))]
+            scoped.extend((entry.get("workspaces") or {}).items())
+            for scope, checkpoint in scoped:
+                if not isinstance(checkpoint, dict) or checkpoint.get("session_id"):
                     continue
-                if scope.pop("recent_keys", None) is not None:
-                    changed = True
-        return changed
+                if checkpoint.pop("recent_keys", None) is not None:
+                    self._dirty_checkpoints.add((path, scope))
 
     def _enforce_legacy_key_bounds(self) -> bool:
         """Bound the one-time migration dedup set. Returns True if it changed.
 
-        Keys for events that never replay would otherwise linger forever and
-        be re-serialized on every flush. Expiry is stamped when keys are first
-        seen and checked again on every flush snapshot so long-running
-        processes drain too.
+        Keys for events that never replay would otherwise linger forever.
+        Expiry is stamped when keys are first seen and checked again on every
+        flush so long-running processes drain too.
         """
         if not self._legacy_event_keys:
             return False
         changed = False
-        expires_at = str(
-            self._ingestion_state.get("legacy_event_keys_expires_at") or ""
-        )
-        if not expires_at:
-            expires_at = _days_from_now_iso(LEGACY_EVENT_KEYS_TTL_DAYS)
-            self._ingestion_state["legacy_event_keys_expires_at"] = expires_at
+        if not self._legacy_expires_at:
+            self._legacy_expires_at = _days_from_now_iso(LEGACY_EVENT_KEYS_TTL_DAYS)
             changed = True
-        if _now_iso() >= expires_at:
+        if _now_iso() >= self._legacy_expires_at:
             log.info(
                 "legacy event keys expired; dropping %d entries",
                 len(self._legacy_event_keys),
@@ -771,16 +967,7 @@ class TokensStore:
             changed = True
         return changed
 
-    def _state_snapshot_locked(self) -> dict[str, Any]:
-        self._enforce_legacy_key_bounds()
-        self._ingestion_state["legacy_event_keys"] = sorted(self._legacy_event_keys)
-        self._ingestion_state["recent_event_keys"] = list(self._recent_event_keys)
-        return deepcopy(self._ingestion_state)
-
-    def _remove_legacy_paths(self) -> None:
-        for path in list(self._legacy_paths_to_remove):
-            path.unlink(missing_ok=True)
-            self._legacy_paths_to_remove.discard(path)
+    # ───────────────────── Ingestion checkpoints ────────────────────
 
     def get_ingestion_checkpoint(
         self,
@@ -789,7 +976,7 @@ class TokensStore:
     ) -> dict[str, Any]:
         """Return a copy of the compact cursor for Global or one workspace."""
         with self._lock:
-            entry = self._ingestion_state["files"].get(file_path, {})
+            entry = self._files.get(file_path, {})
             if workspace_path:
                 value = entry.get("workspaces", {}).get(workspace_path, {})
             else:
@@ -804,25 +991,20 @@ class TokensStore:
     ) -> None:
         if not file_path or not checkpoint:
             return
-        files = self._ingestion_state["files"]
-        entry = files.setdefault(file_path, {"global": {}, "workspaces": {}})
-        if workspace_path:
+        entry = self._files.setdefault(file_path, {"global": {}, "workspaces": {}})
+        scope = workspace_path or ""
+        if scope:
             target = entry.setdefault("workspaces", {})
-            current = target.get(workspace_path, {})
-            if not self._checkpoint_is_newer(current, checkpoint):
+            if not self._checkpoint_is_newer(target.get(scope, {}), checkpoint):
                 return
-            target[workspace_path] = deepcopy(checkpoint)
+            target[scope] = deepcopy(checkpoint)
         else:
             if not self._checkpoint_is_newer(entry.get("global", {}), checkpoint):
                 return
             entry["global"] = deepcopy(checkpoint)
-        self._pending_delta.append({
-            "t": "ckpt",
-            "p": file_path,
-            "w": workspace_path or "",
-            "c": deepcopy(checkpoint),
-        })
-        self._dirty_ingestion_state = True
+        self._last_seen[file_path] = int(time.time())
+        self._dirty_checkpoints.add((file_path, scope))
+        self._deleted_checkpoints.discard((file_path, scope))
 
     @staticmethod
     def _checkpoint_is_newer(current: dict[str, Any], candidate: dict[str, Any]) -> bool:
@@ -870,8 +1052,7 @@ class TokensStore:
         while len(self._recent_event_keys) > RECENT_EVENT_KEYS_LIMIT:
             old = self._recent_event_keys.popleft()
             self._recent_event_key_set.discard(old)
-        self._pending_delta.append({"t": "rek", "k": scoped_key})
-        self._dirty_ingestion_state = True
+        self._dirty_recent_keys = True
 
     # ───────────────────────── Run lifecycle ────────────────────────
 
@@ -891,8 +1072,10 @@ class TokensStore:
                 prev["ended_at"] = _now_iso()
                 doc["runs"].append(prev)
             doc["current_run"] = _new_run(run_id, task, run_dir)
-            self._save_workspace(workspace_path)
-            return doc["current_run"]
+            self._dirty_workspaces.add(workspace_path)
+            result = deepcopy(doc["current_run"])
+            self._flush_dirty()
+            return result
 
     def end_run(self, workspace_path: str) -> None:
         with self._flush_lock, self._lock:
@@ -901,7 +1084,8 @@ class TokensStore:
                 doc["current_run"]["ended_at"] = _now_iso()
                 doc["runs"].append(doc["current_run"])
                 doc["current_run"] = None
-            self._save_workspace(workspace_path)
+            self._dirty_workspaces.add(workspace_path)
+            self._flush_dirty()
 
     # ───────────────────────── Recording ───────────────────────────
 
@@ -955,7 +1139,7 @@ class TokensStore:
             }
             legacy_duplicate = bool(legacy_matches)
             recent_duplicate = bool(scoped_key and scoped_key in self._recent_event_key_set)
-            global_checkpoint = self._ingestion_state["files"].get(
+            global_checkpoint = self._files.get(
                 ingestion_file, {}
             ).get("global", {})
             credit_global_on_replay = bool(
@@ -967,7 +1151,7 @@ class TokensStore:
 
             if legacy_duplicate:
                 self._legacy_event_keys.difference_update(legacy_matches)
-                self._dirty_ingestion_state = True
+                self._dirty_legacy_keys = True
             if recent_duplicate or (legacy_duplicate and not replay_workspace):
                 if ingestion_checkpoint:
                     if replay_workspace:
@@ -1041,6 +1225,8 @@ class TokensStore:
     # ───────────────────────── Snapshot ─────────────────────────────
 
     def snapshot(self, workspace_path: str | None) -> dict[str, Any]:
+        """Materialized copy — callers may serialize it later without racing
+        the live aggregation state."""
         with self._lock:
             workspace_doc = (
                 self._load_workspace(workspace_path) if workspace_path else _empty_workspace_doc()
@@ -1048,11 +1234,12 @@ class TokensStore:
             return {
                 "workspace_path": workspace_path or "",
                 "workspace": {
-                    "current_run": workspace_doc["current_run"],
-                    "runs": workspace_doc["runs"][-20:],  # last 20 only — keep payload small
-                    "cumulative": workspace_doc["cumulative"],
+                    "current_run": deepcopy(workspace_doc["current_run"]),
+                    # last 20 only — keep payload small
+                    "runs": deepcopy(workspace_doc["runs"][-20:]),
+                    "cumulative": deepcopy(workspace_doc["cumulative"]),
                 },
-                "global": dict(self._global_data),
+                "global": deepcopy(self._global_data),
             }
 
     # ───────────────────────── Reset ────────────────────────────────
@@ -1074,26 +1261,34 @@ class TokensStore:
             elif scope == "workspace" and workspace_path:
                 self._workspace_cache[workspace_path] = _empty_workspace_doc()
                 self._dirty_workspaces.add(workspace_path)
-                for entry in self._ingestion_state["files"].values():
+                for entry in self._files.values():
                     if isinstance(entry, dict):
                         entry.get("workspaces", {}).pop(workspace_path, None)
-                self._dirty_ingestion_state = True
-                # A reset removes state, which no delta record can express, and
-                # any queued record would resurrect what was just dropped.
-                self._pending_delta.clear()
-                self._force_compaction = True
+                self._dirty_checkpoints = {
+                    pair for pair in self._dirty_checkpoints if pair[1] != workspace_path
+                }
+                self._deleted_scopes.add(workspace_path)
             elif scope == "global":
                 self._global_data = _empty_global_doc()
                 self._dirty_global = True
-                self._ingestion_state = _empty_ingestion_state()
+                self._files.clear()
+                self._last_seen.clear()
+                self._dirty_checkpoints.clear()
+                self._deleted_checkpoints.clear()
+                self._deleted_scopes.clear()
+                self._delete_all_checkpoints = True
                 self._legacy_event_keys.clear()
+                self._legacy_expires_at = None
                 self._recent_event_keys.clear()
                 self._recent_event_key_set.clear()
-                self._dirty_ingestion_state = True
-                self._pending_delta.clear()
-                self._force_compaction = True
+                self._dirty_legacy_keys = True
+                self._dirty_recent_keys = True
             else:
                 raise ValueError(f"unknown reset scope: {scope!r}")
             result = self.snapshot(workspace_path)
             self._flush_dirty()
             return result
+
+
+def _dump_compact(data: Any) -> str:
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))

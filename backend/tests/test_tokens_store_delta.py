@@ -1,11 +1,16 @@
-"""Append-only ingestion delta: commit cost, replay, and compaction."""
+"""One-time import of the legacy ingestion state (snapshot + delta log +
+write-ahead journal) into SQLite, and the dirty-row commit semantics that
+replaced the append-only delta log."""
 
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
-from agent_team_backend.tokens_store import DELTA_COMPACT_LINES, TokensStore
+import pytest
+
+from agent_team_backend.tokens_store import TokensStore
 
 CHECKPOINT = {"kind": "jsonl", "offset": 10, "identity": "1:1"}
 
@@ -28,24 +33,36 @@ def _delta(tmp_path: Path) -> Path:
     return tmp_path / "token-ingestion-delta.jsonl"
 
 
-def test_ordinary_commit_appends_instead_of_rewriting_the_snapshot(
-    tmp_path: Path,
-) -> None:
-    """The whole point: recording an advanced offset must not cost a rewrite
-    of a state file that is megabytes on a real machine."""
-    store = _store(tmp_path)
-    store.advance_ingestion_checkpoint("/logs/a.jsonl", CHECKPOINT)
-    store._flush_dirty()
-
-    assert not _snapshot(tmp_path).exists()
-    records = [json.loads(line) for line in _delta(tmp_path).read_text().splitlines()]
-    assert records[0]["t"] == "hdr"
-    assert records[1] == {"t": "ckpt", "p": "/logs/a.jsonl", "w": "", "c": CHECKPOINT}
-    store.flush()
+def _journal(tmp_path: Path) -> Path:
+    return tmp_path / "token-persistence-journal.json"
 
 
-def test_restart_replays_the_delta_over_the_snapshot(tmp_path: Path) -> None:
-    """Until the first compaction the log is the only place checkpoints live."""
+def _write_snapshot(tmp_path: Path, files: dict, **extra) -> None:
+    doc = {
+        "version": 2,
+        "files": files,
+        "legacy_event_keys": [],
+        "recent_event_keys": [],
+    }
+    doc.update(extra)
+    _snapshot(tmp_path).write_text(json.dumps(doc), encoding="utf-8")
+
+
+def _snapshot_identity(tmp_path: Path) -> dict:
+    try:
+        st = _snapshot(tmp_path).stat()
+    except OSError:
+        return {"mtime_ns": 0, "size": 0}
+    return {"mtime_ns": st.st_mtime_ns, "size": st.st_size}
+
+
+def _write_delta(tmp_path: Path, records: list[dict]) -> None:
+    lines = [json.dumps({"t": "hdr", "base": _snapshot_identity(tmp_path)})]
+    lines.extend(json.dumps(r) for r in records)
+    _delta(tmp_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_checkpoint_advances_persist_across_restart(tmp_path: Path) -> None:
     store = _store(tmp_path)
     store.advance_ingestion_checkpoint("/logs/a.jsonl", CHECKPOINT)
     store.advance_ingestion_checkpoint(
@@ -60,103 +77,175 @@ def test_restart_replays_the_delta_over_the_snapshot(tmp_path: Path) -> None:
     fresh.flush()
 
 
-def test_flush_compacts_so_shutdown_leaves_a_whole_snapshot(tmp_path: Path) -> None:
-    """A cleanly stopped app must leave state a downgraded build can read."""
-    store = _store(tmp_path)
-    store.advance_ingestion_checkpoint("/logs/a.jsonl", CHECKPOINT)
-    store._flush_dirty()
-    assert _delta(tmp_path).exists()
+def test_import_merges_snapshot_delta_and_journal(tmp_path: Path) -> None:
+    """Everything the legacy three-file machinery held must land in SQLite:
+    the snapshot, the delta records on top of it, and the pending batch a
+    crash left in the write-ahead journal."""
+    _write_snapshot(tmp_path, {
+        "/logs/a.jsonl": {"global": dict(CHECKPOINT), "workspaces": {}},
+    })
+    _write_delta(tmp_path, [
+        {"t": "ckpt", "p": "/logs/a.jsonl", "w": "",
+         "c": {"kind": "jsonl", "offset": 40, "identity": "1:1"}},
+        {"t": "rek", "k": "global::1:1::event-1"},
+    ])
+    global_doc = {
+        "all_time": {"input": 12, "output": 3, "calls": 1},
+        "by_vendor": {}, "by_day": {},
+    }
+    _journal(tmp_path).write_text(json.dumps({
+        "version": 2,
+        "writes": [{"path": str(tmp_path / "tokens.json"), "data": global_doc}],
+        "delta": [{"t": "ckpt", "p": "/logs/a.jsonl", "w": "",
+                   "c": {"kind": "jsonl", "offset": 60, "identity": "1:1"}}],
+    }), encoding="utf-8")
 
-    store.flush()
+    store = _store(tmp_path)
+    assert store.get_ingestion_checkpoint("/logs/a.jsonl")["offset"] == 60
+    assert store.snapshot(None)["global"]["all_time"] == global_doc["all_time"]
+    # The remembered dedup key keeps the already-counted event out of totals.
+    store.record(None, source="cli", vendor="claude", input_tokens=5,
+                 dedup_key="event-1", ingestion_file="/logs/a.jsonl",
+                 ingestion_checkpoint={"kind": "jsonl", "offset": 60, "identity": "1:1"})
+    assert store.snapshot(None)["global"]["all_time"]["calls"] == 1
+
+    # The legacy artifacts are retired.
+    assert not _snapshot(tmp_path).exists()
+    assert _snapshot(tmp_path).with_name(
+        "token-ingestion-state.json.migrated-v1"
+    ).exists()
     assert not _delta(tmp_path).exists()
-    state = json.loads(_snapshot(tmp_path).read_text())
-    assert state["files"]["/logs/a.jsonl"]["global"]["offset"] == 10
+    assert not _journal(tmp_path).exists()
+    store.flush()
 
 
-def test_delta_is_discarded_when_the_snapshot_moved_underneath_it(
-    tmp_path: Path,
-) -> None:
-    """A build that predates the log rewrites the snapshot without touching it.
-    Replaying then would drag checkpoints backwards, so the log is dropped."""
+def test_import_runs_once(tmp_path: Path) -> None:
+    _write_snapshot(tmp_path, {
+        "/logs/a.jsonl": {"global": dict(CHECKPOINT), "workspaces": {}},
+    })
     store = _store(tmp_path)
-    store.advance_ingestion_checkpoint(
-        "/logs/a.jsonl", {"kind": "jsonl", "offset": 99, "identity": "1:1"}
-    )
-    store._flush_dirty()
-    assert _delta(tmp_path).exists()
+    assert store.get_ingestion_checkpoint("/logs/a.jsonl")["offset"] == 10
+    store.flush()
 
-    # Stand in for the older build: a snapshot written with no idea the log exists.
-    _snapshot(tmp_path).write_text(
-        json.dumps({
-            "version": 2,
-            "files": {"/logs/a.jsonl": {"global": CHECKPOINT, "workspaces": {}}},
-            "legacy_event_keys": [],
-            "recent_event_keys": [],
-        }),
-        encoding="utf-8",
-    )
-
+    # A stale copy reappearing (restored from backup) must not re-import
+    # over the database's newer state.
+    _write_snapshot(tmp_path, {
+        "/logs/a.jsonl": {
+            "global": {"kind": "jsonl", "offset": 99, "identity": "1:1"},
+            "workspaces": {},
+        },
+    })
     fresh = _store(tmp_path)
-    # The snapshot wins; the stale log does not resurrect offset 99.
     assert fresh.get_ingestion_checkpoint("/logs/a.jsonl")["offset"] == 10
+    assert not _snapshot(tmp_path).exists()  # retired out of the way
     fresh.flush()
 
 
-def test_replaying_the_same_records_twice_is_idempotent(tmp_path: Path) -> None:
-    """Journal recovery can append a batch that already landed."""
-    store = _store(tmp_path)
-    store.advance_ingestion_checkpoint("/logs/a.jsonl", CHECKPOINT)
-    store._flush_dirty()
-
-    duplicated = _delta(tmp_path).read_text().splitlines()
-    body = [line for line in duplicated[1:] if line.strip()]
-    _delta(tmp_path).write_text("\n".join(duplicated + body) + "\n", encoding="utf-8")
-
-    fresh = _store(tmp_path)
-    assert fresh.get_ingestion_checkpoint("/logs/a.jsonl")["offset"] == 10
-    fresh.flush()
-
-
-def test_a_torn_tail_replays_what_survived_and_forces_a_rebuild(
+def test_stale_delta_is_dropped_when_the_snapshot_moved_underneath_it(
     tmp_path: Path,
 ) -> None:
-    """A crash mid-append leaves a half-written line. Appending past it would
-    strand later records behind the tear, so the next commit compacts."""
+    """A build that predates the log rewrites the snapshot without touching
+    it. Replaying then would drag checkpoints backwards, so the import drops
+    the log and the snapshot stands on its own."""
+    _write_snapshot(tmp_path, {})
+    _write_delta(tmp_path, [
+        {"t": "ckpt", "p": "/logs/a.jsonl", "w": "",
+         "c": {"kind": "jsonl", "offset": 99, "identity": "1:1"}},
+    ])
+    # Stand in for the older build: a snapshot rewritten with no idea the
+    # log exists (its stat no longer matches the log's header).
+    _write_snapshot(tmp_path, {
+        "/logs/a.jsonl": {"global": dict(CHECKPOINT), "workspaces": {}},
+    }, marker="rewritten")
+
     store = _store(tmp_path)
-    store.advance_ingestion_checkpoint("/logs/a.jsonl", CHECKPOINT)
-    store._flush_dirty()
+    assert store.get_ingestion_checkpoint("/logs/a.jsonl")["offset"] == 10
+    store.flush()
+
+
+def test_torn_delta_tail_imports_the_records_that_survived(tmp_path: Path) -> None:
+    """A crash mid-append leaves a half-written line; everything before the
+    tear is still good and must be imported."""
+    _write_snapshot(tmp_path, {
+        "/logs/a.jsonl": {"global": dict(CHECKPOINT), "workspaces": {}},
+    })
+    _write_delta(tmp_path, [
+        {"t": "ckpt", "p": "/logs/a.jsonl", "w": "",
+         "c": {"kind": "jsonl", "offset": 40, "identity": "1:1"}},
+    ])
     with open(_delta(tmp_path), "a", encoding="utf-8") as fh:
         fh.write('{"t":"ckpt","p":"/logs/b.js')
 
-    fresh = _store(tmp_path)
-    assert fresh.get_ingestion_checkpoint("/logs/a.jsonl")["offset"] == 10
-    assert fresh.get_ingestion_checkpoint("/logs/b.jsonl") == {}
-    assert fresh._force_compaction
-
-    fresh.advance_ingestion_checkpoint("/logs/c.jsonl", CHECKPOINT)
-    fresh._flush_dirty()
-    assert _snapshot(tmp_path).exists()
-    assert not _delta(tmp_path).exists()
-    fresh.flush()
-
-
-def test_the_log_is_compacted_once_it_outgrows_its_bound(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    for offset in range(1, DELTA_COMPACT_LINES + 2):
-        store.advance_ingestion_checkpoint(
-            "/logs/a.jsonl", {"kind": "jsonl", "offset": offset, "identity": "1:1"}
-        )
-    store._flush_dirty()
-
-    assert not _delta(tmp_path).exists()
-    state = json.loads(_snapshot(tmp_path).read_text())
-    assert state["files"]["/logs/a.jsonl"]["global"]["offset"] == DELTA_COMPACT_LINES + 1
+    assert store.get_ingestion_checkpoint("/logs/a.jsonl")["offset"] == 40
+    assert store.get_ingestion_checkpoint("/logs/b.jsonl") == {}
     store.flush()
 
 
-def test_recorded_events_survive_a_restart_without_a_snapshot(tmp_path: Path) -> None:
-    """Dedup keys live in the same state, so they ride the log too — otherwise a
-    restart would re-count every event the log had already accounted for."""
+def test_delta_without_snapshot_still_imports(tmp_path: Path) -> None:
+    """Until the first legacy compaction the log was the only place
+    checkpoints lived; an upgrade from that state must not lose them."""
+    _write_delta(tmp_path, [
+        {"t": "ckpt", "p": "/logs/a.jsonl", "w": "", "c": dict(CHECKPOINT)},
+        {"t": "ckpt", "p": "/logs/b.jsonl", "w": "/ws", "c": dict(CHECKPOINT)},
+    ])
+    store = _store(tmp_path)
+    assert store.get_ingestion_checkpoint("/logs/a.jsonl")["offset"] == 10
+    assert store.get_ingestion_checkpoint("/logs/b.jsonl", "/ws")["offset"] == 10
+    store.flush()
+
+
+def test_flush_writes_only_the_dirty_rows(tmp_path: Path) -> None:
+    """The whole point of the migration: advancing one offset must cost one
+    row UPSERT, not a rewrite of the entire ingestion state."""
+    store = _store(tmp_path)
+    for idx in range(50):
+        store.advance_ingestion_checkpoint(
+            f"/logs/file-{idx}.jsonl",
+            {"kind": "jsonl", "offset": 1, "identity": "1:1"},
+        )
+    store._flush_dirty()
+
+    before = store._db._conn.total_changes
+    store.advance_ingestion_checkpoint(
+        "/logs/file-7.jsonl", {"kind": "jsonl", "offset": 2, "identity": "1:1"}
+    )
+    store._flush_dirty()
+    assert store._db._conn.total_changes - before == 1
+
+    # Nothing dirty → nothing written at all.
+    before = store._db._conn.total_changes
+    store._flush_dirty()
+    assert store._db._conn.total_changes == before
+    store.flush()
+
+
+def test_failed_commit_keeps_state_dirty_for_retry(tmp_path: Path, monkeypatch) -> None:
+    store = _store(tmp_path)
+    store.advance_ingestion_checkpoint("/logs/a.jsonl", CHECKPOINT)
+
+    original = store._db.transaction
+    calls = {"n": 0}
+
+    def failing_transaction():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise sqlite3.OperationalError("simulated commit failure")
+        return original()
+
+    monkeypatch.setattr(store._db, "transaction", failing_transaction)
+    store._flush_dirty()  # swallowed, state re-marked dirty
+    store._flush_dirty()  # retry succeeds
+
+    fresh = _store(tmp_path)
+    assert fresh.get_ingestion_checkpoint("/logs/a.jsonl")["offset"] == 10
+    fresh.flush()
+    store.flush()
+
+
+def test_recorded_events_survive_a_restart(tmp_path: Path) -> None:
+    """Dedup keys are persisted with the checkpoints — otherwise a restart
+    would re-count every event already accounted for."""
     store = _store(tmp_path)
     workspace = str(tmp_path / "workspace")
     assert store.record(
@@ -169,7 +258,6 @@ def test_recorded_events_survive_a_restart_without_a_snapshot(tmp_path: Path) ->
         ingestion_checkpoint=CHECKPOINT,
     )
     store._flush_dirty()
-    assert not _snapshot(tmp_path).exists()
 
     fresh = _store(tmp_path)
     # Same event again: the replayed dedup key must keep it out of the totals.
@@ -186,3 +274,12 @@ def test_recorded_events_survive_a_restart_without_a_snapshot(tmp_path: Path) ->
     assert snap["global"]["all_time"]["calls"] == 1
     assert snap["global"]["all_time"]["input"] == 10
     fresh.flush()
+    store.flush()
+
+
+@pytest.mark.parametrize("payload", ["{ not json", ""])
+def test_corrupt_or_empty_snapshot_starts_empty(tmp_path: Path, payload: str) -> None:
+    _snapshot(tmp_path).write_text(payload, encoding="utf-8")
+    store = _store(tmp_path)
+    assert store.get_ingestion_checkpoint("/logs/a.jsonl") == {}
+    store.flush()

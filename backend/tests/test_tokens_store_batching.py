@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import threading
 import time
 from pathlib import Path
 
+from agent_team_backend.db import Database
 from agent_team_backend.tokens_store import (
     COLD_FILE_DAYS,
+    DEAD_ENTRY_DAYS,
     RECENT_EVENT_KEYS_LIMIT,
     TokensStore,
 )
@@ -25,19 +28,45 @@ def _store(tmp_path: Path) -> TokensStore:
     )
 
 
+def _spy_transactions(store: TokensStore, monkeypatch) -> list[int]:
+    """Count how many write transactions the store opens."""
+    calls: list[int] = []
+    original = store._db.transaction
+
+    def counted():
+        calls.append(1)
+        return original()
+
+    monkeypatch.setattr(store._db, "transaction", counted)
+    return calls
+
+
+def _kv(tmp_path: Path, key: str):
+    db = Database(tmp_path / "navide.db")
+    try:
+        return db.kv_get(key)
+    finally:
+        db.close()
+
+
+def _checkpoint_rows(tmp_path: Path) -> list[tuple[str, str, dict]]:
+    db = Database(tmp_path / "navide.db")
+    try:
+        with db.transaction() as cur:
+            rows = cur.execute(
+                "SELECT path, scope, data FROM ingestion_checkpoints"
+            ).fetchall()
+        return [(r["path"], r["scope"], json.loads(r["data"])) for r in rows]
+    finally:
+        db.close()
+
+
 def test_backfill_burst_writes_nothing_until_flush(
     tmp_path: Path, monkeypatch
 ) -> None:
     store = _store(tmp_path)
     workspace = str(tmp_path / "workspace")
-    writes: list[Path] = []
-    original = store._atomic_write
-
-    def counted(path: Path, data: dict) -> None:
-        writes.append(path)
-        original(path, data)
-
-    monkeypatch.setattr(store, "_atomic_write", counted)
+    transactions = _spy_transactions(store, monkeypatch)
     for idx in range(500):
         assert store.record(
             workspace,
@@ -51,23 +80,69 @@ def test_backfill_burst_writes_nothing_until_flush(
             ingestion_checkpoint={"kind": "jsonl", "offset": idx + 1, "identity": "1:1"},
         )
 
-    assert writes == []
+    assert transactions == []
     memory = store.snapshot(workspace)
     store.flush()
-    assert {path.name for path in writes} == {
-        "tokens.json",
-        "token-ingestion-state.json",
-        "token-persistence-journal.json",
-    }
-    # One global tokens.json and one workspace tokens.json share the filename.
-    assert len(writes) == 4
-    assert not (tmp_path / "token-persistence-journal.json").exists()
+    assert transactions  # the batch only reaches the database on flush
 
     fresh = _store(tmp_path)
     disk = fresh.snapshot(workspace)
     assert disk["global"] == memory["global"]
     assert disk["workspace"] == memory["workspace"]
     fresh.flush()
+
+
+def test_flush_serializes_documents_before_the_write_transaction(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The kv documents can be multiple MB; dumping them inside the flush
+    transaction would stall every store sharing the Database lock, so every
+    serialization must happen before the transaction opens."""
+    from agent_team_backend import tokens_store as tokens_store_module
+
+    store = _store(tmp_path)
+    workspace = str(tmp_path / "workspace")
+    store.record(
+        workspace,
+        source="cli",
+        vendor="claude",
+        input_tokens=5,
+        output_tokens=1,
+        dedup_key="claude::file::event-1",
+        legacy_dedup_key="event-1",
+        ingestion_file="/logs/session.jsonl",
+        ingestion_checkpoint={"kind": "jsonl", "offset": 1, "identity": "1:1"},
+    )
+    memory = store.snapshot(workspace)
+
+    events: list[str] = []
+    original_dump = tokens_store_module._dump_compact
+
+    def spying_dump(data):
+        events.append("dump")
+        return original_dump(data)
+
+    monkeypatch.setattr(tokens_store_module, "_dump_compact", spying_dump)
+    original_txn = store._db.transaction
+
+    def spying_txn():
+        events.append("transaction")
+        return original_txn()
+
+    monkeypatch.setattr(store._db, "transaction", spying_txn)
+    store._flush_dirty()
+
+    assert "dump" in events and "transaction" in events
+    txn_at = events.index("transaction")
+    assert "dump" not in events[txn_at:]
+
+    # The raw kv writes round-trip exactly like kv_set would have.
+    fresh = _store(tmp_path)
+    disk = fresh.snapshot(workspace)
+    assert disk["global"] == memory["global"]
+    assert disk["workspace"] == memory["workspace"]
+    fresh.flush()
+    store.flush()
 
 
 def test_dedup_is_effective_before_flush(tmp_path: Path) -> None:
@@ -102,9 +177,8 @@ def test_unified_state_is_bounded_by_recent_key_limit(tmp_path: Path) -> None:
             ingestion_checkpoint={"kind": "jsonl", "offset": idx + 1, "identity": "1:1"},
         )
     store.flush()
-    state = json.loads((tmp_path / "token-ingestion-state.json").read_text())
-    assert len(state["recent_event_keys"]) == RECENT_EVENT_KEYS_LIMIT
-    assert len(state["files"]) == 1
+    assert len(_kv(tmp_path, "tokens.recent_event_keys")) == RECENT_EVENT_KEYS_LIMIT
+    assert len({path for path, _, _ in _checkpoint_rows(tmp_path)}) == 1
 
 
 def test_legacy_files_migrate_without_double_counting(tmp_path: Path) -> None:
@@ -131,9 +205,10 @@ def test_legacy_files_migrate_without_double_counting(tmp_path: Path) -> None:
 
     assert not (tmp_path / "recorded-event-keys.json").exists()
     assert not (tmp_path / "log-readers-seen.json").exists()
-    state = json.loads((tmp_path / "token-ingestion-state.json").read_text())
-    assert state["legacy_event_keys"] == []
-    assert state["files"]["/logs/session.jsonl"]["global"]["offset"] == 99
+    assert _kv(tmp_path, "tokens.legacy_event_keys")["keys"] == []
+    fresh = _store(tmp_path)
+    assert fresh.get_ingestion_checkpoint("/logs/session.jsonl")["offset"] == 99
+    fresh.flush()
 
 
 def test_legacy_watcher_cache_does_not_suppress_external_event(tmp_path: Path) -> None:
@@ -255,6 +330,8 @@ def test_interrupted_batch_journal_recovers_before_load(tmp_path: Path) -> None:
 def test_lifecycle_save_cannot_be_overwritten_by_older_batch(
     tmp_path: Path, monkeypatch
 ) -> None:
+    """start_run must serialize behind an in-flight background commit so its
+    synchronous save is never interleaved with (or shadowed by) older data."""
     store = _store(tmp_path)
     workspace = str(tmp_path / "workspace")
     store.record(
@@ -269,18 +346,18 @@ def test_lifecycle_save_cannot_be_overwritten_by_older_batch(
 
     entered = threading.Event()
     release = threading.Event()
-    original = store._atomic_write
+    original = store._db.transaction
     blocked_once = False
 
-    def blocking_write(path: Path, data: dict) -> None:
+    def blocking_transaction():
         nonlocal blocked_once
-        if path.name == "token-persistence-journal.json" and not blocked_once:
+        if not blocked_once:
             blocked_once = True
             entered.set()
             assert release.wait(timeout=5)
-        original(path, data)
+        return original()
 
-    monkeypatch.setattr(store, "_atomic_write", blocking_write)
+    monkeypatch.setattr(store._db, "transaction", blocking_transaction)
     background = threading.Thread(target=store._flush_dirty)
     background.start()
     assert entered.wait(timeout=5)
@@ -300,15 +377,19 @@ def test_lifecycle_save_cannot_be_overwritten_by_older_batch(
     assert not background.is_alive()
     assert not lifecycle.is_alive()
 
-    persisted = json.loads(store._workspace_path(workspace).read_text())
-    assert persisted["current_run"]["run_id"] == "r1"
-    assert persisted["cumulative"]["totals"]["calls"] == 1
+    fresh = _store(tmp_path)
+    snap = fresh.snapshot(workspace)
+    assert snap["workspace"]["current_run"]["run_id"] == "r1"
+    assert snap["workspace"]["cumulative"]["totals"]["calls"] == 1
+    fresh.flush()
     store.flush()
 
 
 def test_interrupted_workspace_reset_recovers_totals_and_checkpoint_together(
     tmp_path: Path, monkeypatch
 ) -> None:
+    """A reset whose commit fails must stay pending — totals and checkpoint
+    deletion land together on the next successful commit, not piecemeal."""
     store = _store(tmp_path)
     workspace = str(tmp_path / "workspace")
     store.record(
@@ -320,24 +401,22 @@ def test_interrupted_workspace_reset_recovers_totals_and_checkpoint_together(
         ingestion_file="/logs/session.jsonl",
         ingestion_checkpoint={"kind": "jsonl", "offset": 10, "identity": "1:1"},
     )
-    store.flush()
+    store._flush_dirty()
 
-    original = store._atomic_write
+    original = store._db.transaction
     failed = False
 
-    def fail_after_journal(path: Path, data: dict) -> None:
+    def fail_once():
         nonlocal failed
-        if path == store._workspace_path(workspace) and not failed:
+        if not failed:
             failed = True
-            raise OSError("simulated crash after journal")
-        original(path, data)
+            raise sqlite3.OperationalError("simulated crash during commit")
+        return original()
 
-    monkeypatch.setattr(store, "_atomic_write", fail_after_journal)
-    store.reset("workspace", workspace)
-    assert (tmp_path / "token-persistence-journal.json").exists()
+    monkeypatch.setattr(store._db, "transaction", fail_once)
+    store.reset("workspace", workspace)  # its synchronous commit fails
 
-    # The same live process must recover the pending reset before committing a
-    # newer event; otherwise the next journal would overwrite the reset batch.
+    # The next event and flush must carry the pending reset with them.
     store.record(
         workspace,
         source="cli",
@@ -347,8 +426,7 @@ def test_interrupted_workspace_reset_recovers_totals_and_checkpoint_together(
         ingestion_file="/logs/session.jsonl",
         ingestion_checkpoint={"kind": "jsonl", "offset": 20, "identity": "1:1"},
     )
-    store.flush()
-    assert not (tmp_path / "token-persistence-journal.json").exists()
+    store._flush_dirty()
 
     recovered = _store(tmp_path)
     snap = recovered.snapshot(workspace)
@@ -359,45 +437,36 @@ def test_interrupted_workspace_reset_recovers_totals_and_checkpoint_together(
         "/logs/session.jsonl", workspace
     )["offset"] == 20
     recovered.flush()
+    store.flush()
 
 
 def test_unchanged_checkpoint_does_not_trigger_a_rewrite(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """A rescan that finds no new bytes must not dirty the ingestion state.
+    """A rescan that finds no new bytes must not dirty anything.
 
-    The watcher re-submits a checkpoint for every file it scans, so treating an
-    unadvanced offset as "newer" rewrote the whole (multi-megabyte) state file
-    every save interval even when nothing had changed.
+    The watcher re-submits a checkpoint for every file it scans, so treating
+    an unadvanced offset as "newer" would rewrite its row every save interval
+    even when nothing changed.
     """
     store = _store(tmp_path)
     checkpoint = {"kind": "jsonl", "offset": 40, "identity": "1:1"}
     store.advance_ingestion_checkpoint("/logs/session.jsonl", checkpoint)
-    store.flush()
+    store._flush_dirty()
 
-    writes: list[Path] = []
-    original = store._atomic_write
-
-    def counted(path: Path, data: dict) -> None:
-        writes.append(path)
-        original(path, data)
-
-    monkeypatch.setattr(store, "_atomic_write", counted)
+    transactions = _spy_transactions(store, monkeypatch)
 
     # Same offset re-submitted (idle rescan) — nothing to persist.
     store.advance_ingestion_checkpoint("/logs/session.jsonl", dict(checkpoint))
-    store.flush()
-    assert writes == []
+    store._flush_dirty()
+    assert transactions == []
 
     # A genuine advance still persists.
     store.advance_ingestion_checkpoint(
         "/logs/session.jsonl", {"kind": "jsonl", "offset": 41, "identity": "1:1"}
     )
-    store.flush()
-    assert [path.name for path in writes] == [
-        "token-persistence-journal.json",
-        "token-ingestion-state.json",
-    ]
+    store._flush_dirty()
+    assert len(transactions) == 1
     assert store.get_ingestion_checkpoint("/logs/session.jsonl")["offset"] == 41
 
     # A rotated file (new identity) at a lower offset must still be accepted.
@@ -408,30 +477,6 @@ def test_unchanged_checkpoint_does_not_trigger_a_rewrite(
     store.flush()
 
 
-def test_ingestion_state_is_written_without_indentation(tmp_path: Path) -> None:
-    """The state file dominates write volume; indentation is ~30% of its bytes."""
-    store = _store(tmp_path)
-    store.record(
-        str(tmp_path / "workspace"),
-        source="cli",
-        vendor="claude",
-        input_tokens=10,
-        dedup_key="event",
-        ingestion_file="/logs/session.jsonl",
-        ingestion_checkpoint={"kind": "jsonl", "offset": 40, "identity": "1:1"},
-    )
-    store.flush()
-
-    raw = (tmp_path / "token-ingestion-state.json").read_text()
-    assert "\n" not in raw
-    assert ", " not in raw
-    assert json.loads(raw)["files"]["/logs/session.jsonl"]["global"]["offset"] == 40
-
-    # Ledger files stay indented — they are small and get read by humans.
-    assert "\n" in (tmp_path / "tokens.json").read_text()
-    store.flush()
-
-
 def _state_with_files(tmp_path: Path, files: dict) -> Path:
     path = tmp_path / "token-ingestion-state.json"
     path.write_text(json.dumps({"version": 2, "files": files}), encoding="utf-8")
@@ -439,8 +484,8 @@ def _state_with_files(tmp_path: Path, files: dict) -> Path:
 
 
 def test_startup_prune_strips_cold_dedup_windows(tmp_path: Path) -> None:
-    """`files` has no other eviction path, so the windows accumulate (7.5 MB
-    on a real machine) and get rewritten whole on every flush."""
+    """Checkpoint dedup windows have no other eviction path, so they used to
+    accumulate (7.5 MB on a real machine)."""
     old = tmp_path / "cold.jsonl"
     old.write_text("{}\n", encoding="utf-8")
     cold_mtime = time.time() - (COLD_FILE_DAYS + 1) * 86400
@@ -468,8 +513,8 @@ def test_startup_prune_strips_cold_dedup_windows(tmp_path: Path) -> None:
             },
             "workspaces": {},
         },
-        # Unreadable path: left strictly alone, so a transient I/O fault
-        # cannot wipe the dedup state and trigger a full re-read.
+        # Unreadable path: its window is left strictly alone, so a transient
+        # I/O fault cannot wipe the dedup state and trigger a full re-read.
         "/gone/session.jsonl": {
             "global": {
                 "kind": "jsonl", "offset": 5, "identity": "3:3",
@@ -479,7 +524,7 @@ def test_startup_prune_strips_cold_dedup_windows(tmp_path: Path) -> None:
         },
     })
     store = _store(tmp_path)
-    files = store._ingestion_state["files"]
+    files = store._files
 
     assert files["/gone/session.jsonl"]["global"]["recent_keys"] == ["z"]
     # Cold: window stripped in every scope, but position preserved.
@@ -491,10 +536,14 @@ def test_startup_prune_strips_cold_dedup_windows(tmp_path: Path) -> None:
     # Hot files are untouched — their window is still doing work.
     assert files[str(fresh)]["global"]["recent_keys"] == ["c"]
 
-    # The prune is itself a mutation, so it must reach disk.
+    # The prune is itself a mutation, so it must reach the database.
     store.flush()
-    persisted = json.loads((tmp_path / "token-ingestion-state.json").read_text())
-    assert "recent_keys" not in persisted["files"][str(old)]["global"]
+    persisted = dict(
+        ((path, scope), data) for path, scope, data in _checkpoint_rows(tmp_path)
+    )
+    assert "recent_keys" not in persisted[(str(old), "")]
+    assert "recent_keys" not in persisted[(str(old), "/ws")]
+    assert persisted[(str(fresh), "")]["recent_keys"] == ["c"]
 
 
 def test_startup_prune_keeps_windows_readers_carry_across_rotation(
@@ -518,9 +567,7 @@ def test_startup_prune_keeps_windows_readers_carry_across_rotation(
         },
     })
     store = _store(tmp_path)
-    assert store._ingestion_state["files"][str(cold_pi)]["global"][
-        "recent_keys"
-    ] == ["p1", "p2"]
+    assert store._files[str(cold_pi)]["global"]["recent_keys"] == ["p1", "p2"]
     store.flush()
 
 
@@ -552,24 +599,24 @@ def test_periodic_prune_strips_windows_that_went_cold_after_startup(
     })
     store = _store(tmp_path)
     # Hot at startup, so the load-time prune leaves it alone.
-    assert store._ingestion_state["files"][str(log)]["global"]["recent_keys"] == [
-        "a", "b",
-    ]
+    assert store._files[str(log)]["global"]["recent_keys"] == ["a", "b"]
 
     _go_cold(log)
-    store._dirty_ingestion_state = False
+    store._dirty_checkpoints.clear()
     store._prune_cold_windows()
 
-    entry = store._ingestion_state["files"][str(log)]
+    entry = store._files[str(log)]
     assert "recent_keys" not in entry["global"]
     assert "recent_keys" not in entry["workspaces"]["/ws"]
     assert entry["global"]["offset"] == 10
     assert entry["global"]["identity"] == "1:1"
-    # The prune is a mutation, so it has to reach disk on the next flush.
-    assert store._dirty_ingestion_state is True
+    # The prune is a mutation, so it has to reach the database on flush.
+    assert {(str(log), ""), (str(log), "/ws")} <= store._dirty_checkpoints
     store.flush()
-    persisted = json.loads((tmp_path / "token-ingestion-state.json").read_text())
-    assert "recent_keys" not in persisted["files"][str(log)]["global"]
+    persisted = dict(
+        ((path, scope), data) for path, scope, data in _checkpoint_rows(tmp_path)
+    )
+    assert "recent_keys" not in persisted[(str(log), "")]
 
 
 def test_periodic_prune_keeps_windows_readers_carry_across_rotation(
@@ -589,13 +636,11 @@ def test_periodic_prune_keeps_windows_readers_carry_across_rotation(
     })
     store = _store(tmp_path)
     _go_cold(pi_log)
-    store._dirty_ingestion_state = False
+    store._dirty_checkpoints.clear()
     store._prune_cold_windows()
 
-    assert store._ingestion_state["files"][str(pi_log)]["global"][
-        "recent_keys"
-    ] == ["p1", "p2"]
-    assert store._dirty_ingestion_state is False
+    assert store._files[str(pi_log)]["global"]["recent_keys"] == ["p1", "p2"]
+    assert store._dirty_checkpoints == set()
     store.flush()
 
 
@@ -613,9 +658,36 @@ def test_periodic_prune_leaves_hot_files_alone(tmp_path: Path) -> None:
         },
     })
     store = _store(tmp_path)
-    store._dirty_ingestion_state = False
+    store._dirty_checkpoints.clear()
     store._prune_cold_windows()
 
-    assert store._ingestion_state["files"][str(hot)]["global"]["recent_keys"] == ["c"]
-    assert store._dirty_ingestion_state is False
+    assert store._files[str(hot)]["global"]["recent_keys"] == ["c"]
+    assert store._dirty_checkpoints == set()
     store.flush()
+
+
+def test_prune_deletes_rows_dead_for_thirty_days(tmp_path: Path) -> None:
+    """A checkpoint whose log has been unreadable for DEAD_ENTRY_DAYS is
+    reclaimed — this is the eviction path the JSON state never had."""
+    store = _store(tmp_path)
+    gone = "/gone/session.jsonl"
+    store.advance_ingestion_checkpoint(
+        gone, {"kind": "jsonl", "offset": 5, "identity": "3:3"}
+    )
+    store.advance_ingestion_checkpoint(
+        gone, {"kind": "jsonl", "offset": 6, "identity": "3:3"}, "/ws"
+    )
+    store._flush_dirty()
+    assert len(_checkpoint_rows(tmp_path)) == 2
+
+    # Stat has been failing, but not for long enough → conservative, kept.
+    store._prune_cold_windows()
+    assert gone in store._files
+
+    # Now the row has been dead past the cutoff → reclaimed everywhere.
+    store._last_seen[gone] = int(time.time()) - (DEAD_ENTRY_DAYS + 1) * 86400
+    store._prune_cold_windows()
+    assert gone not in store._files
+    store.flush()
+    assert _checkpoint_rows(tmp_path) == []
+    assert store.get_ingestion_checkpoint(gone) == {}

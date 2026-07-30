@@ -8,19 +8,21 @@ under the macOS app-data dir. Capped at ``max_size`` entries — the oldest
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .applog import app_data_dir
+from .db import DB_FILENAME, Database
 
 log = logging.getLogger("agent_team_backend.recent_workspaces")
 
 RECENT_FILE = "recent-workspaces.json"
+_KV_KEY = "recent_workspaces"
 DEFAULT_MAX_SIZE = 20
 
 
@@ -33,40 +35,37 @@ def _empty_doc() -> dict[str, Any]:
 
 
 class RecentWorkspacesStore:
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(self, path: Path | None = None, db: Database | None = None) -> None:
         self._path = path or (app_data_dir() / RECENT_FILE)
+        self._db = db or Database(self._path.parent / DB_FILENAME)
         self._lock = threading.Lock()
 
     @property
     def path(self) -> Path:
-        return self._path
+        return self._db.path
 
-    def _ensure_dir(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+    def _import_legacy(self, cur: Any, data: Any) -> None:
+        if isinstance(data, dict) and isinstance(data.get("recent"), list):
+            self._db.kv_set(_KV_KEY, data, now=int(time.time()))
+        else:
+            log.warning("legacy recent-workspaces.json malformed; starting empty")
 
     def _read(self) -> dict[str, Any]:
-        if not self._path.exists():
+        data = self._db.kv_get(_KV_KEY)
+        if data is None:
+            self._db.import_json(_KV_KEY, self._path, self._import_legacy)
+            data = self._db.kv_get(_KV_KEY)
+        if data is None:
             return _empty_doc()
-        try:
-            data = json.loads(self._path.read_text(encoding="utf-8"))
-            if not isinstance(data, dict) or not isinstance(data.get("recent"), list):
-                raise ValueError("recent-workspaces.json must be an object with a 'recent' array")
-            data.setdefault("version", 1)
-            data.setdefault("max_size", DEFAULT_MAX_SIZE)
-            return data
-        except Exception as err:  # noqa: BLE001
-            log.warning("recent-workspaces.json corrupt (%s); resetting", err)
+        if not isinstance(data, dict) or not isinstance(data.get("recent"), list):
+            log.warning("stored recent-workspaces document malformed; resetting")
             return _empty_doc()
+        data.setdefault("version", 1)
+        data.setdefault("max_size", DEFAULT_MAX_SIZE)
+        return data
 
     def _write(self, doc: dict[str, Any]) -> None:
-        self._ensure_dir()
-        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
-        try:
-            tmp.write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
-            os.replace(tmp, self._path)
-        except Exception:
-            tmp.unlink(missing_ok=True)
-            raise
+        self._db.kv_set(_KV_KEY, doc, now=int(time.time()))
 
     @staticmethod
     def _normalize(path: str) -> str:

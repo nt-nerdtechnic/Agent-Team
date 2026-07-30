@@ -1,27 +1,29 @@
 """Persistent pipeline stage registry.
 
-Pipelines live in pipelines.json under the macOS app-data dir. Each pipeline
-has a name, a builtin flag, and an embedded list of stages.
+Pipelines live in the app-data navide.db (kv key "pipelines"; legacy
+pipelines.json is imported once and retired). Each pipeline has a name, a
+builtin flag, and an embedded list of stages.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 import re
 import threading
+import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .applog import app_data_dir
+from .db import DB_FILENAME, Database
 
 log = logging.getLogger("agent_team_backend.stages")
 
 PIPELINES_FILE = "pipelines.json"
 STAGES_FILE = "stages.json"  # legacy — only used for migration detection
+_KV_KEY = "pipelines"
 
 # Persisted-store schema version. Bumped when the on-disk shape changes in a way
 # that needs a forward migration (see store_migrations.py). Distinct from the
@@ -406,92 +408,85 @@ class StagesStore:
     # Pattern for safe stage IDs: alphanumeric, hyphens, underscores, dots.
     _ID_RE = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9._-]{0,62})?$")
 
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(self, path: Path | None = None, db: Database | None = None) -> None:
         self._path = path or (app_data_dir() / PIPELINES_FILE)
+        self._db = db or Database(self._path.parent / DB_FILENAME)
         self._lock = threading.Lock()
 
     @property
     def path(self) -> Path:
-        return self._path
-
-    def _ensure_dir(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        return self._db.path
 
     def _legacy_path(self) -> Path:
         return self._path.parent / STAGES_FILE
 
-    def _read_doc(self) -> dict[str, Any]:
-        """Read the full pipelines.json document, migrating legacy stages.json if needed."""
-        if not self._path.exists():
-            legacy = self._legacy_path()
-            if legacy.exists():
-                return self._migrate_from_legacy(legacy)
+    def _import_legacy_pipelines(self, cur: Any, data: Any) -> None:
+        if isinstance(data, list):
+            # File was somehow written as a flat list — wrap it.
             doc = self._seed_doc()
-            self._write_doc(doc)
-            return doc
-        try:
-            if self._path.stat().st_size > 2_097_152:  # 2 MB sanity cap
-                raise ValueError("pipelines.json exceeds size limit")
-            data = json.loads(self._path.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                # File was somehow written as a flat list — wrap it
-                doc = self._seed_doc()
-                if data:
-                    migrated = [_migrate(s) for s in data]
-                    for p in doc["pipelines"]:
-                        if p["id"] == "default":
-                            p["stages"] = migrated
-                            break
-                self._write_doc(doc)
-                return doc
-            if isinstance(data, dict) and data.get("version") == 2:
-                schema = data.get("schemaVersion", SCHEMA_VERSION)
-                try:
-                    schema = int(schema)
-                except (TypeError, ValueError):
-                    schema = SCHEMA_VERSION
-                if schema > SCHEMA_VERSION:
-                    # Written by a newer app version. Load as-is and do NOT
-                    # regenerate/overwrite — avoid truncating forward data.
-                    log.warning(
-                        "pipelines.json schemaVersion %s is newer than supported "
-                        "%s; loading as-is without rewriting",
-                        schema,
-                        SCHEMA_VERSION,
-                    )
-                return data
-            raise ValueError("unknown format")
-        except Exception as err:  # noqa: BLE001
-            log.warning("pipelines.json corrupt (%s); regenerating defaults", err)
-            doc = self._seed_doc()
-            self._write_doc(doc)
-            return doc
-
-    def _migrate_from_legacy(self, legacy: Path) -> dict[str, Any]:
-        """Migrate old flat stages.json → new pipelines.json, write .bak."""
-        try:
-            raw = legacy.read_text(encoding="utf-8")
-            old_data = json.loads(raw)
-            bak = legacy.with_suffix(".json.bak")
-            bak.write_text(raw, encoding="utf-8")
-            doc = self._seed_doc()
-            if isinstance(old_data, list) and old_data:
-                migrated = [_migrate(s) for s in old_data]
+            if data:
+                migrated = [_migrate(s) for s in data]
                 for p in doc["pipelines"]:
                     if p["id"] == "default":
                         p["stages"] = migrated
                         break
-                log.info(
-                    "Migrated %d stages from legacy stages.json into default pipeline",
-                    len(old_data),
-                )
             self._write_doc(doc)
-            return doc
-        except Exception as err:  # noqa: BLE001
-            log.warning("Legacy migration failed (%s); using defaults", err)
+        elif isinstance(data, dict):
+            # Format/version validation happens on read.
+            self._write_doc(data)
+
+    def _import_legacy_stages(self, cur: Any, data: Any) -> None:
+        """One-time merge of the ancient flat stages.json into a seed doc."""
+        doc = self._seed_doc()
+        if isinstance(data, list) and data:
+            migrated = [_migrate(s) for s in data]
+            for p in doc["pipelines"]:
+                if p["id"] == "default":
+                    p["stages"] = migrated
+                    break
+            log.info(
+                "Migrated %d stages from legacy stages.json into default pipeline",
+                len(data),
+            )
+        self._write_doc(doc)
+
+    def _read_doc(self) -> dict[str, Any]:
+        """Read the pipelines document, importing legacy JSON files if needed."""
+        data = self._db.kv_get(_KV_KEY)
+        if data is None:
+            self._db.import_json(_KV_KEY, self._path, self._import_legacy_pipelines)
+            data = self._db.kv_get(_KV_KEY)
+        if data is None and self._legacy_path().exists():
+            self._db.import_json(
+                _KV_KEY + "-legacy-stages",
+                self._legacy_path(),
+                self._import_legacy_stages,
+            )
+            data = self._db.kv_get(_KV_KEY)
+        if data is None:
             doc = self._seed_doc()
             self._write_doc(doc)
             return doc
+        if isinstance(data, dict) and data.get("version") == 2:
+            schema = data.get("schemaVersion", SCHEMA_VERSION)
+            try:
+                schema = int(schema)
+            except (TypeError, ValueError):
+                schema = SCHEMA_VERSION
+            if schema > SCHEMA_VERSION:
+                # Written by a newer app version. Load as-is and do NOT
+                # regenerate/overwrite — avoid truncating forward data.
+                log.warning(
+                    "pipelines document schemaVersion %s is newer than supported "
+                    "%s; loading as-is without rewriting",
+                    schema,
+                    SCHEMA_VERSION,
+                )
+            return data
+        log.warning("pipelines document has unknown format; regenerating defaults")
+        doc = self._seed_doc()
+        self._write_doc(doc)
+        return doc
 
     def _seed_doc(self) -> dict[str, Any]:
         return {
@@ -515,14 +510,7 @@ class StagesStore:
         }
 
     def _write_doc(self, doc: dict[str, Any]) -> None:
-        self._ensure_dir()
-        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
-        try:
-            tmp.write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
-            os.replace(tmp, self._path)
-        except Exception:
-            tmp.unlink(missing_ok=True)
-            raise
+        self._db.kv_set(_KV_KEY, doc, now=int(time.time()))
 
     def _get_pipeline(
         self, doc: dict[str, Any], pipeline_id: str | None = None
