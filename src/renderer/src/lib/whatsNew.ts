@@ -34,6 +34,39 @@ export const WHATS_NEW_CHROME = {
 
 export const WHATS_NEW: WhatsNewEntry[] = [
   {
+    version: '0.1.68',
+    title: {
+      'zh-TW': '儲存架構升級：更快、更可靠',
+      'en-US': 'Storage upgrade: faster and more reliable',
+    },
+    highlights: [
+      {
+        'zh-TW':
+          '你的設定、token 用量與工作區資料已自動搬入資料庫（SQLite）。搬移在首次啟動時自動完成，所有資料原樣保留，無需任何操作。',
+        'en-US':
+          'Your settings, token usage and workspace data now live in a database (SQLite). The move happens automatically on first launch — everything is preserved, nothing to do.',
+      },
+      {
+        'zh-TW':
+          '大幅降低磁碟寫入：token 記帳從每 10 秒重寫一份大檔，改為只寫入變動的部分（約 30 倍減少）。',
+        'en-US':
+          'Far less disk churn: token accounting now writes only what changed instead of rewriting a large file every 10 seconds (~30x less I/O).',
+      },
+      {
+        'zh-TW':
+          '舊的 JSON 檔案會保留為 *.migrated-v1 備份，不會被刪除。',
+        'en-US':
+          'Your old JSON files are kept as *.migrated-v1 backups — nothing is deleted.',
+      },
+    ],
+    note: {
+      'zh-TW':
+        '注意：若你之後改回安裝舊版本，App 會像全新安裝一樣看不到既有資料（資料並未消失——把 *.migrated-v1 檔案改回原名即可還原）。',
+      'en-US':
+        'Note: if you later downgrade to an older version, the app will look freshly installed (your data is not lost — rename the *.migrated-v1 files back to restore it).',
+    },
+  },
+  {
     version: '0.1.65',
     title: {
       'zh-TW': '我們更名為「Navide」',
