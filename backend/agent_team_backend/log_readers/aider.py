@@ -49,7 +49,13 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .base import ActivityEvent, IncrementalParseResult, LogReader, TokenUsage
+from .base import (
+    ActivityEvent,
+    IncrementalParseResult,
+    LogReader,
+    TokenUsage,
+    user_prompt_text,
+)
 
 log = logging.getLogger("agent_team_backend.log_readers.aider")
 
@@ -461,7 +467,12 @@ class AiderLogReader(LogReader):
                     if is_new:
                         pending = ""
                         if not prev_prompt:
-                            out.append(_event("agent_active", key, "prompt"))
+                            # First line of the (possibly multi-line) prompt;
+                            # the frontend names the pane from it.
+                            out.append(_event(
+                                "agent_active", key, "prompt",
+                                text=user_prompt_text(line[5:]),
+                            ))
                     prev_prompt = True
                     continue
                 prev_prompt = False

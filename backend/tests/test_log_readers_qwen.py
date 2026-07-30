@@ -250,6 +250,30 @@ def test_parse_activity_filters_automated_user_subtypes(
     ]
 
 
+def test_parse_activity_user_prompt_carries_text(fake_qwen_root: Path) -> None:
+    """User events carry the joined message.parts text (truncated to 500
+    chars) for pane naming; the injected "<...>"-prefixed session-marker
+    bootstrap, non-text parts and assistant records stay text-less."""
+    reader = QwenLogReader()
+    f = _chat_file(fake_qwen_root)
+    _write_jsonl(f, [
+        _user("u0", "<!-- agent-team-session: at-pane:p1 -->"),
+        _user("u1", "fix the login bug"),
+        _user("u2", "p" * 600),
+        _rec("user", "u3",
+             message={"role": "user", "parts": [{"functionResponse": {}}]}),
+        _assistant("a1"),
+    ])
+    events = reader.parse_activity(f, set())
+    assert [(e.detail, e.text) for e in events] == [
+        ("user", ""),
+        ("user", "fix the login bug"),
+        ("user", "p" * 500),
+        ("user", ""),
+        ("assistant", ""),
+    ]
+
+
 def test_parse_activity_reparse_does_not_reemit(fake_qwen_root: Path) -> None:
     reader = QwenLogReader()
     seen: set[str] = set()

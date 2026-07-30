@@ -400,6 +400,30 @@ def test_parse_activity_user_and_assistant_only(fake_pi_root: Path) -> None:
     assert all(e.session_id == _SID and e.cwd == _CWD for e in events)
 
 
+def test_parse_activity_user_prompt_carries_text(fake_pi_root: Path) -> None:
+    """User message content (plain string or text blocks) rides on the event,
+    truncated to 500 chars, for pane naming; the injected "<...>"-prefixed
+    session-marker bootstrap and assistant events stay text-less."""
+    reader = PiLogReader()
+    f = _session_file(fake_pi_root)
+    _write_jsonl(f, [
+        _header(),
+        _user("aa000001",
+              content="<!-- agent-team-session: at-pane:p1 -->"),
+        _user("aa000002", content="fix the login bug", parent="aa000001"),
+        _user("aa000003", content=[{"type": "text", "text": "p" * 600}],
+              parent="aa000002"),
+        _assistant("aa000004", "aa000003"),
+    ])
+    events = reader.parse_activity(f, set())
+    assert [(e.detail, e.text) for e in events] == [
+        ("user", ""),
+        ("user", "fix the login bug"),
+        ("user", "p" * 500),
+        ("assistant", ""),
+    ]
+
+
 def test_parse_activity_reparse_does_not_reemit(fake_pi_root: Path) -> None:
     reader = PiLogReader()
     seen: set[str] = set()

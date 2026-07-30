@@ -281,6 +281,24 @@ def test_activity_prompt_output_and_turn_complete(tmp_path: Path) -> None:
     assert reader.parse_activity(p, seen) == []
 
 
+def test_activity_prompt_carries_first_prompt_line_text(tmp_path: Path) -> None:
+    """The coalesced prompt event carries the first `#### ` line's text
+    (truncated to 500 chars) for pane naming; the injected "<...>"-prefixed
+    session-marker bootstrap and output events stay text-less."""
+    reader = AiderLogReader()
+    p = _history(
+        tmp_path / "ws",
+        "# aider chat started at 2026-07-28 21:30:45\n\n"
+        "#### <!-- agent-team-session: at-pane:p1 -->\n\nsome output\n\n"
+        "#### fix the login bug\n#### second line\n\nmore output\n\n"
+        f"#### {'p' * 600}\n",
+    )
+    events = reader.parse_activity(p, set())
+    prompts = [e for e in events if e.detail == "prompt"]
+    assert [e.text for e in prompts] == ["", "fix the login bug", "p" * 500]
+    assert all(e.text == "" for e in events if e.detail == "output")
+
+
 def test_activity_turn_text_survives_split_poll_batches(tmp_path: Path) -> None:
     """Assistant text and its usage line landing in different poll batches
     still delivers the text on turn_complete (pending text is persisted in

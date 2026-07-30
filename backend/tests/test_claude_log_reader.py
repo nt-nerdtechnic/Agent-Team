@@ -220,10 +220,12 @@ def test_incremental_parse_reads_only_appended_complete_lines(
 
 
 # ── parse_activity: assistant turn text ──────────────────────────────────────
-# The pipeline judges sentinel/QUESTION on this text. Role separation is the
-# core property: kickoff (user record) must never surface as event text, even
-# when it quotes the sentinel — that echo is what falsely completed stages
-# when detection read the rendered terminal output instead.
+# The pipeline judges sentinel/QUESTION on turn_complete text only. Role
+# separation is the core property: kickoff (user record) must never surface
+# as turn_complete text, even when it quotes the sentinel — that echo is what
+# falsely completed stages when detection read the rendered terminal output
+# instead. User prompts ride on their own agent_active "user" events (the
+# frontend names the pane from the first one) and never mix into turn text.
 
 def test_parse_activity_turn_complete_carries_assistant_text(
     fake_claude: tuple[ClaudeLogReader, Path],
@@ -253,7 +255,12 @@ def test_parse_activity_turn_complete_carries_assistant_text(
     assert turns[0].text == "規格完成。\n---SPEC-DONE---"
 
     user_events = [e for e in events if e.detail == "user"]
-    assert user_events and all(e.text == "" for e in user_events)
+    # The kickoff rides on its own agent_active event (pane naming) and never
+    # leaks into the turn_complete text judged above.
+    assert user_events and all(e.event_type == "agent_active" for e in user_events)
+    assert user_events[0].text == (
+        "完成後，最後一行只輸出 ---SPEC-DONE---\n---SPEC-DONE---"
+    )
 
 
 def test_parse_activity_text_joins_only_text_blocks(
@@ -281,12 +288,17 @@ def test_parse_activity_text_joins_only_text_blocks(
     assert turns[0].text == "第一段\n---PLAN-DONE---"
 
 
-def test_parse_activity_text_only_on_turn_complete_not_agent_active(
+def test_parse_activity_text_rides_user_events_and_turn_complete(
     fake_claude: tuple[ClaudeLogReader, Path],
 ) -> None:
     reader, root = fake_claude
     session = root / "-tmp-demo" / "ghi-789.jsonl"
     _write_jsonl(session, [
+        {
+            "type": "user",
+            "timestamp": "2026-07-22T13:23:00Z",
+            "message": {"content": "Fix the login bug"},
+        },
         {
             "type": "assistant",
             "timestamp": "2026-07-22T13:24:00Z",
@@ -298,10 +310,49 @@ def test_parse_activity_text_only_on_turn_complete_not_agent_active(
     ])
     seen: set[str] = set()
     events = reader.parse_activity(session, seen)
-    # agent_active never carries text (only turn_complete does).
-    assert all(e.text == "" for e in events if e.event_type == "agent_active")
+    # User agent_active events carry the typed prompt (pane naming);
+    # assistant/tool agent_active events stay text-less; turn_complete
+    # carries the assistant turn text (sentinel/question judgment).
+    user_events = [
+        e for e in events
+        if e.event_type == "agent_active" and e.detail == "user"
+    ]
+    assert [e.text for e in user_events] == ["Fix the login bug"]
+    assert all(
+        e.text == "" for e in events
+        if e.event_type == "agent_active" and e.detail != "user"
+    )
     turns = [e for e in events if e.event_type == "turn_complete"]
     assert turns[0].text == "完成\n---SPEC-DONE---"
+
+
+def test_parse_activity_user_text_only_for_real_prompts(
+    fake_claude: tuple[ClaudeLogReader, Path],
+) -> None:
+    """A real human prompt (plain-string content, non-empty, not a "<...>"
+    wrapper — same test as first_user_prompts) rides on its agent_active
+    event, truncated to 500 chars; tool_result lists, command wrappers and
+    tool_use records stay text-less."""
+    reader, root = fake_claude
+    session = root / "-tmp-demo" / "jkl-012.jsonl"
+    _write_jsonl(session, [
+        {"type": "user", "timestamp": "t1",
+         "message": {"content": "Fix the login bug"}},
+        {"type": "user", "timestamp": "t2",
+         "message": {"content": [{"type": "tool_result", "content": "ok"}]}},
+        {"type": "user", "timestamp": "t3",
+         "message": {"content": "<command-name>/loop</command-name>"}},
+        {"type": "tool_use", "timestamp": "t4"},
+        {"type": "user", "timestamp": "t5", "message": {"content": "p" * 600}},
+    ])
+    events = reader.parse_activity(session, set())
+    assert [(e.detail, e.text) for e in events] == [
+        ("user", "Fix the login bug"),
+        ("user", ""),
+        ("user", ""),
+        ("tool_use", ""),
+        ("user", "p" * 500),
+    ]
 
 
 def test_join_text_blocks_shared_helper() -> None:

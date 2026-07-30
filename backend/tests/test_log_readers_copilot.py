@@ -391,6 +391,26 @@ def test_parse_activity_messages_tools_and_turn_end(
     assert all(e.session_id == _SID and e.cwd == _CWD for e in events)
 
 
+def test_parse_activity_user_message_carries_prompt_text(
+    fake_copilot_root: Path,
+) -> None:
+    """user.message events carry data.content (truncated to 500 chars) so
+    the frontend can name the pane from the first user text; the injected
+    "<...>"-prefixed session-marker bootstrap stays text-less."""
+    reader = CopilotLogReader()
+    f = _write_session(fake_copilot_root, events=[
+        _user("<!-- agent-team-session: at-pane:p1 -->", eid="ev-user-0"),
+        _user("fix the login bug"),
+        _user("p" * 600, eid="ev-user-2"),
+    ])
+    events = reader.parse_activity(f, set())
+    assert [(e.detail, e.text) for e in events] == [
+        ("user", ""),
+        ("user", "fix the login bug"),
+        ("user", "p" * 500),
+    ]
+
+
 def test_parse_activity_reparse_does_not_reemit(fake_copilot_root: Path) -> None:
     reader = CopilotLogReader()
     seen: set[str] = set()

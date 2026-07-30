@@ -23,6 +23,7 @@ from .base import (
     TokenUsage,
     join_text_blocks,
     read_jsonl_tail,
+    user_prompt_text,
 )
 
 log = logging.getLogger("agent_team_backend.log_readers.codex")
@@ -394,12 +395,19 @@ class CodexLogReader(LogReader):
                             last_text = msg_text
                             text_changed = True
                     seen_keys.add(key)
-                    # Text rides only on turn_complete (the sole event the
-                    # frontend judges); agent_active carries none.
+                    # Turn text rides only on turn_complete (the event the
+                    # frontend judges). The one exception: a user_message's
+                    # typed prompt rides on its own agent_active event so the
+                    # frontend can name the pane from the first user text.
+                    # "<...>"-wrapped records are injected instruction/context
+                    # stubs, not typed prompts.
+                    text = ""
+                    if ptype == "user_message":
+                        text = user_prompt_text(str(payload.get("message") or ""))
                     out.append(ActivityEvent(
                         vendor="codex", event_type="agent_active",
                         cwd=cwd, session_id=session_id, file_path=str(path),
-                        dedup_key=key, timestamp=ts, detail=ptype,
+                        dedup_key=key, timestamp=ts, detail=ptype, text=text,
                     ))
                     # token_count typically fires once per turn end in Codex.
                     if ptype == "token_count":

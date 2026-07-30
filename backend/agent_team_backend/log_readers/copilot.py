@@ -42,6 +42,7 @@ from .base import (
     LogReader,
     TokenUsage,
     read_jsonl_tail,
+    user_prompt_text,
 )
 
 log = logging.getLogger("agent_team_backend.log_readers.copilot")
@@ -383,10 +384,13 @@ class CopilotLogReader(LogReader):
                 data = data if isinstance(data, dict) else {}
                 ts = str(rec.get("timestamp") or "")
                 if rtype == "user.message":
+                    # data.content holds the prompt verbatim; the frontend
+                    # names the pane from the first user text.
                     out.append(ActivityEvent(
                         vendor="copilot", event_type="agent_active",
                         cwd=cwd, session_id=session_id, file_path=str(path),
                         dedup_key=key, timestamp=ts, detail="user",
+                        text=user_prompt_text(str(data.get("content") or "")),
                     ))
                 elif rtype == "assistant.message":
                     text = str(data.get("content") or "")

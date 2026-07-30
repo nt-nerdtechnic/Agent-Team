@@ -297,6 +297,24 @@ def test_parse_activity_open_turn_not_flushed_while_recent(
     assert [e for e in events if e.event_type == "turn_complete"] == []
 
 
+def test_parse_activity_prompt_carries_user_text(fake_kimi_home: Path) -> None:
+    """turn.prompt events carry the prompt's joined text blocks (truncated to
+    500 chars) for pane naming; the injected "<...>"-prefixed session-marker
+    bootstrap and usage.record events stay text-less."""
+    reader = KimiLogReader()
+    wire = _session(fake_kimi_home, "/x")
+    _write_jsonl(wire, [
+        _prompt("<!-- agent-team-session: at-pane:p1 -->", time=1),
+        _prompt("fix the login bug", time=2),
+        _usage(10, 0, 5, time=3),
+        _prompt("p" * 600, time=4),
+    ])
+    events = reader.parse_activity(wire, set())
+    prompts = [e for e in events if e.detail == "prompt"]
+    assert [e.text for e in prompts] == ["", "fix the login bug", "p" * 500]
+    assert all(e.text == "" for e in events if e.detail == "usage")
+
+
 def test_parse_activity_reparse_does_not_reemit(fake_kimi_home: Path) -> None:
     """Re-scanning the same file with the same seen set emits nothing new
     (turns already flushed stay flushed; seen lines are skipped)."""

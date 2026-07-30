@@ -264,22 +264,40 @@ def test_parse_activity_token_count_carries_last_assistant_text(
     assert turns[0].text == "測試完成\n---TEST-DONE---"
 
 
-def test_parse_activity_text_only_on_turn_complete_not_agent_active(
+def test_parse_activity_text_rides_user_events_and_turn_complete(
     fake_codex_session: Path,
 ) -> None:
-    # Text rides only on turn_complete; agent_active never carries it (so a
-    # tool-heavy turn doesn't broadcast text on every line).
+    # User agent_active events carry the typed prompt (pane naming);
+    # assistant/other agent_active events stay text-less (so a tool-heavy
+    # turn doesn't broadcast text on every line); turn_complete carries the
+    # turn's assistant text.
     _write_jsonl(fake_codex_session, [
+        {
+            "timestamp": "2026-07-22T13:25:00Z",
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "Fix the login bug"},
+        },
         {
             "timestamp": "2026-07-22T13:26:00Z",
             "type": "event_msg",
-            "payload": {"type": "agent_message", "message": "回覆內容"},
+            "payload": {"type": "agent_message", "message": "Reply body"},
         },
+        _token_count_event(100, 0, 50, 0),
     ])
     reader = CodexLogReader()
     seen: set[str] = set()
     events = reader.parse_activity(fake_codex_session, seen)
-    assert all(e.text == "" for e in events if e.event_type == "agent_active")
+    user_events = [
+        e for e in events
+        if e.event_type == "agent_active" and e.detail == "user_message"
+    ]
+    assert [e.text for e in user_events] == ["Fix the login bug"]
+    assert all(
+        e.text == "" for e in events
+        if e.event_type == "agent_active" and e.detail != "user_message"
+    )
+    turns = [e for e in events if e.event_type == "turn_complete"]
+    assert [e.text for e in turns] == ["Reply body"]
 
 
 def test_parse_activity_last_text_persists_across_poll_batches(
@@ -309,3 +327,31 @@ def test_parse_activity_last_text_persists_across_poll_batches(
     turns = [e for e in second if e.event_type == "turn_complete"]
     assert len(turns) == 1
     assert turns[0].text == "測試完成\n---TEST-DONE---"
+
+
+def test_parse_activity_user_message_carries_prompt_text(
+    fake_codex_session: Path,
+) -> None:
+    """A typed prompt (event_msg user_message) rides on its own agent_active
+    event, truncated to 500 chars, so the frontend can name the pane from the
+    first user text. "<...>"-wrapped injected stubs and other event_msg types
+    stay text-less."""
+    _write_jsonl(fake_codex_session, [
+        {"timestamp": "2026-07-22T13:25:00Z", "type": "event_msg",
+         "payload": {"type": "user_message", "message": "Fix the login bug"}},
+        {"timestamp": "2026-07-22T13:25:01Z", "type": "event_msg",
+         "payload": {"type": "user_message",
+                     "message": "<user_instructions>injected</user_instructions>"}},
+        {"timestamp": "2026-07-22T13:25:02Z", "type": "event_msg",
+         "payload": {"type": "user_message", "message": "p" * 600}},
+        {"timestamp": "2026-07-22T13:25:03Z", "type": "event_msg",
+         "payload": {"type": "agent_message", "message": "Reply body"}},
+    ])
+    reader = CodexLogReader()
+    events = reader.parse_activity(fake_codex_session, set())
+    assert [(e.detail, e.text) for e in events] == [
+        ("user_message", "Fix the login bug"),
+        ("user_message", ""),
+        ("user_message", "p" * 500),
+        ("agent_message", ""),
+    ]

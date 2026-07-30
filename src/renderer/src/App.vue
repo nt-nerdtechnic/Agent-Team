@@ -22,7 +22,7 @@ import NotificationHost from './components/NotificationHost.vue'
 import Welcome from './components/Welcome.vue'
 import { useNotify } from './composables/useNotify'
 import { useAgentMessaging, isBroadcastTarget } from './composables/useAgentMessaging'
-import { parseMessages, parseSpawns, renderSpawnKickoff } from './lib/agentMessaging'
+import { MSG_ENVELOPE_PREFIX, parseMessages, parseSpawns, renderSpawnKickoff } from './lib/agentMessaging'
 import { evaluateTurnSpawns, computeSpawnDepth } from './lib/agentSpawnGate'
 import StageTabBar, { type TabItem } from './components/StageTabBar.vue'
 import { useBackend } from './composables/useBackend'
@@ -6526,9 +6526,10 @@ backend.on('agent.activity', (raw) => {
     }
     // Inter-CLI messaging: scan this turn's text for MSG blocks, then pump.
     onTurnCompleteForMessaging(ev.pane_id, ev.text ?? '', ev.timestamp ?? '')
-    // Auto-name a still-unnamed pane from its first completed turn's text.
-    // Set-once via setPaneAutoName; deliberately independent of judgeTurnText
-    // and the sentinel paths — it only reads ev.text.
+    // Auto-name fallback: for vendors whose readers can't surface the user's
+    // prompt text, name a still-unnamed pane from its first completed turn's
+    // text. Set-once via setPaneAutoName; deliberately independent of
+    // judgeTurnText and the sentinel paths — it only reads ev.text.
     if (ev.text) {
       const pane = panes.value.find((p) => p.id === ev.pane_id)
       if (pane && !pane.customName && !pane.autoName) {
@@ -6537,6 +6538,19 @@ backend.on('agent.activity', (raw) => {
     }
   } else if (ev.event_type === 'agent_active') {
     paneLastActiveAt.set(ev.pane_id, Date.now())
+    // Auto-name from the user's own prompt (readers attach it as text on
+    // user-record events; detail is 'user' for most vendors, 'prompt' for
+    // kimi/aider, 'user_message' for codex). Arrives before the assistant's
+    // turn_complete, so the user's command wins over the reply-text fallback.
+    // Injected inter-CLI envelopes land in the CLI log as user records too —
+    // never title a pane with one. Set-once lives inside setPaneAutoName.
+    if (
+      (ev.detail === 'user' || ev.detail === 'prompt' || ev.detail === 'user_message') &&
+      ev.text &&
+      !ev.text.startsWith(MSG_ENVELOPE_PREFIX)
+    ) {
+      setPaneAutoName(ev.pane_id, deriveAutoName(ev.text))
+    }
     // A new turn re-arms 'done' notifications for this pane.
     sysNotify.markActive(ev.pane_id)
     // Claude's Notification hook (user attention requested, e.g. permission

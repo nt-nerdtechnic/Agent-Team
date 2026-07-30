@@ -19,7 +19,15 @@ import os
 import time
 from pathlib import Path
 
-from .base import ActivityEvent, IncrementalParseResult, LogReader, TokenUsage, read_jsonl_tail
+from .base import (
+    ActivityEvent,
+    IncrementalParseResult,
+    LogReader,
+    TokenUsage,
+    join_text_blocks,
+    read_jsonl_tail,
+    user_prompt_text,
+)
 
 log = logging.getLogger("agent_team_backend.log_readers.kimi")
 
@@ -314,10 +322,13 @@ class KimiLogReader(LogReader):
                         ))
                     idx = (int(state["idx"]) + 1) if state is not None else 0
                     state = {"idx": idx, "last_ms": tms, "flushed": False}
+                    # The prompt's text blocks carry the user's words; the
+                    # frontend names the pane from the first user text.
                     out.append(ActivityEvent(
                         vendor="kimi", event_type="agent_active",
                         cwd=cwd, session_id=session_id, file_path=str(path),
                         dedup_key=key, timestamp=ts, detail="prompt",
+                        text=user_prompt_text(join_text_blocks(rec.get("input"), "text")),
                     ))
                 elif rtype == "usage.record":
                     seen_keys.add(key)

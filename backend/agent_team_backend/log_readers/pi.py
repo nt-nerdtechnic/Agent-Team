@@ -46,7 +46,9 @@ from .base import (
     IncrementalParseResult,
     LogReader,
     TokenUsage,
+    join_text_blocks,
     read_jsonl_tail,
+    user_prompt_text,
 )
 
 log = logging.getLogger("agent_team_backend.log_readers.pi")
@@ -404,12 +406,19 @@ class PiLogReader(LogReader):
                 msg = rec.get("message")
                 role = str(msg.get("role") or "") if isinstance(msg, dict) else ""
                 if role in ("user", "assistant"):
+                    # User message content is either a plain string or text
+                    # blocks; carry it so the frontend can name the pane.
+                    text = ""
+                    if role == "user":
+                        text = user_prompt_text(
+                            join_text_blocks(msg.get("content"), "text")
+                        )
                     out.append(ActivityEvent(
                         vendor="pi",
                         event_type="agent_active",
                         cwd=cwd, session_id=session_id, file_path=str(path),
                         dedup_key=key,
                         timestamp=str(rec.get("timestamp") or ""),
-                        detail=role,
+                        detail=role, text=text,
                     ))
         return out

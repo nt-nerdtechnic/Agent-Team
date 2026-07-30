@@ -28,6 +28,7 @@ from .base import (
     TokenUsage,
     join_text_blocks,
     read_jsonl_tail,
+    user_prompt_text,
 )
 
 log = logging.getLogger("agent_team_backend.log_readers.claude")
@@ -362,12 +363,22 @@ class ClaudeLogReader(LogReader):
                         ))
                 elif rtype in ("tool_use", "user"):
                     seen_keys.add(key)
+                    # Real human prompts (same test as first_user_prompts:
+                    # plain-string content, non-empty, not a "<...>" wrapper)
+                    # carry their text so the frontend can name the pane.
+                    # tool_result lists / command wrappers stay text-less.
+                    text = ""
+                    if rtype == "user":
+                        msg = rec.get("message")
+                        content = msg.get("content") if isinstance(msg, dict) else None
+                        if isinstance(content, str):
+                            text = user_prompt_text(content)
                     out.append(ActivityEvent(
                         vendor="claude",
                         event_type="agent_active",
                         cwd=cwd, session_id=session_id, file_path=str(path),
                         dedup_key=key, timestamp=ts,
-                        detail=str(rtype),
+                        detail=str(rtype), text=text,
                     ))
                 else:
                     # Mark seen so we don't re-evaluate this line later.

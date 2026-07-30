@@ -29,6 +29,7 @@ from .base import (
     LogReader,
     TokenUsage,
     read_jsonl_tail,
+    user_prompt_text,
 )
 from .claude import encode_claude_cwd
 
@@ -309,11 +310,23 @@ class QwenLogReader(LogReader):
                     rtype == "user"
                     and str(rec.get("subtype") or "") not in _EXCLUDED_USER_SUBTYPES
                 ):
+                    # User prompts live in message.parts[].text; join them so
+                    # the frontend can name the pane from the first user text.
+                    text = ""
+                    if rtype == "user":
+                        msg = rec.get("message")
+                        parts = msg.get("parts") if isinstance(msg, dict) else None
+                        if isinstance(parts, list):
+                            joined = "\n".join(
+                                p["text"] for p in parts
+                                if isinstance(p, dict) and isinstance(p.get("text"), str)
+                            )
+                            text = user_prompt_text(joined)
                     out.append(ActivityEvent(
                         vendor="qwen",
                         event_type="agent_active",
                         cwd=cwd, session_id=session_id, file_path=str(path),
                         dedup_key=key, timestamp=ts,
-                        detail=str(rtype),
+                        detail=str(rtype), text=text,
                     ))
         return out

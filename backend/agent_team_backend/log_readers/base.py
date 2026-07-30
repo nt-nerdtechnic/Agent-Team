@@ -39,6 +39,22 @@ class TokenUsage:
         return self.input_tokens + self.output_tokens
 
 
+#: Cap for the user-prompt text a reader attaches to a user-record
+#: "agent_active" event (the frontend names a pane from the first one).
+USER_PROMPT_MAX_CHARS = 500
+
+
+def user_prompt_text(raw: str) -> str:
+    """Normalize a user-record's text for pane auto-naming: strip, drop
+    '<'-prefixed injected wrappers (session markers, command stubs), cap
+    length. Shared by every reader so the filter is identical across CLIs.
+    """
+    text = raw.strip()
+    if not text or text.startswith("<"):
+        return ""
+    return text[:USER_PROMPT_MAX_CHARS]
+
+
 @dataclass
 class ActivityEvent:
     """Vendor-agnostic activity signal extracted from a CLI conversation log.
@@ -57,7 +73,10 @@ class ActivityEvent:
     file_path: str
     dedup_key: str             # stable key per event for in-memory dedup
     timestamp: str = ""        # ISO 8601 if available
-    detail: str = ""           # e.g. tool name, stop_reason, etc. (UI hint only)
+    detail: str = ""           # e.g. tool name, stop_reason, record type.
+                               # Part of the cross-end contract: the frontend
+                               # treats "user"/"prompt"/"user_message" details
+                               # as user-prompt events when auto-naming panes.
     text: str = ""             # assistant message text for this turn, when the
                                # vendor log carries it; "" when unavailable
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
