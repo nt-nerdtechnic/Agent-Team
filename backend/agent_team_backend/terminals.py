@@ -296,6 +296,10 @@ class TerminalService:
         # Per-session arrival times of recent PTY chunks (monotonic loop time),
         # used to pick the interactive fast path vs. batched flush delay.
         self._chunk_times: dict[str, deque[float]] = {}
+        # Temporary Phase B probe (plan residual-cli-latency-fix-plan_4b8e2f):
+        # per-session rolling counters for fast-path saturation reporting.
+        # Remove with _note_fastpath_stats once the measurement round is done.
+        self._fastpath_stats: dict[str, dict[str, float]] = {}
         # Background task keeping each live session's descendant snapshot
         # fresh, so the EOF path can reap orphans (see _reap_exit_orphans).
         # The wakeup event lets create() pull the next refresh forward.
@@ -943,6 +947,7 @@ class TerminalService:
             session.id, deque(maxlen=_FAST_PATH_MAX_CHUNKS)
         )
         times.append(self._loop.time())
+        self._note_fastpath_stats(session, len(chunk), times[-1])
         buf_size = sum(len(s) for s in buf)
         if buf_size >= _BUF_CAP:
             # Cancel the pending debounce timer and flush now to avoid OOM.
@@ -957,6 +962,37 @@ class TerminalService:
                 session,
             )
             self._out_handles[session.id] = handle
+
+    def _note_fastpath_stats(
+        self, session: TerminalSession, nbytes: int, now: float
+    ) -> None:
+        """Temporary Phase B probe (plan residual-cli-latency-fix-plan_4b8e2f):
+        once per ~5s per session, report how many PTY chunks arrived with the
+        fast-path window already saturated (i.e. would be flushed on the 50ms
+        batch delay), so laggy CLIs can be checked against the 64KB/5-chunk
+        envelope. Silent while nothing saturates. Remove after measurement."""
+        st = self._fastpath_stats.setdefault(
+            session.id, {"t0": now, "chunks": 0, "bytes": 0, "max": 0, "batched": 0}
+        )
+        st["chunks"] += 1
+        st["bytes"] += nbytes
+        st["max"] = max(st["max"], nbytes)
+        times = self._chunk_times.get(session.id)
+        if (
+            times is not None
+            and len(times) == _FAST_PATH_MAX_CHUNKS
+            and now - times[0] <= _FAST_PATH_WINDOW_S
+        ):
+            st["batched"] += 1
+        if now - st["t0"] >= 5.0:
+            if st["batched"]:
+                log.info(
+                    "fastpath-stats session=%s agent=%s chunks=%d bytes=%d "
+                    "maxchunk=%d batched=%d window=%.1fs",
+                    session.id, session.agent_key, st["chunks"], st["bytes"],
+                    st["max"], st["batched"], now - st["t0"],
+                )
+            self._fastpath_stats.pop(session.id, None)
 
     def _flush_delay(self, session_id: str) -> float:
         """Batch delay for the next flush: 0 (next loop tick) while the chunk
@@ -1062,6 +1098,7 @@ class TerminalService:
         self._unwatch_writable(session)
         self._in_buffers.pop(session.id, None)
         self._chunk_times.pop(session.id, None)
+        self._fastpath_stats.pop(session.id, None)
         try:
             os.close(session.master_fd)
         except OSError:

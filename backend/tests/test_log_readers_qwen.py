@@ -337,6 +337,26 @@ def test_single_candidate_fallback_binds_without_marker(
     assert attr.maybe_announce_session(_usage("sess-new", f)) is None
 
 
+def test_bound_session_skips_file_io_on_later_events(
+    qwen_attr: tuple[Attribution, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Session-sink hot path: once a session is bound, later watcher events for
+    it must bail before any file IO (the capped-512KB read used to run on
+    every session-file write, competing with PTY output pumping)."""
+    attr, root = qwen_attr
+    attr.register_pane("p1", vendor="qwen", cwd="/ws", workspace_path="/ws",
+                       session_marker="at-pane:p1")
+    f = _chat_file(root, cwd="/ws", session_id="sess-hot")
+    _write_jsonl(f, [_user("u1", "hi <!-- agent-team-session: at-pane:p1 -->")])
+    assert attr.maybe_announce_session(_usage("sess-hot", f)) is not None
+
+    def _no_read(*args: object, **kwargs: object) -> str:
+        raise AssertionError("bound session must not re-read the session file")
+
+    monkeypatch.setattr(Path, "read_text", _no_read)
+    assert attr.maybe_announce_session(_usage("sess-hot", f)) is None
+
+
 def test_fallback_ignores_baseline_sessions(
     qwen_attr: tuple[Attribution, Path],
 ) -> None:

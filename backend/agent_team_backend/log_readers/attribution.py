@@ -380,10 +380,15 @@ class Attribution:
         if usage.vendor not in ("codex", "antigravity", "kimi", "qwen", "pi", "copilot", "aider"):
             return None
 
-        try:
-            text = Path(usage.file_path).read_text(encoding="utf-8", errors="ignore")[:524_288]
-        except OSError:
-            text = ""
+        # Once a session is bound, every binding path below no-ops — but their
+        # short-circuits sit behind per-event file reads, so a bound session
+        # would still pay a capped-512KB read on every write. This runs in the
+        # session_sink hot path on the loop's thread pool; bail before any IO.
+        sid = usage.session_id
+        if sid:
+            with self._lock:
+                if sid in self._session_owner:
+                    return None
 
         if usage.vendor == "codex":
             pane_id = self._pane_id_from_codex_home_path(usage.file_path)
@@ -392,6 +397,10 @@ class Attribution:
                 # readable. The filename stem includes a timestamp prefix and
                 # is NOT accepted by `codex resume`, so wait for a later file
                 # modification instead of announcing a malformed fallback id.
+                try:
+                    text = Path(usage.file_path).read_text(encoding="utf-8", errors="ignore")[:524_288]
+                except OSError:
+                    text = ""
                 resume_id = _extract_resume_id("codex", text)
                 if not resume_id:
                     return None
