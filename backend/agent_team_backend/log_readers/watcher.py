@@ -177,17 +177,10 @@ class LogWatcher:
         # Watch every existing watch root from every reader. Skip duplicates.
         # Most readers watch the same dirs they scan; Codex also watches the
         # stable ~/.codex-panes parent because per-pane session dirs appear
-        # after the backend has already started.
-        for reader in self._readers:
-            for d in reader.watch_dirs():
-                if d in self._watched_dirs or not d.exists():
-                    continue
-                try:
-                    self._observer.schedule(handler, str(d), recursive=True)
-                    self._watched_dirs.add(d)
-                    log.info("watching %s for %s logs", d, reader.vendor)
-                except Exception as err:  # noqa: BLE001
-                    log.warning("schedule watch on %s failed: %s", d, err)
+        # after the backend has already started. Roots that don't exist yet
+        # (fresh install: CLI homes are created on first spawn/login) are
+        # re-checked every rescan cycle by _watch_new_dirs.
+        self._watch_new_dirs()
 
         self._observer.start()
         self._drain_task = asyncio.create_task(self._drain_loop(), name="logwatcher.drain")
@@ -225,6 +218,30 @@ class LogWatcher:
         except Exception as err:  # noqa: BLE001
             log.warning("schedule watch on %s failed: %s", d, err)
             return False
+
+    def _watch_new_dirs(self) -> None:
+        """Subscribe reader watch roots that exist now but didn't earlier.
+
+        On a fresh install none of the CLI homes (~/.codex-panes,
+        ~/.codex/sessions, …) exist when start() runs — they are created by
+        the first pane spawn or in-pane login. watch_dirs() only returns
+        existing dirs, so without a periodic re-check watchdog never observes
+        those vendors and delivery degrades to the rescan loop alone (a
+        single point of failure). Called from start() and once per rescan
+        cycle; already-watched dirs are deduped so steady-state cost is a few
+        exists() checks."""
+        if self._observer is None or self._handler is None:
+            return
+        for reader in self._readers:
+            for d in reader.watch_dirs():
+                if d in self._watched_dirs or not d.exists():
+                    continue
+                try:
+                    self._observer.schedule(self._handler, str(d), recursive=True)
+                    self._watched_dirs.add(d)
+                    log.info("watching %s for %s logs", d, reader.vendor)
+                except Exception as err:  # noqa: BLE001
+                    log.warning("schedule watch on %s failed: %s", d, err)
 
     def stop(self) -> None:
         if not self._started:
@@ -451,8 +468,16 @@ class LogWatcher:
                 await asyncio.sleep(delay)
             except asyncio.CancelledError:
                 return
-            for path in self._files_to_scan():
-                self._queue.put_nowait((path, ""))
+            # The sweep body must never kill this task: it is the only
+            # delivery path for vendors watchdog isn't observing, and nothing
+            # restarts a dead rescan loop. One reader raising (corrupt store,
+            # unexpected file shape) skips this cycle, not all future ones.
+            try:
+                self._watch_new_dirs()
+                for path in self._files_to_scan():
+                    self._queue.put_nowait((path, ""))
+            except Exception as err:  # noqa: BLE001
+                log.warning("rescan sweep failed: %s", err)
             if first_scan:
                 # The drain processes all startup paths before this marker, so
                 # historic token usage catches up immediately and atomically
