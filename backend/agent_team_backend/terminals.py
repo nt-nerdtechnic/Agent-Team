@@ -694,6 +694,22 @@ class TerminalService:
             self._escalate_kill(session, pgid, descendants=descendants)
         )
 
+    async def _put_down_error_survivor(self, session: TerminalSession) -> None:
+        """Kill a child whose PTY master died on a read error while the child
+        itself is still alive. The session is already closed and popped from
+        _sessions at this point, so without this the child would escape both
+        terminal.kill and the shutdown sweep until the next backend start's
+        reap_stale — yet nobody can ever interact with it again (its tty is
+        gone). Mirrors kill(): snapshot descendants while the child is alive,
+        then TERM the group and escalate."""
+        descendants = await asyncio.to_thread(_descendant_pids, session.proc.pid)
+        try:
+            pgid = os.getpgid(session.proc.pid)
+            os.killpg(pgid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pgid = 0
+        await self._escalate_kill(session, pgid, descendants=descendants)
+
     async def _escalate_kill(
         self,
         session: TerminalSession,
@@ -850,11 +866,16 @@ class TerminalService:
             self._snapshot_task = None
         targets: list[tuple[TerminalSession, int]] = []
         breakaway: list[int] = []
+        # One shared ps snapshot for every session's descendant sweep. The
+        # previous per-session snapshot (a full `ps -Ao` each, 5s budget)
+        # pushed a many-pane shutdown past Electron's SIGKILL deadline, so
+        # the sweep never got to the actual kills. Off the loop via to_thread.
+        children = _children_map(await asyncio.to_thread(_ps_snapshot))
         for session in list(self._sessions.values()):
             if session.closed:
                 continue
             # Snapshot descendants while the child is still alive (see kill()).
-            breakaway.extend(_descendant_pids(session.proc.pid))
+            breakaway.extend(_walk_descendants(children, session.proc.pid))
             try:
                 targets.append((session, os.getpgid(session.proc.pid)))
             except ProcessLookupError:
@@ -1169,6 +1190,13 @@ class TerminalService:
                 self._reap_task = self._loop.create_task(
                     self._reap_pending_orphans()
                 )
+        # A read error closed the PTY while the child is still alive: it is
+        # now unreachable (tty gone, session popped) — put it down, or it
+        # escapes both terminal.kill and the shutdown sweep until the next
+        # backend start. kill()'s own close passes reason="killed", so this
+        # never double-kills.
+        if reason == "error" and session.proc.poll() is None:
+            self._loop.create_task(self._put_down_error_survivor(session))
         # Drop the crash-recovery record only once the child is confirmed
         # dead: a still-live child (e.g. a TERM-trapping CLI) must stay
         # visible to the next start's reap_stale. kill()'s escalation task

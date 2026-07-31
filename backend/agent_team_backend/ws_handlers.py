@@ -3532,6 +3532,35 @@ async def _terminal_create_impl(
         )
     if transaction["cancelled"]:
         raise _TerminalCreateCancelled
+    # The pane's previous PTY, when this create replaces it (restore/rebuild).
+    # Resume-id dedup below can't catch it: a CLI rewrites its session id on
+    # every resume, so across restores the ids never match and the old PTY
+    # would linger ownerless forever. Pane identity is stable — use it, but
+    # only kill a PTY that really belongs to this pane (frontend-bug guard).
+    replaces_tid = str(payload.get("replaces_terminal_id") or "")
+    if replaces_tid:
+        create_pane_id = str(payload["pane_id"])
+        stale = session.terminals.get(replaces_tid)
+        if stale is not None and not stale.closed:
+            # Kill only the pane's own predecessor (same pane id — rebuild) or
+            # an ownerless leftover (pane ids regenerate across restores, but
+            # a predecessor with no owning WebSocket can't be anyone's live
+            # pane). A PTY another window still owns is never touched.
+            if stale.pane_id == create_pane_id or stale.id not in app._PTY_OWNERS:
+                app.log.info(
+                    "terminal.create: reaping replaced PTY %s for pane %s",
+                    replaces_tid,
+                    create_pane_id,
+                )
+                await session.terminals.kill(replaces_tid, force=True)
+            else:
+                app.log.warning(
+                    "terminal.create: replaces_terminal_id %s is another live "
+                    "pane's PTY (pane %s, not %s) — refusing to kill",
+                    replaces_tid,
+                    stale.pane_id,
+                    create_pane_id,
+                )
     # One live CLI per resume id: a --resume spawn can race a still-live PTY
     # resuming the same session (cross-window restore, cleared localStorage —
     # tryReattach only sees the spawning window's own PTY id), leaving two

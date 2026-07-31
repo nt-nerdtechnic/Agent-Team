@@ -600,6 +600,59 @@ def _claim_ptys(session: "Session", terminal_session_ids: list[str]) -> None:
         _PTY_OWNERS[tid] = session
 
 
+# ── Ownerless-PTY janitor ────────────────────────────────────────────────────
+# PTYs deliberately survive a WebSocket disconnect so a reloading renderer can
+# reattach. But a renderer that never comes back (window closed for good, or
+# a restore that spawned a REPLACEMENT PTY instead of reattaching) leaves the
+# old PTY running detached forever — observed as a slow accumulation of idle
+# `claude --resume` processes at 200-400MB each. The janitor kills a PTY only
+# after it has had no owning WebSocket for a full grace period, which is far
+# longer than any transient disconnect/reload.
+_OWNERLESS_GRACE_SEC = 60 * 60.0
+_OWNERLESS_SWEEP_INTERVAL_SEC = 5 * 60.0
+# terminal_session_id → monotonic time it was first seen ownerless.
+_OWNERLESS_SINCE: dict[str, float] = {}
+_ownerless_sweeper_task: "asyncio.Task[None] | None" = None
+
+
+async def _sweep_ownerless_ptys_once(now: float | None = None) -> list[str]:
+    """One janitor pass: kill live PTYs ownerless longer than the grace.
+    Returns the killed terminal ids (for tests/logging)."""
+    if _TERMINALS is None:
+        return []
+    now = time.monotonic() if now is None else now
+    live = set(_TERMINALS.list_session_ids())
+    # A PTY that died or got (re)claimed is no longer a candidate.
+    for tid in list(_OWNERLESS_SINCE):
+        if tid not in live or tid in _PTY_OWNERS:
+            _OWNERLESS_SINCE.pop(tid, None)
+    killed: list[str] = []
+    for tid in live:
+        if tid in _PTY_OWNERS:
+            continue
+        first_seen = _OWNERLESS_SINCE.setdefault(tid, now)
+        if now - first_seen < _OWNERLESS_GRACE_SEC:
+            continue
+        _OWNERLESS_SINCE.pop(tid, None)
+        log.info(
+            "ownerless-pty janitor: killing terminal %s (no owner for %.0fs)",
+            tid,
+            now - first_seen,
+        )
+        await _TERMINALS.kill(tid, force=True)
+        killed.append(tid)
+    return killed
+
+
+async def _ownerless_pty_janitor() -> None:
+    while True:
+        await asyncio.sleep(_OWNERLESS_SWEEP_INTERVAL_SEC)
+        try:
+            await _sweep_ownerless_ptys_once()
+        except Exception as err:  # noqa: BLE001 — the janitor must survive
+            log.warning("ownerless-pty sweep failed: %s", err)
+
+
 async def _maybe_announce_session(usage: TokenUsage) -> None:
     """Codex/Antigravity/Grok/OpenCode: when a session file is first matched to its pane,
     tell the frontend so it can persist the id/path for resume-on-restart."""
@@ -923,6 +976,10 @@ async def _start_log_watcher() -> None:
     except Exception as err:  # noqa: BLE001
         log.warning("pty orphan reap failed: %s", err)
 
+    # Kill PTYs whose owning WebSocket never came back (see janitor above).
+    global _ownerless_sweeper_task
+    _ownerless_sweeper_task = asyncio.create_task(_ownerless_pty_janitor())
+
     global _log_watcher
     _log_watcher = LogWatcher(
         sink=_on_log_token_usage,
@@ -978,6 +1035,8 @@ async def _start_log_watcher() -> None:
 @app.on_event("shutdown")
 async def _stop_log_watcher() -> None:
     global _log_watcher, _git_watcher
+    if _ownerless_sweeper_task is not None:
+        _ownerless_sweeper_task.cancel()
     # PTY children are detached process groups (start_new_session=True); they
     # must be killed here or they outlive the app as CPU-spinning orphans.
     # Guarded so a sweep failure never skips the watcher/MCP teardown below.

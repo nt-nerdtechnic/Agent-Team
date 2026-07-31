@@ -29,6 +29,22 @@ async def test_kill_all_terminates_children() -> None:
 
 
 @pytest.mark.asyncio
+async def test_kill_all_terminates_many_children_with_one_snapshot() -> None:
+    # The descendant sweep now takes ONE shared ps snapshot for all sessions
+    # (a per-session snapshot pushed shutdown past Electron's SIGKILL
+    # deadline). Every child must still die.
+    svc = TerminalService(emit=_noop_emit)
+    sessions = [
+        svc.create(pane_id=f"p{i}", agent_key=None, command=["sleep", "30"], cwd="/")
+        for i in range(3)
+    ]
+    await svc.kill_all(grace=0.5)
+    for session in sessions:
+        assert session.proc.poll() is not None
+    assert svc._sessions == {}
+
+
+@pytest.mark.asyncio
 async def test_kill_all_escalates_to_sigkill() -> None:
     svc = TerminalService(emit=_noop_emit)
     session = svc.create(
