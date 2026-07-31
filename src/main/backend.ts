@@ -1,5 +1,6 @@
 import { spawn, execFile, type ChildProcess } from 'node:child_process'
 import { createServer } from 'node:net'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { app } from 'electron'
 
@@ -39,7 +40,10 @@ function getLoginShellEnv(): Promise<{ shell: string; path: string | null }> {
     // can't pollute the parsed PATH.
     const flags = shell.endsWith('zsh') ? ['-il', '-c'] : ['-l', '-c']
     const args = [...flags, 'printf "__NAVIDE_PATH__%s\\n" "$PATH"']
-    execFile(shell, args, { timeout: 3000 }, (err, stdout) => {
+    // Generous timeout: a heavy ~/.zshrc (nvm etc.) on a busy machine has been
+    // measured at 13s+; timing out silently drops every zshrc PATH entry, which
+    // surfaces later as "executable not found (claude)" on CLI spawn.
+    execFile(shell, args, { timeout: 15_000 }, (err, stdout) => {
       if (err) { resolve({ shell, path: null }); return }
       const marked = stdout.split('\n').filter((l) => l.startsWith('__NAVIDE_PATH__'))
       const p = (marked.at(-1) ?? '').slice('__NAVIDE_PATH__'.length).trim()
@@ -67,7 +71,13 @@ export async function startBackend(healthCheckTimeoutMs = 45_000): Promise<Backe
       env.PATH = merged.join(':')
     } else {
       // Fallback: add common macOS tool locations the system PATH omits.
-      const common = ['/usr/local/bin', '/opt/homebrew/bin', '/opt/homebrew/sbin']
+      // ~/.local/bin is where Claude Code's official installer puts `claude`.
+      const common = [
+        join(homedir(), '.local/bin'),
+        '/usr/local/bin',
+        '/opt/homebrew/bin',
+        '/opt/homebrew/sbin'
+      ]
       const existing = (env.PATH ?? '').split(':').filter(Boolean)
       env.PATH = [...new Set([...common, ...existing])].join(':')
     }
