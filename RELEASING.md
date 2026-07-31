@@ -28,6 +28,10 @@ around it, not the build itself.
   `APPLE_APP_SPECIFIC_PASSWORD`).
 - `node`, `pnpm`, `uv`, `git` on PATH.
 
+## Pre-release step: Update What's New announcement
+
+Before running `./release.sh`, add a new entry to `src/renderer/src/lib/whatsNew.ts` for the target version (e.g. `0.1.70`). Include title and bullet points in both `'zh-TW'` and `'en-US'`. This ensures that when users launch the newly updated app, the in-app What's New modal (`WhatsNewModal`) automatically pops up with the new features and fixes.
+
 ## Patch / hotfix flow
 
 ```bash
