@@ -135,8 +135,8 @@ function broadcastOpenWorkspacesChanged(): void {
   }
 }
 // Route a native application-menu action to the renderer of the most relevant
-// main window: the focused window when it is a real workspace window (roles /
-// stages / editor / detached child windows never receive these), else the
+// main window: the focused window when it is a real workspace window (pipeline
+// manager / editor / detached child windows never receive these), else the
 // most-recently-focused main window.
 function sendMenuAction(action: string): void {
   const focused = BrowserWindow.getFocusedWindow()
@@ -185,8 +185,7 @@ function getGitAccountsStore(): GitAccountsStore {
 // renderer that asks via restore:getPending; cleared on apply/dismiss.
 let pendingRestore: WindowEntry[] | null = null
 let pendingRestoreClaimed = false
-let rolesWindow: BrowserWindow | null = null
-let stagesWindow: BrowserWindow | null = null
+let pipelineManagerWindow: BrowserWindow | null = null
 
 function loadWindow(win: BrowserWindow, params: Record<string, string>): void {
   const qs = new URLSearchParams(params).toString()
@@ -283,16 +282,22 @@ function focusOrCreateMainWindow(): void {
   })
 }
 
-function openRolesWindow(): void {
-  if (rolesWindow && !rolesWindow.isDestroyed()) {
-    rolesWindow.focus()
+function openPipelineManagerWindow(pipelineId?: string): void {
+  if (pipelineManagerWindow && !pipelineManagerWindow.isDestroyed()) {
+    pipelineManagerWindow.focus()
+    // Already-open window: forward the deep link so the renderer can switch to
+    // the requested pipeline's detail view instead of staying where it was.
+    if (pipelineId) {
+      pipelineManagerWindow.webContents.send('pipeline-manager:open-pipeline', pipelineId)
+    }
     return
   }
   const win = new BrowserWindow({
-    width: 900,
-    height: 720,
-    title: 'Navide · Role Manager',
+    width: 1100,
+    height: 760,
+    title: 'Navide · Pipeline Manager',
     backgroundColor: '#0d1117',
+    show: false,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -300,11 +305,12 @@ function openRolesWindow(): void {
       sandbox: false
     }
   })
-  rolesWindow = win
+  pipelineManagerWindow = win
+  win.once('ready-to-show', () => win.show())
   win.on('closed', () => {
-    if (rolesWindow === win) rolesWindow = null
+    if (pipelineManagerWindow === win) pipelineManagerWindow = null
   })
-  loadWindow(win, { window: 'roles' })
+  loadWindow(win, { window: 'pipelines', ...(pipelineId ? { pipeline_id: pipelineId } : {}) })
 }
 
 function backendInfoPayload() {
@@ -505,30 +511,6 @@ ipcMain.handle('workspace:new', async () => {
 })
 
 ipcMain.handle('app:home-dir', () => app.getPath('home'))
-
-function openStagesWindow(): void {
-  if (stagesWindow && !stagesWindow.isDestroyed()) {
-    stagesWindow.focus()
-    return
-  }
-  const win = new BrowserWindow({
-    width: 1000,
-    height: 700,
-    title: 'Navide · Stage Manager',
-    backgroundColor: '#0d1117',
-    webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false
-    }
-  })
-  stagesWindow = win
-  win.on('closed', () => {
-    if (stagesWindow === win) stagesWindow = null
-  })
-  loadWindow(win, { window: 'stages' })
-}
 
 /**
  * Read the current UI theme id from the backend-owned ui_settings.json ('' when
@@ -777,13 +759,8 @@ ipcMain.handle('window:getDetachedGroups', (event) => {
   return result
 })
 
-ipcMain.handle('window:openRoles', () => {
-  openRolesWindow()
-  return { ok: true }
-})
-
-ipcMain.handle('window:openStages', () => {
-  openStagesWindow()
+ipcMain.handle('window:openPipelineManager', (_event, args: { pipeline_id?: string } | undefined) => {
+  openPipelineManagerWindow(args?.pipeline_id)
   return { ok: true }
 })
 
@@ -1411,7 +1388,7 @@ ipcMain.on('app:setQuitConfirm', (_event, cfg: Partial<typeof quitConfirm>) => {
 })
 
 ipcMain.on('settings:language-changed', (_event, locale: string) => {
-  for (const win of [mainWindow, rolesWindow, stagesWindow]) {
+  for (const win of [mainWindow, pipelineManagerWindow]) {
     if (win && !win.isDestroyed()) {
       win.webContents.send('settings:language-changed', locale)
     }
@@ -1712,8 +1689,7 @@ app.whenReady().then(async () => {
     onOpenWorkspace: () => sendMenuAction('open-workspace'),
     onOpenRecent: (path: string) => sendMenuAction('open-recent:' + path),
     onNewWindow: () => void createWindow(),
-    onOpenRoles: () => openRolesWindow(),
-    onOpenStages: () => openStagesWindow(),
+    onOpenPipelineManager: () => openPipelineManagerWindow(),
     onOpenRepo: () => void shell.openExternal('https://github.com/nt-nerdtechnic/Navide'),
     onReportIssue: () => void shell.openExternal('https://github.com/nt-nerdtechnic/Navide/issues'),
     onShowShortcuts: () => sendMenuAction('show-shortcuts'),

@@ -9,8 +9,8 @@ import './styles/tokens/themes/dark-forest.css'
 import './styles/tokens/themes/light.css'
 import './styles/tokens/themes/high-contrast.css'
 
-// Window-type dispatcher: Electron main appends `?window=roles`, `?window=stages`,
-// or `?window=editor` for secondary windows. Default is the main shell.
+// Window-type dispatcher: Electron main appends `?window=pipelines`,
+// `?window=editor`, etc. for secondary windows. Default is the main shell.
 const params = new URLSearchParams(window.location.search)
 const which = params.get('window') ?? 'main'
 
@@ -21,8 +21,7 @@ const which = params.get('window') ?? 'main'
 // parsing Monaco it won't use.
 const loadRoot = (): Promise<{ default: Component }> => {
   switch (which) {
-    case 'roles':  return import('./RolesManagerApp.vue')
-    case 'stages': return import('./StagesEditorApp.vue')
+    case 'pipelines': return import('./PipelineManagerApp.vue')
     case 'editor': return import('./EditorWindowApp.vue')
     case 'plans':  return import('./PlanWindowApp.vue')
     case 'githistory': return import('./GitHistoryWindowApp.vue')

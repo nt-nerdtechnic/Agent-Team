@@ -79,8 +79,8 @@ declare global {
       getDetachedGroups: () => Promise<string[]>
       onGroupDetached: (cb: (groupId: string) => void) => void
       onGroupReattached: (cb: (groupId: string) => void) => void
-      openRolesWindow: () => Promise<{ ok: boolean }>
-      openStagesWindow: () => Promise<{ ok: boolean }>
+      openPipelineManagerWindow: (args?: { pipeline_id?: string }) => Promise<{ ok: boolean }>
+      onPipelineManagerOpenPipeline: (handler: (pipelineId: string) => void) => () => void
       openPlansWindow: (args: { workspace_path: string; rel_path?: string }) => Promise<{ ok: boolean }>
       openGitHistoryWindow: (args: { workspace_path: string }) => Promise<{ ok: boolean }>
       openGitWindow: (args: {

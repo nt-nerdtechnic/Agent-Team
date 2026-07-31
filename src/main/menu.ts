@@ -10,7 +10,7 @@ import { app, Menu, type MenuItemConstructorOptions } from 'electron'
  *   - App menu (macOS): Settings… (⌘,) and Check for Updates…
  *   - File: Open Workspace… (⌘O); on non-macOS also Settings… / Check for
  *     Updates… (platforms without an app menu)
- *   - Window: Role Manager and Stages
+ *   - Window: Pipeline Manager
  *
  * ONE deliberate omission from the default menu remains: the View submenu's
  * `resetZoom` / `zoomIn` / `zoomOut` roles. Those roles bind ⌘0 / ⌘+ / ⌘- to
@@ -39,10 +39,8 @@ export interface AppMenuHooks {
   onOpenRecent?: (path: string) => void
   /** File menu: open a fresh window. */
   onNewWindow?: () => void
-  /** Window menu: open the Role Manager window. */
-  onOpenRoles?: () => void
-  /** Window menu: open the Stages window. */
-  onOpenStages?: () => void
+  /** Window menu: open the Pipeline Manager window. */
+  onOpenPipelineManager?: () => void
   /** Help menu: open the Navide GitHub repo. */
   onOpenRepo?: () => void
   /** Help menu: open the GitHub issues page. */
@@ -166,8 +164,7 @@ export function installApplicationMenu(
     {
       label: 'Window',
       submenu: [
-        { label: 'Role Manager', click: () => hooks.onOpenRoles?.() },
-        { label: 'Stages', click: () => hooks.onOpenStages?.() },
+        { label: 'Pipeline Manager', click: () => hooks.onOpenPipelineManager?.() },
         { type: 'separator' },
         { role: 'minimize' },
         // macOS "zoom" = maximize the window frame. Unrelated to content zoom,

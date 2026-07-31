@@ -635,14 +635,10 @@ watch(
   { immediate: true }
 )
 
-async function openRolesWindow(): Promise<void> {
-  if (!window.agentTeam?.openRolesWindow) return
-  await window.agentTeam.openRolesWindow()
-}
-
-async function openStagesWindow(): Promise<void> {
-  if (!window.agentTeam?.openStagesWindow) return
-  await window.agentTeam.openStagesWindow()
+async function openPipelineManager(pipelineId?: string): Promise<void> {
+  await window.agentTeam?.openPipelineManagerWindow?.(
+    pipelineId ? { pipeline_id: pipelineId } : {}
+  )
 }
 
 function reapplyRoleTooltip(p: ActivePaneView): string {
@@ -1028,6 +1024,7 @@ function onPipelineDividerEnd(): void {
     <section class="block panel-section">
       <div class="row between">
         <label class="lbl">{{ $t('label.pipelines') }}</label>
+        <button class="ghost manage-btn" title="Manage pipelines" @click="openPipelineManager()">⚙</button>
       </div>
       <ul v-if="pipelines && pipelines.length && pipeline.state !== 'running' && pipeline.state !== 'aborted'" class="pipeline-list">
         <li
@@ -1318,6 +1315,7 @@ function onPipelineDividerEnd(): void {
           <button class="ghost back-btn" @click="backToList">← Back</button>
           <span class="pipeline-detail-name">{{ openedPipeline?.name ?? openedPipelineId }}</span>
           <span v-if="openedPipelineId === activePipelineId" class="active-tag">{{ $t('label.default') }}</span>
+          <button class="ghost manage-btn" title="Manage pipelines" @click="openPipelineManager(openedPipelineId || undefined)">⚙</button>
         </div>
       </section>
       <section class="block" :class="{ pipeline: pipelineOpen }">
@@ -2017,6 +2015,14 @@ button.icon-btn.muted:hover {
   color: var(--text-secondary);
 }
 .back-btn:hover {
+  color: var(--text-bright);
+}
+.manage-btn {
+  font-size: 11px;
+  padding: 2px 6px;
+  color: var(--text-secondary);
+}
+.manage-btn:hover {
   color: var(--text-bright);
 }
 .pipeline-detail-name {

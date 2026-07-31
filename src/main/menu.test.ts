@@ -46,8 +46,7 @@ function makeHooks(): AppMenuHooks & { calls: string[] } {
     onOpenWorkspace: () => calls.push('open-workspace'),
     onOpenRecent: (p) => calls.push('open-recent:' + p),
     onNewWindow: () => calls.push('new-window'),
-    onOpenRoles: () => calls.push('roles'),
-    onOpenStages: () => calls.push('stages'),
+    onOpenPipelineManager: () => calls.push('pipeline-manager'),
     onOpenRepo: () => calls.push('open-repo'),
     onReportIssue: () => calls.push('report-issue'),
     onShowShortcuts: () => calls.push('show-shortcuts')
@@ -118,11 +117,10 @@ describe('installApplicationMenu', () => {
     expect(hooks.calls).toEqual(['open-repo', 'report-issue', 'show-shortcuts'])
   })
 
-  it('Window has Role Manager and Stages that invoke their hooks', () => {
+  it('Window has Pipeline Manager that invokes its hook', () => {
     const win = submenuOf('Window')
-    fire(itemIn(win, 'Role Manager'))
-    fire(itemIn(win, 'Stages'))
-    expect(hooks.calls).toEqual(['roles', 'stages'])
+    fire(itemIn(win, 'Pipeline Manager'))
+    expect(hooks.calls).toEqual(['pipeline-manager'])
   })
 
   it('View still has no webContents zoom roles (deliberate omission)', () => {
@@ -137,6 +135,6 @@ describe('installApplicationMenu', () => {
     expect(() => installApplicationMenu()).not.toThrow()
     const menu = isMac ? submenuOf('Agent-Team') : submenuOf('File')
     expect(() => fire(itemIn(menu, 'Settings…'))).not.toThrow()
-    expect(() => fire(itemIn(submenuOf('Window'), 'Role Manager'))).not.toThrow()
+    expect(() => fire(itemIn(submenuOf('Window'), 'Pipeline Manager'))).not.toThrow()
   })
 })

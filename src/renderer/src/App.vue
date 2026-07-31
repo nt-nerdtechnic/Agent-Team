@@ -4029,7 +4029,7 @@ watch(currentWorkspace, (workspacePath) => {
   }
 })
 
-const settingsInitialTab = ref<'roles' | 'pipelines' | 'mcp' | 'analyzer' | 'updates' | 'appearance' | 'accounts' | 'storage'>('roles')
+const settingsInitialTab = ref<'general' | 'mcp' | 'analyzer' | 'updates' | 'appearance' | 'accounts' | 'storage'>('general')
 // Workspaces the Storage tab scans: the open one first, then the recents that
 // still exist on disk.
 const knownWorkspacePaths = computed<string[]>(() => {
@@ -9793,8 +9793,7 @@ function paneIsCommander(p: ActivePane): boolean {
       :workspace-paths="knownWorkspacePaths"
       :initial-tab="settingsInitialTab"
       v-model:confirm-before-close="confirmBeforeClose"
-      @close="showSettings = false; settingsInitialTab = 'roles'"
-      @open-pipeline="(id) => { showSettings = false; controlPaneRef?.openPipelineDetail(id) }"
+      @close="showSettings = false; settingsInitialTab = 'general'"
       @reopen-onboarding="() => { showSettings = false; reopenOnboarding() }"
       @cli-login="onCliLoginSpawn"
     />

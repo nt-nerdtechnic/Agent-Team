@@ -5,7 +5,6 @@ import type { useRoles } from '../composables/useRoles'
 import type { useStages } from '../composables/useStages'
 import type { useAnalyzer } from '../composables/useAnalyzer'
 import type { usePipelines } from '../composables/usePipelines'
-import { stageToBackend, stageDefToFrontend, type Stage, type StageSlot } from '../data/stages'
 import { MCP_CATALOG, isMcpInstalled, type McpCatalogEntry } from '../data/mcpCatalog'
 import { useTheme } from '../composables/useTheme'
 import { useSettings } from '../composables/useSettings'
@@ -40,7 +39,6 @@ import {
   LOOP_RESUME_SETTING_KEY,
   DEFAULT_LOOP_RESUME,
 } from '../lib/loopPrompt'
-import { useNotify } from '../composables/useNotify'
 import { useUpdater } from '../composables/useUpdater'
 import type { UpdateChannel } from '../../../shared/updater'
 import { useGitAccounts } from '../composables/useGitAccounts'
@@ -88,7 +86,6 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{
   (e: 'close'): void
-  (e: 'open-pipeline', id: string): void
   (e: 'reopen-onboarding'): void
   (e: 'cli-login', agentKey: string, loginProfileId?: string): void
   (e: 'update:confirmBeforeClose', v: boolean): void
@@ -99,8 +96,8 @@ const confirmBeforeCloseModel = computed({
 })
 
 // ── Tab ───────────────────────────────────────────────────────────────────────
-type Tab = 'roles' | 'pipelines' | 'mcp' | 'skills' | 'analyzer' | 'cliAgents' | 'general' | 'updates' | 'appearance' | 'accounts' | 'shortcuts' | 'extensions' | 'storage'
-const activeTab = ref<Tab>(props.initialTab ?? 'roles')
+type Tab = 'mcp' | 'skills' | 'analyzer' | 'cliAgents' | 'general' | 'updates' | 'appearance' | 'accounts' | 'shortcuts' | 'extensions' | 'storage'
+const activeTab = ref<Tab>(props.initialTab ?? 'general')
 
 // Sidebar workspace header label — the open workspace's basename, falling back
 // to the app name when no workspace is passed in.
@@ -175,33 +172,6 @@ interface SettingsSearchItem {
 
 const settingsSearchQuery = ref('')
 const settingsSearchItems = computed<SettingsSearchItem[]>(() => [
-  {
-    id: 'roles',
-    tab: 'roles',
-    section: 'roles',
-    title: 'Roles / 角色',
-    group: 'Roles',
-    summary: 'Role keys, labels, one-line summaries, system prompts, JSON import/export.',
-    keywords: 'roles role 角色 身分 prompt system prompt 系統提示詞 key label import export json 匯入 匯出',
-  },
-  {
-    id: 'pipelines',
-    tab: 'pipelines',
-    section: 'pipelines',
-    title: 'Pipelines / 流程',
-    group: 'Pipelines',
-    summary: 'Create, rename, delete, set default, and run pipelines.',
-    keywords: 'pipelines pipeline 流程 管線 default rename delete run 預設 重新命名 刪除 執行',
-  },
-  {
-    id: 'stages',
-    tab: 'pipelines',
-    section: 'pipeline-stages',
-    title: 'Stages & Slots / 階段與 Slot',
-    group: 'Pipelines',
-    summary: 'Stage ID, title, sentinel, questions, Context7 query, slots, roles, agents, manager, kickoff.',
-    keywords: 'stage stages slot slots 階段 sentinel questions allow questions context7 kickoff manager commander agent role codex claude antigravity',
-  },
   {
     id: 'mcp-installed',
     tab: 'mcp',
@@ -568,8 +538,6 @@ function onResumeConcurrencyChange(value: string): void {
   settingsSet(RESUME_CONCURRENCY_SETTING_KEY, resumeConcurrencyModel.value)
 }
 
-const { confirm: notifyConfirm } = useNotify()
-
 // ── Updates (auto-update UX) ────────────────────────────────────────────────
 const {
   state: updateState,
@@ -584,8 +552,6 @@ const {
 // ── Settings management / metadata ──────────────────────────────────────────
 interface SettingsPaths {
   app_data_dir?: string
-  roles?: string
-  pipelines?: string
   mcp?: string
   skills?: string
   analyzer?: string
@@ -598,8 +564,6 @@ const settingsBundleSummary = ref('')
 const settingsBundleError = ref('')
 
 const settingsScopeNotes: Record<Tab, { scope: string; storage: keyof SettingsPaths | 'localStorage' | 'mainProcess' | 'safeStorage' }> = {
-  roles: { scope: 'User', storage: 'roles' },
-  pipelines: { scope: 'User', storage: 'pipelines' },
   mcp: { scope: 'User', storage: 'mcp' },
   skills: { scope: 'User', storage: 'skills' },
   analyzer: { scope: 'User', storage: 'analyzer' },
@@ -801,15 +765,6 @@ onUnmounted(() => {
   if (previewTimer) { clearTimeout(previewTimer); previewTimer = null }
 })
 
-// ══════════════════════════════════════════════════════════════════════════════
-// ROLES TAB
-// ══════════════════════════════════════════════════════════════════════════════
-
-interface DraftRole {
-  key: string; label: string; one_line: string; system_prompt: string
-  isNew: boolean; originalKey: string
-}
-
 // ── Analyzer tab local state ──────────────────────────────────────────────────
 const azPullName = ref('')
 const azRechecking = ref(false)
@@ -864,311 +819,6 @@ async function azDoPull() {
 }
 async function azDoDelete(name: string) {
   await props.analyzerApi.deleteModel(name)
-}
-
-const rSelectedKey = ref<string | null>(null)
-const rDraft = ref<DraftRole | null>(null)
-const rSaving = ref(false)
-const rError = ref('')
-const rConfirmDelete = ref(false)
-const rConfirmReset = ref(false)
-const rSummary = ref('')
-const rImporting = ref(false)
-const rExportBusy = ref(false)
-
-const rSorted = computed(() =>
-  [...props.rolesApi.roles.value].sort((a, b) => a.label.localeCompare(b.label))
-)
-
-watch(() => props.rolesApi.roles.value, (rs) => {
-  if (rs.length > 0 && rSelectedKey.value === null) rSelectKey(rs[0].key)
-  else if (rSelectedKey.value && !rs.find(r => r.key === rSelectedKey.value))
-    rSelectKey(rs[0]?.key ?? null)
-}, { deep: false })
-
-function rFromRole(r: ReturnType<typeof props.rolesApi.find>, isNew: boolean): DraftRole {
-  return { key: r!.key, label: r!.label, one_line: r!.one_line, system_prompt: r!.system_prompt, isNew, originalKey: isNew ? '' : r!.key }
-}
-function rSelectKey(key: string | null) {
-  rSelectedKey.value = key; rError.value = ''
-  if (!key) { rDraft.value = null; return }
-  const r = props.rolesApi.find(key)
-  if (r) rDraft.value = rFromRole(r, false)
-}
-function rStartNew() {
-  rSelectedKey.value = null; rError.value = ''
-  rDraft.value = { key: '', label: '', one_line: '', system_prompt: '# Role: \nYou are a...\n\n# Guidelines:\n1. ...\n\n# Output Format:\n...', isNew: true, originalKey: '' }
-}
-
-const rIsDirty = computed(() => {
-  if (!rDraft.value) return false
-  if (rDraft.value.isNew) return true
-  const r = props.rolesApi.find(rDraft.value.originalKey)
-  if (!r) return true
-  return r.label !== rDraft.value.label || r.one_line !== rDraft.value.one_line || r.system_prompt !== rDraft.value.system_prompt || r.key !== rDraft.value.key
-})
-const rCanSave = computed(() => {
-  if (!rDraft.value) return false
-  if (!rDraft.value.key.trim() || !rDraft.value.label.trim() || !rDraft.value.system_prompt.trim()) return false
-  // Block if the target key is already taken by a DIFFERENT role (covers both new and rename).
-  const existing = props.rolesApi.find(rDraft.value.key.trim())
-  if (existing && existing.key !== rDraft.value.originalKey) return false
-  return rIsDirty.value
-})
-
-async function rSave() {
-  if (!rDraft.value || !rCanSave.value) return
-  rSaving.value = true; rError.value = ''
-  const payload = { key: rDraft.value.key.trim(), label: rDraft.value.label.trim(), one_line: rDraft.value.one_line.trim(), system_prompt: rDraft.value.system_prompt }
-  const wasRename = !rDraft.value.isNew && rDraft.value.originalKey && rDraft.value.originalKey !== payload.key
-  try {
-    if (wasRename) {
-      const role = await props.rolesApi.upsert(payload)
-      if (role) { await props.rolesApi.remove(rDraft.value.originalKey); rSelectKey(role.key) }
-    } else {
-      const role = await props.rolesApi.upsert(payload)
-      if (role) rSelectKey(role.key)
-    }
-    rSummary.value = `Saved "${payload.label}"`
-  } catch (err) { rError.value = String((err as Error).message ?? err) }
-  finally { rSaving.value = false }
-}
-async function rDoDelete() {
-  if (!rDraft.value || rDraft.value.isNew) { rConfirmDelete.value = false; return }
-  const ok = await props.rolesApi.remove(rDraft.value.originalKey || rDraft.value.key)
-  rConfirmDelete.value = false
-  if (ok) rSelectKey(rSorted.value[0]?.key ?? null)
-  else rError.value = props.rolesApi.error.value
-}
-async function rDoReset() {
-  const ok = await props.rolesApi.reset()
-  rConfirmReset.value = false
-  if (ok) rSelectKey(rSorted.value[0]?.key ?? null)
-}
-async function rExport() {
-  if (!window.agentTeam?.saveJson) return
-  rExportBusy.value = true
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-  const envelope = { format_version: 1, exported_at: new Date().toISOString(), roles: props.rolesApi.roles.value }
-  const result = await window.agentTeam.saveJson({ title: 'Export roles', defaultName: `agent-team-roles-${stamp}.json`, content: JSON.stringify(envelope, null, 2) })
-  if (result.ok) rSummary.value = `Exported ${envelope.roles.length} role(s)`
-  rExportBusy.value = false
-}
-async function rImport() {
-  if (!window.agentTeam?.openJson) return
-  rImporting.value = true
-  const result = await window.agentTeam.openJson({ title: 'Import roles JSON' })
-  if (result.ok && result.content) {
-    try {
-      const parsed = JSON.parse(result.content)
-      const raw: unknown[] = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.roles) ? parsed.roles : [])
-      let ok = 0
-      for (const entry of raw) {
-        const e = entry as Record<string, unknown>
-        if (typeof e?.key === 'string' && e.key && typeof e.system_prompt === 'string')
-          if (await props.rolesApi.upsert({ key: e.key as string, label: String(e.label ?? e.key), one_line: String(e.one_line ?? ''), system_prompt: e.system_prompt as string })) ok++
-      }
-      rSummary.value = `Imported ${ok} role(s)`
-    } catch (err) { rError.value = `Invalid JSON: ${(err as Error).message}` }
-  }
-  rImporting.value = false
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
-// STAGES TAB
-// ══════════════════════════════════════════════════════════════════════════════
-
-const AGENT_OPTIONS = [
-  { key: 'claude', label: 'Claude Code' },
-  { key: 'codex', label: 'Codex' },
-  { key: 'antigravity', label: 'Antigravity CLI' }
-]
-
-const sSelectedId = ref<string | null>(null)
-const sDraft = ref<Stage | null>(null)
-const sIsNew = ref(false)
-const sSaving = ref(false)
-const sError = ref('')
-const sConfirmDelete = ref(false)
-const sConfirmReset = ref(false)
-const sSummary = ref('')
-const sExportBusy = ref(false)
-const sImporting = ref(false)
-const sAddingSlot = ref(false)
-const sSlotDraft = ref<StageSlot>({ agentKey: 'claude', roleKey: '', label: '', kickoffBody: '', isCommander: false })
-
-const sIsDirty = computed(() => {
-  if (!sDraft.value) return false
-  if (sIsNew.value) return true
-  const orig = sActiveStages.value.find(s => s.id === sDraft.value!.id)
-  if (!orig) return true
-  return JSON.stringify(stageToBackend(sDraft.value)) !== JSON.stringify(stageToBackend(orig))
-})
-const sCanSave = computed(() => {
-  if (!sDraft.value || !sDraft.value.id.trim() || !sDraft.value.title.trim()) return false
-  if (!sDraft.value.slots || sDraft.value.slots.length === 0) return false
-  if (sIsNew.value && sActiveStages.value.find(s => s.id === sDraft.value!.id.trim())) return false
-  return sIsDirty.value
-})
-
-// Only auto-select first stage when in the global stages view (not pipeline detail)
-watch(() => props.stagesApi.stages.value, (ss) => {
-  if (plView.value === 'detail') return
-  if (ss.length > 0 && sSelectedId.value === null) sSelectStage(ss[0].id)
-  else if (sSelectedId.value && !ss.find(s => s.id === sSelectedId.value)) sSelectStage(ss[0]?.id ?? null)
-}, { deep: false })
-
-function sSelectStage(id: string | null) {
-  sSelectedId.value = id; sError.value = ''; sAddingSlot.value = false; sEditingSlotIndex.value = null
-  if (!id) { sDraft.value = null; return }
-  const s = sActiveStages.value.find(s => s.id === id)
-  if (s) { sDraft.value = JSON.parse(JSON.stringify(s)); sIsNew.value = false }
-}
-function sStartNew() {
-  sSelectedId.value = null; sError.value = ''; sAddingSlot.value = false; sIsNew.value = true
-  sDraft.value = {
-    id: '', title: '', shortTitle: '', question: '', description: '',
-    recommendedRoles: [], sentinel: '', allowQuestions: false, docQuery: '', slots: [],
-  }
-}
-function sPipelineIdParam() {
-  return plView.value === 'detail' ? { pipeline_id: plEditingId.value } : {}
-}
-
-async function sSave() {
-  if (!sDraft.value || !sCanSave.value) return
-  sSaving.value = true; sError.value = ''
-  try {
-    const payload = stageToBackend({ ...sDraft.value, id: sDraft.value.id.trim() })
-    const resp = await props.backend.send<{ stage: Record<string, unknown> }>(
-      'stages.upsert', { stage: payload, ...sPipelineIdParam() }
-    )
-    if (!resp.ok) { sError.value = resp.error?.message ?? 'Save failed'; return }
-    sSummary.value = `Saved "${sDraft.value.title}"`
-    sSelectedId.value = sDraft.value.id.trim()
-    sIsNew.value = false
-    if (plView.value === 'detail') await plReloadStages()
-  } catch (err) {
-    sError.value = err instanceof Error ? err.message : 'Save failed'
-  } finally { sSaving.value = false }
-}
-async function sDoDelete() {
-  if (!sDraft.value || sIsNew.value) { sConfirmDelete.value = false; return }
-  try {
-    const resp = await props.backend.send<{ stages: unknown[] }>(
-      'stages.delete', { id: sDraft.value.id, ...sPipelineIdParam() }
-    )
-    sConfirmDelete.value = false
-    if (!resp.ok) { sError.value = resp.error?.message ?? 'Delete failed'; return }
-    sSummary.value = `Deleted "${sDraft.value.id}"`
-    if (plView.value === 'detail') {
-      await plReloadStages()
-      sSelectStage(plStages.value[0]?.id ?? null)
-    } else {
-      sSelectStage(props.stagesApi.stages.value[0]?.id ?? null)
-    }
-  } catch (err) {
-    sConfirmDelete.value = false
-    sError.value = err instanceof Error ? err.message : 'Delete failed'
-  }
-}
-async function sDoReset() {
-  try {
-    const resp = await props.backend.send<{ stages: unknown[] }>(
-      'stages.reset', { ...sPipelineIdParam() }
-    )
-    sConfirmReset.value = false
-    if (!resp.ok) { sError.value = resp.error?.message ?? 'Reset failed'; return }
-    sSummary.value = 'Reset to factory defaults'
-    if (plView.value === 'detail') {
-      await plReloadStages()
-      sSelectStage(plStages.value[0]?.id ?? null)
-    } else {
-      sSelectStage(props.stagesApi.stages.value[0]?.id ?? null)
-    }
-  } catch (err) {
-    sConfirmReset.value = false
-    sError.value = err instanceof Error ? err.message : 'Reset failed'
-  }
-}
-async function sMoveUp(index: number) {
-  if (index <= 0) return
-  const ids = sActiveStages.value.map(s => s.id)
-  ;[ids[index - 1], ids[index]] = [ids[index], ids[index - 1]]
-  try {
-    await props.backend.send('stages.reorder', { ids, ...sPipelineIdParam() })
-    if (plView.value === 'detail') await plReloadStages()
-  } catch { /* ignore transient WS errors for reorder */ }
-}
-async function sMoveDown(index: number) {
-  if (index >= sActiveStages.value.length - 1) return
-  const ids = sActiveStages.value.map(s => s.id)
-  ;[ids[index], ids[index + 1]] = [ids[index + 1], ids[index]]
-  try {
-    await props.backend.send('stages.reorder', { ids, ...sPipelineIdParam() })
-    if (plView.value === 'detail') await plReloadStages()
-  } catch { /* ignore transient WS errors for reorder */ }
-}
-const sEditingSlotIndex = ref<number | null>(null)
-
-function sStartAddSlot() {
-  sAddingSlot.value = true
-  sEditingSlotIndex.value = null
-  sSlotDraft.value = { agentKey: 'claude', roleKey: '', label: '', kickoffBody: '', isCommander: false }
-}
-function sCancelAddSlot() { sAddingSlot.value = false; sEditingSlotIndex.value = null }
-async function sConfirmAddSlot() {
-  if (!sDraft.value || !sSlotDraft.value.label.trim()) return
-  if (!sDraft.value.slots) sDraft.value.slots = []
-  sDraft.value.slots.push({ ...sSlotDraft.value })
-  sAddingSlot.value = false
-  await sSave()
-}
-function sStartEditSlot(index: number) {
-  sEditingSlotIndex.value = index
-  sAddingSlot.value = false
-  sSlotDraft.value = { ...sDraft.value!.slots![index] }
-}
-async function sSaveEditSlot() {
-  if (!sDraft.value?.slots || sEditingSlotIndex.value === null) return
-  sDraft.value.slots[sEditingSlotIndex.value] = { ...sSlotDraft.value }
-  sEditingSlotIndex.value = null
-  await sSave()
-}
-async function sRemoveSlot(index: number) {
-  if (!sDraft.value?.slots || sDraft.value.slots.length <= 1) return  // must keep at least one
-  if (sEditingSlotIndex.value === index) sEditingSlotIndex.value = null
-  sDraft.value.slots.splice(index, 1)
-  await sSave()
-}
-async function sExport() {
-  if (!window.agentTeam?.saveJson) return
-  sExportBusy.value = true
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-  const envelope = { format_version: 1, exported_at: new Date().toISOString(), stages: sActiveStages.value }
-  const result = await window.agentTeam.saveJson({ title: 'Export stages', defaultName: `agent-team-stages-${stamp}.json`, content: JSON.stringify(envelope, null, 2) })
-  if (result.ok) sSummary.value = `Exported ${envelope.stages.length} stage(s)`
-  sExportBusy.value = false
-}
-async function sImport() {
-  if (!window.agentTeam?.openJson) return
-  sImporting.value = true
-  const result = await window.agentTeam.openJson({ title: 'Import stages JSON' })
-  if (result.ok && result.content) {
-    try {
-      const parsed = JSON.parse(result.content)
-      const raw: unknown[] = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.stages) ? parsed.stages : [])
-      let ok = 0, failed = 0
-      for (const entry of raw) {
-        const s = entry as Record<string, unknown>
-        if (!s.id) { failed++; continue }
-        const resp = await props.backend.send('stages.upsert', { stage: s, ...sPipelineIdParam() })
-        if (resp.ok) ok++; else failed++
-      }
-      sSummary.value = `Imported ${ok} stage(s)` + (failed ? ` · ${failed} failed` : '')
-    } catch (err) { sError.value = `Invalid JSON: ${(err as Error).message}` }
-  }
-  sImporting.value = false
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1477,127 +1127,6 @@ watch(activeTab, (tab) => {
   if (tab === 'accounts') void accountsApi.refresh()
 })
 
-// ══════════════════════════════════════════════════════════════════════════════
-// PIPELINES TAB
-// ══════════════════════════════════════════════════════════════════════════════
-
-// ── List view ──
-const plNewName = ref('')
-const plCreating = ref(false)
-const plBusy = ref(false)
-const plSummary = ref('')
-
-// ── Detail view (pipeline + stage editor) ──
-const plView = ref<'list' | 'detail'>('list')
-const plEditingId = ref<string>('')
-const plStages = ref<Stage[]>([])   // stages for the pipeline being edited
-const plStagesLoading = ref(false)
-const plRenamingId = ref('')
-const plRenameText = ref('')
-
-const plCurrentPipeline = computed(() =>
-  props.pipelinesApi?.pipelines.value.find(p => p.id === plEditingId.value) ?? null
-)
-
-// Stages to use in the stage editor — plStages when in pipeline detail, global otherwise
-const sActiveStages = computed(() =>
-  plView.value === 'detail' ? plStages.value : props.stagesApi.stages.value
-)
-
-async function plEnterDetail(id: string) {
-  plEditingId.value = id
-  plView.value = 'detail'
-  sSelectedId.value = null
-  sDraft.value = null
-  sIsNew.value = false
-  sError.value = ''
-  plStagesLoading.value = true
-  try {
-    const resp = await props.backend.send<{ stages: Record<string, unknown>[] }>(
-      'stages.list', { pipeline_id: id }
-    )
-    if (resp.ok && resp.payload) {
-      plStages.value = resp.payload.stages.map(stageDefToFrontend)
-      if (plStages.value.length > 0) sSelectStage(plStages.value[0].id)
-    }
-  } catch (err) {
-    sError.value = err instanceof Error ? err.message : 'Load failed'
-  } finally {
-    plStagesLoading.value = false
-  }
-}
-
-function plBackToList() {
-  plView.value = 'list'
-  plEditingId.value = ''
-  plStages.value = []
-  sSelectedId.value = null
-  sDraft.value = null
-}
-
-async function plReloadStages() {
-  if (!plEditingId.value) return
-  try {
-    const resp = await props.backend.send<{ stages: Record<string, unknown>[] }>(
-      'stages.list', { pipeline_id: plEditingId.value }
-    )
-    if (resp.ok && resp.payload) {
-      plStages.value = resp.payload.stages.map(stageDefToFrontend)
-    }
-  } catch { /* ignore transient WS errors */ }
-}
-
-async function plCreate() {
-  if (!plNewName.value.trim() || plBusy.value) return
-  plBusy.value = true
-  try {
-    const p = await props.pipelinesApi?.createPipeline(plNewName.value.trim())
-    if (p) { plNewName.value = ''; plCreating.value = false; plSummary.value = `Created "${p.name}"` }
-  } finally {
-    plBusy.value = false
-  }
-}
-
-async function plSetActive(id: string) {
-  if (plBusy.value) return
-  plBusy.value = true
-  try {
-    await props.pipelinesApi?.setActivePipeline(id)
-    plSummary.value = 'Default pipeline updated'
-  } finally {
-    plBusy.value = false
-  }
-}
-
-function plStartRename(id: string, currentName: string) {
-  plRenamingId.value = id
-  plRenameText.value = currentName
-}
-
-async function plConfirmRename() {
-  if (!plRenameText.value.trim() || plBusy.value) return
-  plBusy.value = true
-  try {
-    await props.pipelinesApi?.renamePipeline(plRenamingId.value, plRenameText.value.trim())
-    plSummary.value = 'Renamed'
-    plRenamingId.value = ''
-  } finally {
-    plBusy.value = false
-  }
-}
-
-async function plDelete(id: string, name: string) {
-  if (!(await notifyConfirm(`Delete "${name}"? This cannot be undone.`, { title: 'Delete Pipeline', confirmText: 'Delete' }))) return
-  plBusy.value = true
-  try {
-    await props.pipelinesApi?.deletePipeline(id)
-    plSummary.value = `Deleted "${name}"`
-    plBackToList()
-  } finally {
-    plBusy.value = false
-  }
-}
-
 </script>
 
 <template>
@@ -1671,16 +1200,6 @@ async function plDelete(id: string, name: string) {
                   <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3.3" y="5" width="9.4" height="7" rx="1.6"/><path d="M8 2.3V5"/><circle cx="8" cy="2.1" r="0.6"/><path d="M6 8.3v0.01M10 8.3v0.01"/></svg>
                 </template>
               </SettingsNavItem>
-              <SettingsNavItem :label="$t('settings.nav.roles')" :active="activeTab === 'roles'" @select="activeTab = 'roles'">
-                <template #icon>
-                  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2.8 3.8h10.4v3.4c0 3-2.3 5.5-5.2 5.5S2.8 10.2 2.8 7.2V3.8Z"/><path d="M6 7v0.01M10 7v0.01"/><path d="M6.2 9.8c1.1 0.9 2.5 0.9 3.6 0"/></svg>
-                </template>
-              </SettingsNavItem>
-              <SettingsNavItem :label="$t('settings.nav.pipelines')" :active="activeTab === 'pipelines'" @select="activeTab = 'pipelines'">
-                <template #icon>
-                  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="4.5" cy="4" r="1.7"/><circle cx="4.5" cy="12" r="1.7"/><circle cx="11.5" cy="4" r="1.7"/><path d="M4.5 5.7v4.6M4.5 8h4.3c1.6 0 2.7-.8 2.7-2.3"/></svg>
-                </template>
-              </SettingsNavItem>
             </div>
 
             <div class="s-nav-group">
@@ -1732,70 +1251,6 @@ async function plDelete(id: string, name: string) {
         <div class="s-content">
           <button class="s-close" @click="emit('close')" title="Close (ESC)">✕</button>
 
-        <!-- ── ROLES TAB ─────────────────────────────────────────────────── -->
-        <div v-show="activeTab === 'roles'" class="s-body s-body--bleed roles-body" data-settings-section="roles">
-          <h1 class="s-page-title">{{ $t('settings.nav.roles') }}</h1>
-          <div class="settings-meta-row">
-            <span class="scope-badge">{{ settingsScopeNotes.roles.scope }}</span>
-            <span class="settings-path" :title="pathForTab('roles')">{{ pathForTab('roles') }}</span>
-            <button class="settings-path-btn" :disabled="!settingsPaths.roles" @click="openSettingsPath(settingsPaths.roles)">{{ $t('action.open') }}</button>
-          </div>
-          <div class="tab-toolbar">
-            <button class="ghost" :disabled="rExportBusy" @click="rExport">{{ rExportBusy ? '…' : $t('settings.roles.export-json') }}</button>
-            <button class="ghost" :disabled="rImporting" @click="rImport">{{ rImporting ? '…' : $t('settings.roles.import-json') }}</button>
-            <span v-if="rSummary" class="summary-ok">{{ rSummary }}</span>
-          </div>
-          <div class="split">
-            <aside class="split-list">
-              <button class="primary new-btn" @click="rStartNew">{{ $t('settings.roles.new-role') }}</button>
-              <ul>
-                <li v-for="r in rSorted" :key="r.key"
-                    :class="{ active: rSelectedKey === r.key && rDraft && !rDraft.isNew }"
-                    @click="rSelectKey(r.key)">
-                  <div class="row-g"><span class="mono-key">{{ r.key }}</span><span v-if="r.is_default" class="badge">default</span></div>
-                  <div class="item-label">{{ r.label }}</div>
-                  <div class="item-sub">{{ r.one_line }}</div>
-                </li>
-              </ul>
-            </aside>
-            <section v-if="rDraft" class="split-detail">
-              <div class="detail-head">
-                <h3>{{ rDraft.isNew ? $t('label.new-role') : $t('label.edit-role') }}</h3>
-                <div class="row-g gap">
-                  <button v-if="!rDraft.isNew" class="danger" @click="rConfirmDelete = true">{{ $t('settings.roles.delete') }}</button>
-                  <button class="primary" :disabled="!rCanSave || rSaving" @click="rSave">{{ rSaving ? $t('label.saving') : rDraft.isNew ? $t('action.create') : $t('settings.roles.save') }}</button>
-                </div>
-              </div>
-              <p v-if="rError" class="err-msg">{{ rError }}</p>
-              <div class="two-col">
-                <div class="field">
-                  <label class="lbl">{{ $t('settings.roles.key-label') }}</label>
-                  <input v-model="rDraft.key" type="text" placeholder="lowercase_key" spellcheck="false" :disabled="!rDraft.isNew && rDraft.originalKey === 'pm'" />
-                  <p v-if="rDraft.isNew && rolesApi.find(rDraft.key.trim())" class="warn-msg">key already exists</p>
-                </div>
-                <div class="field">
-                  <label class="lbl">{{ $t('settings.roles.label-label') }}</label>
-                  <input v-model="rDraft.label" type="text" placeholder="e.g. Tech Lead" spellcheck="false" />
-                </div>
-              </div>
-              <div class="field">
-                <label class="lbl">{{ $t('settings.roles.one-line-label') }}</label>
-                <input v-model="rDraft.one_line" type="text" placeholder="short hint shown in dropdown" spellcheck="false" />
-              </div>
-              <div class="field">
-                <label class="lbl">{{ $t('settings.roles.system-prompt-label') }}</label>
-                <textarea v-model="rDraft.system_prompt" rows="14" spellcheck="false"></textarea>
-                <p class="hint-msg">{{ rDraft.system_prompt.length }} chars · Changes apply to new spawns only</p>
-              </div>
-            </section>
-            <section v-else class="split-detail empty-detail">
-              <div class="empty-glyph">👤</div>
-              <p>{{ $t('hint.select-role-create') }}</p>
-            </section>
-          </div>
-        </div>
-
-        <!-- ── STAGES TAB ────────────────────────────────────────────────── -->
         <!-- ── MCP TAB ───────────────────────────────────────────────────── -->
         <div v-show="activeTab === 'mcp'" class="s-body s-body--bleed mcp-body">
           <h1 class="s-page-title">{{ $t('settings.nav.mcp') }}</h1>
@@ -2399,204 +1854,6 @@ async function plDelete(id: string, name: string) {
 
         </div>
 
-        <!-- ── PIPELINES TAB ────────────────────────────────────────────── -->
-        <div v-show="activeTab === 'pipelines'" class="s-body s-body--bleed pipelines-body" data-settings-section="pipelines">
-          <h1 class="s-page-title">{{ $t('settings.nav.pipelines') }}</h1>
-          <div class="settings-meta-row">
-            <span class="scope-badge">{{ settingsScopeNotes.pipelines.scope }}</span>
-            <span class="settings-path" :title="pathForTab('pipelines')">{{ pathForTab('pipelines') }}</span>
-            <button class="settings-path-btn" :disabled="!settingsPaths.pipelines" @click="openSettingsPath(settingsPaths.pipelines)">{{ $t('action.open') }}</button>
-          </div>
-
-          <!-- ── LIST VIEW ──────────────────────────────────────────────── -->
-          <template v-if="plView === 'list'">
-            <div class="tab-toolbar">
-              <button class="ghost" @click="plCreating = !plCreating" :disabled="plBusy">＋ New Pipeline</button>
-              <span v-if="plSummary" class="pl-summary">{{ plSummary }}</span>
-            </div>
-            <div v-if="plCreating" class="pl-create-row">
-              <input v-model="plNewName" type="text" placeholder="Pipeline name…" class="pl-input"
-                @keyup.enter="plCreate" @keyup.escape="plCreating = false; plNewName = ''" />
-              <button class="ghost" :disabled="!plNewName.trim() || plBusy" @click="plCreate">Create</button>
-              <button class="ghost" @click="plCreating = false; plNewName = ''">Cancel</button>
-            </div>
-            <ul v-if="pipelinesApi?.pipelines.value.length" class="pl-list">
-              <li v-for="p in pipelinesApi.pipelines.value" :key="p.id"
-                  class="pl-item" :class="{ 'pl-active': p.id === pipelinesApi.activePipelineId.value }"
-                  @click="plEnterDetail(p.id)" role="button">
-                <div class="pl-item-main">
-                  <span class="pl-name">{{ p.name }}</span>
-                  <span class="pl-meta">{{ p.stage_count }} stage(s)</span>
-                  <span v-if="p.id === pipelinesApi.activePipelineId.value" class="pl-badge active">Default</span>
-                  <span class="pl-enter">›</span>
-                </div>
-              </li>
-            </ul>
-            <p v-else class="hint">No pipelines loaded yet…</p>
-          </template>
-
-          <!-- ── DETAIL VIEW: pipeline + stage editor ───────────────────── -->
-          <template v-else>
-            <!-- Detail header: back + pipeline name (inline rename) + actions -->
-            <div class="pl-detail-header" data-settings-section="pipeline-stages">
-              <button class="pl-back-btn" @click="plBackToList">← Back</button>
-              <!-- Inline rename mode -->
-              <template v-if="plRenamingId === plEditingId">
-                <input v-model="plRenameText" class="pl-input pl-rename" autofocus
-                  @keyup.enter="plConfirmRename" @keyup.escape="plRenamingId = ''" />
-                <button class="ghost tiny" :disabled="plBusy" @click="plConfirmRename">✓</button>
-                <button class="ghost tiny" @click="plRenamingId = ''">✕</button>
-              </template>
-              <!-- Display mode: title + pencil icon -->
-              <template v-else>
-                <h3 class="pl-detail-title">
-                  {{ plCurrentPipeline?.name }}
-                  <button class="pl-rename-icon" :disabled="plBusy"
-                    @click="plStartRename(plEditingId, plCurrentPipeline?.name ?? '')"
-                    :title="$t('action.rename')">✎</button>
-                </h3>
-              </template>
-              <div class="pl-detail-actions">
-                <button class="pl-delete-icon"
-                  :disabled="plBusy || (pipelinesApi?.pipelines.value.length ?? 0) <= 1"
-                  :title="(pipelinesApi?.pipelines.value.length ?? 0) <= 1 ? $t('hint.at-least-one-pipeline') : $t('action.delete-pipeline')"
-                  @click="plDelete(plEditingId, plCurrentPipeline?.name ?? '')">
-                  🗑
-                </button>
-                <span v-if="plEditingId === pipelinesApi?.activePipelineId.value" class="pl-badge active">Default</span>
-                <button v-if="plEditingId !== pipelinesApi?.activePipelineId.value"
-                  class="pl-set-default-btn" :disabled="plBusy" @click="plSetActive(plEditingId)">
-                  ✓ Set as default
-                </button>
-                <span v-if="plSummary" class="pl-summary">{{ plSummary }}</span>
-                <button class="pl-run-btn"
-                  @click="emit('open-pipeline', plEditingId); emit('close')"
-                  :title="$t('action.close-settings-run')">
-                  ▶ Run
-                </button>
-              </div>
-            </div>
-
-            <!-- Stage editor for this pipeline -->
-            <div v-if="plStagesLoading" class="hint">Loading stages…</div>
-            <template v-else>
-              <div class="tab-toolbar">
-                <button class="ghost" :disabled="sExportBusy" @click="sExport">{{ sExportBusy ? '…' : '⬇ Export JSON' }}</button>
-                <button class="ghost" :disabled="sImporting" @click="sImport">{{ sImporting ? '…' : '⬆ Import JSON' }}</button>
-                <span v-if="sSummary" class="summary-ok">{{ sSummary }}</span>
-              </div>
-              <div class="split">
-                <aside class="split-list">
-                  <button class="primary new-btn" @click="sStartNew">+ Add Stage</button>
-                  <ul>
-                    <li v-for="(s, idx) in sActiveStages" :key="s.id"
-                        :class="{ active: sSelectedId === s.id && !sIsNew }"
-                        @click="sSelectStage(s.id)">
-                      <div class="row-g spread">
-                        <span class="mono-key">{{ s.id }}</span>
-                        <div class="row-g gap">
-                          <button class="icon-btn" @click.stop="sMoveUp(idx)" :disabled="idx === 0">▲</button>
-                          <button class="icon-btn" @click.stop="sMoveDown(idx)" :disabled="idx === sActiveStages.length - 1">▼</button>
-                        </div>
-                      </div>
-                      <div class="item-label">
-                        {{ s.shortTitle }}
-                        <span v-if="s.slots.some(sl => sl.isCommander)" class="manager-badge" :title="`Manager: ${s.slots.find(sl => sl.isCommander)?.label}`">🎯</span>
-                      </div>
-                      <div class="item-sub">
-                        {{ s.slots.length === 1 ? `${s.slots[0].agentKey} · ${s.slots[0].roleKey}` : `${s.slots.length} parallel slots` }}
-                      </div>
-                    </li>
-                  </ul>
-                </aside>
-                <section v-if="sDraft" class="split-detail">
-                  <div class="detail-head">
-                    <h3>{{ sIsNew ? $t('label.new-stage') : $t('label.edit-stage') }}</h3>
-                    <div class="row-g gap">
-                      <button v-if="!sIsNew" class="danger" @click="sConfirmDelete = true">{{ $t('settings.roles.delete') }}</button>
-                      <button class="primary" :disabled="!sCanSave || sSaving" @click="sSave">{{ sSaving ? $t('label.saving') : sIsNew ? $t('action.create') : $t('settings.roles.save') }}</button>
-                    </div>
-                  </div>
-                  <p v-if="sError" class="err-msg">{{ sError }}</p>
-                  <div class="two-col">
-                    <div class="field"><label class="lbl">ID</label><input v-model="sDraft.id" type="text" placeholder="e.g. 04.5" spellcheck="false" :disabled="!sIsNew" /></div>
-                    <div class="field"><label class="lbl">Short title</label><input v-model="sDraft.shortTitle" type="text" placeholder="e.g. Review" spellcheck="false" /></div>
-                  </div>
-                  <div class="field"><label class="lbl">Full title</label><input v-model="sDraft.title" type="text" spellcheck="false" /></div>
-                  <div class="two-col">
-                    <div class="field"><label class="lbl">Sentinel</label><input v-model="sDraft.sentinel" type="text" placeholder="---DONE---" spellcheck="false" /></div>
-                    <div class="field">
-                      <label class="lbl">Allow questions</label>
-                      <label class="check-row"><input type="checkbox" v-model="sDraft.allowQuestions" /><span>Pause for user answers</span></label>
-                    </div>
-                  </div>
-                  <div class="field"><label class="lbl">Context7 doc query</label><input v-model="sDraft.docQuery" type="text" placeholder="e.g. security best practices, authentication" spellcheck="false" /></div>
-                  <div class="slots-section">
-                    <div class="row-g spread">
-                      <label class="lbl">Slots <span class="slot-required">* at least one required</span></label>
-                      <button class="ghost" @click="sStartAddSlot">+ Add slot</button>
-                    </div>
-                    <p v-if="!sDraft.slots?.length" class="warn-msg">Add at least one slot before saving.</p>
-                    <template v-for="(slot, i) in sDraft.slots" :key="i">
-                      <div v-if="sEditingSlotIndex !== i" class="slot-item slot-clickable" @click="sStartEditSlot(i)">
-                        <div class="row-g spread">
-                          <span class="item-label">{{ slot.label }}<span v-if="slot.isCommander" class="manager-badge">🎯 Manager</span></span>
-                          <button class="ghost danger-link" @click.stop="sRemoveSlot(i)" :disabled="sDraft.slots.length <= 1" title="Cannot delete the last slot">✕</button>
-                        </div>
-                        <div class="item-sub">{{ slot.agentKey }} · {{ slot.roleKey }}</div>
-                      </div>
-                      <div v-else class="slot-form">
-                        <div class="two-col">
-                          <div class="field"><label class="lbl">Label</label><input v-model="sSlotDraft.label" type="text" /></div>
-                          <div class="field"><label class="lbl">Agent</label><select v-model="sSlotDraft.agentKey"><option v-for="a in AGENT_OPTIONS" :key="a.key" :value="a.key">{{ a.label }}</option></select></div>
-                        </div>
-                        <div class="field"><label class="lbl">Role key</label>
-                          <select v-model="sSlotDraft.roleKey">
-                            <option value="">(unassigned)</option>
-                            <option v-for="r in rolesApi.roles.value" :key="r.key" :value="r.key">{{ r.label }} ({{ r.key }})</option>
-                          </select>
-                        </div>
-                        <label class="check-row manager-toggle">
-                          <input type="checkbox" v-model="sSlotDraft.isCommander" />
-                          <span><strong>🎯 Designate as global manager</strong> — This slot finishes its own work, prints <code>---MANAGER-READY---</code>, then coordinates across stages. Only one manager per pipeline.</span>
-                        </label>
-                        <div class="field"><label class="lbl">Kickoff body</label><textarea v-model="sSlotDraft.kickoffBody" rows="4" spellcheck="false"></textarea></div>
-                        <div class="row-g gap">
-                          <button class="ghost" @click="sCancelAddSlot">Cancel</button>
-                          <button class="primary" @click="sSaveEditSlot">Save slot</button>
-                        </div>
-                      </div>
-                    </template>
-                    <div v-if="sAddingSlot" class="slot-form">
-                      <div class="two-col">
-                        <div class="field"><label class="lbl">Label</label><input v-model="sSlotDraft.label" type="text" /></div>
-                        <div class="field"><label class="lbl">Agent</label><select v-model="sSlotDraft.agentKey"><option v-for="a in AGENT_OPTIONS" :key="a.key" :value="a.key">{{ a.label }}</option></select></div>
-                      </div>
-                      <div class="field"><label class="lbl">Role key</label>
-                        <select v-model="sSlotDraft.roleKey">
-                          <option value="">(unassigned)</option>
-                          <option v-for="r in rolesApi.roles.value" :key="r.key" :value="r.key">{{ r.label }} ({{ r.key }})</option>
-                        </select>
-                      </div>
-                      <label class="check-row manager-toggle">
-                        <input type="checkbox" v-model="sSlotDraft.isCommander" />
-                        <span><strong>🎯 Designate as global manager</strong> — Only one per pipeline.</span>
-                      </label>
-                      <div class="field"><label class="lbl">Kickoff body</label><textarea v-model="sSlotDraft.kickoffBody" rows="4" spellcheck="false"></textarea></div>
-                      <div class="row-g gap">
-                        <button class="ghost" @click="sCancelAddSlot">Cancel</button>
-                        <button class="primary" @click="sConfirmAddSlot">Add</button>
-                      </div>
-                    </div>
-                  </div>
-                </section>
-                <section v-else class="split-detail empty-detail"><p>Select a stage or click + Add Stage</p></section>
-              </div>
-            </template>
-          </template>
-
-        </div>
-
         <!-- ══ CLI AGENTS TAB ══ -->
         <div v-show="activeTab === 'cliAgents'" class="s-body cli-agents-body">
           <h1 class="s-page-title">{{ $t('settings.nav.cliAgents') }}</h1>
@@ -3041,36 +2298,6 @@ async function plDelete(id: string, name: string) {
     </div>
 
     <!-- Confirm dialogs -->
-    <div v-if="rConfirmDelete" class="s-overlay confirm" @click.self="rConfirmDelete = false">
-      <div class="confirm-card">
-        <h3>{{ $t('settings.roles.delete-confirm-title', { label: rDraft?.label }) }}</h3>
-        <p>{{ $t('settings.roles.cannot-undo') }}</p>
-        <div class="row-g gap" style="justify-content:flex-end">
-          <button class="ghost" @click="rConfirmDelete = false">{{ $t('settings.roles.cancel') }}</button>
-          <button class="danger" @click="rDoDelete">{{ $t('action.delete') }}</button>
-        </div>
-      </div>
-    </div>
-    <div v-if="rConfirmReset" class="s-overlay confirm" @click.self="rConfirmReset = false">
-      <div class="confirm-card">
-        <h3>{{ $t('settings.roles.reset-confirm-title') }}</h3>
-        <p>{{ $t('settings.roles.reset-confirm-body') }}</p>
-        <div class="row-g gap" style="justify-content:flex-end">
-          <button class="ghost" @click="rConfirmReset = false">{{ $t('action.cancel') }}</button>
-          <button class="danger" @click="rDoReset">{{ $t('action.reset') }}</button>
-        </div>
-      </div>
-    </div>
-    <div v-if="sConfirmDelete" class="s-overlay confirm" @click.self="sConfirmDelete = false">
-      <div class="confirm-card">
-        <h3>Delete stage "{{ sDraft?.id }}"?</h3>
-        <p>This action cannot be undone.</p>
-        <div class="row-g gap" style="justify-content:flex-end">
-          <button class="ghost" @click="sConfirmDelete = false">Cancel</button>
-          <button class="danger" @click="sDoDelete">Delete</button>
-        </div>
-      </div>
-    </div>
     <div v-if="false" class="s-overlay confirm">
     </div>
   </Teleport>
@@ -3502,16 +2729,6 @@ async function plDelete(id: string, name: string) {
 }
 .settings-path-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
-/* ── Toolbar inside tab ───────────────────────────────────────────────────── */
-.tab-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 22px;
-  border-bottom: 1px solid var(--border-muted);
-  flex-shrink: 0;
-}
-.tab-toolbar button { font-size: 11px; padding: 5px 10px; }
 button.tiny {
   padding: 3px 7px;
   font-size: 10.5px;
@@ -3531,62 +2748,6 @@ button.tiny {
   border-radius: 6px;
 }
 
-/* ── Split layout (list + detail) ─────────────────────────────────────────── */
-.split {
-  flex: 1;
-  display: grid;
-  grid-template-columns: 240px minmax(0, 1fr);
-  min-height: 0;
-}
-.split-list {
-  display: flex;
-  flex-direction: column;
-  border-right: 1px solid var(--border-muted);
-  background: var(--bg-inset);
-  overflow-y: auto;
-  min-height: 0;
-}
-.split-list .new-btn { margin: 10px 10px 6px; font-size: 12px; }
-.split-list ul { list-style: none; margin: 0; padding: 0; }
-.split-list li { padding: 9px 12px; border-bottom: 1px solid var(--bg-subtle); cursor: pointer; }
-.split-list li:hover { background: var(--bg-subtle); }
-.split-list li.active { background: var(--accent-muted); }
-.split-detail { padding: 14px 18px; overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: 10px; }
-.empty-detail { align-items: center; justify-content: center; color: var(--text-muted); }
-
-/* ── Roles tab polish (scoped; pipelines tab keeps base styles) ───────────── */
-.roles-body .split-list { padding: 0 8px 8px; }
-.roles-body .split-list .new-btn { margin: 10px 2px 8px; border-radius: 6px; }
-.roles-body .split-list ul { display: flex; flex-direction: column; gap: 2px; }
-.roles-body .split-list li {
-  padding: 8px 10px;
-  border-bottom: none;
-  border-radius: 6px;
-  border-left: 2px solid transparent;
-}
-.roles-body .split-list li.active {
-  background: var(--accent-muted);
-  border-left-color: var(--accent-emphasis);
-}
-.roles-body .mono-key { background: var(--bg-muted); padding: 1px 6px; border-radius: 4px; }
-.roles-body .badge {
-  background: color-mix(in srgb, var(--accent-fg) 12%, transparent);
-  color: var(--accent-fg);
-  border-radius: 999px;
-  padding: 1px 7px;
-}
-.roles-body .item-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.roles-body .detail-head {
-  justify-content: space-between;
-  padding-bottom: 10px;
-  border-bottom: 1px solid var(--border-muted);
-}
-.roles-body .detail-head h3 { font-size: 15px; }
-.roles-body .split-detail { gap: 12px; }
-.roles-body .empty-detail { gap: 10px; }
-.roles-body .empty-glyph { font-size: 30px; opacity: 0.3; line-height: 1; }
-.roles-body .empty-detail p { margin: 0; font-size: 12px; }
-
 /* ── Fields ───────────────────────────────────────────────────────────────── */
 .field { display: flex; flex-direction: column; gap: 4px; }
 .lbl { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-secondary); }
@@ -3604,23 +2765,11 @@ input[type='text'], input[type='email'], input[type='number'], textarea, select 
 textarea { font-family: Menlo, Monaco, monospace; resize: vertical; line-height: 1.5; }
 input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent-emphasis); }
 input:disabled { opacity: 0.5; cursor: not-allowed; }
-.two-col { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
-.detail-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
-.detail-head h3 { margin: 0; font-size: 14px; }
-.check-row { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; user-select: none; }
-.check-row input[type='checkbox'] { width: 14px; height: 14px; accent-color: var(--accent-fg); }
 
 /* ── List items ───────────────────────────────────────────────────────────── */
 .row-g { display: flex; align-items: center; gap: 6px; }
 .row-g.gap { gap: 8px; }
-.row-g.spread { justify-content: space-between; }
-.mono-key { font-family: Menlo, Monaco, monospace; font-size: 10px; color: var(--accent-bright); }
 .badge { background: var(--bg-muted); color: var(--text-secondary); font-size: 9px; padding: 1px 5px; border-radius: 3px; }
-.item-label { font-weight: 600; font-size: 12px; margin-top: 2px; }
-.item-sub { color: var(--text-secondary); font-size: 11px; margin-top: 1px; }
-.icon-btn { border: 1px solid var(--border-default); background: var(--bg-muted); color: var(--text-secondary); font-size: 10px; padding: 2px 6px; border-radius: 3px; cursor: pointer; }
-.icon-btn:hover:not(:disabled) { background: var(--border-default); color: var(--text-bright); }
-.icon-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 
 /* ── Buttons ──────────────────────────────────────────────────────────────── */
 button {
@@ -3639,27 +2788,10 @@ button.danger { background: var(--danger-deep); border-color: var(--danger-muted
 button.danger:hover { background: var(--danger-muted); }
 button.ghost { background: transparent; }
 button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
-.danger-link { color: var(--danger-fg); border-color: transparent; background: transparent; }
-.danger-link:hover { background: color-mix(in srgb, var(--danger-fg) 10%, transparent) !important; }
 
 /* ── Messages ─────────────────────────────────────────────────────────────── */
 .err-msg { color: var(--danger-fg); font-size: 11px; margin: 0; }
-.warn-msg { color: var(--attention-fg); font-size: 11px; margin: 0; }
 .hint-msg { color: var(--text-secondary); font-size: 11px; margin: 0; }
-
-/* ── Manager designation (per-slot) ───────────────────────────────────────── */
-.manager-toggle { font-size: 11px; line-height: 1.55; padding: 6px 8px; border: 1px solid color-mix(in srgb, var(--manager-fg) 25%, transparent); border-radius: 6px; background: color-mix(in srgb, var(--manager-fg) 4%, transparent); }
-.manager-toggle strong { color: var(--manager-fg); }
-.manager-toggle code { background: var(--bg-subtle); padding: 1px 4px; border-radius: 3px; font-size: 10px; color: var(--text-bright); }
-.manager-badge { font-size: 9px; color: var(--manager-fg); background: color-mix(in srgb, var(--manager-fg) 12%, transparent); border: 1px solid color-mix(in srgb, var(--manager-fg) 30%, transparent); border-radius: 8px; padding: 1px 6px; margin-left: 6px; font-weight: 600; }
-
-/* ── Slots ────────────────────────────────────────────────────────────────── */
-.slots-section { border-top: 1px solid var(--border-muted); padding-top: 10px; display: flex; flex-direction: column; gap: 6px; }
-.slot-required { color: var(--danger-fg); font-size: 9px; font-weight: 400; text-transform: none; margin-left: 4px; }
-.slot-item { background: var(--bg-subtle); border: 1px solid var(--border-muted); border-radius: 6px; padding: 8px 10px; }
-.slot-clickable { cursor: pointer; transition: border-color 0.15s; }
-.slot-clickable:hover { border-color: var(--accent-focus); }
-.slot-form { background: var(--bg-base); border: 1px solid var(--border-default); border-radius: 6px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
 
 /* ── Appearance tab ─────────────────────────────────────────────────────────── */
 .appearance-body { overflow-y: auto; }
@@ -3843,19 +2975,6 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 .mcp-custom-form > p { margin: 0; color: var(--text-secondary); font-size: 11px; line-height: 1.5; }
 .mcp-custom-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
-/* ── Confirm dialog ───────────────────────────────────────────────────────── */
-.confirm-card {
-  background: var(--bg-base);
-  color: var(--text-bright);
-  border: 1px solid var(--border-default);
-  border-radius: 8px;
-  padding: 20px 24px;
-  max-width: 400px;
-  width: 90%;
-}
-.confirm-card h3 { margin: 0 0 8px; font-size: 14px; }
-.confirm-card p { font-size: 12px; color: var(--text-primary); margin: 0 0 16px; }
-
 /* ── Analyzer tab ─────────────────────────────────────────────────────────── */
 .analyzer-body { display: flex; flex-direction: column; gap: 0; overflow-y: auto; padding: 0; }
 
@@ -4029,79 +3148,6 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
   border-radius: 10px;
   font-size: 11px;
 }
-/* ── Pipelines tab ─────────────────────────────────────────────────────────── */
-.pipelines-body { display: flex; flex-direction: column; gap: 12px; overflow: hidden; }
-/* The 12px flex gap already sits below the title, so trim its margin to keep the
-   title→content gap at --space-group like every other tab. */
-.pipelines-body > .s-page-title { margin-bottom: calc(var(--space-group) - 12px); }
-.pl-create-row { display: flex; gap: 6px; align-items: center; padding: 0 22px; }
-/* Empty/loading placeholders in this tab are bare <p>/<div>; give them the same
-   gutter as the list so they are not flush against the modal edge. */
-.pipelines-body > .hint { padding: 0 22px; }
-.pl-input {
-  background: var(--bg-inset); border: 1px solid var(--accent-emphasis); border-radius: 4px;
-  color: var(--text-bright); font-size: 12px; padding: 5px 8px; flex: 1;
-}
-.pl-rename { max-width: 180px; }
-.pl-list { list-style: none; margin: 0; padding: 0 22px; display: flex; flex-direction: column; gap: 6px; overflow-y: auto; min-height: 0; }
-.pl-item {
-  background: var(--bg-subtle); border: 1px solid var(--border-muted); border-radius: 6px;
-  padding: 10px 12px; display: flex; flex-direction: column; gap: 6px;
-}
-.pl-item.pl-active { border-color: var(--accent-emphasis); background: var(--accent-subtle); }
-.pl-item-main { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.pl-name { font-size: 13px; font-weight: 600; color: var(--text-bright); flex: 1; }
-.pl-active .pl-name { color: var(--accent-bright); }
-.pl-meta { font-size: 11px; color: var(--text-muted); }
-.pl-badge { font-size: 11px; padding: 3px 10px; border-radius: 20px; font-weight: 600; letter-spacing: 0.02em; }
-.pl-badge.active { background: color-mix(in srgb, var(--success-fg) 12%, transparent); color: var(--success-fg); border: 1px solid color-mix(in srgb, var(--success-strong) 45%, transparent); }
-.pl-item-actions { display: flex; gap: 6px; flex-wrap: wrap; }
-.pl-summary { font-size: 12px; color: var(--success-fg); }
-.pl-enter { color: var(--text-muted); font-size: 14px; }
-.pl-item:hover .pl-enter { color: var(--text-bright); }
-.pl-item { cursor: pointer; }
-.pl-back-btn {
-  display: inline-flex; align-items: center; gap: 4px;
-  background: transparent; border: 1px solid var(--border-default); border-radius: 6px;
-  color: var(--text-secondary); font-size: 12px; padding: 4px 10px; cursor: pointer;
-  transition: color 0.15s, background 0.15s, border-color 0.15s;
-}
-.pl-back-btn:hover { color: var(--text-bright); background: var(--bg-muted); border-color: var(--border-strong); }
-.pl-set-default-btn {
-  display: inline-flex; align-items: center; gap: 3px;
-  background: transparent; border: 1px solid var(--border-default); border-radius: 6px;
-  color: var(--text-secondary); font-size: 12px; padding: 4px 10px; cursor: pointer;
-  transition: color 0.15s, background 0.15s, border-color 0.15s;
-}
-.pl-set-default-btn:hover:not(:disabled) { color: var(--success-fg); background: color-mix(in srgb, var(--success-fg) 8%, transparent); border-color: color-mix(in srgb, var(--success-fg) 35%, transparent); }
-.pl-set-default-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.pl-run-btn {
-  display: inline-flex; align-items: center; gap: 5px;
-  background: color-mix(in srgb, var(--success-emphasis) 90%, transparent); border: 1px solid var(--success-fg); border-radius: 6px;
-  color: var(--text-on-emphasis); font-size: 12px; font-weight: 600; letter-spacing: 0.02em;
-  padding: 5px 14px; cursor: pointer;
-  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
-}
-.pl-run-btn:hover { background: var(--success-strong); border-color: var(--success-bright); box-shadow: 0 0 0 3px color-mix(in srgb, var(--success-fg) 18%, transparent); }
-.pl-delete-icon {
-  background: none; border: 1px solid transparent; cursor: pointer;
-  color: var(--text-muted); font-size: 14px; padding: 4px 6px; border-radius: 5px;
-  opacity: 0.55; transition: opacity 0.15s, color 0.15s, background 0.15s, border-color 0.15s;
-}
-.pl-delete-icon:hover:not(:disabled) { opacity: 1; color: var(--danger-fg); background: color-mix(in srgb, var(--danger-fg) 8%, transparent); border-color: color-mix(in srgb, var(--danger-fg) 20%, transparent); }
-.pl-delete-icon:disabled { opacity: 0.2; cursor: not-allowed; }
-.pl-detail-header {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  padding: 4px 22px 12px; border-bottom: 1px solid var(--border-muted); margin-bottom: 6px; min-height: 36px;
-}
-.pl-detail-title { font-size: 15px; font-weight: 600; color: var(--accent-bright); margin: 0; flex: 1; display: flex; align-items: center; gap: 6px; }
-.pl-rename-icon {
-  background: none; border: none; cursor: pointer; color: var(--text-secondary);
-  font-size: 13px; padding: 2px 5px; border-radius: 4px; line-height: 1;
-  opacity: 0.75; transition: opacity 0.15s, color 0.15s, background 0.15s;
-}
-.pl-rename-icon:hover { opacity: 1; color: var(--text-bright); background: var(--bg-muted); }
-.pl-detail-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-left: auto; }
 
 .ai-chat-key-row { display: flex; gap: 8px; align-items: center; }
 .az-key-table { width: 100%; border-collapse: collapse; }
