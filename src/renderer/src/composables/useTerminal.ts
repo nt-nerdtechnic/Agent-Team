@@ -150,6 +150,22 @@ export function encodeShiftEnter(agentKey?: string): string {
 
 export type TerminalStatus = 'idle' | 'starting' | 'running' | 'exited' | 'error' | 'stopped'
 
+// The reattach key (`terminal-pty:<resumeKey>`) follows the CLI's session id,
+// but a CLI rewrites its session id on every resume (claude --resume A records
+// a NEW session B). Carry the live PTY id over to the rotated key — otherwise
+// the next restore can't find the running PTY, spawns a second CLI, and the
+// old one lingers detached until the backend janitor reaps it.
+export function migrateTerminalPtyKey(oldKey: string, newKey: string): void {
+  if (!oldKey || !newKey || oldKey === newKey) return
+  try {
+    const pty = localStorage.getItem(`terminal-pty:${oldKey}`)
+    if (pty) {
+      localStorage.setItem(`terminal-pty:${newKey}`, pty)
+      localStorage.removeItem(`terminal-pty:${oldKey}`)
+    }
+  } catch { /* ignore */ }
+}
+
 // Cached dimensions from any visible terminal. Hidden resumed tabs use these
 // to start their PTY immediately at the correct layout size without waiting
 // for the user to switch to them.
@@ -1771,6 +1787,9 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // opts.resumeKey (the stable CLI session id) — the paneId is regenerated on
   // restore and would never match.
   let persistKey = paneId
+  // Previous PTY id snapshotted at spawn() time (before tryReattach can clear
+  // it) — sent as replaces_terminal_id so the backend reaps the predecessor.
+  let replacesPtyId = ''
   function ptyKey(): string { return `terminal-pty:${persistKey}` }
   function rememberSessionId(id: string): void {
     try {
@@ -2210,6 +2229,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         metadata: opts.metadata ?? null,
         output_log_file: opts.outputLogFile ?? null,
         login_profile_id: opts.loginProfileId ?? null,
+        replaces_terminal_id: replacesPtyId || null,
       }, TERMINAL_CREATE_TIMEOUT_MS)
       // A cancellation or replacement can land while the RPC is in flight.
       // The backend cancellation owns rollback; a late result must never bind
@@ -2352,6 +2372,11 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // Use the stable CLI session id as the reattach key when provided, so the
     // lookup below survives a reload (paneId does not).
     if (opts.resumeKey) persistKey = opts.resumeKey
+    // Snapshot the pane's previous PTY id NOW — tryReattach clears it when the
+    // PTY is gone. Passed to terminal.create as replaces_terminal_id so the
+    // backend reaps a still-live predecessor this spawn is replacing (resume-id
+    // dedup can't: the id rotates on every resume, so it never matches).
+    replacesPtyId = persistedSessionId()
     // True persistence: a PTY from before a reload may still be running. Reattach
     // to it (recovering bash/build panes too, with no --resume round-trip) before
     // spawning anew. Falls through to a fresh spawn if the PTY is gone.

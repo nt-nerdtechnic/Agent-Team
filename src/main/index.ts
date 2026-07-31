@@ -1852,7 +1852,9 @@ async function teardownBackendAndQuit(): Promise<void> {
   // A user-initiated quit is a clean exit — nothing to restore next launch.
   windowRegistry.markCleanExit()
   // Never let a wedged/slow backend block quit: cap every wait below.
-  const forced = new Promise<void>((r) => setTimeout(r, 3000))
+  // Must exceed backend.stop()'s 5s SIGTERM grace, or the cap SIGKILLs the
+  // backend mid-shutdown-sweep and orphans every PTY child.
+  const forced = new Promise<void>((r) => setTimeout(r, 6000))
   // If the backend is still spawning (quit mid-startup), wait for it (capped) so
   // we can stop it rather than orphan the process.
   if (!backend && backendStarting) await Promise.race([backendStarting, forced])

@@ -21,6 +21,7 @@ import TokenStatsPanel from './components/TokenStatsPanel.vue'
 import NotificationHost from './components/NotificationHost.vue'
 import Welcome from './components/Welcome.vue'
 import { useNotify } from './composables/useNotify'
+import { migrateTerminalPtyKey } from './composables/useTerminal'
 import { useAgentMessaging, isBroadcastTarget } from './composables/useAgentMessaging'
 import { MSG_ENVELOPE_PREFIX, parseMessages, parseSpawns, renderSpawnKickoff } from './lib/agentMessaging'
 import { evaluateTurnSpawns, computeSpawnDepth } from './lib/agentSpawnGate'
@@ -3253,9 +3254,19 @@ async function dispatchPlanToPane(relPath: string, agentKey: string): Promise<Pl
     await waitForStartupActivity(paneId)
   }
   await waitForQuiet(paneId, 1000, 8000)
-  if (!paneAlive(paneId)) return { ok: false, reason: 'pane-exited' }
+  // Failed dispatch rolls the spawn back (kill PTY + undo manual_pane.spawn)
+  // — mirrors the backend's terminal.create rollback; without it the pane and
+  // its CLI linger with nothing to do.
+  if (!paneAlive(paneId)) {
+    await onKill(paneId)
+    return { ok: false, reason: 'pane-exited' }
+  }
   const injected = await injectPane(paneId, prompt, 'plan-execute', true)
-  return injected ? { ok: true } : { ok: false, reason: 'inject-failed' }
+  if (!injected) {
+    await onKill(paneId)
+    return { ok: false, reason: 'inject-failed' }
+  }
+  return { ok: true }
 }
 
 // Resume an existing agent session by id (Manual Spawn → Resume button). Reuses
@@ -6800,6 +6811,11 @@ backend.on('session.detected', (raw) => {
   if (!pane) return
   const sessionId = normalizeResumeSessionId(pane.agentKey, ev.session_id)
   if (!sessionId) return
+  // The CLI rotated its session id (e.g. claude --resume records a NEW id).
+  // The reattach key follows pinnedSessionId — carry the live PTY id to the
+  // new key so the next restore reattaches instead of spawning a second CLI
+  // beside the still-running one.
+  migrateTerminalPtyKey(pane.pinnedSessionId ?? '', sessionId)
   pane.pinnedSessionId = sessionId
   pane.sessionOnDisk = true
   // The detected id IS the pane's real session — a restore-pinned placeholder

@@ -137,10 +137,13 @@ export async function startBackend(healthCheckTimeoutMs = 45_000): Promise<Backe
         // before this listener attached (e.g. the backend crashed, which is why
         // the UI was stuck "connecting…"), 'exit' never fires again — so the
         // timeout below must resolve unconditionally, or app quit hangs forever.
+        // 5s: the backend's shutdown sweep (kill_all — one ps snapshot + 1s
+        // grace + watcher/MCP teardown) must finish, or every PTY child is
+        // orphaned; 2s cut it off on many-pane workspaces.
         const timer = setTimeout(() => {
           if (proc.exitCode === null) proc.kill('SIGKILL')
           resolve()
-        }, 2000)
+        }, 5000)
         proc.once('exit', () => {
           clearTimeout(timer)
           resolve()
