@@ -89,9 +89,8 @@ def _write(path: Path, text: str) -> None:
     ("claude", ".claude/.credentials.json"),
 ])
 def test_capture_and_restore_round_trip(tmp_path: Path, agent_key: str, live_rel: str) -> None:
-    # __default__ is the slot that owns the live location for every agent
-    # (a managed claude profile keeps its secret in its own profile home —
-    # see test_switch_to_managed_claude_profile_keeps_live_secret).
+    # Every agent follows the same model: the active account's secret lives in
+    # the live location and the slots are cold backups.
     vault = _file_vault(tmp_path)
     live = tmp_path / "home" / live_rel
     _write(live, '{"who": "acct-a"}')
@@ -223,128 +222,11 @@ def test_claude_oauth_account_round_trip(tmp_path: Path) -> None:
     assert config["theme"] == "dark"
 
 
-# ── managed claude profiles keep their token out of the live location ───────
-#
-# Claude Code serializes OAuth refreshes per CLAUDE_CONFIG_DIR and rotates
-# refresh tokens without a grace period, so the same token present in both the
-# real home and a profile home is refreshed twice by locks that cannot see each
-# other and one side ends up dead ("Login expired").
+# ── claude follows the same live↔slot swap model as every other agent ───────
 
 
 def _claude_live_file(tmp_path: Path) -> Path:
     return tmp_path / "home" / ".claude" / ".credentials.json"
-
-
-def test_switch_to_managed_claude_profile_keeps_live_secret(tmp_path: Path) -> None:
-    """Switching to a managed profile publishes only its display-only account:
-    the live secret (the default account's own token) must stay untouched, and
-    the profile's token must never be copied there."""
-    vault = _file_vault(tmp_path)
-    live = _claude_live_file(tmp_path)
-    _write(live, "DEFAULT-TOKEN")
-    _write(
-        tmp_path / "home" / ".claude.json",
-        json.dumps({"oauthAccount": {"emailAddress": "default@x.com"}, "theme": "dark"}),
-    )
-    vault.write_slot(
-        "claude", "acct1",
-        LiveCredentials(secret="ACCT1-TOKEN", account={"emailAddress": "acct1@x.com"}),
-    )
-
-    vault.switch("claude", DEFAULT_SLOT_ID, "acct1")
-
-    assert live.read_text(encoding="utf-8") == "DEFAULT-TOKEN"
-    assert vault.read_slot("claude", DEFAULT_SLOT_ID).secret == "DEFAULT-TOKEN"
-    config = json.loads((tmp_path / "home" / ".claude.json").read_text(encoding="utf-8"))
-    assert config["oauthAccount"] == {"emailAddress": "acct1@x.com"}
-    assert config["theme"] == "dark"
-
-
-def test_mac_switch_to_managed_claude_profile_keeps_live_keychain_item(
-    tmp_path: Path,
-) -> None:
-    vault, sec = _mac_vault(tmp_path)
-    sec.items[CLAUDE_LIVE_KEYCHAIN_SERVICE] = "DEFAULT-TOKEN"
-    vault.write_slot("claude", "acct1", LiveCredentials(secret="ACCT1-TOKEN"))
-
-    vault.switch("claude", DEFAULT_SLOT_ID, "acct1")
-
-    assert sec.items[CLAUDE_LIVE_KEYCHAIN_SERVICE] == "DEFAULT-TOKEN"
-    assert sec.items["Navide CLI account claude-acct1"] == "ACCT1-TOKEN"
-
-
-def test_capture_managed_claude_profile_reads_profile_home(tmp_path: Path) -> None:
-    """The profile's panes refresh their token inside the profile home, so a
-    capture must snapshot that token — not the live one, which belongs to the
-    default account — while the account display still comes from live."""
-    vault = _file_vault(tmp_path)
-    _write(_claude_live_file(tmp_path), "DEFAULT-TOKEN")
-    _write(
-        tmp_path / "home" / ".claude.json",
-        '{"oauthAccount": {"emailAddress": "acct1@x.com"}}',
-    )
-    vault.write_slot("claude", "acct1", LiveCredentials(secret="OLD-SNAPSHOT"))
-    _write(vault.profile_home_path("claude", "acct1") / ".credentials.json", "REFRESHED")
-
-    captured = vault.capture("claude", "acct1")
-
-    assert captured.secret == "REFRESHED"
-    slot = vault.read_slot("claude", "acct1")
-    assert slot.secret == "REFRESHED"
-    assert slot.account == {"emailAddress": "acct1@x.com"}
-
-
-def test_capture_managed_claude_profile_never_imports_live_secret(tmp_path: Path) -> None:
-    """No pane has run for this profile yet (empty profile home): the slot
-    keeps its own snapshot instead of adopting the live account's token."""
-    vault = _file_vault(tmp_path)
-    _write(_claude_live_file(tmp_path), "DEFAULT-TOKEN")
-    vault.write_slot("claude", "acct1", LiveCredentials(secret="ACCT1-TOKEN"))
-
-    assert vault.capture("claude", "acct1").secret == "ACCT1-TOKEN"
-    assert vault.read_slot("claude", "acct1").secret == "ACCT1-TOKEN"
-
-
-def test_harvest_managed_claude_profile_reads_profile_home(tmp_path: Path) -> None:
-    vault = _file_vault(tmp_path)
-    _write(_claude_live_file(tmp_path), "DEFAULT-TOKEN")
-
-    # Never signed in: the live default token must not leak into the slot.
-    assert vault.harvest("claude", "acct1") is False
-    assert vault.slot_is_empty("claude", "acct1")
-
-    _write(vault.profile_home_path("claude", "acct1") / ".credentials.json", "PANE-LOGIN")
-    assert vault.harvest("claude", "acct1") is True
-    assert vault.read_slot("claude", "acct1").secret == "PANE-LOGIN"
-
-
-def test_switch_back_to_default_restores_live_and_captures_profile_home(
-    tmp_path: Path,
-) -> None:
-    """__default__ still owns the live location: a round trip republishes its
-    snapshot verbatim, while the outgoing profile's refreshed token is captured
-    from its profile home."""
-    vault = _file_vault(tmp_path)
-    live = _claude_live_file(tmp_path)
-    _write(live, "DEFAULT-TOKEN")
-    _write(
-        tmp_path / "home" / ".claude.json",
-        '{"oauthAccount": {"emailAddress": "default@x.com"}}',
-    )
-    vault.write_slot(
-        "claude", "acct1",
-        LiveCredentials(secret="ACCT1-TOKEN", account={"emailAddress": "acct1@x.com"}),
-    )
-
-    vault.switch("claude", DEFAULT_SLOT_ID, "acct1")
-    # A pane of acct1 refreshes the token inside the profile home.
-    _write(vault.profile_home_path("claude", "acct1") / ".credentials.json", "ACCT1-REFRESHED")
-    vault.switch("claude", "acct1", DEFAULT_SLOT_ID)
-
-    assert live.read_text(encoding="utf-8") == "DEFAULT-TOKEN"
-    assert vault.read_slot("claude", "acct1").secret == "ACCT1-REFRESHED"
-    config = json.loads((tmp_path / "home" / ".claude.json").read_text(encoding="utf-8"))
-    assert config["oauthAccount"] == {"emailAddress": "default@x.com"}
 
 
 def _claude_secret(token: str, expires_at: object | None = None) -> str:
@@ -359,107 +241,87 @@ def _oauth_account(tmp_path: Path) -> object:
     return config.get("oauthAccount")
 
 
-def _seed_default_restore(
-    tmp_path: Path, *, live: str | None, slot: str | None
-) -> CredentialVault:
-    """A managed profile is active; restoring __default__ brings the built-in
-    login back. ``live`` is what the default account's own storage holds now,
-    ``slot`` the snapshot taken when the user switched away."""
+def test_claude_switch_live_slot_round_trip(tmp_path: Path) -> None:
+    """Switching to a managed claude profile swaps the live secret exactly
+    like any other agent: the default login is parked in __default__ and the
+    profile's slot secret + display account are published to the live
+    location; switching back reverses it verbatim."""
     vault = _file_vault(tmp_path)
-    if live is not None:
-        _write(_claude_live_file(tmp_path), live)
+    live = _claude_live_file(tmp_path)
+    _write(live, "DEFAULT-TOKEN")
     _write(
         tmp_path / "home" / ".claude.json",
-        '{"oauthAccount": {"emailAddress": "acct1@x.com"}, "theme": "dark"}',
+        json.dumps({"oauthAccount": {"emailAddress": "default@x.com"}, "theme": "dark"}),
     )
     vault.write_slot(
-        "claude", DEFAULT_SLOT_ID,
-        LiveCredentials(secret=slot, account={"emailAddress": "default@x.com"}),
-    )
-    return vault
-
-
-def test_restore_default_keeps_fresher_live_secret(tmp_path: Path) -> None:
-    """An unmanaged pane refreshed the default account's token in place while a
-    managed profile was active, so the snapshot is stale. Republishing it would
-    rotate-kill the account; only the display-only account is published."""
-    vault = _seed_default_restore(
-        tmp_path, live=_claude_secret("ROTATED", 2000), slot=_claude_secret("STALE", 1000)
+        "claude", "acct1",
+        LiveCredentials(secret="ACCT1-TOKEN", account={"emailAddress": "acct1@x.com"}),
     )
 
-    vault.restore("claude", DEFAULT_SLOT_ID)
+    vault.switch("claude", DEFAULT_SLOT_ID, "acct1")
 
-    assert _claude_live_file(tmp_path).read_text(encoding="utf-8") == \
-        _claude_secret("ROTATED", 2000)
+    assert live.read_text(encoding="utf-8") == "ACCT1-TOKEN"
+    default_slot = vault.read_slot("claude", DEFAULT_SLOT_ID)
+    assert default_slot.secret == "DEFAULT-TOKEN"
+    assert default_slot.account == {"emailAddress": "default@x.com"}
+    config = json.loads((tmp_path / "home" / ".claude.json").read_text(encoding="utf-8"))
+    assert config["oauthAccount"] == {"emailAddress": "acct1@x.com"}
+    assert config["theme"] == "dark"
+
+    vault.switch("claude", "acct1", DEFAULT_SLOT_ID)
+
+    assert live.read_text(encoding="utf-8") == "DEFAULT-TOKEN"
+    acct1_slot = vault.read_slot("claude", "acct1")
+    assert acct1_slot.secret == "ACCT1-TOKEN"
+    assert acct1_slot.account == {"emailAddress": "acct1@x.com"}
     assert _oauth_account(tmp_path) == {"emailAddress": "default@x.com"}
 
 
-def test_restore_default_keeps_live_secret_on_equal_expiry(tmp_path: Path) -> None:
-    """Equal expiry means live is not older, so it is kept — the same >=
-    comparison the profile-home seeding path uses."""
-    vault = _seed_default_restore(
-        tmp_path, live=_claude_secret("LIVE", 1500), slot=_claude_secret("SNAPSHOT", 1500)
+def test_mac_claude_switch_moves_secret_into_live_keychain(tmp_path: Path) -> None:
+    vault, sec = _mac_vault(tmp_path)
+    sec.items[CLAUDE_LIVE_KEYCHAIN_SERVICE] = "DEFAULT-TOKEN"
+    vault.write_slot("claude", "acct1", LiveCredentials(secret="ACCT1-TOKEN"))
+
+    vault.switch("claude", DEFAULT_SLOT_ID, "acct1")
+
+    assert sec.items[CLAUDE_LIVE_KEYCHAIN_SERVICE] == "ACCT1-TOKEN"
+    assert sec.items["Navide CLI account claude-__default__"] == "DEFAULT-TOKEN"
+
+    vault.switch("claude", "acct1", DEFAULT_SLOT_ID)
+
+    assert sec.items[CLAUDE_LIVE_KEYCHAIN_SERVICE] == "DEFAULT-TOKEN"
+    assert sec.items["Navide CLI account claude-acct1"] == "ACCT1-TOKEN"
+
+
+def test_restore_overwrites_live_with_slot_snapshot(tmp_path: Path) -> None:
+    """restore() publishes the incoming slot unconditionally, even when the
+    live token carries a newer expiry: the two secrets belong to DIFFERENT
+    accounts, so a freshness comparison would be meaningless — and the
+    outgoing account's live state was already captured into its own slot."""
+    vault = _file_vault(tmp_path)
+    _write(_claude_live_file(tmp_path), _claude_secret("OUTGOING", 2000))
+    _write(
+        tmp_path / "home" / ".claude.json",
+        '{"oauthAccount": {"emailAddress": "out@x.com"}, "theme": "dark"}',
+    )
+    vault.write_slot(
+        "claude", "acct1",
+        LiveCredentials(
+            secret=_claude_secret("INCOMING", 1000),
+            account={"emailAddress": "in@x.com"},
+        ),
     )
 
-    vault.restore("claude", DEFAULT_SLOT_ID)
+    vault.restore("claude", "acct1")
 
     assert _claude_live_file(tmp_path).read_text(encoding="utf-8") == \
-        _claude_secret("LIVE", 1500)
-    assert _oauth_account(tmp_path) == {"emailAddress": "default@x.com"}
-
-
-def test_restore_default_publishes_newer_slot_secret(tmp_path: Path) -> None:
-    """The ordinary case: the snapshot is newer than what is live (e.g. a fresh
-    re-login was harvested into the slot), so it is published."""
-    vault = _seed_default_restore(
-        tmp_path, live=_claude_secret("OLD", 1000), slot=_claude_secret("RELOGIN", 2000)
-    )
-
-    vault.restore("claude", DEFAULT_SLOT_ID)
-
-    assert _claude_live_file(tmp_path).read_text(encoding="utf-8") == \
-        _claude_secret("RELOGIN", 2000)
-    assert _oauth_account(tmp_path) == {"emailAddress": "default@x.com"}
-
-
-def test_restore_default_rescues_missing_live_secret(tmp_path: Path) -> None:
-    """The live credential is gone (an external `claude logout`, a wiped
-    Keychain item): the snapshot is the only rescue path and must be written."""
-    vault = _seed_default_restore(tmp_path, live=None, slot=_claude_secret("SNAPSHOT", 1000))
-
-    vault.restore("claude", DEFAULT_SLOT_ID)
-
-    assert _claude_live_file(tmp_path).read_text(encoding="utf-8") == \
-        _claude_secret("SNAPSHOT", 1000)
-    assert _oauth_account(tmp_path) == {"emailAddress": "default@x.com"}
-
-
-def test_restore_default_writes_when_expiry_unparsable(tmp_path: Path) -> None:
-    """No comparable expiry (not JSON, or no claudeAiOauth.expiresAt) means the
-    freshness question cannot be answered — stay conservative and publish."""
-    vault = _seed_default_restore(
-        tmp_path, live="not-json", slot=_claude_secret("SNAPSHOT", 1000)
-    )
-
-    vault.restore("claude", DEFAULT_SLOT_ID)
-
-    assert _claude_live_file(tmp_path).read_text(encoding="utf-8") == \
-        _claude_secret("SNAPSHOT", 1000)
-
-    vault = _seed_default_restore(
-        tmp_path, live=_claude_secret("LIVE", 2000), slot=_claude_secret("SNAPSHOT")
-    )
-
-    vault.restore("claude", DEFAULT_SLOT_ID)
-
-    assert _claude_live_file(tmp_path).read_text(encoding="utf-8") == \
-        _claude_secret("SNAPSHOT")
+        _claude_secret("INCOMING", 1000)
+    assert _oauth_account(tmp_path) == {"emailAddress": "in@x.com"}
 
 
 def test_restore_empty_default_slot_still_clears_live(tmp_path: Path) -> None:
-    """The guard never changes the logged-out semantics: an empty __default__
-    slot still clears the live credentials and the account display, however
-    fresh the live secret is."""
+    """Logged-out semantics: an empty __default__ slot clears the live
+    credentials and the account display, however fresh the live secret is."""
     vault = _file_vault(tmp_path)
     _write(_claude_live_file(tmp_path), _claude_secret("LIVE", 2000))
     _write(
@@ -475,32 +337,18 @@ def test_restore_empty_default_slot_still_clears_live(tmp_path: Path) -> None:
     assert config["theme"] == "dark"
 
 
-def test_mac_restore_default_keeps_fresher_live_keychain_item(tmp_path: Path) -> None:
-    vault, sec = _mac_vault(tmp_path)
-    sec.items[CLAUDE_LIVE_KEYCHAIN_SERVICE] = _claude_secret("ROTATED", 2000)
-    vault.write_slot(
-        "claude", DEFAULT_SLOT_ID, LiveCredentials(secret=_claude_secret("STALE", 1000))
-    )
-
-    vault.restore("claude", DEFAULT_SLOT_ID)
-
-    assert sec.items[CLAUDE_LIVE_KEYCHAIN_SERVICE] == _claude_secret("ROTATED", 2000)
-
-
-def test_switch_rollback_from_managed_profile_keeps_live_secret(
+def test_claude_switch_rollback_restores_live_secret(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A failed restore must not write the outgoing profile's token into the
-    live location — that would plant the very duplicate this split prevents.
-    Only the display-only account reverts to the still-active profile."""
+    """A failed restore writes the captured outgoing state (secret + display
+    account) back to the live location — same rollback as every other agent."""
     vault = _file_vault(tmp_path)
     live = _claude_live_file(tmp_path)
-    _write(live, "DEFAULT-TOKEN")
+    _write(live, "ACCT1-TOKEN")
     _write(
         tmp_path / "home" / ".claude.json",
         '{"oauthAccount": {"emailAddress": "acct1@x.com"}}',
     )
-    _write(vault.profile_home_path("claude", "acct1") / ".credentials.json", "ACCT1-TOKEN")
 
     def boom(agent_key: str, slot_id: str) -> None:
         raise RuntimeError("disk full")
@@ -509,7 +357,7 @@ def test_switch_rollback_from_managed_profile_keeps_live_secret(
     with pytest.raises(CredentialVaultError):
         vault.switch("claude", "acct1", DEFAULT_SLOT_ID)
 
-    assert live.read_text(encoding="utf-8") == "DEFAULT-TOKEN"
+    assert live.read_text(encoding="utf-8") == "ACCT1-TOKEN"
     assert vault.read_slot("claude", "acct1").secret == "ACCT1-TOKEN"
     config = json.loads((tmp_path / "home" / ".claude.json").read_text(encoding="utf-8"))
     assert config["oauthAccount"] == {"emailAddress": "acct1@x.com"}
@@ -570,13 +418,11 @@ def test_mac_switch_moves_secret_between_keychain_services(tmp_path: Path) -> No
 
     vault.switch("claude", DEFAULT_SLOT_ID, "acct1")
 
-    # Old login snapshotted into the backend-owned slot item. The live item
-    # keeps it too: it is the default account's own storage, and a managed
-    # profile runs off its profile home instead of the live location.
+    # Old login snapshotted into the backend-owned slot item; the live item is
+    # cleared (acct1 has no credentials yet, so the CLI prompts a login).
     assert sec.items["Navide CLI account claude-__default__"] == \
         '{"claudeAiOauth": {"accessToken": "A"}}'
-    assert sec.items["Claude Code-credentials"] == \
-        '{"claudeAiOauth": {"accessToken": "A"}}'
+    assert "Claude Code-credentials" not in sec.items
 
     # Switching back restores the live item from the slot.
     vault.switch("claude", "acct1", DEFAULT_SLOT_ID)
@@ -648,42 +494,17 @@ def test_mac_harvest_legacy_home_without_credentials(tmp_path: Path) -> None:
     assert vault.slot_is_empty("claude", "4ad13e88")
 
 
-def test_resolve_claude_credentials_prefers_runtime_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_resolve_claude_credentials_ignores_legacy_profile_home(tmp_path: Path) -> None:
+    """A token left in a legacy profile home no longer shadows anything:
+    resolution is strictly active → live, parked → slot."""
     vault = _file_vault(tmp_path)
-    vault.write_slot(
-        "claude", "acct1",
-        LiveCredentials(secret="SLOT", account={"emailAddress": "slot@example.com"}),
-    )
+    vault.write_slot("claude", "acct1", LiveCredentials(secret="SLOT"))
     _write(vault.profile_home_path("claude", "acct1") / ".credentials.json", "RUNTIME")
 
-    def forbidden(*_args, **_kwargs):
-        raise AssertionError("runtime credential unexpectedly used a fallback")
-
-    monkeypatch.setattr(vault, "read_slot", forbidden)
-    monkeypatch.setattr(vault, "read_live", forbidden)
-
-    resolved = vault.resolve_claude_credentials("acct1", active=False)
-
-    assert resolved.secret == "RUNTIME"
-    assert resolved.account is None
+    assert vault.resolve_claude_credentials("acct1", active=False).secret == "SLOT"
 
 
-def test_resolve_claude_credentials_prefers_runtime_keychain(tmp_path: Path) -> None:
-    vault, sec = _mac_vault(tmp_path)
-    vault.write_slot("claude", "acct1", LiveCredentials(secret="SLOT"))
-    home = vault.profile_home_path("claude", "acct1")
-    sec.items[legacy_claude_keychain_service(home)] = "RUNTIME"
-    sec.calls.clear()
-
-    resolved = vault.resolve_claude_credentials("acct1", active=False)
-
-    assert resolved.secret == "RUNTIME"
-    assert all(call[0] == "find-generic-password" for call in sec.calls)
-
-
-def test_resolve_claude_credentials_falls_back_to_active_live(tmp_path: Path) -> None:
+def test_resolve_claude_credentials_active_reads_live(tmp_path: Path) -> None:
     vault = _file_vault(tmp_path)
     _write(tmp_path / "home" / ".claude" / ".credentials.json", "LIVE")
     _write(
@@ -697,7 +518,7 @@ def test_resolve_claude_credentials_falls_back_to_active_live(tmp_path: Path) ->
     assert resolved.account == {"emailAddress": "live@example.com"}
 
 
-def test_resolve_claude_credentials_falls_back_to_inactive_slot_without_writes(
+def test_resolve_claude_credentials_parked_reads_slot_without_writes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     vault = _file_vault(tmp_path)
@@ -808,11 +629,11 @@ def test_mac_harvest_login_home_claude(tmp_path: Path) -> None:
 
 
 def test_mac_harvest_login_home_drops_obsolete_profile_home_copy(tmp_path: Path) -> None:
-    """A re-login must win the next seed. A profile-home copy whose expiresAt
-    outlives the new login's (e.g. a revoked long-lived token) would shadow it
-    under runtime-first seeding, so harvest drops that copy; a copy that is
-    NOT fresher than the new login stays (still-running panes keep using it,
-    and the next seed overwrites it anyway)."""
+    """A re-login must win. A legacy profile-home copy whose expiresAt
+    outlives the new login's (e.g. a revoked long-lived token) would win the
+    startup promotion and shadow the fresh login, so harvest drops that copy;
+    a copy that is NOT fresher than the new login stays in place (still-running
+    legacy panes keep using it, and the promotion prefers the newer slot)."""
     def secret(expires_at: int, token: str) -> str:
         return json.dumps(
             {"claudeAiOauth": {"accessToken": token, "expiresAt": expires_at}}
@@ -822,24 +643,22 @@ def test_mac_harvest_login_home_drops_obsolete_profile_home_copy(tmp_path: Path)
     profile_home = vault.profile_home_path("claude", "slot1")
     profile_service = legacy_claude_keychain_service(profile_home)
 
-    # Case 1: obsolete-but-far-future home copy → dropped, new login seeds.
+    # Case 1: obsolete-but-far-future home copy → dropped after the harvest.
     sec.items[profile_service] = secret(9_999, "obsolete-long-lived")
     login_home = vault.login_home_path("claude", "slot1")
     login_home.mkdir(parents=True)
     sec.items[legacy_claude_keychain_service(login_home)] = secret(5_000, "fresh-login")
     assert vault.harvest_login_home("claude", "slot1") is True
     assert profile_service not in sec.items
-    vault.prepare_profile_home("claude", "slot1")
-    assert sec.items[profile_service] == secret(5_000, "fresh-login")
+    assert vault.read_slot("claude", "slot1").secret == secret(5_000, "fresh-login")
 
-    # Case 2: home copy older than the new login → left in place for running
-    # panes (the next seed replaces it with the newer slot).
+    # Case 2: home copy older than the new login → left for running panes.
+    sec.items[profile_service] = secret(5_000, "older-copy")
     login_home.mkdir(parents=True)
     sec.items[legacy_claude_keychain_service(login_home)] = secret(8_000, "newer-login")
     assert vault.harvest_login_home("claude", "slot1") is True
-    assert sec.items[profile_service] == secret(5_000, "fresh-login")
-    vault.prepare_profile_home("claude", "slot1")
-    assert sec.items[profile_service] == secret(8_000, "newer-login")
+    assert sec.items[profile_service] == secret(5_000, "older-copy")
+    assert vault.read_slot("claude", "slot1").secret == secret(8_000, "newer-login")
 
 
 def test_login_spawn_env_per_agent(tmp_path: Path) -> None:
@@ -1021,32 +840,6 @@ def test_identity_claude_live_and_slot(tmp_path: Path) -> None:
     assert vault.identity("claude", "missing") == {"email": None, "signedIn": False}
 
 
-def test_identity_active_managed_profile_reads_its_own_home(tmp_path: Path) -> None:
-    """The active row asks for the live location, but a managed claude profile
-    keeps its token in its own profile home — the live copy belongs to the
-    default account. Reading live for an active managed profile reports the
-    wrong account's login state in both directions."""
-    vault = _file_vault(tmp_path)
-    _write(tmp_path / "home" / ".claude.json",
-           '{"oauthAccount": {"emailAddress": "acct1@x.com"}}')
-
-    # Signed in through its own home, while the live location has nothing.
-    _write(vault.profile_home_path("claude", "acct1") / ".credentials.json", "TOKEN")
-    assert vault.identity("claude", None, active_slot_id="acct1") == {
-        "email": "acct1@x.com", "signedIn": True
-    }
-
-    # The reverse: a live secret belongs to __default__, not to this profile.
-    vault.profile_home_path("claude", "acct2").mkdir(parents=True, exist_ok=True)
-    _write(tmp_path / "home" / ".claude" / ".credentials.json", '{"tok": 1}')
-    assert vault.identity("claude", None, active_slot_id="acct2") == {
-        "email": "acct1@x.com", "signedIn": False
-    }
-
-    # The reserved default slot does own the live location.
-    assert vault.identity("claude") == {"email": "acct1@x.com", "signedIn": True}
-
-
 def test_mac_identity_claude_signed_in_reflects_secret(tmp_path: Path) -> None:
     """signedIn comes from the actual credential secret (Keychain item);
     the oauthAccount email is display-only. A long-lived-token login carries
@@ -1109,247 +902,6 @@ def test_identity_logged_out_and_garbage_never_raise(tmp_path: Path) -> None:
     assert vault.identity("kimi", "slot1") == {"email": None, "signedIn": False}
 
 
-# ── persistent profile homes (Phase 1 isolation) ─────────────────────────────
-
-
-def test_prepare_profile_home_seeds_and_isolates_file_agents(tmp_path: Path) -> None:
-    """kimi/grok/codex profile homes are seeded from the slot into the CLI's
-    native location and the returned env points the spawn at that home,
-    separate from the disposable login home."""
-    vault = _file_vault(tmp_path)
-    # kimi: KIMI_CODE_HOME=home, secret at <home>/credentials/kimi-code.json
-    vault.write_slot("kimi", "acct1", LiveCredentials(secret='{"access_token": "kt"}'))
-    plan = vault.prepare_profile_home("kimi", "acct1")
-    home = vault.profile_home_path("kimi", "acct1")
-    assert plan.env_set == {"KIMI_CODE_HOME": str(home)}
-    assert plan.env_remove == []
-    assert (home / "credentials" / "kimi-code.json").read_text() == '{"access_token": "kt"}'
-    assert home != vault.login_home_path("kimi", "acct1")
-
-    # grok: HOME shim IS the home; secret at <home>/.grok/auth.json
-    vault.write_slot("grok", "acct1", LiveCredentials(secret='{"x": 1}'))
-    gplan = vault.prepare_profile_home("grok", "acct1")
-    ghome = vault.profile_home_path("grok", "acct1")
-    assert gplan.env_set == {"HOME": str(ghome)}
-    assert (ghome / ".grok" / "auth.json").read_text() == '{"x": 1}'
-
-    # codex: no env_set; codex_source_home points at the seeded home w/ auth.json
-    vault.write_slot("codex", "acct1", LiveCredentials(secret='{"tokens": {}}'))
-    cplan = vault.prepare_profile_home("codex", "acct1")
-    chome = vault.profile_home_path("codex", "acct1")
-    assert cplan.env_set == {}
-    assert cplan.codex_source_home == chome
-    assert (chome / "auth.json").read_text() == '{"tokens": {}}'
-
-
-def test_prepare_profile_home_claude_file_backend(tmp_path: Path) -> None:
-    vault = _file_vault(tmp_path)
-    vault.write_slot(
-        "claude", "acct1",
-        LiveCredentials(secret='{"t": 1}', account={"emailAddress": "a@b.com"}),
-    )
-    plan = vault.prepare_profile_home("claude", "acct1")
-    home = vault.profile_home_path("claude", "acct1")
-    assert plan.env_set == {"CLAUDE_CONFIG_DIR": str(home)}
-    assert plan.env_remove == ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
-    # Only the credential is isolated (a real file inside the home).
-    assert (home / ".credentials.json").read_text() == '{"t": 1}'
-    assert not (home / ".credentials.json").is_symlink()
-    # Sessions and settings are symlinked back to the real home, not copied.
-    real_claude = tmp_path / "home" / ".claude"
-    for name in ("projects", "todos", "shell-snapshots", "skills"):
-        assert (home / name).is_symlink()
-        assert (home / name).resolve() == (real_claude / name).resolve()
-    assert (home / "settings.json").is_symlink()
-    assert (home / ".claude.json").is_symlink()
-    assert (home / ".claude.json").resolve() == (tmp_path / "home" / ".claude.json").resolve()
-    # The display account is NOT written into the shared .claude.json (it would
-    # pollute the real file through the symlink); the slot carries it instead.
-    assert not (tmp_path / "home" / ".claude.json").exists()
-    assert vault.slot_account("claude", "acct1") == {"emailAddress": "a@b.com"}
-
-
-def test_prepare_profile_home_claude_macos_uses_path_hashed_keychain(tmp_path: Path) -> None:
-    """On macOS the seed lands in the path-hashed Keychain item Claude Code
-    reads under CLAUDE_CONFIG_DIR — the same service harvest_legacy hashes."""
-    vault, sec = _mac_vault(tmp_path)
-    vault.write_slot("claude", "acct1", LiveCredentials(secret='{"t": 1}'))
-    vault.prepare_profile_home("claude", "acct1")
-    home = vault.profile_home_path("claude", "acct1")
-    assert sec.items.get(legacy_claude_keychain_service(home)) == '{"t": 1}'
-    # No plaintext .credentials.json file on macOS.
-    assert not (home / ".credentials.json").exists()
-
-
-def test_prepare_profile_home_claude_macos_skips_redundant_keychain_write(tmp_path: Path) -> None:
-    """Re-seeding an already-current profile home must not touch the Keychain:
-    the redundant add-generic-password is what failed on every Navide restart."""
-    vault, sec = _mac_vault(tmp_path)
-    vault.write_slot("claude", "acct1", LiveCredentials(secret='{"t": 1}'))
-    vault.prepare_profile_home("claude", "acct1")
-    sec.stdin_commands.clear()
-    vault.prepare_profile_home("claude", "acct1")
-    assert not any("add-generic-password" in c for c in sec.stdin_commands)
-    # A changed slot secret still propagates to the Keychain.
-    vault.write_slot("claude", "acct1", LiveCredentials(secret='{"t": 2}'))
-    sec.stdin_commands.clear()
-    vault.prepare_profile_home("claude", "acct1")
-    home = vault.profile_home_path("claude", "acct1")
-    assert sec.items.get(legacy_claude_keychain_service(home)) == '{"t": 2}'
-
-
-def _oauth_secret(expires_at: int, token: str) -> str:
-    return json.dumps({"claudeAiOauth": {"accessToken": token, "expiresAt": expires_at}})
-
-
-def test_prepare_profile_home_claude_macos_keeps_runtime_refreshed_token(
-    tmp_path: Path,
-) -> None:
-    """A token the running CLI refreshed inside the profile home must survive
-    re-seeding: the slot snapshot is stale and its rotated refresh token is
-    dead — overwriting it caused "Login expired" on every restart/switch."""
-    vault, sec = _mac_vault(tmp_path)
-    vault.write_slot("claude", "acct1", LiveCredentials(secret=_oauth_secret(1_000, "old")))
-    vault.prepare_profile_home("claude", "acct1")
-    home = vault.profile_home_path("claude", "acct1")
-    service = legacy_claude_keychain_service(home)
-    refreshed = _oauth_secret(2_000, "refreshed")
-    sec.items[service] = refreshed  # the CLI refreshed the token in place
-    sec.stdin_commands.clear()
-    vault.prepare_profile_home("claude", "acct1")
-    assert sec.items[service] == refreshed
-    assert not any("add-generic-password" in c for c in sec.stdin_commands)
-    # A genuinely newer slot (fresh re-login harvest) still wins.
-    relogin = _oauth_secret(3_000, "relogin")
-    vault.write_slot("claude", "acct1", LiveCredentials(secret=relogin))
-    vault.prepare_profile_home("claude", "acct1")
-    assert sec.items[service] == relogin
-
-
-def test_prepare_profile_home_claude_file_backend_keeps_runtime_refreshed_token(
-    tmp_path: Path,
-) -> None:
-    vault = _file_vault(tmp_path)
-    vault.write_slot("claude", "acct1", LiveCredentials(secret=_oauth_secret(1_000, "old")))
-    vault.prepare_profile_home("claude", "acct1")
-    home = vault.profile_home_path("claude", "acct1")
-    refreshed = _oauth_secret(2_000, "refreshed")
-    (home / ".credentials.json").write_text(refreshed, encoding="utf-8")
-    vault.prepare_profile_home("claude", "acct1")
-    assert (home / ".credentials.json").read_text() == refreshed
-    relogin = _oauth_secret(3_000, "relogin")
-    vault.write_slot("claude", "acct1", LiveCredentials(secret=relogin))
-    vault.prepare_profile_home("claude", "acct1")
-    assert (home / ".credentials.json").read_text() == relogin
-
-
-# ── Phase A: shared session store (only credentials isolated) ────────────────
-
-
-def test_prepare_profile_home_claude_shares_projects_for_resume(tmp_path: Path) -> None:
-    """The crash fix: a session written to the real ~/.claude/projects is
-    visible through the profile home's symlinked projects dir, so resume
-    preflight finds it no matter which home the pane runs in."""
-    vault = _file_vault(tmp_path)
-    real_ws = tmp_path / "home" / ".claude" / "projects" / "-enc-ws"
-    _write(real_ws / "sess-uuid.jsonl", '{"line": 1}')
-    vault.write_slot("claude", "acct1", LiveCredentials(secret='{"t": 1}'))
-
-    vault.prepare_profile_home("claude", "acct1")
-    home = vault.profile_home_path("claude", "acct1")
-
-    linked = home / "projects" / "-enc-ws" / "sess-uuid.jsonl"
-    assert (home / "projects").is_symlink()
-    assert linked.is_file()
-    assert linked.read_text() == '{"line": 1}'
-
-
-def test_prepare_profile_home_claude_migrates_legacy_projects_clean(tmp_path: Path) -> None:
-    """Old whole-home-isolation data (a real projects/ dir inside the home) is
-    merged back into the real home and projects/ becomes a symlink — nothing
-    lost when every session file is unique."""
-    vault = _file_vault(tmp_path)
-    home = vault.profile_home_path("claude", "acct1")
-    _write(home / "projects" / "-enc-ws" / "u1.jsonl", "A")
-    _write(home / "projects" / "-enc-ws" / "u2.jsonl", "B")
-    vault.write_slot("claude", "acct1", LiveCredentials(secret='{"t": 1}'))
-
-    vault.prepare_profile_home("claude", "acct1")
-
-    real_ws = tmp_path / "home" / ".claude" / "projects" / "-enc-ws"
-    assert (home / "projects").is_symlink()
-    assert (real_ws / "u1.jsonl").read_text() == "A"
-    assert (real_ws / "u2.jsonl").read_text() == "B"
-
-
-def test_prepare_profile_home_claude_migration_never_overwrites(tmp_path: Path) -> None:
-    """A name clash keeps the real copy (never overwrites); the home's copy is
-    quarantined aside so the store still fully drains and becomes a symlink —
-    one stale file must not leave every session unshared (the
-    "No conversation found" restart loop)."""
-    vault = _file_vault(tmp_path)
-    home = vault.profile_home_path("claude", "acct1")
-    _write(home / "projects" / "-enc-ws" / "moved.jsonl", "OLD")
-    _write(home / "projects" / "-enc-ws" / "clash.jsonl", "HOME-VERSION")
-    real_ws = tmp_path / "home" / ".claude" / "projects" / "-enc-ws"
-    _write(real_ws / "clash.jsonl", "REAL-VERSION")
-    vault.write_slot("claude", "acct1", LiveCredentials(secret='{"t": 1}'))
-
-    vault.prepare_profile_home("claude", "acct1")
-
-    # Unique file migrated; the clash kept the real copy untouched.
-    assert (real_ws / "moved.jsonl").read_text() == "OLD"
-    assert (real_ws / "clash.jsonl").read_text() == "REAL-VERSION"
-    # The clash was quarantined (preserved), the store drained and is shared.
-    assert (home / "projects").is_symlink()
-    quarantined = home / "projects.unmerged" / "-enc-ws" / "clash.jsonl"
-    assert quarantined.read_text() == "HOME-VERSION"
-
-
-def test_prepare_profile_home_claude_settings_clash_quarantined(tmp_path: Path) -> None:
-    """A real settings.json shadowing the shared link is quarantined so the
-    file still becomes a symlink instead of staying forked forever."""
-    vault = _file_vault(tmp_path)
-    home = vault.profile_home_path("claude", "acct1")
-    _write(home / "settings.json", '{"home": true}')
-    _write(tmp_path / "home" / ".claude" / "settings.json", '{"real": true}')
-    vault.write_slot("claude", "acct1", LiveCredentials(secret='{"t": 1}'))
-
-    vault.prepare_profile_home("claude", "acct1")
-
-    assert (home / "settings.json").is_symlink()
-    assert (home / "settings.json").read_text() == '{"real": true}'
-    assert (home / "settings.json.unmerged").read_text() == '{"home": true}'
-
-
-def test_prepare_profile_home_claude_keychain_failure_still_shares(tmp_path: Path) -> None:
-    """A failed Keychain seed must not abort the spawn or skip the shared-home
-    symlinks — an unshared projects dir hides every resumable session from the
-    pane (and the CLI keeps the Keychain item fresh on its own anyway)."""
-    sec = FakeSecurity()
-
-    def runner(args: list[str], input_text: str | None = None) -> tuple[int, str]:
-        # Only the profile home's path-hashed item is denied; slot bookkeeping
-        # writes still work so the scenario is exactly "seed write fails".
-        if "Claude Code-credentials-" in (input_text or ""):
-            return 36, "security: ACL denied"
-        return sec(args, input_text)
-
-    vault = CredentialVault(
-        root=tmp_path / "root",
-        real_home=tmp_path / "home",
-        security_runner=runner,
-        platform="darwin",
-    )
-    vault.write_slot("claude", "acct1", LiveCredentials(secret='{"t": 1}'))
-
-    plan = vault.prepare_profile_home("claude", "acct1")  # must not raise
-
-    home = vault.profile_home_path("claude", "acct1")
-    assert plan.env_set == {"CLAUDE_CONFIG_DIR": str(home)}
-    assert (home / "projects").is_symlink()
-
-
 def test_keychain_write_failure_surfaces_security_error(tmp_path: Path) -> None:
     """The raised error carries the last line of the `security` output so the
     log shows WHY the write failed, never just the exit code — and never the
@@ -1366,77 +918,387 @@ def test_keychain_write_failure_surfaces_security_error(tmp_path: Path) -> None:
         vault.write_live("claude", LiveCredentials(secret='{"t": 1}'))
 
 
-def test_prepare_profile_home_claude_idempotent(tmp_path: Path) -> None:
-    """Two consecutive prepares leave the same symlinks and never re-migrate."""
+def test_login_spawn_env_grok_migrates_legacy_db(tmp_path: Path) -> None:
+    """A real grok.db left in the login shim (written under the old whole-home
+    isolation) is moved back to ~/.grok, then shared via symlink."""
     vault = _file_vault(tmp_path)
-    real_ws = tmp_path / "home" / ".claude" / "projects" / "-enc-ws"
-    _write(real_ws / "s.jsonl", "X")
-    vault.write_slot("claude", "acct1", LiveCredentials(secret='{"t": 1}'))
+    shim = vault.login_home_path("grok", "slot1") / "home"
+    _write(shim / ".grok" / "grok.db", "DBDATA")
 
-    vault.prepare_profile_home("claude", "acct1")
-    home = vault.profile_home_path("claude", "acct1")
-    target = os.readlink(home / "projects")
+    vault.login_spawn_env("grok", "slot1")
 
-    vault.prepare_profile_home("claude", "acct1")
-    assert (home / "projects").is_symlink()
-    assert os.readlink(home / "projects") == target
-    assert (home / "projects" / "-enc-ws" / "s.jsonl").read_text() == "X"
+    assert (tmp_path / "home" / ".grok" / "grok.db").read_text(encoding="utf-8") == "DBDATA"
+    assert (shim / ".grok" / "grok.db").is_symlink()
 
 
-def test_prepare_profile_home_codex_shares_sessions_isolates_auth(tmp_path: Path) -> None:
+# ── one-time promotion of legacy profile-home credentials ───────────────────
+
+
+class _FakeStore:
+    """Minimal stand-in for CliProfilesStore.list()."""
+
+    def __init__(self, profiles: list[dict], defaults: dict) -> None:
+        self._doc = {"profiles": profiles, "defaults": defaults}
+
+    def list(self) -> dict:
+        return self._doc
+
+
+@pytest.mark.parametrize("agent_key,home_rel", [
+    ("codex", "auth.json"),
+    ("kimi", "credentials/kimi-code.json"),
+    ("grok", ".grok/auth.json"),
+])
+async def test_promote_fills_empty_slot_from_profile_home(
+    tmp_path: Path, agent_key: str, home_rel: str
+) -> None:
     vault = _file_vault(tmp_path)
-    vault.write_slot("codex", "acct1", LiveCredentials(secret='{"tokens": {}}'))
-    vault.prepare_profile_home("codex", "acct1")
+    home = vault.profile_home_path(agent_key, "acct1")
+    _write(home / home_rel, '{"who": "home"}')
+    store = _FakeStore([{"id": "acct1", "agentKey": agent_key}], {agent_key: None})
+
+    await vault.promote_profile_home_secrets(store)
+
+    assert vault.read_slot(agent_key, "acct1").secret == '{"who": "home"}'
+    # Non-destructive: the home copy stays for still-running legacy panes.
+    assert (home / home_rel).read_text(encoding="utf-8") == '{"who": "home"}'
+
+
+async def test_promote_never_overwrites_occupied_non_claude_slot(tmp_path: Path) -> None:
+    vault = _file_vault(tmp_path)
     home = vault.profile_home_path("codex", "acct1")
+    _write(home / "auth.json", '{"who": "home"}')
+    vault.write_slot("codex", "acct1", LiveCredentials(secret='{"who": "slot"}'))
+    store = _FakeStore([{"id": "acct1", "agentKey": "codex"}], {"codex": None})
 
-    assert (home / "sessions").is_symlink()
-    assert (home / "sessions").resolve() == (tmp_path / "home" / ".codex" / "sessions").resolve()
-    assert (home / "history.jsonl").is_symlink()
-    assert not (home / "auth.json").is_symlink()
-    assert (home / "auth.json").read_text() == '{"tokens": {}}'
+    await vault.promote_profile_home_secrets(store)
+
+    assert vault.read_slot("codex", "acct1").secret == '{"who": "slot"}'
 
 
-def test_prepare_profile_home_kimi_shares_sessions_and_config(tmp_path: Path) -> None:
+async def test_promote_claude_home_wins_unless_slot_strictly_newer(tmp_path: Path) -> None:
+    """claude promotion is expiry-compared: the home copy (refreshed in place
+    by its running CLI) wins unless the slot is strictly newer (a fresh
+    re-login harvest); an unparsable expiry cannot prove freshness and keeps
+    the slot. Parked profiles keep their slot's display account."""
     vault = _file_vault(tmp_path)
-    _write(tmp_path / "home" / ".kimi-code" / "config.json", '{"cfg": 1}')
-    vault.write_slot("kimi", "acct1", LiveCredentials(secret='{"access_token": "kt"}'))
-    vault.prepare_profile_home("kimi", "acct1")
-    home = vault.profile_home_path("kimi", "acct1")
+    _write(
+        vault.profile_home_path("claude", "p1") / ".credentials.json",
+        _claude_secret("REFRESHED", 2000),
+    )
+    vault.write_slot("claude", "p1", LiveCredentials(
+        secret=_claude_secret("STALE", 1000), account={"emailAddress": "p1@x.com"},
+    ))
+    _write(
+        vault.profile_home_path("claude", "p2") / ".credentials.json",
+        _claude_secret("OLD", 1000),
+    )
+    vault.write_slot("claude", "p2", LiveCredentials(secret=_claude_secret("RELOGIN", 2000)))
+    _write(vault.profile_home_path("claude", "p3") / ".credentials.json", "not-json")
+    vault.write_slot("claude", "p3", LiveCredentials(secret=_claude_secret("KEPT", 1000)))
+    store = _FakeStore(
+        [{"id": pid, "agentKey": "claude"} for pid in ("p1", "p2", "p3")],
+        {"claude": None},
+    )
 
-    assert (home / "sessions").is_symlink()
-    assert (home / "sessions").resolve() == (tmp_path / "home" / ".kimi-code" / "sessions").resolve()
-    # Existing kimi config follows the account (shared), credentials stay isolated.
-    assert (home / "config.json").is_symlink()
-    assert (home / "config.json").resolve() == (tmp_path / "home" / ".kimi-code" / "config.json").resolve()
-    assert not (home / "credentials").is_symlink()
-    assert (home / "credentials" / "kimi-code.json").read_text() == '{"access_token": "kt"}'
+    await vault.promote_profile_home_secrets(store)
+
+    p1 = vault.read_slot("claude", "p1")
+    assert p1.secret == _claude_secret("REFRESHED", 2000)
+    assert p1.account == {"emailAddress": "p1@x.com"}
+    assert vault.read_slot("claude", "p2").secret == _claude_secret("RELOGIN", 2000)
+    assert vault.read_slot("claude", "p3").secret == _claude_secret("KEPT", 1000)
+    # Non-destructive: every home copy is still in place.
+    assert (
+        vault.profile_home_path("claude", "p1") / ".credentials.json"
+    ).read_text(encoding="utf-8") == _claude_secret("REFRESHED", 2000)
 
 
-def test_prepare_profile_home_grok_shares_db_isolates_auth(tmp_path: Path) -> None:
+async def test_promote_claude_fills_empty_slot_from_home(tmp_path: Path) -> None:
     vault = _file_vault(tmp_path)
-    vault.write_slot("grok", "acct1", LiveCredentials(secret='{"x": 1}'))
-    vault.prepare_profile_home("grok", "acct1")
-    home = vault.profile_home_path("grok", "acct1")
+    _write(
+        vault.profile_home_path("claude", "acct1") / ".credentials.json",
+        _claude_secret("HOME", 1000),
+    )
+    store = _FakeStore([{"id": "acct1", "agentKey": "claude"}], {"claude": None})
 
-    # .grok is a real dir; auth.json inside it is an isolated real file.
-    assert (home / ".grok").is_dir() and not (home / ".grok").is_symlink()
-    assert not (home / ".grok" / "auth.json").is_symlink()
-    assert (home / ".grok" / "auth.json").read_text() == '{"x": 1}'
-    # The session db (and sqlite sidecars) is shared back to the real ~/.grok.
-    assert (home / ".grok" / "grok.db").is_symlink()
-    assert (home / ".grok" / "grok.db").resolve() == (
-        tmp_path / "home" / ".grok" / "grok.db"
-    ).resolve()
+    await vault.promote_profile_home_secrets(store)
+
+    assert vault.read_slot("claude", "acct1").secret == _claude_secret("HOME", 1000)
 
 
-def test_prepare_profile_home_grok_migrates_legacy_db(tmp_path: Path) -> None:
-    """A real grok.db left in the shim is moved back to ~/.grok, then shared."""
+async def test_mac_promote_claude_reads_path_hashed_keychain(tmp_path: Path) -> None:
+    vault, sec = _mac_vault(tmp_path)
+    home = vault.profile_home_path("claude", "acct1")
+    home.mkdir(parents=True)
+    sec.items[legacy_claude_keychain_service(home)] = "HOME-TOKEN"
+    store = _FakeStore([{"id": "acct1", "agentKey": "claude"}], {"claude": None})
+
+    await vault.promote_profile_home_secrets(store)
+
+    assert sec.items["Navide CLI account claude-acct1"] == "HOME-TOKEN"
+    # Non-destructive: the home's Keychain item survives.
+    assert sec.items[legacy_claude_keychain_service(home)] == "HOME-TOKEN"
+
+
+async def test_promote_unifies_claude_live_with_active_profile(tmp_path: Path) -> None:
+    """Legacy state: a managed claude profile is active but the live location
+    still holds the default account's token (the old model never swapped
+    claude's live secret). The one-shot alignment parks the live secret in
+    __default__ — keeping that slot's own display account — and publishes the
+    active profile's promoted secret to the live location. Re-running is a
+    no-op (marker-guarded): the now-live profile secret must never be parked
+    into the default slot."""
     vault = _file_vault(tmp_path)
-    home = vault.profile_home_path("grok", "acct1")
-    _write(home / ".grok" / "grok.db", "DBDATA")
-    vault.write_slot("grok", "acct1", LiveCredentials(secret='{"x": 1}'))
+    _write(_claude_live_file(tmp_path), "DEFAULT-TOKEN")
+    _write(
+        tmp_path / "home" / ".claude.json",
+        '{"oauthAccount": {"emailAddress": "acct1@x.com"}}',
+    )
+    vault.write_slot("claude", DEFAULT_SLOT_ID, LiveCredentials(
+        secret="OLD-DEFAULT-SNAPSHOT", account={"emailAddress": "default@x.com"},
+    ))
+    _write(vault.profile_home_path("claude", "acct1") / ".credentials.json", "ACCT1-TOKEN")
+    store = _FakeStore([{"id": "acct1", "agentKey": "claude"}], {"claude": "acct1"})
 
-    vault.prepare_profile_home("grok", "acct1")
+    await vault.promote_profile_home_secrets(store)
 
-    assert (tmp_path / "home" / ".grok" / "grok.db").read_text() == "DBDATA"
-    assert (home / ".grok" / "grok.db").is_symlink()
+    assert _claude_live_file(tmp_path).read_text(encoding="utf-8") == "ACCT1-TOKEN"
+    assert vault.read_slot("claude", "acct1").secret == "ACCT1-TOKEN"
+    default_slot = vault.read_slot("claude", DEFAULT_SLOT_ID)
+    assert default_slot.secret == "DEFAULT-TOKEN"
+    assert default_slot.account == {"emailAddress": "default@x.com"}
+    assert _oauth_account(tmp_path) == {"emailAddress": "acct1@x.com"}
+
+    await vault.promote_profile_home_secrets(store)  # idempotent
+
+    assert _claude_live_file(tmp_path).read_text(encoding="utf-8") == "ACCT1-TOKEN"
+    assert vault.read_slot("claude", DEFAULT_SLOT_ID).secret == "DEFAULT-TOKEN"
+
+
+async def test_promote_restores_active_account_when_live_empty(tmp_path: Path) -> None:
+    """An active managed account whose promoted slot has a secret while the
+    live location is empty gets restored — the secret may only ever have
+    existed in the legacy profile home."""
+    vault = _file_vault(tmp_path)
+    _write(vault.profile_home_path("codex", "acct1") / "auth.json", '{"who": "acct1"}')
+    store = _FakeStore([{"id": "acct1", "agentKey": "codex"}], {"codex": "acct1"})
+
+    await vault.promote_profile_home_secrets(store)
+
+    assert (
+        tmp_path / "home" / ".codex" / "auth.json"
+    ).read_text(encoding="utf-8") == '{"who": "acct1"}'
+
+
+async def test_promote_without_homes_is_noop(tmp_path: Path) -> None:
+    """No legacy profile homes on disk: nothing is written anywhere."""
+    vault = _file_vault(tmp_path)
+    store = _FakeStore([{"id": "acct1", "agentKey": "codex"}], {"codex": None})
+
+    await vault.promote_profile_home_secrets(store)
+
+    assert vault.slot_is_empty("codex", "acct1")
+    assert not (tmp_path / "home" / ".codex" / "auth.json").exists()
+
+
+# ── strict Keychain reads (capture paths) ───────────────────────────────────
+
+
+class _FlakySecurity(FakeSecurity):
+    """FakeSecurity whose find calls can fail transiently (locked keychain)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_find = False
+
+    def __call__(self, args: list[str], input_text: str | None = None) -> tuple[int, str]:
+        if self.fail_find and args and args[0] == "find-generic-password":
+            return 36, "security: User interaction is not allowed."
+        return super().__call__(args, input_text)
+
+
+def _flaky_mac_vault(tmp_path: Path) -> tuple[CredentialVault, _FlakySecurity]:
+    sec = _FlakySecurity()
+    vault = CredentialVault(
+        root=tmp_path / "root",
+        real_home=tmp_path / "home",
+        security_runner=sec,
+        platform="darwin",
+    )
+    return vault, sec
+
+
+def test_capture_treats_keychain_not_found_as_signed_out(tmp_path: Path) -> None:
+    """A genuinely missing live item (the security CLI's exit code 44) is a
+    legitimate signed-out state: strict capture empties the slot, no raise."""
+    vault, sec = _mac_vault(tmp_path)
+    vault.write_slot("claude", "p1", LiveCredentials(secret="SNAPSHOT"))
+
+    creds = vault.capture("claude", "p1")
+
+    assert creds.secret is None
+    assert vault.read_slot("claude", "p1").secret is None
+
+
+def test_capture_transient_keychain_failure_raises_slot_untouched(tmp_path: Path) -> None:
+    """A locked/denied Keychain is NOT a logout: strict capture raises before
+    any slot write, so the parked snapshot survives."""
+    vault, sec = _flaky_mac_vault(tmp_path)
+    sec.items[CLAUDE_LIVE_KEYCHAIN_SERVICE] = "LIVE-TOKEN"
+    vault.write_slot("claude", "p1", LiveCredentials(secret="SNAPSHOT"))
+    sec.fail_find = True
+
+    with pytest.raises(CredentialVaultError):
+        vault.capture("claude", "p1")
+
+    sec.fail_find = False
+    assert vault.read_slot("claude", "p1").secret == "SNAPSHOT"
+
+
+def test_capture_raising_security_runner_raises(tmp_path: Path) -> None:
+    """A crashing/timing-out security runner likewise aborts strict capture."""
+
+    def boom(args: list[str], input_text: str | None = None) -> tuple[int, str]:
+        raise RuntimeError("security timed out")
+
+    vault = CredentialVault(
+        root=tmp_path / "root",
+        real_home=tmp_path / "home",
+        security_runner=boom,
+        platform="darwin",
+    )
+
+    with pytest.raises(CredentialVaultError):
+        vault.capture("claude", "p1")
+
+
+def test_switch_aborts_before_any_write_on_keychain_failure(tmp_path: Path) -> None:
+    """switch()'s capture happens before any slot or live write: a transient
+    Keychain failure aborts with both slots and the live state untouched."""
+    vault, sec = _flaky_mac_vault(tmp_path)
+    sec.items[CLAUDE_LIVE_KEYCHAIN_SERVICE] = "ACCT-A"
+    vault.write_slot("claude", "p1", LiveCredentials(secret="ACCT-B"))
+    sec.fail_find = True
+
+    with pytest.raises(CredentialVaultError):
+        vault.switch("claude", DEFAULT_SLOT_ID, "p1")
+
+    sec.fail_find = False
+    assert sec.items[CLAUDE_LIVE_KEYCHAIN_SERVICE] == "ACCT-A"
+    assert vault.read_slot("claude", "p1").secret == "ACCT-B"
+    assert vault.slot_is_empty("claude", DEFAULT_SLOT_ID)
+
+
+def test_readonly_paths_stay_lax_on_keychain_failure(tmp_path: Path) -> None:
+    """Display-only reads must never raise on a transient Keychain failure —
+    they just show signed-out until the next poll."""
+    vault, sec = _flaky_mac_vault(tmp_path)
+    sec.items[CLAUDE_LIVE_KEYCHAIN_SERVICE] = "LIVE-TOKEN"
+    sec.fail_find = True
+
+    assert vault.identity("claude") == {"email": None, "signedIn": False}
+    assert vault.resolve_claude_credentials("p1", active=True).secret is None
+    assert vault.read_live("claude").secret is None
+
+
+# ── live-unification marker only on success ─────────────────────────────────
+
+
+class _WriteFailSecurity(FakeSecurity):
+    """FakeSecurity whose interactive writes (`security -i`) can fail."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_writes = False
+
+    def __call__(self, args: list[str], input_text: str | None = None) -> tuple[int, str]:
+        if self.fail_writes and args == ["-i"]:
+            return 1, "security: unable to write to keychain"
+        return super().__call__(args, input_text)
+
+
+async def test_unify_failure_writes_no_marker_and_retries(tmp_path: Path) -> None:
+    """A failed live unification must NOT write the .live-unified marker:
+    the live state still holds the default account's token, so the next
+    startup retries; marking it done would freeze the pre-unification state
+    and let the next switch park the default token into the profile's slot."""
+    sec = _WriteFailSecurity()
+    vault = CredentialVault(
+        root=tmp_path / "root",
+        real_home=tmp_path / "home",
+        security_runner=sec,
+        platform="darwin",
+    )
+    sec.items[CLAUDE_LIVE_KEYCHAIN_SERVICE] = "DEFAULT-TOKEN"
+    sec.items["Navide CLI account claude-acct1"] = "ACCT1-TOKEN"
+    store = _FakeStore([{"id": "acct1", "agentKey": "claude"}], {"claude": "acct1"})
+    marker = tmp_path / "root" / "claude" / ".live-unified"
+
+    sec.fail_writes = True
+    await vault.promote_profile_home_secrets(store)
+
+    assert not marker.exists()
+    assert sec.items[CLAUDE_LIVE_KEYCHAIN_SERVICE] == "DEFAULT-TOKEN"
+    assert "Navide CLI account claude-__default__" not in sec.items
+
+    sec.fail_writes = False
+    await vault.promote_profile_home_secrets(store)  # startup retry
+
+    assert marker.exists()
+    assert sec.items[CLAUDE_LIVE_KEYCHAIN_SERVICE] == "ACCT1-TOKEN"
+    assert sec.items["Navide CLI account claude-__default__"] == "DEFAULT-TOKEN"
+
+
+# ── one-shot per-agent promotion marker ─────────────────────────────────────
+
+
+async def test_promotion_is_one_shot_per_agent(tmp_path: Path) -> None:
+    """A legacy home copy with a far-future expiresAt must not clobber a
+    slot's newer credentials on later startups: after one clean promotion the
+    per-agent marker skips the agent entirely."""
+    vault = _file_vault(tmp_path)
+    _write(
+        vault.profile_home_path("claude", "p1") / ".credentials.json",
+        _claude_secret("LEGACY", 9999),
+    )
+    store = _FakeStore([{"id": "p1", "agentKey": "claude"}], {"claude": None})
+
+    await vault.promote_profile_home_secrets(store)
+
+    assert vault.read_slot("claude", "p1").secret == _claude_secret("LEGACY", 9999)
+    assert (tmp_path / "root" / "claude" / ".homes-promoted").exists()
+
+    # A fresh re-login stores a newer secret with an earlier expiry; without
+    # the marker the far-future home copy would win again on every startup.
+    vault.write_slot("claude", "p1", LiveCredentials(secret=_claude_secret("RELOGIN", 1000)))
+    await vault.promote_profile_home_secrets(store)
+
+    assert vault.read_slot("claude", "p1").secret == _claude_secret("RELOGIN", 1000)
+
+
+async def test_promotion_failure_writes_no_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed profile promotion leaves the agent's marker unwritten so the
+    next startup retries; the retry then promotes and writes the marker."""
+    vault = _file_vault(tmp_path)
+    _write(vault.profile_home_path("codex", "p1") / "auth.json", '{"who": "home"}')
+    store = _FakeStore([{"id": "p1", "agentKey": "codex"}], {"codex": None})
+    marker = tmp_path / "root" / "codex" / ".homes-promoted"
+    real_promote = vault._promote_profile_home
+
+    def boom(agent_key: str, profile_id: str, *, active: bool) -> None:
+        raise RuntimeError("disk error")
+
+    monkeypatch.setattr(vault, "_promote_profile_home", boom)
+    await vault.promote_profile_home_secrets(store)
+
+    assert not marker.exists()
+    assert vault.slot_is_empty("codex", "p1")
+
+    monkeypatch.setattr(vault, "_promote_profile_home", real_promote)
+    await vault.promote_profile_home_secrets(store)  # startup retry
+
+    assert marker.exists()
+    assert vault.read_slot("codex", "p1").secret == '{"who": "home"}'

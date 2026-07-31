@@ -1282,7 +1282,7 @@ def _profile_identities() -> dict:
         ]
         out[agent_key] = {
             sid: app.credential_vault.identity(
-                agent_key, None if sid == active else sid, active_slot_id=active
+                agent_key, None if sid == active else sid
             )
             for sid in slot_ids
         }
@@ -1290,15 +1290,14 @@ def _profile_identities() -> dict:
 
 
 def _profile_pin_for_spawn(agent_key: str, payload_profile_id: object) -> str:
-    """The profile a pane is pinned to, persisted in its restore record so a
-    resume re-spawns under the same account's credentials (see terminal.create's
-    profile pin). Sessions are shared across accounts, so this is a
-    credential-account continuity hint, not a resume-correctness gate — a resume
-    finds its conversation from the real home either way. A restore carries the
-    pane's recorded pin (``payload_profile_id``); a fresh spawn pins to the
-    agent's currently active default. Returns "" for non-account agents,
-    "__default__" when the active account is the unmanaged Default (real home),
-    else the managed profile id."""
+    """The profile a pane was created under, persisted in its restore record.
+    Bookkeeping only (account attribution / history): spawns get no per-profile
+    env, so the pin never affects which credentials a pane runs on — every
+    regular pane uses the live (active-account) credentials in the real home.
+    A restore carries the pane's recorded pin (``payload_profile_id``); a fresh
+    spawn pins to the agent's currently active default. Returns "" for
+    non-account agents, "__default__" when the active account is the unmanaged
+    Default (real home), else the managed profile id."""
     from . import app
 
     if agent_key not in PROFILE_AGENT_KEYS:
@@ -1311,7 +1310,10 @@ def _profile_pin_for_spawn(agent_key: str, payload_profile_id: object) -> str:
 
 
 async def _broadcast_profiles_changed(
-    reason: str, harvested_profile_ids: list[str] | None = None
+    reason: str,
+    harvested_profile_ids: list[str] | None = None,
+    agent_key: str | None = None,
+    forced: bool | None = None,
 ) -> None:
     from . import app
 
@@ -1327,6 +1329,12 @@ async def _broadcast_profiles_changed(
         # login — the initiating window uses this to close the login pane
         # and toast the signed-in identity.
         payload["harvestedProfileIds"] = harvested_profile_ids
+    if agent_key is not None:
+        # set_default: which agent switched accounts and whether the request
+        # forced past the quiescence gate — every window uses this to restart
+        # its own panes of that agent onto the new credentials.
+        payload["agent_key"] = agent_key
+        payload["forced"] = bool(forced)
     await app.broadcast(make_event("cli_profiles.changed", payload))
 
 
@@ -1526,16 +1534,37 @@ def _running_login_terminals(agent_key: str, profile_id: str) -> list[tuple[str,
     return running
 
 
+def _running_regular_terminals(agent_key: str) -> list[str]:
+    """Terminal ids of every live NON-login pane of the given agent. Every
+    regular pane runs on the live credentials in the real home — the very
+    credentials an account switch swaps — so a still-running CLI would keep
+    refreshing the outgoing account's token there mid-swap."""
+    from . import app
+
+    running: list[str] = []
+    for tid, owner in list(app._PTY_OWNERS.items()):
+        term = owner.terminals.get(tid)
+        if (
+            term is not None
+            and not term.closed
+            and term.agent_key == agent_key
+            and not term.metadata.get("login_profile_id")
+        ):
+            running.append(tid)
+    return running
+
+
 @handler("cli_profiles.set_default")
 async def cli_profiles_set_default(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     """Switch the agent's active account: capture the live credentials into the
     outgoing account's slot, then restore the target slot into the real home.
-    Switching only decides which account NEWLY spawned panes use — running panes
-    are pinned to the isolated home they were spawned with (see terminal.create's
-    profile pin) and keep running on that account, unaffected by the switch, so
-    no pane is ever killed. The one guard left is LOGIN_IN_PROGRESS: an isolated
-    sign-in for the target account still running must finish first, because the
-    switch harvests its login home into the slot before restoring it."""
+    Every regular pane runs on those live credentials, so the switch is gated
+    on quiescence: live non-login panes of the agent fail it with PANES_RUNNING
+    unless the request carries force=true (the frontend then restarts the
+    affected panes itself — the backend never kills them). A still-running
+    isolated sign-in for the target account also blocks it (LOGIN_IN_PROGRESS),
+    because the switch harvests its login home into the slot before restoring
+    it."""
     from . import app
 
     agent_key = str(payload.get("agent_key") or "")
@@ -1585,6 +1614,23 @@ async def cli_profiles_set_default(session: "Session", msg_id: str, msg_type: st
                 )
             )
             return
+
+        # Quiescence gate: a live regular pane keeps refreshing the outgoing
+        # account's token in the very live location the swap rewrites. Refuse
+        # unless the caller forces the switch (it then restarts the affected
+        # panes itself; the backend never kills them).
+        if not payload.get("force"):
+            running_count = len(_running_regular_terminals(agent_key))
+            if running_count:
+                await session.send_json(
+                    make_error(
+                        msg_id, msg_type, "PANES_RUNNING",
+                        f"{running_count} running {agent_key} pane(s) still use "
+                        "the current account; close them or force the switch",
+                        {"count": running_count},
+                    )
+                )
+                return
 
         # A pending isolated login home for the target profile must land in
         # its slot BEFORE restore() — restoring the still-empty slot would
@@ -1637,7 +1683,9 @@ async def cli_profiles_set_default(session: "Session", msg_id: str, msg_type: st
         await session.send_json(
             make_response(msg_id, msg_type, {"defaults": defaults})
         )
-    await _broadcast_profiles_changed("set_default")
+    await _broadcast_profiles_changed(
+        "set_default", agent_key=agent_key, forced=bool(payload.get("force"))
+    )
     # The usage badges read the active account's credentials — force the poller
     # to re-fetch now so the badge reflects the switch immediately.
     from .usage_service import service
@@ -3414,15 +3462,13 @@ async def _terminal_create_impl(
     env.update(app.onboarding_deps.spawn_env_for(agent_key))
     # CLI accounts share the real home — regular spawns get no profile env
     # isolation (sessions and settings are global; profiles only swap
-    # credentials). Two account-driven exceptions:
-    #   - a LOGIN pane (login_profile_id set) runs the CLI inside the profile's
-    #     isolated login home, so completing the login never touches the live
-    #     credentials or any running pane; the usage poller later harvests the
-    #     home into the profile's slot (see credential_vault.harvest_login_home)
-    #   - while a managed claude account is active, inherited Anthropic API
-    #     overrides are dropped so they can't shadow its OAuth login
+    # credentials, so the active account's secret already sits in the live
+    # location). The one account-driven exception is a LOGIN pane
+    # (login_profile_id set): it runs the CLI inside the profile's isolated
+    # login home, so completing the login never touches the live credentials
+    # or any running pane; the usage poller later harvests the home into the
+    # profile's slot (see credential_vault.harvest_login_home).
     env_remove: list[str] | None = None
-    profile_plan = None
     login_profile_id = str(payload.get("login_profile_id") or "")
     if login_profile_id:
         profile = app.cli_profiles_store.get(login_profile_id)
@@ -3451,39 +3497,6 @@ async def _terminal_create_impl(
         # the browser authorization opens by itself — the user never types a
         # command in the login pane.
         payload["command"] = app._login_spawn_command(agent_key, payload["command"])
-    elif agent_key in PROFILE_AGENT_KEYS:
-        # A regular pane on a managed account (a non-null default profile) runs
-        # its CLI config home relocated into that account's persistent isolated
-        # home, seeded from the profile's credential slot. Only the credentials
-        # stay isolated: sessions/settings are symlinked back to the real home,
-        # so the log readers, attribution and resume preflight all see the
-        # session under the single real home regardless of which account wrote
-        # it. Default (null profile) leaves the spawn on the real home.
-        #
-        # Profile pin: a restore carries the pane's recorded profile_id in
-        # metadata, so the pane re-spawns under the SAME account's credentials
-        # it was created on regardless of the current active default. Because
-        # sessions are shared, this is no longer a resume-correctness gate (a
-        # missing/wrong pin still resumes the conversation from the real home) —
-        # it only continues the credential account a resumed pane authenticates
-        # as, so "resume" stays on the same account. A fresh spawn has no pin
-        # and binds to the active default; "__default__" pins to the unmanaged
-        # real home; an unknown pin (deleted account) falls back to the real
-        # home.
-        pinned_profile_id = str(metadata.get("profile_id") or "")
-        if pinned_profile_id == DEFAULT_SLOT_ID:
-            profile = None
-        elif pinned_profile_id:
-            profile = app.cli_profiles_store.get(pinned_profile_id)
-        else:
-            profile = app.cli_profiles_store.get_default_profile(agent_key)
-        if profile is not None:
-            profile_plan = await asyncio.to_thread(
-                app.credential_vault.prepare_profile_home, agent_key, profile["id"]
-            )
-            env.update(profile_plan.env_set)
-            if profile_plan.env_remove:
-                env_remove = list(profile_plan.env_remove)
     if agent_key == "codex" and not login_profile_id:
         # Compatibility: `codex resume <id>` only works inside the home
         # that recorded the session. Resume in whichever home owns it;
@@ -3496,17 +3509,10 @@ async def _terminal_create_impl(
         )
         if session_home is None:
             home_id = str(metadata.get("session_home_id") or payload["pane_id"])
-            if profile_plan is not None and profile_plan.codex_source_home is not None:
-                codex_home = await asyncio.to_thread(
-                    app.codex_home_manager.prepare,
-                    home_id,
-                    source_home=profile_plan.codex_source_home,
-                )
-            else:
-                codex_home = await asyncio.to_thread(
-                    app.codex_home_manager.prepare,
-                    home_id,
-                )
+            codex_home = await asyncio.to_thread(
+                app.codex_home_manager.prepare,
+                home_id,
+            )
             env["CODEX_HOME"] = str(codex_home)
             metadata["session_home_id"] = home_id
         elif session_home != app.codex_home_manager.real_home:
@@ -3544,22 +3550,39 @@ async def _terminal_create_impl(
                 resume_dedup_id,
             )
             await session.terminals.kill(stale.id, force=True)
-    term = session.terminals.create(
-        pane_id=payload["pane_id"],
-        agent_key=agent_key,
-        command=payload["command"],
-        cwd=payload["cwd"],
-        cols=int(payload.get("cols", 100)),
-        rows=int(payload.get("rows", 30)),
-        env=env or None,
-        env_remove=env_remove,
-        metadata=metadata,
-        output_log_file=payload.get("output_log_file") or "",
-    )
-    transaction["term_id"] = term.id
-    # Claim immediately. A CLI can die while attribution registration is
-    # still running; its terminal.exit must still reach this renderer.
-    app._PTY_OWNERS[term.id] = session
+    def _spawn_and_claim() -> Any:
+        term = session.terminals.create(
+            pane_id=payload["pane_id"],
+            agent_key=agent_key,
+            command=payload["command"],
+            cwd=payload["cwd"],
+            cols=int(payload.get("cols", 100)),
+            rows=int(payload.get("rows", 30)),
+            env=env or None,
+            env_remove=env_remove,
+            metadata=metadata,
+            output_log_file=payload.get("output_log_file") or "",
+        )
+        transaction["term_id"] = term.id
+        # Claim immediately. A CLI can die while attribution registration is
+        # still running; its terminal.exit must still reach this renderer.
+        app._PTY_OWNERS[term.id] = session
+        return term
+
+    if agent_key in PROFILE_AGENT_KEYS and not login_profile_id:
+        # A regular pane of a profile agent starts on the live credentials —
+        # the very state an account switch swaps. Spawning under the agent's
+        # switch lock closes the quiescence gate's TOCTOU window: the pane is
+        # either created and claimed in _PTY_OWNERS before the switch handler
+        # takes the lock (so its gate counts the pane), or the spawn waits for
+        # the swap to finish and picks up the new account's credentials. The
+        # locked section is synchronous (no awaits), so the lock is held only
+        # for the spawn itself; login panes run in an isolated home and other
+        # agents have no profiles, so neither takes the lock.
+        async with app.credential_vault.switch_lock(agent_key):
+            term = _spawn_and_claim()
+    else:
+        term = _spawn_and_claim()
     # Register the pane with the log-attribution layer so any session
     # file appearing after this point can be attributed back to us.
     if agent_key in ("claude", "codex", "antigravity", "grok", "kimi", "opencode", "qwen", "kilo", "pi", "copilot", "cursor", "aider"):

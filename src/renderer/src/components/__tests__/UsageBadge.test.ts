@@ -5,11 +5,14 @@ import { nextTick } from 'vue'
 import UsageBadge from '../UsageBadge.vue'
 import { i18n } from '../../i18n'
 import type { UsageSnapshot } from '../../composables/useUsage'
-import type {
-  CliAccountIdentity,
-  CliProfile,
-  SetDefaultResult,
-  useCliProfiles,
+import {
+  cliAccountSwitchKey,
+  createCliAccountSwitchHandler,
+  type CliAccountIdentity,
+  type CliAccountSwitchHandler,
+  type CliProfile,
+  type SetDefaultResult,
+  type useCliProfiles,
 } from '../../composables/useCliProfiles'
 
 // Mock boundary: keep useUsage's pure formatters real, replace the singleton
@@ -86,14 +89,24 @@ function makeCliProfiles(
   return { fake, setDefault }
 }
 
-function mountBadge(cliProfiles: FakeCliProfiles): VueWrapper {
+function mountBadge(
+  cliProfiles: FakeCliProfiles,
+  opts: { switchHandler?: CliAccountSwitchHandler } = {},
+): VueWrapper {
   return mount(UsageBadge, {
     props: {
       agentKey: 'claude',
       cliProfiles: cliProfiles as unknown as ReturnType<typeof useCliProfiles>,
     },
     // Teleport is stubbed so the popover renders inside the wrapper.
-    global: { plugins: [i18n], stubs: { teleport: true } },
+    global: {
+      plugins: [i18n],
+      stubs: { teleport: true },
+      // Mimic the main window providing the quiescence-aware switch handler.
+      provide: opts.switchHandler
+        ? { [cliAccountSwitchKey as symbol]: opts.switchHandler }
+        : {},
+    },
   })
 }
 
@@ -343,6 +356,102 @@ describe('UsageBadge – selectProfile', () => {
     expect(notify.alert).toHaveBeenCalledTimes(1)
     expect(notify.alert.mock.calls[0][0]).toBe('switch failed')
     expect(notify.confirm).not.toHaveBeenCalled()
+    expect(usage.refreshUsage).not.toHaveBeenCalled()
+  })
+})
+
+describe('UsageBadge – quiescence switch handler', () => {
+  it('routes the switch through the provided handler instead of setDefault', async () => {
+    usage.usageFor.mockReturnValue(snapshot())
+    const { fake, setDefault } = makeCliProfiles({
+      profiles: [profile('p1', 'Work')],
+      defaultId: null,
+    })
+    const handler = vi.fn(async (): Promise<SetDefaultResult> => ({ ok: true }))
+    wrapper = mountBadge(fake, { switchHandler: handler })
+    await openPopover(wrapper)
+    await wrapper.findAll('.usage-acct')[1].trigger('click')
+    await settle()
+    expect(handler).toHaveBeenCalledWith('claude', 'p1')
+    expect(setDefault).not.toHaveBeenCalled()
+    expect(usage.refreshUsage).toHaveBeenCalledTimes(1)
+  })
+
+  it('blocked switch: confirm accepted → forced setDefault → usage refreshed', async () => {
+    usage.usageFor.mockReturnValue(snapshot())
+    const setDefault = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, code: 'PANES_RUNNING', count: 2, message: 'in use' })
+      .mockResolvedValueOnce({ ok: true })
+    const { fake } = makeCliProfiles({
+      profiles: [profile('p1', 'Work')],
+      defaultId: null,
+      setDefault,
+    })
+    notify.confirm.mockResolvedValue(true)
+    const handler = createCliAccountSwitchHandler(
+      { setDefault: fake.setDefault as unknown as ReturnType<typeof useCliProfiles>['setDefault'] },
+      {
+        confirm: (message, opts) => notify.confirm(message, opts) as Promise<boolean>,
+        agentLabel: () => 'Claude Code',
+      },
+    )
+    wrapper = mountBadge(fake, { switchHandler: handler })
+    await openPopover(wrapper)
+    await wrapper.findAll('.usage-acct')[1].trigger('click')
+    await settle()
+    expect(notify.confirm).toHaveBeenCalledTimes(1)
+    expect(setDefault).toHaveBeenNthCalledWith(1, 'claude', 'p1')
+    expect(setDefault).toHaveBeenNthCalledWith(2, 'claude', 'p1', { force: true })
+    expect(notify.alert).not.toHaveBeenCalled()
+    expect(usage.refreshUsage).toHaveBeenCalledTimes(1)
+  })
+
+  it('blocked switch: declined confirm switches nothing and stays silent', async () => {
+    usage.usageFor.mockReturnValue(snapshot())
+    const setDefault = vi
+      .fn()
+      .mockResolvedValue({ ok: false, code: 'PANES_RUNNING', count: 2, message: 'in use' })
+    const { fake } = makeCliProfiles({
+      profiles: [profile('p1', 'Work')],
+      defaultId: null,
+      setDefault,
+    })
+    notify.confirm.mockResolvedValue(false)
+    const handler = createCliAccountSwitchHandler(
+      { setDefault: fake.setDefault as unknown as ReturnType<typeof useCliProfiles>['setDefault'] },
+      {
+        confirm: (message, opts) => notify.confirm(message, opts) as Promise<boolean>,
+        agentLabel: () => 'Claude Code',
+      },
+    )
+    wrapper = mountBadge(fake, { switchHandler: handler })
+    await openPopover(wrapper)
+    await wrapper.findAll('.usage-acct')[1].trigger('click')
+    await settle()
+    expect(setDefault).toHaveBeenCalledTimes(1)
+    expect(notify.alert).not.toHaveBeenCalled()
+    expect(usage.refreshUsage).not.toHaveBeenCalled()
+  })
+
+  it('without a handler, a PANES_RUNNING failure alerts its message (no force)', async () => {
+    usage.usageFor.mockReturnValue(snapshot())
+    const setDefault = vi
+      .fn()
+      .mockResolvedValue({ ok: false, code: 'PANES_RUNNING', count: 1, message: 'panes running' })
+    const { fake } = makeCliProfiles({
+      profiles: [profile('p1', 'Work')],
+      defaultId: null,
+      setDefault,
+    })
+    wrapper = mountBadge(fake)
+    await openPopover(wrapper)
+    await wrapper.findAll('.usage-acct')[1].trigger('click')
+    await settle()
+    expect(setDefault).toHaveBeenCalledTimes(1)
+    expect(setDefault).toHaveBeenCalledWith('claude', 'p1')
+    expect(notify.alert).toHaveBeenCalledTimes(1)
+    expect(notify.alert.mock.calls[0][0]).toBe('panes running')
     expect(usage.refreshUsage).not.toHaveBeenCalled()
   })
 })

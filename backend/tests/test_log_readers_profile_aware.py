@@ -1,11 +1,11 @@
 """Phase B (simplification): readers/attribution/preflight scan ONE real home.
 
-A managed account's pane still runs with its CLI config home relocated to an
-isolated per-account home (credential_vault.prepare_profile_home), but only the
-credentials stay isolated — ``projects``/``sessions``/``.grok/grok.db`` are
-symlinked back to the user's real home. So every account's sessions resolve into
-the single default root, and the readers/attribution/resume-preflight no longer
-enumerate profile homes separately.
+Every pane runs on the user's real home (spawns get no per-profile config-home
+relocation any more); legacy isolated profile homes symlinked
+``projects``/``sessions``/``.grok/grok.db`` back to the real home. So every
+account's sessions resolve into the single default root, and the
+readers/attribution/resume-preflight no longer enumerate profile homes
+separately.
 
 These tests assert (a) the reader scans exactly the single default root,
 (b) a session in the (shared) real home is found, attributed and resumable, and

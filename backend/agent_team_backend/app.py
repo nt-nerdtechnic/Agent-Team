@@ -901,6 +901,14 @@ async def _start_log_watcher() -> None:
     except Exception as err:  # noqa: BLE001
         log.warning("legacy CLI profile home migration failed: %s", err)
 
+    # One-time promotion of credentials still living in legacy per-profile
+    # isolated homes into their slots (+ the live location for the active
+    # account). Idempotent; background task — credential I/O must never block
+    # startup.
+    asyncio.create_task(
+        credential_vault.promote_profile_home_secrets(cli_profiles_store)
+    )
+
     # Sweep leftover isolated login homes into their slots, independently of
     # the usage poller (which only harvests while usage polling is enabled).
     # Background task — credential I/O must never block startup.

@@ -57,12 +57,13 @@ def default_profiles_root() -> Path:
     return Path.home() / ".navide" / "cli-profiles"
 
 
-# Persistent per-profile config-home subdir inside a slot dir. A managed
-# account's regular panes run with their CLI config home relocated here
-# (credential_vault.prepare_profile_home), kept separate from the disposable
-# login-home and from the slot's own credential bookkeeping. The log readers,
-# attribution and resume preflight enumerate these homes so a profile pane's
-# sessions are still read, attributed and resumable.
+# Persistent per-profile config-home subdir inside a slot dir. Legacy: a
+# managed account's regular panes used to run with their CLI config home
+# relocated here. Spawns no longer use these homes, but an existing one can
+# still host panes spawned before the unification and holds old session
+# files, so the log readers, attribution and resume preflight keep
+# enumerating it (and the startup promotion reads its credentials once —
+# see credential_vault.promote_profile_home_secrets).
 PROFILE_HOME_DIRNAME = "home"
 
 

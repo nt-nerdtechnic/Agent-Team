@@ -199,7 +199,7 @@ class LogWatcher:
         only when a profile pane spawns — after start() already scheduled the
         static watch roots. Watching the home recursively covers claude's
         <home>/projects, kimi's <home>/sessions and grok's <home>/.grok in one
-        subscription; the home dir always exists (prepare_profile_home) so the
+        subscription; the home dir is checked for existence below so the
         schedule can't fail on a not-yet-created session subdir. Lazy + deduped:
         only homes with a live pane are added, and an already-watched dir is a
         no-op. Returns True when a new subscription was created."""

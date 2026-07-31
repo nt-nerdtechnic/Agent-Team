@@ -1415,7 +1415,13 @@
   "cli-account": {
     "default": "預設",
     "switch-title": "切換帳號",
-    "swap-failed": "帳號切換失敗，仍使用原本的帳號。"
+    "swap-failed": "帳號切換失敗，仍使用原本的帳號。",
+    "panes-running": "有 {count} 個運行中的 CLI pane 正在使用此帳號，請先關閉再切換。",
+    "switch-restart-confirm-title": "重啟運行中的 pane",
+    "switch-restart-confirm-body": "切換帳號將重啟 {count} 個運行中的 {agent} pane，繼續？",
+    "switch-restart-confirm-confirm": "切換並重啟",
+    "switch-restart-confirm-cancel": "取消",
+    "switch-restart-partial": "帳號切換後有 {failed}/{total} 個 pane 未能重啟，詳情請見紀錄。"
   },
   "cliDrop": {
     "source-closed": "來源 CLI pane 已關閉",

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, provide, reactive, ref, watch } from 'vue'
 import ViewPanel, { type LayoutMode } from './components/ViewPanel.vue'
 import TerminalPane from './components/TerminalPane.vue'
 import RestoredPanePlaceholder from './components/RestoredPanePlaceholder.vue'
@@ -29,7 +29,14 @@ import { useBackend } from './composables/useBackend'
 import { useTheme } from './composables/useTheme'
 import { useSettings } from './composables/useSettings'
 import { useRoles } from './composables/useRoles'
-import { useCliProfiles } from './composables/useCliProfiles'
+import {
+  cliAccountSwitchKey,
+  createCliAccountSwitchHandler,
+  forcedRestartAgentKey,
+  paneNeedsAccountRestart,
+  runAccountRestartBatch,
+  useCliProfiles
+} from './composables/useCliProfiles'
 import { useStages } from './composables/useStages'
 import { usePipelines } from './composables/usePipelines'
 import { useRecentWorkspaces } from './composables/useRecentWorkspaces'
@@ -3488,12 +3495,26 @@ const rebuildableAllPaneCount = computed(
   () => panes.value.filter((p) => p.realized && paneCanRebuild(p)).length
 )
 
+/** Failure outcomes of `rebuildPaneViaResume` — success resolves undefined.
+ *  Existing batch callers only compare `=== 'busy'`; the other tokens let
+ *  the account-switch restart aggregate silent failures into one toast. */
+type RebuildFailure =
+  | 'busy' // running/starting CLI skipped in a batch
+  | 'declined' // user declined the running-pane confirm
+  | 'missing-pane' // pane gone or never realized
+  | 'no-session' // no resumable session id / no resume command
+  | 'locked' // another rebuild of this pane/session is in flight
+  | 'probe-failed' // stale-create rollback or resumability probe failed
+  | 'not-resumable' // session definitively not resumable
+  | 'missing-session' // session file absent on disk
+  | 'spawn-failed' // replacement pane spawn failed
+
 async function rebuildPaneViaResume(
   paneId: string,
   opts?: { suppressBusyToast?: boolean; forceWhenRunning?: boolean }
-): Promise<'busy' | undefined> {
+): Promise<RebuildFailure | undefined> {
   const pane = panes.value.find((p) => p.id === paneId)
-  if (!pane?.realized) return
+  if (!pane?.realized) return 'missing-pane'
   // If the CLI is actively working, skip rebuild so we don't kill in-flight work.
   // The PTY is alive and the pane is already bound — nothing to reattach, just leave it.
   // displayStatus detects active work from CLEANED output bursts. Raw status
@@ -3517,7 +3538,7 @@ async function rebuildPaneViaResume(
         cancelText: i18n.global.t('pane.terminal.rebuild-running-confirm-cancel')
       }
     )
-    if (!ok) return
+    if (!ok) return 'declined'
   } else if (busy === 'starting') {
     // An in-flight terminal create is never rebuilt over — skip unconditionally.
     // In a batch (rebuild-all) the caller aggregates one toast; here just report.
@@ -3531,7 +3552,7 @@ async function rebuildPaneViaResume(
     if (!opts?.suppressBusyToast) {
       notifyRestore.toast(i18n.global.t('pane.terminal.rebuild-no-session'), { type: 'error' })
     }
-    return
+    return 'no-session'
   }
   // Lock synchronously, before any await: a concurrent call (double-click, or
   // overlap with the rebuild-all batch) would otherwise pass the has() check
@@ -3545,7 +3566,7 @@ async function rebuildPaneViaResume(
     if (!opts?.suppressBusyToast) {
       notifyRestore.toast(i18n.global.t('pane.terminal.rebuild-in-progress'), { type: 'info' })
     }
-    return
+    return 'locked'
   }
   try {
     // A stale STARTING pane may still have terminal.create queued or in flight.
@@ -3562,7 +3583,7 @@ async function rebuildPaneViaResume(
       if (!opts?.suppressBusyToast) {
         notifyRestore.toast(i18n.global.t('pane.terminal.rebuild-probe-failed'), { type: 'error' })
       }
-      return
+      return 'probe-failed'
     }
     const ws = pane.workspacePath
     // Fail-safe: abort on false AND on null (probe failed) — never kill a
@@ -3580,7 +3601,7 @@ async function rebuildPaneViaResume(
           { type: 'error' }
         )
       }
-      return
+      return resumable === false ? 'not-resumable' : 'probe-failed'
     }
     const spec = agentSpecs.find((s) => s.agentKey === pane.agentKey)
     const skipFlag = yoloEnabled.value ? (spec?.skipPermissionFlag ?? '') : ''
@@ -3589,7 +3610,7 @@ async function rebuildPaneViaResume(
       if (!opts?.suppressBusyToast) {
         notifyRestore.toast(i18n.global.t('pane.terminal.rebuild-no-session'), { type: 'error' })
       }
-      return
+      return 'no-session'
     }
 
     // Safety: Ensure the requested session actually exists on disk.
@@ -3602,7 +3623,7 @@ async function rebuildPaneViaResume(
       if (!opts?.suppressBusyToast) {
         notifyRestore.toast(i18n.global.t('pane.terminal.rebuild-not-resumable'), { type: 'error' })
       }
-      return
+      return 'missing-session'
     }
     // Snapshot identity before onKill removes the pane from the list.
     const snap = {
@@ -3675,6 +3696,7 @@ async function rebuildPaneViaResume(
       }
     } else {
       panes.value = panes.value.filter((p) => p.id !== paneId)
+      return 'spawn-failed'
     }
   } finally {
     releaseRebuildLock()
@@ -3700,6 +3722,48 @@ async function confirmBatchRebuildOverRunning(ids: string[]): Promise<boolean> {
       confirmText: i18n.global.t('pane.terminal.rebuild-running-confirm-confirm'),
       cancelText: i18n.global.t('pane.terminal.rebuild-running-confirm-cancel')
     }
+  )
+}
+
+// CLI account switch (UsageBadge popover / Settings › Accounts): when the
+// backend refuses to swap credentials under live panes (PANES_RUNNING), this
+// handler confirms with the user and forces the switch. The pane restart is
+// broadcast-driven: the backend announces the forced switch through
+// `cli_profiles.changed`, and every main window — this one included —
+// restarts its own panes via restartAgentPanes below. Provided (not
+// prop-threaded) so any descendant switch surface picks it up; windows
+// without it fall back to a plain setDefault inside the components.
+provide(
+  cliAccountSwitchKey,
+  createCliAccountSwitchHandler(cliProfilesApi, {
+    confirm: (message, opts) => notifyRestore.confirm(message, opts),
+    agentLabel: (agentKey) => agentSpecs.find((s) => s.agentKey === agentKey)?.label ?? agentKey
+  })
+)
+
+/** Restart this window's live panes of one agent after a forced account
+ *  switch, so they pick up the new credentials. Login panes and dead
+ *  terminals are excluded; panes whose terminal ref has not mounted yet stay
+ *  in (they may be starting on the old credentials). Failures aggregate into
+ *  one summary toast. */
+async function restartAgentPanes(agentKey: string): Promise<void> {
+  // Rebuild replaces pane ids — capture the batch up front.
+  const ids = panes.value
+    .filter((p) => {
+      const paneRef = paneRefs[p.id]
+      const status = (paneRef?.displayStatus ?? paneRef?.status) as string | undefined
+      return paneNeedsAccountRestart(p, agentKey, status)
+    })
+    .map((p) => p.id)
+  await runAccountRestartBatch(
+    ids,
+    (id) => rebuildPaneViaResume(id, { suppressBusyToast: true, forceWhenRunning: true }),
+    pipelineLog,
+    (failed, total) =>
+      notifyRestore.toast(
+        i18n.global.t('cli-account.switch-restart-partial', { failed, total }),
+        { type: 'error' }
+      )
   )
 }
 
@@ -6791,8 +6855,20 @@ backend.on('terminal.exit', (raw) => {
 backend.on('cli_profiles.changed', (raw) => {
   const ev = raw as {
     reason?: string
+    agent_key?: string
+    forced?: boolean
     harvestedProfileIds?: string[]
     identities?: Record<string, Record<string, { email?: string | null }>>
+  }
+  // Forced account switch: credentials were swapped under live panes. Every
+  // main window receives this broadcast and restarts its own panes for the
+  // agent — including the initiating window, whose switch handler no longer
+  // restarts directly (so nothing runs twice). A quiet (non-forced) switch
+  // never touches panes.
+  const restartKey = forcedRestartAgentKey(ev)
+  if (restartKey) {
+    void restartAgentPanes(restartKey)
+    return
   }
   if (ev?.reason !== 'login-harvest') return
   for (const profileId of ev.harvestedProfileIds ?? []) {

@@ -1415,7 +1415,13 @@
   "cli-account": {
     "default": "Default",
     "switch-title": "Switch account",
-    "swap-failed": "Account switch failed — the previous account is still active."
+    "swap-failed": "Account switch failed — the previous account is still active.",
+    "panes-running": "{count} running CLI pane(s) are using this account — close them before switching.",
+    "switch-restart-confirm-title": "Restart running panes",
+    "switch-restart-confirm-body": "Switching accounts will restart {count} running {agent} pane(s). Continue?",
+    "switch-restart-confirm-confirm": "Switch & restart",
+    "switch-restart-confirm-cancel": "Cancel",
+    "switch-restart-partial": "{failed} of {total} pane(s) could not be restarted after the account switch — see the log for details."
   },
   "cliDrop": {
     "source-closed": "CLI pane is no longer open",

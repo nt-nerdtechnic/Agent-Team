@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, inject, onBeforeUnmount, ref } from 'vue'
 import {
   accountUsageFor,
   formatRemaining,
@@ -11,7 +11,7 @@ import {
   usageFor,
   type UsageWindow
 } from '../composables/useUsage'
-import type { useCliProfiles } from '../composables/useCliProfiles'
+import { cliAccountSwitchKey, type useCliProfiles } from '../composables/useCliProfiles'
 import { useNotify } from '../composables/useNotify'
 import { executeCommand } from '../keybindings/commandRegistry'
 import { i18n } from '../i18n'
@@ -79,10 +79,17 @@ function onLeave(): void {
 const { alert: notifyAlert } = useNotify()
 const t = i18n.global.t
 
+// Main window provides the quiescence-aware switch (confirm + force + pane
+// restart). Other windows fall back to plain setDefault, whose PANES_RUNNING
+// failure carries a ready message and surfaces as the alert below.
+const switchAccount = inject(cliAccountSwitchKey, null)
+
 async function selectProfile(id: string): Promise<void> {
   if (id === activeProfileId.value) return
   const target = id || null
-  const res = await props.cliProfiles.setDefault(props.agentKey, target)
+  const res = switchAccount
+    ? await switchAccount(props.agentKey, target)
+    : await props.cliProfiles.setDefault(props.agentKey, target)
   if (!res.ok) {
     if (res.message) void notifyAlert(res.message, { title: t('cli-account.switch-title') })
     return

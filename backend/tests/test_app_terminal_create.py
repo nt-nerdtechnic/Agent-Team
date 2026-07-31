@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -126,6 +127,56 @@ async def test_terminal_create_codex_prepares_home_and_registers_home_id(
         "session_home_id": "stable-home",
     }]
     assert session.websocket.sent[0]["payload"]["pane_id"] == "live-pane"
+
+
+@pytest.mark.asyncio
+async def test_profile_agent_spawn_excluded_against_account_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A regular pane of a profile agent spawns under the agent's credential
+    switch lock: while a switch holds the lock, the spawn (and its
+    _PTY_OWNERS claim) waits — closing the quiescence gate's TOCTOU window
+    where a pane created mid-swap would start on the outgoing account's
+    credentials. Non-profile agents are unaffected."""
+    monkeypatch.setattr(app, "attribution", FakeAttribution())
+    monkeypatch.setattr(app, "_register_workspace_and_backfill", lambda _ws: None)
+    session = _session()
+
+    async with app.credential_vault.switch_lock("claude"):
+        task = asyncio.create_task(app.handle_message(session, {
+            "id": "m1",
+            "type": "terminal.create",
+            "payload": {
+                "pane_id": "claude-pane",
+                "agent_key": "claude",
+                "command": "claude",
+                "cwd": "/ws",
+                "metadata": {"workspace_path": "/ws"},
+            },
+        }))
+        # Ample opportunity to reach the spawn section — it must park on the
+        # held switch lock before creating the PTY.
+        for _ in range(50):
+            await asyncio.sleep(0.005)
+        assert session.terminals.created == []  # type: ignore[attr-defined]
+
+        # A non-profile agent never takes the lock and spawns right through.
+        other = _session()
+        await asyncio.wait_for(app.handle_message(other, {
+            "id": "m2",
+            "type": "terminal.create",
+            "payload": {
+                "pane_id": "shell-pane",
+                "agent_key": "terminal",
+                "command": "/bin/zsh",
+                "cwd": "/ws",
+            },
+        }), timeout=5)
+        assert len(other.terminals.created) == 1  # type: ignore[attr-defined]
+
+    await asyncio.wait_for(task, timeout=5)
+    assert len(session.terminals.created) == 1  # type: ignore[attr-defined]
+    assert app._PTY_OWNERS.get("term-1") is session
 
 
 @pytest.mark.asyncio

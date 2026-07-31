@@ -32,11 +32,12 @@ def _isolated_data_dir(tmp_path, monkeypatch):
 def _isolated_credential_vault(tmp_path, monkeypatch):
     """Tests must NEVER touch the real home or the real Keychain: swap the
     app-wide vault for one rooted in tmp with a security runner that always
-    reports 'not found'."""
+    reports 'not found' (the security CLI's exit code 44 — anything else
+    means a transient failure and makes strict capture reads raise)."""
     vault = CredentialVault(
         root=tmp_path / "vault-root",
         real_home=tmp_path / "vault-home",
-        security_runner=lambda args, input_text=None: (1, ""),
+        security_runner=lambda args, input_text=None: (44, ""),
     )
     monkeypatch.setattr(app, "credential_vault", vault)
 

@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { inject, onMounted, ref } from 'vue'
 import { CLI_AGENT_SPECS } from '../lib/agentSpecs'
-import type { useCliProfiles, CliProfile } from '../composables/useCliProfiles'
+import { cliAccountSwitchKey, type useCliProfiles, type CliProfile } from '../composables/useCliProfiles'
 import { useNotify } from '../composables/useNotify'
 import {
   accountUsageFor,
@@ -110,13 +110,22 @@ async function signIn(agentKey: string, profileId: string | null): Promise<void>
 const { toast } = useNotify()
 const t = i18n.global.t
 
+// Main window provides the quiescence-aware switch (confirm + force + pane
+// restart); without it fall back to plain setDefault.
+const switchAccount = inject(cliAccountSwitchKey, null)
+
 async function requestSetDefault(agentKey: string, profileId: string | null): Promise<boolean> {
-  const res = await props.api.setDefault(agentKey, profileId)
+  const res = switchAccount
+    ? await switchAccount(agentKey, profileId)
+    : await props.api.setDefault(agentKey, profileId)
   if (res.ok) {
     // Re-poll so the card's quota reflects the newly active account.
     refreshUsage()
     return true
   }
+  // PANES_RUNNING skips the composable's banner: with no handler it carries a
+  // ready message — toast it. A declined confirm has no message (stay silent).
+  if (res.code === 'PANES_RUNNING' && res.message) toast(res.message, { type: 'error' })
   return false
 }
 

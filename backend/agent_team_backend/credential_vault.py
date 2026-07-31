@@ -5,12 +5,9 @@ against the user's real home, and a profile is only a credential slot.
 Switching the active account captures the live credentials into the outgoing
 account's slot and restores the incoming account's slot into the live
 location. The reserved slot ``__default__`` holds the unmanaged original
-login while a managed account is active.
-
-Claude is the exception: a managed claude profile's token stays in that
-profile's own home and is never copied to the live location (see
-``_live_owns_slot_secret``), so switching only publishes its display-only
-``oauthAccount``.
+login while a managed account is active. Every agent — claude included —
+follows the same model: the active account's secret lives in the live
+location and the slots are cold backups.
 
 Live credential locations (relative to the real home):
 
@@ -47,8 +44,7 @@ import os
 import shutil
 import subprocess
 import sys
-import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -102,6 +98,16 @@ _LOGIN_HOME_SECRET_FILES = {
     "grok": ("home", ".grok", "auth.json"),
 }
 
+# Where each CLI kept its secret inside a legacy persistent profile home,
+# relative to the home dir (claude used the path-hashed Keychain item /
+# ``.credentials.json`` — see ``_claude_profile_home_secret``). Only read by
+# the one-time profile-home promotion; spawns no longer use these homes.
+_PROFILE_HOME_SECRET_FILES = {
+    "codex": ("auth.json",),
+    "kimi": ("credentials", "kimi-code.json"),
+    "grok": (".grok", "auth.json"),
+}
+
 
 def _parse_json_dict(raw: str | None) -> dict | None:
     if raw is None:
@@ -125,14 +131,14 @@ def _claude_oauth_expires_at(secret: str | None) -> float | None:
 
 
 def _claude_home_secret_is_fresher(home_secret: str | None, slot_secret: str) -> bool:
-    """True when the profile home already holds a token the running CLI
-    refreshed past the slot snapshot. Anthropic OAuth refresh tokens rotate,
-    and the slot is only updated on capture/harvest — never from an in-place
-    runtime refresh — so re-seeding from the slot would hand the pane a dead
-    token pair ("Login expired"). Seeding is therefore runtime-first: the
-    slot wins only when it is strictly newer (a fresh re-login harvest).
-    When either side has no parsable expiry the comparison is impossible and
-    the caller falls back to writing the slot value."""
+    """True when the first credential's token expiry is at least as new as the
+    second's. Anthropic OAuth refresh tokens rotate, and a legacy profile home
+    was refreshed in place by its running CLI while the slot only changed on
+    capture/harvest — so the profile-home promotion (and the stale-home-copy
+    check in ``harvest_login_home``) must prefer the home copy unless the slot
+    is strictly newer (a fresh re-login harvest). When either side has no
+    parsable expiry the comparison is impossible and returns False ("cannot
+    prove fresher")."""
     home_exp = _claude_oauth_expires_at(home_secret)
     slot_exp = _claude_oauth_expires_at(slot_secret)
     return home_exp is not None and slot_exp is not None and home_exp >= slot_exp
@@ -262,16 +268,6 @@ class LiveCredentials:
     account: dict | None = None
 
 
-@dataclass
-class ProfileHomePlan:
-    """Env overrides a managed account's persistent isolated home applies to
-    one regular (non-login) terminal spawn."""
-
-    env_set: dict[str, str] = field(default_factory=dict)
-    env_remove: list[str] = field(default_factory=list)
-    codex_source_home: Path | None = None
-
-
 class CredentialVault:
     def __init__(
         self,
@@ -286,10 +282,6 @@ class CredentialVault:
         self._security = security_runner or _default_security_runner
         self._platform = platform or sys.platform
         self._switch_locks: dict[str, asyncio.Lock] = {}
-        # Serializes Keychain check-then-write pairs across the spawn threads
-        # (prepare_profile_home runs off the event loop; a restore spawns
-        # several panes of one profile concurrently).
-        self._keychain_lock = threading.Lock()
 
     def switch_lock(self, agent_key: str) -> asyncio.Lock:
         """Per-agent lock serializing credential swaps and opportunistic
@@ -327,13 +319,34 @@ class CredentialVault:
     # ---- Keychain primitives (injectable runner; never the real Keychain
     # in tests) ----
 
-    def _keychain_read(self, service: str) -> str | None:
+    def _keychain_read(self, service: str, *, strict: bool = False) -> str | None:
+        """Read a generic-password item. A missing item (exit code 44 /
+        "could not be found") is a legitimate signed-out state and returns
+        None. Any other failure (locked keychain, denied access, timeout) is
+        indistinguishable from signed-out, so with ``strict=True`` it raises
+        instead — capture paths must never mistake a transient read failure
+        for a logout and erase the slot. Read-only display paths keep the
+        lax default (a transient failure shows as signed-out, harmless)."""
         try:
             rc, out = self._security(["find-generic-password", "-s", service, "-w"], None)
         except Exception as err:  # noqa: BLE001
+            if strict:
+                raise CredentialVaultError(
+                    f"keychain read failed for {service!r}: {err}"
+                ) from err
             log.warning("keychain read %s failed: %s", service, err)
             return None
         if rc != 0:
+            if rc == 44 or "could not be found" in out:
+                return None  # item does not exist: signed out
+            if strict:
+                lines = out.strip().splitlines()
+                detail = lines[-1][:200] if lines else ""
+                raise CredentialVaultError(
+                    f"keychain read failed for {service!r} (rc {rc})"
+                    + (f": {detail}" if detail else "")
+                )
+            log.warning("keychain read %s failed (rc %s)", service, rc)
             return None
         secret = out.rstrip("\n")
         return secret or None
@@ -370,9 +383,14 @@ class CredentialVault:
 
     # ---- live credentials ----
 
-    def read_live(self, agent_key: str) -> LiveCredentials:
+    def read_live(self, agent_key: str, *, strict: bool = False) -> LiveCredentials:
+        """``strict=True`` raises on a transient Keychain failure instead of
+        reporting signed-out — required on capture paths (see _keychain_read)."""
         if agent_key == "claude":
-            secret = self._keychain_read(CLAUDE_LIVE_KEYCHAIN_SERVICE) if self._is_macos else None
+            secret = (
+                self._keychain_read(CLAUDE_LIVE_KEYCHAIN_SERVICE, strict=strict)
+                if self._is_macos else None
+            )
             if secret is None:
                 secret = _read_text(self._live_file("claude"))
             return LiveCredentials(secret=secret, account=self._read_live_oauth_account())
@@ -480,17 +498,10 @@ class CredentialVault:
     def resolve_claude_credentials(
         self, slot_id: str, *, active: bool
     ) -> LiveCredentials:
-        """Read the credential a managed Claude pane currently uses.
-
-        A profile's persistent runtime home can contain a token refreshed by a
-        running Claude CLI, so it takes precedence over the older live/slot
-        copy. The built-in default has no managed runtime home. This method is
-        read-only: it never captures, restores, switches, or writes credentials.
+        """Read the credential a Claude account currently uses: the active
+        account owns the live location, a parked account its slot snapshot.
+        Read-only: never captures, restores, switches, or writes credentials.
         """
-        if slot_id != DEFAULT_SLOT_ID:
-            runtime_secret = self._claude_profile_home_secret(slot_id)
-            if runtime_secret is not None:
-                return LiveCredentials(secret=runtime_secret)
         return self.read_live("claude") if active else self.read_slot("claude", slot_id)
 
     def write_slot(self, agent_key: str, slot_id: str, creds: LiveCredentials) -> None:
@@ -524,52 +535,28 @@ class CredentialVault:
         """The slot's display-only account info (claude's ``oauthAccount``)."""
         return self.read_slot(agent_key, slot_id).account
 
-    def identity(
-        self,
-        agent_key: str,
-        slot_id: str | None = None,
-        *,
-        active_slot_id: str = DEFAULT_SLOT_ID,
-    ) -> dict:
+    def identity(self, agent_key: str, slot_id: str | None = None) -> dict:
         """Display-only identity for one account slot (``slot_id=None`` = the
         live state, i.e. the currently active account). ``signedIn`` reflects
         whether an actual credential secret exists; claude's ``oauthAccount``
         email is display-only (a long-lived-token login carries no
-        oauthAccount but is still signed in). ``active_slot_id`` names which
-        slot the live state belongs to: a managed claude profile keeps its
-        secret in its own profile home rather than the live location, so the
-        active row cannot be read from live alone. Reads files — plus, for
+        oauthAccount but is still signed in). Reads files — plus, for
         claude on macOS, the Keychain — so call off the event loop.
         Returns ``{"email": str | None, "signedIn": bool}``; never raises."""
         try:
             if agent_key == "claude":
-                active = slot_id is None
-                resolved = active_slot_id if active else slot_id
-                # The email is display-only: the active row takes it from the
-                # live ~/.claude.json, a parked row from its slot snapshot.
+                # The active row reads the live state (~/.claude.json account
+                # + live secret), a parked row its slot snapshot.
                 base = (
-                    self.read_live("claude") if active
-                    else self.read_slot("claude", resolved)
+                    self.read_live("claude") if slot_id is None
+                    else self.read_slot("claude", slot_id)
                 )
-                if resolved == DEFAULT_SLOT_ID:
-                    secret = base.secret
-                else:
-                    # A managed profile keeps its token in its own home, and the
-                    # live location belongs to the default account, so a profile
-                    # row must never read it (see _live_owns_slot_secret). The
-                    # slot holds the backup snapshot when no pane has run yet.
-                    secret = self._claude_profile_home_secret(resolved)
-                    if secret is None:
-                        snapshot = (
-                            self.read_slot("claude", resolved) if active else base
-                        )
-                        secret = snapshot.secret
                 email = (
                     base.account.get("emailAddress")
                     if isinstance(base.account, dict) else None
                 )
                 email = email if isinstance(email, str) and email else None
-                return {"email": email, "signedIn": secret is not None}
+                return {"email": email, "signedIn": base.secret is not None}
             if slot_id is None:
                 secret = _read_text(self._live_file(agent_key))
             else:
@@ -597,83 +584,21 @@ class CredentialVault:
 
     # ---- account switching ----
 
-    def _live_owns_slot_secret(self, agent_key: str, slot_id: str) -> bool:
-        """True when ``slot_id``'s credential secret belongs in the live
-        location.
-
-        Claude Code scopes its whole OAuth refresh serialization (the
-        cross-process file lock, the ``.storage-write`` lock, the CAS guard) to
-        ``CLAUDE_CONFIG_DIR``, and its refresh tokens rotate without a grace
-        period. One refresh token copied into both the real home and a managed
-        profile home therefore gets rotated twice by locks that cannot see each
-        other, and whichever side refreshes first kills the other ("Login
-        expired"). So a managed claude profile keeps its token in its own
-        profile home only, and the slot is a backup snapshot; only the reserved
-        default slot owns the live location. Agents without that
-        refresh-locking behaviour keep using the live location as before.
-        """
-        return agent_key != "claude" or slot_id == DEFAULT_SLOT_ID
-
-    def _slot_source_credentials(self, agent_key: str, slot_id: str) -> LiveCredentials:
-        """The credential state a capture/harvest of ``slot_id`` should store.
-
-        A managed claude profile's panes refresh their token inside the profile
-        home, so that copy — not the live location, which belongs to the default
-        account — is the profile's current credential. An empty profile home
-        means no pane has run yet: the slot keeps what it already holds rather
-        than importing the live secret, which belongs to another account.
-        ``account`` is display info and always comes from the live
-        ``~/.claude.json``, which the active profile owns.
-        """
-        creds = self.read_live(agent_key)
-        if self._live_owns_slot_secret(agent_key, slot_id):
-            return creds
-        secret = self._claude_profile_home_secret(slot_id)
-        if secret is None:
-            secret = self.read_slot(agent_key, slot_id).secret
-        return LiveCredentials(secret=secret, account=creds.account)
-
     def capture(self, agent_key: str, slot_id: str) -> LiveCredentials:
-        """Mirror the credential state ``slot_id`` currently runs on into the
-        slot (a logged-out state empties the slot). Returns the snapshot."""
-        creds = self._slot_source_credentials(agent_key, slot_id)
+        """Mirror the live credential state — the credentials ``slot_id``
+        currently runs on — into the slot (a logged-out state empties the
+        slot). Returns the snapshot. Reads strictly: a transient Keychain
+        failure aborts BEFORE any slot is written — emptying the slot on a
+        misread would lose the account's token globally."""
+        creds = self.read_live(agent_key, strict=True)
         self.write_slot(agent_key, slot_id, creds)
         return creds
 
     def restore(self, agent_key: str, slot_id: str) -> None:
-        """Make ``slot_id`` the active account. For a slot that owns the live
-        location its content becomes the live credentials, and an empty slot
-        clears them (the CLI then prompts a fresh login) — unless the live
-        secret is already at least as fresh as the snapshot (see below). A
-        managed claude profile keeps its secret in its own profile home, so only
-        the display-only ``oauthAccount`` is published. ``oauthAccount`` is
-        display info and is always published, whichever branch runs."""
-        creds = self.read_slot(agent_key, slot_id)
-        if not self._live_owns_slot_secret(agent_key, slot_id):
-            self._write_live_oauth_account(creds.account)
-            return
-        if (
-            agent_key == "claude"
-            and creds.secret is not None
-            # Expiry comparison: True when the first secret is not older than
-            # the second (same helper, same >= semantics, as the profile-home
-            # seeding path).
-            and _claude_home_secret_is_fresher(self.read_live("claude").secret, creds.secret)
-        ):
-            # The live location is the default account's own storage: it keeps
-            # the token while a managed profile is active, and an unmanaged pane
-            # (or the user's own terminal, or `claude doctor`) refreshes it in
-            # place there, leaving this snapshot behind. Anthropic's refresh
-            # tokens rotate without a grace period, so republishing a stale
-            # snapshot over a newer live token kills the account ("Login
-            # expired"). A missing or unparsable expiry on either side makes the
-            # comparison impossible and falls through to the write on purpose:
-            # the snapshot is the only rescue path when the live credential is
-            # gone (an external `claude logout`, a wiped Keychain item), and
-            # losing that is worse than a redundant write.
-            self._write_live_oauth_account(creds.account)
-            return
-        self.write_live(agent_key, creds)
+        """Make ``slot_id`` the active account: its slot content becomes the
+        live credentials, and an empty slot clears them (the CLI then prompts
+        a fresh login)."""
+        self.write_live(agent_key, self.read_slot(agent_key, slot_id))
 
     def switch(self, agent_key: str, from_slot_id: str, to_slot_id: str) -> None:
         """Atomically capture the outgoing account into ``from_slot_id`` and
@@ -684,14 +609,7 @@ class CredentialVault:
             self.restore(agent_key, to_slot_id)
         except Exception as err:
             try:
-                if self._live_owns_slot_secret(agent_key, from_slot_id):
-                    self.write_live(agent_key, outgoing)
-                else:
-                    # The outgoing profile's secret was never in the live
-                    # location (it lives in that profile's home), so writing it
-                    # back would plant exactly the duplicate this split exists
-                    # to prevent. Only the display-only account has to revert.
-                    self._write_live_oauth_account(outgoing.account)
+                self.write_live(agent_key, outgoing)
             except Exception as rollback_err:  # noqa: BLE001
                 log.error(
                     "credential rollback for %s failed after restore error: %s",
@@ -702,13 +620,13 @@ class CredentialVault:
             ) from err
 
     def harvest(self, agent_key: str, slot_id: str) -> bool:
-        """Opportunistically fill an EMPTY slot from the credentials the account
-        currently runs on (the user just logged in inside a pane). No-op when
-        the slot already holds a secret or nothing is signed in. Returns True
-        when something was harvested."""
+        """Opportunistically fill an EMPTY slot from the live credentials the
+        account currently runs on (the user just logged in inside a pane).
+        No-op when the slot already holds a secret or nothing is signed in.
+        Returns True when something was harvested."""
         if not self.slot_is_empty(agent_key, slot_id):
             return False
-        creds = self._slot_source_credentials(agent_key, slot_id)
+        creds = self.read_live(agent_key)
         if creds.secret is None:
             return False
         self.write_slot(agent_key, slot_id, creds)
@@ -899,13 +817,14 @@ class CredentialVault:
             # the home's own .claude.json for the display-only oauthAccount.
             if not self.harvest_legacy_claude_home(slot_id, home):
                 return False
-            # The user just re-logged this account, so the login must win the
-            # next seed. Runtime-first seeding keeps the profile home's copy
-            # when its expiry is not older — an obsolete copy whose expiresAt
-            # outlives the new login's (e.g. a revoked long-lived token with a
-            # far-future expiry) would shadow the fresh login forever. Drop
-            # the home copy only in that case; otherwise leave it for any
-            # still-running panes of this profile.
+            # The user just re-logged this account, so the login must win. The
+            # legacy profile-home promotion (promote_profile_home_secrets)
+            # keeps a home copy whose expiry is not older than the slot's — an
+            # obsolete copy whose expiresAt outlives the new login's (e.g. a
+            # revoked long-lived token with a far-future expiry) would shadow
+            # the fresh login at every startup. Drop the home copy only in
+            # that case; otherwise leave it for any still-running panes
+            # spawned in this profile's home before the unification.
             profile_home = self.profile_home_path(agent_key, slot_id)
             new_secret = self.read_slot("claude", slot_id).secret
             home_service = legacy_claude_keychain_service(profile_home)
@@ -933,29 +852,25 @@ class CredentialVault:
         shutil.rmtree(home, ignore_errors=True)
         return True
 
-    # ---- persistent isolated homes (regular panes) ----
+    # ---- legacy persistent isolated homes ----
 
     def profile_home_path(self, agent_key: str, slot_id: str) -> Path:
-        """The persistent config home a managed account's regular panes run in.
-
-        Unlike ``login_home_path`` (disposable, harvested + removed after a
-        login), this home lives for the profile's lifetime and holds a working
-        copy of the slot's credentials so panes stay signed in. Kept as a
-        subdir of the slot dir so slot bookkeeping and the login home never
-        collide with the CLI's own config-home files (projects/, sessions/,
-        .grok/). The literal path must be byte-for-byte stable: claude derives
-        its Keychain item name from a hash of ``CLAUDE_CONFIG_DIR``."""
+        """The persistent config home a managed account's regular panes used
+        to run in (legacy). Spawns no longer relocate a CLI's config home, but
+        an existing home can still host panes spawned before the unification
+        and hold the freshest copy of the account's credentials — the startup
+        promotion (``promote_profile_home_secrets``) reads it, and the log
+        readers keep enumerating it for old session files. The literal path
+        must be byte-for-byte stable: claude derives its Keychain item name
+        from a hash of ``CLAUDE_CONFIG_DIR``."""
         return self.slot_dir(agent_key, slot_id) / PROFILE_HOME_DIRNAME
 
     # ---- shared-home symlinks (only credentials stay isolated) ----
     #
-    # A managed account's persistent home isolates ONLY the credential secret;
-    # session history and settings are symlinked back to the user's real home
-    # so panes share one session store regardless of which account is active.
-    # That store-sharing is also what fixes cross-profile resume: every home's
-    # ``projects``/``sessions`` resolves to the same real dir, so a resume
-    # preflight (and the CLI itself) always finds the session no matter which
-    # home the pane runs in — no more "No conversation found" crash-loop.
+    # An isolated home (today only the grok login shim) isolates ONLY the
+    # credential secret; everything shareable is symlinked back to the user's
+    # real home so panes share one session store regardless of which account
+    # is active.
 
     def _ensure_target_base(self, target: Path, *, is_dir: bool) -> None:
         """Make sure a shared symlink can be written through: the target dir
@@ -1058,121 +973,166 @@ class CredentialVault:
         except OSError as err:
             log.warning("shared-home link %s -> %s failed: %s", dst, target, err)
 
-    def _seed_claude_profile_home(self, home: Path, creds: LiveCredentials) -> None:
-        """Seed a claude persistent home from the slot so a pane run with
-        ``CLAUDE_CONFIG_DIR=home`` is already signed in. macOS keeps the secret
-        in the path-hashed Keychain item Claude Code reads under that config
-        dir; elsewhere the ``.credentials.json`` file. Only the credential is
-        isolated: sessions and settings are symlinked back to the real home so
-        every account shares one session store (``creds.account`` is display
-        info the slot's ``oauth-account.json`` already carries, so nothing is
-        written into the shared ``.claude.json``)."""
-        if creds.secret is not None:
-            try:
-                if self._is_macos:
-                    service = legacy_claude_keychain_service(home)
-                    # Idempotency: every restart re-seeds the profile home,
-                    # and a redundant add-generic-password from a
-                    # non-interactive child process can fail on macOS even
-                    # though the stored secret is already current — skip the
-                    # write when nothing changed. The lock serializes the
-                    # check-then-write pair: a restore spawns several panes of
-                    # one profile concurrently, and racing -U rewrites of the
-                    # same item fail for every spawn but the first.
-                    # Runtime-first: a home token the CLI refreshed past the
-                    # slot snapshot must survive re-seeding (see
-                    # _claude_home_secret_is_fresher).
-                    with self._keychain_lock:
-                        current = self._keychain_read(service)
-                        if current != creds.secret and not _claude_home_secret_is_fresher(
-                            current, creds.secret
-                        ):
-                            self._keychain_write(service, creds.secret)
-                else:
-                    current = _read_text(home / ".credentials.json")
-                    if current != creds.secret and not _claude_home_secret_is_fresher(
-                        current, creds.secret
-                    ):
-                        _write_private(home / ".credentials.json", creds.secret)
-            except (CredentialVaultError, OSError) as err:
-                # A failed credential seed must not skip the shared-home links
-                # below — an unshared ``projects`` hides the real session
-                # store from the pane and breaks resume for every session.
-                # The pane can still sign in off whatever the item already
-                # holds (the CLI refreshes it in place on its own).
-                log.warning("claude profile home credential seed failed: %s", err)
-        real_claude = self._real_home / ".claude"
-        for name in ("projects", "todos", "shell-snapshots", "skills"):
-            self._link_shared(home / name, real_claude / name, is_dir=True)
-        self._link_shared(home / "settings.json", real_claude / "settings.json", is_dir=False)
-        self._link_shared(home / ".claude.json", self._real_home / ".claude.json", is_dir=False)
+    # ---- one-time promotion of legacy profile-home credentials ----
 
-    def _seed_codex_profile_home(self, home: Path, creds: LiveCredentials) -> None:
-        """Seed a codex persistent home: the account's own ``auth.json`` plus
-        symlinks to the real ``~/.codex`` config so profile panes keep the
-        shared settings. ``home`` is then the CodexHomeManager source, whose
-        per-pane home symlinks these entries in turn."""
-        if creds.secret is not None:
-            _write_private(home / "auth.json", creds.secret)
-        real_codex = self._real_home / ".codex"
-        for name in ("config.toml", "AGENTS.md", "skills", "plugins", "rules", "memories"):
-            src = real_codex / name
-            dst = home / name
-            if not src.exists() or dst.exists() or dst.is_symlink():
-                continue
-            try:
-                dst.symlink_to(src, target_is_directory=src.is_dir())
-            except OSError as err:
-                log.warning("codex profile-home symlink %s -> %s failed: %s", dst, src, err)
-        # Session history is shared, not isolated: symlink it back to ~/.codex.
-        self._link_shared(home / "sessions", real_codex / "sessions", is_dir=True)
-        self._link_shared(home / "history.jsonl", real_codex / "history.jsonl", is_dir=False)
-
-    def prepare_profile_home(self, agent_key: str, slot_id: str) -> ProfileHomePlan:
-        """Create + seed the profile's persistent isolated home and return the
-        spawn env pointing at it (mirrors the pre-refactor ``build_spawn_plan``,
-        but the home persists and is seeded from the slot rather than harvested).
-        Blocking I/O — call off the event loop."""
-        if agent_key not in _SLOT_FILES:
-            raise ValueError(f"unsupported agent for CLI profile homes: {agent_key!r}")
-        home = self.profile_home_path(agent_key, slot_id)
-        home.mkdir(parents=True, exist_ok=True)
-        os.chmod(home, 0o700)  # umask-proof: the home holds live secrets
-        home_str = canonical_path_str(home)
-        creds = self.read_slot(agent_key, slot_id)
+    def _promote_profile_home(self, agent_key: str, profile_id: str, *, active: bool) -> None:
+        """Promote the credentials a legacy profile home still holds into the
+        profile's slot. Read-only towards the home — a pane spawned before the
+        unification may still be running in it, so nothing in the home is ever
+        modified or removed. claude compares token expiries (the home copy was
+        refreshed in place by its running CLI, so it wins unless the slot is
+        strictly newer — a fresh re-login harvest); other agents only fill an
+        empty slot."""
+        home = self.profile_home_path(agent_key, profile_id)
+        if not home.is_dir():
+            return
         if agent_key == "claude":
-            self._seed_claude_profile_home(Path(home_str), creds)
-            return ProfileHomePlan(
-                env_set={"CLAUDE_CONFIG_DIR": home_str},
-                env_remove=list(CLAUDE_ENV_OVERRIDES),
+            home_secret = self._claude_profile_home_secret(profile_id)
+            if home_secret is None:
+                return
+            slot = self.read_slot("claude", profile_id)
+            if home_secret == slot.secret:
+                return
+            if slot.secret is not None and not _claude_home_secret_is_fresher(
+                home_secret, slot.secret
+            ):
+                return
+            # The active profile owns the live ~/.claude.json display account;
+            # a parked profile keeps whatever its slot already carries.
+            account = self._read_live_oauth_account() if active else slot.account
+            self.write_slot(
+                "claude", profile_id, LiveCredentials(secret=home_secret, account=account)
             )
-        if agent_key == "codex":
-            self._seed_codex_profile_home(Path(home_str), creds)
-            # The per-pane CODEX_HOME mechanism stays; only its symlink source
-            # switches from ~/.codex to this profile home.
-            return ProfileHomePlan(codex_source_home=Path(home_str))
-        if agent_key == "kimi":
-            khome = Path(home_str)
-            if creds.secret is not None:
-                _write_private(khome / "credentials" / "kimi-code.json", creds.secret)
-            real_kimi = self._real_home / ".kimi-code"
-            # Sessions are shared: symlink back to ~/.kimi-code/sessions. Only
-            # the credentials dir stays isolated; every other existing kimi
-            # config entry is mirrored so settings follow the account too.
-            self._link_shared(khome / "sessions", real_kimi / "sessions", is_dir=True)
-            if real_kimi.is_dir():
+            return
+        if self.read_slot(agent_key, profile_id).secret is not None:
+            return
+        secret = _read_text(home.joinpath(*_PROFILE_HOME_SECRET_FILES[agent_key]))
+        if secret is not None:
+            self.write_slot(agent_key, profile_id, LiveCredentials(secret=secret))
+
+    def _claude_live_unified_marker(self) -> Path:
+        return self._root / "claude" / ".live-unified"
+
+    def _homes_promoted_marker(self, agent_key: str) -> Path:
+        return self._root / agent_key / ".homes-promoted"
+
+    def _unify_claude_live(self, active_id: str | None) -> None:
+        """One-shot (marker-guarded) alignment of claude's live location with
+        the active account. Under the pre-unification model a managed claude
+        profile never owned the live location: while it was active, the live
+        secret still belonged to the reserved default account. Left as is, the
+        first unified switch away from that profile would capture the default
+        account's token into the profile's slot (cross-account corruption). So
+        exactly once: park the live secret in the default slot (keeping that
+        slot's own display account) and publish the active profile's slot into
+        the live location. Must run at most once SUCCESSFULLY — after that the
+        live secret belongs to the active profile, and re-running would park
+        it in the default slot instead. The marker is therefore written only
+        on success: a failed attempt leaves the live state as the default
+        secret (park is idempotent), so the next startup retries safely —
+        writing the marker on failure would freeze the pre-unification state
+        forever and the next switch's capture would park the default token
+        into the profile's slot (cross-account corruption)."""
+        marker = self._claude_live_unified_marker()
+        if marker.exists():
+            return
+        try:
+            if active_id and active_id != DEFAULT_SLOT_ID:
+                live = self.read_live("claude", strict=True)
+                if live.secret is not None:
+                    default_slot = self.read_slot("claude", DEFAULT_SLOT_ID)
+                    self.write_slot(
+                        "claude",
+                        DEFAULT_SLOT_ID,
+                        LiveCredentials(secret=live.secret, account=default_slot.account),
+                    )
+                self.restore("claude", active_id)
+        except Exception as err:  # noqa: BLE001 — retried on next startup
+            log.warning(
+                "claude live unification failed (will retry on next startup): %s",
+                err,
+            )
+            return
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
+        except OSError as err:
+            log.warning("cannot write claude live-unification marker: %s", err)
+
+    def _promote_agent_profile_homes(
+        self, agent_key: str, profile_ids: list[str], active_id: str | None
+    ) -> None:
+        # One-shot per agent: re-running the promotion every startup would let
+        # a legacy home copy with a far-future expiresAt (e.g. a revoked
+        # long-lived token) repeatedly overwrite a slot's newer credentials.
+        # The marker is written only after every profile promoted cleanly —
+        # a failed profile leaves it unwritten so the next startup retries.
+        promoted_marker = self._homes_promoted_marker(agent_key)
+        if not promoted_marker.exists():
+            all_promoted = True
+            for profile_id in profile_ids:
                 try:
-                    entries = sorted(real_kimi.iterdir())
+                    self._promote_profile_home(
+                        agent_key, profile_id, active=profile_id == active_id
+                    )
+                except Exception as err:  # noqa: BLE001
+                    all_promoted = False
+                    log.warning(
+                        "promoting %s/%s profile-home credentials failed: %s",
+                        agent_key, profile_id, err,
+                    )
+            if all_promoted:
+                try:
+                    promoted_marker.parent.mkdir(parents=True, exist_ok=True)
+                    promoted_marker.touch()
                 except OSError as err:
-                    log.warning("cannot list %s for kimi shim: %s", real_kimi, err)
-                    entries = []
-                for src in entries:
-                    if src.name in ("credentials", "sessions"):
-                        continue
-                    self._link_shared(khome / src.name, src, is_dir=src.is_dir())
-            return ProfileHomePlan(env_set={"KIMI_CODE_HOME": home_str})
-        # grok: the persistent home IS the HOME shim; its .grok dir holds the db.
-        shim = self._populate_grok_shim(Path(home_str))
-        if creds.secret is not None:
-            _write_private(shim / ".grok" / "auth.json", creds.secret)
-        return ProfileHomePlan(env_set={"HOME": canonical_path_str(shim)})
+                    log.warning(
+                        "cannot write %s homes-promoted marker: %s", agent_key, err
+                    )
+        if agent_key == "claude":
+            self._unify_claude_live(active_id)
+        if not active_id or active_id == DEFAULT_SLOT_ID:
+            return
+        # Repair: a managed account is active but the live location is empty
+        # (e.g. its secret only ever existed in the legacy profile home) —
+        # publish the freshly promoted slot so panes are signed in.
+        try:
+            if (
+                self.read_live(agent_key).secret is None
+                and self.read_slot(agent_key, active_id).secret is not None
+            ):
+                self.restore(agent_key, active_id)
+        except Exception as err:  # noqa: BLE001
+            log.warning(
+                "restoring active %s account after promotion failed: %s",
+                agent_key, err,
+            )
+
+    async def promote_profile_home_secrets(self, store) -> None:
+        """One-time, non-destructive migration off per-profile isolated homes:
+        for every profile whose legacy home still holds credentials, promote
+        them into the profile's slot, then make sure the active account's
+        credentials are in the live location (see ``_unify_claude_live`` and
+        the empty-live repair). Homes are only read — never modified or
+        removed. Idempotent: re-running finds the slots already up to date.
+        Serialized per agent with ``switch_lock`` so it cannot interleave with
+        an account switch or a usage-poller harvest."""
+        try:
+            doc = await asyncio.to_thread(store.list)
+        except Exception as err:  # noqa: BLE001
+            log.warning("profile-home promotion: cannot read profile registry: %s", err)
+            return
+        for agent_key in _SLOT_FILES:
+            profile_ids = [
+                str(p["id"]) for p in doc["profiles"]
+                if p.get("agentKey") == agent_key and p.get("id")
+            ]
+            active_id = doc["defaults"].get(agent_key)
+            try:
+                async with self.switch_lock(agent_key):
+                    await asyncio.to_thread(
+                        self._promote_agent_profile_homes,
+                        agent_key, profile_ids, active_id,
+                    )
+            except Exception as err:  # noqa: BLE001
+                log.warning("profile-home promotion for %s failed: %s", agent_key, err)

@@ -4,11 +4,14 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { ref } from 'vue'
 import CliAccountsPane from '../CliAccountsPane.vue'
 import { i18n } from '../../i18n'
-import type {
-  useCliProfiles,
-  CliProfile,
-  CliProfileDefaults,
-  CliProfileIdentities,
+import {
+  cliAccountSwitchKey,
+  createCliAccountSwitchHandler,
+  type useCliProfiles,
+  type CliAccountSwitchHandler,
+  type CliProfile,
+  type CliProfileDefaults,
+  type CliProfileIdentities,
 } from '../../composables/useCliProfiles'
 import type { UsageSnapshot } from '../../composables/useUsage'
 
@@ -107,11 +110,17 @@ describe('CliAccountsPane', () => {
 
   function mountPane(
     api: ReturnType<typeof useCliProfiles>,
-    opts: { workspaceOpen?: boolean } = {},
+    opts: { workspaceOpen?: boolean; switchHandler?: CliAccountSwitchHandler } = {},
   ) {
     wrapper = mount(CliAccountsPane, {
       props: { api, workspaceOpen: opts.workspaceOpen ?? true },
-      global: { plugins: [i18n] },
+      global: {
+        plugins: [i18n],
+        // Mimic the main window providing the quiescence-aware switch handler.
+        provide: opts.switchHandler
+          ? { [cliAccountSwitchKey as symbol]: opts.switchHandler }
+          : {},
+      },
     })
     return wrapper
   }
@@ -300,6 +309,79 @@ describe('CliAccountsPane', () => {
 
     expect(setDefault).toHaveBeenCalledTimes(1)
     expect(setDefault).toHaveBeenCalledWith('claude', 'p1')
+  })
+
+  // ── quiescence switch handler (main window) ────────────────────────────────
+
+  it('routes Set as default through the provided switch handler', async () => {
+    const api = makeApi({ profiles: [profile('p1', 'claude', 'Account 2')] })
+    const handler = vi.fn(async () => ({ ok: true as const }))
+    const w = mountPane(api, { switchHandler: handler })
+
+    await buttonByText(section(w, 0), 'Set as default')!.trigger('click')
+    await flushPromises()
+
+    expect(handler).toHaveBeenCalledWith('claude', 'p1')
+    expect(api.setDefault).not.toHaveBeenCalled()
+    expect(usage.refreshUsage).toHaveBeenCalledTimes(2) // mount + successful switch
+  })
+
+  it('blocked switch: confirm accepted → forced setDefault → usage refreshed', async () => {
+    const api = makeApi({ profiles: [profile('p1', 'claude', 'Account 2')] })
+    const setDefault = api.setDefault as ReturnType<typeof vi.fn>
+    setDefault
+      .mockResolvedValueOnce({ ok: false, code: 'PANES_RUNNING', count: 2, message: 'in use' })
+      .mockResolvedValueOnce({ ok: true })
+    notify.confirm.mockResolvedValueOnce(true)
+    const handler = createCliAccountSwitchHandler(api, {
+      confirm: (message, opts) => notify.confirm(message, opts) as Promise<boolean>,
+      agentLabel: () => 'Claude Code',
+    })
+    const w = mountPane(api, { switchHandler: handler })
+
+    await buttonByText(section(w, 0), 'Set as default')!.trigger('click')
+    await flushPromises()
+
+    expect(notify.confirm).toHaveBeenCalledTimes(1)
+    expect(setDefault).toHaveBeenNthCalledWith(1, 'claude', 'p1')
+    expect(setDefault).toHaveBeenNthCalledWith(2, 'claude', 'p1', { force: true })
+    expect(usage.refreshUsage).toHaveBeenCalledTimes(2) // mount + successful switch
+    expect(notify.toast).not.toHaveBeenCalled()
+  })
+
+  it('blocked switch: declined confirm switches nothing and stays silent', async () => {
+    const api = makeApi({ profiles: [profile('p1', 'claude', 'Account 2')] })
+    const setDefault = api.setDefault as ReturnType<typeof vi.fn>
+    setDefault.mockResolvedValue({ ok: false, code: 'PANES_RUNNING', count: 2, message: 'in use' })
+    notify.confirm.mockResolvedValueOnce(false)
+    const handler = createCliAccountSwitchHandler(api, {
+      confirm: (message, opts) => notify.confirm(message, opts) as Promise<boolean>,
+      agentLabel: () => 'Claude Code',
+    })
+    const w = mountPane(api, { switchHandler: handler })
+
+    await buttonByText(section(w, 0), 'Set as default')!.trigger('click')
+    await flushPromises()
+
+    expect(setDefault).toHaveBeenCalledTimes(1)
+    expect(notify.toast).not.toHaveBeenCalled()
+    expect(usage.refreshUsage).toHaveBeenCalledTimes(1) // mount only
+  })
+
+  it('without a handler, a PANES_RUNNING failure toasts its message (no force)', async () => {
+    const api = makeApi({ profiles: [profile('p1', 'claude', 'Account 2')] })
+    const setDefault = api.setDefault as ReturnType<typeof vi.fn>
+    setDefault.mockResolvedValue({ ok: false, code: 'PANES_RUNNING', count: 1, message: 'panes running' })
+    const w = mountPane(api)
+
+    await buttonByText(section(w, 0), 'Set as default')!.trigger('click')
+    await flushPromises()
+
+    expect(setDefault).toHaveBeenCalledTimes(1)
+    expect(setDefault).toHaveBeenCalledWith('claude', 'p1')
+    expect(notify.toast).toHaveBeenCalledTimes(1)
+    expect(notify.toast.mock.calls[0][0]).toBe('panes running')
+    expect(usage.refreshUsage).toHaveBeenCalledTimes(1) // mount only
   })
 
   // ── remove ─────────────────────────────────────────────────────────────────
