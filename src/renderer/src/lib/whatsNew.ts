@@ -34,6 +34,33 @@ export const WHATS_NEW_CHROME = {
 
 export const WHATS_NEW: WhatsNewEntry[] = [
   {
+    version: '0.1.70',
+    title: {
+      'zh-TW': '多帳號憑證管理與系統穩定度提升',
+      'en-US': 'Multi-account credentials & stability improvements',
+    },
+    highlights: [
+      {
+        'zh-TW':
+          '多帳號憑證整合：CLI 憑證統一保管於真實 Home 目錄，支援帳號快速 Swap 切換，Codex 登入憑證自動提升至全域共享。',
+        'en-US':
+          'Unified multi-account credentials: CLI auth files now live in your real home directory with instant swap switching, and Codex logins auto-promote to shared auth.',
+      },
+      {
+        'zh-TW':
+          'CLI 重建安全防護：針對執行中的 CLI 按下 Rebuild/重構時增加二次確認彈窗，防止誤觸致使工作中 Task 中斷。',
+        'en-US':
+          'Safer CLI rebuilds: a confirmation dialog now protects running CLIs from accidental rebuilds while tasks are active.',
+      },
+      {
+        'zh-TW':
+          '獨立 Git 視窗與新手安裝優化：修復獨立 Git 視窗追蹤細節，並確保全新安裝時環境依賴檢測與自動安裝順暢完成。',
+        'en-US':
+          'Git window & onboarding fixes: refined follow-up interactions in standalone Git windows and hardened onboarding dependency setup.',
+      },
+    ],
+  },
+  {
     version: '0.1.68',
     title: {
       'zh-TW': '儲存架構升級：更快、更可靠',
