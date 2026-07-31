@@ -10,6 +10,10 @@ const props = defineProps<{
   base: string
   compare: string
   backend: ReturnType<typeof useBackend>
+  // Hosts without the chat capability (the standalone Git plugin window) hide
+  // the AI-review section entirely instead of surfacing calls that would be
+  // denied by the broker.
+  hideAiReview?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -206,7 +210,7 @@ function cellClass(cell: SideRow['left']): string {
     </div>
 
     <!-- AI Review toggle -->
-    <div class="bdp-review-hdr" @click="reviewOpen = !reviewOpen">
+    <div v-if="!hideAiReview" class="bdp-review-hdr" @click="reviewOpen = !reviewOpen">
       <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor" class="bdp-review-ic">
         <path d="M8 0a8 8 0 1 0 0 16A8 8 0 0 0 8 0zm0 1.5a6.5 6.5 0 1 1 0 13 6.5 6.5 0 0 1 0-13zM7 5v3.5l3 1.5-.5 1L6 9V5z"/>
       </svg>
@@ -216,7 +220,7 @@ function cellClass(cell: SideRow['left']): string {
         <path d="M4.427 7.427l3.396 3.396a.25.25 0 0 0 .354 0l3.396-3.396A.25.25 0 0 0 11.396 7H4.604a.25.25 0 0 0-.177.427z"/>
       </svg>
     </div>
-    <div v-show="reviewOpen" class="bdp-review-body" :style="{ height: reviewHeight + 'px' }">
+    <div v-if="!hideAiReview" v-show="reviewOpen" class="bdp-review-body" :style="{ height: reviewHeight + 'px' }">
       <ReviewPane
         :workspace-path="workspacePath"
         :backend="backend"
@@ -228,7 +232,7 @@ function cellClass(cell: SideRow['left']): string {
         @ask-ai-fix="(text) => emit('ask-ai-fix', text)"
       />
     </div>
-    <div v-show="reviewOpen" class="bdp-review-resizer" @mousedown.prevent="startReviewDrag" />
+    <div v-if="!hideAiReview" v-show="reviewOpen" class="bdp-review-resizer" @mousedown.prevent="startReviewDrag" />
 
     <!-- States -->
     <div v-if="loading" class="bdp-msg">{{ $t('label.loading-diff') }}</div>
