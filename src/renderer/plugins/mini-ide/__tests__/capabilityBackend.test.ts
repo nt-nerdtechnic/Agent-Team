@@ -182,3 +182,41 @@ describe('useBackend shim send()', () => {
     ).toHaveBeenCalledWith('git.changed', cb)
   })
 })
+
+describe('useBackend shim status transitions', () => {
+  type NavListener = (data: unknown) => void
+  const listeners = new Map<string, Set<NavListener>>()
+
+  function fire(type: string, data: unknown): void {
+    listeners.get(type)?.forEach((cb) => cb(data))
+  }
+
+  beforeEach(() => {
+    listeners.clear()
+    ;(window as unknown as { nav: unknown }).nav = {
+      callCapability: vi.fn(),
+      on: (type: string, cb: NavListener): (() => void) => {
+        let set = listeners.get(type)
+        if (!set) {
+          set = new Set()
+          listeners.set(type, set)
+        }
+        set.add(cb)
+        return () => set!.delete(cb)
+      },
+      ready: vi.fn(),
+    }
+  })
+
+  it('tracks host-pushed nav.backend_status transitions and ignores junk', () => {
+    const backend = useBackend()
+    expect(backend.status.value).toBe('connected')
+    fire('nav.backend_status', { status: 'disconnected' })
+    expect(backend.status.value).toBe('disconnected')
+    fire('nav.backend_status', null)
+    fire('nav.backend_status', { status: 'bogus' })
+    expect(backend.status.value).toBe('disconnected')
+    fire('nav.backend_status', { status: 'connected' })
+    expect(backend.status.value).toBe('connected')
+  })
+})
