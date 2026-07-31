@@ -338,6 +338,25 @@ _KEYCHAIN_COOLDOWN_S = 300.0
 _keychain_failed_at: float | None = None
 
 
+async def _communicate_or_kill(proc: Any, timeout: float) -> bytes:
+    """``proc.communicate()`` under a deadline; on timeout the child is killed
+    and reaped before the TimeoutError propagates. A bare ``wait_for`` leaves
+    a hung ``security``/``gh``/CLI child running (and unreaped) forever."""
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except (ProcessLookupError, OSError):
+            pass
+        try:
+            await proc.wait()
+        except (ProcessLookupError, OSError):
+            pass
+        raise
+    return out
+
+
 async def read_claude_credentials(home: Path) -> dict | None:
     """File first; on macOS fall back to the Keychain generic password the
     Claude Code CLI writes. A failed Keychain read is remembered for
@@ -358,7 +377,7 @@ async def read_claude_credentials(home: Path) -> dict | None:
             "-s", CLAUDE_KEYCHAIN_SERVICE, "-w",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         )
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
+        out = await _communicate_or_kill(proc, timeout=2.0)
         if proc.returncode != 0:
             _keychain_failed_at = now
             return None
@@ -534,7 +553,7 @@ async def read_antigravity_credentials(home: Path) -> str | None:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
+            out = await _communicate_or_kill(proc, timeout=2.0)
             if proc.returncode == 0:
                 _agy_keychain_failed_at = None
                 rt = _antigravity_refresh_token(out.decode("utf-8", "replace"))
@@ -898,8 +917,7 @@ async def _copilot_gh_token(login: str, host: str) -> str | None:
             binary, "auth", "token", "--user", login, "--hostname", host,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         )
-        out, _ = await asyncio.wait_for(
-            proc.communicate(), timeout=COPILOT_GH_TOKEN_TIMEOUT)
+        out = await _communicate_or_kill(proc, timeout=COPILOT_GH_TOKEN_TIMEOUT)
     except (OSError, asyncio.TimeoutError):
         return None
     if proc.returncode != 0:
@@ -1003,7 +1021,7 @@ async def read_cursor_credentials(home: Path) -> str | None:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=2.0)
+            out = await _communicate_or_kill(proc, timeout=2.0)
             if proc.returncode == 0:
                 _cursor_keychain_failed_at = None
                 token = out.decode("utf-8", "replace").strip()
@@ -1530,7 +1548,7 @@ async def _claude_user_agent() -> str:
                 binary, "--version",
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
             )
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+            out = await _communicate_or_kill(proc, timeout=5.0)
             version = out.decode("utf-8", "replace").strip().split()[0] if out.strip() else ""
         except (OSError, asyncio.TimeoutError, IndexError):
             version = ""
