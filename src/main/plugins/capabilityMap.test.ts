@@ -117,6 +117,13 @@ describe('eventNamespace', () => {
     expect(eventNamespace('ai.review.error')).toBe('chat')
   })
 
+  it('forwards the git askpass round-trip events under the git namespace', () => {
+    // Without these a git-capable plugin (navide.git) never sees the prompt a
+    // push/pull is blocked on — the operation hangs with no way to answer it.
+    expect(eventNamespace('git.credential_request')).toBe('git')
+    expect(eventNamespace('git.credential_cancelled')).toBe('git')
+  })
+
   it('gates the plans.changed live-refresh signal behind the plans namespace', () => {
     expect(eventNamespace('plans.changed')).toBe('plans')
     expect(CAP_EVENTS['plans.changed']).toBe('plans')

@@ -175,10 +175,18 @@ export function useBackend(): {
   restart: () => Promise<unknown>
   stop: () => Promise<unknown>
 } {
-  // Known limitation: the broker owns the real WS liveness, so from the
-  // plugin's side the bridge is simply "connected". Pushing real connection
-  // state to plugins (via a `ui`/`nav` event) is still unimplemented.
+  // The broker owns the real WS liveness and fans every transition out as the
+  // host-synthesized `nav.backend_status` event (frontendPluginManager
+  // dispatchBackendStatus), replaying the current status once at view load.
+  // Start optimistic — the host connects the shared transport at plugin open —
+  // and converge on the pushed transitions.
   const status = ref<BackendStatus>('connected')
+  navBridge().on('nav.backend_status', (data) => {
+    const s = (data as { status?: BackendStatus } | null)?.status
+    if (s === 'connecting' || s === 'connected' || s === 'disconnected' || s === 'error') {
+      status.value = s
+    }
+  })
   const wsUrl = ref('')
   // The host appends the backend HTTP base as a `http_url` query param at mount
   // (mirrors core useBackend's `httpUrl = http://<host>:<port>`), so panes that

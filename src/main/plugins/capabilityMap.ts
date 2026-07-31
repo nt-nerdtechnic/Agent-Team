@@ -122,6 +122,12 @@ export const CAP_EVENTS: Readonly<Record<string, string>> = {
   // Working-tree-changed signal — see NOTE above. Preserves the fs-write
   // broadcast contract Explorer/GitPane rely on.
   'git.changed': 'fs',
+  // Git askpass round-trip (useGit ↔ GitCredentialModal). The backend
+  // broadcasts a prompt while a push/pull/fetch/clone waits on credentials and
+  // a cancel when the request settles unanswered; gated on `git` like the
+  // credential_submit/credential_cancel calls that answer them.
+  'git.credential_request': 'git',
+  'git.credential_cancelled': 'git',
   // Settings sync (lib/settings.ts). Broadcast with exclude=session, but the
   // broker holds its own WS session so it still receives it.
   'ui.settings_changed': 'ui',

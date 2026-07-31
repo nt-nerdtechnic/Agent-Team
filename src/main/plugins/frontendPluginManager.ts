@@ -22,7 +22,12 @@ import {
 import { CAP_EVENTS, eventNamespace } from './capabilityMap'
 import { loadPluginDir, scanInstalledPlugins, verifyOfficialInstall } from './installedPlugins'
 import { resolveOfficialPublisherKey } from './pluginVerify'
-import { createWsClient, type WsClient, type WsConstructor } from '../../shared/wsClient'
+import {
+  createWsClient,
+  type WsClient,
+  type WsClientStatus,
+  type WsConstructor,
+} from '../../shared/wsClient'
 
 /** Everything the manager needs to launch one plugin view. */
 export interface PluginLaunchDescriptor {
@@ -136,6 +141,9 @@ export class FrontendPluginManager {
   private backendWsUrl: string | null = null
   /** Lazily-created shared transport to the backend plugin host. */
   private wsClient: WsClient | null = null
+  /** Last transport status, replayed to late-loading plugin views so their
+   *  useBackend shims start from real liveness instead of assuming it. */
+  private wsStatus: WsClientStatus = 'disconnected'
 
   /** Register the broker IPC handlers exactly once. Safe to call repeatedly. */
   registerIpc(): void {
@@ -225,6 +233,19 @@ export class FrontendPluginManager {
     } else if (client) {
       client.reset('backend stopped')
       client.markErrored()
+      // reset()/markErrored() deliberately emit no status transition, so tell
+      // the plugins ourselves — their views outlive a backend stop/restart.
+      this.dispatchBackendStatus('disconnected')
+    }
+  }
+
+  /** Fan a transport status transition out to every backend-needing plugin as
+   *  the host-synthesized `nav.backend_status` event, so plugin-side useBackend
+   *  shims track real liveness instead of assuming 'connected'. */
+  private dispatchBackendStatus(status: WsClientStatus): void {
+    this.wsStatus = status
+    for (const plugin of this.running.values()) {
+      if (plugin.requires.length > 0) this.emit(plugin.id, 'nav.backend_status', { status })
     }
   }
 
@@ -243,7 +264,10 @@ export class FrontendPluginManager {
   private ensureBackend(): WsClient | null {
     if (!this.backendWsUrl) return null
     if (!this.wsClient) {
-      const client = createWsClient({ WebSocketImpl: NodeWebSocket as unknown as WsConstructor })
+      const client = createWsClient({
+        WebSocketImpl: NodeWebSocket as unknown as WsConstructor,
+        onStatus: (s) => this.dispatchBackendStatus(s),
+      })
       for (const event of Object.keys(CAP_EVENTS)) {
         client.on(event, (payload) => this.dispatchEvent(event, payload))
       }
@@ -381,6 +405,12 @@ export class FrontendPluginManager {
       current.ready = true
       for (const params of current.pendingTargets.splice(0)) {
         view.webContents.send(IPC_OPEN_TARGET, params)
+      }
+      // Replay the current transport status: transitions before this load (or
+      // while a queued view was still booting) would otherwise be missed and
+      // the plugin's optimistic 'connected' default never corrected.
+      if (current.requires.length > 0 && this.wsClient) {
+        this.emit(descriptor.id, 'nav.backend_status', { status: this.wsStatus })
       }
     })
 

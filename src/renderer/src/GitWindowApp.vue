@@ -8,14 +8,18 @@
 //
 // This is the plugin-groundwork skeleton: a wide three-pane window
 // (toolbar → sidebar → history/status + detail/diff) wired to real branches,
-// history, status and per-commit diffs. Advanced surfaces (worktrees, config,
-// AI commit, conflict resolution, credential askpass) are intentionally left as
+// history, status, per-commit diffs and the askpass credential prompt. Diffs
+// render through the shared editor DiffPane. Advanced surfaces (worktrees,
+// config, AI commit, conflict resolution) are intentionally left as
 // placeholders / follow-up — see the standalone-Git plugin plan.
 
 import { ref, computed, onMounted } from 'vue'
 import { useBackend } from './composables/useBackend'
-import { useGit, type GitCommitDetail, type DiffBlameHunk } from './composables/useGit'
+import { useGit, type GitCommitDetail } from './composables/useGit'
 import GitHistoryModal from './components/GitHistoryModal.vue'
+import GitCredentialModal from './components/GitCredentialModal.vue'
+import NotificationHost from './components/NotificationHost.vue'
+import DiffPane from './editor/DiffPane.vue'
 
 // The host sets ?workspace_path= when it loads this entry (frontendPluginManager
 // gitQuery). A getter is what useGit expects.
@@ -51,7 +55,6 @@ const {
   logSearch,
   showCommit,
   commitFileDiff,
-  diffBlame,
   fetchRemote,
   pullOnly,
   pushOnly,
@@ -62,7 +65,11 @@ const {
   createBranch,
   createTag,
   mergeBranch,
-  resetToCommit
+  resetToCommit,
+  credentialPrompt,
+  showCredentialPrompt,
+  submitCredential,
+  cancelCredential
 } = git
 
 // ── View state ───────────────────────────────────────────────────────────────
@@ -72,22 +79,19 @@ const view = ref<CenterView>('history')
 const selectedHash = ref<string>('')
 const commitDetail = ref<GitCommitDetail | null>(null)
 const selectedFile = ref<string>('')
-const diffHunks = ref<DiffBlameHunk[]>([])
 const isLoadingDetail = ref(false)
-const isLoadingDiff = ref(false)
 
 // ── External diff target (from the main GitPane) ─────────────────────────────
 // The main process forwards a git_diff_* target (see window:openGit) so a file
 // clicked in the main-window GitPane shows its diff in *this* window's panel
-// rather than the mini-IDE. We read it on load and via nav.onOpenTarget.
+// rather than the mini-IDE. We read it on load and via nav.onOpenTarget; the
+// shared DiffPane fetches the diff itself from these coordinates.
 interface ExternalDiff {
   name: string
   staged: boolean
   commit: string
-  hunks: DiffBlameHunk[]
 }
 const externalDiff = ref<ExternalDiff | null>(null)
-const isLoadingExternalDiff = ref(false)
 
 // Local busy flags for actions useGit doesn't expose a dedicated ref for.
 const isPulling = ref(false)
@@ -115,14 +119,14 @@ async function refreshAll(): Promise<void> {
 onMounted(() => {
   if (hasWorkspace.value) void refreshAll()
   // Initial diff target from the entry query, then incremental deliveries.
-  void showDiffTarget(Object.fromEntries(new URLSearchParams(window.location.search)))
+  showDiffTarget(Object.fromEntries(new URLSearchParams(window.location.search)))
   const nav = (
     window as unknown as {
       nav?: { onOpenTarget?: (cb: (p: Record<string, string>) => void) => () => void }
     }
   ).nav
   nav?.onOpenTarget?.((p) => {
-    void showDiffTarget(p)
+    showDiffTarget(p)
   })
 })
 
@@ -130,7 +134,6 @@ onMounted(() => {
 async function selectCommit(hash: string): Promise<void> {
   selectedHash.value = hash
   selectedFile.value = ''
-  diffHunks.value = []
   commitDetail.value = null
   isLoadingDetail.value = true
   try {
@@ -140,46 +143,23 @@ async function selectCommit(hash: string): Promise<void> {
   }
 }
 
-async function selectFile(filepath: string): Promise<void> {
+function selectFile(filepath: string): void {
   if (!selectedHash.value) return
   selectedFile.value = filepath
-  isLoadingDiff.value = true
-  try {
-    diffHunks.value = await commitFileDiff(selectedHash.value, filepath)
-  } finally {
-    isLoadingDiff.value = false
-  }
 }
 
-async function showDiffTarget(params: Record<string, string>): Promise<void> {
+function showDiffTarget(params: Record<string, string>): void {
   const filepath = params['git_diff_filepath'] ?? ''
   if (!filepath) return
-  const staged = params['git_diff_staged'] === 'true'
-  const commit = params['git_diff_commit'] ?? ''
-  externalDiff.value = { name: filepath, staged, commit, hunks: [] }
-  isLoadingExternalDiff.value = true
-  try {
-    const hunks = commit
-      ? await commitFileDiff(commit, filepath)
-      : await diffBlame(filepath, staged)
-    // Stale-guard: only apply if the target hasn't changed while awaiting.
-    const cur = externalDiff.value
-    if (cur && cur.name === filepath && cur.commit === commit) {
-      cur.hunks = hunks
-    }
-  } finally {
-    isLoadingExternalDiff.value = false
+  externalDiff.value = {
+    name: filepath,
+    staged: params['git_diff_staged'] === 'true',
+    commit: params['git_diff_commit'] ?? '',
   }
 }
 
 function clearExternalDiff(): void {
   externalDiff.value = null
-}
-
-function lineClass(kind: DiffBlameHunk['lines'][number]['kind']): string {
-  if (kind === '+') return 'dl-add'
-  if (kind === '-') return 'dl-del'
-  return 'dl-ctx'
 }
 
 // ── Toolbar actions ──────────────────────────────────────────────────────────
@@ -380,20 +360,15 @@ function shortDate(iso?: string): string {
                 </div>
               </div>
               <div class="detail-right">
-                <div v-if="isLoadingExternalDiff" class="diff-loading">Loading diff…</div>
-                <div v-else-if="!externalDiff.hunks.length" class="diff-empty">No changes.</div>
-                <div v-else class="diff">
-                  <div class="diff-file mono">{{ externalDiff.name }}</div>
-                  <div v-for="(h, hi) in externalDiff.hunks" :key="hi" class="diff-hunk">
-                    <div class="hunk-head mono">{{ h.header }}</div>
-                    <div v-for="(l, li) in h.lines" :key="li" class="diff-line mono" :class="lineClass(l.kind)">
-                      <span class="ln">{{ l.old_no ?? '' }}</span>
-                      <span class="ln">{{ l.new_no ?? '' }}</span>
-                      <span class="lc">{{ l.kind }}</span>
-                      <span class="lt">{{ l.text }}</span>
-                    </div>
-                  </div>
-                </div>
+                <DiffPane
+                  :key="'ext:' + externalDiff.name + ':' + externalDiff.commit + ':' + externalDiff.staged"
+                  :workspace-path="workspacePath"
+                  :filepath="externalDiff.name"
+                  :staged="externalDiff.staged"
+                  :name="externalDiff.name"
+                  :backend="backend"
+                  :commit="externalDiff.commit || undefined"
+                />
               </div>
             </template>
             <div v-else-if="isLoadingDetail" class="detail-loading">Loading commit…</div>
@@ -418,20 +393,17 @@ function shortDate(iso?: string): string {
                 </div>
               </div>
               <div class="detail-right">
-                <div v-if="isLoadingDiff" class="diff-loading">Loading diff…</div>
-                <div v-else-if="!selectedFile" class="diff-empty">Select a file to view its diff.</div>
-                <div v-else class="diff">
-                  <div class="diff-file mono">{{ selectedFile }}</div>
-                  <div v-for="(h, hi) in diffHunks" :key="hi" class="diff-hunk">
-                    <div class="hunk-head mono">{{ h.header }}</div>
-                    <div v-for="(l, li) in h.lines" :key="li" class="diff-line mono" :class="lineClass(l.kind)">
-                      <span class="ln">{{ l.old_no ?? '' }}</span>
-                      <span class="ln">{{ l.new_no ?? '' }}</span>
-                      <span class="lc">{{ l.kind }}</span>
-                      <span class="lt">{{ l.text }}</span>
-                    </div>
-                  </div>
-                </div>
+                <div v-if="!selectedFile" class="diff-empty">Select a file to view its diff.</div>
+                <DiffPane
+                  v-else
+                  :key="'commit:' + selectedHash + ':' + selectedFile"
+                  :workspace-path="workspacePath"
+                  :filepath="selectedFile"
+                  :staged="false"
+                  :name="selectedFile"
+                  :backend="backend"
+                  :commit="selectedHash"
+                />
               </div>
             </template>
             <div v-else class="detail-empty">Select a commit to see its changes.</div>
@@ -439,6 +411,18 @@ function shortDate(iso?: string): string {
         </template>
       </section>
     </div>
+
+    <!-- Askpass credential prompt for a push/pull/fetch waiting on this window
+         (git.credential_request forwarded by the host broker). -->
+    <GitCredentialModal
+      :show="showCredentialPrompt"
+      :prompt="credentialPrompt"
+      :workspace-path="workspacePath"
+      @submit="submitCredential"
+      @cancel="cancelCredential"
+    />
+    <!-- Renders useNotify toasts/dialogs (DiffPane stage/discard feedback). -->
+    <NotificationHost />
   </div>
 </template>
 
@@ -628,7 +612,6 @@ button.sb-item:hover {
 }
 .pane-loading,
 .detail-loading,
-.diff-loading,
 .diff-empty,
 .detail-empty {
   padding: 16px;
@@ -785,58 +768,14 @@ button.sb-item:hover {
 }
 .detail-right {
   flex: 1;
-  overflow: auto;
+  overflow: hidden;
   min-width: 0;
-}
-.diff-file {
-  padding: 8px 12px;
-  color: var(--text-secondary);
-  border-bottom: 1px solid var(--border-muted);
-  position: sticky;
-  top: 0;
-  background: var(--bg-base);
-}
-.diff-hunk {
-  border-bottom: 1px solid var(--border-muted);
-}
-.hunk-head {
-  padding: 3px 12px;
-  color: var(--accent-fg);
-  background: var(--bg-subtle);
-}
-.diff-line {
   display: flex;
-  font-size: 12px;
-  white-space: pre;
+  flex-direction: column;
 }
-.diff-line .ln {
-  width: 44px;
-  flex-shrink: 0;
-  text-align: right;
-  padding-right: 8px;
-  color: var(--text-disabled);
-  user-select: none;
-}
-.diff-line .lc {
-  width: 16px;
-  flex-shrink: 0;
-  text-align: center;
-  color: var(--text-muted);
-}
-.diff-line .lt {
+.detail-right > .diff-pane {
   flex: 1;
-}
-.dl-add {
-  background: var(--diff-add-bg);
-}
-.dl-add .lt {
-  color: var(--diff-add-fg);
-}
-.dl-del {
-  background: var(--diff-del-bg);
-}
-.dl-del .lt {
-  color: var(--diff-del-fg);
+  min-height: 0;
 }
 
 .mono {
