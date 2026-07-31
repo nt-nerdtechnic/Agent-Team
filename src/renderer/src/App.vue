@@ -79,6 +79,7 @@ import {
 import { planDropPrompt, type PlanDragRef } from './lib/planDrag'
 import { allSlotsFinished, isReplayedTurnComplete, loopContinueReady, turnCompleteDone, turnEndsWithSentinel, type SlotSignal } from './lib/completion'
 import { reorderByIds, sortByIdOrder } from './lib/paneOrder'
+import { computeRangeSelection } from './lib/paneSelection'
 import { AGENT_SPECS, type PaneArgContext } from './lib/agentSpecs'
 import {
   orderedAgentKeys,
@@ -8183,6 +8184,10 @@ const minimizedPanes = ref(new Set<string>())
 // Multi-select set for batch context-menu actions (Cmd/Ctrl/Shift-click a pane
 // header). Pruned to live pane ids by the panes watcher; a plain click clears it.
 const selectedPaneIds = ref(new Set<string>())
+// Anchor for Shift-click range selection (same semantics as GitPane's
+// lastClickKey): set by plain and Cmd/Ctrl clicks, left untouched by Shift
+// clicks, nulled by the panes watcher when the pane disappears.
+const lastClickPaneId = ref<string | null>(null)
 
 // Focusing a pane while the app is in the foreground means the user is now
 // looking at it — clear its Dock badge pending state. markSeen itself gates on
@@ -8756,6 +8761,7 @@ watch(panes, (newPanes, oldPanes) => {
     const pruned = new Set([...selectedPaneIds.value].filter((id) => ids.has(id)))
     if (pruned.size !== selectedPaneIds.value.size) selectedPaneIds.value = pruned
   }
+  if (lastClickPaneId.value && !ids.has(lastClickPaneId.value)) lastClickPaneId.value = null
   if (layoutMode.value !== 'grid' && newPanes.length > (oldPanes?.length ?? 0)) {
     selectPane(newPanes[newPanes.length - 1].id, { userInitiated: false })
   }
@@ -8775,10 +8781,21 @@ watch(activeTab, () => {
   void nextTick(() => refitAllTerminals())
 })
 
-function onSetFocus(paneId: string, ev?: MouseEvent): void {
-  // Cmd/Ctrl/Shift-click toggles the pane in the multi-select set instead of
-  // replacing focus, so the right-click menu can act on the whole batch.
-  if (ev && (ev.metaKey || ev.ctrlKey || ev.shiftKey)) {
+function onSetFocus(paneId: string, ev?: MouseEvent, orderedIds?: string[]): void {
+  // Shift-click selects the range between the anchor and this pane (same
+  // semantics as GitPane's file rows); Cmd/Ctrl-click toggles the pane in the
+  // multi-select set instead of replacing focus, so the right-click menu can
+  // act on the whole batch. orderedIds is the clicked surface's render order —
+  // a range must never sweep in panes that surface does not show.
+  if (ev && ev.shiftKey) {
+    rangeSelectPanes(paneId, orderedIds)
+    revealPaneTab(paneId)
+    // Adding a pane to a batch selection is not "open this pane" — a modifier
+    // click must never spawn the CLI behind a cold-restore placeholder.
+    selectPane(paneId, { userInitiated: false })
+    return
+  }
+  if (ev && (ev.metaKey || ev.ctrlKey)) {
     const next = new Set(selectedPaneIds.value)
     // Seed with the pane the user was already focused on, so the first
     // modifier-click extends from the current single selection.
@@ -8788,15 +8805,36 @@ function onSetFocus(paneId: string, ev?: MouseEvent): void {
     if (next.has(paneId)) next.delete(paneId)
     else next.add(paneId)
     selectedPaneIds.value = next
+    lastClickPaneId.value = paneId
     revealPaneTab(paneId)
-    // Adding a pane to a batch selection is not "open this pane" — a modifier
-    // click must never spawn the CLI behind a cold-restore placeholder.
     selectPane(paneId, { userInitiated: false })
     return
   }
   selectedPaneIds.value = new Set()
+  lastClickPaneId.value = paneId
   revealPaneTab(paneId)
   selectPane(paneId, { userInitiated: true })
+}
+
+function rangeSelectPanes(toId: string, orderedIds?: string[]): void {
+  const ordered = orderedIds ?? panes.value.map((p) => p.id)
+  // No explicit anchor yet → extend from the focused pane, mirroring the
+  // Cmd/Ctrl branch's seeding from the current single selection.
+  const anchor = lastClickPaneId.value ?? focusPaneId.value
+  selectedPaneIds.value = computeRangeSelection(ordered, anchor, toId)
+}
+
+// Sidebar agent-list clicks: a modifier click joins the same multi-select as
+// the pane surfaces (ranging over the sidebar's full list order); a plain
+// click keeps the original focus + scroll behavior.
+function onSidebarFocusPane(paneId: string, ev?: MouseEvent): void {
+  if (ev && (ev.metaKey || ev.ctrlKey || ev.shiftKey)) {
+    onSetFocus(paneId, ev, paneViews.value.map((v) => v.id))
+    return
+  }
+  selectedPaneIds.value = new Set()
+  lastClickPaneId.value = paneId
+  onFocusPane(paneId)
 }
 // Pane right-click context menu, shared by the agent list, spotlight thumbnails,
 // and pane headers. The menu is rendered once in this component; each surface only
@@ -9397,6 +9435,20 @@ const onScreenPaneIds = computed<Set<string>>(() => {
   return visibleIds
 })
 
+// Render order of each click surface, consumed by Shift-click range selection
+// so a range only spans panes the user can actually see on that surface.
+// Stage = the TerminalPane v-for (panes gated by onScreenPaneIds); auxiliary =
+// the meeting sidebar / spotlight strip / float PIP lists, which all share the
+// same v-for filter over paneViews.
+const stageSurfaceOrderedIds = computed<string[]>(() =>
+  panes.value.filter((p) => onScreenPaneIds.value.has(p.id)).map((p) => p.id)
+)
+const auxiliaryListOrderedIds = computed<string[]>(() =>
+  paneViews.value
+    .filter((v) => !v.isMinimized && tabFilteredPaneIds.value.has(v.id))
+    .map((v) => v.id)
+)
+
 function onUserChangeLayoutMode(mode: LayoutMode): void {
   layoutMode.value = mode
   void nextTick().then(() => advanceRestoreSession('layout'))
@@ -9645,6 +9697,7 @@ function paneIsCommander(p: ActivePane): boolean {
       v-model:auto-answer-enabled="autoAnswerEnabled"
       :spawn-history="spawnHistory"
       :focus-pane-id="effectiveFocusPaneId ?? undefined"
+      :selected-pane-ids="selectedPaneIds"
       :can-rebuild-all="rebuildableAllPaneCount > 0"
       :rebuilding-all="rebuildingTabPanes"
       @spawn="onManualSpawn"
@@ -9667,7 +9720,7 @@ function paneIsCommander(p: ActivePane): boolean {
       @pipeline-resume="onPipelineResume"
       @pipeline-restart="onPipelineRestart"
       @refresh-analyzer="onRefreshAnalyzer"
-      @focus-pane="onFocusPane"
+      @focus-pane="onSidebarFocusPane"
       @reorder-pane="reorderPane"
       @open-settings="showSettings = true"
       @open-git-accounts="openSettingsAccounts"
@@ -9945,7 +9998,7 @@ function paneIsCommander(p: ActivePane): boolean {
           :loop-estimate-reset-at="p.loopEstimateResetAt"
           :login-expired="p.loginExpired"
           :restoring="p.restoring"
-          @set-focus="(ev) => onSetFocus(p.id, ev)"
+          @set-focus="(ev) => onSetFocus(p.id, ev, stageSurfaceOrderedIds)"
           @first-output="onPaneFirstOutput(p.id)"
           @minimize="minimizePane(p.id)"
           @rebuild="rebuildPaneViaResume(p.id)"
@@ -9991,7 +10044,7 @@ function paneIsCommander(p: ActivePane): boolean {
             @dragenter="onAuxiliaryPaneDragOver($event, p.id)"
             @dragleave="onAuxiliaryPaneDragLeave($event, p.id)"
             @drop.prevent="onAuxiliaryPaneDrop($event, p.id)"
-            @click="(ev) => onSetFocus(p.id, ev)"
+            @click="(ev) => onSetFocus(p.id, ev, auxiliaryListOrderedIds)"
             @contextmenu.prevent="openPaneCtxMenu($event, p.id)"
           >
             <div class="meeting-info">
@@ -10045,7 +10098,7 @@ function paneIsCommander(p: ActivePane): boolean {
           @dragenter="onAuxiliaryPaneDragOver($event, p.id)"
           @dragleave="onAuxiliaryPaneDragLeave($event, p.id)"
           @drop.prevent="onAuxiliaryPaneDrop($event, p.id)"
-          @click="(ev) => onSetFocus(p.id, ev)"
+          @click="(ev) => onSetFocus(p.id, ev, auxiliaryListOrderedIds)"
           @contextmenu.prevent="openPaneCtxMenu($event, p.id)"
         >
           <div class="spotlight-thumb-info">
@@ -10113,7 +10166,7 @@ function paneIsCommander(p: ActivePane): boolean {
             @dragenter="onAuxiliaryPaneDragOver($event, p.id)"
             @dragleave="onAuxiliaryPaneDragLeave($event, p.id)"
             @drop.prevent="onAuxiliaryPaneDrop($event, p.id)"
-            @click="(ev) => onSetFocus(p.id, ev)"
+            @click="(ev) => onSetFocus(p.id, ev, auxiliaryListOrderedIds)"
             @contextmenu.prevent="openPaneCtxMenu($event, p.id)"
           >
             <div class="meeting-info">

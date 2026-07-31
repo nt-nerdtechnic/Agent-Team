@@ -11,6 +11,14 @@ const appSource = readFileSync(
   resolve(process.cwd(), 'src/renderer/src/App.vue'),
   'utf8'
 )
+const controlPaneSource = readFileSync(
+  resolve(process.cwd(), 'src/renderer/src/components/ControlPane.vue'),
+  'utf8'
+)
+const agentListSource = readFileSync(
+  resolve(process.cwd(), 'src/renderer/src/components/AgentList.vue'),
+  'utf8'
+)
 const enLocale = readFileSync(
   resolve(process.cwd(), 'src/renderer/src/i18n/locales/en-US.json'),
   'utf8'
@@ -28,10 +36,30 @@ describe('App CLI-pane multi-select + batch context menu', () => {
   })
 
   it('toggles the set on modifier-click and clears it on a plain click', () => {
-    expect(appSource).toContain('function onSetFocus(paneId: string, ev?: MouseEvent): void')
-    expect(appSource).toContain('ev.metaKey || ev.ctrlKey || ev.shiftKey')
+    expect(appSource).toContain('function onSetFocus(paneId: string, ev?: MouseEvent, orderedIds?: string[]): void')
+    // Shift ranges, Cmd/Ctrl toggles — two distinct branches.
+    expect(appSource).toContain('if (ev && ev.shiftKey)')
+    expect(appSource).toContain('if (ev && (ev.metaKey || ev.ctrlKey))')
     // Plain click resets the selection.
     expect(appSource).toContain('selectedPaneIds.value = new Set()')
+  })
+
+  it('range-selects on Shift-click via the pure helper, over the clicked surface order', () => {
+    expect(appSource).toContain('const lastClickPaneId = ref<string | null>(null)')
+    expect(appSource).toContain('function rangeSelectPanes(toId: string, orderedIds?: string[]): void')
+    // Range math lives in the behavior-tested pure helper; App resolves the
+    // surface order and the anchor (last click, falling back to focus).
+    expect(appSource).toContain('const ordered = orderedIds ?? panes.value.map((p) => p.id)')
+    expect(appSource).toContain('const anchor = lastClickPaneId.value ?? focusPaneId.value')
+    expect(appSource).toContain('selectedPaneIds.value = computeRangeSelection(ordered, anchor, toId)')
+    // Each surface supplies its own render order so a range never sweeps in
+    // panes that surface does not show (minimized, other tab, other grid page).
+    expect(appSource).toContain('const stageSurfaceOrderedIds = computed<string[]>')
+    expect(appSource).toContain('const auxiliaryListOrderedIds = computed<string[]>')
+    // The anchor is invalidated when its pane disappears.
+    expect(appSource).toContain(
+      'if (lastClickPaneId.value && !ids.has(lastClickPaneId.value)) lastClickPaneId.value = null'
+    )
   })
 
   it('targets the whole selection only when the clicked pane is in a set of >1', () => {
@@ -59,8 +87,29 @@ describe('App CLI-pane multi-select + batch context menu', () => {
 
   it('passes selection state + the click event down to each pane surface', () => {
     expect(appSource).toContain(':is-selected="selectedPaneIds.has(p.id)"')
-    expect(appSource).toContain('@set-focus="(ev) => onSetFocus(p.id, ev)"')
-    expect(appSource).toContain('@click="(ev) => onSetFocus(p.id, ev)"')
+    expect(appSource).toContain('@set-focus="(ev) => onSetFocus(p.id, ev, stageSurfaceOrderedIds)"')
+    expect(appSource).toContain('@click="(ev) => onSetFocus(p.id, ev, auxiliaryListOrderedIds)"')
+  })
+
+  it('wires the sidebar agent list into the same multi-select', () => {
+    // App passes the selection down and routes sidebar clicks through the
+    // modifier-aware handler (plain clicks keep the focus + scroll behavior).
+    expect(appSource).toContain(':selected-pane-ids="selectedPaneIds"')
+    expect(appSource).toContain('@focus-pane="onSidebarFocusPane"')
+    expect(appSource).toContain('function onSidebarFocusPane(paneId: string, ev?: MouseEvent): void')
+    // Sidebar ranges over its own full list order.
+    expect(appSource).toContain('onSetFocus(paneId, ev, paneViews.value.map((v) => v.id))')
+    // ControlPane forwards the native MouseEvent and paints the selection,
+    // without toggling the accordion on a modifier click.
+    expect(controlPaneSource).toContain('@click="onAgentLineClick(p.id, $event)"')
+    expect(controlPaneSource).toContain('function onAgentLineClick(paneId: string, ev?: MouseEvent): void')
+    expect(controlPaneSource).toContain('if (ev && (ev.metaKey || ev.ctrlKey || ev.shiftKey)) return')
+    expect(controlPaneSource).toContain("(e: 'focus-pane', paneId: string, ev?: MouseEvent): void")
+    expect(controlPaneSource).toContain("'agent-item--selected': props.selectedPaneIds?.has(p.id)")
+    // AgentList exposes the same contract.
+    expect(agentListSource).toContain('@click="emit(\'focus-pane\', p.id, $event)"')
+    expect(agentListSource).toContain("(e: 'focus-pane', paneId: string, ev?: MouseEvent): void")
+    expect(agentListSource).toContain("'agent-item--selected': selectedPaneIds?.has(p.id)")
   })
 
   it('ships i18n keys for every batch menu label in both locales', () => {

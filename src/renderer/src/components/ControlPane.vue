@@ -198,6 +198,8 @@ interface Props {
   spawnHistory?: ResumeHistoryEntry[]
   /** The currently focused pane id — highlights the matching agent-item. */
   focusPaneId?: string
+  /** Panes in the App-owned multi-select set — highlights the matching rows. */
+  selectedPaneIds?: Set<string>
   /** Mirrors StageTabBar's global rebuild state so both controls invoke the
    *  same App-owned operation and present the same availability. */
   canRebuildAll?: boolean
@@ -275,7 +277,7 @@ const emit = defineEmits<{
   (e: 'workspace-check', path: string): void
   (e: 'pipeline-resume'): void
   (e: 'pipeline-restart', payload: { task: string; workspacePath: string }): void
-  (e: 'focus-pane', paneId: string): void
+  (e: 'focus-pane', paneId: string, ev?: MouseEvent): void
   (e: 'reorder-pane', fromId: string, toId: string): void
   (e: 'open-settings'): void
   (e: 'open-history'): void
@@ -856,8 +858,10 @@ function kickoffLabel(status?: ActivePaneView['kickoffStatus']): string {
 // stay one line tall so a long agent list can be scanned without scrolling.
 const expandedPaneId = ref<string | null>(null)
 
-function onAgentLineClick(paneId: string): void {
-  emit('focus-pane', paneId)
+function onAgentLineClick(paneId: string, ev?: MouseEvent): void {
+  emit('focus-pane', paneId, ev)
+  // A modifier click is a multi-select gesture — leave the accordion as-is.
+  if (ev && (ev.metaKey || ev.ctrlKey || ev.shiftKey)) return
   expandedPaneId.value = expandedPaneId.value === paneId ? null : paneId
 }
 
@@ -1156,13 +1160,13 @@ function onPipelineDividerEnd(): void {
           v-for="p in panes"
           :key="p.id"
           class="agent-item"
-          :class="{ pipeline: p.origin === 'pipeline', manager: p.isCommander, minimized: p.isMinimized, 'agent-item--focus': p.id === props.focusPaneId, 'drag-over': reorderDragOverId === p.id, expanded: expandedPaneId === p.id || props.focusPaneId === p.id }"
+          :class="{ pipeline: p.origin === 'pipeline', manager: p.isCommander, minimized: p.isMinimized, 'agent-item--focus': p.id === props.focusPaneId, 'agent-item--selected': props.selectedPaneIds?.has(p.id), 'drag-over': reorderDragOverId === p.id, expanded: expandedPaneId === p.id || props.focusPaneId === p.id }"
           @dragover="onAgentDragOver($event, p.id)"
           @dragenter="onAgentDragOver($event, p.id)"
           @dragleave="onAgentDragLeave(p.id)"
           @drop.prevent="onAgentDrop($event, p.id)"
         >
-          <div class="agent-line" role="button" title="Focus pane" draggable="true" @dragstart="onAgentDragStart($event, p.id)" @dragend="onAgentDragEnd" @click="onAgentLineClick(p.id)" @contextmenu.prevent="emit('context-menu', p.id, $event)">
+          <div class="agent-line" role="button" title="Focus pane" draggable="true" @dragstart="onAgentDragStart($event, p.id)" @dragend="onAgentDragEnd" @click="onAgentLineClick(p.id, $event)" @contextmenu.prevent="emit('context-menu', p.id, $event)">
             <span class="status-dot" :data-state="p.status" :title="p.status"></span>
             <span v-if="p.origin === 'pipeline'" class="pipe-tag">P{{ p.stageId }}</span>
             <input
@@ -2317,6 +2321,12 @@ button.icon-btn.muted:hover {
 .agent-item.expanded.agent-item--focus {
   border-color: var(--accent-focus);
   box-shadow: inset 2px 0 0 var(--accent-focus), 0 0 0 1px var(--accent-focus);
+}
+/* Multi-select highlight — softer than focus, mirrors the pane surfaces'
+   *--selected styles (accent at reduced strength). */
+.agent-item--selected {
+  background: color-mix(in srgb, var(--accent-focus) 16%, transparent);
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent-focus) 55%, transparent);
 }
 /* Reorder drop target feedback, matching .pane-header.drag-over in TerminalPane.vue. */
 .agent-item.drag-over {

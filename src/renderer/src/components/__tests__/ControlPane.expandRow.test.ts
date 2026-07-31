@@ -56,7 +56,11 @@ describe('ControlPane – compact agent rows with click-to-expand', () => {
 
   it('click expands the row, shows the detail body, and emits focus-pane', async () => {
     await wrapper.findAll('.agent-line')[0].trigger('click')
-    expect(wrapper.emitted('focus-pane')).toEqual([['pane-a']])
+    const events = wrapper.emitted('focus-pane')
+    expect(events).toHaveLength(1)
+    // Payload: pane id + the native MouseEvent (so App can read modifier keys).
+    expect(events![0][0]).toBe('pane-a')
+    expect(events![0][1]).toBeInstanceOf(MouseEvent)
     const items = wrapper.findAll('.agent-item')
     expect(items[0].classes()).toContain('expanded')
     expect(items[0].find('.agent-cmd').text()).toContain('claude')
@@ -70,9 +74,32 @@ describe('ControlPane – compact agent rows with click-to-expand', () => {
   it('second click on the same row collapses it (still re-emitting focus-pane)', async () => {
     await wrapper.findAll('.agent-line')[0].trigger('click')
     await wrapper.findAll('.agent-line')[0].trigger('click')
-    expect(wrapper.emitted('focus-pane')).toEqual([['pane-a'], ['pane-a']])
+    const events = wrapper.emitted('focus-pane')
+    expect(events?.map((e) => e[0])).toEqual(['pane-a', 'pane-a'])
     expect(wrapper.findAll('.agent-item')[0].classes()).not.toContain('expanded')
     expect(wrapper.find('.agent-cmd').exists()).toBe(false)
+  })
+
+  it('modifier click emits focus-pane but leaves the accordion toggle memory untouched', async () => {
+    // Real-app contract: a modifier click still moves focus (App calls
+    // selectPane), and focus alone expands a row via the :class binding. What
+    // a modifier click must NOT do is move the accordion's own toggle memory
+    // (expandedPaneId) — so the parent's focusPaneId prop is fed back here.
+    // Open pane-b via a plain click; the parent focuses it.
+    await wrapper.findAll('.agent-line')[1].trigger('click')
+    await wrapper.setProps({ focusPaneId: 'pane-b' })
+    // Modifier-click pane-a; the parent moves focus there.
+    await wrapper.findAll('.agent-line')[0].trigger('click', { metaKey: true })
+    const events = wrapper.emitted('focus-pane')
+    expect(events).toHaveLength(2)
+    expect((events![1][1] as MouseEvent).metaKey).toBe(true)
+    await wrapper.setProps({ focusPaneId: 'pane-a' })
+    const items = wrapper.findAll('.agent-item')
+    // pane-a expands through focus — the existing focus-driven contract...
+    expect(items[0].classes()).toContain('expanded')
+    // ...while pane-b stays expanded: the toggle memory was not moved by the
+    // modifier click (a plain click on pane-a would have collapsed pane-b).
+    expect(items[1].classes()).toContain('expanded')
   })
 
   it('expanding another row collapses the first (single-open accordion)', async () => {

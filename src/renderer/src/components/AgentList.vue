@@ -7,12 +7,13 @@ defineProps<{
   layoutMode: LayoutMode
   runningCount: number
   focusPaneId?: string
+  selectedPaneIds?: Set<string>
 }>()
 
 const emit = defineEmits<{
   (e: 'update:layoutMode', v: LayoutMode): void
   (e: 'open-history'): void
-  (e: 'focus-pane', paneId: string): void
+  (e: 'focus-pane', paneId: string, ev?: MouseEvent): void
   (e: 'context-menu', paneId: string, ev: MouseEvent): void
   (e: 'kill', paneId: string): void
   (e: 'interrupt', paneId: string): void
@@ -71,13 +72,13 @@ function kickoffLabel(status?: ActivePaneView['kickoffStatus']): string {
         v-for="p in panes"
         :key="p.id"
         class="agent-item"
-        :class="{ pipeline: p.origin === 'pipeline', manager: p.isCommander, minimized: p.isMinimized, 'agent-item--focus': p.id === focusPaneId }"
+        :class="{ pipeline: p.origin === 'pipeline', manager: p.isCommander, minimized: p.isMinimized, 'agent-item--focus': p.id === focusPaneId, 'agent-item--selected': selectedPaneIds?.has(p.id) }"
       >
         <div
           class="agent-line"
           role="button"
           title="Focus pane"
-          @click="emit('focus-pane', p.id)"
+          @click="emit('focus-pane', p.id, $event)"
           @contextmenu.prevent="emit('context-menu', p.id, $event)"
         >
           <span v-if="p.origin === 'pipeline'" class="pipe-tag">P{{ p.stageId }}</span>
@@ -267,6 +268,11 @@ button.icon-btn:hover {
   border-color: var(--accent-focus);
   background: color-mix(in srgb, var(--accent-focus) 8%, var(--bg-subtle));
   box-shadow: 0 0 0 2px var(--accent-focus);
+}
+.agent-item--selected {
+  border-color: var(--accent-focus);
+  background: color-mix(in srgb, var(--accent-focus) 16%, var(--bg-subtle));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-focus) 55%, transparent);
 }
 .agent-item.minimized {
   opacity: 0.7;
