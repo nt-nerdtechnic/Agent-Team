@@ -82,6 +82,7 @@ const {
   mergeBranch,
   resetToCommit,
   // branches / stash / remotes / tags
+  rebaseOn,
   switchBranch,
   deleteBranch,
   checkoutRemoteBranch,
@@ -228,15 +229,45 @@ function onPaneOpenBranchDiff(p: { base: string; compare: string }): void {
   if (p.compare) diffCompare.value = p.compare
   openBranchDiff()
 }
-// ── Sidebar operations ───────────────────────────────────────────────────────
+// ── Sidebar operations (GitPane-style sections) ──────────────────────────────
+// Collapse state per card, mirroring GitPane's collapsible cards.
+const branchesExpanded = ref(true)
+const stashesExpanded = ref(false)
+const remotesExpanded = ref(false)
+const tagsExpanded = ref(false)
+const worktreesExpanded = ref(false)
+// Remote branches live inside the branch card behind the ⇅ toggle (GitPane).
+const showRemoteBranches = ref(false)
+
+// Inline-create inputs (GitPane's input-row pattern instead of prompt dialogs).
+const newBranchName = ref('')
+const newRemoteName = ref('')
+const newRemoteUrl = ref('')
+const newTagName = ref('')
+const newTagMessage = ref('')
+const newWtPath = ref('')
+const newWtBranch = ref('')
+
+// Switching is an explicit ↵ row button (GitPane doSwitch) — never a row click.
 async function onSwitchBranch(name: string): Promise<void> {
   if (name === gitStatus.value.branch) return
   toastResult(await switchBranch(name), `Switched to ${name}`)
 }
-async function onCreateBranch(): Promise<void> {
-  const name = (await notify.prompt('New branch name', { title: 'Create branch' }))?.trim()
+async function doCreateBranch(): Promise<void> {
+  const name = newBranchName.value.trim()
   if (!name) return
-  toastResult(await createBranch(name), `Created ${name}`)
+  if (toastResult(await createBranch(name), `Created ${name}`)) newBranchName.value = ''
+}
+function doCompareBranch(name: string): void {
+  diffBase.value = name
+  diffCompare.value = gitStatus.value.branch
+  view.value = 'branchdiff'
+}
+async function doMergeIntoCurrent(name: string): Promise<void> {
+  toastResult(await mergeBranch(name), `Merged ${name}`)
+}
+async function doRebaseOnto(name: string): Promise<void> {
+  toastResult(await rebaseOn(name), `Rebased onto ${name}`)
 }
 async function onDeleteBranch(name: string): Promise<void> {
   const ok = await notify.confirm(`Delete branch ${name}?`, {
@@ -275,12 +306,14 @@ async function onStashDrop(index: number): Promise<void> {
   toastResult(await stashDrop(index))
 }
 
-async function onAddRemote(): Promise<void> {
-  const name = (await notify.prompt('Remote name', { title: 'Add remote', defaultValue: 'origin' }))?.trim()
-  if (!name) return
-  const url = (await notify.prompt('Remote URL', { title: `Add remote ${name}` }))?.trim()
-  if (!url) return
-  toastResult(await addRemote(name, url), `Added ${name}`)
+async function doAddRemote(): Promise<void> {
+  const name = newRemoteName.value.trim()
+  const url = newRemoteUrl.value.trim()
+  if (!name || !url) return
+  if (toastResult(await addRemote(name, url), `Added ${name}`)) {
+    newRemoteName.value = ''
+    newRemoteUrl.value = ''
+  }
 }
 async function onRemoveRemote(name: string): Promise<void> {
   const ok = await notify.confirm(`Remove remote ${name}?`, {
@@ -299,17 +332,25 @@ async function onDeleteTag(name: string): Promise<void> {
   if (!ok) return
   toastResult(await deleteTag(name))
 }
+async function doCreateTag(): Promise<void> {
+  const name = newTagName.value.trim()
+  if (!name) return
+  if (toastResult(await createTag(name, newTagMessage.value.trim()), `Tagged ${name}`)) {
+    newTagName.value = ''
+    newTagMessage.value = ''
+  }
+}
 
 // ── Worktrees ────────────────────────────────────────────────────────────────
-async function onAddWorktree(): Promise<void> {
-  const path = (await notify.prompt('New worktree path (absolute)', { title: 'Add worktree' }))?.trim()
-  if (!path) return
-  const branch = (await notify.prompt('Branch to check out (created if missing)', {
-    title: 'Add worktree'
-  }))?.trim()
-  if (!branch) return
+async function doAddWorktree(): Promise<void> {
+  const path = newWtPath.value.trim()
+  const branch = newWtBranch.value.trim()
+  if (!path || !branch) return
   const existing = gitBranches.value.some((b) => !b.is_remote && b.name === branch)
-  toastResult(await addWorktree(path, branch, !existing), 'Worktree added')
+  if (toastResult(await addWorktree(path, branch, !existing), 'Worktree added')) {
+    newWtPath.value = ''
+    newWtBranch.value = ''
+  }
   await loadWorktrees()
 }
 async function onRemoveWorktree(path: string): Promise<void> {
@@ -470,100 +511,178 @@ function shortDate(iso?: string): string {
           </button>
         </div>
 
-        <div class="sb-group">
-          <div class="sb-head">
-            BRANCHES
-            <button class="sb-head-btn" title="Create branch" @click="onCreateBranch">＋</button>
+        <!-- ── BRANCHES (GitPane branch panel: explicit ↵ switch, never row click) ── -->
+        <div class="git-card">
+          <div class="card-hdr clickable" @click="branchesExpanded = !branchesExpanded">
+            <span class="sec-caret">{{ branchesExpanded ? '▾' : '▸' }}</span>
+            <span class="sec-label">Branches</span>
+            <span v-if="localBranches.length" class="sec-badge">{{ localBranches.length }}</span>
+            <div class="spacer" />
           </div>
-          <div
-            v-for="b in localBranches"
-            :key="b.name"
-            class="sb-item row"
-            :class="{ current: b.is_current }"
-            :title="b.is_current ? b.name : `Switch to ${b.name}`"
-            @click="onSwitchBranch(b.name)"
-          >
-            <span class="sb-dot" /><span class="sb-label">{{ b.name }}</span>
-            <button
-              v-if="!b.is_current"
-              class="sb-act danger"
-              title="Delete branch"
-              @click.stop="onDeleteBranch(b.name)"
-            >×</button>
+          <div v-if="branchesExpanded" class="card-body collapsible-body">
+            <div class="input-row">
+              <input
+                v-model="newBranchName"
+                class="git-input"
+                placeholder="New branch…"
+                @keydown.enter="doCreateBranch"
+              />
+              <button
+                class="btn-ghost sm"
+                :disabled="!newBranchName.trim() || /\s|\.\./.test(newBranchName.trim()) || newBranchName.trim().startsWith('-')"
+                @click="doCreateBranch"
+              >＋</button>
+              <button
+                class="btn-ghost sm"
+                :class="{ active: showRemoteBranches }"
+                :title="showRemoteBranches ? 'Hide remote branches' : 'Show remote branches'"
+                @click="showRemoteBranches = !showRemoteBranches"
+              >⇅</button>
+            </div>
+            <div v-for="b in localBranches" :key="b.name" class="branch-row" :class="{ current: b.is_current }">
+              <span class="b-check">{{ b.is_current ? '✓' : '' }}</span>
+              <span class="b-name">{{ b.name }}</span>
+              <span v-if="b.tracking" class="b-track">→ {{ b.tracking }}</span>
+              <div class="spacer" />
+              <template v-if="!b.is_current">
+                <button class="row-btn always" title="Compare" @click.stop="doCompareBranch(b.name)">⇔</button>
+                <button class="row-btn always" title="Rebase current onto" @click.stop="doRebaseOnto(b.name)">⇡</button>
+                <button class="row-btn always" title="Merge into current" @click.stop="doMergeIntoCurrent(b.name)">⇣</button>
+                <button class="row-btn always" title="Switch" @click.stop="onSwitchBranch(b.name)">↵</button>
+                <button class="row-btn always danger" title="Delete branch" @click.stop="onDeleteBranch(b.name)">✕</button>
+              </template>
+            </div>
+            <div v-if="!localBranches.length" class="empty-msg">No branches</div>
+            <template v-if="showRemoteBranches">
+              <div class="branch-section-label">Remote branches</div>
+              <div v-if="!remoteBranches.length" class="empty-msg">No remote branches</div>
+              <div
+                v-for="b in remoteBranches"
+                :key="b.name"
+                class="branch-row"
+                :class="{ 'remote-has-local': b.has_local }"
+              >
+                <span class="b-check">{{ b.has_local ? '✓' : '' }}</span>
+                <span class="b-name remote">{{ b.name }}</span>
+                <div class="spacer" />
+                <button
+                  v-if="!b.has_local"
+                  class="row-btn always"
+                  title="Checkout locally"
+                  @click.stop="onCheckoutRemoteBranch(b.name)"
+                >⬇</button>
+              </div>
+            </template>
           </div>
-          <div v-if="!localBranches.length" class="sb-empty">—</div>
         </div>
 
-        <div class="sb-group">
-          <div class="sb-head">
-            REMOTES
-            <button class="sb-head-btn" title="Add remote" @click="onAddRemote">＋</button>
+        <!-- ── STASHES ── -->
+        <div class="git-card">
+          <div class="card-hdr clickable" @click="stashesExpanded = !stashesExpanded">
+            <span class="sec-caret">{{ stashesExpanded ? '▾' : '▸' }}</span>
+            <span class="sec-label">Stashes</span>
+            <span v-if="gitStashes.length" class="sec-badge">{{ gitStashes.length }}</span>
+            <div class="spacer" />
+            <button class="sec-btn" title="Stash working changes" @click.stop="onStashPush">＋</button>
           </div>
-          <div v-for="r in gitRemotes" :key="r.name" class="sb-item row" :title="r.fetch_url">
-            <span class="sb-label">{{ r.name }}</span>
-            <button class="sb-act danger" title="Remove remote" @click.stop="onRemoveRemote(r.name)">×</button>
+          <div v-if="stashesExpanded" class="card-body collapsible-body">
+            <div v-if="!gitStashes.length" class="empty-msg">No stashes</div>
+            <div v-for="s in gitStashes" :key="s.ref" class="generic-row">
+              <span class="stash-ref">{{ s.ref }}</span>
+              <span class="stash-msg">{{ s.message }}</span>
+              <div class="row-actions always">
+                <button class="row-btn always" title="Apply (keep stash)" @click.stop="onStashApply(s.index)">⎘</button>
+                <button class="row-btn always" title="Pop (apply &amp; remove)" @click.stop="onStashPop(s.index)">↑</button>
+                <button class="row-btn always danger" title="Drop" @click.stop="onStashDrop(s.index)">✕</button>
+              </div>
+            </div>
           </div>
-          <div v-if="!gitRemotes.length" class="sb-empty">—</div>
         </div>
 
-        <div class="sb-group">
-          <div class="sb-head">TAGS</div>
-          <div v-for="t in gitTags" :key="t.name" class="sb-item row" :title="t.message">
-            <span class="sb-label">{{ t.name }}</span>
-            <button class="sb-act danger" title="Delete tag" @click.stop="onDeleteTag(t.name)">×</button>
+        <!-- ── REMOTES ── -->
+        <div class="git-card">
+          <div class="card-hdr clickable" @click="remotesExpanded = !remotesExpanded">
+            <span class="sec-caret">{{ remotesExpanded ? '▾' : '▸' }}</span>
+            <span class="sec-label">Remotes</span>
+            <span v-if="gitRemotes.length" class="sec-badge">{{ gitRemotes.length }}</span>
+            <div class="spacer" />
           </div>
-          <div v-if="!gitTags.length" class="sb-empty">—</div>
+          <div v-if="remotesExpanded" class="card-body collapsible-body">
+            <div v-if="!gitRemotes.length" class="empty-msg">No remotes</div>
+            <div v-for="r in gitRemotes" :key="r.name" class="generic-row">
+              <span class="remote-name">{{ r.name }}</span>
+              <span class="remote-url" :title="r.fetch_url">{{ r.fetch_url }}</span>
+              <button class="row-btn always danger" title="Remove remote" @click.stop="onRemoveRemote(r.name)">✕</button>
+            </div>
+            <div class="input-row" style="margin-top: 6px">
+              <input v-model="newRemoteName" class="git-input" placeholder="Name" style="width: 72px; flex: 0 0 auto" />
+              <input v-model="newRemoteUrl" class="git-input" placeholder="URL" @keydown.enter="doAddRemote" />
+              <button class="btn-ghost sm" :disabled="!newRemoteName.trim() || !newRemoteUrl.trim()" @click="doAddRemote">＋</button>
+            </div>
+          </div>
         </div>
 
-        <div class="sb-group">
-          <div class="sb-head">
-            STASHES
-            <button class="sb-head-btn" title="Stash working changes" @click="onStashPush">＋</button>
+        <!-- ── TAGS ── -->
+        <div class="git-card">
+          <div class="card-hdr clickable" @click="tagsExpanded = !tagsExpanded">
+            <span class="sec-caret">{{ tagsExpanded ? '▾' : '▸' }}</span>
+            <span class="sec-label">Tags</span>
+            <span v-if="gitTags.length" class="sec-badge">{{ gitTags.length }}</span>
+            <div class="spacer" />
           </div>
-          <div v-for="s in gitStashes" :key="s.ref" class="sb-item row" :title="s.message">
-            <span class="sb-label">{{ s.message || s.ref }}</span>
-            <button class="sb-act" title="Pop (apply + drop)" @click.stop="onStashPop(s.index)">⤒</button>
-            <button class="sb-act" title="Apply (keep stash)" @click.stop="onStashApply(s.index)">⎘</button>
-            <button class="sb-act danger" title="Drop" @click.stop="onStashDrop(s.index)">×</button>
+          <div v-if="tagsExpanded" class="card-body collapsible-body">
+            <div v-if="!gitTags.length" class="empty-msg">No tags</div>
+            <div v-for="t in gitTags" :key="t.name" class="generic-row">
+              <span class="b-name">{{ t.name }}</span>
+              <code class="chash" style="margin-left: 4px">{{ t.commit_hash }}</code>
+              <span v-if="t.message" class="b-track">{{ t.message }}</span>
+              <div class="spacer" />
+              <button class="row-btn always danger" title="Delete tag" @click.stop="onDeleteTag(t.name)">✕</button>
+            </div>
+            <div class="input-row" style="margin-top: 6px; flex-wrap: wrap; gap: 4px">
+              <input v-model="newTagName" class="git-input" placeholder="v1.0.0" style="flex: 1; min-width: 72px" />
+              <input v-model="newTagMessage" class="git-input" placeholder="Message" style="flex: 2; min-width: 80px" />
+              <button class="btn-ghost sm" :disabled="!newTagName.trim()" @click="doCreateTag">＋</button>
+            </div>
           </div>
-          <div v-if="!gitStashes.length" class="sb-empty">—</div>
         </div>
 
-        <div class="sb-group">
-          <div class="sb-head">
-            WORKTREES
-            <button class="sb-head-btn" title="Add worktree" @click="onAddWorktree">＋</button>
-            <button class="sb-head-btn" title="Prune stale worktrees" @click="onPruneWorktrees">⌫</button>
+        <!-- ── WORKTREES ── -->
+        <div class="git-card">
+          <div class="card-hdr clickable" @click="worktreesExpanded = !worktreesExpanded">
+            <span class="sec-caret">{{ worktreesExpanded ? '▾' : '▸' }}</span>
+            <span class="sec-label">Worktrees</span>
+            <span v-if="gitWorktrees.length > 1" class="sec-badge">{{ gitWorktrees.length }}</span>
+            <div class="spacer" />
           </div>
-          <div
-            v-for="w in gitWorktrees"
-            :key="w.path"
-            class="sb-item row"
-            :title="`${w.path}${w.locked ? ` (locked: ${w.lock_reason})` : ''}`"
-          >
-            <span class="sb-label">{{ w.branch || w.head.slice(0, 8) }}{{ w.is_main ? ' (main)' : '' }}</span>
-            <button
-              v-if="!w.is_main"
-              class="sb-act danger"
-              title="Remove worktree"
-              @click.stop="onRemoveWorktree(w.path)"
-            >×</button>
+          <div v-if="worktreesExpanded" class="card-body collapsible-body">
+            <div class="input-row" style="margin-bottom: 6px">
+              <button class="btn-ghost sm" title="Prune stale worktrees" @click="onPruneWorktrees">Prune</button>
+            </div>
+            <div v-for="wt in gitWorktrees" :key="wt.path" class="generic-row">
+              <span class="wt-icon">{{ wt.is_main ? '✦' : '○' }}</span>
+              <div style="flex: 1; min-width: 0">
+                <div class="wt-name-row">
+                  <span class="b-name" :title="wt.path">{{ wt.path.split('/').at(-1) }}</span>
+                  <span v-if="wt.detached" class="wt-badge">detached</span>
+                  <span v-if="wt.locked" class="wt-badge warn" :title="wt.lock_reason">🔒</span>
+                  <span v-if="wt.prunable" class="wt-badge warn" :title="wt.prune_reason">⚠</span>
+                </div>
+                <div class="b-track">{{ wt.branch || wt.head.slice(0, 8) }}</div>
+              </div>
+              <button
+                v-if="!wt.is_main"
+                class="row-btn always danger"
+                title="Remove worktree"
+                @click.stop="onRemoveWorktree(wt.path)"
+              >✕</button>
+            </div>
+            <div class="input-row" style="margin-top: 6px">
+              <input v-model="newWtPath" class="git-input" placeholder="/absolute/path" style="flex: 2" />
+              <input v-model="newWtBranch" class="git-input" placeholder="branch" style="flex: 1" />
+              <button class="btn-ghost sm" :disabled="!newWtPath.trim() || !newWtBranch.trim()" @click="doAddWorktree">＋</button>
+            </div>
           </div>
-          <div v-if="!gitWorktrees.length" class="sb-empty">—</div>
-        </div>
-
-        <div class="sb-group muted">
-          <div class="sb-head">REMOTE BRANCHES</div>
-          <div
-            v-for="b in remoteBranches"
-            :key="b.name"
-            class="sb-item row"
-            :title="`Checkout ${b.name}`"
-            @click="onCheckoutRemoteBranch(b.name)"
-          >
-            <span class="sb-label">{{ b.name }}</span>
-          </div>
-          <div v-if="!remoteBranches.length" class="sb-empty">—</div>
         </div>
       </aside>
 
@@ -803,7 +922,7 @@ function shortDate(iso?: string): string {
 
 /* Sidebar */
 .sidebar {
-  width: 220px;
+  width: 270px;
   flex-shrink: 0;
   border-right: 1px solid var(--border-muted);
   overflow-y: auto;
@@ -811,9 +930,6 @@ function shortDate(iso?: string): string {
 }
 .sb-group {
   padding: 4px 0 8px;
-}
-.sb-group.muted {
-  opacity: 0.75;
 }
 .sb-head {
   display: flex;
@@ -838,72 +954,107 @@ function shortDate(iso?: string): string {
   text-align: left;
   cursor: pointer;
 }
-.sb-item.row {
-  cursor: pointer;
+/* ── GitPane-copied section vocabulary (keep in sync with GitPane.vue) ─────── */
+.spacer { flex: 1; }
+.empty-msg { color: var(--text-muted); font-size: 11px; font-style: italic; padding: 3px 8px 6px; }
+.chash { font-size: 10px; color: var(--text-muted); font-family: monospace; background: transparent; }
+
+.git-card {
+  margin: 6px 8px;
+  background: var(--bg-base);
+  border: 1px solid var(--border-muted);
+  border-radius: 6px;
+  overflow: hidden;
 }
-.sb-item.row:hover {
+.card-hdr {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 10px; min-height: 22px;
   background: var(--bg-subtle);
 }
-.sb-label {
-  flex: 1;
-  min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.card-hdr.clickable { cursor: pointer; user-select: none; }
+.card-hdr.clickable:hover { background: var(--bg-elevated); }
+.git-card:has(.card-body) .card-hdr { border-bottom: 1px solid var(--border-muted); }
+.card-body { padding: 4px 2px 6px; }
+.collapsible-body {
+  padding: 4px 12px 8px;
+  display: flex; flex-direction: column; gap: 2px;
 }
-.sb-head-btn {
-  margin-left: auto;
-  background: none;
-  border: none;
-  color: var(--text-muted);
-  font-size: 12px;
-  cursor: pointer;
-  padding: 0 4px;
-  line-height: 1;
+.sec-caret { font-size: 9px; color: var(--text-muted); width: 10px; flex-shrink: 0; }
+.sec-label {
+  font-size: 11px; font-weight: 600; color: var(--text-secondary);
+  letter-spacing: 0.3px;
 }
-.sb-head-btn + .sb-head-btn {
-  margin-left: 0;
+.sec-badge {
+  font-size: 10px; color: var(--text-secondary); background: var(--bg-active);
+  border-radius: 10px; padding: 0 6px; flex-shrink: 0;
 }
-.sb-head-btn:hover {
-  color: var(--text-bright);
+.sec-btn {
+  display: flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; background: transparent; border: none;
+  border-radius: 3px; color: var(--text-muted); cursor: pointer; font-size: 12px; padding: 0;
 }
-.sb-act {
-  flex-shrink: 0;
-  background: none;
-  border: none;
-  color: var(--text-muted);
-  font-size: 12px;
-  cursor: pointer;
-  padding: 0 3px;
-  line-height: 1;
-  visibility: hidden;
+.sec-btn:hover { color: var(--text-primary); background: var(--bg-hover); }
+
+.branch-row {
+  display: flex; align-items: center; gap: 4px;
+  padding: 2px 0; font-size: 11px; border-radius: 3px;
 }
-.sb-item.row:hover .sb-act {
-  visibility: visible;
+.branch-row:hover { background: var(--bg-hover-faint); }
+.branch-row.current .b-name { color: var(--accent-bright); font-weight: 600; }
+.b-check { width: 14px; color: var(--success-bright); font-size: 10px; text-align: center; flex-shrink: 0; }
+.b-name { color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.b-name.remote { color: var(--text-muted); font-style: italic; }
+.b-track { color: var(--text-muted); font-size: 10px; flex-shrink: 0; }
+.branch-section-label { font-size: 10px; color: var(--text-muted); padding: 4px 0 2px; letter-spacing: 0.04em; text-transform: uppercase; }
+
+.generic-row {
+  display: flex; align-items: center; gap: 6px;
+  padding: 3px 0; font-size: 11px;
 }
-.sb-act:hover {
-  color: var(--text-bright);
+.generic-row:hover { background: var(--bg-hover-faint); }
+.row-actions.always { display: flex; }
+.row-btn {
+  display: flex; align-items: center; justify-content: center;
+  min-width: 20px; height: 20px; background: transparent; border: none;
+  border-radius: 3px; color: var(--text-secondary); font-size: 11px; cursor: pointer; padding: 0 2px;
 }
-.sb-act.danger:hover {
-  color: var(--danger-bright);
+.row-btn:hover { color: var(--text-primary); background: var(--bg-active); }
+.row-btn.danger:hover { color: var(--danger-fg); }
+.row-btn.always { opacity: 1; }
+.stash-ref { color: var(--text-muted); font-size: 10px; flex-shrink: 0; }
+.stash-msg { color: var(--text-primary); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.remote-name { color: var(--text-muted); font-size: 10px; flex-shrink: 0; min-width: 44px; }
+.remote-url  { color: var(--text-primary); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.wt-icon { color: var(--success-bright); font-size: 11px; flex-shrink: 0; width: 14px; text-align: center; }
+.wt-name-row { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.wt-name-row .b-name { flex: 0 1 auto; }
+.wt-badge {
+  font-size: 9px; color: var(--text-secondary); background: var(--bg-active);
+  border-radius: 8px; padding: 0 5px; flex-shrink: 0; white-space: nowrap;
 }
+.wt-badge.warn { color: var(--danger-fg); }
+
+.git-input {
+  flex: 1; background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: 4px;
+  color: var(--text-primary); font-size: 11px; padding: 3px 7px;
+}
+.git-input:focus { outline: none; border-color: var(--accent-focus); }
+.input-row { display: flex; gap: 4px; }
+.btn-ghost {
+  background: transparent; border: 1px solid var(--border-default); border-radius: 4px;
+  color: var(--text-secondary); font-size: 12px; padding: 4px 8px; cursor: pointer;
+}
+.btn-ghost:hover { border-color: var(--border-strong); color: var(--text-primary); }
+.btn-ghost:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-ghost.sm { font-size: 11px; padding: 3px 7px; }
+.btn-ghost.active { color: var(--accent-bright); }
+
 button.sb-item:hover {
   background: var(--bg-subtle);
 }
 .sb-item.active {
   background: var(--bg-selected);
   color: var(--text-bright);
-}
-.sb-item.current {
-  color: var(--accent-fg);
-  font-weight: 600;
-}
-.sb-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--accent-fg);
-  flex-shrink: 0;
 }
 .sb-badge {
   margin-left: auto;
@@ -912,11 +1063,6 @@ button.sb-item:hover {
   padding: 0 6px;
   font-size: 11px;
   color: var(--text-primary);
-}
-.sb-empty {
-  padding: 2px 12px;
-  color: var(--text-disabled);
-  font-size: 12px;
 }
 
 /* Center column */

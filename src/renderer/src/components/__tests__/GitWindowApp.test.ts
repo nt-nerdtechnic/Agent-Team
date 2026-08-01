@@ -186,19 +186,44 @@ describe('GitWindowApp — window wiring around the embedded GitPane', () => {
     expect((selects[1]!.element as HTMLSelectElement).value).toBe('feature-x')
   })
 
-  it('switches branch from the sidebar and never for the current branch', async () => {
+  it('switches branch only via the explicit ↵ button, never on row click', async () => {
     wrapper = await mountApp()
-    const rows = wrapper.findAll('.sb-item.row')
+    const rows = wrapper.findAll('.branch-row')
     const feature = rows.find((r) => r.text().includes('feature-x'))
+    expect(feature).toBeTruthy()
+
+    // Clicking the row itself must NOT switch (the single-click-switch bug).
     await feature!.trigger('click')
+    await flushPromises()
+    expect(callsOf('git.switch_branch').length).toBe(0)
+
+    // The GitPane-style explicit Switch button does.
+    await feature!.find('button[title="Switch"]').trigger('click')
     await flushPromises()
     expect(callsOf('git.switch_branch')[0]!.payload).toMatchObject({ name: 'feature-x' })
 
-    sends.calls.length = 0
-    const current = rows.find((r) => r.text().includes('main') && r.classes().includes('current'))
-    await current!.trigger('click')
-    await flushPromises()
-    expect(callsOf('git.switch_branch').length).toBe(0)
+    // The current branch row offers no switch/merge/rebase buttons at all.
+    const current = rows.find((r) => r.classes().includes('current'))
+    expect(current!.find('button[title="Switch"]').exists()).toBe(false)
+  })
+
+  it('collapses and expands the sidebar section cards', async () => {
+    wrapper = await mountApp()
+    // Branches starts expanded; its header caret collapses it.
+    expect(wrapper.findAll('.branch-row').length).toBeGreaterThan(0)
+    const branchesHdr = wrapper
+      .findAll('.card-hdr')
+      .find((h) => h.text().includes('Branches'))
+    await branchesHdr!.trigger('click')
+    expect(wrapper.findAll('.branch-row').length).toBe(0)
+    await branchesHdr!.trigger('click')
+    expect(wrapper.findAll('.branch-row').length).toBeGreaterThan(0)
+
+    // Stashes starts collapsed and expands on header click.
+    const stashesHdr = wrapper.findAll('.card-hdr').find((h) => h.text().includes('Stashes'))
+    expect(stashesHdr!.text()).toContain('▸')
+    await stashesHdr!.trigger('click')
+    expect(stashesHdr!.text()).toContain('▾')
   })
 
   it('opens the branch-diff view with a sensible base/compare preselection', async () => {
