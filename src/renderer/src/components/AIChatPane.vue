@@ -65,6 +65,7 @@ const props = defineProps<{
   getOpenFiles?: () => string[]
   insertTextAtCursor?: (text: string) => void
   openFile?: (relPath: string, line?: number) => void
+  saveDirtyFiles?: () => Promise<void>
 }>()
 
 // ── Message types ──────────────────────────────────────────────────────────────
@@ -141,6 +142,9 @@ let historySavedDraft = ''  // input text saved before first ArrowUp
 let _navAssistIdx = -1     // index into assistant messages for Alt+Up/Down navigation
 const sending = ref(false)
 const currentSessionId = ref<string | null>(null)
+// Session whose ai.chat.done cli_session_id may be persisted on the current
+// thread (real conversation turns only — never /compact or /save-summary runs).
+let cliSidEligibleSession: string | null = null
 
 // ── Voice input (Web Speech API) ───────────────────────────────────────────────
 interface _SR { continuous: boolean; interimResults: boolean; lang: string; onresult: ((e: Event) => void) | null; onend: (() => void) | null; onerror: (() => void) | null; start(): void; stop(): void }
@@ -948,7 +952,7 @@ function newThread(): void {
   allThreads.value.unshift(thread)
   currentThreadId.value = id
   messages.value = []
-  expandedMsgIdxs.value = new Set(); expandedDiffs.value = new Set()
+  expandedMsgIdxs.value = new Set()
   showThreads.value = false
 }
 
@@ -1068,41 +1072,12 @@ function cancelRenameThread(): void {
 watch(messages, saveCurrentThread)
 
 // ── Settings ───────────────────────────────────────────────────────────────────
-type ProviderName = 'anthropic' | 'ollama' | 'openai' | 'groq' | 'deepseek' | 'google' | 'mistral' | 'xai' | 'openai_compatible'
-const settingsProvider = ref<ProviderName>('anthropic')
-const settingsApiKey = ref('')
-// Provider credentials live only in the backend ai_chat_settings.json (0o600);
-// the form hydrates from `ai.chat.settings.get` (see fetchSettings).
-const settingsOpenAiKey = ref('')
-const settingsGroqKey = ref('')
-const settingsDeepSeekKey = ref('')
-const settingsGoogleKey = ref('')
-const settingsMistralKey = ref('')
-const settingsXaiKey = ref('')
-const settingsOaiCompatUrl = ref('')
-const settingsOaiCompatKey = ref('')
-const settingsOaiCompatModel = ref('gpt-4o')
-const settingsModel = ref('claude-sonnet-4-6')
-const settingsOllamaUrl = ref('http://localhost:11434')
+// AI chat runs through the Claude CLI engine; the only backend-persisted
+// setting left is the system prompt (`ai.chat.settings.*`).
 const settingsSendMode = ref<'enter' | 'ctrl-enter'>(
   settingsGet('ai-chat-send-mode', 'enter') as 'enter' | 'ctrl-enter'
 )
 const settingsSystemPrompt = ref('You are a helpful AI coding assistant.')
-const testConnStatus = ref<Record<string, 'idle' | 'testing' | 'ok' | 'fail'>>({})
-const testConnError = ref<Record<string, string>>({})
-
-const providerHasKey = computed<Record<string, boolean>>(() => ({
-  anthropic:        (settingsApiKey.value ?? '').trim().length > 0,
-  openai:           (settingsOpenAiKey.value ?? '').trim().length > 0,
-  groq:             (settingsGroqKey.value ?? '').trim().length > 0,
-  deepseek:         (settingsDeepSeekKey.value ?? '').trim().length > 0,
-  google:           (settingsGoogleKey.value ?? '').trim().length > 0,
-  mistral:          (settingsMistralKey.value ?? '').trim().length > 0,
-  xai:              (settingsXaiKey.value ?? '').trim().length > 0,
-  openai_compatible:(settingsOaiCompatUrl.value ?? '').trim().length > 0,
-  ollama:           true,  // always available (local)
-  auto:             true,
-}))
 
 const _SYSTEM_PROFILES: Record<string, string> = {
   coding:   'You are a helpful AI coding assistant. Be concise, use code examples, and always explain your reasoning.',
@@ -1174,183 +1149,19 @@ function addToWorkingSet(relPath: string): void {
 function removeFromWorkingSet(idx: number): void {
   editWorkingSet.value.splice(idx, 1)
 }
-const settingsMaxTokens = ref(4096)
-const settingsMaxAgentIter = ref(parseInt(settingsGet('ai-chat-max-agent-iter', '10'), 10) || 10)
-const settingsTemperature = ref<number | null>(null)  // null = use model default
-const settingsThinkingBudget = ref<number | null>(null) // null = disabled; token budget for extended thinking
-const settingsReasoningEffort = ref<'low' | 'medium' | 'high' | null>(null)
-const THINKING_SUPPORTED_MODELS = new Set(['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-3-7-sonnet-20250219'])
-const REASONING_MODEL_PREFIXES = ['o1', 'o3', 'o4']
-const thinkingSupported = computed(() => THINKING_SUPPORTED_MODELS.has(settingsModel.value))
-const reasoningModelSelected = computed(() => REASONING_MODEL_PREFIXES.some((p) => settingsModel.value.startsWith(p)))
-const showModelPicker = ref(false)
-const modelPickerSearch = ref('')
-watch(showModelPicker, (v) => { if (!v) modelPickerSearch.value = '' })
-
-interface ModelEntry {
-  id: string
-  provider: 'anthropic' | 'ollama' | 'openai' | 'groq' | 'deepseek' | 'google' | 'mistral' | 'xai' | 'openai_compatible' | 'auto'
-  display: string
-  note: string   // speed/capability hint
-  ctx?: number   // context window in tokens
-  caps?: Array<'vision' | 'thinking' | 'code'>  // capability badges
-}
-const MODEL_CATALOG: ModelEntry[] = [
-  { id: 'auto',                        provider: 'auto',      display: 'Auto',                    note: 'Best available' },
-  // Anthropic
-  { id: 'claude-opus-4-8',            provider: 'anthropic', display: 'Claude Opus 4.8',         note: 'Most capable',      ctx: 200_000, caps: ['vision', 'thinking'] },
-  { id: 'claude-sonnet-4-6',          provider: 'anthropic', display: 'Claude Sonnet 4.6',       note: 'Balanced',           ctx: 200_000, caps: ['vision', 'thinking'] },
-  { id: 'claude-haiku-4-5-20251001',  provider: 'anthropic', display: 'Claude Haiku 4.5',        note: 'Fast',               ctx: 200_000, caps: ['vision'] },
-  { id: 'claude-3-5-sonnet-20241022', provider: 'anthropic', display: 'Claude 3.5 Sonnet',       note: 'Stable',             ctx: 200_000, caps: ['vision'] },
-  { id: 'claude-3-5-haiku-20241022',  provider: 'anthropic', display: 'Claude 3.5 Haiku',        note: 'Fast · Stable',      ctx: 200_000, caps: ['vision'] },
-  // OpenAI
-  { id: 'gpt-4.1',                     provider: 'openai',    display: 'GPT-4.1',                 note: 'OpenAI · 1M ctx',    ctx: 1_000_000, caps: ['vision'] },
-  { id: 'gpt-4.1-mini',                provider: 'openai',    display: 'GPT-4.1 Mini',            note: 'OpenAI · Fast · 1M', ctx: 1_000_000, caps: ['vision'] },
-  { id: 'gpt-4.1-nano',                provider: 'openai',    display: 'GPT-4.1 Nano',            note: 'OpenAI · Fastest',   ctx: 1_000_000 },
-  { id: 'gpt-4o',                      provider: 'openai',    display: 'GPT-4o',                  note: 'OpenAI',             ctx: 128_000, caps: ['vision'] },
-  { id: 'gpt-4o-mini',                 provider: 'openai',    display: 'GPT-4o Mini',             note: 'OpenAI · Fast',      ctx: 128_000 },
-  { id: 'o3',                          provider: 'openai',    display: 'o3',                      note: 'OpenAI · Reasoning', ctx: 200_000, caps: ['thinking'] },
-  { id: 'o3-mini',                     provider: 'openai',    display: 'o3-mini',                 note: 'OpenAI · Reasoning', ctx: 200_000, caps: ['thinking'] },
-  { id: 'o4-mini',                     provider: 'openai',    display: 'o4-mini',                 note: 'OpenAI · Reasoning', ctx: 200_000, caps: ['thinking', 'vision'] },
-  // Groq
-  { id: 'llama-4-scout-17b-16e-instruct',   provider: 'groq', display: 'Llama 4 Scout',          note: 'Groq · Fast',        ctx: 131_072 },
-  { id: 'llama-4-maverick-17b-128e-instruct', provider: 'groq', display: 'Llama 4 Maverick',     note: 'Groq · Capable',     ctx: 131_072 },
-  { id: 'llama-3.3-70b-versatile',    provider: 'groq',      display: 'Llama 3.3 70B',           note: 'Groq',               ctx: 128_000 },
-  { id: 'mixtral-8x7b-32768',          provider: 'groq',      display: 'Mixtral 8x7B',            note: 'Groq',               ctx: 32_000 },
-  // DeepSeek
-  { id: 'deepseek-chat',              provider: 'deepseek',  display: 'DeepSeek Chat',            note: 'DeepSeek',           ctx: 64_000 },
-  { id: 'deepseek-reasoner',          provider: 'deepseek',  display: 'DeepSeek Reasoner',        note: 'DeepSeek · R1',      ctx: 64_000, caps: ['thinking'] },
-  // Google Gemini
-  { id: 'gemini-2.5-pro',             provider: 'google',    display: 'Gemini 2.5 Pro',           note: 'Google',             ctx: 1_048_576, caps: ['vision', 'thinking'] },
-  { id: 'gemini-2.5-flash',           provider: 'google',    display: 'Gemini 2.5 Flash',         note: 'Google · Fast',      ctx: 1_048_576, caps: ['vision'] },
-  { id: 'gemini-2.0-flash',           provider: 'google',    display: 'Gemini 2.0 Flash',         note: 'Google · Fast',      ctx: 1_048_576, caps: ['vision'] },
-  // Mistral AI
-  { id: 'mistral-large-latest',       provider: 'mistral',   display: 'Mistral Large',            note: 'Mistral',            ctx: 131_072 },
-  { id: 'mistral-small-latest',       provider: 'mistral',   display: 'Mistral Small',            note: 'Mistral · Fast',     ctx: 131_072 },
-  { id: 'codestral-latest',           provider: 'mistral',   display: 'Codestral',                note: 'Mistral · Code',     ctx: 256_000, caps: ['code'] },
-  // xAI Grok
-  { id: 'grok-3',                     provider: 'xai',       display: 'Grok 3',                   note: 'xAI',                ctx: 131_072, caps: ['vision'] },
-  { id: 'grok-3-mini',                provider: 'xai',       display: 'Grok 3 Mini',              note: 'xAI · Fast',         ctx: 131_072 },
-  // Ollama (local)
-  { id: 'llama3.2',                   provider: 'ollama',    display: 'Llama 3.2',               note: 'Local',              ctx: 128_000 },
-  { id: 'llama3.1',                   provider: 'ollama',    display: 'Llama 3.1',               note: 'Local',              ctx: 128_000 },
-  { id: 'qwen2.5-coder',              provider: 'ollama',    display: 'Qwen 2.5 Coder',          note: 'Local · Code',       ctx: 128_000, caps: ['code'] },
-  { id: 'mistral',                    provider: 'ollama',    display: 'Mistral',                 note: 'Local',              ctx: 32_000  },
-  { id: 'codellama',                  provider: 'ollama',    display: 'CodeLlama',               note: 'Local · Code',       ctx: 16_000, caps: ['code'] },
-  { id: 'gemma2',                     provider: 'ollama',    display: 'Gemma 2',                 note: 'Local',              ctx: 8_000   },
-]
-// Token pricing per million tokens [input, output] in USD — used for cost estimation badges
-const MODEL_COSTS: Record<string, [number, number]> = {
-  'claude-opus-4-8':            [15,    75   ],
-  'claude-sonnet-4-6':          [3,     15   ],
-  'claude-haiku-4-5-20251001':  [0.8,   4    ],
-  'claude-3-5-sonnet-20241022': [3,     15   ],
-  'claude-3-5-haiku-20241022':  [0.8,   4    ],
-  'gpt-4.1':                    [2,     8    ],
-  'gpt-4.1-mini':               [0.4,   1.6  ],
-  'gpt-4.1-nano':               [0.1,   0.4  ],
-  'gpt-4o':                     [2.5,   10   ],
-  'gpt-4o-mini':                [0.15,  0.6  ],
-  'o3':                         [2,     8    ],
-  'o3-mini':                    [1.1,   4.4  ],
-  'o4-mini':                    [1.1,   4.4  ],
-  'deepseek-chat':              [0.27,  1.1  ],
-  'deepseek-reasoner':          [0.55,  2.19 ],
-  'llama-3.3-70b-versatile':    [0.59,  0.79 ],
-  'mixtral-8x7b-32768':         [0.24,  0.24 ],
-  'gemini-2.5-pro':             [1.25,  10   ],
-  'gemini-2.5-flash':           [0.15,  0.6  ],
-  'gemini-2.0-flash':           [0.1,   0.4  ],
-  'mistral-large-latest':       [2,     6    ],
-  'mistral-small-latest':       [0.1,   0.3  ],
-  'codestral-latest':           [0.3,   0.9  ],
-  'grok-3':                     [3,     15   ],
-  'grok-3-mini':                [0.3,   0.5  ],
-}
-
-function estimateCost(modelId: string, inputTokens: number, outputTokens: number): string | null {
-  const costs = MODEL_COSTS[modelId]
-  if (!costs) return null
-  const usd = (inputTokens / 1_000_000) * costs[0] + (outputTokens / 1_000_000) * costs[1]
-  if (usd < 0.001) return '<$0.001'
-  if (usd < 0.01) return `$${usd.toFixed(4)}`
-  return `$${usd.toFixed(3)}`
-}
-
-// ── Session-level token & cost statistics ─────────────────────────────────────
+// ── Session-level token statistics ────────────────────────────────────────────
 const sessionStats = computed(() => {
-  let totalIn = 0, totalOut = 0, totalCost = 0, modelsUsed = new Set<string>()
+  let totalIn = 0, totalOut = 0
+  const modelsUsed = new Set<string>()
   for (const thread of allThreads.value) {
     for (const m of thread.messages) {
       if (m.inputTokens != null)  totalIn  += m.inputTokens
       if (m.outputTokens != null) totalOut += m.outputTokens
       if (m.model) modelsUsed.add(m.model)
-      if (m.model && m.inputTokens != null && m.outputTokens != null) {
-        const costs = MODEL_COSTS[m.model]
-        if (costs) totalCost += (m.inputTokens / 1_000_000) * costs[0] + (m.outputTokens / 1_000_000) * costs[1]
-      }
     }
   }
-  return { totalIn, totalOut, totalCost, modelsUsed: Array.from(modelsUsed) }
+  return { totalIn, totalOut, modelsUsed: Array.from(modelsUsed) }
 })
-
-const ANTHROPIC_MODELS = MODEL_CATALOG.filter((m) => m.provider === 'anthropic').map((m) => m.id)
-const OLLAMA_MODELS     = MODEL_CATALOG.filter((m) => m.provider === 'ollama').map((m) => m.id)
-const OPENAI_MODELS     = MODEL_CATALOG.filter((m) => m.provider === 'openai').map((m) => m.id)
-const GROQ_MODELS       = MODEL_CATALOG.filter((m) => m.provider === 'groq').map((m) => m.id)
-const DEEPSEEK_MODELS   = MODEL_CATALOG.filter((m) => m.provider === 'deepseek').map((m) => m.id)
-const GOOGLE_MODELS     = MODEL_CATALOG.filter((m) => m.provider === 'google').map((m) => m.id)
-const MISTRAL_MODELS    = MODEL_CATALOG.filter((m) => m.provider === 'mistral').map((m) => m.id)
-const XAI_MODELS        = MODEL_CATALOG.filter((m) => m.provider === 'xai').map((m) => m.id)
-const currentModelOptions = computed(() => {
-  switch (settingsProvider.value) {
-    case 'anthropic': return ANTHROPIC_MODELS
-    case 'openai':    return OPENAI_MODELS
-    case 'groq':      return GROQ_MODELS
-    case 'deepseek':  return DEEPSEEK_MODELS
-    case 'google':    return GOOGLE_MODELS
-    case 'mistral':   return MISTRAL_MODELS
-    case 'xai':       return XAI_MODELS
-    case 'openai_compatible': return []
-    default:          return OLLAMA_MODELS
-  }
-})
-const modelIsCustom = computed(() => !MODEL_CATALOG.some((m) => m.id === settingsModel.value))
-const selectedModelKey = computed({
-  get: () => (modelIsCustom.value ? 'custom' : settingsModel.value),
-  set: (val: string) => { if (val !== 'custom') settingsModel.value = val },
-})
-
-// Atomically switch provider + model and persist to backend.
-// Saves the chosen model as a per-conversation override so switching threads
-// restores each thread's model independently (differentiator vs Cursor/VS Code).
-function switchModel(modelId: string): void {
-  const entry = MODEL_CATALOG.find((m) => m.id === modelId)
-  if (entry && entry.provider !== 'auto') settingsProvider.value = entry.provider
-  settingsModel.value = modelId
-  // Persist per-conversation model on the current thread
-  const ct = allThreads.value.find((t) => t.id === currentThreadId.value)
-  if (ct) ct.model = modelId
-  _pushSettingsToBackend()
-}
-
-// When provider switches, reset model to the first preset for that provider
-// (only if current model doesn't belong to the new provider)
-watch(settingsProvider, (provider) => {
-  const catalog = provider === 'openai_compatible' ? [] : MODEL_CATALOG.filter((m) => m.provider === provider).map((m) => m.id)
-  if (catalog.length && !catalog.includes(settingsModel.value)) {
-    settingsModel.value = catalog[0]
-  }
-  // Reset test status when switching providers
-  testConnStatus.value = {}
-  testConnError.value = {}
-})
-
-// Reset test status when API key changes so stale result isn't shown
-watch([settingsApiKey, settingsOpenAiKey, settingsGroqKey, settingsDeepSeekKey,
-       settingsGoogleKey, settingsMistralKey, settingsXaiKey,
-       settingsOaiCompatKey, settingsOaiCompatUrl, settingsOllamaUrl],
-  () => { testConnStatus.value = {}; testConnError.value = {} })
 
 // Long message fold — collapse AI messages with > 50 lines (UI-only, ephemeral)
 const expandedMsgIdxs = ref(new Set<number>())
@@ -1411,11 +1222,8 @@ function cycleResponseLength(): void {
 const inputCharCount = computed(() => inputText.value.length)
 const inputTokenEstimate = computed(() => Math.ceil(inputCharCount.value / 4))
 
-// Context window usage — use model-specific ctx from catalog, fall back to 100k
-const currentModelCtx = computed(() => {
-  const entry = MODEL_CATALOG.find((m) => m.id === settingsModel.value)
-  return entry?.ctx ?? 100_000
-})
+// Context window usage — the CLI engine runs Claude (200k context window)
+const currentModelCtx = computed(() => 200_000)
 const conversationTokenEstimate = computed(() =>
   messages.value.reduce((sum, m) => sum + Math.ceil(String(m.rawContent ?? m.content).length / 4), 0)
 )
@@ -1736,7 +1544,6 @@ const AT_OPTIONS_STATIC: AtOption[] = [
   { id: '@clipboard', label: '@clipboard — paste clipboard content', group: 'Other' },
   { id: '@notepad',  label: '@notepad — persistent workspace notepad (cross-session)', group: 'Other' },
   { id: '@memories',   label: '@memories — your saved persistent memory facts', group: 'Other' },
-  { id: '@model', label: '@model — switch model for next message (e.g. @model:gpt-4o)', group: 'Other' },
   { id: '@terminal',   label: '@terminal — recent terminal output / last command result (Cursor-style)', group: 'Other' },
   { id: '@hotkeys',    label: '@hotkeys — all keyboard shortcuts for the editor and AI chat', group: 'Other' },
   { id: '@snippets',      label: '@snippets — all saved code snippets (via /snippet:save)', group: 'Other' },
@@ -1830,7 +1637,6 @@ const SLASH_COMMANDS: SlashCommand[] = [
   { id: '/compact',     label: '/compact',     description: 'Summarize & compress history to free context', template: '' },
   { id: '/checkpoint',  label: '/checkpoint',  description: 'Save a conversation checkpoint',              template: '' },
   { id: '/checkpoints', label: '/checkpoints', description: 'View and restore checkpoints',                template: '' },
-  { id: '/model',    label: '/model',    description: 'Switch model for this conversation',            template: '' },
   { id: '/rename',   label: '/rename',   description: 'Rename this chat thread',                       template: '' },
   { id: '/pin',      label: '/pin',      description: 'Pin / unpin this chat thread',                  template: '' },
   { id: '/generate', label: '/generate', description: 'Generate a new file from description',          template: '' },
@@ -2632,14 +2438,6 @@ function renderDiff(diff: string): string {
     .join('')
 }
 
-// ── Compute unified diff from new_content ─────────────────────────────────────
-function makeDiff(filePath: string, newContent: string): string {
-  // We can't run diff in the renderer; produce a simple "whole file replacement" diff header.
-  const lines = newContent.split('\n')
-  const added = lines.map((l) => `+${l}`).join('\n')
-  return `--- a/${filePath}\n+++ b/${filePath}\n@@ -0,0 +1,${lines.length} @@\n${added}`
-}
-
 // ── Scroll to bottom ───────────────────────────────────────────────────────────
 async function scrollBottom(force = false): Promise<void> {
   await nextTick()
@@ -2690,16 +2488,23 @@ function buildFileTree(files: string[]): string {
 }
 
 // ── Tool call human-readable summary + icon ──────────────────────────────────
+// CLI-native tool names (Read/Write/Edit/Bash/…) plus the legacy API-engine
+// names still present in persisted thread history; unknown names fall back to
+// a generic icon and the raw name.
 function getToolIcon(name: string): string {
   switch (name) {
-    case 'read_file':      return '▤'
-    case 'search_files':   return '⌕'
-    case 'edit_file':      return '✎'
-    case 'run_command':    return '▶'
-    case 'list_directory': return '⊞'
-    case 'glob_files':     return '✦'
-    case 'write_file':     return '✍'
-    default:               return '⚙'
+    case 'Read':      case 'read_file':      return '▤'
+    case 'Grep':      case 'search_files':   return '⌕'
+    case 'Edit':      case 'MultiEdit':
+    case 'NotebookEdit':                     case 'edit_file':      return '✎'
+    case 'Bash':      case 'run_command':    return '▶'
+    case 'list_directory':                   return '⊞'
+    case 'Glob':      case 'glob_files':     return '✦'
+    case 'Write':     case 'write_file':     return '✍'
+    case 'Task':                             return '◈'
+    case 'WebFetch':  case 'WebSearch':      return '⌾'
+    case 'TodoWrite':                        return '☰'
+    default:                                 return '⚙'
   }
 }
 
@@ -2708,13 +2513,20 @@ function getToolSummary(name: string, input: unknown): string {
   const inp = input as Record<string, unknown>
   const str = (v: unknown) => (typeof v === 'string' ? v : '')
   switch (name) {
-    case 'read_file':       return `Reading: ${str(inp.file_path)}`
+    case 'Read':            case 'read_file':      return `Reading: ${str(inp.file_path)}`
     case 'search_files':    return `Searching: "${str(inp.query)}"${inp.file_pattern ? ` in ${inp.file_pattern}` : ''}`
-    case 'edit_file':       return `Editing: ${str(inp.file_path)}`
+    case 'Grep':            return `Searching: "${str(inp.pattern)}"${inp.path ? ` in ${inp.path}` : ''}`
+    case 'Edit':            case 'MultiEdit':      case 'edit_file': return `Editing: ${str(inp.file_path)}`
+    case 'Bash':            return `Running: ${str(inp.command) || str(inp.description)}`
     case 'run_command':     return `Running: ${str(inp.command)}`
     case 'list_directory':  return `Listing: ${str(inp.path) || '.'}`
-    case 'glob_files':      return `Glob: ${str(inp.pattern)}`
-    case 'write_file':      return `Write: ${str(inp.file_path)}`
+    case 'Glob':            case 'glob_files':     return `Glob: ${str(inp.pattern)}`
+    case 'Write':           case 'write_file':     return `Write: ${str(inp.file_path)}`
+    case 'Task':            return `Subagent: ${str(inp.description) || str(inp.subagent_type)}`
+    case 'WebFetch':        return `Fetching: ${str(inp.url)}`
+    case 'WebSearch':       return `Searching web: "${str(inp.query)}"`
+    case 'TodoWrite':       return 'Updating todo list'
+    case 'NotebookEdit':    return `Editing notebook: ${str(inp.notebook_path)}`
     default:                return name
   }
 }
@@ -2728,42 +2540,9 @@ function showToast(msg: string): void {
 
 // ── Settings fetch/save ────────────────────────────────────────────────────────
 function applyBackendSettings(payload: unknown): void {
-  const p = payload as {
-    provider?: string; anthropic_api_key?: string; model?: string
-    ollama_base_url?: string; system_prompt?: string; max_tokens?: number; temperature?: number
-    openai_api_key?: string; groq_api_key?: string; deepseek_api_key?: string
-    google_api_key?: string; mistral_api_key?: string; xai_api_key?: string
-    openai_compatible_base_url?: string; openai_compatible_api_key?: string; openai_compatible_model?: string
-    reasoning_effort?: 'low' | 'medium' | 'high' | null
-  }
-  const validProviders: ProviderName[] = ['anthropic', 'ollama', 'openai', 'groq', 'deepseek', 'google', 'mistral', 'xai', 'openai_compatible']
-  if (p.provider && validProviders.includes(p.provider as ProviderName)) settingsProvider.value = p.provider as ProviderName
-  if (p.anthropic_api_key) settingsApiKey.value = p.anthropic_api_key
-  if (p.openai_api_key) settingsOpenAiKey.value = p.openai_api_key
-  if (p.groq_api_key) settingsGroqKey.value = p.groq_api_key
-  if (p.deepseek_api_key) settingsDeepSeekKey.value = p.deepseek_api_key
-  if (p.google_api_key) settingsGoogleKey.value = p.google_api_key
-  if (p.mistral_api_key) settingsMistralKey.value = p.mistral_api_key
-  if (p.xai_api_key) settingsXaiKey.value = p.xai_api_key
-  if (p.openai_compatible_base_url) settingsOaiCompatUrl.value = p.openai_compatible_base_url
-  if (p.openai_compatible_api_key) settingsOaiCompatKey.value = p.openai_compatible_api_key
-  if (p.openai_compatible_model !== undefined) settingsOaiCompatModel.value = p.openai_compatible_model
-  if (p.model) settingsModel.value = p.model
-  if (p.ollama_base_url) settingsOllamaUrl.value = p.ollama_base_url
+  const p = payload as { system_prompt?: string }
   // Use !== undefined so clearing system_prompt to "" is properly reflected in UI
   if (p.system_prompt !== undefined) settingsSystemPrompt.value = p.system_prompt
-  if (p.max_tokens) settingsMaxTokens.value = p.max_tokens
-  if (p.temperature !== undefined) settingsTemperature.value = p.temperature
-  if (p.reasoning_effort !== undefined) settingsReasoningEffort.value = p.reasoning_effort ?? null
-  // Re-apply per-conversation model override after backend settings load
-  const ct = allThreads.value.find((t) => t.id === currentThreadId.value)
-  if (ct?.model) {
-    const entry = MODEL_CATALOG.find((m) => m.id === ct.model)
-    if (entry) {
-      if (entry.provider !== 'auto') settingsProvider.value = entry.provider
-      settingsModel.value = ct.model
-    }
-  }
 }
 
 function fetchSettings(): void {
@@ -2772,134 +2551,22 @@ function fetchSettings(): void {
     .catch(() => {/* ignore */})
 }
 
-// One-time migration of the legacy plaintext localStorage API-key mirrors into
-// the backend ai_chat_settings.json (0o600). The localStorage copies are only
-// removed after the backend acks the write; on failure they stay in place and
-// the next launch retries (idempotent — re-uploading identical values is safe).
-const LEGACY_KEY_MIRRORS: ReadonlyArray<readonly [string, string]> = [
-  ['ai-chat-openai-key', 'openai_api_key'],
-  ['ai-chat-groq-key', 'groq_api_key'],
-  ['ai-chat-deepseek-key', 'deepseek_api_key'],
-  ['ai-chat-google-key', 'google_api_key'],
-  ['ai-chat-mistral-key', 'mistral_api_key'],
-  ['ai-chat-xai-key', 'xai_api_key'],
-  ['ai-chat-oai-compat-url', 'openai_compatible_base_url'],
-  ['ai-chat-oai-compat-key', 'openai_compatible_api_key'],
-  ['ai-chat-oai-compat-model', 'openai_compatible_model'],
-]
-
-async function migrateLegacyKeyMirrors(): Promise<void> {
-  const updates: Record<string, string> = {}
-  const present: string[] = []
-  for (const [lsKey, field] of LEGACY_KEY_MIRRORS) {
-    const v = localStorage.getItem(lsKey)
-    if (v === null) continue
-    present.push(lsKey)
-    // Empty mirrors carry no information — remove them without pushing so a
-    // stale blank can never clobber a real key already stored backend-side.
-    if (v !== '') updates[field] = v
-  }
-  if (present.length === 0) return
-  try {
-    if (Object.keys(updates).length > 0) {
-      const r = await props.backend.send('ai.chat.settings.set', updates)
-      if (!r?.ok) return
-    }
-    for (const k of present) localStorage.removeItem(k)
-  } catch { /* backend unreachable — keep mirrors, retry next launch */ }
-}
-
-// Resolve "auto" model to a real backend model+provider pair
-function resolveModel(): { provider: string; model: string } {
-  if (settingsProvider.value === 'openai_compatible') {
-    return { provider: 'openai_compatible', model: settingsOaiCompatModel.value }
-  }
-  if (settingsModel.value !== 'auto') {
-    return { provider: settingsProvider.value, model: settingsModel.value }
-  }
-  // Auto: prefer Anthropic if key present, otherwise Ollama
-  if ((settingsApiKey.value ?? '').trim().length > 0) return { provider: 'anthropic', model: 'claude-sonnet-4-6' }
-  if ((settingsOpenAiKey.value ?? '').trim().length > 0) return { provider: 'openai', model: OPENAI_MODELS[0] ?? 'gpt-4o' }
-  if ((settingsGroqKey.value ?? '').trim().length > 0) return { provider: 'groq', model: GROQ_MODELS[0] ?? 'llama-3.3-70b-versatile' }
-  if ((settingsDeepSeekKey.value ?? '').trim().length > 0) return { provider: 'deepseek', model: DEEPSEEK_MODELS[0] ?? 'deepseek-chat' }
-  if ((settingsGoogleKey.value ?? '').trim().length > 0) return { provider: 'google', model: GOOGLE_MODELS[0] ?? 'gemini-2.5-flash' }
-  if ((settingsMistralKey.value ?? '').trim().length > 0) return { provider: 'mistral', model: MISTRAL_MODELS[0] ?? 'mistral-large-latest' }
-  if ((settingsXaiKey.value ?? '').trim().length > 0) return { provider: 'xai', model: XAI_MODELS[0] ?? 'grok-3-mini' }
-  return { provider: 'ollama', model: OLLAMA_MODELS[0] ?? 'llama3.2' }
-}
-
 // Send current settings to backend without UI side-effects (toast, panel close).
-// Called by switchModel() and switchThread() to apply per-conversation model silently.
+// The CLI engine only persists the system prompt (thread override wins).
 function _pushSettingsToBackend(): void {
-  const { provider, model } = resolveModel()
-  const payload: Record<string, unknown> = {
-    provider,
-    anthropic_api_key: settingsApiKey.value,
-    openai_api_key: settingsOpenAiKey.value,
-    groq_api_key: settingsGroqKey.value,
-    deepseek_api_key: settingsDeepSeekKey.value,
-    google_api_key: settingsGoogleKey.value,
-    mistral_api_key: settingsMistralKey.value,
-    xai_api_key: settingsXaiKey.value,
-    openai_compatible_base_url: settingsOaiCompatUrl.value,
-    openai_compatible_api_key: settingsOaiCompatKey.value,
-    openai_compatible_model: settingsOaiCompatModel.value,
-    model,
-    ollama_base_url: settingsOllamaUrl.value,
+  props.backend.send('ai.chat.settings.set', {
     system_prompt: allThreads.value.find((t) => t.id === currentThreadId.value)?.systemPrompt || settingsSystemPrompt.value,
-    max_tokens: Math.max(256, Math.min(16000, Number(settingsMaxTokens.value) || 4096)),
-    max_agent_iterations: Math.max(1, Math.min(20, settingsMaxAgentIter.value)),
-  }
-  if (settingsTemperature.value !== null && !reasoningModelSelected.value) {
-    payload.temperature = Math.max(0, Math.min(1, settingsTemperature.value))
-  }
-  if (settingsThinkingBudget.value !== null && thinkingSupported.value) {
-    payload.thinking_budget_tokens = Math.max(1024, Math.min(32000, settingsThinkingBudget.value))
-  }
-  if (settingsReasoningEffort.value !== null && reasoningModelSelected.value) {
-    payload.reasoning_effort = settingsReasoningEffort.value
-  }
-  props.backend.send('ai.chat.settings.set', payload).catch(() => {/* ignore */})
+  }).catch(() => {/* ignore */})
 }
 
 function saveSettings(): void {
   _pushSettingsToBackend()
   settingsSet('ai-chat-auto-accept', settingsAutoAccept.value ? 'true' : 'false')
-  settingsSet('ai-chat-max-agent-iter', String(settingsMaxAgentIter.value))
   settingsSet('ai-chat-send-mode', settingsSendMode.value)
   settingsSet('ai-chat-user-rules', settingsUserRules.value)
   settingsSet('ai-chat-custom-docs', JSON.stringify(customDocs.value))
   showSettings.value = false
   showToast('Settings saved')
-}
-
-async function testConnection(provider: string): Promise<void> {
-  testConnStatus.value = { ...testConnStatus.value, [provider]: 'testing' }
-  testConnError.value = { ...testConnError.value, [provider]: '' }
-  try {
-    const keyMap: Record<string, string> = {
-      anthropic: settingsApiKey.value,
-      openai: settingsOpenAiKey.value,
-      groq: settingsGroqKey.value,
-      deepseek: settingsDeepSeekKey.value,
-      google: settingsGoogleKey.value,
-      mistral: settingsMistralKey.value,
-      xai: settingsXaiKey.value,
-      openai_compatible: settingsOaiCompatKey.value,
-    }
-    const res = await props.backend.send<{ ok: boolean; error?: string }>('ai.chat.test_connection', {
-      provider,
-      api_key: keyMap[provider] ?? '',
-      base_url: settingsOaiCompatUrl.value,
-      ollama_base_url: settingsOllamaUrl.value,
-    }, 15_000)
-    const ok = res.payload?.ok === true
-    testConnStatus.value = { ...testConnStatus.value, [provider]: ok ? 'ok' : 'fail' }
-    if (!ok) testConnError.value = { ...testConnError.value, [provider]: res.payload?.error ?? 'Connection failed' }
-  } catch (e) {
-    testConnStatus.value = { ...testConnStatus.value, [provider]: 'fail' }
-    testConnError.value = { ...testConnError.value, [provider]: String(e) }
-  }
 }
 
 // ── Send message ───────────────────────────────────────────────────────────────
@@ -2936,7 +2603,7 @@ async function sendMessage(): Promise<void> {
 
   // Delegate other slash-only commands to selectSlashCommand so typing them directly works
   const _delegateSlash = [
-    '/clear', '/compact', '/diff', '/model', '/pin', '/summarize',
+    '/clear', '/compact', '/diff', '/pin', '/summarize',
     '/save-summary', '/spell', '/git', '/pr', '/changelog', '/prompts', '/import', '/generate', '/commit',
     '/run', '/search', '/search:regex', '/translate', '/rename', '/save-prompt', '/scaffold',
     '/review:staged', '/review:branch', '/fix:lint', '/coverage',
@@ -3468,8 +3135,16 @@ async function sendMessage(): Promise<void> {
   nextTick(() => { if (textareaEl.value) _autoResizeTextarea(textareaEl.value) })
   sending.value = true
 
+  // Flush dirty editor buffers to disk first so the CLI engine (which reads
+  // files from disk) never sees stale content. Best-effort: never block send.
+  if (props.saveDirtyFiles) {
+    try { await props.saveDirtyFiles() }
+    catch (e) { console.warn('[ai-chat] save-dirty-files before send failed:', e) }
+  }
+
   const sessionId = crypto.randomUUID()
   currentSessionId.value = sessionId
+  cliSidEligibleSession = sessionId
 
   // Build messages history for backend — use rawContent so AI sees actual @chip content
   const history = messages.value.slice(0, -1).map((m) => ({
@@ -3479,7 +3154,7 @@ async function sendMessage(): Promise<void> {
   history.push({ role: 'user', content: sentContent })
 
   // Push placeholder assistant message for streaming
-  messages.value.push({ role: 'assistant', content: '', streaming: true, thinking: true, cards: [], model: settingsModel.value, timestamp: Date.now(), sendMs: Date.now() })
+  messages.value.push({ role: 'assistant', content: '', streaming: true, thinking: true, cards: [], timestamp: Date.now(), sendMs: Date.now() })
   autoScroll.value = true
   await scrollBottom(true)
 
@@ -3558,10 +3233,12 @@ async function sendMessage(): Promise<void> {
       if (pinParts.length) globalPinsSuffix = `\n\n${pinParts.join('\n\n')}`
     }
     settingsSet('ai-chat-smart-context', settingsSmartContext.value ? 'true' : 'false')
+    const cliSid = allThreads.value.find((t) => t.id === currentThreadId.value)?.cliSessionId
     await props.backend.send('ai.chat.start', {
       session_id: sessionId,
       messages: history,
       workspace_path: props.workspacePath,
+      ...(cliSid ? { cli_session_id: cliSid } : {}),
       ...(rulesPrefix ? { system_prefix: rulesPrefix } : {}),
       ...(lengthHint || notesSuffix || pinnedNotepadsSuffix || memoriesSuffix || globalPinsSuffix || smartCtxSuffix || editSetSuffix ? { system_suffix: (lengthHint ?? '') + notesSuffix + pinnedNotepadsSuffix + memoriesSuffix + globalPinsSuffix + smartCtxSuffix + editSetSuffix } : {}),
     })
@@ -3607,10 +3284,14 @@ function clearConversation(): void {
   if (sending.value) stopStreaming()
   _navAssistIdx = -1
   messages.value = []
-  expandedMsgIdxs.value = new Set(); expandedDiffs.value = new Set()
+  expandedMsgIdxs.value = new Set()
   // Also reset the title so it auto-updates on next message
   const idx = allThreads.value.findIndex((t) => t.id === currentThreadId.value)
-  if (idx !== -1) allThreads.value[idx].title = 'New chat'
+  if (idx !== -1) {
+    allThreads.value[idx].title = 'New chat'
+    // A cleared conversation must not resume the old CLI session
+    allThreads.value[idx].cliSessionId = undefined
+  }
   saveCurrentThread()
   showToast('Chat cleared')
 }
@@ -3624,6 +3305,9 @@ function editMessage(idx: number): void {
   inputText.value = msg.content
   // Remove this message and everything after it
   messages.value.splice(idx)
+  // History diverged from the CLI transcript — next turn must rebuild fresh
+  const ct = allThreads.value.find((t) => t.id === currentThreadId.value)
+  if (ct) ct.cliSessionId = undefined
   saveCurrentThread()
   nextTick(() => textareaEl.value?.focus())
 }
@@ -3637,6 +3321,9 @@ function deleteMessagePair(idx: number): void {
   const count = next?.role === 'assistant' ? 2 : 1
   if (!window.confirm(`Delete this ${count === 2 ? 'message exchange' : 'message'}?`)) return
   messages.value.splice(idx, count)
+  // History diverged from the CLI transcript — next turn must rebuild fresh
+  const ct = allThreads.value.find((t) => t.id === currentThreadId.value)
+  if (ct) ct.cliSessionId = undefined
   saveCurrentThread()
 }
 
@@ -3849,6 +3536,9 @@ function ctxMenuEdit(): void {
 function ctxMenuDelete(): void {
   if (!msgCtxMenu.value) return
   messages.value.splice(msgCtxMenu.value.mi, 1)
+  // History diverged from the CLI transcript — next turn must rebuild fresh
+  const ct = allThreads.value.find((t) => t.id === currentThreadId.value)
+  if (ct) ct.cliSessionId = undefined
   saveCurrentThread()
   msgCtxMenu.value = null
 }
@@ -3904,6 +3594,7 @@ function ctxMenuPinMsg(): void {
 }
 
 function ctxMenuForkThread(): void {
+  if (sending.value) return
   if (!msgCtxMenu.value) return
   const mi = msgCtxMenu.value.mi
   msgCtxMenu.value = null
@@ -3966,40 +3657,12 @@ function undoLastSend(): void {
   // Restore the user's message text into the input box
   inputText.value = userMsg.content
   messages.value = messages.value.slice(0, lastUserIdx)
+  // History diverged from the CLI transcript — next turn must rebuild fresh
+  const ct = allThreads.value.find((t) => t.id === currentThreadId.value)
+  if (ct) ct.cliSessionId = undefined
   saveCurrentThread()
   nextTick(() => textareaEl.value?.focus())
   showToast('Message removed — edit and resend')
-}
-
-// ── Regenerate with a different model ─────────────────────────────────────────
-const regenModelOpen = ref(false)
-
-function regenWithModel(modelId: string): void {
-  regenModelOpen.value = false
-  const prevModel    = settingsModel.value
-  const prevProvider = settingsProvider.value
-  switchModel(modelId)
-  void regenerate().finally(() => {
-    // Restore previous provider + model after the stream completes or fails
-    if (settingsModel.value === modelId) {
-      settingsProvider.value = prevProvider
-      settingsModel.value = prevModel
-      saveSettings()
-    }
-  })
-}
-
-function regenWithHigherTemp(): void {
-  regenModelOpen.value = false
-  if (reasoningModelSelected.value) { showToast('Temperature not supported for reasoning models'); return }
-  const prev = settingsTemperature.value
-  const boosted = Math.min(1.0, (prev ?? 0.7) + 0.3)
-  settingsTemperature.value = boosted
-  _pushSettingsToBackend()
-  void regenerate().finally(() => {
-    settingsTemperature.value = prev
-    _pushSettingsToBackend()
-  })
 }
 
 // ── Fix Problems shortcut ──────────────────────────────────────────────────────
@@ -4127,11 +3790,24 @@ async function regenerate(): Promise<void> {
   messages.value = messages.value.slice(0, lastUserIdx + 1)
   sending.value = true
 
+  // Flush dirty editor buffers to disk first (best-effort, same as sendMessage)
+  if (props.saveDirtyFiles) {
+    try { await props.saveDirtyFiles() }
+    catch (e) { console.warn('[ai-chat] save-dirty-files before regenerate failed:', e) }
+  }
+
   const sessionId = crypto.randomUUID()
   currentSessionId.value = sessionId
+  cliSidEligibleSession = sessionId
+
+  // Regenerate discards the last answer, but the CLI transcript still has it —
+  // resuming would poison the session. Drop the sid so the backend rebuilds a
+  // fresh session from the flattened history; done's new sid restores resume.
+  const regenThread = allThreads.value.find((t) => t.id === currentThreadId.value)
+  if (regenThread) regenThread.cliSessionId = undefined
 
   const history = messages.value.map((m) => ({ role: m.role, content: m.rawContent ?? m.content }))
-  messages.value.push({ role: 'assistant', content: '', streaming: true, thinking: true, cards: [], model: settingsModel.value, timestamp: Date.now(), sendMs: Date.now() })
+  messages.value.push({ role: 'assistant', content: '', streaming: true, thinking: true, cards: [], timestamp: Date.now(), sendMs: Date.now() })
   autoScroll.value = true
   await scrollBottom(true)
 
@@ -4195,77 +3871,8 @@ const thinkingLabel = computed(() => {
   // Multimodal: rawContent is an array with image blocks
   if (Array.isArray(lastUser?.rawContent) && (lastUser.rawContent as unknown[]).some((b) => (b as { type?: string }).type === 'image')) return 'Analyzing image…'
   if (userText.includes('[Context:')) return 'Processing context…'
-  // Show model name to make it feel responsive
-  const modelEntry = MODEL_CATALOG.find((m) => m.id === settingsModel.value)
-  const modelShort = modelEntry?.display.replace(/^Claude /, '').replace(/ \d+\.\d+$/, '') ?? settingsModel.value
-  return `${modelShort} thinking…`
+  return 'Thinking…'
 })
-
-// ── Diff expand/collapse ──────────────────────────────────────────────────────
-const expandedDiffs = ref(new Set<string>())
-function isDiffExpanded(toolId: string): boolean { return expandedDiffs.value.has(toolId) }
-function toggleDiff(toolId: string): void {
-  if (expandedDiffs.value.has(toolId)) expandedDiffs.value.delete(toolId)
-  else expandedDiffs.value.add(toolId)
-  expandedDiffs.value = new Set(expandedDiffs.value)
-}
-
-const pendingEditsInLastMsg = computed<EditProposalCard[]>(() => {
-  const idx = lastAssistantIdx.value
-  if (idx === -1) return []
-  const msg = messages.value[idx]
-  return (msg.cards ?? []).filter((c): c is EditProposalCard =>
-    c.kind === 'edit_proposal' && !c.accepted && !c.discarded,
-  )
-})
-
-// ── Accept edit ────────────────────────────────────────────────────────────────
-async function acceptEdit(card: EditProposalCard): Promise<void> {
-  try {
-    await props.backend.send('ai.chat.accept_edit', {
-      workspace_path: props.workspacePath,
-      file_path: card.file_path,
-      new_content: card.new_content,
-    })
-    card.accepted = true
-    showToast(`Applied: ${card.file_path}`)
-  } catch {
-    showToast('Apply failed')
-  }
-}
-
-function discardEdit(card: EditProposalCard): void {
-  card.discarded = true
-}
-
-async function acceptAllEdits(): Promise<void> {
-  for (const card of pendingEditsInLastMsg.value) {
-    await acceptEdit(card)
-  }
-}
-
-function discardAllEdits(): void {
-  for (const card of pendingEditsInLastMsg.value) {
-    card.discarded = true
-  }
-}
-
-// ── Command proposal ──────────────────────────────────────────────────────────
-async function approveCommand(card: CommandProposalCard): Promise<void> {
-  card.status = 'approved'
-  await props.backend.send('ai.chat.approve_command', {
-    session_id: currentSessionId.value ?? '',
-    tool_id: card.tool_id,
-  }).catch(() => { card.status = 'pending' })
-}
-
-async function rejectCommand(card: CommandProposalCard): Promise<void> {
-  card.status = 'rejected'
-  await props.backend.send('ai.chat.reject_command', {
-    session_id: currentSessionId.value ?? '',
-    tool_id: card.tool_id,
-  }).catch(() => { card.status = 'pending' })
-}
 
 // ── Global keyboard shortcuts ─────────────────────────────────────────────────
 // Note: Cmd/Ctrl+L (focus chat input) is deliberately NOT handled here — the
@@ -4406,7 +4013,6 @@ function onMessagesMouseover(e: MouseEvent): void {
 
 let unsubToolCall: (() => void) | null = null
 let unsubToolResult: (() => void) | null = null
-let unsubCommandProposal: (() => void) | null = null
 let unsubDone: (() => void) | null = null
 let unsubError: (() => void) | null = null
 
@@ -4467,43 +4073,8 @@ function setupListeners(): void {
           const resultStr = typeof p.result === 'string'
             ? p.result
             : JSON.stringify(p.result)
-          // Check if this is an edit_file result (backend returns JSON string)
-          let resultObj: Record<string, unknown> | null = null
-          if (card.tool_name === 'edit_file') {
-            try {
-              const parsed = typeof p.result === 'string' ? JSON.parse(p.result) : p.result
-              if (parsed && typeof parsed === 'object') resultObj = parsed as Record<string, unknown>
-            } catch { /* not JSON, treat as plain result */ }
-          }
-          if (
-            resultObj !== null &&
-            typeof resultObj.file_path === 'string' &&
-            typeof resultObj.new_content === 'string'
-          ) {
-            // Replace tool_call card with edit_proposal card
-            const idx = last.cards.indexOf(card)
-            // Prefer the real unified diff from the backend (difflib); fall back to synthetic
-            const diffStr = typeof resultObj.diff === 'string' && resultObj.diff
-              ? resultObj.diff
-              : makeDiff(resultObj.file_path, resultObj.new_content)
-            const editCard: EditProposalCard = {
-              kind: 'edit_proposal',
-              tool_id: p.tool_id,
-              file_path: resultObj.file_path,
-              new_content: resultObj.new_content,
-              diff: diffStr,
-              accepted: false,
-              discarded: false,
-            }
-            last.cards.splice(idx, 1, editCard)
-            // Auto-accept mode: apply edit immediately without user confirmation
-            if (settingsAutoAccept.value) {
-              void acceptEdit(editCard)
-            }
-          } else {
-            card.result = resultStr.slice(0, 200) + (resultStr.length > 200 ? '…' : '')
-            card.collapsed = true
-          }
+          card.result = resultStr.slice(0, 200) + (resultStr.length > 200 ? '…' : '')
+          card.collapsed = true
           void scrollBottom()
         }
         break
@@ -4512,8 +4083,14 @@ function setupListeners(): void {
   })
 
   unsubDone = props.backend.on('ai.chat.done', (payload) => {
-    const p = payload as { session_id: string; model?: string; input_tokens?: number; output_tokens?: number }
+    const p = payload as { session_id: string; model?: string; input_tokens?: number; output_tokens?: number; cli_session_id?: string }
     if (p.session_id !== currentSessionId.value) return
+    // Persist the CLI's own session id on the thread so the next turn can
+    // --resume it (real conversation turns only; see cliSidEligibleSession).
+    if (p.cli_session_id && p.session_id === cliSidEligibleSession) {
+      const ct = allThreads.value.find((t) => t.id === currentThreadId.value)
+      if (ct) { ct.cliSessionId = p.cli_session_id; saveCurrentThread() }
+    }
     const last = messages.value[messages.value.length - 1]
     if (last?.streaming) {
       last.streaming = false; last.thinking = false
@@ -4604,6 +4181,9 @@ function setupListeners(): void {
       if (placeholder) placeholder.content = '[History compacted]'
       messages.value.push(...kept)
       pendingCompactAllMessages.value = []
+      // Compacted history no longer matches the CLI transcript — start fresh
+      const compactThread = allThreads.value.find((t) => t.id === currentThreadId.value)
+      if (compactThread) compactThread.cliSessionId = undefined
       saveCurrentThread()
       showToast(`History compacted — kept last ${kept.length} messages`)
     } else {
@@ -4633,27 +4213,6 @@ function setupListeners(): void {
     void scrollBottom()
   })
 
-  unsubCommandProposal = props.backend.on('ai.chat.command_proposal', (payload) => {
-    const p = payload as { session_id: string; tool_id: string; command: string; cwd: string }
-    if (p.session_id !== currentSessionId.value) return
-    const last = messages.value[messages.value.length - 1]
-    if (last?.role === 'assistant') {
-      if (!last.cards) last.cards = []
-      // Replace the matching tool_call card (if present) with a command_proposal card
-      const existingIdx = last.cards.findIndex((c) => c.tool_id === p.tool_id)
-      const card: CommandProposalCard = {
-        kind: 'command_proposal',
-        tool_id: p.tool_id,
-        command: p.command,
-        cwd: p.cwd,
-        status: 'pending',
-      }
-      if (existingIdx !== -1) last.cards.splice(existingIdx, 1, card)
-      else last.cards.push(card)
-      void scrollBottom()
-    }
-  })
-
 }
 
 function teardownListeners(): void {
@@ -4662,7 +4221,6 @@ function teardownListeners(): void {
   unsubChunk?.()
   unsubToolCall?.()
   unsubToolResult?.()
-  unsubCommandProposal?.()
   unsubDone?.()
   unsubError?.()
 }
@@ -4868,7 +4426,7 @@ function relativeTime(ts: number): string {
 
 onMounted(() => {
   setupListeners()
-  void migrateLegacyKeyMirrors().then(fetchSettings)
+  fetchSettings()
   void loadThreads()
   void detectWorkspaceRules()
   // Render any mermaid diagrams that were persisted in thread history
@@ -5110,24 +4668,6 @@ function onTextareaInput(e: Event): void {
     return
   }
 
-  // @model:id — temporarily switch model for next message
-  if (/^model:?$/i.test(fragment)) {
-    const topModels = MODEL_CATALOG.filter((m) => m.id !== 'auto' && m.provider !== 'ollama').slice(0, 6)
-    atOptions.value = topModels.map((m) => ({ id: `@model:${m.id}`, label: `@model:${m.id} — ${m.display} (${m.note})` }))
-    return
-  }
-  const isModelQuery = /^model:.+/i.test(fragment)
-  if (isModelQuery) {
-    const modelFrag = fragment.slice('model:'.length).toLowerCase()
-    const matched = MODEL_CATALOG.filter(
-      (m) => m.id.toLowerCase().includes(modelFrag) || m.display.toLowerCase().includes(modelFrag)
-    ).slice(0, 6)
-    atOptions.value = matched.length
-      ? matched.map((m) => ({ id: `@model:${m.id}`, label: `@model:${m.id} — ${m.display}` }))
-      : [{ id: `@model:${fragment.slice('model:'.length)}`, label: `@model:${fragment.slice('model:'.length)} — use this model` }]
-    return
-  }
-
   // @glob:pattern — match files by glob pattern (e.g. @glob:src/**/*.ts)
   // @notepad:name — reference a specific named notepad
   if (/^notepad:?$/i.test(fragment)) {
@@ -5270,6 +4810,8 @@ async function selectSlashCommand(cmd: SlashCommand): Promise<void> {
     sending.value = true
     const sessionId = crypto.randomUUID()
     currentSessionId.value = sessionId
+    // Summary run — its CLI session must not become the thread's resume id
+    cliSidEligibleSession = null
     try {
       await props.backend.send('ai.chat.start', {
         session_id: sessionId,
@@ -5373,13 +4915,6 @@ async function selectSlashCommand(cmd: SlashCommand): Promise<void> {
       await nextTick()
       textareaEl.value?.focus()
     })()
-    return
-  }
-
-  if (cmd.id === '/model') {
-    inputText.value = ''
-    showModelPicker.value = true
-    nextTick(() => textareaEl.value?.focus())
     return
   }
 
@@ -5516,6 +5051,8 @@ ${historyText}`
     // Ask AI to generate the summary, then append to notepad on done
     const sessionId = crypto.randomUUID()
     currentSessionId.value = sessionId
+    // Summary run — its CLI session must not become the thread's resume id
+    cliSidEligibleSession = null
     sending.value = true
     if (streamTickInterval !== null) { clearInterval(streamTickInterval); streamTickInterval = null }
     streamTickInterval = window.setInterval(() => { streamNow.value = Date.now() }, 500)
@@ -6271,12 +5808,10 @@ Requirements:
     inputText.value = ''
     const stats = sessionStats.value
     const models = stats.modelsUsed.length ? stats.modelsUsed.join(', ') : 'unknown'
-    const costStr = stats.totalCost > 0 ? `~$${stats.totalCost.toFixed(4)}` : 'free / no pricing data'
     const chip = `// Session Statistics:
 // Total input tokens:  ${stats.totalIn.toLocaleString()}
 // Total output tokens: ${stats.totalOut.toLocaleString()}
 // Total tokens:        ${(stats.totalIn + stats.totalOut).toLocaleString()}
-// Estimated cost:      ${costStr}
 // Models used:         ${models}
 // Threads:             ${allThreads.value.length}`
     contextChips.value = contextChips.value.filter((c) => c.label !== '@session:stats')
@@ -6750,6 +6285,7 @@ ${log || '(no commits)'}`
 
   // /clone:thread — fork current thread into a new one
   if (cmd.id === '/clone:thread') {
+    if (sending.value) return
     inputText.value = ''
     const currentId = currentThreadId.value
     const source = allThreads.value.find((t) => t.id === currentId)
@@ -7384,7 +6920,7 @@ ${log || '(no commits)'}`
       `**Messages:** ${msgs.length} total (${userCount} user, ${assistantCount} AI)`,
       `**Estimated tokens:** ~${estimatedTokens.toLocaleString()} (${Math.round(estimatedTokens / currentModelCtx.value * 100)}% of context)`,
       `**Duration:** ${durationMin > 0 ? `${durationMin} min` : 'less than a minute'}`,
-      `**Model:** ${thread.model ?? settingsModel}`,
+      `**Model:** ${thread.model ?? 'claude (CLI)'}`,
       `**Context chips:** ${contextChips.value.length}`,
       thread.pinned ? `**Pinned:** yes` : '',
       thread.archived ? `**Archived:** yes` : '',
@@ -8635,34 +8171,6 @@ ${out}`
     } catch {
       chipContent = `// @folder:${folderPath}: unavailable`
     }
-  } else if (option.id === '@model' || option.id.startsWith('@model:')) {
-    // @model — switch model for the current conversation (Cursor-style inline model switch)
-    if (option.id === '@model') {
-      // Rewrite to @model: so user can type model name
-      const newVal = val.slice(0, atIdx) + '@model:' + val.slice(cur)
-      inputText.value = newVal
-      showAtMenu.value = false
-      await nextTick()
-      el.focus()
-      const pos = atIdx + '@model:'.length
-      el.setSelectionRange(pos, pos)
-      return
-    }
-    const modelId = option.id.slice('@model:'.length).trim()
-    const entry = MODEL_CATALOG.find((m) => m.id === modelId)
-    if (entry) {
-      settingsProvider.value = entry.provider === 'auto' ? settingsProvider.value : entry.provider
-      settingsModel.value = entry.id
-      showToast(`Model switched to ${entry.display}`)
-    } else {
-      showToast(`@model: unknown model "${modelId}"`)
-    }
-    // Remove the @model:xxx from input (don't add a chip)
-    inputText.value = val.slice(0, atIdx) + val.slice(cur)
-    showAtMenu.value = false
-    await nextTick()
-    el.focus()
-    return
   } else if (option.id === '@tabs') {
     chipLabel = '@tabs'
     const tabPaths = props.getOpenFiles?.() ?? []
@@ -10377,14 +9885,6 @@ function onTextareaKeydown(e: KeyboardEvent): void {
       void regenerate()
     }
   }
-  // Cmd+/ — cycle through models (Cursor-style shortcut)
-  if ((e.ctrlKey || e.metaKey) && e.key === '/') {
-    e.preventDefault()
-    const cycleable = MODEL_CATALOG.filter((m) => m.provider !== 'auto')
-    const idx = cycleable.findIndex((m) => m.id === settingsModel.value)
-    const next = cycleable[(idx + 1) % cycleable.length]
-    if (next) { switchModel(next.id); showToast(`Model: ${next.display}`) }
-  }
   // Backspace at start of empty input — remove last context chip (VS Code/Cursor UX)
   if (e.key === 'Backspace' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
     const el = textareaEl.value
@@ -10411,14 +9911,6 @@ function onClickOutside(e: MouseEvent): void {
   }
   if (slashMenuEl.value && !slashMenuEl.value.contains(e.target as Node)) {
     showSlashMenu.value = false
-  }
-  const modelBar = document.querySelector('.ai-model-bar')
-  if (modelBar && !modelBar.contains(e.target as Node)) {
-    showModelPicker.value = false
-  }
-  const regenWrap = document.querySelector('.ai-regen-model-wrap')
-  if (regenWrap && !regenWrap.contains(e.target as Node)) {
-    regenModelOpen.value = false
   }
 }
 
@@ -10475,6 +9967,9 @@ function restoreCheckpoint(cp: ChatCheckpoint): void {
   // Clear any in-flight /compact state so its handler doesn't overwrite the restored messages
   pendingCompactKeep.value = []
   pendingCompactAllMessages.value = []
+  // History diverged from the CLI transcript — next turn must rebuild fresh
+  const ct = allThreads.value.find((t) => t.id === currentThreadId.value)
+  if (ct) ct.cliSessionId = undefined
   saveCurrentThread()
   showCheckpoints.value = false
   showToast(`Restored: ${cp.name}`)
@@ -10602,7 +10097,7 @@ function showModelChange(mi: number): string | null {
     const prev = messages.value[i]
     if (prev.role === 'assistant' && prev.model) {
       if (prev.model !== msg.model) {
-        return MODEL_CATALOG.find(m => m.id === msg.model)?.display ?? msg.model
+        return msg.model
       }
       return null
     }
@@ -10777,7 +10272,7 @@ function showModelChange(mi: number): string | null {
             <div class="ai-thinking-content" v-html="renderMarkdownLite(msg.thinkingContent)" />
           </details>
 
-          <!-- Cards (tool calls / edit proposals) -->
+          <!-- Cards (tool calls) -->
           <template v-if="msg.cards">
             <template v-for="(card, ci) in msg.cards" :key="ci">
               <!-- Tool call card -->
@@ -10800,15 +10295,20 @@ function showModelChange(mi: number): string | null {
                     <code class="ai-tool-code-inline">{{ (card.tool_input as Record<string,unknown>).query }}</code>
                     <span v-if="(card.tool_input as Record<string,unknown>).file_pattern" class="ai-tool-param-val"> in {{ (card.tool_input as Record<string,unknown>).file_pattern }}</span>
                   </div>
-                  <div v-else-if="card.tool_name === 'run_command' && (card.tool_input as Record<string,unknown>).command" class="ai-tool-param">
+                  <div v-else-if="card.tool_name === 'Grep' && (card.tool_input as Record<string,unknown>).pattern" class="ai-tool-param">
+                    <span class="ai-tool-param-label">Pattern: </span>
+                    <code class="ai-tool-code-inline">{{ (card.tool_input as Record<string,unknown>).pattern }}</code>
+                    <span v-if="(card.tool_input as Record<string,unknown>).path" class="ai-tool-param-val"> in {{ (card.tool_input as Record<string,unknown>).path }}</span>
+                  </div>
+                  <div v-else-if="(card.tool_name === 'run_command' || card.tool_name === 'Bash') && (card.tool_input as Record<string,unknown>).command" class="ai-tool-param">
                     <code class="ai-tool-code-inline">$ {{ (card.tool_input as Record<string,unknown>).command }}</code>
                   </div>
-                  <div v-else-if="!['read_file','list_directory','glob_files','write_file'].includes(card.tool_name)" class="ai-tool-param">
+                  <div v-else-if="!['read_file','list_directory','glob_files','write_file','Read','Glob','Write'].includes(card.tool_name)" class="ai-tool-param">
                     <pre class="ai-tool-pre">{{ JSON.stringify(card.tool_input, null, 2) }}</pre>
                   </div>
                   <!-- Result: code-style pre for file/command output, plain for others -->
                   <template v-if="card.result != null">
-                    <pre v-if="['read_file', 'write_file', 'run_command'].includes(card.tool_name)" class="ai-tool-result-pre">{{ String(card.result).slice(0, 2000) }}{{ String(card.result).length > 2000 ? '\n…truncated' : '' }}</pre>
+                    <pre v-if="['read_file', 'write_file', 'run_command', 'Read', 'Write', 'Bash'].includes(card.tool_name)" class="ai-tool-result-pre">{{ String(card.result).slice(0, 2000) }}{{ String(card.result).length > 2000 ? '\n…truncated' : '' }}</pre>
                     <div v-else class="ai-tool-result">
                       <span class="ai-tool-result-label">Result: </span>{{ card.result }}
                     </div>
@@ -10816,39 +10316,6 @@ function showModelChange(mi: number): string | null {
                 </div>
               </div>
 
-              <!-- Command proposal card -->
-              <div v-else-if="card.kind === 'command_proposal'" class="ai-cmd-card" :class="card.status">
-                <div class="ai-cmd-header">
-                  <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M0 2.75C0 1.784.784 1 1.75 1h12.5c.966 0 1.75.784 1.75 1.75v10.5A1.75 1.75 0 0 1 14.25 15H1.75A1.75 1.75 0 0 1 0 13.25Zm1.75-.25a.25.25 0 0 0-.25.25v10.5c0 .138.112.25.25.25h12.5a.25.25 0 0 0 .25-.25V2.75a.25.25 0 0 0-.25-.25ZM7.25 8a.75.75 0 0 1-.22.53l-2.25 2.25a.749.749 0 1 1-1.06-1.06L5.44 8 3.72 6.28a.749.749 0 1 1 1.06-1.06l2.25 2.25c.141.14.22.331.22.53Zm1.5 1.5h3a.75.75 0 0 1 0 1.5h-3a.75.75 0 0 1 0-1.5Z"/></svg>
-                  <span class="ai-cmd-label">Run command</span>
-                  <span v-if="card.status === 'approved'" class="ai-cmd-status approved">Executed ✓</span>
-                  <span v-else-if="card.status === 'rejected'" class="ai-cmd-status rejected">Rejected ✕</span>
-                  <div v-else class="ai-cmd-actions">
-                    <button class="ai-cmd-btn approve" @click="approveCommand(card)">Run</button>
-                    <button class="ai-cmd-btn reject" @click="rejectCommand(card)">Reject</button>
-                  </div>
-                </div>
-                <pre class="ai-cmd-pre">$ {{ card.command }}{{ card.cwd ? `\n# cwd: ${card.cwd}` : '' }}</pre>
-              </div>
-
-              <!-- Edit proposal card -->
-              <div v-else-if="card.kind === 'edit_proposal' && !card.discarded" class="ai-edit-card">
-                <div class="ai-edit-header" @click="toggleDiff(card.tool_id)" style="cursor:pointer">
-                  <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25c.081-.286.235-.547.445-.758l8.61-8.61Zm.176 4.823L9.75 4.81l-6.286 6.287a.253.253 0 0 0-.064.108l-.558 1.953 1.953-.558a.253.253 0 0 0 .108-.064Zm1.238-3.763a.25.25 0 0 0-.354 0L10.811 3.75l1.439 1.44 1.263-1.263a.25.25 0 0 0 0-.354Z"/></svg>
-                  <span class="ai-edit-path">{{ card.file_path }}</span>
-                  <span class="ai-diff-stat">
-                    <span class="diff-add-count">+{{ card.diff.split('\n').filter(l => l.startsWith('+') && !l.startsWith('+++')).length }}</span>
-                    <span class="diff-del-count"> −{{ card.diff.split('\n').filter(l => l.startsWith('-') && !l.startsWith('---')).length }}</span>
-                  </span>
-                  <span class="ai-diff-toggle-icon">{{ isDiffExpanded(card.tool_id) ? '▾' : '▸' }}</span>
-                  <div v-if="!card.accepted" class="ai-edit-actions" @click.stop>
-                    <button class="ai-edit-btn accept" @click="acceptEdit(card)">Accept</button>
-                    <button class="ai-edit-btn discard" @click="discardEdit(card)">Discard</button>
-                  </div>
-                  <span v-else class="ai-edit-accepted">Applied ✓</span>
-                </div>
-                <div v-if="isDiffExpanded(card.tool_id)" class="ai-diff-view" v-html="renderDiff(card.diff)" />
-              </div>
             </template>
           </template>
 
@@ -10890,14 +10357,6 @@ function showModelChange(mi: number): string | null {
             <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M11.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm-2.25.75a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.492 2.492 0 0 1 6 7h4a1 1 0 0 0 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25ZM4.25 12a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5ZM3.5 3.25a.75.75 0 1 1 1.5 0 .75.75 0 0 1-1.5 0Z"/></svg>
             Run git commit
           </button>
-        </div>
-        <!-- Accept All / Reject All bar for last assistant message -->
-        <div
-          v-if="msg.role === 'assistant' && mi === lastAssistantIdx && pendingEditsInLastMsg.length >= 2"
-          class="ai-bulk-actions"
-        >
-          <button class="ai-bulk-btn accept" @click="acceptAllEdits">Accept All ({{ pendingEditsInLastMsg.length }})</button>
-          <button class="ai-bulk-btn discard" @click="discardAllEdits">Reject All</button>
         </div>
         <!-- Message action bar (copy / regenerate / model badge) -->
         <div class="ai-msg-actions" :class="msg.role">
@@ -10973,55 +10432,6 @@ function showModelChange(mi: number): string | null {
           >
             <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M1.705 8.005a.75.75 0 0 1 .834.656 5.5 5.5 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.002 7.002 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834ZM8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7.002 7.002 0 0 1 14.95 7.16a.75.75 0 0 1-1.49.178A5.5 5.5 0 0 0 8 2.5Z"/></svg>
           </button>
-          <!-- Regenerate with a different model — dropdown -->
-          <div
-            v-if="msg.role === 'assistant' && mi === lastAssistantIdx && !sending"
-            class="ai-regen-model-wrap"
-          >
-            <button
-              class="ai-msg-action-btn ai-regen-model-btn"
-              :title="$t('action.regenerate-with-model')"
-              @click.stop="regenModelOpen = !regenModelOpen"
-            >
-              <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor" style="margin-right:2px"><path d="M1.705 8.005a.75.75 0 0 1 .834.656 5.5 5.5 0 0 0 9.592 2.97l-1.204-1.204a.25.25 0 0 1 .177-.427h3.646a.25.25 0 0 1 .25.25v3.646a.25.25 0 0 1-.427.177l-1.38-1.38A7.002 7.002 0 0 1 1.05 8.84a.75.75 0 0 1 .656-.834ZM8 2.5a5.487 5.487 0 0 0-4.131 1.869l1.204 1.204A.25.25 0 0 1 4.896 6H1.25A.25.25 0 0 1 1 5.75V2.104a.25.25 0 0 1 .427-.177l1.38 1.38A7.002 7.002 0 0 1 14.95 7.16a.75.75 0 0 1-1.49.178A5.5 5.5 0 0 0 8 2.5Z"/></svg>▾
-            </button>
-            <div v-if="regenModelOpen" class="ai-regen-model-menu">
-              <div class="ai-model-picker-group" style="font-size:9px;padding:4px 8px 2px">Creativity</div>
-              <div
-                v-if="!reasoningModelSelected"
-                class="ai-regen-model-item"
-                title="Regenerate with +0.3 temperature for more diverse output"
-                @mousedown.prevent="regenWithHigherTemp()"
-              >🎲 More creative (temp +0.3)</div>
-              <div class="ai-model-picker-group" style="font-size:9px;padding:4px 8px 2px;margin-top:2px">Model</div>
-              <template v-for="grp in [
-                { label: 'Anthropic',    filter: 'anthropic' },
-                { label: 'OpenAI',       filter: 'openai'    },
-                { label: 'Google',       filter: 'google'    },
-                { label: 'Mistral',      filter: 'mistral'   },
-                { label: 'xAI',         filter: 'xai'       },
-                { label: 'Groq',         filter: 'groq'      },
-                { label: 'DeepSeek',     filter: 'deepseek'  },
-                { label: 'Ollama',       filter: 'ollama'    },
-              ]" :key="grp.label">
-                <div
-                  v-if="MODEL_CATALOG.some(e => e.provider === grp.filter)"
-                  class="ai-model-picker-group"
-                  style="font-size:9px;padding:4px 8px 2px"
-                >{{ grp.label }}</div>
-                <div
-                  v-for="m in MODEL_CATALOG.filter(e => e.provider === grp.filter)"
-                  :key="m.id"
-                  class="ai-regen-model-item"
-                  :class="{ active: m.id === settingsModel }"
-                  @mousedown.prevent="regenWithModel(m.id)"
-                >
-                  <span>{{ m.display }}</span>
-                  <span class="ai-model-picker-note">{{ m.note }}{{ m.ctx ? ` · ${m.ctx >= 1_000_000 ? (m.ctx/1_000_000).toFixed(1)+'M' : m.ctx >= 1000 ? Math.round(m.ctx/1000)+'k' : m.ctx}` : '' }}</span>
-                </div>
-              </template>
-            </div>
-          </div>
           <button
             v-if="msg.role === 'assistant' && !msg.streaming"
             class="ai-msg-action-btn"
@@ -11077,11 +10487,6 @@ function showModelChange(mi: number): string | null {
               transform="rotate(-90 7 7)"
             />
           </svg>
-          <span
-            v-if="msg.role === 'assistant' && msg.model && msg.inputTokens != null && msg.outputTokens != null && !msg.streaming && estimateCost(msg.model, msg.inputTokens, msg.outputTokens)"
-            class="ai-msg-cost"
-            :title="`Estimated API cost for this response (${msg.model})`"
-          >{{ estimateCost(msg.model, msg.inputTokens ?? 0, msg.outputTokens ?? 0) }}</span>
           <span
             v-if="msg.timestamp"
             class="ai-msg-time"
@@ -11304,13 +10709,13 @@ function showModelChange(mi: number): string | null {
         </template>
       </div>
 
-      <!-- Model quick-picker badge -->
+      <!-- Mode toggle + rules badges bar -->
       <div class="ai-model-bar">
         <!-- Chat mode toggle: Ask → Edit → Agent cycle -->
         <button
           class="ai-mode-toggle"
           :class="chatMode"
-          :title="chatMode === 'ask' ? 'Ask — AI suggests, you approve all edits\nClick to switch to Edit mode' : chatMode === 'edit' ? 'Edit — target specific files, AI proposes diffs\nClick to switch to Agent mode' : 'Agent — AI auto-applies edits & runs commands\nClick to switch to Ask mode'"
+          :title="chatMode === 'ask' ? 'Ask — prompts the AI to answer and suggest without touching files (guidance only — the CLI engine can still edit if the AI decides to)\nClick to switch to Edit mode' : chatMode === 'edit' ? 'Edit — target specific files for focused changes\nClick to switch to Agent mode' : 'Agent — full agent: the CLI edits files & runs commands directly\nClick to switch to Ask mode'"
           @click="chatMode = chatMode === 'ask' ? 'edit' : chatMode === 'edit' ? 'agent' : 'ask'"
         >{{ chatMode === 'ask' ? 'Ask' : chatMode === 'edit' ? 'Edit' : 'Agent' }}</button>
         <span
@@ -11337,84 +10742,10 @@ function showModelChange(mi: number): string | null {
           :title="`Active persona: ${activePersonaLabel}\nClick to change in Settings`"
           @click="showSettings = true"
         >{{ activePersonaLabel }}</span>
-        <button class="ai-model-badge-btn" :title="`Model: ${settingsModel}\nCmd+/ to cycle · click to pick`" @click="showModelPicker = !showModelPicker">
-          <span v-if="settingsModel === 'auto'" class="ai-model-badge-provider auto">✦</span>
-          <span v-else class="ai-model-badge-provider" :class="settingsProvider">{{ {'anthropic':'A','openai':'GPT','groq':'G','deepseek':'DS','google':'GG','mistral':'M','xai':'X','openai_compatible':'C','ollama':'O'}[settingsProvider] ?? 'O' }}</span>
-          <span class="ai-model-badge-name">{{ MODEL_CATALOG.find(m => m.id === settingsModel)?.display ?? settingsModel }}</span>
-          <span class="ai-model-badge-caret">{{ showModelPicker ? '▲' : '▼' }}</span>
-        </button>
-        <div v-if="showModelPicker" class="ai-model-picker-menu">
-          <!-- Search filter -->
-          <div class="ai-model-picker-search-wrap">
-            <input
-              v-model="modelPickerSearch"
-              class="ai-model-picker-search"
-              placeholder="Search models…"
-              autocomplete="off"
-              @click.stop
-              @keydown.escape.prevent="showModelPicker = false"
-            />
-          </div>
-          <!-- Auto tier (hidden when search active) -->
-          <template v-if="!modelPickerSearch.trim()">
-            <div class="ai-model-picker-group">Smart Routing</div>
-            <div
-              class="ai-model-picker-item"
-              :class="{ active: settingsModel === 'auto' }"
-              @click="switchModel('auto'); showModelPicker = false"
-            >
-              <span class="ai-model-picker-name">✦ Auto</span>
-              <span class="ai-model-picker-note">Best available</span>
-            </div>
-          </template>
-          <template v-for="group in [
-            { label: 'Anthropic', filter: 'anthropic' },
-            { label: 'OpenAI', filter: 'openai' },
-            { label: 'Google Gemini', filter: 'google' },
-            { label: 'Mistral AI', filter: 'mistral' },
-            { label: 'xAI Grok', filter: 'xai' },
-            { label: 'Groq', filter: 'groq' },
-            { label: 'DeepSeek', filter: 'deepseek' },
-            { label: 'Ollama (Local)', filter: 'ollama' },
-          ]" :key="group.label">
-            <template v-if="MODEL_CATALOG.filter(e => e.provider === group.filter && (!modelPickerSearch.trim() || e.display.toLowerCase().includes(modelPickerSearch.toLowerCase()) || e.note.toLowerCase().includes(modelPickerSearch.toLowerCase()) || e.id.includes(modelPickerSearch.toLowerCase()))).length > 0">
-              <div class="ai-model-picker-sep" />
-              <div class="ai-model-picker-group">
-                {{ group.label }}
-                <span v-if="!providerHasKey[group.filter]" class="ai-picker-no-key" title="No API key configured — set in Settings">no key</span>
-              </div>
-              <div
-                v-for="m in MODEL_CATALOG.filter(e => e.provider === group.filter && (!modelPickerSearch.trim() || e.display.toLowerCase().includes(modelPickerSearch.toLowerCase()) || e.note.toLowerCase().includes(modelPickerSearch.toLowerCase()) || e.id.includes(modelPickerSearch.toLowerCase())))"
-                :key="m.id"
-                class="ai-model-picker-item"
-                :class="{ active: m.id === settingsModel }"
-                @click="switchModel(m.id); showModelPicker = false"
-              >
-                <span class="ai-model-picker-name">{{ m.display }}</span>
-                <span class="ai-model-picker-meta">
-                  <span v-if="m.caps?.includes('vision')" class="ai-model-cap-badge vision" title="Vision — supports image inputs">👁</span>
-                  <span v-if="m.caps?.includes('thinking')" class="ai-model-cap-badge thinking" title="Reasoning — extended thinking/chain-of-thought">◎</span>
-                  <span v-if="m.caps?.includes('code')" class="ai-model-cap-badge code" title="Code-specialized model">&lt;/&gt;</span>
-                  <span v-if="m.ctx" class="ai-model-picker-ctx">{{ m.ctx >= 1000 ? (m.ctx/1000)+'k' : m.ctx }}</span>
-                  <span class="ai-model-picker-note">{{ m.note }}</span>
-                </span>
-              </div>
-            </template>
-          </template>
-          <!-- Custom model input -->
-          <div class="ai-model-picker-sep" />
-          <div class="ai-model-picker-custom">
-            <input
-              class="ai-model-picker-custom-input"
-              placeholder="Custom model ID…"
-              @keydown.enter.prevent="(e) => { const v = (e.target as HTMLInputElement).value.trim(); if (v) { settingsModel = v; saveSettings(); showModelPicker = false } }"
-            />
-          </div>
-        </div>
       </div>
 
       <!-- Context window usage bar (shown when > 30%) -->
-      <div v-if="ctxUsagePct > 30" class="ai-ctx-bar" :class="ctxUsageLevel" :title="`~${conversationTokenEstimate.toLocaleString()} / ${currentModelCtx.toLocaleString()} tokens (${settingsModel})`">
+      <div v-if="ctxUsagePct > 30" class="ai-ctx-bar" :class="ctxUsageLevel" :title="`~${conversationTokenEstimate.toLocaleString()} / ${currentModelCtx.toLocaleString()} tokens`">
         <div class="ai-ctx-bar-track">
           <div class="ai-ctx-bar-fill" :style="{ width: ctxUsagePct + '%' }" />
         </div>
@@ -11761,7 +11092,7 @@ function showModelChange(mi: number): string | null {
             </div>
             <div class="ai-thread-meta">
               <span v-if="item.thread.label" class="ai-thread-label-badge" :title="`Label: ${item.thread.label}`">{{ item.thread.label }}</span>
-              <span v-if="item.thread.model" class="ai-thread-model-badge" :title="`Thread model: ${item.thread.model}`">{{ MODEL_CATALOG.find(m => m.id === item.thread.model)?.display?.split(' ').slice(-1)[0] ?? item.thread.model }}</span>
+              <span v-if="item.thread.model" class="ai-thread-model-badge" :title="`Thread model: ${item.thread.model}`">{{ item.thread.model }}</span>
               <span v-if="item.thread.messages.length" class="ai-thread-count">{{ item.thread.messages.length }}</span>
               <!-- Unread badge: AI messages since last visit -->
               <span
@@ -12020,156 +11351,6 @@ function showModelChange(mi: number): string | null {
         <button class="ai-settings-close" @click="showSettings = false">✕</button>
       </div>
       <div class="ai-settings-body">
-        <div class="ai-settings-row">
-          <label class="ai-settings-label">Provider</label>
-          <div class="ai-settings-radios">
-            <label><input v-model="settingsProvider" type="radio" value="anthropic" /> Anthropic</label>
-            <label><input v-model="settingsProvider" type="radio" value="openai" /> OpenAI</label>
-            <label><input v-model="settingsProvider" type="radio" value="groq" /> Groq</label>
-            <label><input v-model="settingsProvider" type="radio" value="deepseek" /> DeepSeek</label>
-            <label><input v-model="settingsProvider" type="radio" value="google" /> Google</label>
-            <label><input v-model="settingsProvider" type="radio" value="mistral" /> Mistral</label>
-            <label><input v-model="settingsProvider" type="radio" value="xai" /> xAI</label>
-            <label><input v-model="settingsProvider" type="radio" value="ollama" /> Ollama</label>
-            <label><input v-model="settingsProvider" type="radio" value="openai_compatible" /> Custom (OpenAI-compat)</label>
-          </div>
-        </div>
-        <div v-if="settingsProvider === 'anthropic'" class="ai-settings-row">
-          <label class="ai-settings-label">Anthropic API Key</label>
-          <div class="ai-settings-key-row">
-            <input v-model="settingsApiKey" type="password" class="ai-settings-input" placeholder="sk-ant-…" />
-            <button class="ai-settings-test-btn" :disabled="testConnStatus['anthropic'] === 'testing'" @click="testConnection('anthropic')">{{ testConnStatus['anthropic'] === 'testing' ? '…' : 'Test' }}</button>
-            <span v-if="testConnStatus['anthropic'] === 'ok'" class="ai-settings-test-ok" title="Connection OK">✓</span>
-            <span v-if="testConnStatus['anthropic'] === 'fail'" class="ai-settings-test-fail" :title="testConnError['anthropic']">✗</span>
-          </div>
-        </div>
-        <div v-if="settingsProvider === 'openai'" class="ai-settings-row">
-          <label class="ai-settings-label">OpenAI API Key</label>
-          <div class="ai-settings-key-row">
-            <input v-model="settingsOpenAiKey" type="password" class="ai-settings-input" placeholder="sk-…" />
-            <button class="ai-settings-test-btn" :disabled="testConnStatus['openai'] === 'testing'" @click="testConnection('openai')">{{ testConnStatus['openai'] === 'testing' ? '…' : 'Test' }}</button>
-            <span v-if="testConnStatus['openai'] === 'ok'" class="ai-settings-test-ok" title="Connection OK">✓</span>
-            <span v-if="testConnStatus['openai'] === 'fail'" class="ai-settings-test-fail" :title="testConnError['openai']">✗</span>
-          </div>
-        </div>
-        <div v-if="settingsProvider === 'groq'" class="ai-settings-row">
-          <label class="ai-settings-label">Groq API Key</label>
-          <div class="ai-settings-key-row">
-            <input v-model="settingsGroqKey" type="password" class="ai-settings-input" placeholder="gsk_…" />
-            <button class="ai-settings-test-btn" :disabled="testConnStatus['groq'] === 'testing'" @click="testConnection('groq')">{{ testConnStatus['groq'] === 'testing' ? '…' : 'Test' }}</button>
-            <span v-if="testConnStatus['groq'] === 'ok'" class="ai-settings-test-ok" title="Connection OK">✓</span>
-            <span v-if="testConnStatus['groq'] === 'fail'" class="ai-settings-test-fail" :title="testConnError['groq']">✗</span>
-          </div>
-        </div>
-        <div v-if="settingsProvider === 'deepseek'" class="ai-settings-row">
-          <label class="ai-settings-label">DeepSeek API Key</label>
-          <div class="ai-settings-key-row">
-            <input v-model="settingsDeepSeekKey" type="password" class="ai-settings-input" placeholder="sk-…" />
-            <button class="ai-settings-test-btn" :disabled="testConnStatus['deepseek'] === 'testing'" @click="testConnection('deepseek')">{{ testConnStatus['deepseek'] === 'testing' ? '…' : 'Test' }}</button>
-            <span v-if="testConnStatus['deepseek'] === 'ok'" class="ai-settings-test-ok" title="Connection OK">✓</span>
-            <span v-if="testConnStatus['deepseek'] === 'fail'" class="ai-settings-test-fail" :title="testConnError['deepseek']">✗</span>
-          </div>
-        </div>
-        <div v-if="settingsProvider === 'google'" class="ai-settings-row">
-          <label class="ai-settings-label">Google API Key</label>
-          <div class="ai-settings-key-row">
-            <input v-model="settingsGoogleKey" type="password" class="ai-settings-input" placeholder="AIza…" />
-            <button class="ai-settings-test-btn" :disabled="testConnStatus['google'] === 'testing'" @click="testConnection('google')">{{ testConnStatus['google'] === 'testing' ? '…' : 'Test' }}</button>
-            <span v-if="testConnStatus['google'] === 'ok'" class="ai-settings-test-ok" title="Connection OK">✓</span>
-            <span v-if="testConnStatus['google'] === 'fail'" class="ai-settings-test-fail" :title="testConnError['google']">✗</span>
-          </div>
-        </div>
-        <div v-if="settingsProvider === 'mistral'" class="ai-settings-row">
-          <label class="ai-settings-label">Mistral API Key</label>
-          <div class="ai-settings-key-row">
-            <input v-model="settingsMistralKey" type="password" class="ai-settings-input" placeholder="…" />
-            <button class="ai-settings-test-btn" :disabled="testConnStatus['mistral'] === 'testing'" @click="testConnection('mistral')">{{ testConnStatus['mistral'] === 'testing' ? '…' : 'Test' }}</button>
-            <span v-if="testConnStatus['mistral'] === 'ok'" class="ai-settings-test-ok" title="Connection OK">✓</span>
-            <span v-if="testConnStatus['mistral'] === 'fail'" class="ai-settings-test-fail" :title="testConnError['mistral']">✗</span>
-          </div>
-        </div>
-        <div v-if="settingsProvider === 'xai'" class="ai-settings-row">
-          <label class="ai-settings-label">xAI API Key</label>
-          <div class="ai-settings-key-row">
-            <input v-model="settingsXaiKey" type="password" class="ai-settings-input" placeholder="xai-…" />
-            <button class="ai-settings-test-btn" :disabled="testConnStatus['xai'] === 'testing'" @click="testConnection('xai')">{{ testConnStatus['xai'] === 'testing' ? '…' : 'Test' }}</button>
-            <span v-if="testConnStatus['xai'] === 'ok'" class="ai-settings-test-ok" title="Connection OK">✓</span>
-            <span v-if="testConnStatus['xai'] === 'fail'" class="ai-settings-test-fail" :title="testConnError['xai']">✗</span>
-          </div>
-        </div>
-        <div v-if="settingsProvider === 'openai_compatible'" class="ai-settings-row">
-          <label class="ai-settings-label">Base URL</label>
-          <input v-model="settingsOaiCompatUrl" type="text" class="ai-settings-input" placeholder="https://…/v1" />
-        </div>
-        <div v-if="settingsProvider === 'openai_compatible'" class="ai-settings-row">
-          <label class="ai-settings-label">API Key</label>
-          <div class="ai-settings-key-row">
-            <input v-model="settingsOaiCompatKey" type="password" class="ai-settings-input" placeholder="optional" />
-            <button class="ai-settings-test-btn" :disabled="testConnStatus['openai_compatible'] === 'testing'" @click="testConnection('openai_compatible')">{{ testConnStatus['openai_compatible'] === 'testing' ? '…' : 'Test' }}</button>
-            <span v-if="testConnStatus['openai_compatible'] === 'ok'" class="ai-settings-test-ok" title="Connection OK">✓</span>
-            <span v-if="testConnStatus['openai_compatible'] === 'fail'" class="ai-settings-test-fail" :title="testConnError['openai_compatible']">✗</span>
-          </div>
-        </div>
-        <div v-if="settingsProvider === 'openai_compatible'" class="ai-settings-row">
-          <label class="ai-settings-label">Model ID</label>
-          <input v-model="settingsOaiCompatModel" type="text" class="ai-settings-input" placeholder="gpt-4o" />
-        </div>
-        <!-- Test connection error detail -->
-        <div v-if="testConnStatus[settingsProvider] === 'fail' && testConnError[settingsProvider]" class="ai-settings-test-error-row">
-          <span class="ai-settings-test-fail-icon">✗</span>
-          <span class="ai-settings-test-error-msg">{{ testConnError[settingsProvider] }}</span>
-        </div>
-        <div class="ai-settings-row">
-          <label class="ai-settings-label">Model</label>
-          <select
-            :value="(settingsProvider === 'openai_compatible') ? 'custom' : (modelIsCustom ? 'custom' : settingsModel)"
-            class="ai-settings-select"
-            @change="(e) => { const v = (e.target as HTMLSelectElement).value; if (v !== 'custom') switchModel(v) }"
-          >
-            <option value="auto">✦ Auto (best available)</option>
-            <optgroup label="Anthropic">
-              <option v-for="m in MODEL_CATALOG.filter(e => e.provider === 'anthropic')" :key="m.id" :value="m.id">{{ m.display }} — {{ m.note }}</option>
-            </optgroup>
-            <optgroup label="OpenAI">
-              <option v-for="m in MODEL_CATALOG.filter(e => e.provider === 'openai')" :key="m.id" :value="m.id">{{ m.display }} — {{ m.note }}</option>
-            </optgroup>
-            <optgroup label="Groq">
-              <option v-for="m in MODEL_CATALOG.filter(e => e.provider === 'groq')" :key="m.id" :value="m.id">{{ m.display }} — {{ m.note }}</option>
-            </optgroup>
-            <optgroup label="DeepSeek">
-              <option v-for="m in MODEL_CATALOG.filter(e => e.provider === 'deepseek')" :key="m.id" :value="m.id">{{ m.display }} — {{ m.note }}</option>
-            </optgroup>
-            <optgroup label="Google Gemini">
-              <option v-for="m in MODEL_CATALOG.filter(e => e.provider === 'google')" :key="m.id" :value="m.id">{{ m.display }} — {{ m.note }}</option>
-            </optgroup>
-            <optgroup label="Mistral AI">
-              <option v-for="m in MODEL_CATALOG.filter(e => e.provider === 'mistral')" :key="m.id" :value="m.id">{{ m.display }} — {{ m.note }}</option>
-            </optgroup>
-            <optgroup label="xAI Grok">
-              <option v-for="m in MODEL_CATALOG.filter(e => e.provider === 'xai')" :key="m.id" :value="m.id">{{ m.display }} — {{ m.note }}</option>
-            </optgroup>
-            <optgroup label="Ollama (Local)">
-              <option v-for="m in MODEL_CATALOG.filter(e => e.provider === 'ollama')" :key="m.id" :value="m.id">{{ m.display }} — {{ m.note }}</option>
-            </optgroup>
-            <option value="custom">Custom…</option>
-          </select>
-          <input
-            v-if="modelIsCustom && settingsProvider !== 'openai_compatible'"
-            v-model="settingsModel"
-            type="text"
-            class="ai-settings-input ai-settings-input--custom"
-            placeholder="Enter model ID"
-          />
-        </div>
-        <div v-if="settingsProvider === 'ollama'" class="ai-settings-row">
-          <label class="ai-settings-label">Ollama URL</label>
-          <div class="ai-settings-key-row">
-            <input v-model="settingsOllamaUrl" type="text" class="ai-settings-input" placeholder="http://localhost:11434" />
-            <button class="ai-settings-test-btn" :disabled="testConnStatus['ollama'] === 'testing'" @click="testConnection('ollama')">{{ testConnStatus['ollama'] === 'testing' ? '…' : 'Test' }}</button>
-            <span v-if="testConnStatus['ollama'] === 'ok'" class="ai-settings-test-ok" title="Ollama reachable">✓</span>
-            <span v-if="testConnStatus['ollama'] === 'fail'" class="ai-settings-test-fail" :title="testConnError['ollama']">✗</span>
-          </div>
-        </div>
         <div class="ai-settings-row ai-settings-row--column">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
             <label class="ai-settings-label" style="margin:0">System Prompt</label>
@@ -12194,7 +11375,7 @@ function showModelChange(mi: number): string | null {
           <label class="ai-settings-label">Chat mode</label>
           <label class="ai-toggle-label">
             <input :checked="chatMode === 'agent'" type="checkbox" @change="chatMode = ($event.target as HTMLInputElement).checked ? 'agent' : 'ask'" />
-            Agent mode — auto-accept file edits &amp; commands (also use toolbar toggle: Ask → Edit → Agent)
+            Agent mode — full agent: the CLI edits files &amp; runs commands directly (also use toolbar toggle: Ask → Edit → Agent)
           </label>
         </div>
         <div class="ai-settings-row">
@@ -12204,58 +11385,6 @@ function showModelChange(mi: number): string | null {
             Auto-inject active file (≤200 lines) if not already in context
           </label>
         </div>
-        <div class="ai-settings-row">
-          <label class="ai-settings-label">Max response tokens (256–16000)</label>
-          <div class="ai-tokens-row">
-            <input v-model.number="settingsMaxTokens" type="range" min="256" max="16000" step="256" class="ai-tokens-slider" />
-            <span class="ai-tokens-val">{{ settingsMaxTokens.toLocaleString() }}</span>
-          </div>
-        </div>
-        <div class="ai-settings-row">
-          <label class="ai-settings-label">Max agent tool calls (1–20)</label>
-          <div class="ai-tokens-row">
-            <input v-model.number="settingsMaxAgentIter" type="range" min="1" max="20" step="1" class="ai-tokens-slider" />
-            <span class="ai-tokens-val">{{ settingsMaxAgentIter }}</span>
-          </div>
-        </div>
-        <!-- Reasoning effort (OpenAI o1/o3/o4 models) -->
-        <div v-if="reasoningModelSelected" class="ai-settings-row">
-          <label class="ai-settings-label">Reasoning effort</label>
-          <div class="ai-tokens-row" style="gap:6px">
-            <label v-for="lvl in ['low','medium','high']" :key="lvl" class="ai-toggle-label" style="gap:4px;cursor:pointer">
-              <input type="radio" :value="lvl" :checked="(settingsReasoningEffort ?? 'medium') === lvl" @change="settingsReasoningEffort = lvl as 'low'|'medium'|'high'" />
-              {{ lvl.charAt(0).toUpperCase() + lvl.slice(1) }}
-            </label>
-          </div>
-        </div>
-        <div v-if="!reasoningModelSelected" class="ai-settings-row">
-          <label class="ai-settings-label">Temperature (0 = precise, 1 = creative)</label>
-          <div class="ai-tokens-row">
-            <label class="ai-toggle-label" style="margin-right:8px">
-              <input type="checkbox" :checked="settingsTemperature === null" @change="settingsTemperature = settingsTemperature === null ? 0.7 : null" />
-              Use default
-            </label>
-            <template v-if="settingsTemperature !== null">
-              <input v-model.number="settingsTemperature" type="range" min="0" max="1" step="0.05" class="ai-tokens-slider" />
-              <span class="ai-tokens-val">{{ (settingsTemperature ?? 0).toFixed(2) }}</span>
-            </template>
-          </div>
-        </div>
-        <!-- Extended thinking (Cursor parity — Claude only) -->
-        <div v-if="thinkingSupported" class="ai-settings-row">
-          <label class="ai-settings-label">Extended thinking (Claude only)</label>
-          <div class="ai-tokens-row">
-            <label class="ai-toggle-label" style="margin-right:8px">
-              <input type="checkbox" :checked="settingsThinkingBudget !== null" @change="settingsThinkingBudget = settingsThinkingBudget === null ? 8000 : null" />
-              Enable
-            </label>
-            <template v-if="settingsThinkingBudget !== null">
-              <input v-model.number="settingsThinkingBudget" type="range" min="1024" max="32000" step="1024" class="ai-tokens-slider" />
-              <span class="ai-tokens-val">{{ (settingsThinkingBudget / 1000).toFixed(1) }}k tokens</span>
-            </template>
-          </div>
-        </div>
-
         <!-- User-level global AI rules (Cursor parity: applies to all projects) -->
         <div class="ai-settings-row ai-settings-row--column">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
@@ -12308,7 +11437,6 @@ function showModelChange(mi: number): string | null {
           <span class="ai-stats-title">Session usage</span>
           <span class="ai-stats-item" title="Total input tokens across all threads">↑ {{ (sessionStats.totalIn / 1000).toFixed(1) }}k in</span>
           <span class="ai-stats-item" title="Total output tokens across all threads">↓ {{ (sessionStats.totalOut / 1000).toFixed(1) }}k out</span>
-          <span v-if="sessionStats.totalCost > 0" class="ai-stats-item ai-stats-cost" title="Estimated total cost">~${{ sessionStats.totalCost < 0.001 ? '<0.001' : sessionStats.totalCost.toFixed(3) }}</span>
         </div>
 
         <div class="ai-settings-footer">
@@ -12337,7 +11465,6 @@ function showModelChange(mi: number): string | null {
           <tr><td><kbd>Ctrl+Shift+A</kbd></td><td>Add current file to context</td></tr>
           <tr><td><kbd>Ctrl+F</kbd></td><td>Search chat</td></tr>
           <tr><td><kbd>Ctrl+Enter</kbd></td><td>Regenerate last response (empty input)</td></tr>
-          <tr><td><kbd>Cmd+/</kbd></td><td>Cycle AI model</td></tr>
           <tr><td><kbd>@</kbd></td><td>Insert context (file, selection, git, notepad…)</td></tr>
           <tr><td><kbd>/</kbd></td><td>Slash commands (/explain, /fix, /generate…)</td></tr>
           <tr><td><kbd>Escape</kbd></td><td>Stop generation · close menu · cancel Apply</td></tr>
@@ -12485,7 +11612,7 @@ function showModelChange(mi: number): string | null {
 .ai-msg-wrap.user { align-items: flex-end; }
 .ai-msg-wrap.assistant { align-items: flex-start; }
 
-/* Message action bar — model badge always visible; buttons hidden until hover */
+/* Message action bar — buttons hidden until hover */
 .ai-msg-actions {
   display: flex;
   align-items: center;
@@ -12495,17 +11622,6 @@ function showModelChange(mi: number): string | null {
 }
 .ai-msg-actions.user { justify-content: flex-end; }
 .ai-msg-actions.assistant { justify-content: flex-start; }
-.ai-model-badge {
-  font-size: 10px;
-  color: var(--text-muted);
-  opacity: 0.6;
-  font-family: ui-monospace, Menlo, monospace;
-  padding: 1px 5px;
-  border: 1px solid var(--border-muted);
-  border-radius: 10px;
-  margin-right: 2px;
-  white-space: nowrap;
-}
 .ai-msg-action-btn {
   opacity: 0;
   transition: opacity 0.15s;
@@ -12548,57 +11664,8 @@ function showModelChange(mi: number): string | null {
 .ai-msg-actions:hover .ai-token-arc { opacity: 1; }
 .ai-msg-tokspeed { font-size: 10px; color: var(--text-muted); opacity: 0.45; user-select: none; font-variant-numeric: tabular-nums; }
 .ai-msg-ttft { font-size: 10px; color: var(--text-muted); opacity: 0.4; user-select: none; font-variant-numeric: tabular-nums; }
-.ai-msg-cost {
-  font-size: 9px; padding: 1px 4px; border-radius: 3px; user-select: none;
-  background: color-mix(in srgb, var(--success-fg) 12%, transparent); color: var(--success-fg); font-variant-numeric: tabular-nums;
-}
 
-.ai-regen-model-wrap { position: relative; display: inline-flex; }
-.ai-regen-model-btn { font-size: 10px; display: flex; align-items: center; }
-.ai-regen-model-menu {
-  position: absolute; bottom: calc(100% + 4px); right: 0;
-  background: var(--bg-overlay); border: 1px solid var(--border-default);
-  border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,.28);
-  padding: 4px 0; min-width: 200px; z-index: 60; max-height: 280px; overflow-y: auto;
-}
-.ai-regen-model-item {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 5px 12px; font-size: 11.5px; cursor: pointer;
-  color: var(--text-primary); gap: 8px;
-}
-.ai-regen-model-item:hover, .ai-regen-model-item.active { background: var(--accent-muted); color: var(--accent-fg); }
 
-/* Provider badge on model bar button */
-.ai-model-badge-provider {
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 16px; height: 16px; border-radius: 3px; font-size: 9px; font-weight: 700;
-  flex-shrink: 0;
-}
-.ai-model-badge-provider.anthropic        { background: rgba(209,92,255,0.2);  color: #d15cff; }
-.ai-model-badge-provider.ollama           { background: rgba(87,171,90,0.2);   color: #57ab5a; }
-.ai-model-badge-provider.openai           { background: rgba(16,185,129,0.2);  color: #10b981; font-size: 8px; width: auto; padding: 0 3px; }
-.ai-model-badge-provider.groq             { background: rgba(251,146,60,0.2);  color: #fb923c; }
-.ai-model-badge-provider.deepseek         { background: rgba(59,130,246,0.2);  color: #3b82f6; font-size: 8px; width: auto; padding: 0 3px; }
-.ai-model-badge-provider.google           { background: rgba(234,67,53,0.2);   color: #ea4335; font-size: 8px; width: auto; padding: 0 3px; }
-.ai-model-badge-provider.mistral          { background: rgba(255,115,0,0.2);   color: #ff7300; }
-.ai-model-badge-provider.xai              { background: rgba(220,220,220,0.15); color: #d0d0d0; }
-.ai-model-badge-provider.openai_compatible{ background: rgba(148,163,184,0.2); color: #94a3b8; }
-
-/* Model picker grouped items */
-.ai-model-picker-group {
-  padding: 5px 10px 2px; font-size: 10px; font-weight: 600; letter-spacing: .04em;
-  text-transform: uppercase; color: var(--text-muted); opacity: 0.7; user-select: none;
-}
-.ai-model-picker-name { flex: 1; font-size: 12px; }
-.ai-model-picker-note { font-size: 10px; color: var(--text-muted); opacity: 0.75; white-space: nowrap; }
-.ai-model-picker-sep  { height: 1px; background: var(--border-muted); margin: 4px 0; }
-.ai-model-picker-custom { padding: 4px 8px 6px; }
-.ai-model-picker-custom-input {
-  width: 100%; box-sizing: border-box; padding: 4px 8px; font-size: 11px;
-  background: var(--bg-muted); border: 1px solid var(--border-muted); border-radius: 4px;
-  color: var(--text-primary); outline: none;
-}
-.ai-model-picker-custom-input:focus { border-color: var(--accent-emphasis); }
 .ai-feedback-comment-wrap {
   display: flex; align-items: center; gap: 6px;
   padding: 4px 10px 6px; animation: fadeIn 0.15s ease;
@@ -13202,33 +12269,6 @@ function showModelChange(mi: number): string | null {
 }
 .ai-commit-run-btn:hover { background: var(--success-strong); }
 
-/* ── Accept All / Reject All bar ─────────────────────────────────────────── */
-.ai-bulk-actions {
-  display: flex;
-  gap: 6px;
-  margin-top: 4px;
-  padding: 0 4px;
-}
-.ai-bulk-btn {
-  font-size: 11px;
-  padding: 3px 10px;
-  border-radius: 5px;
-  border: 1px solid var(--border-muted);
-  cursor: pointer;
-  background: var(--bg-subtle);
-  color: var(--text-bright);
-}
-.ai-bulk-btn.accept {
-  background: var(--success-emphasis);
-  color: var(--text-on-emphasis);
-  border-color: transparent;
-}
-.ai-bulk-btn.discard {
-  background: var(--danger-emphasis);
-  color: var(--text-on-emphasis);
-  border-color: transparent;
-}
-
 /* ── Tool call card ────────────────────────────────────────────────────────── */
 .ai-tool-card {
   margin-top: 6px;
@@ -13302,51 +12342,6 @@ function showModelChange(mi: number): string | null {
   color: var(--accent-fg);
 }
 
-/* ── Edit proposal card ────────────────────────────────────────────────────── */
-.ai-edit-card {
-  margin-top: 8px;
-  border: 1px solid var(--border-muted);
-  border-radius: 6px;
-  overflow: hidden;
-  font-size: 11.5px;
-}
-.ai-edit-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 10px;
-  background: var(--bg-muted);
-  border-bottom: 1px solid var(--border-muted);
-  flex-wrap: wrap;
-}
-.ai-edit-path {
-  flex: 1;
-  font-family: ui-monospace, Menlo, monospace;
-  color: var(--accent-fg);
-  font-size: 11px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.ai-edit-actions { display: flex; gap: 6px; margin-left: auto; }
-.ai-edit-btn {
-  padding: 3px 10px;
-  border-radius: 4px;
-  border: none;
-  cursor: pointer;
-  font-size: 11px;
-  font-weight: 500;
-}
-.ai-edit-btn.accept { background: var(--success-emphasis); color: var(--text-on-emphasis); }
-.ai-edit-btn.accept:hover { background: var(--success-strong); }
-.ai-edit-btn.discard { background: var(--bg-subtle); color: var(--text-secondary); border: 1px solid var(--border-muted); }
-.ai-edit-btn.discard:hover { background: var(--bg-muted); }
-.ai-edit-accepted { font-size: 11px; color: var(--success-fg); margin-left: auto; }
-.ai-diff-stat { font-size: 10px; margin-left: 4px; }
-.diff-add-count { color: var(--success-fg); }
-.diff-del-count { color: var(--danger-fg); }
-.ai-diff-toggle-icon { font-size: 10px; color: var(--text-muted); margin-left: 2px; }
-
 .ai-diff-view {
   font-family: ui-monospace, Menlo, 'Courier New', monospace;
   font-size: 11px;
@@ -13362,55 +12357,6 @@ function showModelChange(mi: number): string | null {
 .ai-diff-view :deep(.diff-hunk) { color: var(--accent-fg); background: color-mix(in srgb, var(--accent-fg) 10%, transparent); padding: 0 8px; white-space: pre; }
 .ai-diff-view :deep(.diff-ctx) { color: var(--text-muted); padding: 0 8px; white-space: pre; }
 .ai-text :deep(.ai-diff-view.ai-diff-inline) { max-height: 400px; border-top: 1px solid var(--border-muted); }
-
-/* ── Command proposal card ─────────────────────────────────────────────────── */
-.ai-cmd-card {
-  margin-top: 8px;
-  border: 1px solid var(--border-muted);
-  border-left: 4px solid var(--attention-bright);
-  border-radius: 0 6px 6px 0;
-  overflow: hidden;
-  font-size: 11.5px;
-}
-.ai-cmd-card.approved { border-left-color: var(--success-fg); }
-.ai-cmd-card.rejected { border-left-color: var(--text-muted); opacity: 0.6; }
-.ai-cmd-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 10px;
-  background: var(--bg-muted);
-  border-bottom: 1px solid var(--border-muted);
-}
-.ai-cmd-label { font-weight: 600; color: var(--attention-bright); flex: 1; }
-.ai-cmd-card.approved .ai-cmd-label { color: var(--success-fg); }
-.ai-cmd-card.rejected .ai-cmd-label { color: var(--text-muted); }
-.ai-cmd-actions { display: flex; gap: 6px; }
-.ai-cmd-btn {
-  padding: 3px 10px;
-  border-radius: 4px;
-  border: none;
-  cursor: pointer;
-  font-size: 11px;
-  font-weight: 500;
-}
-.ai-cmd-btn.approve { background: var(--success-emphasis); color: var(--text-on-emphasis); }
-.ai-cmd-btn.approve:hover { background: var(--success-strong); }
-.ai-cmd-btn.reject { background: var(--bg-subtle); color: var(--text-secondary); border: 1px solid var(--border-muted); }
-.ai-cmd-btn.reject:hover { background: var(--bg-muted); }
-.ai-cmd-status { font-size: 11px; }
-.ai-cmd-status.approved { color: var(--success-fg); }
-.ai-cmd-status.rejected { color: var(--text-muted); }
-.ai-cmd-pre {
-  margin: 0;
-  padding: 7px 10px;
-  font-family: ui-monospace, Menlo, 'Courier New', monospace;
-  font-size: 11px;
-  color: var(--text-secondary);
-  background: var(--bg-base);
-  white-space: pre-wrap;
-  word-break: break-all;
-}
 
 /* ── Input area ────────────────────────────────────────────────────────────── */
 .ai-input-area {
@@ -13624,7 +12570,7 @@ function showModelChange(mi: number): string | null {
 }
 .ai-char-count.warn { color: var(--danger-fg); }
 
-/* Model picker bar */
+/* Mode toggle + rules badges bar */
 .ai-model-bar { position: relative; display: flex; align-items: center; padding: 2px 8px 0; gap: 4px; }
 .ai-rules-badge {
   font-size: 10px;
@@ -13641,39 +12587,6 @@ function showModelChange(mi: number): string | null {
   background: color-mix(in srgb, var(--done-fg) 14%, transparent);
   color: var(--done-fg);
 }
-.ai-model-badge-btn {
-  display: flex; align-items: center; gap: 4px;
-  background: none; border: 1px solid var(--border-muted); border-radius: 10px;
-  padding: 2px 8px; cursor: pointer; color: var(--text-secondary); font-size: 11px;
-  transition: border-color 0.15s;
-}
-.ai-model-badge-btn:hover { border-color: var(--accent-fg); color: var(--text-bright); }
-.ai-model-badge-icon { font-size: 10px; opacity: 0.6; }
-.ai-model-badge-name { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ai-model-badge-caret { font-size: 8px; opacity: 0.6; }
-.ai-model-picker-menu {
-  position: absolute; bottom: calc(100% + 4px); left: 8px;
-  background: var(--bg-overlay); border: 1px solid var(--border-muted); border-radius: 6px;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.3); z-index: 200; min-width: 220px; overflow: hidden;
-  max-height: 380px; overflow-y: auto;
-}
-.ai-model-picker-search-wrap { padding: 6px 8px; border-bottom: 1px solid var(--border-muted); }
-.ai-model-picker-search { width: 100%; box-sizing: border-box; background: var(--bg-muted); border: 1px solid var(--border-muted); border-radius: 4px; color: var(--text-primary); font-size: 11px; padding: 4px 7px; outline: none; }
-.ai-model-picker-search:focus { border-color: var(--accent-emphasis); }
-.ai-model-picker-item {
-  display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  padding: 6px 12px; font-size: 12px; cursor: pointer; color: var(--text-secondary);
-}
-.ai-model-picker-item:hover { background: var(--bg-muted); color: var(--text-bright); }
-.ai-model-picker-item.active { color: var(--accent-fg); font-weight: 600; }
-.ai-model-badge-provider.auto { background: linear-gradient(135deg, #7c3aed, #2563eb); color: #fff; }
-/* Model context size chip */
-.ai-model-picker-meta { display: flex; align-items: center; gap: 4px; }
-.ai-model-picker-ctx { font-size: 9px; background: var(--bg-muted); border-radius: 3px; padding: 0 4px; color: var(--text-muted); opacity: 0.8; }
-.ai-model-cap-badge { font-size: 9px; opacity: 0.65; cursor: default; }
-.ai-model-cap-badge.vision { opacity: 0.7; }
-.ai-model-cap-badge.thinking { font-size: 10px; color: var(--accent-fg); opacity: 0.7; }
-.ai-model-cap-badge.code { font-size: 8.5px; color: var(--accent-fg); opacity: 0.75; font-family: ui-monospace, monospace; }
 /* Chat mode toggle (Ask / Agent) */
 .ai-mode-toggle {
   padding: 2px 8px; font-size: 10px; font-weight: 600; border-radius: 10px; cursor: pointer;
@@ -14056,44 +12969,7 @@ function showModelChange(mi: number): string | null {
   outline: none;
 }
 .ai-settings-input:focus { border-color: var(--accent-emphasis); }
-.ai-settings-select {
-  padding: 5px 28px 5px 9px;
-  border-radius: 5px;
-  border: 1px solid var(--border-muted);
-  background: var(--bg-base);
-  color: var(--text-bright);
-  font-size: 12.5px;
-  outline: none;
-  appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='%236e7681' d='M0 0l5 6 5-6z'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 9px center;
-  cursor: pointer;
-  width: 100%;
-}
-.ai-settings-select:focus { border-color: var(--accent-emphasis); }
-.ai-settings-input--custom { margin-top: 5px; }
 .ai-settings-row--column { flex-direction: column; }
-.ai-settings-key-row { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
-.ai-settings-key-row .ai-settings-input { flex: 1; min-width: 0; }
-.ai-settings-test-btn {
-  flex-shrink: 0;
-  padding: 4px 8px;
-  border-radius: 4px;
-  border: 1px solid var(--border-muted);
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 11px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.ai-settings-test-btn:hover:not(:disabled) { border-color: var(--accent-emphasis); color: var(--accent-fg); }
-.ai-settings-test-btn:disabled { opacity: 0.5; cursor: default; }
-.ai-settings-test-ok { font-size: 14px; color: var(--success-fg); flex-shrink: 0; }
-.ai-settings-test-fail { font-size: 14px; color: var(--danger-fg); flex-shrink: 0; cursor: help; }
-.ai-settings-test-error-row { display: flex; align-items: flex-start; gap: 6px; padding: 4px 0 2px; }
-.ai-settings-test-fail-icon { color: var(--danger-fg); font-size: 12px; flex-shrink: 0; margin-top: 1px; }
-.ai-settings-test-error-msg { font-size: 11px; color: var(--danger-fg); line-height: 1.4; word-break: break-word; opacity: 0.85; }
 .ai-settings-textarea {
   padding: 5px 9px;
   border-radius: 5px;
@@ -14123,11 +12999,7 @@ function showModelChange(mi: number): string | null {
 .ai-stats-row { display: flex; align-items: center; gap: 10px; padding: 8px 0 4px; border-top: 1px solid var(--border-subtle); margin-top: 6px; flex-wrap: wrap; }
 .ai-stats-title { font-size: 11px; font-weight: 600; color: var(--text-muted); flex: 1; }
 .ai-stats-item { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
-.ai-stats-cost { color: var(--accent-emphasis); }
 .ai-settings-footer { display: flex; justify-content: flex-end; }
-.ai-tokens-row { display: flex; align-items: center; gap: 8px; }
-.ai-tokens-slider { flex: 1; accent-color: var(--accent-emphasis); }
-.ai-tokens-val { font-size: 12px; color: var(--text-bright); min-width: 48px; text-align: right; }
 .ai-rules-notice {
   font-size: 11px;
   color: var(--text-muted);
@@ -14480,9 +13352,6 @@ kbd {
 }
 .ai-modal-header code { font-size: 12px; opacity: .8; word-break: break-all; }
 .ai-modal-body { padding: 16px; }
-.ai-diff-stats {
-  display: flex; align-items: center; gap: 8px; font-size: 13px; flex-wrap: wrap;
-}
 .ai-diff-old { opacity: .6; }
 .ai-diff-arrow { opacity: .4; }
 .ai-diff-new { font-weight: 600; }

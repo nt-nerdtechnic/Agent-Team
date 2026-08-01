@@ -17,10 +17,6 @@ const EXPECTED_EXPLICIT: Readonly<Record<string, string>> = {
   'chat.stop': 'ai.chat.stop',
   'chat.settings_get': 'ai.chat.settings.get',
   'chat.settings_set': 'ai.chat.settings.set',
-  'chat.test_connection': 'ai.chat.test_connection',
-  'chat.accept_edit': 'ai.chat.accept_edit',
-  'chat.approve_command': 'ai.chat.approve_command',
-  'chat.reject_command': 'ai.chat.reject_command',
   'chat.notes_set': 'ai.chat.notes.set',
   'chat.notes_get': 'ai.chat.notes.get',
   'chat.threads_set': 'ai.chat.threads.set',
@@ -112,7 +108,6 @@ describe('eventNamespace', () => {
     expect(eventNamespace('ai.chat.chunk')).toBe('chat')
     expect(eventNamespace('ai.chat.done')).toBe('chat')
     expect(eventNamespace('ai.chat.error')).toBe('chat')
-    expect(eventNamespace('ai.chat.command_proposal')).toBe('chat')
     expect(eventNamespace('ai.review.result')).toBe('chat')
     expect(eventNamespace('ai.review.error')).toBe('chat')
   })

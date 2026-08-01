@@ -353,7 +353,6 @@
     "add-as-context": "將回應加入下一則訊息的上下文",
     "delete-exchange": "刪除此對話",
     "regenerate": "重新生成",
-    "regenerate-with-model": "以不同模型重新生成",
     "good-response": "良好回應",
     "bad-response": "不良回應",
     "clear-working-set": "清除工作集",
@@ -951,9 +950,6 @@
       "col-verdict": "結果",
       "badge-pass": "通過",
       "badge-excluded": "排除",
-      "cloud-keys": "雲端供應商 API 金鑰",
-      "cloud-keys-hint": "API 金鑰以受限制的檔案權限（0600）儲存於本地。不使用的供應商請留空。",
-      "custom-openai": "自訂 OpenAI 相容端點",
       "gguf-path-placeholder": "例如 /Users/me/models/qwen.gguf"
     }
   },

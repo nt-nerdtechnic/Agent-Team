@@ -353,7 +353,6 @@
     "add-as-context": "Add response as context for next message",
     "delete-exchange": "Delete this exchange",
     "regenerate": "Regenerate",
-    "regenerate-with-model": "Regenerate with a different model",
     "good-response": "Good response",
     "bad-response": "Bad response",
     "clear-working-set": "Clear working set",
@@ -951,9 +950,6 @@
       "col-verdict": "Verdict",
       "badge-pass": "Pass",
       "badge-excluded": "Excluded",
-      "cloud-keys": "Cloud Provider API Keys",
-      "cloud-keys-hint": "API keys are stored locally with restricted file permissions (0600). Leave blank for providers you don't use.",
-      "custom-openai": "Custom OpenAI-Compatible",
       "gguf-path-placeholder": "e.g. /Users/me/models/qwen.gguf"
     }
   },

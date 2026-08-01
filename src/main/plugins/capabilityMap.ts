@@ -68,10 +68,6 @@ const EXPLICIT_CAP_MAP: Readonly<Record<string, string>> = {
   'chat.stop': 'ai.chat.stop',
   'chat.settings_get': 'ai.chat.settings.get',
   'chat.settings_set': 'ai.chat.settings.set',
-  'chat.test_connection': 'ai.chat.test_connection',
-  'chat.accept_edit': 'ai.chat.accept_edit',
-  'chat.approve_command': 'ai.chat.approve_command',
-  'chat.reject_command': 'ai.chat.reject_command',
   'chat.notes_set': 'ai.chat.notes.set',
   'chat.notes_get': 'ai.chat.notes.get',
   'chat.threads_set': 'ai.chat.threads.set',
@@ -138,7 +134,6 @@ export const CAP_EVENTS: Readonly<Record<string, string>> = {
   'ai.chat.tool_result': 'chat',
   'ai.chat.done': 'chat',
   'ai.chat.error': 'chat',
-  'ai.chat.command_proposal': 'chat',
   // AI code-review results (useReview via ReviewPane). Part of the AI feature,
   // so gated on the chat namespace (the set has no dedicated review/ai ns).
   'ai.review.result': 'chat',

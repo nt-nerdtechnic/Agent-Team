@@ -824,12 +824,16 @@ registerCommand('workbench.action.closeActiveEditor', async () => {
   if (!activeRel.value) return
   await closeFile(activeRel.value)
 })
-registerCommand('workbench.action.saveAll', async () => {
+// Save every dirty file buffer to disk (reuses EditorPane.save, which carries
+// the mtime-conflict protection). Also passed to AIChatPane so the CLI engine
+// always reads current file content from disk before a chat turn.
+async function saveDirtyFiles(): Promise<void> {
   for (const [relPath, pane] of editorPaneRefs.entries()) {
     const f = openFiles.value.find((x) => x.relPath === relPath)
     if (f?.kind === 'file' && f.dirty) await pane.save()
   }
-})
+}
+registerCommand('workbench.action.saveAll', saveDirtyFiles)
 registerCommand('workbench.action.closeAllEditors', async () => {
   const dirty = openFiles.value.filter((f) => f.kind === 'file' && f.dirty)
   if (dirty.length > 0) {
@@ -2063,6 +2067,7 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
         :get-open-files="() => openFiles.filter(f => f.kind === 'file').map(f => f.relPath)"
         :insert-text-at-cursor="(text: string) => activeEditor()?.insertTextAtCursor?.(text)"
         :open-file="(relPath: string, line?: number) => openFile({ filepath: relPath, line })"
+        :save-dirty-files="saveDirtyFiles"
       />
     </div>
     </div><!-- end ide-body -->

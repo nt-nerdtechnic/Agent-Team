@@ -219,15 +219,6 @@ const settingsSearchItems = computed<SettingsSearchItem[]>(() => [
     keywords: 'model models benchmark download delete pull ollama 模型 基準測試 下載 刪除',
   },
   {
-    id: 'cloud-keys',
-    tab: 'analyzer',
-    section: 'cloud-keys',
-    title: 'Cloud Provider Keys / 雲端 API 金鑰',
-    group: 'Analyzer',
-    summary: 'Anthropic, OpenAI, Gemini, Groq, DeepSeek, Mistral, xAI, and OpenAI-compatible endpoint settings.',
-    keywords: 'api key keys token cloud provider anthropic openai google gemini groq deepseek mistral xai grok compatible endpoint base url 金鑰 雲端',
-  },
-  {
     id: 'appearance-theme',
     tab: 'appearance',
     section: 'appearance-theme',
@@ -384,46 +375,6 @@ async function openSettingsSearchResult(item: SettingsSearchItem): Promise<void>
 
 // Git account manager (safeStorage-backed). Lazy-loaded on tab entry.
 const accountsApi = useGitAccounts()
-
-// ── AI provider credentials (shown in Analyzer tab) ──────────────────────────
-const aiProviderKeys = ref({
-  anthropic_api_key: '',
-  openai_api_key: '',
-  google_api_key: '',
-  groq_api_key: '',
-  deepseek_api_key: '',
-  mistral_api_key: '',
-  xai_api_key: '',
-  openai_compatible_base_url: '',
-  openai_compatible_api_key: '',
-  openai_compatible_model: '',
-})
-const aiKeysDirty = ref(false)
-
-// Keep old ref alive so template refs added by the subagent don't break
-const aiChatApiKey = computed({
-  get: () => aiProviderKeys.value.anthropic_api_key,
-  set: (v: string) => { aiProviderKeys.value.anthropic_api_key = v; aiKeysDirty.value = true },
-})
-const aiChatApiKeyDirty = computed(() => aiKeysDirty.value)
-
-function fetchAiChatSettings(): void {
-  props.backend.send<Record<string, string>>('ai.chat.settings.get', {})
-    .then(r => {
-      if (!r?.ok || !r.payload) return
-      const p = r.payload
-      for (const k of Object.keys(aiProviderKeys.value) as (keyof typeof aiProviderKeys.value)[]) {
-        if (p[k] !== undefined) aiProviderKeys.value[k] = p[k] as string
-      }
-      aiKeysDirty.value = false
-    })
-    .catch(() => {/* ignore */})
-}
-function saveAiChatSettings(): void {
-  props.backend.send('ai.chat.settings.set', { ...aiProviderKeys.value })
-    .catch(() => {/* ignore */})
-  aiKeysDirty.value = false
-}
 
 // ── Antigravity credential provisioning (dev/maintainer only) ────────────────
 // Writes ~/navide-signing/usage_secrets.py so the next release build bundles
@@ -667,7 +618,6 @@ async function importSettingsBundle(): Promise<void> {
       props.pipelinesApi?.refresh() ?? Promise.resolve(),
       props.analyzerApi.refreshSettings(),
     ])
-    fetchAiChatSettings()
     const applied = resp.payload?.applied ?? []
     if (shouldReloadMcpAfterBundleImport(applied)) await mLoad(true)
     settingsBundleSummary.value = `Imported: ${applied.join(', ') || 'appearance'}`
@@ -675,40 +625,6 @@ async function importSettingsBundle(): Promise<void> {
     settingsBundleError.value = err instanceof Error ? err.message : 'Import failed'
   } finally {
     settingsBundleBusy.value = false
-  }
-}
-
-interface ProviderTestState { busy?: boolean; ok?: boolean; message?: string }
-const aiProviderTests = ref<Record<string, ProviderTestState>>({})
-
-function aiProviderTestState(provider: string): ProviderTestState {
-  return aiProviderTests.value[provider] ?? {}
-}
-
-async function testAiProvider(provider: string): Promise<void> {
-  aiProviderTests.value = {
-    ...aiProviderTests.value,
-    [provider]: { busy: true, message: 'Testing…' },
-  }
-  try {
-    const resp = await props.backend.send<{ ok: boolean; message: string }>('ai.chat.provider.test', {
-      provider,
-      settings: { ...aiProviderKeys.value },
-    }, 15_000)
-    const payload = resp.payload
-    aiProviderTests.value = {
-      ...aiProviderTests.value,
-      [provider]: {
-        busy: false,
-        ok: !!(resp.ok && payload?.ok),
-        message: payload?.message ?? resp.error?.message ?? 'Test failed',
-      },
-    }
-  } catch (err) {
-    aiProviderTests.value = {
-      ...aiProviderTests.value,
-      [provider]: { busy: false, ok: false, message: err instanceof Error ? err.message : 'Test failed' },
-    }
   }
 }
 
@@ -1122,7 +1038,6 @@ async function mOpenConfig() {
 
 watch(activeTab, (tab) => {
   if (tab === 'mcp' && mServers.value.length === 0) mLoad()
-  if (tab === 'analyzer') fetchAiChatSettings()
   if (tab === 'appearance') void loadAutoRestore()
   if (tab === 'accounts') void accountsApi.refresh()
 })
@@ -1782,74 +1697,6 @@ watch(activeTab, (tab) => {
                 </tbody>
               </table>
             </div>
-          </div>
-
-          <!-- ⑤ Cloud Provider API Keys -->
-          <div class="az-section" data-settings-section="cloud-keys">
-            <div class="az-section-title">{{ $t('settings.analyzer.cloud-keys') }}</div>
-            <p class="az-hint">{{ $t('settings.analyzer.cloud-keys-hint') }}</p>
-
-            <table class="az-key-table">
-              <tbody>
-                <tr>
-                  <td class="az-key-label">Anthropic</td>
-                  <td><input v-model="aiProviderKeys.anthropic_api_key" type="password" class="az-key-input" placeholder="sk-ant-…" @input="aiKeysDirty = true" /></td>
-                  <td class="az-key-test-cell"><button class="ghost tiny" :disabled="aiProviderTestState('anthropic').busy" @click="testAiProvider('anthropic')">Test</button><span class="az-key-test" :class="{ ok: aiProviderTestState('anthropic').ok, err: aiProviderTestState('anthropic').ok === false }">{{ aiProviderTestState('anthropic').message }}</span></td>
-                </tr>
-                <tr>
-                  <td class="az-key-label">OpenAI</td>
-                  <td><input v-model="aiProviderKeys.openai_api_key" type="password" class="az-key-input" placeholder="sk-…" @input="aiKeysDirty = true" /></td>
-                  <td class="az-key-test-cell"><button class="ghost tiny" :disabled="aiProviderTestState('openai').busy" @click="testAiProvider('openai')">Test</button><span class="az-key-test" :class="{ ok: aiProviderTestState('openai').ok, err: aiProviderTestState('openai').ok === false }">{{ aiProviderTestState('openai').message }}</span></td>
-                </tr>
-                <tr>
-                  <td class="az-key-label">Google Gemini</td>
-                  <td><input v-model="aiProviderKeys.google_api_key" type="password" class="az-key-input" placeholder="AIza…" @input="aiKeysDirty = true" /></td>
-                  <td class="az-key-test-cell"><button class="ghost tiny" :disabled="aiProviderTestState('google').busy" @click="testAiProvider('google')">Test</button><span class="az-key-test" :class="{ ok: aiProviderTestState('google').ok, err: aiProviderTestState('google').ok === false }">{{ aiProviderTestState('google').message }}</span></td>
-                </tr>
-                <tr>
-                  <td class="az-key-label">Groq</td>
-                  <td><input v-model="aiProviderKeys.groq_api_key" type="password" class="az-key-input" placeholder="gsk_…" @input="aiKeysDirty = true" /></td>
-                  <td class="az-key-test-cell"><button class="ghost tiny" :disabled="aiProviderTestState('groq').busy" @click="testAiProvider('groq')">Test</button><span class="az-key-test" :class="{ ok: aiProviderTestState('groq').ok, err: aiProviderTestState('groq').ok === false }">{{ aiProviderTestState('groq').message }}</span></td>
-                </tr>
-                <tr>
-                  <td class="az-key-label">DeepSeek</td>
-                  <td><input v-model="aiProviderKeys.deepseek_api_key" type="password" class="az-key-input" placeholder="sk-…" @input="aiKeysDirty = true" /></td>
-                  <td class="az-key-test-cell"><button class="ghost tiny" :disabled="aiProviderTestState('deepseek').busy" @click="testAiProvider('deepseek')">Test</button><span class="az-key-test" :class="{ ok: aiProviderTestState('deepseek').ok, err: aiProviderTestState('deepseek').ok === false }">{{ aiProviderTestState('deepseek').message }}</span></td>
-                </tr>
-                <tr>
-                  <td class="az-key-label">Mistral AI</td>
-                  <td><input v-model="aiProviderKeys.mistral_api_key" type="password" class="az-key-input" placeholder="…" @input="aiKeysDirty = true" /></td>
-                  <td class="az-key-test-cell"><button class="ghost tiny" :disabled="aiProviderTestState('mistral').busy" @click="testAiProvider('mistral')">Test</button><span class="az-key-test" :class="{ ok: aiProviderTestState('mistral').ok, err: aiProviderTestState('mistral').ok === false }">{{ aiProviderTestState('mistral').message }}</span></td>
-                </tr>
-                <tr>
-                  <td class="az-key-label">xAI (Grok)</td>
-                  <td><input v-model="aiProviderKeys.xai_api_key" type="password" class="az-key-input" placeholder="xai-…" @input="aiKeysDirty = true" /></td>
-                  <td class="az-key-test-cell"><button class="ghost tiny" :disabled="aiProviderTestState('xai').busy" @click="testAiProvider('xai')">Test</button><span class="az-key-test" :class="{ ok: aiProviderTestState('xai').ok, err: aiProviderTestState('xai').ok === false }">{{ aiProviderTestState('xai').message }}</span></td>
-                </tr>
-              </tbody>
-            </table>
-
-            <div class="az-section-title" style="margin-top:16px">{{ $t('settings.analyzer.custom-openai') }}</div>
-            <p class="az-hint">Point to any server exposing <code>/v1/chat/completions</code> (LM Studio, vLLM, llama.cpp, etc.).</p>
-            <table class="az-key-table">
-              <tbody>
-                <tr>
-                  <td class="az-key-label">Base URL</td>
-                  <td><input v-model="aiProviderKeys.openai_compatible_base_url" type="text" class="az-key-input" placeholder="http://localhost:1234/v1" @input="aiKeysDirty = true" /></td>
-                </tr>
-                <tr>
-                  <td class="az-key-label">API Key</td>
-                  <td><input v-model="aiProviderKeys.openai_compatible_api_key" type="password" class="az-key-input" placeholder="(optional)" @input="aiKeysDirty = true" /></td>
-                </tr>
-                <tr>
-                  <td class="az-key-label">Default Model</td>
-                  <td><input v-model="aiProviderKeys.openai_compatible_model" type="text" class="az-key-input" placeholder="e.g. llama-3.3-70b" @input="aiKeysDirty = true" /></td>
-                  <td class="az-key-test-cell"><button class="ghost tiny" :disabled="aiProviderTestState('openai_compatible').busy" @click="testAiProvider('openai_compatible')">Test</button><span class="az-key-test" :class="{ ok: aiProviderTestState('openai_compatible').ok, err: aiProviderTestState('openai_compatible').ok === false }">{{ aiProviderTestState('openai_compatible').message }}</span></td>
-                </tr>
-              </tbody>
-            </table>
-
-            <button class="ai-chat-key-save" style="margin-top:10px" :disabled="!aiKeysDirty" @click="saveAiChatSettings">Save Keys</button>
           </div>
 
         </div>
@@ -3149,51 +2996,4 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
   font-size: 11px;
 }
 
-.ai-chat-key-row { display: flex; gap: 8px; align-items: center; }
-.az-key-table { width: 100%; border-collapse: collapse; }
-.az-key-table tr + tr td { padding-top: 6px; }
-.az-key-label { width: 130px; font-size: 12px; color: var(--text-muted); padding-right: 10px; white-space: nowrap; vertical-align: middle; }
-.az-key-input { width: 100%; box-sizing: border-box; padding: 6px 10px; font-size: 12px; border: 1px solid var(--border-default); border-radius: 5px; background: var(--bg-inset); color: var(--text-bright); font-family: monospace; }
-.az-key-input:focus { outline: none; border-color: var(--accent-emphasis); }
-.az-key-test-cell {
-  width: 260px;
-  padding-left: 8px;
-  vertical-align: middle;
-}
-.az-key-test {
-  display: inline-block;
-  max-width: 190px;
-  margin-left: 6px;
-  font-size: 10.5px;
-  color: var(--text-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  vertical-align: middle;
-}
-.az-key-test.ok { color: var(--success-fg); }
-.az-key-test.err { color: var(--danger-fg); }
-.ai-chat-key-input {
-  flex: 1;
-  padding: 7px 10px;
-  font-size: 13px;
-  border: 1px solid var(--border-default);
-  border-radius: 6px;
-  background: var(--bg-inset);
-  color: var(--text-bright);
-  font-family: monospace;
-}
-.ai-chat-key-input:focus { outline: none; border-color: var(--accent-emphasis); }
-.ai-chat-key-save {
-  padding: 7px 14px;
-  font-size: 12px;
-  border: 1px solid var(--accent-emphasis);
-  border-radius: 6px;
-  background: var(--accent-emphasis);
-  color: var(--text-on-emphasis);
-  cursor: pointer;
-  transition: opacity 0.15s;
-}
-.ai-chat-key-save:disabled { opacity: 0.4; cursor: not-allowed; }
-.ai-chat-key-save:not(:disabled):hover { opacity: 0.85; }
 </style>
