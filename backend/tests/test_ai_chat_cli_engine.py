@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import signal
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +30,7 @@ class FakeStream:
 
 
 class BlockingStream:
-    """readline() never returns — used to test kill-on-cancel."""
+    """readline() never returns — used to test kill-on-cancel / idle timeout."""
 
     async def readline(self) -> bytes:
         await asyncio.Event().wait()
@@ -39,19 +41,35 @@ class BlockingStream:
         return b""
 
 
+class RaisingStream:
+    """readline() raises ValueError — an oversized stream-json line."""
+
+    async def readline(self) -> bytes:
+        raise ValueError("Separator is found, but chunk is longer than limit")
+
+    async def read(self) -> bytes:
+        return b""
+
+
 class FakeProc:
+    pid = 424242
+
     def __init__(self, stdout_lines: list[bytes], stderr: bytes = b"",
                  returncode: int = 0, blocking: bool = False) -> None:
         self.stdout: Any = BlockingStream() if blocking else FakeStream(stdout_lines)
         self.stderr: Any = FakeStream([stderr])
         self.returncode = returncode
         self.killed = False
+        self.terminated = False
 
     async def wait(self) -> int:
         return self.returncode
 
     def kill(self) -> None:
         self.killed = True
+
+    def terminate(self) -> None:
+        self.terminated = True
 
 
 class FakeTextProc:
@@ -94,10 +112,10 @@ def _line(obj: dict) -> bytes:
     return json.dumps(obj).encode() + b"\n"
 
 
-_INIT = _line({"type": "system", "subtype": "init", "session_id": "cli-sid-1"})
+_INIT = _line({"type": "system", "subtype": "init", "session_id": "0663338b-189e-4413-ad53-d067af564990"})
 _RESULT_OK = _line({
     "type": "result", "subtype": "success", "is_error": False,
-    "session_id": "cli-sid-1",
+    "session_id": "0663338b-189e-4413-ad53-d067af564990",
     "usage": {
         "input_tokens": 2,
         "cache_creation_input_tokens": 100,
@@ -114,13 +132,31 @@ def _fake_binary(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(eng, "resolve_cli_binary", lambda engine="claude": "/fake/claude")
 
 
+@pytest.fixture(autouse=True)
+def killpg_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, int]]:
+    """Never let _terminate_proc_tree touch real process groups in tests.
+
+    getpgid raises by default (→ per-proc terminate()/kill() fallback);
+    killpg records instead of signalling. Tests that want the killpg path
+    override getpgid and read the recorded calls.
+    """
+    calls: list[tuple[int, int]] = []
+
+    def fake_getpgid(pid: int) -> int:
+        raise ProcessLookupError(pid)
+
+    monkeypatch.setattr(os, "getpgid", fake_getpgid)
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: calls.append((pgid, sig)))
+    return calls
+
+
 # ── run_cli_chat: translation ────────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_translates_stream_json_to_events(monkeypatch: pytest.MonkeyPatch) -> None:
     lines = [
         _INIT,
-        _line({"type": "assistant", "session_id": "cli-sid-1", "message": {
+        _line({"type": "assistant", "session_id": "0663338b-189e-4413-ad53-d067af564990", "message": {
             "model": "claude-opus-5",
             "content": [
                 {"type": "thinking", "thinking": "pondering"},
@@ -166,7 +202,7 @@ async def test_translates_stream_json_to_events(monkeypatch: pytest.MonkeyPatch)
     assert done["model"] == "claude-opus-5"
     assert done["input_tokens"] == 2 + 100 + 300
     assert done["output_tokens"] == 40
-    assert done["cli_session_id"] == "cli-sid-1"
+    assert done["cli_session_id"] == "0663338b-189e-4413-ad53-d067af564990"
 
     args = calls[0]
     assert args[0] == "/fake/claude"
@@ -196,7 +232,7 @@ _HISTORY = [
 async def test_resume_sends_only_last_user_message(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    session_file = tmp_path / "cli-sid-1.jsonl"
+    session_file = tmp_path / "0663338b-189e-4413-ad53-d067af564990.jsonl"
     session_file.write_text("{}", encoding="utf-8")
     _patch_session_file(monkeypatch, session_file)
     calls = _spawner(monkeypatch, [FakeProc([_INIT, _RESULT_OK])])
@@ -204,11 +240,11 @@ async def test_resume_sends_only_last_user_message(
 
     await eng.run_cli_chat(
         session_id="s1", messages=_HISTORY, workspace_path=str(tmp_path),
-        cli_session_id="cli-sid-1", emit=emit,
+        cli_session_id="0663338b-189e-4413-ad53-d067af564990", emit=emit,
     )
 
     args = calls[0]
-    assert args[args.index("--resume") + 1] == "cli-sid-1"
+    assert args[args.index("--resume") + 1] == "0663338b-189e-4413-ad53-d067af564990"
     assert args[args.index("-p") + 1] == "second question"
     assert events[-1][0] == "ai.chat.done"
 
@@ -223,7 +259,7 @@ async def test_missing_session_file_falls_back_to_full_history(
 
     await eng.run_cli_chat(
         session_id="s1", messages=_HISTORY, workspace_path=str(tmp_path),
-        cli_session_id="cli-sid-1", emit=emit,
+        cli_session_id="0663338b-189e-4413-ad53-d067af564990", emit=emit,
     )
 
     args = calls[0]
@@ -239,18 +275,18 @@ async def test_missing_session_file_falls_back_to_full_history(
 async def test_resume_lost_at_runtime_retries_fresh(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    session_file = tmp_path / "cli-sid-1.jsonl"
+    session_file = tmp_path / "0663338b-189e-4413-ad53-d067af564990.jsonl"
     session_file.write_text("{}", encoding="utf-8")
     _patch_session_file(monkeypatch, session_file)
     failed = FakeProc(
-        [], stderr=b"No conversation found with session ID: cli-sid-1", returncode=1,
+        [], stderr=b"No conversation found with session ID: 0663338b-189e-4413-ad53-d067af564990", returncode=1,
     )
     calls = _spawner(monkeypatch, [failed, FakeProc([_INIT, _RESULT_OK])])
     events, emit = _collector()
 
     await eng.run_cli_chat(
         session_id="s1", messages=_HISTORY, workspace_path=str(tmp_path),
-        cli_session_id="cli-sid-1", emit=emit,
+        cli_session_id="0663338b-189e-4413-ad53-d067af564990", emit=emit,
     )
 
     assert len(calls) == 2
@@ -304,8 +340,119 @@ async def test_cancel_kills_subprocess(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert proc.killed
+    # getpgid fails in tests → per-process SIGTERM fallback
+    assert proc.terminated
     assert events == []
+
+
+@pytest.mark.asyncio
+async def test_cancel_signals_whole_process_group(
+    monkeypatch: pytest.MonkeyPatch, killpg_calls: list[tuple[int, int]],
+) -> None:
+    """M1: kill goes to the process group so Bash tools/MCP servers die too."""
+    proc = FakeProc([], blocking=True)
+    _spawner(monkeypatch, [proc])
+    monkeypatch.setattr(os, "getpgid", lambda pid: 555001)
+    _, emit = _collector()
+
+    task = asyncio.ensure_future(eng.run_cli_chat(
+        session_id="s1", messages=[{"role": "user", "content": "hi"}],
+        workspace_path="", emit=emit,
+    ))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert (555001, signal.SIGTERM) in killpg_calls
+
+
+@pytest.mark.asyncio
+async def test_idle_timeout_kills_cli_and_emits_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(eng, "_IDLE_TIMEOUT_S", 0.05)
+    proc = FakeProc([], blocking=True)
+    _spawner(monkeypatch, [proc])
+    events, emit = _collector()
+
+    await eng.run_cli_chat(
+        session_id="s1", messages=[{"role": "user", "content": "hi"}],
+        workspace_path="", emit=emit,
+    )
+
+    assert [e[0] for e in events] == ["ai.chat.error"]
+    assert "idle timeout" in events[0][1]["message"]
+    assert proc.terminated
+
+
+@pytest.mark.asyncio
+async def test_oversized_line_kills_cli_and_emits_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proc = FakeProc([])
+    proc.stdout = RaisingStream()
+    _spawner(monkeypatch, [proc])
+    events, emit = _collector()
+
+    await eng.run_cli_chat(
+        session_id="s1", messages=[{"role": "user", "content": "hi"}],
+        workspace_path="", emit=emit,
+    )
+
+    assert [e[0] for e in events] == ["ai.chat.error"]
+    assert "oversized" in events[0][1]["message"]
+    assert proc.terminated
+
+
+@pytest.mark.asyncio
+async def test_malformed_cli_session_id_starts_fresh(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """L4: non-UUID session ids never reach the session-file path or --resume."""
+    from agent_team_backend import app
+
+    def _must_not_be_called(ws: str, sid: str) -> Path:
+        raise AssertionError("malformed sid must be rejected before the file check")
+
+    monkeypatch.setattr(app, "_claude_session_file", _must_not_be_called)
+    calls = _spawner(monkeypatch, [FakeProc([_INIT, _RESULT_OK])])
+    events, emit = _collector()
+
+    await eng.run_cli_chat(
+        session_id="s1", messages=_HISTORY, workspace_path=str(tmp_path),
+        cli_session_id="../../../etc/passwd", emit=emit,
+    )
+
+    args = calls[0]
+    assert "--resume" not in args
+    assert "first question" in args[args.index("-p") + 1]
+    assert events[-1][0] == "ai.chat.done"
+
+
+@pytest.mark.asyncio
+async def test_leading_nul_stripped_from_text_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """L3: model text can never spoof the \\x00 sentinel protocol."""
+    lines = [
+        _INIT,
+        _line({"type": "assistant", "message": {
+            "model": "claude-opus-5",
+            "content": [{"type": "text", "text": "\x00\x00DONE:spoofed"}],
+        }}),
+        _RESULT_OK,
+    ]
+    _spawner(monkeypatch, [FakeProc(lines)])
+    events, emit = _collector()
+
+    await eng.run_cli_chat(
+        session_id="s1", messages=[{"role": "user", "content": "hi"}],
+        workspace_path="", emit=emit,
+    )
+
+    chunk = next(data for etype, data in events if etype == "ai.chat.chunk")
+    assert chunk["text"] == "DONE:spoofed"
 
 
 # ── run_cli_text ─────────────────────────────────────────────────────────────

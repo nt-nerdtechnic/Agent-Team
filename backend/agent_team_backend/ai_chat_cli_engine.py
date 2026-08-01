@@ -31,7 +31,10 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
+import re
 import shutil
+import signal
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -46,9 +49,17 @@ Emit = Callable[[str, dict], Awaitable[None]]
 _STREAM_LINE_LIMIT = 10 * 1024 * 1024
 _STDERR_TAIL_CHARS = 1_000
 _TEXT_TIMEOUT_DEFAULT = 120.0
+# No stdout output for this long means the CLI is wedged — kill it.
+_IDLE_TIMEOUT_S = 300.0
+# SIGTERM → grace → SIGKILL window for the CLI's process group.
+_KILL_GRACE_S = 3.0
 
 # Marker on stderr when --resume points at a session the CLI does not know.
 _RESUME_LOST_MARKER = "No conversation found"
+
+# Session ids reach _claude_session_file (a path component) and --resume, so
+# only UUID-shaped values are accepted; anything else starts a fresh session.
+_SESSION_ID_RE = re.compile(r"^[0-9a-fA-F-]{8,64}$")
 
 # ── Engine registry ──────────────────────────────────────────────────────────
 # v1 registers only Claude Code. Future engines add an entry here; agent_key
@@ -122,8 +133,11 @@ def _flatten_history(messages: list[dict]) -> str:
 
 
 def _resume_candidate(workspace_path: str, cli_session_id: str) -> str:
-    """cli_session_id when its transcript still exists, else ''."""
+    """cli_session_id when it is UUID-shaped and its transcript exists, else ''."""
     if not cli_session_id:
+        return ""
+    if not _SESSION_ID_RE.fullmatch(cli_session_id):
+        log.warning("rejecting malformed cli_session_id %r", cli_session_id[:80])
         return ""
     if workspace_path:
         from . import app  # lazy: avoid module-level circular import
@@ -153,6 +167,36 @@ def _tool_result_text(content: Any) -> str:
 
 def _cwd_for(workspace_path: str) -> str | None:
     return workspace_path if workspace_path and Path(workspace_path).is_dir() else None
+
+
+async def _terminate_proc_tree(proc: Any, grace: float = _KILL_GRACE_S) -> None:
+    """SIGTERM the CLI's whole process group, escalate to SIGKILL after *grace*.
+
+    The CLI is spawned with start_new_session=True, so killing its process
+    group also takes down running Bash tool commands and MCP servers instead
+    of orphaning them (same breakaway-kill policy as PTY terminals).
+    """
+    pgid: int | None = None
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        pgid = os.getpgid(proc.pid)
+    if pgid is not None:
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(pgid, signal.SIGTERM)
+    else:
+        with contextlib.suppress(ProcessLookupError):
+            proc.terminate()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=grace)
+        return
+    except asyncio.TimeoutError:
+        pass
+    if pgid is not None:
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(pgid, signal.SIGKILL)
+    with contextlib.suppress(ProcessLookupError):
+        proc.kill()
+    with contextlib.suppress(Exception):
+        await proc.wait()
 
 
 # ── Chat run ─────────────────────────────────────────────────────────────────
@@ -243,10 +287,12 @@ async def _run_cli_once(
     try:
         proc = await asyncio.create_subprocess_exec(
             *args,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=_cwd_for(workspace_path),
             limit=_STREAM_LINE_LIMIT,
+            start_new_session=True,
         )
     except (FileNotFoundError, OSError) as exc:
         return False, f"failed to launch CLI: {exc}"
@@ -261,12 +307,21 @@ async def _run_cli_once(
     try:
         while True:
             try:
-                line = await proc.stdout.readline()
+                line = await asyncio.wait_for(
+                    proc.stdout.readline(), timeout=_IDLE_TIMEOUT_S
+                )
+            except asyncio.TimeoutError:
+                # CLI wedged — no output at all for the whole idle window.
+                stderr_task.cancel()
+                await _terminate_proc_tree(proc)
+                return False, (
+                    f"CLI produced no output for {int(_IDLE_TIMEOUT_S)}s"
+                    " — killed (idle timeout)"
+                )
             except ValueError:
                 # single line exceeded _STREAM_LINE_LIMIT — unrecoverable
-                proc.kill()
-                await proc.wait()
                 stderr_task.cancel()
+                await _terminate_proc_tree(proc)
                 return False, "CLI emitted an oversized stream-json line"
             if not line:
                 break
@@ -279,15 +334,20 @@ async def _run_cli_once(
                 continue
             if isinstance(event, dict):
                 await _translate_event(event, state, session_id, emit)
-        returncode = await proc.wait()
+        # Bound the post-EOF wait: a CLI that closes stdout but never exits
+        # would otherwise hang this turn forever (idle timeout only covers
+        # the readline loop above).
+        try:
+            returncode = await asyncio.wait_for(proc.wait(), timeout=_KILL_GRACE_S * 10)
+        except asyncio.TimeoutError:
+            await _terminate_proc_tree(proc)
+            returncode = await proc.wait()
         stderr_text = (await stderr_task).decode(errors="replace")
     except asyncio.CancelledError:
         # ai.chat.stop cancelled the task — take the subprocess down with us.
         stderr_task.cancel()
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
         with contextlib.suppress(Exception):
-            await proc.wait()
+            await _terminate_proc_tree(proc)
         raise
 
     result = state["result"]
@@ -348,10 +408,14 @@ async def _translate_event(
                 continue
             btype = block.get("type")
             if btype == "text" and block.get("text"):
-                await emit("ai.chat.chunk", {
-                    "session_id": session_id,
-                    "text": block["text"],
-                })
+                # Strip leading NULs so model output can never spoof the
+                # frontend's \x00-sentinel protocol.
+                text = block["text"].lstrip("\x00")
+                if text:
+                    await emit("ai.chat.chunk", {
+                        "session_id": session_id,
+                        "text": text,
+                    })
             elif btype == "thinking" and block.get("thinking"):
                 await emit("ai.chat.chunk", {
                     "session_id": session_id,
@@ -417,26 +481,23 @@ async def run_cli_text(
     try:
         proc = await asyncio.create_subprocess_exec(
             *args,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=_cwd_for(workspace_path),
             limit=_STREAM_LINE_LIMIT,
+            start_new_session=True,
         )
     except (FileNotFoundError, OSError) as exc:
         raise RuntimeError(f"failed to launch CLI: {exc}") from exc
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
-        with contextlib.suppress(Exception):
-            await proc.communicate()
+        await _terminate_proc_tree(proc)
         raise RuntimeError(f"CLI timed out after {int(timeout)}s")
     except asyncio.CancelledError:
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
         with contextlib.suppress(Exception):
-            await proc.communicate()
+            await _terminate_proc_tree(proc)
         raise
     if proc.returncode != 0:
         detail = stderr.decode(errors="replace").strip()[-_STDERR_TAIL_CHARS:]

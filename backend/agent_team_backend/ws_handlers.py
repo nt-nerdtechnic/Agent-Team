@@ -83,8 +83,10 @@ def lookup(msg_type: str) -> Handler | None:
 # ── Editor AI (editor.*) ────────────────────────────────────────────────────
 @handler("editor.rewrite")
 async def editor_rewrite(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    from . import app
     from .ai_chat_cli_engine import run_cli_text
 
+    await app._ensure_fresh_path_for_spawn("claude")
     _rew_code = payload.get("code", "") or ""
     _rew_instr = payload.get("instruction", "") or ""
     _rew_lang = payload.get("language", "") or ""
@@ -3108,9 +3110,11 @@ async def ai_enhance_prompt(session: "Session", msg_id: str, msg_type: str, payl
         await session.send_json(make_error(msg_id, msg_type, "BAD_REQUEST", "prompt is required"))
     else:
         try:
+            from . import app
             from .ai_chat_cli_engine import run_cli_text
             # payload model/provider overrides are obsolete — the CLI engine
             # uses the CLI's own configured model.
+            await app._ensure_fresh_path_for_spawn("claude")
             _ep_content = await run_cli_text(_ep_prompt, system_prompt=_ep_system, timeout=60.0)
             await session.send_json(make_response(msg_id, msg_type, {"ok": True, "content": _ep_content}))
         except Exception as _ep_exc:
@@ -3229,6 +3233,7 @@ async def ai_review_start(session: "Session", msg_id: str, msg_type: str, payloa
         import json as _json
         from .review_service import stream_review
         try:
+            await app._ensure_fresh_path_for_spawn("claude")
             if m == "branch":
                 _b = b or "main"
                 if not c:

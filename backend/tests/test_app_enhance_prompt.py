@@ -20,6 +20,14 @@ def _session() -> app.Session:
     return app.Session(FakeWebSocket())  # type: ignore[arg-type]
 
 
+@pytest.fixture(autouse=True)
+def _no_path_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def noop(agent_key: str) -> None:
+        return None
+
+    monkeypatch.setattr(app, "_ensure_fresh_path_for_spawn", noop)
+
+
 def _fake_run_cli_text(captured: list[dict[str, Any]], result: str):
     async def fake_run_cli_text(prompt: str, **kwargs: Any) -> str:
         captured.append({"prompt": prompt, **kwargs})
