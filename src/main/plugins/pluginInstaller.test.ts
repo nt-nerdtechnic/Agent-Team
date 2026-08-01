@@ -256,7 +256,10 @@ describe('official (navide.) install policy', () => {
     ).rejects.toThrow(/official/)
   })
 
-  it('rejects any navide. package when no pinned key is configured (fail-closed)', async () => {
+  // Without an override the pin is the shipped constant, so this test key is
+  // rejected for mismatching it rather than for there being no pin at all —
+  // which is what proves the constant is actually in force.
+  it('rejects a navide. package signed by anything but the shipped pin', async () => {
     delete process.env['AGENT_TEAM_OFFICIAL_PLUGIN_KEY']
     const { bytes, digest } = officialPkg()
     const { deps } = fakeDeps(bytes, digest)
@@ -270,7 +273,7 @@ describe('official (navide.) install policy', () => {
         },
         deps
       )
-    ).rejects.toThrow(/no pinned official/)
+    ).rejects.toThrow(/not signed by the pinned official publisher key/)
   })
 
   it('does not write a receipt for a third-party install', async () => {

@@ -104,11 +104,22 @@ export const OFFICIAL_PLUGIN_PREFIX = 'navide.'
 
 /**
  * Build-time pinned official publisher public key (PEM SubjectPublicKeyInfo,
- * Ed25519). Intentionally EMPTY until the production official keypair is
- * minted — an empty pin means every `navide.` install is refused (fail-closed),
- * it never means "skip the check".
+ * Ed25519). An empty pin means every `navide.` install is refused
+ * (fail-closed); it never means "skip the check".
+ *
+ * The matching private key is NOT in this repo — it lives beside the macOS
+ * signing assets in `~/navide-signing/plugin_publisher.key` (0600) and must be
+ * backed up with them. Losing it means no further official plugin package can
+ * be published under this pin; rotating it requires shipping a new app build,
+ * since the pin is a build-time constant.
+ *
+ * SHA256 of the SPKI DER:
+ * c7c56410028133b00fd6056493186ab6c4badc497a42635626b82b0ea163bca8
  */
-export const OFFICIAL_PUBLISHER_KEY_PEM = ''
+export const OFFICIAL_PUBLISHER_KEY_PEM = `-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAXhRZlYmlpSq1O0YEg1aRFfIsJKa3021/wYtO6sbRd4k=
+-----END PUBLIC KEY-----
+`
 
 /** True when `id` claims the official first-party namespace. */
 export function isOfficialPluginId(id: string): boolean {

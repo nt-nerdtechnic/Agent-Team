@@ -10,6 +10,7 @@ import {
   isOfficialPluginId,
   publicKeysEqual,
   resolveOfficialPublisherKey,
+  OFFICIAL_PUBLISHER_KEY_PEM,
   sensitiveCapabilities,
   verifyPackage,
   PluginVerifyError,
@@ -209,13 +210,24 @@ describe('official publisher pinning', () => {
     expect(isOfficialPluginId('acme.demo')).toBe(false)
   })
 
-  it('resolveOfficialPublisherKey: env override wins, empty → null (fail-closed)', () => {
+  it('resolveOfficialPublisherKey: env override wins, else the shipped pin', () => {
     expect(resolveOfficialPublisherKey({ AGENT_TEAM_OFFICIAL_PLUGIN_KEY: officialPem })).toBe(
       officialPem.trim()
     )
-    // No env override and an empty build-time constant → no pinned key at all.
-    expect(resolveOfficialPublisherKey({})).toBeNull()
-    expect(resolveOfficialPublisherKey({ AGENT_TEAM_OFFICIAL_PLUGIN_KEY: '   ' })).toBeNull()
+    // No usable override → the build-time pin. Asserting it is a parseable key
+    // (not just non-empty) is what catches a mangled paste of the constant.
+    expect(resolveOfficialPublisherKey({})).toBe(OFFICIAL_PUBLISHER_KEY_PEM)
+    expect(resolveOfficialPublisherKey({ AGENT_TEAM_OFFICIAL_PLUGIN_KEY: '   ' })).toBe(
+      OFFICIAL_PUBLISHER_KEY_PEM
+    )
+    expect(publicKeysEqual(OFFICIAL_PUBLISHER_KEY_PEM, OFFICIAL_PUBLISHER_KEY_PEM)).toBe(true)
+  })
+
+  it('the shipped pin is a real Ed25519 key, not a placeholder', () => {
+    // An empty or malformed constant would silently turn every official
+    // install into a no-pin refusal, which no other test would notice.
+    expect(OFFICIAL_PUBLISHER_KEY_PEM).not.toBe('')
+    expect(publicKeysEqual(OFFICIAL_PUBLISHER_KEY_PEM, officialPem)).toBe(false)
   })
 
   it('publicKeysEqual compares DER bytes, tolerating whitespace, never throwing', () => {

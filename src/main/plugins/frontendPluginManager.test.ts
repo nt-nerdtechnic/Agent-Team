@@ -415,13 +415,18 @@ describe('loadInstalledPlugins official receipt gate', () => {
     expect(errors.join(' ')).toMatch(/pinned official key/)
   })
 
-  it('refuses every navide. plugin when no pinned key is configured (fail-closed)', () => {
+  it('falls back to the shipped pin when no env override is set', () => {
+    // Without an override the pin comes from OFFICIAL_PUBLISHER_KEY_PEM, so this
+    // test-only key is refused for MISMATCHING the pin — not for the absence of
+    // one. That distinction is what proves the shipped constant is wired in; if
+    // it were ever emptied, the message would revert to "no pinned official".
     delete process.env['AGENT_TEAM_OFFICIAL_PLUGIN_KEY']
     writePlugin('navide.mini-ide', officialReceipt('navide.mini-ide'))
     const mgr = new FrontendPluginManager()
     const { loaded, errors } = mgr.loadInstalledPlugins(root)
     expect(loaded).toEqual([])
-    expect(errors.join(' ')).toMatch(/no pinned official/)
+    expect(errors.join(' ')).toMatch(/pinned official key/)
+    expect(errors.join(' ')).not.toMatch(/no pinned official/)
   })
 
   it('loads third-party plugins with no receipt requirement', () => {
