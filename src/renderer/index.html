@@ -9,6 +9,21 @@
          token CSS only loads with the module bundle. Vue clears #app on mount,
          so this is auto-removed and the Vue boot overlay takes over seamlessly. -->
     <style>
+      /* Shared reset for every `?window=` app. Without it body keeps the UA
+         default 8px margin and a transparent background, so the BrowserWindow
+         backgroundColor (#0d1117) bleeds through as a dark frame around any
+         window app that only ships scoped styles. The body background uses the
+         theme token so gaps stay theme-colored even if a root container ever
+         fails to fill the viewport. */
+      html,
+      body,
+      #app {
+        margin: 0;
+        height: 100%;
+      }
+      body {
+        background: var(--bg-inset, #0d1117);
+      }
       #pre-splash {
         position: fixed;
         inset: 0;
