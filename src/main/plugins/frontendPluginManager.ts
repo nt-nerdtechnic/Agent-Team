@@ -9,7 +9,7 @@
 
 import { BrowserWindow, WebContentsView, ipcMain, type WebContents } from 'electron'
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { WebSocket as NodeWebSocket } from 'ws'
 import {
   parseCapabilityCall,
@@ -176,7 +176,7 @@ export class FrontendPluginManager {
       // Host-implemented capability (ui.open_in_editor): main services it
       // directly — no backend round-trip.
       if (plan.kind === 'host') {
-        return this.runHostAction(call)
+        return this.runHostAction(call, plugin)
       }
 
       const client = this.ensureBackend()
@@ -257,22 +257,35 @@ export class FrontendPluginManager {
   }
 
   /** Service a host-implemented capability call (see HOST_CAPABILITIES). */
-  private runHostAction(call: CapabilityCall): CapabilityResponse {
+  private runHostAction(call: CapabilityCall, plugin: RunningPlugin): CapabilityResponse {
     // Only open_in_editor exists today; a second action gets a switch.
     const args = (typeof call.args === 'object' && call.args !== null ? call.args : {}) as Record<
       string,
       unknown
     >
-    const workspacePath = typeof args.workspace_path === 'string' ? args.workspace_path : ''
+    // The workspace comes from the query the HOST launched this view with —
+    // never from the call. A plugin-supplied root would defeat the containment
+    // check below by simply claiming '/', and the target is handed to the
+    // mini-IDE or (as a fallback) to the OS default application.
+    const workspacePath = workspaceOf(plugin.query)
     const filepath = typeof args.filepath === 'string' ? args.filepath : ''
     if (!workspacePath || !filepath) {
-      return buildError(call.reqId, 'BAD_REQUEST', 'workspace_path and filepath are required')
+      return buildError(call.reqId, 'BAD_REQUEST', 'filepath is required inside a workspace view')
+    }
+    // Containment: resolve against the workspace root and keep only targets
+    // that stay under it, so neither '../' traversal nor an absolute path can
+    // reach a file the view was never given. The normalized relative path is
+    // what downstream receives, so both open routes agree on the target.
+    const root = resolve(workspacePath)
+    const rel = relative(root, resolve(root, filepath))
+    if (!rel || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+      return buildError(call.reqId, 'BAD_REQUEST', 'filepath escapes the workspace')
     }
     const handler = this.openInEditorHandler
     if (!handler) {
       return buildError(call.reqId, 'BACKEND_ERROR', 'editor open handler not registered')
     }
-    const opened = handler({ workspace_path: workspacePath, filepath })
+    const opened = handler({ workspace_path: workspacePath, filepath: rel })
     return buildSuccess(call.reqId, { ok: true, opened })
   }
 

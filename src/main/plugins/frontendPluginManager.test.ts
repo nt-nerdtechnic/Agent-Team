@@ -208,7 +208,7 @@ interface FakeWindowLike {
   close(): void
   emit(event: string, ...args: unknown[]): void
 }
-const { ipcListeners, views, windows } = (
+const { ipcHandlers, ipcListeners, views, windows } = (
   electron as unknown as {
     __mock: {
       ipcHandlers: Map<string, (...args: unknown[]) => unknown>
@@ -824,5 +824,92 @@ describe('mini-IDE dedicated window (openMiniIdePluginView)', () => {
     expect(views.length).toBe(viewsBefore + 1) // fresh view
     expect(lastWindow()).not.toBe(win1)
     expect(lastView().webContents.loads).toHaveLength(1)
+  })
+})
+
+describe('ui.open_in_editor host capability — workspace containment', () => {
+  const CALL = 'plugin:cap:call'
+
+  /** Open a `ui`-granted view bound to /ws and return the call seam. */
+  function openUiPlugin(): {
+    mgr: FrontendPluginManager
+    view: FakeViewLike
+    opens: Array<Record<string, string>>
+    call: (args: Record<string, unknown>) => Promise<{
+      ok?: boolean
+      result?: unknown
+      error?: { code: string; message: string }
+    }>
+  } {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    mgr.open(
+      asHost(host),
+      {
+        id: 'acme.viewer',
+        requires: ['ui'],
+        devUrl: '',
+        entryFile: '/plugins/acme.viewer/index.html',
+        query: '?workspace_path=/ws',
+      },
+      'fill'
+    )
+    const view = views[views.length - 1]
+    const opens: Array<Record<string, string>> = []
+    mgr.setOpenInEditorHandler((params) => {
+      opens.push(params)
+      return true
+    })
+    const handler = ipcHandlers.get(CALL)
+    expect(handler).toBeDefined()
+    return {
+      mgr,
+      view,
+      opens,
+      call: async (args) =>
+        (await handler!({ sender: { id: view.webContents.id } }, {
+          reqId: 'r1',
+          ns: 'ui',
+          method: 'open_in_editor',
+          args,
+        })) as { ok?: boolean; error?: { code: string; message: string } },
+    }
+  }
+
+  it('uses the host-assigned workspace and ignores a plugin-supplied one', async () => {
+    const { opens, call } = openUiPlugin()
+    // A malicious view claims the whole filesystem as its root; the host's own
+    // /ws binding must win, which then makes the path escape-checkable.
+    const resp = await call({ workspace_path: '/', filepath: 'ws/src/app.ts' })
+    expect(resp.error).toBeUndefined()
+    expect(opens).toEqual([{ workspace_path: '/ws', filepath: 'ws/src/app.ts' }])
+  })
+
+  it('rejects a traversal that escapes the workspace', async () => {
+    const { opens, call } = openUiPlugin()
+    const resp = await call({ filepath: '../../Users/neillu/.ssh/id_rsa' })
+    expect(resp.error?.code).toBe('BAD_REQUEST')
+    expect(opens).toEqual([])
+  })
+
+  it('rejects an absolute path outside the workspace', async () => {
+    const { opens, call } = openUiPlugin()
+    const resp = await call({ workspace_path: '/', filepath: '/etc/passwd' })
+    expect(resp.error?.code).toBe('BAD_REQUEST')
+    expect(opens).toEqual([])
+  })
+
+  it('normalizes an in-workspace path before handing it downstream', async () => {
+    const { opens, call } = openUiPlugin()
+    const resp = await call({ filepath: 'src/../README.md' })
+    expect(resp.error).toBeUndefined()
+    expect(opens).toEqual([{ workspace_path: '/ws', filepath: 'README.md' }])
+  })
+
+  it('rejects a bare workspace reference (no file to open)', async () => {
+    const { opens, call } = openUiPlugin()
+    const resp = await call({ filepath: '.' })
+    expect(resp.error?.code).toBe('BAD_REQUEST')
+    expect(opens).toEqual([])
   })
 })
