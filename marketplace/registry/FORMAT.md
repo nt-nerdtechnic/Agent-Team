@@ -45,7 +45,7 @@ needed for discovery — these are an additive superset, not a divergent schema.
 | `engines` | object | yes | Non-empty `{host: range}`; host-API compat lives here, e.g. `{"navide": "^0.1.0"}`. |
 | `entry` | string | no | Plugin entry file. |
 | `contributes` | object | no | `{ "views": [{id,title}], "commands": [{id,title}] }`. |
-| `requires` | string[] | no | Capabilities; each must be one of `fs, git, terminal, search, chat, ui`. |
+| `requires` | string[] | no | Capabilities; each must be one of `fs, git, terminal, search, chat, ui, issues, plans`. |
 | `activationEvents` | string[] | no | Each matches `onStartup` \| `onView:<id>` \| `onCommand:<id>`. |
 | `displayName` | string | no | *marketplace* — falls back to `name` when absent. |
 | `description` | string | no | *marketplace* — used by search. |
