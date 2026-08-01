@@ -387,6 +387,11 @@ contextBridge.exposeInMainWorld('agentTeam', {
     ipcRenderer.on('cli:external-pane-drop', listener)
     return () => ipcRenderer.removeListener('cli:external-pane-drop', listener)
   },
+  // Terminal right-click. xterm keeps its selection out of the DOM, so main
+  // cannot read it from the context-menu params and the pane hands it over.
+  showTerminalContextMenu: (selection: string): void => {
+    ipcRenderer.send('terminal:context-menu', selection)
+  },
   setBadgeCount: (count: number): void => {
     ipcRenderer.send('window:setBadgeCount', count)
   },

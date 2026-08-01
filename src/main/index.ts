@@ -10,6 +10,7 @@ import { openNoopPluginView, openFsProbePluginView, openMiniIdePluginView, devMi
 import { registerPluginIpc } from './plugins/pluginIpc'
 import { registerStorageIpc } from './storage-ipc'
 import { lockPageZoom } from './web-contents-zoom'
+import { installContextMenu, registerTerminalContextMenu } from './context-menu'
 import { initUpdater } from './updater'
 import { WindowRegistry, type WindowBounds, type WindowEntry } from './window-registry'
 import { setWindowDockTileBadge } from './dock-tile-badge'
@@ -1648,6 +1649,9 @@ app.on('web-contents-created', (_e, contents) => {
   // Pane zoom changes terminal/editor font size only. Never let a retained
   // Chromium/Electron page zoom scale the entire Navide interface.
   lockPageZoom(contents)
+  // Electron has no default right-click menu; without this one, right-click is
+  // inert everywhere and there is no fallback path for copy/paste.
+  installContextMenu(contents)
   contents.on('will-navigate', (e, url) => {
     if (!isAppNavigation(url)) e.preventDefault()
   })
@@ -1656,6 +1660,7 @@ app.on('web-contents-created', (_e, contents) => {
     return { action: 'deny' }
   })
 })
+registerTerminalContextMenu()
 
 app.whenReady().then(async () => {
   if (!gotSingleInstanceLock) return

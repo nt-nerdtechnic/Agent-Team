@@ -202,6 +202,12 @@ function onTerminalDragLeave(): void {
   isPlanDragOver.value = false
 }
 
+// xterm's selection lives outside the DOM, so main cannot read it from the
+// context-menu params — pass it along with the request.
+function onTerminalContextMenu(): void {
+  window.agentTeam?.showTerminalContextMenu?.(terminal.getSelection())
+}
+
 function onTerminalDrop(e: DragEvent): void {
   isDragOver.value = false
   isCliDragOver.value = false
@@ -404,6 +410,7 @@ onMounted(() => {
       :class="{ 'drag-over': isDragOver, 'cli-drag-over': isCliDragOver, 'plan-drag-over': isPlanDragOver, 'alt-buffer': terminal.isAltBuffer.value }"
       :data-pane-id="paneId"
       @mousedown.left="emit('set-focus')"
+      @contextmenu.prevent="onTerminalContextMenu"
       @dragover.prevent="onTerminalDragOver"
       @dragenter.prevent="onTerminalDragOver"
       @dragleave="onTerminalDragLeave"

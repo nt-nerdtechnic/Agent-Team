@@ -77,24 +77,6 @@ interface ToolCallCard {
   collapsed: boolean
 }
 
-interface EditProposalCard {
-  kind: 'edit_proposal'
-  tool_id: string
-  file_path: string
-  new_content: string
-  diff: string
-  accepted: boolean
-  discarded: boolean
-}
-
-interface CommandProposalCard {
-  kind: 'command_proposal'
-  tool_id: string
-  command: string
-  cwd: string
-  status: 'pending' | 'approved' | 'rejected'
-}
-
 interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
@@ -111,7 +93,7 @@ interface ChatMessage {
   outputTokens?: number    // from backend usage data
   isError?: boolean        // true when last chunk was an error
   errorMsg?: string
-  cards?: Array<ToolCallCard | EditProposalCard | CommandProposalCard>
+  cards?: ToolCallCard[]
   bookmarked?: boolean
   feedback?: 'up' | 'down'
   feedbackComment?: string
@@ -215,8 +197,6 @@ async function enhancePrompt(): Promise<void> {
     const resp = await props.backend.send<{ ok: boolean; content?: string; error?: string }>('ai.enhance_prompt', {
       system: systemMsg,
       prompt: draft,
-      model: settingsModel.value,
-      provider: settingsProvider.value,
     })
     if (resp.payload?.ok && resp.payload.content) {
       inputText.value = resp.payload.content
@@ -616,7 +596,7 @@ async function applyAllEdits(msg: ChatMessage): Promise<void> {
 }
 
 // ── Conversation thread persistence ──────────────────────────────────────────
-interface ChatThread { id: string; title: string; messages: ChatMessage[]; updatedAt: number; pinned?: boolean; archived?: boolean; model?: string; checkpoints?: ChatCheckpoint[]; systemPrompt?: string; label?: string; color?: string; pinnedChips?: ContextChip[]; forkedFrom?: string }
+interface ChatThread { id: string; title: string; messages: ChatMessage[]; updatedAt: number; pinned?: boolean; archived?: boolean; model?: string; checkpoints?: ChatCheckpoint[]; systemPrompt?: string; label?: string; color?: string; pinnedChips?: ContextChip[]; forkedFrom?: string; cliSessionId?: string }
 const MAX_THREADS = 20
 const MAX_MESSAGES = 500
 // Legacy localStorage keys — read only by the one-time per-workspace migration.
@@ -932,14 +912,6 @@ async function loadThreads(): Promise<void> {
   const latest = allThreads.value[0]
   currentThreadId.value = latest.id
   messages.value = latest.messages.map((m) => ({ ...m, streaming: false, thinking: false }))
-  // Restore per-conversation model if the thread has one
-  if (latest.model) {
-    const entry = MODEL_CATALOG.find((m) => m.id === latest.model)
-    if (entry) {
-      settingsProvider.value = entry.provider === 'auto' ? settingsProvider.value : entry.provider
-      settingsModel.value = latest.model
-    }
-  }
   // Loading is async now — re-render any mermaid diagrams persisted in the
   // thread history (the mount-time render pass may have run before this).
   void nextTick(renderMermaidBlocks)
@@ -1013,16 +985,7 @@ function switchThread(id: string): void {
   _saveLastVisited()
   messages.value = thread.messages.map((m) => ({ ...m, streaming: false, thinking: false }))
   checkpoints.value = thread.checkpoints ?? []
-  expandedMsgIdxs.value = new Set(); expandedDiffs.value = new Set()
-  // Restore per-conversation model override when switching threads (silently)
-  if (thread.model) {
-    const entry = MODEL_CATALOG.find((m) => m.id === thread.model)
-    if (entry) {
-      if (entry.provider !== 'auto') settingsProvider.value = entry.provider
-      settingsModel.value = thread.model
-      _pushSettingsToBackend()
-    }
-  }
+  expandedMsgIdxs.value = new Set()
   // Clear edit-mode working set on thread switch
   editWorkingSet.value = []
   // Reset auto-compact guard so the new thread can trigger compaction if it's near the limit
@@ -10700,7 +10663,10 @@ function showModelChange(mi: number): string | null {
       <span>⚠ Backend disconnected — messages won't send until reconnected</span>
     </div>
     <!-- Messages list -->
-    <div ref="messagesEl" class="ai-messages" @click="onMessagesClick" @contextmenu.prevent="onMsgContextMenu" @scroll.passive="onMessagesScroll" @mouseover="onMessagesMouseover">
+    <!-- No `.prevent` here: onMsgContextMenu calls preventDefault itself once it
+         has a message to act on. Blanket-preventing would swallow the default
+         menu on every other target and leave right-click dead there. -->
+    <div ref="messagesEl" class="ai-messages" @click="onMessagesClick" @contextmenu="onMsgContextMenu" @scroll.passive="onMessagesScroll" @mouseover="onMessagesMouseover">
       <div v-if="messages.length === 0" class="ai-empty">
         <svg width="28" height="28" viewBox="0 0 16 16" fill="currentColor" style="opacity:.3">
           <path d="M8 0L9.5 5.5L15 7L9.5 8.5L8 14L6.5 8.5L1 7L6.5 5.5Z"/>

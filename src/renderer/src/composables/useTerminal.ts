@@ -1451,6 +1451,21 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         term.clearSelection()
       }
 
+      // ── Cmd+C: copy the terminal's selection ──────────────────────────────
+      // xterm's own copy handler fires on the DOM `copy` event, which needs a
+      // DOM selection — but `.xterm` is `user-select: none` (xterm.css), so a
+      // terminal selection never becomes one and Cmd+C silently copied
+      // nothing. Write xterm's own selection out instead. With no selection,
+      // fall through untouched so Cmd+C keeps its current (no-op) behaviour.
+      if (e.metaKey && !e.shiftKey && !e.altKey && !e.ctrlKey && e.key.toLowerCase() === 'c') {
+        const selection = term.getSelection()
+        if (selection) {
+          e.preventDefault()
+          void navigator.clipboard.writeText(selection)
+          return false
+        }
+      }
+
       // Font zoom (⌘+ / ⌘- / ⌘= / ⌘0) is NOT handled here: it applies to every
       // pane at once and must work regardless of which terminal holds focus, so
       // it lives on a window-level listener (see useTerminalFontSize).
@@ -2551,6 +2566,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     readLineBeforeCursor,
     updateXtermTheme,
     isAltBuffer,
+    getSelection: () => term.getSelection(),
     setDisableStdin: (disabled: boolean) => { term.options.disableStdin = disabled },
   }
 }

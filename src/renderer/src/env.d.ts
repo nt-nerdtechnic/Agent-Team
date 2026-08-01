@@ -189,6 +189,7 @@ declare global {
       onExternalPaneDrop: (
         handler: (args: { paneId: string; screenX: number; screenY: number }) => void
       ) => () => void
+      showTerminalContextMenu: (selection: string) => void
       setBadgeCount: (count: number) => void
       reportWorkspace: (workspacePath: string) => void
       restore?: {
