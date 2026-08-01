@@ -615,7 +615,10 @@ watch(aiPanelOpen, (open) => {
 
 async function aiStart(): Promise<void> {
   const term = aiTermRef.value
+  // Also require a live connection: a create queued while disconnected would
+  // race the connect-time tryReattach and double-bind output handlers.
   if (!term || !aiWorkspace.value || aiStarting.value || aiActive.value || aiReattaching.value) return
+  if (backend.status.value !== 'connected') return
   aiStarting.value = true
   try {
     const shell = backend.shell.value || 'bash'
@@ -1006,7 +1009,7 @@ function aiStop(): void {
           </select>
           <button
             class="primary ai-ctl-btn"
-            :disabled="!aiWorkspace || aiStarting || aiReattaching"
+            :disabled="!aiWorkspace || aiStarting || aiReattaching || backend.status.value !== 'connected'"
             :title="aiWorkspace ? 'Spawn the CLI in ' + aiWorkspace : 'No workspace available'"
             @click="aiStart"
           >{{ aiStarting ? 'Starting…' : aiReattaching ? 'Reattaching…' : 'Start' }}</button>
