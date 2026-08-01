@@ -166,11 +166,25 @@ export function migrateTerminalPtyKey(oldKey: string, newKey: string): void {
   } catch { /* ignore */ }
 }
 
-// Cached dimensions from any visible terminal. Hidden resumed tabs use these
-// to start their PTY immediately at the correct layout size without waiting
-// for the user to switch to them.
+// Cached dimensions from any visible terminal. Hidden tabs use these to start
+// their PTY at the real layout size instead of xterm's 80x24 default: a PTY
+// created too narrow makes the CLI draw its banner and footer narrow, and that
+// already-printed output never widens again (static output can't re-wrap wider,
+// and an idle alt-buffer TUI ignores the later SIGWINCH). Persisted so the
+// spawns right after an app restart — a workspace restore fires them while
+// every pane is still hidden — have a size to borrow as well.
+const LAST_SIZE_KEY = 'terminal-last-size'
 let _lastKnownCols = 0
 let _lastKnownRows = 0
+try {
+  const raw = localStorage.getItem(LAST_SIZE_KEY)
+  const parsed = raw ? (JSON.parse(raw) as { cols?: unknown; rows?: unknown }) : null
+  if (typeof parsed?.cols === 'number' && typeof parsed?.rows === 'number'
+      && parsed.cols > 0 && parsed.rows > 0) {
+    _lastKnownCols = Math.trunc(parsed.cols)
+    _lastKnownRows = Math.trunc(parsed.rows)
+  }
+} catch { /* no persisted size — the 80x24 fallback still applies */ }
 
 // VS Code-style unix path regex (no extension whitelist).
 const _EXCL_S = `[^\\x00<>?\\s!\`&*()[\\]'"\\\\;]`
@@ -864,6 +878,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     if (cols > 0 && rows > 0) {
       _lastKnownCols = cols
       _lastKnownRows = rows
+      try { localStorage.setItem(LAST_SIZE_KEY, JSON.stringify({ cols, rows })) } catch { /* ignore */ }
     }
   })
 
@@ -2163,19 +2178,20 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     if (!createGeneration) return
     let el = containerRef.value
     const visible = !!el && el.clientWidth > 0
-    // A resume reprints the prior conversation and MUST paint at the real width,
-    // so wait until the pane is measurable. A fresh spawn is empty: create it now
-    // even while hidden (the reconciler corrects the width once the tab is shown).
-    // Deferring a fresh spawn would stall e.g. a pipeline stage spawned into a
-    // tab the user isn't currently viewing.
-    if (opts.isResume && !visible) {
-      // Hidden resume: if we have a cached layout size from another visible tab,
-      // use it to start the PTY immediately. Otherwise wait until shown.
-      if (_lastKnownCols > 0 && _lastKnownRows > 0) {
-        try { term.resize(_lastKnownCols, _lastKnownRows) } catch { /* ignore */ }
-      } else {
-        return
-      }
+    // A hidden pane has no measurable width, so the create below would fall back
+    // to xterm's 80x24 default and the CLI would draw its first frame that narrow
+    // — permanently, since already-printed output never re-wraps wider. Borrow the
+    // cached layout size (from a visible terminal, or the previous run) so even a
+    // hidden pane starts its PTY at a realistic size; the reconciler still corrects
+    // it once the tab is shown.
+    if (!visible && _lastKnownCols > 0 && _lastKnownRows > 0) {
+      try { term.resize(_lastKnownCols, _lastKnownRows) } catch { /* ignore */ }
+    } else if (!visible && opts.isResume) {
+      // With no cached size to borrow, a resume must still wait until measurable:
+      // it reprints the prior conversation and MUST paint at the real width. A
+      // fresh spawn is empty, so it proceeds — deferring it would stall e.g. a
+      // pipeline stage spawned into a tab the user isn't currently viewing.
+      return
     }
     if (visible && cellWidth() === 0) {
       // xterm hasn't measured its character cell yet (just opened): poke once to
