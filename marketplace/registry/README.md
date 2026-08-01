@@ -7,6 +7,19 @@ Electron app or `backend/agent_team_backend/` — it is purely additive under
 
 See [`FORMAT.md`](./FORMAT.md) for the `.vsix`-style package format.
 
+> **Not deployed.** This service currently runs locally only, for development
+> and for exercising the publish/install path end to end. Navide ships
+> first-party plugins bundled into the app package, so nothing installs from a
+> registry in production, and third-party publishing is not open — see
+> [the plugin development guide](../../docs/en-US/plugin-development.md) for
+> how to get in touch about building one.
+>
+> Before this is ever exposed publicly, at minimum: add a schema migration
+> mechanism (`db.py` only calls `SQLModel.metadata.create_all`, which will not
+> add columns to existing tables), set `REGISTRY_ADMIN_TOKEN` (the publisher
+> endpoint is open when unset), serve over https, and replace
+> `LocalStorageBackend` with real object storage.
+
 ## Run locally
 
 ```bash

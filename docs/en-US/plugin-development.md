@@ -7,6 +7,31 @@ model, and the packaging and signing rules.
 For the package archive format alone, see
 [`marketplace/registry/FORMAT.md`](../../marketplace/registry/FORMAT.md).
 
+## Status: third-party publishing is not open yet
+
+Navide currently ships first-party plugins only. There is no public marketplace
+registry to publish to — the registry service in `marketplace/registry/` runs
+locally for development, and the plugins that ship with the app are bundled into
+the package rather than installed from it.
+
+Two consequences worth knowing before you invest time:
+
+- **You cannot publish a plugin for other users to install yet.** You can build
+  and run one locally against a local registry, and everything in this guide
+  works for that.
+- **The capability whitelist is centrally maintained.** `requires` accepts only
+  the namespaces listed under [Capability reference](#capability-reference); a
+  plugin asking for anything else is refused as scope over-reach. Adding a new
+  namespace means a change to the host, not something a plugin can declare on
+  its own.
+
+**If you want to build a plugin, please get in touch first** — open a thread in
+[GitHub Discussions](https://github.com/nt-nerdtechnic/Navide/discussions)
+(use **Ideas**). Tell us what surface you want to extend and which capabilities
+it needs. That is also the route for requesting a new capability namespace. We
+would rather shape the API around a real plugin than have you build against
+something that is about to move.
+
 ## Three trust domains
 
 A plugin travels through three domains, joined by one shared manifest schema and
