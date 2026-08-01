@@ -37,6 +37,7 @@ The root [README](../../README.md) introduces the product and current distributi
 | [Contributing](../../CONTRIBUTING.md) | Set up a development environment and submit changes |
 | [Architecture](architecture.md) | Understand process boundaries, state ownership, and major services |
 | [CLI extension guide](cli-extension-guide.md) | Add or maintain an AI coding CLI integration |
+| [Plugin development](plugin-development.md) | Build a frontend view plugin or a backend plugin, then package and sign it |
 | [Release guide](releases.md) | Version, package, sign, notarize, publish, and recover a release |
 
 ## Reference

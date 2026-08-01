@@ -37,6 +37,7 @@ Root [繁體中文 README](../../README.zh-TW.md) 負責介紹產品與目前發
 | [Contributing — English](../../CONTRIBUTING.md) | 建立開發環境並提交變更 |
 | [Architecture — English](../en-US/architecture.md) | 理解 Process Boundary、State Ownership 與主要 Service |
 | [CLI Extension Guide — English](../en-US/cli-extension-guide.md) | 新增或維護 AI Coding CLI 整合 |
+| [Plugin Development — English](../en-US/plugin-development.md) | 開發前端 View 插件或後端插件，並打包簽章發布 |
 | [Release Guide — English](../en-US/releases.md) | 版本、封裝、簽章、Notarization、發布與復原 Release |
 
 ## 參考資料
