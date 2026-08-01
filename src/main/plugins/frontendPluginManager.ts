@@ -1054,12 +1054,14 @@ function gitQuery(
  * (vite.git.config.ts) with the `useBackend` → capabilityBackend alias, so it
  * is not served by the electron-vite dev server: `devUrl` is empty and it
  * always loadFiles. `fs` grants the git.changed working-tree event; `ui` the
- * theme settings sync.
+ * theme settings sync; `issues` the cloud issues panel. Keep `requires` in sync
+ * with the manifest emitted by vite.git.config.ts, or dev runs deny calls the
+ * packaged build allows.
  */
 export function devGitPluginDescriptor(): PluginLaunchDescriptor {
   return {
     id: GIT_PLUGIN_ID,
-    requires: ['git', 'fs', 'ui'],
+    requires: ['git', 'fs', 'ui', 'issues'],
     devUrl: '',
     // __dirname is out/main in dev, so ../../ is the repo root.
     entryFile: join(__dirname, '../../dist-plugins/git/index.html'),

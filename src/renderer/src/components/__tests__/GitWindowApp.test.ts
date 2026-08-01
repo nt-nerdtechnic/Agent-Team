@@ -1,10 +1,12 @@
 // @vitest-environment happy-dom
-// GitWindowApp (the navide.git standalone window) — wiring tests for the
-// working-tree operations added on top of the read-only skeleton: stage /
-// unstage / stage-all, the commit box, conflict quick-resolution + the
-// operation banner, and sidebar branch switching. The backend is mocked at the
-// useBackend seam (exactly what the plugin build aliases), so every assertion
-// is on the real useGit → send() wire format.
+// GitWindowApp (the navide.git standalone window) — wiring tests. The File-
+// status surface embeds the real GitPane (stubbed here), so these tests cover
+// the window-level wiring around it: repo-surface loading, the GitPane emit
+// contracts (open-diff → bottom DiffPane, open-file → the ui.open_in_editor
+// host capability, open-branch-diff → the comparison view), and the sidebar
+// branch switching. The backend is mocked at the useBackend seam (exactly what
+// the plugin build aliases), so every assertion is on the real useGit →
+// send() wire format.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import { ref } from 'vue'
@@ -15,9 +17,6 @@ interface SentCall {
 }
 
 const sends = vi.hoisted(() => ({ calls: [] as { type: string; payload: Record<string, unknown> }[] }))
-
-// Per-test override for the git.status payload.
-const statusOverride = vi.hoisted(() => ({ value: null as Record<string, unknown> | null }))
 
 function baseStatus(): Record<string, unknown> {
   return {
@@ -36,7 +35,7 @@ function baseStatus(): Record<string, unknown> {
 
 vi.mock('../../composables/useBackend', () => {
   function payloadFor(type: string): unknown {
-    if (type === 'git.status') return statusOverride.value ?? baseStatus()
+    if (type === 'git.status') return baseStatus()
     if (type === 'git.branches')
       return {
         ok: true,
@@ -83,10 +82,11 @@ vi.mock('../../composables/useBackend', () => {
 })
 
 import GitWindowApp from '../../GitWindowApp.vue'
+import GitPane from '../GitPane.vue'
 
 const STUBS = {
+  GitPane: true,
   GitHistoryModal: true,
-  GitCredentialModal: true,
   NotificationHost: true,
   DiffPane: true,
   BranchDiffPane: true
@@ -103,21 +103,11 @@ async function mountApp(): Promise<VueWrapper> {
   return wrapper
 }
 
-async function openStatusView(wrapper: VueWrapper): Promise<void> {
-  const btn = wrapper
-    .findAll('button.sb-item')
-    .find((b) => b.text().startsWith('File status'))
-  expect(btn).toBeTruthy()
-  await btn!.trigger('click')
-  await flushPromises()
-}
-
-describe('GitWindowApp — working-tree operations', () => {
+describe('GitWindowApp — window wiring around the embedded GitPane', () => {
   let wrapper: VueWrapper | null = null
 
   beforeEach(() => {
     sends.calls.length = 0
-    statusOverride.value = null
   })
   afterEach(() => {
     wrapper?.unmount()
@@ -140,75 +130,60 @@ describe('GitWindowApp — working-tree operations', () => {
     expect(callsOf('git.status')[0]!.payload.workspace_path).toBe('/tmp/ws')
   })
 
-  it('stages an unstaged file and stages all from the group header', async () => {
+  it('keeps the real GitPane mounted (embedded, with the workspace + backend)', async () => {
     wrapper = await mountApp()
-    await openStatusView(wrapper)
-
-    const stageBtn = wrapper.findAll('.status-row .row-btn[title="Stage"]').at(0)
-    expect(stageBtn).toBeTruthy()
-    await stageBtn!.trigger('click')
-    await flushPromises()
-    expect(callsOf('git.stage')[0]!.payload).toMatchObject({
-      workspace_path: '/tmp/ws',
-      files: ['src/a.ts']
-    })
-
-    const stageAll = wrapper.findAll('button.sg-btn').find((b) => b.text() === 'Stage all')
-    await stageAll!.trigger('click')
-    await flushPromises()
-    expect(callsOf('git.stage_all').length).toBe(1)
+    const pane = wrapper.findComponent(GitPane)
+    expect(pane.exists()).toBe(true)
+    expect(pane.attributes('workspace-path') ?? pane.attributes('workspacepath')).toBe('/tmp/ws')
+    // Stays mounted while another view is shown (v-show, so its credential
+    // modal keeps working for toolbar pushes).
+    const history = wrapper.findAll('button.sb-item').find((b) => b.text() === 'History')
+    await history!.trigger('click')
+    expect(wrapper.findComponent(GitPane).exists()).toBe(true)
   })
 
-  it('unstages a staged file from its row action', async () => {
+  it('shows a clicked GitPane file diff in the bottom DiffPane detail', async () => {
     wrapper = await mountApp()
-    await openStatusView(wrapper)
-    const unstage = wrapper.findAll('.status-row .row-btn[title="Unstage"]').at(0)
-    await unstage!.trigger('click')
+    wrapper
+      .findComponent(GitPane)
+      .vm.$emit('open-diff', { filepath: 'src/a.ts', staged: false, name: 'a.ts' })
     await flushPromises()
-    expect(callsOf('git.unstage')[0]!.payload).toMatchObject({ files: ['src/staged.ts'] })
+    const detail = wrapper.find('.detail')
+    expect(detail.exists()).toBe(true)
+    const diff = wrapper.findComponent({ name: 'DiffPane' })
+    expect(diff.exists()).toBe(true)
+    expect(diff.attributes('filepath')).toBe('src/a.ts')
   })
 
-  it('commits the staged changes with the typed message', async () => {
+  it('routes open-file through the ui.open_in_editor host capability', async () => {
     wrapper = await mountApp()
-    await openStatusView(wrapper)
-
-    const input = wrapper.find('textarea.cb-input')
-    await input.setValue('feat: test commit')
-    const commitBtn = wrapper.findAll('button.cb-btn.primary').at(0)!
-    expect(commitBtn.attributes('disabled')).toBeUndefined()
-    await commitBtn.trigger('click')
+    wrapper.findComponent(GitPane).vm.$emit('open-file', { filepath: 'src/a.ts', name: 'a.ts' })
     await flushPromises()
-    expect(callsOf('git.commit')[0]!.payload).toMatchObject({
+    expect(callsOf('ui.open_in_editor')[0]!.payload).toMatchObject({
       workspace_path: '/tmp/ws',
-      message: 'feat: test commit'
+      filepath: 'src/a.ts'
     })
   })
 
-  it('disables commit when nothing is staged and no operation is in progress', async () => {
-    statusOverride.value = { ...baseStatus(), staged: [] }
+  it('routes open-conflict through the ui.open_in_editor host capability too', async () => {
     wrapper = await mountApp()
-    await openStatusView(wrapper)
-    const input = wrapper.find('textarea.cb-input')
-    await input.setValue('msg')
-    const commitBtn = wrapper.findAll('button.cb-btn.primary').at(0)!
-    expect(commitBtn.attributes('disabled')).toBeDefined()
+    wrapper
+      .findComponent(GitPane)
+      .vm.$emit('open-conflict', { filepath: 'src/conflict.ts', name: 'conflict.ts' })
+    await flushPromises()
+    expect(callsOf('ui.open_in_editor')[0]!.payload).toMatchObject({
+      filepath: 'src/conflict.ts'
+    })
   })
 
-  it('shows the operation banner and conflict quick-resolution during a merge', async () => {
-    statusOverride.value = {
-      ...baseStatus(),
-      operation_in_progress: 'merge',
-      unstaged: [{ path: 'src/conflict.ts', status: 'U' }]
-    }
+  it('opens the comparison view from a GitPane open-branch-diff request', async () => {
     wrapper = await mountApp()
-    await openStatusView(wrapper)
-
-    expect(wrapper.find('.op-banner').text()).toContain('merge in progress')
-    const ours = wrapper.find('.status-row .row-btn[title="Resolve using ours"]')
-    expect(ours.exists()).toBe(true)
-    await ours.trigger('click')
+    wrapper.findComponent(GitPane).vm.$emit('open-branch-diff', { base: 'main', compare: 'feature-x' })
     await flushPromises()
-    expect(callsOf('git.resolve_ours')[0]!.payload).toMatchObject({ filepath: 'src/conflict.ts' })
+    const selects = wrapper.findAll('select.bd-select')
+    expect(selects.length).toBe(2)
+    expect((selects[0]!.element as HTMLSelectElement).value).toBe('main')
+    expect((selects[1]!.element as HTMLSelectElement).value).toBe('feature-x')
   })
 
   it('switches branch from the sidebar and never for the current branch', async () => {
@@ -234,8 +209,5 @@ describe('GitWindowApp — working-tree operations', () => {
     const selects = wrapper.findAll('select.bd-select')
     expect(selects.length).toBe(2)
     expect((selects[0]!.element as HTMLSelectElement).value).toBe('main')
-    // compare defaults to the current branch; base falls back to main/master —
-    // both equal here, so the pane still waits for a distinct pick.
-    expect(wrapper.find('.bd-pickers').exists()).toBe(true)
   })
 })

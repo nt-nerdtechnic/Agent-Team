@@ -47,7 +47,7 @@ function emitManifest(): Plugin {
         publisher: 'navide',
         engines: { navide: '^0.1.0' },
         entry: 'index.html',
-        requires: ['git', 'fs', 'ui'],
+        requires: ['git', 'fs', 'ui', 'issues'],
         activationEvents: ['onStartup'],
       }
       writeFileSync(resolve(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n')

@@ -80,6 +80,10 @@ const GIT_METHODS = [
   'check_staged', 'connect_to_remote', 'ignore', 'diff_all', 'reset',
 ] as const
 
+// issues.* WS types (uniform namespace) — the embedded GitPane's cloud-issues
+// panel (gh/glab CRUD via useIssues).
+const ISSUES_METHODS = ['provider', 'list', 'get', 'create', 'comment', 'set_state'] as const
+
 // fs.* WS types (uniform namespace) the Git UI may send — diff panes read blobs
 // / images, and the workspace change event (git.changed) is gated on `fs`.
 const FS_METHODS = [
@@ -116,6 +120,7 @@ const EXPLICIT: Record<string, CapabilityRef> = {
 export const TYPE_TO_CAP: Readonly<Record<string, CapabilityRef>> = {
   ...fromNs('git', GIT_METHODS),
   ...fromNs('fs', FS_METHODS),
+  ...fromNs('issues', ISSUES_METHODS),
   ...EXPLICIT,
 }
 

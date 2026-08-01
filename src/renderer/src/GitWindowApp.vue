@@ -6,22 +6,26 @@
 // unchanged; the plugin build aliases its `useBackend` to the capability shim,
 // so every git.* call is brokered over the host's shared WebSocket.
 //
-// A wide three-pane window (toolbar → sidebar → history/status/branch-diff +
-// detail/diff) wired to the full daily Git workflow: branches, history, status
-// with stage/unstage/discard, commit (+amend, AI message), conflict quick
-// resolution, stash/remote/tag/worktree management, git config, branch
-// comparison, per-commit diffs through the shared editor DiffPane, and the
-// askpass credential prompt. The full 3-way conflict editor stays in the
-// mini-IDE (Monaco is deliberately kept out of this bundle).
+// A wide three-pane window (toolbar → sidebar → center + diff detail). The
+// center's File-status surface embeds the real GitPane component, so working-
+// tree operations (multi-select stage/unstage, commit box with AI message,
+// conflict handling, credential prompt) are byte-identical to the main
+// window's Git tab and never drift from it. Around it: SourceTree-style
+// sidebar (branch/stash/remote/tag/worktree management), rich history, branch
+// comparison, git config, and a bottom DiffPane detail. "Open in editor"
+// routes through the `ui.open_in_editor` host capability to the mini-IDE
+// plugin (OS default app when it is not installed). The full 3-way conflict
+// editor stays in the mini-IDE (Monaco is deliberately kept out of this
+// bundle).
 
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useBackend } from './composables/useBackend'
-import { useGit, type GitCommitDetail, type GitFileEntry } from './composables/useGit'
+import { useGit } from './composables/useGit'
 import { useNotify } from './composables/useNotify'
 import { useTheme } from './composables/useTheme'
 import { initSettingsBackend, settingsGet, onSettingsChanged } from './lib/settings'
+import GitPane from './components/GitPane.vue'
 import GitHistoryModal from './components/GitHistoryModal.vue'
-import GitCredentialModal from './components/GitCredentialModal.vue'
 import NotificationHost from './components/NotificationHost.vue'
 import DiffPane from './editor/DiffPane.vue'
 import BranchDiffPane from './editor/BranchDiffPane.vue'
@@ -77,25 +81,6 @@ const {
   createTag,
   mergeBranch,
   resetToCommit,
-  credentialPrompt,
-  showCredentialPrompt,
-  submitCredential,
-  cancelCredential,
-  // working-tree operations
-  stageFile,
-  unstageFile,
-  stageAll,
-  unstageFiles,
-  discardFile,
-  resolveConflictOurs,
-  resolveConflictTheirs,
-  abortOperation,
-  // commit
-  commit,
-  amendCommit,
-  generateMessage,
-  isCommitting,
-  isGenerating,
   // branches / stash / remotes / tags
   switchBranch,
   deleteBranch,
@@ -123,16 +108,12 @@ const {
 type CenterView = 'history' | 'status' | 'branchdiff'
 const view = ref<CenterView>('history')
 
-const selectedHash = ref<string>('')
-const commitDetail = ref<GitCommitDetail | null>(null)
-const selectedFile = ref<string>('')
-const isLoadingDetail = ref(false)
-
-// ── External diff target (from the main GitPane) ─────────────────────────────
-// The main process forwards a git_diff_* target (see window:openGit) so a file
-// clicked in the main-window GitPane shows its diff in *this* window's panel
-// rather than the mini-IDE. We read it on load and via nav.onOpenTarget; the
-// shared DiffPane fetches the diff itself from these coordinates.
+// ── Diff detail target ───────────────────────────────────────────────────────
+// Shown in the bottom detail panel of the File-status view. Fed by (a) the
+// embedded GitPane's open-diff clicks, and (b) the main process forwarding a
+// git_diff_* target (see window:openGit) when a file is clicked in the main
+// window's GitPane. The shared DiffPane fetches the diff itself from these
+// coordinates.
 interface ExternalDiff {
   name: string
   staged: boolean
@@ -180,6 +161,9 @@ onMounted(() => {
     if (keys.includes('agent-team:theme') || keys.includes('agent-team:theme-custom')) {
       loadTheme()
     }
+    if (keys.includes('agentTeam.analyzerModel')) {
+      analyzerModel.value = settingsGet('agentTeam.analyzerModel', '')
+    }
   })
   if (hasWorkspace.value) void refreshAll()
   // Initial diff target from the entry query, then incremental deliveries.
@@ -198,24 +182,6 @@ onUnmounted(() => {
   offThemeSettingsChange?.()
 })
 
-// ── Commit selection → detail → per-file diff ────────────────────────────────
-async function selectCommit(hash: string): Promise<void> {
-  selectedHash.value = hash
-  selectedFile.value = ''
-  commitDetail.value = null
-  isLoadingDetail.value = true
-  try {
-    commitDetail.value = await showCommit(hash)
-  } finally {
-    isLoadingDetail.value = false
-  }
-}
-
-function selectFile(filepath: string): void {
-  if (!selectedHash.value) return
-  selectedFile.value = filepath
-}
-
 function showDiffTarget(params: Record<string, string>): void {
   const filepath = params['git_diff_filepath'] ?? ''
   if (!filepath) return
@@ -230,105 +196,38 @@ function clearExternalDiff(): void {
   externalDiff.value = null
 }
 
-// ── Working-tree operations (status view) ────────────────────────────────────
 function toastResult(r: { ok: boolean; error?: string }, okMsg?: string): boolean {
   if (!r.ok) notify.toast(r.error || 'Operation failed', { type: 'error' })
   else if (okMsg) notify.toast(okMsg, { type: 'success' })
   return r.ok
 }
 
-function isConflictEntry(f: GitFileEntry): boolean {
-  return f.status === 'U'
+// ── Embedded GitPane integration ─────────────────────────────────────────────
+// AI commit-message model, live-synced with the main window's setting.
+const analyzerModel = ref(settingsGet('agentTeam.analyzerModel', ''))
+
+/** A file clicked in the embedded GitPane shows its diff in the bottom detail. */
+function onPaneOpenDiff(p: { filepath: string; staged: boolean; name: string; commit?: string }): void {
+  externalDiff.value = { name: p.filepath, staged: p.staged, commit: p.commit ?? '' }
 }
 
-const opInProgress = computed(() => gitStatus.value.operation_in_progress)
-const conflictCount = computed(
-  () =>
-    [...gitStatus.value.staged, ...gitStatus.value.unstaged].filter(isConflictEntry).length
-)
-
-/** Show a working-tree/staged file diff in the bottom detail (reuses the
- *  external-diff DiffPane, which owns stage/unstage-hunk actions). */
-function showWorkingDiff(path: string, staged: boolean): void {
-  externalDiff.value = { name: path, staged, commit: '' }
-}
-
-async function onStage(path: string): Promise<void> {
-  await stageFile(path)
-}
-async function onUnstage(path: string): Promise<void> {
-  await unstageFile(path)
-}
-async function onStageAll(): Promise<void> {
-  await stageAll()
-}
-async function onUnstageAll(): Promise<void> {
-  const paths = gitStatus.value.staged.map((f) => f.path)
-  if (!paths.length) return
-  toastResult(await unstageFiles(paths))
-}
-async function onDiscard(path: string): Promise<void> {
-  const ok = await notify.confirm(`Discard changes in ${path}? This cannot be undone.`, {
-    title: 'Discard changes',
-    confirmText: 'Discard'
+/** Route a file to the mini-IDE through the `ui.open_in_editor` host
+ *  capability; the main process falls back to the OS default application when
+ *  the mini-IDE plugin is not installed/available. */
+async function openInEditor(filepath: string): Promise<void> {
+  if (!filepath) return
+  const resp = await backend.send('ui.open_in_editor', {
+    workspace_path: workspacePath,
+    filepath
   })
-  if (!ok) return
-  await discardFile(path)
-}
-async function onResolveOurs(path: string): Promise<void> {
-  toastResult(await resolveConflictOurs(path))
-}
-async function onResolveTheirs(path: string): Promise<void> {
-  toastResult(await resolveConflictTheirs(path))
-}
-async function onAbortOperation(): Promise<void> {
-  const op = opInProgress.value
-  if (!op) return
-  const ok = await notify.confirm(`Abort the in-progress ${op}?`, {
-    title: 'Abort',
-    confirmText: 'Abort'
-  })
-  if (!ok) return
-  toastResult(await abortOperation(op))
+  if (!resp.ok) notify.toast(resp.error?.message || 'Could not open the editor', { type: 'error' })
 }
 
-// ── Commit box ───────────────────────────────────────────────────────────────
-const commitMessage = ref('')
-const canCommit = computed(
-  () =>
-    commitMessage.value.trim().length > 0 &&
-    (gitStatus.value.staged.length > 0 || opInProgress.value !== '') &&
-    !isCommitting.value
-)
-
-async function onCommit(): Promise<void> {
-  if (!canCommit.value) return
-  const r = await commit(commitMessage.value.trim())
-  if (toastResult(r, 'Committed')) {
-    commitMessage.value = ''
-    await refreshAll()
-  }
+function onPaneOpenBranchDiff(p: { base: string; compare: string }): void {
+  if (p.base) diffBase.value = p.base
+  if (p.compare) diffCompare.value = p.compare
+  openBranchDiff()
 }
-async function onAmend(): Promise<void> {
-  const ok = await notify.confirm(
-    'Amend the last commit with the staged changes' +
-      (commitMessage.value.trim() ? ' and the new message?' : ' (keeping its message)?'),
-    { title: 'Amend', confirmText: 'Amend' }
-  )
-  if (!ok) return
-  const r = await amendCommit(commitMessage.value.trim())
-  if (toastResult(r, 'Amended')) {
-    commitMessage.value = ''
-    await refreshAll()
-  }
-}
-async function onGenerateMessage(): Promise<void> {
-  const model = settingsGet('agentTeam.analyzerModel', '') || 'qwen2:latest'
-  const r = await generateMessage(model)
-  if (r.ok) commitMessage.value = r.message
-  else notify.toast(r.error || 'Message generation failed', { type: 'error' })
-}
-
 // ── Sidebar operations ───────────────────────────────────────────────────────
 async function onSwitchBranch(name: string): Promise<void> {
   if (name === gitStatus.value.branch) return
@@ -725,181 +624,55 @@ function shortDate(iso?: string): string {
           </div>
         </div>
 
-        <!-- File status -->
-        <template v-else>
-          <div class="pane status">
-            <div v-if="opInProgress" class="op-banner">
-              <span>
-                {{ opInProgress }} in progress<template v-if="conflictCount">
-                  — {{ conflictCount }} conflicted file{{ conflictCount > 1 ? 's' : '' }}</template>
-              </span>
-              <button class="op-abort" @click="onAbortOperation">Abort {{ opInProgress }}</button>
-            </div>
+        <!-- File status: the real GitPane, identical to the main window's Git
+             tab. v-show (not v-if) keeps it mounted across view switches so
+             its state and credential modal stay alive. -->
+        <div v-show="view === 'status'" class="status-wrap">
+          <div class="pane gitpane-host">
+            <GitPane
+              :workspace-path="workspacePath"
+              :backend="backend"
+              :analyzer-model="analyzerModel"
+              embedded
+              @open-file="(p) => openInEditor(p.filepath)"
+              @open-conflict="(p) => openInEditor(p.filepath)"
+              @open-diff="onPaneOpenDiff"
+              @open-branch-diff="onPaneOpenBranchDiff"
+            />
+          </div>
 
-            <div class="status-group">
-              <div class="status-head">
-                STAGED ({{ gitStatus.staged.length }})
-                <button
-                  v-if="gitStatus.staged.length"
-                  class="sg-btn"
-                  title="Unstage all"
-                  @click="onUnstageAll"
-                >Unstage all</button>
-              </div>
-              <div
-                v-for="f in gitStatus.staged"
-                :key="'s' + f.path"
-                class="status-row"
-                :class="{ conflict: isConflictEntry(f) }"
-                @click="showWorkingDiff(f.path, true)"
-              >
-                <span class="st-badge staged">{{ f.status }}</span>
-                <span class="st-path">{{ f.path }}</span>
-                <span class="row-actions">
-                  <button class="row-btn" title="Unstage" @click.stop="onUnstage(f.path)">−</button>
-                </span>
-              </div>
-            </div>
-
-            <div class="status-group">
-              <div class="status-head">
-                CHANGES ({{ gitStatus.unstaged.length + gitStatus.untracked.length }})
-                <button
-                  v-if="gitStatus.unstaged.length + gitStatus.untracked.length"
-                  class="sg-btn"
-                  title="Stage all"
-                  @click="onStageAll"
-                >Stage all</button>
-              </div>
-              <div
-                v-for="f in gitStatus.unstaged"
-                :key="'u' + f.path"
-                class="status-row"
-                :class="{ conflict: isConflictEntry(f) }"
-                @click="showWorkingDiff(f.path, false)"
-              >
-                <span class="st-badge" :class="{ 'conflict-badge': isConflictEntry(f) }">{{ f.status }}</span>
-                <span class="st-path">{{ f.path }}</span>
-                <span class="row-actions">
-                  <template v-if="isConflictEntry(f)">
-                    <button class="row-btn" title="Resolve using ours" @click.stop="onResolveOurs(f.path)">ours</button>
-                    <button class="row-btn" title="Resolve using theirs" @click.stop="onResolveTheirs(f.path)">theirs</button>
-                  </template>
-                  <template v-else>
-                    <button class="row-btn" title="Stage" @click.stop="onStage(f.path)">＋</button>
-                    <button class="row-btn danger" title="Discard changes" @click.stop="onDiscard(f.path)">↶</button>
-                  </template>
-                </span>
-              </div>
-              <div
-                v-for="f in gitStatus.untracked"
-                :key="'n' + f.path"
-                class="status-row"
-                @click="showWorkingDiff(f.path, false)"
-              >
-                <span class="st-badge new">?</span>
-                <span class="st-path">{{ f.path }}</span>
-                <span class="row-actions">
-                  <button class="row-btn" title="Stage" @click.stop="onStage(f.path)">＋</button>
-                </span>
+          <!-- Bottom: per-file diff detail -->
+          <div v-if="externalDiff" class="detail">
+            <div class="detail-left">
+              <div class="dt-meta">
+                <div class="dt-subject mono">{{ externalDiff.name }}</div>
+                <div class="dt-sub">
+                  {{
+                    externalDiff.commit
+                      ? 'commit ' + externalDiff.commit.slice(0, 8)
+                      : externalDiff.staged
+                        ? 'staged changes'
+                        : 'working tree'
+                  }}
+                </div>
+                <button class="dt-back" @click="openInEditor(externalDiff.name)">Open in editor</button>
+                <button class="dt-back" @click="clearExternalDiff">✕ close diff</button>
               </div>
             </div>
-
-            <!-- Commit box -->
-            <div class="commit-box">
-              <textarea
-                v-model="commitMessage"
-                class="cb-input"
-                rows="3"
-                placeholder="Commit message"
-                :disabled="isCommitting"
+            <div class="detail-right">
+              <DiffPane
+                :key="'ext:' + externalDiff.name + ':' + externalDiff.commit + ':' + externalDiff.staged"
+                :workspace-path="workspacePath"
+                :filepath="externalDiff.name"
+                :staged="externalDiff.staged"
+                :name="externalDiff.name"
+                :backend="backend"
+                :commit="externalDiff.commit || undefined"
+                @open-file="(p) => openInEditor(p.filepath)"
               />
-              <div class="cb-actions">
-                <button
-                  class="cb-btn"
-                  :disabled="isGenerating || busy"
-                  :title="'Generate a commit message with AI'"
-                  @click="onGenerateMessage"
-                >{{ isGenerating ? 'Generating…' : '✨ AI message' }}</button>
-                <span class="cb-spacer" />
-                <button class="cb-btn" :disabled="isCommitting" title="Amend last commit" @click="onAmend">
-                  Amend
-                </button>
-                <button class="cb-btn primary" :disabled="!canCommit" @click="onCommit">
-                  {{ isCommitting ? 'Committing…' : `Commit to ${gitStatus.branch || 'HEAD'}` }}
-                </button>
-              </div>
             </div>
           </div>
-
-          <!-- Bottom: commit detail + per-file diff -->
-          <div class="detail">
-            <template v-if="externalDiff">
-              <div class="detail-left">
-                <div class="dt-meta">
-                  <div class="dt-subject mono">{{ externalDiff.name }}</div>
-                  <div class="dt-sub">
-                    {{
-                      externalDiff.commit
-                        ? 'commit ' + externalDiff.commit.slice(0, 8)
-                        : externalDiff.staged
-                          ? 'staged changes'
-                          : 'working tree'
-                    }}
-                  </div>
-                  <button class="dt-back" @click="clearExternalDiff">← back to commits</button>
-                </div>
-              </div>
-              <div class="detail-right">
-                <DiffPane
-                  :key="'ext:' + externalDiff.name + ':' + externalDiff.commit + ':' + externalDiff.staged"
-                  :workspace-path="workspacePath"
-                  :filepath="externalDiff.name"
-                  :staged="externalDiff.staged"
-                  :name="externalDiff.name"
-                  :backend="backend"
-                  :commit="externalDiff.commit || undefined"
-                />
-              </div>
-            </template>
-            <div v-else-if="isLoadingDetail" class="detail-loading">Loading commit…</div>
-            <template v-else-if="commitDetail">
-              <div class="detail-left">
-                <div class="dt-meta">
-                  <div class="dt-subject">{{ commitDetail.message }}</div>
-                  <div class="dt-sub mono">{{ commitDetail.short_hash }}</div>
-                  <div class="dt-sub">{{ commitDetail.author_name }} &lt;{{ commitDetail.author_email }}&gt;</div>
-                  <div class="dt-sub">{{ commitDetail.date }}</div>
-                </div>
-                <div class="dt-files">
-                  <div
-                    v-for="f in commitDetail.files"
-                    :key="f"
-                    class="dt-file"
-                    :class="{ active: f === selectedFile }"
-                    @click="selectFile(f)"
-                  >
-                    {{ f }}
-                  </div>
-                </div>
-              </div>
-              <div class="detail-right">
-                <div v-if="!selectedFile" class="diff-empty">Select a file to view its diff.</div>
-                <DiffPane
-                  v-else
-                  :key="'commit:' + selectedHash + ':' + selectedFile"
-                  :workspace-path="workspacePath"
-                  :filepath="selectedFile"
-                  :staged="false"
-                  :name="selectedFile"
-                  :backend="backend"
-                  :commit="selectedHash"
-                />
-              </div>
-            </template>
-            <div v-else class="detail-empty">Select a commit to see its changes.</div>
-          </div>
-        </template>
+        </div>
       </section>
     </div>
 
@@ -920,16 +693,10 @@ function shortDate(iso?: string): string {
       </div>
     </template>
 
-    <!-- Askpass credential prompt for a push/pull/fetch waiting on this window
-         (git.credential_request forwarded by the host broker). -->
-    <GitCredentialModal
-      :show="showCredentialPrompt"
-      :prompt="credentialPrompt"
-      :workspace-path="workspacePath"
-      @submit="submitCredential"
-      @cancel="cancelCredential"
-    />
-    <!-- Renders useNotify toasts/dialogs (DiffPane stage/discard feedback). -->
+    <!-- The askpass credential modal lives inside the embedded GitPane (always
+         mounted via v-show), so a toolbar push/pull waiting on credentials is
+         answered there. -->
+    <!-- Renders useNotify toasts/dialogs (GitPane/DiffPane feedback). -->
     <NotificationHost />
   </div>
 </template>
@@ -1168,9 +935,7 @@ button.sb-item:hover {
   overflow: hidden;
 }
 .pane-loading,
-.detail-loading,
-.diff-empty,
-.detail-empty {
+.diff-empty {
   padding: 16px;
   color: var(--text-secondary);
 }
@@ -1232,146 +997,25 @@ button.sb-item:hover {
   margin-right: 5px;
 }
 
-/* Status view */
-.status {
-  padding: 8px 0;
+/* File-status wrapper: embedded GitPane on top, diff detail below */
+.status-wrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.gitpane-host {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
 }
-.status-group {
-  padding-bottom: 10px;
-}
-.status-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 12px;
-  font-size: 10.5px;
-  letter-spacing: 0.6px;
-  color: var(--text-muted);
-  font-weight: 600;
-}
-.sg-btn {
-  margin-left: auto;
-  background: none;
-  border: 1px solid var(--border-default);
-  border-radius: 4px;
-  color: var(--text-secondary);
-  font-size: 10.5px;
-  padding: 0 6px;
-  cursor: pointer;
-}
-.sg-btn:hover {
-  color: var(--text-bright);
-  border-color: var(--border-strong);
-}
-.status-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 3px 12px;
-  font-size: 12.5px;
-  cursor: pointer;
-}
-.status-row:hover {
-  background: var(--bg-subtle);
-}
-.status-row.conflict {
-  background: var(--danger-subtle);
-}
-.st-path {
+.gitpane-host > * {
   flex: 1;
-  min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.row-actions {
-  display: flex;
-  gap: 2px;
-  flex-shrink: 0;
-  visibility: hidden;
-}
-.status-row:hover .row-actions {
-  visibility: visible;
-}
-.row-btn {
-  background: none;
-  border: 1px solid var(--border-default);
-  border-radius: 4px;
-  color: var(--text-secondary);
-  font-size: 11px;
-  padding: 0 5px;
-  cursor: pointer;
-  line-height: 1.5;
-}
-.row-btn:hover {
-  color: var(--text-bright);
-  border-color: var(--border-strong);
-}
-.row-btn.danger:hover {
-  color: var(--danger-bright);
-  border-color: var(--danger-bright);
-}
-.conflict-badge {
-  color: var(--danger-bright);
+  min-height: 0;
 }
 
-/* Operation-in-progress banner */
-.op-banner {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 0 12px 8px;
-  padding: 6px 10px;
-  border: 1px solid var(--attention-fg);
-  border-radius: 6px;
-  color: var(--attention-fg);
-  font-size: 12px;
-}
-.op-abort {
-  margin-left: auto;
-  background: none;
-  border: 1px solid var(--attention-fg);
-  border-radius: 4px;
-  color: var(--attention-fg);
-  font-size: 11px;
-  padding: 1px 8px;
-  cursor: pointer;
-}
-.op-abort:hover {
-  background: var(--bg-subtle);
-}
-
-/* Commit box */
-.commit-box {
-  margin-top: auto;
-  padding: 10px 12px;
-  border-top: 1px solid var(--border-muted);
-}
-.cb-input {
-  width: 100%;
-  resize: vertical;
-  background: var(--bg-muted);
-  color: var(--text-primary);
-  border: 1px solid var(--border-default);
-  border-radius: 6px;
-  font: 12.5px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  padding: 7px 9px;
-}
-.cb-input:focus {
-  outline: none;
-  border-color: var(--accent-focus);
-}
-.cb-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 7px;
-}
-.cb-spacer {
-  flex: 1;
-}
 .cb-btn {
   background: var(--bg-muted);
   color: var(--text-primary);
@@ -1548,24 +1192,6 @@ button.sb-item:hover {
 }
 .dt-back:hover {
   text-decoration: underline;
-}
-.dt-files {
-  padding: 6px 0;
-}
-.dt-file {
-  padding: 3px 12px;
-  font-size: 12px;
-  cursor: pointer;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.dt-file:hover {
-  background: var(--bg-subtle);
-}
-.dt-file.active {
-  background: var(--bg-selected);
-  color: var(--text-bright);
 }
 .detail-right {
   flex: 1;

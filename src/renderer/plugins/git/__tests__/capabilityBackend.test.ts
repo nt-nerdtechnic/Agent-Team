@@ -32,10 +32,15 @@ describe('TYPE_TO_CAP git surface', () => {
   })
 
   it('maps only into the granted capability namespaces', () => {
-    const allowed = new Set(['git', 'fs', 'ui'])
+    const allowed = new Set(['git', 'fs', 'ui', 'issues'])
     for (const ref of Object.values(TYPE_TO_CAP)) {
       expect(allowed.has(ref.ns)).toBe(true)
     }
+  })
+
+  it('maps the embedded GitPane issues panel calls', () => {
+    expect(resolveCapability('issues.list')).toEqual({ ns: 'issues', method: 'list' })
+    expect(resolveCapability('issues.set_state')).toEqual({ ns: 'issues', method: 'set_state' })
   })
 
   it('maps the open-in-editor host capability (mini-IDE hand-off)', () => {
