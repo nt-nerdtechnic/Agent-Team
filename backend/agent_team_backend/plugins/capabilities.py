@@ -337,7 +337,7 @@ class ChatCapability:
 
     Interface shell: the chat surface is heterogeneous -- some calls map to a
     single core singleton (``ai_chat_settings_store``, ``chat_store``,
-    ``editor_service``, ``fs_service``, ``ai_chat_tools``), others are
+    ``editor_service``, ``fs_service``), others are
     session/broadcast/HTTP-coupled inside their WS handler with no extractable
     service yet. Methods in the first group delegate; methods in the second are
     provisional placeholders that raise until Phase 2 extracts a service.
@@ -391,16 +391,16 @@ class ChatCapability:
         return app.fs_service.write_file(workspace_path, file_path, new_content)
 
     def approve_command(self, session_id: str, tool_id: str) -> None:
-        # Signature provisional -- interface shell, filled in during Phase 2.
-        from ..ai_chat_tools import approve_command
-
-        approve_command(session_id, tool_id, approved=True)
+        # Command approval was removed with the API chat engine — the CLI
+        # engine executes tools itself, so there is nothing to approve.
+        raise CapabilityError(
+            "command approval was removed — the CLI engine runs commands itself"
+        )
 
     def reject_command(self, session_id: str, tool_id: str) -> None:
-        # Signature provisional -- interface shell, filled in during Phase 2.
-        from ..ai_chat_tools import approve_command
-
-        approve_command(session_id, tool_id, approved=False)
+        raise CapabilityError(
+            "command approval was removed — the CLI engine runs commands itself"
+        )
 
     def editor_complete(
         self,

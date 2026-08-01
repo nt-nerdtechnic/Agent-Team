@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, AsyncIterator
+from typing import Any
 
 import pytest
 
 from agent_team_backend import app
-from agent_team_backend import ai_chat_service
+from agent_team_backend import ai_chat_cli_engine
 
 
 class FakeWebSocket:
@@ -16,56 +16,26 @@ class FakeWebSocket:
         self.sent.append(payload)
 
 
-class FakeSettingsStore:
-    """Stands in for app.ai_chat_settings_store with a fixed settings dict."""
-
-    def __init__(self, settings: dict[str, Any]) -> None:
-        self._settings = settings
-
-    def get(self) -> dict[str, Any]:
-        return dict(self._settings)
-
-
 def _session() -> app.Session:
     return app.Session(FakeWebSocket())  # type: ignore[arg-type]
 
 
-def _fake_stream_chat(captured: list[dict[str, Any]], chunks: list[str]):
-    async def fake_stream_chat(
-        *,
-        settings: dict,
-        messages: list[dict],
-        system: str,
-        max_tokens: int,
-        tools: list[dict] | None = None,
-    ) -> AsyncIterator[str]:
-        captured.append({
-            "settings": settings,
-            "messages": messages,
-            "system": system,
-            "max_tokens": max_tokens,
-        })
-        for chunk in chunks:
-            yield chunk
-        yield "\x00DONE:{}"
+def _fake_run_cli_text(captured: list[dict[str, Any]], result: str):
+    async def fake_run_cli_text(prompt: str, **kwargs: Any) -> str:
+        captured.append({"prompt": prompt, **kwargs})
+        return result
 
-    return fake_stream_chat
+    return fake_run_cli_text
 
 
 @pytest.mark.asyncio
 async def test_enhance_prompt_happy_path_returns_ok(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression: the handler used to read the nonexistent session.settings,
-    raising AttributeError on every call, so ok was always False."""
     captured: list[dict[str, Any]] = []
     monkeypatch.setattr(
-        ai_chat_service, "stream_chat",
-        _fake_stream_chat(captured, ["Enhanced ", "prompt text"]),
-    )
-    monkeypatch.setattr(
-        app, "ai_chat_settings_store",
-        FakeSettingsStore({"provider": "ollama", "model": "test-model"}),
+        ai_chat_cli_engine, "run_cli_text",
+        _fake_run_cli_text(captured, "Enhanced prompt text"),
     )
     session = _session()
 
@@ -79,40 +49,40 @@ async def test_enhance_prompt_happy_path_returns_ok(
     assert response["type"] == "ai.enhance_prompt.result"
     assert response["ok"] is True
     assert response["payload"] == {"ok": True, "content": "Enhanced prompt text"}
-    assert captured[0]["messages"] == [{"role": "user", "content": "make this better"}]
-    assert captured[0]["system"] == "You enhance prompts."
+    assert captured[0]["prompt"] == "make this better"
+    assert captured[0]["system_prompt"] == "You enhance prompts."
 
 
 @pytest.mark.asyncio
-async def test_enhance_prompt_settings_come_from_ai_chat_settings_store(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The LLM call must be configured from ai_chat_settings_store, not from
-    any per-session attribute — changing the store changes what stream_chat
-    receives."""
-    captured: list[dict[str, Any]] = []
-    monkeypatch.setattr(
-        ai_chat_service, "stream_chat",
-        _fake_stream_chat(captured, ["ok"]),
-    )
-    monkeypatch.setattr(
-        app, "ai_chat_settings_store",
-        FakeSettingsStore({
-            "provider": "anthropic",
-            "model": "store-model-marker",
-            "anthropic_api_key": "store-key-marker",
-        }),
-    )
+async def test_enhance_prompt_missing_prompt_is_bad_request() -> None:
     session = _session()
 
     await app.handle_message(session, {
         "id": "ep-2",
         "type": "ai.enhance_prompt",
+        "payload": {"prompt": "   "},
+    })
+
+    response = session.websocket.sent[0]  # type: ignore[attr-defined]
+    assert response["error"]["code"] == "BAD_REQUEST"
+
+
+@pytest.mark.asyncio
+async def test_enhance_prompt_cli_failure_returns_ok_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def failing_run_cli_text(prompt: str, **kwargs: Any) -> str:
+        raise RuntimeError("claude CLI not found")
+
+    monkeypatch.setattr(ai_chat_cli_engine, "run_cli_text", failing_run_cli_text)
+    session = _session()
+
+    await app.handle_message(session, {
+        "id": "ep-3",
+        "type": "ai.enhance_prompt",
         "payload": {"prompt": "hello"},
     })
 
     response = session.websocket.sent[0]  # type: ignore[attr-defined]
-    assert response["payload"]["ok"] is True
-    assert captured[0]["settings"]["provider"] == "anthropic"
-    assert captured[0]["settings"]["model"] == "store-model-marker"
-    assert captured[0]["settings"]["anthropic_api_key"] == "store-key-marker"
+    assert response["payload"]["ok"] is False
+    assert "not found" in response["payload"]["error"]

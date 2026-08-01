@@ -2569,8 +2569,7 @@ async def generate_commit_message(
 # ── GIT_ASKPASS credential IPC ────────────────────────────────────────────────
 # Maps request_id -> Future[str | None], resolved via `resolve_credential()`
 # once the frontend responds to a WS `git.credential_submit` message (or a
-# timeout/cancellation supplies None). Shares its implementation with the
-# `_approvals` registry in ai_chat_tools.py via pending_registry.PendingRegistry.
+# timeout/cancellation supplies None). Built on pending_registry.PendingRegistry.
 _credentials: PendingRegistry[str | None] = PendingRegistry()
 
 def _resolve_askpass_helper_path() -> str:

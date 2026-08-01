@@ -83,36 +83,27 @@ def lookup(msg_type: str) -> Handler | None:
 # ── Editor AI (editor.*) ────────────────────────────────────────────────────
 @handler("editor.rewrite")
 async def editor_rewrite(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
-    from . import app
+    from .ai_chat_cli_engine import run_cli_text
 
     _rew_code = payload.get("code", "") or ""
     _rew_instr = payload.get("instruction", "") or ""
     _rew_lang = payload.get("language", "") or ""
-    _chat_cfg = app.ai_chat_settings_store.get()
-    if _chat_cfg.get("provider", "ollama") == "ollama":
-        result = await app.editor_service.rewrite(
-            app._az_base_url(),
-            payload.get("model") or app.ANALYZER_DEFAULT_MODEL,
-            _rew_code,
-            _rew_instr,
-            _rew_lang,
+    _lang_hint = f" ({_rew_lang})" if _rew_lang else ""
+    _prompt = (
+        f"Rewrite the following code{_lang_hint} per this instruction: {_rew_instr}\n\n"
+        f"```\n{_rew_code}\n```\n\nReturn ONLY the rewritten code, no explanation."
+    )
+    try:
+        _text = await run_cli_text(
+            _prompt,
+            system_prompt="You are a code rewriting assistant. Output only code.",
         )
-    else:
-        from .ai_chat_service import stream_chat as _stream_chat
-        _lang_hint = f" ({_rew_lang})" if _rew_lang else ""
-        _msgs = [{"role": "user", "content": (
-            f"Rewrite the following code{_lang_hint} per this instruction: {_rew_instr}\n\n"
-            f"```\n{_rew_code}\n```\n\nReturn ONLY the rewritten code, no explanation."
-        )}]
-        _chunks: list[str] = []
-        async for _chunk in _stream_chat(_chat_cfg, _msgs, "You are a code rewriting assistant. Output only code.", max_tokens=2048):
-            if not _chunk.startswith("\x00"):
-                _chunks.append(_chunk)
-        _text = "".join(_chunks).strip()
         # Strip markdown fences if model wrapped the code
         _text = re.sub(r'^```[a-zA-Z]*\n?', '', _text).strip()
         _text = re.sub(r'\n?```$', '', _text).strip()
         result = {"ok": True, "text": _text} if _text else {"ok": False, "error": "Empty response"}
+    except Exception as _rew_exc:  # noqa: BLE001
+        result = {"ok": False, "error": str(_rew_exc)}
     await session.send_json(make_response(msg_id, msg_type, result))
 
 
@@ -2988,12 +2979,11 @@ async def ai_chat_notes_set(session: "Session", msg_id: str, msg_type: str, payl
 
 @handler("ai.chat.provider.test")
 async def ai_chat_provider_test(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
-    from . import app
-
-    provider = str(payload.get("provider") or "")
-    overrides = payload.get("settings") if isinstance(payload.get("settings"), dict) else {}
-    result = await app._test_ai_provider(provider, overrides)
-    await session.send_json(make_response(msg_id, msg_type, result))
+    # Removed with the API engine: AI chat now runs through the Claude CLI.
+    await session.send_json(make_error(
+        msg_id, msg_type, "REMOVED",
+        "provider test was removed — AI chat uses the Claude CLI engine",
+    ))
 
 
 @handler("ai.chat.start")
@@ -3038,19 +3028,34 @@ async def ai_chat_start(session: "Session", msg_id: str, msg_type: str, payload:
                         pass
                     break
 
-    base_sys = settings.get("system_prompt", "You are a helpful AI coding assistant.")
-    if system_prefix or system_suffix:
-        sep = "" if (not system_prefix or system_prefix.endswith("\n")) else "\n"
-        settings["system_prompt"] = (
-            f"{system_prefix}{sep}{base_sys}" + (f"\n\n{system_suffix}" if system_suffix else "")
-        )
+    base_sys = settings.get("system_prompt", "") or ""
+    sep = "" if (not system_prefix or system_prefix.endswith("\n")) else "\n"
+    system_prompt = (
+        f"{system_prefix}{sep}{base_sys}" + (f"\n\n{system_suffix}" if system_suffix else "")
+    ).strip()
+    cli_session_id = str(payload.get("cli_session_id") or "")
 
-    async def _run_chat(sid=session_id, msgs=messages, ws_path=workspace_path, s=settings):
-        from .ai_chat_tools import run_agent_loop
+    async def _run_chat(
+        sid=session_id, msgs=messages, ws_path=workspace_path,
+        sys_prompt=system_prompt, cli_sid=cli_session_id,
+    ):
+        from .ai_chat_cli_engine import run_cli_chat
         async def _emit(event_type, data):
             await app.broadcast(make_event(event_type, data))
         try:
-            await run_agent_loop(s, msgs, ws_path, sid, _emit)
+            # The backend PATH may lack the login-shell PATH; refresh (throttled)
+            # so resolve_cli_binary sees the same claude the terminal panes do.
+            await app._ensure_fresh_path_for_spawn("claude")
+            await run_cli_chat(
+                session_id=sid,
+                messages=msgs,
+                workspace_path=ws_path,
+                system_prompt=sys_prompt,
+                cli_session_id=cli_sid,
+                emit=_emit,
+            )
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             await app.broadcast(make_event("ai.chat.error", {"session_id": sid, "message": str(e)}))
 
@@ -3060,39 +3065,32 @@ async def ai_chat_start(session: "Session", msg_id: str, msg_type: str, payload:
     await session.send_json(make_response(msg_id, msg_type, {"ok": True, "session_id": session_id}))
 
 
+# ai.chat.accept_edit / approve_command / reject_command were part of the
+# removed API engine's backend tool execution (edit diffs and command
+# proposals awaited user approval). The CLI engine executes tools itself, so
+# these return an explicit error until the frontend drops its calls.
 @handler("ai.chat.accept_edit")
 async def ai_chat_accept_edit(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
-    from . import app
-
-    ws_path = payload.get("workspace_path", "") or ""
-    file_path = payload.get("file_path", "") or ""
-    new_content = payload.get("new_content", "") or ""
-    result = await asyncio.to_thread(app.fs_service.write_file, ws_path, file_path, new_content)
-    await session.send_json(make_response(msg_id, msg_type, result))
-    if result.get("ok"):
-        asyncio.create_task(app.broadcast(make_event("git.changed", {"workspace_path": ws_path})))
+    await session.send_json(make_error(
+        msg_id, msg_type, "REMOVED",
+        "accept_edit was removed — the CLI engine applies edits itself",
+    ))
 
 
 @handler("ai.chat.approve_command")
 async def ai_chat_approve_command(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
-    from .ai_chat_tools import approve_command
-    approve_command(
-        str(payload.get("session_id", "")),
-        str(payload.get("tool_id", "")),
-        approved=True,
-    )
-    await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
+    await session.send_json(make_error(
+        msg_id, msg_type, "REMOVED",
+        "command approval was removed — the CLI engine runs commands itself",
+    ))
 
 
 @handler("ai.chat.reject_command")
 async def ai_chat_reject_command(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
-    from .ai_chat_tools import approve_command
-    approve_command(
-        str(payload.get("session_id", "")),
-        str(payload.get("tool_id", "")),
-        approved=False,
-    )
-    await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
+    await session.send_json(make_error(
+        msg_id, msg_type, "REMOVED",
+        "command approval was removed — the CLI engine runs commands itself",
+    ))
 
 
 @handler("ai.chat.stop")
@@ -3104,37 +3102,17 @@ async def ai_chat_stop(session: "Session", msg_id: str, msg_type: str, payload: 
 
 @handler("ai.enhance_prompt")
 async def ai_enhance_prompt(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
-    from . import app
-
     _ep_system = (payload.get("system") or "").strip()
     _ep_prompt = (payload.get("prompt") or "").strip()[:4000]
-    _ep_model = (payload.get("model") or "").strip()
-    _ep_provider = (payload.get("provider") or "").strip()
     if not _ep_prompt:
         await session.send_json(make_error(msg_id, msg_type, "BAD_REQUEST", "prompt is required"))
     else:
         try:
-            from .ai_chat_service import stream_chat
-            # Use a shallow copy of AI chat settings, overriding model if specified.
-            # (Session has no .settings attribute — reading it raised AttributeError
-            # on every call, so enhance_prompt always returned ok=False.)
-            _ep_settings = dict(app.ai_chat_settings_store.get())
-            if _ep_provider:
-                _ep_settings["provider"] = _ep_provider
-            if _ep_model:
-                _ep_settings["model"] = _ep_model
-            _ep_content = ""
-            async with asyncio.timeout(30):
-                async for _ep_chunk in stream_chat(
-                    settings=_ep_settings,
-                    messages=[{"role": "user", "content": _ep_prompt}],
-                    system=_ep_system,
-                    max_tokens=1024,
-                ):
-                    if _ep_chunk.startswith("\x00"):
-                        break  # DONE or TOOL sentinel
-                    _ep_content += _ep_chunk
-            await session.send_json(make_response(msg_id, msg_type, {"ok": True, "content": _ep_content.strip()}))
+            from .ai_chat_cli_engine import run_cli_text
+            # payload model/provider overrides are obsolete — the CLI engine
+            # uses the CLI's own configured model.
+            _ep_content = await run_cli_text(_ep_prompt, system_prompt=_ep_system, timeout=60.0)
+            await session.send_json(make_response(msg_id, msg_type, {"ok": True, "content": _ep_content}))
         except Exception as _ep_exc:
             await session.send_json(make_response(msg_id, msg_type, {"ok": False, "error": str(_ep_exc)}))
 
@@ -3245,9 +3223,8 @@ async def ai_review_start(session: "Session", msg_id: str, msg_type: str, payloa
     mode = payload.get("mode") or "working"  # "working" | "branch"
     base = payload.get("base") or ""
     compare = payload.get("compare") or ""
-    settings = {**app.ai_chat_settings_store.get()}
 
-    async def _run_review(rid=review_id, m=mode, b=base, c=compare, s=settings, ws=ws_path):
+    async def _run_review(rid=review_id, m=mode, b=base, c=compare, ws=ws_path):
         import re as _re
         import json as _json
         from .review_service import stream_review
@@ -3269,7 +3246,7 @@ async def ai_review_start(session: "Session", msg_id: str, msg_type: str, payloa
                 diff = diff_result.get("diff", "") if diff_result.get("ok") else ""
             _truncated = diff_result.get("truncated", False) if diff_result.get("ok") else False
             chunks: list[str] = []
-            async for chunk in stream_review(s, diff, truncated=_truncated):
+            async for chunk in stream_review(diff, truncated=_truncated, workspace_path=ws):
                 chunks.append(chunk)
             # Parse and validate structured JSON result from streamed text
             full_text = "".join(chunks)
@@ -4850,44 +4827,11 @@ async def pane_reconnect_session(session: "Session", msg_id: str, msg_type: str,
 # ── AI Chat connection test (ai.chat.test_connection) ────────────────────────
 @handler("ai.chat.test_connection")
 async def ai_chat_test_connection(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
-    _tc_provider = (payload.get("provider") or "").strip()
-    _tc_key = (payload.get("api_key") or "").strip()
-    _tc_base_url = (payload.get("base_url") or "").strip().rstrip("/")
-    _tc_ollama_url = (payload.get("ollama_base_url") or "http://localhost:11434").strip().rstrip("/")
-    _tc_ok = False
-    _tc_err = ""
-    try:
-        import httpx as _httpx
-        if _tc_provider == "anthropic":
-            import anthropic as _ant
-            _ant_client = _ant.AsyncAnthropic(api_key=_tc_key or None)
-            async with asyncio.timeout(10):
-                await _ant_client.models.list(limit=1)
-            _tc_ok = True
-        elif _tc_provider == "ollama":
-            async with _httpx.AsyncClient(timeout=8.0) as _hc:
-                _r = await _hc.get(f"{_tc_ollama_url}/api/tags")
-                _r.raise_for_status()
-            _tc_ok = True
-        else:
-            from .ai_chat_service import _OPENAI_COMPAT_CONFIGS
-            _cfg = _OPENAI_COMPAT_CONFIGS.get(_tc_provider, {})
-            if "base_url_field" in _cfg:
-                _url = _tc_base_url
-            else:
-                _url = _cfg.get("base_url", "")
-            if not _url:
-                raise ValueError(f"No base URL for provider '{_tc_provider}'")
-            _headers: dict = {}
-            if _tc_key:
-                _headers["Authorization"] = f"Bearer {_tc_key}"
-            async with _httpx.AsyncClient(timeout=8.0) as _hc:
-                _r = await _hc.get(f"{_url}/models", headers=_headers)
-                _r.raise_for_status()
-            _tc_ok = True
-    except Exception as _e:
-        _tc_err = str(_e)
-    await session.send_json(make_response(msg_id, msg_type, {"ok": _tc_ok, "error": _tc_err}))
+    # Removed with the API engine: AI chat now runs through the Claude CLI.
+    await session.send_json(make_error(
+        msg_id, msg_type, "REMOVED",
+        "connection test was removed — AI chat uses the Claude CLI engine",
+    ))
 
 
 # ── CLI usage/quota badges (usage.*) ────────────────────────────────────────
