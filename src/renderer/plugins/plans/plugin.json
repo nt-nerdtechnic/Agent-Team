@@ -7,6 +7,9 @@
     "navide": "^0.1.0"
   },
   "entry": "index.html",
-  "requires": ["fs", "ui", "plans"],
-  "activationEvents": ["onStartup"]
+  "requires": [
+    "fs",
+    "ui",
+    "plans"
+  ]
 }

@@ -22,6 +22,11 @@ import {
   type CapabilityResponse,
 } from './pluginCapabilityBroker'
 import { CAP_EVENTS, eventNamespace } from './capabilityMap'
+import {
+  GIT_PLUGIN_REQUIRES,
+  MINI_IDE_PLUGIN_REQUIRES,
+  PLANS_PLUGIN_REQUIRES,
+} from '../../shared/pluginCapabilities'
 import { loadPluginDir, scanInstalledPlugins, verifyOfficialInstall } from './installedPlugins'
 import { resolveOfficialPublisherKey } from './pluginVerify'
 import {
@@ -853,7 +858,7 @@ function ensureMiniIdeWindow(): BrowserWindow {
 export function devMiniIdePluginDescriptor(): PluginLaunchDescriptor {
   return {
     id: MINI_IDE_PLUGIN_ID,
-    requires: ['fs', 'git', 'terminal', 'search', 'chat', 'ui', 'issues'],
+    requires: [...MINI_IDE_PLUGIN_REQUIRES],
     devUrl: '',
     // __dirname is out/main in dev, so ../../ is the repo root.
     entryFile: join(__dirname, '../../dist-plugins/mini-ide/index.html'),
@@ -958,7 +963,7 @@ function plansQuery(workspacePath: string, httpUrl: string, relPath: string, the
 export function devPlansPluginDescriptor(): PluginLaunchDescriptor {
   return {
     id: PLANS_PLUGIN_ID,
-    requires: ['fs', 'ui', 'plans'],
+    requires: [...PLANS_PLUGIN_REQUIRES],
     devUrl: '',
     // __dirname is out/main in dev, so ../../ is the repo root.
     entryFile: join(__dirname, '../../dist-plugins/plans/index.html'),
@@ -1067,14 +1072,14 @@ function gitQuery(
  * (vite.git.config.ts) with the `useBackend` → capabilityBackend alias, so it
  * is not served by the electron-vite dev server: `devUrl` is empty and it
  * always loadFiles. `fs` grants the git.changed working-tree event; `ui` the
- * theme settings sync; `issues` the cloud issues panel. Keep `requires` in sync
- * with the manifest emitted by vite.git.config.ts, or dev runs deny calls the
- * packaged build allows.
+ * theme settings sync; `issues` the cloud issues panel. `requires` comes from
+ * the shared declaration the packaged manifest also reads, so dev and packaged
+ * runs cannot disagree about what is granted.
  */
 export function devGitPluginDescriptor(): PluginLaunchDescriptor {
   return {
     id: GIT_PLUGIN_ID,
-    requires: ['git', 'fs', 'ui', 'issues'],
+    requires: [...GIT_PLUGIN_REQUIRES],
     devUrl: '',
     // __dirname is out/main in dev, so ../../ is the repo root.
     entryFile: join(__dirname, '../../dist-plugins/git/index.html'),

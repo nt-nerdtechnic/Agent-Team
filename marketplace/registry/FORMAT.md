@@ -46,7 +46,7 @@ needed for discovery — these are an additive superset, not a divergent schema.
 | `entry` | string | no | Plugin entry file. |
 | `contributes` | object | no | `{ "views": [{id,title}], "commands": [{id,title}] }`. |
 | `requires` | string[] | no | Capabilities; each must be one of `fs, git, terminal, search, chat, ui, issues, plans`. |
-| `activationEvents` | string[] | no | Each matches `onStartup` \| `onView:<id>` \| `onCommand:<id>`. |
+| `activationEvents` | string[] | no | Each matches `onStartup` \| `onView:<id>` \| `onCommand:<id>`. Honored for backend plugins; frontend views ignore it (they start when the host opens them). |
 | `displayName` | string | no | *marketplace* — falls back to `name` when absent. |
 | `description` | string | no | *marketplace* — used by search. |
 | `categories` | string[] | no | *marketplace* — used by search/filter. |

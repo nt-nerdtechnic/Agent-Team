@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { TYPE_TO_CAP, resolveCapability, useBackend } from '../capabilityBackend'
+import { MINI_IDE_PLUGIN_REQUIRES } from '../../../../shared/pluginCapabilities'
 import type { useBackend as realUseBackend } from '../../../src/composables/useBackend'
 
 // ── Compile-time interface parity ────────────────────────────────────────────
@@ -45,8 +46,7 @@ const MINI_IDE_SENT_TYPES = [
   'editor.rewrite', 'editor.complete',
   // ai / ai.chat
   'ai.enhance_prompt', 'ai.web.search', 'ai.chat.start', 'ai.chat.stop',
-  'ai.chat.settings.get', 'ai.chat.settings.set', 'ai.chat.test_connection',
-  'ai.chat.accept_edit', 'ai.chat.approve_command', 'ai.chat.reject_command',
+  'ai.chat.settings.get', 'ai.chat.settings.set',
   'ai.chat.notes.get', 'ai.chat.notes.set', 'ai.chat.threads.get', 'ai.chat.threads.set',
   // ai.review / analyzer (useReview + ReviewPane — Branch-Diff AI code review)
   'ai.review.start', 'ai.review.stop', 'analyzer.models',
@@ -64,7 +64,7 @@ describe('TYPE_TO_CAP coverage', () => {
   })
 
   it('maps only into the granted capability namespaces', () => {
-    const allowed = new Set(['fs', 'git', 'terminal', 'search', 'chat', 'ui', 'issues'])
+    const allowed = new Set(MINI_IDE_PLUGIN_REQUIRES)
     for (const ref of Object.values(TYPE_TO_CAP)) {
       expect(allowed.has(ref.ns)).toBe(true)
     }

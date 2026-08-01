@@ -7,6 +7,13 @@
     "navide": "^0.1.0"
   },
   "entry": "index.html",
-  "requires": ["fs", "git", "terminal", "search", "chat", "ui", "issues"],
-  "activationEvents": ["onStartup"]
+  "requires": [
+    "fs",
+    "git",
+    "terminal",
+    "search",
+    "chat",
+    "ui",
+    "issues"
+  ]
 }

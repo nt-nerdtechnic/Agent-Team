@@ -2,6 +2,7 @@ import { defineConfig, type Plugin } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { resolve } from 'node:path'
 import { readFileSync, writeFileSync } from 'node:fs'
+import { MINI_IDE_PLUGIN_REQUIRES } from './src/shared/pluginCapabilities'
 
 // ── Mini-IDE plugin bundle (Phase 2 M4) ──────────────────────────────────────
 // A SEPARATE Vite build from the core renderer (electron.vite.config.ts). The
@@ -46,8 +47,8 @@ function emitManifest(): Plugin {
         publisher: 'navide',
         engines: { navide: '^0.1.0' },
         entry: 'index.html',
-        requires: ['fs', 'git', 'terminal', 'search', 'chat', 'ui', 'issues'],
-        activationEvents: ['onStartup'],
+        requires: MINI_IDE_PLUGIN_REQUIRES,
+        // No activationEvents — see vite.git.config.ts.
       }
       writeFileSync(resolve(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n')
     },

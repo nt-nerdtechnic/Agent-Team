@@ -7,6 +7,5 @@
     "navide": "^0.1.0"
   },
   "entry": "index.html",
-  "requires": [],
-  "activationEvents": ["onStartup"]
+  "requires": []
 }

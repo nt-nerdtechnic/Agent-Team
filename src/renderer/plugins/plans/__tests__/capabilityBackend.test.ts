@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { TYPE_TO_CAP, resolveCapability, useBackend } from '../capabilityBackend'
+import { PLANS_PLUGIN_REQUIRES } from '../../../../shared/pluginCapabilities'
 import type { useBackend as realUseBackend } from '../../../src/composables/useBackend'
 
 // ── Compile-time interface parity ────────────────────────────────────────────
@@ -39,8 +40,11 @@ describe('plugin.json manifest', () => {
     expect(manifest.name).toBe('Plans')
     expect(manifest.publisher).toBe('navide')
     expect(manifest.entry).toBe('index.html')
-    expect(manifest.requires).toEqual(['fs', 'ui', 'plans'])
-    expect(manifest.activationEvents).toEqual(['onStartup'])
+    expect(manifest.requires).toEqual([...PLANS_PLUGIN_REQUIRES])
+    // A frontend view starts when the host opens it; the loader never reads
+    // activationEvents, so declaring one would promise an unimplemented
+    // lifecycle.
+    expect(manifest.activationEvents).toBeUndefined()
   })
 
   it('grants exactly the namespaces the capability map uses (plus the plans event ns)', () => {
@@ -61,7 +65,7 @@ describe('TYPE_TO_CAP coverage', () => {
   })
 
   it('maps only into the granted capability namespaces', () => {
-    const allowed = new Set(['fs', 'ui'])
+    const allowed = new Set(PLANS_PLUGIN_REQUIRES)
     for (const ref of Object.values(TYPE_TO_CAP)) {
       expect(allowed.has(ref.ns)).toBe(true)
     }

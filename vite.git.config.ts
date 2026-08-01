@@ -2,6 +2,7 @@ import { defineConfig, type Plugin } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { resolve } from 'node:path'
 import { readFileSync, writeFileSync } from 'node:fs'
+import { GIT_PLUGIN_REQUIRES } from './src/shared/pluginCapabilities'
 
 // ── Git plugin bundle ────────────────────────────────────────────────────────
 // A SEPARATE Vite build from the core renderer (electron.vite.config.ts),
@@ -47,8 +48,10 @@ function emitManifest(): Plugin {
         publisher: 'navide',
         engines: { navide: '^0.1.0' },
         entry: 'index.html',
-        requires: ['git', 'fs', 'ui', 'issues'],
-        activationEvents: ['onStartup'],
+        requires: GIT_PLUGIN_REQUIRES,
+        // No activationEvents: a frontend view starts when the host opens it.
+        // The loader does not read the field, so declaring one would only
+        // promise a lifecycle nothing implements (see plugin-development.md).
       }
       writeFileSync(resolve(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n')
     },

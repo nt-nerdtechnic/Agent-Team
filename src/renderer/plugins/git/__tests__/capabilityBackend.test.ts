@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { TYPE_TO_CAP, resolveCapability, useBackend } from '../capabilityBackend'
+import { GIT_PLUGIN_REQUIRES } from '../../../../shared/pluginCapabilities'
 import type { useBackend as realUseBackend } from '../../../src/composables/useBackend'
 
 // ── Compile-time interface parity ────────────────────────────────────────────
@@ -31,8 +32,10 @@ describe('TYPE_TO_CAP git surface', () => {
     expect(resolveCapability('fs.read_image')).toEqual({ ns: 'fs', method: 'read_image' })
   })
 
+  // Asserted against the shared declaration, so adding a namespace to the map
+  // without granting it in the manifest fails here instead of at runtime.
   it('maps only into the granted capability namespaces', () => {
-    const allowed = new Set(['git', 'fs', 'ui', 'issues'])
+    const allowed = new Set(GIT_PLUGIN_REQUIRES)
     for (const ref of Object.values(TYPE_TO_CAP)) {
       expect(allowed.has(ref.ns)).toBe(true)
     }

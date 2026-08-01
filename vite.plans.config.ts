@@ -2,6 +2,7 @@ import { defineConfig, type Plugin } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { resolve } from 'node:path'
 import { readFileSync, writeFileSync } from 'node:fs'
+import { PLANS_PLUGIN_REQUIRES } from './src/shared/pluginCapabilities'
 
 // ── Plans plugin bundle ──────────────────────────────────────────────────────
 // A SEPARATE Vite build from the core renderer (electron.vite.config.ts),
@@ -46,8 +47,8 @@ function emitManifest(): Plugin {
         publisher: 'navide',
         engines: { navide: '^0.1.0' },
         entry: 'index.html',
-        requires: ['fs', 'ui', 'plans'],
-        activationEvents: ['onStartup'],
+        requires: PLANS_PLUGIN_REQUIRES,
+        // No activationEvents — see vite.git.config.ts.
       }
       writeFileSync(resolve(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n')
     },
