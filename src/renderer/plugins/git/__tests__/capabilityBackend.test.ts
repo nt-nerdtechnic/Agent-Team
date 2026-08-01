@@ -37,6 +37,13 @@ describe('TYPE_TO_CAP git surface', () => {
       expect(allowed.has(ref.ns)).toBe(true)
     }
   })
+
+  it('maps the open-in-editor host capability (mini-IDE hand-off)', () => {
+    expect(resolveCapability('ui.open_in_editor')).toEqual({
+      ns: 'ui',
+      method: 'open_in_editor',
+    })
+  })
 })
 
 describe('useBackend shim status', () => {

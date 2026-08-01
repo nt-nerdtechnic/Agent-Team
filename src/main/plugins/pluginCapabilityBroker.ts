@@ -98,13 +98,27 @@ export function resolveCapabilityCall(
 }
 
 /**
+ * Host-implemented capabilities: `(ns.method)` calls the manager services in
+ * the main process itself instead of dispatching to the backend WS. Scoping
+ * still applies (the ns must be granted by the manifest). `open_in_editor`
+ * routes a file to the mini-IDE plugin window — with the main-side
+ * openMiniIdeEditor fallback chain (OS default app when the mini-IDE is not
+ * installed/available).
+ */
+export const HOST_CAPABILITIES: Readonly<Record<string, string>> = {
+  'ui.open_in_editor': 'open_in_editor',
+}
+
+/**
  * A decision about how to service a capability call. `respond` carries a
  * ready-made envelope (deny / built-in ping / unknown); `backend` names the
- * backend WS message type the manager should dispatch and await.
+ * backend WS message type the manager should dispatch and await; `host` names
+ * a main-process action from {@link HOST_CAPABILITIES}.
  */
 export type CapabilityPlan =
   | { kind: 'respond'; response: CapabilityResponse }
   | { kind: 'backend'; wsType: string }
+  | { kind: 'host'; action: string }
 
 /**
  * M2 dispatch planner. Enforces scoping first (an un-granted namespace is
@@ -125,6 +139,10 @@ export function planCapabilityCall(
   }
   if (call.ns === 'ping') {
     return { kind: 'respond', response: buildSuccess(call.reqId, { pong: true, echo: call.args }) }
+  }
+  const hostAction = HOST_CAPABILITIES[`${call.ns}.${call.method}`]
+  if (hostAction) {
+    return { kind: 'host', action: hostAction }
   }
   const wsType = resolveWsType(call.ns, call.method)
   if (!wsType) {

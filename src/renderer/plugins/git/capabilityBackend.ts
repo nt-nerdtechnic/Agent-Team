@@ -94,10 +94,14 @@ const FS_METHODS = [
 ] as const
 
 // Non-uniform WS types: the type string differs from `<ns>.<method>`. Settings
-// persistence (lib/settings.ts theme sync) remaps onto the ui namespace.
+// persistence (lib/settings.ts theme sync) remaps onto the ui namespace, and
+// `ui.open_in_editor` is a HOST capability (pluginCapabilityBroker
+// HOST_CAPABILITIES): the main process routes the file to the mini-IDE plugin,
+// falling back to the OS default application when it is not installed.
 const EXPLICIT: Record<string, CapabilityRef> = {
   'ui.settings.get': { ns: 'ui', method: 'settings_get' },
   'ui.settings.set': { ns: 'ui', method: 'settings_set' },
+  'ui.open_in_editor': { ns: 'ui', method: 'open_in_editor' },
 }
 
 /**

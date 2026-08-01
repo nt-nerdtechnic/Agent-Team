@@ -563,6 +563,12 @@ function openMiniIdeEditor(host: BrowserWindow | null, params: Record<string, st
   return opened
 }
 
+// The `ui.open_in_editor` host capability (plugin broker): a sandboxed plugin
+// view (e.g. the Git window's diff panel) asks the host to open a file in the
+// mini-IDE; openMiniIdeEditor's fallback chain covers the not-installed case
+// by handing the file to the OS default application.
+frontendPluginManager.setOpenInEditorHandler((params) => openMiniIdeEditor(null, params))
+
 /**
  * Fallback when the mini-IDE plugin view could not be opened: plain file opens
  * go to the OS default application; diff/branch-diff and bare opens keep a

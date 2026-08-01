@@ -154,6 +154,17 @@ describe('planCapabilityCall', () => {
     expect(plan.kind).toBe('respond')
     if (plan.kind === 'respond') expect(plan.response.error?.code).toBe('CAP_DENIED')
   })
+
+  it('routes ui.open_in_editor to the host (never to the backend WS)', () => {
+    const plan = planCapabilityCall(call({ ns: 'ui', method: 'open_in_editor' }), ['ui'])
+    expect(plan).toEqual({ kind: 'host', action: 'open_in_editor' })
+  })
+
+  it('DENIES ui.open_in_editor when the plugin did not declare ui', () => {
+    const plan = planCapabilityCall(call({ ns: 'ui', method: 'open_in_editor' }), ['fs', 'git'])
+    expect(plan.kind).toBe('respond')
+    if (plan.kind === 'respond') expect(plan.response.error?.code).toBe('CAP_DENIED')
+  })
 })
 
 describe('backendResponseToCapability', () => {

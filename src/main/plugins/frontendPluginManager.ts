@@ -17,6 +17,8 @@ import {
   backendResponseToCapability,
   isCapabilityAllowed,
   buildError,
+  buildSuccess,
+  type CapabilityCall,
   type CapabilityResponse,
 } from './pluginCapabilityBroker'
 import { CAP_EVENTS, eventNamespace } from './capabilityMap'
@@ -171,6 +173,12 @@ export class FrontendPluginManager {
       const plan = planCapabilityCall(call, plugin.requires)
       if (plan.kind === 'respond') return plan.response
 
+      // Host-implemented capability (ui.open_in_editor): main services it
+      // directly — no backend round-trip.
+      if (plan.kind === 'host') {
+        return this.runHostAction(call)
+      }
+
       const client = this.ensureBackend()
       if (!client) {
         return buildError(call.reqId, 'BACKEND_ERROR', 'backend not connected')
@@ -237,6 +245,35 @@ export class FrontendPluginManager {
       // the plugins ourselves — their views outlive a backend stop/restart.
       this.dispatchBackendStatus('disconnected')
     }
+  }
+
+  /** Main-registered handler for the `ui.open_in_editor` host capability
+   *  (index.ts wires it to openMiniIdeEditor, whose own fallback chain opens
+   *  the file with the OS default app when the mini-IDE is unavailable). */
+  private openInEditorHandler: ((params: Record<string, string>) => boolean) | null = null
+
+  setOpenInEditorHandler(fn: (params: Record<string, string>) => boolean): void {
+    this.openInEditorHandler = fn
+  }
+
+  /** Service a host-implemented capability call (see HOST_CAPABILITIES). */
+  private runHostAction(call: CapabilityCall): CapabilityResponse {
+    // Only open_in_editor exists today; a second action gets a switch.
+    const args = (typeof call.args === 'object' && call.args !== null ? call.args : {}) as Record<
+      string,
+      unknown
+    >
+    const workspacePath = typeof args.workspace_path === 'string' ? args.workspace_path : ''
+    const filepath = typeof args.filepath === 'string' ? args.filepath : ''
+    if (!workspacePath || !filepath) {
+      return buildError(call.reqId, 'BAD_REQUEST', 'workspace_path and filepath are required')
+    }
+    const handler = this.openInEditorHandler
+    if (!handler) {
+      return buildError(call.reqId, 'BACKEND_ERROR', 'editor open handler not registered')
+    }
+    const opened = handler({ workspace_path: workspacePath, filepath })
+    return buildSuccess(call.reqId, { ok: true, opened })
   }
 
   /** Fan a transport status transition out to every backend-needing plugin as
