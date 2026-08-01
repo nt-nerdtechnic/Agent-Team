@@ -352,6 +352,14 @@ class CredentialVault:
         return secret or None
 
     def _keychain_write(self, service: str, secret: str) -> None:
+        # Refuse a multi-line payload BEFORE touching the item: `security -i`
+        # parses one command per line, so it would store everything up to the
+        # first newline and fail on the rest — leaving a truncated, unusable
+        # credential behind (observed: an item reduced to "{").
+        if "\n" in secret:
+            raise CredentialVaultError(
+                f"refusing to write a multi-line secret for {service!r}"
+            )
         # -U updates in place when the item already exists. The account
         # attribute mirrors what the CLIs use (the login user name).
         # Interactive mode (-i) takes the command on stdin so the secret

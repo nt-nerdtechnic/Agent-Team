@@ -173,6 +173,21 @@ function acctTier(profileId: string | null): 'ok' | 'warn' | 'crit' {
   const r = remainingPercent(accountUsageFor(props.agentKey, profileId))
   return r === null ? 'ok' : remainingTier(r)
 }
+
+// A row whose slot could not be polled falls back to the last good numbers,
+// which may be hours or days old. Mark it rather than let a dead snapshot pass
+// for a live reading.
+function acctStale(profileId: string | null): boolean {
+  return accountUsageFor(props.agentKey, profileId)?.stale === true
+}
+
+function acctTitle(profileId: string | null): string {
+  const s = accountUsageFor(props.agentKey, profileId)
+  if (s?.stale !== true) return ''
+  return t('usage.cached-account-tooltip', {
+    time: formatResetAbsolute(s.lastSuccessAt ?? s.fetchedAt),
+  })
+}
 </script>
 
 <template>
@@ -249,9 +264,13 @@ function acctTier(profileId: string | null): 'ok' | 'warn' | 'crit' {
               avatarInitial(accountLabel(null, $t('usage.switch-default')))
             }}</span>
             <span class="usage-acct-name">{{ accountLabel(null, $t('usage.switch-default')) }}</span>
-            <span v-if="acctPct(null)" class="usage-acct-pct" :class="acctTier(null)">{{
-              acctPct(null)
-            }}</span>
+            <span
+              v-if="acctPct(null)"
+              class="usage-acct-pct"
+              :class="[acctTier(null), { stale: acctStale(null) }]"
+              :title="acctTitle(null)"
+              >{{ acctStale(null) ? '~' : '' }}{{ acctPct(null) }}</span
+            >
             <span v-if="activeProfileId === ''" class="usage-acct-tick">✓</span>
           </button>
           <button
@@ -267,9 +286,13 @@ function acctTier(profileId: string | null): 'ok' | 'warn' | 'crit' {
               avatarInitial(accountLabel(p.id, p.name))
             }}</span>
             <span class="usage-acct-name">{{ accountLabel(p.id, p.name) }}</span>
-            <span v-if="acctPct(p.id)" class="usage-acct-pct" :class="acctTier(p.id)">{{
-              acctPct(p.id)
-            }}</span>
+            <span
+              v-if="acctPct(p.id)"
+              class="usage-acct-pct"
+              :class="[acctTier(p.id), { stale: acctStale(p.id) }]"
+              :title="acctTitle(p.id)"
+              >{{ acctStale(p.id) ? '~' : '' }}{{ acctPct(p.id) }}</span
+            >
             <span v-if="activeProfileId === p.id" class="usage-acct-tick">✓</span>
           </button>
         </div>
@@ -484,6 +507,13 @@ function acctTier(profileId: string | null): 'ok' | 'warn' | 'crit' {
 }
 .usage-acct-pct.crit {
   color: var(--danger-fg);
+}
+/* Cached numbers: dimmed and underlined so a days-old reading never passes for
+   a live one (the leading ~ carries it for screen readers too). */
+.usage-acct-pct.stale {
+  opacity: 0.6;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
 }
 .usage-acct-manage {
   display: flex;

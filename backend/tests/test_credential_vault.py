@@ -37,7 +37,14 @@ class FakeSecurity:
         if args == ["-i"]:
             # Interactive mode: the whole command arrives on stdin.
             self.stdin_commands.append(input_text or "")
-            tokens = shlex.split((input_text or "").strip())
+            body = (input_text or "").rstrip("\n")
+            if "\n" in body:
+                # Real `security -i` reads ONE command per line: a payload
+                # carrying a newline is cut there and the remainder is parsed
+                # as further (bogus) commands. Reject it the same way so a
+                # multi-line secret can never pass in tests but fail on a Mac.
+                return 1, "unknown command"
+            tokens = shlex.split(body)
         else:
             tokens = list(args)
         service = tokens[tokens.index("-s") + 1]
@@ -1302,3 +1309,52 @@ async def test_promotion_failure_writes_no_marker(
 
     assert marker.exists()
     assert vault.read_slot("codex", "p1").secret == '{"who": "home"}'
+
+
+# ── refreshed claude payloads must survive the Keychain writer ───────────────
+
+
+def test_write_slot_stores_a_refreshed_claude_secret_on_macos(tmp_path: Path) -> None:
+    """The parked-slot token refresh rewrites a slot through write_slot. On
+    macOS that goes through `security -i`, which parses one command per line —
+    so the refreshed payload must stay on a single line. Regression: an
+    indented rewrite stored only "{" and destroyed the account's credential."""
+    from agent_team_backend.usage_service import merge_claude_secret
+
+    vault, sec = _mac_vault(tmp_path)
+    original = json.dumps({
+        "claudeAiOauth": {
+            "accessToken": "old", "refreshToken": "rt", "expiresAt": 1,
+            "scopes": ["user:inference"],
+        }
+    })
+    vault.write_slot("claude", "acct1", LiveCredentials(secret=original))
+
+    refreshed = merge_claude_secret(original, {"accessToken": "new", "expiresAt": 2})
+    vault.write_slot("claude", "acct1", LiveCredentials(secret=refreshed))
+
+    stored = vault.read_slot("claude", "acct1").secret
+    assert json.loads(stored)["claudeAiOauth"] == {
+        "accessToken": "new", "refreshToken": "rt", "expiresAt": 2,
+        "scopes": ["user:inference"],
+    }
+    assert all("\n" not in cmd.rstrip("\n") for cmd in sec.stdin_commands)
+
+
+def test_write_slot_rejects_a_multiline_secret_without_touching_the_item(
+    tmp_path: Path,
+) -> None:
+    """A newline must be refused BEFORE the write: `security -i` would store
+    the payload up to the first newline and fail on the rest, leaving a
+    truncated credential (observed in the wild as an item reduced to "{")."""
+    vault, sec = _mac_vault(tmp_path)
+    good = json.dumps({"claudeAiOauth": {"accessToken": "keep"}})
+    vault.write_slot("claude", "acct1", LiveCredentials(secret=good))
+    writes_before = len(sec.stdin_commands)
+
+    indented = json.dumps({"claudeAiOauth": {"accessToken": "a"}}, indent=2)
+    with pytest.raises(CredentialVaultError):
+        vault.write_slot("claude", "acct1", LiveCredentials(secret=indented))
+
+    assert len(sec.stdin_commands) == writes_before  # never reached `security`
+    assert vault.read_slot("claude", "acct1").secret == good

@@ -1520,6 +1520,7 @@
     "cached-short": "cached",
     "cached-at": "Cached · last successful {time}",
     "cached-reset-expired": "Cached quota reset has passed",
+    "cached-account-tooltip": "Cached — this account could not be polled; numbers are from {time}",
     "cached-window-expired": "reset passed",
     "no-data": "No quota data yet",
     "refresh-status": "Refresh: {status}",

@@ -97,6 +97,21 @@ CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CLAUDE_BETA_HEADER = "oauth-2025-04-20"
 CLAUDE_UA_FALLBACK = "claude-code/2.1.0"
 CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
+# Parked Claude account slots are the one credential this module refreshes.
+# A slot holds a point-in-time snapshot and no CLI owns it, so its access token
+# just expires (~8h) and the badge freezes on the last good poll — including
+# right after a switch, which installs that dead snapshot into the live
+# location. Refreshing a PARKED slot is safe: the rotated refresh token is
+# written straight back into the slot and nothing else reads it. The LIVE
+# location is still never refreshed here — a running CLI owns it, and Anthropic
+# rotates refresh tokens, so a concurrent refresh would invalidate the CLI's
+# copy. The active account's slot is skipped for the same reason: its snapshot
+# can share a token family with the live credential.
+CLAUDE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+# Refresh a little before expiry so a switch never installs a token that dies
+# seconds later.
+CLAUDE_REFRESH_SKEW_SEC = 300.0
 CODEX_DEFAULT_BASE = "https://chatgpt.com/backend-api"
 KIMI_DEFAULT_BASE = "https://api.kimi.com"
 # Antigravity (Google). Credentials are READ-ONLY: the refresh token comes
@@ -328,6 +343,116 @@ def claude_token_expired(oauth: dict, now_ms: float | None = None) -> bool:
         return False
     now = time.time() * 1000 if now_ms is None else now_ms
     return now >= expires
+
+
+def claude_token_stale(oauth: dict, now_ms: float | None = None) -> bool:
+    """Expired, or close enough to expiry that handing it to the live location
+    would be pointless. Drives the parked-slot refresh only."""
+    expires = _num(oauth.get("expiresAt"))
+    if expires is None:
+        return False
+    now = time.time() * 1000 if now_ms is None else now_ms
+    return now >= expires - CLAUDE_REFRESH_SKEW_SEC * 1000
+
+
+async def refresh_claude_token(refresh_token: str) -> dict | None:
+    """Exchange a refresh token for a fresh Claude OAuth grant.
+
+    Returns the ``claudeAiOauth`` fields to merge, or None when the exchange
+    fails (network, revoked token, unexpected payload). Callers must only pass
+    a PARKED slot's refresh token — see the module constants."""
+    import httpx
+
+    body = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": CLAUDE_CLIENT_ID,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+            resp = await client.post(CLAUDE_TOKEN_URL, json=body)
+    except Exception as err:  # noqa: BLE001 — a dead network must not sink the poll
+        log.warning("claude token refresh failed: %s", err)
+        return None
+    if resp.status_code != 200:
+        log.warning("claude token refresh rejected: HTTP %s", resp.status_code)
+        return None
+    try:
+        data = resp.json()
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    access = data.get("access_token")
+    if not isinstance(access, str) or not access:
+        return None
+    fields: dict = {"accessToken": access}
+    expires_in = _num(data.get("expires_in"))
+    if expires_in is not None:
+        fields["expiresAt"] = int(time.time() * 1000 + expires_in * 1000)
+    rotated = data.get("refresh_token")
+    if isinstance(rotated, str) and rotated:
+        fields["refreshToken"] = rotated
+    scope = data.get("scope")
+    if isinstance(scope, str) and scope:
+        fields["scopes"] = scope.split()
+    return fields
+
+
+def merge_claude_secret(raw: str, fields: dict) -> str | None:
+    """Rewrite a vault credential payload with refreshed OAuth fields, leaving
+    every other key (mcpOAuth, …) untouched. None when ``raw`` is unusable.
+
+    Serialized on ONE line: on macOS the vault stores this through
+    ``security -i``, whose command parser is line-based — an indented payload
+    would be truncated at the first newline."""
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
+    if not isinstance(oauth, dict):
+        return None
+    oauth.update(fields)
+    return json.dumps(data, separators=(",", ":"))
+
+
+async def refresh_parked_claude_slot(
+    vault, slot_id: str, oauth: dict, *, locked: bool = False
+) -> dict | None:
+    """Mint a fresh access token for a PARKED claude slot and write it back.
+
+    The network exchange runs outside the switch lock; the write re-reads the
+    slot under the lock and bails when its refresh token moved (a switch or a
+    harvest landed in between), so a slow refresh can never clobber newer
+    credentials. ``locked=True`` for callers already holding the lock.
+    Returns the refreshed oauth dict, or None when nothing was written."""
+    from .credential_vault import LiveCredentials
+
+    refresh_token = oauth.get("refreshToken")
+    if not isinstance(refresh_token, str) or not refresh_token:
+        return None
+    fields = await refresh_claude_token(refresh_token)
+    if fields is None:
+        return None
+
+    def _write() -> dict | None:
+        current = vault.read_slot("claude", slot_id)
+        parsed = parse_claude_credentials(current.secret)
+        if parsed is None or parsed.get("refreshToken") != refresh_token:
+            return None
+        secret = merge_claude_secret(current.secret, fields)
+        if secret is None:
+            return None
+        vault.write_slot(
+            "claude", slot_id, LiveCredentials(secret=secret, account=current.account)
+        )
+        return {**parsed, **fields}
+
+    if locked:
+        return await asyncio.to_thread(_write)
+    async with vault.switch_lock("claude"):
+        return await asyncio.to_thread(_write)
 
 
 # A failed Keychain read (denied prompt, timeout) is remembered so we don't
@@ -2574,6 +2699,7 @@ class UsageService:
             }
 
         credentials = await asyncio.to_thread(_read_all)
+        await self._refresh_parked_claude_tokens(vault, active, credentials)
         allowed = set(slot_ids)
         removed = False
         for mapping in (
@@ -2586,6 +2712,26 @@ class UsageService:
         if removed:
             await asyncio.to_thread(self._save_cache)
         return active, credentials
+
+    async def _refresh_parked_claude_tokens(
+        self, vault, active: str, credentials: dict[str, dict | None]
+    ) -> None:
+        """Keep every parked slot's access token alive so its badge reports
+        real numbers and a switch installs a live token. The active slot is
+        skipped — its snapshot can share a token family with the live
+        credential a running CLI owns. Best effort throughout."""
+        if not hasattr(vault, "write_slot"):
+            return
+        for slot_id, oauth in credentials.items():
+            if slot_id == active or oauth is None or not claude_token_stale(oauth):
+                continue
+            try:
+                refreshed = await refresh_parked_claude_slot(vault, slot_id, oauth)
+            except Exception as err:  # noqa: BLE001 — one slot must not sink the poll
+                log.warning("claude slot %s token refresh failed: %s", slot_id, err)
+                continue
+            if refreshed is not None:
+                credentials[slot_id] = refreshed
 
     def configure(self, enabled: bool, interval_sec: float | None) -> None:
         self.enabled = bool(enabled)

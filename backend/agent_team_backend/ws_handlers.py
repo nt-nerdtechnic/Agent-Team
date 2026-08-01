@@ -1547,6 +1547,35 @@ def _running_regular_terminals(agent_key: str) -> list[str]:
     return running
 
 
+async def _refresh_claude_slot_for_switch(slot_id: str) -> None:
+    """Refresh a parked claude slot's access token right before it is restored
+    into the live location. Caller holds the agent's switch lock. Never raises
+    — a failed refresh only means the badge stays on cached numbers until a
+    pane spawns, which is the pre-existing behaviour."""
+    import logging
+
+    from . import app
+    from .usage_service import (
+        claude_token_stale,
+        parse_claude_credentials,
+        refresh_parked_claude_slot,
+    )
+
+    vault = app.credential_vault
+    if not hasattr(vault, "read_slot") or not hasattr(vault, "write_slot"):
+        return
+    try:
+        creds = await asyncio.to_thread(vault.read_slot, "claude", slot_id)
+        oauth = parse_claude_credentials(creds.secret)
+        if oauth is None or not claude_token_stale(oauth):
+            return
+        await refresh_parked_claude_slot(vault, slot_id, oauth, locked=True)
+    except Exception as err:  # noqa: BLE001 — the switch itself must not fail on this
+        logging.getLogger(__name__).warning(
+            "claude slot %s pre-switch refresh failed: %s", slot_id, err
+        )
+
+
 @handler("cli_profiles.set_default")
 async def cli_profiles_set_default(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     """Switch the agent's active account: capture the live credentials into the
@@ -1652,6 +1681,14 @@ async def cli_profiles_set_default(session: "Session", msg_id: str, msg_type: st
                     make_error(msg_id, msg_type, "PROFILE_SWAP_FAILED", _profile_error(err))
                 )
                 return
+
+        # The slot about to become live may hold an expired access token — a
+        # parked slot ages with nobody refreshing it between switches, and
+        # restoring a dead token leaves the usage badge frozen on the last good
+        # poll until a pane spawns. Mint a fresh one first (still parked here,
+        # so no CLI owns it). Best effort: the switch proceeds either way.
+        if agent_key == "claude":
+            await _refresh_claude_slot_for_switch(profile_id or DEFAULT_SLOT_ID)
 
         try:
             await asyncio.to_thread(

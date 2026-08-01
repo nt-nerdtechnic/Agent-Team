@@ -1520,6 +1520,7 @@
     "cached-short": "快取",
     "cached-at": "快取 · 上次成功於 {time}",
     "cached-reset-expired": "快取額度的重置時間已過",
+    "cached-account-tooltip": "快取 — 此帳號無法輪詢，數字取自 {time}",
     "cached-window-expired": "重置時間已過",
     "no-data": "尚無額度資料",
     "refresh-status": "刷新：{status}",

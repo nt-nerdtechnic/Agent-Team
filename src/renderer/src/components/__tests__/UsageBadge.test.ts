@@ -287,6 +287,26 @@ describe('UsageBadge – popover account list', () => {
     expect(pcts[1].classes()).toContain('crit')
   })
 
+  it('marks a row whose numbers came from cache, and leaves live rows plain', async () => {
+    // A parked slot that could not be polled falls back to its last good
+    // numbers — possibly days old. The row must not read as a live quota.
+    usage.usageFor.mockReturnValue(snapshot())
+    usage.accountUsageFor.mockImplementation((_agent, profileId) =>
+      profileId === 'p1'
+        ? snapshot({ stale: true, lastSuccessAt: '2026-07-20T00:00:00Z' })
+        : snapshot(),
+    )
+    wrapper = mountBadge(makeCliProfiles({ profiles: [profile('p1', 'Work')] }).fake)
+    await openPopover(wrapper)
+    const pcts = wrapper.findAll('.usage-acct-pct')
+    expect(pcts[0].classes()).not.toContain('stale')
+    expect(pcts[0].text()).toBe('70%')
+    expect(pcts[0].attributes('title')).toBe('')
+    expect(pcts[1].classes()).toContain('stale')
+    expect(pcts[1].text()).toBe('~70%')
+    expect(pcts[1].attributes('title')).toContain('Cached')
+  })
+
   it('omits the row percent when a slot has no fetched snapshot', async () => {
     usage.usageFor.mockReturnValue(snapshot())
     usage.accountUsageFor.mockReturnValue(undefined)

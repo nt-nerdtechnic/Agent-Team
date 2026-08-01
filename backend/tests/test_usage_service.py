@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -2673,3 +2674,243 @@ async def test_fetch_codex_no_credentials_without_stranded_login(monkeypatch, tm
     monkeypatch.setenv("HOME", str(tmp_path))
     snap = await us.fetch_codex(tmp_path / ".codex")
     assert snap["status"] == "no-credentials"
+
+
+# ── Parked Claude slot token refresh ────────────────────────────────────────
+#
+# A parked slot's access token expires with nobody to refresh it, which froze
+# both its badge and every switch that installed the dead snapshot. The poller
+# now refreshes parked slots only — never the live location, never the active
+# account's slot (its snapshot can share a token family with the live copy).
+
+class _SlotVault:
+    """Minimal vault double: one claude slot per id, plus the switch lock."""
+
+    def __init__(self, slots: dict[str, str | None] | None = None) -> None:
+        self.slots: dict[str, str | None] = dict(slots or {})
+        self.accounts: dict[str, dict | None] = {}
+        self.writes: list[tuple[str, str]] = []
+        self._lock = asyncio.Lock()
+
+    def switch_lock(self, agent_key: str) -> asyncio.Lock:
+        return self._lock
+
+    def read_slot(self, agent_key: str, slot_id: str):
+        return SimpleNamespace(
+            secret=self.slots.get(slot_id), account=self.accounts.get(slot_id)
+        )
+
+    def write_slot(self, agent_key: str, slot_id: str, creds) -> None:
+        self.slots[slot_id] = creds.secret
+        self.accounts[slot_id] = creds.account
+        self.writes.append((slot_id, creds.secret))
+
+    def resolve_claude_credentials(self, slot_id: str, *, active: bool):
+        return self.read_slot("claude", slot_id)
+
+
+def _slot_secret(access: str, refresh: str, expires_at: int, **extra) -> str:
+    return json.dumps({
+        "claudeAiOauth": {
+            "accessToken": access, "refreshToken": refresh, "expiresAt": expires_at,
+        },
+        **extra,
+    })
+
+
+def test_claude_token_stale_covers_the_refresh_skew():
+    skew_ms = us.CLAUDE_REFRESH_SKEW_SEC * 1000
+    oauth = {"expiresAt": 10_000_000}
+    assert us.claude_token_stale(oauth, now_ms=10_000_000) is True
+    assert us.claude_token_stale(oauth, now_ms=10_000_000 - skew_ms) is True
+    assert us.claude_token_stale(oauth, now_ms=10_000_000 - skew_ms - 1) is False
+    assert us.claude_token_stale({}, now_ms=0) is False
+
+
+async def test_refresh_claude_token_parses_the_grant(monkeypatch):
+    calls = _fake_httpx(monkeypatch, {
+        us.CLAUDE_TOKEN_URL: _FakeResponse(200, {
+            "access_token": "fresh", "refresh_token": "rotated",
+            "expires_in": 3600, "scope": "user:inference user:profile",
+        }),
+    })
+
+    fields = await us.refresh_claude_token("old-rt")
+
+    assert calls[0][1]["json"] == {
+        "grant_type": "refresh_token",
+        "refresh_token": "old-rt",
+        "client_id": us.CLAUDE_CLIENT_ID,
+    }
+    assert fields["accessToken"] == "fresh"
+    assert fields["refreshToken"] == "rotated"
+    assert fields["scopes"] == ["user:inference", "user:profile"]
+    assert fields["expiresAt"] > time.time() * 1000
+
+
+async def test_refresh_claude_token_survives_rejection_and_network_loss(monkeypatch):
+    import httpx
+
+    _fake_httpx(monkeypatch, {us.CLAUDE_TOKEN_URL: _FakeResponse(400, {"error": "x"})})
+    assert await us.refresh_claude_token("rt") is None
+
+    _fake_httpx(monkeypatch, {us.CLAUDE_TOKEN_URL: httpx.ConnectError("down")})
+    assert await us.refresh_claude_token("rt") is None
+
+    _fake_httpx(monkeypatch, {us.CLAUDE_TOKEN_URL: _FakeResponse(200, {"scope": "x"})})
+    assert await us.refresh_claude_token("rt") is None
+
+
+def test_merge_claude_secret_keeps_unrelated_keys():
+    raw = _slot_secret("old", "rt", 1, mcpOAuth={"srv": {"token": "keep"}})
+    merged = us.merge_claude_secret(raw, {"accessToken": "new", "expiresAt": 99})
+    data = json.loads(merged)
+    assert data["claudeAiOauth"]["accessToken"] == "new"
+    assert data["claudeAiOauth"]["expiresAt"] == 99
+    assert data["claudeAiOauth"]["refreshToken"] == "rt"  # untouched by this grant
+    assert data["mcpOAuth"] == {"srv": {"token": "keep"}}
+    # Single line: the macOS vault writes this through `security -i`, whose
+    # command parser stops at the first newline.
+    assert "\n" not in merged
+    assert us.merge_claude_secret("not json", {}) is None
+    assert us.merge_claude_secret(json.dumps({"other": 1}), {}) is None
+
+
+async def test_refresh_parked_slot_writes_the_new_token_back(monkeypatch):
+    vault = _SlotVault({"p1": _slot_secret("old", "rt", 1)})
+    vault.accounts["p1"] = {"emailAddress": "a@b.c"}
+    _fake_httpx(monkeypatch, {
+        us.CLAUDE_TOKEN_URL: _FakeResponse(200, {
+            "access_token": "fresh", "refresh_token": "rotated", "expires_in": 3600,
+        }),
+    })
+
+    oauth = us.parse_claude_credentials(vault.slots["p1"])
+    refreshed = await us.refresh_parked_claude_slot(vault, "p1", oauth)
+
+    assert refreshed["accessToken"] == "fresh"
+    stored = json.loads(vault.slots["p1"])["claudeAiOauth"]
+    assert stored["accessToken"] == "fresh"
+    assert stored["refreshToken"] == "rotated"
+    # The display-only account object survives the rewrite.
+    assert vault.accounts["p1"] == {"emailAddress": "a@b.c"}
+
+
+async def test_refresh_parked_slot_drops_write_when_the_slot_moved(monkeypatch):
+    """A switch or harvest landing during the network call must win: the stale
+    refresh result is discarded rather than clobbering newer credentials."""
+    vault = _SlotVault({"p1": _slot_secret("old", "rt", 1)})
+    oauth = us.parse_claude_credentials(vault.slots["p1"])
+
+    async def racing_refresh(refresh_token):
+        vault.slots["p1"] = _slot_secret("newer", "rt-newer", 2)
+        return {"accessToken": "fresh", "refreshToken": "rotated"}
+
+    monkeypatch.setattr(us, "refresh_claude_token", racing_refresh)
+
+    assert await us.refresh_parked_claude_slot(vault, "p1", oauth) is None
+    assert json.loads(vault.slots["p1"])["claudeAiOauth"]["accessToken"] == "newer"
+    assert vault.writes == []
+
+
+async def test_refresh_parked_slot_needs_a_refresh_token(monkeypatch):
+    vault = _SlotVault({"p1": json.dumps({"claudeAiOauth": {"accessToken": "a"}})})
+    called = False
+
+    async def never(refresh_token):
+        nonlocal called
+        called = True
+        return None
+
+    monkeypatch.setattr(us, "refresh_claude_token", never)
+    assert await us.refresh_parked_claude_slot(vault, "p1", {"accessToken": "a"}) is None
+    assert called is False
+
+
+async def test_poll_refreshes_parked_slots_but_never_the_active_one(
+    tmp_path, monkeypatch
+):
+    store = _isolated_store(tmp_path)
+    active = store.create(agent_key="claude", name="Active")
+    parked = store.create(agent_key="claude", name="Parked")
+    store.set_default("claude", active["id"])
+
+    dead = 1_000  # epoch ms, long past
+    vault = _SlotVault({
+        "__default__": _slot_secret("default-old", "rt-default", dead),
+        active["id"]: _slot_secret("active-old", "rt-active", dead),
+        parked["id"]: _slot_secret("parked-old", "rt-parked", dead),
+    })
+    monkeypatch.setattr(us, "_get_profiles_store", lambda: store)
+    monkeypatch.setattr(us, "_get_credential_vault", lambda: vault)
+
+    refreshed_tokens: list[str] = []
+
+    async def fake_refresh(refresh_token):
+        refreshed_tokens.append(refresh_token)
+        return {"accessToken": f"fresh-{refresh_token}",
+                "expiresAt": int(time.time() * 1000 + 3_600_000)}
+
+    monkeypatch.setattr(us, "refresh_claude_token", fake_refresh)
+    fetched: list[str] = []
+
+    async def fake_claude(oauth):
+        fetched.append(oauth["accessToken"])
+        return us._snapshot("claude", "ok",
+                            windows=[us._window("session", "Session", 10, None)])
+
+    monkeypatch.setattr(us, "fetch_claude_oauth", fake_claude)
+    for name in ("codex", "kimi", "grok", "antigravity", "opencode", "qwen",
+                 "kilo", "pi", "copilot", "cursor"):
+        monkeypatch.setattr(
+            us, f"fetch_{name}",
+            lambda *a, _p=name, **k: _no_creds(_p),
+        )
+
+    svc = us.UsageService(cache_path=tmp_path / "usage-cache.json")
+    await svc.poll_once(tmp_path)
+
+    # Both parked slots refreshed; the active account's slot was left alone.
+    assert sorted(refreshed_tokens) == ["rt-default", "rt-parked"]
+    assert sorted(fetched) == sorted([
+        "active-old",             # active reads live, untouched by the refresh
+        "fresh-rt-default", "fresh-rt-parked",
+    ])
+    assert json.loads(vault.slots[active["id"]])["claudeAiOauth"]["accessToken"] \
+        == "active-old"
+
+
+async def test_poll_survives_a_failing_slot_refresh(tmp_path, monkeypatch):
+    store = _isolated_store(tmp_path)
+    store.set_default("claude", None)
+    vault = _SlotVault({"__default__": _slot_secret("old", "rt", 1_000)})
+    monkeypatch.setattr(us, "_get_profiles_store", lambda: store)
+    monkeypatch.setattr(us, "_get_credential_vault", lambda: vault)
+
+    async def boom(refresh_token):
+        raise RuntimeError("refresh exploded")
+
+    monkeypatch.setattr(us, "refresh_claude_token", boom)
+    fetched: list[str] = []
+
+    async def fake_claude(oauth):
+        fetched.append(oauth["accessToken"])
+        return us._snapshot("claude", "expired")
+
+    monkeypatch.setattr(us, "fetch_claude_oauth", fake_claude)
+    for name in ("codex", "kimi", "grok", "antigravity", "opencode", "qwen",
+                 "kilo", "pi", "copilot", "cursor"):
+        monkeypatch.setattr(
+            us, f"fetch_{name}",
+            lambda *a, _p=name, **k: _no_creds(_p),
+        )
+
+    svc = us.UsageService(cache_path=tmp_path / "usage-cache.json")
+    payload = await svc.poll_once(tmp_path)
+
+    assert fetched == ["old"]  # the poll still ran on the stale token
+    assert payload["accounts"]["claude"]["__default__"]["status"] == "expired"
+
+
+async def _no_creds(provider: str) -> dict:
+    return us._snapshot(provider, "no-credentials")
