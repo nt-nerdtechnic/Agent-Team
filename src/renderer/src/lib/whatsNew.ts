@@ -34,6 +34,33 @@ export const WHATS_NEW_CHROME = {
 
 export const WHATS_NEW: WhatsNewEntry[] = [
   {
+    version: '0.1.71',
+    title: {
+      'zh-TW': '終端隱藏頁籤渲染優化與 AI Chat CLI 引擎',
+      'en-US': 'Hidden terminal tab rendering & CLI-driven AI chat',
+    },
+    highlights: [
+      {
+        'zh-TW':
+          '隱藏頁籤終端尺寸快取：快取並持久化 Terminal 最佳行列尺寸，解決背景或開機還原時啟動 PTY 輸出繪製過窄且無法拉寬的問題。',
+        'en-US':
+          'Hidden terminal dimension caching: persists terminal dimensions so background PTYs start at realistic layout widths instead of narrow defaults.',
+      },
+      {
+        'zh-TW':
+          'AI Chat 改由 CLI 驅動：AI 聊天視窗改由底層 CLI Engine 驅動，大幅提升回應速度、並能自動回收僵死或孤兒 subprocess。',
+        'en-US':
+          'CLI-driven AI Chat: AI chat frontend now runs on the native CLI engine for higher stability, automatic orphan cleanup, and better resilience.',
+      },
+      {
+        'zh-TW':
+          'Git 獨立視窗與體驗改善：重構 Git 獨立視窗側邊欄為折疊卡片介面，修復 Cmd+C 終端複製、右鍵選取菜單與 Mouse-tracking 拖曳選取。',
+        'en-US':
+          'Git window & terminal UX: reworked Git window sidebar into collapsible cards, fixed Cmd+C terminal copying, context menu, and mouse text selection.',
+      },
+    ],
+  },
+  {
     version: '0.1.70',
     title: {
       'zh-TW': '多帳號憑證管理與系統穩定度提升',
