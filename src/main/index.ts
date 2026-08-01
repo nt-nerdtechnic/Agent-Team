@@ -282,11 +282,13 @@ function focusOrCreateMainWindow(): void {
   })
 }
 
-function openPipelineManagerWindow(pipelineId?: string): void {
+function openPipelineManagerWindow(pipelineId?: string, workspacePath?: string): void {
   if (pipelineManagerWindow && !pipelineManagerWindow.isDestroyed()) {
     pipelineManagerWindow.focus()
     // Already-open window: forward the deep link so the renderer can switch to
     // the requested pipeline's detail view instead of staying where it was.
+    // The AI panel's workspace is fixed at window creation — deliberately NOT
+    // re-forwarded here.
     if (pipelineId) {
       pipelineManagerWindow.webContents.send('pipeline-manager:open-pipeline', pipelineId)
     }
@@ -310,7 +312,11 @@ function openPipelineManagerWindow(pipelineId?: string): void {
   win.on('closed', () => {
     if (pipelineManagerWindow === win) pipelineManagerWindow = null
   })
-  loadWindow(win, { window: 'pipelines', ...(pipelineId ? { pipeline_id: pipelineId } : {}) })
+  loadWindow(win, {
+    window: 'pipelines',
+    ...(pipelineId ? { pipeline_id: pipelineId } : {}),
+    ...(workspacePath ? { workspace_path: workspacePath } : {})
+  })
 }
 
 function backendInfoPayload() {
@@ -765,8 +771,8 @@ ipcMain.handle('window:getDetachedGroups', (event) => {
   return result
 })
 
-ipcMain.handle('window:openPipelineManager', (_event, args: { pipeline_id?: string } | undefined) => {
-  openPipelineManagerWindow(args?.pipeline_id)
+ipcMain.handle('window:openPipelineManager', (_event, args: { pipeline_id?: string; workspace_path?: string } | undefined) => {
+  openPipelineManagerWindow(args?.pipeline_id, args?.workspace_path)
   return { ok: true }
 })
 

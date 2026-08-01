@@ -636,9 +636,12 @@ watch(
 )
 
 async function openPipelineManager(pipelineId?: string): Promise<void> {
-  await window.agentTeam?.openPipelineManagerWindow?.(
-    pipelineId ? { pipeline_id: pipelineId } : {}
-  )
+  await window.agentTeam?.openPipelineManagerWindow?.({
+    ...(pipelineId ? { pipeline_id: pipelineId } : {}),
+    // The Pipeline Manager's AI panel binds its CLI cwd to the opener's
+    // workspace, fixed at window creation.
+    ...(workspacePath.value ? { workspace_path: workspacePath.value } : {})
+  })
 }
 
 function reapplyRoleTooltip(p: ActivePaneView): string {

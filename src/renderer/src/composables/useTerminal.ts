@@ -2515,6 +2515,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   return {
     mount,
     spawn,
+    tryReattach,
     interrupt,
     kill,
     focus,
