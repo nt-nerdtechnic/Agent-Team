@@ -825,6 +825,15 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   installTerminalZoomShortcuts()
 
   const term = new Terminal({
+    // Option+drag forces normal text selection even while a TUI has mouse
+    // reporting on (vim/htop/tmux/less). Without it, xterm's macOS branch of
+    // shouldForceSelection() is `altKey && macOptionClickForcesSelection`, so
+    // it is permanently false and there is NO way to select terminal text once
+    // a CLI enables mouse tracking — the Shift+drag escape hatch other
+    // platforms get is macOS-excluded. Trade-off: this disables Option+drag
+    // column selection on macOS (xterm binds both to the same gesture and
+    // makes them mutually exclusive); Navide never surfaced column select.
+    macOptionClickForcesSelection: true,
     fontFamily: 'Menlo, Monaco, "Courier New", monospace',
     // Seeded from the shared size so a pane spawned after a zoom matches the rest.
     fontSize: terminalFontSize.value,
