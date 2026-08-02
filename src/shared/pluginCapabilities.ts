@@ -19,17 +19,15 @@
 
 /** navide.git — git/fs power the working tree, `ui` the theme sync and the
  *  open-in-editor host capability, `issues` the embedded cloud issues panel.
- *  chat/terminal/search power the embedded AIChatPane (right AI panel): the
- *  chat engine calls plus the shell.run / find_in_files its slash commands and
- *  context gathering send. */
+ *  `terminal` powers the embedded AiCliDock CLI agent panel (interactive PTY:
+ *  create/input/reattach + the output/exit events). The old AIChatPane grants
+ *  (`chat`, `search`) were dropped with the pane. */
 export const GIT_PLUGIN_REQUIRES: readonly string[] = [
   'git',
   'fs',
   'ui',
   'issues',
-  'chat',
   'terminal',
-  'search',
 ]
 
 /** navide.mini-ide — the widest surface: editor, terminal, search and chat. */
@@ -43,16 +41,14 @@ export const MINI_IDE_PLUGIN_REQUIRES: readonly string[] = [
   'issues',
 ]
 
-/** navide.plans — plan documents on disk plus the theme sync.
- *  chat/terminal/search/git power the embedded AIChatPane (right AI panel):
- *  the chat engine calls plus the shell.run / find_in_files / git context and
- *  commit actions its features send. */
+/** navide.plans — plan documents on disk plus the theme sync. `terminal`
+ *  powers the embedded AiCliDock CLI agent panel (interactive PTY). The old
+ *  AIChatPane grants (`chat`, `search`, `git`) were dropped with the pane —
+ *  the Plans tree sends no git.* call and subscribes no git-gated event
+ *  (planShare writes via fs). */
 export const PLANS_PLUGIN_REQUIRES: readonly string[] = [
   'fs',
   'ui',
   'plans',
-  'chat',
   'terminal',
-  'search',
-  'git',
 ]

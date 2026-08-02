@@ -40,6 +40,19 @@ const nav = {
       reqId: globalThis.crypto.randomUUID(),
     })
   },
+  /** Fire-and-forget capability call: no response envelope ever comes back.
+   *  Used for the per-keystroke terminal.input path, where a request/response
+   *  round-trip per key would eat the typing-latency budget. Scoping is still
+   *  enforced by the broker (a denied/unmapped cast is silently dropped). */
+  castCapability(ns: string, method: string, args?: unknown): void {
+    ipcRenderer.send('plugin:cap:cast', {
+      pluginId,
+      ns,
+      method,
+      args,
+      reqId: globalThis.crypto.randomUUID(),
+    })
+  },
   /** Subscribe to host-pushed events of a given type. Returns a disposer. */
   on(type: string, cb: EventListener): () => void {
     let set = listeners.get(type)

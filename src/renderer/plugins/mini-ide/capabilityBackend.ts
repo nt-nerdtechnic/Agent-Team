@@ -35,6 +35,9 @@ interface CapabilityResponse {
 // local casts where needed (see EditorWindowApp.vue) rather than widened here.
 interface NavBridge {
   callCapability(ns: string, method: string, args?: unknown): Promise<CapabilityResponse>
+  /** Fire-and-forget capability call (no response). Optional: older hosts may
+   *  not expose it, in which case the shim falls back to callCapability. */
+  castCapability?(ns: string, method: string, args?: unknown): void
   on(type: string, cb: (data: unknown) => void): () => void
   ready(): void
 }
@@ -59,7 +62,8 @@ function fromNs(ns: string, methods: readonly string[]): Record<string, Capabili
   return out
 }
 
-// fs.* WS types are `fs.<FsCapability method>` one-for-one.
+// fs.* WS types are `fs.<FsCapability method>` one-for-one. `stat_path` backs
+// useTerminal's @-mention existence probe.
 const FS_METHODS = [
   'read_file',
   'write_file',
@@ -73,6 +77,7 @@ const FS_METHODS = [
   'convert_office',
   'list_archive',
   'read_image',
+  'stat_path',
 ] as const
 
 // git.* WS types are `git.<method>` one-for-one. The backend WS handlers for
@@ -97,6 +102,15 @@ const GIT_METHODS = [
 // search.* WS types are `search.<SearchCapability method>` one-for-one.
 const SEARCH_METHODS = ['find_in_files', 'replace_in_files'] as const
 
+// terminal.* WS types (uniform namespace) — the interactive PTY surface
+// (useTerminal): spawn/reattach lifecycle, keystroke input, resize/redraw,
+// interrupt/kill. `terminal.create.cancel` has a second dot, so it rides
+// EXPLICIT below. Kept in lockstep with the git/plans shims and the host's
+// capabilityMap.ts TERMINAL_METHODS.
+const TERMINAL_METHODS = [
+  'create', 'input', 'log_sent', 'resize', 'interrupt', 'kill', 'reattach', 'redraw',
+] as const
+
 // issues.* WS types are `issues.<method>` one-for-one (GitPane → useIssues,
 // gh/glab CRUD). The backend handlers already exist; the plugin just needs the
 // `issues` namespace granted in its manifest `requires` for the broker to route.
@@ -108,6 +122,8 @@ const ISSUES_METHODS = ['provider', 'list', 'get', 'create', 'comment', 'set_sta
 const EXPLICIT: Record<string, CapabilityRef> = {
   // shell → TerminalCapability
   'shell.run': { ns: 'terminal', method: 'run' },
+  // PTY create cancellation (second dot → not uniform-splittable)
+  'terminal.create.cancel': { ns: 'terminal', method: 'create_cancel' },
   // editor inline AI → ChatCapability
   'editor.rewrite': { ns: 'chat', method: 'editor_rewrite' },
   'editor.complete': { ns: 'chat', method: 'editor_complete' },
@@ -150,8 +166,15 @@ export const TYPE_TO_CAP: Readonly<Record<string, CapabilityRef>> = {
   ...fromNs('git', GIT_METHODS),
   ...fromNs('search', SEARCH_METHODS),
   ...fromNs('issues', ISSUES_METHODS),
+  ...fromNs('terminal', TERMINAL_METHODS),
   ...EXPLICIT,
 }
+
+/** WS types the shim casts (fire-and-forget) instead of awaiting: the
+ *  per-keystroke PTY input path and its log marker. Their senders never read
+ *  the response (`void backend.send(...)` in useTerminal), and a broker
+ *  request/response round-trip per key would eat the typing-latency budget. */
+const CAST_TYPES: ReadonlySet<string> = new Set(['terminal.input', 'terminal.log_sent'])
 
 /** Resolve a WS message `type` to its capability address, or `null` when the
  *  type has no mapping (caller must handle unmapped explicitly). */
@@ -244,6 +267,12 @@ export function useBackend(): {
       return errorWsResponse<T>(type, 'UNMAPPED_CAPABILITY', `no capability mapping for '${type}'`)
     }
     try {
+      // One-way fast path (terminal.input / terminal.log_sent): cast and
+      // resolve immediately with a synthetic ok — no per-keystroke round-trip.
+      if (CAST_TYPES.has(type) && typeof window.nav.castCapability === 'function') {
+        window.nav.castCapability(cap.ns, cap.method, payload)
+        return { id: '', type, ok: true, payload: null, error: null, timestamp: nowIso() }
+      }
       const resp = await window.nav.callCapability(cap.ns, cap.method, payload)
       return toWsResponse<T>(type, resp)
     } catch (err) {

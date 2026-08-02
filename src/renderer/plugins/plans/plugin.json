@@ -11,9 +11,6 @@
     "fs",
     "ui",
     "plans",
-    "chat",
-    "terminal",
-    "search",
-    "git"
+    "terminal"
   ]
 }

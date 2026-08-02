@@ -31,6 +31,9 @@ interface CapabilityResponse {
 }
 interface NavBridge {
   callCapability(ns: string, method: string, args?: unknown): Promise<CapabilityResponse>
+  /** Fire-and-forget capability call (no response). Optional: older hosts may
+   *  not expose it, in which case the shim falls back to callCapability. */
+  castCapability?(ns: string, method: string, args?: unknown): void
   on(type: string, cb: (data: unknown) => void): () => void
   ready(): void
 }
@@ -86,8 +89,8 @@ const ISSUES_METHODS = ['provider', 'list', 'get', 'create', 'comment', 'set_sta
 
 // fs.* WS types (uniform namespace) the Git UI may send — diff panes read blobs
 // / images, the workspace change event (git.changed) is gated on `fs`, and the
-// embedded AIChatPane's pin/context reads and /open listing add the flat/glob
-// listings.
+// embedded AiCliDock's @-mention file listing/probe adds the flat listing and
+// stat_path.
 const FS_METHODS = [
   'read_file',
   'write_file',
@@ -99,11 +102,16 @@ const FS_METHODS = [
   'read_image',
   'list_archive',
   'convert_office',
+  'stat_path',
 ] as const
 
-// search.* WS types (uniform namespace) — the embedded AIChatPane's context
-// search.
-const SEARCH_METHODS = ['find_in_files'] as const
+// terminal.* WS types (uniform namespace) — the embedded AiCliDock CLI agent
+// panel (useTerminal): PTY spawn/reattach lifecycle, keystroke input,
+// resize/redraw, interrupt/kill. `terminal.create.cancel` has a second dot, so
+// it rides EXPLICIT below.
+const TERMINAL_METHODS = [
+  'create', 'input', 'log_sent', 'resize', 'interrupt', 'kill', 'reattach', 'redraw',
+] as const
 
 // Non-uniform WS types: the type string differs from `<ns>.<method>`. Settings
 // persistence (lib/settings.ts theme sync) remaps onto the ui namespace, and
@@ -121,20 +129,10 @@ const EXPLICIT: Record<string, CapabilityRef> = {
   'ui.reveal_path': { ns: 'ui', method: 'reveal_path' },
   'ui.open_workspace': { ns: 'ui', method: 'open_workspace' },
   'ui.pick_folder': { ns: 'ui', method: 'pick_folder' },
-  // shell → TerminalCapability (embedded AIChatPane slash commands / context)
+  // shell → TerminalCapability (one-shot command run)
   'shell.run': { ns: 'terminal', method: 'run' },
-  // ai / ai.chat → ChatCapability (embedded AIChatPane engine + persistence;
-  // mirrors the mini-IDE shim's EXPLICIT block)
-  'ai.enhance_prompt': { ns: 'chat', method: 'enhance_prompt' },
-  'ai.web.search': { ns: 'chat', method: 'web_search' },
-  'ai.chat.start': { ns: 'chat', method: 'start' },
-  'ai.chat.stop': { ns: 'chat', method: 'stop' },
-  'ai.chat.settings.get': { ns: 'chat', method: 'settings_get' },
-  'ai.chat.settings.set': { ns: 'chat', method: 'settings_set' },
-  'ai.chat.notes.set': { ns: 'chat', method: 'notes_set' },
-  'ai.chat.notes.get': { ns: 'chat', method: 'notes_get' },
-  'ai.chat.threads.set': { ns: 'chat', method: 'threads_set' },
-  'ai.chat.threads.get': { ns: 'chat', method: 'threads_get' },
+  // PTY create cancellation (second dot → not uniform-splittable)
+  'terminal.create.cancel': { ns: 'terminal', method: 'create_cancel' },
 }
 
 /**
@@ -142,17 +140,23 @@ const EXPLICIT: Record<string, CapabilityRef> = {
  * data so it is trivially unit-testable. A `type` absent here is an explicit
  * "unmapped" (see {@link resolveCapability}).
  *
- * The `git.changed` / `git.credential_*` server-push events are subscribed via
- * `on()` (no request mapping needed here); their broker forwarding is gated by
- * CAP_EVENTS on the main side.
+ * The `git.changed` / `git.credential_*` / `terminal.output` / `terminal.exit`
+ * server-push events are subscribed via `on()` (no request mapping needed
+ * here); their broker forwarding is gated by CAP_EVENTS on the main side.
  */
 export const TYPE_TO_CAP: Readonly<Record<string, CapabilityRef>> = {
   ...fromNs('git', GIT_METHODS),
   ...fromNs('fs', FS_METHODS),
   ...fromNs('issues', ISSUES_METHODS),
-  ...fromNs('search', SEARCH_METHODS),
+  ...fromNs('terminal', TERMINAL_METHODS),
   ...EXPLICIT,
 }
+
+/** WS types the shim casts (fire-and-forget) instead of awaiting: the
+ *  per-keystroke PTY input path and its log marker. Their senders never read
+ *  the response (`void backend.send(...)` in useTerminal), and a broker
+ *  request/response round-trip per key would eat the typing-latency budget. */
+const CAST_TYPES: ReadonlySet<string> = new Set(['terminal.input', 'terminal.log_sent'])
 
 /** Resolve a WS message `type` to its capability address, or `null` when the
  *  type has no mapping (caller must handle unmapped explicitly). */
@@ -246,7 +250,14 @@ export function useBackend(): {
       return errorWsResponse<T>(type, 'UNMAPPED_CAPABILITY', `no capability mapping for '${type}'`)
     }
     try {
-      const resp = await navBridge().callCapability(cap.ns, cap.method, payload)
+      const bridge = navBridge()
+      // One-way fast path (terminal.input / terminal.log_sent): cast and
+      // resolve immediately with a synthetic ok — no per-keystroke round-trip.
+      if (CAST_TYPES.has(type) && typeof bridge.castCapability === 'function') {
+        bridge.castCapability(cap.ns, cap.method, payload)
+        return { id: '', type, ok: true, payload: null, error: null, timestamp: nowIso() }
+      }
+      const resp = await bridge.callCapability(cap.ns, cap.method, payload)
       return toWsResponse<T>(type, resp)
     } catch (err) {
       return errorWsResponse<T>(

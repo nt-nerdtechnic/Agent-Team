@@ -18,9 +18,14 @@ import {
   isCapabilityAllowed,
   buildError,
   buildSuccess,
+  CASTABLE_WS_TYPES,
+  createTerminalOutputBatcher,
+  terminalSessionIdOf,
+  terminalSessionsFromResponse,
   HOST_CAPABILITIES,
   type CapabilityCall,
   type CapabilityResponse,
+  type TerminalOutputBatcher,
 } from './pluginCapabilityBroker'
 import { CAP_EVENTS, eventNamespace } from './capabilityMap'
 import {
@@ -88,6 +93,7 @@ interface RunningPlugin {
 }
 
 const IPC_CALL = 'plugin:cap:call'
+const IPC_CAST = 'plugin:cap:cast'
 const IPC_EVENT = 'plugin:cap:event'
 const IPC_READY = 'plugin:ready'
 const IPC_HIDE_SELF = 'plugin:hideSelf'
@@ -152,6 +158,17 @@ export class FrontendPluginManager {
   /** Last transport status, replayed to late-loading plugin views so their
    *  useBackend shims start from real liveness instead of assuming it. */
   private wsStatus: WsClientStatus = 'disconnected'
+  /** `terminal_session_id` → owning pluginId. Registered from terminal.create /
+   *  terminal.reattach responses ({@link noteTerminalRoutes}); terminal.output
+   *  and terminal.exit are delivered to the owner only, falling back to the
+   *  ns-gated fan-out for unregistered sessions. Cleared on terminal.exit and
+   *  on {@link destroy} of the owning plugin. */
+  private readonly terminalRoutes = new Map<string, string>()
+  /** Per-session micro-batcher for terminal.output (see the broker module):
+   *  coalesces the dense PTY stream into one IPC send per ~12 ms per session. */
+  private readonly terminalOutputBatcher: TerminalOutputBatcher = createTerminalOutputBatcher(
+    (sessionId, payload) => this.deliverTerminalEvent('terminal.output', sessionId, payload)
+  )
 
   /** Register the broker IPC handlers exactly once. Safe to call repeatedly. */
   registerIpc(): void {
@@ -190,7 +207,16 @@ export class FrontendPluginManager {
         return buildError(call.reqId, 'BACKEND_ERROR', 'backend not connected')
       }
       try {
-        const resp = await client.send(plan.wsType, toPayload(call.args))
+        // A reattach request may not claim PTY sessions bound to a DIFFERENT
+        // plugin — strip those ids before the backend re-targets their output.
+        const wsPayload =
+          plan.wsType === 'terminal.reattach'
+            ? this.filterTerminalReattachPayload(pluginId, toPayload(call.args))
+            : toPayload(call.args)
+        const resp = await client.send(plan.wsType, wsPayload)
+        // A successful terminal.create/reattach binds the PTY to this plugin so
+        // its output/exit events are routed to this view only.
+        if (resp.ok) this.noteTerminalRoutes(pluginId, plan.wsType, resp.payload)
         return backendResponseToCapability(call.reqId, resp)
       } catch (err) {
         return buildError(
@@ -199,6 +225,11 @@ export class FrontendPluginManager {
           err instanceof Error ? err.message : 'backend request failed'
         )
       }
+    })
+
+    // Fire-and-forget capability channel (nav.castCapability) — see handleCast.
+    ipcMain.on(IPC_CAST, (event, payload: unknown) => {
+      this.handleCast(event.sender.id, payload)
     })
 
     // Plugins announce readiness; it is only logged (activation is not gated on it).
@@ -400,14 +431,157 @@ export class FrontendPluginManager {
   }
 
   /** Fan a backend server-push event out to every running plugin whose
-   *  manifest grants the namespace gating that event. */
+   *  manifest grants the namespace gating that event. terminal.output rides the
+   *  per-session micro-batcher instead of going out per event, and
+   *  terminal.exit flushes that batch first (ordering barrier) then retires the
+   *  session's route. */
   private dispatchEvent(event: string, payload: unknown): void {
+    if (event === 'terminal.output') {
+      const sessionId = terminalSessionIdOf(payload)
+      if (sessionId) {
+        this.terminalOutputBatcher.push(sessionId, toPayload(payload))
+        return
+      }
+    } else if (event === 'terminal.exit') {
+      const sessionId = terminalSessionIdOf(payload)
+      if (sessionId) {
+        this.terminalOutputBatcher.flushSession(sessionId)
+        this.deliverTerminalEvent(event, sessionId, payload)
+        this.terminalRoutes.delete(sessionId)
+        return
+      }
+    }
     const ns = eventNamespace(event)
     if (!ns) return
     for (const plugin of this.running.values()) {
       if (isCapabilityAllowed(plugin.requires, ns)) {
         this.emit(plugin.id, event, payload)
       }
+    }
+  }
+
+  /** Deliver a terminal.output/exit event to the session's registered owner —
+   *  and ONLY the owner. Unrouted sessions (or a dead owner view) are dropped,
+   *  never fanned out: PTY content must not leak to plugins that did not bind
+   *  the session. Registration always precedes delivery because the WS is
+   *  processed in order — the create/reattach response that feeds
+   *  noteTerminalRoutes arrives before the session's subsequent output frames
+   *  (and the renderer ignores pre-bind frames anyway). */
+  private deliverTerminalEvent(event: string, sessionId: string, payload: unknown): void {
+    const owner = this.terminalRoutes.get(sessionId)
+    if (owner && this.running.has(owner)) {
+      this.emit(owner, event, payload)
+      return
+    }
+    console.debug(
+      `[plugin] dropping ${event} for terminal session ${sessionId}: ` +
+        (owner ? `owner ${owner} is not running` : 'no plugin bound the session')
+    )
+  }
+
+  /** Register the PTY sessions a successful terminal.create/terminal.reattach
+   *  response binds to `pluginId` (route table feeding
+   *  {@link deliverTerminalEvent}). Any other WS type is a no-op. */
+  noteTerminalRoutes(pluginId: string, wsType: string, result: unknown): void {
+    for (const sessionId of terminalSessionsFromResponse(wsType, result)) {
+      this.terminalRoutes.set(sessionId, pluginId)
+    }
+  }
+
+  /**
+   * Strip session ids owned by ANOTHER plugin from a terminal.reattach payload
+   * so one plugin view can never hijack a PTY the broker bound to a sibling
+   * (routes are retained across view teardown precisely so only the SAME
+   * plugin re-claims its sessions after a window close/reopen or crash). Ids
+   * the table has never seen pass through — that covers legitimate re-claims
+   * after a host-app restart, and also PTYs created outside the broker (main
+   * window panes): fully isolating those needs a backend-side ownership
+   * namespace, which is documented as a residual risk in
+   * docs/en-US/plugin-development.md (marketplace prerequisite).
+   */
+  filterTerminalReattachPayload(
+    pluginId: string,
+    payload: Record<string, unknown>
+  ): Record<string, unknown> {
+    const ids = payload.terminal_session_ids
+    if (!Array.isArray(ids)) return payload
+    const kept = ids.filter((id) => {
+      if (typeof id !== 'string') return false
+      const owner = this.terminalRoutes.get(id)
+      return owner === undefined || owner === pluginId
+    })
+    if (kept.length === ids.length) return payload
+    console.debug(
+      `[plugin] reattach: stripped ${ids.length - kept.length} session id(s) owned by another plugin from ${pluginId}`
+    )
+    return { ...payload, terminal_session_ids: kept }
+  }
+
+  /**
+   * Service one fire-and-forget capability cast (IPC_CAST / nav.castCapability).
+   * Same scoping + routing as IPC_CALL, but no response ever returns to the
+   * view, and ONLY the {@link CASTABLE_WS_TYPES} whitelist may dispatch
+   * (main-side enforcement mirroring the shims' CAST_TYPES). Every drop logs a
+   * distinct debug line; the outcome is returned for tests.
+   */
+  handleCast(
+    senderId: number,
+    payload: unknown
+  ): 'dispatched' | 'no-backend' | 'unknown-sender' | 'malformed' | 'denied' | 'unmapped' | 'not-castable' {
+    const pluginId = this.bySender.get(senderId)
+    if (!pluginId) {
+      console.debug('[plugin] cast dropped: unknown sender')
+      return 'unknown-sender'
+    }
+    const plugin = this.running.get(pluginId)
+    const call = parseCapabilityCall(payload, pluginId)
+    if (!call || !plugin) {
+      console.debug(`[plugin] cast dropped: malformed call from ${pluginId}`)
+      return 'malformed'
+    }
+    const plan = planCapabilityCall(call, plugin.requires)
+    if (plan.kind === 'host') {
+      console.debug(
+        `[plugin] cast dropped: ${pluginId} ${call.ns}.${call.method} is a host capability (not castable)`
+      )
+      return 'not-castable'
+    }
+    if (plan.kind === 'respond') {
+      if (plan.response.error?.code === 'CAP_DENIED') {
+        console.debug(`[plugin] cast dropped: ${pluginId} ${call.ns}.${call.method} denied`)
+        return 'denied'
+      }
+      console.debug(`[plugin] cast dropped: ${pluginId} ${call.ns}.${call.method} unmapped`)
+      return 'unmapped'
+    }
+    if (!CASTABLE_WS_TYPES.has(plan.wsType)) {
+      console.debug(
+        `[plugin] cast dropped: ${pluginId} ${plan.wsType} is not in the cast whitelist`
+      )
+      return 'not-castable'
+    }
+    const client = this.ensureBackend()
+    if (!client) {
+      console.debug(`[plugin] cast dropped: ${pluginId} ${plan.wsType} — backend not connected`)
+      return 'no-backend'
+    }
+    void client.send(plan.wsType, toPayload(call.args)).catch(() => {
+      // Nobody is awaiting — a failed input write surfaces through the PTY
+      // stream itself (or the next request/response call).
+    })
+    return 'dispatched'
+  }
+
+  /** Shared terminal teardown for BOTH view-death paths ({@link destroy} and
+   *  the defensive webContents 'destroyed' hook): discard the plugin's pending
+   *  output batches so they are never delivered anywhere. The route entries
+   *  themselves are RETAINED (still marked with the pluginId) — delivery
+   *  targets only live views, and a retained route both lets the same plugin
+   *  re-claim its PTY on a later reattach and blocks other plugins from
+   *  claiming it (see {@link filterTerminalReattachPayload}). */
+  private releaseTerminalOwnership(pluginId: string): void {
+    for (const [sessionId, owner] of this.terminalRoutes) {
+      if (owner === pluginId) this.terminalOutputBatcher.dropSession(sessionId)
     }
   }
 
@@ -517,6 +691,10 @@ export class FrontendPluginManager {
       current.detachHostResize = null
       this.running.delete(descriptor.id)
       this.bySender.delete(current.senderId)
+      // Same terminal teardown as destroy(): a renderer crash must also stop
+      // pending output delivery, while the retained route marks keep the PTYs
+      // re-claimable by this plugin only.
+      this.releaseTerminalOwnership(descriptor.id)
     })
 
     // Open targets sent before the entry finished loading are queued and
@@ -620,6 +798,10 @@ export class FrontendPluginManager {
     plugin.detachHostResize = null
     this.running.delete(pluginId)
     this.bySender.delete(plugin.senderId)
+    // The PTY itself keeps running — drop its pending output, keep the routes
+    // marked with this pluginId so only a reopened view of the SAME plugin can
+    // re-claim them (see releaseTerminalOwnership).
+    this.releaseTerminalOwnership(pluginId)
     try {
       if (!plugin.hostWindow.isDestroyed()) {
         plugin.hostWindow.contentView.removeChildView(plugin.view)

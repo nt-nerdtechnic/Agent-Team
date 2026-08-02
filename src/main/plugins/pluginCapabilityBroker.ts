@@ -171,3 +171,123 @@ export function backendResponseToCapability(
   if (resp.ok) return buildSuccess(reqId, resp.payload)
   return buildError(reqId, 'BACKEND_ERROR', resp.error?.message ?? 'backend request failed')
 }
+
+// ── Terminal PTY routing + output micro-batching ─────────────────────────────
+
+/** WS request types whose successful responses bind PTY sessions to the calling
+ *  plugin (see {@link terminalSessionsFromResponse}). */
+export const TERMINAL_ROUTE_WS_TYPES: readonly string[] = ['terminal.create', 'terminal.reattach']
+
+/** The ONLY WS types the fire-and-forget cast channel may dispatch — the
+ *  per-keystroke input path and its log marker. Main-side enforcement mirroring
+ *  the shims' CAST_TYPES: everything else must go through the request/response
+ *  channel so errors surface, and a compromised view cannot spray arbitrary
+ *  unacknowledged backend traffic. */
+export const CASTABLE_WS_TYPES: ReadonlySet<string> = new Set([
+  'terminal.input',
+  'terminal.log_sent',
+])
+
+/**
+ * PTY session ids a successful backend response binds to the calling plugin:
+ * `terminal.create` yields its new `terminal_session_id`, `terminal.reattach`
+ * yields every id in `alive[]` (the reattach re-claims those PTYs' output for
+ * the broker transport, on behalf of the plugin that asked). Anything else —
+ * other WS types, malformed payloads — yields nothing.
+ */
+export function terminalSessionsFromResponse(wsType: string, result: unknown): string[] {
+  if (typeof result !== 'object' || result === null) return []
+  const r = result as Record<string, unknown>
+  if (wsType === 'terminal.create') {
+    return typeof r.terminal_session_id === 'string' && r.terminal_session_id
+      ? [r.terminal_session_id]
+      : []
+  }
+  if (wsType === 'terminal.reattach') {
+    return Array.isArray(r.alive)
+      ? r.alive.filter((id): id is string => typeof id === 'string' && id.length > 0)
+      : []
+  }
+  return []
+}
+
+/** The `terminal_session_id` of a terminal.* event payload, or '' when absent. */
+export function terminalSessionIdOf(payload: unknown): string {
+  if (typeof payload !== 'object' || payload === null) return ''
+  const id = (payload as Record<string, unknown>).terminal_session_id
+  return typeof id === 'string' ? id : ''
+}
+
+export interface TerminalOutputBatcher {
+  /** Queue one terminal.output payload; delivery happens at the next flush. */
+  push(sessionId: string, payload: Record<string, unknown>): void
+  /** Deliver the session's pending batch now (ordering barrier before exit). */
+  flushSession(sessionId: string): void
+  /** Discard a session's pending batch without delivering (owner torn down). */
+  dropSession(sessionId: string): void
+  /** Deliver every pending batch now. */
+  flushAll(): void
+}
+
+/**
+ * Per-session micro-batcher for `terminal.output` events crossing the broker.
+ * PTY output arrives as a dense stream of small events; forwarding each one
+ * through a separate `webContents.send` floods the plugin view's IPC channel.
+ * Batching per `terminal_session_id` over a short window (default 12 ms)
+ * concatenates the `data` strings — safe, because the backend already decodes
+ * on UTF-8 codepoint boundaries, so these are complete JS strings — and keeps
+ * every other field (including `sequence`) from the LAST queued payload: the
+ * batch's data covers exactly the events up to that sequence, and the frontend
+ * consumer (useTerminal) reads only `terminal_session_id` + `data`.
+ *
+ * Ordering: one entry per session means intra-session order is preserved;
+ * callers must `flushSession` before delivering a `terminal.exit` so batched
+ * output never lands after the exit notice.
+ */
+export function createTerminalOutputBatcher(
+  deliver: (sessionId: string, payload: Record<string, unknown>) => void,
+  flushMs = 12
+): TerminalOutputBatcher {
+  interface Entry {
+    data: string
+    last: Record<string, unknown>
+    timer: ReturnType<typeof setTimeout>
+  }
+  const pending = new Map<string, Entry>()
+
+  function flushSession(sessionId: string): void {
+    const entry = pending.get(sessionId)
+    if (!entry) return
+    clearTimeout(entry.timer)
+    pending.delete(sessionId)
+    deliver(sessionId, { ...entry.last, data: entry.data })
+  }
+
+  function push(sessionId: string, payload: Record<string, unknown>): void {
+    const data = typeof payload.data === 'string' ? payload.data : ''
+    const entry = pending.get(sessionId)
+    if (entry) {
+      entry.data += data
+      entry.last = payload
+      return
+    }
+    pending.set(sessionId, {
+      data,
+      last: payload,
+      timer: setTimeout(() => flushSession(sessionId), flushMs),
+    })
+  }
+
+  function dropSession(sessionId: string): void {
+    const entry = pending.get(sessionId)
+    if (!entry) return
+    clearTimeout(entry.timer)
+    pending.delete(sessionId)
+  }
+
+  function flushAll(): void {
+    for (const sessionId of [...pending.keys()]) flushSession(sessionId)
+  }
+
+  return { push, flushSession, dropSession, flushAll }
+}

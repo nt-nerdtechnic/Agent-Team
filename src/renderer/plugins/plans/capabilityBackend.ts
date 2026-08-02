@@ -31,6 +31,9 @@ interface CapabilityResponse {
 }
 interface NavBridge {
   callCapability(ns: string, method: string, args?: unknown): Promise<CapabilityResponse>
+  /** Fire-and-forget capability call (no response). Optional: older hosts may
+   *  not expose it, in which case the shim falls back to callCapability. */
+  castCapability?(ns: string, method: string, args?: unknown): void
   on(type: string, cb: (data: unknown) => void): () => void
   ready(): void
 }
@@ -62,7 +65,7 @@ function fromNs(ns: string, methods: readonly string[]): Record<string, Capabili
 // fs.* WS types the Plans UI actually sends (PlansPane list/rename/delete,
 // planStore/planShare read+write, PlanFileView/PlanMarkdownBody/PlanDocPreview
 // reads, FilePreviewPane's bundled archive/office previews, and the embedded
-// AIChatPane's pin/context reads and /open file listing).
+// AiCliDock's context read + @-mention file listing/probe).
 const FS_METHODS = [
   'read_file',
   'write_file',
@@ -73,36 +76,27 @@ const FS_METHODS = [
   'rename',
   'list_archive',
   'convert_office',
+  'stat_path',
 ] as const
 
-// git.* WS types the embedded AIChatPane sends (uniform namespace): commit
-// action, diff/stash context gathering. Only the chat surface — the Plans UI
-// itself drives no other git calls.
-const GIT_METHODS = ['commit', 'diff_all', 'diff_branches', 'show_commit', 'stash_list'] as const
-
-// search.* WS types (uniform namespace) — AIChatPane context search.
-const SEARCH_METHODS = ['find_in_files'] as const
+// terminal.* WS types (uniform namespace) — the embedded AiCliDock CLI agent
+// panel (useTerminal): PTY spawn/reattach lifecycle, keystroke input,
+// resize/redraw, interrupt/kill. `terminal.create.cancel` has a second dot, so
+// it rides EXPLICIT below.
+const TERMINAL_METHODS = [
+  'create', 'input', 'log_sent', 'resize', 'interrupt', 'kill', 'reattach', 'redraw',
+] as const
 
 // Non-uniform WS types: the type string differs from `<ns>.<method>`. Settings
-// persistence (lib/settings.ts theme sync) remaps onto the ui namespace; the
-// shell/ai families the embedded AIChatPane sends remap onto the
-// terminal/chat namespaces (mirrors the mini-IDE shim's EXPLICIT block).
+// persistence (lib/settings.ts theme sync) remaps onto the ui namespace;
+// shell.run rides the terminal namespace (mirrors the mini-IDE shim).
 const EXPLICIT: Record<string, CapabilityRef> = {
   'ui.settings.get': { ns: 'ui', method: 'settings_get' },
   'ui.settings.set': { ns: 'ui', method: 'settings_set' },
-  // shell → TerminalCapability (AIChatPane slash commands / context gathering)
+  // shell → TerminalCapability (one-shot command run)
   'shell.run': { ns: 'terminal', method: 'run' },
-  // ai / ai.chat → ChatCapability (AIChatPane engine + persistence)
-  'ai.enhance_prompt': { ns: 'chat', method: 'enhance_prompt' },
-  'ai.web.search': { ns: 'chat', method: 'web_search' },
-  'ai.chat.start': { ns: 'chat', method: 'start' },
-  'ai.chat.stop': { ns: 'chat', method: 'stop' },
-  'ai.chat.settings.get': { ns: 'chat', method: 'settings_get' },
-  'ai.chat.settings.set': { ns: 'chat', method: 'settings_set' },
-  'ai.chat.notes.set': { ns: 'chat', method: 'notes_set' },
-  'ai.chat.notes.get': { ns: 'chat', method: 'notes_get' },
-  'ai.chat.threads.set': { ns: 'chat', method: 'threads_set' },
-  'ai.chat.threads.get': { ns: 'chat', method: 'threads_get' },
+  // PTY create cancellation (second dot → not uniform-splittable)
+  'terminal.create.cancel': { ns: 'terminal', method: 'create_cancel' },
 }
 
 /**
@@ -112,15 +106,20 @@ const EXPLICIT: Record<string, CapabilityRef> = {
  *
  * The `plans` namespace carries no request types — it exists solely to gate
  * the `plans.changed` server-push event (see capabilityMap.ts CAP_EVENTS).
- * The `chat` namespace also gates the ai.chat.* streaming events the embedded
- * AIChatPane subscribes to via `on()`.
+ * The `terminal` namespace also gates the terminal.output / terminal.exit
+ * events the embedded AiCliDock's useTerminal subscribes to via `on()`.
  */
 export const TYPE_TO_CAP: Readonly<Record<string, CapabilityRef>> = {
   ...fromNs('fs', FS_METHODS),
-  ...fromNs('git', GIT_METHODS),
-  ...fromNs('search', SEARCH_METHODS),
+  ...fromNs('terminal', TERMINAL_METHODS),
   ...EXPLICIT,
 }
+
+/** WS types the shim casts (fire-and-forget) instead of awaiting: the
+ *  per-keystroke PTY input path and its log marker. Their senders never read
+ *  the response (`void backend.send(...)` in useTerminal), and a broker
+ *  request/response round-trip per key would eat the typing-latency budget. */
+const CAST_TYPES: ReadonlySet<string> = new Set(['terminal.input', 'terminal.log_sent'])
 
 /** Resolve a WS message `type` to its capability address, or `null` when the
  *  type has no mapping (caller must handle unmapped explicitly). */
@@ -213,7 +212,14 @@ export function useBackend(): {
       return errorWsResponse<T>(type, 'UNMAPPED_CAPABILITY', `no capability mapping for '${type}'`)
     }
     try {
-      const resp = await navBridge().callCapability(cap.ns, cap.method, payload)
+      const bridge = navBridge()
+      // One-way fast path (terminal.input / terminal.log_sent): cast and
+      // resolve immediately with a synthetic ok — no per-keystroke round-trip.
+      if (CAST_TYPES.has(type) && typeof bridge.castCapability === 'function') {
+        bridge.castCapability(cap.ns, cap.method, payload)
+        return { id: '', type, ok: true, payload: null, error: null, timestamp: nowIso() }
+      }
+      const resp = await bridge.callCapability(cap.ns, cap.method, payload)
       return toWsResponse<T>(type, resp)
     } catch (err) {
       return errorWsResponse<T>(

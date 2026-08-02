@@ -301,7 +301,7 @@ describe('devPlansPluginDescriptor', () => {
     const desc = devPlansPluginDescriptor()
     expect(desc.id).toBe(PLANS_PLUGIN_ID)
     expect(desc.id).toBe('navide.plans')
-    expect(desc.requires).toEqual(['fs', 'ui', 'plans', 'chat', 'terminal', 'search', 'git'])
+    expect(desc.requires).toEqual(['fs', 'ui', 'plans', 'terminal'])
     // Built separately (vite.plans.config.ts) — never served by the dev server.
     expect(desc.devUrl).toBe('')
     expect(desc.entryFile.endsWith('dist-plugins/plans/index.html')).toBe(true)
@@ -724,6 +724,296 @@ describe('view lifecycle (open / hideSelf / resize / death paths)', () => {
     expect(hostB.children).not.toContain(view)
     expect(hostA.focusCount).toBeGreaterThan(0)
     expect(hostB.focusCount).toBe(0)
+  })
+})
+
+describe('terminal PTY routing + output micro-batching', () => {
+  const CAP_EVENT = 'plugin:cap:event'
+
+  interface DispatchSeam {
+    dispatchEvent(event: string, payload: unknown): void
+  }
+
+  function dispatch(mgr: FrontendPluginManager, event: string, payload: unknown): void {
+    ;(mgr as unknown as DispatchSeam).dispatchEvent(event, payload)
+  }
+
+  function eventsOf(
+    view: FakeViewLike,
+    type: string
+  ): Array<{ type: string; data: Record<string, unknown> }> {
+    return view.webContents.sent
+      .filter((m) => m.channel === CAP_EVENT)
+      .map((m) => m.args[0] as { type: string; data: Record<string, unknown> })
+      .filter((e) => e.type === type)
+  }
+
+  function openTerminalPlugin(
+    mgr: FrontendPluginManager,
+    host: FakeBrowserWindow,
+    id: string,
+    requires: string[] = ['terminal']
+  ): FakeViewLike {
+    const before = views.length
+    mgr.open(
+      asHost(host),
+      { id, requires, devUrl: '', entryFile: `/plugins/${id}/index.html` },
+      { x: 0, y: 0, width: 10, height: 10 }
+    )
+    return views.length > before ? views[views.length - 1] : views[before - 1]
+  }
+
+  function output(id: string, data: string, sequence = 1): Record<string, unknown> {
+    return { terminal_session_id: id, pane_id: 'p', sequence, data, stream: 'stdout' }
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('delivers batched output ONLY to the plugin whose create bound the session', () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    const viewA = openTerminalPlugin(mgr, host, 'acme.term-a')
+    const viewB = openTerminalPlugin(mgr, host, 'acme.term-b')
+
+    mgr.noteTerminalRoutes('acme.term-a', 'terminal.create', { terminal_session_id: 't-1' })
+    dispatch(mgr, 'terminal.output', output('t-1', 'hi'))
+    vi.advanceTimersByTime(12)
+
+    expect(eventsOf(viewA, 'terminal.output')).toHaveLength(1)
+    expect(eventsOf(viewB, 'terminal.output')).toHaveLength(0)
+  })
+
+  it('coalesces an output burst into one IPC send with concatenated data', () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    const view = openTerminalPlugin(mgr, host, 'acme.term-a')
+    mgr.noteTerminalRoutes('acme.term-a', 'terminal.create', { terminal_session_id: 't-1' })
+
+    dispatch(mgr, 'terminal.output', output('t-1', 'he', 1))
+    dispatch(mgr, 'terminal.output', output('t-1', 'll', 2))
+    dispatch(mgr, 'terminal.output', output('t-1', 'o', 3))
+    expect(eventsOf(view, 'terminal.output')).toHaveLength(0) // still batching
+    vi.advanceTimersByTime(12)
+
+    const got = eventsOf(view, 'terminal.output')
+    expect(got).toHaveLength(1)
+    expect(got[0].data.data).toBe('hello')
+    expect(got[0].data.sequence).toBe(3) // last event's fields ride along
+  })
+
+  it('flushes pending output before terminal.exit and retires the route', () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    const viewA = openTerminalPlugin(mgr, host, 'acme.term-a')
+    const viewB = openTerminalPlugin(mgr, host, 'acme.term-b')
+    mgr.noteTerminalRoutes('acme.term-a', 'terminal.create', { terminal_session_id: 't-1' })
+
+    dispatch(mgr, 'terminal.output', output('t-1', 'bye'))
+    dispatch(mgr, 'terminal.exit', { terminal_session_id: 't-1', exit_code: 0 })
+
+    // Output landed BEFORE exit despite the batch window (ordering barrier).
+    const all = viewA.webContents.sent
+      .filter((m) => m.channel === CAP_EVENT)
+      .map((m) => (m.args[0] as { type: string }).type)
+    expect(all).toEqual(['terminal.output', 'terminal.exit'])
+    expect(eventsOf(viewB, 'terminal.exit')).toHaveLength(0)
+
+    // The route is gone: later output for the id is DROPPED (never fanned out).
+    dispatch(mgr, 'terminal.output', output('t-1', 'late'))
+    vi.advanceTimersByTime(12)
+    expect(eventsOf(viewA, 'terminal.output')).toHaveLength(1) // just the flush
+    expect(eventsOf(viewB, 'terminal.output')).toHaveLength(0)
+  })
+
+  it('drops output/exit for sessions no plugin bound (no fan-out)', () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    const viewA = openTerminalPlugin(mgr, host, 'acme.term-a')
+
+    dispatch(mgr, 'terminal.output', output('t-9', 'orphan'))
+    dispatch(mgr, 'terminal.exit', { terminal_session_id: 't-9', exit_code: 0 })
+    vi.advanceTimersByTime(12)
+
+    expect(eventsOf(viewA, 'terminal.output')).toHaveLength(0)
+    expect(eventsOf(viewA, 'terminal.exit')).toHaveLength(0)
+  })
+
+  it('registers every alive session from a reattach response', () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    const viewA = openTerminalPlugin(mgr, host, 'acme.term-a')
+    const viewB = openTerminalPlugin(mgr, host, 'acme.term-b')
+    mgr.noteTerminalRoutes('acme.term-b', 'terminal.reattach', { alive: ['t-1', 't-2'], dead: [] })
+
+    dispatch(mgr, 'terminal.output', output('t-1', 'a'))
+    dispatch(mgr, 'terminal.output', output('t-2', 'b'))
+    vi.advanceTimersByTime(12)
+
+    expect(eventsOf(viewB, 'terminal.output')).toHaveLength(2)
+    expect(eventsOf(viewA, 'terminal.output')).toHaveLength(0)
+  })
+
+  it('destroy drops pending batches and keeps the route marked — output never leaks', () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    openTerminalPlugin(mgr, host, 'acme.term-a')
+    const viewB = openTerminalPlugin(mgr, host, 'acme.term-b')
+    mgr.noteTerminalRoutes('acme.term-a', 'terminal.create', { terminal_session_id: 't-1' })
+
+    dispatch(mgr, 'terminal.output', output('t-1', 'secret'))
+    mgr.destroy('acme.term-a')
+    vi.advanceTimersByTime(12)
+    // The dead view's pending batch is dropped, never fanned out to others.
+    expect(eventsOf(viewB, 'terminal.output')).toHaveLength(0)
+
+    // The route entry is RETAINED with the dead owner: later output for the id
+    // is dropped, not delivered to unrelated plugins.
+    dispatch(mgr, 'terminal.output', output('t-1', 'later'))
+    vi.advanceTimersByTime(12)
+    expect(eventsOf(viewB, 'terminal.output')).toHaveLength(0)
+  })
+
+  it('a renderer crash runs the same terminal teardown as destroy()', () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    const viewA = openTerminalPlugin(mgr, host, 'acme.term-a')
+    const viewB = openTerminalPlugin(mgr, host, 'acme.term-b')
+    mgr.noteTerminalRoutes('acme.term-a', 'terminal.create', { terminal_session_id: 't-1' })
+
+    dispatch(mgr, 'terminal.output', output('t-1', 'secret'))
+    viewA.webContents.close() // crash path — fires the 'destroyed' hook
+    vi.advanceTimersByTime(12)
+    expect(eventsOf(viewB, 'terminal.output')).toHaveLength(0) // batch dropped
+
+    // Route retained: the crashed plugin's session is still owned by it, so a
+    // sibling's reattach may not claim it (see the filter test below).
+    const filtered = mgr.filterTerminalReattachPayload('acme.term-b', {
+      terminal_session_ids: ['t-1'],
+      cols: 0,
+      rows: 0,
+    })
+    expect(filtered.terminal_session_ids).toEqual([])
+  })
+
+  it('re-claim after teardown: the SAME plugin reattaches and delivery resumes', () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    openTerminalPlugin(mgr, host, 'acme.term-a')
+    mgr.noteTerminalRoutes('acme.term-a', 'terminal.create', { terminal_session_id: 't-1' })
+    mgr.destroy('acme.term-a')
+
+    // Reopened view of the same plugin: its own retained id passes the filter…
+    const payload = mgr.filterTerminalReattachPayload('acme.term-a', {
+      terminal_session_ids: ['t-1'],
+    })
+    expect(payload.terminal_session_ids).toEqual(['t-1'])
+
+    // …and after the reattach response re-registers, delivery resumes.
+    const reopened = openTerminalPlugin(mgr, host, 'acme.term-a')
+    mgr.noteTerminalRoutes('acme.term-a', 'terminal.reattach', { alive: ['t-1'], dead: [] })
+    dispatch(mgr, 'terminal.output', output('t-1', 'back'))
+    vi.advanceTimersByTime(12)
+    expect(eventsOf(reopened, 'terminal.output')).toHaveLength(1)
+  })
+
+  it('reattach filter strips ids owned by another plugin, keeps own and unknown ids', () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    openTerminalPlugin(mgr, host, 'acme.term-a')
+    openTerminalPlugin(mgr, host, 'acme.term-b')
+    mgr.noteTerminalRoutes('acme.term-a', 'terminal.create', { terminal_session_id: 't-a' })
+    mgr.noteTerminalRoutes('acme.term-b', 'terminal.create', { terminal_session_id: 't-b' })
+
+    const payload = mgr.filterTerminalReattachPayload('acme.term-b', {
+      terminal_session_ids: ['t-a', 't-b', 't-unknown'],
+      cols: 80,
+      rows: 24,
+    })
+    // The live sibling's session is stripped; own + never-seen ids pass
+    // (never-seen covers app-restart re-claims and non-broker PTYs).
+    expect(payload.terminal_session_ids).toEqual(['t-b', 't-unknown'])
+    expect(payload.cols).toBe(80) // other fields untouched
+
+    // A payload without an ids array passes through unchanged.
+    const untouched = { cols: 80 }
+    expect(mgr.filterTerminalReattachPayload('acme.term-b', untouched)).toBe(untouched)
+  })
+})
+
+describe('cast channel (IPC_CAST / handleCast)', () => {
+  function openPlugin(
+    mgr: FrontendPluginManager,
+    host: FakeBrowserWindow,
+    id: string,
+    requires: string[]
+  ): FakeViewLike {
+    const before = views.length
+    mgr.open(
+      asHost(host),
+      { id, requires, devUrl: '', entryFile: `/plugins/${id}/index.html` },
+      { x: 0, y: 0, width: 10, height: 10 }
+    )
+    return views.length > before ? views[views.length - 1] : views[before - 1]
+  }
+
+  function castPayload(ns: string, method: string): Record<string, unknown> {
+    return { ns, method, args: { terminal_session_id: 't-1', data: 'x' }, reqId: 'r1' }
+  }
+
+  it('accepts whitelisted casts from a known sender (terminal.input / log_sent)', () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    const view = openPlugin(mgr, host, 'acme.term', ['terminal'])
+    // No backend transport in tests — reaching 'no-backend' proves the cast
+    // passed sender, shape, scoping AND the whitelist.
+    expect(mgr.handleCast(view.webContents.id, castPayload('terminal', 'input'))).toBe('no-backend')
+    expect(mgr.handleCast(view.webContents.id, castPayload('terminal', 'log_sent'))).toBe(
+      'no-backend'
+    )
+  })
+
+  it('rejects non-whitelisted backend types (mirror of the shim CAST_TYPES)', () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    const view = openPlugin(mgr, host, 'acme.term', ['terminal'])
+    expect(mgr.handleCast(view.webContents.id, castPayload('terminal', 'resize'))).toBe(
+      'not-castable'
+    )
+    expect(mgr.handleCast(view.webContents.id, castPayload('terminal', 'kill'))).toBe(
+      'not-castable'
+    )
+  })
+
+  it('rejects casts for namespaces the manifest never granted', () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    const view = openPlugin(mgr, host, 'acme.fsonly', ['fs'])
+    expect(mgr.handleCast(view.webContents.id, castPayload('terminal', 'input'))).toBe('denied')
+  })
+
+  it('rejects unmapped methods, unknown senders and malformed payloads', () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    const view = openPlugin(mgr, host, 'acme.term', ['terminal'])
+    expect(mgr.handleCast(view.webContents.id, castPayload('terminal', 'nope'))).toBe('unmapped')
+    expect(mgr.handleCast(999999, castPayload('terminal', 'input'))).toBe('unknown-sender')
+    expect(mgr.handleCast(view.webContents.id, { nope: true })).toBe('malformed')
+  })
+
+  it('is wired to the plugin:cap:cast IPC channel', () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    const view = openPlugin(mgr, host, 'acme.term', ['terminal'])
+    const cast = ipcListeners.get('plugin:cap:cast')
+    expect(cast).toBeDefined()
+    expect(() =>
+      cast!({ sender: { id: view.webContents.id } }, castPayload('terminal', 'input'))
+    ).not.toThrow()
   })
 })
 

@@ -60,17 +60,29 @@ describe('TYPE_TO_CAP git surface', () => {
     expect(resolveCapability('ui.pick_folder')).toEqual({ ns: 'ui', method: 'pick_folder' })
   })
 
-  it('maps the embedded AIChatPane surface (chat/terminal/search + fs listings)', () => {
-    expect(resolveCapability('ai.chat.start')).toEqual({ ns: 'chat', method: 'start' })
-    expect(resolveCapability('ai.chat.threads.get')).toEqual({ ns: 'chat', method: 'threads_get' })
-    expect(resolveCapability('ai.enhance_prompt')).toEqual({ ns: 'chat', method: 'enhance_prompt' })
-    expect(resolveCapability('shell.run')).toEqual({ ns: 'terminal', method: 'run' })
-    expect(resolveCapability('search.find_in_files')).toEqual({
-      ns: 'search',
-      method: 'find_in_files',
+  it('maps the embedded AiCliDock PTY surface (terminal + @-mention fs probes)', () => {
+    expect(resolveCapability('terminal.create')).toEqual({ ns: 'terminal', method: 'create' })
+    expect(resolveCapability('terminal.input')).toEqual({ ns: 'terminal', method: 'input' })
+    expect(resolveCapability('terminal.log_sent')).toEqual({ ns: 'terminal', method: 'log_sent' })
+    expect(resolveCapability('terminal.resize')).toEqual({ ns: 'terminal', method: 'resize' })
+    expect(resolveCapability('terminal.interrupt')).toEqual({ ns: 'terminal', method: 'interrupt' })
+    expect(resolveCapability('terminal.kill')).toEqual({ ns: 'terminal', method: 'kill' })
+    expect(resolveCapability('terminal.reattach')).toEqual({ ns: 'terminal', method: 'reattach' })
+    expect(resolveCapability('terminal.redraw')).toEqual({ ns: 'terminal', method: 'redraw' })
+    // Second dot → explicit remap, not the uniform split.
+    expect(resolveCapability('terminal.create.cancel')).toEqual({
+      ns: 'terminal',
+      method: 'create_cancel',
     })
+    expect(resolveCapability('shell.run')).toEqual({ ns: 'terminal', method: 'run' })
     expect(resolveCapability('fs.list_files_flat')).toEqual({ ns: 'fs', method: 'list_files_flat' })
-    expect(resolveCapability('fs.glob_files')).toEqual({ ns: 'fs', method: 'glob_files' })
+    expect(resolveCapability('fs.stat_path')).toEqual({ ns: 'fs', method: 'stat_path' })
+  })
+
+  it('no longer maps the retired AIChatPane chat/search surface', () => {
+    expect(resolveCapability('ai.chat.start')).toBeNull()
+    expect(resolveCapability('ai.enhance_prompt')).toBeNull()
+    expect(resolveCapability('search.find_in_files')).toBeNull()
   })
 })
 
@@ -129,5 +141,67 @@ describe('useBackend shim status', () => {
     backend.on('git.credential_request', cb)
     fire('git.credential_request', { request_id: 'r1' })
     expect(cb).toHaveBeenCalledWith({ request_id: 'r1' })
+  })
+})
+
+describe('useBackend shim one-way input casts', () => {
+  const callCapability = vi.fn()
+  const castCapability = vi.fn()
+
+  function installNav(withCast: boolean): void {
+    ;(window as unknown as { nav: unknown }).nav = {
+      callCapability,
+      ...(withCast ? { castCapability } : {}),
+      on: vi.fn(() => () => {}),
+      ready: vi.fn(),
+    }
+  }
+
+  beforeEach(() => {
+    callCapability.mockReset()
+    castCapability.mockReset()
+  })
+
+  it('casts terminal.input fire-and-forget and resolves ok immediately', async () => {
+    installNav(true)
+    const backend = useBackend()
+    const resp = await backend.send('terminal.input', { terminal_session_id: 't-1', data: 'x' })
+    expect(castCapability).toHaveBeenCalledWith('terminal', 'input', {
+      terminal_session_id: 't-1',
+      data: 'x',
+    })
+    expect(callCapability).not.toHaveBeenCalled()
+    expect(resp.ok).toBe(true)
+  })
+
+  it('casts terminal.log_sent the same way', async () => {
+    installNav(true)
+    const backend = useBackend()
+    const resp = await backend.send('terminal.log_sent', { terminal_session_id: 't-1' })
+    expect(castCapability).toHaveBeenCalledWith('terminal', 'log_sent', {
+      terminal_session_id: 't-1',
+    })
+    expect(callCapability).not.toHaveBeenCalled()
+    expect(resp.ok).toBe(true)
+  })
+
+  it('keeps request/response semantics for every other terminal type', async () => {
+    installNav(true)
+    callCapability.mockResolvedValue({ reqId: 'r1', ok: true, result: { alive: [], dead: [] } })
+    const backend = useBackend()
+    await backend.send('terminal.reattach', { terminal_session_ids: ['t-1'] })
+    expect(castCapability).not.toHaveBeenCalled()
+    expect(callCapability).toHaveBeenCalledWith('terminal', 'reattach', {
+      terminal_session_ids: ['t-1'],
+    })
+  })
+
+  it('falls back to callCapability when the host lacks castCapability', async () => {
+    installNav(false)
+    callCapability.mockResolvedValue({ reqId: 'r1', ok: true, result: null })
+    const backend = useBackend()
+    const resp = await backend.send('terminal.input', { data: 'x' })
+    expect(callCapability).toHaveBeenCalledWith('terminal', 'input', { data: 'x' })
+    expect(resp.ok).toBe(true)
   })
 })

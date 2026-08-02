@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   buildError,
   buildSuccess,
@@ -7,6 +7,9 @@ import {
   resolveCapabilityCall,
   planCapabilityCall,
   backendResponseToCapability,
+  createTerminalOutputBatcher,
+  terminalSessionIdOf,
+  terminalSessionsFromResponse,
   type CapabilityCall,
 } from './pluginCapabilityBroker'
 import type { WsResponse } from '../../shared/wsClient'
@@ -213,5 +216,117 @@ describe('backendResponseToCapability', () => {
     }))
     expect(cap.ok).toBe(false)
     expect(cap.error).toEqual({ code: 'BACKEND_ERROR', message: 'no such file' })
+  })
+})
+
+describe('terminalSessionsFromResponse', () => {
+  it('yields the new session id from a terminal.create response', () => {
+    expect(
+      terminalSessionsFromResponse('terminal.create', { terminal_session_id: 't-1', pid: 42 })
+    ).toEqual(['t-1'])
+  })
+
+  it('yields every alive id from a terminal.reattach response', () => {
+    expect(
+      terminalSessionsFromResponse('terminal.reattach', { alive: ['t-1', 't-2'], dead: ['t-3'] })
+    ).toEqual(['t-1', 't-2'])
+  })
+
+  it('yields nothing for other WS types or malformed payloads', () => {
+    expect(terminalSessionsFromResponse('terminal.input', { terminal_session_id: 't-1' })).toEqual([])
+    expect(terminalSessionsFromResponse('terminal.create', null)).toEqual([])
+    expect(terminalSessionsFromResponse('terminal.create', { terminal_session_id: 7 })).toEqual([])
+    expect(terminalSessionsFromResponse('terminal.reattach', { alive: 'nope' })).toEqual([])
+    expect(terminalSessionsFromResponse('terminal.reattach', { alive: ['ok', 7, ''] })).toEqual(['ok'])
+  })
+})
+
+describe('terminalSessionIdOf', () => {
+  it('extracts the terminal_session_id, tolerating junk', () => {
+    expect(terminalSessionIdOf({ terminal_session_id: 't-1', data: 'x' })).toBe('t-1')
+    expect(terminalSessionIdOf({ terminal_session_id: 5 })).toBe('')
+    expect(terminalSessionIdOf(null)).toBe('')
+    expect(terminalSessionIdOf('t-1')).toBe('')
+  })
+})
+
+describe('createTerminalOutputBatcher', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  function payload(id: string, data: string, sequence: number): Record<string, unknown> {
+    return { terminal_session_id: id, pane_id: 'p', sequence, data, stream: 'stdout' }
+  }
+
+  it('coalesces a burst into ONE delivery, concatenating data in order', () => {
+    const delivered: Array<{ id: string; payload: Record<string, unknown> }> = []
+    const batcher = createTerminalOutputBatcher((id, p) => delivered.push({ id, payload: p }), 12)
+    batcher.push('t-1', payload('t-1', 'he', 1))
+    batcher.push('t-1', payload('t-1', 'll', 2))
+    batcher.push('t-1', payload('t-1', 'o', 3))
+    expect(delivered).toEqual([])
+    vi.advanceTimersByTime(12)
+    expect(delivered).toHaveLength(1)
+    // data is the concatenation; the other fields (incl. sequence) come from
+    // the LAST queued payload — the batch covers exactly the events up to it.
+    expect(delivered[0]).toEqual({
+      id: 't-1',
+      payload: { terminal_session_id: 't-1', pane_id: 'p', sequence: 3, data: 'hello', stream: 'stdout' },
+    })
+  })
+
+  it('keeps sessions independent (per-session batches and timers)', () => {
+    const delivered: string[] = []
+    const batcher = createTerminalOutputBatcher((id, p) => delivered.push(`${id}:${p.data}`), 12)
+    batcher.push('t-1', payload('t-1', 'a', 1))
+    vi.advanceTimersByTime(6)
+    batcher.push('t-2', payload('t-2', 'b', 1))
+    vi.advanceTimersByTime(6)
+    expect(delivered).toEqual(['t-1:a'])
+    vi.advanceTimersByTime(6)
+    expect(delivered).toEqual(['t-1:a', 't-2:b'])
+  })
+
+  it('flushSession delivers pending output immediately (ordering barrier before exit)', () => {
+    const delivered: string[] = []
+    const batcher = createTerminalOutputBatcher((id, p) => delivered.push(String(p.data)), 12)
+    batcher.push('t-1', payload('t-1', 'bye', 9))
+    batcher.flushSession('t-1')
+    expect(delivered).toEqual(['bye'])
+    // The timer was cleared — no double delivery.
+    vi.advanceTimersByTime(20)
+    expect(delivered).toEqual(['bye'])
+  })
+
+  it('a new push after a flush starts a fresh batch', () => {
+    const delivered: string[] = []
+    const batcher = createTerminalOutputBatcher((id, p) => delivered.push(String(p.data)), 12)
+    batcher.push('t-1', payload('t-1', 'one', 1))
+    vi.advanceTimersByTime(12)
+    batcher.push('t-1', payload('t-1', 'two', 2))
+    vi.advanceTimersByTime(12)
+    expect(delivered).toEqual(['one', 'two'])
+  })
+
+  it('dropSession discards pending output without delivering', () => {
+    const delivered: string[] = []
+    const batcher = createTerminalOutputBatcher((id, p) => delivered.push(String(p.data)), 12)
+    batcher.push('t-1', payload('t-1', 'gone', 1))
+    batcher.dropSession('t-1')
+    vi.advanceTimersByTime(20)
+    expect(delivered).toEqual([])
+  })
+
+  it('flushAll drains every pending session', () => {
+    const delivered: string[] = []
+    const batcher = createTerminalOutputBatcher((id) => delivered.push(id), 12)
+    batcher.push('t-1', payload('t-1', 'a', 1))
+    batcher.push('t-2', payload('t-2', 'b', 1))
+    batcher.flushAll()
+    expect(delivered.sort()).toEqual(['t-1', 't-2'])
   })
 })

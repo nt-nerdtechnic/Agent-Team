@@ -19,22 +19,19 @@ const _realAssignableToShim: Shim = undefined as unknown as Real
 // Every WS `type` the Plans UI actually sends (collected from PlanWindowApp +
 // PlansPane + PlanReviewToolbar + planStore/planShare + PlanFileView/
 // PlanMarkdownBody/PlanDocPreview + FilePreviewPane's bundled previews +
-// lib/settings + the embedded AIChatPane). The map MUST resolve all of them.
+// lib/settings + the embedded AiCliDock's useTerminal). The map MUST resolve
+// all of them.
 const PLANS_SENT_TYPES = [
-  // fs
+  // fs (stat_path/list_files_flat also back the CLI dock's @-mention)
   'fs.read_file', 'fs.write_file', 'fs.list_dir', 'fs.list_files_flat',
   'fs.glob_files', 'fs.delete', 'fs.rename', 'fs.list_archive',
-  'fs.convert_office',
+  'fs.convert_office', 'fs.stat_path',
   // ui / settings (theme sync via lib/settings.ts)
   'ui.settings.get', 'ui.settings.set',
-  // embedded AIChatPane — chat engine + persistence
-  'ai.chat.start', 'ai.chat.stop', 'ai.chat.settings.get', 'ai.chat.settings.set',
-  'ai.chat.notes.get', 'ai.chat.notes.set', 'ai.chat.threads.get',
-  'ai.chat.threads.set', 'ai.enhance_prompt', 'ai.web.search',
-  // embedded AIChatPane — slash commands / context gathering
-  'shell.run', 'search.find_in_files',
-  'git.commit', 'git.diff_all', 'git.diff_branches', 'git.show_commit',
-  'git.stash_list',
+  // embedded AiCliDock — interactive PTY (useTerminal)
+  'terminal.create', 'terminal.create.cancel', 'terminal.input',
+  'terminal.log_sent', 'terminal.resize', 'terminal.interrupt', 'terminal.kill',
+  'terminal.reattach', 'terminal.redraw',
 ] as const
 
 // Vitest runs with cwd at the repo root; vite-node serves modules under a
@@ -90,19 +87,27 @@ describe('TYPE_TO_CAP coverage', () => {
     expect(resolveCapability('ui.settings.set')).toEqual({ ns: 'ui', method: 'settings_set' })
   })
 
-  it('remaps the AIChatPane ai/shell families onto the chat/terminal namespaces', () => {
-    expect(resolveCapability('ai.chat.start')).toEqual({ ns: 'chat', method: 'start' })
-    expect(resolveCapability('ai.chat.threads.get')).toEqual({ ns: 'chat', method: 'threads_get' })
-    expect(resolveCapability('ai.enhance_prompt')).toEqual({ ns: 'chat', method: 'enhance_prompt' })
+  it('maps the AiCliDock PTY surface onto the terminal namespace', () => {
+    expect(resolveCapability('terminal.create')).toEqual({ ns: 'terminal', method: 'create' })
+    expect(resolveCapability('terminal.input')).toEqual({ ns: 'terminal', method: 'input' })
+    expect(resolveCapability('terminal.reattach')).toEqual({ ns: 'terminal', method: 'reattach' })
+    // Second dot → explicit remap, not the uniform split.
+    expect(resolveCapability('terminal.create.cancel')).toEqual({
+      ns: 'terminal',
+      method: 'create_cancel',
+    })
     expect(resolveCapability('shell.run')).toEqual({ ns: 'terminal', method: 'run' })
   })
 
   it('returns null for types outside the Plans surface', () => {
-    // git is granted only for the chat subset — the wider useGit surface the
-    // Plans UI never drives stays unmapped.
+    // The retired AIChatPane chat/search/git surface is gone with the pane —
+    // the Plans tree sends no git.* call at all (planShare writes via fs).
     expect(resolveCapability('git.status')).toBeNull()
-    expect(resolveCapability('git.push')).toBeNull()
+    expect(resolveCapability('git.commit')).toBeNull()
+    expect(resolveCapability('git.diff_all')).toBeNull()
     expect(resolveCapability('editor.rewrite')).toBeNull()
+    expect(resolveCapability('ai.chat.start')).toBeNull()
+    expect(resolveCapability('search.find_in_files')).toBeNull()
     expect(resolveCapability('totally.unknown')).toBeNull()
     expect(resolveCapability('')).toBeNull()
   })
@@ -139,6 +144,24 @@ describe('useBackend shim send()', () => {
     expect(callCapability).not.toHaveBeenCalled()
     expect(resp.ok).toBe(false)
     expect(resp.error?.code).toBe('UNMAPPED_CAPABILITY')
+  })
+
+  it('casts terminal.input fire-and-forget when the host exposes castCapability', async () => {
+    const castCapability = vi.fn()
+    ;(window as unknown as { nav: unknown }).nav = {
+      callCapability,
+      castCapability,
+      on: vi.fn(() => () => {}),
+      ready: vi.fn(),
+    }
+    const backend = useBackend()
+    const resp = await backend.send('terminal.input', { terminal_session_id: 't-1', data: 'x' })
+    expect(castCapability).toHaveBeenCalledWith('terminal', 'input', {
+      terminal_session_id: 't-1',
+      data: 'x',
+    })
+    expect(callCapability).not.toHaveBeenCalled()
+    expect(resp.ok).toBe(true)
   })
 
   it('subscribes to plans.changed via nav.on', () => {

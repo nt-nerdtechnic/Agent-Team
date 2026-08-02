@@ -213,7 +213,7 @@ rejected with `CAP_DENIED` before it reaches the backend.
 |---|---|
 | `fs` | File read/write, directory listing, glob, archive listing, image reading — and the `git.changed` working-tree event |
 | `git` | Status, log, diff, branch, stage, commit, sync, and credential events |
-| `terminal` | Shell execution |
+| `terminal` | Shell execution — the one-shot `run`, plus the interactive PTY surface (`create` / `input` / `resize` / `interrupt` / `kill` / `reattach` / `redraw` and the `terminal.output` / `terminal.exit` events) |
 | `search` | Find and replace across files |
 | `chat` | AI chat, editor rewrite/complete, review, analyzer models |
 | `ui` | Settings get/set, settings-changed events, opening a file in the editor |
@@ -224,7 +224,20 @@ rejected with `CAP_DENIED` before it reaches the backend.
 bridge works before wiring anything real.
 
 `fs` and `terminal` are **sensitive**: installing a plugin that requests them
-triggers an extra trust confirmation in the UI.
+triggers an extra trust confirmation in the UI. `terminal` in particular now
+grants an interactive PTY — a plugin holding it can spawn and drive a
+long-running shell process in the workspace, not just one-shot commands.
+Splitting the interactive PTY into a dedicated `terminal.pty` namespace (so a
+plugin can be granted `run` without PTY spawning) is a possible future
+refinement; today one grant covers both.
+
+Known residual risk: the host strips `terminal.reattach` ids that are bound to
+a **different plugin**, but ids the broker has never seen pass through — which
+includes PTY sessions created by the app's own main windows. A
+terminal-granted plugin could therefore reattach (and take over the output of)
+a main-window terminal session whose id it somehow learns. Full isolation
+requires a backend-side ownership namespace and is a prerequisite for opening
+the `terminal` grant to marketplace plugins.
 
 ### Calling a capability
 
@@ -236,11 +249,16 @@ The host resolves the calling plugin's identity from the Electron sender id, not
 from anything in the payload, so a plugin cannot impersonate another.
 
 The `fs`, `git`, `search`, and `issues` namespaces map one-to-one onto backend
-message types. `terminal`, `chat`, and `ui` are remapped — the full table:
+message types, and so do the interactive PTY methods (`terminal.create`,
+`terminal.input`, `terminal.log_sent`, `terminal.resize`, `terminal.interrupt`,
+`terminal.kill`, `terminal.reattach`, `terminal.redraw` →
+`terminal.<method>`). The rest of `terminal`, plus `chat` and `ui`, are
+remapped — the full table:
 
 | Capability | Backend type |
 |---|---|
 | `terminal.run` | `shell.run` |
+| `terminal.create_cancel` | `terminal.create.cancel` |
 | `chat.start` / `chat.stop` | `ai.chat.start` / `ai.chat.stop` |
 | `chat.enhance_prompt` / `chat.web_search` | `ai.enhance_prompt` / `ai.web.search` |
 | `chat.editor_rewrite` / `chat.editor_complete` | `editor.rewrite` / `editor.complete` |
@@ -275,6 +293,14 @@ Events are gated by namespace, so you only receive what your `requires` covers:
 | `ui.settings_changed` | `ui` |
 | `ai.chat.*`, `ai.review.*` | `chat` |
 | `plans.changed` | `plans` |
+| `terminal.output`, `terminal.exit` | `terminal` |
+
+`terminal.output` is micro-batched by the host (a few milliseconds per PTY
+session, `data` concatenated) and delivered only to the plugin whose
+`terminal.create`/`terminal.reattach` bound the session; `terminal.exit`
+always flushes the session's pending output first. Events for a session no
+running plugin view has bound are **dropped**, never fanned out — PTY content
+cannot leak to plugins that did not bind the session.
 
 The host also emits a synthetic `nav.backend_status` event so a plugin can track
 whether the backend connection is actually live.
@@ -288,6 +314,7 @@ differ in maturity:
 |---|---|
 | `fs`, `git`, `search`, `issues` | Available |
 | `terminal.run` | Available and hardened: `cwd` must be a registered workspace root or a subdirectory, 30-second timeout, output truncated at 8000 characters |
+| `terminal` PTY (`create`/`input`/…) | Frontend-broker only — routed to the core terminal service over the shared WS transport; not exposed to Python plugins |
 | `chat` | Partly available — settings, notes, threads, edit approval, and editor rewrite/complete delegate to the core service; `start`, `stop`, `test_connection`, `enhance_prompt`, and `web_search` raise `CapabilityNotAvailable` |
 | `ui` | Interface only — all methods raise `CapabilityNotAvailable`; the namespace exists so authorization can be recorded |
 | `plans` | Empty marker |
@@ -304,6 +331,7 @@ available to plugins.
 | Method | Purpose |
 |---|---|
 | `callCapability(ns, method, args)` | Invoke a capability; returns a promise |
+| `castCapability(ns, method, args)` | Fire-and-forget capability call — no response, same scoping; meant for high-frequency paths like per-keystroke `terminal.input` |
 | `on(type, cb)` | Subscribe to an event; returns a disposer |
 | `ready()` | Signal that the plugin has mounted |
 | `hideSelf()` | Hide or close this plugin's own view |

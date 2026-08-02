@@ -21,11 +21,12 @@ function uniformNs(ns: string, methods: readonly string[]): Record<string, strin
   return out
 }
 
-// fs capability methods → backend `fs.<method>` one-for-one.
+// fs capability methods → backend `fs.<method>` one-for-one. `stat_path` backs
+// the embedded CLI dock's @-mention existence probe (useTerminal).
 const FS_METHODS = [
   'read_file', 'write_file', 'list_dir', 'list_files_flat', 'glob_files',
   'create_file', 'delete', 'mkdir', 'rename', 'convert_office', 'list_archive',
-  'read_image',
+  'read_image', 'stat_path',
 ] as const
 
 // git capability methods → backend `git.<method>` one-for-one.
@@ -53,11 +54,24 @@ const SEARCH_METHODS = ['find_in_files', 'replace_in_files'] as const
 // exist, so plugin parity is a pure mapping plus a `requires: ["issues"]` grant.
 const ISSUES_METHODS = ['provider', 'list', 'get', 'create', 'comment', 'set_state'] as const
 
+// terminal capability methods → backend `terminal.<method>` one-for-one: the
+// interactive PTY surface AiCliDock/useTerminal drives from plugin windows
+// (spawn/reattach lifecycle, keystroke input, resize/redraw, interrupt/kill).
+// `create_cancel` is the one non-uniform member (WS type
+// `terminal.create.cancel`) and lives in EXPLICIT_CAP_MAP; `run` (one-shot
+// shell.run) stays an EXPLICIT remap as before.
+const TERMINAL_METHODS = [
+  'create', 'input', 'log_sent', 'resize', 'interrupt', 'kill', 'reattach', 'redraw',
+] as const
+
 // Non-uniform `(ns.method)` → backend WS type. These invert the shim's EXPLICIT
 // remaps of the shell/editor/ai/ui families onto the terminal/chat/ui namespaces.
 const EXPLICIT_CAP_MAP: Readonly<Record<string, string>> = {
   // TerminalCapability
   'terminal.run': 'shell.run',
+  // TerminalCapability — PTY create cancellation. The WS type has a second dot
+  // (`terminal.create.cancel`), so it cannot ride the uniform split.
+  'terminal.create_cancel': 'terminal.create.cancel',
   // ChatCapability — editor inline AI
   'chat.editor_rewrite': 'editor.rewrite',
   'chat.editor_complete': 'editor.complete',
@@ -93,6 +107,7 @@ export const CAP_MAP: Readonly<Record<string, string>> = {
   ...uniformNs('git', GIT_METHODS),
   ...uniformNs('search', SEARCH_METHODS),
   ...uniformNs('issues', ISSUES_METHODS),
+  ...uniformNs('terminal', TERMINAL_METHODS),
   ...EXPLICIT_CAP_MAP,
 }
 
@@ -143,6 +158,14 @@ export const CAP_EVENTS: Readonly<Record<string, string>> = {
   // `plans` namespace — event-only, it maps no request types — so the Plans
   // plugin can live-refresh without being granted broader fs event surface.
   'plans.changed': 'plans',
+  // PTY stream + lifecycle (useTerminal inside AiCliDock). These are _active_
+  // emits sent to the PTY owner's WS session — the broker's shared transport is
+  // the owner for PTYs created through it. terminal.output is additionally
+  // micro-batched and routed to the creating plugin only (see
+  // frontendPluginManager dispatchEvent); the `terminal` gate here is the
+  // fan-out fallback for sessions with no registered owner.
+  'terminal.output': 'terminal',
+  'terminal.exit': 'terminal',
 }
 
 /** The namespace gating a server-push event, or `null` when not forwardable. */

@@ -20,7 +20,7 @@ const MINI_IDE_SENT_TYPES = [
   // fs
   'fs.read_file', 'fs.write_file', 'fs.list_dir', 'fs.list_files_flat', 'fs.glob_files',
   'fs.create_file', 'fs.delete', 'fs.mkdir', 'fs.rename', 'fs.convert_office',
-  'fs.list_archive', 'fs.read_image',
+  'fs.list_archive', 'fs.read_image', 'fs.stat_path',
   // git (via useGit + DiffPane/BranchDiffPane/ConflictPane/AIChatPane)
   'git.status', 'git.log', 'git.diff_branches', 'git.rebase', 'git.restore_from_branch',
   'git.show_commit', 'git.worktrees', 'git.add_worktree', 'git.remove_worktree',
@@ -42,6 +42,10 @@ const MINI_IDE_SENT_TYPES = [
   'search.find_in_files', 'search.replace_in_files',
   // shell
   'shell.run',
+  // terminal (interactive PTY — useTerminal; kept in lockstep with git/plans)
+  'terminal.create', 'terminal.create.cancel', 'terminal.input', 'terminal.log_sent',
+  'terminal.resize', 'terminal.interrupt', 'terminal.kill', 'terminal.reattach',
+  'terminal.redraw',
   // editor inline AI
   'editor.rewrite', 'editor.complete',
   // ai / ai.chat
@@ -101,9 +105,20 @@ describe('TYPE_TO_CAP coverage', () => {
     expect(resolveCapability('issues.set_state')).toEqual({ ns: 'issues', method: 'set_state' })
   })
 
+  it('maps the interactive PTY surface onto the terminal namespace', () => {
+    expect(resolveCapability('terminal.create')).toEqual({ ns: 'terminal', method: 'create' })
+    expect(resolveCapability('terminal.input')).toEqual({ ns: 'terminal', method: 'input' })
+    expect(resolveCapability('terminal.reattach')).toEqual({ ns: 'terminal', method: 'reattach' })
+    // Second dot → explicit remap, not the uniform split.
+    expect(resolveCapability('terminal.create.cancel')).toEqual({
+      ns: 'terminal',
+      method: 'create_cancel',
+    })
+  })
+
   it('returns null for unmapped types', () => {
     expect(resolveCapability('issues.nope')).toBeNull()
-    expect(resolveCapability('terminal.input')).toBeNull()
+    expect(resolveCapability('terminal.nope')).toBeNull()
     expect(resolveCapability('totally.unknown')).toBeNull()
     expect(resolveCapability('')).toBeNull()
   })
@@ -149,7 +164,7 @@ describe('useBackend shim send()', () => {
 
   it('returns UNMAPPED_CAPABILITY without calling the broker for an unmapped type', async () => {
     const backend = useBackend()
-    const resp = await backend.send('terminal.input', {})
+    const resp = await backend.send('totally.unknown', {})
     expect(callCapability).not.toHaveBeenCalled()
     expect(resp.ok).toBe(false)
     expect(resp.error?.code).toBe('UNMAPPED_CAPABILITY')

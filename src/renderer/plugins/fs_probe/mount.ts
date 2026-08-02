@@ -14,6 +14,10 @@ interface CapabilityResponse {
 
 interface NavBridge {
   callCapability(ns: string, method: string, args?: unknown): Promise<CapabilityResponse>
+  /** Fire-and-forget capability call (no response). Optional: older hosts may
+   *  not expose it. Unused here; declared to keep every `Window.nav`
+   *  augmentation structurally identical (TS2717). */
+  castCapability?(ns: string, method: string, args?: unknown): void
   on(type: string, cb: (data: unknown) => void): () => void
   ready(): void
 }

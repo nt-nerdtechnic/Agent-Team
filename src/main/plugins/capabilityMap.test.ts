@@ -9,6 +9,9 @@ import { CAP_MAP, CAP_EVENTS, resolveWsType, eventNamespace } from './capability
 // own test uses for MINI_IDE_SENT_TYPES.
 const EXPECTED_EXPLICIT: Readonly<Record<string, string>> = {
   'terminal.run': 'shell.run',
+  // PTY create cancellation — the WS type's second dot keeps it out of the
+  // uniform terminal split.
+  'terminal.create_cancel': 'terminal.create.cancel',
   'chat.editor_rewrite': 'editor.rewrite',
   'chat.editor_complete': 'editor.complete',
   'chat.enhance_prompt': 'ai.enhance_prompt',
@@ -58,10 +61,28 @@ describe('resolveWsType', () => {
     expect(resolveWsType('chat', 'analyzer_models')).toBe('analyzer.models')
   })
 
+  it('maps the interactive PTY surface (AiCliDock/useTerminal) one-for-one', () => {
+    expect(resolveWsType('terminal', 'create')).toBe('terminal.create')
+    expect(resolveWsType('terminal', 'input')).toBe('terminal.input')
+    expect(resolveWsType('terminal', 'log_sent')).toBe('terminal.log_sent')
+    expect(resolveWsType('terminal', 'resize')).toBe('terminal.resize')
+    expect(resolveWsType('terminal', 'interrupt')).toBe('terminal.interrupt')
+    expect(resolveWsType('terminal', 'kill')).toBe('terminal.kill')
+    expect(resolveWsType('terminal', 'reattach')).toBe('terminal.reattach')
+    expect(resolveWsType('terminal', 'redraw')).toBe('terminal.redraw')
+    // The one non-uniform member: WS type carries a second dot.
+    expect(resolveWsType('terminal', 'create_cancel')).toBe('terminal.create.cancel')
+  })
+
+  it('maps the @-mention stat probe (fs.stat_path)', () => {
+    expect(resolveWsType('fs', 'stat_path')).toBe('fs.stat_path')
+  })
+
   it('returns null for an unmapped (ns, method)', () => {
     expect(resolveWsType('ping', 'ping')).toBeNull()
     expect(resolveWsType('issues', 'nope')).toBeNull()
     expect(resolveWsType('fs', 'nope')).toBeNull()
+    expect(resolveWsType('terminal', 'nope')).toBeNull()
   })
 
   it('every CAP_MAP entry keys on ns.method', () => {
@@ -79,16 +100,19 @@ describe('resolveWsType', () => {
   it('keeps uniform-namespace entries an identity map (value === key)', () => {
     for (const [key, value] of Object.entries(CAP_MAP)) {
       const ns = key.slice(0, key.indexOf('.'))
-      if (ns === 'fs' || ns === 'git' || ns === 'search' || ns === 'issues') {
+      // terminal is uniform EXCEPT its two explicit remaps (run / create_cancel).
+      if (key in EXPECTED_EXPLICIT) continue
+      if (ns === 'fs' || ns === 'git' || ns === 'search' || ns === 'issues' || ns === 'terminal') {
         expect(value).toBe(key)
       }
     }
   })
 
-  it('has no CAP_MAP entry outside the fs/git/search/issues uniform + explicit surface', () => {
+  it('has no CAP_MAP entry outside the uniform + explicit surface', () => {
     for (const key of Object.keys(CAP_MAP)) {
       const ns = key.slice(0, key.indexOf('.'))
-      const isUniform = ns === 'fs' || ns === 'git' || ns === 'search' || ns === 'issues'
+      const isUniform =
+        ns === 'fs' || ns === 'git' || ns === 'search' || ns === 'issues' || ns === 'terminal'
       expect(isUniform || key in EXPECTED_EXPLICIT).toBe(true)
     }
   })
@@ -122,6 +146,13 @@ describe('eventNamespace', () => {
   it('gates the plans.changed live-refresh signal behind the plans namespace', () => {
     expect(eventNamespace('plans.changed')).toBe('plans')
     expect(CAP_EVENTS['plans.changed']).toBe('plans')
+  })
+
+  it('forwards the PTY stream + lifecycle events under the terminal namespace', () => {
+    // Without these, a plugin-hosted AiCliDock spawns a PTY it can never hear
+    // from — output stays on the broker's WS and the pane looks frozen.
+    expect(eventNamespace('terminal.output')).toBe('terminal')
+    expect(eventNamespace('terminal.exit')).toBe('terminal')
   })
 
   it('gates every CAP_EVENTS entry on a granted capability namespace', () => {
