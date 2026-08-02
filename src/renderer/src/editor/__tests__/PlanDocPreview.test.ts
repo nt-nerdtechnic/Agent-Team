@@ -89,10 +89,15 @@ describe('PlanDocPreview', () => {
     expect(wrapper.find('iframe').element).toBe(before) // no remount
   })
 
-  it('shows the error state when the file cannot be read', async () => {
+  it('shows the error state with the backend reason and resolved path', async () => {
     const { wrapper } = await mountPreview(null)
     expect(wrapper.find('iframe').exists()).toBe(false)
-    expect(wrapper.find('.pdp-error').text()).toBe('Failed to load the plan document')
+    const error = wrapper.find('.pdp-error')
+    expect(error.text()).toContain('Failed to load the plan document')
+    expect(error.find('.pdp-error-reason').text()).toBe('missing')
+    expect(error.find('.pdp-error-path').text()).toContain(
+      '/ws › .agent-team/plans/test-plan_a1b2c3.html',
+    )
   })
 
   it('ignores window messages whose source is not the preview frame', async () => {

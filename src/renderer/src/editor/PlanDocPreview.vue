@@ -36,6 +36,10 @@ const { t } = useI18n()
 const frame = ref<HTMLIFrameElement | null>(null)
 const docHtml = ref('')
 const loadError = ref(false)
+// Backend's own reason ("not a file", "path escapes workspace", a WS timeout…).
+// Shown verbatim next to the generic message: without it every cause — most
+// often a plan written under a different workspace root — looks identical.
+const loadErrorDetail = ref('')
 // True while the frame reports an in-progress inline section edit; the host
 // (PlanWindowApp) checks this so ESC cancels the edit before closing the window.
 const editing = ref(false)
@@ -45,6 +49,12 @@ const scrollY = ref(0)
 
 let todoIds: string[] = []
 let anchors: string[] = []
+
+function setLoadError(reason: unknown): void {
+  loadError.value = true
+  loadErrorDetail.value =
+    reason instanceof Error ? reason.message : String(reason ?? '').trim()
+}
 
 async function loadDoc(): Promise<void> {
   // A reload (external plans.changed / meta write) swaps in a fresh iframe whose
@@ -58,7 +68,7 @@ async function loadDoc(): Promise<void> {
       { workspace_path: props.workspacePath, rel_path: props.relPath },
     )
     if (!resp.payload?.ok || resp.payload.content === undefined) {
-      loadError.value = true
+      setLoadError(resp.payload?.error)
       return
     }
     const content = resp.payload.content
@@ -79,8 +89,9 @@ async function loadDoc(): Promise<void> {
       scrollY: scrollY.value,
     })
     loadError.value = false
-  } catch {
-    loadError.value = true
+    loadErrorDetail.value = ''
+  } catch (err) {
+    setLoadError(err)
   }
 }
 
@@ -134,7 +145,11 @@ defineExpose({ scrollToAnchor, isEditing, cancelEdit })
 
 <template>
   <div class="pdp">
-    <div v-if="loadError" class="pdp-error">{{ t('pane.plans.doc-load-failed') }}</div>
+    <div v-if="loadError" class="pdp-error">
+      <span>{{ t('pane.plans.doc-load-failed') }}</span>
+      <span v-if="loadErrorDetail" class="pdp-error-reason">{{ loadErrorDetail }}</span>
+      <span class="pdp-error-path">{{ workspacePath }} › {{ relPath }}</span>
+    </div>
     <!-- allow-scripts only (no same-origin): the frame stays an opaque origin;
          the injected CSP additionally confines the document itself. -->
     <iframe
@@ -169,7 +184,24 @@ defineExpose({ scrollToAnchor, isEditing, cancelEdit })
   color: var(--text-muted);
   display: flex;
   flex: 1;
+  flex-direction: column;
   font-size: 13px;
+  gap: 6px;
   justify-content: center;
+  padding: 0 16px;
+  text-align: center;
+}
+
+/* The backend's raw reason and the exact path it was resolved against —
+   diagnostic detail, deliberately quieter than the message above. */
+.pdp-error-reason,
+.pdp-error-path {
+  font-size: 12px;
+  opacity: 0.75;
+  overflow-wrap: anywhere;
+}
+
+.pdp-error-path {
+  font-family: var(--font-mono, monospace);
 }
 </style>
