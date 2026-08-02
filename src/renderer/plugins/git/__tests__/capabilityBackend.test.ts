@@ -59,6 +59,19 @@ describe('TYPE_TO_CAP git surface', () => {
     expect(resolveCapability('ui.open_workspace')).toEqual({ ns: 'ui', method: 'open_workspace' })
     expect(resolveCapability('ui.pick_folder')).toEqual({ ns: 'ui', method: 'pick_folder' })
   })
+
+  it('maps the embedded AIChatPane surface (chat/terminal/search + fs listings)', () => {
+    expect(resolveCapability('ai.chat.start')).toEqual({ ns: 'chat', method: 'start' })
+    expect(resolveCapability('ai.chat.threads.get')).toEqual({ ns: 'chat', method: 'threads_get' })
+    expect(resolveCapability('ai.enhance_prompt')).toEqual({ ns: 'chat', method: 'enhance_prompt' })
+    expect(resolveCapability('shell.run')).toEqual({ ns: 'terminal', method: 'run' })
+    expect(resolveCapability('search.find_in_files')).toEqual({
+      ns: 'search',
+      method: 'find_in_files',
+    })
+    expect(resolveCapability('fs.list_files_flat')).toEqual({ ns: 'fs', method: 'list_files_flat' })
+    expect(resolveCapability('fs.glob_files')).toEqual({ ns: 'fs', method: 'glob_files' })
+  })
 })
 
 describe('useBackend shim status', () => {

@@ -10,6 +10,10 @@
   "requires": [
     "fs",
     "ui",
-    "plans"
+    "plans",
+    "chat",
+    "terminal",
+    "search",
+    "git"
   ]
 }

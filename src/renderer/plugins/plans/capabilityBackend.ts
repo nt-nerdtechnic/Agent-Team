@@ -61,22 +61,48 @@ function fromNs(ns: string, methods: readonly string[]): Record<string, Capabili
 
 // fs.* WS types the Plans UI actually sends (PlansPane list/rename/delete,
 // planStore/planShare read+write, PlanFileView/PlanMarkdownBody/PlanDocPreview
-// reads, FilePreviewPane's bundled archive/office previews).
+// reads, FilePreviewPane's bundled archive/office previews, and the embedded
+// AIChatPane's pin/context reads and /open file listing).
 const FS_METHODS = [
   'read_file',
   'write_file',
   'list_dir',
+  'list_files_flat',
+  'glob_files',
   'delete',
   'rename',
   'list_archive',
   'convert_office',
 ] as const
 
+// git.* WS types the embedded AIChatPane sends (uniform namespace): commit
+// action, diff/stash context gathering. Only the chat surface — the Plans UI
+// itself drives no other git calls.
+const GIT_METHODS = ['commit', 'diff_all', 'diff_branches', 'show_commit', 'stash_list'] as const
+
+// search.* WS types (uniform namespace) — AIChatPane context search.
+const SEARCH_METHODS = ['find_in_files'] as const
+
 // Non-uniform WS types: the type string differs from `<ns>.<method>`. Settings
-// persistence (lib/settings.ts theme sync) remaps onto the ui namespace.
+// persistence (lib/settings.ts theme sync) remaps onto the ui namespace; the
+// shell/ai families the embedded AIChatPane sends remap onto the
+// terminal/chat namespaces (mirrors the mini-IDE shim's EXPLICIT block).
 const EXPLICIT: Record<string, CapabilityRef> = {
   'ui.settings.get': { ns: 'ui', method: 'settings_get' },
   'ui.settings.set': { ns: 'ui', method: 'settings_set' },
+  // shell → TerminalCapability (AIChatPane slash commands / context gathering)
+  'shell.run': { ns: 'terminal', method: 'run' },
+  // ai / ai.chat → ChatCapability (AIChatPane engine + persistence)
+  'ai.enhance_prompt': { ns: 'chat', method: 'enhance_prompt' },
+  'ai.web.search': { ns: 'chat', method: 'web_search' },
+  'ai.chat.start': { ns: 'chat', method: 'start' },
+  'ai.chat.stop': { ns: 'chat', method: 'stop' },
+  'ai.chat.settings.get': { ns: 'chat', method: 'settings_get' },
+  'ai.chat.settings.set': { ns: 'chat', method: 'settings_set' },
+  'ai.chat.notes.set': { ns: 'chat', method: 'notes_set' },
+  'ai.chat.notes.get': { ns: 'chat', method: 'notes_get' },
+  'ai.chat.threads.set': { ns: 'chat', method: 'threads_set' },
+  'ai.chat.threads.get': { ns: 'chat', method: 'threads_get' },
 }
 
 /**
@@ -86,9 +112,13 @@ const EXPLICIT: Record<string, CapabilityRef> = {
  *
  * The `plans` namespace carries no request types — it exists solely to gate
  * the `plans.changed` server-push event (see capabilityMap.ts CAP_EVENTS).
+ * The `chat` namespace also gates the ai.chat.* streaming events the embedded
+ * AIChatPane subscribes to via `on()`.
  */
 export const TYPE_TO_CAP: Readonly<Record<string, CapabilityRef>> = {
   ...fromNs('fs', FS_METHODS),
+  ...fromNs('git', GIT_METHODS),
+  ...fromNs('search', SEARCH_METHODS),
   ...EXPLICIT,
 }
 

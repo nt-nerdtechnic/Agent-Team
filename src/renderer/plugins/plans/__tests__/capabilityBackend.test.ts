@@ -19,13 +19,22 @@ const _realAssignableToShim: Shim = undefined as unknown as Real
 // Every WS `type` the Plans UI actually sends (collected from PlanWindowApp +
 // PlansPane + PlanReviewToolbar + planStore/planShare + PlanFileView/
 // PlanMarkdownBody/PlanDocPreview + FilePreviewPane's bundled previews +
-// lib/settings). The map MUST resolve all of them.
+// lib/settings + the embedded AIChatPane). The map MUST resolve all of them.
 const PLANS_SENT_TYPES = [
   // fs
-  'fs.read_file', 'fs.write_file', 'fs.list_dir', 'fs.delete', 'fs.rename',
-  'fs.list_archive', 'fs.convert_office',
+  'fs.read_file', 'fs.write_file', 'fs.list_dir', 'fs.list_files_flat',
+  'fs.glob_files', 'fs.delete', 'fs.rename', 'fs.list_archive',
+  'fs.convert_office',
   // ui / settings (theme sync via lib/settings.ts)
   'ui.settings.get', 'ui.settings.set',
+  // embedded AIChatPane — chat engine + persistence
+  'ai.chat.start', 'ai.chat.stop', 'ai.chat.settings.get', 'ai.chat.settings.set',
+  'ai.chat.notes.get', 'ai.chat.notes.set', 'ai.chat.threads.get',
+  'ai.chat.threads.set', 'ai.enhance_prompt', 'ai.web.search',
+  // embedded AIChatPane — slash commands / context gathering
+  'shell.run', 'search.find_in_files',
+  'git.commit', 'git.diff_all', 'git.diff_branches', 'git.show_commit',
+  'git.stash_list',
 ] as const
 
 // Vitest runs with cwd at the repo root; vite-node serves modules under a
@@ -81,9 +90,19 @@ describe('TYPE_TO_CAP coverage', () => {
     expect(resolveCapability('ui.settings.set')).toEqual({ ns: 'ui', method: 'settings_set' })
   })
 
+  it('remaps the AIChatPane ai/shell families onto the chat/terminal namespaces', () => {
+    expect(resolveCapability('ai.chat.start')).toEqual({ ns: 'chat', method: 'start' })
+    expect(resolveCapability('ai.chat.threads.get')).toEqual({ ns: 'chat', method: 'threads_get' })
+    expect(resolveCapability('ai.enhance_prompt')).toEqual({ ns: 'chat', method: 'enhance_prompt' })
+    expect(resolveCapability('shell.run')).toEqual({ ns: 'terminal', method: 'run' })
+  })
+
   it('returns null for types outside the Plans surface', () => {
+    // git is granted only for the chat subset — the wider useGit surface the
+    // Plans UI never drives stays unmapped.
     expect(resolveCapability('git.status')).toBeNull()
-    expect(resolveCapability('shell.run')).toBeNull()
+    expect(resolveCapability('git.push')).toBeNull()
+    expect(resolveCapability('editor.rewrite')).toBeNull()
     expect(resolveCapability('totally.unknown')).toBeNull()
     expect(resolveCapability('')).toBeNull()
   })

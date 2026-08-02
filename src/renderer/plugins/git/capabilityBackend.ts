@@ -85,17 +85,25 @@ const GIT_METHODS = [
 const ISSUES_METHODS = ['provider', 'list', 'get', 'create', 'comment', 'set_state'] as const
 
 // fs.* WS types (uniform namespace) the Git UI may send — diff panes read blobs
-// / images, and the workspace change event (git.changed) is gated on `fs`.
+// / images, the workspace change event (git.changed) is gated on `fs`, and the
+// embedded AIChatPane's pin/context reads and /open listing add the flat/glob
+// listings.
 const FS_METHODS = [
   'read_file',
   'write_file',
   'list_dir',
+  'list_files_flat',
+  'glob_files',
   'delete',
   'rename',
   'read_image',
   'list_archive',
   'convert_office',
 ] as const
+
+// search.* WS types (uniform namespace) — the embedded AIChatPane's context
+// search.
+const SEARCH_METHODS = ['find_in_files'] as const
 
 // Non-uniform WS types: the type string differs from `<ns>.<method>`. Settings
 // persistence (lib/settings.ts theme sync) remaps onto the ui namespace, and
@@ -113,6 +121,20 @@ const EXPLICIT: Record<string, CapabilityRef> = {
   'ui.reveal_path': { ns: 'ui', method: 'reveal_path' },
   'ui.open_workspace': { ns: 'ui', method: 'open_workspace' },
   'ui.pick_folder': { ns: 'ui', method: 'pick_folder' },
+  // shell → TerminalCapability (embedded AIChatPane slash commands / context)
+  'shell.run': { ns: 'terminal', method: 'run' },
+  // ai / ai.chat → ChatCapability (embedded AIChatPane engine + persistence;
+  // mirrors the mini-IDE shim's EXPLICIT block)
+  'ai.enhance_prompt': { ns: 'chat', method: 'enhance_prompt' },
+  'ai.web.search': { ns: 'chat', method: 'web_search' },
+  'ai.chat.start': { ns: 'chat', method: 'start' },
+  'ai.chat.stop': { ns: 'chat', method: 'stop' },
+  'ai.chat.settings.get': { ns: 'chat', method: 'settings_get' },
+  'ai.chat.settings.set': { ns: 'chat', method: 'settings_set' },
+  'ai.chat.notes.set': { ns: 'chat', method: 'notes_set' },
+  'ai.chat.notes.get': { ns: 'chat', method: 'notes_get' },
+  'ai.chat.threads.set': { ns: 'chat', method: 'threads_set' },
+  'ai.chat.threads.get': { ns: 'chat', method: 'threads_get' },
 }
 
 /**
@@ -128,6 +150,7 @@ export const TYPE_TO_CAP: Readonly<Record<string, CapabilityRef>> = {
   ...fromNs('git', GIT_METHODS),
   ...fromNs('fs', FS_METHODS),
   ...fromNs('issues', ISSUES_METHODS),
+  ...fromNs('search', SEARCH_METHODS),
   ...EXPLICIT,
 }
 

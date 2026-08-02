@@ -69,6 +69,21 @@ vi.mock('../../composables/useBackend', () => {
         ]
       }
     if (type === 'ui.pick_folder') return { ok: true, path: '/tmp/picked' }
+    if (type === 'issues.provider')
+      return { ok: true, provider: 'github', cli_available: true, authenticated: true }
+    if (type === 'issues.list')
+      return {
+        ok: true,
+        provider: 'github',
+        issues: [
+          {
+            number: 7, title: 'Sidebar parity', state: 'open', author: 'neillu',
+            labels: [], assignees: [], updated_at: '', url: 'https://example.com/issues/7'
+          }
+        ]
+      }
+    if (type === 'git.config_get')
+      return { ok: true, config: { 'user.name': 'neillu' }, allowed_keys: ['user.name', 'user.email'] }
     if (type === 'ui.settings.get') return { ok: true, settings: {} }
     return { ok: true }
   }
@@ -118,17 +133,6 @@ async function mountApp(): Promise<VueWrapper> {
   const wrapper = mount(GitWindowApp, { global: { stubs: STUBS } })
   await flushPromises()
   return wrapper
-}
-
-/** Open a row's "⋯" popover and click the item with the given label. */
-async function runMenu(wrapper: VueWrapper, rowText: string, itemLabel: string): Promise<void> {
-  const row = wrapper.findAll('.srow').find((r) => r.text().includes(rowText))
-  expect(row, rowText).toBeTruthy()
-  await row!.find('button.dots').trigger('click')
-  const item = wrapper.findAll('.menu-item').find((m) => m.text() === itemLabel)
-  expect(item, itemLabel).toBeTruthy()
-  await item!.trigger('click')
-  await flushPromises()
 }
 
 describe('GitWindowApp — Editorial Calm wiring', () => {
@@ -235,45 +239,93 @@ describe('GitWindowApp — Editorial Calm wiring', () => {
     expect(diff.attributes('filepath')).toBe('src/a.ts')
   })
 
-  it('switches branch only through the ⋯ menu, never on row click', async () => {
+  it('switches branch only via the explicit ↵ button, never on row click', async () => {
     wrapper = await mountApp()
-    const row = wrapper.findAll('.srow').find((r) => r.text().includes('feature-x'))
-    await row!.trigger('click')
+    const rows = wrapper.findAll('.branch-row')
+    const feature = rows.find((r) => r.text().includes('feature-x'))
+    await feature!.trigger('click')
     await flushPromises()
     expect(callsOf('git.switch_branch').length).toBe(0)
 
-    await runMenu(wrapper, 'feature-x', 'Switch to this branch')
+    await feature!.find('button[title="Switch"]').trigger('click')
+    await flushPromises()
     expect(callsOf('git.switch_branch')[0]!.payload).toMatchObject({ name: 'feature-x' })
 
-    // The current branch row offers no menu at all.
-    const current = wrapper.findAll('.srow').find((r) => r.classes().includes('cur'))
-    expect(current!.find('button.dots').exists()).toBe(false)
+    // The current branch row offers no action buttons at all.
+    const current = rows.find((r) => r.classes().includes('current'))
+    expect(current!.find('button[title="Switch"]').exists()).toBe(false)
   })
 
-  it('drives stash actions from the Stashes drawer menu', async () => {
+  it('deletes a branch from its right-click context menu (GitPane style)', async () => {
     wrapper = await mountApp()
-    const drawer = wrapper.findAll('.srow.drawer').find((r) => r.text().includes('Stashes'))
-    await drawer!.trigger('click')
-    await runMenu(wrapper, 'wip sidebar', 'Pop (apply and remove)')
+    const feature = wrapper.findAll('.branch-row').find((r) => r.text().includes('feature-x'))
+    await feature!.trigger('contextmenu')
+    const del = wrapper.findAll('.menu-item').find((m) => m.text().startsWith('Delete branch'))
+    expect(del).toBeTruthy()
+  })
+
+  it('drives stash actions from the Stashes card buttons', async () => {
+    wrapper = await mountApp()
+    const hdr = wrapper.findAll('.card-hdr').find((h) => h.text().includes('Stashes'))
+    await hdr!.trigger('click')
+    await flushPromises()
+    const row = wrapper.findAll('.generic-row').find((r) => r.text().includes('wip sidebar'))
+    await row!.find('button[title="Pop (apply & remove)"]').trigger('click')
+    await flushPromises()
     expect(callsOf('git.stash_pop').length).toBe(1)
   })
 
-  it('drives worktree lock and reveal from the Worktrees drawer menu', async () => {
+  it('drives worktree lock and reveal from the Worktrees card buttons', async () => {
     wrapper = await mountApp()
-    const drawer = wrapper.findAll('.srow.drawer').find((r) => r.text().includes('Worktrees'))
-    await drawer!.trigger('click')
-    await runMenu(wrapper, 'wt-feature', 'Lock')
+    const hdr = wrapper.findAll('.card-hdr').find((h) => h.text().includes('Worktrees'))
+    await hdr!.trigger('click')
+    await flushPromises()
+    const row = wrapper.findAll('.generic-row').find((r) => r.text().includes('wt-feature'))
+    await row!.find('button[title="Lock"]').trigger('click')
+    await flushPromises()
     expect(callsOf('git.lock_worktree')[0]!.payload).toMatchObject({ worktree_path: '/tmp/wt-feature' })
-    await runMenu(wrapper, 'wt-feature', 'Reveal in Finder')
+    await row!.find('button[title="Reveal in Finder"]').trigger('click')
+    await flushPromises()
     expect(callsOf('ui.reveal_path')[0]!.payload).toMatchObject({ path: '/tmp/wt-feature' })
   })
 
   it('opens the remote URL through the ui.open_external host capability', async () => {
     wrapper = await mountApp()
-    const drawer = wrapper.findAll('.srow.drawer').find((r) => r.text().includes('Remotes'))
-    await drawer!.trigger('click')
-    await runMenu(wrapper, 'origin', 'Open URL in browser')
+    const hdr = wrapper.findAll('.card-hdr').find((h) => h.text().includes('Remotes'))
+    await hdr!.trigger('click')
+    await flushPromises()
+    await wrapper.find('button[title="Open remote URL"]').trigger('click')
+    await flushPromises()
     expect(callsOf('ui.open_external')[0]!.payload).toMatchObject({ url: 'https://example.com/r.git' })
+  })
+
+  it('lazy-loads the Issues card on expand and lists issues (GitPane parity)', async () => {
+    wrapper = await mountApp()
+    expect(callsOf('issues.provider').length).toBe(0)
+    const hdr = wrapper.findAll('.card-hdr').find((h) => h.text().includes('Issues'))
+    await hdr!.trigger('click')
+    await flushPromises()
+    expect(callsOf('issues.provider').length).toBe(1)
+    expect(callsOf('issues.list').length).toBe(1)
+    const row = wrapper.findAll('.generic-row').find((r) => r.text().includes('#7'))
+    expect(row).toBeTruthy()
+  })
+
+  it('loads git config on Config card expand and edits a key inline', async () => {
+    wrapper = await mountApp()
+    // useGit auto-loads config once at mount; expanding the card reloads it.
+    const before = callsOf('git.config_get').length
+    const hdr = wrapper.findAll('.card-hdr').find((h) => h.text().includes('Config'))
+    await hdr!.trigger('click')
+    await flushPromises()
+    expect(callsOf('git.config_get').length).toBe(before + 1)
+    const row = wrapper.findAll('.config-row').find((r) => r.text().includes('user.name'))
+    await row!.find('.config-val').trigger('click')
+    await row!.find('input.config-inline-input').setValue('newname')
+    const save = row!.findAll('button').find((b) => b.text() === '✓')
+    await save!.trigger('click')
+    await flushPromises()
+    expect(callsOf('git.config_set')[0]!.payload).toMatchObject({ key: 'user.name', value: 'newname' })
   })
 
   it('opens the branch-diff view with a sensible base/compare preselection', async () => {

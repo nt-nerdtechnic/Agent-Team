@@ -301,7 +301,7 @@ describe('devPlansPluginDescriptor', () => {
     const desc = devPlansPluginDescriptor()
     expect(desc.id).toBe(PLANS_PLUGIN_ID)
     expect(desc.id).toBe('navide.plans')
-    expect(desc.requires).toEqual(['fs', 'ui', 'plans'])
+    expect(desc.requires).toEqual(['fs', 'ui', 'plans', 'chat', 'terminal', 'search', 'git'])
     // Built separately (vite.plans.config.ts) — never served by the dev server.
     expect(desc.devUrl).toBe('')
     expect(desc.entryFile.endsWith('dist-plugins/plans/index.html')).toBe(true)

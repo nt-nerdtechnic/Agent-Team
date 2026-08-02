@@ -18,8 +18,19 @@
 // the broker would deny at runtime.
 
 /** navide.git — git/fs power the working tree, `ui` the theme sync and the
- *  open-in-editor host capability, `issues` the embedded cloud issues panel. */
-export const GIT_PLUGIN_REQUIRES: readonly string[] = ['git', 'fs', 'ui', 'issues']
+ *  open-in-editor host capability, `issues` the embedded cloud issues panel.
+ *  chat/terminal/search power the embedded AIChatPane (right AI panel): the
+ *  chat engine calls plus the shell.run / find_in_files its slash commands and
+ *  context gathering send. */
+export const GIT_PLUGIN_REQUIRES: readonly string[] = [
+  'git',
+  'fs',
+  'ui',
+  'issues',
+  'chat',
+  'terminal',
+  'search',
+]
 
 /** navide.mini-ide — the widest surface: editor, terminal, search and chat. */
 export const MINI_IDE_PLUGIN_REQUIRES: readonly string[] = [
@@ -32,5 +43,16 @@ export const MINI_IDE_PLUGIN_REQUIRES: readonly string[] = [
   'issues',
 ]
 
-/** navide.plans — plan documents on disk plus the theme sync. */
-export const PLANS_PLUGIN_REQUIRES: readonly string[] = ['fs', 'ui', 'plans']
+/** navide.plans — plan documents on disk plus the theme sync.
+ *  chat/terminal/search/git power the embedded AIChatPane (right AI panel):
+ *  the chat engine calls plus the shell.run / find_in_files / git context and
+ *  commit actions its features send. */
+export const PLANS_PLUGIN_REQUIRES: readonly string[] = [
+  'fs',
+  'ui',
+  'plans',
+  'chat',
+  'terminal',
+  'search',
+  'git',
+]
