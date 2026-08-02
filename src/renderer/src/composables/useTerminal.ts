@@ -4,7 +4,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import '@xterm/xterm/css/xterm.css'
 import type { useBackend } from './useBackend'
-import { bufferTail, dropTuiNoise, isRedrawReplay, stripAnsi } from '../lib/buffer'
+import { bufferTail, createRedrawGuard, dropTuiNoise, stripAnsi } from '../lib/buffer'
 import { createResizeController, type ResizeController } from './useTerminalResize'
 import { installTerminalZoomShortcuts, terminalFontSize } from './useTerminalFontSize'
 import { getResumeConcurrency } from '../lib/resumeConcurrency'
@@ -1010,6 +1010,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     return runningLatched.value ? 'running' : 'idle'
   })
   const BUFFER_CAP = 128 * 1024
+  const redrawGuard = createRedrawGuard()
 
   function appendClean(chunk: string): void {
     // ANY byte counts as "process still alive" — spinners included. This feeds
@@ -1025,7 +1026,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // for a mere click/resize. Drop replays here — the raw-activity clock above
     // already marked the process alive, but a replay must not build a burst or
     // double the buffer. Genuinely new content isn't a replay and falls through.
-    if (isRedrawReplay(cleanBuffer.value, cleaned)) return
+    if (redrawGuard.isReplay(cleaned)) return
     // Badge burst tracking, driven by CLEANED content only. Output inside the
     // scroll grace window is a shifted-viewport repaint the replay check above
     // can't recognize — it must neither build a burst nor drop/raise the
@@ -1053,6 +1054,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     cleanBytesSeen.value += cleaned.length
     const next = cleanBuffer.value + cleaned
     cleanBuffer.value = bufferTail(next, BUFFER_CAP)
+    redrawGuard.accept(cleaned)
     // Skip the activity timestamp if this chunk arrived inside the focus
     // grace window — those bytes are very likely a focus-triggered TUI
     // redraw, not real agent output. Buffer content is still kept so any
@@ -1078,6 +1080,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
    *  the noise-filter rules change (HMR) or a watcher arms on an old pane. */
   function recleanBuffer(): void {
     cleanBuffer.value = dropTuiNoise(cleanBuffer.value)
+    redrawGuard.reset(cleanBuffer.value)
   }
 
   /** Tail of the RENDERED scrollback — the text the user sees on screen. The
@@ -1196,6 +1199,14 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // while the menu is open. Any other printable key / Backspace dismisses the
     // menu and is re-sent to the PTY so typing continues uninterrupted.
     const onDocKeydown = (e: KeyboardEvent): void => {
+      // IME guard, same contract as the xterm handler below: while a
+      // composition is live, e.key is a raw pre-edit keystroke ('ㄒ', 'j',
+      // Enter to pick a candidate), NOT committed text. Forwarding it to the
+      // PTY here both mangled the input and stole the Enter/Backspace the IME
+      // needed, so composing in a pane with the mention menu open produced
+      // garbage. Let the browser drive the composition; the committed text
+      // arrives through term.onData like any other input.
+      if (e.isComposing || e.keyCode === 229) return
       if (e.key === 'ArrowDown') {
         e.preventDefault(); e.stopPropagation()
         if (selectedIdx < candidates.length - 1) { selectedIdx++; renderSelection() }

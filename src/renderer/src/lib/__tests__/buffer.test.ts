@@ -8,7 +8,7 @@ import {
   findConsecutiveQuestionBlocks,
   findSentinel,
   bufferTail,
-  isRedrawReplay
+  createRedrawGuard
 } from '../buffer'
 
 describe('stripAnsi', () => {
@@ -266,39 +266,76 @@ describe('bufferTail', () => {
   })
 })
 
-describe('isRedrawReplay', () => {
+describe('createRedrawGuard', () => {
   // A screenful of prose already on screen; a click/resize repaints it verbatim.
   const screen =
     'Analyzing the request and planning the change across several files.\n' +
     'First I will read the terminal composable, then wire the new helper.\n' +
     'Running the test suite to confirm nothing regressed after the edit.'
 
+  const seeded = (): ReturnType<typeof createRedrawGuard> => {
+    const g = createRedrawGuard()
+    g.accept(screen)
+    return g
+  }
+
   it('flags a verbatim repaint of on-screen content', () => {
-    expect(isRedrawReplay(screen, screen)).toBe(true)
+    expect(seeded().isReplay(screen)).toBe(true)
   })
 
   it('flags a repaint after reflow (newlines moved, characters unchanged)', () => {
     // A resize rewraps the same characters onto different line boundaries.
     const reflowed = screen.replace(/\n/g, ' ').replace(/ /g, '\n')
-    expect(isRedrawReplay(screen, reflowed)).toBe(true)
+    expect(seeded().isReplay(reflowed)).toBe(true)
   })
 
   it('flags a repaint of just the visible tail (scrolled viewport)', () => {
-    expect(isRedrawReplay(screen, screen.slice(-90))).toBe(true)
+    expect(seeded().isReplay(screen.slice(-90))).toBe(true)
   })
 
   it('does not flag genuinely new output', () => {
-    expect(isRedrawReplay(screen, 'Here is a completely different fresh line of agent output now.')).toBe(false)
+    expect(seeded().isReplay('Here is a completely different fresh line of agent output now.')).toBe(false)
   })
 
   it('does not flag output that only partly overlaps then adds new content', () => {
     // Tail of the screen replayed, then real new work appended → not a pure replay.
     const mixed = screen.slice(-90) + ' and now writing brand new content that was never shown before.'
-    expect(isRedrawReplay(screen, mixed)).toBe(false)
+    expect(seeded().isReplay(mixed)).toBe(false)
   })
 
   it('ignores short chunks that could collide by coincidence', () => {
     // < REDRAW_MIN_CHARS of non-whitespace, even though it is a substring.
-    expect(isRedrawReplay(screen, 'Analyzing')).toBe(false)
+    expect(seeded().isReplay('Analyzing')).toBe(false)
+  })
+
+  it('matches content spread across several accepted chunks', () => {
+    // The window is built incrementally, so a repaint may straddle the
+    // boundaries of the chunks that originally delivered it.
+    const g = createRedrawGuard()
+    for (const line of screen.split('\n')) g.accept(line + '\n')
+    expect(g.isReplay(screen)).toBe(true)
+  })
+
+  it('forgets content that scrolled out of the window', () => {
+    const g = createRedrawGuard(1024)
+    g.accept(screen)
+    g.accept('z'.repeat(4096))
+    expect(g.isReplay(screen)).toBe(false)
+  })
+
+  it('keeps at least one window worth of history', () => {
+    const g = createRedrawGuard(1024)
+    g.accept('a'.repeat(600))
+    g.accept(screen)
+    // The screen still fits inside the window, so it must still be recognized.
+    expect(g.isReplay(screen)).toBe(true)
+  })
+
+  it('reset rebuilds the window from the given text', () => {
+    const g = createRedrawGuard()
+    g.accept('some earlier output that will be discarded by the reset below.')
+    g.reset(screen)
+    expect(g.isReplay(screen)).toBe(true)
+    expect(g.isReplay('some earlier output that will be discarded by the reset below.')).toBe(false)
   })
 })

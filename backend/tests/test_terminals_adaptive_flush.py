@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_team_backend.terminals import (
-    _FAST_PATH_MAX_CHUNKS,
+    _FAST_PATH_MAX_BYTES,
     _FAST_PATH_WINDOW_S,
     _OUTPUT_BATCH_MS,
     _READ_CHUNK_BYTES,
@@ -79,7 +79,7 @@ async def test_sustained_stream_falls_back_to_batching_end_to_end():
     exercising the real production path with NO manual timer surgery.
 
     Intra-burst, chunks 2..N hit the `session.id in self._out_handles` guard
-    and only accumulate timestamps — they do not re-evaluate the delay. So
+    and only accumulate window entries — they do not re-evaluate the delay. So
     batching can only take effect on the flush cycle *after* the window fills.
     This test lets the real delay-0 timer fire, then checks the following
     chunk is batched — the behaviour the old, cancel-happy version masked.
@@ -92,18 +92,26 @@ async def test_sustained_stream_falls_back_to_batching_end_to_end():
     svc = TerminalService(collect)
     r, w = os.pipe()
     _nonblocking(r)
+    _nonblocking(w)
     session = _make_session("t-stream", r)
     svc._sessions["t-stream"] = session
     try:
         # Burst: first chunk schedules a delay-0 flush; the rest are swallowed
-        # by the pending-timer guard and just record arrival times.
-        for _ in range(_FAST_PATH_MAX_CHUNKS):
-            os.write(w, b"y")
+        # by the pending-timer guard and just record bytes. Written in
+        # pipe-sized slices and drained each time, so the whole burst lands
+        # inside one fast-path window.
+        slice_bytes = 32 * 1024
+        pushed = 0
+        while pushed <= _FAST_PATH_MAX_BYTES:
+            written = os.write(w, b"y" * slice_bytes)
+            if written < slice_bytes:
+                pytest.skip(f"pipe capacity {written}B too small to model a stream")
             svc._on_readable(session)
+            pushed += written
         # Exactly one pending flush, and it is the interactive fast path.
         assert _pending_delay(svc, "t-stream") < _OUTPUT_BATCH_MS / 1000 / 2
 
-        # Let the fast flush fire. The window is now full of recent timestamps.
+        # Let the fast flush fire. The window is now full of recent bytes.
         await asyncio.sleep(0.01)
 
         # The next chunk re-evaluates _flush_delay and now sees a saturated
@@ -122,6 +130,30 @@ async def test_sustained_stream_falls_back_to_batching_end_to_end():
 
 
 @pytest.mark.asyncio
+async def test_many_tiny_chunks_stay_on_the_fast_path():
+    """The gate is throughput, not wakeup count. A CLI that wakes the reader
+    dozens of times for a spinner or a split repaint moves almost no data —
+    under the old chunk-count gate that alone forced the typist onto the 50ms
+    batch path, which is the residual 'laggy while the CLI is running' case."""
+    svc = TerminalService(_emit)
+    r, w = os.pipe()
+    _nonblocking(r)
+    session = _make_session("t-tiny", r)
+    svc._sessions["t-tiny"] = session
+    try:
+        for _ in range(50):
+            os.write(w, b"|")
+            svc._on_readable(session)
+            _cancel_pending_flush(svc, "t-tiny")  # force a delay re-evaluation
+        assert svc._window_bytes("t-tiny") == 50
+        assert svc._flush_delay("t-tiny") == 0.0
+    finally:
+        _cancel_pending_flush(svc, "t-tiny")
+        os.close(r)
+        os.close(w)
+
+
+@pytest.mark.asyncio
 async def test_one_viewport_repaint_stays_on_the_fast_path():
     """A full-screen CLI rewrites its whole viewport on every keystroke — tens
     of KB at once. Read 4 KB at a time that became enough chunks to saturate
@@ -135,15 +167,17 @@ async def test_one_viewport_repaint_stays_on_the_fast_path():
     svc._sessions["t-repaint"] = session
     try:
         written = os.write(w, b"x" * (_READ_CHUNK_BYTES // 2))
-        if written <= _FAST_PATH_MAX_CHUNKS * 4096:
+        if written <= 5 * 4096:
             pytest.skip(f"pipe capacity {written}B too small to model a repaint")
         # The loop's reader callback is level-triggered: it keeps firing until
         # the fd is drained, which is what turned one repaint into many chunks.
-        for _ in range(_FAST_PATH_MAX_CHUNKS + 2):
+        for _ in range(7):
             svc._on_readable(session)
 
-        # One repaint = one chunk, so the next flush stays interactive.
-        assert len(svc._chunk_times["t-repaint"]) == 1
+        # One repaint = one chunk, and one repaint is well under the byte
+        # envelope, so the next flush stays interactive.
+        assert len(svc._recent_chunks["t-repaint"]) == 1
+        assert svc._window_bytes("t-repaint") <= _FAST_PATH_MAX_BYTES
         assert svc._flush_delay("t-repaint") == 0.0
         assert _pending_delay(svc, "t-repaint") < _OUTPUT_BATCH_MS / 1000 / 2
     finally:
@@ -159,14 +193,10 @@ async def test_quiet_period_restores_fast_path():
     from collections import deque
 
     stale = now - _FAST_PATH_WINDOW_S * 10
-    svc._chunk_times["t-idle"] = deque(
-        [stale] * _FAST_PATH_MAX_CHUNKS, maxlen=_FAST_PATH_MAX_CHUNKS
-    )
+    svc._recent_chunks["t-idle"] = deque([(stale, _FAST_PATH_MAX_BYTES * 2)])
     assert svc._flush_delay("t-idle") == 0.0
     # And a saturated recent window batches.
-    svc._chunk_times["t-busy"] = deque(
-        [now] * _FAST_PATH_MAX_CHUNKS, maxlen=_FAST_PATH_MAX_CHUNKS
-    )
+    svc._recent_chunks["t-busy"] = deque([(now, _FAST_PATH_MAX_BYTES + 1)])
     assert svc._flush_delay("t-busy") == _OUTPUT_BATCH_MS / 1000
 
 

@@ -325,9 +325,53 @@ export function bufferTail(text: string, maxBytes: number = 64 * 1024): string {
 const REDRAW_MIN_CHARS = 40
 const REDRAW_TAIL_WINDOW = 64 * 1024
 
-export function isRedrawReplay(existingTail: string, incoming: string): boolean {
-  const inc = incoming.replace(/\s+/g, '')
-  if (inc.length < REDRAW_MIN_CHARS) return false
-  const tail = bufferTail(existingTail, REDRAW_TAIL_WINDOW).replace(/\s+/g, '')
-  return tail.includes(inc)
+export interface RedrawGuard {
+  /** True if `cleaned` is content already in the window (a repaint). */
+  isReplay(cleaned: string): boolean
+  /** Record a chunk the caller kept, extending the comparison window. */
+  accept(cleaned: string): void
+  /** Rebuild the window from scratch (buffer rewritten out of band). */
+  reset(seed?: string): void
+}
+
+/** Stateful replay detector. The window is normalized incrementally: the
+ *  previous implementation re-normalized the whole 64KB tail on EVERY chunk,
+ *  so a streaming CLI paid a full-window regex sweep per PTY wakeup on the
+ *  renderer's main thread — which is exactly when the user is trying to type.
+ *  Now each chunk is normalized once, when it is accepted. */
+export function createRedrawGuard(windowChars: number = REDRAW_TAIL_WINDOW): RedrawGuard {
+  let tail = ''
+  // Raw (pre-normalization) length of each accepted chunk, so the window still
+  // spans roughly windowChars of ORIGINAL text the way bufferTail used to.
+  // Whole chunks are dropped, so the span is >= windowChars, never less.
+  const segs: { raw: number; norm: number }[] = []
+  let rawTotal = 0
+
+  function accept(cleaned: string): void {
+    if (!cleaned) return
+    const norm = cleaned.replace(/\s+/g, '')
+    segs.push({ raw: cleaned.length, norm: norm.length })
+    rawTotal += cleaned.length
+    tail += norm
+    while (segs.length > 1 && rawTotal - segs[0].raw >= windowChars) {
+      const drop = segs.shift()!
+      rawTotal -= drop.raw
+      tail = tail.slice(drop.norm)
+    }
+  }
+
+  return {
+    isReplay(cleaned: string): boolean {
+      const inc = cleaned.replace(/\s+/g, '')
+      if (inc.length < REDRAW_MIN_CHARS) return false
+      return tail.includes(inc)
+    },
+    accept,
+    reset(seed = ''): void {
+      segs.length = 0
+      tail = ''
+      rawTotal = 0
+      accept(seed)
+    }
+  }
 }

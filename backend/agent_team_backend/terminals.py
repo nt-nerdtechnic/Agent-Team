@@ -170,15 +170,24 @@ _OUTPUT_BATCH_MS = 50
 # stream" if a chunk is big enough to represent real throughput.
 _READ_CHUNK_BYTES = 64 * 1024
 
-# Interactive fast path: keystroke echo is a handful of chunks per second,
-# and delaying it the full batch window makes typing feel laggy (worst for IME
-# input, where the wait lands on the commit).  When a session produced fewer
-# than _FAST_PATH_MAX_CHUNKS PTY chunks within _FAST_PATH_WINDOW_S, flush on
-# the next loop tick instead.  Sustained streams exceed the threshold within a
-# few chunks and fall back to _OUTPUT_BATCH_MS batching, so the flood
-# protection above still holds.
+# Interactive fast path: keystroke echo is a trickle of bytes, and delaying it
+# the full batch window makes typing feel laggy (worst for IME input, where the
+# wait lands on the commit).  When a session produced less than
+# _FAST_PATH_MAX_BYTES within _FAST_PATH_WINDOW_S, flush on the next loop tick
+# instead.  Sustained streams exceed the threshold and fall back to
+# _OUTPUT_BATCH_MS batching, so the flood protection above still holds.
+#
+# The gate is BYTES, not chunk count.  Counting chunks conflated "many small
+# reads" with "high throughput": a CLI that wakes the reader often — repainting
+# a spinner, or splitting one repaint across reads — looked like a stream and
+# pushed the typist onto the 50ms path even though the actual data rate was
+# trivial.  _READ_CHUNK_BYTES above already made one repaint one chunk for the
+# well-behaved CLIs; the byte gate covers the ones it didn't.
+# 192KB/0.1s ~= 1.9MB/s: an order of magnitude above per-keystroke repaint
+# traffic (tens of KB per key, even while a CLI redraws its footer), well
+# below what a real output flood sustains.
 _FAST_PATH_WINDOW_S = 0.1
-_FAST_PATH_MAX_CHUNKS = 5
+_FAST_PATH_MAX_BYTES = 192 * 1024
 
 
 def _ps_snapshot() -> dict[int, tuple[int, int, str]]:
@@ -293,9 +302,11 @@ class TerminalService:
         # each chunk independently turns the halves into U+FFFD, which desyncs
         # the CLI's cursor math from what xterm renders (layout corruption).
         self._decoders: dict[str, codecs.IncrementalDecoder] = {}
-        # Per-session arrival times of recent PTY chunks (monotonic loop time),
+        # Per-session (monotonic loop time, byte count) of recent PTY chunks,
         # used to pick the interactive fast path vs. batched flush delay.
-        self._chunk_times: dict[str, deque[float]] = {}
+        # maxlen only bounds memory against pathological tiny reads; the
+        # window itself is trimmed by time in _window_bytes.
+        self._recent_chunks: dict[str, deque[tuple[float, int]]] = {}
         # Temporary Phase B probe (plan residual-cli-latency-fix-plan_4b8e2f):
         # per-session rolling counters for fast-path saturation reporting.
         # Remove with _note_fastpath_stats once the measurement round is done.
@@ -964,11 +975,10 @@ class TerminalService:
             return  # chunk ended mid-character; bytes held until the rest arrives
         buf = self._out_buffers.setdefault(session.id, [])
         buf.append(decoded)
-        times = self._chunk_times.setdefault(
-            session.id, deque(maxlen=_FAST_PATH_MAX_CHUNKS)
-        )
-        times.append(self._loop.time())
-        self._note_fastpath_stats(session, len(chunk), times[-1])
+        window = self._recent_chunks.setdefault(session.id, deque(maxlen=512))
+        now = self._loop.time()
+        window.append((now, len(chunk)))
+        self._note_fastpath_stats(session, len(chunk), now)
         buf_size = sum(len(s) for s in buf)
         if buf_size >= _BUF_CAP:
             # Cancel the pending debounce timer and flush now to avoid OOM.
@@ -990,20 +1000,15 @@ class TerminalService:
         """Temporary Phase B probe (plan residual-cli-latency-fix-plan_4b8e2f):
         once per ~5s per session, report how many PTY chunks arrived with the
         fast-path window already saturated (i.e. would be flushed on the 50ms
-        batch delay), so laggy CLIs can be checked against the 64KB/5-chunk
-        envelope. Silent while nothing saturates. Remove after measurement."""
+        batch delay), so laggy CLIs can be checked against the byte envelope.
+        Silent while nothing saturates. Remove after measurement."""
         st = self._fastpath_stats.setdefault(
             session.id, {"t0": now, "chunks": 0, "bytes": 0, "max": 0, "batched": 0}
         )
         st["chunks"] += 1
         st["bytes"] += nbytes
         st["max"] = max(st["max"], nbytes)
-        times = self._chunk_times.get(session.id)
-        if (
-            times is not None
-            and len(times) == _FAST_PATH_MAX_CHUNKS
-            and now - times[0] <= _FAST_PATH_WINDOW_S
-        ):
+        if self._window_bytes(session.id) > _FAST_PATH_MAX_BYTES:
             st["batched"] += 1
         if now - st["t0"] >= 5.0:
             if st["batched"]:
@@ -1015,15 +1020,23 @@ class TerminalService:
                 )
             self._fastpath_stats.pop(session.id, None)
 
+    def _window_bytes(self, session_id: str) -> int:
+        """Bytes read from this PTY within the last _FAST_PATH_WINDOW_S,
+        dropping entries that fell out of the window."""
+        window = self._recent_chunks.get(session_id)
+        if not window:
+            return 0
+        cutoff = self._loop.time() - _FAST_PATH_WINDOW_S
+        while window and window[0][0] < cutoff:
+            window.popleft()
+        return sum(nbytes for _, nbytes in window)
+
     def _flush_delay(self, session_id: str) -> float:
-        """Batch delay for the next flush: 0 (next loop tick) while the chunk
+        """Batch delay for the next flush: 0 (next loop tick) while the output
         rate looks interactive, _OUTPUT_BATCH_MS once it looks like a stream."""
-        times = self._chunk_times.get(session_id)
-        if times is None or len(times) < _FAST_PATH_MAX_CHUNKS:
-            return 0.0
-        if self._loop.time() - times[0] > _FAST_PATH_WINDOW_S:
-            return 0.0
-        return _OUTPUT_BATCH_MS / 1000
+        if self._window_bytes(session_id) > _FAST_PATH_MAX_BYTES:
+            return _OUTPUT_BATCH_MS / 1000
+        return 0.0
 
     def _flush_output(self, session: TerminalSession) -> None:
         """Send all buffered output for this session as a single WS message.
@@ -1118,7 +1131,7 @@ class TerminalService:
         # fd is closed (remove_writer needs a still-valid fd).
         self._unwatch_writable(session)
         self._in_buffers.pop(session.id, None)
-        self._chunk_times.pop(session.id, None)
+        self._recent_chunks.pop(session.id, None)
         self._fastpath_stats.pop(session.id, None)
         try:
             os.close(session.master_fd)
