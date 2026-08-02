@@ -9,7 +9,7 @@ Navide is **local-first**, not universally offline. Its Electron application, Py
 Depending on enabled features, Navide stores:
 
 - Private per-user project intelligence and run artifacts under `<workspace>/.agent-team/`
-- Roles, pipelines, recent workspaces, UI settings, analyzer settings, and AI Chat settings in the application data directory
+- Roles, pipelines, recent workspaces, UI settings, analyzer settings, and AI provider settings in the application data directory
 - Token-attribution and deduplication metadata derived from local CLI logs
 - Optional AI provider API keys in a local settings file protected with restrictive file permissions (`0600` on supported systems)
 
@@ -28,7 +28,7 @@ A future portability feature should use explicit local export/import with redact
 | Feature | Possible recipient | Data involved |
 |---|---|---|
 | Coding-agent CLI | The CLI vendor or configured model provider | Prompts, selected context, tool results, and provider-defined telemetry |
-| Cloud AI Chat | Anthropic, OpenAI, Google, Groq, DeepSeek, Mistral, xAI, or a custom endpoint | Chat messages, attached context, and model parameters |
+| Cloud AI (inline editing and code review) | Anthropic, OpenAI, Google, Groq, DeepSeek, Mistral, xAI, or a custom endpoint | Selected code, prompts, and model parameters |
 | Context7 injection | Context7 and its MCP distribution/runtime dependencies | Detected library names and documentation queries |
 | Web search | Search provider | Search query text |
 | Git operations | Configured Git host | Repository data and credentials handled by Git or the host flow |
@@ -39,7 +39,7 @@ Read each provider's policy before sending private code or regulated data.
 
 ## Credentials
 
-Agent CLI credentials remain in each CLI's own configuration. If you enter cloud AI keys in Navide, Navide stores them locally so AI Chat can use them. Settings export redacts API keys and tokens.
+Agent CLI credentials remain in each CLI's own configuration. If you enter cloud AI keys in Navide, Navide stores them locally so AI features (inline editing, code review) can use them. Settings export redacts API keys and tokens.
 
 Local file permissions reduce accidental access by other users on the same machine but do not protect against malware, a compromised user account, unrestricted agents, backups, or processes with equivalent permissions.
 

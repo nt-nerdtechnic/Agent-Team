@@ -140,8 +140,8 @@ const fileList = computed(() => {
 })
 
 // Lazy-render a ```mermaid fence. The mermaid lib is dynamically imported so it
-// never loads unless a plan actually contains a diagram (editor-window startup
-// deliberately avoids the static mermaid import in AIChatPane).
+// never loads unless a plan actually contains a diagram (keeps mermaid out of
+// the editor-window startup bundle).
 const MermaidBlock = defineComponent({
   props: { code: { type: String, default: '' } },
   setup(props) {

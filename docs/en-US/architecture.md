@@ -70,7 +70,7 @@ The renderer owns interactive application state and workflow presentation:
 - Pipeline state machine and stage activation
 - Manager/worker protocol parsing and routing
 - Settings, roles, pipelines, MCP, and analyzer controls
-- Explorer, Monaco editor, Git, issues, review, AI Chat, history, and token views
+- Explorer, Monaco editor, Git, issues, review, AI terminal, history, and token views
 
 Renderer composables communicate with the backend through correlated WebSocket requests and broadcast events. Terminal display state is distinct from the underlying PTY state.
 
@@ -147,7 +147,7 @@ Source code, tests, configuration, and explicitly authored project documents rem
 
 ### Application-scoped
 
-The application data directory contains registries and preferences such as roles, pipeline definitions, recent workspaces, analyzer settings, token attribution metadata, and optional AI Chat credentials.
+The application data directory contains registries and preferences such as roles, pipeline definitions, recent workspaces, analyzer settings, token attribution metadata, and optional AI provider credentials.
 
 ### Provider-owned
 

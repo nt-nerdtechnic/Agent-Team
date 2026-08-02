@@ -91,9 +91,9 @@ Git View は Repository Discovery、Working Tree Inspection、Staging、Commit�
 
 特に Automatic または Parallel Run の後は、Commit 前に変更を確認してください。Agent-generated Change が Git Panel に表示されたというだけで、安全になるわけではありません。
 
-## Editor と AI Chat
+## Editor と AI Terminal
 
-Editor は Monaco を使用し、File Editing、Diagnostics、Plan Rendering、Diff、Conflict、AI-assisted Workflow を提供します。AI Chat は Local Model または設定された Cloud Provider を利用できます。Provider-specific API Key と Model Setting は任意で、入力するとローカル保存されます。
+Editor は Monaco を使用し、File Editing、Diagnostics、Plan Rendering、Diff、Conflict、AI-assisted Workflow を提供します。右側の AI パネルは実際の Coding Agent CLI Terminal（メインウィンドウと同じ Agent）を組み込み、起動時に Editor の Context を注入します。
 
 これらの Tool は、より広い Engineering Environment における Intervention Surface です。Navide は最終的に、従来の IDE を主要環境として必要としない完全な Professional Workflow を提供することを目指します。
 

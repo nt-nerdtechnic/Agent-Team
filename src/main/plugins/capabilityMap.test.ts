@@ -14,16 +14,10 @@ const EXPECTED_EXPLICIT: Readonly<Record<string, string>> = {
   'terminal.create_cancel': 'terminal.create.cancel',
   'chat.editor_rewrite': 'editor.rewrite',
   'chat.editor_complete': 'editor.complete',
-  'chat.enhance_prompt': 'ai.enhance_prompt',
-  'chat.web_search': 'ai.web.search',
-  'chat.start': 'ai.chat.start',
-  'chat.stop': 'ai.chat.stop',
+  // Retired AIChatPane surface trimmed to the settings store ReviewPane still
+  // reads for its analyzer credentials.
   'chat.settings_get': 'ai.chat.settings.get',
   'chat.settings_set': 'ai.chat.settings.set',
-  'chat.notes_set': 'ai.chat.notes.set',
-  'chat.notes_get': 'ai.chat.notes.get',
-  'chat.threads_set': 'ai.chat.threads.set',
-  'chat.threads_get': 'ai.chat.threads.get',
   // Branch-Diff AI code review — request side of the chat-gated ai.review.*
   // result events already forwarded via CAP_EVENTS.
   'chat.review_start': 'ai.review.start',
@@ -52,13 +46,22 @@ describe('resolveWsType', () => {
   it('inverts the shim non-uniform remaps back to their backend WS types', () => {
     expect(resolveWsType('terminal', 'run')).toBe('shell.run')
     expect(resolveWsType('chat', 'editor_complete')).toBe('editor.complete')
-    expect(resolveWsType('chat', 'start')).toBe('ai.chat.start')
     expect(resolveWsType('chat', 'settings_get')).toBe('ai.chat.settings.get')
-    expect(resolveWsType('chat', 'web_search')).toBe('ai.web.search')
     expect(resolveWsType('ui', 'settings_set')).toBe('ui.settings.set')
     expect(resolveWsType('chat', 'review_start')).toBe('ai.review.start')
     expect(resolveWsType('chat', 'review_stop')).toBe('ai.review.stop')
     expect(resolveWsType('chat', 'analyzer_models')).toBe('analyzer.models')
+  })
+
+  it('no longer maps the retired AIChatPane chat surface (settings excepted)', () => {
+    expect(resolveWsType('chat', 'start')).toBeNull()
+    expect(resolveWsType('chat', 'stop')).toBeNull()
+    expect(resolveWsType('chat', 'notes_get')).toBeNull()
+    expect(resolveWsType('chat', 'notes_set')).toBeNull()
+    expect(resolveWsType('chat', 'threads_get')).toBeNull()
+    expect(resolveWsType('chat', 'threads_set')).toBeNull()
+    expect(resolveWsType('chat', 'enhance_prompt')).toBeNull()
+    expect(resolveWsType('chat', 'web_search')).toBeNull()
   })
 
   it('maps the interactive PTY surface (AiCliDock/useTerminal) one-for-one', () => {
@@ -127,13 +130,19 @@ describe('eventNamespace', () => {
     expect(CAP_EVENTS['git.changed']).toBe('fs')
   })
 
-  it('forwards the settings, chat-stream and review events under their ns', () => {
+  it('forwards the settings and review events under their ns', () => {
     expect(eventNamespace('ui.settings_changed')).toBe('ui')
-    expect(eventNamespace('ai.chat.chunk')).toBe('chat')
-    expect(eventNamespace('ai.chat.done')).toBe('chat')
-    expect(eventNamespace('ai.chat.error')).toBe('chat')
     expect(eventNamespace('ai.review.result')).toBe('chat')
+    expect(eventNamespace('ai.review.end')).toBe('chat')
     expect(eventNamespace('ai.review.error')).toBe('chat')
+  })
+
+  it('no longer forwards the retired AIChatPane chat-stream events', () => {
+    expect(eventNamespace('ai.chat.chunk')).toBeNull()
+    expect(eventNamespace('ai.chat.tool_call')).toBeNull()
+    expect(eventNamespace('ai.chat.tool_result')).toBeNull()
+    expect(eventNamespace('ai.chat.done')).toBeNull()
+    expect(eventNamespace('ai.chat.error')).toBeNull()
   })
 
   it('forwards the git askpass round-trip events under the git namespace', () => {

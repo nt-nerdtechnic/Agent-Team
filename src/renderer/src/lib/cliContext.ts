@@ -9,10 +9,6 @@ export const CLI_CONTEXT_MIME = 'application/x-cli-context'
 /** MIME type carrying a bare pane id. Set (as an inline literal) by pane
  *  reorder drag sources: TerminalPane's header and ControlPane's agent list. */
 export const PANE_ID_MIME = 'application/x-pane-id'
-/** sourceId prefix marking a chip as a CLI-pane snapshot (enables refresh). */
-export const CLI_SOURCE_PREFIX = 'cli-pane:'
-/** Tail cap applied to the pane buffer before wrapping it into a chip. */
-export const CLI_CHIP_BUFFER_CAP = 32 * 1024
 /** Tail cap applied to the pane buffer before pasting it into another pane's
  *  input prompt. Much smaller than the chip cap: a 128KB blob is unusable as
  *  CLI prompt input. */
@@ -96,7 +92,7 @@ export function parseCliContextPayload(raw: string): CliContextPayload | null {
  *  - cliRaw absent but paneIdRaw present → minimal synthesized payload (the
  *    pane-buffer IPC reply fills in label/sessionId)
  *  - neither → null (not a CLI-pane drop) */
-export function resolveCliDropPayload(
+function resolveCliDropPayload(
   cliRaw: string,
   paneIdRaw: string
 ): CliContextPayload | 'malformed' | null {
@@ -223,55 +219,6 @@ export function screenToClientPoint(
   return {
     x: point.screenX - viewportOrigin.screenX,
     y: point.screenY - viewportOrigin.screenY
-  }
-}
-
-export type CliContextChipResult =
-  | { kind: 'chip'; label: string; content: string; sourceId: string }
-  | { kind: 'empty' }
-  | { kind: 'error'; error: string }
-
-/** Build the context-chip fields from the drag payload and the pane-buffer
- *  reply. Pure (timestamp injected) so it is unit-testable without AIChatPane.
- *  - reply carries an error → passthrough (caller surfaces it, no chip)
- *  - empty/whitespace buffer → 'empty' (no chip)
- *  - otherwise → chip with a header line + tail-truncated fenced buffer */
-export function buildCliContextChip(
-  payload: CliContextPayload,
-  reply: {
-    label?: string
-    agentKey?: string
-    sessionId?: string | null
-    sessionHomeId?: string
-    workspacePath?: string
-    conversationLogPath?: string
-    buffer?: string
-    error?: string
-  },
-  capturedAt: number = Date.now()
-): CliContextChipResult {
-  if (reply.error) return { kind: 'error', error: reply.error }
-  const buffer = reply.buffer ?? ''
-  const context: CliSessionContext = {
-    paneId: payload.paneId,
-    agentKey: reply.agentKey || payload.agentKey,
-    label: reply.label || payload.label,
-    sessionId: reply.sessionId || payload.sessionId || null,
-    sessionHomeId: reply.sessionHomeId || payload.sessionHomeId,
-    workspacePath: reply.workspacePath || payload.workspacePath,
-    conversationLogPath: reply.conversationLogPath || payload.conversationLogPath
-  }
-  if (!buffer.trim() && !context.conversationLogPath && !context.sessionId) return { kind: 'empty' }
-  const name = reply.label || payload.label || payload.agentKey || 'pane'
-  const reference = buildCliSessionReference(context)
-  const header = `// CLI session context — captured: ${new Date(capturedAt).toISOString()}`
-  const tail = bufferTail(buffer, CLI_CHIP_BUFFER_CAP)
-  const excerpt = tail ? `\n// Recent terminal excerpt\n\`\`\`\n${tail}\n\`\`\`` : ''
-  return {
-    kind: 'chip',
-    label: `@cli:${name}`,
-    content: `${header}\n${reference}${excerpt}`,
-    sourceId: `${CLI_SOURCE_PREFIX}${payload.paneId}`
   }
 }
 

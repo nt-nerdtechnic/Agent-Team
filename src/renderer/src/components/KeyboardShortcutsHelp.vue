@@ -50,34 +50,6 @@ const blocks: Block[] = [
     ],
   },
   {
-    titleKey: 'settings.shortcuts.section.ai',
-    noteKey: 'settings.shortcuts.note.ai',
-    rows: [
-      { keys: '⌘ J / ⌘ ⇧ A / ⌃ `', desc: '開關 AI 對話', ctx: ['global'] },
-      { keys: '⌘ ⇧ N', desc: '新對話串' },
-      { keys: '⌘ ⇧ T', desc: '開關對話串面板' },
-      { keys: '⌘ R / ⌘ ⇧ H', desc: '歷史面板（palette）；原生 ⌘R 重載會先觸發', ctx: ['native'] },
-      { keys: '⌘ ⇧ S', desc: '存 checkpoint' },
-      { keys: '⌘ ⇧ M', desc: '複製對話串為 Markdown' },
-      { keys: '⌥ [ / ⌥ ]', desc: '跳上 / 下一則 AI 回覆' },
-      { keys: '⌥ E / ⌥ R / ⌥ N / ⌥ C', desc: '對 hover 的程式碼區塊：解釋 / 重構 / 新對話 / 比較' },
-    ],
-  },
-  {
-    titleKey: 'settings.shortcuts.section.aiInput',
-    noteKey: 'settings.shortcuts.note.aiInput',
-    rows: [
-      { keys: 'Enter / ⌘ Enter', desc: '送出（依 ctrl-enter 設定）；空輸入 + ⌘Enter = 重新生成' },
-      { keys: '↑ / ↓', desc: '游標在開頭時 → prompt 歷史；選單開啟時 → 移動選項' },
-      { keys: '⌘ /', desc: '循環切換模型' },
-      { keys: '⌘ ⇧ P', desc: '聚焦輸入並開 slash 命令面板' },
-      { keys: '⌘ ⇧ A / ⌘ ⇧ W', desc: '加當前檔為 @context / 加入 Edit 工作集' },
-      { keys: '⌘ ⇧ K', desc: '清空對話' },
-      { keys: 'Esc', desc: '串流中 → 停止；否則關預覽 / 選單' },
-      { keys: 'Backspace', desc: '空輸入開頭 → 移除最後一個 context chip' },
-    ],
-  },
-  {
     titleKey: 'settings.shortcuts.section.editorFind',
     noteKey: 'settings.shortcuts.note.editor',
     rows: [
@@ -94,7 +66,8 @@ const blocks: Block[] = [
     rows: [
       { keys: '⌘ K → ⌘ K / ⌃ ⇧ I', desc: 'Inline rewrite（AI 改寫）', ctx: ['editorText'] },
       { keys: '⌘ I / ⌃ Space', desc: '觸發 Ghost 建議', ctx: ['editorText'] },
-      { keys: '⌘ ⇧ L', desc: '加選取到 AI 對話（文字焦點時＝選取相同項）', ctx: ['editorOpen'] },
+      { keys: '⌘ J / ⌘ ⇧ A / ⌃ `', desc: '開關 AI 終端機面板', ctx: ['editorOpen'] },
+      { keys: '⌘ ⇧ L', desc: '加選取到 AI 終端機（文字焦點時＝選取相同項）', ctx: ['editorOpen'] },
     ],
   },
   {

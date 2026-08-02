@@ -1,7 +1,7 @@
 // capabilityBackend — Phase 2 M4.
 //
 // The keystone seam that lets the unmodified mini-IDE (EditorWindowApp.vue,
-// AIChatPane.vue, useGit, the panes …) run inside an isolated plugin
+// useGit, the panes …) run inside an isolated plugin
 // WebContentsView. It re-implements the exact public surface of the renderer's
 // `useBackend()` composable, but instead of owning a WebSocket it routes every
 // `send(type, payload)` through the host capability broker (`window.nav`):
@@ -127,17 +127,10 @@ const EXPLICIT: Record<string, CapabilityRef> = {
   // editor inline AI → ChatCapability
   'editor.rewrite': { ns: 'chat', method: 'editor_rewrite' },
   'editor.complete': { ns: 'chat', method: 'editor_complete' },
-  // ai / ai.chat → ChatCapability
-  'ai.enhance_prompt': { ns: 'chat', method: 'enhance_prompt' },
-  'ai.web.search': { ns: 'chat', method: 'web_search' },
-  'ai.chat.start': { ns: 'chat', method: 'start' },
-  'ai.chat.stop': { ns: 'chat', method: 'stop' },
+  // ai.chat settings → ChatCapability (retired AIChatPane surface trimmed to
+  // the settings store ReviewPane still reads for its analyzer credentials)
   'ai.chat.settings.get': { ns: 'chat', method: 'settings_get' },
   'ai.chat.settings.set': { ns: 'chat', method: 'settings_set' },
-  'ai.chat.notes.set': { ns: 'chat', method: 'notes_set' },
-  'ai.chat.notes.get': { ns: 'chat', method: 'notes_get' },
-  'ai.chat.threads.set': { ns: 'chat', method: 'threads_set' },
-  'ai.chat.threads.get': { ns: 'chat', method: 'threads_get' },
   // ai.review / analyzer → ChatCapability (Branch-Diff AI code review). The
   // result events (ai.review.result/end/error) are already chat-gated in
   // CAP_EVENTS; these route the request side through the same namespace.

@@ -48,10 +48,6 @@
     "explorer": {
       "title": "Explorer"
     },
-    "ai-chat": {
-      "title": "AI Chat",
-      "tab-shortcut": "AI Chat (⌘⇧A)"
-    },
     "ai-terminal": {
       "title": "AI Terminal"
     },
@@ -311,27 +307,7 @@
     "save-draft-title": "Save as Draft (label optional)",
     "publish-branch": "Publish Branch",
     "commit-more-options": "More options",
-    "add-editor-selection": "Add editor selection as context (Cursor-style: adds selected code as {'@'}selection chip)",
-    "attach-file": "Attach file — add any workspace file as context (Cursor-style)",
-    "attach-image": "Attach image — pick an image file from disk to add to context",
-    "voice-stop-listening": "Stop listening",
-    "voice-input": "Voice input",
-    "enhance-prompt-busy": "Enhancing…",
-    "enhance-prompt": "Enhance prompt — AI rewrites your message to be clearer and more specific",
-    "send-ctrl-enter": "Send (Ctrl+Enter)",
-    "send-enter": "Send (Enter)",
     "stop-streaming": "Stop",
-    "new-chat": "New chat",
-    "chat-history": "Chat history",
-    "search-chat": "Search chat (Ctrl+F)",
-    "copy-conversation": "Copy conversation to clipboard",
-    "clear-chat": "Clear chat",
-    "fix-typescript-errors": "Fix TypeScript errors — run type check and pre-fill a fix request",
-    "checkpoints": "Checkpoints ({count}) — Ctrl+Shift+S to save",
-    "undo-last-send": "Undo last send — remove last message and restore text to input",
-    "response-length": "Response length: {label} (click to cycle)",
-    "workspace-notes-active": "Workspace notes (active — injected into every message)",
-    "workspace-notes": "Workspace notes",
     "prompt-templates": "Prompt templates library",
     "copy-thread-markdown": "Copy thread as Markdown",
     "bookmarks-count": "Bookmarks ({count})",
@@ -424,7 +400,7 @@
     "paste": "Paste",
     "toggle-comment": "Toggle Comment",
     "find": "Find",
-    "add-to-ai-chat": "Add to AI Chat",
+    "add-to-ai-chat": "Add to AI Terminal",
     "explain-with-ai": "Explain with AI",
     "fix-with-ai": "Fix with AI",
     "insert": "Insert",
@@ -847,8 +823,6 @@
       },
       "section": {
         "workbench": "Workbench · Windows / Panels / Navigation",
-        "ai": "AI Chat (AI pane focused)",
-        "aiInput": "AI Chat input box",
         "editorFind": "Editor · File / Find / Save",
         "editorAi": "Editor · AI-assisted editing",
         "editorEdit": "Editor · Editing / Cursor / Folding",
@@ -858,8 +832,6 @@
       },
       "note": {
         "workbench": "Workbench-level shortcuts from central defaults.ts. Ones marked editorOpen only apply in the editor window; the rest are mostly global.",
-        "ai": "Toggling the panel is a central rule; in-panel actions are intercepted by the AI chat panel itself and override the same keys when it is focused.",
-        "aiInput": "Apply when focus is in the AI chat input box.",
         "editor": "Almost all of these only fully apply in the editor window; in the main window they are mostly no-ops. This is a selection — the full set is ~180, matching VS Code.",
         "terminal": "When the terminal is focused, useTerminal intercepts these and turns them into terminal control sequences; everything else is sent to the CLI, and keys are always passed through during IME composition.",
         "native": "These fire before the renderer and shadow the app's own handling of the same keys. The View menu deliberately drops window zoom on ⌘0 / ⌘+ / ⌘-, yielding those keys to content zoom."
@@ -1157,7 +1129,6 @@
     "line-number": "Line number",
     "stage-description-hint": "Brief description of what this stage does",
     "command-name-placeholder": "Type a command name…",
-    "search-all-chats": "Search all chats…",
     "task-placeholder": "Describe the task to drive through all stages. e.g. \"Build an internal approval system for the store, digitising the paper workflow…\"",
     "answer-placeholder": "Type your answer…",
     "inline-edit-placeholder": "Instruction or question — e.g. 'add error handling' or 'how does this work?'",

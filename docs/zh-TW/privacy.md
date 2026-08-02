@@ -9,7 +9,7 @@ Navide 採用 **Local-first**，但不代表所有情況都完全離線。Electr
 依照啟用功能，Navide 會儲存：
 
 - `<workspace>/.agent-team/` 中的個人私有專案智慧與 Run Artifact
-- 應用程式資料目錄中的 Role、Pipeline、Recent Workspace、UI Setting、Analyzer Setting 與 AI Chat Setting
+- 應用程式資料目錄中的 Role、Pipeline、Recent Workspace、UI Setting、Analyzer Setting 與 AI Provider Setting
 - 從本機 CLI Log 衍生的 Token Attribution 與 Deduplication Metadata
 - 選用的 AI Provider API Key；它會儲存在受限制檔案權限保護的本機設定檔中（受支援系統上為 `0600`）
 
@@ -28,7 +28,7 @@ Navide 不營運專案 Telemetry 服務，也不要求建立 Navide 帳號。
 | 功能 | 可能接收者 | 涉及資料 |
 |---|---|---|
 | Coding Agent CLI | CLI 供應商或設定的模型 Provider | Prompt、選取的 Context、Tool Result 與供應商定義的 Telemetry |
-| Cloud AI Chat | Anthropic、OpenAI、Google、Groq、DeepSeek、Mistral、xAI 或自訂 Endpoint | Chat Message、附加 Context 與 Model Parameter |
+| Cloud AI（Inline 編輯與 Code Review） | Anthropic、OpenAI、Google、Groq、DeepSeek、Mistral、xAI 或自訂 Endpoint | 選取的程式碼、Prompt 與 Model Parameter |
 | Context7 Injection | Context7 及其 MCP Distribution／Runtime 相依套件 | 偵測到的 Library Name 與文件查詢 |
 | Web Search | Search Provider | 搜尋查詢文字 |
 | Git Operation | 設定的 Git Host | Repository 資料，以及由 Git 或 Host Flow 處理的憑證 |
@@ -39,7 +39,7 @@ Navide 不營運專案 Telemetry 服務，也不要求建立 Navide 帳號。
 
 ## 憑證
 
-Agent CLI 憑證保留在各 CLI 自己的設定中。如果在 Navide 輸入 Cloud AI Key，Navide 會把它保存在本機，供 AI Chat 使用。設定 Export 會遮蔽 API Key 與 Token。
+Agent CLI 憑證保留在各 CLI 自己的設定中。如果在 Navide 輸入 Cloud AI Key，Navide 會把它保存在本機，供 AI 功能（Inline 編輯、Code Review）使用。設定 Export 會遮蔽 API Key 與 Token。
 
 本機檔案權限可以降低同一部電腦其他使用者意外存取的機會，但無法防範 Malware、遭入侵的使用者帳號、無限制 Agent、Backup，或具有同等權限的 Process。
 

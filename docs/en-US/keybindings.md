@@ -31,9 +31,9 @@ and when-clause conditions.
 | `⌘B` | Toggle sidebar |
 | `⌘⇧E` | Focus Explorer |
 | `⌘⇧G` | Focus Source Control (when find is closed) |
-| `⌘J` | Toggle AI Chat panel |
-| `⌘⇧A` | Toggle AI Chat panel |
-| `` ⌃` `` | Toggle AI Chat panel |
+| `⌘J` | Toggle AI Terminal panel |
+| `⌘⇧A` | Toggle AI Terminal panel |
+| `` ⌃` `` | Toggle AI Terminal panel |
 | `⌘⇧U` | Open Agent |
 | `⌘⇧B` | Rebuild Pane (Resume) |
 | `Escape` | Close modal dialog |
@@ -327,8 +327,8 @@ Run these via `⌘⇧P`. No default keybinding.
 |----------|--------|
 | `⌘I` / `⌃Space` | Trigger AI inline completion (Ghost Text) |
 | `⌘K ⌘K` / `⌃⇧I` | AI inline rewrite (select code, then type instruction) |
-| `⌘⇧A` / `⌘J` / `` ⌃` `` | Open / close AI Chat panel |
-| `⌘⇧L` | Add current selection or word to AI Chat context (when editor is open but text area is not focused) |
+| `⌘⇧A` / `⌘J` / `` ⌃` `` | Open / close AI Terminal panel |
+| `⌘⇧L` | Add current selection or word to the AI Terminal prompt (when editor is open but text area is not focused) |
 | `Tab` (Ghost Text visible) | Accept full AI suggestion |
 | `→` (Ghost Text visible) | Accept one character of AI suggestion |
 | `⌘→` / `⌥→` (Ghost Text visible) | Accept one word of AI suggestion |

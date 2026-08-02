@@ -5,15 +5,12 @@ import {
   endsWithMentionTrigger,
   shouldOpenMentionMenu,
   parseCliContextPayload,
-  resolveCliDropPayload,
   writeCliPaneDragPayload,
-  buildCliContextChip,
   screenToClientPoint,
   resolveCliDropSource,
   buildPaneContextPaste,
   buildCliSessionReference,
   chunkForPty,
-  CLI_CHIP_BUFFER_CAP,
   CLI_PASTE_BUFFER_CAP
 } from '../cliContext'
 
@@ -159,132 +156,6 @@ describe('parseCliContextPayload', () => {
       label: undefined,
       sessionId: null
     })
-  })
-})
-
-describe('resolveCliDropPayload', () => {
-  it('prefers a valid CLI-context payload over the pane-id fallback', () => {
-    const raw = JSON.stringify({ paneId: 'p-1', agentKey: 'claude', label: 'Claude', sessionId: 's-1' })
-    expect(resolveCliDropPayload(raw, 'p-other')).toEqual({
-      paneId: 'p-1',
-      agentKey: 'claude',
-      label: 'Claude',
-      sessionId: 's-1'
-    })
-  })
-
-  it("returns 'malformed' when the CLI-context payload is present but unparseable", () => {
-    expect(resolveCliDropPayload('not json', '')).toBe('malformed')
-    expect(resolveCliDropPayload(JSON.stringify({ paneId: '' }), 'p-9')).toBe('malformed')
-  })
-
-  it('synthesizes a minimal payload from a bare pane id (pane-id fallback)', () => {
-    expect(resolveCliDropPayload('', 'p-9')).toEqual({
-      paneId: 'p-9',
-      agentKey: '',
-      label: '',
-      sessionId: null
-    })
-  })
-
-  it('returns null when neither MIME string is present (not a CLI drop)', () => {
-    expect(resolveCliDropPayload('', '')).toBeNull()
-  })
-})
-
-describe('buildCliContextChip', () => {
-  const payload = { paneId: 'p-1', agentKey: 'claude', label: 'My Pane', sessionId: 's-drag' }
-  const capturedAt = Date.UTC(2026, 6, 12, 10, 30, 0)
-
-  it('builds a chip with both the durable conversation reference and rendered content', () => {
-    const result = buildCliContextChip(payload, {
-      label: 'Reply Pane',
-      agentKey: 'claude',
-      sessionId: 's-1',
-      workspacePath: '/workspace',
-      conversationLogPath: '/workspace/.agent-team/manual/claude.log',
-      buffer: 'hello output'
-    }, capturedAt)
-    expect(result).toEqual({
-      kind: 'chip',
-      label: '@cli:Reply Pane',
-      content:
-        '// CLI session context — captured: 2026-07-12T10:30:00.000Z\n' +
-        'source_pane_id: "p-1"\n' +
-        'source_name: "Reply Pane"\n' +
-        'source_agent: "claude"\n' +
-        'source_workspace: "/workspace"\n' +
-        'source_session_id: "s-1"\n' +
-        'conversation_log: "/workspace/.agent-team/manual/claude.log"\n' +
-        '// Recent terminal excerpt\n```\nhello output\n```',
-      sourceId: 'cli-pane:p-1'
-    })
-  })
-
-  it('falls back to the drag payload label, then agentKey, when the reply label is empty', () => {
-    const fromPayload = buildCliContextChip(payload, { label: '', buffer: 'x' }, capturedAt)
-    expect(fromPayload.kind === 'chip' && fromPayload.label).toBe('@cli:My Pane')
-    const fromAgent = buildCliContextChip({ paneId: 'p-1', agentKey: 'codex' }, { buffer: 'x' }, capturedAt)
-    expect(fromAgent.kind === 'chip' && fromAgent.label).toBe('@cli:codex')
-  })
-
-  it('builds a chip from a pane-id fallback payload, labeled from the IPC reply', () => {
-    const fallback = { paneId: 'p-9', agentKey: '', label: '', sessionId: null }
-    const result = buildCliContextChip(fallback, { label: 'Codex 2', sessionId: 's-9', buffer: 'out' }, capturedAt)
-    expect(result).toEqual({
-      kind: 'chip',
-      label: '@cli:Codex 2',
-      content:
-        '// CLI session context — captured: 2026-07-12T10:30:00.000Z\n' +
-        'source_pane_id: "p-9"\nsource_name: "Codex 2"\nsource_session_id: "s-9"\n' +
-        '// Recent terminal excerpt\n```\nout\n```',
-      sourceId: 'cli-pane:p-9'
-    })
-  })
-
-  it("resolves an all-empty label chain to 'pane' / 'unknown agent'", () => {
-    const fallback = { paneId: 'p-9', agentKey: '', label: '', sessionId: null }
-    const result = buildCliContextChip(fallback, { buffer: 'out' }, capturedAt)
-    expect(result.kind === 'chip' && result.label).toBe('@cli:pane')
-    expect(result.kind === 'chip' && result.content).toContain('source_pane_id: "p-9"')
-  })
-
-  it("shows 'no session' when neither reply nor payload carries a session id", () => {
-    const result = buildCliContextChip({ paneId: 'p-1' }, { buffer: 'x' }, capturedAt)
-    expect(result.kind === 'chip' && result.content).not.toContain('source_session_id:')
-  })
-
-  it('tail-truncates an oversized buffer to the cap (keeps the end, drops the head)', () => {
-    const buffer = 'HEAD-MARKER\n' + 'x'.repeat(CLI_CHIP_BUFFER_CAP) + '\nTAIL-MARKER'
-    const result = buildCliContextChip(payload, { buffer }, capturedAt)
-    if (result.kind !== 'chip') throw new Error('expected chip')
-    expect(result.content).toContain('TAIL-MARKER')
-    expect(result.content).not.toContain('HEAD-MARKER')
-    const fenced = result.content.split('```')[1]
-    expect(fenced.length).toBeLessThanOrEqual(CLI_CHIP_BUFFER_CAP + 2) // + wrapping newlines
-  })
-
-  it('signals empty for an empty or whitespace-only buffer (no chip)', () => {
-    const unidentified = { paneId: 'p-empty' }
-    expect(buildCliContextChip(unidentified, { buffer: '' })).toEqual({ kind: 'empty' })
-    expect(buildCliContextChip(unidentified, { buffer: '  \n ' })).toEqual({ kind: 'empty' })
-    expect(buildCliContextChip(unidentified, {})).toEqual({ kind: 'empty' })
-  })
-
-  it('builds a metadata-only chip when the full conversation log is available', () => {
-    const result = buildCliContextChip(payload, {
-      conversationLogPath: '/workspace/.agent-team/manual/claude.log',
-      buffer: ''
-    }, capturedAt)
-    expect(result.kind).toBe('chip')
-    expect(result.kind === 'chip' && result.content)
-      .toContain('conversation_log: "/workspace/.agent-team/manual/claude.log"')
-  })
-
-  it('passes an error reply through untouched (caller surfaces it, no chip)', () => {
-    expect(buildCliContextChip(payload, { error: 'not-found' })).toEqual({ kind: 'error', error: 'not-found' })
-    expect(buildCliContextChip(payload, { error: 'timeout', buffer: 'stale' })).toEqual({ kind: 'error', error: 'timeout' })
-    expect(buildCliContextChip(payload, { error: 'unavailable' })).toEqual({ kind: 'error', error: 'unavailable' })
   })
 })
 

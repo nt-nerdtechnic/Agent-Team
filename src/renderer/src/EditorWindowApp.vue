@@ -9,11 +9,10 @@ import DiffPane from './editor/DiffPane.vue'
 import BranchDiffPane from './editor/BranchDiffPane.vue'
 import ConflictPane from './editor/ConflictPane.vue'
 import NotificationHost from './components/NotificationHost.vue'
-// Shared right-side AI chat shell (rail toggle + resize + lazily mounted
-// AIChatPane). `import type` keeps withAiChat's pane parameter fully typed with
-// no runtime/bundle cost.
-import type AIChatPaneType from './components/AIChatPane.vue'
-import AiChatDock from './components/AiChatDock.vue'
+// Shared right-side AI CLI terminal shell (rail toggle + resize + embedded
+// PTY terminal), same panel the Git/Plan windows embed.
+import AiCliDock from './components/AiCliDock.vue'
+import { aiTerminalPaneId, bracketedPaste, truncateText } from './lib/aiCliContext'
 import ProblemsPane from './components/ProblemsPane.vue'
 import PlanFileView from './editor/PlanFileView.vue'
 import FilePreviewPane from './editor/FilePreviewPane.vue'
@@ -69,92 +68,97 @@ function onResizeEnd(): void {
   document.removeEventListener('mouseup', onResizeEnd)
 }
 
-// ── AI Panel (shared dock shell) ──────────────────────────────────────────────
-const aiDockRef = ref<InstanceType<typeof AiChatDock> | null>(null)
+// ── AI Panel (shared CLI terminal dock) ───────────────────────────────────────
+const cliDockRef = ref<InstanceType<typeof AiCliDock> | null>(null)
 const aiPanelOpen = ref(false)
+// Pane id unique per (surface, workspace): two editor windows on different
+// workspaces must not steal each other's PTY (see aiTerminalPaneId).
+const AI_PANE_ID = aiTerminalPaneId('editor', workspacePath)
 
-function selectionContext(relPath: string, selection: unknown): { label: string; content: string } {
-  const ext = relPath.split('.').pop() ?? ''
-  const label = `@${relPath.split('/').pop()}`
-  const content = `// Selection from: ${relPath}\n\`\`\`${ext}\n${String(selection ?? '')}\n\`\`\``
-  return { label, content }
-}
-
-// AIChatPane mounts lazily inside the dock on first open (async chunk); for a
-// beat after opening, the dock's exposed `pane` is null until the chunk
-// resolves. Retry briefly so an early action (chip / draft / focus) isn't
-// silently dropped on a slow first load. Callers must set aiPanelOpen first —
-// the pane never mounts (and the retries drain) while the panel stays closed.
-function withAiChat(fn: (pane: InstanceType<typeof AIChatPaneType>) => void): void {
-  let tries = 0
-  const attempt = (): void => {
-    const pane = aiDockRef.value?.pane
-    if (pane) { fn(pane); return }
-    if (tries++ < 100) window.setTimeout(attempt, 20)
+// Context payload the CLI dock injects after a fresh spawn: workspace, open
+// tabs, the active file plus its selection and (truncated) content.
+const EDITOR_CONTEXT_TRUNCATE_AT = 8000
+function buildEditorContext(): string {
+  const lines = [
+    "You are running in a terminal embedded in Navide's editor window, " +
+      'assisting the user who is reading and editing files in this workspace.',
+    `Workspace: ${workspacePath}`,
+  ]
+  const files = openFiles.value.filter((f) => f.kind === 'file').map((f) => f.relPath)
+  if (files.length) lines.push(`Open files: ${files.join(', ')}`)
+  const rel = activeRel.value
+  // Synthetic tabs (diff/conflict/branch-diff) have no readable file content.
+  if (rel && !rel.startsWith('\x00')) {
+    lines.push(`Active file: ${rel}`)
+    const selection = String(activeEditor()?.getSelection?.() ?? '')
+    if (selection) {
+      lines.push('', 'Selected text:', truncateText(selection, EDITOR_CONTEXT_TRUNCATE_AT))
+    }
+    const content = String(activeEditor()?.getContent?.() ?? '')
+    if (content) {
+      lines.push(
+        '',
+        content.length > EDITOR_CONTEXT_TRUNCATE_AT
+          ? 'Active file content (truncated):'
+          : 'Active file content:',
+        truncateText(content, EDITOR_CONTEXT_TRUNCATE_AT)
+      )
+    }
   }
-  void nextTick(attempt)
+  return lines.join('\n')
 }
 
-async function handleAskAiAboutFile(relPath: string): Promise<void> {
+// Route an editor "ask AI" action into the CLI terminal: open the panel and
+// bracketed-paste the prompt into the running CLI (unsubmitted, so the user
+// can edit before sending). Without a running CLI the panel opens on its Start
+// UI and a toast says to start it first — no auto-spawn, a paste should never
+// launch an agent the user did not start.
+function pasteToCli(text: string): void {
   aiPanelOpen.value = true
-  await nextTick()
-  const ext = relPath.split('.').pop() ?? ''
-  const label = '@' + relPath.split('/').pop()
-  try {
-    const r = await backend.send<{ ok: boolean; content?: string }>('fs.read_file', {
-      workspace_path: workspacePath,
-      rel_path: relPath,
-    })
-    const content = r.payload?.ok
-      ? `// ${relPath}\n\`\`\`${ext}\n${(r.payload.content ?? '').slice(0, 3000)}\n\`\`\``
-      : `// ${relPath} (read failed)`
-    withAiChat((c) => c.addContextChip(label, content))
-  } catch {
-    withAiChat((c) => c.addContextChip(label, `// ${relPath}`))
-  }
+  const dock = cliDockRef.value
+  if (dock?.terminal?.status === 'running') dock.pasteText(bracketedPaste(text))
+  else if (dock?.terminal?.status === 'starting') toast('AI terminal is starting — retry in a moment')
+  else toast('Start the AI terminal first, then retry')
+}
+
+function selectionPrompt(relPath: string, selection: unknown, instruction: string): string {
+  const sel = truncateText(String(selection ?? ''), EDITOR_CONTEXT_TRUNCATE_AT)
+  return `${instruction}\n\nSelection from ${relPath}:\n\`\`\`\n${sel}\n\`\`\``
+}
+
+function handleAskAiAboutFile(relPath: string): void {
+  pasteToCli(`Please explain the file ${relPath} in this workspace.`)
 }
 
 function addSelectionToChat(file: OpenFile, selection: unknown): void {
-  const { label, content } = selectionContext(file.relPath, selection)
-  aiPanelOpen.value = true
-  withAiChat((c) => c.addContextChip(label, content))
+  pasteToCli(selectionPrompt(file.relPath, selection, 'Consider this code selection:'))
 }
 
 function explainSelectionWithAi(file: OpenFile, selection: unknown): void {
-  const { label, content } = selectionContext(file.relPath, selection)
-  aiPanelOpen.value = true
-  withAiChat((c) => {
-    c.addContextChip(label, content)
-    c.injectDraft('/explain Explain the selected code step by step.')
-  })
+  pasteToCli(
+    selectionPrompt(file.relPath, selection, 'Explain the selected code step by step.')
+  )
 }
 
 function fixSelectionWithAi(file: OpenFile, selection: unknown): void {
-  const { label, content } = selectionContext(file.relPath, selection)
-  aiPanelOpen.value = true
-  withAiChat((c) => {
-    c.addContextChip(label, content)
-    c.injectDraft('/fix Fix any bugs or issues in the selected code.')
-  })
+  pasteToCli(
+    selectionPrompt(file.relPath, selection, 'Fix any bugs or issues in the selected code.')
+  )
 }
 
 function writeTestsWithAi(file: OpenFile, selection: unknown): void {
-  const { label, content } = selectionContext(file.relPath, selection)
-  aiPanelOpen.value = true
-  withAiChat((c) => {
-    c.addContextChip(label, content)
-    c.injectDraft('/tests Generate comprehensive unit tests for the selected code.')
-  })
+  pasteToCli(
+    selectionPrompt(
+      file.relPath,
+      selection,
+      'Generate comprehensive unit tests for the selected code.'
+    )
+  )
 }
 
 function askSelectionWithAi(file: OpenFile, payload: unknown): void {
   const body = (payload ?? {}) as { selection?: unknown; question?: unknown }
-  const { label, content } = selectionContext(file.relPath, body.selection)
-  aiPanelOpen.value = true
-  withAiChat((c) => {
-    c.addContextChip(label, content)
-    c.injectDraft(String(body.question ?? ''))
-  })
+  pasteToCli(selectionPrompt(file.relPath, body.selection, String(body.question ?? '')))
 }
 
 // ── Open files (VS Code-style tabs); each EditorPane stays mounted (v-show) so
@@ -639,16 +643,13 @@ registerCommand('workbench.action.toggleAIChat', () => { aiPanelOpen.value = !ai
 registerCommand('workbench.action.addSelectionToChat', () => {
   const sel = activeEditor()?.getSelection() || activeEditor()?.getWordAtCursor?.() || ''
   if (!sel) return
-  aiPanelOpen.value = true
   const rel = activeRel.value
-  const ext = rel ? (rel.split('.').pop() ?? '') : ''
-  const label = rel ? `@${rel.split('/').pop()}` : '@selection'
-  const content = rel
-    ? `// Selection from: ${rel}\n\`\`\`${ext}\n${sel}\n\`\`\``
-    : `// Selected code:\n\`\`\`\n${sel}\n\`\`\``
-  withAiChat((c) => c.addContextChip(label, content))
+  pasteToCli(
+    rel
+      ? selectionPrompt(rel, sel, 'Consider this code selection:')
+      : `Consider this code selection:\n\`\`\`\n${truncateText(String(sel), EDITOR_CONTEXT_TRUNCATE_AT)}\n\`\`\``
+  )
 })
-function getActiveRelPath(): string { return activeRel.value }
 registerCommand('editor.action.toggleComment',    () => activeEditor()?.toggleLineComment())
 registerCommand('editor.action.deleteLines',      () => activeEditor()?.deleteLine())
 registerCommand('editor.action.deleteWordLeft',   () => activeEditor()?.deleteWordLeft())
@@ -806,8 +807,7 @@ registerCommand('workbench.action.closeActiveEditor', async () => {
   await closeFile(activeRel.value)
 })
 // Save every dirty file buffer to disk (reuses EditorPane.save, which carries
-// the mtime-conflict protection). Also passed to AIChatPane so the CLI engine
-// always reads current file content from disk before a chat turn.
+// the mtime-conflict protection).
 async function saveDirtyFiles(): Promise<void> {
   for (const [relPath, pane] of editorPaneRefs.entries()) {
     const f = openFiles.value.find((x) => x.relPath === relPath)
@@ -1079,8 +1079,8 @@ const PALETTE_COMMANDS: PaletteCmd[] = [
   { id: 'editor.action.openReplace',    label: 'Find and Replace',       keys: '⌘⌥F' },
   { id: 'editor.action.formatDocument', label: 'Format Document',       keys: '⌥⇧F' },
   { id: 'editor.action.formatSelection',label: 'Format Selection',   keys: '⌘K ⌘F' },
-  { id: 'workbench.action.toggleAIChat',         label: 'Toggle AI Chat',                   keys: '⌘⇧A / ⌃`' },
-  { id: 'workbench.action.addSelectionToChat',  label: 'Add Selection/Word to AI Chat',    keys: '⌘⇧L' },
+  { id: 'workbench.action.toggleAIChat',         label: 'Toggle AI Terminal',                   keys: '⌘⇧A / ⌃`' },
+  { id: 'workbench.action.addSelectionToChat',  label: 'Add Selection/Word to AI Terminal',    keys: '⌘⇧L' },
   { id: 'editor.action.smartSelect.expand',          label: 'Expand Selection',   keys: '⇧⌥→' },
   { id: 'editor.action.smartSelect.shrink',          label: 'Shrink Selection',   keys: '⇧⌥←' },
   { id: 'workbench.action.copyFilePath',         label: 'Copy Absolute Path',      keys: '⌘K ⌘P' },
@@ -1629,7 +1629,7 @@ function onAppKeydown(e: KeyboardEvent): void {
   if (mod && e.key === 'l') {
     e.preventDefault()
     if (!aiPanelOpen.value) aiPanelOpen.value = true
-    withAiChat((c) => c.focusInput())
+    void nextTick(() => cliDockRef.value?.terminal?.focus())
   }
 }
 
@@ -1836,9 +1836,7 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
         @open-file="(p) => openFile({ filepath: p.filepath, line: p.line })"
         @fix-with-ai="(p) => {
           const loc = `${p.diag.relPath}:${p.diag.line}${p.diag.col ? ':' + p.diag.col : ''}`
-          const chipContent = `// ${p.diag.severity.toUpperCase()}: ${p.diag.message}\n// at ${loc}${p.diag.source ? ' (' + p.diag.source + ')' : ''}`
-          aiPanelOpen = true
-          withAiChat((c) => { c.addContextChip('@problems', chipContent); c.injectDraft('/fix') })
+          pasteToCli(`Fix this problem: ${p.diag.severity.toUpperCase()}: ${p.diag.message} at ${loc}${p.diag.source ? ' (' + p.diag.source + ')' : ''}`)
         }"
       />
     </div>
@@ -1975,7 +1973,7 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
             :compare="f.compare ?? ''"
             :backend="backend"
             @open-file="openFile"
-            @ask-ai-fix="(text) => { aiPanelOpen = true; withAiChat((c) => c.injectDraft(text)) }"
+            @ask-ai-fix="(text) => pasteToCli(text)"
           />
         </template>
         <div v-if="!openFiles.length" class="ide-empty">
@@ -2017,22 +2015,17 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
       </div><!-- end ide-main secondary -->
     </div><!-- end ide-main-container -->
 
-    <!-- Right AI chat dock (rail toggle + resize + lazy AIChatPane) -->
-    <AiChatDock
-      ref="aiDockRef"
+    <!-- Right AI CLI dock (rail toggle + resize + embedded PTY terminal) -->
+    <AiCliDock
+      ref="cliDockRef"
       v-model:open="aiPanelOpen"
       width-key="ide-ai-panel-width"
       :default-width="320"
-      title-key="pane.ai-chat.tab-shortcut"
+      :pane-id="AI_PANE_ID"
+      origin="mini-ide"
       :workspace-path="workspacePath"
       :backend="backend"
-      :get-editor-content="() => activeEditor()?.getContent?.() ?? ''"
-      :get-editor-selection="() => activeEditor()?.getSelection?.() ?? ''"
-      :get-active-rel-path="getActiveRelPath"
-      :get-open-files="() => openFiles.filter(f => f.kind === 'file').map(f => f.relPath)"
-      :insert-text-at-cursor="(text: string) => activeEditor()?.insertTextAtCursor?.(text)"
-      :open-file="(relPath: string, line?: number) => openFile({ filepath: relPath, line })"
-      :save-dirty-files="saveDirtyFiles"
+      :build-context="buildEditorContext"
     />
     </div><!-- end ide-body -->
   </div>

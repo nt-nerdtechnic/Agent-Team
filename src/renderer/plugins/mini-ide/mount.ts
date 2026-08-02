@@ -7,7 +7,7 @@
 //
 // The one difference is invisible to the app source: the plugin build aliases
 // `composables/useBackend` to `./capabilityBackend`, so every `send`/`on` inside
-// EditorWindowApp, AIChatPane, useGit, … is routed through `window.nav` (the
+// EditorWindowApp, useGit, … is routed through `window.nav` (the
 // host capability broker) instead of a direct WebSocket. EditorWindowApp still
 // reads its `workspace_path` / `filepath` from `window.location.search`, which
 // the host sets when it loads this entry — no injection needed here.

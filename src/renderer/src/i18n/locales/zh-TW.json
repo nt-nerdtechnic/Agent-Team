@@ -48,10 +48,6 @@
     "explorer": {
       "title": "檔案總管"
     },
-    "ai-chat": {
-      "title": "AI 對話",
-      "tab-shortcut": "AI 對話 (⌘⇧A)"
-    },
     "ai-terminal": {
       "title": "AI 終端機"
     },
@@ -311,27 +307,7 @@
     "save-draft-title": "儲存為草稿（標籤可選）",
     "publish-branch": "發佈分支",
     "commit-more-options": "更多選項",
-    "add-editor-selection": "新增編輯器選取內容為上下文（Cursor 風格：以 {'@'}selection 晶片加入選取的程式碼）",
-    "attach-file": "附加檔案——將工作區中的任意檔案加入上下文（Cursor 風格）",
-    "attach-image": "附加圖片——從磁碟選取圖片檔案以加入上下文",
-    "voice-stop-listening": "停止聆聽",
-    "voice-input": "語音輸入",
-    "enhance-prompt-busy": "增強中…",
-    "enhance-prompt": "增強提示——AI 將重寫您的訊息，使其更清晰、更具體",
-    "send-ctrl-enter": "傳送（Ctrl+Enter）",
-    "send-enter": "傳送（Enter）",
     "stop-streaming": "停止",
-    "new-chat": "新增對話",
-    "chat-history": "對話記錄",
-    "search-chat": "搜尋對話（Ctrl+F）",
-    "copy-conversation": "複製對話至剪貼簿",
-    "clear-chat": "清除對話",
-    "fix-typescript-errors": "修正 TypeScript 錯誤——執行型別檢查並預先填入修復請求",
-    "checkpoints": "檢查點（{count}）——按 Ctrl+Shift+S 儲存",
-    "undo-last-send": "復原上次傳送——移除最後一則訊息並將文字還原至輸入框",
-    "response-length": "回應長度：{label}（點擊切換）",
-    "workspace-notes-active": "工作區筆記（啟用中——注入至每則訊息）",
-    "workspace-notes": "工作區筆記",
     "prompt-templates": "提示模板庫",
     "copy-thread-markdown": "以 Markdown 格式複製對話串",
     "bookmarks-count": "書籤（{count}）",
@@ -424,7 +400,7 @@
     "paste": "貼上",
     "toggle-comment": "切換註解",
     "find": "尋找",
-    "add-to-ai-chat": "加入 AI 對話",
+    "add-to-ai-chat": "加入 AI 終端機",
     "explain-with-ai": "AI 解釋",
     "fix-with-ai": "AI 修復",
     "insert": "插入",
@@ -847,8 +823,6 @@
       },
       "section": {
         "workbench": "Workbench · 視窗 / 面板 / 導覽",
-        "ai": "AI 對話（AI pane 焦點）",
-        "aiInput": "AI 輸入框內",
         "editorFind": "編輯器 · 檔案 / 尋找 / 存檔",
         "editorAi": "編輯器 · AI 輔助編輯",
         "editorEdit": "編輯器 · 編輯 / 游標 / 折疊",
@@ -858,8 +832,6 @@
       },
       "note": {
         "workbench": "中央 defaults.ts 的工作臺級快捷鍵；標 editorOpen 的只在編輯器視窗生效，其餘多為全域。",
-        "ai": "切換面板為中央規則；面板內操作由 AI 對話面板自己攔截，焦點在此時會覆蓋同鍵的中央行為。",
-        "aiInput": "焦點在 AI 對話輸入框時生效。",
         "editor": "以下幾乎全部只在編輯器視窗完整生效，主視窗多為 no-op；此為精選，完整約 180 條同 VS Code。",
         "terminal": "終端有焦點時由 useTerminal 攔截並轉成終端控制序列；其餘照送給 CLI，組字（IME）中一律放行。",
         "native": "這些在 renderer 之前觸發，會蓋過同鍵的 app 行為。View 選單刻意移除了 ⌘0 / ⌘+ / ⌘- 的視窗縮放，把這些鍵讓給內容縮放。"
@@ -1157,7 +1129,6 @@
     "line-number": "行號",
     "stage-description-hint": "此階段功能的簡短說明",
     "command-name-placeholder": "輸入指令名稱…",
-    "search-all-chats": "搜尋所有對話…",
     "task-placeholder": "描述任務，例如：「為商店建立內部審批系統，將紙本工作流程數位化…」",
     "answer-placeholder": "輸入您的回答…",
     "inline-edit-placeholder": "指令或問題，例如「新增錯誤處理」或「這段程式碼是做什麼的？」",

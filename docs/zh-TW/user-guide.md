@@ -91,9 +91,9 @@ Git View 支援 Repository Discovery、Working Tree Inspection、Staging、Commi
 
 Commit 前務必審查變更，特別是在 Automation 或 Parallel Run 之後。Agent 生成的變更不會因為顯示在 Git Panel 中就自動變得安全。
 
-## Editor 與 AI Chat
+## Editor 與 AI Terminal
 
-Editor 使用 Monaco，並提供 File Editing、Diagnostics、Plan Rendering、Diff、Conflict 與 AI-assisted Workflow。AI Chat 可以使用本機模型或設定的 Cloud Provider。Provider-specific API Key 與 Model Setting 為選用項目，輸入後會儲存在本機。
+Editor 使用 Monaco，並提供 File Editing、Diagnostics、Plan Rendering、Diff、Conflict 與 AI-assisted Workflow。右側 AI 面板內嵌真實的 Coding Agent CLI Terminal（與主視窗相同的 Agent），啟動時會自動注入 Editor 情境。
 
 這些工具是更大工程環境的 Intervention 介面。Navide 的目標，是最終提供完整專業工作流，而不必使用傳統 IDE 作為主要環境。
 

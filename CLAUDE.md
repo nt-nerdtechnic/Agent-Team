@@ -26,7 +26,7 @@ Read routed files on demand, not all up front.
    they explicitly authorized committing for the task.
 4. **No UI automation** (cliclick/screencapture/AppleScript) — the user tests
    UI manually.
-5. **Giant files** (AIChatPane.vue ~14K lines, App.vue ~7K, GitPane.vue ~3K,
+5. **Giant files** (App.vue ~7K lines, GitPane.vue ~3K,
    EditorWindowApp.vue ~2.6K, backend/agent_team_backend/app.py ~2.7K):
    Grep tool to locate → Read with offset/limit → batch edits through one
    subagent. Never whole-file Read, never bash/python inline search.

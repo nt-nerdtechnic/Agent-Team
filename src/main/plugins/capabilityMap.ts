@@ -75,17 +75,10 @@ const EXPLICIT_CAP_MAP: Readonly<Record<string, string>> = {
   // ChatCapability — editor inline AI
   'chat.editor_rewrite': 'editor.rewrite',
   'chat.editor_complete': 'editor.complete',
-  // ChatCapability — ai / ai.chat
-  'chat.enhance_prompt': 'ai.enhance_prompt',
-  'chat.web_search': 'ai.web.search',
-  'chat.start': 'ai.chat.start',
-  'chat.stop': 'ai.chat.stop',
+  // ChatCapability — ai.chat settings (retired AIChatPane surface trimmed to
+  // the settings store ReviewPane still reads for its analyzer credentials)
   'chat.settings_get': 'ai.chat.settings.get',
   'chat.settings_set': 'ai.chat.settings.set',
-  'chat.notes_set': 'ai.chat.notes.set',
-  'chat.notes_get': 'ai.chat.notes.get',
-  'chat.threads_set': 'ai.chat.threads.set',
-  'chat.threads_get': 'ai.chat.threads.get',
   // ChatCapability — ai.review / analyzer (Branch-Diff AI code review). The
   // result events (ai.review.result/end/error) are already chat-gated in
   // CAP_EVENTS; these invert the shim's request-side remaps.
@@ -142,13 +135,6 @@ export const CAP_EVENTS: Readonly<Record<string, string>> = {
   // Settings sync (lib/settings.ts). Broadcast with exclude=session, but the
   // broker holds its own WS session so it still receives it.
   'ui.settings_changed': 'ui',
-  // AI chat streaming + lifecycle (AIChatPane). All broadcast via the agent
-  // loop's emit = app.broadcast(make_event(...)).
-  'ai.chat.chunk': 'chat',
-  'ai.chat.tool_call': 'chat',
-  'ai.chat.tool_result': 'chat',
-  'ai.chat.done': 'chat',
-  'ai.chat.error': 'chat',
   // AI code-review results (useReview via ReviewPane). Part of the AI feature,
   // so gated on the chat namespace (the set has no dedicated review/ai ns).
   'ai.review.result': 'chat',

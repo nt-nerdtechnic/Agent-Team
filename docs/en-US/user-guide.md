@@ -91,9 +91,9 @@ The Git view supports repository discovery, working-tree inspection, staging, co
 
 Review changes before committing, especially after automated or parallel runs. Navide does not make an agent-generated change safe merely because it appears in the Git panel.
 
-## Editor and AI chat
+## Editor and AI terminal
 
-The editor uses Monaco and provides file editing, diagnostics, plan rendering, diffs, conflicts, and AI-assisted workflows. AI Chat can use a local model or configured cloud providers. Provider-specific API keys and model settings are optional and are stored locally when entered.
+The editor uses Monaco and provides file editing, diagnostics, plan rendering, diffs, conflicts, and AI-assisted workflows. The right-side AI panel embeds a real coding-agent CLI terminal (the same agents as the main window) and injects editor context when it starts.
 
 These tools are the Intervention surface of the wider engineering environment. Navide's goal is eventually to provide the complete professional workflow without requiring a traditional IDE as the user's primary environment.
 

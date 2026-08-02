@@ -15,13 +15,13 @@ const _shimAssignableToReal: Real = undefined as unknown as Shim
 const _realAssignableToShim: Shim = undefined as unknown as Real
 
 // Every WS `type` the mini-IDE actually sends (collected from EditorWindowApp +
-// AIChatPane + the panes + useGit/useExplorer). The map MUST resolve all of them.
+// the panes + useGit/useExplorer). The map MUST resolve all of them.
 const MINI_IDE_SENT_TYPES = [
   // fs
   'fs.read_file', 'fs.write_file', 'fs.list_dir', 'fs.list_files_flat', 'fs.glob_files',
   'fs.create_file', 'fs.delete', 'fs.mkdir', 'fs.rename', 'fs.convert_office',
   'fs.list_archive', 'fs.read_image', 'fs.stat_path',
-  // git (via useGit + DiffPane/BranchDiffPane/ConflictPane/AIChatPane)
+  // git (via useGit + DiffPane/BranchDiffPane/ConflictPane)
   'git.status', 'git.log', 'git.diff_branches', 'git.rebase', 'git.restore_from_branch',
   'git.show_commit', 'git.worktrees', 'git.add_worktree', 'git.remove_worktree',
   'git.prune_worktrees', 'git.lock_worktree', 'git.unlock_worktree', 'git.move_worktree',
@@ -48,10 +48,8 @@ const MINI_IDE_SENT_TYPES = [
   'terminal.redraw',
   // editor inline AI
   'editor.rewrite', 'editor.complete',
-  // ai / ai.chat
-  'ai.enhance_prompt', 'ai.web.search', 'ai.chat.start', 'ai.chat.stop',
+  // ai.chat settings (ReviewPane analyzer credentials)
   'ai.chat.settings.get', 'ai.chat.settings.set',
-  'ai.chat.notes.get', 'ai.chat.notes.set', 'ai.chat.threads.get', 'ai.chat.threads.set',
   // ai.review / analyzer (useReview + ReviewPane — Branch-Diff AI code review)
   'ai.review.start', 'ai.review.stop', 'analyzer.models',
   // ui / settings (set + the connect-time reconcile read in lib/settings.ts)
@@ -86,9 +84,7 @@ describe('TYPE_TO_CAP coverage', () => {
   it('remaps the non-uniform shell/editor/ai/ui families', () => {
     expect(resolveCapability('shell.run')).toEqual({ ns: 'terminal', method: 'run' })
     expect(resolveCapability('editor.complete')).toEqual({ ns: 'chat', method: 'editor_complete' })
-    expect(resolveCapability('ai.chat.start')).toEqual({ ns: 'chat', method: 'start' })
     expect(resolveCapability('ai.chat.settings.get')).toEqual({ ns: 'chat', method: 'settings_get' })
-    expect(resolveCapability('ai.web.search')).toEqual({ ns: 'chat', method: 'web_search' })
     expect(resolveCapability('ui.settings.set')).toEqual({ ns: 'ui', method: 'settings_set' })
     // Settings reconcile read — without this the plugin's settings cache stays
     // empty on connect and the theme falls back to the dark default.
@@ -121,6 +117,17 @@ describe('TYPE_TO_CAP coverage', () => {
     expect(resolveCapability('terminal.nope')).toBeNull()
     expect(resolveCapability('totally.unknown')).toBeNull()
     expect(resolveCapability('')).toBeNull()
+  })
+
+  it('no longer maps the retired AIChatPane chat surface (settings excepted)', () => {
+    expect(resolveCapability('ai.chat.start')).toBeNull()
+    expect(resolveCapability('ai.chat.stop')).toBeNull()
+    expect(resolveCapability('ai.chat.notes.get')).toBeNull()
+    expect(resolveCapability('ai.chat.notes.set')).toBeNull()
+    expect(resolveCapability('ai.chat.threads.get')).toBeNull()
+    expect(resolveCapability('ai.chat.threads.set')).toBeNull()
+    expect(resolveCapability('ai.enhance_prompt')).toBeNull()
+    expect(resolveCapability('ai.web.search')).toBeNull()
   })
 })
 

@@ -4,7 +4,8 @@
 // extracted from the Pipeline Manager window's inline AI panel so other
 // standalone windows (Plan) can embed the same real-CLI panel.
 //
-// Layout contract (same as AiChatDock): renders three siblings (rail / resize
+// Layout contract (inherited from the retired AiChatDock): renders three
+// siblings (rail / resize
 // handle / panel) meant to sit at the END of a row-flex container. Width is
 // clamped 280–600 and persisted per-window via `widthKey`. The terminal mounts
 // EAGERLY as soon as a workspace exists — panel visibility is v-show only —

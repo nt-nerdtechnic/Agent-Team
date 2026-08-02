@@ -12,7 +12,6 @@ i18n.global.locale.value = 'en-US'
 
 function stub(name: string) {
   return {
-    // __esModule lets defineAsyncComponent unwrap .default (AIChatPane).
     __esModule: true,
     default: defineComponent({
       name,
@@ -28,7 +27,7 @@ vi.mock('../../components/ExplorerPane.vue', () => stub('ExplorerPane'))
 vi.mock('../../components/SearchPane.vue', () => stub('SearchPane'))
 vi.mock('../../components/GitPane.vue', () => stub('GitPane'))
 vi.mock('../../components/ProblemsPane.vue', () => stub('ProblemsPane'))
-vi.mock('../../components/AIChatPane.vue', () => stub('AIChatPane'))
+vi.mock('../../components/AiCliTerminal.vue', () => stub('AiCliTerminal'))
 vi.mock('../../components/NotificationHost.vue', () => stub('NotificationHost'))
 vi.mock('../EditorPane.vue', () => stub('EditorPane'))
 vi.mock('../PlanFileView.vue', () => stub('PlanFileView'))
@@ -241,22 +240,23 @@ describe('EditorWindowApp – preview routing', () => {
     expect(previewToggle(wrapper).exists()).toBe(false)
   })
 
-  it('hosts the shared AI chat dock with the editor width key and bridge callbacks', async () => {
+  it('hosts the shared AI CLI dock with the editor width key and context builder', async () => {
     const wrapper = await mountApp()
-    // The shared shell (AiChatDock) owns the rail/resize/lazy-mount behavior —
-    // covered in depth by AiChatDock.test.ts. Here: the editor wires its width
-    // key and editor bridge, and the pane mounts on first toggle only
-    // (withAiChat reaches it through the dock's exposed `pane`).
-    const dock = wrapper.findComponent({ name: 'AiChatDock' })
+    // The shared shell (AiCliDock) owns the rail/resize/terminal lifecycle.
+    // Here: the editor wires its (carried-over) width key, a per-workspace
+    // pane id, the mini-ide origin tag and its context builder.
+    const dock = wrapper.findComponent({ name: 'AiCliDock' })
     expect(dock.exists()).toBe(true)
     expect(dock.props('widthKey')).toBe('ide-ai-panel-width')
-    expect(typeof dock.props('getEditorContent')).toBe('function')
-    expect(typeof dock.props('saveDirtyFiles')).toBe('function')
-    expect(wrapper.findComponent({ name: 'AIChatPane' }).exists()).toBe(false)
+    expect(dock.props('origin')).toBe('mini-ide')
+    expect(String(dock.props('paneId'))).toMatch(/^[0-9a-f]{8}-editor-ai-terminal$/)
+    expect(typeof dock.props('buildContext')).toBe('function')
 
+    // No workspace in this harness (no ?workspace_path=) — the terminal must
+    // not mount, and toggling the rail shows the panel with its empty state.
+    expect(wrapper.findComponent({ name: 'AiCliTerminal' }).exists()).toBe(false)
     await wrapper.find('.ai-dock-rail-btn').trigger('click')
     await flushPromises()
-    // The stub declares no props, so assert the lazy mount only.
-    expect(wrapper.findComponent({ name: 'AIChatPane' }).exists()).toBe(true)
+    expect(wrapper.find('.ai-cli-empty').text()).toBe('No workspace available')
   })
 })

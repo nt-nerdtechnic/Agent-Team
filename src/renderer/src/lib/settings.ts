@@ -27,9 +27,9 @@ export const SETTINGS_FLUSH_DEBOUNCE_MS = 500
 // `__migrated` flag is uploaded with the same batch, and the localStorage
 // copies are deleted only after the backend acks the write — so a failed
 // migration retries on the next startup. Workspace-scoped keys
-// (agentTeam.runGroups.*, agentTeam.activeTab.*, ai-chat-threads:*, …) are NOT
-// listed here — they migrate lazily per workspace into project.json /
-// chat-*.json when that workspace is opened (App.vue / AIChatPane.vue).
+// (agentTeam.runGroups.*, agentTeam.activeTab.*, …) are NOT listed here — they
+// migrate lazily per workspace into project.json when that workspace is
+// opened (App.vue).
 export const MIGRATED_LOCALSTORAGE_KEYS: readonly string[] = [
   // language / theme
   'agent-team:language',
@@ -61,7 +61,14 @@ export const MIGRATED_LOCALSTORAGE_KEYS: readonly string[] = [
   'agentTeam.search.opts',
   'agentTeam.pipelineTopRatio',
   'agent-team.benchmark-results',
-  // AI chat user-level (non-secret) prefs
+]
+
+// Dead legacy entries that are deleted outright (never copied). Absorbed from
+// per-component one-time cleanups (e.g. ControlPane's pipelineTaskDescription).
+// The ai-chat-*/ai-recent-*/ai-thread-* keys are the retired AIChatPane's
+// user-level prefs (the pane is gone; the CLI dock replaced it).
+export const PURGED_LOCALSTORAGE_KEYS: readonly string[] = [
+  'agentTeam.pipelineTaskDescription',
   'ai-chat-send-mode',
   'ai-chat-auto-accept',
   'ai-chat-smart-context',
@@ -80,10 +87,14 @@ export const MIGRATED_LOCALSTORAGE_KEYS: readonly string[] = [
   'ai-chat-terminal-buffer',
 ]
 
-// Dead legacy entries that are deleted outright (never copied). Absorbed from
-// per-component one-time cleanups (e.g. ControlPane's pipelineTaskDescription).
-export const PURGED_LOCALSTORAGE_KEYS: readonly string[] = [
-  'agentTeam.pipelineTaskDescription',
+// Workspace-scoped leftovers of the retired AIChatPane, keyed as
+// `<prefix><workspacePath>` — deleted by prefix scan (exact keys can't be
+// enumerated up front).
+export const PURGED_LOCALSTORAGE_PREFIXES: readonly string[] = [
+  'ai-chat-notes:',
+  'ai-chat-notepads:',
+  'ai-chat-threads:',
+  'ai-chat-history:',
 ]
 
 const MIGRATION_FLAG = '__migrated'
@@ -288,6 +299,17 @@ export function migrateLegacyLocalStorage(): void {
     } catch {
       /* ignore */
     }
+  }
+  try {
+    // Collect first — removing while iterating by index skips keys.
+    const prefixed: string[] = []
+    for (let i = 0; i < store.length; i++) {
+      const key = store.key(i)
+      if (key && PURGED_LOCALSTORAGE_PREFIXES.some((p) => key.startsWith(p))) prefixed.push(key)
+    }
+    for (const key of prefixed) store.removeItem(key)
+  } catch {
+    /* ignore */
   }
   if (cache[MIGRATION_FLAG] === true) {
     removeMigratedLocalCopies()

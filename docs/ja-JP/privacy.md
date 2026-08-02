@@ -9,7 +9,7 @@ Navide は **Local-first** ですが、常に完全オフラインという意�
 有効な機能に応じて、Navide は次を保存します。
 
 - `<workspace>/.agent-team/` 内の、ユーザーごとに非公開の Project Intelligence と Run Artifact
-- Application Data Directory 内の Role、Pipeline、Recent Workspace、UI Setting、Analyzer Setting、AI Chat Setting
+- Application Data Directory 内の Role、Pipeline、Recent Workspace、UI Setting、Analyzer Setting、AI Provider Setting
 - Local CLI Log から得た Token Attribution と Deduplication Metadata
 - 任意の AI Provider API Key。制限された File Permission（対応 System では `0600`）で保護された Local Settings File に保存
 
@@ -28,7 +28,7 @@ Navide は Project Telemetry Service を運営せず、Navide Account を必要�
 | 機能 | 送信先の可能性 | 関係するデータ |
 |---|---|---|
 | Coding Agent CLI | CLI Vendor または設定された Model Provider | Prompt、選択した Context、Tool Result、Provider 定義の Telemetry |
-| Cloud AI Chat | Anthropic、OpenAI、Google、Groq、DeepSeek、Mistral、xAI、Custom Endpoint | Chat Message、添付 Context、Model Parameter |
+| Cloud AI（Inline 編集と Code Review） | Anthropic、OpenAI、Google、Groq、DeepSeek、Mistral、xAI、Custom Endpoint | 選択したコード、Prompt、Model Parameter |
 | Context7 Injection | Context7 と MCP Distribution/Runtime Dependency | 検出された Library Name と Documentation Query |
 | Web Search | Search Provider | Search Query Text |
 | Git Operation | 設定された Git Host | Repository Data と、Git または Host Flow が扱う Credential |
@@ -39,7 +39,7 @@ Private Code や規制対象 Data を送信する前に、各 Provider の Polic
 
 ## 認証情報
 
-Agent CLI の Credential は各 CLI の Configuration に残ります。Cloud AI Key を Navide に入力すると、AI Chat で利用できるようローカル保存されます。Settings Export では API Key と Token を Redact します。
+Agent CLI の Credential は各 CLI の Configuration に残ります。Cloud AI Key を Navide に入力すると、AI 機能（Inline 編集、Code Review）で利用できるようローカル保存されます。Settings Export では API Key と Token を Redact します。
 
 Local File Permission は、同じ Machine 上の他 User による偶発的 Access を減らしますが、Malware、Compromised User Account、Unrestricted Agent、Backup、同等権限の Process からは保護しません。
 
