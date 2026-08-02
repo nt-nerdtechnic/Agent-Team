@@ -82,7 +82,12 @@ async def test_plan_list_returns_plans_with_meta(workspace: Path) -> None:
         result = await session.call_tool("plan_list", {"workspace_path": str(workspace)})
     assert not result.isError
     plans = result.structuredContent["result"]
-    assert [p["rel_path"] for p in plans] == ["alpha.html", "beta.html"]
+    # Workspace-relative paths: agents echo these into the terminal, where
+    # cmd+click only recognizes the full .agent-team/plans/… form.
+    assert [p["rel_path"] for p in plans] == [
+        ".agent-team/plans/alpha.html",
+        ".agent-team/plans/beta.html",
+    ]
     alpha, beta = plans
     assert alpha["name"] == "Alpha"
     assert alpha["stage"] == "approved"
@@ -101,13 +106,25 @@ async def test_plan_read_returns_meta_and_html(workspace: Path) -> None:
         )
     assert not result.isError
     data = result.structuredContent
-    assert data["rel_path"] == "alpha.html"
+    assert data["rel_path"] == ".agent-team/plans/alpha.html"
     assert data["meta"]["name"] == "Alpha"
     assert data["meta"]["stage"] == "approved"
     assert 'id="plan-meta"' in data["html"]
     assert data["html"] == (
         workspace / ".agent-team" / "plans" / "alpha.html"
     ).read_text(encoding="utf-8")
+
+
+async def test_plan_read_accepts_the_full_workspace_relative_path(workspace: Path) -> None:
+    """Both input forms resolve to the same plan (the other test passes a filename)."""
+    async with create_connected_server_and_client_session(plan_mcp.server) as session:
+        result = await session.call_tool(
+            "plan_read",
+            {"workspace_path": str(workspace), "rel_path": ".agent-team/plans/alpha.html"},
+        )
+    assert not result.isError
+    assert result.structuredContent["rel_path"] == ".agent-team/plans/alpha.html"
+    assert result.structuredContent["meta"]["name"] == "Alpha"
 
 
 async def test_plan_read_rejects_path_traversal(workspace: Path) -> None:
@@ -142,11 +159,13 @@ async def test_plan_create_writes_plan_and_lists_it(workspace: Path) -> None:
     )
     assert not result.isError
     data = result.structuredContent
-    assert re.fullmatch(r"my-new-plan_[0-9a-f]{6}\.html", data["rel_path"])
+    assert re.fullmatch(r"\.agent-team/plans/my-new-plan_[0-9a-f]{6}\.html", data["rel_path"])
     assert data["name"] == "My New Plan"
     assert data["stage"] == "draft"
+    # No pane workspaces are known in this test, so no advisory warning fires.
+    assert "warning" not in data
 
-    html = (plans / data["rel_path"]).read_text(encoding="utf-8")
+    html = (workspace / data["rel_path"]).read_text(encoding="utf-8")
     meta = parse_plan_meta(html)
     assert meta["schemaVersion"] == 1
     assert meta["name"] == "My New Plan"
@@ -169,7 +188,7 @@ async def test_plan_create_writes_plan_and_lists_it(workspace: Path) -> None:
     listed = await _call("plan_list", {"workspace_path": str(workspace)})
     rels = [p["rel_path"] for p in listed.structuredContent["result"]]
     assert data["rel_path"] in rels
-    assert "_template.html" not in rels
+    assert ".agent-team/plans/_template.html" not in rels
 
 
 async def test_plan_update_stage_updates_island_and_pill(workspace: Path) -> None:
@@ -337,6 +356,48 @@ def fake_terminals(monkeypatch: pytest.MonkeyPatch) -> _FakeTerminalService:
     return fake
 
 
+async def test_plan_create_warns_when_no_pane_uses_the_workspace(
+    workspace: Path, fake_terminals: _FakeTerminalService
+) -> None:
+    """The plan window resolves plans against a pane's workspace, so writing to
+    a root no pane uses produces a file Navide can never open."""
+    (_plans_dir(workspace) / "_template.html").unlink()
+    result = await _call(
+        "plan_create",
+        {
+            "workspace_path": str(workspace),
+            "name": "Orphan Plan",
+            "overview": "",
+            "todos": ["Task"],
+        },
+    )
+    assert not result.isError
+    warning = result.structuredContent["warning"]
+    assert str(workspace) in warning
+    # Live pane workspaces are listed so the agent can retry against one; the
+    # closed session's workspace (/ws/b via s3) is not a live pane on its own.
+    assert "/ws/a" in warning and "/ws/b" in warning
+
+
+async def test_plan_create_does_not_warn_when_a_pane_matches(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeTerminalService([_fake_session("s1", cwd=str(workspace))])
+    monkeypatch.setattr(backend_app, "get_terminals", lambda: fake)
+    (_plans_dir(workspace) / "_template.html").unlink()
+    result = await _call(
+        "plan_create",
+        {
+            "workspace_path": str(workspace),
+            "name": "Matched Plan",
+            "overview": "",
+            "todos": ["Task"],
+        },
+    )
+    assert not result.isError
+    assert "warning" not in result.structuredContent
+
+
 _ALPHA_PROMPT = (
     "Execute the approved plan document at .agent-team/plans/alpha.html "
     "(workspace-relative path). "
@@ -362,7 +423,7 @@ async def test_plan_dispatch_writes_prompt_then_enter(
     # Same wording as the frontend template (planExecutePrompt.ts).
     assert fake_terminals.writes == [("s1", _ALPHA_PROMPT), ("s1", "\r")]
     assert result.structuredContent == {
-        "plan_rel_path": "alpha.html",
+        "plan_rel_path": ".agent-team/plans/alpha.html",
         "session_id": "s1",
         "submitted": True,
         "prompt": _ALPHA_PROMPT,

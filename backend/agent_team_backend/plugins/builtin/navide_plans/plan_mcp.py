@@ -56,7 +56,10 @@ server = FastMCP(
         "absolute path of the project root you are working in (the workspace "
         "the user opened, normally your current working directory or its "
         "repository root). There is no implicit current workspace, and "
-        "pointing it at a different project reads that project's plans.\n"
+        "pointing it at a different project reads that project's plans. If a "
+        "tool warns that no pane uses your workspace_path, Navide is not "
+        "watching that project and will not show the plan — check "
+        "list_dispatch_targets for the workspaces panes actually use.\n"
         "\n"
         "When to use: whenever the user asks for a plan, or a task is large "
         "enough that its steps and progress should be tracked. Create the "
@@ -86,6 +89,22 @@ server = FastMCP(
 def _plans_root(workspace_path: str) -> Path:
     """Resolve the plans dir under the workspace (raises FsError on escape)."""
     return _resolve_safe(workspace_path, PLANS_REL_DIR)
+
+
+def _plan_rel_path(filename: str) -> str:
+    """Workspace-relative path of a plan file — the form every tool returns.
+
+    Agents echo returned paths into the terminal, where Navide's cmd+click
+    router only recognizes the full ``.agent-team/plans/…`` form.
+    """
+    return f"{PLANS_REL_DIR}/{filename}"
+
+
+def _plan_filename(rel_path: str) -> str:
+    """Bare filename from either accepted input form (full path or filename)."""
+    cleaned = str(rel_path or "").strip().lstrip("/")
+    prefix = f"{PLANS_REL_DIR}/"
+    return cleaned[len(prefix) :] if cleaned.startswith(prefix) else cleaned
 
 
 def _todo_summary(meta: dict[str, Any]) -> dict[str, Any]:
@@ -125,7 +144,7 @@ def _list_plans_sync(workspace_path: str) -> list[dict[str, Any]]:
             continue
         entries.append(
             {
-                "rel_path": path.name,
+                "rel_path": _plan_rel_path(path.name),
                 "name": meta.get("name"),
                 "stage": meta.get("stage"),
                 "overview": meta.get("overview"),
@@ -139,7 +158,7 @@ def _list_plans_sync(workspace_path: str) -> list[dict[str, Any]]:
 def _plan_target(workspace_path: str, rel_path: str) -> Path:
     """Resolve ``rel_path`` inside the plans dir; FsError when it escapes."""
     root = _plans_root(workspace_path)
-    target = _resolve_safe(workspace_path, f"{PLANS_REL_DIR}/{rel_path}")
+    target = _resolve_safe(workspace_path, _plan_rel_path(_plan_filename(rel_path)))
     if target == root or not target.is_relative_to(root):
         raise FsError("path escapes the plans directory")
     return target
@@ -150,7 +169,11 @@ def _read_plan_sync(workspace_path: str, rel_path: str) -> dict[str, Any]:
     if not target.is_file():
         raise FsError(f"plan not found: {rel_path}")
     html = target.read_text(encoding="utf-8", errors="replace")
-    return {"rel_path": rel_path, "meta": parse_plan_meta(html), "html": html}
+    return {
+        "rel_path": _plan_rel_path(_plan_filename(rel_path)),
+        "meta": parse_plan_meta(html),
+        "html": html,
+    }
 
 
 def _require_plan_sync(workspace_path: str, rel_path: str) -> None:
@@ -197,7 +220,7 @@ def _save_plan(
     """
     result = write_file(
         workspace_path,
-        f"{PLANS_REL_DIR}/{rel_path}",
+        _plan_rel_path(_plan_filename(rel_path)),
         content,
         expected_mtime=expected_mtime,
     )
@@ -267,8 +290,8 @@ def _create_plan_sync(
 
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:60].rstrip("-") or "plan"
     for _ in range(16):
-        rel_path = f"{slug}_{secrets.token_hex(3)}.html"
-        if not (root / rel_path).exists():
+        filename = f"{slug}_{secrets.token_hex(3)}.html"
+        if not (root / filename).exists():
             break
     else:
         raise FsError("could not allocate a unique plan filename")
@@ -290,8 +313,8 @@ def _create_plan_sync(
         "reviewNotes": [],
     }
     content = write_plan_meta(content, meta)
-    _save_plan(workspace_path, rel_path, content)
-    return {"rel_path": rel_path, "name": name, "stage": "draft"}
+    _save_plan(workspace_path, filename, content)
+    return {"rel_path": _plan_rel_path(filename), "name": name, "stage": "draft"}
 
 
 def _update_stage_sync(workspace_path: str, rel_path: str, stage: str) -> dict[str, Any]:
@@ -349,6 +372,62 @@ def _add_note_sync(
     return dict(note)
 
 
+# ── workspace sanity check ──────────────────────────────────────────────────
+
+
+def _norm_workspace(path: str) -> str:
+    """Comparable form of a workspace path (symlinks + trailing slash)."""
+    try:
+        return str(Path(path).resolve())
+    except OSError:
+        return str(path or "").rstrip("/")
+
+
+def _live_pane_workspaces() -> list[str]:
+    """Workspaces of live CLI panes; empty when the check is unavailable.
+
+    Uses :func:`_terminal_service` lazily (defined below, resolved at call
+    time) so a backend without terminals never breaks plan creation.
+    """
+    try:
+        terminals = _terminal_service()
+        sessions = list(getattr(terminals, "_sessions", {}).values())  # snapshot
+    except Exception:  # noqa: BLE001 — advisory check, never fatal
+        return []
+    workspaces: list[str] = []
+    for session in sessions:
+        try:
+            if session.closed:
+                continue
+            metadata = session.metadata if isinstance(session.metadata, dict) else {}
+            workspaces.append(str(metadata.get("workspace_path") or session.cwd))
+        except AttributeError:
+            continue  # defensive: session shape changed mid-iteration
+    return workspaces
+
+
+def _workspace_mismatch_warning(workspace_path: str) -> str | None:
+    """Advise when no live pane uses ``workspace_path``.
+
+    Navide's plan window resolves plans against a *pane's* workspace, so a
+    plan written to any other root is invisible there ("Failed to load the
+    plan document"). None when the workspace matches a pane or no pane
+    workspace is known (headless/external MCP clients must not be warned).
+    """
+    panes = _live_pane_workspaces()
+    if not panes:
+        return None
+    target = _norm_workspace(workspace_path)
+    if any(_norm_workspace(pane) == target for pane in panes):
+        return None
+    known = ", ".join(sorted(set(panes)))
+    return (
+        f"no live Navide pane uses workspace_path {workspace_path!r}, so this plan "
+        "will not be visible in Navide's plan view (it resolves plans against the "
+        f"pane's own workspace). Pane workspaces right now: {known}"
+    )
+
+
 # ── MCP tools ───────────────────────────────────────────────────────────────
 
 
@@ -357,9 +436,9 @@ async def plan_list(workspace_path: str) -> list[dict[str, Any]]:
     """List plan documents in the workspace's .agent-team/plans/ directory.
 
     Skips provisioned assets (basename starting with "_") and files without a
-    valid plan-meta island. Each entry has: rel_path (relative to the plans
-    directory — pass it to plan_read), name, stage, overview, todos
-    ({total, by_status} counts), mtime (epoch seconds).
+    valid plan-meta island. Each entry has: rel_path (workspace-relative, e.g.
+    ".agent-team/plans/foo.html" — pass it to plan_read), name, stage,
+    overview, todos ({total, by_status} counts), mtime (epoch seconds).
     """
     return await asyncio.to_thread(_list_plans_sync, workspace_path)
 
@@ -368,9 +447,10 @@ async def plan_list(workspace_path: str) -> list[dict[str, Any]]:
 async def plan_read(workspace_path: str, rel_path: str) -> dict[str, Any]:
     """Read one plan document from the workspace's .agent-team/plans/ directory.
 
-    rel_path is relative to the plans directory (as returned by plan_list).
-    Returns {rel_path, meta, html}: the parsed plan-meta dict (null if the
-    island is missing/invalid) and the raw file content.
+    rel_path is the workspace-relative path returned by plan_list (a bare
+    filename is also accepted). Returns {rel_path, meta, html}: the parsed
+    plan-meta dict (null if the island is missing/invalid) and the raw file
+    content.
     """
     return await asyncio.to_thread(_read_plan_sync, workspace_path, rel_path)
 
@@ -390,9 +470,15 @@ async def plan_create(
     content; id auto-assigned as t1, t2, ...) or a {"id": "<kebab-case>",
     "content": "..."} object; every todo starts as "pending". name/overview/
     todos are written to both the plan-meta island and the visible markup.
-    Returns {rel_path, name, stage}.
+    Returns {rel_path, name, stage}, plus "warning" when workspace_path does
+    not match any pane's workspace — the plan is on disk but Navide's plan
+    view will not find it; re-create it under the warned-about workspace.
     """
-    return await asyncio.to_thread(_create_plan_sync, workspace_path, name, overview, todos)
+    result = await asyncio.to_thread(_create_plan_sync, workspace_path, name, overview, todos)
+    warning = await asyncio.to_thread(_workspace_mismatch_warning, workspace_path)
+    if warning:
+        result["warning"] = warning
+    return result
 
 
 @server.tool()
@@ -475,17 +561,19 @@ async def plan_dispatch(
 ) -> dict[str, Any]:
     """Send an "execute this plan" prompt into a CLI terminal session.
 
-    plan_rel_path is relative to the plans directory (as returned by
-    plan_list). The prompt is the same template the plan window's dispatch
-    button injects. With submit=true (default) a carriage return follows the
-    prompt so the CLI agent starts immediately; submit=false only types the
-    prompt. Dispatch guarantees delivery to the session's PTY, not that the
-    agent acted on it. Use list_dispatch_targets to find session ids.
+    plan_rel_path is the workspace-relative path returned by plan_list (a bare
+    filename is also accepted). The prompt is the same template the plan
+    window's dispatch button injects. With submit=true (default) a carriage
+    return follows the prompt so the CLI agent starts immediately;
+    submit=false only types the prompt. Dispatch guarantees delivery to the
+    session's PTY, not that the agent acted on it. Use list_dispatch_targets
+    to find session ids.
     Returns {plan_rel_path, session_id, submitted, prompt}.
     """
     await asyncio.to_thread(_require_plan_sync, workspace_path, plan_rel_path)
     terminals = _terminal_service()
-    prompt = _plan_execution_prompt(f"{PLANS_REL_DIR}/{plan_rel_path}")
+    plan_rel_path = _plan_rel_path(_plan_filename(plan_rel_path))
+    prompt = _plan_execution_prompt(plan_rel_path)
     terminals.write(session_id, prompt)
     if submit:
         # Brief pause so the CLI's input handling ingests the text before
