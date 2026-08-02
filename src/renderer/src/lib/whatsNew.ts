@@ -34,6 +34,33 @@ export const WHATS_NEW_CHROME = {
 
 export const WHATS_NEW: WhatsNewEntry[] = [
   {
+    version: '0.1.72',
+    title: {
+      'zh-TW': '獨立視窗 AI 面板整合與極速終端回應',
+      'en-US': 'Embedded AI chat in standalone windows & ultra-fast terminal response',
+    },
+    highlights: [
+      {
+        'zh-TW':
+          '獨立視窗內建 AI Chat 面板：Git 與 Plan 獨立視窗全新整合 AI Chat 右側面板，並支援直接拖曳（Drag & Drop）Git 變更檔案列至終端機。',
+        'en-US':
+          'Embedded AI Chat in standalone windows: Git & Plan windows now feature an embedded AI Chat panel and support dragging file rows to terminals.',
+      },
+      {
+        'zh-TW':
+          'Git 視窗 Editorial Calm 介面重構：採用雜誌感簡潔視覺設計與折疊卡片排版，大幅提升工作區狀態與 Diff 閱讀舒適度。',
+        'en-US':
+          'Git window Editorial Calm redesign: fresh magazine-style layout and collapsible cards for cleaner working tree and diff reading.',
+      },
+      {
+        'zh-TW':
+          '終端機打字延遲大幅降低：優化 CLI 高速輸出時的輸入快取機制，打字回應與動態渲染更加順暢無卡頓。',
+        'en-US':
+          'Reduced typing latency: optimized input caching during heavy CLI streaming for smoother typing and dynamic rendering.',
+      },
+    ],
+  },
+  {
     version: '0.1.71',
     title: {
       'zh-TW': '終端隱藏頁籤渲染優化與 AI Chat CLI 引擎',
