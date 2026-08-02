@@ -65,7 +65,6 @@ def ensure_workspace_data_dir(workspace_path: str) -> Path:
     `.gitignore` with `*` ignores the whole directory (including itself), so
     git never tracks it regardless of the workspace's own .gitignore or
     staging order — same pattern as pytest's .pytest_cache/.gitignore.
-    Shared by ProjectStore and ChatStore.
     """
     d = Path(workspace_path) / PROJECT_DIR_NAME
     d.mkdir(parents=True, exist_ok=True)

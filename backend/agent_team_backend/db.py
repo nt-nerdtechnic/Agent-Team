@@ -335,7 +335,7 @@ class WorkspaceDatabases:
     def _canonical(workspace_path: str) -> str | None:
         """Resolved workspace path, or None when empty / not a directory.
 
-        Same guard semantics as the JSON stores' safe no-op (ChatStore._file):
+        Same guard semantics as the legacy JSON stores' safe no-op:
         an invalid workspace yields no database rather than creating one.
         """
         if not workspace_path:

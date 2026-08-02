@@ -208,24 +208,6 @@ def test_chat_settings_delegate_to_store(monkeypatch: pytest.MonkeyPatch) -> Non
     assert ChatCapability().settings_get() is sentinel
 
 
-def test_chat_notes_set_delegates_to_chat_store(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[tuple] = []
-
-    def fake_set_notes(workspace_path, notes, notepads):
-        calls.append((workspace_path, notes, notepads))
-        return True
-
-    monkeypatch.setattr(app.chat_store, "set_notes", fake_set_notes)
-
-    assert ChatCapability().notes_set("/ws", notes="hi") is True
-    assert calls == [("/ws", "hi", [])]
-
-
-def test_chat_provisional_method_raises() -> None:
-    with pytest.raises(CapabilityError, match="provisional"):
-        ChatCapability().start()
-
-
 # -- terminal capability ---------------------------------------------------
 
 

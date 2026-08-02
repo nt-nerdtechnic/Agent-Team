@@ -86,7 +86,6 @@ from .plan_provisioning import ensure_plan_assets, plan_spec_exists
 from .profile_migration import migrate_legacy_claude_homes
 from .profiles_store import CliProfilesStore
 from .skills_store import SkillsStore
-from .chat_store import ChatStore
 from .projects import ProjectStore
 from .spawn_history import SpawnHistoryStore
 from .recent_workspaces import RecentWorkspacesStore
@@ -136,7 +135,6 @@ skills_store = SkillsStore()
 analyzer_settings_store = AnalyzerSettingsStore(db=database)
 ai_chat_settings_store = AIChatSettingsStore(db=database)
 ui_settings_store = UiSettingsStore(db=database)
-chat_store = ChatStore(databases=workspace_databases)
 # Module-level stores share the same database handle.
 pty_registry.set_database(database)
 onboarding_deps.set_database(database)
@@ -282,7 +280,6 @@ class Session:
         # Session's send_json. See get_terminals().
         self.terminals = get_terminals()
         # Track background tasks so they can be cancelled on disconnect.
-        self._chat_tasks: set[asyncio.Task] = set()
         self._review_tasks: set[asyncio.Task] = set()
         # In-flight handle_message tasks; cancelled in ws() finally so handlers
         # never outlive the connection and drain onto a closed socket.
@@ -1294,8 +1291,6 @@ async def ws(websocket: WebSocket) -> None:
         # PTYs survive this disconnect so the frontend can reattach after a
         # transient network outage. They are killed only when the user explicitly
         # closes a pane (terminal.kill) or the whole app process exits.
-        for t in session._chat_tasks:
-            t.cancel()
         for t in session._review_tasks:
             t.cancel()
         for t in session._handler_tasks:

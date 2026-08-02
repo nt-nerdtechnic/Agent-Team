@@ -333,14 +333,12 @@ class SearchCapability:
 
 
 class ChatCapability:
-    """Scoped AI-chat access, delegating to the chat/editor core services.
+    """Scoped AI settings / editor-AI access, delegating to core services.
 
-    Interface shell: the chat surface is heterogeneous -- some calls map to a
-    single core singleton (``ai_chat_settings_store``, ``chat_store``,
-    ``editor_service``, ``fs_service``), others are
-    session/broadcast/HTTP-coupled inside their WS handler with no extractable
-    service yet. Methods in the first group delegate; methods in the second are
-    provisional placeholders that raise until Phase 2 extracts a service.
+    Interface shell: delegates to a single core singleton per call
+    (``ai_chat_settings_store``, ``editor_service``). The AI chat feature
+    itself was removed; what remains is the shared AI settings store (used by
+    review and git.generate_message) and the Monaco inline-AI editor calls.
     Signatures are provisional throughout.
     """
 
@@ -357,50 +355,6 @@ class ChatCapability:
         from .. import app
 
         return app.ai_chat_settings_store.set(settings)
-
-    def notes_set(
-        self,
-        workspace_path: str,
-        notes: str = "",
-        notepads: list | None = None,
-    ) -> Any:
-        # Signature provisional -- interface shell, filled in during Phase 2.
-        from .. import app
-
-        return app.chat_store.set_notes(
-            workspace_path, notes=notes, notepads=notepads or []
-        )
-
-    def threads_set(self, workspace_path: str, threads: list) -> Any:
-        # Signature provisional -- interface shell, filled in during Phase 2.
-        from .. import app
-
-        return app.chat_store.set_threads(workspace_path, threads)
-
-    def accept_edit(
-        self,
-        workspace_path: str,
-        file_path: str,
-        new_content: str,
-    ) -> dict[str, Any]:
-        # Signature provisional -- interface shell, filled in during Phase 2.
-        # Delegates the file write; the handler's git.changed broadcast is
-        # host-side and intentionally not mirrored here.
-        from .. import app
-
-        return app.fs_service.write_file(workspace_path, file_path, new_content)
-
-    def approve_command(self, session_id: str, tool_id: str) -> None:
-        # Command approval was removed with the API chat engine — the CLI
-        # engine executes tools itself, so there is nothing to approve.
-        raise CapabilityError(
-            "command approval was removed — the CLI engine runs commands itself"
-        )
-
-    def reject_command(self, session_id: str, tool_id: str) -> None:
-        raise CapabilityError(
-            "command approval was removed — the CLI engine runs commands itself"
-        )
 
     def editor_complete(
         self,
@@ -427,45 +381,6 @@ class ChatCapability:
         from .. import app
 
         return app.editor_service.rewrite(base_url, model, code, instruction, language)
-
-    # -- provisional: no extractable service yet --------------------------
-    # ``start``/``stop`` are session-task + agent-loop coupled;
-    # ``test_connection``/``enhance_prompt``/``web_search`` inline per-provider
-    # HTTP inside their WS handler. They raise until Phase 2 extracts a service.
-
-    def start(self, *args: Any, **kwargs: Any) -> Any:
-        raise CapabilityNotAvailable(
-            "capability not available: chat.start is provisional — "
-            "session/agent-loop coupled, no core service to delegate to yet "
-            "(Phase 2)"
-        )
-
-    def stop(self, *args: Any, **kwargs: Any) -> Any:
-        raise CapabilityNotAvailable(
-            "capability not available: chat.stop is provisional — "
-            "session-task coupled, no core service to delegate to yet (Phase 2)"
-        )
-
-    def test_connection(self, *args: Any, **kwargs: Any) -> Any:
-        raise CapabilityNotAvailable(
-            "capability not available: chat.test_connection is provisional — "
-            "per-provider HTTP inlined in the WS handler, no core service to "
-            "delegate to yet (Phase 2)"
-        )
-
-    def enhance_prompt(self, *args: Any, **kwargs: Any) -> Any:
-        raise CapabilityNotAvailable(
-            "capability not available: chat.enhance_prompt is provisional — "
-            "streaming inlined in the WS handler, no core service to delegate "
-            "to yet (Phase 2)"
-        )
-
-    def web_search(self, *args: Any, **kwargs: Any) -> Any:
-        raise CapabilityNotAvailable(
-            "capability not available: chat.web_search is provisional — "
-            "HTTP inlined in the WS handler, no core service to delegate to "
-            "yet (Phase 2)"
-        )
 
 
 class IssuesCapability:
