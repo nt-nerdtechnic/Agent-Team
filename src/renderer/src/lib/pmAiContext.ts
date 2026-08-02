@@ -1,14 +1,14 @@
 /**
  * pmAiContext.ts
  *
- * Pure helpers for the Pipeline Manager window's embedded CLI terminal:
- * the context payload injected right after a fresh spawn (a short situating
+ * Pure helper for the Pipeline Manager window's embedded CLI terminal: the
+ * context payload injected right after a fresh spawn (a short situating
  * preamble plus a snapshot of what the user is looking at and a roles
- * summary) and the spawn command assembly. Pure functions so both are
- * unit-testable; the caller decides when and how to send them.
+ * summary). Generic CLI-dock helpers (command assembly, bracketed paste,
+ * truncation) live in aiCliContext.ts.
  */
 
-import { CLI_AGENT_SPECS } from './agentSpecs'
+import { truncateText } from './aiCliContext'
 
 export interface PmAiPipelineSummary {
   name: string
@@ -51,7 +51,7 @@ function truncateKickoffBodies(stages: Record<string, unknown>[]): Record<string
         if (typeof body !== 'string' || body.length <= KICKOFF_TRUNCATE_AT) return slot
         return {
           ...(slot as Record<string, unknown>),
-          kickoff_body: body.slice(0, KICKOFF_TRUNCATE_AT) + '…[truncated]',
+          kickoff_body: truncateText(body, KICKOFF_TRUNCATE_AT),
         }
       }),
     }
@@ -85,35 +85,4 @@ export function buildPmAiContext(input: PmAiContextInput): string {
     lines.push(`- ${r.key}: ${r.label}${r.oneLine ? ` — ${r.oneLine}` : ''}`)
   }
   return lines.join('\n')
-}
-
-/** Wrap text in a bracketed-paste envelope so TUI CLIs treat it as one paste
- *  (inserted literally, not interpreted keystroke-by-keystroke). */
-export function bracketedPaste(text: string): string {
-  return `\x1b[200~${text}\x1b[201~`
-}
-
-/** Simplified App.vue resolveCommand for the PM AI panel: spec default command
- *  + per-pane arg (aider chat-history isolation) + YOLO skip-permission flag.
- *  There is no user command-override UI here, and the frontend binary override
- *  is deliberately skipped — the backend backstops binary resolution.
- *
- *  `yoloStored` is the raw 'agentTeam.yolo' setting value: '1'/'0', or null
- *  when unset → defaults ON, mirroring App.vue's makeStickyBool semantics. */
-export function resolvePmAiCommand(input: {
-  agentKey: string
-  paneId: string
-  /** Directory the per-pane files live in — the panel's workspace path. */
-  historyRoot: string
-  yoloStored: string | null
-}): string {
-  const spec = CLI_AGENT_SPECS.find((s) => s.agentKey === input.agentKey)
-  const parts = [spec?.defaultCommand || input.agentKey]
-  const paneArg = spec?.paneArg
-    ? spec.paneArg({ paneId: input.paneId, historyRoot: input.historyRoot })
-    : ''
-  if (paneArg) parts.push(paneArg)
-  const yolo = input.yoloStored === null ? true : input.yoloStored === '1'
-  if (yolo && spec?.skipPermissionFlag) parts.push(spec.skipPermissionFlag)
-  return parts.join(' ')
 }

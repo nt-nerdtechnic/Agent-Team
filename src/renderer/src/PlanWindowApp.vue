@@ -22,8 +22,9 @@ import PlanMarkdownBody from './editor/PlanMarkdownBody.vue'
 import FilePreviewPane from './editor/FilePreviewPane.vue'
 import PlanDocPreview from './editor/PlanDocPreview.vue'
 import NotificationHost from './components/NotificationHost.vue'
-// Shared right-side AI chat shell (rail toggle + resize + lazy AIChatPane).
-import AiChatDock from './components/AiChatDock.vue'
+// Shared right-side CLI agent terminal shell (rail toggle + resize + real PTY).
+import AiCliDock from './components/AiCliDock.vue'
+import { aiTerminalPaneId, buildPlanCliContext, type PlanCliMetaSummary } from './lib/aiCliContext'
 
 const params = new URLSearchParams(window.location.search)
 const workspacePath = params.get('workspace_path') ?? ''
@@ -234,6 +235,43 @@ function onWindowKeydown(event: KeyboardEvent): void {
   window.close()
 }
 
+// Pane id for the CLI dock, derived per (surface, workspace): Plan windows for
+// different workspaces coexist, and a shared fixed id would let one window's
+// reattach steal — and its Start reap — another's running CLI (see
+// aiTerminalPaneId). workspacePath is fixed at window creation, so this is
+// stable for the window's life.
+const AI_PANE_ID = aiTerminalPaneId('plan', workspacePath)
+
+// Context payload the CLI dock injects after a fresh spawn: the open plan
+// document (path + plan-meta summary + truncated content) and the workspace.
+// Reads through the same store the toolbar uses, so the snapshot is fresh at
+// injection time; a plain doc without plan meta still injects its raw content.
+async function buildPlanContext(): Promise<string> {
+  const relPath = openDoc.value?.relPath ?? null
+  let meta: PlanCliMetaSummary | null = null
+  let content: string | null = null
+  if (relPath) {
+    const read = await resolvePlanStore(relPath).readMeta(planCtx(relPath)).catch(() => null)
+    if (read) {
+      meta = {
+        name: read.meta.name,
+        stage: read.meta.stage,
+        todoStatuses: read.meta.todos.map((todo) => todo.status),
+      }
+      content = read.raw
+    } else {
+      const resp = await backend
+        .send<{ ok: boolean; content?: string }>('fs.read_file', {
+          workspace_path: workspacePath,
+          rel_path: relPath,
+        })
+        .catch(() => null)
+      content = resp?.payload?.ok ? (resp.payload.content ?? null) : null
+    }
+  }
+  return buildPlanCliContext({ workspacePath, relPath, meta, content })
+}
+
 let offThemeSettingsChange: (() => void) | null = null
 let offPlansChanged: (() => void) | null = null
 let offPlanOpenDoc: (() => void) | null = null
@@ -387,8 +425,17 @@ onUnmounted(() => {
       </template>
       <div v-else class="plan-window-empty">{{ t('pane.plans.window-empty') }}</div>
     </main>
-    <!-- Right AI chat dock (rail toggle + resize + lazy AIChatPane) -->
-    <AiChatDock width-key="plan-ai-panel-width" :workspace-path="workspacePath" :backend="backend" />
+    <!-- Right AI terminal dock (rail toggle + resize + embedded CLI PTY).
+         width-key is carried over from the previous AiChatDock so the user's
+         persisted panel width survives the module swap. -->
+    <AiCliDock
+      width-key="plan-ai-panel-width"
+      :pane-id="AI_PANE_ID"
+      origin="plan-window"
+      :workspace-path="workspacePath"
+      :backend="backend"
+      :build-context="buildPlanContext"
+    />
     <NotificationHost />
   </div>
 </template>

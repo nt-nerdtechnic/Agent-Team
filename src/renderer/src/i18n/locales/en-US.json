@@ -52,6 +52,9 @@
       "title": "AI Chat",
       "tab-shortcut": "AI Chat (⌘⇧A)"
     },
+    "ai-terminal": {
+      "title": "AI Terminal"
+    },
     "search": {
       "title": "Search"
     },

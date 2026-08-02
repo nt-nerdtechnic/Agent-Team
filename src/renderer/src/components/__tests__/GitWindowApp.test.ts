@@ -9,17 +9,35 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises, type DOMWrapper, type VueWrapper } from '@vue/test-utils'
 import { defineComponent, h, ref } from 'vue'
 import { extractDropPaths, shellEscape } from '../../lib/drop'
+import { aiTerminalPaneId } from '../../lib/aiCliContext'
 import { i18n } from '../../i18n'
 
-// Async-loaded by the AiChatDock (defineAsyncComponent) — the mock keeps the
-// real pane's heavy static deps (mermaid/katex) out of the test bundle.
-vi.mock('../AIChatPane.vue', () => ({
+// The CLI dock's terminal host pulls in useTerminal/xterm — stub it with the
+// imperative surface the dock drives (reattach/fit are called on first open).
+vi.mock('../AiCliTerminal.vue', () => ({
   __esModule: true,
   default: defineComponent({
-    name: 'AIChatPane',
-    props: ['workspacePath', 'backend', 'embedded', 'active'],
+    name: 'AiCliTerminal',
+    props: ['paneId', 'backend', 'workspacePath'],
     inheritAttrs: false,
-    render: () => h('div', { class: 'stub-AIChatPane' })
+    setup(_, { expose }) {
+      expose({
+        spawn: vi.fn(async () => undefined),
+        tryReattach: vi.fn(async () => undefined),
+        pasteText: vi.fn(),
+        interrupt: vi.fn(async () => undefined),
+        kill: vi.fn(async () => undefined),
+        cancelPendingCreate: vi.fn(async () => undefined),
+        fitTerminal: vi.fn(),
+        focus: vi.fn(),
+        status: ref('idle'),
+        displayStatus: ref('idle'),
+        lastRawActivityAt: ref(0),
+        sessionId: ref(''),
+        error: ref('')
+      })
+      return () => h('div', { class: 'stub-AiCliTerminal' })
+    }
   })
 }))
 
@@ -339,23 +357,35 @@ describe('GitWindowApp — Editorial Calm wiring', () => {
     expect(diff.attributes('filepath')).toBe('src/a.ts')
   })
 
-  it('hosts the shared AI chat dock with this window\'s width key and lazy pane', async () => {
+  it('hosts the shared AI CLI dock with this window\'s width key, pane id and context', async () => {
     wrapper = await mountApp()
-    // The shared shell (AiChatDock) owns the rail/resize/lazy-mount behavior —
-    // covered in depth by AiChatDock.test.ts. Here: it is wired to this
-    // window's workspace + width key and the pane mounts on first toggle only.
-    const dock = wrapper.findComponent({ name: 'AiChatDock' })
+    // The shared shell (AiCliDock) owns the rail/resize/eager-mount and the
+    // CLI state machine — covered in depth by AiCliDock.test.ts. Here: it is
+    // wired to this window's workspace, width key and per-workspace derived
+    // pane id, and the terminal mounts eagerly (PTY ownership claim) while
+    // the panel starts closed.
+    const dock = wrapper.findComponent({ name: 'AiCliDock' })
     expect(dock.exists()).toBe(true)
     expect(dock.props('widthKey')).toBe('git-ai-panel-width')
     expect(dock.props('workspacePath')).toBe('/tmp/ws')
-    expect(wrapper.findComponent({ name: 'AIChatPane' }).exists()).toBe(false)
+    expect(dock.props('paneId')).toBe(aiTerminalPaneId('git', '/tmp/ws'))
+    expect(dock.props('origin')).toBe('git-window')
+    expect(typeof dock.props('buildContext')).toBe('function')
+    // The injected context reflects this window's git status snapshot.
+    const context = (dock.props('buildContext') as () => string)()
+    expect(context).toContain('Workspace: /tmp/ws')
+    expect(context).toContain('Current branch: main')
+    expect(context).toContain('src/staged.ts')
+    const term = wrapper.findComponent({ name: 'AiCliTerminal' })
+    expect(term.exists()).toBe(true)
+    expect(term.props('workspacePath')).toBe('/tmp/ws')
+    expect(term.props('paneId')).toBe(aiTerminalPaneId('git', '/tmp/ws'))
+    const panelEl = wrapper.find('.ai-dock-panel').element as HTMLElement
+    expect(panelEl.style.display).toBe('none')
 
     await wrapper.find('.ai-dock-rail-btn').trigger('click')
     await flushPromises()
-    const pane = wrapper.findComponent({ name: 'AIChatPane' })
-    expect(pane.exists()).toBe(true)
-    expect(pane.props('workspacePath')).toBe('/tmp/ws')
-    expect(pane.props('active')).toBe(true)
+    expect(panelEl.style.display).not.toBe('none')
   })
 
   it('switches branch only via the explicit ↵ button, never on row click', async () => {

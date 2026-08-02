@@ -3,20 +3,20 @@
 // BrowserWindow that unifies pipeline + stage editing and role management,
 // replacing the old Role Manager and Stages windows. Owns its own backend
 // connection; theme changes made in other windows arrive as settings broadcasts.
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useBackend } from './composables/useBackend'
-import { initSettingsBackend, onSettingsChanged, settingsGet, settingsSet } from './lib/settings'
+import { initSettingsBackend, onSettingsChanged } from './lib/settings'
 import { useTheme } from './composables/useTheme'
 import { useNotify } from './composables/useNotify'
 import { useKeybindings } from './keybindings/useKeybindings'
 import NotificationHost from './components/NotificationHost.vue'
-import PipelineAiTerminal from './components/PipelineAiTerminal.vue'
+import AiCliDock from './components/AiCliDock.vue'
 import { useRoles, type Role } from './composables/useRoles'
 import { usePipelines, type PipelineSummary } from './composables/usePipelines'
 import { useStages } from './composables/useStages'
 import { stageToBackend, type AgentKey, type Stage, type StageSlot } from './data/stages'
-import { CLI_AGENT_SPECS } from './lib/agentSpecs'
-import { bracketedPaste, buildPmAiContext, resolvePmAiCommand } from './lib/pmAiContext'
+import { buildPmAiContext } from './lib/pmAiContext'
+import { aiTerminalPaneId } from './lib/aiCliContext'
 
 const params = new URLSearchParams(window.location.search)
 const initialPipelineId = params.get('pipeline_id')
@@ -517,74 +517,33 @@ async function rImport(): Promise<void> {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// AI PANEL — embedded CLI terminal (real PTY) bound to the opener's workspace
+// AI PANEL — shared AiCliDock (embedded CLI PTY) bound to the opener's workspace
 // ══════════════════════════════════════════════════════════════════════════════
-
-// Fixed pane id: this window is a singleton, so the id can never collide, and
-// keeping it constant makes useTerminal's localStorage keys (terminal-pty /
-// terminal-scroll) stable across window close/reopen — that is what lets a
-// still-running CLI be reattached instead of respawned. The first 8 chars are
-// hex on purpose: aider's per-pane chat-history file name is derived from
-// paneId.slice(0, 8) and the backend only claims 8-hex tokens — a non-hex
-// prefix would silently degrade aider to the SHARED history file.
-const AI_PANE_ID = 'aa1de001-pm-ai-terminal'
-const AI_PANEL_W_KEY = 'pm-ai-panel-width'
-const AI_AGENT_KEY = 'pm-ai-agent'
-
-const aiPanelOpen = ref(false)
-const aiPanelWidth = ref(Math.max(280, Math.min(600, parseInt(settingsGet(AI_PANEL_W_KEY, '360'), 10))))
-let aiResizing = false
-function onAiResizeStart(): void {
-  aiResizing = true
-  document.addEventListener('mousemove', onAiResizeMove)
-  document.addEventListener('mouseup', onAiResizeEnd)
-}
-function onAiResizeMove(e: MouseEvent): void {
-  if (!aiResizing) return
-  aiPanelWidth.value = Math.max(280, Math.min(600, window.innerWidth - e.clientX))
-}
-function onAiResizeEnd(): void {
-  if (!aiResizing) return
-  aiResizing = false
-  settingsSet(AI_PANEL_W_KEY, String(aiPanelWidth.value))
-  document.removeEventListener('mousemove', onAiResizeMove)
-  document.removeEventListener('mouseup', onAiResizeEnd)
-}
 
 // Workspace is fixed at window CREATION: the opener's workspace (query param)
 // or, when launched without one (native menu), the most recent still-existing
 // workspace. Re-opening a pipeline in the already-open window does not rebind it.
 const aiWorkspace = ref(params.get('workspace_path') ?? '')
-const aiWorkspaceName = computed(() => aiWorkspace.value.split('/').filter(Boolean).pop() ?? '')
 
-const aiTermRef = ref<InstanceType<typeof PipelineAiTerminal> | null>(null)
-const aiAgentKey = ref(settingsGet<string>(AI_AGENT_KEY, 'claude'))
-watch(aiAgentKey, (k) => settingsSet(AI_AGENT_KEY, k))
-const aiStarting = ref(false)
-const aiStatus = computed(() => aiTermRef.value?.status ?? 'idle')
-/** A PTY is attached (fresh spawn or reattach) and not yet exited. */
-const aiActive = computed(() => aiStatus.value === 'starting' || aiStatus.value === 'running')
-const aiAgentLabel = computed(
-  () => CLI_AGENT_SPECS.find((s) => s.agentKey === aiAgentKey.value)?.label ?? aiAgentKey.value
-)
+// Pane id derived per (surface, workspace) so a PM window on another workspace
+// never steals/reaps this one's PTY; stable for a given workspace, which keeps
+// useTerminal's localStorage keys (terminal-pty / terminal-scroll) stable
+// across window close/reopen — that is what lets a still-running CLI be
+// reattached instead of respawned. (Replaces the old fixed 'aa1de001-…' id:
+// one-time reattach break, a CLI left running under the old id is orphaned.)
+const aiPaneId = computed(() => aiTerminalPaneId('pm', aiWorkspace.value))
 
-// On first backend connect: resolve the fallback workspace if needed, then try
-// to reattach to a CLI left running by a previous window instance. A dead or
-// absent PTY simply leaves the Start UI showing.
-let aiInitDone = false
-// True while the connect-time reattach is in flight. Start is locked out then:
-// a spawn racing the reattach could bind the session handlers twice (doubled
-// output rendering plus a leaked subscription).
-const aiReattaching = ref(false)
-// The terminal mounts only after the workspace question is SETTLED (found or
-// definitively absent), so PipelineAiTerminal's setup-time workspacePath prop
-// is always the real value — useTerminal captures it once.
+// On first backend connect: resolve the fallback workspace if needed. The dock
+// owns the rest of the lifecycle (reattach, spawn, context injection);
+// aiWorkspaceResolved gates its empty state so "No workspace available" never
+// flashes during the list_recent round-trip.
 const aiWorkspaceResolved = ref(!!aiWorkspace.value)
+let aiWorkspaceInitDone = false
 watch(
   () => backend.status.value,
   async (s) => {
-    if (s !== 'connected' || aiInitDone) return
-    aiInitDone = true
+    if (s !== 'connected' || aiWorkspaceInitDone) return
+    aiWorkspaceInitDone = true
     if (!aiWorkspace.value) {
       try {
         const resp = await backend.send<{ recent: { path: string; exists: boolean }[] }>(
@@ -593,105 +552,28 @@ watch(
         aiWorkspace.value = resp.ok
           ? (resp.payload?.recent.find((w) => w.exists)?.path ?? '')
           : ''
-      } catch { /* no workspace — panel shows the empty state, spawn disabled */ }
+      } catch { /* no workspace — the dock shows its empty state, spawn disabled */ }
     }
     aiWorkspaceResolved.value = true
-    if (!aiWorkspace.value) return  // no workspace → no terminal mounted
-    aiReattaching.value = true
-    try {
-      await nextTick()  // the v-if just unlocked — let the terminal mount first
-      await aiTermRef.value?.tryReattach()
-    } catch { /* PTY gone — fall through to the Start UI */ }
-    finally { aiReattaching.value = false }
   },
   { immediate: true }
 )
 
-// The panel opens from display:none — refit once measurable so the terminal
-// paints at the real width (sanctioned explicit-refit path, no history loss).
-watch(aiPanelOpen, (open) => {
-  if (open) void nextTick(() => aiTermRef.value?.fitTerminal({ redrawAfterSettle: true }))
-})
-
-async function aiStart(): Promise<void> {
-  const term = aiTermRef.value
-  // Also require a live connection: a create queued while disconnected would
-  // race the connect-time tryReattach and double-bind output handlers.
-  if (!term || !aiWorkspace.value || aiStarting.value || aiActive.value || aiReattaching.value) return
-  if (backend.status.value !== 'connected') return
-  aiStarting.value = true
-  try {
-    const shell = backend.shell.value || 'bash'
-    const command = resolvePmAiCommand({
-      agentKey: aiAgentKey.value,
-      paneId: AI_PANE_ID,
-      historyRoot: aiWorkspace.value,
-      yoloStored: settingsGet<string | null>('agentTeam.yolo', null),
-    })
-    await term.spawn({
-      // zsh reads ~/.zshrc (where installers add PATH) only in interactive
-      // mode — plain -lc misses it (same wrapping as App.vue spawns).
-      command: [shell, shell.endsWith('zsh') ? '-ilc' : '-lc', command],
-      cwd: aiWorkspace.value,
-      agentKey: aiAgentKey.value,
-      metadata: { workspace_path: aiWorkspace.value, origin: 'pipeline-manager' },
-      // Start always means a NEW PTY. Reattach belongs to the connect-time
-      // tryReattach above — letting spawn's internal reattach run here could
-      // rebind a live conversation and re-inject context into it. A still-live
-      // predecessor is reaped via replaces_terminal_id.
-      skipReattach: true,
-    })
-    // Context is injected on FRESH spawns only — reattach keeps the running
-    // conversation untouched (mount-time tryReattach already claimed any live
-    // PTY, so reaching here means this spawn created a new one).
-    if (term.status === 'running') void aiInjectContext()
-  } catch { /* spawn errors are rendered inside the terminal by useTerminal */ }
-  finally { aiStarting.value = false }
-}
-
-/** Best-effort context injection after a fresh spawn: wait for the CLI's
- *  startup output to go quiet (2 s of silence after first output, 12 s cap),
- *  then bracketed-paste the snapshot and submit. Failure never blocks the CLI. */
-async function aiInjectContext(): Promise<void> {
-  const term = aiTermRef.value
-  if (!term) return
-  try {
-    const deadline = Date.now() + 12000
-    for (;;) {
-      const last = term.lastRawActivityAt
-      if ((last > 0 && Date.now() - last >= 2000) || Date.now() >= deadline) break
-      await new Promise((r) => setTimeout(r, 250))
-      if (term.status !== 'running') return  // died during startup — nothing to inject
-    }
-    const inDetail = plView.value === 'detail' && !!plEditingId.value
-    const text = buildPmAiContext({
-      workspacePath: aiWorkspace.value,
-      pipelineName: inDetail ? (plCurrentPipeline.value?.name ?? plEditingId.value) : null,
-      stages: inDetail ? sActiveStages.value.map(stageToBackend) : [],
-      pipelines: pipelinesApi.pipelines.value.map((p) => ({
-        name: p.name,
-        stageCount: p.stage_count,
-        isDefault: p.id === pipelinesApi.activePipelineId.value,
-      })),
-      roles: rolesApi.roles.value.map((r) => ({ key: r.key, label: r.label, oneLine: r.one_line })),
-    })
-    term.pasteText(bracketedPaste(text))
-    // Let the CLI ingest the paste before the submitting CR.
-    await new Promise((r) => setTimeout(r, 300))
-    term.pasteText('\r')
-  } catch { /* best-effort */ }
-}
-
-function aiInterrupt(): void {
-  void aiTermRef.value?.interrupt()
-}
-function aiStop(): void {
-  const term = aiTermRef.value
-  if (!term) return
-  // While 'starting' there is no sessionId yet, so kill() would be a no-op and
-  // a hung terminal.create would be uncancellable — cancel the pending create.
-  if (term.status === 'starting') void term.cancelPendingCreate().catch(() => {})
-  else void term.kill()
+/** Snapshot of what the user is looking at, injected by the dock after a
+ *  fresh spawn (buildPmAiContext stays a pure, unit-tested function). */
+function buildAiContext(): string {
+  const inDetail = plView.value === 'detail' && !!plEditingId.value
+  return buildPmAiContext({
+    workspacePath: aiWorkspace.value,
+    pipelineName: inDetail ? (plCurrentPipeline.value?.name ?? plEditingId.value) : null,
+    stages: inDetail ? sActiveStages.value.map(stageToBackend) : [],
+    pipelines: pipelinesApi.pipelines.value.map((p) => ({
+      name: p.name,
+      stageCount: p.stage_count,
+      isDefault: p.id === pipelinesApi.activePipelineId.value,
+    })),
+    roles: rolesApi.roles.value.map((r) => ({ key: r.key, label: r.label, oneLine: r.one_line })),
+  })
 }
 </script>
 
@@ -981,57 +863,17 @@ function aiStop(): void {
     </div>
     </div><!-- end tab-col -->
 
-    <!-- Right activity rail (AI terminal toggle) -->
-    <div class="right-act">
-      <button
-        class="right-act-btn"
-        :class="{ active: aiPanelOpen }"
-        title="AI terminal"
-        @click="aiPanelOpen = !aiPanelOpen"
-      >
-        <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor">
-          <path d="M8 0L9.5 5.5L15 7L9.5 8.5L8 14L6.5 8.5L1 7L6.5 5.5Z"/>
-        </svg>
-      </button>
-    </div>
-
-    <!-- AI panel (right): embedded CLI terminal -->
-    <div v-show="aiPanelOpen" class="ai-resize-handle" @mousedown.prevent="onAiResizeStart" />
-    <div v-show="aiPanelOpen" class="ai-panel" :style="{ width: aiPanelWidth + 'px' }">
-      <div class="ai-head">
-        <span class="ai-title">AI Terminal</span>
-        <span v-if="aiWorkspace" class="ai-ws" :title="aiWorkspace">{{ aiWorkspaceName }}</span>
-      </div>
-      <div class="ai-controls">
-        <template v-if="!aiActive">
-          <select v-model="aiAgentKey" class="ai-agent-select">
-            <option v-for="s in CLI_AGENT_SPECS" :key="s.agentKey" :value="s.agentKey">{{ s.label }}</option>
-          </select>
-          <button
-            class="primary ai-ctl-btn"
-            :disabled="!aiWorkspace || aiStarting || aiReattaching || backend.status.value !== 'connected'"
-            :title="aiWorkspace ? 'Spawn the CLI in ' + aiWorkspace : 'No workspace available'"
-            @click="aiStart"
-          >{{ aiStarting ? 'Starting…' : aiReattaching ? 'Reattaching…' : 'Start' }}</button>
-        </template>
-        <template v-else>
-          <span class="ai-running-label">{{ aiAgentLabel }}</span>
-          <button class="ghost ai-ctl-btn" title="Send Ctrl+C to the CLI" @click="aiInterrupt">Interrupt</button>
-          <button class="danger ai-ctl-btn" title="Kill the CLI process" @click="aiStop">Stop</button>
-        </template>
-      </div>
-      <p v-if="aiWorkspaceResolved && !aiWorkspace" class="ai-empty">No workspace available</p>
-      <!-- Mounted only once the workspace is resolved and present, so
-           useTerminal's setup-time workspacePath capture sees the real value. -->
-      <PipelineAiTerminal
-        v-if="aiWorkspace"
-        ref="aiTermRef"
-        :pane-id="AI_PANE_ID"
-        :backend="backend"
-        :workspace-path="aiWorkspace"
-        class="ai-term"
-      />
-    </div>
+    <!-- Right AI terminal dock (rail toggle + resize + embedded CLI PTY) -->
+    <AiCliDock
+      width-key="pm-ai-panel-width"
+      agent-key-storage-key="pm-ai-agent"
+      :pane-id="aiPaneId"
+      origin="pipeline-manager"
+      :workspace-path="aiWorkspace"
+      :workspace-resolved="aiWorkspaceResolved"
+      :backend="backend"
+      :build-context="buildAiContext"
+    />
     </div><!-- end main-row -->
 
     <!-- ── Confirm dialogs ───────────────────────────────────────────────── -->
@@ -1164,107 +1006,6 @@ function aiStop(): void {
   overflow: hidden;
 }
 
-/* ── AI panel (right) ─────────────────────────────────────────────────────── */
-.right-act {
-  flex-shrink: 0;
-  width: 34px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding-top: 8px;
-  border-left: 1px solid var(--border-muted);
-  background: var(--bg-base);
-}
-.right-act-btn {
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  padding: 5px;
-  border-radius: 4px;
-}
-.right-act-btn:hover { color: var(--text-bright); }
-.right-act-btn.active { color: var(--accent-bright); background: var(--accent-subtle); }
-.ai-resize-handle {
-  flex-shrink: 0;
-  width: 4px;
-  cursor: col-resize;
-  background: transparent;
-  border-left: 1px solid var(--border-muted);
-  transition: background 0.15s;
-}
-.ai-resize-handle:hover { background: var(--accent-emphasis); }
-.ai-panel {
-  flex-shrink: 0;
-  min-width: 280px;
-  max-width: 600px;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  border-left: 1px solid var(--border-muted);
-  background: var(--bg-base);
-}
-.ai-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px 4px;
-  flex-shrink: 0;
-}
-.ai-title {
-  font-size: 12px;
-  font-weight: 600;
-}
-.ai-ws {
-  margin-left: auto;
-  font-size: 11px;
-  color: var(--text-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-}
-.ai-controls {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px 8px;
-  border-bottom: 1px solid var(--border-muted);
-  flex-shrink: 0;
-}
-.ai-agent-select {
-  flex: 1;
-  min-width: 0;
-  font-size: 12px;
-  padding: 5px 8px;
-}
-.ai-ctl-btn {
-  font-size: 11px;
-  padding: 5px 10px;
-  flex-shrink: 0;
-}
-.ai-running-label {
-  flex: 1;
-  min-width: 0;
-  font-size: 12px;
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.ai-empty {
-  margin: 0;
-  padding: 12px;
-  font-size: 12px;
-  color: var(--text-muted);
-  flex-shrink: 0;
-}
-.ai-term {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
 .toolbar {
   display: flex;
   gap: 6px;

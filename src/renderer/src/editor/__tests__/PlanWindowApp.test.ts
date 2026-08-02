@@ -11,6 +11,7 @@ import { ref } from 'vue'
 import PlanWindowApp from '../../PlanWindowApp.vue'
 import { i18n } from '../../i18n'
 import { resolvePlanStore } from '../../composables/planStore'
+import { aiTerminalPaneId } from '../../lib/aiCliContext'
 
 i18n.global.locale.value = 'en-US'
 
@@ -130,10 +131,37 @@ vi.mock('../PlanMarkdownBody.vue', () => ({
 vi.mock('../PlanFileView.vue', () => stub('PlanFileView', ['workspacePath', 'relPath', 'backend']))
 vi.mock('../FilePreviewPane.vue', () => stub('FilePreviewPane', ['workspacePath', 'relPath', 'name', 'backend']))
 vi.mock('../../components/NotificationHost.vue', () => stub('NotificationHost'))
-// Async-loaded by the window (defineAsyncComponent) — the mock also keeps the
-// real pane's heavy static deps (mermaid/katex) out of the test bundle.
-vi.mock('../../components/AIChatPane.vue', () =>
-  stub('AIChatPane', ['workspacePath', 'backend', 'embedded', 'active']))
+// The CLI dock's terminal host pulls in useTerminal/xterm — stub it with the
+// imperative surface the dock drives (reattach/fit are called on first open).
+const cliTermSpies = vi.hoisted(() => ({
+  spawn: vi.fn(async () => undefined),
+  tryReattach: vi.fn(async () => undefined),
+  pasteText: vi.fn(),
+  interrupt: vi.fn(async () => undefined),
+  kill: vi.fn(async () => undefined),
+  cancelPendingCreate: vi.fn(async () => undefined),
+  fitTerminal: vi.fn(),
+  focus: vi.fn(),
+}))
+vi.mock('../../components/AiCliTerminal.vue', () => ({
+  __esModule: true,
+  default: defineComponent({
+    name: 'AiCliTerminal',
+    props: ['paneId', 'backend', 'workspacePath'],
+    inheritAttrs: false,
+    setup(_, { expose }) {
+      expose({
+        ...cliTermSpies,
+        status: ref('idle'),
+        displayStatus: ref('idle'),
+        lastRawActivityAt: ref(0),
+        sessionId: ref(''),
+        error: ref(''),
+      })
+      return () => h('div', { class: 'stub-AiCliTerminal' })
+    },
+  }),
+}))
 
 beforeEach(() => {
   toolbarSpies.cycleTodo.mockClear()
@@ -147,6 +175,7 @@ beforeEach(() => {
   mdBodySpies.isEditing.mockReset().mockReturnValue(false)
   mdBodySpies.cancelEdit.mockClear()
   plansPaneSpies.closeActiveOverlay.mockReset().mockReturnValue(false)
+  for (const spy of Object.values(cliTermSpies)) spy.mockClear()
   toastMock.mockClear()
   confirmMock.mockReset().mockResolvedValue(true)
   fsState.content = ''
@@ -237,35 +266,59 @@ describe('PlanWindowApp', () => {
     expect(document.title).toBe('Plans · demo-ws')
   })
 
-  it('hosts the shared AI chat dock with this window\'s width key and lazy pane', async () => {
+  it('hosts the shared AI CLI dock with this window\'s keys and eager terminal', async () => {
     const wrapper = await mountApp()
-    // The shared shell (AiChatDock) owns the rail/resize/lazy-mount behavior —
-    // covered in depth by AiChatDock.test.ts. Here: it is wired to this
-    // window's workspace + width key, and the pane stays unmounted until the
-    // first toggle, then survives closing (v-show keep-alive).
-    const dock = wrapper.findComponent({ name: 'AiChatDock' })
+    // The shared shell (AiCliDock) owns the rail/resize/spawn behavior —
+    // covered in depth by AiCliDock.test.ts. Here: it is wired to this
+    // window's workspace / width key / per-workspace pane identity, and the
+    // terminal mounts eagerly (PTY ownership claim) while the panel starts
+    // closed; toggling only flips v-show.
+    const dock = wrapper.findComponent({ name: 'AiCliDock' })
     expect(dock.exists()).toBe(true)
     expect(dock.props('widthKey')).toBe('plan-ai-panel-width')
+    expect(dock.props('paneId')).toBe(aiTerminalPaneId('plan', '/tmp/demo-ws'))
+    expect(dock.props('origin')).toBe('plan-window')
     expect(dock.props('workspacePath')).toBe('/tmp/demo-ws')
-    expect(wrapper.findComponent({ name: 'AIChatPane' }).exists()).toBe(false)
-
-    await wrapper.find('.ai-dock-rail-btn').trigger('click')
-    await flushPromises()
-    const pane = wrapper.findComponent({ name: 'AIChatPane' })
-    expect(pane.exists()).toBe(true)
-    expect(pane.props('workspacePath')).toBe('/tmp/demo-ws')
-    expect(pane.props('active')).toBe(true)
+    expect(typeof dock.props('buildContext')).toBe('function')
+    // Eager mount + connect-time reattach happen with the panel still closed.
+    const term = wrapper.findComponent({ name: 'AiCliTerminal' })
+    expect(term.exists()).toBe(true)
+    expect(term.props('workspacePath')).toBe('/tmp/demo-ws')
+    expect(term.props('paneId')).toBe(aiTerminalPaneId('plan', '/tmp/demo-ws'))
+    expect(cliTermSpies.tryReattach).toHaveBeenCalledTimes(1)
     // v-show visibility asserted via style.display — happy-dom's isVisible()
     // does not reflect v-show's inline display toggling.
     const panelEl = wrapper.find('.ai-dock-panel').element as HTMLElement
+    expect(panelEl.style.display).toBe('none')
+
+    await wrapper.find('.ai-dock-rail-btn').trigger('click')
+    await flushPromises()
     expect(panelEl.style.display).not.toBe('none')
 
-    // Closing hides via v-show but keeps the instance (chat state preserved).
+    // Closing hides via v-show but keeps the instance (CLI session preserved).
     await wrapper.find('.ai-dock-rail-btn').trigger('click')
-    const paneAfter = wrapper.findComponent({ name: 'AIChatPane' })
-    expect(paneAfter.exists()).toBe(true)
-    expect(paneAfter.props('active')).toBe(false)
+    expect(wrapper.findComponent({ name: 'AiCliTerminal' }).exists()).toBe(true)
     expect(panelEl.style.display).toBe('none')
+  })
+
+  it('builds the CLI dock context from the open plan document', async () => {
+    fsState.content = MD_PLAN
+    const wrapper = await mountApp()
+    const dock = wrapper.findComponent({ name: 'AiCliDock' })
+    const build = dock.props('buildContext') as () => Promise<string>
+
+    // Nothing open yet.
+    expect(await build()).toContain('No plan document is currently open.')
+
+    await open(wrapper, '.agent-team/plans/md-plan.plan.md')
+    const text = await build()
+    expect(text).toContain('Workspace: /tmp/demo-ws')
+    expect(text).toContain('Currently open document: .agent-team/plans/md-plan.plan.md')
+    expect(text).toContain('Plan name: MD Plan')
+    expect(text).toContain('Stage: in-review')
+    expect(text).toContain('Todos: 1 total (1 pending)')
+    // Raw document content rides along (truncated only past the cap).
+    expect(text).toContain('Body A.')
   })
 
   it('opens an HTML plan with the review toolbar above the interactive preview', async () => {

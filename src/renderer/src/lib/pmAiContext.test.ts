@@ -1,10 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import {
-  buildPmAiContext,
-  bracketedPaste,
-  resolvePmAiCommand,
-  KICKOFF_TRUNCATE_AT,
-} from './pmAiContext'
+import { buildPmAiContext, KICKOFF_TRUNCATE_AT } from './pmAiContext'
 
 const roles = [
   { key: 'pm', label: 'Product Manager', oneLine: 'writes specs' },
@@ -94,49 +89,5 @@ describe('buildPmAiContext', () => {
       roles: [],
     })
     expect(text.match(/\(none\)/g)).toHaveLength(2)
-  })
-})
-
-describe('bracketedPaste', () => {
-  it('wraps text in the bracketed-paste envelope', () => {
-    expect(bracketedPaste('hello')).toBe('\x1b[200~hello\x1b[201~')
-  })
-})
-
-describe('resolvePmAiCommand', () => {
-  const base = { paneId: 'aa1de001-pm-ai-terminal', historyRoot: '/tmp/ws' }
-
-  it('defaults YOLO to ON when the setting is unset (null)', () => {
-    expect(resolvePmAiCommand({ ...base, agentKey: 'claude', yoloStored: null }))
-      .toBe('claude --dangerously-skip-permissions')
-  })
-
-  it('honors an explicit YOLO on (stored "1")', () => {
-    expect(resolvePmAiCommand({ ...base, agentKey: 'claude', yoloStored: '1' }))
-      .toBe('claude --dangerously-skip-permissions')
-  })
-
-  it('omits the skip-permission flag when YOLO is off (stored "0")', () => {
-    expect(resolvePmAiCommand({ ...base, agentKey: 'claude', yoloStored: '0' }))
-      .toBe('claude')
-  })
-
-  it('agents without a skipPermissionFlag get the bare default command', () => {
-    expect(resolvePmAiCommand({ ...base, agentKey: 'grok', yoloStored: null })).toBe('grok')
-  })
-
-  it('uses the spec default command, not the agent key (no binary override)', () => {
-    expect(resolvePmAiCommand({ ...base, agentKey: 'cursor', yoloStored: '0' }))
-      .toBe('cursor-agent')
-  })
-
-  it('aider gets its per-pane chat-history file from the hex pane-id prefix', () => {
-    const cmd = resolvePmAiCommand({ ...base, agentKey: 'aider', yoloStored: null })
-    expect(cmd).toContain('aider')
-    expect(cmd).toContain('--chat-history-file')
-    // paneId.slice(0, 8) = 'aa1de001' — a backend-claimable 8-hex token, so
-    // this pane does NOT fall back to the shared .aider.chat.history.md.
-    expect(cmd).toContain('/tmp/ws/.aider.chat.history.aa1de001.md')
-    expect(cmd).toContain('--yes-always')
   })
 })

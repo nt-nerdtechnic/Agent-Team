@@ -32,8 +32,9 @@ import GitCredentialModal from './components/GitCredentialModal.vue'
 import NotificationHost from './components/NotificationHost.vue'
 import DiffPane from './editor/DiffPane.vue'
 import BranchDiffPane from './editor/BranchDiffPane.vue'
-// Shared right-side AI chat shell (rail toggle + resize + lazy AIChatPane).
-import AiChatDock from './components/AiChatDock.vue'
+// Shared right-side CLI agent dock (rail toggle + resize + embedded PTY).
+import AiCliDock from './components/AiCliDock.vue'
+import { aiTerminalPaneId } from './lib/aiCliContext'
 
 // The host sets ?workspace_path= when it loads this entry (frontendPluginManager
 // gitQuery). A getter is what useGit expects.
@@ -295,6 +296,42 @@ async function pickFolder(defaultPath?: string): Promise<string | null> {
 async function onOpenWorktree(path: string): Promise<void> {
   const resp = await backend.send('ui.open_workspace', { workspace_path: path })
   if (!resp.ok) notify.toast(resp.error?.message || 'Could not open the workspace', { type: 'error' })
+}
+
+// ── AI CLI dock (embedded PTY agent panel) ───────────────────────────────────
+// Pane id for the CLI dock, derived per (surface, workspace): Git windows for
+// different workspaces coexist, and a shared fixed id would let one window's
+// reattach steal — and its Start reap — another's running CLI (see
+// aiTerminalPaneId). workspacePath is fixed at window creation, so this is
+// stable for the window's life.
+const AI_PANE_ID = aiTerminalPaneId('git', workspacePath)
+
+// Context payload the CLI dock injects after a fresh spawn: workspace, current
+// branch, and the staged/unstaged/untracked file lists this window is showing.
+// Lists are capped so the CLI is not buried under a huge startup paste.
+const GIT_CONTEXT_MAX_FILES = 50
+function gitContextFileLines(label: string, files: GitFileEntry[]): string[] {
+  if (!files.length) return []
+  const shown = files.slice(0, GIT_CONTEXT_MAX_FILES).map((f) => `  ${f.status} ${f.path}`)
+  const more = files.length - GIT_CONTEXT_MAX_FILES
+  return [`${label} (${files.length}):`, ...shown, ...(more > 0 ? [`  …and ${more} more`] : [])]
+}
+function buildGitContext(): string {
+  const s = gitStatus.value
+  const lines = [
+    "You are running in a terminal embedded in Navide's Git window, assisting " +
+      'the user who is reviewing and committing changes in this repository.',
+    `Workspace: ${workspacePath}`,
+  ]
+  if (s.branch) lines.push(`Current branch: ${s.branch}`)
+  lines.push('')
+  const files = [
+    ...gitContextFileLines('Staged files', s.staged),
+    ...gitContextFileLines('Unstaged files', s.unstaged),
+    ...gitContextFileLines('Untracked files', s.untracked),
+  ]
+  lines.push(...(files.length ? files : ['Working tree clean.']))
+  return lines.join('\n')
 }
 
 // ── The file card: checkbox IS the stage state ───────────────────────────────
@@ -1305,8 +1342,15 @@ const busy = computed(
         </div>
       </section>
 
-      <!-- Right AI chat dock (rail toggle + resize + lazy AIChatPane) -->
-      <AiChatDock width-key="git-ai-panel-width" :workspace-path="workspacePath" :backend="backend" />
+      <!-- Right AI CLI dock (rail toggle + resize + embedded PTY terminal) -->
+      <AiCliDock
+        width-key="git-ai-panel-width"
+        :pane-id="AI_PANE_ID"
+        origin="git-window"
+        :workspace-path="workspacePath"
+        :backend="backend"
+        :build-context="buildGitContext"
+      />
     </div>
 
     <!-- ⋯ popover menu -->

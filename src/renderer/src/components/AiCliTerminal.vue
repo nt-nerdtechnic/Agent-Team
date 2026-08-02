@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// Minimal terminal host for the Pipeline Manager window's AI panel.
+// Minimal terminal host for embedded CLI agent panels (AiCliDock).
 // Deliberately a slim wrapper over useTerminal instead of reusing
 // TerminalPane: this panel needs tryReattach/pasteText (not in TerminalPane's
 // expose) and none of its header chrome (loop/rebuild/drag/minimize). All
@@ -52,11 +52,11 @@ defineExpose({
 </script>
 
 <template>
-  <div ref="containerRef" class="pm-xterm-host" :data-pane-id="paneId"></div>
+  <div ref="containerRef" class="ai-cli-xterm-host" :data-pane-id="paneId"></div>
 </template>
 
 <style scoped>
-.pm-xterm-host {
+.ai-cli-xterm-host {
   flex: 1;
   min-height: 0;
   padding: 4px 8px;

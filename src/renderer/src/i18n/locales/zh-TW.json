@@ -52,6 +52,9 @@
       "title": "AI 對話",
       "tab-shortcut": "AI 對話 (⌘⇧A)"
     },
+    "ai-terminal": {
+      "title": "AI 終端機"
+    },
     "search": {
       "title": "搜尋"
     },
