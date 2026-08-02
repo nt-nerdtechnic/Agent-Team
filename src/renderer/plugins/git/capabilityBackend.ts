@@ -106,6 +106,13 @@ const EXPLICIT: Record<string, CapabilityRef> = {
   'ui.settings.get': { ns: 'ui', method: 'settings_get' },
   'ui.settings.set': { ns: 'ui', method: 'settings_set' },
   'ui.open_in_editor': { ns: 'ui', method: 'open_in_editor' },
+  // Shell-level host capabilities (HOST_CAPABILITIES): remote ↗ browser open,
+  // worktree Finder reveal / open-in-new-window, and the directory picker the
+  // worktree add/move flows use.
+  'ui.open_external': { ns: 'ui', method: 'open_external' },
+  'ui.reveal_path': { ns: 'ui', method: 'reveal_path' },
+  'ui.open_workspace': { ns: 'ui', method: 'open_workspace' },
+  'ui.pick_folder': { ns: 'ui', method: 'pick_folder' },
 }
 
 /**

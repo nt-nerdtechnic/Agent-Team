@@ -52,6 +52,13 @@ describe('TYPE_TO_CAP git surface', () => {
       method: 'open_in_editor',
     })
   })
+
+  it('maps the shell-level host capabilities (worktree/remote card actions)', () => {
+    expect(resolveCapability('ui.open_external')).toEqual({ ns: 'ui', method: 'open_external' })
+    expect(resolveCapability('ui.reveal_path')).toEqual({ ns: 'ui', method: 'reveal_path' })
+    expect(resolveCapability('ui.open_workspace')).toEqual({ ns: 'ui', method: 'open_workspace' })
+    expect(resolveCapability('ui.pick_folder')).toEqual({ ns: 'ui', method: 'pick_folder' })
+  })
 })
 
 describe('useBackend shim status', () => {

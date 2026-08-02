@@ -160,6 +160,25 @@ describe('planCapabilityCall', () => {
     expect(plan).toEqual({ kind: 'host', action: 'open_in_editor' })
   })
 
+  it('routes the shell-level ui host capabilities to their host actions', () => {
+    expect(planCapabilityCall(call({ ns: 'ui', method: 'open_external' }), ['ui'])).toEqual({
+      kind: 'host',
+      action: 'open_external',
+    })
+    expect(planCapabilityCall(call({ ns: 'ui', method: 'reveal_path' }), ['ui'])).toEqual({
+      kind: 'host',
+      action: 'reveal_path',
+    })
+    expect(planCapabilityCall(call({ ns: 'ui', method: 'open_workspace' }), ['ui'])).toEqual({
+      kind: 'host',
+      action: 'open_workspace',
+    })
+    expect(planCapabilityCall(call({ ns: 'ui', method: 'pick_folder' }), ['ui'])).toEqual({
+      kind: 'host',
+      action: 'pick_folder',
+    })
+  })
+
   it('DENIES ui.open_in_editor when the plugin did not declare ui', () => {
     const plan = planCapabilityCall(call({ ns: 'ui', method: 'open_in_editor' }), ['fs', 'git'])
     expect(plan.kind).toBe('respond')

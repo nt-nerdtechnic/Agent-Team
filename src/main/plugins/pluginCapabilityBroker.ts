@@ -107,6 +107,14 @@ export function resolveCapabilityCall(
  */
 export const HOST_CAPABILITIES: Readonly<Record<string, string>> = {
   'ui.open_in_editor': 'open_in_editor',
+  // Shell-level actions the Git window's worktree/remote cards need (GitPane
+  // parity): open an http(s) URL in the default browser, reveal a path in the
+  // OS file manager, open a workspace in a new main window, and a native
+  // directory picker (async result).
+  'ui.open_external': 'open_external',
+  'ui.reveal_path': 'reveal_path',
+  'ui.open_workspace': 'open_workspace',
+  'ui.pick_folder': 'pick_folder',
 }
 
 /**

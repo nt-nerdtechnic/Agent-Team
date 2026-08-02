@@ -18,6 +18,7 @@ import {
   isCapabilityAllowed,
   buildError,
   buildSuccess,
+  HOST_CAPABILITIES,
   type CapabilityCall,
   type CapabilityResponse,
 } from './pluginCapabilityBroker'
@@ -261,37 +262,103 @@ export class FrontendPluginManager {
     this.openInEditorHandler = fn
   }
 
+  /** Main-registered handlers for the shell-level host capabilities
+   *  (open_external / reveal_path / open_workspace / pick_folder). index.ts
+   *  wires them to shell.openExternal / shell.showItemInFolder /
+   *  window:openMain / dialog.showOpenDialog respectively. */
+  private hostShellHandlers: {
+    openExternal: (url: string) => Promise<{ ok: boolean; error?: string }>
+    revealPath: (path: string) => { ok: boolean; error?: string }
+    openWorkspace: (workspacePath: string) => { ok: boolean }
+    pickFolder: (defaultPath?: string) => Promise<string | null>
+  } | null = null
+
+  setHostShellHandlers(handlers: NonNullable<FrontendPluginManager['hostShellHandlers']>): void {
+    this.hostShellHandlers = handlers
+  }
+
   /** Service a host-implemented capability call (see HOST_CAPABILITIES). */
-  private runHostAction(call: CapabilityCall, plugin: RunningPlugin): CapabilityResponse {
-    // Only open_in_editor exists today; a second action gets a switch.
+  private async runHostAction(
+    call: CapabilityCall,
+    plugin: RunningPlugin
+  ): Promise<CapabilityResponse> {
     const args = (typeof call.args === 'object' && call.args !== null ? call.args : {}) as Record<
       string,
       unknown
     >
-    // The workspace comes from the query the HOST launched this view with —
-    // never from the call. A plugin-supplied root would defeat the containment
-    // check below by simply claiming '/', and the target is handed to the
-    // mini-IDE or (as a fallback) to the OS default application.
-    const workspacePath = workspaceOf(plugin.query)
-    const filepath = typeof args.filepath === 'string' ? args.filepath : ''
-    if (!workspacePath || !filepath) {
-      return buildError(call.reqId, 'BAD_REQUEST', 'filepath is required inside a workspace view')
+    const action = HOST_CAPABILITIES[`${call.ns}.${call.method}`]
+
+    if (action === 'open_in_editor') {
+      // The workspace comes from the query the HOST launched this view with —
+      // never from the call. A plugin-supplied root would defeat the
+      // containment check below by simply claiming '/', and the target is
+      // handed to the mini-IDE or (as a fallback) to the OS default app.
+      const workspacePath = workspaceOf(plugin.query)
+      const filepath = typeof args.filepath === 'string' ? args.filepath : ''
+      if (!workspacePath || !filepath) {
+        return buildError(call.reqId, 'BAD_REQUEST', 'filepath is required inside a workspace view')
+      }
+      // Containment: resolve against the workspace root and keep only targets
+      // that stay under it, so neither '../' traversal nor an absolute path
+      // can reach a file the view was never given. The normalized relative
+      // path is what downstream receives, so both open routes agree.
+      const root = resolve(workspacePath)
+      const rel = relative(root, resolve(root, filepath))
+      if (!rel || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+        return buildError(call.reqId, 'BAD_REQUEST', 'filepath escapes the workspace')
+      }
+      const handler = this.openInEditorHandler
+      if (!handler) {
+        return buildError(call.reqId, 'BACKEND_ERROR', 'editor open handler not registered')
+      }
+      const opened = handler({ workspace_path: workspacePath, filepath: rel })
+      return buildSuccess(call.reqId, { ok: true, opened })
     }
-    // Containment: resolve against the workspace root and keep only targets
-    // that stay under it, so neither '../' traversal nor an absolute path can
-    // reach a file the view was never given. The normalized relative path is
-    // what downstream receives, so both open routes agree on the target.
-    const root = resolve(workspacePath)
-    const rel = relative(root, resolve(root, filepath))
-    if (!rel || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
-      return buildError(call.reqId, 'BAD_REQUEST', 'filepath escapes the workspace')
+
+    // Shell-level actions. reveal_path / open_workspace intentionally accept
+    // absolute paths outside the view's workspace: their legitimate targets
+    // are git worktrees, which live beside (not under) the repo root. Both are
+    // display-only surfaces (file manager reveal / opening a Navide window);
+    // neither reads nor writes the target, and only first-party `navide.*`
+    // plugins can be granted `ui` (reserved publisher namespace).
+    const shell = this.hostShellHandlers
+    if (!shell) {
+      return buildError(call.reqId, 'BACKEND_ERROR', 'host shell handlers not registered')
     }
-    const handler = this.openInEditorHandler
-    if (!handler) {
-      return buildError(call.reqId, 'BACKEND_ERROR', 'editor open handler not registered')
+    if (action === 'open_external') {
+      const url = typeof args.url === 'string' ? args.url : ''
+      if (!/^https?:\/\//i.test(url)) {
+        return buildError(call.reqId, 'BAD_REQUEST', 'only http/https urls allowed')
+      }
+      const r = await shell.openExternal(url)
+      return r.ok
+        ? buildSuccess(call.reqId, { ok: true })
+        : buildError(call.reqId, 'BACKEND_ERROR', r.error ?? 'open failed')
     }
-    const opened = handler({ workspace_path: workspacePath, filepath: rel })
-    return buildSuccess(call.reqId, { ok: true, opened })
+    if (action === 'reveal_path') {
+      const path = typeof args.path === 'string' ? args.path : ''
+      if (!path || !isAbsolute(path)) {
+        return buildError(call.reqId, 'BAD_REQUEST', 'an absolute path is required')
+      }
+      const r = shell.revealPath(path)
+      return r.ok
+        ? buildSuccess(call.reqId, { ok: true })
+        : buildError(call.reqId, 'BACKEND_ERROR', r.error ?? 'reveal failed')
+    }
+    if (action === 'open_workspace') {
+      const workspacePath = typeof args.workspace_path === 'string' ? args.workspace_path : ''
+      if (!workspacePath || !isAbsolute(workspacePath)) {
+        return buildError(call.reqId, 'BAD_REQUEST', 'an absolute workspace_path is required')
+      }
+      const r = shell.openWorkspace(workspacePath)
+      return buildSuccess(call.reqId, { ok: r.ok })
+    }
+    if (action === 'pick_folder') {
+      const defaultPath = typeof args.default_path === 'string' ? args.default_path : undefined
+      const picked = await shell.pickFolder(defaultPath)
+      return buildSuccess(call.reqId, { ok: true, path: picked })
+    }
+    return buildError(call.reqId, 'UNKNOWN', `no host action '${String(action)}'`)
   }
 
   /** Fan a transport status transition out to every backend-needing plugin as

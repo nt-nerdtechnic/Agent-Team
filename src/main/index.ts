@@ -576,6 +576,50 @@ function openMiniIdeEditor(host: BrowserWindow | null, params: Record<string, st
 // by handing the file to the OS default application.
 frontendPluginManager.setOpenInEditorHandler((params) => openMiniIdeEditor(null, params))
 
+// Shell-level host capabilities (plugin broker): the Git window's remote/
+// worktree cards need the same shell actions GitPane reaches via
+// window.agentTeam — browser open, Finder reveal, open-workspace-window
+// (mirrors the window:openMain handler), and a native directory picker.
+frontendPluginManager.setHostShellHandlers({
+  openExternal: async (url) => {
+    try {
+      await shell.openExternal(url)
+      return { ok: true }
+    } catch (e) {
+      return { ok: false, error: String(e) }
+    }
+  },
+  revealPath: (target) => {
+    try {
+      shell.showItemInFolder(target)
+      return { ok: true }
+    } catch (e) {
+      return { ok: false, error: String(e) }
+    }
+  },
+  openWorkspace: (ws) => {
+    const existing = findMainWindowForWorkspace(ws)
+    if (existing) {
+      revealMainWindow(existing)
+      return { ok: true }
+    }
+    // duplicate=1: same semantics as window:openMain — skip pane restore for a
+    // window cloned while its source's CLI sessions are still running.
+    void createWindow({ workspace_path: ws, duplicate: '1' })
+    return { ok: true }
+  },
+  pickFolder: async (defaultPath) => {
+    const opts = {
+      properties: ['openDirectory', 'createDirectory'] as ('openDirectory' | 'createDirectory')[],
+      ...(defaultPath ? { defaultPath } : {}),
+    }
+    const result = mainWindow
+      ? await dialog.showOpenDialog(mainWindow, opts)
+      : await dialog.showOpenDialog(opts)
+    return result.canceled || !result.filePaths.length ? null : result.filePaths[0]!
+  },
+})
+
 /**
  * Fallback when the mini-IDE plugin view could not be opened: plain file opens
  * go to the OS default application; diff/branch-diff and bare opens keep a
