@@ -1,12 +1,10 @@
 // @vitest-environment happy-dom
-// GitWindowApp (the navide.git standalone window) — wiring tests. The File-
-// status surface embeds the real GitPane (stubbed here), so these tests cover
-// the window-level wiring around it: repo-surface loading, the GitPane emit
-// contracts (open-diff → bottom DiffPane, open-file → the ui.open_in_editor
-// host capability, open-branch-diff → the comparison view), and the sidebar
-// branch switching. The backend is mocked at the useBackend seam (exactly what
-// the plugin build aliases), so every assertion is on the real useGit →
-// send() wire format.
+// GitWindowApp (the navide.git standalone window) — wiring tests for the
+// "Editorial Calm" design: the checkbox-IS-the-stage-state file card, the
+// commit composer, conflict quick-resolution, the sidebar "⋯" popover menus
+// (branches / stashes / worktrees / remotes), and the diff detail. The backend
+// is mocked at the useBackend seam (exactly what the plugin build aliases), so
+// every assertion is on the real useGit → send() wire format.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import { ref } from 'vue'
@@ -17,6 +15,9 @@ interface SentCall {
 }
 
 const sends = vi.hoisted(() => ({ calls: [] as { type: string; payload: Record<string, unknown> }[] }))
+
+// Per-test override for the git.status payload.
+const statusOverride = vi.hoisted(() => ({ value: null as Record<string, unknown> | null }))
 
 function baseStatus(): Record<string, unknown> {
   return {
@@ -35,7 +36,7 @@ function baseStatus(): Record<string, unknown> {
 
 vi.mock('../../composables/useBackend', () => {
   function payloadFor(type: string): unknown {
-    if (type === 'git.status') return baseStatus()
+    if (type === 'git.status') return statusOverride.value ?? baseStatus()
     if (type === 'git.branches')
       return {
         ok: true,
@@ -46,11 +47,28 @@ vi.mock('../../composables/useBackend', () => {
         ]
       }
     if (type === 'git.log') return { ok: true, commits: [] }
-    if (type === 'git.stash_list') return { ok: true, stashes: [] }
+    if (type === 'git.stash_list')
+      return { ok: true, stashes: [{ index: 0, ref: 'stash@{0}', message: 'wip sidebar' }] }
     if (type === 'git.remotes')
-      return { ok: true, remotes: [{ name: 'origin', fetch_url: 'u', push_url: 'u' }] }
+      return { ok: true, remotes: [{ name: 'origin', fetch_url: 'https://example.com/r.git', push_url: 'https://example.com/r.git' }] }
     if (type === 'git.tags') return { ok: true, tags: [] }
-    if (type === 'git.worktrees') return { ok: true, worktrees: [] }
+    if (type === 'git.worktrees')
+      return {
+        ok: true,
+        worktrees: [
+          {
+            path: '/tmp/ws', head: 'abc1234', branch: 'main', is_main: true,
+            detached: false, bare: false, locked: false, lock_reason: '',
+            prunable: false, prune_reason: ''
+          },
+          {
+            path: '/tmp/wt-feature', head: 'def5678', branch: 'feature-x', is_main: false,
+            detached: false, bare: false, locked: false, lock_reason: '',
+            prunable: false, prune_reason: ''
+          }
+        ]
+      }
+    if (type === 'ui.pick_folder') return { ok: true, path: '/tmp/picked' }
     if (type === 'ui.settings.get') return { ok: true, settings: {} }
     return { ok: true }
   }
@@ -82,11 +100,10 @@ vi.mock('../../composables/useBackend', () => {
 })
 
 import GitWindowApp from '../../GitWindowApp.vue'
-import GitPane from '../GitPane.vue'
 
 const STUBS = {
-  GitPane: true,
   GitHistoryModal: true,
+  GitCredentialModal: true,
   NotificationHost: true,
   DiffPane: true,
   BranchDiffPane: true
@@ -103,11 +120,23 @@ async function mountApp(): Promise<VueWrapper> {
   return wrapper
 }
 
-describe('GitWindowApp — window wiring around the embedded GitPane', () => {
+/** Open a row's "⋯" popover and click the item with the given label. */
+async function runMenu(wrapper: VueWrapper, rowText: string, itemLabel: string): Promise<void> {
+  const row = wrapper.findAll('.srow').find((r) => r.text().includes(rowText))
+  expect(row, rowText).toBeTruthy()
+  await row!.find('button.dots').trigger('click')
+  const item = wrapper.findAll('.menu-item').find((m) => m.text() === itemLabel)
+  expect(item, itemLabel).toBeTruthy()
+  await item!.trigger('click')
+  await flushPromises()
+}
+
+describe('GitWindowApp — Editorial Calm wiring', () => {
   let wrapper: VueWrapper | null = null
 
   beforeEach(() => {
     sends.calls.length = 0
+    statusOverride.value = null
   })
   afterEach(() => {
     wrapper?.unmount()
@@ -130,108 +159,129 @@ describe('GitWindowApp — window wiring around the embedded GitPane', () => {
     expect(callsOf('git.status')[0]!.payload.workspace_path).toBe('/tmp/ws')
   })
 
-  it('keeps the real GitPane mounted (embedded, with the workspace + backend)', async () => {
+  it('stages via the checkbox and unstages via the checked checkbox', async () => {
     wrapper = await mountApp()
-    const pane = wrapper.findComponent(GitPane)
-    expect(pane.exists()).toBe(true)
-    expect(pane.attributes('workspace-path') ?? pane.attributes('workspacepath')).toBe('/tmp/ws')
-    // Stays mounted while another view is shown (v-show, so its credential
-    // modal keeps working for toolbar pushes).
-    const history = wrapper.findAll('button.sb-item').find((b) => b.text() === 'History')
-    await history!.trigger('click')
-    expect(wrapper.findComponent(GitPane).exists()).toBe(true)
+    const rows = wrapper.findAll('.frow')
+    const unstagedRow = rows.find((r) => r.text().includes('a.ts'))
+    await unstagedRow!.find('button.chk:not(.on)').trigger('click')
+    await flushPromises()
+    expect(callsOf('git.stage')[0]!.payload).toMatchObject({
+      workspace_path: '/tmp/ws',
+      files: ['src/a.ts']
+    })
+
+    const stagedRow = wrapper.findAll('.frow').find((r) => r.text().includes('staged.ts'))
+    await stagedRow!.find('button.chk.on').trigger('click')
+    await flushPromises()
+    expect(callsOf('git.unstage')[0]!.payload).toMatchObject({ files: ['src/staged.ts'] })
   })
 
-  it('shows a clicked GitPane file diff in the bottom DiffPane detail', async () => {
+  it('stages all and unstages all from the list header links', async () => {
     wrapper = await mountApp()
-    wrapper
-      .findComponent(GitPane)
-      .vm.$emit('open-diff', { filepath: 'src/a.ts', staged: false, name: 'a.ts' })
+    const stageAll = wrapper.findAll('.hdr-actions .linkbtn').find((b) => b.text() === 'Stage all')
+    await stageAll!.trigger('click')
     await flushPromises()
-    const detail = wrapper.find('.detail')
-    expect(detail.exists()).toBe(true)
+    expect(callsOf('git.stage_all').length).toBe(1)
+
+    const unstageAll = wrapper.findAll('.hdr-actions .linkbtn').find((b) => b.text() === 'Unstage all')
+    await unstageAll!.trigger('click')
+    await flushPromises()
+    expect(callsOf('git.unstage')[0]!.payload).toMatchObject({ files: ['src/staged.ts'] })
+  })
+
+  it('commits the staged files with the composed message', async () => {
+    wrapper = await mountApp()
+    await wrapper.find('textarea.cmp-input').setValue('feat: editorial calm')
+    const btn = wrapper.find('button.commitbtn')
+    expect(btn.attributes('disabled')).toBeUndefined()
+    await btn.trigger('click')
+    await flushPromises()
+    expect(callsOf('git.commit')[0]!.payload).toMatchObject({
+      workspace_path: '/tmp/ws',
+      message: 'feat: editorial calm'
+    })
+  })
+
+  it('disables commit when nothing is staged and no operation is in progress', async () => {
+    statusOverride.value = { ...baseStatus(), staged: [] }
+    wrapper = await mountApp()
+    await wrapper.find('textarea.cmp-input').setValue('msg')
+    expect(wrapper.find('button.commitbtn').attributes('disabled')).toBeDefined()
+  })
+
+  it('shows the operation banner and conflict quick-resolution during a merge', async () => {
+    statusOverride.value = {
+      ...baseStatus(),
+      operation_in_progress: 'merge',
+      unstaged: [{ path: 'src/conflict.ts', status: 'U' }]
+    }
+    wrapper = await mountApp()
+    expect(wrapper.find('.op-banner').text()).toContain('merge in progress')
+    const conflictRow = wrapper.find('.frow.conflict')
+    expect(conflictRow.exists()).toBe(true)
+    const ours = conflictRow.findAll('button.linkbtn').find((b) => b.text() === 'ours')
+    await ours!.trigger('click')
+    await flushPromises()
+    expect(callsOf('git.resolve_ours')[0]!.payload).toMatchObject({ filepath: 'src/conflict.ts' })
+  })
+
+  it('shows a clicked file diff in the bottom DiffPane detail', async () => {
+    wrapper = await mountApp()
+    const row = wrapper.findAll('.frow').find((r) => r.text().includes('a.ts'))
+    await row!.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.detail').exists()).toBe(true)
     const diff = wrapper.findComponent({ name: 'DiffPane' })
-    expect(diff.exists()).toBe(true)
     expect(diff.attributes('filepath')).toBe('src/a.ts')
   })
 
-  it('routes open-file through the ui.open_in_editor host capability', async () => {
+  it('switches branch only through the ⋯ menu, never on row click', async () => {
     wrapper = await mountApp()
-    wrapper.findComponent(GitPane).vm.$emit('open-file', { filepath: 'src/a.ts', name: 'a.ts' })
-    await flushPromises()
-    expect(callsOf('ui.open_in_editor')[0]!.payload).toMatchObject({
-      workspace_path: '/tmp/ws',
-      filepath: 'src/a.ts'
-    })
-  })
-
-  it('routes open-conflict through the ui.open_in_editor host capability too', async () => {
-    wrapper = await mountApp()
-    wrapper
-      .findComponent(GitPane)
-      .vm.$emit('open-conflict', { filepath: 'src/conflict.ts', name: 'conflict.ts' })
-    await flushPromises()
-    expect(callsOf('ui.open_in_editor')[0]!.payload).toMatchObject({
-      filepath: 'src/conflict.ts'
-    })
-  })
-
-  it('opens the comparison view from a GitPane open-branch-diff request', async () => {
-    wrapper = await mountApp()
-    wrapper.findComponent(GitPane).vm.$emit('open-branch-diff', { base: 'main', compare: 'feature-x' })
-    await flushPromises()
-    const selects = wrapper.findAll('select.bd-select')
-    expect(selects.length).toBe(2)
-    expect((selects[0]!.element as HTMLSelectElement).value).toBe('main')
-    expect((selects[1]!.element as HTMLSelectElement).value).toBe('feature-x')
-  })
-
-  it('switches branch only via the explicit ↵ button, never on row click', async () => {
-    wrapper = await mountApp()
-    const rows = wrapper.findAll('.branch-row')
-    const feature = rows.find((r) => r.text().includes('feature-x'))
-    expect(feature).toBeTruthy()
-
-    // Clicking the row itself must NOT switch (the single-click-switch bug).
-    await feature!.trigger('click')
+    const row = wrapper.findAll('.srow').find((r) => r.text().includes('feature-x'))
+    await row!.trigger('click')
     await flushPromises()
     expect(callsOf('git.switch_branch').length).toBe(0)
 
-    // The GitPane-style explicit Switch button does.
-    await feature!.find('button[title="Switch"]').trigger('click')
-    await flushPromises()
+    await runMenu(wrapper, 'feature-x', 'Switch to this branch')
     expect(callsOf('git.switch_branch')[0]!.payload).toMatchObject({ name: 'feature-x' })
 
-    // The current branch row offers no switch/merge/rebase buttons at all.
-    const current = rows.find((r) => r.classes().includes('current'))
-    expect(current!.find('button[title="Switch"]').exists()).toBe(false)
+    // The current branch row offers no menu at all.
+    const current = wrapper.findAll('.srow').find((r) => r.classes().includes('cur'))
+    expect(current!.find('button.dots').exists()).toBe(false)
   })
 
-  it('collapses and expands the sidebar section cards', async () => {
+  it('drives stash actions from the Stashes drawer menu', async () => {
     wrapper = await mountApp()
-    // Branches starts expanded; its header caret collapses it.
-    expect(wrapper.findAll('.branch-row').length).toBeGreaterThan(0)
-    const branchesHdr = wrapper
-      .findAll('.card-hdr')
-      .find((h) => h.text().includes('Branches'))
-    await branchesHdr!.trigger('click')
-    expect(wrapper.findAll('.branch-row').length).toBe(0)
-    await branchesHdr!.trigger('click')
-    expect(wrapper.findAll('.branch-row').length).toBeGreaterThan(0)
+    const drawer = wrapper.findAll('.srow.drawer').find((r) => r.text().includes('Stashes'))
+    await drawer!.trigger('click')
+    await runMenu(wrapper, 'wip sidebar', 'Pop (apply and remove)')
+    expect(callsOf('git.stash_pop').length).toBe(1)
+  })
 
-    // Stashes starts collapsed and expands on header click.
-    const stashesHdr = wrapper.findAll('.card-hdr').find((h) => h.text().includes('Stashes'))
-    expect(stashesHdr!.text()).toContain('▸')
-    await stashesHdr!.trigger('click')
-    expect(stashesHdr!.text()).toContain('▾')
+  it('drives worktree lock and reveal from the Worktrees drawer menu', async () => {
+    wrapper = await mountApp()
+    const drawer = wrapper.findAll('.srow.drawer').find((r) => r.text().includes('Worktrees'))
+    await drawer!.trigger('click')
+    await runMenu(wrapper, 'wt-feature', 'Lock')
+    expect(callsOf('git.lock_worktree')[0]!.payload).toMatchObject({ worktree_path: '/tmp/wt-feature' })
+    await runMenu(wrapper, 'wt-feature', 'Reveal in Finder')
+    expect(callsOf('ui.reveal_path')[0]!.payload).toMatchObject({ path: '/tmp/wt-feature' })
+  })
+
+  it('opens the remote URL through the ui.open_external host capability', async () => {
+    wrapper = await mountApp()
+    const drawer = wrapper.findAll('.srow.drawer').find((r) => r.text().includes('Remotes'))
+    await drawer!.trigger('click')
+    await runMenu(wrapper, 'origin', 'Open URL in browser')
+    expect(callsOf('ui.open_external')[0]!.payload).toMatchObject({ url: 'https://example.com/r.git' })
   })
 
   it('opens the branch-diff view with a sensible base/compare preselection', async () => {
     wrapper = await mountApp()
-    const btn = wrapper.findAll('button.sb-item').find((b) => b.text() === 'Branch diff')
+    const btn = wrapper.findAll('.navi button').find((b) => b.text() === 'Branch diff')
     await btn!.trigger('click')
     await flushPromises()
-    const selects = wrapper.findAll('select.bd-select')
+    const selects = wrapper.findAll('select.ed-select')
     expect(selects.length).toBe(2)
     expect((selects[0]!.element as HTMLSelectElement).value).toBe('main')
   })

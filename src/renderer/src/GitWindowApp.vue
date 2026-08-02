@@ -1,31 +1,31 @@
 <script setup lang="ts">
-// GitWindowApp — the standalone Git client surface (SourceTree / Fork layout).
+// GitWindowApp — the standalone Git client surface, "Editorial Calm" design.
 //
 // Runs inside the isolated `navide.git` plugin WebContentsView (see
 // src/renderer/plugins/git/). It reuses the existing `useGit` composable
 // unchanged; the plugin build aliases its `useBackend` to the capability shim,
 // so every git.* call is brokered over the host's shared WebSocket.
 //
-// A wide three-pane window (toolbar → sidebar → center + diff detail). The
-// center's File-status surface embeds the real GitPane component, so working-
-// tree operations (multi-select stage/unstage, commit box with AI message,
-// conflict handling, credential prompt) are byte-identical to the main
-// window's Git tab and never drift from it. Around it: SourceTree-style
-// sidebar (branch/stash/remote/tag/worktree management), rich history, branch
-// comparison, git config, and a bottom DiffPane detail. "Open in editor"
-// routes through the `ui.open_in_editor` host capability to the mini-IDE
-// plugin (OS default app when it is not installed). The full 3-way conflict
-// editor stays in the mini-IDE (Monaco is deliberately kept out of this
-// bundle).
+// Layout: a calm, borderless reading surface. Toolbar (wordmark → repo crumb →
+// ghost sync actions + one primary). Minimal sidebar (view nav → branches →
+// collapsed drawers for stashes/worktrees/remotes/tags), with row management
+// tucked into "⋯" popover menus. Center: the signature interaction — one file
+// card where the checkbox IS the stage state (check to stage, uncheck to
+// unstage) — plus a floating commit composer card. Bottom: shared DiffPane
+// detail. History (GitHistoryModal) and branch comparison (BranchDiffPane)
+// keep their own views. "Open in editor" routes through the `ui.open_in_editor`
+// host capability to the mini-IDE (OS default app when not installed); the
+// worktree/remote shell actions ride the other ui.* host capabilities. All
+// colors map to semantic tokens so the five app themes translate the design.
 
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useBackend } from './composables/useBackend'
-import { useGit } from './composables/useGit'
+import { useGit, type GitFileEntry, type GitWorktree } from './composables/useGit'
 import { useNotify } from './composables/useNotify'
 import { useTheme } from './composables/useTheme'
 import { initSettingsBackend, settingsGet, onSettingsChanged } from './lib/settings'
-import GitPane from './components/GitPane.vue'
 import GitHistoryModal from './components/GitHistoryModal.vue'
+import GitCredentialModal from './components/GitCredentialModal.vue'
 import NotificationHost from './components/NotificationHost.vue'
 import DiffPane from './editor/DiffPane.vue'
 import BranchDiffPane from './editor/BranchDiffPane.vue'
@@ -81,6 +81,20 @@ const {
   createTag,
   mergeBranch,
   resetToCommit,
+  // working tree + commit (the checkbox-stage surface)
+  stageFile,
+  unstageFile,
+  stageAll,
+  unstageFiles,
+  discardFile,
+  resolveConflictOurs,
+  resolveConflictTheirs,
+  abortOperation,
+  commit,
+  amendCommit,
+  generateMessage,
+  isCommitting,
+  isGenerating,
   // branches / stash / remotes / tags
   rebaseOn,
   switchBranch,
@@ -99,22 +113,30 @@ const {
   addWorktree,
   removeWorktree,
   pruneWorktrees,
+  lockWorktree,
+  unlockWorktree,
+  moveWorktree,
+  repairWorktrees,
   gitConfig,
   gitConfigAllowedKeys,
   loadGitConfig,
-  setGitConfig
+  setGitConfig,
+  // askpass credential prompt
+  credentialPrompt,
+  showCredentialPrompt,
+  submitCredential,
+  cancelCredential
 } = git
 
 // ── View state ───────────────────────────────────────────────────────────────
 type CenterView = 'history' | 'status' | 'branchdiff'
-const view = ref<CenterView>('history')
+const view = ref<CenterView>('status')
 
 // ── Diff detail target ───────────────────────────────────────────────────────
-// Shown in the bottom detail panel of the File-status view. Fed by (a) the
-// embedded GitPane's open-diff clicks, and (b) the main process forwarding a
-// git_diff_* target (see window:openGit) when a file is clicked in the main
-// window's GitPane. The shared DiffPane fetches the diff itself from these
-// coordinates.
+// Shown in the bottom detail panel of the Changes view. Fed by (a) file-row
+// clicks in the center card, and (b) the main process forwarding a git_diff_*
+// target (see window:openGit) when a file is clicked in the main window's
+// GitPane. The shared DiffPane fetches the diff itself from these coordinates.
 interface ExternalDiff {
   name: string
   staged: boolean
@@ -126,12 +148,12 @@ const externalDiff = ref<ExternalDiff | null>(null)
 const isPulling = ref(false)
 const isPushing = ref(false)
 
-// Only local branches in the sidebar BRANCHES group (remotes have their own).
 const localBranches = computed(() => gitBranches.value.filter((b) => !b.is_remote))
 const remoteBranches = computed(() => gitBranches.value.filter((b) => b.is_remote))
 
 const hasWorkspace = computed(() => workspacePath.length > 0)
 const isRepo = computed(() => gitStatus.value.is_git_repo)
+const repoName = computed(() => workspacePath.split('/').filter(Boolean).at(-1) ?? '')
 
 const changeCount = computed(() => {
   const s = gitStatus.value
@@ -155,8 +177,7 @@ async function refreshAll(): Promise<void> {
 let offThemeSettingsChange: (() => void) | null = null
 
 onMounted(() => {
-  const base = workspacePath.split('/').filter(Boolean).at(-1) ?? workspacePath
-  if (base) document.title = `Git · ${base}`
+  if (repoName.value) document.title = `Git · ${repoName.value}`
   loadTheme()
   offThemeSettingsChange = onSettingsChanged((keys) => {
     if (keys.includes('agent-team:theme') || keys.includes('agent-team:theme-custom')) {
@@ -186,6 +207,7 @@ onUnmounted(() => {
 function showDiffTarget(params: Record<string, string>): void {
   const filepath = params['git_diff_filepath'] ?? ''
   if (!filepath) return
+  view.value = 'status'
   externalDiff.value = {
     name: filepath,
     staged: params['git_diff_staged'] === 'true',
@@ -203,14 +225,29 @@ function toastResult(r: { ok: boolean; error?: string }, okMsg?: string): boolea
   return r.ok
 }
 
-// ── Embedded GitPane integration ─────────────────────────────────────────────
-// AI commit-message model, live-synced with the main window's setting.
-const analyzerModel = ref(settingsGet('agentTeam.analyzerModel', ''))
-
-/** A file clicked in the embedded GitPane shows its diff in the bottom detail. */
-function onPaneOpenDiff(p: { filepath: string; staged: boolean; name: string; commit?: string }): void {
-  externalDiff.value = { name: p.filepath, staged: p.staged, commit: p.commit ?? '' }
+// ── Popover menus (the "⋯" row menus) ────────────────────────────────────────
+interface MenuItem {
+  label: string
+  danger?: boolean
+  action: () => void
 }
+const menu = ref<{ x: number; y: number; items: MenuItem[] } | null>(null)
+
+function openMenu(e: MouseEvent, items: MenuItem[]): void {
+  const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
+  menu.value = {
+    x: Math.min(r.left, window.innerWidth - 208),
+    y: Math.min(r.bottom + 4, window.innerHeight - items.length * 30 - 16),
+    items
+  }
+}
+function runMenuItem(item: MenuItem): void {
+  menu.value = null
+  item.action()
+}
+
+// ── Host capabilities (mini-IDE / shell hand-offs) ───────────────────────────
+const analyzerModel = ref(settingsGet('agentTeam.analyzerModel', ''))
 
 /** Route a file to the mini-IDE through the `ui.open_in_editor` host
  *  capability; the main process falls back to the OS default application when
@@ -223,24 +260,182 @@ async function openInEditor(filepath: string): Promise<void> {
   })
   if (!resp.ok) notify.toast(resp.error?.message || 'Could not open the editor', { type: 'error' })
 }
-
-function onPaneOpenBranchDiff(p: { base: string; compare: string }): void {
-  if (p.base) diffBase.value = p.base
-  if (p.compare) diffCompare.value = p.compare
-  openBranchDiff()
+async function openExternal(url: string): Promise<void> {
+  if (!url) return
+  const resp = await backend.send('ui.open_external', { url })
+  if (!resp.ok) notify.toast(resp.error?.message || 'Could not open the URL', { type: 'error' })
 }
-// ── Sidebar operations (GitPane-style sections) ──────────────────────────────
-// Collapse state per card, mirroring GitPane's collapsible cards.
-const branchesExpanded = ref(true)
-const stashesExpanded = ref(false)
-const remotesExpanded = ref(false)
-const tagsExpanded = ref(false)
-const worktreesExpanded = ref(false)
-// Remote branches live inside the branch card behind the ⇅ toggle (GitPane).
-const showRemoteBranches = ref(false)
+async function revealPath(path: string): Promise<void> {
+  const resp = await backend.send('ui.reveal_path', { path })
+  if (!resp.ok) notify.toast(resp.error?.message || 'Could not reveal the path', { type: 'error' })
+}
+async function pickFolder(defaultPath?: string): Promise<string | null> {
+  const resp = await backend.send<{ ok: boolean; path: string | null }>('ui.pick_folder', {
+    ...(defaultPath ? { default_path: defaultPath } : {})
+  })
+  return resp.ok ? (resp.payload?.path ?? null) : null
+}
+async function onOpenWorktree(path: string): Promise<void> {
+  const resp = await backend.send('ui.open_workspace', { workspace_path: path })
+  if (!resp.ok) notify.toast(resp.error?.message || 'Could not open the workspace', { type: 'error' })
+}
 
-// Inline-create inputs (GitPane's input-row pattern instead of prompt dialogs).
+// ── The file card: checkbox IS the stage state ───────────────────────────────
+function isConflictEntry(f: GitFileEntry): boolean {
+  return f.status === 'U'
+}
+const conflictFiles = computed(() =>
+  [...gitStatus.value.staged, ...gitStatus.value.unstaged].filter(isConflictEntry)
+)
+const stagedFiles = computed(() => gitStatus.value.staged.filter((f) => !isConflictEntry(f)))
+const changedFiles = computed(() => gitStatus.value.unstaged.filter((f) => !isConflictEntry(f)))
+const untrackedFiles = computed(() => gitStatus.value.untracked)
+
+const opInProgress = computed(() => gitStatus.value.operation_in_progress)
+
+function fileTag(f: GitFileEntry, untracked = false): { label: string; cls: string } {
+  if (untracked) return { label: 'new', cls: 'q' }
+  const c = f.status[0]
+  if (c === 'A') return { label: 'added', cls: 'a' }
+  if (c === 'D') return { label: 'deleted', cls: 'd' }
+  if (c === 'R') return { label: 'renamed', cls: 'm' }
+  if (c === 'U') return { label: 'conflict', cls: 'u' }
+  return { label: 'modified', cls: 'm' }
+}
+function splitPath(path: string): { dir: string; base: string } {
+  const i = path.lastIndexOf('/')
+  return i < 0 ? { dir: '', base: path } : { dir: path.slice(0, i + 1), base: path.slice(i + 1) }
+}
+
+async function toggleStage(f: GitFileEntry, staged: boolean): Promise<void> {
+  if (staged) await unstageFile(f.path)
+  else await stageFile(f.path)
+}
+async function onStageAll(): Promise<void> {
+  await stageAll()
+}
+async function onUnstageAll(): Promise<void> {
+  const paths = stagedFiles.value.map((f) => f.path)
+  if (!paths.length) return
+  toastResult(await unstageFiles(paths))
+}
+async function onDiscard(f: GitFileEntry): Promise<void> {
+  const ok = await notify.confirm(`Discard changes in ${f.path}? This cannot be undone.`, {
+    title: 'Discard changes',
+    confirmText: 'Discard'
+  })
+  if (!ok) return
+  await discardFile(f.path)
+}
+async function onResolveOurs(path: string): Promise<void> {
+  toastResult(await resolveConflictOurs(path))
+}
+async function onResolveTheirs(path: string): Promise<void> {
+  toastResult(await resolveConflictTheirs(path))
+}
+async function onAbortOperation(): Promise<void> {
+  const op = opInProgress.value
+  if (!op) return
+  const ok = await notify.confirm(`Abort the in-progress ${op}?`, {
+    title: 'Abort',
+    confirmText: 'Abort'
+  })
+  if (!ok) return
+  toastResult(await abortOperation(op))
+}
+
+/** A file row click shows its working-tree/staged diff in the bottom detail. */
+function showWorkingDiff(path: string, staged: boolean): void {
+  externalDiff.value = { name: path, staged, commit: '' }
+}
+
+// ── Commit composer ──────────────────────────────────────────────────────────
+const commitMessage = ref('')
+const canCommit = computed(
+  () =>
+    commitMessage.value.trim().length > 0 &&
+    (gitStatus.value.staged.length > 0 || opInProgress.value !== '') &&
+    !isCommitting.value
+)
+
+async function onCommit(): Promise<void> {
+  if (!canCommit.value) return
+  const r = await commit(commitMessage.value.trim())
+  if (toastResult(r, 'Committed')) {
+    commitMessage.value = ''
+    await refreshAll()
+  }
+}
+async function onAmend(): Promise<void> {
+  const ok = await notify.confirm(
+    'Amend the last commit with the staged changes' +
+      (commitMessage.value.trim() ? ' and the new message?' : ' (keeping its message)?'),
+    { title: 'Amend', confirmText: 'Amend' }
+  )
+  if (!ok) return
+  const r = await amendCommit(commitMessage.value.trim())
+  if (toastResult(r, 'Amended')) {
+    commitMessage.value = ''
+    await refreshAll()
+  }
+}
+async function onGenerateMessage(): Promise<void> {
+  const model = analyzerModel.value || 'qwen2:latest'
+  const r = await generateMessage(model)
+  if (r.ok) commitMessage.value = r.message
+  else notify.toast(r.error || 'Message generation failed', { type: 'error' })
+}
+
+// ── Sidebar: branches ────────────────────────────────────────────────────────
+const addingBranch = ref(false)
 const newBranchName = ref('')
+
+async function onSwitchBranch(name: string): Promise<void> {
+  if (name === gitStatus.value.branch) return
+  toastResult(await switchBranch(name), `Switched to ${name}`)
+}
+async function doCreateBranch(): Promise<void> {
+  const name = newBranchName.value.trim()
+  if (!name || /\s|\.\./.test(name) || name.startsWith('-')) return
+  if (toastResult(await createBranch(name), `Created ${name}`)) {
+    newBranchName.value = ''
+    addingBranch.value = false
+  }
+}
+function doCompareBranch(name: string): void {
+  diffBase.value = name
+  diffCompare.value = gitStatus.value.branch
+  view.value = 'branchdiff'
+}
+function branchMenu(name: string): MenuItem[] {
+  return [
+    { label: 'Switch to this branch', action: () => void onSwitchBranch(name) },
+    { label: 'Compare with current', action: () => doCompareBranch(name) },
+    { label: 'Merge into current', action: () => void mergeBranch(name).then((r) => toastResult(r, `Merged ${name}`)) },
+    { label: 'Rebase current onto this', action: () => void rebaseOn(name).then((r) => toastResult(r, `Rebased onto ${name}`)) },
+    {
+      label: 'Delete branch…',
+      danger: true,
+      action: () =>
+        void notify
+          .confirm(`Delete branch ${name}?`, { title: 'Delete branch', confirmText: 'Delete' })
+          .then(async (ok) => {
+            if (ok) toastResult(await deleteBranch(name), `Deleted ${name}`)
+          })
+    }
+  ]
+}
+function remoteBranchMenu(name: string): MenuItem[] {
+  return [{ label: 'Check out locally', action: () => void checkoutRemoteBranch(name).then((r) => toastResult(r)) }]
+}
+
+// ── Sidebar: drawers (stashes / worktrees / remotes / tags / remote branches) ─
+const stashesOpen = ref(false)
+const worktreesOpen = ref(false)
+const remotesOpen = ref(false)
+const tagsOpen = ref(false)
+const remoteBranchesOpen = ref(false)
+
 const newRemoteName = ref('')
 const newRemoteUrl = ref('')
 const newTagName = ref('')
@@ -248,62 +443,26 @@ const newTagMessage = ref('')
 const newWtPath = ref('')
 const newWtBranch = ref('')
 
-// Switching is an explicit ↵ row button (GitPane doSwitch) — never a row click.
-async function onSwitchBranch(name: string): Promise<void> {
-  if (name === gitStatus.value.branch) return
-  toastResult(await switchBranch(name), `Switched to ${name}`)
-}
-async function doCreateBranch(): Promise<void> {
-  const name = newBranchName.value.trim()
-  if (!name) return
-  if (toastResult(await createBranch(name), `Created ${name}`)) newBranchName.value = ''
-}
-function doCompareBranch(name: string): void {
-  diffBase.value = name
-  diffCompare.value = gitStatus.value.branch
-  view.value = 'branchdiff'
-}
-async function doMergeIntoCurrent(name: string): Promise<void> {
-  toastResult(await mergeBranch(name), `Merged ${name}`)
-}
-async function doRebaseOnto(name: string): Promise<void> {
-  toastResult(await rebaseOn(name), `Rebased onto ${name}`)
-}
-async function onDeleteBranch(name: string): Promise<void> {
-  const ok = await notify.confirm(`Delete branch ${name}?`, {
-    title: 'Delete branch',
-    confirmText: 'Delete'
-  })
-  if (!ok) return
-  toastResult(await deleteBranch(name), `Deleted ${name}`)
-}
-async function onCheckoutRemoteBranch(ref: string): Promise<void> {
-  const ok = await notify.confirm(`Check out ${ref} as a local branch?`, {
-    title: 'Checkout remote branch',
-    confirmText: 'Checkout'
-  })
-  if (!ok) return
-  toastResult(await checkoutRemoteBranch(ref))
-}
-
 async function onStashPush(): Promise<void> {
   const msg = await notify.prompt('Stash message (optional)', { title: 'Stash changes' })
   if (msg === null) return
   toastResult(await stashPush(msg.trim()), 'Stashed')
 }
-async function onStashPop(index: number): Promise<void> {
-  toastResult(await stashPop(index))
-}
-async function onStashApply(index: number): Promise<void> {
-  toastResult(await stashApply(index))
-}
-async function onStashDrop(index: number): Promise<void> {
-  const ok = await notify.confirm('Drop this stash? Its changes are lost.', {
-    title: 'Drop stash',
-    confirmText: 'Drop'
-  })
-  if (!ok) return
-  toastResult(await stashDrop(index))
+function stashMenu(index: number): MenuItem[] {
+  return [
+    { label: 'Apply (keep stash)', action: () => void stashApply(index).then((r) => toastResult(r)) },
+    { label: 'Pop (apply and remove)', action: () => void stashPop(index).then((r) => toastResult(r)) },
+    {
+      label: 'Drop…',
+      danger: true,
+      action: () =>
+        void notify
+          .confirm('Drop this stash? Its changes are lost.', { title: 'Drop stash', confirmText: 'Drop' })
+          .then(async (ok) => {
+            if (ok) toastResult(await stashDrop(index))
+          })
+    }
+  ]
 }
 
 async function doAddRemote(): Promise<void> {
@@ -315,23 +474,22 @@ async function doAddRemote(): Promise<void> {
     newRemoteUrl.value = ''
   }
 }
-async function onRemoveRemote(name: string): Promise<void> {
-  const ok = await notify.confirm(`Remove remote ${name}?`, {
-    title: 'Remove remote',
-    confirmText: 'Remove'
-  })
-  if (!ok) return
-  toastResult(await removeRemote(name))
+function remoteMenu(name: string, url: string): MenuItem[] {
+  return [
+    { label: 'Open URL in browser', action: () => void openExternal(url) },
+    {
+      label: 'Remove remote…',
+      danger: true,
+      action: () =>
+        void notify
+          .confirm(`Remove remote ${name}?`, { title: 'Remove remote', confirmText: 'Remove' })
+          .then(async (ok) => {
+            if (ok) toastResult(await removeRemote(name))
+          })
+    }
+  ]
 }
 
-async function onDeleteTag(name: string): Promise<void> {
-  const ok = await notify.confirm(`Delete tag ${name}?`, {
-    title: 'Delete tag',
-    confirmText: 'Delete'
-  })
-  if (!ok) return
-  toastResult(await deleteTag(name))
-}
 async function doCreateTag(): Promise<void> {
   const name = newTagName.value.trim()
   if (!name) return
@@ -340,8 +498,21 @@ async function doCreateTag(): Promise<void> {
     newTagMessage.value = ''
   }
 }
+function tagMenu(name: string): MenuItem[] {
+  return [
+    {
+      label: 'Delete tag…',
+      danger: true,
+      action: () =>
+        void notify
+          .confirm(`Delete tag ${name}?`, { title: 'Delete tag', confirmText: 'Delete' })
+          .then(async (ok) => {
+            if (ok) toastResult(await deleteTag(name))
+          })
+    }
+  ]
+}
 
-// ── Worktrees ────────────────────────────────────────────────────────────────
 async function doAddWorktree(): Promise<void> {
   const path = newWtPath.value.trim()
   const branch = newWtBranch.value.trim()
@@ -353,21 +524,71 @@ async function doAddWorktree(): Promise<void> {
   }
   await loadWorktrees()
 }
+async function pickWorktreeDir(): Promise<void> {
+  const picked = await pickFolder(newWtPath.value.trim() || undefined)
+  if (picked) newWtPath.value = picked
+}
+function worktreeMenu(wt: GitWorktree): MenuItem[] {
+  const items: MenuItem[] = []
+  if (!wt.bare && wt.path !== workspacePath) {
+    items.push({ label: 'Open in new window', action: () => void onOpenWorktree(wt.path) })
+  }
+  if (!wt.bare) items.push({ label: 'Reveal in Finder', action: () => void revealPath(wt.path) })
+  if (!wt.is_main) {
+    items.push({
+      label: wt.locked ? 'Unlock' : 'Lock',
+      action: () =>
+        void (wt.locked ? unlockWorktree(wt.path) : lockWorktree(wt.path)).then(async (r) => {
+          toastResult(r)
+          await loadWorktrees()
+        })
+    })
+  }
+  if (!wt.is_main && !wt.bare) {
+    items.push({
+      label: 'Move…',
+      action: () =>
+        void pickFolder(wt.path).then(async (dest) => {
+          if (!dest) return
+          toastResult(await moveWorktree(wt.path, dest), 'Worktree moved')
+          await loadWorktrees()
+        })
+    })
+  }
+  if (!wt.is_main) {
+    items.push({
+      label: 'Remove…',
+      danger: true,
+      action: () => void onRemoveWorktree(wt.path)
+    })
+  }
+  return items
+}
+function worktreesHeaderMenu(): MenuItem[] {
+  return [
+    { label: 'Prune stale worktrees', action: () => void pruneWorktrees().then(async (r) => { toastResult(r, 'Pruned'); await loadWorktrees() }) },
+    { label: 'Repair worktree links', action: () => void repairWorktrees().then(async (r) => { toastResult(r, 'Repaired'); await loadWorktrees() }) }
+  ]
+}
 async function onRemoveWorktree(path: string): Promise<void> {
   const ok = await notify.confirm(`Remove worktree at ${path}?`, {
     title: 'Remove worktree',
     confirmText: 'Remove'
   })
   if (!ok) return
-  toastResult(await removeWorktree(path))
-  await loadWorktrees()
-}
-async function onPruneWorktrees(): Promise<void> {
-  toastResult(await pruneWorktrees(), 'Pruned')
+  const r = await removeWorktree(path)
+  if (!r.ok) {
+    // A dirty/locked worktree fails a plain remove — offer --force.
+    const forced = await notify.confirm(`${r.error || 'Remove failed'} — force remove?`, {
+      title: 'Remove worktree',
+      confirmText: 'Force remove'
+    })
+    if (forced) toastResult(await removeWorktree(path, true))
+  }
   await loadWorktrees()
 }
 
-// ── Git config modal ─────────────────────────────────────────────────────────
+// ── Repository settings modal ────────────────────────────────────────────────
 const showConfig = ref(false)
 const configDraft = ref<Record<string, string>>({})
 
@@ -389,7 +610,7 @@ async function saveConfig(): Promise<void> {
   }
   await loadGitConfig()
   showConfig.value = false
-  notify.toast('Config saved', { type: 'success' })
+  notify.toast('Settings saved', { type: 'success' })
 }
 
 // ── Branch diff view ─────────────────────────────────────────────────────────
@@ -445,250 +666,180 @@ const busy = computed(
     isLoadingStatus.value ||
     isLoadingLog.value
 )
-
-// Short date for the history table (avoids pulling a date lib into the skeleton).
-function shortDate(iso?: string): string {
-  if (!iso) return ''
-  return iso.length > 10 ? iso.slice(0, 10) : iso
-}
 </script>
 
 <template>
   <div class="git-window">
     <!-- ── Toolbar ────────────────────────────────────────────────────── -->
     <header class="toolbar">
-      <div class="tb-title">
-        <span class="tb-branch">{{ gitStatus.branch || 'Git' }}</span>
-        <span v-if="gitStatus.ahead || gitStatus.behind" class="tb-track">
-          <span v-if="gitStatus.ahead">↑{{ gitStatus.ahead }}</span>
-          <span v-if="gitStatus.behind">↓{{ gitStatus.behind }}</span>
-        </span>
-      </div>
+      <span class="wm">Navide Git</span>
+      <span class="crumb">
+        {{ repoName }}<template v-if="gitStatus.branch">
+          <span class="crumb-sep">／</span><b class="mono">{{ gitStatus.branch }}</b>
+          <span v-if="gitStatus.ahead" class="crumb-cnt">↑{{ gitStatus.ahead }}</span>
+          <span v-if="gitStatus.behind" class="crumb-cnt">↓{{ gitStatus.behind }}</span>
+        </template>
+      </span>
+      <span v-if="busy" class="busy-dot" title="Working…" />
       <div class="tb-actions">
-        <button class="tb-btn" :disabled="busy || !isRepo" title="Fetch" @click="onFetch">
-          <span class="ic">⇊</span>Fetch
-        </button>
-        <button class="tb-btn" :disabled="busy || !isRepo" title="Pull" @click="onPull">
-          <span class="ic">↓</span>Pull
-        </button>
-        <button class="tb-btn" :disabled="busy || !isRepo" title="Push" @click="onPush">
-          <span class="ic">↑</span>Push
-        </button>
-        <button class="tb-btn" :disabled="busy || !isRepo" title="Sync (pull + push)" @click="onSync">
-          <span class="ic">⇅</span>Sync
-        </button>
-        <button class="tb-btn" :disabled="busy || !isRepo" title="Stash working changes" @click="onStashPush">
-          <span class="ic">☰</span>Stash
-        </button>
+        <button class="gbtn" :disabled="busy || !isRepo" @click="onFetch">Fetch</button>
+        <button class="gbtn" :disabled="busy || !isRepo" @click="onPull">Pull</button>
+        <button class="gbtn" :disabled="busy || !isRepo" @click="onPush">Push</button>
+        <button class="pbtn" :disabled="busy || !isRepo" title="Pull then push" @click="onSync">Sync</button>
+        <button class="gbtn icon" :disabled="!isRepo" title="Repository settings" @click="openConfig">⚙</button>
       </div>
-      <div class="tb-spacer" />
-      <div v-if="busy" class="tb-busy">working…</div>
-      <button class="tb-btn" :disabled="!isRepo" title="Repository settings" @click="openConfig">
-        <span class="ic">⚙</span>
-      </button>
     </header>
 
     <div v-if="gitError" class="err-bar">{{ gitError }}</div>
 
-    <!-- ── Body: sidebar | center | detail ───────────────────────────── -->
     <div v-if="!hasWorkspace" class="empty">No workspace path provided.</div>
     <div v-else-if="!isRepo && !isLoadingStatus" class="empty">Not a Git repository.</div>
 
     <div v-else class="body">
-      <!-- Sidebar -->
+      <!-- ── Sidebar ──────────────────────────────────────────────────── -->
       <aside class="sidebar">
-        <div class="sb-group">
-          <div class="sb-head">WORKSPACE</div>
-          <button class="sb-item" :class="{ active: view === 'status' }" @click="view = 'status'">
-            File status
-            <span v-if="changeCount" class="sb-badge">{{ changeCount }}</span>
+        <nav class="navi">
+          <button :class="{ on: view === 'status' }" @click="view = 'status'">
+            Changes<span v-if="changeCount" class="n">{{ changeCount }}</span>
           </button>
-          <button class="sb-item" :class="{ active: view === 'history' }" @click="view = 'history'">
-            History
-          </button>
-          <button class="sb-item" :class="{ active: view === 'branchdiff' }" @click="openBranchDiff">
-            Branch diff
-          </button>
-        </div>
+          <button :class="{ on: view === 'history' }" @click="view = 'history'">History</button>
+          <button :class="{ on: view === 'branchdiff' }" @click="openBranchDiff">Branch diff</button>
+        </nav>
+        <div class="divider" />
 
-        <!-- ── BRANCHES (GitPane branch panel: explicit ↵ switch, never row click) ── -->
-        <div class="git-card">
-          <div class="card-hdr clickable" @click="branchesExpanded = !branchesExpanded">
-            <span class="sec-caret">{{ branchesExpanded ? '▾' : '▸' }}</span>
-            <span class="sec-label">Branches</span>
-            <span v-if="localBranches.length" class="sec-badge">{{ localBranches.length }}</span>
-            <div class="spacer" />
-          </div>
-          <div v-if="branchesExpanded" class="card-body collapsible-body">
-            <div class="input-row">
-              <input
-                v-model="newBranchName"
-                class="git-input"
-                placeholder="New branch…"
-                @keydown.enter="doCreateBranch"
-              />
-              <button
-                class="btn-ghost sm"
-                :disabled="!newBranchName.trim() || /\s|\.\./.test(newBranchName.trim()) || newBranchName.trim().startsWith('-')"
-                @click="doCreateBranch"
-              >＋</button>
-              <button
-                class="btn-ghost sm"
-                :class="{ active: showRemoteBranches }"
-                :title="showRemoteBranches ? 'Hide remote branches' : 'Show remote branches'"
-                @click="showRemoteBranches = !showRemoteBranches"
-              >⇅</button>
-            </div>
-            <div v-for="b in localBranches" :key="b.name" class="branch-row" :class="{ current: b.is_current }">
-              <span class="b-check">{{ b.is_current ? '✓' : '' }}</span>
-              <span class="b-name">{{ b.name }}</span>
-              <span v-if="b.tracking" class="b-track">→ {{ b.tracking }}</span>
-              <div class="spacer" />
-              <template v-if="!b.is_current">
-                <button class="row-btn always" title="Compare" @click.stop="doCompareBranch(b.name)">⇔</button>
-                <button class="row-btn always" title="Rebase current onto" @click.stop="doRebaseOnto(b.name)">⇡</button>
-                <button class="row-btn always" title="Merge into current" @click.stop="doMergeIntoCurrent(b.name)">⇣</button>
-                <button class="row-btn always" title="Switch" @click.stop="onSwitchBranch(b.name)">↵</button>
-                <button class="row-btn always danger" title="Delete branch" @click.stop="onDeleteBranch(b.name)">✕</button>
-              </template>
-            </div>
-            <div v-if="!localBranches.length" class="empty-msg">No branches</div>
-            <template v-if="showRemoteBranches">
-              <div class="branch-section-label">Remote branches</div>
-              <div v-if="!remoteBranches.length" class="empty-msg">No remote branches</div>
-              <div
-                v-for="b in remoteBranches"
-                :key="b.name"
-                class="branch-row"
-                :class="{ 'remote-has-local': b.has_local }"
-              >
-                <span class="b-check">{{ b.has_local ? '✓' : '' }}</span>
-                <span class="b-name remote">{{ b.name }}</span>
-                <div class="spacer" />
-                <button
-                  v-if="!b.has_local"
-                  class="row-btn always"
-                  title="Checkout locally"
-                  @click.stop="onCheckoutRemoteBranch(b.name)"
-                >⬇</button>
-              </div>
-            </template>
-          </div>
+        <div class="sec-title">
+          Branches
+          <button class="tinybtn" title="Create a branch" @click="addingBranch = !addingBranch">＋</button>
         </div>
+        <div v-if="addingBranch" class="add-row">
+          <input
+            v-model="newBranchName"
+            class="ed-input"
+            placeholder="new-branch-name"
+            spellcheck="false"
+            @keydown.enter="doCreateBranch"
+          />
+          <button class="tinybtn" :disabled="!newBranchName.trim()" @click="doCreateBranch">Add</button>
+        </div>
+        <div
+          v-for="b in localBranches"
+          :key="b.name"
+          class="srow"
+          :class="{ cur: b.is_current }"
+          :title="b.tracking ? `${b.name} → ${b.tracking}` : b.name"
+        >
+          <span class="bdot" :class="{ cur: b.is_current }" />
+          <span class="sname mono">{{ b.name }}</span>
+          <button
+            v-if="!b.is_current"
+            class="dots"
+            title="Branch actions"
+            @click.stop="openMenu($event, branchMenu(b.name))"
+          >⋯</button>
+        </div>
+        <div v-if="!localBranches.length" class="empty-msg">No branches yet</div>
 
-        <!-- ── STASHES ── -->
-        <div class="git-card">
-          <div class="card-hdr clickable" @click="stashesExpanded = !stashesExpanded">
-            <span class="sec-caret">{{ stashesExpanded ? '▾' : '▸' }}</span>
-            <span class="sec-label">Stashes</span>
-            <span v-if="gitStashes.length" class="sec-badge">{{ gitStashes.length }}</span>
-            <div class="spacer" />
-            <button class="sec-btn" title="Stash working changes" @click.stop="onStashPush">＋</button>
+        <div class="sec-title" style="margin-top: 14px">Collections</div>
+        <button class="srow drawer" @click="stashesOpen = !stashesOpen">
+          <span class="sname">Stashes</span>
+          <span class="count">{{ gitStashes.length || '' }}</span>
+          <span class="chev">{{ stashesOpen ? '▾' : '▸' }}</span>
+        </button>
+        <template v-if="stashesOpen">
+          <div class="sub-add"><button class="linkbtn" @click="onStashPush">＋ Stash working changes</button></div>
+          <div v-for="s in gitStashes" :key="s.ref" class="srow sub" :title="s.message">
+            <span class="sname mono dim">{{ s.ref }}</span>
+            <span class="sname">{{ s.message }}</span>
+            <button class="dots" title="Stash actions" @click.stop="openMenu($event, stashMenu(s.index))">⋯</button>
           </div>
-          <div v-if="stashesExpanded" class="card-body collapsible-body">
-            <div v-if="!gitStashes.length" class="empty-msg">No stashes</div>
-            <div v-for="s in gitStashes" :key="s.ref" class="generic-row">
-              <span class="stash-ref">{{ s.ref }}</span>
-              <span class="stash-msg">{{ s.message }}</span>
-              <div class="row-actions always">
-                <button class="row-btn always" title="Apply (keep stash)" @click.stop="onStashApply(s.index)">⎘</button>
-                <button class="row-btn always" title="Pop (apply &amp; remove)" @click.stop="onStashPop(s.index)">↑</button>
-                <button class="row-btn always danger" title="Drop" @click.stop="onStashDrop(s.index)">✕</button>
-              </div>
-            </div>
-          </div>
-        </div>
+          <div v-if="!gitStashes.length" class="empty-msg sub">Nothing stashed</div>
+        </template>
 
-        <!-- ── REMOTES ── -->
-        <div class="git-card">
-          <div class="card-hdr clickable" @click="remotesExpanded = !remotesExpanded">
-            <span class="sec-caret">{{ remotesExpanded ? '▾' : '▸' }}</span>
-            <span class="sec-label">Remotes</span>
-            <span v-if="gitRemotes.length" class="sec-badge">{{ gitRemotes.length }}</span>
-            <div class="spacer" />
+        <button class="srow drawer" @click="worktreesOpen = !worktreesOpen">
+          <span class="sname">Worktrees</span>
+          <span class="count">{{ gitWorktrees.length > 1 ? gitWorktrees.length : '' }}</span>
+          <span class="chev">{{ worktreesOpen ? '▾' : '▸' }}</span>
+        </button>
+        <template v-if="worktreesOpen">
+          <div class="sub-add">
+            <button class="linkbtn" @click.stop="openMenu($event, worktreesHeaderMenu())">Maintenance ⋯</button>
           </div>
-          <div v-if="remotesExpanded" class="card-body collapsible-body">
-            <div v-if="!gitRemotes.length" class="empty-msg">No remotes</div>
-            <div v-for="r in gitRemotes" :key="r.name" class="generic-row">
-              <span class="remote-name">{{ r.name }}</span>
-              <span class="remote-url" :title="r.fetch_url">{{ r.fetch_url }}</span>
-              <button class="row-btn always danger" title="Remove remote" @click.stop="onRemoveRemote(r.name)">✕</button>
-            </div>
-            <div class="input-row" style="margin-top: 6px">
-              <input v-model="newRemoteName" class="git-input" placeholder="Name" style="width: 72px; flex: 0 0 auto" />
-              <input v-model="newRemoteUrl" class="git-input" placeholder="URL" @keydown.enter="doAddRemote" />
-              <button class="btn-ghost sm" :disabled="!newRemoteName.trim() || !newRemoteUrl.trim()" @click="doAddRemote">＋</button>
-            </div>
+          <div v-for="wt in gitWorktrees" :key="wt.path" class="srow sub" :title="wt.path">
+            <span class="sname mono">{{ wt.path.split('/').at(-1) }}</span>
+            <span v-if="wt.is_main" class="minitag">main</span>
+            <span v-if="wt.locked" class="minitag warn" :title="wt.lock_reason">locked</span>
+            <span v-if="wt.prunable" class="minitag warn" :title="wt.prune_reason">stale</span>
+            <button class="dots" title="Worktree actions" @click.stop="openMenu($event, worktreeMenu(wt))">⋯</button>
           </div>
-        </div>
+          <div class="sub-add wt-add">
+            <input v-model="newWtPath" class="ed-input" placeholder="/absolute/path" spellcheck="false" />
+            <button class="tinybtn" title="Browse for a folder" @click="pickWorktreeDir">…</button>
+            <input v-model="newWtBranch" class="ed-input short" placeholder="branch" spellcheck="false" />
+            <button class="tinybtn" :disabled="!newWtPath.trim() || !newWtBranch.trim()" @click="doAddWorktree">Add</button>
+          </div>
+        </template>
 
-        <!-- ── TAGS ── -->
-        <div class="git-card">
-          <div class="card-hdr clickable" @click="tagsExpanded = !tagsExpanded">
-            <span class="sec-caret">{{ tagsExpanded ? '▾' : '▸' }}</span>
-            <span class="sec-label">Tags</span>
-            <span v-if="gitTags.length" class="sec-badge">{{ gitTags.length }}</span>
-            <div class="spacer" />
+        <button class="srow drawer" @click="remotesOpen = !remotesOpen">
+          <span class="sname">Remotes</span>
+          <span class="count">{{ gitRemotes.length || '' }}</span>
+          <span class="chev">{{ remotesOpen ? '▾' : '▸' }}</span>
+        </button>
+        <template v-if="remotesOpen">
+          <div v-for="r in gitRemotes" :key="r.name" class="srow sub" :title="r.fetch_url">
+            <span class="sname mono">{{ r.name }}</span>
+            <span class="sname dim">{{ r.fetch_url }}</span>
+            <button class="dots" title="Remote actions" @click.stop="openMenu($event, remoteMenu(r.name, r.fetch_url))">⋯</button>
           </div>
-          <div v-if="tagsExpanded" class="card-body collapsible-body">
-            <div v-if="!gitTags.length" class="empty-msg">No tags</div>
-            <div v-for="t in gitTags" :key="t.name" class="generic-row">
-              <span class="b-name">{{ t.name }}</span>
-              <code class="chash" style="margin-left: 4px">{{ t.commit_hash }}</code>
-              <span v-if="t.message" class="b-track">{{ t.message }}</span>
-              <div class="spacer" />
-              <button class="row-btn always danger" title="Delete tag" @click.stop="onDeleteTag(t.name)">✕</button>
-            </div>
-            <div class="input-row" style="margin-top: 6px; flex-wrap: wrap; gap: 4px">
-              <input v-model="newTagName" class="git-input" placeholder="v1.0.0" style="flex: 1; min-width: 72px" />
-              <input v-model="newTagMessage" class="git-input" placeholder="Message" style="flex: 2; min-width: 80px" />
-              <button class="btn-ghost sm" :disabled="!newTagName.trim()" @click="doCreateTag">＋</button>
-            </div>
+          <div v-if="!gitRemotes.length" class="empty-msg sub">No remotes</div>
+          <div class="sub-add wt-add">
+            <input v-model="newRemoteName" class="ed-input short" placeholder="name" spellcheck="false" />
+            <input v-model="newRemoteUrl" class="ed-input" placeholder="url" spellcheck="false" @keydown.enter="doAddRemote" />
+            <button class="tinybtn" :disabled="!newRemoteName.trim() || !newRemoteUrl.trim()" @click="doAddRemote">Add</button>
           </div>
-        </div>
+        </template>
 
-        <!-- ── WORKTREES ── -->
-        <div class="git-card">
-          <div class="card-hdr clickable" @click="worktreesExpanded = !worktreesExpanded">
-            <span class="sec-caret">{{ worktreesExpanded ? '▾' : '▸' }}</span>
-            <span class="sec-label">Worktrees</span>
-            <span v-if="gitWorktrees.length > 1" class="sec-badge">{{ gitWorktrees.length }}</span>
-            <div class="spacer" />
+        <button class="srow drawer" @click="tagsOpen = !tagsOpen">
+          <span class="sname">Tags</span>
+          <span class="count">{{ gitTags.length || '' }}</span>
+          <span class="chev">{{ tagsOpen ? '▾' : '▸' }}</span>
+        </button>
+        <template v-if="tagsOpen">
+          <div v-for="t in gitTags" :key="t.name" class="srow sub" :title="t.message">
+            <span class="sname mono">{{ t.name }}</span>
+            <span class="sname dim mono">{{ t.commit_hash.slice(0, 7) }}</span>
+            <button class="dots" title="Tag actions" @click.stop="openMenu($event, tagMenu(t.name))">⋯</button>
           </div>
-          <div v-if="worktreesExpanded" class="card-body collapsible-body">
-            <div class="input-row" style="margin-bottom: 6px">
-              <button class="btn-ghost sm" title="Prune stale worktrees" @click="onPruneWorktrees">Prune</button>
-            </div>
-            <div v-for="wt in gitWorktrees" :key="wt.path" class="generic-row">
-              <span class="wt-icon">{{ wt.is_main ? '✦' : '○' }}</span>
-              <div style="flex: 1; min-width: 0">
-                <div class="wt-name-row">
-                  <span class="b-name" :title="wt.path">{{ wt.path.split('/').at(-1) }}</span>
-                  <span v-if="wt.detached" class="wt-badge">detached</span>
-                  <span v-if="wt.locked" class="wt-badge warn" :title="wt.lock_reason">🔒</span>
-                  <span v-if="wt.prunable" class="wt-badge warn" :title="wt.prune_reason">⚠</span>
-                </div>
-                <div class="b-track">{{ wt.branch || wt.head.slice(0, 8) }}</div>
-              </div>
-              <button
-                v-if="!wt.is_main"
-                class="row-btn always danger"
-                title="Remove worktree"
-                @click.stop="onRemoveWorktree(wt.path)"
-              >✕</button>
-            </div>
-            <div class="input-row" style="margin-top: 6px">
-              <input v-model="newWtPath" class="git-input" placeholder="/absolute/path" style="flex: 2" />
-              <input v-model="newWtBranch" class="git-input" placeholder="branch" style="flex: 1" />
-              <button class="btn-ghost sm" :disabled="!newWtPath.trim() || !newWtBranch.trim()" @click="doAddWorktree">＋</button>
-            </div>
+          <div v-if="!gitTags.length" class="empty-msg sub">No tags</div>
+          <div class="sub-add wt-add">
+            <input v-model="newTagName" class="ed-input short" placeholder="v1.0.0" spellcheck="false" />
+            <input v-model="newTagMessage" class="ed-input" placeholder="message" @keydown.enter="doCreateTag" />
+            <button class="tinybtn" :disabled="!newTagName.trim()" @click="doCreateTag">Add</button>
           </div>
-        </div>
+        </template>
+
+        <button class="srow drawer" @click="remoteBranchesOpen = !remoteBranchesOpen">
+          <span class="sname">Remote branches</span>
+          <span class="count">{{ remoteBranches.length || '' }}</span>
+          <span class="chev">{{ remoteBranchesOpen ? '▾' : '▸' }}</span>
+        </button>
+        <template v-if="remoteBranchesOpen">
+          <div v-for="b in remoteBranches" :key="b.name" class="srow sub" :title="b.name">
+            <span class="sname mono dim">{{ b.name }}</span>
+            <span v-if="b.has_local" class="minitag">local ✓</span>
+            <button
+              v-else
+              class="dots"
+              title="Remote branch actions"
+              @click.stop="openMenu($event, remoteBranchMenu(b.name))"
+            >⋯</button>
+          </div>
+          <div v-if="!remoteBranches.length" class="empty-msg sub">No remote branches</div>
+        </template>
       </aside>
 
-      <!-- Center + bottom detail -->
+      <!-- ── Center ───────────────────────────────────────────────────── -->
       <section class="center">
-        <!-- History (full rich history with graph, search, context menu, and split detail) -->
+        <!-- History -->
         <div v-if="view === 'history'" class="pane history-full">
           <GitHistoryModal
             show
@@ -719,12 +870,12 @@ function shortDate(iso?: string): string {
         <!-- Branch comparison -->
         <div v-else-if="view === 'branchdiff'" class="pane branchdiff">
           <div class="bd-pickers">
-            <select v-model="diffBase" class="bd-select" title="Base branch">
+            <select v-model="diffBase" class="ed-select" title="Base branch">
               <option value="" disabled>base…</option>
               <option v-for="b in gitBranches" :key="'b' + b.name" :value="b.name">{{ b.name }}</option>
             </select>
             <span class="bd-arrow">→</span>
-            <select v-model="diffCompare" class="bd-select" title="Compare branch">
+            <select v-model="diffCompare" class="ed-select" title="Compare branch">
               <option value="" disabled>compare…</option>
               <option v-for="b in gitBranches" :key="'c' + b.name" :value="b.name">{{ b.name }}</option>
             </select>
@@ -739,46 +890,104 @@ function shortDate(iso?: string): string {
               :backend="backend"
               hide-ai-review
             />
-            <div v-else class="diff-empty">Pick two branches to compare.</div>
+            <div v-else class="empty-hint">Pick two branches to compare.</div>
           </div>
         </div>
 
-        <!-- File status: the real GitPane, identical to the main window's Git
-             tab. v-show (not v-if) keeps it mounted across view switches so
-             its state and credential modal stay alive. -->
-        <div v-show="view === 'status'" class="status-wrap">
-          <div class="pane gitpane-host">
-            <GitPane
-              :workspace-path="workspacePath"
-              :backend="backend"
-              :analyzer-model="analyzerModel"
-              embedded
-              @open-file="(p) => openInEditor(p.filepath)"
-              @open-conflict="(p) => openInEditor(p.filepath)"
-              @open-diff="onPaneOpenDiff"
-              @open-branch-diff="onPaneOpenBranchDiff"
-            />
+        <!-- Changes: the checkbox-stage file card + commit composer -->
+        <div v-else class="status-wrap">
+          <div class="pane changes">
+            <div v-if="opInProgress" class="op-banner">
+              <span>{{ opInProgress }} in progress<template v-if="conflictFiles.length"> — {{ conflictFiles.length }} conflicted file{{ conflictFiles.length > 1 ? 's' : '' }}</template></span>
+              <button class="linkbtn danger" @click="onAbortOperation">Abort {{ opInProgress }}</button>
+            </div>
+
+            <div class="list-hdr">
+              <div>
+                <div class="gtitle">{{ changeCount }} file{{ changeCount === 1 ? '' : 's' }} changed</div>
+                <div class="gsub">Check to stage · click a file for its diff</div>
+              </div>
+              <div class="hdr-actions">
+                <button v-if="stagedFiles.length" class="linkbtn" @click="onUnstageAll">Unstage all</button>
+                <button v-if="changedFiles.length + untrackedFiles.length" class="linkbtn" @click="onStageAll">Stage all</button>
+              </div>
+            </div>
+
+            <div v-if="!changeCount && !conflictFiles.length" class="clean-hint">
+              Working tree clean — nothing to commit.
+            </div>
+            <div v-else class="fcard">
+              <div v-for="f in conflictFiles" :key="'c' + f.path" class="frow conflict" @click="showWorkingDiff(f.path, false)">
+                <span class="conflict-mark">⚠</span>
+                <span class="stag u">conflict</span>
+                <span class="fpath mono"><i>{{ splitPath(f.path).dir }}</i>{{ splitPath(f.path).base }}</span>
+                <span class="rowact">
+                  <button class="linkbtn" @click.stop="onResolveOurs(f.path)">ours</button>
+                  <button class="linkbtn" @click.stop="onResolveTheirs(f.path)">theirs</button>
+                  <button class="linkbtn" @click.stop="openInEditor(f.path)">editor</button>
+                </span>
+              </div>
+              <div v-for="f in stagedFiles" :key="'s' + f.path" class="frow" @click="showWorkingDiff(f.path, true)">
+                <button class="chk on" title="Unstage" @click.stop="toggleStage(f, true)" />
+                <span class="stag" :class="fileTag(f).cls">{{ fileTag(f).label }}</span>
+                <span class="fpath mono"><i>{{ splitPath(f.path).dir }}</i>{{ splitPath(f.path).base }}</span>
+                <span class="rowact"><button class="linkbtn" @click.stop="showWorkingDiff(f.path, true)">diff</button></span>
+              </div>
+              <div v-for="f in changedFiles" :key="'u' + f.path" class="frow" @click="showWorkingDiff(f.path, false)">
+                <button class="chk" title="Stage" @click.stop="toggleStage(f, false)" />
+                <span class="stag" :class="fileTag(f).cls">{{ fileTag(f).label }}</span>
+                <span class="fpath mono"><i>{{ splitPath(f.path).dir }}</i>{{ splitPath(f.path).base }}</span>
+                <span class="rowact">
+                  <button class="linkbtn" @click.stop="showWorkingDiff(f.path, false)">diff</button>
+                  <button class="linkbtn danger" @click.stop="onDiscard(f)">discard</button>
+                </span>
+              </div>
+              <div v-for="f in untrackedFiles" :key="'n' + f.path" class="frow" @click="showWorkingDiff(f.path, false)">
+                <button class="chk" title="Stage" @click.stop="toggleStage(f, false)" />
+                <span class="stag q">new</span>
+                <span class="fpath mono"><i>{{ splitPath(f.path).dir }}</i>{{ splitPath(f.path).base }}</span>
+                <span class="rowact"><button class="linkbtn" @click.stop="showWorkingDiff(f.path, false)">diff</button></span>
+              </div>
+            </div>
+
+            <div class="composer">
+              <textarea
+                v-model="commitMessage"
+                class="cmp-input"
+                rows="2"
+                placeholder="Describe this change…"
+                :disabled="isCommitting"
+              />
+              <div class="cmp-actions">
+                <button class="chipbtn" :disabled="isGenerating || busy" @click="onGenerateMessage">
+                  {{ isGenerating ? 'Generating…' : '✨ AI message' }}
+                </button>
+                <button class="chipbtn" :disabled="isCommitting" @click="onAmend">Amend</button>
+                <button class="commitbtn" :disabled="!canCommit" @click="onCommit">
+                  {{ isCommitting ? 'Committing…' : `Commit ${gitStatus.staged.length} file${gitStatus.staged.length === 1 ? '' : 's'}` }}
+                </button>
+              </div>
+            </div>
           </div>
 
           <!-- Bottom: per-file diff detail -->
           <div v-if="externalDiff" class="detail">
-            <div class="detail-left">
-              <div class="dt-meta">
-                <div class="dt-subject mono">{{ externalDiff.name }}</div>
-                <div class="dt-sub">
-                  {{
-                    externalDiff.commit
-                      ? 'commit ' + externalDiff.commit.slice(0, 8)
-                      : externalDiff.staged
-                        ? 'staged changes'
-                        : 'working tree'
-                  }}
-                </div>
-                <button class="dt-back" @click="openInEditor(externalDiff.name)">Open in editor</button>
-                <button class="dt-back" @click="clearExternalDiff">✕ close diff</button>
-              </div>
+            <div class="detail-hdr">
+              <span class="dt-name mono">{{ externalDiff.name }}</span>
+              <span class="dt-kind">
+                {{
+                  externalDiff.commit
+                    ? 'commit ' + externalDiff.commit.slice(0, 8)
+                    : externalDiff.staged
+                      ? 'staged'
+                      : 'working tree'
+                }}
+              </span>
+              <span class="spacer" />
+              <button class="linkbtn" @click="openInEditor(externalDiff.name)">Open in editor</button>
+              <button class="linkbtn" @click="clearExternalDiff">Close</button>
             </div>
-            <div class="detail-right">
+            <div class="detail-body">
               <DiffPane
                 :key="'ext:' + externalDiff.name + ':' + externalDiff.commit + ':' + externalDiff.staged"
                 :workspace-path="workspacePath"
@@ -795,7 +1004,21 @@ function shortDate(iso?: string): string {
       </section>
     </div>
 
-    <!-- Repository config (allow-listed git config keys) -->
+    <!-- ⋯ popover menu -->
+    <template v-if="menu">
+      <div class="menu-backdrop" @click="menu = null" />
+      <div class="menu" :style="{ left: menu.x + 'px', top: menu.y + 'px' }">
+        <button
+          v-for="(item, i) in menu.items"
+          :key="i"
+          class="menu-item"
+          :class="{ danger: item.danger }"
+          @click="runMenuItem(item)"
+        >{{ item.label }}</button>
+      </div>
+    </template>
+
+    <!-- Repository settings (allow-listed git config keys) -->
     <template v-if="showConfig">
       <div class="cfg-backdrop" @click="showConfig = false" />
       <div class="cfg-modal" @keydown.esc="showConfig = false">
@@ -803,108 +1026,118 @@ function shortDate(iso?: string): string {
         <div v-if="!gitConfigAllowedKeys.length" class="cfg-empty">No editable keys.</div>
         <div v-for="key in gitConfigAllowedKeys" :key="key" class="cfg-row">
           <label class="cfg-key mono">{{ key }}</label>
-          <input v-model="configDraft[key]" class="cfg-input" type="text" spellcheck="false" />
+          <input v-model="configDraft[key]" class="ed-input" type="text" spellcheck="false" />
         </div>
         <div class="cfg-actions">
-          <button class="cb-btn" @click="showConfig = false">Cancel</button>
-          <button class="cb-btn primary" @click="saveConfig">Save</button>
+          <button class="chipbtn" @click="showConfig = false">Cancel</button>
+          <button class="commitbtn" @click="saveConfig">Save</button>
         </div>
       </div>
     </template>
 
-    <!-- The askpass credential modal lives inside the embedded GitPane (always
-         mounted via v-show), so a toolbar push/pull waiting on credentials is
-         answered there. -->
-    <!-- Renders useNotify toasts/dialogs (GitPane/DiffPane feedback). -->
+    <!-- Askpass credential prompt for a push/pull/fetch waiting on this window
+         (git.credential_request forwarded by the host broker). -->
+    <GitCredentialModal
+      :show="showCredentialPrompt"
+      :prompt="credentialPrompt"
+      :workspace-path="workspacePath"
+      @submit="submitCredential"
+      @cancel="cancelCredential"
+    />
     <NotificationHost />
   </div>
 </template>
 
 <style scoped>
-/* Colors follow the app theme via semantic tokens (styles/tokens/semantic.css),
- * so the standalone Git window re-themes with the rest of the app. The default
- * dark-github values reproduce the original hardcoded palette. */
+/* Editorial Calm — generous spacing, hairline borders, soft cards. All colors
+ * come from semantic tokens so every app theme translates the design; the
+ * light theme reproduces the approved mockup. */
 .git-window {
   height: 100vh;
   display: flex;
   flex-direction: column;
   background: var(--bg-base);
   color: var(--text-primary);
-  font: 13px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font: 13px/1.55 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   overflow: hidden;
 }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.spacer { flex: 1; }
 
-/* Toolbar */
+/* ── Toolbar ── */
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 16px;
-  height: 44px;
-  padding: 0 14px;
+  gap: 14px;
+  height: 54px;
+  padding: 0 18px 0 84px; /* clear the hidden-titlebar traffic lights */
+  background: var(--bg-subtle);
   border-bottom: 1px solid var(--border-muted);
   -webkit-app-region: drag;
-  padding-left: 78px; /* clear the hidden-titlebar traffic lights */
+  flex-shrink: 0;
 }
-.tb-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.wm {
+  font-weight: 800;
+  font-size: 13.5px;
+  letter-spacing: 0.02em;
+  color: var(--text-bright);
   -webkit-app-region: no-drag;
 }
-.tb-branch {
-  font-weight: 600;
-  color: var(--text-bright);
+.crumb {
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
-.tb-track {
+.crumb b { color: var(--text-bright); font-weight: 650; }
+.crumb-sep { margin: 0 4px; color: var(--text-muted); }
+.crumb-cnt { margin-left: 6px; color: var(--accent-fg); font-size: 12px; }
+.busy-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--attention-fg);
+  animation: busy-pulse 1.2s ease-in-out infinite;
+}
+@keyframes busy-pulse { 50% { opacity: 0.25; } }
+@media (prefers-reduced-motion: reduce) { .busy-dot { animation: none; } }
+.tb-actions {
+  margin-left: auto;
   display: flex;
   gap: 6px;
-  color: var(--accent-fg);
-  font-size: 12px;
-}
-.tb-actions {
-  display: flex;
-  gap: 4px;
-  -webkit-app-region: no-drag;
-}
-.tb-btn {
-  display: inline-flex;
   align-items: center;
-  gap: 5px;
-  height: 28px;
-  padding: 0 10px;
-  background: var(--bg-muted);
-  color: var(--text-primary);
-  border: 1px solid var(--border-default);
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 12px;
-}
-.tb-btn:hover:not(:disabled) {
-  background: var(--bg-hover-strong);
-}
-.tb-btn:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-.tb-btn .ic {
-  font-size: 13px;
-}
-.tb-spacer {
-  flex: 1;
-}
-.tb-busy {
-  color: var(--text-secondary);
-  font-size: 12px;
   -webkit-app-region: no-drag;
 }
+.gbtn {
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  padding: 7px 11px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.gbtn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
+.gbtn:disabled { opacity: 0.4; cursor: default; }
+.gbtn.icon { padding: 7px 9px; }
+.pbtn {
+  border: none;
+  background: var(--accent-emphasis);
+  color: var(--text-on-emphasis);
+  font-size: 12.5px;
+  font-weight: 700;
+  padding: 8px 16px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+.pbtn:hover:not(:disabled) { filter: brightness(1.08); }
+.pbtn:disabled { opacity: 0.45; cursor: default; }
 
 .err-bar {
-  padding: 6px 14px;
+  padding: 6px 18px;
   background: var(--danger-subtle);
   color: var(--danger-bright);
   font-size: 12px;
 }
-
 .empty {
   flex: 1;
   display: flex;
@@ -913,324 +1146,348 @@ function shortDate(iso?: string): string {
   color: var(--text-secondary);
 }
 
-/* Body layout */
-.body {
-  flex: 1;
-  display: flex;
-  min-height: 0;
-}
+/* ── Body ── */
+.body { flex: 1; display: flex; min-height: 0; }
 
-/* Sidebar */
+/* ── Sidebar ── */
 .sidebar {
-  width: 270px;
+  width: 256px;
   flex-shrink: 0;
+  background: var(--bg-subtle);
   border-right: 1px solid var(--border-muted);
   overflow-y: auto;
-  padding: 8px 0;
+  padding: 14px 0 20px;
 }
-.sb-group {
-  padding: 4px 0 8px;
-}
-.sb-head {
+.navi { display: flex; flex-direction: column; gap: 2px; padding: 0 12px 12px; }
+.navi button {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 4px 12px;
-  font-size: 10.5px;
-  letter-spacing: 0.6px;
-  color: var(--text-muted);
-  font-weight: 600;
+  text-align: left;
+  border: none;
+  background: none;
+  padding: 7px 12px;
+  border-radius: 9px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
 }
-.sb-item {
+.navi button:hover { background: var(--bg-hover-faint); }
+.navi .on { background: var(--bg-selected); color: var(--accent-bright); font-weight: 700; }
+.navi .n { margin-left: auto; font-size: 11.5px; color: var(--text-muted); }
+.divider { height: 1px; background: var(--border-muted); margin: 4px 12px 12px; }
+
+.sec-title {
   display: flex;
   align-items: center;
   gap: 6px;
-  width: 100%;
-  padding: 4px 12px;
-  background: none;
-  border: none;
-  color: var(--text-primary);
-  font-size: 12.5px;
-  text-align: left;
-  cursor: pointer;
+  padding: 4px 24px;
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
 }
-/* ── GitPane-copied section vocabulary (keep in sync with GitPane.vue) ─────── */
-.spacer { flex: 1; }
-.empty-msg { color: var(--text-muted); font-size: 11px; font-style: italic; padding: 3px 8px 6px; }
-.chash { font-size: 10px; color: var(--text-muted); font-family: monospace; background: transparent; }
-
-.git-card {
-  margin: 6px 8px;
-  background: var(--bg-base);
-  border: 1px solid var(--border-muted);
-  border-radius: 6px;
-  overflow: hidden;
-}
-.card-hdr {
-  display: flex; align-items: center; gap: 6px;
-  padding: 6px 10px; min-height: 22px;
-  background: var(--bg-subtle);
-}
-.card-hdr.clickable { cursor: pointer; user-select: none; }
-.card-hdr.clickable:hover { background: var(--bg-elevated); }
-.git-card:has(.card-body) .card-hdr { border-bottom: 1px solid var(--border-muted); }
-.card-body { padding: 4px 2px 6px; }
-.collapsible-body {
-  padding: 4px 12px 8px;
-  display: flex; flex-direction: column; gap: 2px;
-}
-.sec-caret { font-size: 9px; color: var(--text-muted); width: 10px; flex-shrink: 0; }
-.sec-label {
-  font-size: 11px; font-weight: 600; color: var(--text-secondary);
-  letter-spacing: 0.3px;
-}
-.sec-badge {
-  font-size: 10px; color: var(--text-secondary); background: var(--bg-active);
-  border-radius: 10px; padding: 0 6px; flex-shrink: 0;
-}
-.sec-btn {
-  display: flex; align-items: center; justify-content: center;
-  width: 20px; height: 20px; background: transparent; border: none;
-  border-radius: 3px; color: var(--text-muted); cursor: pointer; font-size: 12px; padding: 0;
-}
-.sec-btn:hover { color: var(--text-primary); background: var(--bg-hover); }
-
-.branch-row {
-  display: flex; align-items: center; gap: 4px;
-  padding: 2px 0; font-size: 11px; border-radius: 3px;
-}
-.branch-row:hover { background: var(--bg-hover-faint); }
-.branch-row.current .b-name { color: var(--accent-bright); font-weight: 600; }
-.b-check { width: 14px; color: var(--success-bright); font-size: 10px; text-align: center; flex-shrink: 0; }
-.b-name { color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
-.b-name.remote { color: var(--text-muted); font-style: italic; }
-.b-track { color: var(--text-muted); font-size: 10px; flex-shrink: 0; }
-.branch-section-label { font-size: 10px; color: var(--text-muted); padding: 4px 0 2px; letter-spacing: 0.04em; text-transform: uppercase; }
-
-.generic-row {
-  display: flex; align-items: center; gap: 6px;
-  padding: 3px 0; font-size: 11px;
-}
-.generic-row:hover { background: var(--bg-hover-faint); }
-.row-actions.always { display: flex; }
-.row-btn {
-  display: flex; align-items: center; justify-content: center;
-  min-width: 20px; height: 20px; background: transparent; border: none;
-  border-radius: 3px; color: var(--text-secondary); font-size: 11px; cursor: pointer; padding: 0 2px;
-}
-.row-btn:hover { color: var(--text-primary); background: var(--bg-active); }
-.row-btn.danger:hover { color: var(--danger-fg); }
-.row-btn.always { opacity: 1; }
-.stash-ref { color: var(--text-muted); font-size: 10px; flex-shrink: 0; }
-.stash-msg { color: var(--text-primary); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.remote-name { color: var(--text-muted); font-size: 10px; flex-shrink: 0; min-width: 44px; }
-.remote-url  { color: var(--text-primary); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
-.wt-icon { color: var(--success-bright); font-size: 11px; flex-shrink: 0; width: 14px; text-align: center; }
-.wt-name-row { display: flex; align-items: center; gap: 4px; min-width: 0; }
-.wt-name-row .b-name { flex: 0 1 auto; }
-.wt-badge {
-  font-size: 9px; color: var(--text-secondary); background: var(--bg-active);
-  border-radius: 8px; padding: 0 5px; flex-shrink: 0; white-space: nowrap;
-}
-.wt-badge.warn { color: var(--danger-fg); }
-
-.git-input {
-  flex: 1; background: var(--bg-subtle); border: 1px solid var(--border-default); border-radius: 4px;
-  color: var(--text-primary); font-size: 11px; padding: 3px 7px;
-}
-.git-input:focus { outline: none; border-color: var(--accent-focus); }
-.input-row { display: flex; gap: 4px; }
-.btn-ghost {
-  background: transparent; border: 1px solid var(--border-default); border-radius: 4px;
-  color: var(--text-secondary); font-size: 12px; padding: 4px 8px; cursor: pointer;
-}
-.btn-ghost:hover { border-color: var(--border-strong); color: var(--text-primary); }
-.btn-ghost:disabled { opacity: 0.4; cursor: not-allowed; }
-.btn-ghost.sm { font-size: 11px; padding: 3px 7px; }
-.btn-ghost.active { color: var(--accent-bright); }
-
-button.sb-item:hover {
-  background: var(--bg-subtle);
-}
-.sb-item.active {
-  background: var(--bg-selected);
-  color: var(--text-bright);
-}
-.sb-badge {
+.tinybtn {
   margin-left: auto;
-  background: var(--bg-muted);
-  border-radius: 9px;
-  padding: 0 6px;
-  font-size: 11px;
-  color: var(--text-primary);
-}
-
-/* Center column */
-.center {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-.pane {
-  flex: 1;
-  overflow: auto;
-  min-height: 0;
-}
-.pane.history-full {
-  overflow: hidden;
-}
-.pane-loading,
-.diff-empty {
-  padding: 16px;
-  color: var(--text-secondary);
-}
-
-/* History table */
-.hist-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 12.5px;
-}
-.hist-table thead th {
-  position: sticky;
-  top: 0;
-  background: var(--bg-base);
-  text-align: left;
-  padding: 6px 10px;
+  border: none;
+  background: none;
   color: var(--text-muted);
-  font-weight: 600;
-  border-bottom: 1px solid var(--border-muted);
-  font-size: 11px;
-}
-.hist-row {
-  cursor: pointer;
-  border-bottom: 1px solid var(--border-muted);
-}
-.hist-row:hover {
-  background: var(--bg-subtle);
-}
-.hist-row.selected {
-  background: var(--bg-selected);
-}
-.hist-table td {
-  padding: 5px 10px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.c-desc {
-  max-width: 0;
-  width: 100%;
-}
-.c-hash {
-  color: var(--text-secondary);
-}
-.c-author {
-  color: var(--text-secondary);
-  max-width: 140px;
-}
-.c-date {
-  color: var(--text-muted);
-}
-.ref-pill {
-  display: inline-block;
-  background: var(--accent-emphasis);
-  color: var(--text-on-emphasis);
-  border-radius: 8px;
-  padding: 0 7px;
-  font-size: 11px;
-  margin-right: 5px;
-}
-
-/* File-status wrapper: embedded GitPane on top, diff detail below */
-.status-wrap {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-.gitpane-host {
-  flex: 1;
-  min-height: 0;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-}
-.gitpane-host > * {
-  flex: 1;
-  min-height: 0;
-}
-
-.cb-btn {
-  background: var(--bg-muted);
-  color: var(--text-primary);
-  border: 1px solid var(--border-default);
-  border-radius: 6px;
   font-size: 12px;
-  padding: 4px 10px;
   cursor: pointer;
+  padding: 0 4px;
+  border-radius: 5px;
+  letter-spacing: 0;
 }
-.cb-btn:hover:not(:disabled) {
-  background: var(--bg-hover-strong);
-}
-.cb-btn:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-.cb-btn.primary {
-  background: var(--success-emphasis);
-  color: var(--text-on-emphasis);
-  border-color: var(--success-strong);
-}
-.cb-btn.primary:hover:not(:disabled) {
-  background: var(--success-strong);
-}
+.tinybtn:hover:not(:disabled) { color: var(--text-bright); background: var(--bg-hover); }
+.tinybtn:disabled { opacity: 0.4; cursor: default; }
 
-/* Branch diff view */
-.branchdiff {
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-.bd-pickers {
+.srow {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--border-muted);
-}
-.bd-select {
-  background: var(--bg-muted);
+  width: 100%;
+  padding: 4.5px 24px;
+  border: none;
+  background: none;
+  text-align: left;
+  font-size: 12.5px;
   color: var(--text-primary);
-  border: 1px solid var(--border-default);
-  border-radius: 6px;
-  font-size: 12px;
-  padding: 3px 6px;
-  max-width: 220px;
+  cursor: default;
 }
-.bd-arrow {
+.srow:hover { background: var(--bg-hover-faint); }
+.srow.drawer { cursor: pointer; color: var(--text-secondary); margin-top: 1px; }
+.srow.sub { padding-left: 34px; }
+.bdot { width: 7px; height: 7px; border-radius: 50%; background: var(--border-strong); flex: none; }
+.bdot.cur { background: var(--accent-bright); }
+.srow.cur .sname { color: var(--accent-bright); font-weight: 700; }
+.sname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.sname.dim { color: var(--text-muted); flex-shrink: 1; }
+.count { margin-left: auto; font-size: 11.5px; color: var(--text-muted); flex: none; }
+.chev { font-size: 9px; color: var(--text-muted); flex: none; width: 10px; }
+.dots {
+  margin-left: auto;
+  border: none;
+  background: none;
   color: var(--text-muted);
+  font-size: 13px;
+  padding: 0 4px;
+  border-radius: 5px;
+  cursor: pointer;
+  visibility: hidden;
+  flex: none;
 }
-.bd-body {
+.srow:hover .dots { visibility: visible; }
+.dots:hover { color: var(--text-bright); background: var(--bg-hover); }
+.minitag {
+  font-size: 9.5px;
+  color: var(--text-secondary);
+  background: var(--bg-active);
+  border-radius: 7px;
+  padding: 0 6px;
+  flex: none;
+}
+.minitag.warn { color: var(--danger-fg); }
+.empty-msg { padding: 3px 24px 6px; color: var(--text-muted); font-size: 11.5px; font-style: italic; }
+.empty-msg.sub { padding-left: 34px; }
+
+.add-row, .sub-add { display: flex; gap: 5px; align-items: center; padding: 4px 24px 6px; }
+.sub-add { padding-left: 34px; }
+.sub-add.wt-add { flex-wrap: wrap; }
+.ed-input {
   flex: 1;
-  min-height: 0;
+  min-width: 60px;
+  background: var(--bg-base);
+  border: 1px solid var(--border-default);
+  border-radius: 7px;
+  color: var(--text-primary);
+  font-size: 11.5px;
+  padding: 4px 8px;
+}
+.ed-input.short { flex: 0 1 76px; }
+.ed-input:focus { outline: none; border-color: var(--accent-focus); }
+.linkbtn {
+  border: none;
+  background: none;
+  color: var(--accent-fg);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 5px;
+}
+.linkbtn:hover { background: var(--bg-hover-faint); }
+.linkbtn.danger { color: var(--danger-fg); }
+
+/* ── Center ── */
+.center { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.pane { flex: 1; overflow: auto; min-height: 0; }
+.pane.history-full { overflow: hidden; }
+.status-wrap { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.pane.changes { display: flex; flex-direction: column; padding: 20px 26px 18px; overflow-y: auto; }
+
+.op-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--attention-fg) 12%, transparent);
+  color: var(--attention-fg);
+  font-size: 12.5px;
+  margin-bottom: 14px;
+}
+.op-banner .linkbtn { margin-left: auto; }
+
+.list-hdr { display: flex; align-items: flex-end; gap: 12px; margin-bottom: 12px; }
+.gtitle { font-size: 15px; font-weight: 800; color: var(--text-bright); }
+.gsub { font-size: 12px; color: var(--text-muted); margin-top: 1px; }
+.hdr-actions { margin-left: auto; display: flex; gap: 10px; }
+.clean-hint, .empty-hint { color: var(--text-muted); font-size: 13px; padding: 26px 4px; }
+
+.fcard {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-muted);
+  border-radius: 14px;
   overflow: hidden;
+}
+.frow {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 8.5px 16px;
+  border-bottom: 1px solid var(--border-muted);
+  font-size: 13px;
+  cursor: pointer;
+}
+.frow:last-child { border-bottom: none; }
+.frow:hover { background: var(--bg-hover-faint); }
+.frow.conflict { background: color-mix(in srgb, var(--danger-fg) 7%, transparent); }
+.conflict-mark { color: var(--danger-fg); flex: none; width: 15px; text-align: center; }
+.chk {
+  width: 15px;
+  height: 15px;
+  border-radius: 5px;
+  border: 1.5px solid var(--border-strong);
+  background: none;
+  cursor: pointer;
+  flex: none;
+  padding: 0;
+  position: relative;
+}
+.chk:hover { border-color: var(--accent-focus); }
+.chk.on { background: var(--accent-emphasis); border-color: var(--accent-emphasis); }
+.chk.on::after {
+  content: '✓';
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-on-emphasis);
+  font-size: 10px;
+  font-weight: 800;
+}
+.stag {
+  font-size: 10.5px;
+  font-weight: 800;
+  border-radius: 5px;
+  padding: 1px 7px;
+  flex: none;
+}
+.stag.m { background: color-mix(in srgb, var(--attention-fg) 14%, transparent); color: var(--attention-fg); }
+.stag.a { background: color-mix(in srgb, var(--success-fg) 14%, transparent); color: var(--success-fg); }
+.stag.q { background: color-mix(in srgb, var(--accent-fg) 13%, transparent); color: var(--accent-fg); }
+.stag.d, .stag.u { background: color-mix(in srgb, var(--danger-fg) 13%, transparent); color: var(--danger-fg); }
+.fpath { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); font-size: 12.5px; }
+.fpath i { color: var(--text-muted); font-style: normal; }
+.rowact { display: flex; gap: 6px; flex: none; visibility: hidden; }
+.frow:hover .rowact, .frow.conflict .rowact { visibility: visible; }
+
+/* ── Commit composer ── */
+.composer {
+  margin-top: 16px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-muted);
+  border-radius: 16px;
+  padding: 12px 14px;
+  box-shadow: 0 6px 22px var(--shadow-scrim);
+  flex-shrink: 0;
+}
+.cmp-input {
+  width: 100%;
+  border: none;
+  background: none;
+  resize: vertical;
+  color: var(--text-primary);
+  font: 13px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  padding: 2px 2px 8px;
+}
+.cmp-input:focus { outline: none; }
+.cmp-input::placeholder { color: var(--text-muted); }
+.cmp-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid var(--border-muted);
+  padding-top: 10px;
+}
+.chipbtn {
+  border: none;
+  background: var(--bg-muted);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.chipbtn:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover-strong); }
+.chipbtn:disabled { opacity: 0.45; cursor: default; }
+.commitbtn {
+  margin-left: auto;
+  border: none;
+  background: var(--success-emphasis);
+  color: var(--text-on-emphasis);
+  border-radius: 10px;
+  padding: 8px 18px;
+  font-weight: 700;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.commitbtn:hover:not(:disabled) { background: var(--success-strong); }
+.commitbtn:disabled { opacity: 0.45; cursor: default; }
+
+/* ── ⋯ popover menu ── */
+.menu-backdrop { position: fixed; inset: 0; z-index: 9998; }
+.menu {
+  position: fixed;
+  z-index: 9999;
+  min-width: 188px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  box-shadow: 0 8px 26px var(--shadow-scrim);
+  padding: 4px;
   display: flex;
   flex-direction: column;
 }
-.bd-body > * {
-  flex: 1;
-  min-height: 0;
+.menu-item {
+  border: none;
+  background: none;
+  text-align: left;
+  color: var(--text-primary);
+  font-size: 12.5px;
+  padding: 6.5px 11px;
+  border-radius: 7px;
+  cursor: pointer;
 }
+.menu-item:hover { background: var(--bg-hover); }
+.menu-item.danger { color: var(--danger-fg); }
 
-/* Repository config modal */
-.cfg-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 9998;
-  background: var(--shadow-scrim);
+/* ── Branch diff view ── */
+.branchdiff { display: flex; flex-direction: column; overflow: hidden; }
+.bd-pickers {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 26px;
 }
+.ed-select {
+  background: var(--bg-subtle);
+  color: var(--text-primary);
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  font-size: 12.5px;
+  padding: 5px 8px;
+  max-width: 240px;
+}
+.bd-arrow { color: var(--text-muted); }
+.bd-body { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+.bd-body > * { flex: 1; min-height: 0; }
+
+/* ── Diff detail ── */
+.detail {
+  height: 44%;
+  min-height: 170px;
+  border-top: 1px solid var(--border-muted);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-subtle);
+  flex-shrink: 0;
+}
+.detail-hdr {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--border-muted);
+  flex-shrink: 0;
+}
+.dt-name { font-size: 12.5px; font-weight: 650; color: var(--text-bright); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dt-kind { font-size: 11.5px; color: var(--text-muted); flex: none; }
+.detail-body { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+.detail-body > .diff-pane { flex: 1; min-height: 0; }
+
+/* ── Repository settings modal ── */
+.cfg-backdrop { position: fixed; inset: 0; z-index: 9998; background: var(--shadow-scrim); }
 .cfg-modal {
   position: fixed;
   z-index: 9999;
@@ -1240,118 +1497,19 @@ button.sb-item:hover {
   width: min(520px, 90vw);
   max-height: 68vh;
   overflow-y: auto;
-  background: var(--bg-subtle);
-  border: 1px solid var(--border-default);
-  border-radius: 8px;
-  padding: 14px 16px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-muted);
+  border-radius: 16px;
+  padding: 18px 20px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-}
-.cfg-title {
-  font-weight: 600;
-  color: var(--text-bright);
-  margin-bottom: 4px;
-}
-.cfg-empty {
-  color: var(--text-secondary);
-  font-size: 12.5px;
-}
-.cfg-row {
-  display: flex;
-  align-items: center;
   gap: 10px;
+  box-shadow: 0 12px 40px var(--shadow-scrim);
 }
-.cfg-key {
-  width: 180px;
-  flex-shrink: 0;
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-.cfg-input {
-  flex: 1;
-  background: var(--bg-base);
-  border: 1px solid var(--border-default);
-  border-radius: 4px;
-  color: var(--text-primary);
-  font-size: 12.5px;
-  padding: 5px 8px;
-}
-.cfg-input:focus {
-  outline: none;
-  border-color: var(--accent-focus);
-}
-.cfg-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 6px;
-}
-.st-badge {
-  display: inline-flex;
-  width: 16px;
-  justify-content: center;
-  color: var(--attention-fg);
-  font-weight: 600;
-}
-.st-badge.staged {
-  color: var(--success-fg);
-}
-.st-badge.new {
-  color: var(--accent-fg);
-}
-
-/* Bottom detail (commit detail + diff) */
-.detail {
-  height: 44%;
-  min-height: 160px;
-  border-top: 1px solid var(--border-muted);
-  display: flex;
-}
-.detail-left {
-  width: 300px;
-  flex-shrink: 0;
-  border-right: 1px solid var(--border-muted);
-  overflow: auto;
-}
-.dt-meta {
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--border-muted);
-}
-.dt-subject {
-  font-weight: 600;
-  color: var(--text-bright);
-  margin-bottom: 4px;
-}
-.dt-sub {
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-.dt-back {
-  margin-top: 8px;
-  background: none;
-  border: none;
-  color: var(--accent-fg);
-  font-size: 12px;
-  cursor: pointer;
-  padding: 0;
-}
-.dt-back:hover {
-  text-decoration: underline;
-}
-.detail-right {
-  flex: 1;
-  overflow: hidden;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-}
-.detail-right > .diff-pane {
-  flex: 1;
-  min-height: 0;
-}
-
-.mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-}
+.cfg-title { font-weight: 800; font-size: 14px; color: var(--text-bright); margin-bottom: 2px; }
+.cfg-empty { color: var(--text-secondary); font-size: 12.5px; }
+.cfg-row { display: flex; align-items: center; gap: 10px; }
+.cfg-key { width: 170px; flex-shrink: 0; font-size: 12px; color: var(--text-secondary); }
+.cfg-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.cfg-actions .commitbtn { margin-left: 0; }
 </style>
