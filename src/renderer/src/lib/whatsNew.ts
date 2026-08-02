@@ -34,6 +34,33 @@ export const WHATS_NEW_CHROME = {
 
 export const WHATS_NEW: WhatsNewEntry[] = [
   {
+    version: '0.1.73',
+    title: {
+      'zh-TW': '模組化 CLI Agent 面板與互動能力全面升級',
+      'en-US': 'Modular CLI Agent panel & interactive PTY capabilities',
+    },
+    highlights: [
+      {
+        'zh-TW':
+          '全新 AiCliDock 面板：全面替換原本純文字 Chat 介面，為 mini-IDE、Git 與 Plans 外掛視窗帶入完全互動式、功能齊全的 CLI Agent 面板。',
+        'en-US':
+          'New AiCliDock panel: replaces legacy plain-text chat with a fully interactive CLI agent panel across mini-IDE, Git, and Plans windows.',
+      },
+      {
+        'zh-TW':
+          '外掛 PTY 互動能力管道：允許外掛視窗順暢呼叫互動式 PTY 能力，享受同主視窗級別的 Agent 互動與終端呈現。',
+        'en-US':
+          'Plugin PTY capability broker: pipes interactive PTY capabilities through the broker to grant plugin windows full main-window agent power.',
+      },
+      {
+        'zh-TW':
+          '後端架構輕量化：完全移除舊版 AI Chat 後端介面，專注於高效能、高穩定的原生 CLI Agent Engine。',
+        'en-US':
+          'Lightweight backend architecture: retired legacy AI chat backend surfaces to focus on high-performance native CLI agent engines.',
+      },
+    ],
+  },
+  {
     version: '0.1.72',
     title: {
       'zh-TW': '獨立視窗 AI 面板整合與極速終端回應',
