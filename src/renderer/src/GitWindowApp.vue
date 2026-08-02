@@ -20,18 +20,22 @@
 // worktree/remote shell actions ride the other ui.* host capabilities. All
 // colors map to semantic tokens so the five app themes translate the design.
 
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, defineAsyncComponent, onMounted, onUnmounted } from 'vue'
 import { useBackend } from './composables/useBackend'
 import { useGit, type GitFileEntry } from './composables/useGit'
 import { useIssues } from './composables/useIssues'
 import { useNotify } from './composables/useNotify'
 import { useTheme } from './composables/useTheme'
-import { initSettingsBackend, settingsGet, onSettingsChanged } from './lib/settings'
+import { initSettingsBackend, settingsGet, settingsSet, onSettingsChanged } from './lib/settings'
 import GitHistoryModal from './components/GitHistoryModal.vue'
 import GitCredentialModal from './components/GitCredentialModal.vue'
 import NotificationHost from './components/NotificationHost.vue'
 import DiffPane from './editor/DiffPane.vue'
 import BranchDiffPane from './editor/BranchDiffPane.vue'
+// Lazy-loaded: AIChatPane statically pulls mermaid + katex (heavy). The async
+// chunk is only fetched when the panel is first opened (v-if below), keeping
+// the git window's first paint unaffected. Mirrors PlanWindowApp.
+const AIChatPane = defineAsyncComponent(() => import('./components/AIChatPane.vue'))
 
 // The host sets ?workspace_path= when it loads this entry (frontendPluginManager
 // gitQuery). A getter is what useGit expects.
@@ -45,6 +49,37 @@ initSettingsBackend(backend)
 const { loadTheme } = useTheme()
 const notify = useNotify()
 const git = useGit(() => workspacePath, backend)
+
+// ── AI Chat panel (right) — mirrors PlanWindowApp ────────────────────────────
+const AI_PANEL_W_KEY = 'git-ai-panel-width'
+const aiPanelOpen = ref(false)
+// Mounted lazily on first open, then kept alive via v-show so the chat state
+// (threads, streaming) survives toggling the panel closed.
+const aiPanelMounted = ref(false)
+const aiPanelWidth = ref(
+  Math.max(280, Math.min(600, parseInt(settingsGet(AI_PANEL_W_KEY, '360'), 10)))
+)
+let aiResizing = false
+function toggleAiPanel(): void {
+  aiPanelOpen.value = !aiPanelOpen.value
+  if (aiPanelOpen.value) aiPanelMounted.value = true
+}
+function onAiResizeStart(): void {
+  aiResizing = true
+  document.addEventListener('mousemove', onAiResizeMove)
+  document.addEventListener('mouseup', onAiResizeEnd)
+}
+function onAiResizeMove(e: MouseEvent): void {
+  if (!aiResizing) return
+  aiPanelWidth.value = Math.max(280, Math.min(600, window.innerWidth - e.clientX))
+}
+function onAiResizeEnd(): void {
+  if (!aiResizing) return
+  aiResizing = false
+  settingsSet(AI_PANEL_W_KEY, String(aiPanelWidth.value))
+  document.removeEventListener('mousemove', onAiResizeMove)
+  document.removeEventListener('mouseup', onAiResizeEnd)
+}
 
 const {
   gitStatus,
@@ -320,6 +355,18 @@ function fileTag(f: GitFileEntry, untracked = false): { label: string; cls: stri
 function splitPath(path: string): { dir: string; base: string } {
   const i = path.lastIndexOf('/')
   return i < 0 ? { dir: '', base: path } : { dir: path.slice(0, i + 1), base: path.slice(i + 1) }
+}
+function absPath(p: string): string {
+  return `${workspacePath.replace(/\/+$/, '')}/${p}`
+}
+/** File rows carry their absolute path as `text/plain`, the payload convention
+ *  ExplorerPane and GitPane already use. A terminal in the main window turns
+ *  that into a shell-escaped path at the prompt (see lib/drop.ts); Chromium
+ *  delivers same-app drops across window boundaries on its own. */
+function onFileDragStart(e: DragEvent, path: string): void {
+  if (!e.dataTransfer) return
+  e.dataTransfer.setData('text/plain', absPath(path))
+  e.dataTransfer.effectAllowed = 'copy'
 }
 
 async function toggleStage(f: GitFileEntry, staged: boolean): Promise<void> {
@@ -1165,7 +1212,7 @@ const busy = computed(
             <div class="list-hdr">
               <div>
                 <div class="gtitle">{{ changeCount }} file{{ changeCount === 1 ? '' : 's' }} changed</div>
-                <div class="gsub">Check to stage · click a file for its diff</div>
+                <div class="gsub">Check to stage · click for its diff · drag onto a terminal</div>
               </div>
               <div class="hdr-actions">
                 <button v-if="stagedFiles.length" class="linkbtn" @click="onUnstageAll">Unstage all</button>
@@ -1177,7 +1224,14 @@ const busy = computed(
               Working tree clean — nothing to commit.
             </div>
             <div v-else class="fcard">
-              <div v-for="f in conflictFiles" :key="'c' + f.path" class="frow conflict" @click="showWorkingDiff(f.path, false)">
+              <div
+                v-for="f in conflictFiles"
+                :key="'c' + f.path"
+                class="frow conflict"
+                draggable="true"
+                @dragstart="onFileDragStart($event, f.path)"
+                @click="showWorkingDiff(f.path, false)"
+              >
                 <span class="conflict-mark">⚠</span>
                 <span class="stag u">conflict</span>
                 <span class="fpath mono"><i>{{ splitPath(f.path).dir }}</i>{{ splitPath(f.path).base }}</span>
@@ -1187,13 +1241,27 @@ const busy = computed(
                   <button class="linkbtn" @click.stop="openInEditor(f.path)">editor</button>
                 </span>
               </div>
-              <div v-for="f in stagedFiles" :key="'s' + f.path" class="frow" @click="showWorkingDiff(f.path, true)">
+              <div
+                v-for="f in stagedFiles"
+                :key="'s' + f.path"
+                class="frow"
+                draggable="true"
+                @dragstart="onFileDragStart($event, f.path)"
+                @click="showWorkingDiff(f.path, true)"
+              >
                 <button class="chk on" title="Unstage" @click.stop="toggleStage(f, true)" />
                 <span class="stag" :class="fileTag(f).cls">{{ fileTag(f).label }}</span>
                 <span class="fpath mono"><i>{{ splitPath(f.path).dir }}</i>{{ splitPath(f.path).base }}</span>
                 <span class="rowact"><button class="linkbtn" @click.stop="showWorkingDiff(f.path, true)">diff</button></span>
               </div>
-              <div v-for="f in changedFiles" :key="'u' + f.path" class="frow" @click="showWorkingDiff(f.path, false)">
+              <div
+                v-for="f in changedFiles"
+                :key="'u' + f.path"
+                class="frow"
+                draggable="true"
+                @dragstart="onFileDragStart($event, f.path)"
+                @click="showWorkingDiff(f.path, false)"
+              >
                 <button class="chk" title="Stage" @click.stop="toggleStage(f, false)" />
                 <span class="stag" :class="fileTag(f).cls">{{ fileTag(f).label }}</span>
                 <span class="fpath mono"><i>{{ splitPath(f.path).dir }}</i>{{ splitPath(f.path).base }}</span>
@@ -1202,7 +1270,14 @@ const busy = computed(
                   <button class="linkbtn danger" @click.stop="onDiscard(f)">discard</button>
                 </span>
               </div>
-              <div v-for="f in untrackedFiles" :key="'n' + f.path" class="frow" @click="showWorkingDiff(f.path, false)">
+              <div
+                v-for="f in untrackedFiles"
+                :key="'n' + f.path"
+                class="frow"
+                draggable="true"
+                @dragstart="onFileDragStart($event, f.path)"
+                @click="showWorkingDiff(f.path, false)"
+              >
                 <button class="chk" title="Stage" @click.stop="toggleStage(f, false)" />
                 <span class="stag q">new</span>
                 <span class="fpath mono"><i>{{ splitPath(f.path).dir }}</i>{{ splitPath(f.path).base }}</span>
@@ -1262,6 +1337,31 @@ const busy = computed(
           </div>
         </div>
       </section>
+
+      <!-- Right activity rail (AI Chat toggle) — mirrors PlanWindowApp -->
+      <div class="git-right-act">
+        <button
+          class="git-right-act-btn"
+          :class="{ active: aiPanelOpen }"
+          title="AI Chat"
+          @click="toggleAiPanel"
+        >
+          <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M8 0L9.5 5.5L15 7L9.5 8.5L8 14L6.5 8.5L1 7L6.5 5.5Z"/>
+          </svg>
+        </button>
+      </div>
+      <!-- AI Chat panel (right): embedded chat bound to this window's workspace -->
+      <div v-show="aiPanelOpen" class="git-ai-resize-handle" @mousedown.prevent="onAiResizeStart" />
+      <div v-show="aiPanelOpen" class="git-ai-panel" :style="{ width: aiPanelWidth + 'px' }">
+        <AIChatPane
+          v-if="aiPanelMounted"
+          :workspace-path="workspacePath"
+          :backend="backend"
+          embedded
+          :active="aiPanelOpen"
+        />
+      </div>
     </div>
 
     <!-- ⋯ popover menu -->
@@ -1391,6 +1491,49 @@ const busy = computed(
 
 /* ── Body ── */
 .body { flex: 1; display: flex; min-height: 0; }
+
+/* ── AI Chat panel (right) — mirrors PlanWindowApp ── */
+.git-right-act {
+  align-items: center;
+  background: var(--bg-subtle);
+  border-left: 1px solid var(--border-muted);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  padding-top: 8px;
+  width: 34px;
+}
+.git-right-act-btn {
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 5px;
+}
+.git-right-act-btn:hover { color: var(--text-bright); }
+.git-right-act-btn.active {
+  background: var(--accent-subtle);
+  color: var(--accent-bright);
+}
+.git-ai-resize-handle {
+  background: transparent;
+  border-left: 1px solid var(--border-muted);
+  cursor: col-resize;
+  flex-shrink: 0;
+  transition: background 0.15s;
+  width: 4px;
+}
+.git-ai-resize-handle:hover { background: var(--accent-emphasis); }
+.git-ai-panel {
+  border-left: 1px solid var(--border-muted);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  max-width: 600px;
+  min-width: 280px;
+  overflow: hidden;
+}
 
 /* ── Sidebar ── */
 .sidebar {

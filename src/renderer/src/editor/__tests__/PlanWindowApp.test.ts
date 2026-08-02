@@ -130,6 +130,10 @@ vi.mock('../PlanMarkdownBody.vue', () => ({
 vi.mock('../PlanFileView.vue', () => stub('PlanFileView', ['workspacePath', 'relPath', 'backend']))
 vi.mock('../FilePreviewPane.vue', () => stub('FilePreviewPane', ['workspacePath', 'relPath', 'name', 'backend']))
 vi.mock('../../components/NotificationHost.vue', () => stub('NotificationHost'))
+// Async-loaded by the window (defineAsyncComponent) — the mock also keeps the
+// real pane's heavy static deps (mermaid/katex) out of the test bundle.
+vi.mock('../../components/AIChatPane.vue', () =>
+  stub('AIChatPane', ['workspacePath', 'backend', 'embedded', 'active']))
 
 beforeEach(() => {
   toolbarSpies.cycleTodo.mockClear()
@@ -231,6 +235,30 @@ describe('PlanWindowApp', () => {
     expect(pane.props('workspacePath')).toBe('/tmp/demo-ws')
     expect(wrapper.find('.plan-window-empty').exists()).toBe(true)
     expect(document.title).toBe('Plans · demo-ws')
+  })
+
+  it('mounts the AI chat panel lazily on first toggle and keeps it alive when closed', async () => {
+    const wrapper = await mountApp()
+    // Not mounted until the panel is first opened (lazy chunk stays unloaded).
+    expect(wrapper.findComponent({ name: 'AIChatPane' }).exists()).toBe(false)
+
+    await wrapper.find('.plan-right-act-btn').trigger('click')
+    await flushPromises()
+    const pane = wrapper.findComponent({ name: 'AIChatPane' })
+    expect(pane.exists()).toBe(true)
+    expect(pane.props('workspacePath')).toBe('/tmp/demo-ws')
+    expect(pane.props('active')).toBe(true)
+    // v-show visibility asserted via style.display — happy-dom's isVisible()
+    // does not reflect v-show's inline display toggling.
+    const panelEl = wrapper.find('.plan-ai-panel').element as HTMLElement
+    expect(panelEl.style.display).not.toBe('none')
+
+    // Closing hides via v-show but keeps the instance (chat state preserved).
+    await wrapper.find('.plan-right-act-btn').trigger('click')
+    const paneAfter = wrapper.findComponent({ name: 'AIChatPane' })
+    expect(paneAfter.exists()).toBe(true)
+    expect(paneAfter.props('active')).toBe(false)
+    expect(panelEl.style.display).toBe('none')
   })
 
   it('opens an HTML plan with the review toolbar above the interactive preview', async () => {

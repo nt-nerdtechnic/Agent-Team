@@ -6,8 +6,9 @@
 // is mocked at the useBackend seam (exactly what the plugin build aliases), so
 // every assertion is on the real useGit → send() wire format.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
+import { mount, flushPromises, type DOMWrapper, type VueWrapper } from '@vue/test-utils'
 import { ref } from 'vue'
+import { extractDropPaths, shellEscape } from '../../lib/drop'
 
 interface SentCall {
   type: string
@@ -128,6 +129,30 @@ function callsOf(type: string): SentCall[] {
   return sends.calls.filter((c) => c.type === type)
 }
 
+type DragStub = Event & {
+  dataTransfer: { setData: ReturnType<typeof vi.fn>; effectAllowed: string }
+}
+
+function rowFor(w: VueWrapper, file: string): DOMWrapper<Element> {
+  const row = w.findAll('.frow').find((r) => r.text().includes(file))
+  expect(row, file).toBeDefined()
+  return row!
+}
+
+function dispatchDragStart(row: DOMWrapper<Element>): DragStub {
+  const ev = new Event('dragstart', { bubbles: true, cancelable: true })
+  Object.assign(ev, {
+    dataTransfer: { types: [], getData: () => '', setData: vi.fn(), effectAllowed: '' }
+  })
+  row.element.dispatchEvent(ev)
+  return ev as DragStub
+}
+
+function textPlainPayload(ev: DragStub): string | undefined {
+  const call = ev.dataTransfer.setData.mock.calls.find(([type]) => type === 'text/plain')
+  return call?.[1] as string | undefined
+}
+
 async function mountApp(): Promise<VueWrapper> {
   window.history.replaceState({}, '', '/?workspace_path=%2Ftmp%2Fws')
   const wrapper = mount(GitWindowApp, { global: { stubs: STUBS } })
@@ -227,6 +252,68 @@ describe('GitWindowApp — Editorial Calm wiring', () => {
     await ours!.trigger('click')
     await flushPromises()
     expect(callsOf('git.resolve_ours')[0]!.payload).toMatchObject({ filepath: 'src/conflict.ts' })
+  })
+
+  it('makes every file row draggable with its absolute path as text/plain', async () => {
+    wrapper = await mountApp()
+    for (const [file, expected] of [
+      ['staged.ts', '/tmp/ws/src/staged.ts'],
+      ['a.ts', '/tmp/ws/src/a.ts'],
+      ['new.ts', '/tmp/ws/src/new.ts']
+    ] as const) {
+      const row = rowFor(wrapper, file)
+      expect(row.attributes('draggable'), file).toBe('true')
+      const ev = dispatchDragStart(row)
+      expect(textPlainPayload(ev), file).toBe(expected)
+      expect(ev.dataTransfer.effectAllowed, file).toBe('copy')
+    }
+  })
+
+  it('makes conflict rows draggable too', async () => {
+    statusOverride.value = {
+      ...baseStatus(),
+      operation_in_progress: 'merge',
+      unstaged: [{ path: 'src/conflict.ts', status: 'U' }]
+    }
+    wrapper = await mountApp()
+    const row = wrapper.find('.frow.conflict')
+    expect(row.attributes('draggable')).toBe('true')
+    expect(textPlainPayload(dispatchDragStart(row))).toBe('/tmp/ws/src/conflict.ts')
+  })
+
+  it('normalizes a trailing slash in the workspace path and tolerates a missing dataTransfer', async () => {
+    window.history.replaceState({}, '', '/?workspace_path=%2Ftmp%2Fws%2F')
+    wrapper = mount(GitWindowApp, { global: { stubs: STUBS } })
+    await flushPromises()
+    expect(textPlainPayload(dispatchDragStart(rowFor(wrapper, 'a.ts')))).toBe('/tmp/ws/src/a.ts')
+
+    const bare = new Event('dragstart', { bubbles: true, cancelable: true })
+    Object.assign(bare, { dataTransfer: null })
+    expect(() => rowFor(wrapper!, 'a.ts').element.dispatchEvent(bare)).not.toThrow()
+  })
+
+  it('emits a payload the terminal drop handler turns into a shell-escaped path', async () => {
+    // The contract with the main window: GitWindowApp only sets text/plain, and
+    // TerminalPane runs extractDropPaths → shellEscape → pasteText on it.
+    wrapper = await mountApp()
+    const payload = textPlainPayload(dispatchDragStart(rowFor(wrapper, 'a.ts')))
+
+    const original = window.agentTeam
+    window.agentTeam = { getPathForFile: () => '' } as unknown as typeof window.agentTeam
+    try {
+      const drop = {
+        dataTransfer: {
+          items: [],
+          files: [],
+          getData: (type: string) => (type === 'text/plain' ? payload : '')
+        }
+      } as unknown as DragEvent
+      const paths = extractDropPaths(drop)
+      expect(paths).toEqual(['/tmp/ws/src/a.ts'])
+      expect(paths.map(shellEscape).join(' ')).toBe("'/tmp/ws/src/a.ts'")
+    } finally {
+      window.agentTeam = original
+    }
   })
 
   it('shows a clicked file diff in the bottom DiffPane detail', async () => {
