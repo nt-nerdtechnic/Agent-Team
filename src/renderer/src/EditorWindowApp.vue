@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted, nextTick, defineAsyncComponent } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useBackend } from './composables/useBackend'
 import ExplorerPane from './components/ExplorerPane.vue'
 import SearchPane from './components/SearchPane.vue'
@@ -9,12 +9,11 @@ import DiffPane from './editor/DiffPane.vue'
 import BranchDiffPane from './editor/BranchDiffPane.vue'
 import ConflictPane from './editor/ConflictPane.vue'
 import NotificationHost from './components/NotificationHost.vue'
-// Lazy-loaded: AIChatPane statically pulls mermaid + katex (heavy). Loading it
-// async keeps the editor window's first paint off the critical path — the panel
-// (v-show) hydrates a moment later. `import type` keeps the ref fully typed with
+// Shared right-side AI chat shell (rail toggle + resize + lazily mounted
+// AIChatPane). `import type` keeps withAiChat's pane parameter fully typed with
 // no runtime/bundle cost.
 import type AIChatPaneType from './components/AIChatPane.vue'
-const AIChatPane = defineAsyncComponent(() => import('./components/AIChatPane.vue'))
+import AiChatDock from './components/AiChatDock.vue'
 import ProblemsPane from './components/ProblemsPane.vue'
 import PlanFileView from './editor/PlanFileView.vue'
 import FilePreviewPane from './editor/FilePreviewPane.vue'
@@ -70,29 +69,9 @@ function onResizeEnd(): void {
   document.removeEventListener('mouseup', onResizeEnd)
 }
 
-// ── AI Panel resize ───────────────────────────────────────────────────────────
-const AI_PANEL_W_KEY = 'ide-ai-panel-width'
-const aiChatRef = ref<InstanceType<typeof AIChatPaneType> | null>(null)
+// ── AI Panel (shared dock shell) ──────────────────────────────────────────────
+const aiDockRef = ref<InstanceType<typeof AiChatDock> | null>(null)
 const aiPanelOpen = ref(false)
-const aiPanelWidth = ref(Math.max(280, Math.min(600, parseInt(settingsGet(AI_PANEL_W_KEY, '320'), 10))))
-let aiResizing = false
-function onAiResizeStart(): void {
-  aiResizing = true
-  document.addEventListener('mousemove', onAiResizeMove)
-  document.addEventListener('mouseup', onAiResizeEnd)
-}
-function onAiResizeMove(e: MouseEvent): void {
-  if (!aiResizing) return
-  const newWidth = window.innerWidth - e.clientX
-  aiPanelWidth.value = Math.max(280, Math.min(600, newWidth))
-}
-function onAiResizeEnd(): void {
-  if (!aiResizing) return
-  aiResizing = false
-  settingsSet(AI_PANEL_W_KEY, String(aiPanelWidth.value))
-  document.removeEventListener('mousemove', onAiResizeMove)
-  document.removeEventListener('mouseup', onAiResizeEnd)
-}
 
 function selectionContext(relPath: string, selection: unknown): { label: string; content: string } {
   const ext = relPath.split('.').pop() ?? ''
@@ -101,13 +80,15 @@ function selectionContext(relPath: string, selection: unknown): { label: string;
   return { label, content }
 }
 
-// AIChatPane is async-loaded (defineAsyncComponent); for a beat after the editor
-// window opens its ref is null until the chunk resolves. Retry briefly so an
-// early action (chip / draft / focus) isn't silently dropped on a slow first load.
-function withAiChat(fn: (pane: NonNullable<typeof aiChatRef.value>) => void): void {
+// AIChatPane mounts lazily inside the dock on first open (async chunk); for a
+// beat after opening, the dock's exposed `pane` is null until the chunk
+// resolves. Retry briefly so an early action (chip / draft / focus) isn't
+// silently dropped on a slow first load. Callers must set aiPanelOpen first —
+// the pane never mounts (and the retries drain) while the panel stays closed.
+function withAiChat(fn: (pane: InstanceType<typeof AIChatPaneType>) => void): void {
   let tries = 0
   const attempt = (): void => {
-    const pane = aiChatRef.value
+    const pane = aiDockRef.value?.pane
     if (pane) { fn(pane); return }
     if (tries++ < 100) window.setTimeout(attempt, 20)
   }
@@ -1752,8 +1733,6 @@ onUnmounted(() => {
   document.removeEventListener('click', closeBcDropdown)
   document.removeEventListener('mousemove', onResizeMove)
   document.removeEventListener('mouseup', onResizeEnd)
-  document.removeEventListener('mousemove', onAiResizeMove)
-  document.removeEventListener('mouseup', onAiResizeEnd)
 })
 
 function markDirty(relPath: string, v: boolean): void {
@@ -2038,38 +2017,23 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
       </div><!-- end ide-main secondary -->
     </div><!-- end ide-main-container -->
 
-    <!-- Right activity bar (AI Chat toggle) -->
-    <div class="ide-right-act">
-      <button
-        class="ide-right-act-btn"
-        :class="{ active: aiPanelOpen }"
-        :title="$t('pane.ai-chat.tab-shortcut')"
-        @click="aiPanelOpen = !aiPanelOpen"
-      >
-        <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor">
-          <path d="M8 0L9.5 5.5L15 7L9.5 8.5L8 14L6.5 8.5L1 7L6.5 5.5Z"/>
-        </svg>
-      </button>
-    </div>
-
-    <!-- AI Chat Panel (right) -->
-    <div v-show="aiPanelOpen" class="ide-ai-resize-handle" @mousedown.prevent="onAiResizeStart" />
-    <div v-show="aiPanelOpen" class="ide-ai-panel" :style="{ width: aiPanelWidth + 'px' }">
-      <AIChatPane
-        ref="aiChatRef"
-        :workspace-path="workspacePath"
-        :backend="backend"
-        embedded
-        :active="aiPanelOpen"
-        :get-editor-content="() => activeEditor()?.getContent?.() ?? ''"
-        :get-editor-selection="() => activeEditor()?.getSelection?.() ?? ''"
-        :get-active-rel-path="getActiveRelPath"
-        :get-open-files="() => openFiles.filter(f => f.kind === 'file').map(f => f.relPath)"
-        :insert-text-at-cursor="(text: string) => activeEditor()?.insertTextAtCursor?.(text)"
-        :open-file="(relPath: string, line?: number) => openFile({ filepath: relPath, line })"
-        :save-dirty-files="saveDirtyFiles"
-      />
-    </div>
+    <!-- Right AI chat dock (rail toggle + resize + lazy AIChatPane) -->
+    <AiChatDock
+      ref="aiDockRef"
+      v-model:open="aiPanelOpen"
+      width-key="ide-ai-panel-width"
+      :default-width="320"
+      title-key="pane.ai-chat.tab-shortcut"
+      :workspace-path="workspacePath"
+      :backend="backend"
+      :get-editor-content="() => activeEditor()?.getContent?.() ?? ''"
+      :get-editor-selection="() => activeEditor()?.getSelection?.() ?? ''"
+      :get-active-rel-path="getActiveRelPath"
+      :get-open-files="() => openFiles.filter(f => f.kind === 'file').map(f => f.relPath)"
+      :insert-text-at-cursor="(text: string) => activeEditor()?.insertTextAtCursor?.(text)"
+      :open-file="(relPath: string, line?: number) => openFile({ filepath: relPath, line })"
+      :save-dirty-files="saveDirtyFiles"
+    />
     </div><!-- end ide-body -->
   </div>
   <!-- Color Theme Picker -->
@@ -2730,51 +2694,6 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
   user-select: none;
 }
 
-.ide-right-act {
-  flex-shrink: 0;
-  width: 36px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding: 6px 0;
-  background: var(--bg-subtle);
-  border-left: 1px solid var(--border-muted);
-  gap: 2px;
-}
-.ide-right-act-btn {
-  width: 34px;
-  height: 34px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  border-right: 2px solid transparent;
-  border-radius: 0;
-}
-.ide-right-act-btn:hover { color: var(--text-bright); }
-.ide-right-act-btn.active { color: var(--accent-fg); border-right-color: var(--accent-emphasis); }
-
-.ide-ai-resize-handle {
-  flex-shrink: 0;
-  width: 4px;
-  cursor: col-resize;
-  background: transparent;
-  border-left: 1px solid var(--border-muted);
-  transition: background 0.15s;
-}
-.ide-ai-resize-handle:hover { background: var(--accent-emphasis); }
-.ide-ai-panel {
-  flex-shrink: 0;
-  min-width: 280px;
-  max-width: 600px;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  border-left: 1px solid var(--border-muted);
-}
 </style>
 
 <style>

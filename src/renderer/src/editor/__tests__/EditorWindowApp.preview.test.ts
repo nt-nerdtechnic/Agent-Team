@@ -240,4 +240,23 @@ describe('EditorWindowApp – preview routing', () => {
     expect(wrapper.findComponent({ name: 'FilePreviewPane' }).exists()).toBe(false)
     expect(previewToggle(wrapper).exists()).toBe(false)
   })
+
+  it('hosts the shared AI chat dock with the editor width key and bridge callbacks', async () => {
+    const wrapper = await mountApp()
+    // The shared shell (AiChatDock) owns the rail/resize/lazy-mount behavior —
+    // covered in depth by AiChatDock.test.ts. Here: the editor wires its width
+    // key and editor bridge, and the pane mounts on first toggle only
+    // (withAiChat reaches it through the dock's exposed `pane`).
+    const dock = wrapper.findComponent({ name: 'AiChatDock' })
+    expect(dock.exists()).toBe(true)
+    expect(dock.props('widthKey')).toBe('ide-ai-panel-width')
+    expect(typeof dock.props('getEditorContent')).toBe('function')
+    expect(typeof dock.props('saveDirtyFiles')).toBe('function')
+    expect(wrapper.findComponent({ name: 'AIChatPane' }).exists()).toBe(false)
+
+    await wrapper.find('.ai-dock-rail-btn').trigger('click')
+    await flushPromises()
+    // The stub declares no props, so assert the lazy mount only.
+    expect(wrapper.findComponent({ name: 'AIChatPane' }).exists()).toBe(true)
+  })
 })

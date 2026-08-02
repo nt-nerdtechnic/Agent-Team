@@ -7,8 +7,21 @@
 // every assertion is on the real useGit → send() wire format.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises, type DOMWrapper, type VueWrapper } from '@vue/test-utils'
-import { ref } from 'vue'
+import { defineComponent, h, ref } from 'vue'
 import { extractDropPaths, shellEscape } from '../../lib/drop'
+import { i18n } from '../../i18n'
+
+// Async-loaded by the AiChatDock (defineAsyncComponent) — the mock keeps the
+// real pane's heavy static deps (mermaid/katex) out of the test bundle.
+vi.mock('../AIChatPane.vue', () => ({
+  __esModule: true,
+  default: defineComponent({
+    name: 'AIChatPane',
+    props: ['workspacePath', 'backend', 'embedded', 'active'],
+    inheritAttrs: false,
+    render: () => h('div', { class: 'stub-AIChatPane' })
+  })
+}))
 
 interface SentCall {
   type: string
@@ -155,7 +168,7 @@ function textPlainPayload(ev: DragStub): string | undefined {
 
 async function mountApp(): Promise<VueWrapper> {
   window.history.replaceState({}, '', '/?workspace_path=%2Ftmp%2Fws')
-  const wrapper = mount(GitWindowApp, { global: { stubs: STUBS } })
+  const wrapper = mount(GitWindowApp, { global: { stubs: STUBS, plugins: [i18n] } })
   await flushPromises()
   return wrapper
 }
@@ -283,7 +296,7 @@ describe('GitWindowApp — Editorial Calm wiring', () => {
 
   it('normalizes a trailing slash in the workspace path and tolerates a missing dataTransfer', async () => {
     window.history.replaceState({}, '', '/?workspace_path=%2Ftmp%2Fws%2F')
-    wrapper = mount(GitWindowApp, { global: { stubs: STUBS } })
+    wrapper = mount(GitWindowApp, { global: { stubs: STUBS, plugins: [i18n] } })
     await flushPromises()
     expect(textPlainPayload(dispatchDragStart(rowFor(wrapper, 'a.ts')))).toBe('/tmp/ws/src/a.ts')
 
@@ -324,6 +337,25 @@ describe('GitWindowApp — Editorial Calm wiring', () => {
     expect(wrapper.find('.detail').exists()).toBe(true)
     const diff = wrapper.findComponent({ name: 'DiffPane' })
     expect(diff.attributes('filepath')).toBe('src/a.ts')
+  })
+
+  it('hosts the shared AI chat dock with this window\'s width key and lazy pane', async () => {
+    wrapper = await mountApp()
+    // The shared shell (AiChatDock) owns the rail/resize/lazy-mount behavior —
+    // covered in depth by AiChatDock.test.ts. Here: it is wired to this
+    // window's workspace + width key and the pane mounts on first toggle only.
+    const dock = wrapper.findComponent({ name: 'AiChatDock' })
+    expect(dock.exists()).toBe(true)
+    expect(dock.props('widthKey')).toBe('git-ai-panel-width')
+    expect(dock.props('workspacePath')).toBe('/tmp/ws')
+    expect(wrapper.findComponent({ name: 'AIChatPane' }).exists()).toBe(false)
+
+    await wrapper.find('.ai-dock-rail-btn').trigger('click')
+    await flushPromises()
+    const pane = wrapper.findComponent({ name: 'AIChatPane' })
+    expect(pane.exists()).toBe(true)
+    expect(pane.props('workspacePath')).toBe('/tmp/ws')
+    expect(pane.props('active')).toBe(true)
   })
 
   it('switches branch only via the explicit ↵ button, never on row click', async () => {

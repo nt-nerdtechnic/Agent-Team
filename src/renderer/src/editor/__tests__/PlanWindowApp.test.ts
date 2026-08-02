@@ -237,12 +237,19 @@ describe('PlanWindowApp', () => {
     expect(document.title).toBe('Plans · demo-ws')
   })
 
-  it('mounts the AI chat panel lazily on first toggle and keeps it alive when closed', async () => {
+  it('hosts the shared AI chat dock with this window\'s width key and lazy pane', async () => {
     const wrapper = await mountApp()
-    // Not mounted until the panel is first opened (lazy chunk stays unloaded).
+    // The shared shell (AiChatDock) owns the rail/resize/lazy-mount behavior —
+    // covered in depth by AiChatDock.test.ts. Here: it is wired to this
+    // window's workspace + width key, and the pane stays unmounted until the
+    // first toggle, then survives closing (v-show keep-alive).
+    const dock = wrapper.findComponent({ name: 'AiChatDock' })
+    expect(dock.exists()).toBe(true)
+    expect(dock.props('widthKey')).toBe('plan-ai-panel-width')
+    expect(dock.props('workspacePath')).toBe('/tmp/demo-ws')
     expect(wrapper.findComponent({ name: 'AIChatPane' }).exists()).toBe(false)
 
-    await wrapper.find('.plan-right-act-btn').trigger('click')
+    await wrapper.find('.ai-dock-rail-btn').trigger('click')
     await flushPromises()
     const pane = wrapper.findComponent({ name: 'AIChatPane' })
     expect(pane.exists()).toBe(true)
@@ -250,11 +257,11 @@ describe('PlanWindowApp', () => {
     expect(pane.props('active')).toBe(true)
     // v-show visibility asserted via style.display — happy-dom's isVisible()
     // does not reflect v-show's inline display toggling.
-    const panelEl = wrapper.find('.plan-ai-panel').element as HTMLElement
+    const panelEl = wrapper.find('.ai-dock-panel').element as HTMLElement
     expect(panelEl.style.display).not.toBe('none')
 
     // Closing hides via v-show but keeps the instance (chat state preserved).
-    await wrapper.find('.plan-right-act-btn').trigger('click')
+    await wrapper.find('.ai-dock-rail-btn').trigger('click')
     const paneAfter = wrapper.findComponent({ name: 'AIChatPane' })
     expect(paneAfter.exists()).toBe(true)
     expect(paneAfter.props('active')).toBe(false)

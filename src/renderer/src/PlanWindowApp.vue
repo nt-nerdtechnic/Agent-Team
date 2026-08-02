@@ -7,10 +7,10 @@
 // PlanMarkdownBody. Other HTML docs keep the plain sandboxed FilePreviewPane;
 // plain markdown (no frontmatter meta) falls back to the read-only PlanFileView.
 // Plans only — no file tree, terminal, or git.
-import { computed, defineAsyncComponent, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useBackend } from './composables/useBackend'
-import { initSettingsBackend, onSettingsChanged, settingsGet, settingsSet } from './lib/settings'
+import { initSettingsBackend, onSettingsChanged } from './lib/settings'
 import { useTheme } from './composables/useTheme'
 import { useNotify } from './composables/useNotify'
 import { resolvePlanStore, type PlanCtx, type WriteResult } from './composables/planStore'
@@ -22,10 +22,8 @@ import PlanMarkdownBody from './editor/PlanMarkdownBody.vue'
 import FilePreviewPane from './editor/FilePreviewPane.vue'
 import PlanDocPreview from './editor/PlanDocPreview.vue'
 import NotificationHost from './components/NotificationHost.vue'
-// Lazy-loaded: AIChatPane statically pulls mermaid + katex (heavy). The async
-// chunk is only fetched when the panel is first opened (v-if below), keeping
-// the plan window's first paint unaffected.
-const AIChatPane = defineAsyncComponent(() => import('./components/AIChatPane.vue'))
+// Shared right-side AI chat shell (rail toggle + resize + lazy AIChatPane).
+import AiChatDock from './components/AiChatDock.vue'
 
 const params = new URLSearchParams(window.location.search)
 const workspacePath = params.get('workspace_path') ?? ''
@@ -41,35 +39,6 @@ initSettingsBackend(backend)
 const { loadTheme } = useTheme()
 const { t } = useI18n()
 const { toast, confirm } = useNotify()
-
-// ── AI Chat panel (right) ─────────────────────────────────────────────────────
-const AI_PANEL_W_KEY = 'plan-ai-panel-width'
-const aiPanelOpen = ref(false)
-// Mounted lazily on first open, then kept alive via v-show so the chat state
-// (threads, streaming) survives toggling the panel closed.
-const aiPanelMounted = ref(false)
-const aiPanelWidth = ref(Math.max(280, Math.min(600, parseInt(settingsGet(AI_PANEL_W_KEY, '360'), 10))))
-let aiResizing = false
-function toggleAiPanel(): void {
-  aiPanelOpen.value = !aiPanelOpen.value
-  if (aiPanelOpen.value) aiPanelMounted.value = true
-}
-function onAiResizeStart(): void {
-  aiResizing = true
-  document.addEventListener('mousemove', onAiResizeMove)
-  document.addEventListener('mouseup', onAiResizeEnd)
-}
-function onAiResizeMove(e: MouseEvent): void {
-  if (!aiResizing) return
-  aiPanelWidth.value = Math.max(280, Math.min(600, window.innerWidth - e.clientX))
-}
-function onAiResizeEnd(): void {
-  if (!aiResizing) return
-  aiResizing = false
-  settingsSet(AI_PANEL_W_KEY, String(aiPanelWidth.value))
-  document.removeEventListener('mousemove', onAiResizeMove)
-  document.removeEventListener('mouseup', onAiResizeEnd)
-}
 
 const openDoc = ref<{ relPath: string; name: string } | null>(null)
 // Read-only history snapshot shown instead of the live plan (Phase C); the
@@ -418,30 +387,8 @@ onUnmounted(() => {
       </template>
       <div v-else class="plan-window-empty">{{ t('pane.plans.window-empty') }}</div>
     </main>
-    <!-- Right activity rail (AI Chat toggle) -->
-    <div class="plan-right-act">
-      <button
-        class="plan-right-act-btn"
-        :class="{ active: aiPanelOpen }"
-        :title="t('pane.ai-chat.title')"
-        @click="toggleAiPanel"
-      >
-        <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor">
-          <path d="M8 0L9.5 5.5L15 7L9.5 8.5L8 14L6.5 8.5L1 7L6.5 5.5Z"/>
-        </svg>
-      </button>
-    </div>
-    <!-- AI Chat panel (right): embedded chat bound to this window's workspace -->
-    <div v-show="aiPanelOpen" class="plan-ai-resize-handle" @mousedown.prevent="onAiResizeStart" />
-    <div v-show="aiPanelOpen" class="plan-ai-panel" :style="{ width: aiPanelWidth + 'px' }">
-      <AIChatPane
-        v-if="aiPanelMounted"
-        :workspace-path="workspacePath"
-        :backend="backend"
-        embedded
-        :active="aiPanelOpen"
-      />
-    </div>
+    <!-- Right AI chat dock (rail toggle + resize + lazy AIChatPane) -->
+    <AiChatDock width-key="plan-ai-panel-width" :workspace-path="workspacePath" :backend="backend" />
     <NotificationHost />
   </div>
 </template>
@@ -531,58 +478,6 @@ onUnmounted(() => {
   justify-content: center;
 }
 
-/* ── AI Chat panel (right) ────────────────────────────────────────────────── */
-.plan-right-act {
-  align-items: center;
-  background: var(--bg-subtle);
-  border-left: 1px solid var(--border-muted);
-  display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
-  padding-top: 8px;
-  width: 34px;
-}
-
-.plan-right-act-btn {
-  background: transparent;
-  border: none;
-  border-radius: 4px;
-  color: var(--text-muted);
-  cursor: pointer;
-  padding: 5px;
-}
-
-.plan-right-act-btn:hover {
-  color: var(--text-bright);
-}
-
-.plan-right-act-btn.active {
-  background: var(--accent-subtle);
-  color: var(--accent-bright);
-}
-
-.plan-ai-resize-handle {
-  background: transparent;
-  border-left: 1px solid var(--border-muted);
-  cursor: col-resize;
-  flex-shrink: 0;
-  transition: background 0.15s;
-  width: 4px;
-}
-
-.plan-ai-resize-handle:hover {
-  background: var(--accent-emphasis);
-}
-
-.plan-ai-panel {
-  border-left: 1px solid var(--border-muted);
-  display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
-  max-width: 600px;
-  min-width: 280px;
-  overflow: hidden;
-}
 </style>
 
 <!-- Global reset (non-scoped): scoped styles cannot target html/body/#app, so

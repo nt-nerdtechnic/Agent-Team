@@ -20,22 +20,20 @@
 // worktree/remote shell actions ride the other ui.* host capabilities. All
 // colors map to semantic tokens so the five app themes translate the design.
 
-import { ref, computed, defineAsyncComponent, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useBackend } from './composables/useBackend'
 import { useGit, type GitFileEntry } from './composables/useGit'
 import { useIssues } from './composables/useIssues'
 import { useNotify } from './composables/useNotify'
 import { useTheme } from './composables/useTheme'
-import { initSettingsBackend, settingsGet, settingsSet, onSettingsChanged } from './lib/settings'
+import { initSettingsBackend, settingsGet, onSettingsChanged } from './lib/settings'
 import GitHistoryModal from './components/GitHistoryModal.vue'
 import GitCredentialModal from './components/GitCredentialModal.vue'
 import NotificationHost from './components/NotificationHost.vue'
 import DiffPane from './editor/DiffPane.vue'
 import BranchDiffPane from './editor/BranchDiffPane.vue'
-// Lazy-loaded: AIChatPane statically pulls mermaid + katex (heavy). The async
-// chunk is only fetched when the panel is first opened (v-if below), keeping
-// the git window's first paint unaffected. Mirrors PlanWindowApp.
-const AIChatPane = defineAsyncComponent(() => import('./components/AIChatPane.vue'))
+// Shared right-side AI chat shell (rail toggle + resize + lazy AIChatPane).
+import AiChatDock from './components/AiChatDock.vue'
 
 // The host sets ?workspace_path= when it loads this entry (frontendPluginManager
 // gitQuery). A getter is what useGit expects.
@@ -49,37 +47,6 @@ initSettingsBackend(backend)
 const { loadTheme } = useTheme()
 const notify = useNotify()
 const git = useGit(() => workspacePath, backend)
-
-// ── AI Chat panel (right) — mirrors PlanWindowApp ────────────────────────────
-const AI_PANEL_W_KEY = 'git-ai-panel-width'
-const aiPanelOpen = ref(false)
-// Mounted lazily on first open, then kept alive via v-show so the chat state
-// (threads, streaming) survives toggling the panel closed.
-const aiPanelMounted = ref(false)
-const aiPanelWidth = ref(
-  Math.max(280, Math.min(600, parseInt(settingsGet(AI_PANEL_W_KEY, '360'), 10)))
-)
-let aiResizing = false
-function toggleAiPanel(): void {
-  aiPanelOpen.value = !aiPanelOpen.value
-  if (aiPanelOpen.value) aiPanelMounted.value = true
-}
-function onAiResizeStart(): void {
-  aiResizing = true
-  document.addEventListener('mousemove', onAiResizeMove)
-  document.addEventListener('mouseup', onAiResizeEnd)
-}
-function onAiResizeMove(e: MouseEvent): void {
-  if (!aiResizing) return
-  aiPanelWidth.value = Math.max(280, Math.min(600, window.innerWidth - e.clientX))
-}
-function onAiResizeEnd(): void {
-  if (!aiResizing) return
-  aiResizing = false
-  settingsSet(AI_PANEL_W_KEY, String(aiPanelWidth.value))
-  document.removeEventListener('mousemove', onAiResizeMove)
-  document.removeEventListener('mouseup', onAiResizeEnd)
-}
 
 const {
   gitStatus,
@@ -1338,30 +1305,8 @@ const busy = computed(
         </div>
       </section>
 
-      <!-- Right activity rail (AI Chat toggle) — mirrors PlanWindowApp -->
-      <div class="git-right-act">
-        <button
-          class="git-right-act-btn"
-          :class="{ active: aiPanelOpen }"
-          title="AI Chat"
-          @click="toggleAiPanel"
-        >
-          <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M8 0L9.5 5.5L15 7L9.5 8.5L8 14L6.5 8.5L1 7L6.5 5.5Z"/>
-          </svg>
-        </button>
-      </div>
-      <!-- AI Chat panel (right): embedded chat bound to this window's workspace -->
-      <div v-show="aiPanelOpen" class="git-ai-resize-handle" @mousedown.prevent="onAiResizeStart" />
-      <div v-show="aiPanelOpen" class="git-ai-panel" :style="{ width: aiPanelWidth + 'px' }">
-        <AIChatPane
-          v-if="aiPanelMounted"
-          :workspace-path="workspacePath"
-          :backend="backend"
-          embedded
-          :active="aiPanelOpen"
-        />
-      </div>
+      <!-- Right AI chat dock (rail toggle + resize + lazy AIChatPane) -->
+      <AiChatDock width-key="git-ai-panel-width" :workspace-path="workspacePath" :backend="backend" />
     </div>
 
     <!-- ⋯ popover menu -->
@@ -1491,49 +1436,6 @@ const busy = computed(
 
 /* ── Body ── */
 .body { flex: 1; display: flex; min-height: 0; }
-
-/* ── AI Chat panel (right) — mirrors PlanWindowApp ── */
-.git-right-act {
-  align-items: center;
-  background: var(--bg-subtle);
-  border-left: 1px solid var(--border-muted);
-  display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
-  padding-top: 8px;
-  width: 34px;
-}
-.git-right-act-btn {
-  background: transparent;
-  border: none;
-  border-radius: 4px;
-  color: var(--text-muted);
-  cursor: pointer;
-  padding: 5px;
-}
-.git-right-act-btn:hover { color: var(--text-bright); }
-.git-right-act-btn.active {
-  background: var(--accent-subtle);
-  color: var(--accent-bright);
-}
-.git-ai-resize-handle {
-  background: transparent;
-  border-left: 1px solid var(--border-muted);
-  cursor: col-resize;
-  flex-shrink: 0;
-  transition: background 0.15s;
-  width: 4px;
-}
-.git-ai-resize-handle:hover { background: var(--accent-emphasis); }
-.git-ai-panel {
-  border-left: 1px solid var(--border-muted);
-  display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
-  max-width: 600px;
-  min-width: 280px;
-  overflow: hidden;
-}
 
 /* ── Sidebar ── */
 .sidebar {
