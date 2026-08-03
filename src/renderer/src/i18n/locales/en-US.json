@@ -15,7 +15,9 @@
     "rename-collision-confirm": "Rename",
     "rename-collision-cancel": "Cancel",
     "paused-banner": "Delivery paused — messages queue but are not sent",
-    "spawn-toast": "“{parent}” spawned “{child}”"
+    "spawn-toast": "“{parent}” spawned “{child}”",
+    "cross-workspace-toast": "Instruction from another workspace: “{from}” → “{target}”",
+    "cross-workspace-badge": "cross-workspace"
   },
   "confirm-close": {
     "ws-title": "Close workspace?",

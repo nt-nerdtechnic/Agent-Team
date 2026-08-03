@@ -15,7 +15,9 @@
     "rename-collision-confirm": "確認",
     "rename-collision-cancel": "取消",
     "paused-banner": "投遞已暫停 — 訊息會排入佇列但不會送出",
-    "spawn-toast": "「{parent}」啟動了「{child}」"
+    "spawn-toast": "「{parent}」啟動了「{child}」",
+    "cross-workspace-toast": "來自其他工作區的指令：「{from}」→「{target}」",
+    "cross-workspace-badge": "跨工作區"
   },
   "confirm-close": {
     "ws-title": "關閉工作區？",

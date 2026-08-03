@@ -23,6 +23,7 @@ import Welcome from './components/Welcome.vue'
 import { useNotify } from './composables/useNotify'
 import { migrateTerminalPtyKey } from './composables/useTerminal'
 import { useAgentMessaging, isBroadcastTarget } from './composables/useAgentMessaging'
+import type { RouteResult } from './composables/useAgentMessaging'
 import { MSG_ENVELOPE_PREFIX, parseMessages, parseSpawns, renderSpawnKickoff } from './lib/agentMessaging'
 import { evaluateTurnSpawns, computeSpawnDepth } from './lib/agentSpawnGate'
 import StageTabBar, { type TabItem } from './components/StageTabBar.vue'
@@ -1253,12 +1254,30 @@ function registerPaneMessaging(pane: ActivePane, preferredName?: string): void {
     preferredName || pane.customName || pane.autoName || pane.slotLabel || pane.agentLabel
   pane.messagingName = messaging.registerPane(pane.id, pane.agentKey, preferred)
   persistMessagingName(pane.id, pane.messagingName)
+  mirrorMessagingHandle(pane)
+}
+
+/** Mirror a pane's handle into the backend registry, which is the only place
+ *  that sees every workspace at once — that is what makes `<folder>/<pane>`
+ *  addressable from another workspace window. Fire-and-forget: if it fails, only
+ *  cross-workspace addressing is lost, never local messaging. */
+function mirrorMessagingHandle(pane: ActivePane): void {
+  if (!pane.messagingName || !pane.workspacePath) return
+  backend
+    .send('agent_msg.register', {
+      pane_id: pane.id,
+      name: pane.messagingName,
+      workspace_path: pane.workspacePath,
+      agent_key: pane.agentKey,
+    })
+    .catch(() => { /* local messaging is unaffected */ })
 }
 
 /** keepPersisted: pane handed off to another window (detach) — it re-registers
  *  there under the same persisted name. */
 function unregisterPaneMessaging(paneId: string, opts: { keepPersisted?: boolean } = {}): void {
   messaging.unregisterPane(paneId)
+  backend.send('agent_msg.unregister', { pane_id: paneId }).catch(() => { /* best effort */ })
   if (!opts.keepPersisted) dropPersistedMessagingName(paneId)
 }
 
@@ -1439,17 +1458,67 @@ async function resolveManualHandle(paneId: string, desired: string): Promise<str
   return resolveManualHandle(paneId, answer) // re-validate the entered name
 }
 
+/** routeRemote() dep: a `<folder>/<pane>` target no pane in THIS window answers
+ *  to. The backend registry resolves it across every open workspace window and
+ *  broadcasts the delivery; this window only learns the outcome later, via the
+ *  agent_msg.delivery_result event. */
+async function routeRemoteMessage(args: {
+  fromPaneId: string
+  fromName: string
+  to: string
+  content: string
+  msgKey: string
+}): Promise<RouteResult> {
+  const resp = await backend.send<{
+    ok?: boolean
+    error?: string
+    target_display?: string
+    target_workspace_path?: string
+  }>(
+    'agent_msg.route',
+    {
+      from_pane_id: args.fromPaneId,
+      from_name: args.fromName,
+      to: args.to,
+      content: args.content,
+      msg_key: args.msgKey,
+    },
+    // Generous: the handler broadcasts the delivery BEFORE it replies, so a
+    // timeout here would report failure for a message the target already got.
+    30_000,
+  )
+  const p = resp.payload
+  if (!resp.ok || !p?.ok) {
+    return { ok: false, error: p?.error || resp.error?.message || 'cross-workspace routing failed' }
+  }
+  return {
+    ok: true,
+    targetDisplay: p.target_display,
+    targetWorkspacePath: p.target_workspace_path,
+  }
+}
+
 let _msgPumpTimer = 0
+let _remoteTargetsTimer = 0
 onMounted(() => {
   messaging.configureMessaging({
     now: () => Date.now(),
     deliver: deliverAgentMessage,
     isPaneIdle: isPaneIdleForMessaging,
+    routeRemote: routeRemoteMessage,
+    reportDelivery: (msgKey, ok, reason) => {
+      backend
+        .send('agent_msg.delivered', { msg_key: msgKey, ok, reason })
+        .catch(() => { /* the sender's log entry just stays queued */ })
+    },
   })
   _msgPumpTimer = window.setInterval(() => messaging.pump(), 1000)
+  void refreshRemoteMessagingTargets()
+  _remoteTargetsTimer = window.setInterval(() => void refreshRemoteMessagingTargets(), 10_000)
 })
 onUnmounted(() => {
   window.clearInterval(_msgPumpTimer)
+  window.clearInterval(_remoteTargetsTimer)
 })
 
 function syncViews(): void {
@@ -1686,15 +1755,37 @@ function readPaneShareText(ref: NonNullable<(typeof paneRefs)[string]>, maxLines
   return rendered.trim() ? rendered : ((ref.cleanBuffer as unknown as string) ?? '')
 }
 
+// Panes in OTHER workspace windows, as `<folder>/<pane>` addresses. Polled
+// rather than pushed: the list only feeds autocomplete, so a slightly stale
+// snapshot costs nothing (routing itself always re-resolves in the backend).
+const remoteMessagingTargets = ref<string[]>([])
+
+async function refreshRemoteMessagingTargets(): Promise<void> {
+  try {
+    const resp = await backend.send<{
+      panes?: Array<{ pane_id?: string; qualified_name?: string }>
+    }>('agent_msg.list', {})
+    const localIds = new Set(panes.value.map((p) => p.id))
+    remoteMessagingTargets.value = (resp.payload?.panes ?? [])
+      .filter((p) => p.pane_id && p.qualified_name && !localIds.has(p.pane_id))
+      .map((p) => p.qualified_name as string)
+  } catch {
+    remoteMessagingTargets.value = []
+  }
+}
+
 // Messaging names offered by pane `paneId`'s @-mention autocomplete menu: every
-// OTHER pane that has a messaging name (self excluded).
+// OTHER pane that has a messaging name (self excluded), then the qualified
+// addresses of panes open in other workspace windows.
 function mentionCandidatesFor(paneId: string): string[] {
   const others = panes.value
     .filter((x) => x.id !== paneId && x.messagingName)
     .map((x) => x.messagingName as string)
   // Offer the broadcast keyword first once there are ≥2 recipients — picking it
   // sends to every other pane at once (see isBroadcastTarget / sendBroadcast).
-  return others.length >= 2 ? ['all', ...others] : others
+  // `all` stays workspace-local; cross-workspace sends are always explicit.
+  const local = others.length >= 2 ? ['all', ...others] : others
+  return [...local, ...remoteMessagingTargets.value]
 }
 
 // Cross-pane context share: pane A dragged onto pane B's terminal area pastes a
@@ -4972,7 +5063,15 @@ async function onWorkspaceCheck(path: string): Promise<void> {
 watch(
   () => backend.status.value,
   (s) => {
-    if (s !== 'connected' || !recheckWorkspaceOnConnect) return
+    if (s !== 'connected') return
+    // The messaging registry lives in the backend process and is dropped when a
+    // connection goes away — including the transient drops the ws client heals
+    // by itself. Without re-mirroring, this window's panes would silently stop
+    // being addressable from other workspaces until they were renamed or
+    // recreated.
+    for (const pane of panes.value) mirrorMessagingHandle(pane)
+    void refreshRemoteMessagingTargets()
+    if (!recheckWorkspaceOnConnect) return
     const p = recheckWorkspaceOnConnect
     recheckWorkspaceOnConnect = ''
     if (currentWorkspace.value === p) void onWorkspaceCheck(p)
@@ -6815,6 +6914,44 @@ backend.on('pane.stopped', (raw) => {
   const ev = raw as { pane_id?: string; stopped?: boolean }
   if (!ev?.pane_id) return
   paneRefs[ev.pane_id]?.setStopped(!!ev.stopped)
+})
+
+// Cross-workspace message routed by the backend registry. Every window receives
+// the broadcast; only the one owning the target pane accepts it, and delivery
+// then runs through the ordinary queue (idle gate, FIFO, injection verified).
+backend.on('agent_msg.deliver', (raw) => {
+  const ev = raw as {
+    msg_key?: string
+    target_pane_id?: string
+    from_display?: string
+    from_workspace_path?: string
+    content?: string
+    cross_workspace?: boolean
+  }
+  if (!ev?.msg_key || !ev.target_pane_id || !ev.content) return
+  const accepted = messaging.acceptRemoteMessage({
+    msgKey: ev.msg_key,
+    targetPaneId: ev.target_pane_id,
+    fromDisplay: ev.from_display || 'unknown',
+    content: ev.content,
+    remoteWorkspace: ev.from_workspace_path,
+  })
+  if (!accepted || !ev.cross_workspace) return
+  // The instruction came from another project — say so, since nothing else in
+  // this window would show where it originated.
+  const target = panes.value.find((p) => p.id === ev.target_pane_id)
+  notifyRestore.toast(
+    i18n.global.t('msg.cross-workspace-toast', {
+      from: ev.from_display || 'unknown',
+      target: target?.messagingName ?? '',
+    }),
+  )
+})
+
+backend.on('agent_msg.delivery_result', (raw) => {
+  const ev = raw as { msg_key?: string; ok?: boolean; reason?: string }
+  if (!ev?.msg_key) return
+  messaging.resolveRemoteDelivery(ev.msg_key, !!ev.ok, ev.reason || '')
 })
 
 backend.on('session.detected', (raw) => {
@@ -8974,12 +9111,14 @@ async function setPaneCustomName(paneId: string, rawName: string): Promise<void>
       if (applied) {
         pane.messagingName = applied
         persistMessagingName(pane.id, applied)
+        mirrorMessagingHandle(pane)
       }
     } else {
       const reverted = messaging.setDerivedName(pane.id, pane.autoName || pane.agentLabel, pane.agentKey)
       if (reverted) {
         pane.messagingName = reverted
         persistMessagingName(pane.id, reverted)
+        mirrorMessagingHandle(pane)
       }
     }
   }
@@ -9025,6 +9164,7 @@ function setPaneAutoName(paneId: string, name: string): void {
     if (derived) {
       pane.messagingName = derived
       persistMessagingName(pane.id, derived)
+      mirrorMessagingHandle(pane)
     }
   }
   syncViews()

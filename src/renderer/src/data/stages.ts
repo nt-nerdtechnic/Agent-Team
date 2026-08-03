@@ -65,9 +65,13 @@ ${MSG_START} to: <對方名稱>
 <訊息內容，可多行>
 ${MSG_END}
 
-要一次廣播給所有其他 agent，把對方名稱寫成 all（即 ${MSG_START} to: all）。
+要一次廣播給同一個工作區的所有其他 agent，把對方名稱寫成 all（即 ${MSG_START} to: all）。
 
-收到開頭為 ${MSG_ENVELOPE_PREFIX} <名稱> 的輸入時，那是其他 agent 傳來的訊息；需要回覆就用上述 MSG 區塊指名對方。
+要傳給「其他工作區視窗」的 agent，對方名稱寫成 <工作區資料夾名>/<對方名稱>，例如：
+${MSG_START} to: Agent-Team/reviewer
+資料夾名重複時改寫完整路徑（例如 /Users/me/Agent-Team/reviewer）。all 只會廣播給同一個工作區。
+
+收到開頭為 ${MSG_ENVELOPE_PREFIX} <名稱> 的輸入時，那是其他 agent 傳來的訊息；需要回覆就用上述 MSG 區塊指名對方（跨工作區來的訊息，名稱本身就已經帶工作區前綴，照原樣回覆即可）。
 沒有溝通需求時不要輸出 MSG 區塊。
 
 `

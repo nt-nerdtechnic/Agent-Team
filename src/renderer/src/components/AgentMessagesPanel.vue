@@ -50,6 +50,9 @@ function fmtTime(ts: number): string {
             <div class="msg-row-line">
               <span class="msg-time">{{ fmtTime(msg.createdAt) }}</span>
               <span class="msg-route">{{ msg.from }} → {{ msg.to }}</span>
+              <span v-if="msg.remote" class="msg-xws" :title="msg.remoteWorkspace">
+                {{ $t('msg.cross-workspace-badge') }}
+              </span>
               <span class="msg-st" :data-st="msg.status">{{ $t(`msg.status-${msg.status}`) }}</span>
               <span class="msg-preview">{{ msg.content }}</span>
             </div>
@@ -167,6 +170,16 @@ function fmtTime(ts: number): string {
   font-weight: 700;
   border-radius: 99px;
   padding: 0 8px;
+}
+
+.msg-xws {
+  flex: none;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 99px;
+  padding: 0 8px;
+  background: rgba(110, 150, 230, 0.18);
+  color: #7ba3e8;
 }
 
 .msg-st[data-st='queued'] { background: rgba(128, 128, 128, 0.18); color: var(--text-secondary); }
