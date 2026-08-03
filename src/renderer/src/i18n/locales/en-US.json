@@ -1009,6 +1009,7 @@
     "manual-confirm": "Manual confirm",
     "history": "History",
     "tokens": "Tokens",
+    "tasker": "Tasker",
     "current-run": "Current run",
     "no-active-run": "No active run.",
     "workspace-cumulative": "Workspace cumulative",
@@ -1585,5 +1586,90 @@
         "pane-hint": "Toggle Navide on in Privacy & Security → Full Disk Access."
       }
     }
+  },
+  "executions": {
+    "last-scan": "Last scan {time}",
+    "rescan": "Rescan",
+    "scanning": "Scanning…",
+    "scan-failed": "Scan failed: {message}",
+    "count": "{count} items",
+    "empty": "Nothing here",
+    "unsupported": "Not supported on this platform",
+    "crontab": {
+      "title": "System crontab",
+      "filter-all": "All",
+      "filter-enabled": "Enabled",
+      "filter-disabled": "Disabled"
+    },
+    "launchagents": {
+      "title": "macOS LaunchAgents",
+      "filter-all": "All",
+      "filter-running": "Running",
+      "filter-stopped": "Stopped"
+    },
+    "tag": {
+      "disabled": "Disabled",
+      "pid": "PID {pid}",
+      "exit": "exit {code}"
+    },
+    "state": {
+      "loaded-not-running": "Loaded, not running",
+      "not-loaded": "Not loaded"
+    },
+    "action": {
+      "enable": "Enable",
+      "disable": "Disable",
+      "remove": "Remove"
+    },
+    "detail": {
+      "schedule": "Schedule",
+      "command": "Command",
+      "raw": "Raw line",
+      "label": "Label",
+      "plist": "Plist path",
+      "exit-code": "Last exit code",
+      "state": "State"
+    },
+    "row": {
+      "expand": "Show details",
+      "collapse": "Hide details"
+    },
+    "confirm": {
+      "crontab": "This crontab entry ({name}) will be permanently removed:",
+      "launchagent": "{name} will be unloaded and its plist permanently deleted:",
+      "warning": "This cannot be undone.",
+      "ok": "Remove",
+      "cancel": "Cancel"
+    },
+    "cron": {
+      "reboot": "At boot",
+      "daily": "Every day at 00:00",
+      "hourly": "Every hour",
+      "weekly": "Every week",
+      "monthly": "Every month",
+      "yearly": "Every year",
+      "every-minutes": "Every {n} minutes",
+      "daily-at": "Every day at {time}",
+      "weekly-at": "Every {weekday} at {time}",
+      "monthly-at": "Day {day} of every month at {time}"
+    },
+    "agent": {
+      "every-seconds": "Every {n} seconds",
+      "every-minutes": "Every {n} minutes",
+      "every-hours": "Every {n} hours",
+      "daily-at": "Every day at {time}",
+      "weekly-at": "Every {weekday} at {time}",
+      "keep-alive": "Resident service (KeepAlive)",
+      "run-at-load": "Runs at load (RunAtLoad)",
+      "calendar": "On a calendar schedule (see the plist)",
+      "unknown": "—"
+    },
+    "weekday-0": "Sunday",
+    "weekday-1": "Monday",
+    "weekday-2": "Tuesday",
+    "weekday-3": "Wednesday",
+    "weekday-4": "Thursday",
+    "weekday-5": "Friday",
+    "weekday-6": "Saturday"
   }
 }

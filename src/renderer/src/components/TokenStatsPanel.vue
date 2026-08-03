@@ -5,6 +5,7 @@ import { useTokens, type TokenBucket, type ResetScope } from '../composables/use
 import { useNotify } from '../composables/useNotify'
 import type { useBackend } from '../composables/useBackend'
 import HistoryPanel from './HistoryPanel.vue'
+import TaskerPanel from './TaskerPanel.vue'
 import type { PipelineStatusView } from './ControlPane.vue'
 
 interface Stage {
@@ -52,11 +53,13 @@ watch(expanded, (v) => {
   emit('update:expanded', v)
 }, { immediate: true })
 
-// Active right-panel tab — Tokens (default) or the pipeline History timeline.
-const tab = ref<'history' | 'tokens'>('history')
+// Active right-panel tab — the pipeline History timeline (default), token stats,
+// or Tasker (machine-level crontab / LaunchAgents). Unknown or legacy persisted
+// values fall back to the default.
+const tab = ref<'history' | 'tokens' | 'tasker'>('history')
 {
   const t = settingsGet<string | null>('agentTeam.rightPanel.tab', null)
-  if (t === 'history' || t === 'tokens') tab.value = t
+  if (t === 'history' || t === 'tokens' || t === 'tasker') tab.value = t
 }
 watch(tab, (v) => {
   settingsSet('agentTeam.rightPanel.tab', v)
@@ -173,6 +176,10 @@ async function confirmReset(scope: ResetScope): Promise<void> {
         <span class="rail-label">{{ $t('label.tokens') }}</span>
         <span v-if="runTotals.calls > 0" class="rail-badge">{{ collapsedTotal }}</span>
       </button>
+      <button class="rail-btn" :class="{ active: tab === 'tasker' }" title="Expand scheduled tasks" @click="tab = 'tasker'; expanded = true">
+        <span class="rail-icon">🗓</span>
+        <span class="rail-label">{{ $t('label.tasker') }}</span>
+      </button>
     </div>
 
     <!-- Expanded panel -->
@@ -182,10 +189,12 @@ async function confirmReset(scope: ResetScope): Promise<void> {
         <div class="tabs">
           <button class="tab" :class="{ active: tab === 'history' }" @click="tab = 'history'">📜 {{ $t('label.history') }}</button>
           <button class="tab" :class="{ active: tab === 'tokens' }" @click="tab = 'tokens'">📊 {{ $t('label.tokens') }}</button>
+          <button class="tab" :class="{ active: tab === 'tasker' }" @click="tab = 'tasker'">🗓 {{ $t('label.tasker') }}</button>
         </div>
       </header>
 
       <HistoryPanel v-if="tab === 'history'" :backend="backend" :workspace-path="workspacePath" :pipeline="pipeline" />
+      <TaskerPanel v-else-if="tab === 'tasker'" :backend="backend" />
 
       <template v-else>
       <div v-if="loading && !snapshot" class="msg">{{ $t('label.loading') }}</div>
@@ -306,6 +315,9 @@ async function confirmReset(scope: ResetScope): Promise<void> {
   flex-direction: column;
   align-items: stretch;
   height: 100%;
+  /* The vertical tab labels are tall; a short window would otherwise clip the
+     last tab out of reach (.token-panel hides its overflow). */
+  overflow-y: auto;
 }
 .rail-btn {
   appearance: none;
@@ -375,6 +387,9 @@ async function confirmReset(scope: ResetScope): Promise<void> {
   display: flex;
   gap: 4px;
   flex: 1;
+  /* Three tabs no longer fit on one line at the panel's 180px minimum width. */
+  flex-wrap: wrap;
+  min-width: 0;
 }
 .tab {
   background: transparent;

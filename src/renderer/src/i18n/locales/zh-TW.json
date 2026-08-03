@@ -1009,6 +1009,7 @@
     "manual-confirm": "手動確認",
     "history": "歷史記錄",
     "tokens": "Tokens",
+    "tasker": "Tasker",
     "current-run": "目前執行",
     "no-active-run": "沒有執行中的任務。",
     "workspace-cumulative": "工作區累計",
@@ -1585,5 +1586,90 @@
         "pane-hint": "在「隱私權與安全性 → 完全取用磁碟」中開啟 Navide。"
       }
     }
+  },
+  "executions": {
+    "last-scan": "上次掃描 {time}",
+    "rescan": "重新掃描",
+    "scanning": "掃描中…",
+    "scan-failed": "掃描失敗：{message}",
+    "count": "{count} 項",
+    "empty": "沒有項目",
+    "unsupported": "此平台不支援",
+    "crontab": {
+      "title": "系統 crontab",
+      "filter-all": "全部",
+      "filter-enabled": "啟用中",
+      "filter-disabled": "已停用"
+    },
+    "launchagents": {
+      "title": "macOS LaunchAgents",
+      "filter-all": "全部",
+      "filter-running": "執行中",
+      "filter-stopped": "已停止"
+    },
+    "tag": {
+      "disabled": "已停用",
+      "pid": "PID {pid}",
+      "exit": "exit {code}"
+    },
+    "state": {
+      "loaded-not-running": "已載入但未執行",
+      "not-loaded": "未載入"
+    },
+    "action": {
+      "enable": "啟用",
+      "disable": "停用",
+      "remove": "刪除"
+    },
+    "detail": {
+      "schedule": "排程",
+      "command": "指令",
+      "raw": "原始內容",
+      "label": "Label",
+      "plist": "plist 路徑",
+      "exit-code": "上次結束碼",
+      "state": "狀態"
+    },
+    "row": {
+      "expand": "顯示細節",
+      "collapse": "隱藏細節"
+    },
+    "confirm": {
+      "crontab": "「{name}」這筆 crontab 排程將被永久刪除：",
+      "launchagent": "「{name}」將被停用，且其 plist 檔會被永久刪除：",
+      "warning": "此操作無法復原。",
+      "ok": "刪除",
+      "cancel": "取消"
+    },
+    "cron": {
+      "reboot": "開機時執行",
+      "daily": "每天 00:00",
+      "hourly": "每小時",
+      "weekly": "每週",
+      "monthly": "每月",
+      "yearly": "每年",
+      "every-minutes": "每 {n} 分鐘",
+      "daily-at": "每天 {time}",
+      "weekly-at": "每{weekday} {time}",
+      "monthly-at": "每月 {day} 日 {time}"
+    },
+    "agent": {
+      "every-seconds": "每 {n} 秒",
+      "every-minutes": "每 {n} 分鐘",
+      "every-hours": "每 {n} 小時",
+      "daily-at": "每天 {time}",
+      "weekly-at": "每{weekday} {time}",
+      "keep-alive": "常駐服務（KeepAlive）",
+      "run-at-load": "啟動時執行（RunAtLoad）",
+      "calendar": "依日期排程（詳見 plist）",
+      "unknown": "—"
+    },
+    "weekday-0": "週日",
+    "weekday-1": "週一",
+    "weekday-2": "週二",
+    "weekday-3": "週三",
+    "weekday-4": "週四",
+    "weekday-5": "週五",
+    "weekday-6": "週六"
   }
 }
