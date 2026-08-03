@@ -34,6 +34,8 @@ export interface OnboardGate {
   has_any_cli: boolean
   analyzer_ready: boolean
   ollama_ok: boolean
+  /** ollama is installed AND its daemon answered — pulling a model can work. */
+  ollama_service_up: boolean
   has_model: boolean
   all_required_ready: boolean
   suggested_model: string
@@ -117,19 +119,28 @@ export function cliHealthGuideForLaunch(status: OnboardStatus | null | undefined
   return repairable ? status.cli_health : null
 }
 
-interface InstallResult {
+export interface InstallResult {
   ok: boolean
   needs_terminal?: boolean
   command?: string
   output?: string
   error?: string
   docs_url?: string
+  /** Bootstrap binaries (brew, npm) the install command needs but cannot find. */
+  missing_requirements?: string[]
+  /** Ollama is installed but its daemon is not answering. */
+  needs_service?: boolean
 }
 
 // Inline installs (brew) block the WS reply until the command finishes; the
 // backend caps them at 900s, so the request deadline must outlive that —
 // the default 10s send timeout aborts every real install mid-download.
 const INSTALL_TIMEOUT_MS = 910_000
+
+// An external-terminal install finishes outside the app, so nothing tells us
+// when it is done. Poll instead of leaving the card stuck at "not installed".
+const WATCH_INTERVAL_MS = 5_000
+const WATCH_MAX_TICKS = 60 // ≈5 minutes, then the user re-detects manually
 
 /**
  * useOnboarding — drives the first-run environment wizard. The backend is the
@@ -141,10 +152,92 @@ export function useOnboarding(backend: ReturnType<typeof useBackend>) {
   const loading = ref(false)
   const installing = ref('') // dep id currently being installed ('' = none)
   const maintaining = ref('') // '<agent>:<action>' currently running ('' = none)
+  const pulling = ref('') // model name currently being pulled ('' = none)
   const logLines = ref<string[]>([])
+  /** Seconds the current install has been running — the only progress signal
+   *  an inline brew install gives, since its output arrives only at the end. */
+  const installElapsedSec = ref(0)
+  /** Key of the external-terminal task being polled ('' = none). */
+  const watching = ref('')
+
+  let elapsedTimer: ReturnType<typeof setInterval> | null = null
+  let watchTimer: ReturnType<typeof setTimeout> | null = null
 
   function log(line: string): void {
     logLines.value = [...logLines.value, line].slice(-200)
+  }
+
+  /** Log a headline plus the tail of a multi-line detail (stderr, etc.). */
+  function logDetail(headline: string, detail: string): void {
+    log(headline)
+    for (const line of detail.trim().split('\n').slice(-20)) log(`  ${line}`)
+  }
+
+  function stopElapsed(): void {
+    if (elapsedTimer !== null) {
+      clearInterval(elapsedTimer)
+      elapsedTimer = null
+    }
+  }
+
+  function startElapsed(): void {
+    stopElapsed()
+    installElapsedSec.value = 0
+    elapsedTimer = setInterval(() => {
+      installElapsedSec.value += 1
+    }, 1000)
+  }
+
+  function stopWatch(): void {
+    if (watchTimer !== null) {
+      clearTimeout(watchTimer)
+      watchTimer = null
+    }
+    watching.value = ''
+  }
+
+  /** Re-detect on an interval until `isDone()` or the ceiling is reached. */
+  function watchUntil(key: string, isDone: () => boolean, onDone: () => void): void {
+    stopWatch()
+    watching.value = key
+    let ticks = 0
+    const tick = async (): Promise<void> => {
+      if (watching.value !== key) return
+      ticks += 1
+      await refresh()
+      if (watching.value !== key) return // superseded or disposed while in flight
+      if (isDone()) {
+        stopWatch()
+        onDone()
+        return
+      }
+      if (ticks >= WATCH_MAX_TICKS) {
+        stopWatch()
+        return
+      }
+      watchTimer = setTimeout(() => void tick(), WATCH_INTERVAL_MS)
+    }
+    watchTimer = setTimeout(() => void tick(), WATCH_INTERVAL_MS)
+  }
+
+  /** Release timers — the wizard can be closed mid-install. */
+  function dispose(): void {
+    stopElapsed()
+    stopWatch()
+  }
+
+  async function openInTerminal(command: string, hint: string): Promise<boolean> {
+    // A failed openTerminal used to be swallowed, so the log claimed a terminal
+    // had opened while nothing happened (TCC automation not granted yet).
+    const opened = await window.agentTeam?.openTerminal(command)
+    if (!opened?.ok) {
+      log(`✗ Could not open an external terminal: ${opened?.error || 'unavailable'}`)
+      log(`  Run this yourself, then click Re-detect: ${command}`)
+      return false
+    }
+    log(`↗ Opened in external terminal: ${command}`)
+    log(`  ${hint}`)
+    return true
   }
 
   async function refresh(): Promise<void> {
@@ -159,10 +252,15 @@ export function useOnboarding(backend: ReturnType<typeof useBackend>) {
     }
   }
 
-  async function install(dep: OnboardDep): Promise<void> {
-    if (installing.value) return
+  async function install(dep: OnboardDep): Promise<InstallResult | null> {
+    if (installing.value) return null
     installing.value = dep.id
+    startElapsed()
     log(`▶ Installing ${dep.label}…`)
+    // Set only when the command ran here and exited 0 — that claim is worth
+    // re-checking, because "installed" and "detectable" are not the same thing.
+    let ranInlineOk = false
+    let handedToTerminal = false
     try {
       const resp = await backend.send<InstallResult>(
         'onboarding.install',
@@ -171,39 +269,108 @@ export function useOnboarding(backend: ReturnType<typeof useBackend>) {
       )
       const r = resp.payload
       if (!r?.ok) {
-        log(`✗ ${dep.label} installation failed: ${r?.error || resp.error?.message || 'unknown'}`)
-        return
+        logDetail(
+          `✗ ${dep.label} installation failed:`,
+          r?.error || r?.output || resp.error?.message || 'unknown'
+        )
+        return r ?? null
       }
       if (r.needs_terminal && r.command) {
-        await window.agentTeam?.openTerminal(r.command)
-        log(`↗ Opened in external terminal: ${r.command}`)
-        log('  After completing, click Re-detect.')
-      } else {
-        log(r.output?.trim() || `✓ ${dep.label} installed`)
+        handedToTerminal = await openInTerminal(
+          r.command,
+          'Watching for it to finish — or click Re-detect.'
+        )
+        if (handedToTerminal) {
+          watchUntil(
+            dep.id,
+            () => deps.value.find((d) => d.id === dep.id)?.status === 'ok',
+            () => log(`✓ ${dep.label} detected.`)
+          )
+        }
+        return r
       }
+      ranInlineOk = true
+      log(r.output?.trim() || `✓ ${dep.label} installed`)
+      return r
     } catch (e) {
       log(`✗ ${dep.label} installation error: ${e instanceof Error ? e.message : String(e)}`)
+      return null
     } finally {
       installing.value = ''
-      await refresh()
+      stopElapsed()
+      // Skip the immediate re-detect when the work moved to a terminal: it
+      // cannot have finished yet, and the watcher polls for it anyway.
+      if (!handedToTerminal) {
+        await refresh()
+        const after = deps.value.find((d) => d.id === dep.id)
+        if (ranInlineOk && after && after.status !== 'ok') {
+          log(`⚠ ${dep.label} installed successfully but is still not detected.`)
+          log('  It may need a new shell session, or it landed outside PATH.')
+        }
+      }
     }
   }
 
-  async function pullModel(model?: string): Promise<void> {
+  async function pullModel(model?: string): Promise<InstallResult | null> {
+    if (pulling.value) return null
     const name = model || status.value?.gate.suggested_model || 'qwen2.5-coder'
+    pulling.value = name
     log(`▶ Downloading model ${name}…`)
     try {
       const resp = await backend.send<InstallResult>('onboarding.pull_model', { model: name })
       const r = resp.payload
-      if (!r?.ok) { log(`✗ ${r?.error || 'download failed'}`); return }
-      if (r.needs_terminal && r.command) {
-        await window.agentTeam?.openTerminal(r.command)
-        log(`↗ Opened in external terminal: ${r.command}`)
-        log('  After completion, click Re-detect.')
+      if (!r?.ok) {
+        log(`✗ ${r?.error || 'download failed'}`)
+        if (r?.needs_service) log('  Start the Ollama service, then try again.')
+        return r ?? null
       }
+      if (r.needs_terminal && r.command) {
+        const opened = await openInTerminal(
+          r.command,
+          'Watching for the download to finish — or click Re-detect.'
+        )
+        if (opened) {
+          watchUntil(
+            `model:${name}`,
+            () => models.value.includes(name),
+            () => log(`✓ Model ${name} is available.`)
+          )
+        }
+      }
+      return r
     } catch (e) {
       log(`✗ Model download failed: ${e instanceof Error ? e.message : String(e)}`)
+      return null
+    } finally {
+      pulling.value = ''
     }
+  }
+
+  /**
+   * Start the Ollama daemon. Installing the formula does not start it, and
+   * without it `ollama pull` fails and the model list stays empty forever.
+   */
+  async function startOllamaService(): Promise<InstallResult | null> {
+    const resp = await backend.send<InstallResult>('onboarding.start_ollama', {})
+    const r = resp.payload
+    if (!r?.ok) {
+      log(`✗ ${r?.error || 'cannot start the Ollama service'}`)
+      return r ?? null
+    }
+    if (r.command) {
+      const opened = await openInTerminal(
+        r.command,
+        'Watching for the service to come up — or click Re-detect.'
+      )
+      if (opened) {
+        watchUntil(
+          'ollama-service',
+          () => gate.value?.ollama_service_up === true,
+          () => log('✓ Ollama service is running.')
+        )
+      }
+    }
+    return r
   }
 
   /**
@@ -226,9 +393,7 @@ export function useOnboarding(backend: ReturnType<typeof useBackend>) {
         return r ?? null
       }
       if (r.command) {
-        await window.agentTeam?.openTerminal(r.command)
-        log(`↗ Opened in external terminal: ${r.command}`)
-        log('  After it finishes, click Re-detect.')
+        await openInTerminal(r.command, 'After it finishes, click Re-detect.')
       }
       return r
     } catch (e) {
@@ -267,13 +432,17 @@ export function useOnboarding(backend: ReturnType<typeof useBackend>) {
   const foundationReady = computed(() => gate.value?.foundation_ready ?? false)
   const hasAnyCli = computed(() => gate.value?.has_any_cli ?? false)
   const analyzerReady = computed(() => gate.value?.analyzer_ready ?? false)
+  const ollamaServiceUp = computed(() => gate.value?.ollama_service_up ?? false)
   const allRequiredReady = computed(() => gate.value?.all_required_ready ?? false)
   const cliHealth = computed<CliHealthStatus | null>(() => status.value?.cli_health ?? null)
 
   return {
-    status, loading, installing, maintaining, logLines,
-    refresh, install, pullModel, markComplete, runMaintenance, setAutoupdatePolicy,
+    status, loading, installing, maintaining, pulling, logLines,
+    installElapsedSec, watching,
+    refresh, install, pullModel, startOllamaService, markComplete, runMaintenance,
+    setAutoupdatePolicy, dispose,
     deps, foundationDeps, cliDeps, analyzerDeps, models, modelCatalog, gate,
-    foundationReady, hasAnyCli, analyzerReady, allRequiredReady, cliHealth,
+    foundationReady, hasAnyCli, analyzerReady, allRequiredReady, ollamaServiceUp,
+    cliHealth,
   }
 }

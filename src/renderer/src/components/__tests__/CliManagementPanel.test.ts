@@ -39,7 +39,8 @@ function status(): OnboardStatus {
     model_catalog: [],
     gate: {
       foundation_ready: true, has_any_cli: true, analyzer_ready: false,
-      ollama_ok: false, has_model: false, all_required_ready: true, suggested_model: '',
+      ollama_ok: false, ollama_service_up: false, has_model: false,
+      all_required_ready: true, suggested_model: '',
     },
     cli_health: {
       entries: [{

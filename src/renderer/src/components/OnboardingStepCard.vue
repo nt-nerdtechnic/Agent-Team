@@ -42,7 +42,9 @@ defineEmits<{ (e: 'toggle'): void }>()
       </span>
     </button>
 
-    <div v-if="expanded && !done" class="oc-body">
+    <!-- A done card still opens on click: its actions include Re-detect, and a
+         dead click was the only feedback when a user re-checked a green step. -->
+    <div v-if="expanded" class="oc-body">
       <p v-if="description" class="oc-desc">{{ description }}</p>
       <p v-if="warning" class="oc-warn">{{ warning }}</p>
       <div class="oc-actions">

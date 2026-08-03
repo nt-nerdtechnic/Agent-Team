@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { useBackend } from '../composables/useBackend'
 import { useOnboarding, type OnboardDep } from '../composables/useOnboarding'
@@ -24,6 +24,37 @@ onMounted(() => {
   void ob.refresh()
   void perms.refresh()
 })
+
+// The wizard can be closed mid-install; its timers must not outlive it.
+onBeforeUnmount(() => ob.dispose())
+
+/** Install button label — carries the elapsed seconds, the only progress an
+ *  inline brew install reports before its output arrives all at once. */
+function installLabel(dep: OnboardDep): string {
+  if (ob.installing.value !== dep.id) return t('onboard.install')
+  const secs = ob.installElapsedSec.value
+  return secs > 0 ? `${t('onboard.installing')} (${secs}s)` : t('onboard.installing')
+}
+
+// Re-detect during an install would race the refresh the install itself runs,
+// and the loser's response overwrites the winner's status.
+const detectBusy = computed(() => ob.loading.value || !!ob.installing.value)
+
+/** ollama installed but its daemon is down — pulling a model cannot work. */
+function ollamaStopped(dep: OnboardDep): boolean {
+  return dep.id === 'ollama' && dep.status === 'ok' && !ob.ollamaServiceUp.value
+}
+
+// An install's output lands in one burst; without this the pane stays pinned
+// to the first line and the actual error scrolls out of sight.
+const logEl = ref<HTMLElement | null>(null)
+watch(
+  () => ob.logLines.value.length,
+  async () => {
+    await nextTick()
+    if (logEl.value) logEl.value.scrollTop = logEl.value.scrollHeight
+  },
+)
 
 // ── Steps ─────────────────────────────────────────────────────────────────────
 type StepId = 'environment' | 'agents' | 'permissions' | 'ready'
@@ -87,6 +118,12 @@ function toggleInfo(key: string): void {
   infoKey.value = infoKey.value === key ? '' : key
 }
 
+// Clearing the pick hands the accordion back to "first unfinished card", which
+// reads as a collapse. Needed now that finished cards expand too.
+function togglePick(key: string): void {
+  picked.value = picked.value === key ? '' : key
+}
+
 // ── Model picker ──────────────────────────────────────────────────────────────
 const selectedModel = ref('')
 const customModel = ref('')
@@ -145,7 +182,15 @@ const activePermission = computed<TccPermissionKey | null>(() =>
 // ── Footer ────────────────────────────────────────────────────────────────────
 async function installMissing(deps: OnboardDep[]): Promise<void> {
   for (const d of deps) {
-    if (d.status !== 'ok' && d.can_install) await ob.install(d)
+    if (d.status === 'ok' || !d.can_install) continue
+    const result = await ob.install(d)
+    // An interactive install only *opens* a terminal — the tool is not there
+    // yet. Continuing would run the next command (which may need it) against a
+    // machine that still lacks it: on a fresh Mac every `brew install …` after
+    // Homebrew failed with exit 127. Stop and let the watcher/Re-detect catch up.
+    if (result?.needs_terminal) break
+    // A missing bootstrap binary blocks everything downstream of it too.
+    if (result?.missing_requirements?.length) break
   }
 }
 
@@ -201,7 +246,7 @@ function finish(): void {
             :done="d.status === 'ok'"
             :expanded="activeKey === d.id"
             :warning="d.status === 'outdated' ? $t('onboard.outdated', { min: d.min_version }) : ''"
-            @toggle="picked = d.id"
+            @toggle="togglePick(d.id)"
           >
             <template #actions>
               <button
@@ -210,12 +255,12 @@ function finish(): void {
                 :disabled="!!ob.installing.value"
                 @click="ob.install(d)"
               >
-                {{ ob.installing.value === d.id ? $t('onboard.installing') : $t('onboard.install') }}
+                {{ installLabel(d) }}
               </button>
               <a v-else-if="d.docs_url" class="ob-btn primary" :href="d.docs_url" target="_blank" rel="noreferrer">
                 {{ $t('onboard.install-guide') }}
               </a>
-              <button class="ob-btn ghost" :disabled="ob.loading.value" @click="ob.refresh()">
+              <button class="ob-btn ghost" :disabled="detectBusy" @click="ob.refresh()">
                 {{ ob.loading.value ? $t('label.detecting') : $t('action.re-detect') }}
               </button>
             </template>
@@ -241,21 +286,29 @@ function finish(): void {
             :optional="d.optional"
             :done="d.status === 'ok'"
             :expanded="activeKey === d.id"
-            @toggle="picked = d.id"
+            :warning="ollamaStopped(d) ? $t('onboard.ollama-stopped') : ''"
+            @toggle="togglePick(d.id)"
           >
             <template #actions>
               <button
-                v-if="d.can_install"
+                v-if="ollamaStopped(d)"
+                class="ob-btn primary"
+                @click="ob.startOllamaService()"
+              >
+                {{ $t('action.start-ollama') }}
+              </button>
+              <button
+                v-else-if="d.can_install"
                 class="ob-btn primary"
                 :disabled="!!ob.installing.value"
                 @click="ob.install(d)"
               >
-                {{ ob.installing.value === d.id ? $t('onboard.installing') : $t('onboard.install') }}
+                {{ installLabel(d) }}
               </button>
               <a v-else-if="d.docs_url" class="ob-btn primary" :href="d.docs_url" target="_blank" rel="noreferrer">
                 {{ $t('onboard.install-guide') }}
               </a>
-              <button class="ob-btn ghost" :disabled="ob.loading.value" @click="ob.refresh()">
+              <button class="ob-btn ghost" :disabled="detectBusy" @click="ob.refresh()">
                 {{ ob.loading.value ? $t('label.detecting') : $t('action.re-detect') }}
               </button>
             </template>
@@ -268,7 +321,7 @@ function finish(): void {
             optional
             :done="ob.models.value.length > 0"
             :expanded="activeKey === 'model'"
-            @toggle="picked = 'model'"
+            @toggle="togglePick('model')"
           >
             <template #actions>
               <div class="ob-models">
@@ -312,10 +365,18 @@ function finish(): void {
                 </label>
               </div>
 
-              <button class="ob-btn primary" :disabled="!pullTarget" @click="ob.pullModel(pullTarget)">
-                {{ $t('action.download-model', { name: pullTarget || $t('label.model') }) }}
+              <button
+                class="ob-btn primary"
+                :disabled="!pullTarget || !!ob.pulling.value"
+                @click="ob.pullModel(pullTarget)"
+              >
+                {{
+                  ob.pulling.value
+                    ? $t('onboard.downloading', { name: ob.pulling.value })
+                    : $t('action.download-model', { name: pullTarget || $t('label.model') })
+                }}
               </button>
-              <button class="ob-btn ghost" :disabled="ob.loading.value" @click="ob.refresh()">
+              <button class="ob-btn ghost" :disabled="detectBusy" @click="ob.refresh()">
                 {{ ob.loading.value ? $t('label.detecting') : $t('action.re-detect') }}
               </button>
             </template>
@@ -333,7 +394,7 @@ function finish(): void {
             :done="perms.statuses.value[k] === 'granted'"
             :expanded="activeKey === k"
             :warning="perms.statuses.value[k] === 'denied' ? $t(`onboard.perm.${k}.denied`) : ''"
-            @toggle="picked = k"
+            @toggle="togglePick(k)"
           >
             <template #actions>
               <button
@@ -384,13 +445,13 @@ function finish(): void {
               {{ $t('label.optional') }}
             </li>
           </ul>
-          <button class="ob-linkbtn" :disabled="ob.loading.value" @click="ob.refresh()">
+          <button class="ob-linkbtn" :disabled="detectBusy" @click="ob.refresh()">
             {{ ob.loading.value ? $t('label.detecting') : $t('action.re-detect') }}
           </button>
         </template>
 
         <!-- Install log -->
-        <div v-if="ob.logLines.value.length" class="ob-log">
+        <div v-if="ob.logLines.value.length" ref="logEl" class="ob-log">
           <div v-for="(l, i) in ob.logLines.value" :key="i" class="ob-log-line">{{ l }}</div>
         </div>
       </main>

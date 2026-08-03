@@ -2891,7 +2891,16 @@ async def onboarding_pull_model(session: "Session", msg_id: str, msg_type: str, 
     from . import app
 
     model = payload.get("model", "") or app.onboarding_deps._SUGGESTED_MODEL
-    result = app.onboarding_deps.pull_model(model)
+    # Offloaded: the reachability check shells out to `ollama list`.
+    result = await asyncio.to_thread(app.onboarding_deps.pull_model, model)
+    await session.send_json(make_response(msg_id, msg_type, result))
+
+
+@handler("onboarding.start_ollama")
+async def onboarding_start_ollama(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    from . import app
+
+    result = await asyncio.to_thread(app.onboarding_deps.start_ollama_service)
     await session.send_json(make_response(msg_id, msg_type, result))
 
 

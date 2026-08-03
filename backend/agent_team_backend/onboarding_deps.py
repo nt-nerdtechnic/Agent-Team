@@ -45,6 +45,10 @@ class Dep:
     needs_terminal: bool = False     # interactive (sudo / OAuth) → external Terminal
     optional: bool = False
     docs_url: str = ""
+    # Binaries install_cmd itself invokes (brew, npm). Checked before running it
+    # so a missing bootstrap tool reports "install brew first" instead of a bare
+    # exit 127 — on a fresh Mac every brew-based install used to fail this way.
+    requires_binaries: tuple[str, ...] = ()
     # Maintenance — the CLI's OWN official commands. Navide never wraps, parses
     # or replaces them; it only surfaces and runs them. '' = the vendor ships no
     # such command, in which case the UI points at docs_url instead of guessing.
@@ -72,24 +76,29 @@ DEPS: list[Dep] = [
     # stay off PATH after a successful install and detection would never pass.
     Dep("node", "Node.js", "JavaScript runtime (≥ 22)", "foundation",
         ["node", "--version"], r"v?(\d+\.\d+\.\d+)", min_version="22.0.0",
-        install_cmd="brew install node", docs_url="https://nodejs.org"),
+        install_cmd="brew install node", requires_binaries=("brew",),
+        docs_url="https://nodejs.org"),
     Dep("pnpm", "pnpm", "Package manager", "foundation",
         ["pnpm", "--version"], r"(\d+\.\d+\.\d+)",
-        install_cmd="brew install pnpm", docs_url="https://pnpm.io"),
+        install_cmd="brew install pnpm", requires_binaries=("brew",),
+        docs_url="https://pnpm.io"),
     # Unversioned formula on purpose: versioned kegs (python@3.12) only link
     # `python3.12`, never `python3`, so detection (`python3 --version`) would
     # keep failing after a successful install.
     Dep("python", "Python", "Python 3.12+", "foundation",
         ["python3", "--version"], r"Python (\d+\.\d+\.\d+)", min_version="3.12.0",
-        install_cmd="brew install python3", docs_url="https://python.org"),
+        install_cmd="brew install python3", requires_binaries=("brew",),
+        docs_url="https://python.org"),
     Dep("uv", "uv", "Python package and environment manager", "foundation",
         ["uv", "--version"], r"uv (\d+\.\d+\.\d+)",
-        install_cmd="brew install uv", docs_url="https://docs.astral.sh/uv"),
+        install_cmd="brew install uv", requires_binaries=("brew",),
+        docs_url="https://docs.astral.sh/uv"),
 
     # Step 2 — Agent CLIs (≥ 1 required) + Analyzer
     Dep("claude", "Claude Code", "Anthropic Claude CLI", "agent_cli",
         ["claude", "--version"], r"(\d+\.\d+\.\d+)",
         install_cmd="npm install -g @anthropic-ai/claude-code", needs_terminal=True,
+        requires_binaries=("npm",),
         optional=True, docs_url="https://docs.anthropic.com/claude-code",
         update_cmd="claude update", doctor_cmd="claude doctor",
         npm_package="@anthropic-ai/claude-code",
@@ -99,7 +108,8 @@ DEPS: list[Dep] = [
     Dep("codex", "Codex", "OpenAI Codex CLI", "agent_cli",
         ["codex", "--version"], r"(\d+\.\d+\.\d+)",
         install_cmd="npm install -g @openai/codex", needs_terminal=True,
-        optional=True, docs_url="",
+        requires_binaries=("npm",),
+        optional=True, docs_url="https://developers.openai.com/codex/cli",
         update_cmd="codex update", doctor_cmd="codex doctor",
         npm_package="@openai/codex"),
     Dep("antigravity", "Antigravity", "Google Antigravity CLI", "agent_cli",
@@ -134,7 +144,7 @@ DEPS: list[Dep] = [
     Dep("kilo", "Kilo Code", "Kilo Code terminal coding agent (OpenCode fork)", "agent_cli",
         ["kilo", "--version"], r"(\d+\.\d+\.\d+)",
         install_cmd="npm install -g @kilocode/cli",
-        needs_terminal=True, optional=True,
+        needs_terminal=True, requires_binaries=("npm",), optional=True,
         docs_url="https://kilo.ai/docs/code-with-ai/platforms/cli",
         update_cmd="kilo upgrade",
         npm_package="@kilocode/cli",
@@ -145,6 +155,7 @@ DEPS: list[Dep] = [
     Dep("qwen", "Qwen Code", "Alibaba Qwen Code coding agent CLI", "agent_cli",
         ["qwen", "--version"], r"(\d+\.\d+\.\d+)",
         install_cmd="npm install -g @qwen-code/qwen-code", needs_terminal=True,
+        requires_binaries=("npm",),
         optional=True, docs_url="https://qwenlm.github.io/qwen-code-docs/",
         update_cmd="qwen update",
         npm_package="@qwen-code/qwen-code"),
@@ -153,7 +164,8 @@ DEPS: list[Dep] = [
     Dep("pi", "Pi", "Pi coding agent CLI", "agent_cli",
         ["pi", "--version"], r"(\d+\.\d+\.\d+)",
         install_cmd="npm install -g @earendil-works/pi-coding-agent",
-        needs_terminal=True, optional=True, docs_url="https://pi.dev/docs",
+        needs_terminal=True, requires_binaries=("npm",),
+        optional=True, docs_url="https://pi.dev/docs",
         update_cmd="pi update",
         npm_package="@earendil-works/pi-coding-agent",
         config_home_env="PI_CODING_AGENT_DIR",
@@ -164,7 +176,7 @@ DEPS: list[Dep] = [
     Dep("copilot", "Copilot CLI", "GitHub Copilot coding agent CLI", "agent_cli",
         ["copilot", "--version"], r"(\d+\.\d+\.\d+)",
         install_cmd="brew install --cask copilot-cli",
-        needs_terminal=True, optional=True,
+        needs_terminal=True, requires_binaries=("brew",), optional=True,
         docs_url="https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-copilot-cli",
         update_cmd="copilot update",
         npm_package="@github/copilot",
@@ -196,7 +208,8 @@ DEPS: list[Dep] = [
         autoupdate_env="AIDER_CHECK_UPDATE"),
     Dep("ollama", "Ollama", "Local LLM runtime (required for Analyzer)", "analyzer",
         ["ollama", "--version"], r"(\d+\.\d+\.\d+)",
-        install_cmd="brew install ollama", docs_url="https://ollama.com"),
+        install_cmd="brew install ollama", requires_binaries=("brew",),
+        docs_url="https://ollama.com"),
 ]
 
 DEPS_BY_ID: dict[str, Dep] = {d.id: d for d in DEPS}
@@ -245,7 +258,15 @@ def _path_probe_command() -> list[str]:
 # Standard install prefixes merged into PATH even when the login-shell probe
 # fails (slow shell config hits the 3s timeout, GUI launches get launchd's
 # minimal PATH) — otherwise brew itself is invisible to detection and installs.
-_FALLBACK_PATH_DIRS = ("/opt/homebrew/bin", "/usr/local/bin")
+# ~/.local/bin is where vendor install scripts (aider, opencode, cursor, kimi)
+# drop their binary and export the dir from a shell rc file — invisible
+# whenever the rc probe times out, which made a just-installed CLI still read
+# as missing. Kept in this one tuple so tests can disable every fallback at once.
+_FALLBACK_PATH_DIRS = (
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    os.path.expanduser("~/.local/bin"),
+)
 
 
 def _refresh_path_from_login_shell() -> None:
@@ -665,25 +686,51 @@ def build_cli_health(dep_statuses: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def detect_ollama_models() -> list[str]:
-    """Return installed Ollama model names (empty if ollama missing/unreachable)."""
+def detect_ollama_status() -> dict[str, Any]:
+    """Installed Ollama models plus whether the daemon actually answered.
+
+    `ollama list` exits non-zero when the service is down — indistinguishable
+    from "no models installed" if only the parsed list is returned, which left
+    the wizard telling users to pull a model that could never succeed.
+    """
     if shutil.which("ollama") is None:
-        return []
+        return {"models": [], "reachable": False, "detail": "ollama not installed"}
     try:
         proc = subprocess.run(
             ["ollama", "list"], capture_output=True, text=True, timeout=8
         )
-    except (subprocess.SubprocessError, OSError):
-        return []
+    except (subprocess.SubprocessError, OSError) as exc:
+        return {"models": [], "reachable": False, "detail": str(exc) or "ollama list failed"}
+    if proc.returncode != 0:
+        detail = ((proc.stderr or "") + (proc.stdout or "")).strip()
+        return {
+            "models": [],
+            "reachable": False,
+            "detail": detail or f"exit code {proc.returncode}",
+        }
     models: list[str] = []
-    for line in proc.stdout.splitlines()[1:]:  # skip header
+    for line in (proc.stdout or "").splitlines()[1:]:  # skip header
         name = line.split()[0] if line.split() else ""
         if name:
             models.append(name)
-    return models
+    return {"models": models, "reachable": True, "detail": ""}
 
 
-def compute_gate(dep_statuses: list[dict[str, Any]], models: list[str]) -> dict[str, Any]:
+def detect_ollama_models() -> list[str]:
+    """Return installed Ollama model names (empty if ollama missing/unreachable)."""
+    return list(detect_ollama_status()["models"])
+
+
+def ollama_reachable() -> bool:
+    """True when the ollama daemon answered a list request."""
+    return bool(detect_ollama_status()["reachable"])
+
+
+def compute_gate(
+    dep_statuses: list[dict[str, Any]],
+    models: list[str],
+    ollama_service_up: bool = True,
+) -> dict[str, Any]:
     """Compute the hard-block gate from detected statuses."""
     by_group: dict[str, list[dict[str, Any]]] = {"foundation": [], "agent_cli": [], "analyzer": []}
     for s in dep_statuses:
@@ -692,7 +739,9 @@ def compute_gate(dep_statuses: list[dict[str, Any]], models: list[str]) -> dict[
     foundation_ready = all(s["status"] == "ok" for s in by_group["foundation"] if not s.get("optional"))
     has_any_cli = any(s["status"] == "ok" for s in by_group["agent_cli"])
     ollama_ok = any(s["id"] == "ollama" and s["status"] == "ok" for s in by_group["analyzer"])
-    analyzer_ready = ollama_ok and len(models) > 0
+    # Installed but not serving is its own state: pulling a model would fail.
+    ollama_service_ready = ollama_ok and ollama_service_up
+    analyzer_ready = ollama_service_ready and len(models) > 0
 
     # Analyzer (ollama + a multi-GB local model) is optional — it must not
     # hard-block first use. analyzer_ready is still reported so the wizard
@@ -703,6 +752,7 @@ def compute_gate(dep_statuses: list[dict[str, Any]], models: list[str]) -> dict[
         "has_any_cli": has_any_cli,
         "analyzer_ready": analyzer_ready,
         "ollama_ok": ollama_ok,
+        "ollama_service_up": ollama_service_ready,
         "has_model": len(models) > 0,
         "all_required_ready": all_required_ready,
         "suggested_model": _SUGGESTED_MODEL,
@@ -720,13 +770,15 @@ def get_status() -> dict[str, Any]:
     with ThreadPoolExecutor(
         max_workers=min(len(DEPS) + 1, 8), thread_name_prefix="dep-probe"
     ) as pool:
-        models_future = pool.submit(detect_ollama_models)
+        models_future = pool.submit(detect_ollama_status)
         deps = list(pool.map(detect_dep, DEPS))
-        models = models_future.result()
+        ollama = models_future.result()
+    models = list(ollama["models"])
     return {
         "deps": deps,
         "models": models,
-        "gate": compute_gate(deps, models),
+        "ollama_detail": ollama["detail"],
+        "gate": compute_gate(deps, models, bool(ollama["reachable"])),
         "model_catalog": MODEL_CATALOG,
         "cli_health": build_cli_health(deps),
     }
@@ -765,6 +817,35 @@ def maintenance_command(dep_id: str, action: str) -> dict[str, Any]:
 
 
 # ── Install (whitelist-driven) ────────────────────────────────────────────────
+INSTALL_TIMEOUT_S = 900
+
+
+def missing_requirements(dep: Dep) -> list[str]:
+    """Bootstrap binaries `dep.install_cmd` needs that are not on PATH."""
+    return [name for name in dep.requires_binaries if shutil.which(name) is None]
+
+
+def _terminate_process_group(proc: subprocess.Popen[str]) -> None:
+    """Kill an install's whole process group, not just the `/bin/sh` wrapper.
+
+    `shell=True` puts brew/curl one level below sh, so killing the direct child
+    leaves them running AND keeps the inherited pipes open — the reaping call
+    would then block far past the timeout it was supposed to enforce.
+    """
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(os.getpgid(proc.pid), sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            proc.kill()
+        try:
+            proc.communicate(timeout=5)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+        except (ValueError, OSError):
+            return
+
+
 def install_dep(dep_id: str) -> dict[str, Any]:
     """Install a dep by id. Only ids in the registry whitelist are accepted.
 
@@ -777,29 +858,92 @@ def install_dep(dep_id: str) -> dict[str, Any]:
         return {"ok": False, "error": f"unknown dependency: {dep_id!r}"}
     if not dep.install_cmd:
         return {"ok": False, "error": "no install command for this dependency"}
+    # Bootstrap gate: `brew install …` on a Mac without Homebrew only ever
+    # produced a bare exit 127. Name the real blocker instead.
+    missing = missing_requirements(dep)
+    if missing:
+        return {
+            "ok": False,
+            "error": (
+                f"{', '.join(missing)} is required to install {dep.label}. "
+                f"Install {missing[0]} first, then retry."
+            ),
+            "missing_requirements": missing,
+            "command": dep.install_cmd,
+        }
     if dep.needs_terminal:
         # Caller (frontend → main process) opens Terminal.app with this command.
         return {"ok": True, "needs_terminal": True, "command": dep.install_cmd}
+    # start_new_session puts the shell and its children in their own process
+    # group so a timeout can reap the whole tree (see _terminate_process_group).
     try:
-        proc = subprocess.run(
-            dep.install_cmd, shell=True, capture_output=True, text=True, timeout=900
+        proc = subprocess.Popen(
+            dep.install_cmd,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "install timed out"}
     except OSError as exc:
-        return {"ok": False, "error": str(exc)}
-    output = (proc.stdout or "") + (proc.stderr or "")
-    return {"ok": proc.returncode == 0, "output": output, "command": dep.install_cmd}
+        return {"ok": False, "error": str(exc), "command": dep.install_cmd}
+    try:
+        stdout, stderr = proc.communicate(timeout=INSTALL_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        _terminate_process_group(proc)
+        return {
+            "ok": False,
+            "error": f"install timed out after {INSTALL_TIMEOUT_S}s",
+            "command": dep.install_cmd,
+        }
+    output = (stdout or "") + (stderr or "")
+    if proc.returncode == 0:
+        return {"ok": True, "output": output, "command": dep.install_cmd}
+    # The frontend reports `error`; returning only `output` here is what made
+    # every failed install read as "unknown".
+    return {
+        "ok": False,
+        "error": output.strip() or f"exit code {proc.returncode}",
+        "output": output,
+        "command": dep.install_cmd,
+    }
+
+
+# Ollama model names may be namespaced (`hf.co/user/repo`, `library/llama3`),
+# so '/' is allowed; the charset still excludes every shell metacharacter, and
+# leading '-' / '..' are rejected so the name can't act as a flag or traverse.
+_MODEL_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/\-]*")
 
 
 def pull_model(model: str) -> dict[str, Any]:
     """Pull an Ollama model. The model name is constrained to a safe charset."""
-    if not re.fullmatch(r"[A-Za-z0-9._:\-]+", model or ""):
+    name = model or ""
+    if not _MODEL_NAME_RE.fullmatch(name) or ".." in name:
         return {"ok": False, "error": "invalid model name"}
     if shutil.which("ollama") is None:
         return {"ok": False, "error": "ollama not installed"}
+    if not ollama_reachable():
+        return {
+            "ok": False,
+            "error": "Ollama is installed but its service is not running.",
+            "needs_service": True,
+        }
     # Long download — hand to an external Terminal so progress is visible.
-    return {"ok": True, "needs_terminal": True, "command": f"ollama pull {model}"}
+    return {"ok": True, "needs_terminal": True, "command": f"ollama pull {name}"}
+
+
+# Installing the formula does not start the service; without this the model
+# list stays empty forever and `ollama pull` fails with a connection error.
+OLLAMA_SERVICE_CMD = "brew services start ollama"
+
+
+def start_ollama_service() -> dict[str, Any]:
+    """Hand the official service-start command to an external Terminal."""
+    if shutil.which("ollama") is None:
+        return {"ok": False, "error": "ollama not installed"}
+    if shutil.which("brew") is None:
+        return {"ok": False, "error": "brew is required to manage the ollama service"}
+    return {"ok": True, "needs_terminal": True, "command": OLLAMA_SERVICE_CMD}
 
 
 # ── Completion flag ───────────────────────────────────────────────────────────

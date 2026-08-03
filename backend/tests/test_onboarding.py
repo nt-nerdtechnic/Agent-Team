@@ -187,6 +187,201 @@ def test_pull_model_rejects_bad_name() -> None:
     assert ob.pull_model("evil; rm -rf /")["ok"] is False
 
 
+# ── install: failure reporting + bootstrap gate + timeout reaping ─────────────
+def _fake_popen(returncode: int, stdout: str = "", stderr: str = "", *, timeout: bool = False):
+    """A Popen stand-in; `timeout=True` makes the FIRST communicate() time out."""
+    class _P:
+        pid = 424242
+
+        def __init__(self, *_a: object, **_k: object) -> None:
+            self.returncode = returncode
+            self._timeout = timeout
+            self.killed = False
+
+        def communicate(self, timeout: float | None = None):  # noqa: ANN202
+            if self._timeout:
+                self._timeout = False
+                raise subprocess.TimeoutExpired(cmd="install", timeout=timeout or 0)
+            return stdout, stderr
+
+        def kill(self) -> None:
+            self.killed = True
+
+    return _P
+
+
+def _brew_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ob.shutil, "which", lambda name: f"/opt/homebrew/bin/{name}")
+
+
+def test_install_failure_surfaces_output_as_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The frontend renders `error`; returning only `output` on failure is what
+    # made every failed install read as "installation failed: unknown".
+    _brew_present(monkeypatch)
+    monkeypatch.setattr(
+        ob.subprocess, "Popen", _fake_popen(1, "", "Error: node: no bottle available")
+    )
+    r = ob.install_dep("node")
+    assert r["ok"] is False
+    assert "no bottle available" in r["error"]
+    assert "no bottle available" in r["output"]
+
+
+def test_install_failure_without_output_still_names_the_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _brew_present(monkeypatch)
+    monkeypatch.setattr(ob.subprocess, "Popen", _fake_popen(127, "", ""))
+    r = ob.install_dep("node")
+    assert r["ok"] is False and "127" in r["error"]
+
+
+def test_install_success_returns_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    _brew_present(monkeypatch)
+    monkeypatch.setattr(ob.subprocess, "Popen", _fake_popen(0, "==> Pouring node\n"))
+    r = ob.install_dep("node")
+    assert r["ok"] is True and "Pouring" in r["output"]
+
+
+def test_install_blocked_when_bootstrap_binary_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Fresh Mac without Homebrew: `brew install node` only ever produced a bare
+    # exit 127, so the wizard has to name the real blocker instead of running it.
+    monkeypatch.setattr(ob.shutil, "which", lambda _x: None)
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise AssertionError("must not shell out when a requirement is missing")
+
+    monkeypatch.setattr(ob.subprocess, "Popen", boom)
+    r = ob.install_dep("node")
+    assert r["ok"] is False
+    assert r["missing_requirements"] == ["brew"]
+    assert "brew" in r["error"]
+
+
+def test_install_bootstrap_gate_precedes_the_terminal_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # claude is needs_terminal: without the gate the app reported success while
+    # the terminal it opened just printed "npm: command not found".
+    monkeypatch.setattr(ob.shutil, "which", lambda _x: None)
+    r = ob.install_dep("claude")
+    assert r["ok"] is False
+    assert r["missing_requirements"] == ["npm"]
+    assert "needs_terminal" not in r
+
+
+def test_every_brew_or_npm_install_declares_its_bootstrap_binary() -> None:
+    for dep in ob.DEPS:
+        if dep.install_cmd.startswith("brew "):
+            assert "brew" in dep.requires_binaries, dep.id
+        if dep.install_cmd.startswith("npm "):
+            assert "npm" in dep.requires_binaries, dep.id
+
+
+def test_install_timeout_reaps_the_whole_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # shell=True puts brew one level below /bin/sh: killing only the direct
+    # child leaves it running and keeps the inherited pipes open.
+    signals: list[int] = []
+    _brew_present(monkeypatch)
+    monkeypatch.setattr(ob.subprocess, "Popen", _fake_popen(0, timeout=True))
+    monkeypatch.setattr(ob.os, "getpgid", lambda _pid: 424242)
+    monkeypatch.setattr(ob.os, "killpg", lambda _pgid, sig: signals.append(sig))
+    r = ob.install_dep("node")
+    assert r["ok"] is False and "timed out" in r["error"]
+    assert signals[:1] == [ob.signal.SIGTERM]
+
+
+# ── ollama: installed ≠ serving ───────────────────────────────────────────────
+def _ollama_list(returncode: int, stdout: str = "", stderr: str = ""):
+    def run(*a: object, **_k: object):
+        return subprocess.CompletedProcess(a[0] if a else [], returncode, stdout, stderr)
+    return run
+
+
+def test_ollama_status_separates_service_down_from_no_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `ollama list` fails when the daemon is down, which used to be reported
+    # identically to "no models installed".
+    monkeypatch.setattr(ob.shutil, "which", lambda _x: "/opt/homebrew/bin/ollama")
+    monkeypatch.setattr(
+        ob.subprocess, "run", _ollama_list(1, "", "could not connect to ollama app")
+    )
+    r = ob.detect_ollama_status()
+    assert r["reachable"] is False and r["models"] == []
+    assert "connect" in r["detail"]
+
+
+def test_ollama_status_lists_models_when_reachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ob.shutil, "which", lambda _x: "/opt/homebrew/bin/ollama")
+    monkeypatch.setattr(
+        ob.subprocess, "run", _ollama_list(0, "NAME\tID\nqwen2.5-coder:7b\tabc\n")
+    )
+    r = ob.detect_ollama_status()
+    assert r["reachable"] is True and r["models"] == ["qwen2.5-coder:7b"]
+    assert ob.detect_ollama_models() == ["qwen2.5-coder:7b"]
+
+
+def test_gate_reports_analyzer_blocked_when_service_is_down() -> None:
+    deps = [{"id": "ollama", "group": "analyzer", "status": "ok", "optional": False}]
+    gate = ob.compute_gate(deps, ["qwen2.5-coder:7b"], False)
+    assert gate["ollama_ok"] is True
+    assert gate["ollama_service_up"] is False
+    assert gate["analyzer_ready"] is False
+
+
+def test_pull_model_allows_namespaced_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ob.shutil, "which", lambda _x: "/opt/homebrew/bin/ollama")
+    monkeypatch.setattr(ob, "ollama_reachable", lambda: True)
+    r = ob.pull_model("hf.co/user/repo:q4")
+    assert r["ok"] is True and r["command"].endswith("hf.co/user/repo:q4")
+
+
+def test_pull_model_rejects_traversal_flags_and_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ob.shutil, "which", lambda _x: "/opt/homebrew/bin/ollama")
+    monkeypatch.setattr(ob, "ollama_reachable", lambda: True)
+    assert ob.pull_model("../../etc/passwd")["ok"] is False
+    assert ob.pull_model("-rf")["ok"] is False
+    assert ob.pull_model("")["ok"] is False
+
+
+def test_pull_model_blocked_while_the_service_is_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ob.shutil, "which", lambda _x: "/opt/homebrew/bin/ollama")
+    monkeypatch.setattr(ob, "ollama_reachable", lambda: False)
+    r = ob.pull_model("qwen2.5-coder:7b")
+    assert r["ok"] is False and r["needs_service"] is True
+
+
+def test_start_ollama_service_hands_back_the_official_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ob.shutil, "which", lambda name: f"/opt/homebrew/bin/{name}")
+    assert ob.start_ollama_service() == {
+        "ok": True,
+        "needs_terminal": True,
+        "command": "brew services start ollama",
+    }
+
+
+def test_start_ollama_service_requires_ollama(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ob.shutil, "which", lambda _x: None)
+    assert ob.start_ollama_service()["ok"] is False
+
+
+def test_local_bin_is_a_path_fallback() -> None:
+    # aider / opencode / cursor / kimi install scripts land in ~/.local/bin and
+    # export it from a shell rc file the 3s probe can miss.
+    assert any(p.endswith("/.local/bin") for p in ob._FALLBACK_PATH_DIRS)
+
+
 # ── completion flag ───────────────────────────────────────────────────────────
 def _patch_flag_paths(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path

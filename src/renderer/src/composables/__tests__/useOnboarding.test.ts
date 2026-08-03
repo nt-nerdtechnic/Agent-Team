@@ -37,6 +37,7 @@ function status(opts: { found?: boolean; cli?: boolean; ollama?: boolean; models
       has_any_cli: cli,
       analyzer_ready: analyzer,
       ollama_ok: ollama,
+      ollama_service_up: ollama,
       has_model: models.length > 0,
       all_required_ready: all,
       suggested_model: 'qwen2.5-coder',
@@ -109,6 +110,128 @@ describe('useOnboarding', () => {
     // Backend caps inline installs at 900s; the default 10s WS timeout would
     // abort every real install mid-download.
     expect(sent?.timeoutMs).toBeGreaterThan(900_000)
+    scope.stop()
+  })
+
+  // ── install failure reporting ───────────────────────────────────────────────
+  function stubTerminal(result: { ok: boolean; error?: string }): string[] {
+    const calls: string[] = []
+    ;(globalThis as unknown as {
+      window: { agentTeam: { openTerminal: (c: string) => Promise<{ ok: boolean; error?: string }> } }
+    }).window = {
+      agentTeam: { openTerminal: (c: string) => { calls.push(c); return Promise.resolve(result) } },
+    }
+    return calls
+  }
+
+  it('surfaces the backend failure text instead of "unknown"', async () => {
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', status({ found: false }))
+    mock.setResponse('onboarding.install', { ok: false, error: 'Error: no bottle available' })
+    const { result, scope } = withScope(() => useOnboarding(mock.backend))
+    await result.refresh()
+    await result.install(result.foundationDeps.value[0])
+    await flush()
+    const log = result.logLines.value.join('\n')
+    expect(log).toContain('no bottle available')
+    expect(log).not.toContain('unknown')
+    result.dispose()
+    scope.stop()
+  })
+
+  it('falls back to the captured output when the failure carries no error field', async () => {
+    // Guards the frontend half of the contract: the backend used to report a
+    // non-zero install through `output` alone, which rendered as "unknown".
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', status({ found: false }))
+    mock.setResponse('onboarding.install', { ok: false, output: 'sh: brew: command not found' })
+    const { result, scope } = withScope(() => useOnboarding(mock.backend))
+    await result.refresh()
+    await result.install(result.foundationDeps.value[0])
+    await flush()
+    expect(result.logLines.value.join('\n')).toContain('brew: command not found')
+    result.dispose()
+    scope.stop()
+  })
+
+  it('reports a failed terminal handoff instead of claiming one opened', async () => {
+    // TCC automation is granted in a LATER wizard step, so this is the common
+    // first-run path — it used to log success while nothing happened.
+    stubTerminal({ ok: false, error: 'not authorised' })
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', status({ cli: false }))
+    mock.setResponse('onboarding.install', { ok: true, needs_terminal: true, command: 'npm i -g x' })
+    const { result, scope } = withScope(() => useOnboarding(mock.backend))
+    await result.refresh()
+    await result.install(result.cliDeps.value[0])
+    await flush()
+    const log = result.logLines.value.join('\n')
+    expect(log).not.toContain('Opened in external terminal')
+    expect(log).toContain('not authorised')
+    expect(log).toContain('npm i -g x') // the command to run by hand
+    result.dispose()
+    scope.stop()
+  })
+
+  it('warns when an install reports success but detection still fails', async () => {
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', status({ found: false }))
+    mock.setResponse('onboarding.install', { ok: true, output: 'installed' })
+    const { result, scope } = withScope(() => useOnboarding(mock.backend))
+    await result.refresh()
+    await result.install(result.foundationDeps.value[0])
+    await flush()
+    expect(result.logLines.value.join('\n')).toContain('still not detected')
+    result.dispose()
+    scope.stop()
+  })
+
+  it('skips the immediate re-detect when the install moved to a terminal', async () => {
+    // That detection cannot possibly pass yet; the watcher polls for it instead.
+    stubTerminal({ ok: true })
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', status({ cli: false }))
+    mock.setResponse('onboarding.install', { ok: true, needs_terminal: true, command: 'npm i -g x' })
+    const { result, scope } = withScope(() => useOnboarding(mock.backend))
+    await result.refresh()
+    await result.install(result.cliDeps.value[0])
+    await flush()
+    expect(mock.sent.filter((s) => s.type === 'onboarding.status')).toHaveLength(1)
+    expect(result.watching.value).toBe('claude')
+    result.dispose()
+    expect(result.watching.value).toBe('')
+    scope.stop()
+  })
+
+  it('ignores a second model pull while one is in flight', async () => {
+    stubTerminal({ ok: true })
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', status({}))
+    mock.setResponse('onboarding.pull_model', { ok: true, needs_terminal: true, command: 'ollama pull a' })
+    const { result, scope } = withScope(() => useOnboarding(mock.backend))
+    await result.refresh()
+    const first = result.pullModel('a')
+    const second = await result.pullModel('b')
+    await first
+    await flush()
+    expect(second).toBeNull()
+    result.dispose()
+    scope.stop()
+  })
+
+  it('startOllamaService opens the official service command', async () => {
+    const calls = stubTerminal({ ok: true })
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', status({}))
+    mock.setResponse('onboarding.start_ollama', {
+      ok: true, needs_terminal: true, command: 'brew services start ollama',
+    })
+    const { result, scope } = withScope(() => useOnboarding(mock.backend))
+    await result.refresh()
+    await result.startOllamaService()
+    await flush()
+    expect(calls).toContain('brew services start ollama')
+    result.dispose()
     scope.stop()
   })
 

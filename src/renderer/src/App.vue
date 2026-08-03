@@ -254,9 +254,19 @@ const cliHealthGuide = ref<CliHealthStatus | null>(null)
 // "What's New" announcement to show once after updating to a version that has
 // an entry (see lib/whatsNew.ts). Null = nothing to show.
 const whatsNewEntry = ref<WhatsNewEntry | null>(null)
+// Probing 18 deps fans out over 8 workers with an 8s ceiling each, and the
+// backend serialises these on one executor — on a cold or loaded machine the
+// default 10s deadline expires, and the fail-open below then hides the wizard
+// from exactly the first-run user who needs it.
+const ONBOARDING_STATUS_TIMEOUT_MS = 45_000
+
 async function checkOnboarding(): Promise<void> {
   try {
-    const resp = await backend.send<OnboardStatus>('onboarding.status', {})
+    const resp = await backend.send<OnboardStatus>(
+      'onboarding.status',
+      {},
+      ONBOARDING_STATUS_TIMEOUT_MS
+    )
     onboardingComplete.value = resp.payload?.complete ?? true
     const health = resp.payload?.cli_health
     // One-time migration for selections made by renderer versions that stored
@@ -6927,7 +6937,14 @@ async function promptCliInstall(agentKey: string, agentLabel: string): Promise<v
       )
       const r = resp.payload
       if (r?.ok && r.needs_terminal && r.command) {
-        await window.agentTeam?.openTerminal(r.command)
+        // A silently-failed openTerminal (automation not granted) left the user
+        // waiting on a window that never appeared — report it instead.
+        const opened = await window.agentTeam?.openTerminal(r.command)
+        if (!opened?.ok) {
+          pipelineLog(
+            `❌ ${agentLabel}: could not open a terminal (${opened?.error || 'unavailable'}). Run: ${r.command}`
+          )
+        }
       } else if (!r?.ok) {
         pipelineLog(`❌ ${agentLabel} install failed: ${r?.error || resp.error?.message || 'unknown'}`)
       }
