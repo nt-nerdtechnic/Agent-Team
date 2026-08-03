@@ -1,7 +1,10 @@
 """Read and manage the machine's registered background executions.
 
 Two sources are covered: the current user's Unix ``crontab`` entries, and (on
-macOS only) the LaunchAgents installed under ``~/Library/LaunchAgents``.
+macOS only) the launchd jobs installed under ``~/Library/LaunchAgents``,
+``/Library/LaunchAgents`` and ``/Library/LaunchDaemons``. Only the first is
+manageable — the system directories are listed read-only, because changing them
+needs root, which this app never asks for.
 
 This module is a pure service layer — it knows nothing about WebSocket sessions
 and never touches app state. Every external command runs through
@@ -328,7 +331,23 @@ _NOT_LOADED_MARKERS = ("no such process", "could not find")
 
 
 def _launch_agents_dir() -> Path:
+    """The only directory this service is allowed to write to."""
     return Path(os.path.expanduser("~")) / "Library" / "LaunchAgents"
+
+
+def _system_launch_agents_dir() -> Path:
+    return Path("/Library/LaunchAgents")
+
+
+def _system_launch_daemons_dir() -> Path:
+    return Path("/Library/LaunchDaemons")
+
+
+# Scanned in this order, and the listing keeps it: the user's own jobs — the
+# ones they can act on — come first.
+SCOPE_USER = "user"
+SCOPE_SYSTEM_AGENT = "system-agent"
+SCOPE_SYSTEM_DAEMON = "system-daemon"
 
 
 def _coerce_int(value: object) -> int | None:
@@ -366,44 +385,61 @@ def _humanize_label(label: str) -> str:
 
 
 def _scan_plists() -> tuple[dict[str, dict], int]:
-    """Read ``~/Library/LaunchAgents/*.plist``; return ``({label: info}, bad)``."""
-    directory = _launch_agents_dir()
-    try:
-        paths = sorted(directory.glob("*.plist"))
-    except OSError:
-        return {}, 0
+    """Read every scanned launchd directory; return ``({plist_path: info}, bad)``.
+
+    Keyed by path, not by label: the same label legitimately appears in both the
+    user and the system directories (Google's keystone ships exactly that), and
+    those are two distinct registrations. Keying by label would silently drop
+    one of them.
+    """
     found: dict[str, dict] = {}
     unreadable = 0
-    for path in paths:
+    for directory, scope in (
+        (_launch_agents_dir(), SCOPE_USER),
+        (_system_launch_agents_dir(), SCOPE_SYSTEM_AGENT),
+        (_system_launch_daemons_dir(), SCOPE_SYSTEM_DAEMON),
+    ):
         try:
-            with open(path, "rb") as fh:
-                data = plistlib.load(fh)
-        except Exception:  # noqa: BLE001 - corrupt plists are skipped, not fatal
+            paths = sorted(directory.glob("*.plist"))
+        except OSError:
+            # A directory we cannot even list is one unreadable item, not a
+            # reason to abandon the other two.
             unreadable += 1
             continue
-        if not isinstance(data, dict):
-            unreadable += 1
-            continue
-        label = data.get("Label")
-        if not isinstance(label, str) or not label.strip():
-            label = path.stem
-        keep_alive_raw = data.get("KeepAlive")
-        if isinstance(keep_alive_raw, dict):
-            keep_alive: bool | None = True
-        elif isinstance(keep_alive_raw, bool):
-            keep_alive = keep_alive_raw
-        else:
-            keep_alive = None
-        run_at_load = data.get("RunAtLoad")
-        comment = data.get("Comment")
-        found[label] = {
-            "plist_path": str(path),
-            "keep_alive": keep_alive,
-            "run_at_load": run_at_load if isinstance(run_at_load, bool) else None,
-            "start_interval": _coerce_int(data.get("StartInterval")),
-            "start_calendar": _normalize_calendar(data.get("StartCalendarInterval")),
-            "comment": comment.strip() if isinstance(comment, str) and comment.strip() else None,
-        }
+        for path in paths:
+            try:
+                with open(path, "rb") as fh:
+                    data = plistlib.load(fh)
+            except Exception:  # noqa: BLE001 - corrupt plists are skipped, not fatal
+                unreadable += 1
+                continue
+            if not isinstance(data, dict):
+                unreadable += 1
+                continue
+            label = data.get("Label")
+            if not isinstance(label, str) or not label.strip():
+                label = path.stem
+            keep_alive_raw = data.get("KeepAlive")
+            if isinstance(keep_alive_raw, dict):
+                keep_alive: bool | None = True
+            elif isinstance(keep_alive_raw, bool):
+                keep_alive = keep_alive_raw
+            else:
+                keep_alive = None
+            run_at_load = data.get("RunAtLoad")
+            comment = data.get("Comment")
+            found[str(path)] = {
+                "label": label,
+                "scope": scope,
+                "plist_path": str(path),
+                "keep_alive": keep_alive,
+                "run_at_load": run_at_load if isinstance(run_at_load, bool) else None,
+                "start_interval": _coerce_int(data.get("StartInterval")),
+                "start_calendar": _normalize_calendar(data.get("StartCalendarInterval")),
+                "comment": comment.strip()
+                if isinstance(comment, str) and comment.strip()
+                else None,
+            }
     return found, unreadable
 
 
@@ -436,7 +472,7 @@ def parse_launchctl_list(text: str) -> dict[str, tuple[int | None, int | None]]:
 
 
 async def list_launch_agents() -> dict:
-    """List LaunchAgents: the union of installed plists and loaded services."""
+    """List launchd jobs: installed plists joined with ``launchctl list`` state."""
     if sys.platform != "darwin":
         return {"supported": False, "entries": [], "unreadable": 0, "error": None}
     plists, unreadable = await asyncio.to_thread(_scan_plists)
@@ -450,12 +486,24 @@ async def list_launch_agents() -> dict:
 
     # Only plist-backed agents. launchctl also reports hundreds of transient
     # `application.com.apple.*` GUI registrations that have no plist here and
-    # therefore no action the user can take — listing them buries the ~dozen
-    # agents the Tasker panel exists to manage.
+    # therefore nothing to show about them — listing them buries the ~20 real
+    # registrations the Tasker panel exists to surface.
     entries: list[dict] = []
-    for label in sorted(plists):
-        info = plists[label]
-        pid, last_exit_code = loaded.get(label, (None, None))
+    # Insertion order = scan order: user jobs first, then the two system dirs.
+    for info in plists.values():
+        label = info["label"]
+        scope = info["scope"]
+        # `launchctl list` without sudo only reports the caller's gui domain, so
+        # a daemon missing from it is unknown, not stopped. Reporting it as
+        # stopped would be a confident lie about someone else's machine.
+        runtime_known = scope != SCOPE_SYSTEM_DAEMON or label in loaded
+        if runtime_known:
+            pid, last_exit_code = loaded.get(label, (None, None))
+            is_loaded: bool | None = label in loaded
+            running: bool | None = pid is not None
+        else:
+            pid = last_exit_code = None
+            is_loaded = running = None
         comment = info.get("comment")
         entries.append(
             {
@@ -463,8 +511,13 @@ async def list_launch_agents() -> dict:
                 "name": comment or _humanize_label(label),
                 "plist_path": info["plist_path"],
                 "plist_exists": True,
-                "loaded": label in loaded,
-                "running": pid is not None,
+                "scope": scope,
+                # Only the user's own LaunchAgents can be changed without root,
+                # and the UI hides its action buttons on everything else.
+                "managed": scope == SCOPE_USER,
+                "runtime_known": runtime_known,
+                "loaded": is_loaded,
+                "running": running,
                 "pid": pid,
                 "last_exit_code": last_exit_code,
                 "keep_alive": info["keep_alive"],
@@ -483,14 +536,26 @@ async def list_launch_agents() -> dict:
 
 
 async def _resolve_plist_path(label: str) -> tuple[Path, bool]:
-    """Validate ``label`` and locate its plist; return ``(path, exists)``."""
+    """Validate ``label`` and locate its plist; return ``(path, exists)``.
+
+    Refuses anything outside ``~/Library/LaunchAgents``: the system directories
+    are listed for visibility only, and touching them would need root.
+    """
     if sys.platform != "darwin":
         raise ExecutionsError("LaunchAgents are only available on macOS")
     if not _LABEL_RE.match(label or ""):
         raise ExecutionsError(f"invalid LaunchAgent label: {label!r}")
     # Scanning reads and parses every plist; keep it off the event loop.
     plists, _unreadable = await asyncio.to_thread(_scan_plists)
-    info = plists.get(label)
+    info = next(
+        (i for i in plists.values() if i["label"] == label and i["scope"] == SCOPE_USER),
+        None,
+    )
+    if info is None and any(i["label"] == label for i in plists.values()):
+        raise ExecutionsError(
+            f"{label} is a system-level launchd job: it is read-only here "
+            "(changing it requires root)"
+        )
     path = Path(info["plist_path"]) if info else _launch_agents_dir() / f"{label}.plist"
     directory = os.path.realpath(_launch_agents_dir())
     resolved = os.path.realpath(path)

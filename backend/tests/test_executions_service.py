@@ -1,6 +1,8 @@
 """Parser and write-back guard tests for the executions service.
 
-Every test stubs ``_run`` — the real crontab/launchctl must never be touched.
+Every test stubs ``_run`` — the real crontab/launchctl must never be touched —
+and the fixture below redirects all three launchd directories into tmp_path, so
+no test can read (let alone write) the machine's real plists.
 """
 
 from __future__ import annotations
@@ -10,6 +12,35 @@ import plistlib
 import pytest
 
 from agent_team_backend import executions_service as svc
+
+
+@pytest.fixture(autouse=True)
+def isolate_launchd_dirs(tmp_path_factory, monkeypatch):
+    """Point every scanned directory at an empty tmp dir.
+
+    Autouse so a test that forgets one of the three still cannot reach
+    ``~/Library/LaunchAgents``, ``/Library/LaunchAgents`` or
+    ``/Library/LaunchDaemons``. Tests that need content override the ones they
+    care about — their own ``monkeypatch`` calls run after this fixture's.
+    """
+    root = tmp_path_factory.mktemp("launchd-isolation")
+    monkeypatch.setattr(svc, "_launch_agents_dir", lambda: root / "user")
+    monkeypatch.setattr(svc, "_system_launch_agents_dir", lambda: root / "system-agents")
+    monkeypatch.setattr(svc, "_system_launch_daemons_dir", lambda: root / "system-daemons")
+    return root
+
+
+def _scoped_dirs(monkeypatch, tmp_path):
+    """Create and install the three launchd directories under ``tmp_path``."""
+    user = tmp_path / "user"
+    system_agents = tmp_path / "system-agents"
+    system_daemons = tmp_path / "system-daemons"
+    for directory in (user, system_agents, system_daemons):
+        directory.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(svc, "_launch_agents_dir", lambda: user)
+    monkeypatch.setattr(svc, "_system_launch_agents_dir", lambda: system_agents)
+    monkeypatch.setattr(svc, "_system_launch_daemons_dir", lambda: system_daemons)
+    return user, system_agents, system_daemons
 
 
 def _stub_run(monkeypatch, responses):
@@ -218,7 +249,8 @@ def test_binary_plist_is_parsed(tmp_path, monkeypatch):
         )
     found, unreadable = svc._scan_plists()
     assert unreadable == 0
-    info = found["local.nightly.index"]
+    info = found[str(target)]
+    assert info["label"] == "local.nightly.index"
     assert info["keep_alive"] is True
     assert info["run_at_load"] is True
     assert info["start_calendar"] == [{"Hour": 3, "Minute": 0}]
@@ -233,7 +265,7 @@ def test_unreadable_plist_is_counted_not_fatal(tmp_path, monkeypatch):
     )
     found, unreadable = svc._scan_plists()
     assert unreadable == 1
-    assert list(found) == ["com.ok"]
+    assert [info["label"] for info in found.values()] == ["com.ok"]
 
 
 def test_start_calendar_list_is_normalized(tmp_path, monkeypatch):
@@ -247,7 +279,7 @@ def test_start_calendar_list_is_normalized(tmp_path, monkeypatch):
         )
     )
     found, _ = svc._scan_plists()
-    assert found["com.multi"]["start_calendar"] == [
+    assert found[str(tmp_path / "a.plist")]["start_calendar"] == [
         {"Hour": 1},
         {"Minute": 30, "Weekday": 2},
     ]
@@ -340,6 +372,143 @@ async def test_list_launch_agents_unions_both_sources(tmp_path, monkeypatch):
     # `application.com.apple.*` registrations that have no plist and no action.
     assert "com.apple.only.in.launchctl" not in by_label
     assert all(e["plist_exists"] for e in result["entries"])
+
+
+# ── system-level launchd jobs (read-only) ────────────────────────────────────
+
+def _launchctl(listing: str):
+    return {"launchctl": (0, listing, "")}
+
+
+async def test_scan_covers_all_three_directories_with_scopes(tmp_path, monkeypatch):
+    monkeypatch.setattr(svc.sys, "platform", "darwin")
+    user, system_agents, system_daemons = _scoped_dirs(monkeypatch, tmp_path)
+    (user / "u.plist").write_bytes(plistlib.dumps({"Label": "local.user.job"}))
+    (system_agents / "s.plist").write_bytes(plistlib.dumps({"Label": "com.vendor.agent"}))
+    (system_daemons / "d.plist").write_bytes(plistlib.dumps({"Label": "com.vendor.daemon"}))
+    _stub_run(monkeypatch, _launchctl("PID\tStatus\tLabel\n"))
+
+    result = await svc.list_launch_agents()
+    by_label = {e["label"]: e for e in result["entries"]}
+    assert by_label["local.user.job"]["scope"] == "user"
+    assert by_label["com.vendor.agent"]["scope"] == "system-agent"
+    assert by_label["com.vendor.daemon"]["scope"] == "system-daemon"
+    # User jobs — the only actionable ones — are listed first.
+    assert result["entries"][0]["label"] == "local.user.job"
+
+
+async def test_same_label_in_user_and_system_stays_two_rows(tmp_path, monkeypatch):
+    """Google's keystone really does install the same label in both places."""
+    monkeypatch.setattr(svc.sys, "platform", "darwin")
+    user, system_agents, _daemons = _scoped_dirs(monkeypatch, tmp_path)
+    label = "com.google.keystone.agent"
+    (user / f"{label}.plist").write_bytes(plistlib.dumps({"Label": label}))
+    (system_agents / f"{label}.plist").write_bytes(plistlib.dumps({"Label": label}))
+    _stub_run(monkeypatch, _launchctl("PID\tStatus\tLabel\n"))
+
+    result = await svc.list_launch_agents()
+    rows = [e for e in result["entries"] if e["label"] == label]
+    assert len(rows) == 2
+    assert sorted(e["scope"] for e in rows) == ["system-agent", "user"]
+    assert {e["plist_path"] for e in rows} == {
+        str(user / f"{label}.plist"),
+        str(system_agents / f"{label}.plist"),
+    }
+
+
+async def test_system_daemon_runtime_is_unknown_not_stopped(tmp_path, monkeypatch):
+    """`launchctl list` without sudo cannot see the system domain at all.
+
+    Reporting those daemons as "not running" would be a confident lie, so every
+    runtime field has to come back as None.
+    """
+    monkeypatch.setattr(svc.sys, "platform", "darwin")
+    _user, _agents, system_daemons = _scoped_dirs(monkeypatch, tmp_path)
+    (system_daemons / "d.plist").write_bytes(plistlib.dumps({"Label": "com.vendor.daemon"}))
+    _stub_run(monkeypatch, _launchctl("PID\tStatus\tLabel\n4182\t0\tcom.other\n"))
+
+    entry = (await svc.list_launch_agents())["entries"][0]
+    assert entry["runtime_known"] is False
+    assert entry["loaded"] is None
+    assert entry["running"] is None
+    assert entry["pid"] is None
+    assert entry["last_exit_code"] is None
+
+
+async def test_system_agent_state_is_known_from_launchctl(tmp_path, monkeypatch):
+    """/Library/LaunchAgents is bootstrapped into gui/$UID, so it is visible."""
+    monkeypatch.setattr(svc.sys, "platform", "darwin")
+    _user, system_agents, system_daemons = _scoped_dirs(monkeypatch, tmp_path)
+    (system_agents / "s.plist").write_bytes(plistlib.dumps({"Label": "com.vendor.agent"}))
+    # A daemon that *is* in the listing is knowable too.
+    (system_daemons / "d.plist").write_bytes(plistlib.dumps({"Label": "com.vendor.seen"}))
+    _stub_run(
+        monkeypatch,
+        _launchctl(
+            "PID\tStatus\tLabel\n1234\t0\tcom.vendor.agent\n-\t78\tcom.vendor.seen\n"
+        ),
+    )
+
+    by_label = {e["label"]: e for e in (await svc.list_launch_agents())["entries"]}
+    agent = by_label["com.vendor.agent"]
+    assert agent["runtime_known"] is True
+    assert agent["loaded"] is True
+    assert agent["running"] is True
+    assert agent["pid"] == 1234
+    seen = by_label["com.vendor.seen"]
+    assert seen["runtime_known"] is True
+    assert seen["running"] is False
+    assert seen["last_exit_code"] == 78
+
+
+async def test_only_user_entries_are_managed(tmp_path, monkeypatch):
+    monkeypatch.setattr(svc.sys, "platform", "darwin")
+    user, system_agents, system_daemons = _scoped_dirs(monkeypatch, tmp_path)
+    (user / "u.plist").write_bytes(plistlib.dumps({"Label": "local.user.job"}))
+    (system_agents / "s.plist").write_bytes(plistlib.dumps({"Label": "com.vendor.agent"}))
+    (system_daemons / "d.plist").write_bytes(plistlib.dumps({"Label": "com.vendor.daemon"}))
+    _stub_run(monkeypatch, _launchctl("PID\tStatus\tLabel\n"))
+
+    managed = {e["label"]: e["managed"] for e in (await svc.list_launch_agents())["entries"]}
+    assert managed == {
+        "local.user.job": True,
+        "com.vendor.agent": False,
+        "com.vendor.daemon": False,
+    }
+
+
+@pytest.mark.parametrize("directory", ["system-agents", "system-daemons"])
+async def test_system_level_jobs_cannot_be_mutated(directory, tmp_path, monkeypatch):
+    """The path containment guard must hold before any command is spawned."""
+    monkeypatch.setattr(svc.sys, "platform", "darwin")
+    dirs = dict(zip(("user", "system-agents", "system-daemons"), _scoped_dirs(monkeypatch, tmp_path)))
+    (dirs[directory] / "x.plist").write_bytes(plistlib.dumps({"Label": "com.vendor.system"}))
+    calls = _stub_run(monkeypatch, {})
+
+    with pytest.raises(svc.ExecutionsError, match="system-level"):
+        await svc.set_launch_agent_enabled("com.vendor.system", False)
+    with pytest.raises(svc.ExecutionsError, match="system-level"):
+        await svc.set_launch_agent_enabled("com.vendor.system", True)
+    with pytest.raises(svc.ExecutionsError, match="system-level"):
+        await svc.remove_launch_agent("com.vendor.system")
+    assert calls == []
+    assert (dirs[directory] / "x.plist").exists()
+
+
+async def test_a_user_job_shadowing_a_system_label_is_still_manageable(tmp_path, monkeypatch):
+    """The user's own copy is the one a mutation resolves to."""
+    monkeypatch.setattr(svc.sys, "platform", "darwin")
+    user, system_agents, _daemons = _scoped_dirs(monkeypatch, tmp_path)
+    label = "com.google.keystone.agent"
+    user_plist = user / f"{label}.plist"
+    user_plist.write_bytes(plistlib.dumps({"Label": label}))
+    system_plist = system_agents / f"{label}.plist"
+    system_plist.write_bytes(plistlib.dumps({"Label": label}))
+    _stub_run(monkeypatch, {"launchctl": (0, "", "")})
+
+    await svc.remove_launch_agent(label)
+    assert not user_plist.exists()
+    assert system_plist.exists()
 
 
 async def test_launch_agents_unsupported_off_darwin(monkeypatch):
