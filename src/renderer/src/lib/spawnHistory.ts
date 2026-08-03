@@ -6,6 +6,9 @@ export interface HistoryTitleEntry {
   paneId: string
   agentLabel: string
   customName?: string
+  /** Auto-derived title mirrored from the pane record; only a fallback —
+   *  a user-set customName always wins. */
+  autoName?: string
   agentKey?: string
   sessionId?: string
   sessionHomeId?: string
@@ -67,11 +70,14 @@ export function filterWorkspaceEntries<T extends { workspacePath?: string }>(
   return entries.filter((entry) => entryBelongsToWorkspace(entry, workspace))
 }
 
+/** Display title for a history entry, in priority order:
+ *  user rename > auto-derived name > vendor default label. */
 export function historyEntryLabel(entry: HistoryTitleEntry): string {
-  return entry.customName || entry.agentLabel
+  return entry.customName || entry.autoName || entry.agentLabel
 }
 
-/** Case-insensitive match of a history entry against a search query.
+/** Case-insensitive match of a history entry against a search query
+ *  (both name layers are searchable).
  *  An empty (or whitespace-only) query matches everything. */
 export function matchesHistorySearch(
   entry: HistoryTitleEntry & { roleKey?: string; roleLabel?: string },
@@ -79,7 +85,7 @@ export function matchesHistorySearch(
 ): boolean {
   const q = query.trim().toLowerCase()
   if (!q) return true
-  return [entry.customName, entry.agentLabel, entry.sessionId, entry.roleKey, entry.roleLabel]
+  return [entry.customName, entry.autoName, entry.agentLabel, entry.sessionId, entry.roleKey, entry.roleLabel]
     .some((field) => !!field && field.toLowerCase().includes(q))
 }
 

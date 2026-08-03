@@ -34,6 +34,13 @@ describe('spawn history titles', () => {
     expect(historyEntryLabel(entry())).toBe('Claude Code')
   })
 
+  it('ranks the auto-derived name between the custom title and the vendor label', () => {
+    expect(historyEntryLabel(entry({ customName: 'Frontend Lead', autoName: 'Fix login' })))
+      .toBe('Frontend Lead')
+    expect(historyEntryLabel(entry({ autoName: 'Fix login' }))).toBe('Fix login')
+    expect(historyEntryLabel(entry())).toBe('Claude Code')
+  })
+
   it('synchronizes rename and reset operations with the matching history entry', () => {
     const entries = [entry()]
 
@@ -144,6 +151,13 @@ describe('matchesHistorySearch', () => {
   it('matches the custom name and the agent label', () => {
     expect(matchesHistorySearch(searchable, 'Frontend Lead')).toBe(true)
     expect(matchesHistorySearch(entry(), 'Claude')).toBe(true)
+  })
+
+  it('matches the auto-derived name', () => {
+    const autoNamed = entry({ autoName: 'Fix login bug' })
+    expect(matchesHistorySearch(autoNamed, 'login')).toBe(true)
+    expect(matchesHistorySearch(autoNamed, 'LOGIN BUG')).toBe(true)
+    expect(matchesHistorySearch(autoNamed, 'logout')).toBe(false)
   })
 
   it('matches a partial session id', () => {

@@ -2974,6 +2974,7 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
       agentKey: pane.agentKey,
       agentLabel: pane.agentLabel,
       customName: pane.customName,
+      autoName: pane.autoName,
       roleKey: pane.roleKey,
       roleLabel: roleLabel(pane.roleKey),
       command: pane.command,
@@ -5241,6 +5242,7 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
       agentKey: saved.agent,
       agentLabel: spec?.label ?? saved.agent,
       customName: saved.custom_name || undefined,
+      autoName: saved.auto_name || undefined,
       roleKey: saved.role as RoleKey,
       roleLabel: roleLabel(saved.role),
       command: saved.command ?? '',
@@ -8293,9 +8295,18 @@ function onRunGroupsRemoteSync(raw: unknown): void {
   // key so it can never be mistaken for a manual rename). customName still
   // wins in the display chain, so applying it unconditionally is safe.
   if (d.auto_named_pane?.pane_id && d.auto_named_pane.auto_name) {
+    const autoName = d.auto_named_pane.auto_name.trim() || undefined
     const pane = panes.value.find((p) => p.id === d.auto_named_pane!.pane_id)
     if (pane) {
-      pane.autoName = d.auto_named_pane.auto_name.trim() || undefined
+      pane.autoName = autoName
+    }
+    // This broadcast carries no spawn_history, so patch our history mirror the
+    // same way the local setPaneAutoName path does — otherwise our next
+    // snapshot would write the name back out of the backend's mirror.
+    const histEntry = spawnHistory.value.find((e) => e.paneId === d.auto_named_pane!.pane_id)
+    if (histEntry) {
+      histEntry.autoName = autoName
+      spawnHistory.value = [...spawnHistory.value] // trigger save
     }
   }
   if (Array.isArray(d.cli_agent_order) || Array.isArray(d.cli_agent_disabled)) {
@@ -8981,6 +8992,14 @@ function setPaneAutoName(paneId: string, name: string): void {
   if (!pane || !name) return
   if (pane.customName || pane.autoName) return
   pane.autoName = name
+  // Mirror into the local history list so Agent History keeps the name after
+  // the pane is closed (the backend patches its own copy; this keeps our next
+  // snapshot from writing the name back out).
+  const histEntry = spawnHistory.value.find((e) => e.paneId === paneId)
+  if (histEntry) {
+    histEntry.autoName = name
+    spawnHistory.value = [...spawnHistory.value] // trigger save
+  }
   // The auto-title becomes the pane's name, so sync the messaging handle to it
   // (silently — auto-naming is not a manual rename, so no collision prompt;
   // duplicates just take a -N suffix).
