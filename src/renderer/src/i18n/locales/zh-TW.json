@@ -1602,10 +1602,18 @@
       "filter-disabled": "已停用"
     },
     "launchagents": {
-      "title": "macOS LaunchAgents",
+      "title": "macOS Agents",
       "filter-all": "全部",
       "filter-running": "執行中",
       "filter-stopped": "已停止"
+    },
+    "daemons": {
+      "title": "macOS Daemons"
+    },
+    "scope": {
+      "user": "使用者",
+      "system-agent": "系統",
+      "system-daemon": "Daemon"
     },
     "tag": {
       "disabled": "已停用",
@@ -1614,7 +1622,8 @@
     },
     "state": {
       "loaded-not-running": "已載入但未執行",
-      "not-loaded": "未載入"
+      "not-loaded": "未載入",
+      "unknown": "狀態未知（需 root）"
     },
     "action": {
       "enable": "啟用",
@@ -1626,6 +1635,7 @@
       "command": "指令",
       "raw": "原始內容",
       "label": "Label",
+      "scope": "層級",
       "plist": "plist 路徑",
       "exit-code": "上次結束碼",
       "state": "狀態"

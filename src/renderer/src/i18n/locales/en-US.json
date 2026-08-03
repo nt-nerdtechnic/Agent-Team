@@ -1602,10 +1602,18 @@
       "filter-disabled": "Disabled"
     },
     "launchagents": {
-      "title": "macOS LaunchAgents",
+      "title": "macOS Agents",
       "filter-all": "All",
       "filter-running": "Running",
       "filter-stopped": "Stopped"
+    },
+    "daemons": {
+      "title": "macOS Daemons"
+    },
+    "scope": {
+      "user": "User",
+      "system-agent": "System",
+      "system-daemon": "Daemon"
     },
     "tag": {
       "disabled": "Disabled",
@@ -1614,7 +1622,8 @@
     },
     "state": {
       "loaded-not-running": "Loaded, not running",
-      "not-loaded": "Not loaded"
+      "not-loaded": "Not loaded",
+      "unknown": "State unknown (requires root)"
     },
     "action": {
       "enable": "Enable",
@@ -1626,6 +1635,7 @@
       "command": "Command",
       "raw": "Raw line",
       "label": "Label",
+      "scope": "Scope",
       "plist": "Plist path",
       "exit-code": "Last exit code",
       "state": "State"

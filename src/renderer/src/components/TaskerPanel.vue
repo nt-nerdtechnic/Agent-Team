@@ -1,7 +1,12 @@
 <script lang="ts">
 // Tasker tab of the right-hand rail: the machine-level background jobs
-// registered on this Mac — the user's Unix crontab entries and their
-// ~/Library/LaunchAgents services — with disable / re-enable / remove actions.
+// registered on this Mac, in three sections — the user's Unix crontab entries,
+// the launchd agents under ~/Library/LaunchAgents and /Library/LaunchAgents,
+// and the daemons under /Library/LaunchDaemons. Only the user's own
+// LaunchAgents get action buttons (`managed`); the system ones are shown for
+// visibility and are read-only. Daemons are their own section because the whole
+// class is read-only and mostly unknowable — a state filter over them would
+// only ever be a control that changes nothing.
 // All scanning and mutation lives in the backend (`executions.*` RPC); this
 // panel only renders and confirms.
 //
@@ -73,7 +78,9 @@ function isPending(kind: Kind, key: string): boolean {
 }
 
 const cronFilter = ref<CronFilter>('enabled')
-const agentFilter = ref<AgentFilter>('running')
+// "all" on purpose: this section exists so the user can see everything that is
+// registered on the machine, and some system agents have no knowable state.
+const agentFilter = ref<AgentFilter>('all')
 
 const CRON_FILTERS: CronFilter[] = ['all', 'enabled', 'disabled']
 const AGENT_FILTERS: AgentFilter[] = ['all', 'running', 'stopped']
@@ -81,9 +88,17 @@ const AGENT_FILTERS: AgentFilter[] = ['all', 'running', 'stopped']
 const crontab = computed(() => snapshot.value?.crontab ?? null)
 const launchAgents = computed(() => snapshot.value?.launch_agents ?? null)
 
-/** A LaunchAgent counts as up when launchd has it either running or loaded. */
+/** A LaunchAgent counts as up when launchd has it either running or loaded.
+ *  Never true for a job whose state is unknown — both fields are null then. */
 function isAgentUp(agent: LaunchAgentEntry): boolean {
-  return agent.running || agent.loaded
+  return agent.running === true || agent.loaded === true
+}
+
+/** Rows are keyed by plist path, not label: the same label legitimately exists
+ *  in both the user and the system directory (Google keystone does exactly
+ *  that), and those are two separate registrations. */
+function agentKey(agent: LaunchAgentEntry): string {
+  return agent.plist_path ?? agent.label
 }
 
 const visibleCronEntries = computed<CrontabEntry[]>(() => {
@@ -93,10 +108,25 @@ const visibleCronEntries = computed<CrontabEntry[]>(() => {
   return entries
 })
 
+/** The launchd agents: both directories that are bootstrapped into the user's
+ *  GUI session, i.e. everything that is not a system daemon. */
+const agentEntries = computed<LaunchAgentEntry[]>(() =>
+  (launchAgents.value?.agents ?? []).filter((a) => a.scope !== 'system-daemon')
+)
+
+/** /Library/LaunchDaemons. Read-only in full, and shown unfiltered. */
+const daemonEntries = computed<LaunchAgentEntry[]>(() =>
+  (launchAgents.value?.agents ?? []).filter((a) => a.scope === 'system-daemon')
+)
+
+// Both state filters require a known state: a job launchctl cannot see is
+// neither running nor stopped, so it only ever shows up under "all".
 const visibleAgents = computed<LaunchAgentEntry[]>(() => {
-  const agents = launchAgents.value?.agents ?? []
-  if (agentFilter.value === 'running') return agents.filter((a) => isAgentUp(a))
-  if (agentFilter.value === 'stopped') return agents.filter((a) => !isAgentUp(a))
+  const agents = agentEntries.value
+  if (agentFilter.value === 'running')
+    return agents.filter((a) => a.runtime_known && isAgentUp(a))
+  if (agentFilter.value === 'stopped')
+    return agents.filter((a) => a.runtime_known && !isAgentUp(a))
   return agents
 })
 
@@ -111,9 +141,19 @@ function agentFailed(agent: LaunchAgentEntry): boolean {
 }
 
 function agentStateNote(agent: LaunchAgentEntry): string {
+  // Unknown must never be rendered as "not loaded": `launchctl list` cannot see
+  // the system domain without root, so we genuinely do not know.
+  if (!agent.runtime_known) return t('executions.state.unknown')
   if (agent.running) return ''
   if (agent.loaded) return t('executions.state.loaded-not-running')
   return t('executions.state.not-loaded')
+}
+
+/** Neutral dot for an unknown state — neither the green "up" nor the grey
+ *  "stopped" reading would be true. */
+function agentDotClass(agent: LaunchAgentEntry): Record<string, boolean> {
+  if (!agent.runtime_known) return { unknown: true }
+  return { idle: !isAgentUp(agent), err: agentFailed(agent) }
 }
 
 // ─────────────────────── Row expand ───────────────────────
@@ -132,7 +172,7 @@ function toggle(id: string): void {
 function pruneExpanded(snap: ExecutionsSnapshot): void {
   const live = new Set<string>()
   for (const entry of snap.crontab?.entries ?? []) live.add(entry.id)
-  for (const agent of snap.launch_agents?.agents ?? []) live.add(agent.label)
+  for (const agent of snap.launch_agents?.agents ?? []) live.add(agentKey(agent))
   const next = new Set<string>()
   for (const id of expandedIds.value) if (live.has(id)) next.add(id)
   if (next.size !== expandedIds.value.size) expandedIds.value = next
@@ -229,7 +269,7 @@ function toggleAgent(agent: LaunchAgentEntry): void {
     'launchagent',
     'executions.set_enabled',
     { kind: 'launchagent', target: agent.label, enabled: !isAgentUp(agent) },
-    agent.label
+    agentKey(agent)
   )
 }
 
@@ -407,12 +447,12 @@ onUnmounted(() => {
         </p>
       </section>
 
-      <!-- ── macOS LaunchAgents ───────────────────────────────────────── -->
+      <!-- ── macOS launchd agents (user + system) ──────────────────────── -->
       <section class="tk-section" data-section="launchagent">
         <div class="tk-sec-hdr">
           <span class="tk-sec-title">{{ t('executions.launchagents.title') }}</span>
           <span class="tk-count">
-            {{ t('executions.count', { count: launchAgents?.agents.length ?? 0 }) }}
+            {{ t('executions.count', { count: agentEntries.length }) }}
           </span>
         </div>
         <div class="tk-chips">
@@ -435,19 +475,24 @@ onUnmounted(() => {
         <template v-else>
           <div
             v-for="agent in visibleAgents"
-            :key="agent.label"
+            :key="agentKey(agent)"
             class="tk-row"
-            :class="{ off: !isAgentUp(agent) }"
+            :class="{ off: agent.runtime_known && !isAgentUp(agent) }"
             :data-agent-label="agent.label"
+            :data-agent-key="agentKey(agent)"
+            :data-scope="agent.scope"
           >
             <div
               class="tk-row-head"
-              :title="expandedIds.has(agent.label) ? t('executions.row.collapse') : t('executions.row.expand')"
-              @click="toggle(agent.label)"
+              :title="expandedIds.has(agentKey(agent)) ? t('executions.row.collapse') : t('executions.row.expand')"
+              @click="toggle(agentKey(agent))"
             >
               <div class="tk-line1">
-                <span class="tk-dot" :class="{ idle: !isAgentUp(agent), err: agentFailed(agent) }" />
+                <span class="tk-dot" :class="agentDotClass(agent)" />
                 <span class="tk-name">{{ agent.name }}</span>
+                <span v-if="agent.scope !== 'user'" class="tk-tag scope">
+                  {{ t(`executions.scope.${agent.scope}`) }}
+                </span>
                 <span v-if="agent.pid !== null" class="tk-tag pid">
                   {{ t('executions.tag.pid', { pid: agent.pid }) }}
                 </span>
@@ -457,7 +502,9 @@ onUnmounted(() => {
               </div>
               <div class="tk-line2">
                 <span class="tk-desc">{{ describeLaunchAgentSchedule(agent, tr) }}</span>
-                <span class="tk-acts">
+                <!-- Read-only rows get no buttons at all: everything outside
+                     ~/Library/LaunchAgents needs root, which we never ask for. -->
+                <span v-if="agent.managed" class="tk-acts">
                   <button
                     class="tk-act tk-act-toggle"
                     :disabled="busy"
@@ -470,7 +517,7 @@ onUnmounted(() => {
                     class="tk-act tk-act-remove"
                     :disabled="busy"
                     :title="t('executions.action.remove')"
-                    @click.stop="askRemove('launchagent', agent.label)"
+                    @click.stop="askRemove('launchagent', agentKey(agent))"
                   >
                     🗑
                   </button>
@@ -478,10 +525,14 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <div v-if="expandedIds.has(agent.label)" class="tk-detail">
+            <div v-if="expandedIds.has(agentKey(agent))" class="tk-detail">
               <div class="tk-kv">
                 <span class="tk-k">{{ t('executions.detail.label') }}</span>
                 <code class="tk-v">{{ agent.label }}</code>
+              </div>
+              <div class="tk-kv">
+                <span class="tk-k">{{ t('executions.detail.scope') }}</span>
+                <span class="tk-v">{{ t(`executions.scope.${agent.scope}`) }}</span>
               </div>
               <div class="tk-kv">
                 <span class="tk-k">{{ t('executions.detail.plist') }}</span>
@@ -497,7 +548,7 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <div v-if="isPending('launchagent', agent.label)" class="tk-confirm">
+            <div v-if="isPending('launchagent', agentKey(agent))" class="tk-confirm">
               <p class="tk-confirm-lead">
                 {{ t('executions.confirm.launchagent', { name: agent.name }) }}
               </p>
@@ -511,7 +562,7 @@ onUnmounted(() => {
                 <button
                   class="tk-confirm-ok"
                   :disabled="busy"
-                  @click.stop="confirmRemove('launchagent', agent.label, agent.label)"
+                  @click.stop="confirmRemove('launchagent', agentKey(agent), agent.label)"
                 >
                   {{ t('executions.confirm.ok') }}
                 </button>
@@ -524,6 +575,82 @@ onUnmounted(() => {
         <p v-if="opError.launchagent" class="tk-op-error" data-error-section="launchagent">
           {{ opError.launchagent }}
         </p>
+      </section>
+
+      <!-- ── macOS launchd daemons (/Library/LaunchDaemons) ────────────── -->
+      <!-- No filter chips and no action buttons: every row here needs root, so
+           there is nothing to act on, and `launchctl list` usually cannot see
+           these at all — a state filter would be a control that never moves.
+           The state itself is still read from the payload, because a daemon
+           that does show up in `launchctl list` has a real one. -->
+      <section class="tk-section" data-section="daemon">
+        <div class="tk-sec-hdr no-chips">
+          <span class="tk-sec-title">{{ t('executions.daemons.title') }}</span>
+          <span class="tk-count">
+            {{ t('executions.count', { count: daemonEntries.length }) }}
+          </span>
+        </div>
+
+        <p v-if="launchAgents && !launchAgents.supported" class="tk-unsupported">
+          {{ t('executions.unsupported') }}
+        </p>
+        <p v-else-if="launchAgents?.error" class="tk-sec-error">{{ launchAgents.error }}</p>
+        <template v-else>
+          <div
+            v-for="agent in daemonEntries"
+            :key="agentKey(agent)"
+            class="tk-row"
+            :class="{ off: agent.runtime_known && !isAgentUp(agent) }"
+            :data-agent-label="agent.label"
+            :data-agent-key="agentKey(agent)"
+            :data-scope="agent.scope"
+          >
+            <div
+              class="tk-row-head"
+              :title="expandedIds.has(agentKey(agent)) ? t('executions.row.collapse') : t('executions.row.expand')"
+              @click="toggle(agentKey(agent))"
+            >
+              <div class="tk-line1">
+                <span class="tk-dot" :class="agentDotClass(agent)" />
+                <span class="tk-name">{{ agent.name }}</span>
+                <span class="tk-tag scope">{{ t(`executions.scope.${agent.scope}`) }}</span>
+                <span v-if="agent.pid !== null" class="tk-tag pid">
+                  {{ t('executions.tag.pid', { pid: agent.pid }) }}
+                </span>
+                <span v-if="agentFailed(agent)" class="tk-tag exit">
+                  {{ t('executions.tag.exit', { code: agent.last_exit_code }) }}
+                </span>
+              </div>
+              <div class="tk-line2">
+                <span class="tk-desc">{{ describeLaunchAgentSchedule(agent, tr) }}</span>
+              </div>
+            </div>
+
+            <div v-if="expandedIds.has(agentKey(agent))" class="tk-detail">
+              <div class="tk-kv">
+                <span class="tk-k">{{ t('executions.detail.label') }}</span>
+                <code class="tk-v">{{ agent.label }}</code>
+              </div>
+              <div class="tk-kv">
+                <span class="tk-k">{{ t('executions.detail.scope') }}</span>
+                <span class="tk-v">{{ t(`executions.scope.${agent.scope}`) }}</span>
+              </div>
+              <div class="tk-kv">
+                <span class="tk-k">{{ t('executions.detail.plist') }}</span>
+                <code class="tk-v">{{ agent.plist_path ?? '—' }}</code>
+              </div>
+              <div v-if="agent.last_exit_code !== null" class="tk-kv">
+                <span class="tk-k">{{ t('executions.detail.exit-code') }}</span>
+                <code class="tk-v">{{ agent.last_exit_code }}</code>
+              </div>
+              <div v-if="agentStateNote(agent)" class="tk-kv">
+                <span class="tk-k">{{ t('executions.detail.state') }}</span>
+                <span class="tk-v">{{ agentStateNote(agent) }}</span>
+              </div>
+            </div>
+          </div>
+          <p v-if="!daemonEntries.length" class="tk-empty">{{ t('executions.empty') }}</p>
+        </template>
       </section>
     </div>
   </div>
@@ -599,6 +726,11 @@ onUnmounted(() => {
   align-items: baseline;
   gap: 6px;
   padding: 8px 10px 4px;
+}
+/* Matches the 4px + .tk-chips 6px gap the filtered sections leave above their
+   first row, so the unfiltered one doesn't sit tighter than its neighbours. */
+.tk-sec-hdr.no-chips {
+  padding-bottom: 10px;
 }
 .tk-sec-title {
   flex: 1;
@@ -676,6 +808,12 @@ onUnmounted(() => {
 .tk-dot.err {
   background: var(--danger-fg);
 }
+/* Hollow, so it reads as "no state to report" rather than as either the green
+   running dot or the grey stopped one. */
+.tk-dot.unknown {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--text-disabled);
+}
 .tk-name {
   flex: 1;
   min-width: 0;
@@ -705,6 +843,10 @@ onUnmounted(() => {
   color: var(--danger-fg);
   border-color: var(--danger-muted);
   background: var(--danger-subtle);
+}
+.tk-tag.scope {
+  font-weight: 600;
+  text-transform: none;
 }
 .tk-line2 {
   display: flex;

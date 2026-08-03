@@ -78,6 +78,9 @@ function snapshot(): Record<string, unknown> {
           name: 'Syncthing',
           plist_path: '/Users/t/Library/LaunchAgents/com.syncthing.syncthing.plist',
           plist_exists: true,
+          scope: 'user',
+          managed: true,
+          runtime_known: true,
           loaded: true,
           running: true,
           pid: 921,
@@ -93,6 +96,9 @@ function snapshot(): Record<string, unknown> {
           name: 'Nightly Index',
           plist_path: '/Users/t/Library/LaunchAgents/local.nightly.index.plist',
           plist_exists: true,
+          scope: 'user',
+          managed: true,
+          runtime_known: true,
           loaded: true,
           running: false,
           pid: null,
@@ -108,12 +114,75 @@ function snapshot(): Record<string, unknown> {
           name: 'Legacy Backup',
           plist_path: '/Users/t/Library/LaunchAgents/local.legacy.backup.plist',
           plist_exists: true,
+          scope: 'user',
+          managed: true,
+          runtime_known: true,
           loaded: false,
           running: false,
           pid: null,
           last_exit_code: 0,
           keep_alive: false,
           run_at_load: true,
+          start_interval: null,
+          start_calendar: [],
+          comment: null,
+        },
+        {
+          // /Library/LaunchAgents is bootstrapped into gui/$UID, so launchctl
+          // can see it: read-only, but with a real state.
+          label: 'com.vendor.updater',
+          name: 'Vendor Updater',
+          plist_path: '/Library/LaunchAgents/com.vendor.updater.plist',
+          plist_exists: true,
+          scope: 'system-agent',
+          managed: false,
+          runtime_known: true,
+          loaded: true,
+          running: true,
+          pid: 400,
+          last_exit_code: null,
+          keep_alive: true,
+          run_at_load: false,
+          start_interval: null,
+          start_calendar: [],
+          comment: null,
+        },
+        {
+          // A system daemon: invisible to `launchctl list` without root, so
+          // every runtime field is null rather than false.
+          label: 'com.vendor.daemon',
+          name: 'Vendor Daemon',
+          plist_path: '/Library/LaunchDaemons/com.vendor.daemon.plist',
+          plist_exists: true,
+          scope: 'system-daemon',
+          managed: false,
+          runtime_known: false,
+          loaded: null,
+          running: null,
+          pid: null,
+          last_exit_code: null,
+          keep_alive: true,
+          run_at_load: false,
+          start_interval: null,
+          start_calendar: [],
+          comment: null,
+        },
+        {
+          // …and a daemon `launchctl list` *can* see: a daemon's runtime state
+          // is not always unknown, so the Daemons section must not hardcode it.
+          label: 'com.vendor.visible',
+          name: 'Visible Daemon',
+          plist_path: '/Library/LaunchDaemons/com.vendor.visible.plist',
+          plist_exists: true,
+          scope: 'system-daemon',
+          managed: false,
+          runtime_known: true,
+          loaded: true,
+          running: true,
+          pid: 77,
+          last_exit_code: null,
+          keep_alive: true,
+          run_at_load: false,
           start_interval: null,
           start_calendar: [],
           comment: null,
@@ -188,15 +257,25 @@ function cronSection(wrapper: VueWrapper) {
 function agentSection(wrapper: VueWrapper) {
   return wrapper.get('[data-section="launchagent"]')
 }
+function daemonSection(wrapper: VueWrapper) {
+  return wrapper.get('[data-section="daemon"]')
+}
 function cronIds(wrapper: VueWrapper): (string | undefined)[] {
   return cronSection(wrapper)
     .findAll('[data-entry-id]')
     .map((el) => el.attributes('data-entry-id'))
 }
+function labelsIn(section: ReturnType<typeof agentSection>): (string | undefined)[] {
+  return section.findAll('[data-agent-label]').map((el) => el.attributes('data-agent-label'))
+}
 function agentLabels(wrapper: VueWrapper): (string | undefined)[] {
-  return agentSection(wrapper)
-    .findAll('[data-agent-label]')
-    .map((el) => el.attributes('data-agent-label'))
+  return labelsIn(agentSection(wrapper))
+}
+function daemonLabels(wrapper: VueWrapper): (string | undefined)[] {
+  return labelsIn(daemonSection(wrapper))
+}
+function scopesIn(section: ReturnType<typeof agentSection>): (string | undefined)[] {
+  return section.findAll('[data-scope]').map((el) => el.attributes('data-scope'))
 }
 
 describe('TaskerPanel', () => {
@@ -220,14 +299,86 @@ describe('TaskerPanel', () => {
     wrapper = undefined
   })
 
-  it('scans on mount and defaults each section to its "active" filter', async () => {
+  it('scans on mount, and the Agents section defaults to showing all', async () => {
     wrapper = await mountPanel()
 
     expect(wire.calls.filter((c) => c.type === 'executions.list')).toHaveLength(1)
     // crontab defaults to "enabled" — the disabled entry is hidden.
     expect(cronIds(wrapper)).toEqual(['c1', 'c2'])
-    // LaunchAgents default to "running" — running || loaded counts as up.
-    expect(agentLabels(wrapper)).toEqual(['com.syncthing.syncthing', 'local.nightly.index'])
+    // Agents default to "all": the point of the section is seeing what is
+    // registered, not only what happens to be up right now.
+    expect(agentSection(wrapper).get('[data-filter="all"]').classes()).toContain('on')
+    expect(agentLabels(wrapper)).toHaveLength(4)
+  })
+
+  it('splits agents and daemons into their own sections by scope', async () => {
+    wrapper = await mountPanel()
+
+    // Agents: both the user's own and /Library/LaunchAgents — never a daemon.
+    expect(agentLabels(wrapper)).toEqual([
+      'com.syncthing.syncthing',
+      'local.nightly.index',
+      'local.legacy.backup',
+      'com.vendor.updater',
+    ])
+    expect(scopesIn(agentSection(wrapper))).toEqual([
+      'user',
+      'user',
+      'user',
+      'system-agent',
+    ])
+
+    // Daemons: nothing but /Library/LaunchDaemons.
+    expect(daemonLabels(wrapper)).toEqual(['com.vendor.daemon', 'com.vendor.visible'])
+    expect(new Set(scopesIn(daemonSection(wrapper)))).toEqual(new Set(['system-daemon']))
+
+    // Each header counts its own section, not the whole payload.
+    expect(agentSection(wrapper).get('.tk-count').text()).toBe(
+      i18n.global.t('executions.count', { count: 4 })
+    )
+    expect(daemonSection(wrapper).get('.tk-count').text()).toBe(
+      i18n.global.t('executions.count', { count: 2 })
+    )
+  })
+
+  it('gives the Daemons section no filters and no actions at all', async () => {
+    wrapper = await mountPanel()
+
+    // A filter over rows that are read-only and mostly unknowable would be a
+    // control that changes nothing.
+    expect(daemonSection(wrapper).findAll('.tk-chip')).toHaveLength(0)
+    expect(daemonSection(wrapper).findAll('.tk-act')).toHaveLength(0)
+    expect(daemonSection(wrapper).findAll('.tk-acts')).toHaveLength(0)
+  })
+
+  it('does not hardcode a daemon as unknown when launchctl can see it', async () => {
+    wrapper = await mountPanel()
+
+    const visible = daemonSection(wrapper).get('[data-agent-label="com.vendor.visible"]')
+    expect(visible.get('.tk-dot').classes()).toEqual(['tk-dot'])
+    expect(visible.text()).toContain(i18n.global.t('executions.tag.pid', { pid: 77 }))
+
+    const unknown = daemonSection(wrapper).get('[data-agent-label="com.vendor.daemon"]')
+    expect(unknown.get('.tk-dot').classes()).toEqual(['tk-dot', 'unknown'])
+  })
+
+  it('expands and collapses rows in both launchd sections', async () => {
+    wrapper = await mountPanel()
+
+    const agent = agentSection(wrapper).get('[data-agent-label="com.vendor.updater"]')
+    const daemon = daemonSection(wrapper).get('[data-agent-label="com.vendor.daemon"]')
+
+    await agent.get('.tk-row-head').trigger('click')
+    await daemon.get('.tk-row-head').trigger('click')
+    // One expanded set across both sections, so both stay open at once.
+    expect(agent.find('.tk-detail').exists()).toBe(true)
+    expect(daemon.get('.tk-detail').text()).toContain(
+      '/Library/LaunchDaemons/com.vendor.daemon.plist'
+    )
+
+    await daemon.get('.tk-row-head').trigger('click')
+    expect(daemon.find('.tk-detail').exists()).toBe(false)
+    expect(agent.find('.tk-detail').exists()).toBe(true)
   })
 
   it('filters crontab entries by enabled state', async () => {
@@ -243,17 +394,143 @@ describe('TaskerPanel', () => {
     expect(cronIds(wrapper)).toEqual(['c1', 'c2'])
   })
 
-  it('filters LaunchAgents by running-or-loaded', async () => {
+  it('filters Agents by running-or-loaded, and never touches the Daemons section', async () => {
     wrapper = await mountPanel()
 
     await agentSection(wrapper).get('[data-filter="stopped"]').trigger('click')
     expect(agentLabels(wrapper)).toEqual(['local.legacy.backup'])
+    expect(daemonLabels(wrapper)).toHaveLength(2)
 
     await agentSection(wrapper).get('[data-filter="all"]').trigger('click')
-    expect(agentLabels(wrapper)).toHaveLength(3)
+    expect(agentLabels(wrapper)).toHaveLength(4)
 
     await agentSection(wrapper).get('[data-filter="running"]').trigger('click')
-    expect(agentLabels(wrapper)).toEqual(['com.syncthing.syncthing', 'local.nightly.index'])
+    expect(agentLabels(wrapper)).toEqual([
+      'com.syncthing.syncthing',
+      'local.nightly.index',
+      'com.vendor.updater',
+    ])
+    expect(daemonLabels(wrapper)).toHaveLength(2)
+  })
+
+  // ── system-level jobs (read-only) ─────────────────────────────────────────
+
+  it('gives read-only rows no action buttons at all', async () => {
+    wrapper = await mountPanel()
+
+    const managed = agentSection(wrapper).get('[data-agent-label="com.syncthing.syncthing"]')
+    expect(managed.find('.tk-act-toggle').exists()).toBe(true)
+    expect(managed.find('.tk-act-remove').exists()).toBe(true)
+
+    // /Library/LaunchAgents lives in the Agents section but stays read-only.
+    expect(
+      agentSection(wrapper).get('[data-agent-label="com.vendor.updater"]').findAll('.tk-act')
+    ).toHaveLength(0)
+  })
+
+  it('never calls an unknown state "stopped"', async () => {
+    wrapper = await mountPanel()
+    const stopped = i18n.global.t('executions.state.not-loaded')
+    const unknown = i18n.global.t('executions.state.unknown')
+
+    const row = daemonSection(wrapper).get('[data-agent-label="com.vendor.daemon"]')
+    await row.get('.tk-row-head').trigger('click')
+    expect(row.text()).not.toContain(stopped)
+    expect(row.get('.tk-detail').text()).toContain(unknown)
+    // A hollow dot, not the grey "stopped" one, and no dimmed row.
+    expect(row.get('.tk-dot').classes()).toEqual(['tk-dot', 'unknown'])
+    expect(row.classes()).not.toContain('off')
+  })
+
+  it('keeps an unknown state out of both Agents filters', async () => {
+    // The backend only reports runtime_known: false for system daemons, so this
+    // shape cannot reach the Agents section today — but the filter guard is what
+    // keeps "unknown" from being silently counted as stopped, so pin it here.
+    const opaque = snapshot()
+    const agents = (opaque.launch_agents as { agents: Record<string, unknown>[] }).agents
+    agents.push({
+      ...agents[3],
+      label: 'com.vendor.opaque',
+      name: 'Opaque Agent',
+      plist_path: '/Library/LaunchAgents/com.vendor.opaque.plist',
+      runtime_known: false,
+      loaded: null,
+      running: null,
+      pid: null,
+    })
+    wire.overrides.set('executions.list', opaque)
+    wrapper = await mountPanel()
+
+    // Unknown is neither running nor stopped: it appears under "all" only.
+    await agentSection(wrapper).get('[data-filter="running"]').trigger('click')
+    expect(agentLabels(wrapper)).not.toContain('com.vendor.opaque')
+    await agentSection(wrapper).get('[data-filter="stopped"]').trigger('click')
+    expect(agentLabels(wrapper)).not.toContain('com.vendor.opaque')
+    await agentSection(wrapper).get('[data-filter="all"]').trigger('click')
+    expect(agentLabels(wrapper)).toContain('com.vendor.opaque')
+  })
+
+  it('tags each system row with its scope and leaves user rows untagged', async () => {
+    wrapper = await mountPanel()
+
+    const tagsOf = (
+      section: ReturnType<typeof agentSection>,
+      label: string
+    ): string[] =>
+      section
+        .get(`[data-agent-label="${label}"]`)
+        .findAll('.tk-tag.scope')
+        .map((el) => el.text())
+
+    expect(tagsOf(agentSection(wrapper), 'com.syncthing.syncthing')).toEqual([])
+    expect(tagsOf(agentSection(wrapper), 'com.vendor.updater')).toEqual([
+      i18n.global.t('executions.scope.system-agent'),
+    ])
+    expect(tagsOf(daemonSection(wrapper), 'com.vendor.daemon')).toEqual([
+      i18n.global.t('executions.scope.system-daemon'),
+    ])
+
+    // The expanded detail names the scope and the full plist path, so the user
+    // can tell which directory a job came from.
+    const row = agentSection(wrapper).get('[data-agent-label="com.vendor.updater"]')
+    await row.get('.tk-row-head').trigger('click')
+    const detail = row.get('.tk-detail').text()
+    expect(detail).toContain(i18n.global.t('executions.scope.system-agent'))
+    expect(detail).toContain('/Library/LaunchAgents/com.vendor.updater.plist')
+  })
+
+  it('keeps the same label registered in two directories as two rows', async () => {
+    const twins = snapshot()
+    const label = 'com.google.keystone.agent'
+    const base = (
+      (twins.launch_agents as { agents: Record<string, unknown>[] }).agents as Record<
+        string,
+        unknown
+      >[]
+    )[0]
+    ;(twins.launch_agents as { agents: Record<string, unknown>[] }).agents = [
+      { ...base, label, name: 'Keystone', plist_path: `/Users/t/Library/LaunchAgents/${label}.plist` },
+      {
+        ...base,
+        label,
+        name: 'Keystone',
+        plist_path: `/Library/LaunchAgents/${label}.plist`,
+        scope: 'system-agent',
+        managed: false,
+      },
+    ]
+    wire.overrides.set('executions.list', twins)
+    wrapper = await mountPanel()
+
+    expect(agentLabels(wrapper)).toEqual([label, label])
+    // Rows are keyed by plist path, so expanding one must not expand the other.
+    const rows = agentSection(wrapper).findAll('[data-agent-key]')
+    await rows[0].get('.tk-row-head').trigger('click')
+    expect(rows[0].find('.tk-detail').exists()).toBe(true)
+    expect(rows[1].find('.tk-detail').exists()).toBe(false)
+    // Only the user copy is actionable.
+    expect(rows[0].findAll('.tk-act')).toHaveLength(2)
+    expect(rows[1].findAll('.tk-act')).toHaveLength(0)
   })
 
   it('collapses a crontab row by default and reveals command + raw when expanded', async () => {
@@ -412,8 +689,41 @@ describe('TaskerPanel', () => {
     wire.overrides.set('executions.list', unsupported)
     wrapper = await mountPanel()
 
-    expect(agentSection(wrapper).find('.tk-unsupported').exists()).toBe(true)
-    expect(agentSection(wrapper).find('.tk-empty').exists()).toBe(false)
+    for (const section of [agentSection(wrapper), daemonSection(wrapper)]) {
+      expect(section.find('.tk-unsupported').exists()).toBe(true)
+      expect(section.find('.tk-empty').exists()).toBe(false)
+    }
+  })
+
+  it('still renders an empty section rather than hiding the category', async () => {
+    const none = snapshot()
+    ;(none.launch_agents as Record<string, unknown>).agents = []
+    wire.overrides.set('executions.list', none)
+    wrapper = await mountPanel()
+
+    // The user has to be able to tell "this category exists, it is just empty"
+    // apart from "this category is gone".
+    for (const section of [agentSection(wrapper), daemonSection(wrapper)]) {
+      expect(section.get('.tk-empty').text()).toBe(i18n.global.t('executions.empty'))
+      expect(section.get('.tk-count').text()).toBe(
+        i18n.global.t('executions.count', { count: 0 })
+      )
+    }
+    expect(daemonSection(wrapper).get('.tk-sec-title').text()).toBe(
+      i18n.global.t('executions.daemons.title')
+    )
+  })
+
+  it('renders the Daemons section even when only agents are registered', async () => {
+    const agentsOnly = snapshot()
+    const section = agentsOnly.launch_agents as { agents: Record<string, unknown>[] }
+    section.agents = section.agents.filter((a) => a.scope !== 'system-daemon')
+    wire.overrides.set('executions.list', agentsOnly)
+    wrapper = await mountPanel()
+
+    expect(agentLabels(wrapper)).toHaveLength(4)
+    expect(daemonLabels(wrapper)).toHaveLength(0)
+    expect(daemonSection(wrapper).find('.tk-empty').exists()).toBe(true)
   })
 
   it('shows a section-level scan error reported by the backend', async () => {
@@ -440,9 +750,17 @@ describe('TaskerPanel', () => {
     await agentSection(wrapper)
       .get('[data-agent-label="local.nightly.index"] .tk-row-head')
       .trigger('click')
+    // …and the read-only daemon, whose scope tag and "state unknown" note are
+    // the only place several of the new keys appear.
+    await daemonSection(wrapper)
+      .get('[data-agent-label="com.vendor.daemon"] .tk-row-head')
+      .trigger('click')
+    // Both section titles are on screen, so a missing one would show up below.
+    expect(wrapper.text()).toContain(i18n.global.t('executions.launchagents.title'))
+    expect(wrapper.text()).toContain(i18n.global.t('executions.daemons.title'))
     // vue-i18n only warns on a missing key and renders the key itself, so a
     // typo would otherwise sail through every structural assertion above.
-    expect(wrapper.findAll('.tk-detail')).toHaveLength(2)
+    expect(wrapper.findAll('.tk-detail')).toHaveLength(3)
     expect(wrapper.text()).not.toContain('executions.')
     // html() also covers the keys that only reach `title` attributes.
     expect(wrapper.html()).not.toContain('executions.')

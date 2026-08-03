@@ -28,14 +28,24 @@ export interface StartCalendarInterval {
   Month?: number
 }
 
+/** Which launchd directory the job was installed in. */
+export type LaunchAgentScope = 'user' | 'system-agent' | 'system-daemon'
+
 export interface LaunchAgentEntry {
   label: string
   name: string
   /** null when the agent is only known to launchctl and has no plist here. */
   plist_path: string | null
   plist_exists: boolean
-  loaded: boolean
-  running: boolean
+  scope: LaunchAgentScope
+  /** True only for ~/Library/LaunchAgents — everything else is read-only. */
+  managed: boolean
+  /** False when `launchctl list` cannot see this job (system daemons need
+   *  root). The four runtime fields below are then null: "unknown", never
+   *  "stopped". */
+  runtime_known: boolean
+  loaded: boolean | null
+  running: boolean | null
   pid: number | null
   last_exit_code: number | null
   keep_alive: boolean | null
