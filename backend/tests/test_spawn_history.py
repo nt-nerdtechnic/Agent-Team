@@ -890,11 +890,12 @@ async def test_rename_pane_handler_patches_full_store(
     assert stored[0]["customName"] == "Live name"
 
 
-async def test_set_pane_auto_name_handler_broadcasts_once_and_skips_history(
+async def test_set_pane_auto_name_handler_broadcasts_once_and_mirrors_history(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """First auto-name write is broadcast to peers; set-once repeats are
-    silent no-ops, and neither touches the spawn-history layers."""
+    """First auto-name write is broadcast to peers and mirrored into
+    ui_spawn_history under autoName; set-once repeats are silent no-ops, and
+    neither touches the full spawn-history store."""
     from agent_team_backend import app, ws_handlers
 
     store = ProjectStore()
@@ -936,9 +937,12 @@ async def test_set_pane_auto_name_handler_broadcasts_once_and_skips_history(
     pane = next(p for p in store.peek(str(tmp_path)).panes if p.pane_id == "p1")
     assert pane.auto_name == "Fix login"
 
-    # Unlike rename_pane, neither the mirror nor the full store changed.
+    # The mirror carries the winning auto-name; customName stays untouched and
+    # the losing write did not overwrite it. Unlike rename_pane the full store
+    # is still not written.
     history = store.peek(str(tmp_path)).ui_spawn_history
-    assert "autoName" not in history[0] and "customName" not in history[0]
+    assert history[0]["autoName"] == "Fix login"
+    assert "customName" not in history[0]
     assert _stored_entries(tmp_path) == []
 
     ok_responses = session.websocket.sent  # type: ignore[attr-defined]

@@ -846,13 +846,62 @@ def test_set_pane_auto_name_before_record_exists_upserts(
     assert panes[0].auto_name == "Auto Title"
 
 
-def test_set_pane_auto_name_leaves_history_mirror_untouched(
+def test_set_pane_auto_name_mirrors_into_history(
     store_with_stage: tuple[ProjectStore, str]
 ) -> None:
-    """Unlike rename_pane, auto_name is not mirrored into ui_spawn_history."""
+    """Like rename_pane, auto_name is mirrored into ui_spawn_history — under
+    its own autoName key, so the closed pane keeps its title in Agent History."""
+    store, ws = store_with_stage
+    store.record_manual_pane_spawn(ws, pane_id="p1", agent="codex")
+    store.set_ui_state(ws, spawn_history=[
+        {"paneId": "p1", "agentLabel": "Codex"},
+        {"paneId": "p2", "agentLabel": "Claude"},
+    ])
+    store.set_pane_auto_name(ws, pane_id="p1", auto_name="Auto")
+    history = store.peek(ws).ui_spawn_history
+    assert history[0] == {"paneId": "p1", "agentLabel": "Codex", "autoName": "Auto"}
+    assert history[1] == {"paneId": "p2", "agentLabel": "Claude"}  # untouched
+
+
+def test_set_pane_auto_name_set_once_leaves_history_mirror(
+    store_with_stage: tuple[ProjectStore, str]
+) -> None:
+    """The losing (second) write must not rewrite the mirror either."""
     store, ws = store_with_stage
     store.record_manual_pane_spawn(ws, pane_id="p1", agent="codex")
     store.set_ui_state(ws, spawn_history=[{"paneId": "p1", "agentLabel": "Codex"}])
+    store.set_pane_auto_name(ws, pane_id="p1", auto_name="First")
+    store.set_pane_auto_name(ws, pane_id="p1", auto_name="Second")
+    history = store.peek(ws).ui_spawn_history
+    assert history[0]["autoName"] == "First"
+
+
+def test_set_pane_auto_name_skips_history_mirror_when_custom_named(
+    store_with_stage: tuple[ProjectStore, str]
+) -> None:
+    """custom_name wins outright: no autoName is written into the mirror."""
+    store, ws = store_with_stage
+    store.record_manual_pane_spawn(ws, pane_id="p1", agent="codex")
+    store.rename_pane(ws, pane_id="p1", custom_name="User Name")
+    store.set_ui_state(ws, spawn_history=[
+        {"paneId": "p1", "agentLabel": "Codex", "customName": "User Name"},
+    ])
     store.set_pane_auto_name(ws, pane_id="p1", auto_name="Auto")
     history = store.peek(ws).ui_spawn_history
-    assert history == [{"paneId": "p1", "agentLabel": "Codex"}]
+    assert "autoName" not in history[0]
+    assert history[0]["customName"] == "User Name"
+
+
+def test_set_pane_auto_name_without_matching_history_entry(
+    store_with_stage: tuple[ProjectStore, str]
+) -> None:
+    """A mirror with no entry for the pane (or no mirror at all) is fine."""
+    store, ws = store_with_stage
+    store.record_manual_pane_spawn(ws, pane_id="p1", agent="codex")
+    store.set_ui_state(ws, spawn_history=[{"paneId": "other", "agentLabel": "Claude"}])
+    project, changed = store.set_pane_auto_name(ws, pane_id="p1", auto_name="Auto")
+    assert changed is True
+    assert project is not None
+    assert store.peek(ws).ui_spawn_history == [{"paneId": "other", "agentLabel": "Claude"}]
+    pane = next(p for p in store.peek(ws).panes if p.pane_id == "p1")
+    assert pane.auto_name == "Auto"

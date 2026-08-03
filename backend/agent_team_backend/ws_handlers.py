@@ -3937,7 +3937,8 @@ async def project_rename_pane(session: "Session", msg_id: str, msg_type: str, pa
 async def project_set_pane_auto_name(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     """Persist an auto-generated pane title (set-once; custom_name wins).
 
-    Unlike project.rename_pane this never touches the spawn-history layers,
+    An accepted write also patches the project.json spawn-history mirror
+    (autoName key) via the store, but never the full spawn-history store,
     and a no-op (empty name, or the pane already named either way) is not
     broadcast — the store is the final arbiter of the cross-window race, so
     only the winning write reaches peer windows.

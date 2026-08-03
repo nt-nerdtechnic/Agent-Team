@@ -807,7 +807,8 @@ class ProjectStore:
 
         Upsert mirrors rename_pane(): the name can arrive before the spawn
         persists the PaneRecord, so create a pending stub keyed by pane_id.
-        Unlike rename_pane(), the spawn-history mirror is never touched.
+        Like rename_pane(), an accepted write also patches the spawn-history
+        mirror (under its own autoName key) so the name survives pane removal.
         """
         project = self.peek(workspace_path)
         if project is None:
@@ -821,6 +822,12 @@ class ProjectStore:
             pane = PaneRecord(pane_id=pane_id, origin="manual")
             project.panes.append(pane)
         pane.auto_name = auto_name
+        # Keep the renderer-owned history mirror consistent at the source (same
+        # reasoning as rename_pane), but under a separate key: customName is the
+        # user's name and must never be overwritten by an auto-derived one.
+        for entry in project.ui_spawn_history or []:
+            if isinstance(entry, dict) and entry.get("paneId") == pane_id:
+                entry["autoName"] = auto_name
         self.save(project)
         return project, True
 
