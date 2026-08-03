@@ -6985,6 +6985,7 @@ backend.on('agent_msg.deliver', (raw) => {
     from_workspace_path?: string
     content?: string
     cross_workspace?: boolean
+    rate_limit?: boolean
   }
   if (!ev?.msg_key || !ev.target_pane_id || !ev.content) return
   const accepted = messaging.acceptRemoteMessage({
@@ -6993,6 +6994,9 @@ backend.on('agent_msg.deliver', (raw) => {
     fromDisplay: ev.from_display || 'unknown',
     content: ev.content,
     remoteWorkspace: ev.from_workspace_path,
+    // Senders that bypassed sendMessage (the MCP tools) carry no rate-limit
+    // accounting of their own.
+    rateLimit: !!ev.rate_limit,
   })
   if (!accepted || !ev.cross_workspace) return
   // The instruction came from another project — say so, since nothing else in

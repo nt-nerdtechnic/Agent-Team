@@ -255,6 +255,48 @@ describe('useAgentMessaging — cross-workspace routing', () => {
     expect(reports[0].reason).toContain('echo not verified')
   })
 
+  it('applies the rate limit to inbound messages that ask for it', async () => {
+    m.registerPane('p2', 'claude', 'reviewer')
+    for (let i = 0; i < RATE_LIMIT_MAX; i++) {
+      m.acceptRemoteMessage({
+        msgKey: `k${i}`,
+        targetPaneId: 'p2',
+        fromDisplay: 'alpha/spammer',
+        content: `msg ${i}`,
+        rateLimit: true,
+      })
+      await flush()
+    }
+    reports = []
+    m.acceptRemoteMessage({
+      msgKey: 'over',
+      targetPaneId: 'p2',
+      fromDisplay: 'alpha/spammer',
+      content: 'one too many',
+      rateLimit: true,
+    })
+    await flush()
+
+    expect(reports).toHaveLength(1)
+    expect(reports[0]).toMatchObject({ msgKey: 'over', ok: false })
+    expect(reports[0].reason).toContain('rate limit')
+    expect(delivered).toHaveLength(RATE_LIMIT_MAX)
+  })
+
+  it('leaves inbound messages that carry their own accounting unlimited', async () => {
+    m.registerPane('p2', 'claude', 'reviewer')
+    for (let i = 0; i < RATE_LIMIT_MAX + 2; i++) {
+      m.acceptRemoteMessage({
+        msgKey: `k${i}`,
+        targetPaneId: 'p2',
+        fromDisplay: 'alpha/sender',
+        content: `msg ${i}`,
+      })
+      await flush()
+    }
+    expect(delivered).toHaveLength(RATE_LIMIT_MAX + 2)
+  })
+
   it('rejects an inbound message when the target queue is full', async () => {
     m.registerPane('p3', 'claude', 'busy') // not idle → queue never drains
     for (let i = 0; i < QUEUE_CAP; i++) {

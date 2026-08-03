@@ -9,11 +9,13 @@ read-modify-write from us can lose its update, and vice versa) and
 CODEX_HOME via symlink. Instead, terminal.create appends CLI-native,
 additive spawn-time flags — no user config file is ever modified:
 
-- claude: ``--mcp-config <app_data_dir>/plan-mcp.json``. Servers from
-  ``--mcp-config`` load IN ADDITION to the user's own MCP config (we never
-  pass ``--strict-mcp-config``). The JSON file lives in the app's own data
-  dir and is rewritten on every backend startup so its URL always carries
-  the current port.
+- claude: ``--mcp-config <inline JSON>``. The flag takes a literal JSON string
+  as well as a path, and inline is what a spawn actually uses: the URL carries
+  the pane id (see plan_mcp_url), so a file-based config would mean one file
+  per pane left behind in the app data dir. Servers from ``--mcp-config`` load
+  IN ADDITION to the user's own MCP config (we never pass
+  ``--strict-mcp-config``). The written ``<app_data_dir>/plan-mcp.json`` remains
+  as the fallback for a spawn with no pane id.
 - codex: ``-c mcp_servers.navide-plans.url="http://127.0.0.1:<port>/plan-mcp"``
   — a one-shot TOML override merged over config.toml at process start
   (``-c`` is a global flag, valid after subcommands like ``codex resume``).
@@ -41,7 +43,10 @@ log = logging.getLogger("agent_team_backend.plugins.builtin.navide_plans.plan_mc
 SERVER_NAME = "navide-plans"
 CLAUDE_CONFIG_FILENAME = "plan-mcp.json"
 
-_CALLER_TOKEN = ""
+# Minted at import, not on first use: spawn wiring runs in worker threads and
+# concurrent pane restores would otherwise race to initialise it, burning a
+# token into one pane's command line that a later winner immediately replaces.
+_CALLER_TOKEN = secrets.token_urlsafe(24)
 
 
 def plan_mcp_url(port: int, pane_id: str = "") -> str:
@@ -50,8 +55,8 @@ def plan_mcp_url(port: int, pane_id: str = "") -> str:
     The endpoint is shared by every pane, so a tool that acts *as* the calling
     pane (cli_send) has no other way to know who is asking — the pane id rides
     in the query string and the server reads it off the HTTP request. The token
-    stops another local process from claiming to be a pane just by guessing an
-    id; it is regenerated on every backend start.
+    marks the caller as belonging to this backend run — see :func:`caller_token`
+    for what that does and does not guarantee.
     """
     base = f"http://127.0.0.1:{port}/plan-mcp"
     if not pane_id:
@@ -60,10 +65,14 @@ def plan_mcp_url(port: int, pane_id: str = "") -> str:
 
 
 def caller_token() -> str:
-    """Per-run secret proving a caller really is a pane Navide spawned."""
-    global _CALLER_TOKEN
-    if not _CALLER_TOKEN:
-        _CALLER_TOKEN = secrets.token_urlsafe(24)
+    """Per-run secret marking a caller as a pane this backend run spawned.
+
+    Scope note: it is a freshness check, not an authorisation boundary — the
+    token sits in every pane's command line, so anything running as the same
+    user can read it with ``ps``. What it buys is that a caller from a previous
+    backend run (or something that never went through spawn wiring) is rejected
+    instead of silently acting as some pane.
+    """
     return _CALLER_TOKEN
 
 

@@ -181,6 +181,26 @@ def backend_port() -> int | None:
         return None
 
 
+def _call_transformer(
+    transformer: Any, agent_key: str, command: Any, port: int | None, pane_id: str
+) -> Any:
+    """Call a spawn transformer, tolerating the pre-pane_id 3-argument shape.
+
+    Third-party plugins were written against the older contract; passing them a
+    fourth argument would raise TypeError, which the caller swallows as "broken
+    plugin" — their wiring would stop applying with only a log line to show for
+    it.
+    """
+    try:
+        params = list(inspect.signature(transformer).parameters.values())
+    except (TypeError, ValueError):
+        params = []
+    takes_varargs = any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in params)
+    if params and len(params) < 4 and not takes_varargs:
+        return transformer(agent_key, command, port)
+    return transformer(agent_key, command, port, pane_id)
+
+
 def apply_spawn_wiring(
     host: PluginHost, agent_key: str, command: Any, pane_id: str = ""
 ) -> Any:
@@ -196,7 +216,7 @@ def apply_spawn_wiring(
     port = backend_port()
     for plugin_id, transformer in host.spawn_transformers():
         try:
-            command = transformer(agent_key, command, port, pane_id)
+            command = _call_transformer(transformer, agent_key, command, port, pane_id)
         except Exception as err:  # noqa: BLE001 - isolate broken plugins
             log.warning("plugin %s spawn transformer failed: %s", plugin_id, err)
     return command

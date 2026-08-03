@@ -71,6 +71,28 @@ async def test_send_refuses_a_bad_caller_token(captured: list[dict[str, Any]]) -
     assert captured == []
 
 
+@pytest.mark.asyncio
+async def test_send_refuses_a_pane_id_that_is_no_longer_live(
+    captured: list[dict[str, Any]],
+) -> None:
+    """A re-attached pane (detach, window reload) gets a NEW pane id without
+    re-running spawn wiring, so the CLI keeps quoting the old one. Acting on it
+    would break self-send detection and strip the sender's identity."""
+    _seed()
+    result = await plan_mcp.cli_send("beta/reviewer", "hi", _ctx(pane_id="long-gone"))
+    assert result["ok"] is False
+    assert "stale" in result["error"]
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_list_targets_refuses_a_stale_pane_id() -> None:
+    _seed()
+    result = await plan_mcp.cli_list_targets(_ctx(pane_id="long-gone"))
+    assert result["targets"] == []
+    assert "stale" in result["error"]
+
+
 # ── Sending ────────────────────────────────────────────────────────────────
 @pytest.mark.asyncio
 async def test_send_broadcasts_the_delivery(captured: list[dict[str, Any]]) -> None:
@@ -85,6 +107,10 @@ async def test_send_broadcasts_the_delivery(captured: list[dict[str, Any]]) -> N
     assert payload["from_display"] == "alpha/sender"
     assert payload["content"] == "run the tests"
     assert payload["cross_workspace"] is True
+    # This path never went through the frontend's send-side rate limit, so the
+    # receiving window has to apply it — otherwise two agents replying to each
+    # other through cli_send have no loop guard.
+    assert payload["rate_limit"] is True
 
 
 @pytest.mark.asyncio

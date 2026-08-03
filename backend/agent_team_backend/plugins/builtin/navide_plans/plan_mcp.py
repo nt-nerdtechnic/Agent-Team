@@ -646,31 +646,47 @@ class CallerUnknown(Exception):
     """The request carries no usable pane identity."""
 
 
+_UNWIRED = (
+    "this MCP endpoint could not identify your pane — reopen the pane so Navide "
+    "can wire it, or use the ---MSG-START--- output protocol"
+)
+_STALE = (
+    "this pane's id is stale (it was re-attached to a new pane since the CLI "
+    "started, e.g. by a detach or a window reload) — reopen the pane to send "
+    "messages through these tools, or use the ---MSG-START--- output protocol, "
+    "which always resolves against the pane's current identity"
+)
+
+
 def _caller_pane_id(ctx: Context) -> str:
     """The pane whose CLI is calling, from the pane-specific endpoint URL.
 
-    Every pane is spawned pointing at `/plan-mcp?pane=<id>&t=<token>`; the token
-    is minted per backend run, so another local process cannot claim to be a
-    pane by guessing an id.
+    Every pane is spawned pointing at `/plan-mcp?pane=<id>&t=<token>`.
+
+    The id is fixed at spawn time while a pane's id is not: re-attaching a live
+    PTY (detach to a window, reload) mints a new pane id without re-running
+    spawn wiring, leaving the CLI holding one that no longer refers to anything.
+    Acting on a stale id would be worse than refusing — the sender resolves to
+    nobody, which turns every same-workspace name into "unknown target", makes
+    the pane fail its own self-send check (so it can message itself in a loop),
+    and shows the recipient an unaddressable sender. So require the id to still
+    be live and say plainly what to do about it.
     """
+    from agent_team_backend import agent_messaging
     from agent_team_backend.plugins.builtin.navide_plans import plan_mcp_wiring
 
     request = getattr(ctx.request_context, "request", None)
     params = getattr(request, "query_params", None)
     if params is None:
-        raise CallerUnknown(
-            "this MCP endpoint could not identify your pane — reopen the pane so "
-            "Navide can wire it, or use the ---MSG-START--- output protocol"
-        )
+        raise CallerUnknown(_UNWIRED)
     pane_id = str(params.get("pane") or "")
     token = str(params.get("t") or "")
     if not pane_id:
-        raise CallerUnknown(
-            "this MCP endpoint could not identify your pane — reopen the pane so "
-            "Navide can wire it, or use the ---MSG-START--- output protocol"
-        )
+        raise CallerUnknown(_UNWIRED)
     if not secrets.compare_digest(token, plan_mcp_wiring.caller_token()):
         raise CallerUnknown("caller token rejected; reopen the pane to re-wire it")
+    if agent_messaging.get(pane_id) is None:
+        raise CallerUnknown(_STALE)
     return pane_id
 
 
@@ -751,6 +767,12 @@ async def cli_send(to: str, text: str, ctx: Context) -> dict[str, Any]:
                 "from_workspace_path": sender.workspace_path if sender else "",
                 "cross_workspace": result.cross_workspace,
                 "content": text,
+                # The frontend applies the per-pair rate limit when it sends;
+                # a message that entered here never passed through that, so the
+                # receiving window has to apply it instead. Without this, two
+                # agents replying to each other through cli_send have no loop
+                # guard at all.
+                "rate_limit": True,
             },
         )
     )

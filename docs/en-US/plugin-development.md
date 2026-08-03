@@ -157,7 +157,7 @@ def deactivate():
 | `register_route(path, asgi_app, methods)` | Mount an HTTP route |
 | `register_startup(hook)` | Run at service startup (may be async) |
 | `register_shutdown(hook)` | Run at service shutdown |
-| `register_spawn_transformer(fn)` | Rewrite an agent's spawn command: `(agent_key, command, port) -> command` |
+| `register_spawn_transformer(fn)` | Rewrite an agent's spawn command: `(agent_key, command, port, pane_id) -> command` |
 | `clear_registrations()` | Drop registrations on deactivate |
 
 Place the directory under `plugins/builtin/` to ship it with the service, or

@@ -360,10 +360,36 @@ function acceptRemoteMessage(args: {
   fromDisplay: string
   content: string
   remoteWorkspace?: string
+  /** Apply the per-pair rate limit here — set for senders that did not pass
+   *  through sendMessage (the MCP tools), which would otherwise have no loop
+   *  guard at all. */
+  rateLimit?: boolean
 }): boolean {
   if (!deps) return false
   const localName = nameByPane.get(args.targetPaneId)
   if (!localName) return false
+
+  if (args.rateLimit) {
+    const now = deps.now()
+    if (overRateLimit(args.fromDisplay, localName, now, true)) {
+      const reason = `rate limit: max ${RATE_LIMIT_MAX} msgs / ${RATE_LIMIT_WINDOW_MS / 1000}s per pair`
+      pushLog({
+        id: ++seq,
+        from: args.fromDisplay,
+        to: localName,
+        content: args.content,
+        status: 'failed',
+        reason,
+        createdAt: now,
+        remote: 'inbound',
+        remoteWorkspace: args.remoteWorkspace,
+      })
+      deps.reportDelivery?.(args.msgKey, false, reason)
+      return true
+    }
+    const key = pairKey(args.fromDisplay, localName, true)
+    pairSends.set(key, [...(pairSends.get(key) ?? []), now])
+  }
 
   const msg: AgentMessage = {
     id: ++seq,

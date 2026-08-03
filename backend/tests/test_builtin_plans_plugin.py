@@ -5,6 +5,7 @@ from __future__ import annotations
 import shlex
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -116,3 +117,37 @@ def test_spawn_wiring_untouched_after_deactivate(
 
     assert [pid for pid, _ in host.spawn_transformers()] == ["navide.skills"]
     assert wiring.apply_spawn_wiring(host, "claude", "claude") == "claude"
+
+
+def test_spawn_wiring_tolerates_a_pre_pane_id_transformer(tmp_path: Path) -> None:
+    """Third-party plugins were written against `(agent_key, command, port)`.
+    Passing them a fourth argument would raise TypeError, which the caller
+    swallows — their wiring would silently stop applying."""
+    _stage_port_file(tmp_path)
+    calls: list[tuple[str, Any, int | None]] = []
+
+    def legacy(agent_key: str, command: Any, port: int | None) -> Any:
+        calls.append((agent_key, command, port))
+        return f"{command} --legacy"
+
+    host = PluginHost()
+    host._activated = lambda: []  # type: ignore[assignment,method-assign]
+    host.spawn_transformers = lambda: [("third.party", legacy)]  # type: ignore[assignment,method-assign]
+
+    assert wiring.apply_spawn_wiring(host, "claude", "claude", "pane-1") == "claude --legacy"
+    assert calls == [("claude", "claude", 4567)]
+
+
+def test_spawn_wiring_passes_the_pane_id_to_a_current_transformer(tmp_path: Path) -> None:
+    _stage_port_file(tmp_path)
+    seen: list[str] = []
+
+    def current(agent_key: str, command: Any, port: int | None, pane_id: str) -> Any:
+        seen.append(pane_id)
+        return command
+
+    host = PluginHost()
+    host.spawn_transformers = lambda: [("third.party", current)]  # type: ignore[assignment,method-assign]
+
+    wiring.apply_spawn_wiring(host, "claude", "claude", "pane-9")
+    assert seen == ["pane-9"]
