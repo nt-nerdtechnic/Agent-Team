@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from pydantic import ValidationError
 
-from . import storage_service
+from . import executions_service, storage_service
 from .ipc import make_error, make_event, make_response
 from .log_readers.claude import ClaudeLogReader, first_user_prompts
 from .credential_vault import DEFAULT_SLOT_ID
@@ -4713,3 +4713,94 @@ async def storage_cleanup(session: "Session", msg_id: str, msg_type: str, payloa
         )
         return
     await session.send_json(make_response(msg_id, msg_type, result))
+
+
+# ── Background executions (executions.*) ────────────────────────────────────
+_EXECUTION_KINDS = ("crontab", "launchagent")
+
+
+def _executions_target(payload: dict) -> tuple[str, str] | None:
+    """Validate ``kind``/``target``; None when the request is malformed."""
+    kind = payload.get("kind")
+    target = payload.get("target")
+    if kind not in _EXECUTION_KINDS or not isinstance(target, str) or not target.strip():
+        return None
+    return kind, target
+
+
+async def _broadcast_executions_changed(session: "Session") -> None:
+    """Tell the *other* windows to rescan.
+
+    The acting window refreshes off its own response, so including it here
+    would make every mutation cost two full scans.
+    """
+    from . import app
+
+    await app.broadcast(make_event("executions.changed", {}), exclude=session)
+
+
+@handler("executions.list")
+async def executions_list(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Scan the machine's crontab entries and macOS LaunchAgents."""
+    await session.send_json(
+        make_response(msg_id, msg_type, await executions_service.list_executions())
+    )
+
+
+@handler("executions.set_enabled")
+async def executions_set_enabled(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Enable or disable one crontab entry or LaunchAgent.
+
+    Operational failures come back as ``ok: false`` with the real stderr so the
+    UI can show it in place; only malformed requests are protocol errors.
+    """
+    parsed = _executions_target(payload)
+    enabled = payload.get("enabled")
+    if parsed is None or not isinstance(enabled, bool):
+        await session.send_json(
+            make_error(
+                msg_id, msg_type, "BAD_REQUEST",
+                "executions.set_enabled needs kind ('crontab'|'launchagent'), target and enabled",
+            )
+        )
+        return
+    kind, target = parsed
+    try:
+        if kind == "crontab":
+            await executions_service.set_crontab_enabled(target, enabled)
+        else:
+            await executions_service.set_launch_agent_enabled(target, enabled)
+    except executions_service.ExecutionsError as err:
+        await session.send_json(
+            make_response(msg_id, msg_type, {"ok": False, "error": str(err)})
+        )
+        return
+    await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
+    await _broadcast_executions_changed(session)
+
+
+@handler("executions.remove")
+async def executions_remove(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Delete one crontab entry, or unload and delete one LaunchAgent plist."""
+    parsed = _executions_target(payload)
+    if parsed is None:
+        await session.send_json(
+            make_error(
+                msg_id, msg_type, "BAD_REQUEST",
+                "executions.remove needs kind ('crontab'|'launchagent') and target",
+            )
+        )
+        return
+    kind, target = parsed
+    try:
+        if kind == "crontab":
+            await executions_service.remove_crontab_entry(target)
+        else:
+            await executions_service.remove_launch_agent(target)
+    except executions_service.ExecutionsError as err:
+        await session.send_json(
+            make_response(msg_id, msg_type, {"ok": False, "error": str(err)})
+        )
+        return
+    await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
+    await _broadcast_executions_changed(session)
