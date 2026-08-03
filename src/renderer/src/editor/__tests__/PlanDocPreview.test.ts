@@ -30,10 +30,10 @@ const PLAN_DOC = [
   '</head><body><section><h2>Goals</h2></section></body></html>',
 ].join('\n')
 
-function makeBackend(content: string | null) {
+function makeBackend(content: string | null, status = 'connected') {
   return {
     httpUrl: ref('http://127.0.0.1:1'),
-    status: ref('connected'),
+    status: ref(status),
     send: vi.fn(async (type: string) => {
       if (type === 'fs.read_file') {
         return content === null
@@ -45,8 +45,8 @@ function makeBackend(content: string | null) {
   }
 }
 
-async function mountPreview(content: string | null = PLAN_DOC) {
-  const backend = makeBackend(content)
+async function mountPreview(content: string | null = PLAN_DOC, status = 'connected') {
+  const backend = makeBackend(content, status)
   const wrapper = mount(PlanDocPreview, {
     props: {
       workspacePath: '/ws',
@@ -98,6 +98,34 @@ describe('PlanDocPreview', () => {
     expect(error.find('.pdp-error-path').text()).toContain(
       '/ws › .agent-team/plans/test-plan_a1b2c3.html',
     )
+  })
+
+  it('does not read while the backend is still starting, then loads on connect', async () => {
+    const { wrapper, backend } = await mountPreview(PLAN_DOC, 'connecting')
+    // A request here would burn the client timeout and strand the preview on
+    // the error state, since loadDoc only re-runs on a refresh bump.
+    expect(backend.send).not.toHaveBeenCalled()
+    expect(wrapper.find('.pdp-error').exists()).toBe(false)
+
+    backend.status.value = 'connected'
+    await flushPromises()
+
+    expect(backend.send).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('iframe').attributes('srcdoc') ?? '').toContain('id="plan-meta"')
+  })
+
+  it('retries a failed load when the backend reconnects', async () => {
+    const { wrapper, backend } = await mountPreview(null)
+    expect(wrapper.find('.pdp-error').exists()).toBe(true)
+
+    backend.send.mockResolvedValue({ payload: { ok: true, content: PLAN_DOC } } as never)
+    backend.status.value = 'disconnected'
+    await flushPromises()
+    backend.status.value = 'connected'
+    await flushPromises()
+
+    expect(wrapper.find('.pdp-error').exists()).toBe(false)
+    expect(wrapper.find('iframe').exists()).toBe(true)
   })
 
   it('ignores window messages whose source is not the preview frame', async () => {

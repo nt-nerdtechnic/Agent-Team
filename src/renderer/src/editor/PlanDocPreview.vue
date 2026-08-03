@@ -43,6 +43,10 @@ const loadErrorDetail = ref('')
 // True while the frame reports an in-progress inline section edit; the host
 // (PlanWindowApp) checks this so ESC cancels the edit before closing the window.
 const editing = ref(false)
+// True while a load was skipped because the backend wasn't connected. The
+// status watcher below retries; without it the skip would be permanent, since
+// loadDoc otherwise only re-runs on a refresh bump.
+const waitingForBackend = ref(false)
 // Last position reported by the runtime; re-injected on reload so a meta
 // write does not jump the document back to the top.
 const scrollY = ref(0)
@@ -62,6 +66,16 @@ async function loadDoc(): Promise<void> {
   // otherwise `editing` sticks true and ESC keeps calling cancelEdit() instead
   // of closing the window.
   editing.value = false
+  // The window mounts and opens its plan while the backend may still be
+  // starting, and the client's timer covers queue-wait plus in-flight — so a
+  // request sent now would just burn the timeout and leave the preview stuck
+  // on the error state for good. Wait for the connection instead (PlansPane
+  // gates its own load the same way).
+  if (props.backend.status?.value && props.backend.status.value !== 'connected') {
+    waitingForBackend.value = true
+    return
+  }
+  waitingForBackend.value = false
   try {
     const resp = await props.backend.send<{ ok: boolean; content?: string; error?: string }>(
       'fs.read_file',
@@ -122,6 +136,15 @@ watch(
   () => props.refresh,
   () => {
     void loadDoc()
+  },
+)
+
+// Retry on (re)connect: both a boot-time skip and a request that failed while
+// the socket was down would otherwise never recover on their own.
+watch(
+  () => props.backend.status?.value,
+  (status) => {
+    if (status === 'connected' && (waitingForBackend.value || loadError.value)) void loadDoc()
   },
 )
 
