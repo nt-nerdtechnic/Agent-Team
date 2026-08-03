@@ -34,6 +34,33 @@ export const WHATS_NEW_CHROME = {
 
 export const WHATS_NEW: WhatsNewEntry[] = [
   {
+    version: '0.1.74',
+    title: {
+      'zh-TW': 'Tasker 排程引擎與人性化 Cron 表達式文字',
+      'en-US': 'Tasker scheduling engine & human-readable cron descriptions',
+    },
+    highlights: [
+      {
+        'zh-TW':
+          'Cron 定時與循環任務：後端排程服務升級，支援 Cron 表達式定時觸發、單次與循環 Timer、以及 Max Iterations 最大執行次數限制。',
+        'en-US':
+          'Cron scheduling & recurring tasks: backend execution engine now supports cron expressions, one-shot/recurring timers, and max iteration bounds.',
+      },
+      {
+        'zh-TW':
+          'Tasker 控制介面：Tasker 面板新增直覺的 Cron 排程輸入框，動態顯示人性化中文/英文時間描述（例如「每 5 分鐘」）。',
+        'en-US':
+          'Tasker schedule UI: added intuitive cron controls with real-time human-readable time descriptions (e.g. "Every 5 minutes").',
+      },
+      {
+        'zh-TW':
+          '背景 Timer 邊界保護：強化背景排程 Timer 綁定與早期終止機制，確保逾時排程不佔用背景資源。',
+        'en-US':
+          'Protected background timers: hardened background timer binding and early termination to ensure idle schedules do not leak resources.',
+      },
+    ],
+  },
+  {
     version: '0.1.73',
     title: {
       'zh-TW': '模組化 CLI Agent 面板與互動能力全面升級',
