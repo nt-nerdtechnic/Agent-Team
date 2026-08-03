@@ -3276,6 +3276,7 @@ async def _terminal_create_impl(
             app.plugin_host,
             agent_key,
             payload["command"],
+            str(payload.get("pane_id") or ""),
         )
     if transaction["cancelled"]:
         raise _TerminalCreateCancelled

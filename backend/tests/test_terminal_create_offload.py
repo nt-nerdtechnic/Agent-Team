@@ -73,7 +73,7 @@ async def test_codex_home_lookup_prepare_and_spawn_wiring_use_to_thread(
     def probe(_agent_key: str, _command: Any) -> None:
         return None
 
-    def wire(_host: Any, _agent_key: str, command: Any) -> Any:
+    def wire(_host: Any, _agent_key: str, command: Any, _pane_id: str = "") -> Any:
         return command
 
     monkeypatch.setattr(ws_handlers.asyncio, "to_thread", spy)
@@ -129,7 +129,7 @@ async def test_claude_spawn_wiring_uses_to_thread_and_preserves_transformer_resu
     def probe(_agent_key: str, _command: Any) -> None:
         return None
 
-    def wire(_host: Any, _agent_key: str, command: Any) -> Any:
+    def wire(_host: Any, _agent_key: str, command: Any, _pane_id: str = "") -> Any:
         return [*command[:-1], f"{command[-1]} --wired"]
 
     monkeypatch.setattr(ws_handlers.asyncio, "to_thread", spy)

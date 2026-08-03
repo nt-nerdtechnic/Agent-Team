@@ -181,18 +181,22 @@ def backend_port() -> int | None:
         return None
 
 
-def apply_spawn_wiring(host: PluginHost, agent_key: str, command: Any) -> Any:
+def apply_spawn_wiring(
+    host: PluginHost, agent_key: str, command: Any, pane_id: str = ""
+) -> Any:
     """Run every plugin spawn transformer over a pane spawn command.
 
-    Each transformer is called as ``(agent_key, command, port)`` and returns
-    the (possibly unchanged) command; ``port`` is the backend's current HTTP
-    port from the discovery file (None when unknown). A failing transformer
-    is skipped — a spawn must never break over plugin wiring.
+    Each transformer is called as ``(agent_key, command, port, pane_id)`` and
+    returns the (possibly unchanged) command; ``port`` is the backend's current
+    HTTP port from the discovery file (None when unknown), and ``pane_id``
+    identifies the pane being spawned so a plugin can hand the CLI a
+    pane-specific endpoint. A failing transformer is skipped — a spawn must
+    never break over plugin wiring.
     """
     port = backend_port()
     for plugin_id, transformer in host.spawn_transformers():
         try:
-            command = transformer(agent_key, command, port)
+            command = transformer(agent_key, command, port, pane_id)
         except Exception as err:  # noqa: BLE001 - isolate broken plugins
             log.warning("plugin %s spawn transformer failed: %s", plugin_id, err)
     return command

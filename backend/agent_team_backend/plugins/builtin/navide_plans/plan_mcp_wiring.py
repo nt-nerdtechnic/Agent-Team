@@ -28,9 +28,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 import shlex
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from agent_team_backend.applog import app_data_dir, backend_port_file
 
@@ -39,9 +41,30 @@ log = logging.getLogger("agent_team_backend.plugins.builtin.navide_plans.plan_mc
 SERVER_NAME = "navide-plans"
 CLAUDE_CONFIG_FILENAME = "plan-mcp.json"
 
+_CALLER_TOKEN = ""
 
-def plan_mcp_url(port: int) -> str:
-    return f"http://127.0.0.1:{port}/plan-mcp"
+
+def plan_mcp_url(port: int, pane_id: str = "") -> str:
+    """Endpoint URL, optionally identifying the pane the CLI runs in.
+
+    The endpoint is shared by every pane, so a tool that acts *as* the calling
+    pane (cli_send) has no other way to know who is asking — the pane id rides
+    in the query string and the server reads it off the HTTP request. The token
+    stops another local process from claiming to be a pane just by guessing an
+    id; it is regenerated on every backend start.
+    """
+    base = f"http://127.0.0.1:{port}/plan-mcp"
+    if not pane_id:
+        return base
+    return f"{base}?pane={quote(pane_id, safe='')}&t={quote(caller_token(), safe='')}"
+
+
+def caller_token() -> str:
+    """Per-run secret proving a caller really is a pane Navide spawned."""
+    global _CALLER_TOKEN
+    if not _CALLER_TOKEN:
+        _CALLER_TOKEN = secrets.token_urlsafe(24)
+    return _CALLER_TOKEN
 
 
 def claude_config_path() -> Path:
@@ -108,18 +131,34 @@ def _append_to_command(command: Any, suffix: str) -> Any:
     return f"{command} {suffix}"
 
 
+def claude_inline_config(port: int, pane_id: str) -> str:
+    """Single-line JSON for claude's ``--mcp-config`` (it accepts a literal JSON
+    string as well as a path), so a pane-specific URL needs no per-pane file."""
+    return json.dumps(
+        {"mcpServers": {SERVER_NAME: {"type": "http", "url": plan_mcp_url(port, pane_id)}}},
+        separators=(",", ":"),
+    )
+
+
 def wire_command(
     agent_key: str,
     command: Any,
     port: int | None,
+    pane_id: str = "",
+    *,
     claude_config: Path | None = None,
 ) -> Any:
     """Append Plan-MCP wiring flags to a pane spawn command.
 
     No-op for non-claude/codex agents, unknown port, empty commands,
     already-wired commands, a user-supplied ``--mcp-config`` (respect their
-    deliberate MCP setup, esp. with --strict-mcp-config), or (claude) a
-    missing config file — a spawn must never break over MCP wiring.
+    deliberate MCP setup, esp. with --strict-mcp-config), or (claude, when no
+    pane id is known) a missing config file — a spawn must never break over MCP
+    wiring.
+
+    With a pane id, claude gets the config inline rather than by path: the URL
+    now differs per pane, and writing one file per pane would leave litter
+    behind in the app data dir.
     """
     if port is None:
         return command
@@ -129,6 +168,9 @@ def wire_command(
     if agent_key == "claude":
         if "--mcp-config" in text:
             return command
+        if pane_id:
+            inline = claude_inline_config(port, pane_id)
+            return _append_to_command(command, f"--mcp-config {shlex.quote(inline)}")
         config = claude_config or claude_config_path()
         if not config.is_file():
             return command
@@ -136,6 +178,6 @@ def wire_command(
     if agent_key == "codex":
         if f"mcp_servers.{SERVER_NAME}" in text:
             return command
-        override = f'mcp_servers.{SERVER_NAME}.url="{plan_mcp_url(port)}"'
+        override = f'mcp_servers.{SERVER_NAME}.url="{plan_mcp_url(port, pane_id)}"'
         return _append_to_command(command, f"-c {shlex.quote(override)}")
     return command

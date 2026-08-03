@@ -58,7 +58,9 @@ def prepare_claude_add_dir(
         return None
 
 
-def wire_command(agent_key: str, command: Any, _port: int | None) -> Any:
+def wire_command(
+    agent_key: str, command: Any, _port: int | None, _pane_id: str = ""
+) -> Any:
     """Append one idempotent Claude ``--add-dir`` flag; all other agents no-op."""
     if agent_key != "claude":
         return command

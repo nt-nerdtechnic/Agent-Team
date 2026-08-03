@@ -74,7 +74,7 @@ def claude_config(tmp_path: Path) -> Path:
 
 def test_wire_claude_appends_quoted_flag_to_shell_wrapper(claude_config: Path) -> None:
     command = ["/bin/zsh", "-ilc", "claude --dangerously-skip-permissions"]
-    wired = plan_mcp_wiring.wire_command("claude", command, 4567, claude_config)
+    wired = plan_mcp_wiring.wire_command("claude", command, 4567, claude_config=claude_config)
     assert wired[:2] == ["/bin/zsh", "-ilc"]
     assert wired[2] == (
         "claude --dangerously-skip-permissions "
@@ -84,24 +84,24 @@ def test_wire_claude_appends_quoted_flag_to_shell_wrapper(claude_config: Path) -
 
 
 def test_wire_claude_plain_string_command(claude_config: Path) -> None:
-    wired = plan_mcp_wiring.wire_command("claude", "claude", 4567, claude_config)
+    wired = plan_mcp_wiring.wire_command("claude", "claude", 4567, claude_config=claude_config)
     assert wired == f"claude --mcp-config {shlex.quote(str(claude_config))}"
 
 
 def test_wire_claude_second_run_is_noop(claude_config: Path) -> None:
-    once = plan_mcp_wiring.wire_command("claude", "claude", 4567, claude_config)
-    twice = plan_mcp_wiring.wire_command("claude", once, 4567, claude_config)
+    once = plan_mcp_wiring.wire_command("claude", "claude", 4567, claude_config=claude_config)
+    twice = plan_mcp_wiring.wire_command("claude", once, 4567, claude_config=claude_config)
     assert twice == once
 
 
 def test_wire_claude_respects_user_mcp_config_flag(claude_config: Path) -> None:
     command = "claude --mcp-config /home/user/my-servers.json --strict-mcp-config"
-    assert plan_mcp_wiring.wire_command("claude", command, 4567, claude_config) == command
+    assert plan_mcp_wiring.wire_command("claude", command, 4567, claude_config=claude_config) == command
 
 
 def test_wire_claude_missing_config_file_is_noop(tmp_path: Path) -> None:
     missing = tmp_path / "nope" / "plan-mcp.json"
-    assert plan_mcp_wiring.wire_command("claude", "claude", 4567, missing) == "claude"
+    assert plan_mcp_wiring.wire_command("claude", "claude", 4567, claude_config=missing) == "claude"
 
 
 # ---- wire_command: codex ----
@@ -131,7 +131,7 @@ def test_wire_codex_second_run_is_noop() -> None:
 
 
 def test_wire_noop_without_port(claude_config: Path) -> None:
-    assert plan_mcp_wiring.wire_command("claude", "claude", None, claude_config) == "claude"
+    assert plan_mcp_wiring.wire_command("claude", "claude", None, claude_config=claude_config) == "claude"
     assert plan_mcp_wiring.wire_command("codex", "codex", None) == "codex"
 
 
@@ -182,7 +182,7 @@ async def test_terminal_create_wires_claude_pane(
     # conftest points AGENT_TEAM_DATA_DIR at tmp_path: stage the port
     # discovery file and the startup-written claude config there.
     (tmp_path / "backend-port").write_text("4567", encoding="utf-8")
-    config = plan_mcp_wiring.write_claude_config(4567)
+    plan_mcp_wiring.write_claude_config(4567)
     monkeypatch.setattr(app, "attribution", FakeAttribution())
     monkeypatch.setattr(app, "_register_workspace_and_backfill", lambda _ws: None)
 
@@ -212,8 +212,13 @@ async def test_terminal_create_wires_claude_pane(
     finally:
         plugin_wiring.shutdown(app.plugin_host)
 
+    # The endpoint is shared by every pane, so the URL carries the pane id (and
+    # the caller token) — which means claude gets the config inline rather than
+    # as a path, so no per-pane file is left behind.
     created = session.terminals.created[0]  # type: ignore[attr-defined]
+    inline = plan_mcp_wiring.claude_inline_config(4567, "pane-1")
     assert created["command"][2] == (
-        "claude --dangerously-skip-permissions "
-        f"--mcp-config {shlex.quote(str(config))}"
+        f"claude --dangerously-skip-permissions --mcp-config {shlex.quote(inline)}"
     )
+    assert "pane=pane-1" in inline
+    assert plan_mcp_wiring.caller_token() in inline

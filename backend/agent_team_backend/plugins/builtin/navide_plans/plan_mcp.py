@@ -29,7 +29,7 @@ from html import escape as html_escape
 from pathlib import Path
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.responses import PlainTextResponse
 from starlette.types import Receive, Scope, Send
@@ -78,7 +78,16 @@ server = FastMCP(
         "plan_add_note. Always edit through these tools — writing the HTML "
         "yourself corrupts the plan-meta island Navide reads.\n"
         "\n"
-        "Dispatch tools: list_dispatch_targets, plan_dispatch."
+        "Dispatch tools: list_dispatch_targets, plan_dispatch.\n"
+        "\n"
+        "Talking to other CLI panes: you can send an instruction to another "
+        "CLI agent Navide is running — in this workspace or in another "
+        "workspace window — with cli_send. Call cli_list_targets first to see "
+        "who exists and how to address them (a bare pane name in your own "
+        "workspace, `<folder>/<pane>` for another one). Use it when the user "
+        "asks you to hand work to, ask something of, or coordinate with "
+        "another pane or project; delivery waits for that pane to be idle, so "
+        "it is not an instant reply channel."
     ),
 )
 
@@ -623,6 +632,133 @@ async def list_dispatch_targets(
             continue
         targets.append(entry)
     return targets
+
+
+# ── Inter-CLI messaging (cli_send / cli_list_targets) ───────────────────────
+# The `---MSG---` output protocol only reaches agents that were taught it in
+# their kickoff, so a hand-opened pane has no way to discover it. These tools do
+# — they show up in the agent's tool list on their own. Both route through the
+# same backend registry as the protocol, and delivery still runs in the frontend
+# (idle gate, rate limit, injection verification), so the two paths behave alike.
+
+
+class CallerUnknown(Exception):
+    """The request carries no usable pane identity."""
+
+
+def _caller_pane_id(ctx: Context) -> str:
+    """The pane whose CLI is calling, from the pane-specific endpoint URL.
+
+    Every pane is spawned pointing at `/plan-mcp?pane=<id>&t=<token>`; the token
+    is minted per backend run, so another local process cannot claim to be a
+    pane by guessing an id.
+    """
+    from agent_team_backend.plugins.builtin.navide_plans import plan_mcp_wiring
+
+    request = getattr(ctx.request_context, "request", None)
+    params = getattr(request, "query_params", None)
+    if params is None:
+        raise CallerUnknown(
+            "this MCP endpoint could not identify your pane — reopen the pane so "
+            "Navide can wire it, or use the ---MSG-START--- output protocol"
+        )
+    pane_id = str(params.get("pane") or "")
+    token = str(params.get("t") or "")
+    if not pane_id:
+        raise CallerUnknown(
+            "this MCP endpoint could not identify your pane — reopen the pane so "
+            "Navide can wire it, or use the ---MSG-START--- output protocol"
+        )
+    if not secrets.compare_digest(token, plan_mcp_wiring.caller_token()):
+        raise CallerUnknown("caller token rejected; reopen the pane to re-wire it")
+    return pane_id
+
+
+@server.tool()
+async def cli_list_targets(ctx: Context) -> dict[str, Any]:
+    """List the CLI panes you can send instructions to with cli_send.
+
+    Returns {you, targets}. Each target: {name, address, workspace_path,
+    same_workspace}. Address a pane in YOUR workspace by its bare name; a pane
+    in another workspace window by the `<folder>/<pane>` address given here.
+    Read-only.
+    """
+    from agent_team_backend import agent_messaging
+
+    try:
+        me = _caller_pane_id(ctx)
+    except CallerUnknown as err:
+        return {"error": str(err), "targets": []}
+    caller = agent_messaging.get(me)
+    targets = [
+        {
+            "name": entry.name,
+            "address": entry.qualified_name,
+            "workspace_path": entry.workspace_path,
+            "same_workspace": bool(caller and caller.workspace_path == entry.workspace_path),
+        }
+        for entry in agent_messaging.list_panes()
+        if entry.pane_id != me
+    ]
+    return {
+        "you": caller.qualified_name if caller else None,
+        "targets": targets,
+    }
+
+
+@server.tool()
+async def cli_send(to: str, text: str, ctx: Context) -> dict[str, Any]:
+    """Send an instruction to another CLI pane, in this or another workspace.
+
+    `to` is a pane name for a pane in your own workspace, or `<folder>/<pane>`
+    for one in another workspace window — cli_list_targets shows both forms. The
+    text is delivered verbatim and submitted for the receiving agent to act on,
+    once that pane is idle; it is queued if the pane is mid-turn. An unknown or
+    ambiguous target is refused rather than guessed.
+
+    Delivery is asynchronous: this returns once the message is accepted for
+    delivery, not once the other agent has read it. Returns
+    {ok, target, cross_workspace} or {ok: false, error}.
+    """
+    from agent_team_backend import agent_messaging, app
+    from agent_team_backend.ipc import make_event
+
+    try:
+        me = _caller_pane_id(ctx)
+    except CallerUnknown as err:
+        return {"ok": False, "error": str(err)}
+    if not (text or "").strip():
+        return {"ok": False, "error": "text is empty"}
+
+    result = agent_messaging.resolve(me, to)
+    if result.pane is None:
+        return {"ok": False, "error": result.error or f'unknown target "{to}"'}
+    if result.pane.pane_id == me:
+        return {"ok": False, "error": "that is your own pane"}
+
+    sender = agent_messaging.get(me)
+    msg_key = f"{me}:mcp:{secrets.token_hex(8)}"
+    await app.broadcast(
+        make_event(
+            "agent_msg.deliver",
+            {
+                "msg_key": msg_key,
+                "target_pane_id": result.pane.pane_id,
+                "target_workspace_path": result.pane.workspace_path,
+                "target_name": result.pane.name,
+                "from_pane_id": me,
+                "from_display": agent_messaging.sender_display(me, "another pane"),
+                "from_workspace_path": sender.workspace_path if sender else "",
+                "cross_workspace": result.cross_workspace,
+                "content": text,
+            },
+        )
+    )
+    return {
+        "ok": True,
+        "target": result.pane.qualified_name,
+        "cross_workspace": result.cross_workspace,
+    }
 
 
 # ── ASGI mount + lifecycle ──────────────────────────────────────────────────

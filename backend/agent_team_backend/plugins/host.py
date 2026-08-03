@@ -95,7 +95,7 @@ class PluginContext:
     routes: list[RegisteredRoute] = field(default_factory=list)
     startup_hooks: list[Callable[[], Any]] = field(default_factory=list)
     shutdown_hooks: list[Callable[[], Any]] = field(default_factory=list)
-    spawn_transformers: list[Callable[[str, Any, int | None], Any]] = field(
+    spawn_transformers: list[Callable[[str, Any, int | None, str], Any]] = field(
         default_factory=list
     )
 
@@ -114,10 +114,10 @@ class PluginContext:
         self.shutdown_hooks.append(hook)
 
     def register_spawn_transformer(
-        self, transformer: Callable[[str, Any, int | None], Any]
+        self, transformer: Callable[[str, Any, int | None, str], Any]
     ) -> None:
-        """Register a ``(agent_key, command, port) -> command`` transformer
-        applied to pane spawn commands at terminal.create time."""
+        """Register a ``(agent_key, command, port, pane_id) -> command``
+        transformer applied to pane spawn commands at terminal.create time."""
         self.spawn_transformers.append(transformer)
 
     def clear_registrations(self) -> None:
@@ -251,7 +251,7 @@ class PluginHost:
 
     def spawn_transformers(
         self,
-    ) -> list[tuple[str, Callable[[str, Any, int | None], Any]]]:
+    ) -> list[tuple[str, Callable[[str, Any, int | None, str], Any]]]:
         """``(plugin_id, transformer)`` pairs from activated plugins."""
         return [
             (lp.manifest.id, transformer)
