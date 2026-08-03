@@ -223,6 +223,26 @@ async def test_list_handler_returns_all_workspaces_when_unfiltered() -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_pairs_pane_id_with_its_address() -> None:
+    """The drag-to-mention path resolves a dropped pane id to its address
+    straight from this listing, so the pairing has to be exact."""
+    _seed_two_workspaces()
+    session = _session()
+    await app.handle_message(session, {
+        "id": "l2",
+        "type": "agent_msg.list",
+        "payload": {},
+    })
+    panes = session.websocket.sent[0]["payload"]["panes"]  # type: ignore[attr-defined]
+    by_id = {p["pane_id"]: p["qualified_name"] for p in panes}
+    assert by_id == {
+        "p1": "alpha/claude-1",
+        "p2": "alpha/reviewer",
+        "p3": "beta/reviewer",
+    }
+
+
+@pytest.mark.asyncio
 async def test_route_handler_broadcasts_deliver_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

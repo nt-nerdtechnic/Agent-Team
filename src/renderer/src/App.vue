@@ -1759,6 +1759,9 @@ function readPaneShareText(ref: NonNullable<(typeof paneRefs)[string]>, maxLines
 // rather than pushed: the list only feeds autocomplete, so a slightly stale
 // snapshot costs nothing (routing itself always re-resolves in the backend).
 const remoteMessagingTargets = ref<string[]>([])
+/** paneId → `<folder>/<pane>`, so a pane dragged in from another window can be
+ *  turned into an address without a second round trip. */
+const remoteTargetByPane = new Map<string, string>()
 
 async function refreshRemoteMessagingTargets(): Promise<void> {
   try {
@@ -1766,12 +1769,25 @@ async function refreshRemoteMessagingTargets(): Promise<void> {
       panes?: Array<{ pane_id?: string; qualified_name?: string }>
     }>('agent_msg.list', {})
     const localIds = new Set(panes.value.map((p) => p.id))
-    remoteMessagingTargets.value = (resp.payload?.panes ?? [])
-      .filter((p) => p.pane_id && p.qualified_name && !localIds.has(p.pane_id))
-      .map((p) => p.qualified_name as string)
+    const remote = (resp.payload?.panes ?? []).filter(
+      (p) => p.pane_id && p.qualified_name && !localIds.has(p.pane_id),
+    )
+    remoteTargetByPane.clear()
+    for (const p of remote) remoteTargetByPane.set(p.pane_id as string, p.qualified_name as string)
+    remoteMessagingTargets.value = remote.map((p) => p.qualified_name as string)
   } catch {
     remoteMessagingTargets.value = []
+    remoteTargetByPane.clear()
   }
+}
+
+/** The cross-workspace address of a pane living in another window. Refreshes
+ *  once on a miss — a pane opened since the last poll is the common case. */
+async function remoteAddressOf(paneId: string): Promise<string | null> {
+  const cached = remoteTargetByPane.get(paneId)
+  if (cached) return cached
+  await refreshRemoteMessagingTargets()
+  return remoteTargetByPane.get(paneId) ?? null
 }
 
 // Messaging names offered by pane `paneId`'s @-mention autocomplete menu: every
@@ -1788,6 +1804,23 @@ function mentionCandidatesFor(paneId: string): string[] {
   return [...local, ...remoteMessagingTargets.value]
 }
 
+/** Mention mode for a pane drop: an "@" typed immediately before the drop means
+ *  "insert just this pane's address", completing e.g. "傳給 @" + drop →
+ *  "傳給 @codex-1 ". Returns true when it handled the drop; false falls through
+ *  to the full context share (source has no address — a plain terminal, or a
+ *  remote pane the registry does not know). */
+async function tryMentionOnDrop(
+  targetPaneId: string,
+  resolveAddress: () => string | null | Promise<string | null>,
+): Promise<boolean> {
+  const lineBeforeCursor = paneRefs[targetPaneId]?.readLineBeforeCursor?.()
+  if (lineBeforeCursor === undefined || !endsWithMentionTrigger(lineBeforeCursor)) return false
+  const address = await resolveAddress()
+  if (!address) return false
+  await pastePaneContext(targetPaneId, address + ' ')
+  return true
+}
+
 // Cross-pane context share: pane A dragged onto pane B's terminal area pastes a
 // tail excerpt of A's rendered scrollback into B's input prompt (TerminalPane's
 // 'cli-context-drop'). Deliberately NOT injectText: no Enter is sent — the text
@@ -1802,6 +1835,19 @@ async function injectPaneContext(sourcePaneId: string, targetPaneId: string): Pr
   // share, however, so never ask another window to provide stale context for it.
   if (!sourcePane || !sourceRef) {
     if (!sourcePane || sourcePane.realized) {
+      // A source in another window used to have no address, so mention mode
+      // skipped it and always pulled its scrollback over. Now that it can be
+      // reached at `<folder>/<pane>`, an "@" before the drop means the same
+      // thing here as it does locally. Same target liveness rule as the relay
+      // path below — a dead pane is not a drop target.
+      const targetStatus = paneRefs[targetPaneId]?.displayStatus as string | undefined
+      if (
+        targetStatus !== 'exited' &&
+        targetStatus !== 'error' &&
+        (await tryMentionOnDrop(targetPaneId, () => remoteAddressOf(sourcePaneId)))
+      ) {
+        return
+      }
       await injectExternalPaneContext(sourcePaneId, targetPaneId)
     }
     return
@@ -1809,15 +1855,7 @@ async function injectPaneContext(sourcePaneId: string, targetPaneId: string): Pr
   // Placeholders have no live PTY/buffer. A target placeholder cannot accept a
   // paste either.
   if (!sourcePane.realized || !panes.value.find((p) => p.id === targetPaneId)?.realized || !targetSessionId) return
-  // Mention mode: an "@" typed immediately before the drop means "insert just
-  // this pane's messaging name", completing e.g. "傳給 @" + drop → "傳給 @codex-1 ".
-  // Falls through to the full context share when the source has no name
-  // (plain terminal, cross-window source).
-  const lineBeforeCursor = paneRefs[targetPaneId]?.readLineBeforeCursor?.()
-  if (lineBeforeCursor !== undefined && endsWithMentionTrigger(lineBeforeCursor) && sourcePane?.messagingName) {
-    await pastePaneContext(targetPaneId, sourcePane.messagingName + ' ')
-    return
-  }
+  if (await tryMentionOnDrop(targetPaneId, () => sourcePane.messagingName ?? null)) return
 
   const text = buildPaneContextPaste({
     paneId: sourcePane.id,
