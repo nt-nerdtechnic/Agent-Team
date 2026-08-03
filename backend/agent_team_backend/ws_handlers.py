@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from pydantic import ValidationError
 
-from . import executions_service, storage_service
+from . import agent_messaging, executions_service, storage_service
 from .ipc import make_error, make_event, make_response
 from .log_readers.claude import ClaudeLogReader, first_user_prompts
 from .credential_vault import DEFAULT_SLOT_ID
@@ -4814,3 +4814,155 @@ async def executions_remove(session: "Session", msg_id: str, msg_type: str, payl
         return
     await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
     await _broadcast_executions_changed(session)
+
+
+# ── Cross-workspace inter-CLI messaging (agent_msg.*) ───────────────────────
+# Each renderer window mirrors its own pane handles here so the backend — the
+# only process that sees every workspace — can resolve `to: <folder>/<pane>`
+# targets. Delivery stays in the frontend: a resolved cross-workspace message is
+# broadcast back out as an `agent_msg.deliver` event, and the window that owns
+# the target pane runs it through the existing injection queue.
+
+
+@handler("agent_msg.register")
+async def agent_msg_register(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    pane_id = str(payload.get("pane_id") or "")
+    name = str(payload.get("name") or "")
+    workspace_path = str(payload.get("workspace_path") or "")
+    if not pane_id or not name or not workspace_path:
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "BAD_REQUEST",
+                "agent_msg.register needs pane_id, name and workspace_path",
+            )
+        )
+        return
+    entry = agent_messaging.register(
+        pane_id,
+        name,
+        workspace_path,
+        agent_key=str(payload.get("agent_key") or ""),
+        owner=session,
+    )
+    await session.send_json(make_response(msg_id, msg_type, entry.to_dict()))
+
+
+@handler("agent_msg.unregister")
+async def agent_msg_unregister(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    pane_id = str(payload.get("pane_id") or "")
+    removed = bool(pane_id) and agent_messaging.unregister(pane_id, owner=session)
+    await session.send_json(make_response(msg_id, msg_type, {"ok": True, "removed": removed}))
+
+
+@handler("agent_msg.list")
+async def agent_msg_list(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    raw_ws = payload.get("workspace_path")
+    workspace_path = str(raw_ws) if isinstance(raw_ws, str) and raw_ws else None
+    entries = [e.to_dict() for e in agent_messaging.list_panes(workspace_path)]
+    await session.send_json(make_response(msg_id, msg_type, {"panes": entries}))
+
+
+@handler("agent_msg.route")
+async def agent_msg_route(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    from . import app
+
+    from_pane_id = str(payload.get("from_pane_id") or "")
+    to = str(payload.get("to") or "")
+    content = str(payload.get("content") or "")
+    msg_key = str(payload.get("msg_key") or "")
+    if not from_pane_id or not to or not msg_key:
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "BAD_REQUEST",
+                "agent_msg.route needs from_pane_id, to and msg_key",
+            )
+        )
+        return
+
+    result = agent_messaging.resolve(from_pane_id, to)
+    if result.pane is None:
+        await session.send_json(
+            make_response(msg_id, msg_type, {"ok": False, "error": result.error or "unresolved"})
+        )
+        return
+
+    if result.pane.pane_id == from_pane_id:
+        await session.send_json(
+            make_response(
+                msg_id, msg_type, {"ok": False, "error": "sender and target are the same pane"}
+            )
+        )
+        return
+
+    sender = agent_messaging.get(from_pane_id)
+    from_display = agent_messaging.sender_display(
+        from_pane_id, str(payload.get("from_name") or "")
+    )
+    asyncio.create_task(
+        app.broadcast(
+            make_event(
+                "agent_msg.deliver",
+                {
+                    "msg_key": msg_key,
+                    "target_pane_id": result.pane.pane_id,
+                    "target_workspace_path": result.pane.workspace_path,
+                    "target_name": result.pane.name,
+                    "from_pane_id": from_pane_id,
+                    "from_display": from_display,
+                    "from_workspace_path": sender.workspace_path if sender else "",
+                    "cross_workspace": result.cross_workspace,
+                    "content": content,
+                },
+            )
+        )
+    )
+    await session.send_json(
+        make_response(
+            msg_id,
+            msg_type,
+            {
+                "ok": True,
+                "target_pane_id": result.pane.pane_id,
+                "target_workspace_path": result.pane.workspace_path,
+                "target_display": result.pane.qualified_name,
+                "cross_workspace": result.cross_workspace,
+            },
+        )
+    )
+
+
+@handler("agent_msg.delivered")
+async def agent_msg_delivered(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """The receiving window reports the outcome so the sending window's message
+    log can leave the `queued` state.
+
+    Not excluding the reporter: a workspace-qualified target may resolve to a
+    pane in the SAME window, and then sender and receiver are one connection —
+    excluding it would strand that message in `queued` forever. Windows with no
+    matching msg_key ignore the event.
+    """
+    from . import app
+
+    msg_key = str(payload.get("msg_key") or "")
+    if not msg_key:
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "agent_msg.delivered needs msg_key")
+        )
+        return
+    asyncio.create_task(
+        app.broadcast(
+            make_event(
+                "agent_msg.delivery_result",
+                {
+                    "msg_key": msg_key,
+                    "ok": bool(payload.get("ok", False)),
+                    "reason": str(payload.get("reason") or ""),
+                },
+            )
+        )
+    )
+    await session.send_json(make_response(msg_id, msg_type, {"ok": True}))

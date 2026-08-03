@@ -25,6 +25,7 @@ from pydantic import ValidationError
 from uvicorn.protocols.utils import ClientDisconnected
 
 from . import __version__
+from . import agent_messaging
 from .analyzer import DEFAULT_MODEL as ANALYZER_DEFAULT_MODEL
 from .analyzer import (
     classify as _llama_classify,
@@ -1288,6 +1289,9 @@ async def ws(websocket: WebSocket) -> None:
         orphaned = [tid for tid, owner in _PTY_OWNERS.items() if owner is session]
         for tid in orphaned:
             del _PTY_OWNERS[tid]
+        # Forget the messaging handles this window mirrored, so a closed window's
+        # panes stop showing up as cross-workspace targets.
+        agent_messaging.drop_owner(session)
         # PTYs survive this disconnect so the frontend can reattach after a
         # transient network outage. They are killed only when the user explicitly
         # closes a pane (terminal.kill) or the whole app process exits.
