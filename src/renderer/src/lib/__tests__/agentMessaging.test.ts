@@ -5,6 +5,7 @@ import {
   MSG_ENVELOPE_PREFIX,
   SPAWN_START,
   SPAWN_END,
+  isQualifiedTarget,
   parseMessages,
   parseSpawns,
   renderSpawnKickoff,
@@ -271,5 +272,27 @@ describe('uniqueMessagingName', () => {
   it('leaves differing numeric groups untouched (not a run)', () => {
     expect(uniqueMessagingName('v1-2-3', [])).toBe('v1-2-3')
     expect(uniqueMessagingName('v1-2-3', ['v1-2-3'])).toBe('v1-2-4')
+  })
+})
+
+describe('isQualifiedTarget', () => {
+  it('treats a bare name as workspace-local', () => {
+    expect(isQualifiedTarget('reviewer')).toBe(false)
+    expect(isQualifiedTarget('  claude-1  ')).toBe(false)
+    expect(isQualifiedTarget('後端組')).toBe(false)
+  })
+  it('recognises folder-qualified and absolute-path targets', () => {
+    expect(isQualifiedTarget('Agent-Team/reviewer')).toBe(true)
+    expect(isQualifiedTarget('/Users/me/Agent-Team/reviewer')).toBe(true)
+    expect(isQualifiedTarget('parent/proj/reviewer')).toBe(true)
+  })
+})
+
+describe('parseMessages with qualified targets', () => {
+  it('keeps a slash-qualified target intact', () => {
+    const blocks = parseMessages(
+      `${MSG_START} to: Agent-Team/reviewer\nrun the tests\n${MSG_END}`,
+    )
+    expect(blocks).toEqual([{ target: 'Agent-Team/reviewer', content: 'run the tests' }])
   })
 })

@@ -204,6 +204,15 @@ export function defaultMessagingName(agentKey: string, taken: Iterable<string>):
   }
 }
 
+/**
+ * True when a `to:` target names another workspace (`<folder>/<pane>` or
+ * `/abs/path/<pane>`). Bare names stay workspace-local, which is the original
+ * single-window behaviour.
+ */
+export function isQualifiedTarget(to: string): boolean {
+  return to.trim().includes('/')
+}
+
 /** A usable messagingName: non-empty, single line. Returns trimmed name or null. */
 export function normalizeMessagingName(raw: string): string | null {
   const name = raw.trim()

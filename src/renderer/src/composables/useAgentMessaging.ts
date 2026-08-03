@@ -2,6 +2,7 @@ import { readonly, ref } from 'vue'
 import {
   renderEnvelope,
   defaultMessagingName,
+  isQualifiedTarget,
   normalizeMessagingName,
   uniqueMessagingName,
 } from '../lib/agentMessaging'
@@ -31,6 +32,19 @@ export interface AgentMessage {
   reason?: string
   createdAt: number
   deliveredAt?: number
+  /** Set when the message crossed a workspace boundary. 'outbound' entries live
+   *  in the sending window and are resolved by a delivery report; 'inbound'
+   *  entries live in the receiving window and are delivered locally. */
+  remote?: 'outbound' | 'inbound'
+  /** The other workspace involved, for display in the log panel. */
+  remoteWorkspace?: string
+}
+
+export interface RouteResult {
+  ok: boolean
+  error?: string
+  targetDisplay?: string
+  targetWorkspacePath?: string
 }
 
 export interface MessagingDeps {
@@ -39,12 +53,30 @@ export interface MessagingDeps {
   deliver: (paneId: string, text: string) => Promise<boolean>
   /** True when the pane can accept an injection right now (idle + settled). */
   isPaneIdle: (paneId: string) => boolean
+  /** Ask the backend registry to route a target this window does not own.
+   *  Absent (or throwing) → cross-workspace addressing degrades to the previous
+   *  local-only behaviour. */
+  routeRemote?: (args: {
+    fromPaneId: string
+    fromName: string
+    to: string
+    content: string
+    msgKey: string
+  }) => Promise<RouteResult>
+  /** Tell the sending window how an inbound cross-workspace message ended. */
+  reportDelivery?: (msgKey: string, ok: boolean, reason: string) => void
 }
 
 export const RATE_LIMIT_MAX = 5
 export const RATE_LIMIT_WINDOW_MS = 60_000
 export const QUEUE_CAP = 10
 const LOG_CAP = 500
+/** Backstop for an outbound cross-workspace message whose target window never
+ *  reports back (window killed mid-queue, machine slept). Deliberately long: the
+ *  receiving pane may legitimately stay busy for a long turn before its queue
+ *  drains, and every orderly outcome — delivered, injection failed, pane closed,
+ *  queue full — is reported explicitly well before this fires. */
+const REMOTE_ACK_TIMEOUT_MS = 30 * 60_000
 
 /** Reserved `to:` keywords that fan a message out to every other pane instead
  *  of a single named target. `all` (case-insensitive) or `*`. */
@@ -70,6 +102,10 @@ const delivering = new Set<string>()
 const envelopes = new Map<number, string>()
 /** Enqueue timestamps per `${from}→${to}` pair, for rate limiting. */
 const pairSends = new Map<string, number[]>()
+/** Outbound cross-workspace messages awaiting a delivery report, by msgKey. */
+const remoteOutbound = new Map<string, { id: number; sentAt: number }>()
+/** Inbound cross-workspace messages to report back on, message id → msgKey. */
+const remoteInbound = new Map<number, string>()
 
 function configureMessaging(d: MessagingDeps): void {
   deps = d
@@ -122,7 +158,12 @@ function renamePane(paneId: string, rawName: string): boolean {
 
 function unregisterPane(paneId: string): void {
   const q = queues.get(paneId) ?? []
-  for (const id of q) failMessage(id, 'target pane closed')
+  for (const id of q) {
+    failMessage(id, 'target pane closed')
+    // Undelivered cross-workspace messages must not leave the sending window
+    // waiting for a report that will never come.
+    ackInbound(id, false, 'target pane closed')
+  }
   queues.delete(paneId)
   delivering.delete(paneId)
   const name = nameByPane.get(paneId)
@@ -167,11 +208,35 @@ function pushLog(m: AgentMessage): void {
   }
 }
 
-function overRateLimit(from: string, to: string, now: number): boolean {
-  const key = `${from}→${to}`
+/** Rate-limit key for a sender→target pair.
+ *
+ *  Local targets key on the exact handle, exactly as before — a pane may
+ *  legitimately be named `fix/bug`, and it must keep its own budget.
+ *
+ *  A remotely-routed target instead keys on the pane name alone: the backend
+ *  accepts several spellings of the same address (folder basename, path suffix,
+ *  absolute path), and one budget per spelling would multiply the limit. */
+function pairKey(from: string, to: string, remote: boolean): string {
+  if (!remote) return `${from}→${to}`
+  const t = to.trim()
+  const slash = t.lastIndexOf('/')
+  return `${from}→remote:${slash === -1 ? t : t.slice(slash + 1)}`
+}
+
+function overRateLimit(from: string, to: string, now: number, remote = false): boolean {
+  const key = pairKey(from, to, remote)
   const stamps = (pairSends.get(key) ?? []).filter((t) => now - t < RATE_LIMIT_WINDOW_MS)
   pairSends.set(key, stamps)
   return stamps.length >= RATE_LIMIT_MAX
+}
+
+/** Report an inbound cross-workspace message's outcome back to the sending
+ *  window. Idempotent: only the first call for a message reports. */
+function ackInbound(id: number, ok: boolean, reason: string): void {
+  const msgKey = remoteInbound.get(id)
+  if (msgKey === undefined) return
+  remoteInbound.delete(id)
+  deps?.reportDelivery?.(msgKey, ok, reason)
 }
 
 export interface SendOptions {
@@ -197,6 +262,12 @@ function sendMessage(from: string, to: string, content: string, opts: SendOption
 
   const targetPane = paneIdOf(to)
   if (!targetPane) {
+    // A `<folder>/<pane>` target this window does not own may live in another
+    // workspace window; anything else keeps failing straight away as before.
+    if (deps.routeRemote && isQualifiedTarget(to)) {
+      dispatchRemote(msg, from, to, content, now)
+      return msg
+    }
     failMessage(msg.id, `unknown target "${to}"`)
     return msg
   }
@@ -214,12 +285,137 @@ function sendMessage(from: string, to: string, content: string, opts: SendOption
     return msg
   }
 
-  const key = `${from}→${to}`
+  const key = pairKey(from, to, false)
   pairSends.set(key, [...(pairSends.get(key) ?? []), now])
   envelopes.set(msg.id, renderEnvelope(from, content, opts))
   q.push(msg.id)
   queues.set(targetPane, q)
   return msg
+}
+
+// ── Cross-workspace routing ────────────────────────────────────────────────
+/**
+ * Hand a `<folder>/<pane>` target to the backend registry. The message stays
+ * `queued` here until the receiving window reports back, so the log reflects
+ * what actually happened rather than assuming success. The per-pair rate limit
+ * applies exactly as it does locally; the queue cap belongs to the receiving
+ * window, which owns the target's queue.
+ */
+function dispatchRemote(
+  msg: AgentMessage,
+  from: string,
+  to: string,
+  content: string,
+  now: number,
+): void {
+  const routeRemote = deps?.routeRemote
+  if (!routeRemote) {
+    failMessage(msg.id, `unknown target "${to}"`)
+    return
+  }
+  const fromPaneId = paneIdOf(from)
+  if (!fromPaneId) {
+    failMessage(msg.id, `unknown target "${to}"`)
+    return
+  }
+  if (overRateLimit(from, to, now, true)) {
+    failMessage(
+      msg.id,
+      `rate limit: max ${RATE_LIMIT_MAX} msgs / ${RATE_LIMIT_WINDOW_MS / 1000}s per pair`,
+    )
+    return
+  }
+  const key = pairKey(from, to, true)
+  pairSends.set(key, [...(pairSends.get(key) ?? []), now])
+
+  msg.remote = 'outbound'
+  const msgKey = `${fromPaneId}:${msg.id}`
+  remoteOutbound.set(msgKey, { id: msg.id, sentAt: now })
+
+  void (async () => {
+    try {
+      const result = await routeRemote({ fromPaneId, fromName: from, to, content, msgKey })
+      if (!result.ok) {
+        remoteOutbound.delete(msgKey)
+        failMessage(msg.id, result.error || `unknown target "${to}"`)
+        return
+      }
+      msg.remoteWorkspace = result.targetWorkspacePath
+    } catch (err) {
+      remoteOutbound.delete(msgKey)
+      failMessage(msg.id, `routing error: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  })()
+}
+
+/**
+ * Accept a cross-workspace message addressed to a pane in THIS window. Returns
+ * false when the target is not ours, which is how each window filters the
+ * broadcast. Delivery then runs through the ordinary queue, so the idle gate,
+ * FIFO order and injection verification are unchanged.
+ */
+function acceptRemoteMessage(args: {
+  msgKey: string
+  targetPaneId: string
+  fromDisplay: string
+  content: string
+  remoteWorkspace?: string
+}): boolean {
+  if (!deps) return false
+  const localName = nameByPane.get(args.targetPaneId)
+  if (!localName) return false
+
+  const msg: AgentMessage = {
+    id: ++seq,
+    from: args.fromDisplay,
+    to: localName,
+    content: args.content,
+    status: 'queued',
+    createdAt: deps.now(),
+    remote: 'inbound',
+    remoteWorkspace: args.remoteWorkspace,
+  }
+  pushLog(msg)
+
+  const q = queues.get(args.targetPaneId) ?? []
+  if (q.length >= QUEUE_CAP) {
+    failMessage(msg.id, `target queue full (${QUEUE_CAP})`)
+    deps.reportDelivery?.(args.msgKey, false, `target queue full (${QUEUE_CAP})`)
+    return true
+  }
+  envelopes.set(msg.id, renderEnvelope(args.fromDisplay, args.content))
+  remoteInbound.set(msg.id, args.msgKey)
+  q.push(msg.id)
+  queues.set(args.targetPaneId, q)
+  pump()
+  return true
+}
+
+/** Apply a delivery report to this window's outbound log entry (no-op when the
+ *  report belongs to another window). */
+function resolveRemoteDelivery(msgKey: string, ok: boolean, reason: string): void {
+  const rec = remoteOutbound.get(msgKey)
+  if (rec === undefined) return
+  remoteOutbound.delete(msgKey)
+  const msg = findMessage(rec.id)
+  if (!msg) return
+  if (ok) {
+    msg.status = 'delivered'
+    msg.deliveredAt = deps ? deps.now() : msg.createdAt
+  } else {
+    failMessage(rec.id, reason || 'delivery failed')
+  }
+}
+
+/** Fail outbound messages whose target window never reported back, so they stop
+ *  sitting in `queued` (which clearMessageLog deliberately keeps) and stop
+ *  holding a remoteOutbound entry. */
+function expireStaleRemotes(now: number): void {
+  for (const [msgKey, rec] of [...remoteOutbound]) {
+    if (now - rec.sentAt < REMOTE_ACK_TIMEOUT_MS) continue
+    remoteOutbound.delete(msgKey)
+    failMessage(rec.id, 'no delivery report from the target window')
+  }
 }
 
 /**
@@ -238,7 +434,11 @@ function sendBroadcast(from: string, content: string, opts: SendOptions = {}): A
  * per-pane in-flight guard makes it re-entrant.
  */
 function pump(): void {
-  if (!deps || paused.value) return
+  if (!deps) return
+  // Runs even while paused: pausing stops local injection, it does not make a
+  // dead target window start answering.
+  expireStaleRemotes(deps.now())
+  if (paused.value) return
   for (const paneId of queues.keys()) void pumpPane(paneId)
 }
 
@@ -253,24 +453,31 @@ async function pumpPane(paneId: string): Promise<void> {
   const envelope = envelopes.get(id)
   if (!msg || !envelope) {
     q.shift()
+    ackInbound(id, false, 'message dropped before delivery')
     return
   }
   delivering.add(paneId)
   msg.status = 'delivering'
+  let ackOk = false
+  let ackReason = ''
   try {
     const ok = await deps.deliver(paneId, envelope)
     if (ok) {
       msg.status = 'delivered'
       msg.deliveredAt = deps.now()
       envelopes.delete(id)
+      ackOk = true
     } else {
-      failMessage(id, 'injection failed (echo not verified)')
+      ackReason = 'injection failed (echo not verified)'
+      failMessage(id, ackReason)
     }
   } catch (err) {
-    failMessage(id, `injection error: ${err instanceof Error ? err.message : String(err)}`)
+    ackReason = `injection error: ${err instanceof Error ? err.message : String(err)}`
+    failMessage(id, ackReason)
   } finally {
     q.shift()
     delivering.delete(paneId)
+    ackInbound(id, ackOk, ackReason)
   }
 }
 
@@ -301,6 +508,8 @@ export function _resetMessagingForTest(): void {
   delivering.clear()
   envelopes.clear()
   pairSends.clear()
+  remoteOutbound.clear()
+  remoteInbound.clear()
 }
 
 export function useAgentMessaging() {
@@ -317,6 +526,8 @@ export function useAgentMessaging() {
     suggestName,
     sendMessage,
     sendBroadcast,
+    acceptRemoteMessage,
+    resolveRemoteDelivery,
     pump,
     pauseMessaging,
     resumeMessaging,
