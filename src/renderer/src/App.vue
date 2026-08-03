@@ -233,7 +233,10 @@ onMounted(() => {
     const host = document.elementFromPoint(x, y)?.closest('[data-pane-id]')
     const targetPaneId = host instanceof HTMLElement ? host.dataset.paneId : undefined
     if (!targetPaneId || targetPaneId === paneId) return
-    void injectExternalPaneContext(paneId, targetPaneId)
+    // Same entry point as a drop the target consumed itself, so the mention
+    // gesture behaves identically whether the release landed on the terminal
+    // area or was routed here by main's hit-test.
+    void injectPaneContext(paneId, targetPaneId)
   })
   window.addEventListener('resize', onWindowResize)
   // Warm the heaviest deferred panel (Settings) during idle: it stays lazy to
@@ -1763,11 +1766,11 @@ const remoteMessagingTargets = ref<string[]>([])
  *  turned into an address without a second round trip. */
 const remoteTargetByPane = new Map<string, string>()
 
-async function refreshRemoteMessagingTargets(): Promise<void> {
+async function refreshRemoteMessagingTargets(timeoutMs?: number): Promise<void> {
   try {
     const resp = await backend.send<{
       panes?: Array<{ pane_id?: string; qualified_name?: string }>
-    }>('agent_msg.list', {})
+    }>('agent_msg.list', {}, timeoutMs)
     const localIds = new Set(panes.value.map((p) => p.id))
     const remote = (resp.payload?.panes ?? []).filter(
       (p) => p.pane_id && p.qualified_name && !localIds.has(p.pane_id),
@@ -1782,11 +1785,16 @@ async function refreshRemoteMessagingTargets(): Promise<void> {
 }
 
 /** The cross-workspace address of a pane living in another window. Refreshes
- *  once on a miss — a pane opened since the last poll is the common case. */
+ *  once on a miss — a pane opened since the last poll is the common case.
+ *
+ *  Bounded on purpose: this sits in front of a drag-and-drop gesture whose
+ *  fallback (the buffer relay) runs over IPC and needs no backend at all, so a
+ *  reconnecting socket must never hold the gesture for the default 10s deadline. */
 async function remoteAddressOf(paneId: string): Promise<string | null> {
   const cached = remoteTargetByPane.get(paneId)
   if (cached) return cached
-  await refreshRemoteMessagingTargets()
+  if (backend.status.value !== 'connected') return null
+  await refreshRemoteMessagingTargets(2_000)
   return remoteTargetByPane.get(paneId) ?? null
 }
 
@@ -1806,9 +1814,10 @@ function mentionCandidatesFor(paneId: string): string[] {
 
 /** Mention mode for a pane drop: an "@" typed immediately before the drop means
  *  "insert just this pane's address", completing e.g. "傳給 @" + drop →
- *  "傳給 @codex-1 ". Returns true when it handled the drop; false falls through
- *  to the full context share (source has no address — a plain terminal, or a
- *  remote pane the registry does not know). */
+ *  "傳給 @codex-1 ". Returns true when the drop belonged to mention mode —
+ *  including when it was abandoned because the prompt moved — and false to fall
+ *  through to the full context share (the source has no address at all: a plain
+ *  terminal, or a remote pane the registry does not know). */
 async function tryMentionOnDrop(
   targetPaneId: string,
   resolveAddress: () => string | null | Promise<string | null>,
@@ -1817,6 +1826,11 @@ async function tryMentionOnDrop(
   if (lineBeforeCursor === undefined || !endsWithMentionTrigger(lineBeforeCursor)) return false
   const address = await resolveAddress()
   if (!address) return false
+  // Resolving a remote address awaits a round trip, so the prompt may have moved
+  // on — the user kept typing, or the CLI redrew. Abandon the gesture rather
+  // than splicing an address into the middle of what they wrote; falling through
+  // to the scrollback share would be an even bigger surprise.
+  if (paneRefs[targetPaneId]?.readLineBeforeCursor?.() !== lineBeforeCursor) return true
   await pastePaneContext(targetPaneId, address + ' ')
   return true
 }
@@ -1841,10 +1855,16 @@ async function injectPaneContext(sourcePaneId: string, targetPaneId: string): Pr
       // thing here as it does locally. Same target liveness rule as the relay
       // path below — a dead pane is not a drop target.
       const targetStatus = paneRefs[targetPaneId]?.displayStatus as string | undefined
+      // A pane of THIS window that merely lost its ref still has its local
+      // handle — asking the registry for it would always miss, since the listing
+      // filters out this window's own panes.
+      const resolveAddress = sourcePane
+        ? () => sourcePane.messagingName ?? null
+        : () => remoteAddressOf(sourcePaneId)
       if (
         targetStatus !== 'exited' &&
         targetStatus !== 'error' &&
-        (await tryMentionOnDrop(targetPaneId, () => remoteAddressOf(sourcePaneId)))
+        (await tryMentionOnDrop(targetPaneId, resolveAddress))
       ) {
         return
       }
