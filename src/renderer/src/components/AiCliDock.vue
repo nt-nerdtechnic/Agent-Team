@@ -96,14 +96,20 @@ function clampWidth(w: number): number {
 }
 const width = ref(clampWidth(parseInt(settingsGet(props.widthKey, String(props.defaultWidth)), 10)))
 let resizing = false
+// The dock's right edge is the viewport edge in a standalone window but not
+// when the host is a centered modal, so measure it instead of assuming.
+const panelRef = ref<HTMLElement | null>(null)
+let resizeAnchorX = 0
 function onResizeStart(): void {
   resizing = true
+  // A zero right edge means the element has no layout yet — fall back to the viewport.
+  resizeAnchorX = panelRef.value?.getBoundingClientRect().right || window.innerWidth
   document.addEventListener('mousemove', onResizeMove)
   document.addEventListener('mouseup', onResizeEnd)
 }
 function onResizeMove(e: MouseEvent): void {
   if (!resizing) return
-  width.value = clampWidth(window.innerWidth - e.clientX)
+  width.value = clampWidth(resizeAnchorX - e.clientX)
 }
 function onResizeEnd(): void {
   if (!resizing) return
@@ -290,7 +296,7 @@ defineExpose({ start, stop, interrupt, pasteText, injectNow, toggle, terminal: t
     </button>
   </div>
   <div v-show="open" class="ai-dock-resize-handle" @mousedown.prevent="onResizeStart" />
-  <div v-show="open" class="ai-dock-panel" :style="{ width: width + 'px' }">
+  <div v-show="open" ref="panelRef" class="ai-dock-panel" :style="{ width: width + 'px' }">
     <div class="ai-cli-head">
       <span class="ai-cli-title">{{ t(titleKey) }}</span>
       <span v-if="workspacePath" class="ai-cli-ws" :title="workspacePath">{{ workspaceName }}</span>

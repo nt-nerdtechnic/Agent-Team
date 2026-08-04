@@ -1289,8 +1289,61 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // while focused. Focus moving between two panes is safe: blur (old pane,
   // sets false) always fires before focus (new pane, sets true).
   let _ownsTerminalFocus = false
-  const _onTermFocus = (): void => { _ownsTerminalFocus = true; setContext('terminalFocus', true) }
-  const _onTermBlur = (): void => { _ownsTerminalFocus = false; setContext('terminalFocus', false) }
+  // Set when the textarea lost focus only because the whole window did (cmd+tab,
+  // clicking another app). Chromium fires a textarea blur in that case even
+  // though focus never moved to another element in this document. Treating that
+  // as "lost focus" would drop this pane's echo into the 100ms coalesced path —
+  // and strand it there whenever the window returns without handing focus back
+  // to the textarea, so every later keystroke echoes a frame late.
+  let _blurredWithWindow = false
+  const _onTermFocus = (): void => {
+    _blurredWithWindow = false
+    _ownsTerminalFocus = true
+    setContext('terminalFocus', true)
+  }
+  const _onTermBlur = (): void => {
+    if (!document.hasFocus()) { _blurredWithWindow = true; return }
+    _blurredWithWindow = false
+    _ownsTerminalFocus = false
+    setContext('terminalFocus', false)
+  }
+  // Runs in every mounted pane, but the _blurredWithWindow guard means only the
+  // one that actually held focus reacts — panes never fight over it.
+  const _onWindowFocus = (): void => {
+    if (!_blurredWithWindow) return
+    _blurredWithWindow = false
+    const active = document.activeElement
+    if (!active || active === document.body) {
+      // Nothing claimed focus while we were away; take it back so typing lands
+      // in the terminal the user left off in.
+      term.focus()
+    } else if (active !== term.textarea) {
+      _ownsTerminalFocus = false
+      setContext('terminalFocus', false)
+    }
+  }
+
+  // xterm's CompositionHelper latches on compositionstart and only unlatches on
+  // compositionend — which macOS does not reliably deliver when the user
+  // switches input method mid-composition. While latched, its keydown() returns
+  // early for keyCode 229, so every subsequent IME keystroke is swallowed and
+  // piles up in the hidden textarea until some non-IME key forces a flush. That
+  // is the "typed for seconds, then everything appears at once" symptom.
+  //
+  // Only reads the helper's public surface (isComposing getter, compositionend
+  // method), and is optional-chained so an xterm upgrade that relocates it
+  // degrades to today's behaviour rather than breaking input entirely.
+  type CompositionHelperLike = { isComposing: boolean, compositionend: () => void }
+  function finalizeStaleComposition(): void {
+    const helper = (term as unknown as { _core?: { _compositionHelper?: CompositionHelperLike } })
+      ._core?._compositionHelper
+    if (!helper?.isComposing) return
+    // waitForPropagation: the deferred path sends substring(start) — everything
+    // to the end of the textarea — so the pending text is committed whole. The
+    // immediate path would use a `end` offset that compositionupdate stopped
+    // refreshing when the composition went stale, truncating the commit.
+    helper.compositionend()
+  }
 
   // Set when a reattached pane is waiting to repaint. We never force_redraw at
   // reattach time: the renderer is mid-reflow then (reload, or a hidden tab
@@ -1350,6 +1403,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // Publish terminal focus to the keybinding context (see _onTermFocus doc).
     term.textarea?.addEventListener('focus', _onTermFocus)
     term.textarea?.addEventListener('blur', _onTermBlur)
+    window.addEventListener('focus', _onWindowFocus)
 
     // Anchor for Shift+Arrow keyboard selection
     let selAnchorX = -1
@@ -1393,6 +1447,12 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
 
     term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
       if (e.type !== 'keydown') return true
+      // A keyCode 229 that the browser does not consider part of a composition,
+      // while xterm still believes one is running, is only reachable once the
+      // helper has gone stale: a genuine first IME keystroke arrives before
+      // compositionstart (xterm still false), and a genuine in-flight one
+      // reports composing on both sides. Unlatch before xterm swallows this key.
+      if (e.keyCode === 229 && !e.isComposing) finalizeStaleComposition()
       // IME guard: allow the browser to process composition (e.g. Zhuyin/Pinyin)
       if (e.isComposing) return true
 
@@ -2551,6 +2611,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     closeMentionMenu()  // tear down any open @-mention menu (detaches doc listeners)
     term.textarea?.removeEventListener('focus', _onTermFocus)
     term.textarea?.removeEventListener('blur', _onTermBlur)
+    window.removeEventListener('focus', _onWindowFocus)
     // A pane disposed while focused never fires blur — clear the context so
     // `terminalFocus` cannot stay stuck on.
     if (_ownsTerminalFocus) _onTermBlur()
