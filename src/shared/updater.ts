@@ -47,6 +47,14 @@ export interface UpdateState {
   releaseNotes?: string
   severity?: UpdateSeverity
   lastCheckFailure?: UpdateCheckFailure
+  /**
+   * The downloaded payload has been handed to the OS updater, so quitting the
+   * app applies it. Distinct from the `autoInstallOnQuit` *setting*: the
+   * handoff is one-way (it cannot be un-staged), so this stays true even if
+   * the user switches the setting back off afterwards — the UI must describe
+   * what will happen, not what was asked for.
+   */
+  quitInstallArmed?: boolean
 }
 
 export interface UpdateActionResult {

@@ -644,7 +644,12 @@ export class FrontendPluginManager {
         // sandboxed.
         sandbox: true,
         // Plugin views host AiCliDock terminals — see the main window for why
-        // throttling must stay off.
+        // throttling must stay off. One non-throttled webContents also keeps
+        // frames drawn for the whole host window, which is how the plugin host
+        // windows below (they declare no webPreferences of their own) inherit
+        // it. Note Electron 33 still reports visibilityState 'hidden' for an
+        // occluded WebContentsView regardless (electron#44590), so do not rely
+        // on the Page Visibility API inside plugin views.
         backgroundThrottling: false,
         // Injected so the preload can stamp calls with an authoritative plugin id.
         additionalArguments: [`--plugin-id=${descriptor.id}`],

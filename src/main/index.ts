@@ -238,6 +238,18 @@ async function createWindow(
   }
   win.on('moved', () => { if (!win.isDestroyed()) windowRegistry.setBounds(winId, win.getBounds()) })
   win.on('resized', () => { if (!win.isDestroyed()) windowRegistry.setBounds(winId, win.getBounds()) })
+  // backgroundThrottling is off for the terminals, which also pins the
+  // renderer's document.hidden to false — so the Page Visibility API can no
+  // longer tell it when to pause background polling. Report the window state
+  // directly instead (see App.vue's git status poll).
+  const sendVisibility = (): void => {
+    if (win.isDestroyed()) return
+    win.webContents.send('window:visibility', win.isVisible() && !win.isMinimized())
+  }
+  win.on('hide', sendVisibility)
+  win.on('show', sendVisibility)
+  win.on('minimize', sendVisibility)
+  win.on('restore', sendVisibility)
   // Show on first paint (theme already applied → no white/wrong-theme flash).
   // Fallback timer guarantees the window appears even if ready-to-show is missed.
   let _shown = false

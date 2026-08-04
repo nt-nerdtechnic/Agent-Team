@@ -1999,7 +1999,7 @@ watch(activeTab, (tab) => {
                   <p class="summary-ok">{{ $t('updater.available', { version: updateState.availableVersion }) }}</p>
                   <p v-if="updateState.status === 'downloading'" class="ap-hint">{{ $t('updater.downloading', { percent: updateState.percent ?? 0 }) }}</p>
                   <p v-else-if="updateState.status === 'downloaded'" class="ap-hint">
-                    {{ updSettings.autoInstallOnQuit ? $t('updater.downloaded-on-quit') : $t('updater.downloaded') }}
+                    {{ updateState.quitInstallArmed ? $t('updater.downloaded-on-quit') : $t('updater.downloaded') }}
                   </p>
                   <p v-else-if="updateState.status === 'installing'" class="ap-hint">{{ $t('updater.restarting') }}</p>
                   <div v-if="updateState.releaseNotes" class="upd-notes">
@@ -2045,6 +2045,11 @@ watch(activeTab, (tab) => {
                   />
                 </template>
               </SettingRow>
+              <!-- Switching off cannot un-stage a payload the OS updater already
+                   took, so say so rather than implying it was cancelled. -->
+              <div v-if="!updSettings.autoInstallOnQuit && updateState.quitInstallArmed" class="s-fullrow">
+                <p class="ap-hint">{{ $t('updater.auto-install-already-armed') }}</p>
+              </div>
               <SettingRow
                 :title="$t('updater.notify-check-failure')"
                 :description="$t('updater.notify-check-failure-hint')"

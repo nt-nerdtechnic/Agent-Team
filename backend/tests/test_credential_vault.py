@@ -211,14 +211,20 @@ def test_harvest_fills_only_empty_slot(tmp_path: Path) -> None:
 # rejects a refresh, leaving a valid-looking blob with no credential in it.
 
 
-_WIPED = json.dumps({
-    "claudeAiOauth": {
-        "accessToken": "",
-        "refreshToken": "",
-        "expiresAt": 1000,
-        "scopes": ["user:inference"],
-    }
-})
+def _wiped_claude_secret(expires_at: int = 1000) -> str:
+    """What Claude Code leaves behind when a refresh is rejected: the wrapper
+    and metadata survive, both tokens are emptied in place."""
+    return json.dumps({
+        "claudeAiOauth": {
+            "accessToken": "",
+            "refreshToken": "",
+            "expiresAt": expires_at,
+            "scopes": ["user:inference"],
+        }
+    })
+
+
+_WIPED = _wiped_claude_secret()
 _LIVE_TOKENS = json.dumps({
     "claudeAiOauth": {
         "accessToken": "sk-live",
@@ -226,6 +232,71 @@ _LIVE_TOKENS = json.dumps({
         "expiresAt": 2000,
     }
 })
+
+
+def test_write_slot_keeps_stored_secret_but_updates_account_when_wiped(
+    tmp_path: Path,
+) -> None:
+    """The guard lives in write_slot, so every mirroring path inherits it: the
+    stored secret survives while the display-only account still refreshes."""
+    vault = _file_vault(tmp_path)
+    vault.write_slot("claude", "slot1", LiveCredentials(
+        secret=_LIVE_TOKENS, account={"emailAddress": "old@x.com"},
+    ))
+
+    vault.write_slot("claude", "slot1", LiveCredentials(
+        secret=_WIPED, account={"emailAddress": "new@x.com"},
+    ))
+
+    slot = vault.read_slot("claude", "slot1")
+    assert slot.secret == _LIVE_TOKENS
+    assert slot.account == {"emailAddress": "new@x.com"}
+
+
+def test_write_slot_still_clears_the_slot_on_a_real_sign_out(tmp_path: Path) -> None:
+    """A signed-out state is ``None``, not a wiped blob — it must keep emptying
+    the slot exactly as before."""
+    vault = _file_vault(tmp_path)
+    vault.write_slot("claude", "slot1", LiveCredentials(secret=_LIVE_TOKENS))
+
+    vault.write_slot("claude", "slot1", LiveCredentials(secret=None))
+
+    assert vault.slot_is_empty("claude", "slot1")
+
+
+@pytest.mark.parametrize("incoming,stored_survives", [
+    # Both tokens emptied in place — the shape Claude Code leaves behind.
+    ('{"claudeAiOauth": {"accessToken": "", "refreshToken": ""}}', True),
+    # An empty wrapper carries no token either.
+    ('{"claudeAiOauth": {}}', True),
+    # Expired access token but the refresh token survives: still recoverable,
+    # so it must be stored — this is the common expired-credential case.
+    ('{"claudeAiOauth": {"accessToken": "", "refreshToken": "rt"}}', False),
+    ('{"claudeAiOauth": {"accessToken": "at", "refreshToken": ""}}', False),
+    # Not an OAuth blob at all (long-lived token, API key, junk): the guard is
+    # about one known shape and must not swallow anything else.
+    ('{"someOtherLogin": {"token": "t"}}', False),
+    ("not-json-at-all", False),
+    ("", False),
+])
+def test_write_slot_wiped_guard_shapes(
+    tmp_path: Path, incoming: str, stored_survives: bool
+) -> None:
+    vault = _file_vault(tmp_path)
+    vault.write_slot("claude", "slot1", LiveCredentials(secret=_LIVE_TOKENS))
+
+    vault.write_slot("claude", "slot1", LiveCredentials(secret=incoming))
+
+    expected = _LIVE_TOKENS if stored_survives else incoming
+    assert vault.read_slot("claude", "slot1").secret == expected
+
+
+def test_write_slot_wiped_guard_is_claude_only(tmp_path: Path) -> None:
+    """Other agents have no such format; their blobs pass through untouched."""
+    vault = _file_vault(tmp_path)
+    vault.write_slot("codex", "slot1", LiveCredentials(secret=_WIPED))
+
+    assert vault.read_slot("codex", "slot1").secret == _WIPED
 
 
 def test_capture_keeps_slot_when_live_claude_tokens_are_wiped(tmp_path: Path) -> None:
@@ -574,6 +645,35 @@ def test_mac_harvest_legacy_home_without_credentials(tmp_path: Path) -> None:
 
     assert vault.harvest_legacy_claude_home("4ad13e88", legacy_home) is False
     assert vault.slot_is_empty("claude", "4ad13e88")
+
+
+def test_mac_harvest_legacy_home_with_wiped_credentials(tmp_path: Path) -> None:
+    """A home Claude Code wiped counts as having no credentials: the slot keeps
+    its own, and the home is reported as not captured so the caller leaves it
+    (and its Keychain item) in place."""
+    vault, sec = _mac_vault(tmp_path)
+    legacy_home = tmp_path / "legacy" / "5be24f99"
+    _write(legacy_home / ".claude.json", '{"oauthAccount": {"emailAddress": "old@x.com"}}')
+    service = legacy_claude_keychain_service(legacy_home)
+    sec.items[service] = _WIPED
+    vault.write_slot("claude", "5be24f99", LiveCredentials(secret=_LIVE_TOKENS))
+
+    assert vault.harvest_legacy_claude_home("5be24f99", legacy_home) is False
+
+    assert vault.read_slot("claude", "5be24f99").secret == _LIVE_TOKENS
+    assert sec.items[service] == _WIPED
+
+
+def test_mac_write_slot_never_puts_a_wiped_credential_in_the_keychain(
+    tmp_path: Path,
+) -> None:
+    vault, sec = _mac_vault(tmp_path)
+    slot_service = "Navide CLI account claude-acct1"
+    sec.items[slot_service] = _LIVE_TOKENS
+
+    vault.write_slot("claude", "acct1", LiveCredentials(secret=_WIPED))
+
+    assert sec.items[slot_service] == _LIVE_TOKENS
 
 
 def test_resolve_claude_credentials_ignores_legacy_profile_home(tmp_path: Path) -> None:
@@ -1094,6 +1194,25 @@ async def test_promote_claude_home_wins_unless_slot_strictly_newer(tmp_path: Pat
     assert (
         vault.profile_home_path("claude", "p1") / ".credentials.json"
     ).read_text(encoding="utf-8") == _claude_secret("REFRESHED", 2000)
+
+
+async def test_promote_never_replaces_a_slot_with_a_wiped_home_credential(
+    tmp_path: Path,
+) -> None:
+    """A profile home whose CLI hit an invalid_grant keeps its expiresAt, so it
+    still looks 'fresher' than the slot — promotion must not let that empty the
+    account's only surviving refresh token."""
+    vault = _file_vault(tmp_path)
+    _write(
+        vault.profile_home_path("claude", "p1") / ".credentials.json",
+        _wiped_claude_secret(2000),
+    )
+    vault.write_slot("claude", "p1", LiveCredentials(secret=_claude_secret("GOOD", 1000)))
+    store = _FakeStore([{"id": "p1", "agentKey": "claude"}], {"claude": None})
+
+    await vault.promote_profile_home_secrets(store)
+
+    assert vault.read_slot("claude", "p1").secret == _claude_secret("GOOD", 1000)
 
 
 async def test_promote_claude_fills_empty_slot_from_home(tmp_path: Path) -> None:

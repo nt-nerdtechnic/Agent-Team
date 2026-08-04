@@ -4408,8 +4408,9 @@ function openSettingsAccounts(): void {
   showSettings.value = true
 }
 // Status-bar update indicator: shares the updater state machine with ControlPane.
-// settings comes along because a downloaded update reads differently depending
-// on whether it will be applied on quit or is waiting for an explicit restart.
+// settings comes along for the check-failure threshold; whether a downloaded
+// update will be applied on quit is read from the STATE (quitInstallArmed),
+// not the setting — the handoff to the OS updater is one-way.
 const {
   state: updateState, settings: updaterSettings,
   startDownload: startUpdateDownload, installUpdate,
@@ -4571,16 +4572,19 @@ let _gitPollTimer: number | null = null
 // Skip the poll while the window is hidden (minimized / other desktop) — each
 // tick spawns git subprocesses in the backend, and hidden windows kept polling
 // forever. Catch up once when the window becomes visible again.
-const _onGitPollVisibility = (): void => {
-  if (!document.hidden && _gitPollTimer !== null) void refreshStatusBarGit()
-}
-document.addEventListener('visibilitychange', _onGitPollVisibility)
-onUnmounted(() => document.removeEventListener('visibilitychange', _onGitPollVisibility))
+// Main reports this over IPC rather than the Page Visibility API: terminal panes
+// need backgroundThrottling disabled, which pins document.hidden to false.
+let _windowVisible = true
+const _offWindowVisibility = window.agentTeam?.onWindowVisibility?.((visible: boolean) => {
+  _windowVisible = visible
+  if (visible && _gitPollTimer !== null) void refreshStatusBarGit()
+})
+onUnmounted(() => _offWindowVisibility?.())
 watch(workspaceSelected, (v) => {
   if (v) {
     void refreshStatusBarGit()
     _gitPollTimer = window.setInterval(() => {
-      if (!document.hidden) void refreshStatusBarGit()
+      if (_windowVisible) void refreshStatusBarGit()
     }, 5000)
   } else {
     if (_gitPollTimer !== null) { clearInterval(_gitPollTimer); _gitPollTimer = null }
@@ -10896,7 +10900,7 @@ function paneIsCommander(p: ActivePane): boolean {
           <span class="sb-dot" />
           <template v-if="updateState.status === 'downloading'">↓{{ updateState.percent ?? 0 }}%</template>
           <template v-else-if="updateState.status === 'downloaded'">
-            {{ updaterSettings.autoInstallOnQuit ? $t('updater.restart-on-quit') : $t('updater.restart') }}
+            {{ updateState.quitInstallArmed ? $t('updater.restart-on-quit') : $t('updater.restart') }}
           </template>
           <template v-else-if="updateState.status === 'error'">{{ $t('updater.badge-error') }}</template>
           <template v-else>↑{{ updateState.availableVersion }}</template>

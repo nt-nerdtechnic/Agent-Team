@@ -164,6 +164,11 @@ export function createUpdaterService(
     const merged: UpdateState = { ...next }
     if (checkFailure) merged.lastCheckFailure = checkFailure
     else delete merged.lastCheckFailure
+    // Whether a quit will actually apply the update is a property of the
+    // updater, not of any one transition — so it is merged here rather than
+    // restated by every setState caller.
+    if (quitInstallArmed) merged.quitInstallArmed = true
+    else delete merged.quitInstallArmed
     state = merged
     onStateChanged(snapshot())
   }
@@ -184,14 +189,61 @@ export function createUpdaterService(
     // check, but the count the UI reads does.
     setState({ ...state })
   }
+  /**
+   * Hand an already-downloaded payload to Squirrel so quitting applies it.
+   *
+   * electron-updater consumes `autoInstallOnAppQuit` when a download FINISHES,
+   * not when the app quits: MacUpdater only calls the native updater (which is
+   * what actually fetches and stages the payload) if the flag is set at that
+   * moment. Two consequences drive the shape of this function:
+   *
+   *  - Turning the setting on after a download completed does nothing on its
+   *    own, so arming re-runs the download with the flag set. The payload is
+   *    already in the cache, so that pass is a checksum check, not a transfer.
+   *  - A download that runs with the flag set never resolves its promise (the
+   *    handoff replaces the resolve), which is why the flag stays off for the
+   *    normal download path and this call is deliberately fire-and-forget.
+   */
+  const armQuitInstall = (): void => {
+    if (!supported || !wantQuitInstall || quitInstallArmed) return
+    if (state.status !== 'downloaded') return
+    quitInstallArmed = true
+    client.autoInstallOnAppQuit = true
+    setState({ ...state })
+    void Promise.resolve(client.downloadUpdate()).catch((error) => {
+      quitInstallArmed = false
+      client.autoInstallOnAppQuit = false
+      console.warn('[updater] could not arm the quit-time install:', errorMessage(error))
+      setState({ ...state })
+    })
+  }
+
+  const setAutoInstallOnQuit = (enabled: boolean): void => {
+    wantQuitInstall = supported && enabled
+    if (wantQuitInstall) {
+      armQuitInstall()
+      return
+    }
+    // Squirrel cannot un-stage a payload it has already fetched, so an armed
+    // update still applies on the next quit. All switching off can do is stop
+    // arming future ones — `quitInstallArmed` stays true so the UI can say so
+    // instead of quietly promising something that will not hold.
+    if (!quitInstallArmed) client.autoInstallOnAppQuit = false
+  }
+
   const success = (): UpdateActionResult => ({ ok: true, state: snapshot() })
   const failure = (message: string): UpdateActionResult => ({ ok: false, state: snapshot(), error: message })
 
   // Both of electron-updater's automatic behaviours stay off here; each is
   // driven by its own user setting. autoDownload is decided per update by the
-  // caller (patch only), autoInstallOnAppQuit by setAutoInstallOnQuit below.
+  // caller (patch only), autoInstallOnAppQuit by armQuitInstall() below.
   client.autoDownload = false
   client.autoInstallOnAppQuit = false
+
+  /** The user wants downloaded updates applied on quit. */
+  let wantQuitInstall = false
+  /** The payload has actually been handed to Squirrel, so quitting applies it. */
+  let quitInstallArmed = false
 
   if (supported) {
     client.on('checking-for-update', () => {
@@ -229,6 +281,9 @@ export function createUpdaterService(
         severity: computeUpdateSeverity(currentVersion, info.version),
         percent: 100,
       })
+      // A download that just finished is the moment the payload can be handed
+      // to Squirrel — see armQuitInstall for why it cannot happen any earlier.
+      armQuitInstall()
     })
     client.on('error', (error) => {
       const message = errorMessage(error)
@@ -423,12 +478,6 @@ export function createUpdaterService(
       })
       return failure(message)
     }
-  }
-
-  // Unsupported builds keep electron-updater fully inert: nothing was ever
-  // downloaded there, so promising a quit-time install would be a lie.
-  const setAutoInstallOnQuit = (enabled: boolean): void => {
-    client.autoInstallOnAppQuit = supported && enabled
   }
 
   return { getState: snapshot, check, download, install, setAutoInstallOnQuit }

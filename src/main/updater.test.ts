@@ -196,10 +196,10 @@ describe('initUpdater lifecycle', () => {
 
     const setSettings = h.ipcHandlers.get('updater:set-settings')!
     await setSettings({}, { autoInstallOnQuit: true } as Partial<UpdaterSettings>)
-    expect(h.autoUpdater.autoInstallOnAppQuit).toBe(true)
+    expect(h.ipcHandlers.get('updater:get-settings')!()).toMatchObject({ autoInstallOnQuit: true })
     // And back off again — the switch has to be reversible without a restart.
     await setSettings({}, { autoInstallOnQuit: false } as Partial<UpdaterSettings>)
-    expect(h.autoUpdater.autoInstallOnAppQuit).toBe(false)
+    expect(h.ipcHandlers.get('updater:get-settings')!()).toMatchObject({ autoInstallOnQuit: false })
   })
 
   it('restores a stored quit-time install preference on the next launch', async () => {
@@ -207,10 +207,8 @@ describe('initUpdater lifecycle', () => {
     first({ enabled: true, currentVersion: '1.0.0' })
     await h.ipcHandlers.get('updater:set-settings')!({}, { autoInstallOnQuit: true } as Partial<UpdaterSettings>)
 
-    h.autoUpdater.autoInstallOnAppQuit = true // electron-updater's own default
     const second = await loadInitUpdater()
     second({ enabled: true, currentVersion: '1.0.0' })
-    expect(h.autoUpdater.autoInstallOnAppQuit).toBe(true)
     expect(h.ipcHandlers.get('updater:get-settings')!()).toMatchObject({ autoInstallOnQuit: true })
   })
 
@@ -221,6 +219,79 @@ describe('initUpdater lifecycle', () => {
 
     await h.ipcHandlers.get('updater:set-settings')!({}, { autoInstallOnQuit: true } as Partial<UpdaterSettings>)
     expect(h.autoUpdater.autoInstallOnAppQuit).toBe(false)
+  })
+
+  it('does not retry a failed download when retries are switched off', async () => {
+    const initUpdater = await loadInitUpdater()
+    initUpdater({ enabled: true, currentVersion: '1.0.0' })
+    await h.ipcHandlers.get('updater:set-settings')!({}, { retryDownload: false } as Partial<UpdaterSettings>)
+
+    h.autoUpdater.downloadUpdate.mockRejectedValue(new Error('ECONNRESET'))
+    emit('update-available', { version: '1.0.1' })
+    await flush()
+    await flush()
+    expect(h.autoUpdater.downloadUpdate).toHaveBeenCalledTimes(1)
+  })
+
+  it('retries a failed download as many times as the user asked for', async () => {
+    const initUpdater = await loadInitUpdater()
+    initUpdater({ enabled: true, currentVersion: '1.0.0' })
+    await h.ipcHandlers.get('updater:set-settings')!({}, { downloadRetryCount: 1 } as Partial<UpdaterSettings>)
+
+    h.autoUpdater.downloadUpdate.mockRejectedValue(new Error('ECONNRESET'))
+    emit('update-available', { version: '1.0.1' })
+    await flush()
+    expect(h.autoUpdater.downloadUpdate).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(h.autoUpdater.downloadUpdate).toHaveBeenCalledTimes(2)
+    // One retry was all that was asked for.
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(h.autoUpdater.downloadUpdate).toHaveBeenCalledTimes(2)
+  })
+
+  it('uses the configured install timeout to release a stuck install', async () => {
+    const initUpdater = await loadInitUpdater()
+    initUpdater({ enabled: true, currentVersion: '1.0.0' })
+    await h.ipcHandlers.get('updater:set-settings')!({}, { installTimeoutSeconds: 5 } as Partial<UpdaterSettings>)
+    const getState = (): UpdateState => h.ipcHandlers.get('updater:get-state')!() as UpdateState
+
+    emit('update-downloaded', { version: '1.0.1' })
+    h.ipcHandlers.get('updater:install')!()
+    expect(getState().status).toBe('installing')
+
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(getState().status).toBe('downloaded')
+  })
+
+  it('carries the last successful check across a restart', async () => {
+    const first = await loadInitUpdater()
+    first({ enabled: true, currentVersion: '1.0.0' })
+    emit('update-not-available', {})
+    const checkedAt = (h.ipcHandlers.get('updater:get-state')!() as UpdateState).checkedAt
+    expect(checkedAt).toBeTruthy()
+
+    const second = await loadInitUpdater()
+    second({ enabled: true, currentVersion: '1.0.0' })
+    expect(h.ipcHandlers.get('updater:get-state')!()).toMatchObject({ status: 'idle', checkedAt })
+  })
+
+  it('carries a run of failed background checks across a restart', async () => {
+    h.autoUpdater.checkForUpdates.mockRejectedValue(new Error('feed unavailable'))
+    const first = await loadInitUpdater()
+    first({ enabled: true, currentVersion: '1.0.0' })
+
+    // The startup check is silent, so only the failure counter records it.
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(h.ipcHandlers.get('updater:get-state')!()).toMatchObject({
+      lastCheckFailure: { count: 1, message: 'feed unavailable' },
+    })
+
+    const second = await loadInitUpdater()
+    second({ enabled: true, currentVersion: '1.0.0' })
+    expect(h.ipcHandlers.get('updater:get-state')!()).toMatchObject({
+      lastCheckFailure: { count: 1, message: 'feed unavailable' },
+    })
   })
 
   it('persists channel changes and re-applies them to autoUpdater', async () => {

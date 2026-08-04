@@ -284,6 +284,14 @@ contextBridge.exposeInMainWorld('agentTeam', {
     ipcRenderer.on('app:quitConfirmDisabled', listener)
     return () => ipcRenderer.removeListener('app:quitConfirmDisabled', listener)
   },
+  // Real window visibility, reported by main. The Page Visibility API cannot be
+  // used for this: terminal panes need backgroundThrottling disabled, which also
+  // pins document.hidden to false for the whole renderer.
+  onWindowVisibility: (cb: (visible: boolean) => void): (() => void) => {
+    const listener = (_event: unknown, visible: boolean): void => cb(visible)
+    ipcRenderer.on('window:visibility', listener)
+    return () => ipcRenderer.removeListener('window:visibility', listener)
+  },
   readHealthCheckTimeout: (): Promise<{ ok: boolean; timeoutSec?: number }> =>
     ipcRenderer.invoke('settings:health-timeout-read'),
   writeHealthCheckTimeout: (timeoutSec: number): Promise<{ ok: boolean; error?: string }> =>
