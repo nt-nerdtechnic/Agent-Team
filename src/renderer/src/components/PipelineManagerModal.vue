@@ -1,34 +1,38 @@
 <script setup lang="ts">
-// Pipeline Manager window (?window=pipelines[&pipeline_id=…]): standalone
-// BrowserWindow that unifies pipeline + stage editing and role management,
-// replacing the old Role Manager and Stages windows. Owns its own backend
-// connection; theme changes made in other windows arrive as settings broadcasts.
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useBackend } from './composables/useBackend'
-import { initSettingsBackend, onSettingsChanged } from './lib/settings'
-import { useTheme } from './composables/useTheme'
-import { useNotify } from './composables/useNotify'
-import { useKeybindings } from './keybindings/useKeybindings'
-import NotificationHost from './components/NotificationHost.vue'
-import AiCliDock from './components/AiCliDock.vue'
-import { useRoles, type Role } from './composables/useRoles'
-import { usePipelines, type PipelineSummary } from './composables/usePipelines'
-import { useStages } from './composables/useStages'
-import { stageToBackend, type AgentKey, type Stage, type StageSlot } from './data/stages'
-import { buildPmAiContext } from './lib/pmAiContext'
-import { aiTerminalPaneId } from './lib/aiCliContext'
+// Pipeline Manager modal: unifies pipeline + stage editing and role management,
+// replacing the old Role Manager and Stages windows. Hosted inside the main
+// window — the backend connection, theme and notification host belong to the
+// host app, so this component only owns the pipeline/stage/role UI.
+import { computed, ref, watch } from 'vue'
+import type { useBackend } from '../composables/useBackend'
+import { useNotify } from '../composables/useNotify'
+import AiCliDock from './AiCliDock.vue'
+import type { useRoles, Role } from '../composables/useRoles'
+import type { usePipelines, PipelineSummary } from '../composables/usePipelines'
+import { useStages } from '../composables/useStages'
+import { stageToBackend, type AgentKey, type Stage, type StageSlot } from '../data/stages'
+import { buildPmAiContext } from '../lib/pmAiContext'
+import { aiTerminalPaneId } from '../lib/aiCliContext'
 
-const params = new URLSearchParams(window.location.search)
-const initialPipelineId = params.get('pipeline_id')
+const props = defineProps<{
+  backend: ReturnType<typeof useBackend>
+  rolesApi: ReturnType<typeof useRoles>
+  pipelinesApi: ReturnType<typeof usePipelines>
+  /** Workspace the embedded CLI dock spawns in; empty = no workspace open. */
+  workspacePath: string
+  /** Deep link: jump straight into this pipeline's detail view when opened. */
+  initialPipelineId?: string
+  /** Visibility. The modal stays MOUNTED while closed (v-show, not v-if) so the
+   *  AiCliDock keeps owning its PTY — unmounting would let the backend janitor
+   *  reap a CLI the user is still running. */
+  open: boolean
+}>()
+const emit = defineEmits<{
+  (e: 'close'): void
+}>()
+const { backend, rolesApi, pipelinesApi } = props
 
-const backend = useBackend()
-initSettingsBackend(backend)
-const { loadTheme } = useTheme()
 const notify = useNotify()
-useKeybindings()
-
-const rolesApi = useRoles(backend)
-const pipelinesApi = usePipelines(backend)
 
 const activeTab = ref<'pipelines' | 'roles'>('pipelines')
 
@@ -42,27 +46,19 @@ const statusClass = computed(() => {
   }
 })
 
-let offThemeSettingsChange: (() => void) | null = null
-let offOpenPipeline: (() => void) | null = null
-onMounted(() => {
-  document.title = 'Pipeline Manager'
-  loadTheme()
-  offThemeSettingsChange = onSettingsChanged((keys) => {
-    if (keys.includes('agent-team:theme') || keys.includes('agent-team:theme-custom')) {
-      loadTheme()
-    }
-  })
-  // Deep link relayed by main when the window is already open: switch to the
-  // requested pipeline's detail view.
-  offOpenPipeline =
-    window.agentTeam?.onPipelineManagerOpenPipeline?.((pipelineId) => {
-      void openPipelineDeepLink(pipelineId)
-    }) ?? null
-})
-onUnmounted(() => {
-  offThemeSettingsChange?.()
-  offOpenPipeline?.()
-})
+// Esc is owned by the host's `workbench.action.closeModal` stack — a listener
+// here would be dead code behind the capture-phase keybinding dispatcher. The
+// host calls this first so a nested confirm dialog closes before the modal.
+function closeTopLayer(): boolean {
+  const openConfirm = sConfirmDelete.value || sConfirmReset.value || rConfirmDelete.value || rConfirmReset.value
+  if (!openConfirm) return false
+  sConfirmDelete.value = false
+  sConfirmReset.value = false
+  rConfirmDelete.value = false
+  rConfirmReset.value = false
+  return true
+}
+defineExpose({ closeTopLayer })
 
 // ══════════════════════════════════════════════════════════════════════════════
 // PIPELINES TAB — list view (CRUD) + detail view (stage editor)
@@ -184,9 +180,9 @@ async function plResetBuiltin(p: PipelineSummary): Promise<void> {
   }
 }
 
-// Deep link into a pipeline's detail view. Used by the ?pipeline_id=… query
-// param at launch and by the main-process relay when the window is already
-// open. Unknown ids get one list refresh before being ignored.
+// Deep link into a pipeline's detail view. Used by the host's
+// `initialPipelineId` prop when the modal is opened from a specific pipeline.
+// Unknown ids get one list refresh before being ignored.
 async function openPipelineDeepLink(pipelineId: string): Promise<void> {
   activeTab.value = 'pipelines'
   if (!pipelinesApi.pipelines.value.some((p) => p.id === pipelineId)) {
@@ -196,16 +192,35 @@ async function openPipelineDeepLink(pipelineId: string): Promise<void> {
   await plEnterDetail(pipelineId)
 }
 
-// Deep link: ?pipeline_id=… jumps straight into that pipeline's detail view.
-let deepLinkDone = false
+// Fires when the modal is opened with an id (and on a later id change while it
+// stays open); deferred until the pipeline list has loaded.
+let deepLinkPending = false
+watch(
+  () => [props.open, props.initialPipelineId] as const,
+  ([open, id], prev) => {
+    if (!open) { deepLinkPending = false; return }
+    // Only a real closed→open transition resets the view; on the immediate run
+    // the state is already fresh and the stage refs below are still in their TDZ.
+    const justOpened = !!prev && !prev[0]
+    if (!id) {
+      // Opened without a deep link. The modal stays mounted between openings so
+      // the CLI dock keeps its PTY, so reset the view the way a fresh window did.
+      if (justOpened) plBackToList()
+      return
+    }
+    if (!pipelinesApi.isLoaded.value) { deepLinkPending = true; return }
+    deepLinkPending = false
+    void openPipelineDeepLink(id)
+  },
+  { immediate: true }
+)
 watch(
   () => pipelinesApi.isLoaded.value,
   (loaded) => {
-    if (!loaded || deepLinkDone) return
-    deepLinkDone = true
-    if (initialPipelineId) void openPipelineDeepLink(initialPipelineId)
-  },
-  { immediate: true }
+    if (!loaded || !deepLinkPending || !props.open) return
+    deepLinkPending = false
+    if (props.initialPipelineId) void openPipelineDeepLink(props.initialPipelineId)
+  }
 )
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -422,6 +437,9 @@ const rSorted = computed(() =>
 )
 
 watch(() => rolesApi.roles.value, (rs) => {
+  // Never steal the draft while the user is composing a new role: rStartNew()
+  // leaves rSelectedKey null, which the first branch would otherwise claim.
+  if (rDraft.value?.isNew) return
   if (rs.length > 0 && rSelectedKey.value === null) rSelectKey(rs[0].key)
   else if (rSelectedKey.value && !rs.find((r) => r.key === rSelectedKey.value))
     rSelectKey(rs[0]?.key ?? null)
@@ -459,17 +477,26 @@ const rCanSave = computed(() => {
 
 async function rSave(): Promise<void> {
   if (!rDraft.value || !rCanSave.value) return
-  rSaving.value = true; rError.value = ''
+  rSaving.value = true; rError.value = ''; rSummary.value = ''
   const payload = { key: rDraft.value.key.trim(), label: rDraft.value.label.trim(), one_line: rDraft.value.one_line.trim(), system_prompt: rDraft.value.system_prompt }
-  const wasRename = !rDraft.value.isNew && rDraft.value.originalKey && rDraft.value.originalKey !== payload.key
+  // Capture before awaiting — the draft can be swapped out while requests are in flight.
+  const originalKey = rDraft.value.originalKey
+  const wasRename = !rDraft.value.isNew && originalKey && originalKey !== payload.key
   try {
-    if (wasRename) {
-      const role = await rolesApi.upsert(payload)
-      if (role) { await rolesApi.remove(rDraft.value.originalKey); rSelectKey(role.key) }
-    } else {
-      const role = await rolesApi.upsert(payload)
-      if (role) rSelectKey(role.key)
+    // rolesApi.* resolve to null/false on failure instead of throwing, so the
+    // catch below never sees backend errors — surface them explicitly.
+    const role = await rolesApi.upsert(payload)
+    if (!role) {
+      rError.value = rolesApi.error.value || 'Save failed'
+      notify.toast(rError.value, { type: 'error' })
+      return
     }
+    if (wasRename && !(await rolesApi.remove(originalKey))) {
+      rError.value = rolesApi.error.value || 'Rename cleanup failed'
+      notify.toast(rError.value, { type: 'error' })
+      return
+    }
+    rSelectKey(role.key)
     rSummary.value = `Saved "${payload.label}"`
   } catch (err) { rError.value = String((err as Error).message ?? err) }
   finally { rSaving.value = false }
@@ -517,47 +544,20 @@ async function rImport(): Promise<void> {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// AI PANEL — shared AiCliDock (embedded CLI PTY) bound to the opener's workspace
+// AI PANEL — shared AiCliDock (embedded CLI PTY) bound to the host's workspace
 // ══════════════════════════════════════════════════════════════════════════════
 
-// Workspace is fixed at window CREATION: the opener's workspace (query param)
-// or, when launched without one (native menu), the most recent still-existing
-// workspace. Re-opening a pipeline in the already-open window does not rebind it.
-const aiWorkspace = ref(params.get('workspace_path') ?? '')
+// The host window's current workspace; empty when none is open, which is the
+// dock's own "No workspace available" empty state.
+const aiWorkspace = computed(() => props.workspacePath)
 
-// Pane id derived per (surface, workspace) so a PM window on another workspace
+// Pane id derived per (surface, workspace) so a PM surface on another workspace
 // never steals/reaps this one's PTY; stable for a given workspace, which keeps
 // useTerminal's localStorage keys (terminal-pty / terminal-scroll) stable
-// across window close/reopen — that is what lets a still-running CLI be
-// reattached instead of respawned. (Replaces the old fixed 'aa1de001-…' id:
-// one-time reattach break, a CLI left running under the old id is orphaned.)
+// across close/reopen — that is what lets a still-running CLI be reattached
+// instead of respawned. The dock is keyed by it so switching workspace rebuilds
+// the dock (its reattach is once per dock life).
 const aiPaneId = computed(() => aiTerminalPaneId('pm', aiWorkspace.value))
-
-// On first backend connect: resolve the fallback workspace if needed. The dock
-// owns the rest of the lifecycle (reattach, spawn, context injection);
-// aiWorkspaceResolved gates its empty state so "No workspace available" never
-// flashes during the list_recent round-trip.
-const aiWorkspaceResolved = ref(!!aiWorkspace.value)
-let aiWorkspaceInitDone = false
-watch(
-  () => backend.status.value,
-  async (s) => {
-    if (s !== 'connected' || aiWorkspaceInitDone) return
-    aiWorkspaceInitDone = true
-    if (!aiWorkspace.value) {
-      try {
-        const resp = await backend.send<{ recent: { path: string; exists: boolean }[] }>(
-          'workspace.list_recent', {}
-        )
-        aiWorkspace.value = resp.ok
-          ? (resp.payload?.recent.find((w) => w.exists)?.path ?? '')
-          : ''
-      } catch { /* no workspace — the dock shows its empty state, spawn disabled */ }
-    }
-    aiWorkspaceResolved.value = true
-  },
-  { immediate: true }
-)
 
 /** Snapshot of what the user is looking at, injected by the dock after a
  *  fresh spawn (buildPmAiContext stays a pure, unit-tested function). */
@@ -578,6 +578,9 @@ function buildAiContext(): string {
 </script>
 
 <template>
+  <Teleport to="body">
+    <div v-show="open" class="pm-overlay" @click.self="emit('close')">
+      <div class="pm-modal">
   <div class="app">
     <header class="top">
       <div class="title">Pipeline Manager</div>
@@ -593,6 +596,7 @@ function buildAiContext(): string {
         <span class="dot" :class="statusClass"></span>
         <span>backend {{ backend.status.value }}</span>
       </div>
+      <button class="pm-close" title="Close (ESC)" @click="emit('close')">✕</button>
     </header>
 
     <div class="main-row">
@@ -865,12 +869,12 @@ function buildAiContext(): string {
 
     <!-- Right AI terminal dock (rail toggle + resize + embedded CLI PTY) -->
     <AiCliDock
+      :key="aiPaneId"
       width-key="pm-ai-panel-width"
       agent-key-storage-key="pm-ai-agent"
       :pane-id="aiPaneId"
       origin="pipeline-manager"
       :workspace-path="aiWorkspace"
-      :workspace-resolved="aiWorkspaceResolved"
       :backend="backend"
       :build-context="buildAiContext"
     />
@@ -917,15 +921,50 @@ function buildAiContext(): string {
         </div>
       </div>
     </div>
-    <NotificationHost />
   </div>
+      </div>
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>
+.pm-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--shadow-overlay);
+  z-index: 8000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  -webkit-app-region: no-drag;
+}
+.pm-modal {
+  width: 92vw;
+  max-width: 1100px;
+  height: 88vh;
+  border: 1px solid var(--border-muted);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.7);
+}
+.pm-close {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: var(--radius-control);
+  line-height: 1;
+}
+.pm-close:hover {
+  background: var(--bg-muted);
+  color: var(--text-bright);
+}
 .app {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: 100%;
   background: var(--bg-inset);
   color: var(--text-bright);
   font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
@@ -1425,6 +1464,8 @@ button.small {
 }
 
 /* ── Modals ───────────────────────────────────────────────────────────────── */
+/* Nested inside .pm-overlay (z-index 8000): must sit above the modal shell that
+   hosts them, hence a z-index past the shell's own stacking level. */
 .modal {
   position: fixed;
   inset: 0;
@@ -1432,7 +1473,7 @@ button.small {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 100;
+  z-index: 8100;
 }
 .modal-card {
   background: var(--bg-base);
