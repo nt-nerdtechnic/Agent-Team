@@ -144,6 +144,21 @@ def _claude_home_secret_is_fresher(home_secret: str | None, slot_secret: str) ->
     return home_exp is not None and slot_exp is not None and home_exp >= slot_exp
 
 
+def _claude_credential_is_wiped(secret: str | None) -> bool:
+    """True when a claude credentials JSON keeps its ``claudeAiOauth`` wrapper
+    but holds neither token. Claude Code empties ``accessToken`` and
+    ``refreshToken`` in place when the server rejects a refresh
+    (``invalid_grant``), leaving a structurally valid blob that carries no
+    credential at all. Such a blob must never be mirrored into a slot: it would
+    replace that account's only surviving refresh token with empty strings and
+    the account could only be recovered by signing in again."""
+    data = _parse_json_dict(secret)
+    oauth = data.get("claudeAiOauth") if data else None
+    if not isinstance(oauth, dict):
+        return False
+    return not (oauth.get("accessToken") or oauth.get("refreshToken"))
+
+
 def _codex_identity_email(secret: str | None) -> str | None:
     """Best-effort login email from codex ``auth.json``: the ``id_token`` JWT
     payload carries it. Display only — the signature is not verified."""
@@ -515,15 +530,30 @@ class CredentialVault:
     def write_slot(self, agent_key: str, slot_id: str, creds: LiveCredentials) -> None:
         slot = self.slot_dir(agent_key, slot_id)
         if agent_key == "claude":
+            # A wiped credential holds no token to store, and writing it would
+            # replace the account's only surviving refresh token with empty
+            # strings (see ``_claude_credential_is_wiped``). Every path that
+            # mirrors a credential into a slot — switch capture, login-home and
+            # legacy-home harvest, startup promotion — funnels through here, so
+            # the guard lives here rather than at each call site. The stored
+            # secret is left as it is; the display-only account still updates.
+            # An explicit ``None`` keeps clearing the slot: that is a real
+            # sign-out, not a wipe.
+            wiped = _claude_credential_is_wiped(creds.secret)
+            if wiped:
+                log.warning(
+                    "refusing to store a wiped claude credential in slot %s; "
+                    "keeping the one already stored", slot_id,
+                )
             if self._is_macos:
                 service = self._slot_service(agent_key, slot_id)
                 if creds.secret is None:
                     self._keychain_delete(service)
-                else:
+                elif not wiped:
                     self._keychain_write(service, creds.secret)
             elif creds.secret is None:
                 (slot / _SLOT_FILES["claude"]).unlink(missing_ok=True)
-            else:
+            elif not wiped:
                 _write_private(slot / _SLOT_FILES["claude"], creds.secret)
             account_file = slot / _OAUTH_ACCOUNT_SLOT_FILE
             if creds.account is None:
@@ -597,7 +627,10 @@ class CredentialVault:
         currently runs on — into the slot (a logged-out state empties the
         slot). Returns the snapshot. Reads strictly: a transient Keychain
         failure aborts BEFORE any slot is written — emptying the slot on a
-        misread would lose the account's token globally."""
+        misread would lose the account's token globally. A claude credential
+        whose tokens Claude Code wiped in place leaves the slot's stored secret
+        alone (``write_slot``); the returned snapshot still mirrors the live
+        state so callers can roll it back."""
         creds = self.read_live(agent_key, strict=True)
         self.write_slot(agent_key, slot_id, creds)
         return creds
@@ -630,12 +663,15 @@ class CredentialVault:
     def harvest(self, agent_key: str, slot_id: str) -> bool:
         """Opportunistically fill an EMPTY slot from the live credentials the
         account currently runs on (the user just logged in inside a pane).
-        No-op when the slot already holds a secret or nothing is signed in.
+        No-op when the slot already holds a secret or nothing is signed in — a
+        claude credential whose tokens were wiped counts as nothing.
         Returns True when something was harvested."""
         if not self.slot_is_empty(agent_key, slot_id):
             return False
         creds = self.read_live(agent_key)
         if creds.secret is None:
+            return False
+        if agent_key == "claude" and _claude_credential_is_wiped(creds.secret):
             return False
         self.write_slot(agent_key, slot_id, creds)
         return True
@@ -666,7 +702,9 @@ class CredentialVault:
         Keychain item whose service is suffixed with a hash of the config-dir
         path (see ``legacy_claude_keychain_service``); the non-macOS fallback
         is ``<home>/.credentials.json``. Display info comes from the legacy
-        home's own ``.claude.json``. Returns True when a secret was captured.
+        home's own ``.claude.json``. Returns True when a secret was captured —
+        a home whose tokens Claude Code wiped counts as having none, so the
+        caller leaves it in place instead of reporting a successful capture.
         """
         secret = None
         if self._is_macos:
@@ -682,7 +720,7 @@ class CredentialVault:
                     account = parsed["oauthAccount"]
             except ValueError:
                 pass
-        if secret is None:
+        if secret is None or _claude_credential_is_wiped(secret):
             return False
         self.write_slot("claude", slot_id, LiveCredentials(secret=secret, account=account))
         if self._is_macos:

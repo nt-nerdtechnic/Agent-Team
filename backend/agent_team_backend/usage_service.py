@@ -2580,6 +2580,9 @@ class UsageService:
             }
 
         credentials = await asyncio.to_thread(_read_all)
+        credentials = await self._delegate_active_claude_refresh(
+            vault, active, credentials, _read_all
+        )
         allowed = set(slot_ids)
         removed = False
         for mapping in (
@@ -2592,6 +2595,33 @@ class UsageService:
         if removed:
             await asyncio.to_thread(self._save_cache)
         return active, credentials
+
+    async def _delegate_active_claude_refresh(
+        self, vault, active: str, credentials: dict[str, dict | None], read_all
+    ) -> dict[str, dict | None]:
+        """When the ACTIVE account's token has expired, ask the CLI to renew it
+        and re-read. Nothing is minted here — see ``claude_delegated_refresh``.
+
+        Only the active account can be renewed this way: the CLI probe touches
+        whatever credential is live. A parked slot stays expired until a switch
+        brings it live, where the CLI takes over. Best effort — a poll on an
+        expired token still reports the account as expired, which is the
+        behaviour without this step."""
+        oauth = credentials.get(active)
+        if oauth is None or not claude_token_expired(oauth):
+            return credentials
+        if not hasattr(vault, "read_live"):
+            return credentials
+        from .claude_delegated_refresh import OUTCOME_REFRESHED, attempt
+
+        try:
+            outcome = await attempt(vault)
+        except Exception as err:  # noqa: BLE001 — must not sink the poll
+            log.warning("claude delegated refresh errored: %s", err)
+            return credentials
+        if outcome != OUTCOME_REFRESHED:
+            return credentials
+        return await asyncio.to_thread(read_all)
 
     def configure(self, enabled: bool, interval_sec: float | None) -> None:
         self.enabled = bool(enabled)

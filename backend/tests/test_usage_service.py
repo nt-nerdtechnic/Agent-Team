@@ -2708,6 +2708,11 @@ class _SlotVault:
     def resolve_claude_credentials(self, slot_id: str, *, active: bool):
         return self.read_slot("claude", slot_id)
 
+    def read_live(self, agent_key: str):
+        # The live location mirrors whichever slot the delegated refresh
+        # renewed; tests set `live` directly.
+        return SimpleNamespace(secret=getattr(self, "live", None))
+
 
 def _slot_secret(access: str, refresh: str, expires_at: int, **extra) -> str:
     return json.dumps({
@@ -2758,6 +2763,98 @@ async def test_poll_never_mints_tokens_and_reads_slots_as_stored(
     assert sorted(fetched) == ["active-old", "default-old", "parked-old"]
     assert vault.writes == []
     assert payload["accounts"]["claude"][parked["id"]]["status"] == "expired"
+
+
+async def test_poll_delegates_refresh_when_the_active_token_expired(
+    tmp_path, monkeypatch
+):
+    """An expired ACTIVE token is renewed by asking the CLI, then re-read.
+    The app still mints nothing — see claude_delegated_refresh."""
+    from agent_team_backend import claude_delegated_refresh as dr
+
+    store = _isolated_store(tmp_path)
+    store.set_default("claude", None)
+    dead, alive = 1_000, int(time.time() * 1000 + 3_600_000)
+    vault = _SlotVault({"__default__": _slot_secret("stale", "rt", dead)})
+    monkeypatch.setattr(us, "_get_profiles_store", lambda: store)
+    monkeypatch.setattr(us, "_get_credential_vault", lambda: vault)
+
+    attempts: list[Any] = []
+
+    async def fake_attempt(v, **kwargs):
+        attempts.append(v)
+        # The CLI renewed it: the slot the resolver reads now holds a live token.
+        vault.slots["__default__"] = _slot_secret("renewed", "rt2", alive)
+        return dr.OUTCOME_REFRESHED
+
+    monkeypatch.setattr(dr, "attempt", fake_attempt)
+    fetched: list[str] = []
+
+    async def fake_claude(oauth):
+        fetched.append(oauth["accessToken"])
+        return us._snapshot("claude", "ok",
+                            windows=[us._window("session", "Session", 10, None)])
+
+    monkeypatch.setattr(us, "fetch_claude_oauth", fake_claude)
+    for name in ("codex", "kimi", "grok", "antigravity", "opencode", "qwen",
+                 "kilo", "pi", "copilot", "cursor"):
+        monkeypatch.setattr(
+            us, f"fetch_{name}",
+            lambda *a, _p=name, **k: _no_creds(_p),
+        )
+
+    svc = us.UsageService(cache_path=tmp_path / "usage-cache.json")
+    await svc.poll_once(tmp_path)
+
+    assert len(attempts) == 1
+    assert fetched == ["renewed"]  # polled on the token the CLI minted
+
+
+async def test_poll_leaves_an_expired_parked_slot_to_the_switch(
+    tmp_path, monkeypatch
+):
+    """The CLI probe touches whatever is live, so a parked slot cannot be
+    renewed this way — it stays expired until a switch brings it live."""
+    from agent_team_backend import claude_delegated_refresh as dr
+
+    store = _isolated_store(tmp_path)
+    active = store.create(agent_key="claude", name="Active")
+    parked = store.create(agent_key="claude", name="Parked")
+    store.set_default("claude", active["id"])
+
+    alive = int(time.time() * 1000 + 3_600_000)
+    vault = _SlotVault({
+        "__default__": _slot_secret("default-live", "rt-d", alive),
+        active["id"]: _slot_secret("active-live", "rt-a", alive),
+        parked["id"]: _slot_secret("parked-stale", "rt-p", 1_000),
+    })
+    monkeypatch.setattr(us, "_get_profiles_store", lambda: store)
+    monkeypatch.setattr(us, "_get_credential_vault", lambda: vault)
+
+    attempts: list[Any] = []
+
+    async def fake_attempt(v, **kwargs):
+        attempts.append(v)
+        return dr.OUTCOME_REFRESHED
+
+    monkeypatch.setattr(dr, "attempt", fake_attempt)
+
+    async def fake_claude(oauth):
+        return us._snapshot("claude", "ok",
+                            windows=[us._window("session", "Session", 10, None)])
+
+    monkeypatch.setattr(us, "fetch_claude_oauth", fake_claude)
+    for name in ("codex", "kimi", "grok", "antigravity", "opencode", "qwen",
+                 "kilo", "pi", "copilot", "cursor"):
+        monkeypatch.setattr(
+            us, f"fetch_{name}",
+            lambda *a, _p=name, **k: _no_creds(_p),
+        )
+
+    svc = us.UsageService(cache_path=tmp_path / "usage-cache.json")
+    await svc.poll_once(tmp_path)
+
+    assert attempts == []  # the active token was fine; the parked one is not ours to fix
 
 
 async def _no_creds(provider: str) -> dict:

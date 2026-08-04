@@ -205,11 +205,86 @@ def test_harvest_fills_only_empty_slot(tmp_path: Path) -> None:
     assert vault.read_slot("codex", "slot1").secret == '{"who": "A"}'
 
 
+# ── wiped claude credentials ────────────────────────────────────────────────
+#
+# Claude Code empties accessToken/refreshToken in place when the server
+# rejects a refresh, leaving a valid-looking blob with no credential in it.
+
+
+_WIPED = json.dumps({
+    "claudeAiOauth": {
+        "accessToken": "",
+        "refreshToken": "",
+        "expiresAt": 1000,
+        "scopes": ["user:inference"],
+    }
+})
+_LIVE_TOKENS = json.dumps({
+    "claudeAiOauth": {
+        "accessToken": "sk-live",
+        "refreshToken": "rt-live",
+        "expiresAt": 2000,
+    }
+})
+
+
+def test_capture_keeps_slot_when_live_claude_tokens_are_wiped(tmp_path: Path) -> None:
+    """The slot's stored refresh token is the account's only surviving copy —
+    a wiped live blob must never overwrite it."""
+    vault = _file_vault(tmp_path)
+    _write(tmp_path / "home" / ".claude" / ".credentials.json", _WIPED)
+    vault.write_slot("claude", "slot1", LiveCredentials(secret=_LIVE_TOKENS))
+
+    captured = vault.capture("claude", "slot1")
+
+    assert vault.read_slot("claude", "slot1").secret == _LIVE_TOKENS
+    # The snapshot still mirrors live so switch() can roll it back.
+    assert captured.secret == _WIPED
+
+
+def test_capture_stores_claude_credential_that_still_has_a_token(tmp_path: Path) -> None:
+    """Only a fully wiped blob is refused: an expired-but-refreshable
+    credential still carries the refresh token and must be backed up."""
+    vault = _file_vault(tmp_path)
+    expired = json.dumps({
+        "claudeAiOauth": {"accessToken": "", "refreshToken": "rt-1", "expiresAt": 1}
+    })
+    _write(tmp_path / "home" / ".claude" / ".credentials.json", expired)
+
+    vault.capture("claude", "slot1")
+
+    assert vault.read_slot("claude", "slot1").secret == expired
+
+
+def test_switch_away_from_wiped_claude_login_preserves_slot_token(tmp_path: Path) -> None:
+    vault = _file_vault(tmp_path)
+    live = tmp_path / "home" / ".claude" / ".credentials.json"
+    _write(live, _WIPED)
+    vault.write_slot("claude", "slot-a", LiveCredentials(secret=_LIVE_TOKENS))
+    vault.write_slot("claude", "slot-b", LiveCredentials(secret='{"who": "B"}'))
+
+    vault.switch("claude", "slot-a", "slot-b")
+
+    # slot-a keeps the credential it can still be recovered from...
+    assert vault.read_slot("claude", "slot-a").secret == _LIVE_TOKENS
+    # ...and the target account came live as usual.
+    assert live.read_text(encoding="utf-8") == '{"who": "B"}'
+
+
+def test_harvest_ignores_wiped_claude_credential(tmp_path: Path) -> None:
+    vault = _file_vault(tmp_path)
+    _write(tmp_path / "home" / ".claude" / ".credentials.json", _WIPED)
+
+    assert vault.harvest("claude", "slot1") is False
+    assert vault.slot_is_empty("claude", "slot1")
+
+
 def test_claude_oauth_account_round_trip(tmp_path: Path) -> None:
     """`~/.claude.json` oauthAccount travels with the credentials; other keys
     in the file survive both clear and restore."""
     vault = _file_vault(tmp_path)
-    _write(tmp_path / "home" / ".claude" / ".credentials.json", '{"claudeAiOauth": {}}')
+    # A token must be present: capture() refuses to mirror a wiped credential.
+    _write(tmp_path / "home" / ".claude" / ".credentials.json", _LIVE_TOKENS)
     _write(
         tmp_path / "home" / ".claude.json",
         json.dumps({"oauthAccount": {"emailAddress": "a@x.com"}, "theme": "dark"}),
