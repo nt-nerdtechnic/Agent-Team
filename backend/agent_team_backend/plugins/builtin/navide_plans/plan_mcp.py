@@ -647,7 +647,11 @@ async def cli_list_targets(ctx: Context) -> dict[str, Any]:
 # knows the pane counts, chain depth and name collisions the gate needs. The
 # tool waits for that verdict instead of reporting "requested", so the agent
 # learns whether it actually got a pane and, if not, why.
-_SPAWN_VERDICT_TIMEOUT_S = 45.0
+#
+# The verdict lands once the pane exists, not once its CLI has booted: booting
+# a cold CLI can take longer than any deadline an agent would tolerate, so that
+# part continues after the answer and reports failure by message.
+_SPAWN_VERDICT_TIMEOUT_S = 30.0
 _pending_spawns: dict[str, asyncio.Future[dict[str, Any]]] = {}
 
 
@@ -668,9 +672,13 @@ async def cli_open_agent(agent: str, name: str, task: str, ctx: Context) -> dict
     will be called — that name is also its messaging address, so pick something
     role-shaped like "reviewer" — and `task` is what it should do.
 
-    The new pane starts, receives the task, and reports back to you by message
-    when it is done, so you do not need to poll it. This call waits for the pane
-    to start, which takes a few seconds.
+    This returns once the pane exists, which takes a few seconds. Its CLI then
+    boots and receives the task in the background — if that part fails you are
+    told by message. The pane also reports its result to you by message when it
+    finishes, so you never need to poll it.
+
+    Use the returned name, not the one you asked for: a concurrent request may
+    have taken that name, in which case yours gets a suffix.
 
     Refused when the name is taken, the agent key is unknown, or a limit is hit:
     3 child panes per pane, 8 CLI panes per workspace, spawn chain depth 2.
@@ -714,7 +722,8 @@ async def cli_open_agent(agent: str, name: str, task: str, ctx: Context) -> dict
         return {
             "ok": False,
             "error": "no answer from the window that owns your pane — it may have "
-            "closed, or the new pane is taking unusually long to start",
+            "closed. Check cli_list_targets before retrying: the pane may exist "
+            "already, in which case reopening it would duplicate the work",
         }
     finally:
         _pending_spawns.pop(request_id, None)

@@ -1404,14 +1404,15 @@ async function handleSpawnRequestsForTurn(
   }
 }
 
-/** Spawn + kick off a pane requested by a SPAWN block. Mirrors
- *  dispatchPlanToPane's create path: the kickoff is injected directly because
- *  scheduleInjection never injects a roleless manual pane's kickoffPrompt. */
-async function spawnRequestedPane(
+/** Create the pane a spawn request asked for, and return its id once it exists
+ *  and holds its messaging handle. Split from the kickoff because this part is
+ *  quick and settles the pane's real identity, while the kickoff waits on the
+ *  CLI to boot — a caller that needs to be told what it got should be told
+ *  here, not tens of seconds later. */
+async function createRequestedPane(
   parent: ActivePane,
-  parentName: string,
-  req: { agentKey: string; name: string; task: string },
-): Promise<boolean> {
+  req: { agentKey: string; name: string },
+): Promise<string | null> {
   const paneId = await spawnPane({
     agentKey: req.agentKey,
     roleKey: '' as RoleKey,
@@ -1424,7 +1425,7 @@ async function spawnRequestedPane(
     preferredMessagingName: req.name,
     spawnedBy: parent.id,
   })
-  if (!paneId) return false
+  if (!paneId) return null
   await sendQuiet<ProjectPayload>('manual_pane.spawn', {
     workspace_path: parent.workspacePath,
     pane_id: paneId,
@@ -1441,11 +1442,18 @@ async function spawnRequestedPane(
     pane_id: paneId,
     custom_name: req.name,
   })
+  return panes.value.some((p) => p.id === paneId) ? paneId : null
+}
+
+/** Wait for a freshly created pane's CLI to settle, then inject its task. Slow
+ *  by nature: a cold CLI can take tens of seconds to print its first byte. */
+async function kickoffRequestedPane(
+  paneId: string,
+  parentName: string,
+  task: string,
+): Promise<boolean> {
   const pane = panes.value.find((p) => p.id === paneId)
   if (!pane) return false
-  notifyRestore.toast(
-    i18n.global.t('msg.spawn-toast', { parent: parentName, child: pane.messagingName ?? req.name }),
-  )
   const bootstrapped = await sendSessionMarkerBootstrap(pane, `[pane ${paneId.slice(0, 8)}]`)
   if (!bootstrapped) {
     await dismissStartupDialog(paneId, DISMISS_TIMEOUT_MS)
@@ -1453,7 +1461,24 @@ async function spawnRequestedPane(
   }
   await waitForQuiet(paneId, 1000, 8000)
   if (!paneAlive(paneId)) return false
-  return await injectPane(paneId, renderSpawnKickoff(req.task, parentName), 'agent-spawn', true)
+  return await injectPane(paneId, renderSpawnKickoff(task, parentName), 'agent-spawn', true)
+}
+
+/** Spawn + kick off a pane requested by a SPAWN block. Mirrors
+ *  dispatchPlanToPane's create path: the kickoff is injected directly because
+ *  scheduleInjection never injects a roleless manual pane's kickoffPrompt. */
+async function spawnRequestedPane(
+  parent: ActivePane,
+  parentName: string,
+  req: { agentKey: string; name: string; task: string },
+): Promise<boolean> {
+  const paneId = await createRequestedPane(parent, req)
+  if (!paneId) return false
+  const pane = panes.value.find((p) => p.id === paneId)
+  notifyRestore.toast(
+    i18n.global.t('msg.spawn-toast', { parent: parentName, child: pane?.messagingName ?? req.name }),
+  )
+  return await kickoffRequestedPane(paneId, parentName, req.task)
 }
 
 /** The spawn-gate context for a pane in this window. Shared by the SPAWN block
@@ -1502,19 +1527,54 @@ async function handleMcpSpawnRequest(ev: {
     spawnGateContextFor(ev.requester_pane_id),
   )
   if (!gate.ok) {
-    report({ ok: false, error: gate.reason })
+    report({ ok: false, error: describeSpawnRefusal(gate.reason, ev.name, ev.requester_pane_id) })
     return
   }
+  let paneId: string | null = null
   try {
-    const started = await spawnRequestedPane(parent, parentName, gate)
-    if (!started) {
-      report({ ok: false, error: `pane「${gate.name}」啟動或任務注入失敗` })
-      return
-    }
-    report({ ok: true, paneId: messaging.paneIdOf(gate.name) ?? '', name: gate.name })
+    paneId = await createRequestedPane(parent, gate)
   } catch (err) {
     report({ ok: false, error: err instanceof Error ? err.message : String(err) })
+    return
   }
+  if (!paneId) {
+    report({ ok: false, error: `pane「${gate.name}」建立失敗` })
+    return
+  }
+  // The pane exists and owns its handle, so answer now with its real identity
+  // rather than the requested name — a concurrent spawn may have taken that
+  // name and pushed this one to a suffix. Booting the CLI and injecting the
+  // task takes far longer and would blow the caller's deadline, so it runs on
+  // after this and reports a failure by message instead.
+  const child = panes.value.find((p) => p.id === paneId)
+  const childName = child?.messagingName ?? gate.name
+  notifyRestore.toast(i18n.global.t('msg.spawn-toast', { parent: parentName, child: childName }))
+  report({ ok: true, paneId, name: childName })
+
+  void kickoffRequestedPane(paneId, parentName, gate.task)
+    .then((ok) => {
+      if (!ok) {
+        sendSpawnFeedback(parentName, `pane「${childName}」已開啟，但任務注入失敗，請自行確認`)
+      }
+    })
+    .catch((err) => {
+      sendSpawnFeedback(
+        parentName,
+        `pane「${childName}」已開啟，但任務注入出錯：${err instanceof Error ? err.message : String(err)}`,
+      )
+    })
+}
+
+/** Make a gate refusal actionable. A name collision with a pane the requester
+ *  itself spawned almost always means an earlier request succeeded but its
+ *  verdict never got back — telling that agent to "pick another name" would
+ *  have it open a second pane doing the same work. */
+function describeSpawnRefusal(reason: string, requestedName: string, requesterPaneId: string): string {
+  const holder = messaging.paneIdOf(requestedName)
+  if (!holder) return reason
+  const pane = panes.value.find((p) => p.id === holder)
+  if (pane?.spawnedBy !== requesterPaneId) return reason
+  return `你已經開了一個叫「${requestedName}」的 pane，它正在執行中 — 不需要重開`
 }
 
 function openMessagingPanel(): void {
