@@ -7,6 +7,7 @@ import {
   SPAWN_END,
   isQualifiedTarget,
   isTurnInFlight,
+  VENDORS_WITHOUT_TURN_END,
   parseMessages,
   parseSpawns,
   renderSpawnKickoff,
@@ -288,20 +289,34 @@ describe('isTurnInFlight', () => {
     expect(isTurnInFlight(NOW - 100, NOW - 500, NOW)).toBe(true)
   })
 
-  it('gives up on a vendor that never reports a turn end', () => {
-    // qwen/pi/cursor never advance lastTurnCompleteAt, so without a timeout the
-    // pane would be considered busy forever and stop accepting messages.
-    expect(isTurnInFlight(NOW - 19_000, 0, NOW)).toBe(true)
-    expect(isTurnInFlight(NOW - 21_000, 0, NOW)).toBe(false)
+  it('never infers the end from silence for a vendor that reports turn ends', () => {
+    // Activity is logged per output line, not as a heartbeat: a CLI running a
+    // long tool call, or sitting on a permission prompt, is silent but very
+    // much mid-turn. Injecting there would answer the prompt.
+    expect(isTurnInFlight(NOW - 5 * 60_000, 0, NOW)).toBe(true)
+  })
+
+  it('infers the end from silence only where that is the only signal', () => {
+    // qwen/pi/cursor never advance lastTurnCompleteAt, so without this the pane
+    // would count as busy forever and stop accepting messages.
+    const opts = { inferEndFromSilence: true }
+    expect(isTurnInFlight(NOW - 19_000, 0, NOW, opts)).toBe(true)
+    expect(isTurnInFlight(NOW - 21_000, 0, NOW, opts)).toBe(false)
   })
 
   it('treats a pane that has never been active as not in flight', () => {
     expect(isTurnInFlight(0, 0, NOW)).toBe(false)
+    expect(isTurnInFlight(0, 0, NOW, { inferEndFromSilence: true })).toBe(false)
   })
 
-  it('honours a custom window', () => {
-    expect(isTurnInFlight(NOW - 3_000, 0, NOW, 5_000)).toBe(true)
-    expect(isTurnInFlight(NOW - 6_000, 0, NOW, 5_000)).toBe(false)
+  it('honours a custom silence window', () => {
+    const opts = { inferEndFromSilence: true, silenceMs: 5_000 }
+    expect(isTurnInFlight(NOW - 3_000, 0, NOW, opts)).toBe(true)
+    expect(isTurnInFlight(NOW - 6_000, 0, NOW, opts)).toBe(false)
+  })
+
+  it('lists exactly the vendors whose logs carry no end-of-turn record', () => {
+    expect([...VENDORS_WITHOUT_TURN_END].sort()).toEqual(['cursor', 'pi', 'qwen'])
   })
 })
 

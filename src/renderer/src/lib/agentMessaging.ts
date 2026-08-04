@@ -204,32 +204,38 @@ export function defaultMessagingName(agentKey: string, taken: Iterable<string>):
   }
 }
 
-/** How long after the last activity a turn is still believed to be running.
- *  See {@link isTurnInFlight}. */
-export const TURN_IN_FLIGHT_MAX_MS = 20_000
+/** How long a silence must last before a turn is assumed over, for the vendors
+ *  where silence is the only available signal. See {@link isTurnInFlight}. */
+export const TURN_SILENCE_MS = 20_000
+
+/** CLIs whose logs carry no end-of-turn record at all, so the end of a turn can
+ *  only be inferred from silence.
+ *
+ *  Everything else reports turn ends explicitly and MUST be trusted instead:
+ *  activity is logged per output line, not as a heartbeat, so a CLI waiting on
+ *  a long tool call — or on a permission prompt — looks exactly like a CLI that
+ *  has finished. Inferring from silence there would inject text and a newline
+ *  into a pane that is mid-task, and into a y/n prompt would answer it. */
+export const VENDORS_WITHOUT_TURN_END: ReadonlySet<string> = new Set(['qwen', 'pi', 'cursor'])
 
 /**
  * Whether a pane's CLI is still mid-turn, from its activity timestamps.
  *
- * The direct signal is "activity newer than the last reported turn end". But
- * some vendors' logs carry no end-of-turn record at all (qwen, pi, cursor), so
- * their `lastTurnCompleteAt` never advances and that test alone would latch
- * forever — those panes would stop accepting inter-CLI messages the moment they
- * did any work. Activity is reported per log line while a CLI produces output,
- * so a long enough silence means the turn ended whether or not anyone said so.
- *
- * Vendors that do report turn ends are unaffected: their report moves
- * `lastTurnCompleteAt` past `lastActiveAt` immediately, which settles this
- * before the timeout matters.
+ * The signal is "activity newer than the last reported turn end". For the
+ * vendors in {@link VENDORS_WITHOUT_TURN_END} that alone would latch forever,
+ * since their `lastTurnCompleteAt` never advances — those panes would stop
+ * accepting inter-CLI messages the moment they did any work — so there, and
+ * only there, a long enough silence is taken to mean the turn ended.
  */
 export function isTurnInFlight(
   lastActiveAt: number,
   lastTurnCompleteAt: number,
   now: number,
-  maxMs: number = TURN_IN_FLIGHT_MAX_MS,
+  opts: { inferEndFromSilence?: boolean; silenceMs?: number } = {},
 ): boolean {
   if (lastActiveAt <= lastTurnCompleteAt) return false
-  return now - lastActiveAt < maxMs
+  if (!opts.inferEndFromSilence) return true
+  return now - lastActiveAt < (opts.silenceMs ?? TURN_SILENCE_MS)
 }
 
 /**

@@ -24,7 +24,7 @@ import { useNotify } from './composables/useNotify'
 import { migrateTerminalPtyKey } from './composables/useTerminal'
 import { useAgentMessaging, isBroadcastTarget } from './composables/useAgentMessaging'
 import type { RouteResult } from './composables/useAgentMessaging'
-import { MSG_ENVELOPE_PREFIX, isTurnInFlight, parseMessages, parseSpawns, renderSpawnKickoff } from './lib/agentMessaging'
+import { MSG_ENVELOPE_PREFIX, VENDORS_WITHOUT_TURN_END, isTurnInFlight, parseMessages, parseSpawns, renderSpawnKickoff } from './lib/agentMessaging'
 import { evaluateTurnSpawns, evaluateSpawnRequest, computeSpawnDepth } from './lib/agentSpawnGate'
 import StageTabBar, { type TabItem } from './components/StageTabBar.vue'
 import { useBackend } from './composables/useBackend'
@@ -1339,7 +1339,10 @@ function isPaneIdleForMessaging(paneId: string): boolean {
   if (pane.injectionStatus === 'scheduled' || pane.kickoffStatus === 'pending') return false
   const now = Date.now()
   const lastActive = paneLastActiveAt.get(paneId) ?? 0
-  if (isTurnInFlight(lastActive, paneTurnCompleteAt.get(paneId) ?? 0, now)) return false
+  const inFlight = isTurnInFlight(lastActive, paneTurnCompleteAt.get(paneId) ?? 0, now, {
+    inferEndFromSilence: VENDORS_WITHOUT_TURN_END.has(pane.agentKey),
+  })
+  if (inFlight) return false
   return now - lastActive >= 2000
 }
 
