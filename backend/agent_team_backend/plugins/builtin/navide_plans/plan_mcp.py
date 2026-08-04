@@ -59,7 +59,7 @@ server = FastMCP(
         "pointing it at a different project reads that project's plans. If a "
         "tool warns that no pane uses your workspace_path, Navide is not "
         "watching that project and will not show the plan — check "
-        "list_dispatch_targets for the workspaces panes actually use.\n"
+        "cli_list_targets for the workspaces panes actually use.\n"
         "\n"
         "When to use: whenever the user asks for a plan, or a task is large "
         "enough that its steps and progress should be tracked. Create the "
@@ -77,8 +77,6 @@ server = FastMCP(
         "skipped) as you go, and record findings or decisions with "
         "plan_add_note. Always edit through these tools — writing the HTML "
         "yourself corrupts the plan-meta island Navide reads.\n"
-        "\n"
-        "Dispatch tools: list_dispatch_targets, plan_dispatch.\n"
         "\n"
         "Talking to other CLI panes: you can send an instruction to another "
         "CLI agent Navide is running — in this workspace or in another "
@@ -530,22 +528,7 @@ async def plan_add_note(
     return await asyncio.to_thread(_add_note_sync, workspace_path, rel_path, text, author)
 
 
-# ── dispatch (plan → CLI terminal session) ──────────────────────────────────
-
-
-def _plan_execution_prompt(plan_workspace_rel_path: str) -> str:
-    """Python mirror of the frontend's planExecutionPrompt template
-    (src/renderer/src/lib/planExecutePrompt.ts) — keep the wording in sync so
-    MCP dispatch behaves exactly like the plan window's dispatch button.
-    """
-    return (
-        f"Execute the approved plan document at {plan_workspace_rel_path} "
-        "(workspace-relative path). "
-        "Read the plan first, then implement it by its todos phase by phase. "
-        "Update the plan-meta todo status (and the matching visible markup) "
-        "as you complete each phase. "
-        'Set the plan-meta stage to "done" when all todos are complete.'
-    )
+# ── terminal access ────────────────────────────────────────────────────────
 
 
 def _terminal_service() -> Any:
@@ -562,76 +545,6 @@ def _terminal_service() -> Any:
     if service is None:
         raise RuntimeError("terminal service unavailable (backend not initialized)")
     return service
-
-
-@server.tool()
-async def plan_dispatch(
-    workspace_path: str, plan_rel_path: str, session_id: str, submit: bool = True
-) -> dict[str, Any]:
-    """Send an "execute this plan" prompt into a CLI terminal session.
-
-    plan_rel_path is the workspace-relative path returned by plan_list (a bare
-    filename is also accepted). The prompt is the same template the plan
-    window's dispatch button injects. With submit=true (default) a carriage
-    return follows the prompt so the CLI agent starts immediately;
-    submit=false only types the prompt. Dispatch guarantees delivery to the
-    session's PTY, not that the agent acted on it. Use list_dispatch_targets
-    to find session ids.
-    Returns {plan_rel_path, session_id, submitted, prompt}.
-    """
-    await asyncio.to_thread(_require_plan_sync, workspace_path, plan_rel_path)
-    terminals = _terminal_service()
-    plan_rel_path = _plan_rel_path(_plan_filename(plan_rel_path))
-    prompt = _plan_execution_prompt(plan_rel_path)
-    terminals.write(session_id, prompt)
-    if submit:
-        # Brief pause so the CLI's input handling ingests the text before
-        # Enter arrives (the frontend's injectText does the same, with
-        # bracketed paste + a delayed Enter).
-        await asyncio.sleep(0.05)
-        terminals.write(session_id, "\r")
-    return {
-        "plan_rel_path": plan_rel_path,
-        "session_id": session_id,
-        "submitted": submit,
-        "prompt": prompt,
-    }
-
-
-@server.tool()
-async def list_dispatch_targets(
-    agent_key: str | None = None, workspace: str | None = None
-) -> list[dict[str, Any]]:
-    """List CLI terminal sessions plan_dispatch can target.
-
-    Each entry: {session_id, pane_id, agent_key, cwd, workspace_path, alive}.
-    workspace_path falls back to cwd when the session carries no explicit
-    workspace metadata (same rule the backend's pane bookkeeping uses).
-    Optional filters: agent_key (exact match) and workspace (exact match
-    against workspace_path). Read-only.
-    """
-    terminals = _terminal_service()
-    sessions = list(getattr(terminals, "_sessions", {}).values())  # snapshot
-    targets: list[dict[str, Any]] = []
-    for session in sessions:
-        try:
-            metadata = session.metadata if isinstance(session.metadata, dict) else {}
-            entry = {
-                "session_id": session.id,
-                "pane_id": session.pane_id,
-                "agent_key": session.agent_key,
-                "cwd": session.cwd,
-                "workspace_path": str(metadata.get("workspace_path") or session.cwd),
-                "alive": not session.closed,
-            }
-        except AttributeError:
-            continue  # defensive: session shape changed mid-iteration
-        if agent_key is not None and entry["agent_key"] != agent_key:
-            continue
-        if workspace is not None and entry["workspace_path"] != workspace:
-            continue
-        targets.append(entry)
-    return targets
 
 
 # ── Inter-CLI messaging (cli_send / cli_list_targets) ───────────────────────
