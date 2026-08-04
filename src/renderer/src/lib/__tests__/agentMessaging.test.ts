@@ -6,6 +6,7 @@ import {
   SPAWN_START,
   SPAWN_END,
   isQualifiedTarget,
+  isTurnInFlight,
   parseMessages,
   parseSpawns,
   renderSpawnKickoff,
@@ -272,6 +273,35 @@ describe('uniqueMessagingName', () => {
   it('leaves differing numeric groups untouched (not a run)', () => {
     expect(uniqueMessagingName('v1-2-3', [])).toBe('v1-2-3')
     expect(uniqueMessagingName('v1-2-3', ['v1-2-3'])).toBe('v1-2-4')
+  })
+})
+
+describe('isTurnInFlight', () => {
+  const NOW = 1_000_000
+
+  it('is not in flight when the turn end is the newest signal', () => {
+    // claude/codex: turn_complete lands after the last agent_active.
+    expect(isTurnInFlight(NOW - 500, NOW - 100, NOW)).toBe(false)
+  })
+
+  it('is in flight while activity is newer than the last reported turn end', () => {
+    expect(isTurnInFlight(NOW - 100, NOW - 500, NOW)).toBe(true)
+  })
+
+  it('gives up on a vendor that never reports a turn end', () => {
+    // qwen/pi/cursor never advance lastTurnCompleteAt, so without a timeout the
+    // pane would be considered busy forever and stop accepting messages.
+    expect(isTurnInFlight(NOW - 19_000, 0, NOW)).toBe(true)
+    expect(isTurnInFlight(NOW - 21_000, 0, NOW)).toBe(false)
+  })
+
+  it('treats a pane that has never been active as not in flight', () => {
+    expect(isTurnInFlight(0, 0, NOW)).toBe(false)
+  })
+
+  it('honours a custom window', () => {
+    expect(isTurnInFlight(NOW - 3_000, 0, NOW, 5_000)).toBe(true)
+    expect(isTurnInFlight(NOW - 6_000, 0, NOW, 5_000)).toBe(false)
   })
 })
 

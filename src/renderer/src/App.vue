@@ -24,7 +24,7 @@ import { useNotify } from './composables/useNotify'
 import { migrateTerminalPtyKey } from './composables/useTerminal'
 import { useAgentMessaging, isBroadcastTarget } from './composables/useAgentMessaging'
 import type { RouteResult } from './composables/useAgentMessaging'
-import { MSG_ENVELOPE_PREFIX, parseMessages, parseSpawns, renderSpawnKickoff } from './lib/agentMessaging'
+import { MSG_ENVELOPE_PREFIX, isTurnInFlight, parseMessages, parseSpawns, renderSpawnKickoff } from './lib/agentMessaging'
 import { evaluateTurnSpawns, evaluateSpawnRequest, computeSpawnDepth } from './lib/agentSpawnGate'
 import StageTabBar, { type TabItem } from './components/StageTabBar.vue'
 import { useBackend } from './composables/useBackend'
@@ -1262,8 +1262,10 @@ function registerPaneMessaging(pane: ActivePane, preferredName?: string): void {
   mirrorMessagingHandle(pane)
 }
 
-/** Tell the registry whether a pane's agent is mid-turn, so cli_list_targets can
- *  report it. Deduped locally: turn events are frequent, state changes are not. */
+/** Tell the registry whether a pane can take work right now, so cli_list_targets
+ *  can report it. Derived from the same judgement that gates delivery, so "busy"
+ *  always means "a message sent now would wait" — a flag that disagreed with
+ *  that would be worse than none. Deduped: only changes cross the wire. */
 const paneBusyReported = new Map<string, boolean>()
 function reportPaneBusy(paneId: string, busy: boolean): void {
   if (paneBusyReported.get(paneId) === busy) return
@@ -1271,6 +1273,16 @@ function reportPaneBusy(paneId: string, busy: boolean): void {
   backend
     .send('agent_msg.set_busy', { pane_id: paneId, busy })
     .catch(() => { /* advisory only */ })
+}
+
+/** Re-derive every registered pane's busy state. Polled rather than driven off
+ *  turn events: idleness also depends on elapsed silence, which no event
+ *  announces. */
+function syncPaneBusy(): void {
+  for (const pane of panes.value) {
+    if (!pane.messagingName) continue
+    reportPaneBusy(pane.id, !isPaneIdleForMessaging(pane.id))
+  }
 }
 
 /** Mirror a pane's handle into the backend registry, which is the only place
@@ -1325,9 +1337,10 @@ function isPaneIdleForMessaging(paneId: string): boolean {
   const status = paneRefs[paneId]?.displayStatus as string | undefined
   if (status !== 'running' && status !== 'idle') return false
   if (pane.injectionStatus === 'scheduled' || pane.kickoffStatus === 'pending') return false
+  const now = Date.now()
   const lastActive = paneLastActiveAt.get(paneId) ?? 0
-  if (lastActive > (paneTurnCompleteAt.get(paneId) ?? 0)) return false // turn in flight
-  return Date.now() - lastActive >= 2000
+  if (isTurnInFlight(lastActive, paneTurnCompleteAt.get(paneId) ?? 0, now)) return false
+  return now - lastActive >= 2000
 }
 
 // Per-pane timestamp of the last turn_complete whose text was scanned for MSG
@@ -1581,7 +1594,7 @@ onMounted(() => {
         .catch(() => { /* the sender's log entry just stays queued */ })
     },
   })
-  _msgPumpTimer = window.setInterval(() => messaging.pump(), 1000)
+  _msgPumpTimer = window.setInterval(() => { messaging.pump(); syncPaneBusy() }, 1000)
   void refreshRemoteMessagingTargets()
   _remoteTargetsTimer = window.setInterval(() => void refreshRemoteMessagingTargets(), 10_000)
 })
@@ -6889,7 +6902,6 @@ backend.on('agent.activity', (raw) => {
   if (!ev?.pane_id) return
   if (ev.event_type === 'turn_complete') {
     paneTurnCompleteAt.set(ev.pane_id, Date.now())
-    reportPaneBusy(ev.pane_id, false)
     // Badge: authoritative turn end → drop the RUNNING hysteresis latch now.
     paneRefs[ev.pane_id]?.markTurnComplete?.()
     scheduleDoneNotify(ev.pane_id, ev.timestamp ?? '')
@@ -6932,7 +6944,6 @@ backend.on('agent.activity', (raw) => {
     }
     // A new turn re-arms 'done' notifications for this pane.
     sysNotify.markActive(ev.pane_id)
-    reportPaneBusy(ev.pane_id, true)
     // Claude's Notification hook (user attention requested, e.g. permission
     // prompt) arrives as agent_active with detail 'hook:notification'.
     if (ev.detail === 'hook:notification') notifyAttention(ev.pane_id)

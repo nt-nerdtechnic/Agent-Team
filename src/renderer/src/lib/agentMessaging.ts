@@ -204,6 +204,34 @@ export function defaultMessagingName(agentKey: string, taken: Iterable<string>):
   }
 }
 
+/** How long after the last activity a turn is still believed to be running.
+ *  See {@link isTurnInFlight}. */
+export const TURN_IN_FLIGHT_MAX_MS = 20_000
+
+/**
+ * Whether a pane's CLI is still mid-turn, from its activity timestamps.
+ *
+ * The direct signal is "activity newer than the last reported turn end". But
+ * some vendors' logs carry no end-of-turn record at all (qwen, pi, cursor), so
+ * their `lastTurnCompleteAt` never advances and that test alone would latch
+ * forever — those panes would stop accepting inter-CLI messages the moment they
+ * did any work. Activity is reported per log line while a CLI produces output,
+ * so a long enough silence means the turn ended whether or not anyone said so.
+ *
+ * Vendors that do report turn ends are unaffected: their report moves
+ * `lastTurnCompleteAt` past `lastActiveAt` immediately, which settles this
+ * before the timeout matters.
+ */
+export function isTurnInFlight(
+  lastActiveAt: number,
+  lastTurnCompleteAt: number,
+  now: number,
+  maxMs: number = TURN_IN_FLIGHT_MAX_MS,
+): boolean {
+  if (lastActiveAt <= lastTurnCompleteAt) return false
+  return now - lastActiveAt < maxMs
+}
+
 /**
  * True when a `to:` target names another workspace (`<folder>/<pane>` or
  * `/abs/path/<pane>`). Bare names stay workspace-local, which is the original
