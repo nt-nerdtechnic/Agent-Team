@@ -336,6 +336,7 @@ describe('CliAccountsPane', () => {
     const handler = createCliAccountSwitchHandler(api, {
       confirm: (message, opts) => notify.confirm(message, opts) as Promise<boolean>,
       agentLabel: () => 'Claude Code',
+      startLogin: () => {},
     })
     const w = mountPane(api, { switchHandler: handler })
 
@@ -357,6 +358,7 @@ describe('CliAccountsPane', () => {
     const handler = createCliAccountSwitchHandler(api, {
       confirm: (message, opts) => notify.confirm(message, opts) as Promise<boolean>,
       agentLabel: () => 'Claude Code',
+      startLogin: () => {},
     })
     const w = mountPane(api, { switchHandler: handler })
 

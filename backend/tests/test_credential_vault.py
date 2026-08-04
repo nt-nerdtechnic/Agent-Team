@@ -1311,16 +1311,14 @@ async def test_promotion_failure_writes_no_marker(
     assert vault.read_slot("codex", "p1").secret == '{"who": "home"}'
 
 
-# ── refreshed claude payloads must survive the Keychain writer ───────────────
+# ── rewritten claude payloads must survive the Keychain writer ───────────────
 
 
-def test_write_slot_stores_a_refreshed_claude_secret_on_macos(tmp_path: Path) -> None:
-    """The parked-slot token refresh rewrites a slot through write_slot. On
-    macOS that goes through `security -i`, which parses one command per line —
-    so the refreshed payload must stay on a single line. Regression: an
-    indented rewrite stored only "{" and destroyed the account's credential."""
-    from agent_team_backend.usage_service import merge_claude_secret
-
+def test_write_slot_stores_a_rewritten_claude_secret_on_macos(tmp_path: Path) -> None:
+    """A re-login or capture rewrites a slot through write_slot. On macOS that
+    goes through `security -i`, which parses one command per line — so the
+    payload must stay on a single line. Regression: an indented rewrite stored
+    only "{" and destroyed the account's credential."""
     vault, sec = _mac_vault(tmp_path)
     original = json.dumps({
         "claudeAiOauth": {
@@ -1330,8 +1328,13 @@ def test_write_slot_stores_a_refreshed_claude_secret_on_macos(tmp_path: Path) ->
     })
     vault.write_slot("claude", "acct1", LiveCredentials(secret=original))
 
-    refreshed = merge_claude_secret(original, {"accessToken": "new", "expiresAt": 2})
-    vault.write_slot("claude", "acct1", LiveCredentials(secret=refreshed))
+    rewritten = json.dumps({
+        "claudeAiOauth": {
+            "accessToken": "new", "refreshToken": "rt", "expiresAt": 2,
+            "scopes": ["user:inference"],
+        }
+    }, separators=(",", ":"))
+    vault.write_slot("claude", "acct1", LiveCredentials(secret=rewritten))
 
     stored = vault.read_slot("claude", "acct1").secret
     assert json.loads(stored)["claudeAiOauth"] == {

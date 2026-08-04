@@ -249,11 +249,6 @@
       "detecting-session": "detecting session ID",
       "ready": "ready",
       "failed": "setup failed"
-    },
-    "cli-missing": {
-      "title": "CLI not installed",
-      "message": "{label} exited with \"command not found\" — the CLI is not installed. Install it now? The install command runs in an external terminal; reopen the pane once it finishes.",
-      "install": "Install in terminal"
     }
   },
   "action": {
@@ -1401,7 +1396,8 @@
     "switch-restart-confirm-body": "Switching accounts will restart {count} running {agent} pane(s). Continue?",
     "switch-restart-confirm-confirm": "Switch & restart",
     "switch-restart-confirm-cancel": "Cancel",
-    "switch-restart-partial": "{failed} of {total} pane(s) could not be restarted after the account switch — see the log for details."
+    "switch-restart-partial": "{failed} of {total} pane(s) could not be restarted after the account switch — see the log for details.",
+    "needs-login": "This account is signed out — starting a sign-in."
   },
   "cliDrop": {
     "source-closed": "CLI pane is no longer open",
@@ -1415,6 +1411,36 @@
     "confirm": "Close all {count} session(s) and their tabs? Agent history is kept — this only frees the resources used by this project.",
     "confirmBtn": "Close all",
     "done": "Closed {count} session(s)"
+  },
+  "cli-install": {
+    "kicker": "Guided install",
+    "title": "Install {label}",
+    "lead": "{label} is not installed on this Mac. Navide can run the vendor's own install command for you — nothing else is downloaded or modified.",
+    "command-label": "Command that will run",
+    "note-terminal": "This runs in an external Terminal window so you can answer any prompt it asks (password, sign-in). This dialog updates by itself once the CLI is detected.",
+    "note-inline": "This runs in the background and can take a few minutes.",
+    "no-install-command": "{label} has no automatic install command. Follow the vendor's instructions, then re-detect.",
+    "install": "Install",
+    "retry": "Try again",
+    "installing": "Installing… {seconds}s",
+    "not-now": "Not now",
+    "close": "Close",
+    "waiting-title": "Waiting for the install to finish",
+    "waiting-desc": "The command is running in a Terminal window. This dialog updates as soon as {label} is detected.",
+    "waiting-timeout": "Still no sign of {label}. Finish the install in the Terminal window, then re-detect.",
+    "terminal-failed": "Navide could not open a Terminal window. Run the command above yourself, then re-detect.",
+    "blocked-title": "{name} is needed first",
+    "blocked-desc": "The install command for {label} depends on it. Install it here, then try again.",
+    "install-requirement": "Install {label}",
+    "requirement-manual": "{name} is missing and cannot be installed from here — install it manually, then try again.",
+    "failed-title": "The install command failed",
+    "docs": "Open the official docs",
+    "installed-not-detected": "The command finished, but {label} still isn't detected. It may need a new terminal session, or it landed outside PATH.",
+    "done-title": "{label} is ready",
+    "done-desc": "Version {version} detected.",
+    "done-desc-no-version": "Detected and ready to use.",
+    "relaunch": "Start {label} again",
+    "dont-ask": "Stop asking about {label}"
   },
   "cli-manage": {
     "title": "Installation and updates",

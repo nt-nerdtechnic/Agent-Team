@@ -1637,6 +1637,20 @@ class AgentCliProbeError(RuntimeError):
         self.details = details
 
 
+def _with_replaced_executable(command: Any, text: str, executable: str) -> Any:
+    """Swap the command's first token, preserving flags and the list wrapper."""
+    first_token = re.match(r"^\s*(?:'[^']*'|\"[^\"]*\"|\S+)", text)
+    if first_token is None:
+        return command
+    replaced = f"{text[:first_token.start()]}{shlex.quote(executable)}{text[first_token.end():]}"
+    if isinstance(command, list):
+        updated = list(command)
+        if updated:
+            updated[-1] = replaced
+        return updated
+    return replaced
+
+
 def _command_with_persisted_cli_binary(agent_key: str, command: Any) -> Any:
     """Replace the CLI executable while preserving shell flags and list wrappers."""
     selected = onboarding_deps.cli_binary_override(agent_key)
@@ -1650,16 +1664,33 @@ def _command_with_persisted_cli_binary(agent_key: str, command: Any) -> Any:
         return command
     if not parts or Path(parts[0]).name != dep.check_cmd[0]:
         return command
-    first_token = re.match(r"^\s*(?:'[^']*'|\"[^\"]*\"|\S+)", text)
-    if first_token is None:
+    return _with_replaced_executable(command, text, selected)
+
+
+def _command_with_installed_cli_alias(agent_key: str, command: Any) -> Any:
+    """Point the command at the executable name this machine actually has.
+
+    agentSpecs pins ONE name per CLI, but a vendor rename leaves the other one
+    installed (cursor ships `agent`; older installs only have `cursor-agent`).
+    Spawning the pinned name then dies with exit 127 while detection reports
+    the CLI as present — so resolve the alias here instead.
+    """
+    dep = onboarding_deps.DEPS_BY_ID.get(agent_key)
+    if dep is None or not dep.alt_commands:
         return command
-    replaced = f"{text[:first_token.start()]}{shlex.quote(selected)}{text[first_token.end():]}"
-    if isinstance(command, list):
-        updated = list(command)
-        if updated:
-            updated[-1] = replaced
-        return updated
-    return replaced
+    text = _command_text(command)
+    try:
+        parts = shlex.split(text)
+    except ValueError:
+        return command
+    if not parts or Path(parts[0]).name not in (dep.check_cmd[0], *dep.alt_commands):
+        return command
+    if shutil.which(parts[0]):
+        return command  # the requested name resolves — nothing to fix
+    installed = onboarding_deps.resolve_executable(dep)
+    if not installed:
+        return command
+    return _with_replaced_executable(command, text, installed)
 
 
 # Direct sign-in trigger per CLI, appended to the pane's resolved binary. A
@@ -1725,9 +1756,10 @@ def _probe_agent_cli_for_spawn(agent_key: str, requested_command: Any = None) ->
     except ValueError:
         command_parts = []
     requested_executable = command_parts[0] if command_parts else ""
-    if requested_executable and Path(requested_executable).name == dep.check_cmd[0]:
+    known_names = (dep.check_cmd[0], *dep.alt_commands)
+    if requested_executable and Path(requested_executable).name in known_names:
         executable = shutil.which(requested_executable)
-    executable = executable or shutil.which(dep.check_cmd[0])
+    executable = executable or onboarding_deps.resolve_executable(dep)
     if not executable:
         raise AgentCliProbeError(
             f"{dep.label} startup probe failed: executable not found ({dep.check_cmd[0]})",

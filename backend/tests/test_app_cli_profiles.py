@@ -152,9 +152,9 @@ class FakeVault:
     def identity(self, agent_key: str, slot_id: str | None = None) -> dict[str, Any]:
         return {"email": None, "signedIn": False}
 
-    # Claude slot snapshots — the pre-switch token refresh reads and rewrites
-    # the slot about to become live. Empty by default, so the refresh is a
-    # no-op for every test that does not opt in.
+    # Claude slot snapshots — the switch reads the slot about to become live to
+    # decide whether it can authenticate. Empty by default, so tests that do
+    # not opt in see a signed-out slot.
     def read_slot(self, agent_key: str, slot_id: str) -> SimpleNamespace:
         return SimpleNamespace(
             secret=self.slot_secrets.get((agent_key, slot_id)),
@@ -1288,139 +1288,77 @@ def _claude_slot_secret(access: str, refresh: str, expires_at: int) -> str:
     })
 
 
-async def test_set_default_refreshes_an_expired_target_slot_before_restoring(
+async def test_set_default_reports_needs_login_for_an_empty_slot(
     store: CliProfilesStore,
     events: list[dict[str, Any]],
     vault: FakeVault,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Nothing refreshes a parked slot between switches, so its access token is
-    usually dead by the time it is selected — restoring it would freeze the
-    usage badge on cached numbers until a pane spawns. The switch mints a fresh
-    token first (the slot is still parked, so no CLI owns it)."""
-    import json
+    """Restoring an empty slot CLEARS the live credentials — the CLI is signed
+    out the moment the switch lands. The response says so, so the caller can
+    start a sign-in instead of dropping the user at a login prompt."""
+    profile = store.create(agent_key="claude", name="Work")
+    session = _session()
 
-    from agent_team_backend import usage_service
+    await app.handle_message(session, {
+        "id": "n1",
+        "type": "cli_profiles.set_default",
+        "payload": {"agent_key": "claude", "profile_id": profile["id"]},
+    })
+
+    sent = session.websocket.sent[0]  # type: ignore[attr-defined]
+    assert sent["ok"] is True
+    assert sent["payload"]["needsLogin"] is True
+
+
+async def test_set_default_reports_needs_login_for_an_expired_snapshot(
+    store: CliProfilesStore,
+    events: list[dict[str, Any]],
+    vault: FakeVault,
+) -> None:
+    """Nothing renews a parked slot — the CLI is the only refresher — so an
+    aged snapshot goes live expired. The switch offers a sign-in and, crucially,
+    never mints a token itself: rotating one out from under a running Claude
+    Code is what killed accounts before."""
+    import json
 
     profile = store.create(agent_key="claude", name="Work")
     vault.slot_secrets[("claude", profile["id"])] = _claude_slot_secret(
         "dead", "rt-work", 1_000
     )
-    seen: list[str] = []
-
-    async def fake_refresh(refresh_token: str) -> dict[str, Any]:
-        seen.append(refresh_token)
-        return {"accessToken": "fresh", "refreshToken": "rotated",
-                "expiresAt": 4_102_444_800_000}
-
-    monkeypatch.setattr(usage_service, "refresh_claude_token", fake_refresh)
     session = _session()
 
     await app.handle_message(session, {
-        "id": "r1",
+        "id": "n2",
         "type": "cli_profiles.set_default",
         "payload": {"agent_key": "claude", "profile_id": profile["id"]},
     })
 
-    assert session.websocket.sent[0]["ok"] is True  # type: ignore[attr-defined]
-    assert seen == ["rt-work"]
-    stored = json.loads(vault.slot_secrets[("claude", profile["id"])])["claudeAiOauth"]
-    assert stored["accessToken"] == "fresh"
-    # The refresh lands BEFORE the swap, so the live location gets the new token.
-    assert vault.switch_calls == [("claude", "__default__", profile["id"])]
-    assert vault.slot_writes and vault.slot_writes[0][1] == profile["id"]
+    sent = session.websocket.sent[0]  # type: ignore[attr-defined]
+    assert sent["ok"] is True
+    assert sent["payload"]["needsLogin"] is True
+    assert vault.slot_writes == []
+    assert json.loads(
+        vault.slot_secrets[("claude", profile["id"])]
+    )["claudeAiOauth"]["accessToken"] == "dead"
 
 
-async def test_set_default_leaves_a_live_target_token_alone(
+async def test_set_default_reports_no_login_needed_for_a_usable_slot(
     store: CliProfilesStore,
     events: list[dict[str, Any]],
     vault: FakeVault,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A slot whose token is still comfortably valid is not re-minted — an
-    unnecessary refresh would rotate a perfectly good credential."""
-    from agent_team_backend import usage_service
-
+    """A slot whose token is still valid switches silently — no sign-in."""
     profile = store.create(agent_key="claude", name="Work")
     vault.slot_secrets[("claude", profile["id"])] = _claude_slot_secret(
         "good", "rt-work", 4_102_444_800_000
     )
-    called: list[str] = []
-
-    async def fake_refresh(refresh_token: str) -> None:
-        called.append(refresh_token)
-        return None
-
-    monkeypatch.setattr(usage_service, "refresh_claude_token", fake_refresh)
     session = _session()
 
     await app.handle_message(session, {
-        "id": "r2",
+        "id": "n3",
         "type": "cli_profiles.set_default",
         "payload": {"agent_key": "claude", "profile_id": profile["id"]},
     })
 
-    assert called == []
-    assert vault.slot_writes == []
-    assert vault.switch_calls == [("claude", "__default__", profile["id"])]
-
-
-async def test_set_default_switches_even_when_the_refresh_fails(
-    store: CliProfilesStore,
-    events: list[dict[str, Any]],
-    vault: FakeVault,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The refresh is best effort: a dead network must not block the switch —
-    the badge just stays on cached numbers, the pre-existing behaviour."""
-    from agent_team_backend import usage_service
-
-    profile = store.create(agent_key="claude", name="Work")
-    vault.slot_secrets[("claude", profile["id"])] = _claude_slot_secret(
-        "dead", "rt-work", 1_000
-    )
-
-    async def boom(refresh_token: str) -> None:
-        raise RuntimeError("network down")
-
-    monkeypatch.setattr(usage_service, "refresh_claude_token", boom)
-    session = _session()
-
-    await app.handle_message(session, {
-        "id": "r3",
-        "type": "cli_profiles.set_default",
-        "payload": {"agent_key": "claude", "profile_id": profile["id"]},
-    })
-
-    assert session.websocket.sent[0]["ok"] is True  # type: ignore[attr-defined]
-    assert vault.switch_calls == [("claude", "__default__", profile["id"])]
-    assert store.list()["defaults"]["claude"] == profile["id"]
-
-
-async def test_set_default_skips_the_refresh_for_non_claude_agents(
-    store: CliProfilesStore,
-    events: list[dict[str, Any]],
-    vault: FakeVault,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Only claude slots hold a refreshable OAuth grant."""
-    from agent_team_backend import usage_service
-
-    profile = store.create(agent_key="codex", name="Work")
-    called: list[str] = []
-
-    async def fake_refresh(refresh_token: str) -> None:
-        called.append(refresh_token)
-        return None
-
-    monkeypatch.setattr(usage_service, "refresh_claude_token", fake_refresh)
-    session = _session()
-
-    await app.handle_message(session, {
-        "id": "r4",
-        "type": "cli_profiles.set_default",
-        "payload": {"agent_key": "codex", "profile_id": profile["id"]},
-    })
-
-    assert called == []
-    assert vault.switch_calls == [("codex", "__default__", profile["id"])]
+    sent = session.websocket.sent[0]  # type: ignore[attr-defined]
+    assert sent["payload"]["needsLogin"] is False

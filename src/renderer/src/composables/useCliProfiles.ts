@@ -15,9 +15,12 @@ export interface CliProfile {
 }
 
 // Outcome of `setDefault`. `count` is set for PANES_RUNNING refusals — the
-// number of live non-login panes the backend saw for the agent.
+// number of live non-login panes the backend saw for the agent. `needsLogin`
+// marks a switch onto an account whose stored credentials cannot authenticate
+// (empty slot, or an expired token the backend could not refresh) — the CLI is
+// now signed out and the caller should start a sign-in.
 export type SetDefaultResult =
-  | { ok: true }
+  | { ok: true; needsLogin?: boolean }
   | { ok: false; code?: string; message?: string; count?: number }
 
 // Map of agentKey -> default profile id, or null for the built-in Default
@@ -157,11 +160,10 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
         profile_id: profileId,
       }
       if (opts?.force) payload.force = true
-      const resp = await backend.send<{ defaults: CliProfileDefaults }>(
-        'cli_profiles.set_default',
-        payload,
-        30_000,
-      )
+      const resp = await backend.send<{
+        defaults: CliProfileDefaults
+        needsLogin?: boolean
+      }>('cli_profiles.set_default', payload, 30_000)
       if (!resp.ok || !resp.payload) {
         const code = resp.error?.code
         if (code === 'PANES_RUNNING') {
@@ -184,7 +186,7 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
         return { ok: false, code, message }
       }
       defaults.value = resp.payload.defaults
-      return { ok: true }
+      return { ok: true, needsLogin: resp.payload.needsLogin === true }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'set default failed'
       error.value = message
@@ -294,6 +296,10 @@ export interface CliAccountSwitchCaps {
   ) => Promise<boolean>
   /** Display label for the agent in the confirm copy. */
   agentLabel: (agentKey: string) => string
+  /** Start a live sign-in for the agent — used when the switch landed on an
+   *  account whose stored credentials cannot authenticate. The account is
+   *  already active by then, so this is a LIVE login (not an isolated one). */
+  startLogin: (agentKey: string) => void
 }
 
 /**
@@ -308,9 +314,17 @@ export function createCliAccountSwitchHandler(
   api: Pick<ReturnType<typeof useCliProfiles>, 'setDefault'>,
   caps: CliAccountSwitchCaps,
 ): CliAccountSwitchHandler {
+  // The switched-to account has no usable credentials: the CLI is signed out
+  // right now, so start the sign-in for the user instead of leaving them at a
+  // login prompt to resolve by hand.
+  function afterSwitch(agentKey: string, res: SetDefaultResult): SetDefaultResult {
+    if (res.ok && res.needsLogin) caps.startLogin(agentKey)
+    return res
+  }
+
   return async (agentKey, profileId) => {
     const first = await api.setDefault(agentKey, profileId)
-    if (first.ok || first.code !== 'PANES_RUNNING') return first
+    if (first.ok || first.code !== 'PANES_RUNNING') return afterSwitch(agentKey, first)
     const t = i18n.global.t
     const confirmed = await caps.confirm(
       t('cli-account.switch-restart-confirm-body', {
@@ -324,7 +338,7 @@ export function createCliAccountSwitchHandler(
       },
     )
     if (!confirmed) return { ok: false, code: 'PANES_RUNNING' }
-    return api.setDefault(agentKey, profileId, { force: true })
+    return afterSwitch(agentKey, await api.setDefault(agentKey, profileId, { force: true }))
   }
 }
 

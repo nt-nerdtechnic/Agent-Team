@@ -249,11 +249,6 @@
       "detecting-session": "取得 Session ID 中",
       "ready": "就緒",
       "failed": "設定失敗"
-    },
-    "cli-missing": {
-      "title": "CLI 尚未安裝",
-      "message": "{label} 以「command not found」退出 — 尚未安裝此 CLI。要現在安裝嗎?安裝指令會在外部終端機執行,完成後請重新開啟 pane。",
-      "install": "在終端機安裝"
     }
   },
   "action": {
@@ -1401,7 +1396,8 @@
     "switch-restart-confirm-body": "切換帳號將重啟 {count} 個運行中的 {agent} pane，繼續？",
     "switch-restart-confirm-confirm": "切換並重啟",
     "switch-restart-confirm-cancel": "取消",
-    "switch-restart-partial": "帳號切換後有 {failed}/{total} 個 pane 未能重啟，詳情請見紀錄。"
+    "switch-restart-partial": "帳號切換後有 {failed}/{total} 個 pane 未能重啟，詳情請見紀錄。",
+    "needs-login": "這個帳號未登入，正在開啟登入流程。"
   },
   "cliDrop": {
     "source-closed": "來源 CLI pane 已關閉",
@@ -1415,6 +1411,36 @@
     "confirm": "要關閉全部 {count} 個 session 與分頁嗎？Agent 紀錄會保留，只釋放本專案佔用的資源。",
     "confirmBtn": "全部關閉",
     "done": "已關閉 {count} 個 session"
+  },
+  "cli-install": {
+    "kicker": "引導安裝",
+    "title": "安裝 {label}",
+    "lead": "這台 Mac 尚未安裝 {label}。Navide 可以幫你執行原廠自己的安裝指令，不會另外下載或改動任何東西。",
+    "command-label": "即將執行的指令",
+    "note-terminal": "指令會在外部終端機視窗執行，方便你回答它的提問（密碼、登入）。偵測到 CLI 後，本對話框會自動更新。",
+    "note-inline": "指令會在背景執行，可能需要幾分鐘。",
+    "no-install-command": "{label} 沒有自動安裝指令。請依原廠說明安裝，完成後再重新偵測。",
+    "install": "安裝",
+    "retry": "再試一次",
+    "installing": "安裝中… {seconds} 秒",
+    "not-now": "暫時不要",
+    "close": "關閉",
+    "waiting-title": "等待安裝完成",
+    "waiting-desc": "指令正在終端機視窗中執行。一偵測到 {label}，本對話框就會更新。",
+    "waiting-timeout": "仍然沒有偵測到 {label}。請在終端機視窗中完成安裝，然後重新偵測。",
+    "terminal-failed": "Navide 無法開啟終端機視窗。請自行執行上方指令，完成後重新偵測。",
+    "blocked-title": "需要先安裝 {name}",
+    "blocked-desc": "{label} 的安裝指令依賴它。可以直接在這裡安裝，然後再試一次。",
+    "install-requirement": "安裝 {label}",
+    "requirement-manual": "缺少 {name}，無法從這裡安裝 — 請手動安裝後再試一次。",
+    "failed-title": "安裝指令執行失敗",
+    "docs": "開啟官方文件",
+    "installed-not-detected": "指令已結束，但仍偵測不到 {label}。可能需要新的終端機工作階段，或它安裝在 PATH 之外。",
+    "done-title": "{label} 已就緒",
+    "done-desc": "已偵測到版本 {version}。",
+    "done-desc-no-version": "已偵測到，可以開始使用。",
+    "relaunch": "重新啟動 {label}",
+    "dont-ask": "不要再詢問 {label}"
   },
   "cli-manage": {
     "title": "安裝與更新",

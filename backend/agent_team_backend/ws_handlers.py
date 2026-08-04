@@ -1547,33 +1547,31 @@ def _running_regular_terminals(agent_key: str) -> list[str]:
     return running
 
 
-async def _refresh_claude_slot_for_switch(slot_id: str) -> None:
-    """Refresh a parked claude slot's access token right before it is restored
-    into the live location. Caller holds the agent's switch lock. Never raises
-    — a failed refresh only means the badge stays on cached numbers until a
-    pane spawns, which is the pre-existing behaviour."""
-    import logging
+def _slot_needs_login(agent_key: str, slot_id: str) -> bool:
+    """True when restoring this slot leaves the CLI unable to authenticate, so
+    the caller should start a sign-in right after the switch.
 
+    Two cases: the slot holds no secret at all (restore() then CLEARS the live
+    credentials — an empty slot signs the user out), or claude's snapshot sat
+    parked long enough for its access token to expire. Nothing renews a parked
+    slot — the CLI is the only refresher — so the expired token goes live and
+    Claude Code renews it from the restored refresh token on its next run;
+    offering a sign-in is the fallback for when that refresh token is dead too.
+    A claude login with no OAuth block (long-lived token) carries nothing to
+    judge, so it counts as usable. Blocking reads (Keychain) — thread it."""
     from . import app
-    from .usage_service import (
-        claude_token_stale,
-        parse_claude_credentials,
-        refresh_parked_claude_slot,
-    )
+    from .usage_service import claude_token_expired, parse_claude_credentials
 
-    vault = app.credential_vault
-    if not hasattr(vault, "read_slot") or not hasattr(vault, "write_slot"):
-        return
     try:
-        creds = await asyncio.to_thread(vault.read_slot, "claude", slot_id)
-        oauth = parse_claude_credentials(creds.secret)
-        if oauth is None or not claude_token_stale(oauth):
-            return
-        await refresh_parked_claude_slot(vault, slot_id, oauth, locked=True)
-    except Exception as err:  # noqa: BLE001 — the switch itself must not fail on this
-        logging.getLogger(__name__).warning(
-            "claude slot %s pre-switch refresh failed: %s", slot_id, err
-        )
+        creds = app.credential_vault.read_slot(agent_key, slot_id)
+    except Exception:  # noqa: BLE001 — a read failure must not invent a logout
+        return False
+    if creds.secret is None:
+        return True
+    if agent_key != "claude":
+        return False
+    oauth = parse_claude_credentials(creds.secret)
+    return oauth is not None and claude_token_expired(oauth)
 
 
 @handler("cli_profiles.set_default")
@@ -1682,13 +1680,13 @@ async def cli_profiles_set_default(session: "Session", msg_id: str, msg_type: st
                 )
                 return
 
-        # The slot about to become live may hold an expired access token — a
-        # parked slot ages with nobody refreshing it between switches, and
-        # restoring a dead token leaves the usage badge frozen on the last good
-        # poll until a pane spawns. Mint a fresh one first (still parked here,
-        # so no CLI owns it). Best effort: the switch proceeds either way.
-        if agent_key == "claude":
-            await _refresh_claude_slot_for_switch(profile_id or DEFAULT_SLOT_ID)
+        # Judged BEFORE the swap, while the slot still holds what will become
+        # live: an empty or dead-token slot signs the CLI out, and the caller
+        # opens a sign-in instead of leaving the user at a "not logged in"
+        # prompt they have to resolve by hand.
+        needs_login = await asyncio.to_thread(
+            _slot_needs_login, agent_key, profile_id or DEFAULT_SLOT_ID
+        )
 
         try:
             await asyncio.to_thread(
@@ -1711,7 +1709,7 @@ async def cli_profiles_set_default(session: "Session", msg_id: str, msg_type: st
             )
             return
         await session.send_json(
-            make_response(msg_id, msg_type, {"defaults": defaults})
+            make_response(msg_id, msg_type, {"defaults": defaults, "needsLogin": needs_login})
         )
     await _broadcast_profiles_changed(
         "set_default", agent_key=agent_key, forced=bool(payload.get("force"))
@@ -2912,6 +2910,18 @@ async def onboarding_complete(session: "Session", msg_id: str, msg_type: str, pa
     await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
 
 
+@handler("onboarding.install_prompt")
+async def onboarding_install_prompt(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Silence (or restore) the guided-install prompt for one CLI."""
+    from . import app
+
+    result = app.onboarding_deps.set_install_prompt_dismissed(
+        str(payload.get("dep_id") or ""),
+        bool(payload.get("dismissed", True)),
+    )
+    await session.send_json(make_response(msg_id, msg_type, result))
+
+
 @handler("onboarding.cli_health.dismiss")
 async def onboarding_cli_health_dismiss(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
@@ -3198,6 +3208,9 @@ async def _terminal_create_impl(
     env = dict(payload.get("env") or {})
     await app._ensure_fresh_path_for_spawn(agent_key)
     payload["command"] = app._command_with_persisted_cli_binary(
+        agent_key, payload.get("command")
+    )
+    payload["command"] = app._command_with_installed_cli_alias(
         agent_key, payload.get("command")
     )
     startup_probe = await asyncio.to_thread(

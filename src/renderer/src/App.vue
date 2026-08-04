@@ -164,6 +164,7 @@ const SettingsModal = defineAsyncComponent(() => import('./components/SettingsMo
 const OnboardingWizard = defineAsyncComponent(() => import('./components/OnboardingWizard.vue'))
 const WhatsNewModal = defineAsyncComponent(() => import('./components/WhatsNewModal.vue'))
 const CliHealthGuide = defineAsyncComponent(() => import('./components/CliHealthGuide.vue'))
+const CliInstallDialog = defineAsyncComponent(() => import('./components/CliInstallDialog.vue'))
 const AgentMessagesPanel = defineAsyncComponent(() => import('./components/AgentMessagesPanel.vue'))
 const RestoreScopeModal = defineAsyncComponent(() => import('./components/RestoreScopeModal.vue'))
 
@@ -272,6 +273,7 @@ async function checkOnboarding(): Promise<void> {
       ONBOARDING_STATUS_TIMEOUT_MS
     )
     onboardingComplete.value = resp.payload?.complete ?? true
+    cliInstallPromptDismissed.value = new Set(resp.payload?.install_prompt_dismissed ?? [])
     const health = resp.payload?.cli_health
     // One-time migration for selections made by renderer versions that stored
     // only UI settings. Persist the same path + fingerprint in the backend so
@@ -3973,7 +3975,15 @@ provide(
   cliAccountSwitchKey,
   createCliAccountSwitchHandler(cliProfilesApi, {
     confirm: (message, opts) => notifyRestore.confirm(message, opts),
-    agentLabel: (agentKey) => agentSpecs.find((s) => s.agentKey === agentKey)?.label ?? agentKey
+    agentLabel: (agentKey) => agentSpecs.find((s) => s.agentKey === agentKey)?.label ?? agentKey,
+    // The account we just switched to cannot authenticate (empty slot, or a
+    // token too old to refresh). It is the active account now, so this is a
+    // live login — the poller harvests it back into the slot. The toast says
+    // why a login pane appeared on its own.
+    startLogin: (agentKey) => {
+      notifyRestore.toast(i18n.global.t('cli-account.needs-login'), { type: 'info' })
+      void onCliLoginSpawn(agentKey)
+    }
   })
 )
 
@@ -7162,7 +7172,7 @@ backend.on('terminal.exit', (raw) => {
     syncViews()
   }
   if (ev.exit_code === 127 && pane.agentKey !== 'terminal') {
-    void promptCliInstall(pane.agentKey, pane.agentLabel)
+    promptCliInstall(pane.agentKey, pane.agentLabel, pane.id)
   }
 })
 
@@ -7204,45 +7214,51 @@ backend.on('cli_profiles.changed', (raw) => {
   }
 })
 
-// One prompt per agent at a time: several panes of the same CLI exiting 127
-// together (e.g. a pipeline stage) must not stack identical dialogs.
-const cliInstallPromptOpen = new Set<string>()
-async function promptCliInstall(agentKey: string, agentLabel: string): Promise<void> {
-  if (cliInstallPromptOpen.has(agentKey)) return
-  cliInstallPromptOpen.add(agentKey)
-  try {
-    const ok = await notifyRestore.confirm(
-      i18n.global.t('pane.cli-missing.message', { label: agentLabel }),
-      {
-        title: i18n.global.t('pane.cli-missing.title'),
-        confirmText: i18n.global.t('pane.cli-missing.install')
-      }
-    )
-    if (!ok) return
-    try {
-      const resp = await backend.send<{ ok?: boolean; needs_terminal?: boolean; command?: string; error?: string }>(
-        'onboarding.install',
-        { dep_id: agentKey }
-      )
-      const r = resp.payload
-      if (r?.ok && r.needs_terminal && r.command) {
-        // A silently-failed openTerminal (automation not granted) left the user
-        // waiting on a window that never appeared — report it instead.
-        const opened = await window.agentTeam?.openTerminal(r.command)
-        if (!opened?.ok) {
-          pipelineLog(
-            `❌ ${agentLabel}: could not open a terminal (${opened?.error || 'unavailable'}). Run: ${r.command}`
-          )
-        }
-      } else if (!r?.ok) {
-        pipelineLog(`❌ ${agentLabel} install failed: ${r?.error || resp.error?.message || 'unknown'}`)
-      }
-    } catch (e) {
-      pipelineLog(`❌ ${agentLabel} install failed: ${e instanceof Error ? e.message : String(e)}`)
-    }
-  } finally {
-    cliInstallPromptOpen.delete(agentKey)
+// Guided install request currently on screen (null = none). One dialog at a
+// time: several panes of the same CLI exiting 127 together (e.g. a pipeline
+// stage) must not stack identical prompts.
+const cliInstallRequest = ref<{
+  depId: string
+  label: string
+  origin: 'pane' | 'spawn'
+  paneId?: string
+} | null>(null)
+/** Dep ids the user switched the prompt off for, mirrored from the backend. */
+const cliInstallPromptDismissed = ref<Set<string>>(new Set())
+
+function promptCliInstall(agentKey: string, agentLabel: string, paneId?: string): void {
+  if (cliInstallRequest.value) return
+  // The opt-out only silences the AUTOMATIC prompt (a pane dying with 127).
+  // Picking the CLI in the spawn dropdown is the user asking for it, so that
+  // path always opens — declining once is not the same as opting out.
+  if (paneId && cliInstallPromptDismissed.value.has(agentKey)) return
+  cliInstallRequest.value = {
+    depId: agentKey,
+    label: agentLabel,
+    origin: paneId ? 'pane' : 'spawn',
+    paneId,
   }
+}
+
+function closeCliInstall(): void {
+  cliInstallRequest.value = null
+}
+
+/** Mirror the dialog's opt-out locally; a full status re-probe (18 deps) would
+ *  be a heavy way to learn one boolean. */
+function onCliInstallDismissChanged(payload: { depId: string; dismissed: boolean }): void {
+  const next = new Set(cliInstallPromptDismissed.value)
+  if (payload.dismissed) next.add(payload.depId)
+  else next.delete(payload.depId)
+  cliInstallPromptDismissed.value = next
+}
+
+/** Re-run the CLI in the pane that died with 127, now that it is installed. */
+function relaunchAfterInstall(depId: string): void {
+  const paneId = cliInstallRequest.value?.paneId
+  const pane = paneId ? panes.value.find((p) => p.id === paneId) : undefined
+  if (!pane || pane.agentKey !== depId) return
+  void rebuildPaneViaResume(pane.id, { suppressBusyToast: true, forceWhenRunning: true })
 }
 
 // ── Exception tracking → supervision log ────────────────────────────────────
@@ -9953,6 +9969,18 @@ function paneIsCommander(p: ActivePane): boolean {
     @resolved="cliHealthGuide = null"
     @use-binary="selectCliBinary"
   />
+  <!-- Guided install for a CLI that is missing (pane exited 127, or picked
+       from the spawn dropdown while not installed). -->
+  <CliInstallDialog
+    v-if="cliInstallRequest"
+    :backend="backend"
+    :dep-id="cliInstallRequest.depId"
+    :fallback-label="cliInstallRequest.label"
+    :origin="cliInstallRequest.origin"
+    @close="closeCliInstall"
+    @relaunch="relaunchAfterInstall"
+    @dismiss-changed="onCliInstallDismissChanged"
+  />
   <RestoreScopeModal
     v-if="showRestoreScopeModal"
     :open="showRestoreScopeModal"
@@ -10059,6 +10087,7 @@ function paneIsCommander(p: ActivePane): boolean {
       @dispatch-issue="onDispatchIssue"
       @spawn-for-issue="onHandleIssue"
       @rename-pane="setPaneCustomName"
+      @install-cli="(p) => promptCliInstall(p.agentKey, p.label)"
     />
     <QuestionAlert
       :visible="!!activeQuestion"

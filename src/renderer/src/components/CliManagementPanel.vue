@@ -7,7 +7,7 @@
  * user can see. It never wraps, parses or substitutes a vendor command, and it
  * never downloads or installs anything itself.
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, defineAsyncComponent, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { useBackend } from '../composables/useBackend'
 import { useOnboarding } from '../composables/useOnboarding'
@@ -15,14 +15,23 @@ import type {
   AutoupdatePolicy, CliHealthEntry, CliUpdateRecord, MaintenanceAction, OnboardDep,
 } from '../composables/useOnboarding'
 
+const CliInstallDialog = defineAsyncComponent(() => import('./CliInstallDialog.vue'))
+
 const props = defineProps<{ backend: ReturnType<typeof useBackend> }>()
 const { t } = useI18n()
 
 const onboarding = useOnboarding(props.backend)
 const { cliDeps, cliHealth, loading, maintaining } = onboarding
 const message = ref('')
+/** Dep id whose guided install dialog is open ('' = none). */
+const installTarget = ref('')
 
 onMounted(() => { void onboarding.refresh() })
+
+function closeInstall(): void {
+  installTarget.value = ''
+  void onboarding.refresh()
+}
 
 function entryFor(dep: OnboardDep): CliHealthEntry | undefined {
   return cliHealth.value?.entries.find((entry) => entry.agent_key === dep.id)
@@ -167,7 +176,7 @@ function formatTime(value: string): string {
           v-if="dep.status === 'missing' && dep.can_install"
           class="cm-btn"
           :disabled="!!maintaining"
-          @click="run(dep, 'install')"
+          @click="installTarget = dep.id"
         >
           {{ $t('cli-manage.install') }}
         </button>
@@ -183,6 +192,16 @@ function formatTime(value: string): string {
     </div>
 
     <p class="cm-footnote">{{ $t('cli-manage.footnote') }}</p>
+
+    <!-- Same guided flow the spawn dropdown and a 127 exit open, so an install
+         started here reports prerequisites, failures and detection alike. -->
+    <CliInstallDialog
+      v-if="installTarget"
+      :backend="backend"
+      :dep-id="installTarget"
+      origin="settings"
+      @close="closeInstall"
+    />
   </div>
 </template>
 

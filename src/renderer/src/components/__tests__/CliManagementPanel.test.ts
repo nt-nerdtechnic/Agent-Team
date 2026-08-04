@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import CliManagementPanel from '../CliManagementPanel.vue'
 import { i18n } from '../../i18n'
@@ -152,5 +152,27 @@ describe('CliManagementPanel', () => {
     await mountPanel()
 
     expect(wrapper!.findAll('.cm-policy')).toHaveLength(1)
+  })
+
+  it('opens the guided install dialog instead of a bare terminal handoff', async () => {
+    // Installing from Settings used to differ from the wizard: it only opened
+    // a terminal and reported nothing afterwards.
+    stubTerminal()
+    const mock = createMockBackend('connected')
+    const payload = status()
+    payload.deps = [{ ...kimi, status: 'missing', version: '' }]
+    mock.setResponse('onboarding.status', payload)
+    wrapper = mount(CliManagementPanel, { props: { backend: mock.backend }, global: { plugins: [i18n] } })
+    await flushPromises()
+
+    const install = wrapper.findAll('button').find(
+      (button) => button.text() === i18n.global.t('cli-manage.install')
+    )
+    await install!.trigger('click')
+    await vi.dynamicImportSettled() // the dialog is a defineAsyncComponent
+    await flushPromises()
+
+    expect(wrapper.find('.ci-dialog').exists()).toBe(true)
+    expect(mock.sent.some((s) => s.type === 'onboarding.cli_maintenance')).toBe(false)
   })
 })

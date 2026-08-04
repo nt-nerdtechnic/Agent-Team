@@ -67,7 +67,7 @@ describe('useCliProfiles', () => {
     await flush()
 
     const res = await result.setDefault('claude', null)
-    expect(res).toEqual({ ok: true })
+    expect(res).toEqual({ ok: true, needsLogin: false })
     const call = mock.sent.find((s) => s.type === 'cli_profiles.set_default')
     expect(call?.payload).toEqual({ agent_key: 'claude', profile_id: null })
     expect(result.defaultProfileId('claude')).toBe(null)
@@ -82,7 +82,7 @@ describe('useCliProfiles', () => {
     await flush()
 
     const res = await result.setDefault('claude', 'p1', { force: true })
-    expect(res).toEqual({ ok: true })
+    expect(res).toEqual({ ok: true, needsLogin: false })
     const call = mock.sent.find((s) => s.type === 'cli_profiles.set_default')
     expect(call?.payload).toEqual({ agent_key: 'claude', profile_id: 'p1', force: true })
     scope.stop()
@@ -190,6 +190,7 @@ describe('createCliAccountSwitchHandler', () => {
     return {
       confirm: vi.fn(async () => confirmResult),
       agentLabel: (agentKey: string) => agentKey,
+      startLogin: vi.fn(),
     }
   }
 
@@ -203,6 +204,37 @@ describe('createCliAccountSwitchHandler', () => {
     expect(setDefault).toHaveBeenCalledTimes(1)
     expect(setDefault).toHaveBeenCalledWith('claude', 'p1')
     expect(caps.confirm).not.toHaveBeenCalled()
+  })
+
+  it('starts a sign-in when the switched-to account has no usable credentials', async () => {
+    const setDefault = vi.fn<SetDefaultFn>().mockResolvedValue({ ok: true, needsLogin: true })
+    const caps = makeCaps()
+    const handler = createCliAccountSwitchHandler({ setDefault }, caps)
+
+    const res = await handler('claude', 'p1')
+    expect(res).toEqual({ ok: true, needsLogin: true })
+    expect(caps.startLogin).toHaveBeenCalledWith('claude')
+  })
+
+  it('starts a sign-in after a FORCED switch onto a signed-out account', async () => {
+    const setDefault = vi
+      .fn<SetDefaultFn>()
+      .mockResolvedValueOnce({ ok: false, code: 'PANES_RUNNING', count: 1, message: 'in use' })
+      .mockResolvedValueOnce({ ok: true, needsLogin: true })
+    const caps = makeCaps()
+    const handler = createCliAccountSwitchHandler({ setDefault }, caps)
+
+    await handler('claude', 'p1')
+    expect(caps.startLogin).toHaveBeenCalledWith('claude')
+  })
+
+  it('leaves a usable account alone (no sign-in)', async () => {
+    const setDefault = vi.fn<SetDefaultFn>().mockResolvedValue({ ok: true, needsLogin: false })
+    const caps = makeCaps()
+    const handler = createCliAccountSwitchHandler({ setDefault }, caps)
+
+    await handler('claude', 'p1')
+    expect(caps.startLogin).not.toHaveBeenCalled()
   })
 
   it('PANES_RUNNING: confirm, then force the switch — no direct restart (broadcast-driven)', async () => {
