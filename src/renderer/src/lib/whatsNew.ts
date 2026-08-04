@@ -34,6 +34,33 @@ export const WHATS_NEW_CHROME = {
 
 export const WHATS_NEW: WhatsNewEntry[] = [
   {
+    version: '0.1.75',
+    title: {
+      'zh-TW': '跨工作區 Agent 通訊與定址系統',
+      'en-US': 'Cross-workspace Agent addressing & inter-agent messaging',
+    },
+    highlights: [
+      {
+        'zh-TW':
+          '跨工作區 CLI 定址與 MCP 工具：發布跨工作區通訊註冊表，將 CLI 訊息傳送包裝為 MCP 工具，實現跨視窗、跨工作區 Agent 之間的無縫對話。',
+        'en-US':
+          'Cross-workspace CLI addressing & MCP tools: introduced a global addressing registry exposing inter-agent messaging as MCP tools for cross-window collaboration.',
+      },
+      {
+        'zh-TW':
+          '拖曳面板 @ 定址輸入：支援將遠端視窗或頁籤面板直接拖曳至 "@" 提及輸入框，自動帶入其全區目標位址。',
+        'en-US':
+          'Drag-to-mention @ addressing: drag any remote pane onto the "@" mention box to automatically insert its fully qualified address.',
+      },
+      {
+        'zh-TW':
+          '環境初始化與 Plan 加載強化：改善全新安裝時的依賴安裝順序與錯誤呈現，並優化 Plan 文件讀取的後端等待流程。',
+        'en-US':
+          'Onboarding & Plan loading fixes: refined dependency bootstrap ordering and plan document loading readiness.',
+      },
+    ],
+  },
+  {
     version: '0.1.74',
     title: {
       'zh-TW': 'Tasker 排程引擎與人性化 Cron 表達式文字',
