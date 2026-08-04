@@ -414,6 +414,7 @@ describe('UsageBadge – quiescence switch handler', () => {
       {
         confirm: (message, opts) => notify.confirm(message, opts) as Promise<boolean>,
         agentLabel: () => 'Claude Code',
+        startLogin: () => {},
       },
     )
     wrapper = mountBadge(fake, { switchHandler: handler })
@@ -443,6 +444,7 @@ describe('UsageBadge – quiescence switch handler', () => {
       {
         confirm: (message, opts) => notify.confirm(message, opts) as Promise<boolean>,
         agentLabel: () => 'Claude Code',
+        startLogin: () => {},
       },
     )
     wrapper = mountBadge(fake, { switchHandler: handler })
