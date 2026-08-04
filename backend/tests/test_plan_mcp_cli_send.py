@@ -7,6 +7,7 @@ list on their own and route through the same registry.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 
@@ -183,10 +184,138 @@ async def test_list_targets_reports_an_unidentified_caller() -> None:
     assert "identify your pane" in result["error"]
 
 
+# ── cli_open_agent ─────────────────────────────────────────────────────────
+@pytest.mark.asyncio
+async def test_open_agent_broadcasts_the_request_and_returns_the_verdict(
+    captured: list[dict[str, Any]],
+) -> None:
+    _seed()
+
+    async def answer() -> None:
+        # Stand in for the window that owns the requesting pane.
+        for _ in range(200):
+            keys = list(plan_mcp._pending_spawns)
+            if keys:
+                agent_messaging.register("new-pane", "reviewer2", "/ws/alpha")
+                plan_mcp.resolve_spawn(
+                    keys[0], {"ok": True, "pane_id": "new-pane", "name": "reviewer2"}
+                )
+                return
+            await asyncio.sleep(0.005)
+
+    task = asyncio.create_task(answer())
+    result = await plan_mcp.cli_open_agent("codex", "reviewer2", "review the PR", _ctx())
+    await task
+
+    assert result == {"ok": True, "name": "reviewer2", "address": "alpha/reviewer2"}
+    assert len(captured) == 1
+    payload = captured[0]["payload"]
+    assert captured[0]["type"] == "agent_spawn.request"
+    assert payload["requester_pane_id"] == "pa"
+    assert payload["agent_key"] == "codex"
+    assert payload["name"] == "reviewer2"
+    assert payload["task"] == "review the PR"
+
+
+@pytest.mark.asyncio
+async def test_open_agent_surfaces_a_refusal_reason(captured: list[dict[str, Any]]) -> None:
+    _seed()
+
+    async def refuse() -> None:
+        for _ in range(200):
+            keys = list(plan_mcp._pending_spawns)
+            if keys:
+                plan_mcp.resolve_spawn(keys[0], {"ok": False, "error": "已達子 pane 上限 (3)"})
+                return
+            await asyncio.sleep(0.005)
+
+    task = asyncio.create_task(refuse())
+    result = await plan_mcp.cli_open_agent("codex", "extra", "do a thing", _ctx())
+    await task
+
+    assert result == {"ok": False, "error": "已達子 pane 上限 (3)"}
+
+
+@pytest.mark.asyncio
+async def test_open_agent_times_out_when_no_window_answers(
+    captured: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed()
+    monkeypatch.setattr(plan_mcp, "_SPAWN_VERDICT_TIMEOUT_S", 0.05)
+
+    result = await plan_mcp.cli_open_agent("codex", "orphan", "do a thing", _ctx())
+
+    assert result["ok"] is False
+    assert "no answer" in result["error"]
+    # The pending entry must not leak once the wait gives up.
+    assert plan_mcp._pending_spawns == {}
+
+
+@pytest.mark.asyncio
+async def test_open_agent_validates_its_arguments(captured: list[dict[str, Any]]) -> None:
+    _seed()
+    missing_agent = await plan_mcp.cli_open_agent("", "x", "t", _ctx())
+    missing_name = await plan_mcp.cli_open_agent("codex", "  ", "t", _ctx())
+    missing_task = await plan_mcp.cli_open_agent("codex", "x", "   ", _ctx())
+
+    assert missing_agent["ok"] is False and "agent is required" in missing_agent["error"]
+    assert missing_name["ok"] is False and "name is required" in missing_name["error"]
+    assert missing_task["ok"] is False and "task is empty" in missing_task["error"]
+    assert captured == []  # nothing broadcast for a malformed call
+
+
+@pytest.mark.asyncio
+async def test_open_agent_refuses_an_unidentified_caller(
+    captured: list[dict[str, Any]],
+) -> None:
+    _seed()
+    result = await plan_mcp.cli_open_agent("codex", "x", "t", _ctx(pane_id=None))
+    assert result["ok"] is False
+    assert "identify your pane" in result["error"]
+    assert captured == []
+
+
+def test_resolve_spawn_ignores_an_unknown_request_id() -> None:
+    assert plan_mcp.resolve_spawn("nope", {"ok": True}) is False
+
+
+# ── busy state ─────────────────────────────────────────────────────────────
+@pytest.mark.asyncio
+async def test_list_targets_reports_whether_a_target_is_busy() -> None:
+    _seed()
+    agent_messaging.set_busy("pb", True)
+    result = await plan_mcp.cli_list_targets(_ctx())
+    busy = {t["address"]: t["busy"] for t in result["targets"]}
+    assert busy == {"beta/reviewer": True, "alpha/helper": False}
+
+
+def test_set_busy_reports_whether_it_changed() -> None:
+    _seed()
+    assert agent_messaging.set_busy("pa", True) is True
+    assert agent_messaging.set_busy("pa", True) is False
+    assert agent_messaging.set_busy("nope", True) is False
+
+
+def test_re_register_keeps_busy_but_a_fresh_pane_starts_idle() -> None:
+    agent_messaging.register("p1", "a", "/ws/alpha")
+    agent_messaging.set_busy("p1", True)
+    # A rename re-registers the same pane — that is not a state change.
+    agent_messaging.register("p1", "renamed", "/ws/alpha")
+    entry = agent_messaging.get("p1")
+    assert entry is not None and entry.busy is True
+    # A pane the registry has never seen starts idle.
+    agent_messaging.register("p2", "b", "/ws/alpha")
+    fresh = agent_messaging.get("p2")
+    assert fresh is not None and fresh.busy is False
+
+
 @pytest.mark.asyncio
 async def test_tools_are_registered_without_a_ctx_argument() -> None:
     tools = {t.name: t for t in await plan_mcp.server.list_tools()}
-    assert set(tools) >= {"cli_send", "cli_list_targets"}
+    assert set(tools) >= {"cli_send", "cli_list_targets", "cli_open_agent"}
     # The Context parameter is injected, never asked of the agent.
     assert set((tools["cli_send"].inputSchema.get("properties") or {})) == {"to", "text"}
     assert not (tools["cli_list_targets"].inputSchema.get("properties") or {})
+    assert set((tools["cli_open_agent"].inputSchema.get("properties") or {})) == {
+        "agent", "name", "task",
+    }

@@ -24,6 +24,10 @@ class RegisteredPane:
     name: str
     workspace_path: str
     agent_key: str
+    #: True while the pane's agent is mid-turn. Reported by the owning window on
+    #: turn start/end, so it lags reality by one event at worst — good enough to
+    #: tell a caller "it is working, your message will wait", not a lock.
+    busy: bool = False
 
     @property
     def workspace_label(self) -> str:
@@ -42,6 +46,7 @@ class RegisteredPane:
             "workspace_label": self.workspace_label,
             "qualified_name": self.qualified_name,
             "agent_key": self.agent_key,
+            "busy": self.busy,
         }
 
 
@@ -71,11 +76,14 @@ def register(
 ) -> RegisteredPane:
     """Mirror one window's pane handle. Re-registering the same pane replaces
     its entry, which is how renames propagate."""
+    previous = _PANES.get(pane_id)
     entry = RegisteredPane(
         pane_id=pane_id,
         name=name,
         workspace_path=_normalize_workspace(workspace_path),
         agent_key=agent_key,
+        # A re-register is a rename or a reconnect, not a state change.
+        busy=previous.busy if previous else False,
     )
     _PANES[pane_id] = entry
     if owner is not None:
@@ -106,6 +114,15 @@ def drop_owner(owner: Any) -> list[str]:
 
 def get(pane_id: str) -> RegisteredPane | None:
     return _PANES.get(pane_id)
+
+
+def set_busy(pane_id: str, busy: bool) -> bool:
+    """Record whether a pane's agent is mid-turn. Returns whether it changed."""
+    entry = _PANES.get(pane_id)
+    if entry is None or entry.busy == busy:
+        return False
+    entry.busy = busy
+    return True
 
 
 def list_panes(workspace_path: str | None = None) -> list[RegisteredPane]:

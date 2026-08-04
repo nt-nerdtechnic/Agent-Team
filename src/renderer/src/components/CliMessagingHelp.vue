@@ -179,6 +179,15 @@ const troubleshooting: TroubleRow[] = [
           agent 啟動時就會在自己的工具清單裡看到，不需要任何人教它。
           它可以先查詢有哪些對象在線上，再把指令送過去。
         </p>
+        <p class="cmh-p">工具有三個：</p>
+        <ul class="cmh-list">
+          <li><strong>查詢對象</strong> — 有誰在線上、位址怎麼寫、對方現在是不是忙碌中。</li>
+          <li><strong>送出指令</strong> — 把任意文字送給指定的 pane。</li>
+          <li>
+            <strong>開新 agent 並派工</strong> — 請 Navide 開一個新的 CLI pane、指定用哪家 CLI、
+            給它任務。新 pane 完成後會用訊息回報給呼叫者，不需要輪詢。
+          </li>
+        </ul>
         <p class="cmh-note">
           目前只有 <strong>Claude Code</strong> 與 <strong>Codex</strong> 接上了這組工具。
         </p>
@@ -290,6 +299,37 @@ const troubleshooting: TroubleRow[] = [
           否則貼上對方的畫面內容摘要。
         </li>
       </ul>
+    </section>
+
+    <!-- ── 開新 agent ───────────────────────────────────────────────── -->
+    <section class="cmh-section">
+      <h2 class="cmh-h2">請 agent 開一個新 agent</h2>
+      <p class="cmh-p">
+        除了傳訊息，agent 還可以請 Navide<strong>開一個新的 CLI pane 並指派任務</strong>——
+        適合把工作拆開平行處理，或交給另一家更適合的 CLI。你一樣只要用中文交代，例如
+        「<em>開一個 codex 來審查這份 PR</em>」。
+      </p>
+      <ul class="cmh-list">
+        <li>新 pane 的名稱就是它的位址，取角色名最好用。</li>
+        <li>任務完成後，新 pane 會<strong>主動用訊息回報</strong>給開它的那個 agent。</li>
+        <li>被拒絕時會說明原因（名稱重複、CLI 名稱錯誤、或撞到下面的上限）。</li>
+      </ul>
+      <div class="cmh-tablewrap">
+        <table class="cmh-table">
+          <thead>
+            <tr><th>上限</th><th>數值</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>一個 pane 最多開幾個子 pane</td><td class="cmh-nowrap">3</td></tr>
+            <tr><td>一個工作區的 CLI pane 總數</td><td class="cmh-nowrap">8</td></tr>
+            <tr><td>開啟鏈的深度（你開的再開下去）</td><td class="cmh-nowrap">2 層</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="cmh-note">
+        這些上限是為了避免 agent 遞迴開下去把機器塞爆。流程（pipeline）的 pane 也可以用
+        <code>---SPAWN---</code> 區塊做同一件事，走的是同一套上限。
+      </p>
     </section>
 
     <!-- ── 護欄 ─────────────────────────────────────────────────────── -->

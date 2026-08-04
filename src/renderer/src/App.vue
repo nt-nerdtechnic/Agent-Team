@@ -25,7 +25,7 @@ import { migrateTerminalPtyKey } from './composables/useTerminal'
 import { useAgentMessaging, isBroadcastTarget } from './composables/useAgentMessaging'
 import type { RouteResult } from './composables/useAgentMessaging'
 import { MSG_ENVELOPE_PREFIX, parseMessages, parseSpawns, renderSpawnKickoff } from './lib/agentMessaging'
-import { evaluateTurnSpawns, computeSpawnDepth } from './lib/agentSpawnGate'
+import { evaluateTurnSpawns, evaluateSpawnRequest, computeSpawnDepth } from './lib/agentSpawnGate'
 import StageTabBar, { type TabItem } from './components/StageTabBar.vue'
 import { useBackend } from './composables/useBackend'
 import { useTheme } from './composables/useTheme'
@@ -1260,6 +1260,17 @@ function registerPaneMessaging(pane: ActivePane, preferredName?: string): void {
   mirrorMessagingHandle(pane)
 }
 
+/** Tell the registry whether a pane's agent is mid-turn, so cli_list_targets can
+ *  report it. Deduped locally: turn events are frequent, state changes are not. */
+const paneBusyReported = new Map<string, boolean>()
+function reportPaneBusy(paneId: string, busy: boolean): void {
+  if (paneBusyReported.get(paneId) === busy) return
+  paneBusyReported.set(paneId, busy)
+  backend
+    .send('agent_msg.set_busy', { pane_id: paneId, busy })
+    .catch(() => { /* advisory only */ })
+}
+
 /** Mirror a pane's handle into the backend registry, which is the only place
  *  that sees every workspace at once — that is what makes `<folder>/<pane>`
  *  addressable from another workspace window. Fire-and-forget: if it fails, only
@@ -1280,6 +1291,7 @@ function mirrorMessagingHandle(pane: ActivePane): void {
  *  there under the same persisted name. */
 function unregisterPaneMessaging(paneId: string, opts: { keepPersisted?: boolean } = {}): void {
   messaging.unregisterPane(paneId)
+  paneBusyReported.delete(paneId)
   backend.send('agent_msg.unregister', { pane_id: paneId }).catch(() => { /* best effort */ })
   if (!opts.keepPersisted) dropPersistedMessagingName(paneId)
 }
@@ -1361,16 +1373,7 @@ async function handleSpawnRequestsForTurn(
   if (requests.length === 0) return
   const parent = panes.value.find((p) => p.id === parentPaneId)
   if (!parent) return
-  const results = evaluateTurnSpawns(requests, {
-    validAgentKeys: agentSpecs.filter((s) => s.agentKey !== 'terminal').map((s) => s.agentKey),
-    isNameTaken: (name) => messaging.paneIdOf(name) !== null,
-    parentDepth: computeSpawnDepth(
-      parentPaneId,
-      (id) => panes.value.find((p) => p.id === id)?.spawnedBy ?? null,
-    ),
-    parentChildCount: panes.value.filter((p) => p.spawnedBy === parentPaneId).length,
-    cliPaneCount: panes.value.filter((p) => p.agentKey !== 'terminal').length,
-  })
+  const results = evaluateTurnSpawns(requests, spawnGateContextFor(parentPaneId))
   for (const result of results) {
     if (!result.ok) {
       sendSpawnFeedback(parentName, `SPAWN 失敗：${result.reason}`)
@@ -1433,6 +1436,67 @@ async function spawnRequestedPane(
   await waitForQuiet(paneId, 1000, 8000)
   if (!paneAlive(paneId)) return false
   return await injectPane(paneId, renderSpawnKickoff(req.task, parentName), 'agent-spawn', true)
+}
+
+/** The spawn-gate context for a pane in this window. Shared by the SPAWN block
+ *  path and the cli_open_agent MCP tool so both are held to the same limits. */
+function spawnGateContextFor(parentPaneId: string) {
+  return {
+    validAgentKeys: agentSpecs.filter((s) => s.agentKey !== 'terminal').map((s) => s.agentKey),
+    isNameTaken: (name: string) => messaging.paneIdOf(name) !== null,
+    parentDepth: computeSpawnDepth(
+      parentPaneId,
+      (id) => panes.value.find((p) => p.id === id)?.spawnedBy ?? null,
+    ),
+    parentChildCount: panes.value.filter((p) => p.spawnedBy === parentPaneId).length,
+    cliPaneCount: panes.value.filter((p) => p.agentKey !== 'terminal').length,
+  }
+}
+
+/** cli_open_agent asked this window to open a pane. Only the window owning the
+ *  requesting pane answers; the gate runs here because only this window knows
+ *  the pane counts, chain depth and name collisions it needs. */
+async function handleMcpSpawnRequest(ev: {
+  request_id: string
+  requester_pane_id: string
+  agent_key: string
+  name: string
+  task: string
+}): Promise<void> {
+  const parent = panes.value.find((p) => p.id === ev.requester_pane_id)
+  if (!parent) return // not our pane — another window will answer
+  const parentName = parent.messagingName ?? ev.requester_pane_id
+
+  const report = (verdict: { ok: boolean; error?: string; paneId?: string; name?: string }): void => {
+    backend
+      .send('agent_spawn.result', {
+        request_id: ev.request_id,
+        ok: verdict.ok,
+        error: verdict.error ?? '',
+        pane_id: verdict.paneId ?? '',
+        name: verdict.name ?? '',
+      })
+      .catch(() => { /* the tool call times out and says so */ })
+  }
+
+  const gate = evaluateSpawnRequest(
+    { agent: ev.agent_key, name: ev.name, task: ev.task },
+    spawnGateContextFor(ev.requester_pane_id),
+  )
+  if (!gate.ok) {
+    report({ ok: false, error: gate.reason })
+    return
+  }
+  try {
+    const started = await spawnRequestedPane(parent, parentName, gate)
+    if (!started) {
+      report({ ok: false, error: `pane「${gate.name}」啟動或任務注入失敗` })
+      return
+    }
+    report({ ok: true, paneId: messaging.paneIdOf(gate.name) ?? '', name: gate.name })
+  } catch (err) {
+    report({ ok: false, error: err instanceof Error ? err.message : String(err) })
+  }
 }
 
 function openMessagingPanel(): void {
@@ -5127,6 +5191,10 @@ watch(
     // by itself. Without re-mirroring, this window's panes would silently stop
     // being addressable from other workspaces until they were renamed or
     // recreated.
+    // The disconnect dropped this window's registry entries, so re-registering
+    // starts every pane at not-busy. Drop the local dedup cache to match, or a
+    // pane that was busy across the reconnect would never report it again.
+    paneBusyReported.clear()
     for (const pane of panes.value) mirrorMessagingHandle(pane)
     void refreshRemoteMessagingTargets()
     if (!recheckWorkspaceOnConnect) return
@@ -6811,6 +6879,7 @@ backend.on('agent.activity', (raw) => {
   if (!ev?.pane_id) return
   if (ev.event_type === 'turn_complete') {
     paneTurnCompleteAt.set(ev.pane_id, Date.now())
+    reportPaneBusy(ev.pane_id, false)
     // Badge: authoritative turn end → drop the RUNNING hysteresis latch now.
     paneRefs[ev.pane_id]?.markTurnComplete?.()
     scheduleDoneNotify(ev.pane_id, ev.timestamp ?? '')
@@ -6853,6 +6922,7 @@ backend.on('agent.activity', (raw) => {
     }
     // A new turn re-arms 'done' notifications for this pane.
     sysNotify.markActive(ev.pane_id)
+    reportPaneBusy(ev.pane_id, true)
     // Claude's Notification hook (user attention requested, e.g. permission
     // prompt) arrives as agent_active with detail 'hook:notification'.
     if (ev.detail === 'hook:notification') notifyAttention(ev.pane_id)
@@ -7008,6 +7078,26 @@ backend.on('agent_msg.deliver', (raw) => {
       target: target?.messagingName ?? '',
     }),
   )
+})
+
+// cli_open_agent wants a pane opened. Every window sees this; only the one
+// owning the requesting pane answers (handleMcpSpawnRequest bails otherwise).
+backend.on('agent_spawn.request', (raw) => {
+  const ev = raw as {
+    request_id?: string
+    requester_pane_id?: string
+    agent_key?: string
+    name?: string
+    task?: string
+  }
+  if (!ev?.request_id || !ev.requester_pane_id) return
+  void handleMcpSpawnRequest({
+    request_id: ev.request_id,
+    requester_pane_id: ev.requester_pane_id,
+    agent_key: ev.agent_key ?? '',
+    name: ev.name ?? '',
+    task: ev.task ?? '',
+  })
 })
 
 backend.on('agent_msg.delivery_result', (raw) => {

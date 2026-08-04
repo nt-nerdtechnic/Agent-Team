@@ -85,7 +85,14 @@ server = FastMCP(
         "workspace, `<folder>/<pane>` for another one). Use it when the user "
         "asks you to hand work to, ask something of, or coordinate with "
         "another pane or project; delivery waits for that pane to be idle, so "
-        "it is not an instant reply channel."
+        "it is not an instant reply channel.\n"
+        "\n"
+        "Delegating to a new agent: cli_open_agent opens a fresh CLI pane and "
+        "hands it a task. Use it when work is better done in parallel or by a "
+        "different CLI than yours; the new pane reports back to you by message "
+        "when it finishes, so you do not poll it. Limits apply (3 child panes "
+        "per pane, 8 CLI panes per workspace, chain depth 2) and the call tells "
+        "you if one was hit."
     ),
 )
 
@@ -625,6 +632,7 @@ async def cli_list_targets(ctx: Context) -> dict[str, Any]:
             "address": entry.qualified_name,
             "workspace_path": entry.workspace_path,
             "same_workspace": bool(caller and caller.workspace_path == entry.workspace_path),
+            "busy": entry.busy,
         }
         for entry in agent_messaging.list_panes()
         if entry.pane_id != me
@@ -632,6 +640,92 @@ async def cli_list_targets(ctx: Context) -> dict[str, Any]:
     return {
         "you": caller.qualified_name if caller else None,
         "targets": targets,
+    }
+
+
+# Spawn verdicts come from the window that owns the requesting pane — only it
+# knows the pane counts, chain depth and name collisions the gate needs. The
+# tool waits for that verdict instead of reporting "requested", so the agent
+# learns whether it actually got a pane and, if not, why.
+_SPAWN_VERDICT_TIMEOUT_S = 45.0
+_pending_spawns: dict[str, asyncio.Future[dict[str, Any]]] = {}
+
+
+def resolve_spawn(request_id: str, verdict: dict[str, Any]) -> bool:
+    """Hand a window's verdict to the waiting cli_open_agent call."""
+    future = _pending_spawns.get(request_id)
+    if future is None or future.done():
+        return False
+    future.set_result(verdict)
+    return True
+
+
+@server.tool()
+async def cli_open_agent(agent: str, name: str, task: str, ctx: Context) -> dict[str, Any]:
+    """Open a new CLI pane in your workspace and give it a task.
+
+    `agent` is the CLI to run (e.g. "claude", "codex"), `name` is what the pane
+    will be called — that name is also its messaging address, so pick something
+    role-shaped like "reviewer" — and `task` is what it should do.
+
+    The new pane starts, receives the task, and reports back to you by message
+    when it is done, so you do not need to poll it. This call waits for the pane
+    to start, which takes a few seconds.
+
+    Refused when the name is taken, the agent key is unknown, or a limit is hit:
+    3 child panes per pane, 8 CLI panes per workspace, spawn chain depth 2.
+    Returns {ok, name, address} or {ok: false, error}.
+    """
+    from agent_team_backend import agent_messaging, app
+    from agent_team_backend.ipc import make_event
+
+    try:
+        me = _caller_pane_id(ctx)
+    except CallerUnknown as err:
+        return {"ok": False, "error": str(err)}
+    agent_key = (agent or "").strip()
+    pane_name = (name or "").strip()
+    if not agent_key:
+        return {"ok": False, "error": "agent is required (e.g. \"claude\", \"codex\")"}
+    if not pane_name:
+        return {"ok": False, "error": "name is required — it doubles as the pane's address"}
+    if not (task or "").strip():
+        return {"ok": False, "error": "task is empty"}
+
+    request_id = f"{me}:spawn:{secrets.token_hex(8)}"
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[dict[str, Any]] = loop.create_future()
+    _pending_spawns[request_id] = future
+    try:
+        await app.broadcast(
+            make_event(
+                "agent_spawn.request",
+                {
+                    "request_id": request_id,
+                    "requester_pane_id": me,
+                    "agent_key": agent_key,
+                    "name": pane_name,
+                    "task": task,
+                },
+            )
+        )
+        verdict = await asyncio.wait_for(future, timeout=_SPAWN_VERDICT_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        return {
+            "ok": False,
+            "error": "no answer from the window that owns your pane — it may have "
+            "closed, or the new pane is taking unusually long to start",
+        }
+    finally:
+        _pending_spawns.pop(request_id, None)
+
+    if not verdict.get("ok"):
+        return {"ok": False, "error": str(verdict.get("error") or "spawn refused")}
+    entry = agent_messaging.get(str(verdict.get("pane_id") or ""))
+    return {
+        "ok": True,
+        "name": str(verdict.get("name") or pane_name),
+        "address": entry.qualified_name if entry else str(verdict.get("name") or pane_name),
     }
 
 

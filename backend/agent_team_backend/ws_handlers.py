@@ -4857,6 +4857,39 @@ async def agent_msg_unregister(session: "Session", msg_id: str, msg_type: str, p
     await session.send_json(make_response(msg_id, msg_type, {"ok": True, "removed": removed}))
 
 
+@handler("agent_msg.set_busy")
+async def agent_msg_set_busy(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """The owning window reports whether a pane's agent is mid-turn, so
+    cli_list_targets can tell a caller that a target is working."""
+    pane_id = str(payload.get("pane_id") or "")
+    changed = bool(pane_id) and agent_messaging.set_busy(pane_id, bool(payload.get("busy")))
+    await session.send_json(make_response(msg_id, msg_type, {"ok": True, "changed": changed}))
+
+
+@handler("agent_spawn.result")
+async def agent_spawn_result(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """A window's verdict on an agent_spawn.request, handed to the waiting
+    cli_open_agent call."""
+    from .plugins.builtin.navide_plans import plan_mcp
+
+    request_id = str(payload.get("request_id") or "")
+    if not request_id:
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "agent_spawn.result needs request_id")
+        )
+        return
+    delivered = plan_mcp.resolve_spawn(
+        request_id,
+        {
+            "ok": bool(payload.get("ok", False)),
+            "error": str(payload.get("error") or ""),
+            "pane_id": str(payload.get("pane_id") or ""),
+            "name": str(payload.get("name") or ""),
+        },
+    )
+    await session.send_json(make_response(msg_id, msg_type, {"ok": True, "delivered": delivered}))
+
+
 @handler("agent_msg.list")
 async def agent_msg_list(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     raw_ws = payload.get("workspace_path")
