@@ -1,4 +1,21 @@
-import type { UpdateActionResult, UpdateSeverity, UpdateState } from '../shared/updater'
+import type { UpdateActionResult, UpdateCheckFailure, UpdateSeverity, UpdateState } from '../shared/updater'
+
+// How long quitAndInstall gets to actually take the process over. Squirrel.Mac
+// normally hands off within a couple of seconds; if we are still running well
+// past that, the install did not start and the user is staring at a dead
+// "installing" state with no way back.
+const DEFAULT_INSTALL_TIMEOUT_MS = 20_000
+
+// Backoff for download retries. The length of the array is the retry count;
+// callers that let the user pick a count build their own from this shape.
+export const DEFAULT_DOWNLOAD_RETRY_DELAYS_MS: readonly number[] = [5_000, 15_000, 45_000]
+
+// Download failures that a retry cannot fix: the asset is missing or forbidden,
+// or the payload failed integrity/signature verification. Everything else
+// (timeouts, resets, DNS) is treated as transient and worth another attempt.
+const PERMANENT_DOWNLOAD_ERROR = /\b(40[0134]|signature|checksum|sha512|integrity)\b/i
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms) })
 
 interface UpdateInfoLike {
   version: string
@@ -27,6 +44,34 @@ export interface UpdaterService {
   check(options?: { silent?: boolean }): Promise<UpdateActionResult>
   download(): Promise<UpdateActionResult>
   install(): UpdateActionResult
+  /**
+   * Let a downloaded update be applied when the app quits, instead of only on
+   * an explicit restart. Downloading and installing are separate decisions:
+   * this one owns the second half.
+   */
+  setAutoInstallOnQuit(enabled: boolean): void
+}
+
+/**
+ * The slice of updater state that outlives a session. Deliberately excludes
+ * availableVersion: a version carried over from a previous run may already be
+ * installed, and claiming an update is waiting when it is not is worse than
+ * showing nothing until the startup check answers.
+ */
+export interface RestoredUpdateState {
+  checkedAt?: string
+  lastCheckFailure?: UpdateCheckFailure
+}
+
+/**
+ * Both tunables are user settings, so they may be passed as a getter to be read
+ * at the moment they are used rather than captured when the service is built —
+ * changing them in Settings must not require recreating the service.
+ */
+export interface UpdaterServiceOptions {
+  installTimeoutMs?: number | (() => number)
+  downloadRetryDelaysMs?: readonly number[] | (() => readonly number[])
+  restored?: RestoredUpdateState
 }
 
 function errorMessage(error: unknown): string {
@@ -69,9 +114,34 @@ export function createUpdaterService(
   currentVersion: string,
   supported: boolean,
   onStateChanged: (state: UpdateState) => void,
+  options: UpdaterServiceOptions = {},
 ): UpdaterService {
+  const resolveInstallTimeoutMs = (): number => {
+    const value = options.installTimeoutMs
+    if (typeof value === 'function') return value()
+    return value ?? DEFAULT_INSTALL_TIMEOUT_MS
+  }
+  const resolveRetryDelays = (): readonly number[] => {
+    const value = options.downloadRetryDelaysMs
+    if (typeof value === 'function') return value()
+    return value ?? DEFAULT_DOWNLOAD_RETRY_DELAYS_MS
+  }
+
+  // When a check last succeeded, carried across restarts. A failed check must
+  // never advance it — that is what made a broken feed read as "up to date".
+  let lastSuccessAt: string | undefined = options.restored?.checkedAt
+  // The current run of failed checks, merged into every published state.
+  let checkFailure: UpdateCheckFailure | null = options.restored?.lastCheckFailure ?? null
+
   let state: UpdateState = supported
-    ? { status: 'idle', currentVersion }
+    ? {
+        status: 'idle',
+        currentVersion,
+        checkedAt: lastSuccessAt,
+        // Built directly rather than through setState, so the restored failure
+        // run has to be attached here too.
+        ...(checkFailure ? { lastCheckFailure: checkFailure } : {}),
+      }
     : {
         status: 'unsupported',
         currentVersion,
@@ -79,18 +149,47 @@ export function createUpdaterService(
       }
   let checkPromise: Promise<UpdateActionResult> | null = null
   let downloadPromise: Promise<UpdateActionResult> | null = null
+  let installTimer: ReturnType<typeof setTimeout> | null = null
   // True while a silent (startup/periodic) check is in flight. When set,
   // provider errors are logged but never surfaced as an 'error' state.
   let silentActive = false
+  // The error a silent check saw, if any. Kept so check() can count the cycle
+  // as failed even when the provider promise still resolves.
+  let silentErrorMessage: string | null = null
 
   const snapshot = (): UpdateState => ({ ...state })
+  // checkFailure is merged here rather than at each call site: every setState
+  // caller builds a fresh state object, so one place has to own the field.
   const setState = (next: UpdateState): void => {
-    state = next
+    const merged: UpdateState = { ...next }
+    if (checkFailure) merged.lastCheckFailure = checkFailure
+    else delete merged.lastCheckFailure
+    state = merged
     onStateChanged(snapshot())
+  }
+  /** Stamp a successful check and end any failure run. */
+  const markCheckSuccess = (): string => {
+    const now = new Date().toISOString()
+    lastSuccessAt = now
+    checkFailure = null
+    return now
+  }
+  const recordCheckFailure = (message: string): void => {
+    checkFailure = {
+      message,
+      count: (checkFailure?.count ?? 0) + 1,
+      at: new Date().toISOString(),
+    }
+    // Republish: the visible status often does not change on a failed silent
+    // check, but the count the UI reads does.
+    setState({ ...state })
   }
   const success = (): UpdateActionResult => ({ ok: true, state: snapshot() })
   const failure = (message: string): UpdateActionResult => ({ ok: false, state: snapshot(), error: message })
 
+  // Both of electron-updater's automatic behaviours stay off here; each is
+  // driven by its own user setting. autoDownload is decided per update by the
+  // caller (patch only), autoInstallOnAppQuit by setAutoInstallOnQuit below.
   client.autoDownload = false
   client.autoInstallOnAppQuit = false
 
@@ -105,11 +204,11 @@ export function createUpdaterService(
         availableVersion: info.version,
         releaseNotes: normalizeReleaseNotes(info.releaseNotes),
         severity: computeUpdateSeverity(currentVersion, info.version),
-        checkedAt: new Date().toISOString(),
+        checkedAt: markCheckSuccess(),
       })
     })
     client.on('update-not-available', () => {
-      setState({ status: 'not-available', currentVersion, checkedAt: new Date().toISOString() })
+      setState({ status: 'not-available', currentVersion, checkedAt: markCheckSuccess() })
     })
     client.on('download-progress', (progress) => {
       setState({
@@ -137,6 +236,7 @@ export function createUpdaterService(
       // a transient network/feed error; log and leave the state as-is.
       if (silentActive) {
         console.warn('[updater] silent check error:', message)
+        silentErrorMessage = message
         return
       }
       setState({
@@ -168,6 +268,13 @@ export function createUpdaterService(
 
     checkPromise = (async () => {
       silentActive = silent
+      silentErrorMessage = null
+      let counted = false
+      const noteSilentFailure = (message: string): void => {
+        if (counted) return
+        counted = true
+        recordCheckFailure(message)
+      }
       setState({ status: 'checking', currentVersion, availableVersion: state.availableVersion })
       try {
         const result = await client.checkForUpdates()
@@ -175,17 +282,22 @@ export function createUpdaterService(
         // deterministic fallback for providers/mocks that only return a result.
         if (state.status === 'checking') {
           const version = result?.updateInfo?.version
-          if (result?.isUpdateAvailable && version) {
+          if (silentErrorMessage) {
+            // The provider reported an error yet still resolved. Settle out of
+            // 'checking' without claiming the app is up to date.
+            noteSilentFailure(silentErrorMessage)
+            setState({ status: 'not-available', currentVersion, checkedAt: lastSuccessAt })
+          } else if (result?.isUpdateAvailable && version) {
             setState({
               status: 'available',
               currentVersion,
               availableVersion: version,
               releaseNotes: normalizeReleaseNotes(result?.updateInfo?.releaseNotes),
               severity: computeUpdateSeverity(currentVersion, version),
-              checkedAt: new Date().toISOString(),
+              checkedAt: markCheckSuccess(),
             })
           } else {
-            setState({ status: 'not-available', currentVersion, checkedAt: new Date().toISOString() })
+            setState({ status: 'not-available', currentVersion, checkedAt: markCheckSuccess() })
           }
         }
         restoreDownloaded()
@@ -197,8 +309,12 @@ export function createUpdaterService(
         // into not-available if we are still mid-check.
         if (silent) {
           console.warn('[updater] silent check failed:', message)
+          noteSilentFailure(message)
+          // checkedAt stays at the last *successful* check. Stamping it here is
+          // what made a permanently broken feed read as "checked just now, you
+          // are up to date".
           if (state.status === 'checking') {
-            setState({ status: 'not-available', currentVersion, checkedAt: new Date().toISOString() })
+            setState({ status: 'not-available', currentVersion, checkedAt: lastSuccessAt })
           }
           restoreDownloaded()
           return failure(message)
@@ -209,7 +325,9 @@ export function createUpdaterService(
         restoreDownloaded()
         return failure(message)
       } finally {
+        if (silent && silentErrorMessage) noteSilentFailure(silentErrorMessage)
         silentActive = false
+        silentErrorMessage = null
         checkPromise = null
       }
     })()
@@ -228,21 +346,34 @@ export function createUpdaterService(
 
     const releaseNotes = state.releaseNotes
     const severity = state.severity
+    const retryDelays = resolveRetryDelays()
     downloadPromise = (async () => {
-      setState({ status: 'downloading', currentVersion, availableVersion, releaseNotes, severity, percent: 0 })
       try {
-        await client.downloadUpdate()
-        if (state.status === 'error') return failure(state.message ?? 'Update download failed.')
-        if (state.status === 'downloading') {
-          setState({ status: 'downloaded', currentVersion, availableVersion, releaseNotes, severity, percent: 100 })
+        // Transient transfer failures used to leave the user stranded at
+        // 'error' with no automatic second attempt. Retry on a bounded backoff,
+        // but never for a failure a retry cannot fix.
+        for (let attempt = 0; ; attempt += 1) {
+          setState({ status: 'downloading', currentVersion, availableVersion, releaseNotes, severity, percent: 0 })
+          try {
+            await client.downloadUpdate()
+            if (state.status === 'error') return failure(state.message ?? 'Update download failed.')
+            if (state.status === 'downloading') {
+              setState({ status: 'downloaded', currentVersion, availableVersion, releaseNotes, severity, percent: 100 })
+            }
+            return success()
+          } catch (error) {
+            const message = errorMessage(error)
+            const delay = retryDelays[attempt]
+            if (delay === undefined || PERMANENT_DOWNLOAD_ERROR.test(message)) {
+              if (state.status !== 'error' || state.message !== message) {
+                setState({ status: 'error', currentVersion, availableVersion, message })
+              }
+              return failure(message)
+            }
+            console.warn(`[updater] download attempt ${attempt + 1} failed, retrying in ${delay}ms:`, message)
+            await sleep(delay)
+          }
         }
-        return success()
-      } catch (error) {
-        const message = errorMessage(error)
-        if (state.status !== 'error' || state.message !== message) {
-          setState({ status: 'error', currentVersion, availableVersion, message })
-        }
-        return failure(message)
       } finally {
         downloadPromise = null
       }
@@ -252,17 +383,38 @@ export function createUpdaterService(
 
   function install(): UpdateActionResult {
     if (state.status !== 'downloaded') return failure('No downloaded update is ready to install.')
+    // Snapshot the ready-to-install state so the timeout below can hand it back
+    // intact if the handoff never happens.
+    const readyState = snapshot()
+    if (installTimer) {
+      clearTimeout(installTimer)
+      installTimer = null
+    }
     setState({
       status: 'installing',
       currentVersion,
       availableVersion: state.availableVersion,
       percent: 100,
     })
+    const installTimeoutMs = resolveInstallTimeoutMs()
     try {
       client.quitAndInstall(false, true)
+      // quitAndInstall can return without throwing and without the installer
+      // ever taking over. Nothing else clears 'installing', and that status
+      // blocks check() and the updater-cache cleanup indefinitely.
+      installTimer = setTimeout(() => {
+        installTimer = null
+        if (state.status !== 'installing') return
+        console.warn('[updater] install did not start within', installTimeoutMs, 'ms; returning to downloaded')
+        setState({ ...readyState, message: 'The update did not start installing. Try restarting again.' })
+      }, installTimeoutMs)
       return success()
     } catch (error) {
       const message = errorMessage(error)
+      if (installTimer) {
+        clearTimeout(installTimer)
+        installTimer = null
+      }
       setState({
         status: 'error',
         currentVersion,
@@ -273,5 +425,11 @@ export function createUpdaterService(
     }
   }
 
-  return { getState: snapshot, check, download, install }
+  // Unsupported builds keep electron-updater fully inert: nothing was ever
+  // downloaded there, so promising a quit-time install would be a lie.
+  const setAutoInstallOnQuit = (enabled: boolean): void => {
+    client.autoInstallOnAppQuit = supported && enabled
+  }
+
+  return { getState: snapshot, check, download, install, setAutoInstallOnQuit }
 }

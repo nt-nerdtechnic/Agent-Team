@@ -1,8 +1,8 @@
 # Releasing Navide
 
 Navide ships as a signed + notarized macOS app. Users receive updates through
-the in-app updater (electron-updater), which downloads only the changed bytes
-(blockmap delta), so patches land in seconds.
+the in-app updater (electron-updater), which downloads the full zip for every
+update — see "Updates are full downloads" below for why.
 
 We use a **two-tier** model.
 
@@ -42,8 +42,8 @@ Before running `./release.sh`, add a new entry to `src/renderer/src/lib/whatsNew
 (typecheck + frontend + backend tests), builds locally, commits, tags, and
 (after you confirm) pushes `main` + the tag. The tag push triggers the
 **Release macOS** CI workflow, which signs, notarizes, and publishes the GitHub
-Release. Existing users' apps auto-check (startup + every 4h), download the
-delta in the background, and prompt "Restart to update".
+Release. Existing users' apps auto-check (startup + every 30 min), download the
+update in the background, and prompt "Restart to update".
 
 That's the whole hotfix flow. `release.sh` already repointed the README
 download links (and the `latest-release` badge tracks the newest release), so
@@ -74,8 +74,10 @@ The classic form still works unchanged:
 - **Bump keywords** (`patch`/`minor`/`major`) compute the next version from the
   current `package.json`. Never hand-edit version numbers — always go through
   `release.sh`, or the version files desync and the script refuses to run.
-- **Delta updates** are automatic: because CI publishes the `.zip` + `.blockmap`,
-  electron-updater downloads only the diff.
+- **Updates are full downloads**, not deltas. `scripts/fix-mac-update-zip.mjs`
+  re-zips the signed app with `ditto` and deliberately leaves the now-stale
+  `.zip.blockmap` alone; since `latest-mac.yml` carries no `blockMapSize`,
+  electron-updater never consults the blockmap and fetches the whole `.zip`.
 - **Channels** (stable/beta) are an orthogonal, user-facing choice in
   Settings → Updates — unrelated to the patch/major tiers. A beta CI publishing
   feed is not wired yet; the App side is ready for it.

@@ -1,5 +1,14 @@
 import { readFileSync, writeFileSync, renameSync } from 'node:fs'
-import type { UpdateChannel, UpdaterSettings } from '../shared/updater'
+import {
+  CHECK_FAILURE_THRESHOLD_RANGE,
+  DEFAULT_CHECK_FAILURE_THRESHOLD,
+  DEFAULT_DOWNLOAD_RETRY_COUNT,
+  DEFAULT_INSTALL_TIMEOUT_SECONDS,
+  DOWNLOAD_RETRY_COUNT_RANGE,
+  INSTALL_TIMEOUT_SECONDS_RANGE,
+  type UpdateChannel,
+  type UpdaterSettings,
+} from '../shared/updater'
 
 // Persisted user preferences for the auto-updater. The file lives under the
 // Electron userData dir; the caller resolves the path (this module stays
@@ -7,11 +16,31 @@ import type { UpdateChannel, UpdaterSettings } from '../shared/updater'
 export const DEFAULT_UPDATER_SETTINGS: UpdaterSettings = {
   autoCheck: true,
   autoDownload: true,
+  // Off by default: an existing install must not start applying updates on
+  // quit just because it was upgraded to a version that can.
+  autoInstallOnQuit: false,
   channel: 'stable',
+  notifyOnCheckFailure: true,
+  checkFailureThreshold: DEFAULT_CHECK_FAILURE_THRESHOLD,
+  retryDownload: true,
+  downloadRetryCount: DEFAULT_DOWNLOAD_RETRY_COUNT,
+  installTimeoutSeconds: DEFAULT_INSTALL_TIMEOUT_SECONDS,
 }
 
 function clampChannel(value: unknown): UpdateChannel {
   return value === 'beta' ? 'beta' : 'stable'
+}
+
+// Numeric preferences come from a hand-editable JSON file and from spin boxes,
+// so anything out of range (or not a number at all) falls back to the default
+// rather than reaching the updater.
+function clampNumber(
+  value: unknown,
+  range: { min: number; max: number },
+  fallback: number,
+): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback
+  return Math.min(range.max, Math.max(range.min, Math.round(value)))
 }
 
 // Validate an arbitrary parsed document into a full UpdaterSettings, ignoring
@@ -33,7 +62,34 @@ export function parseUpdaterSettingsDoc(text: string | null): UpdaterSettings {
       typeof doc.autoDownload === 'boolean'
         ? doc.autoDownload
         : DEFAULT_UPDATER_SETTINGS.autoDownload,
+    autoInstallOnQuit:
+      typeof doc.autoInstallOnQuit === 'boolean'
+        ? doc.autoInstallOnQuit
+        : DEFAULT_UPDATER_SETTINGS.autoInstallOnQuit,
     channel: clampChannel(doc.channel),
+    notifyOnCheckFailure:
+      typeof doc.notifyOnCheckFailure === 'boolean'
+        ? doc.notifyOnCheckFailure
+        : DEFAULT_UPDATER_SETTINGS.notifyOnCheckFailure,
+    checkFailureThreshold: clampNumber(
+      doc.checkFailureThreshold,
+      CHECK_FAILURE_THRESHOLD_RANGE,
+      DEFAULT_UPDATER_SETTINGS.checkFailureThreshold,
+    ),
+    retryDownload:
+      typeof doc.retryDownload === 'boolean'
+        ? doc.retryDownload
+        : DEFAULT_UPDATER_SETTINGS.retryDownload,
+    downloadRetryCount: clampNumber(
+      doc.downloadRetryCount,
+      DOWNLOAD_RETRY_COUNT_RANGE,
+      DEFAULT_UPDATER_SETTINGS.downloadRetryCount,
+    ),
+    installTimeoutSeconds: clampNumber(
+      doc.installTimeoutSeconds,
+      INSTALL_TIMEOUT_SECONDS_RANGE,
+      DEFAULT_UPDATER_SETTINGS.installTimeoutSeconds,
+    ),
   }
 }
 

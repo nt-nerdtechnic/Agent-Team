@@ -180,6 +180,49 @@ describe('initUpdater lifecycle', () => {
     expect(h.autoUpdater.checkForUpdates).toHaveBeenCalledTimes(1)
   })
 
+  it('leaves quit-time installs off until the user asks for them', async () => {
+    // Downloading and installing are separate decisions: an app that upgraded
+    // into this feature must not start applying updates on quit by itself.
+    const initUpdater = await loadInitUpdater()
+    initUpdater({ enabled: true, currentVersion: '1.0.0' })
+
+    expect(h.ipcHandlers.get('updater:get-settings')!()).toMatchObject({ autoInstallOnQuit: false })
+    expect(h.autoUpdater.autoInstallOnAppQuit).toBe(false)
+  })
+
+  it('hands quit-time installs to electron-updater once enabled', async () => {
+    const initUpdater = await loadInitUpdater()
+    initUpdater({ enabled: true, currentVersion: '1.0.0' })
+
+    const setSettings = h.ipcHandlers.get('updater:set-settings')!
+    await setSettings({}, { autoInstallOnQuit: true } as Partial<UpdaterSettings>)
+    expect(h.autoUpdater.autoInstallOnAppQuit).toBe(true)
+    // And back off again — the switch has to be reversible without a restart.
+    await setSettings({}, { autoInstallOnQuit: false } as Partial<UpdaterSettings>)
+    expect(h.autoUpdater.autoInstallOnAppQuit).toBe(false)
+  })
+
+  it('restores a stored quit-time install preference on the next launch', async () => {
+    const first = await loadInitUpdater()
+    first({ enabled: true, currentVersion: '1.0.0' })
+    await h.ipcHandlers.get('updater:set-settings')!({}, { autoInstallOnQuit: true } as Partial<UpdaterSettings>)
+
+    h.autoUpdater.autoInstallOnAppQuit = true // electron-updater's own default
+    const second = await loadInitUpdater()
+    second({ enabled: true, currentVersion: '1.0.0' })
+    expect(h.autoUpdater.autoInstallOnAppQuit).toBe(true)
+    expect(h.ipcHandlers.get('updater:get-settings')!()).toMatchObject({ autoInstallOnQuit: true })
+  })
+
+  it('never arms a quit-time install on an unsupported build', async () => {
+    // Nothing was ever downloaded there, so promising one would be a lie.
+    const initUpdater = await loadInitUpdater()
+    initUpdater({ enabled: false, currentVersion: '1.0.0' })
+
+    await h.ipcHandlers.get('updater:set-settings')!({}, { autoInstallOnQuit: true } as Partial<UpdaterSettings>)
+    expect(h.autoUpdater.autoInstallOnAppQuit).toBe(false)
+  })
+
   it('persists channel changes and re-applies them to autoUpdater', async () => {
     const initUpdater = await loadInitUpdater()
     initUpdater({ enabled: true, currentVersion: '1.0.0' })

@@ -3,6 +3,11 @@ import { defineComponent, nextTick } from 'vue'
 import { mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useUpdater, type RendererUpdateState } from '../useUpdater'
+import {
+  DEFAULT_CHECK_FAILURE_THRESHOLD,
+  DEFAULT_DOWNLOAD_RETRY_COUNT,
+  DEFAULT_INSTALL_TIMEOUT_SECONDS,
+} from '../../../../shared/updater'
 
 const mounted: Array<ReturnType<typeof mount>> = []
 
@@ -119,7 +124,16 @@ describe('useUpdater', () => {
     const updater = mountUpdater()
     await nextTick()
     await nextTick()
-    expect(updater.settings.value).toEqual({ autoCheck: true, autoDownload: true, channel: 'stable' })
+    // toMatchObject, not toEqual: the point is that the fallbacks survive an
+    // unreachable IPC, not that the settings shape never grows a field.
+    expect(updater.settings.value).toMatchObject({
+      autoCheck: true, autoDownload: true, autoInstallOnQuit: false, channel: 'stable',
+      notifyOnCheckFailure: true,
+      checkFailureThreshold: DEFAULT_CHECK_FAILURE_THRESHOLD,
+      retryDownload: true,
+      downloadRetryCount: DEFAULT_DOWNLOAD_RETRY_COUNT,
+      installTimeoutSeconds: DEFAULT_INSTALL_TIMEOUT_SECONDS,
+    })
     await expect(updater.updateSettings({ channel: 'beta' })).resolves.toBeUndefined()
   })
 })

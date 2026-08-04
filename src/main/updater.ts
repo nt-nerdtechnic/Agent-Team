@@ -1,13 +1,21 @@
 import { join } from 'node:path'
 import { autoUpdater } from 'electron-updater'
 import { app, ipcMain, BrowserWindow } from 'electron'
-import { createUpdaterService, type UpdaterService } from './updater-service'
+import {
+  createUpdaterService,
+  DEFAULT_DOWNLOAD_RETRY_DELAYS_MS,
+  type RestoredUpdateState,
+  type UpdaterService,
+} from './updater-service'
 import { readUpdaterSettings, writeUpdaterSettings } from './updater-settings'
+import { readUpdaterState, writeUpdaterState } from './updater-state-store'
 import type { UpdateSettingsResult, UpdaterSettings, UpdateState, UpdateStatus } from '../shared/updater'
 
 let service: UpdaterService | null = null
 let settings: UpdaterSettings | null = null
 let settingsFile = ''
+let stateFile = ''
+let persistedState = ''
 let periodicTimer: ReturnType<typeof setInterval> | null = null
 
 // Re-check for updates every 30 minutes in addition to the one-shot startup
@@ -22,8 +30,35 @@ function broadcast(channel: string, payload: unknown): void {
   }
 }
 
+// Mirror the durable slice of the state to disk. Only the fields that outlive a
+// session are written, and only when they actually change — download-progress
+// alone publishes a new state several times a second.
+function persistState(state: UpdateState): void {
+  if (!stateFile) return
+  const durable: RestoredUpdateState = {
+    // checkedAt is absent from most statuses ('checking', 'downloading', …),
+    // so carry the last known value forward rather than erasing it.
+    checkedAt: state.checkedAt ?? readLastCheckedAt(),
+    lastCheckFailure: state.lastCheckFailure,
+  }
+  const encoded = JSON.stringify(durable)
+  if (encoded === persistedState) return
+  persistedState = encoded
+  writeUpdaterState(stateFile, durable)
+}
+
+function readLastCheckedAt(): string | undefined {
+  if (!persistedState) return undefined
+  try {
+    return (JSON.parse(persistedState) as RestoredUpdateState).checkedAt
+  } catch {
+    return undefined
+  }
+}
+
 function publishState(state: UpdateState): void {
   broadcast('updater:state-changed', state)
+  persistState(state)
   if (state.status === 'error') console.error('[updater]', state.message)
   // Background auto-download: once an update is detected, kick off the download
   // without user action when enabled. download() is idempotent and only
@@ -32,8 +67,29 @@ function publishState(state: UpdateState): void {
   // Only patch releases download silently; minor/major updates stay at
   // 'available' so the renderer can ask the user first.
   if (state.status === 'available' && state.severity === 'patch' && settings?.autoDownload) {
-    queueMicrotask(() => { void service?.download() })
+    queueMicrotask(() => {
+      // Don't discard the result: a silent auto-download that fails otherwise
+      // leaves no trace beyond the 'error' state. The service retries transient
+      // failures itself; once it gives up, the next periodic check republishes
+      // 'available' and this handler starts a fresh attempt.
+      void service?.download().then((result) => {
+        if (!result.ok) {
+          console.warn('[updater] auto-download failed, will retry after the next check:', result.error)
+        }
+      })
+    })
   }
+}
+
+// Turn the user's retry count into a backoff schedule. Retries disabled means
+// an empty schedule; counts past the base schedule repeat its last delay.
+function retryDelaysFor(current: UpdaterSettings | null): readonly number[] {
+  if (!current?.retryDownload) return []
+  const base = DEFAULT_DOWNLOAD_RETRY_DELAYS_MS
+  return Array.from(
+    { length: current.downloadRetryCount },
+    (_, index) => base[Math.min(index, base.length - 1)],
+  )
 }
 
 function applyChannel(next: UpdaterSettings): void {
@@ -82,15 +138,28 @@ export function initUpdater(options: {
 
   settingsFile = join(app.getPath('userData'), 'updater-settings.json')
   settings = readUpdaterSettings(settingsFile)
+  stateFile = join(app.getPath('userData'), 'updater-state.json')
+  const restored = readUpdaterState(stateFile)
+  persistedState = JSON.stringify(restored)
 
   service = createUpdaterService(
     autoUpdater,
     options.currentVersion,
     options.enabled,
     publishState,
+    {
+      // Read through to `settings` on use, so changing either preference takes
+      // effect without rebuilding the service.
+      installTimeoutMs: () => (settings?.installTimeoutSeconds ?? 20) * 1000,
+      downloadRetryDelaysMs: () => retryDelaysFor(settings),
+      restored,
+    },
   )
 
-  if (options.enabled) applyChannel(settings)
+  if (options.enabled) {
+    applyChannel(settings)
+    service.setAutoInstallOnQuit(settings.autoInstallOnQuit)
+  }
 
   ipcMain.handle('updater:get-state', () => service!.getState())
   ipcMain.handle('updater:check', () => service!.check())
@@ -103,6 +172,9 @@ export function initUpdater(options: {
       settings = writeUpdaterSettings(settingsFile, patch ?? {})
       if (options.enabled) {
         applyChannel(settings)
+        // Applies to the update already sitting in the cache too — turning the
+        // switch on should not require re-downloading anything.
+        service!.setAutoInstallOnQuit(settings.autoInstallOnQuit)
         if (settings.autoCheck) {
           startPeriodicCheck()
           // Turned on at runtime: check right away instead of waiting for the

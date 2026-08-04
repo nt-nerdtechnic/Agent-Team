@@ -8,6 +8,11 @@ import {
   readUpdaterSettings,
   writeUpdaterSettings,
 } from './updater-settings'
+import {
+  CHECK_FAILURE_THRESHOLD_RANGE,
+  DOWNLOAD_RETRY_COUNT_RANGE,
+  INSTALL_TIMEOUT_SECONDS_RANGE,
+} from '../shared/updater'
 
 describe('parseUpdaterSettingsDoc', () => {
   it('returns defaults for missing or corrupt content', () => {
@@ -17,14 +22,42 @@ describe('parseUpdaterSettingsDoc', () => {
   })
 
   it('fills missing fields with defaults and ignores unknown keys', () => {
+    // Spread the defaults rather than restating them: this asserts "everything
+    // not in the document falls back", which is the actual contract, and does
+    // not need editing every time a new preference is added.
     const parsed = parseUpdaterSettingsDoc(JSON.stringify({ autoCheck: false, extra: 'nope' }))
-    expect(parsed).toEqual({ autoCheck: false, autoDownload: true, channel: 'stable' })
+    expect(parsed).toEqual({ ...DEFAULT_UPDATER_SETTINGS, autoCheck: false })
   })
 
   it('clamps the channel to the two allowed values', () => {
     expect(parseUpdaterSettingsDoc(JSON.stringify({ channel: 'beta' })).channel).toBe('beta')
     expect(parseUpdaterSettingsDoc(JSON.stringify({ channel: 'nightly' })).channel).toBe('stable')
     expect(parseUpdaterSettingsDoc(JSON.stringify({ channel: 42 })).channel).toBe('stable')
+  })
+
+  it('clamps numeric preferences into their allowed range', () => {
+    const tooLow = parseUpdaterSettingsDoc(
+      JSON.stringify({ checkFailureThreshold: 0, downloadRetryCount: -4, installTimeoutSeconds: 1 }),
+    )
+    expect(tooLow.checkFailureThreshold).toBe(CHECK_FAILURE_THRESHOLD_RANGE.min)
+    expect(tooLow.downloadRetryCount).toBe(DOWNLOAD_RETRY_COUNT_RANGE.min)
+    expect(tooLow.installTimeoutSeconds).toBe(INSTALL_TIMEOUT_SECONDS_RANGE.min)
+
+    const tooHigh = parseUpdaterSettingsDoc(
+      JSON.stringify({ checkFailureThreshold: 99, downloadRetryCount: 99, installTimeoutSeconds: 9999 }),
+    )
+    expect(tooHigh.checkFailureThreshold).toBe(CHECK_FAILURE_THRESHOLD_RANGE.max)
+    expect(tooHigh.downloadRetryCount).toBe(DOWNLOAD_RETRY_COUNT_RANGE.max)
+    expect(tooHigh.installTimeoutSeconds).toBe(INSTALL_TIMEOUT_SECONDS_RANGE.max)
+  })
+
+  it('falls back to defaults for non-numeric or fractional preferences', () => {
+    const parsed = parseUpdaterSettingsDoc(
+      JSON.stringify({ checkFailureThreshold: 'three', downloadRetryCount: null, installTimeoutSeconds: 20.6 }),
+    )
+    expect(parsed.checkFailureThreshold).toBe(DEFAULT_UPDATER_SETTINGS.checkFailureThreshold)
+    expect(parsed.downloadRetryCount).toBe(DEFAULT_UPDATER_SETTINGS.downloadRetryCount)
+    expect(parsed.installTimeoutSeconds).toBe(21)
   })
 
   it('rejects non-boolean flags in favour of defaults', () => {
@@ -50,7 +83,7 @@ describe('readUpdaterSettings / writeUpdaterSettings', () => {
 
   it('round-trips a merged patch', () => {
     const saved = writeUpdaterSettings(file, { autoDownload: false, channel: 'beta' })
-    expect(saved).toEqual({ autoCheck: true, autoDownload: false, channel: 'beta' })
+    expect(saved).toEqual({ ...DEFAULT_UPDATER_SETTINGS, autoDownload: false, channel: 'beta' })
     expect(readUpdaterSettings(file)).toEqual(saved)
   })
 
@@ -58,8 +91,8 @@ describe('readUpdaterSettings / writeUpdaterSettings', () => {
     writeUpdaterSettings(file, { channel: 'beta' })
     writeUpdaterSettings(file, { autoCheck: false })
     expect(readUpdaterSettings(file)).toEqual({
+      ...DEFAULT_UPDATER_SETTINGS,
       autoCheck: false,
-      autoDownload: true,
       channel: 'beta',
     })
   })

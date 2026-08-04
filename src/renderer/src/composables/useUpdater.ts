@@ -1,9 +1,24 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import type { UpdateState, UpdaterSettings } from '../../../shared/updater'
+import {
+  DEFAULT_CHECK_FAILURE_THRESHOLD,
+  DEFAULT_DOWNLOAD_RETRY_COUNT,
+  DEFAULT_INSTALL_TIMEOUT_SECONDS,
+} from '../../../shared/updater'
 
 export type RendererUpdateState = UpdateState
 
-const DEFAULT_SETTINGS: UpdaterSettings = { autoCheck: true, autoDownload: true, channel: 'stable' }
+const DEFAULT_SETTINGS: UpdaterSettings = {
+  autoCheck: true,
+  autoDownload: true,
+  autoInstallOnQuit: false,
+  channel: 'stable',
+  notifyOnCheckFailure: true,
+  checkFailureThreshold: DEFAULT_CHECK_FAILURE_THRESHOLD,
+  retryDownload: true,
+  downloadRetryCount: DEFAULT_DOWNLOAD_RETRY_COUNT,
+  installTimeoutSeconds: DEFAULT_INSTALL_TIMEOUT_SECONDS,
+}
 
 export function useUpdater() {
   const state = ref<RendererUpdateState>({
