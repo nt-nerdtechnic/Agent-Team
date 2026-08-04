@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { cliHealthGuideForLaunch, useOnboarding, type OnboardStatus } from '../useOnboarding'
 import { createMockBackend, withScope, flush } from './mockBackend'
 
@@ -200,6 +200,82 @@ describe('useOnboarding', () => {
     expect(result.watching.value).toBe('claude')
     result.dispose()
     expect(result.watching.value).toBe('')
+    scope.stop()
+  })
+
+  it('marks a terminal handoff that failed to open', async () => {
+    // `ok: true` alone described BOTH "terminal opened" and "nothing happened";
+    // the dialog needs them apart to know whether to show an error.
+    stubTerminal({ ok: false, error: 'not authorised' })
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', status({ cli: false }))
+    mock.setResponse('onboarding.install', { ok: true, needs_terminal: true, command: 'npm i -g x' })
+    const { result, scope } = withScope(() => useOnboarding(mock.backend))
+    await result.refresh()
+    const r = await result.install(result.cliDeps.value[0])
+    await flush()
+    expect(r?.terminal_opened).toBe(false)
+    result.dispose()
+    scope.stop()
+  })
+
+  it('reports when the terminal watcher gives up instead of stopping silently', async () => {
+    // Polling used to end after ~5 minutes with no message at all, leaving the
+    // user staring at a card that would never change.
+    stubTerminal({ ok: true })
+    vi.useFakeTimers()
+    try {
+      const mock = createMockBackend('connected')
+      mock.setResponse('onboarding.status', status({ cli: false }))
+      mock.setResponse('onboarding.install', { ok: true, needs_terminal: true, command: 'npm i -g x' })
+      const { result, scope } = withScope(() => useOnboarding(mock.backend))
+      await result.refresh()
+      await result.install(result.cliDeps.value[0])
+      expect(result.watching.value).toBe('claude')
+      // 60 polls at 5s each is the ceiling; one extra tick trips the give-up.
+      await vi.advanceTimersByTimeAsync(5_000 * 61)
+      expect(result.watching.value).toBe('')
+      expect(result.watchOutcome.value).toBe('timeout')
+      expect(result.logLines.value.join('\n')).toContain('Stopped watching')
+      result.dispose()
+      scope.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('records the opt-out for one CLI without touching the others', async () => {
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', status({}))
+    mock.setResponse('onboarding.install_prompt', { ok: true })
+    const { result, scope } = withScope(() => useOnboarding(mock.backend))
+    await result.refresh()
+    expect(await result.dismissInstallPrompt('claude')).toBe(true)
+    expect(result.installPromptDismissed.value.has('claude')).toBe(true)
+    expect(result.installPromptDismissed.value.has('node')).toBe(false)
+    await result.dismissInstallPrompt('claude', false)
+    expect(result.installPromptDismissed.value.has('claude')).toBe(false)
+    scope.stop()
+  })
+
+  it('keeps the opt-out unset when the backend rejects it', async () => {
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', status({}))
+    mock.setResponse('onboarding.install_prompt', { ok: false, error: 'unknown dependency' })
+    const { result, scope } = withScope(() => useOnboarding(mock.backend))
+    await result.refresh()
+    expect(await result.dismissInstallPrompt('nope')).toBe(false)
+    expect(result.installPromptDismissed.value.size).toBe(0)
+    expect(result.logLines.value.join('\n')).toContain('unknown dependency')
+    scope.stop()
+  })
+
+  it('reads the stored opt-out list from status', async () => {
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', { ...status({}), install_prompt_dismissed: ['claude'] })
+    const { result, scope } = withScope(() => useOnboarding(mock.backend))
+    await result.refresh()
+    expect(result.installPromptDismissed.value.has('claude')).toBe(true)
     scope.stop()
   })
 

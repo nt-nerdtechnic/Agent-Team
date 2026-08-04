@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
 import os
 import re
 import shlex
@@ -31,6 +32,8 @@ from .applog import app_data_dir
 from .db import DB_FILENAME, Database
 from .profiles_store import default_profiles_root
 
+log = logging.getLogger("agent_team_backend.onboarding_deps")
+
 
 @dataclass(frozen=True)
 class Dep:
@@ -40,6 +43,10 @@ class Dep:
     group: str                       # 'foundation' | 'agent_cli' | 'analyzer'
     check_cmd: list[str]             # e.g. ['node', '--version']
     version_regex: str = r"(\d+\.\d+(?:\.\d+)?)"
+    # Other executable names the SAME tool ships as (a vendor rename leaves the
+    # old name on older installs). Probed in order only when check_cmd[0] is not
+    # on PATH, so a machine carrying the legacy binary is not reported missing.
+    alt_commands: tuple[str, ...] = ()
     min_version: str = ""            # '' = any version is fine
     install_cmd: str = ""            # shell command (whitelist); '' = no auto-install
     needs_terminal: bool = False     # interactive (sudo / OAuth) → external Terminal
@@ -71,7 +78,7 @@ DEPS: list[Dep] = [
     Dep("homebrew", "Homebrew", "macOS package manager", "foundation",
         ["brew", "--version"], r"Homebrew (\d+\.\d+\.\d+)",
         install_cmd='/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"',
-        needs_terminal=True, docs_url="https://brew.sh"),
+        needs_terminal=True, requires_binaries=("curl",), docs_url="https://brew.sh"),
     # Unversioned formula on purpose: node@22 is keg-only, so `node` would
     # stay off PATH after a successful install and detection would never pass.
     Dep("node", "Node.js", "JavaScript runtime (≥ 22)", "foundation",
@@ -115,26 +122,28 @@ DEPS: list[Dep] = [
     Dep("antigravity", "Antigravity", "Google Antigravity CLI", "agent_cli",
         ["agy", "--version"], r"(\d+\.\d+\.\d+)",
         install_cmd="curl -fsSL https://antigravity.google/cli/install.sh | bash",
-        needs_terminal=True, optional=True,
+        needs_terminal=True, requires_binaries=("curl",), optional=True,
         docs_url="https://antigravity.google/docs/cli-getting-started",
         update_cmd="agy update"),
     Dep("grok", "Grok CLI", "superagent-ai Grok coding agent", "agent_cli",
         ["grok", "--version"], r"(\d+\.\d+\.\d+)",
         install_cmd="curl -fsSL https://raw.githubusercontent.com/superagent-ai/grok-cli/main/install.sh | bash",
-        needs_terminal=True, optional=True, docs_url="https://grokcli.io",
+        needs_terminal=True, requires_binaries=("curl",), optional=True, docs_url="https://grokcli.io",
         update_cmd="grok update"),
     # Kimi Code ships `kimi doctor` but no update subcommand — update_cmd stays
     # empty so the UI sends the user to the vendor docs instead of inventing one.
     Dep("kimi", "Kimi Code", "Moonshot AI Kimi Code CLI", "agent_cli",
         ["kimi", "--version"], r"(\d+\.\d+\.\d+)",
         install_cmd="curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash",
-        needs_terminal=True, optional=True, docs_url="https://moonshotai.github.io/kimi-cli/en/",
+        needs_terminal=True, requires_binaries=("curl",), optional=True,
+        docs_url="https://moonshotai.github.io/kimi-cli/en/",
         doctor_cmd="kimi doctor"),
     # OpenCode ships `opencode upgrade` but no doctor subcommand.
     Dep("opencode", "OpenCode", "OpenCode terminal coding agent", "agent_cli",
         ["opencode", "--version"], r"(\d+\.\d+\.\d+)",
         install_cmd="curl -fsSL https://opencode.ai/install | bash",
-        needs_terminal=True, optional=True, docs_url="https://opencode.ai/docs",
+        needs_terminal=True, requires_binaries=("curl",), optional=True,
+        docs_url="https://opencode.ai/docs",
         update_cmd="opencode upgrade",
         npm_package="opencode-ai",
         config_home_env="OPENCODE_CONFIG_DIR",
@@ -185,13 +194,14 @@ DEPS: list[Dep] = [
     # Cursor CLI (closed source; binary `agent`, legacy installs `cursor-agent`)
     # ships `agent update` but no doctor subcommand. Autoupdate is on by default
     # with no confirmed opt-out env, and its data home is fixed at ~/.cursor
-    # (no config-home env) — both stay empty. Dep detection probes a single
-    # executable, so only the current `agent` binary is checked (no
-    # cursor-agent fallback — the dataclass has no alternate-binary support).
+    # (no config-home env) — both stay empty. `cursor-agent` is declared as an
+    # alternate so a machine still carrying the legacy binary is detected and
+    # spawnable instead of being reported as not installed.
     Dep("cursor", "Cursor CLI", "Cursor terminal coding agent CLI", "agent_cli",
         ["agent", "--version"], r"(\d+\.\d+\.\d+)",
+        alt_commands=("cursor-agent",),
         install_cmd="curl https://cursor.com/install -fsS | bash",
-        needs_terminal=True, optional=True,
+        needs_terminal=True, requires_binaries=("curl",), optional=True,
         docs_url="https://cursor.com/docs/cli",
         update_cmd="agent update"),
     # Aider updates via the `--upgrade` FLAG (not a subcommand) and ships no
@@ -202,7 +212,7 @@ DEPS: list[Dep] = [
     Dep("aider", "Aider", "Aider AI pair-programming CLI", "agent_cli",
         ["aider", "--version"], r"(\d+\.\d+\.\d+)",
         install_cmd="curl -LsSf https://aider.chat/install.sh | sh",
-        needs_terminal=True, optional=True,
+        needs_terminal=True, requires_binaries=("curl",), optional=True,
         docs_url="https://aider.chat",
         update_cmd="aider --upgrade",
         autoupdate_env="AIDER_CHECK_UPDATE"),
@@ -346,9 +356,22 @@ def _install_method(resolved_path: str) -> str:
     return "unknown"
 
 
+def resolve_executable(dep: Dep) -> str:
+    """PATH location of the dep's binary — its primary name, else an alternate.
+
+    A vendor rename (cursor's `cursor-agent` → `agent`) otherwise reports an
+    installed CLI as missing and blocks its spawn.
+    """
+    for name in (dep.check_cmd[0], *dep.alt_commands):
+        found = shutil.which(name)
+        if found:
+            return found
+    return ""
+
+
 def detect_dep(dep: Dep) -> dict[str, Any]:
     """Run the dep's check_cmd and classify ok | missing | outdated."""
-    binary_path = shutil.which(dep.check_cmd[0]) or ""
+    binary_path = resolve_executable(dep)
     exit_code: int | None = None
     signal_name = ""
     duration_ms: int | None = None
@@ -359,7 +382,7 @@ def detect_dep(dep: Dep) -> dict[str, Any]:
         started = time.monotonic()
         try:
             proc = subprocess.run(
-                dep.check_cmd, capture_output=True, text=True, timeout=8
+                [binary_path, *dep.check_cmd[1:]], capture_output=True, text=True, timeout=8
             )
             duration_ms = max(0, round((time.monotonic() - started) * 1000))
             exit_code = proc.returncode
@@ -391,6 +414,9 @@ def detect_dep(dep: Dep) -> dict[str, Any]:
         "optional": dep.optional,
         "needs_terminal": dep.needs_terminal,
         "can_install": bool(dep.install_cmd),
+        # Surfaced so the install dialog can show exactly what will run before
+        # the user agrees to it — the renderer still never composes a command.
+        "install_cmd": dep.install_cmd,
         "docs_url": dep.docs_url,
         "binary_path": binary_path,
         "resolved_path": os.path.realpath(binary_path) if binary_path else "",
@@ -781,6 +807,7 @@ def get_status() -> dict[str, Any]:
         "gate": compute_gate(deps, models, bool(ollama["reachable"])),
         "model_catalog": MODEL_CATALOG,
         "cli_health": build_cli_health(deps),
+        "install_prompt_dismissed": install_prompt_dismissals(),
     }
 
 
@@ -855,14 +882,18 @@ def install_dep(dep_id: str) -> dict[str, Any]:
     """
     dep = DEPS_BY_ID.get(dep_id)
     if dep is None:
+        log.warning("install rejected: unknown dependency %r", dep_id)
         return {"ok": False, "error": f"unknown dependency: {dep_id!r}"}
+    context = {"dep_id": dep.id, "label": dep.label, "docs_url": dep.docs_url}
     if not dep.install_cmd:
-        return {"ok": False, "error": "no install command for this dependency"}
+        return {**context, "ok": False, "error": "no install command for this dependency"}
     # Bootstrap gate: `brew install …` on a Mac without Homebrew only ever
     # produced a bare exit 127. Name the real blocker instead.
     missing = missing_requirements(dep)
     if missing:
+        log.warning("install blocked for %s: missing %s", dep.id, ", ".join(missing))
         return {
+            **context,
             "ok": False,
             "error": (
                 f"{', '.join(missing)} is required to install {dep.label}. "
@@ -873,7 +904,8 @@ def install_dep(dep_id: str) -> dict[str, Any]:
         }
     if dep.needs_terminal:
         # Caller (frontend → main process) opens Terminal.app with this command.
-        return {"ok": True, "needs_terminal": True, "command": dep.install_cmd}
+        log.info("install for %s handed to an external terminal", dep.id)
+        return {**context, "ok": True, "needs_terminal": True, "command": dep.install_cmd}
     # start_new_session puts the shell and its children in their own process
     # group so a timeout can reap the whole tree (see _terminate_process_group).
     try:
@@ -886,22 +918,33 @@ def install_dep(dep_id: str) -> dict[str, Any]:
             start_new_session=True,
         )
     except OSError as exc:
-        return {"ok": False, "error": str(exc), "command": dep.install_cmd}
+        log.warning("install for %s could not start: %s", dep.id, exc)
+        return {**context, "ok": False, "error": str(exc), "command": dep.install_cmd}
     try:
         stdout, stderr = proc.communicate(timeout=INSTALL_TIMEOUT_S)
     except subprocess.TimeoutExpired:
         _terminate_process_group(proc)
+        log.warning("install for %s timed out after %ds", dep.id, INSTALL_TIMEOUT_S)
         return {
+            **context,
             "ok": False,
             "error": f"install timed out after {INSTALL_TIMEOUT_S}s",
             "command": dep.install_cmd,
         }
     output = (stdout or "") + (stderr or "")
     if proc.returncode == 0:
-        return {"ok": True, "output": output, "command": dep.install_cmd}
+        log.info("install for %s succeeded", dep.id)
+        return {**context, "ok": True, "output": output, "command": dep.install_cmd}
     # The frontend reports `error`; returning only `output` here is what made
     # every failed install read as "unknown".
+    # Logged too: the wizard's in-memory log dies with the modal, so a failed
+    # install left no trace anywhere afterwards.
+    log.warning(
+        "install for %s failed with exit %s: %s",
+        dep.id, proc.returncode, output.strip()[-500:] or "(no output)",
+    )
     return {
+        **context,
         "ok": False,
         "error": output.strip() or f"exit code {proc.returncode}",
         "output": output,
@@ -1078,6 +1121,42 @@ def dismiss_cli_health(fingerprint: str) -> None:
             _write_state(data)
     except OSError:
         pass
+
+
+def install_prompt_dismissals() -> list[str]:
+    """Dep ids whose guided-install prompt the user switched off.
+
+    Declining once is not the same as never wanting to be asked again, so the
+    prompt keeps appearing until the user explicitly opts out — this list is
+    what makes that opt-out survive a restart.
+    """
+    _migrate_legacy_flag()
+    stored = _read_state().get("install_prompt_dismissed")
+    if not isinstance(stored, list):
+        return []
+    return [dep_id for dep_id in stored if isinstance(dep_id, str) and dep_id in DEPS_BY_ID]
+
+
+def set_install_prompt_dismissed(dep_id: str, dismissed: bool) -> dict[str, Any]:
+    """Turn the guided-install prompt for one dep off (or back on)."""
+    if dep_id not in DEPS_BY_ID:
+        return {"ok": False, "error": f"unknown dependency: {dep_id!r}"}
+    _migrate_legacy_flag()
+    try:
+        with _STATE_LOCK:
+            data = _read_state()
+            stored = data.get("install_prompt_dismissed")
+            ids = [i for i in stored if isinstance(i, str)] if isinstance(stored, list) else []
+            if dismissed:
+                if dep_id not in ids:
+                    ids.append(dep_id)
+            else:
+                ids = [i for i in ids if i != dep_id]
+            data["install_prompt_dismissed"] = ids
+            _write_state(data)
+    except OSError as error:
+        return {"ok": False, "error": str(error)}
+    return {"ok": True, "dep_id": dep_id, "dismissed": dismissed}
 
 
 def cli_binary_override(agent_key: str) -> str:

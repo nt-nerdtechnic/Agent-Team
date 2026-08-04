@@ -19,6 +19,8 @@ export interface OnboardDep {
   optional: boolean
   needs_terminal: boolean
   can_install: boolean
+  /** The vendor command an install would run, shown before the user agrees. */
+  install_cmd?: string
   docs_url: string
   binary_path: string
   resolved_path: string
@@ -107,6 +109,8 @@ export interface OnboardStatus {
   gate: OnboardGate
   model_catalog: ModelOption[]
   cli_health: CliHealthStatus
+  /** Dep ids whose guided-install prompt the user switched off for good. */
+  install_prompt_dismissed?: string[]
   complete: boolean
   skip: boolean
 }
@@ -126,10 +130,14 @@ export interface InstallResult {
   output?: string
   error?: string
   docs_url?: string
+  dep_id?: string
+  label?: string
   /** Bootstrap binaries (brew, npm) the install command needs but cannot find. */
   missing_requirements?: string[]
   /** Ollama is installed but its daemon is not answering. */
   needs_service?: boolean
+  /** False when the external terminal never opened — `ok` alone would lie. */
+  terminal_opened?: boolean
 }
 
 // Inline installs (brew) block the WS reply until the command finishes; the
@@ -159,6 +167,9 @@ export function useOnboarding(backend: ReturnType<typeof useBackend>) {
   const installElapsedSec = ref(0)
   /** Key of the external-terminal task being polled ('' = none). */
   const watching = ref('')
+  /** How the last external-terminal watch ended — the UI has to say something
+   *  when polling gives up, otherwise the card just sits at "not installed". */
+  const watchOutcome = ref<'' | 'detected' | 'timeout'>('')
 
   let elapsedTimer: ReturnType<typeof setInterval> | null = null
   let watchTimer: ReturnType<typeof setTimeout> | null = null
@@ -197,9 +208,15 @@ export function useOnboarding(backend: ReturnType<typeof useBackend>) {
   }
 
   /** Re-detect on an interval until `isDone()` or the ceiling is reached. */
-  function watchUntil(key: string, isDone: () => boolean, onDone: () => void): void {
+  function watchUntil(
+    key: string,
+    isDone: () => boolean,
+    onDone: () => void,
+    onTimeout?: () => void,
+  ): void {
     stopWatch()
     watching.value = key
+    watchOutcome.value = ''
     let ticks = 0
     const tick = async (): Promise<void> => {
       if (watching.value !== key) return
@@ -208,11 +225,16 @@ export function useOnboarding(backend: ReturnType<typeof useBackend>) {
       if (watching.value !== key) return // superseded or disposed while in flight
       if (isDone()) {
         stopWatch()
+        watchOutcome.value = 'detected'
         onDone()
         return
       }
       if (ticks >= WATCH_MAX_TICKS) {
         stopWatch()
+        // Giving up used to be silent: the user was left watching a card that
+        // would never change, with nothing saying the polling had stopped.
+        watchOutcome.value = 'timeout'
+        onTimeout?.()
         return
       }
       watchTimer = setTimeout(() => void tick(), WATCH_INTERVAL_MS)
@@ -284,10 +306,11 @@ export function useOnboarding(backend: ReturnType<typeof useBackend>) {
           watchUntil(
             dep.id,
             () => deps.value.find((d) => d.id === dep.id)?.status === 'ok',
-            () => log(`✓ ${dep.label} detected.`)
+            () => log(`✓ ${dep.label} detected.`),
+            () => log(`⚠ Stopped watching for ${dep.label} — click Re-detect once it finishes.`)
           )
         }
-        return r
+        return { ...r, terminal_opened: handedToTerminal }
       }
       ranInlineOk = true
       log(r.output?.trim() || `✓ ${dep.label} installed`)
@@ -416,6 +439,29 @@ export function useOnboarding(backend: ReturnType<typeof useBackend>) {
     await refresh()
   }
 
+  /**
+   * Stop (or resume) raising the guided-install prompt for one CLI. Declining
+   * a prompt is deliberately NOT the same as this: the prompt keeps coming
+   * back until the user opts out here, and the choice is per CLI, not global.
+   */
+  async function dismissInstallPrompt(depId: string, dismissed = true): Promise<boolean> {
+    const resp = await backend.send<InstallResult>('onboarding.install_prompt', {
+      dep_id: depId,
+      dismissed,
+    })
+    if (!resp.payload?.ok) {
+      log(`✗ ${depId} install prompt: ${resp.payload?.error || 'rejected'}`)
+      return false
+    }
+    if (status.value) {
+      const current = new Set(status.value.install_prompt_dismissed ?? [])
+      if (dismissed) current.add(depId)
+      else current.delete(depId)
+      status.value.install_prompt_dismissed = [...current]
+    }
+    return true
+  }
+
   async function markComplete(): Promise<void> {
     await backend.send('onboarding.complete', { complete: true })
     if (status.value) status.value.complete = true
@@ -435,14 +481,17 @@ export function useOnboarding(backend: ReturnType<typeof useBackend>) {
   const ollamaServiceUp = computed(() => gate.value?.ollama_service_up ?? false)
   const allRequiredReady = computed(() => gate.value?.all_required_ready ?? false)
   const cliHealth = computed<CliHealthStatus | null>(() => status.value?.cli_health ?? null)
+  const installPromptDismissed = computed(
+    () => new Set(status.value?.install_prompt_dismissed ?? [])
+  )
 
   return {
     status, loading, installing, maintaining, pulling, logLines,
-    installElapsedSec, watching,
+    installElapsedSec, watching, watchOutcome,
     refresh, install, pullModel, startOllamaService, markComplete, runMaintenance,
-    setAutoupdatePolicy, dispose,
+    setAutoupdatePolicy, dismissInstallPrompt, dispose,
     deps, foundationDeps, cliDeps, analyzerDeps, models, modelCatalog, gate,
     foundationReady, hasAnyCli, analyzerReady, allRequiredReady, ollamaServiceUp,
-    cliHealth,
+    cliHealth, installPromptDismissed,
   }
 }

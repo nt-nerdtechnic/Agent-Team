@@ -288,6 +288,7 @@ const emit = defineEmits<{
   (e: 'spawn-for-issue', payload: { agentKey: string; mode: IssueHandlerMode; issue: Issue; provider: IssueProvider }): void
   (e: 'open-git-accounts'): void
   (e: 'rename-pane', paneId: string, name: string): void
+  (e: 'install-cli', payload: { agentKey: string; label: string }): void
 }>()
 
 const renamingPaneId = ref<string | null>(null)
@@ -731,14 +732,36 @@ const canRunPipeline = computed(
     effectiveStageCount.value > 0
 )
 
-function spawn(): void {
-  if (!canSpawn.value) return
+function emitSpawn(): void {
   emit('spawn', {
     agentKey: pickedAgent.value,
     roleKey: pickedRole.value,
     stageId: '',
     workspacePath: workspacePath.value
   })
+}
+
+function spawn(): void {
+  if (!canSpawn.value) return
+  // Spawning a CLI we know is missing only produces a pane that dies with 127.
+  // Offer the guided install instead of that dead end — but re-detect first,
+  // since the cached status may predate an install the user just finished.
+  if (missingClis.value.has(pickedAgent.value)) {
+    void spawnOrOfferInstall()
+    return
+  }
+  emitSpawn()
+}
+
+async function spawnOrOfferInstall(): Promise<void> {
+  cliStatusFetchedAt = 0
+  await refreshCliStatus()
+  if (!missingClis.value.has(pickedAgent.value)) {
+    emitSpawn()
+    return
+  }
+  const spec = manualAgentSpecs.value.find((s) => s.agentKey === pickedAgent.value)
+  emit('install-cli', { agentKey: pickedAgent.value, label: spec?.label ?? pickedAgent.value })
 }
 
 function openTerminal(): void {
