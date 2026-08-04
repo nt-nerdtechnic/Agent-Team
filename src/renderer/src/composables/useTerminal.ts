@@ -1315,8 +1315,14 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     const active = document.activeElement
     if (!active || active === document.body) {
       // Nothing claimed focus while we were away; take it back so typing lands
-      // in the terminal the user left off in.
+      // in the terminal the user left off in. focus() is a no-op on an element
+      // that stopped being rendered while the window was away (pane hidden by a
+      // layout change), so verify rather than assert focus we never received.
       term.focus()
+      if (document.activeElement !== term.textarea) {
+        _ownsTerminalFocus = false
+        setContext('terminalFocus', false)
+      }
     } else if (active !== term.textarea) {
       _ownsTerminalFocus = false
       setContext('terminalFocus', false)
@@ -2613,8 +2619,15 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     term.textarea?.removeEventListener('blur', _onTermBlur)
     window.removeEventListener('focus', _onWindowFocus)
     // A pane disposed while focused never fires blur — clear the context so
-    // `terminalFocus` cannot stay stuck on.
-    if (_ownsTerminalFocus) _onTermBlur()
+    // `terminalFocus` cannot stay stuck on. Cleared directly rather than through
+    // _onTermBlur(), which defers to the window-focus path when the whole window
+    // is unfocused — and the listener that would have completed the handoff was
+    // just removed above, so the context would stay stuck on for good.
+    if (_ownsTerminalFocus) {
+      _ownsTerminalFocus = false
+      _blurredWithWindow = false
+      setContext('terminalFocus', false)
+    }
     term.dispose()
     // PTY is intentionally NOT killed here. The backend keeps PTYs running
     // after a WS disconnect so that tryReattach() can rebind after a page

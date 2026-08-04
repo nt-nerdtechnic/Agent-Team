@@ -100,6 +100,7 @@ vi.mock('@xterm/addon-fit', () => ({
 }))
 
 import { useTerminal } from '../useTerminal'
+import { getContext } from '../../keybindings/contextService'
 
 describe('useTerminal — focus transitions and stale IME composition', () => {
   afterEach(() => {
@@ -184,6 +185,36 @@ describe('useTerminal — focus transitions and stale IME composition', () => {
       window.dispatchEvent(new Event('focus'))
 
       expect(captured.focusCalls).toBe(0)
+      scope.stop()
+    })
+
+    // `terminalFocus` is a renderer-wide singleton: leaving it stuck on disables
+    // every `!terminalFocus` binding (Escape, cmd+f, cmd+s) for the whole window.
+    it('clears the focus context when disposed while the window is away', async () => {
+      const { scope } = await spawnedTerminal()
+      captured.textarea!.dispatchEvent(new Event('focus'))
+      expect(getContext().terminalFocus).toBe(true)
+
+      vi.spyOn(document, 'hasFocus').mockReturnValue(false)
+      captured.textarea!.dispatchEvent(new Event('blur')) // window-level: latched
+      scope.stop() // pane torn down before the window ever came back
+
+      expect(getContext().terminalFocus).toBe(false)
+    })
+
+    // The mock's focus() deliberately does not move activeElement, standing in
+    // for a pane that stopped being rendered while the window was away — where
+    // HTMLElement.focus() is a no-op.
+    it('clears the focus context when it cannot take focus back', async () => {
+      const { scope } = await spawnedTerminal()
+      captured.textarea!.dispatchEvent(new Event('focus'))
+      vi.spyOn(document, 'hasFocus').mockReturnValue(false)
+      captured.textarea!.dispatchEvent(new Event('blur'))
+
+      window.dispatchEvent(new Event('focus'))
+
+      expect(captured.focusCalls).toBe(1) // it tried
+      expect(getContext().terminalFocus).toBe(false) // but did not assert focus it lacks
       scope.stop()
     })
   })
