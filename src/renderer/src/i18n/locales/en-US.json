@@ -581,10 +581,15 @@
       "skills": "Skills",
       "analyzer": "Analyzer",
       "extensions": "Extensions",
-      "shortcuts": "Shortcuts",
       "storage": "Storage",
       "updates": "Updates",
-    "help": "Help"
+      "help": "Help"
+    },
+    "help": {
+      "topic": {
+        "messaging": "Inter-CLI Messaging",
+        "shortcuts": "Keyboard Shortcuts"
+      }
     },
     "mcp": {
       "add-custom": "Add custom",

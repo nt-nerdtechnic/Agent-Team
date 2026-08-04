@@ -97,7 +97,11 @@ const confirmBeforeCloseModel = computed({
 })
 
 // ── Tab ───────────────────────────────────────────────────────────────────────
-type Tab = 'mcp' | 'skills' | 'analyzer' | 'cliAgents' | 'general' | 'updates' | 'appearance' | 'accounts' | 'shortcuts' | 'extensions' | 'storage' | 'help'
+type Tab = 'mcp' | 'skills' | 'analyzer' | 'cliAgents' | 'general' | 'updates' | 'appearance' | 'accounts' | 'extensions' | 'storage' | 'help'
+
+/** Topics inside the Help tab — read-only reference material, no settings. */
+type HelpTopic = 'messaging' | 'shortcuts'
+const helpTopic = ref<HelpTopic>('messaging')
 const activeTab = ref<Tab>(props.initialTab ?? 'general')
 
 // Sidebar workspace header label — the open workspace's basename, falling back
@@ -169,6 +173,7 @@ interface SettingsSearchItem {
   summary: string
   keywords: string
   mcpView?: MView
+  helpTopic?: HelpTopic
 }
 
 const settingsSearchQuery = ref('')
@@ -329,10 +334,11 @@ const settingsSearchItems = computed<SettingsSearchItem[]>(() => [
   },
   {
     id: 'shortcuts',
-    tab: 'shortcuts',
-    section: 'shortcuts',
+    tab: 'help',
+    section: 'help',
+    helpTopic: 'shortcuts',
     title: 'Keyboard Shortcuts / 快捷鍵',
-    group: 'Shortcuts',
+    group: 'Help',
     summary: 'Read-only reference of all keyboard shortcuts across workbench, AI chat, editor, terminal, and native menu.',
     keywords: 'keyboard shortcuts keys keybinding hotkey 快捷鍵 鍵盤 按鍵 workbench editor terminal cli ctrl cmd shift option',
   },
@@ -349,6 +355,7 @@ const settingsSearchItems = computed<SettingsSearchItem[]>(() => [
     id: 'help-cli-messaging',
     tab: 'help',
     section: 'help',
+    helpTopic: 'messaging',
     title: 'CLI 互傳訊息 / Inter-CLI Messaging',
     group: 'Help',
     summary: 'How one CLI agent sends an instruction to another — addressing, delivery timing, guard rails, and troubleshooting.',
@@ -375,6 +382,7 @@ const settingsSearchResults = computed(() => {
 async function openSettingsSearchResult(item: SettingsSearchItem): Promise<void> {
   activeTab.value = item.tab
   if (item.tab === 'mcp' && item.mcpView) mView.value = item.mcpView
+  if (item.tab === 'help' && item.helpTopic) helpTopic.value = item.helpTopic
   settingsSearchQuery.value = ''
   await nextTick()
   requestAnimationFrame(() => {
@@ -537,7 +545,6 @@ const settingsScopeNotes: Record<SettingsTab, { scope: string; storage: keyof Se
   updates: { scope: 'User', storage: 'mainProcess' },
   appearance: { scope: 'User', storage: 'localStorage' },
   accounts: { scope: 'User / Workspace bindings', storage: 'safeStorage' },
-  shortcuts: { scope: 'User', storage: 'localStorage' },
   extensions: { scope: 'User', storage: 'mainProcess' },
   storage: { scope: 'User', storage: 'app_data_dir' },
 }
@@ -1157,11 +1164,6 @@ watch(activeTab, (tab) => {
 
             <div class="s-nav-group">
               <div class="s-nav-group-title">{{ $t('settings.nav.group.system') }}</div>
-              <SettingsNavItem :label="$t('settings.nav.shortcuts')" :active="activeTab === 'shortcuts'" @select="activeTab = 'shortcuts'">
-                <template #icon>
-                  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="1.8" y="4.3" width="12.4" height="7.4" rx="1.4"/><path d="M4.4 7v0.01M6.8 7v0.01M9.2 7v0.01M11.6 7v0.01M4.4 9.2v0.01M11.6 9.2v0.01"/><path d="M6.4 9.2h3.2"/></svg>
-                </template>
-              </SettingsNavItem>
               <SettingsNavItem :label="$t('settings.nav.storage')" :active="activeTab === 'storage'" @select="activeTab = 'storage'">
                 <template #icon>
                   <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="3.8" rx="5.2" ry="2"/><path d="M2.8 3.8v4.4c0 1.1 2.3 2 5.2 2s5.2-.9 5.2-2V3.8"/><path d="M2.8 8.2v4c0 1.1 2.3 2 5.2 2s5.2-.9 5.2-2v-4"/></svg>
@@ -2134,15 +2136,27 @@ watch(activeTab, (tab) => {
         </div>
 
         <!-- ── KEYBOARD SHORTCUTS TAB ────────────────────────────────────── -->
-        <div v-show="activeTab === 'shortcuts'" class="s-body shortcuts-body" data-settings-section="shortcuts">
-          <h1 class="s-page-title">{{ $t('settings.nav.shortcuts') }}</h1>
-          <KeyboardShortcutsHelp />
-        </div>
-
-        <!-- ── HELP TAB ──────────────────────────────────────────────────── -->
+        <!-- ── HELP TAB (read-only reference: messaging + shortcuts) ─────── -->
         <div v-show="activeTab === 'help'" class="s-body help-body" data-settings-section="help">
           <h1 class="s-page-title">{{ $t('settings.nav.help') }}</h1>
-          <CliMessagingHelp v-if="activeTab === 'help'" />
+          <div class="help-topics" role="tablist">
+            <button
+              class="help-topic"
+              :class="{ active: helpTopic === 'messaging' }"
+              role="tab"
+              :aria-selected="helpTopic === 'messaging'"
+              @click="helpTopic = 'messaging'"
+            >{{ $t('settings.help.topic.messaging') }}</button>
+            <button
+              class="help-topic"
+              :class="{ active: helpTopic === 'shortcuts' }"
+              role="tab"
+              :aria-selected="helpTopic === 'shortcuts'"
+              @click="helpTopic = 'shortcuts'"
+            >{{ $t('settings.help.topic.shortcuts') }}</button>
+          </div>
+          <CliMessagingHelp v-if="activeTab === 'help' && helpTopic === 'messaging'" />
+          <KeyboardShortcutsHelp v-else-if="activeTab === 'help'" />
         </div>
 
         <!-- ── EXTENSIONS TAB (flag-gated) ───────────────────────────────── -->
@@ -2667,8 +2681,33 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 
 /* ── Appearance tab ─────────────────────────────────────────────────────────── */
 .appearance-body { overflow-y: auto; }
-.shortcuts-body { overflow-y: auto; padding: 18px 22px; }
 .help-body { overflow-y: auto; padding: 18px 22px; }
+.help-topics {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 18px;
+  padding: 3px;
+  border: 1px solid var(--border-muted);
+  border-radius: 8px;
+  background: var(--bg-inset);
+  align-self: flex-start;
+}
+.help-topic {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 5px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.help-topic:hover { color: var(--text-primary); }
+.help-topic.active {
+  background: var(--bg-base);
+  color: var(--text-bright);
+  box-shadow: 0 1px 2px var(--shadow-overlay);
+}
 
 /* ── MCP tab ──────────────────────────────────────────────────────────────── */
 .mcp-body { overflow-y: auto; display: flex; flex-direction: column; }

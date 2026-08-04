@@ -581,10 +581,15 @@
       "skills": "技能",
       "analyzer": "分析器",
       "extensions": "擴充功能",
-      "shortcuts": "快捷鍵",
       "storage": "儲存空間",
       "updates": "更新",
-    "help": "說明"
+      "help": "說明"
+    },
+    "help": {
+      "topic": {
+        "messaging": "CLI 互傳訊息",
+        "shortcuts": "快捷鍵"
+      }
     },
     "mcp": {
       "add-custom": "新增自訂",
