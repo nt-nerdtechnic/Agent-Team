@@ -1298,6 +1298,7 @@
     "auto-install": "結束 App 時安裝更新",
     "auto-install-hint": "在 App 關閉時套用已下載的更新，下次啟動就是新版本。安裝一定會重新啟動 App，所以絕不會在你工作到一半時發生；保持關閉則每次都由你決定何時安裝。",
     "downloaded-on-quit": "更新已下載完成 — 下次結束 App 時會自動套用。",
+    "auto-install-already-armed": "已下載的這個更新已經交給系統更新程式，結束 App 時仍會套用。此設定從下一個更新開始生效。",
     "restart-on-quit": "更新已就緒",
     "notify-check-failure": "檢查更新持續失敗時提醒我",
     "notify-check-failure-hint": "背景檢查連續失敗達到次數後，在狀態列顯示提醒。無論是否開啟，失敗次數都會記錄並顯示在本頁。",

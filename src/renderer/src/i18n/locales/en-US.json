@@ -1298,6 +1298,7 @@
     "auto-install": "Install updates when you quit",
     "auto-install-hint": "Apply a downloaded update as the app closes, so the next launch is the new version. Installing always restarts the app, so it never happens while you're working — leave this off to decide each time.",
     "downloaded-on-quit": "Update downloaded — it will be applied the next time you quit.",
+    "auto-install-already-armed": "The update that is already downloaded was handed to the system updater and will still be applied when you quit. This setting applies from the next update onwards.",
     "restart-on-quit": "Update ready",
     "notify-check-failure": "Tell me when update checks keep failing",
     "notify-check-failure-hint": "Show a status-bar reminder after a run of failed background checks. The count is tracked either way and always shown on this page.",
