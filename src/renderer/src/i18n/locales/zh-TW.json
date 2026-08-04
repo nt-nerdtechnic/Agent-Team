@@ -583,7 +583,8 @@
       "extensions": "擴充功能",
       "shortcuts": "快捷鍵",
       "storage": "儲存空間",
-      "updates": "更新"
+      "updates": "更新",
+    "help": "說明"
     },
     "mcp": {
       "add-custom": "新增自訂",

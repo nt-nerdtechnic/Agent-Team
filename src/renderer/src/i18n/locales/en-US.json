@@ -583,7 +583,8 @@
       "extensions": "Extensions",
       "shortcuts": "Shortcuts",
       "storage": "Storage",
-      "updates": "Updates"
+      "updates": "Updates",
+    "help": "Help"
     },
     "mcp": {
       "add-custom": "Add custom",

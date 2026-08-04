@@ -47,6 +47,7 @@ import CliAccountsPane from './CliAccountsPane.vue'
 import CliManagementPanel from './CliManagementPanel.vue'
 import type { useCliProfiles } from '../composables/useCliProfiles'
 import KeyboardShortcutsHelp from './KeyboardShortcutsHelp.vue'
+import CliMessagingHelp from './CliMessagingHelp.vue'
 import ExtensionsPane from './ExtensionsPane.vue'
 import StorageUsagePane from './StorageUsagePane.vue'
 import SkillsPane from './SkillsPane.vue'
@@ -96,7 +97,7 @@ const confirmBeforeCloseModel = computed({
 })
 
 // ── Tab ───────────────────────────────────────────────────────────────────────
-type Tab = 'mcp' | 'skills' | 'analyzer' | 'cliAgents' | 'general' | 'updates' | 'appearance' | 'accounts' | 'shortcuts' | 'extensions' | 'storage'
+type Tab = 'mcp' | 'skills' | 'analyzer' | 'cliAgents' | 'general' | 'updates' | 'appearance' | 'accounts' | 'shortcuts' | 'extensions' | 'storage' | 'help'
 const activeTab = ref<Tab>(props.initialTab ?? 'general')
 
 // Sidebar workspace header label — the open workspace's basename, falling back
@@ -344,6 +345,15 @@ const settingsSearchItems = computed<SettingsSearchItem[]>(() => [
     summary: 'Scan disk usage across app data, Electron caches, CLI homes and workspaces, then clean up reclaimable space.',
     keywords: 'storage disk space usage cache caches cleanup clean logs node_modules stale free 儲存 空間 磁碟 快取 清理 清除 日誌 佔用 釋出',
   },
+  {
+    id: 'help-cli-messaging',
+    tab: 'help',
+    section: 'help',
+    title: 'CLI 互傳訊息 / Inter-CLI Messaging',
+    group: 'Help',
+    summary: 'How one CLI agent sends an instruction to another — addressing, delivery timing, guard rails, and troubleshooting.',
+    keywords: 'help guide messaging message send cli agent pane cross workspace address broadcast queue rate limit troubleshooting 說明 教學 訊息 傳訊 互傳 傳送 指令 位址 跨工作區 廣播 佇列 頻率 疑難排解 怎麼用',
+  },
 ])
 
 const settingsSearchResults = computed(() => {
@@ -514,7 +524,11 @@ const settingsBundleBusy = ref(false)
 const settingsBundleSummary = ref('')
 const settingsBundleError = ref('')
 
-const settingsScopeNotes: Record<Tab, { scope: string; storage: keyof SettingsPaths | 'localStorage' | 'mainProcess' | 'safeStorage' }> = {
+/** Tabs that actually hold settings. `help` is read-only reference material, so
+ *  it has no scope badge and no settings file to reveal. */
+type SettingsTab = Exclude<Tab, 'help'>
+
+const settingsScopeNotes: Record<SettingsTab, { scope: string; storage: keyof SettingsPaths | 'localStorage' | 'mainProcess' | 'safeStorage' }> = {
   mcp: { scope: 'User', storage: 'mcp' },
   skills: { scope: 'User', storage: 'skills' },
   analyzer: { scope: 'User', storage: 'analyzer' },
@@ -535,7 +549,7 @@ async function loadSettingsPaths(): Promise<void> {
   } catch { /* non-fatal */ }
 }
 
-function pathForTab(tab: Tab): string {
+function pathForTab(tab: SettingsTab): string {
   const storage = settingsScopeNotes[tab].storage
   if (storage === 'localStorage') return 'ui_settings.json (app data) + workspace backup'
   if (storage === 'mainProcess') return 'Electron main process userData'
@@ -1156,6 +1170,11 @@ watch(activeTab, (tab) => {
               <SettingsNavItem :label="$t('settings.nav.updates')" :active="activeTab === 'updates'" @select="activeTab = 'updates'">
                 <template #icon>
                   <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 10.3V2.8M8 2.8 5.3 5.5M8 2.8l2.7 2.7"/><path d="M3.3 10.5v1.6a1.2 1.2 0 0 0 1.2 1.2h7a1.2 1.2 0 0 0 1.2-1.2v-1.6"/></svg>
+                </template>
+              </SettingsNavItem>
+              <SettingsNavItem :label="$t('settings.nav.help')" :active="activeTab === 'help'" @select="activeTab = 'help'">
+                <template #icon>
+                  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="6.2"/><path d="M6.2 6.2a1.85 1.85 0 1 1 2.6 1.7c-.5.25-.8.7-.8 1.25v.3"/><path d="M8 11.9v0.01"/></svg>
                 </template>
               </SettingsNavItem>
             </div>
@@ -2120,6 +2139,12 @@ watch(activeTab, (tab) => {
           <KeyboardShortcutsHelp />
         </div>
 
+        <!-- ── HELP TAB ──────────────────────────────────────────────────── -->
+        <div v-show="activeTab === 'help'" class="s-body help-body" data-settings-section="help">
+          <h1 class="s-page-title">{{ $t('settings.nav.help') }}</h1>
+          <CliMessagingHelp v-if="activeTab === 'help'" />
+        </div>
+
         <!-- ── EXTENSIONS TAB (flag-gated) ───────────────────────────────── -->
         <div v-show="activeTab === 'extensions'" class="s-body s-body--bleed" data-settings-section="extensions">
           <h1 class="s-page-title">{{ $t('settings.nav.extensions') }}</h1>
@@ -2643,6 +2668,7 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 /* ── Appearance tab ─────────────────────────────────────────────────────────── */
 .appearance-body { overflow-y: auto; }
 .shortcuts-body { overflow-y: auto; padding: 18px 22px; }
+.help-body { overflow-y: auto; padding: 18px 22px; }
 
 /* ── MCP tab ──────────────────────────────────────────────────────────────── */
 .mcp-body { overflow-y: auto; display: flex; flex-direction: column; }
