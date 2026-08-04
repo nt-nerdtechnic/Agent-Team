@@ -167,6 +167,7 @@ const CliHealthGuide = defineAsyncComponent(() => import('./components/CliHealth
 const CliInstallDialog = defineAsyncComponent(() => import('./components/CliInstallDialog.vue'))
 const AgentMessagesPanel = defineAsyncComponent(() => import('./components/AgentMessagesPanel.vue'))
 const RestoreScopeModal = defineAsyncComponent(() => import('./components/RestoreScopeModal.vue'))
+const PipelineManagerModal = defineAsyncComponent(() => import('./components/PipelineManagerModal.vue'))
 
 const backend = useBackend()
 // Hook the settings cache to the ws: reconciles + flushes queued writes once
@@ -4328,6 +4329,35 @@ const pipeline = reactive<PipelineRun>({
 
 const showCompletionModal = ref(false)
 const showSettings = ref(false)
+// Pipeline Manager modal. Unlike the other modals it is mounted lazily but never
+// unmounted again (v-if on pmEverOpened + v-show on showPipelineManager): its
+// embedded AiCliDock must keep owning its PTY, and unmounting would let the
+// backend janitor reap a CLI the user is still running.
+const showPipelineManager = ref(false)
+const pmRef = ref<{ closeTopLayer?: () => boolean } | null>(null)
+const pmEverOpened = ref(false)
+const pmInitialPipelineId = ref('')
+function openPipelineManager(pipelineId?: string): void {
+  pmInitialPipelineId.value = pipelineId ?? ''
+  pmEverOpened.value = true
+  showPipelineManager.value = true
+}
+// Native application menu entry (menu:open-pipeline-manager). Cast locally so
+// this compiles whether or not the preload bridge exposes it yet.
+let offOpenPipelineManager: (() => void) | null = null
+onMounted(() => {
+  const api = (window as Window & {
+    agentTeam?: {
+      onOpenPipelineManager?: (h: (payload: { pipelineId?: string }) => void) => (() => void) | void
+    }
+  }).agentTeam
+  offOpenPipelineManager =
+    api?.onOpenPipelineManager?.((payload) => { openPipelineManager(payload?.pipelineId) }) ?? null
+})
+onUnmounted(() => {
+  offOpenPipelineManager?.()
+  offOpenPipelineManager = null
+})
 type RestoreScopeSelection = RestoreScope | 'fresh' | null
 
 interface RestoreScopePrompt {
@@ -4378,7 +4408,20 @@ function openSettingsAccounts(): void {
   showSettings.value = true
 }
 // Status-bar update indicator: shares the updater state machine with ControlPane.
-const { state: updateState, startDownload: startUpdateDownload, installUpdate } = useUpdater()
+// settings comes along because a downloaded update reads differently depending
+// on whether it will be applied on quit or is waiting for an explicit restart.
+const {
+  state: updateState, settings: updaterSettings,
+  startDownload: startUpdateDownload, installUpdate,
+} = useUpdater()
+// A run of failed background checks is not an update status of its own — it
+// rides alongside whatever the status is. Surface it in the status bar only
+// once it clears the user's threshold, and only if they asked to be told.
+const showUpdateCheckFailure = computed(() => {
+  if (!updaterSettings.value.notifyOnCheckFailure) return false
+  const failure = updateState.value.lastCheckFailure
+  return !!failure && failure.count >= updaterSettings.value.checkFailureThreshold
+})
 // Drive the whole update flow from the status-bar badge instead of only opening
 // Settings: available → start the download; downloaded → confirm then restart to
 // install; downloading/error → open the Updates tab for progress or details.
@@ -4556,9 +4599,14 @@ registerCommand('workbench.action.newWindow', async () => {
 })
 registerCommand('workbench.action.openSettings', () => { showSettings.value = true })
 registerCommand('workbench.action.openSettingsAccounts', () => openSettingsAccounts())
+registerCommand('workbench.action.openPipelineManager', () => { openPipelineManager() })
 registerCommand('workbench.action.closeModal', () => {
   if (previewLogOpen.value) previewLogOpen.value = false
   else if (showSettings.value) showSettings.value = false
+  else if (showPipelineManager.value) {
+    // The modal owns nested confirm dialogs — let it close its own top layer first.
+    if (!pmRef.value?.closeTopLayer?.()) showPipelineManager.value = false
+  }
   else if (showKbPanel.value) showKbPanel.value = false
   else if (showCompletionModal.value) showCompletionModal.value = false
 })
@@ -4583,7 +4631,7 @@ registerCommand('workbench.action.openPlans', async () => {
 registerCommand('workbench.action.rebuildFocusedPane', async () => {
   if (effectiveFocusPaneId.value) await rebuildPaneViaResume(effectiveFocusPaneId.value)
 })
-watch([showSettings, showKbPanel, showCompletionModal, showRestoreScopeModal], ([s, k, c, r]) => setContext('modalOpen', s || k || c || r || previewLogOpen.value))
+watch([showSettings, showKbPanel, showCompletionModal, showRestoreScopeModal, showPipelineManager], ([s, k, c, r, p]) => setContext('modalOpen', s || k || c || r || p || previewLogOpen.value))
 
 /** The sidebar agent list shows panes from every tab; focusing one that lives
  *  in another tab must also activate that tab, or the pane stays v-show-hidden. */
@@ -4625,7 +4673,7 @@ const previewLogContent = ref<string>('')
 const previewLogTitle = ref<string>('')
 const previewLogOpen = ref<boolean>(false)
 watch(previewLogOpen, (open) => {
-  setContext('modalOpen', open || showSettings.value || showKbPanel.value || showCompletionModal.value || showRestoreScopeModal.value)
+  setContext('modalOpen', open || showSettings.value || showKbPanel.value || showCompletionModal.value || showRestoreScopeModal.value || showPipelineManager.value)
   if (!open) {
     // Drop the (possibly multi-MB) log text once the preview closes so it
     // doesn't linger in memory and doesn't flash stale content on reopen.
@@ -7275,6 +7323,19 @@ backend.on('terminal.exit', (raw) => {
   if (ev.exit_code === 127 && pane.agentKey !== 'terminal') {
     promptCliInstall(pane.agentKey, pane.agentLabel, pane.id)
   }
+})
+
+// The backend's pre-spawn probe found no executable at all. This fires BEFORE
+// a PTY exists, so it catches every way a pane gets opened (Open Agent, Resume,
+// Handle Issue, a pipeline stage) — not just the ones that reach exit 127.
+backend.on('cli.missing', (raw) => {
+  const ev = raw as { agent_key?: string; label?: string; pane_id?: string }
+  if (!ev?.agent_key || ev.agent_key === 'terminal') return
+  const pane = ev.pane_id ? panes.value.find((p) => p.id === ev.pane_id) : undefined
+  // Pass the event's pane id, not the matched pane's: embedded CLI docks (e.g.
+  // the Pipeline Manager) share this window's session but own no pane entry, and
+  // dropping their id would bypass the "don't ask again" opt-out.
+  promptCliInstall(ev.agent_key, pane?.agentLabel || ev.label || ev.agent_key, ev.pane_id)
 })
 
 // CLI account login: the backend harvested a profile's isolated login home
@@ -10180,6 +10241,7 @@ function paneIsCommander(p: ActivePane): boolean {
       @focus-pane="onSidebarFocusPane"
       @reorder-pane="reorderPane"
       @open-settings="showSettings = true"
+      @open-pipeline-manager="openPipelineManager"
       @open-git-accounts="openSettingsAccounts"
       @open-history="showHistory = true"
       @switch-workspace="onSwitchWorkspace"
@@ -10254,6 +10316,17 @@ function paneIsCommander(p: ActivePane): boolean {
       @close="showSettings = false; settingsInitialTab = 'general'"
       @reopen-onboarding="() => { showSettings = false; reopenOnboarding() }"
       @cli-login="onCliLoginSpawn"
+    />
+    <PipelineManagerModal
+      v-if="pmEverOpened"
+      ref="pmRef"
+      :open="showPipelineManager"
+      :backend="backend"
+      :roles-api="rolesApi"
+      :pipelines-api="pipelinesApi"
+      :workspace-path="currentWorkspace"
+      :initial-pipeline-id="pmInitialPipelineId"
+      @close="showPipelineManager = false"
     />
     <div v-if="showKbPanel" class="kb-overlay" @mousedown.self="showKbPanel = false">
       <div class="kb-panel">
@@ -10822,9 +10895,23 @@ function paneIsCommander(p: ActivePane): boolean {
         >
           <span class="sb-dot" />
           <template v-if="updateState.status === 'downloading'">↓{{ updateState.percent ?? 0 }}%</template>
-          <template v-else-if="updateState.status === 'downloaded'">{{ $t('updater.restart') }}</template>
+          <template v-else-if="updateState.status === 'downloaded'">
+            {{ updaterSettings.autoInstallOnQuit ? $t('updater.restart-on-quit') : $t('updater.restart') }}
+          </template>
           <template v-else-if="updateState.status === 'error'">{{ $t('updater.badge-error') }}</template>
           <template v-else>↑{{ updateState.availableVersion }}</template>
+        </span>
+        <span
+          v-else-if="showUpdateCheckFailure"
+          class="sb-item sb-update sb-update-check-failed sb-clickable"
+          role="button"
+          tabindex="0"
+          :title="updateState.lastCheckFailure?.message"
+          @click="onUpdateBadgeClick"
+          @keydown.enter="onUpdateBadgeClick"
+        >
+          <span class="sb-dot" />
+          {{ $t('updater.badge-check-failed') }}
         </span>
       </div>
       <div class="statusbar-right">
@@ -11205,6 +11292,8 @@ function paneIsCommander(p: ActivePane): boolean {
 .sb-update-downloading .sb-dot { background: var(--attention-fg); }
 .sb-update-downloaded .sb-dot { background: var(--success-fg); }
 .sb-update-error .sb-dot { background: var(--danger-fg); }
+.sb-update-check-failed { color: var(--text-muted); }
+.sb-update-check-failed .sb-dot { background: var(--text-muted); }
 .sb-clickable { cursor: pointer; }
 
 /* ── Backend supervisor popover ──────────────────────────────────────────── */

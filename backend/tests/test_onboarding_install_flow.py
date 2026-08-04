@@ -211,6 +211,57 @@ class _FakeWebSocket:
         self.sent.append(payload)
 
 
+async def _run_create(session: object, monkeypatch: pytest.MonkeyPatch, reason: str) -> None:
+    """Drive terminal.create's impl to the point where the spawn probe runs."""
+    from agent_team_backend import ws_handlers
+
+    async def noop(*_a: object, **_k: object) -> None:
+        return None
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise app_mod.AgentCliProbeError("no executable", {"reason": reason})
+
+    monkeypatch.setattr(app_mod, "_ensure_fresh_path_for_spawn", noop)
+    monkeypatch.setattr(app_mod, "_command_with_persisted_cli_binary", lambda _k, c: c)
+    monkeypatch.setattr(app_mod, "_command_with_installed_cli_alias", lambda _k, c: c)
+    monkeypatch.setattr(app_mod, "_probe_agent_cli_for_spawn", boom)
+    await ws_handlers._terminal_create_impl(
+        session,  # type: ignore[arg-type]
+        "m1", "terminal.create",
+        {"pane_id": "pane-1", "agent_key": "qwen", "command": "qwen", "cwd": "/tmp"},
+        {}, "gen-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_spawn_probe_miss_announces_the_cli_before_failing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The window needs this to open the guided install: a probe miss happens
+    # BEFORE any PTY exists, so exit 127 never fires and nothing else would say
+    # what went wrong beyond red text in a dead pane.
+    session = app_mod.Session(_FakeWebSocket())  # type: ignore[arg-type]
+    with pytest.raises(app_mod.AgentCliProbeError):
+        await _run_create(session, monkeypatch, "not_found")
+    events = [m for m in session.websocket.sent if m["type"] == "cli.missing"]  # type: ignore[attr-defined]
+    assert len(events) == 1
+    assert events[0]["payload"] == {
+        "agent_key": "qwen", "label": "Qwen Code", "pane_id": "pane-1", "reason": "not_found",
+    }
+
+
+@pytest.mark.asyncio
+async def test_other_probe_failures_do_not_offer_an_install(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A binary that exists but crashes is a broken install, not a missing one —
+    # offering to install it again would be the wrong advice.
+    session = app_mod.Session(_FakeWebSocket())  # type: ignore[arg-type]
+    with pytest.raises(app_mod.AgentCliProbeError):
+        await _run_create(session, monkeypatch, "nonzero_exit")
+    assert not [m for m in session.websocket.sent if m["type"] == "cli.missing"]  # type: ignore[attr-defined]
+
+
 @pytest.mark.asyncio
 async def test_install_prompt_handler_persists_the_choice(monkeypatch: pytest.MonkeyPatch) -> None:
     recorded: list[tuple[str, bool]] = []

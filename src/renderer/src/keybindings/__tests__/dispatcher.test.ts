@@ -135,6 +135,21 @@ describe('when-clause gating', () => {
     expect(spy).toHaveBeenCalledTimes(1)
     expect(e2.defaultPrevented).toBe(true)
   })
+
+  it('escape reaches an embedded terminal instead of closing the modal', () => {
+    // The Pipeline Manager modal embeds a CLI dock: while its terminal holds
+    // focus, Esc is the CLI's interrupt key and must not be swallowed.
+    const spy = vi.fn()
+    registerCommand('workbench.action.closeModal', spy)
+    setContext('modalOpen', true)
+    setContext('terminalFocus', true)
+    const e1 = dispatch({ key: 'Escape' })
+    expect(spy).not.toHaveBeenCalled()
+    expect(e1.defaultPrevented).toBe(false)
+    setContext('terminalFocus', false)
+    dispatch({ key: 'Escape' })
+    expect(spy).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('cmd+l ownership (audit issue 3 regression)', () => {

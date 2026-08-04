@@ -75,6 +75,49 @@ describe('CliInstallDialog', () => {
     return w
   }
 
+  it('opens on the check step of a three-step wizard', async () => {
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', status())
+    wrapper = await open(mock)
+
+    const steps = wrapper.findAll('.ci-steps li')
+    expect(steps).toHaveLength(3)
+    expect(steps[0].classes()).toContain('active')
+    expect(wrapper.text()).toContain(i18n.global.t('cli-install.check-title', { label: 'qwen' }))
+  })
+
+  it('lists prerequisites and their state before anything is attempted', async () => {
+    // The old flow only revealed "brew is missing" after the install failed.
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', status({
+      deps: [
+        dep({ id: 'qwen', requirements: [{ name: 'npm', ok: false }, { name: 'curl', ok: true }] }),
+        dep({ id: 'node', group: 'foundation', label: 'Node.js' }),
+      ],
+    }))
+    wrapper = await open(mock)
+
+    const rows = wrapper.findAll('.ci-reqs li')
+    expect(rows).toHaveLength(2)
+    expect(rows[0].classes()).toContain('missing')
+    expect(rows[1].classes()).not.toContain('missing')
+    // npm comes from Node, so it can be installed without leaving the wizard.
+    expect(wrapper.find('.ci-install-requirement').exists()).toBe(true)
+    expect(mock.sent.filter((s) => s.type === 'onboarding.install')).toHaveLength(0)
+  })
+
+  it('moves to the verify step by itself once the CLI is detected', async () => {
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', status({
+      deps: [dep({ id: 'qwen', status: 'ok', version: '1.2.3' })],
+    }))
+    wrapper = await open(mock)
+
+    const steps = wrapper.findAll('.ci-steps li')
+    expect(steps[2].classes()).toContain('active')
+    expect(steps[0].classes()).toContain('done')
+  })
+
   it('shows the exact command before anything runs', async () => {
     // Consent needs the command visible up front, not only in the result.
     const mock = createMockBackend('connected')

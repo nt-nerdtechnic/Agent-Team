@@ -136,9 +136,9 @@ function broadcastOpenWorkspacesChanged(): void {
   }
 }
 // Route a native application-menu action to the renderer of the most relevant
-// main window: the focused window when it is a real workspace window (pipeline
-// manager / editor / detached child windows never receive these), else the
-// most-recently-focused main window.
+// main window: the focused window when it is a real workspace window (editor /
+// detached child windows never receive these), else the most-recently-focused
+// main window.
 function sendMenuAction(action: string): void {
   const focused = BrowserWindow.getFocusedWindow()
   const target =
@@ -186,7 +186,6 @@ function getGitAccountsStore(): GitAccountsStore {
 // renderer that asks via restore:getPending; cleared on apply/dismiss.
 let pendingRestore: WindowEntry[] | null = null
 let pendingRestoreClaimed = false
-let pipelineManagerWindow: BrowserWindow | null = null
 
 function loadWindow(win: BrowserWindow, params: Record<string, string>): void {
   const qs = new URLSearchParams(params).toString()
@@ -217,7 +216,13 @@ async function createWindow(
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: false,
+      // Chromium throttles occluded windows: rAF pauses, setTimeout is clamped
+      // to >=1s, and after 5 minutes hidden it drops to roughly once a minute.
+      // Terminal panes drain PTY output through a timer and xterm's WriteBuffer
+      // yields with setTimeout every 12ms, so throttling turns a backgrounded
+      // window into multi-second keystroke lag once the user switches back.
+      backgroundThrottling: false
     }
   })
   mainWindows.add(win)
@@ -283,41 +288,36 @@ function focusOrCreateMainWindow(): void {
   })
 }
 
-function openPipelineManagerWindow(pipelineId?: string, workspacePath?: string): void {
-  if (pipelineManagerWindow && !pipelineManagerWindow.isDestroyed()) {
-    pipelineManagerWindow.focus()
-    // Already-open window: forward the deep link so the renderer can switch to
-    // the requested pipeline's detail view instead of staying where it was.
-    // The AI panel's workspace is fixed at window creation — deliberately NOT
-    // re-forwarded here.
-    if (pipelineId) {
-      pipelineManagerWindow.webContents.send('pipeline-manager:open-pipeline', pipelineId)
-    }
-    return
+// The Pipeline Manager is a modal inside a workspace window: reveal one and let
+// its renderer open the modal. Target selection mirrors sendMenuAction (detached
+// run-group children never host it), and a window is created when none is left —
+// on macOS the app outlives its last window, where a silent no-op would make the
+// menu item look broken. The send waits for the first paint so it can never race
+// the renderer's listener registration.
+function requestPipelineManager(): void {
+  const focused = BrowserWindow.getFocusedWindow()
+  const target =
+    focused && !focused.isDestroyed() && mainWindows.has(focused) && !detachedWindowIds.has(focused.id)
+      ? focused
+      : [...mainWindows].reverse().find((w) => !w.isDestroyed() && !detachedWindowIds.has(w.id))
+
+  const send = (win: BrowserWindow): void => {
+    if (!win.isDestroyed()) win.webContents.send('menu:open-pipeline-manager', {})
   }
-  const win = new BrowserWindow({
-    width: 1100,
-    height: 760,
-    title: 'Navide · Pipeline Manager',
-    backgroundColor: '#0d1117',
-    show: false,
-    webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false
+  const revealAndSend = (win: BrowserWindow): void => {
+    if (win.isVisible()) {
+      revealMainWindow(win)
+      send(win)
+    } else {
+      win.once('show', () => {
+        revealMainWindow(win)
+        send(win)
+      })
     }
-  })
-  pipelineManagerWindow = win
-  win.once('ready-to-show', () => win.show())
-  win.on('closed', () => {
-    if (pipelineManagerWindow === win) pipelineManagerWindow = null
-  })
-  loadWindow(win, {
-    window: 'pipelines',
-    ...(pipelineId ? { pipeline_id: pipelineId } : {}),
-    ...(workspacePath ? { workspace_path: workspacePath } : {})
-  })
+  }
+
+  if (target) revealAndSend(target)
+  else void createWindow().then(revealAndSend)
 }
 
 function backendInfoPayload() {
@@ -816,11 +816,6 @@ ipcMain.handle('window:getDetachedGroups', (event) => {
   return result
 })
 
-ipcMain.handle('window:openPipelineManager', (_event, args: { pipeline_id?: string; workspace_path?: string } | undefined) => {
-  openPipelineManagerWindow(args?.pipeline_id, args?.workspace_path)
-  return { ok: true }
-})
-
 ipcMain.handle('window:openDiff', (event, args: Record<string, string>) => {
   openDiffWindow(BrowserWindow.fromWebContents(event.sender), args ?? {})
   return { ok: true }
@@ -977,7 +972,10 @@ function openPlanWindow(workspacePath: string, relPath?: string): void {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: false,
+      // Hosts an AiCliDock terminal — see the main window for why throttling
+      // must stay off.
+      backgroundThrottling: false
     }
   })
   planWindows.set(workspacePath, win)
@@ -1445,10 +1443,8 @@ ipcMain.on('app:setQuitConfirm', (_event, cfg: Partial<typeof quitConfirm>) => {
 })
 
 ipcMain.on('settings:language-changed', (_event, locale: string) => {
-  for (const win of [mainWindow, pipelineManagerWindow]) {
-    if (win && !win.isDestroyed()) {
-      win.webContents.send('settings:language-changed', locale)
-    }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('settings:language-changed', locale)
   }
 })
 
@@ -1750,7 +1746,7 @@ app.whenReady().then(async () => {
     onOpenWorkspace: () => sendMenuAction('open-workspace'),
     onOpenRecent: (path: string) => sendMenuAction('open-recent:' + path),
     onNewWindow: () => void createWindow(),
-    onOpenPipelineManager: () => openPipelineManagerWindow(),
+    onOpenPipelineManager: () => requestPipelineManager(),
     onOpenRepo: () => void shell.openExternal('https://github.com/nt-nerdtechnic/Navide'),
     onReportIssue: () => void shell.openExternal('https://github.com/nt-nerdtechnic/Navide/issues'),
     onShowShortcuts: () => sendMenuAction('show-shortcuts'),

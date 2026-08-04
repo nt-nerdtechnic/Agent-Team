@@ -80,7 +80,10 @@ watch(dialog, async (d) => {
   position: fixed;
   top: 16px;
   right: 16px;
-  z-index: 2000;
+  /* Above every overlay in the app (settings/pipeline-manager modals sit at
+     8000-9000): a toast or confirm hidden behind one reads as a silent failure,
+     and a hidden confirm still answers Enter. */
+  z-index: 10000;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -150,7 +153,7 @@ watch(dialog, async (d) => {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 2100;
+  z-index: 10100;
 }
 .modal:focus {
   outline: none;

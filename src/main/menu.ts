@@ -39,7 +39,7 @@ export interface AppMenuHooks {
   onOpenRecent?: (path: string) => void
   /** File menu: open a fresh window. */
   onNewWindow?: () => void
-  /** Window menu: open the Pipeline Manager window. */
+  /** Window menu: ask the main window to open the Pipeline Manager modal. */
   onOpenPipelineManager?: () => void
   /** Help menu: open the Navide GitHub repo. */
   onOpenRepo?: () => void

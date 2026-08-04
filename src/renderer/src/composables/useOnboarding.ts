@@ -21,6 +21,8 @@ export interface OnboardDep {
   can_install: boolean
   /** The vendor command an install would run, shown before the user agrees. */
   install_cmd?: string
+  /** Bootstrap tools this dep's install needs, with their current state. */
+  requirements?: { name: string; ok: boolean }[]
   docs_url: string
   binary_path: string
   resolved_path: string

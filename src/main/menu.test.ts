@@ -117,9 +117,9 @@ describe('installApplicationMenu', () => {
     expect(hooks.calls).toEqual(['open-repo', 'report-issue', 'show-shortcuts'])
   })
 
-  it('Window has Pipeline Manager that invokes its hook', () => {
-    const win = submenuOf('Window')
-    fire(itemIn(win, 'Pipeline Manager'))
+  it('Window has Pipeline Manager wired to its hook', () => {
+    const item = itemIn(submenuOf('Window'), 'Pipeline Manager')
+    fire(item)
     expect(hooks.calls).toEqual(['pipeline-manager'])
   })
 

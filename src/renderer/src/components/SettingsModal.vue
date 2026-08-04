@@ -41,6 +41,11 @@ import {
 } from '../lib/loopPrompt'
 import { useUpdater } from '../composables/useUpdater'
 import type { UpdateChannel } from '../../../shared/updater'
+import {
+  CHECK_FAILURE_THRESHOLD_RANGE,
+  DOWNLOAD_RETRY_COUNT_RANGE,
+  INSTALL_TIMEOUT_SECONDS_RANGE,
+} from '../../../shared/updater'
 import { useGitAccounts } from '../composables/useGitAccounts'
 import GitAccountsPane from './GitAccountsPane.vue'
 import CliAccountsPane from './CliAccountsPane.vue'
@@ -48,6 +53,7 @@ import CliManagementPanel from './CliManagementPanel.vue'
 import type { useCliProfiles } from '../composables/useCliProfiles'
 import KeyboardShortcutsHelp from './KeyboardShortcutsHelp.vue'
 import CliMessagingHelp from './CliMessagingHelp.vue'
+import McpHelp from './McpHelp.vue'
 import ExtensionsPane from './ExtensionsPane.vue'
 import StorageUsagePane from './StorageUsagePane.vue'
 import SkillsPane from './SkillsPane.vue'
@@ -100,7 +106,7 @@ const confirmBeforeCloseModel = computed({
 type Tab = 'mcp' | 'skills' | 'analyzer' | 'cliAgents' | 'general' | 'updates' | 'appearance' | 'accounts' | 'extensions' | 'storage' | 'help'
 
 /** Topics inside the Help tab — read-only reference material, no settings. */
-type HelpTopic = 'messaging' | 'shortcuts'
+type HelpTopic = 'messaging' | 'mcp' | 'shortcuts'
 const helpTopic = ref<HelpTopic>('messaging')
 const activeTab = ref<Tab>(props.initialTab ?? 'general')
 
@@ -352,6 +358,16 @@ const settingsSearchItems = computed<SettingsSearchItem[]>(() => [
     keywords: 'storage disk space usage cache caches cleanup clean logs node_modules stale free 儲存 空間 磁碟 快取 清理 清除 日誌 佔用 釋出',
   },
   {
+    id: 'help-mcp',
+    tab: 'help',
+    section: 'help',
+    helpTopic: 'mcp',
+    title: 'MCP 說明 / How Navide uses MCP',
+    group: 'Help',
+    summary: 'The two directions MCP is used in: tools Navide offers CLI agents, and external servers Navide reads docs from.',
+    keywords: 'mcp model context protocol tool tools plan cli agent server client context7 github filesystem 說明 介紹 工具 計畫 外部 文件 注入 怎麼用 為什麼用不到',
+  },
+  {
     id: 'help-cli-messaging',
     tab: 'help',
     section: 'help',
@@ -517,6 +533,11 @@ const {
   installUpdate,
   updateSettings: updUpdateSettings,
 } = useUpdater()
+// checkedAt only moves when a check succeeds, so it reads as "last known good"
+// next to a run of failures.
+const updLastSuccessfulCheck = computed(() =>
+  updateState.value.checkedAt ? new Date(updateState.value.checkedAt).toLocaleString() : ''
+)
 
 // ── Settings management / metadata ──────────────────────────────────────────
 interface SettingsPaths {
@@ -1962,10 +1983,24 @@ watch(activeTab, (tab) => {
                 <p v-else-if="updateState.status === 'error'" class="err-msg">{{ $t('updater.error', { message: updateState.message }) }}</p>
                 <p v-else-if="updateState.status === 'unsupported'" class="ap-hint">{{ $t('updater.unsupported') }}</p>
 
+                <!-- Diagnostics: a run of failed background checks always shows
+                     here. notifyOnCheckFailure only gates the status bar. -->
+                <p v-if="updateState.lastCheckFailure" class="err-msg">
+                  {{ $t('updater.check-failure', {
+                    count: updateState.lastCheckFailure.count,
+                    message: updateState.lastCheckFailure.message,
+                  }) }}
+                  {{ updateState.checkedAt
+                    ? $t('updater.last-successful-check', { at: updLastSuccessfulCheck })
+                    : $t('updater.last-successful-check-never') }}
+                </p>
+
                 <div v-if="['available', 'downloading', 'downloaded', 'installing'].includes(updateState.status)" class="upd-available">
                   <p class="summary-ok">{{ $t('updater.available', { version: updateState.availableVersion }) }}</p>
                   <p v-if="updateState.status === 'downloading'" class="ap-hint">{{ $t('updater.downloading', { percent: updateState.percent ?? 0 }) }}</p>
-                  <p v-else-if="updateState.status === 'downloaded'" class="ap-hint">{{ $t('updater.downloaded') }}</p>
+                  <p v-else-if="updateState.status === 'downloaded'" class="ap-hint">
+                    {{ updSettings.autoInstallOnQuit ? $t('updater.downloaded-on-quit') : $t('updater.downloaded') }}
+                  </p>
                   <p v-else-if="updateState.status === 'installing'" class="ap-hint">{{ $t('updater.restarting') }}</p>
                   <div v-if="updateState.releaseNotes" class="upd-notes">
                     <div class="ap-hint">{{ $t('updater.release-notes') }}</div>
@@ -1998,11 +2033,94 @@ watch(activeTab, (tab) => {
                   />
                 </template>
               </SettingRow>
+              <SettingRow
+                :title="$t('updater.auto-install')"
+                :description="$t('updater.auto-install-hint')"
+              >
+                <template #control>
+                  <ToggleSwitch
+                    :model-value="updSettings.autoInstallOnQuit"
+                    :aria-label="$t('updater.auto-install')"
+                    @update:model-value="(v) => updUpdateSettings({ autoInstallOnQuit: v })"
+                  />
+                </template>
+              </SettingRow>
+              <SettingRow
+                :title="$t('updater.notify-check-failure')"
+                :description="$t('updater.notify-check-failure-hint')"
+              >
+                <template #control>
+                  <ToggleSwitch
+                    :model-value="updSettings.notifyOnCheckFailure"
+                    :aria-label="$t('updater.notify-check-failure')"
+                    @update:model-value="(v) => updUpdateSettings({ notifyOnCheckFailure: v })"
+                  />
+                </template>
+              </SettingRow>
+              <SettingRow
+                v-if="updSettings.notifyOnCheckFailure"
+                :title="$t('updater.check-failure-threshold')"
+                :description="$t('updater.check-failure-threshold-hint')"
+              >
+                <template #control>
+                  <input
+                    type="number"
+                    :min="CHECK_FAILURE_THRESHOLD_RANGE.min"
+                    :max="CHECK_FAILURE_THRESHOLD_RANGE.max"
+                    :value="updSettings.checkFailureThreshold"
+                    :aria-label="$t('updater.check-failure-threshold')"
+                    @change="updUpdateSettings({ checkFailureThreshold: Number(($event.target as HTMLInputElement).value) })"
+                  />
+                </template>
+              </SettingRow>
+              <SettingRow
+                :title="$t('updater.retry-download')"
+                :description="$t('updater.retry-download-hint')"
+              >
+                <template #control>
+                  <ToggleSwitch
+                    :model-value="updSettings.retryDownload"
+                    :aria-label="$t('updater.retry-download')"
+                    @update:model-value="(v) => updUpdateSettings({ retryDownload: v })"
+                  />
+                </template>
+              </SettingRow>
+              <SettingRow
+                v-if="updSettings.retryDownload"
+                :title="$t('updater.download-retry-count')"
+                :description="$t('updater.download-retry-count-hint')"
+              >
+                <template #control>
+                  <input
+                    type="number"
+                    :min="DOWNLOAD_RETRY_COUNT_RANGE.min"
+                    :max="DOWNLOAD_RETRY_COUNT_RANGE.max"
+                    :value="updSettings.downloadRetryCount"
+                    :aria-label="$t('updater.download-retry-count')"
+                    @change="updUpdateSettings({ downloadRetryCount: Number(($event.target as HTMLInputElement).value) })"
+                  />
+                </template>
+              </SettingRow>
+              <SettingRow
+                :title="$t('updater.install-timeout')"
+                :description="$t('updater.install-timeout-hint')"
+              >
+                <template #control>
+                  <input
+                    type="number"
+                    :min="INSTALL_TIMEOUT_SECONDS_RANGE.min"
+                    :max="INSTALL_TIMEOUT_SECONDS_RANGE.max"
+                    :value="updSettings.installTimeoutSeconds"
+                    :aria-label="$t('updater.install-timeout')"
+                    @change="updUpdateSettings({ installTimeoutSeconds: Number(($event.target as HTMLInputElement).value) })"
+                  />
+                </template>
+              </SettingRow>
               <SettingRow :title="$t('updater.channel')" :description="$t('updater.channel-hint')">
                 <template #control>
                   <select :value="updSettings.channel" @change="updUpdateSettings({ channel: ($event.target as HTMLSelectElement).value as UpdateChannel })">
                     <option value="stable">{{ $t('updater.channel-stable') }}</option>
-                    <option value="beta">{{ $t('updater.channel-beta') }}</option>
+                    <option value="beta" disabled>{{ $t('updater.channel-beta') }} — {{ $t('updater.channel-beta-unavailable') }}</option>
                   </select>
                 </template>
               </SettingRow>
@@ -2149,6 +2267,13 @@ watch(activeTab, (tab) => {
             >{{ $t('settings.help.topic.messaging') }}</button>
             <button
               class="help-topic"
+              :class="{ active: helpTopic === 'mcp' }"
+              role="tab"
+              :aria-selected="helpTopic === 'mcp'"
+              @click="helpTopic = 'mcp'"
+            >{{ $t('settings.help.topic.mcp') }}</button>
+            <button
+              class="help-topic"
               :class="{ active: helpTopic === 'shortcuts' }"
               role="tab"
               :aria-selected="helpTopic === 'shortcuts'"
@@ -2156,6 +2281,7 @@ watch(activeTab, (tab) => {
             >{{ $t('settings.help.topic.shortcuts') }}</button>
           </div>
           <CliMessagingHelp v-if="activeTab === 'help' && helpTopic === 'messaging'" />
+          <McpHelp v-else-if="activeTab === 'help' && helpTopic === 'mcp'" />
           <KeyboardShortcutsHelp v-else-if="activeTab === 'help'" />
         </div>
 

@@ -280,6 +280,7 @@ const emit = defineEmits<{
   (e: 'focus-pane', paneId: string, ev?: MouseEvent): void
   (e: 'reorder-pane', fromId: string, toId: string): void
   (e: 'open-settings'): void
+  (e: 'open-pipeline-manager', pipelineId?: string): void
   (e: 'open-history'): void
   (e: 'switch-workspace'): void
   (e: 'workspace-browse', path: string): void
@@ -636,13 +637,8 @@ watch(
   { immediate: true }
 )
 
-async function openPipelineManager(pipelineId?: string): Promise<void> {
-  await window.agentTeam?.openPipelineManagerWindow?.({
-    ...(pipelineId ? { pipeline_id: pipelineId } : {}),
-    // The Pipeline Manager's AI panel binds its CLI cwd to the opener's
-    // workspace, fixed at window creation.
-    ...(workspacePath.value ? { workspace_path: workspacePath.value } : {})
-  })
+function openPipelineManager(pipelineId?: string): void {
+  emit('open-pipeline-manager', pipelineId)
 }
 
 function reapplyRoleTooltip(p: ActivePaneView): string {

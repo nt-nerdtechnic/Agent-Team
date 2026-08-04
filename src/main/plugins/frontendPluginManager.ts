@@ -643,6 +643,9 @@ export class FrontendPluginManager {
         // The plugin preload is node-free (webcrypto only), so views run fully
         // sandboxed.
         sandbox: true,
+        // Plugin views host AiCliDock terminals — see the main window for why
+        // throttling must stay off.
+        backgroundThrottling: false,
         // Injected so the preload can stamp calls with an authoritative plugin id.
         additionalArguments: [`--plugin-id=${descriptor.id}`],
       },

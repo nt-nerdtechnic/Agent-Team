@@ -181,6 +181,13 @@ function acctStale(profileId: string | null): boolean {
   return accountUsageFor(props.agentKey, profileId)?.stale === true
 }
 
+// An account with no stored credentials keeps whatever quota was last cached
+// for it, so the row would advertise a number for something that cannot run.
+// Say it is signed out instead — switching to it starts a sign-in, not work.
+function acctSignedOut(profileId: string | null): boolean {
+  return props.cliProfiles.identityFor(props.agentKey, profileId)?.signedIn === false
+}
+
 function acctTitle(profileId: string | null): string {
   const s = accountUsageFor(props.agentKey, profileId)
   if (s?.stale !== true) return ''
@@ -264,8 +271,11 @@ function acctTitle(profileId: string | null): string {
               avatarInitial(accountLabel(null, $t('usage.switch-default')))
             }}</span>
             <span class="usage-acct-name">{{ accountLabel(null, $t('usage.switch-default')) }}</span>
+            <span v-if="acctSignedOut(null)" class="usage-acct-out">{{
+              $t('settings.accounts.cli.not-signed-in')
+            }}</span>
             <span
-              v-if="acctPct(null)"
+              v-else-if="acctPct(null)"
               class="usage-acct-pct"
               :class="[acctTier(null), { stale: acctStale(null) }]"
               :title="acctTitle(null)"
@@ -286,8 +296,11 @@ function acctTitle(profileId: string | null): string {
               avatarInitial(accountLabel(p.id, p.name))
             }}</span>
             <span class="usage-acct-name">{{ accountLabel(p.id, p.name) }}</span>
+            <span v-if="acctSignedOut(p.id)" class="usage-acct-out">{{
+              $t('settings.accounts.cli.not-signed-in')
+            }}</span>
             <span
-              v-if="acctPct(p.id)"
+              v-else-if="acctPct(p.id)"
               class="usage-acct-pct"
               :class="[acctTier(p.id), { stale: acctStale(p.id) }]"
               :title="acctTitle(p.id)"
@@ -501,6 +514,13 @@ function acctTitle(profileId: string | null): string {
   font-size: 10px;
   font-weight: 600;
   color: var(--text-secondary);
+}
+/* Signed-out rows take the quota slot but read as a state, not a number. */
+.usage-acct-out {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-style: italic;
+  color: var(--text-tertiary, var(--text-secondary));
 }
 .usage-acct-pct.warn {
   color: var(--attention-fg);

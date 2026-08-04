@@ -417,6 +417,13 @@ def detect_dep(dep: Dep) -> dict[str, Any]:
         # Surfaced so the install dialog can show exactly what will run before
         # the user agrees to it — the renderer still never composes a command.
         "install_cmd": dep.install_cmd,
+        # Prerequisites with their CURRENT state, so the guided install can show
+        # "Homebrew is missing" during its check step instead of only after the
+        # install command has already failed.
+        "requirements": [
+            {"name": name, "ok": shutil.which(name) is not None}
+            for name in dep.requires_binaries
+        ],
         "docs_url": dep.docs_url,
         "binary_path": binary_path,
         "resolved_path": os.path.realpath(binary_path) if binary_path else "",

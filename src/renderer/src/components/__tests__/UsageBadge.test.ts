@@ -287,6 +287,31 @@ describe('UsageBadge – popover account list', () => {
     expect(pcts[1].classes()).toContain('crit')
   })
 
+  it('shows a signed-out row as signed out, never as leftover quota', async () => {
+    // An account with no stored credentials keeps whatever was last cached for
+    // it. Rendering that number advertises quota for something that cannot run
+    // — the row must say it is signed out instead.
+    usage.usageFor.mockReturnValue(snapshot())
+    usage.accountUsageFor.mockReturnValue(snapshot({ stale: true }))
+    wrapper = mountBadge(
+      makeCliProfiles({
+        profiles: [profile('p1', 'Work')],
+        identities: {
+          __default__: { email: null, signedIn: false },
+          p1: { email: 'work@example.com', signedIn: true },
+        },
+      }).fake,
+    )
+    await openPopover(wrapper)
+
+    const rows = wrapper.findAll('.usage-acct')
+    expect(rows[0].find('.usage-acct-out').exists()).toBe(true)
+    expect(rows[0].find('.usage-acct-pct').exists()).toBe(false)
+    // The signed-in row is untouched.
+    expect(rows[1].find('.usage-acct-out').exists()).toBe(false)
+    expect(rows[1].find('.usage-acct-pct').text()).toBe('~70%')
+  })
+
   it('marks a row whose numbers came from cache, and leaves live rows plain', async () => {
     // A parked slot that could not be polled falls back to its last good
     // numbers — possibly days old. The row must not read as a live quota.

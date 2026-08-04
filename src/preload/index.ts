@@ -139,12 +139,10 @@ contextBridge.exposeInMainWorld('agentTeam', {
   onGroupReattached: (cb: (groupId: string) => void): void => {
     ipcRenderer.on('group:reattached', (_event, arg: { groupId: string }) => cb(arg.groupId))
   },
-  openPipelineManagerWindow: (args?: { pipeline_id?: string; workspace_path?: string }): Promise<{ ok: boolean }> =>
-    ipcRenderer.invoke('window:openPipelineManager', args ?? {}),
-  onPipelineManagerOpenPipeline: (handler: (pipelineId: string) => void): (() => void) => {
-    const listener = (_event: unknown, pipelineId: string): void => handler(pipelineId)
-    ipcRenderer.on('pipeline-manager:open-pipeline', listener)
-    return () => ipcRenderer.removeListener('pipeline-manager:open-pipeline', listener)
+  onOpenPipelineManager: (handler: (payload: { pipelineId?: string }) => void): (() => void) => {
+    const listener = (_event: unknown, payload: { pipelineId?: string }): void => handler(payload ?? {})
+    ipcRenderer.on('menu:open-pipeline-manager', listener)
+    return () => ipcRenderer.removeListener('menu:open-pipeline-manager', listener)
   },
   openPlansWindow: (args: { workspace_path: string; rel_path?: string }): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke('window:openPlans', {

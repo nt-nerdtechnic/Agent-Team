@@ -10,7 +10,9 @@ export const defaults: KeybindingRule[] = [
   { key: 'cmd+,',       command: 'workbench.action.openSettings' },
   { key: 'cmd+w',       command: 'workbench.action.closeActiveEditor', when: 'editorOpen && !modalOpen' },
   { key: 'cmd+shift+s', command: 'workbench.action.saveAll',             when: 'editorOpen' },
-  { key: 'escape',      command: 'workbench.action.closeModal', when: 'modalOpen' },
+  // !terminalFocus: a modal may embed a CLI terminal (Pipeline Manager), where
+  // Esc is the CLI's own interrupt key and must reach the PTY.
+  { key: 'escape',      command: 'workbench.action.closeModal', when: 'modalOpen && !terminalFocus' },
 
   // ── Editor ───────────────────────────────────────────────────────────────
   { key: 'cmd+s', command: 'editor.action.save',          when: 'editorOpen && !terminalFocus' },

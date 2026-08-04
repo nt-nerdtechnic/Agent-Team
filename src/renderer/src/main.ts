@@ -9,19 +9,18 @@ import './styles/tokens/themes/dark-forest.css'
 import './styles/tokens/themes/light.css'
 import './styles/tokens/themes/high-contrast.css'
 
-// Window-type dispatcher: Electron main appends `?window=pipelines`,
-// `?window=editor`, etc. for secondary windows. Default is the main shell.
+// Window-type dispatcher: Electron main appends `?window=editor`,
+// `?window=plans`, etc. for secondary windows. Default is the main shell.
 const params = new URLSearchParams(window.location.search)
 const which = params.get('window') ?? 'main'
 
-// Lazy-load only the root app this window needs. Statically importing all four
+// Lazy-load only the root app this window needs. Statically importing them all
 // pulled the editor window's heavy tree (Monaco) into every window's initial
 // bundle — including the main shell, which never renders it. Dynamic import lets
 // Vite code-split each root app so the main window's first paint isn't delayed by
 // parsing Monaco it won't use.
 const loadRoot = (): Promise<{ default: Component }> => {
   switch (which) {
-    case 'pipelines': return import('./PipelineManagerApp.vue')
     case 'editor': return import('./EditorWindowApp.vue')
     case 'plans':  return import('./PlanWindowApp.vue')
     case 'githistory': return import('./GitHistoryWindowApp.vue')

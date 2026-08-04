@@ -1,14 +1,17 @@
 <script setup lang="ts">
 /**
- * Guided CLI install — the single dialog behind every "this CLI is missing"
- * moment (a pane exiting 127, picking a not-installed CLI in the spawn
- * dropdown, the Install button in CLI management).
+ * Guided CLI install — the single wizard behind every "this CLI is missing"
+ * moment: the backend's pre-spawn probe finding no executable (Open Agent,
+ * Resume, Handle Issue, a pipeline stage), a pane exiting 127, picking a
+ * not-installed CLI in the spawn dropdown, or the Install button in CLI
+ * management.
  *
- * It replaces a bare confirm() that offered exactly one yes/no and then went
- * quiet: a bootstrap tool missing, a terminal that never opened, an install
- * that failed, or one that finished without becoming detectable all looked
- * identical from the outside. Every one of those states is named here, and
- * each has an action attached.
+ * Shaped like the first-run onboarding wizard on purpose — check → install →
+ * verify — because the situation is the same one: the environment is not ready
+ * and the user needs to be walked through making it ready, not handed a
+ * yes/no confirm that goes quiet afterwards. Prerequisites are shown during
+ * the check step (not only after an install has already failed), and every
+ * failure mode has its own message and its own next action.
  *
  * Everything runnable still comes from the backend registry — this component
  * never composes an install command of its own.
@@ -83,16 +86,57 @@ const failureText = computed(
   () => result.value?.error || result.value?.output || terminalError.value
 )
 
+// ── Steps (check → install → verify) ────────────────────────────────────────
+const STEPS = ['check', 'install', 'verify'] as const
+type Step = (typeof STEPS)[number]
+
+/**
+ * Prerequisites with their state. The probe reports them up front; a failed
+ * install can also name one the probe did not know about, so the two are
+ * merged rather than one replacing the other.
+ */
+const requirementRows = computed<{ name: string; ok: boolean }[]>(() => {
+  const rows = (dep.value?.requirements ?? []).map((r) => ({ name: r.name, ok: r.ok }))
+  for (const name of blockers.value) {
+    const known = rows.find((r) => r.name === name)
+    if (known) known.ok = false
+    else rows.push({ name, ok: false })
+  }
+  return rows
+})
+const missingRequirements = computed(() => requirementRows.value.filter((r) => !r.ok).map((r) => r.name))
+
+/** Step the user last navigated to; the derived one below can overrule it. */
+const requestedStep = ref<Step>('check')
+
+/**
+ * Which step is on screen. Derived from what is actually happening, so the
+ * wizard follows the install rather than needing to be clicked along: a
+ * running install is always the install step, a detected CLI is always verify.
+ */
+const step = computed<Step>(() => {
+  if (dep.value?.status === 'ok') return 'verify'
+  if (phase.value === 'installing' || phase.value === 'waiting' || phase.value === 'failed') {
+    return 'install'
+  }
+  return requestedStep.value
+})
+const stepIndex = computed(() => STEPS.indexOf(step.value))
+
 async function runInstall(): Promise<void> {
   const target = dep.value
   if (!target || installing.value) return
   result.value = null
   terminalError.value = ''
+  requestedStep.value = 'install'
   const r = await onboarding.install(target)
   result.value = r
   if (r?.needs_terminal && r.terminal_opened === false) {
     terminalError.value = t('cli-install.terminal-failed')
   }
+  // A blocked install belongs back at the check step: what's wrong is the
+  // environment, not the install itself.
+  if (r?.missing_requirements?.length) requestedStep.value = 'check'
   if (dep.value?.status === 'ok') emit('installed', props.depId)
 }
 
@@ -126,37 +170,70 @@ function relaunch(): void {
   <div class="ci-page" @click.self="emit('close')">
     <section class="ci-dialog" role="dialog" aria-modal="true">
       <header class="ci-top">
-        <div class="ci-kicker">{{ $t('cli-install.kicker') }}</div>
-        <h1>{{ $t('cli-install.title', { label }) }}</h1>
-        <p v-if="dep?.description" class="ci-desc">{{ dep.description }}</p>
+        <div>
+          <div class="ci-kicker">{{ $t('cli-install.kicker') }}</div>
+          <h1>{{ $t('cli-install.title', { label }) }}</h1>
+        </div>
+        <!-- Same step rail as the first-run wizard: the user is in the same
+             situation (environment not ready) and gets the same shape of help. -->
+        <ol class="ci-steps">
+          <li
+            v-for="(name, index) in STEPS"
+            :key="name"
+            :class="{ active: step === name, done: index < stepIndex }"
+          >
+            <span>{{ index < stepIndex ? '✓' : index + 1 }}</span>
+            {{ $t(`cli-install.step.${name}`) }}
+          </li>
+        </ol>
       </header>
 
       <main class="ci-main">
-        <!-- Ready ------------------------------------------------------------>
-        <template v-if="phase === 'done'">
-          <div class="ci-verdict">
-            <div class="ci-check">✓</div>
-            <h2>{{ $t('cli-install.done-title', { label }) }}</h2>
-            <p class="ci-lead">
-              {{ dep?.version
-                ? $t('cli-install.done-desc', { version: dep.version })
-                : $t('cli-install.done-desc-no-version') }}
-            </p>
-            <button
-              v-if="origin === 'pane'"
-              class="ci-btn primary ci-relaunch"
-              @click="relaunch"
-            >
-              {{ $t('cli-install.relaunch', { label }) }}
-            </button>
-          </div>
-        </template>
-
-        <template v-else>
+        <!-- Step 1 · Check ---------------------------------------------------->
+        <template v-if="step === 'check'">
+          <h2>{{ $t('cli-install.check-title', { label }) }}</h2>
           <p class="ci-lead">{{ $t('cli-install.lead', { label }) }}</p>
 
+          <section class="ci-card">
+            <div class="ci-card-head">
+              <strong>{{ label }}</strong>
+              <span v-if="dep" :class="['ci-badge', dep.status]">
+                {{ $t(`cli-install.status.${dep.status}`) }}
+              </span>
+              <span v-else class="ci-badge">{{ $t('label.detecting') }}</span>
+            </div>
+            <p v-if="dep?.description" class="ci-note">{{ dep.description }}</p>
+          </section>
+
+          <!-- Prerequisites, BEFORE anything is attempted -------------------->
+          <section v-if="requirementRows.length" class="ci-card" :class="{ blocked: missingRequirements.length }">
+            <div class="ci-card-label">{{ $t('cli-install.requirements-label') }}</div>
+            <ul class="ci-reqs">
+              <li v-for="req in requirementRows" :key="req.name" :class="{ missing: !req.ok }">
+                <span class="ci-req-mark">{{ req.ok ? '✓' : '!' }}</span>
+                <code>{{ req.name }}</code>
+                <span class="ci-note">
+                  {{ req.ok ? $t('cli-install.requirement-ok') : $t('cli-install.requirement-missing') }}
+                </span>
+                <button
+                  v-if="!req.ok && requirementDep(req.name)"
+                  class="ci-btn primary small ci-install-requirement"
+                  :disabled="!!installing"
+                  @click="installRequirement(req.name)"
+                >
+                  {{ installing === requirementDep(req.name)!.id
+                    ? $t('cli-install.installing', { seconds: installElapsedSec })
+                    : $t('cli-install.install-requirement', { label: requirementDep(req.name)!.label }) }}
+                </button>
+              </li>
+            </ul>
+            <p v-if="missingRequirements.length" class="ci-note">
+              {{ $t('cli-install.blocked-desc', { label }) }}
+            </p>
+          </section>
+
           <!-- What will run, verbatim ---------------------------------------->
-          <section v-if="dep?.can_install" class="ci-card">
+          <section v-if="dep && dep.can_install" class="ci-card">
             <div class="ci-card-label">{{ $t('cli-install.command-label') }}</div>
             <code class="ci-command">{{ result?.command || dep.install_cmd }}</code>
             <p class="ci-note">
@@ -172,36 +249,31 @@ function relaunch(): void {
           </section>
           <section v-else class="ci-card">
             <p class="ci-note">{{ $t('cli-install.no-install-command', { label }) }}</p>
+            <a
+              v-if="dep.docs_url"
+              class="ci-btn ghost"
+              :href="dep.docs_url"
+              target="_blank"
+              rel="noreferrer"
+            >{{ $t('cli-install.docs') }}</a>
+          </section>
+        </template>
+
+        <!-- Step 2 · Install -------------------------------------------------->
+        <template v-else-if="step === 'install'">
+          <h2>{{ $t('cli-install.install-title', { label }) }}</h2>
+
+          <section v-if="phase === 'installing'" class="ci-card">
+            <strong>{{ $t('cli-install.installing', { seconds: installElapsedSec }) }}</strong>
+            <p class="ci-note">{{ $t('cli-install.note-inline') }}</p>
           </section>
 
-          <!-- Prerequisite missing -------------------------------------------->
-          <section v-if="phase === 'blocked'" class="ci-card blocked">
-            <strong>{{ $t('cli-install.blocked-title', { name: blockers.join(', ') }) }}</strong>
-            <p class="ci-note">{{ $t('cli-install.blocked-desc', { label }) }}</p>
-            <div class="ci-row">
-              <template v-for="binary in blockers" :key="binary">
-                <button
-                  v-if="requirementDep(binary)"
-                  class="ci-btn primary ci-install-requirement"
-                  :disabled="!!installing"
-                  @click="installRequirement(binary)"
-                >
-                  {{ installing === requirementDep(binary)!.id
-                    ? $t('cli-install.installing', { seconds: installElapsedSec })
-                    : $t('cli-install.install-requirement', { label: requirementDep(binary)!.label }) }}
-                </button>
-                <span v-else class="ci-note">{{ $t('cli-install.requirement-manual', { name: binary }) }}</span>
-              </template>
-            </div>
-          </section>
-
-          <!-- Handed to an external terminal ---------------------------------->
           <section v-else-if="phase === 'waiting'" class="ci-card waiting">
             <strong>{{ $t('cli-install.waiting-title') }}</strong>
             <p class="ci-note">{{ $t('cli-install.waiting-desc', { label }) }}</p>
+            <code v-if="result?.command" class="ci-command">{{ result.command }}</code>
           </section>
 
-          <!-- Failed ---------------------------------------------------------->
           <section v-else-if="phase === 'failed'" class="ci-card failed">
             <strong>{{ $t('cli-install.failed-title') }}</strong>
             <pre v-if="failureText" class="ci-error">{{ failureText }}</pre>
@@ -214,6 +286,11 @@ function relaunch(): void {
             >{{ $t('cli-install.docs') }}</a>
           </section>
 
+          <section v-else class="ci-card">
+            <div class="ci-card-label">{{ $t('cli-install.command-label') }}</div>
+            <code class="ci-command">{{ result?.command || dep?.install_cmd }}</code>
+          </section>
+
           <!-- The watcher gave up; nothing else will change on its own -------->
           <p v-if="watchOutcome === 'timeout' && phase !== 'waiting'" class="ci-warn">
             {{ $t('cli-install.waiting-timeout', { label }) }}
@@ -221,6 +298,29 @@ function relaunch(): void {
           <p v-if="result?.ok && !result.needs_terminal && dep?.status !== 'ok'" class="ci-warn">
             {{ $t('cli-install.installed-not-detected', { label }) }}
           </p>
+        </template>
+
+        <!-- Step 3 · Verify --------------------------------------------------->
+        <template v-else>
+          <div class="ci-verdict">
+            <div class="ci-check">✓</div>
+            <h2>{{ $t('cli-install.done-title', { label }) }}</h2>
+            <p class="ci-lead">
+              {{ dep?.version
+                ? $t('cli-install.done-desc', { version: dep.version })
+                : $t('cli-install.done-desc-no-version') }}
+            </p>
+            <code v-if="dep?.binary_path" class="ci-command">{{ dep.binary_path }}</code>
+            <div class="ci-row center">
+              <button
+                v-if="origin === 'pane'"
+                class="ci-btn primary ci-relaunch"
+                @click="relaunch"
+              >
+                {{ $t('cli-install.relaunch', { label }) }}
+              </button>
+            </div>
+          </div>
         </template>
       </main>
 
@@ -234,10 +334,10 @@ function relaunch(): void {
           {{ loading ? $t('label.detecting') : $t('action.re-detect') }}
         </button>
         <button class="ci-btn ghost ci-close" @click="emit('close')">
-          {{ phase === 'done' ? $t('cli-install.close') : $t('cli-install.not-now') }}
+          {{ step === 'verify' ? $t('cli-install.close') : $t('cli-install.not-now') }}
         </button>
         <button
-          v-if="phase !== 'done' && dep && dep.can_install"
+          v-if="step !== 'verify' && dep && dep.can_install"
           class="ci-btn primary ci-install"
           :disabled="!!installing || phase === 'waiting'"
           @click="runInstall"
@@ -278,8 +378,31 @@ function relaunch(): void {
   background: var(--bg-base);
   box-shadow: 0 22px 70px rgba(0, 0, 0, .48);
 }
-.ci-top { padding: 24px 28px 18px; border-bottom: 1px solid var(--border-muted); }
+.ci-top {
+  display: flex; align-items: center; justify-content: space-between; gap: 24px;
+  padding: 22px 28px 18px; border-bottom: 1px solid var(--border-muted); flex-wrap: wrap;
+}
 .ci-kicker { color: var(--accent-bright); font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.ci-steps { display: flex; gap: 16px; margin: 0; padding: 0; list-style: none; color: var(--text-muted); font-size: 12px; }
+.ci-steps li { display: flex; align-items: center; gap: 6px; }
+.ci-steps li span { display: grid; place-items: center; width: 21px; height: 21px; border: 1px solid var(--border-default); border-radius: 50%; }
+.ci-steps li.active { color: var(--text-bright); }
+.ci-steps li.active span { border-color: var(--accent-bright); color: var(--accent-bright); }
+.ci-steps li.done span { border-color: var(--success-emphasis); background: var(--success-emphasis); color: var(--text-on-emphasis); }
+.ci-card-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ci-badge { font-size: 11px; border-radius: 99px; padding: 1px 9px; background: var(--bg-base); color: var(--text-muted); }
+.ci-badge.ok { color: var(--success-fg, #2b8a3e); }
+.ci-badge.outdated { color: var(--attention-fg); }
+.ci-reqs { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.ci-reqs li { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; font-size: 12.5px; }
+.ci-reqs .ci-note { margin: 0; }
+.ci-req-mark {
+  display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%;
+  background: var(--success-emphasis); color: var(--text-on-emphasis); font-size: 11px; flex: none;
+}
+.ci-reqs li.missing .ci-req-mark { background: var(--attention-fg); }
+.ci-btn.small { padding: 3px 9px; font-size: 12px; margin-left: auto; }
+.ci-row.center { justify-content: center; }
 h1 { margin: 6px 0 0; color: var(--text-bright); font-size: 22px; }
 .ci-desc { margin: 6px 0 0; color: var(--text-muted); font-size: 12.5px; }
 .ci-main { padding: 22px 28px; overflow: auto; }
