@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -301,6 +302,94 @@ async def test_plan_update_stage_rejects_path_traversal(workspace: Path) -> None
     )
     assert result.isError
     assert (workspace / ".agent-team" / "secret.html").read_text(encoding="utf-8") == "secret"
+
+
+# ── workspace-mismatch warning ──────────────────────────────────────────────
+
+
+class _FakeTerminalService:
+    """Stand-in for TerminalService: just the `_sessions` dict the
+    workspace-mismatch check snapshots."""
+
+    def __init__(self, sessions: list[SimpleNamespace]) -> None:
+        self._sessions = {s.id: s for s in sessions}
+
+
+def _fake_session(
+    session_id: str,
+    agent_key: str | None = "claude",
+    cwd: str = "/ws/a",
+    metadata: dict | None = None,
+    closed: bool = False,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=session_id,
+        pane_id=f"pane-{session_id}",
+        agent_key=agent_key,
+        cwd=cwd,
+        metadata=metadata if metadata is not None else {},
+        closed=closed,
+    )
+
+
+@pytest.fixture
+def fake_terminals(monkeypatch: pytest.MonkeyPatch) -> _FakeTerminalService:
+    fake = _FakeTerminalService(
+        [
+            _fake_session("s1", agent_key="claude", cwd="/ws/a"),
+            _fake_session(
+                "s2",
+                agent_key="codex",
+                cwd="/ws/b/sub",
+                metadata={"workspace_path": "/ws/b"},
+            ),
+            _fake_session("s3", agent_key="claude", cwd="/ws/b", closed=True),
+        ]
+    )
+    monkeypatch.setattr(backend_app, "get_terminals", lambda: fake)
+    return fake
+
+
+async def test_plan_create_warns_when_no_pane_uses_the_workspace(
+    workspace: Path, fake_terminals: _FakeTerminalService
+) -> None:
+    """The plan window resolves plans against a pane's workspace, so writing to
+    a root no pane uses produces a file Navide can never open."""
+    (_plans_dir(workspace) / "_template.html").unlink()
+    result = await _call(
+        "plan_create",
+        {
+            "workspace_path": str(workspace),
+            "name": "Orphan Plan",
+            "overview": "",
+            "todos": ["Task"],
+        },
+    )
+    assert not result.isError
+    warning = result.structuredContent["warning"]
+    assert str(workspace) in warning
+    # Live pane workspaces are listed so the agent can retry against one; the
+    # closed session's workspace (/ws/b via s3) is not a live pane on its own.
+    assert "/ws/a" in warning and "/ws/b" in warning
+
+
+async def test_plan_create_does_not_warn_when_a_pane_matches(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeTerminalService([_fake_session("s1", cwd=str(workspace))])
+    monkeypatch.setattr(backend_app, "get_terminals", lambda: fake)
+    (_plans_dir(workspace) / "_template.html").unlink()
+    result = await _call(
+        "plan_create",
+        {
+            "workspace_path": str(workspace),
+            "name": "Matched Plan",
+            "overview": "",
+            "todos": ["Task"],
+        },
+    )
+    assert not result.isError
+    assert "warning" not in result.structuredContent
 
 
 async def test_mounted_endpoint_serves_mcp(workspace: Path) -> None:

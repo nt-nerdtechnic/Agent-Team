@@ -528,7 +528,7 @@ async def plan_add_note(
     return await asyncio.to_thread(_add_note_sync, workspace_path, rel_path, text, author)
 
 
-# ── terminal access ────────────────────────────────────────────────────────
+# ── terminal access ─────────────────────────────────────────────────────────
 
 
 def _terminal_service() -> Any:
