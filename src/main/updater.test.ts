@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { UpdateSettingsResult, UpdaterSettings } from '../shared/updater'
+import type { UpdateSettingsResult, UpdaterSettings, UpdateState } from '../shared/updater'
 
 // Shared, hoisted fakes for the electron / electron-updater module mocks.
 const h = vi.hoisted(() => {

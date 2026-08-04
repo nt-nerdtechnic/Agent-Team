@@ -112,6 +112,30 @@ describe('useUpdater', () => {
     expect(updater.settings.value).toEqual({ autoCheck: false, autoDownload: true, channel: 'beta' })
   })
 
+  it('exposes a run of failed checks pushed from the main process', async () => {
+    let listener!: (state: RendererUpdateState) => void
+    window.agentTeam = {
+      version: '1.0.0',
+      updater: {
+        getState: vi.fn().mockResolvedValue({ status: 'idle', currentVersion: '1.0.0' }),
+        onStateChanged: vi.fn((cb) => { listener = cb; return vi.fn() }),
+      },
+    } as unknown as typeof window.agentTeam
+
+    const updater = mountUpdater()
+    await nextTick()
+    listener({
+      status: 'idle',
+      currentVersion: '1.0.0',
+      checkedAt: '2026-01-01T00:00:00.000Z',
+      lastCheckFailure: { message: 'offline', count: 3, at: '2026-01-02T00:00:00.000Z' },
+    })
+    expect(updater.state.value.lastCheckFailure).toEqual({
+      message: 'offline', count: 3, at: '2026-01-02T00:00:00.000Z',
+    })
+    expect(updater.state.value.checkedAt).toBe('2026-01-01T00:00:00.000Z')
+  })
+
   it('keeps default settings when the settings IPC is unavailable', async () => {
     window.agentTeam = {
       version: '1.0.0',

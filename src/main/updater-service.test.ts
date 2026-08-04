@@ -205,6 +205,208 @@ describe('createUpdaterService', () => {
     expect(service.getState()).toMatchObject({ status: 'downloaded', availableVersion: '1.0.1', percent: 100 })
   })
 
+  it('does not let a failed background check pass as a successful one', async () => {
+    const { client, raw } = fakeClient()
+    const service = createUpdaterService(client, '1.0.0', true, vi.fn())
+
+    // A real check first, so there is a genuine "last succeeded" timestamp.
+    expect((await service.check({ silent: true })).ok).toBe(true)
+    const checkedAt = service.getState().checkedAt
+    expect(checkedAt).toBeTruthy()
+
+    raw.checkForUpdates.mockRejectedValue(new Error('feed unavailable'))
+    expect((await service.check({ silent: true })).ok).toBe(false)
+
+    const state = service.getState()
+    expect(state.status).toBe('not-available')
+    // The failure must not read as "checked just now, you are up to date".
+    expect(state.checkedAt).toBe(checkedAt)
+    expect(state.lastCheckFailure).toMatchObject({ count: 1, message: 'feed unavailable' })
+  })
+
+  it('counts consecutive background failures and clears the run on the next success', async () => {
+    const { client, raw } = fakeClient()
+    const service = createUpdaterService(client, '1.0.0', true, vi.fn())
+    raw.checkForUpdates.mockRejectedValue(new Error('feed unavailable'))
+
+    await service.check({ silent: true })
+    await service.check({ silent: true })
+    await service.check({ silent: true })
+    expect(service.getState().lastCheckFailure).toMatchObject({ count: 3 })
+
+    raw.checkForUpdates.mockResolvedValue({ isUpdateAvailable: false, updateInfo: { version: '1.0.0' } })
+    await service.check({ silent: true })
+    expect(service.getState().lastCheckFailure).toBeUndefined()
+    expect(service.getState().checkedAt).toBeTruthy()
+  })
+
+  it('counts an error event and a rejected check as one failure, not two', async () => {
+    const { client, raw, emit } = fakeClient()
+    const service = createUpdaterService(client, '1.0.0', true, vi.fn())
+    raw.checkForUpdates.mockImplementation(async () => {
+      emit('error', new Error('feed unavailable'))
+      throw new Error('feed unavailable')
+    })
+
+    await service.check({ silent: true })
+    expect(service.getState().lastCheckFailure).toMatchObject({ count: 1 })
+  })
+
+  it('counts a silent check that errors but still resolves as a failure', async () => {
+    const { client, raw, emit } = fakeClient()
+    const service = createUpdaterService(client, '1.0.0', true, vi.fn())
+    raw.checkForUpdates.mockImplementation(async () => {
+      emit('error', new Error('bad metadata'))
+      return { isUpdateAvailable: false }
+    })
+
+    await service.check({ silent: true })
+    const state = service.getState()
+    expect(state.status).toBe('not-available')
+    expect(state.checkedAt).toBeUndefined()
+    expect(state.lastCheckFailure).toMatchObject({ count: 1, message: 'bad metadata' })
+  })
+
+  it('carries a check history restored from a previous run', () => {
+    const { client } = fakeClient()
+    const restored = {
+      checkedAt: '2026-01-01T00:00:00.000Z',
+      lastCheckFailure: { message: 'feed unavailable', count: 2, at: '2026-01-02T00:00:00.000Z' },
+    }
+    const service = createUpdaterService(client, '1.0.0', true, vi.fn(), { restored })
+
+    expect(service.getState()).toMatchObject({
+      status: 'idle',
+      checkedAt: restored.checkedAt,
+      lastCheckFailure: restored.lastCheckFailure,
+    })
+  })
+
+  it('retries a transient download failure and settles once it succeeds', async () => {
+    vi.useFakeTimers()
+    try {
+      const { client, raw, emit } = fakeClient()
+      const service = createUpdaterService(client, '1.0.0', true, vi.fn(), {
+        downloadRetryDelaysMs: [10, 20],
+      })
+      emit('update-available', { version: '1.1.0' })
+      raw.downloadUpdate.mockRejectedValueOnce(new Error('ECONNRESET')).mockResolvedValueOnce([])
+
+      const download = service.download()
+      await vi.advanceTimersByTimeAsync(10)
+      await expect(download).resolves.toMatchObject({ ok: true })
+      expect(raw.downloadUpdate).toHaveBeenCalledTimes(2)
+      expect(service.getState().status).toBe('downloaded')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('gives up after the configured number of download retries', async () => {
+    vi.useFakeTimers()
+    try {
+      const { client, raw, emit } = fakeClient()
+      const service = createUpdaterService(client, '1.0.0', true, vi.fn(), {
+        downloadRetryDelaysMs: [10, 20],
+      })
+      emit('update-available', { version: '1.1.0' })
+      raw.downloadUpdate.mockRejectedValue(new Error('ECONNRESET'))
+
+      const download = service.download()
+      await vi.advanceTimersByTimeAsync(10)
+      await vi.advanceTimersByTimeAsync(20)
+      await expect(download).resolves.toMatchObject({ ok: false, error: 'ECONNRESET' })
+      expect(raw.downloadUpdate).toHaveBeenCalledTimes(3)
+      expect(service.getState()).toMatchObject({ status: 'error', message: 'ECONNRESET' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not retry a download failure a retry cannot fix', async () => {
+    const { client, raw, emit } = fakeClient()
+    const service = createUpdaterService(client, '1.0.0', true, vi.fn(), {
+      downloadRetryDelaysMs: [10, 20],
+    })
+    emit('update-available', { version: '1.1.0' })
+    raw.downloadUpdate.mockRejectedValue(new Error('404 Not Found'))
+
+    await expect(service.download()).resolves.toMatchObject({ ok: false })
+    expect(raw.downloadUpdate).toHaveBeenCalledOnce()
+  })
+
+  it('does not retry at all when the retry schedule is empty', async () => {
+    const { client, raw, emit } = fakeClient()
+    const service = createUpdaterService(client, '1.0.0', true, vi.fn(), {
+      downloadRetryDelaysMs: [],
+    })
+    emit('update-available', { version: '1.1.0' })
+    raw.downloadUpdate.mockRejectedValue(new Error('ECONNRESET'))
+
+    await expect(service.download()).resolves.toMatchObject({ ok: false })
+    expect(raw.downloadUpdate).toHaveBeenCalledOnce()
+  })
+
+  it('hands a stuck install back as downloaded once the timeout elapses', async () => {
+    vi.useFakeTimers()
+    try {
+      const { client, raw, emit } = fakeClient()
+      const service = createUpdaterService(client, '1.0.0', true, vi.fn(), { installTimeoutMs: 50 })
+      emit('update-downloaded', { version: '1.1.0' })
+
+      expect(service.install().ok).toBe(true)
+      expect(service.getState().status).toBe('installing')
+
+      await vi.advanceTimersByTimeAsync(50)
+      expect(service.getState()).toMatchObject({
+        status: 'downloaded', availableVersion: '1.1.0', percent: 100,
+      })
+      // ...and the user can try again rather than being stuck forever.
+      expect(service.install().ok).toBe(true)
+      expect(raw.quitAndInstall).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stops blocking checks once a stuck install times out', async () => {
+    vi.useFakeTimers()
+    try {
+      const { client, raw, emit } = fakeClient()
+      const service = createUpdaterService(client, '1.0.0', true, vi.fn(), { installTimeoutMs: 50 })
+      emit('update-downloaded', { version: '1.1.0' })
+      service.install()
+
+      await service.check()
+      expect(raw.checkForUpdates).not.toHaveBeenCalled()
+
+      await vi.advanceTimersByTimeAsync(50)
+      await service.check()
+      expect(raw.checkForUpdates).toHaveBeenCalledOnce()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('reads the install timeout at install time, not at construction', async () => {
+    vi.useFakeTimers()
+    try {
+      const { client, emit } = fakeClient()
+      let timeout = 1000
+      const service = createUpdaterService(client, '1.0.0', true, vi.fn(), {
+        installTimeoutMs: () => timeout,
+      })
+      emit('update-downloaded', { version: '1.1.0' })
+
+      timeout = 50
+      service.install()
+      await vi.advanceTimersByTimeAsync(50)
+      expect(service.getState().status).toBe('downloaded')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('restores the downloaded state when a re-check fails', async () => {
     const { client, raw, emit } = fakeClient()
     const service = createUpdaterService(client, '1.0.0', true, vi.fn())

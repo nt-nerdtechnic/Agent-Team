@@ -1,0 +1,371 @@
+<script setup lang="ts">
+// Read-only reference for how MCP is used in Navide, shown inside Settings →
+// 說明. The two directions below are genuinely separate subsystems that happen
+// to share a protocol name; conflating them is the usual confusion.
+
+interface ToolRow {
+  name: string
+  what: string
+}
+
+interface CompareRow {
+  aspect: string
+  provide: string
+  consume: string
+}
+
+const planTools: ToolRow[] = [
+  { name: 'plan_list', what: '列出這個工作區的所有計畫，含階段與待辦進度' },
+  { name: 'plan_read', what: '讀取一份計畫的完整內容' },
+  { name: 'plan_create', what: '建立新計畫（從草稿開始）' },
+  { name: 'plan_update_stage', what: '推進階段：草稿 → 審查中 → 已核准 → 進行中 → 完成' },
+  { name: 'plan_update_todo', what: '更新單一待辦的狀態' },
+  { name: 'plan_add_note', what: '寫入發現或決策的紀錄' },
+]
+
+const cliTools: ToolRow[] = [
+  { name: 'cli_list_targets', what: '有哪些 CLI pane 在線上、位址怎麼寫、對方是否忙碌' },
+  { name: 'cli_send', what: '把任意指令送給指定的 pane（同工作區或跨工作區視窗）' },
+  { name: 'cli_open_agent', what: '開一個新的 CLI pane 並指派任務，完成後它會回報' },
+]
+
+const comparison: CompareRow[] = [
+  {
+    aspect: '誰是 server',
+    provide: 'Navide',
+    consume: '外部服務（Context7、GitHub…）',
+  },
+  {
+    aspect: '誰在呼叫',
+    provide: 'pane 裡的 CLI agent',
+    consume: 'Navide 後端',
+  },
+  {
+    aspect: '在哪設定',
+    provide: '不用設定，開 pane 就自動接上',
+    consume: '設定 → MCP',
+  },
+  {
+    aspect: '什麼時候作用',
+    provide: 'agent 想用的時候',
+    consume: '只在流程（pipeline）啟動時',
+  },
+  {
+    aspect: '做什麼',
+    provide: '操作 Navide：計畫、傳訊、開 agent',
+    consume: '讀取技術文件，附加到開場提示',
+  },
+]
+</script>
+
+<template>
+  <div class="mh">
+    <p class="mh-intro">
+      MCP（Model Context Protocol）是一套讓 AI agent 呼叫外部工具的通用協定。
+      Navide 用到它的地方有<strong>兩個方向</strong>，兩者除了協定同名之外沒有關係——
+      這是最常見的誤解來源，所以先分清楚。
+    </p>
+
+    <div class="mh-dirs">
+      <div class="mh-dir">
+        <div class="mh-dir-arrow">CLI agent → Navide</div>
+        <div class="mh-dir-title">Navide 提供工具</div>
+        <p class="mh-dir-text">
+          pane 裡的 agent 可以反過來操作 Navide：讀寫計畫、傳訊給其他 pane、開新的 agent。
+          <strong>不需要任何設定</strong>，開 pane 時自動接上。
+        </p>
+      </div>
+      <div class="mh-dir">
+        <div class="mh-dir-arrow">Navide → 外部服務</div>
+        <div class="mh-dir-title">Navide 取用文件</div>
+        <p class="mh-dir-text">
+          Navide 後端連到外部 MCP server 讀取技術文件，附加到流程的開場提示裡。
+          在<strong>設定 → MCP</strong> 設定，<strong>只在跑流程時作用</strong>。
+        </p>
+      </div>
+    </div>
+
+    <!-- ── 方向一 ───────────────────────────────────────────────────── -->
+    <section class="mh-section">
+      <h2 class="mh-h2">方向一：Navide 提供給 CLI agent 的工具</h2>
+      <p class="mh-p">
+        pane 一啟動，agent 的工具清單裡就會多出這些。你不需要教它，也不用設定——
+        直接用中文交代就好，例如「幫我把這份計畫的第二階段標成完成」。
+      </p>
+
+      <h3 class="mh-h3">計畫文件</h3>
+      <div class="mh-tablewrap">
+        <table class="mh-table">
+          <tbody>
+            <tr v-for="t in planTools" :key="t.name">
+              <td class="mh-tool"><code>{{ t.name }}</code></td>
+              <td>{{ t.what }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="mh-note">
+        計畫是 agent 用這些工具寫出來的 HTML，你在 Navide 的計畫視窗閱讀與核准。
+        agent 只有在階段推進到「已核准」之後才會開始寫程式。
+      </p>
+
+      <h3 class="mh-h3">與其他 CLI 協作</h3>
+      <div class="mh-tablewrap">
+        <table class="mh-table">
+          <tbody>
+            <tr v-for="t in cliTools" :key="t.name">
+              <td class="mh-tool"><code>{{ t.name }}</code></td>
+              <td>{{ t.what }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="mh-note">
+        詳細用法見本頁的「CLI 互傳訊息」主題。
+      </p>
+
+      <h3 class="mh-h3">哪些 CLI 接得到</h3>
+      <p class="mh-p">
+        目前只有 <strong>Claude Code</strong> 與 <strong>Codex</strong>。
+        這兩家的 CLI 支援在啟動時用參數指定 MCP server，Navide 就是這樣接上的——
+        不會去改你自己的 MCP 設定檔。其他 CLI 要嘛不支援這種接法，要嘛只能改設定檔，
+        目前沒有接。
+      </p>
+      <p class="mh-note">
+        接線是 <strong>pane 啟動當下</strong>做的。所以功能更新後，已經開著的 pane
+        還是舊的工具清單——關掉重開才會拿到新的。
+      </p>
+    </section>
+
+    <!-- ── 方向二 ───────────────────────────────────────────────────── -->
+    <section class="mh-section">
+      <h2 class="mh-h2">方向二：Navide 取用外部 MCP</h2>
+      <p class="mh-p">
+        這是<strong>設定 → MCP</strong> 那一頁在管的東西。Navide 後端會連到你設定的 MCP server，
+        讀取跟當前任務相關的技術文件，把它附加在流程開場提示的前面，讓 agent 一開始就有正確的
+        API 參考。
+      </p>
+      <p class="mh-p">內建目錄裡的選項：</p>
+      <ul class="mh-list">
+        <li><code>context7</code> — 各種框架與函式庫的最新官方文件</li>
+        <li><code>github</code> — 讀取 repo、issue、PR 內容</li>
+        <li><code>filesystem</code> — 讀取指定目錄的檔案</li>
+        <li><code>brave-search</code> — 網路搜尋</li>
+        <li><code>sentry</code> — 讀取錯誤追蹤資料</li>
+      </ul>
+      <div class="mh-warn">
+        <p>
+          <strong>這裡設定的 server 不會出現在 CLI agent 的工具清單裡。</strong>
+          它們只服務「讀取上下文 → 注入開場提示」這一件事，而且<strong>只在跑流程時</strong>觸發，
+          你手動開的 pane 完全不會用到。
+        </p>
+        <p>
+          想讓 Claude Code 或 Codex 自己能用某個 MCP server（例如讓它直接查 GitHub），
+          請用那個 CLI 自己的 MCP 設定，不是這裡。
+        </p>
+      </div>
+    </section>
+
+    <!-- ── 對照 ─────────────────────────────────────────────────────── -->
+    <section class="mh-section">
+      <h2 class="mh-h2">兩個方向的對照</h2>
+      <div class="mh-tablewrap">
+        <table class="mh-table">
+          <thead>
+            <tr>
+              <th></th>
+              <th>Navide 提供工具</th>
+              <th>Navide 取用文件</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in comparison" :key="row.aspect">
+              <th class="mh-aspect">{{ row.aspect }}</th>
+              <td>{{ row.provide }}</td>
+              <td>{{ row.consume }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ── 疑難排解 ─────────────────────────────────────────────────── -->
+    <section class="mh-section">
+      <h2 class="mh-h2">出問題時</h2>
+      <div class="mh-tablewrap">
+        <table class="mh-table">
+          <thead>
+            <tr><th>症狀</th><th>原因與解法</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>agent 說它沒有計畫或傳訊的工具</td>
+              <td>那個 pane 開啟時還沒接上（功能更新前開的），或用的 CLI 不是 Claude Code／Codex。
+                  前者關掉重開即可。</td>
+            </tr>
+            <tr>
+              <td>設定 → MCP 加了 server，但 agent 用不到</td>
+              <td>那是方向二，只給流程讀文件用。要讓 agent 自己能呼叫，得設定在那個 CLI 自己的
+                  MCP 設定裡。</td>
+            </tr>
+            <tr>
+              <td>agent 說計畫載入失敗</td>
+              <td>計畫工具都要指定工作區路徑。若 agent 傳的路徑跟 pane 實際的工作區不同，
+                  就會寫到 Navide 看不見的地方。請它改用 pane 的工作區路徑。</td>
+            </tr>
+            <tr>
+              <td>提示 pane 身分已失效</td>
+              <td>pane 被拆到別的視窗或視窗重新載入過，接線時記下的身分過期了。重開該 pane。</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+</template>
+
+<style scoped>
+.mh {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  color: var(--text-primary);
+  max-width: 78ch;
+}
+
+.mh-intro {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.65;
+}
+
+.mh-dirs {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.mh-dir {
+  flex: 1 1 260px;
+  border: 1px solid var(--border-muted);
+  border-radius: 8px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.mh-dir-arrow {
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 11px;
+  color: var(--accent-fg);
+  background: var(--accent-subtle);
+  border-radius: 99px;
+  padding: 1px 9px;
+  align-self: flex-start;
+}
+.mh-dir-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-bright);
+}
+.mh-dir-text {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.mh-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.mh-h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-bright);
+}
+.mh-h3 {
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.mh-p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.65;
+}
+.mh-note {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+.mh-list {
+  margin: 0;
+  padding-left: 1.3em;
+  font-size: 13px;
+  line-height: 1.65;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mh-warn {
+  border-left: 3px solid var(--st-progress, #c77400);
+  background: var(--bg-inset);
+  border-radius: 0 8px 8px 0;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mh-warn p {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.mh-tablewrap {
+  overflow-x: auto;
+  border: 1px solid var(--border-muted);
+  border-radius: 8px;
+}
+.mh-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12.5px;
+}
+.mh-table th,
+.mh-table td {
+  padding: 8px 12px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--border-muted);
+  line-height: 1.55;
+}
+.mh-table thead th {
+  background: var(--bg-inset);
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.mh-table tr:last-child td,
+.mh-table tr:last-child th { border-bottom: none; }
+.mh-aspect {
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.mh-tool { white-space: nowrap; }
+
+.mh code {
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 0.92em;
+  background: var(--bg-inset);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+</style>
