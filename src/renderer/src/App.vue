@@ -1426,7 +1426,10 @@ async function createRequestedPane(
     spawnedBy: parent.id,
   })
   if (!paneId) return null
-  await sendQuiet<ProjectPayload>('manual_pane.spawn', {
+  // Persistence only — the pane is already usable, and both responses are
+  // ignored. Awaiting them would put two 10s deadlines between the caller and
+  // an answer it needs promptly.
+  void sendQuiet<ProjectPayload>('manual_pane.spawn', {
     workspace_path: parent.workspacePath,
     pane_id: paneId,
     agent: req.agentKey,
@@ -1437,12 +1440,17 @@ async function createRequestedPane(
     run_group_id: parent.runGroupId ?? '',
     output_log_file: panes.value.find((p) => p.id === paneId)?.outputLogFile ?? '',
   })
-  await sendQuiet('project.rename_pane', {
+  void sendQuiet('project.rename_pane', {
     workspace_path: parent.workspacePath,
     pane_id: paneId,
     custom_name: req.name,
   })
-  return panes.value.some((p) => p.id === paneId) ? paneId : null
+  // spawnPane returns the id even when terminal.create failed — the pane object
+  // is in the list either way, with no PTY behind it. Report that as a failure
+  // rather than handing back a pane whose CLI never started.
+  const pane = panes.value.find((p) => p.id === paneId)
+  if (!pane || pane.preparationStatus === 'failed') return null
+  return paneId
 }
 
 /** Wait for a freshly created pane's CLI to settle, then inject its task. Slow
@@ -1454,14 +1462,25 @@ async function kickoffRequestedPane(
 ): Promise<boolean> {
   const pane = panes.value.find((p) => p.id === paneId)
   if (!pane) return false
-  const bootstrapped = await sendSessionMarkerBootstrap(pane, `[pane ${paneId.slice(0, 8)}]`)
-  if (!bootstrapped) {
-    await dismissStartupDialog(paneId, DISMISS_TIMEOUT_MS)
-    await waitForStartupActivity(paneId)
+  // The pane's own task has to land before anything else may type into it: a
+  // CLI still booting can be sitting on a trust dialog, where an injected
+  // message plus its newline would answer the prompt. The messaging idle gate
+  // already refuses a pane whose kickoff is pending, so say so until this is
+  // done — the caller may already know this pane's name and be messaging it.
+  pane.kickoffStatus = 'pending'
+  try {
+    const bootstrapped = await sendSessionMarkerBootstrap(pane, `[pane ${paneId.slice(0, 8)}]`)
+    if (!bootstrapped) {
+      await dismissStartupDialog(paneId, DISMISS_TIMEOUT_MS)
+      await waitForStartupActivity(paneId)
+    }
+    await waitForQuiet(paneId, 1000, 8000)
+    if (!paneAlive(paneId)) return false
+    return await injectPane(paneId, renderSpawnKickoff(task, parentName), 'agent-spawn', true)
+  } finally {
+    const live = panes.value.find((p) => p.id === paneId)
+    if (live?.kickoffStatus === 'pending') live.kickoffStatus = 'none'
   }
-  await waitForQuiet(paneId, 1000, 8000)
-  if (!paneAlive(paneId)) return false
-  return await injectPane(paneId, renderSpawnKickoff(task, parentName), 'agent-spawn', true)
 }
 
 /** Spawn + kick off a pane requested by a SPAWN block. Mirrors
@@ -1548,6 +1567,10 @@ async function handleMcpSpawnRequest(ev: {
   // after this and reports a failure by message instead.
   const child = panes.value.find((p) => p.id === paneId)
   const childName = child?.messagingName ?? gate.name
+  // Shut the injection window before the caller learns this pane's name, not
+  // after: the moment it knows, it may message it, and the pane has not had its
+  // own task yet.
+  if (child) child.kickoffStatus = 'pending'
   notifyRestore.toast(i18n.global.t('msg.spawn-toast', { parent: parentName, child: childName }))
   report({ ok: true, paneId, name: childName })
 
@@ -1570,6 +1593,10 @@ async function handleMcpSpawnRequest(ev: {
  *  verdict never got back — telling that agent to "pick another name" would
  *  have it open a second pane doing the same work. */
 function describeSpawnRefusal(reason: string, requestedName: string, requesterPaneId: string): string {
+  // Only rewrite an actual name collision. The gate checks the agent key first,
+  // so a bad key on a retry would otherwise be reported as "you already have
+  // that pane" and the real mistake would never surface.
+  if (!reason.includes('已被其他 pane 使用')) return reason
   const holder = messaging.paneIdOf(requestedName)
   if (!holder) return reason
   const pane = panes.value.find((p) => p.id === holder)

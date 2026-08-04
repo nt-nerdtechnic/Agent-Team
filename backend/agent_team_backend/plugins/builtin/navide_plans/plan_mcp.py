@@ -651,7 +651,7 @@ async def cli_list_targets(ctx: Context) -> dict[str, Any]:
 # The verdict lands once the pane exists, not once its CLI has booted: booting
 # a cold CLI can take longer than any deadline an agent would tolerate, so that
 # part continues after the answer and reports failure by message.
-_SPAWN_VERDICT_TIMEOUT_S = 30.0
+_SPAWN_VERDICT_TIMEOUT_S = 40.0
 _pending_spawns: dict[str, asyncio.Future[dict[str, Any]]] = {}
 
 
