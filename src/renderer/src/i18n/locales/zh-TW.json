@@ -877,7 +877,6 @@
         "cancel": "取消",
         "delete-confirm": "確定刪除此帳號？其儲存的登入憑證也會一併移除。",
         "unsupported": "此 agent 不支援多帳號。",
-        "no-live-quota": "非使用中，無即時額度",
         "active-error": "此帳號目前使用中，請先切換到其他帳號再刪除。",
         "login-in-progress-error": "此帳號的登入程序仍在進行中，請先完成或關閉其登入 pane。"
       }
@@ -1599,7 +1598,7 @@
     "settings-title": "CLI 額度徽章",
     "settings-enabled": "在 CLI pane 標題列顯示剩餘額度",
     "settings-refresh": "刷新間隔",
-    "settings-hint": "讀取本機 CLI 憑證查詢官方用量 API（claude / codex / kimi / grok），僅讀取、不寫入憑證。",
+    "settings-hint": "顯示 11 家 CLI 的額度：claude、codex、kimi、grok、antigravity、opencode、qwen、kilo、pi、copilot、cursor。多數是讀取本機 CLI 憑證查詢該供應商的官方用量 API，僅讀取、不寫入憑證。claude 則不同，改為驅動 Claude CLI 內建的 /usage 面板，不讀取憑證。",
     "settings-signing-title": "Antigravity 憑證（maintainer）",
     "settings-signing-hint": "僅開發模式顯示。寫入 ~/navide-signing/usage_secrets.py，讓下次 release build 打包 Antigravity 的公開 installed-app OAuth 常數。不會存進 repo。",
     "settings-signing-id": "client_id",

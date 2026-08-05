@@ -1065,8 +1065,11 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
 
   /** Authoritative turn end from the CLI's own conversation log. Drops the
    *  hysteresis latch so the badge goes idle now instead of waiting out
-   *  IDLE_CONFIRM_MS. Only claude/copilot emit a reliable turn_complete; the
-   *  other vendors fall back to the silence timeout. */
+   *  IDLE_CONFIRM_MS. Only vendors whose log reader emits turn_complete reach
+   *  here: claude/codex/copilot/aider (which also carry the turn text) and kimi
+   *  (turn_complete without text). The rest fall back to the silence timeout —
+   *  qwen/pi/cursor emit agent_active only, and antigravity/grok/opencode/kilo
+   *  emit neither (no parse_activity override). */
   function markTurnComplete(): void {
     turnCompleteAt.value = Date.now()
     runningLatched.value = false

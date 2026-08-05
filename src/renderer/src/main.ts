@@ -23,7 +23,6 @@ const loadRoot = (): Promise<{ default: Component }> => {
   switch (which) {
     case 'editor': return import('./EditorWindowApp.vue')
     case 'plans':  return import('./PlanWindowApp.vue')
-    case 'githistory': return import('./GitHistoryWindowApp.vue')
     default:       return import('./App.vue')
   }
 }

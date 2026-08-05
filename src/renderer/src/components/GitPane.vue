@@ -1424,8 +1424,8 @@ function openCommitFileDiffInIDE(hash: string, file: string): void {
 
 // ── history ───────────────────────────────────────────────────────────────────
 // The main panel shows only the latest page (read-only expand). Search, scope
-// toggle, pagination and commit actions live in the standalone Git History
-// window (?window=githistory), one per workspace.
+// toggle, pagination and commit actions live in the Git plugin window's History
+// view, which `window:openGitHistory` routes to — one window per workspace.
 const historyExpanded = ref(true)
 const latestLog = computed(() => gitLog.value.slice(0, 15))
 

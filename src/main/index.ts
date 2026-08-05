@@ -1024,11 +1024,8 @@ ipcMain.handle('window:openPlans', (_event, args: { workspace_path?: string; rel
   return { ok: true }
 })
 
-// Git History window: routes to the unified standalone Git client window.
-function openGitHistoryWindow(workspacePath: string): void {
-  openGitWindow(workspacePath)
-}
-
+// Git History: routes to the unified Git plugin window (its History view). The
+// dedicated `?window=githistory` renderer it used to open is gone.
 ipcMain.handle('window:openGitHistory', (_event, args: { workspace_path?: string }) => {
   const workspacePath = (args?.workspace_path ?? '').trim()
   if (!workspacePath) return { ok: false }

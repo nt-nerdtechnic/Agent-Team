@@ -1190,8 +1190,9 @@ const paneViews = ref<ActivePaneView[]>([])
 
 // ── Per-pane turn-complete signal (CLI lifecycle, not a buffer guess) ────────
 // The backend broadcasts `agent.activity` with event_type "turn_complete" when
-// a CLI ends its turn (Claude Stop hook = 100% reliable, or JSONL turn-end for
-// Codex/Antigravity). We record the wall-clock time per pane. A pane only counts as
+// a CLI ends its turn (Claude Stop hook = 100% reliable, or a conversation-log
+// turn-end parsed for codex/copilot/aider/kimi — the only other vendors whose
+// reader emits it). We record the wall-clock time per pane. A pane only counts as
 // "turn complete for the current stage" when this timestamp is AFTER the
 // watcher armed (see slotFinished), so a stale signal from a prior stage/turn
 // is never reused — no explicit reset needed.
@@ -6886,8 +6887,12 @@ const QUESTION_PLACEHOLDER_RE = /^<[^>]{1,40}>$/
 // strict turn-text sentinel path (judgeTurnText) is authoritative, so the loose
 // in-buffer sentinel scan is skipped — it can false-complete on a TUI redraw
 // that re-echoes the kickoff's sentinel examples. Vendors without turn text
-// (grok/antigravity emit no turn_complete, kimi carries none) keep the buffer
-// scan as their only sentinel source.
+// keep the buffer scan as their only sentinel source: kimi emits turn_complete
+// but carries no text, qwen/pi/cursor emit agent_active only, and
+// antigravity/grok/opencode/kilo emit neither.
+// Deliberately conservative: copilot and aider now carry turn text too, but
+// their readers have not been validated against real sessions, so they stay
+// out of this set and keep the buffer scan until that verification happens.
 const TURN_TEXT_VENDORS = new Set(['claude', 'codex'])
 
 // A turn_complete whose CLI timestamp predates the watcher arming by more than

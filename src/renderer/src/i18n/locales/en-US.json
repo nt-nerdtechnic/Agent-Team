@@ -877,7 +877,6 @@
         "cancel": "Cancel",
         "delete-confirm": "Delete this account? Its saved sign-in will also be removed.",
         "unsupported": "This agent does not support multiple accounts.",
-        "no-live-quota": "Not active — no live quota",
         "active-error": "This account is currently active and cannot be deleted. Switch to another account first.",
         "login-in-progress-error": "A sign-in for this account is still running. Finish or close its login pane first."
       }
@@ -1599,7 +1598,7 @@
     "settings-title": "CLI quota badge",
     "settings-enabled": "Show remaining quota in CLI pane headers",
     "settings-refresh": "Refresh interval",
-    "settings-hint": "Reads local CLI credentials to query each provider's usage API (claude / codex / kimi / grok). Read-only — credentials are never written.",
+    "settings-hint": "Shows CLI quota for 11 providers: claude, codex, kimi, grok, antigravity, opencode, qwen, kilo, pi, copilot and cursor. Most read local CLI credentials to query that provider's own usage API — read-only, credentials are never written. Claude is different: it drives the Claude CLI's built-in /usage panel instead of reading credentials.",
     "settings-signing-title": "Antigravity credentials (maintainer)",
     "settings-signing-hint": "Dev-only. Writes ~/navide-signing/usage_secrets.py so the next release build bundles Antigravity's public installed-app OAuth constants. Never stored in the repo.",
     "settings-signing-id": "client_id",

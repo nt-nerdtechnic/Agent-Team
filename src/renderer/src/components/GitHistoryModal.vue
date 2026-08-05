@@ -15,8 +15,6 @@ import type { GitCommit, GitCommitDetail, DiffBlameHunk } from '../composables/u
 // top, and a fixed detail split (metadata + files | inline diff) below.
 const props = defineProps<{
   show: boolean
-  // Standalone-window mode: fill the viewport, no backdrop (?window=githistory).
-  standalone?: boolean
   // Inline component mode: render inside container without Teleport or popup header.
   inline?: boolean
   backend: ReturnType<typeof useBackend>
@@ -254,8 +252,8 @@ watch(() => props.show, (visible) => {
 <template>
   <Teleport to="body" :disabled="inline">
     <template v-if="show">
-      <div v-if="!standalone && !inline" class="tp-backdrop" @click="emit('close')" />
-      <div class="history-modal" :class="{ standalone, inline }" @click="closeCtxMenu()">
+      <div v-if="!inline" class="tp-backdrop" @click="emit('close')" />
+      <div class="history-modal" :class="{ inline }" @click="closeCtxMenu()">
         <!-- Header -->
         <div v-if="!inline" class="hm-hdr">
           <span class="hm-title">{{ $t('label.history') }}</span>
@@ -469,11 +467,6 @@ watch(() => props.show, (visible) => {
   background: var(--bg-base); border: 1px solid var(--border-default); border-radius: 8px;
   box-shadow: 0 12px 32px var(--shadow-scrim);
   display: flex; flex-direction: column; overflow: hidden;
-}
-.history-modal.standalone {
-  top: 0; left: 0; transform: none;
-  width: 100vw; height: 100vh;
-  border: none; border-radius: 0; box-shadow: none;
 }
 .history-modal.inline {
   position: relative; top: 0; left: 0; transform: none;
