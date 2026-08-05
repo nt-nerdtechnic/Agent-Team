@@ -4503,7 +4503,7 @@ const unavailableHistoryPaneIds = ref<Set<string>>(new Set())
 // ── Keyboard Shortcuts Panel ──────────────────────────────────────────────────
 const MAIN_SHORTCUTS = [
   { label: 'Open Settings',              keys: '⌘,' },
-  { label: 'Open Mini IDE',              keys: '⌘⇧I' },
+  { label: 'Open Mini-IDE',              keys: '⌘⇧I' },
   { label: 'Open Agent',                 keys: '⌘⇧U' },
   { label: 'Rebuild Pane (Resume)',      keys: '⌘⇧B' },
   { label: 'Find in Files',             keys: '⌘⇧F' },
@@ -4526,19 +4526,20 @@ const kbMainItems = computed(() => {
 
 // ── Titlebar & Status Bar ─────────────────────────────────────────────────────
 const workspaceBaseName = computed(() => {
-  if (!currentWorkspace.value) return 'Navide (Agent-Team)'
+  if (!currentWorkspace.value) return 'Navide'
   const parts = currentWorkspace.value.replace(/\\/g, '/').split('/')
-  return parts.filter(Boolean).at(-1) || 'Navide (Agent-Team)'
+  return parts.filter(Boolean).at(-1) || 'Navide'
 })
 
 // Reflect the open workspace in the real window title (document.title) so each
 // main window is distinguishable in macOS Mission Control / the Dock. Without
-// this every main window shows the static index.html <title>. Editor windows
-// already set their own document.title.
+// this every main window shows the static index.html <title>. Follows the
+// shared `<context> — <feature>` window naming (docs/en-US/plugin-development.md);
+// the plugin windows set their own title the same way.
 watch(
   workspaceBaseName,
   (name) => {
-    document.title = currentWorkspace.value ? `${name} — Navide (Agent-Team)` : 'Navide (Agent-Team)'
+    document.title = currentWorkspace.value ? `${name} — Navide` : 'Navide'
   },
   { immediate: true },
 )

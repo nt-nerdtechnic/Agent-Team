@@ -195,7 +195,7 @@ async function refreshAll(): Promise<void> {
 let offThemeSettingsChange: (() => void) | null = null
 
 onMounted(() => {
-  if (repoName.value) document.title = `Git · ${repoName.value}`
+  if (repoName.value) document.title = `${repoName.value} — Git`
   loadTheme()
   offThemeSettingsChange = onSettingsChanged((keys) => {
     if (keys.includes('agent-team:theme') || keys.includes('agent-team:theme-custom')) {

@@ -980,7 +980,7 @@ function openPlanWindow(workspacePath: string, relPath?: string): void {
   const win = new BrowserWindow({
     width: 1100,
     height: 760,
-    title: 'Navide · Plans',
+    title: 'Plans',
     backgroundColor: '#0d1117',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),

@@ -846,7 +846,7 @@ let _unsubGitChanged: (() => void) | null = null
 
 onMounted(() => {
   // The host (IDE shell) owns the window title when embedded.
-  if (!props.embedded) document.title = `Editor · ${props.name}`
+  if (!props.embedded) document.title = `${props.name} — Mini-IDE`
   window.addEventListener('keydown', onKeydown)
   // 編輯器為獨立視窗，開窗當下後端 WebSocket 通常尚未連上，
   // 若立即 send 會以「ws not open」reject 且不會重試，畫面卡在「載入中」。

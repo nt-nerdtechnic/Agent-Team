@@ -595,7 +595,7 @@ export class FrontendPluginManager {
     hostWindow: BrowserWindow,
     descriptor: PluginLaunchDescriptor,
     bounds: PluginViewBounds,
-    opts: { closeHostOnHide?: boolean } = {}
+    opts: { closeHostOnHide?: boolean; mirrorTitle?: boolean } = {}
   ): void {
     this.registerIpc()
 
@@ -655,6 +655,19 @@ export class FrontendPluginManager {
         additionalArguments: [`--plugin-id=${descriptor.id}`],
       },
     })
+
+    // A dedicated host window carries no UI of its own — its webContents stays
+    // blank, so the plugin's document.title never reaches the window and the
+    // macOS Window menu / Mission Control / Dock keep showing the static
+    // creation-time title. Mirror the view's page title onto the host so every
+    // window follows the same `<context> — <feature>` naming (see
+    // docs/en-US/plugin-development.md). Opt-in: a plugin embedded in the main
+    // window must not overwrite that window's title.
+    if (opts.mirrorTitle) {
+      view.webContents.on('page-title-updated', (_event, title) => {
+        if (!hostWindow.isDestroyed() && title) hostWindow.setTitle(title)
+      })
+    }
 
     // attach
     hostWindow.contentView.addChildView(view)
@@ -1085,15 +1098,17 @@ let miniIdeWindow: BrowserWindow | null = null
 
 /** Reuse the live dedicated window or create a fresh one. Window options
  *  mirror the retired legacy editor BrowserWindow (`openEditorWindow` in git
- *  history: 1100x760, hidden title bar, `Navide · Editor`, #0d1117). The
- *  window's own webContents stays blank — the plugin view carries the UI, so
- *  no preload/webPreferences are needed here. */
+ *  history: 1100x760, hidden title bar, #0d1117). The window's own webContents
+ *  stays blank — the plugin view carries the UI, so no preload/webPreferences
+ *  are needed here. The bare feature name is only the pre-load title; once the
+ *  view reports a page title, `mirrorTitle` replaces it with
+ *  `<file> — Mini-IDE`. */
 function ensureMiniIdeWindow(): BrowserWindow {
   if (miniIdeWindow && !miniIdeWindow.isDestroyed()) return miniIdeWindow
   const win = new BrowserWindow({
     width: 1100,
     height: 760,
-    title: 'Navide · Editor',
+    title: 'Mini-IDE',
     titleBarStyle: 'hidden',
     backgroundColor: '#0d1117',
   })
@@ -1146,7 +1161,8 @@ export function openMiniIdePluginView(
     // Fill the dedicated window's content bounds and track its resizes.
     'fill',
     // Esc (nav.hideSelf) closes the dedicated window, like the legacy editor.
-    { closeHostOnHide: true }
+    // The window is this plugin's alone, so it wears the plugin's page title.
+    { closeHostOnHide: true, mirrorTitle: true }
   )
   return true
 }
@@ -1354,7 +1370,7 @@ function ensureGitWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width: 1280,
     height: 820,
-    title: 'Navide · Git',
+    title: 'Git',
     titleBarStyle: 'hidden',
     backgroundColor: '#0d1117',
   })
@@ -1387,7 +1403,8 @@ export function openGitPluginView(
     // Fill the dedicated window's content bounds and track its resizes.
     'fill',
     // Esc (nav.hideSelf) closes the dedicated window, like the mini-IDE editor.
-    { closeHostOnHide: true }
+    // The window is this plugin's alone, so it wears the plugin's page title.
+    { closeHostOnHide: true, mirrorTitle: true }
   )
   return true
 }

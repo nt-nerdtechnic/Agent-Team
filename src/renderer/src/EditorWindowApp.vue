@@ -1069,7 +1069,7 @@ const PALETTE_COMMANDS: PaletteCmd[] = [
   { id: 'workbench.action.focusSourceControl', label: 'Show Source Control', keys: '⌘⇧G' },
   { id: 'workbench.action.focusActiveEditorGroup', label: 'Focus Editor', keys: '⌘K ⌘E' },
   { id: 'workbench.action.findInFiles',  label: 'Find in Files',   keys: '⌘⇧F' },
-  { id: 'workbench.action.openMiniIDE', label: 'Open Mini IDE',   keys: '⌘⇧I' },
+  { id: 'workbench.action.openMiniIDE', label: 'Open Mini-IDE',   keys: '⌘⇧I' },
   { id: 'workbench.action.openNextEditor',      label: 'Next Tab',   keys: '⌃Tab' },
   { id: 'workbench.action.openPreviousEditor',  label: 'Previous Tab',   keys: '⌃⇧Tab' },
   { id: 'workbench.action.quickOpen',             label: 'Quick Open',     keys: '⌘P' },
@@ -1745,7 +1745,7 @@ watch(
   [activeRel, openFiles],
   () => {
     const f = openFiles.value.find((x) => x.relPath === activeRel.value)
-    document.title = f ? `${f.dirty ? '● ' : ''}${f.name} — Editor` : 'Editor'
+    document.title = f ? `${f.dirty ? '● ' : ''}${f.name} — Mini-IDE` : 'Mini-IDE'
   },
   { deep: true, immediate: true },
 )

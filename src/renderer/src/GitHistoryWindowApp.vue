@@ -50,7 +50,7 @@ function closeWindow(): void {
 let offThemeSettingsChange: (() => void) | null = null
 
 onMounted(() => {
-  document.title = `Git History · ${workspaceBaseName}`
+  document.title = `${workspaceBaseName} — Git History`
   loadTheme()
   offThemeSettingsChange = onSettingsChanged((keys) => {
     if (keys.includes('agent-team:theme') || keys.includes('agent-team:theme-custom')) {

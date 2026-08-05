@@ -277,7 +277,7 @@ let offPlansChanged: (() => void) | null = null
 let offPlanOpenDoc: (() => void) | null = null
 
 onMounted(() => {
-  document.title = `Plans · ${workspaceBaseName}`
+  document.title = `${workspaceBaseName} — Plans`
   loadTheme()
   offThemeSettingsChange = onSettingsChanged((keys) => {
     if (keys.includes('agent-team:theme') || keys.includes('agent-team:theme-custom')) {
