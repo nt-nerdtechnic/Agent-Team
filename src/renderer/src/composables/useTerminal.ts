@@ -8,7 +8,8 @@ import { bufferTail, createRedrawGuard, dropTuiNoise, stripAnsi } from '../lib/b
 import { createResizeController, type ResizeController } from './useTerminalResize'
 import { installTerminalZoomShortcuts, terminalFontSize } from './useTerminalFontSize'
 import { getResumeConcurrency } from '../lib/resumeConcurrency'
-import { shouldOpenMentionMenu } from '../lib/cliContext'
+import { chunkForPty, shouldOpenMentionMenu } from '../lib/cliContext'
+import { settingsGet, settingsSet } from '../lib/settings'
 import { TERMINAL_CREATE_TIMEOUT_MS } from '../lib/resume-command'
 import { setContext } from '../keybindings/contextService'
 import {
@@ -146,6 +147,47 @@ export function encodeShiftEnter(agentKey?: string): string {
   // Plain shells (bash/zsh) treat \x1b\r as Enter and do not always have bracketed paste enabled.
   // Ctrl+V (\x16) + Ctrl+J (\x0a) is the standard way to insert a literal newline in readline/ZLE.
   return '\x16\x0a'
+}
+
+/** Clipboard bytes per `terminal.input` write, matching App.vue's injectText. */
+const PASTE_CHUNK = 512
+
+/** Set once the "hold ⌥ to select" hint has been shown — it teaches once.
+ *  Goes through settings (backend-persisted) rather than localStorage, which
+ *  this app has been migrating away from and which plugin bundles don't share. */
+const OPTION_SELECT_HINT_KEY = 'agentTeam.terminal.optionSelectHintSeen'
+
+/** Agents whose TUI keeps bracketed paste on — see pasteFromClipboard(). */
+function agentUsesBracketedPaste(agentKey?: string): boolean {
+  const key = agentKey?.toLowerCase()
+  return key === 'claude' || key === 'claude-code' || key === 'agy' ||
+    key === 'antigravity' || key === 'grok' || key === 'kimi' || key === 'codex'
+}
+
+// ── Edit > Copy bridge ──────────────────────────────────────────────────────
+// Main cannot read an xterm selection (`.xterm` is user-select: none, so
+// webContents.copy() sees nothing). Publish it on a global that Edit > Copy
+// evaluates in the focused page (see TERMINAL_SELECTION_EXPRESSION in menu.ts).
+// A global rather than an IPC listener on purpose: a page without one — no
+// terminal mounted yet, or a plugin view on a different preload — yields '' and
+// main falls back to its built-in copy, so Copy can never end up doing nothing.
+//
+// The FOCUSED pane answers. Keying off focus rather than "who has a selection"
+// keeps a stale highlight in a background pane from hijacking a Copy aimed at
+// the editor or a plain input.
+let _focusOwner: Terminal | null = null
+let _selectionGlobalInstalled = false
+
+function installTerminalSelectionGlobal(): void {
+  if (_selectionGlobalInstalled) return
+  _selectionGlobalInstalled = true
+  window.__navideTerminalSelection = () => {
+    try {
+      return _focusOwner?.getSelection() ?? ''
+    } catch {
+      return ''  // disposed terminal — let main run the built-in copy
+    }
+  }
 }
 
 export type TerminalStatus = 'idle' | 'starting' | 'running' | 'exited' | 'error' | 'stopped'
@@ -837,6 +879,7 @@ function releaseResumeSpawnSlot(): void {
 
 export function useTerminal(paneId: string, backend: ReturnType<typeof useBackend>, opts?: UseTerminalOptions) {
   installTerminalZoomShortcuts()
+  installTerminalSelectionGlobal()
 
   const term = new Terminal({
     // Option+drag forces normal text selection even while a TUI has mouse
@@ -890,6 +933,26 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   const isAltBuffer = ref(false)
   let isDisposed = false
   let activeAgentKey: string | undefined
+
+  // ── "hold ⌥ to select" hint ────────────────────────────────────────────────
+  // Once a CLI turns mouse reporting on, a plain drag is forwarded to the
+  // process and highlights nothing; the force-selection modifier is the only
+  // way out (see macOptionClickForcesSelection above). Nothing on screen says
+  // so, so teach it the first time a drag visibly does nothing.
+  const optionSelectHint = ref(false)
+  let _hintDragX = -1
+  let _hintDragY = -1
+  let _hintTimer: ReturnType<typeof setTimeout> | null = null
+
+  function maybeShowOptionSelectHint(e: MouseEvent): void {
+    if (_hintDragX < 0 || optionSelectHint.value) return
+    if (Math.abs(e.clientX - _hintDragX) + Math.abs(e.clientY - _hintDragY) < 12) return
+    _hintDragX = -1  // one shot per drag
+    if (settingsGet(OPTION_SELECT_HINT_KEY, false)) return
+    settingsSet(OPTION_SELECT_HINT_KEY, true)
+    optionSelectHint.value = true
+    _hintTimer = setTimeout(() => { optionSelectHint.value = false }, 6000)
+  }
   let activeCrashKey = ''
 
   // Rolling ANSI-stripped text accumulator used by the pipeline orchestrator
@@ -1281,11 +1344,12 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   }
   let mounted = false
   let mountedEl: HTMLElement | null = null
-  let _mousedownHandler: (() => void) | null = null
+  let _mousedownHandler: ((e: MouseEvent) => void) | null = null
   let _cmdKeyDown: ((e: KeyboardEvent) => void) | null = null
   let _cmdKeyUp: ((e: KeyboardEvent) => void) | null = null
   let _cmdClickHandler: ((e: MouseEvent) => void) | null = null
   let _mousePosTracker: ((e: MouseEvent) => void) | null = null
+  let _pasteHandler: ((e: ClipboardEvent) => void) | null = null
   // Whether THIS pane's xterm textarea currently holds focus. Used to publish
   // the `terminalFocus` keybinding context (defaults.ts gates editor shortcuts
   // like cmd+f on `!terminalFocus`) and to clear it if the pane is disposed
@@ -1299,16 +1363,27 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // and strand it there whenever the window returns without handing focus back
   // to the textarea, so every later keystroke echoes a frame late.
   let _blurredWithWindow = false
+  // Every path that concludes "this pane no longer holds focus" goes through
+  // here, so Edit > Copy ownership can never outlive the keybinding context —
+  // a stale owner would answer Copy with an old selection and suppress main's
+  // fallback for good.
+  const _releaseTerminalFocus = (): void => {
+    _ownsTerminalFocus = false
+    if (_focusOwner === term) _focusOwner = null
+    setContext('terminalFocus', false)
+  }
   const _onTermFocus = (): void => {
     _blurredWithWindow = false
     _ownsTerminalFocus = true
+    _focusOwner = term  // answers Edit > Copy for this window
     setContext('terminalFocus', true)
   }
   const _onTermBlur = (): void => {
+    // A blur that came with the whole window losing focus is not a focus
+    // change — keep owning Edit > Copy, since reaching the menu bar causes it.
     if (!document.hasFocus()) { _blurredWithWindow = true; return }
     _blurredWithWindow = false
-    _ownsTerminalFocus = false
-    setContext('terminalFocus', false)
+    _releaseTerminalFocus()
   }
   // Runs in every mounted pane, but the _blurredWithWindow guard means only the
   // one that actually held focus reacts — panes never fight over it.
@@ -1322,13 +1397,9 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       // that stopped being rendered while the window was away (pane hidden by a
       // layout change), so verify rather than assert focus we never received.
       term.focus()
-      if (document.activeElement !== term.textarea) {
-        _ownsTerminalFocus = false
-        setContext('terminalFocus', false)
-      }
+      if (document.activeElement !== term.textarea) _releaseTerminalFocus()
     } else if (active !== term.textarea) {
-      _ownsTerminalFocus = false
-      setContext('terminalFocus', false)
+      _releaseTerminalFocus()
     }
   }
 
@@ -1469,11 +1540,21 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       const curX = buf.cursorX
       const curY = buf.baseY + buf.cursorY
 
-      // ── Shift+Enter: newline without submitting ────────────────────────────
-      // Traditional PTYs do not preserve the Shift modifier on Enter. Present
-      // one shortcut to the user, then encode it for the active agent's input
-      // protocol (CSI-u for Codex, bracketed paste for modern TUIs, Ctrl+V for bash).
-      if (e.shiftKey && !e.metaKey && !e.altKey && !e.ctrlKey && e.key === 'Enter') {
+      // ── Shift/Ctrl/Cmd+Enter: newline without submitting ──────────────────
+      // Traditional PTYs do not preserve modifiers on Enter, so encode the
+      // chord for the active agent's input protocol (CSI-u for Codex, bracketed
+      // paste for modern TUIs, Ctrl+V for bash).
+      //
+      // Cmd+Enter is free everywhere: macOS never delivers it to a PTY. Ctrl+
+      // Enter is NOT — a plain shell receives it as a bare Enter and runs the
+      // command, so claiming it is limited to agent panes, where the CLI's own
+      // prompt is the thing being edited.
+      const isAgentPane = !!activeAgentKey && activeAgentKey !== 'terminal'
+      const newlineChord =
+        (e.shiftKey && !e.metaKey && !e.altKey && !e.ctrlKey) ||
+        (isAgentPane && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) ||
+        (e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey)
+      if (newlineChord && e.key === 'Enter') {
         e.preventDefault()
         e.stopPropagation()
         pasteText(encodeShiftEnter(activeAgentKey))
@@ -1584,7 +1665,12 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // Make the whole pane click-focusable so the user can type immediately.
     el.tabIndex = 0
     el.style.cursor = 'text'
-    _mousedownHandler = () => {
+    _mousedownHandler = (e: MouseEvent) => {
+      // A drag that starts without the force-selection modifier while the CLI
+      // has mouse reporting on will select nothing — arm the hint (fired from
+      // the mousemove tracker below, once the drag is unmistakable).
+      _hintDragX = !e.altKey && !e.shiftKey && term.modes.mouseTrackingMode !== 'none' ? e.clientX : -1
+      _hintDragY = e.clientY
       // Record click moment too — Claude TUI redraws on focus regardless of
       // which path got us there.
       lastFocusAt.value = Date.now()
@@ -1596,12 +1682,42 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     }
     el.addEventListener('mousedown', _mousedownHandler)
 
+    // Intercept ⌘V / right-click Paste before xterm's own textarea handler —
+    // see pasteFromClipboard() for why xterm's version truncates multi-line
+    // pastes here. Capture phase so the event never reaches the textarea.
+    _pasteHandler = (e: ClipboardEvent) => {
+      if (e.target !== term.textarea) return
+      const text = e.clipboardData?.getData('text/plain')
+      if (!text) return
+      e.preventDefault()
+      e.stopPropagation()
+      // xterm's paste path clears the helper textarea; the right-click handler
+      // fills it with the selection, so skipping that would leave stale text
+      // for CompositionHelper (which anchors IME input at value.length).
+      if (term.textarea) term.textarea.value = ''
+      pasteFromClipboard(text)
+      // pasteFromClipboard drops the visible selection; the keyboard-selection
+      // anchor has to go with it. ⌘V is on the keepForCmd list below, so it
+      // survives the key handler — and a stale anchor makes the next Backspace
+      // take the "delete the selection" branch and emit a burst of deletes.
+      selAnchorX = -1
+      selAnchorY = -1
+    }
+    el.addEventListener('paste', _pasteHandler, true)
+
     // ── Cmd+Click file search overlay ────────────────────────────────────────
     let _isCmdHeld = false
     let _lastMX = 0
     let _lastMY = 0
 
-    _mousePosTracker = (e: MouseEvent) => { _lastMX = e.clientX; _lastMY = e.clientY }
+    _mousePosTracker = (e: MouseEvent) => {
+      _lastMX = e.clientX
+      _lastMY = e.clientY
+      // Disarm as soon as the button is up, so a drag that began outside this
+      // element (or ended below the threshold) cannot fire the hint later.
+      if (e.buttons === 1) maybeShowOptionSelectHint(e)
+      else _hintDragX = -1
+    }
     el.addEventListener('mousemove', _mousePosTracker)
 
     _cmdKeyDown = (e: KeyboardEvent) => {
@@ -2003,10 +2119,28 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     return depth > 0 && lastEnterPos !== -1 ? snap.slice(0, lastEnterPos) : snap
   }
 
+  // Rolling tail of what the user typed on the current line, used to spot the
+  // `/clear` command. Lives out here (rather than inside bindSessionHandlers)
+  // because the manual-paste path bypasses term.onData and has to feed it too —
+  // otherwise pasting "/clear" and pressing Enter stops triggering onClear.
+  let inputBuffer = ''
+
+  /** Input bookkeeping shared by term.onData and the manual-paste path. */
+  function noteUserInput(text: string): void {
+    if (isStopped.value) { isStopped.value = false; opts?.onUserResume?.() }
+    // Only what follows the last CR is still on the current line — without this
+    // a pasted "/clear\n" leaves "/clear" behind and the user's NEXT Enter
+    // fires onClear again.
+    const lastBreak = text.lastIndexOf('\r')
+    if (lastBreak >= 0) inputBuffer = ''
+    inputBuffer += text.slice(lastBreak + 1).replace(/[\x00-\x1f\x7f]/g, '')
+    if (inputBuffer.length > 100) inputBuffer = inputBuffer.slice(-100)
+  }
+
   // Wire input/output/exit handlers for the current sessionId. Shared by a fresh
   // spawn and a reattach so both bind identically.
   function bindSessionHandlers(): void {
-    let inputBuffer = ''
+    inputBuffer = ''
     inputDisposer = term.onData((data) => {
       if (data === '\r' || data === '\n' || data === '\r\n') {
         if (isStopped.value) { isStopped.value = false; opts?.onUserResume?.() }
@@ -2111,7 +2245,11 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // Try to rebind to a PTY that survived a reload. Returns true if the backend
   // confirms the persisted id is still alive (and we've rebound); false if it's
   // gone, in which case the caller spawns a fresh process.
-  async function tryReattach(): Promise<boolean> {
+  // `agentKey` matters when the caller reattaches WITHOUT ever calling spawn()
+  // (AiCliDock claims a surviving PTY at mount): spawn() is the only other place
+  // that records it, and without it every input-protocol decision — Shift+Enter
+  // encoding, forced bracketed paste — degrades to the plain-shell branch.
+  async function tryReattach(reattachOpts?: { agentKey?: string }): Promise<boolean> {
     if (!REATTACH_ON_RELOAD) return false
     const prev = persistedSessionId()
     if (!prev) return false
@@ -2143,6 +2281,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     term.write('\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?1004l\x1b[?2004l')
     sessionId.value = prev
     status.value = 'running'
+    if (reattachOpts?.agentKey) activeAgentKey = reattachOpts.agentKey
     bindSessionHandlers()
     pendingReattachRedraw = true      // reconciler repaints once the width is settled
     resizeCtrl.applyFit()             // start syncing size (no-op while hidden)
@@ -2521,6 +2660,44 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     })
   }
 
+  /**
+   * Send clipboard text the way programmatic injection already does.
+   *
+   * xterm's built-in paste writes the whole clipboard in one call and decides
+   * on bracketing from ITS view of DEC mode 2004. That view is wrong in exactly
+   * the case that hurts most: a reattached pane runs a fresh xterm (mode off by
+   * default, and tryReattach explicitly resets it) while the CLI on the other
+   * end is still in bracketed-paste mode. An unbracketed multi-line paste then
+   * reaches the CLI as one Enter per line — the first line submits and the rest
+   * spill into the next prompt, which is the "paste gets cut off" report.
+   * So bracket by what the AGENT supports, and reuse the 512-byte chunking that
+   * App.vue's injectText relies on to keep large pastes off the tty's limits.
+   */
+  function pasteFromClipboard(text: string): void {
+    // xterm drops input while stdin is disabled (CoreService); the pane does
+    // that while it is still preparing, and a paste must respect it too.
+    if (!text || term.options.disableStdin) return
+    // Same gate pasteText applies. Checked up front so a paste into a dead pane
+    // cannot clear `isStopped` (and fire onUserResume) while sending nothing.
+    if (!sessionId.value || status.value === 'exited' || status.value === 'error') return
+    // Same normalization xterm applies: a PTY expects CR, never CRLF/LF.
+    const normalized = text.replace(/\r?\n/g, '\r')
+    // Bracket when xterm knows the CLI asked for it, and — only for text that
+    // actually spans lines — when the agent is known to keep the mode on. That
+    // second case is the reattach hole this exists for; restricting it to
+    // multi-line text keeps a single-line paste on xterm's own judgement, so a
+    // sub-shell that never enabled mode 2004 cannot receive a literal "[200~".
+    const bracketed = term.modes.bracketedPasteMode ||
+      (normalized.includes('\r') && agentUsesBracketedPaste(activeAgentKey))
+    const payload = bracketed ? `\x1b[200~${normalized}\x1b[201~` : normalized
+    // The rest of what term.onData would have done for us (CoreService's
+    // _onUserInput plus this composable's own input bookkeeping).
+    noteUserInput(normalized)
+    for (const chunk of chunkForPty(payload, PASTE_CHUNK)) pasteText(chunk)
+    term.scrollToBottom()
+    term.clearSelection()
+  }
+
   async function interrupt(): Promise<void> {
     if (!sessionId.value) return
     isStopped.value = true
@@ -2610,12 +2787,15 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     clearInterval(tickInterval)
     clearInterval(reconcileInterval)
     if (freshSpawnRefitTimer) clearTimeout(freshSpawnRefitTimer)
+    if (_hintTimer) clearTimeout(_hintTimer)
     resizeCtrl.dispose()
     if (mountedEl && _mousedownHandler) mountedEl.removeEventListener('mousedown', _mousedownHandler)
     if (_cmdKeyDown) window.removeEventListener('keydown', _cmdKeyDown)
     if (_cmdKeyUp) window.removeEventListener('keyup', _cmdKeyUp)
     if (mountedEl && _mousePosTracker) mountedEl.removeEventListener('mousemove', _mousePosTracker)
     if (mountedEl && _cmdClickHandler) mountedEl.removeEventListener('mousedown', _cmdClickHandler, { capture: true })
+    if (mountedEl && _pasteHandler) mountedEl.removeEventListener('paste', _pasteHandler, true)
+    if (_focusOwner === term) _focusOwner = null
     document.querySelector('.term-file-picker-root')?.remove()
     closeMentionMenu()  // tear down any open @-mention menu (detaches doc listeners)
     term.textarea?.removeEventListener('focus', _onTermFocus)
@@ -2670,6 +2850,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     readLineBeforeCursor,
     updateXtermTheme,
     isAltBuffer,
+    optionSelectHint,
     getSelection: () => term.getSelection(),
     setDisableStdin: (disabled: boolean) => { term.options.disableStdin = disabled },
   }

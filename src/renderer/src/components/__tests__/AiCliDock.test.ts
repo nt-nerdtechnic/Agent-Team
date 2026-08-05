@@ -133,6 +133,9 @@ describe('AiCliDock — eager terminal mount + keep-alive toggle', () => {
     expect(term.props('paneId')).toBe('ab12cd34-test-cli-dock')
     expect(term.props('workspacePath')).toBe('/tmp/ws')
     expect(termSpies.tryReattach).toHaveBeenCalledTimes(1)
+    // The agent must ride along: this path never calls spawn(), and without it
+    // useTerminal falls back to plain-shell input encoding (Shift+Enter, paste).
+    expect(termSpies.tryReattach).toHaveBeenCalledWith({ agentKey: expect.any(String) })
     const panelEl = wrapper.find('.ai-dock-panel').element as HTMLElement
     expect(panelEl.style.display).toBe('none')
   })

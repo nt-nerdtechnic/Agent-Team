@@ -166,7 +166,10 @@ async function maybeReattach(): Promise<void> {
   reattaching.value = true
   try {
     await nextTick() // the v-if just unlocked — let the terminal mount first
-    await termRef.value?.tryReattach()
+    // Pass the agent: this path never calls spawn(), which is the only other
+    // place useTerminal records it, and the input protocol (Shift+Enter,
+    // bracketed paste) degrades to plain-shell encoding without it.
+    await termRef.value?.tryReattach({ agentKey: agentKey.value })
   } catch { /* PTY gone — fall through to the Start UI */ }
   finally { reattaching.value = false }
 }

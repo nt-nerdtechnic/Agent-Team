@@ -2,10 +2,10 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { createMockBackend, withScope } from './mockBackend'
 
-// Shift+Enter is one user-facing shortcut with CLI-specific wire encodings:
-// Codex understands CSI-u, while Claude Code's xterm.js terminal setup uses
-// ESC+CR. xterm won't boot in happy-dom, so the mock captures the custom key
-// event handler and the tests drive it directly.
+// Shift/Ctrl/Cmd+Enter are one user-facing shortcut with CLI-specific wire
+// encodings: Codex understands CSI-u, while Claude Code's xterm.js terminal
+// setup uses ESC+CR. xterm won't boot in happy-dom, so the mock captures the
+// custom key event handler and the tests drive it directly.
 
 const ctrl = vi.hoisted(() => ({
   applyFit: vi.fn(),
@@ -87,7 +87,7 @@ function keyEvent(overrides: Partial<KeyboardEvent>): KeyboardEvent {
   } as unknown as KeyboardEvent
 }
 
-describe('useTerminal — Shift+Enter key handling', () => {
+describe('useTerminal — newline chord key handling', () => {
   afterEach(() => {
     vi.clearAllMocks()
     captured.keyHandler = undefined
@@ -133,6 +133,46 @@ describe('useTerminal — Shift+Enter key handling', () => {
     expect(handled).toBe(false)
     expect(inputsSent(mock)).toEqual([
       { type: 'terminal.input', payload: { terminal_session_id: 'sess-1', data: '\x16\x0a' } },
+    ])
+    scope.stop()
+  })
+
+  // Ctrl+Enter and Cmd+Enter are indistinguishable from (or never reach) a
+  // plain Enter at the PTY, so both are free to carry the same newline UX.
+  it('encodes Ctrl+Enter like Shift+Enter', async () => {
+    const { mock, scope } = await spawnedTerminal('claude')
+    const handled = captured.keyHandler!(keyEvent({ key: 'Enter', ctrlKey: true }))
+    expect(handled).toBe(false)
+    expect(inputsSent(mock)).toEqual([
+      { type: 'terminal.input', payload: { terminal_session_id: 'sess-1', data: '\x1b[200~\n\x1b[201~' } },
+    ])
+    scope.stop()
+  })
+
+  // A plain shell receives Ctrl+Enter as a bare Enter and runs the command, so
+  // claiming it there would change what a plain terminal pane does.
+  it('leaves Ctrl+Enter alone in a non-agent pane', async () => {
+    const { mock, scope } = await spawnedTerminal(undefined)
+    const handled = captured.keyHandler!(keyEvent({ key: 'Enter', ctrlKey: true }))
+    expect(handled).toBe(true)
+    expect(inputsSent(mock)).toEqual([])
+    scope.stop()
+  })
+
+  it('leaves Ctrl+Enter alone in an explicit terminal pane', async () => {
+    const { mock, scope } = await spawnedTerminal('terminal')
+    const handled = captured.keyHandler!(keyEvent({ key: 'Enter', ctrlKey: true }))
+    expect(handled).toBe(true)
+    expect(inputsSent(mock)).toEqual([])
+    scope.stop()
+  })
+
+  it('encodes Cmd+Enter like Shift+Enter', async () => {
+    const { mock, scope } = await spawnedTerminal('codex')
+    const handled = captured.keyHandler!(keyEvent({ key: 'Enter', metaKey: true }))
+    expect(handled).toBe(false)
+    expect(inputsSent(mock)).toEqual([
+      { type: 'terminal.input', payload: { terminal_session_id: 'sess-1', data: '\x1b[13;2u' } },
     ])
     scope.stop()
   })

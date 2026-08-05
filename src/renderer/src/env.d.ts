@@ -46,6 +46,8 @@ declare global {
   type TccPermissionKey = 'automation' | 'notifications' | 'folders' | 'fullDisk'
   type TccPermissionStatus = 'granted' | 'denied' | 'unknown' | 'not-applicable'
   interface Window {
+    /** Set by useTerminal; read by the Edit > Copy menu item (see menu.ts). */
+    __navideTerminalSelection?: () => string
     agentTeam?: {
       appName: string
       version: string

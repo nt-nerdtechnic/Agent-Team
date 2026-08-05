@@ -8,6 +8,7 @@ import { extractDropPaths, shellEscape } from '../lib/drop'
 import { CLI_CONTEXT_MIME, PANE_ID_MIME, resolveCliDropSource, writeCliPaneDragPayload } from '../lib/cliContext'
 import { PLAN_REF_MIME, isPlanDrag, parsePlanRefPayload, type PlanDragRef } from '../lib/planDrag'
 import { formatLoopTime } from '../lib/loopPrompt'
+import { isMacPlatform } from '../keybindings/parseKey'
 import RebuildIcon from './RebuildIcon.vue'
 import UsageBadge from './UsageBadge.vue'
 import RestoredPanePlaceholder from './RestoredPanePlaceholder.vue'
@@ -201,6 +202,11 @@ function onTerminalDragLeave(): void {
   isCliDragOver.value = false
   isPlanDragOver.value = false
 }
+
+// Modifier that forces text selection while a CLI has mouse reporting on.
+// xterm binds it to Option on macOS (macOptionClickForcesSelection) and to
+// Shift everywhere else.
+const selectModifierLabel = isMacPlatform() ? '⌥ Option' : 'Shift'
 
 // xterm's selection lives outside the DOM, so main cannot read it from the
 // context-menu params — pass it along with the request.
@@ -416,6 +422,10 @@ onMounted(() => {
       @dragleave="onTerminalDragLeave"
       @drop.prevent="onTerminalDrop"
     ></div>
+    <!-- Optional-chained: the pane's tests stub useTerminal with partial objects. -->
+    <div v-if="terminal.optionSelectHint?.value" class="select-hint" aria-live="polite">
+      {{ $t('pane.terminal.option-select-hint', { key: selectModifierLabel }) }}
+    </div>
     <div v-if="isPreparing" class="prep-overlay" aria-live="polite">
       <div class="prep-panel">
         <div class="prep-spinner" />
@@ -688,6 +698,20 @@ onMounted(() => {
 }
 .xterm-host.plan-drag-over::after {
   content: 'Drop to inject plan goal';
+}
+/* Transient teaching hint; must never eat clicks meant for the terminal. */
+.select-hint {
+  position: absolute;
+  right: 10px;
+  bottom: 8px;
+  z-index: 9;
+  padding: 4px 9px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg-elevated) 92%, transparent);
+  color: var(--text-secondary);
+  font-size: 11px;
+  pointer-events: none;
 }
 .prep-overlay {
   position: absolute;

@@ -16,7 +16,7 @@ const ALIASES: Record<string, string> = {
 
 // 'mod' is the platform-primary modifier: Cmd (meta) on macOS, Ctrl elsewhere.
 // Resolved at parse time so rules written with 'mod' work on every platform.
-function isMacPlatform(): boolean {
+export function isMacPlatform(): boolean {
   if (typeof navigator === 'undefined') return false
   const platform = navigator.platform || ''
   if (platform) return /mac|iphone|ipad|ipod/i.test(platform)
