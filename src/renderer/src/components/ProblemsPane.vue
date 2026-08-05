@@ -24,7 +24,7 @@ interface Group { key: string; label: string; items: Diagnostic[] }
 const groups = computed((): Group[] => {
   const map = new Map<string, Group>()
   for (const d of all.value) {
-    const key = diagnosticsKey(d.wsPath ?? '', d.relPath)
+    const key = diagnosticsKey(d.wsPath, d.relPath)
     const g = map.get(key) ?? { key, label: fileLabel(d), items: [] }
     g.items.push(d)
     map.set(key, g)

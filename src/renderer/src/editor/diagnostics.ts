@@ -4,8 +4,9 @@ export interface Diagnostic {
   relPath: string
   /** Workspace root `relPath` is resolved against — files opened from outside
    *  the window's workspace carry their own root, so the same basename in two
-   *  roots stays two distinct entries. */
-  wsPath?: string
+   *  roots stays two distinct entries. Required: an omitted root would sort into
+   *  a different key space than the one readers compare against. */
+  wsPath: string
   line: number
   col: number
   endLine?: number
@@ -39,8 +40,8 @@ export function allDiagnosticsSorted(): Diagnostic[] {
     all.push(...diags)
   }
   return all.sort((a, b) => {
-    const ka = diagnosticsKey(a.wsPath ?? '', a.relPath)
-    const kb = diagnosticsKey(b.wsPath ?? '', b.relPath)
+    const ka = diagnosticsKey(a.wsPath, a.relPath)
+    const kb = diagnosticsKey(b.wsPath, b.relPath)
     if (ka !== kb) return ka.localeCompare(kb)
     return a.line - b.line
   })
