@@ -70,6 +70,12 @@ Codex、Antigravity 與 Grok 依賴 Log 或 Database Discovery，將新的 CLI S
 
 開啟 **System Settings → Privacy & Security**，檢查 Automation、Files and Folders、Accessibility 與 Full Disk Access。只授予特定 CLI 與 Workspace 實際需要的權限。修改權限後重新啟動受影響的應用程式。
 
+## Terminal Pane 的複製貼上行為異常
+
+- CLI 啟用 Mouse Reporting 時，一般拖曳會被轉送給程式本身，劃不出任何選取。請按住 **Option**（macOS）或 **Shift**（Windows/Linux）再拖曳，強制進行文字選取。
+- **Edit → Copy**、Pane 右鍵的 **Copy** 與 **⌘C / Ctrl+C** 都會複製終端機選取。終端機的選取對作業系統不可見，因此背景執行的第三方輔助使用或剪貼簿工具（Typeless 這類會攔截 Edit 選單或 Pasteboard 的工具）可能吃掉複製動作。若複製沒有任何反應，請關閉該工具（或在 **System Settings → Privacy & Security → Accessibility** 中排除 Navide）後再試。
+- 在 CLI 面板要插入換行而不送出，可按 **Shift+Enter**、**Ctrl+Enter** 或 **⌘Enter**。一般 shell 面板只有 Shift+Enter 有此作用 —— Ctrl+Enter 維持送出，因為那是 shell 原本的行為。單純的 Enter 一律送出。
+
 ## Context7 或 Documentation Injection 失敗
 
 Documentation Injection 採用 Best-effort。檢查 MCP Configuration、Package Runtime 與 Network Access。Fetch 失敗不應阻擋手動任務；如果 Workspace 必須保持離線，請停用整合。

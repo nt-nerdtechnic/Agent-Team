@@ -70,6 +70,12 @@ Codex、Antigravity、Grok は、Log または Database Discovery を利用し�
 
 **システム設定 → プライバシーとセキュリティ**を開き、Automation、Files and Folders、Accessibility、Full Disk Access を確認します。特定の CLI と Workspace に必要な権限だけを付与してください。権限変更後は影響を受ける Application を再起動します。
 
+## Terminal Pane のコピー＆ペーストがおかしい
+
+- CLI が Mouse Reporting を有効にしている間、通常のドラッグはプログラム側に転送され、何も選択できません。**Option**（macOS）または **Shift**（Windows/Linux）を押しながらドラッグして、テキスト選択を強制してください。
+- **Edit → Copy**、Pane の右クリック **Copy**、**⌘C / Ctrl+C** はいずれも Terminal の選択範囲をコピーします。Terminal の選択は OS からは見えないため、バックグラウンドで動作するサードパーティのアクセシビリティ／クリップボードツール（Edit メニューや Pasteboard を横取りする Typeless などのツール）がコピーを飲み込むことがあります。コピーが無反応の場合は、そのツールを終了する（または **システム設定 → プライバシーとセキュリティ → アクセシビリティ**で Navide を除外する）か確認してから再試行してください。
+- CLI パネルで送信せずに改行を入れるには、**Shift+Enter**、**Ctrl+Enter**、**⌘Enter** を押します。通常のシェルのパネルでは Shift+Enter のみが改行になり、Ctrl+Enter は従来どおり送信になります（シェル本来の挙動のため）。修飾なしの Enter は常に送信です。
+
 ## Context7 または Documentation Injection が失敗する
 
 Documentation Injection は Best-effort です。MCP Configuration、Package Runtime、Network Access を確認します。Fetch の失敗で Manual Task が Block されるべきではありません。Workspace を Offline に保つ必要がある場合は Integration を無効化してください。

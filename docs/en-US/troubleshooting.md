@@ -70,6 +70,12 @@ Codex, Antigravity, and Grok rely on log or database discovery to bind a new CLI
 
 Open **System Settings → Privacy & Security** and inspect Automation, Files and Folders, Accessibility, and Full Disk Access. Grant only permissions required for the specific CLI and workspace. Restart the affected application after changing permissions.
 
+## Copy and paste behave oddly in a terminal pane
+
+- While a CLI has mouse reporting on, a plain drag is forwarded to the program and selects nothing. Hold **Option** (macOS) or **Shift** (Windows/Linux) while dragging to force a text selection.
+- **Edit → Copy**, the pane's right-click **Copy**, and **⌘C / Ctrl+C** all copy the terminal selection. A terminal selection is invisible to the operating system, so a third-party accessibility or clipboard utility running in the background — Typeless and similar tools that intercept the Edit menu or the pasteboard — can swallow the copy. If a copy silently does nothing, quit that utility (or exclude Navide in **System Settings → Privacy & Security → Accessibility**) and try again.
+- To insert a newline without submitting in a CLI pane, press **Shift+Enter**, **Ctrl+Enter**, or **⌘Enter**. In a plain shell pane only Shift+Enter does this — Ctrl+Enter keeps submitting, because that is what a shell expects. Plain Enter always submits.
+
 ## Context7 or documentation injection fails
 
 Documentation injection is best-effort. Check the MCP configuration, package runtime, and network access. A failed fetch should not block a manual task; disable the integration if the workspace must remain offline.

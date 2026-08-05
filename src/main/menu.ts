@@ -1,4 +1,4 @@
-import { app, Menu, type MenuItemConstructorOptions } from 'electron'
+import { app, clipboard, Menu, webContents, type BrowserWindow, type MenuItemConstructorOptions } from 'electron'
 
 /**
  * Application menu.
@@ -59,11 +59,66 @@ export interface AppMenuHooks {
   onOpenPlansPlugin?: () => void
 }
 
+/**
+ * Expression evaluated in the focused page to read a terminal selection.
+ *
+ * useTerminal publishes this global; a page with no terminal (or a plugin view,
+ * which gets a different preload) simply does not have it and yields '', which
+ * routes the copy back to Chromium's own implementation.
+ */
+export const TERMINAL_SELECTION_EXPRESSION = 'window.__navideTerminalSelection?.() ?? ""'
+
+/** How long Edit > Copy waits for the page before falling back to its own copy. */
+const SELECTION_READ_TIMEOUT_MS = 300
+
 export function installApplicationMenu(
   hooks: AppMenuHooks = {},
   recents: RecentMenuEntry[] = []
 ): void {
   const isMac = process.platform === 'darwin'
+
+  // `role: 'copy'` copies the DOM selection, which a terminal pane never has
+  // (`.xterm` is user-select: none), so Edit > Copy was inert while a CLI was
+  // showing. Read the selection out of the focused page instead, and fall back
+  // to Chromium's own copy for everything else.
+  //
+  // The target is `webContents.getFocusedWebContents()`, NOT the window's own
+  // webContents: plugin UI lives in a child WebContentsView whose host window
+  // renders a blank page (see frontendPluginManager), so anything addressed to
+  // the window would reach nobody at all. Same conclusion context-menu.ts
+  // already reached for the right-click menu.
+  const copyItem: MenuItemConstructorOptions = {
+    label: 'Copy',
+    accelerator: 'CmdOrCtrl+C',
+    // Nothing awaits this handler, so every path must swallow its own errors:
+    // an escaping rejection becomes an unhandled rejection in the main process.
+    click: async (_item, win) => {
+      try {
+        const target =
+          webContents.getFocusedWebContents() ??
+          // The click signature types the window as BaseWindow; every window
+          // this app creates is a BrowserWindow, so the narrowing is safe.
+          (win as BrowserWindow | undefined)?.webContents
+        if (!target || target.isDestroyed()) return
+        let selection: unknown = ''
+        try {
+          // executeJavaScript never settles while the page is navigating, which
+          // would strand Copy with no fallback — race it against a short
+          // deadline and treat a slow page as "no terminal selection".
+          selection = await Promise.race([
+            target.executeJavaScript(TERMINAL_SELECTION_EXPRESSION, true),
+            new Promise((resolve) => setTimeout(() => resolve(''), SELECTION_READ_TIMEOUT_MS))
+          ])
+        } catch { /* page not ready — fall through to the built-in copy */ }
+        // The WebContents can be gone by the time the round-trip returns.
+        if (target.isDestroyed()) return
+        // Written from main, so it never depends on the page holding DOM focus
+        // (opening the menu takes it away) — same reason context-menu.ts does.
+        if (typeof selection === 'string' && selection) clipboard.writeText(selection)
+        else target.copy()
+      } catch { /* window torn down mid-copy — nothing useful to do */ }
+    }
+  }
 
   const settingsItem: MenuItemConstructorOptions = {
     label: 'Settings…',
@@ -135,7 +190,7 @@ export function installApplicationMenu(
         { role: 'redo' },
         { type: 'separator' },
         { role: 'cut' },
-        { role: 'copy' },
+        copyItem,
         { role: 'paste' },
         ...(isMac
           ? [

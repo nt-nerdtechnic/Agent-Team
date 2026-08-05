@@ -203,6 +203,7 @@
       "sort-progress": "Progress"
     },
     "terminal": {
+      "option-select-hint": "This CLI captures the mouse — hold {key} while dragging to select text",
       "click-to-resume": "Click to resume",
       "resuming": "Resuming…",
       "rebuild-tooltip": "Rebuild (resume) ⌘⇧B — kill and re-spawn via --resume at the current size to clear ghosting/overlap that can't be repainted. Interrupts the in-progress turn and reprints the conversation.",

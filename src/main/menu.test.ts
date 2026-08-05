@@ -1,13 +1,18 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type { MenuItemConstructorOptions } from 'electron'
 
-// Shared, hoisted capture of the template passed to Menu.buildFromTemplate.
+// Shared, hoisted capture of the template passed to Menu.buildFromTemplate,
+// plus the clipboard / focused-WebContents doubles Edit > Copy drives.
 const h = vi.hoisted(() => ({
-  template: [] as MenuItemConstructorOptions[]
+  template: [] as MenuItemConstructorOptions[],
+  clipboardWrites: [] as string[],
+  focusedWebContents: null as unknown
 }))
 
 vi.mock('electron', () => ({
   app: { name: 'Agent-Team' },
+  clipboard: { writeText: (text: string) => h.clipboardWrites.push(text) },
+  webContents: { getFocusedWebContents: () => h.focusedWebContents },
   Menu: {
     buildFromTemplate: (template: MenuItemConstructorOptions[]) => {
       h.template = template
@@ -18,6 +23,21 @@ vi.mock('electron', () => ({
 }))
 
 import { installApplicationMenu, type AppMenuHooks } from './menu'
+
+const clipboardWrites = h.clipboardWrites
+
+/** Stand-in for the WebContents that currently holds focus. */
+const focused = {
+  selection: '',
+  throws: false,
+  copyCalls: 0,
+  isDestroyed: (): boolean => false,
+  executeJavaScript: async (): Promise<string> => {
+    if (focused.throws) throw new Error('no such page')
+    return focused.selection
+  },
+  copy: (): void => { focused.copyCalls++ }
+}
 
 const isMac = process.platform === 'darwin'
 
@@ -58,6 +78,11 @@ describe('installApplicationMenu', () => {
 
   beforeEach(() => {
     hooks = makeHooks()
+    clipboardWrites.length = 0
+    focused.selection = ''
+    focused.throws = false
+    focused.copyCalls = 0
+    h.focusedWebContents = focused
     installApplicationMenu(hooks)
   })
 
@@ -121,6 +146,67 @@ describe('installApplicationMenu', () => {
     const item = itemIn(submenuOf('Window'), 'Pipeline Manager')
     fire(item)
     expect(hooks.calls).toEqual(['pipeline-manager'])
+  })
+
+  // role: 'copy' copies the DOM selection, which a terminal pane never has, so
+  // Edit > Copy reads the selection out of the focused page instead.
+  describe('Edit > Copy', () => {
+    function clickCopy(win?: unknown): Promise<void> {
+      const copy = itemIn(submenuOf('Edit'), 'Copy')
+      expect(copy.role).toBeUndefined()
+      return (copy.click as unknown as (item: unknown, win: unknown) => Promise<void>)(undefined, win)
+    }
+
+    it('copies a terminal selection through main, not the page clipboard', async () => {
+      focused.selection = 'selected terminal text'
+      await clickCopy()
+      expect(clipboardWrites).toEqual(['selected terminal text'])
+      expect(focused.copyCalls).toBe(0)
+    })
+
+    it('falls back to the built-in copy when the page reports no selection', async () => {
+      focused.selection = ''
+      await clickCopy()
+      expect(clipboardWrites).toEqual([])
+      expect(focused.copyCalls).toBe(1)
+    })
+
+    // A plugin view (different preload, no terminal global) rejects the eval;
+    // the copy must still happen rather than silently doing nothing.
+    it('falls back when the page cannot be evaluated at all', async () => {
+      focused.throws = true
+      await clickCopy()
+      expect(clipboardWrites).toEqual([])
+      expect(focused.copyCalls).toBe(1)
+    })
+
+    // The plugin host window renders a blank page; its child WebContentsView is
+    // what holds focus, so the window must never be preferred over it.
+    it('prefers the focused WebContents over the window it was invoked from', async () => {
+      focused.selection = 'from the focused view'
+      const winContents = { isDestroyed: () => false, executeJavaScript: async () => 'from the window', copy: () => {} }
+      await clickCopy({ webContents: winContents })
+      expect(clipboardWrites).toEqual(['from the focused view'])
+    })
+
+    it('does nothing (without throwing) when nothing is focused', async () => {
+      h.focusedWebContents = null
+      await expect(clickCopy()).resolves.toBeUndefined()
+      expect(clipboardWrites).toEqual([])
+    })
+
+    // Nothing awaits the click handler, so a throw here would surface as an
+    // unhandled rejection in the main process rather than a failed copy.
+    it('survives a WebContents destroyed mid-copy', async () => {
+      const destroyed = {
+        isDestroyed: () => true,
+        executeJavaScript: async () => { throw new Error('Object has been destroyed') },
+        copy: () => { throw new Error('Object has been destroyed') }
+      }
+      h.focusedWebContents = destroyed
+      await expect(clickCopy()).resolves.toBeUndefined()
+      expect(clipboardWrites).toEqual([])
+    })
   })
 
   it('View still has no webContents zoom roles (deliberate omission)', () => {
