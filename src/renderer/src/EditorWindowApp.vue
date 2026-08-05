@@ -29,6 +29,21 @@ import type { Diagnostic } from './editor/diagnostics'
 const params = new URLSearchParams(window.location.search)
 const workspacePath = params.get('workspace_path') ?? ''
 const workspaceBaseName = workspacePath.split('/').filter(Boolean).at(-1) ?? workspacePath
+// Canonical spelling of the same workspace, used ONLY for comparisons — the
+// workspace stays displayed as the user opened it. A workspace reached through
+// a symlink (/tmp/wt/proj → /private/tmp/wt/proj, routine with git worktrees on
+// macOS) comes back from the OS file picker in its canonical form; comparing
+// only the literal string would file that pick as an external root and give one
+// physical file two tabs, two buffers and two mtime baselines, so whichever is
+// saved second silently overwrites the other. Resolved once here because
+// `normWs`/⌘O are synchronous; empty until the IPC lands, which matches "no
+// canonical alias known" and simply falls back to literal comparison.
+const workspaceRealPath = ref('')
+if (workspacePath) {
+  void window.agentTeam?.realpath?.(workspacePath)
+    .then((p) => { if (p) workspaceRealPath.value = p.replace(/\/+$/, '') || '/' })
+    .catch(() => { /* keep the literal-only comparison */ })
+}
 const initialRel = params.get('filepath') ?? ''
 // Files outside the window's workspace are addressed by (file_ws, filepath):
 // the file's own parent directory is used as the backend workspace root.
@@ -192,6 +207,9 @@ function normWs(ws: string | undefined | null): string | undefined {
   // Strip trailing slashes, but keep the filesystem root itself: '/' must stay a
   // root of its own, not collapse to "the window's workspace".
   const v = ws.replace(/\/+$/, '') || '/'
+  // The canonical spelling of the window's workspace folds too, or the same
+  // file reached through a symlinked root would key as a second tab.
+  if (v === workspaceRealPath.value) return undefined
   return v !== (workspacePath.replace(/\/+$/, '') || '/') ? v : undefined
 }
 function fileWs(f: { wsPath?: string }): string { return f.wsPath || workspacePath }
@@ -854,10 +872,16 @@ registerCommand('workbench.action.reloadWindow', () => { window.location.reload(
 registerCommand('workbench.action.openFile', async () => {
   const result = await window.agentTeam?.pickFile({ title: 'Open File' })
   if (!result?.ok || !result.path) return
-  const prefix = workspacePath.replace(/\/+$/, '') + '/'
-  if (workspacePath && result.path.startsWith(prefix)) {
-    openFile({ filepath: result.path.slice(prefix.length) })
-    return
+  // The picker answers with a canonical path, so a workspace opened through a
+  // symlink only matches under its resolved spelling — test both, and cut the
+  // relPath with whichever prefix hit.
+  for (const root of [workspacePath, workspaceRealPath.value]) {
+    if (!root) continue
+    const prefix = root.replace(/\/+$/, '') + '/'
+    if (result.path.startsWith(prefix)) {
+      openFile({ filepath: result.path.slice(prefix.length) })
+      return
+    }
   }
   // Outside the workspace: the file's own directory becomes its root, so the
   // absolute path never leaks into a relPath the backend would reject.

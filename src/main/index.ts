@@ -1432,6 +1432,17 @@ ipcMain.handle('fs:readFrom', async (_event, filePath: string, fromByte: number)
   }
 })
 
+// Canonical form of a path, over the same normalizer the main process uses for
+// workspaces. The renderer has no fs access, but it needs this to tell whether
+// two spellings — /tmp/wt/proj from a URL param vs /private/tmp/wt/proj from the
+// OS file picker — name the same folder. Never rejects: an unresolvable path
+// degrades to the trimmed input, and an empty answer simply leaves the caller
+// comparing literals.
+ipcMain.handle('fs:realpath', async (_event, target: string) => {
+  if (typeof target !== 'string' || !target) return ''
+  return normalizeWorkspacePath(target)
+})
+
 // Legacy spawnHistory fallback: find a manual-session log by filename when
 // outputLogFile wasn't recorded at spawn time (see manual-log-search.ts).
 ipcMain.handle('logs:findManualLog', async (_event, workspacePath: string, filename: string) => {
