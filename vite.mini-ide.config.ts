@@ -40,7 +40,7 @@ function emitManifest(): Plugin {
     closeBundle() {
       const manifest = {
         id: 'navide.mini-ide',
-        name: 'Mini IDE',
+        name: 'Mini-IDE',
         displayName: 'Navide Mini-IDE',
         description: 'Editor, diff, git and terminal surface for Navide workspaces.',
         version: APP_VERSION,

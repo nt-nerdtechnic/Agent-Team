@@ -1052,7 +1052,7 @@ describe('mini-IDE dedicated window (openMiniIdePluginView)', () => {
     expect(win.options).toMatchObject({
       width: 1100,
       height: 760,
-      title: 'Navide · Editor',
+      title: 'Mini-IDE',
       titleBarStyle: 'hidden',
       backgroundColor: '#0d1117',
     })

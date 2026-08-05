@@ -263,7 +263,7 @@ describe('PlanWindowApp', () => {
     expect(pane.exists()).toBe(true)
     expect(pane.props('workspacePath')).toBe('/tmp/demo-ws')
     expect(wrapper.find('.plan-window-empty').exists()).toBe(true)
-    expect(document.title).toBe('Plans · demo-ws')
+    expect(document.title).toBe('demo-ws — Plans')
   })
 
   it('hosts the shared AI CLI dock with this window\'s keys and eager terminal', async () => {
