@@ -311,6 +311,29 @@ describe('CliAccountsPane', () => {
     expect(setDefault).toHaveBeenCalledWith('claude', 'p1')
   })
 
+  it('shows the row busy and drops competing clicks until the switch settles', async () => {
+    const api = makeApi({ profiles: [profile('p1', 'claude', 'Account 2')] })
+    let release: (res: { ok: boolean }) => void = () => {}
+    const setDefault = api.setDefault as ReturnType<typeof vi.fn>
+    setDefault.mockImplementation(
+      () => new Promise<{ ok: boolean }>((resolve) => { release = resolve }),
+    )
+    const w = mountPane(api)
+
+    await buttonByText(section(w, 0), 'Set as default')!.trigger('click')
+    await flushPromises()
+
+    const busy = buttonByText(section(w, 0), 'Switching…')
+    expect(busy).toBeDefined()
+    expect(busy!.attributes('disabled')).toBeDefined()
+    expect(buttonByText(section(w, 0), 'Set as default')).toBeUndefined()
+
+    release({ ok: true })
+    await flushPromises()
+    expect(setDefault).toHaveBeenCalledTimes(1)
+    expect(buttonByText(section(w, 0), 'Switching…')).toBeUndefined()
+  })
+
   // ── quiescence switch handler (main window) ────────────────────────────────
 
   it('routes Set as default through the provided switch handler', async () => {
@@ -561,6 +584,22 @@ describe('CliAccountsPane', () => {
     expect(cards[0].get('.cli-card-big').text()).toContain('70%')
     expect(cards[0].get('.cli-card-cache').text()).toContain('Cached')
     expect(cards[0].get('.cli-card-refresh').text()).toContain('rate limited')
+  })
+
+  it('translates the parked-account refresh state instead of printing the raw key', () => {
+    // Parked Claude accounts come back as `not-measured`; the pane used to omit
+    // it from its own allow-list and render the bare key.
+    usage.accountUsageFor.mockReturnValue(
+      usageSnapshot({ stale: true, refreshStatus: 'not-measured' }),
+    )
+    const w = mountPane(
+      makeApi({
+        identities: { claude: { __default__: { email: 'me@example.com', signedIn: true } } },
+      }),
+    )
+    const refresh = section(w, 0).findAll('.cli-card')[0].get('.cli-card-refresh').text()
+    expect(refresh).toContain('Not measured')
+    expect(refresh).not.toContain('not-measured')
   })
 
   it('does not present a cached window after its reset has passed', () => {

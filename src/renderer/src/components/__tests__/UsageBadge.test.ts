@@ -372,6 +372,60 @@ describe('UsageBadge – selectProfile', () => {
     expect(usage.refreshUsage).toHaveBeenCalledTimes(1)
   })
 
+  it('marks the target row busy and drops competing clicks until it settles', async () => {
+    usage.usageFor.mockReturnValue(snapshot())
+    let release: (res: { ok: boolean }) => void = () => {}
+    const setDefault = vi.fn(
+      () => new Promise<{ ok: boolean }>((resolve) => { release = resolve }),
+    )
+    const { fake } = makeCliProfiles({
+      profiles: [profile('p1', 'Work'), profile('p2', 'Personal')],
+      defaultId: null,
+      setDefault,
+    })
+    wrapper = mountBadge(fake)
+    await openPopover(wrapper)
+    // Re-query after every render: a DOMWrapper captured earlier does not see
+    // children added by a later patch.
+    const rows = (): ReturnType<VueWrapper['findAll']> => wrapper!.findAll('.usage-acct')
+    await rows()[1].trigger('click')
+    await settle()
+
+    // In flight: spinner on the clicked row only, every row unclickable.
+    expect(wrapper.findAll('.usage-acct-spin')).toHaveLength(1)
+    expect(rows()[1].find('.usage-acct-spin').exists()).toBe(true)
+    expect(rows().every((r) => r.attributes('disabled') !== undefined)).toBe(true)
+    await rows()[2].trigger('click')
+    await settle()
+    expect(setDefault).toHaveBeenCalledTimes(1)
+
+    release({ ok: true })
+    await settle()
+    expect(wrapper.findAll('.usage-acct-spin')).toHaveLength(0)
+    expect(rows()[1].attributes('disabled')).toBeUndefined()
+    expect(usage.refreshUsage).toHaveBeenCalledTimes(1)
+  })
+
+  it('releases the busy row when the switch fails', async () => {
+    usage.usageFor.mockReturnValue(snapshot())
+    const setDefault = vi.fn().mockResolvedValue({ ok: false, message: 'switch failed' })
+    const { fake } = makeCliProfiles({
+      profiles: [profile('p1', 'Work')],
+      defaultId: null,
+      setDefault,
+    })
+    wrapper = mountBadge(fake)
+    await openPopover(wrapper)
+    await wrapper.findAll('.usage-acct')[1].trigger('click')
+    await settle()
+
+    expect(wrapper.findAll('.usage-acct-spin')).toHaveLength(0)
+    // A second attempt is possible after the failure — the guard is not sticky.
+    await wrapper.findAll('.usage-acct')[1].trigger('click')
+    await settle()
+    expect(setDefault).toHaveBeenCalledTimes(2)
+  })
+
   it('clicking the already-active row is a no-op', async () => {
     usage.usageFor.mockReturnValue(snapshot())
     const { fake, setDefault } = makeCliProfiles({
