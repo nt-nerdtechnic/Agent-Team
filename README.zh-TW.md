@@ -10,7 +10,7 @@ Navide 是一套開源、AI-native 的軟體工程環境，專為一個人調度
 
 [English](README.md) | 繁體中文 | [日本語](README.ja-JP.md)
 
-[下載 v0.1.75](https://github.com/nt-nerdtechnic/Navide/releases/tag/v0.1.75) | [開始使用](docs/zh-TW/getting-started.md) | [文件中心](docs/zh-TW/README.md) | [Roadmap](docs/zh-TW/roadmap.md)
+[下載 v0.1.76](https://github.com/nt-nerdtechnic/Navide/releases/tag/v0.1.76) | [開始使用](docs/zh-TW/getting-started.md) | [文件中心](docs/zh-TW/README.md) | [Roadmap](docs/zh-TW/roadmap.md)
 
 [![Latest release](https://img.shields.io/github/v/release/nt-nerdtechnic/Navide?sort=semver&label=release&logo=github)](https://github.com/nt-nerdtechnic/Navide/releases/latest)
 [![Electron](https://img.shields.io/badge/Electron-33-47848F?logo=electron)](https://www.electronjs.org/)
@@ -115,10 +115,10 @@ Local-first 不代表所有情況都完全離線。使用外部 Agent CLI、雲�
 
 ## 試用 Navide
 
-Navide 支援配備 Apple 晶片且執行 macOS 13 以上版本的 Mac。v0.1.75 為經 Developer ID 簽章並通過 Apple Notarization 的正式版本：
+Navide 支援配備 Apple 晶片且執行 macOS 13 以上版本的 Mac。v0.1.76 為經 Developer ID 簽章並通過 Apple Notarization 的正式版本：
 
-- [下載 DMG](https://github.com/nt-nerdtechnic/Navide/releases/download/v0.1.75/Navide-0.1.75-arm64.dmg)
-- [下載 ZIP](https://github.com/nt-nerdtechnic/Navide/releases/download/v0.1.75/Navide-0.1.75-arm64.zip)
+- [下載 DMG](https://github.com/nt-nerdtechnic/Navide/releases/download/v0.1.76/Navide-0.1.76-arm64.dmg)
+- [下載 ZIP](https://github.com/nt-nerdtechnic/Navide/releases/download/v0.1.76/Navide-0.1.76-arm64.zip)
 
 將 Navide 複製到「應用程式」後即可正常開啟，無需繞過 Gatekeeper。自此版本起支援 App 內自動更新。
 
