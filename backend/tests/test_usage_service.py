@@ -1080,20 +1080,95 @@ async def test_fetch_antigravity_no_credentials(monkeypatch):
     assert snap["status"] == "no-credentials"
 
 
-async def test_fetch_antigravity_signed_in_reports_unavailable(monkeypatch):
-    """No token is minted and no quota call is made.
+async def test_fetch_antigravity_needs_operator_supplied_oauth_config(monkeypatch):
+    """Enabling this provider is a deliberate act, not something a build ships.
 
-    This read used to exchange the CLI's own client_id/secret for a Google
-    access token in-process, then call ``v1internal:retrieveUserQuotaSummary``
-    as ``User-Agent: antigravity`` — impersonation on both halves. The refresh
-    token is still read, but only to answer "signed in".
-    """
+    Minting the access token needs Antigravity's own OAuth client credentials.
+    This app neither bundles nor stores them, so with the environment unset the
+    account still reads as signed in and the quota says why it is missing —
+    without any request going out."""
     _with_antigravity_refresh_token(monkeypatch)
+    monkeypatch.setattr(us, "ANTIGRAVITY_CLIENT_ID", "")
+    monkeypatch.setattr(us, "ANTIGRAVITY_CLIENT_SECRET", "")
     calls = _fake_httpx(monkeypatch, {})
+
     snap = await us.fetch_antigravity(Path("/x"))
+
     assert snap["status"] == "unavailable"
-    assert snap["error"] == us.NO_OFFICIAL_USAGE_SURFACE
+    assert snap["error"] == us.ANTIGRAVITY_NEEDS_OAUTH_CONFIG
     assert calls == []
+
+
+def _with_antigravity_oauth_config(monkeypatch):
+    monkeypatch.setattr(us, "ANTIGRAVITY_CLIENT_ID", "cid")
+    monkeypatch.setattr(us, "ANTIGRAVITY_CLIENT_SECRET", "csec")
+
+
+async def test_fetch_antigravity_reads_the_quota_when_configured(monkeypatch):
+    _with_antigravity_refresh_token(monkeypatch)
+    _with_antigravity_oauth_config(monkeypatch)
+    calls = _fake_httpx(monkeypatch, {
+        us.ANTIGRAVITY_TOKEN_URL: _FakeResponse(200, {"access_token": "ya29.new"}),
+        us.ANTIGRAVITY_LOAD_URL: _FakeResponse(200, {
+            "currentTier": {"id": "free-tier", "name": "Antigravity"},
+            "cloudaicompanionProject": "proj-1",
+        }),
+        us.ANTIGRAVITY_QUOTA_URL: _FakeResponse(200, {
+            "groups": [{"displayName": "Gemini Models", "buckets": [
+                {"bucketId": "gemini-weekly", "displayName": "Weekly Limit",
+                 "window": "weekly", "resetTime": "2026-07-30T06:18:23Z",
+                 "remainingFraction": 0.22621265},
+            ]}],
+        }),
+    })
+
+    snap = await us.fetch_antigravity(Path("/x"))
+
+    assert snap["status"] == "ok"
+    assert snap["planType"] == "Antigravity"
+    assert snap["windows"] == [{
+        "kind": "weekly", "label": "Gemini Models — Weekly Limit",
+        "usedPercent": 77.4, "resetsAt": "2026-07-30T06:18:23Z",
+    }]
+    quota_kwargs = next(kw for url, kw in calls if url == us.ANTIGRAVITY_QUOTA_URL)
+    assert quota_kwargs["json"] == {"project": "proj-1"}
+    assert quota_kwargs["headers"]["Authorization"] == "Bearer ya29.new"
+    # The quota call no longer claims to be the vendor's own client.
+    assert quota_kwargs["headers"]["User-Agent"] == "Navide"
+
+
+async def test_fetch_antigravity_never_writes_the_minted_token_back(monkeypatch):
+    """The access token lives in memory for one call. Google's grant returns no
+    new refresh token, so nothing the CLI owns rotates — the failure mode that
+    killed Claude accounts cannot happen here."""
+    _with_antigravity_refresh_token(monkeypatch)
+    _with_antigravity_oauth_config(monkeypatch)
+    calls = _fake_httpx(monkeypatch, {
+        us.ANTIGRAVITY_TOKEN_URL: _FakeResponse(200, {"access_token": "ya29.x"}),
+        us.ANTIGRAVITY_LOAD_URL: _FakeResponse(403, {}),
+        us.ANTIGRAVITY_QUOTA_URL: _FakeResponse(200, {"groups": []}),
+    })
+
+    await us.fetch_antigravity(Path("/x"))
+
+    token_kwargs = next(kw for url, kw in calls if url == us.ANTIGRAVITY_TOKEN_URL)
+    assert token_kwargs["data"]["grant_type"] == "refresh_token"
+    assert token_kwargs["data"]["refresh_token"] == "1//rt"
+    # Nothing in the response is persisted; only the request carried a secret.
+    assert all(url != us.ANTIGRAVITY_TOKEN_URL or "json" not in kw
+               for url, kw in calls)
+
+
+async def test_fetch_antigravity_expired_grant_reads_as_expired(monkeypatch):
+    _with_antigravity_refresh_token(monkeypatch)
+    _with_antigravity_oauth_config(monkeypatch)
+    _fake_httpx(monkeypatch, {
+        us.ANTIGRAVITY_TOKEN_URL: _FakeResponse(400, {"error": "invalid_grant"}),
+    })
+
+    snap = await us.fetch_antigravity(Path("/x"))
+
+    assert snap["status"] == "expired"
 
 
 # ── opencode fetch (aggregator over auth.json entries) ──────────────────────
@@ -1234,20 +1309,67 @@ async def test_fetch_qwen_no_credentials_and_legacy_oauth(tmp_path):
     assert "Coding Plan API key" in snap["error"]
 
 
-async def test_fetch_qwen_with_key_reports_unavailable(tmp_path, monkeypatch):
-    """The console gateway is not an API for this app to call.
-
-    Quota only ever came from ModelStudio's own ``data/api.json`` console
-    gateway, reached with a browser User-Agent plus matching Origin/Referer —
-    a surface built for a logged-in web session. The key is still detected, so
-    the account reads as signed in.
-    """
+async def test_fetch_qwen_reads_the_quota_without_a_browser_costume(
+    tmp_path, monkeypatch
+):
+    """The API key is what the gateway authenticates; the browser User-Agent it
+    used to send was decoration. Origin/Referer stay — the gateway refuses
+    cross-site posts without them, and they name the console the endpoint
+    belongs to rather than claiming to be its client."""
     _with_qwen_key(monkeypatch)
-    calls = _fake_httpx(monkeypatch, {})
+    calls = _fake_httpx(monkeypatch, {
+        us.QWEN_INTL_USAGE_URL: _FakeResponse(200, {
+            "data": {"codingPlanInstanceInfos": [{
+                "planName": "Pro",
+                "per5HourUsedQuota": 10, "per5HourTotalQuota": 40,
+            }]},
+        }),
+    })
+
     snap = await us.fetch_qwen(tmp_path, {})
-    assert snap["status"] == "unavailable"
-    assert snap["error"] == us.NO_OFFICIAL_USAGE_SURFACE
-    assert calls == []
+
+    assert snap["status"] == "ok"
+    assert snap["planType"] == "Pro"
+    assert [(w["kind"], w["usedPercent"]) for w in snap["windows"]] == [
+        ("session", 25.0)]
+    assert len(calls) == 1  # intl answered: no CN retry
+    headers = calls[0][1]["headers"]
+    assert headers["User-Agent"] == "Navide"
+    assert "Mozilla" not in headers["User-Agent"]
+    assert headers["Authorization"] == "Bearer sk-sp-test"
+    assert headers["Origin"] == "https://modelstudio.console.alibabacloud.com"
+
+
+async def test_fetch_qwen_retries_the_other_region(tmp_path, monkeypatch):
+    """A region that refuses is retried against the alternate one."""
+    _with_qwen_key(monkeypatch)
+    calls = _fake_httpx(monkeypatch, {
+        us.QWEN_INTL_USAGE_URL: _FakeResponse(500, {}),
+        us.QWEN_CN_USAGE_URL: _FakeResponse(200, {
+            "codingPlanInstanceInfos": [{
+                "perWeekUsedQuota": 5, "perWeekTotalQuota": 10}]}),
+    })
+
+    snap = await us.fetch_qwen(tmp_path, {})
+
+    assert snap["status"] == "ok"
+    assert [url for url, _ in calls] == [us.QWEN_INTL_USAGE_URL,
+                                         us.QWEN_CN_USAGE_URL]
+    cn_body = calls[1][1]["json"]["queryCodingPlanInstanceInfoRequest"]
+    assert cn_body["commodityCode"] == "sfm_codingplan_public_cn"
+
+
+async def test_fetch_qwen_tunnelled_auth_failure_is_expired(tmp_path, monkeypatch):
+    """The gateway answers 200 with a NeedLogin marker instead of a 401."""
+    _with_qwen_key(monkeypatch)
+    _fake_httpx(monkeypatch, {
+        us.QWEN_INTL_USAGE_URL: _FakeResponse(200, {"code": "NeedLogin"}),
+        us.QWEN_CN_USAGE_URL: _FakeResponse(200, {"code": "NeedLogin"}),
+    })  # both regions tunnel the same auth failure
+
+    snap = await us.fetch_qwen(tmp_path, {})
+
+    assert snap["status"] == "expired"
 
 
 # ── kilo fetch (credit balance + best-effort Kilo Pass) ─────────────────────
@@ -1528,31 +1650,54 @@ async def test_fetch_copilot_no_credentials(monkeypatch):
     assert snap["status"] == "no-credentials"
 
 
-async def test_fetch_copilot_signed_in_reports_unavailable(monkeypatch):
-    """``copilot_internal/user`` answered the VS Code extension, not us.
+async def test_fetch_copilot_reads_the_quota_without_a_costume(monkeypatch):
+    """The read is back, and it says who is calling.
 
-    Reaching it meant sending that extension's User-Agent and Editor-Version.
-    The CLI's own ``/usage`` is not a substitute — it renders inside a TUI that
-    needs a full terminal handshake, and reports session credits, not the plan.
-    Token discovery still runs, so the account reads as signed in.
-    """
+    It used to send ``GitHubCopilotChat/…`` plus VS Code Editor-Version
+    headers. Measured 2026-08-05: the endpoint answers 200 to a plain
+    ``User-Agent: Navide`` with the same body, so the costume was never
+    load-bearing. This pins that it does not come back."""
     _with_copilot_gh_token(monkeypatch)
-    calls = _fake_httpx(monkeypatch, {})
+    calls = _fake_httpx(monkeypatch, {
+        _COPILOT_USAGE_URL: _FakeResponse(200, {
+            "copilot_plan": "individual",
+            "quota_reset_date_utc": "2026-08-01T00:00:00.000Z",
+            "quota_snapshots": {
+                "chat": {"percent_remaining": 98.7, "has_quota": True},
+            },
+        }),
+    })
+
     snap = await us.fetch_copilot(Path("/x"), {})
-    assert snap["status"] == "unavailable"
-    assert snap["error"] == us.NO_OFFICIAL_USAGE_SURFACE
-    assert calls == []
+
+    assert snap["status"] == "ok"
+    assert snap["planType"] == "individual"
+    assert snap["windows"] == [{
+        "kind": "monthly", "label": "Chat", "usedPercent": 1.3,
+        "resetsAt": "2026-08-01T00:00:00.000Z",
+    }]
+    headers = next(kw for url, kw in calls if url == _COPILOT_USAGE_URL)["headers"]
+    assert headers["Authorization"] == "token gho_test"
+    assert headers["User-Agent"] == "Navide"
+    assert "Editor-Version" not in headers
+    assert "Editor-Plugin-Version" not in headers
 
 
 async def test_fetch_copilot_token_discovery_still_works(monkeypatch):
     """Sign-in detection is unchanged: env fallback still counts as signed in,
-    and no token at all is still no-credentials."""
+    and no token at all is still no-credentials (with no request made)."""
     _with_copilot_gh_token(monkeypatch, token=None)
-    calls = _fake_httpx(monkeypatch, {})
+    calls = _fake_httpx(monkeypatch, {
+        _COPILOT_USAGE_URL: _FakeResponse(200, {
+            "quota_snapshots": {"chat": {"percent_remaining": 50,
+                                         "has_quota": True}},
+        }),
+    })
 
     snap = await us.fetch_copilot(Path("/nonexistent"), {"GH_TOKEN": "gho_env"})
-    assert snap["status"] == "unavailable"
+    assert snap["status"] == "ok"
 
+    calls.clear()
     snap = await us.fetch_copilot(Path("/nonexistent"), {})
     assert snap["status"] == "no-credentials"
     assert calls == []
@@ -1580,21 +1725,38 @@ async def test_fetch_cursor_expired_locally(monkeypatch):
     assert snap["status"] == "expired"
 
 
-async def test_fetch_cursor_signed_in_reports_unavailable(monkeypatch):
-    """The usage summary authenticates a browser session, not this app.
+async def test_fetch_cursor_reads_the_quota_through_the_session_cookie(monkeypatch):
+    """The one provider that still needs a browser-shaped credential.
 
-    Reaching it meant rebuilding cursor.com's own ``WorkosCursorSessionToken``
-    cookie from a JWT lifted out of the Keychain (or the IDE's sqlite state).
-    The local expiry check still runs first, so a stale token still reads as
-    expired without any network access.
-    """
-    _with_cursor_token(monkeypatch,
-                       _cursor_jwt({"sub": "auth0|u1", "exp": 4_102_444_800}))
-    calls = _fake_httpx(monkeypatch, {})
+    Measured 2026-08-05: the same token as ``Authorization: Bearer`` gets 401
+    from usage-summary, while the session cookie gets 200. The User-Agent is
+    honest; the cookie is the only form the endpoint accepts."""
+    token = _cursor_jwt({"sub": "google-oauth2|user_123", "exp": 4_102_444_800})
+    _with_cursor_token(monkeypatch, token)
+    calls = _fake_httpx(monkeypatch, {
+        us.CURSOR_USAGE_SUMMARY_URL: _FakeResponse(200, {
+            "billingCycleEnd": "2026-08-18T02:00:32.193Z",
+            "membershipType": "pro",
+            "individualUsage": {
+                "plan": {"enabled": True, "used": 850, "limit": 2000,
+                         "totalPercentUsed": 42.5},
+            },
+        }),
+    })
+
     snap = await us.fetch_cursor(Path("/x"))
-    assert snap["status"] == "unavailable"
-    assert snap["error"] == us.NO_OFFICIAL_USAGE_SURFACE
-    assert calls == []
+
+    assert snap["status"] == "ok"
+    assert snap["planType"] == "pro"
+    assert snap["windows"] == [{
+        "kind": "cycle", "label": "Plan usage", "usedPercent": 42.5,
+        "resetsAt": "2026-08-18T02:00:32.193Z",
+    }]
+    headers = next(
+        kw for url, kw in calls if url == us.CURSOR_USAGE_SUMMARY_URL
+    )["headers"]
+    assert headers["Cookie"] == f"WorkosCursorSessionToken=user_123%3A%3A{token}"
+    assert headers["User-Agent"] == "Navide"
 
 
 async def test_fetch_cursor_local_expiry_still_precedes_unavailable(monkeypatch):

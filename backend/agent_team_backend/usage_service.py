@@ -16,10 +16,11 @@ provider's own usage surface — no login flow, no credential writes:
   method ``x.ai/billing``
 - antigravity: refresh token from macOS Keychain ``gemini``/``antigravity``
   (stale-file fallback ``~/.gemini/antigravity-cli/antigravity-oauth-token``)
-  -> sign-in state only. The quota read minted a Google access token in-process
-  from the CLI's own client_id/secret and called
-  ``v1internal:retrieveUserQuotaSummary`` as ``User-Agent: antigravity``. Both
-  halves impersonated the vendor's client, so both are gone.
+  -> in-memory Google OAuth refresh ->
+  ``POST https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary``.
+  Minting the token needs Antigravity's OAuth client credentials, which this
+  app neither ships nor stores: set NAVIDE_ANTIGRAVITY_CLIENT_ID/_SECRET to
+  enable the quota read. Unset, the account still reports as signed in.
 - opencode: ``~/.local/share/opencode/auth.json`` is an aggregator (a map of
   providerID -> credential); each supported entry is mapped to that
   provider's own usage endpoint: ``minimax-coding-plan`` ->
@@ -29,10 +30,11 @@ provider's own usage surface — no login flow, no credential writes:
 - qwen: Alibaba ModelStudio Coding Plan API key (``sk-sp-...``) from the
   process env (``BAILIAN_CODING_PLAN_API_KEY`` + CodexBar's aliases),
   ``~/.qwen/.env`` or the ``env`` block of ``~/.qwen/settings.json`` ->
-  sign-in state only. Quota came from ModelStudio's own console gateway
-  (``data/api.json``), reached with a browser User-Agent and matching
-  Origin/Referer — a surface for a logged-in web console, not for this app.
-  The legacy Qwen OAuth file has no usage API either (free tier discontinued).
+  ``POST <console gateway>/data/api.json queryCodingPlanInstanceInfoV2``
+  (international region first, China-mainland retry). The key is what the
+  gateway authenticates; the browser User-Agent this once sent is gone, while
+  Origin/Referer stay because the gateway refuses cross-site posts without
+  them. The legacy Qwen OAuth file has no usage API (free tier discontinued).
 - kilo: ``~/.local/share/kilo/auth.json`` (the ``kilo`` entry: api key, or the
   long-lived oauth access token + accountId org; legacy fallback
   ``~/.kilocode/cli/config.json``) ->
@@ -50,18 +52,17 @@ provider's own usage surface — no login flow, no credential writes:
   account; the CLI's own OAuth token lives in the macOS Keychain (not probed),
   so the token is read via ``gh auth token -u <login>`` (fallbacks: the
   VS Code-style ``~/.config/github-copilot/{apps,hosts}.json`` oauth_token,
-  then ``GH_TOKEN``/``GITHUB_TOKEN`` env) -> sign-in state only.
-  ``copilot_internal/user`` answered the VS Code extension, so the request
-  carried its ``Editor-Version``/``User-Agent``. The CLI's own ``/usage`` is no
-  substitute: it renders inside a TUI that needs a full terminal handshake, and
-  reports the session's credits rather than the plan's.
+  then ``GH_TOKEN``/``GITHUB_TOKEN`` env)
+  -> ``GET https://api.<host>/copilot_internal/user``, identified as Navide
+  (the VS Code extension headers it once sent turned out not to be required).
 - cursor: session JWT from the macOS Keychain generic password
   ``cursor-access-token`` (cursor-agent CLI; fallback: the Cursor IDE's
   ``~/Library/Application Support/Cursor/User/globalStorage/state.vscdb``
-  sqlite row ``cursorAuth/accessToken``) -> sign-in state and local expiry
-  only. ``usage-summary`` authenticates a signed-in browser session, so
-  reaching it meant rebuilding cursor.com's own ``WorkosCursorSessionToken``
-  cookie from that JWT.
+  sqlite row ``cursorAuth/accessToken``) ->
+  ``GET https://cursor.com/api/usage-summary``. The only provider here that
+  still needs a browser-shaped credential: the endpoint authenticates a
+  signed-in cursor.com session, so the JWT is presented as that site's own
+  ``WorkosCursorSessionToken`` cookie (Bearer returns 401).
 
 Every credential file is read-only here; token refresh is left to the CLI
 that owns the file (refreshing ourselves would rotate the CLI's tokens).
@@ -102,21 +103,6 @@ log = logging.getLogger(__name__)
 PROVIDERS = ("claude", "codex", "kimi", "grok", "antigravity", "opencode", "qwen",
              "kilo", "pi", "copilot", "cursor")
 
-# Reported by providers whose quota could only be read by pretending to be the
-# vendor's own client — a browser, an IDE extension, or the CLI itself. Those
-# requests are gone. Verified 2026-08-05 against the installed CLIs: none of
-# them exposes a non-interactive usage command (``codex doctor``, ``kimi``'s
-# subcommands and ``opencode stats`` report local session statistics, not the
-# account's quota), and copilot's ``/usage`` lives inside a TUI that will not
-# render without a full terminal handshake — and reports the session, not the
-# plan. Reading the local credential to show "signed in" stays: that file is
-# the user's own. grok remains the working pattern (``grok agent stdio``, the
-# CLI's own published interface).
-NO_OFFICIAL_USAGE_SURFACE = (
-    "no official CLI command exposes this account's quota; "
-    "the previous HTTP read required impersonating the vendor's own client"
-)
-
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 # How long a `/usage` panel reading stands before the CLI is asked again. The
 # read costs a full Claude Code start, so it deliberately does not follow the
@@ -142,15 +128,58 @@ ANTIGRAVITY_KEYCHAIN_SERVICE = "gemini"
 ANTIGRAVITY_KEYCHAIN_ACCOUNT = "antigravity"
 ANTIGRAVITY_KEYRING_PREFIX = "go-keyring-base64:"
 ANTIGRAVITY_TOKEN_FILE_REL = (".gemini", "antigravity-cli", "antigravity-oauth-token")
-# The Google OAuth client constants this provider used to mint access tokens
-# with are gone along with the quota call — see fetch_antigravity. Only the
-# Keychain/token-file locations above remain, and only to detect sign-in.
+ANTIGRAVITY_TOKEN_URL = "https://oauth2.googleapis.com/token"
+ANTIGRAVITY_API_BASE = "https://cloudcode-pa.googleapis.com"
+ANTIGRAVITY_LOAD_URL = f"{ANTIGRAVITY_API_BASE}/v1internal:loadCodeAssist"
+ANTIGRAVITY_QUOTA_URL = f"{ANTIGRAVITY_API_BASE}/v1internal:retrieveUserQuotaSummary"
+ANTIGRAVITY_LOAD_METADATA = {
+    "ideType": "ANTIGRAVITY",
+    "platform": "PLATFORM_UNSPECIFIED",
+    "pluginType": "GEMINI",
+}
+# Minting an access token needs Antigravity's own OAuth client credentials.
+# This app ships none and stores none: the values come from the environment, so
+# enabling this provider is the operator's explicit act, not something a build
+# carries. Unset (the default) means the quota read is skipped with a status
+# that says why, rather than a mystery error.
+ANTIGRAVITY_CLIENT_ID = os.environ.get("NAVIDE_ANTIGRAVITY_CLIENT_ID", "")
+ANTIGRAVITY_CLIENT_SECRET = os.environ.get("NAVIDE_ANTIGRAVITY_CLIENT_SECRET", "")
+ANTIGRAVITY_NEEDS_OAUTH_CONFIG = (
+    "signed in, but reading the quota needs Antigravity's OAuth client "
+    "credentials; set NAVIDE_ANTIGRAVITY_CLIENT_ID and "
+    "NAVIDE_ANTIGRAVITY_CLIENT_SECRET to enable it"
+)
 OPENCODE_AUTH_FILE_REL = (".local", "share", "opencode", "auth.json")
 OPENCODE_MINIMAX_USAGE_URL = "https://api.minimax.io/v1/token_plan/remains"
-# qwen (Alibaba ModelStudio Coding Plan). The console-gateway quota URLs and
-# the browser User-Agent/Origin/Referer that made them answer are gone — that
-# gateway serves a logged-in web console, not this app. Only key detection
-# remains.
+# qwen (Alibaba ModelStudio Coding Plan). The quota endpoint is the console
+# gateway API — undocumented, and previously requested behind a full browser
+# User-Agent. The costume is gone: the request now says ``Navide`` and carries
+# the API key the user configured, which is what the gateway actually
+# authenticates. Origin/Referer stay because the gateway rejects cross-site
+# posts without them; they name the console the API belongs to, not a client we
+# are pretending to be. The alternate region is retried on failure.
+_QWEN_USAGE_QUERY = (
+    "?action=zeldaEasy.broadscope-bailian.codingPlan.queryCodingPlanInstanceInfoV2"
+    "&product=broadscope-bailian&api=queryCodingPlanInstanceInfoV2"
+)
+QWEN_INTL_USAGE_URL = (
+    "https://modelstudio.console.alibabacloud.com/data/api.json"
+    + _QWEN_USAGE_QUERY + "&currentRegionId=ap-southeast-1"
+)
+QWEN_CN_USAGE_URL = (
+    "https://bailian.console.aliyun.com/data/api.json"
+    + _QWEN_USAGE_QUERY + "&currentRegionId=cn-beijing"
+)
+# (url, commodityCode, Origin, Referer) per region, tried in order.
+QWEN_REGIONS = (
+    (QWEN_INTL_USAGE_URL, "sfm_codingplan_public_intl",
+     "https://modelstudio.console.alibabacloud.com",
+     "https://modelstudio.console.alibabacloud.com/ap-southeast-1/"
+     "?tab=coding-plan#/efm/coding_plan"),
+    (QWEN_CN_USAGE_URL, "sfm_codingplan_public_cn",
+     "https://bailian.console.aliyun.com",
+     "https://bailian.console.aliyun.com/"),
+)
 # The env key qwen-code itself resolves, then CodexBar's accepted aliases.
 QWEN_ENV_KEYS = (
     "BAILIAN_CODING_PLAN_API_KEY",
@@ -189,19 +218,22 @@ COPILOT_HOSTS_FILES_REL = (
 )
 COPILOT_DEFAULT_HOST = "github.com"
 COPILOT_ENV_KEYS = ("GH_TOKEN", "GITHUB_TOKEN")
-# The Editor-Version/User-Agent set that made copilot_internal/user answer
-# identified this app as the VS Code Copilot Chat extension. Removed with the
-# request itself — see fetch_copilot.
+# The Editor-Version/User-Agent set this once sent identified the app as the
+# VS Code Copilot Chat extension. Measured 2026-08-05: the endpoint answers the
+# same without any of it, so the read stays and the costume does not.
 COPILOT_GH_TOKEN_TIMEOUT = 5.0
 # cursor (Cursor / cursor-agent CLI). The session JWT the CLI stores in the
 # macOS Keychain (fallback: the Cursor IDE's state.vscdb sqlite row) is still
-# read to detect sign-in and local expiry. The usage-summary endpoint it used
-# to authenticate — by rebuilding cursor.com's own WorkosCursorSessionToken
-# cookie — is gone: that surface serves the signed-in dashboard, not this app.
+# read to detect sign-in and local expiry, and to authenticate usage-summary by
+# rebuilding cursor.com's own WorkosCursorSessionToken cookie. Unofficial but
+# stable, and the only form that answers: the legacy Bearer endpoint returns
+# null limits on dollar-based plans, and Bearer against usage-summary itself
+# returns 401 (measured 2026-08-05).
 CURSOR_KEYCHAIN_SERVICE = "cursor-access-token"
 CURSOR_IDE_STATE_DB_REL = ("Library", "Application Support", "Cursor",
                            "User", "globalStorage", "state.vscdb")
 CURSOR_IDE_TOKEN_KEY = "cursorAuth/accessToken"
+CURSOR_USAGE_SUMMARY_URL = "https://cursor.com/api/usage-summary"
 GROK_INIT_TIMEOUT = 4.0
 GROK_BILLING_TIMEOUT = 3.0
 HTTP_TIMEOUT = 30.0
@@ -1687,19 +1719,92 @@ async def fetch_grok(home: Path, env: dict | None = None,
     return _snapshot("grok", "ok", windows=windows, plan_type=plan)
 
 
-async def fetch_antigravity(home: Path) -> dict:
-    """Sign-in state only.
+async def refresh_antigravity_token(refresh_token: str) -> str | None:
+    """Exchange the refresh_token for an access_token, held in memory only.
 
-    The quota read this used to do was the most invasive of the set: it minted
-    a Google access token in-process from the CLI's own client_id/secret, then
-    called ``v1internal:retrieveUserQuotaSummary`` as ``User-Agent:
-    antigravity``. Both halves impersonated the vendor's client, so both are
-    gone. The refresh token is still read — but only to answer "is this account
-    signed in", which is a local file lookup."""
+    Never written back to the Keychain or ``~/.gemini``; Google's grant returns
+    no new refresh token, so nothing the CLI owns rotates. None on 400/401
+    (invalid_grant -> expired); other failures raise for the caller to map."""
+    import httpx
+
+    body = {
+        "grant_type": "refresh_token",
+        "client_id": ANTIGRAVITY_CLIENT_ID,
+        "client_secret": ANTIGRAVITY_CLIENT_SECRET,
+        "refresh_token": refresh_token,
+    }
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        resp = await client.post(ANTIGRAVITY_TOKEN_URL, data=body)
+    if resp.status_code in (400, 401):
+        return None
+    resp.raise_for_status()
+    token = resp.json().get("access_token")
+    if not isinstance(token, str) or not token:
+        raise ValueError("token response had no access_token")
+    return token
+
+
+async def fetch_antigravity(home: Path) -> dict:
+    """Quota via Google's Code Assist API, using the CLI's stored refresh token.
+
+    The heaviest read of the set, and the only one whose enablement is a
+    deliberate act: it needs Antigravity's OAuth client credentials, which this
+    app neither ships nor stores (see ANTIGRAVITY_CLIENT_ID). Without them the
+    account still reports as signed in — that part is a local file lookup — and
+    the quota is reported as unavailable with the reason."""
     refresh_token = await read_antigravity_credentials(home)
     if refresh_token is None:
         return _snapshot("antigravity", "no-credentials")
-    return _snapshot("antigravity", "unavailable", error=NO_OFFICIAL_USAGE_SURFACE)
+    if not (ANTIGRAVITY_CLIENT_ID and ANTIGRAVITY_CLIENT_SECRET):
+        return _snapshot("antigravity", "unavailable",
+                         error=ANTIGRAVITY_NEEDS_OAUTH_CONFIG)
+    import httpx
+
+    try:
+        access_token = await refresh_antigravity_token(refresh_token)
+    except (httpx.HTTPError, ValueError) as err:
+        return _snapshot("antigravity", "error", error=f"token refresh: {err}")
+    if access_token is None:
+        return _snapshot("antigravity", "expired")
+
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "Navide",
+    }
+    plan: str | None = None
+    project: str | None = None
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+            # loadCodeAssist supplies the project id + tier. Best effort — a
+            # failure must not block the quota read ({} still works there).
+            try:
+                load = await client.post(
+                    ANTIGRAVITY_LOAD_URL, headers=headers,
+                    json={"metadata": ANTIGRAVITY_LOAD_METADATA})
+                if load.status_code == 200:
+                    payload = load.json()
+                    if isinstance(payload, dict):
+                        project = antigravity_project(payload)
+                        plan = antigravity_plan(payload)
+            except (httpx.HTTPError, ValueError):
+                pass
+            resp = await client.post(
+                ANTIGRAVITY_QUOTA_URL, headers=headers,
+                json={"project": project} if project else {})
+    except httpx.HTTPError as err:
+        return _snapshot("antigravity", "error", error=str(err))
+    if resp.status_code == 401:
+        return _snapshot("antigravity", "expired")
+    if resp.status_code == 429:
+        snap = _snapshot("antigravity", "rate-limited")
+        snap["retryAfterSec"] = parse_retry_after(resp.headers.get("Retry-After"))
+        return snap
+    if resp.status_code != 200:
+        return _snapshot("antigravity", "error", error=f"HTTP {resp.status_code}")
+    windows, _ = normalize_antigravity(resp.json())
+    return _snapshot("antigravity", "ok", windows=windows, plan_type=plan)
 
 
 async def _fetch_opencode_minimax(key: str) -> dict:
@@ -1762,6 +1867,51 @@ async def fetch_opencode(home: Path) -> dict:
     return sub_snaps[0]
 
 
+async def _fetch_qwen_region(client, key: str, region: tuple) -> dict:
+    """One region's console-gateway query -> snapshot.
+
+    The API key is the credential the gateway checks; the browser User-Agent
+    this used to send was decoration and is gone. Origin/Referer stay: the
+    gateway refuses cross-site posts without them, and they name the console
+    the endpoint belongs to rather than claiming to be its client."""
+    url, commodity_code, origin, referer = region
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "x-api-key": key,
+        "X-DashScope-API-Key": key,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "Navide",
+        "Origin": origin,
+        "Referer": referer,
+    }
+    resp = await client.post(
+        url, headers=headers,
+        json={"queryCodingPlanInstanceInfoRequest":
+              {"commodityCode": commodity_code}})
+    if resp.status_code in (401, 403):
+        return _snapshot("qwen", "expired")
+    if resp.status_code == 429:
+        snap = _snapshot("qwen", "rate-limited")
+        snap["retryAfterSec"] = parse_retry_after(resp.headers.get("Retry-After"))
+        return snap
+    if resp.status_code != 200:
+        return _snapshot("qwen", "error", error=f"HTTP {resp.status_code}")
+    try:
+        payload = resp.json()
+    except ValueError:
+        return _snapshot("qwen", "error", error="non-JSON response")
+    # The gateway tunnels auth failures (invalid key, api-key mode unavailable
+    # in this region) through HTTP 200 + a NeedLogin marker in the body.
+    if "NeedLogin" in json.dumps(payload):
+        return _snapshot("qwen", "expired")
+    windows, plan = normalize_qwen(payload if isinstance(payload, dict) else {})
+    if not windows:
+        return _snapshot("qwen", "error",
+                         error="response had no usable quota fields")
+    return _snapshot("qwen", "ok", windows=windows, plan_type=plan)
+
+
 async def fetch_qwen(home: Path, env: dict | None = None) -> dict:
     env = env if env is not None else dict(os.environ)
     key = read_qwen_credentials(home, env)
@@ -1772,11 +1922,22 @@ async def fetch_qwen(home: Path, env: dict | None = None) -> dict:
                 error="legacy Qwen OAuth has no usage API (free tier "
                       "discontinued; a Coding Plan API key is required)")
         return _snapshot("qwen", "no-credentials")
-    # The key is a real credential, but the only surface that answered with a
-    # quota was the ModelStudio console's own ``data/api.json`` gateway, reached
-    # with a browser User-Agent. That is a console endpoint for a logged-in web
-    # session, not an API for this app to call.
-    return _snapshot("qwen", "unavailable", error=NO_OFFICIAL_USAGE_SURFACE)
+    import httpx
+
+    first: dict | None = None
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        for region in QWEN_REGIONS:
+            try:
+                snap = await _fetch_qwen_region(client, key, region)
+            except httpx.HTTPError as err:
+                snap = _snapshot("qwen", "error", error=str(err))
+            # ok answers; 429 means the key works, so the alternate region
+            # would not help. Everything else retries the other region,
+            # surfacing the FIRST failure when both refuse.
+            if snap["status"] in ("ok", "rate-limited"):
+                return snap
+            first = first or snap
+    return first or _snapshot("qwen", "error", error="no region answered")
 
 
 async def fetch_kilo(home: Path, env: dict | None = None) -> dict:
@@ -1932,11 +2093,37 @@ async def fetch_copilot(home: Path, env: dict | None = None) -> dict:
         token = copilot_env_token(env)
     if token is None:
         return _snapshot("copilot", "no-credentials")
-    # ``copilot_internal/user`` answered only for the VS Code extension, so the
-    # request carried its User-Agent. The CLI's own ``/usage`` is not a
-    # substitute: it lives in a TUI that needs a full terminal handshake before
-    # it paints, and reports the session's credits rather than the plan's.
-    return _snapshot("copilot", "unavailable", error=NO_OFFICIAL_USAGE_SURFACE)
+    import httpx
+
+    # This read was once dressed as the VS Code extension — a spoofed
+    # ``GitHubCopilotChat/…`` User-Agent plus ``Editor-Version`` headers.
+    # Measured 2026-08-05: the endpoint does not gate on any of it, answering
+    # 200 to a plain ``User-Agent: Navide`` with the same body. The costume was
+    # never load-bearing, so it is gone and the reading stays.
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/json",
+        "User-Agent": "Navide",
+    }
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        resp = await client.get(copilot_usage_url(host), headers=headers)
+    if resp.status_code in (401, 403):
+        return _snapshot("copilot", "expired")
+    if resp.status_code == 429:
+        snap = _snapshot("copilot", "rate-limited")
+        snap["retryAfterSec"] = parse_retry_after(resp.headers.get("Retry-After"))
+        return snap
+    if resp.status_code != 200:
+        return _snapshot("copilot", "error", error=f"HTTP {resp.status_code}")
+    try:
+        payload = resp.json()
+    except ValueError:
+        return _snapshot("copilot", "error", error="non-JSON response")
+    windows, plan = normalize_copilot(payload if isinstance(payload, dict) else {})
+    if not windows:
+        return _snapshot("copilot", "error",
+                         error="response had no usable quota fields")
+    return _snapshot("copilot", "ok", windows=windows, plan_type=plan)
 
 
 async def fetch_cursor(home: Path) -> dict:
@@ -1945,11 +2132,44 @@ async def fetch_cursor(home: Path) -> dict:
         return _snapshot("cursor", "no-credentials")
     if cursor_token_expired(token):
         return _snapshot("cursor", "expired")
-    # The usage-summary endpoint authenticates a signed-in browser session, so
-    # reaching it meant rebuilding cursor.com's own session cookie from a JWT
-    # lifted out of the Keychain (or the IDE's sqlite state). The User-Agent was
-    # honest; the session was not ours to present. No CLI command replaces it.
-    return _snapshot("cursor", "unavailable", error=NO_OFFICIAL_USAGE_SURFACE)
+    user_id = cursor_user_id(token)
+    if user_id is None:
+        return _snapshot("cursor", "error",
+                         error="session token has no usable sub claim")
+    import httpx
+
+    # The one provider here that still needs a browser-shaped credential. The
+    # User-Agent is honest, but ``usage-summary`` authenticates a signed-in
+    # cursor.com session and nothing else: measured 2026-08-05, the same token
+    # as ``Authorization: Bearer`` returns 401 while the session cookie returns
+    # 200. The token is the user's own, read from their own machine — but this
+    # is a dashboard session rebuilt from it, not an API credential, and that
+    # distinction is the reason this one is worth revisiting if Cursor ever
+    # publishes a real endpoint.
+    headers = {
+        "Cookie": f"WorkosCursorSessionToken={user_id}%3A%3A{token}",
+        "Accept": "application/json",
+        "User-Agent": "Navide",
+    }
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        resp = await client.get(CURSOR_USAGE_SUMMARY_URL, headers=headers)
+    if resp.status_code in (401, 403):
+        return _snapshot("cursor", "expired")
+    if resp.status_code == 429:
+        snap = _snapshot("cursor", "rate-limited")
+        snap["retryAfterSec"] = parse_retry_after(resp.headers.get("Retry-After"))
+        return snap
+    if resp.status_code != 200:
+        return _snapshot("cursor", "error", error=f"HTTP {resp.status_code}")
+    try:
+        payload = resp.json()
+    except ValueError:
+        return _snapshot("cursor", "error", error="non-JSON response")
+    windows, plan = normalize_cursor(payload if isinstance(payload, dict) else {})
+    if not windows:
+        return _snapshot("cursor", "error",
+                         error="response had no usable quota fields")
+    return _snapshot("cursor", "ok", windows=windows, plan_type=plan)
 
 
 # ── Poller service ──────────────────────────────────────────────────────────

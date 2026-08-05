@@ -3,6 +3,7 @@ import { createServer } from 'node:net'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { app } from 'electron'
+import { registerPendingBackend, releasePendingBackend } from './backend-pending'
 
 export interface BackendHandle {
   host: string
@@ -115,6 +116,13 @@ export async function startBackend(healthCheckTimeoutMs = 45_000): Promise<Backe
     )
   }
 
+  // From here until the start finishes, shutdown owns this child: nothing else
+  // holds a reference to it yet, and quitting mid-start would otherwise leave it
+  // running after the app is gone.
+  if (!registerPendingBackend(proc)) {
+    throw new Error('backend start abandoned: the app is quitting')
+  }
+
   proc.stdout?.on('data', (chunk: Buffer) => {
     process.stdout.write(`[backend] ${chunk.toString()}`)
   })
@@ -164,6 +172,10 @@ export async function startBackend(healthCheckTimeoutMs = 45_000): Promise<Backe
     // contend over the shared ~/.agent-team state on the next start attempt.
     try { proc.kill('SIGKILL') } catch { /* already dead */ }
     throw err
+  } finally {
+    // Settled either way: the handle below owns the process now, or it is dead.
+    // Shutdown has nothing left to abandon here.
+    releasePendingBackend(proc)
   }
   return handle
 }

@@ -5,6 +5,7 @@ import { readFileSync, statSync, existsSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { spawn } from 'node:child_process'
 import { startBackend, type BackendHandle } from './backend'
+import { abandonPendingBackends } from './backend-pending'
 import { installApplicationMenu, type AppMenuHooks, type RecentMenuEntry } from './menu'
 import { openNoopPluginView, openFsProbePluginView, openMiniIdePluginView, devMiniIdePluginDescriptor, openPlansPluginView, devPlansPluginDescriptor, openGitPluginView, devGitPluginDescriptor, registerBundledMiniIde, registerBundledPlans, registerBundledGit, frontendPluginManager } from './plugins/frontendPluginManager'
 import { registerPluginIpc } from './plugins/pluginIpc'
@@ -1906,6 +1907,14 @@ app.on('window-all-closed', () => {
 // let a slow spawn eat the stop budget, and stopping must keep its full window
 // — it has to outlast backend.stop()'s own 5s SIGTERM grace, or the cap
 // SIGKILLs the backend mid-shutdown-sweep and orphans every PTY child.
+//
+// The spawn budget stays short on purpose. A start that is seconds away is not
+// worth making every quit feel slow, and a real start is often far longer than
+// any budget worth waiting (the macOS login-shell PATH probe alone has been
+// measured at 13s+ before the child even spawns). What makes the short budget
+// safe is abandonPendingBackends() below: ending the wait no longer means
+// leaving the process behind, so the number only decides how often a
+// still-starting backend is killed outright rather than stopped cleanly.
 const BACKEND_SPAWN_WAIT_MS = 3000
 const BACKEND_STOP_WAIT_MS = 6000
 
@@ -1918,6 +1927,14 @@ async function teardownBackendAndQuit(): Promise<void> {
   const b = backend
   backend = null
   backendStarting = null
+  // Giving up on the WAIT must not mean giving up on the PROCESS. Whatever is
+  // still starting — the wait above that ran out, or a restart's start, which
+  // `backendStarting` no longer tracks — has a spawned child that Electron
+  // exiting would leave running, reparented and still holding the port and the
+  // shared app-data state for the next launch to fight over. A finished start
+  // is not in that set: its handle owns the process, and `stop()` below is what
+  // takes that one down.
+  abandonPendingBackends()
   if (b) await withDeadline(b.stop(), BACKEND_STOP_WAIT_MS)
   app.quit()
 }
