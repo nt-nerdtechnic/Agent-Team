@@ -20,6 +20,7 @@ import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { useBackend } from '../composables/useBackend'
 import { useOnboarding, type InstallResult, type OnboardDep } from '../composables/useOnboarding'
+import { orderInstalls, providerFor } from '../lib/installPlan'
 
 const props = defineProps<{
   backend: ReturnType<typeof useBackend>
@@ -58,15 +59,26 @@ watch(installPromptDismissed, (dismissed) => { dontAsk.value = dismissed.has(pro
 const dep = computed<OnboardDep | undefined>(() => deps.value.find((d) => d.id === props.depId))
 const label = computed(() => dep.value?.label || props.fallbackLabel || props.depId)
 
-/** Bootstrap binaries that are themselves installable deps here. */
-const BOOTSTRAP_DEP: Record<string, string> = { brew: 'homebrew', npm: 'node' }
-
 const blockers = computed(() => result.value?.missing_requirements ?? [])
 
 function requirementDep(binary: string): OnboardDep | undefined {
-  const id = BOOTSTRAP_DEP[binary]
-  return id ? deps.value.find((d) => d.id === id) : undefined
+  return providerFor(binary, deps.value)
 }
+
+/**
+ * Everything that has to be installed, prerequisites first — on a bare Mac,
+ * picking a CLI means Homebrew → Node → that CLI. Derived from status, so each
+ * finished step drops off the front and `nextStep` becomes the following one
+ * without any bookkeeping.
+ */
+const chain = computed<OnboardDep[]>(() =>
+  dep.value ? orderInstalls([dep.value], deps.value) : []
+)
+const nextStep = computed<OnboardDep | undefined>(() => chain.value[0])
+/** Position of the pending step in the chain, for "2 of 3" style labels. */
+const chainTotal = computed(() => chain.value.length)
+/** True while the chain has prerequisites beyond the CLI the user asked for. */
+const hasPrerequisites = computed(() => chainTotal.value > 1)
 
 /**
  * The one place that decides what the user is looking at. Derived rather than
@@ -123,9 +135,28 @@ const step = computed<Step>(() => {
 })
 const stepIndex = computed(() => STEPS.indexOf(step.value))
 
-async function runInstall(): Promise<void> {
-  const target = dep.value
+/**
+ * Set once the user starts the chain, so finished steps continue into the next
+ * one by themselves. Cleared by any failure — an unattended chain must stop at
+ * the first thing that went wrong rather than running on past it.
+ */
+const advancing = ref(false)
+/**
+ * Links already tried in this run. A step can report success without becoming
+ * detectable (it landed outside PATH, or needs a fresh shell) — without this
+ * the chain would see the same unfinished link as "next" and retry it forever.
+ * Cleared when the user starts a run, so Retry genuinely retries.
+ */
+const attempted = ref(new Set<string>())
+
+/** Install one link of the chain and, when it lands cleanly, the next. */
+async function installStep(target: OnboardDep | undefined): Promise<void> {
   if (!target || installing.value) return
+  if (attempted.value.has(target.id)) {
+    advancing.value = false
+    return
+  }
+  attempted.value.add(target.id)
   result.value = null
   terminalError.value = ''
   requestedStep.value = 'install'
@@ -134,21 +165,41 @@ async function runInstall(): Promise<void> {
   if (r?.needs_terminal && r.terminal_opened === false) {
     terminalError.value = t('cli-install.terminal-failed')
   }
-  // A blocked install belongs back at the check step: what's wrong is the
-  // environment, not the install itself.
-  if (r?.missing_requirements?.length) requestedStep.value = 'check'
-  if (dep.value?.status === 'ok') emit('installed', props.depId)
+  if (!r?.ok || r.terminal_opened === false) {
+    advancing.value = false
+    // A blocked install belongs back at the check step: what is wrong is the
+    // environment, not the install itself.
+    if (r?.missing_requirements?.length) requestedStep.value = 'check'
+    return
+  }
+  if (dep.value?.status === 'ok') {
+    emit('installed', props.depId)
+    return
+  }
+  // An external terminal has only been HANDED the command; the watcher resumes
+  // the chain once the tool actually appears (see the watchOutcome watcher).
+  if (r.needs_terminal) return
+  if (advancing.value && nextStep.value) await installStep(nextStep.value)
 }
+
+async function runInstall(): Promise<void> {
+  advancing.value = true
+  attempted.value = new Set()
+  await installStep(nextStep.value ?? dep.value)
+}
+
+// A prerequisite installed in an external terminal finishes outside this
+// dialog. When detection confirms it, carry on with the rest of the chain
+// instead of making the user press Install once per link.
+watch(watchOutcome, (outcome) => {
+  if (outcome !== 'detected' || !advancing.value) return
+  if (!nextStep.value) return
+  void installStep(nextStep.value)
+})
 
 /** Install a bootstrap tool (Homebrew, Node for npm) without leaving the flow. */
 async function installRequirement(binary: string): Promise<void> {
-  const target = requirementDep(binary)
-  if (!target || installing.value) return
-  const r = await onboarding.install(target)
-  // Keep the blocker visible when the prerequisite itself failed; clear it so
-  // the primary install can be retried once the prerequisite is in place.
-  if (r?.ok) result.value = null
-  else result.value = r
+  await installStep(requirementDep(binary))
 }
 
 async function toggleDontAsk(): Promise<void> {
@@ -203,6 +254,25 @@ function relaunch(): void {
               <span v-else class="ci-badge">{{ $t('label.detecting') }}</span>
             </div>
             <p v-if="dep?.description" class="ci-note">{{ dep.description }}</p>
+          </section>
+
+          <!-- The whole chain, in order. On a machine that has nothing yet this
+               is where the user learns that a CLI means Homebrew → Node → CLI,
+               instead of meeting each prerequisite one failure at a time. -->
+          <section v-if="hasPrerequisites" class="ci-card">
+            <div class="ci-card-label">{{ $t('cli-install.chain-label') }}</div>
+            <ol class="ci-chain">
+              <li
+                v-for="(link, linkIndex) in chain"
+                :key="link.id"
+                :class="{ next: link.id === nextStep?.id }"
+              >
+                <span class="ci-chain-index">{{ linkIndex + 1 }}</span>
+                <span class="ci-chain-label">{{ link.label }}</span>
+                <span class="ci-note">{{ $t('cli-install.requirement-missing') }}</span>
+              </li>
+            </ol>
+            <p class="ci-note">{{ $t('cli-install.chain-desc', { label, count: chainTotal }) }}</p>
           </section>
 
           <!-- Prerequisites, BEFORE anything is attempted -------------------->
@@ -346,6 +416,11 @@ function relaunch(): void {
             {{ $t('cli-install.installing', { seconds: installElapsedSec }) }}
           </template>
           <template v-else-if="result">{{ $t('cli-install.retry') }}</template>
+          <!-- Name the link being installed, so a chain never asks the user to
+               press "Install <the CLI>" and then install something else. -->
+          <template v-else-if="hasPrerequisites && nextStep">
+            {{ $t('cli-install.install-step', { label: nextStep.label, total: chainTotal }) }}
+          </template>
           <template v-else>{{ $t('cli-install.install') }}</template>
         </button>
       </footer>
@@ -401,6 +476,15 @@ function relaunch(): void {
   background: var(--success-emphasis); color: var(--text-on-emphasis); font-size: 11px; flex: none;
 }
 .ci-reqs li.missing .ci-req-mark { background: var(--attention-fg); }
+.ci-chain { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.ci-chain li { display: flex; align-items: center; gap: 9px; font-size: 12.5px; color: var(--text-muted); }
+.ci-chain li.next { color: var(--text-bright); }
+.ci-chain .ci-note { margin: 0; margin-left: auto; }
+.ci-chain-index {
+  display: grid; place-items: center; width: 18px; height: 18px; flex: none;
+  border: 1px solid var(--border-default); border-radius: 50%; font-size: 10.5px;
+}
+.ci-chain li.next .ci-chain-index { border-color: var(--accent-bright); color: var(--accent-bright); }
 .ci-btn.small { padding: 3px 9px; font-size: 12px; margin-left: auto; }
 .ci-row.center { justify-content: center; }
 h1 { margin: 6px 0 0; color: var(--text-bright); font-size: 22px; }

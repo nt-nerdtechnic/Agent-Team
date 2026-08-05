@@ -1295,6 +1295,16 @@
     "auto-check-hint": "在背景定期檢查是否有新版本。",
     "auto-download": "自動下載更新",
     "auto-download-hint": "自動下載可用的更新，以便隨時安裝。",
+    "stage": {
+      "check": "檢查",
+      "download": "下載",
+      "install": "安裝"
+    },
+    "group": {
+      "check": "檢查更新",
+      "download": "下載更新",
+      "install": "安裝更新"
+    },
     "auto-install": "結束 App 時安裝更新",
     "auto-install-hint": "在 App 關閉時套用已下載的更新，下次啟動就是新版本。安裝一定會重新啟動 App，所以絕不會在你工作到一半時發生；保持關閉則每次都由你決定何時安裝。",
     "downloaded-on-quit": "更新已下載完成 — 下次結束 App 時會自動套用。",
@@ -1450,6 +1460,9 @@
       "outdated": "版本過舊"
     },
     "requirements-label": "前置需求",
+    "chain-label": "安裝順序",
+    "chain-desc": "在這台 Mac 上安裝 {label} 需要 {count} 個步驟。開始之後每一步會自動接續下一步，只有終端機視窗需要你回答時才要動手。",
+    "install-step": "安裝 {label}（共 {total} 步的第 1 步）",
     "requirement-ok": "已就緒",
     "requirement-missing": "缺少",
     "command-label": "即將執行的指令",

@@ -1295,6 +1295,16 @@
     "auto-check-hint": "Periodically check for new releases in the background.",
     "auto-download": "Automatically download updates",
     "auto-download-hint": "Download available updates automatically so they're ready to install.",
+    "stage": {
+      "check": "Check",
+      "download": "Download",
+      "install": "Install"
+    },
+    "group": {
+      "check": "Checking for updates",
+      "download": "Downloading",
+      "install": "Installing"
+    },
     "auto-install": "Install updates when you quit",
     "auto-install-hint": "Apply a downloaded update as the app closes, so the next launch is the new version. Installing always restarts the app, so it never happens while you're working — leave this off to decide each time.",
     "downloaded-on-quit": "Update downloaded — it will be applied the next time you quit.",
@@ -1450,6 +1460,9 @@
       "outdated": "outdated"
     },
     "requirements-label": "Prerequisites",
+    "chain-label": "Installation order",
+    "chain-desc": "{label} needs {count} steps on this Mac. Start it and each step continues into the next by itself — you only step in where a Terminal window asks you something.",
+    "install-step": "Install {label} (1 of {total})",
     "requirement-ok": "ready",
     "requirement-missing": "missing",
     "command-label": "Command that will run",

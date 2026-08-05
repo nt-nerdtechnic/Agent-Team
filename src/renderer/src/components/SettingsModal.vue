@@ -40,6 +40,7 @@ import {
   DEFAULT_LOOP_RESUME,
 } from '../lib/loopPrompt'
 import { useUpdater } from '../composables/useUpdater'
+import { updateStages } from '../lib/updaterStages'
 import type { UpdateChannel } from '../../../shared/updater'
 import {
   CHECK_FAILURE_THRESHOLD_RANGE,
@@ -538,6 +539,9 @@ const {
 const updLastSuccessfulCheck = computed(() =>
   updateState.value.checkedAt ? new Date(updateState.value.checkedAt).toLocaleString() : ''
 )
+// check → download → install, so the panel shows where the update actually is
+// rather than leaving the user to infer it from one status line.
+const updStages = computed(() => updateStages(updateState.value))
 
 // ── Settings management / metadata ──────────────────────────────────────────
 interface SettingsPaths {
@@ -1978,6 +1982,22 @@ watch(activeTab, (tab) => {
                   <span class="settings-path">v{{ updateState.currentVersion }}</span>
                 </div>
 
+                <!-- Where the update actually is. Each stage below owns the
+                     settings group of the same name. -->
+                <ol v-if="updStages.length" class="upd-rail">
+                  <li
+                    v-for="(stage, stageIndex) in updStages"
+                    :key="stage.id"
+                    :class="['upd-stage', stage.state]"
+                  >
+                    <span class="upd-stage-mark" aria-hidden="true">
+                      {{ stage.state === 'done' ? '✓' : stage.state === 'failed' ? '!' : stageIndex + 1 }}
+                    </span>
+                    <span class="upd-stage-label">{{ $t(`updater.stage.${stage.id}`) }}</span>
+                    <span v-if="stage.percent !== undefined" class="upd-stage-pct">{{ stage.percent }}%</span>
+                  </li>
+                </ol>
+
                 <p v-if="updateState.status === 'checking'" class="ap-hint">{{ $t('updater.checking') }}</p>
                 <p v-else-if="updateState.status === 'not-available'" class="summary-ok">{{ $t('updater.up-to-date') }}</p>
                 <p v-else-if="updateState.status === 'error'" class="err-msg">{{ $t('updater.error', { message: updateState.message }) }}</p>
@@ -2013,7 +2033,12 @@ watch(activeTab, (tab) => {
                 </div>
               </div>
             </SettingsCard>
+          </SettingsSection>
 
+          <!-- One group per stage of the rail above: every setting sits under
+               the step of the update it actually governs, instead of nine
+               switches in one undifferentiated list. -->
+          <SettingsSection :label="$t('updater.group.check')">
             <SettingsCard>
               <SettingRow :title="$t('updater.auto-check')" :description="$t('updater.auto-check-hint')">
                 <template #control>
@@ -2024,31 +2049,16 @@ watch(activeTab, (tab) => {
                   />
                 </template>
               </SettingRow>
-              <SettingRow :title="$t('updater.auto-download')" :description="$t('updater.auto-download-hint')">
+              <SettingRow :title="$t('updater.channel')" :description="$t('updater.channel-hint')">
                 <template #control>
-                  <ToggleSwitch
-                    :model-value="updSettings.autoDownload"
-                    :aria-label="$t('updater.auto-download')"
-                    @update:model-value="(v) => updUpdateSettings({ autoDownload: v })"
-                  />
+                  <select :value="updSettings.channel" @change="updUpdateSettings({ channel: ($event.target as HTMLSelectElement).value as UpdateChannel })">
+                    <option value="stable">{{ $t('updater.channel-stable') }}</option>
+                    <option value="beta" disabled>{{ $t('updater.channel-beta') }} — {{ $t('updater.channel-beta-unavailable') }}</option>
+                  </select>
                 </template>
               </SettingRow>
-              <SettingRow
-                :title="$t('updater.auto-install')"
-                :description="$t('updater.auto-install-hint')"
-              >
-                <template #control>
-                  <ToggleSwitch
-                    :model-value="updSettings.autoInstallOnQuit"
-                    :aria-label="$t('updater.auto-install')"
-                    @update:model-value="(v) => updUpdateSettings({ autoInstallOnQuit: v })"
-                  />
-                </template>
-              </SettingRow>
-              <!-- Switching off cannot un-stage a payload the OS updater already
-                   took, so say so rather than implying it was cancelled. -->
-              <div v-if="!updSettings.autoInstallOnQuit && updateState.quitInstallArmed" class="s-fullrow">
-                <p class="ap-hint">{{ $t('updater.auto-install-already-armed') }}</p>
+              <div v-if="updSettings.channel === 'beta'" class="s-fullrow">
+                <p class="ap-hint">{{ $t('updater.beta-warning') }}</p>
               </div>
               <SettingRow
                 :title="$t('updater.notify-check-failure')"
@@ -2075,6 +2085,20 @@ watch(activeTab, (tab) => {
                     :value="updSettings.checkFailureThreshold"
                     :aria-label="$t('updater.check-failure-threshold')"
                     @change="updUpdateSettings({ checkFailureThreshold: Number(($event.target as HTMLInputElement).value) })"
+                  />
+                </template>
+              </SettingRow>
+            </SettingsCard>
+          </SettingsSection>
+
+          <SettingsSection :label="$t('updater.group.download')">
+            <SettingsCard>
+              <SettingRow :title="$t('updater.auto-download')" :description="$t('updater.auto-download-hint')">
+                <template #control>
+                  <ToggleSwitch
+                    :model-value="updSettings.autoDownload"
+                    :aria-label="$t('updater.auto-download')"
+                    @update:model-value="(v) => updUpdateSettings({ autoDownload: v })"
                   />
                 </template>
               </SettingRow>
@@ -2106,6 +2130,28 @@ watch(activeTab, (tab) => {
                   />
                 </template>
               </SettingRow>
+            </SettingsCard>
+          </SettingsSection>
+
+          <SettingsSection :label="$t('updater.group.install')">
+            <SettingsCard>
+              <SettingRow
+                :title="$t('updater.auto-install')"
+                :description="$t('updater.auto-install-hint')"
+              >
+                <template #control>
+                  <ToggleSwitch
+                    :model-value="updSettings.autoInstallOnQuit"
+                    :aria-label="$t('updater.auto-install')"
+                    @update:model-value="(v) => updUpdateSettings({ autoInstallOnQuit: v })"
+                  />
+                </template>
+              </SettingRow>
+              <!-- Switching off cannot un-stage a payload the OS updater already
+                   took, so say so rather than implying it was cancelled. -->
+              <div v-if="!updSettings.autoInstallOnQuit && updateState.quitInstallArmed" class="s-fullrow">
+                <p class="ap-hint">{{ $t('updater.auto-install-already-armed') }}</p>
+              </div>
               <SettingRow
                 :title="$t('updater.install-timeout')"
                 :description="$t('updater.install-timeout-hint')"
@@ -2121,17 +2167,6 @@ watch(activeTab, (tab) => {
                   />
                 </template>
               </SettingRow>
-              <SettingRow :title="$t('updater.channel')" :description="$t('updater.channel-hint')">
-                <template #control>
-                  <select :value="updSettings.channel" @change="updUpdateSettings({ channel: ($event.target as HTMLSelectElement).value as UpdateChannel })">
-                    <option value="stable">{{ $t('updater.channel-stable') }}</option>
-                    <option value="beta" disabled>{{ $t('updater.channel-beta') }} — {{ $t('updater.channel-beta-unavailable') }}</option>
-                  </select>
-                </template>
-              </SettingRow>
-              <div v-if="updSettings.channel === 'beta'" class="s-fullrow">
-                <p class="ap-hint">{{ $t('updater.beta-warning') }}</p>
-              </div>
             </SettingsCard>
           </SettingsSection>
         </div>
@@ -2752,6 +2787,53 @@ button.tiny {
   line-height: 1.2;
 }
 .summary-ok { font-size: 11px; color: var(--success-fg); margin-left: 6px; }
+
+/* Update pipeline rail: check → download → install. The connector is drawn on
+   each step except the first, so the row stays a plain flex list. */
+.upd-rail {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  list-style: none;
+  margin: 12px 0 10px;
+  padding: 0;
+  flex-wrap: wrap;
+}
+.upd-stage {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+.upd-stage + .upd-stage::before {
+  content: "";
+  width: 26px;
+  height: 1px;
+  margin: 0 10px;
+  background: var(--border-default);
+}
+.upd-stage-mark {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--border-default);
+  border-radius: 50%;
+  font-size: 10px;
+  line-height: 1;
+}
+.upd-stage.active { color: var(--text-bright); }
+.upd-stage.active .upd-stage-mark { border-color: var(--accent-emphasis); color: var(--accent-bright); }
+.upd-stage.done .upd-stage-mark {
+  border-color: var(--success-emphasis);
+  background: var(--success-emphasis);
+  color: var(--text-on-emphasis);
+}
+.upd-stage.failed { color: var(--danger-fg); }
+.upd-stage.failed .upd-stage-mark { border-color: var(--danger-fg); color: var(--danger-fg); }
+.upd-stage-pct { color: var(--text-bright); font-variant-numeric: tabular-nums; }
+
 .upd-notes-body {
   white-space: pre-wrap;
   word-break: break-word;
