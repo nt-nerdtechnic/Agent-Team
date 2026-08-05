@@ -8,6 +8,7 @@ import {
   refreshUsage,
   remainingPercent,
   remainingTier,
+  TRANSLATED_REFRESH_STATUSES,
   usageFor,
   type UsageWindow
 } from '../composables/useUsage'
@@ -84,18 +85,29 @@ const t = i18n.global.t
 // failure carries a ready message and surfaces as the alert below.
 const switchAccount = inject(cliAccountSwitchKey, null)
 
+// The swap round-trips to the backend (30s timeout) and may stop for a confirm
+// dialog, so the row that was clicked stays marked until it settles — without
+// it the popover looks inert and a second click starts a competing switch.
+const switching = ref<string | null>(null)
+
 async function selectProfile(id: string): Promise<void> {
   if (id === activeProfileId.value) return
+  if (switching.value !== null) return
   const target = id || null
-  const res = switchAccount
-    ? await switchAccount(props.agentKey, target)
-    : await props.cliProfiles.setDefault(props.agentKey, target)
-  if (!res.ok) {
-    if (res.message) void notifyAlert(res.message, { title: t('cli-account.switch-title') })
-    return
+  switching.value = id
+  try {
+    const res = switchAccount
+      ? await switchAccount(props.agentKey, target)
+      : await props.cliProfiles.setDefault(props.agentKey, target)
+    if (!res.ok) {
+      if (res.message) void notifyAlert(res.message, { title: t('cli-account.switch-title') })
+      return
+    }
+    // Re-poll so the badge reflects the newly active account's quota promptly.
+    refreshUsage()
+  } finally {
+    switching.value = null
   }
-  // Re-poll so the badge reflects the newly active account's quota promptly.
-  refreshUsage()
 }
 
 // Jump straight to Settings › Accounts (CLI account manager) so a new account
@@ -130,17 +142,7 @@ function rowReset(w: UsageWindow): string {
 
 function refreshStatusLabel(status: string | undefined): string {
   if (!status) return ''
-  const known = new Set([
-    'not-refreshed',
-    'no-credentials',
-    'expired',
-    'rate-limited',
-    'unavailable',
-    'not-measured',
-    'error',
-    'ok',
-  ])
-  return known.has(status) ? t(`usage.refresh-status-${status}`) : status
+  return TRANSLATED_REFRESH_STATUSES.has(status) ? t(`usage.refresh-status-${status}`) : status
 }
 
 // Per-account avatar: first character over a deterministic color picked from
@@ -266,6 +268,7 @@ function acctTitle(profileId: string | null): string {
             role="option"
             :class="{ active: activeProfileId === '' }"
             :aria-selected="activeProfileId === ''"
+            :disabled="switching !== null"
             @click="selectProfile('')"
           >
             <span class="usage-acct-av default">{{
@@ -282,7 +285,8 @@ function acctTitle(profileId: string | null): string {
               :title="acctTitle(null)"
               >{{ acctStale(null) ? '~' : '' }}{{ acctPct(null) }}</span
             >
-            <span v-if="activeProfileId === ''" class="usage-acct-tick">✓</span>
+            <span v-if="switching === ''" class="usage-acct-spin" aria-hidden="true" />
+            <span v-else-if="activeProfileId === ''" class="usage-acct-tick">✓</span>
           </button>
           <button
             v-for="p in switchProfiles"
@@ -291,6 +295,7 @@ function acctTitle(profileId: string | null): string {
             role="option"
             :class="{ active: activeProfileId === p.id }"
             :aria-selected="activeProfileId === p.id"
+            :disabled="switching !== null"
             @click="selectProfile(p.id)"
           >
             <span class="usage-acct-av" :style="{ background: avatarColor(p.id) }">{{
@@ -307,7 +312,8 @@ function acctTitle(profileId: string | null): string {
               :title="acctTitle(p.id)"
               >{{ acctStale(p.id) ? '~' : '' }}{{ acctPct(p.id) }}</span
             >
-            <span v-if="activeProfileId === p.id" class="usage-acct-tick">✓</span>
+            <span v-if="switching === p.id" class="usage-acct-spin" aria-hidden="true" />
+            <span v-else-if="activeProfileId === p.id" class="usage-acct-tick">✓</span>
           </button>
         </div>
         <button class="usage-acct-manage" @click="openAccountSettings">
@@ -474,6 +480,36 @@ function acctTitle(profileId: string | null): string {
 }
 .usage-acct:hover {
   background: var(--bg-hover);
+}
+.usage-acct:disabled {
+  cursor: default;
+}
+/* Only the untouched rows dim — the one being switched to keeps full contrast
+   so the spinner reads as "this one", not "everything is busy". */
+.usage-acct:disabled:not(:has(.usage-acct-spin)) {
+  opacity: 0.5;
+}
+.usage-acct:disabled:hover {
+  background: transparent;
+}
+.usage-acct-spin {
+  flex-shrink: 0;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border-strong);
+  border-top-color: var(--accent-fg);
+  animation: usage-acct-spin 0.6s linear infinite;
+}
+@keyframes usage-acct-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .usage-acct-spin {
+    animation: none;
+  }
 }
 .usage-acct.active {
   color: var(--text-bright);

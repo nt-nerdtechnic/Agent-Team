@@ -10,6 +10,7 @@ import {
   formatResetCountdown,
   refreshUsage,
   remainingTier,
+  TRANSLATED_REFRESH_STATUSES,
   usageFor,
   type UsageSnapshot,
   type UsageWindow,
@@ -114,19 +115,34 @@ const t = i18n.global.t
 // restart); without it fall back to plain setDefault.
 const switchAccount = inject(cliAccountSwitchKey, null)
 
+// The swap round-trips to the backend (30s timeout) and may stop for a confirm
+// dialog. Hold the target row so its button reads as busy and a second click
+// can't start a competing switch — `signIn` routes through here too.
+const switching = ref<string | null>(null)
+
+function switchRowKey(agentKey: string, profileId: string | null): string {
+  return `${agentKey}:${profileId ?? '__default__'}`
+}
+
 async function requestSetDefault(agentKey: string, profileId: string | null): Promise<boolean> {
-  const res = switchAccount
-    ? await switchAccount(agentKey, profileId)
-    : await props.api.setDefault(agentKey, profileId)
-  if (res.ok) {
-    // Re-poll so the card's quota reflects the newly active account.
-    refreshUsage()
-    return true
+  if (switching.value !== null) return false
+  switching.value = switchRowKey(agentKey, profileId)
+  try {
+    const res = switchAccount
+      ? await switchAccount(agentKey, profileId)
+      : await props.api.setDefault(agentKey, profileId)
+    if (res.ok) {
+      // Re-poll so the card's quota reflects the newly active account.
+      refreshUsage()
+      return true
+    }
+    // PANES_RUNNING skips the composable's banner: with no handler it carries a
+    // ready message — toast it. A declined confirm has no message (stay silent).
+    if (res.code === 'PANES_RUNNING' && res.message) toast(res.message, { type: 'error' })
+    return false
+  } finally {
+    switching.value = null
   }
-  // PANES_RUNNING skips the composable's banner: with no handler it carries a
-  // ready message — toast it. A declined confirm has no message (stay silent).
-  if (res.code === 'PANES_RUNNING' && res.message) toast(res.message, { type: 'error' })
-  return false
 }
 
 // ── Delete confirm ───────────────────────────────────────────────────────────
@@ -204,16 +220,7 @@ function cardUsage(agentKey: string, profileId: string | null): CardUsage | unde
 }
 
 function refreshStatusLabel(status: string): string {
-  const known = new Set([
-    'not-refreshed',
-    'no-credentials',
-    'expired',
-    'rate-limited',
-    'unavailable',
-    'error',
-    'ok',
-  ])
-  return known.has(status) ? t(`usage.refresh-status-${status}`) : status
+  return TRANSLATED_REFRESH_STATUSES.has(status) ? t(`usage.refresh-status-${status}`) : status
 }
 
 /** Card footer: the non-headline windows plus the headline reset countdown. */
@@ -382,13 +389,19 @@ onMounted(() => refreshUsage())
                 <button
                   v-if="api.defaultProfileId(spec.agentKey) !== (p?.id ?? null)"
                   class="cli-btn ghost sm"
+                  :disabled="switching !== null"
                   @click="requestSetDefault(spec.agentKey, p?.id ?? null)"
                 >
-                  {{ $t('settings.accounts.cli.set-default') }}
+                  {{
+                    switching === switchRowKey(spec.agentKey, p?.id ?? null)
+                      ? $t('settings.accounts.cli.switching')
+                      : $t('settings.accounts.cli.set-default')
+                  }}
                 </button>
                 <button
                   v-if="!rowIdentity(spec.agentKey, p?.id ?? null)?.signedIn || cardUsage(spec.agentKey, p?.id ?? null)?.expired"
                   class="cli-btn ghost sm"
+                  :disabled="switching !== null"
                   @click="signIn(spec.agentKey, p?.id ?? null)"
                 >
                   {{ $t('settings.accounts.cli.sign-in') }}

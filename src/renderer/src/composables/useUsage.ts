@@ -34,7 +34,23 @@ export type UsageStatus =
   | 'expired'
   | 'rate-limited'
   | 'unavailable'
+  // Parked Claude accounts: the CLI's `/usage` panel only speaks for whoever is
+  // signed in, so a non-active account carries no figure at all.
+  | 'not-measured'
   | 'error'
+
+/** Statuses with a `usage.refresh-status-*` translation. Shared so the badge
+ *  and the accounts pane can't drift apart and print a raw key. */
+export const TRANSLATED_REFRESH_STATUSES: ReadonlySet<string> = new Set<UsageStatus | 'not-refreshed'>([
+  'ok',
+  'not-refreshed',
+  'no-credentials',
+  'expired',
+  'rate-limited',
+  'unavailable',
+  'not-measured',
+  'error'
+])
 
 export interface UsageWindow {
   kind: 'session' | 'weekly' | 'weekly-model' | 'monthly' | string
