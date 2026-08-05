@@ -84,6 +84,7 @@ vi.mock('electron', () => {
   // Constructed by the manager for dedicated plugin host windows (mini-IDE).
   class BrowserWindow {
     options: Record<string, unknown>
+    title: string
     destroyed = false
     minimized = false
     shown = false
@@ -101,7 +102,11 @@ vi.mock('electron', () => {
     }
     constructor(options?: Record<string, unknown>) {
       this.options = options ?? {}
+      this.title = String(options?.title ?? '')
       windows.push(this)
+    }
+    setTitle(t: string): void {
+      this.title = t
     }
     isDestroyed(): boolean {
       return this.destroyed
@@ -199,6 +204,7 @@ interface FakeViewLike {
 }
 interface FakeWindowLike {
   options: Record<string, unknown>
+  title: string
   destroyed: boolean
   minimized: boolean
   shown: boolean
@@ -221,6 +227,7 @@ const { ipcHandlers, ipcListeners, views, windows } = (
 
 /** Host-window fake with just the surface the manager touches. */
 class FakeBrowserWindow {
+  title = ''
   destroyed = false
   minimized = false
   shown = false
