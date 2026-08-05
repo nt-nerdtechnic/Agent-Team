@@ -350,7 +350,10 @@ export class FrontendPluginManager {
       if (!handler) {
         return buildError(call.reqId, 'BACKEND_ERROR', 'editor open handler not registered')
       }
-      const opened = handler({ workspace_path: workspacePath, filepath: rel || filepath })
+      // Hand the RESOLVED root downstream: an unnormalized one ('/ws/sub/..')
+      // passes containment yet reads as a different view identity, which would
+      // reload the mini-IDE for a file that is in fact inside its workspace.
+      const opened = handler({ workspace_path: root, filepath: rel })
       return buildSuccess(call.reqId, { ok: true, opened })
     }
 
