@@ -825,12 +825,12 @@ registerCommand('workbench.action.copyRelativeFilePath', async () => {
 })
 registerCommand('workbench.action.revealInExplorer', () => {
   const f = activeFile.value
+  sidebarHidden.value = false
+  sidebarView.value = 'explorer'
   // The explorer tree only shows the window's workspace — a file from another
   // root simply is not in it.
   if (f?.kind !== 'file') return
   if (f.wsPath) { toast('File is outside this workspace'); return }
-  sidebarHidden.value = false
-  sidebarView.value = 'explorer'
   void nextTick(() => explorerRef.value?.revealFile(f.relPath))
 })
 registerCommand('workbench.action.revealFileInOS', async () => {
