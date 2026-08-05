@@ -562,11 +562,13 @@ function currentUiTheme(): string {
 
 /**
  * Open the mini-IDE plugin view (the editor surface) in its dedicated window,
- * forwarding editor open params (`filepath`/`line`/`sidebar`/`diff_*`/
+ * forwarding editor open params (`filepath`/`file_ws`/`line`/`sidebar`/`diff_*`/
  * `branch_diff_*`) as the entry query EditorWindowApp reads from
  * `window.location.search`. A changed workspace reloads the running view (see
- * FrontendPluginManager.open); `host` only parents the unavailable-fallback
- * dialog.
+ * FrontendPluginManager.open) — `file_ws`, the root of a file living outside
+ * the workspace, deliberately is NOT part of that identity, so opening an
+ * external file adds a tab instead of reloading; `host` only parents the
+ * unavailable-fallback dialog.
  */
 function openMiniIdeEditor(host: BrowserWindow | null, params: Record<string, string>): boolean {
   const { workspace_path: workspacePath = '', ...extraParams } = params
@@ -646,7 +648,10 @@ async function handleMiniIdeUnavailable(
 ): Promise<void> {
   const kind = classifyEditorOpen(params)
   if (kind === 'file') {
-    const abs = resolveExternalOpenTarget(workspacePath, params.filepath ?? '')
+    // `file_ws` (an out-of-workspace file's own root) is what `filepath` is
+    // relative to when present — resolving it against the workspace instead
+    // would point at a different file, or at nothing.
+    const abs = resolveExternalOpenTarget(params.file_ws || workspacePath, params.filepath ?? '')
     if (abs) {
       // shell.openPath returns an empty string on success, or an error message.
       const err = await shell.openPath(abs)
@@ -943,7 +948,9 @@ ipcMain.handle('window:openEditor', (event, args: Record<string, string>) => {
   const params = args ?? {}
   const workspacePath = params.workspace_path ?? ''
   const filepath = params.filepath ?? ''
-  if (workspacePath && isHtmlPlanDocPath(filepath)) {
+  // With `file_ws` the path is relative to that root, not to the workspace —
+  // it can never name this workspace's plan doc, so keep it out of the route.
+  if (workspacePath && !params.file_ws && isHtmlPlanDocPath(filepath)) {
     openPlanWindow(workspacePath, filepath)
     return { ok: true }
   }

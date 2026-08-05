@@ -6,7 +6,7 @@ import { setContext } from '../keybindings/useKeybindings'
 import EditorViewMonaco from './view/EditorViewMonaco.vue'
 import { languageForFile, normalizeLanguage } from './languageDetect'
 import type { Range, Position } from './types'
-import { diagnosticsStore } from './diagnostics'
+import { diagnosticsStore, diagnosticsKey } from './diagnostics'
 import { loadImageDataUrl } from '../lib/imageData'
 
 const props = defineProps<{
@@ -42,7 +42,9 @@ const content = ref('')
 const dirty = ref(false)
 watch(dirty, (v) => emit('dirty', v))
 
-const fileDiagnostics = computed(() => diagnosticsStore.value.get(props.relPath) ?? [])
+const fileDiagnostics = computed(
+  () => diagnosticsStore.value.get(diagnosticsKey(props.workspacePath, props.relPath)) ?? [],
+)
 // Navigate to a specific line when the host signals a new target (e.g. search results
 // clicking an already-open file). revealSeq ensures the watch fires even when revealAt
 // is the same line number as before.
@@ -867,6 +869,9 @@ onMounted(() => {
   // but only if the user hasn't made local edits.
   _unsubGitChanged = props.backend.on('git.changed', (raw) => {
     const ev = raw as { workspace_path?: string }
+    // Deliberate: a tab opened from outside the window's workspace uses its own
+    // parent directory as workspace root, which no git watcher reports on, so
+    // it never auto-reloads here. Correct — that root is not a repo we watch.
     if (ev?.workspace_path !== props.workspacePath) return
     if (!loaded.value || dirty.value) return
     const preContent = content.value // snapshot to detect edits typed mid-read

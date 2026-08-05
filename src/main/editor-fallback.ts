@@ -18,9 +18,11 @@ export function classifyEditorOpen(params: Record<string, string>): EditorOpenKi
   return 'bare'
 }
 
-/** Resolve a workspace-relative filepath to an absolute path suitable for
- *  `shell.openPath`. Returns null when the inputs are empty, the resolved path
- *  escapes the workspace (`../` traversal), or the file does not exist on disk
+/** Resolve a root-relative filepath to an absolute path suitable for
+ *  `shell.openPath`. The root is the workspace, or `file_ws` (the file's own
+ *  root) for an out-of-workspace open — the containment rule is the same
+ *  either way. Returns null when the inputs are empty, the resolved path
+ *  escapes the root (`../` traversal), or the file does not exist on disk
  *  (stale reference) — callers fall back to the unavailable dialog then. */
 export function resolveExternalOpenTarget(
   workspacePath: string,

@@ -187,6 +187,10 @@ contextBridge.exposeInMainWorld('agentTeam', {
   openEditorWindow: (args: {
     workspace_path: string
     filepath?: string
+    // Root the file itself belongs to (normally its parent directory) when it
+    // lives outside `workspace_path`. Omitted/empty means the file is opened
+    // against the workspace, as before.
+    file_ws?: string
     name?: string
     line?: number
     sidebar?: 'explorer' | 'search' | 'git'
@@ -194,6 +198,7 @@ contextBridge.exposeInMainWorld('agentTeam', {
     ipcRenderer.invoke('window:openEditor', {
       workspace_path: args.workspace_path,
       ...(args.filepath ? { filepath: args.filepath, name: args.name ?? args.filepath } : {}),
+      ...(args.file_ws ? { file_ws: args.file_ws } : {}),
       ...(args.line ? { line: String(args.line) } : {}),
       ...(args.sidebar ? { sidebar: args.sidebar } : {}),
     }),

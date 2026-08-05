@@ -18,6 +18,8 @@ export interface RenameableTab {
   kind: string
   relPath: string
   name: string
+  /** Workspace root this tab's relPath is resolved against; undefined = the window's workspace. */
+  wsPath?: string
 }
 
 /**
@@ -25,6 +27,11 @@ export interface RenameableTab {
  * rename/move of `oldRel` → `newRel`, mutating the tabs in place (they are
  * reactive objects). Non-file tabs (diff/conflict/…, which use synthetic
  * relPath keys) and unaffected paths are left untouched.
+ * `wsPath` scopes the rename to one workspace: a tab is only rewritten when its
+ * own `wsPath` matches, so an explorer rename in the window's workspace can
+ * never repoint a tab holding a same-named file from another root (that would
+ * silently redirect the next save). Defaults to the window's workspace, i.e.
+ * only tabs without a `wsPath` of their own.
  * Returns the affected tabs with their previous paths so the caller can
  * migrate any state keyed by the old relPath.
  */
@@ -32,10 +39,12 @@ export function rebindTabs<T extends RenameableTab>(
   tabs: T[],
   oldRel: string,
   newRel: string,
+  wsPath?: string,
 ): Array<{ tab: T; prevRelPath: string }> {
   const moved: Array<{ tab: T; prevRelPath: string }> = []
   for (const tab of tabs) {
     if (tab.kind !== 'file') continue
+    if ((tab.wsPath ?? '') !== (wsPath ?? '')) continue
     const next = rebindPath(tab.relPath, oldRel, newRel)
     if (next === null) continue
     moved.push({ tab, prevRelPath: tab.relPath })

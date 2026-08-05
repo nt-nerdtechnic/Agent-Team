@@ -17,18 +17,22 @@ import ProblemsPane from './components/ProblemsPane.vue'
 import PlanFileView from './editor/PlanFileView.vue'
 import FilePreviewPane from './editor/FilePreviewPane.vue'
 import { previewKind, isMarkdownFile } from './editor/previewTypes'
-import { rebindPath, rebindTabs } from './editor/tabRebind'
+import { rebindTabs } from './editor/tabRebind'
 import { useKeybindings, registerCommand, setContext, executeCommand } from './keybindings/useKeybindings'
 import { useTheme, BUILTIN_THEMES } from './composables/useTheme'
 import { initSettingsBackend, settingsGet, settingsSet, onSettingsChanged } from './lib/settings'
 import { useNotify } from './composables/useNotify'
-import { allDiagnosticsSorted, setDiagnostics } from './editor/diagnostics'
+import { allDiagnosticsSorted, setDiagnostics, diagnosticsKey } from './editor/diagnostics'
+import type { Diagnostic } from './editor/diagnostics'
 
 // ── window params (Electron appends ?window=editor&workspace_path=…&filepath=…) ──
 const params = new URLSearchParams(window.location.search)
 const workspacePath = params.get('workspace_path') ?? ''
 const workspaceBaseName = workspacePath.split('/').filter(Boolean).at(-1) ?? workspacePath
 const initialRel = params.get('filepath') ?? ''
+// Files outside the window's workspace are addressed by (file_ws, filepath):
+// the file's own parent directory is used as the backend workspace root.
+const initialFileWs = params.get('file_ws') ?? ''
 const initialName = params.get('name') ?? (initialRel.split('/').pop() || initialRel)
 const initialLine = Number(params.get('line')) || 0
 // diff pre-load: when opened via openDiffWindow with no existing editor window
@@ -84,12 +88,14 @@ function buildEditorContext(): string {
       'assisting the user who is reading and editing files in this workspace.',
     `Workspace: ${workspacePath}`,
   ]
-  const files = openFiles.value.filter((f) => f.kind === 'file').map((f) => f.relPath)
+  // Tabs outside this workspace are listed by absolute path — their relPath
+  // would otherwise read as a (non-existent) file inside the workspace.
+  const files = openFiles.value.filter((f) => f.kind === 'file').map(tabDisplayPath)
   if (files.length) lines.push(`Open files: ${files.join(', ')}`)
-  const rel = activeRel.value
+  const active = activeFile.value
   // Synthetic tabs (diff/conflict/branch-diff) have no readable file content.
-  if (rel && !rel.startsWith('\x00')) {
-    lines.push(`Active file: ${rel}`)
+  if (active?.kind === 'file') {
+    lines.push(`Active file: ${tabDisplayPath(active)}`)
     const selection = String(activeEditor()?.getSelection?.() ?? '')
     if (selection) {
       lines.push('', 'Selected text:', truncateText(selection, EDITOR_CONTEXT_TRUNCATE_AT))
@@ -131,25 +137,25 @@ function handleAskAiAboutFile(relPath: string): void {
 }
 
 function addSelectionToChat(file: OpenFile, selection: unknown): void {
-  pasteToCli(selectionPrompt(file.relPath, selection, 'Consider this code selection:'))
+  pasteToCli(selectionPrompt(tabDisplayPath(file), selection, 'Consider this code selection:'))
 }
 
 function explainSelectionWithAi(file: OpenFile, selection: unknown): void {
   pasteToCli(
-    selectionPrompt(file.relPath, selection, 'Explain the selected code step by step.')
+    selectionPrompt(tabDisplayPath(file), selection, 'Explain the selected code step by step.')
   )
 }
 
 function fixSelectionWithAi(file: OpenFile, selection: unknown): void {
   pasteToCli(
-    selectionPrompt(file.relPath, selection, 'Fix any bugs or issues in the selected code.')
+    selectionPrompt(tabDisplayPath(file), selection, 'Fix any bugs or issues in the selected code.')
   )
 }
 
 function writeTestsWithAi(file: OpenFile, selection: unknown): void {
   pasteToCli(
     selectionPrompt(
-      file.relPath,
+      tabDisplayPath(file),
       selection,
       'Generate comprehensive unit tests for the selected code.'
     )
@@ -158,7 +164,7 @@ function writeTestsWithAi(file: OpenFile, selection: unknown): void {
 
 function askSelectionWithAi(file: OpenFile, payload: unknown): void {
   const body = (payload ?? {}) as { selection?: unknown; question?: unknown }
-  pasteToCli(selectionPrompt(file.relPath, body.selection, String(body.question ?? '')))
+  pasteToCli(selectionPrompt(tabDisplayPath(file), body.selection, String(body.question ?? '')))
 }
 
 // ── Open files (VS Code-style tabs); each EditorPane stays mounted (v-show) so
@@ -166,14 +172,42 @@ function askSelectionWithAi(file: OpenFile, payload: unknown): void {
 // kind='diff': relPath is a synthetic key (\x00diff:<staged-or-commit>:<filepath>), filepath/staged/commit hold the real values.
 // kind='conflict': relPath is a synthetic key (\x00conflict:<filepath>), filepath holds the real path.
 // kind='branch-diff': relPath is a synthetic key (\x00branch-diff:<base>), base holds the base branch.
-interface OpenFile { kind: 'file' | 'diff' | 'conflict' | 'branch-diff'; id: number; relPath: string; name: string; line: number; dirty: boolean; revealAt?: number; revealSeq: number; filepath?: string; staged?: boolean; commit?: string; base?: string; compare?: string }
+// wsPath: workspace root this tab's relPath is resolved against. Undefined for
+// the ordinary case (the window's own workspace); set when the file lives
+// outside it, in which case it is the file's parent directory — the backend
+// only checks that the target stays inside the given root, so an external file
+// passes every existing guard with its own root and no backend change.
+interface OpenFile { kind: 'file' | 'diff' | 'conflict' | 'branch-diff'; id: number; relPath: string; wsPath?: string; name: string; line: number; dirty: boolean; revealAt?: number; revealSeq: number; filepath?: string; staged?: boolean; commit?: string; base?: string; compare?: string }
 // Stable tab identity for template keys: relPath is mutable (tabs follow
 // explorer renames/moves), and keying panes by it would remount EditorPane on
 // rename — losing the Monaco undo stack and any unsaved buffer.
 let tabIdSeq = 1
 function nextTabId(): number { return tabIdSeq++ }
 const openFiles = ref<OpenFile[]>([])
-const activeRel = ref('')
+
+// A tab is identified by (workspace, relPath): the same relPath under two roots
+// is two independent files. Every per-tab map/set below is keyed this way.
+function normWs(ws: string | undefined | null): string | undefined {
+  const v = (ws ?? '').replace(/\/+$/, '')
+  return v && v !== workspacePath.replace(/\/+$/, '') ? v : undefined
+}
+function fileWs(f: { wsPath?: string }): string { return f.wsPath || workspacePath }
+function tabKeyOf(wsPath: string | undefined, relPath: string): string {
+  return diagnosticsKey(wsPath || workspacePath, relPath)
+}
+function tabKey(f: { wsPath?: string; relPath: string }): string { return tabKeyOf(f.wsPath, f.relPath) }
+function findTab(key: string): OpenFile | undefined {
+  return openFiles.value.find((f) => tabKey(f) === key)
+}
+function absPathOf(f: { wsPath?: string; relPath: string }): string {
+  return `${fileWs(f).replace(/\/+$/, '')}/${f.relPath}`
+}
+/** What to show the user (and the AI) for a tab: external files need their absolute path. */
+function tabDisplayPath(f: { wsPath?: string; relPath: string }): string {
+  return f.wsPath ? absPathOf(f) : f.relPath
+}
+
+const activeKey = ref('')
 
 // ── Plan file view mode ───────────────────────────────────────────────────────
 // Tracks which .plan.md files are shown in the rich plan view (vs raw editor).
@@ -183,12 +217,12 @@ function isPlanFile(relPath: string): boolean {
   return relPath.endsWith('.plan.md')
 }
 
-function togglePlanView(relPath: string): void {
+function togglePlanView(key: string): void {
   const s = new Set(planViewFiles.value)
-  if (s.has(relPath)) {
-    s.delete(relPath)
+  if (s.has(key)) {
+    s.delete(key)
   } else {
-    s.add(relPath)
+    s.add(key)
   }
   planViewFiles.value = s
 }
@@ -202,12 +236,12 @@ function isPreviewToggleFile(relPath: string): boolean {
   return previewKind(relPath) !== null || isMarkdownFile(relPath)
 }
 
-function togglePreview(relPath: string): void {
+function togglePreview(key: string): void {
   const s = new Set(previewFiles.value)
-  if (s.has(relPath)) {
-    s.delete(relPath)
+  if (s.has(key)) {
+    s.delete(key)
   } else {
-    s.add(relPath)
+    s.add(key)
   }
   previewFiles.value = s
 }
@@ -220,9 +254,10 @@ const sidebarHidden = ref(false)
 const zenMode = ref(false)
 const changesCount = ref(0)
 const activePath = computed(() => {
-  const f = openFiles.value.find((x) => x.relPath === activeRel.value)
-  if (f?.kind === 'branch-diff') return [f.name]
-  const displayPath = (f?.kind === 'diff' || f?.kind === 'conflict') ? (f.filepath ?? '') : activeRel.value
+  const f = findTab(activeKey.value)
+  if (!f) return []
+  if (f.kind === 'branch-diff') return [f.name]
+  const displayPath = (f.kind === 'diff' || f.kind === 'conflict') ? (f.filepath ?? '') : f.relPath
   return displayPath.split('/').filter(Boolean)
 })
 
@@ -333,7 +368,11 @@ async function openBcDropdown(segIdx: number, e: MouseEvent): Promise<void> {
     interface LsResp { ok: boolean; entries?: Array<{ name: string; is_dir: boolean; rel_path: string }> }
     let resp: Awaited<ReturnType<typeof backend.send<LsResp>>>
     try {
-      resp = await backend.send<LsResp>('fs.list_dir', { workspace_path: workspacePath, rel_path: parentPath, show_hidden: false })
+      // Breadcrumb segments are relative to the *active tab's* root, not the
+      // window's — listing an external file's parent against the workspace
+      // would show an unrelated directory.
+      const ws = fileWs(activeFile.value ?? {})
+      resp = await backend.send<LsResp>('fs.list_dir', { workspace_path: ws, rel_path: parentPath, show_hidden: false })
     } catch { return }
     const entries = resp.payload?.entries
     // Guard: if the user closed the dropdown (or opened another) while we waited, don't reopen.
@@ -352,10 +391,10 @@ async function openBcDropdown(segIdx: number, e: MouseEvent): Promise<void> {
 function onBcItemClick(item: BcItem): void {
   bcDropdown.value = null
   if (item.line) {
-    const f = openFiles.value.find((x) => x.relPath === activeRel.value)
+    const f = activeFile.value
     if (f) { f.revealAt = item.line; f.revealSeq = (f.revealSeq ?? 0) + 1 }
   } else if (!item.isDir && item.relPath) {
-    openFile({ filepath: item.relPath })
+    openFile({ filepath: item.relPath, wsPath: activeFile.value?.wsPath })
   }
 }
 
@@ -385,22 +424,24 @@ function onBcCaptureKeydown(e: KeyboardEvent): void {
   }
 }
 
-function openFile(p: { filepath: string; name?: string; line?: number }): void {
+function openFile(p: { filepath: string; name?: string; line?: number; wsPath?: string }): void {
   const relPath = p.filepath
   if (!relPath) return
+  const wsPath = normWs(p.wsPath)
   const name = p.name ?? (relPath.split('/').pop() || relPath)
-  const existing = openFiles.value.find((f) => f.relPath === relPath)
+  const key = tabKeyOf(wsPath, relPath)
+  const existing = findTab(key)
   if (existing) {
     if (p.line && p.line > 0) {
       existing.revealAt = p.line
       existing.revealSeq = (existing.revealSeq ?? 0) + 1
     }
   } else {
-    openFiles.value.push({ kind: 'file', id: nextTabId(), relPath, name, line: p.line ?? 0, dirty: false, revealSeq: 0 })
+    openFiles.value.push({ kind: 'file', id: nextTabId(), relPath, wsPath, name, line: p.line ?? 0, dirty: false, revealSeq: 0 })
     // Auto-enable plan view for .plan.md files.
     if (isPlanFile(relPath)) {
       const s = new Set(planViewFiles.value)
-      s.add(relPath)
+      s.add(key)
       planViewFiles.value = s
     } else if (
       previewKind(relPath) !== null &&
@@ -410,44 +451,46 @@ function openFile(p: { filepath: string; name?: string; line?: number }): void {
       // Media/PDF/font/archive/known-binary files auto-open in preview;
       // markdown, HTML and CSV stay raw with a Preview toggle.
       const s = new Set(previewFiles.value)
-      s.add(relPath)
+      s.add(key)
       previewFiles.value = s
     }
   }
-  activeRel.value = relPath
+  activeKey.value = key
 }
 
 function openDiff(p: { filepath: string; staged: boolean; name?: string; commit?: string }): void {
-  const tabKey = `\x00diff:${p.commit || (p.staged ? '1' : '0')}:${p.filepath}`
+  const relPath = `\x00diff:${p.commit || (p.staged ? '1' : '0')}:${p.filepath}`
   const name = p.name ?? (p.filepath.split('/').pop() || p.filepath)
-  if (!openFiles.value.find((f) => f.relPath === tabKey)) {
-    openFiles.value.push({ kind: 'diff', id: nextTabId(), relPath: tabKey, filepath: p.filepath, staged: p.staged, commit: p.commit || undefined, name, line: 0, dirty: false, revealSeq: 0 })
+  const key = tabKeyOf(undefined, relPath)
+  if (!findTab(key)) {
+    openFiles.value.push({ kind: 'diff', id: nextTabId(), relPath, filepath: p.filepath, staged: p.staged, commit: p.commit || undefined, name, line: 0, dirty: false, revealSeq: 0 })
   }
-  activeRel.value = tabKey
+  activeKey.value = key
 }
 
 function openConflict(p: { filepath: string; name?: string }): void {
-  const tabKey = `\x00conflict:${p.filepath}`
+  const relPath = `\x00conflict:${p.filepath}`
   const name = p.name ?? (p.filepath.split('/').pop() || p.filepath)
-  if (!openFiles.value.find((f) => f.relPath === tabKey)) {
-    openFiles.value.push({ kind: 'conflict', id: nextTabId(), relPath: tabKey, filepath: p.filepath, name, line: 0, dirty: false, revealSeq: 0 })
+  const key = tabKeyOf(undefined, relPath)
+  if (!findTab(key)) {
+    openFiles.value.push({ kind: 'conflict', id: nextTabId(), relPath, filepath: p.filepath, name, line: 0, dirty: false, revealSeq: 0 })
   }
-  activeRel.value = tabKey
+  activeKey.value = key
 }
 
 function openBranchDiff(p: { base: string; compare?: string; workspacePath?: string }): void {
   const base = p.base || 'main'
-  const tabKey = `\x00branch-diff:${base}`
+  const relPath = `\x00branch-diff:${base}`
   const name = `Diff with ${base}`
-  const ws = p.workspacePath || workspacePath
-  const existing = openFiles.value.find((f) => f.relPath === tabKey)
-  if (existing) {
-    // update workspace in case called from a different workspace context
-    existing.filepath = ws
-  } else {
-    openFiles.value.push({ kind: 'branch-diff', id: nextTabId(), relPath: tabKey, base, compare: p.compare ?? '', filepath: ws, name, line: 0, dirty: false, revealSeq: 0 })
+  // A branch diff carries its own repo root like any other tab (this used to
+  // live in `filepath`); the root is part of the tab identity, so a diff of
+  // another repo gets its own tab instead of overwriting this one.
+  const wsPath = normWs(p.workspacePath)
+  const key = tabKeyOf(wsPath, relPath)
+  if (!findTab(key)) {
+    openFiles.value.push({ kind: 'branch-diff', id: nextTabId(), relPath, wsPath, base, compare: p.compare ?? '', name, line: 0, dirty: false, revealSeq: 0 })
   }
-  activeRel.value = tabKey
+  activeKey.value = key
 }
 
 // ── Tab rebinding on explorer rename/move ─────────────────────────────────────
@@ -456,77 +499,85 @@ function openBranchDiff(p: { base: string; compare?: string; workspacePath?: str
 // relPath in place does NOT remount EditorPane — the buffer, undo stack, and
 // mtime baseline survive, and the pane's next save targets the new path.
 function onEntryRenamed(p: { oldRel: string; newRel: string }): void {
+  // The explorer only ever renames inside the window's workspace, so tabs
+  // carrying their own wsPath must not be rewritten — same relPath, other root.
   const moved = rebindTabs(openFiles.value, p.oldRel, p.newRel)
   for (const { tab, prevRelPath } of moved) {
-    // Migrate state keyed by the old relPath.
-    const pane = editorPaneRefs.get(prevRelPath)
-    if (pane) { editorPaneRefs.delete(prevRelPath); editorPaneRefs.set(tab.relPath, pane) }
-    if (planViewFiles.value.has(prevRelPath)) {
-      const s = new Set(planViewFiles.value); s.delete(prevRelPath); s.add(tab.relPath)
+    // Migrate state keyed by the old tab key.
+    const prevKey = tabKeyOf(tab.wsPath, prevRelPath)
+    const nextKey = tabKey(tab)
+    const pane = editorPaneRefs.get(prevKey)
+    if (pane) { editorPaneRefs.delete(prevKey); editorPaneRefs.set(nextKey, pane) }
+    if (planViewFiles.value.has(prevKey)) {
+      const s = new Set(planViewFiles.value); s.delete(prevKey); s.add(nextKey)
       planViewFiles.value = s
     }
-    if (previewFiles.value.has(prevRelPath)) {
-      const s = new Set(previewFiles.value); s.delete(prevRelPath); s.add(tab.relPath)
+    if (previewFiles.value.has(prevKey)) {
+      const s = new Set(previewFiles.value); s.delete(prevKey); s.add(nextKey)
       previewFiles.value = s
     }
+    if (activeKey.value === prevKey) activeKey.value = nextKey
   }
   if (secondaryGroup.value) {
     const movedSec = rebindTabs(secondaryGroup.value.files, p.oldRel, p.newRel)
     for (const { tab, prevRelPath } of movedSec) {
-      const pane = editorPaneRefsSecondary.get(prevRelPath)
-      if (pane) { editorPaneRefsSecondary.delete(prevRelPath); editorPaneRefsSecondary.set(tab.relPath, pane) }
+      const prevKey = tabKeyOf(tab.wsPath, prevRelPath)
+      const nextKey = tabKey(tab)
+      const pane = editorPaneRefsSecondary.get(prevKey)
+      if (pane) { editorPaneRefsSecondary.delete(prevKey); editorPaneRefsSecondary.set(nextKey, pane) }
+      if (secondaryGroup.value.activeKey === prevKey) secondaryGroup.value.activeKey = nextKey
     }
-    const nextSecActive = rebindPath(secondaryGroup.value.activeRel, p.oldRel, p.newRel)
-    if (nextSecActive !== null) secondaryGroup.value.activeRel = nextSecActive
   }
-  const nextActive = rebindPath(activeRel.value, p.oldRel, p.newRel)
-  if (nextActive !== null) activeRel.value = nextActive
 }
 
-const closedHistory: Array<{ relPath: string; name: string }> = []
+const closedHistory: Array<{ relPath: string; wsPath?: string; name: string }> = []
 
-async function closeFile(relPath: string): Promise<void> {
-  const f = openFiles.value.find((x) => x.relPath === relPath)
+async function closeFile(key: string): Promise<void> {
+  const f = findTab(key)
   if (f?.dirty) {
     const ok = await confirm(`"${f.name}" has unsaved changes. Close anyway?`, {
       title: 'Close File', confirmText: 'Close',
     })
     if (!ok) return
   }
-  const i = openFiles.value.findIndex((x) => x.relPath === relPath)
+  const i = openFiles.value.findIndex((x) => tabKey(x) === key)
   if (i === -1) return
-  if (f?.kind === 'file') closedHistory.push({ relPath: f.relPath, name: f.name })
+  if (f?.kind === 'file') closedHistory.push({ relPath: f.relPath, wsPath: f.wsPath, name: f.name })
   openFiles.value.splice(i, 1)
-  if (activeRel.value === relPath) {
-    activeRel.value = openFiles.value[Math.min(i, openFiles.value.length - 1)]?.relPath ?? ''
+  if (activeKey.value === key) {
+    const next = openFiles.value[Math.min(i, openFiles.value.length - 1)]
+    activeKey.value = next ? tabKey(next) : ''
   }
 }
 
 // ── Tab right-click context menu ──────────────────────────────────────────────
-const tabCtxMenu = ref<{ relPath: string; x: number; y: number } | null>(null)
+const tabCtxMenu = ref<{ key: string; x: number; y: number } | null>(null)
 
-function openTabCtxMenu(e: MouseEvent, relPath: string): void {
-  tabCtxMenu.value = { relPath, x: e.clientX, y: e.clientY }
+// Path actions only apply to real file tabs (diff/conflict/branch-diff are synthetic).
+const tabCtxIsFile = computed(() => findTab(tabCtxMenu.value?.key ?? '')?.kind === 'file')
+
+function openTabCtxMenu(e: MouseEvent, key: string): void {
+  tabCtxMenu.value = { key, x: e.clientX, y: e.clientY }
 }
 function closeTabCtxMenu(): void { tabCtxMenu.value = null }
 
-async function ctxCloseOthers(relPath: string): Promise<void> {
+async function ctxCloseOthers(key: string): Promise<void> {
   closeTabCtxMenu()
-  const dirty = openFiles.value.filter((f) => f.relPath !== relPath && f.kind === 'file' && f.dirty)
+  const dirty = openFiles.value.filter((f) => tabKey(f) !== key && f.kind === 'file' && f.dirty)
   if (dirty.length) { const ok = await confirm(`${dirty.length} file(s) have unsaved changes. Close other tabs anyway?`, { title: 'Close Other Tabs', confirmText: 'Close' }); if (!ok) return }
-  openFiles.value = openFiles.value.filter((f) => f.relPath === relPath)
+  openFiles.value = openFiles.value.filter((f) => tabKey(f) === key)
 }
-async function ctxCloseRight(relPath: string): Promise<void> {
+async function ctxCloseRight(key: string): Promise<void> {
   closeTabCtxMenu()
-  const idx = openFiles.value.findIndex((f) => f.relPath === relPath)
+  const idx = openFiles.value.findIndex((f) => tabKey(f) === key)
   if (idx < 0) return
   const dirty = openFiles.value.slice(idx + 1).filter((f) => f.kind === 'file' && f.dirty)
   if (dirty.length) { const ok = await confirm(`${dirty.length} file(s) have unsaved changes. Close tabs to the right anyway?`, { title: 'Close Tabs to the Right', confirmText: 'Close' }); if (!ok) return }
   openFiles.value = openFiles.value.slice(0, idx + 1)
 }
-async function ctxCloseLeft(relPath: string): Promise<void> {
+async function ctxCloseLeft(key: string): Promise<void> {
   closeTabCtxMenu()
-  const idx = openFiles.value.findIndex((f) => f.relPath === relPath)
+  const idx = openFiles.value.findIndex((f) => tabKey(f) === key)
   if (idx <= 0) return
   const dirty = openFiles.value.slice(0, idx).filter((f) => f.kind === 'file' && f.dirty)
   if (dirty.length) { const ok = await confirm(`${dirty.length} file(s) have unsaved changes. Close tabs to the left anyway?`, { title: 'Close Tabs to the Left', confirmText: 'Close' }); if (!ok) return }
@@ -536,63 +587,64 @@ async function ctxCloseAll(): Promise<void> {
   closeTabCtxMenu()
   const dirty = openFiles.value.filter((f) => f.kind === 'file' && f.dirty)
   if (dirty.length) { const ok = await confirm(`${dirty.length} file(s) have unsaved changes. Close all anyway?`, { title: 'Close All Tabs', confirmText: 'Close All' }); if (!ok) return }
-  openFiles.value = []; activeRel.value = ''
+  openFiles.value = []; activeKey.value = ''
 }
-async function ctxCopyPath(relPath: string): Promise<void> {
+async function ctxCopyPath(key: string): Promise<void> {
   closeTabCtxMenu()
-  if (!relPath.startsWith('\x00')) await navigator.clipboard.writeText(`${workspacePath.replace(/\/+$/, '')}/${relPath}`)
+  const f = findTab(key)
+  if (f?.kind === 'file') await navigator.clipboard.writeText(absPathOf(f))
 }
-async function ctxCopyRelPath(relPath: string): Promise<void> {
+async function ctxCopyRelPath(key: string): Promise<void> {
   closeTabCtxMenu()
-  if (!relPath.startsWith('\x00')) await navigator.clipboard.writeText(relPath)
+  const f = findTab(key)
+  if (f?.kind === 'file') await navigator.clipboard.writeText(f.relPath)
 }
-async function ctxRevealInFinder(relPath: string): Promise<void> {
+async function ctxRevealInFinder(key: string): Promise<void> {
   closeTabCtxMenu()
-  if (!relPath.startsWith('\x00') && workspacePath) {
-    await window.agentTeam?.revealPath(`${workspacePath.replace(/\/+$/, '')}/${relPath}`)
-  }
+  const f = findTab(key)
+  if (f?.kind === 'file' && fileWs(f)) await window.agentTeam?.revealPath(absPathOf(f))
 }
 
 // ── EditorPane ref tracking (for command delegation) ─────────────────────────
 const editorPaneRefs = new Map<string, InstanceType<typeof EditorPane>>()
-function setEditorRef(relPath: string, el: unknown): void {
-  if (el) editorPaneRefs.set(relPath, el as InstanceType<typeof EditorPane>)
-  else editorPaneRefs.delete(relPath)
+function setEditorRef(key: string, el: unknown): void {
+  if (el) editorPaneRefs.set(key, el as InstanceType<typeof EditorPane>)
+  else editorPaneRefs.delete(key)
 }
 
 // ── Split Editor — secondary group (Phase D) ──────────────────────────────────
-interface SecondaryGroup { files: OpenFile[]; activeRel: string }
+interface SecondaryGroup { files: OpenFile[]; activeKey: string }
 const secondaryGroup = ref<SecondaryGroup | null>(null)
 const activeGroupIsPrimary = ref(true)
 const editorPaneRefsSecondary = new Map<string, InstanceType<typeof EditorPane>>()
 
-function setEditorRefSecondary(relPath: string, el: unknown): void {
-  if (el) editorPaneRefsSecondary.set(relPath, el as InstanceType<typeof EditorPane>)
-  else editorPaneRefsSecondary.delete(relPath)
+function setEditorRefSecondary(key: string, el: unknown): void {
+  if (el) editorPaneRefsSecondary.set(key, el as InstanceType<typeof EditorPane>)
+  else editorPaneRefsSecondary.delete(key)
 }
 
 function activeEditor(): InstanceType<typeof EditorPane> | undefined {
-  if (activeGroupIsPrimary.value) return editorPaneRefs.get(activeRel.value)
-  return editorPaneRefsSecondary.get(secondaryGroup.value?.activeRel ?? '')
+  if (activeGroupIsPrimary.value) return editorPaneRefs.get(activeKey.value)
+  return editorPaneRefsSecondary.get(secondaryGroup.value?.activeKey ?? '')
 }
 
-const activeFile = computed(() => openFiles.value.find((f) => f.relPath === activeRel.value))
+const activeFile = computed(() => findTab(activeKey.value))
 
 function splitEditor(): void {
-  const current = openFiles.value.find(f => f.relPath === activeRel.value)
+  const current = activeFile.value
   if (!current || current.kind !== 'file') return
-  secondaryGroup.value = { files: [{ ...current }], activeRel: current.relPath }
+  secondaryGroup.value = { files: [{ ...current }], activeKey: tabKey(current) }
   activeGroupIsPrimary.value = false
 }
 
-function closeFileInSecondary(relPath: string): void {
+function closeFileInSecondary(key: string): void {
   if (!secondaryGroup.value) return
-  const i = secondaryGroup.value.files.findIndex(f => f.relPath === relPath)
+  const i = secondaryGroup.value.files.findIndex(f => tabKey(f) === key)
   if (i === -1) return
   secondaryGroup.value.files.splice(i, 1)
-  if (secondaryGroup.value.activeRel === relPath) {
-    secondaryGroup.value.activeRel =
-      secondaryGroup.value.files[Math.min(i, secondaryGroup.value.files.length - 1)]?.relPath ?? ''
+  if (secondaryGroup.value.activeKey === key) {
+    const next = secondaryGroup.value.files[Math.min(i, secondaryGroup.value.files.length - 1)]
+    secondaryGroup.value.activeKey = next ? tabKey(next) : ''
   }
   if (secondaryGroup.value.files.length === 0) {
     secondaryGroup.value = null
@@ -600,14 +652,14 @@ function closeFileInSecondary(relPath: string): void {
   }
 }
 
-function openFileInSecondary(relPath: string): void {
+function openFileInSecondary(key: string): void {
   if (!secondaryGroup.value) return
-  const exists = secondaryGroup.value.files.find(f => f.relPath === relPath)
+  const exists = secondaryGroup.value.files.find(f => tabKey(f) === key)
   if (!exists) {
-    const primary = openFiles.value.find(f => f.relPath === relPath)
+    const primary = findTab(key)
     if (primary) secondaryGroup.value.files.push({ ...primary })
   }
-  secondaryGroup.value.activeRel = relPath
+  secondaryGroup.value.activeKey = key
   activeGroupIsPrimary.value = false
 }
 
@@ -643,10 +695,10 @@ registerCommand('workbench.action.toggleAIChat', () => { aiPanelOpen.value = !ai
 registerCommand('workbench.action.addSelectionToChat', () => {
   const sel = activeEditor()?.getSelection() || activeEditor()?.getWordAtCursor?.() || ''
   if (!sel) return
-  const rel = activeRel.value
+  const f = activeFile.value
   pasteToCli(
-    rel
-      ? selectionPrompt(rel, sel, 'Consider this code selection:')
+    f
+      ? selectionPrompt(tabDisplayPath(f), sel, 'Consider this code selection:')
       : `Consider this code selection:\n\`\`\`\n${truncateText(String(sel), EDITOR_CONTEXT_TRUNCATE_AT)}\n\`\`\``
   )
 })
@@ -710,7 +762,11 @@ registerCommand('editor.action.openFileAtCursor', async () => {
     || lineText.match(/['"`]([./][^'"`]+)['"`]/)
   if (!m) return
   const raw = m[1]
-  const activeDir = activeRel.value.split('/').slice(0, -1).join('/')
+  // Resolve the import against the active tab's own root — for an external
+  // file that is its parent directory, not the window's workspace.
+  const active = activeFile.value
+  if (active?.kind !== 'file') return
+  const activeDir = active.relPath.split('/').slice(0, -1).join('/')
   const joined = activeDir ? activeDir + '/' + raw : raw
   const parts = joined.split('/').filter(Boolean)
   const resolved: string[] = []
@@ -719,22 +775,22 @@ registerCommand('editor.action.openFileAtCursor', async () => {
   for (const ext of ['', '.ts', '.tsx', '.js', '.jsx', '.vue', '.py', '/index.ts', '/index.js']) {
     const path = base + ext
     if (!path) continue
-    const resp = await backend.send<{ content?: string }>('fs.read_file', { workspace_path: workspacePath, rel_path: path })
-    if (resp.payload?.content !== undefined) { openFile({ filepath: path }); return }
+    const resp = await backend.send<{ content?: string }>('fs.read_file', { workspace_path: fileWs(active), rel_path: path })
+    if (resp.payload?.content !== undefined) { openFile({ filepath: path, wsPath: active.wsPath }); return }
   }
 })
 registerCommand('editor.action.trimTrailingWhitespace', () => activeEditor()?.trimTrailingWhitespace())
 registerCommand('editor.action.formatDocument', () => {
   activeEditor()?.formatDocument()
   // After formatting, validate JSON/YAML syntax and expose parse errors as diagnostics.
-  const f = openFiles.value.find(x => x.relPath === activeRel.value)
+  const f = activeFile.value
   const ext = f?.name.split('.').pop()?.toLowerCase() ?? ''
-  if (ext !== 'json') return
+  if (!f || ext !== 'json') return
   const content = activeEditor()?.getContent?.() ?? ''
   try {
     JSON.parse(content)
     // Clear any prior JSON parse diagnostics for this file.
-    setDiagnostics(activeRel.value, [])
+    setDiagnostics(activeKey.value, [])
   } catch (err) {
     const msg = err instanceof SyntaxError ? err.message : String(err)
     // Try to extract line number from SyntaxError message (V8: "at position N").
@@ -744,8 +800,8 @@ registerCommand('editor.action.formatDocument', () => {
       const offset = parseInt(posMatch[1], 10)
       line = content.slice(0, offset).split('\n').length
     }
-    setDiagnostics(activeRel.value, [{
-      relPath: activeRel.value, line, col: 0,
+    setDiagnostics(activeKey.value, [{
+      relPath: f.relPath, wsPath: fileWs(f), line, col: 0,
       severity: 'error', message: msg, source: 'json',
     }])
     toast(`JSON syntax error: ${msg}`)
@@ -755,24 +811,29 @@ registerCommand('editor.action.formatSelection',        () => activeEditor()?.fo
 registerCommand('editor.action.smartSelect.expand',     () => activeEditor()?.expandSelection())
 registerCommand('editor.action.smartSelect.shrink',     () => activeEditor()?.shrinkSelection())
 registerCommand('workbench.action.copyFilePath', async () => {
-  const path = activeRel.value
-  if (!path) return
-  await navigator.clipboard.writeText(`${workspacePath.replace(/\/+$/, '')}/${path}`)
+  const f = activeFile.value
+  if (f?.kind !== 'file') return
+  await navigator.clipboard.writeText(absPathOf(f))
 })
 registerCommand('workbench.action.copyRelativeFilePath', async () => {
-  const path = activeRel.value
-  if (!path) return
-  await navigator.clipboard.writeText(path)
+  const f = activeFile.value
+  if (f?.kind !== 'file') return
+  await navigator.clipboard.writeText(f.relPath)
 })
 registerCommand('workbench.action.revealInExplorer', () => {
+  const f = activeFile.value
+  // The explorer tree only shows the window's workspace — a file from another
+  // root simply is not in it.
+  if (f?.kind !== 'file') return
+  if (f.wsPath) { toast('File is outside this workspace'); return }
   sidebarHidden.value = false
   sidebarView.value = 'explorer'
-  if (activeRel.value) void nextTick(() => explorerRef.value?.revealFile(activeRel.value))
+  void nextTick(() => explorerRef.value?.revealFile(f.relPath))
 })
 registerCommand('workbench.action.revealFileInOS', async () => {
-  if (!activeRel.value) return
-  const absPath = `${workspacePath.replace(/\/+$/, '')}/${activeRel.value}`
-  await window.agentTeam?.revealPath(absPath)
+  const f = activeFile.value
+  if (f?.kind !== 'file') return
+  await window.agentTeam?.revealPath(absPathOf(f))
 })
 registerCommand('workbench.action.newWindow', async () => {
   await window.agentTeam?.openEditorWindow({ workspace_path: workspacePath })
@@ -786,8 +847,14 @@ registerCommand('workbench.action.openFile', async () => {
   const result = await window.agentTeam?.pickFile({ title: 'Open File' })
   if (!result?.ok || !result.path) return
   const prefix = workspacePath.replace(/\/+$/, '') + '/'
-  const relPath = result.path.startsWith(prefix) ? result.path.slice(prefix.length) : result.path
-  openFile({ filepath: relPath })
+  if (workspacePath && result.path.startsWith(prefix)) {
+    openFile({ filepath: result.path.slice(prefix.length) })
+    return
+  }
+  // Outside the workspace: the file's own directory becomes its root, so the
+  // absolute path never leaks into a relPath the backend would reject.
+  const cut = result.path.lastIndexOf('/')
+  openFile({ filepath: result.path.slice(cut + 1), wsPath: result.path.slice(0, cut) || '/' })
 })
 registerCommand('workbench.action.openSettings', openKeyboardShortcuts)
 registerCommand('editor.action.addSelectionToNextFindMatch',  () => activeEditor()?.selectNextOccurrence())
@@ -799,18 +866,18 @@ for (let _i = 1; _i <= 9; _i++) {
   const idx = _i - 1
   registerCommand(`workbench.action.openEditorAtIndex${_i}`, () => {
     const f = openFiles.value[idx] ?? openFiles.value[openFiles.value.length - 1]
-    if (f) activeRel.value = f.relPath
+    if (f) activeKey.value = tabKey(f)
   })
 }
 registerCommand('workbench.action.closeActiveEditor', async () => {
-  if (!activeRel.value) return
-  await closeFile(activeRel.value)
+  if (!activeKey.value) return
+  await closeFile(activeKey.value)
 })
 // Save every dirty file buffer to disk (reuses EditorPane.save, which carries
 // the mtime-conflict protection).
 async function saveDirtyFiles(): Promise<void> {
-  for (const [relPath, pane] of editorPaneRefs.entries()) {
-    const f = openFiles.value.find((x) => x.relPath === relPath)
+  for (const [key, pane] of editorPaneRefs.entries()) {
+    const f = findTab(key)
     if (f?.kind === 'file' && f.dirty) await pane.save()
   }
 }
@@ -824,24 +891,24 @@ registerCommand('workbench.action.closeAllEditors', async () => {
     if (!ok) return
   }
   openFiles.value = []
-  activeRel.value = ''
+  activeKey.value = ''
 })
 registerCommand('workbench.action.closeOtherEditors', async () => {
-  const cur = activeRel.value
+  const cur = activeKey.value
   if (!cur) return
-  const others = openFiles.value.filter((f) => f.relPath !== cur && f.kind === 'file' && f.dirty)
+  const others = openFiles.value.filter((f) => tabKey(f) !== cur && f.kind === 'file' && f.dirty)
   if (others.length > 0) {
     const ok = await confirm(`${others.length} file(s) have unsaved changes. Close other tabs anyway?`, {
       title: 'Close Other Tabs', confirmText: 'Close',
     })
     if (!ok) return
   }
-  openFiles.value = openFiles.value.filter((f) => f.relPath === cur)
+  openFiles.value = openFiles.value.filter((f) => tabKey(f) === cur)
 })
 registerCommand('workbench.action.closeEditorsToTheRight', async () => {
-  const cur = activeRel.value
+  const cur = activeKey.value
   if (!cur) return
-  const idx = openFiles.value.findIndex((f) => f.relPath === cur)
+  const idx = openFiles.value.findIndex((f) => tabKey(f) === cur)
   if (idx < 0) return
   const dirty = openFiles.value.slice(idx + 1).filter((f) => f.kind === 'file' && f.dirty)
   if (dirty.length > 0) {
@@ -853,9 +920,9 @@ registerCommand('workbench.action.closeEditorsToTheRight', async () => {
   openFiles.value = openFiles.value.slice(0, idx + 1)
 })
 registerCommand('workbench.action.closeEditorsToTheLeft', async () => {
-  const cur = activeRel.value
+  const cur = activeKey.value
   if (!cur) return
-  const idx = openFiles.value.findIndex((f) => f.relPath === cur)
+  const idx = openFiles.value.findIndex((f) => tabKey(f) === cur)
   if (idx <= 0) return
   const dirty = openFiles.value.slice(0, idx).filter((f) => f.kind === 'file' && f.dirty)
   if (dirty.length > 0) {
@@ -869,24 +936,26 @@ registerCommand('workbench.action.closeEditorsToTheLeft', async () => {
 registerCommand('workbench.action.openNextEditor', () => {
   const files = openFiles.value
   if (!files.length) return
-  const idx = files.findIndex((f) => f.relPath === activeRel.value)
-  activeRel.value = files[(idx + 1) % files.length]?.relPath ?? ''
+  const idx = files.findIndex((f) => tabKey(f) === activeKey.value)
+  const next = files[(idx + 1) % files.length]
+  activeKey.value = next ? tabKey(next) : ''
 })
 registerCommand('workbench.action.openPreviousEditor', () => {
   const files = openFiles.value
   if (!files.length) return
-  const idx = files.findIndex((f) => f.relPath === activeRel.value)
-  activeRel.value = files[(idx - 1 + files.length) % files.length]?.relPath ?? ''
+  const idx = files.findIndex((f) => tabKey(f) === activeKey.value)
+  const prev = files[(idx - 1 + files.length) % files.length]
+  activeKey.value = prev ? tabKey(prev) : ''
 })
 registerCommand('workbench.action.moveEditorRightInGroup', () => {
   const files = openFiles.value
-  const idx = files.findIndex((f) => f.relPath === activeRel.value)
+  const idx = files.findIndex((f) => tabKey(f) === activeKey.value)
   if (idx < 0 || idx >= files.length - 1) return
   ;[files[idx], files[idx + 1]] = [files[idx + 1], files[idx]]
 })
 registerCommand('workbench.action.moveEditorLeftInGroup', () => {
   const files = openFiles.value
-  const idx = files.findIndex((f) => f.relPath === activeRel.value)
+  const idx = files.findIndex((f) => tabKey(f) === activeKey.value)
   if (idx <= 0) return
   ;[files[idx], files[idx - 1]] = [files[idx - 1], files[idx]]
 })
@@ -895,7 +964,7 @@ registerCommand('workbench.action.moveEditorLeftInGroup', () => {
 const _navHistory: string[] = []
 let _navIdx = -1
 let _navIgnore = false
-watch(activeRel, (v) => {
+watch(activeKey, (v) => {
   if (!v || _navIgnore) return
   if (_navIdx < _navHistory.length - 1) _navHistory.splice(_navIdx + 1)
   _navHistory.push(v)
@@ -904,17 +973,17 @@ watch(activeRel, (v) => {
 registerCommand('workbench.action.navigateBack', () => {
   if (_navIdx <= 0) return
   _navIgnore = true
-  activeRel.value = _navHistory[--_navIdx]
+  activeKey.value = _navHistory[--_navIdx]
   void nextTick(() => { _navIgnore = false })
 })
 registerCommand('workbench.action.navigateForward', () => {
   if (_navIdx >= _navHistory.length - 1) return
   _navIgnore = true
-  activeRel.value = _navHistory[++_navIdx]
+  activeKey.value = _navHistory[++_navIdx]
   void nextTick(() => { _navIgnore = false })
 })
 
-watch(activeRel, (rel) => setContext('editorOpen', !!rel), { immediate: true })
+watch(activeKey, (key) => setContext('editorOpen', !!key), { immediate: true })
 
 // ── Explorer pane ref (for revealFile) ───────────────────────────────────────
 const explorerRef = ref<{ revealFile: (path: string) => Promise<void>; focusTree: () => void } | null>(null)
@@ -959,7 +1028,7 @@ registerCommand('editor.action.detectIndentation', () => {
 
 // ── Tab bar: auto-scroll active tab into view ─────────────────────────────────
 const tabsEl = ref<HTMLElement | null>(null)
-watch(activeRel, async () => {
+watch(activeKey, async () => {
   await nextTick()
   tabsEl.value?.querySelector<HTMLElement>('.ide-tab.active')?.scrollIntoView({ inline: 'nearest', block: 'nearest' })
 })
@@ -1149,7 +1218,7 @@ watch(paletteQuery, () => { paletteIdx.value = 0 })
 registerCommand('workbench.action.showCommands', openPalette)
 
 // ── Quick Open (⌘P) ─────────────────────────────────────────────────────────
-type QoFileItem   = { qoKind: 'file';   name: string; relPath: string }
+type QoFileItem   = { qoKind: 'file';   name: string; relPath: string; key: string }
 type QoLineItem   = { qoKind: 'line';   line: number }
 type QoSymbolItem = { qoKind: 'symbol'; name: string; line: number; kind: string }
 type QoHeaderItem = { qoKind: 'header'; label: string }
@@ -1179,7 +1248,7 @@ const qoItems = computed((): QoItem[] => {
     const rest = q.slice(1)
     const grouped = rest.startsWith(':')
     const symQ = (grouped ? rest.slice(1) : rest).toLowerCase()
-    const f = openFiles.value.find((f) => f.relPath === activeRel.value)
+    const f = activeFile.value
     if (!f || f.kind !== 'file') return []
     const content = activeEditor()?.getContent?.() ?? ''
     const ext = f.name.split('.').pop() ?? ''
@@ -1199,13 +1268,13 @@ const qoItems = computed((): QoItem[] => {
   // default: fuzzy-filter open + recently-closed files (subsequence match)
   const ql = q.toLowerCase()
   const files = openFiles.value.filter((f) => f.kind === 'file')
-  const openSet = new Set(files.map((f) => f.relPath))
-  const recentClosed = [...closedHistory].reverse().filter((r) => !openSet.has(r.relPath)).slice(0, 20)
-    .map((r) => ({ name: r.name, relPath: r.relPath, kind: 'file' as const, isDir: false }))
+  const openSet = new Set(files.map(tabKey))
+  const recentClosed = [...closedHistory].reverse().filter((r) => !openSet.has(tabKey(r))).slice(0, 20)
+    .map((r) => ({ name: r.name, relPath: r.relPath, wsPath: r.wsPath, kind: 'file' as const, isDir: false }))
+  const item = (f: { name: string; relPath: string; wsPath?: string }): QoFileItem =>
+    ({ qoKind: 'file', name: f.name, relPath: f.relPath, key: tabKey(f) })
   if (!ql) {
-    const openItems = files.map((f): QoFileItem => ({ qoKind: 'file', name: f.name, relPath: f.relPath }))
-    const closedItems = recentClosed.slice(0, 8).map((r): QoFileItem => ({ qoKind: 'file', name: r.name, relPath: r.relPath }))
-    return [...openItems, ...closedItems]
+    return [...files.map(item), ...recentClosed.slice(0, 8).map(item)]
   }
   type Scored = { f: (typeof files[0]) | (typeof recentClosed[0]); score: number }
   const scored: Scored[] = []
@@ -1218,7 +1287,7 @@ const qoItems = computed((): QoItem[] => {
     if (best > 0) scored.push({ f, score: best })
   }
   scored.sort((a, b) => b.score - a.score)
-  return scored.map(({ f }): QoFileItem => ({ qoKind: 'file', name: f.name, relPath: f.relPath }))
+  return scored.map(({ f }) => item(f))
 })
 function openQuickOpen(): void {
   qoQuery.value = ''
@@ -1230,13 +1299,13 @@ function closeQuickOpen(): void { qoOpen.value = false }
 function confirmQuickOpen(): void {
   const item = qoItems.value[qoIdx.value]
   if (!item || item.qoKind === 'header') { closeQuickOpen(); return }
-  if (item.qoKind === 'file') { activeRel.value = item.relPath }
+  if (item.qoKind === 'file') { activeKey.value = item.key }
   else if (item.qoKind === 'line') { activeEditor()?.jumpToLine(item.line) }
   else if (item.qoKind === 'symbol') { activeEditor()?.jumpToLine(item.line) }
   closeQuickOpen()
 }
 function qoItemKey(item: QoItem, i: number): string {
-  if (item.qoKind === 'file') return item.relPath
+  if (item.qoKind === 'file') return item.key
   if (item.qoKind === 'line') return `line:${item.line}`
   if (item.qoKind === 'header') return `hdr:${i}:${item.label}`
   return `sym:${i}:${item.name}`
@@ -1287,29 +1356,31 @@ for (let _n = 1; _n <= 7; _n++) {
 }
 registerCommand('workbench.action.reopenClosedEditor', () => {
   const last = closedHistory.pop()
-  if (last) openFile({ filepath: last.relPath, name: last.name })
+  if (last) openFile({ filepath: last.relPath, wsPath: last.wsPath, name: last.name })
 })
 
 // ── Problems Panel (F8 / ⇧F8 / ⌘⇧M) ──────────────────────────────────────────
+// Diagnostics are addressed like tabs — by (workspace, relPath).
+function diagKey(d: Diagnostic): string { return tabKeyOf(d.wsPath, d.relPath) }
 function nextProblem(): void {
   const all = allDiagnosticsSorted()
   if (!all.length) { toast('No problems detected'); return }
   const curLine = (activeEditor()?.getCursorLine?.() ?? 0) + 1 // 1-based
-  const curRel = activeRel.value
-  const next = all.find(d => d.relPath > curRel || (d.relPath === curRel && d.line > curLine))
+  const curKey = activeKey.value
+  const next = all.find(d => diagKey(d) > curKey || (diagKey(d) === curKey && d.line > curLine))
     ?? all[0]
-  if (next.relPath !== curRel) openFile({ filepath: next.relPath })
+  if (diagKey(next) !== curKey) openFile({ filepath: next.relPath, wsPath: next.wsPath })
   nextTick(() => (activeEditor() as unknown as { revealLine?: (line: number) => void } | null)?.revealLine?.(next.line))
 }
 function prevProblem(): void {
   const all = allDiagnosticsSorted()
   if (!all.length) { toast('No problems detected'); return }
   const curLine = (activeEditor()?.getCursorLine?.() ?? 0) + 1
-  const curRel = activeRel.value
+  const curKey = activeKey.value
   const reversed = [...all].reverse()
-  const prev = reversed.find(d => d.relPath < curRel || (d.relPath === curRel && d.line < curLine))
+  const prev = reversed.find(d => diagKey(d) < curKey || (diagKey(d) === curKey && d.line < curLine))
     ?? reversed[0]
-  if (prev.relPath !== curRel) openFile({ filepath: prev.relPath })
+  if (diagKey(prev) !== curKey) openFile({ filepath: prev.relPath, wsPath: prev.wsPath })
   nextTick(() => (activeEditor() as unknown as { revealLine?: (line: number) => void } | null)?.revealLine?.(prev.line))
 }
 registerCommand('editor.action.marker.nextInFiles', nextProblem)
@@ -1323,7 +1394,7 @@ const quickFixIdx = ref(0)
 
 function showQuickFix(): void {
   const curLine = (activeEditor()?.getCursorLine?.() ?? 0) + 1 // diagnostics are 1-based
-  const diags = (allDiagnosticsSorted()).filter(d => d.relPath === activeRel.value && d.line === curLine)
+  const diags = (allDiagnosticsSorted()).filter(d => diagKey(d) === activeKey.value && d.line === curLine)
   if (!diags.length) { toast('No quick fixes available'); return }
   quickFixItems.value = diags.map(d => ({ label: `AI Fix: ${d.message}`, message: d.message }))
   quickFixIdx.value = 0
@@ -1356,7 +1427,7 @@ registerCommand('editor.action.toggleLineNumbers', () => activeEditor()?.toggleL
 registerCommand('editor.action.toggleWordWrap',    () => activeEditor()?.toggleWordWrap())
 
 // ── Go to Symbol in Workspace (⌘T) ──────────────────────────────────────────
-interface WsymItem { name: string; kind: string; relPath: string; line: number }
+interface WsymItem { name: string; kind: string; relPath: string; wsPath?: string; line: number }
 const wsymOpen = ref(false)
 const wsymQuery = ref('')
 const wsymIdx = ref(0)
@@ -1366,10 +1437,10 @@ const wsymItems = computed<WsymItem[]>(() => {
   const all: WsymItem[] = []
   for (const f of openFiles.value) {
     if (f.kind !== 'file') continue
-    const content = editorPaneRefs.get(f.relPath)?.getContent?.() ?? ''
+    const content = editorPaneRefs.get(tabKey(f))?.getContent?.() ?? ''
     const ext = f.name.split('.').pop() ?? ''
     for (const s of _extractSymbols(content, ext)) {
-      all.push({ name: s.name, kind: s.kind ?? '', relPath: f.relPath, line: s.line ?? 0 })
+      all.push({ name: s.name, kind: s.kind ?? '', relPath: f.relPath, wsPath: f.wsPath, line: s.line ?? 0 })
     }
     if (all.length >= 500) break
   }
@@ -1386,7 +1457,7 @@ function closeWorkspaceSymbol(): void { wsymOpen.value = false }
 function confirmWorkspaceSymbol(): void {
   const item = wsymItems.value[wsymIdx.value]
   if (item) {
-    openFile({ filepath: item.relPath, name: item.relPath.split('/').pop() ?? item.relPath, line: item.line })
+    openFile({ filepath: item.relPath, wsPath: item.wsPath, name: item.relPath.split('/').pop() ?? item.relPath, line: item.line })
     void nextTick(() => activeEditor()?.jumpToLine(item.line))
   }
   closeWorkspaceSymbol()
@@ -1407,7 +1478,7 @@ const symIdx = ref(0)
 const symInputEl = ref<HTMLInputElement | null>(null)
 const symItems = computed(() => {
   if (!symOpen.value) return []
-  const f = openFiles.value.find((f) => f.relPath === activeRel.value)
+  const f = activeFile.value
   if (!f || f.kind !== 'file') return []
   const content = activeEditor()?.getContent?.() ?? ''
   const ext = f.name.split('.').pop() ?? ''
@@ -1619,12 +1690,12 @@ function onAppKeydown(e: KeyboardEvent): void {
     return
   }
   const mod = e.metaKey || e.ctrlKey
-  if (mod && (e.key === 'w' || e.key === 'W') && activeRel.value) {
+  if (mod && (e.key === 'w' || e.key === 'W') && activeKey.value) {
     // Don't close the tab while focus is in a find/goto/cmdk text input.
     const tag = (document.activeElement as HTMLElement | null)?.tagName
     if (tag === 'INPUT') return
     e.preventDefault()
-    closeFile(activeRel.value)
+    closeFile(activeKey.value)
   }
   if (mod && e.key === 'l') {
     e.preventDefault()
@@ -1670,6 +1741,7 @@ function applyOpenTarget(p: Record<string, string>): void {
       filepath: p.filepath,
       name: p.name || undefined,
       line: Number.isFinite(line) && line > 0 ? line : undefined,
+      wsPath: p.file_ws || undefined,
     })
   }
 }
@@ -1704,6 +1776,7 @@ onMounted(() => {
       filepath: params.filepath ?? '',
       name: params.name,
       line: Number.isFinite(line) && line > 0 ? line : undefined,
+      wsPath: params.file_ws || undefined,
     })
   })
   api?.onOpenEditorDiff?.((params) => {
@@ -1735,22 +1808,22 @@ onUnmounted(() => {
   document.removeEventListener('mouseup', onResizeEnd)
 })
 
-function markDirty(relPath: string, v: boolean): void {
-  const f = openFiles.value.find((x) => x.relPath === relPath)
+function markDirty(key: string, v: boolean): void {
+  const f = findTab(key)
   if (f) f.dirty = v
 }
 
 // Host owns the window title — tracks the active file (+ dirty marker).
 watch(
-  [activeRel, openFiles],
+  [activeKey, openFiles],
   () => {
-    const f = openFiles.value.find((x) => x.relPath === activeRel.value)
+    const f = activeFile.value
     document.title = f ? `${f.dirty ? '● ' : ''}${f.name} — Mini-IDE` : 'Mini-IDE'
   },
   { deep: true, immediate: true },
 )
 
-if (workspacePath && initialRel) openFile({ filepath: initialRel, name: initialName, line: initialLine })
+if (workspacePath && initialRel) openFile({ filepath: initialRel, name: initialName, line: initialLine, wsPath: initialFileWs || undefined })
 if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, staged: initialDiffStaged, name: initialDiffName, commit: initialDiffCommit || undefined })
 </script>
 
@@ -1833,7 +1906,8 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
       />
       <ProblemsPane
         v-show="sidebarView === 'problems'"
-        @open-file="(p) => openFile({ filepath: p.filepath, line: p.line })"
+        :workspace-path="workspacePath"
+        @open-file="(p) => openFile({ filepath: p.filepath, line: p.line, wsPath: p.wsPath })"
         @fix-with-ai="(p) => {
           const loc = `${p.diag.relPath}:${p.diag.line}${p.diag.col ? ':' + p.diag.col : ''}`
           pasteToCli(`Fix this problem: ${p.diag.severity.toUpperCase()}: ${p.diag.message} at ${loc}${p.diag.source ? ' (' + p.diag.source + ')' : ''}`)
@@ -1851,32 +1925,32 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
             v-for="f in openFiles"
             :key="f.id"
             class="ide-tab"
-            :class="{ active: f.relPath === activeRel }"
-            :title="(f.kind === 'diff' || f.kind === 'conflict') ? f.filepath : f.relPath"
-            @click="activeRel = f.relPath"
-            @contextmenu.prevent="openTabCtxMenu($event, f.relPath)"
+            :class="{ active: tabKey(f) === activeKey }"
+            :title="(f.kind === 'diff' || f.kind === 'conflict') ? f.filepath : tabDisplayPath(f)"
+            @click="activeKey = tabKey(f)"
+            @contextmenu.prevent="openTabCtxMenu($event, tabKey(f))"
           >
             <span v-if="f.kind === 'diff'" class="ide-tab-diff-badge" :class="f.commit ? 'commit' : f.staged ? 'staged' : 'unstaged'">{{ f.commit ? 'C' : f.staged ? 'S' : 'U' }}</span>
             <span v-else-if="f.kind === 'conflict'" class="ide-tab-diff-badge conflict-badge">!</span>
             <span v-else-if="f.kind === 'branch-diff'" class="ide-tab-diff-badge branch-diff-badge">±</span>
             <span class="ide-tab-name">{{ f.name }}</span>
             <span v-if="f.dirty" class="ide-tab-dirty" :title="$t('label.unsaved')">●</span>
-            <button class="ide-tab-close" :title="$t('action.close')" @click.stop="closeFile(f.relPath)">✕</button>
+            <button class="ide-tab-close" :title="$t('action.close')" @click.stop="closeFile(tabKey(f))">✕</button>
           </div>
         </div>
         <div v-if="activeFile?.kind === 'file'" class="ide-tab-actions">
           <button
             v-if="activeFile && isPlanFile(activeFile.relPath)"
             class="ide-tab-act ide-tab-act--plan-toggle"
-            :title="planViewFiles.has(activeFile.relPath) ? 'Switch to raw editor' : 'Switch to plan view'"
-            @click="togglePlanView(activeFile.relPath)"
-          >{{ planViewFiles.has(activeFile.relPath) ? 'Raw' : 'Plan' }}</button>
+            :title="planViewFiles.has(activeKey) ? 'Switch to raw editor' : 'Switch to plan view'"
+            @click="togglePlanView(activeKey)"
+          >{{ planViewFiles.has(activeKey) ? 'Raw' : 'Plan' }}</button>
           <button
             v-if="activeFile && isPreviewToggleFile(activeFile.relPath)"
             class="ide-tab-act ide-tab-act--preview-toggle"
-            :title="previewFiles.has(activeFile.relPath) ? $t('preview.switch-to-raw') : $t('preview.switch-to-preview')"
-            @click="togglePreview(activeFile.relPath)"
-          >{{ previewFiles.has(activeFile.relPath) ? $t('preview.toggle-raw') : $t('preview.toggle-preview') }}</button>
+            :title="previewFiles.has(activeKey) ? $t('preview.switch-to-raw') : $t('preview.switch-to-preview')"
+            @click="togglePreview(activeKey)"
+          >{{ previewFiles.has(activeKey) ? $t('preview.toggle-raw') : $t('preview.toggle-preview') }}</button>
           <template v-if="!isPlanFile(activeFile?.relPath ?? '')">
             <button class="ide-tab-act" :title="'AI complete (⌘I)'" @click="activeEditor()?.requestGhost()">✦ Complete</button>
             <button class="ide-tab-act" :title="'AI rewrite selection (⌘K)'" @click="activeEditor()?.openCmdK()">✦ Cmd+K</button>
@@ -1885,7 +1959,7 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
       </div>
 
       <!-- Breadcrumb -->
-      <div v-if="activeRel" class="ide-breadcrumb">
+      <div v-if="activeKey" class="ide-breadcrumb">
         <template v-for="(seg, i) in activePath" :key="i">
           <span v-if="i > 0" class="ide-bc-sep">›</span>
           <span
@@ -1901,22 +1975,22 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
           <!-- Plan view: .plan.md files in plan mode, and plain .md files in
                markdown preview mode (same rendering pipeline). -->
           <PlanFileView
-            v-if="f.kind === 'file' && ((isPlanFile(f.relPath) && planViewFiles.has(f.relPath)) || (isMarkdownFile(f.relPath) && previewFiles.has(f.relPath)))"
-            v-show="f.relPath === activeRel"
-            :workspace-path="workspacePath"
+            v-if="f.kind === 'file' && ((isPlanFile(f.relPath) && planViewFiles.has(tabKey(f))) || (isMarkdownFile(f.relPath) && previewFiles.has(tabKey(f))))"
+            v-show="tabKey(f) === activeKey"
+            :workspace-path="fileWs(f)"
             :rel-path="f.relPath"
             :backend="backend"
-            @dirty="(v) => markDirty(f.relPath, v)"
+            @dirty="(v) => markDirty(tabKey(f), v)"
           />
           <!-- File preview: media/PDF/binary files in preview mode. -->
           <div
-            v-if="f.kind === 'file' && !isMarkdownFile(f.relPath) && !isPlanFile(f.relPath) && previewFiles.has(f.relPath)"
-            v-show="f.relPath === activeRel"
+            v-if="f.kind === 'file' && !isMarkdownFile(f.relPath) && !isPlanFile(f.relPath) && previewFiles.has(tabKey(f))"
+            v-show="tabKey(f) === activeKey"
             class="ide-preview-stack"
           >
             <FilePreviewPane
-              :key="f.relPath"
-              :workspace-path="workspacePath"
+              :key="tabKey(f)"
+              :workspace-path="fileWs(f)"
               :rel-path="f.relPath"
               :name="f.name"
               :backend="backend"
@@ -1925,11 +1999,11 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
           <!-- Code editor: shown for all non-plan files, and plan files in raw mode.
                Key changes when toggling plan/raw, forcing a fresh load from disk. -->
           <EditorPane
-            v-if="f.kind === 'file' && !(isPlanFile(f.relPath) && planViewFiles.has(f.relPath)) && !previewFiles.has(f.relPath)"
-            :key="f.id + ':' + (planViewFiles.has(f.relPath) ? 'plan' : 'raw')"
-            v-show="f.relPath === activeRel"
-            :ref="(el) => setEditorRef(f.relPath, el)"
-            :workspace-path="workspacePath"
+            v-if="f.kind === 'file' && !(isPlanFile(f.relPath) && planViewFiles.has(tabKey(f))) && !previewFiles.has(tabKey(f))"
+            :key="f.id + ':' + (planViewFiles.has(tabKey(f)) ? 'plan' : 'raw')"
+            v-show="tabKey(f) === activeKey"
+            :ref="(el) => setEditorRef(tabKey(f), el)"
+            :workspace-path="fileWs(f)"
             :backend="backend"
             :rel-path="f.relPath"
             :name="f.name"
@@ -1937,8 +2011,8 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
             :reveal-at="f.revealAt"
             :reveal-seq="f.revealSeq"
             embedded
-            :active="f.relPath === activeRel"
-            @dirty="(v) => markDirty(f.relPath, v)"
+            :active="tabKey(f) === activeKey"
+            @dirty="(v) => markDirty(tabKey(f), v)"
             @add-to-chat="addSelectionToChat(f, $event)"
             @explain-with-ai="explainSelectionWithAi(f, $event)"
             @fix-with-ai="fixSelectionWithAi(f, $event)"
@@ -1947,7 +2021,7 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
           />
           <DiffPane
             v-else-if="f.kind === 'diff'"
-            v-show="f.relPath === activeRel"
+            v-show="tabKey(f) === activeKey"
             :workspace-path="workspacePath"
             :filepath="f.filepath!"
             :staged="f.staged!"
@@ -1958,21 +2032,21 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
           />
           <ConflictPane
             v-else-if="f.kind === 'conflict'"
-            v-show="f.relPath === activeRel"
+            v-show="tabKey(f) === activeKey"
             :workspace-path="workspacePath"
             :filepath="f.filepath!"
             :name="f.name"
             :backend="backend"
-            @resolved="closeFile(f.relPath)"
+            @resolved="closeFile(tabKey(f))"
           />
           <BranchDiffPane
             v-else-if="f.kind === 'branch-diff'"
-            v-show="f.relPath === activeRel"
-            :workspace-path="f.filepath || workspacePath"
+            v-show="tabKey(f) === activeKey"
+            :workspace-path="fileWs(f)"
             :base="f.base!"
             :compare="f.compare ?? ''"
             :backend="backend"
-            @open-file="openFile"
+            @open-file="(p) => openFile({ ...p, wsPath: f.wsPath })"
             @ask-ai-fix="(text) => pasteToCli(text)"
           />
         </template>
@@ -1989,26 +2063,26 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
             v-for="f in secondaryGroup.files"
             :key="f.id"
             class="ide-tab"
-            :class="{ active: f.relPath === secondaryGroup.activeRel }"
-            @click="secondaryGroup.activeRel = f.relPath"
+            :class="{ active: tabKey(f) === secondaryGroup.activeKey }"
+            @click="secondaryGroup.activeKey = tabKey(f)"
           >
             <span class="ide-tab-name">{{ f.name }}</span>
-            <button class="ide-tab-close" :title="$t('action.close')" @click.stop="closeFileInSecondary(f.relPath)">✕</button>
+            <button class="ide-tab-close" :title="$t('action.close')" @click.stop="closeFileInSecondary(tabKey(f))">✕</button>
           </div>
         </div>
         <div class="ide-editors">
           <template v-for="f in secondaryGroup.files" :key="'sec:' + f.id">
             <EditorPane
               v-if="f.kind === 'file'"
-              v-show="f.relPath === secondaryGroup.activeRel"
-              :ref="(el) => setEditorRefSecondary(f.relPath, el)"
-              :workspace-path="workspacePath"
+              v-show="tabKey(f) === secondaryGroup.activeKey"
+              :ref="(el) => setEditorRefSecondary(tabKey(f), el)"
+              :workspace-path="fileWs(f)"
               :backend="backend"
               :rel-path="f.relPath"
               :name="f.name"
               embedded
-              :active="f.relPath === secondaryGroup.activeRel && !activeGroupIsPrimary"
-              @dirty="(v) => markDirty(f.relPath, v)"
+              :active="tabKey(f) === secondaryGroup.activeKey && !activeGroupIsPrimary"
+              @dirty="(v) => markDirty(tabKey(f), v)"
             />
           </template>
         </div>
@@ -2258,15 +2332,15 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
   <!-- Tab right-click context menu -->
   <teleport to="body">
     <div v-if="tabCtxMenu" class="ide-tab-ctx" :style="{ left: tabCtxMenu.x + 'px', top: tabCtxMenu.y + 'px' }" @click.stop @mousedown.stop>
-      <div class="ide-tab-ctx-item" @click="closeFile(tabCtxMenu!.relPath).then(closeTabCtxMenu)">{{ $t('action.close') }}</div>
-      <div class="ide-tab-ctx-item" @click="ctxCloseOthers(tabCtxMenu!.relPath)">{{ $t('action.close-others') }}</div>
-      <div class="ide-tab-ctx-item" @click="ctxCloseRight(tabCtxMenu!.relPath)">{{ $t('action.close-to-right') }}</div>
-      <div class="ide-tab-ctx-item" @click="ctxCloseLeft(tabCtxMenu!.relPath)">{{ $t('action.close-to-left') }}</div>
+      <div class="ide-tab-ctx-item" @click="closeFile(tabCtxMenu!.key).then(closeTabCtxMenu)">{{ $t('action.close') }}</div>
+      <div class="ide-tab-ctx-item" @click="ctxCloseOthers(tabCtxMenu!.key)">{{ $t('action.close-others') }}</div>
+      <div class="ide-tab-ctx-item" @click="ctxCloseRight(tabCtxMenu!.key)">{{ $t('action.close-to-right') }}</div>
+      <div class="ide-tab-ctx-item" @click="ctxCloseLeft(tabCtxMenu!.key)">{{ $t('action.close-to-left') }}</div>
       <div class="ide-tab-ctx-item" @click="ctxCloseAll">{{ $t('action.close-all') }}</div>
       <div class="ide-tab-ctx-sep" />
-      <div class="ide-tab-ctx-item" :class="{ disabled: tabCtxMenu!.relPath.startsWith('\x00') }" @click="ctxCopyPath(tabCtxMenu!.relPath)">{{ $t('action.copy-path') }}</div>
-      <div class="ide-tab-ctx-item" :class="{ disabled: tabCtxMenu!.relPath.startsWith('\x00') }" @click="ctxCopyRelPath(tabCtxMenu!.relPath)">{{ $t('action.copy-relative-path') }}</div>
-      <div v-if="!tabCtxMenu!.relPath.startsWith('\x00')" class="ide-tab-ctx-item" @click="ctxRevealInFinder(tabCtxMenu!.relPath)">{{ $t('action.reveal-in-finder') }}</div>
+      <div class="ide-tab-ctx-item" :class="{ disabled: !tabCtxIsFile }" @click="ctxCopyPath(tabCtxMenu!.key)">{{ $t('action.copy-path') }}</div>
+      <div class="ide-tab-ctx-item" :class="{ disabled: !tabCtxIsFile }" @click="ctxCopyRelPath(tabCtxMenu!.key)">{{ $t('action.copy-relative-path') }}</div>
+      <div v-if="tabCtxIsFile" class="ide-tab-ctx-item" @click="ctxRevealInFinder(tabCtxMenu!.key)">{{ $t('action.reveal-in-finder') }}</div>
     </div>
     <div v-if="tabCtxMenu" class="ide-tab-ctx-backdrop" @mousedown="closeTabCtxMenu" />
   </teleport>

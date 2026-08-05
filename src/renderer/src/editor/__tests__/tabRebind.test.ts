@@ -86,4 +86,26 @@ describe('rebindTabs', () => {
     expect(rebindTabs([t], 'other/x.ts', 'other/y.ts')).toEqual([])
     expect(t.relPath).toBe('src/a.ts')
   })
+
+  it('leaves tabs from another workspace alone even on an identical relPath', () => {
+    const inside = tab('notes.md')
+    const outside = { ...tab('notes.md'), wsPath: '/ext/dir' }
+    const moved = rebindTabs([inside, outside], 'notes.md', 'renamed.md')
+    expect(moved.map((m) => m.tab)).toEqual([inside])
+    expect(inside.relPath).toBe('renamed.md')
+    // Rewriting this would silently redirect the tab's next save.
+    expect(outside.relPath).toBe('notes.md')
+    expect(outside.name).toBe('notes.md')
+  })
+
+  it('rebinds only the tabs of the workspace the rename happened in', () => {
+    const inside = tab('notes.md')
+    const outside = { ...tab('notes.md'), wsPath: '/ext/dir' }
+    const other = { ...tab('notes.md'), wsPath: '/other/dir' }
+    const moved = rebindTabs([inside, outside, other], 'notes.md', 'renamed.md', '/ext/dir')
+    expect(moved.map((m) => m.tab)).toEqual([outside])
+    expect(outside.relPath).toBe('renamed.md')
+    expect(inside.relPath).toBe('notes.md')
+    expect(other.relPath).toBe('notes.md')
+  })
 })

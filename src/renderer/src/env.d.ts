@@ -101,6 +101,8 @@ declare global {
       openEditorWindow: (args: {
         workspace_path: string
         filepath?: string
+        /** Root the file itself belongs to when it lives outside `workspace_path`. */
+        file_ws?: string
         name?: string
         line?: number
         sidebar?: 'explorer' | 'search' | 'git'
