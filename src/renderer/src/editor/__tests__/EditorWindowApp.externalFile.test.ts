@@ -121,6 +121,9 @@ const bridge = {
 }
 
 let pickFileResult: { ok: boolean; path?: string } = { ok: false }
+// `fs:realpath` stand-in: paths absent from the map resolve to themselves,
+// which is the no-symlink case every pre-existing test relies on.
+let realpaths: Record<string, string> = {}
 
 beforeEach(() => {
   saveCalls.length = 0
@@ -128,6 +131,7 @@ beforeEach(() => {
   bridge.onOpenEditorFile = undefined
   bridge.onOpenTarget = undefined
   pickFileResult = { ok: false }
+  realpaths = {}
   Object.assign(window, {
     agentTeam: {
       onSwitchEditorSidebar: vi.fn(),
@@ -135,6 +139,7 @@ beforeEach(() => {
       onOpenEditorDiff: vi.fn(),
       onOpenEditorBranchDiff: vi.fn(),
       pickFile: vi.fn(async () => pickFileResult),
+      realpath: vi.fn(async (p: string) => realpaths[p] ?? p),
       openEditorWindow: vi.fn(async () => undefined),
     },
     nav: {
@@ -387,6 +392,89 @@ describe('EditorWindowApp – real open entry points carry file_ws', () => {
     await openViaIpc('notes.txt')
 
     expect(wrapper.findAll('.ide-tab')).toHaveLength(1)
+  })
+})
+
+// A workspace reached through a symlink (/tmp/wt/proj vs /private/tmp/wt/proj —
+// routine for git worktrees on macOS) has two spellings. The OS file picker
+// always answers with the canonical one, so a literal-string prefix test files
+// a ⌘O pick as "external": the same physical file gets a second tab with its
+// own buffer and its own mtime baseline, and whichever is saved second silently
+// overwrites the other's edits without tripping the conflict guard.
+describe('EditorWindowApp – symlinked workspace aliases', () => {
+  const REAL_WS = '/private/ws'
+
+  /** Mount on `/ws`, which the filesystem resolves to `/private/ws`. */
+  async function mountSymlinked(extraQuery = ''): Promise<VueWrapper> {
+    realpaths = { [WS]: REAL_WS }
+    return mountApp(extraQuery)
+  }
+
+  it('⌘O on the canonical path reuses the tab already open for that file', async () => {
+    const wrapper = await mountSymlinked()
+    await openViaIpc('src/a.ts')
+
+    pickFileResult = { ok: true, path: `${REAL_WS}/src/a.ts` }
+    await commands.get('workbench.action.openFile')!()
+    await flushPromises()
+
+    expect(wrapper.findAll('.ide-tab')).toHaveLength(1)
+    const [pane] = panes(wrapper)
+    expect(pane.props('workspacePath')).toBe(WS)
+    expect(pane.props('relPath')).toBe('src/a.ts')
+  })
+
+  it('⌘O on the canonical path opens an in-workspace tab, not an external one', async () => {
+    const wrapper = await mountSymlinked()
+    pickFileResult = { ok: true, path: `${REAL_WS}/src/a.ts` }
+    await commands.get('workbench.action.openFile')!()
+    await flushPromises()
+
+    const [pane] = panes(wrapper)
+    expect(pane.props('workspacePath')).toBe(WS)
+    expect(pane.props('relPath')).toBe('src/a.ts')
+    // Relative tooltip = the tab is inside the workspace; an external tab would
+    // show /private/ws/src/a.ts and leak the canonical path into the UI.
+    expect(wrapper.findAll('.ide-tab')[0].attributes('title')).toBe('src/a.ts')
+  })
+
+  it('still gives a genuinely external ⌘O pick its own root', async () => {
+    const wrapper = await mountSymlinked()
+    pickFileResult = { ok: true, path: '/ext/dir/notes.txt' }
+    await commands.get('workbench.action.openFile')!()
+    await flushPromises()
+
+    const [pane] = panes(wrapper)
+    expect(pane.props('workspacePath')).toBe('/ext/dir')
+    expect(pane.props('relPath')).toBe('notes.txt')
+  })
+
+  it('does not swallow a sibling directory that merely shares the canonical prefix', async () => {
+    const wrapper = await mountSymlinked()
+    pickFileResult = { ok: true, path: '/private/ws-other/notes.txt' }
+    await commands.get('workbench.action.openFile')!()
+    await flushPromises()
+
+    const [pane] = panes(wrapper)
+    expect(pane.props('workspacePath')).toBe('/private/ws-other')
+    expect(pane.props('relPath')).toBe('notes.txt')
+  })
+
+  it('folds a canonical file_ws into the window workspace tab', async () => {
+    const wrapper = await mountSymlinked()
+    await openViaIpc('notes.txt')
+    await openViaIpc('notes.txt', REAL_WS)
+
+    expect(wrapper.findAll('.ide-tab')).toHaveLength(1)
+    expect(panes(wrapper)[0].props('workspacePath')).toBe(WS)
+  })
+
+  it("still keeps '/' as a root of its own under a symlinked workspace", async () => {
+    const wrapper = await mountSymlinked()
+    await openViaIpc('notes.txt', '/')
+
+    expect(panes(wrapper)[0].props('workspacePath')).toBe('/')
+    expect(wrapper.findAll('.ide-tab')[0].attributes('title')).toBe('/notes.txt')
   })
 })
 
