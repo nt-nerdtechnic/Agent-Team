@@ -7,12 +7,20 @@ This file is a router — read the referenced file BEFORE doing the matching wor
 
 | Situation | Read first |
 |---|---|
-| Running tests / typecheck / build / dev app; git & commit rules; worktrees | `.claude/playbook/10-ops.md` |
-| Touching terminal, xterm, PTY, WebSocket, or panes | `.claude/playbook/20-pitfalls.md` |
-| Why this repo leaks tokens + the giant-file protocol | `.claude/playbook/00-diagnosis.md` |
-| Delegation, model choice, judgment calls (Claude Code only) | `~/.claude/playbook/` (see route table in global CLAUDE.md) |
+| Dev setup, tests, typecheck, PR and commit rules | `CONTRIBUTING.md` |
+| Process boundaries, ownership, persistence and trust boundaries | `docs/en-US/architecture.md` |
+| Adding or changing an agent CLI integration | `docs/en-US/cli-extension-guide.md` |
+| Building or changing a plugin | `docs/en-US/plugin-development.md` |
+| Editor, diff, or plan surfaces | `docs/en-US/editor-design.md` |
+| Keyboard shortcuts and the key resolver | `docs/en-US/keybindings.md` |
 
 Read routed files on demand, not all up front.
+
+An optional machine-local overlay may exist at `.claude/playbook/` (ignored by
+Git, so a fresh clone will not have it) and at `~/.claude/playbook/` for
+delegation and model-choice guidance. Read them when present; never block on
+them — every rule required to work in this repo is in this file or the routed
+in-repo docs above.
 
 ## Always-on rules (the expensive-to-violate subset)
 
@@ -26,12 +34,20 @@ Read routed files on demand, not all up front.
    they explicitly authorized committing for the task.
 4. **No UI automation** (cliclick/screencapture/AppleScript) — the user tests
    UI manually.
-5. **Giant files** (App.vue ~12.1K lines, ws_handlers.py ~5.2K,
-   EditorWindowApp.vue ~2.6K, backend/agent_team_backend/app.py ~1.7K):
-   Grep tool to locate → Read with offset/limit → batch edits through one
-   subagent. Never whole-file Read, never bash/python inline search.
-   Per-vendor CLI code lives in backend/agent_team_backend/cli_vendors/
-   (one file per vendor; see docs/adding-a-cli-vendor.md).
+5. **Giant files** — any file over ~2K lines: Grep tool to locate → Read with
+   offset/limit → batch edits through one subagent. Never whole-file Read,
+   never bash/python inline search. The largest are `src/renderer/src/App.vue`
+   (~12.1K lines), `backend/agent_team_backend/ws_handlers.py` (~5.2K),
+   `src/renderer/src/components/GitPane.vue` (~3.5K),
+   `src/renderer/src/components/SettingsModal.vue` (~3.0K),
+   `backend/agent_team_backend/usage_service.py` (~2.9K),
+   `src/renderer/src/components/ControlPane.vue` (~2.8K),
+   `backend/agent_team_backend/git_service.py` (~2.7K),
+   `src/renderer/src/EditorWindowApp.vue` (~2.7K), and
+   `src/renderer/src/composables/useTerminal.ts` (~2.6K). Check with `wc -l`
+   rather than trusting this list — it drifts. Per-vendor CLI code lives in
+   `backend/agent_team_backend/cli_vendors/` (one file per vendor; see
+   `docs/adding-a-cli-vendor.md`).
 
 ## Workflow (Plan Documents)
 

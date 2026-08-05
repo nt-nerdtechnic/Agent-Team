@@ -7,12 +7,20 @@ This file is a router — read the referenced file BEFORE doing the matching wor
 
 | Situation | Read first |
 |---|---|
-| Running tests / typecheck / build / dev app; git & commit rules; worktrees | `.Codex/playbook/10-ops.md` |
-| Touching terminal, xterm, PTY, WebSocket, or panes | `.Codex/playbook/20-pitfalls.md` |
-| Why this repo leaks tokens + the giant-file protocol | `.Codex/playbook/00-diagnosis.md` |
-| Delegation, model choice, judgment calls (Codex only) | `~/.Codex/playbook/` (see route table in global AGENTS.md) |
+| Dev setup, tests, typecheck, PR and commit rules | `CONTRIBUTING.md` |
+| Process boundaries, ownership, persistence and trust boundaries | `docs/en-US/architecture.md` |
+| Adding or changing an agent CLI integration | `docs/en-US/cli-extension-guide.md` |
+| Building or changing a plugin | `docs/en-US/plugin-development.md` |
+| Editor, diff, or plan surfaces | `docs/en-US/editor-design.md` |
+| Keyboard shortcuts and the key resolver | `docs/en-US/keybindings.md` |
 
 Read routed files on demand, not all up front.
+
+An optional machine-local overlay may exist at `.Codex/playbook/` and
+`~/.Codex/playbook/` for delegation and model-choice guidance. Neither is
+checked in, so a fresh clone will not have them. Read them when present; never
+block on them — every rule required to work in this repo is in this file or the
+routed in-repo docs above.
 
 ## Always-on rules (the expensive-to-violate subset)
 
@@ -26,19 +34,37 @@ Read routed files on demand, not all up front.
    they explicitly authorized committing for the task.
 4. **No UI automation** (cliclick/screencapture/AppleScript) — the user tests
    UI manually.
-5. **Giant files** (App.vue ~7K lines, GitPane.vue ~3K,
-   EditorWindowApp.vue ~2.6K, backend/agent_team_backend/app.py ~2.7K):
-   Grep tool to locate → Read with offset/limit → batch edits through one
-   subagent. Never whole-file Read, never bash/python inline search.
+5. **Giant files** — any file over ~2K lines: Grep tool to locate → Read with
+   offset/limit → batch edits through one subagent. Never whole-file Read,
+   never bash/python inline search. The largest, as of v0.1.75, are
+   `src/renderer/src/App.vue` (~11.8K lines),
+   `backend/agent_team_backend/ws_handlers.py` (~5.0K),
+   `src/renderer/src/components/GitPane.vue` (~3.5K),
+   `src/renderer/src/components/SettingsModal.vue` (~3.0K),
+   `backend/agent_team_backend/usage_service.py` (~2.9K),
+   `src/renderer/src/components/ControlPane.vue` (~2.8K),
+   `backend/agent_team_backend/git_service.py` (~2.7K),
+   `src/renderer/src/EditorWindowApp.vue` (~2.7K), and
+   `src/renderer/src/composables/useTerminal.ts` (~2.6K). Check with `wc -l`
+   rather than trusting this list — it drifts.
 
-## Workflow (Cursor Plan Mode)
+## Workflow (Plan Documents)
 
-Plan-driven development:
+Plan mode is **opt-in only** — enter it solely when the user explicitly asks
+(e.g. "建立計畫", "plan 模式"). Never create a plan file proactively, even for
+complex tasks; without a plan, state assumptions and implement directly.
 
-1. Before implementation, read the latest `.plan.md` under `.cursor/plans/`.
-2. Implement by the plan's `todos` phases; update each todo's `status` in the
-   plan file as phases complete.
-3. No plan + complex task → Discovery → Clarify → Plan Artifact first.
+When a plan exists or was explicitly requested:
+
+1. Plans are agent-authored HTML in `.agent-team/plans/` per
+   `.agent-team/plans/_spec.md` (copy `_template.html` to start). The user
+   views them in the app.
+2. Updates (todo status, stage, review notes): edit only the `plan-meta`
+   JSON block plus its matching visible markup — never rewrite the file.
+3. Approval gate: write code only when the plan's `stage` is `approved` or
+   later. The user saying "開始" means: set `stage: approved` + `approvedAt`,
+   then start.
+4. Legacy `.cursor/plans/*.plan.md` stay readable; never create new ones.
 
 ## Language
 
