@@ -618,6 +618,16 @@ describe('view lifecycle (open / hideSelf / resize / death paths)', () => {
       .map((m) => m.args[0] as Record<string, string>)
   }
 
+  it('leaves the host title alone when mirrorTitle is not requested', () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    host.title = 'my-repo — Navide'
+    const view = openView(mgr, host, 'acme.a', '?workspace_path=/ws')
+    // A plugin embedded in a shared window must never rename that window.
+    view.webContents.emit('page-title-updated', {}, 'something — Acme')
+    expect(host.title).toBe('my-repo — Navide')
+  })
+
   it('hideSelf hides only the calling sender view', () => {
     const mgr = new FrontendPluginManager()
     const host = new FakeBrowserWindow()

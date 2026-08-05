@@ -131,6 +131,43 @@ The host passes context through the entry URL's query string: `workspace_path`,
 them from `window.location.search`. Seeding your theme from `?theme=` before
 mount avoids a flash of the wrong palette.
 
+## Naming and window titles
+
+A plugin's name is written down in four places, and macOS shows the result side
+by side in the Window menu, Mission Control and the Dock. They must agree, or
+the same surface appears under three different names in one list.
+
+Pick one **feature name** per plugin — short, `Title-Case`, hyphenated if it has
+to be (`Mini-IDE`, `Git`, `Plans`) — and use it everywhere below. It is not
+derived from the plugin id: the id is a stable identifier that can never change
+(changing it installs a different plugin), the feature name is what users read.
+
+| Layer | Rule | Mini-IDE example |
+|---|---|---|
+| Manifest `id` | `navide.<kebab>`, permanent | `navide.mini-ide` |
+| Manifest `name` | The feature name, verbatim | `Mini-IDE` |
+| Manifest `displayName` | Marketplace only: `Navide <feature name>` | `Navide Mini-IDE` |
+| Entry `<title>` | The feature name alone — a pre-mount fallback, shown only until the app sets a real title | `Mini-IDE` |
+| `document.title` | `<context> — <feature name>`, em dash. No context yet → the feature name alone | `main.ts — Mini-IDE` |
+| Host `BrowserWindow` `title` | The feature name alone (see below) | `Mini-IDE` |
+
+`<context>` is whatever identifies *this* window among windows of the same kind:
+the open file for the editor, the repository for Git, the workspace for Plans.
+Put it first — a truncated Dock entry then still says which one it is. Core
+windows follow the same rule (`Agent-Team — Navide`), so plugin windows need no
+`Navide` prefix of their own; the menu already sits under the app name.
+
+**A dedicated host window does not pick up your title by itself.** The window
+that hosts a plugin view (`ensureMiniIdeWindow`, `ensureGitWindow`) has a blank
+webContents — the UI lives in the `WebContentsView`, and its `document.title`
+never reaches the window. Pass `mirrorTitle: true` to
+`frontendPluginManager.open()` for a window dedicated to one plugin; the manager
+then forwards the view's `page-title-updated` to `hostWindow.setTitle()`. Do
+**not** pass it for a view embedded in a shared window (the main shell) — the
+plugin would rename a window it does not own. The window's constructor `title`
+stays the feature name: it is what shows during load, before the first title
+event.
+
 ## Quick start: a backend plugin
 
 Create a directory containing `plugin.json` and `backend.py`. The loader
@@ -173,7 +210,7 @@ and shutdown hooks, and a spawn transformer.
 | Field | Rule | Required |
 |---|---|---|
 | `id` | `^[a-z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9-]*$`. The `navide.` prefix is reserved | yes |
-| `name` | Non-empty string | yes |
+| `name` | Non-empty string; the feature name — see [Naming and window titles](#naming-and-window-titles) | yes |
 | `version` | Strict semver `MAJOR.MINOR.PATCH`, no pre-release or build metadata | yes |
 | `publisher` | Non-empty publisher id | yes |
 | `engines` | Non-empty object containing `navide`, e.g. `{"navide": "^0.1.0"}` | yes |
