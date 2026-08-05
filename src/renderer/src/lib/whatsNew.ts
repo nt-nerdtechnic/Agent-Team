@@ -34,6 +34,33 @@ export const WHATS_NEW_CHROME = {
 
 export const WHATS_NEW: WhatsNewEntry[] = [
   {
+    version: '0.1.76',
+    title: {
+      'zh-TW': 'Claude CLI 用量讀取優化、自動更新 Pipeline 與安穩關機保護',
+      'en-US': 'Claude CLI usage panel integration, update pipeline UI & robust app shutdown',
+    },
+    highlights: [
+      {
+        'zh-TW':
+          'Claude CLI 直接面板讀取與帳號容錯：改由直接驅動 Claude CLI 內建用量面板讀取額度，徹底避免輪詢時 Token 旋轉問題，並能自動偵測被本機清空的失效憑證。',
+        'en-US':
+          'Claude CLI panel scraping & credential resilience: directly reads usage from Claude CLI without rotating OAuth refresh tokens, with automatic detection of wiped credentials.',
+      },
+      {
+        'zh-TW':
+          '自動更新 Pipeline 視覺化與確認還原：新增「檢查 ➔ 下載 ➔ 安裝」三階段進度條，並在更新安裝異常或逾時時自動復原使用者設定的「關閉 App 確認」視窗。',
+        'en-US':
+          'Visual update pipeline & quit confirmation recovery: added 3-stage update pipeline indicators and restored quit confirmation dialogs when an install fails or times out.',
+      },
+      {
+        'zh-TW':
+          '依賴安裝連鎖鏈與 Terminal IME 輸入優化：CLI 安裝對話框支援自動接續連鎖安裝步驟，並優化 Terminal 在輸入法 (IME) 及視窗切換時的 Focus 清除與狀態復原。',
+        'en-US':
+          'Sequential dependency installer & Terminal IME focus fixes: automated multi-step CLI dependency installation and resolved focus/IME state leakage during terminal pane disposal.',
+      },
+    ],
+  },
+  {
     version: '0.1.75',
     title: {
       'zh-TW': '跨工作區 Agent 通訊與定址系統',
