@@ -261,6 +261,9 @@ class FakeBrowserWindow {
   getContentBounds(): { x: number; y: number; width: number; height: number } {
     return { ...this.contentBounds }
   }
+  setTitle(t: string): void {
+    this.title = t
+  }
   on(event: string, cb: (...args: unknown[]) => void): this {
     const list = this.listeners.get(event) ?? []
     list.push(cb)
@@ -1072,6 +1075,23 @@ describe('mini-IDE dedicated window (openMiniIdePluginView)', () => {
   it('passes the current theme in the entry query', () => {
     openMiniIdePluginView('/ws', '', {}, 'light')
     expect(lastView().webContents.loads[0]).toContain('theme=light')
+  })
+
+  it('mirrors the plugin page title onto the dedicated host window', () => {
+    openMiniIdePluginView('/ws', 'http://h:1')
+    const win = lastWindow()
+    // The host's own webContents is blank; without mirroring the window would
+    // keep its creation-time title in the macOS Window menu forever.
+    expect(win.title).toBe('Mini-IDE')
+    lastView().webContents.emit('page-title-updated', {}, 'main.ts — Mini-IDE')
+    expect(win.title).toBe('main.ts — Mini-IDE')
+  })
+
+  it('ignores an empty page title so the window keeps its feature name', () => {
+    openMiniIdePluginView('/ws', 'http://h:1')
+    const win = lastWindow()
+    lastView().webContents.emit('page-title-updated', {}, '')
+    expect(win.title).toBe('Mini-IDE')
   })
 
   it('reopen restores and focuses the dedicated window without reloading', () => {
