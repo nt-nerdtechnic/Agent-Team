@@ -47,7 +47,8 @@ async function flush(): Promise<void> {
   await Promise.resolve()
 }
 
-async function loadInitUpdater(): Promise<(o: { enabled: boolean; currentVersion: string; checkDelayMs?: number }) => void> {
+// Derive the signature from the module so a new option never needs restating.
+async function loadInitUpdater(): Promise<typeof import('./updater').initUpdater> {
   vi.resetModules()
   return (await import('./updater')).initUpdater
 }
@@ -210,6 +211,89 @@ describe('initUpdater lifecycle', () => {
     const second = await loadInitUpdater()
     second({ enabled: true, currentVersion: '1.0.0' })
     expect(h.ipcHandlers.get('updater:get-settings')!()).toMatchObject({ autoInstallOnQuit: true })
+  })
+
+  it('arms the quit-time install only once the download has landed', async () => {
+    // End-to-end for the timing that matters: electron-updater reads
+    // autoInstallOnAppQuit when a download finishes, so it must be off during
+    // the transfer and on afterwards — not simply mirror the setting.
+    const initUpdater = await loadInitUpdater()
+    initUpdater({ enabled: true, currentVersion: '1.0.0' })
+    await h.ipcHandlers.get('updater:set-settings')!({}, { autoInstallOnQuit: true } as Partial<UpdaterSettings>)
+
+    emit('update-available', { version: '1.0.1' })
+    await flush()
+    expect(h.autoUpdater.downloadUpdate).toHaveBeenCalledTimes(1)
+    expect(h.autoUpdater.autoInstallOnAppQuit).toBe(false)
+
+    emit('update-downloaded', { version: '1.0.1' })
+    await flush()
+    expect(h.autoUpdater.autoInstallOnAppQuit).toBe(true)
+    expect(h.autoUpdater.downloadUpdate).toHaveBeenCalledTimes(2)
+  })
+
+  it('waives the quit confirmation before an install takes the app down', async () => {
+    // quitAndInstall quits the app, which would otherwise raise the "Quit?"
+    // dialog on top of the confirmation the user just answered — and cancelling
+    // that dialog does not un-stage the update, so the question would be a lie.
+    const onInstallStarting = vi.fn()
+    const initUpdater = await loadInitUpdater()
+    initUpdater({ enabled: true, currentVersion: '1.0.0', onInstallStarting })
+
+    emit('update-available', { version: '1.0.1' })
+    await flush()
+    emit('update-downloaded', { version: '1.0.1' })
+    await flush()
+    expect(onInstallStarting).not.toHaveBeenCalled()
+
+    await h.ipcHandlers.get('updater:install')!()
+
+    expect(onInstallStarting).toHaveBeenCalledOnce()
+    expect(h.autoUpdater.quitAndInstall).toHaveBeenCalled()
+    // Order matters: quitAndInstall can take the app down synchronously.
+    expect(onInstallStarting.mock.invocationCallOrder[0])
+      .toBeLessThan(h.autoUpdater.quitAndInstall.mock.invocationCallOrder[0])
+  })
+
+  it('hands back the waived quit confirmation when the install is refused outright', async () => {
+    // Nothing downloaded: install() rejects its precondition and the app stays
+    // up. Without the rollback, every later Cmd+Q would skip the user's
+    // "confirm before quit" dialog for the rest of the run.
+    const onInstallStarting = vi.fn()
+    const onInstallAbandoned = vi.fn()
+    const initUpdater = await loadInitUpdater()
+    initUpdater({ enabled: true, currentVersion: '1.0.0', onInstallStarting, onInstallAbandoned })
+
+    await h.ipcHandlers.get('updater:install')!()
+
+    expect(onInstallStarting).toHaveBeenCalledOnce()
+    expect(onInstallAbandoned).toHaveBeenCalledOnce()
+  })
+
+  it('hands back the waived quit confirmation when a stuck install times out', async () => {
+    const onInstallAbandoned = vi.fn()
+    const initUpdater = await loadInitUpdater()
+    initUpdater({ enabled: true, currentVersion: '1.0.0', onInstallAbandoned })
+    await h.ipcHandlers.get('updater:set-settings')!({}, { installTimeoutSeconds: 5 } as Partial<UpdaterSettings>)
+
+    emit('update-downloaded', { version: '1.0.1' })
+    h.ipcHandlers.get('updater:install')!()
+    expect(onInstallAbandoned).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(onInstallAbandoned).toHaveBeenCalledOnce()
+  })
+
+  it('hands back the waived quit confirmation when quitAndInstall throws', async () => {
+    const onInstallAbandoned = vi.fn()
+    const initUpdater = await loadInitUpdater()
+    initUpdater({ enabled: true, currentVersion: '1.0.0', onInstallAbandoned })
+    h.autoUpdater.quitAndInstall.mockImplementation(() => { throw new Error('spawn failed') })
+
+    emit('update-downloaded', { version: '1.0.1' })
+    await h.ipcHandlers.get('updater:install')!()
+
+    expect(onInstallAbandoned).toHaveBeenCalledOnce()
   })
 
   it('never arms a quit-time install on an unsupported build', async () => {

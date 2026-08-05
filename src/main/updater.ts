@@ -17,6 +17,18 @@ let settingsFile = ''
 let stateFile = ''
 let persistedState = ''
 let periodicTimer: ReturnType<typeof setInterval> | null = null
+let lastPublishedStatus: UpdateStatus | null = null
+let onInstallAbandoned: (() => void) | null = null
+// Set when onInstallStarting waived the quit confirmation; the rollback fires
+// once per waiver, whichever failure path (rejected precondition, error state,
+// install timeout) reports the abandonment first.
+let installWaived = false
+
+function abandonInstall(): void {
+  if (!installWaived) return
+  installWaived = false
+  onInstallAbandoned?.()
+}
 
 // Re-check for updates every 30 minutes in addition to the one-shot startup
 // check, so a release published while the app is already running is picked up
@@ -57,6 +69,13 @@ function readLastCheckedAt(): string | undefined {
 }
 
 function publishState(state: UpdateState): void {
+  // An install that leaves 'installing' without the app going down (install
+  // timeout, quitAndInstall error) must hand back whatever the host waived
+  // when the install started — otherwise the quit-confirm dialog stays
+  // disabled for the rest of the run.
+  const wasInstalling = lastPublishedStatus === 'installing'
+  lastPublishedStatus = state.status
+  if (wasInstalling && state.status !== 'installing') abandonInstall()
   broadcast('updater:state-changed', state)
   persistState(state)
   if (state.status === 'error') console.error('[updater]', state.message)
@@ -133,9 +152,21 @@ export function initUpdater(options: {
   enabled: boolean
   currentVersion: string
   checkDelayMs?: number
+  /**
+   * Called just before an install takes the app down, so the host can waive a
+   * quit confirmation the user has effectively already given.
+   */
+  onInstallStarting?: () => void
+  /**
+   * Called when an install that started did not take the app down after all
+   * (rejected precondition, quitAndInstall error, install timeout), so the
+   * host can restore whatever onInstallStarting waived.
+   */
+  onInstallAbandoned?: () => void
 }): void {
   if (service) return
 
+  onInstallAbandoned = options.onInstallAbandoned ?? null
   settingsFile = join(app.getPath('userData'), 'updater-settings.json')
   settings = readUpdaterSettings(settingsFile)
   stateFile = join(app.getPath('userData'), 'updater-state.json')
@@ -164,7 +195,17 @@ export function initUpdater(options: {
   ipcMain.handle('updater:get-state', () => service!.getState())
   ipcMain.handle('updater:check', () => service!.check())
   ipcMain.handle('updater:download', () => service!.download())
-  ipcMain.handle('updater:install', () => service!.install())
+  ipcMain.handle('updater:install', () => {
+    // Before, not after: quitAndInstall can take the app down synchronously.
+    options.onInstallStarting?.()
+    installWaived = true
+    const result = service!.install()
+    // A rejected precondition never enters 'installing', so the state-change
+    // rollback in publishState cannot fire — undo the waiver here. The throw
+    // and timeout paths do transition, and publishState handles those.
+    if (!result.ok) abandonInstall()
+    return result
+  })
   ipcMain.handle('updater:get-settings', (): UpdaterSettings => settings!)
   ipcMain.handle('updater:set-settings', (_event, patch: Partial<UpdaterSettings>): UpdateSettingsResult => {
     try {

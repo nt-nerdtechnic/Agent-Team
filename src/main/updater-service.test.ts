@@ -420,3 +420,127 @@ describe('createUpdaterService', () => {
     expect(service.getState()).toMatchObject({ status: 'downloaded', availableVersion: '1.0.1' })
   })
 })
+
+/**
+ * electron-updater consumes autoInstallOnAppQuit when a download FINISHES, not
+ * when the app quits (MacUpdater only hands the payload to Squirrel if the flag
+ * is set at that moment). These tests pin that timing down: without them the
+ * flag looks like a plain mirror of the user's setting, which is exactly the
+ * misreading that made the feature silently do nothing.
+ */
+describe('createUpdaterService — quit-time install', () => {
+  async function downloaded(supported = true) {
+    const parts = fakeClient()
+    const service = createUpdaterService(parts.client, '1.0.0', supported, vi.fn())
+    await service.check()
+    parts.emit('update-available', { version: '1.0.1' })
+    return { ...parts, service }
+  }
+
+  it('keeps the flag off during the download itself', async () => {
+    // A download that runs with the flag set never resolves its promise, so
+    // download() would hang and downloadPromise would never clear.
+    const { raw, service, emit } = await downloaded()
+    service.setAutoInstallOnQuit(true)
+    const inFlight = service.download()
+    expect(raw.autoInstallOnAppQuit).toBe(false)
+    emit('update-downloaded', { version: '1.0.1' })
+    await inFlight
+    // Only the arming pass turns it on, and only after the transfer is done.
+    expect(raw.autoInstallOnAppQuit).toBe(true)
+  })
+
+  it('arms the install once the download finishes', async () => {
+    const { raw, service, emit } = await downloaded()
+    service.setAutoInstallOnQuit(true)
+    await service.download()
+    raw.downloadUpdate.mockClear()
+
+    emit('update-downloaded', { version: '1.0.1' })
+
+    expect(raw.autoInstallOnAppQuit).toBe(true)
+    // Re-run with the flag on is what actually hands the payload over; the file
+    // is already cached, so this is a checksum pass rather than a transfer.
+    expect(raw.downloadUpdate).toHaveBeenCalledTimes(1)
+    expect(service.getState().quitInstallArmed).toBe(true)
+  })
+
+  it('arms an update that had already finished downloading', async () => {
+    // The common case: the user sees "update ready" and only then turns the
+    // switch on. Setting the flag alone would do nothing at all.
+    const { raw, service, emit } = await downloaded()
+    emit('update-downloaded', { version: '1.0.1' })
+    expect(raw.autoInstallOnAppQuit).toBe(false)
+    raw.downloadUpdate.mockClear()
+
+    service.setAutoInstallOnQuit(true)
+
+    expect(raw.autoInstallOnAppQuit).toBe(true)
+    expect(raw.downloadUpdate).toHaveBeenCalledTimes(1)
+    expect(service.getState().quitInstallArmed).toBe(true)
+  })
+
+  it('does not arm before anything has been downloaded', async () => {
+    const { raw, service } = await downloaded()
+    service.setAutoInstallOnQuit(true)
+    expect(raw.autoInstallOnAppQuit).toBe(false)
+    expect(raw.downloadUpdate).not.toHaveBeenCalled()
+    expect(service.getState().quitInstallArmed).toBeUndefined()
+  })
+
+  it('arms at most once', async () => {
+    const { raw, service, emit } = await downloaded()
+    service.setAutoInstallOnQuit(true)
+    emit('update-downloaded', { version: '1.0.1' })
+    raw.downloadUpdate.mockClear()
+
+    service.setAutoInstallOnQuit(true)
+    emit('update-downloaded', { version: '1.0.1' })
+
+    expect(raw.downloadUpdate).not.toHaveBeenCalled()
+  })
+
+  it('keeps reporting an armed update after the switch goes back off', async () => {
+    // The handoff is one-way: Squirrel cannot un-stage a payload it has taken.
+    // Claiming otherwise would tell the user an update was cancelled when it
+    // will still be applied on the next quit.
+    const { raw, service, emit } = await downloaded()
+    service.setAutoInstallOnQuit(true)
+    emit('update-downloaded', { version: '1.0.1' })
+
+    service.setAutoInstallOnQuit(false)
+
+    expect(raw.autoInstallOnAppQuit).toBe(true)
+    expect(service.getState().quitInstallArmed).toBe(true)
+  })
+
+  it('clears the flag when switched off before anything was armed', async () => {
+    const { raw, service } = await downloaded()
+    service.setAutoInstallOnQuit(true)
+    service.setAutoInstallOnQuit(false)
+    expect(raw.autoInstallOnAppQuit).toBe(false)
+    expect(service.getState().quitInstallArmed).toBeUndefined()
+  })
+
+  it('never arms on an unsupported build', async () => {
+    const { raw, service } = await downloaded(false)
+    service.setAutoInstallOnQuit(true)
+    expect(raw.autoInstallOnAppQuit).toBe(false)
+    expect(service.getState().quitInstallArmed).toBeUndefined()
+  })
+
+  it('backs the arming out when the handoff fails', async () => {
+    // Otherwise the UI would keep promising a quit-time install that the OS
+    // updater never accepted.
+    const { raw, service, emit } = await downloaded()
+    emit('update-downloaded', { version: '1.0.1' })
+    raw.downloadUpdate.mockRejectedValueOnce(new Error('squirrel refused'))
+
+    service.setAutoInstallOnQuit(true)
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(service.getState().quitInstallArmed).toBeUndefined()
+    expect(raw.autoInstallOnAppQuit).toBe(false)
+  })
+})

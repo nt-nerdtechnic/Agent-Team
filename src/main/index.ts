@@ -12,6 +12,7 @@ import { registerStorageIpc } from './storage-ipc'
 import { lockPageZoom } from './web-contents-zoom'
 import { installContextMenu, registerTerminalContextMenu } from './context-menu'
 import { initUpdater } from './updater'
+import { withDeadline } from './deadline'
 import { WindowRegistry, type WindowBounds, type WindowEntry } from './window-registry'
 import { setWindowDockTileBadge } from './dock-tile-badge'
 import { BackendBroadcastTracker } from './backend-broadcast'
@@ -1807,6 +1808,14 @@ app.whenReady().then(async () => {
   initUpdater({
     enabled: app.isPackaged && process.platform === 'darwin',
     currentVersion: app.getVersion(),
+    // Installing quits the app by design, and the user already agreed to that
+    // when they asked for the install. Without this they get a second "Quit?"
+    // dialog on top of the one they just answered — and cancelling it leaves
+    // the update staged anyway, so the question is not even truthful.
+    onInstallStarting: () => { quitConfirmed = true },
+    // The install did not take the app down (bad precondition, error, or
+    // timeout) — restore the confirmation gate the waiver above disabled.
+    onInstallAbandoned: () => { quitConfirmed = false },
   })
   // Detect an unclean previous exit and stash its windows for the restore
   // banner. Always reset the file (start tracking this run) — but only OFFER
@@ -1893,20 +1902,23 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
+// Shutdown budgets. They are deliberately SEPARATE: a single shared deadline
+// let a slow spawn eat the stop budget, and stopping must keep its full window
+// — it has to outlast backend.stop()'s own 5s SIGTERM grace, or the cap
+// SIGKILLs the backend mid-shutdown-sweep and orphans every PTY child.
+const BACKEND_SPAWN_WAIT_MS = 3000
+const BACKEND_STOP_WAIT_MS = 6000
+
 async function teardownBackendAndQuit(): Promise<void> {
   // A user-initiated quit is a clean exit — nothing to restore next launch.
   windowRegistry.markCleanExit()
-  // Never let a wedged/slow backend block quit: cap every wait below.
-  // Must exceed backend.stop()'s 5s SIGTERM grace, or the cap SIGKILLs the
-  // backend mid-shutdown-sweep and orphans every PTY child.
-  const forced = new Promise<void>((r) => setTimeout(r, 6000))
   // If the backend is still spawning (quit mid-startup), wait for it (capped) so
   // we can stop it rather than orphan the process.
-  if (!backend && backendStarting) await Promise.race([backendStarting, forced])
+  if (!backend && backendStarting) await withDeadline(backendStarting, BACKEND_SPAWN_WAIT_MS)
   const b = backend
   backend = null
   backendStarting = null
-  if (b) await Promise.race([b.stop(), forced])
+  if (b) await withDeadline(b.stop(), BACKEND_STOP_WAIT_MS)
   app.quit()
 }
 

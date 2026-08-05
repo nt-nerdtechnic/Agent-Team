@@ -159,8 +159,11 @@ async function clearChromiumCaches(
 /** Why the updater cache must survive, per updater status. */
 const UPDATER_BUSY_REASON: Record<string, string> = {
   downloading: 'An update download is in progress — the updater cache was left untouched.',
+  // "Restart or quit": with install-on-quit enabled a downloaded update is
+  // applied when the app closes, so telling the user to restart would name the
+  // one action they were trying to avoid.
   downloaded:
-    'An update is downloaded and waiting to install — the updater cache was left untouched so the pending install keeps working. Restart to install it, then clear again.',
+    'An update is downloaded and waiting to install — the updater cache was left untouched so the pending install keeps working. Restart or quit the app to apply it, then clear again.',
   installing: 'An update is installing — the updater cache was left untouched.'
 }
 
