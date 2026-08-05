@@ -71,15 +71,30 @@ def _resolve_safe(workspace_path: str, rel_path: str) -> Path:
     if target != root and root not in target.parents:
         raise FsError("path escapes workspace")
 
-    parts = target.relative_to(root).parts
-    if parts and parts[0] == PROJECT_DIR_NAME:
-        # Exception: the plans subtree (the dir itself and anything below it)
-        # is user-facing and allowed. `target` is already resolve()d, so a
-        # traversal like `.agent-team/plans/../chat-threads.json` normalizes
-        # to a protected path before reaching this check.
-        if len(parts) < 2 or parts[1] not in _ALLOWED_AGENT_TEAM_SUBDIRS:
-            raise FsError("the internal directory is protected")
+    _reject_protected_internal_dir(target)
     return target
+
+
+def _reject_protected_internal_dir(target: Path) -> None:
+    """Reject paths inside an internal ``.agent-team`` dir, wherever it sits.
+
+    The check walks the whole absolute path rather than only the part below the
+    root: a caller may name any existing directory as its root (that is how
+    files outside a workspace are opened), and rooting at
+    ``<ws>/.agent-team`` would otherwise leave the guard looking at a filename
+    where it expects the internal dir. Only the user-facing ``plans/`` and
+    ``reports/`` subtrees are allowed through, exactly as before.
+    """
+    parts = target.parts
+    for i, part in enumerate(parts):
+        if part != PROJECT_DIR_NAME:
+            continue
+        # `target` is already resolve()d, so a traversal like
+        # `.agent-team/plans/../chat-threads.json` normalizes to a protected
+        # path before reaching this check.
+        nxt = parts[i + 1] if i + 1 < len(parts) else None
+        if nxt not in _ALLOWED_AGENT_TEAM_SUBDIRS:
+            raise FsError("the internal directory is protected")
 
 
 def _entry(root: Path, parent: Path, name: str, is_dir: bool) -> dict[str, Any]:

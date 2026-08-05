@@ -122,6 +122,32 @@ def test_plans_traversal_still_protected(tmp_path: Path) -> None:
         assert "protected" in res["error"].lower()
 
 
+def test_internal_dir_protected_when_named_as_the_root(tmp_path: Path) -> None:
+    """Rooting at .agent-team itself must not step around the guard.
+
+    Any existing directory is accepted as a root (that is how files outside a
+    workspace are opened), so a root of `<ws>/.agent-team` would leave a
+    root-relative check inspecting a filename where it expects the internal dir.
+    """
+    _ws_with_plans(tmp_path)
+    internal = str(tmp_path / ".agent-team")
+    for res in (
+        fs_service.read_file(internal, "project.json"),
+        fs_service.list_dir(internal, ""),
+        fs_service.write_file(internal, "evil.json", "x"),
+    ):
+        assert res["ok"] is False
+        assert "protected" in res["error"].lower()
+
+
+def test_plans_subtree_still_reachable_when_named_as_the_root(tmp_path: Path) -> None:
+    """The user-facing subtrees stay open however the root is expressed."""
+    _ws_with_plans(tmp_path)
+    plans = str(tmp_path / ".agent-team" / "plans")
+    assert fs_service.read_file(plans, "my-plan.html")["ok"] is True
+    assert fs_service.list_dir(plans, "")["ok"] is True
+
+
 # ── list_dir + show_hidden ──────────────────────────────────────────────────
 def test_list_hides_dotfiles_by_default(tmp_path: Path) -> None:
     res = fs_service.list_dir(_ws(tmp_path), "")
