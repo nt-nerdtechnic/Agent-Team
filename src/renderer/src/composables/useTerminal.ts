@@ -380,7 +380,7 @@ function openInEditor(absPath: string, line: number | undefined, workspacePath?:
   const root = workspacePath?.replace(/\/+$/, '')
   const inWorkspace = !!root && absPath.startsWith(`${root}/`)
   void api.openEditorWindow({
-    workspace_path: root ?? dir,
+    workspace_path: root || dir,
     filepath: inWorkspace ? absPath.slice(root.length + 1) : absPath.slice(slash + 1),
     ...(root && !inWorkspace ? { file_ws: dir } : {}),
     ...(line !== undefined ? { line } : {}),
