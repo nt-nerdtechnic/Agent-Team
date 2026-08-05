@@ -136,6 +136,7 @@ function refreshStatusLabel(status: string | undefined): string {
     'expired',
     'rate-limited',
     'unavailable',
+    'not-measured',
     'error',
     'ok',
   ])

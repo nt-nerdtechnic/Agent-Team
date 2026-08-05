@@ -25,11 +25,6 @@ backend/.venv/
 *.pyc
 backend/dist/
 backend/build/
-# Untracked local constants: Antigravity's public installed-app OAuth values.
-# Bundled into release builds but NEVER committed to this open-source repo.
-# Copy usage_secrets.example.py -> usage_secrets.py to enable locally.
-backend/agent_team_backend/usage_secrets.py
-
 # ─── Electron packaging output ──────────────────────────────────────────────
 dist-local/
 dist-release/

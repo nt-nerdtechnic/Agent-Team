@@ -3,8 +3,11 @@
 Reads the credentials each CLI already stores locally and calls that
 provider's own usage surface — no login flow, no credential writes:
 
-- claude: ``~/.claude/.credentials.json`` (macOS Keychain fallback) ->
-  ``GET https://api.anthropic.com/api/oauth/usage``
+- claude: no request from here at all — the CLI's own ``/usage`` panel is
+  read instead, so Claude Code asks under its own identity
+  (see :mod:`claude_cli_usage`). ``api/oauth/usage`` is still reached for the
+  Anthropic OAuth grants that opencode and pi keep in their own auth files,
+  where there is no vendor CLI to delegate to.
 - codex:  ``$CODEX_HOME/auth.json`` -> ``GET <base>/wham/usage``
   (base from ``config.toml`` ``chatgpt_base_url``, default chatgpt.com)
 - kimi:   ``~/.kimi-code/credentials/kimi-code.json`` ->
@@ -13,8 +16,10 @@ provider's own usage surface — no login flow, no credential writes:
   method ``x.ai/billing``
 - antigravity: refresh token from macOS Keychain ``gemini``/``antigravity``
   (stale-file fallback ``~/.gemini/antigravity-cli/antigravity-oauth-token``)
-  -> in-memory Google OAuth refresh grant ->
-  ``POST https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary``
+  -> sign-in state only. The quota read minted a Google access token in-process
+  from the CLI's own client_id/secret and called
+  ``v1internal:retrieveUserQuotaSummary`` as ``User-Agent: antigravity``. Both
+  halves impersonated the vendor's client, so both are gone.
 - opencode: ``~/.local/share/opencode/auth.json`` is an aggregator (a map of
   providerID -> credential); each supported entry is mapped to that
   provider's own usage endpoint: ``minimax-coding-plan`` ->
@@ -24,9 +29,10 @@ provider's own usage surface — no login flow, no credential writes:
 - qwen: Alibaba ModelStudio Coding Plan API key (``sk-sp-...``) from the
   process env (``BAILIAN_CODING_PLAN_API_KEY`` + CodexBar's aliases),
   ``~/.qwen/.env`` or the ``env`` block of ``~/.qwen/settings.json`` ->
-  ``POST <console gateway>/data/api.json queryCodingPlanInstanceInfoV2``
-  (international region first, China-mainland retry). The legacy Qwen OAuth
-  file has no usage API (free tier discontinued) -> unavailable.
+  sign-in state only. Quota came from ModelStudio's own console gateway
+  (``data/api.json``), reached with a browser User-Agent and matching
+  Origin/Referer — a surface for a logged-in web console, not for this app.
+  The legacy Qwen OAuth file has no usage API either (free tier discontinued).
 - kilo: ``~/.local/share/kilo/auth.json`` (the ``kilo`` entry: api key, or the
   long-lived oauth access token + accountId org; legacy fallback
   ``~/.kilocode/cli/config.json``) ->
@@ -44,15 +50,18 @@ provider's own usage surface — no login flow, no credential writes:
   account; the CLI's own OAuth token lives in the macOS Keychain (not probed),
   so the token is read via ``gh auth token -u <login>`` (fallbacks: the
   VS Code-style ``~/.config/github-copilot/{apps,hosts}.json`` oauth_token,
-  then ``GH_TOKEN``/``GITHUB_TOKEN`` env) ->
-  ``GET https://api.github.com/copilot_internal/user``
+  then ``GH_TOKEN``/``GITHUB_TOKEN`` env) -> sign-in state only.
+  ``copilot_internal/user`` answered the VS Code extension, so the request
+  carried its ``Editor-Version``/``User-Agent``. The CLI's own ``/usage`` is no
+  substitute: it renders inside a TUI that needs a full terminal handshake, and
+  reports the session's credits rather than the plan's.
 - cursor: session JWT from the macOS Keychain generic password
   ``cursor-access-token`` (cursor-agent CLI; fallback: the Cursor IDE's
   ``~/Library/Application Support/Cursor/User/globalStorage/state.vscdb``
-  sqlite row ``cursorAuth/accessToken``) ->
-  ``GET https://cursor.com/api/usage-summary`` authenticated by a
-  ``WorkosCursorSessionToken={userId}%3A%3A{jwt}`` cookie (userId = the JWT
-  ``sub`` after the last ``|``)
+  sqlite row ``cursorAuth/accessToken``) -> sign-in state and local expiry
+  only. ``usage-summary`` authenticates a signed-in browser session, so
+  reaching it meant rebuilding cursor.com's own ``WorkosCursorSessionToken``
+  cookie from that JWT.
 
 Every credential file is read-only here; token refresh is left to the CLI
 that owns the file (refreshing ourselves would rotate the CLI's tokens).
@@ -93,9 +102,27 @@ log = logging.getLogger(__name__)
 PROVIDERS = ("claude", "codex", "kimi", "grok", "antigravity", "opencode", "qwen",
              "kilo", "pi", "copilot", "cursor")
 
+# Reported by providers whose quota could only be read by pretending to be the
+# vendor's own client — a browser, an IDE extension, or the CLI itself. Those
+# requests are gone. Verified 2026-08-05 against the installed CLIs: none of
+# them exposes a non-interactive usage command (``codex doctor``, ``kimi``'s
+# subcommands and ``opencode stats`` report local session statistics, not the
+# account's quota), and copilot's ``/usage`` lives inside a TUI that will not
+# render without a full terminal handshake — and reports the session, not the
+# plan. Reading the local credential to show "signed in" stays: that file is
+# the user's own. grok remains the working pattern (``grok agent stdio``, the
+# CLI's own published interface).
+NO_OFFICIAL_USAGE_SURFACE = (
+    "no official CLI command exposes this account's quota; "
+    "the previous HTTP read required impersonating the vendor's own client"
+)
+
 CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+# How long a `/usage` panel reading stands before the CLI is asked again. The
+# read costs a full Claude Code start, so it deliberately does not follow the
+# poll interval; the badge's refresh button clears it via `request_refresh`.
+CLAUDE_CLI_READ_INTERVAL = 900.0
 CLAUDE_BETA_HEADER = "oauth-2025-04-20"
-CLAUDE_UA_FALLBACK = "claude-code/2.1.0"
 CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 # Claude OAuth tokens are never minted here. Anthropic rotates refresh tokens,
 # so every exchange invalidates the previous one: whenever this app refreshed a
@@ -115,67 +142,15 @@ ANTIGRAVITY_KEYCHAIN_SERVICE = "gemini"
 ANTIGRAVITY_KEYCHAIN_ACCOUNT = "antigravity"
 ANTIGRAVITY_KEYRING_PREFIX = "go-keyring-base64:"
 ANTIGRAVITY_TOKEN_FILE_REL = (".gemini", "antigravity-cli", "antigravity-oauth-token")
-ANTIGRAVITY_OAUTH_CONFIG = "antigravity-oauth.json"
-ANTIGRAVITY_TOKEN_URL = "https://oauth2.googleapis.com/token"
-ANTIGRAVITY_API_BASE = "https://cloudcode-pa.googleapis.com"
-ANTIGRAVITY_LOAD_URL = f"{ANTIGRAVITY_API_BASE}/v1internal:loadCodeAssist"
-ANTIGRAVITY_QUOTA_URL = f"{ANTIGRAVITY_API_BASE}/v1internal:retrieveUserQuotaSummary"
-# Antigravity's public installed-app OAuth constants are deliberately NOT
-# committed to this open-source repo. They are resolved at runtime from, in
-# order: an untracked usage_secrets.py (gitignored, bundled into release builds
-# — see usage_secrets.example.py), then env-var overrides, then empty. When
-# empty the token refresh returns 401 and the Antigravity quota provider
-# degrades to an error status. The per-user antigravity-oauth.json override
-# (_load_antigravity_oauth_config) still takes precedence over all of these.
-try:
-    from .usage_secrets import (
-        ANTIGRAVITY_CLIENT_ID as _ANTIGRAVITY_CLIENT_ID,
-        ANTIGRAVITY_CLIENT_SECRET as _ANTIGRAVITY_CLIENT_SECRET,
-    )
-except ImportError:
-    _ANTIGRAVITY_CLIENT_ID = ""
-    _ANTIGRAVITY_CLIENT_SECRET = ""
-ANTIGRAVITY_CLIENT_ID = _ANTIGRAVITY_CLIENT_ID or os.environ.get(
-    "NAVIDE_ANTIGRAVITY_CLIENT_ID", "")
-ANTIGRAVITY_CLIENT_SECRET = _ANTIGRAVITY_CLIENT_SECRET or os.environ.get(
-    "NAVIDE_ANTIGRAVITY_CLIENT_SECRET", "")
-ANTIGRAVITY_LOAD_METADATA = {
-    "ideType": "ANTIGRAVITY",
-    "platform": "PLATFORM_UNSPECIFIED",
-    "pluginType": "GEMINI",
-}
+# The Google OAuth client constants this provider used to mint access tokens
+# with are gone along with the quota call — see fetch_antigravity. Only the
+# Keychain/token-file locations above remain, and only to detect sign-in.
 OPENCODE_AUTH_FILE_REL = (".local", "share", "opencode", "auth.json")
 OPENCODE_MINIMAX_USAGE_URL = "https://api.minimax.io/v1/token_plan/remains"
-# qwen (Alibaba ModelStudio Coding Plan). The quota endpoint is the console
-# gateway API CodexBar's Alibaba provider ships against — undocumented, so the
-# request mirrors the console (browser UA + Origin/Referer) and the alternate
-# region is retried on failure, exactly like CodexBar.
-_QWEN_USAGE_QUERY = (
-    "?action=zeldaEasy.broadscope-bailian.codingPlan.queryCodingPlanInstanceInfoV2"
-    "&product=broadscope-bailian&api=queryCodingPlanInstanceInfoV2"
-)
-QWEN_INTL_USAGE_URL = (
-    "https://modelstudio.console.alibabacloud.com/data/api.json"
-    + _QWEN_USAGE_QUERY + "&currentRegionId=ap-southeast-1"
-)
-QWEN_CN_USAGE_URL = (
-    "https://bailian.console.aliyun.com/data/api.json"
-    + _QWEN_USAGE_QUERY + "&currentRegionId=cn-beijing"
-)
-# (url, commodityCode, Origin, Referer) per region, tried in order.
-QWEN_REGIONS = (
-    (QWEN_INTL_USAGE_URL, "sfm_codingplan_public_intl",
-     "https://modelstudio.console.alibabacloud.com",
-     "https://modelstudio.console.alibabacloud.com/ap-southeast-1/"
-     "?tab=coding-plan#/efm/coding_plan"),
-    (QWEN_CN_USAGE_URL, "sfm_codingplan_public_cn",
-     "https://bailian.console.aliyun.com",
-     "https://bailian.console.aliyun.com/"),
-)
-QWEN_BROWSER_UA = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-)
+# qwen (Alibaba ModelStudio Coding Plan). The console-gateway quota URLs and
+# the browser User-Agent/Origin/Referer that made them answer are gone — that
+# gateway serves a logged-in web console, not this app. Only key detection
+# remains.
 # The env key qwen-code itself resolves, then CodexBar's accepted aliases.
 QWEN_ENV_KEYS = (
     "BAILIAN_CODING_PLAN_API_KEY",
@@ -214,26 +189,19 @@ COPILOT_HOSTS_FILES_REL = (
 )
 COPILOT_DEFAULT_HOST = "github.com"
 COPILOT_ENV_KEYS = ("GH_TOKEN", "GITHUB_TOKEN")
-COPILOT_HEADERS = {
-    "Accept": "application/json",
-    "Editor-Version": "vscode/1.96.2",
-    "Editor-Plugin-Version": "copilot-chat/0.26.7",
-    "User-Agent": "GitHubCopilotChat/0.26.7",
-    "X-Github-Api-Version": "2025-04-01",
-}
+# The Editor-Version/User-Agent set that made copilot_internal/user answer
+# identified this app as the VS Code Copilot Chat extension. Removed with the
+# request itself — see fetch_copilot.
 COPILOT_GH_TOKEN_TIMEOUT = 5.0
 # cursor (Cursor / cursor-agent CLI). The session JWT the CLI stores in the
-# macOS Keychain (fallback: the Cursor IDE's state.vscdb sqlite row)
-# authenticates the dashboard's usage-summary endpoint via a
-# WorkosCursorSessionToken cookie — unofficial but stable, the same surface
-# cursor.com's own dashboard and CodexBar's Cursor provider use. The legacy
-# Bearer endpoint (api2.cursor.sh/auth/usage) returns null limits on modern
-# dollar-based plans, so usage-summary is the one normalized here.
+# macOS Keychain (fallback: the Cursor IDE's state.vscdb sqlite row) is still
+# read to detect sign-in and local expiry. The usage-summary endpoint it used
+# to authenticate — by rebuilding cursor.com's own WorkosCursorSessionToken
+# cookie — is gone: that surface serves the signed-in dashboard, not this app.
 CURSOR_KEYCHAIN_SERVICE = "cursor-access-token"
 CURSOR_IDE_STATE_DB_REL = ("Library", "Application Support", "Cursor",
                            "User", "globalStorage", "state.vscdb")
 CURSOR_IDE_TOKEN_KEY = "cursorAuth/accessToken"
-CURSOR_USAGE_SUMMARY_URL = "https://cursor.com/api/usage-summary"
 GROK_INIT_TIMEOUT = 4.0
 GROK_BILLING_TIMEOUT = 3.0
 HTTP_TIMEOUT = 30.0
@@ -570,25 +538,6 @@ async def read_antigravity_credentials(home: Path) -> str | None:
         except (OSError, asyncio.TimeoutError):
             _agy_keychain_failed_at = now
     return read_antigravity_credentials_file(home)
-
-
-def _load_antigravity_oauth_config() -> dict:
-    """Antigravity's public installed-app OAuth client. An optional override
-    file ``app_data_dir()/antigravity-oauth.json`` ({client_id, client_secret})
-    wins when present and complete."""
-    try:
-        data = json.loads(
-            (app_data_dir() / ANTIGRAVITY_OAUTH_CONFIG).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        data = None
-    if isinstance(data, dict):
-        client_id = data.get("client_id")
-        client_secret = data.get("client_secret")
-        if (isinstance(client_id, str) and client_id
-                and isinstance(client_secret, str) and client_secret):
-            return {"client_id": client_id, "client_secret": client_secret}
-    return {"client_id": ANTIGRAVITY_CLIENT_ID,
-            "client_secret": ANTIGRAVITY_CLIENT_SECRET}
 
 
 def read_opencode_credentials(home: Path) -> dict | None:
@@ -1538,31 +1487,16 @@ def parse_retry_after(value: str | None) -> float:
 
 # ── Fetchers ────────────────────────────────────────────────────────────────
 
-_claude_ua: str | None = None
-
-
-async def _claude_user_agent() -> str:
-    """``claude --version`` once per process; CodexBar-style fallback."""
-    global _claude_ua
-    if _claude_ua is not None:
-        return _claude_ua
-    binary = shutil.which("claude")
-    version = ""
-    if binary:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                binary, "--version",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-            )
-            out = await _communicate_or_kill(proc, timeout=5.0)
-            version = out.decode("utf-8", "replace").strip().split()[0] if out.strip() else ""
-        except (OSError, asyncio.TimeoutError, IndexError):
-            version = ""
-    _claude_ua = f"claude-code/{version}" if version else CLAUDE_UA_FALLBACK
-    return _claude_ua
-
-
 async def fetch_claude_oauth(oauth: dict | None) -> dict:
+    """Claude usage for an Anthropic OAuth credential another CLI stores.
+
+    The claude provider itself no longer comes through here — it reads the
+    CLI's own ``/usage`` panel (see :mod:`claude_cli_usage`). What remains are
+    opencode and pi, which keep an Anthropic OAuth grant inside their own auth
+    files; there is no vendor CLI to delegate to for those, so this call stays.
+    It identifies itself as Navide, the same as every other provider fetcher:
+    this app previously sent ``claude-code/<version>``, built by running
+    ``claude --version``, which claimed to be a client it is not."""
     if oauth is None:
         return _snapshot("claude", "no-credentials")
     if claude_token_expired(oauth):
@@ -1574,7 +1508,7 @@ async def fetch_claude_oauth(oauth: dict | None) -> dict:
         "anthropic-beta": CLAUDE_BETA_HEADER,
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "User-Agent": await _claude_user_agent(),
+        "User-Agent": "Navide",
     }
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         resp = await client.get(CLAUDE_USAGE_URL, headers=headers)
@@ -1591,7 +1525,16 @@ async def fetch_claude_oauth(oauth: dict | None) -> dict:
 
 
 async def fetch_claude(home: Path) -> dict:
-    return await fetch_claude_oauth(await read_claude_credentials(home))
+    """Claude quota, read from the CLI's own ``/usage`` panel.
+
+    Claude Code asks Anthropic under its own identity and prints the answer;
+    this reads what it printed. It replaced a direct HTTP call this app made
+    while presenting itself as ``claude-code/<version>``. ``home`` locates the
+    live credential for the logged-out precheck; the CLI itself still reads
+    whichever credential is live."""
+    from .claude_cli_usage import fetch_claude_usage_via_cli
+
+    return await fetch_claude_usage_via_cli(home) or _snapshot("claude", "unavailable")
 
 
 async def fetch_codex(codex_home: Path) -> dict:
@@ -1744,83 +1687,19 @@ async def fetch_grok(home: Path, env: dict | None = None,
     return _snapshot("grok", "ok", windows=windows, plan_type=plan)
 
 
-async def refresh_antigravity_token(refresh_token: str) -> str | None:
-    """Exchange the Antigravity refresh_token for a fresh access_token, held in
-    memory only (never written back to the Keychain or ``~/.gemini``; the grant
-    response carries no new refresh token, so nothing rotates). Returns the
-    token, or None on 400/401 (invalid_grant -> expired). Other non-200s and
-    network errors raise for the caller to map to status="error"."""
-    import httpx
-
-    cfg = _load_antigravity_oauth_config()
-    body = {
-        "grant_type": "refresh_token",
-        "client_id": cfg["client_id"],
-        "client_secret": cfg["client_secret"],
-        "refresh_token": refresh_token,
-    }
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        resp = await client.post(ANTIGRAVITY_TOKEN_URL, data=body)
-    if resp.status_code in (400, 401):
-        return None
-    resp.raise_for_status()
-    token = resp.json().get("access_token")
-    if not isinstance(token, str) or not token:
-        raise ValueError("token response had no access_token")
-    return token
-
-
 async def fetch_antigravity(home: Path) -> dict:
+    """Sign-in state only.
+
+    The quota read this used to do was the most invasive of the set: it minted
+    a Google access token in-process from the CLI's own client_id/secret, then
+    called ``v1internal:retrieveUserQuotaSummary`` as ``User-Agent:
+    antigravity``. Both halves impersonated the vendor's client, so both are
+    gone. The refresh token is still read — but only to answer "is this account
+    signed in", which is a local file lookup."""
     refresh_token = await read_antigravity_credentials(home)
     if refresh_token is None:
         return _snapshot("antigravity", "no-credentials")
-    import httpx
-
-    try:
-        access_token = await refresh_antigravity_token(refresh_token)
-    except (httpx.HTTPError, ValueError) as err:
-        return _snapshot("antigravity", "error", error=f"token refresh: {err}")
-    if access_token is None:
-        return _snapshot("antigravity", "expired")
-
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "User-Agent": "antigravity",
-    }
-    plan: str | None = None
-    project: str | None = None
-    try:
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-            # loadCodeAssist supplies the project id + tier. Best effort — a
-            # failure must not block the quota read ({} still works there).
-            try:
-                load = await client.post(
-                    ANTIGRAVITY_LOAD_URL, headers=headers,
-                    json={"metadata": ANTIGRAVITY_LOAD_METADATA})
-                if load.status_code == 200:
-                    payload = load.json()
-                    if isinstance(payload, dict):
-                        project = antigravity_project(payload)
-                        plan = antigravity_plan(payload)
-            except (httpx.HTTPError, ValueError):
-                pass
-            resp = await client.post(
-                ANTIGRAVITY_QUOTA_URL, headers=headers,
-                json={"project": project} if project else {})
-    except httpx.HTTPError as err:
-        return _snapshot("antigravity", "error", error=str(err))
-    if resp.status_code == 401:
-        return _snapshot("antigravity", "expired")
-    if resp.status_code == 429:
-        snap = _snapshot("antigravity", "rate-limited")
-        snap["retryAfterSec"] = parse_retry_after(resp.headers.get("Retry-After"))
-        return snap
-    if resp.status_code != 200:
-        return _snapshot("antigravity", "error", error=f"HTTP {resp.status_code}")
-    windows, _ = normalize_antigravity(resp.json())
-    return _snapshot("antigravity", "ok", windows=windows, plan_type=plan)
+    return _snapshot("antigravity", "unavailable", error=NO_OFFICIAL_USAGE_SURFACE)
 
 
 async def _fetch_opencode_minimax(key: str) -> dict:
@@ -1883,46 +1762,6 @@ async def fetch_opencode(home: Path) -> dict:
     return sub_snaps[0]
 
 
-async def _fetch_qwen_region(client, key: str, region: tuple) -> dict:
-    """One region's console-gateway query -> snapshot."""
-    url, commodity_code, origin, referer = region
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "x-api-key": key,
-        "X-DashScope-API-Key": key,
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "User-Agent": QWEN_BROWSER_UA,
-        "Origin": origin,
-        "Referer": referer,
-    }
-    resp = await client.post(
-        url, headers=headers,
-        json={"queryCodingPlanInstanceInfoRequest":
-              {"commodityCode": commodity_code}})
-    if resp.status_code in (401, 403):
-        return _snapshot("qwen", "expired")
-    if resp.status_code == 429:
-        snap = _snapshot("qwen", "rate-limited")
-        snap["retryAfterSec"] = parse_retry_after(resp.headers.get("Retry-After"))
-        return snap
-    if resp.status_code != 200:
-        return _snapshot("qwen", "error", error=f"HTTP {resp.status_code}")
-    try:
-        payload = resp.json()
-    except ValueError:
-        return _snapshot("qwen", "error", error="non-JSON response")
-    # The gateway tunnels auth failures (invalid key, api-key mode unavailable
-    # in this region) through HTTP 200 + a NeedLogin marker in the body.
-    if "NeedLogin" in json.dumps(payload):
-        return _snapshot("qwen", "expired")
-    windows, plan = normalize_qwen(payload if isinstance(payload, dict) else {})
-    if not windows:
-        return _snapshot("qwen", "error",
-                         error="response had no usable quota fields")
-    return _snapshot("qwen", "ok", windows=windows, plan_type=plan)
-
-
 async def fetch_qwen(home: Path, env: dict | None = None) -> dict:
     env = env if env is not None else dict(os.environ)
     key = read_qwen_credentials(home, env)
@@ -1933,23 +1772,11 @@ async def fetch_qwen(home: Path, env: dict | None = None) -> dict:
                 error="legacy Qwen OAuth has no usage API (free tier "
                       "discontinued; a Coding Plan API key is required)")
         return _snapshot("qwen", "no-credentials")
-    import httpx
-
-    first: dict | None = None
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        for region in QWEN_REGIONS:
-            try:
-                snap = await _fetch_qwen_region(client, key, region)
-            except httpx.HTTPError as err:
-                snap = _snapshot("qwen", "error", error=str(err))
-            # ok answers; 429 means the key works, so the alternate region
-            # would not help. Everything else retries the other region
-            # (CodexBar's alternate-region fallback), surfacing the FIRST
-            # failure when both refuse.
-            if snap["status"] in ("ok", "rate-limited"):
-                return snap
-            first = first or snap
-    return first
+    # The key is a real credential, but the only surface that answered with a
+    # quota was the ModelStudio console's own ``data/api.json`` gateway, reached
+    # with a browser User-Agent. That is a console endpoint for a logged-in web
+    # session, not an API for this app to call.
+    return _snapshot("qwen", "unavailable", error=NO_OFFICIAL_USAGE_SURFACE)
 
 
 async def fetch_kilo(home: Path, env: dict | None = None) -> dict:
@@ -2105,28 +1932,11 @@ async def fetch_copilot(home: Path, env: dict | None = None) -> dict:
         token = copilot_env_token(env)
     if token is None:
         return _snapshot("copilot", "no-credentials")
-    import httpx
-
-    headers = {"Authorization": f"token {token}", **COPILOT_HEADERS}
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        resp = await client.get(copilot_usage_url(host), headers=headers)
-    if resp.status_code in (401, 403):
-        return _snapshot("copilot", "expired")
-    if resp.status_code == 429:
-        snap = _snapshot("copilot", "rate-limited")
-        snap["retryAfterSec"] = parse_retry_after(resp.headers.get("Retry-After"))
-        return snap
-    if resp.status_code != 200:
-        return _snapshot("copilot", "error", error=f"HTTP {resp.status_code}")
-    try:
-        payload = resp.json()
-    except ValueError:
-        return _snapshot("copilot", "error", error="non-JSON response")
-    windows, plan = normalize_copilot(payload if isinstance(payload, dict) else {})
-    if not windows:
-        return _snapshot("copilot", "error",
-                         error="response had no usable quota fields")
-    return _snapshot("copilot", "ok", windows=windows, plan_type=plan)
+    # ``copilot_internal/user`` answered only for the VS Code extension, so the
+    # request carried its User-Agent. The CLI's own ``/usage`` is not a
+    # substitute: it lives in a TUI that needs a full terminal handshake before
+    # it paints, and reports the session's credits rather than the plan's.
+    return _snapshot("copilot", "unavailable", error=NO_OFFICIAL_USAGE_SURFACE)
 
 
 async def fetch_cursor(home: Path) -> dict:
@@ -2135,36 +1945,11 @@ async def fetch_cursor(home: Path) -> dict:
         return _snapshot("cursor", "no-credentials")
     if cursor_token_expired(token):
         return _snapshot("cursor", "expired")
-    user_id = cursor_user_id(token)
-    if user_id is None:
-        return _snapshot("cursor", "error",
-                         error="session token has no usable sub claim")
-    import httpx
-
-    headers = {
-        "Cookie": f"WorkosCursorSessionToken={user_id}%3A%3A{token}",
-        "Accept": "application/json",
-        "User-Agent": "Navide",
-    }
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        resp = await client.get(CURSOR_USAGE_SUMMARY_URL, headers=headers)
-    if resp.status_code in (401, 403):
-        return _snapshot("cursor", "expired")
-    if resp.status_code == 429:
-        snap = _snapshot("cursor", "rate-limited")
-        snap["retryAfterSec"] = parse_retry_after(resp.headers.get("Retry-After"))
-        return snap
-    if resp.status_code != 200:
-        return _snapshot("cursor", "error", error=f"HTTP {resp.status_code}")
-    try:
-        payload = resp.json()
-    except ValueError:
-        return _snapshot("cursor", "error", error="non-JSON response")
-    windows, plan = normalize_cursor(payload if isinstance(payload, dict) else {})
-    if not windows:
-        return _snapshot("cursor", "error",
-                         error="response had no usable quota fields")
-    return _snapshot("cursor", "ok", windows=windows, plan_type=plan)
+    # The usage-summary endpoint authenticates a signed-in browser session, so
+    # reaching it meant rebuilding cursor.com's own session cookie from a JWT
+    # lifted out of the Keychain (or the IDE's sqlite state). The User-Agent was
+    # honest; the session was not ours to present. No CLI command replaces it.
+    return _snapshot("cursor", "unavailable", error=NO_OFFICIAL_USAGE_SURFACE)
 
 
 # ── Poller service ──────────────────────────────────────────────────────────
@@ -2537,6 +2322,20 @@ class UsageService:
         self._refresh_stale_expiry(merged)
         return merged
 
+    def _record_parked_claude_slot(self, slot_id: str) -> bool:
+        """A parked account has no measurable quota.
+
+        Only the CLI can report a figure now, and it can only speak for whoever
+        is signed in. The cached percentage is dropped rather than left to
+        stand in for a live one — an account showing a healthy number it can no
+        longer back up is what sent the user to a signed-out account in the
+        first place. Returns True when a cache entry was discarded."""
+        changed = self._last_good.get("claude", {}).pop(slot_id, None) is not None
+        self.account_snapshots.setdefault("claude", {})[slot_id] = _snapshot(
+            "claude", "not-measured"
+        )
+        return changed
+
     def _record_claude_snapshot(self, slot_id: str, fresh: dict) -> bool:
         account = self.account_snapshots.setdefault("claude", {})
         if fresh.get("status") == "ok":
@@ -2688,15 +2487,19 @@ class UsageService:
         now = time.monotonic()
         claude_accounts = await self._claude_credentials_by_slot()
         cache_changed = False
+        # Claude quota comes from the CLI's own `/usage` panel — Claude Code
+        # asks under its own identity and this reads what it printed. Only the
+        # signed-in account can be reported that way, so parked accounts carry
+        # no figure at all rather than a cached one pretending to be current.
+        parked_slots: list[str] = []
         if claude_accounts is None:
             claude_active = "__default__"
-            claude_coros = {claude_active: lambda: fetch_claude(home)}
         else:
             claude_active, credentials = claude_accounts
-            claude_coros = {
-                slot_id: (lambda oauth=oauth: fetch_claude_oauth(oauth))
-                for slot_id, oauth in credentials.items()
-            }
+            parked_slots = [s for s in credentials if s != claude_active]
+        claude_coros = {claude_active: lambda: fetch_claude(home)}
+        for slot_id in parked_slots:
+            cache_changed = self._record_parked_claude_slot(slot_id) or cache_changed
         self._active_claude_slot = claude_active
         claude_tasks: dict[str, asyncio.Task] = {}
         for slot_id, coro in claude_coros.items():
@@ -2727,8 +2530,17 @@ class UsageService:
                 log.warning("usage poll failed for claude account %s: %s", slot_id, err)
                 snap = _snapshot("claude", "error", error=str(err))
             retry_after = snap.pop("retryAfterSec", None)
+            costly = snap.pop("costlyRead", False)
             cooldown = retry_after if snap["status"] == "rate-limited" else \
                 (RATE_LIMIT_COOLDOWN if snap["status"] == "unavailable" else None)
+            if snap["status"] == "ok" or costly:
+                # Reading the panel starts a whole Claude Code (seconds, plus
+                # the user's MCP servers), so it must not ride the poll
+                # interval — and a read that spawned but produced nothing cost
+                # the same as one that succeeded, so it waits the same.
+                # `request_refresh` clears this, which is what makes the
+                # badge's own refresh button feel immediate.
+                cooldown = CLAUDE_CLI_READ_INTERVAL
             if cooldown:
                 self._blocked_until[("claude", slot_id)] = time.monotonic() + cooldown
             cache_changed = self._record_claude_snapshot(slot_id, snap) or cache_changed

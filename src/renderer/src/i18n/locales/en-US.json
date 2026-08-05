@@ -1576,6 +1576,7 @@
     "refresh-status-expired": "credentials expired",
     "refresh-status-rate-limited": "rate limited",
     "refresh-status-unavailable": "unavailable",
+    "refresh-status-not-measured": "Not measured",
     "refresh-status-error": "failed",
     "expired-tooltip": "Credentials expired — re-login in that CLI",
     "remaining": "{pct} left",

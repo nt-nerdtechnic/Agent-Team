@@ -22,6 +22,26 @@ from agent_team_backend.credential_vault import CredentialVault
 
 
 @pytest.fixture(autouse=True)
+def _no_real_claude_cli(monkeypatch):
+    """Never let a test start the developer's Claude Code.
+
+    Claude quota is read by driving the CLI's own ``/usage`` panel, so an
+    unstubbed poll would spawn a real Claude Code — seconds per test, the
+    user's MCP servers, and their live account read for no reason. Tests that
+    care about the numbers stub ``usage_service.fetch_claude``; this only makes
+    the accident impossible."""
+    from agent_team_backend import claude_cli_usage
+
+    async def _refuse(*_args, **_kwargs):
+        raise AssertionError(
+            "a test tried to read Claude usage through the real CLI; "
+            "stub usage_service.fetch_claude instead"
+        )
+
+    monkeypatch.setattr(claude_cli_usage, "fetch_claude_usage_via_cli", _refuse)
+
+
+@pytest.fixture(autouse=True)
 def _isolated_data_dir(tmp_path, monkeypatch):
     """Keep app-data side effects (e.g. pty-registry.json written on every
     TerminalService.create) out of the real app-data dir during tests."""

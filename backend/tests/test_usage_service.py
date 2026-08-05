@@ -1080,89 +1080,20 @@ async def test_fetch_antigravity_no_credentials(monkeypatch):
     assert snap["status"] == "no-credentials"
 
 
-async def test_fetch_antigravity_invalid_grant_is_expired(monkeypatch):
+async def test_fetch_antigravity_signed_in_reports_unavailable(monkeypatch):
+    """No token is minted and no quota call is made.
+
+    This read used to exchange the CLI's own client_id/secret for a Google
+    access token in-process, then call ``v1internal:retrieveUserQuotaSummary``
+    as ``User-Agent: antigravity`` — impersonation on both halves. The refresh
+    token is still read, but only to answer "signed in".
+    """
     _with_antigravity_refresh_token(monkeypatch)
-    _fake_httpx(monkeypatch, {
-        us.ANTIGRAVITY_TOKEN_URL: _FakeResponse(400, {"error": "invalid_grant"}),
-    })
+    calls = _fake_httpx(monkeypatch, {})
     snap = await us.fetch_antigravity(Path("/x"))
-    assert snap["status"] == "expired"
-
-
-async def test_fetch_antigravity_refresh_failures_are_errors(monkeypatch):
-    import httpx
-
-    _with_antigravity_refresh_token(monkeypatch)
-    _fake_httpx(monkeypatch, {
-        us.ANTIGRAVITY_TOKEN_URL: httpx.ConnectError("no network"),
-    })
-    snap = await us.fetch_antigravity(Path("/x"))
-    assert snap["status"] == "error"
-    assert "token refresh" in snap["error"]
-
-    _fake_httpx(monkeypatch, {
-        us.ANTIGRAVITY_TOKEN_URL: _FakeResponse(200, {"not_a_token": 1}),
-    })
-    snap = await us.fetch_antigravity(Path("/x"))
-    assert snap["status"] == "error"
-
-
-async def test_fetch_antigravity_happy_path(monkeypatch):
-    _with_antigravity_refresh_token(monkeypatch)
-    calls = _fake_httpx(monkeypatch, {
-        us.ANTIGRAVITY_TOKEN_URL: _FakeResponse(200, {"access_token": "ya29.new"}),
-        us.ANTIGRAVITY_LOAD_URL: _FakeResponse(200, {
-            "currentTier": {"id": "free-tier", "name": "Antigravity"},
-            "cloudaicompanionProject": "proj-1",
-        }),
-        us.ANTIGRAVITY_QUOTA_URL: _FakeResponse(200, {
-            "groups": [{"displayName": "Gemini Models", "buckets": [
-                {"bucketId": "gemini-weekly", "displayName": "Weekly Limit",
-                 "window": "weekly", "resetTime": "2026-07-30T06:18:23Z",
-                 "remainingFraction": 0.22621265},
-            ]}],
-        }),
-    })
-    snap = await us.fetch_antigravity(Path("/x"))
-    assert snap["status"] == "ok"
-    assert snap["planType"] == "Antigravity"
-    assert snap["windows"] == [{
-        "kind": "weekly", "label": "Gemini Models — Weekly Limit",
-        "usedPercent": 77.4, "resetsAt": "2026-07-30T06:18:23Z",
-    }]
-    token_kwargs = next(kw for url, kw in calls if url == us.ANTIGRAVITY_TOKEN_URL)
-    assert token_kwargs["data"]["grant_type"] == "refresh_token"
-    assert token_kwargs["data"]["refresh_token"] == "1//rt"
-    load_kwargs = next(kw for url, kw in calls if url == us.ANTIGRAVITY_LOAD_URL)
-    assert load_kwargs["json"] == {"metadata": us.ANTIGRAVITY_LOAD_METADATA}
-    quota_kwargs = next(kw for url, kw in calls if url == us.ANTIGRAVITY_QUOTA_URL)
-    assert quota_kwargs["json"] == {"project": "proj-1"}
-    assert quota_kwargs["headers"]["Authorization"] == "Bearer ya29.new"
-
-
-async def test_fetch_antigravity_quota_statuses(monkeypatch):
-    _with_antigravity_refresh_token(monkeypatch)
-    for status, expected in ((401, "expired"), (500, "error")):
-        calls = _fake_httpx(monkeypatch, {
-            us.ANTIGRAVITY_TOKEN_URL: _FakeResponse(200, {"access_token": "t"}),
-            # loadCodeAssist failure must not block the quota read.
-            us.ANTIGRAVITY_LOAD_URL: _FakeResponse(403, {}),
-            us.ANTIGRAVITY_QUOTA_URL: _FakeResponse(status, {}),
-        })
-        snap = await us.fetch_antigravity(Path("/x"))
-        assert snap["status"] == expected
-        quota_kwargs = next(kw for url, kw in calls if url == us.ANTIGRAVITY_QUOTA_URL)
-        assert quota_kwargs["json"] == {}  # no project without loadCodeAssist
-
-    _fake_httpx(monkeypatch, {
-        us.ANTIGRAVITY_TOKEN_URL: _FakeResponse(200, {"access_token": "t"}),
-        us.ANTIGRAVITY_LOAD_URL: _FakeResponse(200, {}),
-        us.ANTIGRAVITY_QUOTA_URL: _FakeResponse(
-            429, {}, headers={"Retry-After": "77"}),
-    })
-    snap = await us.fetch_antigravity(Path("/x"))
-    assert snap["status"] == "rate-limited"
-    assert snap["retryAfterSec"] == 77.0
+    assert snap["status"] == "unavailable"
+    assert snap["error"] == us.NO_OFFICIAL_USAGE_SURFACE
+    assert calls == []
 
 
 # ── opencode fetch (aggregator over auth.json entries) ──────────────────────
@@ -1303,87 +1234,20 @@ async def test_fetch_qwen_no_credentials_and_legacy_oauth(tmp_path):
     assert "Coding Plan API key" in snap["error"]
 
 
-async def test_fetch_qwen_happy_path_intl(tmp_path, monkeypatch):
+async def test_fetch_qwen_with_key_reports_unavailable(tmp_path, monkeypatch):
+    """The console gateway is not an API for this app to call.
+
+    Quota only ever came from ModelStudio's own ``data/api.json`` console
+    gateway, reached with a browser User-Agent plus matching Origin/Referer —
+    a surface built for a logged-in web session. The key is still detected, so
+    the account reads as signed in.
+    """
     _with_qwen_key(monkeypatch)
-    calls = _fake_httpx(monkeypatch, {
-        us.QWEN_INTL_USAGE_URL: _FakeResponse(200, {
-            "data": {"codingPlanInstanceInfos": [{
-                "planName": "Pro",
-                "per5HourUsedQuota": 10, "per5HourTotalQuota": 40,
-            }]},
-        }),
-    })
+    calls = _fake_httpx(monkeypatch, {})
     snap = await us.fetch_qwen(tmp_path, {})
-    assert snap["status"] == "ok"
-    assert snap["planType"] == "Pro"
-    assert [(w["kind"], w["usedPercent"]) for w in snap["windows"]] == [
-        ("session", 25.0)]
-    assert len(calls) == 1  # intl answered: no CN retry
-    url, kwargs = calls[0]
-    assert url == us.QWEN_INTL_USAGE_URL
-    assert kwargs["json"] == {"queryCodingPlanInstanceInfoRequest":
-                              {"commodityCode": "sfm_codingplan_public_intl"}}
-    assert kwargs["headers"]["Authorization"] == "Bearer sk-sp-test"
-    assert kwargs["headers"]["x-api-key"] == "sk-sp-test"
-
-
-async def test_fetch_qwen_retries_cn_region(tmp_path, monkeypatch):
-    _with_qwen_key(monkeypatch)
-    # NeedLogin tunneled through HTTP 200 -> auth failure in that region;
-    # the CN region is tried next and answers.
-    calls = _fake_httpx(monkeypatch, {
-        us.QWEN_INTL_USAGE_URL: _FakeResponse(200, {"code": "NeedLogin"}),
-        us.QWEN_CN_USAGE_URL: _FakeResponse(200, {
-            "codingPlanInstanceInfos": [{
-                "perWeekUsedQuota": 5, "perWeekTotalQuota": 10}]}),
-    })
-    snap = await us.fetch_qwen(tmp_path, {})
-    assert snap["status"] == "ok"
-    assert [url for url, _ in calls] == [
-        us.QWEN_INTL_USAGE_URL, us.QWEN_CN_USAGE_URL]
-    cn_body = calls[1][1]["json"]["queryCodingPlanInstanceInfoRequest"]
-    assert cn_body["commodityCode"] == "sfm_codingplan_public_cn"
-
-    # Both regions refusing the key -> the FIRST failure surfaces.
-    _fake_httpx(monkeypatch, {
-        us.QWEN_INTL_USAGE_URL: _FakeResponse(401, {}),
-        us.QWEN_CN_USAGE_URL: _FakeResponse(500, {}),
-    })
-    snap = await us.fetch_qwen(tmp_path, {})
-    assert snap["status"] == "expired"
-
-
-async def test_fetch_qwen_statuses(tmp_path, monkeypatch):
-    import httpx
-
-    _with_qwen_key(monkeypatch)
-    # 429 means the key works — returned as-is, no alternate-region retry.
-    calls = _fake_httpx(monkeypatch, {
-        us.QWEN_INTL_USAGE_URL: _FakeResponse(
-            429, {}, headers={"Retry-After": "66"}),
-    })
-    snap = await us.fetch_qwen(tmp_path, {})
-    assert snap["status"] == "rate-limited"
-    assert snap["retryAfterSec"] == 66.0
-    assert len(calls) == 1
-
-    # Network failure in both regions stays an isolated error snapshot.
-    _fake_httpx(monkeypatch, {
-        us.QWEN_INTL_USAGE_URL: httpx.ConnectError("no network"),
-        us.QWEN_CN_USAGE_URL: httpx.ConnectError("no network"),
-    })
-    snap = await us.fetch_qwen(tmp_path, {})
-    assert snap["status"] == "error"
-    assert snap["error"] == "no network"
-
-    # HTTP 200 with no recognizable quota payload -> error.
-    _fake_httpx(monkeypatch, {
-        us.QWEN_INTL_USAGE_URL: _FakeResponse(200, {"data": {}}),
-        us.QWEN_CN_USAGE_URL: _FakeResponse(200, {"data": {}}),
-    })
-    snap = await us.fetch_qwen(tmp_path, {})
-    assert snap["status"] == "error"
-    assert "no usable quota fields" in snap["error"]
+    assert snap["status"] == "unavailable"
+    assert snap["error"] == us.NO_OFFICIAL_USAGE_SURFACE
+    assert calls == []
 
 
 # ── kilo fetch (credit balance + best-effort Kilo Pass) ─────────────────────
@@ -1664,70 +1528,34 @@ async def test_fetch_copilot_no_credentials(monkeypatch):
     assert snap["status"] == "no-credentials"
 
 
-async def test_fetch_copilot_happy_path(monkeypatch):
+async def test_fetch_copilot_signed_in_reports_unavailable(monkeypatch):
+    """``copilot_internal/user`` answered the VS Code extension, not us.
+
+    Reaching it meant sending that extension's User-Agent and Editor-Version.
+    The CLI's own ``/usage`` is not a substitute — it renders inside a TUI that
+    needs a full terminal handshake, and reports session credits, not the plan.
+    Token discovery still runs, so the account reads as signed in.
+    """
     _with_copilot_gh_token(monkeypatch)
-    calls = _fake_httpx(monkeypatch, {
-        _COPILOT_USAGE_URL: _FakeResponse(200, {
-            "copilot_plan": "individual",
-            "quota_reset_date_utc": "2026-08-01T00:00:00.000Z",
-            "quota_snapshots": {
-                "chat": {"percent_remaining": 98.7, "has_quota": True},
-                "premium_interactions": {"percent_remaining": 0.0,
-                                         "has_quota": False},
-            },
-        }),
-    })
+    calls = _fake_httpx(monkeypatch, {})
     snap = await us.fetch_copilot(Path("/x"), {})
-    assert snap["status"] == "ok"
-    assert snap["planType"] == "individual"
-    assert snap["windows"] == [{
-        "kind": "monthly", "label": "Chat", "usedPercent": 1.3,
-        "resetsAt": "2026-08-01T00:00:00.000Z",
-    }]
-    kwargs = next(kw for url, kw in calls if url == _COPILOT_USAGE_URL)
-    assert kwargs["headers"]["Authorization"] == "token gho_test"
-    assert kwargs["headers"]["Editor-Version"] == "vscode/1.96.2"
-    assert kwargs["headers"]["X-Github-Api-Version"] == "2025-04-01"
+    assert snap["status"] == "unavailable"
+    assert snap["error"] == us.NO_OFFICIAL_USAGE_SURFACE
+    assert calls == []
 
 
-async def test_fetch_copilot_gh_failure_falls_back_to_env(monkeypatch):
+async def test_fetch_copilot_token_discovery_still_works(monkeypatch):
+    """Sign-in detection is unchanged: env fallback still counts as signed in,
+    and no token at all is still no-credentials."""
     _with_copilot_gh_token(monkeypatch, token=None)
-    _fake_httpx(monkeypatch, {
-        _COPILOT_USAGE_URL: _FakeResponse(200, {
-            "quota_snapshots": {"chat": {"percent_remaining": 50,
-                                         "has_quota": True}},
-        }),
-    })
-    # No hosts.json fallback on this fake home -> env token is used.
+    calls = _fake_httpx(monkeypatch, {})
+
     snap = await us.fetch_copilot(Path("/nonexistent"), {"GH_TOKEN": "gho_env"})
-    assert snap["status"] == "ok"
-    assert snap["windows"][0]["usedPercent"] == 50.0
+    assert snap["status"] == "unavailable"
 
     snap = await us.fetch_copilot(Path("/nonexistent"), {})
     assert snap["status"] == "no-credentials"
-
-
-async def test_fetch_copilot_statuses(monkeypatch):
-    _with_copilot_gh_token(monkeypatch)
-    for status, expected in ((401, "expired"), (403, "expired"), (500, "error")):
-        _fake_httpx(monkeypatch, {
-            _COPILOT_USAGE_URL: _FakeResponse(status, {})})
-        snap = await us.fetch_copilot(Path("/x"), {})
-        assert snap["status"] == expected
-
-    _fake_httpx(monkeypatch, {
-        _COPILOT_USAGE_URL: _FakeResponse(
-            429, {}, headers={"Retry-After": "88"})})
-    snap = await us.fetch_copilot(Path("/x"), {})
-    assert snap["status"] == "rate-limited"
-    assert snap["retryAfterSec"] == 88.0
-
-    # HTTP 200 with no usable quota snapshot -> error.
-    _fake_httpx(monkeypatch, {
-        _COPILOT_USAGE_URL: _FakeResponse(200, {"copilot_plan": "individual"})})
-    snap = await us.fetch_copilot(Path("/x"), {})
-    assert snap["status"] == "error"
-    assert "no usable quota fields" in snap["error"]
+    assert calls == []
 
 
 # ── cursor fetch (session-cookie auth against usage-summary) ────────────────
@@ -1752,61 +1580,31 @@ async def test_fetch_cursor_expired_locally(monkeypatch):
     assert snap["status"] == "expired"
 
 
-async def test_fetch_cursor_unusable_sub_is_error(monkeypatch):
-    _with_cursor_token(monkeypatch, _cursor_jwt({"exp": 4_102_444_800}))
-    snap = await us.fetch_cursor(Path("/x"))
-    assert snap["status"] == "error"
-    assert "sub claim" in snap["error"]
+async def test_fetch_cursor_signed_in_reports_unavailable(monkeypatch):
+    """The usage summary authenticates a browser session, not this app.
 
-
-async def test_fetch_cursor_happy_path(monkeypatch):
-    token = _cursor_jwt({"sub": "google-oauth2|user_123",
-                         "exp": 4_102_444_800})
-    _with_cursor_token(monkeypatch, token)
-    calls = _fake_httpx(monkeypatch, {
-        us.CURSOR_USAGE_SUMMARY_URL: _FakeResponse(200, {
-            "billingCycleEnd": "2026-08-18T02:00:32.193Z",
-            "membershipType": "pro",
-            "individualUsage": {
-                "plan": {"enabled": True, "used": 850, "limit": 2000,
-                         "totalPercentUsed": 42.5},
-            },
-        }),
-    })
-    snap = await us.fetch_cursor(Path("/x"))
-    assert snap["status"] == "ok"
-    assert snap["planType"] == "pro"
-    assert snap["windows"] == [{
-        "kind": "cycle", "label": "Plan usage", "usedPercent": 42.5,
-        "resetsAt": "2026-08-18T02:00:32.193Z",
-    }]
-    kwargs = next(kw for url, kw in calls if url == us.CURSOR_USAGE_SUMMARY_URL)
-    assert kwargs["headers"]["Cookie"] == \
-        f"WorkosCursorSessionToken=user_123%3A%3A{token}"
-
-
-async def test_fetch_cursor_statuses(monkeypatch):
+    Reaching it meant rebuilding cursor.com's own ``WorkosCursorSessionToken``
+    cookie from a JWT lifted out of the Keychain (or the IDE's sqlite state).
+    The local expiry check still runs first, so a stale token still reads as
+    expired without any network access.
+    """
     _with_cursor_token(monkeypatch,
                        _cursor_jwt({"sub": "auth0|u1", "exp": 4_102_444_800}))
-    for status, expected in ((401, "expired"), (403, "expired"), (500, "error")):
-        _fake_httpx(monkeypatch, {
-            us.CURSOR_USAGE_SUMMARY_URL: _FakeResponse(status, {})})
-        snap = await us.fetch_cursor(Path("/x"))
-        assert snap["status"] == expected
-
-    _fake_httpx(monkeypatch, {
-        us.CURSOR_USAGE_SUMMARY_URL: _FakeResponse(
-            429, {}, headers={"Retry-After": "77"})})
+    calls = _fake_httpx(monkeypatch, {})
     snap = await us.fetch_cursor(Path("/x"))
-    assert snap["status"] == "rate-limited"
-    assert snap["retryAfterSec"] == 77.0
+    assert snap["status"] == "unavailable"
+    assert snap["error"] == us.NO_OFFICIAL_USAGE_SURFACE
+    assert calls == []
 
-    # HTTP 200 with no usable quota payload -> error.
-    _fake_httpx(monkeypatch, {
-        us.CURSOR_USAGE_SUMMARY_URL: _FakeResponse(200, {"membershipType": "pro"})})
+
+async def test_fetch_cursor_local_expiry_still_precedes_unavailable(monkeypatch):
+    """A locally-detectable expiry is more informative than "unavailable" and
+    must keep winning — it is read from the token itself, not from the network."""
+    _with_cursor_token(monkeypatch, _cursor_jwt({"sub": "auth0|u1", "exp": 1}))
+    calls = _fake_httpx(monkeypatch, {})
     snap = await us.fetch_cursor(Path("/x"))
-    assert snap["status"] == "error"
-    assert "no usable quota fields" in snap["error"]
+    assert snap["status"] == "expired"
+    assert calls == []
 
 
 # ── Poller cooldown behavior ────────────────────────────────────────────────
@@ -1981,15 +1779,12 @@ async def test_poll_once_claude_accounts_are_independent_and_pruned(tmp_path, mo
     vault = AccountVault()
     monkeypatch.setattr(us, "_get_profiles_store", lambda: store)
     monkeypatch.setattr(us, "_get_credential_vault", lambda: vault)
-    calls: dict[str, int] = {}
+    calls: list[str] = []
 
-    async def fake_claude(oauth):
-        token = oauth["accessToken"]
-        calls[token] = calls.get(token, 0) + 1
-        if token == inactive["id"]:
-            snap = us._snapshot("claude", "rate-limited")
-            snap["retryAfterSec"] = 120
-            return snap
+    async def fake_claude(home):
+        # The CLI can only speak for whoever is signed in, so the poll asks it
+        # once per cycle rather than once per account.
+        calls.append(store.list()["defaults"]["claude"])
         return us._snapshot(
             "claude", "ok",
             windows=[us._window("session", "Session", len(calls), None)],
@@ -1998,7 +1793,7 @@ async def test_poll_once_claude_accounts_are_independent_and_pruned(tmp_path, mo
     async def fake_other(provider):
         return us._snapshot(provider, "no-credentials")
 
-    monkeypatch.setattr(us, "fetch_claude_oauth", fake_claude)
+    monkeypatch.setattr(us, "fetch_claude", fake_claude)
     monkeypatch.setattr(us, "fetch_codex", lambda home: fake_other("codex"))
     monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_other("kimi"))
     monkeypatch.setattr(us, "fetch_grok", lambda home: fake_other("grok"))
@@ -2013,18 +1808,23 @@ async def test_poll_once_claude_accounts_are_independent_and_pruned(tmp_path, mo
     cache = tmp_path / "usage-cache.json"
     svc = us.UsageService(cache_path=cache)
     first = await svc.poll_once(tmp_path)
+    # Every account still has a row — the parked ones just carry no figure.
     assert set(first["accounts"]["claude"]) == {
         "__default__", active["id"], inactive["id"],
     }
     assert first["providers"]["claude"] == first["accounts"]["claude"][active["id"]]
-    assert sorted(vault.calls) == sorted([
-        ("__default__", False), (active["id"], True), (inactive["id"], False),
-    ])
+    assert first["accounts"]["claude"][active["id"]]["status"] == "ok"
+    for parked in ("__default__", inactive["id"]):
+        row = first["accounts"]["claude"][parked]
+        assert row["status"] == "not-measured"
+        assert row["windows"] == []
 
+    # The reading stands for a while: asking the CLI costs a Claude Code start.
     await svc.poll_once(tmp_path)
-    assert calls[inactive["id"]] == 1
-    assert calls[active["id"]] == 2
-    assert calls["__default__"] == 2
+    assert calls == [active["id"]]
+    svc.request_refresh()  # what the badge's refresh button does
+    await svc.poll_once(tmp_path)
+    assert calls == [active["id"], active["id"]]
 
     store.delete(inactive["id"])
     third = await svc.poll_once(tmp_path)
@@ -2066,11 +1866,15 @@ async def test_refresh_during_poll_runs_next_cycle_with_new_active_account(
     started = asyncio.Event()
     release_first_poll = asyncio.Event()
 
-    async def fake_claude(oauth):
+    async def fake_claude(home):
+        # Read the active account when the cycle starts, not when it finishes:
+        # the point of the test is that a switch mid-poll lands on the NEXT
+        # cycle, so the in-flight one must still report who it began with.
+        active = store.list()["defaults"]["claude"]
         if not release_first_poll.is_set():
             started.set()
             await release_first_poll.wait()
-        used = 10 if oauth["accessToken"] == first["id"] else 20
+        used = 10 if active == first["id"] else 20
         return us._snapshot(
             "claude", "ok",
             windows=[us._window("session", "Session", used, None)],
@@ -2079,7 +1883,7 @@ async def test_refresh_during_poll_runs_next_cycle_with_new_active_account(
     async def fake_other(provider):
         return us._snapshot(provider, "no-credentials")
 
-    monkeypatch.setattr(us, "fetch_claude_oauth", fake_claude)
+    monkeypatch.setattr(us, "fetch_claude", fake_claude)
     monkeypatch.setattr(us, "fetch_codex", lambda home: fake_other("codex"))
     monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_other("kimi"))
     monkeypatch.setattr(us, "fetch_grok", lambda home: fake_other("grok"))
@@ -2726,9 +2530,9 @@ def _slot_secret(access: str, refresh: str, expires_at: int, **extra) -> str:
 async def test_poll_never_mints_tokens_and_reads_slots_as_stored(
     tmp_path, monkeypatch
 ):
-    """The CLI is the only refresher. The poll reads every slot exactly as
-    stored — expired access tokens included — and writes nothing back, so it
-    can never rotate a refresh token out from under a running Claude Code."""
+    """The CLI is the only refresher and the only quota source. The poll reads
+    every slot exactly as stored and writes nothing back, so it can never
+    rotate a refresh token out from under a running Claude Code."""
     store = _isolated_store(tmp_path)
     active = store.create(agent_key="claude", name="Active")
     parked = store.create(agent_key="claude", name="Parked")
@@ -2742,13 +2546,12 @@ async def test_poll_never_mints_tokens_and_reads_slots_as_stored(
     })
     monkeypatch.setattr(us, "_get_profiles_store", lambda: store)
     monkeypatch.setattr(us, "_get_credential_vault", lambda: vault)
-    fetched: list[str] = []
 
-    async def fake_claude(oauth):
-        fetched.append(oauth["accessToken"])
-        return us._snapshot("claude", "expired")
+    async def fake_claude(home):
+        return us._snapshot("claude", "ok",
+                            windows=[us._window("session", "Session", 10, None)])
 
-    monkeypatch.setattr(us, "fetch_claude_oauth", fake_claude)
+    monkeypatch.setattr(us, "fetch_claude", fake_claude)
     for name in ("codex", "kimi", "grok", "antigravity", "opencode", "qwen",
                  "kilo", "pi", "copilot", "cursor"):
         monkeypatch.setattr(
@@ -2759,17 +2562,63 @@ async def test_poll_never_mints_tokens_and_reads_slots_as_stored(
     svc = us.UsageService(cache_path=tmp_path / "usage-cache.json")
     payload = await svc.poll_once(tmp_path)
 
-    # Every slot polled on its stored token; none was renewed or rewritten.
-    assert sorted(fetched) == ["active-old", "default-old", "parked-old"]
-    assert vault.writes == []
-    assert payload["accounts"]["claude"][parked["id"]]["status"] == "expired"
+    assert vault.writes == []  # nothing was renewed or rewritten
+    assert payload["accounts"]["claude"][active["id"]]["status"] == "ok"
+    assert payload["accounts"]["claude"][parked["id"]]["status"] == "not-measured"
+
+
+async def test_a_parked_account_never_shows_a_cached_percentage(
+    tmp_path, monkeypatch
+):
+    """Only the signed-in account can be measured now. A leftover figure from
+    when it was active would advertise quota nobody can confirm — that is what
+    sent the user to a signed-out account in the first place."""
+    store = _isolated_store(tmp_path)
+    one = store.create(agent_key="claude", name="One")
+    two = store.create(agent_key="claude", name="Two")
+    store.set_default("claude", one["id"])
+
+    alive = int(time.time() * 1000 + 3_600_000)
+    vault = _SlotVault({
+        "__default__": _slot_secret("d", "rt-d", alive),
+        one["id"]: _slot_secret("a", "rt-a", alive),
+        two["id"]: _slot_secret("b", "rt-b", alive),
+    })
+    monkeypatch.setattr(us, "_get_profiles_store", lambda: store)
+    monkeypatch.setattr(us, "_get_credential_vault", lambda: vault)
+
+    async def fake_claude(home):
+        return us._snapshot("claude", "ok",
+                            windows=[us._window("session", "Session", 40, None)])
+
+    monkeypatch.setattr(us, "fetch_claude", fake_claude)
+    for name in ("codex", "kimi", "grok", "antigravity", "opencode", "qwen",
+                 "kilo", "pi", "copilot", "cursor"):
+        monkeypatch.setattr(
+            us, f"fetch_{name}",
+            lambda *a, _p=name, **k: _no_creds(_p),
+        )
+
+    svc = us.UsageService(cache_path=tmp_path / "usage-cache.json")
+    await svc.poll_once(tmp_path)          # `one` measured while active
+    assert svc._last_good["claude"][one["id"]]["windows"]
+
+    store.set_default("claude", two["id"])  # it is parked now
+    svc.request_refresh()
+    payload = await svc.poll_once(tmp_path)
+
+    row = payload["accounts"]["claude"][one["id"]]
+    assert row["status"] == "not-measured"
+    assert row["windows"] == []
+    assert row.get("stale") is not True     # not a dressed-up cached reading
+    assert one["id"] not in svc._last_good.get("claude", {})
 
 
 async def test_poll_delegates_refresh_when_the_active_token_expired(
     tmp_path, monkeypatch
 ):
-    """An expired ACTIVE token is renewed by asking the CLI, then re-read.
-    The app still mints nothing — see claude_delegated_refresh."""
+    """An expired ACTIVE token is renewed by asking the CLI before the quota is
+    read. The app still mints nothing — see claude_delegated_refresh."""
     from agent_team_backend import claude_delegated_refresh as dr
 
     store = _isolated_store(tmp_path)
@@ -2783,19 +2632,16 @@ async def test_poll_delegates_refresh_when_the_active_token_expired(
 
     async def fake_attempt(v, **kwargs):
         attempts.append(v)
-        # The CLI renewed it: the slot the resolver reads now holds a live token.
         vault.slots["__default__"] = _slot_secret("renewed", "rt2", alive)
         return dr.OUTCOME_REFRESHED
 
     monkeypatch.setattr(dr, "attempt", fake_attempt)
-    fetched: list[str] = []
 
-    async def fake_claude(oauth):
-        fetched.append(oauth["accessToken"])
+    async def fake_claude(home):
         return us._snapshot("claude", "ok",
                             windows=[us._window("session", "Session", 10, None)])
 
-    monkeypatch.setattr(us, "fetch_claude_oauth", fake_claude)
+    monkeypatch.setattr(us, "fetch_claude", fake_claude)
     for name in ("codex", "kimi", "grok", "antigravity", "opencode", "qwen",
                  "kilo", "pi", "copilot", "cursor"):
         monkeypatch.setattr(
@@ -2807,7 +2653,9 @@ async def test_poll_delegates_refresh_when_the_active_token_expired(
     await svc.poll_once(tmp_path)
 
     assert len(attempts) == 1
-    assert fetched == ["renewed"]  # polled on the token the CLI minted
+    assert us.parse_claude_credentials(
+        vault.slots["__default__"]
+    )["accessToken"] == "renewed"
 
 
 async def test_poll_leaves_an_expired_parked_slot_to_the_switch(
@@ -2857,5 +2705,124 @@ async def test_poll_leaves_an_expired_parked_slot_to_the_switch(
     assert attempts == []  # the active token was fine; the parked one is not ours to fix
 
 
+async def test_the_residual_anthropic_call_identifies_itself_as_navide(monkeypatch):
+    """opencode and pi keep an Anthropic OAuth grant in their own auth files,
+    so that one call still goes out from here. It must say who is calling: the
+    app used to send `claude-code/<version>`, assembled by running
+    `claude --version`, which claimed to be a client it is not."""
+    seen: dict = {}
+
+    class _Resp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {}
+
+    class _Client:
+        def __init__(self, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None):
+            seen["url"] = url
+            seen["headers"] = headers or {}
+            return _Resp()
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+
+    await us.fetch_claude_oauth({
+        "accessToken": "tok",
+        "expiresAt": int(time.time() * 1000 + 3_600_000),
+    })
+
+    assert seen["headers"]["User-Agent"] == "Navide"
+    assert "claude-code" not in json.dumps(seen["headers"])
+
+
+def test_no_impersonating_user_agent_survives_anywhere() -> None:
+    """No string this module can actually send may pose as Anthropic's own
+    client. Docstrings are excluded on purpose — they explain the history, and
+    a guard that failed on its own explanation would just get deleted."""
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(us))
+    docstrings = {
+        text
+        for node in ast.walk(tree)
+        if isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        )
+        and (text := ast.get_docstring(node, clean=False))
+    }
+    offenders = [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and "claude-code/" in node.value
+        and node.value not in docstrings
+    ]
+
+    assert offenders == []
+
+
 async def _no_creds(provider: str) -> dict:
     return us._snapshot(provider, "no-credentials")
+
+
+def _stub_non_claude_fetchers(monkeypatch) -> None:
+    for name in ("codex", "kimi", "grok", "antigravity", "opencode", "qwen",
+                 "kilo", "pi", "copilot", "cursor"):
+        monkeypatch.setattr(
+            us, f"fetch_{name}",
+            lambda *a, _p=name, **k: _no_creds(_p),
+        )
+
+
+async def test_a_costly_failed_read_waits_the_full_read_interval(tmp_path, monkeypatch):
+    """A read that spawned a whole Claude Code and still came back empty cost
+    as much as a success. Retrying it on the short failure cooldown would boot
+    the CLI three times as often as a working read — permanently."""
+    async def costly(home):
+        snap = us._snapshot("claude", "unavailable")
+        snap["costlyRead"] = True
+        return snap
+
+    monkeypatch.setattr(us, "fetch_claude", costly)
+    _stub_non_claude_fetchers(monkeypatch)
+
+    svc = us.UsageService(cache_path=tmp_path / "usage-cache.json")
+    before = time.monotonic()
+    payload = await svc.poll_once(tmp_path)
+
+    blocked = svc._blocked_until[("claude", "__default__")]
+    assert blocked - before > us.RATE_LIMIT_COOLDOWN  # not the cheap-failure price
+    assert blocked - before <= us.CLAUDE_CLI_READ_INTERVAL + 1
+    # The transient pricing flag never reaches the published snapshot.
+    assert "costlyRead" not in payload["accounts"]["claude"]["__default__"]
+
+
+async def test_a_spawnless_unavailable_keeps_the_short_cooldown(tmp_path, monkeypatch):
+    """unavailable without a spawn (no CLI binary on the machine) stays on the
+    short cooldown, so the badge recovers quickly after an install."""
+    async def cheap(home):
+        return us._snapshot("claude", "unavailable")
+
+    monkeypatch.setattr(us, "fetch_claude", cheap)
+    _stub_non_claude_fetchers(monkeypatch)
+
+    svc = us.UsageService(cache_path=tmp_path / "usage-cache.json")
+    before = time.monotonic()
+    await svc.poll_once(tmp_path)
+
+    blocked = svc._blocked_until[("claude", "__default__")]
+    assert blocked - before <= us.RATE_LIMIT_COOLDOWN + 1
