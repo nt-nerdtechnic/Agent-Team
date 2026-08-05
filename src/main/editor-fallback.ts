@@ -31,8 +31,11 @@ export function resolveExternalOpenTarget(
 ): string | null {
   if (!workspacePath || !filepath) return null
   const root = resolve(workspacePath)
+  // The filesystem root already ends in a separator; appending another would
+  // demand a '//' prefix no path ever has, rejecting every file under '/'.
+  const prefix = root.endsWith(sep) ? root : root + sep
   const candidate = resolve(join(root, filepath))
-  if (!candidate.startsWith(root + sep)) return null
+  if (!candidate.startsWith(prefix)) return null
   if (!exists(candidate)) return null
   return candidate
 }

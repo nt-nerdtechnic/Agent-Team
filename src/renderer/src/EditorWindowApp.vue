@@ -188,8 +188,11 @@ const openFiles = ref<OpenFile[]>([])
 // A tab is identified by (workspace, relPath): the same relPath under two roots
 // is two independent files. Every per-tab map/set below is keyed this way.
 function normWs(ws: string | undefined | null): string | undefined {
-  const v = (ws ?? '').replace(/\/+$/, '')
-  return v && v !== workspacePath.replace(/\/+$/, '') ? v : undefined
+  if (!ws) return undefined
+  // Strip trailing slashes, but keep the filesystem root itself: '/' must stay a
+  // root of its own, not collapse to "the window's workspace".
+  const v = ws.replace(/\/+$/, '') || '/'
+  return v !== (workspacePath.replace(/\/+$/, '') || '/') ? v : undefined
 }
 function fileWs(f: { wsPath?: string }): string { return f.wsPath || workspacePath }
 function tabKeyOf(wsPath: string | undefined, relPath: string): string {

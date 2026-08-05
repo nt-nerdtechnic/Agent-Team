@@ -67,3 +67,56 @@ describe('resolveExternalOpenTarget', () => {
     expect(resolveExternalOpenTarget(workspace, 'definitely-not-there-3f1a.txt')).toBeNull()
   })
 })
+
+// An out-of-workspace open arrives as (file_ws, basename): `filepath` is
+// relative to `file_ws`, not to the window's workspace. index.ts picks the root
+// with `params.file_ws || workspacePath` before calling in here; these tests pin
+// what each choice resolves to, so a regression that drops file_ws is visible as
+// "opened the wrong file / opened nothing".
+describe('resolveExternalOpenTarget – out-of-workspace opens (file_ws as the root)', () => {
+  const workspace = join('/tmp', 'editor-fallback-ws')
+  const external = join('/tmp', 'editor-fallback-ext')
+  const always = () => true
+
+  it('resolves a basename against the file own root (file_ws)', () => {
+    expect(resolveExternalOpenTarget(external, 'notes.txt', always)).toBe(
+      resolve(external, 'notes.txt')
+    )
+  })
+
+  it('resolves the same basename to a DIFFERENT file when the workspace is used as root', () => {
+    // Exactly the damage of ignoring file_ws: a real path, but the wrong file.
+    expect(resolveExternalOpenTarget(workspace, 'notes.txt', always)).not.toBe(
+      resolveExternalOpenTarget(external, 'notes.txt', always)
+    )
+  })
+
+  it('returns null when the workspace copy does not exist (open silently does nothing)', () => {
+    // The usual shape of the bug: /ws has no notes.txt, so the fallback finds
+    // nothing to hand to the OS and drops to the "unavailable" dialog.
+    const exists = (p: string): boolean => p === resolve(external, 'notes.txt')
+    expect(resolveExternalOpenTarget(workspace, 'notes.txt', exists)).toBeNull()
+    expect(resolveExternalOpenTarget(external, 'notes.txt', exists)).toBe(
+      resolve(external, 'notes.txt')
+    )
+  })
+
+  // `file_ws: '/'` is reachable in production — ⌘O on /notes.txt and a ⌘-click
+  // on a filesystem-root path both emit it — and the containment check must not
+  // demand a '//' prefix for that root.
+  it('resolves against the filesystem root when file_ws is /', () => {
+    expect(resolveExternalOpenTarget('/', 'notes.txt', always)).toBe('/notes.txt')
+  })
+
+  it('applies the same containment rule to an external root', () => {
+    expect(resolveExternalOpenTarget(external, '../outside.txt', always)).toBeNull()
+    expect(resolveExternalOpenTarget(external, '.', always)).toBeNull()
+  })
+
+  it('still classifies an open carrying file_ws as a plain file open', () => {
+    // The OS-default-app branch is what handles it; file_ws must not push the
+    // request into the diff/bare branches.
+    expect(classifyEditorOpen({ filepath: 'notes.txt', file_ws: external })).toBe('file')
+    expect(classifyEditorOpen({ file_ws: external })).toBe('bare')
+  })
+})
