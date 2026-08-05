@@ -99,7 +99,11 @@ const IPC_READY = 'plugin:ready'
 const IPC_HIDE_SELF = 'plugin:hideSelf'
 const IPC_OPEN_TARGET = 'plugin:openTarget'
 
-/** `workspace_path` param of an entry query ('' when absent). */
+/** `workspace_path` param of an entry query ('' when absent) — the view's
+ *  identity in {@link FrontendPluginManager.open}. Deliberately blind to
+ *  `file_ws` (the root of a file opened from outside the workspace): an
+ *  external-file open keeps the same workspace and must add a tab in-page,
+ *  never reload the view out from under its open buffers. */
 function workspaceOf(query: string): string {
   return new URLSearchParams(query).get('workspace_path') ?? ''
 }
@@ -320,29 +324,33 @@ export class FrontendPluginManager {
     const action = HOST_CAPABILITIES[`${call.ns}.${call.method}`]
 
     if (action === 'open_in_editor') {
-      // The workspace comes from the query the HOST launched this view with —
-      // never from the call. A plugin-supplied root would defeat the
-      // containment check below by simply claiming '/', and the target is
-      // handed to the mini-IDE or (as a fallback) to the OS default app.
-      const workspacePath = workspaceOf(plugin.query)
+      // The root defaults to the query the HOST launched this view with. A
+      // call MAY name its own `workspace_path` — that is how a view opens a
+      // file that lives outside the workspace it was given (the safety
+      // boundary for such opens sits in the caller, by product decision).
+      // The target is handed to the mini-IDE or (as a fallback) to the OS
+      // default app.
+      const callerRoot = typeof args.workspace_path === 'string' ? args.workspace_path : ''
+      const workspacePath = callerRoot || workspaceOf(plugin.query)
       const filepath = typeof args.filepath === 'string' ? args.filepath : ''
       if (!workspacePath || !filepath) {
         return buildError(call.reqId, 'BAD_REQUEST', 'filepath is required inside a workspace view')
       }
-      // Containment: resolve against the workspace root and keep only targets
-      // that stay under it, so neither '../' traversal nor an absolute path
-      // can reach a file the view was never given. The normalized relative
-      // path is what downstream receives, so both open routes agree.
+      // Containment: resolve against the root and keep only targets that stay
+      // under it, so neither '../' traversal nor an absolute path can reach a
+      // file outside it. This holds for a caller-supplied root too: naming the
+      // file's own root is the supported way to reach it, so the target never
+      // needs to escape whichever root won.
       const root = resolve(workspacePath)
       const rel = relative(root, resolve(root, filepath))
       if (!rel || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
-        return buildError(call.reqId, 'BAD_REQUEST', 'filepath escapes the workspace')
+        return buildError(call.reqId, 'BAD_REQUEST', 'filepath escapes the root')
       }
       const handler = this.openInEditorHandler
       if (!handler) {
         return buildError(call.reqId, 'BACKEND_ERROR', 'editor open handler not registered')
       }
-      const opened = handler({ workspace_path: workspacePath, filepath: rel })
+      const opened = handler({ workspace_path: workspacePath, filepath: rel || filepath })
       return buildSuccess(call.reqId, { ok: true, opened })
     }
 
@@ -619,7 +627,9 @@ export class FrontendPluginManager {
         } else if (query) {
           // Same workspace → deliver the open target in-page (legacy
           // `editor:openFile`/`editor:openDiff` semantics: add/reveal the tab
-          // without reloading, so open tabs and unsaved buffers survive).
+          // without reloading, so open tabs and unsaved buffers survive). This
+          // is also the path an out-of-workspace open takes: it carries
+          // `file_ws` in the params, which is not part of the identity above.
           this.sendOpenTarget(existing, queryToParams(query))
         }
         existing.fill = bounds === 'fill'
@@ -1069,11 +1079,13 @@ export function registerBundledMiniIde(
 /** Build the entry query the mini-IDE reads from `window.location.search`:
  *  `workspacePath` plus the backend `httpUrl` (the capabilityBackend shim
  *  resolves backend HTTP URLs from it), `extraParams` forwarding editor
- *  open params (`filepath`/`line`/`sidebar`/`diff_*`/`branch_diff_*`)
+ *  open params (`filepath`/`file_ws`/`line`/`sidebar`/`diff_*`/`branch_diff_*`)
  *  EditorWindowApp also reads from the search string, and the current `theme`
  *  id so the plugin paints with the app theme before its first settings
  *  reconcile (zero-flash; see plugins/mini-ide/mount.ts). A theme change alone
- *  never reloads a running view — open() only compares `workspace_path`. */
+ *  never reloads a running view — open() only compares `workspace_path`, which
+ *  is also why `file_ws` (an out-of-workspace file's own root) rides along as
+ *  an ordinary param instead of altering the workspace. */
 function miniIdeQuery(
   workspacePath: string,
   httpUrl: string,

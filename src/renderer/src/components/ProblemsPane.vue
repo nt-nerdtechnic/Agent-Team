@@ -1,10 +1,16 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { allDiagnosticsSorted } from '../editor/diagnostics'
+import { allDiagnosticsSorted, diagnosticsKey } from '../editor/diagnostics'
 import type { Diagnostic } from '../editor/diagnostics'
 
+const props = defineProps<{
+  // The window's workspace — diagnostics from another root are labelled with
+  // their absolute path so two same-named files stay distinguishable.
+  workspacePath?: string
+}>()
+
 const emit = defineEmits<{
-  (e: 'open-file', payload: { filepath: string; line: number }): void
+  (e: 'open-file', payload: { filepath: string; line: number; wsPath?: string }): void
   (e: 'fix-with-ai', payload: { diag: Diagnostic }): void
 }>()
 
@@ -13,17 +19,23 @@ const all = computed(() => allDiagnosticsSorted())
 const errorCount = computed(() => all.value.filter(d => d.severity === 'error').length)
 const warnCount  = computed(() => all.value.filter(d => d.severity === 'warning').length)
 
-// Group by relPath, preserving sorted order
-interface Group { relPath: string; items: Diagnostic[] }
+// Group by (workspace, relPath), preserving sorted order
+interface Group { key: string; label: string; items: Diagnostic[] }
 const groups = computed((): Group[] => {
-  const map = new Map<string, Diagnostic[]>()
+  const map = new Map<string, Group>()
   for (const d of all.value) {
-    const arr = map.get(d.relPath) ?? []
-    arr.push(d)
-    map.set(d.relPath, arr)
+    const key = diagnosticsKey(d.wsPath ?? '', d.relPath)
+    const g = map.get(key) ?? { key, label: fileLabel(d), items: [] }
+    g.items.push(d)
+    map.set(key, g)
   }
-  return Array.from(map.entries()).map(([relPath, items]) => ({ relPath, items }))
+  return Array.from(map.values())
 })
+
+function fileLabel(d: Diagnostic): string {
+  if (!d.wsPath || d.wsPath === (props.workspacePath ?? '')) return d.relPath
+  return `${d.wsPath.replace(/\/+$/, '')}/${d.relPath}`
+}
 
 function sevIcon(sev: Diagnostic['severity']): string {
   return sev === 'error' ? '●' : sev === 'warning' ? '▲' : '●'
@@ -33,7 +45,7 @@ function sevClass(sev: Diagnostic['severity']): string {
 }
 
 function openItem(d: Diagnostic): void {
-  emit('open-file', { filepath: d.relPath, line: d.line })
+  emit('open-file', { filepath: d.relPath, line: d.line, wsPath: d.wsPath })
 }
 </script>
 
@@ -46,8 +58,8 @@ function openItem(d: Diagnostic): void {
     </div>
     <div v-if="!all.length" class="problems-empty">{{ $t('label.no-problems-detected') }}</div>
     <div v-else class="problems-list">
-      <div v-for="g in groups" :key="g.relPath" class="prob-group">
-        <div class="prob-file">{{ g.relPath }}</div>
+      <div v-for="g in groups" :key="g.key" class="prob-group">
+        <div class="prob-file">{{ g.label }}</div>
         <div
           v-for="(d, i) in g.items"
           :key="i"

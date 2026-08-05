@@ -4,7 +4,7 @@ import { useReview } from '../composables/useReview'
 import type { ReviewFinding } from '../composables/useReview'
 import type { useBackend } from '../composables/useBackend'
 import type { useGit } from '../composables/useGit'
-import { setDiagnostics, clearDiagnostics } from '../editor/diagnostics'
+import { setDiagnostics, clearDiagnostics, diagnosticsKey } from '../editor/diagnostics'
 import type { Diagnostic } from '../editor/diagnostics'
 
 const props = defineProps<{
@@ -32,10 +32,10 @@ watch(reviewResult, (result) => {
     const sev: Diagnostic['severity'] =
       f.severity === 'critical' ? 'error' : f.severity === 'warning' ? 'warning' : 'info'
     const arr = byFile.get(f.file) ?? []
-    arr.push({ relPath: f.file, line: f.line, col: 0, severity: sev, message: f.title, source: 'review' })
+    arr.push({ relPath: f.file, wsPath: props.workspacePath, line: f.line, col: 0, severity: sev, message: f.title, source: 'review' })
     byFile.set(f.file, arr)
   }
-  for (const [relPath, diags] of byFile) setDiagnostics(relPath, diags)
+  for (const [relPath, diags] of byFile) setDiagnostics(diagnosticsKey(props.workspacePath, relPath), diags)
 })
 
 const mode = ref<'working' | 'branch'>('working')

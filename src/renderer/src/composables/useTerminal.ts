@@ -366,13 +366,25 @@ export function htmlReportRoute(
   return { workspace_path: root, rel_path: absPath.slice(root.length + 1) }
 }
 
-function openInEditor(absPath: string, line: number | undefined): void {
+/** Open a clicked path in the mini-IDE. Files inside the pane's workspace open
+ *  as a workspace-relative path; files outside it keep `workspace_path` on the
+ *  workspace and name their own root in `file_ws` (their parent directory), so
+ *  the mini-IDE adds a tab instead of reloading onto a different workspace and
+ *  losing every open tab. Without a pane workspace there is nothing to stay
+ *  on, so the file's own directory becomes the workspace (previous behaviour). */
+function openInEditor(absPath: string, line: number | undefined, workspacePath?: string): void {
   const api = (window as Window & { agentTeam?: _AgentApi }).agentTeam
   if (!api?.openEditorWindow) return
   const slash = absPath.lastIndexOf('/')
-  const wsPath = slash > 0 ? absPath.slice(0, slash) : absPath
-  const filepath = absPath.slice(slash + 1)
-  void api.openEditorWindow({ workspace_path: wsPath, filepath, ...(line !== undefined ? { line } : {}) })
+  const dir = slash > 0 ? absPath.slice(0, slash) : '/'
+  const root = workspacePath?.replace(/\/+$/, '')
+  const inWorkspace = !!root && absPath.startsWith(`${root}/`)
+  void api.openEditorWindow({
+    workspace_path: root ?? dir,
+    filepath: inWorkspace ? absPath.slice(root.length + 1) : absPath.slice(slash + 1),
+    ...(root && !inWorkspace ? { file_ws: dir } : {}),
+    ...(line !== undefined ? { line } : {}),
+  })
 }
 
 // '~/'-prefixed links (shell output loves them) resolve against the user's
@@ -1811,7 +1823,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
           row.appendChild(nameSpan)
           row.appendChild(dirSpan)
           row.addEventListener('mouseenter', () => { selectedIdx = i; renderList() })
-          row.addEventListener('mousedown', (e) => { e.preventDefault(); close(); openInEditor(item.abs, lineNum) })
+          row.addEventListener('mousedown', (e) => { e.preventDefault(); close(); openInEditor(item.abs, lineNum, wsPath) })
           itemList.appendChild(row)
         })
       }
@@ -1871,7 +1883,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         } else if (e.key === 'Enter') {
           e.preventDefault()
           const item = currentItems[selectedIdx]
-          if (item) { close(); openInEditor(item.abs, lineNum) }
+          if (item) { close(); openInEditor(item.abs, lineNum, wsPath) }
         }
       })
 

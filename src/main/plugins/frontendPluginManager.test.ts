@@ -690,6 +690,21 @@ describe('view lifecycle (open / hideSelf / resize / death paths)', () => {
     expect(openTargets(view)).toEqual([{ workspace_path: '/ws', filepath: 'b.ts' }])
   })
 
+  it('delivers an out-of-workspace open (file_ws) in-page without reloading', () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    const view = openView(mgr, host, 'acme.editor', '?workspace_path=/ws&http_url=http://x')
+    view.webContents.emit('did-finish-load')
+
+    // `file_ws` names the external file's own root; the workspace is unchanged,
+    // so the view must keep its open tabs and just receive the target.
+    openView(mgr, host, 'acme.editor', '?workspace_path=/ws&file_ws=/elsewhere&filepath=notes.md')
+    expect(view.webContents.loads).toHaveLength(1) // no reload
+    expect(openTargets(view)).toEqual([
+      { workspace_path: '/ws', file_ws: '/elsewhere', filepath: 'notes.md' },
+    ])
+  })
+
   it('reloads the entry when the workspace changes (legacy routing)', () => {
     const mgr = new FrontendPluginManager()
     const host = new FakeBrowserWindow()
@@ -1159,7 +1174,7 @@ describe('mini-IDE dedicated window (openMiniIdePluginView)', () => {
   })
 })
 
-describe('ui.open_in_editor host capability — workspace containment', () => {
+describe('ui.open_in_editor host capability — workspace containment / caller root', () => {
   const CALL = 'plugin:cap:call'
 
   /** Open a `ui`-granted view bound to /ws and return the call seam. */
@@ -1208,13 +1223,11 @@ describe('ui.open_in_editor host capability — workspace containment', () => {
     }
   }
 
-  it('uses the host-assigned workspace and ignores a plugin-supplied one', async () => {
+  it('uses the host-assigned workspace when the call names no root', async () => {
     const { opens, call } = openUiPlugin()
-    // A malicious view claims the whole filesystem as its root; the host's own
-    // /ws binding must win, which then makes the path escape-checkable.
-    const resp = await call({ workspace_path: '/', filepath: 'ws/src/app.ts' })
+    const resp = await call({ filepath: 'src/app.ts' })
     expect(resp.error).toBeUndefined()
-    expect(opens).toEqual([{ workspace_path: '/ws', filepath: 'ws/src/app.ts' }])
+    expect(opens).toEqual([{ workspace_path: '/ws', filepath: 'src/app.ts' }])
   })
 
   it('rejects a traversal that escapes the workspace', async () => {
@@ -1226,9 +1239,32 @@ describe('ui.open_in_editor host capability — workspace containment', () => {
 
   it('rejects an absolute path outside the workspace', async () => {
     const { opens, call } = openUiPlugin()
-    const resp = await call({ workspace_path: '/', filepath: '/etc/passwd' })
+    const resp = await call({ filepath: '/etc/passwd' })
     expect(resp.error?.code).toBe('BAD_REQUEST')
     expect(opens).toEqual([])
+  })
+
+  it('honours a call-supplied root', async () => {
+    const { opens, call } = openUiPlugin()
+    // Opening a file that lives outside the view's workspace: the caller names
+    // the file's own root, and the target is normalized against it.
+    const resp = await call({ workspace_path: '/elsewhere', filepath: 'notes/todo.md' })
+    expect(resp.error).toBeUndefined()
+    expect(opens).toEqual([{ workspace_path: '/elsewhere', filepath: 'notes/todo.md' }])
+  })
+
+  it('rejects a traversal that escapes a call-supplied root', async () => {
+    const { opens, call } = openUiPlugin()
+    const resp = await call({ workspace_path: '/elsewhere', filepath: '../secrets/key' })
+    expect(resp.error?.code).toBe('BAD_REQUEST')
+    expect(opens).toEqual([])
+  })
+
+  it('normalizes an absolute filepath against a call-supplied root', async () => {
+    const { opens, call } = openUiPlugin()
+    const resp = await call({ workspace_path: '/elsewhere', filepath: '/elsewhere/notes/todo.md' })
+    expect(resp.error).toBeUndefined()
+    expect(opens).toEqual([{ workspace_path: '/elsewhere', filepath: 'notes/todo.md' }])
   })
 
   it('normalizes an in-workspace path before handing it downstream', async () => {
