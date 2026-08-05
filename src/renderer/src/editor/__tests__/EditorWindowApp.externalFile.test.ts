@@ -4,13 +4,23 @@
 // consequences: tab identity is (workspace, relPath), each pane reads/writes
 // against its own tab's root, and an explorer rename in the window's workspace
 // can never repoint a tab that belongs to another root.
-import { describe, it, expect, vi } from 'vitest'
+//
+// The window here runs on a REAL workspace ('/ws'), because the interesting
+// half of `normWs()` is the folding branch — a wsPath equal to the window's
+// own workspace must collapse to `undefined`, or the same file opens twice.
+// Tabs are driven through the four production entry points that can actually
+// carry a root (`onOpenEditorFile` IPC, the nav bridge's open target, the ⌘O
+// picker command, and the entry query); ExplorerPane's `open-file` emit is
+// typed `{ filepath, name }` and can never deliver one.
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import { defineComponent, h, ref } from 'vue'
 import EditorWindowApp from '../../EditorWindowApp.vue'
 import { i18n } from '../../i18n'
 
 i18n.global.locale.value = 'en-US'
+
+const WS = '/ws'
 
 function stub(name: string, props: string[] = []) {
   return {
@@ -30,13 +40,35 @@ vi.mock('../../components/GitPane.vue', () => stub('GitPane'))
 vi.mock('../../components/ProblemsPane.vue', () => stub('ProblemsPane'))
 vi.mock('../../components/AiCliTerminal.vue', () => stub('AiCliTerminal'))
 vi.mock('../../components/NotificationHost.vue', () => stub('NotificationHost'))
-// Declared props so the host's per-tab bindings are assertable.
-vi.mock('../EditorPane.vue', () => stub('EditorPane', ['workspacePath', 'relPath', 'name']))
 vi.mock('../PlanFileView.vue', () => stub('PlanFileView', ['workspacePath', 'relPath']))
 vi.mock('../DiffPane.vue', () => stub('DiffPane'))
 vi.mock('../ConflictPane.vue', () => stub('ConflictPane'))
 vi.mock('../BranchDiffPane.vue', () => stub('BranchDiffPane'))
 vi.mock('../FilePreviewPane.vue', () => stub('FilePreviewPane', ['workspacePath', 'relPath']))
+
+// EditorPane records which root its save() ran against — `workbench.action.
+// saveAll` reaches panes through the host's ref map, and a save that used the
+// window workspace instead of the tab's own root writes to the wrong file.
+const saveCalls = vi.hoisted(() => [] as Array<{ workspacePath: string; relPath: string }>)
+
+vi.mock('../EditorPane.vue', () => ({
+  __esModule: true,
+  default: defineComponent({
+    name: 'EditorPane',
+    props: {
+      workspacePath: { type: String, default: '' },
+      relPath: { type: String, default: '' },
+      name: { type: String, default: '' },
+    },
+    inheritAttrs: false,
+    methods: {
+      save(): void {
+        saveCalls.push({ workspacePath: this.workspacePath, relPath: this.relPath })
+      },
+    },
+    render: () => h('div', { class: 'stub-EditorPane' }),
+  }),
+}))
 
 vi.mock('../../composables/useBackend', () => ({
   useBackend: () => ({
@@ -70,23 +102,62 @@ vi.mock('../../composables/useTheme', () => ({
   BUILTIN_THEMES: [],
 }))
 
+// Commands are captured rather than swallowed: ⌘O and ⌘⌥S are registered here,
+// and invoking the registered handler is the only way to exercise the real
+// command bodies without a keybinding runtime.
+const commands = vi.hoisted(() => new Map<string, () => unknown>())
+
 vi.mock('../../keybindings/useKeybindings', () => ({
   useKeybindings: vi.fn(),
-  registerCommand: vi.fn(),
+  registerCommand: vi.fn((id: string, fn: () => unknown) => { commands.set(id, fn) }),
   setContext: vi.fn(),
   executeCommand: vi.fn(),
 }))
 
-async function mountApp(): Promise<VueWrapper> {
+// The two host-pushed open channels, captured at onMounted.
+const bridge = {
+  onOpenEditorFile: undefined as ((p: Record<string, string>) => void) | undefined,
+  onOpenTarget: undefined as ((p: Record<string, string>) => void) | undefined,
+}
+
+let pickFileResult: { ok: boolean; path?: string } = { ok: false }
+
+beforeEach(() => {
+  saveCalls.length = 0
+  commands.clear()
+  bridge.onOpenEditorFile = undefined
+  bridge.onOpenTarget = undefined
+  pickFileResult = { ok: false }
+  Object.assign(window, {
+    agentTeam: {
+      onSwitchEditorSidebar: vi.fn(),
+      onOpenEditorFile: (cb: (p: Record<string, string>) => void) => { bridge.onOpenEditorFile = cb },
+      onOpenEditorDiff: vi.fn(),
+      onOpenEditorBranchDiff: vi.fn(),
+      pickFile: vi.fn(async () => pickFileResult),
+      openEditorWindow: vi.fn(async () => undefined),
+    },
+    nav: {
+      onOpenTarget: (cb: (p: Record<string, string>) => void) => {
+        bridge.onOpenTarget = cb
+        return () => {}
+      },
+    },
+  })
+})
+
+/** Mount the window on `/ws` (plus any extra entry-query params). */
+async function mountApp(extraQuery = ''): Promise<VueWrapper> {
+  window.history.replaceState({}, '', `/?window=editor&workspace_path=${WS}${extraQuery}`)
   const wrapper = mount(EditorWindowApp, { global: { plugins: [i18n] } })
   await flushPromises()
   return wrapper
 }
 
-// The harness has no ?workspace_path=, so the window workspace is '' and any
-// tab with a wsPath of its own counts as external.
-async function open(wrapper: VueWrapper, filepath: string, wsPath?: string): Promise<void> {
-  wrapper.findComponent({ name: 'ExplorerPane' }).vm.$emit('open-file', { filepath, wsPath })
+/** Open a file through the `editor:openFile` IPC channel — the production path
+ *  used by every host-side "open this file in the mini-IDE" request. */
+async function openViaIpc(filepath: string, fileWs?: string, extra: Record<string, string> = {}): Promise<void> {
+  bridge.onOpenEditorFile?.({ filepath, ...(fileWs ? { file_ws: fileWs } : {}), ...extra })
   await flushPromises()
 }
 
@@ -97,8 +168,8 @@ function panes(wrapper: VueWrapper) {
 describe('EditorWindowApp – files outside the workspace', () => {
   it('opens same-named files from two roots as two independent tabs', async () => {
     const wrapper = await mountApp()
-    await open(wrapper, 'notes.txt')
-    await open(wrapper, 'notes.txt', '/ext/dir')
+    await openViaIpc('notes.txt')
+    await openViaIpc('notes.txt', '/ext/dir')
 
     const tabs = wrapper.findAll('.ide-tab')
     expect(tabs).toHaveLength(2)
@@ -108,18 +179,18 @@ describe('EditorWindowApp – files outside the workspace', () => {
 
   it('reuses the tab when the same external file is opened again', async () => {
     const wrapper = await mountApp()
-    await open(wrapper, 'notes.txt', '/ext/dir')
-    await open(wrapper, 'notes.txt', '/ext/dir')
+    await openViaIpc('notes.txt', '/ext/dir')
+    await openViaIpc('notes.txt', '/ext/dir')
     expect(wrapper.findAll('.ide-tab')).toHaveLength(1)
   })
 
   it('gives each pane its own tab workspace, so saves target the right root', async () => {
     const wrapper = await mountApp()
-    await open(wrapper, 'notes.txt')
-    await open(wrapper, 'notes.txt', '/ext/dir')
+    await openViaIpc('notes.txt')
+    await openViaIpc('notes.txt', '/ext/dir')
 
     const [inside, outside] = panes(wrapper)
-    expect(inside.props('workspacePath')).toBe('')
+    expect(inside.props('workspacePath')).toBe(WS)
     expect(inside.props('relPath')).toBe('notes.txt')
     // The external pane reads and writes through its own parent directory —
     // the backend's root check passes and the file resolves to /ext/dir/notes.txt.
@@ -129,8 +200,8 @@ describe('EditorWindowApp – files outside the workspace', () => {
 
   it('shows the absolute path in the tab tooltip for an external file only', async () => {
     const wrapper = await mountApp()
-    await open(wrapper, 'docs/notes.txt')
-    await open(wrapper, 'notes.txt', '/ext/dir')
+    await openViaIpc('docs/notes.txt')
+    await openViaIpc('notes.txt', '/ext/dir')
 
     const tabs = wrapper.findAll('.ide-tab')
     expect(tabs[0].attributes('title')).toBe('docs/notes.txt')
@@ -139,8 +210,8 @@ describe('EditorWindowApp – files outside the workspace', () => {
 
   it('does not repoint an external tab when the explorer renames a same-named file', async () => {
     const wrapper = await mountApp()
-    await open(wrapper, 'notes.txt')
-    await open(wrapper, 'notes.txt', '/ext/dir')
+    await openViaIpc('notes.txt')
+    await openViaIpc('notes.txt', '/ext/dir')
 
     wrapper
       .findComponent({ name: 'ExplorerPane' })
@@ -157,8 +228,8 @@ describe('EditorWindowApp – files outside the workspace', () => {
 
   it('keeps per-tab view mode independent for same-named files', async () => {
     const wrapper = await mountApp()
-    await open(wrapper, 'notes.md')
-    await open(wrapper, 'notes.md', '/ext/dir')
+    await openViaIpc('notes.md')
+    await openViaIpc('notes.md', '/ext/dir')
 
     // The external tab is active; toggling preview must not flip the other one.
     await wrapper.find('.ide-tab-act--preview-toggle').trigger('click')
@@ -166,5 +237,188 @@ describe('EditorWindowApp – files outside the workspace', () => {
     expect(preview).toHaveLength(1)
     expect(preview[0].props('workspacePath')).toBe('/ext/dir')
     expect(panes(wrapper)).toHaveLength(1)
+  })
+})
+
+// normWs() folds a root that IS the window's workspace back to `undefined`.
+// Without it, a host that helpfully stamps `file_ws` on every open (it knows
+// the file's directory, not whether it is "external") would key the same file
+// under two different tab keys and open it twice.
+describe('EditorWindowApp – normWs folding', () => {
+  it('folds a file_ws equal to the window workspace into the plain workspace tab', async () => {
+    const wrapper = await mountApp()
+    await openViaIpc('notes.txt', WS)
+    await openViaIpc('notes.txt')
+
+    expect(wrapper.findAll('.ide-tab')).toHaveLength(1)
+    const [pane] = panes(wrapper)
+    expect(pane.props('workspacePath')).toBe(WS)
+    // Folded, so it is an in-workspace tab: relative tooltip, no absolute path.
+    expect(wrapper.findAll('.ide-tab')[0].attributes('title')).toBe('notes.txt')
+  })
+
+  it('folds a trailing-slash form of the window workspace too', async () => {
+    const wrapper = await mountApp()
+    await openViaIpc('notes.txt')
+    await openViaIpc('notes.txt', `${WS}/`)
+
+    expect(wrapper.findAll('.ide-tab')).toHaveLength(1)
+    expect(panes(wrapper)).toHaveLength(1)
+  })
+
+  it("keeps '/' as a root of its own instead of folding it into the workspace", async () => {
+    // Regression: `'/'.replace(/\/+$/, '')` is '' — a falsy root that used to
+    // fold, so /notes.txt opened as <workspace>/notes.txt (wrong file, or none).
+    const wrapper = await mountApp()
+    await openViaIpc('notes.txt', '/')
+
+    const [pane] = panes(wrapper)
+    expect(pane.props('workspacePath')).toBe('/')
+    expect(wrapper.findAll('.ide-tab')[0].attributes('title')).toBe('/notes.txt')
+  })
+
+  it("keeps a '/'-rooted file distinct from the same name in the workspace", async () => {
+    const wrapper = await mountApp()
+    await openViaIpc('notes.txt')
+    await openViaIpc('notes.txt', '/')
+
+    expect(wrapper.findAll('.ide-tab')).toHaveLength(2)
+    expect(panes(wrapper).map((p) => p.props('workspacePath'))).toEqual([WS, '/'])
+  })
+})
+
+// The four production entry points that can carry a root. ExplorerPane's
+// `open-file` emit is not one of them (its payload has no wsPath at all).
+describe('EditorWindowApp – real open entry points carry file_ws', () => {
+  it('onOpenEditorFile (IPC) opens an out-of-workspace file against file_ws', async () => {
+    const wrapper = await mountApp()
+    expect(bridge.onOpenEditorFile).toBeTypeOf('function')
+    await openViaIpc('notes.txt', '/ext/dir', { name: 'notes.txt', line: '7' })
+
+    const [pane] = panes(wrapper)
+    expect(pane.props('workspacePath')).toBe('/ext/dir')
+    expect(pane.props('relPath')).toBe('notes.txt')
+  })
+
+  it('applyOpenTarget (nav bridge) opens an out-of-workspace file against file_ws', async () => {
+    const wrapper = await mountApp()
+    expect(bridge.onOpenTarget).toBeTypeOf('function')
+    bridge.onOpenTarget?.({ filepath: 'notes.txt', file_ws: '/ext/dir' })
+    await flushPromises()
+
+    const [pane] = panes(wrapper)
+    expect(pane.props('workspacePath')).toBe('/ext/dir')
+    expect(wrapper.findAll('.ide-tab')[0].attributes('title')).toBe('/ext/dir/notes.txt')
+  })
+
+  it('applyOpenTarget folds a file_ws that equals the window workspace', async () => {
+    const wrapper = await mountApp()
+    await openViaIpc('notes.txt')
+    bridge.onOpenTarget?.({ filepath: 'notes.txt', file_ws: WS })
+    await flushPromises()
+
+    expect(wrapper.findAll('.ide-tab')).toHaveLength(1)
+  })
+
+  it('⌘O keeps an in-workspace pick relative to the window workspace', async () => {
+    const wrapper = await mountApp()
+    pickFileResult = { ok: true, path: `${WS}/docs/notes.txt` }
+    await commands.get('workbench.action.openFile')!()
+    await flushPromises()
+
+    const [pane] = panes(wrapper)
+    expect(pane.props('workspacePath')).toBe(WS)
+    expect(pane.props('relPath')).toBe('docs/notes.txt')
+    expect(wrapper.findAll('.ide-tab')[0].attributes('title')).toBe('docs/notes.txt')
+  })
+
+  it('⌘O gives an out-of-workspace pick its own parent directory as root', async () => {
+    const wrapper = await mountApp()
+    pickFileResult = { ok: true, path: '/ext/dir/notes.txt' }
+    await commands.get('workbench.action.openFile')!()
+    await flushPromises()
+
+    const [pane] = panes(wrapper)
+    expect(pane.props('workspacePath')).toBe('/ext/dir')
+    expect(pane.props('relPath')).toBe('notes.txt')
+  })
+
+  it("⌘O gives a filesystem-root pick '/' as its root", async () => {
+    const wrapper = await mountApp()
+    pickFileResult = { ok: true, path: '/notes.txt' }
+    await commands.get('workbench.action.openFile')!()
+    await flushPromises()
+
+    const [pane] = panes(wrapper)
+    expect(pane.props('workspacePath')).toBe('/')
+    expect(pane.props('relPath')).toBe('notes.txt')
+  })
+
+  it('⌘O opens nothing when the picker is cancelled', async () => {
+    const wrapper = await mountApp()
+    pickFileResult = { ok: false }
+    await commands.get('workbench.action.openFile')!()
+    await flushPromises()
+
+    expect(panes(wrapper)).toHaveLength(0)
+  })
+
+  it('the entry query opens the initial file against its file_ws', async () => {
+    // Cold start: Electron appends ?workspace_path=…&filepath=…&file_ws=… when
+    // the window is created for an out-of-workspace file.
+    const wrapper = await mountApp('&filepath=notes.txt&file_ws=/ext/dir&name=notes.txt')
+
+    const [pane] = panes(wrapper)
+    expect(pane.props('workspacePath')).toBe('/ext/dir')
+    expect(pane.props('relPath')).toBe('notes.txt')
+    expect(wrapper.findAll('.ide-tab')[0].attributes('title')).toBe('/ext/dir/notes.txt')
+  })
+
+  it('the entry query without file_ws stays on the window workspace', async () => {
+    const wrapper = await mountApp('&filepath=docs/notes.txt')
+
+    const [pane] = panes(wrapper)
+    expect(pane.props('workspacePath')).toBe(WS)
+    expect(wrapper.findAll('.ide-tab')[0].attributes('title')).toBe('docs/notes.txt')
+  })
+
+  it('an entry-query file_ws equal to the workspace does not open a second tab', async () => {
+    const wrapper = await mountApp(`&filepath=notes.txt&file_ws=${WS}`)
+    await openViaIpc('notes.txt')
+
+    expect(wrapper.findAll('.ide-tab')).toHaveLength(1)
+  })
+})
+
+describe('EditorWindowApp – saveAll', () => {
+  it('saves each dirty tab through its own root', async () => {
+    const wrapper = await mountApp()
+    await openViaIpc('notes.txt')
+    await openViaIpc('notes.txt', '/ext/dir')
+
+    // Both panes report unsaved changes (EditorPane's `dirty` emit).
+    for (const p of panes(wrapper)) p.vm.$emit('dirty', true)
+    await flushPromises()
+
+    await commands.get('workbench.action.saveAll')!()
+    await flushPromises()
+
+    // The external tab must save against /ext/dir — saving it through the
+    // window workspace would silently overwrite /ws/notes.txt instead.
+    expect(saveCalls).toContainEqual({ workspacePath: '/ext/dir', relPath: 'notes.txt' })
+    expect(saveCalls).toContainEqual({ workspacePath: WS, relPath: 'notes.txt' })
+    expect(saveCalls).toHaveLength(2)
+  })
+
+  it('does not save a clean external tab', async () => {
+    const wrapper = await mountApp()
+    await openViaIpc('notes.txt', '/ext/dir')
+    panes(wrapper)[0].vm.$emit('dirty', false)
+    await flushPromises()
+
+    await commands.get('workbench.action.saveAll')!()
+    await flushPromises()
+
+    expect(saveCalls).toHaveLength(0)
   })
 })
