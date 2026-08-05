@@ -128,7 +128,7 @@ async function removeItem(item: RecentWorkspace, ev: Event): Promise<void> {
   <div class="welcome-overlay">
     <div class="welcome-card">
       <header class="w-head">
-        <h1>Navide (Agent-Team)</h1>
+        <h1>Navide</h1>
         <p class="tagline">{{ $t('label.tagline') }}</p>
       </header>
 

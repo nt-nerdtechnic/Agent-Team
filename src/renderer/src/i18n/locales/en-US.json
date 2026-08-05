@@ -412,7 +412,7 @@
     "back": "Back",
     "next": "Next",
     "skip-for-now": "Skip for now",
-    "open-app": "Open Navide (Agent-Team)",
+    "open-app": "Open Navide",
     "download-model": "Download {name}",
     "start-ollama": "Start Ollama service",
     "kill-all-agents": "Kill all agents",
