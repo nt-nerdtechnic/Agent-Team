@@ -60,27 +60,51 @@ const size = buf.length
 
 let yml = readFileSync(ymlPath, 'utf8')
 
-// The blanket rewrite below only holds while latest-mac.yml lists the zip and
-// nothing else: two sha512 lines (files[0] + the identical top-level one) and
-// one files[0].size. If the mac target ever publishes more artifacts, every
-// entry would be stamped with the zip's hash — bail out instead of shipping a
-// broken feed.
-const sha512Count = (yml.match(/^\s*sha512: /gm) ?? []).length
-const sizeCount = (yml.match(/^\s*size: /gm) ?? []).length
-if (sha512Count !== 2 || sizeCount !== 1) {
+// Parse and patch latest-mac.yml specifically for zipName.
+const lines = yml.split('\n')
+let inTargetFileBlock = false
+let updatedFileSha512 = false
+let updatedFileSize = false
+let updatedTopLevelSha512 = false
+let isTopLevelPathTarget = false
+
+for (let i = 0; i < lines.length; i++) {
+  const line = lines[i]
+
+  if (/^path:\s*/.test(line)) {
+    isTopLevelPathTarget = line.includes(zipName)
+  }
+  if (/^sha512:\s*/.test(line) && isTopLevelPathTarget) {
+    lines[i] = `sha512: ${sha512}`
+    updatedTopLevelSha512 = true
+  }
+
+  if (/^\s*-\s*url:\s*/.test(line)) {
+    inTargetFileBlock = line.includes(zipName)
+  } else if (/^\s*-\s*/.test(line) || /^[a-zA-Z]/.test(line)) {
+    inTargetFileBlock = false
+  }
+
+  if (inTargetFileBlock) {
+    if (/^\s*sha512:\s*/.test(line)) {
+      const indent = line.match(/^(\s*)/)[1]
+      lines[i] = `${indent}sha512: ${sha512}`
+      updatedFileSha512 = true
+    } else if (/^\s*size:\s*/.test(line)) {
+      const indent = line.match(/^(\s*)/)[1]
+      lines[i] = `${indent}size: ${size}`
+      updatedFileSize = true
+    }
+  }
+}
+
+if (!updatedFileSha512 || !updatedFileSize || !updatedTopLevelSha512) {
   die(
-    `latest-mac.yml no longer lists the zip alone: found ${sha512Count} sha512 and ${sizeCount} size fields (expected 2 and 1).\n` +
-      `  This script rewrites every sha512/size in the file, so it would give all entries the zip's hash and size\n` +
-      `  and publish an update feed that fails integrity checks for the other artifacts.\n` +
-      `  Fix this script to patch the zip's entry specifically (match it by url) before releasing again.`,
+    `failed to patch latest-mac.yml for ${zipName} (fileSha512: ${updatedFileSha512}, fileSize: ${updatedFileSize}, topSha512: ${updatedTopLevelSha512})`,
   )
 }
 
-// latest-mac.yml lists only the zip: one indented files[].sha512 + the
-// top-level sha512 (identical), and one files[].size. Rewrite all of them.
-yml = yml.replace(/^(\s*)sha512: .*$/gm, `$1sha512: ${sha512}`)
-yml = yml.replace(/^(\s*)size: .*$/gm, `$1size: ${size}`)
-writeFileSync(ymlPath, yml)
+writeFileSync(ymlPath, lines.join('\n'))
 
 console.log(`fix-mac-update-zip: updated ${ymlPath}`)
 console.log(`  size:   ${size}`)
