@@ -71,9 +71,16 @@ function requirementDep(binary: string): OnboardDep | undefined {
  * finished step drops off the front and `nextStep` becomes the following one
  * without any bookkeeping.
  */
-const chain = computed<OnboardDep[]>(() =>
-  dep.value ? orderInstalls([dep.value], deps.value) : []
-)
+const chain = computed<OnboardDep[]>(() => {
+  if (!dep.value) return []
+  // An install can report a prerequisite the probe did not know about. Feed
+  // those in too, so a late discovery joins the chain instead of falling
+  // between the chain and the manual list.
+  const late = blockers.value
+    .map((name) => requirementDep(name))
+    .filter((d): d is OnboardDep => !!d && d.status !== 'ok')
+  return orderInstalls([...late, dep.value], deps.value)
+})
 const nextStep = computed<OnboardDep | undefined>(() => chain.value[0])
 /** Position of the pending step in the chain, for "2 of 3" style labels. */
 const chainTotal = computed(() => chain.value.length)
@@ -116,7 +123,19 @@ const requirementRows = computed<{ name: string; ok: boolean }[]>(() => {
   }
   return rows
 })
-const missingRequirements = computed(() => requirementRows.value.filter((r) => !r.ok).map((r) => r.name))
+/**
+ * Unmet prerequisites no registry dep provides (`curl`). Everything the app can
+ * install itself appears in the ordered chain instead, so the two lists never
+ * describe the same thing twice.
+ */
+const manualRequirements = computed(() => {
+  const inChain = new Set(chain.value.map((d) => d.id))
+  return requirementRows.value.filter((r) => {
+    if (r.ok) return false
+    const provider = requirementDep(r.name)
+    return !provider || !inChain.has(provider.id)
+  })
+})
 
 /** Step the user last navigated to; the derived one below can overrule it. */
 const requestedStep = ref<Step>('check')
@@ -148,6 +167,16 @@ const advancing = ref(false)
  * Cleared when the user starts a run, so Retry genuinely retries.
  */
 const attempted = ref(new Set<string>())
+/**
+ * The link the last result belongs to. In a chain that is often a prerequisite
+ * rather than the CLI the dialog is titled after, and messages about it must
+ * name what was actually installed.
+ */
+const lastAttemptedId = ref('')
+const lastAttempted = computed<OnboardDep | undefined>(
+  () => deps.value.find((d) => d.id === lastAttemptedId.value)
+)
+const lastAttemptedLabel = computed(() => lastAttempted.value?.label || label.value)
 
 /** Install one link of the chain and, when it lands cleanly, the next. */
 async function installStep(target: OnboardDep | undefined): Promise<void> {
@@ -157,6 +186,7 @@ async function installStep(target: OnboardDep | undefined): Promise<void> {
     return
   }
   attempted.value.add(target.id)
+  lastAttemptedId.value = target.id
   result.value = null
   terminalError.value = ''
   requestedStep.value = 'install'
@@ -179,6 +209,14 @@ async function installStep(target: OnboardDep | undefined): Promise<void> {
   // An external terminal has only been HANDED the command; the watcher resumes
   // the chain once the tool actually appears (see the watchOutcome watcher).
   if (r.needs_terminal) return
+  // "Installed" and "detectable" are not the same thing. Carrying on would run
+  // the next command against a machine that still cannot see this one — which
+  // is exactly the exit-127 failure the chain exists to avoid. Stop instead and
+  // let the 'installed but not detected' notice explain it.
+  if (deps.value.find((d) => d.id === target.id)?.status !== 'ok') {
+    advancing.value = false
+    return
+  }
   if (advancing.value && nextStep.value) await installStep(nextStep.value)
 }
 
@@ -196,11 +234,6 @@ watch(watchOutcome, (outcome) => {
   if (!nextStep.value) return
   void installStep(nextStep.value)
 })
-
-/** Install a bootstrap tool (Homebrew, Node for npm) without leaving the flow. */
-async function installRequirement(binary: string): Promise<void> {
-  await installStep(requirementDep(binary))
-}
 
 async function toggleDontAsk(): Promise<void> {
   const ok = await onboarding.dismissInstallPrompt(props.depId, dontAsk.value)
@@ -275,31 +308,18 @@ function relaunch(): void {
             <p class="ci-note">{{ $t('cli-install.chain-desc', { label, count: chainTotal }) }}</p>
           </section>
 
-          <!-- Prerequisites, BEFORE anything is attempted -------------------->
-          <section v-if="requirementRows.length" class="ci-card" :class="{ blocked: missingRequirements.length }">
+          <!-- Only prerequisites this app cannot install for the user. Anything
+               it can install is a numbered link in the chain above, so the two
+               never state the same requirement twice. -->
+          <section v-if="manualRequirements.length" class="ci-card blocked">
             <div class="ci-card-label">{{ $t('cli-install.requirements-label') }}</div>
             <ul class="ci-reqs">
-              <li v-for="req in requirementRows" :key="req.name" :class="{ missing: !req.ok }">
-                <span class="ci-req-mark">{{ req.ok ? '✓' : '!' }}</span>
+              <li v-for="req in manualRequirements" :key="req.name" class="missing">
+                <span class="ci-req-mark">!</span>
                 <code>{{ req.name }}</code>
-                <span class="ci-note">
-                  {{ req.ok ? $t('cli-install.requirement-ok') : $t('cli-install.requirement-missing') }}
-                </span>
-                <button
-                  v-if="!req.ok && requirementDep(req.name)"
-                  class="ci-btn primary small ci-install-requirement"
-                  :disabled="!!installing"
-                  @click="installRequirement(req.name)"
-                >
-                  {{ installing === requirementDep(req.name)!.id
-                    ? $t('cli-install.installing', { seconds: installElapsedSec })
-                    : $t('cli-install.install-requirement', { label: requirementDep(req.name)!.label }) }}
-                </button>
+                <span class="ci-note">{{ $t('cli-install.requirement-manual', { name: req.name }) }}</span>
               </li>
             </ul>
-            <p v-if="missingRequirements.length" class="ci-note">
-              {{ $t('cli-install.blocked-desc', { label }) }}
-            </p>
           </section>
 
           <!-- What will run, verbatim ---------------------------------------->
@@ -365,8 +385,13 @@ function relaunch(): void {
           <p v-if="watchOutcome === 'timeout' && phase !== 'waiting'" class="ci-warn">
             {{ $t('cli-install.waiting-timeout', { label }) }}
           </p>
-          <p v-if="result?.ok && !result.needs_terminal && dep?.status !== 'ok'" class="ci-warn">
-            {{ $t('cli-install.installed-not-detected', { label }) }}
+          <!-- Names the link that stayed undetected, which in a chain is often
+               a prerequisite rather than the CLI this dialog is titled after. -->
+          <p
+            v-if="result?.ok && !result.needs_terminal && lastAttempted && lastAttempted.status !== 'ok'"
+            class="ci-warn"
+          >
+            {{ $t('cli-install.installed-not-detected', { label: lastAttemptedLabel }) }}
           </p>
         </template>
 

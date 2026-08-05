@@ -86,23 +86,24 @@ describe('CliInstallDialog', () => {
     expect(wrapper.text()).toContain(i18n.global.t('cli-install.check-title', { label: 'qwen' }))
   })
 
-  it('lists prerequisites and their state before anything is attempted', async () => {
-    // The old flow only revealed "brew is missing" after the install failed.
+  it('lists only prerequisites it cannot install for the user', async () => {
+    // Anything installable is a numbered link in the chain instead, so the two
+    // lists never state the same requirement twice. curl has no provider.
     const mock = createMockBackend('connected')
     mock.setResponse('onboarding.status', status({
       deps: [
-        dep({ id: 'qwen', requirements: [{ name: 'npm', ok: false }, { name: 'curl', ok: true }] }),
+        dep({ id: 'qwen', requirements: [{ name: 'npm', ok: false }, { name: 'curl', ok: false }] }),
         dep({ id: 'node', group: 'foundation', label: 'Node.js' }),
       ],
     }))
     wrapper = await open(mock)
 
     const rows = wrapper.findAll('.ci-reqs li')
-    expect(rows).toHaveLength(2)
-    expect(rows[0].classes()).toContain('missing')
-    expect(rows[1].classes()).not.toContain('missing')
-    // npm comes from Node, so it can be installed without leaving the wizard.
-    expect(wrapper.find('.ci-install-requirement').exists()).toBe(true)
+    expect(rows).toHaveLength(1)
+    expect(rows[0].text()).toContain('curl')
+    // npm comes from Node, which appears in the ordered chain.
+    expect(wrapper.findAll('.ci-chain li').map((li) => li.find('.ci-chain-label').text()))
+      .toEqual(['Node.js', 'qwen'])
     expect(mock.sent.filter((s) => s.type === 'onboarding.install')).toHaveLength(0)
   })
 
@@ -127,7 +128,9 @@ describe('CliInstallDialog', () => {
     expect(mock.sent.filter((s) => s.type === 'onboarding.install')).toHaveLength(0)
   })
 
-  it('names the missing prerequisite and offers to install it', async () => {
+  it('names a prerequisite the probe missed and stops there', async () => {
+    // The probe said nothing was needed, but the install came back blocked.
+    // The user must still be told which tool is missing.
     const mock = createMockBackend('connected')
     mock.setResponse('onboarding.status', status())
     mock.setResponse('onboarding.install', {
@@ -138,25 +141,11 @@ describe('CliInstallDialog', () => {
     await wrapper.find('.ci-install').trigger('click')
     await flushPromises()
 
-    expect(wrapper.text()).toContain('brew')
-    expect(wrapper.find('.ci-install-requirement').exists()).toBe(true)
-  })
-
-  it('installs the prerequisite dep, not the blocked one', async () => {
-    const mock = createMockBackend('connected')
-    mock.setResponse('onboarding.status', status())
-    mock.setResponse('onboarding.install', {
-      ok: false, error: 'brew is required', missing_requirements: ['brew'],
-    })
-    wrapper = await open(mock)
-    await wrapper.find('.ci-install').trigger('click')
-    await flushPromises()
-
-    await wrapper.find('.ci-install-requirement').trigger('click')
-    await flushPromises()
-
-    const ids = mock.sent.filter((s) => s.type === 'onboarding.install').map((s) => s.payload.dep_id)
-    expect(ids).toEqual(['qwen', 'homebrew'])
+    // The late discovery joins the chain rather than vanishing between lists.
+    expect(wrapper.findAll('.ci-chain li').map((li) => li.find('.ci-chain-label').text()))
+      .toEqual(['homebrew', 'qwen'])
+    // Blocked belongs back at the check step — the environment is the problem.
+    expect(wrapper.findAll('.ci-steps li')[0].classes()).toContain('active')
   })
 
   it('reports a terminal that never opened instead of claiming success', async () => {
@@ -298,5 +287,181 @@ describe('CliInstallDialog', () => {
     wrapper = await open(mock)
     expect(wrapper.text()).toContain(i18n.global.t('cli-install.no-install-command', { label: 'qwen' }))
     expect(wrapper.find('.ci-install').exists()).toBe(false)
+  })
+})
+
+/**
+ * A machine that has never installed any CLI: picking one means Homebrew →
+ * Node → that CLI. This is the case the dialog used to reveal one failure at a
+ * time, so each step of the chain is pinned down here.
+ */
+describe('CliInstallDialog — dependency chain on a bare machine', () => {
+  let wrapper: VueWrapper | undefined
+
+  afterEach(() => {
+    wrapper?.unmount()
+    wrapper = undefined
+  })
+
+  /** homebrew (curl ok) → node (needs brew) → qwen (needs npm). */
+  function bare(over: { installed?: string[] } = {}): OnboardStatus {
+    const installed = new Set(over.installed ?? [])
+    const mark = (id: string) => (installed.has(id) ? 'ok' : 'missing') as OnboardDep['status']
+    return status({
+      deps: [
+        dep({
+          id: 'qwen', label: 'Qwen Code', status: mark('qwen'),
+          requirements: [{ name: 'npm', ok: installed.has('node') }],
+        }),
+        dep({
+          id: 'node', label: 'Node.js', group: 'foundation', optional: false,
+          needs_terminal: false, status: mark('node'),
+          requirements: [{ name: 'brew', ok: installed.has('homebrew') }],
+        }),
+        dep({
+          id: 'homebrew', label: 'Homebrew', group: 'foundation', optional: false,
+          status: mark('homebrew'), requirements: [{ name: 'curl', ok: true }],
+        }),
+      ],
+    })
+  }
+
+  async function open(
+    mock: ReturnType<typeof createMockBackend>,
+    props: Record<string, unknown> = {},
+  ): Promise<VueWrapper> {
+    const w = mount(CliInstallDialog, {
+      props: { backend: mock.backend, depId: 'qwen', ...props },
+      global: { plugins: [i18n] },
+    })
+    await flushPromises()
+    return w
+  }
+
+  const installedIds = (mock: ReturnType<typeof createMockBackend>): string[] =>
+    mock.sent.filter((s) => s.type === 'onboarding.install').map((s) => s.payload.dep_id as string)
+
+  it('shows the whole chain in order before anything runs', async () => {
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', bare())
+    wrapper = await open(mock)
+
+    const links = wrapper.findAll('.ci-chain li')
+    expect(links.map((li) => li.find('.ci-chain-label').text())).toEqual(['Homebrew', 'Node.js', 'Qwen Code'])
+    expect(links[0].classes()).toContain('next')
+    expect(installedIds(mock)).toEqual([])
+  })
+
+  it('names the prerequisite on the button rather than the CLI that was asked for', async () => {
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', bare())
+    wrapper = await open(mock)
+    expect(wrapper.find('.ci-install').text()).toBe(
+      i18n.global.t('cli-install.install-step', { label: 'Homebrew', total: 3 })
+    )
+  })
+
+  it('installs the first link, not the CLI', async () => {
+    stubTerminal({ ok: true })
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', bare())
+    mock.setResponse('onboarding.install', { ok: true, needs_terminal: true, command: 'install brew' })
+    wrapper = await open(mock)
+
+    await wrapper.find('.ci-install').trigger('click')
+    await flushPromises()
+
+    expect(installedIds(mock)).toEqual(['homebrew'])
+  })
+
+  /**
+   * Make the machine actually change: every dep installed through the mock
+   * becomes detectable on the next status probe. Without this the fixture would
+   * describe a machine where installs never take effect, which is a different
+   * case (covered separately below).
+   */
+  function withInstallsTakingEffect(
+    mock: ReturnType<typeof createMockBackend>,
+    initial: string[],
+  ): void {
+    const installed = new Set(initial)
+    const send = mock.backend.send.bind(mock.backend)
+    mock.backend.send = ((type: string, payload: Record<string, unknown>, timeoutMs?: number) => {
+      if (type === 'onboarding.status') {
+        return Promise.resolve({ ok: true, payload: bare({ installed: [...installed] }) })
+      }
+      if (type === 'onboarding.install') installed.add(String(payload.dep_id))
+      return send(type, payload, timeoutMs)
+    }) as typeof mock.backend.send
+  }
+
+  it('continues into the next link once an inline step lands', async () => {
+    // Node installs inline; with Homebrew already present the chain should run
+    // straight through to the CLI without a second press.
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', bare({ installed: ['homebrew'] }))
+    mock.setResponse('onboarding.install', { ok: true, output: 'done' })
+    withInstallsTakingEffect(mock, ['homebrew'])
+    wrapper = await open(mock)
+
+    await wrapper.find('.ci-install').trigger('click')
+    await flushPromises()
+
+    expect(installedIds(mock)).toEqual(['node', 'qwen'])
+  })
+
+  it('walks the full chain from nothing installed', async () => {
+    // The headline case: one press on a bare machine reaches the CLI.
+    stubTerminal({ ok: true })
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', bare())
+    mock.setResponse('onboarding.install', { ok: true, output: 'done' })
+    withInstallsTakingEffect(mock, [])
+    wrapper = await open(mock)
+
+    await wrapper.find('.ci-install').trigger('click')
+    await flushPromises()
+
+    expect(installedIds(mock)).toEqual(['homebrew', 'node', 'qwen'])
+  })
+
+  it('stops the chain where a step fails', async () => {
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', bare({ installed: ['homebrew'] }))
+    mock.setResponse('onboarding.install', { ok: false, error: 'brew: no bottle' })
+    wrapper = await open(mock)
+
+    await wrapper.find('.ci-install').trigger('click')
+    await flushPromises()
+
+    expect(installedIds(mock)).toEqual(['node'])
+    expect(wrapper.find('.ci-error').text()).toContain('no bottle')
+  })
+
+  it('stops when a step reports success but stays undetected', async () => {
+    // "Installed" and "detectable" differ. Running the next command against a
+    // machine that still cannot see this one is the exit-127 failure the chain
+    // exists to prevent — and repeating the same link would recurse forever.
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', bare({ installed: ['homebrew'] }))
+    mock.setResponse('onboarding.install', { ok: true, output: 'installed' })
+    wrapper = await open(mock)
+
+    await wrapper.find('.ci-install').trigger('click')
+    await flushPromises()
+
+    expect(installedIds(mock)).toEqual(['node'])
+    expect(wrapper.text()).toContain(
+      i18n.global.t('cli-install.installed-not-detected', { label: 'Node.js' })
+    )
+  })
+
+  it('hides the chain when the CLI has no unmet prerequisites', async () => {
+    const mock = createMockBackend('connected')
+    mock.setResponse('onboarding.status', bare({ installed: ['homebrew', 'node'] }))
+    wrapper = await open(mock)
+
+    expect(wrapper.find('.ci-chain').exists()).toBe(false)
+    expect(wrapper.find('.ci-install').text()).toBe(i18n.global.t('cli-install.install'))
   })
 })
