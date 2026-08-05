@@ -205,9 +205,11 @@ function findTab(key: string): OpenFile | undefined {
 function absPathOf(f: { wsPath?: string; relPath: string }): string {
   return `${fileWs(f).replace(/\/+$/, '')}/${f.relPath}`
 }
-/** What to show the user (and the AI) for a tab: external files need their absolute path. */
-function tabDisplayPath(f: { wsPath?: string; relPath: string }): string {
-  return f.wsPath ? absPathOf(f) : f.relPath
+/** What to show the user (and the AI) for a tab: external files need their absolute
+ *  path. Non-file tabs carry a synthetic relPath (see OpenFile) that is not a path
+ *  at all, so they are shown as-is rather than glued onto a root. */
+function tabDisplayPath(f: { wsPath?: string; relPath: string; kind?: OpenFile['kind'] }): string {
+  return f.wsPath && (f.kind ?? 'file') === 'file' ? absPathOf(f) : f.relPath
 }
 
 const activeKey = ref('')
@@ -600,7 +602,10 @@ async function ctxCopyPath(key: string): Promise<void> {
 async function ctxCopyRelPath(key: string): Promise<void> {
   closeTabCtxMenu()
   const f = findTab(key)
-  if (f?.kind === 'file') await navigator.clipboard.writeText(f.relPath)
+  // An external tab's relPath is relative to its own root, so a bare copy would
+  // resolve against the workspace and name a different file: copy the path that
+  // actually round-trips.
+  if (f?.kind === 'file') await navigator.clipboard.writeText(tabDisplayPath(f))
 }
 async function ctxRevealInFinder(key: string): Promise<void> {
   closeTabCtxMenu()
@@ -821,7 +826,7 @@ registerCommand('workbench.action.copyFilePath', async () => {
 registerCommand('workbench.action.copyRelativeFilePath', async () => {
   const f = activeFile.value
   if (f?.kind !== 'file') return
-  await navigator.clipboard.writeText(f.relPath)
+  await navigator.clipboard.writeText(tabDisplayPath(f))
 })
 registerCommand('workbench.action.revealInExplorer', () => {
   const f = activeFile.value
@@ -1221,7 +1226,7 @@ watch(paletteQuery, () => { paletteIdx.value = 0 })
 registerCommand('workbench.action.showCommands', openPalette)
 
 // ── Quick Open (⌘P) ─────────────────────────────────────────────────────────
-type QoFileItem   = { qoKind: 'file';   name: string; relPath: string; key: string }
+type QoFileItem   = { qoKind: 'file';   name: string; relPath: string; wsPath?: string; key: string }
 type QoLineItem   = { qoKind: 'line';   line: number }
 type QoSymbolItem = { qoKind: 'symbol'; name: string; line: number; kind: string }
 type QoHeaderItem = { qoKind: 'header'; label: string }
@@ -1275,7 +1280,7 @@ const qoItems = computed((): QoItem[] => {
   const recentClosed = [...closedHistory].reverse().filter((r) => !openSet.has(tabKey(r))).slice(0, 20)
     .map((r) => ({ name: r.name, relPath: r.relPath, wsPath: r.wsPath, kind: 'file' as const, isDir: false }))
   const item = (f: { name: string; relPath: string; wsPath?: string }): QoFileItem =>
-    ({ qoKind: 'file', name: f.name, relPath: f.relPath, key: tabKey(f) })
+    ({ qoKind: 'file', name: f.name, relPath: f.relPath, wsPath: f.wsPath, key: tabKey(f) })
   if (!ql) {
     return [...files.map(item), ...recentClosed.slice(0, 8).map(item)]
   }
@@ -1912,7 +1917,7 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
         :workspace-path="workspacePath"
         @open-file="(p) => openFile({ filepath: p.filepath, line: p.line, wsPath: p.wsPath })"
         @fix-with-ai="(p) => {
-          const loc = `${p.diag.relPath}:${p.diag.line}${p.diag.col ? ':' + p.diag.col : ''}`
+          const loc = `${tabDisplayPath({ wsPath: normWs(p.diag.wsPath), relPath: p.diag.relPath })}:${p.diag.line}${p.diag.col ? ':' + p.diag.col : ''}`
           pasteToCli(`Fix this problem: ${p.diag.severity.toUpperCase()}: ${p.diag.message} at ${loc}${p.diag.source ? ' (' + p.diag.source + ')' : ''}`)
         }"
       />
@@ -2187,14 +2192,14 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
       <ul v-if="wsymItems.length" class="ide-palette-list">
         <li
           v-for="(s, i) in wsymItems"
-          :key="s.relPath + s.name + s.line"
+          :key="(s.wsPath ?? '') + s.relPath + s.name + s.line"
           class="ide-palette-item"
           :class="{ active: i === wsymIdx }"
           @mouseover="wsymIdx = i"
           @click="confirmWorkspaceSymbol"
         >
           <span class="ide-palette-label">{{ s.name }}</span>
-          <span class="ide-palette-key" style="opacity:.6; font-size:.85em">{{ s.kind }} · {{ s.relPath.split('/').pop() }}:{{ s.line }}</span>
+          <span class="ide-palette-key" style="opacity:.6; font-size:.85em">{{ s.kind }} · {{ s.wsPath ? tabDisplayPath({ wsPath: s.wsPath, relPath: s.relPath }) : s.relPath.split('/').pop() }}:{{ s.line }}</span>
         </li>
       </ul>
       <div v-else class="ide-palette-empty">{{ $t('label.no-symbols-found') }}</div>
@@ -2250,7 +2255,7 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
           >
             <template v-if="item.qoKind === 'file'">
               <span class="ide-palette-label">{{ item.name }}</span>
-              <span class="ide-palette-key" style="opacity:.6; font-size:.85em">{{ item.relPath }}</span>
+              <span class="ide-palette-key" style="opacity:.6; font-size:.85em">{{ tabDisplayPath(item) }}</span>
             </template>
             <template v-else-if="item.qoKind === 'line'">
               <span class="ide-palette-label">Go to line {{ item.line }}</span>
