@@ -1551,8 +1551,10 @@ def _slot_needs_login(agent_key: str, slot_id: str) -> bool:
     """True when restoring this slot leaves the CLI unable to authenticate, so
     the caller should start a sign-in right after the switch.
 
-    Two cases: the slot holds no secret at all (restore() then CLEARS the live
-    credentials — an empty slot signs the user out), or claude's snapshot sat
+    Three cases: the slot holds no secret at all (restore() then CLEARS the live
+    credentials — an empty slot signs the user out), claude's snapshot was wiped
+    in place by Claude Code (both tokens emptied after an ``invalid_grant``, so
+    it restores as a non-credential), or claude's snapshot sat
     parked long enough for its access token to expire. Nothing renews a parked
     slot — the CLI is the only refresher — so the expired token goes live and
     Claude Code renews it from the restored refresh token on its next run;
@@ -1560,6 +1562,7 @@ def _slot_needs_login(agent_key: str, slot_id: str) -> bool:
     A claude login with no OAuth block (long-lived token) carries nothing to
     judge, so it counts as usable. Blocking reads (Keychain) — thread it."""
     from . import app
+    from .credential_vault import _claude_credential_is_wiped
     from .usage_service import claude_token_expired, parse_claude_credentials
 
     try:
@@ -1570,6 +1573,10 @@ def _slot_needs_login(agent_key: str, slot_id: str) -> bool:
         return True
     if agent_key != "claude":
         return False
+    # A wiped blob parses as "no OAuth block to judge", which the expiry check
+    # below would pass as usable — catch it before that.
+    if _claude_credential_is_wiped(creds.secret):
+        return True
     oauth = parse_claude_credentials(creds.secret)
     return oauth is not None and claude_token_expired(oauth)
 

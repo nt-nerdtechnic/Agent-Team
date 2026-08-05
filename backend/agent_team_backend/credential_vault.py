@@ -576,9 +576,11 @@ class CredentialVault:
     def identity(self, agent_key: str, slot_id: str | None = None) -> dict:
         """Display-only identity for one account slot (``slot_id=None`` = the
         live state, i.e. the currently active account). ``signedIn`` reflects
-        whether an actual credential secret exists; claude's ``oauthAccount``
-        email is display-only (a long-lived-token login carries no
-        oauthAccount but is still signed in). Reads files — plus, for
+        whether an actual credential secret exists — a claude blob Claude Code
+        wiped in place carries none, so it does not count (see
+        ``_claude_credential_is_wiped``). claude's ``oauthAccount`` email is
+        display-only (a long-lived-token login carries no oauthAccount but is
+        still signed in). Reads files — plus, for
         claude on macOS, the Keychain — so call off the event loop.
         Returns ``{"email": str | None, "signedIn": bool}``; never raises."""
         try:
@@ -594,7 +596,11 @@ class CredentialVault:
                     if isinstance(base.account, dict) else None
                 )
                 email = email if isinstance(email, str) and email else None
-                return {"email": email, "signedIn": base.secret is not None}
+                signed_in = (
+                    base.secret is not None
+                    and not _claude_credential_is_wiped(base.secret)
+                )
+                return {"email": email, "signedIn": signed_in}
             if slot_id is None:
                 secret = _read_text(self._live_file(agent_key))
             else:

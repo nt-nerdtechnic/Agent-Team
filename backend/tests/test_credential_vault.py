@@ -1022,6 +1022,22 @@ def test_identity_claude_live_and_slot(tmp_path: Path) -> None:
     assert vault.identity("claude", "missing") == {"email": None, "signedIn": False}
 
 
+def test_identity_claude_wiped_credential_is_not_a_login(tmp_path: Path) -> None:
+    """A credential Claude Code emptied in place (``invalid_grant``) keeps its
+    claudeAiOauth wrapper but carries no token. Reporting it as signed in tells
+    the user an account works when nothing can authenticate with it. write_slot
+    refuses to create such a slot, but one written before that guard existed
+    still reads back, so the display side has to judge it too."""
+    vault = _file_vault(tmp_path)
+    _write(tmp_path / "home" / ".claude.json",
+           '{"oauthAccount": {"emailAddress": "live@x.com"}}')
+    _write(tmp_path / "home" / ".claude" / ".credentials.json", _WIPED)
+    _write(vault.slot_dir("claude", "slot1") / ".credentials.json", _WIPED)
+
+    assert vault.identity("claude") == {"email": "live@x.com", "signedIn": False}
+    assert vault.identity("claude", "slot1") == {"email": None, "signedIn": False}
+
+
 def test_mac_identity_claude_signed_in_reflects_secret(tmp_path: Path) -> None:
     """signedIn comes from the actual credential secret (Keychain item);
     the oauthAccount email is display-only. A long-lived-token login carries

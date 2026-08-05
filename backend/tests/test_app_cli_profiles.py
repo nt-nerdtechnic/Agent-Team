@@ -1342,6 +1342,32 @@ async def test_set_default_reports_needs_login_for_an_expired_snapshot(
     )["claudeAiOauth"]["accessToken"] == "dead"
 
 
+async def test_set_default_reports_needs_login_for_a_wiped_snapshot(
+    store: CliProfilesStore,
+    events: list[dict[str, Any]],
+    vault: FakeVault,
+) -> None:
+    """Claude Code empties both tokens in place when a refresh is rejected.
+    The blob still parses and its expiry is far in the future, so the expiry
+    check alone calls it usable — but restoring it leaves the CLI with no
+    credential at all, exactly like an empty slot. Offer the sign-in."""
+    profile = store.create(agent_key="claude", name="Work")
+    vault.slot_secrets[("claude", profile["id"])] = _claude_slot_secret(
+        "", "", 4_102_444_800_000
+    )
+    session = _session()
+
+    await app.handle_message(session, {
+        "id": "n4",
+        "type": "cli_profiles.set_default",
+        "payload": {"agent_key": "claude", "profile_id": profile["id"]},
+    })
+
+    sent = session.websocket.sent[0]  # type: ignore[attr-defined]
+    assert sent["ok"] is True
+    assert sent["payload"]["needsLogin"] is True
+
+
 async def test_set_default_reports_no_login_needed_for_a_usable_slot(
     store: CliProfilesStore,
     events: list[dict[str, Any]],
