@@ -34,6 +34,33 @@ export const WHATS_NEW_CHROME = {
 
 export const WHATS_NEW: WhatsNewEntry[] = [
   {
+    version: '0.1.77',
+    title: {
+      'zh-TW': '三方 Git 衝突解決面板、預設外部編輯器路由與 DebugModal 診斷視窗',
+      'en-US': '3-way Git conflict resolution pane, default external editor routing & DebugModal diagnostics',
+    },
+    highlights: [
+      {
+        'zh-TW':
+          '三方 Git 衝突視覺化解決與外掛相容：新增 ConflictPane 能直接讀取 Git Index 三方 Merge Stages，高亮標記衝突解決與即時切換，並完全對映給外掛與獨立編輯器視窗。',
+        'en-US':
+          '3-way Git conflict resolution & plugin compatibility: added ConflictPane with direct Git Index merge stages reading, highlight resolve actions, and full mapping to plugins and standalone windows.',
+      },
+      {
+        'zh-TW':
+          '預設外部編輯器與快速鍵操作提升：可選擇 VS Code / Cursor 等為預設外部編輯器並支援開啟專案資料夾；新增 Ctrl+Tab 面板切換與 ⌘⇧L 系統診斷工具 DebugModal。',
+        'en-US':
+          'Default external editor & keybindings overhaul: choose VS Code or Cursor as your default editor with Open Folder support; added Ctrl+Tab pane cycling and ⌘⇧L DebugModal diagnostics.',
+      },
+      {
+        'zh-TW':
+          'CLI 訊息傳遞擴充與自動退避防禦：補齊 Grok、Kimi、Pi、Qwen 的訊息轉發與 Copilot/OpenCode/Kilo 的 Plan MCP 自動掛載，並新增 CLI 停滯 (Stall) 退避與帳號切換快取保護。',
+        'en-US':
+          'Expanded CLI messaging & stall protection: added turn-text messaging for Grok, Kimi, Pi, Qwen and Plan MCP wiring for Copilot/OpenCode/Kilo, plus CLI stall backoff and parked account cache preservation.',
+      },
+    ],
+  },
+  {
     version: '0.1.76',
     title: {
       'zh-TW': 'Claude CLI 用量讀取優化、自動更新 Pipeline 與安穩關機保護',
