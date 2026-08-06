@@ -350,7 +350,9 @@ def test_parse_activity_turn_complete_carries_the_assistant_reply(
     assert completes[0].text == "done, handing over"
 
 
-def test_parse_activity_reply_survives_a_poll_boundary(fake_kimi_home: Path) -> None:
+def test_parse_activity_reply_survives_a_poll_boundary(
+    fake_kimi_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """content.part and the turn's close often land in different polls, so the
     text is persisted in seen_keys between them."""
     reader = KimiLogReader()
@@ -360,11 +362,11 @@ def test_parse_activity_reply_survives_a_poll_boundary(fake_kimi_home: Path) -> 
     import agent_team_backend.log_readers.kimi as kimi_mod
 
     # First poll: still mid-turn, nothing completed, text not delivered yet.
-    kimi_mod.time.time = lambda: 1_000.5  # type: ignore[method-assign]
+    monkeypatch.setattr(kimi_mod.time, "time", lambda: 1_000.5)
     assert [e for e in reader.parse_activity(wire, seen) if e.event_type == "turn_complete"] == []
 
     # Second poll after the idle window: the turn flushes with the earlier text.
-    kimi_mod.time.time = lambda: 1_100.0  # type: ignore[method-assign]
+    monkeypatch.setattr(kimi_mod.time, "time", lambda: 1_100.0)
     completes = [
         e for e in reader.parse_activity(wire, seen) if e.event_type == "turn_complete"
     ]

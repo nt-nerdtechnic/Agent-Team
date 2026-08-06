@@ -129,8 +129,6 @@ CURSOR_IDE_STATE_DB_REL = ("Library", "Application Support", "Cursor",
                            "User", "globalStorage", "state.vscdb")
 CURSOR_IDE_TOKEN_KEY = "cursorAuth/accessToken"
 CURSOR_USAGE_SUMMARY_URL = "https://cursor.com/api/usage-summary"
-GROK_INIT_TIMEOUT = 4.0
-GROK_BILLING_TIMEOUT = 3.0
 RESET_BOUNDARY_GRACE = 30.0
 DEFAULT_INTERVAL = 300.0
 MIN_INTERVAL = 60.0
@@ -154,6 +152,14 @@ from .usage_common import (  # noqa: E402,F401
 
 # R2: qwen's usage stack moved to its vendor module; re-exported so this
 # module's namespace (and its tests) keep working until the cleanup round.
+from .cli_vendors.grok import (  # noqa: E402,F401
+    GROK_BILLING_TIMEOUT,
+    GROK_INIT_TIMEOUT,
+    fetch_grok,
+    grok_billing_rpc,
+    normalize_grok,
+    read_grok_credentials,
+)
 from .cli_vendors.pi import (  # noqa: E402,F401
     PI_AGENT_DIR_ENV,
     PI_OPENROUTER_KEY_URL,
@@ -405,33 +411,6 @@ def read_kimi_credentials(home: Path, env: dict | None = None,
     return token if expires > now + 60 else None
 
 
-def read_grok_credentials(home: Path, env: dict | None = None) -> dict | None:
-    """``auth.json`` is a map keyed by scope URL. Prefer the OIDC entry
-    (``https://auth.x.ai::`` prefix, SuperGrok), fall back to a legacy
-    ``/sign-in`` scope. Returns {key, email, expires_at} or None."""
-    env = env or {}
-    grok_home = Path(env["GROK_HOME"]) if env.get("GROK_HOME") else home / ".grok"
-    try:
-        data = json.loads((grok_home / "auth.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    oidc, legacy = None, None
-    for scope, entry in data.items():
-        if not isinstance(entry, dict) or not entry.get("key"):
-            continue
-        if str(scope).startswith("https://auth.x.ai::"):
-            oidc = oidc or entry
-        elif "/sign-in" in str(scope):
-            legacy = legacy or entry
-    entry = oidc or legacy
-    if entry is None:
-        return None
-    return {"key": entry["key"], "email": entry.get("email"),
-            "expires_at": entry.get("expires_at")}
-
-
 def _kimi_used(detail: dict, limit):
     used = _num(detail.get("used"))
     if used is None:
@@ -467,24 +446,6 @@ def normalize_kimi(data: dict) -> tuple[list[dict], str | None]:
             if limit and used is not None:
                 windows.append(_window("session", "Rate limit (5h)",
                                        used / limit * 100, _kimi_resets(detail)))
-    return windows, None
-
-
-def normalize_grok(billing: dict) -> tuple[list[dict], str | None]:
-    """``x.ai/billing`` result: cent amounts wrapped as ``{"val": n}``."""
-    def val(node: Any) -> float | None:
-        if isinstance(node, dict):
-            return _num(node.get("val"))
-        return _num(node)
-
-    windows: list[dict] = []
-    limit = val((billing or {}).get("monthlyLimit"))
-    used = val(((billing or {}).get("usage") or {}).get("totalUsed"))
-    cycle = (billing or {}).get("billingCycle") or {}
-    resets = cycle.get("billingPeriodEnd")
-    if limit and used is not None:
-        windows.append(_window("monthly", "Monthly credits", used / limit * 100,
-                               resets if isinstance(resets, str) else None))
     return windows, None
 
 
@@ -576,79 +537,6 @@ async def fetch_kimi(home: Path, env: dict | None = None) -> dict:
         return _snapshot("kimi", "error", error=f"HTTP {resp.status_code}")
     windows, plan = normalize_kimi(resp.json())
     return _snapshot("kimi", "ok", windows=windows, plan_type=plan)
-
-
-async def grok_billing_rpc(binary: str, env: dict | None = None) -> dict:
-    """Spawn ``grok agent stdio`` and ask ``x.ai/billing`` over newline-delimited
-    JSON-RPC. The subprocess is short-lived — spawned, queried, terminated.
-    json.dumps never escapes ``/`` so the method name arrives intact.
-
-    ``env`` (``None`` = inherit the parent environment) lets a profile point the
-    CLI at its isolated ``HOME`` shim so billing reflects that account."""
-    proc = await asyncio.create_subprocess_exec(
-        binary, "agent", "stdio",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-        env=env,
-    )
-
-    async def rpc(req_id: int, method: str, params: dict, timeout: float) -> dict:
-        assert proc.stdin is not None and proc.stdout is not None
-        msg = {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}
-        proc.stdin.write((json.dumps(msg, separators=(",", ":")) + "\n").encode())
-        await proc.stdin.drain()
-        deadline = time.monotonic() + timeout
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise asyncio.TimeoutError()
-            line = await asyncio.wait_for(proc.stdout.readline(), timeout=remaining)
-            if not line:
-                raise ConnectionError("grok agent closed stdout")
-            try:
-                payload = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(payload, dict) and payload.get("id") == req_id:
-                if "error" in payload:
-                    raise ConnectionError(str(payload["error"]))
-                return payload.get("result") or {}
-
-    try:
-        await rpc(1, "initialize", {
-            "protocolVersion": "1",
-            "clientCapabilities": {
-                "fs": {"readTextFile": False, "writeTextFile": False},
-                "terminal": False,
-            },
-        }, GROK_INIT_TIMEOUT)
-        return await rpc(2, "x.ai/billing", {}, GROK_BILLING_TIMEOUT)
-    finally:
-        if proc.returncode is None:
-            proc.terminate()
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
-                proc.kill()
-
-
-async def fetch_grok(home: Path, env: dict | None = None,
-                     spawn_env: dict | None = None) -> dict:
-    creds = read_grok_credentials(home, env)
-    if creds is None:
-        return _snapshot("grok", "no-credentials")
-    binary = shutil.which("grok")
-    if not binary:
-        return _snapshot("grok", "unavailable", error="grok CLI not found")
-    try:
-        billing = await grok_billing_rpc(binary, spawn_env)
-    except (OSError, ConnectionError, asyncio.TimeoutError) as err:
-        return _snapshot("grok", "unavailable", error=str(err) or "grok agent stdio failed")
-    windows, plan = normalize_grok(billing)
-    if not windows:
-        return _snapshot("grok", "error", error="billing response had no usable fields")
-    return _snapshot("grok", "ok", windows=windows, plan_type=plan)
 
 
 # ── Poller service ──────────────────────────────────────────────────────────
@@ -1217,8 +1105,7 @@ class UsageService:
         legacy_fetchers: dict[str, Any] = {
             "codex": lambda: fetch_codex(codex_home),
             "kimi": lambda: fetch_kimi(home),
-            "grok": lambda: fetch_grok(home),
-                                                        }
+                                                                }
         tasks: dict[str, Any] = {}
         for provider in PROVIDERS:
             if provider == "claude":  # claude polls per-slot above

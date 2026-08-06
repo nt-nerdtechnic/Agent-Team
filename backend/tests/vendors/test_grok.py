@@ -419,7 +419,7 @@ def test_parse_activity_completes_a_turn_with_the_assistant_reply(
 def test_parse_activity_open_turn_stays_open_while_the_session_is_live(
     tmp_path: Path, monkeypatch
 ) -> None:
-    import agent_team_backend.log_readers.grok as grok_mod
+    import agent_team_backend.cli_vendors.grok as grok_mod
 
     reader, db, con = _grok_db_with_session(tmp_path, monkeypatch)
     _add_role_message(con, "aaaaaaaaaaa1", 1, "user", "go")
@@ -435,7 +435,7 @@ def test_parse_activity_open_turn_stays_open_while_the_session_is_live(
 def test_parse_activity_next_user_message_closes_the_previous_turn(
     tmp_path: Path, monkeypatch
 ) -> None:
-    import agent_team_backend.log_readers.grok as grok_mod
+    import agent_team_backend.cli_vendors.grok as grok_mod
 
     reader, db, con = _grok_db_with_session(tmp_path, monkeypatch)
     _add_role_message(con, "aaaaaaaaaaa1", 1, "user", "first")
@@ -454,7 +454,7 @@ def test_parse_activity_idle_is_per_session_not_per_file(
     """One db holds every session. A session that is still being written to
     must not keep another session's finished turn from completing, and the two
     replies must not cross over."""
-    import agent_team_backend.log_readers.grok as grok_mod
+    import agent_team_backend.cli_vendors.grok as grok_mod
 
     reader, db, con = _grok_db_with_session(tmp_path, monkeypatch)
     _add_session(con, "bbbbbbbbbbb2", "w" * 16, str(tmp_path / "proj"))

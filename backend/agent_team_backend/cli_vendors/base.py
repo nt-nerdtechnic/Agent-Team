@@ -63,6 +63,10 @@ class VendorSpec:
     # Path parts of the secret inside a legacy profile home.
     profile_home_secret_file: tuple[str, ...] | None = None
 
+    # Display identity for the accounts UI: (secret) -> {email, signedIn}.
+    # None = the vault's legacy per-agent branch (or token-presence default).
+    identity_from_secret: Callable[[str | None], dict] | None = None
+
     # --- usage quota ---
     # async (home: Path) -> snapshot dict, same shape usage_service._snapshot
     # produces. None = vendor has no quota interface (aider) or not migrated.

@@ -374,7 +374,7 @@ class Attribution:
         resume itself is the id-less, lossy `aider --restore-chat-history`.
         """
         shared_db_reader = self._readers.get(usage.vendor)
-        if usage.vendor in ("grok",) or (
+        if (
             shared_db_reader is not None
             and shared_db_reader.binds_shared_db_by_marker
         ):
@@ -714,11 +714,6 @@ class Attribution:
                 # Codex puts cwd in session_meta → usage.cwd
                 if usage.cwd and usage.cwd == ws_path:
                     return ws_path
-            elif usage.vendor == "grok":
-                # Grok reader emits cwd = workspaces.scope_key (git root /
-                # canonical cwd of the session's workspace).
-                if usage.cwd and usage.cwd == ws_path:
-                    return ws_path
             elif usage.vendor == "kimi":
                 # Kimi reader emits cwd = the session state.json workDir.
                 if usage.cwd and usage.cwd == ws_path:
@@ -783,7 +778,7 @@ class Attribution:
         if usage.vendor == "claude":
             expected_dir = encode_claude_cwd(pane_cwd)
             return f"/{expected_dir}/" in file_path
-        if usage.vendor in ("codex", "grok", "kimi"):
+        if usage.vendor in ("codex", "kimi"):
             return usage.cwd == pane_cwd
         return False
 

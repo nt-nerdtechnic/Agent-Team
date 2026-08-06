@@ -49,6 +49,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from .cli_vendors.registry import vendor as _cli_vendor_spec
 from .profiles_store import (
     CLAUDE_ENV_OVERRIDES,
     PROFILE_HOME_DIRNAME,
@@ -95,7 +96,6 @@ _SLOT_FILES = {
     "claude": ".credentials.json",
     "codex": "auth.json",
     "kimi": "kimi-code.json",
-    "grok": "auth.json",
 }
 
 # Live secret file path segments, relative to the real home.
@@ -103,7 +103,6 @@ _LIVE_FILES = {
     "claude": (".claude", ".credentials.json"),
     "codex": (".codex", "auth.json"),
     "kimi": (".kimi-code", "credentials", "kimi-code.json"),
-    "grok": (".grok", "auth.json"),
 }
 
 _OAUTH_ACCOUNT_SLOT_FILE = "oauth-account.json"
@@ -122,7 +121,6 @@ LOGIN_HOME_DIRNAME = "login-home"
 _LOGIN_HOME_SECRET_FILES = {
     "codex": ("auth.json",),
     "kimi": ("credentials", "kimi-code.json"),
-    "grok": ("home", ".grok", "auth.json"),
 }
 
 # Where each CLI kept its secret inside a legacy persistent profile home,
@@ -132,7 +130,6 @@ _LOGIN_HOME_SECRET_FILES = {
 _PROFILE_HOME_SECRET_FILES = {
     "codex": ("auth.json",),
     "kimi": ("credentials", "kimi-code.json"),
-    "grok": (".grok", "auth.json"),
 }
 
 
@@ -241,28 +238,6 @@ def _codex_signed_in(secret: str | None) -> bool:
     if isinstance(tokens, dict) and (tokens.get("access_token") or tokens.get("accessToken")):
         return True
     return bool(data.get("OPENAI_API_KEY"))
-
-
-def _grok_auth_entry(secret: str | None) -> dict | None:
-    """Grok's ``auth.json`` is a map keyed by scope URL; prefer the OIDC entry,
-    fall back to the legacy ``/sign-in`` scope (mirrors usage_service)."""
-    data = _parse_json_dict(secret)
-    if data is None:
-        return None
-    oidc, legacy = None, None
-    for scope, entry in data.items():
-        if not isinstance(entry, dict) or not entry.get("key"):
-            continue
-        if str(scope).startswith("https://auth.x.ai::"):
-            oidc = oidc or entry
-        elif "/sign-in" in str(scope):
-            legacy = legacy or entry
-    return oidc or legacy
-
-# runner(args_after_security, stdin_text) -> (returncode, output). Output is
-# stdout; on failure the runner appends stderr so callers can surface the
-# actual `security` error instead of a bare exit code.
-SecurityRunner = Callable[[list[str], "str | None"], "tuple[int, str]"]
 
 
 class CredentialVaultError(RuntimeError):
@@ -662,13 +637,9 @@ class CredentialVault:
                     "email": _codex_identity_email(secret),
                     "signedIn": _codex_signed_in(secret),
                 }
-            if agent_key == "grok":
-                entry = _grok_auth_entry(secret)
-                email = entry.get("email") if entry else None
-                return {
-                    "email": email if isinstance(email, str) and email else None,
-                    "signedIn": entry is not None,
-                }
+            spec = _cli_vendor_spec(agent_key)
+            if spec is not None and spec.identity_from_secret is not None:
+                return spec.identity_from_secret(secret)
             # kimi (and any future agent without an identity field): presence
             # of a token is all we can show.
             data = _parse_json_dict(secret)
