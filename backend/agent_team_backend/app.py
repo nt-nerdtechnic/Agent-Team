@@ -873,7 +873,6 @@ def _register_workspace_and_backfill(workspace_path: str) -> None:
 
 _INHERITED_CLI_HOME_VARS = (
     "CLAUDE_CONFIG_DIR",
-    "CODEX_HOME",
     "GROK_HOME",
     # Not home relocators, but the same inheritance hazard with a worse
     # failure mode: runtime markers a CLI stamps on its own subprocesses.
@@ -1388,8 +1387,6 @@ def _claude_session_file(workspace_path: str, session_id: str) -> Path:
     return Path.home() / ".claude" / "projects" / project_dir / f"{session_id}.jsonl"
 
 
-_CODEX_RESUME_RE = re.compile(r"^codex\s+resume\s+(\S+)")
-
 
 # Shared with vendor modules — the canonical definition moved to
 # cli_vendors.base so specs can parse commands without importing app.
@@ -1420,7 +1417,6 @@ def _kimi_resume_id(command: Any) -> str:
 
 
 _RESUME_ID_EXTRACTORS = {
-    "codex": _codex_resume_id,
     "claude": _claude_resume_id,
 }
 
@@ -1471,11 +1467,6 @@ def _session_exists(agent: str, workspace_path: str, session_id: str) -> bool:
         # resolves to the default location. One check there covers every
         # account — no "No conversation found" crash-loop (2026-07-25).
         return _claude_session_file(workspace_path, session_id).is_file()
-    if agent == "codex":
-        # Agent History stores only a pointer to the vendor-owned rollout. A
-        # stale pointer must not pass preflight and launch a doomed
-        # `codex resume`; search both the real and isolated per-pane homes.
-        return codex_home_manager.find_session_home(session_id) is not None
     path = _session_lookup_path(agent, workspace_path, session_id)
     if path:
         return Path(path).is_file()

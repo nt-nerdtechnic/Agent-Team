@@ -29,6 +29,17 @@ class _StaticReader(LogReader):
 
     def __init__(self, root: Path) -> None:
         self.vendor = "claude"
+
+        # Mirror the real reader's capability hooks so flag-gated watcher
+        # paths behave as in production for this vendor.
+        from agent_team_backend.cli_vendors.registry import vendor as _v
+        _spec = _v(self.vendor)
+        if _spec is not None and _spec.make_log_reader is not None:
+            _real = _spec.make_log_reader()
+            self.emits_session_sink = _real.emits_session_sink
+            self.binds_by_marker_file = _real.binds_by_marker_file
+            self.workspace_match = _real.workspace_match
+            self.pane_cwd_match = _real.pane_cwd_match
         self.root = root
         self.call_count = 0
 
@@ -279,6 +290,17 @@ async def test_only_tokens_wait_for_ingestion_interval(
         def __init__(self, root: Path) -> None:
             super().__init__(root)
             self.vendor = "codex"
+
+            # Mirror the real reader's capability hooks so flag-gated watcher
+            # paths behave as in production for this vendor.
+            from agent_team_backend.cli_vendors.registry import vendor as _v
+            _spec = _v(self.vendor)
+            if _spec is not None and _spec.make_log_reader is not None:
+                _real = _spec.make_log_reader()
+                self.emits_session_sink = _real.emits_session_sink
+                self.binds_by_marker_file = _real.binds_by_marker_file
+                self.workspace_match = _real.workspace_match
+                self.pane_cwd_match = _real.pane_cwd_match
 
         def parse_incremental(
             self, path: Path, checkpoint: dict

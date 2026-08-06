@@ -180,7 +180,7 @@ def test_prepare_skill_view_failure_does_not_block_spawn(
     def fail_mkdtemp(*_args, **_kwargs):
         raise OSError("disk unavailable")
 
-    monkeypatch.setattr("agent_team_backend.codex_home.tempfile.mkdtemp", fail_mkdtemp)
+    monkeypatch.setattr("agent_team_backend.cli_vendors.codex.tempfile.mkdtemp", fail_mkdtemp)
 
     home = manager.prepare("pane-1")
 

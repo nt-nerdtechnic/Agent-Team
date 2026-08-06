@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_team_backend.log_readers.codex import CodexLogReader
+from agent_team_backend.cli_vendors.codex import CodexLogReader
 
 
 def _write_jsonl(path: Path, records: list[dict]) -> None:

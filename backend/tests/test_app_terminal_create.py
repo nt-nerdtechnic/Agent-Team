@@ -286,16 +286,16 @@ async def test_terminal_create_codex_resume_uses_owning_pane_home(
 
 
 def test_codex_resume_id_parses_resume_commands() -> None:
-    assert app._codex_resume_id("codex resume abc-123") == "abc-123"
-    assert app._codex_resume_id("codex resume abc-123 --yolo") == "abc-123"
-    assert app._codex_resume_id("codex") == ""
-    assert app._codex_resume_id("codex --resume abc") == ""
-    assert app._codex_resume_id("") == ""
-    assert app._codex_resume_id(None) == ""
+    assert app._resume_id_for_agent("codex", "codex resume abc-123") == "abc-123"
+    assert app._resume_id_for_agent("codex", "codex resume abc-123 --yolo") == "abc-123"
+    assert app._resume_id_for_agent("codex", "codex") == ""
+    assert app._resume_id_for_agent("codex", "codex --resume abc") == ""
+    assert app._resume_id_for_agent("codex", "") == ""
+    assert app._resume_id_for_agent("codex", None) == ""
     # Shell-wrapped list — the shape the frontend actually sends.
-    assert app._codex_resume_id(["/bin/zsh", "-lc", "codex resume abc-123 --yolo"]) == "abc-123"
-    assert app._codex_resume_id(["/bin/zsh", "-lc", "codex"]) == ""
-    assert app._codex_resume_id([]) == ""
+    assert app._resume_id_for_agent("codex", ["/bin/zsh", "-lc", "codex resume abc-123 --yolo"]) == "abc-123"
+    assert app._resume_id_for_agent("codex", ["/bin/zsh", "-lc", "codex"]) == ""
+    assert app._resume_id_for_agent("codex", []) == ""
 
 
 def test_claude_resume_id_parses_resume_commands() -> None:

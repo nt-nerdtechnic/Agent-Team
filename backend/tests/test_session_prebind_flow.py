@@ -12,6 +12,20 @@ class FakeReader(LogReader):
     def __init__(self, vendor: str, root: Path) -> None:
         self.vendor = vendor
         self.root = root
+        from agent_team_backend.cli_vendors.registry import vendor as _v
+        _spec = _v(getattr(self, "vendor", "") or "")
+        if _spec is not None and _spec.make_log_reader is not None:
+            _real = _spec.make_log_reader()
+            self.binds_by_marker_file = _real.binds_by_marker_file
+            self.binds_shared_db_by_marker = _real.binds_shared_db_by_marker
+            self.binds_new_session_single_candidate = _real.binds_new_session_single_candidate
+            self.emits_session_sink = _real.emits_session_sink
+            self.requires_real_resume_id = _real.requires_real_resume_id
+            self.workspace_match = _real.workspace_match
+            self.pane_cwd_match = _real.pane_cwd_match
+            self.path_identity = _real.path_identity
+            self.pane_home_id = _real.pane_home_id
+            self.resume_id_from_session_text = _real.resume_id_from_session_text
 
     def project_dirs(self) -> list[Path]:
         return [self.root] if self.root.is_dir() else []

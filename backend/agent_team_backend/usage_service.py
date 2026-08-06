@@ -151,6 +151,11 @@ from .usage_common import (  # noqa: E402,F401
 
 # R2: qwen's usage stack moved to its vendor module; re-exported so this
 # module's namespace (and its tests) keep working until the cleanup round.
+from .cli_vendors.codex import (  # noqa: E402,F401
+    codex_base_url,
+    fetch_codex,
+    read_codex_credentials,
+)
 from .cli_vendors.kimi import (  # noqa: E402,F401
     KIMI_DEFAULT_BASE,
     fetch_kimi,
@@ -345,54 +350,6 @@ async def read_claude_credentials(home: Path) -> dict | None:
         return None
 
 
-def read_codex_credentials(codex_home: Path) -> dict | None:
-    """Parse ``auth.json``: tokens object (snake_case or camelCase) or the
-    bare ``{"OPENAI_API_KEY": ...}`` form."""
-    try:
-        data = json.loads((codex_home / "auth.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    tokens = data.get("tokens")
-    if isinstance(tokens, dict):
-        access = tokens.get("access_token") or tokens.get("accessToken")
-        if access:
-            return {
-                "access_token": access,
-                "account_id": tokens.get("account_id") or tokens.get("accountId"),
-            }
-    api_key = data.get("OPENAI_API_KEY")
-    if isinstance(api_key, str) and api_key:
-        return {"access_token": api_key, "account_id": None}
-    return None
-
-
-def codex_base_url(codex_home: Path) -> str:
-    """``chatgpt_base_url`` from config.toml (simple line parse, matching
-    CodexBar), normalized: strip trailing slash; chatgpt.com/chat.openai.com
-    bases get ``/backend-api`` appended when missing."""
-    base = ""
-    try:
-        for line in (codex_home / "config.toml").read_text(encoding="utf-8").splitlines():
-            line = line.split("#", 1)[0].strip()
-            if "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            if key.strip() == "chatgpt_base_url":
-                base = value.strip().strip("'\"")
-                break
-    except OSError:
-        pass
-    if not base:
-        return CODEX_DEFAULT_BASE
-    base = base.rstrip("/")
-    if (base.startswith("https://chatgpt.com") or base.startswith("https://chat.openai.com")) \
-            and "/backend-api" not in base:
-        base += "/backend-api"
-    return base
-
-
 async def fetch_claude(home: Path) -> dict:
     """Claude quota, read from the CLI's own ``/usage`` panel.
 
@@ -404,53 +361,6 @@ async def fetch_claude(home: Path) -> dict:
     from .claude_cli_usage import fetch_claude_usage_via_cli
 
     return await fetch_claude_usage_via_cli(home) or _snapshot("claude", "unavailable")
-
-
-async def fetch_codex(codex_home: Path) -> dict:
-    creds = read_codex_credentials(codex_home)
-    if creds is None:
-        # Fresh-install rescue: an OAuth login completed inside a manual pane
-        # sits stranded in ~/.codex-panes/<pane>/auth.json (no real auth.json
-        # existed to symlink at spawn). Adopt it so the credential is shared
-        # and the badge lights without waiting for a new pane spawn.
-        from .codex_home import CodexHomeManager
-
-        if await asyncio.to_thread(
-            CodexHomeManager(real_home=codex_home).promote_stranded_auth
-        ):
-            creds = read_codex_credentials(codex_home)
-    if creds is None:
-        return _snapshot("codex", "no-credentials")
-    import httpx
-
-    headers = {
-        "Authorization": f"Bearer {creds['access_token']}",
-        "User-Agent": "Navide",
-        "Accept": "application/json",
-    }
-    if creds.get("account_id"):
-        headers["ChatGPT-Account-Id"] = creds["account_id"]
-    url = codex_usage_url(codex_base_url(codex_home))
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        resp = await client.get(url, headers=headers)
-    if resp.status_code in (401, 403):
-        return _snapshot("codex", "expired")
-    if resp.status_code == 429:
-        snap = _snapshot("codex", "rate-limited")
-        snap["retryAfterSec"] = parse_retry_after(resp.headers.get("Retry-After"))
-        return snap
-    if resp.status_code != 200:
-        return _snapshot("codex", "error", error=f"HTTP {resp.status_code}")
-    payload = resp.json()
-    windows, plan = normalize_codex(payload)
-    snap = _snapshot("codex", "ok", windows=windows, plan_type=plan)
-    credits = _codex_credits(payload)
-    if credits is not None:
-        snap["credits"] = credits
-    extra = _codex_extra_windows(payload)
-    if extra:
-        snap["extraWindows"] = extra
-    return snap
 
 
 # ── Poller service ──────────────────────────────────────────────────────────
@@ -1017,8 +927,7 @@ class UsageService:
         # Iteration runs over PROVIDERS (not the legacy table) so deleting a
         # lambda cannot silently drop the vendor from the poll.
         legacy_fetchers: dict[str, Any] = {
-            "codex": lambda: fetch_codex(codex_home),
-                                                                        }
+                                                                                }
         tasks: dict[str, Any] = {}
         for provider in PROVIDERS:
             if provider == "claude":  # claude polls per-slot above

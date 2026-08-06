@@ -88,30 +88,6 @@ class _PaneRegistration:
     session_marker: str = ""
 
 
-def _extract_resume_id(vendor: str, text: str) -> str:
-    """Pull the id the CLI's resume command needs out of a session file's text.
-
-    Codex:  the session_meta record's payload.id (the filename stem has a
-            timestamp prefix and is NOT accepted by `codex resume`).
-    Returns "" when the expected shape isn't found (caller falls back).
-    """
-    if vendor == "codex":
-        for line in text.splitlines():
-            line = line.strip()
-            if not line or '"session_meta"' not in line:
-                continue
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if rec.get("type") == "session_meta":
-                payload = rec.get("payload") or {}
-                if isinstance(payload, dict) and payload.get("id"):
-                    return str(payload["id"])
-        return ""
-    return ""
-
-
 class Attribution:
     """Maps log-file events → (workspace_path, pane_id, stage_id).
 
@@ -382,8 +358,7 @@ class Attribution:
         # Tuple = vendors not yet migrated to reader hooks; a migrated
         # vendor's reader declares binds_by_marker_file instead.
         marker_reader = self._readers.get(usage.vendor)
-        if usage.vendor not in ("codex",) \
-                and not (marker_reader is not None and marker_reader.binds_by_marker_file):
+        if not (marker_reader is not None and marker_reader.binds_by_marker_file):
             return None
 
         # Once a session is bound, every binding path below no-ops — but their
@@ -396,18 +371,15 @@ class Attribution:
                 if sid in self._session_owner:
                     return None
 
-        if usage.vendor == "codex":
-            pane_id = self._pane_id_from_codex_home_path(usage.file_path)
-            if pane_id:
-                # Codex creates the rollout file before session_meta is always
-                # readable. The filename stem includes a timestamp prefix and
-                # is NOT accepted by `codex resume`, so wait for a later file
-                # modification instead of announcing a malformed fallback id.
-                try:
-                    text = Path(usage.file_path).read_text(encoding="utf-8", errors="ignore")[:524_288]
-                except OSError:
-                    text = ""
-                resume_id = _extract_resume_id("codex", text)
+        # Identity path: vendors whose session-file PATH names the pane
+        # (codex's per-pane CODEX_HOME). Three-state hook: None = not an
+        # identity-path file; (pane, "") = pane known but the vendor's real
+        # resume id isn't readable yet, so WAIT rather than announce a
+        # malformed fallback id; (pane, id) = bind.
+        if marker_reader is not None:
+            identity = marker_reader.path_identity(usage)
+            if identity is not None:
+                pane_id, resume_id = identity
                 if not resume_id:
                     return None
                 binding = self._bind_and_announce_path_session(
@@ -457,8 +429,7 @@ class Attribution:
         further reads. The file read happens outside the lock.
         """
         gate_reader = self._readers.get(usage.vendor)
-        if usage.vendor not in ("codex",) \
-                and not (gate_reader is not None and gate_reader.binds_by_marker_file):
+        if not (gate_reader is not None and gate_reader.binds_by_marker_file):
             return None
         sid = usage.session_id
         with self._lock:
@@ -486,10 +457,14 @@ class Attribution:
         if matched_pane is None:
             return None
 
-        resume_id = _extract_resume_id(usage.vendor, text)
-        if usage.vendor == "codex" and not resume_id:
-            # Do not consume the marker or claim the rollout until its real
-            # resume id appears in session_meta. Watcher updates will retry.
+        resume_id = (
+            gate_reader.resume_id_from_session_text(text)
+            if gate_reader is not None else ""
+        )
+        if not resume_id and gate_reader is not None \
+                and gate_reader.requires_real_resume_id:
+            # Do not consume the marker or claim the session file until the
+            # vendor's real resume id appears. Watcher updates will retry.
             return None
         resume_id = resume_id or sid
         with self._lock:
@@ -577,12 +552,9 @@ class Attribution:
         corruption.
         """
         sc_reader = self._readers.get(usage.vendor)
-        if (
-            usage.vendor not in ()
-            and not (
-                sc_reader is not None
-                and sc_reader.binds_new_session_single_candidate
-            )
+        if not (
+            sc_reader is not None
+            and sc_reader.binds_new_session_single_candidate
         ) or not usage.session_id:
             return None
         file_path = Path(usage.file_path)
@@ -633,7 +605,7 @@ class Attribution:
             return None
         key = f"{usage.vendor}:{usage.session_id}:{resume_id}"
         with self._lock:
-            reg = self._pane_registration_for_codex_home_id(pane_id)
+            reg = self._pane_registration_for_home_id(pane_id)
             if reg is None or reg.vendor != usage.vendor:
                 return None
             if key in self._announced_session_keys:
@@ -710,10 +682,6 @@ class Attribution:
                     or file_path.startswith(mapping.claude_dir + os.sep)
                 ):
                     return ws_path
-            elif usage.vendor == "codex":
-                # Codex puts cwd in session_meta → usage.cwd
-                if usage.cwd and usage.cwd == ws_path:
-                    return ws_path
         return None
 
     def _lookup_pane_for(
@@ -731,9 +699,10 @@ class Attribution:
             if reg:
                 return reg.pane_id, reg.stage_id, reg.slot_key or None
 
-        if usage.vendor == "codex":
-            pane_id = self._pane_id_from_codex_home_path(usage.file_path)
-            reg = self._pane_registration_for_codex_home_id(pane_id) if pane_id else None
+        home_reader = self._readers.get(usage.vendor)
+        home_id = home_reader.pane_home_id(usage.file_path) if home_reader else ""
+        if home_id:
+            reg = self._pane_registration_for_home_id(home_id)
             if reg and reg.vendor == usage.vendor:
                 self._session_owner[usage.session_id] = reg.pane_id
                 reg.claimed_session_ids.add(usage.session_id)
@@ -774,23 +743,9 @@ class Attribution:
         if usage.vendor == "claude":
             expected_dir = encode_claude_cwd(pane_cwd)
             return f"/{expected_dir}/" in file_path
-        if usage.vendor in ("codex",):
-            return usage.cwd == pane_cwd
         return False
 
-    def _pane_id_from_codex_home_path(self, file_path: str) -> str:
-        try:
-            path = Path(file_path).resolve()
-            panes_root = (Path.home() / ".codex-panes").resolve()
-            rel = path.relative_to(panes_root)
-        except (OSError, ValueError):
-            return ""
-        parts = rel.parts
-        if len(parts) >= 3 and parts[1] == "sessions":
-            return parts[0]
-        return ""
-
-    def _pane_registration_for_codex_home_id(self, home_id: str) -> _PaneRegistration | None:
+    def _pane_registration_for_home_id(self, home_id: str) -> _PaneRegistration | None:
         if not home_id:
             return None
         reg = self._panes.get(home_id)

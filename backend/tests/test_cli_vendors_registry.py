@@ -37,7 +37,7 @@ NON_VENDOR_AGENT_KEYS = {"terminal"}
 # Modules a vendor file may import. log_readers.base is the shared reader
 # contract (safe direction: it imports no vendor); kilo→opencode is the
 # single allowed vendor→vendor edge (reader class inheritance).
-ALLOWED_LOCAL_IMPORTS = {"base", "_protocols", "log_readers.base", "usage_common"}
+ALLOWED_LOCAL_IMPORTS = {"base", "_protocols", "applog", "log_readers.base", "skills_store", "usage_common"}
 VENDOR_IMPORT_EXEMPTIONS = {"kilo": {"opencode"}}
 ALLOWED_THIRD_PARTY = {"httpx", "yaml"}
 

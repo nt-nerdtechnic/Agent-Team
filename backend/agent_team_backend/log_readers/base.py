@@ -231,6 +231,36 @@ class LogReader(ABC):
         None = not migrated (attribution's legacy chain decides)."""
         return None
 
+    #: Marker binding must wait for the vendor's REAL resume id to appear in
+    #: the session file (codex: session_meta payload.id — the filename stem
+    #: is not accepted by its resume command). Migrated replacement for the
+    #: vendor-name check in attribution's marker path.
+    requires_real_resume_id: bool = False
+
+    def path_identity(self, usage: TokenUsage) -> tuple[str, str] | None:
+        """Identity-path binding, three-state:
+
+        - None: this file is not on the vendor's identity path — fall
+          through to marker binding.
+        - (pane_id, resume_id): bind now.
+        - (pane_id, ""): the path names a pane but the vendor's real resume
+          id isn't readable yet — the caller must WAIT (bind nothing this
+          event) rather than announce a malformed fallback id.
+        Codex: per-pane CODEX_HOME encodes the pane id; session_meta carries
+        the real id."""
+        return None
+
+    def pane_home_id(self, file_path: str) -> str:
+        """Pane/home id encoded in the session file's PATH ('' when none).
+        Used to claim sessions for panes spawned with an isolated per-pane
+        home (codex)."""
+        return ""
+
+    def resume_id_from_session_text(self, text: str) -> str:
+        """The id the vendor's resume command needs, parsed from session-file
+        text ('' when not found — callers fall back to usage.session_id)."""
+        return ""
+
     def accepts_watch_path(self, path_str: str) -> bool:
         """Accept a filesystem-event path the generic extension filter would
         drop (e.g. aider's Markdown history filenames). Hot path — must be

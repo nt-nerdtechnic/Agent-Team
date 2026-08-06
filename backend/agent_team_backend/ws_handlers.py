@@ -3342,7 +3342,7 @@ async def _terminal_create_impl(
         # Compatibility: `codex resume <id>` only works inside the home
         # that recorded the session. Resume in whichever home owns it;
         # only unknown/fresh sessions get a (new) per-pane home.
-        resume_id = app._codex_resume_id(payload.get("command"))
+        resume_id = app._resume_id_for_agent("codex", payload.get("command"))
         session_home = (
             await asyncio.to_thread(app.codex_home_manager.find_session_home, resume_id)
             if resume_id

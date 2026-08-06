@@ -94,13 +94,11 @@ _SLOT_SERVICE_PREFIX = "Navide CLI account "
 # Secret file name inside a slot directory, per agent.
 _SLOT_FILES = {
     "claude": ".credentials.json",
-    "codex": "auth.json",
 }
 
 # Live secret file path segments, relative to the real home.
 _LIVE_FILES = {
     "claude": (".claude", ".credentials.json"),
-    "codex": (".codex", "auth.json"),
 }
 
 _OAUTH_ACCOUNT_SLOT_FILE = "oauth-account.json"
@@ -117,7 +115,6 @@ LOGIN_HOME_DIRNAME = "login-home"
 # codex CODEX_HOME, kimi KIMI_CODE_HOME, grok a HOME shim with a real ``.grok``
 # dir one level in.
 _LOGIN_HOME_SECRET_FILES = {
-    "codex": ("auth.json",),
 }
 
 # Where each CLI kept its secret inside a legacy persistent profile home,
@@ -125,7 +122,6 @@ _LOGIN_HOME_SECRET_FILES = {
 # ``.credentials.json`` — see ``_claude_profile_home_secret``). Only read by
 # the one-time profile-home promotion; spawns no longer use these homes.
 _PROFILE_HOME_SECRET_FILES = {
-    "codex": ("auth.json",),
 }
 
 
@@ -200,40 +196,6 @@ def _claude_credential_is_wiped(secret: str | None) -> bool:
     if not isinstance(oauth, dict):
         return False
     return not (oauth.get("accessToken") or oauth.get("refreshToken"))
-
-
-def _codex_identity_email(secret: str | None) -> str | None:
-    """Best-effort login email from codex ``auth.json``: the ``id_token`` JWT
-    payload carries it. Display only — the signature is not verified."""
-    data = _parse_json_dict(secret)
-    tokens = data.get("tokens") if data else None
-    id_token = tokens.get("id_token") if isinstance(tokens, dict) else None
-    if not isinstance(id_token, str) or id_token.count(".") < 2:
-        return None
-    payload = id_token.split(".")[1]
-    try:
-        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
-    except ValueError:
-        return None
-    if not isinstance(claims, dict):
-        return None
-    email = claims.get("email")
-    if isinstance(email, str) and email:
-        return email
-    profile = claims.get("https://api.openai.com/profile")
-    if isinstance(profile, dict) and isinstance(profile.get("email"), str):
-        return profile["email"] or None
-    return None
-
-
-def _codex_signed_in(secret: str | None) -> bool:
-    data = _parse_json_dict(secret)
-    if data is None:
-        return False
-    tokens = data.get("tokens")
-    if isinstance(tokens, dict) and (tokens.get("access_token") or tokens.get("accessToken")):
-        return True
-    return bool(data.get("OPENAI_API_KEY"))
 
 
 class CredentialVaultError(RuntimeError):
@@ -628,11 +590,6 @@ class CredentialVault:
                 secret = _read_text(
                     self.slot_dir(agent_key, slot_id) / _SLOT_FILES[agent_key]
                 )
-            if agent_key == "codex":
-                return {
-                    "email": _codex_identity_email(secret),
-                    "signedIn": _codex_signed_in(secret),
-                }
             spec = _cli_vendor_spec(agent_key)
             if spec is not None and spec.identity_from_secret is not None:
                 return spec.identity_from_secret(secret)
@@ -823,8 +780,6 @@ class CredentialVault:
         spec = _cli_vendor_spec(agent_key)
         if spec is not None and spec.login_home_env is not None:
             return {spec.login_home_env: home_str}, []
-        if agent_key == "codex":
-            return {"CODEX_HOME": home_str}, []
         # grok: HOME shim; its .grok dir lives one level in.
         shim = self._refresh_grok_login_shim(Path(home_str))
         return {"HOME": canonical_path_str(shim)}, []

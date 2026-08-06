@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from agent_team_backend.app import _session_exists
+from agent_team_backend.cli_vendors import codex as codex_vendor
 from agent_team_backend.codex_home import CodexHomeManager
 
 
@@ -90,6 +91,7 @@ def test_codex_session_exists_checks_real_and_pane_homes(
 
     manager = CodexHomeManager(real_home=real_home, panes_root=panes_root)
     monkeypatch.setattr("agent_team_backend.app.codex_home_manager", manager)
+    monkeypatch.setattr(codex_vendor, "CodexHomeManager", lambda **kw: manager)
 
     assert _session_exists("codex", "/tmp/ws", "real-session") is True
     assert _session_exists("codex", "/tmp/ws", "pane-session") is True

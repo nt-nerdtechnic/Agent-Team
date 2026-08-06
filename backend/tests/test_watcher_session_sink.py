@@ -29,6 +29,10 @@ class _Reader(LogReader):
             # from the real reader without sharing its state.
             self.workspace_match = real.workspace_match
             self.pane_cwd_match = real.pane_cwd_match
+            self.requires_real_resume_id = real.requires_real_resume_id
+            self.path_identity = real.path_identity
+            self.pane_home_id = real.pane_home_id
+            self.resume_id_from_session_text = real.resume_id_from_session_text
         self.root = root
 
     def project_dirs(self) -> list[Path]:
