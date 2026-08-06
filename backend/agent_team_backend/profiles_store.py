@@ -36,7 +36,20 @@ _KV_KEY = "cli_profiles"
 PROFILES_SCHEMA_VERSION = 1
 # antigravity is excluded on purpose: its OAuth token lives in a fixed-name
 # macOS Keychain entry, so config-home isolation cannot separate accounts.
-SUPPORTED_AGENT_KEYS = ("claude", "codex", "kimi", "grok")
+def _supported_agent_keys() -> tuple[str, ...]:
+    """Multi-account support = the vendor declares a credential slot layout.
+    Derived from the registry so a vendor's spec is the single source."""
+    from .cli_vendors.registry import VENDORS
+
+    # Preserve the pre-registry ordering (claude, codex, kimi, grok) — the
+    # tuple's order has always been what ships to the frontend, and the
+    # registry itself is alphabetical for contributors.
+    order = {"claude": 0, "codex": 1, "kimi": 2, "grok": 3}
+    keys = [k for k, spec in VENDORS.items() if spec.slot_file is not None]
+    return tuple(sorted(keys, key=lambda k: (order.get(k, len(order)), k)))
+
+
+SUPPORTED_AGENT_KEYS = _supported_agent_keys()
 # Env vars that override Claude Code's OAuth login when they leak in from the
 # parent environment — they must never reach a spawn while a managed claude
 # account (a non-null default profile) is active.

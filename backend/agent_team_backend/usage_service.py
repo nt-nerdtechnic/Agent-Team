@@ -841,8 +841,6 @@ class UsageService:
         # spec and its legacy lambda below is deleted in that vendor's round.
         # Iteration runs over PROVIDERS (not the legacy table) so deleting a
         # lambda cannot silently drop the vendor from the poll.
-        legacy_fetchers: dict[str, Any] = {
-                                                                                }
         tasks: dict[str, Any] = {}
         for provider in PROVIDERS:
             if provider == "claude":  # claude polls per-slot above
@@ -853,8 +851,6 @@ class UsageService:
             if spec is not None and spec.fetch_usage is not None:
                 fetch = spec.fetch_usage
                 tasks[provider] = asyncio.create_task(fetch(home))
-            elif provider in legacy_fetchers:
-                tasks[provider] = asyncio.create_task(legacy_fetchers[provider]())
         for slot_id, task in claude_tasks.items():
             try:
                 snap = await task

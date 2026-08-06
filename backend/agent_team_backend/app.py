@@ -48,6 +48,7 @@ from .analyzer_settings import AnalyzerSettingsStore
 from .ai_chat_settings import AIChatSettingsStore
 from .applog import app_data_dir, backend_log_path, backend_port_file
 from .claude_hooks import install_hooks as install_claude_hooks
+from .cli_vendors.registry import VENDORS as _CLI_VENDORS
 from .cli_vendors.registry import vendor as cli_vendor
 from .codex_home import CodexHomeManager
 from .ipc import make_error, make_event, make_response
@@ -240,7 +241,12 @@ async def analyzer_benchmark(progress_cb=None) -> list:
     return await _llama_benchmark(progress_cb=progress_cb)
 
 # Log readers: one per vendor. Attribution maps log session files to panes.
-_readers = [ClaudeLogReader(), CodexLogReader(), AntigravityLogReader(), GrokLogReader(), KimiLogReader(), OpencodeLogReader(), QwenLogReader(), KiloLogReader(), PiLogReader(), CopilotLogReader(), CursorLogReader(), AiderLogReader()]
+# One reader per registered vendor — the registry is the single source.
+_readers = [
+    spec.make_log_reader()
+    for spec in _CLI_VENDORS.values()
+    if spec.make_log_reader is not None
+]
 attribution = Attribution(_readers, db=database)
 _log_watcher: LogWatcher | None = None
 _git_watcher: GitWatcher | None = None
@@ -1384,18 +1390,14 @@ from .cli_vendors.base import command_text as _command_text  # noqa: E402
 
 
 
-_RESUME_ID_EXTRACTORS = {
-}
-
-
 def _resume_id_for_agent(agent_key: str, command: Any) -> str:
     """Resume/session id a launch command targets for this agent ('' when the
-    agent has no id-carrying resume flag or the command doesn't resume)."""
+    agent has no id-carrying resume flag or the command doesn't resume).
+    Fully registry-driven since R12 — vendors own their parsers."""
     spec = cli_vendor(agent_key)
     if spec is not None and spec.resume_id_from_command is not None:
         return spec.resume_id_from_command(command)
-    extract = _RESUME_ID_EXTRACTORS.get(agent_key)
-    return extract(command) if extract else ""
+    return ""
 
 
 def _session_lookup_path(agent: str, workspace_path: str, session_id: str) -> str:
