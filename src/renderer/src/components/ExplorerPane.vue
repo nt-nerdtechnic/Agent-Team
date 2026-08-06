@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch, toRef, nextTick } from 'vue'
 import type { useBackend } from '../composables/useBackend'
+import { useEditorTargets } from '../composables/useEditorTargets'
 import { useExplorer, type FsEntry } from '../composables/useExplorer'
 import { useGit } from '../composables/useGit'
 import { useNotify } from '../composables/useNotify'
@@ -241,12 +242,26 @@ function openInEditor(entry: FsEntry): void {
   })
 }
 
+// ── Open a folder in an editor ───────────────────────────────────────────────
+const { editorTargets, loadEditorTargets } = useEditorTargets()
+
+// The pane also runs inside the editor window's file tree; hosts without the
+// bridge simply don't get the folder-open items.
+function canOpenFolderInEditor(): boolean {
+  return typeof window.agentTeam?.openFolderInEditor === 'function'
+}
+
+function openFolderInEditor(entry: FsEntry, editorId?: string): void {
+  void window.agentTeam?.openFolderInEditor(absPath(entry.rel_path), editorId)
+}
+
 // ── Context menu ─────────────────────────────────────────────────────────────
 const ctx = ref<{ x: number; y: number; entry: FsEntry | null } | null>(null)
 
 function openCtx(e: MouseEvent, entry: FsEntry | null): void {
   e.preventDefault()
   ctx.value = { x: e.clientX, y: e.clientY, entry }
+  if (entry?.is_dir) void loadEditorTargets()
 }
 function closeCtx(): void {
   ctx.value = null
@@ -732,6 +747,20 @@ defineExpose({ revealFile, focusTree })
           <button v-if="!ctx.entry.is_dir" class="exp-ctx-item" @click="openDiff(ctx.entry!); closeCtx()">{{ $t('action.open-diff') }}</button>
           <button v-if="!ctx.entry.is_dir" class="exp-ctx-item" @click="openInEditor(ctx.entry!); closeCtx()">{{ $t('action.open-in-editor') }}</button>
           <button v-if="!ctx.entry.is_dir && props.onAskAiAboutFile" class="exp-ctx-item" @click="props.onAskAiAboutFile!(ctx.entry!.rel_path); closeCtx()">{{ $t('action.ask-ai-about-file') }}</button>
+          <template v-if="ctx.entry.is_dir && canOpenFolderInEditor()">
+            <button class="exp-ctx-item" @click="openFolderInEditor(ctx.entry!); closeCtx()">{{ $t('action.open-in-default-editor') }}</button>
+            <div class="exp-ctx-item has-sub">
+              <span>{{ $t('action.open-with') }}</span><span class="exp-ctx-caret">▸</span>
+              <div class="exp-ctx-submenu">
+                <button
+                  v-for="target in editorTargets"
+                  :key="target.id"
+                  class="exp-ctx-item"
+                  @click="openFolderInEditor(ctx!.entry!, target.id); closeCtx()"
+                >{{ $t(target.labelKey) }}</button>
+              </div>
+            </div>
+          </template>
           <button class="exp-ctx-item" @click="startRename(ctx.entry!); closeCtx()">{{ $t('action.rename') }}</button>
           <button class="exp-ctx-item danger" @click="doDelete(ctx.entry!); closeCtx()">{{ $t('action.delete') }}</button>
           <div class="exp-ctx-sep" />
@@ -927,6 +956,29 @@ defineExpose({ revealFile, focusTree })
 .exp-ctx-item:hover { background: var(--bg-muted); }
 .exp-ctx-item.danger:hover { color: var(--danger-fg); }
 .exp-ctx-sep { height: 1px; background: var(--border-muted); margin: 4px 0; }
+/* Hover submenu (Open with ▸) */
+.exp-ctx-item.has-sub {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.exp-ctx-caret { color: var(--text-muted); font-size: 10px; }
+.exp-ctx-submenu {
+  position: absolute;
+  top: -5px;
+  left: 100%;
+  margin-left: 2px;
+  display: none;
+  min-width: 160px;
+  background: var(--bg-overlay);
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  padding: 4px;
+  box-shadow: 0 8px 28px var(--shadow-overlay);
+}
+.exp-ctx-item.has-sub:hover .exp-ctx-submenu { display: block; }
 
 /* Multi-select */
 .exp-row.row-selected { background: color-mix(in srgb, var(--accent-fg) 12%, transparent); }

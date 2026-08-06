@@ -12,14 +12,20 @@ import { app, clipboard, Menu, webContents, type BrowserWindow, type MenuItemCon
  *     Updates… (platforms without an app menu)
  *   - Window: Pipeline Manager
  *
- * ONE deliberate omission from the default menu remains: the View submenu's
- * `resetZoom` / `zoomIn` / `zoomOut` roles. Those roles bind ⌘0 / ⌘+ / ⌘- to
- * `webContents` zoom, which scales the ENTIRE window — chrome, layout, every
- * pane — and their native accelerators fire before the renderer's key
- * handlers. Zoom in this app is per-pane content zoom only (xterm font size
- * in useTerminal.ts, Monaco font size in EditorViewMonaco.vue), so the
- * built-in roles must not exist. Installing a menu without them is the only
- * way to drop them: Electron has no API to edit the default menu in place.
+ * TWO deliberate omissions from the default menu remain, both because native
+ * accelerators fire before the renderer's key handlers:
+ *
+ *   - The View submenu's `resetZoom` / `zoomIn` / `zoomOut` roles. Those roles
+ *     bind ⌘0 / ⌘+ / ⌘- to `webContents` zoom, which scales the ENTIRE window
+ *     — chrome, layout, every pane. Zoom in this app is per-pane content zoom
+ *     only (xterm font size in useTerminal.ts, Monaco font size in
+ *     EditorViewMonaco.vue), so the built-in roles must not exist.
+ *   - The View submenu's `forceReload` role, which owns ⇧⌘R. That chord is the
+ *     renderer's Rebuild-pane shortcut (keybindings/defaults.ts). `reload` (⌘R)
+ *     stays, so a plain reload is still one keystroke away.
+ *
+ * Installing a menu without them is the only way to drop them: Electron has no
+ * API to edit the default menu in place.
  */
 /** One entry in the File > Open Recent submenu. */
 export interface RecentMenuEntry {
@@ -207,10 +213,9 @@ export function installApplicationMenu(
     },
     {
       label: 'View',
-      // No resetZoom / zoomIn / zoomOut — see the doc comment above.
+      // No resetZoom / zoomIn / zoomOut, no forceReload — see the doc comment above.
       submenu: [
         { role: 'reload' },
-        { role: 'forceReload' },
         { role: 'toggleDevTools' },
         { type: 'separator' },
         { role: 'togglefullscreen' }

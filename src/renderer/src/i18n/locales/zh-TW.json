@@ -206,7 +206,7 @@
       "option-select-hint": "此 CLI 接管了滑鼠 — 按住 {key} 再拖曳即可劃選文字",
       "click-to-resume": "點擊以續接",
       "resuming": "續接中…",
-      "rebuild-tooltip": "重建 (resume) ⌘⇧B — 殺掉並用 --resume 在當前尺寸重新開,清除無法重畫的疊影/跑版。會中斷進行中的回合、重印對話。",
+      "rebuild-tooltip": "重建 (resume) ⌘⇧R — 殺掉並用 --resume 在當前尺寸重新開,清除無法重畫的疊影/跑版。會中斷進行中的回合、重印對話。",
       "rebuild-tooltip-disabled": "重建需要一段可 resume 的對話。請先送出一則訊息，逐字稿會在第一次對話後建立。",
       "rebuild-busy-skipped": "CLI 正在執行中,已保留現有工作,略過重建",
       "rebuild-busy-skipped-batch": "{count} 個 CLI 正在執行中,已保留現有工作,略過重建",
@@ -285,6 +285,8 @@
     "copy-paths": "複製路徑",
     "open-diff": "開啟差異比對",
     "open-in-editor": "在編輯器中開啟",
+    "open-with": "用…開啟",
+    "open-in-default-editor": "用預設編輯器開啟",
     "open-remote-url": "開啟遠端網址",
     "ask-ai-about-file": "詢問 AI 關於此檔案",
     "reveal-in-finder": "在 Finder 中顯示",
@@ -542,6 +544,16 @@
       "export-bundle": "匯出設定全集",
       "import-bundle": "匯入設定全集",
       "bundle-hint": "匯出內容包含 Roles、Pipelines、MCP、Analyzer、AI Chat 非敏感設定與外觀偏好；API key 和 token 會被遮蔽，匯入時不會覆蓋。"
+    },
+    "general": {
+      "default-editor": "預設編輯器",
+      "default-editor-hint": "Navide 開啟檔案與資料夾的去向。Diff 檢視一律使用 Mini-IDE。",
+      "default-editor-not-installed": "未安裝",
+      "default-editor-redetect": "重新偵測",
+      "default-editor-custom-command": "自訂命令",
+      "default-editor-custom-command-hint": "可用佔位符：{'{'}file{'}'}、{'{'}dir{'}'}、{'{'}line{'}'}、{'{'}workspace{'}'}。直接執行，不經 shell。",
+      "default-editor-custom-command-empty": "請輸入命令——在此之前 Navide 仍會用 Mini-IDE 開檔。",
+      "default-editor-preset": "快選模板"
     },
     "appearance": {
       "language": "語言",
@@ -1420,7 +1432,12 @@
     "initialized-with-gitignore": "已初始化儲存庫並建立 .gitignore",
     "initialized": "已初始化儲存庫",
     "cloned-into": "已複製到 {path}",
-    "cloned": "已複製"
+    "cloned": "已複製",
+    "editor-mini-ide": "Mini-IDE（內建）",
+    "editor-system": "系統預設程式",
+    "editor-vscode": "Visual Studio Code",
+    "editor-cursor": "Cursor",
+    "editor-custom": "自訂命令…"
   },
   "error": {
     "not-git-repo": "非 Git 儲存庫",

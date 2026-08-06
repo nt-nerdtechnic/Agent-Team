@@ -206,7 +206,7 @@
       "option-select-hint": "This CLI captures the mouse — hold {key} while dragging to select text",
       "click-to-resume": "Click to resume",
       "resuming": "Resuming…",
-      "rebuild-tooltip": "Rebuild (resume) ⌘⇧B — kill and re-spawn via --resume at the current size to clear ghosting/overlap that can't be repainted. Interrupts the in-progress turn and reprints the conversation.",
+      "rebuild-tooltip": "Rebuild (resume) ⌘⇧R — kill and re-spawn via --resume at the current size to clear ghosting/overlap that can't be repainted. Interrupts the in-progress turn and reprints the conversation.",
       "rebuild-tooltip-disabled": "Rebuild needs an existing session to resume. Send a message first — the conversation transcript is created after the first turn.",
       "rebuild-busy-skipped": "CLI is busy — kept the running work, skipped rebuild",
       "rebuild-busy-skipped-batch": "{count} CLI(s) busy — kept running work, skipped rebuild",
@@ -285,6 +285,8 @@
     "copy-paths": "Copy paths",
     "open-diff": "Open Diff",
     "open-in-editor": "Open in editor",
+    "open-with": "Open with",
+    "open-in-default-editor": "Open in default editor",
     "open-remote-url": "Open remote URL",
     "ask-ai-about-file": "Ask AI about this file",
     "reveal-in-finder": "Reveal in Finder",
@@ -542,6 +544,16 @@
       "export-bundle": "Export Settings Bundle",
       "import-bundle": "Import Settings Bundle",
       "bundle-hint": "Exports Roles, Pipelines, MCP, Analyzer, non-sensitive AI Chat settings, and appearance preferences. API keys and tokens are redacted and are not overwritten on import."
+    },
+    "general": {
+      "default-editor": "Default editor",
+      "default-editor-hint": "Where Navide opens files and folders. Diff views always use the Mini-IDE.",
+      "default-editor-not-installed": "not installed",
+      "default-editor-redetect": "Re-detect",
+      "default-editor-custom-command": "Custom command",
+      "default-editor-custom-command-hint": "Placeholders: {'{'}file{'}'}, {'{'}dir{'}'}, {'{'}line{'}'}, {'{'}workspace{'}'}. Run directly, not through a shell.",
+      "default-editor-custom-command-empty": "Enter a command — until then Navide keeps opening files in the Mini-IDE.",
+      "default-editor-preset": "Preset"
     },
     "appearance": {
       "language": "Language",
@@ -1420,7 +1432,12 @@
     "initialized-with-gitignore": "Initialized the repository and created .gitignore",
     "initialized": "Initialized the repository",
     "cloned-into": "Cloned into {path}",
-    "cloned": "Cloned"
+    "cloned": "Cloned",
+    "editor-mini-ide": "Mini-IDE (built in)",
+    "editor-system": "System default application",
+    "editor-vscode": "Visual Studio Code",
+    "editor-cursor": "Cursor",
+    "editor-custom": "Custom command…"
   },
   "error": {
     "not-git-repo": "Not a Git repository",

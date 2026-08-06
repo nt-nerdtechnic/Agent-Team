@@ -2313,6 +2313,16 @@ async function fireLoopResume(paneId: string, logLabel: string): Promise<void> {
   // Re-arm turn-complete: the pre-limit turn's signal must not trigger an
   // instant continue right after the quota resumes.
   armLoopTurn(paneId)
+  // Drop the stall bookkeeping: an exhausted CLI answers short and repetitively
+  // ("you've hit your limit"), so the turns leading into the pause look stalled
+  // when the quota — not the agent — was the problem. Carrying that count over
+  // would stop the loop moments after it resumes on a fresh window.
+  const resumed = loopLimitWatchers.get(paneId)
+  if (resumed) {
+    resumed.stalledRuns = 0
+    resumed.lastTurnText = ''
+    resumed.nextContinueAt = 0
+  }
 }
 
 /** Auto-continue path for turn-complete (unattended loop). Sends the resume
@@ -4666,13 +4676,13 @@ const MAIN_SHORTCUTS = [
   { label: 'Open Settings',              keys: '⌘,' },
   { label: 'Open Mini-IDE',              keys: '⌘⇧I' },
   { label: 'Open Agent',                 keys: '⌘⇧U' },
-  { label: 'Rebuild Pane (Resume)',      keys: '⌘⇧B' },
+  { label: 'Rebuild Pane (Resume)',      keys: '⌘⇧R / ⌘⇧B' },
   { label: 'Find in Files',             keys: '⌘⇧F' },
   { label: 'Show Keyboard Shortcuts',   keys: '⌘K ⌘S' },
   { label: 'New Main Window',           keys: '⌘⇧N' },
   { label: 'Toggle AI Chat',            keys: '⌘⇧A / ⌘J' },
   { label: 'Show Explorer',             keys: '⌘⇧E' },
-  { label: 'Show Pipeline',             keys: '⌘⇧R' },
+  { label: 'Show Pipeline',             keys: '⌘⇧Y' },
   { label: 'Show Source Control',       keys: '⌘⇧G' },
   { label: 'Toggle Sidebar',            keys: '⌘B' },
   { label: 'Sidebar: Explorer Tab',     keys: '⌘1' },

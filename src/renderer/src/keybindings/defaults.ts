@@ -142,13 +142,19 @@ export const defaults: KeybindingRule[] = [
   // ── Workbench: sidebar & view ────────────────────────────────────────────────
   { key: 'cmd+b',       command: 'workbench.action.toggleSidebar' },
   { key: 'cmd+shift+e', command: 'workbench.action.focusExplorer' },
-  { key: 'cmd+shift+r', command: 'workbench.action.focusPipeline' },
+  // Pipeline moved off cmd+shift+r (now Rebuild, below) to cmd+shift+y — the
+  // only unclaimed cmd+shift+<letter> that macOS doesn't reserve.
+  { key: 'cmd+shift+y', command: 'workbench.action.focusPipeline' },
   { key: 'cmd+shift+g', command: 'workbench.action.focusSourceControl', when: '!findOpen' },
   { key: 'cmd+shift+i', command: 'workbench.action.openMiniIDE' },
   // cmd+shift+p is the command palette and cmd+shift+l is taken by
   // selectHighlights/addSelectionToChat, so Plans lives on cmd+shift+d.
   { key: 'cmd+shift+d', command: 'workbench.action.openPlans' },
   { key: 'cmd+shift+u', command: 'workbench.action.spawnAgent' },
+  // Rebuild is reachable two ways: cmd+shift+r is the primary chord (freed by
+  // dropping the forceReload menu role in main/menu.ts), cmd+shift+b is kept as
+  // the original alias.
+  { key: 'cmd+shift+r', command: 'workbench.action.rebuildFocusedPane' },
   { key: 'cmd+shift+b', command: 'workbench.action.rebuildFocusedPane' },
 
   // ── CLI type quick-select (ControlPane) ──────────────────────────────────────

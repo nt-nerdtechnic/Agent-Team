@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import type { useBackend } from '../composables/useBackend'
+import { useEditorTargets } from '../composables/useEditorTargets'
 import { useRecentWorkspaces, type RecentWorkspace } from '../composables/useRecentWorkspaces'
 
 const props = defineProps<{ backend: ReturnType<typeof useBackend> }>()
@@ -30,6 +31,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   disposeOpenChanged?.()
   disposeOpenChanged = null
+  window.removeEventListener('keydown', onCtxKeydown)
 })
 
 function isOpenElsewhere(path: string): boolean {
@@ -122,6 +124,67 @@ async function removeItem(item: RecentWorkspace, ev: Event): Promise<void> {
   ev.stopPropagation()
   await remove(item.path)
 }
+
+// ── Context menu ─────────────────────────────────────────────────────────────
+// Backdrop + fixed menu, following the PlansPane convention.
+const { editorTargets, loadEditorTargets } = useEditorTargets()
+const ctxMenu = ref<{ show: boolean; x: number; y: number; path: string }>({
+  show: false,
+  x: 0,
+  y: 0,
+  path: '',
+})
+const ctxMenuEl = ref<HTMLElement | null>(null)
+
+// Keep the menu inside the viewport: clamp with a rough size first so it never
+// spawns off-screen, then re-clamp once the real element is measured.
+function clampMenu(x: number, y: number, w: number, h: number): { x: number; y: number } {
+  return {
+    x: Math.max(8, Math.min(x, window.innerWidth - w - 8)),
+    y: Math.max(8, Math.min(y, window.innerHeight - h - 8)),
+  }
+}
+
+async function openCtxMenu(e: MouseEvent, item: RecentWorkspace): Promise<void> {
+  e.preventDefault()
+  const first = clampMenu(e.clientX, e.clientY, 200, 180)
+  ctxMenu.value = { show: true, x: first.x, y: first.y, path: item.path }
+  window.addEventListener('keydown', onCtxKeydown)
+  void loadEditorTargets()
+  await nextTick()
+  const el = ctxMenuEl.value
+  if (!el || !ctxMenu.value.show) return
+  const rect = el.getBoundingClientRect()
+  if (!rect.width && !rect.height) return
+  const fit = clampMenu(e.clientX, e.clientY, rect.width, rect.height)
+  if (fit.x !== ctxMenu.value.x || fit.y !== ctxMenu.value.y) {
+    ctxMenu.value = { ...ctxMenu.value, x: fit.x, y: fit.y }
+  }
+}
+
+function closeCtxMenu(): void {
+  window.removeEventListener('keydown', onCtxKeydown)
+  ctxMenu.value = { ...ctxMenu.value, show: false, path: '' }
+}
+
+function onCtxKeydown(e: KeyboardEvent): void {
+  if (e.key === 'Escape') closeCtxMenu()
+}
+
+function ctxOpenInEditor(editorId?: string): void {
+  void window.agentTeam?.openFolderInEditor(ctxMenu.value.path, editorId)
+  closeCtxMenu()
+}
+
+function ctxReveal(): void {
+  void window.agentTeam?.revealPath(ctxMenu.value.path)
+  closeCtxMenu()
+}
+
+function ctxCopyPath(): void {
+  void navigator.clipboard?.writeText(ctxMenu.value.path)
+  closeCtxMenu()
+}
 </script>
 
 <template>
@@ -159,6 +222,7 @@ async function removeItem(item: RecentWorkspace, ev: Event): Promise<void> {
             class="recent-item"
             :class="{ stale: !item.exists }"
             @click="openWorkspace(item.path)"
+            @contextmenu="openCtxMenu($event, item)"
           >
             <button
               class="pin"
@@ -197,6 +261,27 @@ async function removeItem(item: RecentWorkspace, ev: Event): Promise<void> {
         <button class="link" @click="emit('open-settings')">⚙ {{ $t('action.settings') }}</button>
       </footer>
     </div>
+
+    <template v-if="ctxMenu.show">
+      <div class="ctx-backdrop" @click="closeCtxMenu" @contextmenu.prevent="closeCtxMenu" />
+      <div ref="ctxMenuEl" class="ctx-menu" :style="{ top: ctxMenu.y + 'px', left: ctxMenu.x + 'px' }" @click.stop>
+        <button class="menu-item" @click="ctxOpenInEditor()">{{ $t('action.open-in-default-editor') }}</button>
+        <div class="menu-item has-sub">
+          <span>{{ $t('action.open-with') }}</span><span class="sub-caret">▸</span>
+          <div class="ctx-submenu">
+            <button
+              v-for="target in editorTargets"
+              :key="target.id"
+              class="menu-item"
+              @click="ctxOpenInEditor(target.id)"
+            >{{ $t(target.labelKey) }}</button>
+          </div>
+        </div>
+        <div class="menu-sep" />
+        <button class="menu-item" @click="ctxReveal">{{ $t('action.reveal-in-finder') }}</button>
+        <button class="menu-item" @click="ctxCopyPath">{{ $t('action.copy-path') }}</button>
+      </div>
+    </template>
   </div>
 </template>
 
@@ -414,5 +499,68 @@ button.link {
 }
 button.link:hover {
   color: var(--text-bright);
+}
+.ctx-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+.ctx-menu {
+  position: fixed;
+  z-index: 41;
+  min-width: 180px;
+  background: var(--bg-base);
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px var(--shadow-overlay);
+  padding: 4px;
+}
+.ctx-menu .menu-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 5px 10px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.ctx-menu .menu-item:hover {
+  background: var(--bg-active);
+}
+.ctx-menu .menu-sep {
+  height: 1px;
+  background: var(--border-muted);
+  margin: 4px 0;
+}
+/* Hover submenu (Open with ▸) */
+.ctx-menu .menu-item.has-sub {
+  position: relative;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ctx-menu .sub-caret {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+.ctx-menu .ctx-submenu {
+  position: absolute;
+  top: -5px;
+  left: 100%;
+  margin-left: 2px;
+  display: none;
+  min-width: 180px;
+  background: var(--bg-base);
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  padding: 4px;
+  box-shadow: 0 8px 24px var(--shadow-overlay);
+}
+.ctx-menu .menu-item.has-sub:hover .ctx-submenu {
+  display: block;
 }
 </style>
