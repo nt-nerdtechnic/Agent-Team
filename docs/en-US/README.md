@@ -38,6 +38,7 @@ The root [README](../../README.md) introduces the product and current distributi
 | [Architecture](architecture.md) | Understand process boundaries, state ownership, and major services |
 | [CLI extension guide](cli-extension-guide.md) | Add or maintain an AI coding CLI integration |
 | [Plugin development](plugin-development.md) | Build a frontend view plugin or a backend plugin, then package and sign it |
+| [External MCP control](external-mcp-control.md) | Connect an external MCP client to control a running Navide window, and understand the security model |
 | [Release guide](releases.md) | Version, package, sign, notarize, publish, and recover a release |
 
 ## Reference

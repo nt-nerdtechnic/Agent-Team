@@ -27,6 +27,15 @@ const cliTools: ToolRow[] = [
   { name: 'cli_list_targets', what: '有哪些 CLI pane 在線上、位址怎麼寫、對方是否忙碌' },
   { name: 'cli_send', what: '把任意指令送給指定的 pane（同工作區或跨工作區視窗）' },
   { name: 'cli_open_agent', what: '開一個新的 CLI pane 並指派任務，完成後它會回報' },
+  { name: 'cli_read_log', what: '讀取另一個 pane 對話紀錄的結尾（預設 200 行）' },
+  { name: 'cli_get_status', what: '查另一個 pane 是否忙碌、最近一次活動' },
+  { name: 'cli_wait_idle', what: '等到另一個 pane 閒置或逾時（最長 120 秒）' },
+]
+
+const uiTools: ToolRow[] = [
+  { name: 'ui_list_actions', what: '列出目標視窗目前註冊的所有動作 id' },
+  { name: 'ui_invoke', what: '呼叫一個註冊動作（例如開新 pane、切分頁、開設定）' },
+  { name: 'ui_snapshot', what: '取得目標視窗目前的 UI 狀態快照（pane、分頁、焦點…）' },
 ]
 
 const comparison: CompareRow[] = [
@@ -62,7 +71,7 @@ const comparison: CompareRow[] = [
   <div class="mh">
     <p class="mh-intro">
       MCP（Model Context Protocol）是一套讓 AI agent 呼叫外部工具的通用協定。
-      Navide 用到它的地方有<strong>兩個方向</strong>，兩者除了協定同名之外沒有關係——
+      Navide 用到它的地方有<strong>三個方向</strong>，彼此除了協定同名之外沒有關係——
       這是最常見的誤解來源，所以先分清楚。
     </p>
 
@@ -81,6 +90,14 @@ const comparison: CompareRow[] = [
         <p class="mh-dir-text">
           Navide 後端連到外部 MCP server 讀取技術文件，附加到流程的開場提示裡。
           在<strong>設定 → MCP</strong> 設定，<strong>只在跑流程時作用</strong>。
+        </p>
+      </div>
+      <div class="mh-dir">
+        <div class="mh-dir-arrow">外部 client → Navide</div>
+        <div class="mh-dir-title">外部控制</div>
+        <p class="mh-dir-text">
+          Navide process 之外的 client（腳本、另一個 agent……）也能操作 Navide 本身。
+          <strong>預設關閉</strong>，要在<strong>設定 → MCP → External access</strong> 手動開啟。
         </p>
       </div>
     </div>
@@ -166,9 +183,45 @@ const comparison: CompareRow[] = [
       </div>
     </section>
 
+    <!-- ── 方向三 ───────────────────────────────────────────────────── -->
+    <section class="mh-section">
+      <h2 class="mh-h2">方向三：外部 client 控制 Navide</h2>
+      <p class="mh-p">
+        跟方向一同一個端點（<code>/plan-mcp</code>），但開放給 <strong>Navide process 之外</strong>
+        的 client 連——外部腳本、跑在別處的 agent、任何 MCP client 都算。除了方向一那些工具，
+        還多了兩組：
+      </p>
+
+      <h3 class="mh-h3">操作 Navide 介面</h3>
+      <div class="mh-tablewrap">
+        <table class="mh-table">
+          <tbody>
+            <tr v-for="t in uiTools" :key="t.name">
+              <td class="mh-tool"><code>{{ t.name }}</code></td>
+              <td>{{ t.what }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="mh-note">
+        <code>ui_invoke</code> 能呼叫的動作 id（例如 <code>ui.pane.create</code>、
+        <code>ui.settings.open</code>）要先用 <code>ui_list_actions</code> 查——它會列出目標視窗
+        當下註冊的所有 id，實際可用的以那份清單為準。
+      </p>
+
+      <div class="mh-warn">
+        <p><strong>開啟後，本機任何程式皆可控制 Navide。</strong>能做的事包括開關 pane、跨工作區傳訊、
+          讀取其他 pane 的對話紀錄、操作介面。連線網址（含一次性 token）在
+          <strong>設定 → MCP → External access</strong> 複製，「重新產生 token」會讓舊網址立即失效。</p>
+        <p>同一個面板裡的 <strong>Chrome DevTools Protocol</strong> 開關是另一條、更底層的逃生口——
+          給截圖或還沒註冊成動作的操作用，不是主要路徑。它一旦開啟，本機任何行程都能對 Navide
+          執行任意程式碼，且僅綁定 127.0.0.1，需要重啟 App 才生效。</p>
+      </div>
+    </section>
+
     <!-- ── 對照 ─────────────────────────────────────────────────────── -->
     <section class="mh-section">
-      <h2 class="mh-h2">兩個方向的對照</h2>
+      <h2 class="mh-h2">方向一與方向二的對照</h2>
       <div class="mh-tablewrap">
         <table class="mh-table">
           <thead>
@@ -216,6 +269,11 @@ const comparison: CompareRow[] = [
             <tr>
               <td>提示 pane 身分已失效</td>
               <td>pane 被拆到別的視窗或視窗重新載入過，接線時記下的身分過期了。重開該 pane。</td>
+            </tr>
+            <tr>
+              <td>外部 client 連線被拒（external token rejected / disabled）</td>
+              <td>方向三預設關閉，要先在設定 → MCP → External access 開啟；或是網址裡的 token
+                  已經被「重新產生 token」換掉，複製最新的連線網址即可。</td>
             </tr>
           </tbody>
         </table>
