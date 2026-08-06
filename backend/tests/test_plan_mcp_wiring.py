@@ -158,6 +158,39 @@ def test_wire_codex_second_run_is_noop() -> None:
     assert plan_mcp_wiring.wire_command("codex", once, 4567) == once
 
 
+# ---- wire_command: copilot ----
+
+
+def test_wire_copilot_appends_inline_config() -> None:
+    wired = plan_mcp_wiring.wire_command("copilot", "copilot --allow-all-tools", 4567)
+    inline = plan_mcp_wiring.inline_mcp_config(4567)
+    assert wired == f"copilot --allow-all-tools --additional-mcp-config {shlex.quote(inline)}"
+    assert "client=host" in wired
+
+
+def test_wire_copilot_shell_wrapper_and_pane_credential() -> None:
+    command = ["/bin/zsh", "-ilc", "copilot"]
+    wired = plan_mcp_wiring.wire_command("copilot", command, 4567, pane_id="p1")
+    assert wired[:2] == ["/bin/zsh", "-ilc"]
+    assert wired[2].startswith("copilot --additional-mcp-config ")
+    assert "pane=p1" in wired[2] and "client=host" not in wired[2]
+    assert command[2] == "copilot"  # input untouched
+
+
+def test_wire_copilot_second_run_is_noop() -> None:
+    once = plan_mcp_wiring.wire_command("copilot", "copilot", 4567)
+    assert plan_mcp_wiring.wire_command("copilot", once, 4567) == once
+
+
+def test_wire_copilot_keeps_user_additional_config() -> None:
+    """copilot's flag is additive and repeatable, so a user's own
+    --additional-mcp-config is augmented, not stepped aside for."""
+    command = "copilot --additional-mcp-config @/home/user/servers.json"
+    wired = plan_mcp_wiring.wire_command("copilot", command, 4567)
+    assert wired.startswith(command + " --additional-mcp-config ")
+    assert plan_mcp_wiring.SERVER_NAME in wired
+
+
 # ---- wire_command: gates ----
 
 
@@ -247,7 +280,7 @@ async def test_terminal_create_wires_claude_pane(
     # the caller token) — which means claude gets the config inline rather than
     # as a path, so no per-pane file is left behind.
     created = session.terminals.created[0]  # type: ignore[attr-defined]
-    inline = plan_mcp_wiring.claude_inline_config(4567, "pane-1")
+    inline = plan_mcp_wiring.inline_mcp_config(4567, "pane-1")
     assert created["command"][2] == (
         f"claude --dangerously-skip-permissions --mcp-config {shlex.quote(inline)}"
     )

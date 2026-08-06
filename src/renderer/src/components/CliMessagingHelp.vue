@@ -27,14 +27,15 @@ interface CoverageRow {
   sendKind: 'both' | 'protocol' | 'none'
 }
 
-// Sending needs one of the two routes. The MCP tools are wired only for claude
-// and codex; the output protocol needs Navide to read the agent's turn text,
-// which only four vendors' logs actually carry. Receiving is unaffected either
-// way — that is text injected into the terminal.
+// Sending needs one of the two routes. The MCP tools are wired only for claude,
+// codex and copilot — the three CLIs with an additive spawn-time flag for it;
+// the output protocol needs Navide to read the agent's turn text, which only
+// four vendors' logs actually carry. Receiving is unaffected either way — that
+// is text injected into the terminal.
 const coverage: CoverageRow[] = [
   { cli: 'Claude Code', send: 'MCP 工具 ＋ 輸出協定', sendKind: 'both' },
   { cli: 'Codex', send: 'MCP 工具 ＋ 輸出協定', sendKind: 'both' },
-  { cli: 'Copilot CLI', send: '僅輸出協定', sendKind: 'protocol' },
+  { cli: 'Copilot CLI', send: 'MCP 工具 ＋ 輸出協定', sendKind: 'both' },
   { cli: 'Aider', send: '僅輸出協定', sendKind: 'protocol' },
   { cli: 'Antigravity CLI', send: '目前不支援', sendKind: 'none' },
   { cli: 'Grok CLI', send: '目前不支援', sendKind: 'none' },
