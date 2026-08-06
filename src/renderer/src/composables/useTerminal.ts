@@ -2,6 +2,7 @@ import { computed, onScopeDispose, ref, shallowRef, watch } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
+import { SerializeAddon } from '@xterm/addon-serialize'
 import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
 import type { useBackend } from './useBackend'
@@ -968,6 +969,16 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // mid-line input repaints land at the wrong column (overlapping text).
   term.loadAddon(new Unicode11Addon())
   term.unicode.activeVersion = '11'
+  // Scrollback is persisted by serializing xterm's own buffer, NOT by hoarding
+  // the raw PTY bytes. Claude Code paints its whole screen with absolute cursor
+  // moves (measured on a real snapshot: 1300 ESC[r;cH, 2032 ESC[nG, zero \n),
+  // and those coordinates are constants baked in at the width they were drawn
+  // at. Replaying them into a terminal of a different width writes into the
+  // wrong cells — text lands on top of text and the leftovers stay on screen.
+  // Serializing emits the RESULT (glyphs + SGR) instead of the drawing
+  // instructions, so a replay only ever re-wraps.
+  const serializer = new SerializeAddon()
+  term.loadAddon(serializer)
 
   term.onResize(({ cols, rows }) => {
     if (cols > 0 && rows > 0) {
@@ -1407,7 +1418,6 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     firstOutputSeen = true
     term.write(chunk, onFirstOutput)
     appendClean(chunk)
-    appendToScrollBuffer(chunk)
   }
   let mounted = false
   let mountedEl: HTMLElement | null = null
@@ -2126,11 +2136,32 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // resumeKey, the snapshot is replayed into the fresh xterm instance before
   // the new PTY starts writing — giving instant scrollback access to prior work.
   const SCROLL_SNAP_MAX = 256 * 1024  // 256 KB rolling cap
-  const SCROLL_SNAP_MIN = 8 * 1024
-  let rawScrollBuffer = ''
+  // Scrollback is measured in lines, not bytes: the payload is produced by
+  // serializing xterm's buffer, and the only safe way to shrink it is to
+  // serialize fewer lines. Slicing the string would cut through an escape
+  // sequence and corrupt everything after the cut.
+  const SCROLL_SNAP_LINES = 2000
+  const SCROLL_SNAP_MIN_LINES = 100
+  // Set when a session ends cleanly: its scrollback must not be persisted, and
+  // unlike the old raw buffer there is nothing to clear — the content lives in
+  // xterm itself, which is still on screen at that point.
+  let snapshotDiscarded = false
+  // Marks a snapshot as a serialized buffer. Snapshots written before this
+  // format existed are raw PTY bytes: replaying those is exactly the bug this
+  // format was introduced to fix, so an unmarked snapshot is dropped rather
+  // than rendered. Without this, the first resume after an upgrade would still
+  // come back garbled.
+  const SNAP_FORMAT = 'nv1\n'
   function scrollSnapKey(): string { return `terminal-scroll:${persistKey}` }
   function loadScrollSnapshot(): string {
-    try { return localStorage.getItem(scrollSnapKey()) ?? '' } catch { return '' }
+    try {
+      const stored = localStorage.getItem(scrollSnapKey()) ?? ''
+      if (!stored.startsWith(SNAP_FORMAT)) {
+        if (stored) localStorage.removeItem(scrollSnapKey())  // reclaim the quota
+        return ''
+      }
+      return stored.slice(SNAP_FORMAT.length)
+    } catch { return '' }
   }
   // localStorage quota is shared across every pane's snapshot, and snapshots
   // of closed panes linger. On overflow, evict another pane's stale snapshot
@@ -2150,65 +2181,45 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       return true
     } catch { return false }
   }
+  // Render the buffer to a width-independent payload. excludeAltBuffer keeps a
+  // TUI's transient full-screen view (vim, a pager) out of the snapshot — only
+  // the normal buffer, which holds the conversation, is worth restoring; the
+  // CLI repaints its own alt-buffer view when it reattaches.
+  function serializeSnapshot(lines: number): string {
+    try {
+      return serializer.serialize({ scrollback: lines, excludeAltBuffer: true })
+    } catch {
+      return ''
+    }
+  }
   function saveScrollSnapshot(): void {
     const key = scrollSnapKey()
-    if (!rawScrollBuffer) {
+    let lines = SCROLL_SNAP_LINES
+    let payload = snapshotDiscarded ? '' : serializeSnapshot(lines)
+    // Halve the line count (never the string) until it fits the byte cap.
+    while (payload.length > SCROLL_SNAP_MAX && lines > SCROLL_SNAP_MIN_LINES) {
+      lines = Math.floor(lines / 2)
+      payload = serializeSnapshot(lines)
+    }
+    if (!payload.trim()) {
       try { localStorage.removeItem(key) } catch { /* ignore */ }
       return
     }
-    // appendToScrollBuffer lets the buffer overshoot the cap to avoid a slice
-    // per chunk; cut it back here, where it happens once per pane teardown.
-    let payload = rawScrollBuffer.length > SCROLL_SNAP_MAX
-      ? rawScrollBuffer.slice(-SCROLL_SNAP_MAX)
-      : rawScrollBuffer
     for (;;) {
       try {
-        localStorage.setItem(key, payload)
+        localStorage.setItem(key, SNAP_FORMAT + payload)
         return
       } catch {
         if (evictLargestOtherSnapshot(key)) continue
-        if (payload.length > SCROLL_SNAP_MIN) {
-          payload = payload.slice(-Math.floor(payload.length / 2))
+        if (lines > SCROLL_SNAP_MIN_LINES) {
+          lines = Math.floor(lines / 2)
+          payload = serializeSnapshot(lines)
           continue
         }
         console.warn(`[terminal] scrollback snapshot dropped for ${persistKey}: localStorage quota exhausted`)
         return
       }
     }
-  }
-  function appendToScrollBuffer(data: string): void {
-    rawScrollBuffer += data
-    // Same lazy-trim reasoning as cleanBuffer above: the slice flattens the
-    // rope and cost ~50µs on every chunk once the buffer was full. Trimming at
-    // twice the cap makes that per-chunk cost vanish; saveScrollSnapshot cuts
-    // the overshoot back to SCROLL_SNAP_MAX before persisting.
-    if (rawScrollBuffer.length > SCROLL_SNAP_MAX * 2) {
-      rawScrollBuffer = rawScrollBuffer.slice(-SCROLL_SNAP_MAX)
-    }
-  }
-
-  // Strip everything from the last unmatched \x1b[?1049h onward so replaying
-  // the snapshot never renders alt-buffer TUI content (cursor-positioning codes
-  // written at the old terminal width) into the fresh xterm instance.
-  function stripAltBufferSuffix(snap: string): string {
-    const ENTER = '\x1b[?1049h'
-    const EXIT  = '\x1b[?1049l'
-    let depth = 0
-    let lastEnterPos = -1
-    let i = 0
-    while (i < snap.length) {
-      if (snap.startsWith(ENTER, i)) {
-        if (depth === 0) lastEnterPos = i
-        depth++
-        i += ENTER.length
-      } else if (snap.startsWith(EXIT, i)) {
-        if (depth > 0 && --depth === 0) lastEnterPos = -1
-        i += EXIT.length
-      } else {
-        i++
-      }
-    }
-    return depth > 0 && lastEnterPos !== -1 ? snap.slice(0, lastEnterPos) : snap
   }
 
   // Rolling tail of what the user typed on the current line, used to spot the
@@ -2295,7 +2306,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       rememberSessionId('')  // the PTY is gone — don't try to reattach to it
       // Session ended cleanly — discard its scrollback snapshot so a future
       // pane with the same key doesn't see stale output from a closed session.
-      rawScrollBuffer = ''
+      snapshotDiscarded = true
       try { localStorage.removeItem(scrollSnapKey()) } catch {}
       const color = crashState.open ? 31 : 33
       term.writeln(`\r\n\x1b[${color}m[session] ${error.value || formatTerminalExit(payload)}\x1b[0m`)
@@ -2547,15 +2558,12 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // before the new PTY starts writing. Only for resume spawns that have a saved
     // snapshot — fresh spawns (no resumeKey) have no snapshot to replay.
     if (opts.resumeKey && opts.restoreMode !== 'fresh') {
-      // Strip any trailing alt-buffer content before replaying. The snapshot
-      // accumulates raw PTY output including Claude Code's TUI redraws; those
-      // cursor-positioning codes were written at the old terminal width and
-      // would render garbled in the fresh xterm. Only the main-buffer portion
-      // (before the last unmatched \x1b[?1049h) is safe to replay.
-      const snap = stripAltBufferSuffix(loadScrollSnapshot())
+      // The snapshot is a serialized buffer — glyphs and colours, no cursor
+      // positioning — so it renders correctly whatever width this pane now has.
+      // It re-wraps; it cannot land in the wrong cell.
+      const snap = loadScrollSnapshot()
       if (snap) {
         term.write(snap)
-        rawScrollBuffer = snap  // seed the buffer so new output appends correctly
         // Reset any mouse tracking modes the previous session may have enabled.
         term.write('\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?1004l\x1b[?2004l')
         term.write('\r\n\x1b[2m\x1b[38;5;240m─── reconnected ───\x1b[0m\r\n')
@@ -2934,10 +2942,10 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     outputUnsub = null
     exitUnsub?.()
     exitUnsub = null
-    // Flush any coalesced output that hadn't been written yet.
-    // We only update the visual terminal, not the scroll buffer: the exit handler
-    // intentionally clears rawScrollBuffer before calling us, so appending here
-    // would re-populate a snapshot that should stay discarded.
+    // Flush any coalesced output that hadn't been written yet. The snapshot is
+    // read straight off xterm's buffer at teardown, so there is no separate
+    // buffer to keep in step here; the exit handler sets snapshotDiscarded when
+    // this session's scrollback must not be persisted at all.
     if (_outputTimer) { clearTimeout(_outputTimer); _outputTimer = null }
     if (_pendingOutput) {
       term.write(_pendingOutput)
