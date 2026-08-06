@@ -17,6 +17,7 @@ import termios
 import threading
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import IO, Any, Awaitable, Callable
@@ -175,6 +176,16 @@ _OUTPUT_BATCH_MS = 50
 # _COALESCE_MS below is what actually reassembles it.
 _READ_CHUNK_BYTES = 64 * 1024
 
+# Because of the 1024-byte cap above, one readable callback that reads once
+# only ever takes 1 KB off the PTY, so a 20 KB repaint needs 20 trips through
+# the event loop — 20 decodes and 20 flush-scheduling rounds for one keystroke.
+# _on_readable instead drains until EAGAIN, which collapses those into a single
+# callback.  The drain is bounded so a sustained flood still yields to the loop:
+# _flush_output's remove_reader backpressure only engages between callbacks, and
+# an unbounded loop would starve every other session.  256 KB is an order of
+# magnitude above one repaint and well under _BUF_CAP.
+_READ_DRAIN_MAX_BYTES = 256 * 1024
+
 # Interactive fast path: keystroke echo is a trickle of bytes, and delaying it
 # the full batch window makes typing feel laggy (worst for IME input, where the
 # wait lands on the commit).  When a session produced less than
@@ -210,6 +221,18 @@ _FAST_PATH_MAX_BYTES = 192 * 1024
 # concern that motivated the 0ms path (a commit must not wait for a frame)
 # still holds.
 _COALESCE_MS = 2
+
+# PTY lifecycle work — registry register/unregister and zombie reaping — runs
+# on its own pool.  It used to share asyncio's default executor with
+# _snapshot_loop's _ps_snapshot, a full-system process scan that runs
+# continuously for as long as any session is live.  That is the same shape as
+# the shared-pool starvation this codebase has hit before, and the cost lands
+# where it hurts most: create()'s register call is what the terminal.create ack
+# waits on, so a queued process scan delays opening a pane.  Keeping the scans
+# on the default executor and the lifecycle calls here decouples the two.
+_LIFECYCLE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="pty-lifecycle"
+)
 
 
 def _ps_snapshot() -> dict[int, tuple[int, int, str]]:
@@ -315,6 +338,10 @@ class TerminalService:
         self._loop = asyncio.get_event_loop()
         # Per-session output batching state
         self._out_buffers: dict[str, list[str]] = {}   # session_id -> pending chunks
+        # Running total of len() over _out_buffers[session_id].  Kept alongside
+        # the list because the OOM guard needs the size on every append, and
+        # re-summing the whole buffer each time is quadratic in chunk count.
+        self._out_buf_bytes: dict[str, int] = {}       # session_id -> buffered chars
         self._out_handles: dict[str, asyncio.TimerHandle] = {}  # session_id -> timer
         # Per-session pending INPUT bytes not yet accepted by the non-blocking
         # PTY master (EAGAIN / partial write). Drained via add_writer.
@@ -408,7 +435,7 @@ class TerminalService:
         registry_future: asyncio.Future[Any] | None = None
         try:
             registry_future = asyncio.get_running_loop().run_in_executor(
-                None, pty_registry.register, proc.pid, argv
+                _LIFECYCLE_EXECUTOR, pty_registry.register, proc.pid, argv
             )
         except RuntimeError:
             # No running loop (non-async caller) — fall back to inline.
@@ -513,7 +540,9 @@ class TerminalService:
         # failed child in the crash-recovery registry.
         if registry_future is not None:
             registry_future.add_done_callback(
-                lambda future: self._loop.run_in_executor(None, unregister, future)
+                lambda future: self._loop.run_in_executor(
+                    _LIFECYCLE_EXECUTOR, unregister, future
+                )
             )
         else:
             unregister()
@@ -665,11 +694,15 @@ class TerminalService:
             decoded = decoder.decode(chunk)
             if decoded:
                 self._out_buffers.setdefault(session.id, []).append(decoded)
+                self._out_buf_bytes[session.id] = (
+                    self._out_buf_bytes.get(session.id, 0) + len(decoded)
+                )
         # 2. Cancel the pending batch timer; we emit synchronously below.
         handle = self._out_handles.pop(session.id, None)
         if handle:
             handle.cancel()
         # 3. Emit everything buffered, awaiting so it precedes the ack on the wire.
+        self._out_buf_bytes.pop(session.id, None)
         chunks = self._out_buffers.pop(session.id, None)
         if not chunks:
             return
@@ -769,13 +802,17 @@ class TerminalService:
                 pass
             try:
                 # Reap the zombie so poll() flips before we unregister.
-                await asyncio.to_thread(session.proc.wait, 1.0)
+                await self._loop.run_in_executor(
+                    _LIFECYCLE_EXECUTOR, session.proc.wait, 1.0
+                )
             except subprocess.TimeoutExpired:
                 pass
         # Reap breakaway grandchildren that escaped the process group via setsid.
         _kill_breakaway(descendants)
         if session.proc.poll() is not None:
-            await asyncio.to_thread(pty_registry.unregister, session.proc.pid)
+            await self._loop.run_in_executor(
+                _LIFECYCLE_EXECUTOR, pty_registry.unregister, session.proc.pid
+            )
 
     async def _snapshot_loop(self) -> None:
         """Keep every live session's descendant snapshot fresh. kill()
@@ -975,24 +1012,41 @@ class TerminalService:
     def _on_readable(self, session: TerminalSession) -> None:
         if session.closed:
             return
-        try:
-            chunk = os.read(session.master_fd, _READ_CHUNK_BYTES)
-        except BlockingIOError:
-            return
-        except OSError as err:
-            if err.errno in (errno.EIO,):
-                # PTY closed (child exited and tty was released)
-                self._close(session, reason="exit")
-                return
-            log.warning("read session %s failed: %s", session.id, err)
-            self._close(session, reason="error")
-            return
+        # Drain until the PTY would block, rather than taking one read per
+        # callback — see _READ_DRAIN_MAX_BYTES for why that mattered on macOS.
+        raw: list[bytes] = []
+        nbytes = 0
+        close_reason: str | None = None
+        while nbytes < _READ_DRAIN_MAX_BYTES:
+            try:
+                chunk = os.read(session.master_fd, _READ_CHUNK_BYTES)
+            except BlockingIOError:
+                break
+            except OSError as err:
+                if err.errno in (errno.EIO,):
+                    # PTY closed (child exited and tty was released)
+                    close_reason = "exit"
+                else:
+                    log.warning("read session %s failed: %s", session.id, err)
+                    close_reason = "error"
+                break
+            if not chunk:
+                close_reason = "exit"
+                break
+            raw.append(chunk)
+            nbytes += len(chunk)
 
-        if not chunk:
-            self._close(session, reason="exit")
-            return
+        # Whatever arrived before EOF still has to reach the client, and _close
+        # flushes the output buffer — so absorb first, then close.
+        if raw:
+            self._absorb_output(session, b"".join(raw), nbytes)
+        if close_reason is not None:
+            self._close(session, reason=close_reason)
 
-        # Accumulate decoded bytes; schedule a flush if not already pending.
+    def _absorb_output(
+        self, session: TerminalSession, chunk: bytes, nbytes: int
+    ) -> None:
+        """Decode one drained batch, buffer it, and schedule (or force) a flush."""
         _BUF_CAP = 5 * 1024 * 1024  # 5 MB — force an immediate flush if exceeded
         decoder = self._decoders.get(session.id)
         if decoder is None:
@@ -1005,9 +1059,10 @@ class TerminalService:
         buf.append(decoded)
         window = self._recent_chunks.setdefault(session.id, deque(maxlen=512))
         now = self._loop.time()
-        window.append((now, len(chunk)))
-        self._note_fastpath_stats(session, len(chunk), now)
-        buf_size = sum(len(s) for s in buf)
+        window.append((now, nbytes))
+        self._note_fastpath_stats(session, nbytes, now)
+        buf_size = self._out_buf_bytes.get(session.id, 0) + len(decoded)
+        self._out_buf_bytes[session.id] = buf_size
         if buf_size >= _BUF_CAP:
             # Cancel the pending debounce timer and flush now to avoid OOM.
             existing = self._out_handles.pop(session.id, None)
@@ -1074,6 +1129,7 @@ class TerminalService:
         frame (large frames have been observed to trigger the crash).
         """
         self._out_handles.pop(session.id, None)
+        self._out_buf_bytes.pop(session.id, None)
         chunks = self._out_buffers.pop(session.id, None)
         if not chunks:
             return
@@ -1177,6 +1233,9 @@ class TerminalService:
             tail = decoder.decode(b"", final=True)
             if tail:
                 self._out_buffers.setdefault(session.id, []).append(tail)
+                self._out_buf_bytes[session.id] = (
+                    self._out_buf_bytes.get(session.id, 0) + len(tail)
+                )
         self._flush_output(session)
         # Best-effort wait for child to avoid zombies
         try:
@@ -1243,4 +1302,6 @@ class TerminalService:
         # visible to the next start's reap_stale. kill()'s escalation task
         # and kill_all() unregister the survivors they put down.
         if session.proc.poll() is not None:
-            self._loop.run_in_executor(None, pty_registry.unregister, session.proc.pid)
+            self._loop.run_in_executor(
+                _LIFECYCLE_EXECUTOR, pty_registry.unregister, session.proc.pid
+            )
