@@ -71,6 +71,12 @@ Implementation: [`plan_mcp.py`](../../backend/agent_team_backend/plugins/builtin
 any live pane's workspace — the file is written, but Navide's plan window
 won't find it.
 
+`plan_list` returns a list, and MCP delivers a list as **one content block
+per item** rather than a single JSON array. Concatenating the blocks and
+parsing once fails with `Extra data`; parse each block on its own, or read
+the call's `structuredContent`. Every other tool here returns a single
+object, so this only bites on `plan_list`.
+
 ### CLI panes — messaging and spawning
 
 | Tool | Parameters | What it does |
