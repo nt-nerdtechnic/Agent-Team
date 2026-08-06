@@ -31,6 +31,7 @@ import {
   type CandidateWindow
 } from './cross-window-drag'
 import { readHealthCheckTimeoutSec, writeHealthCheckTimeoutSec } from './health-timeout'
+import { readCdpDebugConfig, writeCdpDebugConfig, type CdpDebugConfig } from './cdp-debug'
 import { classifyEditorOpen, resolveExternalOpenTarget } from './editor-fallback'
 import { findManualLogFile } from './manual-log-search'
 import { searchLogFiles } from './log-content-search'
@@ -167,6 +168,10 @@ const windowRegistry = new WindowRegistry(() => join(app.getPath('userData'), 'o
 // startBackend() (called before any renderer window exists) can read it.
 // Path resolved lazily for the same reason as windowRegistry's, above.
 const healthTimeoutPath = (): string => join(app.getPath('userData'), 'health-check-timeout.json')
+// Chrome DevTools Protocol (CDP) debug toggle: user-configurable via Settings.
+// Path resolved lazily for the same dev-userData reason as above — see the
+// pre-ready read of this file, below the dev userData override.
+const cdpDebugPath = (): string => join(app.getPath('userData'), 'cdp-debug.json')
 // Git account registry: main-owned, safeStorage-encrypted PATs bound per
 // workspace (see gitAccountsStore.ts). Built lazily so app.getPath / safeStorage
 // are only touched after the app is ready (IPC calls arrive from renderers).
@@ -1507,6 +1512,22 @@ ipcMain.handle('settings:health-timeout-write', (_event, timeoutSec: number) => 
   }
 })
 
+// CDP debug toggle read/write. The port/address switches themselves are
+// applied at pre-ready startup (above) — a write here only takes effect after
+// the app is restarted.
+ipcMain.handle('settings:cdp-debug-read', () => {
+  return { ok: true, config: readCdpDebugConfig(cdpDebugPath()) }
+})
+
+ipcMain.handle('settings:cdp-debug-write', (_event, config: CdpDebugConfig) => {
+  try {
+    writeCdpDebugConfig(cdpDebugPath(), config)
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: String(e) }
+  }
+})
+
 // Git account registry IPC. CRUD + per-workspace binding live in main because
 // safeStorage (token encryption) is a main-process API; the renderer only sees
 // masked accounts and, at git-op time, the decrypted credential for the bound
@@ -1611,6 +1632,16 @@ app.commandLine.appendSwitch('disable-gpu')
 // builds are untouched.
 if (!app.isPackaged) {
   app.setPath('userData', `${app.getPath('userData')}-dev`)
+}
+
+// Chrome DevTools Protocol (CDP) debug toggle (Settings > MCP > External
+// access). Must be applied before the app is ready — Electron only honors
+// --remote-debugging-port set at this point. readCdpDebugConfig resolves any
+// read/parse failure to disabled, so a bad file can never turn this on.
+const cdpDebugConfig = readCdpDebugConfig(cdpDebugPath())
+if (cdpDebugConfig.enabled) {
+  app.commandLine.appendSwitch('remote-debugging-port', String(cdpDebugConfig.port))
+  app.commandLine.appendSwitch('remote-debugging-address', '127.0.0.1')
 }
 
 // Folder paths handed to the app from outside (Finder "Open With", a macOS

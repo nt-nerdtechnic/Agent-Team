@@ -303,6 +303,10 @@ contextBridge.exposeInMainWorld('agentTeam', {
     ipcRenderer.invoke('settings:health-timeout-read'),
   writeHealthCheckTimeout: (timeoutSec: number): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('settings:health-timeout-write', timeoutSec),
+  readCdpDebugConfig: (): Promise<{ ok: boolean; config?: { enabled: boolean; port: number } }> =>
+    ipcRenderer.invoke('settings:cdp-debug-read'),
+  writeCdpDebugConfig: (config: { enabled: boolean; port: number }): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('settings:cdp-debug-write', config),
   notify: (args: { paneId?: string; title: string; body?: string }): Promise<{ ok: boolean }> =>
     ipcRenderer.invoke('window:notify', args),
   // Plan execute dispatch: the plan window hands an approved plan to a CLI
