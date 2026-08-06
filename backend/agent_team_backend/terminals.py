@@ -168,6 +168,11 @@ _OUTPUT_BATCH_MS = 50
 # echo paid the full batch delay for as long as the user kept typing — the
 # window never got a chance to cool down.  Chunk count only means "sustained
 # stream" if a chunk is big enough to represent real throughput.
+#
+# CAVEAT (measured 2026-08-06): on macOS this size is aspirational.  A PTY
+# master read returns at most 1024 bytes however much is asked for — a 200 KB
+# burst comes back as 196 reads, never one — so a repaint is still split here.
+# _COALESCE_MS below is what actually reassembles it.
 _READ_CHUNK_BYTES = 64 * 1024
 
 # Interactive fast path: keystroke echo is a trickle of bytes, and delaying it
@@ -188,6 +193,23 @@ _READ_CHUNK_BYTES = 64 * 1024
 # below what a real output flood sustains.
 _FAST_PATH_WINDOW_S = 0.1
 _FAST_PATH_MAX_BYTES = 192 * 1024
+
+# Coalescing window on the interactive fast path.  Flushing on the next loop
+# tick (0ms) sounds like the lowest-latency choice, but because macOS caps a
+# PTY read at 1024 bytes (see _READ_CHUNK_BYTES), one 20 KB repaint arrives as
+# ~20 reads and each got its own flush — 20 WebSocket frames per keystroke,
+# every one of them paying a remove_reader/send/add_reader cycle that stops
+# draining the PTY while it sends, and costing the renderer 20 parses and 20
+# xterm writes.  Waiting 2ms lets a whole repaint land in one flush.
+#
+# Measured (20 KB-per-keystroke TUI, 60 keystrokes, same round):
+#   0ms: p50 7.6ms, p95 34.7ms, 20 frames/keystroke
+#   2ms: p50 5.4ms, p95 25.1ms,  1 frame/keystroke
+# The window pays for itself — the per-frame overhead it removes exceeds the
+# wait.  It stays well under one 16.7ms display frame, so the IME-commit
+# concern that motivated the 0ms path (a commit must not wait for a frame)
+# still holds.
+_COALESCE_MS = 2
 
 
 def _ps_snapshot() -> dict[int, tuple[int, int, str]]:
@@ -1032,11 +1054,11 @@ class TerminalService:
         return sum(nbytes for _, nbytes in window)
 
     def _flush_delay(self, session_id: str) -> float:
-        """Batch delay for the next flush: 0 (next loop tick) while the output
-        rate looks interactive, _OUTPUT_BATCH_MS once it looks like a stream."""
+        """Batch delay for the next flush: _COALESCE_MS while the output rate
+        looks interactive, _OUTPUT_BATCH_MS once it looks like a stream."""
         if self._window_bytes(session_id) > _FAST_PATH_MAX_BYTES:
             return _OUTPUT_BATCH_MS / 1000
-        return 0.0
+        return _COALESCE_MS / 1000
 
     def _flush_output(self, session: TerminalSession) -> None:
         """Send all buffered output for this session as a single WS message.

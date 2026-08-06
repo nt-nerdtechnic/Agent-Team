@@ -2,9 +2,10 @@
 
 Keystroke echo used to wait the full 50ms batch window before reaching the
 renderer, making typing feel laggy (worst for IME input, where the wait lands
-on the commit). Low-rate output now flushes on the next loop tick; sustained
-streams still fall back to 50ms batching so the Electron flood protection
-holds.
+on the commit). Low-rate output now flushes after a 2ms coalescing window —
+long enough to reassemble a repaint that macOS split into 1 KB reads, far
+short of a display frame; sustained streams still fall back to 50ms batching
+so the Electron flood protection holds.
 """
 
 import asyncio
@@ -15,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_team_backend.terminals import (
+    _COALESCE_MS,
     _FAST_PATH_MAX_BYTES,
     _FAST_PATH_WINDOW_S,
     _OUTPUT_BATCH_MS,
@@ -146,7 +148,7 @@ async def test_many_tiny_chunks_stay_on_the_fast_path():
             svc._on_readable(session)
             _cancel_pending_flush(svc, "t-tiny")  # force a delay re-evaluation
         assert svc._window_bytes("t-tiny") == 50
-        assert svc._flush_delay("t-tiny") == 0.0
+        assert svc._flush_delay("t-tiny") == _COALESCE_MS / 1000
     finally:
         _cancel_pending_flush(svc, "t-tiny")
         os.close(r)
@@ -178,7 +180,7 @@ async def test_one_viewport_repaint_stays_on_the_fast_path():
         # envelope, so the next flush stays interactive.
         assert len(svc._recent_chunks["t-repaint"]) == 1
         assert svc._window_bytes("t-repaint") <= _FAST_PATH_MAX_BYTES
-        assert svc._flush_delay("t-repaint") == 0.0
+        assert svc._flush_delay("t-repaint") == _COALESCE_MS / 1000
         assert _pending_delay(svc, "t-repaint") < _OUTPUT_BATCH_MS / 1000 / 2
     finally:
         _cancel_pending_flush(svc, "t-repaint")
@@ -194,7 +196,7 @@ async def test_quiet_period_restores_fast_path():
 
     stale = now - _FAST_PATH_WINDOW_S * 10
     svc._recent_chunks["t-idle"] = deque([(stale, _FAST_PATH_MAX_BYTES * 2)])
-    assert svc._flush_delay("t-idle") == 0.0
+    assert svc._flush_delay("t-idle") == _COALESCE_MS / 1000
     # And a saturated recent window batches.
     svc._recent_chunks["t-busy"] = deque([(now, _FAST_PATH_MAX_BYTES + 1)])
     assert svc._flush_delay("t-busy") == _OUTPUT_BATCH_MS / 1000
