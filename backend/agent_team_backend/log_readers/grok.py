@@ -247,6 +247,19 @@ class GrokLogReader(LogReader):
         last_seen_at: dict[str, float] = {}
         cwds: dict[str, str] = {}
 
+        def _complete(sid: str, state: dict, detail: str) -> ActivityEvent:
+            # The turn's own last message supplies the timestamp. It must be a
+            # real one: the frontend dedups messaging turns by timestamp and
+            # treats an unparseable one as always-fresh, which would resend a
+            # turn delivered twice and replay history after a backend restart.
+            return ActivityEvent(
+                vendor="grok", event_type="turn_complete",
+                cwd=cwds.get(sid, ""), session_id=sid, file_path=str(path),
+                dedup_key=f"turn:{sid}:{int(state['idx'])}",
+                timestamp=str(state.get("ts") or ""), detail=detail,
+                text=str(texts.get(sid) or ""),
+            )
+
         for session_id, seq, role, message_json, created_at, ws_root in rows:
             sid = str(session_id or "")
             key = f"act:{sid}:{seq}"
@@ -259,23 +272,20 @@ class GrokLogReader(LogReader):
             if role_name not in ("user", "assistant"):
                 continue
             state = states.get(sid)
+            created = str(created_at or "")
             text = ""
             if role_name == "user":
                 if state is not None and not state.get("flushed"):
-                    out.append(ActivityEvent(
-                        vendor="grok", event_type="turn_complete",
-                        cwd=cwds[sid], session_id=sid, file_path=str(path),
-                        dedup_key=f"turn:{sid}:{state['idx']}", timestamp="",
-                        detail="boundary", text=str(texts.get(sid) or ""),
-                    ))
+                    out.append(_complete(sid, state, "boundary"))
                     texts.pop(sid, None)
                 idx = (int(state["idx"]) + 1) if state is not None else 0
-                states[sid] = {"idx": idx, "flushed": False}
+                states[sid] = {"idx": idx, "flushed": False, "ts": created}
                 text = user_prompt_text(_message_text(message_json))
             else:
                 if state is None or state.get("flushed"):
                     idx = (int(state["idx"]) + 1) if state is not None else 0
-                    states[sid] = {"idx": idx, "flushed": False}
+                    states[sid] = {"idx": idx, "flushed": False, "ts": created}
+                states[sid]["ts"] = created
                 reply = _message_text(message_json).strip()
                 if reply:
                     texts[sid] = _cap_text(reply)
@@ -294,12 +304,7 @@ class GrokLogReader(LogReader):
             seen_at = last_seen_at.get(sid, 0.0)
             if seen_at <= 0.0 or now - seen_at < _TURN_IDLE_SECONDS:
                 continue
-            out.append(ActivityEvent(
-                vendor="grok", event_type="turn_complete",
-                cwd=cwds.get(sid, ""), session_id=sid, file_path=str(path),
-                dedup_key=f"turn:{sid}:{state['idx']}", timestamp="",
-                detail="idle", text=str(texts.get(sid) or ""),
-            ))
+            out.append(_complete(sid, state, "idle"))
             state["flushed"] = True
             texts.pop(sid, None)
 

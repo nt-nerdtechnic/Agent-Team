@@ -406,9 +406,14 @@ def test_parse_activity_completes_a_turn_with_the_assistant_reply(
     con.close()
     # _NOW is far in the past relative to the real clock, so the session reads
     # as quiet without having to move time.
-    assert _completes(reader.parse_activity(db, set())) == [
+    events = reader.parse_activity(db, set())
+    assert _completes(events) == [
         ("turn:aaaaaaaaaaa1:0", "idle", "done, handing over")
     ]
+    # A real timestamp is what the frontend dedups messaging turns by; an
+    # unparseable one reads as always-fresh and resends the turn.
+    completes = [e for e in events if e.event_type == "turn_complete"]
+    assert completes[0].timestamp == _NOW
 
 
 def test_parse_activity_open_turn_stays_open_while_the_session_is_live(

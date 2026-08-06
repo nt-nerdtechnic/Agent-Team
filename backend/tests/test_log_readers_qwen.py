@@ -310,6 +310,9 @@ def test_parse_activity_completes_a_turn_with_the_assistant_reply(
     assert [(e.dedup_key, e.detail, e.text) for e in completes] == [
         ("turn:0", "idle", "done, handing over")
     ]
+    # A real timestamp is what the frontend dedups messaging turns by; an
+    # unparseable one reads as always-fresh and resends the turn.
+    assert completes[0].timestamp == "2026-07-27T10:00:00.000Z"
 
 
 def test_parse_activity_open_turn_is_not_completed_while_the_log_is_live(

@@ -432,11 +432,16 @@ class PiLogReader(LogReader):
                 state = None
         last_text = _read_sentinel(seen_keys, _TEXT_PREFIX)
 
-        def _complete(idx: int, detail: str) -> ActivityEvent:
+        def _complete(state: dict, detail: str) -> ActivityEvent:
+            # The turn's own last entry supplies the timestamp. It must be a
+            # real one: the frontend dedups messaging turns by timestamp and
+            # treats an unparseable one as always-fresh, which would resend a
+            # turn delivered twice and replay history after a backend restart.
             return ActivityEvent(
                 vendor="pi", event_type="turn_complete",
                 cwd=cwd, session_id=session_id, file_path=str(path),
-                dedup_key=f"turn:{idx}", timestamp="", detail=detail,
+                dedup_key=f"turn:{int(state['idx'])}",
+                timestamp=str(state.get("ts") or ""), detail=detail,
                 text=last_text,
             )
 
@@ -466,13 +471,14 @@ class PiLogReader(LogReader):
                     # User message content is either a plain string or text
                     # blocks; carry it so the frontend can name the pane.
                     text = ""
+                    entry_ts = str(rec.get("timestamp") or "")
                     if role == "user":
                         # A new message closes the previous turn (if open).
                         if state is not None and not state.get("flushed"):
-                            out.append(_complete(int(state["idx"]), "boundary"))
+                            out.append(_complete(state, "boundary"))
                             last_text = ""
                         idx = (int(state["idx"]) + 1) if state is not None else 0
-                        state = {"idx": idx, "flushed": False}
+                        state = {"idx": idx, "flushed": False, "ts": entry_ts}
                         text = user_prompt_text(
                             join_text_blocks(msg.get("content"), "text")
                         )
@@ -481,7 +487,8 @@ class PiLogReader(LogReader):
                         # resumed session joined mid-turn) still opens a turn.
                         if state is None or state.get("flushed"):
                             idx = (int(state["idx"]) + 1) if state is not None else 0
-                            state = {"idx": idx, "flushed": False}
+                            state = {"idx": idx, "flushed": False, "ts": entry_ts}
+                        state["ts"] = entry_ts
                         reply = join_text_blocks(msg.get("content"), "text").strip()
                         if reply:
                             last_text = _cap_text(reply)
@@ -502,7 +509,7 @@ class PiLogReader(LogReader):
                 except OSError:
                     quiet_for = 0.0
                 if quiet_for >= _TURN_IDLE_SECONDS:
-                    out.append(_complete(int(state["idx"]), "idle"))
+                    out.append(_complete(state, "idle"))
                     state["flushed"] = True
                     last_text = ""
 

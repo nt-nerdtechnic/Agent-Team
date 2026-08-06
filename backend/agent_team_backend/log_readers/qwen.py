@@ -347,11 +347,16 @@ class QwenLogReader(LogReader):
                 state = None
         last_text = _read_sentinel(seen_keys, _TEXT_PREFIX)
 
-        def _complete(idx: int, detail: str) -> ActivityEvent:
+        def _complete(state: dict, detail: str) -> ActivityEvent:
+            # The turn's own last record supplies the timestamp. It must be a
+            # real one: the frontend dedups messaging turns by timestamp and
+            # treats an unparseable one as always-fresh, which would resend a
+            # turn delivered twice and replay history after a backend restart.
             return ActivityEvent(
                 vendor="qwen", event_type="turn_complete",
                 cwd=cwd, session_id=session_id, file_path=str(path),
-                dedup_key=f"turn:{idx}", timestamp="", detail=detail,
+                dedup_key=f"turn:{int(state['idx'])}",
+                timestamp=str(state.get("ts") or ""), detail=detail,
                 text=last_text,
             )
 
@@ -387,17 +392,18 @@ class QwenLogReader(LogReader):
                     if is_user_prompt:
                         # A new prompt closes the previous turn (if still open).
                         if state is not None and not state.get("flushed"):
-                            out.append(_complete(int(state["idx"]), "boundary"))
+                            out.append(_complete(state, "boundary"))
                             last_text = ""
                         idx = (int(state["idx"]) + 1) if state is not None else 0
-                        state = {"idx": idx, "flushed": False}
+                        state = {"idx": idx, "flushed": False, "ts": ts}
                         text = user_prompt_text(_parts_text(rec))
                     else:
                         # An assistant record with no preceding prompt (a
                         # resumed session joined mid-turn) still opens a turn.
                         if state is None or state.get("flushed"):
                             idx = (int(state["idx"]) + 1) if state is not None else 0
-                            state = {"idx": idx, "flushed": False}
+                            state = {"idx": idx, "flushed": False, "ts": ts}
+                        state["ts"] = ts
                         reply = _parts_text(rec).strip()
                         if reply:
                             last_text = _cap_text(reply)
@@ -417,7 +423,7 @@ class QwenLogReader(LogReader):
                 except OSError:
                     quiet_for = 0.0
                 if quiet_for >= _TURN_IDLE_SECONDS:
-                    out.append(_complete(int(state["idx"]), "idle"))
+                    out.append(_complete(state, "idle"))
                     state["flushed"] = True
                     last_text = ""
 
