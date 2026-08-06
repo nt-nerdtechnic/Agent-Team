@@ -64,6 +64,22 @@ export function getResolvedUserPath(): string {
   return resolvedUserPath ?? process.env.PATH ?? ''
 }
 
+/** Mirror a backend log line to our own stdio, best-effort.
+ *
+ *  The stream we inherited can go away while the app lives on — closing the
+ *  terminal that launched a dev run leaves a dead pipe behind — and a write to
+ *  it fails asynchronously with EIO. Swallow that: losing a log line is not a
+ *  reason to take the app down with an uncaught exception. */
+export function forwardBackendLog(stream: NodeJS.WriteStream, chunk: Buffer): void {
+  try {
+    stream.write(`[backend] ${chunk.toString()}`, () => {
+      /* async write failure — the stream is gone, nothing to do */
+    })
+  } catch {
+    /* synchronous failure (already-destroyed stream) — same story */
+  }
+}
+
 export async function startBackend(healthCheckTimeoutMs = 45_000): Promise<BackendHandle> {
   const port = await findFreePort()
   const host = '127.0.0.1'
@@ -135,12 +151,8 @@ export async function startBackend(healthCheckTimeoutMs = 45_000): Promise<Backe
     throw new Error('backend start abandoned: the app is quitting')
   }
 
-  proc.stdout?.on('data', (chunk: Buffer) => {
-    process.stdout.write(`[backend] ${chunk.toString()}`)
-  })
-  proc.stderr?.on('data', (chunk: Buffer) => {
-    process.stderr.write(`[backend] ${chunk.toString()}`)
-  })
+  proc.stdout?.on('data', (chunk: Buffer) => forwardBackendLog(process.stdout, chunk))
+  proc.stderr?.on('data', (chunk: Buffer) => forwardBackendLog(process.stderr, chunk))
 
   const handle: BackendHandle = {
     host,
