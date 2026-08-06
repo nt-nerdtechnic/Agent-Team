@@ -14,7 +14,6 @@ from .base import (
 )
 from .claude import ClaudeLogReader
 from .codex import CodexLogReader
-from .kimi import KimiLogReader
 from .watcher import LogWatcher
 
 # Readers migrated to cli_vendors/ resolve lazily (PEP 562): their vendor
@@ -29,6 +28,7 @@ _MIGRATED_READERS = {
     "CursorLogReader": "cursor",
     "GrokLogReader": "grok",
     "KiloLogReader": "kilo",
+    "KimiLogReader": "kimi",
     "OpencodeLogReader": "opencode",
     "PiLogReader": "pi",
     "QwenLogReader": "qwen",

@@ -318,22 +318,22 @@ def test_claude_resume_id_parses_resume_commands() -> None:
 
 
 def test_kimi_resume_id_parses_resume_commands() -> None:
-    assert app._kimi_resume_id("kimi --session session_abc-123") == "session_abc-123"
-    assert app._kimi_resume_id("kimi -S session_abc-123") == "session_abc-123"
-    assert app._kimi_resume_id("kimi --session session_abc-123 --yolo") == "session_abc-123"
-    assert app._kimi_resume_id("kimi --yolo --session session_abc-123") == "session_abc-123"
-    assert app._kimi_resume_id("kimi") == ""
+    assert app._resume_id_for_agent("kimi", "kimi --session session_abc-123") == "session_abc-123"
+    assert app._resume_id_for_agent("kimi", "kimi -S session_abc-123") == "session_abc-123"
+    assert app._resume_id_for_agent("kimi", "kimi --session session_abc-123 --yolo") == "session_abc-123"
+    assert app._resume_id_for_agent("kimi", "kimi --yolo --session session_abc-123") == "session_abc-123"
+    assert app._resume_id_for_agent("kimi", "kimi") == ""
     # `--session` takes an OPTIONAL id (bare flag = interactive picker); a
     # following flag must not be captured as the id.
-    assert app._kimi_resume_id("kimi --session --yolo") == ""
-    assert app._kimi_resume_id("kimi --session") == ""
-    assert app._kimi_resume_id("") == ""
-    assert app._kimi_resume_id(None) == ""
+    assert app._resume_id_for_agent("kimi", "kimi --session --yolo") == ""
+    assert app._resume_id_for_agent("kimi", "kimi --session") == ""
+    assert app._resume_id_for_agent("kimi", "") == ""
+    assert app._resume_id_for_agent("kimi", None) == ""
     # Shell-wrapped list — the shape the frontend actually sends.
-    assert app._kimi_resume_id(
+    assert app._resume_id_for_agent("kimi", 
         ["/bin/zsh", "-lc", "kimi --session session_abc-123 --yolo"]
     ) == "session_abc-123"
-    assert app._kimi_resume_id(["/bin/zsh", "-lc", "kimi"]) == ""
+    assert app._resume_id_for_agent("kimi", ["/bin/zsh", "-lc", "kimi"]) == ""
 
 
 def test_opencode_resume_id_parses_resume_commands() -> None:

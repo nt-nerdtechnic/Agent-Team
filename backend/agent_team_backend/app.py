@@ -874,7 +874,6 @@ def _register_workspace_and_backfill(workspace_path: str) -> None:
 _INHERITED_CLI_HOME_VARS = (
     "CLAUDE_CONFIG_DIR",
     "CODEX_HOME",
-    "KIMI_CODE_HOME",
     "GROK_HOME",
     # Not home relocators, but the same inheritance hazard with a worse
     # failure mode: runtime markers a CLI stamps on its own subprocesses.
@@ -1412,10 +1411,6 @@ def _claude_resume_id(command: Any) -> str:
     return m.group(1) if m else ""
 
 
-# `--session [id]` takes an OPTIONAL id (bare flag = interactive picker), so
-# the capture must not swallow a following flag like `--yolo`.
-_KIMI_RESUME_RE = re.compile(r"^kimi\s+(?:\S+\s+)*(?:--session|-S)\s+([^-\s]\S*)")
-
 
 def _kimi_resume_id(command: Any) -> str:
     """Session id from a `kimi ... --session <id>` / `-S <id>` command ('' otherwise)."""
@@ -1424,16 +1419,9 @@ def _kimi_resume_id(command: Any) -> str:
 
 
 
-def _pi_resume_id(command: Any) -> str:
-    """Session id from a `pi ... --session-id <id>` command ('' otherwise)."""
-    m = _PI_RESUME_RE.match(_command_text(command).strip())
-    return m.group(1) if m else ""
-
-
 _RESUME_ID_EXTRACTORS = {
     "codex": _codex_resume_id,
     "claude": _claude_resume_id,
-    "kimi": _kimi_resume_id,
 }
 
 
@@ -1488,13 +1476,6 @@ def _session_exists(agent: str, workspace_path: str, session_id: str) -> bool:
         # stale pointer must not pass preflight and launch a doomed
         # `codex resume`; search both the real and isolated per-pane homes.
         return codex_home_manager.find_session_home(session_id) is not None
-    if agent == "kimi":
-        # Kimi stores each session at ~/.kimi-code/sessions/wd_*/<id>/. Verify
-        # the id really exists so a bogus record (e.g. a pre-fix "wire"/"state"
-        # history entry) fails preflight instead of launching a doomed
-        # `kimi --session <id>` that dead-ends the pane at startup.
-        reader = next((r for r in _readers if r.vendor == "kimi"), None)
-        return reader.has_session(session_id) if isinstance(reader, KimiLogReader) else False
     path = _session_lookup_path(agent, workspace_path, session_id)
     if path:
         return Path(path).is_file()

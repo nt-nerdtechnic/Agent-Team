@@ -3515,12 +3515,6 @@ async def _terminal_create_impl(
             # can hand this pane's session to a sibling in the same cwd —
             # which then overwrites that sibling's persisted resume id.
             explicit_session_id = app._claude_resume_id(payload.get("command"))
-        elif agent_key == "kimi" and not explicit_session_id:
-            # Resumed Kimi panes likewise: claiming the resume id up front
-            # routes the session's events back to this pane and removes it
-            # from the new-session single-candidate fallback's candidate set,
-            # so a sibling fresh pane in the same cwd can still fallback-bind.
-            explicit_session_id = app._kimi_resume_id(payload.get("command"))
         # Vendors absent from both paths above deliberately claim no resume
         # id here (e.g. an id-less lossy resume); the rationale lives in each
         # vendor's module. Such panes bind via the kickoff marker instead.

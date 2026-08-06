@@ -116,7 +116,6 @@ CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 # the account had to be signed in again. The CLI is the only refresher — a
 # parked slot's access token is simply allowed to expire, and Claude Code
 # renews it from the restored refresh token the first time it runs.
-KIMI_DEFAULT_BASE = "https://api.kimi.com"
 # cursor (Cursor / cursor-agent CLI). The session JWT the CLI stores in the
 # macOS Keychain (fallback: the Cursor IDE's state.vscdb sqlite row) is still
 # read to detect sign-in and local expiry, and to authenticate usage-summary by
@@ -152,6 +151,12 @@ from .usage_common import (  # noqa: E402,F401
 
 # R2: qwen's usage stack moved to its vendor module; re-exported so this
 # module's namespace (and its tests) keep working until the cleanup round.
+from .cli_vendors.kimi import (  # noqa: E402,F401
+    KIMI_DEFAULT_BASE,
+    fetch_kimi,
+    normalize_kimi,
+    read_kimi_credentials,
+)
 from .cli_vendors.grok import (  # noqa: E402,F401
     GROK_BILLING_TIMEOUT,
     GROK_INIT_TIMEOUT,
@@ -388,67 +393,6 @@ def codex_base_url(codex_home: Path) -> str:
     return base
 
 
-def read_kimi_credentials(home: Path, env: dict | None = None,
-                          now: float | None = None) -> str | None:
-    """``KIMI_CODE_API_KEY`` env wins; otherwise the CLI OAuth file, used only
-    while ``expires_at`` is more than 60 s away (matching CodexBar)."""
-    env = env or {}
-    api_key = env.get("KIMI_CODE_API_KEY")
-    if api_key:
-        return api_key
-    kimi_home = Path(env["KIMI_CODE_HOME"]) if env.get("KIMI_CODE_HOME") else home / ".kimi-code"
-    try:
-        data = json.loads((kimi_home / "credentials" / "kimi-code.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    token = data.get("access_token")
-    expires = _num(data.get("expires_at"))
-    if not token or expires is None:
-        return None
-    now = time.time() if now is None else now
-    return token if expires > now + 60 else None
-
-
-def _kimi_used(detail: dict, limit):
-    used = _num(detail.get("used"))
-    if used is None:
-        rem = _num(detail.get("remaining"))
-        if rem is not None and limit is not None:
-            used = max(0.0, limit - rem)
-    return used
-
-
-def _kimi_resets(detail: dict):
-    r = (detail.get("resetTime") or detail.get("resetAt")
-         or detail.get("reset_time") or detail.get("reset_at"))
-    return r if isinstance(r, str) else None
-
-
-def normalize_kimi(data: dict) -> tuple[list[dict], str | None]:
-    windows: list[dict] = []
-    usage = data.get("usage")
-    if isinstance(usage, dict):
-        limit = _num(usage.get("limit"))
-        used = _kimi_used(usage, limit)
-        if limit and used is not None:
-            windows.append(_window("weekly", "Weekly", used / limit * 100,
-                                   _kimi_resets(usage)))
-    # CodexBar's Code-API model nests the 5h rate-limit under
-    # ``limits[0].detail`` (KimiRateLimit { window, detail }), not at top level.
-    limits = data.get("limits")
-    if isinstance(limits, list) and limits and isinstance(limits[0], dict):
-        detail = limits[0].get("detail")
-        if isinstance(detail, dict):
-            limit = _num(detail.get("limit"))
-            used = _kimi_used(detail, limit)
-            if limit and used is not None:
-                windows.append(_window("session", "Rate limit (5h)",
-                                       used / limit * 100, _kimi_resets(detail)))
-    return windows, None
-
-
 async def fetch_claude(home: Path) -> dict:
     """Claude quota, read from the CLI's own ``/usage`` panel.
 
@@ -507,36 +451,6 @@ async def fetch_codex(codex_home: Path) -> dict:
     if extra:
         snap["extraWindows"] = extra
     return snap
-
-
-async def fetch_kimi(home: Path, env: dict | None = None) -> dict:
-    import os
-
-    env = env if env is not None else dict(os.environ)
-    token = read_kimi_credentials(home, env)
-    if token is None:
-        return _snapshot("kimi", "no-credentials")
-    import httpx
-
-    base = (env.get("KIMI_CODE_BASE_URL") or KIMI_DEFAULT_BASE).rstrip("/")
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/json",
-        "User-Agent": "Navide",
-        "X-Msh-Platform": "kimi_code_cli",
-    }
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        resp = await client.get(f"{base}/coding/v1/usages", headers=headers)
-    if resp.status_code in (401, 403):
-        return _snapshot("kimi", "expired")
-    if resp.status_code == 429:
-        snap = _snapshot("kimi", "rate-limited")
-        snap["retryAfterSec"] = parse_retry_after(resp.headers.get("Retry-After"))
-        return snap
-    if resp.status_code != 200:
-        return _snapshot("kimi", "error", error=f"HTTP {resp.status_code}")
-    windows, plan = normalize_kimi(resp.json())
-    return _snapshot("kimi", "ok", windows=windows, plan_type=plan)
 
 
 # ── Poller service ──────────────────────────────────────────────────────────
@@ -1104,8 +1018,7 @@ class UsageService:
         # lambda cannot silently drop the vendor from the poll.
         legacy_fetchers: dict[str, Any] = {
             "codex": lambda: fetch_codex(codex_home),
-            "kimi": lambda: fetch_kimi(home),
-                                                                }
+                                                                        }
         tasks: dict[str, Any] = {}
         for provider in PROVIDERS:
             if provider == "claude":  # claude polls per-slot above

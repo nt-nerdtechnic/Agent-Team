@@ -15,6 +15,7 @@ from agent_team_backend.cli_vendors import _protocols as protocols_vendor
 from agent_team_backend.cli_vendors import antigravity as antigravity_vendor
 from agent_team_backend.cli_vendors import grok as grok_vendor
 from agent_team_backend.cli_vendors import kilo as kilo_vendor
+from agent_team_backend.cli_vendors import kimi as kimi_vendor
 from agent_team_backend.cli_vendors import pi as pi_vendor
 from agent_team_backend.cli_vendors import opencode as opencode_vendor
 from agent_team_backend.cli_vendors import copilot as copilot_vendor
@@ -1795,7 +1796,7 @@ async def test_poll_once_rate_limit_sets_cooldown(tmp_path, monkeypatch):
     monkeypatch.setattr(us, "_get_profiles_store", lambda: None)
     monkeypatch.setattr(us, "fetch_claude", fake_claude)
     monkeypatch.setattr(us, "fetch_codex", lambda home: fake_ok("codex"))
-    monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_ok("kimi"))
+    monkeypatch.setattr(kimi_vendor, "fetch_kimi", lambda home: fake_ok("kimi"))
     monkeypatch.setattr(grok_vendor, "fetch_grok", lambda home: fake_ok("grok"))
     monkeypatch.setattr(antigravity_vendor, "fetch_antigravity", lambda home: fake_ok("antigravity"))
     monkeypatch.setattr(opencode_vendor, "fetch_opencode", lambda home: fake_ok("opencode"))
@@ -1828,7 +1829,7 @@ async def test_poll_once_survives_fetcher_exception(tmp_path, monkeypatch):
     monkeypatch.setattr(us, "_get_profiles_store", lambda: None)
     monkeypatch.setattr(us, "fetch_claude", boom)
     monkeypatch.setattr(us, "fetch_codex", lambda home: fake_ok("codex"))
-    monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_ok("kimi"))
+    monkeypatch.setattr(kimi_vendor, "fetch_kimi", lambda home: fake_ok("kimi"))
     monkeypatch.setattr(grok_vendor, "fetch_grok", lambda home: fake_ok("grok"))
     monkeypatch.setattr(antigravity_vendor, "fetch_antigravity", lambda home: fake_ok("antigravity"))
     monkeypatch.setattr(opencode_vendor, "fetch_opencode", lambda home: fake_ok("opencode"))
@@ -1966,7 +1967,7 @@ async def test_poll_once_claude_accounts_are_independent_and_pruned(tmp_path, mo
 
     monkeypatch.setattr(us, "fetch_claude", fake_claude)
     monkeypatch.setattr(us, "fetch_codex", lambda home: fake_other("codex"))
-    monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_other("kimi"))
+    monkeypatch.setattr(kimi_vendor, "fetch_kimi", lambda home: fake_other("kimi"))
     monkeypatch.setattr(grok_vendor, "fetch_grok", lambda home: fake_other("grok"))
     monkeypatch.setattr(antigravity_vendor, "fetch_antigravity", lambda home: fake_other("antigravity"))
     monkeypatch.setattr(opencode_vendor, "fetch_opencode", lambda home: fake_other("opencode"))
@@ -2056,7 +2057,7 @@ async def test_refresh_during_poll_runs_next_cycle_with_new_active_account(
 
     monkeypatch.setattr(us, "fetch_claude", fake_claude)
     monkeypatch.setattr(us, "fetch_codex", lambda home: fake_other("codex"))
-    monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_other("kimi"))
+    monkeypatch.setattr(kimi_vendor, "fetch_kimi", lambda home: fake_other("kimi"))
     monkeypatch.setattr(grok_vendor, "fetch_grok", lambda home: fake_other("grok"))
     monkeypatch.setattr(antigravity_vendor, "fetch_antigravity", lambda home: fake_other("antigravity"))
     monkeypatch.setattr(opencode_vendor, "fetch_opencode", lambda home: fake_other("opencode"))
@@ -2188,7 +2189,7 @@ async def test_poll_once_always_reads_real_home(tmp_path, monkeypatch):
 
     monkeypatch.setattr(us, "fetch_claude", spy_claude)
     monkeypatch.setattr(us, "fetch_codex", spy_codex)
-    monkeypatch.setattr(us, "fetch_kimi", spy_kimi)
+    monkeypatch.setattr(kimi_vendor, "fetch_kimi", spy_kimi)
     monkeypatch.setattr(grok_vendor, "fetch_grok", spy_grok)
     monkeypatch.setattr(antigravity_vendor, "fetch_antigravity", spy_antigravity)
     monkeypatch.setattr(opencode_vendor, "fetch_opencode", spy_opencode)
@@ -2229,7 +2230,7 @@ async def test_poll_once_harvests_active_slots(tmp_path, monkeypatch):
 
     monkeypatch.setattr(us, "fetch_claude", lambda home: fake_ok("claude"))
     monkeypatch.setattr(us, "fetch_codex", lambda home: fake_ok("codex"))
-    monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_ok("kimi"))
+    monkeypatch.setattr(kimi_vendor, "fetch_kimi", lambda home: fake_ok("kimi"))
     monkeypatch.setattr(grok_vendor, "fetch_grok", lambda home: fake_ok("grok"))
     monkeypatch.setattr(antigravity_vendor, "fetch_antigravity", lambda home: fake_ok("antigravity"))
     monkeypatch.setattr(opencode_vendor, "fetch_opencode", lambda home: fake_ok("opencode"))
@@ -2271,7 +2272,7 @@ async def test_poll_once_harvests_pending_login_homes(tmp_path, monkeypatch):
 
     monkeypatch.setattr(us, "fetch_claude", lambda home: fake_ok("claude"))
     monkeypatch.setattr(us, "fetch_codex", lambda home: fake_ok("codex"))
-    monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_ok("kimi"))
+    monkeypatch.setattr(kimi_vendor, "fetch_kimi", lambda home: fake_ok("kimi"))
     monkeypatch.setattr(grok_vendor, "fetch_grok", lambda home: fake_ok("grok"))
     monkeypatch.setattr(antigravity_vendor, "fetch_antigravity", lambda home: fake_ok("antigravity"))
     monkeypatch.setattr(opencode_vendor, "fetch_opencode", lambda home: fake_ok("opencode"))
@@ -2370,7 +2371,7 @@ async def test_poll_once_skips_login_harvest_while_login_pane_runs(
 
     monkeypatch.setattr(us, "fetch_claude", lambda home: fake_ok("claude"))
     monkeypatch.setattr(us, "fetch_codex", lambda home: fake_ok("codex"))
-    monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_ok("kimi"))
+    monkeypatch.setattr(kimi_vendor, "fetch_kimi", lambda home: fake_ok("kimi"))
     monkeypatch.setattr(grok_vendor, "fetch_grok", lambda home: fake_ok("grok"))
     monkeypatch.setattr(antigravity_vendor, "fetch_antigravity", lambda home: fake_ok("antigravity"))
     monkeypatch.setattr(opencode_vendor, "fetch_opencode", lambda home: fake_ok("opencode"))
@@ -2413,7 +2414,7 @@ async def test_login_harvest_for_active_profile_restores_live(tmp_path, monkeypa
 
     monkeypatch.setattr(us, "fetch_claude", lambda home: fake_ok("claude"))
     monkeypatch.setattr(us, "fetch_codex", lambda home: fake_ok("codex"))
-    monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_ok("kimi"))
+    monkeypatch.setattr(kimi_vendor, "fetch_kimi", lambda home: fake_ok("kimi"))
     monkeypatch.setattr(grok_vendor, "fetch_grok", lambda home: fake_ok("grok"))
     monkeypatch.setattr(antigravity_vendor, "fetch_antigravity", lambda home: fake_ok("antigravity"))
     monkeypatch.setattr(opencode_vendor, "fetch_opencode", lambda home: fake_ok("opencode"))

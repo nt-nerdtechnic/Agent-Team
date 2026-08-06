@@ -67,6 +67,12 @@ class VendorSpec:
     # None = the vault's legacy per-agent branch (or token-presence default).
     identity_from_secret: Callable[[str | None], dict] | None = None
 
+    # Env var that relocates the CLI's config home for an isolated login
+    # pane ({VAR: <login-home>} with no removals). None = the vault's legacy
+    # branch (claude adds env removals, grok builds a HOME shim — both stay
+    # in the vault by design).
+    login_home_env: str | None = None
+
     # --- usage quota ---
     # async (home: Path) -> snapshot dict, same shape usage_service._snapshot
     # produces. None = vendor has no quota interface (aider) or not migrated.

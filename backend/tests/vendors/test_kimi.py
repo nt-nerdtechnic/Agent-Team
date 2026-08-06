@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_team_backend.log_readers.kimi import KimiLogReader
+from agent_team_backend.cli_vendors.kimi import KimiLogReader
 
 _SID = "session_4d4a11fe-b08a-46df-9f86-685589531e65"
 
@@ -286,7 +286,7 @@ def test_parse_activity_open_turn_not_flushed_while_recent(
 ) -> None:
     """An open turn whose last record is more recent than _TURN_IDLE_MS is NOT
     completed yet — the CLI may still be mid-turn."""
-    import agent_team_backend.log_readers.kimi as kimi_mod
+    import agent_team_backend.cli_vendors.kimi as kimi_mod
 
     reader = KimiLogReader()
     wire = _session(fake_kimi_home, "/x")
@@ -359,7 +359,7 @@ def test_parse_activity_reply_survives_a_poll_boundary(
     seen: set[str] = set()
     wire = _session(fake_kimi_home, "/x")
     _write_jsonl(wire, [_prompt(time=1_000_000), _text_part("ready", time=1_000_001)])
-    import agent_team_backend.log_readers.kimi as kimi_mod
+    import agent_team_backend.cli_vendors.kimi as kimi_mod
 
     # First poll: still mid-turn, nothing completed, text not delivered yet.
     monkeypatch.setattr(kimi_mod.time, "time", lambda: 1_000.5)

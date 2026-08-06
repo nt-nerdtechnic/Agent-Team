@@ -95,14 +95,12 @@ _SLOT_SERVICE_PREFIX = "Navide CLI account "
 _SLOT_FILES = {
     "claude": ".credentials.json",
     "codex": "auth.json",
-    "kimi": "kimi-code.json",
 }
 
 # Live secret file path segments, relative to the real home.
 _LIVE_FILES = {
     "claude": (".claude", ".credentials.json"),
     "codex": (".codex", "auth.json"),
-    "kimi": (".kimi-code", "credentials", "kimi-code.json"),
 }
 
 _OAUTH_ACCOUNT_SLOT_FILE = "oauth-account.json"
@@ -120,7 +118,6 @@ LOGIN_HOME_DIRNAME = "login-home"
 # dir one level in.
 _LOGIN_HOME_SECRET_FILES = {
     "codex": ("auth.json",),
-    "kimi": ("credentials", "kimi-code.json"),
 }
 
 # Where each CLI kept its secret inside a legacy persistent profile home,
@@ -129,7 +126,6 @@ _LOGIN_HOME_SECRET_FILES = {
 # the one-time profile-home promotion; spawns no longer use these homes.
 _PROFILE_HOME_SECRET_FILES = {
     "codex": ("auth.json",),
-    "kimi": ("credentials", "kimi-code.json"),
 }
 
 
@@ -824,10 +820,11 @@ class CredentialVault:
             # CLAUDE_CONFIG_DIR string; the canonical path here must match the
             # one harvest_login_home hashes later, byte for byte.
             return {"CLAUDE_CONFIG_DIR": home_str}, list(CLAUDE_ENV_OVERRIDES)
+        spec = _cli_vendor_spec(agent_key)
+        if spec is not None and spec.login_home_env is not None:
+            return {spec.login_home_env: home_str}, []
         if agent_key == "codex":
             return {"CODEX_HOME": home_str}, []
-        if agent_key == "kimi":
-            return {"KIMI_CODE_HOME": home_str}, []
         # grok: HOME shim; its .grok dir lives one level in.
         shim = self._refresh_grok_login_shim(Path(home_str))
         return {"HOME": canonical_path_str(shim)}, []

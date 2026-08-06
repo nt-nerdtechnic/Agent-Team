@@ -382,7 +382,7 @@ class Attribution:
         # Tuple = vendors not yet migrated to reader hooks; a migrated
         # vendor's reader declares binds_by_marker_file instead.
         marker_reader = self._readers.get(usage.vendor)
-        if usage.vendor not in ("codex", "kimi") \
+        if usage.vendor not in ("codex",) \
                 and not (marker_reader is not None and marker_reader.binds_by_marker_file):
             return None
 
@@ -422,7 +422,7 @@ class Attribution:
         marker_binding = self.maybe_bind_by_marker(usage)
         if marker_binding:
             pane_id, resume_id = marker_binding
-        elif usage.vendor in ("kimi",) or (
+        elif (
             marker_reader is not None
             and marker_reader.binds_new_session_single_candidate
         ):
@@ -457,7 +457,7 @@ class Attribution:
         further reads. The file read happens outside the lock.
         """
         gate_reader = self._readers.get(usage.vendor)
-        if usage.vendor not in ("codex", "kimi") \
+        if usage.vendor not in ("codex",) \
                 and not (gate_reader is not None and gate_reader.binds_by_marker_file):
             return None
         sid = usage.session_id
@@ -578,7 +578,7 @@ class Attribution:
         """
         sc_reader = self._readers.get(usage.vendor)
         if (
-            usage.vendor not in ("kimi",)
+            usage.vendor not in ()
             and not (
                 sc_reader is not None
                 and sc_reader.binds_new_session_single_candidate
@@ -714,10 +714,6 @@ class Attribution:
                 # Codex puts cwd in session_meta → usage.cwd
                 if usage.cwd and usage.cwd == ws_path:
                     return ws_path
-            elif usage.vendor == "kimi":
-                # Kimi reader emits cwd = the session state.json workDir.
-                if usage.cwd and usage.cwd == ws_path:
-                    return ws_path
         return None
 
     def _lookup_pane_for(
@@ -778,7 +774,7 @@ class Attribution:
         if usage.vendor == "claude":
             expected_dir = encode_claude_cwd(pane_cwd)
             return f"/{expected_dir}/" in file_path
-        if usage.vendor in ("codex", "kimi"):
+        if usage.vendor in ("codex",):
             return usage.cwd == pane_cwd
         return False
 
