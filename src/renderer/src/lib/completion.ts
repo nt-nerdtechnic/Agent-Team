@@ -73,6 +73,92 @@ export function loopContinueReady(s: TurnCompleteState): boolean {
   return turnCompleteDone(s) && s.lastActiveAt > s.armedAt
 }
 
+/** A turn shorter than this (whitespace-collapsed) is too small to be real
+ *  work — "等待中。", "好的，我繼續" — and counts as a stalled run. */
+export const LOOP_MIN_PROGRESS_CHARS = 40
+
+/** Delay before the NEXT continue may fire, indexed by how many consecutive
+ *  stalled runs preceded it. Index 0 (a productive turn) keeps the original
+ *  poll-speed behaviour; each further stall backs off hard so a spinning loop
+ *  burns minutes of quota instead of a whole night's. */
+export const LOOP_STALL_BACKOFF_MS = [0, 30_000, 120_000, 600_000]
+
+/** Consecutive stalled runs after which the loop stops itself and asks for
+ *  attention rather than injecting yet another continue. */
+export const LOOP_STALL_LIMIT = 4
+
+/** Hard backstop on continues per loop run — the last line of defence for a
+ *  spin the stall detector cannot see (every turn different and long enough,
+ *  yet going nowhere). Sized so a genuinely long unattended run never trips it. */
+export const LOOP_MAX_CONTINUES = 200
+
+/** Whitespace-collapsed turn text, so a TUI re-wrap of the same sentence
+ *  compares equal to its previous rendering. */
+export function normalizeTurnText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+/** True when a completed turn shows real forward motion. False — a "stalled
+ *  run" — when the CLI repeated its previous answer verbatim, or answered with
+ *  something too short to be work. Both are what a CLI does when it is stuck
+ *  waiting on something the loop cannot observe (a background agent, a poll of
+ *  its own), and both re-satisfy loopContinueReady on every poll. */
+export function turnMadeProgress(text: string, prevText: string): boolean {
+  const now = normalizeTurnText(text)
+  if (now.length < LOOP_MIN_PROGRESS_CHARS) return false
+  return now !== normalizeTurnText(prevText)
+}
+
+/** How long to hold off the next continue after `stalledRuns` consecutive
+ *  stalled turns (clamped to the last backoff tier). */
+export function loopBackoffMs(stalledRuns: number): number {
+  if (stalledRuns <= 0) return LOOP_STALL_BACKOFF_MS[0]
+  return LOOP_STALL_BACKOFF_MS[Math.min(stalledRuns, LOOP_STALL_BACKOFF_MS.length - 1)]
+}
+
+/** The loop watcher's stall bookkeeping — the subset of its state the progress
+ *  judgement reads and writes. */
+export interface LoopStallState {
+  /** Consecutive completed turns that showed no forward motion. */
+  stalledRuns: number
+  /** Normalized text of the last completed turn (see normalizeTurnText). */
+  lastTurnText: string
+}
+
+/** Fold a completed turn's text into the stall state.
+ *
+ *  Empty text is UNKNOWN, never a stall: only claude/codex/copilot readers
+ *  attach the turn's text, so for every other vendor each turn would otherwise
+ *  look stalled and stop a perfectly healthy loop. Those vendors keep their
+ *  previous behaviour and rely on the continue cap alone. */
+export function applyTurnProgress(state: LoopStallState, text: string): LoopStallState {
+  const normalized = normalizeTurnText(text)
+  if (!normalized) return state
+  return {
+    stalledRuns: turnMadeProgress(text, state.lastTurnText) ? 0 : state.stalledRuns + 1,
+    lastTurnText: normalized,
+  }
+}
+
+/** Whether the loop may inject another continue, or must stop itself.
+ *
+ *  loopContinueReady cannot see a CLI that is stuck: a turn ending with
+ *  "waiting for a background agent" is a genuine post-arm, woken-up turn end,
+ *  so every one of its conditions holds and the loop would resend forever.
+ *  These two counters are what actually terminates such a spin — the stall
+ *  detector for CLIs whose turn text we can read, the continue cap as the
+ *  vendor-agnostic backstop. The cap is checked first: it is the harder
+ *  guarantee and its message ("hit the continue limit") is the accurate one
+ *  when both trip on the same poll. */
+export function loopStallVerdict(s: {
+  continues: number
+  stalledRuns: number
+}): 'stop-capped' | 'stop-stalled' | 'ok' {
+  if (s.continues >= LOOP_MAX_CONTINUES) return 'stop-capped'
+  if (s.stalledRuns >= LOOP_STALL_LIMIT) return 'stop-stalled'
+  return 'ok'
+}
+
 /** Parse a CLI event timestamp into epoch ms. Accepts ISO-8601 (Claude/Codex
  *  emit their log's ISO timestamp) and a bare epoch-ms string (Kimi emits the
  *  wire.jsonl `time` field). Returns NaN when unparseable. */

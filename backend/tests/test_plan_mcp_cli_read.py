@@ -250,3 +250,71 @@ async def test_wait_idle_fails_for_an_unknown_target() -> None:
     result = await plan_mcp.cli_wait_idle("nope", _ctx())
     assert result["ok"] is False
     assert "unknown target" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_wait_idle_trusts_the_window_when_the_busy_flag_is_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # busy is frontend-reported and can stay stuck on; the owning window's own
+    # view of the pane is the signal that stays current.
+    monkeypatch.setattr(plan_mcp, "_WAIT_IDLE_POLL_S", 0.01)
+    agent_messaging.register("pw", "worker", "/ws/alpha")
+    agent_messaging.register("other", "caller", "/ws/somewhere-else")
+    agent_messaging.set_busy("pw", True)
+
+    async def _idle_window(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {"ok": True, "result": {"status": "idle", "buffer": ""}}
+
+    monkeypatch.setattr(plan_mcp, "_ui_request", _idle_window)
+
+    result = await plan_mcp.cli_wait_idle("alpha/worker", _ctx(pane_id="other"), timeout_s=1.0)
+
+    assert result["idle"] is True
+    assert result["source"] == "ui_status"
+
+
+@pytest.mark.asyncio
+async def test_wait_idle_keeps_waiting_while_the_window_reports_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(plan_mcp, "_WAIT_IDLE_POLL_S", 0.01)
+    agent_messaging.register("pw", "worker", "/ws/alpha")
+    agent_messaging.register("other", "caller", "/ws/somewhere-else")
+    agent_messaging.set_busy("pw", True)
+
+    async def _busy_window(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {"ok": True, "result": {"status": "running", "buffer": ""}}
+
+    monkeypatch.setattr(plan_mcp, "_ui_request", _busy_window)
+
+    result = await plan_mcp.cli_wait_idle("alpha/worker", _ctx(pane_id="other"), timeout_s=0.05)
+
+    assert result["idle"] is False
+    assert result["source"] == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_wait_idle_stops_probing_a_window_that_does_not_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # With no window listening every probe would burn the full _ui_request
+    # timeout, so the first failure has to be the last probe.
+    monkeypatch.setattr(plan_mcp, "_WAIT_IDLE_POLL_S", 0.01)
+    monkeypatch.setattr(plan_mcp, "_WAIT_IDLE_UI_PROBE_EVERY", 1)
+    agent_messaging.register("pw", "worker", "/ws/alpha")
+    agent_messaging.register("other", "caller", "/ws/somewhere-else")
+    agent_messaging.set_busy("pw", True)
+    calls = 0
+
+    async def _no_window(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return {"ok": False, "error": "no reply"}
+
+    monkeypatch.setattr(plan_mcp, "_ui_request", _no_window)
+
+    result = await plan_mcp.cli_wait_idle("alpha/worker", _ctx(pane_id="other"), timeout_s=0.08)
+
+    assert result["source"] == "timeout"
+    assert calls == 1

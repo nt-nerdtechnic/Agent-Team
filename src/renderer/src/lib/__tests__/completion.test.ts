@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { slotFinished, allSlotsFinished, turnCompleteDone, loopContinueReady, turnEndsWithSentinel, parseEventMs, isReplayedTurnComplete, type SlotSignal } from '../completion'
+import { slotFinished, allSlotsFinished, turnCompleteDone, loopContinueReady, turnEndsWithSentinel, parseEventMs, isReplayedTurnComplete, normalizeTurnText, turnMadeProgress, loopBackoffMs, applyTurnProgress, loopStallVerdict, LOOP_STALL_BACKOFF_MS, LOOP_MIN_PROGRESS_CHARS, LOOP_STALL_LIMIT, LOOP_MAX_CONTINUES, type SlotSignal, type LoopStallState } from '../completion'
 
 // Fixed reference time for the watcher arming. turn_complete only counts when
 // its timestamp is strictly AFTER this.
@@ -142,6 +142,117 @@ describe('loopContinueReady', () => {
       turnCompleteAt: 2000, lastActiveAt: 1500, armedAt: ARMED,
       now: 2000 + 1000, settleMs: SETTLE
     })).toBe(false)
+  })
+})
+
+describe('turnMadeProgress', () => {
+  // Long enough to clear LOOP_MIN_PROGRESS_CHARS.
+  const WORK = 'Implemented the parser, added three tests, and ran the suite — all green.'
+  const OTHER_WORK = 'Fixed the failing case in the reducer and re-ran the suite — still green.'
+
+  it('is true for a substantial turn that differs from the previous one', () => {
+    expect(turnMadeProgress(WORK, OTHER_WORK)).toBe(true)
+  })
+
+  it('is false when the CLI repeats its previous answer verbatim', () => {
+    expect(turnMadeProgress(WORK, WORK)).toBe(false)
+  })
+
+  it('ignores whitespace/wrapping differences when comparing to the previous turn', () => {
+    expect(turnMadeProgress(WORK.replace(' ', '\n  '), WORK)).toBe(false)
+  })
+
+  it('is false for a turn too short to be work (the "等待中。" spin)', () => {
+    expect(turnMadeProgress('等待中。', '')).toBe(false)
+    expect(turnMadeProgress('等待中。', '等待中。')).toBe(false)
+  })
+
+  it('is false for an empty turn_complete', () => {
+    expect(turnMadeProgress('', 'anything')).toBe(false)
+  })
+
+  it('treats exactly LOOP_MIN_PROGRESS_CHARS as long enough', () => {
+    expect(turnMadeProgress('x'.repeat(LOOP_MIN_PROGRESS_CHARS), '')).toBe(true)
+    expect(turnMadeProgress('x'.repeat(LOOP_MIN_PROGRESS_CHARS - 1), '')).toBe(false)
+  })
+})
+
+describe('normalizeTurnText', () => {
+  it('collapses whitespace runs and trims', () => {
+    expect(normalizeTurnText('  a \n\n b\tc  ')).toBe('a b c')
+  })
+})
+
+describe('loopBackoffMs', () => {
+  it('does not delay a productive loop', () => {
+    expect(loopBackoffMs(0)).toBe(0)
+    expect(loopBackoffMs(-1)).toBe(0)
+  })
+
+  it('escalates with each consecutive stalled run', () => {
+    expect(loopBackoffMs(1)).toBe(LOOP_STALL_BACKOFF_MS[1])
+    expect(loopBackoffMs(2)).toBe(LOOP_STALL_BACKOFF_MS[2])
+    expect(loopBackoffMs(3)).toBe(LOOP_STALL_BACKOFF_MS[3])
+  })
+
+  it('clamps past the last tier', () => {
+    expect(loopBackoffMs(99)).toBe(LOOP_STALL_BACKOFF_MS[LOOP_STALL_BACKOFF_MS.length - 1])
+  })
+})
+
+describe('applyTurnProgress', () => {
+  const FRESH: LoopStallState = { stalledRuns: 0, lastTurnText: '' }
+  const WORK = 'Implemented the parser, added three tests, and ran the suite — all green.'
+
+  it('records a productive turn and keeps the counter at zero', () => {
+    expect(applyTurnProgress(FRESH, WORK)).toEqual({ stalledRuns: 0, lastTurnText: WORK })
+  })
+
+  it('clears the counter as soon as the loop gets moving again', () => {
+    expect(applyTurnProgress({ stalledRuns: 3, lastTurnText: '等待中。' }, WORK).stalledRuns).toBe(0)
+  })
+
+  it('counts a repeated answer as a stalled run', () => {
+    const after = applyTurnProgress({ stalledRuns: 1, lastTurnText: WORK }, WORK)
+    expect(after.stalledRuns).toBe(2)
+  })
+
+  it('reaches the stall limit after LOOP_STALL_LIMIT "等待中。" turns (the reported spin)', () => {
+    let state = FRESH
+    for (let i = 0; i < LOOP_STALL_LIMIT; i++) state = applyTurnProgress(state, '等待中。')
+    expect(state.stalledRuns).toBe(LOOP_STALL_LIMIT)
+    expect(loopStallVerdict({ continues: 0, stalledRuns: state.stalledRuns })).toBe('stop-stalled')
+  })
+
+  it('leaves the state untouched for a text-less turn_complete (kimi/qwen/pi readers)', () => {
+    const stalled: LoopStallState = { stalledRuns: 2, lastTurnText: WORK }
+    expect(applyTurnProgress(stalled, '')).toBe(stalled)
+    expect(applyTurnProgress(stalled, '   \n ')).toBe(stalled)
+  })
+
+  it('never stalls a vendor that sends no turn text, however many turns pass', () => {
+    let state = FRESH
+    for (let i = 0; i < 50; i++) state = applyTurnProgress(state, '')
+    expect(loopStallVerdict({ continues: 0, stalledRuns: state.stalledRuns })).toBe('ok')
+  })
+})
+
+describe('loopStallVerdict', () => {
+  it('lets a healthy loop keep going', () => {
+    expect(loopStallVerdict({ continues: 0, stalledRuns: 0 })).toBe('ok')
+    expect(loopStallVerdict({ continues: LOOP_MAX_CONTINUES - 1, stalledRuns: LOOP_STALL_LIMIT - 1 })).toBe('ok')
+  })
+
+  it('stops on the stall limit', () => {
+    expect(loopStallVerdict({ continues: 0, stalledRuns: LOOP_STALL_LIMIT })).toBe('stop-stalled')
+  })
+
+  it('stops on the continue cap', () => {
+    expect(loopStallVerdict({ continues: LOOP_MAX_CONTINUES, stalledRuns: 0 })).toBe('stop-capped')
+  })
+
+  it('reports the cap when both trip on the same poll', () => {
+    expect(loopStallVerdict({ continues: LOOP_MAX_CONTINUES, stalledRuns: LOOP_STALL_LIMIT })).toBe('stop-capped')
   })
 })
 
