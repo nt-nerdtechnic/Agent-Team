@@ -1634,7 +1634,7 @@
       "count": "{shown} / {total} lines",
       "copy": "Copy",
       "copied": "Copied",
-      "reveal": "Open file",
+      "reveal": "Reveal in Finder",
       "no-path": "Waiting for the backend to report its log path…",
       "empty": "Nothing matches the current filter."
     },

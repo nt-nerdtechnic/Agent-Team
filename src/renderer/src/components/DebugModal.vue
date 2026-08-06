@@ -232,6 +232,13 @@ function openPath(target: string): void {
   if (target) void window.agentTeam?.openPath?.(target)
 }
 
+/** Select the file in Finder rather than opening it. backend.log runs to 10 MB
+ *  and the default handler would hand that to TextEdit; the Shell tab is the
+ *  place to actually read it. */
+function revealPath(target: string): void {
+  if (target) void window.agentTeam?.revealPath?.(target)
+}
+
 // ── Embedded terminals ──────────────────────────────────────────────────────
 
 // Each tab mounts its terminal only once visited, then stays mounted for the
@@ -480,7 +487,7 @@ onUnmounted(() => stopTail())
             <button class="dbg-btn" @click="copyVisible()">
               {{ copied ? t('debug.log.copied') : t('debug.log.copy') }}
             </button>
-            <button class="dbg-btn" :disabled="!logPath" @click="openPath(logPath)">
+            <button class="dbg-btn" :disabled="!logPath" @click="revealPath(logPath)">
               {{ t('debug.log.reveal') }}
             </button>
           </div>

@@ -1634,7 +1634,7 @@
       "count": "{shown} / {total} 行",
       "copy": "複製",
       "copied": "已複製",
-      "reveal": "開啟檔案",
+      "reveal": "在 Finder 顯示",
       "no-path": "等待後端回報日誌路徑…",
       "empty": "沒有符合目前篩選條件的內容。"
     },
