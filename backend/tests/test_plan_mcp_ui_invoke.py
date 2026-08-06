@@ -164,3 +164,26 @@ async def test_ui_snapshot_uses_the_snapshot_op(broadcasts: list[dict[str, Any]]
 
 def test_resolve_ui_invoke_ignores_an_unknown_request_id() -> None:
     assert plan_mcp.resolve_ui_invoke("nope", {"ok": True, "result": None, "error": None}) is False
+
+
+@pytest.mark.asyncio
+async def test_pane_create_gets_a_longer_deadline_than_a_plain_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Spawning a pane waits out the CLI's startup before injecting the task,
+    # which alone reaches the default timeout — reporting failure there would
+    # deny work that actually succeeded.
+    seen: list[float] = []
+
+    async def _capture(request_id: str, fut: Any, *, timeout: float) -> Any:
+        seen.append(timeout)
+        return {"ok": True, "result": None, "error": None}
+
+    monkeypatch.setattr(plan_mcp._ui_invoke_pending, "wait", _capture)
+
+    await plan_mcp._ui_request("/ws", "invoke", action="ui.settings.close")
+    await plan_mcp._ui_request("/ws", "invoke", action="ui.pane.create")
+
+    assert seen[0] == plan_mcp._UI_INVOKE_TIMEOUT_S
+    assert seen[1] == plan_mcp._UI_INVOKE_SLOW_TIMEOUT_S
+    assert seen[1] > seen[0]

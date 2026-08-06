@@ -91,6 +91,7 @@ import {
 } from './composables/useCliAgentPrefs'
 import { pickReusablePane, runReportedDispatch, validatePlanDispatch, type PlanDispatchOutcome, type PlanDispatchPayload } from './lib/planDispatch'
 import { planExecutionPrompt } from './lib/planExecutePrompt'
+import { injectStandaloneTask, type StandaloneTaskInjectionDeps } from './lib/standalonePaneTask'
 import { quickClassify } from './lib/quick-classify'
 import { resolveAiderHistoryRoot, resumeAiderHistoryPath, type DirLister } from './lib/aider-history'
 import {
@@ -1457,11 +1458,33 @@ async function createRequestedPane(
   return paneId
 }
 
+/** Wires App.vue's pane-settling primitives into injectStandaloneTask's
+ *  injectable-dependency shape. Shared by createStandaloneRequestedPane and
+ *  ui.pane.create — the two standalone (no report-back parent) spawn paths
+ *  that create a roleless manual pane and must inject its task themselves. */
+function standaloneTaskDeps(): StandaloneTaskInjectionDeps {
+  return {
+    selectPane: (id, opts) => selectPane(id, opts),
+    sendSessionMarkerBootstrap: (id, tag) => {
+      const pane = panes.value.find((p) => p.id === id)
+      return pane ? sendSessionMarkerBootstrap(pane, tag) : Promise.resolve(false)
+    },
+    dismissStartupDialog: (id) => dismissStartupDialog(id, DISMISS_TIMEOUT_MS),
+    waitForStartupActivity: (id) => waitForStartupActivity(id),
+    waitForQuiet: (id, quietMs, timeoutMs) => waitForQuiet(id, quietMs, timeoutMs),
+    paneAlive: (id) => paneAlive(id),
+    injectPane: (id, text, label, preserveNewlines) => injectPane(id, text, label, preserveNewlines),
+    onKill: (id) => onKill(id),
+  }
+}
+
 /** Standalone counterpart to createRequestedPane for an external MCP spawn
  *  request addressed by target_workspace instead of a requesting pane (no
  *  report-back parent). Mirrors ui.pane.create's independent-pane path: the
- *  task is injected as a plain kickoffPrompt rather than the report-back
- *  marker renderSpawnKickoff builds for pane-to-pane spawns. */
+ *  pane is created roleless, then the task is injected directly via
+ *  injectStandaloneTask — scheduleInjection early-returns for a roleless
+ *  pane before its kickoff step, so a kickoffPrompt handed to spawnPane here
+ *  would never actually be injected. */
 async function createStandaloneRequestedPane(
   workspacePath: string,
   req: { agentKey: string; name: string; task: string },
@@ -1477,8 +1500,6 @@ async function createStandaloneRequestedPane(
     origin: 'manual',
     runGroupId: runGroupId || undefined,
     preferredMessagingName: req.name,
-    kickoffPrompt: req.task,
-    skipRoleInjection: !!req.task,
   })
   if (!paneId) return null
   void sendQuiet<ProjectPayload>('manual_pane.spawn', {
@@ -1499,6 +1520,8 @@ async function createStandaloneRequestedPane(
   })
   const pane = panes.value.find((p) => p.id === paneId)
   if (!pane || pane.preparationStatus === 'failed') return null
+  const injected = await injectStandaloneTask(paneId, req.task, 'mcp-task', standaloneTaskDeps())
+  if (!injected) return null
   return paneId
 }
 
@@ -1647,9 +1670,9 @@ async function handleMcpSpawnRequest(ev: {
   const child = panes.value.find((p) => p.id === paneId)
   const childName = child?.messagingName ?? gate.name
   if (!parent) {
-    // Standalone spawn: the task was already handed to spawnPane as a plain
-    // kickoffPrompt (createStandaloneRequestedPane), which itself already set
-    // kickoffStatus='pending'. There is no parent pane to report back to, so
+    // Standalone spawn: createStandaloneRequestedPane already settled the CLI
+    // and injected the task (or left the pane empty if there was none) before
+    // returning paneId above. There is no parent pane to report back to, so
     // no kickoffRequestedPane / report-back marker either.
     report({ ok: true, paneId, name: childName })
     return
@@ -4836,8 +4859,6 @@ registerCommand('ui.pane.create', async (args) => {
     origin: 'manual',
     runGroupId: runGroupId || undefined,
     preferredMessagingName: a.name,
-    kickoffPrompt: a.task,
-    skipRoleInjection: !!a.task,
   })
   if (!paneId) throw new Error(`ui.pane.create failed to spawn agent "${a.agent}"`)
   void sendQuiet<ProjectPayload>('manual_pane.spawn', {
@@ -4858,6 +4879,11 @@ registerCommand('ui.pane.create', async (args) => {
       custom_name: a.name,
     })
   }
+  // Roleless manual pane: scheduleInjection early-returns for it before its
+  // kickoff step, so the task must be injected here rather than via
+  // spawnPane's kickoffPrompt (see createStandaloneRequestedPane above).
+  const injected = await injectStandaloneTask(paneId, a.task ?? '', 'mcp-task', standaloneTaskDeps())
+  if (!injected) throw new Error(`ui.pane.create failed to inject task into pane "${paneId}"`)
   return paneId
 })
 registerCommand('ui.pane.close', async (args) => {

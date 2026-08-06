@@ -1122,6 +1122,12 @@ async def cli_wait_idle(target: str, ctx: Context, timeout_s: float = 60.0) -> d
 # other window ignore it.
 
 _UI_INVOKE_TIMEOUT_S = 15.0
+# Spawning a pane has to wait out the CLI's own startup before it can hand it
+# the task, which on its own reaches the default timeout — measured at 15s for
+# claude. Giving these actions the same budget as an unanswered request means
+# reporting failure for work that in fact succeeded, so they get their own.
+_UI_INVOKE_SLOW_TIMEOUT_S = 60.0
+_UI_INVOKE_SLOW_ACTIONS = frozenset({"ui.pane.create"})
 _ui_invoke_pending: PendingRegistry[dict[str, Any]] = PendingRegistry()
 
 
@@ -1162,14 +1168,15 @@ async def _ui_request(
     else:
         await app.broadcast(event)
 
-    result = await _ui_invoke_pending.wait(request_id, fut, timeout=_UI_INVOKE_TIMEOUT_S)
+    timeout = _UI_INVOKE_SLOW_TIMEOUT_S if action in _UI_INVOKE_SLOW_ACTIONS else _UI_INVOKE_TIMEOUT_S
+    result = await _ui_invoke_pending.wait(request_id, fut, timeout=timeout)
     if result is TIMEOUT:
         return {
             "ok": False,
             "result": None,
             "error": (
                 f"no reply for workspace_path {workspace_path!r} within "
-                f"{_UI_INVOKE_TIMEOUT_S:.0f}s — either no Navide window owns that "
+                f"{timeout:.0f}s — either no Navide window owns that "
                 "workspace, or the action timed out while executing"
             ),
         }
