@@ -24,6 +24,8 @@ import { initSettingsBackend, settingsGet, settingsSet, onSettingsChanged } from
 import { useNotify } from './composables/useNotify'
 import { allDiagnosticsSorted, setDiagnostics, diagnosticsKey } from './editor/diagnostics'
 import type { Diagnostic } from './editor/diagnostics'
+// Type-only — erased at build time, no useGit in this window's bundle.
+import type { ListConflictsResult } from './composables/useGit'
 
 // ── window params (Electron appends ?window=editor&workspace_path=…&filepath=…) ──
 const params = new URLSearchParams(window.location.search)
@@ -499,7 +501,36 @@ function openConflict(p: { filepath: string; name?: string }): void {
     openFiles.value.push({ kind: 'conflict', id: nextTabId(), relPath, filepath: p.filepath, name, line: 0, dirty: false, revealSeq: 0 })
   }
   activeKey.value = key
+  void loadConflictPaths()
 }
+
+// ── Conflict tabs: is the merge that produced them still in progress? ────────
+// ConflictPane refuses to write once its file is no longer an unmerged path
+// (`merge --abort` run in the Git window or a terminal), but that guard only
+// works if this host feeds it. GitPane keeps its useGit instance private, so
+// the unmerged paths are read straight from the index here and re-read on the
+// backend's git.changed broadcast. `null` = never read; only a successful read
+// is allowed to declare a file no longer conflicted.
+const conflictPaths = ref<Set<string> | null>(null)
+
+async function loadConflictPaths(): Promise<void> {
+  if (!workspacePath) return
+  try {
+    const resp = await backend.send<ListConflictsResult>(
+      'git.list_conflicts', { workspace_path: workspacePath },
+    )
+    if (resp.ok && resp.payload?.ok) {
+      conflictPaths.value = new Set(resp.payload.conflicts.map((c) => c.path))
+    }
+  } catch { /* keep the last known list rather than falsely aborting a merge */ }
+}
+
+function mergeAbortedFor(filepath: string): boolean {
+  return conflictPaths.value !== null && !conflictPaths.value.has(filepath)
+}
+
+let offGitChanged: (() => void) | null = null
+let gitChangedTimer: ReturnType<typeof setTimeout> | null = null
 
 function openBranchDiff(p: { base: string; compare?: string; workspacePath?: string }): void {
   const base = p.base || 'main'
@@ -1827,12 +1858,25 @@ onMounted(() => {
   }).nav
   offOpenTarget = navBridge?.onOpenTarget?.(applyOpenTarget) ?? null
   if (initialBranchDiffBase) openBranchDiff({ base: initialBranchDiffBase, compare: initialBranchDiffCompare })
+  // Debounced at 300 ms like useGit's own listener: one git operation reaches
+  // us twice (GitWatcher plus app.py's own broadcast).
+  offGitChanged = backend.on('git.changed', () => {
+    if (!openFiles.value.some((f) => f.kind === 'conflict')) return
+    if (gitChangedTimer !== null) clearTimeout(gitChangedTimer)
+    gitChangedTimer = setTimeout(() => {
+      gitChangedTimer = null
+      void loadConflictPaths()
+    }, 300)
+  })
 })
 onUnmounted(() => {
   offThemeSettingsChange?.()
   offThemeSettingsChange = null
   offOpenTarget?.()
   offOpenTarget = null
+  offGitChanged?.()
+  offGitChanged = null
+  if (gitChangedTimer !== null) { clearTimeout(gitChangedTimer); gitChangedTimer = null }
   window.removeEventListener('keydown', onAppKeydown)
   window.removeEventListener('keydown', onBcCaptureKeydown, { capture: true })
   document.removeEventListener('click', closeBcDropdown)
@@ -2069,6 +2113,7 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
             :filepath="f.filepath!"
             :name="f.name"
             :backend="backend"
+            :merge-aborted="mergeAbortedFor(f.filepath!)"
             @resolved="closeFile(tabKey(f))"
           />
           <BranchDiffPane

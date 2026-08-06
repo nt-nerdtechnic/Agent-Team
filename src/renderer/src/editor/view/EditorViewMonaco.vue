@@ -7,6 +7,10 @@ import { normalizeLanguage } from '../languageDetect'
 import {
   toSnakeCase, toCamelCase, toKebabCase, toPascalCase,
 } from '../textTransforms'
+import {
+  parseConflicts, hasConflicts, buildResolved,
+  type ConflictSection, type ConflictChoice,
+} from '../../lib/conflict-parser'
 
 // ── Props / Emits ─────────────────────────────────────────────────────────────
 const props = withDefaults(defineProps<{
@@ -32,6 +36,14 @@ let decorationColl: monaco.editor.IEditorDecorationsCollection | null = null
 let inlineDisposer: monaco.IDisposable | null = null
 let pendingGhost: string | null = null
 let ignoreNextModelChange = false
+// ── Merge-conflict support (inert until the document actually has markers) ────
+let conflictDecorationColl: monaco.editor.IEditorDecorationsCollection | null = null
+let conflictLensDisposer: monaco.IDisposable | null = null
+let conflictChangeDisposer: monaco.IDisposable | null = null
+let conflictLensEmitter: monaco.Emitter<monaco.languages.CodeLensProvider> | null = null
+let conflictLensProvider: monaco.languages.CodeLensProvider | null = null
+let conflictCommandId: string | null = null
+let conflictActive = false
 // Last value emitted to the parent — lets the modelValue watcher skip the
 // echo round-trip without re-serializing the whole document per keystroke.
 let lastEmittedValue: string | null = null
@@ -276,10 +288,14 @@ onMounted(() => {
     disposeInlineCompletions() {},
   })
 
-  // Emit content changes
-  editor.onDidChangeModelContent(() => {
+  // Emit content changes. The conflict sync shares this listener's single
+  // getValue() so ordinary typing costs exactly what it did before, and it runs
+  // ahead of the early return so external updates refresh the conflict UI too.
+  conflictChangeDisposer = editor.onDidChangeModelContent(() => {
+    const value = editor!.getValue()
+    syncConflictSupport(value)
     if (ignoreNextModelChange) { ignoreNextModelChange = false; return }
-    lastEmittedValue = editor!.getValue()
+    lastEmittedValue = value
     emit('update:modelValue', lastEmittedValue)
   })
 
@@ -313,15 +329,27 @@ onMounted(() => {
     () => editor?.trigger('keyboard', 'editor.action.blockComment', null),
   )
 
+  syncConflictSupport(props.modelValue)
+
   // Apply initial diagnostics
   if (props.diagnostics?.length) applyDiagnostics(props.diagnostics)
 })
 
 onBeforeUnmount(() => {
   inlineDisposer?.dispose()
+  conflictChangeDisposer?.dispose()
+  conflictLensDisposer?.dispose()
+  conflictLensEmitter?.dispose()
   editor?.dispose()
   editor = null
   decorationColl = null
+  conflictDecorationColl = null
+  conflictChangeDisposer = null
+  conflictLensDisposer = null
+  conflictLensEmitter = null
+  conflictLensProvider = null
+  conflictCommandId = null
+  conflictActive = false
 })
 
 // ── Watchers ──────────────────────────────────────────────────────────────────
@@ -377,18 +405,22 @@ function applyDiagnostics(
 }
 
 // ── Decoration helpers ────────────────────────────────────────────────────────
-function setDecorations(decs: Decoration[]): void {
-  if (!decorationColl) return
-  const items: monaco.editor.IModelDeltaDecoration[] = decs.map((d) => {
+function toMonacoDecorations(decs: Decoration[]): monaco.editor.IModelDeltaDecoration[] {
+  return decs.map((d) => {
     const classMap: Record<string, string> = {
       'highlight': d.className ?? 'ev-dec-highlight',
       'line-add': 'ev-dec-line-add',
       'line-del': 'ev-dec-line-del',
       'inline-add': 'ev-dec-inline-add',
       'inline-del': 'ev-dec-inline-del',
+      'conflict-ours': 'ev-dec-conflict-ours',
+      'conflict-base': 'ev-dec-conflict-base',
+      'conflict-theirs': 'ev-dec-conflict-theirs',
     }
     const cls = classMap[d.type] ?? 'ev-dec-highlight'
-    const isLine = d.type === 'line-add' || d.type === 'line-del'
+    const isDiffLine = d.type === 'line-add' || d.type === 'line-del'
+    const isConflict = d.type.startsWith('conflict-')
+    const isLine = isDiffLine || isConflict
     return {
       range: new monaco.Range(
         d.range.start.line + 1, d.range.start.col + 1,
@@ -398,11 +430,174 @@ function setDecorations(decs: Decoration[]): void {
         isWholeLine: isLine,
         className: cls,
         inlineClassName: isLine ? undefined : cls,
-        overviewRuler: isLine ? { color: d.type === 'line-add' ? '#4ec94e' : '#f44747', position: monaco.editor.OverviewRulerLane.Left } : undefined,
+        glyphMarginClassName: isConflict ? `ev-glyph-${d.type}` : undefined,
+        overviewRuler: isDiffLine ? { color: d.type === 'line-add' ? '#4ec94e' : '#f44747', position: monaco.editor.OverviewRulerLane.Left } : undefined,
       },
     }
   })
-  decorationColl.set(items)
+}
+
+function setDecorations(decs: Decoration[]): void {
+  if (!decorationColl) return
+  decorationColl.set(toMonacoDecorations(decs))
+}
+
+// ── Merge conflicts ───────────────────────────────────────────────────────────
+interface ConflictBlock {
+  section: ConflictSection
+  /** 1-based line of the `<<<<<<<` marker. */
+  startLine: number
+  /** 1-based line of the `>>>>>>>` marker. */
+  endLine: number
+}
+
+interface ConflictLensArgs {
+  startLine: number
+  choice: ConflictChoice
+}
+
+/**
+ * Locate every conflict block in the model. Line numbers are recomputed from
+ * the live document on every call — never cached — because accepting one block
+ * shifts every block after it.
+ *
+ * Returns `[]` if the computed spans disagree with the document; a wrong span
+ * here would rewrite the wrong lines, so bailing out is the safe answer.
+ */
+function scanConflictBlocks(model: monaco.editor.ITextModel): ConflictBlock[] {
+  const total = model.getLineCount()
+  const blocks: ConflictBlock[] = []
+  let line = 1
+  for (const s of parseConflicts(model.getValue())) {
+    if (s.kind === 'context') { line += s.lines.length; continue }
+    const height = 1 + s.ours.length + (s.hasBase ? 1 + s.base.length : 0)
+      + 1 + s.theirs.length + 1
+    const endLine = line + height - 1
+    if (endLine > total
+      || !model.getLineContent(line).startsWith('<<<<<<<')
+      || !model.getLineContent(endLine).startsWith('>>>>>>>')) return []
+    blocks.push({ section: s, startLine: line, endLine })
+    line = endLine + 1
+  }
+  return blocks
+}
+
+function conflictSideIsEmpty(section: ConflictSection, choice: ConflictChoice): boolean {
+  if (choice === 'ours') return section.ours.length === 0
+  if (choice === 'theirs') return section.theirs.length === 0
+  if (choice === 'base') return section.base.length === 0
+  return section.ours.length === 0 && section.theirs.length === 0
+}
+
+/** Replace one conflict block with the chosen side, keeping the undo stack. */
+function applyConflictChoice(startLine: number, choice: ConflictChoice): void {
+  const model = editor?.getModel()
+  if (!model) return
+  const block = scanConflictBlocks(model).find((b) => b.startLine === startLine)
+  if (!block) return
+
+  // Reuse the shared resolver rather than re-implementing the merge rules.
+  const resolved = buildResolved([block.section], new Map([[0, choice]]), new Map())
+  const bodyLines = conflictSideIsEmpty(block.section, choice)
+    ? []
+    : resolved.slice(0, -1).split('\n')
+
+  const lastLine = model.getLineCount()
+  const range = block.endLine < lastLine
+    ? new monaco.Range(block.startLine, 1, block.endLine + 1, 1)
+    : new monaco.Range(block.startLine, 1, block.endLine, model.getLineMaxColumn(block.endLine))
+  const text = block.endLine < lastLine
+    ? bodyLines.map((l) => l + '\n').join('')
+    : bodyLines.join('\n')
+
+  model.pushEditOperations([], [{ range, text }], () => null)
+  editor?.focus()
+}
+
+function provideConflictLenses(model: monaco.editor.ITextModel): monaco.languages.CodeLensList {
+  const commandId = conflictCommandId
+  if (!commandId || !editor || editor.getModel() !== model) return { lenses: [], dispose() {} }
+  const lenses: monaco.languages.CodeLens[] = []
+  for (const block of scanConflictBlocks(model)) {
+    const range = {
+      startLineNumber: block.startLine, startColumn: 1,
+      endLineNumber: block.startLine, endColumn: 1,
+    }
+    const add = (title: string, choice: ConflictChoice): void => {
+      const args: ConflictLensArgs = { startLine: block.startLine, choice }
+      lenses.push({
+        range,
+        id: `conflict-${block.startLine}-${choice}`,
+        command: { id: commandId, title, arguments: [args] },
+      })
+    }
+    add('Accept Current Change', 'ours')
+    add('Accept Incoming Change', 'theirs')
+    add('Accept Both Changes', 'both')
+    if (block.section.hasBase) add('Accept Base', 'base')
+  }
+  return { lenses, dispose() {} }
+}
+
+function paintConflictDecorations(model: monaco.editor.ITextModel): void {
+  if (!conflictDecorationColl) return
+  const decs: Decoration[] = []
+  const push = (type: Decoration['type'], from: number, to: number): void => {
+    decs.push({
+      id: `${type}-${from}`,
+      type,
+      range: { start: { line: from - 1, col: 0 }, end: { line: to - 1, col: 0 } },
+    })
+  }
+  for (const block of scanConflictBlocks(model)) {
+    const s = block.section
+    const oursEnd = block.startLine + s.ours.length
+    const baseEnd = s.hasBase ? oursEnd + 1 + s.base.length : oursEnd
+    push('conflict-ours', block.startLine, oursEnd)
+    if (s.hasBase) push('conflict-base', oursEnd + 1, baseEnd)
+    push('conflict-theirs', baseEnd + 1, block.endLine)
+  }
+  conflictDecorationColl.set(toMonacoDecorations(decs))
+}
+
+/** Register the CodeLens provider + command the first time a conflict shows up. */
+function ensureConflictSupport(): void {
+  if (!editor || conflictLensDisposer) return
+  conflictDecorationColl = editor.createDecorationsCollection([])
+  conflictCommandId = editor.addCommand(0, (...args: unknown[]) => {
+    // The command service may prepend a services accessor; find our payload.
+    const payload = args.find((a): a is ConflictLensArgs =>
+      typeof a === 'object' && a !== null && 'startLine' in a && 'choice' in a)
+    if (payload) applyConflictChoice(payload.startLine, payload.choice)
+  }) ?? null
+  conflictLensEmitter = new monaco.Emitter<monaco.languages.CodeLensProvider>()
+  conflictLensProvider = {
+    onDidChange: conflictLensEmitter.event,
+    provideCodeLenses: (model) => provideConflictLenses(model),
+  }
+  conflictLensDisposer = monaco.languages.registerCodeLensProvider('*', conflictLensProvider)
+}
+
+/**
+ * Turn conflict UI on/off to match the document. A file without markers never
+ * registers a provider, never enables `codeLens` and never gets a decoration —
+ * ordinary editing is byte-for-byte the pre-existing behaviour.
+ */
+function syncConflictSupport(value: string): void {
+  const model = editor?.getModel()
+  if (!model) return
+  const active = hasConflicts(value)
+  if (!active && !conflictActive) return
+
+  if (active !== conflictActive) {
+    conflictActive = active
+    if (active) ensureConflictSupport()
+    editor!.updateOptions({ codeLens: active })
+  }
+  if (!active) { conflictDecorationColl?.set([]); return }
+
+  paintConflictDecorations(model)
+  if (conflictLensProvider) conflictLensEmitter?.fire(conflictLensProvider)
 }
 
 // ── Text transform helper ─────────────────────────────────────────────────────
@@ -705,6 +900,25 @@ defineExpose({
 .ev-dec-line-del { background: rgba(244, 71, 71, 0.15); }
 .ev-dec-inline-add { background: rgba(78, 201, 78, 0.3); }
 .ev-dec-inline-del { background: rgba(244, 71, 71, 0.3); text-decoration: line-through; }
+
+/* Merge conflict blocks — low-saturation tints derived from theme tokens so
+   they read the same in light and dark. */
+.ev-dec-conflict-ours   { background: color-mix(in srgb, var(--success-fg) 11%, transparent); }
+.ev-dec-conflict-base   { background: color-mix(in srgb, var(--attention-fg) 10%, transparent); }
+.ev-dec-conflict-theirs { background: color-mix(in srgb, var(--accent-fg) 12%, transparent); }
+
+/* Gutter bars. Monaco sizes the glyph-margin element itself, so paint the bar
+   with a background gradient instead of fighting its inline width. */
+.ev-glyph-conflict-ours,
+.ev-glyph-conflict-base,
+.ev-glyph-conflict-theirs {
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 3px 100%;
+}
+.ev-glyph-conflict-ours   { background-image: linear-gradient(var(--success-fg), var(--success-fg)); }
+.ev-glyph-conflict-base   { background-image: linear-gradient(var(--attention-fg), var(--attention-fg)); }
+.ev-glyph-conflict-theirs { background-image: linear-gradient(var(--accent-fg), var(--accent-fg)); }
 </style>
 
 <style scoped>

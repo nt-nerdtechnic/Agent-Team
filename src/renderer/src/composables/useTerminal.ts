@@ -871,8 +871,22 @@ interface UseTerminalOptions {
 // Raised from wsClient's 10s default: the backend's near-8s CLI probe plus PTY
 // fork and attribution scan is legitimately heavier than an average request, so
 // 10s was too tight even for a single healthy spawn.
+// Upper bound on the queue wait. Not charging it against the per-request
+// timeout is the point of acquiring early, but "not charged" was implemented as
+// "unbounded": when the in-flight creates never ack, the queued panes never even
+// send their create and sit in 'starting' with nothing to time out. A single
+// healthy spawn is dominated by the near-8s CLI probe, so 45s absorbs several
+// normal drain rounds and still fails loudly long before "stuck forever".
+const RESUME_QUEUE_TIMEOUT_MS = 45_000
+
 let _resumeSpawnActive = 0
-const _resumeSpawnWaiters: Array<() => void> = []
+// Waiters are objects, not bare resolvers, so a timed-out one is identifiable.
+// A timed-out waiter removes itself from the queue, and grant() reports whether
+// it actually took the baton — handing the slot to a waiter that already gave up
+// would destroy it (the active count would never come back down), so the
+// releaser keeps walking the queue until someone accepts or it runs out.
+interface ResumeSpawnWaiter { grant(): boolean }
+const _resumeSpawnWaiters: ResumeSpawnWaiter[] = []
 
 async function acquireResumeSpawnSlot(): Promise<void> {
   // Cap read live at acquire time so a Settings change takes effect immediately.
@@ -881,13 +895,38 @@ async function acquireResumeSpawnSlot(): Promise<void> {
     return
   }
   // Wait; releaseResumeSpawnSlot hands us the slot (count stays put).
-  await new Promise<void>((resolve) => _resumeSpawnWaiters.push(resolve))
+  await new Promise<void>((resolve, reject) => {
+    let settled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const waiter: ResumeSpawnWaiter = {
+      grant(): boolean {
+        if (settled) return false
+        settled = true
+        if (timer !== null) clearTimeout(timer)
+        resolve()
+        return true
+      },
+    }
+    timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      const at = _resumeSpawnWaiters.indexOf(waiter)
+      if (at >= 0) _resumeSpawnWaiters.splice(at, 1)  // no slot may be sent our way
+      reject(new Error(
+        `resume spawn queue timed out after ${Math.round(RESUME_QUEUE_TIMEOUT_MS / 1000)}s`
+      ))
+    }, RESUME_QUEUE_TIMEOUT_MS)
+    _resumeSpawnWaiters.push(waiter)
+  })
 }
 
 function releaseResumeSpawnSlot(): void {
-  const next = _resumeSpawnWaiters.shift()
-  if (next) next()  // pass the baton: our slot goes to the next waiter
-  else _resumeSpawnActive--
+  // Pass the baton to the first waiter still alive (the count stays put); only
+  // when nobody takes it does the slot actually go back to the pool.
+  while (_resumeSpawnWaiters.length > 0) {
+    if (_resumeSpawnWaiters.shift()!.grant()) return
+  }
+  _resumeSpawnActive--
 }
 
 export function useTerminal(paneId: string, backend: ReturnType<typeof useBackend>, opts?: UseTerminalOptions) {
@@ -1049,6 +1088,13 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       ? Math.max(0, nowTick.value - startingStartedAt.value)
       : null
   ))
+  // Which early exit in _doCreate last stopped a spawn from reaching
+  // terminal.create. Those exits are silent on purpose — the spawn stays parked
+  // and the reconciler / ResizeObserver retry it once the pane is measurable —
+  // so a pane that is never retried is indistinguishable from one that is
+  // legitimately still waiting. Recording the exit is what lets the starting
+  // watchdog say WHERE a stuck pane stopped instead of only that it stopped.
+  const stallReason = ref<string | null>(null)
 
   const isStopped = ref(false)
 
@@ -2431,6 +2477,10 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // cleared until after the awaits in _doCreate, so without this the reconciler /
   // ResizeObserver could start a second create for the same pane (two PTYs).
   let _creating = false
+  // True only while the terminal.create RPC itself awaits its ack. That request
+  // carries its own TERMINAL_CREATE_TIMEOUT_MS deadline and reports its own
+  // failure, so the starting watchdog must stand down while it is in flight.
+  let createInFlight = false
   async function createWhenMeasurable(): Promise<void> {
     if (_creating || !pendingSpawn.value) return
     _creating = true
@@ -2440,7 +2490,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     const opts = pendingSpawn.value
     if (!opts) return
     const createGeneration = activeCreateGeneration
-    if (!createGeneration) return
+    if (!createGeneration) { stallReason.value = 'no-active-generation'; return }
     let el = containerRef.value
     const visible = !!el && el.clientWidth > 0
     // A hidden pane has no measurable width, so the create below would fall back
@@ -2456,6 +2506,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       // it reprints the prior conversation and MUST paint at the real width. A
       // fresh spawn is empty, so it proceeds — deferring it would stall e.g. a
       // pipeline stage spawned into a tab the user isn't currently viewing.
+      stallReason.value = 'hidden-resume-no-cached-size'
       return
     }
     if (visible && cellWidth() === 0) {
@@ -2472,7 +2523,10 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
           const t = setTimeout(() => { cancelAnimationFrame(raf); resolve() }, 100)
         })
         el = containerRef.value
-        if (opts.isResume && (!el || el.clientWidth === 0)) return  // hidden mid-wait
+        if (opts.isResume && (!el || el.clientWidth === 0)) {  // hidden mid-wait
+          stallReason.value = 'hidden-during-measure'
+          return
+        }
       }
     }
     pendingSpawn.value = null  // claim it so a concurrent retry can't double-create
@@ -2484,6 +2538,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       el = containerRef.value
       if (opts.isResume && (!el || el.clientWidth === 0 || cellWidth() === 0)) {
         pendingSpawn.value = opts
+        stallReason.value = 'reparked-tab-switched'
         return
       }
       try { fit.fit() } catch { /* keep current size */ }
@@ -2508,13 +2563,24 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     }
     // Only resume spawns are throttled (they are the heavy ones). Acquire before
     // send so the queue-wait is NOT charged against the per-request timeout;
-    // released in finally once the ack (or failure) lands.
+    // released in finally once the ack (or failure) lands. Acquired INSIDE the
+    // try so a queue timeout surfaces through the same catch as any other spawn
+    // failure — a pane stuck behind a wedged backend must report an error rather
+    // than sit in 'starting' having never sent anything. slotHeld (rather than
+    // `throttled`) gates the release: a rejected acquire never held a slot, and
+    // releasing one we don't own would hand a phantom slot to the next waiter.
     const throttled = !!opts.isResume
-    if (throttled) await acquireResumeSpawnSlot()
+    let slotHeld = false
     try {
+      if (throttled) {
+        await acquireResumeSpawnSlot()
+        slotHeld = true
+      }
       // The pane may have been cancelled while waiting for the shared resume
       // semaphore. Never send a create for an invalidated generation.
       if (activeCreateGeneration !== createGeneration || isDisposed) return
+      stallReason.value = null  // past every silent exit — the create is going out
+      createInFlight = true
       const resp = await backend.send<{
         terminal_session_id: string
         pid: number
@@ -2582,13 +2648,17 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       bindSessionHandlers()
     } catch (err) {
       if (activeCreateGeneration !== createGeneration) return
+      // Throttled yet holding no slot can only mean acquireResumeSpawnSlot
+      // rejected: this pane never reached terminal.create at all.
+      if (throttled && !slotHeld) stallReason.value = 'resume-queue-timeout'
       activeCreateGeneration = null
       void requestCreateCancel(createGeneration)
       status.value = 'error'
       error.value = String((err as Error).message ?? err)
       term.writeln(`\r\n\x1b[31m[error] ${error.value}\x1b[0m`)
     } finally {
-      if (throttled) releaseResumeSpawnSlot()
+      createInFlight = false
+      if (slotHeld) releaseResumeSpawnSlot()
     }
   }
 
@@ -2616,6 +2686,55 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     requestAnimationFrame(() => requestAnimationFrame(attempt))
     freshSpawnRefitTimer = setTimeout(() => { freshSpawnRefitTimer = null; attempt() }, 350)
   }
+
+  // Last resort for a pane that entered 'starting' and then went permanently
+  // silent. The only way out of 'starting' is terminal.create's ack, so a create
+  // that neither acks nor errors — or one that was never sent because _doCreate
+  // took a silent exit nothing retried — strands the pane with no status change,
+  // no error and no output. This turns that into a stated failure.
+  //
+  // It reports ONLY. _creating exists because a second create for the same pane
+  // means two PTYs, and from out here we cannot know whether the first one is
+  // truly dead; recovery stays a user action (Respawn).
+  //
+  // Every guard below is load-bearing:
+  //  - pendingSpawn set means a resume is parked waiting for its hidden tab to
+  //    be shown. Waiting indefinitely is the DESIGN there, not a stall.
+  //  - createInFlight means the RPC owns the deadline and will report for itself.
+  //  - _creating means _doCreate is mid-flight but has not reached the send yet
+  //    — most of that window is the resume queue wait, which a pane unparked
+  //    long after it entered 'starting' enters with its age already past the
+  //    threshold. Without this guard an All-CLI restore prints a spurious error
+  //    (naming the PREVIOUS park's stallReason) at a pane that then goes on to
+  //    spawn fine. Not a blind spot: _doCreate is bounded by the 45s queue
+  //    timeout and the 30s RPC timeout, both of which report for themselves.
+  //  - the age is past both that deadline and the resume queue timeout, so
+  //    whichever of those is the real cause gets to report first.
+  const STARTING_WATCHDOG_MS = 60_000
+  let startingWatchdogTimer: ReturnType<typeof setInterval> | null = null
+  function stopStartingWatchdog(): void {
+    if (startingWatchdogTimer === null) return
+    clearInterval(startingWatchdogTimer)
+    startingWatchdogTimer = null
+  }
+  function checkStartingStall(): void {
+    if (status.value !== 'starting') { stopStartingWatchdog(); return }
+    // Re-evaluated every tick rather than once at arm time: a pane can be
+    // re-parked, or start its create, long after it entered 'starting'.
+    if (pendingSpawn.value || createInFlight || _creating) return
+    const startedAt = startingStartedAt.value
+    if (startedAt === null || Date.now() - startedAt < STARTING_WATCHDOG_MS) return
+    stopStartingWatchdog()
+    status.value = 'error'
+    error.value = `startup stalled before terminal.create (${stallReason.value ?? 'unknown'})`
+    term.writeln(`\r\n\x1b[31m[error] ${error.value}\x1b[0m`)
+  }
+  watch(status, (next) => {
+    if (next !== 'starting') { stopStartingWatchdog(); return }
+    if (startingWatchdogTimer === null) {
+      startingWatchdogTimer = setInterval(checkStartingStall, 5_000)
+    }
+  })
 
   // Assign here — after createWhenMeasurable is defined — so all callbacks
   // close over the fully-initialized functions. The declaration is hoisted
@@ -2654,6 +2773,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     runningLatched.value = false
     turnCompleteAt.value = 0
     error.value = ''
+    stallReason.value = null  // a retry must not inherit the last attempt's exit
     status.value = 'starting'
     startingStartedAt.value = Date.now()
     const createGeneration = newCreateGeneration()
@@ -2832,6 +2952,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     cleanupSession()
     clearInterval(tickInterval)
     clearInterval(reconcileInterval)
+    stopStartingWatchdog()
     if (freshSpawnRefitTimer) clearTimeout(freshSpawnRefitTimer)
     if (_hintTimer) clearTimeout(_hintTimer)
     resizeCtrl.dispose()
@@ -2880,6 +3001,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     displayStatus,
     startingStartedAt,
     startingAgeMs,
+    stallReason,
     cancelPendingCreate,
     isStopped,
     sessionId,

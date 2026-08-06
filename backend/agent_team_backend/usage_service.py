@@ -97,6 +97,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .applog import app_data_dir
+from .credential_vault import vault_to_thread
 
 log = logging.getLogger(__name__)
 
@@ -2243,11 +2244,11 @@ async def _harvest_login_home_locked(vault, agent_key: str, profile_id: str) -> 
     if _login_pane_running(agent_key, profile_id):
         return False
     async with vault.switch_lock(agent_key):
-        harvested = await asyncio.to_thread(
+        harvested = await vault_to_thread(
             vault.harvest_login_home, agent_key, profile_id
         )
         if harvested and _active_profile_id(agent_key) == profile_id:
-            await asyncio.to_thread(vault.restore, agent_key, profile_id)
+            await vault_to_thread(vault.restore, agent_key, profile_id)
         return harvested
 
 
@@ -2680,7 +2681,7 @@ class UsageService:
                 # Same lock as the switch handler: a harvest must not interleave
                 # with a live credential swap for this agent.
                 async with vault.switch_lock(agent_key):
-                    harvested = await asyncio.to_thread(vault.harvest, agent_key, profile_id) or harvested
+                    harvested = await vault_to_thread(vault.harvest, agent_key, profile_id) or harvested
             except Exception:  # noqa: BLE001
                 pass
         login_harvested_ids = await _harvest_pending_login_homes(store, vault)

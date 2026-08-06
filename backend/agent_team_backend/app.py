@@ -1679,7 +1679,13 @@ async def _ensure_fresh_path_for_spawn(agent_key: str) -> None:
     if now - _last_path_refresh < _PATH_REFRESH_INTERVAL_SEC:
         return
     _last_path_refresh = now
-    await asyncio.to_thread(onboarding_deps._refresh_path_from_login_shell)
+    # Same dedicated pool as the spawn probe: a login-shell subprocess is the
+    # same kind of heavy pre-spawn work and must stay off the shared default
+    # executor (see ws_handlers._CLI_PROBE_EXECUTOR).
+    await asyncio.get_running_loop().run_in_executor(
+        ws_handlers._CLI_PROBE_EXECUTOR,
+        onboarding_deps._refresh_path_from_login_shell,
+    )
 
 
 class AgentCliProbeError(RuntimeError):

@@ -77,6 +77,9 @@ export type DecorationType =
   | 'inline-del'    // inline range removed
   | 'ghost'         // ghost (suggested) text shown inline, not in the model
   | 'highlight'     // generic selection/emphasis background
+  | 'conflict-ours'   // merge conflict: the current (HEAD) side
+  | 'conflict-base'   // merge conflict: the diff3 common-ancestor side
+  | 'conflict-theirs' // merge conflict: the incoming side
 
 export interface Decoration {
   id: string

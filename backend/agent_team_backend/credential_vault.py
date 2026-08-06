@@ -44,6 +44,7 @@ import os
 import shutil
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -51,11 +52,37 @@ from typing import Callable
 from .profiles_store import (
     CLAUDE_ENV_OVERRIDES,
     PROFILE_HOME_DIRNAME,
+    SUPPORTED_AGENT_KEYS,
     canonical_path_str,
     default_profiles_root,
 )
 
 log = logging.getLogger("agent_team_backend.credential_vault")
+
+# Dedicated pool for blocking credential I/O (Keychain ``security``
+# subprocesses, 0600 secret files). Every one of these calls runs while its
+# agent's ``switch_lock`` is held, so it must never queue behind unrelated
+# work: on asyncio's shared default executor a burst of CLI spawn probes can
+# occupy every worker, leaving the lock holder waiting for a thread and the
+# lock held indefinitely. One worker per profile agent: ``switch_lock`` already
+# serializes vault work per agent, so ``len(SUPPORTED_AGENT_KEYS)`` is the true
+# concurrency ceiling. Sizing it smaller would requeue the very calls this pool
+# exists to unblock — a 10s Keychain ``security`` timeout each, against the
+# 30s spawn-side lock budget.
+_VAULT_EXECUTOR = ThreadPoolExecutor(
+    max_workers=len(SUPPORTED_AGENT_KEYS), thread_name_prefix="vault-io"
+)
+
+
+async def vault_to_thread(fn: Callable, *args):
+    """``asyncio.to_thread`` for credential I/O, pinned to ``_VAULT_EXECUTOR``.
+
+    Use this — never ``asyncio.to_thread`` — for anything called while holding
+    an agent's ``switch_lock``.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_VAULT_EXECUTOR, fn, *args)
+
 
 # Reserved slot for the unmanaged original login (defaults[agent] = null).
 DEFAULT_SLOT_ID = "__default__"
@@ -1182,7 +1209,7 @@ class CredentialVault:
             active_id = doc["defaults"].get(agent_key)
             try:
                 async with self.switch_lock(agent_key):
-                    await asyncio.to_thread(
+                    await vault_to_thread(
                         self._promote_agent_profile_homes,
                         agent_key, profile_ids, active_id,
                     )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -70,7 +71,11 @@ async def test_codex_home_lookup_prepare_and_spawn_wiring_use_to_thread(
     async def no_path_refresh(_agent_key: str) -> None:
         pass
 
+    probe_threads: list[str] = []
+
     def probe(_agent_key: str, _command: Any) -> None:
+        probe_threads.append(threading.current_thread().name)
+        threaded.append("probe")
         return None
 
     def wire(_host: Any, _agent_key: str, command: Any, _pane_id: str = "") -> Any:
@@ -107,6 +112,8 @@ async def test_codex_home_lookup_prepare_and_spawn_wiring_use_to_thread(
     )
 
     assert threaded == ["probe", "find_session_home", "prepare", "wire"]
+    # The probe runs in its own pool, never on asyncio's shared default one.
+    assert probe_threads[0].startswith("cli-probe")
     created = session.terminals.created[0]  # type: ignore[attr-defined]
     assert created["env"]["CODEX_HOME"] == str(tmp_path / "homes" / "codex-pane")
     assert session.websocket.sent[-1]["ok"] is True  # type: ignore[attr-defined]
@@ -126,7 +133,11 @@ async def test_claude_spawn_wiring_uses_to_thread_and_preserves_transformer_resu
     async def no_path_refresh(_agent_key: str) -> None:
         pass
 
+    probe_threads: list[str] = []
+
     def probe(_agent_key: str, _command: Any) -> None:
+        probe_threads.append(threading.current_thread().name)
+        threaded.append("probe")
         return None
 
     def wire(_host: Any, _agent_key: str, command: Any, _pane_id: str = "") -> Any:
@@ -162,6 +173,8 @@ async def test_claude_spawn_wiring_uses_to_thread_and_preserves_transformer_resu
     )
 
     assert threaded == ["probe", "wire"]
+    # The probe runs in its own pool, never on asyncio's shared default one.
+    assert probe_threads[0].startswith("cli-probe")
     created = session.terminals.created[0]  # type: ignore[attr-defined]
     assert created["command"] == ["/bin/zsh", "-lc", "claude --wired"]
     assert session.websocket.sent[-1]["ok"] is True  # type: ignore[attr-defined]
