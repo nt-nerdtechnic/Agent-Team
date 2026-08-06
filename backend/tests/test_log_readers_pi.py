@@ -400,6 +400,96 @@ def test_parse_activity_user_and_assistant_only(fake_pi_root: Path) -> None:
     assert all(e.session_id == _SID and e.cwd == _CWD for e in events)
 
 
+def _assistant_saying(eid: str, text: str, parent: str | None = None) -> dict:
+    rec = _assistant(eid, parent)
+    rec["message"]["content"] = [{"type": "text", "text": text}]
+    return rec
+
+
+def _go_quiet(path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pretend the log stopped being written to well past the idle window."""
+    import agent_team_backend.log_readers.pi as pi_mod
+
+    monkeypatch.setattr(
+        pi_mod.time, "time", lambda: path.stat().st_mtime + pi_mod._TURN_IDLE_SECONDS + 1
+    )
+
+
+def test_parse_activity_completes_a_turn_with_the_assistant_reply(
+    fake_pi_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pi has no MCP support, so the output protocol is its only route to
+    sending a message — and that needs a turn_complete carrying text."""
+    reader = PiLogReader()
+    f = _session_file(fake_pi_root)
+    _write_jsonl(f, [
+        _header(),
+        _user("aa000001", content="ask reviewer to take over"),
+        _assistant_saying("aa000002", "looking into it", "aa000001"),
+        _assistant_saying("aa000003", "done, handing over", "aa000002"),
+    ])
+    _go_quiet(f, monkeypatch)
+    completes = [
+        e for e in reader.parse_activity(f, set()) if e.event_type == "turn_complete"
+    ]
+    assert [(e.dedup_key, e.detail, e.text) for e in completes] == [
+        ("turn:0", "idle", "done, handing over")
+    ]
+
+
+def test_parse_activity_open_turn_is_not_completed_while_the_log_is_live(
+    fake_pi_root: Path,
+) -> None:
+    reader = PiLogReader()
+    f = _session_file(fake_pi_root)
+    _write_jsonl(f, [
+        _header(),
+        _user("aa000001", content="go"),
+        _assistant_saying("aa000002", "working", "aa000001"),
+    ])
+    assert [
+        e for e in reader.parse_activity(f, set()) if e.event_type == "turn_complete"
+    ] == []
+
+
+def test_parse_activity_next_message_closes_the_previous_turn(
+    fake_pi_root: Path,
+) -> None:
+    reader = PiLogReader()
+    f = _session_file(fake_pi_root)
+    _write_jsonl(f, [
+        _header(),
+        _user("aa000001", content="first"),
+        _assistant_saying("aa000002", "answer one", "aa000001"),
+        _user("aa000003", content="second", parent="aa000002"),
+    ])
+    completes = [
+        e for e in reader.parse_activity(f, set()) if e.event_type == "turn_complete"
+    ]
+    assert [(e.dedup_key, e.detail, e.text) for e in completes] == [
+        ("turn:0", "boundary", "answer one")
+    ]
+
+
+def test_parse_activity_reply_survives_a_poll_boundary(
+    fake_pi_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reader = PiLogReader()
+    seen: set[str] = set()
+    f = _session_file(fake_pi_root)
+    _write_jsonl(f, [
+        _header(),
+        _user("aa000001", content="go"),
+        _assistant_saying("aa000002", "ready", "aa000001"),
+    ])
+    assert [e for e in reader.parse_activity(f, seen) if e.event_type == "turn_complete"] == []
+    _go_quiet(f, monkeypatch)
+    completes = [
+        e for e in reader.parse_activity(f, seen) if e.event_type == "turn_complete"
+    ]
+    assert [(e.detail, e.text) for e in completes] == [("idle", "ready")]
+
+
 def test_parse_activity_user_prompt_carries_text(fake_pi_root: Path) -> None:
     """User message content (plain string or text blocks) rides on the event,
     truncated to 500 chars, for pane naming; the injected "<...>"-prefixed
@@ -416,7 +506,9 @@ def test_parse_activity_user_prompt_carries_text(fake_pi_root: Path) -> None:
         _assistant("aa000004", "aa000003"),
     ])
     events = reader.parse_activity(f, set())
-    assert [(e.detail, e.text) for e in events] == [
+    assert [
+        (e.detail, e.text) for e in events if e.event_type == "agent_active"
+    ] == [
         ("user", ""),
         ("user", "fix the login bug"),
         ("user", "p" * 500),

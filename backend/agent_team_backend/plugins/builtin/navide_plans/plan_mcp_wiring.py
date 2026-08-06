@@ -1,4 +1,4 @@
-"""Wire pane CLI agents (claude / codex / copilot) to the Plan MCP endpoint.
+"""Wire pane CLI agents to the Plan MCP endpoint.
 
 The backend serves a Plan MCP server at ``/plan-mcp`` (see plan_mcp.py) on a
 dynamic port picked fresh each launch, so nothing static can point at it.
@@ -25,6 +25,18 @@ additive spawn-time flags — no user config file is ever modified:
   claude there is nothing to step aside for — a user's own servers keep
   loading alongside ours, and ``--disable-mcp-server navide-plans`` is their
   opt-out.
+- opencode / kilo: no MCP flag at all, but both read an entire config document
+  out of ``OPENCODE_CONFIG_CONTENT`` / ``KILO_CONFIG_CONTENT`` and deep-merge
+  it over the user's files, so the spawn env carries the wiring instead. A
+  value already present in the spawn env is left alone. Note this reaches only
+  variables Navide itself set — one exported from the user's shell profile is
+  inherited by the CLI process and would be overwritten.
+
+Deliberately not wired this way: the CLIs whose only MCP surface is a config
+file under a home directory (kimi, grok, qwen, antigravity). Their home
+variable relocates credentials and sessions along with the config, so pointing
+it at a Navide-owned directory logs the user out; doing it safely needs a
+symlink shim of the real home, which is a much larger change than this module.
 
 The port is read from the discovery file written by __main__ before uvicorn
 starts (same mechanism the Claude hooks use). File absent → wiring no-ops,
@@ -212,6 +224,9 @@ def wire_command(
     now differs per pane, and writing one file per pane would leave litter
     behind in the app data dir. copilot is always inline — it has no
     file-based fallback to fall back to.
+
+    ``env`` is the spawn environment and is mutated in place for the CLIs
+    configured by variable; None (or a variable already set) leaves it alone.
     """
     if port is None:
         return command

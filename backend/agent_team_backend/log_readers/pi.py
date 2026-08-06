@@ -39,6 +39,7 @@ import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
 
 from .base import (
@@ -56,6 +57,36 @@ log = logging.getLogger("agent_team_backend.log_readers.pi")
 # Rewrites re-read the WHOLE file, so the dedup window must cover far more
 # than the append-tail case other vendors need (qwen keeps 64).
 _RECENT_KEYS_WINDOW = 256
+
+# Pi writes no end-of-turn record, so a turn is closed either by the next user
+# message or — for the latest turn, which has no successor — once the file has
+# stopped being written to for _TURN_IDLE_SECONDS. File mtime is the activity
+# signal: entry timestamps are ISO strings, and Pi rewrites the whole file, so
+# a write is the same evidence with none of the parsing.
+_TURN_IDLE_SECONDS = 8.0
+_STATE_PREFIX = "pi_turn::"
+_TEXT_PREFIX = "pi_text::"
+_TEXT_MAX_CHARS = 4_000
+
+
+def _cap_text(text: str) -> str:
+    if len(text) <= _TEXT_MAX_CHARS:
+        return text
+    half = _TEXT_MAX_CHARS // 2
+    return f"{text[:half]}\n…\n{text[-half:]}"
+
+
+def _read_sentinel(seen_keys: set[str], prefix: str) -> str:
+    for k in seen_keys:
+        if k.startswith(prefix):
+            return k[len(prefix):]
+    return ""
+
+
+def _write_sentinel(seen_keys: set[str], prefix: str, value: str) -> None:
+    seen_keys.difference_update({k for k in seen_keys if k.startswith(prefix)})
+    if value:
+        seen_keys.add(f"{prefix}{value}")
 
 
 def pi_sessions_root() -> Path:
@@ -373,16 +404,42 @@ class PiLogReader(LogReader):
     def parse_activity(
         self, path: Path, seen_keys: set[str]
     ) -> list[ActivityEvent]:
-        """Emit `agent_active` for user and assistant message entries.
+        """Emit `agent_active` for user and assistant message entries, and
+        `turn_complete` once per user-facing turn.
 
-        Pi's log carries no explicit end-of-turn signal (an assistant turn
-        spans several message/tool entries with no stop record), so no
-        turn_complete is emitted. Non-message entries (tool results,
-        compaction, branch summaries) are not user-visible activity."""
+        Pi's log carries no explicit end-of-turn record (an assistant turn
+        spans several message/tool entries with no stop record), so the turn
+        boundary is inferred: the next user message closes the previous turn,
+        and the latest turn is flushed once the file has been quiet for
+        _TURN_IDLE_SECONDS. turn_complete carries the assistant's closing text,
+        which is what lets a Pi pane send inter-CLI messages — the frontend
+        only parses the ---MSG-START--- protocol out of a turn_complete that
+        has text, and Pi has no MCP support to offer the alternative route.
+
+        Non-message entries (tool results, compaction, branch summaries) are
+        not user-visible activity."""
         out: list[ActivityEvent] = []
         header = self._header(path)
         session_id = str(header.get("id") or "") or self._fallback_id(path)
         cwd = str(header.get("cwd") or "")
+        state_raw = _read_sentinel(seen_keys, _STATE_PREFIX)
+        state: dict | None = None
+        if state_raw:
+            try:
+                parsed = json.loads(state_raw)
+                state = parsed if isinstance(parsed, dict) else None
+            except json.JSONDecodeError:
+                state = None
+        last_text = _read_sentinel(seen_keys, _TEXT_PREFIX)
+
+        def _complete(idx: int, detail: str) -> ActivityEvent:
+            return ActivityEvent(
+                vendor="pi", event_type="turn_complete",
+                cwd=cwd, session_id=session_id, file_path=str(path),
+                dedup_key=f"turn:{idx}", timestamp="", detail=detail,
+                text=last_text,
+            )
+
         try:
             fh = path.open(encoding="utf-8")
         except OSError:
@@ -410,9 +467,24 @@ class PiLogReader(LogReader):
                     # blocks; carry it so the frontend can name the pane.
                     text = ""
                     if role == "user":
+                        # A new message closes the previous turn (if open).
+                        if state is not None and not state.get("flushed"):
+                            out.append(_complete(int(state["idx"]), "boundary"))
+                            last_text = ""
+                        idx = (int(state["idx"]) + 1) if state is not None else 0
+                        state = {"idx": idx, "flushed": False}
                         text = user_prompt_text(
                             join_text_blocks(msg.get("content"), "text")
                         )
+                    else:
+                        # An assistant entry with no preceding user message (a
+                        # resumed session joined mid-turn) still opens a turn.
+                        if state is None or state.get("flushed"):
+                            idx = (int(state["idx"]) + 1) if state is not None else 0
+                            state = {"idx": idx, "flushed": False}
+                        reply = join_text_blocks(msg.get("content"), "text").strip()
+                        if reply:
+                            last_text = _cap_text(reply)
                     out.append(ActivityEvent(
                         vendor="pi",
                         event_type="agent_active",
@@ -421,4 +493,21 @@ class PiLogReader(LogReader):
                         timestamp=str(rec.get("timestamp") or ""),
                         detail=role, text=text,
                     ))
+
+            # The latest turn has no following message; flush it once the file
+            # has stopped being written to for long enough to call it finished.
+            if state is not None and not state.get("flushed"):
+                try:
+                    quiet_for = time.time() - path.stat().st_mtime
+                except OSError:
+                    quiet_for = 0.0
+                if quiet_for >= _TURN_IDLE_SECONDS:
+                    out.append(_complete(int(state["idx"]), "idle"))
+                    state["flushed"] = True
+                    last_text = ""
+
+        _write_sentinel(
+            seen_keys, _STATE_PREFIX, json.dumps(state) if state is not None else ""
+        )
+        _write_sentinel(seen_keys, _TEXT_PREFIX, last_text)
         return out

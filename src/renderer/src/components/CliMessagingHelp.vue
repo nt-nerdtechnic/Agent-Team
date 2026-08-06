@@ -24,26 +24,29 @@ interface TroubleRow {
 interface CoverageRow {
   cli: string
   send: string
-  sendKind: 'both' | 'protocol' | 'none'
+  sendKind: 'both' | 'protocol' | 'mcp' | 'none'
 }
 
-// Sending needs one of the two routes. The MCP tools are wired only for claude,
-// codex and copilot — the three CLIs with an additive spawn-time flag for it;
-// the output protocol needs Navide to read the agent's turn text, which only
-// four vendors' logs actually carry. Receiving is unaffected either way — that
-// is text injected into the terminal.
+// Sending needs one of the two routes. The MCP tools are wired for the CLIs
+// that take MCP config from a spawn-time flag or an environment variable; the
+// output protocol needs Navide to read the agent's turn text, which needs the
+// vendor's log to expose the reply in the first place. Antigravity and Cursor
+// keep theirs in undocumented protobuf blobs and offer no way to point them at
+// an MCP server without editing the user's own config file, so neither route
+// is open. Receiving is unaffected throughout — that is text injected into the
+// terminal, and it works for every CLI.
 const coverage: CoverageRow[] = [
   { cli: 'Claude Code', send: 'MCP 工具 ＋ 輸出協定', sendKind: 'both' },
   { cli: 'Codex', send: 'MCP 工具 ＋ 輸出協定', sendKind: 'both' },
   { cli: 'Copilot CLI', send: 'MCP 工具 ＋ 輸出協定', sendKind: 'both' },
+  { cli: 'OpenCode', send: '僅 MCP 工具', sendKind: 'mcp' },
+  { cli: 'Kilo Code', send: '僅 MCP 工具', sendKind: 'mcp' },
   { cli: 'Aider', send: '僅輸出協定', sendKind: 'protocol' },
+  { cli: 'Kimi Code', send: '僅輸出協定', sendKind: 'protocol' },
+  { cli: 'Qwen Code', send: '僅輸出協定', sendKind: 'protocol' },
+  { cli: 'Grok CLI', send: '僅輸出協定', sendKind: 'protocol' },
+  { cli: 'Pi', send: '僅輸出協定', sendKind: 'protocol' },
   { cli: 'Antigravity CLI', send: '目前不支援', sendKind: 'none' },
-  { cli: 'Grok CLI', send: '目前不支援', sendKind: 'none' },
-  { cli: 'Kimi Code', send: '目前不支援', sendKind: 'none' },
-  { cli: 'OpenCode', send: '目前不支援', sendKind: 'none' },
-  { cli: 'Qwen Code', send: '目前不支援', sendKind: 'none' },
-  { cli: 'Kilo Code', send: '目前不支援', sendKind: 'none' },
-  { cli: 'Pi', send: '目前不支援', sendKind: 'none' },
   { cli: 'Cursor CLI', send: '目前不支援', sendKind: 'none' },
 ]
 

@@ -265,13 +265,115 @@ def test_parse_activity_user_prompt_carries_text(fake_qwen_root: Path) -> None:
         _assistant("a1"),
     ])
     events = reader.parse_activity(f, set())
-    assert [(e.detail, e.text) for e in events] == [
+    assert [
+        (e.detail, e.text) for e in events if e.event_type == "agent_active"
+    ] == [
         ("user", ""),
         ("user", "fix the login bug"),
         ("user", "p" * 500),
         ("user", ""),
         ("assistant", ""),
     ]
+
+
+def _assistant_saying(uuid: str, text: str, cwd: str = _CWD) -> dict:
+    rec = _assistant(uuid, cwd=cwd)
+    rec["message"] = {"role": "model", "parts": [{"text": text}]}
+    return rec
+
+
+def _go_quiet(path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pretend the log stopped being written to well past the idle window."""
+    import agent_team_backend.log_readers.qwen as qwen_mod
+
+    monkeypatch.setattr(
+        qwen_mod.time, "time", lambda: path.stat().st_mtime + qwen_mod._TURN_IDLE_SECONDS + 1
+    )
+
+
+def test_parse_activity_completes_a_turn_with_the_assistant_reply(
+    fake_qwen_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Qwen writes no end-of-turn record, so the latest turn is closed by the
+    file going quiet — and it must carry the reply for the messaging protocol."""
+    reader = QwenLogReader()
+    f = _chat_file(fake_qwen_root)
+    _write_jsonl(f, [
+        _user("u1", "ask reviewer to take over"),
+        _assistant_saying("a1", "looking into it"),
+        _assistant_saying("a2", "done, handing over"),
+    ])
+    _go_quiet(f, monkeypatch)
+    completes = [
+        e for e in reader.parse_activity(f, set()) if e.event_type == "turn_complete"
+    ]
+    assert [(e.dedup_key, e.detail, e.text) for e in completes] == [
+        ("turn:0", "idle", "done, handing over")
+    ]
+
+
+def test_parse_activity_open_turn_is_not_completed_while_the_log_is_live(
+    fake_qwen_root: Path
+) -> None:
+    reader = QwenLogReader()
+    f = _chat_file(fake_qwen_root)
+    _write_jsonl(f, [_user("u1", "go"), _assistant_saying("a1", "working")])
+    # The file was just written, so it is still inside the idle window.
+    assert [
+        e for e in reader.parse_activity(f, set()) if e.event_type == "turn_complete"
+    ] == []
+
+
+def test_parse_activity_next_prompt_closes_the_previous_turn(
+    fake_qwen_root: Path
+) -> None:
+    reader = QwenLogReader()
+    f = _chat_file(fake_qwen_root)
+    _write_jsonl(f, [
+        _user("u1", "first"),
+        _assistant_saying("a1", "answer one"),
+        _user("u2", "second"),
+    ])
+    completes = [
+        e for e in reader.parse_activity(f, set()) if e.event_type == "turn_complete"
+    ]
+    assert [(e.dedup_key, e.detail, e.text) for e in completes] == [
+        ("turn:0", "boundary", "answer one")
+    ]
+
+
+def test_parse_activity_automated_user_records_do_not_close_a_turn(
+    fake_qwen_root: Path
+) -> None:
+    """A cron/notification record is not a human prompt, so it must not split
+    the turn — otherwise the reply would be attributed to the wrong one."""
+    reader = QwenLogReader()
+    f = _chat_file(fake_qwen_root)
+    _write_jsonl(f, [
+        _user("u1", "go"),
+        _user("u2", "injected", subtype="cron"),
+        _assistant_saying("a1", "still turn zero"),
+        _user("u3", "next"),
+    ])
+    completes = [
+        e for e in reader.parse_activity(f, set()) if e.event_type == "turn_complete"
+    ]
+    assert [(e.dedup_key, e.text) for e in completes] == [("turn:0", "still turn zero")]
+
+
+def test_parse_activity_reply_survives_a_poll_boundary(
+    fake_qwen_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reader = QwenLogReader()
+    seen: set[str] = set()
+    f = _chat_file(fake_qwen_root)
+    _write_jsonl(f, [_user("u1", "go"), _assistant_saying("a1", "ready")])
+    assert [e for e in reader.parse_activity(f, seen) if e.event_type == "turn_complete"] == []
+    _go_quiet(f, monkeypatch)
+    completes = [
+        e for e in reader.parse_activity(f, seen) if e.event_type == "turn_complete"
+    ]
+    assert [(e.detail, e.text) for e in completes] == [("idle", "ready")]
 
 
 def test_parse_activity_reparse_does_not_reemit(fake_qwen_root: Path) -> None:

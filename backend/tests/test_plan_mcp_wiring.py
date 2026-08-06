@@ -191,6 +191,47 @@ def test_wire_copilot_keeps_user_additional_config() -> None:
     assert plan_mcp_wiring.SERVER_NAME in wired
 
 
+# ---- wire_command: opencode / kilo (config in an env var) ----
+
+
+def test_wire_opencode_sets_the_config_content_var() -> None:
+    env: dict[str, str] = {}
+    assert plan_mcp_wiring.wire_command("opencode", "opencode", 4567, "p1", env) == "opencode"
+    payload = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+    entry = payload["mcp"][plan_mcp_wiring.SERVER_NAME]
+    # Verified against `opencode mcp list`: remote servers are type "remote",
+    # and an "mcpServers" key is rejected as unrecognised.
+    assert entry["type"] == "remote"
+    assert entry["url"] == plan_mcp_wiring.plan_mcp_url(4567, "p1")
+    assert entry["enabled"] is True
+
+
+def test_wire_kilo_uses_its_own_var_with_the_same_document() -> None:
+    kilo_env: dict[str, str] = {}
+    opencode_env: dict[str, str] = {}
+    plan_mcp_wiring.wire_command("kilo", "kilo", 4567, "p1", kilo_env)
+    plan_mcp_wiring.wire_command("opencode", "opencode", 4567, "p1", opencode_env)
+    assert kilo_env["KILO_CONFIG_CONTENT"] == opencode_env["OPENCODE_CONFIG_CONTENT"]
+    assert "OPENCODE_CONFIG_CONTENT" not in kilo_env
+
+
+def test_wire_env_cli_leaves_the_command_and_a_preset_var_alone() -> None:
+    env = {"OPENCODE_CONFIG_CONTENT": "{}"}
+    assert plan_mcp_wiring.wire_command("opencode", "opencode", 4567, "p1", env) == "opencode"
+    assert env == {"OPENCODE_CONFIG_CONTENT": "{}"}
+
+
+def test_wire_env_cli_without_an_env_dict_is_a_noop() -> None:
+    """The transformer still runs for callers on the older contract."""
+    assert plan_mcp_wiring.wire_command("opencode", "opencode", 4567, "p1") == "opencode"
+
+
+def test_wire_env_cli_without_pane_id_uses_the_host_credential() -> None:
+    env: dict[str, str] = {}
+    plan_mcp_wiring.wire_command("opencode", "opencode", 4567, "", env)
+    assert "client=host" in env["OPENCODE_CONFIG_CONTENT"]
+
+
 # ---- wire_command: gates ----
 
 

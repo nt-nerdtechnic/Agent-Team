@@ -40,6 +40,32 @@ log = logging.getLogger("agent_team_backend.log_readers.kimi")
 _TURN_IDLE_MS = 8_000
 _STATE_PREFIX = "kimi_turn::"
 
+# The assistant's reply, persisted inside the watcher-owned seen_keys set (the
+# same trick the Copilot reader uses) so a turn whose content.part and closing
+# boundary land in different poll batches still carries its text.
+_TEXT_PREFIX = "kimi_text::"
+_TEXT_MAX_CHARS = 4_000
+
+
+def _cap_text(text: str) -> str:
+    if len(text) <= _TEXT_MAX_CHARS:
+        return text
+    half = _TEXT_MAX_CHARS // 2
+    return f"{text[:half]}\n…\n{text[-half:]}"
+
+
+def _read_last_text(seen_keys: set[str]) -> str:
+    for k in seen_keys:
+        if k.startswith(_TEXT_PREFIX):
+            return k[len(_TEXT_PREFIX):]
+    return ""
+
+
+def _write_last_text(seen_keys: set[str], text: str) -> None:
+    seen_keys.difference_update({k for k in seen_keys if k.startswith(_TEXT_PREFIX)})
+    if text:
+        seen_keys.add(f"{_TEXT_PREFIX}{text}")
+
 
 def _read_turn_state(seen_keys: set[str]) -> dict | None:
     """The pending (currently-open) turn, persisted across polls inside the
@@ -277,17 +303,23 @@ class KimiLogReader(LogReader):
         prompt, so it is flushed once the file has been quiet for _TURN_IDLE_MS
         (wall-clock silence stands in for the turn-end record Kimi never writes).
         `dedup_key` is the turn index, so each turn notifies exactly once.
+
+        turn_complete carries the assistant's closing reply, which is what lets
+        Kimi panes send inter-CLI messages: the frontend only parses the
+        ---MSG-START--- protocol out of a turn_complete that has text.
         """
         out: list[ActivityEvent] = []
         cwd = self.cwd_from_file(path)
         session_id = self._session_id(path)
         state = _read_turn_state(seen_keys)
+        last_text = _read_last_text(seen_keys)
 
         def _complete(idx: int, ms: int, detail: str) -> ActivityEvent:
             return ActivityEvent(
                 vendor="kimi", event_type="turn_complete",
                 cwd=cwd, session_id=session_id, file_path=str(path),
                 dedup_key=f"turn:{idx}", timestamp=_ts(ms), detail=detail,
+                text=last_text,
             )
 
         try:
@@ -320,6 +352,7 @@ class KimiLogReader(LogReader):
                             int(state["idx"]), int(state.get("last_ms") or 0),
                             "boundary",
                         ))
+                        last_text = ""
                     idx = (int(state["idx"]) + 1) if state is not None else 0
                     state = {"idx": idx, "last_ms": tms, "flushed": False}
                     # The prompt's text blocks carry the user's words; the
@@ -339,6 +372,19 @@ class KimiLogReader(LogReader):
                         cwd=cwd, session_id=session_id, file_path=str(path),
                         dedup_key=key, timestamp=ts, detail="usage",
                     ))
+                elif rtype == "context.append_loop_event":
+                    seen_keys.add(key)
+                    # The assistant's visible reply: content.part carries both
+                    # `think` and `text` parts, and only the latter is what the
+                    # user (and the messaging protocol) sees. Later parts in a
+                    # turn replace earlier ones — the closing part is the reply.
+                    event = rec.get("event")
+                    if isinstance(event, dict) and event.get("type") == "content.part":
+                        part = event.get("part")
+                        if isinstance(part, dict) and part.get("type") == "text":
+                            text = str(part.get("text") or "").strip()
+                            if text:
+                                last_text = _cap_text(text)
                 elif rtype == "turn.cancel":
                     seen_keys.add(key)
                     if state is not None and not state.get("flushed"):
@@ -347,6 +393,7 @@ class KimiLogReader(LogReader):
                             max(int(state.get("last_ms") or 0), tms), "cancel",
                         ))
                         state["flushed"] = True
+                        last_text = ""
                 else:
                     seen_keys.add(key)
 
@@ -359,6 +406,8 @@ class KimiLogReader(LogReader):
                         int(state["idx"]), int(state.get("last_ms") or 0), "idle",
                     ))
                     state["flushed"] = True
+                    last_text = ""
 
         _write_turn_state(seen_keys, state)
+        _write_last_text(seen_keys, last_text)
         return out

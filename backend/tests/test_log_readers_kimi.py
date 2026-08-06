@@ -315,6 +315,82 @@ def test_parse_activity_prompt_carries_user_text(fake_kimi_home: Path) -> None:
     assert all(e.text == "" for e in events if e.detail == "usage")
 
 
+def _text_part(text: str, *, time: int) -> dict:
+    """A content.part loop event carrying the assistant's visible reply."""
+    return {
+        "type": "context.append_loop_event",
+        "event": {"type": "content.part", "part": {"type": "text", "text": text}},
+        "time": time,
+    }
+
+
+def test_parse_activity_turn_complete_carries_the_assistant_reply(
+    fake_kimi_home: Path,
+) -> None:
+    """The inter-CLI messaging protocol is only parsed out of a turn_complete
+    that has text, so the closing reply has to ride on it."""
+    reader = KimiLogReader()
+    wire = _session(fake_kimi_home, "/x")
+    _write_jsonl(wire, [
+        _prompt(time=1),
+        {
+            "type": "context.append_loop_event",
+            "event": {"type": "content.part", "part": {"type": "think", "text": "hmm"}},
+            "time": 2,
+        },
+        _text_part("first pass", time=3),
+        _usage(10, 0, 5, time=4),
+        _text_part("done, handing over", time=5),
+    ])
+    completes = [
+        e for e in reader.parse_activity(wire, set()) if e.event_type == "turn_complete"
+    ]
+    assert len(completes) == 1
+    # The closing text part wins, and `think` parts never leak into it.
+    assert completes[0].text == "done, handing over"
+
+
+def test_parse_activity_reply_survives_a_poll_boundary(fake_kimi_home: Path) -> None:
+    """content.part and the turn's close often land in different polls, so the
+    text is persisted in seen_keys between them."""
+    reader = KimiLogReader()
+    seen: set[str] = set()
+    wire = _session(fake_kimi_home, "/x")
+    _write_jsonl(wire, [_prompt(time=1_000_000), _text_part("ready", time=1_000_001)])
+    import agent_team_backend.log_readers.kimi as kimi_mod
+
+    # First poll: still mid-turn, nothing completed, text not delivered yet.
+    kimi_mod.time.time = lambda: 1_000.5  # type: ignore[method-assign]
+    assert [e for e in reader.parse_activity(wire, seen) if e.event_type == "turn_complete"] == []
+
+    # Second poll after the idle window: the turn flushes with the earlier text.
+    kimi_mod.time.time = lambda: 1_100.0  # type: ignore[method-assign]
+    completes = [
+        e for e in reader.parse_activity(wire, seen) if e.event_type == "turn_complete"
+    ]
+    assert [(e.detail, e.text) for e in completes] == [("idle", "ready")]
+
+
+def test_parse_activity_reply_does_not_leak_into_the_next_turn(
+    fake_kimi_home: Path,
+) -> None:
+    reader = KimiLogReader()
+    wire = _session(fake_kimi_home, "/x")
+    _write_jsonl(wire, [
+        _prompt(time=1),
+        _text_part("answer one", time=2),
+        _prompt(time=10),
+        _usage(20, 0, 8, time=11),
+    ])
+    completes = [
+        e for e in reader.parse_activity(wire, set()) if e.event_type == "turn_complete"
+    ]
+    assert [(e.dedup_key, e.text) for e in completes] == [
+        ("turn:0", "answer one"),
+        ("turn:1", ""),
+    ]
+
+
 def test_parse_activity_reparse_does_not_reemit(fake_kimi_home: Path) -> None:
     """Re-scanning the same file with the same seen set emits nothing new
     (turns already flushed stay flushed; seen lines are skipped)."""
