@@ -181,42 +181,85 @@ def backend_port() -> int | None:
         return None
 
 
-def _call_transformer(
-    transformer: Any, agent_key: str, command: Any, port: int | None, pane_id: str
-) -> Any:
-    """Call a spawn transformer, tolerating the pre-pane_id 3-argument shape.
+_POSITIONAL_KINDS = (
+    inspect.Parameter.POSITIONAL_ONLY,
+    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+)
 
-    Third-party plugins were written against the older contract; passing them a
-    fourth argument would raise TypeError, which the caller swallows as "broken
-    plugin" — their wiring would stop applying with only a log line to show for
-    it.
+
+def _positional_arity(transformer: Any) -> int | None:
+    """Positional parameter count, or None when every argument should be passed.
+
+    None means "call with the newest shape": either the signature is
+    unreadable (C callables) or it absorbs ``*args``, and in both cases
+    withholding arguments is the worse guess.
+
+    Only positional parameters are counted. ``plan_mcp_wiring.wire_command``
+    carries a keyword-only ``claude_config`` for tests, so a plain
+    ``len(parameters)`` would over-count it into a contract it does not
+    implement.
     """
     try:
         params = list(inspect.signature(transformer).parameters.values())
     except (TypeError, ValueError):
-        params = []
-    takes_varargs = any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in params)
-    if params and len(params) < 4 and not takes_varargs:
+        return None
+    if not params or any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in params):
+        return None
+    return sum(1 for p in params if p.kind in _POSITIONAL_KINDS)
+
+
+def _call_transformer(
+    transformer: Any,
+    agent_key: str,
+    command: Any,
+    port: int | None,
+    pane_id: str,
+    env: dict[str, str],
+) -> Any:
+    """Call a spawn transformer, tolerating both earlier argument shapes.
+
+    Third-party plugins were written against older contracts; passing them an
+    argument they do not accept would raise TypeError, which the caller
+    swallows as "broken plugin" — their wiring would stop applying with only a
+    log line to show for it. So each older shape keeps its own rung:
+    ``(agent_key, command, port)``, then ``+ pane_id``, then ``+ env``.
+    """
+    arity = _positional_arity(transformer)
+    if arity is not None and arity < 4:
         return transformer(agent_key, command, port)
-    return transformer(agent_key, command, port, pane_id)
+    if arity is not None and arity < 5:
+        return transformer(agent_key, command, port, pane_id)
+    return transformer(agent_key, command, port, pane_id, env)
 
 
 def apply_spawn_wiring(
-    host: PluginHost, agent_key: str, command: Any, pane_id: str = ""
+    host: PluginHost,
+    agent_key: str,
+    command: Any,
+    pane_id: str = "",
+    env: dict[str, str] | None = None,
 ) -> Any:
     """Run every plugin spawn transformer over a pane spawn command.
 
-    Each transformer is called as ``(agent_key, command, port, pane_id)`` and
-    returns the (possibly unchanged) command; ``port`` is the backend's current
-    HTTP port from the discovery file (None when unknown), and ``pane_id``
-    identifies the pane being spawned so a plugin can hand the CLI a
+    Each transformer is called as ``(agent_key, command, port, pane_id, env)``
+    and returns the (possibly unchanged) command; ``port`` is the backend's
+    current HTTP port from the discovery file (None when unknown), and
+    ``pane_id`` identifies the pane being spawned so a plugin can hand the CLI a
     pane-specific endpoint. A failing transformer is skipped — a spawn must
     never break over plugin wiring.
+
+    ``env`` is the spawn environment, already settled by the caller, and is
+    mutated in place: a CLI with no additive command-line flag for MCP takes
+    its wiring through an environment variable instead. Passing None gives
+    transformers a throwaway dict, so callers that do not care keep working.
     """
     port = backend_port()
+    env_patch = env if env is not None else {}
     for plugin_id, transformer in host.spawn_transformers():
         try:
-            command = _call_transformer(transformer, agent_key, command, port, pane_id)
+            command = _call_transformer(
+                transformer, agent_key, command, port, pane_id, env_patch
+            )
         except Exception as err:  # noqa: BLE001 - isolate broken plugins
             log.warning("plugin %s spawn transformer failed: %s", plugin_id, err)
     return command

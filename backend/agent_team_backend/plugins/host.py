@@ -95,9 +95,7 @@ class PluginContext:
     routes: list[RegisteredRoute] = field(default_factory=list)
     startup_hooks: list[Callable[[], Any]] = field(default_factory=list)
     shutdown_hooks: list[Callable[[], Any]] = field(default_factory=list)
-    spawn_transformers: list[Callable[[str, Any, int | None, str], Any]] = field(
-        default_factory=list
-    )
+    spawn_transformers: list[Callable[..., Any]] = field(default_factory=list)
 
     def register_route(self, path: str, asgi_app: Any, methods: list[str]) -> None:
         """Ask the host to serve ``asgi_app`` (raw ASGI) at ``path``."""
@@ -113,11 +111,16 @@ class PluginContext:
         """Register a callable (sync or async) run at backend shutdown."""
         self.shutdown_hooks.append(hook)
 
-    def register_spawn_transformer(
-        self, transformer: Callable[[str, Any, int | None, str], Any]
-    ) -> None:
-        """Register a ``(agent_key, command, port, pane_id) -> command``
-        transformer applied to pane spawn commands at terminal.create time."""
+    def register_spawn_transformer(self, transformer: Callable[..., Any]) -> None:
+        """Register a ``(agent_key, command, port, pane_id, env) -> command``
+        transformer applied to pane spawn commands at terminal.create time.
+
+        ``env`` is the spawn environment and is mutated in place; the return
+        value is the command. Transformers declaring fewer positional
+        parameters keep being called with the older shapes they were written
+        against (see plugins.wiring._call_transformer), so the signature is
+        untyped here.
+        """
         self.spawn_transformers.append(transformer)
 
     def clear_registrations(self) -> None:
@@ -249,9 +252,7 @@ class PluginHost:
             for hook in lp.context.shutdown_hooks
         ]
 
-    def spawn_transformers(
-        self,
-    ) -> list[tuple[str, Callable[[str, Any, int | None, str], Any]]]:
+    def spawn_transformers(self) -> list[tuple[str, Callable[..., Any]]]:
         """``(plugin_id, transformer)`` pairs from activated plugins."""
         return [
             (lp.manifest.id, transformer)

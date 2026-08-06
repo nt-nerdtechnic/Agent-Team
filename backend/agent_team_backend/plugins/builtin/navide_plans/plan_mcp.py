@@ -1236,6 +1236,33 @@ async def ui_snapshot(workspace_path: str, ctx: Context) -> dict[str, Any]:
     return await _ui_request(workspace_path, "snapshot")
 
 
+@server.tool()
+async def ui_diagnostics(
+    workspace_path: str, ctx: Context, since_seq: int = 0, pane_id: str = "", limit: int = 50
+) -> dict[str, Any]:
+    """Read renderer-side diagnostics recorded by the Navide window at workspace_path.
+
+    These are warnings the renderer logged about its own UI actions — e.g.
+    injectText resending content because its echo check timed out, or giving
+    up entirely — that a `ui_invoke` caller cannot see from `ok: true` alone
+    (they only ever appeared in that window's devtools console before this).
+    Use this to diagnose cases where a tool reported success but the actual
+    in-window behavior looked wrong (duplicated input, a stuck send, etc.).
+
+    `since_seq` returns only entries recorded after that sequence number —
+    pass the `nextSeq` from a previous call to poll incrementally without
+    re-reading old entries. `pane_id` filters to one pane; `limit` caps how
+    many entries come back. Errors if no window owns workspace_path within 15s.
+    """
+    _resolve_caller(ctx)
+    return await _ui_request(
+        workspace_path,
+        "invoke",
+        action="ui.diagnostics.read",
+        args={"sinceSeq": since_seq, "paneId": pane_id, "limit": limit},
+    )
+
+
 # ── ASGI mount + lifecycle ──────────────────────────────────────────────────
 
 _session_manager: StreamableHTTPSessionManager | None = None
