@@ -886,13 +886,16 @@ _INHERITED_CLI_HOME_VARS = (
     "KILO_CONFIG",
     "KILO_DB",
     "COPILOT_HOME",
-    # Not a home relocator, but the same inheritance hazard with a worse
-    # failure: Claude Code marks its own subprocesses with this so child
-    # sessions skip transcript saving. A dev/prod app launched from inside a
-    # claude pane (observed: `pnpm dev` from a Navide pane) passes it to
-    # every spawned claude pane, which then SILENTLY writes no session jsonl
-    # — the pane works all day and restores as a blank after restart.
+    # Not home relocators, but the same inheritance hazard with a worse
+    # failure mode: runtime markers a CLI stamps on its own subprocesses.
+    # Claude Code's child-session marker makes an inheriting pane skip
+    # transcript saving (observed: `pnpm dev` launched from a claude pane —
+    # the pane works all day and restores as a blank after restart). Grok's
+    # child markers are the same shape, stripped preemptively; they are
+    # process-lifecycle flags no user config legitimately sets.
     "CLAUDE_CODE_CHILD_SESSION",
+    "GROK_BACKGROUND_CHILD",
+    "GROK_DAEMON_CHILD",
 )
 
 
