@@ -1055,8 +1055,13 @@ async def cli_wait_idle(target: str, ctx: Context, timeout_s: float = 60.0) -> d
     the owning window reports the pane itself as idle/exited/stopped/error.
     That last one matters because the busy flag is frontend-reported and can
     stay stale. Returns {idle, source, waited_s} where source is
-    "turn_complete", "quiet_period", "ui_status", or "timeout"; or
-    {ok: false, error} if `target` cannot be resolved.
+    "turn_complete", "quiet_period", "ui_status", "never_started", or
+    "timeout"; or {ok: false, error} if `target` cannot be resolved.
+
+    "never_started" is idle in the sense that nothing is running, but the pane
+    has shown no activity at all — a CLI that finished booting and is sitting
+    at its prompt. If you just gave it a task, that task has not begun yet;
+    keep waiting rather than treating it as done.
     """
     from agent_team_backend import agent_messaging, app
 
@@ -1104,6 +1109,12 @@ async def cli_wait_idle(target: str, ctx: Context, timeout_s: float = 60.0) -> d
             if not isinstance(payload, dict):
                 ui_reachable = False
             elif payload.get("status") in _UI_IDLE_STATUSES:
+                # A window reporting idle only means "not working right now".
+                # For a pane that has never shown any activity that means "has
+                # not started yet", not "finished" — a caller that just handed
+                # it a task must be able to tell those apart.
+                if app.pane_activity(pane_id) is None:
+                    return done("never_started")
                 return done("ui_status")
         tick += 1
         waited = time.monotonic() - started

@@ -262,6 +262,7 @@ async def test_wait_idle_trusts_the_window_when_the_busy_flag_is_stale(
     agent_messaging.register("pw", "worker", "/ws/alpha")
     agent_messaging.register("other", "caller", "/ws/somewhere-else")
     agent_messaging.set_busy("pw", True)
+    app._record_pane_activity("pw", "agent_active", "")
 
     async def _idle_window(*args: Any, **kwargs: Any) -> dict[str, Any]:
         return {"ok": True, "result": {"status": "idle", "buffer": ""}}
@@ -318,3 +319,26 @@ async def test_wait_idle_stops_probing_a_window_that_does_not_answer(
 
     assert result["source"] == "timeout"
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_wait_idle_distinguishes_a_pane_that_never_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A CLI sitting at its prompt right after boot reports idle too. Saying
+    # "done" there would tell a caller that just handed it a task that the
+    # task finished, when it has not begun.
+    monkeypatch.setattr(plan_mcp, "_WAIT_IDLE_POLL_S", 0.01)
+    agent_messaging.register("pw", "worker", "/ws/alpha")
+    agent_messaging.register("other", "caller", "/ws/somewhere-else")
+    agent_messaging.set_busy("pw", True)
+
+    async def _idle_window(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {"ok": True, "result": {"status": "idle", "buffer": ""}}
+
+    monkeypatch.setattr(plan_mcp, "_ui_request", _idle_window)
+
+    result = await plan_mcp.cli_wait_idle("alpha/worker", _ctx(pane_id="other"), timeout_s=1.0)
+
+    assert result["idle"] is True
+    assert result["source"] == "never_started"

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { forwardBackendLog } from './backend'
+import { forwardBackendLog, guardStdioStreams } from './backend'
 
 function fakeStream(write: (text: string, cb: (err?: Error) => void) => boolean) {
   return { write } as unknown as NodeJS.WriteStream
@@ -35,5 +35,39 @@ describe('forwardBackendLog', () => {
     })
 
     expect(() => forwardBackendLog(fakeStream(write), Buffer.from('x'))).not.toThrow()
+  })
+})
+
+describe('guardStdioStreams', () => {
+  it("registers an 'error' listener on both stdio streams", () => {
+    // The write callback does not cover a stream-level 'error' event: Node
+    // turns an unlistened one into an uncaught exception. This is the path
+    // that produced the EIO crash dialog.
+    const before = {
+      out: process.stdout.listenerCount('error'),
+      err: process.stderr.listenerCount('error'),
+    }
+
+    guardStdioStreams()
+
+    expect(process.stdout.listenerCount('error')).toBeGreaterThan(before.out - 1)
+    expect(process.stderr.listenerCount('error')).toBeGreaterThan(before.err - 1)
+    expect(process.stdout.listenerCount('error')).toBeGreaterThan(0)
+    expect(process.stderr.listenerCount('error')).toBeGreaterThan(0)
+  })
+
+  it('emitting an error on stdout no longer throws once guarded', () => {
+    guardStdioStreams()
+
+    expect(() => process.stdout.emit('error', new Error('write EIO'))).not.toThrow()
+  })
+
+  it('is idempotent — repeated calls do not stack listeners', () => {
+    guardStdioStreams()
+    const after1 = process.stdout.listenerCount('error')
+    guardStdioStreams()
+    guardStdioStreams()
+
+    expect(process.stdout.listenerCount('error')).toBe(after1)
   })
 })

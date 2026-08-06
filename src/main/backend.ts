@@ -80,7 +80,24 @@ export function forwardBackendLog(stream: NodeJS.WriteStream, chunk: Buffer): vo
   }
 }
 
+let stdioGuarded = false
+
+/** Keep a dead stdio pipe from killing the app.
+ *
+ *  A broken pipe surfaces as an 'error' event on the stream itself, which
+ *  Node turns into an uncaught exception when nothing listens. The write
+ *  callback in forwardBackendLog does NOT cover this: the event fires on its
+ *  own, independently of any one write. Observed as an EIO crash dialog after
+ *  the terminal that launched a dev run went away. */
+export function guardStdioStreams(): void {
+  if (stdioGuarded) return
+  stdioGuarded = true
+  process.stdout.on('error', () => {})
+  process.stderr.on('error', () => {})
+}
+
 export async function startBackend(healthCheckTimeoutMs = 45_000): Promise<BackendHandle> {
+  guardStdioStreams()
   const port = await findFreePort()
   const host = '127.0.0.1'
 
