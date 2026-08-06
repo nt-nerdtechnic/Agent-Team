@@ -92,6 +92,7 @@ import {
 import { pickReusablePane, runReportedDispatch, validatePlanDispatch, type PlanDispatchOutcome, type PlanDispatchPayload } from './lib/planDispatch'
 import { planExecutionPrompt } from './lib/planExecutePrompt'
 import { echoLanded, echoTimeoutFor, normalizeForMatch, TAIL_MATCH_LEN } from './lib/injectEcho'
+import { recordDiagnostic, readDiagnostics, currentDiagnosticSeq } from './lib/uiDiagnostics'
 import { injectStandaloneTask, type StandaloneTaskInjectionDeps } from './lib/standalonePaneTask'
 import { quickClassify } from './lib/quick-classify'
 import { resolveAiderHistoryRoot, resumeAiderHistoryPath, type DirLister } from './lib/aider-history'
@@ -169,6 +170,7 @@ const OnboardingWizard = defineAsyncComponent(() => import('./components/Onboard
 const WhatsNewModal = defineAsyncComponent(() => import('./components/WhatsNewModal.vue'))
 const CliHealthGuide = defineAsyncComponent(() => import('./components/CliHealthGuide.vue'))
 const CliInstallDialog = defineAsyncComponent(() => import('./components/CliInstallDialog.vue'))
+const DebugModal = defineAsyncComponent(() => import('./components/DebugModal.vue'))
 const AgentMessagesPanel = defineAsyncComponent(() => import('./components/AgentMessagesPanel.vue'))
 const RestoreScopeModal = defineAsyncComponent(() => import('./components/RestoreScopeModal.vue'))
 const PipelineManagerModal = defineAsyncComponent(() => import('./components/PipelineManagerModal.vue'))
@@ -1903,7 +1905,11 @@ async function injectText(
   const paneId = Object.keys(paneRefs).find((id) => paneRefs[id]?.sessionId === sessionId)
   const cleanBuf = (): string =>
     paneId ? ((paneRefs[paneId]?.cleanBuffer as unknown as string) ?? '') : ''
-  const cleanLen = (): number => (paneId ? cleanBuf().length : -1)
+  // Growth must come from the monotonic counter, not cleanBuffer.length: the
+  // buffer is trimmed once it passes its cap, so a length delta can read as
+  // zero — or negative — while output is streaming, which made the echo look
+  // absent and resent the whole prompt.
+  const cleanBytes = (): number => (paneId ? paneCleanBytes(paneId) : -1)
 
   // Send in modest chunks to avoid hitting any tty input-buffer limits and to
   // give the CLI's render loop a chance to keep up.
@@ -1944,9 +1950,17 @@ async function injectText(
   let ready = false
   for (let send = 1; send <= MAX_CONTENT_SENDS && !ready; send++) {
     if (shouldAbort?.()) return false
-    const preLen = cleanLen()
+    // A previous attempt can land after we gave up waiting — a CLI still
+    // painting its startup screen accepts the bytes but echoes them late.
+    // Sending again then puts the instruction on screen twice, so look before
+    // repeating ourselves.
+    if (send > 1 && tail && normalizeForMatch(cleanBuf()).includes(tail)) {
+      ready = true
+      break
+    }
+    const preBytes = cleanBytes()
     if (!(await sendChunks())) return false
-    if (paneId === undefined || preLen < 0) {
+    if (paneId === undefined || preBytes < 0) {
       // Nothing observable — keep the old fixed-gap fallback and fire once.
       await sleep(Math.min(4_000, Math.max(1_500, Math.floor(text.length / 8))))
       ready = true
@@ -1957,7 +1971,7 @@ async function injectText(
       await sleep(200)
       if (shouldAbort?.()) return false
       const buf = cleanBuf()
-      if (echoLanded(buf, tail, buf.length - preLen, normalizedLen)) {
+      if (echoLanded(buf, tail, cleanBytes() - preBytes, normalizedLen)) {
         ready = true
         break
       }
@@ -1967,19 +1981,31 @@ async function injectText(
         `[injectText] content not echoed within ${readyTimeout}ms ` +
         `(send ${send}/${MAX_CONTENT_SENDS}) — resending content`
       )
+      recordDiagnostic({
+        level: 'warn',
+        code: 'inject.resend',
+        message: `content not echoed within ${readyTimeout}ms (send ${send}/${MAX_CONTENT_SENDS}) — resending`,
+        paneId
+      })
     }
   }
   if (!ready) {
     // Content never reached the input box after retries — report honestly so
     // the caller logs a truthful failure instead of a misleading "✓ sent".
     console.error('[injectText] content never appeared in the input box after retries')
+    recordDiagnostic({
+      level: 'error',
+      code: 'inject.failed',
+      message: 'content never appeared in the input box after retries',
+      paneId
+    })
     return false
   }
 
   // Submit. Baseline captured AFTER the box is ready, so growth beyond it means
   // the agent reacted to Enter (not the echo of our paste). No reaction ⇒ the
   // \r didn't take ⇒ resend it.
-  const before = cleanLen()
+  const before = cleanBytes()
   const MAX_SUBMITS = 3
   for (let attempt = 1; attempt <= MAX_SUBMITS; attempt++) {
     if (shouldAbort?.()) return false
@@ -1992,7 +2018,7 @@ async function injectText(
     if (paneId === undefined || before < 0) return true
     // Wait for agent to show first reaction (thinking spinner appears quickly).
     await sleep(2_500)
-    if (cleanLen() > before) return true
+    if (cleanBytes() > before) return true
     if (attempt < MAX_SUBMITS) {
       console.warn(
         `[injectText] no reaction 2.5s after Enter (attempt ${attempt}/${MAX_SUBMITS}) — ` +
@@ -4529,6 +4555,14 @@ function openPipelineManager(pipelineId?: string): void {
   pmEverOpened.value = true
   showPipelineManager.value = true
 }
+// Debug modal (cmd+shift+L). Same lazy-mount-then-keep pattern as the Pipeline
+// Manager, and for the same reason: its Shell and Ask AI tabs embed terminals.
+const showDebug = ref(false)
+const debugEverOpened = ref(false)
+function openDebugModal(): void {
+  debugEverOpened.value = true
+  showDebug.value = true
+}
 // Native application menu entry (menu:open-pipeline-manager). Cast locally so
 // this compiles whether or not the preload bridge exposes it yet.
 let offOpenPipelineManager: (() => void) | null = null
@@ -4792,9 +4826,11 @@ registerCommand('workbench.action.newWindow', async () => {
 registerCommand('workbench.action.openSettings', () => { showSettings.value = true })
 registerCommand('workbench.action.openSettingsAccounts', () => openSettingsAccounts())
 registerCommand('workbench.action.openPipelineManager', () => { openPipelineManager() })
+registerCommand('workbench.action.openDebug', () => { openDebugModal() })
 registerCommand('workbench.action.closeModal', () => {
   if (previewLogOpen.value) previewLogOpen.value = false
   else if (showSettings.value) showSettings.value = false
+  else if (showDebug.value) showDebug.value = false
   else if (showPipelineManager.value) {
     // The modal owns nested confirm dialogs — let it close its own top layer first.
     if (!pmRef.value?.closeTopLayer?.()) showPipelineManager.value = false
@@ -4902,6 +4938,14 @@ registerCommand('ui.pane.getStatus', (args) => {
       : null,
   )
 })
+// Diagnostics recorded by uiDiagnostics (e.g. injectText resends) — lets an
+// external MCP client see an in-window anomaly a "ok: true" reply hid. See
+// plan_mcp.ui_diagnostics for the MCP-facing tool that calls this action.
+registerCommand('ui.diagnostics.read', (args) => {
+  const a = (args as { sinceSeq?: number; paneId?: string; limit?: number } | undefined) ?? {}
+  const entries = readDiagnostics({ sinceSeq: a.sinceSeq, paneId: a.paneId || undefined, limit: a.limit })
+  return { entries, nextSeq: currentDiagnosticSeq() }
+})
 registerCommand('ui.tab.switch', (args) => {
   const tabId = (args as { tabId?: string } | undefined)?.tabId
   if (!tabId) throw new Error('ui.tab.switch requires tabId')
@@ -4958,7 +5002,7 @@ async function buildUiActionSnapshot(): Promise<{
 }
 useUiActionBus({ backend, currentWorkspace, buildSnapshot: buildUiActionSnapshot })
 
-watch([showSettings, showKbPanel, showCompletionModal, showRestoreScopeModal, showPipelineManager], ([s, k, c, r, p]) => setContext('modalOpen', s || k || c || r || p || previewLogOpen.value))
+watch([showSettings, showKbPanel, showCompletionModal, showRestoreScopeModal, showPipelineManager, showDebug], ([s, k, c, r, p, d]) => setContext('modalOpen', s || k || c || r || p || d || previewLogOpen.value))
 
 /** The sidebar agent list shows panes from every tab; focusing one that lives
  *  in another tab must also activate that tab, or the pane stays v-show-hidden. */
@@ -5000,7 +5044,7 @@ const previewLogContent = ref<string>('')
 const previewLogTitle = ref<string>('')
 const previewLogOpen = ref<boolean>(false)
 watch(previewLogOpen, (open) => {
-  setContext('modalOpen', open || showSettings.value || showKbPanel.value || showCompletionModal.value || showRestoreScopeModal.value || showPipelineManager.value)
+  setContext('modalOpen', open || showSettings.value || showKbPanel.value || showCompletionModal.value || showRestoreScopeModal.value || showPipelineManager.value || showDebug.value)
   if (!open) {
     // Drop the (possibly multi-MB) log text once the preview closes so it
     // doesn't linger in memory and doesn't flash stale content on reopen.
@@ -10666,6 +10710,13 @@ function paneIsCommander(p: ActivePane): boolean {
       :workspace-path="currentWorkspace"
       :initial-pipeline-id="pmInitialPipelineId"
       @close="showPipelineManager = false"
+    />
+    <DebugModal
+      v-if="debugEverOpened"
+      :open="showDebug"
+      :backend="backend"
+      :workspace-path="currentWorkspace"
+      @close="showDebug = false"
     />
     <div v-if="showKbPanel" class="kb-overlay" @mousedown.self="showKbPanel = false">
       <div class="kb-panel">
