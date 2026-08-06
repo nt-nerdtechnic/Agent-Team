@@ -41,11 +41,26 @@ def auth_path() -> Path:
     return app_data_dir() / AUTH_FILENAME
 
 
-def _read_raw() -> dict[str, Any]:
+def _harden(path: Path) -> None:
+    """Tighten a file left group/world readable by an older version.
+
+    os.replace carries the temp file's mode over, so anything this module
+    writes is already 0600 — this only catches files from before that.
+    """
     try:
-        raw = json.loads(auth_path().read_text(encoding="utf-8"))
+        if path.stat().st_mode & 0o077:
+            path.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _read_raw() -> dict[str, Any]:
+    path = auth_path()
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+    _harden(path)
     return raw if isinstance(raw, dict) else {}
 
 
@@ -53,8 +68,18 @@ def _write(config: dict[str, Any]) -> None:
     path = auth_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    # These are bearer tokens: the file must never exist group/world readable,
+    # not even between a default-mode create and a chmod. os.open sets the
+    # mode at creation; the explicit chmod covers a umask that widened it.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(config, indent=2) + "\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _config() -> dict[str, Any]:
