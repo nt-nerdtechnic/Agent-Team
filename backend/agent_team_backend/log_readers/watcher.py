@@ -29,7 +29,6 @@ from pathlib import Path
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
-from .aider import is_history_name as is_aider_history_name
 from .base import ActivityEvent, LogReader, TokenSinkResult, TokenUsage
 
 log = logging.getLogger("agent_team_backend.log_readers.watcher")
@@ -44,9 +43,16 @@ CheckpointSink = Callable[[str, dict, str | None], None]
 class _Handler(FileSystemEventHandler):
     """watchdog event handler → push affected paths onto an asyncio queue."""
 
-    def __init__(self, on_path: Callable[[Path], None]) -> None:
+    def __init__(
+        self,
+        on_path: Callable[[Path], None],
+        accepts_path: Callable[[str], bool] | None = None,
+    ) -> None:
         super().__init__()
         self._on_path = on_path
+        # Vendor hook (LogReader.accepts_watch_path): paths the generic
+        # extension filter below would drop but some reader claims.
+        self._accepts_path = accepts_path or (lambda _s: False)
 
     def on_modified(self, event: FileSystemEvent) -> None:
         if event.is_directory:
@@ -57,11 +63,7 @@ class _Handler(FileSystemEventHandler):
         if s.endswith(".db-wal"):
             self._on_path(Path(s[: -len("-wal")]))
             return
-        # Aider's history files (shared + per-pane) are Markdown; only those
-        # exact filenames are accepted so ordinary workspace .md edits can
-        # never flood the queue (aider is otherwise driven by the rescan loop
-        # — workspace roots get no watchdog subscription).
-        if "/.aider.chat.history." in s and is_aider_history_name(s.rsplit("/", 1)[-1]):
+        if self._accepts_path(s):
             self._on_path(Path(s))
             return
         # .db = Antigravity conversations / Grok's grok.db / OpenCode's
@@ -171,7 +173,11 @@ class LogWatcher:
                 # loop closed mid-flight
                 pass
 
-        handler = _Handler(on_path)
+        def accepts_path(s: str) -> bool:
+            # Live view, not a snapshot — readers may register after start().
+            return any(r.accepts_watch_path(s) for r in self._readers)
+
+        handler = _Handler(on_path, accepts_path)
         self._handler = handler
 
         # Watch every existing watch root from every reader. Skip duplicates.
@@ -500,7 +506,10 @@ class LogWatcher:
         # independent of token parsing so it works even for session-file formats
         # the token reader doesn't (yet) understand — it only needs the file to
         # exist + contain the pane marker.
-        if self._session_sink is not None and reader.vendor in ("codex", "antigravity", "grok", "kimi", "opencode", "qwen", "kilo", "pi", "copilot", "cursor", "aider"):
+        if self._session_sink is not None and (
+            reader.emits_session_sink
+            or reader.vendor in ("codex", "antigravity", "grok", "kimi", "opencode", "qwen", "kilo", "pi", "copilot", "cursor")
+        ):
             try:
                 await self._session_sink(reader.vendor, path)
             except Exception as err:  # noqa: BLE001

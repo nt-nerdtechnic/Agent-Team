@@ -167,6 +167,44 @@ class LogReader(ABC):
     #: Vendor identifier matching `agent_key` in panes ("claude" | "codex").
     vendor: str = ""
 
+    # ---- per-vendor attribution/watch hooks (one-file-per-vendor bridge) --
+    # Defaults mean "not migrated": attribution/watcher fall back to their
+    # legacy vendor-name branches. A vendor's migration round overrides the
+    # hooks on its reader and deletes its name from the legacy branches.
+
+    #: Participates in kickoff-marker file binding (attribution's marker
+    #: paths). Migrated replacement for membership in the vendor-name tuples.
+    binds_by_marker_file: bool = False
+
+    #: Session files feed the session sink (Agent History). Migrated
+    #: replacement for membership in the watcher's vendor-name tuple.
+    emits_session_sink: bool = False
+
+    def marker_scan_text(self, path: Path) -> str | None:
+        """Text to scan for a kickoff marker, or None for the generic
+        plain-file read. Override when only part of the file may bind
+        (e.g. aider: only the last started-at section is the live session).
+        May raise OSError; callers treat that as unreadable."""
+        return None
+
+    def workspace_match(self, usage: TokenUsage, ws_path: str) -> bool | None:
+        """Does this usage event belong to the workspace at ``ws_path``?
+        None = not migrated (attribution's legacy chain decides)."""
+        return None
+
+    def pane_cwd_match(
+        self, usage: TokenUsage, pane_cwd: str, pane_id: str
+    ) -> bool | None:
+        """Does this usage event belong to a pane running in ``pane_cwd``?
+        None = not migrated (attribution's legacy chain decides)."""
+        return None
+
+    def accepts_watch_path(self, path_str: str) -> bool:
+        """Accept a filesystem-event path the generic extension filter would
+        drop (e.g. aider's Markdown history filenames). Hot path — must be
+        a cheap string check."""
+        return False
+
     @abstractmethod
     def project_dirs(self) -> list[Path]:
         """Return all existing root directories under which session jsonl files live.

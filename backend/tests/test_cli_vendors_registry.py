@@ -34,9 +34,10 @@ NON_VENDOR_DEPS = {"homebrew", "node", "ollama", "pnpm", "python", "uv"}
 # Frontend-only pane type, not a CLI vendor.
 NON_VENDOR_AGENT_KEYS = {"terminal"}
 
-# Modules a vendor file may import. kilo→opencode is the single allowed
-# vendor→vendor edge (reader class inheritance).
-ALLOWED_LOCAL_IMPORTS = {"base", "_protocols"}
+# Modules a vendor file may import. log_readers.base is the shared reader
+# contract (safe direction: it imports no vendor); kilo→opencode is the
+# single allowed vendor→vendor edge (reader class inheritance).
+ALLOWED_LOCAL_IMPORTS = {"base", "_protocols", "log_readers.base"}
 VENDOR_IMPORT_EXEMPTIONS = {"kilo": {"opencode"}}
 ALLOWED_THIRD_PARTY = {"httpx"}
 
@@ -85,8 +86,8 @@ def test_vendor_modules_import_only_allowed_modules() -> None:
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
-                if node.level:  # relative: from .base import ...
-                    module = (node.module or "").split(".")[0]
+                if node.level:  # relative: from .base / ..log_readers.base
+                    module = node.module or ""
                     assert module in allowed_local, (
                         f"{path.name} imports .{node.module} — vendor modules "
                         f"may only import {sorted(allowed_local)} locally"

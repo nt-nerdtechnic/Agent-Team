@@ -3554,10 +3554,9 @@ async def _terminal_create_impl(
             # kickoff), so claim the resume id from the launch command to
             # route the resumed session's events back to this pane.
             explicit_session_id = app._cursor_resume_id(payload.get("command"))
-        # Aider deliberately has NO resume-id claim: its lossy resume
-        # (`aider --restore-chat-history`) takes no id, so there is nothing
-        # to parse from the launch command — a resumed aider pane binds via
-        # the kickoff marker in the history file's new section instead.
+        # Vendors absent from both paths above deliberately claim no resume
+        # id here (e.g. an id-less lossy resume); the rationale lives in each
+        # vendor's module. Such panes bind via the kickoff marker instead.
         # A re-created pane (renderer reload respawn keeps its pane id)
         # must not lose its fresh registration to a pending grace-period
         # cleanup from the previous PTY's exit.

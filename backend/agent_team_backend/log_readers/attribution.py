@@ -37,7 +37,6 @@ from typing import Iterable
 
 from ..applog import app_data_dir
 from ..db import DB_FILENAME, Database
-from .aider import aider_history_path, aider_pane_history_path, is_history_name
 from .base import LogReader, TokenUsage
 from .claude import encode_claude_cwd
 from .cursor import cursor_project_hash
@@ -377,7 +376,11 @@ class Attribution:
         """
         if usage.vendor in ("grok", "opencode", "kilo", "cursor"):
             return self._bind_shared_db_by_marker(usage)
-        if usage.vendor not in ("codex", "antigravity", "kimi", "qwen", "pi", "copilot", "aider"):
+        # Tuple = vendors not yet migrated to reader hooks; a migrated
+        # vendor's reader declares binds_by_marker_file instead.
+        marker_reader = self._readers.get(usage.vendor)
+        if usage.vendor not in ("codex", "antigravity", "kimi", "qwen", "pi", "copilot") \
+                and not (marker_reader is not None and marker_reader.binds_by_marker_file):
             return None
 
         # Once a session is bound, every binding path below no-ops — but their
@@ -447,7 +450,9 @@ class Attribution:
         unowned session — once bound, the session_owner short-circuit means no
         further reads. The file read happens outside the lock.
         """
-        if usage.vendor not in ("codex", "antigravity", "kimi", "qwen", "pi", "copilot", "aider"):
+        gate_reader = self._readers.get(usage.vendor)
+        if usage.vendor not in ("codex", "antigravity", "kimi", "qwen", "pi", "copilot") \
+                and not (gate_reader is not None and gate_reader.binds_by_marker_file):
             return None
         sid = usage.session_id
         with self._lock:
@@ -458,22 +463,18 @@ class Attribution:
         try:
             # Markers live in the first user turn; cap the read so a long session
             # doesn't cost a full file scan on every event.
-            if usage.vendor == "antigravity":
+            scan_override = (
+                gate_reader.marker_scan_text(Path(usage.file_path))
+                if gate_reader is not None else None
+            )
+            if scan_override is not None:
+                text = scan_override[:524_288]
+            elif usage.vendor == "antigravity":
                 reader = self._readers.get("antigravity")
                 if reader:
                     text = reader._metadata_text(Path(usage.file_path))[:524_288]
                 else:
                     text = Path(usage.file_path).read_text(encoding="utf-8", errors="ignore")[:524_288]
-            elif usage.vendor == "aider":
-                # Only the LAST started-at section is the live session — an
-                # earlier section's marker belongs to a historic session and
-                # must never bind. Still true for a per-pane file: it too is
-                # appended to by every aider run of that pane.
-                reader = self._readers.get("aider")
-                text = (
-                    reader.last_section(Path(usage.file_path))[1][:524_288]
-                    if reader is not None else ""
-                )
             else:
                 text = Path(usage.file_path).read_text(encoding="utf-8", errors="ignore")[:524_288]
         except OSError:
@@ -682,7 +683,16 @@ class Attribution:
     def _lookup_workspace_for(self, usage: TokenUsage) -> str | None:
         """Find which registered workspace this log file belongs to."""
         file_path = usage.file_path
+        ws_reader = self._readers.get(usage.vendor)
         for ws_path, mapping in self._workspaces.items():
+            # Migrated vendors answer through their reader; None falls to the
+            # legacy chain below, deleted one vendor at a time.
+            if ws_reader is not None:
+                verdict = ws_reader.workspace_match(usage, ws_path)
+                if verdict is True:
+                    return ws_path
+                if verdict is False:
+                    continue
             if usage.vendor == "claude":
                 # Path-prefix match against claude_dir (default config home).
                 # Managed-account panes write via a symlinked profile home whose
@@ -733,19 +743,6 @@ class Attribution:
                 # Copilot reader emits cwd = the session's workspace.yaml cwd.
                 if usage.cwd and usage.cwd == ws_path:
                     return ws_path
-            elif usage.vendor == "aider":
-                # Aider reader emits cwd = the history file's directory (the
-                # session's git root). A workspace registered at a
-                # subdirectory of that root still maps to the same file.
-                if usage.cwd and usage.cwd == ws_path:
-                    return ws_path
-                if usage.file_path:
-                    fp = Path(usage.file_path)
-                    if (
-                        is_history_name(fp.name)
-                        and fp.parent == aider_history_path(ws_path).parent
-                    ):
-                        return ws_path
             elif usage.vendor == "cursor":
                 # Cursor stores NO cwd anywhere. A session already bound to a
                 # pane (marker hit) attributes to that pane's workspace, so
@@ -811,6 +808,11 @@ class Attribution:
         if not pane_cwd:
             return False
         file_path = usage.file_path
+        reader = self._readers.get(usage.vendor)
+        if reader is not None:
+            verdict = reader.pane_cwd_match(usage, pane_cwd, pane_id)
+            if verdict is not None:
+                return verdict
         if usage.vendor == "claude":
             expected_dir = encode_claude_cwd(pane_cwd)
             return f"/{expected_dir}/" in file_path
@@ -820,22 +822,6 @@ class Attribution:
             # binding never depends on it (the hash scheme is unconfirmed).
             hash_dir = cursor_project_hash(pane_cwd)
             return bool(hash_dir) and f"/{hash_dir}/" in file_path
-        if usage.vendor == "aider":
-            # The pane's OWN `--chat-history-file` is its file — that is what
-            # lets two aider panes in ONE repo discriminate at all. The
-            # per-project shared file is claimable only by a pane that has no
-            # per-pane file (started before per-pane files existed), never by
-            # one that does.
-            own = aider_pane_history_path(pane_cwd, pane_id)
-            if own is not None:
-                if usage.file_path == str(own):
-                    return True
-                try:
-                    if own.exists():
-                        return False
-                except OSError:
-                    return False
-            return usage.file_path == str(aider_history_path(pane_cwd))
         if usage.vendor in ("codex", "antigravity", "grok", "kimi", "opencode", "qwen", "kilo", "pi", "copilot"):
             return usage.cwd == pane_cwd
         return False
