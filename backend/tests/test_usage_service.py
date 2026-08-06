@@ -11,7 +11,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from agent_team_backend import usage_service as us
+from agent_team_backend.cli_vendors import _protocols as protocols_vendor
 from agent_team_backend.cli_vendors import antigravity as antigravity_vendor
+from agent_team_backend.cli_vendors import opencode as opencode_vendor
 from agent_team_backend.cli_vendors import copilot as copilot_vendor
 from agent_team_backend.cli_vendors import cursor as cursor_vendor
 from agent_team_backend.cli_vendors import qwen as qwen_vendor
@@ -1178,7 +1180,7 @@ async def test_fetch_antigravity_expired_grant_reads_as_expired(monkeypatch):
 # ── opencode fetch (aggregator over auth.json entries) ──────────────────────
 
 def _with_opencode_auth(monkeypatch, auth: dict | None):
-    monkeypatch.setattr(us, "read_opencode_credentials", lambda home: auth)
+    monkeypatch.setattr(opencode_vendor, "read_opencode_credentials", lambda home: auth)
 
 
 async def test_fetch_opencode_no_credentials(monkeypatch):
@@ -1258,7 +1260,7 @@ async def test_fetch_opencode_anthropic_entry_reuses_claude_flow(monkeypatch):
             "claude", "ok",
             windows=[us._window("session", "Session (5h)", 42, None)])
 
-    monkeypatch.setattr(us, "fetch_claude_oauth", fake_claude)
+    monkeypatch.setattr(protocols_vendor, "fetch_claude_oauth", fake_claude)
     snap = await us.fetch_opencode(Path("/x"))
     assert snap["provider"] == "opencode"
     assert snap["status"] == "ok"
@@ -1281,7 +1283,7 @@ async def test_fetch_opencode_mixed_sources_ok_wins(monkeypatch):
             "claude", "ok",
             windows=[us._window("weekly", "Weekly", 5, None)])
 
-    monkeypatch.setattr(us, "fetch_claude_oauth", fake_claude)
+    monkeypatch.setattr(protocols_vendor, "fetch_claude_oauth", fake_claude)
     snap = await us.fetch_opencode(Path("/x"))
     assert snap["status"] == "ok"
     assert [w["label"] for w in snap["windows"]] == ["Claude — Weekly"]
@@ -1793,7 +1795,7 @@ async def test_poll_once_rate_limit_sets_cooldown(tmp_path, monkeypatch):
     monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_ok("kimi"))
     monkeypatch.setattr(us, "fetch_grok", lambda home: fake_ok("grok"))
     monkeypatch.setattr(antigravity_vendor, "fetch_antigravity", lambda home: fake_ok("antigravity"))
-    monkeypatch.setattr(us, "fetch_opencode", lambda home: fake_ok("opencode"))
+    monkeypatch.setattr(opencode_vendor, "fetch_opencode", lambda home: fake_ok("opencode"))
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_ok("kilo"))
     monkeypatch.setattr(us, "fetch_pi", lambda home: fake_ok("pi"))
@@ -1826,7 +1828,7 @@ async def test_poll_once_survives_fetcher_exception(tmp_path, monkeypatch):
     monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_ok("kimi"))
     monkeypatch.setattr(us, "fetch_grok", lambda home: fake_ok("grok"))
     monkeypatch.setattr(antigravity_vendor, "fetch_antigravity", lambda home: fake_ok("antigravity"))
-    monkeypatch.setattr(us, "fetch_opencode", lambda home: fake_ok("opencode"))
+    monkeypatch.setattr(opencode_vendor, "fetch_opencode", lambda home: fake_ok("opencode"))
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_ok("kilo"))
     monkeypatch.setattr(us, "fetch_pi", lambda home: fake_ok("pi"))
@@ -1964,7 +1966,7 @@ async def test_poll_once_claude_accounts_are_independent_and_pruned(tmp_path, mo
     monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_other("kimi"))
     monkeypatch.setattr(us, "fetch_grok", lambda home: fake_other("grok"))
     monkeypatch.setattr(antigravity_vendor, "fetch_antigravity", lambda home: fake_other("antigravity"))
-    monkeypatch.setattr(us, "fetch_opencode", lambda home: fake_other("opencode"))
+    monkeypatch.setattr(opencode_vendor, "fetch_opencode", lambda home: fake_other("opencode"))
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_other("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_other("kilo"))
     monkeypatch.setattr(us, "fetch_pi", lambda home: fake_other("pi"))
@@ -2054,7 +2056,7 @@ async def test_refresh_during_poll_runs_next_cycle_with_new_active_account(
     monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_other("kimi"))
     monkeypatch.setattr(us, "fetch_grok", lambda home: fake_other("grok"))
     monkeypatch.setattr(antigravity_vendor, "fetch_antigravity", lambda home: fake_other("antigravity"))
-    monkeypatch.setattr(us, "fetch_opencode", lambda home: fake_other("opencode"))
+    monkeypatch.setattr(opencode_vendor, "fetch_opencode", lambda home: fake_other("opencode"))
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_other("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_other("kilo"))
     monkeypatch.setattr(us, "fetch_pi", lambda home: fake_other("pi"))
@@ -2186,7 +2188,7 @@ async def test_poll_once_always_reads_real_home(tmp_path, monkeypatch):
     monkeypatch.setattr(us, "fetch_kimi", spy_kimi)
     monkeypatch.setattr(us, "fetch_grok", spy_grok)
     monkeypatch.setattr(antigravity_vendor, "fetch_antigravity", spy_antigravity)
-    monkeypatch.setattr(us, "fetch_opencode", spy_opencode)
+    monkeypatch.setattr(opencode_vendor, "fetch_opencode", spy_opencode)
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", spy_qwen)
     monkeypatch.setattr(us, "fetch_kilo", spy_kilo)
     monkeypatch.setattr(us, "fetch_pi", spy_pi)
@@ -2227,7 +2229,7 @@ async def test_poll_once_harvests_active_slots(tmp_path, monkeypatch):
     monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_ok("kimi"))
     monkeypatch.setattr(us, "fetch_grok", lambda home: fake_ok("grok"))
     monkeypatch.setattr(antigravity_vendor, "fetch_antigravity", lambda home: fake_ok("antigravity"))
-    monkeypatch.setattr(us, "fetch_opencode", lambda home: fake_ok("opencode"))
+    monkeypatch.setattr(opencode_vendor, "fetch_opencode", lambda home: fake_ok("opencode"))
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_ok("kilo"))
     monkeypatch.setattr(us, "fetch_pi", lambda home: fake_ok("pi"))
@@ -2269,7 +2271,7 @@ async def test_poll_once_harvests_pending_login_homes(tmp_path, monkeypatch):
     monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_ok("kimi"))
     monkeypatch.setattr(us, "fetch_grok", lambda home: fake_ok("grok"))
     monkeypatch.setattr(antigravity_vendor, "fetch_antigravity", lambda home: fake_ok("antigravity"))
-    monkeypatch.setattr(us, "fetch_opencode", lambda home: fake_ok("opencode"))
+    monkeypatch.setattr(opencode_vendor, "fetch_opencode", lambda home: fake_ok("opencode"))
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_ok("kilo"))
     monkeypatch.setattr(us, "fetch_pi", lambda home: fake_ok("pi"))
@@ -2368,7 +2370,7 @@ async def test_poll_once_skips_login_harvest_while_login_pane_runs(
     monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_ok("kimi"))
     monkeypatch.setattr(us, "fetch_grok", lambda home: fake_ok("grok"))
     monkeypatch.setattr(antigravity_vendor, "fetch_antigravity", lambda home: fake_ok("antigravity"))
-    monkeypatch.setattr(us, "fetch_opencode", lambda home: fake_ok("opencode"))
+    monkeypatch.setattr(opencode_vendor, "fetch_opencode", lambda home: fake_ok("opencode"))
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_ok("kilo"))
     monkeypatch.setattr(us, "fetch_pi", lambda home: fake_ok("pi"))
@@ -2411,7 +2413,7 @@ async def test_login_harvest_for_active_profile_restores_live(tmp_path, monkeypa
     monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_ok("kimi"))
     monkeypatch.setattr(us, "fetch_grok", lambda home: fake_ok("grok"))
     monkeypatch.setattr(antigravity_vendor, "fetch_antigravity", lambda home: fake_ok("antigravity"))
-    monkeypatch.setattr(us, "fetch_opencode", lambda home: fake_ok("opencode"))
+    monkeypatch.setattr(opencode_vendor, "fetch_opencode", lambda home: fake_ok("opencode"))
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_ok("kilo"))
     monkeypatch.setattr(us, "fetch_pi", lambda home: fake_ok("pi"))

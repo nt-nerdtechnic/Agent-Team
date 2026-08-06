@@ -3521,11 +3521,6 @@ async def _terminal_create_impl(
             # from the new-session single-candidate fallback's candidate set,
             # so a sibling fresh pane in the same cwd can still fallback-bind.
             explicit_session_id = app._kimi_resume_id(payload.get("command"))
-        elif agent_key == "opencode" and not explicit_session_id:
-            # Resumed OpenCode panes carry no marker (markers only appear in a
-            # fresh kickoff), so claim the resume id from the launch command —
-            # otherwise the resumed session's events can't be routed back.
-            explicit_session_id = app._opencode_resume_id(payload.get("command"))
         elif agent_key == "kilo" and not explicit_session_id:
             # Resumed Kilo panes (OpenCode fork) likewise: markers only appear
             # in a fresh kickoff, so claim the resume id from the launch

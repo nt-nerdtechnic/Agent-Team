@@ -876,8 +876,6 @@ _INHERITED_CLI_HOME_VARS = (
     "CODEX_HOME",
     "KIMI_CODE_HOME",
     "GROK_HOME",
-    "OPENCODE_CONFIG_DIR",
-    "OPENCODE_CONFIG",
     "PI_CODING_AGENT_DIR",
     "PI_CODING_AGENT_SESSION_DIR",
     "PI_PACKAGE_DIR",
@@ -1432,15 +1430,6 @@ def _kimi_resume_id(command: Any) -> str:
 
 
 # Same optional-id guard as Kimi: the capture must not swallow a following flag.
-_OPENCODE_RESUME_RE = re.compile(r"^opencode\s+(?:\S+\s+)*(?:--session|-s)\s+([^-\s]\S*)")
-
-
-def _opencode_resume_id(command: Any) -> str:
-    """Session id from an `opencode ... --session <id>` / `-s <id>` command ('' otherwise)."""
-    m = _OPENCODE_RESUME_RE.match(_command_text(command).strip())
-    return m.group(1) if m else ""
-
-
 # Kilo Code is an OpenCode fork and keeps its resume flags — same
 # optional-id guard so the capture never swallows a following flag.
 _KILO_RESUME_RE = re.compile(r"^kilo\s+(?:\S+\s+)*(?:--session|-s)\s+([^-\s]\S*)")
@@ -1471,7 +1460,6 @@ _RESUME_ID_EXTRACTORS = {
     "codex": _codex_resume_id,
     "claude": _claude_resume_id,
     "kimi": _kimi_resume_id,
-    "opencode": _opencode_resume_id,
     "kilo": _kilo_resume_id,
     "pi": _pi_resume_id,
 }
@@ -1535,12 +1523,6 @@ def _session_exists(agent: str, workspace_path: str, session_id: str) -> bool:
         # `kimi --session <id>` that dead-ends the pane at startup.
         reader = next((r for r in _readers if r.vendor == "kimi"), None)
         return reader.has_session(session_id) if isinstance(reader, KimiLogReader) else False
-    if agent == "opencode":
-        # OpenCode keeps every session in one shared SQLite db; ask the reader
-        # so a stale persisted id fails preflight instead of launching a
-        # doomed `opencode --session <id>`.
-        reader = next((r for r in _readers if r.vendor == "opencode"), None)
-        return reader.has_session(session_id) if isinstance(reader, OpencodeLogReader) else False
     if agent == "kilo":
         # Kilo Code (OpenCode fork) likewise keeps every session in one shared
         # SQLite db; ask the reader so a stale persisted id fails preflight

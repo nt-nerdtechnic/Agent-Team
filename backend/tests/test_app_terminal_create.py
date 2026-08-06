@@ -338,21 +338,21 @@ def test_kimi_resume_id_parses_resume_commands() -> None:
 
 def test_opencode_resume_id_parses_resume_commands() -> None:
     sid = "ses_18d0acbcaffe3eXy2s3zezEmix"
-    assert app._opencode_resume_id(f"opencode --session {sid}") == sid
-    assert app._opencode_resume_id(f"opencode -s {sid}") == sid
-    assert app._opencode_resume_id(f"opencode --session {sid} --print-logs") == sid
-    assert app._opencode_resume_id(f"opencode --print-logs --session {sid}") == sid
-    assert app._opencode_resume_id("opencode") == ""
+    assert app._resume_id_for_agent("opencode", f"opencode --session {sid}") == sid
+    assert app._resume_id_for_agent("opencode", f"opencode -s {sid}") == sid
+    assert app._resume_id_for_agent("opencode", f"opencode --session {sid} --print-logs") == sid
+    assert app._resume_id_for_agent("opencode", f"opencode --print-logs --session {sid}") == sid
+    assert app._resume_id_for_agent("opencode", "opencode") == ""
     # A following flag must not be captured as the id.
-    assert app._opencode_resume_id("opencode --session --print-logs") == ""
-    assert app._opencode_resume_id("opencode --session") == ""
-    assert app._opencode_resume_id("") == ""
-    assert app._opencode_resume_id(None) == ""
+    assert app._resume_id_for_agent("opencode", "opencode --session --print-logs") == ""
+    assert app._resume_id_for_agent("opencode", "opencode --session") == ""
+    assert app._resume_id_for_agent("opencode", "") == ""
+    assert app._resume_id_for_agent("opencode", None) == ""
     # Shell-wrapped list — the shape the frontend actually sends.
-    assert app._opencode_resume_id(
+    assert app._resume_id_for_agent("opencode", 
         ["/bin/zsh", "-lc", f"opencode --session {sid}"]
     ) == sid
-    assert app._opencode_resume_id(["/bin/zsh", "-lc", "opencode"]) == ""
+    assert app._resume_id_for_agent("opencode", ["/bin/zsh", "-lc", "opencode"]) == ""
 
 
 def test_kilo_resume_id_parses_resume_commands() -> None:

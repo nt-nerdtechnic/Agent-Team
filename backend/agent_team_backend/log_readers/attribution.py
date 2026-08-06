@@ -374,7 +374,7 @@ class Attribution:
         resume itself is the id-less, lossy `aider --restore-chat-history`.
         """
         shared_db_reader = self._readers.get(usage.vendor)
-        if usage.vendor in ("grok", "opencode", "kilo") or (
+        if usage.vendor in ("grok", "kilo") or (
             shared_db_reader is not None
             and shared_db_reader.binds_shared_db_by_marker
         ):
@@ -723,11 +723,6 @@ class Attribution:
                 # Kimi reader emits cwd = the session state.json workDir.
                 if usage.cwd and usage.cwd == ws_path:
                     return ws_path
-            elif usage.vendor == "opencode":
-                # OpenCode reader emits cwd = session.directory (the cwd the
-                # session was started in).
-                if usage.cwd and usage.cwd == ws_path:
-                    return ws_path
             elif usage.vendor == "kilo":
                 # Kilo (OpenCode fork) likewise emits cwd = session.directory.
                 if usage.cwd and usage.cwd == ws_path:
@@ -796,7 +791,7 @@ class Attribution:
         if usage.vendor == "claude":
             expected_dir = encode_claude_cwd(pane_cwd)
             return f"/{expected_dir}/" in file_path
-        if usage.vendor in ("codex", "grok", "kimi", "opencode", "kilo", "pi"):
+        if usage.vendor in ("codex", "grok", "kimi", "kilo", "pi"):
             return usage.cwd == pane_cwd
         return False
 

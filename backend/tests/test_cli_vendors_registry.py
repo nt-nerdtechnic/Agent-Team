@@ -88,6 +88,14 @@ def test_vendor_modules_import_only_allowed_modules() -> None:
             if isinstance(node, ast.ImportFrom):
                 if node.level:  # relative: from .base / ..log_readers.base
                     module = node.module or ""
+                    if module == "":  # from . import _protocols, base, ...
+                        for alias in node.names:
+                            assert alias.name in allowed_local, (
+                                f"{path.name} imports .{alias.name} — vendor "
+                                f"modules may only import "
+                                f"{sorted(allowed_local)} locally"
+                            )
+                        continue
                     assert module in allowed_local, (
                         f"{path.name} imports .{node.module} — vendor modules "
                         f"may only import {sorted(allowed_local)} locally"

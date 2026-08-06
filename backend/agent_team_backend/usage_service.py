@@ -105,12 +105,10 @@ log = logging.getLogger(__name__)
 PROVIDERS = ("claude", "codex", "kimi", "grok", "antigravity", "opencode", "qwen",
              "kilo", "pi", "copilot", "cursor")
 
-CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 # How long a `/usage` panel reading stands before the CLI is asked again. The
 # read costs a full Claude Code start, so it deliberately does not follow the
 # poll interval; the badge's refresh button clears it via `request_refresh`.
 CLAUDE_CLI_READ_INTERVAL = 900.0
-CLAUDE_BETA_HEADER = "oauth-2025-04-20"
 CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 # Claude OAuth tokens are never minted here. Anthropic rotates refresh tokens,
 # so every exchange invalidates the previous one: whenever this app refreshed a
@@ -120,8 +118,6 @@ CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 # renews it from the restored refresh token the first time it runs.
 CODEX_DEFAULT_BASE = "https://chatgpt.com/backend-api"
 KIMI_DEFAULT_BASE = "https://api.kimi.com"
-OPENCODE_AUTH_FILE_REL = (".local", "share", "opencode", "auth.json")
-OPENCODE_MINIMAX_USAGE_URL = "https://api.minimax.io/v1/token_plan/remains"
 # kilo (Kilo CLI, @kilocode/cli). auth.json is a map keyed by provider id; the
 # "kilo" entry holds either an api key or a long-lived oauth access token that
 # IS the Kilo bearer token (1-year expiry, no refresh rotation needed for
@@ -175,6 +171,22 @@ from .usage_common import (  # noqa: E402,F401
 
 # R2: qwen's usage stack moved to its vendor module; re-exported so this
 # module's namespace (and its tests) keep working until the cleanup round.
+from .cli_vendors.opencode import (  # noqa: E402,F401
+    OPENCODE_AUTH_FILE_REL,
+    OPENCODE_MINIMAX_USAGE_URL,
+    fetch_opencode,
+    normalize_opencode_minimax,
+    opencode_anthropic_oauth,
+    opencode_minimax_key,
+    read_opencode_credentials,
+)
+from .cli_vendors._protocols import (  # noqa: E402,F401
+    CLAUDE_BETA_HEADER,
+    CLAUDE_USAGE_URL,
+    claude_token_expired,
+    fetch_claude_oauth,
+    normalize_claude,
+)
 from .cli_vendors.antigravity import (  # noqa: E402,F401
     _antigravity_refresh_token,
     ANTIGRAVITY_CLIENT_ID,
@@ -259,12 +271,6 @@ def parse_claude_credentials(raw: str | None) -> dict | None:
     return oauth
 
 
-def claude_token_expired(oauth: dict, now_ms: float | None = None) -> bool:
-    expires = _num(oauth.get("expiresAt"))
-    if expires is None:
-        return False
-    now = time.time() * 1000 if now_ms is None else now_ms
-    return now >= expires
 
 
 # A failed Keychain read (denied prompt, timeout) is remembered so we don't
@@ -417,44 +423,6 @@ def read_grok_credentials(home: Path, env: dict | None = None) -> dict | None:
         return None
     return {"key": entry["key"], "email": entry.get("email"),
             "expires_at": entry.get("expires_at")}
-
-
-def read_opencode_credentials(home: Path) -> dict | None:
-    """Parse ``~/.local/share/opencode/auth.json``: a map of providerID ->
-    credential entry ({type: "api", key} or {type: "oauth", access, refresh,
-    expires}). Returns the dict-valued entries, or None when the file is
-    absent/malformed/empty."""
-    path = home.joinpath(*OPENCODE_AUTH_FILE_REL)
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    entries = {k: v for k, v in data.items() if isinstance(v, dict)}
-    return entries or None
-
-
-def opencode_minimax_key(auth: dict) -> str | None:
-    """The MiniMax coding-plan API key from an opencode auth map, or None."""
-    entry = auth.get("minimax-coding-plan")
-    if not isinstance(entry, dict) or entry.get("type") != "api":
-        return None
-    key = entry.get("key")
-    return key if isinstance(key, str) and key else None
-
-
-def opencode_anthropic_oauth(auth: dict) -> dict | None:
-    """Map an ``anthropic`` {type: "oauth"} entry to the claudeAiOauth shape
-    (accessToken + epoch-ms expiresAt) so the existing Claude usage flow can
-    be reused as-is."""
-    entry = auth.get("anthropic")
-    if not isinstance(entry, dict) or entry.get("type") != "oauth":
-        return None
-    access = entry.get("access")
-    if not isinstance(access, str) or not access:
-        return None
-    return {"accessToken": access, "expiresAt": entry.get("expires")}
 
 
 def _kilo_entry_credentials(entry: Any) -> dict | None:
@@ -619,65 +587,19 @@ def pi_openrouter_key(auth: dict) -> str | None:
 
 # ── Response normalizers (pure) ─────────────────────────────────────────────
 
-_CLAUDE_NAMED_WINDOWS = (
-    ("five_hour", "session", "Session (5h)"),
-    ("seven_day", "weekly", "Weekly (all models)"),
-    ("seven_day_opus", "weekly-model", "Weekly (Opus)"),
-    ("seven_day_sonnet", "weekly-model", "Weekly (Sonnet)"),
+
+
+_CODEX_POSITIONAL = (
+    ("primary_window", ("session", "Session (5h)")),
+    ("secondary_window", ("weekly", "Weekly")),
 )
 
 
-def normalize_claude(data: dict) -> tuple[list[dict], str | None]:
-    windows: list[dict] = []
-    for key, kind, label in _CLAUDE_NAMED_WINDOWS:
-        entry = data.get(key)
-        if not isinstance(entry, dict):
-            continue
-        pct = _num(entry.get("utilization"))
-        if pct is None:
-            continue
-        windows.append(_window(kind, label, pct, entry.get("resets_at")))
-    # Mirrors CodexBar's ClaudeScopedWeeklyLimitMapper: drop the "all models"
-    # aggregate row and de-duplicate by model slug.
-    seen_models: set[str] = set()
-    for entry in data.get("limits") or []:
-        if not isinstance(entry, dict):
-            continue
-        # is_active is deliberately NOT a filter — enforceable scoped limits
-        # report False in practice (CodexBar finding).
-        if entry.get("kind") != "weekly_scoped" or entry.get("group") != "weekly":
-            continue
-        pct = _num(entry.get("percent"))
-        scope_model = ((entry.get("scope") or {}).get("model")) or {}
-        model = scope_model.get("display_name")
-        model_id = scope_model.get("id")
-        if pct is None or not model:
-            continue
-        slug = (model_id or model).strip().lower()
-        if slug in ("all models", "all-models") or slug.endswith("-all-models"):
-            continue
-        if slug in seen_models:
-            continue
-        seen_models.add(slug)
-        # Null-id "promotional" buckets (e.g. Fable) are surfaced as-is like any
-        # other per-model window: the quota is real, so never hide or relabel it.
-        windows.append(_window("weekly-model", f"{model} only", pct, entry.get("resets_at")))
-    plan = None
-    return windows, plan
-
-
-# Codex classifies a rate window by its ``limit_window_seconds`` (mirrors
-# CodexBar's CodexRateWindowNormalizer), not by position — the API does not
-# guarantee primary=Session / secondary=Weekly ordering.
 _CODEX_WINDOW_ROLES = {
     300: ("session", "Session (5h)"),
     10080: ("weekly", "Weekly"),
 }
 # Positional fallback for entries whose window length can't classify them.
-_CODEX_POSITIONAL = (
-    ("primary_window", ("session", "Session (5h)")),
-    ("secondary_window", ("weekly", "Weekly")),
-)
 
 
 def _codex_window_minutes(entry: dict) -> int | None:
@@ -826,30 +748,6 @@ def normalize_grok(billing: dict) -> tuple[list[dict], str | None]:
     return windows, None
 
 
-def normalize_opencode_minimax(data: dict) -> list[dict]:
-    """MiniMax ``token_plan/remains``: ``model_remains[]`` per model; the
-    coding plan is the ``model_name == "general"`` entry. Percents are
-    remaining -> used; epoch-ms end times -> ISO resetsAt."""
-    for entry in data.get("model_remains") or []:
-        if not isinstance(entry, dict) or entry.get("model_name") != "general":
-            continue
-        windows: list[dict] = []
-        interval = _num(entry.get("current_interval_remaining_percent"))
-        if interval is not None:
-            end = _num(entry.get("end_time"))
-            windows.append(_window(
-                "session", "MiniMax (5h)", 100.0 - interval,
-                _epoch_to_iso(end / 1000) if end is not None else None))
-        weekly = _num(entry.get("current_weekly_remaining_percent"))
-        if weekly is not None:
-            end = _num(entry.get("weekly_end_time"))
-            windows.append(_window(
-                "weekly", "MiniMax weekly", 100.0 - weekly,
-                _epoch_to_iso(end / 1000) if end is not None else None))
-        return windows
-    return []
-
-
 def normalize_kilo_balance(data: dict) -> list[dict]:
     """``/api/profile/balance``: {"balance": USD remaining} — a prepaid credit
     pool with no reset window and no used/limit ratio, so the raw balance is
@@ -921,43 +819,6 @@ def normalize_pi_openrouter(data: dict) -> list[dict]:
 
 
 # ── Fetchers ────────────────────────────────────────────────────────────────
-
-async def fetch_claude_oauth(oauth: dict | None) -> dict:
-    """Claude usage for an Anthropic OAuth credential another CLI stores.
-
-    The claude provider itself no longer comes through here — it reads the
-    CLI's own ``/usage`` panel (see :mod:`claude_cli_usage`). What remains are
-    opencode and pi, which keep an Anthropic OAuth grant inside their own auth
-    files; there is no vendor CLI to delegate to for those, so this call stays.
-    It identifies itself as Navide, the same as every other provider fetcher:
-    this app previously sent ``claude-code/<version>``, built by running
-    ``claude --version``, which claimed to be a client it is not."""
-    if oauth is None:
-        return _snapshot("claude", "no-credentials")
-    if claude_token_expired(oauth):
-        return _snapshot("claude", "expired")
-    import httpx
-
-    headers = {
-        "Authorization": f"Bearer {oauth['accessToken']}",
-        "anthropic-beta": CLAUDE_BETA_HEADER,
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "User-Agent": "Navide",
-    }
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        resp = await client.get(CLAUDE_USAGE_URL, headers=headers)
-    if resp.status_code == 401:
-        return _snapshot("claude", "expired")
-    if resp.status_code == 429:
-        snap = _snapshot("claude", "rate-limited")
-        snap["retryAfterSec"] = parse_retry_after(resp.headers.get("Retry-After"))
-        return snap
-    if resp.status_code != 200:
-        return _snapshot("claude", "error", error=f"HTTP {resp.status_code}")
-    windows, plan = normalize_claude(resp.json())
-    return _snapshot("claude", "ok", windows=windows, plan_type=plan)
-
 
 async def fetch_claude(home: Path) -> dict:
     """Claude quota, read from the CLI's own ``/usage`` panel.
@@ -1120,66 +981,6 @@ async def fetch_grok(home: Path, env: dict | None = None,
     if not windows:
         return _snapshot("grok", "error", error="billing response had no usable fields")
     return _snapshot("grok", "ok", windows=windows, plan_type=plan)
-
-
-async def _fetch_opencode_minimax(key: str) -> dict:
-    import httpx
-
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "Accept": "application/json",
-        "User-Agent": "Navide",
-    }
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        resp = await client.get(OPENCODE_MINIMAX_USAGE_URL, headers=headers)
-    if resp.status_code in (401, 403):
-        return _snapshot("opencode", "expired")
-    if resp.status_code == 429:
-        snap = _snapshot("opencode", "rate-limited")
-        snap["retryAfterSec"] = parse_retry_after(resp.headers.get("Retry-After"))
-        return snap
-    if resp.status_code != 200:
-        return _snapshot("opencode", "error", error=f"HTTP {resp.status_code}")
-    payload = resp.json()
-    base = payload.get("base_resp") if isinstance(payload, dict) else None
-    status_code = _num((base or {}).get("status_code"))
-    if status_code is not None and status_code != 0:
-        msg = (base or {}).get("status_msg")
-        return _snapshot("opencode", "error",
-                         error=str(msg or f"MiniMax status {int(status_code)}"))
-    return _snapshot("opencode", "ok", windows=normalize_opencode_minimax(payload))
-
-
-async def fetch_opencode(home: Path) -> dict:
-    """opencode is an aggregator: each supported ``auth.json`` entry is asked
-    its own provider's usage endpoint. Any source that answers makes the
-    snapshot "ok" (windows combined); with none answering the first failure
-    is surfaced; entries without a usage surface (Zen, BYOK keys) alone ->
-    unavailable."""
-    auth = read_opencode_credentials(home)
-    if auth is None:
-        return _snapshot("opencode", "no-credentials")
-    sub_snaps: list[dict] = []
-    key = opencode_minimax_key(auth)
-    if key is not None:
-        sub_snaps.append(await _fetch_opencode_minimax(key))
-    oauth = opencode_anthropic_oauth(auth)
-    if oauth is not None:
-        snap = await fetch_claude_oauth(oauth)
-        snap["provider"] = "opencode"
-        snap["windows"] = [dict(w, label=f"Claude — {w['label']}")
-                           for w in snap["windows"]]
-        sub_snaps.append(snap)
-    if not sub_snaps:
-        return _snapshot(
-            "opencode", "unavailable",
-            error="no auth.json entry has a usage API "
-                  "(opencode Zen and plain API keys expose none)")
-    ok = [s for s in sub_snaps if s["status"] == "ok"]
-    if ok:
-        return _snapshot("opencode", "ok",
-                         windows=[w for s in ok for w in s["windows"]])
-    return sub_snaps[0]
 
 
 async def fetch_kilo(home: Path, env: dict | None = None) -> dict:
@@ -1889,8 +1690,7 @@ class UsageService:
             "codex": lambda: fetch_codex(codex_home),
             "kimi": lambda: fetch_kimi(home),
             "grok": lambda: fetch_grok(home),
-                    "opencode": lambda: fetch_opencode(home),
-            "kilo": lambda: fetch_kilo(home),
+                            "kilo": lambda: fetch_kilo(home),
             "pi": lambda: fetch_pi(home),
                         }
         tasks: dict[str, Any] = {}
