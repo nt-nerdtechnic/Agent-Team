@@ -886,6 +886,13 @@ _INHERITED_CLI_HOME_VARS = (
     "KILO_CONFIG",
     "KILO_DB",
     "COPILOT_HOME",
+    # Not a home relocator, but the same inheritance hazard with a worse
+    # failure: Claude Code marks its own subprocesses with this so child
+    # sessions skip transcript saving. A dev/prod app launched from inside a
+    # claude pane (observed: `pnpm dev` from a Navide pane) passes it to
+    # every spawned claude pane, which then SILENTLY writes no session jsonl
+    # — the pane works all day and restores as a blank after restart.
+    "CLAUDE_CODE_CHILD_SESSION",
 )
 
 

@@ -1268,11 +1268,15 @@ def test_sanitize_inherited_cli_env_drops_home_relocations(
     # (e.g. `pnpm dev` inside an old profile pane) must not pass them on.
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/tmp/poisoned-claude")
     monkeypatch.setenv("CODEX_HOME", "/tmp/poisoned-codex")
+    # Claude Code's child-session marker: inherited, it makes every spawned
+    # claude pane silently skip transcript saving (blank pane after restart).
+    monkeypatch.setenv("CLAUDE_CODE_CHILD_SESSION", "1")
 
     app._sanitize_inherited_cli_env()
 
     assert "CLAUDE_CONFIG_DIR" not in os.environ
     assert "CODEX_HOME" not in os.environ
+    assert "CLAUDE_CODE_CHILD_SESSION" not in os.environ
 
 
 # ---- pre-switch token refresh (claude only) ----
