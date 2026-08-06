@@ -15,7 +15,6 @@ from .base import (
 from .claude import ClaudeLogReader
 from .codex import CodexLogReader
 from .grok import GrokLogReader
-from .kilo import KiloLogReader
 from .kimi import KimiLogReader
 from .pi import PiLogReader
 from .watcher import LogWatcher
@@ -30,6 +29,7 @@ _MIGRATED_READERS = {
     "AntigravityLogReader": "antigravity",
     "CopilotLogReader": "copilot",
     "CursorLogReader": "cursor",
+    "KiloLogReader": "kilo",
     "OpencodeLogReader": "opencode",
     "QwenLogReader": "qwen",
 }

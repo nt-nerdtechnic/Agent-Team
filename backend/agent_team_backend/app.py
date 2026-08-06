@@ -879,9 +879,6 @@ _INHERITED_CLI_HOME_VARS = (
     "PI_CODING_AGENT_DIR",
     "PI_CODING_AGENT_SESSION_DIR",
     "PI_PACKAGE_DIR",
-    "KILO_CONFIG_DIR",
-    "KILO_CONFIG",
-    "KILO_DB",
     # Not home relocators, but the same inheritance hazard with a worse
     # failure mode: runtime markers a CLI stamps on its own subprocesses.
     # Claude Code's child-session marker makes an inheriting pane skip
@@ -1430,17 +1427,6 @@ def _kimi_resume_id(command: Any) -> str:
 
 
 # Same optional-id guard as Kimi: the capture must not swallow a following flag.
-# Kilo Code is an OpenCode fork and keeps its resume flags — same
-# optional-id guard so the capture never swallows a following flag.
-_KILO_RESUME_RE = re.compile(r"^kilo\s+(?:\S+\s+)*(?:--session|-s)\s+([^-\s]\S*)")
-
-
-def _kilo_resume_id(command: Any) -> str:
-    """Session id from a `kilo ... --session <id>` / `-s <id>` command ('' otherwise)."""
-    m = _KILO_RESUME_RE.match(_command_text(command).strip())
-    return m.group(1) if m else ""
-
-
 # Same optional-id guard as Kimi: `--resume` can appear bare (interactive
 # picker), so the capture must not swallow a following flag.
 # `pi --session-id <id>` resumes when the id exists and creates a NEW session
@@ -1460,7 +1446,6 @@ _RESUME_ID_EXTRACTORS = {
     "codex": _codex_resume_id,
     "claude": _claude_resume_id,
     "kimi": _kimi_resume_id,
-    "kilo": _kilo_resume_id,
     "pi": _pi_resume_id,
 }
 
@@ -1523,12 +1508,6 @@ def _session_exists(agent: str, workspace_path: str, session_id: str) -> bool:
         # `kimi --session <id>` that dead-ends the pane at startup.
         reader = next((r for r in _readers if r.vendor == "kimi"), None)
         return reader.has_session(session_id) if isinstance(reader, KimiLogReader) else False
-    if agent == "kilo":
-        # Kilo Code (OpenCode fork) likewise keeps every session in one shared
-        # SQLite db; ask the reader so a stale persisted id fails preflight
-        # instead of launching a doomed `kilo --session <id>`.
-        reader = next((r for r in _readers if r.vendor == "kilo"), None)
-        return reader.has_session(session_id) if isinstance(reader, KiloLogReader) else False
     if agent == "pi":
         # Pi stores each session at ~/.pi/agent/sessions/<encoded-cwd>/
         # <timestamp>_<id>.jsonl — the timestamp prefix means the id alone

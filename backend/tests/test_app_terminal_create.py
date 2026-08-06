@@ -357,19 +357,19 @@ def test_opencode_resume_id_parses_resume_commands() -> None:
 
 def test_kilo_resume_id_parses_resume_commands() -> None:
     sid = "ses_29e1bcdcaffe3eXy2s3zezKilo"
-    assert app._kilo_resume_id(f"kilo --session {sid}") == sid
-    assert app._kilo_resume_id(f"kilo -s {sid}") == sid
-    assert app._kilo_resume_id(f"kilo --session {sid} --print-logs") == sid
-    assert app._kilo_resume_id(f"kilo --print-logs --session {sid}") == sid
-    assert app._kilo_resume_id("kilo") == ""
+    assert app._resume_id_for_agent("kilo", f"kilo --session {sid}") == sid
+    assert app._resume_id_for_agent("kilo", f"kilo -s {sid}") == sid
+    assert app._resume_id_for_agent("kilo", f"kilo --session {sid} --print-logs") == sid
+    assert app._resume_id_for_agent("kilo", f"kilo --print-logs --session {sid}") == sid
+    assert app._resume_id_for_agent("kilo", "kilo") == ""
     # A following flag must not be captured as the id.
-    assert app._kilo_resume_id("kilo --session --print-logs") == ""
-    assert app._kilo_resume_id("kilo --session") == ""
-    assert app._kilo_resume_id("") == ""
-    assert app._kilo_resume_id(None) == ""
+    assert app._resume_id_for_agent("kilo", "kilo --session --print-logs") == ""
+    assert app._resume_id_for_agent("kilo", "kilo --session") == ""
+    assert app._resume_id_for_agent("kilo", "") == ""
+    assert app._resume_id_for_agent("kilo", None) == ""
     # Shell-wrapped list — the shape the frontend actually sends.
-    assert app._kilo_resume_id(["/bin/zsh", "-lc", f"kilo --session {sid}"]) == sid
-    assert app._kilo_resume_id(["/bin/zsh", "-lc", "kilo"]) == ""
+    assert app._resume_id_for_agent("kilo", ["/bin/zsh", "-lc", f"kilo --session {sid}"]) == sid
+    assert app._resume_id_for_agent("kilo", ["/bin/zsh", "-lc", "kilo"]) == ""
 
 
 def test_qwen_resume_id_parses_resume_commands() -> None:
