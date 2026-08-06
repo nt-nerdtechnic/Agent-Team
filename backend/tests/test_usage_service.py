@@ -2729,12 +2729,16 @@ async def test_poll_never_mints_tokens_and_reads_slots_as_stored(
     assert payload["accounts"]["claude"][parked["id"]]["status"] == "not-measured"
 
 
-async def test_a_parked_account_never_shows_a_cached_percentage(
+async def test_a_parked_account_keeps_its_last_reading_marked_stale(
     tmp_path, monkeypatch
 ):
-    """Only the signed-in account can be measured now. A leftover figure from
-    when it was active would advertise quota nobody can confirm — that is what
-    sent the user to a signed-out account in the first place."""
+    """Only the signed-in account can be measured, but the parked one keeps the
+    figure it measured for itself, labelled stale and with the time it was
+    taken. Discarding it blanked both cards on every account switch — the
+    outgoing one here, the incoming one from when it was parked — and a card
+    reading "no data" looks exactly like a broken one. What must never happen
+    is the old figure passing for a current one, so the staleness markers are
+    asserted alongside the percentage."""
     store = _isolated_store(tmp_path)
     one = store.create(agent_key="claude", name="One")
     two = store.create(agent_key="claude", name="Two")
@@ -2762,18 +2766,27 @@ async def test_a_parked_account_never_shows_a_cached_percentage(
         )
 
     svc = us.UsageService(cache_path=tmp_path / "usage-cache.json")
-    await svc.poll_once(tmp_path)          # `one` measured while active
+    first = await svc.poll_once(tmp_path)  # `one` measured while active
     assert svc._last_good["claude"][one["id"]]["windows"]
+    # `two` has never been measured, so it has nothing to keep — a bare
+    # not-measured row, with no staleness markers implying a lost reading.
+    never = first["accounts"]["claude"][two["id"]]
+    assert never["status"] == "not-measured"
+    assert never["windows"] == []
+    assert never.get("stale") is not True
 
     store.set_default("claude", two["id"])  # it is parked now
     svc.request_refresh()
     payload = await svc.poll_once(tmp_path)
 
     row = payload["accounts"]["claude"][one["id"]]
-    assert row["status"] == "not-measured"
-    assert row["windows"] == []
-    assert row.get("stale") is not True     # not a dressed-up cached reading
-    assert one["id"] not in svc._last_good.get("claude", {})
+    # The reading survives …
+    assert [w["usedPercent"] for w in row["windows"]] == [40]
+    assert svc._last_good["claude"][one["id"]]["windows"]
+    # … and cannot be mistaken for a live one.
+    assert row["stale"] is True
+    assert row["refreshStatus"] == "not-measured"
+    assert row["lastSuccessAt"]
 
 
 async def test_poll_delegates_refresh_when_the_active_token_expired(

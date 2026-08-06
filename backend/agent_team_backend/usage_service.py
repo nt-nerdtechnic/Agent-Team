@@ -2543,19 +2543,23 @@ class UsageService:
         self._refresh_stale_expiry(merged)
         return merged
 
-    def _record_parked_claude_slot(self, slot_id: str) -> bool:
-        """A parked account has no measurable quota.
+    def _record_parked_claude_slot(self, slot_id: str) -> None:
+        """A parked account cannot be measured right now.
 
-        Only the CLI can report a figure now, and it can only speak for whoever
-        is signed in. The cached percentage is dropped rather than left to
-        stand in for a live one — an account showing a healthy number it can no
-        longer back up is what sent the user to a signed-out account in the
-        first place. Returns True when a cache entry was discarded."""
-        changed = self._last_good.get("claude", {}).pop(slot_id, None) is not None
-        self.account_snapshots.setdefault("claude", {})[slot_id] = _snapshot(
-            "claude", "not-measured"
+        Only the CLI can report a figure and it speaks only for whoever is
+        signed in, so a parked slot gets no fresh read. What it last measured
+        *for itself* is kept and surfaced as stale rather than discarded:
+        dropping it blanked both cards on every account switch — the outgoing
+        one here, the incoming one because the same had happened to it while it
+        was parked — and a card reading "no data" is indistinguishable from a
+        broken one. The figure is the account's own past reading, labelled with
+        its age, never presented as current. The cache itself is untouched."""
+        cached = self._last_good.get("claude", {}).get(slot_id)
+        self.account_snapshots.setdefault("claude", {})[slot_id] = (
+            self._merge_cached(cached, "not-measured", None)
+            if cached is not None
+            else _snapshot("claude", "not-measured")
         )
-        return changed
 
     def _record_claude_snapshot(self, slot_id: str, fresh: dict) -> bool:
         account = self.account_snapshots.setdefault("claude", {})
@@ -2710,8 +2714,8 @@ class UsageService:
         cache_changed = False
         # Claude quota comes from the CLI's own `/usage` panel — Claude Code
         # asks under its own identity and this reads what it printed. Only the
-        # signed-in account can be reported that way, so parked accounts carry
-        # no figure at all rather than a cached one pretending to be current.
+        # signed-in account can be reported that way, so a parked account shows
+        # its own last reading marked stale, never a figure passed off as live.
         parked_slots: list[str] = []
         if claude_accounts is None:
             claude_active = "__default__"
@@ -2720,7 +2724,7 @@ class UsageService:
             parked_slots = [s for s in credentials if s != claude_active]
         claude_coros = {claude_active: lambda: fetch_claude(home)}
         for slot_id in parked_slots:
-            cache_changed = self._record_parked_claude_slot(slot_id) or cache_changed
+            self._record_parked_claude_slot(slot_id)
         self._active_claude_slot = claude_active
         claude_tasks: dict[str, asyncio.Task] = {}
         for slot_id, coro in claude_coros.items():
