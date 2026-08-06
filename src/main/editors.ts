@@ -227,6 +227,61 @@ export function detectEditors(
   })
 }
 
+/** The part of a spawned child that launch detection observes. */
+export interface EditorProcess {
+  once(event: 'error', listener: () => void): unknown
+  once(event: 'exit', listener: (code: number | null) => void): unknown
+  unref(): void
+}
+
+/** Starts the editor. Throws (or returns a child that errors) on failure. */
+export type EditorSpawner = () => EditorProcess
+
+/** How long a freshly spawned editor gets to fail before it counts as
+ *  launched. GUI editors hand off to an already-running instance and exit 0
+ *  almost immediately, so only a NON-ZERO exit inside the window is a failure —
+ *  treating any early exit as failure would reject every successful open. */
+export const EDITOR_LAUNCH_FAILURE_WINDOW_MS = 800
+
+/**
+ * Spawn an editor and report whether it started.
+ *
+ * Resolves false when the process could not be spawned at all, or died with a
+ * non-zero status inside the failure window — those are the cases where the
+ * user would otherwise see nothing happen at all, so the caller falls back.
+ */
+export function launchEditorProcess(
+  spawner: EditorSpawner,
+  failureWindowMs: number = EDITOR_LAUNCH_FAILURE_WINDOW_MS
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    let child: EditorProcess
+    try {
+      child = spawner()
+    } catch {
+      resolve(false)
+      return
+    }
+    let settled = false
+    const settle = (ok: boolean): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(ok)
+    }
+    const timer = setTimeout(() => {
+      // Survived the window: detach so quitting Navide doesn't take the editor
+      // down with it.
+      child.unref()
+      settle(true)
+    }, failureWindowMs)
+    child.once('error', () => settle(false))
+    child.once('exit', (code) => {
+      if (code !== 0) settle(false)
+    })
+  })
+}
+
 /** The argv (executable + arguments) for an external open, or null when the
  *  editor is unknown, undetected, or its custom template expands to nothing. */
 export function buildEditorArgv(

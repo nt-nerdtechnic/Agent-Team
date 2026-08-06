@@ -202,6 +202,13 @@ contextBridge.exposeInMainWorld('agentTeam', {
       ...(args.line ? { line: String(args.line) } : {}),
       ...(args.sidebar ? { sidebar: args.sidebar } : {}),
     }),
+  // Default-editor routing: the editors Navide can drive on this machine, and
+  // opening a folder in one of them ("Open with…"; omit editorId for the
+  // user's default).
+  listEditors: (refresh = false): Promise<{ id: string; command: string; available: boolean }[]> =>
+    ipcRenderer.invoke('editors:list', { refresh }),
+  openFolderInEditor: (dir: string, editorId?: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('editor:openFolder', { dir, ...(editorId ? { editorId } : {}) }),
   onSwitchEditorSidebar: (cb: (sidebar: string) => void): void => {
     ipcRenderer.on('editor:switchSidebar', (_event, sidebar: string) => cb(sidebar))
   },

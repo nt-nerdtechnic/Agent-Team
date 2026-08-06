@@ -4,7 +4,7 @@ import { writeFile, readFile, mkdir } from 'node:fs/promises'
 import { readFileSync, statSync, existsSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { spawn } from 'node:child_process'
-import { startBackend, type BackendHandle } from './backend'
+import { startBackend, getResolvedUserPath, type BackendHandle } from './backend'
 import { abandonPendingBackends } from './backend-pending'
 import { installApplicationMenu, type AppMenuHooks, type RecentMenuEntry } from './menu'
 import { openNoopPluginView, openFsProbePluginView, openMiniIdePluginView, devMiniIdePluginDescriptor, openPlansPluginView, devPlansPluginDescriptor, openGitPluginView, devGitPluginDescriptor, registerBundledMiniIde, registerBundledPlans, registerBundledGit, frontendPluginManager } from './plugins/frontendPluginManager'
@@ -33,6 +33,16 @@ import {
 import { readHealthCheckTimeoutSec, writeHealthCheckTimeoutSec } from './health-timeout'
 import { readCdpDebugConfig, writeCdpDebugConfig, type CdpDebugConfig } from './cdp-debug'
 import { classifyEditorOpen, resolveExternalOpenTarget } from './editor-fallback'
+import {
+  buildEditorArgv,
+  classifyOpenRequest,
+  detectEditors,
+  launchEditorProcess,
+  normalizeEditorId,
+  DEFAULT_EDITOR_ID,
+  type DetectedEditor,
+  type EditorPreference
+} from './editors'
 import { findManualLogFile } from './manual-log-search'
 import { searchLogFiles } from './log-content-search'
 import {
@@ -543,7 +553,7 @@ ipcMain.handle('app:home-dir', () => app.getPath('home'))
  * unset/unreadable). Store values are JSON-encoded strings (lib/settings keeps
  * the legacy localStorage encoding), so the raw value needs a second parse.
  */
-function currentUiTheme(): string {
+function readUiSettings(): Record<string, unknown> {
   try {
     const dataDir = resolveBackendDataDir({
       envOverride: process.env.AGENT_TEAM_DATA_DIR,
@@ -553,16 +563,167 @@ function currentUiTheme(): string {
       homeDir: app.getPath('home'),
       xdgDataHome: process.env.XDG_DATA_HOME
     })
-    const settings = JSON.parse(readUiSettingsText(join(dataDir, UI_SETTINGS_FILE))) as Record<
-      string,
-      unknown
-    >
-    const raw = settings['agent-team:theme']
-    const theme: unknown = typeof raw === 'string' ? JSON.parse(raw) : ''
-    return typeof theme === 'string' ? theme : ''
+    return JSON.parse(readUiSettingsText(join(dataDir, UI_SETTINGS_FILE))) as Record<string, unknown>
   } catch {
-    return ''
+    return {}
   }
+}
+
+/** One ui_settings value, decoded. Returns null when absent or malformed. */
+function uiSetting<T>(settings: Record<string, unknown>, key: string): T | null {
+  const raw = settings[key]
+  if (typeof raw !== 'string') return null
+  try {
+    return JSON.parse(raw) as T
+  } catch {
+    return null
+  }
+}
+
+function currentUiTheme(): string {
+  const theme = uiSetting<string>(readUiSettings(), 'agent-team:theme')
+  return typeof theme === 'string' ? theme : ''
+}
+
+const DEFAULT_EDITOR_SETTING_KEY = 'agentTeam.defaultEditor'
+const DEFAULT_EDITOR_COMMAND_KEY = 'agentTeam.defaultEditor.customCommand'
+
+/** The user's default-editor preference, read fresh per open. Settings changes
+ *  reach main through the backend's ui_settings.json mirror (written on every
+ *  set), so there is no cache to invalidate and no IPC to keep in sync. */
+function currentEditorPreference(): EditorPreference {
+  const settings = readUiSettings()
+  const rawCommand = uiSetting<unknown>(settings, DEFAULT_EDITOR_COMMAND_KEY)
+  const customCommand = Array.isArray(rawCommand)
+    ? rawCommand.filter((part): part is string => typeof part === 'string')
+    : []
+  const editorId = normalizeEditorId(
+    uiSetting<string>(settings, DEFAULT_EDITOR_SETTING_KEY),
+    customCommand
+  )
+  return { editorId, customCommand }
+}
+
+// Editor detection is filesystem work over every PATH entry; cache it and let
+// Settings force a rescan after the user installs something.
+let detectedEditorsCache: DetectedEditor[] | null = null
+
+function currentDetectedEditors(refresh = false): DetectedEditor[] {
+  if (refresh || !detectedEditorsCache) {
+    detectedEditorsCache = detectEditors(getResolvedUserPath())
+  }
+  return detectedEditorsCache
+}
+
+// An external editor that cannot be launched falls back to the mini-IDE, which
+// on its own looks like the setting was ignored. Warn once per editor id per
+// session: enough to explain it, not so much that every click nags.
+const warnedEditorIds = new Set<string>()
+
+function warnEditorUnavailable(target: BrowserWindow | null, editorId: string): void {
+  if (warnedEditorIds.has(editorId)) return
+  warnedEditorIds.add(editorId)
+  const win = target && !target.isDestroyed() ? target : mainWindow
+  if (!win || win.isDestroyed()) return
+  void dialog.showMessageBox(win, {
+    type: 'warning',
+    title: 'Editor unavailable',
+    message: `Could not open your default editor (${editorId})`,
+    detail:
+      'Navide opened the file in the Mini-IDE instead. Check Settings → General → Default editor: ' +
+      'the editor may not be installed, or its command may have moved.',
+  })
+}
+
+/**
+ * Spawn an external editor. Resolves false when the process could not start or
+ * died with a non-zero status right away — the caller then falls back.
+ *
+ * argv is passed as an array and never through a shell, so a path containing
+ * spaces or shell metacharacters stays a single argument. PATH is the
+ * login-shell one the backend resolved: the PATH Electron inherits when
+ * launched from Finder omits Homebrew and friends.
+ */
+function launchExternalEditor(argv: string[], cwd?: string): Promise<boolean> {
+  const [command, ...args] = argv
+  if (!command) return Promise.resolve(false)
+  return launchEditorProcess(() =>
+    spawn(command, args, {
+      ...(cwd ? { cwd } : {}),
+      detached: true,
+      stdio: 'ignore',
+      env: { ...process.env, PATH: getResolvedUserPath() }
+    })
+  )
+}
+
+/**
+ * Route one editor-open request: the mini-IDE (default, and the only surface
+ * that can serve diff/sidebar/bare opens), the OS default application, or the
+ * external editor the user chose. Any failure past the decision point falls
+ * back to the mini-IDE, so an open never silently does nothing.
+ */
+async function routeEditorOpen(
+  host: BrowserWindow | null,
+  params: Record<string, string>
+): Promise<boolean> {
+  const preference = currentEditorPreference()
+  const route = classifyOpenRequest(params, preference)
+  if (route.via === 'mini-ide') return openMiniIdeEditor(host, params)
+
+  const workspacePath = params.workspace_path ?? ''
+  // `file_ws` (an out-of-workspace file's own root) is what `filepath` is
+  // relative to when present — the same containment rule as the fallback path.
+  const abs = resolveExternalOpenTarget(params.file_ws || workspacePath, params.filepath ?? '')
+  if (!abs) return openMiniIdeEditor(host, params)
+
+  if (route.via === 'system') {
+    // shell.openPath returns '' on success, or an error message.
+    const err = await shell.openPath(abs)
+    if (!err) return true
+    return openMiniIdeEditor(host, params)
+  }
+
+  const parsedLine = Number.parseInt(params.line ?? '', 10)
+  const argv = buildEditorArgv(route.editorId, currentDetectedEditors(), preference.customCommand, {
+    file: abs,
+    line: Number.isFinite(parsedLine) ? parsedLine : undefined,
+    workspace: workspacePath
+  })
+  if (argv && (await launchExternalEditor(argv))) return true
+  warnEditorUnavailable(host, route.editorId)
+  return openMiniIdeEditor(host, params)
+}
+
+/**
+ * Open a folder in an editor: the id the caller asked for ("Open with…"), or
+ * the user's default. `mini-ide` reopens the mini-IDE against that folder as
+ * its workspace root; everything else hands the directory to the editor.
+ */
+async function openFolderInEditor(
+  host: BrowserWindow | null,
+  dir: string,
+  editorId?: string
+): Promise<boolean> {
+  if (!dir || !existsSync(dir)) return false
+  const preference = currentEditorPreference()
+  const id = editorId
+    ? normalizeEditorId(editorId, preference.customCommand)
+    : preference.editorId
+  if (id === DEFAULT_EDITOR_ID) return openMiniIdeEditor(host, { workspace_path: dir })
+  if (id === 'system') {
+    const err = await shell.openPath(dir)
+    if (!err) return true
+    warnEditorUnavailable(host, id)
+    return false
+  }
+  const argv = buildEditorArgv(id, currentDetectedEditors(), preference.customCommand, {
+    dir,
+    workspace: dir
+  })
+  if (argv && (await launchExternalEditor(argv, dir))) return true
+  warnEditorUnavailable(host, id)
+  return false
 }
 
 /**
@@ -592,10 +753,10 @@ function openMiniIdeEditor(host: BrowserWindow | null, params: Record<string, st
 }
 
 // The `ui.open_in_editor` host capability (plugin broker): a sandboxed plugin
-// view (e.g. the Git window's diff panel) asks the host to open a file in the
-// mini-IDE; openMiniIdeEditor's fallback chain covers the not-installed case
-// by handing the file to the OS default application.
-frontendPluginManager.setOpenInEditorHandler((params) => openMiniIdeEditor(null, params))
+// view (e.g. the Git window's file list) asks the host to open a file. It goes
+// through the same router as window:openEditor so the user's default-editor
+// choice applies here too, with the mini-IDE as the fallback.
+frontendPluginManager.setOpenInEditorHandler((params) => routeEditorOpen(null, params))
 
 // Shell-level host capabilities (plugin broker): the Git window's remote/
 // worktree cards need the same shell actions GitPane reaches via
@@ -949,7 +1110,7 @@ function isHtmlPlanDocPath(relPath: string): boolean {
   return name.endsWith('.html') && !name.startsWith('_') && !name.includes('/')
 }
 
-ipcMain.handle('window:openEditor', (event, args: Record<string, string>) => {
+ipcMain.handle('window:openEditor', async (event, args: Record<string, string>) => {
   const params = args ?? {}
   const workspacePath = params.workspace_path ?? ''
   const filepath = params.filepath ?? ''
@@ -959,9 +1120,27 @@ ipcMain.handle('window:openEditor', (event, args: Record<string, string>) => {
     openPlanWindow(workspacePath, filepath)
     return { ok: true }
   }
-  const ok = openMiniIdeEditor(BrowserWindow.fromWebContents(event.sender), params)
+  const ok = await routeEditorOpen(BrowserWindow.fromWebContents(event.sender), params)
   return { ok }
 })
+
+// Default-editor surface for Settings and the "Open with…" menus: the built-in
+// editors plus whether each one was found on this machine.
+ipcMain.handle('editors:list', (_event, args?: { refresh?: boolean }) =>
+  currentDetectedEditors(args?.refresh === true)
+)
+
+ipcMain.handle(
+  'editor:openFolder',
+  async (event, args: { dir?: string; editorId?: string }) => {
+    const ok = await openFolderInEditor(
+      BrowserWindow.fromWebContents(event.sender),
+      args?.dir ?? '',
+      args?.editorId
+    )
+    return { ok }
+  }
+)
 
 // Plan review windows: one per workspace; reopening focuses the existing one.
 const planWindows = new PlanWindowRegistry<BrowserWindow>()

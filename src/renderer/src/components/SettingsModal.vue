@@ -31,6 +31,17 @@ import {
   MAX_RESUME_CONCURRENCY,
   clampResumeConcurrency,
 } from '../lib/resumeConcurrency'
+import {
+  DEFAULT_EDITOR_SETTING_KEY,
+  DEFAULT_EDITOR_COMMAND_KEY,
+  DEFAULT_EDITOR_ID,
+  DETECTABLE_EDITOR_IDS,
+  CUSTOM_COMMAND_PRESETS,
+  normalizeDefaultEditor,
+  parseCustomCommand,
+  formatCustomCommand,
+  type DetectedEditor,
+} from '../lib/defaultEditor'
 import { useCliAgentPrefs } from '../composables/useCliAgentPrefs'
 import { CLI_AGENT_SPECS } from '../lib/agentSpecs'
 import {
@@ -245,6 +256,15 @@ const settingsSearchItems = computed<SettingsSearchItem[]>(() => [
     group: 'Appearance',
     summary: 'Built-in themes and semantic color overrides.',
     keywords: 'appearance theme custom colors color 外觀 主題 自訂顏色 背景 文字 邊框 accent high contrast',
+  },
+  {
+    id: 'general-default-editor',
+    tab: 'general',
+    section: 'general-default-editor',
+    title: 'Default Editor / 預設編輯器',
+    group: 'General',
+    summary: 'Choose where files and folders open: Mini-IDE, the system default app, VS Code, Cursor, or a custom command.',
+    keywords: 'default editor open with mini-ide system vscode visual studio code cursor sublime custom command placeholder 預設編輯器 開啟 外部編輯器 自訂命令 偵測',
   },
   {
     id: 'settings-management',
@@ -530,6 +550,64 @@ function onResumeConcurrencyChange(value: string): void {
   settingsSet(RESUME_CONCURRENCY_SETTING_KEY, resumeConcurrencyModel.value)
 }
 
+// ── Default editor ──────────────────────────────────────────────────────────
+// Which editor file/folder opens are routed to. The detected list (absolute
+// paths + availability) comes from the main process, which owns the lookup.
+const customEditorCommand = ref<string[]>(
+  settingsGet<string[]>(DEFAULT_EDITOR_COMMAND_KEY, [])
+)
+const customEditorCommandText = ref(formatCustomCommand(customEditorCommand.value))
+const defaultEditorModel = ref(
+  normalizeDefaultEditor(
+    settingsGet(DEFAULT_EDITOR_SETTING_KEY, DEFAULT_EDITOR_ID),
+    customEditorCommand.value
+  )
+)
+const detectedEditors = ref<DetectedEditor[]>([])
+const detectingEditors = ref(false)
+
+async function loadDetectedEditors(refresh = false): Promise<void> {
+  detectingEditors.value = true
+  try {
+    detectedEditors.value = (await window.agentTeam?.listEditors?.(refresh)) ?? []
+  } catch {
+    detectedEditors.value = []
+  } finally {
+    detectingEditors.value = false
+  }
+}
+
+function isEditorAvailable(id: string): boolean {
+  return detectedEditors.value.some((editor) => editor.id === id && editor.available)
+}
+
+/** Absolute path the selected editor resolved to, when there is one to show. */
+const selectedEditorCommand = computed(() => {
+  const hit = detectedEditors.value.find((editor) => editor.id === defaultEditorModel.value)
+  return hit?.available ? hit.command : ''
+})
+
+function onDefaultEditorChange(value: string): void {
+  // Not normalized here: picking `custom` before typing a command must stick so
+  // the command field can appear. Main normalizes again when it reads.
+  defaultEditorModel.value = value
+  settingsSet(DEFAULT_EDITOR_SETTING_KEY, value)
+}
+
+function onCustomEditorCommandChange(text: string): void {
+  customEditorCommandText.value = text
+  customEditorCommand.value = parseCustomCommand(text)
+  settingsSet(DEFAULT_EDITOR_COMMAND_KEY, customEditorCommand.value)
+}
+
+function onCustomEditorPresetChange(select: HTMLSelectElement): void {
+  const preset = CUSTOM_COMMAND_PRESETS.find((entry) => entry.id === select.value)
+  // Snap back to the placeholder so the same preset can be picked again.
+  select.value = ''
+  if (!preset) return
+  onCustomEditorCommandChange(formatCustomCommand(preset.command))
+}
+
 // ── Updates (auto-update UX) ────────────────────────────────────────────────
 const {
   state: updateState,
@@ -727,6 +805,7 @@ function onKeyDown(e: KeyboardEvent) { if (e.key === 'Escape') emit('close') }
 onMounted(() => {
   window.addEventListener('keydown', onKeyDown)
   void loadSettingsPaths()
+  void loadDetectedEditors()
 })
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeyDown)
@@ -2001,6 +2080,59 @@ watch(activeTab, (tab) => {
               </SettingRow>
 
               <SettingRow
+                data-settings-section="general-default-editor"
+                :title="$t('settings.general.default-editor')"
+                :description="$t('settings.general.default-editor-hint')"
+              >
+                <template #control>
+                  <div class="row-g gap">
+                    <span v-if="selectedEditorCommand" class="s-ctrl-label">{{ selectedEditorCommand }}</span>
+                    <select :value="defaultEditorModel" @change="onDefaultEditorChange(($event.target as HTMLSelectElement).value)">
+                      <option value="mini-ide">{{ $t('label.editor-mini-ide') }}</option>
+                      <option value="system">{{ $t('label.editor-system') }}</option>
+                      <option
+                        v-for="id in DETECTABLE_EDITOR_IDS"
+                        :key="id"
+                        :value="id"
+                        :disabled="!isEditorAvailable(id)"
+                      >
+                        {{ $t('label.editor-' + id) + (isEditorAvailable(id) ? '' : '（' + $t('settings.general.default-editor-not-installed') + '）') }}
+                      </option>
+                      <option value="custom">{{ $t('label.editor-custom') }}</option>
+                    </select>
+                    <button class="ap-reset" :disabled="detectingEditors" @click="loadDetectedEditors(true)">
+                      {{ $t('settings.general.default-editor-redetect') }}
+                    </button>
+                  </div>
+                </template>
+              </SettingRow>
+
+              <div v-if="defaultEditorModel === 'custom'" class="s-fullrow">
+                <div class="row-g gap">
+                  <span class="s-ctrl-label">{{ $t('settings.general.default-editor-custom-command') }}</span>
+                  <input
+                    type="text"
+                    spellcheck="false"
+                    :value="customEditorCommandText"
+                    @change="onCustomEditorCommandChange(($event.target as HTMLInputElement).value)"
+                  />
+                  <select @change="onCustomEditorPresetChange($event.target as HTMLSelectElement)">
+                    <option value="">{{ $t('settings.general.default-editor-preset') }}</option>
+                    <option v-for="preset in CUSTOM_COMMAND_PRESETS" :key="preset.id" :value="preset.id">
+                      {{ formatCustomCommand(preset.command) }}
+                    </option>
+                  </select>
+                </div>
+                <p class="ap-hint">{{ $t('settings.general.default-editor-custom-command-hint') }}</p>
+                <!-- An empty template resolves back to the Mini-IDE at open
+                     time, which would otherwise look like the setting was
+                     ignored. -->
+                <p v-if="customEditorCommand.length === 0" class="ap-hint ap-hint-warn">
+                  {{ $t('settings.general.default-editor-custom-command-empty') }}
+                </p>
+              </div>
+
+              <SettingRow
                 data-settings-section="general-usage-badge"
                 :title="$t('usage.settings-title')"
                 :description="$t('usage.settings-hint')"
@@ -2728,6 +2860,7 @@ watch(activeTab, (tab) => {
 .ap-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .ap-title { margin: 0 0 4px; font-size: 13px; font-weight: 600; color: var(--text-bright); }
 .ap-hint { margin: 0 0 14px; font-size: 11.5px; color: var(--text-secondary); }
+.ap-hint-warn { color: var(--danger-fg); }
 
 /* ── Two-column settings layout (page title / full-width rows / control labels) ── */
 .s-page-title {

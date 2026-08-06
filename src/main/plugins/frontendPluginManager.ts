@@ -289,11 +289,13 @@ export class FrontendPluginManager {
   }
 
   /** Main-registered handler for the `ui.open_in_editor` host capability
-   *  (index.ts wires it to openMiniIdeEditor, whose own fallback chain opens
-   *  the file with the OS default app when the mini-IDE is unavailable). */
-  private openInEditorHandler: ((params: Record<string, string>) => boolean) | null = null
+   *  (index.ts wires it to the default-editor router, which sends the file to
+   *  the mini-IDE, the OS default app, or the user's external editor). */
+  private openInEditorHandler:
+    | ((params: Record<string, string>) => boolean | Promise<boolean>)
+    | null = null
 
-  setOpenInEditorHandler(fn: (params: Record<string, string>) => boolean): void {
+  setOpenInEditorHandler(fn: (params: Record<string, string>) => boolean | Promise<boolean>): void {
     this.openInEditorHandler = fn
   }
 
@@ -353,7 +355,7 @@ export class FrontendPluginManager {
       // Hand the RESOLVED root downstream: an unnormalized one ('/ws/sub/..')
       // passes containment yet reads as a different view identity, which would
       // reload the mini-IDE for a file that is in fact inside its workspace.
-      const opened = handler({ workspace_path: root, filepath: rel })
+      const opened = await handler({ workspace_path: root, filepath: rel })
       return buildSuccess(call.reqId, { ok: true, opened })
     }
 

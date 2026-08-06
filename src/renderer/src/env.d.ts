@@ -107,6 +107,12 @@ declare global {
         line?: number
         sidebar?: 'explorer' | 'search' | 'git'
       }) => Promise<{ ok: boolean }>
+      /** Editors Navide can drive here; `available` is false when not found. */
+      listEditors: (
+        refresh?: boolean
+      ) => Promise<{ id: string; command: string; available: boolean }[]>
+      /** Open a folder in `editorId`, or the user's default editor when omitted. */
+      openFolderInEditor: (dir: string, editorId?: string) => Promise<{ ok: boolean }>
       onOpenEditorFile: (cb: (params: Record<string, string>) => void) => void
       saveJson: (args: {
         defaultName?: string
