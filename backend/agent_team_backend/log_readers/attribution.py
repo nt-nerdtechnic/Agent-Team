@@ -39,7 +39,6 @@ from ..applog import app_data_dir
 from ..db import DB_FILENAME, Database
 from .base import LogReader, TokenUsage
 from .claude import encode_claude_cwd
-from .cursor import cursor_project_hash
 
 log = logging.getLogger("agent_team_backend.log_readers.attribution")
 
@@ -374,7 +373,11 @@ class Attribution:
         the announced "resume id" is the section's started-at slug, and
         resume itself is the id-less, lossy `aider --restore-chat-history`.
         """
-        if usage.vendor in ("grok", "opencode", "kilo", "cursor"):
+        shared_db_reader = self._readers.get(usage.vendor)
+        if usage.vendor in ("grok", "opencode", "kilo") or (
+            shared_db_reader is not None
+            and shared_db_reader.binds_shared_db_by_marker
+        ):
             return self._bind_shared_db_by_marker(usage)
         # Tuple = vendors not yet migrated to reader hooks; a migrated
         # vendor's reader declares binds_by_marker_file instead.
@@ -694,11 +697,17 @@ class Attribution:
         """Find which registered workspace this log file belongs to."""
         file_path = usage.file_path
         ws_reader = self._readers.get(usage.vendor)
+        # Workspace of the pane a marker binding already assigned this session
+        # to (None when unbound) — vendors whose logs carry no cwd (cursor)
+        # attribute bound sessions through it.
+        owner = self._session_owner.get(usage.session_id) if usage.session_id else None
+        owner_reg = self._panes.get(owner) if owner else None
+        owner_ws = owner_reg.workspace_path if owner_reg is not None else None
         for ws_path, mapping in self._workspaces.items():
             # Migrated vendors answer through their reader; None falls to the
             # legacy chain below, deleted one vendor at a time.
             if ws_reader is not None:
-                verdict = ws_reader.workspace_match(usage, ws_path)
+                verdict = ws_reader.workspace_match(usage, ws_path, owner_ws)
                 if verdict is True:
                     return ws_path
                 if verdict is False:
@@ -747,19 +756,6 @@ class Attribution:
             elif usage.vendor == "copilot":
                 # Copilot reader emits cwd = the session's workspace.yaml cwd.
                 if usage.cwd and usage.cwd == ws_path:
-                    return ws_path
-            elif usage.vendor == "cursor":
-                # Cursor stores NO cwd anywhere. A session already bound to a
-                # pane (marker hit) attributes to that pane's workspace, so
-                # the gate can never drop a marker-bound session; otherwise
-                # fall back to the community-documented md5(cwd) project-hash
-                # dir name in the file path (best-effort — unconfirmed hash).
-                owner = self._session_owner.get(usage.session_id)
-                reg = self._panes.get(owner) if owner else None
-                if reg is not None and reg.workspace_path == ws_path:
-                    return ws_path
-                hash_dir = cursor_project_hash(ws_path)
-                if hash_dir and f"/{hash_dir}/" in file_path:
                     return ws_path
         return None
 
@@ -821,12 +817,6 @@ class Attribution:
         if usage.vendor == "claude":
             expected_dir = encode_claude_cwd(pane_cwd)
             return f"/{expected_dir}/" in file_path
-        if usage.vendor == "cursor":
-            # No cwd in the store; match the md5(cwd) project-hash dir in the
-            # file path instead. Only the claim fallbacks use this — marker
-            # binding never depends on it (the hash scheme is unconfirmed).
-            hash_dir = cursor_project_hash(pane_cwd)
-            return bool(hash_dir) and f"/{hash_dir}/" in file_path
         if usage.vendor in ("codex", "antigravity", "grok", "kimi", "opencode", "kilo", "pi", "copilot"):
             return usage.cwd == pane_cwd
         return False

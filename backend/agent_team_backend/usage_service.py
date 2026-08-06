@@ -225,6 +225,18 @@ from .usage_common import (  # noqa: E402,F401
 
 # R2: qwen's usage stack moved to its vendor module; re-exported so this
 # module's namespace (and its tests) keep working until the cleanup round.
+from .cli_vendors.cursor import (  # noqa: E402,F401
+    CURSOR_IDE_STATE_DB_REL,
+    CURSOR_IDE_TOKEN_KEY,
+    CURSOR_KEYCHAIN_SERVICE,
+    CURSOR_USAGE_SUMMARY_URL,
+    cursor_token_expired,
+    cursor_user_id,
+    fetch_cursor,
+    normalize_cursor,
+    read_cursor_credentials,
+    read_cursor_ide_token,
+)
 from .cli_vendors.qwen import (  # noqa: E402,F401
     QWEN_CN_USAGE_URL,
     QWEN_ENV_KEYS,
@@ -283,23 +295,10 @@ _KEYCHAIN_COOLDOWN_S = 300.0
 _keychain_failed_at: float | None = None
 
 
-async def _communicate_or_kill(proc: Any, timeout: float) -> bytes:
-    """``proc.communicate()`` under a deadline; on timeout the child is killed
-    and reaped before the TimeoutError propagates. A bare ``wait_for`` leaves
-    a hung ``security``/``gh``/CLI child running (and unreaped) forever."""
-    try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-        except (ProcessLookupError, OSError):
-            pass
-        try:
-            await proc.wait()
-        except (ProcessLookupError, OSError):
-            pass
-        raise
-    return out
+from .usage_common import (  # noqa: E402,F401
+    _KEYCHAIN_COOLDOWN_S as _SHARED_KEYCHAIN_COOLDOWN_S,
+    communicate_or_kill as _communicate_or_kill,
+)
 
 
 async def read_claude_credentials(home: Path) -> dict | None:
@@ -796,114 +795,6 @@ async def _copilot_gh_token(login: str, host: str) -> str | None:
     return token or None
 
 
-def _cursor_jwt_claims(token: str) -> dict | None:
-    """Decode a JWT's payload (no signature check — the claims are only used
-    to build the session cookie and pre-check expiry)."""
-    parts = token.split(".")
-    if len(parts) != 3:
-        return None
-    payload = parts[1]
-    try:
-        raw = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
-        data = json.loads(raw)
-    except (ValueError, UnicodeDecodeError):
-        return None
-    return data if isinstance(data, dict) else None
-
-
-def cursor_user_id(token: str) -> str | None:
-    """The WorkosCursorSessionToken user id: the JWT ``sub`` after the last
-    ``|`` (e.g. ``google-oauth2|user_xxx`` -> ``user_xxx``)."""
-    claims = _cursor_jwt_claims(token)
-    sub = claims.get("sub") if claims else None
-    if not isinstance(sub, str) or not sub:
-        return None
-    return sub.split("|")[-1] or None
-
-
-def cursor_token_expired(token: str, now: float | None = None) -> bool:
-    """True when the JWT ``exp`` (epoch seconds) has passed. Tokens are never
-    refreshed here — the CLI/IDE rotate their own; missing/unreadable claims
-    assume valid and let the endpoint's 401 decide."""
-    claims = _cursor_jwt_claims(token)
-    exp = _num(claims.get("exp")) if claims else None
-    if exp is None:
-        return False
-    now = time.time() if now is None else now
-    return now >= exp
-
-
-def read_cursor_ide_token(home: Path) -> str | None:
-    """The Cursor IDE fallback: the ``cursorAuth/accessToken`` ItemTable row of
-    ``state.vscdb`` (sqlite, opened read-only) holds the raw session JWT."""
-    import sqlite3
-
-    path = home.joinpath(*CURSOR_IDE_STATE_DB_REL)
-    if not path.is_file():
-        return None
-    try:
-        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-    except sqlite3.Error:
-        return None
-    try:
-        row = conn.execute("SELECT value FROM ItemTable WHERE key = ?",
-                           (CURSOR_IDE_TOKEN_KEY,)).fetchone()
-    except sqlite3.Error:
-        return None
-    finally:
-        conn.close()
-    if not row:
-        return None
-    value = row[0]
-    if isinstance(value, bytes):
-        value = value.decode("utf-8", "replace")
-    if not isinstance(value, str):
-        return None
-    value = value.strip()
-    if value.startswith('"'):  # some rows store JSON-encoded strings
-        try:
-            value = json.loads(value)
-        except ValueError:
-            return None
-    return value if isinstance(value, str) and value else None
-
-
-_cursor_keychain_failed_at: float | None = None
-
-
-async def read_cursor_credentials(home: Path) -> str | None:
-    """cursor-agent CLI Keychain first (macOS ``security
-    find-generic-password``, read-only), then the Cursor IDE state db. Returns
-    the raw session JWT or None. A failed Keychain read is remembered for
-    ``_KEYCHAIN_COOLDOWN_S`` (mirrors ``read_claude_credentials``). The CLI's
-    Keychain slot is per-user, so per-pane isolated homes do not isolate
-    cursor-agent credentials."""
-    global _cursor_keychain_failed_at
-    now = time.monotonic()
-    if sys.platform == "darwin" and (
-        _cursor_keychain_failed_at is None
-        or now - _cursor_keychain_failed_at >= _KEYCHAIN_COOLDOWN_S
-    ):
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "/usr/bin/security", "find-generic-password",
-                "-s", CURSOR_KEYCHAIN_SERVICE, "-w",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            out = await _communicate_or_kill(proc, timeout=2.0)
-            if proc.returncode == 0:
-                _cursor_keychain_failed_at = None
-                token = out.decode("utf-8", "replace").strip()
-                if token:
-                    return token
-            else:
-                _cursor_keychain_failed_at = now
-        except (OSError, asyncio.TimeoutError):
-            _cursor_keychain_failed_at = now
-    return read_cursor_ide_token(home)
-
-
 # ── Response normalizers (pure) ─────────────────────────────────────────────
 
 _CLAUDE_NAMED_WINDOWS = (
@@ -1292,39 +1183,6 @@ def normalize_copilot(data: dict) -> tuple[list[dict], str | None]:
         if remaining is None:
             continue
         windows.append(_window("monthly", label, 100.0 - remaining, resets))
-    return windows, plan
-
-
-def normalize_cursor(data: dict) -> tuple[list[dict], str | None]:
-    """``usage-summary``: ``individualUsage.plan`` (cent amounts;
-    ``totalPercentUsed`` is already in percent units, used/limit is the
-    fallback) -> one billing-cycle window resetting at ``billingCycleEnd``;
-    an enabled, limited ``individualUsage.onDemand`` adds an on-demand
-    window; ``membershipType`` -> planType."""
-    plan = data.get("membershipType")
-    plan = plan if isinstance(plan, str) and plan else None
-    resets = data.get("billingCycleEnd")
-    resets = resets if isinstance(resets, str) and resets else None
-    individual = data.get("individualUsage")
-    individual = individual if isinstance(individual, dict) else {}
-    windows: list[dict] = []
-    plan_usage = individual.get("plan")
-    if isinstance(plan_usage, dict):
-        pct = _num(plan_usage.get("totalPercentUsed"))
-        if pct is None:
-            limit = _num(plan_usage.get("limit"))
-            used = _num(plan_usage.get("used"))
-            if limit and used is not None:
-                pct = used / limit * 100
-        if pct is not None:
-            windows.append(_window("cycle", "Plan usage", pct, resets))
-    on_demand = individual.get("onDemand")
-    if isinstance(on_demand, dict) and on_demand.get("enabled"):
-        limit = _num(on_demand.get("limit"))
-        used = _num(on_demand.get("used"))
-        if limit and used is not None:
-            windows.append(_window("on-demand", "On-demand",
-                                   used / limit * 100, resets))
     return windows, plan
 
 
@@ -1862,52 +1720,6 @@ async def fetch_copilot(home: Path, env: dict | None = None) -> dict:
         return _snapshot("copilot", "error",
                          error="response had no usable quota fields")
     return _snapshot("copilot", "ok", windows=windows, plan_type=plan)
-
-
-async def fetch_cursor(home: Path) -> dict:
-    token = await read_cursor_credentials(home)
-    if token is None:
-        return _snapshot("cursor", "no-credentials")
-    if cursor_token_expired(token):
-        return _snapshot("cursor", "expired")
-    user_id = cursor_user_id(token)
-    if user_id is None:
-        return _snapshot("cursor", "error",
-                         error="session token has no usable sub claim")
-    import httpx
-
-    # The one provider here that still needs a browser-shaped credential. The
-    # User-Agent is honest, but ``usage-summary`` authenticates a signed-in
-    # cursor.com session and nothing else: measured 2026-08-05, the same token
-    # as ``Authorization: Bearer`` returns 401 while the session cookie returns
-    # 200. The token is the user's own, read from their own machine — but this
-    # is a dashboard session rebuilt from it, not an API credential, and that
-    # distinction is the reason this one is worth revisiting if Cursor ever
-    # publishes a real endpoint.
-    headers = {
-        "Cookie": f"WorkosCursorSessionToken={user_id}%3A%3A{token}",
-        "Accept": "application/json",
-        "User-Agent": "Navide",
-    }
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        resp = await client.get(CURSOR_USAGE_SUMMARY_URL, headers=headers)
-    if resp.status_code in (401, 403):
-        return _snapshot("cursor", "expired")
-    if resp.status_code == 429:
-        snap = _snapshot("cursor", "rate-limited")
-        snap["retryAfterSec"] = parse_retry_after(resp.headers.get("Retry-After"))
-        return snap
-    if resp.status_code != 200:
-        return _snapshot("cursor", "error", error=f"HTTP {resp.status_code}")
-    try:
-        payload = resp.json()
-    except ValueError:
-        return _snapshot("cursor", "error", error="non-JSON response")
-    windows, plan = normalize_cursor(payload if isinstance(payload, dict) else {})
-    if not windows:
-        return _snapshot("cursor", "error",
-                         error="response had no usable quota fields")
-    return _snapshot("cursor", "ok", windows=windows, plan_type=plan)
 
 
 # ── Poller service ──────────────────────────────────────────────────────────
@@ -2482,8 +2294,7 @@ class UsageService:
             "kilo": lambda: fetch_kilo(home),
             "pi": lambda: fetch_pi(home),
             "copilot": lambda: fetch_copilot(home),
-            "cursor": lambda: fetch_cursor(home),
-        }
+                }
         tasks: dict[str, Any] = {}
         for provider in PROVIDERS:
             if provider == "claude":  # claude polls per-slot above

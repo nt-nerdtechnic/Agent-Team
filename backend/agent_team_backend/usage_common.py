@@ -11,6 +11,7 @@ Imports nothing from this package on purpose; keep it that way.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
@@ -78,3 +79,27 @@ def parse_retry_after(value: str | None) -> float:
         return max(1.0, float(value))  # seconds form only; date form -> default
     except (TypeError, ValueError):
         return RATE_LIMIT_COOLDOWN
+
+
+# A failed Keychain read (denied prompt, timeout) is remembered for this many
+# seconds so we don't re-prompt every poll; a transient failure self-heals.
+_KEYCHAIN_COOLDOWN_S = 300.0
+
+
+async def communicate_or_kill(proc: Any, timeout: float) -> bytes:
+    """``proc.communicate()`` under a deadline; on timeout the child is killed
+    and reaped before the TimeoutError propagates. A bare ``wait_for`` leaves
+    a hung ``security``/``gh``/CLI child running (and unreaped) forever."""
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except (ProcessLookupError, OSError):
+            pass
+        try:
+            await proc.wait()
+        except (ProcessLookupError, OSError):
+            pass
+        raise
+    return out

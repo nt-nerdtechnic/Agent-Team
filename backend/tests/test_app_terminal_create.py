@@ -432,20 +432,20 @@ def test_cursor_resume_id_parses_resume_commands() -> None:
     """Cursor CLI resumes with `agent --resume=<chatId>` (legacy binary name
     `cursor-agent`); both the `=` and space forms are accepted."""
     sid = "e6495800-dfd4-4a75-b2ab-d70980f83b89"
-    assert app._cursor_resume_id(f"agent --resume={sid}") == sid
-    assert app._cursor_resume_id(f"agent --resume {sid}") == sid
-    assert app._cursor_resume_id(f"cursor-agent --resume={sid}") == sid
-    assert app._cursor_resume_id(f"cursor-agent --resume {sid}") == sid
-    assert app._cursor_resume_id(f"agent --force --resume={sid}") == sid
-    assert app._cursor_resume_id("agent") == ""
+    assert app._resume_id_for_agent("cursor", f"agent --resume={sid}") == sid
+    assert app._resume_id_for_agent("cursor", f"agent --resume {sid}") == sid
+    assert app._resume_id_for_agent("cursor", f"cursor-agent --resume={sid}") == sid
+    assert app._resume_id_for_agent("cursor", f"cursor-agent --resume {sid}") == sid
+    assert app._resume_id_for_agent("cursor", f"agent --force --resume={sid}") == sid
+    assert app._resume_id_for_agent("cursor", "agent") == ""
     # Flag guard: bare --resume (picker) must not swallow a following flag.
-    assert app._cursor_resume_id("agent --resume --force") == ""
-    assert app._cursor_resume_id("agent --resume") == ""
-    assert app._cursor_resume_id("") == ""
-    assert app._cursor_resume_id(None) == ""
+    assert app._resume_id_for_agent("cursor", "agent --resume --force") == ""
+    assert app._resume_id_for_agent("cursor", "agent --resume") == ""
+    assert app._resume_id_for_agent("cursor", "") == ""
+    assert app._resume_id_for_agent("cursor", None) == ""
     # Frontend wraps commands as [shell, '-lc', '<cmd>'].
-    assert app._cursor_resume_id(["/bin/zsh", "-lc", f"agent --resume={sid}"]) == sid
-    assert app._cursor_resume_id(["/bin/zsh", "-lc", "agent"]) == ""
+    assert app._resume_id_for_agent("cursor", ["/bin/zsh", "-lc", f"agent --resume={sid}"]) == sid
+    assert app._resume_id_for_agent("cursor", ["/bin/zsh", "-lc", "agent"]) == ""
 
 
 @pytest.mark.asyncio

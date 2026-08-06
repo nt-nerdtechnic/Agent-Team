@@ -267,7 +267,10 @@ class AiderLogReader(LogReader):
         # every aider run of that pane.
         return self.last_section(path)[1]
 
-    def workspace_match(self, usage: TokenUsage, ws_path: str) -> bool | None:
+    def workspace_match(
+        self, usage: TokenUsage, ws_path: str,
+        owner_workspace: str | None = None,
+    ) -> bool | None:
         # The reader emits cwd = the history file's directory (the session's
         # git root). A workspace registered at a subdirectory of that root
         # still maps to the same file.

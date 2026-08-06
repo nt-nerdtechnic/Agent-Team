@@ -450,7 +450,10 @@ class QwenLogReader(LogReader):
     emits_session_sink = True
     binds_new_session_single_candidate = True
 
-    def workspace_match(self, usage: TokenUsage, ws_path: str) -> bool | None:
+    def workspace_match(
+        self, usage: TokenUsage, ws_path: str,
+        owner_workspace: str | None = None,
+    ) -> bool | None:
         # Reader emits cwd = the record's own cwd field (every jsonl line
         # carries the session's exact cwd).
         return bool(usage.cwd and usage.cwd == ws_path)

@@ -3543,12 +3543,6 @@ async def _terminal_create_impl(
             # that UUID — claim it up front so the session's events route
             # back to this pane.
             explicit_session_id = app._copilot_resume_id(payload.get("command"))
-        elif agent_key == "cursor" and not explicit_session_id:
-            # Resumed Cursor panes (`agent --resume=<chatId>`, legacy
-            # `cursor-agent`) carry no marker (markers only appear in a fresh
-            # kickoff), so claim the resume id from the launch command to
-            # route the resumed session's events back to this pane.
-            explicit_session_id = app._cursor_resume_id(payload.get("command"))
         # Vendors absent from both paths above deliberately claim no resume
         # id here (e.g. an id-less lossy resume); the rationale lives in each
         # vendor's module. Such panes bind via the kickoff marker instead.

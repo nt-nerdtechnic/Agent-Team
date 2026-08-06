@@ -196,6 +196,11 @@ class LogReader(ABC):
     #: replacement for membership in the watcher's vendor-name tuple.
     emits_session_sink: bool = False
 
+    #: Binds via the shared-db marker path (one SQLite store for every
+    #: session; grok/opencode/kilo/cursor). Migrated replacement for
+    #: membership in attribution's shared-db tuple.
+    binds_shared_db_by_marker: bool = False
+
     #: When a kickoff marker misses, fall back to binding a NEW session to
     #: the single unbound candidate pane in the same cwd. Migrated
     #: replacement for membership in attribution's fallback tuple.
@@ -208,8 +213,14 @@ class LogReader(ABC):
         May raise OSError; callers treat that as unreadable."""
         return None
 
-    def workspace_match(self, usage: TokenUsage, ws_path: str) -> bool | None:
+    def workspace_match(
+        self, usage: TokenUsage, ws_path: str,
+        owner_workspace: str | None = None,
+    ) -> bool | None:
         """Does this usage event belong to the workspace at ``ws_path``?
+        ``owner_workspace`` is the workspace of the pane a marker binding
+        already assigned this session to, when one exists — vendors whose
+        logs carry no cwd (cursor) attribute bound sessions through it.
         None = not migrated (attribution's legacy chain decides)."""
         return None
 

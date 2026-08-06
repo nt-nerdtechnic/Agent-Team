@@ -1482,20 +1482,6 @@ def _copilot_resume_id(command: Any) -> str:
     return (m.group(1) or m.group(2)) if m else ""
 
 
-# Cursor CLI's binary is `agent` (legacy installs: `cursor-agent`); both take
-# `--resume=<chatId>` / `--resume <chatId>`. `--resume` can also appear bare
-# (= is optional), so the space form must not swallow a following flag.
-_CURSOR_RESUME_RE = re.compile(
-    r"^(?:agent|cursor-agent)\s+(?:\S+\s+)*--resume(?:=(\S+)|\s+([^-\s]\S*))"
-)
-
-
-def _cursor_resume_id(command: Any) -> str:
-    """Session id from an `agent ... --resume=<id>` / `cursor-agent ... --resume <id>` command ('' otherwise)."""
-    m = _CURSOR_RESUME_RE.match(_command_text(command).strip())
-    return (m.group(1) or m.group(2)) if m else ""
-
-
 _RESUME_ID_EXTRACTORS = {
     "codex": _codex_resume_id,
     "claude": _claude_resume_id,
@@ -1504,7 +1490,6 @@ _RESUME_ID_EXTRACTORS = {
     "kilo": _kilo_resume_id,
     "pi": _pi_resume_id,
     "copilot": _copilot_resume_id,
-    "cursor": _cursor_resume_id,
 }
 
 
@@ -1599,15 +1584,6 @@ def _session_exists(agent: str, workspace_path: str, session_id: str) -> bool:
         # would not fail, it would silently start a blank NEW session.
         reader = next((r for r in _readers if r.vendor == "pi"), None)
         return reader.has_session(session_id) if isinstance(reader, PiLogReader) else False
-    if agent == "cursor":
-        # Cursor stores each session at ~/.cursor/chats/<project-hash>/<id>/
-        # store.db; the project-hash segment is not reliably derivable from
-        # the workspace (community-documented md5(cwd), unconfirmed), so the
-        # reader globs across every project dir. Preflight matters here: the
-        # behaviour of `agent --resume=<stale-id>` is unverified, so a stale
-        # id must fail fast instead of launching a doomed resume.
-        reader = next((r for r in _readers if r.vendor == "cursor"), None)
-        return reader.has_session(session_id) if isinstance(reader, CursorLogReader) else False
     path = _session_lookup_path(agent, workspace_path, session_id)
     if path:
         return Path(path).is_file()
