@@ -26,10 +26,12 @@ Read routed files on demand, not all up front.
    they explicitly authorized committing for the task.
 4. **No UI automation** (cliclick/screencapture/AppleScript) — the user tests
    UI manually.
-5. **Giant files** (App.vue ~7K lines, GitPane.vue ~3K,
-   EditorWindowApp.vue ~2.6K, backend/agent_team_backend/app.py ~2.7K):
+5. **Giant files** (App.vue ~12.1K lines, ws_handlers.py ~5.2K,
+   EditorWindowApp.vue ~2.6K, backend/agent_team_backend/app.py ~1.7K):
    Grep tool to locate → Read with offset/limit → batch edits through one
    subagent. Never whole-file Read, never bash/python inline search.
+   Per-vendor CLI code lives in backend/agent_team_backend/cli_vendors/
+   (one file per vendor; see docs/adding-a-cli-vendor.md).
 
 ## Workflow (Plan Documents)
 
