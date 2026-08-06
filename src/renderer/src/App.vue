@@ -79,7 +79,7 @@ import {
   CLI_PASTE_LINE_CAP
 } from './lib/cliContext'
 import { planDropPrompt, type PlanDragRef } from './lib/planDrag'
-import { allSlotsFinished, isReplayedTurnComplete, loopContinueReady, turnCompleteDone, turnEndsWithSentinel, type SlotSignal } from './lib/completion'
+import { allSlotsFinished, applyTurnProgress, isReplayedTurnComplete, loopBackoffMs, loopContinueReady, loopStallVerdict, LOOP_STALL_LIMIT, turnCompleteDone, turnEndsWithSentinel, type SlotSignal } from './lib/completion'
 import { reorderByIds, sortByIdOrder } from './lib/paneOrder'
 import { computeRangeSelection } from './lib/paneSelection'
 import { AGENT_SPECS, type PaneArgContext } from './lib/agentSpecs'
@@ -2350,7 +2350,51 @@ async function fireLoopContinue(paneId: string): Promise<void> {
   }
   // Fresh turn started: re-arm and refresh the pre-limit estimate window.
   armLoopTurn(paneId)
+  // Hold the next continue for the current stall tier (0 while productive), and
+  // count this one against the hard cap.
+  watcher.continues += 1
+  watcher.nextContinueAt = Date.now() + loopBackoffMs(watcher.stalledRuns)
   pane.loopEstimateResetAt = Date.now() + LOOP_ESTIMATE_WINDOW_MS
+}
+
+/** A completed turn's text decides whether the loop is getting anywhere. A
+ *  stalled run (repeat of the previous answer, or too short to be work) backs
+ *  the next continue off; a productive one clears the counter. Stale replayed
+ *  turns are ignored on the same timestamp test as the done-marker path, so a
+ *  log re-parse can't inflate the count. */
+function noteLoopTurnProgress(paneId: string, text: string, timestamp: string): void {
+  const watcher = loopLimitWatchers.get(paneId)
+  if (!watcher) return
+  const eventMs = timestamp ? Date.parse(timestamp) : NaN
+  if (!Number.isNaN(eventMs) && eventMs < watcher.armedAt - TURN_TEXT_REPLAY_TOLERANCE_MS) return
+  const next = applyTurnProgress(watcher, text)
+  if (next.stalledRuns > watcher.stalledRuns) {
+    console.warn(
+      `[loop] pane ${paneId}: turn showed no progress (${next.stalledRuns}/${LOOP_STALL_LIMIT}) — next continue backs off ${loopBackoffMs(next.stalledRuns) / 1000}s`
+    )
+  }
+  watcher.stalledRuns = next.stalledRuns
+  watcher.lastTurnText = next.lastTurnText
+}
+
+/** The loop is spinning without finishing — it repeated itself past the stall
+ *  limit, or burned through the continue cap. Stop it (same teardown as the
+ *  done path) and ask for attention instead of injecting another continue. */
+function stopLoopSpinning(paneId: string, reason: 'stalled' | 'capped'): void {
+  const pane = panes.value.find((p) => p.id === paneId)
+  if (!pane || !pane.loopActive) return
+  console.warn(`[loop] pane ${paneId}: loop stopped — ${reason}`)
+  pane.loopActive = false
+  pane.loopWaitUntil = null
+  pane.loopEstimateResetAt = null
+  bumpLoopGen(paneId)
+  stopLoopLimitWatcher(paneId)
+  sysNotify.notifyPaneState(
+    paneId,
+    'attention',
+    i18n.global.t(`pane.terminal.loop-${reason}-notify-title`),
+    i18n.global.t(`pane.terminal.loop-${reason}-notify-body`)
+  )
 }
 
 /** The CLI reported LOOP_DONE_MARKER as its turn's final line — the task is
@@ -2423,6 +2467,17 @@ interface LoopLimitWatcher {
   /** A continue injection is in flight — blocks overlapping polls from
    *  double-sending the resume prompt for the same turn. */
   continuing: boolean
+  /** Continues injected since this loop started — checked against
+   *  LOOP_MAX_CONTINUES so a spin the stall detector can't see still ends. */
+  continues: number
+  /** Consecutive completed turns that showed no forward motion (see
+   *  turnMadeProgress). Drives the backoff and the stall stop. */
+  stalledRuns: number
+  /** Earliest wall-clock ms the next continue may fire — the stall backoff.
+   *  0 while the loop is productive. */
+  nextContinueAt: number
+  /** Normalized text of the last completed turn, for the repeat comparison. */
+  lastTurnText: string
 }
 const loopLimitWatchers = new Map<string, LoopLimitWatcher>()
 const LOOP_LIMIT_POLL_MS = 5000
@@ -2446,6 +2501,10 @@ function startLoopLimitWatcher(paneId: string): void {
     lastUnparseable: null,
     armedAt: Number.MAX_SAFE_INTEGER,
     continuing: false,
+    continues: 0,
+    stalledRuns: 0,
+    nextContinueAt: 0,
+    lastTurnText: '',
   }
   watcher.timer = window.setInterval(() => {
     const pane = panes.value.find((p) => p.id === paneId)
@@ -2520,8 +2579,24 @@ function startLoopLimitWatcher(paneId: string): void {
     // resends "繼續" forever. Task COMPLETION is handled separately in the
     // agent.activity handler: LOOP_DONE_MARKER stops the loop (loopActive=false)
     // before this poll can fire another continue.
+    //
+    // loopContinueReady cannot see a CLI that is stuck: a turn that ends with
+    // "waiting for a background agent" is a genuine, post-arm, woken-up turn
+    // end, so every condition holds and the loop would resend forever. The
+    // stall detector (noteLoopTurnProgress) judges the turn's TEXT instead and
+    // stops the spin here; the continue cap is the vendor-agnostic backstop.
+    const verdict = loopStallVerdict(watcher)
+    if (verdict === 'stop-capped') {
+      stopLoopSpinning(paneId, 'capped')
+      return
+    }
+    if (verdict === 'stop-stalled') {
+      stopLoopSpinning(paneId, 'stalled')
+      return
+    }
     if (
       !watcher.continuing &&
+      Date.now() >= watcher.nextContinueAt &&
       loopContinueReady({
         turnCompleteAt: paneTurnCompleteAt.get(paneId) ?? 0,
         lastActiveAt: paneLastActiveAt.get(paneId) ?? 0,
@@ -7280,6 +7355,10 @@ backend.on('agent.activity', (raw) => {
     if (ev.text && turnEndsWithSentinel(ev.text, LOOP_DONE_MARKER)) {
       stopLoopOnDoneMarker(ev.pane_id, ev.timestamp ?? '')
     }
+    // Unattended loop: judge whether this turn actually moved the task forward.
+    // A CLI parked on something the loop can't observe (a background agent)
+    // ends its turn for real every time, so only the TEXT reveals the spin.
+    noteLoopTurnProgress(ev.pane_id, ev.text ?? '', ev.timestamp ?? '')
     // Inter-CLI messaging: scan this turn's text for MSG blocks, then pump.
     onTurnCompleteForMessaging(ev.pane_id, ev.text ?? '', ev.timestamp ?? '')
     // Auto-name fallback: for vendors whose readers can't surface the user's
