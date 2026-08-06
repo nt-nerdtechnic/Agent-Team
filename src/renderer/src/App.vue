@@ -91,6 +91,7 @@ import {
 } from './composables/useCliAgentPrefs'
 import { pickReusablePane, runReportedDispatch, validatePlanDispatch, type PlanDispatchOutcome, type PlanDispatchPayload } from './lib/planDispatch'
 import { planExecutionPrompt } from './lib/planExecutePrompt'
+import { echoLanded, echoTimeoutFor, normalizeForMatch, TAIL_MATCH_LEN } from './lib/injectEcho'
 import { injectStandaloneTask, type StandaloneTaskInjectionDeps } from './lib/standalonePaneTask'
 import { quickClassify } from './lib/quick-classify'
 import { resolveAiderHistoryRoot, resumeAiderHistoryPath, type DirLister } from './lib/aider-history'
@@ -1872,18 +1873,8 @@ function flattenForInjection(text: string): string {
 
 // Whitespace-stripped form used to match our injected text against the echoed
 // input box. The TUI word-wraps and re-indents the echo, so we drop ALL
-// whitespace on both sides and compare the remaining glyphs.
-function normalizeForMatch(s: string): string {
-  return s.replace(/\s+/g, '')
-}
-// How many trailing (whitespace-stripped) chars of the payload to look for in
-// the echo as the "input box received it" signal. Long enough to be unique,
-// short enough to survive minor TUI re-rendering.
-const TAIL_MATCH_LEN = 40
-// Minimum buffer growth that counts as "the input box echoed something" when
-// the tail itself can't be matched (e.g. a TUI that collapses a big paste into
-// a "[Pasted text +N lines]" placeholder).
-const READY_GROWTH_MIN = 40
+// whitespace — and its frame characters — on both sides before comparing.
+// See lib/injectEcho.ts for why the frame matters.
 
 async function injectText(
   sessionId: string,
@@ -1938,7 +1929,9 @@ async function injectText(
   }
 
   // Tail of OUR text (whitespace-stripped) — the "input box received it" signal.
-  const tail = normalizeForMatch(text).slice(-TAIL_MATCH_LEN)
+  const normalized = normalizeForMatch(text)
+  const normalizedLen = normalized.length
+  const tail = normalized.slice(-TAIL_MATCH_LEN)
 
   // Send content, then WAIT for the input box to be ready rather than betting on
   // a fixed gap: poll until the tail shows up in the echo (strong) OR the buffer
@@ -1947,7 +1940,7 @@ async function injectText(
   // never landed (e.g. dropped under back-pressure) ⇒ resend the whole content
   // instead of pressing Enter on an empty box.
   const MAX_CONTENT_SENDS = 3
-  const readyTimeout = Math.min(8_000, Math.max(2_500, Math.floor(text.length / 6)))
+  const readyTimeout = echoTimeoutFor(text.length)
   let ready = false
   for (let send = 1; send <= MAX_CONTENT_SENDS && !ready; send++) {
     if (shouldAbort?.()) return false
@@ -1964,7 +1957,7 @@ async function injectText(
       await sleep(200)
       if (shouldAbort?.()) return false
       const buf = cleanBuf()
-      if (normalizeForMatch(buf).includes(tail) || buf.length - preLen >= READY_GROWTH_MIN) {
+      if (echoLanded(buf, tail, buf.length - preLen, normalizedLen)) {
         ready = true
         break
       }
