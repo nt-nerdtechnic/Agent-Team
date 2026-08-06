@@ -265,6 +265,28 @@ async def broadcast(event: dict[str, Any], *, exclude: "Session | None" = None) 
             _SESSIONS.discard(session)
 
 
+async def unicast_any(event: dict[str, Any]) -> bool:
+    """Send *event* to one arbitrary connected session.
+
+    For requests any live window can service (e.g. a global UI action with no
+    fixed owner), so a broadcast that every window would otherwise have to
+    ignore is unnecessary. Returns False when no session is connected.
+    """
+    for session in list(_SESSIONS):
+        if session.dead:
+            continue
+        try:
+            await session.send_json(event)
+        except Exception as err:  # noqa: BLE001
+            # Same defensive net as broadcast(): try the next session rather
+            # than failing the request outright.
+            log.warning("unicast send failed: %s", err)
+            _SESSIONS.discard(session)
+            continue
+        return True
+    return False
+
+
 class Session:
     """Per-WebSocket-connection state."""
 
@@ -623,6 +645,34 @@ def _cap_activity_text(text: str) -> str:
     return f"{text[:half]}\n…\n{text[-half:]}"
 
 
+# Last agent-activity event per pane, for the Plan MCP server's cli_get_status
+# / cli_wait_idle tools. Single most-recent entry per pane (not a history);
+# text is kept only for turn_complete (agent_active only ever carries a short
+# prompt snippet, not meant for replay outside pane naming).
+_pane_activity: dict[str, dict[str, Any]] = {}
+
+
+def pane_activity(pane_id: str) -> dict[str, Any] | None:
+    return _pane_activity.get(pane_id)
+
+
+def _record_pane_activity(pane_id: str, event_type: str, text: str) -> None:
+    if not pane_id:
+        return
+    _pane_activity[pane_id] = {
+        "event_type": event_type,
+        # Same cap as the broadcast path — this dict must not become the one
+        # place an unbounded turn_complete text is retained.
+        "text": _cap_activity_text(text) if event_type == "turn_complete" else "",
+        "ts_monotonic": time.monotonic(),
+    }
+
+
+def forget_pane_activity(pane_id: str) -> None:
+    """Drop a closed pane's entry so the cache tracks live panes only."""
+    _pane_activity.pop(pane_id, None)
+
+
 async def _on_log_activity(event: ActivityEvent) -> None:
     """Sink for agent-activity events (agent_active / turn_complete).
 
@@ -643,6 +693,7 @@ async def _on_log_activity(event: ActivityEvent) -> None:
         if attributed.workspace_path is None:
             # External session — skip; no pane to deliver to.
             return
+        _record_pane_activity(attributed.pane_id or "", event.event_type, event.text)
         await broadcast(make_event("agent.activity", {
             "vendor": event.vendor,
             "event_type": event.event_type,

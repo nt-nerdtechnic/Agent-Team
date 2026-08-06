@@ -4,6 +4,7 @@ import json
 import re
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import httpx
 import pytest
@@ -13,7 +14,7 @@ from agent_team_backend import app as backend_app
 from agent_team_backend.app import app
 from agent_team_backend.plan_meta import parse_plan_meta
 from agent_team_backend.plugins import wiring as plugin_wiring
-from agent_team_backend.plugins.builtin.navide_plans import plan_mcp
+from agent_team_backend.plugins.builtin.navide_plans import plan_mcp, plan_mcp_auth
 from agent_team_backend.plugins.host import PluginHost
 
 
@@ -33,9 +34,43 @@ def _plan_html(meta: dict) -> str:
     )
 
 
-async def _call(tool: str, args: dict):
-    async with create_connected_server_and_client_session(plan_mcp.server) as session:
-        return await session.call_tool(tool, args)
+def _ctx() -> SimpleNamespace:
+    """A Context carrying a valid host credential — plan_* tools only need *a*
+    valid /plan-mcp credential, not a specific pane identity."""
+    params = {"client": "host", "t": plan_mcp_auth.internal_token()}
+    return SimpleNamespace(
+        request_context=SimpleNamespace(request=SimpleNamespace(query_params=params))
+    )
+
+
+class _ToolResult:
+    """Mimics the bits of mcp.types.CallToolResult these tests read, for a
+    direct call to the tool function. The in-memory transport used by
+    create_connected_server_and_client_session carries no real HTTP request,
+    so it cannot carry the credential every tool now requires — calling the
+    (undecorated-return) tool function directly, the same way the cli_send
+    tests already do, sidesteps that."""
+
+    def __init__(self, value: Any = None, error: Exception | None = None) -> None:
+        self.isError = error is not None
+        self._value = value
+        self._error = error
+
+    @property
+    def structuredContent(self) -> Any:
+        return {"result": self._value} if isinstance(self._value, list) else self._value
+
+    @property
+    def content(self) -> list[Any]:
+        return [SimpleNamespace(text=str(self._error))]
+
+
+async def _call(tool: str, args: dict) -> _ToolResult:
+    try:
+        value = await getattr(plan_mcp, tool)(**args, ctx=_ctx())
+    except Exception as err:  # noqa: BLE001 — mirrors the MCP session's isError wrapping
+        return _ToolResult(error=err)
+    return _ToolResult(value=value)
 
 
 def _plans_dir(workspace: Path) -> Path:
@@ -78,8 +113,7 @@ def workspace(tmp_path: Path) -> Path:
 
 
 async def test_plan_list_returns_plans_with_meta(workspace: Path) -> None:
-    async with create_connected_server_and_client_session(plan_mcp.server) as session:
-        result = await session.call_tool("plan_list", {"workspace_path": str(workspace)})
+    result = await _call("plan_list", {"workspace_path": str(workspace)})
     assert not result.isError
     plans = result.structuredContent["result"]
     # Workspace-relative paths: agents echo these into the terminal, where
@@ -100,10 +134,9 @@ async def test_plan_list_returns_plans_with_meta(workspace: Path) -> None:
 
 
 async def test_plan_read_returns_meta_and_html(workspace: Path) -> None:
-    async with create_connected_server_and_client_session(plan_mcp.server) as session:
-        result = await session.call_tool(
-            "plan_read", {"workspace_path": str(workspace), "rel_path": "alpha.html"}
-        )
+    result = await _call(
+        "plan_read", {"workspace_path": str(workspace), "rel_path": "alpha.html"}
+    )
     assert not result.isError
     data = result.structuredContent
     assert data["rel_path"] == ".agent-team/plans/alpha.html"
@@ -117,29 +150,26 @@ async def test_plan_read_returns_meta_and_html(workspace: Path) -> None:
 
 async def test_plan_read_accepts_the_full_workspace_relative_path(workspace: Path) -> None:
     """Both input forms resolve to the same plan (the other test passes a filename)."""
-    async with create_connected_server_and_client_session(plan_mcp.server) as session:
-        result = await session.call_tool(
-            "plan_read",
-            {"workspace_path": str(workspace), "rel_path": ".agent-team/plans/alpha.html"},
-        )
+    result = await _call(
+        "plan_read",
+        {"workspace_path": str(workspace), "rel_path": ".agent-team/plans/alpha.html"},
+    )
     assert not result.isError
     assert result.structuredContent["rel_path"] == ".agent-team/plans/alpha.html"
     assert result.structuredContent["meta"]["name"] == "Alpha"
 
 
 async def test_plan_read_rejects_path_traversal(workspace: Path) -> None:
-    async with create_connected_server_and_client_session(plan_mcp.server) as session:
-        result = await session.call_tool(
-            "plan_read", {"workspace_path": str(workspace), "rel_path": "../secret.html"}
-        )
+    result = await _call(
+        "plan_read", {"workspace_path": str(workspace), "rel_path": "../secret.html"}
+    )
     assert result.isError
 
 
 async def test_plan_read_rejects_missing_file(workspace: Path) -> None:
-    async with create_connected_server_and_client_session(plan_mcp.server) as session:
-        result = await session.call_tool(
-            "plan_read", {"workspace_path": str(workspace), "rel_path": "nope.html"}
-        )
+    result = await _call(
+        "plan_read", {"workspace_path": str(workspace), "rel_path": "nope.html"}
+    )
     assert result.isError
 
 

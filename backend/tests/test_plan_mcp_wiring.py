@@ -10,7 +10,7 @@ import pytest
 
 from agent_team_backend import app
 from agent_team_backend.plugins import wiring as plugin_wiring
-from agent_team_backend.plugins.builtin.navide_plans import plan_mcp_wiring
+from agent_team_backend.plugins.builtin.navide_plans import plan_mcp_auth, plan_mcp_wiring
 
 
 # ---- write_claude_config ----
@@ -21,11 +21,14 @@ def test_write_claude_config_creates_file(tmp_path: Path) -> None:
     out = plan_mcp_wiring.write_claude_config(4567, path)
     assert out == path
     data = json.loads(path.read_text(encoding="utf-8"))
+    # No pane id known for this fallback file, so the URL carries this
+    # backend's own host credential instead of being bare.
     assert data == {
         "mcpServers": {
-            "navide-plans": {"type": "http", "url": "http://127.0.0.1:4567/plan-mcp"}
+            "navide-plans": {"type": "http", "url": plan_mcp_wiring.plan_mcp_url(4567)}
         }
     }
+    assert f"client=host&t={plan_mcp_auth.internal_token()}" in data["mcpServers"]["navide-plans"]["url"]
 
 
 def test_write_claude_config_updates_stale_port(tmp_path: Path) -> None:
@@ -33,7 +36,7 @@ def test_write_claude_config_updates_stale_port(tmp_path: Path) -> None:
     plan_mcp_wiring.write_claude_config(1111, path)
     plan_mcp_wiring.write_claude_config(2222, path)
     data = json.loads(path.read_text(encoding="utf-8"))
-    assert data["mcpServers"]["navide-plans"]["url"] == "http://127.0.0.1:2222/plan-mcp"
+    assert data["mcpServers"]["navide-plans"]["url"] == plan_mcp_wiring.plan_mcp_url(2222)
 
 
 def test_write_claude_config_idempotent(tmp_path: Path) -> None:
@@ -58,6 +61,23 @@ def test_backend_port_absent_or_garbage(tmp_path: Path) -> None:
     assert plan_mcp_wiring.backend_port() is None
     (tmp_path / "backend-port").write_text("not-a-port", encoding="utf-8")
     assert plan_mcp_wiring.backend_port() is None
+
+
+# ---- plan_mcp_url: pane vs. host credential ----
+
+
+def test_plan_mcp_url_with_pane_id_carries_the_pane_credential() -> None:
+    url = plan_mcp_wiring.plan_mcp_url(4567, "pane-1")
+    assert url == (
+        f"http://127.0.0.1:4567/plan-mcp?pane=pane-1&t={plan_mcp_wiring.caller_token()}"
+    )
+
+
+def test_plan_mcp_url_without_pane_id_carries_the_host_credential() -> None:
+    url = plan_mcp_wiring.plan_mcp_url(4567)
+    assert url == (
+        f"http://127.0.0.1:4567/plan-mcp?client=host&t={plan_mcp_auth.internal_token()}"
+    )
 
 
 # ---- wire_command: claude ----
@@ -109,17 +129,28 @@ def test_wire_claude_missing_config_file_is_noop(tmp_path: Path) -> None:
 
 def test_wire_codex_appends_config_override() -> None:
     wired = plan_mcp_wiring.wire_command("codex", "codex --yolo", 4567)
+    # No pane id given, so the override URL carries the host credential.
     assert wired == (
         "codex --yolo -c "
-        "'mcp_servers.navide-plans.url=\"http://127.0.0.1:4567/plan-mcp\"'"
+        f"'mcp_servers.navide-plans.url=\"{plan_mcp_wiring.plan_mcp_url(4567)}\"'"
     )
+    assert "client=host" in wired
 
 
 def test_wire_codex_resume_command() -> None:
     command = ["/bin/zsh", "-lc", "codex resume abc123 --yolo"]
     wired = plan_mcp_wiring.wire_command("codex", command, 4567)
     assert wired[2].startswith("codex resume abc123 --yolo -c ")
-    assert 'mcp_servers.navide-plans.url="http://127.0.0.1:4567/plan-mcp"' in wired[2]
+    assert f'mcp_servers.navide-plans.url="{plan_mcp_wiring.plan_mcp_url(4567)}"' in wired[2]
+
+
+def test_wire_codex_with_pane_id_uses_pane_credential() -> None:
+    """With a pane id, the override URL still carries the pane credential
+    (unaffected by the host-credential fallback added for the empty case)."""
+    wired = plan_mcp_wiring.wire_command("codex", "codex", 4567, pane_id="p1")
+    url = plan_mcp_wiring.plan_mcp_url(4567, "p1")
+    assert "pane=p1" in url and "client=host" not in url
+    assert url in wired
 
 
 def test_wire_codex_second_run_is_noop() -> None:

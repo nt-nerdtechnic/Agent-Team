@@ -23,7 +23,9 @@ from __future__ import annotations
 import asyncio
 import re
 import secrets
+import time
 from contextlib import AsyncExitStack
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from html import escape as html_escape
 from pathlib import Path
@@ -35,6 +37,7 @@ from starlette.responses import PlainTextResponse
 from starlette.types import Receive, Scope, Send
 
 from agent_team_backend.fs_service import FsError, _resolve_safe, write_file
+from agent_team_backend.pending_registry import TIMEOUT, PendingRegistry
 from agent_team_backend.plan_meta import (
     PLAN_STAGES,
     TODO_STATUSES,
@@ -92,7 +95,13 @@ server = FastMCP(
         "different CLI than yours; the new pane reports back to you by message "
         "when it finishes, so you do not poll it. Limits apply (3 child panes "
         "per pane, 8 CLI panes per workspace, chain depth 2) and the call tells "
-        "you if one was hit."
+        "you if one was hit.\n"
+        "\n"
+        "Checking on another pane: cli_read_log reads the tail of a pane's "
+        "conversation log, cli_get_status reports whether it is busy and its "
+        "last known activity, and cli_wait_idle blocks until it goes idle or a "
+        "timeout passes — useful for an external caller, which gets no "
+        "cli_open_agent completion message to poll instead."
     ),
 )
 
@@ -446,7 +455,7 @@ def _workspace_mismatch_warning(workspace_path: str) -> str | None:
 
 
 @server.tool()
-async def plan_list(workspace_path: str) -> list[dict[str, Any]]:
+async def plan_list(workspace_path: str, ctx: Context) -> list[dict[str, Any]]:
     """List plan documents in the workspace's .agent-team/plans/ directory.
 
     Skips provisioned assets (basename starting with "_") and files without a
@@ -454,11 +463,12 @@ async def plan_list(workspace_path: str) -> list[dict[str, Any]]:
     ".agent-team/plans/foo.html" — pass it to plan_read), name, stage,
     overview, todos ({total, by_status} counts), mtime (epoch seconds).
     """
+    _resolve_caller(ctx)
     return await asyncio.to_thread(_list_plans_sync, workspace_path)
 
 
 @server.tool()
-async def plan_read(workspace_path: str, rel_path: str) -> dict[str, Any]:
+async def plan_read(workspace_path: str, rel_path: str, ctx: Context) -> dict[str, Any]:
     """Read one plan document from the workspace's .agent-team/plans/ directory.
 
     rel_path is the workspace-relative path returned by plan_list (a bare
@@ -466,6 +476,7 @@ async def plan_read(workspace_path: str, rel_path: str) -> dict[str, Any]:
     plan-meta dict (null if the island is missing/invalid) and the raw file
     content.
     """
+    _resolve_caller(ctx)
     return await asyncio.to_thread(_read_plan_sync, workspace_path, rel_path)
 
 
@@ -475,6 +486,7 @@ async def plan_create(
     name: str,
     overview: str,
     todos: list[str | dict[str, str]],
+    ctx: Context,
 ) -> dict[str, Any]:
     """Create a new plan document in the workspace's .agent-team/plans/ directory.
 
@@ -488,6 +500,7 @@ async def plan_create(
     not match any pane's workspace — the plan is on disk but Navide's plan
     view will not find it; re-create it under the warned-about workspace.
     """
+    _resolve_caller(ctx)
     result = await asyncio.to_thread(_create_plan_sync, workspace_path, name, overview, todos)
     warning = await asyncio.to_thread(_workspace_mismatch_warning, workspace_path)
     if warning:
@@ -496,7 +509,9 @@ async def plan_create(
 
 
 @server.tool()
-async def plan_update_stage(workspace_path: str, rel_path: str, stage: str) -> dict[str, Any]:
+async def plan_update_stage(
+    workspace_path: str, rel_path: str, stage: str, ctx: Context
+) -> dict[str, Any]:
     """Set a plan's lifecycle stage (island + visible stage pill).
 
     stage must be one of: draft, in-review, approved, in-progress, done,
@@ -504,12 +519,13 @@ async def plan_update_stage(workspace_path: str, rel_path: str, stage: str) -> d
     time (ISO-8601, Z suffix). Fails with a conflict error if the file changed
     on disk during the update. Returns {stage, approvedAt}.
     """
+    _resolve_caller(ctx)
     return await asyncio.to_thread(_update_stage_sync, workspace_path, rel_path, stage)
 
 
 @server.tool()
 async def plan_update_todo(
-    workspace_path: str, rel_path: str, todo_id: str, status: str
+    workspace_path: str, rel_path: str, todo_id: str, status: str, ctx: Context
 ) -> dict[str, Any]:
     """Set one todo's status (island + the todo's visible row markup).
 
@@ -517,12 +533,13 @@ async def plan_update_todo(
     todo_id fails with an error listing the plan's valid todo ids. Returns the
     updated todo object.
     """
+    _resolve_caller(ctx)
     return await asyncio.to_thread(_update_todo_sync, workspace_path, rel_path, todo_id, status)
 
 
 @server.tool()
 async def plan_add_note(
-    workspace_path: str, rel_path: str, text: str, author: str = "ai"
+    workspace_path: str, rel_path: str, text: str, ctx: Context, author: str = "ai"
 ) -> dict[str, Any]:
     """Append a review note to a plan's plan-meta island.
 
@@ -532,6 +549,7 @@ async def plan_add_note(
     visible note markup may lag and is re-synced by the authoring agent on its
     next edit. Returns the created note.
     """
+    _resolve_caller(ctx)
     return await asyncio.to_thread(_add_note_sync, workspace_path, rel_path, text, author)
 
 
@@ -563,7 +581,7 @@ def _terminal_service() -> Any:
 
 
 class CallerUnknown(Exception):
-    """The request carries no usable pane identity."""
+    """The request carries no usable / accepted credential."""
 
 
 _UNWIRED = (
@@ -576,38 +594,81 @@ _STALE = (
     "messages through these tools, or use the ---MSG-START--- output protocol, "
     "which always resolves against the pane's current identity"
 )
+_HOST_TOKEN_REJECTED = "host token rejected"
+_EXTERNAL_TOKEN_REJECTED = "external token rejected"
+_EXTERNAL_DISABLED = (
+    "external access to this MCP endpoint is disabled — turn it on in Navide's "
+    "Settings before using an external client credential"
+)
+# Every cli_* tool that addresses another pane requires the sender's own pane
+# identity to resolve a bare name against its own workspace (see
+# agent_messaging.resolve). A caller with no pane identity (host / external)
+# has no "own workspace", so it must always spell out the full address.
+_QUALIFIED_TARGET_REQUIRED = (
+    'a caller with no pane identity must address a pane as "<folder>/<pane>" '
+    "— call cli_list_targets for the qualified address"
+)
 
 
-def _caller_pane_id(ctx: Context) -> str:
-    """The pane whose CLI is calling, from the pane-specific endpoint URL.
+@dataclass
+class _Caller:
+    """The credential kind that authenticated a /plan-mcp request.
 
-    Every pane is spawned pointing at `/plan-mcp?pane=<id>&t=<token>`.
+    kind is "pane" (pane_id set), "host" (this backend's own CLI wiring with
+    no pane id known at spawn time), or "external" (a client outside Navide's
+    process tree, only accepted while enabled).
+    """
 
-    The id is fixed at spawn time while a pane's id is not: re-attaching a live
-    PTY (detach to a window, reload) mints a new pane id without re-running
-    spawn wiring, leaving the CLI holding one that no longer refers to anything.
-    Acting on a stale id would be worse than refusing — the sender resolves to
-    nobody, which turns every same-workspace name into "unknown target", makes
-    the pane fail its own self-send check (so it can message itself in a loop),
-    and shows the recipient an unaddressable sender. So require the id to still
-    be live and say plainly what to do about it.
+    kind: str
+    pane_id: str = ""
+
+
+def _resolve_caller(ctx: Context) -> _Caller:
+    """Validate the request's credential (pane / host / external).
+
+    Every pane is spawned pointing at `/plan-mcp?pane=<id>&t=<token>`; backend-
+    written CLI config without a known pane id instead carries
+    `?client=host&t=<internal token>` (see plan_mcp_wiring.plan_mcp_url); an
+    external client carries `?client=external&t=<external token>`, accepted
+    only while plan_mcp_auth.external_enabled() is True. Raises CallerUnknown
+    with a caller-facing message when none of these validate.
+
+    For the pane kind specifically: the id is fixed at spawn time while a
+    pane's id is not — re-attaching a live PTY (detach to a window, reload)
+    mints a new pane id without re-running spawn wiring, leaving the CLI
+    holding one that no longer refers to anything. Acting on a stale id would
+    be worse than refusing — the sender resolves to nobody, which turns every
+    same-workspace name into "unknown target", makes the pane fail its own
+    self-send check (so it can message itself in a loop), and shows the
+    recipient an unaddressable sender. So require the id to still be live.
     """
     from agent_team_backend import agent_messaging
-    from agent_team_backend.plugins.builtin.navide_plans import plan_mcp_wiring
+    from agent_team_backend.plugins.builtin.navide_plans import plan_mcp_auth, plan_mcp_wiring
 
     request = getattr(ctx.request_context, "request", None)
     params = getattr(request, "query_params", None)
     if params is None:
         raise CallerUnknown(_UNWIRED)
-    pane_id = str(params.get("pane") or "")
     token = str(params.get("t") or "")
+    client = str(params.get("client") or "")
+    if client == "host":
+        if not secrets.compare_digest(token, plan_mcp_auth.internal_token()):
+            raise CallerUnknown(_HOST_TOKEN_REJECTED)
+        return _Caller(kind="host")
+    if client == "external":
+        if not plan_mcp_auth.external_enabled():
+            raise CallerUnknown(_EXTERNAL_DISABLED)
+        if not secrets.compare_digest(token, plan_mcp_auth.external_token()):
+            raise CallerUnknown(_EXTERNAL_TOKEN_REJECTED)
+        return _Caller(kind="external")
+    pane_id = str(params.get("pane") or "")
     if not pane_id:
         raise CallerUnknown(_UNWIRED)
     if not secrets.compare_digest(token, plan_mcp_wiring.caller_token()):
         raise CallerUnknown("caller token rejected; reopen the pane to re-wire it")
     if agent_messaging.get(pane_id) is None:
         raise CallerUnknown(_STALE)
-    return pane_id
+    return _Caller(kind="pane", pane_id=pane_id)
 
 
 @server.tool()
@@ -615,32 +676,44 @@ async def cli_list_targets(ctx: Context) -> dict[str, Any]:
     """List the CLI panes you can send instructions to with cli_send.
 
     Returns {you, targets}. Each target: {name, address, workspace_path,
-    same_workspace}. Address a pane in YOUR workspace by its bare name; a pane
-    in another workspace window by the `<folder>/<pane>` address given here.
-    Read-only.
+    same_workspace, busy}. Address a pane in YOUR workspace by its bare name; a
+    pane in another workspace window by the `<folder>/<pane>` address given
+    here. A caller with no pane identity (host / external credential) has no
+    "own workspace" — every target comes back with same_workspace false and
+    "you" set to the credential kind ("host" or "external"); always use the
+    qualified address. Read-only.
     """
     from agent_team_backend import agent_messaging
 
     try:
-        me = _caller_pane_id(ctx)
+        caller = _resolve_caller(ctx)
     except CallerUnknown as err:
         return {"error": str(err), "targets": []}
-    caller = agent_messaging.get(me)
+    if caller.kind == "pane":
+        me_entry = agent_messaging.get(caller.pane_id)
+        targets = [
+            {
+                "name": entry.name,
+                "address": entry.qualified_name,
+                "workspace_path": entry.workspace_path,
+                "same_workspace": bool(me_entry and me_entry.workspace_path == entry.workspace_path),
+                "busy": entry.busy,
+            }
+            for entry in agent_messaging.list_panes()
+            if entry.pane_id != caller.pane_id
+        ]
+        return {"you": me_entry.qualified_name if me_entry else None, "targets": targets}
     targets = [
         {
             "name": entry.name,
             "address": entry.qualified_name,
             "workspace_path": entry.workspace_path,
-            "same_workspace": bool(caller and caller.workspace_path == entry.workspace_path),
+            "same_workspace": False,
             "busy": entry.busy,
         }
         for entry in agent_messaging.list_panes()
-        if entry.pane_id != me
     ]
-    return {
-        "you": caller.qualified_name if caller else None,
-        "targets": targets,
-    }
+    return {"you": caller.kind, "targets": targets}
 
 
 # Spawn verdicts come from the window that owns the requesting pane — only it
@@ -665,30 +738,40 @@ def resolve_spawn(request_id: str, verdict: dict[str, Any]) -> bool:
 
 
 @server.tool()
-async def cli_open_agent(agent: str, name: str, task: str, ctx: Context) -> dict[str, Any]:
-    """Open a new CLI pane in your workspace and give it a task.
+async def cli_open_agent(
+    agent: str, name: str, task: str, ctx: Context, workspace_path: str = ""
+) -> dict[str, Any]:
+    """Open a new CLI pane and give it a task.
 
     `agent` is the CLI to run (e.g. "claude", "codex"), `name` is what the pane
     will be called — that name is also its messaging address, so pick something
     role-shaped like "reviewer" — and `task` is what it should do.
 
+    Pane callers open the pane in their own workspace; `workspace_path` is
+    ignored for them. A caller with no pane identity (host / external
+    credential) has no workspace of its own, so `workspace_path` is required —
+    the pane opens there with no parent: it does not count against any pane's
+    3-child-per-pane limit or the spawn chain depth, but the workspace's 8
+    CLI-panes cap still applies.
+
     This returns once the pane exists, which takes a few seconds. Its CLI then
     boots and receives the task in the background — if that part fails you are
-    told by message. The pane also reports its result to you by message when it
-    finishes, so you never need to poll it.
+    told by message. For a pane caller, the new pane also reports its result to
+    you by message when it finishes, so you never need to poll it — an external
+    or host caller gets no such message and should poll cli_get_status /
+    cli_wait_idle instead.
 
     Use the returned name, not the one you asked for: a concurrent request may
     have taken that name, in which case yours gets a suffix.
 
-    Refused when the name is taken, the agent key is unknown, or a limit is hit:
-    3 child panes per pane, 8 CLI panes per workspace, spawn chain depth 2.
+    Refused when the name is taken, the agent key is unknown, or a limit is hit.
     Returns {ok, name, address} or {ok: false, error}.
     """
     from agent_team_backend import agent_messaging, app
     from agent_team_backend.ipc import make_event
 
     try:
-        me = _caller_pane_id(ctx)
+        caller = _resolve_caller(ctx)
     except CallerUnknown as err:
         return {"ok": False, "error": str(err)}
     agent_key = (agent or "").strip()
@@ -699,24 +782,36 @@ async def cli_open_agent(agent: str, name: str, task: str, ctx: Context) -> dict
         return {"ok": False, "error": "name is required — it doubles as the pane's address"}
     if not (task or "").strip():
         return {"ok": False, "error": "task is empty"}
+    target_workspace = ""
+    if caller.kind == "pane":
+        me = caller.pane_id
+    else:
+        me = ""
+        target_workspace = (workspace_path or "").strip()
+        if not target_workspace:
+            return {
+                "ok": False,
+                "error": "workspace_path is required for a caller with no pane identity",
+            }
 
-    request_id = f"{me}:spawn:{secrets.token_hex(8)}"
+    request_id = f"{me or caller.kind}:spawn:{secrets.token_hex(8)}"
     loop = asyncio.get_running_loop()
     future: asyncio.Future[dict[str, Any]] = loop.create_future()
     _pending_spawns[request_id] = future
     try:
-        await app.broadcast(
-            make_event(
-                "agent_spawn.request",
-                {
-                    "request_id": request_id,
-                    "requester_pane_id": me,
-                    "agent_key": agent_key,
-                    "name": pane_name,
-                    "task": task,
-                },
-            )
-        )
+        spawn_payload: dict[str, Any] = {
+            "request_id": request_id,
+            "requester_pane_id": me,
+            "agent_key": agent_key,
+            "name": pane_name,
+            "task": task,
+        }
+        if target_workspace:
+            # No parent pane owns this request — the owning window is decided
+            # by workspace match instead (see App.vue's agent_spawn.request
+            # handler).
+            spawn_payload["target_workspace"] = target_workspace
+        await app.broadcast(make_event("agent_spawn.request", spawn_payload))
         verdict = await asyncio.wait_for(future, timeout=_SPAWN_VERDICT_TIMEOUT_S)
     except asyncio.TimeoutError:
         return {
@@ -743,7 +838,9 @@ async def cli_send(to: str, text: str, ctx: Context) -> dict[str, Any]:
     """Send an instruction to another CLI pane, in this or another workspace.
 
     `to` is a pane name for a pane in your own workspace, or `<folder>/<pane>`
-    for one in another workspace window — cli_list_targets shows both forms. The
+    for one in another workspace window — cli_list_targets shows both forms. A
+    caller with no pane identity (host / external credential) has no "own
+    workspace" and must always use the qualified `<folder>/<pane>` form. The
     text is delivered verbatim and submitted for the receiving agent to act on,
     once that pane is idle; it is queued if the pane is mid-turn. An unknown or
     ambiguous target is refused rather than guessed.
@@ -756,20 +853,23 @@ async def cli_send(to: str, text: str, ctx: Context) -> dict[str, Any]:
     from agent_team_backend.ipc import make_event
 
     try:
-        me = _caller_pane_id(ctx)
+        caller = _resolve_caller(ctx)
     except CallerUnknown as err:
         return {"ok": False, "error": str(err)}
     if not (text or "").strip():
         return {"ok": False, "error": "text is empty"}
+    me = caller.pane_id if caller.kind == "pane" else ""
+    if caller.kind != "pane" and "/" not in (to or ""):
+        return {"ok": False, "error": _QUALIFIED_TARGET_REQUIRED}
 
     result = agent_messaging.resolve(me, to)
     if result.pane is None:
         return {"ok": False, "error": result.error or f'unknown target "{to}"'}
-    if result.pane.pane_id == me:
+    if me and result.pane.pane_id == me:
         return {"ok": False, "error": "that is your own pane"}
 
-    sender = agent_messaging.get(me)
-    msg_key = f"{me}:mcp:{secrets.token_hex(8)}"
+    sender = agent_messaging.get(me) if me else None
+    msg_key = f"{me or caller.kind}:mcp:{secrets.token_hex(8)}"
     await app.broadcast(
         make_event(
             "agent_msg.deliver",
@@ -779,7 +879,9 @@ async def cli_send(to: str, text: str, ctx: Context) -> dict[str, Any]:
                 "target_workspace_path": result.pane.workspace_path,
                 "target_name": result.pane.name,
                 "from_pane_id": me,
-                "from_display": agent_messaging.sender_display(me, "another pane"),
+                "from_display": agent_messaging.sender_display(
+                    me, "an external client" if caller.kind == "external" else "a host client"
+                ),
                 "from_workspace_path": sender.workspace_path if sender else "",
                 "cross_workspace": result.cross_workspace,
                 "content": text,
@@ -797,6 +899,295 @@ async def cli_send(to: str, text: str, ctx: Context) -> dict[str, Any]:
         "target": result.pane.qualified_name,
         "cross_workspace": result.cross_workspace,
     }
+
+
+# ── Reading another pane (cli_read_log / cli_get_status / cli_wait_idle) ────
+
+_LOG_TAIL_MAX_BYTES = 64 * 1024
+
+
+def _read_log_tail(path: Path, tail_lines: int) -> tuple[str, bool]:
+    """Tail of a log file, bounded by both a byte window and a line count.
+
+    Reads at most _LOG_TAIL_MAX_BYTES from the end of the file (bounds memory
+    for an arbitrarily large log), then keeps only the last `tail_lines` lines
+    of that window. `truncated` is True whenever content before the returned
+    text was dropped — either the byte window clipped mid-file, or more lines
+    existed in the window than `tail_lines` kept.
+    """
+    size = path.stat().st_size
+    read_bytes = min(size, _LOG_TAIL_MAX_BYTES)
+    with path.open("rb") as f:
+        if read_bytes < size:
+            f.seek(size - read_bytes)
+        data = f.read()
+    text = data.decode("utf-8", errors="replace")
+    byte_truncated = read_bytes < size
+    lines = text.splitlines()
+    line_truncated = len(lines) > tail_lines
+    if line_truncated:
+        lines = lines[-tail_lines:]
+    return "\n".join(lines), byte_truncated or line_truncated
+
+
+@server.tool()
+async def cli_read_log(target: str, ctx: Context, tail_lines: int = 200) -> dict[str, Any]:
+    """Read the tail of a CLI pane's conversation log file.
+
+    `target` uses the same addressing as cli_send (cli_list_targets shows the
+    forms); a caller with no pane identity must use the qualified
+    `<folder>/<pane>` form. Returns {ok, target, log_path, text, truncated} —
+    `text` is at most 64KB and `tail_lines` lines, whichever is smaller;
+    `truncated` is true when older content was dropped to fit. Fails when the
+    target is unknown or its log file was never recorded / no longer exists.
+    """
+    from agent_team_backend import agent_messaging, app
+
+    try:
+        caller = _resolve_caller(ctx)
+    except CallerUnknown as err:
+        return {"ok": False, "error": str(err)}
+    me = caller.pane_id if caller.kind == "pane" else ""
+    if caller.kind != "pane" and "/" not in (target or ""):
+        return {"ok": False, "error": _QUALIFIED_TARGET_REQUIRED}
+
+    result = agent_messaging.resolve(me, target)
+    if result.pane is None:
+        return {"ok": False, "error": result.error or f'unknown target "{target}"'}
+
+    def _find_log_path() -> str:
+        project = app.project_store.peek(result.pane.workspace_path)
+        if project is None:
+            return ""
+        record = next((p for p in project.panes if p.pane_id == result.pane.pane_id), None)
+        return record.output_log_file if record else ""
+
+    log_path_str = await asyncio.to_thread(_find_log_path)
+    if not log_path_str:
+        return {
+            "ok": False,
+            "error": f"no log file recorded for pane {result.pane.qualified_name!r}",
+        }
+    log_path = Path(log_path_str)
+    if not log_path.is_file():
+        return {"ok": False, "error": f"log file no longer exists: {log_path}"}
+
+    text, truncated = await asyncio.to_thread(_read_log_tail, log_path, max(1, int(tail_lines)))
+    return {
+        "ok": True,
+        "target": result.pane.qualified_name,
+        "log_path": str(log_path),
+        "text": text,
+        "truncated": truncated,
+    }
+
+
+@server.tool()
+async def cli_get_status(target: str, ctx: Context) -> dict[str, Any]:
+    """Report whether a CLI pane is busy and its most recent activity.
+
+    `target` uses the same addressing as cli_send. Returns {ok, name,
+    agent_key, busy, last_activity?, ui?}. `last_activity`, when known, is
+    {type: "agent_active"|"turn_complete", text? (turn_complete only),
+    age_seconds}. `ui`, when the owning Navide window answers in time, is
+    {status, buffer, logPath?} straight from the renderer; it is omitted
+    (not a failure) when the window does not reply.
+    """
+    from agent_team_backend import agent_messaging, app
+
+    try:
+        caller = _resolve_caller(ctx)
+    except CallerUnknown as err:
+        return {"ok": False, "error": str(err)}
+    me = caller.pane_id if caller.kind == "pane" else ""
+    if caller.kind != "pane" and "/" not in (target or ""):
+        return {"ok": False, "error": _QUALIFIED_TARGET_REQUIRED}
+
+    result = agent_messaging.resolve(me, target)
+    if result.pane is None:
+        return {"ok": False, "error": result.error or f'unknown target "{target}"'}
+    pane = result.pane
+
+    status: dict[str, Any] = {
+        "ok": True,
+        "name": pane.name,
+        "agent_key": pane.agent_key,
+        "busy": pane.busy,
+    }
+    activity = app.pane_activity(pane.pane_id)
+    if activity is not None:
+        last: dict[str, Any] = {
+            "type": activity["event_type"],
+            "age_seconds": round(time.monotonic() - activity["ts_monotonic"], 1),
+        }
+        if activity["text"]:
+            last["text"] = activity["text"]
+        status["last_activity"] = last
+
+    ui_result = await _ui_request(
+        pane.workspace_path, "invoke", action="ui.pane.getStatus", args={"paneId": pane.pane_id}
+    )
+    if ui_result.get("ok") and isinstance(ui_result.get("result"), dict):
+        status["ui"] = ui_result["result"]
+    return status
+
+
+_WAIT_IDLE_POLL_S = 1.0
+_WAIT_IDLE_QUIET_S = 10.0
+_WAIT_IDLE_MAX_TIMEOUT_S = 120.0
+
+
+@server.tool()
+async def cli_wait_idle(target: str, ctx: Context, timeout_s: float = 60.0) -> dict[str, Any]:
+    """Block until a CLI pane goes idle, or a timeout passes.
+
+    `target` uses the same addressing as cli_send. `timeout_s` is capped at
+    120s. Idle means the pane is not busy AND either its last known activity
+    was a turn_complete signal, or at least 10s of silence has passed since
+    that activity. claude/codex/copilot/aider emit turn_complete, so idle
+    detection is precise for them; other CLIs are only inferred from the quiet
+    period. Returns {idle, source, waited_s} where source is "turn_complete",
+    "quiet_period", or "timeout"; or {ok: false, error} if `target` cannot be
+    resolved.
+    """
+    from agent_team_backend import agent_messaging, app
+
+    try:
+        caller = _resolve_caller(ctx)
+    except CallerUnknown as err:
+        return {"ok": False, "error": str(err)}
+    me = caller.pane_id if caller.kind == "pane" else ""
+    if caller.kind != "pane" and "/" not in (target or ""):
+        return {"ok": False, "error": _QUALIFIED_TARGET_REQUIRED}
+
+    result = agent_messaging.resolve(me, target)
+    if result.pane is None:
+        return {"ok": False, "error": result.error or f'unknown target "{target}"'}
+    pane_id = result.pane.pane_id
+
+    timeout = min(max(float(timeout_s), 0.0), _WAIT_IDLE_MAX_TIMEOUT_S)
+    started = time.monotonic()
+    while True:
+        entry = agent_messaging.get(pane_id)
+        busy = bool(entry.busy) if entry else False
+        if not busy:
+            activity = app.pane_activity(pane_id)
+            if activity is None:
+                return {"idle": True, "source": "quiet_period", "waited_s": round(time.monotonic() - started, 1)}
+            if activity["event_type"] == "turn_complete":
+                return {"idle": True, "source": "turn_complete", "waited_s": round(time.monotonic() - started, 1)}
+            if time.monotonic() - activity["ts_monotonic"] >= _WAIT_IDLE_QUIET_S:
+                return {"idle": True, "source": "quiet_period", "waited_s": round(time.monotonic() - started, 1)}
+        waited = time.monotonic() - started
+        if waited >= timeout:
+            return {"idle": False, "source": "timeout", "waited_s": round(waited, 1)}
+        await asyncio.sleep(_WAIT_IDLE_POLL_S)
+
+
+# ── UI control (ui_invoke / ui_snapshot / ui_list_actions) ─────────────────
+# Routes a request to the renderer window that owns `workspace_path` over WS
+# (`ui.invoke.request`), and waits for its `ui.invoke.result` reply. Most
+# requests broadcast, and every renderer decides for itself whether it owns
+# the workspace; `global=True` requests (currently only ui.workspace.open, to
+# open a workspace no window has yet) unicast to one arbitrary session instead,
+# since any live window can perform them and broadcasting would just make every
+# other window ignore it.
+
+_UI_INVOKE_TIMEOUT_S = 15.0
+_ui_invoke_pending: PendingRegistry[dict[str, Any]] = PendingRegistry()
+
+
+def resolve_ui_invoke(request_id: str, result: dict[str, Any]) -> bool:
+    """Hand a renderer window's ui.invoke.result to the waiting MCP call."""
+    return _ui_invoke_pending.resolve(request_id, result)
+
+
+async def _ui_request(
+    workspace_path: str,
+    op: str,
+    *,
+    action: str | None = None,
+    args: dict[str, Any] | None = None,
+    is_global: bool = False,
+) -> dict[str, Any]:
+    from agent_team_backend import app
+    from agent_team_backend.ipc import make_event
+
+    request_id = secrets.token_hex(16)
+    fut = _ui_invoke_pending.register(request_id)
+    event = make_event(
+        "ui.invoke.request",
+        {
+            "request_id": request_id,
+            "workspace_path": workspace_path,
+            "op": op,
+            "action": action,
+            "args": args,
+            "global": is_global,
+        },
+    )
+    if is_global:
+        sent = await app.unicast_any(event)
+        if not sent:
+            _ui_invoke_pending.discard(request_id)
+            return {"ok": False, "result": None, "error": "no Navide window is open to handle this request"}
+    else:
+        await app.broadcast(event)
+
+    result = await _ui_invoke_pending.wait(request_id, fut, timeout=_UI_INVOKE_TIMEOUT_S)
+    if result is TIMEOUT:
+        return {
+            "ok": False,
+            "result": None,
+            "error": (
+                f"no reply for workspace_path {workspace_path!r} within "
+                f"{_UI_INVOKE_TIMEOUT_S:.0f}s — either no Navide window owns that "
+                "workspace, or the action timed out while executing"
+            ),
+        }
+    return result
+
+
+@server.tool()
+async def ui_list_actions(workspace_path: str, ctx: Context) -> dict[str, Any]:
+    """List the UI actions registered by the Navide window for workspace_path.
+
+    Returns the list of registered action ids (plain strings), so a caller
+    can discover what ui_invoke accepts before calling it. Errors if no
+    window owns workspace_path within 15s.
+    """
+    _resolve_caller(ctx)
+    return await _ui_request(workspace_path, "list_actions")
+
+
+@server.tool()
+async def ui_invoke(
+    workspace_path: str, action: str, ctx: Context, args: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Invoke a registered UI action in the Navide window for workspace_path.
+
+    `action` must be one returned by ui_list_actions; `args` is passed through
+    to it verbatim. `action` "ui.workspace.open" is routed differently: it has
+    no fixed owner (the workspace may not have a window yet), so it is sent to
+    any one live Navide window instead of broadcast to all. Errors if no
+    window owns workspace_path (or, for ui.workspace.open, no window is open
+    at all) within 15s.
+    """
+    _resolve_caller(ctx)
+    return await _ui_request(
+        workspace_path, "invoke", action=action, args=args, is_global=action == "ui.workspace.open"
+    )
+
+
+@server.tool()
+async def ui_snapshot(workspace_path: str, ctx: Context) -> dict[str, Any]:
+    """Return a structured snapshot of UI state for the Navide window at workspace_path.
+
+    Shape is decided by the renderer (panes, tabs, focus, etc.). Errors if no
+    window owns workspace_path within 15s.
+    """
+    _resolve_caller(ctx)
+    return await _ui_request(workspace_path, "snapshot")
 
 
 # ── ASGI mount + lifecycle ──────────────────────────────────────────────────

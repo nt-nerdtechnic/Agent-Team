@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from agent_team_backend import agent_messaging, app
-from agent_team_backend.plugins.builtin.navide_plans import plan_mcp, plan_mcp_wiring
+from agent_team_backend.plugins.builtin.navide_plans import plan_mcp, plan_mcp_auth, plan_mcp_wiring
 
 
 @pytest.fixture(autouse=True)
@@ -22,6 +22,23 @@ def _clean_registry() -> Any:
     agent_messaging._reset_for_test()
     yield
     agent_messaging._reset_for_test()
+
+
+def _external_ctx() -> Any:
+    """A Context authenticated as an external client (no pane identity)."""
+    plan_mcp_auth.set_external_enabled(True)
+    params = {"client": "external", "t": plan_mcp_auth.external_token()}
+    return SimpleNamespace(
+        request_context=SimpleNamespace(request=SimpleNamespace(query_params=params))
+    )
+
+
+def _host_ctx() -> Any:
+    """A Context authenticated as this backend's own CLI wiring (no pane id)."""
+    params = {"client": "host", "t": plan_mcp_auth.internal_token()}
+    return SimpleNamespace(
+        request_context=SimpleNamespace(request=SimpleNamespace(query_params=params))
+    )
 
 
 def _ctx(pane_id: str | None = "pa", token: str | None = None) -> Any:
@@ -317,5 +334,124 @@ async def test_tools_are_registered_without_a_ctx_argument() -> None:
     assert set((tools["cli_send"].inputSchema.get("properties") or {})) == {"to", "text"}
     assert not (tools["cli_list_targets"].inputSchema.get("properties") or {})
     assert set((tools["cli_open_agent"].inputSchema.get("properties") or {})) == {
-        "agent", "name", "task",
+        "agent", "name", "task", "workspace_path",
     }
+
+
+# ── external / host callers (no pane identity) ──────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_list_targets_for_an_external_caller_shows_every_pane_as_cross_workspace() -> None:
+    _seed()
+    result = await plan_mcp.cli_list_targets(_external_ctx())
+
+    assert result["you"] == "external"
+    by_address = {t["address"]: t for t in result["targets"]}
+    assert set(by_address) == {"alpha/sender", "beta/reviewer", "alpha/helper"}
+    assert all(t["same_workspace"] is False for t in by_address.values())
+
+
+@pytest.mark.asyncio
+async def test_send_from_an_external_caller_requires_a_qualified_address(
+    captured: list[dict[str, Any]],
+) -> None:
+    _seed()
+    result = await plan_mcp.cli_send("reviewer", "hi", _external_ctx())
+    assert result["ok"] is False
+    assert "qualified" in result["error"]
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_send_from_an_external_caller_delivers_to_a_qualified_target(
+    captured: list[dict[str, Any]],
+) -> None:
+    _seed()
+    result = await plan_mcp.cli_send("beta/reviewer", "run the tests", _external_ctx())
+
+    assert result == {"ok": True, "target": "beta/reviewer", "cross_workspace": True}
+    payload = captured[0]["payload"]
+    assert payload["from_pane_id"] == ""
+    assert payload["from_display"] == "an external client"
+
+
+@pytest.mark.asyncio
+async def test_send_from_a_host_caller_also_requires_a_qualified_address(
+    captured: list[dict[str, Any]],
+) -> None:
+    _seed()
+    result = await plan_mcp.cli_send("reviewer", "hi", _host_ctx())
+    assert result["ok"] is False
+    assert "qualified" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_external_access_disabled_rejects_the_external_credential() -> None:
+    ctx = _external_ctx()  # mints a valid external token and enables access
+    plan_mcp_auth.set_external_enabled(False)  # then turn access back off
+
+    result = await plan_mcp.cli_list_targets(ctx)
+
+    assert result["targets"] == []
+    assert "disabled" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_open_agent_from_an_external_caller_requires_workspace_path(
+    captured: list[dict[str, Any]],
+) -> None:
+    result = await plan_mcp.cli_open_agent("codex", "x", "task", _external_ctx())
+    assert result["ok"] is False
+    assert "workspace_path is required" in result["error"]
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_open_agent_from_an_external_caller_sends_target_workspace_with_no_parent(
+    captured: list[dict[str, Any]],
+) -> None:
+    async def answer() -> None:
+        for _ in range(200):
+            keys = list(plan_mcp._pending_spawns)
+            if keys:
+                agent_messaging.register("new-pane", "worker", "/ws/ext")
+                plan_mcp.resolve_spawn(keys[0], {"ok": True, "pane_id": "new-pane", "name": "worker"})
+                return
+            await asyncio.sleep(0.005)
+
+    task = asyncio.create_task(answer())
+    result = await plan_mcp.cli_open_agent(
+        "codex", "worker", "do it", _external_ctx(), workspace_path="/ws/ext"
+    )
+    await task
+
+    assert result == {"ok": True, "name": "worker", "address": "ext/worker"}
+    payload = captured[0]["payload"]
+    assert payload["requester_pane_id"] == ""
+    assert payload["target_workspace"] == "/ws/ext"
+
+
+@pytest.mark.asyncio
+async def test_open_agent_from_a_pane_caller_never_sends_target_workspace(
+    captured: list[dict[str, Any]],
+) -> None:
+    """Backward compatibility: a pane caller's spawn request payload is
+    unchanged by the external-caller addition."""
+    _seed()
+
+    async def answer() -> None:
+        for _ in range(200):
+            keys = list(plan_mcp._pending_spawns)
+            if keys:
+                agent_messaging.register("new-pane", "worker2", "/ws/alpha")
+                plan_mcp.resolve_spawn(keys[0], {"ok": True, "pane_id": "new-pane", "name": "worker2"})
+                return
+            await asyncio.sleep(0.005)
+
+    task = asyncio.create_task(answer())
+    result = await plan_mcp.cli_open_agent("codex", "worker2", "do it", _ctx())
+    await task
+
+    assert result["ok"] is True
+    assert "target_workspace" not in captured[0]["payload"]

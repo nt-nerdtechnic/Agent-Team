@@ -4842,6 +4842,11 @@ async def agent_msg_register(session: "Session", msg_id: str, msg_type: str, pay
 async def agent_msg_unregister(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     pane_id = str(payload.get("pane_id") or "")
     removed = bool(pane_id) and agent_messaging.unregister(pane_id, owner=session)
+    if removed:
+        # The pane is gone for good (a detach keeps the entry, see unregister),
+        # so drop its cached activity instead of leaking one entry per pane.
+        from . import app
+        app.forget_pane_activity(pane_id)
     await session.send_json(make_response(msg_id, msg_type, {"ok": True, "removed": removed}))
 
 
@@ -4852,6 +4857,43 @@ async def agent_msg_set_busy(session: "Session", msg_id: str, msg_type: str, pay
     pane_id = str(payload.get("pane_id") or "")
     changed = bool(pane_id) and agent_messaging.set_busy(pane_id, bool(payload.get("busy")))
     await session.send_json(make_response(msg_id, msg_type, {"ok": True, "changed": changed}))
+
+
+def _external_access_status() -> dict:
+    """{enabled, token, port} for the Settings UI's external-access panel."""
+    from .plugins.builtin.navide_plans import plan_mcp_auth, plan_mcp_wiring
+
+    return {
+        "enabled": plan_mcp_auth.external_enabled(),
+        "token": plan_mcp_auth.external_token(),
+        "port": plan_mcp_wiring.backend_port() or 0,
+    }
+
+
+@handler("external_access.get")
+async def external_access_get(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Settings UI: current /plan-mcp external-access config."""
+    await session.send_json(make_response(msg_id, msg_type, _external_access_status()))
+
+
+@handler("external_access.set")
+async def external_access_set(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Settings UI: turn external access to /plan-mcp on or off."""
+    from .plugins.builtin.navide_plans import plan_mcp_auth
+
+    plan_mcp_auth.set_external_enabled(bool(payload.get("enabled")))
+    await session.send_json(make_response(msg_id, msg_type, _external_access_status()))
+
+
+@handler("external_access.regenerate")
+async def external_access_regenerate(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Settings UI: mint a new external token, invalidating the old one."""
+    from .plugins.builtin.navide_plans import plan_mcp_auth
+
+    plan_mcp_auth.regenerate_external_token()
+    await session.send_json(make_response(msg_id, msg_type, _external_access_status()))
 
 
 @handler("agent_spawn.result")
@@ -4873,6 +4915,29 @@ async def agent_spawn_result(session: "Session", msg_id: str, msg_type: str, pay
             "error": str(payload.get("error") or ""),
             "pane_id": str(payload.get("pane_id") or ""),
             "name": str(payload.get("name") or ""),
+        },
+    )
+    await session.send_json(make_response(msg_id, msg_type, {"ok": True, "delivered": delivered}))
+
+
+@handler("ui.invoke.result")
+async def ui_invoke_result(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """A renderer window's reply to a ui.invoke.request, handed to the
+    waiting ui_invoke/ui_snapshot/ui_list_actions MCP call."""
+    from .plugins.builtin.navide_plans import plan_mcp
+
+    request_id = str(payload.get("request_id") or "")
+    if not request_id:
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "ui.invoke.result needs request_id")
+        )
+        return
+    delivered = plan_mcp.resolve_ui_invoke(
+        request_id,
+        {
+            "ok": bool(payload.get("ok", False)),
+            "result": payload.get("result"),
+            "error": str(payload["error"]) if payload.get("error") is not None else None,
         },
     )
     await session.send_json(make_response(msg_id, msg_type, {"ok": True, "delivered": delivered}))

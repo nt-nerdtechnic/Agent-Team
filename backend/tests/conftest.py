@@ -73,10 +73,12 @@ def _reset_terminal_singleton():
     app._TERMINALS = None
     app._active_session = None
     app._PTY_OWNERS.clear()
+    app._pane_activity.clear()
     yield
     app._TERMINALS = None
     app._active_session = None
     app._PTY_OWNERS.clear()
+    app._pane_activity.clear()
 
 
 # ---- shared helpers for the PTY kill/reap tests ----

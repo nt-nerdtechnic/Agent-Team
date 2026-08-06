@@ -37,6 +37,7 @@ from typing import Any
 from urllib.parse import quote
 
 from agent_team_backend.applog import app_data_dir, backend_port_file
+from agent_team_backend.plugins.builtin.navide_plans import plan_mcp_auth
 
 log = logging.getLogger("agent_team_backend.plugins.builtin.navide_plans.plan_mcp_wiring")
 
@@ -50,18 +51,20 @@ _CALLER_TOKEN = secrets.token_urlsafe(24)
 
 
 def plan_mcp_url(port: int, pane_id: str = "") -> str:
-    """Endpoint URL, optionally identifying the pane the CLI runs in.
+    """Endpoint URL, identifying the pane the CLI runs in when known.
 
-    The endpoint is shared by every pane, so a tool that acts *as* the calling
-    pane (cli_send) has no other way to know who is asking — the pane id rides
-    in the query string and the server reads it off the HTTP request. The token
-    marks the caller as belonging to this backend run — see :func:`caller_token`
-    for what that does and does not guarantee.
+    The endpoint requires a credential on every call (see
+    plan_mcp._resolve_caller): with a pane id, the pane credential rides in
+    the query string so a tool that acts *as* the calling pane (cli_send) can
+    tell who is asking. Without one — the fallback claude config and any
+    wired command spawned before a pane id was known — this backend's own
+    host credential rides instead, so its own CLI wiring is never mistaken
+    for an external caller.
     """
     base = f"http://127.0.0.1:{port}/plan-mcp"
-    if not pane_id:
-        return base
-    return f"{base}?pane={quote(pane_id, safe='')}&t={quote(caller_token(), safe='')}"
+    if pane_id:
+        return f"{base}?pane={quote(pane_id, safe='')}&t={quote(caller_token(), safe='')}"
+    return f"{base}?client=host&t={quote(plan_mcp_auth.internal_token(), safe='')}"
 
 
 def caller_token() -> str:
