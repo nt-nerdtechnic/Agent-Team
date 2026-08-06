@@ -346,10 +346,23 @@ export function createRedrawGuard(windowChars: number = REDRAW_TAIL_WINDOW): Red
   // Whole chunks are dropped, so the span is >= windowChars, never less.
   const segs: { raw: number; norm: number }[] = []
   let rawTotal = 0
+  // appendClean calls isReplay(chunk) and then accept(chunk) with the SAME
+  // string, and both normalize it — two full passes over every chunk. Keep the
+  // last result so the pair costs one. The key is the string itself, so a
+  // caller that does not follow that order simply misses the cache.
+  let normCacheKey: string | null = null
+  let normCacheValue = ''
+
+  function normalize(cleaned: string): string {
+    if (normCacheKey === cleaned) return normCacheValue
+    normCacheKey = cleaned
+    normCacheValue = cleaned.replace(/\s+/g, '')
+    return normCacheValue
+  }
 
   function accept(cleaned: string): void {
     if (!cleaned) return
-    const norm = cleaned.replace(/\s+/g, '')
+    const norm = normalize(cleaned)
     segs.push({ raw: cleaned.length, norm: norm.length })
     rawTotal += cleaned.length
     tail += norm
@@ -362,7 +375,7 @@ export function createRedrawGuard(windowChars: number = REDRAW_TAIL_WINDOW): Red
 
   return {
     isReplay(cleaned: string): boolean {
-      const inc = cleaned.replace(/\s+/g, '')
+      const inc = normalize(cleaned)
       if (inc.length < REDRAW_MIN_CHARS) return false
       return tail.includes(inc)
     },

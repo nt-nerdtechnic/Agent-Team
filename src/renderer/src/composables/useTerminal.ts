@@ -1127,8 +1127,16 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // the buffer hits BUFFER_CAP, so quiet-detection (waitForQuiet etc.) can
     // tell "still streaming" from "quiet" during large session replays.
     cleanBytesSeen.value += cleaned.length
+    // Trim lazily. `a + b` is a rope in V8 and costs nothing, but bufferTail's
+    // slice flattens it — so trimming on every chunk charged ~30µs per chunk
+    // once the buffer sat at cap, however small the chunk was. At 20 chunks per
+    // keystroke (macOS splits a PTY read at 1KB) that tax dominated the whole
+    // output path. Trimming only at twice the cap amortises it to ~nothing per
+    // chunk; the buffer now drifts between BUFFER_CAP and 2x it, which no
+    // consumer depends on — App.vue already treats cleanBuffer.length as
+    // unreliable past the cap and uses cleanBytesSeen for progress.
     const next = cleanBuffer.value + cleaned
-    cleanBuffer.value = bufferTail(next, BUFFER_CAP)
+    cleanBuffer.value = next.length > BUFFER_CAP * 2 ? bufferTail(next, BUFFER_CAP) : next
     redrawGuard.accept(cleaned)
     // Skip the activity timestamp if this chunk arrived inside the focus
     // grace window — those bytes are very likely a focus-triggered TUI
@@ -2084,7 +2092,11 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       try { localStorage.removeItem(key) } catch { /* ignore */ }
       return
     }
-    let payload = rawScrollBuffer
+    // appendToScrollBuffer lets the buffer overshoot the cap to avoid a slice
+    // per chunk; cut it back here, where it happens once per pane teardown.
+    let payload = rawScrollBuffer.length > SCROLL_SNAP_MAX
+      ? rawScrollBuffer.slice(-SCROLL_SNAP_MAX)
+      : rawScrollBuffer
     for (;;) {
       try {
         localStorage.setItem(key, payload)
@@ -2102,7 +2114,11 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   }
   function appendToScrollBuffer(data: string): void {
     rawScrollBuffer += data
-    if (rawScrollBuffer.length > SCROLL_SNAP_MAX) {
+    // Same lazy-trim reasoning as cleanBuffer above: the slice flattens the
+    // rope and cost ~50µs on every chunk once the buffer was full. Trimming at
+    // twice the cap makes that per-chunk cost vanish; saveScrollSnapshot cuts
+    // the overshoot back to SCROLL_SNAP_MAX before persisting.
+    if (rawScrollBuffer.length > SCROLL_SNAP_MAX * 2) {
       rawScrollBuffer = rawScrollBuffer.slice(-SCROLL_SNAP_MAX)
     }
   }
