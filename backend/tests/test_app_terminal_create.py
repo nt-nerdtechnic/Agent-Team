@@ -412,20 +412,20 @@ def test_copilot_resume_id_parses_resume_commands() -> None:
     session under that UUID — either way it names the pane's session, so it
     is claimed. Both the `=` and space forms are accepted."""
     sid = "e6495800-dfd4-4a75-b2ab-d70980f83b89"
-    assert app._copilot_resume_id(f"copilot --resume={sid}") == sid
-    assert app._copilot_resume_id(f"copilot --resume {sid}") == sid
-    assert app._copilot_resume_id(f"copilot --resume={sid} --yolo") == sid
-    assert app._copilot_resume_id(f"copilot --yolo --resume={sid}") == sid
-    assert app._copilot_resume_id(f"copilot --yolo --resume {sid}") == sid
-    assert app._copilot_resume_id("copilot") == ""
+    assert app._resume_id_for_agent("copilot", f"copilot --resume={sid}") == sid
+    assert app._resume_id_for_agent("copilot", f"copilot --resume {sid}") == sid
+    assert app._resume_id_for_agent("copilot", f"copilot --resume={sid} --yolo") == sid
+    assert app._resume_id_for_agent("copilot", f"copilot --yolo --resume={sid}") == sid
+    assert app._resume_id_for_agent("copilot", f"copilot --yolo --resume {sid}") == sid
+    assert app._resume_id_for_agent("copilot", "copilot") == ""
     # Flag guard: bare --resume (interactive picker) must not swallow a flag.
-    assert app._copilot_resume_id("copilot --resume --yolo") == ""
-    assert app._copilot_resume_id("copilot --resume") == ""
-    assert app._copilot_resume_id("") == ""
-    assert app._copilot_resume_id(None) == ""
+    assert app._resume_id_for_agent("copilot", "copilot --resume --yolo") == ""
+    assert app._resume_id_for_agent("copilot", "copilot --resume") == ""
+    assert app._resume_id_for_agent("copilot", "") == ""
+    assert app._resume_id_for_agent("copilot", None) == ""
     # Frontend wraps commands as [shell, '-lc', '<cmd>'].
-    assert app._copilot_resume_id(["/bin/zsh", "-lc", f"copilot --resume={sid}"]) == sid
-    assert app._copilot_resume_id(["/bin/zsh", "-lc", "copilot"]) == ""
+    assert app._resume_id_for_agent("copilot", ["/bin/zsh", "-lc", f"copilot --resume={sid}"]) == sid
+    assert app._resume_id_for_agent("copilot", ["/bin/zsh", "-lc", "copilot"]) == ""
 
 
 def test_cursor_resume_id_parses_resume_commands() -> None:

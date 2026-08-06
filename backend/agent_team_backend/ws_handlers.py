@@ -3537,12 +3537,6 @@ async def _terminal_create_impl(
             # it — claim it up front like Claude's --session-id so the
             # session's events route back to this pane.
             explicit_session_id = app._pi_resume_id(payload.get("command"))
-        elif agent_key == "copilot" and not explicit_session_id:
-            # Copilot's `--resume=<id>` names the pane's session whether it
-            # resumes an existing id or (id unknown) creates a new one under
-            # that UUID — claim it up front so the session's events route
-            # back to this pane.
-            explicit_session_id = app._copilot_resume_id(payload.get("command"))
         # Vendors absent from both paths above deliberately claim no resume
         # id here (e.g. an id-less lossy resume); the rationale lives in each
         # vendor's module. Such panes bind via the kickoff marker instead.

@@ -71,7 +71,6 @@ from .log_readers import (
 )
 from .log_readers.attribution import Attribution
 from .log_readers.claude import encode_claude_cwd
-from .log_readers.copilot import copilot_root
 from .credential_vault import CredentialVault
 from .doc_injector import fetch_stage_docs
 from .mcp_manager import MCPManager
@@ -882,7 +881,6 @@ _INHERITED_CLI_HOME_VARS = (
     "KILO_CONFIG_DIR",
     "KILO_CONFIG",
     "KILO_DB",
-    "COPILOT_HOME",
     # Not home relocators, but the same inheritance hazard with a worse
     # failure mode: runtime markers a CLI stamps on its own subprocesses.
     # Claude Code's child-session marker makes an inheriting pane skip
@@ -1466,22 +1464,6 @@ def _pi_resume_id(command: Any) -> str:
     return m.group(1) if m else ""
 
 
-# `copilot --resume=<id>` (or `--resume <id>`) resumes when the id exists and
-# creates a NEW session under that UUID otherwise — either way the id names
-# this pane's session, so it is claimed like Pi's --session-id. `--resume`
-# can also appear bare (interactive picker), so the space form must not
-# swallow a following flag.
-_COPILOT_RESUME_RE = re.compile(
-    r"^copilot\s+(?:\S+\s+)*--resume(?:=(\S+)|\s+([^-\s]\S*))"
-)
-
-
-def _copilot_resume_id(command: Any) -> str:
-    """Session id from a `copilot ... --resume=<id>` / `--resume <id>` command ('' otherwise)."""
-    m = _COPILOT_RESUME_RE.match(_command_text(command).strip())
-    return (m.group(1) or m.group(2)) if m else ""
-
-
 _RESUME_ID_EXTRACTORS = {
     "codex": _codex_resume_id,
     "claude": _claude_resume_id,
@@ -1489,7 +1471,6 @@ _RESUME_ID_EXTRACTORS = {
     "opencode": _opencode_resume_id,
     "kilo": _kilo_resume_id,
     "pi": _pi_resume_id,
-    "copilot": _copilot_resume_id,
 }
 
 
@@ -1528,12 +1509,6 @@ def _session_lookup_path(agent: str, workspace_path: str, session_id: str) -> st
             Path.home() / ".gemini" / "antigravity-cli" / "conversations"
             / f"{session_id}.db"
         )
-    if agent == "copilot":
-        # Copilot stores each session at <root>/session-state/<id>/
-        # events.jsonl, so the id alone names the path. Preflight matters
-        # here like Pi's: `copilot --resume=<stale-id>` would not fail, it
-        # would silently start a blank NEW session under that UUID.
-        return str(copilot_root() / "session-state" / session_id / "events.jsonl")
     return ""
 
 

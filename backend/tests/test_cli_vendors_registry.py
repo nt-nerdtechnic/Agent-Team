@@ -39,7 +39,7 @@ NON_VENDOR_AGENT_KEYS = {"terminal"}
 # single allowed vendor→vendor edge (reader class inheritance).
 ALLOWED_LOCAL_IMPORTS = {"base", "_protocols", "log_readers.base", "usage_common"}
 VENDOR_IMPORT_EXEMPTIONS = {"kilo": {"opencode"}}
-ALLOWED_THIRD_PARTY = {"httpx"}
+ALLOWED_THIRD_PARTY = {"httpx", "yaml"}
 
 
 def test_registry_matches_expected_vendor_set() -> None:

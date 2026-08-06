@@ -508,7 +508,7 @@ class LogWatcher:
         # exist + contain the pane marker.
         if self._session_sink is not None and (
             reader.emits_session_sink
-            or reader.vendor in ("codex", "antigravity", "grok", "kimi", "opencode", "kilo", "pi", "copilot")
+            or reader.vendor in ("codex", "antigravity", "grok", "kimi", "opencode", "kilo", "pi")
         ):
             try:
                 await self._session_sink(reader.vendor, path)

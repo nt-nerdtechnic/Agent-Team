@@ -169,25 +169,6 @@ KILO_PASS_PATH = "/api/trpc/kiloPass.getState?batch=1&input=%7B%220%22%3Anull%7D
 # oauth entry maps to status=expired.
 PI_AGENT_DIR_ENV = "PI_CODING_AGENT_DIR"
 PI_OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
-# copilot (GitHub Copilot CLI). ``~/.copilot/config.json`` is metadata only —
-# the CLI keeps its OAuth token in the macOS Keychain (never probed here), so
-# the token is resolved read-only via ``gh auth token -u <login>`` (gh shares
-# the same gho_ GitHub OAuth scope; verified to print without rotating
-# anything), then the VS Code/JetBrains-style ~/.config/github-copilot files,
-# then GH_TOKEN/GITHUB_TOKEN env. ``copilot_internal/user`` is the surface
-# CodexBar and the JetBrains quota monitor use; the Copilot-client headers
-# are required for it to answer.
-COPILOT_CONFIG_FILE_REL = (".copilot", "config.json")
-COPILOT_HOSTS_FILES_REL = (
-    (".config", "github-copilot", "apps.json"),
-    (".config", "github-copilot", "hosts.json"),
-)
-COPILOT_DEFAULT_HOST = "github.com"
-COPILOT_ENV_KEYS = ("GH_TOKEN", "GITHUB_TOKEN")
-# The Editor-Version/User-Agent set this once sent identified the app as the
-# VS Code Copilot Chat extension. Measured 2026-08-05: the endpoint answers the
-# same without any of it, so the read stays and the costume does not.
-COPILOT_GH_TOKEN_TIMEOUT = 5.0
 # cursor (Cursor / cursor-agent CLI). The session JWT the CLI stores in the
 # macOS Keychain (fallback: the Cursor IDE's state.vscdb sqlite row) is still
 # read to detect sign-in and local expiry, and to authenticate usage-summary by
@@ -225,6 +206,18 @@ from .usage_common import (  # noqa: E402,F401
 
 # R2: qwen's usage stack moved to its vendor module; re-exported so this
 # module's namespace (and its tests) keep working until the cleanup round.
+from .cli_vendors.copilot import (  # noqa: E402,F401
+    COPILOT_CONFIG_FILE_REL,
+    COPILOT_DEFAULT_HOST,
+    COPILOT_ENV_KEYS,
+    COPILOT_HOSTS_FILES_REL,
+    copilot_env_token,
+    copilot_usage_url,
+    fetch_copilot,
+    normalize_copilot,
+    read_copilot_config,
+    read_copilot_hosts_token,
+)
 from .cli_vendors.cursor import (  # noqa: E402,F401
     CURSOR_IDE_STATE_DB_REL,
     CURSOR_IDE_TOKEN_KEY,
@@ -708,93 +701,6 @@ def pi_openrouter_key(auth: dict) -> str | None:
     return None
 
 
-def read_copilot_config(home: Path) -> dict | None:
-    """Parse ``~/.copilot/config.json`` (JSONC: ``//`` comment lines before the
-    JSON body). Returns {host, login} for ``lastLoggedInUser`` (host reduced to
-    a bare hostname, default github.com), or None when absent/malformed/logged
-    out. The file is metadata only — the CLI's token lives in the Keychain."""
-    path = home.joinpath(*COPILOT_CONFIG_FILE_REL)
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    body = "\n".join(line for line in text.splitlines()
-                     if not line.lstrip().startswith("//"))
-    try:
-        data = json.loads(body)
-    except ValueError:
-        return None
-    user = data.get("lastLoggedInUser") if isinstance(data, dict) else None
-    if not isinstance(user, dict):
-        return None
-    login = user.get("login")
-    if not isinstance(login, str) or not login:
-        return None
-    hostname = COPILOT_DEFAULT_HOST
-    host = user.get("host")
-    if isinstance(host, str) and host.strip():
-        stripped = host.strip().split("://", 1)[-1].split("/", 1)[0]
-        hostname = stripped or COPILOT_DEFAULT_HOST
-    return {"host": hostname, "login": login}
-
-
-def read_copilot_hosts_token(home: Path, host: str = COPILOT_DEFAULT_HOST) -> str | None:
-    """The VS Code/JetBrains-style Copilot credential fallback:
-    ``~/.config/github-copilot/apps.json`` then ``hosts.json``, each a map of
-    host key (bare, or suffixed like ``github.com:Iv1.xxx``) -> {oauth_token}.
-    Returns the first matching host's token, or None."""
-    for rel in COPILOT_HOSTS_FILES_REL:
-        try:
-            data = json.loads(home.joinpath(*rel).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        for key, entry in data.items():
-            if not isinstance(entry, dict) or host not in str(key):
-                continue
-            token = entry.get("oauth_token")
-            if isinstance(token, str) and token:
-                return token
-    return None
-
-
-def copilot_env_token(env: dict) -> str | None:
-    for key in COPILOT_ENV_KEYS:
-        value = env.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
-
-
-def copilot_usage_url(host: str) -> str:
-    """github.com -> api.github.com; enterprise hosts use ``api.<host>`` the
-    same way (CodexBar's Copilot host mapping)."""
-    return f"https://api.{host}/copilot_internal/user"
-
-
-async def _copilot_gh_token(login: str, host: str) -> str | None:
-    """``gh auth token -u <login>`` — gh keeps GitHub OAuth tokens in the
-    Keychain and prints them read-only without prompting or rotating anything
-    (verified live). None when gh is missing, fails or prints nothing; gh's
-    active account may differ from Copilot's, hence the explicit ``--user``."""
-    binary = shutil.which("gh")
-    if not binary:
-        return None
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            binary, "auth", "token", "--user", login, "--hostname", host,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-        )
-        out = await _communicate_or_kill(proc, timeout=COPILOT_GH_TOKEN_TIMEOUT)
-    except (OSError, asyncio.TimeoutError):
-        return None
-    if proc.returncode != 0:
-        return None
-    token = out.decode("utf-8", "replace").strip()
-    return token or None
-
-
 # ── Response normalizers (pure) ─────────────────────────────────────────────
 
 _CLAUDE_NAMED_WINDOWS = (
@@ -1154,36 +1060,6 @@ def normalize_pi_openrouter(data: dict) -> list[dict]:
     window["limit"] = limit
     return [window]
 
-
-_COPILOT_QUOTA_KEYS = (
-    ("chat", "Chat"),
-    ("completions", "Completions"),
-    ("premium_interactions", "Premium requests"),
-)
-
-
-def normalize_copilot(data: dict) -> tuple[list[dict], str | None]:
-    """``copilot_internal/user``: one monthly window per ``quota_snapshots``
-    entry with has_quota=true (usedPercent = 100 - percent_remaining), all
-    resetting at ``quota_reset_date_utc``; ``copilot_plan`` -> planType.
-    Entitlements without quota (has_quota=false) are skipped."""
-    plan = data.get("copilot_plan")
-    plan = plan if isinstance(plan, str) and plan else None
-    snapshots = data.get("quota_snapshots")
-    if not isinstance(snapshots, dict):
-        return [], plan
-    resets = data.get("quota_reset_date_utc")
-    resets = resets if isinstance(resets, str) and resets else None
-    windows: list[dict] = []
-    for key, label in _COPILOT_QUOTA_KEYS:
-        entry = snapshots.get(key)
-        if not isinstance(entry, dict) or not entry.get("has_quota"):
-            continue
-        remaining = _num(entry.get("percent_remaining"))
-        if remaining is None:
-            continue
-        windows.append(_window("monthly", label, 100.0 - remaining, resets))
-    return windows, plan
 
 
 # ── Fetchers ────────────────────────────────────────────────────────────────
@@ -1674,52 +1550,6 @@ async def fetch_pi(home: Path, env: dict | None = None) -> dict:
         return _snapshot("pi", "ok",
                          windows=[w for s in ok for w in s["windows"]])
     return sub_snaps[0]
-
-
-async def fetch_copilot(home: Path, env: dict | None = None) -> dict:
-    env = env if env is not None else dict(os.environ)
-    config = read_copilot_config(home)
-    host = config["host"] if config else COPILOT_DEFAULT_HOST
-    token = None
-    if config is not None:
-        token = await _copilot_gh_token(config["login"], host)
-    if token is None:
-        token = read_copilot_hosts_token(home, host)
-    if token is None:
-        token = copilot_env_token(env)
-    if token is None:
-        return _snapshot("copilot", "no-credentials")
-    import httpx
-
-    # This read was once dressed as the VS Code extension — a spoofed
-    # ``GitHubCopilotChat/…`` User-Agent plus ``Editor-Version`` headers.
-    # Measured 2026-08-05: the endpoint does not gate on any of it, answering
-    # 200 to a plain ``User-Agent: Navide`` with the same body. The costume was
-    # never load-bearing, so it is gone and the reading stays.
-    headers = {
-        "Authorization": f"token {token}",
-        "Accept": "application/json",
-        "User-Agent": "Navide",
-    }
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        resp = await client.get(copilot_usage_url(host), headers=headers)
-    if resp.status_code in (401, 403):
-        return _snapshot("copilot", "expired")
-    if resp.status_code == 429:
-        snap = _snapshot("copilot", "rate-limited")
-        snap["retryAfterSec"] = parse_retry_after(resp.headers.get("Retry-After"))
-        return snap
-    if resp.status_code != 200:
-        return _snapshot("copilot", "error", error=f"HTTP {resp.status_code}")
-    try:
-        payload = resp.json()
-    except ValueError:
-        return _snapshot("copilot", "error", error="non-JSON response")
-    windows, plan = normalize_copilot(payload if isinstance(payload, dict) else {})
-    if not windows:
-        return _snapshot("copilot", "error",
-                         error="response had no usable quota fields")
-    return _snapshot("copilot", "ok", windows=windows, plan_type=plan)
 
 
 # ── Poller service ──────────────────────────────────────────────────────────
@@ -2293,8 +2123,7 @@ class UsageService:
             "opencode": lambda: fetch_opencode(home),
             "kilo": lambda: fetch_kilo(home),
             "pi": lambda: fetch_pi(home),
-            "copilot": lambda: fetch_copilot(home),
-                }
+                        }
         tasks: dict[str, Any] = {}
         for provider in PROVIDERS:
             if provider == "claude":  # claude polls per-slot above

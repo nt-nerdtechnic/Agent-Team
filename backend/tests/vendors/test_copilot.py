@@ -14,7 +14,7 @@ import pytest
 
 from agent_team_backend.log_readers.attribution import Attribution
 from agent_team_backend.log_readers.base import TokenUsage
-from agent_team_backend.log_readers.copilot import (
+from agent_team_backend.cli_vendors.copilot import (
     CopilotLogReader,
     _metrics_totals,
     copilot_root,

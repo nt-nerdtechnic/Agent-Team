@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from agent_team_backend import usage_service as us
+from agent_team_backend.cli_vendors import copilot as copilot_vendor
 from agent_team_backend.cli_vendors import cursor as cursor_vendor
 from agent_team_backend.cli_vendors import qwen as qwen_vendor
 from agent_team_backend.profiles_store import CliProfilesStore
@@ -1636,18 +1637,18 @@ _COPILOT_USAGE_URL = us.copilot_usage_url("github.com")
 
 
 def _with_copilot_gh_token(monkeypatch, token="gho_test"):
-    monkeypatch.setattr(us, "read_copilot_config",
+    monkeypatch.setattr(copilot_vendor, "read_copilot_config",
                         lambda home: {"host": "github.com", "login": "octo"})
 
     async def fake_token(login, host):
         assert (login, host) == ("octo", "github.com")
         return token
 
-    monkeypatch.setattr(us, "_copilot_gh_token", fake_token)
+    monkeypatch.setattr(copilot_vendor, "_copilot_gh_token", fake_token)
 
 
 async def test_fetch_copilot_no_credentials(monkeypatch):
-    monkeypatch.setattr(us, "read_copilot_config", lambda home: None)
+    monkeypatch.setattr(copilot_vendor, "read_copilot_config", lambda home: None)
     snap = await us.fetch_copilot(Path("/nonexistent"), {})
     assert snap["status"] == "no-credentials"
 
@@ -1795,7 +1796,7 @@ async def test_poll_once_rate_limit_sets_cooldown(tmp_path, monkeypatch):
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_ok("kilo"))
     monkeypatch.setattr(us, "fetch_pi", lambda home: fake_ok("pi"))
-    monkeypatch.setattr(us, "fetch_copilot", lambda home: fake_ok("copilot"))
+    monkeypatch.setattr(copilot_vendor, "fetch_copilot", lambda home: fake_ok("copilot"))
     monkeypatch.setattr(cursor_vendor, "fetch_cursor", lambda home: fake_ok("cursor"))
 
     svc = us.UsageService()
@@ -1828,7 +1829,7 @@ async def test_poll_once_survives_fetcher_exception(tmp_path, monkeypatch):
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_ok("kilo"))
     monkeypatch.setattr(us, "fetch_pi", lambda home: fake_ok("pi"))
-    monkeypatch.setattr(us, "fetch_copilot", lambda home: fake_ok("copilot"))
+    monkeypatch.setattr(copilot_vendor, "fetch_copilot", lambda home: fake_ok("copilot"))
     monkeypatch.setattr(cursor_vendor, "fetch_cursor", lambda home: fake_ok("cursor"))
 
     svc = us.UsageService()
@@ -1966,7 +1967,7 @@ async def test_poll_once_claude_accounts_are_independent_and_pruned(tmp_path, mo
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_other("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_other("kilo"))
     monkeypatch.setattr(us, "fetch_pi", lambda home: fake_other("pi"))
-    monkeypatch.setattr(us, "fetch_copilot", lambda home: fake_other("copilot"))
+    monkeypatch.setattr(copilot_vendor, "fetch_copilot", lambda home: fake_other("copilot"))
     monkeypatch.setattr(cursor_vendor, "fetch_cursor", lambda home: fake_other("cursor"))
 
     cache = tmp_path / "usage-cache.json"
@@ -2056,7 +2057,7 @@ async def test_refresh_during_poll_runs_next_cycle_with_new_active_account(
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_other("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_other("kilo"))
     monkeypatch.setattr(us, "fetch_pi", lambda home: fake_other("pi"))
-    monkeypatch.setattr(us, "fetch_copilot", lambda home: fake_other("copilot"))
+    monkeypatch.setattr(copilot_vendor, "fetch_copilot", lambda home: fake_other("copilot"))
     monkeypatch.setattr(cursor_vendor, "fetch_cursor", lambda home: fake_other("cursor"))
 
     broadcasts: list[dict] = []
@@ -2188,7 +2189,7 @@ async def test_poll_once_always_reads_real_home(tmp_path, monkeypatch):
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", spy_qwen)
     monkeypatch.setattr(us, "fetch_kilo", spy_kilo)
     monkeypatch.setattr(us, "fetch_pi", spy_pi)
-    monkeypatch.setattr(us, "fetch_copilot", spy_copilot)
+    monkeypatch.setattr(copilot_vendor, "fetch_copilot", spy_copilot)
     monkeypatch.setattr(cursor_vendor, "fetch_cursor", spy_cursor)
 
     real = tmp_path / "realhome"
@@ -2229,7 +2230,7 @@ async def test_poll_once_harvests_active_slots(tmp_path, monkeypatch):
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_ok("kilo"))
     monkeypatch.setattr(us, "fetch_pi", lambda home: fake_ok("pi"))
-    monkeypatch.setattr(us, "fetch_copilot", lambda home: fake_ok("copilot"))
+    monkeypatch.setattr(copilot_vendor, "fetch_copilot", lambda home: fake_ok("copilot"))
     monkeypatch.setattr(cursor_vendor, "fetch_cursor", lambda home: fake_ok("cursor"))
 
     await us.UsageService().poll_once(tmp_path)
@@ -2271,7 +2272,7 @@ async def test_poll_once_harvests_pending_login_homes(tmp_path, monkeypatch):
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_ok("kilo"))
     monkeypatch.setattr(us, "fetch_pi", lambda home: fake_ok("pi"))
-    monkeypatch.setattr(us, "fetch_copilot", lambda home: fake_ok("copilot"))
+    monkeypatch.setattr(copilot_vendor, "fetch_copilot", lambda home: fake_ok("copilot"))
     monkeypatch.setattr(cursor_vendor, "fetch_cursor", lambda home: fake_ok("cursor"))
 
     await us.UsageService().poll_once(tmp_path)
@@ -2370,7 +2371,7 @@ async def test_poll_once_skips_login_harvest_while_login_pane_runs(
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_ok("kilo"))
     monkeypatch.setattr(us, "fetch_pi", lambda home: fake_ok("pi"))
-    monkeypatch.setattr(us, "fetch_copilot", lambda home: fake_ok("copilot"))
+    monkeypatch.setattr(copilot_vendor, "fetch_copilot", lambda home: fake_ok("copilot"))
     monkeypatch.setattr(cursor_vendor, "fetch_cursor", lambda home: fake_ok("cursor"))
 
     await us.UsageService().poll_once(tmp_path)
@@ -2413,7 +2414,7 @@ async def test_login_harvest_for_active_profile_restores_live(tmp_path, monkeypa
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_ok("kilo"))
     monkeypatch.setattr(us, "fetch_pi", lambda home: fake_ok("pi"))
-    monkeypatch.setattr(us, "fetch_copilot", lambda home: fake_ok("copilot"))
+    monkeypatch.setattr(copilot_vendor, "fetch_copilot", lambda home: fake_ok("copilot"))
     monkeypatch.setattr(cursor_vendor, "fetch_cursor", lambda home: fake_ok("cursor"))
 
     await us.UsageService().poll_once(tmp_path)
