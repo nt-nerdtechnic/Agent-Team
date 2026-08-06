@@ -750,6 +750,94 @@ describe('GitWindowApp — toolbar ⋯, detail modes, file menu, bootstrap', () 
     })
   })
 
+  // ── 2b. Conflict mode: resolve the merge inside the Git window ─────────────
+  function mergingStatus(): Record<string, unknown> {
+    return {
+      ...baseStatus(),
+      operation_in_progress: 'merge',
+      unstaged: [{ path: 'src/a.ts', status: 'M' }, { path: 'src/conflict.ts', status: 'U' }]
+    }
+  }
+  const modeLabels = (w: VueWrapper): string[] =>
+    w.findAll('.dt-modes button').map((b) => b.text())
+
+  it('offers the Conflict mode on conflicted files only', async () => {
+    statusOverride.value = mergingStatus()
+    wrapper = await mountApp()
+
+    // A plain modified file gets the three reading modes it always had.
+    await rowFor(wrapper, 'a.ts').trigger('click')
+    await flushPromises()
+    expect(modeLabels(wrapper)).toEqual(['Diff', 'Blame', 'History'])
+    expect(wrapper.findComponent({ name: 'ConflictPane' }).exists()).toBe(false)
+
+    // The conflicted one gains a fourth, and opens straight into it.
+    await wrapper.find('.frow.conflict').trigger('click')
+    await flushPromises()
+    expect(modeLabels(wrapper)).toEqual(['Diff', 'Blame', 'History', 'Conflict'])
+    expect(wrapper.findAll('.dt-modes button.on').map((b) => b.text())).toEqual(['Conflict'])
+  })
+
+  it('mounts ConflictPane on the conflicted file with the brokered backend', async () => {
+    statusOverride.value = mergingStatus()
+    wrapper = await mountApp()
+    await wrapper.find('.frow.conflict').trigger('click')
+    await flushPromises()
+
+    const pane = wrapper.findComponent({ name: 'ConflictPane' })
+    expect(pane.exists()).toBe(true)
+    expect(pane.props('filepath')).toBe('src/conflict.ts')
+    expect(pane.props('workspacePath')).toBe('/tmp/ws')
+    expect(pane.props('backend')).toBeTruthy()
+    // The merge is live, so the panel is in service.
+    expect(pane.props('mergeAborted')).toBe(false)
+    // It reads the file and the index's three stages through that backend.
+    expect(callsOf('fs.read_file').some((c) => c.payload.rel_path === 'src/conflict.ts')).toBe(true)
+    expect(callsOf('git.conflict_stages')[0]!.payload).toMatchObject({
+      workspace_path: '/tmp/ws',
+      filepath: 'src/conflict.ts'
+    })
+  })
+
+  it('takes the panel out of service once the file is no longer unmerged', async () => {
+    statusOverride.value = mergingStatus()
+    wrapper = await mountApp()
+    await wrapper.find('.frow.conflict').trigger('click')
+    await flushPromises()
+    expect(wrapper.findComponent({ name: 'ConflictPane' }).props('mergeAborted')).toBe(false)
+
+    // Someone ran `git merge --abort` elsewhere: the next status read has no
+    // unmerged paths left.
+    statusOverride.value = baseStatus()
+    await rowFor(wrapper, 'a.ts').find('button.chk').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.findComponent({ name: 'ConflictPane' }).props('mergeAborted')).toBe(true)
+    expect(modeLabels(wrapper)).toEqual(['Diff', 'Blame', 'History'])
+  })
+
+  it('returns to the diff and refreshes after the panel resolves the file', async () => {
+    statusOverride.value = mergingStatus()
+    wrapper = await mountApp()
+    await wrapper.find('.frow.conflict').trigger('click')
+    await flushPromises()
+    const before = callsOf('git.status').length
+
+    wrapper.findComponent({ name: 'ConflictPane' }).vm.$emit('resolved')
+    await flushPromises()
+
+    expect(wrapper.findAll('.dt-modes button.on').map((b) => b.text())).toEqual(['Diff'])
+    expect(wrapper.findComponent({ name: 'DiffPane' }).exists()).toBe(true)
+    expect(callsOf('git.status').length).toBeGreaterThan(before)
+  })
+
+  it('keeps the conflict row actions the Git window already had', async () => {
+    statusOverride.value = mergingStatus()
+    wrapper = await mountApp()
+    const actions = wrapper.find('.frow.conflict').findAll('button.linkbtn').map((b) => b.text())
+    expect(actions).toEqual(['ours', 'theirs', 'editor', 'agent'])
+  })
+
   it('resets the detail to Diff and drops the caches when another file is opened', async () => {
     wrapper = await mountApp()
     await rowFor(wrapper, 'a.ts').trigger('click')

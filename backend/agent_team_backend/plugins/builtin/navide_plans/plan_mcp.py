@@ -1035,6 +1035,12 @@ async def cli_get_status(target: str, ctx: Context) -> dict[str, Any]:
 _WAIT_IDLE_POLL_S = 1.0
 _WAIT_IDLE_QUIET_S = 10.0
 _WAIT_IDLE_MAX_TIMEOUT_S = 120.0
+# Poll the owning window this often (in poll ticks) for its own view of the
+# pane. The registry's busy flag is reported by the frontend and can stay
+# stale, and log-reader activity only exists for the four CLIs that emit it —
+# the renderer's status is the one signal that is always current.
+_WAIT_IDLE_UI_PROBE_EVERY = 5
+_UI_IDLE_STATUSES = frozenset({"idle", "exited", "stopped", "error"})
 
 
 @server.tool()
@@ -1042,13 +1048,15 @@ async def cli_wait_idle(target: str, ctx: Context, timeout_s: float = 60.0) -> d
     """Block until a CLI pane goes idle, or a timeout passes.
 
     `target` uses the same addressing as cli_send. `timeout_s` is capped at
-    120s. Idle means the pane is not busy AND either its last known activity
-    was a turn_complete signal, or at least 10s of silence has passed since
-    that activity. claude/codex/copilot/aider emit turn_complete, so idle
-    detection is precise for them; other CLIs are only inferred from the quiet
-    period. Returns {idle, source, waited_s} where source is "turn_complete",
-    "quiet_period", or "timeout"; or {ok: false, error} if `target` cannot be
-    resolved.
+    120s. Three signals settle it, in the order they become available: the
+    pane's last activity was a turn_complete (claude/codex/copilot/aider emit
+    it, so detection is precise for them); at least 10s of silence passed
+    since its last activity; or, while the registry still reports it busy,
+    the owning window reports the pane itself as idle/exited/stopped/error.
+    That last one matters because the busy flag is frontend-reported and can
+    stay stale. Returns {idle, source, waited_s} where source is
+    "turn_complete", "quiet_period", "ui_status", or "timeout"; or
+    {ok: false, error} if `target` cannot be resolved.
     """
     from agent_team_backend import agent_messaging, app
 
@@ -1065,19 +1073,39 @@ async def cli_wait_idle(target: str, ctx: Context, timeout_s: float = 60.0) -> d
         return {"ok": False, "error": result.error or f'unknown target "{target}"'}
     pane_id = result.pane.pane_id
 
+    workspace_path = result.pane.workspace_path
     timeout = min(max(float(timeout_s), 0.0), _WAIT_IDLE_MAX_TIMEOUT_S)
     started = time.monotonic()
+
+    def done(source: str) -> dict[str, Any]:
+        return {"idle": True, "source": source, "waited_s": round(time.monotonic() - started, 1)}
+
+    ui_reachable = True
+    tick = 0
     while True:
         entry = agent_messaging.get(pane_id)
         busy = bool(entry.busy) if entry else False
         if not busy:
             activity = app.pane_activity(pane_id)
             if activity is None:
-                return {"idle": True, "source": "quiet_period", "waited_s": round(time.monotonic() - started, 1)}
+                return done("quiet_period")
             if activity["event_type"] == "turn_complete":
-                return {"idle": True, "source": "turn_complete", "waited_s": round(time.monotonic() - started, 1)}
+                return done("turn_complete")
             if time.monotonic() - activity["ts_monotonic"] >= _WAIT_IDLE_QUIET_S:
-                return {"idle": True, "source": "quiet_period", "waited_s": round(time.monotonic() - started, 1)}
+                return done("quiet_period")
+        elif ui_reachable and tick % _WAIT_IDLE_UI_PROBE_EVERY == 0:
+            # busy says otherwise, so ask the window that can actually see the
+            # pane. Stop probing once it fails: with no window listening every
+            # probe burns the full _ui_request timeout.
+            ui = await _ui_request(
+                workspace_path, "invoke", action="ui.pane.getStatus", args={"paneId": pane_id}
+            )
+            payload = ui.get("result") if ui.get("ok") else None
+            if not isinstance(payload, dict):
+                ui_reachable = False
+            elif payload.get("status") in _UI_IDLE_STATUSES:
+                return done("ui_status")
+        tick += 1
         waited = time.monotonic() - started
         if waited >= timeout:
             return {"idle": False, "source": "timeout", "waited_s": round(waited, 1)}
