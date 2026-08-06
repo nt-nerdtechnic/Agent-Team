@@ -53,6 +53,17 @@ function getLoginShellEnv(): Promise<{ shell: string; path: string | null }> {
   })
 }
 
+// PATH as resolved for spawned children (login-shell probe merged with the
+// process PATH). Cached at backend start so other main-process spawners —
+// external editors, see editors.ts — don't pay the probe again.
+let resolvedUserPath: string | null = null
+
+/** The PATH to give processes main spawns. Falls back to the process PATH
+ *  when the backend has not started yet (or the probe failed). */
+export function getResolvedUserPath(): string {
+  return resolvedUserPath ?? process.env.PATH ?? ''
+}
+
 export async function startBackend(healthCheckTimeoutMs = 45_000): Promise<BackendHandle> {
   const port = await findFreePort()
   const host = '127.0.0.1'
@@ -83,6 +94,7 @@ export async function startBackend(healthCheckTimeoutMs = 45_000): Promise<Backe
       env.PATH = [...new Set([...common, ...existing])].join(':')
     }
   }
+  resolvedUserPath = env.PATH ?? null
 
   // Backend plugin discovery scans the same directory the frontend installs
   // plugins into (see pluginsRoot in index.ts; honour a pre-set value).
