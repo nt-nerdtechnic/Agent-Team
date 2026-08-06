@@ -29,6 +29,19 @@ describe('logLineLevel', () => {
       logLineLevel('[2026-08-06 10:00:00,000] INFO mod: raising an ERROR next time')
     ).toBe('INFO')
   })
+
+  it('is not fooled by a bracketed level quoted inside the message', () => {
+    // Real lines carry whole command lines and JSON; an unanchored match would
+    // read this ERROR record as INFO and drop it under an ERROR filter.
+    expect(
+      logLineLevel('[2026-08-06 10:00:00,000] ERROR mod: cmd=[\'sh\', \'-c\'] INFO noise')
+    ).toBe('ERROR')
+  })
+
+  it('ignores a level-looking word that is not the record header', () => {
+    expect(logLineLevel('WARNING: this line has no timestamp header')).toBe('')
+    expect(logLineLevel('[2026-08-06 10:00:00,000] TRACE mod: unknown level')).toBe('')
+  })
 })
 
 describe('splitLogChunk', () => {

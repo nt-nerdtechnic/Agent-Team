@@ -183,16 +183,25 @@ export const defaults: KeybindingRule[] = [
   // ── CLI pane cycling ─────────────────────────────────────────────────────────
   // Browser-tab muscle memory for walking the visible CLI panes. These must sit
   // AFTER the editor-tab rules above: the resolver reverses the list, so these
-  // are tried first and the '!editorOpen' guard falls through to openNext/
-  // PreviousEditor in the Mini IDE window (the only window that sets
-  // editorOpen). Ctrl+Tab is the one Tab combo free to intercept — bare Tab is
-  // shell completion and Shift+Tab is Claude Code's permission-mode toggle, and
-  // the dispatcher runs in the capture phase, so binding either would swallow
-  // it before xterm forwards it to the PTY.
-  // '!modalOpen' keeps the shortcut from moving focus to a pane the open dialog
-  // is covering.
-  { key: 'ctrl+tab',       command: 'workbench.action.focusNextPane',     when: '!editorOpen && !modalOpen' },
-  { key: 'ctrl+shift+tab', command: 'workbench.action.focusPreviousPane', when: '!editorOpen && !modalOpen' },
+  // are tried first and windows without a pane stage fall through to
+  // openNext/PreviousEditor exactly as before.
+  //
+  // The guard is 'paneStage' (set only by the main window) rather than
+  // '!editorOpen': the Mini IDE clears editorOpen whenever its last tab closes,
+  // which would let these rules win in a window that never registers the
+  // commands — and an unhandled binding is NOT consumed, so the Tab would leak
+  // straight into that window's AI dock terminal.
+  //
+  // Ctrl+Tab is the one Tab combo free to intercept — bare Tab is shell
+  // completion and Shift+Tab is Claude Code's permission-mode toggle, and the
+  // dispatcher runs in the capture phase, so binding either would swallow it
+  // before xterm forwards it to the PTY.
+  //
+  // '!modalOpen' stops the shortcut from shuffling panes behind a dialog. It
+  // covers the modals wired into that context (see App.vue's modalOpen watch),
+  // not every overlay in the app.
+  { key: 'ctrl+tab',       command: 'workbench.action.focusNextPane',     when: 'paneStage && !modalOpen' },
+  { key: 'ctrl+shift+tab', command: 'workbench.action.focusPreviousPane', when: 'paneStage && !modalOpen' },
   { key: 'cmd+shift+]', command: 'workbench.action.moveEditorRightInGroup', when: 'editorOpen' },
   { key: 'cmd+shift+[', command: 'workbench.action.moveEditorLeftInGroup',  when: 'editorOpen' },
   { key: 'cmd+1', command: 'workbench.action.openEditorAtIndex1', when: 'editorOpen' },

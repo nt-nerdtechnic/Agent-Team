@@ -4730,6 +4730,7 @@ const MAIN_SHORTCUTS = [
   { label: 'Rebuild Pane (Resume)',      keys: '⌘⇧R / ⌘⇧B' },
   { label: 'Find in Files',             keys: '⌘⇧F' },
   { label: 'Show Keyboard Shortcuts',   keys: '⌘K ⌘S' },
+  { label: 'Open Debug',                keys: '⌘⇧L' },
   { label: 'New Main Window',           keys: '⌘⇧N' },
   { label: 'Toggle AI Chat',            keys: '⌘⇧A / ⌘J' },
   { label: 'Show Explorer',             keys: '⌘⇧E' },
@@ -4860,7 +4861,10 @@ registerCommand('workbench.action.openPlans', async () => {
 registerCommand('workbench.action.rebuildFocusedPane', async () => {
   if (effectiveFocusPaneId.value) await rebuildPaneViaResume(effectiveFocusPaneId.value)
 })
-// Ctrl+Tab / Ctrl+Shift+Tab — see cycleFocusedPane near the grid pagination state.
+// Ctrl+Tab / Ctrl+Shift+Tab — see cycleFocusedPane near the grid pagination
+// state. 'paneStage' marks this as the window that owns the CLI pane grid; the
+// keybinding rules gate on it so plugin windows keep their editor-tab behavior.
+setContext('paneStage', true)
 registerCommand('workbench.action.focusNextPane', () => { cycleFocusedPane(1) })
 registerCommand('workbench.action.focusPreviousPane', () => { cycleFocusedPane(-1) })
 
@@ -7256,12 +7260,15 @@ const QUESTION_PLACEHOLDER_RE = /^<[^>]{1,40}>$/
 // strict turn-text sentinel path (judgeTurnText) is authoritative, so the loose
 // in-buffer sentinel scan is skipped — it can false-complete on a TUI redraw
 // that re-echoes the kickoff's sentinel examples. Vendors without turn text
-// keep the buffer scan as their only sentinel source: kimi emits turn_complete
-// but carries no text, qwen/pi/cursor emit agent_active only, and
-// antigravity/grok/opencode/kilo emit neither.
-// Deliberately conservative: copilot and aider now carry turn text too, but
-// their readers have not been validated against real sessions, so they stay
-// out of this set and keep the buffer scan until that verification happens.
+// keep the buffer scan as their only sentinel source: cursor and antigravity
+// store their transcripts as opaque protobuf, and opencode/kilo parse no
+// activity at all.
+// Deliberately conservative: copilot, aider, kimi, qwen, pi and grok now carry
+// turn text too — enough for the inter-CLI messaging protocol, which only
+// needs the text — but their readers have not been validated against real
+// sessions, and for qwen/pi/grok the turn boundary is inferred from silence
+// rather than read from a record. They stay out of this set and keep the
+// buffer scan until that verification happens.
 const TURN_TEXT_VENDORS = new Set(['claude', 'codex'])
 
 // A turn_complete whose CLI timestamp predates the watcher arming by more than
@@ -10372,7 +10379,21 @@ function cycleFocusedPane(direction: CycleDirection): void {
   })
   if (!plan) return
   if (plan.page !== null) onUserChangeGridPage(plan.page)
+  const targetRealized = panes.value.find((p) => p.id === plan.targetId)?.realized
   selectPane(plan.targetId, { userInitiated: true, scrollIntoView: true })
+  // A pane still showing its restore placeholder has no TerminalPane ref, so
+  // the focusPaneId watcher's focus() is a silent no-op and the outgoing
+  // terminal would keep the DOM focus — every keystroke would land in the pane
+  // the user just left. Drop focus now, then claim it once the pane realizes
+  // (selectPane already kicked that off; realizeRestoredPane dedupes in-flight
+  // calls, so awaiting it here does not start a second resume).
+  if (!targetRealized) {
+    ;(document.activeElement as HTMLElement | null)?.blur?.()
+    void realizeRestoredPane(plan.targetId).then(() => {
+      if (focusPaneId.value !== plan.targetId) return
+      void nextTick(() => { paneRefs[plan.targetId]?.focus?.() })
+    })
+  }
 }
 
 const dualFocusHandlePos = computed(() => {

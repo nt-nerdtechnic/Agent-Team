@@ -70,6 +70,36 @@ describe('KeyResolver – single key', () => {
     const rule = defaultResolver.resolve(mkEvent('D', { metaKey: true, shiftKey: true }), {})
     expect(rule?.command).toBe('workbench.action.openPlans')
   })
+
+  // cmd+shift+L is shared three ways. Debug only claims it where no editor is
+  // open, so the Mini IDE keeps both of its editor commands on that chord.
+  describe('default cmd+shift+l is shared with the editor', () => {
+    const shiftL = (): KeyboardEvent => mkEvent('L', { metaKey: true, shiftKey: true })
+
+    it('opens Debug when no editor is open', () => {
+      const rule = new KeyResolver(defaults).resolve(shiftL(), {
+        editorOpen: false,
+        editorTextFocus: false,
+      })
+      expect(rule?.command).toBe('workbench.action.openDebug')
+    })
+
+    it('still adds the selection to chat when an editor is open but unfocused', () => {
+      const rule = new KeyResolver(defaults).resolve(shiftL(), {
+        editorOpen: true,
+        editorTextFocus: false,
+      })
+      expect(rule?.command).toBe('workbench.action.addSelectionToChat')
+    })
+
+    it('still selects highlights when the editor text area has focus', () => {
+      const rule = new KeyResolver(defaults).resolve(shiftL(), {
+        editorOpen: true,
+        editorTextFocus: true,
+      })
+      expect(rule?.command).toBe('editor.action.selectHighlights')
+    })
+  })
 })
 
 describe('KeyResolver – chord', () => {

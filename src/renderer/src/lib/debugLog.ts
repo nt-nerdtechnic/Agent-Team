@@ -14,12 +14,17 @@ export const LOG_LEVELS = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'] as c
 
 export type LogLevel = (typeof LOG_LEVELS)[number]
 
+/** Anchored at the start of the line so a level word quoted inside a message —
+ *  log lines routinely carry whole command lines and JSON — cannot be mistaken
+ *  for the record's own level. */
+const HEADER = /^\[[^\]]*\] ([A-Z]+) /
+
 /** The line's own level, or '' for continuation lines (traceback bodies). */
 export function logLineLevel(line: string): '' | LogLevel {
-  for (const level of LOG_LEVELS) {
-    if (line.includes(`] ${level} `)) return level
-  }
-  return ''
+  const match = HEADER.exec(line)
+  if (!match) return ''
+  const level = match[1] as LogLevel
+  return LOG_LEVELS.includes(level) ? level : ''
 }
 
 export interface ChunkSplit {

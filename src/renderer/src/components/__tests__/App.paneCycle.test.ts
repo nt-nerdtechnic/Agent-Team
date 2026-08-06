@@ -15,7 +15,7 @@ const appSource = readFileSync(
 
 const cycleFn = appSource.slice(
   appSource.indexOf('function cycleFocusedPane'),
-  appSource.indexOf('function cycleFocusedPane') + 700
+  appSource.indexOf('function cycleFocusedPane') + 1400
 )
 
 describe('App pane cycling wiring', () => {
@@ -50,5 +50,18 @@ describe('App pane cycling wiring', () => {
 
   it('bails out on a no-op plan', () => {
     expect(cycleFn).toContain('if (!plan) return')
+  })
+
+  it('marks the window as the pane-stage owner for the keybinding guard', () => {
+    expect(appSource).toContain("setContext('paneStage', true)")
+  })
+
+  it('hands DOM focus over when the target is still a restore placeholder', () => {
+    // A placeholder has no TerminalPane ref, so the focusPaneId watcher cannot
+    // focus it — without this the outgoing terminal keeps every keystroke.
+    expect(cycleFn).toContain("panes.value.find((p) => p.id === plan.targetId)?.realized")
+    expect(cycleFn).toContain('.blur?.()')
+    expect(cycleFn).toContain('void realizeRestoredPane(plan.targetId).then(')
+    expect(cycleFn).toContain('paneRefs[plan.targetId]?.focus?.()')
   })
 })

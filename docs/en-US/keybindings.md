@@ -36,6 +36,7 @@ and when-clause conditions.
 | `` ⌃` `` | Toggle AI Terminal panel |
 | `⌘⇧U` | Open Agent |
 | `⌘⇧B` | Rebuild Pane (Resume) |
+| `⌘⇧L` | Open Debug (backend log, shell, AI) — outside the Mini IDE, where this chord belongs to the editor |
 | `Escape` | Close modal dialog |
 
 ### Quick Open

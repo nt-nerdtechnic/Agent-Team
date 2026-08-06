@@ -7,10 +7,13 @@ import { defaults } from '../defaults'
 import { useKeybindings, setUserRules, setContext } from '../useKeybindings'
 import { registerCommand, _resetRegistry } from '../commandRegistry'
 
-// Ctrl+Tab / Ctrl+Shift+Tab cycle CLI panes. Two things must hold and both are
+// Ctrl+Tab / Ctrl+Shift+Tab cycle CLI panes. Three things must hold and each is
 // easy to break from a distance:
 // - the rules sit AFTER the editor-tab rules for the same chord, so priority
-//   and the '!editorOpen' fallback decide which command wins per window;
+//   and the 'paneStage' guard decide which command wins per window;
+// - windows without a pane stage must fall through to the editor rules. An
+//   unhandled binding is NOT consumed, so a rule that wins in a window that
+//   never registered the command leaks the Tab into that window's terminal;
 // - bare Tab and Shift+Tab must stay untouched — the dispatcher's capture-phase
 //   listener would otherwise swallow shell completion and Claude Code's
 //   permission-mode toggle before xterm forwards them to the PTY.
@@ -26,35 +29,42 @@ describe('Ctrl+Tab pane cycling rules', () => {
     resolver = new KeyResolver(defaults)
   })
 
-  it('cycles panes when no editor is open', () => {
-    expect(resolver.resolve(tabEvent(false), {})?.command).toBe('workbench.action.focusNextPane')
-    expect(resolver.resolve(tabEvent(true), {})?.command).toBe('workbench.action.focusPreviousPane')
+  it('cycles panes in the window that owns the pane stage', () => {
+    const ctx = { paneStage: true }
+    expect(resolver.resolve(tabEvent(false), ctx)?.command).toBe('workbench.action.focusNextPane')
+    expect(resolver.resolve(tabEvent(true), ctx)?.command).toBe('workbench.action.focusPreviousPane')
   })
 
-  it('falls back to editor tab switching in the Mini IDE window', () => {
-    const ctx = { editorOpen: true }
+  it('falls back to editor tab switching in a plugin window', () => {
+    expect(resolver.resolve(tabEvent(false), {})?.command).toBe('workbench.action.openNextEditor')
+    expect(resolver.resolve(tabEvent(true), {})?.command).toBe('workbench.action.openPreviousEditor')
+  })
+
+  it('still falls back when the Mini IDE has closed its last tab', () => {
+    // Regression guard: editorOpen is !!activeKey, so it goes false with no
+    // tabs open. Gating on '!editorOpen' would hand the chord to a command the
+    // Mini IDE never registers, and the unconsumed Tab would reach its AI dock.
+    const ctx = { editorOpen: false }
     expect(resolver.resolve(tabEvent(false), ctx)?.command).toBe('workbench.action.openNextEditor')
-    expect(resolver.resolve(tabEvent(true), ctx)?.command).toBe('workbench.action.openPreviousEditor')
   })
 
   it('still cycles panes while a terminal has focus', () => {
     // CLI panes hold terminalFocus almost all the time; guarding on it would
     // make the shortcut unreachable.
-    const ctx = { terminalFocus: true }
+    const ctx = { paneStage: true, terminalFocus: true }
     expect(resolver.resolve(tabEvent(false), ctx)?.command).toBe('workbench.action.focusNextPane')
   })
 
   it('does not cycle behind an open modal', () => {
-    expect(resolver.resolve(tabEvent(false), { modalOpen: true })?.command).not.toBe(
-      'workbench.action.focusNextPane',
-    )
+    const ctx = { paneStage: true, modalOpen: true }
+    expect(resolver.resolve(tabEvent(false), ctx)?.command).not.toBe('workbench.action.focusNextPane')
   })
 
   it('leaves bare Tab and Shift+Tab unbound', () => {
     const bare = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true })
     const shiftOnly = new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true })
-    expect(resolver.resolve(bare, {})).toBeNull()
-    expect(resolver.resolve(shiftOnly, {})).toBeNull()
+    expect(resolver.resolve(bare, { paneStage: true })).toBeNull()
+    expect(resolver.resolve(shiftOnly, { paneStage: true })).toBeNull()
   })
 })
 
@@ -82,6 +92,7 @@ describe('Ctrl+Tab pane cycling dispatch', () => {
 
   beforeEach(() => {
     _resetRegistry()
+    setContext('paneStage', true)
     setContext('editorOpen', false)
     setContext('modalOpen', false)
     setContext('terminalFocus', true)
@@ -99,6 +110,7 @@ describe('Ctrl+Tab pane cycling dispatch', () => {
     window.removeEventListener('keydown', probe)
     wrapper.unmount()
     setUserRules([])
+    setContext('paneStage', false)
     setContext('terminalFocus', false)
   })
 
@@ -141,12 +153,12 @@ describe('Ctrl+Tab pane cycling dispatch', () => {
     setContext('modalOpen', false)
   })
 
-  it('does not cycle panes in a window showing an editor', () => {
-    setContext('editorOpen', true)
+  it('does not cycle panes in a window without a pane stage', () => {
+    setContext('paneStage', false)
     const e = dispatch({ key: 'Tab', ctrlKey: true })
     expect(next).not.toHaveBeenCalled()
-    // openNextEditor is unregistered here, so the event falls through untouched.
+    // Resolves to openNextEditor, which is unregistered here, so the event
+    // falls through untouched — the plugin window's own handler decides.
     expect(e.defaultPrevented).toBe(false)
-    setContext('editorOpen', false)
   })
 })

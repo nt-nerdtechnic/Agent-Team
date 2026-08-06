@@ -85,6 +85,18 @@ async function loadHealth(): Promise<void> {
   } catch { /* non-fatal */ }
 }
 
+// Opening the modal during startup finds the backend still connecting, and both
+// loads fail silently — leaving the log path unknown and the whole modal blank
+// until the user closes and reopens it. Reload whenever the connection lands.
+watch(
+  () => props.backend.status.value,
+  (status) => {
+    if (status !== 'connected' || !props.open) return
+    void loadPaths()
+    void loadHealth()
+  }
+)
+
 // ── Log tail ────────────────────────────────────────────────────────────────
 
 /** Rendered line cap. The file is 10 MB before it rotates; keeping all of it in
@@ -107,6 +119,8 @@ let logOffset = 0
  *  mid-line, and joining it to the next chunk is what keeps lines intact. */
 let partial = ''
 let pollTimer: ReturnType<typeof setTimeout> | null = null
+/** Bumped by stopTail() so an in-flight poll knows its chain was abandoned. */
+let tailGeneration = 0
 /** False until the cursor has been placed near the end of the file. */
 let seeded = false
 /** A seek into the middle of the file lands mid-line; that first fragment is
@@ -160,11 +174,17 @@ async function pollOnce(): Promise<void> {
 }
 
 /** Self-rescheduling poll rather than setInterval: a slow read must not let
- *  ticks pile up on top of each other. */
-function scheduleTail(): void {
+ *  ticks pile up on top of each other.
+ *
+ *  Every chain carries the generation it was started under. stopTail() bumps
+ *  the counter, so a poll that was mid-await when the tab closed finds itself
+ *  stale and stops instead of rescheduling. Without this, a stop/start inside
+ *  one read's await window leaves two chains sharing `logOffset` — duplicated
+ *  lines, and a timer stopTail() can no longer reach. */
+function scheduleTail(generation: number): void {
   pollTimer = setTimeout(() => {
     void pollOnce().finally(() => {
-      if (tailing.value) scheduleTail()
+      if (generation === tailGeneration) scheduleTail(generation)
     })
   }, POLL_MS)
 }
@@ -172,13 +192,15 @@ function scheduleTail(): void {
 function startTail(): void {
   if (tailing.value) return
   tailing.value = true
+  const generation = tailGeneration
   void pollOnce().finally(() => {
-    if (tailing.value) scheduleTail()
+    if (generation === tailGeneration) scheduleTail(generation)
   })
 }
 
 function stopTail(): void {
   tailing.value = false
+  tailGeneration++
   if (pollTimer !== null) {
     clearTimeout(pollTimer)
     pollTimer = null
@@ -224,7 +246,8 @@ const shellPaneId = computed(() => aiTerminalPaneId('debug-shell', logDir.value)
 const aiWorkspace = computed(() => props.workspacePath || logDir.value)
 const aiPaneId = computed(() => aiTerminalPaneId('debug-ai', aiWorkspace.value))
 
-const aiSpecs = CLI_AGENT_SPECS.filter((s) => s.agentKey !== 'terminal')
+// CLI_AGENT_SPECS already excludes the plain-shell 'terminal' spec.
+const aiSpecs = CLI_AGENT_SPECS
 const aiAgent = ref(settingsGet('agentTeam.debug.agent', 'claude'))
 watch(aiAgent, (v) => settingsSet('agentTeam.debug.agent', v))
 
@@ -237,6 +260,11 @@ function shellStatus(): string {
 function aiStatus(): string {
   return aiRef.value?.status ?? 'idle'
 }
+/** A finished CLI leaves 'exited'/'stopped'/'error', never 'idle' — gating the
+ *  controls on 'idle' would lock the agent picker forever after the first run. */
+function isActive(status: string): boolean {
+  return status === 'starting' || status === 'running'
+}
 
 async function startShell(): Promise<void> {
   const term = shellRef.value
@@ -247,9 +275,13 @@ async function startShell(): Promise<void> {
   try {
     const shell = props.backend.shell.value || 'bash'
     await term.spawn({
-      // Interactive zsh: ~/.zshrc is where installers put PATH, and a plain
-      // -lc shell would not see the tools the user expects here.
-      command: [shell, shell.endsWith('zsh') ? '-ilc' : '-lc', ''],
+      // The inner shell name is the command on purpose: `zsh -ilc ''` runs an
+      // empty command and exits immediately, so the PTY would die before the
+      // user saw a prompt. Spawning the shell as its own command is what
+      // App.vue does for its plain-terminal panes (see the agentKey 'terminal'
+      // branch there). The -ilc wrapper still matters: ~/.zshrc is where
+      // installers put PATH, and -lc alone would not read it.
+      command: [shell, shell.endsWith('zsh') ? '-ilc' : '-lc', shell],
       cwd: logDir.value,
       agentKey: 'terminal',
       metadata: { workspace_path: logDir.value, origin: 'debug-modal' },
@@ -355,12 +387,33 @@ watch(activeTab, (tab) => {
   else stopTail()
   if (tab === 'shell') shellVisited.value = true
   if (tab === 'ai') aiVisited.value = true
-  void nextTick(() => refitActive())
+  void nextTick(() => {
+    refitActive()
+    if (tab === 'shell' || tab === 'ai') void reattachOnce(tab)
+  })
 })
 
 function refitActive(): void {
   if (activeTab.value === 'shell') shellRef.value?.fitTerminal({ redrawAfterSettle: true })
   if (activeTab.value === 'ai') aiRef.value?.fitTerminal({ redrawAfterSettle: true })
+}
+
+// A window reload drops ownership of any PTY these tabs started; the backend
+// janitor only reaps it after an idle hour, so without this the CLI is stranded
+// and invisible. Claim it back the first time the tab is opened. Once per
+// terminal: a second attempt could rebind a session Start has since replaced.
+const reattached = { shell: false, ai: false }
+async function reattachOnce(tab: 'shell' | 'ai'): Promise<void> {
+  if (reattached[tab]) return
+  if (props.backend.status.value !== 'connected') return
+  const term = tab === 'shell' ? shellRef.value : aiRef.value
+  if (!term) return
+  reattached[tab] = true
+  // Pass the agent: tryReattach is the one path that never calls spawn(), and
+  // the input protocol degrades to plain-shell encoding without it.
+  try {
+    await term.tryReattach({ agentKey: tab === 'shell' ? 'terminal' : aiAgent.value })
+  } catch { /* PTY gone — the Start button stays as it was */ }
 }
 
 // The path arrives from the backend a beat after the modal opens, so the first
@@ -456,25 +509,32 @@ onUnmounted(() => stopTail())
             <span class="dbg-count">{{ shellStatus() }}</span>
             <button
               class="dbg-btn"
-              :disabled="shellBusy || !logDir || shellStatus() === 'running'"
+              :disabled="shellBusy || !logDir || isActive(shellStatus())"
               @click="startShell()"
             >
               {{ t('debug.term.start') }}
             </button>
             <button
               class="dbg-btn"
-              :disabled="shellStatus() === 'idle'"
+              :disabled="!isActive(shellStatus())"
               @click="shellRef?.interrupt()"
             >
               {{ t('debug.term.interrupt') }}
             </button>
-            <button class="dbg-btn" :disabled="shellStatus() === 'idle'" @click="stopTerm(shellRef)">
+            <button
+              class="dbg-btn"
+              :disabled="!isActive(shellStatus())"
+              @click="stopTerm(shellRef)"
+            >
               {{ t('debug.term.stop') }}
             </button>
           </div>
           <div class="dbg-term">
+            <!-- :key — useTerminal captures paneId/workspacePath once at setup,
+                 so a path that only resolves after mount must remount it. -->
             <AiCliTerminal
               v-if="shellVisited"
+              :key="shellPaneId"
               ref="shellRef"
               :pane-id="shellPaneId"
               :backend="backend"
@@ -486,7 +546,7 @@ onUnmounted(() => stopTail())
         <!-- Ask AI -->
         <section v-show="activeTab === 'ai'" class="dbg-body">
           <div class="dbg-toolbar">
-            <select v-model="aiAgent" class="dbg-select" :disabled="aiStatus() !== 'idle'">
+            <select v-model="aiAgent" class="dbg-select" :disabled="isActive(aiStatus())">
               <option v-for="s in aiSpecs" :key="s.agentKey" :value="s.agentKey">
                 {{ s.label }}
               </option>
@@ -496,21 +556,26 @@ onUnmounted(() => stopTail())
             <span class="dbg-count">{{ aiStatus() }}</span>
             <button
               class="dbg-btn"
-              :disabled="aiBusy || !aiWorkspace || aiStatus() === 'running'"
+              :disabled="aiBusy || !aiWorkspace || isActive(aiStatus())"
               @click="startAi()"
             >
               {{ t('debug.term.start') }}
             </button>
-            <button class="dbg-btn" :disabled="aiStatus() === 'idle'" @click="aiRef?.interrupt()">
+            <button
+              class="dbg-btn"
+              :disabled="!isActive(aiStatus())"
+              @click="aiRef?.interrupt()"
+            >
               {{ t('debug.term.interrupt') }}
             </button>
-            <button class="dbg-btn" :disabled="aiStatus() === 'idle'" @click="stopTerm(aiRef)">
+            <button class="dbg-btn" :disabled="!isActive(aiStatus())" @click="stopTerm(aiRef)">
               {{ t('debug.term.stop') }}
             </button>
           </div>
           <div class="dbg-term">
             <AiCliTerminal
               v-if="aiVisited"
+              :key="aiPaneId"
               ref="aiRef"
               :pane-id="aiPaneId"
               :backend="backend"
