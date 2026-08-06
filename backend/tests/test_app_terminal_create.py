@@ -374,19 +374,19 @@ def test_kilo_resume_id_parses_resume_commands() -> None:
 
 def test_qwen_resume_id_parses_resume_commands() -> None:
     sid = "1f0b9d5e-2f4a-4c0e-9b7d-3a5c8e9f0a1b"
-    assert app._qwen_resume_id(f"qwen --resume {sid}") == sid
-    assert app._qwen_resume_id(f"qwen -r {sid}") == sid
-    assert app._qwen_resume_id(f"qwen --resume {sid} --yolo") == sid
-    assert app._qwen_resume_id(f"qwen --yolo --resume {sid}") == sid
-    assert app._qwen_resume_id("qwen") == ""
+    assert app._resume_id_for_agent("qwen", f"qwen --resume {sid}") == sid
+    assert app._resume_id_for_agent("qwen", f"qwen -r {sid}") == sid
+    assert app._resume_id_for_agent("qwen", f"qwen --resume {sid} --yolo") == sid
+    assert app._resume_id_for_agent("qwen", f"qwen --yolo --resume {sid}") == sid
+    assert app._resume_id_for_agent("qwen", "qwen") == ""
     # A following flag must not be captured as the id (bare --resume = latest).
-    assert app._qwen_resume_id("qwen --resume --yolo") == ""
-    assert app._qwen_resume_id("qwen --resume") == ""
-    assert app._qwen_resume_id("") == ""
-    assert app._qwen_resume_id(None) == ""
+    assert app._resume_id_for_agent("qwen", "qwen --resume --yolo") == ""
+    assert app._resume_id_for_agent("qwen", "qwen --resume") == ""
+    assert app._resume_id_for_agent("qwen", "") == ""
+    assert app._resume_id_for_agent("qwen", None) == ""
     # Shell-wrapped list — the shape the frontend actually sends.
-    assert app._qwen_resume_id(["/bin/zsh", "-lc", f"qwen --resume {sid}"]) == sid
-    assert app._qwen_resume_id(["/bin/zsh", "-lc", "qwen"]) == ""
+    assert app._resume_id_for_agent("qwen", ["/bin/zsh", "-lc", f"qwen --resume {sid}"]) == sid
+    assert app._resume_id_for_agent("qwen", ["/bin/zsh", "-lc", "qwen"]) == ""
 
 
 def test_pi_resume_id_parses_session_id_commands() -> None:

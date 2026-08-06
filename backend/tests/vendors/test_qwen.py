@@ -284,7 +284,7 @@ def _assistant_saying(uuid: str, text: str, cwd: str = _CWD) -> dict:
 
 def _go_quiet(path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Pretend the log stopped being written to well past the idle window."""
-    import agent_team_backend.log_readers.qwen as qwen_mod
+    import agent_team_backend.cli_vendors.qwen as qwen_mod
 
     monkeypatch.setattr(
         qwen_mod.time, "time", lambda: path.stat().st_mtime + qwen_mod._TURN_IDLE_SECONDS + 1

@@ -3531,11 +3531,6 @@ async def _terminal_create_impl(
             # in a fresh kickoff, so claim the resume id from the launch
             # command to route the resumed session's events back to this pane.
             explicit_session_id = app._kilo_resume_id(payload.get("command"))
-        elif agent_key == "qwen" and not explicit_session_id:
-            # Resumed Qwen panes likewise: claim the resume id up front so the
-            # session's events route back to this pane and the new-session
-            # single-candidate fallback excludes it.
-            explicit_session_id = app._qwen_resume_id(payload.get("command"))
         elif agent_key == "pi" and not explicit_session_id:
             # Pi's `--session-id <id>` names the pane's session whether it
             # resumes an existing id or (id unknown) creates a new one under

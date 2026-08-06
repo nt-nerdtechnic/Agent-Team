@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from agent_team_backend import usage_service as us
+from agent_team_backend.cli_vendors import qwen as qwen_vendor
 from agent_team_backend.profiles_store import CliProfilesStore
 
 
@@ -1296,7 +1297,7 @@ async def test_fetch_opencode_first_failure_surfaced_when_none_answer(monkeypatc
 # ── qwen fetch (ModelStudio Coding Plan console gateway) ────────────────────
 
 def _with_qwen_key(monkeypatch, key="sk-sp-test"):
-    monkeypatch.setattr(us, "read_qwen_credentials", lambda home, env=None: key)
+    monkeypatch.setattr(qwen_vendor, "read_qwen_credentials", lambda home, env=None: key)
 
 
 async def test_fetch_qwen_no_credentials_and_legacy_oauth(tmp_path):
@@ -1790,7 +1791,7 @@ async def test_poll_once_rate_limit_sets_cooldown(tmp_path, monkeypatch):
     monkeypatch.setattr(us, "fetch_grok", lambda home: fake_ok("grok"))
     monkeypatch.setattr(us, "fetch_antigravity", lambda home: fake_ok("antigravity"))
     monkeypatch.setattr(us, "fetch_opencode", lambda home: fake_ok("opencode"))
-    monkeypatch.setattr(us, "fetch_qwen", lambda home: fake_ok("qwen"))
+    monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_ok("kilo"))
     monkeypatch.setattr(us, "fetch_pi", lambda home: fake_ok("pi"))
     monkeypatch.setattr(us, "fetch_copilot", lambda home: fake_ok("copilot"))
@@ -1823,7 +1824,7 @@ async def test_poll_once_survives_fetcher_exception(tmp_path, monkeypatch):
     monkeypatch.setattr(us, "fetch_grok", lambda home: fake_ok("grok"))
     monkeypatch.setattr(us, "fetch_antigravity", lambda home: fake_ok("antigravity"))
     monkeypatch.setattr(us, "fetch_opencode", lambda home: fake_ok("opencode"))
-    monkeypatch.setattr(us, "fetch_qwen", lambda home: fake_ok("qwen"))
+    monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_ok("kilo"))
     monkeypatch.setattr(us, "fetch_pi", lambda home: fake_ok("pi"))
     monkeypatch.setattr(us, "fetch_copilot", lambda home: fake_ok("copilot"))
@@ -1961,7 +1962,7 @@ async def test_poll_once_claude_accounts_are_independent_and_pruned(tmp_path, mo
     monkeypatch.setattr(us, "fetch_grok", lambda home: fake_other("grok"))
     monkeypatch.setattr(us, "fetch_antigravity", lambda home: fake_other("antigravity"))
     monkeypatch.setattr(us, "fetch_opencode", lambda home: fake_other("opencode"))
-    monkeypatch.setattr(us, "fetch_qwen", lambda home: fake_other("qwen"))
+    monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_other("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_other("kilo"))
     monkeypatch.setattr(us, "fetch_pi", lambda home: fake_other("pi"))
     monkeypatch.setattr(us, "fetch_copilot", lambda home: fake_other("copilot"))
@@ -2051,7 +2052,7 @@ async def test_refresh_during_poll_runs_next_cycle_with_new_active_account(
     monkeypatch.setattr(us, "fetch_grok", lambda home: fake_other("grok"))
     monkeypatch.setattr(us, "fetch_antigravity", lambda home: fake_other("antigravity"))
     monkeypatch.setattr(us, "fetch_opencode", lambda home: fake_other("opencode"))
-    monkeypatch.setattr(us, "fetch_qwen", lambda home: fake_other("qwen"))
+    monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_other("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_other("kilo"))
     monkeypatch.setattr(us, "fetch_pi", lambda home: fake_other("pi"))
     monkeypatch.setattr(us, "fetch_copilot", lambda home: fake_other("copilot"))
@@ -2183,7 +2184,7 @@ async def test_poll_once_always_reads_real_home(tmp_path, monkeypatch):
     monkeypatch.setattr(us, "fetch_grok", spy_grok)
     monkeypatch.setattr(us, "fetch_antigravity", spy_antigravity)
     monkeypatch.setattr(us, "fetch_opencode", spy_opencode)
-    monkeypatch.setattr(us, "fetch_qwen", spy_qwen)
+    monkeypatch.setattr(qwen_vendor, "fetch_qwen", spy_qwen)
     monkeypatch.setattr(us, "fetch_kilo", spy_kilo)
     monkeypatch.setattr(us, "fetch_pi", spy_pi)
     monkeypatch.setattr(us, "fetch_copilot", spy_copilot)
@@ -2224,7 +2225,7 @@ async def test_poll_once_harvests_active_slots(tmp_path, monkeypatch):
     monkeypatch.setattr(us, "fetch_grok", lambda home: fake_ok("grok"))
     monkeypatch.setattr(us, "fetch_antigravity", lambda home: fake_ok("antigravity"))
     monkeypatch.setattr(us, "fetch_opencode", lambda home: fake_ok("opencode"))
-    monkeypatch.setattr(us, "fetch_qwen", lambda home: fake_ok("qwen"))
+    monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_ok("kilo"))
     monkeypatch.setattr(us, "fetch_pi", lambda home: fake_ok("pi"))
     monkeypatch.setattr(us, "fetch_copilot", lambda home: fake_ok("copilot"))
@@ -2266,7 +2267,7 @@ async def test_poll_once_harvests_pending_login_homes(tmp_path, monkeypatch):
     monkeypatch.setattr(us, "fetch_grok", lambda home: fake_ok("grok"))
     monkeypatch.setattr(us, "fetch_antigravity", lambda home: fake_ok("antigravity"))
     monkeypatch.setattr(us, "fetch_opencode", lambda home: fake_ok("opencode"))
-    monkeypatch.setattr(us, "fetch_qwen", lambda home: fake_ok("qwen"))
+    monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_ok("kilo"))
     monkeypatch.setattr(us, "fetch_pi", lambda home: fake_ok("pi"))
     monkeypatch.setattr(us, "fetch_copilot", lambda home: fake_ok("copilot"))
@@ -2365,7 +2366,7 @@ async def test_poll_once_skips_login_harvest_while_login_pane_runs(
     monkeypatch.setattr(us, "fetch_grok", lambda home: fake_ok("grok"))
     monkeypatch.setattr(us, "fetch_antigravity", lambda home: fake_ok("antigravity"))
     monkeypatch.setattr(us, "fetch_opencode", lambda home: fake_ok("opencode"))
-    monkeypatch.setattr(us, "fetch_qwen", lambda home: fake_ok("qwen"))
+    monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_ok("kilo"))
     monkeypatch.setattr(us, "fetch_pi", lambda home: fake_ok("pi"))
     monkeypatch.setattr(us, "fetch_copilot", lambda home: fake_ok("copilot"))
@@ -2408,7 +2409,7 @@ async def test_login_harvest_for_active_profile_restores_live(tmp_path, monkeypa
     monkeypatch.setattr(us, "fetch_grok", lambda home: fake_ok("grok"))
     monkeypatch.setattr(us, "fetch_antigravity", lambda home: fake_ok("antigravity"))
     monkeypatch.setattr(us, "fetch_opencode", lambda home: fake_ok("opencode"))
-    monkeypatch.setattr(us, "fetch_qwen", lambda home: fake_ok("qwen"))
+    monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_ok("kilo"))
     monkeypatch.setattr(us, "fetch_pi", lambda home: fake_ok("pi"))
     monkeypatch.setattr(us, "fetch_copilot", lambda home: fake_ok("copilot"))

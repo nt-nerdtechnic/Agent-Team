@@ -22,7 +22,6 @@ from .kilo import KiloLogReader
 from .kimi import KimiLogReader
 from .opencode import OpencodeLogReader
 from .pi import PiLogReader
-from .qwen import QwenLogReader
 from .watcher import LogWatcher
 
 # Readers migrated to cli_vendors/ resolve lazily (PEP 562): their vendor
@@ -32,6 +31,7 @@ from .watcher import LogWatcher
 # packages finish initializing first.
 _MIGRATED_READERS = {
     "AiderLogReader": "aider",
+    "QwenLogReader": "qwen",
 }
 
 

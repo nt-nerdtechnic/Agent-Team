@@ -153,42 +153,6 @@ ANTIGRAVITY_NEEDS_OAUTH_CONFIG = (
 )
 OPENCODE_AUTH_FILE_REL = (".local", "share", "opencode", "auth.json")
 OPENCODE_MINIMAX_USAGE_URL = "https://api.minimax.io/v1/token_plan/remains"
-# qwen (Alibaba ModelStudio Coding Plan). The quota endpoint is the console
-# gateway API — undocumented, and previously requested behind a full browser
-# User-Agent. The costume is gone: the request now says ``Navide`` and carries
-# the API key the user configured, which is what the gateway actually
-# authenticates. Origin/Referer stay because the gateway rejects cross-site
-# posts without them; they name the console the API belongs to, not a client we
-# are pretending to be. The alternate region is retried on failure.
-_QWEN_USAGE_QUERY = (
-    "?action=zeldaEasy.broadscope-bailian.codingPlan.queryCodingPlanInstanceInfoV2"
-    "&product=broadscope-bailian&api=queryCodingPlanInstanceInfoV2"
-)
-QWEN_INTL_USAGE_URL = (
-    "https://modelstudio.console.alibabacloud.com/data/api.json"
-    + _QWEN_USAGE_QUERY + "&currentRegionId=ap-southeast-1"
-)
-QWEN_CN_USAGE_URL = (
-    "https://bailian.console.aliyun.com/data/api.json"
-    + _QWEN_USAGE_QUERY + "&currentRegionId=cn-beijing"
-)
-# (url, commodityCode, Origin, Referer) per region, tried in order.
-QWEN_REGIONS = (
-    (QWEN_INTL_USAGE_URL, "sfm_codingplan_public_intl",
-     "https://modelstudio.console.alibabacloud.com",
-     "https://modelstudio.console.alibabacloud.com/ap-southeast-1/"
-     "?tab=coding-plan#/efm/coding_plan"),
-    (QWEN_CN_USAGE_URL, "sfm_codingplan_public_cn",
-     "https://bailian.console.aliyun.com",
-     "https://bailian.console.aliyun.com/"),
-)
-# The env key qwen-code itself resolves, then CodexBar's accepted aliases.
-QWEN_ENV_KEYS = (
-    "BAILIAN_CODING_PLAN_API_KEY",
-    "ALIBABA_CODING_PLAN_API_KEY",
-    "ALIBABA_QWEN_API_KEY",
-    "DASHSCOPE_API_KEY",
-)
 # kilo (Kilo CLI, @kilocode/cli). auth.json is a map keyed by provider id; the
 # "kilo" entry holds either an api key or a long-lived oauth access token that
 # IS the Kilo bearer token (1-year expiry, no refresh rotation needed for
@@ -238,8 +202,6 @@ CURSOR_IDE_TOKEN_KEY = "cursorAuth/accessToken"
 CURSOR_USAGE_SUMMARY_URL = "https://cursor.com/api/usage-summary"
 GROK_INIT_TIMEOUT = 4.0
 GROK_BILLING_TIMEOUT = 3.0
-HTTP_TIMEOUT = 30.0
-RATE_LIMIT_COOLDOWN = 300.0
 RESET_BOUNDARY_GRACE = 30.0
 DEFAULT_INTERVAL = 300.0
 MIN_INTERVAL = 60.0
@@ -247,57 +209,32 @@ USAGE_CACHE_FILE = "usage-cache.json"
 USAGE_CACHE_SCHEMA_VERSION = 1
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+# Snapshot plumbing lives in usage_common (importable by vendor modules);
+# re-exported here so this module's namespace is unchanged for callers/tests.
+from .usage_common import (  # noqa: E402,F401
+    HTTP_TIMEOUT,
+    RATE_LIMIT_COOLDOWN,
+    _clamp_pct,
+    _epoch_to_iso,
+    _now_iso,
+    _num,
+    _snapshot,
+    _window,
+    parse_retry_after,
+)
 
-
-def _epoch_to_iso(sec: Any) -> str | None:
-    try:
-        return datetime.fromtimestamp(float(sec), timezone.utc).isoformat()
-    except (TypeError, ValueError, OSError, OverflowError):
-        return None
-
-
-def _num(v: Any) -> float | None:
-    """Kimi returns numbers as int, float or string interchangeably."""
-    if isinstance(v, bool) or v is None:
-        return None
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return None
-
-
-def _clamp_pct(v: float) -> float:
-    return max(0.0, min(100.0, v))
-
-
-_UNSET = object()
-
-
-def _window(kind: str, label: str, used_percent: float, resets_at: str | None,
-            window_minutes: Any = _UNSET) -> dict:
-    w = {
-        "kind": kind,
-        "label": label,
-        "usedPercent": round(_clamp_pct(used_percent), 1),
-        "resetsAt": resets_at,
-    }
-    if window_minutes is not _UNSET:
-        w["windowMinutes"] = window_minutes
-    return w
-
-
-def _snapshot(provider: str, status: str, *, windows: list[dict] | None = None,
-              plan_type: str | None = None, error: str | None = None) -> dict:
-    return {
-        "provider": provider,
-        "status": status,
-        "planType": plan_type,
-        "windows": windows or [],
-        "fetchedAt": _now_iso(),
-        "error": error,
-    }
+# R2: qwen's usage stack moved to its vendor module; re-exported so this
+# module's namespace (and its tests) keep working until the cleanup round.
+from .cli_vendors.qwen import (  # noqa: E402,F401
+    QWEN_CN_USAGE_URL,
+    QWEN_ENV_KEYS,
+    QWEN_INTL_USAGE_URL,
+    QWEN_REGIONS,
+    fetch_qwen,
+    normalize_qwen,
+    qwen_legacy_oauth_present,
+    read_qwen_credentials,
+)
 
 
 # ── Credential readers (pure; ``home`` injectable for tests) ────────────────
@@ -610,62 +547,6 @@ def opencode_anthropic_oauth(auth: dict) -> dict | None:
     if not isinstance(access, str) or not access:
         return None
     return {"accessToken": access, "expiresAt": entry.get("expires")}
-
-
-def _qwen_env_lookup(mapping: dict) -> str | None:
-    for key in QWEN_ENV_KEYS:
-        value = mapping.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
-
-
-def _parse_dotenv(text: str) -> dict:
-    """Minimal ``KEY=VALUE`` .env parse (comments/blank lines skipped,
-    ``export`` prefix and surrounding quotes stripped) — enough for the .env
-    files qwen-code resolves its API key from."""
-    result: dict[str, str] = {}
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        if key.startswith("export "):
-            key = key[len("export "):].strip()
-        result[key] = value.strip().strip("'\"")
-    return result
-
-
-def read_qwen_credentials(home: Path, env: dict | None = None) -> str | None:
-    """The Alibaba ModelStudio Coding Plan API key, resolved the way qwen-code
-    does (read-only): process env first, then ``~/.qwen/.env``, then the
-    ``env`` object in ``~/.qwen/settings.json``."""
-    key = _qwen_env_lookup(env or {})
-    if key is not None:
-        return key
-    qwen_home = home / ".qwen"
-    try:
-        key = _qwen_env_lookup(
-            _parse_dotenv((qwen_home / ".env").read_text(encoding="utf-8")))
-    except OSError:
-        key = None
-    if key is not None:
-        return key
-    try:
-        settings = json.loads(
-            (qwen_home / "settings.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    env_obj = settings.get("env") if isinstance(settings, dict) else None
-    return _qwen_env_lookup(env_obj) if isinstance(env_obj, dict) else None
-
-
-def qwen_legacy_oauth_present(home: Path) -> bool:
-    """True when the defunct Qwen OAuth credential file exists. The free tier
-    it belonged to was discontinued and no quota endpoint accepts the token,
-    so it maps to status=unavailable rather than inventing client-side counts."""
-    return (home / ".qwen" / "oauth_creds.json").is_file()
 
 
 def _kilo_entry_credentials(entry: Any) -> dict | None:
@@ -1314,71 +1195,6 @@ def normalize_opencode_minimax(data: dict) -> list[dict]:
     return []
 
 
-_QWEN_WINDOWS = (
-    ("per5Hour", "session", "Session (5h)"),
-    ("perWeek", "weekly", "Weekly"),
-    ("perBillMonth", "monthly", "Monthly"),
-)
-
-
-def _qwen_reset_iso(raw: Any) -> str | None:
-    """``*QuotaNextRefreshTime`` arrives as epoch ms, epoch s, ISO8601 or
-    ``yyyy-MM-dd HH:mm[:ss]`` depending on gateway version."""
-    num = _num(raw)
-    if num is not None:
-        return _epoch_to_iso(num / 1000 if num > 1e11 else num)
-    if not isinstance(raw, str) or not raw.strip():
-        return None
-    try:
-        parsed = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.isoformat()
-
-
-def _qwen_instance_infos(data: Any, depth: int = 0) -> list | None:
-    """Deep-search the console-gateway envelope for
-    ``codingPlanInstanceInfos`` — the data/statusCode wrapping shifts between
-    gateway versions, so CodexBar searches by key and so do we."""
-    if depth > 6 or not isinstance(data, dict):
-        return None
-    infos = data.get("codingPlanInstanceInfos")
-    if isinstance(infos, list):
-        return infos
-    for value in data.values():
-        found = _qwen_instance_infos(value, depth + 1)
-        if found is not None:
-            return found
-    return None
-
-
-def normalize_qwen(data: dict) -> tuple[list[dict], str | None]:
-    """First usable ``codingPlanInstanceInfos[]`` entry: per5Hour/perWeek/
-    perBillMonth Used/Total quota pairs -> session/weekly/monthly windows;
-    planName (falling back to instanceName/packageName) -> planType."""
-    for info in _qwen_instance_infos(data) or []:
-        if not isinstance(info, dict):
-            continue
-        windows: list[dict] = []
-        for prefix, kind, label in _QWEN_WINDOWS:
-            total = _num(info.get(f"{prefix}TotalQuota"))
-            used = _num(info.get(f"{prefix}UsedQuota"))
-            if not total or used is None:
-                continue
-            windows.append(_window(
-                kind, label, used / total * 100,
-                _qwen_reset_iso(info.get(f"{prefix}QuotaNextRefreshTime"))))
-        if not windows:
-            continue
-        plan = next(
-            (info[k] for k in ("planName", "instanceName", "packageName")
-             if isinstance(info.get(k), str) and info[k]), None)
-        return windows, plan
-    return [], None
-
-
 def normalize_kilo_balance(data: dict) -> list[dict]:
     """``/api/profile/balance``: {"balance": USD remaining} — a prepaid credit
     pool with no reset window and no used/limit ratio, so the raw balance is
@@ -1510,13 +1326,6 @@ def normalize_cursor(data: dict) -> tuple[list[dict], str | None]:
             windows.append(_window("on-demand", "On-demand",
                                    used / limit * 100, resets))
     return windows, plan
-
-
-def parse_retry_after(value: str | None) -> float:
-    try:
-        return max(1.0, float(value))  # seconds form only; date form -> default
-    except (TypeError, ValueError):
-        return RATE_LIMIT_COOLDOWN
 
 
 # ── Fetchers ────────────────────────────────────────────────────────────────
@@ -1867,79 +1676,6 @@ async def fetch_opencode(home: Path) -> dict:
         return _snapshot("opencode", "ok",
                          windows=[w for s in ok for w in s["windows"]])
     return sub_snaps[0]
-
-
-async def _fetch_qwen_region(client, key: str, region: tuple) -> dict:
-    """One region's console-gateway query -> snapshot.
-
-    The API key is the credential the gateway checks; the browser User-Agent
-    this used to send was decoration and is gone. Origin/Referer stay: the
-    gateway refuses cross-site posts without them, and they name the console
-    the endpoint belongs to rather than claiming to be its client."""
-    url, commodity_code, origin, referer = region
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "x-api-key": key,
-        "X-DashScope-API-Key": key,
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "User-Agent": "Navide",
-        "Origin": origin,
-        "Referer": referer,
-    }
-    resp = await client.post(
-        url, headers=headers,
-        json={"queryCodingPlanInstanceInfoRequest":
-              {"commodityCode": commodity_code}})
-    if resp.status_code in (401, 403):
-        return _snapshot("qwen", "expired")
-    if resp.status_code == 429:
-        snap = _snapshot("qwen", "rate-limited")
-        snap["retryAfterSec"] = parse_retry_after(resp.headers.get("Retry-After"))
-        return snap
-    if resp.status_code != 200:
-        return _snapshot("qwen", "error", error=f"HTTP {resp.status_code}")
-    try:
-        payload = resp.json()
-    except ValueError:
-        return _snapshot("qwen", "error", error="non-JSON response")
-    # The gateway tunnels auth failures (invalid key, api-key mode unavailable
-    # in this region) through HTTP 200 + a NeedLogin marker in the body.
-    if "NeedLogin" in json.dumps(payload):
-        return _snapshot("qwen", "expired")
-    windows, plan = normalize_qwen(payload if isinstance(payload, dict) else {})
-    if not windows:
-        return _snapshot("qwen", "error",
-                         error="response had no usable quota fields")
-    return _snapshot("qwen", "ok", windows=windows, plan_type=plan)
-
-
-async def fetch_qwen(home: Path, env: dict | None = None) -> dict:
-    env = env if env is not None else dict(os.environ)
-    key = read_qwen_credentials(home, env)
-    if key is None:
-        if qwen_legacy_oauth_present(home):
-            return _snapshot(
-                "qwen", "unavailable",
-                error="legacy Qwen OAuth has no usage API (free tier "
-                      "discontinued; a Coding Plan API key is required)")
-        return _snapshot("qwen", "no-credentials")
-    import httpx
-
-    first: dict | None = None
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        for region in QWEN_REGIONS:
-            try:
-                snap = await _fetch_qwen_region(client, key, region)
-            except httpx.HTTPError as err:
-                snap = _snapshot("qwen", "error", error=str(err))
-            # ok answers; 429 means the key works, so the alternate region
-            # would not help. Everything else retries the other region,
-            # surfacing the FIRST failure when both refuse.
-            if snap["status"] in ("ok", "rate-limited"):
-                return snap
-            first = first or snap
-    return first or _snapshot("qwen", "error", error="no region answered")
 
 
 async def fetch_kilo(home: Path, env: dict | None = None) -> dict:
@@ -2733,30 +2469,33 @@ class UsageService:
             if self._blocked_until.get(key, 0) <= now:
                 claude_tasks[slot_id] = asyncio.create_task(coro())
 
+        # One-file-per-vendor bridge: a migrated vendor's fetch lives in its
+        # spec and its legacy lambda below is deleted in that vendor's round.
+        # Iteration runs over PROVIDERS (not the legacy table) so deleting a
+        # lambda cannot silently drop the vendor from the poll.
+        legacy_fetchers: dict[str, Any] = {
+            "codex": lambda: fetch_codex(codex_home),
+            "kimi": lambda: fetch_kimi(home),
+            "grok": lambda: fetch_grok(home),
+            "antigravity": lambda: fetch_antigravity(home),
+            "opencode": lambda: fetch_opencode(home),
+            "kilo": lambda: fetch_kilo(home),
+            "pi": lambda: fetch_pi(home),
+            "copilot": lambda: fetch_copilot(home),
+            "cursor": lambda: fetch_cursor(home),
+        }
         tasks: dict[str, Any] = {}
-        for provider, coro in (
-            ("codex", lambda: fetch_codex(codex_home)),
-            ("kimi", lambda: fetch_kimi(home)),
-            ("grok", lambda: fetch_grok(home)),
-            ("antigravity", lambda: fetch_antigravity(home)),
-            ("opencode", lambda: fetch_opencode(home)),
-            ("qwen", lambda: fetch_qwen(home)),
-            ("kilo", lambda: fetch_kilo(home)),
-            ("pi", lambda: fetch_pi(home)),
-            ("copilot", lambda: fetch_copilot(home)),
-            ("cursor", lambda: fetch_cursor(home)),
-        ):
+        for provider in PROVIDERS:
+            if provider == "claude":  # claude polls per-slot above
+                continue
             if self._blocked_until.get(provider, 0) > now:
                 continue
-            # One-file-per-vendor bridge: a migrated vendor's fetch lives in
-            # its spec; the legacy lambda above is deleted in that vendor's
-            # round and this fallthrough keeps the tuple valid until then.
             spec = _cli_vendor(provider)
             if spec is not None and spec.fetch_usage is not None:
                 fetch = spec.fetch_usage
                 tasks[provider] = asyncio.create_task(fetch(home))
-            else:
-                tasks[provider] = asyncio.create_task(coro())
+            elif provider in legacy_fetchers:
+                tasks[provider] = asyncio.create_task(legacy_fetchers[provider]())
         for slot_id, task in claude_tasks.items():
             try:
                 snap = await task

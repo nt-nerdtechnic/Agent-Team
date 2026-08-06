@@ -26,6 +26,18 @@ from pathlib import Path
 from typing import Any, Callable
 
 
+def command_text(command: Any) -> str:
+    """Actual CLI command string from a terminal.create payload.
+
+    The frontend wraps agent commands as [shell, '-ilc'|'-lc', '<cmd>'] — the
+    real command is the LAST element. Plain strings pass through unchanged.
+    Shared helper for every vendor's ``resume_id_from_command``.
+    """
+    if isinstance(command, list):
+        return str(command[-1]) if command else ""
+    return str(command or "")
+
+
 @dataclass(frozen=True)
 class VendorSpec:
     """Everything the shared orchestration knows about one CLI vendor.

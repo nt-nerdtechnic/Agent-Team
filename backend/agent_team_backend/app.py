@@ -72,7 +72,6 @@ from .log_readers import (
 from .log_readers.attribution import Attribution
 from .log_readers.claude import encode_claude_cwd
 from .log_readers.copilot import copilot_root
-from .log_readers.qwen import qwen_root
 from .credential_vault import CredentialVault
 from .doc_injector import fetch_stage_docs
 from .mcp_manager import MCPManager
@@ -880,8 +879,6 @@ _INHERITED_CLI_HOME_VARS = (
     "PI_CODING_AGENT_DIR",
     "PI_CODING_AGENT_SESSION_DIR",
     "PI_PACKAGE_DIR",
-    "QWEN_HOME",
-    "QWEN_RUNTIME_DIR",
     "KILO_CONFIG_DIR",
     "KILO_CONFIG",
     "KILO_DB",
@@ -1399,25 +1396,12 @@ def _claude_session_file(workspace_path: str, session_id: str) -> Path:
     return Path.home() / ".claude" / "projects" / project_dir / f"{session_id}.jsonl"
 
 
-def _qwen_session_file(workspace_path: str, session_id: str) -> Path:
-    # Qwen Code reuses Claude's cwd encoding for its per-project dirs; the
-    # session file is named after the id `qwen --resume <id>` accepts.
-    project_dir = encode_claude_cwd(workspace_path)
-    return qwen_root() / "projects" / project_dir / "chats" / f"{session_id}.jsonl"
-
-
 _CODEX_RESUME_RE = re.compile(r"^codex\s+resume\s+(\S+)")
 
 
-def _command_text(command: Any) -> str:
-    """Actual CLI command string from a terminal.create payload.
-
-    The frontend wraps agent commands as [shell, '-ilc'|'-lc', '<cmd>'] — the real
-    command is the LAST element. Plain strings pass through unchanged.
-    """
-    if isinstance(command, list):
-        return str(command[-1]) if command else ""
-    return str(command or "")
+# Shared with vendor modules — the canonical definition moved to
+# cli_vendors.base so specs can parse commands without importing app.
+from .cli_vendors.base import command_text as _command_text  # noqa: E402
 
 
 def _codex_resume_id(command: Any) -> str:
@@ -1469,15 +1453,6 @@ def _kilo_resume_id(command: Any) -> str:
 
 # Same optional-id guard as Kimi: `--resume` can appear bare (interactive
 # picker), so the capture must not swallow a following flag.
-_QWEN_RESUME_RE = re.compile(r"^qwen\s+(?:\S+\s+)*(?:--resume|-r)\s+([^-\s]\S*)")
-
-
-def _qwen_resume_id(command: Any) -> str:
-    """Session id from a `qwen ... --resume <id>` / `-r <id>` command ('' otherwise)."""
-    m = _QWEN_RESUME_RE.match(_command_text(command).strip())
-    return m.group(1) if m else ""
-
-
 # `pi --session-id <id>` resumes when the id exists and creates a NEW session
 # under that id otherwise — either way the id names this pane's session, so
 # it is claimed like Claude's --session-id. Same flag guard as Kimi so the
@@ -1527,7 +1502,6 @@ _RESUME_ID_EXTRACTORS = {
     "kimi": _kimi_resume_id,
     "opencode": _opencode_resume_id,
     "kilo": _kilo_resume_id,
-    "qwen": _qwen_resume_id,
     "pi": _pi_resume_id,
     "copilot": _copilot_resume_id,
     "cursor": _cursor_resume_id,
@@ -1562,8 +1536,6 @@ def _session_lookup_path(agent: str, workspace_path: str, session_id: str) -> st
         return str(path) if path is not None else ""
     if agent == "claude":
         return str(_claude_session_file(workspace_path, session_id))
-    if agent == "qwen":
-        return str(_qwen_session_file(workspace_path, session_id))
     if agent == "antigravity":
         # Antigravity stores each conversation as a SQLite db; the id is the
         # filename stem accepted by `agy --conversation <id>`.
@@ -1619,13 +1591,6 @@ def _session_exists(agent: str, workspace_path: str, session_id: str) -> bool:
         # instead of launching a doomed `kilo --session <id>`.
         reader = next((r for r in _readers if r.vendor == "kilo"), None)
         return reader.has_session(session_id) if isinstance(reader, KiloLogReader) else False
-    if agent == "qwen":
-        # Qwen stores each session at <root>/projects/<encoded-cwd>/chats/
-        # <id>.jsonl; ask the reader (which also scans chats/archive/ and
-        # other project dirs) so an archived-but-resumable session still
-        # passes preflight.
-        reader = next((r for r in _readers if r.vendor == "qwen"), None)
-        return reader.has_session(session_id) if isinstance(reader, QwenLogReader) else False
     if agent == "pi":
         # Pi stores each session at ~/.pi/agent/sessions/<encoded-cwd>/
         # <timestamp>_<id>.jsonl — the timestamp prefix means the id alone

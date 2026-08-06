@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -156,6 +157,21 @@ def read_jsonl_tail(
     return records, next_checkpoint, rotated
 
 
+def encode_claude_cwd(cwd: str) -> str:
+    """Claude Code's project-dir name for a cwd — the single source of truth.
+
+    Claude replaces EVERY non-alphanumeric char with "-" (dots, underscores,
+    spaces, unicode — not just "/"). It encodes its *normalized* cwd, which
+    never carries a trailing separator, so strip one before encoding:
+    otherwise the extra "-" makes the encoded dir miss the real one.
+
+    Lives here rather than in claude's vendor module because qwen reuses the
+    same encoding for its per-project dirs — shared infrastructure, not
+    claude-only knowledge.
+    """
+    return re.sub(r"[^A-Za-z0-9]", "-", cwd.rstrip("/"))
+
+
 class LogReader(ABC):
     """Abstract reader for one CLI vendor's local conversation logs.
 
@@ -179,6 +195,11 @@ class LogReader(ABC):
     #: Session files feed the session sink (Agent History). Migrated
     #: replacement for membership in the watcher's vendor-name tuple.
     emits_session_sink: bool = False
+
+    #: When a kickoff marker misses, fall back to binding a NEW session to
+    #: the single unbound candidate pane in the same cwd. Migrated
+    #: replacement for membership in attribution's fallback tuple.
+    binds_new_session_single_candidate: bool = False
 
     def marker_scan_text(self, path: Path) -> str | None:
         """Text to scan for a kickoff marker, or None for the generic

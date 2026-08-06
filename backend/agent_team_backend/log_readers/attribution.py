@@ -379,7 +379,7 @@ class Attribution:
         # Tuple = vendors not yet migrated to reader hooks; a migrated
         # vendor's reader declares binds_by_marker_file instead.
         marker_reader = self._readers.get(usage.vendor)
-        if usage.vendor not in ("codex", "antigravity", "kimi", "qwen", "pi", "copilot") \
+        if usage.vendor not in ("codex", "antigravity", "kimi", "pi", "copilot") \
                 and not (marker_reader is not None and marker_reader.binds_by_marker_file):
             return None
 
@@ -419,7 +419,10 @@ class Attribution:
         marker_binding = self.maybe_bind_by_marker(usage)
         if marker_binding:
             pane_id, resume_id = marker_binding
-        elif usage.vendor in ("antigravity", "kimi", "qwen", "pi", "copilot"):
+        elif usage.vendor in ("antigravity", "kimi", "pi", "copilot") or (
+            marker_reader is not None
+            and marker_reader.binds_new_session_single_candidate
+        ):
             return self._bind_new_session_single_candidate(usage)
         else:
             return None
@@ -451,7 +454,7 @@ class Attribution:
         further reads. The file read happens outside the lock.
         """
         gate_reader = self._readers.get(usage.vendor)
-        if usage.vendor not in ("codex", "antigravity", "kimi", "qwen", "pi", "copilot") \
+        if usage.vendor not in ("codex", "antigravity", "kimi", "pi", "copilot") \
                 and not (gate_reader is not None and gate_reader.binds_by_marker_file):
             return None
         sid = usage.session_id
@@ -583,7 +586,14 @@ class Attribution:
         unbound so marker matching can resolve them later without cross-pane
         corruption.
         """
-        if usage.vendor not in ("antigravity", "kimi", "qwen", "pi", "copilot") or not usage.session_id:
+        sc_reader = self._readers.get(usage.vendor)
+        if (
+            usage.vendor not in ("antigravity", "kimi", "pi", "copilot")
+            and not (
+                sc_reader is not None
+                and sc_reader.binds_new_session_single_candidate
+            )
+        ) or not usage.session_id:
             return None
         file_path = Path(usage.file_path)
         key = f"{usage.vendor}:{usage.session_id}:{usage.session_id}"
@@ -730,11 +740,6 @@ class Attribution:
                 # Kilo (OpenCode fork) likewise emits cwd = session.directory.
                 if usage.cwd and usage.cwd == ws_path:
                     return ws_path
-            elif usage.vendor == "qwen":
-                # Qwen reader emits cwd = the record's own cwd field (every
-                # jsonl line carries the session's exact cwd).
-                if usage.cwd and usage.cwd == ws_path:
-                    return ws_path
             elif usage.vendor == "pi":
                 # Pi reader emits cwd = the session header's cwd field.
                 if usage.cwd and usage.cwd == ws_path:
@@ -822,7 +827,7 @@ class Attribution:
             # binding never depends on it (the hash scheme is unconfirmed).
             hash_dir = cursor_project_hash(pane_cwd)
             return bool(hash_dir) and f"/{hash_dir}/" in file_path
-        if usage.vendor in ("codex", "antigravity", "grok", "kimi", "opencode", "qwen", "kilo", "pi", "copilot"):
+        if usage.vendor in ("codex", "antigravity", "grok", "kimi", "opencode", "kilo", "pi", "copilot"):
             return usage.cwd == pane_cwd
         return False
 

@@ -34,15 +34,10 @@ from .base import (
 log = logging.getLogger("agent_team_backend.log_readers.claude")
 
 
-def encode_claude_cwd(cwd: str) -> str:
-    """Claude Code's project-dir name for a cwd — the single source of truth.
-
-    Claude replaces EVERY non-alphanumeric char with "-" (dots, underscores,
-    spaces, unicode — not just "/"). It encodes its *normalized* cwd, which
-    never carries a trailing separator, so strip one before encoding:
-    otherwise the extra "-" makes the encoded dir miss the real one.
-    """
-    return re.sub(r"[^A-Za-z0-9]", "-", cwd.rstrip("/"))
+# Moved to log_readers.base (shared infrastructure): qwen deliberately reuses
+# this encoding for its own project dirs, so it is not claude-only knowledge.
+# Re-exported here for existing import sites until the cleanup round.
+from .base import encode_claude_cwd  # noqa: F401
 
 
 def _assistant_text(msg: dict) -> str:
