@@ -16,7 +16,6 @@ from .claude import ClaudeLogReader
 from .codex import CodexLogReader
 from .grok import GrokLogReader
 from .kimi import KimiLogReader
-from .pi import PiLogReader
 from .watcher import LogWatcher
 
 # Readers migrated to cli_vendors/ resolve lazily (PEP 562): their vendor
@@ -31,6 +30,7 @@ _MIGRATED_READERS = {
     "CursorLogReader": "cursor",
     "KiloLogReader": "kilo",
     "OpencodeLogReader": "opencode",
+    "PiLogReader": "pi",
     "QwenLogReader": "qwen",
 }
 

@@ -14,6 +14,7 @@ from agent_team_backend import usage_service as us
 from agent_team_backend.cli_vendors import _protocols as protocols_vendor
 from agent_team_backend.cli_vendors import antigravity as antigravity_vendor
 from agent_team_backend.cli_vendors import kilo as kilo_vendor
+from agent_team_backend.cli_vendors import pi as pi_vendor
 from agent_team_backend.cli_vendors import opencode as opencode_vendor
 from agent_team_backend.cli_vendors import copilot as copilot_vendor
 from agent_team_backend.cli_vendors import cursor as cursor_vendor
@@ -1469,7 +1470,7 @@ _PI_CODEX_USAGE_URL = us.codex_usage_url(us.CODEX_DEFAULT_BASE)
 
 
 def _with_pi_auth(monkeypatch, auth: dict | None):
-    monkeypatch.setattr(us, "read_pi_credentials", lambda home, env=None: auth)
+    monkeypatch.setattr(pi_vendor, "read_pi_credentials", lambda home, env=None: auth)
 
 
 async def test_fetch_pi_no_credentials(monkeypatch):
@@ -1502,7 +1503,7 @@ async def test_fetch_pi_anthropic_entry_reuses_claude_flow(monkeypatch):
             "claude", "ok",
             windows=[us._window("session", "Session (5h)", 42, None)])
 
-    monkeypatch.setattr(us, "fetch_claude_oauth", fake_claude)
+    monkeypatch.setattr(protocols_vendor, "fetch_claude_oauth", fake_claude)
     snap = await us.fetch_pi(Path("/x"), {})
     assert snap["provider"] == "pi"
     assert snap["status"] == "ok"
@@ -1619,7 +1620,7 @@ async def test_fetch_pi_mixed_sources_ok_wins(monkeypatch):
             "claude", "ok",
             windows=[us._window("weekly", "Weekly", 5, None)])
 
-    monkeypatch.setattr(us, "fetch_claude_oauth", fake_claude)
+    monkeypatch.setattr(protocols_vendor, "fetch_claude_oauth", fake_claude)
     snap = await us.fetch_pi(Path("/x"), {})
     assert snap["status"] == "ok"
     assert [w["label"] for w in snap["windows"]] == ["Claude — Weekly"]
@@ -1799,7 +1800,7 @@ async def test_poll_once_rate_limit_sets_cooldown(tmp_path, monkeypatch):
     monkeypatch.setattr(opencode_vendor, "fetch_opencode", lambda home: fake_ok("opencode"))
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(kilo_vendor, "fetch_kilo", lambda home: fake_ok("kilo"))
-    monkeypatch.setattr(us, "fetch_pi", lambda home: fake_ok("pi"))
+    monkeypatch.setattr(pi_vendor, "fetch_pi", lambda home: fake_ok("pi"))
     monkeypatch.setattr(copilot_vendor, "fetch_copilot", lambda home: fake_ok("copilot"))
     monkeypatch.setattr(cursor_vendor, "fetch_cursor", lambda home: fake_ok("cursor"))
 
@@ -1832,7 +1833,7 @@ async def test_poll_once_survives_fetcher_exception(tmp_path, monkeypatch):
     monkeypatch.setattr(opencode_vendor, "fetch_opencode", lambda home: fake_ok("opencode"))
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(kilo_vendor, "fetch_kilo", lambda home: fake_ok("kilo"))
-    monkeypatch.setattr(us, "fetch_pi", lambda home: fake_ok("pi"))
+    monkeypatch.setattr(pi_vendor, "fetch_pi", lambda home: fake_ok("pi"))
     monkeypatch.setattr(copilot_vendor, "fetch_copilot", lambda home: fake_ok("copilot"))
     monkeypatch.setattr(cursor_vendor, "fetch_cursor", lambda home: fake_ok("cursor"))
 
@@ -1970,7 +1971,7 @@ async def test_poll_once_claude_accounts_are_independent_and_pruned(tmp_path, mo
     monkeypatch.setattr(opencode_vendor, "fetch_opencode", lambda home: fake_other("opencode"))
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_other("qwen"))
     monkeypatch.setattr(kilo_vendor, "fetch_kilo", lambda home: fake_other("kilo"))
-    monkeypatch.setattr(us, "fetch_pi", lambda home: fake_other("pi"))
+    monkeypatch.setattr(pi_vendor, "fetch_pi", lambda home: fake_other("pi"))
     monkeypatch.setattr(copilot_vendor, "fetch_copilot", lambda home: fake_other("copilot"))
     monkeypatch.setattr(cursor_vendor, "fetch_cursor", lambda home: fake_other("cursor"))
 
@@ -2060,7 +2061,7 @@ async def test_refresh_during_poll_runs_next_cycle_with_new_active_account(
     monkeypatch.setattr(opencode_vendor, "fetch_opencode", lambda home: fake_other("opencode"))
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_other("qwen"))
     monkeypatch.setattr(kilo_vendor, "fetch_kilo", lambda home: fake_other("kilo"))
-    monkeypatch.setattr(us, "fetch_pi", lambda home: fake_other("pi"))
+    monkeypatch.setattr(pi_vendor, "fetch_pi", lambda home: fake_other("pi"))
     monkeypatch.setattr(copilot_vendor, "fetch_copilot", lambda home: fake_other("copilot"))
     monkeypatch.setattr(cursor_vendor, "fetch_cursor", lambda home: fake_other("cursor"))
 
@@ -2192,7 +2193,7 @@ async def test_poll_once_always_reads_real_home(tmp_path, monkeypatch):
     monkeypatch.setattr(opencode_vendor, "fetch_opencode", spy_opencode)
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", spy_qwen)
     monkeypatch.setattr(kilo_vendor, "fetch_kilo", spy_kilo)
-    monkeypatch.setattr(us, "fetch_pi", spy_pi)
+    monkeypatch.setattr(pi_vendor, "fetch_pi", spy_pi)
     monkeypatch.setattr(copilot_vendor, "fetch_copilot", spy_copilot)
     monkeypatch.setattr(cursor_vendor, "fetch_cursor", spy_cursor)
 
@@ -2233,7 +2234,7 @@ async def test_poll_once_harvests_active_slots(tmp_path, monkeypatch):
     monkeypatch.setattr(opencode_vendor, "fetch_opencode", lambda home: fake_ok("opencode"))
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(kilo_vendor, "fetch_kilo", lambda home: fake_ok("kilo"))
-    monkeypatch.setattr(us, "fetch_pi", lambda home: fake_ok("pi"))
+    monkeypatch.setattr(pi_vendor, "fetch_pi", lambda home: fake_ok("pi"))
     monkeypatch.setattr(copilot_vendor, "fetch_copilot", lambda home: fake_ok("copilot"))
     monkeypatch.setattr(cursor_vendor, "fetch_cursor", lambda home: fake_ok("cursor"))
 
@@ -2275,7 +2276,7 @@ async def test_poll_once_harvests_pending_login_homes(tmp_path, monkeypatch):
     monkeypatch.setattr(opencode_vendor, "fetch_opencode", lambda home: fake_ok("opencode"))
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(kilo_vendor, "fetch_kilo", lambda home: fake_ok("kilo"))
-    monkeypatch.setattr(us, "fetch_pi", lambda home: fake_ok("pi"))
+    monkeypatch.setattr(pi_vendor, "fetch_pi", lambda home: fake_ok("pi"))
     monkeypatch.setattr(copilot_vendor, "fetch_copilot", lambda home: fake_ok("copilot"))
     monkeypatch.setattr(cursor_vendor, "fetch_cursor", lambda home: fake_ok("cursor"))
 
@@ -2374,7 +2375,7 @@ async def test_poll_once_skips_login_harvest_while_login_pane_runs(
     monkeypatch.setattr(opencode_vendor, "fetch_opencode", lambda home: fake_ok("opencode"))
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(kilo_vendor, "fetch_kilo", lambda home: fake_ok("kilo"))
-    monkeypatch.setattr(us, "fetch_pi", lambda home: fake_ok("pi"))
+    monkeypatch.setattr(pi_vendor, "fetch_pi", lambda home: fake_ok("pi"))
     monkeypatch.setattr(copilot_vendor, "fetch_copilot", lambda home: fake_ok("copilot"))
     monkeypatch.setattr(cursor_vendor, "fetch_cursor", lambda home: fake_ok("cursor"))
 
@@ -2417,7 +2418,7 @@ async def test_login_harvest_for_active_profile_restores_live(tmp_path, monkeypa
     monkeypatch.setattr(opencode_vendor, "fetch_opencode", lambda home: fake_ok("opencode"))
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(kilo_vendor, "fetch_kilo", lambda home: fake_ok("kilo"))
-    monkeypatch.setattr(us, "fetch_pi", lambda home: fake_ok("pi"))
+    monkeypatch.setattr(pi_vendor, "fetch_pi", lambda home: fake_ok("pi"))
     monkeypatch.setattr(copilot_vendor, "fetch_copilot", lambda home: fake_ok("copilot"))
     monkeypatch.setattr(cursor_vendor, "fetch_cursor", lambda home: fake_ok("cursor"))
 

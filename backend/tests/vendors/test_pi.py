@@ -11,7 +11,7 @@ import pytest
 
 from agent_team_backend.log_readers.attribution import Attribution
 from agent_team_backend.log_readers.base import TokenUsage
-from agent_team_backend.log_readers.pi import (
+from agent_team_backend.cli_vendors.pi import (
     PiLogReader,
     encode_pi_cwd,
     pi_sessions_root,
@@ -408,7 +408,7 @@ def _assistant_saying(eid: str, text: str, parent: str | None = None) -> dict:
 
 def _go_quiet(path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Pretend the log stopped being written to well past the idle window."""
-    import agent_team_backend.log_readers.pi as pi_mod
+    import agent_team_backend.cli_vendors.pi as pi_mod
 
     monkeypatch.setattr(
         pi_mod.time, "time", lambda: path.stat().st_mtime + pi_mod._TURN_IDLE_SECONDS + 1

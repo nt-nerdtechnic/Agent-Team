@@ -116,15 +116,7 @@ CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 # the account had to be signed in again. The CLI is the only refresher — a
 # parked slot's access token is simply allowed to expire, and Claude Code
 # renews it from the restored refresh token the first time it runs.
-CODEX_DEFAULT_BASE = "https://chatgpt.com/backend-api"
 KIMI_DEFAULT_BASE = "https://api.kimi.com"
-# pi (Pi coding agent, @mariozechner/pi-coding-agent). auth.json is keyed by
-# provider id; oauth entries are {type: "oauth", access, refresh, expires
-# (epoch ms)}, BYOK keys are {type: "api_key", key}. Credentials are read-only
-# here and never refreshed (pi rotates its own refresh tokens): an expired
-# oauth entry maps to status=expired.
-PI_AGENT_DIR_ENV = "PI_CODING_AGENT_DIR"
-PI_OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
 # cursor (Cursor / cursor-agent CLI). The session JWT the CLI stores in the
 # macOS Keychain (fallback: the Cursor IDE's state.vscdb sqlite row) is still
 # read to detect sign-in and local expiry, and to authenticate usage-summary by
@@ -162,6 +154,17 @@ from .usage_common import (  # noqa: E402,F401
 
 # R2: qwen's usage stack moved to its vendor module; re-exported so this
 # module's namespace (and its tests) keep working until the cleanup round.
+from .cli_vendors.pi import (  # noqa: E402,F401
+    PI_AGENT_DIR_ENV,
+    PI_OPENROUTER_KEY_URL,
+    fetch_pi,
+    normalize_pi_openrouter,
+    pi_anthropic_oauth,
+    pi_codex_oauth,
+    pi_oauth_expired,
+    pi_openrouter_key,
+    read_pi_credentials,
+)
 from .cli_vendors.kilo import (  # noqa: E402,F401
     KILO_AUTH_FILE_REL,
     KILO_BALANCE_PATH,
@@ -185,6 +188,11 @@ from .cli_vendors.opencode import (  # noqa: E402,F401
     read_opencode_credentials,
 )
 from .cli_vendors._protocols import (  # noqa: E402,F401
+    CODEX_DEFAULT_BASE,
+    _codex_credits,
+    _codex_extra_windows,
+    codex_usage_url,
+    normalize_codex,
     CLAUDE_BETA_HEADER,
     CLAUDE_USAGE_URL,
     claude_token_expired,
@@ -374,11 +382,6 @@ def codex_base_url(codex_home: Path) -> str:
     return base
 
 
-def codex_usage_url(base: str) -> str:
-    path = "/wham/usage" if "/backend-api" in base else "/api/codex/usage"
-    return base + path
-
-
 def read_kimi_credentials(home: Path, env: dict | None = None,
                           now: float | None = None) -> str | None:
     """``KIMI_CODE_API_KEY`` env wins; otherwise the CLI OAuth file, used only
@@ -427,188 +430,6 @@ def read_grok_credentials(home: Path, env: dict | None = None) -> dict | None:
         return None
     return {"key": entry["key"], "email": entry.get("email"),
             "expires_at": entry.get("expires_at")}
-
-
-def read_pi_credentials(home: Path, env: dict | None = None) -> dict | None:
-    """Parse pi's ``auth.json`` (under ``$PI_CODING_AGENT_DIR``, default
-    ``~/.pi/agent`` — mirroring the pi log reader's root resolution): a map of
-    provider id -> credential entry. Returns the dict-valued entries, or None
-    when the file is absent/malformed/empty."""
-    env = env or {}
-    root = Path(env[PI_AGENT_DIR_ENV]) if env.get(PI_AGENT_DIR_ENV) \
-        else home / ".pi" / "agent"
-    try:
-        data = json.loads((root / "auth.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    entries = {k: v for k, v in data.items() if isinstance(v, dict)}
-    return entries or None
-
-
-def pi_oauth_expired(entry: dict, now_ms: float | None = None) -> bool:
-    """True when an oauth entry's ``expires`` (epoch ms) has passed. Tokens
-    are never refreshed here — pi serializes its own refresh flow and Anthropic
-    rotates refresh tokens, so refreshing would invalidate the CLI's copy."""
-    expires = _num(entry.get("expires"))
-    if expires is None:
-        return False
-    now = time.time() * 1000 if now_ms is None else now_ms
-    return now >= expires
-
-
-def pi_anthropic_oauth(auth: dict) -> dict | None:
-    """Map an ``anthropic`` {type: "oauth"} entry to the claudeAiOauth shape
-    (accessToken + epoch-ms expiresAt) so the existing Claude usage flow can
-    be reused as-is — pi's Anthropic OAuth uses Claude Code's client id, so
-    the stored token works against the same oauth/usage endpoint."""
-    entry = auth.get("anthropic")
-    if not isinstance(entry, dict) or entry.get("type") != "oauth":
-        return None
-    access = entry.get("access")
-    if not isinstance(access, str) or not access:
-        return None
-    return {"accessToken": access, "expiresAt": entry.get("expires")}
-
-
-def pi_codex_oauth(auth: dict) -> dict | None:
-    """The ``openai-codex`` {type: "oauth"} entry -> {access_token, account_id,
-    expires} for the ChatGPT ``wham/usage`` flow. api_key entries are BYOK and
-    have no usage surface -> None."""
-    entry = auth.get("openai-codex")
-    if not isinstance(entry, dict) or entry.get("type") != "oauth":
-        return None
-    access = entry.get("access")
-    if not isinstance(access, str) or not access:
-        return None
-    account = entry.get("accountId") or entry.get("account_id")
-    return {"access_token": access,
-            "account_id": account if isinstance(account, str) and account else None,
-            "expires": entry.get("expires")}
-
-
-def pi_openrouter_key(auth: dict) -> str | None:
-    """The ``openrouter`` bearer credential: the oauth access token (the PKCE
-    exchange yields a long-lived key) or a plain api key — both are accepted
-    by ``GET /api/v1/key``."""
-    entry = auth.get("openrouter")
-    if not isinstance(entry, dict):
-        return None
-    if entry.get("type") == "oauth":
-        access = entry.get("access")
-        return access if isinstance(access, str) and access else None
-    if entry.get("type") == "api_key":
-        key = entry.get("key")
-        return key if isinstance(key, str) and key else None
-    return None
-
-
-# ── Response normalizers (pure) ─────────────────────────────────────────────
-
-
-
-_CODEX_POSITIONAL = (
-    ("primary_window", ("session", "Session (5h)")),
-    ("secondary_window", ("weekly", "Weekly")),
-)
-
-
-_CODEX_WINDOW_ROLES = {
-    300: ("session", "Session (5h)"),
-    10080: ("weekly", "Weekly"),
-}
-# Positional fallback for entries whose window length can't classify them.
-
-
-def _codex_window_minutes(entry: dict) -> int | None:
-    secs = _num(entry.get("limit_window_seconds"))
-    return int(secs // 60) if secs is not None else None
-
-
-def _codex_window_role(entry: dict) -> tuple[str, str] | None:
-    minutes = _codex_window_minutes(entry)
-    if minutes is None:
-        return None
-    return _CODEX_WINDOW_ROLES.get(minutes)
-
-
-def _resolve_codex_roles(rate: dict) -> list[tuple[dict, tuple[str, str]]]:
-    """Assign (kind, label) to each present window. Prefer classification by
-    window length; fall back to position only when length can't decide or
-    would collide, so two windows never share a role."""
-    present: list[tuple[int, dict, tuple[str, str]]] = []
-    for index, (key, pos_role) in enumerate(_CODEX_POSITIONAL):
-        entry = rate.get(key)
-        if isinstance(entry, dict):
-            present.append((index, entry, pos_role))
-
-    resolved: dict[int, tuple[dict, tuple[str, str]]] = {}
-    taken: set[str] = set()
-    pending: list[tuple[int, dict, tuple[str, str]]] = []
-    for index, entry, pos_role in present:
-        role = _codex_window_role(entry)
-        if role is not None and role[0] not in taken:
-            taken.add(role[0])
-            resolved[index] = (entry, role)
-        else:
-            pending.append((index, entry, pos_role))
-
-    all_roles = [pos_role for _, pos_role in _CODEX_POSITIONAL]
-    for index, entry, pos_role in pending:
-        if pos_role[0] not in taken:
-            role = pos_role
-        else:
-            remaining = [r for r in all_roles if r[0] not in taken]
-            role = remaining[0] if remaining else pos_role
-        taken.add(role[0])
-        resolved[index] = (entry, role)
-    return [resolved[i] for i in sorted(resolved)]
-
-
-def _codex_windows(rate: dict) -> list[dict]:
-    windows: list[dict] = []
-    for entry, (kind, label) in _resolve_codex_roles(rate):
-        pct = _num(entry.get("used_percent"))
-        if pct is None:
-            continue
-        windows.append(_window(kind, label, pct,
-                               _epoch_to_iso(entry.get("reset_at")),
-                               window_minutes=_codex_window_minutes(entry)))
-    return windows
-
-
-def _codex_credits(data: dict) -> dict | None:
-    credits = data.get("credits")
-    if not isinstance(credits, dict):
-        return None
-    balance = credits.get("balance")
-    parsed = _num(balance)
-    return {
-        "hasCredits": bool(credits.get("has_credits")),
-        "unlimited": bool(credits.get("unlimited")),
-        "balance": parsed if parsed is not None else balance,
-    }
-
-
-def _codex_extra_windows(data: dict) -> list[dict]:
-    extra: list[dict] = []
-    for item in data.get("additional_rate_limits") or []:
-        if not isinstance(item, dict):
-            continue
-        rate = item.get("rate_limit")
-        if not isinstance(rate, dict):
-            continue
-        windows = _codex_windows(rate)
-        if windows:
-            extra.append({"name": item.get("limit_name"), "windows": windows})
-    return extra
-
-
-def normalize_codex(data: dict) -> tuple[list[dict], str | None]:
-    windows = _codex_windows(data.get("rate_limit") or {})
-    plan = data.get("plan_type") if isinstance(data.get("plan_type"), str) else None
-    return windows, plan
 
 
 def _kimi_used(detail: dict, limit):
@@ -666,28 +487,6 @@ def normalize_grok(billing: dict) -> tuple[list[dict], str | None]:
                                resets if isinstance(resets, str) else None))
     return windows, None
 
-
-def normalize_pi_openrouter(data: dict) -> list[dict]:
-    """OpenRouter ``GET /api/v1/key``: ``{"data": {"usage": <credits used>,
-    "limit": <credit limit|null>}}`` — dollar/credit based, no reset window.
-    With a limit the used/limit ratio is real; a null limit (unlimited key)
-    pins usedPercent to 0 and the raw fields are surfaced as-is."""
-    entry = data.get("data")
-    if not isinstance(entry, dict):
-        return []
-    used = _num(entry.get("usage"))
-    if used is None:
-        return []
-    limit = _num(entry.get("limit"))
-    window = _window("credits", "OpenRouter credits",
-                     used / limit * 100 if limit else 0.0, None)
-    window["usage"] = used
-    window["limit"] = limit
-    return [window]
-
-
-
-# ── Fetchers ────────────────────────────────────────────────────────────────
 
 async def fetch_claude(home: Path) -> dict:
     """Claude quota, read from the CLI's own ``/usage`` panel.
@@ -850,101 +649,6 @@ async def fetch_grok(home: Path, env: dict | None = None,
     if not windows:
         return _snapshot("grok", "error", error="billing response had no usable fields")
     return _snapshot("grok", "ok", windows=windows, plan_type=plan)
-
-
-async def _fetch_pi_codex(creds: dict) -> dict:
-    """pi's ``openai-codex`` oauth token against ChatGPT ``wham/usage`` (the
-    same endpoint the codex provider uses; pi has no config.toml base
-    override, so the default base applies)."""
-    if pi_oauth_expired(creds):
-        return _snapshot("pi", "expired")
-    import httpx
-
-    headers = {
-        "Authorization": f"Bearer {creds['access_token']}",
-        "User-Agent": "Navide",
-        "Accept": "application/json",
-    }
-    if creds.get("account_id"):
-        headers["ChatGPT-Account-Id"] = creds["account_id"]
-    url = codex_usage_url(CODEX_DEFAULT_BASE)
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        resp = await client.get(url, headers=headers)
-    if resp.status_code in (401, 403):
-        return _snapshot("pi", "expired")
-    if resp.status_code == 429:
-        snap = _snapshot("pi", "rate-limited")
-        snap["retryAfterSec"] = parse_retry_after(resp.headers.get("Retry-After"))
-        return snap
-    if resp.status_code != 200:
-        return _snapshot("pi", "error", error=f"HTTP {resp.status_code}")
-    windows, plan = normalize_codex(resp.json())
-    windows = [dict(w, label=f"Codex — {w['label']}") for w in windows]
-    return _snapshot("pi", "ok", windows=windows, plan_type=plan)
-
-
-async def _fetch_pi_openrouter(key: str) -> dict:
-    import httpx
-
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "Accept": "application/json",
-        "User-Agent": "Navide",
-    }
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        resp = await client.get(PI_OPENROUTER_KEY_URL, headers=headers)
-    if resp.status_code in (401, 403):
-        return _snapshot("pi", "expired")
-    if resp.status_code == 429:
-        snap = _snapshot("pi", "rate-limited")
-        snap["retryAfterSec"] = parse_retry_after(resp.headers.get("Retry-After"))
-        return snap
-    if resp.status_code != 200:
-        return _snapshot("pi", "error", error=f"HTTP {resp.status_code}")
-    try:
-        payload = resp.json()
-    except ValueError:
-        return _snapshot("pi", "error", error="non-JSON response")
-    windows = normalize_pi_openrouter(payload if isinstance(payload, dict) else {})
-    if not windows:
-        return _snapshot("pi", "error", error="response had no usable fields")
-    return _snapshot("pi", "ok", windows=windows)
-
-
-async def fetch_pi(home: Path, env: dict | None = None) -> dict:
-    """pi is an aggregator with no server of its own: each supported
-    ``auth.json`` credential is asked its own provider's usage endpoint. Any
-    source that answers makes the snapshot "ok" (windows combined); with none
-    answering the first failure is surfaced; entries without a usage surface
-    (BYOK api keys, github-copilot/xai/radius) alone -> unavailable."""
-    env = env if env is not None else dict(os.environ)
-    auth = read_pi_credentials(home, env)
-    if auth is None:
-        return _snapshot("pi", "no-credentials")
-    sub_snaps: list[dict] = []
-    oauth = pi_anthropic_oauth(auth)
-    if oauth is not None:
-        snap = await fetch_claude_oauth(oauth)
-        snap["provider"] = "pi"
-        snap["windows"] = [dict(w, label=f"Claude — {w['label']}")
-                           for w in snap["windows"]]
-        sub_snaps.append(snap)
-    codex_creds = pi_codex_oauth(auth)
-    if codex_creds is not None:
-        sub_snaps.append(await _fetch_pi_codex(codex_creds))
-    key = pi_openrouter_key(auth)
-    if key is not None:
-        sub_snaps.append(await _fetch_pi_openrouter(key))
-    if not sub_snaps:
-        return _snapshot(
-            "pi", "unavailable",
-            error="no auth.json credential has a usage API "
-                  "(plain API keys and github-copilot/xai/radius expose none)")
-    ok = [s for s in sub_snaps if s["status"] == "ok"]
-    if ok:
-        return _snapshot("pi", "ok",
-                         windows=[w for s in ok for w in s["windows"]])
-    return sub_snaps[0]
 
 
 # ── Poller service ──────────────────────────────────────────────────────────
@@ -1514,8 +1218,7 @@ class UsageService:
             "codex": lambda: fetch_codex(codex_home),
             "kimi": lambda: fetch_kimi(home),
             "grok": lambda: fetch_grok(home),
-                                    "pi": lambda: fetch_pi(home),
-                        }
+                                                        }
         tasks: dict[str, Any] = {}
         for provider in PROVIDERS:
             if provider == "claude":  # claude polls per-slot above

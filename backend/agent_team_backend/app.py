@@ -876,9 +876,6 @@ _INHERITED_CLI_HOME_VARS = (
     "CODEX_HOME",
     "KIMI_CODE_HOME",
     "GROK_HOME",
-    "PI_CODING_AGENT_DIR",
-    "PI_CODING_AGENT_SESSION_DIR",
-    "PI_PACKAGE_DIR",
     # Not home relocators, but the same inheritance hazard with a worse
     # failure mode: runtime markers a CLI stamps on its own subprocesses.
     # Claude Code's child-session marker makes an inheriting pane skip
@@ -1426,15 +1423,6 @@ def _kimi_resume_id(command: Any) -> str:
     return m.group(1) if m else ""
 
 
-# Same optional-id guard as Kimi: the capture must not swallow a following flag.
-# Same optional-id guard as Kimi: `--resume` can appear bare (interactive
-# picker), so the capture must not swallow a following flag.
-# `pi --session-id <id>` resumes when the id exists and creates a NEW session
-# under that id otherwise — either way the id names this pane's session, so
-# it is claimed like Claude's --session-id. Same flag guard as Kimi so the
-# capture never swallows a following flag (Pi ids can't start with "-").
-_PI_RESUME_RE = re.compile(r"^pi\s+(?:\S+\s+)*--session-id\s+([^-\s]\S*)")
-
 
 def _pi_resume_id(command: Any) -> str:
     """Session id from a `pi ... --session-id <id>` command ('' otherwise)."""
@@ -1446,7 +1434,6 @@ _RESUME_ID_EXTRACTORS = {
     "codex": _codex_resume_id,
     "claude": _claude_resume_id,
     "kimi": _kimi_resume_id,
-    "pi": _pi_resume_id,
 }
 
 
@@ -1508,14 +1495,6 @@ def _session_exists(agent: str, workspace_path: str, session_id: str) -> bool:
         # `kimi --session <id>` that dead-ends the pane at startup.
         reader = next((r for r in _readers if r.vendor == "kimi"), None)
         return reader.has_session(session_id) if isinstance(reader, KimiLogReader) else False
-    if agent == "pi":
-        # Pi stores each session at ~/.pi/agent/sessions/<encoded-cwd>/
-        # <timestamp>_<id>.jsonl — the timestamp prefix means the id alone
-        # can't name the file, so ask the reader (filename glob + header-id
-        # check). Preflight matters doubly here: `pi --session-id <stale-id>`
-        # would not fail, it would silently start a blank NEW session.
-        reader = next((r for r in _readers if r.vendor == "pi"), None)
-        return reader.has_session(session_id) if isinstance(reader, PiLogReader) else False
     path = _session_lookup_path(agent, workspace_path, session_id)
     if path:
         return Path(path).is_file()

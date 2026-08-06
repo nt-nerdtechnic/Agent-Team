@@ -3521,12 +3521,6 @@ async def _terminal_create_impl(
             # from the new-session single-candidate fallback's candidate set,
             # so a sibling fresh pane in the same cwd can still fallback-bind.
             explicit_session_id = app._kimi_resume_id(payload.get("command"))
-        elif agent_key == "pi" and not explicit_session_id:
-            # Pi's `--session-id <id>` names the pane's session whether it
-            # resumes an existing id or (id unknown) creates a new one under
-            # it — claim it up front like Claude's --session-id so the
-            # session's events route back to this pane.
-            explicit_session_id = app._pi_resume_id(payload.get("command"))
         # Vendors absent from both paths above deliberately claim no resume
         # id here (e.g. an id-less lossy resume); the rationale lives in each
         # vendor's module. Such panes bind via the kickoff marker instead.

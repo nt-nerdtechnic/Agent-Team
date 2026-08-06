@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import time
 
-from ..usage_common import HTTP_TIMEOUT, _num, _snapshot, _window, parse_retry_after
+from ..usage_common import HTTP_TIMEOUT, _epoch_to_iso, _num, _snapshot, _window, parse_retry_after
 
 # ---- Anthropic OAuth usage (opencode, pi; claude itself reads its CLI's
 # /usage panel instead — see cli_vendors/claude.py after R12) ---------------
@@ -114,3 +114,118 @@ async def fetch_claude_oauth(oauth: dict | None) -> dict:
         return _snapshot("claude", "error", error=f"HTTP {resp.status_code}")
     windows, plan = normalize_claude(resp.json())
     return _snapshot("claude", "ok", windows=windows, plan_type=plan)
+
+
+# ---- ChatGPT wham/usage (codex, pi) ---------------------------------------
+# pi stores an openai-codex OAuth grant in its own auth file and reads the
+# same ``wham/usage`` endpoint the codex provider uses.
+
+CODEX_DEFAULT_BASE = "https://chatgpt.com/backend-api"
+
+
+def codex_usage_url(base: str) -> str:
+    path = "/wham/usage" if "/backend-api" in base else "/api/codex/usage"
+    return base + path
+
+
+_CODEX_POSITIONAL = (
+    ("primary_window", ("session", "Session (5h)")),
+    ("secondary_window", ("weekly", "Weekly")),
+)
+
+
+_CODEX_WINDOW_ROLES = {
+    300: ("session", "Session (5h)"),
+    10080: ("weekly", "Weekly"),
+}
+# Positional fallback for entries whose window length can't classify them.
+
+
+def _codex_window_minutes(entry: dict) -> int | None:
+    secs = _num(entry.get("limit_window_seconds"))
+    return int(secs // 60) if secs is not None else None
+
+
+def _codex_window_role(entry: dict) -> tuple[str, str] | None:
+    minutes = _codex_window_minutes(entry)
+    if minutes is None:
+        return None
+    return _CODEX_WINDOW_ROLES.get(minutes)
+
+
+def _resolve_codex_roles(rate: dict) -> list[tuple[dict, tuple[str, str]]]:
+    """Assign (kind, label) to each present window. Prefer classification by
+    window length; fall back to position only when length can't decide or
+    would collide, so two windows never share a role."""
+    present: list[tuple[int, dict, tuple[str, str]]] = []
+    for index, (key, pos_role) in enumerate(_CODEX_POSITIONAL):
+        entry = rate.get(key)
+        if isinstance(entry, dict):
+            present.append((index, entry, pos_role))
+
+    resolved: dict[int, tuple[dict, tuple[str, str]]] = {}
+    taken: set[str] = set()
+    pending: list[tuple[int, dict, tuple[str, str]]] = []
+    for index, entry, pos_role in present:
+        role = _codex_window_role(entry)
+        if role is not None and role[0] not in taken:
+            taken.add(role[0])
+            resolved[index] = (entry, role)
+        else:
+            pending.append((index, entry, pos_role))
+
+    all_roles = [pos_role for _, pos_role in _CODEX_POSITIONAL]
+    for index, entry, pos_role in pending:
+        if pos_role[0] not in taken:
+            role = pos_role
+        else:
+            remaining = [r for r in all_roles if r[0] not in taken]
+            role = remaining[0] if remaining else pos_role
+        taken.add(role[0])
+        resolved[index] = (entry, role)
+    return [resolved[i] for i in sorted(resolved)]
+
+
+def _codex_windows(rate: dict) -> list[dict]:
+    windows: list[dict] = []
+    for entry, (kind, label) in _resolve_codex_roles(rate):
+        pct = _num(entry.get("used_percent"))
+        if pct is None:
+            continue
+        windows.append(_window(kind, label, pct,
+                               _epoch_to_iso(entry.get("reset_at")),
+                               window_minutes=_codex_window_minutes(entry)))
+    return windows
+
+
+def _codex_credits(data: dict) -> dict | None:
+    credits = data.get("credits")
+    if not isinstance(credits, dict):
+        return None
+    balance = credits.get("balance")
+    parsed = _num(balance)
+    return {
+        "hasCredits": bool(credits.get("has_credits")),
+        "unlimited": bool(credits.get("unlimited")),
+        "balance": parsed if parsed is not None else balance,
+    }
+
+
+def _codex_extra_windows(data: dict) -> list[dict]:
+    extra: list[dict] = []
+    for item in data.get("additional_rate_limits") or []:
+        if not isinstance(item, dict):
+            continue
+        rate = item.get("rate_limit")
+        if not isinstance(rate, dict):
+            continue
+        windows = _codex_windows(rate)
+        if windows:
+            extra.append({"name": item.get("limit_name"), "windows": windows})
+    return extra
+
+
+def normalize_codex(data: dict) -> tuple[list[dict], str | None]:
+    windows = _codex_windows(data.get("rate_limit") or {})
+    plan = data.get("plan_type") if isinstance(data.get("plan_type"), str) else None
+    return windows, plan

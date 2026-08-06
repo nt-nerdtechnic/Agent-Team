@@ -393,18 +393,18 @@ def test_pi_resume_id_parses_session_id_commands() -> None:
     """`pi --session-id <id>` both resumes an existing id and pins a NEW
     session's id — either way it names the pane's session, so it is claimed."""
     sid = "pi-sess.01_a"
-    assert app._pi_resume_id(f"pi --session-id {sid}") == sid
-    assert app._pi_resume_id(f"pi --session-id {sid} --no-color") == sid
-    assert app._pi_resume_id(f"pi --no-color --session-id {sid}") == sid
-    assert app._pi_resume_id("pi") == ""
+    assert app._resume_id_for_agent("pi", f"pi --session-id {sid}") == sid
+    assert app._resume_id_for_agent("pi", f"pi --session-id {sid} --no-color") == sid
+    assert app._resume_id_for_agent("pi", f"pi --no-color --session-id {sid}") == sid
+    assert app._resume_id_for_agent("pi", "pi") == ""
     # Flag guard: a following flag must never be captured as the id.
-    assert app._pi_resume_id("pi --session-id --no-color") == ""
-    assert app._pi_resume_id("pi --session-id") == ""
-    assert app._pi_resume_id("") == ""
-    assert app._pi_resume_id(None) == ""
+    assert app._resume_id_for_agent("pi", "pi --session-id --no-color") == ""
+    assert app._resume_id_for_agent("pi", "pi --session-id") == ""
+    assert app._resume_id_for_agent("pi", "") == ""
+    assert app._resume_id_for_agent("pi", None) == ""
     # Frontend wraps commands as [shell, '-lc', '<cmd>'].
-    assert app._pi_resume_id(["/bin/zsh", "-lc", f"pi --session-id {sid}"]) == sid
-    assert app._pi_resume_id(["/bin/zsh", "-lc", "pi"]) == ""
+    assert app._resume_id_for_agent("pi", ["/bin/zsh", "-lc", f"pi --session-id {sid}"]) == sid
+    assert app._resume_id_for_agent("pi", ["/bin/zsh", "-lc", "pi"]) == ""
 
 
 def test_copilot_resume_id_parses_resume_commands() -> None:
