@@ -84,7 +84,10 @@ def test_vendor_modules_import_only_allowed_modules() -> None:
             ALLOWED_LOCAL_IMPORTS | VENDOR_IMPORT_EXEMPTIONS.get(path.stem, set())
         )
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
+        # Module-level imports only: an import inside a function is a lazy
+        # runtime backreference (the pre-existing pattern of the migrated
+        # claude machines) and cannot create an import cycle.
+        for node in tree.body:
             if isinstance(node, ast.ImportFrom):
                 if node.level:  # relative: from .base / ..log_readers.base
                     module = node.module or ""

@@ -13,7 +13,7 @@ import asyncio
 
 import pytest
 
-from agent_team_backend import claude_delegated_refresh as dr
+from agent_team_backend.cli_vendors import claude as dr
 
 
 class FakeVault:
@@ -236,7 +236,7 @@ def test_probe_env_drops_api_keys_that_would_shadow_oauth(
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "tok")
     monkeypatch.setenv("PATH", "/usr/bin")
 
-    env = dr._probe_env()
+    env = dr._refresh_probe_env()
 
     assert "ANTHROPIC_API_KEY" not in env
     assert "ANTHROPIC_AUTH_TOKEN" not in env
@@ -250,7 +250,7 @@ def test_probe_env_drops_a_relocated_claude_home(
     home, so it would renew something the live fingerprint never sees."""
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/tmp/some-other-account")
 
-    assert "CLAUDE_CONFIG_DIR" not in dr._probe_env()
+    assert "CLAUDE_CONFIG_DIR" not in dr._refresh_probe_env()
 
 
 async def test_a_timed_out_probe_takes_down_the_whole_process_group(

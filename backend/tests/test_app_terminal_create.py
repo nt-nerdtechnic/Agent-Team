@@ -299,22 +299,22 @@ def test_codex_resume_id_parses_resume_commands() -> None:
 
 
 def test_claude_resume_id_parses_resume_commands() -> None:
-    assert app._claude_resume_id("claude --resume abc-123") == "abc-123"
-    assert app._claude_resume_id(
+    assert app._resume_id_for_agent("claude", "claude --resume abc-123") == "abc-123"
+    assert app._resume_id_for_agent("claude", 
         "claude --resume abc-123 --dangerously-skip-permissions"
     ) == "abc-123"
-    assert app._claude_resume_id(
+    assert app._resume_id_for_agent("claude", 
         "claude --dangerously-skip-permissions --resume abc-123"
     ) == "abc-123"
-    assert app._claude_resume_id("claude") == ""
-    assert app._claude_resume_id("claude --session-id abc-123") == ""
-    assert app._claude_resume_id("") == ""
-    assert app._claude_resume_id(None) == ""
+    assert app._resume_id_for_agent("claude", "claude") == ""
+    assert app._resume_id_for_agent("claude", "claude --session-id abc-123") == ""
+    assert app._resume_id_for_agent("claude", "") == ""
+    assert app._resume_id_for_agent("claude", None) == ""
     # Shell-wrapped list — the shape the frontend actually sends.
-    assert app._claude_resume_id(
+    assert app._resume_id_for_agent("claude", 
         ["/bin/zsh", "-lc", "claude --resume abc-123 --dangerously-skip-permissions"]
     ) == "abc-123"
-    assert app._claude_resume_id(["/bin/zsh", "-lc", "claude"]) == ""
+    assert app._resume_id_for_agent("claude", ["/bin/zsh", "-lc", "claude"]) == ""
 
 
 def test_kimi_resume_id_parses_resume_commands() -> None:

@@ -113,7 +113,7 @@ async def test_find_live_by_resume_id_matches_only_live_same_agent() -> None:
     service._sessions = {s.id: s for s in (match, closed, other_agent, other_id)}  # type: ignore[assignment]
 
     found = service.find_live_by_resume_id(
-        "claude", "abc", lambda cmd: app._claude_resume_id(cmd)
+        "claude", "abc", lambda cmd: app._resume_id_for_agent("claude", cmd)
     )
     assert [s.id for s in found] == ["t1"]
 

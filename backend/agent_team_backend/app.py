@@ -872,7 +872,6 @@ def _register_workspace_and_backfill(workspace_path: str) -> None:
 
 
 _INHERITED_CLI_HOME_VARS = (
-    "CLAUDE_CONFIG_DIR",
     "GROK_HOME",
     # Not home relocators, but the same inheritance hazard with a worse
     # failure mode: runtime markers a CLI stamps on its own subprocesses.
@@ -881,9 +880,6 @@ _INHERITED_CLI_HOME_VARS = (
     # the pane works all day and restores as a blank after restart). Grok's
     # child markers are the same shape, stripped preemptively; they are
     # process-lifecycle flags no user config legitimately sets.
-    "CLAUDE_CODE_CHILD_SESSION",
-    "GROK_BACKGROUND_CHILD",
-    "GROK_DAEMON_CHILD",
 )
 
 
@@ -1379,45 +1375,16 @@ def _project_payload(project) -> dict[str, Any]:
     }
 
 
-def _claude_session_file(workspace_path: str, session_id: str) -> Path:
-    # Encoding details (why EVERY non-alphanumeric char becomes "-", why the
-    # trailing separator must be stripped) live in encode_claude_cwd — the
-    # single source of truth shared with the attribution layer.
-    project_dir = encode_claude_cwd(workspace_path)
-    return Path.home() / ".claude" / "projects" / project_dir / f"{session_id}.jsonl"
-
-
 
 # Shared with vendor modules — the canonical definition moved to
 # cli_vendors.base so specs can parse commands without importing app.
 from .cli_vendors.base import command_text as _command_text  # noqa: E402
 
 
-def _codex_resume_id(command: Any) -> str:
-    """Session id from a `codex resume <id> ...` command ('' otherwise)."""
-    m = _CODEX_RESUME_RE.match(_command_text(command).strip())
-    return m.group(1) if m else ""
-
-
-_CLAUDE_RESUME_RE = re.compile(r"^claude\s+(?:\S+\s+)*--resume\s+(\S+)")
-
-
-def _claude_resume_id(command: Any) -> str:
-    """Session id from a `claude ... --resume <id> ...` command ('' otherwise)."""
-    m = _CLAUDE_RESUME_RE.match(_command_text(command).strip())
-    return m.group(1) if m else ""
-
-
-
-def _kimi_resume_id(command: Any) -> str:
-    """Session id from a `kimi ... --session <id>` / `-S <id>` command ('' otherwise)."""
-    m = _KIMI_RESUME_RE.match(_command_text(command).strip())
-    return m.group(1) if m else ""
 
 
 
 _RESUME_ID_EXTRACTORS = {
-    "claude": _claude_resume_id,
 }
 
 
@@ -1447,8 +1414,6 @@ def _session_lookup_path(agent: str, workspace_path: str, session_id: str) -> st
     if spec is not None and spec.session_path is not None:
         path = spec.session_path(workspace_path, session_id)
         return str(path) if path is not None else ""
-    if agent == "claude":
-        return str(_claude_session_file(workspace_path, session_id))
     return ""
 
 
@@ -1460,13 +1425,6 @@ def _session_exists(agent: str, workspace_path: str, session_id: str) -> bool:
     spec = cli_vendor(agent)
     if spec is not None and spec.session_exists is not None:
         return spec.session_exists(workspace_path, session_id)
-    if agent == "claude":
-        # A managed-account pane resumes inside its profile's isolated config
-        # home (CLAUDE_CONFIG_DIR), but that home's ``projects`` is symlinked
-        # back to the real home (credential_vault), so the session jsonl always
-        # resolves to the default location. One check there covers every
-        # account — no "No conversation found" crash-loop (2026-07-25).
-        return _claude_session_file(workspace_path, session_id).is_file()
     path = _session_lookup_path(agent, workspace_path, session_id)
     if path:
         return Path(path).is_file()

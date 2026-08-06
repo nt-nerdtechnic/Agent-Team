@@ -12,7 +12,6 @@ from .base import (
     TokenSinkResult,
     TokenUsage,
 )
-from .claude import ClaudeLogReader
 from .watcher import LogWatcher
 
 # Readers migrated to cli_vendors/ resolve lazily (PEP 562): their vendor
@@ -23,6 +22,7 @@ from .watcher import LogWatcher
 _MIGRATED_READERS = {
     "AiderLogReader": "aider",
     "AntigravityLogReader": "antigravity",
+    "ClaudeLogReader": "claude",
     "CodexLogReader": "codex",
     "CopilotLogReader": "copilot",
     "CursorLogReader": "cursor",

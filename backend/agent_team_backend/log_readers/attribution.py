@@ -740,9 +740,6 @@ class Attribution:
             verdict = reader.pane_cwd_match(usage, pane_cwd, pane_id)
             if verdict is not None:
                 return verdict
-        if usage.vendor == "claude":
-            expected_dir = encode_claude_cwd(pane_cwd)
-            return f"/{expected_dir}/" in file_path
         return False
 
     def _pane_registration_for_home_id(self, home_id: str) -> _PaneRegistration | None:

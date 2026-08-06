@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_team_backend.log_readers.claude import ClaudeLogReader
+from agent_team_backend.cli_vendors.claude import ClaudeLogReader
 
 
 def _write_jsonl(path: Path, records: list[dict]) -> None:

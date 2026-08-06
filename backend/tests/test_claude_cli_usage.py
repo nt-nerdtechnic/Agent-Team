@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from agent_team_backend import claude_cli_usage as cu
+from agent_team_backend.cli_vendors import claude as cu
 
 REAL_PANEL = (Path(__file__).parent / "fixtures" / "claude_usage_panel.txt").read_text(
     encoding="utf-8"
@@ -278,7 +278,7 @@ async def test_logged_out_is_reported_without_a_spawn(monkeypatch, tmp_path) -> 
     def resolve_is_too_late(name):
         raise AssertionError("resolved the binary despite no credentials")
 
-    monkeypatch.setattr(us, "read_claude_credentials", no_creds)
+    monkeypatch.setattr(cu, "read_claude_credentials", no_creds)
     monkeypatch.setattr(ai_chat_cli_engine, "resolve_cli_binary", resolve_is_too_late)
 
     snap = await _REAL_FETCH(tmp_path)
@@ -297,7 +297,7 @@ async def test_a_spawned_but_empty_read_is_priced_like_a_success(monkeypatch, tm
     async def read_fails(binary):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(us, "read_claude_credentials", creds)
+    monkeypatch.setattr(cu, "read_claude_credentials", creds)
     monkeypatch.setattr(ai_chat_cli_engine, "resolve_cli_binary", lambda name: "/bin/claude")
     monkeypatch.setattr(cu, "read_usage_panel", read_fails)
 
@@ -311,7 +311,7 @@ def test_probe_env_drops_credentials_and_home_relocations(monkeypatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/tmp/other")
 
-    env = cu._probe_env()
+    env = cu._panel_probe_env()
 
     assert "ANTHROPIC_API_KEY" not in env
     assert "CLAUDE_CONFIG_DIR" not in env

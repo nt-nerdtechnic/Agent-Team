@@ -3509,12 +3509,6 @@ async def _terminal_create_impl(
             explicit_session_id = vendor_spec.resume_id_from_command(
                 payload.get("command")
             )
-        if agent_key == "claude" and not explicit_session_id:
-            # Resumed Claude panes carry no pinned --session-id. Claim the
-            # resume id at registration, or the unowned-session fallback
-            # can hand this pane's session to a sibling in the same cwd —
-            # which then overwrites that sibling's persisted resume id.
-            explicit_session_id = app._claude_resume_id(payload.get("command"))
         # Vendors absent from both paths above deliberately claim no resume
         # id here (e.g. an id-less lossy resume); the rationale lives in each
         # vendor's module. Such panes bind via the kickoff marker instead.

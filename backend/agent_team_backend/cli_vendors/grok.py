@@ -587,6 +587,12 @@ SPEC = VendorSpec(
     identity_from_secret=identity_from_secret,
     # Late-bound (module global at call time) so tests can monkeypatch.
     fetch_usage=lambda home: fetch_grok(home),
-    home_env_vars=("GROK_HOME",),
+    home_env_vars=(
+        "GROK_HOME",
+        # Child/daemon runtime markers grok stamps on its own subprocesses —
+        # same inheritance hazard class as claude's child-session marker.
+        "GROK_BACKGROUND_CHILD",
+        "GROK_DAEMON_CHILD",
+    ),
     make_log_reader=GrokLogReader,
 )

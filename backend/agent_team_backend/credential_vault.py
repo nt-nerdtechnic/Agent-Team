@@ -93,12 +93,10 @@ _SLOT_SERVICE_PREFIX = "Navide CLI account "
 
 # Secret file name inside a slot directory, per agent.
 _SLOT_FILES = {
-    "claude": ".credentials.json",
 }
 
 # Live secret file path segments, relative to the real home.
 _LIVE_FILES = {
-    "claude": (".claude", ".credentials.json"),
 }
 
 _OAUTH_ACCOUNT_SLOT_FILE = "oauth-account.json"

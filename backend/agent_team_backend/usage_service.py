@@ -109,7 +109,6 @@ PROVIDERS = ("claude", "codex", "kimi", "grok", "antigravity", "opencode", "qwen
 # read costs a full Claude Code start, so it deliberately does not follow the
 # poll interval; the badge's refresh button clears it via `request_refresh`.
 CLAUDE_CLI_READ_INTERVAL = 900.0
-CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 # Claude OAuth tokens are never minted here. Anthropic rotates refresh tokens,
 # so every exchange invalidates the previous one: whenever this app refreshed a
 # credential the CLI also owns, one of the two ended up holding a dead token and
@@ -138,6 +137,7 @@ USAGE_CACHE_SCHEMA_VERSION = 1
 # Snapshot plumbing lives in usage_common (importable by vendor modules);
 # re-exported here so this module's namespace is unchanged for callers/tests.
 from .usage_common import (  # noqa: E402,F401
+    communicate_or_kill as _communicate_or_kill,
     HTTP_TIMEOUT,
     RATE_LIMIT_COOLDOWN,
     _clamp_pct,
@@ -151,6 +151,13 @@ from .usage_common import (  # noqa: E402,F401
 
 # R2: qwen's usage stack moved to its vendor module; re-exported so this
 # module's namespace (and its tests) keep working until the cleanup round.
+from .cli_vendors.claude import (  # noqa: E402,F401
+    CLAUDE_KEYCHAIN_SERVICE,
+    fetch_claude,
+    parse_claude_credentials,
+    read_claude_credentials,
+    read_claude_credentials_file,
+)
 from .cli_vendors.codex import (  # noqa: E402,F401
     codex_base_url,
     fetch_codex,
@@ -270,98 +277,6 @@ from .cli_vendors.qwen import (  # noqa: E402,F401
 
 
 # ── Credential readers (pure; ``home`` injectable for tests) ────────────────
-
-def read_claude_credentials_file(home: Path) -> dict | None:
-    """Parse ``~/.claude/.credentials.json``. Returns the claudeAiOauth dict
-    or None when absent/unusable (an mcpOAuth-only payload counts as absent)."""
-    path = home / ".claude" / ".credentials.json"
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
-    if not isinstance(oauth, dict) or not oauth.get("accessToken"):
-        return None
-    return oauth
-
-
-def parse_claude_credentials(raw: str | None) -> dict | None:
-    """Extract Claude OAuth data from a vault credential payload."""
-    if raw is None:
-        return None
-    try:
-        data = json.loads(raw)
-    except (TypeError, ValueError):
-        return None
-    oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
-    if not isinstance(oauth, dict) or not oauth.get("accessToken"):
-        return None
-    return oauth
-
-
-
-
-# A failed Keychain read (denied prompt, timeout) is remembered so we don't
-# re-prompt every poll — but only for a cooldown window, so a transient failure
-# (e.g. a slow security call during an account switch) self-heals without an app
-# restart. monotonic timestamp; None means no active cooldown.
-_KEYCHAIN_COOLDOWN_S = 300.0
-_keychain_failed_at: float | None = None
-
-
-from .usage_common import (  # noqa: E402,F401
-    _KEYCHAIN_COOLDOWN_S as _SHARED_KEYCHAIN_COOLDOWN_S,
-    communicate_or_kill as _communicate_or_kill,
-)
-
-
-async def read_claude_credentials(home: Path) -> dict | None:
-    """File first; on macOS fall back to the Keychain generic password the
-    Claude Code CLI writes. A failed Keychain read is remembered for
-    ``_KEYCHAIN_COOLDOWN_S`` (the prompt/denial would otherwise re-fire every
-    poll), then retried so a transient failure self-heals."""
-    global _keychain_failed_at
-    oauth = read_claude_credentials_file(home)
-    if oauth is not None:
-        return oauth
-    if sys.platform != "darwin":
-        return None
-    now = time.monotonic()
-    if _keychain_failed_at is not None and now - _keychain_failed_at < _KEYCHAIN_COOLDOWN_S:
-        return None
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "/usr/bin/security", "find-generic-password",
-            "-s", CLAUDE_KEYCHAIN_SERVICE, "-w",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-        )
-        out = await _communicate_or_kill(proc, timeout=2.0)
-        if proc.returncode != 0:
-            _keychain_failed_at = now
-            return None
-        _keychain_failed_at = None
-        data = json.loads(out.decode("utf-8", "replace").strip())
-        oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
-        if not isinstance(oauth, dict) or not oauth.get("accessToken"):
-            return None
-        return oauth
-    except (OSError, ValueError, asyncio.TimeoutError):
-        _keychain_failed_at = now
-        return None
-
-
-async def fetch_claude(home: Path) -> dict:
-    """Claude quota, read from the CLI's own ``/usage`` panel.
-
-    Claude Code asks Anthropic under its own identity and prints the answer;
-    this reads what it printed. It replaced a direct HTTP call this app made
-    while presenting itself as ``claude-code/<version>``. ``home`` locates the
-    live credential for the logged-out precheck; the CLI itself still reads
-    whichever credential is live."""
-    from .claude_cli_usage import fetch_claude_usage_via_cli
-
-    return await fetch_claude_usage_via_cli(home) or _snapshot("claude", "unavailable")
-
 
 # ── Poller service ──────────────────────────────────────────────────────────
 
