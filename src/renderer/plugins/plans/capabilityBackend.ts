@@ -97,6 +97,9 @@ const EXPLICIT: Record<string, CapabilityRef> = {
   'shell.run': { ns: 'terminal', method: 'run' },
   // PTY create cancellation (second dot → not uniform-splittable)
   'terminal.create.cancel': { ns: 'terminal', method: 'create_cancel' },
+  // Messaging roster read for the embedded CLI panel's @-mention menu (see
+  // capabilityMap's note on why it rides the terminal namespace).
+  'agent_msg.list': { ns: 'terminal', method: 'agent_msg_list' },
 }
 
 /**

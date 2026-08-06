@@ -159,11 +159,35 @@ def inline_mcp_config(port: int, pane_id: str = "") -> str:
     )
 
 
+def inline_env_config(port: int, pane_id: str = "") -> str:
+    """Single-line JSON for the CLIs configured by an inline-config variable.
+
+    opencode and its fork kilo read the same ``mcp`` map, where a streamable
+    HTTP endpoint is ``type: remote`` (verified against ``opencode mcp list``:
+    a ``mcpServers`` key is rejected outright as an unrecognised key). Both
+    deep-merge this over the user's own config rather than replacing it.
+    """
+    return json.dumps(
+        {
+            "$schema": "https://opencode.ai/config.json",
+            "mcp": {
+                SERVER_NAME: {
+                    "type": "remote",
+                    "url": plan_mcp_url(port, pane_id),
+                    "enabled": True,
+                }
+            },
+        },
+        separators=(",", ":"),
+    )
+
+
 def wire_command(
     agent_key: str,
     command: Any,
     port: int | None,
     pane_id: str = "",
+    env: dict[str, str] | None = None,
     *,
     claude_config: Path | None = None,
 ) -> Any:
@@ -205,4 +229,7 @@ def wire_command(
             return command
         inline = inline_mcp_config(port, pane_id)
         return _append_to_command(command, f"--additional-mcp-config {shlex.quote(inline)}")
+    config_var = INLINE_CONFIG_ENV_VARS.get(agent_key)
+    if config_var is not None and env is not None and config_var not in env:
+        env[config_var] = inline_env_config(port, pane_id)
     return command

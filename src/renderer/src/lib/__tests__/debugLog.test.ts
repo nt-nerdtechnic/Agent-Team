@@ -1,0 +1,109 @@
+import { describe, it, expect } from 'vitest'
+import {
+  capLines,
+  filterLogLines,
+  logLineLevel,
+  splitLogChunk,
+} from '../debugLog'
+
+const WARN =
+  '[2026-08-06 09:37:44,989] WARNING agent_team_backend.claude_cli_usage: read failed'
+const INFO = '[2026-08-06 16:58:42,251] INFO agent_team_backend.terminals: session closed'
+const ERROR = '[2026-08-06 10:01:28,075] ERROR agent_team_backend.usage_service: boom'
+const TRACEBACK = '  File "usage_service.py", line 2711, in poll_once'
+
+describe('logLineLevel', () => {
+  it('reads the level out of a backend log line', () => {
+    expect(logLineLevel(WARN)).toBe('WARNING')
+    expect(logLineLevel(INFO)).toBe('INFO')
+    expect(logLineLevel(ERROR)).toBe('ERROR')
+  })
+
+  it('returns empty for continuation lines', () => {
+    expect(logLineLevel(TRACEBACK)).toBe('')
+    expect(logLineLevel('')).toBe('')
+  })
+
+  it('does not match a level word inside the message body', () => {
+    expect(
+      logLineLevel('[2026-08-06 10:00:00,000] INFO mod: raising an ERROR next time')
+    ).toBe('INFO')
+  })
+})
+
+describe('splitLogChunk', () => {
+  it('splits complete lines and keeps the trailing fragment back', () => {
+    const r = splitLogChunk('', 'a\nb\nhalf')
+    expect(r.lines).toEqual(['a', 'b'])
+    expect(r.partial).toBe('half')
+  })
+
+  it('joins the fragment from the previous read', () => {
+    const first = splitLogChunk('', 'complete\npar')
+    const second = splitLogChunk(first.partial, 'tial\n')
+    expect(second.lines).toEqual(['partial'])
+    expect(second.partial).toBe('')
+  })
+
+  it('yields no lines when the chunk has no newline yet', () => {
+    const r = splitLogChunk('abc', 'def')
+    expect(r.lines).toEqual([])
+    expect(r.partial).toBe('abcdef')
+  })
+
+  it('handles an empty chunk without losing the fragment', () => {
+    const r = splitLogChunk('kept', '')
+    expect(r.lines).toEqual([])
+    expect(r.partial).toBe('kept')
+  })
+})
+
+describe('capLines', () => {
+  it('appends within the cap', () => {
+    expect(capLines(['a'], ['b', 'c'], 10)).toEqual(['a', 'b', 'c'])
+  })
+
+  it('keeps the newest lines when the cap is exceeded', () => {
+    expect(capLines(['a', 'b'], ['c', 'd'], 3)).toEqual(['b', 'c', 'd'])
+  })
+
+  it('returns the same array when nothing came in', () => {
+    const lines = ['a']
+    expect(capLines(lines, [], 10)).toBe(lines)
+  })
+
+  it('caps even when a single read overflows on its own', () => {
+    expect(capLines([], ['a', 'b', 'c', 'd'], 2)).toEqual(['c', 'd'])
+  })
+})
+
+describe('filterLogLines', () => {
+  const lines = [INFO, WARN, ERROR, TRACEBACK]
+
+  it('returns everything with no filters', () => {
+    expect(filterLogLines(lines, { minLevel: 'all', text: '' })).toBe(lines)
+  })
+
+  it('keeps levels at or above the floor', () => {
+    expect(filterLogLines(lines, { minLevel: 'WARNING', text: '' })).toEqual([WARN, ERROR])
+  })
+
+  it('drops continuation lines once a level filter is on', () => {
+    expect(filterLogLines(lines, { minLevel: 'DEBUG', text: '' })).not.toContain(TRACEBACK)
+  })
+
+  it('keeps continuation lines when only filtering by text', () => {
+    expect(filterLogLines(lines, { minLevel: 'all', text: 'usage_service.py' })).toEqual([
+      TRACEBACK,
+    ])
+  })
+
+  it('matches text case-insensitively and ignores surrounding whitespace', () => {
+    expect(filterLogLines(lines, { minLevel: 'all', text: '  BOOM  ' })).toEqual([ERROR])
+  })
+
+  it('applies both gates together', () => {
+    expect(filterLogLines(lines, { minLevel: 'ERROR', text: 'read failed' })).toEqual([])
+    expect(filterLogLines(lines, { minLevel: 'WARNING', text: 'read failed' })).toEqual([WARN])
+  })
+})
