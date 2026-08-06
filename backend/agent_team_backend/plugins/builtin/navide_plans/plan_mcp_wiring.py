@@ -1,4 +1,4 @@
-"""Wire pane CLI agents (claude / codex) to the Plan MCP endpoint.
+"""Wire pane CLI agents to the Plan MCP endpoint.
 
 The backend serves a Plan MCP server at ``/plan-mcp`` (see plan_mcp.py) on a
 dynamic port picked fresh each launch, so nothing static can point at it.
@@ -19,6 +19,24 @@ additive spawn-time flags — no user config file is ever modified:
 - codex: ``-c mcp_servers.navide-plans.url="http://127.0.0.1:<port>/plan-mcp"``
   — a one-shot TOML override merged over config.toml at process start
   (``-c`` is a global flag, valid after subcommands like ``codex resume``).
+- copilot: ``--additional-mcp-config <inline JSON>``, same ``{"mcpServers":
+  {...}}`` shape claude takes. The flag is documented as augmenting
+  ``~/.copilot/mcp-config.json`` for the session and may be repeated, so unlike
+  claude there is nothing to step aside for — a user's own servers keep
+  loading alongside ours, and ``--disable-mcp-server navide-plans`` is their
+  opt-out.
+- opencode / kilo: no MCP flag at all, but both read an entire config document
+  out of ``OPENCODE_CONFIG_CONTENT`` / ``KILO_CONFIG_CONTENT`` and deep-merge
+  it over the user's files, so the spawn env carries the wiring instead. A
+  value already present in the spawn env is left alone. Note this reaches only
+  variables Navide itself set — one exported from the user's shell profile is
+  inherited by the CLI process and would be overwritten.
+
+Deliberately not wired this way: the CLIs whose only MCP surface is a config
+file under a home directory (kimi, grok, qwen, antigravity). Their home
+variable relocates credentials and sessions along with the config, so pointing
+it at a Navide-owned directory logs the user out; doing it safely needs a
+symlink shim of the real home, which is a much larger change than this module.
 
 The port is read from the discovery file written by __main__ before uvicorn
 starts (same mechanism the Claude hooks use). File absent → wiring no-ops,
@@ -43,6 +61,15 @@ log = logging.getLogger("agent_team_backend.plugins.builtin.navide_plans.plan_mc
 
 SERVER_NAME = "navide-plans"
 CLAUDE_CONFIG_FILENAME = "plan-mcp.json"
+
+# CLIs that read a whole config document out of an environment variable. Both
+# deep-merge it over the user's own files, so this adds our server without
+# displacing theirs — no config file is written, and the value dies with the
+# pane. kilo is an opencode fork and takes the identical document.
+INLINE_CONFIG_ENV_VARS = {
+    "opencode": "OPENCODE_CONFIG_CONTENT",
+    "kilo": "KILO_CONFIG_CONTENT",
+}
 
 # Minted at import, not on first use: spawn wiring runs in worker threads and
 # concurrent pane restores would otherwise race to initialise it, burning a
@@ -143,11 +170,35 @@ def _append_to_command(command: Any, suffix: str) -> Any:
     return f"{command} {suffix}"
 
 
-def claude_inline_config(port: int, pane_id: str) -> str:
-    """Single-line JSON for claude's ``--mcp-config`` (it accepts a literal JSON
-    string as well as a path), so a pane-specific URL needs no per-pane file."""
+def inline_mcp_config(port: int, pane_id: str = "") -> str:
+    """Single-line JSON for the flags that take a literal config (claude's
+    ``--mcp-config``, copilot's ``--additional-mcp-config``), so a pane-specific
+    URL needs no per-pane file. Both CLIs read the same ``mcpServers`` shape."""
     return json.dumps(
         {"mcpServers": {SERVER_NAME: {"type": "http", "url": plan_mcp_url(port, pane_id)}}},
+        separators=(",", ":"),
+    )
+
+
+def inline_env_config(port: int, pane_id: str = "") -> str:
+    """Single-line JSON for the CLIs configured by an inline-config variable.
+
+    opencode and its fork kilo read the same ``mcp`` map, where a streamable
+    HTTP endpoint is ``type: remote`` (verified against ``opencode mcp list``:
+    a ``mcpServers`` key is rejected outright as an unrecognised key). Both
+    deep-merge this over the user's own config rather than replacing it.
+    """
+    return json.dumps(
+        {
+            "$schema": "https://opencode.ai/config.json",
+            "mcp": {
+                SERVER_NAME: {
+                    "type": "remote",
+                    "url": plan_mcp_url(port, pane_id),
+                    "enabled": True,
+                }
+            },
+        },
         separators=(",", ":"),
     )
 
@@ -157,12 +208,13 @@ def wire_command(
     command: Any,
     port: int | None,
     pane_id: str = "",
+    env: dict[str, str] | None = None,
     *,
     claude_config: Path | None = None,
 ) -> Any:
     """Append Plan-MCP wiring flags to a pane spawn command.
 
-    No-op for non-claude/codex agents, unknown port, empty commands,
+    No-op for agents with no known flag, unknown port, empty commands,
     already-wired commands, a user-supplied ``--mcp-config`` (respect their
     deliberate MCP setup, esp. with --strict-mcp-config), or (claude, when no
     pane id is known) a missing config file — a spawn must never break over MCP
@@ -170,7 +222,11 @@ def wire_command(
 
     With a pane id, claude gets the config inline rather than by path: the URL
     now differs per pane, and writing one file per pane would leave litter
-    behind in the app data dir.
+    behind in the app data dir. copilot is always inline — it has no
+    file-based fallback to fall back to.
+
+    ``env`` is the spawn environment and is mutated in place for the CLIs
+    configured by variable; None (or a variable already set) leaves it alone.
     """
     if port is None:
         return command
@@ -181,7 +237,7 @@ def wire_command(
         if "--mcp-config" in text:
             return command
         if pane_id:
-            inline = claude_inline_config(port, pane_id)
+            inline = inline_mcp_config(port, pane_id)
             return _append_to_command(command, f"--mcp-config {shlex.quote(inline)}")
         config = claude_config or claude_config_path()
         if not config.is_file():
@@ -192,4 +248,12 @@ def wire_command(
             return command
         override = f'mcp_servers.{SERVER_NAME}.url="{plan_mcp_url(port, pane_id)}"'
         return _append_to_command(command, f"-c {shlex.quote(override)}")
+    if agent_key == "copilot":
+        if SERVER_NAME in text:
+            return command
+        inline = inline_mcp_config(port, pane_id)
+        return _append_to_command(command, f"--additional-mcp-config {shlex.quote(inline)}")
+    config_var = INLINE_CONFIG_ENV_VARS.get(agent_key)
+    if config_var is not None and env is not None and config_var not in env:
+        env[config_var] = inline_env_config(port, pane_id)
     return command

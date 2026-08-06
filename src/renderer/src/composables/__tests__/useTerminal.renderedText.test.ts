@@ -68,7 +68,14 @@ describe('readBufferLineBeforeCursor', () => {
           cursorY: 0,
           cursorX,
           getLine: (r: number) =>
-            rows[r] === undefined ? undefined : { translateToString: () => rows[r] },
+            rows[r] === undefined
+              ? undefined
+              : {
+                  // Mirrors xterm: trimRight cuts the row at its last non-blank
+                  // cell, which happens BEFORE the caller slices at the cursor.
+                  translateToString: (trimRight?: boolean) =>
+                    trimRight ? rows[r].replace(/\s+$/, '') : rows[r],
+                },
         },
       },
     } as unknown as Terminal
@@ -77,6 +84,13 @@ describe('readBufferLineBeforeCursor', () => {
   it('returns the cursor row text up to the cursor column', () => {
     expect(readBufferLineBeforeCursor(mockCursorTerm(['history', '│ > tell @'], 10))).toBe('│ > tell @')
     expect(readBufferLineBeforeCursor(mockCursorTerm(['│ > tell @more'], 10))).toBe('│ > tell @')
+  })
+
+  it('keeps the blank before the cursor when nothing is drawn to its right', () => {
+    // A plain shell prompt: without the right border there is no trailing cell
+    // to protect the space, so trimming would strip it and break @-mention.
+    expect(readBufferLineBeforeCursor(mockCursorTerm(['$ '], 2))).toBe('$ ')
+    expect(readBufferLineBeforeCursor(mockCursorTerm(['▌ '], 2))).toBe('▌ ')
   })
 
   it('returns empty for a missing line', () => {

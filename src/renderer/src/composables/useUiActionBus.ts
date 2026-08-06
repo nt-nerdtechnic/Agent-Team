@@ -1,11 +1,15 @@
 import { invokeCommand, listCommands } from '../keybindings/commandRegistry'
+import { currentDiagnosticSeq, takeDiagnosticsSince } from '../lib/uiDiagnostics'
 
 /**
  * Bridges an external MCP client's `ui.invoke.request` broadcasts into this
  * window's command registry and replies with `ui.invoke.result`. Backend
  * contract (do not change without updating the backend side):
  *   request:  { request_id, workspace_path, op, action, args, global }
- *   response: backend.send('ui.invoke.result', { request_id, ok, result, error })
+ *   response: backend.send('ui.invoke.result', { request_id, ok, result, error, warnings? })
+ * `warnings` is a string array and is only present when uiDiagnostics recorded
+ * something during the action (e.g. injectText resending content) — it lets
+ * the caller see an in-window anomaly even though `ok` is still true.
  */
 
 export type UiInvokeOp = 'invoke' | 'snapshot' | 'list_actions'
@@ -49,6 +53,7 @@ export async function handleUiInvokeRequest(
   // for agent_spawn.request (another window silently owns any mismatch).
   if (!req.global && req.workspace_path !== opts.currentWorkspace.value) return
 
+  const diagnosticSeq = currentDiagnosticSeq()
   let ok = true
   let result: unknown
   let error: string | undefined
@@ -76,8 +81,14 @@ export async function handleUiInvokeRequest(
     error = errorMessage(err)
   }
 
+  const diagnostics = takeDiagnosticsSince(diagnosticSeq)
+  const payload: Record<string, unknown> = { request_id: req.request_id, ok, result, error: error ?? null }
+  if (diagnostics.length > 0) {
+    payload.warnings = diagnostics.map((d) => `[${d.code}] ${d.message}`)
+  }
+
   await opts.backend
-    .send('ui.invoke.result', { request_id: req.request_id, ok, result, error: error ?? null })
+    .send('ui.invoke.result', payload)
     .catch(() => { /* best-effort reply — the requester's own call just times out */ })
 }
 

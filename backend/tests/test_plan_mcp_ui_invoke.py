@@ -167,6 +167,77 @@ def test_resolve_ui_invoke_ignores_an_unknown_request_id() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ui_diagnostics_invokes_the_diagnostics_read_action_with_its_args(
+    broadcasts: list[dict[str, Any]],
+) -> None:
+    task = asyncio.create_task(_answer("diagnostics"))
+    result = await plan_mcp.ui_diagnostics(
+        "/ws/alpha", _ctx(), since_seq=7, pane_id="pane-1", limit=25
+    )
+    await task
+
+    assert result["ok"] is True
+    payload = broadcasts[0]["payload"]
+    assert payload["op"] == "invoke"
+    assert payload["action"] == "ui.diagnostics.read"
+    assert payload["args"] == {"sinceSeq": 7, "paneId": "pane-1", "limit": 25}
+    assert payload["global"] is False
+
+
+@pytest.mark.asyncio
+async def test_ui_diagnostics_uses_its_documented_defaults(
+    broadcasts: list[dict[str, Any]],
+) -> None:
+    task = asyncio.create_task(_answer("diagnostics-defaults"))
+    await plan_mcp.ui_diagnostics("/ws/alpha", _ctx())
+    await task
+
+    payload = broadcasts[0]["payload"]
+    assert payload["args"] == {"sinceSeq": 0, "paneId": "", "limit": 50}
+
+
+@pytest.mark.asyncio
+async def test_ui_invoke_result_carries_warnings_through_unchanged_when_present() -> None:
+    """_ui_request returns whatever resolve_ui_invoke was handed — including an
+    optional `warnings` list the renderer attached to flag an in-window
+    anomaly (e.g. injectText resending) even though the action still ok'd."""
+
+    async def _answer_with_warnings() -> None:
+        for _ in range(200):
+            keys = list(plan_mcp._ui_invoke_pending.pending)
+            if keys:
+                plan_mcp.resolve_ui_invoke(
+                    keys[0],
+                    {
+                        "ok": True,
+                        "result": "pane-1",
+                        "error": None,
+                        "warnings": ["[inject.resend] content not echoed — resending"],
+                    },
+                )
+                return
+            await asyncio.sleep(0.005)
+        raise AssertionError("no pending ui.invoke request appeared")
+
+    task = asyncio.create_task(_answer_with_warnings())
+    result = await plan_mcp._ui_request("/ws", "invoke", action="ui.pane.create")
+    await task
+
+    assert result["warnings"] == ["[inject.resend] content not echoed — resending"]
+
+
+@pytest.mark.asyncio
+async def test_ui_invoke_result_has_no_warnings_key_when_the_renderer_sent_none(
+    broadcasts: list[dict[str, Any]],
+) -> None:
+    task = asyncio.create_task(_answer("no-warnings"))
+    result = await plan_mcp._ui_request("/ws", "invoke", action="ui.settings.close")
+    await task
+
+    assert "warnings" not in result
+
+
+@pytest.mark.asyncio
 async def test_pane_create_gets_a_longer_deadline_than_a_plain_action(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -75,6 +75,11 @@ const EXPLICIT_CAP_MAP: Readonly<Record<string, string>> = {
   // TerminalCapability — PTY create cancellation. The WS type has a second dot
   // (`terminal.create.cancel`), so it cannot ride the uniform split.
   'terminal.create_cancel': 'terminal.create.cancel',
+  // TerminalCapability — messaging roster read, feeding the embedded CLI
+  // panel's @-mention menu. Rides the terminal namespace (already granted to
+  // every plugin that embeds AiCliDock) rather than adding an `agent_msg` one:
+  // this is a read of names the panel completes into, not messaging itself.
+  'terminal.agent_msg_list': 'agent_msg.list',
   // ChatCapability — editor inline AI
   'chat.editor_rewrite': 'editor.rewrite',
   'chat.editor_complete': 'editor.complete',

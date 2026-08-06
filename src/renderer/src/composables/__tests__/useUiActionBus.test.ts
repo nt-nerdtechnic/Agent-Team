@@ -2,10 +2,12 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { ref } from 'vue'
 import { useUiActionBus, handleUiInvokeRequest, type UiInvokeRequest } from '../useUiActionBus'
 import { registerCommand, _resetRegistry } from '../../keybindings/commandRegistry'
+import { recordDiagnostic, _resetDiagnostics } from '../../lib/uiDiagnostics'
 import { createMockBackend, flush } from './mockBackend'
 
 beforeEach(() => {
   _resetRegistry()
+  _resetDiagnostics()
 })
 
 function baseRequest(overrides: Partial<UiInvokeRequest> = {}): UiInvokeRequest {
@@ -166,5 +168,45 @@ describe('handleUiInvokeRequest — op dispatch', () => {
     await handleUiInvokeRequest({ workspace_path: '/ws' }, { backend, ...deps() })
     await handleUiInvokeRequest(null, { backend, ...deps() })
     expect(sent).toHaveLength(0)
+  })
+})
+
+describe('handleUiInvokeRequest — warnings from uiDiagnostics', () => {
+  const currentWorkspace = ref('/ws')
+  const deps = () => ({ currentWorkspace, buildSnapshot: vi.fn() })
+
+  it('omits warnings entirely when the action recorded no diagnostics', async () => {
+    const { backend, sent } = createMockBackend()
+    registerCommand('noop', () => 'ok')
+    await handleUiInvokeRequest(baseRequest({ action: 'noop', workspace_path: '/ws' }), { backend, ...deps() })
+
+    expect(sent[0].payload).toEqual({ request_id: 'req-1', ok: true, result: 'ok', error: null })
+    expect('warnings' in sent[0].payload).toBe(false)
+  })
+
+  it('includes warnings recorded by the command while it ran, formatted as "[code] message"', async () => {
+    const { backend, sent } = createMockBackend()
+    registerCommand('flaky', () => {
+      recordDiagnostic({ level: 'warn', code: 'inject.resend', message: 'content not echoed — resending' })
+      return 'ok'
+    })
+    await handleUiInvokeRequest(baseRequest({ action: 'flaky', workspace_path: '/ws' }), { backend, ...deps() })
+
+    expect(sent[0].payload).toEqual({
+      request_id: 'req-1',
+      ok: true,
+      result: 'ok',
+      error: null,
+      warnings: ['[inject.resend] content not echoed — resending']
+    })
+  })
+
+  it('only reports diagnostics recorded during this action, not ones from before it started', async () => {
+    const { backend, sent } = createMockBackend()
+    recordDiagnostic({ level: 'error', code: 'inject.failed', message: 'stale — from an earlier action' })
+    registerCommand('noop', () => 'ok')
+    await handleUiInvokeRequest(baseRequest({ action: 'noop', workspace_path: '/ws' }), { backend, ...deps() })
+
+    expect('warnings' in sent[0].payload).toBe(false)
   })
 })

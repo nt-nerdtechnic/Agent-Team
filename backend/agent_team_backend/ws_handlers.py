@@ -3363,12 +3363,16 @@ async def _terminal_create_impl(
         # Run plugin-registered spawn transformers over the command (e.g. the
         # builtin navide.plans plugin appends Plan-MCP flags for claude/codex);
         # no-op with no plugins, and a failing transformer never breaks a spawn.
+        # env is passed last and mutated in place: CLIs with no additive MCP
+        # flag take their wiring through a variable instead, and it is settled
+        # by this point (CODEX_HOME above is the last writer).
         payload["command"] = await asyncio.to_thread(
             app.plugin_wiring.apply_spawn_wiring,
             app.plugin_host,
             agent_key,
             payload["command"],
             str(payload.get("pane_id") or ""),
+            env,
         )
     if transaction["cancelled"]:
         raise _TerminalCreateCancelled
@@ -5019,14 +5023,14 @@ async def ui_invoke_result(session: "Session", msg_id: str, msg_type: str, paylo
             make_error(msg_id, msg_type, "BAD_REQUEST", "ui.invoke.result needs request_id")
         )
         return
-    delivered = plan_mcp.resolve_ui_invoke(
-        request_id,
-        {
-            "ok": bool(payload.get("ok", False)),
-            "result": payload.get("result"),
-            "error": str(payload["error"]) if payload.get("error") is not None else None,
-        },
-    )
+    result: dict[str, Any] = {
+        "ok": bool(payload.get("ok", False)),
+        "result": payload.get("result"),
+        "error": str(payload["error"]) if payload.get("error") is not None else None,
+    }
+    if payload.get("warnings"):
+        result["warnings"] = payload["warnings"]
+    delivered = plan_mcp.resolve_ui_invoke(request_id, result)
     await session.send_json(make_response(msg_id, msg_type, {"ok": True, "delivered": delivered}))
 
 

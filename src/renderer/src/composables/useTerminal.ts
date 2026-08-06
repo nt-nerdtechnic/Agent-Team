@@ -500,10 +500,13 @@ const BOX_ONLY_LINE_RE = /^[\s─-╿]*[─-╿][\s─-╿]*$/
  *  frame lines, takes at most `maxLines` rows and returns them oldest→newest.
  *  READ-ONLY: never mutates the terminal. */
 /** Text of the cursor's row up to the cursor column. Module-level (like
- *  serializeRenderedBuffer) so tests can drive it with a buffer fixture. */
+ *  serializeRenderedBuffer) so tests can drive it with a buffer fixture.
+ *  Never trims: trimRight cuts the row at its last non-blank cell BEFORE the
+ *  slice, which eats the space right before the cursor on any CLI without a
+ *  right border - and callers key off that space. */
 export function readBufferLineBeforeCursor(term: import('@xterm/xterm').Terminal): string {
   const buf = term.buffer.active
-  const line = buf.getLine(buf.baseY + buf.cursorY)?.translateToString(true) ?? ''
+  const line = buf.getLine(buf.baseY + buf.cursorY)?.translateToString(false) ?? ''
   return line.slice(0, buf.cursorX)
 }
 

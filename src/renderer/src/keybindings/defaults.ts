@@ -150,6 +150,11 @@ export const defaults: KeybindingRule[] = [
   // cmd+shift+p is the command palette and cmd+shift+l is taken by
   // selectHighlights/addSelectionToChat, so Plans lives on cmd+shift+d.
   { key: 'cmd+shift+d', command: 'workbench.action.openPlans' },
+  // The Debug modal shares cmd+shift+l with the editor's selectHighlights and
+  // addSelectionToChat, which are both gated on editorOpen — a context only the
+  // Mini IDE window ever sets. Guarding on !editorOpen keeps the chord free for
+  // the editor there and gives Debug every other window.
+  { key: 'cmd+shift+l', command: 'workbench.action.openDebug', when: '!editorOpen' },
   { key: 'cmd+shift+u', command: 'workbench.action.spawnAgent' },
   // Rebuild is reachable two ways: cmd+shift+r is the primary chord (freed by
   // dropping the forceReload menu role in main/menu.ts), cmd+shift+b is kept as
@@ -174,6 +179,29 @@ export const defaults: KeybindingRule[] = [
   // ── Editor tabs ──────────────────────────────────────────────────────────────
   { key: 'ctrl+tab',       command: 'workbench.action.openNextEditor' },
   { key: 'ctrl+shift+tab', command: 'workbench.action.openPreviousEditor' },
+
+  // ── CLI pane cycling ─────────────────────────────────────────────────────────
+  // Browser-tab muscle memory for walking the visible CLI panes. These must sit
+  // AFTER the editor-tab rules above: the resolver reverses the list, so these
+  // are tried first and windows without a pane stage fall through to
+  // openNext/PreviousEditor exactly as before.
+  //
+  // The guard is 'paneStage' (set only by the main window) rather than
+  // '!editorOpen': the Mini IDE clears editorOpen whenever its last tab closes,
+  // which would let these rules win in a window that never registers the
+  // commands — and an unhandled binding is NOT consumed, so the Tab would leak
+  // straight into that window's AI dock terminal.
+  //
+  // Ctrl+Tab is the one Tab combo free to intercept — bare Tab is shell
+  // completion and Shift+Tab is Claude Code's permission-mode toggle, and the
+  // dispatcher runs in the capture phase, so binding either would swallow it
+  // before xterm forwards it to the PTY.
+  //
+  // '!modalOpen' stops the shortcut from shuffling panes behind a dialog. It
+  // covers the modals wired into that context (see App.vue's modalOpen watch),
+  // not every overlay in the app.
+  { key: 'ctrl+tab',       command: 'workbench.action.focusNextPane',     when: 'paneStage && !modalOpen' },
+  { key: 'ctrl+shift+tab', command: 'workbench.action.focusPreviousPane', when: 'paneStage && !modalOpen' },
   { key: 'cmd+shift+]', command: 'workbench.action.moveEditorRightInGroup', when: 'editorOpen' },
   { key: 'cmd+shift+[', command: 'workbench.action.moveEditorLeftInGroup',  when: 'editorOpen' },
   { key: 'cmd+1', command: 'workbench.action.openEditorAtIndex1', when: 'editorOpen' },

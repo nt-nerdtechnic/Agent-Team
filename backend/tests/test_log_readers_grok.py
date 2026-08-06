@@ -360,3 +360,133 @@ def test_two_panes_bind_their_own_markers(tmp_path: Path, monkeypatch) -> None:
     bound = {b.pane_id: b.resume_id for b in (first, second)}
     assert bound == {"pane-a": "aaaaaaaaaaa1", "pane-b": "bbbbbbbbbbb2"}
     assert attr.maybe_announce_session(_session_sink_usage(db)) is None
+
+
+# ---- parse_activity: turn boundaries in a shared, multi-session db ----
+
+
+def _add_role_message(
+    con: sqlite3.Connection, sid: str, seq: int, role: str, text: str,
+    created_at: str = _NOW,
+) -> None:
+    con.execute(
+        "INSERT INTO messages VALUES (?, ?, ?, ?, ?)",
+        (sid, seq, role, json.dumps({"role": role, "content": text}), created_at),
+    )
+    con.commit()
+
+
+def _grok_db_with_session(tmp_path: Path, monkeypatch) -> tuple[GrokLogReader, Path, sqlite3.Connection]:
+    reader = _reader_rooted_at(tmp_path, monkeypatch)
+    db = tmp_path / ".grok" / "grok.db"
+    con = _create_db(db)
+    ws = tmp_path / "proj"
+    ws.mkdir(exist_ok=True)
+    _add_workspace(con, "w" * 16, str(ws))
+    _add_session(con, "aaaaaaaaaaa1", "w" * 16, str(ws))
+    return reader, db, con
+
+
+def _completes(events) -> list[tuple[str, str, str]]:
+    return [
+        (e.dedup_key, e.detail, e.text) for e in events
+        if e.event_type == "turn_complete"
+    ]
+
+
+def test_parse_activity_completes_a_turn_with_the_assistant_reply(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Grok has no end-of-turn record, so the turn is closed by the session
+    going quiet — and must carry the reply for the messaging protocol."""
+    reader, db, con = _grok_db_with_session(tmp_path, monkeypatch)
+    _add_role_message(con, "aaaaaaaaaaa1", 1, "user", "ask reviewer to take over")
+    _add_role_message(con, "aaaaaaaaaaa1", 2, "assistant", "looking into it")
+    _add_role_message(con, "aaaaaaaaaaa1", 3, "assistant", "done, handing over")
+    con.close()
+    # _NOW is far in the past relative to the real clock, so the session reads
+    # as quiet without having to move time.
+    events = reader.parse_activity(db, set())
+    assert _completes(events) == [
+        ("turn:aaaaaaaaaaa1:0", "idle", "done, handing over")
+    ]
+    # A real timestamp is what the frontend dedups messaging turns by; an
+    # unparseable one reads as always-fresh and resends the turn.
+    completes = [e for e in events if e.event_type == "turn_complete"]
+    assert completes[0].timestamp == _NOW
+
+
+def test_parse_activity_open_turn_stays_open_while_the_session_is_live(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import agent_team_backend.log_readers.grok as grok_mod
+
+    reader, db, con = _grok_db_with_session(tmp_path, monkeypatch)
+    _add_role_message(con, "aaaaaaaaaaa1", 1, "user", "go")
+    _add_role_message(con, "aaaaaaaaaaa1", 2, "assistant", "working")
+    con.close()
+    # Pretend now is right after the messages were written.
+    monkeypatch.setattr(
+        grok_mod.time, "time", lambda: grok_mod._epoch(_NOW) + 1.0
+    )
+    assert _completes(reader.parse_activity(db, set())) == []
+
+
+def test_parse_activity_next_user_message_closes_the_previous_turn(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import agent_team_backend.log_readers.grok as grok_mod
+
+    reader, db, con = _grok_db_with_session(tmp_path, monkeypatch)
+    _add_role_message(con, "aaaaaaaaaaa1", 1, "user", "first")
+    _add_role_message(con, "aaaaaaaaaaa1", 2, "assistant", "answer one")
+    _add_role_message(con, "aaaaaaaaaaa1", 3, "user", "second")
+    con.close()
+    monkeypatch.setattr(grok_mod.time, "time", lambda: grok_mod._epoch(_NOW) + 1.0)
+    assert _completes(reader.parse_activity(db, set())) == [
+        ("turn:aaaaaaaaaaa1:0", "boundary", "answer one")
+    ]
+
+
+def test_parse_activity_idle_is_per_session_not_per_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """One db holds every session. A session that is still being written to
+    must not keep another session's finished turn from completing, and the two
+    replies must not cross over."""
+    import agent_team_backend.log_readers.grok as grok_mod
+
+    reader, db, con = _grok_db_with_session(tmp_path, monkeypatch)
+    _add_session(con, "bbbbbbbbbbb2", "w" * 16, str(tmp_path / "proj"))
+    quiet, busy = _NOW, "2026-07-10T00:01:00.000Z"
+    _add_role_message(con, "aaaaaaaaaaa1", 1, "user", "old", quiet)
+    _add_role_message(con, "aaaaaaaaaaa1", 2, "assistant", "quiet reply", quiet)
+    _add_role_message(con, "bbbbbbbbbbb2", 1, "user", "new", busy)
+    _add_role_message(con, "bbbbbbbbbbb2", 2, "assistant", "busy reply", busy)
+    con.close()
+    # Now sits just after the busy session's last write: session a is long
+    # past the idle window, session b is still inside it.
+    monkeypatch.setattr(grok_mod.time, "time", lambda: grok_mod._epoch(busy) + 1.0)
+    assert _completes(reader.parse_activity(db, set())) == [
+        ("turn:aaaaaaaaaaa1:0", "idle", "quiet reply")
+    ]
+
+
+def test_parse_activity_reparse_does_not_reemit(tmp_path: Path, monkeypatch) -> None:
+    reader, db, con = _grok_db_with_session(tmp_path, monkeypatch)
+    _add_role_message(con, "aaaaaaaaaaa1", 1, "user", "go")
+    _add_role_message(con, "aaaaaaaaaaa1", 2, "assistant", "done")
+    con.close()
+    seen: set[str] = set()
+    assert len(_completes(reader.parse_activity(db, seen))) == 1
+    assert reader.parse_activity(db, seen) == []
+
+
+def test_parse_activity_ignores_non_session_files(
+    tmp_path: Path, monkeypatch
+) -> None:
+    reader = _reader_rooted_at(tmp_path, monkeypatch)
+    settings = tmp_path / ".grok" / "user-settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text("{}", encoding="utf-8")
+    assert reader.parse_activity(settings, set()) == []

@@ -1605,7 +1605,11 @@ ipcMain.handle('fs:readFrom', async (_event, filePath: string, fromByte: number)
   try {
     const fs = await import('node:fs/promises')
     const stat = await fs.stat(filePath)
-    if (stat.size <= fromByte) return { ok: true, content: '', newOffset: fromByte }
+    // Report the real size even when there is nothing new: a tailing caller
+    // detects log rotation (the file shrank below its cursor) by seeing
+    // newOffset < the offset it asked for. Echoing fromByte back would hide
+    // the truncation and the tail would stall forever.
+    if (stat.size <= fromByte) return { ok: true, content: '', newOffset: stat.size }
     const fh = await fs.open(filePath, 'r')
     const buf = Buffer.alloc(stat.size - fromByte)
     await fh.read(buf, 0, buf.length, fromByte)

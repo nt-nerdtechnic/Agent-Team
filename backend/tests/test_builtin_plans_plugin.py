@@ -139,7 +139,9 @@ def test_spawn_wiring_tolerates_a_pre_pane_id_transformer(tmp_path: Path) -> Non
     assert calls == [("claude", "claude", 4567)]
 
 
-def test_spawn_wiring_passes_the_pane_id_to_a_current_transformer(tmp_path: Path) -> None:
+def test_spawn_wiring_tolerates_a_pre_env_transformer(tmp_path: Path) -> None:
+    """Same hazard one rung up: plugins written against the 4-argument shape
+    must not be handed the env dict."""
     _stage_port_file(tmp_path)
     seen: list[str] = []
 
@@ -150,5 +152,71 @@ def test_spawn_wiring_passes_the_pane_id_to_a_current_transformer(tmp_path: Path
     host = PluginHost()
     host.spawn_transformers = lambda: [("third.party", current)]  # type: ignore[assignment,method-assign]
 
-    wiring.apply_spawn_wiring(host, "claude", "claude", "pane-9")
+    wiring.apply_spawn_wiring(host, "claude", "claude", "pane-9", {})
     assert seen == ["pane-9"]
+
+
+def test_spawn_wiring_lets_a_transformer_patch_the_env(tmp_path: Path) -> None:
+    """CLIs with no additive MCP flag are wired through the environment, so a
+    transformer mutates the spawn env in place."""
+    _stage_port_file(tmp_path)
+
+    def env_wirer(
+        agent_key: str, command: Any, port: int | None, pane_id: str, env: dict[str, str]
+    ) -> Any:
+        env["SOME_CLI_CONFIG_CONTENT"] = f"{agent_key}:{port}:{pane_id}"
+        return command
+
+    host = PluginHost()
+    host.spawn_transformers = lambda: [("third.party", env_wirer)]  # type: ignore[assignment,method-assign]
+
+    env: dict[str, str] = {"EXISTING": "kept"}
+    assert wiring.apply_spawn_wiring(host, "kilo", "kilo", "pane-3", env) == "kilo"
+    assert env == {"EXISTING": "kept", "SOME_CLI_CONFIG_CONTENT": "kilo:4567:pane-3"}
+
+
+def test_spawn_wiring_ignores_keyword_only_params_when_picking_the_shape(
+    tmp_path: Path,
+) -> None:
+    """plan_mcp_wiring.wire_command carries a keyword-only `claude_config` for
+    tests. Counting it as positional would promote a 4-argument transformer
+    into the env contract and hand it the dict as its pane_id."""
+    _stage_port_file(tmp_path)
+    seen: list[tuple[str, Any]] = []
+
+    def four_positional_plus_kwonly(
+        agent_key: str,
+        command: Any,
+        port: int | None,
+        pane_id: str = "",
+        *,
+        extra: str | None = None,
+    ) -> Any:
+        seen.append((pane_id, extra))
+        return command
+
+    host = PluginHost()
+    host.spawn_transformers = lambda: [  # type: ignore[assignment,method-assign]
+        ("third.party", four_positional_plus_kwonly)
+    ]
+
+    wiring.apply_spawn_wiring(host, "claude", "claude", "pane-7", {})
+    assert seen == [("pane-7", None)]
+
+
+def test_spawn_wiring_passes_env_to_a_varargs_transformer(tmp_path: Path) -> None:
+    """An unreadable or *args signature gets the newest shape — withholding
+    arguments is the worse guess."""
+    _stage_port_file(tmp_path)
+    seen: list[tuple[Any, ...]] = []
+
+    def anything(*args: Any) -> Any:
+        seen.append(args)
+        return args[1]
+
+    host = PluginHost()
+    host.spawn_transformers = lambda: [("third.party", anything)]  # type: ignore[assignment,method-assign]
+
+    env: dict[str, str] = {}
+    wiring.apply_spawn_wiring(host, "claude", "claude", "pane-2", env)
+    assert seen == [("claude", "claude", 4567, "pane-2", env)]

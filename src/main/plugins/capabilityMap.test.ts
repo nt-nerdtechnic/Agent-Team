@@ -12,6 +12,9 @@ const EXPECTED_EXPLICIT: Readonly<Record<string, string>> = {
   // PTY create cancellation — the WS type's second dot keeps it out of the
   // uniform terminal split.
   'terminal.create_cancel': 'terminal.create.cancel',
+  // Messaging roster read feeding the embedded CLI panel's @-mention menu —
+  // rides the terminal namespace, so the WS type differs from the address.
+  'terminal.agent_msg_list': 'agent_msg.list',
   'chat.editor_rewrite': 'editor.rewrite',
   'chat.editor_complete': 'editor.complete',
   // Retired AIChatPane surface trimmed to the settings store ReviewPane still
@@ -111,7 +114,8 @@ describe('resolveWsType', () => {
   it('keeps uniform-namespace entries an identity map (value === key)', () => {
     for (const [key, value] of Object.entries(CAP_MAP)) {
       const ns = key.slice(0, key.indexOf('.'))
-      // terminal is uniform EXCEPT its two explicit remaps (run / create_cancel).
+      // terminal is uniform EXCEPT its explicit remaps (run / create_cancel /
+      // agent_msg_list).
       if (key in EXPECTED_EXPLICIT) continue
       if (ns === 'fs' || ns === 'git' || ns === 'search' || ns === 'issues' || ns === 'terminal') {
         expect(value).toBe(key)

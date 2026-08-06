@@ -13,11 +13,15 @@ const props = defineProps<{
   paneId: string
   backend: ReturnType<typeof useBackend>
   workspacePath?: string
+  /** Names offered by the @-mention menu. Read lazily on every `@` keystroke,
+   *  so the host can keep refreshing the list behind this prop. */
+  mentionCandidates?: string[]
 }>()
 
 const containerRef = ref<HTMLElement | null>(null)
 const terminal = useTerminal(props.paneId, props.backend, {
   workspacePath: props.workspacePath,
+  mentionCandidates: () => props.mentionCandidates ?? [],
 })
 const { theme } = useTheme()
 watch(theme, () => terminal.updateXtermTheme())

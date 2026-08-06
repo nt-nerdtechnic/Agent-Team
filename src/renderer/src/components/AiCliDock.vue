@@ -179,6 +179,30 @@ watch(
   { immediate: true }
 )
 
+// Names offered by the terminal's @-mention menu: every pane in the backend
+// messaging roster except this one, as `<folder>/<pane>` addresses. Polled
+// rather than pushed (as in the main window) — the list only feeds
+// autocomplete, so a stale snapshot costs nothing; routing always re-resolves
+// in the backend. This panel is not itself registered in the roster, so the
+// mentions go one way: from here out to the main window's panes.
+const mentionTargets = ref<string[]>([])
+async function refreshMentionTargets(): Promise<void> {
+  if (props.backend.status.value !== 'connected') return
+  try {
+    const resp = await props.backend.send<{
+      panes?: Array<{ pane_id?: string; qualified_name?: string }>
+    }>('agent_msg.list', {})
+    mentionTargets.value = (resp.payload?.panes ?? [])
+      .filter((p) => p.qualified_name && p.pane_id !== props.paneId)
+      .map((p) => p.qualified_name as string)
+  } catch {
+    mentionTargets.value = []
+  }
+}
+watch(() => props.backend.status.value, () => void refreshMentionTargets(), { immediate: true })
+const mentionPollTimer = setInterval(() => void refreshMentionTargets(), 10_000)
+onUnmounted(() => clearInterval(mentionPollTimer))
+
 // The panel opens from display:none — refit once measurable so the terminal
 // paints at the real width (sanctioned explicit-refit path, no history loss).
 watch(open, (o) => {
@@ -333,6 +357,7 @@ defineExpose({ start, stop, interrupt, pasteText, injectNow, toggle, terminal: t
       :pane-id="paneId"
       :backend="backend"
       :workspace-path="workspacePath"
+      :mention-candidates="mentionTargets"
       class="ai-cli-term"
     />
   </div>

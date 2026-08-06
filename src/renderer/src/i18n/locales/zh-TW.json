@@ -1618,6 +1618,37 @@
     "title": "背景整理歷史 token 用量",
     "tidying": "整理 token 歷史… 剩 {count} 檔"
   },
+  "debug": {
+    "title": "偵錯",
+    "close": "關閉（ESC）",
+    "tab": {
+      "log": "後端日誌",
+      "shell": "終端機",
+      "ai": "問 AI",
+      "info": "資訊"
+    },
+    "log": {
+      "level-all": "所有等級",
+      "filter-placeholder": "文字篩選…",
+      "follow": "自動跟隨",
+      "count": "{shown} / {total} 行",
+      "copy": "複製",
+      "copied": "已複製",
+      "reveal": "在 Finder 顯示",
+      "no-path": "等待後端回報日誌路徑…",
+      "empty": "沒有符合目前篩選條件的內容。"
+    },
+    "term": {
+      "start": "啟動",
+      "interrupt": "中斷",
+      "stop": "停止"
+    },
+    "info": {
+      "runtime": "執行環境",
+      "paths": "路徑",
+      "open": "開啟"
+    }
+  },
   "orphans": {
     "title": "殘留 CLI 程序",
     "leftover": "殘留",
