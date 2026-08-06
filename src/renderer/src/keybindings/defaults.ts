@@ -150,6 +150,11 @@ export const defaults: KeybindingRule[] = [
   // cmd+shift+p is the command palette and cmd+shift+l is taken by
   // selectHighlights/addSelectionToChat, so Plans lives on cmd+shift+d.
   { key: 'cmd+shift+d', command: 'workbench.action.openPlans' },
+  // The Debug modal shares cmd+shift+l with the editor's selectHighlights and
+  // addSelectionToChat, which are both gated on editorOpen — a context only the
+  // Mini IDE window ever sets. Guarding on !editorOpen keeps the chord free for
+  // the editor there and gives Debug every other window.
+  { key: 'cmd+shift+l', command: 'workbench.action.openDebug', when: '!editorOpen' },
   { key: 'cmd+shift+u', command: 'workbench.action.spawnAgent' },
   // Rebuild is reachable two ways: cmd+shift+r is the primary chord (freed by
   // dropping the forceReload menu role in main/menu.ts), cmd+shift+b is kept as

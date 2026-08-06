@@ -1618,6 +1618,37 @@
     "title": "Backfilling historical token usage in the background",
     "tidying": "tidying token history… {count} file(s)"
   },
+  "debug": {
+    "title": "Debug",
+    "close": "Close (ESC)",
+    "tab": {
+      "log": "Backend Log",
+      "shell": "Shell",
+      "ai": "Ask AI",
+      "info": "Info"
+    },
+    "log": {
+      "level-all": "All levels",
+      "filter-placeholder": "Filter text…",
+      "follow": "Follow",
+      "count": "{shown} / {total} lines",
+      "copy": "Copy",
+      "copied": "Copied",
+      "reveal": "Open file",
+      "no-path": "Waiting for the backend to report its log path…",
+      "empty": "Nothing matches the current filter."
+    },
+    "term": {
+      "start": "Start",
+      "interrupt": "Interrupt",
+      "stop": "Stop"
+    },
+    "info": {
+      "runtime": "Runtime",
+      "paths": "Paths",
+      "open": "Open"
+    }
+  },
   "orphans": {
     "title": "Leftover CLI processes",
     "leftover": "leftover",
