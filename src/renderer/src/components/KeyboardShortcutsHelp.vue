@@ -41,6 +41,7 @@ const blocks: Block[] = [
       { keys: '⌘ ⇧ L', desc: '開啟 Debug 視窗（後端日誌／終端機／問 AI）', ctx: ['global'] },
       { keys: '⌃ 1 – 5', desc: '切換 CLI 種類（下次要開的類型）', ctx: ['global'] },
       { keys: '⌘ ⇧ U', desc: '用選定類型開新 agent（spawn）', ctx: ['global'] },
+      { keys: '⌃ Tab / ⌃ ⇧ Tab', desc: '切換到下一個／上一個 pane（循環，會自動翻 grid 分頁）', ctx: ['global'] },
       { keys: '⌘ ⇧ R / ⌘ ⇧ B', desc: '重建目前 focus 的 pane（resume）', ctx: ['global'] },
       { keys: '⌘ ⇧ N', desc: '開新視窗', ctx: ['global'] },
       { keys: '⌘ ⇧ F', desc: '跨檔搜尋', ctx: ['global'] },

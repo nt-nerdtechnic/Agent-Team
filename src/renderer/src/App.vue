@@ -125,6 +125,7 @@ import {
   type RawOrphanSession,
 } from './lib/sessionHeal'
 import { gridPageCount, gridPageSlice, gridPresetDims, parseGridPreset, type GridPreset } from './lib/gridLayout'
+import { planPaneCycle, type CycleDirection } from './lib/paneCycle'
 import { parseLegacyRunGroups, resolveActiveTab, resolveManualSpawnGroupId } from './lib/runGroups'
 import {
   ALL_SCOPE_RESTORE_CONCURRENCY,
@@ -4859,6 +4860,9 @@ registerCommand('workbench.action.openPlans', async () => {
 registerCommand('workbench.action.rebuildFocusedPane', async () => {
   if (effectiveFocusPaneId.value) await rebuildPaneViaResume(effectiveFocusPaneId.value)
 })
+// Ctrl+Tab / Ctrl+Shift+Tab — see cycleFocusedPane near the grid pagination state.
+registerCommand('workbench.action.focusNextPane', () => { cycleFocusedPane(1) })
+registerCommand('workbench.action.focusPreviousPane', () => { cycleFocusedPane(-1) })
 
 // ── External UI action bus (MCP-driven) ─────────────────────────────────────
 // Actions a UI-control MCP client can invoke via ui.invoke.request. See
@@ -10351,6 +10355,24 @@ function onUserChangeGridPreset(preset: GridPreset): void {
 function onUserChangeGridPage(page: number): void {
   gridPage.value = page
   void nextTick().then(() => advanceRestoreSession('grid-page'))
+}
+
+/** Ctrl+Tab / Ctrl+Shift+Tab: walk the panes visible under the current tab,
+ *  wrapping at both ends. A fixed grid preset hides off-page panes behind
+ *  v-show, so landing on one has to turn the page as well — otherwise focus
+ *  would move to a pane the user cannot see. Non-grid layouts derive the stage
+ *  from focusPaneId alone and need no such fixup. */
+function cycleFocusedPane(direction: CycleDirection): void {
+  const plan = planPaneCycle({
+    orderedIds: tabVisiblePanes.value.map((p) => p.id),
+    currentId: effectiveFocusPaneId.value,
+    direction,
+    gridDims: effectiveLayoutMode.value === 'grid' ? gridPresetDims(gridPreset.value) : null,
+    currentPage: gridPage.value,
+  })
+  if (!plan) return
+  if (plan.page !== null) onUserChangeGridPage(plan.page)
+  selectPane(plan.targetId, { userInitiated: true, scrollIntoView: true })
 }
 
 const dualFocusHandlePos = computed(() => {
