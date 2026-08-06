@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   buildCliPaneBufferReply,
   buildExternalPaneContextPaste,
+  buildPaneStatusReply,
   endsWithMentionTrigger,
   shouldOpenMentionMenu,
   parseCliContextPayload,
@@ -103,6 +104,41 @@ describe('buildCliPaneBufferReply', () => {
       workspacePath: '',
       conversationLogPath: '',
       buffer: 'x'
+    })
+  })
+})
+
+describe('buildPaneStatusReply', () => {
+  it('reports starting with no buffer for a pane with no realized ref', () => {
+    expect(buildPaneStatusReply({ outputLogFile: '/ws/.agent-team/manual/x.log' }, null)).toEqual({
+      status: 'starting',
+      buffer: '',
+      logPath: '/ws/.agent-team/manual/x.log'
+    })
+  })
+
+  it('reports the live status and buffer for a realized pane', () => {
+    expect(
+      buildPaneStatusReply({ outputLogFile: '/ws/x.log' }, { displayStatus: 'running', buffer: 'hello' })
+    ).toEqual({
+      status: 'running',
+      buffer: 'hello',
+      logPath: '/ws/x.log'
+    })
+  })
+
+  it('caps the buffer to CLI_PASTE_BUFFER_CAP chars, keeping only the tail', () => {
+    const long = 'a'.repeat(CLI_PASTE_BUFFER_CAP + 500)
+    const reply = buildPaneStatusReply(undefined, { displayStatus: 'idle', buffer: long })
+    expect(reply.buffer.length).toBe(CLI_PASTE_BUFFER_CAP)
+    expect(reply.buffer).toBe(long.slice(-CLI_PASTE_BUFFER_CAP))
+  })
+
+  it('omits logPath when the pane record has none, without a pane record at all', () => {
+    expect(buildPaneStatusReply(undefined, { displayStatus: 'idle', buffer: '' })).toEqual({
+      status: 'idle',
+      buffer: '',
+      logPath: undefined
     })
   })
 })

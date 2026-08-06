@@ -13,4 +13,7 @@ export interface KeybindingRule {
   args?: unknown
 }
 
-export type CommandHandler = (args?: unknown) => void | Promise<void>
+// Widened to `unknown` (rather than `void`) so invokeCommand can hand a
+// handler's return value back to its caller; existing void/Promise<void>
+// handlers remain valid since void is assignable to unknown.
+export type CommandHandler = (args?: unknown) => unknown | Promise<unknown>

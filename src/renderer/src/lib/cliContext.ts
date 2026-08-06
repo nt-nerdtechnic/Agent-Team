@@ -259,3 +259,25 @@ export function buildCliPaneBufferReply(
     buffer: paneRef.buffer ?? ''
   }
 }
+
+export interface PaneStatusReply {
+  status: string
+  buffer: string
+  logPath?: string
+}
+
+/** Shape a `ui.pane.getStatus` reply (App.vue's external UI action bus).
+ *  Mirrors buildCliPaneBufferReply's split: `pane` supplies static identity
+ *  (outputLogFile), `live` supplies the caller-computed status/rendered
+ *  buffer text — null when the pane exists but hasn't realized its
+ *  TerminalPane ref yet (still shows a status, but no scrollback). */
+export function buildPaneStatusReply(
+  pane: { outputLogFile?: string } | undefined,
+  live: { displayStatus?: string; buffer: string } | null
+): PaneStatusReply {
+  return {
+    status: live?.displayStatus ?? 'starting',
+    buffer: live ? bufferTail(live.buffer, CLI_PASTE_BUFFER_CAP) : '',
+    logPath: pane?.outputLogFile || undefined
+  }
+}

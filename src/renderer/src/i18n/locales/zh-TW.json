@@ -604,7 +604,17 @@
       "custom-title": "新增自訂 MCP server",
       "custom-hint": "先選擇傳輸方式，建立後再到已安裝清單填寫連線資訊。",
       "server-name": "Server 名稱",
-      "create-server": "建立 server"
+      "create-server": "建立 server",
+      "external-access-title": "外部存取",
+      "external-access-hint": "允許外部 MCP client 透過本機 HTTP 端點連線到 Navide。",
+      "allow-external": "允許外部 MCP client",
+      "allow-external-warning": "開啟後，本機任何程式皆可控制 Navide。",
+      "connection-url": "連線 URL",
+      "regenerate-token": "重新產生 token",
+      "token-copied": "已複製",
+      "cdp-title": "Chrome DevTools Protocol（CDP）",
+      "cdp-hint": "需重啟 App 才會生效；僅綁定 127.0.0.1。",
+      "cdp-warning": "開啟後，本機任何行程皆可對 Navide 執行任意程式碼。"
     },
     "skills": {
       "title": "受管 Skills",

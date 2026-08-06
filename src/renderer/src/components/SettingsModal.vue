@@ -110,6 +110,12 @@ type Tab = 'mcp' | 'skills' | 'analyzer' | 'cliAgents' | 'general' | 'updates' |
 type HelpTopic = 'messaging' | 'mcp' | 'shortcuts'
 const helpTopic = ref<HelpTopic>('messaging')
 const activeTab = ref<Tab>(props.initialTab ?? 'general')
+// initialTab is only read once at mount by the ref initializer above; when the
+// modal is already open and a new tab is requested (e.g. the ui.settings.open
+// action), react to the prop changing too.
+watch(() => props.initialTab, (tab) => {
+  if (tab) activeTab.value = tab
+})
 
 // Sidebar workspace header label — the open workspace's basename, falling back
 // to the app name when no workspace is passed in.
@@ -1082,8 +1088,105 @@ async function mOpenConfig() {
   if (mConfigPath.value) await (window as any).agentTeam.openPath(mConfigPath.value)
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// EXTERNAL ACCESS (MCP tab): external MCP client access + CDP debug toggle.
+// ══════════════════════════════════════════════════════════════════════════════
+
+interface ExternalAccessState { enabled: boolean; token: string; port: number }
+const eaEnabled = ref(false)
+const eaToken = ref('')
+const eaPort = ref(0)
+const eaLoading = ref(false)
+const eaError = ref('')
+const eaCopied = ref(false)
+
+const eaUrl = computed(() => (
+  eaEnabled.value && eaPort.value
+    ? `http://127.0.0.1:${eaPort.value}/plan-mcp?client=external&t=${eaToken.value}`
+    : ''
+))
+
+async function eaLoad(): Promise<void> {
+  eaLoading.value = true; eaError.value = ''
+  try {
+    const resp = await props.backend.send<ExternalAccessState>('external_access.get', {})
+    if (resp.ok && resp.payload) {
+      eaEnabled.value = resp.payload.enabled
+      eaToken.value = resp.payload.token
+      eaPort.value = resp.payload.port
+    } else {
+      eaError.value = resp.error?.message ?? 'Load failed'
+    }
+  } catch (err) { eaError.value = String((err as Error).message ?? err) }
+  finally { eaLoading.value = false }
+}
+
+async function eaSetEnabled(enabled: boolean): Promise<void> {
+  const prev = eaEnabled.value
+  eaEnabled.value = enabled
+  eaError.value = ''
+  try {
+    const resp = await props.backend.send<ExternalAccessState>('external_access.set', { enabled })
+    if (resp.ok && resp.payload) {
+      eaEnabled.value = resp.payload.enabled
+      eaToken.value = resp.payload.token
+      eaPort.value = resp.payload.port
+    } else {
+      eaEnabled.value = prev
+      eaError.value = resp.error?.message ?? 'Save failed'
+    }
+  } catch (err) {
+    eaEnabled.value = prev
+    eaError.value = String((err as Error).message ?? err)
+  }
+}
+
+async function eaRegenerateToken(): Promise<void> {
+  eaError.value = ''
+  try {
+    const resp = await props.backend.send<ExternalAccessState>('external_access.regenerate', {})
+    if (resp.ok && resp.payload) {
+      eaToken.value = resp.payload.token
+    } else {
+      eaError.value = resp.error?.message ?? 'Regenerate failed'
+    }
+  } catch (err) { eaError.value = String((err as Error).message ?? err) }
+}
+
+async function eaCopyUrl(): Promise<void> {
+  if (!eaUrl.value) return
+  try {
+    await navigator.clipboard.writeText(eaUrl.value)
+    eaCopied.value = true
+    setTimeout(() => { eaCopied.value = false }, 1500)
+  } catch { /* clipboard unavailable — no-op */ }
+}
+
+// CDP (Chrome DevTools Protocol) debug toggle. Takes effect on next app
+// restart — the switch is applied at pre-ready startup in main (cdp-debug.ts).
+const cdpEnabled = ref(false)
+const cdpPort = ref(9223)
+const cdpSaving = ref(false)
+
+async function cdpLoad(): Promise<void> {
+  const resp = await window.agentTeam?.readCdpDebugConfig?.()
+  if (resp?.ok && resp.config) {
+    cdpEnabled.value = resp.config.enabled
+    cdpPort.value = resp.config.port
+  }
+}
+
+async function cdpSetEnabled(enabled: boolean): Promise<void> {
+  cdpEnabled.value = enabled
+  cdpSaving.value = true
+  try {
+    await window.agentTeam?.writeCdpDebugConfig?.({ enabled, port: cdpPort.value })
+  } finally { cdpSaving.value = false }
+}
+
 watch(activeTab, (tab) => {
   if (tab === 'mcp' && mServers.value.length === 0) mLoad()
+  if (tab === 'mcp') { void eaLoad(); void cdpLoad() }
   if (tab === 'appearance') void loadAutoRestore()
   if (tab === 'accounts') void accountsApi.refresh()
 })
@@ -1384,6 +1487,56 @@ watch(activeTab, (tab) => {
               <div v-if="!mLoading && mServers.length === 0" class="mcp-empty">
                 No MCP servers installed. Click "Add MCP +" to add one from the catalog.
               </div>
+            </div>
+
+            <!-- ── EXTERNAL ACCESS ──────────────────────────────────────── -->
+            <div class="ea-section-wrap">
+            <SettingsSection :label="$t('settings.mcp.external-access-title')" data-settings-section="mcp-external-access">
+              <SettingsCard>
+                <SettingRow
+                  :title="$t('settings.mcp.allow-external')"
+                  :description="$t('settings.mcp.external-access-hint')"
+                >
+                  <template #control>
+                    <ToggleSwitch
+                      :model-value="eaEnabled"
+                      :disabled="eaLoading"
+                      :aria-label="$t('settings.mcp.allow-external')"
+                      @update:model-value="eaSetEnabled"
+                    />
+                  </template>
+                </SettingRow>
+                <p class="ea-warning">{{ $t('settings.mcp.allow-external-warning') }}</p>
+                <p v-if="eaError" class="err-msg">{{ eaError }}</p>
+                <div v-if="eaEnabled" class="ea-connection">
+                  <div class="field">
+                    <label class="lbl">{{ $t('settings.mcp.connection-url') }}</label>
+                    <div class="row-g gap">
+                      <input :value="eaUrl" type="text" readonly spellcheck="false" />
+                      <button class="mcp-action-btn" @click="eaCopyUrl">
+                        {{ eaCopied ? $t('settings.mcp.token-copied') : $t('action.copy') }}
+                      </button>
+                      <button class="mcp-action-btn" @click="eaRegenerateToken">{{ $t('settings.mcp.regenerate-token') }}</button>
+                    </div>
+                  </div>
+                </div>
+
+                <SettingRow
+                  :title="$t('settings.mcp.cdp-title')"
+                  :description="$t('settings.mcp.cdp-hint')"
+                >
+                  <template #control>
+                    <ToggleSwitch
+                      :model-value="cdpEnabled"
+                      :disabled="cdpSaving"
+                      :aria-label="$t('settings.mcp.cdp-title')"
+                      @update:model-value="cdpSetEnabled"
+                    />
+                  </template>
+                </SettingRow>
+                <p class="ea-warning">{{ $t('settings.mcp.cdp-warning') }}</p>
+              </SettingsCard>
+            </SettingsSection>
             </div>
           </template>
 
@@ -3099,6 +3252,13 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 }
 .mcp-custom-form > p { margin: 0; color: var(--text-secondary); font-size: 11px; line-height: 1.5; }
 .mcp-custom-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* External access / CDP debug section */
+.ea-section-wrap { flex-shrink: 0; padding: 0 22px 18px; }
+.ea-warning { margin: 0; padding: 0 var(--space-row-x) 10px; font-size: 11px; color: var(--attention-fg); }
+.ea-section-wrap .err-msg { padding: 0 var(--space-row-x) 10px; }
+.ea-connection { padding: 0 var(--space-row-x) 12px; }
+.ea-connection input[readonly] { width: 100%; font-size: 11px; }
 
 /* ── Analyzer tab ─────────────────────────────────────────────────────────── */
 .analyzer-body { display: flex; flex-direction: column; gap: 0; overflow-y: auto; padding: 0; }

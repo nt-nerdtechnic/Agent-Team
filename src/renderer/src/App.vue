@@ -71,6 +71,7 @@ import {
   buildCliPaneBufferReply,
   buildExternalPaneContextPaste,
   buildPaneContextPaste,
+  buildPaneStatusReply,
   chunkForPty,
   endsWithMentionTrigger,
   screenToClientPoint,
@@ -156,6 +157,7 @@ import {
 import { loginCommandFor, matchLoginExpired } from './lib/cliLoginExpired'
 import { entryBelongsToWorkspace, filterWorkspaceEntries, historyEntryLabel, legacyHistoryLogPath, manualLogFileName, updateHistoryCustomName, type HistoryCleanupMode, type HistoryDeletePreview, type HistoryDeleteTarget, type SpawnHistoryEntry, type WorkspaceIdentity } from './lib/spawnHistory'
 import { useKeybindings, registerCommand, setContext } from './keybindings/useKeybindings'
+import { useUiActionBus } from './composables/useUiActionBus'
 
 // Modals/wizard that only render behind a v-if (settings opened, run completed,
 // first-run onboarding) — defer them off the main shell's first-paint bundle.
@@ -1455,6 +1457,64 @@ async function createRequestedPane(
   return paneId
 }
 
+/** Standalone counterpart to createRequestedPane for an external MCP spawn
+ *  request addressed by target_workspace instead of a requesting pane (no
+ *  report-back parent). Mirrors ui.pane.create's independent-pane path: the
+ *  task is injected as a plain kickoffPrompt rather than the report-back
+ *  marker renderSpawnKickoff builds for pane-to-pane spawns. */
+async function createStandaloneRequestedPane(
+  workspacePath: string,
+  req: { agentKey: string; name: string; task: string },
+): Promise<string | null> {
+  const runGroupId = resolveManualSpawnGroupId(runGroups.value, activeTab.value)
+  const paneId = await spawnPane({
+    agentKey: req.agentKey,
+    roleKey: '' as RoleKey,
+    stageId: '' as StageId,
+    customName: req.name,
+    commandOverride: '',
+    workspacePath,
+    origin: 'manual',
+    runGroupId: runGroupId || undefined,
+    preferredMessagingName: req.name,
+    kickoffPrompt: req.task,
+    skipRoleInjection: !!req.task,
+  })
+  if (!paneId) return null
+  void sendQuiet<ProjectPayload>('manual_pane.spawn', {
+    workspace_path: workspacePath,
+    pane_id: paneId,
+    agent: req.agentKey,
+    role: '',
+    command: '',
+    session_id: panes.value.find((p) => p.id === paneId)?.pinnedSessionId ?? '',
+    session_home_id: panes.value.find((p) => p.id === paneId)?.sessionHomeId ?? '',
+    run_group_id: runGroupId,
+    output_log_file: panes.value.find((p) => p.id === paneId)?.outputLogFile ?? '',
+  })
+  void sendQuiet('project.rename_pane', {
+    workspace_path: workspacePath,
+    pane_id: paneId,
+    custom_name: req.name,
+  })
+  const pane = panes.value.find((p) => p.id === paneId)
+  if (!pane || pane.preparationStatus === 'failed') return null
+  return paneId
+}
+
+/** Gate context for a target_workspace spawn: no requesting pane exists, so
+ *  depth/child-count are root-level (0) — only the workspace-wide CLI pane
+ *  cap still applies. */
+function standaloneSpawnGateContext() {
+  return {
+    validAgentKeys: agentSpecs.filter((s) => s.agentKey !== 'terminal').map((s) => s.agentKey),
+    isNameTaken: (name: string) => messaging.paneIdOf(name) !== null,
+    parentDepth: 0,
+    parentChildCount: 0,
+    cliPaneCount: panes.value.filter((p) => p.agentKey !== 'terminal').length,
+  }
+}
+
 /** Wait for a freshly created pane's CLI to settle, then inject its task. Slow
  *  by nature: a cold CLI can take tens of seconds to print its first byte. */
 async function kickoffRequestedPane(
@@ -1517,19 +1577,31 @@ function spawnGateContextFor(parentPaneId: string) {
   }
 }
 
-/** cli_open_agent asked this window to open a pane. Only the window owning the
- *  requesting pane answers; the gate runs here because only this window knows
- *  the pane counts, chain depth and name collisions it needs. */
+/** cli_open_agent asked this window to open a pane. Ownership is normally by
+ *  requesting pane (only the window owning it answers); an external caller
+ *  with no requesting pane instead sends target_workspace, and ownership is
+ *  by open workspace — mirrors handleUiInvokeRequest's ownership check. The
+ *  gate runs here because only this window knows the pane counts, chain depth
+ *  and name collisions it needs. */
 async function handleMcpSpawnRequest(ev: {
   request_id: string
   requester_pane_id: string
   agent_key: string
   name: string
   task: string
+  target_workspace?: string
 }): Promise<void> {
-  const parent = panes.value.find((p) => p.id === ev.requester_pane_id)
-  if (!parent) return // not our pane — another window will answer
-  const parentName = parent.messagingName ?? ev.requester_pane_id
+  const standalone = !!ev.target_workspace
+  let parent: ActivePane | undefined
+  let parentName: string
+  if (standalone) {
+    if (ev.target_workspace !== currentWorkspace.value) return // not our workspace — another window will answer
+    parentName = ev.target_workspace as string
+  } else {
+    parent = panes.value.find((p) => p.id === ev.requester_pane_id)
+    if (!parent) return // not our pane — another window will answer
+    parentName = parent.messagingName ?? ev.requester_pane_id
+  }
 
   const report = (verdict: { ok: boolean; error?: string; paneId?: string; name?: string }): void => {
     backend
@@ -1545,15 +1617,20 @@ async function handleMcpSpawnRequest(ev: {
 
   const gate = evaluateSpawnRequest(
     { agent: ev.agent_key, name: ev.name, task: ev.task },
-    spawnGateContextFor(ev.requester_pane_id),
+    parent ? spawnGateContextFor(parent.id) : standaloneSpawnGateContext(),
   )
   if (!gate.ok) {
-    report({ ok: false, error: describeSpawnRefusal(gate.reason, ev.name, ev.requester_pane_id) })
+    report({
+      ok: false,
+      error: parent ? describeSpawnRefusal(gate.reason, ev.name, ev.requester_pane_id) : gate.reason,
+    })
     return
   }
   let paneId: string | null = null
   try {
-    paneId = await createRequestedPane(parent, gate)
+    paneId = parent
+      ? await createRequestedPane(parent, gate)
+      : await createStandaloneRequestedPane(ev.target_workspace as string, gate)
   } catch (err) {
     report({ ok: false, error: err instanceof Error ? err.message : String(err) })
     return
@@ -1569,6 +1646,14 @@ async function handleMcpSpawnRequest(ev: {
   // after this and reports a failure by message instead.
   const child = panes.value.find((p) => p.id === paneId)
   const childName = child?.messagingName ?? gate.name
+  if (!parent) {
+    // Standalone spawn: the task was already handed to spawnPane as a plain
+    // kickoffPrompt (createStandaloneRequestedPane), which itself already set
+    // kickoffStatus='pending'. There is no parent pane to report back to, so
+    // no kickoffRequestedPane / report-back marker either.
+    report({ ok: true, paneId, name: childName })
+    return
+  }
   // Shut the injection window before the caller learns this pane's name, not
   // after: the moment it knows, it may message it, and the pane has not had its
   // own task yet.
@@ -4637,6 +4722,138 @@ registerCommand('workbench.action.openPlans', async () => {
 registerCommand('workbench.action.rebuildFocusedPane', async () => {
   if (effectiveFocusPaneId.value) await rebuildPaneViaResume(effectiveFocusPaneId.value)
 })
+
+// ── External UI action bus (MCP-driven) ─────────────────────────────────────
+// Actions a UI-control MCP client can invoke via ui.invoke.request. See
+// useUiActionBus for the request/reply plumbing and ownership check.
+const UI_SETTINGS_TABS = ['general', 'mcp', 'analyzer', 'updates', 'appearance', 'accounts', 'storage'] as const
+registerCommand('ui.settings.open', (args) => {
+  const tab = (args as { tab?: string } | undefined)?.tab
+  if (tab && (UI_SETTINGS_TABS as readonly string[]).includes(tab)) {
+    settingsInitialTab.value = tab as typeof settingsInitialTab.value
+  }
+  showSettings.value = true
+})
+registerCommand('ui.settings.close', () => { showSettings.value = false })
+registerCommand('ui.pane.create', async (args) => {
+  const a = (args as { agent?: string; name?: string; task?: string } | undefined) ?? {}
+  if (!a.agent || !currentWorkspace.value) {
+    throw new Error('ui.pane.create requires an agent and an open workspace')
+  }
+  const runGroupId = resolveManualSpawnGroupId(runGroups.value, activeTab.value)
+  const paneId = await spawnPane({
+    agentKey: a.agent as AgentKey,
+    roleKey: '' as RoleKey,
+    stageId: '' as StageId,
+    customName: a.name,
+    commandOverride: '',
+    workspacePath: currentWorkspace.value,
+    origin: 'manual',
+    runGroupId: runGroupId || undefined,
+    preferredMessagingName: a.name,
+    kickoffPrompt: a.task,
+    skipRoleInjection: !!a.task,
+  })
+  if (!paneId) throw new Error(`ui.pane.create failed to spawn agent "${a.agent}"`)
+  void sendQuiet<ProjectPayload>('manual_pane.spawn', {
+    workspace_path: currentWorkspace.value,
+    pane_id: paneId,
+    agent: a.agent,
+    role: '',
+    command: '',
+    session_id: panes.value.find((p) => p.id === paneId)?.pinnedSessionId ?? '',
+    session_home_id: panes.value.find((p) => p.id === paneId)?.sessionHomeId ?? '',
+    run_group_id: runGroupId,
+    output_log_file: panes.value.find((p) => p.id === paneId)?.outputLogFile ?? '',
+  })
+  if (a.name) {
+    void sendQuiet('project.rename_pane', {
+      workspace_path: currentWorkspace.value,
+      pane_id: paneId,
+      custom_name: a.name,
+    })
+  }
+  return paneId
+})
+registerCommand('ui.pane.close', async (args) => {
+  const paneId = (args as { paneId?: string } | undefined)?.paneId
+  if (!paneId) throw new Error('ui.pane.close requires paneId')
+  await onKill(paneId)
+})
+registerCommand('ui.pane.focus', (args) => {
+  const paneId = (args as { paneId?: string } | undefined)?.paneId
+  if (!paneId) throw new Error('ui.pane.focus requires paneId')
+  onFocusPane(paneId)
+})
+registerCommand('ui.pane.getStatus', (args) => {
+  const paneId = (args as { paneId?: string } | undefined)?.paneId
+  if (!paneId) throw new Error('ui.pane.getStatus requires paneId')
+  const pane = panes.value.find((p) => p.id === paneId)
+  if (!pane) throw new Error(`ui.pane.getStatus: pane "${paneId}" not found`)
+  const ref = paneRefs[paneId]
+  return buildPaneStatusReply(
+    pane,
+    ref
+      ? { displayStatus: ref.displayStatus as string | undefined, buffer: readPaneShareText(ref, CLI_CHIP_LINE_CAP) }
+      : null,
+  )
+})
+registerCommand('ui.tab.switch', (args) => {
+  const tabId = (args as { tabId?: string } | undefined)?.tabId
+  if (!tabId) throw new Error('ui.tab.switch requires tabId')
+  activeTab.value = tabId
+})
+registerCommand('ui.window.openPlans', () => { openPlansWindow() })
+registerCommand('ui.window.openGit', async () => {
+  if (!currentWorkspace.value) return
+  await window.agentTeam?.openGitWindow?.({ workspace_path: currentWorkspace.value })
+})
+registerCommand('ui.window.openPipeline', (args) => {
+  const pipelineId = (args as { pipelineId?: string } | undefined)?.pipelineId
+  openPipelineManager(pipelineId)
+})
+registerCommand('ui.workspace.open', async (args) => {
+  const path = (args as { path?: string } | undefined)?.path
+  if (!path) throw new Error('ui.workspace.open requires path')
+  await window.agentTeam?.openMainWindow?.({ workspace_path: path })
+})
+registerCommand('ui.layout.setMode', (args) => {
+  const mode = (args as { mode?: LayoutMode } | undefined)?.mode
+  if (!mode) throw new Error('ui.layout.setMode requires mode')
+  onUserChangeLayoutMode(mode)
+})
+
+interface UiActionSnapshotPane {
+  id: string
+  name?: string
+  agentKey: string
+  workspacePath: string
+  status?: PreparationStatus
+}
+
+async function buildUiActionSnapshot(): Promise<{
+  workspace: string
+  panes: UiActionSnapshotPane[]
+  activeTab: string
+  settingsOpen: boolean
+  openWorkspaces: string[]
+}> {
+  return {
+    workspace: currentWorkspace.value,
+    panes: panes.value.map((p) => ({
+      id: p.id,
+      name: p.customName || p.autoName || p.messagingName || undefined,
+      agentKey: p.agentKey,
+      workspacePath: p.workspacePath,
+      status: p.preparationStatus,
+    })),
+    activeTab: activeTab.value,
+    settingsOpen: showSettings.value,
+    openWorkspaces: (await window.agentTeam?.listOpenWorkspaces?.()) ?? [],
+  }
+}
+useUiActionBus({ backend, currentWorkspace, buildSnapshot: buildUiActionSnapshot })
+
 watch([showSettings, showKbPanel, showCompletionModal, showRestoreScopeModal, showPipelineManager], ([s, k, c, r, p]) => setContext('modalOpen', s || k || c || r || p || previewLogOpen.value))
 
 /** The sidebar agent list shows panes from every tab; focusing one that lives
@@ -7258,14 +7475,18 @@ backend.on('agent_spawn.request', (raw) => {
     agent_key?: string
     name?: string
     task?: string
+    target_workspace?: string
   }
-  if (!ev?.request_id || !ev.requester_pane_id) return
+  // An external caller (no requesting pane) addresses this by target_workspace
+  // instead — accept the event as long as one of the two identifies an owner.
+  if (!ev?.request_id || (!ev.requester_pane_id && !ev.target_workspace)) return
   void handleMcpSpawnRequest({
     request_id: ev.request_id,
-    requester_pane_id: ev.requester_pane_id,
+    requester_pane_id: ev.requester_pane_id ?? '',
     agent_key: ev.agent_key ?? '',
     name: ev.name ?? '',
     task: ev.task ?? '',
+    target_workspace: ev.target_workspace,
   })
 })
 

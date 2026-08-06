@@ -604,7 +604,17 @@
       "custom-title": "Add custom MCP server",
       "custom-hint": "Choose a transport now, then fill in its connection details from the installed-server list.",
       "server-name": "Server name",
-      "create-server": "Create server"
+      "create-server": "Create server",
+      "external-access-title": "External access",
+      "external-access-hint": "Let an external MCP client connect to Navide over a local HTTP endpoint.",
+      "allow-external": "Allow external MCP clients",
+      "allow-external-warning": "Anything running on this machine can control Navide while this is on.",
+      "connection-url": "Connection URL",
+      "regenerate-token": "Regenerate token",
+      "token-copied": "Copied",
+      "cdp-title": "Chrome DevTools Protocol (CDP)",
+      "cdp-hint": "Requires an app restart to take effect. Binds to 127.0.0.1 only.",
+      "cdp-warning": "Anything running on this machine can execute arbitrary code in Navide while this is on."
     },
     "skills": {
       "title": "Managed Skills",
