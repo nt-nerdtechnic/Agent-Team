@@ -120,37 +120,6 @@ CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 # renews it from the restored refresh token the first time it runs.
 CODEX_DEFAULT_BASE = "https://chatgpt.com/backend-api"
 KIMI_DEFAULT_BASE = "https://api.kimi.com"
-# Antigravity (Google). Credentials are READ-ONLY: the refresh token comes
-# from the CLI's Keychain entry (stale-file fallback) and the minted access
-# token stays in memory — Google's refresh grant returns no new refresh token
-# (verified live), so nothing the CLI owns ever rotates. client_id/secret are
-# Antigravity's public installed-app OAuth constants (the same values ship in
-# its OSS auth plugin); an optional app-data override file can replace them.
-ANTIGRAVITY_KEYCHAIN_SERVICE = "gemini"
-ANTIGRAVITY_KEYCHAIN_ACCOUNT = "antigravity"
-ANTIGRAVITY_KEYRING_PREFIX = "go-keyring-base64:"
-ANTIGRAVITY_TOKEN_FILE_REL = (".gemini", "antigravity-cli", "antigravity-oauth-token")
-ANTIGRAVITY_TOKEN_URL = "https://oauth2.googleapis.com/token"
-ANTIGRAVITY_API_BASE = "https://cloudcode-pa.googleapis.com"
-ANTIGRAVITY_LOAD_URL = f"{ANTIGRAVITY_API_BASE}/v1internal:loadCodeAssist"
-ANTIGRAVITY_QUOTA_URL = f"{ANTIGRAVITY_API_BASE}/v1internal:retrieveUserQuotaSummary"
-ANTIGRAVITY_LOAD_METADATA = {
-    "ideType": "ANTIGRAVITY",
-    "platform": "PLATFORM_UNSPECIFIED",
-    "pluginType": "GEMINI",
-}
-# Minting an access token needs Antigravity's own OAuth client credentials.
-# This app ships none and stores none: the values come from the environment, so
-# enabling this provider is the operator's explicit act, not something a build
-# carries. Unset (the default) means the quota read is skipped with a status
-# that says why, rather than a mystery error.
-ANTIGRAVITY_CLIENT_ID = os.environ.get("NAVIDE_ANTIGRAVITY_CLIENT_ID", "")
-ANTIGRAVITY_CLIENT_SECRET = os.environ.get("NAVIDE_ANTIGRAVITY_CLIENT_SECRET", "")
-ANTIGRAVITY_NEEDS_OAUTH_CONFIG = (
-    "signed in, but reading the quota needs Antigravity's OAuth client "
-    "credentials; set NAVIDE_ANTIGRAVITY_CLIENT_ID and "
-    "NAVIDE_ANTIGRAVITY_CLIENT_SECRET to enable it"
-)
 OPENCODE_AUTH_FILE_REL = (".local", "share", "opencode", "auth.json")
 OPENCODE_MINIMAX_USAGE_URL = "https://api.minimax.io/v1/token_plan/remains"
 # kilo (Kilo CLI, @kilocode/cli). auth.json is a map keyed by provider id; the
@@ -206,6 +175,24 @@ from .usage_common import (  # noqa: E402,F401
 
 # R2: qwen's usage stack moved to its vendor module; re-exported so this
 # module's namespace (and its tests) keep working until the cleanup round.
+from .cli_vendors.antigravity import (  # noqa: E402,F401
+    _antigravity_refresh_token,
+    ANTIGRAVITY_CLIENT_ID,
+    ANTIGRAVITY_CLIENT_SECRET,
+    ANTIGRAVITY_KEYCHAIN_ACCOUNT,
+    ANTIGRAVITY_KEYCHAIN_SERVICE,
+    ANTIGRAVITY_LOAD_URL,
+    ANTIGRAVITY_QUOTA_URL,
+    ANTIGRAVITY_TOKEN_FILE_REL,
+    ANTIGRAVITY_TOKEN_URL,
+    antigravity_plan,
+    antigravity_project,
+    fetch_antigravity,
+    normalize_antigravity,
+    read_antigravity_credentials,
+    read_antigravity_credentials_file,
+    refresh_antigravity_token,
+)
 from .cli_vendors.copilot import (  # noqa: E402,F401
     COPILOT_CONFIG_FILE_REL,
     COPILOT_DEFAULT_HOST,
@@ -430,77 +417,6 @@ def read_grok_credentials(home: Path, env: dict | None = None) -> dict | None:
         return None
     return {"key": entry["key"], "email": entry.get("email"),
             "expires_at": entry.get("expires_at")}
-
-
-def _antigravity_refresh_token(raw: str) -> str | None:
-    """Extract ``token.refresh_token`` from a stored Antigravity credential
-    blob. Accepts both the Keychain form (``go-keyring-base64:`` + base64(JSON))
-    and the bare JSON token file. The stored access_token is deliberately
-    ignored — it is almost always expired and a fresh one is minted in memory
-    from the refresh token."""
-    raw = raw.strip()
-    if raw.startswith(ANTIGRAVITY_KEYRING_PREFIX):
-        try:
-            raw = base64.b64decode(
-                raw[len(ANTIGRAVITY_KEYRING_PREFIX):]).decode("utf-8")
-        except (ValueError, UnicodeDecodeError):
-            return None
-    try:
-        data = json.loads(raw)
-    except ValueError:
-        return None
-    token = data.get("token") if isinstance(data, dict) else None
-    if isinstance(token, dict):
-        rt = token.get("refresh_token")
-        if isinstance(rt, str) and rt:
-            return rt
-    return None
-
-
-def read_antigravity_credentials_file(home: Path) -> str | None:
-    """Stale-file fallback: ``~/.gemini/antigravity-cli/antigravity-oauth-token``.
-    Returns the refresh_token or None."""
-    path = home.joinpath(*ANTIGRAVITY_TOKEN_FILE_REL)
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    return _antigravity_refresh_token(raw)
-
-
-_agy_keychain_failed_at: float | None = None
-
-
-async def read_antigravity_credentials(home: Path) -> str | None:
-    """Keychain first (macOS ``security find-generic-password``, read-only),
-    then the stale token file. Returns the refresh_token or None. A failed
-    Keychain read is remembered for ``_KEYCHAIN_COOLDOWN_S`` so a denial does
-    not re-prompt every poll (mirrors ``read_claude_credentials``)."""
-    global _agy_keychain_failed_at
-    now = time.monotonic()
-    if sys.platform == "darwin" and (
-        _agy_keychain_failed_at is None
-        or now - _agy_keychain_failed_at >= _KEYCHAIN_COOLDOWN_S
-    ):
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "/usr/bin/security", "find-generic-password",
-                "-s", ANTIGRAVITY_KEYCHAIN_SERVICE,
-                "-a", ANTIGRAVITY_KEYCHAIN_ACCOUNT, "-w",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            out = await _communicate_or_kill(proc, timeout=2.0)
-            if proc.returncode == 0:
-                _agy_keychain_failed_at = None
-                rt = _antigravity_refresh_token(out.decode("utf-8", "replace"))
-                if rt is not None:
-                    return rt
-            else:
-                _agy_keychain_failed_at = now
-        except (OSError, asyncio.TimeoutError):
-            _agy_keychain_failed_at = now
-    return read_antigravity_credentials_file(home)
 
 
 def read_opencode_credentials(home: Path) -> dict | None:
@@ -910,64 +826,6 @@ def normalize_grok(billing: dict) -> tuple[list[dict], str | None]:
     return windows, None
 
 
-_ANTIGRAVITY_WINDOW_KINDS = {"5h": "session", "weekly": "weekly"}
-
-
-def normalize_antigravity(data: dict) -> tuple[list[dict], str | None]:
-    """``groups[].buckets[]`` from retrieveUserQuotaSummary. remainingFraction
-    is a 0..1 remaining ratio (omitted when a full quota is implied -> 0 used);
-    ``window`` is "5h"/"weekly". The tightest (lowest remaining) bucket sorts
-    first so a windows[0]-only consumer surfaces the most-constrained quota."""
-    ranked: list[tuple[float, dict]] = []
-    for group in data.get("groups") or []:
-        if not isinstance(group, dict):
-            continue
-        group_name = group.get("displayName")
-        for bucket in group.get("buckets") or []:
-            if not isinstance(bucket, dict):
-                continue
-            frac = _num(bucket.get("remainingFraction"))
-            if frac is None:
-                frac = 1.0  # omitted when the quota is untouched
-            window = bucket.get("window")
-            kind = _ANTIGRAVITY_WINDOW_KINDS.get(window) or (
-                window if isinstance(window, str) and window else "other")
-            names = [n for n in (group_name, bucket.get("displayName"))
-                     if isinstance(n, str) and n]
-            label = " — ".join(names) or str(bucket.get("bucketId") or "Quota")
-            reset = bucket.get("resetTime")
-            ranked.append((frac, _window(
-                kind, label, 100.0 * (1.0 - frac),
-                reset if isinstance(reset, str) else None)))
-    ranked.sort(key=lambda item: item[0])
-    return [w for _, w in ranked], None
-
-
-def antigravity_plan(data: dict) -> str | None:
-    """loadCodeAssist ``currentTier`` -> plan label (name, falling back to id),
-    surfaced as-is."""
-    tier = data.get("currentTier")
-    if not isinstance(tier, dict):
-        return None
-    for key in ("name", "id"):
-        value = tier.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return None
-
-
-def antigravity_project(data: dict) -> str | None:
-    """loadCodeAssist ``cloudaicompanionProject`` is a plain string or ``{id}``."""
-    project = data.get("cloudaicompanionProject")
-    if isinstance(project, str) and project:
-        return project
-    if isinstance(project, dict):
-        pid = project.get("id")
-        if isinstance(pid, str) and pid:
-            return pid
-    return None
-
-
 def normalize_opencode_minimax(data: dict) -> list[dict]:
     """MiniMax ``token_plan/remains``: ``model_remains[]`` per model; the
     coding plan is the ``model_name == "general"`` entry. Percents are
@@ -1262,94 +1120,6 @@ async def fetch_grok(home: Path, env: dict | None = None,
     if not windows:
         return _snapshot("grok", "error", error="billing response had no usable fields")
     return _snapshot("grok", "ok", windows=windows, plan_type=plan)
-
-
-async def refresh_antigravity_token(refresh_token: str) -> str | None:
-    """Exchange the refresh_token for an access_token, held in memory only.
-
-    Never written back to the Keychain or ``~/.gemini``; Google's grant returns
-    no new refresh token, so nothing the CLI owns rotates. None on 400/401
-    (invalid_grant -> expired); other failures raise for the caller to map."""
-    import httpx
-
-    body = {
-        "grant_type": "refresh_token",
-        "client_id": ANTIGRAVITY_CLIENT_ID,
-        "client_secret": ANTIGRAVITY_CLIENT_SECRET,
-        "refresh_token": refresh_token,
-    }
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        resp = await client.post(ANTIGRAVITY_TOKEN_URL, data=body)
-    if resp.status_code in (400, 401):
-        return None
-    resp.raise_for_status()
-    token = resp.json().get("access_token")
-    if not isinstance(token, str) or not token:
-        raise ValueError("token response had no access_token")
-    return token
-
-
-async def fetch_antigravity(home: Path) -> dict:
-    """Quota via Google's Code Assist API, using the CLI's stored refresh token.
-
-    The heaviest read of the set, and the only one whose enablement is a
-    deliberate act: it needs Antigravity's OAuth client credentials, which this
-    app neither ships nor stores (see ANTIGRAVITY_CLIENT_ID). Without them the
-    account still reports as signed in — that part is a local file lookup — and
-    the quota is reported as unavailable with the reason."""
-    refresh_token = await read_antigravity_credentials(home)
-    if refresh_token is None:
-        return _snapshot("antigravity", "no-credentials")
-    if not (ANTIGRAVITY_CLIENT_ID and ANTIGRAVITY_CLIENT_SECRET):
-        return _snapshot("antigravity", "unavailable",
-                         error=ANTIGRAVITY_NEEDS_OAUTH_CONFIG)
-    import httpx
-
-    try:
-        access_token = await refresh_antigravity_token(refresh_token)
-    except (httpx.HTTPError, ValueError) as err:
-        return _snapshot("antigravity", "error", error=f"token refresh: {err}")
-    if access_token is None:
-        return _snapshot("antigravity", "expired")
-
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "User-Agent": "Navide",
-    }
-    plan: str | None = None
-    project: str | None = None
-    try:
-        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-            # loadCodeAssist supplies the project id + tier. Best effort — a
-            # failure must not block the quota read ({} still works there).
-            try:
-                load = await client.post(
-                    ANTIGRAVITY_LOAD_URL, headers=headers,
-                    json={"metadata": ANTIGRAVITY_LOAD_METADATA})
-                if load.status_code == 200:
-                    payload = load.json()
-                    if isinstance(payload, dict):
-                        project = antigravity_project(payload)
-                        plan = antigravity_plan(payload)
-            except (httpx.HTTPError, ValueError):
-                pass
-            resp = await client.post(
-                ANTIGRAVITY_QUOTA_URL, headers=headers,
-                json={"project": project} if project else {})
-    except httpx.HTTPError as err:
-        return _snapshot("antigravity", "error", error=str(err))
-    if resp.status_code == 401:
-        return _snapshot("antigravity", "expired")
-    if resp.status_code == 429:
-        snap = _snapshot("antigravity", "rate-limited")
-        snap["retryAfterSec"] = parse_retry_after(resp.headers.get("Retry-After"))
-        return snap
-    if resp.status_code != 200:
-        return _snapshot("antigravity", "error", error=f"HTTP {resp.status_code}")
-    windows, _ = normalize_antigravity(resp.json())
-    return _snapshot("antigravity", "ok", windows=windows, plan_type=plan)
 
 
 async def _fetch_opencode_minimax(key: str) -> dict:
@@ -2119,8 +1889,7 @@ class UsageService:
             "codex": lambda: fetch_codex(codex_home),
             "kimi": lambda: fetch_kimi(home),
             "grok": lambda: fetch_grok(home),
-            "antigravity": lambda: fetch_antigravity(home),
-            "opencode": lambda: fetch_opencode(home),
+                    "opencode": lambda: fetch_opencode(home),
             "kilo": lambda: fetch_kilo(home),
             "pi": lambda: fetch_pi(home),
                         }

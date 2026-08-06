@@ -96,6 +96,7 @@ from .terminals import TerminalService
 from .tokens_store import TokensStore
 from .ui_settings import UiSettingsStore
 from .history_store import HistoryStore
+from .agent_message_log import AgentMessageLog
 from . import git_service
 from . import issue_service
 from . import fs_service
@@ -124,6 +125,8 @@ roles_store = RolesStore(db=database)
 stages_store = StagesStore(db=database)
 tokens_store = TokensStore(db=database)
 history_store = HistoryStore(databases=workspace_databases)
+# Cross-workspace by construction, so it lives in the global database.
+agent_message_log = AgentMessageLog(db=database)
 codex_home_manager = CodexHomeManager()
 cli_profiles_store = CliProfilesStore(db=database)
 credential_vault = CredentialVault()
@@ -1502,13 +1505,6 @@ def _session_lookup_path(agent: str, workspace_path: str, session_id: str) -> st
         return str(path) if path is not None else ""
     if agent == "claude":
         return str(_claude_session_file(workspace_path, session_id))
-    if agent == "antigravity":
-        # Antigravity stores each conversation as a SQLite db; the id is the
-        # filename stem accepted by `agy --conversation <id>`.
-        return str(
-            Path.home() / ".gemini" / "antigravity-cli" / "conversations"
-            / f"{session_id}.db"
-        )
     return ""
 
 

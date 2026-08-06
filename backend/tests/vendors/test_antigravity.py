@@ -11,7 +11,7 @@ import sqlite3
 from pathlib import Path
 
 from agent_team_backend.log_readers import AntigravityLogReader, TokenUsage
-from agent_team_backend.log_readers.antigravity import _extract_cwd
+from agent_team_backend.cli_vendors.antigravity import _extract_cwd
 from agent_team_backend.log_readers.attribution import Attribution
 
 

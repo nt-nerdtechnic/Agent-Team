@@ -382,7 +382,7 @@ class Attribution:
         # Tuple = vendors not yet migrated to reader hooks; a migrated
         # vendor's reader declares binds_by_marker_file instead.
         marker_reader = self._readers.get(usage.vendor)
-        if usage.vendor not in ("codex", "antigravity", "kimi", "pi") \
+        if usage.vendor not in ("codex", "kimi", "pi") \
                 and not (marker_reader is not None and marker_reader.binds_by_marker_file):
             return None
 
@@ -422,7 +422,7 @@ class Attribution:
         marker_binding = self.maybe_bind_by_marker(usage)
         if marker_binding:
             pane_id, resume_id = marker_binding
-        elif usage.vendor in ("antigravity", "kimi", "pi") or (
+        elif usage.vendor in ("kimi", "pi") or (
             marker_reader is not None
             and marker_reader.binds_new_session_single_candidate
         ):
@@ -457,7 +457,7 @@ class Attribution:
         further reads. The file read happens outside the lock.
         """
         gate_reader = self._readers.get(usage.vendor)
-        if usage.vendor not in ("codex", "antigravity", "kimi", "pi") \
+        if usage.vendor not in ("codex", "kimi", "pi") \
                 and not (gate_reader is not None and gate_reader.binds_by_marker_file):
             return None
         sid = usage.session_id
@@ -469,31 +469,18 @@ class Attribution:
         try:
             # Markers live in the first user turn; cap the read so a long session
             # doesn't cost a full file scan on every event.
+            # A migrated vendor's hook owns its own read budget (it may
+            # combine several sources, e.g. a db plus its -wal journal).
             scan_override = (
                 gate_reader.marker_scan_text(Path(usage.file_path))
                 if gate_reader is not None else None
             )
             if scan_override is not None:
-                text = scan_override[:524_288]
-            elif usage.vendor == "antigravity":
-                reader = self._readers.get("antigravity")
-                if reader:
-                    text = reader._metadata_text(Path(usage.file_path))[:524_288]
-                else:
-                    text = Path(usage.file_path).read_text(encoding="utf-8", errors="ignore")[:524_288]
+                text = scan_override
             else:
                 text = Path(usage.file_path).read_text(encoding="utf-8", errors="ignore")[:524_288]
         except OSError:
             return None
-        if usage.vendor == "antigravity":
-            # SQLite conversations: recent frames (incl. the just-typed marker)
-            # often sit in the -wal journal before being checkpointed into the
-            # main db, so search it too.
-            try:
-                wal = Path(usage.file_path + "-wal")
-                text += wal.read_text(encoding="utf-8", errors="ignore")[:524_288]
-            except OSError:
-                pass
 
         matched_pane = next((pid for marker, pid in markers.items() if marker in text), None)
         if matched_pane is None:
@@ -591,7 +578,7 @@ class Attribution:
         """
         sc_reader = self._readers.get(usage.vendor)
         if (
-            usage.vendor not in ("antigravity", "kimi", "pi")
+            usage.vendor not in ("kimi", "pi")
             and not (
                 sc_reader is not None
                 and sc_reader.binds_new_session_single_candidate
@@ -727,10 +714,6 @@ class Attribution:
                 # Codex puts cwd in session_meta → usage.cwd
                 if usage.cwd and usage.cwd == ws_path:
                     return ws_path
-            elif usage.vendor == "antigravity":
-                # Antigravity cwd is extracted from trajectory_metadata_blob.
-                if usage.cwd and usage.cwd == ws_path:
-                    return ws_path
             elif usage.vendor == "grok":
                 # Grok reader emits cwd = workspaces.scope_key (git root /
                 # canonical cwd of the session's workspace).
@@ -813,7 +796,7 @@ class Attribution:
         if usage.vendor == "claude":
             expected_dir = encode_claude_cwd(pane_cwd)
             return f"/{expected_dir}/" in file_path
-        if usage.vendor in ("codex", "antigravity", "grok", "kimi", "opencode", "kilo", "pi"):
+        if usage.vendor in ("codex", "grok", "kimi", "opencode", "kilo", "pi"):
             return usage.cwd == pane_cwd
         return False
 

@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from agent_team_backend import usage_service as us
+from agent_team_backend.cli_vendors import antigravity as antigravity_vendor
 from agent_team_backend.cli_vendors import copilot as copilot_vendor
 from agent_team_backend.cli_vendors import cursor as cursor_vendor
 from agent_team_backend.cli_vendors import qwen as qwen_vendor
@@ -126,17 +127,17 @@ def test_grok_legacy_fallback_and_missing(tmp_path):
 def test_antigravity_refresh_token_plain_and_keyring_blob():
     payload = json.dumps({"token": {"refresh_token": "1//rt", "access_token": "ya29.x"},
                           "auth_method": "consumer"})
-    assert us._antigravity_refresh_token(payload) == "1//rt"
-    blob = us.ANTIGRAVITY_KEYRING_PREFIX + base64.b64encode(payload.encode()).decode()
-    assert us._antigravity_refresh_token(blob) == "1//rt"
+    assert antigravity_vendor._antigravity_refresh_token(payload) == "1//rt"
+    blob = antigravity_vendor.ANTIGRAVITY_KEYRING_PREFIX + base64.b64encode(payload.encode()).decode()
+    assert antigravity_vendor._antigravity_refresh_token(blob) == "1//rt"
 
 
 def test_antigravity_refresh_token_malformed():
-    assert us._antigravity_refresh_token("not json") is None
-    assert us._antigravity_refresh_token(us.ANTIGRAVITY_KEYRING_PREFIX + "!!!") is None
-    assert us._antigravity_refresh_token(json.dumps({"token": {}})) is None
-    assert us._antigravity_refresh_token(json.dumps({"token": {"refresh_token": ""}})) is None
-    assert us._antigravity_refresh_token(json.dumps(["token"])) is None
+    assert antigravity_vendor._antigravity_refresh_token("not json") is None
+    assert antigravity_vendor._antigravity_refresh_token(antigravity_vendor.ANTIGRAVITY_KEYRING_PREFIX + "!!!") is None
+    assert antigravity_vendor._antigravity_refresh_token(json.dumps({"token": {}})) is None
+    assert antigravity_vendor._antigravity_refresh_token(json.dumps({"token": {"refresh_token": ""}})) is None
+    assert antigravity_vendor._antigravity_refresh_token(json.dumps(["token"])) is None
 
 
 def test_antigravity_credentials_file_and_missing(tmp_path):
@@ -1074,7 +1075,7 @@ def _with_antigravity_refresh_token(monkeypatch, token="1//rt"):
     async def fake_read(home):
         return token
 
-    monkeypatch.setattr(us, "read_antigravity_credentials", fake_read)
+    monkeypatch.setattr(antigravity_vendor, "read_antigravity_credentials", fake_read)
 
 
 async def test_fetch_antigravity_no_credentials(monkeypatch):
@@ -1091,32 +1092,32 @@ async def test_fetch_antigravity_needs_operator_supplied_oauth_config(monkeypatc
     account still reads as signed in and the quota says why it is missing —
     without any request going out."""
     _with_antigravity_refresh_token(monkeypatch)
-    monkeypatch.setattr(us, "ANTIGRAVITY_CLIENT_ID", "")
-    monkeypatch.setattr(us, "ANTIGRAVITY_CLIENT_SECRET", "")
+    monkeypatch.setattr(antigravity_vendor, "ANTIGRAVITY_CLIENT_ID", "")
+    monkeypatch.setattr(antigravity_vendor, "ANTIGRAVITY_CLIENT_SECRET", "")
     calls = _fake_httpx(monkeypatch, {})
 
     snap = await us.fetch_antigravity(Path("/x"))
 
     assert snap["status"] == "unavailable"
-    assert snap["error"] == us.ANTIGRAVITY_NEEDS_OAUTH_CONFIG
+    assert snap["error"] == antigravity_vendor.ANTIGRAVITY_NEEDS_OAUTH_CONFIG
     assert calls == []
 
 
 def _with_antigravity_oauth_config(monkeypatch):
-    monkeypatch.setattr(us, "ANTIGRAVITY_CLIENT_ID", "cid")
-    monkeypatch.setattr(us, "ANTIGRAVITY_CLIENT_SECRET", "csec")
+    monkeypatch.setattr(antigravity_vendor, "ANTIGRAVITY_CLIENT_ID", "cid")
+    monkeypatch.setattr(antigravity_vendor, "ANTIGRAVITY_CLIENT_SECRET", "csec")
 
 
 async def test_fetch_antigravity_reads_the_quota_when_configured(monkeypatch):
     _with_antigravity_refresh_token(monkeypatch)
     _with_antigravity_oauth_config(monkeypatch)
     calls = _fake_httpx(monkeypatch, {
-        us.ANTIGRAVITY_TOKEN_URL: _FakeResponse(200, {"access_token": "ya29.new"}),
-        us.ANTIGRAVITY_LOAD_URL: _FakeResponse(200, {
+        antigravity_vendor.ANTIGRAVITY_TOKEN_URL: _FakeResponse(200, {"access_token": "ya29.new"}),
+        antigravity_vendor.ANTIGRAVITY_LOAD_URL: _FakeResponse(200, {
             "currentTier": {"id": "free-tier", "name": "Antigravity"},
             "cloudaicompanionProject": "proj-1",
         }),
-        us.ANTIGRAVITY_QUOTA_URL: _FakeResponse(200, {
+        antigravity_vendor.ANTIGRAVITY_QUOTA_URL: _FakeResponse(200, {
             "groups": [{"displayName": "Gemini Models", "buckets": [
                 {"bucketId": "gemini-weekly", "displayName": "Weekly Limit",
                  "window": "weekly", "resetTime": "2026-07-30T06:18:23Z",
@@ -1133,7 +1134,7 @@ async def test_fetch_antigravity_reads_the_quota_when_configured(monkeypatch):
         "kind": "weekly", "label": "Gemini Models — Weekly Limit",
         "usedPercent": 77.4, "resetsAt": "2026-07-30T06:18:23Z",
     }]
-    quota_kwargs = next(kw for url, kw in calls if url == us.ANTIGRAVITY_QUOTA_URL)
+    quota_kwargs = next(kw for url, kw in calls if url == antigravity_vendor.ANTIGRAVITY_QUOTA_URL)
     assert quota_kwargs["json"] == {"project": "proj-1"}
     assert quota_kwargs["headers"]["Authorization"] == "Bearer ya29.new"
     # The quota call no longer claims to be the vendor's own client.
@@ -1147,18 +1148,18 @@ async def test_fetch_antigravity_never_writes_the_minted_token_back(monkeypatch)
     _with_antigravity_refresh_token(monkeypatch)
     _with_antigravity_oauth_config(monkeypatch)
     calls = _fake_httpx(monkeypatch, {
-        us.ANTIGRAVITY_TOKEN_URL: _FakeResponse(200, {"access_token": "ya29.x"}),
-        us.ANTIGRAVITY_LOAD_URL: _FakeResponse(403, {}),
-        us.ANTIGRAVITY_QUOTA_URL: _FakeResponse(200, {"groups": []}),
+        antigravity_vendor.ANTIGRAVITY_TOKEN_URL: _FakeResponse(200, {"access_token": "ya29.x"}),
+        antigravity_vendor.ANTIGRAVITY_LOAD_URL: _FakeResponse(403, {}),
+        antigravity_vendor.ANTIGRAVITY_QUOTA_URL: _FakeResponse(200, {"groups": []}),
     })
 
     await us.fetch_antigravity(Path("/x"))
 
-    token_kwargs = next(kw for url, kw in calls if url == us.ANTIGRAVITY_TOKEN_URL)
+    token_kwargs = next(kw for url, kw in calls if url == antigravity_vendor.ANTIGRAVITY_TOKEN_URL)
     assert token_kwargs["data"]["grant_type"] == "refresh_token"
     assert token_kwargs["data"]["refresh_token"] == "1//rt"
     # Nothing in the response is persisted; only the request carried a secret.
-    assert all(url != us.ANTIGRAVITY_TOKEN_URL or "json" not in kw
+    assert all(url != antigravity_vendor.ANTIGRAVITY_TOKEN_URL or "json" not in kw
                for url, kw in calls)
 
 
@@ -1166,7 +1167,7 @@ async def test_fetch_antigravity_expired_grant_reads_as_expired(monkeypatch):
     _with_antigravity_refresh_token(monkeypatch)
     _with_antigravity_oauth_config(monkeypatch)
     _fake_httpx(monkeypatch, {
-        us.ANTIGRAVITY_TOKEN_URL: _FakeResponse(400, {"error": "invalid_grant"}),
+        antigravity_vendor.ANTIGRAVITY_TOKEN_URL: _FakeResponse(400, {"error": "invalid_grant"}),
     })
 
     snap = await us.fetch_antigravity(Path("/x"))
@@ -1791,7 +1792,7 @@ async def test_poll_once_rate_limit_sets_cooldown(tmp_path, monkeypatch):
     monkeypatch.setattr(us, "fetch_codex", lambda home: fake_ok("codex"))
     monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_ok("kimi"))
     monkeypatch.setattr(us, "fetch_grok", lambda home: fake_ok("grok"))
-    monkeypatch.setattr(us, "fetch_antigravity", lambda home: fake_ok("antigravity"))
+    monkeypatch.setattr(antigravity_vendor, "fetch_antigravity", lambda home: fake_ok("antigravity"))
     monkeypatch.setattr(us, "fetch_opencode", lambda home: fake_ok("opencode"))
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_ok("kilo"))
@@ -1824,7 +1825,7 @@ async def test_poll_once_survives_fetcher_exception(tmp_path, monkeypatch):
     monkeypatch.setattr(us, "fetch_codex", lambda home: fake_ok("codex"))
     monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_ok("kimi"))
     monkeypatch.setattr(us, "fetch_grok", lambda home: fake_ok("grok"))
-    monkeypatch.setattr(us, "fetch_antigravity", lambda home: fake_ok("antigravity"))
+    monkeypatch.setattr(antigravity_vendor, "fetch_antigravity", lambda home: fake_ok("antigravity"))
     monkeypatch.setattr(us, "fetch_opencode", lambda home: fake_ok("opencode"))
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_ok("kilo"))
@@ -1962,7 +1963,7 @@ async def test_poll_once_claude_accounts_are_independent_and_pruned(tmp_path, mo
     monkeypatch.setattr(us, "fetch_codex", lambda home: fake_other("codex"))
     monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_other("kimi"))
     monkeypatch.setattr(us, "fetch_grok", lambda home: fake_other("grok"))
-    monkeypatch.setattr(us, "fetch_antigravity", lambda home: fake_other("antigravity"))
+    monkeypatch.setattr(antigravity_vendor, "fetch_antigravity", lambda home: fake_other("antigravity"))
     monkeypatch.setattr(us, "fetch_opencode", lambda home: fake_other("opencode"))
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_other("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_other("kilo"))
@@ -2052,7 +2053,7 @@ async def test_refresh_during_poll_runs_next_cycle_with_new_active_account(
     monkeypatch.setattr(us, "fetch_codex", lambda home: fake_other("codex"))
     monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_other("kimi"))
     monkeypatch.setattr(us, "fetch_grok", lambda home: fake_other("grok"))
-    monkeypatch.setattr(us, "fetch_antigravity", lambda home: fake_other("antigravity"))
+    monkeypatch.setattr(antigravity_vendor, "fetch_antigravity", lambda home: fake_other("antigravity"))
     monkeypatch.setattr(us, "fetch_opencode", lambda home: fake_other("opencode"))
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_other("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_other("kilo"))
@@ -2184,7 +2185,7 @@ async def test_poll_once_always_reads_real_home(tmp_path, monkeypatch):
     monkeypatch.setattr(us, "fetch_codex", spy_codex)
     monkeypatch.setattr(us, "fetch_kimi", spy_kimi)
     monkeypatch.setattr(us, "fetch_grok", spy_grok)
-    monkeypatch.setattr(us, "fetch_antigravity", spy_antigravity)
+    monkeypatch.setattr(antigravity_vendor, "fetch_antigravity", spy_antigravity)
     monkeypatch.setattr(us, "fetch_opencode", spy_opencode)
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", spy_qwen)
     monkeypatch.setattr(us, "fetch_kilo", spy_kilo)
@@ -2225,7 +2226,7 @@ async def test_poll_once_harvests_active_slots(tmp_path, monkeypatch):
     monkeypatch.setattr(us, "fetch_codex", lambda home: fake_ok("codex"))
     monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_ok("kimi"))
     monkeypatch.setattr(us, "fetch_grok", lambda home: fake_ok("grok"))
-    monkeypatch.setattr(us, "fetch_antigravity", lambda home: fake_ok("antigravity"))
+    monkeypatch.setattr(antigravity_vendor, "fetch_antigravity", lambda home: fake_ok("antigravity"))
     monkeypatch.setattr(us, "fetch_opencode", lambda home: fake_ok("opencode"))
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_ok("kilo"))
@@ -2267,7 +2268,7 @@ async def test_poll_once_harvests_pending_login_homes(tmp_path, monkeypatch):
     monkeypatch.setattr(us, "fetch_codex", lambda home: fake_ok("codex"))
     monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_ok("kimi"))
     monkeypatch.setattr(us, "fetch_grok", lambda home: fake_ok("grok"))
-    monkeypatch.setattr(us, "fetch_antigravity", lambda home: fake_ok("antigravity"))
+    monkeypatch.setattr(antigravity_vendor, "fetch_antigravity", lambda home: fake_ok("antigravity"))
     monkeypatch.setattr(us, "fetch_opencode", lambda home: fake_ok("opencode"))
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_ok("kilo"))
@@ -2366,7 +2367,7 @@ async def test_poll_once_skips_login_harvest_while_login_pane_runs(
     monkeypatch.setattr(us, "fetch_codex", lambda home: fake_ok("codex"))
     monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_ok("kimi"))
     monkeypatch.setattr(us, "fetch_grok", lambda home: fake_ok("grok"))
-    monkeypatch.setattr(us, "fetch_antigravity", lambda home: fake_ok("antigravity"))
+    monkeypatch.setattr(antigravity_vendor, "fetch_antigravity", lambda home: fake_ok("antigravity"))
     monkeypatch.setattr(us, "fetch_opencode", lambda home: fake_ok("opencode"))
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_ok("kilo"))
@@ -2409,7 +2410,7 @@ async def test_login_harvest_for_active_profile_restores_live(tmp_path, monkeypa
     monkeypatch.setattr(us, "fetch_codex", lambda home: fake_ok("codex"))
     monkeypatch.setattr(us, "fetch_kimi", lambda home: fake_ok("kimi"))
     monkeypatch.setattr(us, "fetch_grok", lambda home: fake_ok("grok"))
-    monkeypatch.setattr(us, "fetch_antigravity", lambda home: fake_ok("antigravity"))
+    monkeypatch.setattr(antigravity_vendor, "fetch_antigravity", lambda home: fake_ok("antigravity"))
     monkeypatch.setattr(us, "fetch_opencode", lambda home: fake_ok("opencode"))
     monkeypatch.setattr(qwen_vendor, "fetch_qwen", lambda home: fake_ok("qwen"))
     monkeypatch.setattr(us, "fetch_kilo", lambda home: fake_ok("kilo"))

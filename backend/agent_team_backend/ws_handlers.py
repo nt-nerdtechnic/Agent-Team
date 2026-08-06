@@ -5141,3 +5141,46 @@ async def agent_msg_delivered(session: "Session", msg_id: str, msg_type: str, pa
         )
     )
     await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
+
+
+# ── Message-log persistence (agent_msg.log_*) ───────────────────────────────
+# The renderer's message log is in-memory and dies with the window; these
+# mirror it into the global database. Per-window queries — never broadcast.
+
+
+@handler("agent_msg.log_snapshot")
+async def agent_msg_log_snapshot(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    from . import app
+
+    limit = max(1, min(int(payload.get("limit", 500)), 500))
+    rows = app.agent_message_log.tail(limit)
+    await session.send_json(make_response(msg_id, msg_type, {"rows": rows}))
+
+
+@handler("agent_msg.log_append")
+async def agent_msg_log_append(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    from . import app
+
+    rows = payload.get("rows")
+    written = app.agent_message_log.append(rows if isinstance(rows, list) else [])
+    await session.send_json(make_response(msg_id, msg_type, {"written": written}))
+
+
+@handler("agent_msg.log_update")
+async def agent_msg_log_update(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    from . import app
+
+    updates = payload.get("updates")
+    updated = app.agent_message_log.update(updates if isinstance(updates, list) else [])
+    await session.send_json(make_response(msg_id, msg_type, {"updated": updated}))
+
+
+@handler("agent_msg.log_clear")
+async def agent_msg_log_clear(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    from . import app
+
+    keep = payload.get("keep_statuses")
+    deleted = app.agent_message_log.clear(
+        [str(s) for s in keep] if isinstance(keep, list) else None
+    )
+    await session.send_json(make_response(msg_id, msg_type, {"deleted": deleted}))

@@ -265,7 +265,7 @@ class AiderLogReader(LogReader):
         # section's marker belongs to a historic session and must never
         # bind. Still true for a per-pane file: it too is appended to by
         # every aider run of that pane.
-        return self.last_section(path)[1]
+        return self.last_section(path)[1][:524_288]
 
     def workspace_match(
         self, usage: TokenUsage, ws_path: str,

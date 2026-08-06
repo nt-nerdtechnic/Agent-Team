@@ -15,6 +15,20 @@ from agent_team_backend.log_readers.watcher import LogWatcher
 class _Reader(LogReader):
     def __init__(self, vendor: str, root: Path) -> None:
         self.vendor = vendor
+        # Migrated vendors advertise capabilities on the reader; stubs
+        # mirror the real flags so bridge behavior matches production.
+        from agent_team_backend.cli_vendors.registry import vendor as _v
+        spec = _v(vendor)
+        if spec is not None and spec.make_log_reader is not None:
+            real = spec.make_log_reader()
+            self.binds_by_marker_file = real.binds_by_marker_file
+            self.binds_shared_db_by_marker = real.binds_shared_db_by_marker
+            self.binds_new_session_single_candidate = real.binds_new_session_single_candidate
+            self.emits_session_sink = real.emits_session_sink
+            # Behavioral hooks too — the pure-args ones a stub can borrow
+            # from the real reader without sharing its state.
+            self.workspace_match = real.workspace_match
+            self.pane_cwd_match = real.pane_cwd_match
         self.root = root
 
     def project_dirs(self) -> list[Path]:

@@ -5,7 +5,6 @@ of the CLI's own JSONL conversation logs. See docs/cli-log-formats.md
 for the three formats this module supports.
 """
 
-from .antigravity import AntigravityLogReader
 from .base import (
     ActivityEvent,
     IncrementalParseResult,
@@ -29,6 +28,7 @@ from .watcher import LogWatcher
 # packages finish initializing first.
 _MIGRATED_READERS = {
     "AiderLogReader": "aider",
+    "AntigravityLogReader": "antigravity",
     "CopilotLogReader": "copilot",
     "CursorLogReader": "cursor",
     "QwenLogReader": "qwen",

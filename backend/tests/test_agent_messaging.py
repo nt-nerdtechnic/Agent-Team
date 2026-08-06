@@ -8,6 +8,8 @@ from typing import Any
 import pytest
 
 from agent_team_backend import agent_messaging, app, ws_handlers
+from agent_team_backend.agent_message_log import AgentMessageLog
+from agent_team_backend.db import Database
 
 
 @pytest.fixture(autouse=True)
@@ -358,6 +360,134 @@ async def test_delivered_handler_broadcasts_result_to_every_window(
     assert exclude is None
 
 
+# ── Message-log persistence handlers ───────────────────────────────────────
+@pytest.fixture
+def message_log(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Swap the app-wide log for one rooted in tmp, like the vault fixture."""
+    log = AgentMessageLog(db=Database(tmp_path / "navide.db"))
+    monkeypatch.setattr(app, "agent_message_log", log)
+    return log
+
+
+def _log_row(uid: str, created_at: int, **over: Any) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "uid": uid,
+        "created_at": created_at,
+        "status": "delivered",
+        "sender": "alpha/claude-1",
+        "recipient": "beta/reviewer",
+        "content": f"hello {uid}",
+    }
+    row.update(over)
+    return row
+
+
+@pytest.mark.asyncio
+async def test_log_append_then_snapshot_round_trip(message_log: Any) -> None:
+    session = _session()
+    await app.handle_message(session, {
+        "id": "la1",
+        "type": "agent_msg.log_append",
+        "payload": {"rows": [_log_row("a:1", 100), _log_row("a:2", 200)]},
+    })
+    assert session.websocket.sent[0]["payload"] == {"written": 2}  # type: ignore[attr-defined]
+
+    await app.handle_message(session, {
+        "id": "ls1",
+        "type": "agent_msg.log_snapshot",
+        "payload": {},
+    })
+    rows = session.websocket.sent[1]["payload"]["rows"]  # type: ignore[attr-defined]
+    assert [r["uid"] for r in rows] == ["a:1", "a:2"]
+
+
+@pytest.mark.asyncio
+async def test_log_snapshot_clamps_the_limit(message_log: Any) -> None:
+    message_log.append([_log_row(f"a:{i}", i) for i in range(1, 4)])
+    session = _session()
+    await app.handle_message(session, {
+        "id": "ls2",
+        "type": "agent_msg.log_snapshot",
+        "payload": {"limit": 9000},
+    })
+    assert len(session.websocket.sent[0]["payload"]["rows"]) == 3  # type: ignore[attr-defined]
+
+    await app.handle_message(session, {
+        "id": "ls3",
+        "type": "agent_msg.log_snapshot",
+        "payload": {"limit": 0},
+    })
+    rows = session.websocket.sent[1]["payload"]["rows"]  # type: ignore[attr-defined]
+    assert [r["uid"] for r in rows] == ["a:3"]
+
+
+@pytest.mark.asyncio
+async def test_log_update_handler_patches_status(message_log: Any) -> None:
+    message_log.append([_log_row("a:1", 100, status="queued")])
+    session = _session()
+    await app.handle_message(session, {
+        "id": "lu1",
+        "type": "agent_msg.log_update",
+        "payload": {
+            "updates": [
+                {"uid": "a:1", "status": "delivered", "delivered_at": 900},
+                {"uid": "unknown:1", "status": "failed"},
+            ]
+        },
+    })
+    assert session.websocket.sent[0]["payload"] == {"updated": 1}  # type: ignore[attr-defined]
+    assert message_log.tail()[0]["status"] == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_log_clear_handler_keeps_in_flight_messages(message_log: Any) -> None:
+    message_log.append([
+        _log_row("a:1", 100, status="queued"),
+        _log_row("a:2", 200, status="delivered"),
+    ])
+    session = _session()
+    await app.handle_message(session, {
+        "id": "lc1",
+        "type": "agent_msg.log_clear",
+        "payload": {},
+    })
+    assert session.websocket.sent[0]["payload"] == {"deleted": 1}  # type: ignore[attr-defined]
+    assert [r["uid"] for r in message_log.tail()] == ["a:1"]
+
+
+@pytest.mark.asyncio
+async def test_log_clear_handler_honors_explicit_keep_statuses(message_log: Any) -> None:
+    message_log.append([
+        _log_row("a:1", 100, status="queued"),
+        _log_row("a:2", 200, status="failed"),
+    ])
+    session = _session()
+    await app.handle_message(session, {
+        "id": "lc2",
+        "type": "agent_msg.log_clear",
+        "payload": {"keep_statuses": ["failed"]},
+    })
+    assert session.websocket.sent[0]["payload"] == {"deleted": 1}  # type: ignore[attr-defined]
+    assert [r["uid"] for r in message_log.tail()] == ["a:2"]
+
+
+@pytest.mark.asyncio
+async def test_log_handlers_tolerate_malformed_payloads(message_log: Any) -> None:
+    session = _session()
+    await app.handle_message(session, {
+        "id": "lm1",
+        "type": "agent_msg.log_append",
+        "payload": {"rows": "not a list"},
+    })
+    await app.handle_message(session, {
+        "id": "lm2",
+        "type": "agent_msg.log_update",
+        "payload": {},
+    })
+    assert session.websocket.sent[0]["payload"] == {"written": 0}  # type: ignore[attr-defined]
+    assert session.websocket.sent[1]["payload"] == {"updated": 0}  # type: ignore[attr-defined]
+
+
 def test_handlers_are_registered() -> None:
     for msg_type in (
         "agent_msg.register",
@@ -365,5 +495,9 @@ def test_handlers_are_registered() -> None:
         "agent_msg.list",
         "agent_msg.route",
         "agent_msg.delivered",
+        "agent_msg.log_snapshot",
+        "agent_msg.log_append",
+        "agent_msg.log_update",
+        "agent_msg.log_clear",
     ):
         assert ws_handlers.lookup(msg_type) is not None
