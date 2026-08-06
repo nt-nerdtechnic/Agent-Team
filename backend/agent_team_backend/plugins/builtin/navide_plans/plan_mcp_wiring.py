@@ -50,6 +50,15 @@ log = logging.getLogger("agent_team_backend.plugins.builtin.navide_plans.plan_mc
 SERVER_NAME = "navide-plans"
 CLAUDE_CONFIG_FILENAME = "plan-mcp.json"
 
+# CLIs that read a whole config document out of an environment variable. Both
+# deep-merge it over the user's own files, so this adds our server without
+# displacing theirs — no config file is written, and the value dies with the
+# pane. kilo is an opencode fork and takes the identical document.
+INLINE_CONFIG_ENV_VARS = {
+    "opencode": "OPENCODE_CONFIG_CONTENT",
+    "kilo": "KILO_CONFIG_CONTENT",
+}
+
 # Minted at import, not on first use: spawn wiring runs in worker threads and
 # concurrent pane restores would otherwise race to initialise it, burning a
 # token into one pane's command line that a later winner immediately replaces.
