@@ -97,6 +97,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .applog import app_data_dir
+from .cli_vendors.registry import vendor as _cli_vendor
 from .credential_vault import vault_to_thread
 
 log = logging.getLogger(__name__)
@@ -2747,7 +2748,15 @@ class UsageService:
         ):
             if self._blocked_until.get(provider, 0) > now:
                 continue
-            tasks[provider] = asyncio.create_task(coro())
+            # One-file-per-vendor bridge: a migrated vendor's fetch lives in
+            # its spec; the legacy lambda above is deleted in that vendor's
+            # round and this fallthrough keeps the tuple valid until then.
+            spec = _cli_vendor(provider)
+            if spec is not None and spec.fetch_usage is not None:
+                fetch = spec.fetch_usage
+                tasks[provider] = asyncio.create_task(fetch(home))
+            else:
+                tasks[provider] = asyncio.create_task(coro())
         for slot_id, task in claude_tasks.items():
             try:
                 snap = await task

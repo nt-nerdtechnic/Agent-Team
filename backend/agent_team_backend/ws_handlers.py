@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from pydantic import ValidationError
 
 from . import agent_messaging, executions_service, storage_service
+from .cli_vendors.registry import VENDORS as CLI_VENDORS
+from .cli_vendors.registry import vendor as cli_vendor
 from .ipc import make_error, make_event, make_response
 from .log_readers.claude import ClaudeLogReader, first_user_prompts
 from .credential_vault import DEFAULT_SLOT_ID, vault_to_thread
@@ -3487,13 +3489,26 @@ async def _terminal_create_impl(
         term = _spawn_and_claim()
     # Register the pane with the log-attribution layer so any session
     # file appearing after this point can be attributed back to us.
-    if agent_key in ("claude", "codex", "antigravity", "grok", "kimi", "opencode", "qwen", "kilo", "pi", "copilot", "cursor", "aider"):
+    # Registry membership == the 12 CLI vendors; the drift test pins the set.
+    if agent_key in CLI_VENDORS:
         ws_for_pane = str(metadata.get("workspace_path") or payload["cwd"])
         # Workspace registration via helper triggers a force-rescan
         # if the workspace is newly known — so historic CLI sessions
         # in that workspace's folder appear in the panel right away.
         app._register_workspace_and_backfill(ws_for_pane)
         explicit_session_id = str(metadata.get("explicit_session_id") or "")
+        # One-file-per-vendor bridge: a migrated vendor claims its resume id
+        # through its spec (the why-claim rationale moves into the vendor
+        # file); the elif chain below is the legacy fallback, deleted one
+        # vendor at a time. Codex stays out of both paths here — its resume
+        # id is claimed via the per-pane CODEX_HOME flow.
+        vendor_spec = cli_vendor(agent_key)
+        if (not explicit_session_id and agent_key != "codex"
+                and vendor_spec is not None
+                and vendor_spec.resume_id_from_command is not None):
+            explicit_session_id = vendor_spec.resume_id_from_command(
+                payload.get("command")
+            )
         if agent_key == "claude" and not explicit_session_id:
             # Resumed Claude panes carry no pinned --session-id. Claim the
             # resume id at registration, or the unowned-session fallback

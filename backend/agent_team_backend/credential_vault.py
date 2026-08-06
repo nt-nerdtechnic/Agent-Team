@@ -136,6 +136,29 @@ _PROFILE_HOME_SECRET_FILES = {
 }
 
 
+def _apply_vendor_credential_files() -> None:
+    """Overlay migrated vendors' credential layouts onto the legacy tables.
+
+    One-file-per-vendor bridge: a vendor's round moves its entries from the
+    literals above into its ``cli_vendors/<key>.py`` spec and deletes them
+    here; this overlay keeps the four tables complete either way, so the 16
+    lookup/membership/iteration sites in this module stay untouched."""
+    from .cli_vendors.registry import VENDORS
+
+    for key, spec in VENDORS.items():
+        if spec.slot_file is not None:
+            _SLOT_FILES[key] = spec.slot_file
+        if spec.live_file is not None:
+            _LIVE_FILES[key] = spec.live_file
+        if spec.login_home_secret_file is not None:
+            _LOGIN_HOME_SECRET_FILES[key] = spec.login_home_secret_file
+        if spec.profile_home_secret_file is not None:
+            _PROFILE_HOME_SECRET_FILES[key] = spec.profile_home_secret_file
+
+
+_apply_vendor_credential_files()
+
+
 def _parse_json_dict(raw: str | None) -> dict | None:
     if raw is None:
         return None

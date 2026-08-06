@@ -59,10 +59,11 @@ class VendorSpec:
     # --- resume / session ---
     # (command) -> session id the launch command targets, "" when none.
     resume_id_from_command: Callable[[Any], str] | None = None
-    # (home: Path, session_id: str) -> path that would hold the session.
-    session_path: Callable[[Path, str], Path | None] | None = None
-    # (home: Path, session_id: str) -> whether the session exists on disk.
-    session_exists: Callable[[Path, str], bool] | None = None
+    # (workspace_path: str, session_id: str) -> the single stable path the
+    # resume preflight checks, or None when the vendor has no such path.
+    session_path: Callable[[str, str], Path | None] | None = None
+    # (workspace_path: str, session_id: str) -> session exists on disk.
+    session_exists: Callable[[str, str], bool] | None = None
 
     # --- spawn environment ---
     # Env var names that relocate this CLI's home/config; the backend strips

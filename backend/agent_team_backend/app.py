@@ -48,6 +48,7 @@ from .analyzer_settings import AnalyzerSettingsStore
 from .ai_chat_settings import AIChatSettingsStore
 from .applog import app_data_dir, backend_log_path, backend_port_file
 from .claude_hooks import install_hooks as install_claude_hooks
+from .cli_vendors.registry import vendor as cli_vendor
 from .codex_home import CodexHomeManager
 from .ipc import make_error, make_event, make_response
 from .log_readers import (
@@ -891,6 +892,18 @@ _INHERITED_CLI_HOME_VARS = (
 )
 
 
+def _inherited_cli_home_vars() -> tuple[str, ...]:
+    """Legacy table plus every migrated vendor's declared home vars. A var a
+    vendor's round moves into its spec is deleted from the tuple above; until
+    every round lands, the union covers both."""
+    from .cli_vendors.registry import VENDORS
+
+    merged = dict.fromkeys(_INHERITED_CLI_HOME_VARS)
+    for spec in VENDORS.values():
+        merged.update(dict.fromkeys(spec.home_env_vars))
+    return tuple(merged)
+
+
 def _sanitize_inherited_cli_env() -> None:
     """Drop CLI home-relocating vars inherited from whatever launched us.
 
@@ -899,7 +912,7 @@ def _sanitize_inherited_cli_env() -> None:
     CLAUDE_CONFIG_DIR) would silently poison every spawned pane and
     log-reader scan with a home nobody's sessions live in.
     """
-    for key in _INHERITED_CLI_HOME_VARS:
+    for key in _inherited_cli_home_vars():
         if os.environ.pop(key, None) is not None:
             log.info("dropped inherited %s from backend environment", key)
 
@@ -1517,6 +1530,9 @@ _RESUME_ID_EXTRACTORS = {
 def _resume_id_for_agent(agent_key: str, command: Any) -> str:
     """Resume/session id a launch command targets for this agent ('' when the
     agent has no id-carrying resume flag or the command doesn't resume)."""
+    spec = cli_vendor(agent_key)
+    if spec is not None and spec.resume_id_from_command is not None:
+        return spec.resume_id_from_command(command)
     extract = _RESUME_ID_EXTRACTORS.get(agent_key)
     return extract(command) if extract else ""
 
@@ -1533,6 +1549,10 @@ def _session_lookup_path(agent: str, workspace_path: str, session_id: str) -> st
     session_id = session_id.strip()
     if not session_id:
         return ""
+    spec = cli_vendor(agent)
+    if spec is not None and spec.session_path is not None:
+        path = spec.session_path(workspace_path, session_id)
+        return str(path) if path is not None else ""
     if agent == "claude":
         return str(_claude_session_file(workspace_path, session_id))
     if agent == "qwen":
@@ -1575,6 +1595,9 @@ def _session_exists(agent: str, workspace_path: str, session_id: str) -> bool:
     session_id = session_id.strip()
     if not session_id:
         return False
+    spec = cli_vendor(agent)
+    if spec is not None and spec.session_exists is not None:
+        return spec.session_exists(workspace_path, session_id)
     if agent == "claude":
         # A managed-account pane resumes inside its profile's isolated config
         # home (CLAUDE_CONFIG_DIR), but that home's ``projects`` is symlinked
