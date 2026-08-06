@@ -77,6 +77,14 @@ describe('resolveWsType', () => {
     expect(resolveWsType('terminal', 'create_cancel')).toBe('terminal.create.cancel')
   })
 
+  it('maps the three-way conflict surface (must stay in sync with the git shim)', () => {
+    // Missing here, the merge editor works in the main window and is rejected
+    // by the broker in the plugin window — a plugin-only class of failure.
+    expect(resolveWsType('git', 'conflict_stages')).toBe('git.conflict_stages')
+    expect(resolveWsType('git', 'list_conflicts')).toBe('git.list_conflicts')
+    expect(resolveWsType('git', 'mark_resolved')).toBe('git.mark_resolved')
+  })
+
   it('maps the @-mention stat probe (fs.stat_path)', () => {
     expect(resolveWsType('fs', 'stat_path')).toBe('fs.stat_path')
   })

@@ -12,6 +12,20 @@ import { extractDropPaths, shellEscape } from '../../lib/drop'
 import { aiTerminalPaneId } from '../../lib/aiCliContext'
 import { i18n } from '../../i18n'
 
+// Control surface for the stubbed CLI terminal: tests seed the PTY state the
+// dock sees at mount and read back what "Resolve with agent" pasted into it.
+const term = vi.hoisted(() => ({
+  /** Seeds the stub's status ref at mount ('running' = a live CLI). */
+  status: 'idle',
+  /** Seeds lastRawActivityAt; a past timestamp means "the CLI is quiet". */
+  lastRawActivityAt: 0,
+  /** Everything pasted into the PTY, in order. */
+  pastes: [] as string[],
+  spawnCalls: 0,
+  /** Whether spawn() lands in 'running' (false = the CLI failed to start). */
+  spawnRuns: true
+}))
+
 // The CLI dock's terminal host pulls in useTerminal/xterm — stub it with the
 // imperative surface the dock drives (reattach/fit are called on first open).
 vi.mock('../AiCliTerminal.vue', () => ({
@@ -21,18 +35,24 @@ vi.mock('../AiCliTerminal.vue', () => ({
     props: ['paneId', 'backend', 'workspacePath'],
     inheritAttrs: false,
     setup(_, { expose }) {
+      const status = ref(term.status)
       expose({
-        spawn: vi.fn(async () => undefined),
+        spawn: vi.fn(async () => {
+          term.spawnCalls++
+          if (term.spawnRuns) status.value = 'running'
+        }),
         tryReattach: vi.fn(async () => undefined),
-        pasteText: vi.fn(),
+        pasteText: vi.fn((text: string) => {
+          term.pastes.push(text)
+        }),
         interrupt: vi.fn(async () => undefined),
         kill: vi.fn(async () => undefined),
         cancelPendingCreate: vi.fn(async () => undefined),
         fitTerminal: vi.fn(),
         focus: vi.fn(),
-        status: ref('idle'),
+        status,
         displayStatus: ref('idle'),
-        lastRawActivityAt: ref(0),
+        lastRawActivityAt: ref(term.lastRawActivityAt),
         sessionId: ref(''),
         error: ref('')
       })
@@ -66,9 +86,58 @@ function baseStatus(): Record<string, unknown> {
   }
 }
 
+// Per-test override for git.clean's dry run (the file list the confirmation
+// dialog enumerates). The real delete pass echoes the same list back.
+const cleanFiles = vi.hoisted(() => ({ value: [] as string[] }))
+
+// Per-test override for fs.read_file (the conflicted file "Resolve with
+// agent" quotes into its prompt).
+const fileRead = vi.hoisted(() => ({ ok: true, content: '', error: '' }))
+
 vi.mock('../../composables/useBackend', () => {
-  function payloadFor(type: string): unknown {
+  function payloadFor(type: string, payload: Record<string, unknown>): unknown {
     if (type === 'git.status') return statusOverride.value ?? baseStatus()
+    if (type === 'git.clean') return { ok: true, files: cleanFiles.value, dry_run: payload.dry_run }
+    if (type === 'git.blame')
+      return {
+        ok: true,
+        lines: [
+          { short_hash: 'abc1234', author: 'neillu', date: '2026-08-01', line_no: 1, content: 'const a = 1' }
+        ]
+      }
+    if (type === 'git.diff_blame')
+      return {
+        ok: true,
+        hunks: [
+          {
+            header: '@@ -1,2 +1,3 @@',
+            lines: [
+              { kind: '+', old_no: null, new_no: 2, text: 'added', author: '', date: '', committed: false },
+              { kind: '-', old_no: 2, new_no: null, text: 'removed', author: 'neillu', date: '2026-08-01', committed: true }
+            ]
+          }
+        ]
+      }
+    if (type === 'git.file_log')
+      return {
+        ok: true,
+        commits: [
+          { hash: 'aaaaaaaaaaaa', short_hash: 'aaaaaaa', message: 'touch a.ts', branches: [], parents: [], author: 'neillu', date: '2026-08-01' }
+        ]
+      }
+    if (type === 'git.commit_file_diff')
+      return {
+        ok: true,
+        hunks: [
+          {
+            header: '@@ -1 +1 @@',
+            lines: [{ kind: '+', old_no: null, new_no: 1, text: 'hello', author: 'neillu', date: '2026-08-01', committed: true }]
+          }
+        ]
+      }
+    if (type === 'git.init') return { ok: true, gitignore_created: true }
+    if (type === 'git.clone') return { ok: true, path: '/tmp/cloned' }
+    if (type === 'git.ignore') return { ok: true, target_file: '.gitignore', untracked: [] }
     if (type === 'git.branches')
       return {
         ok: true,
@@ -117,6 +186,10 @@ vi.mock('../../composables/useBackend', () => {
     if (type === 'git.config_get')
       return { ok: true, config: { 'user.name': 'neillu' }, allowed_keys: ['user.name', 'user.email'] }
     if (type === 'ui.settings.get') return { ok: true, settings: {} }
+    if (type === 'fs.read_file')
+      return fileRead.ok
+        ? { ok: true, content: fileRead.content }
+        : { ok: false, error: fileRead.error }
     return { ok: true }
   }
   return {
@@ -134,7 +207,7 @@ vi.mock('../../composables/useBackend', () => {
           id: 'r',
           type,
           ok: true,
-          payload: payloadFor(type),
+          payload: payloadFor(type, payload),
           error: null,
           timestamp: new Date().toISOString()
         }
@@ -147,6 +220,26 @@ vi.mock('../../composables/useBackend', () => {
 })
 
 import GitWindowApp from '../../GitWindowApp.vue'
+import { useNotify } from '../../composables/useNotify'
+
+// notify.confirm resolves through the (stubbed-out) NotificationHost, so tests
+// answer the dialog directly on the shared useNotify singleton.
+const notify = useNotify()
+
+function dialogMessage(): string {
+  const d = notify.dialog.value
+  expect(d, 'a confirmation dialog is open').toBeTruthy()
+  return d!.message
+}
+async function answerDialog(ok: boolean): Promise<void> {
+  expect(notify.dialog.value, 'a dialog is open').toBeTruthy()
+  notify.resolveDialog(ok)
+  await flushPromises()
+}
+
+// Every assertion below matches the English copy, so pin the locale instead of
+// letting it fall out of navigator.language / the settings cache.
+i18n.global.locale.value = 'en-US'
 
 const STUBS = {
   GitHistoryModal: true,
@@ -485,5 +578,480 @@ describe('GitWindowApp — Editorial Calm wiring', () => {
     const selects = wrapper.findAll('select.ed-select')
     expect(selects.length).toBe(2)
     expect((selects[0]!.element as HTMLSelectElement).value).toBe('main')
+  })
+})
+
+// ── The second wave: entries for backend/composable features that had no UI ──
+describe('GitWindowApp — toolbar ⋯, detail modes, file menu, bootstrap', () => {
+  let wrapper: VueWrapper | null = null
+
+  beforeEach(() => {
+    sends.calls.length = 0
+    statusOverride.value = null
+    cleanFiles.value = []
+    if (notify.dialog.value) notify.resolveDialog(false)
+  })
+  afterEach(() => {
+    if (notify.dialog.value) notify.resolveDialog(false)
+    wrapper?.unmount()
+    wrapper = null
+  })
+
+  function menuItem(w: VueWrapper, label: string): DOMWrapper<Element> {
+    const item = w.findAll('.menu-item').find((m) => m.text() === label)
+    expect(item, label).toBeDefined()
+    return item!
+  }
+
+  async function openToolbarMenu(w: VueWrapper): Promise<void> {
+    await w.find('button.tb-more').trigger('click')
+  }
+
+  async function openFileMenu(w: VueWrapper, file: string): Promise<void> {
+    await rowFor(w, file).trigger('contextmenu', { clientX: 40, clientY: 60 })
+  }
+
+  // ── 1. Toolbar ⋯ menu ──────────────────────────────────────────────────────
+  it('runs pull --rebase and push --set-upstream from the toolbar ⋯ menu', async () => {
+    wrapper = await mountApp()
+    await openToolbarMenu(wrapper)
+    await menuItem(wrapper, 'Pull (rebase)').trigger('click')
+    await flushPromises()
+    expect(callsOf('git.pull_rebase')[0]!.payload).toMatchObject({ workspace_path: '/tmp/ws' })
+
+    await openToolbarMenu(wrapper)
+    await menuItem(wrapper, 'Push (set upstream)').trigger('click')
+    await flushPromises()
+    expect(callsOf('git.push_upstream')[0]!.payload).toMatchObject({
+      branch: 'main',
+      remote: 'origin'
+    })
+  })
+
+  it('hides "Push (set upstream)" when the repo has no current branch', async () => {
+    statusOverride.value = { ...baseStatus(), branch: '' }
+    wrapper = await mountApp()
+    await openToolbarMenu(wrapper)
+    const labels = wrapper.findAll('.menu-item').map((m) => m.text())
+    expect(labels).toContain('Pull (rebase)')
+    expect(labels).not.toContain('Push (set upstream)')
+  })
+
+  it('force-pushes only after the destructive confirmation is accepted', async () => {
+    wrapper = await mountApp()
+    await openToolbarMenu(wrapper)
+    await menuItem(wrapper, 'Force push…').trigger('click')
+    await flushPromises()
+    expect(dialogMessage()).toContain('cannot be undone')
+    await answerDialog(false)
+    expect(callsOf('git.push_force').length).toBe(0)
+
+    await openToolbarMenu(wrapper)
+    await menuItem(wrapper, 'Force push…').trigger('click')
+    await flushPromises()
+    await answerDialog(true)
+    expect(callsOf('git.push_force').length).toBe(1)
+  })
+
+  it('undoes the last commit behind a confirmation', async () => {
+    wrapper = await mountApp()
+    await openToolbarMenu(wrapper)
+    await menuItem(wrapper, 'Undo last commit…').trigger('click')
+    await flushPromises()
+    expect(dialogMessage()).toContain('stay in your working tree')
+    await answerDialog(true)
+    expect(callsOf('git.undo_commit').length).toBe(1)
+  })
+
+  it('cleans untracked files in two stages: dry run → confirmation → delete', async () => {
+    cleanFiles.value = Array.from({ length: 12 }, (_, i) => `junk/f${i}.log`)
+    wrapper = await mountApp()
+    await openToolbarMenu(wrapper)
+    await menuItem(wrapper, 'Clean untracked files…').trigger('click')
+    await flushPromises()
+
+    // Stage 1 is the dry run; nothing is deleted yet.
+    const clean = callsOf('git.clean')
+    expect(clean.length).toBe(1)
+    expect(clean[0]!.payload).toMatchObject({ dry_run: true })
+
+    // The confirmation enumerates the dry run's own list (capped at 10).
+    const msg = dialogMessage()
+    expect(msg).toContain('permanently deletes 12 untracked files')
+    expect(msg).toContain('cannot be undone')
+    expect(msg).toContain('junk/f0.log')
+    expect(msg).toContain('junk/f9.log')
+    expect(msg).not.toContain('junk/f10.log')
+    expect(msg).toContain('…and 2 more')
+
+    await answerDialog(true)
+    const after = callsOf('git.clean')
+    expect(after.length).toBe(2)
+    expect(after[1]!.payload).toMatchObject({ dry_run: false })
+  })
+
+  it('never deletes when the clean confirmation is declined', async () => {
+    cleanFiles.value = ['junk/a.log']
+    wrapper = await mountApp()
+    await openToolbarMenu(wrapper)
+    await menuItem(wrapper, 'Clean untracked files…').trigger('click')
+    await flushPromises()
+    await answerDialog(false)
+    expect(callsOf('git.clean').length).toBe(1)
+  })
+
+  it('stops at the dry run when there is nothing to clean', async () => {
+    cleanFiles.value = []
+    wrapper = await mountApp()
+    await openToolbarMenu(wrapper)
+    await menuItem(wrapper, 'Clean untracked files…').trigger('click')
+    await flushPromises()
+    expect(callsOf('git.clean').length).toBe(1)
+    expect(notify.dialog.value).toBeNull()
+  })
+
+  // ── 2. Detail modes ────────────────────────────────────────────────────────
+  it('switches the detail between Diff, Blame and History', async () => {
+    wrapper = await mountApp()
+    await rowFor(wrapper, 'a.ts').trigger('click')
+    await flushPromises()
+    expect(wrapper.findComponent({ name: 'DiffPane' }).exists()).toBe(true)
+
+    const mode = (label: string): DOMWrapper<Element> =>
+      wrapper!.findAll('.dt-modes button').find((b) => b.text() === label)!
+
+    await mode('Blame').trigger('click')
+    await flushPromises()
+    expect(callsOf('git.blame')[0]!.payload).toMatchObject({ filepath: 'src/a.ts' })
+    expect(wrapper.findComponent({ name: 'DiffPane' }).exists()).toBe(false)
+    expect(wrapper.find('.blame-row').text()).toContain('abc1234')
+
+    // "Only changed lines" swaps blame for the diff-blame hunks.
+    await wrapper.find('.detail-hdr input[type="checkbox"]').setValue(true)
+    await flushPromises()
+    expect(callsOf('git.diff_blame')[0]!.payload).toMatchObject({
+      filepath: 'src/a.ts',
+      staged: false
+    })
+    expect(wrapper.find('.db-hunk-head').text()).toBe('@@ -1,2 +1,3 @@')
+    expect(wrapper.find('.db-line.db-add').text()).toContain('Uncommitted')
+
+    await mode('History').trigger('click')
+    await flushPromises()
+    expect(callsOf('git.file_log')[0]!.payload).toMatchObject({ filepath: 'src/a.ts', n: 30 })
+    const commitRow = wrapper.find('.hist-row')
+    expect(commitRow.text()).toContain('touch a.ts')
+
+    await commitRow.trigger('click')
+    await flushPromises()
+    expect(callsOf('git.commit_file_diff')[0]!.payload).toMatchObject({
+      commit_hash: 'aaaaaaaaaaaa',
+      filepath: 'src/a.ts'
+    })
+  })
+
+  it('resets the detail to Diff and drops the caches when another file is opened', async () => {
+    wrapper = await mountApp()
+    await rowFor(wrapper, 'a.ts').trigger('click')
+    await flushPromises()
+    await wrapper.findAll('.dt-modes button').find((b) => b.text() === 'Blame')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.blame-row').exists()).toBe(true)
+
+    await rowFor(wrapper, 'staged.ts').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.blame-row').exists()).toBe(false)
+    expect(wrapper.findComponent({ name: 'DiffPane' }).exists()).toBe(true)
+    const on = wrapper.findAll('.dt-modes button').find((b) => b.classes().includes('on'))
+    expect(on!.text()).toBe('Diff')
+  })
+
+  // ── 3. File row context menu ───────────────────────────────────────────────
+  it('offers "Add to .gitignore" on untracked rows only, and wires it up', async () => {
+    wrapper = await mountApp()
+    await openFileMenu(wrapper, 'a.ts')
+    expect(wrapper.findAll('.menu-item').map((m) => m.text())).toEqual([
+      'Open in editor',
+      'View history',
+      'Blame',
+      'Restore from branch…'
+    ])
+
+    await openFileMenu(wrapper, 'new.ts')
+    await menuItem(wrapper, 'Add to .gitignore').trigger('click')
+    await flushPromises()
+    expect(callsOf('git.ignore')[0]!.payload).toMatchObject({
+      pattern: 'src/new.ts',
+      target: 'project',
+      untrack: true
+    })
+  })
+
+  it('opens Blame and History straight from the file context menu', async () => {
+    wrapper = await mountApp()
+    await openFileMenu(wrapper, 'staged.ts')
+    await menuItem(wrapper, 'Blame').trigger('click')
+    await flushPromises()
+    expect(callsOf('git.blame')[0]!.payload).toMatchObject({ filepath: 'src/staged.ts' })
+
+    await openFileMenu(wrapper, 'staged.ts')
+    await menuItem(wrapper, 'View history').trigger('click')
+    await flushPromises()
+    expect(callsOf('git.file_log')[0]!.payload).toMatchObject({ filepath: 'src/staged.ts' })
+  })
+
+  it('restores a file from another branch through the two-level menu', async () => {
+    wrapper = await mountApp()
+    await openFileMenu(wrapper, 'a.ts')
+    await menuItem(wrapper, 'Restore from branch…').trigger('click')
+    await flushPromises()
+    // Second level lists the other local branches only (never the current one).
+    const branches = wrapper.findAll('.menu-item').map((m) => m.text())
+    expect(branches).toEqual(['feature-x'])
+
+    await menuItem(wrapper, 'feature-x').trigger('click')
+    await flushPromises()
+    expect(dialogMessage()).toContain('Restore src/a.ts from feature-x')
+    await answerDialog(true)
+    expect(callsOf('git.restore_from_branch')[0]!.payload).toMatchObject({
+      branch: 'feature-x',
+      filepath: 'src/a.ts'
+    })
+  })
+
+  it('keeps the file rows draggable and left-clickable next to the context menu', async () => {
+    wrapper = await mountApp()
+    const row = rowFor(wrapper, 'a.ts')
+    expect(row.attributes('draggable')).toBe('true')
+    await row.trigger('contextmenu', { clientX: 5, clientY: 5 })
+    expect(wrapper.findAll('.menu-item').length).toBeGreaterThan(0)
+    await wrapper.find('.menu-backdrop').trigger('click')
+    await row.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.detail').exists()).toBe(true)
+  })
+
+  // ── 4. Branch context menu ─────────────────────────────────────────────────
+  it('merges the current branch into another one from the branch context menu', async () => {
+    wrapper = await mountApp()
+    const feature = wrapper.findAll('.branch-row').find((r) => r.text().includes('feature-x'))
+    await feature!.trigger('contextmenu')
+    await menuItem(wrapper, 'Merge current into feature-x').trigger('click')
+    await flushPromises()
+    expect(dialogMessage()).toContain('Merge main into feature-x')
+    await answerDialog(true)
+    expect(callsOf('git.merge_into')[0]!.payload).toMatchObject({ target: 'feature-x' })
+  })
+
+  // ── 5. Non-repo bootstrap ──────────────────────────────────────────────────
+  it('initializes a repository from the empty state, honouring the .gitignore box', async () => {
+    statusOverride.value = { ...baseStatus(), is_git_repo: false }
+    wrapper = await mountApp()
+    expect(wrapper.find('.init-card').exists()).toBe(true)
+
+    await wrapper.find('.init-row input[type="checkbox"]').setValue(false)
+    await wrapper.findAll('.init-card button').find((b) => b.text().includes('Initialize'))!.trigger('click')
+    await flushPromises()
+    expect(callsOf('git.init')[0]!.payload).toMatchObject({
+      workspace_path: '/tmp/ws',
+      create_gitignore: false
+    })
+  })
+
+  it('clones from the empty state and opens the clone as a new workspace', async () => {
+    statusOverride.value = { ...baseStatus(), is_git_repo: false }
+    wrapper = await mountApp()
+    await wrapper.findAll('.init-card button').find((b) => b.text().includes('Clone repository'))!.trigger('click')
+
+    const cloneBtn = (): DOMWrapper<Element> =>
+      wrapper!.findAll('.init-clone button').find((b) => b.text() === 'Clone')!
+    expect(cloneBtn().attributes('disabled')).toBeDefined()
+
+    const inputs = wrapper.findAll('.init-clone input')
+    await inputs[0]!.setValue('https://example.com/r.git')
+    // The target folder can come from the ui.pick_folder host capability.
+    await wrapper.find('.init-clone .btn-ghost').trigger('click')
+    await flushPromises()
+    expect((inputs[1]!.element as HTMLInputElement).value).toBe('/tmp/picked')
+    expect(cloneBtn().attributes('disabled')).toBeUndefined()
+
+    await cloneBtn().trigger('click')
+    await flushPromises()
+    expect(callsOf('git.clone')[0]!.payload).toMatchObject({
+      url: 'https://example.com/r.git',
+      target_dir: '/tmp/picked'
+    })
+    expect(callsOf('ui.open_workspace')[0]!.payload).toMatchObject({ workspace_path: '/tmp/cloned' })
+  })
+})
+
+// ── Resolve with agent: hand a conflicted file to the embedded CLI dock ──────
+describe('GitWindowApp — Resolve with agent', () => {
+  let wrapper: VueWrapper | null = null
+
+  const SMALL_CONFLICT = [
+    'const a = 1',
+    '<<<<<<< HEAD',
+    'const b = 2',
+    '=======',
+    'const b = 3',
+    '>>>>>>> feature-x',
+    'const c = 4'
+  ].join('\n')
+
+  /** 700 lines with a single conflict block at lines 501–505. */
+  function largeConflict(): string {
+    const lines: string[] = []
+    for (let i = 1; i <= 500; i++) lines.push(`FILLER_${i}`)
+    lines.push('<<<<<<< HEAD', 'const b = 2', '=======', 'const b = 3', '>>>>>>> feature-x')
+    for (let i = 501; i <= 700; i++) lines.push(`FILLER_${i}`)
+    return lines.join('\n')
+  }
+
+  function conflictStatus(): Record<string, unknown> {
+    return {
+      ...baseStatus(),
+      operation_in_progress: 'merge',
+      unstaged: [{ path: 'src/a.ts', status: 'M' }, { path: 'src/conflict.ts', status: 'U' }]
+    }
+  }
+
+  function agentButton(w: VueWrapper): DOMWrapper<Element> {
+    const btn = w
+      .find('.frow.conflict')
+      .findAll('button.linkbtn')
+      .find((b) => b.text() === 'agent')
+    expect(btn, 'the conflict row offers an "agent" action').toBeDefined()
+    return btn!
+  }
+
+  /** The prompt paste (the dock also injects its own git context on a fresh
+   *  spawn, so pick ours out of the stream rather than assuming an index). */
+  function promptPaste(): string | undefined {
+    return term.pastes.find((p) => p.includes('Resolve a git merge conflict'))
+  }
+
+  function toastMessages(): string[] {
+    return notify.toasts.value.map((t) => t.message)
+  }
+
+  beforeEach(() => {
+    sends.calls.length = 0
+    statusOverride.value = conflictStatus()
+    fileRead.ok = true
+    fileRead.content = SMALL_CONFLICT
+    fileRead.error = ''
+    term.pastes.length = 0
+    term.spawnCalls = 0
+    term.spawnRuns = true
+    term.status = 'running'
+    // A timestamp well in the past = the CLI has been quiet, so the injection
+    // wait resolves without burning real time.
+    term.lastRawActivityAt = Date.now() - 60_000
+  })
+  afterEach(() => {
+    wrapper?.unmount()
+    wrapper = null
+    term.status = 'idle'
+    term.lastRawActivityAt = 0
+    term.pastes.length = 0
+  })
+
+  it('offers the agent action on conflict rows only', async () => {
+    wrapper = await mountApp()
+    expect(agentButton(wrapper).exists()).toBe(true)
+    for (const file of ['a.ts', 'staged.ts', 'new.ts']) {
+      const labels = rowFor(wrapper, file)
+        .findAll('button.linkbtn')
+        .map((b) => b.text())
+      expect(labels, file).not.toContain('agent')
+    }
+  })
+
+  it('adds "Resolve with agent" to the context menu of conflicted files only', async () => {
+    wrapper = await mountApp()
+    await wrapper.find('.frow.conflict').trigger('contextmenu', { clientX: 10, clientY: 10 })
+    expect(wrapper.findAll('.menu-item').map((m) => m.text())[0]).toBe('Resolve with agent')
+
+    await wrapper.find('.menu-backdrop').trigger('click')
+    await rowFor(wrapper, 'a.ts').trigger('contextmenu', { clientX: 10, clientY: 10 })
+    expect(wrapper.findAll('.menu-item').map((m) => m.text())).not.toContain('Resolve with agent')
+  })
+
+  it('quotes a small file in full and submits it as one bracketed paste', async () => {
+    wrapper = await mountApp()
+    await agentButton(wrapper).trigger('click')
+    await flushPromises()
+
+    expect(callsOf('fs.read_file')[0]!.payload).toMatchObject({
+      workspace_path: '/tmp/ws',
+      rel_path: 'src/conflict.ts'
+    })
+    const prompt = promptPaste()
+    expect(prompt).toBeDefined()
+    expect(prompt!.startsWith('\x1b[200~')).toBe(true)
+    expect(prompt!.endsWith('\x1b[201~')).toBe(true)
+    expect(prompt).toContain('File: src/conflict.ts (absolute path: /tmp/ws/src/conflict.ts)')
+    expect(prompt).toContain('Operation in progress: merge')
+    expect(prompt).toContain('Conflict blocks in this file: 1')
+    expect(prompt).toContain('Full content of src/conflict.ts:')
+    expect(prompt).toContain(SMALL_CONFLICT)
+    expect(prompt).not.toContain('This is an excerpt')
+
+    // The submitting CR follows the paste.
+    await vi.waitFor(() => expect(term.pastes).toContain('\r'))
+    expect(toastMessages().some((m) => m.includes('Sent the conflict in src/conflict.ts'))).toBe(true)
+  })
+
+  it('sends only the conflict regions of a large file, pointing at the full path', async () => {
+    fileRead.content = largeConflict()
+    wrapper = await mountApp()
+    await agentButton(wrapper).trigger('click')
+    await flushPromises()
+
+    const prompt = promptPaste()!
+    expect(prompt).toContain('This is an excerpt — read the complete file at /tmp/ws/src/conflict.ts')
+    expect(prompt).toContain('--- src/conflict.ts lines 495-511 ---')
+    // 6 lines of context on each side of the block, and nothing beyond them.
+    expect(prompt).toContain('\nFILLER_495\n')
+    expect(prompt).not.toContain('\nFILLER_494\n')
+    expect(prompt).toContain('\nFILLER_506\n')
+    expect(prompt).not.toContain('\nFILLER_507\n')
+    expect(prompt.length).toBeLessThan(fileRead.content.length)
+  })
+
+  it('starts the CLI first when no PTY is running, then injects the prompt', async () => {
+    term.status = 'idle'
+    wrapper = await mountApp()
+    await agentButton(wrapper).trigger('click')
+    await flushPromises()
+
+    expect(term.spawnCalls).toBe(1)
+    expect(promptPaste()).toBeDefined()
+    // The panel is expanded so the user sees the agent working.
+    expect((wrapper.find('.ai-dock-panel').element as HTMLElement).style.display).not.toBe('none')
+  })
+
+  it('reports an error instead of failing silently when the CLI cannot start', async () => {
+    term.status = 'idle'
+    term.spawnRuns = false
+    wrapper = await mountApp()
+    await agentButton(wrapper).trigger('click')
+    await flushPromises()
+
+    expect(term.spawnCalls).toBe(1)
+    expect(promptPaste()).toBeUndefined()
+    expect(toastMessages().some((m) => m.includes('Could not start the CLI agent'))).toBe(true)
+  })
+
+  it('reports a read failure and never pastes a partial prompt', async () => {
+    fileRead.ok = false
+    fileRead.error = 'permission denied'
+    wrapper = await mountApp()
+    await agentButton(wrapper).trigger('click')
+    await flushPromises()
+
+    expect(promptPaste()).toBeUndefined()
+    expect(toastMessages()).toContain('permission denied')
   })
 })

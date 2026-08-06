@@ -38,6 +38,45 @@ export interface CheckIgnoreResult {
   error?: string
 }
 
+// The three merge stages git keeps in its index for a conflicted path (1 base,
+// 2 ours, 3 theirs). `has_*` distinguishes "this stage does not exist" — normal
+// for add/add (no base) and delete/modify (a side missing) — from a read
+// failure, which comes back as ok:false instead. `binary` means at least one
+// stage is not text, and its content is empty rather than mojibake.
+export interface ConflictStages {
+  ok: boolean
+  base: string
+  ours: string
+  theirs: string
+  has_base: boolean
+  has_ours: boolean
+  has_theirs: boolean
+  binary: boolean
+  error?: string
+}
+
+// Derived from which stages exist, mirroring git status's AA/DU/UD/DD pairs.
+export type ConflictKind =
+  | 'both-modified'
+  | 'both-added'
+  | 'deleted-by-them'
+  | 'deleted-by-us'
+  | 'both-deleted'
+  | 'added-by-us'
+  | 'added-by-them'
+  | 'unknown'
+
+export interface ConflictEntry {
+  path: string
+  kind: ConflictKind
+}
+
+export interface ListConflictsResult {
+  ok: boolean
+  conflicts: ConflictEntry[]
+  error?: string
+}
+
 export interface GitCommit {
   hash: string
   short_hash: string
@@ -681,6 +720,55 @@ export function useGit(
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       gitError.value = `resolveConflictTheirs: ${msg}`
+      return { ok: false, error: msg }
+    }
+  }
+
+  const emptyStages = (error: string): ConflictStages => ({
+    ok: false, base: '', ours: '', theirs: '',
+    has_base: false, has_ours: false, has_theirs: false, binary: false, error,
+  })
+
+  /** Read all three merge stages of a conflicted file in one round-trip. */
+  async function conflictStages(filepath: string): Promise<ConflictStages> {
+    const ws = workspacePath()
+    if (!ws) return emptyStages('no workspace')
+    try {
+      const resp = await send<ConflictStages>('git.conflict_stages', { workspace_path: ws, filepath })
+      return resp.payload ?? emptyStages('no response')
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      return emptyStages(msg)
+    }
+  }
+
+  /** Enumerate the index's unmerged paths — outlives the merge output that
+   *  produced them, so the conflict list survives an app restart. */
+  async function listConflicts(): Promise<ListConflictsResult> {
+    const ws = workspacePath()
+    if (!ws) return { ok: false, conflicts: [], error: 'no workspace' }
+    try {
+      const resp = await send<ListConflictsResult>('git.list_conflicts', { workspace_path: ws })
+      return resp.payload ?? { ok: false, conflicts: [], error: 'no response' }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      return { ok: false, conflicts: [], error: msg }
+    }
+  }
+
+  /** Stage a hand-merged file as resolved (plain `git add`, content untouched). */
+  async function markResolved(filepath: string): Promise<{ ok: boolean; error?: string }> {
+    const ws = workspacePath()
+    if (!ws) return { ok: false, error: 'no workspace' }
+    try {
+      const resp = await send<{ ok: boolean; error?: string }>(
+        'git.mark_resolved', { workspace_path: ws, filepath }, 20_000,
+      )
+      if (resp.ok && resp.payload?.ok) await loadStatus()
+      return resp.payload ?? { ok: false, error: 'no response' }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      gitError.value = `markResolved: ${msg}`
       return { ok: false, error: msg }
     }
   }
@@ -1621,6 +1709,7 @@ export function useGit(
     // file operations
     stageFile, unstageFile, stageAll, stageFiles, unstageFiles, discardFiles, discardFile, diffFile,
     fileLog, showFile, resolveConflictOurs, resolveConflictTheirs,
+    conflictStages, listConflicts, markResolved,
     cleanUntracked, blameFile, diffBlame,
     // remote
     fetchRemote, pullOnly, pushOnly, pushUpstream, sync,

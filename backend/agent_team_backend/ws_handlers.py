@@ -23,7 +23,7 @@ from pydantic import ValidationError
 from . import agent_messaging, executions_service, storage_service
 from .ipc import make_error, make_event, make_response
 from .log_readers.claude import ClaudeLogReader, first_user_prompts
-from .credential_vault import DEFAULT_SLOT_ID
+from .credential_vault import DEFAULT_SLOT_ID, vault_to_thread
 from .mcp_settings import (
     MCPSettingsConflictError,
     MCPSettingsError,
@@ -56,6 +56,32 @@ _REGISTRY: dict[str, Handler] = {}
 _ONBOARDING_EXECUTOR = ThreadPoolExecutor(
     max_workers=1, thread_name_prefix="onboarding"
 )
+
+# Dedicated pool for the pre-spawn CLI work of terminal.create: the agent CLI
+# probe (a subprocess with an 8s budget) and the login-shell PATH refresh (a
+# subprocess with a 3s budget). Opening a dozen panes at once used to fill
+# asyncio's shared default executor with these, starving every other
+# to_thread in the backend — including the credential I/O that runs while an
+# agent's switch_lock is held, so the lock was never released and the very
+# spawns that filled the pool then deadlocked waiting for it.
+# Eight workers: probes are subprocess-bound, not CPU-bound, so this only has
+# to stay clear of the default executor's ~12-16 — it does not have to be
+# small. Sizing it smaller would regress the case this pool does NOT protect:
+# fresh spawns are not throttled frontend-side (only resumes are), so a
+# pipeline fan-out arrives all at once, and at 4 workers a 16-pane burst would
+# serialize past the frontend's 30s terminal.create timeout on a cold machine
+# where each probe nears its 8s budget.
+_CLI_PROBE_EXECUTOR = ThreadPoolExecutor(
+    max_workers=8, thread_name_prefix="cli-probe"
+)
+
+# Ceiling on acquiring an agent's credential switch lock before a spawn: a
+# legitimate account switch completes in well under a second, so this is purely
+# a deadlock backstop the normal path never reaches. Kept just UNDER the
+# frontend's 30s TERMINAL_CREATE_TIMEOUT_MS (resume-command.ts) on purpose —
+# at 30s the client gives up first and reports a generic request timeout, and
+# the named reason below (the whole point of the backstop) never arrives.
+_SWITCH_LOCK_TIMEOUT_SEC = 25.0
 
 
 def handler(*msg_types: str) -> Callable[[Handler], Handler]:
@@ -910,6 +936,37 @@ async def git_resolve_theirs(session: "Session", msg_id: str, msg_type: str, pay
         asyncio.create_task(app.broadcast(make_event("git.changed", {"workspace_path": ws_path})))
 
 
+@handler("git.conflict_stages")
+async def git_conflict_stages(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    from . import app
+
+    ws_path = payload.get("workspace_path") or ""
+    filepath = payload.get("filepath") or ""
+    result = await app.git_service.conflict_stages(ws_path, filepath)
+    await session.send_json(make_response(msg_id, msg_type, result))
+
+
+@handler("git.list_conflicts")
+async def git_list_conflicts(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    from . import app
+
+    ws_path = payload.get("workspace_path") or ""
+    result = await app.git_service.list_conflicts(ws_path)
+    await session.send_json(make_response(msg_id, msg_type, result))
+
+
+@handler("git.mark_resolved")
+async def git_mark_resolved(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    from . import app
+
+    ws_path = payload.get("workspace_path") or ""
+    filepath = payload.get("filepath") or ""
+    result = await app.git_service.mark_resolved(ws_path, filepath)
+    await session.send_json(make_response(msg_id, msg_type, result))
+    if result.get("ok"):
+        asyncio.create_task(app.broadcast(make_event("git.changed", {"workspace_path": ws_path})))
+
+
 @handler("git.clean")
 async def git_clean(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
@@ -1426,9 +1483,9 @@ async def cli_profiles_delete(session: "Session", msg_id: str, msg_type: str, pa
             if active_id is None:
                 clear_fn = getattr(app.credential_vault, "clear_live", None)
                 if callable(clear_fn):
-                    await asyncio.to_thread(clear_fn, agent_key)
+                    await vault_to_thread(clear_fn, agent_key)
             else:
-                await asyncio.to_thread(
+                await vault_to_thread(
                     app.credential_vault.delete_slot_secrets, agent_key, "__default__"
                 )
         await _broadcast_profiles_changed("delete")
@@ -1483,7 +1540,7 @@ async def cli_profiles_delete(session: "Session", msg_id: str, msg_type: str, pa
         # BEFORE the store renames the slot dir away. Cleanup failures must
         # never block the delete.
         try:
-            await asyncio.to_thread(
+            await vault_to_thread(
                 app.credential_vault.delete_slot_secrets, agent_key, profile_id
             )
         except Exception as err:  # noqa: BLE001
@@ -1665,7 +1722,7 @@ async def cli_profiles_set_default(session: "Session", msg_id: str, msg_type: st
         # completed login. While the login pane's CLI is still running the
         # home cannot be harvested safely (token rotation, config home
         # deleted under a live CLI), so refuse the switch (LOGIN_IN_PROGRESS).
-        if profile_id is not None and await asyncio.to_thread(
+        if profile_id is not None and await vault_to_thread(
             app.credential_vault.login_home_path(agent_key, profile_id).is_dir
         ):
             if _running_login_terminals(agent_key, profile_id):
@@ -1678,7 +1735,7 @@ async def cli_profiles_set_default(session: "Session", msg_id: str, msg_type: st
                 )
                 return
             try:
-                await asyncio.to_thread(
+                await vault_to_thread(
                     app.credential_vault.harvest_login_home, agent_key, profile_id
                 )
             except Exception as err:  # noqa: BLE001 — credentials untouched, refuse cleanly
@@ -1691,12 +1748,12 @@ async def cli_profiles_set_default(session: "Session", msg_id: str, msg_type: st
         # live: an empty or dead-token slot signs the CLI out, and the caller
         # opens a sign-in instead of leaving the user at a "not logged in"
         # prompt they have to resolve by hand.
-        needs_login = await asyncio.to_thread(
+        needs_login = await vault_to_thread(
             _slot_needs_login, agent_key, profile_id or DEFAULT_SLOT_ID
         )
 
         try:
-            await asyncio.to_thread(
+            await vault_to_thread(
                 app.credential_vault.switch,
                 agent_key,
                 current_id or DEFAULT_SLOT_ID,
@@ -3221,8 +3278,9 @@ async def _terminal_create_impl(
         agent_key, payload.get("command")
     )
     try:
-        startup_probe = await asyncio.to_thread(
-            app._probe_agent_cli_for_spawn, agent_key, payload.get("command")
+        startup_probe = await asyncio.get_running_loop().run_in_executor(
+            _CLI_PROBE_EXECUTOR,
+            app._probe_agent_cli_for_spawn, agent_key, payload.get("command"),
         )
     except app.AgentCliProbeError as probe_error:
         # A CLI that simply is not installed is not an error the user can act on
@@ -3390,8 +3448,37 @@ async def _terminal_create_impl(
         # locked section is synchronous (no awaits), so the lock is held only
         # for the spawn itself; login panes run in an isolated home and other
         # agents have no profiles, so neither takes the lock.
-        async with app.credential_vault.switch_lock(agent_key):
+        # Bounded acquire (_SWITCH_LOCK_TIMEOUT_SEC): if the lock is somehow
+        # held forever the spawn must fail visibly instead of hanging with no
+        # response and no log.
+        switch_lock = app.credential_vault.switch_lock(agent_key)
+        try:
+            await asyncio.wait_for(
+                switch_lock.acquire(), timeout=_SWITCH_LOCK_TIMEOUT_SEC
+            )
+        except asyncio.TimeoutError:
+            app.log.warning(
+                "terminal.create for %s timed out after %.0fs waiting for the "
+                "credential switch lock", agent_key, _SWITCH_LOCK_TIMEOUT_SEC,
+            )
+            # Name both plausible causes: a wedged switch/harvest, and a
+            # Keychain authorization prompt sitting unanswered (each `security`
+            # call has its own 10s budget, so an unattended prompt blows this
+            # ceiling). Also say the previous PTY is gone: the reap of
+            # replaces_terminal_id above already ran, so a Respawn that lands
+            # here has lost its old pane and must be started again by hand.
+            raise RuntimeError(
+                f"timed out after {_SWITCH_LOCK_TIMEOUT_SEC:.0f}s waiting for the "
+                f"{agent_key} credential switch lock; an account switch or "
+                "credential harvest appears to be stuck, or a Keychain "
+                "authorization prompt is waiting for an answer. If this was a "
+                "respawn, the previous session was already closed — start the "
+                "pane again"
+            ) from None
+        try:
             term = _spawn_and_claim()
+        finally:
+            switch_lock.release()
     else:
         term = _spawn_and_claim()
     # Register the pane with the log-attribution layer so any session

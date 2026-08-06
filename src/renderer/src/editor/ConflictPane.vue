@@ -6,6 +6,8 @@ import {
   type FileSection, type ConflictChoice,
 } from '../lib/conflict-parser'
 import type { useBackend } from '../composables/useBackend'
+// Type-only — erased at build time, so this never pulls useGit into a bundle.
+import type { ConflictStages } from '../composables/useGit'
 
 const props = defineProps<{
   workspacePath: string
@@ -24,6 +26,20 @@ const content = ref<string | null>(null)
 const loading = ref(false)
 const loadError = ref('')
 const applying = ref(false)
+
+// The index's three merge stages (`git show :1:/:2:/:3:`), fetched alongside
+// the working-tree file. Only used to (a) reveal the common ancestor the file
+// itself does not carry unless the user runs diff3 conflict style, and (b)
+// recognise a binary conflict, which has no text merge to offer at all.
+const stages = ref<ConflictStages | null>(null)
+const showBase = ref(false)
+/** A binary conflict: the backend returns empty stages plus this flag. */
+const binaryConflict = computed(() => stages.value?.binary === true)
+/** The base toggle is offered only when stage 1 exists (add/add has none). */
+const canShowBase = computed(
+  () => stages.value?.ok === true && stages.value.has_base && !stages.value.binary,
+)
+const baseText = computed(() => stages.value?.base ?? '')
 
 const sections = computed<FileSection[]>(() =>
   content.value !== null ? parseConflicts(content.value) : [],
@@ -50,6 +66,8 @@ async function loadFile(): Promise<void> {
   manualEdits.value = new Map()
   _priorChoice.value = new Map()
   editingIdx.value = null
+  stages.value = null
+  void loadStages()
   try {
     const resp = await props.backend.send<{ ok: boolean; content: string; error?: string }>(
       'fs.read_file',
@@ -72,6 +90,22 @@ async function loadFile(): Promise<void> {
   }
 }
 
+/** Merge stages are a side channel: a failure here only costs the base view,
+ *  so it never surfaces as a load error on the merge itself. */
+async function loadStages(): Promise<void> {
+  const target = props.filepath
+  try {
+    const resp = await props.backend.send<ConflictStages>(
+      'git.conflict_stages',
+      { workspace_path: props.workspacePath, filepath: target },
+    )
+    if (props.filepath !== target) return
+    stages.value = resp.payload ?? null
+  } catch {
+    stages.value = null
+  }
+}
+
 watch(
   () => props.backend.status.value,
   (s) => { if (s === 'connected' && content.value === null && !loadError.value) void loadFile() },
@@ -80,6 +114,7 @@ watch(
 watch([() => props.filepath], () => {
   content.value = null
   loadError.value = ''
+  showBase.value = false
   void loadFile()
 })
 
@@ -179,6 +214,8 @@ interface RenderBlock {
   conflictIdx?: number
   lines?: string[]
   ours?: string[]
+  base?: string[]
+  hasBase?: boolean
   theirs?: string[]
   oursLabel?: string
   theirsLabel?: string
@@ -192,6 +229,8 @@ const blocks = computed<RenderBlock[]>(() => {
       type: 'conflict',
       conflictIdx: ci,
       ours: s.ours,
+      base: s.base,
+      hasBase: s.hasBase,
       theirs: s.theirs,
       oursLabel: s.oursLabel,
       theirsLabel: s.theirsLabel,
@@ -214,8 +253,15 @@ function choiceOf(idx: number): ConflictChoice | undefined {
       <span class="cp-filepath" :title="filepath">{{ filepath }}</span>
       <span class="cp-progress">{{ resolvedCount }} / {{ totalConflicts }} resolved</span>
       <button
+        v-if="canShowBase"
+        class="cp-btn cp-base-toggle"
+        :class="{ active: showBase }"
+        :title="$t('action.toggle-base')"
+        @click="showBase = !showBase"
+      >{{ $t('label.merge-base') }}</button>
+      <button
         class="cp-apply"
-        :disabled="!allResolved || applying || !!mergeAborted"
+        :disabled="!allResolved || applying || !!mergeAborted || binaryConflict"
         :title="allResolved ? 'Write and stage this file' : 'Resolve all conflicts first'"
         @click="applyAndStage"
       >
@@ -230,10 +276,21 @@ function choiceOf(idx: number): ConflictChoice | undefined {
     <div class="cp-body">
       <div v-if="loading" class="cp-msg">{{ $t('label.loading') }}</div>
       <div v-else-if="mergeAborted" class="cp-msg warn">{{ $t('status.merge-aborted') }}</div>
+      <!-- A binary conflict has no text to merge — say so instead of showing an
+           empty merge view (the backend returns empty stages plus the flag). -->
+      <div v-else-if="binaryConflict" class="cp-msg warn">{{ $t('label.binary-conflict') }}</div>
       <div v-else-if="loadError" class="cp-msg err">{{ loadError }}</div>
       <div v-else-if="content === null" class="cp-msg">{{ $t('label.not-loaded') }}</div>
 
       <template v-else>
+        <!-- Common ancestor, VS Code's "toggle base": the whole stage-1 file,
+             which is the only base available when the file is not written in
+             diff3 conflict style. -->
+        <div v-if="showBase" class="cp-base-panel">
+          <div class="cp-base-head">{{ $t('label.common-ancestor') }}</div>
+          <pre class="cp-base-text">{{ baseText }}</pre>
+        </div>
+
         <div v-for="(block, bi) in blocks" :key="bi">
           <!-- Context block -->
           <div v-if="block.type === 'context'" class="cp-context">
@@ -262,6 +319,11 @@ function choiceOf(idx: number): ConflictChoice | undefined {
                   @click="choose(block.conflictIdx!, 'both')"
                 >{{ $t('action.accept-both') }}</button>
                 <button
+                  v-if="showBase && block.hasBase"
+                  class="cp-btn" :class="{ active: choiceOf(block.conflictIdx!) === 'base' }"
+                  @click="choose(block.conflictIdx!, 'base')"
+                >{{ $t('action.accept-base') }}</button>
+                <button
                   class="cp-btn edit-btn" :class="{ active: choiceOf(block.conflictIdx!) === 'manual' }"
                   @click="choose(block.conflictIdx!, 'manual')"
                 >{{ $t('action.edit') }}</button>
@@ -283,13 +345,13 @@ function choiceOf(idx: number): ConflictChoice | undefined {
             </div>
 
             <!-- Side-by-side diff -->
-            <div v-else class="cp-sbs">
+            <div v-else class="cp-sbs" :class="{ 'with-base': showBase && block.hasBase }">
               <!-- Ours -->
               <div
                 class="cp-side ours-side"
                 :class="{
                   'side-chosen': choiceOf(block.conflictIdx!) === 'ours' || choiceOf(block.conflictIdx!) === 'both',
-                  'side-rejected': choiceOf(block.conflictIdx!) === 'theirs',
+                  'side-rejected': choiceOf(block.conflictIdx!) === 'theirs' || choiceOf(block.conflictIdx!) === 'base',
                 }"
               >
                 <div v-for="(line, li) in block.ours" :key="li" class="cp-line">
@@ -298,12 +360,24 @@ function choiceOf(idx: number): ConflictChoice | undefined {
                 </div>
                 <div v-if="!block.ours!.length" class="cp-empty-side">(empty)</div>
               </div>
+              <!-- Base (diff3 conflict style only) -->
+              <div
+                v-if="showBase && block.hasBase"
+                class="cp-side base-side"
+                :class="{ 'side-chosen': choiceOf(block.conflictIdx!) === 'base' }"
+              >
+                <div v-for="(line, li) in block.base" :key="li" class="cp-line">
+                  <span class="cp-lno">{{ li + 1 }}</span>
+                  <span class="cp-ltext">{{ line }}</span>
+                </div>
+                <div v-if="!block.base!.length" class="cp-empty-side">(empty)</div>
+              </div>
               <!-- Theirs -->
               <div
                 class="cp-side theirs-side"
                 :class="{
                   'side-chosen': choiceOf(block.conflictIdx!) === 'theirs' || choiceOf(block.conflictIdx!) === 'both',
-                  'side-rejected': choiceOf(block.conflictIdx!) === 'ours',
+                  'side-rejected': choiceOf(block.conflictIdx!) === 'ours' || choiceOf(block.conflictIdx!) === 'base',
                 }"
               >
                 <div v-for="(line, li) in block.theirs" :key="li" class="cp-line">
@@ -320,6 +394,7 @@ function choiceOf(idx: number): ConflictChoice | undefined {
                 <template v-if="choiceOf(block.conflictIdx!) === 'ours'">✓ Accepted Ours</template>
                 <template v-else-if="choiceOf(block.conflictIdx!) === 'theirs'">✓ Accepted Theirs</template>
                 <template v-else-if="choiceOf(block.conflictIdx!) === 'both'">✓ Accepted Both</template>
+                <template v-else-if="choiceOf(block.conflictIdx!) === 'base'">✓ {{ $t('label.accepted-base') }}</template>
                 <template v-else>✓ Manually edited</template>
               </span>
               <button class="cp-undo-btn" @click="choices = new Map([...choices].filter(([k]) => k !== block.conflictIdx!))">Undo</button>
@@ -461,8 +536,37 @@ function choiceOf(idx: number): ConflictChoice | undefined {
 .cp-btn.primary { border-color: var(--accent-emphasis); background: color-mix(in srgb, var(--accent-emphasis) 25%, transparent); color: var(--accent-fg); }
 .cp-btn.edit-btn.active { border-color: var(--attention-fg); background: var(--attention-subtle); color: var(--attention-fg); }
 
+/* Common-ancestor panel (the "Base" toggle) */
+.cp-base-toggle { flex-shrink: 0; }
+.cp-base-panel {
+  margin: 6px 8px 0;
+  border: 1px solid var(--border-muted);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.cp-base-head {
+  padding: 3px 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg-subtle);
+  border-bottom: 1px solid var(--border-muted);
+}
+.cp-base-text {
+  margin: 0;
+  padding: 4px 12px;
+  max-height: 220px;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 /* Side-by-side */
 .cp-sbs { display: grid; grid-template-columns: 1fr 1fr; }
+.cp-sbs.with-base { grid-template-columns: 1fr 1fr 1fr; }
 .cp-side {
   padding: 4px 0;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -471,6 +575,7 @@ function choiceOf(idx: number): ConflictChoice | undefined {
   transition: opacity 0.15s;
 }
 .cp-side.ours-side { background: color-mix(in srgb, var(--warning-fg) 6%, transparent); border-right: 1px solid var(--border-muted); }
+.cp-side.base-side { background: var(--bg-subtle); border-right: 1px solid var(--border-muted); }
 .cp-side.theirs-side { background: color-mix(in srgb, var(--accent-fg) 6%, transparent); }
 .cp-side.side-chosen { opacity: 1; }
 .cp-side.side-rejected { opacity: 0.3; }

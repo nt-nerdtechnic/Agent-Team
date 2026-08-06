@@ -866,6 +866,285 @@ class TestResolveConflict:
         assert "<<<<<<" not in content
 
 
+# ── conflict stages / list_conflicts / mark_resolved ──────────────────────────
+
+def commit_all(path: Path, message: str) -> None:
+    """Stage everything (including deletions) and commit, empty commits allowed."""
+    subprocess.run(["git", "add", "-A"], cwd=path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", message], cwd=path, check=True, capture_output=True
+    )
+
+
+def make_conflict(path: Path, base, ours, theirs) -> None:
+    """Build a repo where merging 'feature' conflicts with the current branch.
+
+    Each argument is a callable applied to the working tree for that side; a
+    no-op callable models the side that never touched the file.
+    """
+    init_repo(path)
+    orig = subprocess.run(
+        ["git", "branch", "--show-current"], cwd=path, capture_output=True, text=True
+    ).stdout.strip()
+    base(path)
+    commit_all(path, "base")
+    subprocess.run(["git", "checkout", "-b", "feature"], cwd=path, check=True, capture_output=True)
+    theirs(path)
+    commit_all(path, "theirs")
+    subprocess.run(["git", "checkout", orig], cwd=path, check=True, capture_output=True)
+    ours(path)
+    commit_all(path, "ours")
+    subprocess.run(["git", "merge", "feature"], cwd=path, capture_output=True)
+
+
+def writer(name: str, text: str):
+    return lambda p: (p / name).write_text(text, encoding="utf-8")
+
+
+def byte_writer(name: str, data: bytes):
+    return lambda p: (p / name).write_bytes(data)
+
+
+def remover(name: str):
+    return lambda p: (p / name).unlink()
+
+
+def nothing(p: Path) -> None:
+    return None
+
+
+class TestConflictStages:
+    @pytest.mark.asyncio
+    async def test_both_modified_returns_all_three_stages(self, tmp_path):
+        make_conflict(
+            tmp_path,
+            writer("f.txt", "base\n"),
+            writer("f.txt", "ours\n"),
+            writer("f.txt", "theirs\n"),
+        )
+        r = await git_service.conflict_stages(str(tmp_path), "f.txt")
+        assert r["ok"] is True
+        assert (r["has_base"], r["has_ours"], r["has_theirs"]) == (True, True, True)
+        assert r["base"] == "base\n"
+        assert r["ours"] == "ours\n"
+        assert r["theirs"] == "theirs\n"
+        assert r["binary"] is False
+
+    @pytest.mark.asyncio
+    async def test_add_add_has_no_base(self, tmp_path):
+        # Both sides create the same new path: stage 1 does not exist, which is
+        # normal — not a read failure.
+        make_conflict(
+            tmp_path,
+            nothing,
+            writer("new.txt", "ours\n"),
+            writer("new.txt", "theirs\n"),
+        )
+        r = await git_service.conflict_stages(str(tmp_path), "new.txt")
+        assert r["ok"] is True
+        assert r["has_base"] is False
+        assert r["base"] == ""
+        assert (r["has_ours"], r["has_theirs"]) == (True, True)
+        assert r["ours"] == "ours\n"
+        assert r["theirs"] == "theirs\n"
+
+    @pytest.mark.asyncio
+    async def test_delete_modify_missing_theirs(self, tmp_path):
+        make_conflict(
+            tmp_path,
+            writer("f.txt", "base\n"),
+            writer("f.txt", "ours\n"),
+            remover("f.txt"),
+        )
+        r = await git_service.conflict_stages(str(tmp_path), "f.txt")
+        assert r["ok"] is True
+        assert (r["has_base"], r["has_ours"], r["has_theirs"]) == (True, True, False)
+        assert r["theirs"] == ""
+
+    @pytest.mark.asyncio
+    async def test_delete_modify_missing_ours(self, tmp_path):
+        make_conflict(
+            tmp_path,
+            writer("f.txt", "base\n"),
+            remover("f.txt"),
+            writer("f.txt", "theirs\n"),
+        )
+        r = await git_service.conflict_stages(str(tmp_path), "f.txt")
+        assert r["ok"] is True
+        assert (r["has_base"], r["has_ours"], r["has_theirs"]) == (True, False, True)
+        assert r["ours"] == ""
+
+    @pytest.mark.asyncio
+    async def test_path_with_space_and_non_ascii(self, tmp_path):
+        name = "測 試 檔案.txt"
+        make_conflict(
+            tmp_path,
+            writer(name, "base\n"),
+            writer(name, "ours\n"),
+            writer(name, "theirs\n"),
+        )
+        r = await git_service.conflict_stages(str(tmp_path), name)
+        assert r["ok"] is True
+        assert r["ours"] == "ours\n"
+        assert r["theirs"] == "theirs\n"
+
+    @pytest.mark.asyncio
+    async def test_binary_flagged_with_empty_content(self, tmp_path):
+        make_conflict(
+            tmp_path,
+            byte_writer("blob.bin", b"\x00\x01base"),
+            byte_writer("blob.bin", b"\x00\x01ours"),
+            byte_writer("blob.bin", b"\x00\x01theirs"),
+        )
+        r = await git_service.conflict_stages(str(tmp_path), "blob.bin")
+        assert r["ok"] is True
+        assert r["binary"] is True
+        assert (r["has_base"], r["has_ours"], r["has_theirs"]) == (True, True, True)
+        assert (r["base"], r["ours"], r["theirs"]) == ("", "", "")
+
+    @pytest.mark.asyncio
+    async def test_not_conflicted_reports_error(self, tmp_path):
+        init_repo(tmp_path)
+        r = await git_service.conflict_stages(str(tmp_path), "README.md")
+        assert r["ok"] is False
+        assert "not conflicted" in r["error"]
+        assert r["has_base"] is False
+
+    @pytest.mark.asyncio
+    async def test_missing_filepath(self, tmp_path):
+        init_repo(tmp_path)
+        r = await git_service.conflict_stages(str(tmp_path), "")
+        assert r["ok"] is False
+        assert "filepath" in r["error"]
+
+    @pytest.mark.asyncio
+    async def test_non_git_dir(self, tmp_path):
+        r = await git_service.conflict_stages(str(tmp_path), "f.txt")
+        assert r["ok"] is False
+        assert r["error"]
+
+
+class TestListConflicts:
+    @pytest.mark.asyncio
+    async def test_empty_outside_merge(self, tmp_path):
+        init_repo(tmp_path)
+        r = await git_service.list_conflicts(str(tmp_path))
+        assert r["ok"] is True
+        assert r["conflicts"] == []
+
+    @pytest.mark.asyncio
+    async def test_both_modified_kind(self, tmp_path):
+        make_conflict(
+            tmp_path,
+            writer("f.txt", "base\n"),
+            writer("f.txt", "ours\n"),
+            writer("f.txt", "theirs\n"),
+        )
+        r = await git_service.list_conflicts(str(tmp_path))
+        assert r["ok"] is True
+        assert r["conflicts"] == [{"path": "f.txt", "kind": "both-modified"}]
+
+    @pytest.mark.asyncio
+    async def test_both_added_kind(self, tmp_path):
+        make_conflict(tmp_path, nothing, writer("n.txt", "a\n"), writer("n.txt", "b\n"))
+        r = await git_service.list_conflicts(str(tmp_path))
+        assert r["conflicts"] == [{"path": "n.txt", "kind": "both-added"}]
+
+    @pytest.mark.asyncio
+    async def test_deleted_by_them_kind(self, tmp_path):
+        make_conflict(tmp_path, writer("f.txt", "b\n"), writer("f.txt", "o\n"), remover("f.txt"))
+        r = await git_service.list_conflicts(str(tmp_path))
+        assert r["conflicts"] == [{"path": "f.txt", "kind": "deleted-by-them"}]
+
+    @pytest.mark.asyncio
+    async def test_deleted_by_us_kind(self, tmp_path):
+        make_conflict(tmp_path, writer("f.txt", "b\n"), remover("f.txt"), writer("f.txt", "t\n"))
+        r = await git_service.list_conflicts(str(tmp_path))
+        assert r["conflicts"] == [{"path": "f.txt", "kind": "deleted-by-us"}]
+
+    @pytest.mark.asyncio
+    async def test_path_with_space_and_non_ascii(self, tmp_path):
+        name = "測 試 檔案.txt"
+        make_conflict(tmp_path, writer(name, "b\n"), writer(name, "o\n"), writer(name, "t\n"))
+        r = await git_service.list_conflicts(str(tmp_path))
+        assert r["conflicts"] == [{"path": name, "kind": "both-modified"}]
+
+    @pytest.mark.asyncio
+    async def test_binary_conflict_listed(self, tmp_path):
+        make_conflict(
+            tmp_path,
+            byte_writer("b.bin", b"\x00base"),
+            byte_writer("b.bin", b"\x00ours"),
+            byte_writer("b.bin", b"\x00theirs"),
+        )
+        r = await git_service.list_conflicts(str(tmp_path))
+        assert r["conflicts"] == [{"path": "b.bin", "kind": "both-modified"}]
+
+    @pytest.mark.asyncio
+    async def test_non_git_dir(self, tmp_path):
+        r = await git_service.list_conflicts(str(tmp_path))
+        assert r["ok"] is False
+        assert r["conflicts"] == []
+
+
+class TestMarkResolved:
+    @pytest.mark.asyncio
+    async def test_stages_hand_merged_content(self, tmp_path):
+        make_conflict(
+            tmp_path,
+            writer("f.txt", "base\n"),
+            writer("f.txt", "ours\n"),
+            writer("f.txt", "theirs\n"),
+        )
+        (tmp_path / "f.txt").write_text("merged by hand\n", encoding="utf-8")
+        r = await git_service.mark_resolved(str(tmp_path), "f.txt")
+        assert r["ok"] is True
+        # No longer unmerged, and the hand-written content was left alone.
+        listed = await git_service.list_conflicts(str(tmp_path))
+        assert listed["conflicts"] == []
+        assert (tmp_path / "f.txt").read_text() == "merged by hand\n"
+
+    @pytest.mark.asyncio
+    async def test_keeps_content_that_looks_like_a_marker(self, tmp_path):
+        # Deliberate non-check: text resembling a conflict marker may be exactly
+        # what the user meant to keep.
+        make_conflict(
+            tmp_path,
+            writer("f.txt", "base\n"),
+            writer("f.txt", "ours\n"),
+            writer("f.txt", "theirs\n"),
+        )
+        content = "<<<<<<< documented example\n=======\n>>>>>>> end\n"
+        (tmp_path / "f.txt").write_text(content, encoding="utf-8")
+        r = await git_service.mark_resolved(str(tmp_path), "f.txt")
+        assert r["ok"] is True
+        assert (tmp_path / "f.txt").read_text() == content
+
+    @pytest.mark.asyncio
+    async def test_path_with_space_and_non_ascii(self, tmp_path):
+        name = "測 試 檔案.txt"
+        make_conflict(tmp_path, writer(name, "b\n"), writer(name, "o\n"), writer(name, "t\n"))
+        (tmp_path / name).write_text("merged\n", encoding="utf-8")
+        r = await git_service.mark_resolved(str(tmp_path), name)
+        assert r["ok"] is True
+        listed = await git_service.list_conflicts(str(tmp_path))
+        assert listed["conflicts"] == []
+
+    @pytest.mark.asyncio
+    async def test_missing_filepath(self, tmp_path):
+        init_repo(tmp_path)
+        r = await git_service.mark_resolved(str(tmp_path), "")
+        assert r["ok"] is False
+        assert "filepath" in r["error"]
+
+    @pytest.mark.asyncio
+    async def test_unknown_path_fails(self, tmp_path):
+        init_repo(tmp_path)
+        r = await git_service.mark_resolved(str(tmp_path), "does-not-exist.txt")
+        assert r["ok"] is False
+        assert r["error"]
+
+
 # ── argument injection / input validation ─────────────────────────────────────
 
 class TestInputValidation:

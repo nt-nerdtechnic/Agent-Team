@@ -81,6 +81,9 @@ const GIT_METHODS = [
   'credential_cancel', 'discover_repositories', 'compare_branches', 'clean', 'discard',
   'stage', 'unstage', 'stage_all', 'commit', 'sync', 'init', 'generate_message',
   'check_staged', 'connect_to_remote', 'ignore', 'diff_all', 'reset',
+  // Three-way conflict surface: read the index's merge stages, enumerate
+  // unmerged paths, and stage a hand-merged file as resolved.
+  'conflict_stages', 'list_conflicts', 'mark_resolved',
 ] as const
 
 // issues.* WS types (uniform namespace) — the embedded GitPane's cloud-issues
@@ -273,10 +276,14 @@ export function useBackend(): {
   }
 
   // No lifecycle control from inside a plugin view — the host owns the backend.
+  // Resolving keeps callers that `await` these from hanging, but a silent
+  // resolve reads as success, so name the no-op where a caller can see it.
   function restart(): Promise<unknown> {
+    console.warn('[git-plugin] backend.restart() is a no-op — the host owns the backend lifecycle')
     return Promise.resolve()
   }
   function stop(): Promise<unknown> {
+    console.warn('[git-plugin] backend.stop() is a no-op — the host owns the backend lifecycle')
     return Promise.resolve()
   }
 

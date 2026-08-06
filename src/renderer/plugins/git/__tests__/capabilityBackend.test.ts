@@ -26,6 +26,15 @@ describe('TYPE_TO_CAP git surface', () => {
     })
   })
 
+  it('maps the three-way conflict calls (inverse of the host capabilityMap)', () => {
+    expect(resolveCapability('git.conflict_stages')).toEqual({
+      ns: 'git',
+      method: 'conflict_stages',
+    })
+    expect(resolveCapability('git.list_conflicts')).toEqual({ ns: 'git', method: 'list_conflicts' })
+    expect(resolveCapability('git.mark_resolved')).toEqual({ ns: 'git', method: 'mark_resolved' })
+  })
+
   it('maps the diff calls the shared DiffPane sends', () => {
     expect(resolveCapability('git.diff_file')).toEqual({ ns: 'git', method: 'diff_file' })
     expect(resolveCapability('git.apply_patch')).toEqual({ ns: 'git', method: 'apply_patch' })

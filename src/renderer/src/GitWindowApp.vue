@@ -21,8 +21,15 @@
 // colors map to semantic tokens so the five app themes translate the design.
 
 import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { useBackend } from './composables/useBackend'
-import { useGit, type GitFileEntry } from './composables/useGit'
+import {
+  useGit,
+  type BlameEntry,
+  type DiffBlameHunk,
+  type GitCommit,
+  type GitFileEntry
+} from './composables/useGit'
 import { useIssues } from './composables/useIssues'
 import { useNotify } from './composables/useNotify'
 import { useTheme } from './composables/useTheme'
@@ -32,14 +39,18 @@ import GitCredentialModal from './components/GitCredentialModal.vue'
 import NotificationHost from './components/NotificationHost.vue'
 import DiffPane from './editor/DiffPane.vue'
 import BranchDiffPane from './editor/BranchDiffPane.vue'
+// Hand-rolled three-way merge view (plain Vue, no Monaco — keeps it out of the
+// git plugin bundle); the same component the mini-IDE opens conflicts in.
+import ConflictPane from './editor/ConflictPane.vue'
 // Shared right-side CLI agent dock (rail toggle + resize + embedded PTY).
 import AiCliDock from './components/AiCliDock.vue'
-import { aiTerminalPaneId } from './lib/aiCliContext'
+import { aiTerminalPaneId, bracketedPaste } from './lib/aiCliContext'
 
 // The host sets ?workspace_path= when it loads this entry (frontendPluginManager
 // gitQuery). A getter is what useGit expects.
 const workspacePath = new URLSearchParams(window.location.search).get('workspace_path') ?? ''
 
+const { t } = useI18n()
 const backend = useBackend()
 // Hook the settings cache to the brokered ui.settings surface so theme changes
 // made in other windows arrive live (ui.settings_changed is ui-gated and the
@@ -76,10 +87,20 @@ const {
   logSearch,
   showCommit,
   commitFileDiff,
+  // per-file detail modes (blame / changed-line blame / file history)
+  blameFile,
+  diffBlame,
+  fileLog,
   fetchRemote,
   pullOnly,
   pushOnly,
   sync,
+  // toolbar "⋯" operations
+  pullRebase,
+  pushUpstream,
+  pushForce,
+  undoLastCommit,
+  cleanUntracked,
   cherryPick,
   revertCommit,
   checkoutCommit,
@@ -105,6 +126,8 @@ const {
   rebaseOn,
   switchBranch,
   deleteBranch,
+  mergeInto,
+  restoreFileFromBranch,
   checkoutRemoteBranch,
   stashPush,
   stashPop,
@@ -129,6 +152,11 @@ const {
   setGitConfig,
   // branch comparison (inline compare panel, GitPane parity)
   compareBranches,
+  // repository bootstrap (the non-repo empty state) + ignore
+  initRepo,
+  isInitializing,
+  cloneRepo,
+  addToGitignore,
   // askpass credential prompt
   credentialPrompt,
   showCredentialPrompt,
@@ -231,14 +259,16 @@ function showDiffTarget(params: Record<string, string>): void {
     staged: params['git_diff_staged'] === 'true',
     commit: params['git_diff_commit'] ?? '',
   }
+  resetDetailAux()
 }
 
 function clearExternalDiff(): void {
   externalDiff.value = null
+  resetDetailAux()
 }
 
 function toastResult(r: { ok: boolean; error?: string }, okMsg?: string): boolean {
-  if (!r.ok) notify.toast(r.error || 'Operation failed', { type: 'error' })
+  if (!r.ok) notify.toast(r.error || t('label.operation-failed'), { type: 'error' })
   else if (okMsg) notify.toast(okMsg, { type: 'success' })
   return r.ok
 }
@@ -247,17 +277,27 @@ function toastResult(r: { ok: boolean; error?: string }, okMsg?: string): boolea
 interface MenuItem {
   label: string
   danger?: boolean
+  /** Draw a hairline above this item (groups the destructive tail). */
+  separator?: boolean
+  /** Inert row — used for the "…more" overflow hint. */
+  disabled?: boolean
   action: () => void
 }
 const menu = ref<{ x: number; y: number; items: MenuItem[] } | null>(null)
 
-function openMenu(e: MouseEvent, items: MenuItem[]): void {
-  const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
+/** Place a menu at viewport coordinates. Two-level flows (pick an action, then
+ *  pick a branch) reopen at the same spot by passing the coordinates again. */
+function openMenuAt(x: number, y: number, items: MenuItem[]): void {
   menu.value = {
-    x: Math.min(r.left, window.innerWidth - 208),
-    y: Math.min(r.bottom + 4, window.innerHeight - items.length * 30 - 16),
+    x: Math.min(x, window.innerWidth - 208),
+    y: Math.min(y, window.innerHeight - items.length * 30 - 16),
     items
   }
+}
+
+function openMenu(e: MouseEvent, items: MenuItem[]): void {
+  const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
+  openMenuAt(r.left, r.bottom + 4, items)
 }
 function runMenuItem(item: MenuItem): void {
   menu.value = null
@@ -276,16 +316,18 @@ async function openInEditor(filepath: string): Promise<void> {
     workspace_path: workspacePath,
     filepath
   })
-  if (!resp.ok) notify.toast(resp.error?.message || 'Could not open the editor', { type: 'error' })
+  if (!resp.ok)
+    notify.toast(resp.error?.message || t('label.could-not-open-editor'), { type: 'error' })
 }
 async function openExternal(url: string): Promise<void> {
   if (!url) return
   const resp = await backend.send('ui.open_external', { url })
-  if (!resp.ok) notify.toast(resp.error?.message || 'Could not open the URL', { type: 'error' })
+  if (!resp.ok) notify.toast(resp.error?.message || t('label.could-not-open-url'), { type: 'error' })
 }
 async function revealPath(path: string): Promise<void> {
   const resp = await backend.send('ui.reveal_path', { path })
-  if (!resp.ok) notify.toast(resp.error?.message || 'Could not reveal the path', { type: 'error' })
+  if (!resp.ok)
+    notify.toast(resp.error?.message || t('label.could-not-reveal-path'), { type: 'error' })
 }
 async function pickFolder(defaultPath?: string): Promise<string | null> {
   const resp = await backend.send<{ ok: boolean; path: string | null }>('ui.pick_folder', {
@@ -295,7 +337,8 @@ async function pickFolder(defaultPath?: string): Promise<string | null> {
 }
 async function onOpenWorktree(path: string): Promise<void> {
   const resp = await backend.send('ui.open_workspace', { workspace_path: path })
-  if (!resp.ok) notify.toast(resp.error?.message || 'Could not open the workspace', { type: 'error' })
+  if (!resp.ok)
+    notify.toast(resp.error?.message || t('label.could-not-open-workspace'), { type: 'error' })
 }
 
 // ── AI CLI dock (embedded PTY agent panel) ───────────────────────────────────
@@ -334,6 +377,165 @@ function buildGitContext(): string {
   return lines.join('\n')
 }
 
+// ── Resolve with agent (hand a conflicted file to the CLI dock) ──────────────
+// The dock's `buildContext` pipeline runs on a FRESH spawn only, and its
+// injectNow() re-injects that same buildContext — neither can carry a
+// per-file prompt. So the prompt goes in through the dock's exposed
+// pasteText() wrapped in the very envelope the dock uses internally: one
+// bracketed paste, then a submitting CR after the CLI has ingested it.
+const aiDockRef = ref<InstanceType<typeof AiCliDock> | null>(null)
+const aiDockOpen = ref(false)
+
+/** Caps on quoting the whole conflicted file: past either one the CLI would be
+ *  buried in a paste it has to scroll past before reading anything useful, so
+ *  only the conflict regions are quoted and the agent is told to open the file
+ *  itself. */
+const CONFLICT_PROMPT_MAX_LINES = 400
+const CONFLICT_PROMPT_MAX_CHARS = 16000
+/** Lines quoted around each conflict block in that excerpt mode. */
+const CONFLICT_EXCERPT_CONTEXT = 6
+
+/** 1-based inclusive line ranges of the `<<<<<<<` … `>>>>>>>` blocks.
+ *  Deliberately a line scan, not a parser: excerpting needs line numbers only,
+ *  and the sides themselves are quoted verbatim for the agent to read. */
+function conflictBlockRanges(lines: string[]): { start: number; end: number }[] {
+  const ranges: { start: number; end: number }[] = []
+  let open = -1
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? ''
+    if (line.startsWith('<<<<<<<')) open = i
+    else if (line.startsWith('>>>>>>>') && open >= 0) {
+      ranges.push({ start: open + 1, end: i + 1 })
+      open = -1
+    }
+  }
+  return ranges
+}
+
+/** Pad each block with context lines and merge the ones that then touch, so
+ *  neighbouring conflicts are quoted once instead of twice. */
+function excerptRanges(
+  blocks: { start: number; end: number }[],
+  totalLines: number
+): { start: number; end: number }[] {
+  const merged: { start: number; end: number }[] = []
+  for (const b of blocks) {
+    const start = Math.max(1, b.start - CONFLICT_EXCERPT_CONTEXT)
+    const end = Math.min(totalLines, b.end + CONFLICT_EXCERPT_CONTEXT)
+    const last = merged[merged.length - 1]
+    if (last && start <= last.end + 1) last.end = Math.max(last.end, end)
+    else merged.push({ start, end })
+  }
+  return merged
+}
+
+/** The instruction handed to the CLI agent. English on purpose: it is a prompt
+ *  for the CLI, not UI copy (same rule as buildGitContext). */
+function buildConflictPrompt(relPath: string, content: string): string {
+  const lines = content.split('\n')
+  const blocks = conflictBlockRanges(lines)
+  const op = opInProgress.value
+  const out = [
+    'Resolve a git merge conflict for me.',
+    '',
+    `Repository: ${workspacePath}`,
+    `File: ${relPath} (absolute path: ${absPath(relPath)})`,
+    ...(op ? [`Operation in progress: ${op}`] : []),
+    `Conflict blocks in this file: ${blocks.length}`,
+    '',
+    'What to do:',
+    '1. Read both sides of every conflict block: "ours" is between <<<<<<< and' +
+      ' =======, "theirs" is between ======= and >>>>>>>.',
+    '2. Work out what each side is trying to do, then edit the file in place so' +
+      ' the result keeps both intents wherever they are compatible.',
+    '3. Remove every conflict marker line (<<<<<<<, |||||||, =======, >>>>>>>).',
+    '4. Do not stage and do not commit — I review the result and commit from' +
+      " Navide's Git window.",
+    '5. If a block is genuinely ambiguous, stop and explain the options instead' +
+      ' of guessing.',
+    ''
+  ]
+  if (lines.length <= CONFLICT_PROMPT_MAX_LINES && content.length <= CONFLICT_PROMPT_MAX_CHARS) {
+    out.push(`Full content of ${relPath}:`, '', content)
+    return out.join('\n')
+  }
+  out.push(
+    `The file is large (${lines.length} lines, ${content.length} characters), so` +
+      ` only the conflict regions are quoted below, with ${CONFLICT_EXCERPT_CONTEXT}` +
+      ' lines of context around each one. This is an excerpt — read the complete' +
+      ` file at ${absPath(relPath)} before editing it.`,
+    ''
+  )
+  if (!blocks.length) {
+    out.push('(No conflict markers found — check whether the file is already resolved.)')
+    return out.join('\n')
+  }
+  for (const r of excerptRanges(blocks, lines.length)) {
+    out.push(`--- ${relPath} lines ${r.start}-${r.end} ---`, ...lines.slice(r.start - 1, r.end), '')
+  }
+  return out.join('\n')
+}
+
+// A fresh spawn injects the dock's own git context first, after 2000 ms of CLI
+// silence (AiCliDock injectQuietMs). Requiring a strictly longer quiet window
+// here keeps this prompt behind that injection instead of interleaving with
+// it: the context paste is itself PTY activity, so it restarts this wait.
+const AGENT_PROMPT_QUIET_MS = 3500
+const AGENT_PROMPT_TIMEOUT_MS = 25000
+
+type DockTerminal = { status: string; lastRawActivityAt: number } | null
+
+async function waitForCliQuiet(term: () => DockTerminal): Promise<void> {
+  const deadline = Date.now() + AGENT_PROMPT_TIMEOUT_MS
+  for (;;) {
+    const t = term()
+    if (!t || t.status !== 'running') return
+    const last = t.lastRawActivityAt
+    if ((last > 0 && Date.now() - last >= AGENT_PROMPT_QUIET_MS) || Date.now() >= deadline) return
+    await new Promise((r) => setTimeout(r, 250))
+  }
+}
+
+async function sendPromptToAgent(prompt: string): Promise<{ ok: boolean; error?: string }> {
+  const dock = aiDockRef.value
+  if (!dock) return { ok: false, error: t('label.resolve-agent-unavailable') }
+  const term = (): DockTerminal => (dock.terminal as unknown as DockTerminal) ?? null
+  if (term()?.status !== 'running') {
+    await dock.start()
+    if (term()?.status !== 'running') return { ok: false, error: t('label.resolve-agent-start-failed') }
+    await waitForCliQuiet(term)
+    if (term()?.status !== 'running') return { ok: false, error: t('label.resolve-agent-start-failed') }
+  }
+  dock.pasteText(bracketedPaste(prompt))
+  // Let the CLI ingest the paste before the submitting CR (the dock's own
+  // context injection uses the same 300 ms gap).
+  await new Promise((r) => setTimeout(r, 300))
+  dock.pasteText('\r')
+  return { ok: true }
+}
+
+/** Read the conflicted file, build the prompt, and hand it to the CLI dock —
+ *  opening the panel so the user sees the agent working. The agent's edits
+ *  arrive back through the existing git.changed refresh; nothing to wire here. */
+async function onResolveWithAgent(path: string): Promise<void> {
+  const resp = await backend.send<{ ok: boolean; content: string; error?: string }>('fs.read_file', {
+    workspace_path: workspacePath,
+    rel_path: path
+  })
+  if (!resp.ok || !resp.payload?.ok || typeof resp.payload.content !== 'string') {
+    const detail = resp.payload?.error || resp.error?.message
+    notify.toast(detail || t('label.resolve-agent-read-failed', { path }), { type: 'error' })
+    return
+  }
+  aiDockOpen.value = true
+  const sent = await sendPromptToAgent(buildConflictPrompt(path, resp.payload.content))
+  if (!sent.ok) {
+    notify.toast(sent.error || t('label.operation-failed'), { type: 'error' })
+    return
+  }
+  notify.toast(t('label.resolve-agent-sent', { path }), { type: 'success' })
+}
+
 // ── The file card: checkbox IS the stage state ───────────────────────────────
 function isConflictEntry(f: GitFileEntry): boolean {
   return f.status === 'U'
@@ -348,13 +550,13 @@ const untrackedFiles = computed(() => gitStatus.value.untracked)
 const opInProgress = computed(() => gitStatus.value.operation_in_progress)
 
 function fileTag(f: GitFileEntry, untracked = false): { label: string; cls: string } {
-  if (untracked) return { label: 'new', cls: 'q' }
+  if (untracked) return { label: t('label.tag-new'), cls: 'q' }
   const c = f.status[0]
-  if (c === 'A') return { label: 'added', cls: 'a' }
-  if (c === 'D') return { label: 'deleted', cls: 'd' }
-  if (c === 'R') return { label: 'renamed', cls: 'm' }
-  if (c === 'U') return { label: 'conflict', cls: 'u' }
-  return { label: 'modified', cls: 'm' }
+  if (c === 'A') return { label: t('label.tag-added'), cls: 'a' }
+  if (c === 'D') return { label: t('label.tag-deleted'), cls: 'd' }
+  if (c === 'R') return { label: t('label.tag-renamed'), cls: 'm' }
+  if (c === 'U') return { label: t('label.tag-conflict'), cls: 'u' }
+  return { label: t('label.tag-modified'), cls: 'm' }
 }
 function splitPath(path: string): { dir: string; base: string } {
   const i = path.lastIndexOf('/')
@@ -386,9 +588,9 @@ async function onUnstageAll(): Promise<void> {
   toastResult(await unstageFiles(paths))
 }
 async function onDiscard(f: GitFileEntry): Promise<void> {
-  const ok = await notify.confirm(`Discard changes in ${f.path}? This cannot be undone.`, {
-    title: 'Discard changes',
-    confirmText: 'Discard'
+  const ok = await notify.confirm(t('label.discard-file-confirm', { path: f.path }), {
+    title: t('label.discard-changes-title'),
+    confirmText: t('action.discard')
   })
   if (!ok) return
   await discardFile(f.path)
@@ -402,17 +604,240 @@ async function onResolveTheirs(path: string): Promise<void> {
 async function onAbortOperation(): Promise<void> {
   const op = opInProgress.value
   if (!op) return
-  const ok = await notify.confirm(`Abort the in-progress ${op}?`, {
-    title: 'Abort',
-    confirmText: 'Abort'
+  const ok = await notify.confirm(t('label.abort-op-confirm', { op }), {
+    title: t('action.abort'),
+    confirmText: t('action.abort')
   })
   if (!ok) return
   toastResult(await abortOperation(op))
 }
 
-/** A file row click shows its working-tree/staged diff in the bottom detail. */
-function showWorkingDiff(path: string, staged: boolean): void {
+/** A file row click shows its working-tree/staged diff in the bottom detail.
+ *  The context menu reuses it with a mode so "Blame"/"View history" open the
+ *  same detail panel already switched to that reading. */
+function showWorkingDiff(path: string, staged: boolean, mode: DetailMode = 'diff'): void {
   externalDiff.value = { name: path, staged, commit: '' }
+  resetDetailAux()
+  if (mode !== 'diff') void setDetailMode(mode)
+}
+
+// ── File row context menu ────────────────────────────────────────────────────
+// Only the second-level branch list is capped: a repo with dozens of branches
+// would otherwise render a menu taller than the window (the popover does not
+// scroll). The overflow row is inert rather than paging, because restoring a
+// file from an old branch is rare enough that the branch card is the better
+// path when the shortlist misses.
+const RESTORE_BRANCH_MAX = 12
+
+function openFileCtxMenu(e: MouseEvent, f: GitFileEntry, staged = false, untracked = false): void {
+  const { clientX: x, clientY: y } = e
+  const items: MenuItem[] = [
+    { label: t('action.open-in-editor'), action: () => void openInEditor(f.path) },
+    { label: t('action.view-history'), action: () => showWorkingDiff(f.path, staged, 'history') },
+    { label: t('label.blame'), action: () => showWorkingDiff(f.path, staged, 'blame') },
+    { label: t('action.restore-from-branch-menu'), action: () => openRestoreBranchMenu(x, y, f.path) }
+  ]
+  if (untracked) {
+    items.push({ label: t('action.add-to-gitignore'), action: () => void onAddToGitignore(f.path) })
+  }
+  if (isConflictEntry(f)) {
+    items.unshift({
+      label: t('action.resolve-with-agent'),
+      action: () => void onResolveWithAgent(f.path)
+    })
+  }
+  openMenuAt(x, y, items)
+}
+
+/** Second level of the file menu: reopened at the same coordinates. */
+function openRestoreBranchMenu(x: number, y: number, path: string): void {
+  const names = localBranches.value
+    .map((b) => b.name)
+    .filter((n) => n !== gitStatus.value.branch)
+  if (!names.length) {
+    notify.toast(t('label.no-other-branch'), { type: 'error' })
+    return
+  }
+  const items: MenuItem[] = names.slice(0, RESTORE_BRANCH_MAX).map((n) => ({
+    label: n,
+    action: () => void onRestoreFromBranch(n, path)
+  }))
+  const hidden = names.length - items.length
+  if (hidden > 0) {
+    items.push({
+      label:
+        hidden === 1
+          ? t('label.more-branches-one', { count: hidden })
+          : t('label.more-branches-many', { count: hidden }),
+      disabled: true,
+      action: () => {}
+    })
+  }
+  openMenuAt(x, y, items)
+}
+
+async function onRestoreFromBranch(branch: string, path: string): Promise<void> {
+  const ok = await notify.confirm(t('label.restore-file-confirm', { path, branch }), {
+    title: t('label.restore-file-title'),
+    confirmText: t('action.restore-file')
+  })
+  if (!ok) return
+  if (
+    toastResult(
+      await restoreFileFromBranch(branch, path),
+      t('label.restored-file', { path, branch })
+    )
+  ) {
+    await refreshAll()
+  }
+}
+
+async function onAddToGitignore(path: string): Promise<void> {
+  const r = await addToGitignore(path)
+  if (!r.ok) {
+    toastResult(r)
+    return
+  }
+  notify.toast(
+    t('label.added-to-ignore-file', { path, file: r.target_file || '.gitignore' }),
+    { type: 'success' }
+  )
+  await refreshAll()
+}
+
+// ── Detail panel: Diff / Blame / History / Conflict ──────────────────────────
+type DetailMode = 'diff' | 'blame' | 'history' | 'conflict'
+const detailMode = ref<DetailMode>('diff')
+/** The detail's file is still an unmerged path. Drives both the Conflict mode
+ *  being offered at all and ConflictPane's `mergeAborted` guard: `git status`
+ *  is re-read on every git.changed broadcast, so a `merge --abort` run in
+ *  another window takes the panel out of service instead of letting the user
+ *  keep resolving a merge that no longer exists. */
+const detailIsConflict = computed(() => {
+  const target = externalDiff.value
+  return !!target && conflictFiles.value.some((f) => f.path === target.name)
+})
+const detailModes = computed<readonly DetailMode[]>(() =>
+  detailIsConflict.value
+    ? (['diff', 'blame', 'history', 'conflict'] as const)
+    : (['diff', 'blame', 'history'] as const)
+)
+// Blame: whole file (blameFile) or only the changed lines (diffBlame).
+const blameChangedOnly = ref(false)
+const blameEntries = ref<BlameEntry[]>([])
+const blameHunks = ref<DiffBlameHunk[]>([])
+const blameLoading = ref(false)
+const blameMessage = ref('')
+// History: this file's commits, plus the diff of the selected one.
+const fileHistory = ref<GitCommit[]>([])
+const historyLoading = ref(false)
+const historyMessage = ref('')
+const historyCommit = ref('')
+const historyHunks = ref<DiffBlameHunk[]>([])
+const historyDiffLoading = ref(false)
+
+/** Switching files drops every mode's cache — the panes are per-file. */
+function resetDetailAux(): void {
+  detailMode.value = 'diff'
+  blameChangedOnly.value = false
+  blameEntries.value = []
+  blameHunks.value = []
+  blameLoading.value = false
+  blameMessage.value = ''
+  fileHistory.value = []
+  historyLoading.value = false
+  historyMessage.value = ''
+  historyCommit.value = ''
+  historyHunks.value = []
+  historyDiffLoading.value = false
+}
+
+async function setDetailMode(mode: DetailMode): Promise<void> {
+  detailMode.value = mode
+  if (mode === 'blame') await loadBlame()
+  else if (mode === 'history') await loadFileHistory()
+}
+
+function detailModeLabel(mode: DetailMode): string {
+  if (mode === 'blame') return t('label.blame')
+  if (mode === 'history') return t('label.history')
+  if (mode === 'conflict') return t('label.conflict-mode')
+  return t('label.diff')
+}
+
+/** ConflictPane resolved the file: back to the diff of what was just staged. */
+async function onConflictResolved(): Promise<void> {
+  detailMode.value = 'diff'
+  await refreshAll()
+}
+
+async function loadBlame(): Promise<void> {
+  const target = externalDiff.value
+  if (!target) return
+  blameLoading.value = true
+  blameMessage.value = ''
+  blameEntries.value = []
+  blameHunks.value = []
+  try {
+    if (blameChangedOnly.value) {
+      const hunks = await diffBlame(target.name, target.staged)
+      if (externalDiff.value?.name !== target.name) return
+      blameHunks.value = hunks
+      if (!hunks.length) blameMessage.value = t('label.no-changed-lines')
+    } else {
+      const entries = await blameFile(target.name)
+      if (externalDiff.value?.name !== target.name) return
+      blameEntries.value = entries
+      if (!entries.length) blameMessage.value = t('label.no-blame-info')
+    }
+  } finally {
+    blameLoading.value = false
+  }
+}
+
+const FILE_LOG_LIMIT = 30
+
+async function loadFileHistory(): Promise<void> {
+  const target = externalDiff.value
+  if (!target) return
+  historyLoading.value = true
+  historyMessage.value = ''
+  fileHistory.value = []
+  historyCommit.value = ''
+  historyHunks.value = []
+  try {
+    const commits = await fileLog(target.name, FILE_LOG_LIMIT)
+    if (externalDiff.value?.name !== target.name) return
+    fileHistory.value = commits
+    if (!commits.length) historyMessage.value = t('label.no-file-history')
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+/** Same shape GitHistoryModal uses: commitFileDiff → DiffBlameHunk[] rendered
+ *  inline (a second click on the same commit collapses it). */
+async function selectHistoryCommit(hash: string): Promise<void> {
+  const target = externalDiff.value
+  if (!target) return
+  if (historyCommit.value === hash) {
+    historyCommit.value = ''
+    historyHunks.value = []
+    return
+  }
+  historyCommit.value = hash
+  historyHunks.value = []
+  historyDiffLoading.value = true
+  try {
+    const hunks = await commitFileDiff(hash, target.name)
+    if (historyCommit.value === hash) historyHunks.value = hunks
+  } finally {
+    historyDiffLoading.value = false
+  }
+}
+
+function hunkLineClass(kind: ' ' | '-' | '+'): string {
+  return kind === '+' ? 'db-add' : kind === '-' ? 'db-del' : 'db-ctx'
 }
 
 // ── Commit composer ──────────────────────────────────────────────────────────
@@ -427,20 +852,21 @@ const canCommit = computed(
 async function onCommit(): Promise<void> {
   if (!canCommit.value) return
   const r = await commit(commitMessage.value.trim())
-  if (toastResult(r, 'Committed')) {
+  if (toastResult(r, t('label.committed'))) {
     commitMessage.value = ''
     await refreshAll()
   }
 }
 async function onAmend(): Promise<void> {
   const ok = await notify.confirm(
-    'Amend the last commit with the staged changes' +
-      (commitMessage.value.trim() ? ' and the new message?' : ' (keeping its message)?'),
-    { title: 'Amend', confirmText: 'Amend' }
+    commitMessage.value.trim()
+      ? t('label.amend-confirm-with-message')
+      : t('label.amend-confirm-keep-message'),
+    { title: t('action.amend'), confirmText: t('action.amend') }
   )
   if (!ok) return
   const r = await amendCommit(commitMessage.value.trim())
-  if (toastResult(r, 'Amended')) {
+  if (toastResult(r, t('label.amended'))) {
     commitMessage.value = ''
     await refreshAll()
   }
@@ -449,7 +875,7 @@ async function onGenerateMessage(): Promise<void> {
   const model = analyzerModel.value || 'qwen2:latest'
   const r = await generateMessage(model)
   if (r.ok) commitMessage.value = r.message
-  else notify.toast(r.error || 'Message generation failed', { type: 'error' })
+  else notify.toast(r.error || t('label.message-generation-failed'), { type: 'error' })
 }
 
 // ── Sidebar cards (aligned 1:1 with GitPane's sections) ──────────────────────
@@ -474,7 +900,7 @@ async function onSwitchBranch(name: string): Promise<void> {
   if (name === gitStatus.value.branch) return
   branchOpError.value = ''
   const r = await switchBranch(name)
-  if (!r.ok) branchOpError.value = r.error || 'switch failed'
+  if (!r.ok) branchOpError.value = r.error || t('label.switch-failed')
 }
 async function doCreateBranch(): Promise<void> {
   const name = newBranchName.value.trim()
@@ -482,7 +908,7 @@ async function doCreateBranch(): Promise<void> {
   branchOpError.value = ''
   const r = await createBranch(name)
   if (r.ok) newBranchName.value = ''
-  else branchOpError.value = r.error || 'create failed'
+  else branchOpError.value = r.error || t('label.create-failed')
 }
 async function doCompareBranch(name: string): Promise<void> {
   if (comparingBranch.value === name) {
@@ -493,29 +919,67 @@ async function doCompareBranch(name: string): Promise<void> {
   comparingBranch.value = name
   const r = await compareBranches(name, gitStatus.value.branch)
   compareResult.value = r.ok ? { stat: r.stat, files: r.files } : null
-  if (!r.ok) branchOpError.value = r.error || 'compare failed'
+  if (!r.ok) branchOpError.value = r.error || t('label.compare-failed')
 }
 async function doMergeIntoCurrent(name: string): Promise<void> {
   branchOpError.value = ''
   const r = await mergeBranch(name)
-  if (!r.ok) branchOpError.value = r.error || 'merge failed'
+  if (!r.ok) branchOpError.value = r.error || t('label.merge-failed')
 }
 async function doRebaseOnto(name: string): Promise<void> {
   branchOpError.value = ''
   const r = await rebaseOn(name)
-  if (!r.ok) branchOpError.value = r.error || 'rebase failed'
+  if (!r.ok) branchOpError.value = r.error || t('label.rebase-failed')
 }
+/** Merge the current branch INTO another one (git.merge_into: checkout target,
+ *  merge, come back) — the mirror of the row's ⤵ "merge into current". */
+async function doMergeCurrentInto(name: string): Promise<void> {
+  const current = gitStatus.value.branch
+  const ok = await notify.confirm(
+    t('label.merge-current-into-confirm', {
+      branch: current || t('label.the-current-branch'),
+      target: name
+    }),
+    { title: t('action.merge'), confirmText: t('action.merge') }
+  )
+  if (!ok) return
+  const r = await mergeInto(name)
+  if (!r.ok) {
+    toastResult(r)
+    return
+  }
+  const conflicts = r.conflict_files?.length ?? 0
+  if (conflicts) {
+    notify.toast(
+      conflicts === 1
+        ? t('label.merged-with-conflicts-one', { branch: name, count: conflicts })
+        : t('label.merged-with-conflicts-many', { branch: name, count: conflicts }),
+      { type: 'error' }
+    )
+  } else {
+    notify.toast(t('label.merged-into', { branch: name }), { type: 'success' })
+  }
+  await refreshAll()
+}
+
 // GitPane deletes branches from a right-click context menu — same here.
 function openBranchCtxMenu(e: MouseEvent, name: string): void {
   openMenu(e, [
     {
-      label: 'Delete branch…',
+      label: t('action.merge-current-into-branch', { branch: name }),
+      action: () => void doMergeCurrentInto(name)
+    },
+    {
+      label: t('action.delete-branch-menu'),
       danger: true,
       action: () =>
         void notify
-          .confirm(`Delete branch ${name}?`, { title: 'Delete branch', confirmText: 'Delete' })
+          .confirm(t('label.delete-branch-confirm', { name }), {
+            title: t('label.delete-branch-title'),
+            confirmText: t('action.delete')
+          })
           .then(async (ok) => {
-            if (ok) toastResult(await deleteBranch(name), `Deleted ${name}`)
+            if (ok) toastResult(await deleteBranch(name), t('label.deleted-name', { name }))
           })
     }
   ])
@@ -523,14 +987,16 @@ function openBranchCtxMenu(e: MouseEvent, name: string): void {
 async function onCheckoutRemoteBranch(ref: string): Promise<void> {
   branchOpError.value = ''
   const r = await checkoutRemoteBranch(ref)
-  if (!r.ok) branchOpError.value = r.error || 'checkout failed'
+  if (!r.ok) branchOpError.value = r.error || t('label.checkout-failed')
 }
 
 // ── Stashes ──────────────────────────────────────────────────────────────────
 async function onStashPush(): Promise<void> {
-  const msg = await notify.prompt('Stash message (optional)', { title: 'Stash changes' })
+  const msg = await notify.prompt(t('label.stash-message-optional'), {
+    title: t('label.stash-changes-title')
+  })
   if (msg === null) return
-  toastResult(await stashPush(msg.trim()), 'Stashed')
+  toastResult(await stashPush(msg.trim()), t('label.stashed'))
 }
 async function onStashApply(index: number): Promise<void> {
   toastResult(await stashApply(index))
@@ -539,9 +1005,9 @@ async function onStashPop(index: number): Promise<void> {
   toastResult(await stashPop(index))
 }
 async function onStashDrop(index: number): Promise<void> {
-  const ok = await notify.confirm('Drop this stash? Its changes are lost.', {
-    title: 'Drop stash',
-    confirmText: 'Drop'
+  const ok = await notify.confirm(t('label.drop-stash-confirm'), {
+    title: t('label.drop-stash-title'),
+    confirmText: t('action.drop')
   })
   if (!ok) return
   toastResult(await stashDrop(index))
@@ -555,15 +1021,15 @@ async function doAddRemote(): Promise<void> {
   const name = newRemoteName.value.trim()
   const url = newRemoteUrl.value.trim()
   if (!name || !url) return
-  if (toastResult(await addRemote(name, url), `Added ${name}`)) {
+  if (toastResult(await addRemote(name, url), t('label.added-name', { name }))) {
     newRemoteName.value = ''
     newRemoteUrl.value = ''
   }
 }
 async function onRemoveRemote(name: string): Promise<void> {
-  const ok = await notify.confirm(`Remove remote ${name}?`, {
-    title: 'Remove remote',
-    confirmText: 'Remove'
+  const ok = await notify.confirm(t('label.remove-remote-confirm', { name }), {
+    title: t('action.remove-remote'),
+    confirmText: t('action.remove')
   })
   if (!ok) return
   toastResult(await removeRemote(name))
@@ -576,15 +1042,20 @@ const newTagMessage = ref('')
 async function doCreateTag(): Promise<void> {
   const name = newTagName.value.trim()
   if (!name) return
-  if (toastResult(await createTag(name, newTagMessage.value.trim()), `Tagged ${name}`)) {
+  if (
+    toastResult(
+      await createTag(name, newTagMessage.value.trim()),
+      t('label.tagged-name', { name })
+    )
+  ) {
     newTagName.value = ''
     newTagMessage.value = ''
   }
 }
 async function onDeleteTag(name: string): Promise<void> {
-  const ok = await notify.confirm(`Delete tag ${name}?`, {
-    title: 'Delete tag',
-    confirmText: 'Delete'
+  const ok = await notify.confirm(t('label.delete-tag-confirm', { name }), {
+    title: t('action.delete-tag'),
+    confirmText: t('action.delete')
   })
   if (!ok) return
   toastResult(await deleteTag(name))
@@ -602,7 +1073,9 @@ async function doAddWorktree(): Promise<void> {
   const path = newWtPath.value.trim()
   const branch = newWtBranch.value.trim()
   if (!path || !branch) return
-  if (toastResult(await addWorktree(path, branch, newWtIsNew.value), 'Worktree added')) {
+  if (
+    toastResult(await addWorktree(path, branch, newWtIsNew.value), t('label.worktree-added'))
+  ) {
     newWtPath.value = ''
     newWtBranch.value = ''
   }
@@ -613,18 +1086,21 @@ async function pickWorktreeDir(): Promise<void> {
   if (picked) newWtPath.value = picked
 }
 async function onRemoveWorktree(path: string): Promise<void> {
-  const ok = await notify.confirm(`Remove worktree at ${path}?`, {
-    title: 'Remove worktree',
-    confirmText: 'Remove'
+  const ok = await notify.confirm(t('label.remove-worktree-at-confirm', { path }), {
+    title: t('action.remove-worktree'),
+    confirmText: t('action.remove')
   })
   if (!ok) return
   const r = await removeWorktree(path)
   if (!r.ok) {
     // A dirty/locked worktree fails a plain remove — offer --force (GitPane).
-    const forced = await notify.confirm(`${r.error || 'Remove failed'} — force remove?`, {
-      title: 'Remove worktree',
-      confirmText: 'Force remove'
-    })
+    const forced = await notify.confirm(
+      t('label.force-remove-confirm', { error: r.error || t('label.worktree-remove-failed') }),
+      {
+        title: t('action.remove-worktree'),
+        confirmText: t('action.force-remove-worktree')
+      }
+    )
     if (forced) toastResult(await removeWorktree(path, true))
   }
   await loadWorktrees()
@@ -636,15 +1112,15 @@ async function onToggleWorktreeLock(wt: { path: string; locked: boolean }): Prom
 async function onMoveWorktree(path: string): Promise<void> {
   const dest = await pickFolder(path)
   if (!dest) return
-  toastResult(await moveWorktree(path, dest), 'Worktree moved')
+  toastResult(await moveWorktree(path, dest), t('label.worktree-moved'))
   await loadWorktrees()
 }
 async function onPruneWorktrees(): Promise<void> {
-  toastResult(await pruneWorktrees(), 'Pruned')
+  toastResult(await pruneWorktrees(), t('label.pruned'))
   await loadWorktrees()
 }
 async function onRepairWorktrees(): Promise<void> {
-  toastResult(await repairWorktrees(), 'Repaired')
+  toastResult(await repairWorktrees(), t('label.repaired'))
   await loadWorktrees()
 }
 
@@ -680,7 +1156,7 @@ async function saveInlineEdit(): Promise<void> {
   const key = inlineEditKey.value
   if (!key) return
   const r = await setGitConfig(key, inlineEditValue.value)
-  if (!r.ok) configError.value = r.error || 'failed'
+  if (!r.ok) configError.value = r.error || t('label.failed')
   else cancelInlineEdit()
 }
 
@@ -765,12 +1241,170 @@ async function onSync(): Promise<void> {
   await refreshAll()
 }
 
+// ── Toolbar "⋯" menu (the less-used / destructive remote operations) ─────────
+const isRunningExtra = ref(false)
+
+async function runExtraOp(
+  op: () => Promise<{ ok: boolean; error?: string }>,
+  okMsg: string
+): Promise<void> {
+  isRunningExtra.value = true
+  try {
+    if (toastResult(await op(), okMsg)) await refreshAll()
+  } finally {
+    isRunningExtra.value = false
+  }
+}
+
+async function onForcePush(): Promise<void> {
+  const ok = await notify.confirm(t('label.force-push-confirm'), {
+    title: t('action.force-push'),
+    confirmText: t('action.force-push')
+  })
+  if (!ok) return
+  await runExtraOp(() => pushForce(), t('label.force-pushed'))
+}
+
+async function onUndoLastCommit(): Promise<void> {
+  const ok = await notify.confirm(t('label.undo-last-commit-confirm'), {
+    title: t('label.undo-last-commit-title'),
+    confirmText: t('action.undo-commit')
+  })
+  if (!ok) return
+  await runExtraOp(() => undoLastCommit(), t('label.last-commit-undone'))
+}
+
+/** Two-stage clean: a dry run names the victims, and only a confirmation on
+ *  that exact list runs the real (irreversible) delete. */
+const CLEAN_PREVIEW_MAX = 10
+
+async function onCleanUntracked(): Promise<void> {
+  isRunningExtra.value = true
+  let preview: { ok: boolean; files: string[]; error?: string }
+  try {
+    preview = await cleanUntracked(true)
+  } finally {
+    isRunningExtra.value = false
+  }
+  if (!preview.ok) {
+    toastResult(preview)
+    return
+  }
+  if (!preview.files.length) {
+    notify.toast(t('label.nothing-to-clean'))
+    return
+  }
+  const shown = preview.files.slice(0, CLEAN_PREVIEW_MAX)
+  const hidden = preview.files.length - shown.length
+  const listed = [
+    ...shown,
+    ...(hidden > 0 ? [t('label.and-more', { count: hidden })] : [])
+  ].join('\n')
+  const count = preview.files.length
+  const ok = await notify.confirm(
+    count === 1
+      ? t('label.clean-untracked-confirm-one', { count, files: listed })
+      : t('label.clean-untracked-confirm-many', { count, files: listed }),
+    { title: t('label.clean-untracked-title'), confirmText: t('action.delete-files') }
+  )
+  if (!ok) return
+  isRunningExtra.value = true
+  try {
+    const r = await cleanUntracked(false)
+    const removed = r.files.length || preview.files.length
+    const doneMsg =
+      removed === 1
+        ? t('label.deleted-files-one', { count: removed })
+        : t('label.deleted-files-many', { count: removed })
+    if (toastResult(r, doneMsg)) await refreshAll()
+  } finally {
+    isRunningExtra.value = false
+  }
+}
+
+function openToolbarMenu(e: MouseEvent): void {
+  const branch = gitStatus.value.branch
+  const items: MenuItem[] = [
+    {
+      label: t('action.pull-rebase-menu'),
+      action: () => void runExtraOp(() => pullRebase(), t('label.pulled-rebase'))
+    }
+  ]
+  if (branch) {
+    items.push({
+      label: t('action.push-set-upstream'),
+      action: () =>
+        void runExtraOp(
+          () => pushUpstream(branch),
+          t('label.pushed-set-upstream', { branch })
+        )
+    })
+  }
+  items.push(
+    {
+      label: t('action.force-push-menu'),
+      danger: true,
+      separator: true,
+      action: () => void onForcePush()
+    },
+    { label: t('action.undo-last-commit-menu'), danger: true, action: () => void onUndoLastCommit() },
+    { label: t('action.clean-untracked-menu'), danger: true, action: () => void onCleanUntracked() }
+  )
+  openMenu(e, items)
+}
+
+// ── Non-repo empty state: initialize here, or clone somewhere ────────────────
+const initGitignore = ref(true)
+const showCloneForm = ref(false)
+const cloneUrl = ref('')
+const cloneDir = ref('')
+const isCloning = ref(false)
+const canClone = computed(
+  () => cloneUrl.value.trim().length > 0 && cloneDir.value.trim().length > 0 && !isCloning.value
+)
+
+async function onInitRepo(): Promise<void> {
+  const r = await initRepo(initGitignore.value)
+  if (!r.ok) {
+    toastResult(r)
+    return
+  }
+  notify.toast(
+    r.gitignore_created ? t('label.initialized-with-gitignore') : t('label.initialized'),
+    { type: 'success' }
+  )
+  await refreshAll()
+}
+
+async function pickCloneDir(): Promise<void> {
+  const picked = await pickFolder(cloneDir.value.trim() || undefined)
+  if (picked) cloneDir.value = picked
+}
+
+/** A clone lands outside this window's workspace, so the result opens in a new
+ *  workspace window through the `ui.open_workspace` host capability. */
+async function onCloneRepo(): Promise<void> {
+  if (!canClone.value) return
+  isCloning.value = true
+  try {
+    const r = await cloneRepo(cloneUrl.value.trim(), cloneDir.value.trim())
+    if (!toastResult(r)) return
+    notify.toast(r.path ? t('label.cloned-into', { path: r.path }) : t('label.cloned'), {
+      type: 'success'
+    })
+    if (r.path) await onOpenWorktree(r.path)
+  } finally {
+    isCloning.value = false
+  }
+}
+
 const busy = computed(
   () =>
     isFetching.value ||
     isSyncing.value ||
     isPulling.value ||
     isPushing.value ||
+    isRunningExtra.value ||
     isLoadingStatus.value ||
     isLoadingLog.value
 )
@@ -788,29 +1422,72 @@ const busy = computed(
           <span v-if="gitStatus.behind" class="crumb-cnt">↓{{ gitStatus.behind }}</span>
         </template>
       </span>
-      <span v-if="busy" class="busy-dot" title="Working…" />
+      <span v-if="busy" class="busy-dot" :title="$t('label.working')" />
       <div class="tb-actions">
-        <button class="gbtn" :disabled="busy || !isRepo" @click="onFetch">Fetch</button>
-        <button class="gbtn" :disabled="busy || !isRepo" @click="onPull">Pull</button>
-        <button class="gbtn" :disabled="busy || !isRepo" @click="onPush">Push</button>
-        <button class="pbtn" :disabled="busy || !isRepo" title="Pull then push" @click="onSync">Sync</button>
+        <button class="gbtn" :disabled="busy || !isRepo" @click="onFetch">{{ $t('action.fetch') }}</button>
+        <button class="gbtn" :disabled="busy || !isRepo" @click="onPull">{{ $t('action.pull') }}</button>
+        <button class="gbtn" :disabled="busy || !isRepo" @click="onPush">{{ $t('action.push') }}</button>
+        <button class="pbtn" :disabled="busy || !isRepo" :title="$t('hint.pull-then-push')" @click="onSync">{{ $t('action.sync') }}</button>
+        <button
+          class="gbtn icon tb-more"
+          :disabled="busy || !isRepo"
+          :title="$t('hint.more-git-operations')"
+          @click="openToolbarMenu"
+        >⋯</button>
       </div>
     </header>
 
     <div v-if="gitError" class="err-bar">{{ gitError }}</div>
 
-    <div v-if="!hasWorkspace" class="empty">No workspace path provided.</div>
-    <div v-else-if="!isRepo && !isLoadingStatus" class="empty">Not a Git repository.</div>
+    <div v-if="!hasWorkspace" class="empty">{{ $t('label.no-workspace-path') }}</div>
+    <div v-else-if="!isRepo && !isLoadingStatus" class="empty">
+      <div class="init-card">
+        <h2 class="init-title">{{ $t('error.not-git-repo') }}</h2>
+        <p class="init-sub">{{ $t('hint.init-repo') }}</p>
+        <div class="init-row">
+          <button class="pbtn" :disabled="isInitializing" @click="onInitRepo">
+            {{ isInitializing ? $t('label.initializing') : $t('action.initialize-repository') }}
+          </button>
+          <label class="check-label">
+            <input v-model="initGitignore" type="checkbox" :disabled="isInitializing" />
+            {{ $t('label.create-gitignore') }}
+          </label>
+        </div>
+        <div class="init-row">
+          <button class="gbtn" @click="showCloneForm = !showCloneForm">{{ $t('action.clone-repository') }}</button>
+        </div>
+        <div v-if="showCloneForm" class="init-clone">
+          <input
+            v-model="cloneUrl"
+            class="git-input"
+            :placeholder="$t('label.repository-url-placeholder')"
+            spellcheck="false"
+          />
+          <div class="input-row">
+            <input
+              v-model="cloneDir"
+              class="git-input"
+              :placeholder="$t('label.target-folder-placeholder')"
+              spellcheck="false"
+            />
+            <button class="btn-ghost sm" :title="$t('hint.choose-a-folder')" @click="pickCloneDir">…</button>
+          </div>
+          <button class="pbtn clone-go" :disabled="!canClone" @click="onCloneRepo">
+            {{ isCloning ? $t('label.cloning') : $t('action.clone') }}
+          </button>
+        </div>
+      </div>
+    </div>
 
     <div v-else class="body">
       <!-- ── Sidebar ──────────────────────────────────────────────────── -->
       <aside class="sidebar">
         <nav class="navi">
           <button :class="{ on: view === 'status' }" @click="view = 'status'">
-            Changes<span v-if="changeCount" class="n">{{ changeCount }}</span>
+            {{ $t('label.changes') }}<span v-if="changeCount" class="n">{{ changeCount }}</span>
           </button>
-          <button :class="{ on: view === 'history' }" @click="view = 'history'">History</button>
-          <button :class="{ on: view === 'branchdiff' }" @click="openBranchDiff">Branch diff</button>
+          <button :class="{ on: view === 'history' }" @click="view = 'history'">{{ $t('label.history') }}</button>
+          <button :class="{ on: view === 'branchdiff' }" @click="openBranchDiff">{{ $t('label.branch-diff') }}</button>
         </nav>
         <div class="divider" />
 
@@ -818,7 +1495,7 @@ const busy = computed(
         <div class="git-card">
           <div class="card-hdr clickable" @click="branchesExpanded = !branchesExpanded">
             <span class="sec-caret">{{ branchesExpanded ? '▾' : '▸' }}</span>
-            <span class="sec-label">Branches</span>
+            <span class="sec-label">{{ $t('label.branches') }}</span>
             <span v-if="localBranches.length" class="sec-badge">{{ localBranches.length }}</span>
             <div class="spacer" />
           </div>
@@ -827,7 +1504,7 @@ const busy = computed(
               <input
                 v-model="newBranchName"
                 class="git-input"
-                placeholder="New branch…"
+                :placeholder="$t('label.new-branch-input-placeholder')"
                 spellcheck="false"
                 @keydown.enter="doCreateBranch"
               />
@@ -839,7 +1516,7 @@ const busy = computed(
               <button
                 class="btn-ghost sm"
                 :class="{ active: showRemoteBranches }"
-                :title="showRemoteBranches ? 'Hide remote branches' : 'Show remote branches'"
+                :title="showRemoteBranches ? $t('action.hide-remote-branches') : $t('action.show-remote-branches')"
                 @click="showRemoteBranches = !showRemoteBranches"
               >⇅</button>
             </div>
@@ -856,16 +1533,16 @@ const busy = computed(
               <span v-if="b.tracking" class="b-track">→ {{ b.tracking }}</span>
               <div class="spacer" />
               <template v-if="!b.is_current">
-                <button class="row-btn always" title="Compare" @click.stop="doCompareBranch(b.name)">⇔</button>
-                <button class="row-btn always" title="Rebase current onto" @click.stop="doRebaseOnto(b.name)">⇡</button>
-                <button class="row-btn always" title="Merge into current" @click.stop="doMergeIntoCurrent(b.name)">⇣</button>
-                <button class="row-btn always" title="Switch" @click.stop="onSwitchBranch(b.name)">↵</button>
+                <button class="row-btn always" :title="$t('action.compare')" @click.stop="doCompareBranch(b.name)">⇔</button>
+                <button class="row-btn always" :title="$t('action.rebase-current-onto')" @click.stop="doRebaseOnto(b.name)">⇡</button>
+                <button class="row-btn always" :title="$t('action.merge-into-current')" @click.stop="doMergeIntoCurrent(b.name)">⇣</button>
+                <button class="row-btn always" :title="$t('action.switch')" @click.stop="onSwitchBranch(b.name)">↵</button>
               </template>
             </div>
-            <div v-if="!localBranches.length" class="empty-msg">No branches</div>
+            <div v-if="!localBranches.length" class="empty-msg">{{ $t('label.no-branches') }}</div>
             <template v-if="showRemoteBranches">
-              <div class="branch-section-label">Remote branches</div>
-              <div v-if="!remoteBranches.length" class="empty-msg">No remote branches</div>
+              <div class="branch-section-label">{{ $t('label.remote-branches') }}</div>
+              <div v-if="!remoteBranches.length" class="empty-msg">{{ $t('label.no-remote-branches') }}</div>
               <div
                 v-for="b in remoteBranches"
                 :key="b.name"
@@ -878,7 +1555,7 @@ const busy = computed(
                 <button
                   v-if="!b.has_local"
                   class="row-btn always"
-                  title="Checkout locally"
+                  :title="$t('action.checkout-locally')"
                   @click.stop="onCheckoutRemoteBranch(b.name)"
                 >⬇</button>
               </div>
@@ -895,20 +1572,20 @@ const busy = computed(
         <div class="git-card">
           <div class="card-hdr clickable" @click="stashesExpanded = !stashesExpanded">
             <span class="sec-caret">{{ stashesExpanded ? '▾' : '▸' }}</span>
-            <span class="sec-label">Stashes</span>
+            <span class="sec-label">{{ $t('label.stashes') }}</span>
             <span v-if="gitStashes.length" class="sec-badge">{{ gitStashes.length }}</span>
             <div class="spacer" />
-            <button class="row-btn always" title="Stash working changes" @click.stop="onStashPush">＋</button>
+            <button class="row-btn always" :title="$t('action.stash-working-changes')" @click.stop="onStashPush">＋</button>
           </div>
           <div v-if="stashesExpanded" class="card-body collapsible-body">
-            <div v-if="!gitStashes.length" class="empty-msg">No stashes</div>
+            <div v-if="!gitStashes.length" class="empty-msg">{{ $t('label.no-stashes') }}</div>
             <div v-for="st in gitStashes" :key="st.ref" class="generic-row">
               <span class="stash-ref">{{ st.ref }}</span>
               <span class="stash-msg">{{ st.message }}</span>
               <div class="row-actions always">
-                <button class="row-btn always" title="Apply (keep stash)" @click.stop="onStashApply(st.index)">⎘</button>
-                <button class="row-btn always" title="Pop (apply &amp; remove)" @click.stop="onStashPop(st.index)">↑</button>
-                <button class="row-btn always danger" title="Drop" @click.stop="onStashDrop(st.index)">✕</button>
+                <button class="row-btn always" :title="$t('action.stash-apply')" @click.stop="onStashApply(st.index)">⎘</button>
+                <button class="row-btn always" :title="$t('action.stash-pop')" @click.stop="onStashPop(st.index)">↑</button>
+                <button class="row-btn always danger" :title="$t('action.drop')" @click.stop="onStashDrop(st.index)">✕</button>
               </div>
             </div>
           </div>
@@ -918,21 +1595,21 @@ const busy = computed(
         <div class="git-card">
           <div class="card-hdr clickable" @click="remotesExpanded = !remotesExpanded">
             <span class="sec-caret">{{ remotesExpanded ? '▾' : '▸' }}</span>
-            <span class="sec-label">Remotes</span>
+            <span class="sec-label">{{ $t('label.remotes') }}</span>
             <span v-if="gitRemotes.length" class="sec-badge">{{ gitRemotes.length }}</span>
             <div class="spacer" />
           </div>
           <div v-if="remotesExpanded" class="card-body collapsible-body">
-            <div v-if="!gitRemotes.length" class="empty-msg">No remotes</div>
+            <div v-if="!gitRemotes.length" class="empty-msg">{{ $t('label.no-remotes') }}</div>
             <div v-for="r in gitRemotes" :key="r.name" class="generic-row">
               <span class="remote-name">{{ r.name }}</span>
               <span class="remote-url" :title="r.fetch_url">{{ r.fetch_url }}</span>
-              <button class="row-btn always" title="Open remote URL" @click.stop="openExternal(r.fetch_url)">↗</button>
-              <button class="row-btn always danger" title="Remove remote" @click.stop="onRemoveRemote(r.name)">✕</button>
+              <button class="row-btn always" :title="$t('action.open-remote-url')" @click.stop="openExternal(r.fetch_url)">↗</button>
+              <button class="row-btn always danger" :title="$t('action.remove-remote')" @click.stop="onRemoveRemote(r.name)">✕</button>
             </div>
             <div class="input-row" style="margin-top: 6px">
-              <input v-model="newRemoteName" class="git-input" placeholder="Name" style="width: 72px; flex: 0 0 auto" />
-              <input v-model="newRemoteUrl" class="git-input" placeholder="URL" @keydown.enter="doAddRemote" />
+              <input v-model="newRemoteName" class="git-input" :placeholder="$t('label.name-placeholder')" style="width: 72px; flex: 0 0 auto" />
+              <input v-model="newRemoteUrl" class="git-input" :placeholder="$t('label.url')" @keydown.enter="doAddRemote" />
               <button class="btn-ghost sm" :disabled="!newRemoteName.trim() || !newRemoteUrl.trim()" @click="doAddRemote">＋</button>
             </div>
           </div>
@@ -942,22 +1619,22 @@ const busy = computed(
         <div class="git-card">
           <div class="card-hdr clickable" @click="tagsExpanded = !tagsExpanded">
             <span class="sec-caret">{{ tagsExpanded ? '▾' : '▸' }}</span>
-            <span class="sec-label">Tags</span>
+            <span class="sec-label">{{ $t('label.tags') }}</span>
             <span v-if="gitTags.length" class="sec-badge">{{ gitTags.length }}</span>
             <div class="spacer" />
           </div>
           <div v-if="tagsExpanded" class="card-body collapsible-body">
-            <div v-if="!gitTags.length" class="empty-msg">No tags</div>
+            <div v-if="!gitTags.length" class="empty-msg">{{ $t('label.no-tags') }}</div>
             <div v-for="t in gitTags" :key="t.name" class="generic-row">
               <span class="b-name">{{ t.name }}</span>
               <code class="chash" style="margin-left: 4px">{{ t.commit_hash }}</code>
               <span v-if="t.message" class="b-track">{{ t.message }}</span>
               <div class="spacer" />
-              <button class="row-btn always danger" title="Delete tag" @click.stop="onDeleteTag(t.name)">✕</button>
+              <button class="row-btn always danger" :title="$t('action.delete-tag')" @click.stop="onDeleteTag(t.name)">✕</button>
             </div>
             <div class="input-row" style="margin-top: 6px; flex-wrap: wrap; gap: 4px">
               <input v-model="newTagName" class="git-input" placeholder="v1.0.0" style="flex: 1; min-width: 72px" />
-              <input v-model="newTagMessage" class="git-input" placeholder="Message" style="flex: 2; min-width: 80px" />
+              <input v-model="newTagMessage" class="git-input" :placeholder="$t('label.message')" style="flex: 2; min-width: 80px" />
               <button class="btn-ghost sm" :disabled="!newTagName.trim()" @click="doCreateTag">＋</button>
             </div>
           </div>
@@ -967,64 +1644,64 @@ const busy = computed(
         <div class="git-card">
           <div class="card-hdr clickable" @click="worktreesExpanded = !worktreesExpanded">
             <span class="sec-caret">{{ worktreesExpanded ? '▾' : '▸' }}</span>
-            <span class="sec-label">Worktrees</span>
+            <span class="sec-label">{{ $t('label.worktrees') }}</span>
             <span v-if="gitWorktrees.length > 1" class="sec-badge">{{ gitWorktrees.length }}</span>
             <div class="spacer" />
           </div>
           <div v-if="worktreesExpanded" class="card-body collapsible-body">
             <div class="input-row" style="margin-bottom: 6px">
-              <button class="btn-ghost sm" title="Prune stale worktrees" @click="onPruneWorktrees">Prune</button>
-              <button class="btn-ghost sm" title="Repair worktree links" @click="onRepairWorktrees">Repair</button>
+              <button class="btn-ghost sm" :title="$t('hint.prune-stale-worktrees')" @click="onPruneWorktrees">{{ $t('action.prune') }}</button>
+              <button class="btn-ghost sm" :title="$t('hint.repair-worktree-links')" @click="onRepairWorktrees">{{ $t('action.repair') }}</button>
             </div>
             <div v-for="wt in gitWorktrees" :key="wt.path" class="generic-row">
               <span class="wt-icon">{{ wt.is_main ? '✦' : '○' }}</span>
               <div style="flex: 1; min-width: 0">
                 <div class="wt-name-row">
                   <span class="b-name" :title="wt.path">{{ wt.path.split('/').at(-1) }}</span>
-                  <span v-if="wt.bare" class="wt-badge">bare</span>
-                  <span v-if="wt.detached" class="wt-badge">detached</span>
-                  <span v-if="wt.locked" class="wt-badge warn" :title="wt.lock_reason">🔒 locked</span>
-                  <span v-if="wt.prunable" class="wt-badge warn" :title="wt.prune_reason">⚠ stale</span>
+                  <span v-if="wt.bare" class="wt-badge">{{ $t('label.bare') }}</span>
+                  <span v-if="wt.detached" class="wt-badge">{{ $t('label.detached') }}</span>
+                  <span v-if="wt.locked" class="wt-badge warn" :title="wt.lock_reason">🔒 {{ $t('label.locked') }}</span>
+                  <span v-if="wt.prunable" class="wt-badge warn" :title="wt.prune_reason">⚠ {{ $t('label.stale') }}</span>
                 </div>
                 <div class="b-track">{{ wt.branch || wt.head.slice(0, 8) }}</div>
               </div>
               <button
                 v-if="!wt.bare && wt.path !== workspacePath"
                 class="row-btn always"
-                title="Open in new window"
+                :title="$t('action.open-in-new-window')"
                 @click.stop="onOpenWorktree(wt.path)"
               >⧉</button>
-              <button v-if="!wt.bare" class="row-btn always" title="Reveal in Finder" @click.stop="revealPath(wt.path)">◱</button>
+              <button v-if="!wt.bare" class="row-btn always" :title="$t('action.reveal-in-finder')" @click.stop="revealPath(wt.path)">◱</button>
               <button
                 v-if="!wt.is_main"
                 class="row-btn always"
-                :title="wt.locked ? 'Unlock' : 'Lock'"
+                :title="wt.locked ? $t('action.unlock') : $t('action.lock')"
                 @click.stop="onToggleWorktreeLock(wt)"
               >{{ wt.locked ? '🔓' : '🔒' }}</button>
               <button
                 v-if="!wt.is_main && !wt.bare"
                 class="row-btn always"
-                title="Move worktree"
+                :title="$t('action.move-worktree')"
                 @click.stop="onMoveWorktree(wt.path)"
               >⇄</button>
               <button
                 v-if="!wt.is_main"
                 class="row-btn always danger"
-                title="Remove worktree"
+                :title="$t('action.remove-worktree')"
                 @click.stop="onRemoveWorktree(wt.path)"
               >✕</button>
             </div>
             <div class="input-row" style="margin-top: 6px">
-              <input v-model="newWtPath" class="git-input" placeholder="/absolute/path" style="flex: 2" spellcheck="false" />
-              <button class="btn-ghost sm" title="Browse for a folder" @click="pickWorktreeDir">…</button>
+              <input v-model="newWtPath" class="git-input" :placeholder="$t('label.absolute-path-placeholder')" style="flex: 2" spellcheck="false" />
+              <button class="btn-ghost sm" :title="$t('hint.browse-for-folder')" @click="pickWorktreeDir">…</button>
               <input v-if="newWtIsNew" v-model="newWtBranch" class="git-input" placeholder="new-branch" style="flex: 1" spellcheck="false" />
               <select v-else v-model="newWtBranch" class="git-input" style="flex: 1">
-                <option value="" disabled>branch…</option>
+                <option value="" disabled>{{ $t('label.branch-placeholder') }}</option>
                 <option v-for="b in worktreeBranchOptions" :key="b" :value="b">{{ b }}</option>
               </select>
-              <button class="btn-ghost sm" :disabled="!newWtPath.trim() || !newWtBranch.trim()" title="Add worktree" @click="doAddWorktree">＋</button>
+              <button class="btn-ghost sm" :disabled="!newWtPath.trim() || !newWtBranch.trim()" :title="$t('action.add-worktree')" @click="doAddWorktree">＋</button>
             </div>
-            <label class="check-label"><input v-model="newWtIsNew" type="checkbox" /> Create a new branch</label>
+            <label class="check-label"><input v-model="newWtIsNew" type="checkbox" /> {{ $t('label.worktree-create-new-branch') }}</label>
           </div>
         </div>
 
@@ -1032,7 +1709,7 @@ const busy = computed(
         <div class="git-card">
           <div class="card-hdr clickable" @click="toggleConfigCard">
             <span class="sec-caret">{{ configExpanded ? '▾' : '▸' }}</span>
-            <span class="sec-label">Config</span>
+            <span class="sec-label">{{ $t('label.config') }}</span>
             <div class="spacer" />
           </div>
           <div v-if="configExpanded" class="card-body collapsible-body">
@@ -1063,39 +1740,39 @@ const busy = computed(
         <div class="git-card">
           <div class="card-hdr clickable" @click="toggleIssuesCard">
             <span class="sec-caret">{{ issuesExpanded ? '▾' : '▸' }}</span>
-            <span class="sec-label">Issues</span>
+            <span class="sec-label">{{ $t('label.issues') }}</span>
             <span v-if="issuesExpanded && issueProviderLabel()" class="sec-badge">{{ issueProviderLabel() }}</span>
-            <span v-if="issuesExpanded && openIssueCount" class="sec-badge">{{ openIssueCount }} open</span>
+            <span v-if="issuesExpanded && openIssueCount" class="sec-badge">{{ $t('label.n-open', { count: openIssueCount }) }}</span>
             <div class="spacer" />
             <button
               v-if="issuesExpanded && issueProvider.authenticated && !selectedIssue"
               class="row-btn always"
-              title="New issue"
+              :title="$t('action.new-issue')"
               @click.stop="showNewIssue = !showNewIssue"
             >＋</button>
-            <button v-if="issuesExpanded" class="row-btn always" title="Refresh" @click.stop="refreshIssues">↻</button>
+            <button v-if="issuesExpanded" class="row-btn always" :title="$t('action.refresh')" @click.stop="refreshIssues">↻</button>
           </div>
           <div v-if="issuesExpanded" class="card-body collapsible-body">
             <div v-if="issueProvider.provider === 'unknown'" class="empty-msg" style="padding: 2px 0">
-              No supported issue host detected for this repo (needs a GitHub or GitLab origin remote).
+              {{ $t('label.no-issue-host') }}
             </div>
             <div v-else-if="!issueProvider.cli_available" class="empty-msg" style="padding: 2px 0">
-              {{ issueProvider.provider === 'github' ? 'GitHub CLI (gh)' : 'GitLab CLI (glab)' }} is not installed.
+              {{ $t('label.cli-not-installed', { cli: issueProvider.provider === 'github' ? 'GitHub CLI (gh)' : 'GitLab CLI (glab)' }) }}
             </div>
             <div v-else-if="!issueProvider.authenticated" class="empty-msg" style="padding: 2px 0">
-              Not authenticated. Run
+              {{ $t('label.issues-not-authenticated-prefix') }}
               <code>{{ issueProvider.provider === 'github' ? 'gh auth login' : 'glab auth login' }}</code>
-              in a terminal, then refresh.
+              {{ $t('label.issues-not-authenticated-suffix') }}
             </div>
 
             <!-- detail view -->
             <template v-else-if="selectedIssue">
               <div class="input-row" style="margin-bottom: 6px">
-                <button class="btn-ghost sm" @click="closeIssueDetail">← Back</button>
+                <button class="btn-ghost sm" @click="closeIssueDetail">← {{ $t('action.back') }}</button>
                 <div class="spacer" />
-                <button class="btn-ghost sm" title="Open in browser" @click="openExternal(selectedIssue.url)">Open ↗</button>
+                <button class="btn-ghost sm" :title="$t('hint.open-in-browser')" @click="openExternal(selectedIssue.url)">{{ $t('action.open') }} ↗</button>
                 <button class="btn-ghost sm" :disabled="isIssueSubmitting" @click="toggleIssueState">
-                  {{ selectedIssue.state === 'open' ? 'Close' : 'Reopen' }}
+                  {{ selectedIssue.state === 'open' ? $t('action.close') : $t('action.reopen') }}
                 </button>
               </div>
               <div class="issue-detail-title">
@@ -1103,29 +1780,29 @@ const busy = computed(
                 #{{ selectedIssue.number }} · {{ selectedIssue.title }}
               </div>
               <div class="b-track" style="margin-bottom: 6px">{{ selectedIssue.author }} · {{ selectedIssue.created_at }}</div>
-              <pre class="issue-body">{{ selectedIssue.body || '(no description)' }}</pre>
+              <pre class="issue-body">{{ selectedIssue.body || $t('label.no-description') }}</pre>
               <div v-for="(c, i) in selectedIssue.comments" :key="i" class="issue-comment">
                 <div class="b-track">{{ c.author }} · {{ c.created_at }}</div>
                 <pre class="issue-body">{{ c.body }}</pre>
               </div>
               <div class="input-row" style="margin-top: 6px; flex-direction: column; gap: 4px">
-                <textarea v-model="newComment" class="git-input" rows="2" placeholder="Add a comment…" />
-                <button class="btn-ghost sm" :disabled="!newComment.trim() || isIssueSubmitting" @click="submitComment">Comment</button>
+                <textarea v-model="newComment" class="git-input" rows="2" :placeholder="$t('label.add-comment-placeholder')" />
+                <button class="btn-ghost sm" :disabled="!newComment.trim() || isIssueSubmitting" @click="submitComment">{{ $t('action.comment') }}</button>
               </div>
             </template>
 
             <!-- list view -->
             <template v-else>
               <div v-if="showNewIssue" class="input-row" style="margin-bottom: 6px; flex-direction: column; gap: 4px">
-                <input v-model="newIssueTitle" class="git-input" placeholder="Issue title" />
-                <textarea v-model="newIssueBody" class="git-input" rows="3" placeholder="Description (optional)" />
+                <input v-model="newIssueTitle" class="git-input" :placeholder="$t('label.issue-title-placeholder')" />
+                <textarea v-model="newIssueBody" class="git-input" rows="3" :placeholder="$t('label.description-optional')" />
                 <div class="input-row">
-                  <button class="btn-ghost sm" :disabled="!newIssueTitle.trim() || isIssueSubmitting" @click="submitNewIssue">Create</button>
-                  <button class="btn-ghost sm" @click="showNewIssue = false">Cancel</button>
+                  <button class="btn-ghost sm" :disabled="!newIssueTitle.trim() || isIssueSubmitting" @click="submitNewIssue">{{ $t('action.create') }}</button>
+                  <button class="btn-ghost sm" @click="showNewIssue = false">{{ $t('action.cancel') }}</button>
                 </div>
               </div>
-              <div v-if="isLoadingIssues" class="empty-msg" style="padding: 2px 0">Loading…</div>
-              <div v-else-if="!issues.length" class="empty-msg" style="padding: 2px 0">No issues</div>
+              <div v-if="isLoadingIssues" class="empty-msg" style="padding: 2px 0">{{ $t('label.loading') }}</div>
+              <div v-else-if="!issues.length" class="empty-msg" style="padding: 2px 0">{{ $t('label.no-issues') }}</div>
               <div
                 v-for="it in issues"
                 :key="it.number"
@@ -1181,13 +1858,13 @@ const busy = computed(
         <!-- Branch comparison -->
         <div v-else-if="view === 'branchdiff'" class="pane branchdiff">
           <div class="bd-pickers">
-            <select v-model="diffBase" class="ed-select" title="Base branch">
-              <option value="" disabled>base…</option>
+            <select v-model="diffBase" class="ed-select" :title="$t('label.base-branch')">
+              <option value="" disabled>{{ $t('label.base-placeholder') }}</option>
               <option v-for="b in gitBranches" :key="'b' + b.name" :value="b.name">{{ b.name }}</option>
             </select>
             <span class="bd-arrow">→</span>
-            <select v-model="diffCompare" class="ed-select" title="Compare branch">
-              <option value="" disabled>compare…</option>
+            <select v-model="diffCompare" class="ed-select" :title="$t('label.compare-branch')">
+              <option value="" disabled>{{ $t('label.compare-placeholder') }}</option>
               <option v-for="b in gitBranches" :key="'c' + b.name" :value="b.name">{{ b.name }}</option>
             </select>
           </div>
@@ -1201,7 +1878,7 @@ const busy = computed(
               :backend="backend"
               hide-ai-review
             />
-            <div v-else class="empty-hint">Pick two branches to compare.</div>
+            <div v-else class="empty-hint">{{ $t('hint.pick-two-branches') }}</div>
           </div>
         </div>
 
@@ -1209,23 +1886,23 @@ const busy = computed(
         <div v-else class="status-wrap">
           <div class="pane changes">
             <div v-if="opInProgress" class="op-banner">
-              <span>{{ opInProgress }} in progress<template v-if="conflictFiles.length"> — {{ conflictFiles.length }} conflicted file{{ conflictFiles.length > 1 ? 's' : '' }}</template></span>
-              <button class="linkbtn danger" @click="onAbortOperation">Abort {{ opInProgress }}</button>
+              <span>{{ $t('label.op-in-progress', { op: opInProgress }) }}<template v-if="conflictFiles.length"> — {{ conflictFiles.length > 1 ? $t('label.conflicted-files-many', { count: conflictFiles.length }) : $t('label.conflicted-files-one', { count: conflictFiles.length }) }}</template></span>
+              <button class="linkbtn danger" @click="onAbortOperation">{{ $t('action.abort-op', { op: opInProgress }) }}</button>
             </div>
 
             <div class="list-hdr">
               <div>
-                <div class="gtitle">{{ changeCount }} file{{ changeCount === 1 ? '' : 's' }} changed</div>
-                <div class="gsub">Check to stage · click for its diff · drag onto a terminal</div>
+                <div class="gtitle">{{ changeCount === 1 ? $t('label.files-changed-one', { count: changeCount }) : $t('label.files-changed-many', { count: changeCount }) }}</div>
+                <div class="gsub">{{ $t('hint.file-card') }}</div>
               </div>
               <div class="hdr-actions">
-                <button v-if="stagedFiles.length" class="linkbtn" @click="onUnstageAll">Unstage all</button>
-                <button v-if="changedFiles.length + untrackedFiles.length" class="linkbtn" @click="onStageAll">Stage all</button>
+                <button v-if="stagedFiles.length" class="linkbtn" @click="onUnstageAll">{{ $t('action.unstage-all-files') }}</button>
+                <button v-if="changedFiles.length + untrackedFiles.length" class="linkbtn" @click="onStageAll">{{ $t('action.stage-all-files') }}</button>
               </div>
             </div>
 
             <div v-if="!changeCount && !conflictFiles.length" class="clean-hint">
-              Working tree clean — nothing to commit.
+              {{ $t('label.working-tree-clean') }}
             </div>
             <div v-else class="fcard">
               <div
@@ -1234,15 +1911,17 @@ const busy = computed(
                 class="frow conflict"
                 draggable="true"
                 @dragstart="onFileDragStart($event, f.path)"
-                @click="showWorkingDiff(f.path, false)"
+                @click="showWorkingDiff(f.path, false, 'conflict')"
+                @contextmenu.prevent="openFileCtxMenu($event, f)"
               >
                 <span class="conflict-mark">⚠</span>
-                <span class="stag u">conflict</span>
+                <span class="stag u">{{ $t('label.tag-conflict') }}</span>
                 <span class="fpath mono"><i>{{ splitPath(f.path).dir }}</i>{{ splitPath(f.path).base }}</span>
                 <span class="rowact">
-                  <button class="linkbtn" @click.stop="onResolveOurs(f.path)">ours</button>
-                  <button class="linkbtn" @click.stop="onResolveTheirs(f.path)">theirs</button>
-                  <button class="linkbtn" @click.stop="openInEditor(f.path)">editor</button>
+                  <button class="linkbtn" @click.stop="onResolveOurs(f.path)">{{ $t('action.row-ours') }}</button>
+                  <button class="linkbtn" @click.stop="onResolveTheirs(f.path)">{{ $t('action.row-theirs') }}</button>
+                  <button class="linkbtn" @click.stop="openInEditor(f.path)">{{ $t('action.row-editor') }}</button>
+                  <button class="linkbtn" @click.stop="onResolveWithAgent(f.path)">{{ $t('action.row-agent') }}</button>
                 </span>
               </div>
               <div
@@ -1252,11 +1931,12 @@ const busy = computed(
                 draggable="true"
                 @dragstart="onFileDragStart($event, f.path)"
                 @click="showWorkingDiff(f.path, true)"
+                @contextmenu.prevent="openFileCtxMenu($event, f, true)"
               >
-                <button class="chk on" title="Unstage" @click.stop="toggleStage(f, true)" />
+                <button class="chk on" :title="$t('action.unstage')" @click.stop="toggleStage(f, true)" />
                 <span class="stag" :class="fileTag(f).cls">{{ fileTag(f).label }}</span>
                 <span class="fpath mono"><i>{{ splitPath(f.path).dir }}</i>{{ splitPath(f.path).base }}</span>
-                <span class="rowact"><button class="linkbtn" @click.stop="showWorkingDiff(f.path, true)">diff</button></span>
+                <span class="rowact"><button class="linkbtn" @click.stop="showWorkingDiff(f.path, true)">{{ $t('action.row-diff') }}</button></span>
               </div>
               <div
                 v-for="f in changedFiles"
@@ -1265,13 +1945,14 @@ const busy = computed(
                 draggable="true"
                 @dragstart="onFileDragStart($event, f.path)"
                 @click="showWorkingDiff(f.path, false)"
+                @contextmenu.prevent="openFileCtxMenu($event, f)"
               >
-                <button class="chk" title="Stage" @click.stop="toggleStage(f, false)" />
+                <button class="chk" :title="$t('action.stage')" @click.stop="toggleStage(f, false)" />
                 <span class="stag" :class="fileTag(f).cls">{{ fileTag(f).label }}</span>
                 <span class="fpath mono"><i>{{ splitPath(f.path).dir }}</i>{{ splitPath(f.path).base }}</span>
                 <span class="rowact">
-                  <button class="linkbtn" @click.stop="showWorkingDiff(f.path, false)">diff</button>
-                  <button class="linkbtn danger" @click.stop="onDiscard(f)">discard</button>
+                  <button class="linkbtn" @click.stop="showWorkingDiff(f.path, false)">{{ $t('action.row-diff') }}</button>
+                  <button class="linkbtn danger" @click.stop="onDiscard(f)">{{ $t('action.row-discard') }}</button>
                 </span>
               </div>
               <div
@@ -1281,11 +1962,12 @@ const busy = computed(
                 draggable="true"
                 @dragstart="onFileDragStart($event, f.path)"
                 @click="showWorkingDiff(f.path, false)"
+                @contextmenu.prevent="openFileCtxMenu($event, f, false, true)"
               >
-                <button class="chk" title="Stage" @click.stop="toggleStage(f, false)" />
-                <span class="stag q">new</span>
+                <button class="chk" :title="$t('action.stage')" @click.stop="toggleStage(f, false)" />
+                <span class="stag q">{{ $t('label.tag-new') }}</span>
                 <span class="fpath mono"><i>{{ splitPath(f.path).dir }}</i>{{ splitPath(f.path).base }}</span>
-                <span class="rowact"><button class="linkbtn" @click.stop="showWorkingDiff(f.path, false)">diff</button></span>
+                <span class="rowact"><button class="linkbtn" @click.stop="showWorkingDiff(f.path, false)">{{ $t('action.row-diff') }}</button></span>
               </div>
             </div>
 
@@ -1294,16 +1976,22 @@ const busy = computed(
                 v-model="commitMessage"
                 class="cmp-input"
                 rows="2"
-                placeholder="Describe this change…"
+                :placeholder="$t('label.describe-change-placeholder')"
                 :disabled="isCommitting"
               />
               <div class="cmp-actions">
                 <button class="chipbtn" :disabled="isGenerating || busy" @click="onGenerateMessage">
-                  {{ isGenerating ? 'Generating…' : '✨ AI message' }}
+                  {{ isGenerating ? $t('label.generating') : $t('action.ai-message') }}
                 </button>
-                <button class="chipbtn" :disabled="isCommitting" @click="onAmend">Amend</button>
+                <button class="chipbtn" :disabled="isCommitting" @click="onAmend">{{ $t('action.amend') }}</button>
                 <button class="commitbtn" :disabled="!canCommit" @click="onCommit">
-                  {{ isCommitting ? 'Committing…' : `Commit ${gitStatus.staged.length} file${gitStatus.staged.length === 1 ? '' : 's'}` }}
+                  {{
+                    isCommitting
+                      ? $t('label.committing')
+                      : gitStatus.staged.length === 1
+                        ? $t('action.commit-files-one', { count: gitStatus.staged.length })
+                        : $t('action.commit-files-many', { count: gitStatus.staged.length })
+                  }}
                 </button>
               </div>
             </div>
@@ -1316,18 +2004,31 @@ const busy = computed(
               <span class="dt-kind">
                 {{
                   externalDiff.commit
-                    ? 'commit ' + externalDiff.commit.slice(0, 8)
+                    ? $t('label.detail-commit', { hash: externalDiff.commit.slice(0, 8) })
                     : externalDiff.staged
-                      ? 'staged'
-                      : 'working tree'
+                      ? $t('label.detail-staged')
+                      : $t('label.detail-working-tree')
                 }}
               </span>
+              <div class="dt-modes">
+                <button
+                  v-for="m in detailModes"
+                  :key="m"
+                  :class="{ on: detailMode === m }"
+                  @click="setDetailMode(m)"
+                >{{ detailModeLabel(m) }}</button>
+              </div>
+              <label v-if="detailMode === 'blame'" class="check-label">
+                <input v-model="blameChangedOnly" type="checkbox" @change="loadBlame" />
+                {{ $t('label.only-changed-lines') }}
+              </label>
               <span class="spacer" />
-              <button class="linkbtn" @click="openInEditor(externalDiff.name)">Open in editor</button>
-              <button class="linkbtn" @click="clearExternalDiff">Close</button>
+              <button class="linkbtn" @click="openInEditor(externalDiff.name)">{{ $t('action.open-in-editor') }}</button>
+              <button class="linkbtn" @click="clearExternalDiff">{{ $t('action.close') }}</button>
             </div>
             <div class="detail-body">
               <DiffPane
+                v-if="detailMode === 'diff'"
                 :key="'ext:' + externalDiff.name + ':' + externalDiff.commit + ':' + externalDiff.staged"
                 :workspace-path="workspacePath"
                 :filepath="externalDiff.name"
@@ -1337,6 +2038,90 @@ const busy = computed(
                 :commit="externalDiff.commit || undefined"
                 @open-file="(p) => openInEditor(p.filepath)"
               />
+
+              <!-- Conflict: resolve the merge here instead of routing to the
+                   mini-IDE (the row's "editor" button stays as the other path) -->
+              <ConflictPane
+                v-else-if="detailMode === 'conflict'"
+                :key="'cf:' + externalDiff.name"
+                :workspace-path="workspacePath"
+                :filepath="externalDiff.name"
+                :name="externalDiff.name"
+                :backend="backend"
+                :merge-aborted="!detailIsConflict"
+                @resolved="onConflictResolved"
+              />
+
+              <!-- Blame: whole file, or only the changed lines (diff blame) -->
+              <div v-else-if="detailMode === 'blame'" class="aux-body">
+                <div v-if="blameLoading" class="empty-msg">{{ $t('label.loading') }}</div>
+                <div v-else-if="blameMessage" class="empty-msg">{{ blameMessage }}</div>
+                <template v-else-if="blameChangedOnly">
+                  <template v-for="(h, hi) in blameHunks" :key="'h' + hi">
+                    <div class="db-hunk-head">{{ h.header }}</div>
+                    <div
+                      v-for="(l, li) in h.lines"
+                      :key="'h' + hi + ':' + li"
+                      class="db-line"
+                      :class="hunkLineClass(l.kind)"
+                    >
+                      <span class="bl-who">{{ l.committed ? l.author : $t('label.uncommitted') }}</span>
+                      <span class="bl-date">{{ l.committed ? l.date : '' }}</span>
+                      <span class="db-no">{{ l.new_no ?? l.old_no ?? '' }}</span>
+                      <span class="db-sign">{{ l.kind === ' ' ? '' : l.kind }}</span>
+                      <code class="db-code">{{ l.text }}</code>
+                    </div>
+                  </template>
+                </template>
+                <template v-else>
+                  <div v-for="(b, bi) in blameEntries" :key="'b' + bi" class="blame-row">
+                    <span class="chash">{{ b.short_hash }}</span>
+                    <span class="bl-who">{{ b.author }}</span>
+                    <span class="bl-date">{{ b.date }}</span>
+                    <span class="db-no">{{ b.line_no }}</span>
+                    <code class="db-code">{{ b.content }}</code>
+                  </div>
+                </template>
+              </div>
+
+              <!-- History: this file's commits + the selected commit's diff -->
+              <div v-else class="aux-body">
+                <div v-if="historyLoading" class="empty-msg">{{ $t('label.loading') }}</div>
+                <div v-else-if="historyMessage" class="empty-msg">{{ historyMessage }}</div>
+                <template v-else>
+                  <div
+                    v-for="c in fileHistory"
+                    :key="c.hash"
+                    class="hist-row"
+                    :class="{ on: historyCommit === c.hash }"
+                    @click="selectHistoryCommit(c.hash)"
+                  >
+                    <span class="chash">{{ c.short_hash }}</span>
+                    <span class="hist-msg">{{ c.message }}</span>
+                    <span class="bl-who">{{ c.author }}</span>
+                    <span class="bl-date">{{ c.date }}</span>
+                  </div>
+                  <div v-if="historyDiffLoading" class="empty-msg">{{ $t('label.loading') }}</div>
+                  <template v-else-if="historyCommit">
+                    <div v-if="!historyHunks.length" class="empty-msg">
+                      {{ $t('label.no-changes-in-commit') }}
+                    </div>
+                    <template v-for="(h, hi) in historyHunks" :key="'c' + hi">
+                      <div class="db-hunk-head">{{ h.header }}</div>
+                      <div
+                        v-for="(l, li) in h.lines"
+                        :key="'c' + hi + ':' + li"
+                        class="db-line"
+                        :class="hunkLineClass(l.kind)"
+                      >
+                        <span class="db-no">{{ l.new_no ?? l.old_no ?? '' }}</span>
+                        <span class="db-sign">{{ l.kind === ' ' ? '' : l.kind }}</span>
+                        <code class="db-code">{{ l.text }}</code>
+                      </div>
+                    </template>
+                  </template>
+                </template>
+              </div>
             </div>
           </div>
         </div>
@@ -1344,6 +2129,8 @@ const busy = computed(
 
       <!-- Right AI CLI dock (rail toggle + resize + embedded PTY terminal) -->
       <AiCliDock
+        ref="aiDockRef"
+        v-model:open="aiDockOpen"
         width-key="git-ai-panel-width"
         :pane-id="AI_PANE_ID"
         origin="git-window"
@@ -1357,13 +2144,15 @@ const busy = computed(
     <template v-if="menu">
       <div class="menu-backdrop" @click="menu = null" />
       <div class="menu" :style="{ left: menu.x + 'px', top: menu.y + 'px' }">
-        <button
-          v-for="(item, i) in menu.items"
-          :key="i"
-          class="menu-item"
-          :class="{ danger: item.danger }"
-          @click="runMenuItem(item)"
-        >{{ item.label }}</button>
+        <template v-for="(item, i) in menu.items" :key="i">
+          <div v-if="item.separator" class="menu-sep" />
+          <button
+            class="menu-item"
+            :class="{ danger: item.danger }"
+            :disabled="item.disabled"
+            @click="runMenuItem(item)"
+          >{{ item.label }}</button>
+        </template>
       </div>
     </template>
 
@@ -1477,6 +2266,27 @@ const busy = computed(
   justify-content: center;
   color: var(--text-secondary);
 }
+
+/* ── Non-repo bootstrap card (init / clone) ── */
+.init-card {
+  width: min(460px, 88%);
+  padding: 22px 24px 20px;
+  border: 1px solid var(--border-muted);
+  border-radius: 12px;
+  background: var(--bg-subtle);
+}
+.init-title { margin: 0 0 6px; font-size: 16px; font-weight: 800; color: var(--text-bright); }
+.init-sub { margin: 0 0 16px; font-size: 12.5px; line-height: 1.5; color: var(--text-muted); }
+.init-row { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+.init-clone {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-muted);
+}
+.init-clone .clone-go { align-self: flex-start; margin-top: 2px; }
 
 /* ── Body ── */
 .body { flex: 1; display: flex; min-height: 0; }
@@ -1803,8 +2613,10 @@ const busy = computed(
   border-radius: 7px;
   cursor: pointer;
 }
-.menu-item:hover { background: var(--bg-hover); }
+.menu-item:hover:not(:disabled) { background: var(--bg-hover); }
 .menu-item.danger { color: var(--danger-fg); }
+.menu-item:disabled { opacity: 0.5; cursor: default; font-style: italic; }
+.menu-sep { height: 1px; background: var(--border-muted); margin: 4px 6px; }
 
 /* ── Branch diff view ── */
 .branchdiff { display: flex; flex-direction: column; overflow: hidden; }
@@ -1849,5 +2661,77 @@ const busy = computed(
 .dt-kind { font-size: 11.5px; color: var(--text-muted); flex: none; }
 .detail-body { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
 .detail-body > .diff-pane { flex: 1; min-height: 0; }
+.detail-body > .cp-root { flex: 1; min-height: 0; }
+
+/* Diff / Blame / History segmented switch in the detail header */
+.dt-modes { display: flex; gap: 2px; flex: none; }
+.dt-modes button {
+  border: none;
+  background: none;
+  padding: 3px 9px;
+  border-radius: 7px;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.dt-modes button:hover { background: var(--bg-hover-faint); }
+.dt-modes button.on { background: var(--bg-selected); color: var(--accent-bright); font-weight: 700; }
+
+/* Blame / file-history readings (the non-DiffPane detail modes) */
+.aux-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 4px 0 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+.blame-row, .db-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  line-height: 1.55;
+  padding: 0 14px;
+  width: max-content;
+  min-width: 100%;
+}
+.blame-row:hover { background: var(--bg-hover-faint); }
+.bl-who {
+  color: var(--text-secondary);
+  min-width: 86px;
+  max-width: 86px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.bl-date { color: var(--text-muted); font-size: 10px; min-width: 74px; flex-shrink: 0; }
+.db-no { color: var(--text-muted); min-width: 36px; text-align: right; flex-shrink: 0; user-select: none; }
+.db-sign { width: 10px; flex-shrink: 0; text-align: center; user-select: none; }
+.db-code { white-space: pre; flex-shrink: 0; color: var(--text-primary); }
+.db-hunk-head { color: var(--accent-bright); font-size: 10px; opacity: 0.8; padding: 4px 14px 2px; white-space: pre; }
+.db-line.db-add { background: var(--diff-add-bg); }
+.db-line.db-add .db-code, .db-line.db-add .db-sign { color: var(--success-bright); }
+.db-line.db-del { background: var(--diff-del-bg); }
+.db-line.db-del .db-code, .db-line.db-del .db-sign { color: var(--danger-fg); }
+.hist-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 4px 14px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border-muted);
+}
+.hist-row:hover { background: var(--bg-hover-faint); }
+.hist-row.on { background: var(--bg-selected); }
+.hist-msg {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+  font-family: inherit;
+}
 
 </style>

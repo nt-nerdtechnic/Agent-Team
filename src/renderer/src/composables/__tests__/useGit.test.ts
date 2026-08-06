@@ -654,4 +654,154 @@ describe('useGit', () => {
       scope.stop()
     })
   })
+
+  describe('three-way conflict surface', () => {
+    const stages = {
+      ok: true,
+      base: 'base\n',
+      ours: 'ours\n',
+      theirs: 'theirs\n',
+      has_base: true,
+      has_ours: true,
+      has_theirs: true,
+      binary: false,
+    }
+
+    async function mounted(ws = WS) {
+      const mock = createMockBackend('connected')
+      mock.setResponse('git.status', mockStatus)
+      mock.setResponse('git.log', { commits: [] })
+      const { result, scope } = withScope(() => useGit(() => ws, mock.backend))
+      await flush()
+      return { mock, result, scope }
+    }
+
+    it('conflictStages sends git.conflict_stages with the filepath', async () => {
+      const { mock, result, scope } = await mounted()
+      mock.setResponse('git.conflict_stages', stages)
+
+      const r = await result.conflictStages('src/f.ts')
+      const call = mock.sent.find(s => s.type === 'git.conflict_stages')
+      expect(call?.payload).toEqual({ workspace_path: WS, filepath: 'src/f.ts' })
+      expect(r.ok).toBe(true)
+      expect(r.base).toBe('base\n')
+      expect(r.has_theirs).toBe(true)
+      scope.stop()
+    })
+
+    it('conflictStages passes a stage-missing result through untouched', async () => {
+      const { mock, result, scope } = await mounted()
+      mock.setResponse('git.conflict_stages', { ...stages, base: '', has_base: false })
+
+      const r = await result.conflictStages('new.txt')
+      expect(r.ok).toBe(true)
+      expect(r.has_base).toBe(false)
+      expect(r.base).toBe('')
+      scope.stop()
+    })
+
+    it('conflictStages returns no-workspace without sending', async () => {
+      const { mock, result, scope } = await mounted('')
+
+      const r = await result.conflictStages('f.txt')
+      expect(r.ok).toBe(false)
+      expect(r.error).toBe('no workspace')
+      expect(mock.sent.find(s => s.type === 'git.conflict_stages')).toBeUndefined()
+      scope.stop()
+    })
+
+    it('conflictStages surfaces a backend error and an absent payload', async () => {
+      const { mock, result, scope } = await mounted()
+      mock.setResponse('git.conflict_stages', {
+        ...stages, ok: false, base: '', ours: '', theirs: '',
+        has_base: false, has_ours: false, has_theirs: false,
+        error: 'f.txt is not conflicted',
+      })
+      const failed = await result.conflictStages('f.txt')
+      expect(failed.ok).toBe(false)
+      expect(failed.error).toBe('f.txt is not conflicted')
+
+      const { mock: mock2, result: result2, scope: scope2 } = await mounted()
+      mock2.setResponse('git.conflict_stages', null)
+      const empty = await result2.conflictStages('f.txt')
+      expect(empty.ok).toBe(false)
+      expect(empty.error).toBe('no response')
+      scope.stop()
+      scope2.stop()
+    })
+
+    it('listConflicts sends git.list_conflicts and returns the entries', async () => {
+      const { mock, result, scope } = await mounted()
+      mock.setResponse('git.list_conflicts', {
+        ok: true,
+        conflicts: [
+          { path: 'f.txt', kind: 'both-modified' },
+          { path: 'n.txt', kind: 'both-added' },
+        ],
+      })
+
+      const r = await result.listConflicts()
+      const call = mock.sent.find(s => s.type === 'git.list_conflicts')
+      expect(call?.payload).toEqual({ workspace_path: WS })
+      expect(r.ok).toBe(true)
+      expect(r.conflicts).toHaveLength(2)
+      expect(r.conflicts[1].kind).toBe('both-added')
+      scope.stop()
+    })
+
+    it('listConflicts returns no-workspace and no-response empties', async () => {
+      const { mock, result, scope } = await mounted('')
+      const noWs = await result.listConflicts()
+      expect(noWs).toEqual({ ok: false, conflicts: [], error: 'no workspace' })
+      expect(mock.sent.find(s => s.type === 'git.list_conflicts')).toBeUndefined()
+
+      const { mock: mock2, result: result2, scope: scope2 } = await mounted()
+      mock2.setResponse('git.list_conflicts', null)
+      expect(await result2.listConflicts()).toEqual({ ok: false, conflicts: [], error: 'no response' })
+      scope.stop()
+      scope2.stop()
+    })
+
+    it('markResolved sends git.mark_resolved with the write timeout and reloads status', async () => {
+      const { mock, result, scope } = await mounted()
+      mock.setResponse('git.mark_resolved', { ok: true })
+
+      const before = mock.sent.filter(s => s.type === 'git.status').length
+      const r = await result.markResolved('f.txt')
+      await flush()
+
+      const call = mock.sent.find(s => s.type === 'git.mark_resolved')
+      expect(call?.payload).toEqual({ workspace_path: WS, filepath: 'f.txt' })
+      expect(call?.timeoutMs).toBe(20_000)
+      expect(r.ok).toBe(true)
+      expect(mock.sent.filter(s => s.type === 'git.status').length).toBeGreaterThan(before)
+      scope.stop()
+    })
+
+    it('markResolved reports a backend failure without reloading status', async () => {
+      const { mock, result, scope } = await mounted()
+      mock.setResponse('git.mark_resolved', { ok: false, error: 'pathspec did not match' })
+
+      const before = mock.sent.filter(s => s.type === 'git.status').length
+      const r = await result.markResolved('gone.txt')
+      await flush()
+
+      expect(r.ok).toBe(false)
+      expect(r.error).toBe('pathspec did not match')
+      expect(mock.sent.filter(s => s.type === 'git.status').length).toBe(before)
+      scope.stop()
+    })
+
+    it('markResolved returns no-workspace and no-response failures', async () => {
+      const { mock, result, scope } = await mounted('')
+      expect(await result.markResolved('f.txt')).toEqual({ ok: false, error: 'no workspace' })
+      expect(mock.sent.find(s => s.type === 'git.mark_resolved')).toBeUndefined()
+
+      const { mock: mock2, result: result2, scope: scope2 } = await mounted()
+      mock2.setResponse('git.mark_resolved', null)
+      expect(await result2.markResolved('f.txt')).toEqual({ ok: false, error: 'no response' })
+      scope.stop()
+      scope2.stop()
+    })
+  })
 })

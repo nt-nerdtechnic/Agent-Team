@@ -97,6 +97,9 @@ const GIT_METHODS = [
   'credential_cancel', 'discover_repositories', 'compare_branches', 'clean', 'discard',
   'stage', 'unstage', 'stage_all', 'commit', 'sync', 'init', 'generate_message',
   'check_staged', 'connect_to_remote', 'ignore', 'diff_all', 'reset',
+  // Three-way conflict surface: ConflictPane lives in this window, so it needs
+  // the index's merge stages, the unmerged-path list, and resolve-only staging.
+  'conflict_stages', 'list_conflicts', 'mark_resolved',
 ] as const
 
 // search.* WS types are `search.<SearchCapability method>` one-for-one.

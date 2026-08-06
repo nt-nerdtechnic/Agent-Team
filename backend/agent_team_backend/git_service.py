@@ -248,6 +248,36 @@ async def _run_with_input(args: list[str], cwd: str, stdin_text: str) -> tuple[i
         return 128, "", str(exc)
 
 
+async def _run_bytes(args: list[str], cwd: str) -> tuple[int, bytes, str]:
+    """Run a git command returning raw stdout bytes.
+
+    ``_run`` decodes stdout with ``errors="replace"``, which silently corrupts
+    binary blobs; conflict stages must be inspected as bytes to tell text from
+    binary before any decoding happens.
+    """
+    try:
+        async with _git_proc_semaphore():
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                cwd=cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15.0)
+        return proc.returncode or 0, stdout, stderr.decode("utf-8", errors="replace")
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+            await proc.wait()
+        except Exception:
+            pass
+        return 128, b"", "git command timed out"
+    except FileNotFoundError:
+        return 128, b"", "git executable not found"
+    except Exception as exc:
+        return 128, b"", str(exc)
+
+
 # ─── Public API ───────────────────────────────────────────────────────────────
 
 async def get_status(workspace_path: str, include_ignored: bool = False) -> dict[str, Any]:
@@ -536,6 +566,155 @@ async def resolve_conflict_theirs(workspace_path: str, filepath: str) -> dict[st
         return {"ok": False, "error": stderr.strip()}
     rc2, _, stderr2 = await _run(["git", "add", "--", filepath], workspace_path)
     return {"ok": rc2 == 0, "error": stderr2.strip() if rc2 != 0 else ""}
+
+
+# ─── Three-way conflict stages ────────────────────────────────────────────────
+# git keeps an unmerged path in the index as up to three entries: stage 1 is the
+# merge base, stage 2 "ours", stage 3 "theirs". Which stages exist is what tells
+# an add/add conflict (no base) apart from a delete/modify one (a side missing)
+# — reading `git show :N:path` three times cannot, because a missing stage and a
+# read failure both come back as a non-zero exit.
+_CONFLICT_STAGE_KEYS: tuple[tuple[int, str], ...] = ((1, "base"), (2, "ours"), (3, "theirs"))
+
+# Which stages are present → the conflict kind git status renders as AA/DU/UD/…
+_CONFLICT_KINDS: dict[frozenset[int], str] = {
+    frozenset({1, 2, 3}): "both-modified",
+    frozenset({2, 3}): "both-added",
+    frozenset({1, 2}): "deleted-by-them",
+    frozenset({1, 3}): "deleted-by-us",
+    frozenset({1}): "both-deleted",
+    frozenset({2}): "added-by-us",
+    frozenset({3}): "added-by-them",
+}
+
+
+async def _unmerged_entries(
+    workspace_path: str, filepath: str = ""
+) -> tuple[bool, dict[str, dict[int, str]], str]:
+    """Return ``(ok, {path: {stage: blob_sha}}, error)`` for unmerged index entries.
+
+    ``git ls-files -u -z`` emits ``<mode> SP <sha> SP <stage> TAB <path> NUL``.
+    The ``-z`` form leaves paths unquoted, so records are split on NUL — never on
+    line breaks, which are legal inside a filename.
+    """
+    args = ["git", "ls-files", "-u", "-z"]
+    if filepath:
+        args += ["--", filepath]
+    rc, out, stderr = await _run(args, workspace_path)
+    if rc != 0:
+        return False, {}, stderr.strip() or "git ls-files failed"
+    entries: dict[str, dict[int, str]] = {}
+    for record in out.split("\x00"):
+        if not record:
+            continue
+        meta, sep, path = record.partition("\t")
+        if not sep or not path:
+            continue
+        parts = meta.split()
+        if len(parts) < 3:
+            continue
+        try:
+            stage = int(parts[2])
+        except ValueError:
+            continue
+        entries.setdefault(path, {})[stage] = parts[1]
+    return True, entries, ""
+
+
+def _decode_blob(data: bytes) -> str | None:
+    """Decode blob bytes as text, or return None when the blob is binary.
+
+    Follows git's own heuristic (a NUL byte means binary) and additionally
+    refuses anything that is not valid UTF-8, so no caller ever receives a
+    lossily replaced string.
+    """
+    if b"\x00" in data:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+async def conflict_stages(workspace_path: str, filepath: str) -> dict[str, Any]:
+    """Return the three merge stages of a conflicted *filepath* in one round-trip.
+
+    Blobs are read by sha with ``git cat-file blob`` rather than ``git show
+    :N:<path>``: the sha comes straight from the index listing, so no pathspec
+    is re-parsed and filenames containing ``:``, leading dashes or newlines are
+    a non-issue.
+
+    A stage that does not exist reports ``has_* = False`` with empty content —
+    the normal shape of add/add (no base) and delete/modify (a side missing)
+    conflicts, not an error. Binary stages set ``binary`` and keep their content
+    empty, since there is nothing a text merge view could show.
+    """
+    empty: dict[str, Any] = {
+        "base": "", "ours": "", "theirs": "",
+        "has_base": False, "has_ours": False, "has_theirs": False,
+        "binary": False,
+    }
+    if not filepath:
+        return {"ok": False, **empty, "error": "filepath is required"}
+    ok, entries, err = await _unmerged_entries(workspace_path, filepath)
+    if not ok:
+        return {"ok": False, **empty, "error": err}
+    stages = entries.get(filepath)
+    if stages is None and len(entries) == 1:
+        # The pathspec matched a single entry under a different spelling
+        # (e.g. "./name"); use it rather than claiming there is no conflict.
+        stages = next(iter(entries.values()))
+    if not stages:
+        return {"ok": False, **empty, "error": f"{filepath} is not conflicted"}
+
+    result: dict[str, Any] = {"ok": True, **empty, "error": ""}
+    for stage, key in _CONFLICT_STAGE_KEYS:
+        sha = stages.get(stage)
+        if not sha:
+            continue
+        result[f"has_{key}"] = True
+        rc, blob, stderr = await _run_bytes(["git", "cat-file", "blob", sha], workspace_path)
+        if rc != 0:
+            return {"ok": False, **empty, "error": stderr.strip() or f"cannot read stage {stage}"}
+        text = _decode_blob(blob)
+        if text is None:
+            result["binary"] = True
+        else:
+            result[key] = text
+    return result
+
+
+async def list_conflicts(workspace_path: str) -> dict[str, Any]:
+    """List every unmerged path with the kind of conflict it is in.
+
+    Survives an app restart (unlike scraping merge output) because the index is
+    the source of truth. Outside a merge the index has no unmerged entries, so
+    the list is simply empty — that is not an error.
+    """
+    ok, entries, err = await _unmerged_entries(workspace_path)
+    if not ok:
+        return {"ok": False, "conflicts": [], "error": err}
+    conflicts = [
+        {"path": path, "kind": _CONFLICT_KINDS.get(frozenset(stages), "unknown")}
+        for path, stages in sorted(entries.items())
+    ]
+    return {"ok": True, "conflicts": conflicts, "error": ""}
+
+
+@_serialize_write
+async def mark_resolved(workspace_path: str, filepath: str) -> dict[str, Any]:
+    """Stage *filepath* as resolved without rewriting it (plain ``git add``).
+
+    ``resolve_conflict_ours``/``_theirs`` overwrite the working-tree file first;
+    a merge editor has already written the content it wants, so only the staging
+    step is left. The content is deliberately NOT checked for leftover conflict
+    markers — text that looks like a marker can be exactly what the user meant to
+    keep, and git itself does not object either.
+    """
+    if not filepath:
+        return {"ok": False, "error": "filepath is required"}
+    rc, _, stderr = await _run(["git", "add", "--", filepath], workspace_path)
+    return {"ok": rc == 0, "error": stderr.strip() if rc != 0 else ""}
 
 
 @_serialize_write

@@ -1,4 +1,4 @@
-export type ConflictChoice = 'ours' | 'theirs' | 'both' | 'manual'
+export type ConflictChoice = 'ours' | 'theirs' | 'both' | 'base' | 'manual'
 
 export interface ContextSection {
   kind: 'context'
@@ -10,6 +10,15 @@ export interface ConflictSection {
   oursLabel: string   // text after <<<<<<<
   theirsLabel: string // text after >>>>>>>
   ours: string[]
+  /**
+   * Common-ancestor lines, present only when the user's git writes diff3 /
+   * zdiff3 style conflicts (a `|||||||` block between ours and theirs).
+   * Empty array both when there is no `|||||||` marker and when the marker is
+   * there but the base side is empty — use `hasBase` to tell those apart.
+   */
+  base: string[]
+  /** True when the block carries a `|||||||` marker line. */
+  hasBase: boolean
   theirs: string[]
 }
 
@@ -28,13 +37,20 @@ export function parseConflicts(content: string): FileSection[] {
     if (line.startsWith('<<<<<<<')) {
       const oursLabel = line.slice(7).trim()
       const oursLines: string[] = []
+      const baseLines: string[] = []
       const theirsLines: string[] = []
       let theirsLabel = ''
-      let phase: 'ours' | 'theirs' = 'ours'
+      let hasBase = false
+      let phase: 'ours' | 'base' | 'theirs' = 'ours'
       i++
       while (i < lines.length) {
         const cl = lines[i]
-        if (cl.startsWith('=======')) {
+        // `|||||||` only opens the diff3 base side while we are still on the
+        // ours side; anywhere else it is ordinary content (as before).
+        if (phase === 'ours' && cl.startsWith('|||||||')) {
+          hasBase = true
+          phase = 'base'
+        } else if (cl.startsWith('=======')) {
           phase = 'theirs'
         } else if (cl.startsWith('>>>>>>>')) {
           theirsLabel = cl.slice(7).trim()
@@ -42,12 +58,17 @@ export function parseConflicts(content: string): FileSection[] {
           break
         } else if (phase === 'ours') {
           oursLines.push(cl)
+        } else if (phase === 'base') {
+          baseLines.push(cl)
         } else {
           theirsLines.push(cl)
         }
         i++
       }
-      sections.push({ kind: 'conflict', oursLabel, theirsLabel, ours: oursLines, theirs: theirsLines })
+      sections.push({
+        kind: 'conflict', oursLabel, theirsLabel,
+        ours: oursLines, base: baseLines, hasBase, theirs: theirsLines,
+      })
     } else {
       // accumulate context lines
       const last = sections[sections.length - 1]
@@ -87,6 +108,8 @@ export function buildResolved(
         parts.push(...section.ours)
       } else if (choice === 'theirs') {
         parts.push(...section.theirs)
+      } else if (choice === 'base') {
+        parts.push(...section.base)
       } else {
         // both: ours first, then theirs
         parts.push(...section.ours)

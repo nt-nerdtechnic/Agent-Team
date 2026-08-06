@@ -44,6 +44,9 @@ const GIT_METHODS = [
   'credential_cancel', 'discover_repositories', 'compare_branches', 'clean', 'discard',
   'stage', 'unstage', 'stage_all', 'commit', 'sync', 'init', 'generate_message',
   'check_staged', 'connect_to_remote', 'ignore', 'diff_all', 'reset',
+  // Three-way conflict surface: read the index's merge stages, enumerate
+  // unmerged paths, and stage a hand-merged file as resolved.
+  'conflict_stages', 'list_conflicts', 'mark_resolved',
 ] as const
 
 // search capability methods → backend `search.<method>` one-for-one.
