@@ -2,6 +2,7 @@ import { computed, onScopeDispose, ref, shallowRef, watch } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
+import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
 import type { useBackend } from './useBackend'
 import { bufferTail, createRedrawGuard, dropTuiNoise, stripAnsi } from '../lib/buffer'
@@ -1499,6 +1500,23 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   function mount(el: HTMLElement): void {
     containerRef.value = el
     term.open(el)
+
+    // xterm 6 ships only the DOM renderer, which rewrites a row of DOM nodes
+    // per write. That is the dominant cost of typing latency: a CLI repaints
+    // its viewport on every keystroke, and each repaint lands as several
+    // writes. WebGL moves the drawing to the GPU. Load AFTER open() — the
+    // addon attaches its canvas to the already-created element — and drop back
+    // to the DOM renderer on context loss (GPU reset, driver recovery) rather
+    // than leaving a dead canvas in place.
+    try {
+      const webgl = new WebglAddon()
+      webgl.onContextLoss(() => { webgl.dispose() })
+      term.loadAddon(webgl)
+    } catch (err) {
+      // No usable WebGL (software rendering, blacklisted driver). The DOM
+      // renderer stays active; the pane is slower but fully functional.
+      console.warn('[terminal] WebGL renderer unavailable, using DOM renderer', err)
+    }
 
     // Publish terminal focus to the keybinding context (see _onTermFocus doc).
     term.textarea?.addEventListener('focus', _onTermFocus)
