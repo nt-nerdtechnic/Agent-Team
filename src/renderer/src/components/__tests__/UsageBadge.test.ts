@@ -91,13 +91,16 @@ function makeCliProfiles(
 
 function mountBadge(
   cliProfiles: FakeCliProfiles,
-  opts: { switchHandler?: CliAccountSwitchHandler } = {},
+  opts: { switchHandler?: CliAccountSwitchHandler; attach?: boolean } = {},
 ): VueWrapper {
   return mount(UsageBadge, {
     props: {
       agentKey: 'claude',
       cliProfiles: cliProfiles as unknown as ReturnType<typeof useCliProfiles>,
     },
+    // Only the dismissal tests need a real document tree: events dispatched on
+    // a detached node never reach the document-level listeners.
+    ...(opts.attach ? { attachTo: document.body } : {}),
     // Teleport is stubbed so the popover renders inside the wrapper.
     global: {
       plugins: [i18n],
@@ -554,6 +557,148 @@ describe('UsageBadge – quiescence switch handler', () => {
     expect(notify.alert).toHaveBeenCalledTimes(1)
     expect(notify.alert.mock.calls[0][0]).toBe('panes running')
     expect(usage.refreshUsage).not.toHaveBeenCalled()
+  })
+})
+
+describe('UsageBadge – popover placement', () => {
+  it('flips above the badge when the drop-down would run off the bottom', async () => {
+    usage.usageFor.mockReturnValue(snapshot())
+    const heightSpy = vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(200)
+    const rectSpy = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue({
+      top: 700,
+      bottom: 720,
+      left: 100,
+      right: 140,
+      width: 40,
+      height: 20,
+      x: 100,
+      y: 700,
+      toJSON: () => ({}),
+    } as DOMRect)
+
+    wrapper = mountBadge(makeCliProfiles().fake)
+    await openPopover(wrapper)
+    await nextTick()
+
+    // 720 + 6 + 200 overflows the 768px viewport → top = 700 - 6 - 200.
+    expect(wrapper.find('.usage-pop').attributes('style')).toContain('top: 494px')
+    heightSpy.mockRestore()
+    rectSpy.mockRestore()
+  })
+
+  it('keeps the drop-down placement when there is room below', async () => {
+    usage.usageFor.mockReturnValue(snapshot())
+    const heightSpy = vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(200)
+    const rectSpy = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue({
+      top: 40,
+      bottom: 60,
+      left: 100,
+      right: 140,
+      width: 40,
+      height: 20,
+      x: 100,
+      y: 40,
+      toJSON: () => ({}),
+    } as DOMRect)
+
+    wrapper = mountBadge(makeCliProfiles().fake)
+    await openPopover(wrapper)
+    await nextTick()
+
+    expect(wrapper.find('.usage-pop').attributes('style')).toContain('top: 66px')
+    heightSpy.mockRestore()
+    rectSpy.mockRestore()
+  })
+})
+
+describe('UsageBadge – popover dismissal', () => {
+  // Hover-only dismissal stranded the panel over the UI whenever a mouseleave
+  // was missed (window blur, re-render under the cursor) — GitHub issue #17.
+  it('closes on Escape', async () => {
+    usage.usageFor.mockReturnValue(snapshot())
+    wrapper = mountBadge(makeCliProfiles().fake)
+    await openPopover(wrapper)
+    expect(wrapper.find('.usage-pop').exists()).toBe(true)
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    await nextTick()
+    expect(wrapper.find('.usage-pop').exists()).toBe(false)
+  })
+
+  it('ignores keys other than Escape', async () => {
+    usage.usageFor.mockReturnValue(snapshot())
+    wrapper = mountBadge(makeCliProfiles().fake)
+    await openPopover(wrapper)
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'a' }))
+    await nextTick()
+    expect(wrapper.find('.usage-pop').exists()).toBe(true)
+  })
+
+  it('closes on a pointerdown outside the popover', async () => {
+    usage.usageFor.mockReturnValue(snapshot())
+    wrapper = mountBadge(makeCliProfiles().fake)
+    await openPopover(wrapper)
+
+    document.body.dispatchEvent(new Event('pointerdown', { bubbles: true }))
+    await nextTick()
+    expect(wrapper.find('.usage-pop').exists()).toBe(false)
+  })
+
+  it('stays open on a pointerdown inside the popover', async () => {
+    usage.usageFor.mockReturnValue(snapshot())
+    wrapper = mountBadge(makeCliProfiles({ profiles: [profile('p1', 'A account')] }).fake, {
+      attach: true,
+    })
+    await openPopover(wrapper)
+
+    wrapper.find('.usage-acct').element.dispatchEvent(new Event('pointerdown', { bubbles: true }))
+    await nextTick()
+    expect(wrapper.find('.usage-pop').exists()).toBe(true)
+  })
+
+  it('stays open on a pointerdown on the badge itself', async () => {
+    usage.usageFor.mockReturnValue(snapshot())
+    wrapper = mountBadge(makeCliProfiles().fake, { attach: true })
+    await openPopover(wrapper)
+
+    wrapper.find('.usage-badge').element.dispatchEvent(new Event('pointerdown', { bubbles: true }))
+    await nextTick()
+    expect(wrapper.find('.usage-pop').exists()).toBe(true)
+  })
+
+  it('closes when the window loses focus', async () => {
+    usage.usageFor.mockReturnValue(snapshot())
+    wrapper = mountBadge(makeCliProfiles().fake)
+    await openPopover(wrapper)
+
+    window.dispatchEvent(new Event('blur'))
+    await nextTick()
+    expect(wrapper.find('.usage-pop').exists()).toBe(false)
+  })
+
+  it('drops the document listeners when the popover closes', async () => {
+    usage.usageFor.mockReturnValue(snapshot())
+    wrapper = mountBadge(makeCliProfiles().fake)
+    await openPopover(wrapper)
+
+    const removeSpy = vi.spyOn(document, 'removeEventListener')
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    await nextTick()
+    expect(removeSpy).toHaveBeenCalledWith('keydown', expect.any(Function), true)
+    expect(removeSpy).toHaveBeenCalledWith('pointerdown', expect.any(Function), true)
+    removeSpy.mockRestore()
+  })
+
+  it('drops the document listeners when unmounted while open', async () => {
+    usage.usageFor.mockReturnValue(snapshot())
+    const w = mountBadge(makeCliProfiles().fake)
+    await openPopover(w)
+
+    const removeSpy = vi.spyOn(document, 'removeEventListener')
+    w.unmount()
+    expect(removeSpy).toHaveBeenCalledWith('keydown', expect.any(Function), true)
+    removeSpy.mockRestore()
   })
 })
 

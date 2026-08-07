@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, inject, onBeforeUnmount, ref } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import {
   accountUsageFor,
   formatRemaining,
@@ -43,10 +43,13 @@ const critSwitch = computed(() => tier.value === 'crit')
 const open = ref(false)
 const popStyle = ref<{ top: string; left: string }>({ top: '0px', left: '0px' })
 const badgeRef = ref<HTMLElement | null>(null)
+const popRef = ref<HTMLElement | null>(null)
 let openTimer: ReturnType<typeof setTimeout> | null = null
 let closeTimer: ReturnType<typeof setTimeout> | null = null
 
 const POP_WIDTH = 260
+const POP_GAP = 6
+const VIEWPORT_MARGIN = 8
 
 function onEnter(): void {
   if (closeTimer) {
@@ -58,11 +61,30 @@ function onEnter(): void {
     openTimer = null
     const rect = badgeRef.value?.getBoundingClientRect()
     if (rect) {
-      const left = Math.max(8, Math.min(rect.left, window.innerWidth - POP_WIDTH - 8))
-      popStyle.value = { top: `${rect.bottom + 6}px`, left: `${left}px` }
+      const left = Math.max(
+        VIEWPORT_MARGIN,
+        Math.min(rect.left, window.innerWidth - POP_WIDTH - VIEWPORT_MARGIN)
+      )
+      popStyle.value = { top: `${rect.bottom + POP_GAP}px`, left: `${left}px` }
     }
     open.value = true
+    void nextTick(flipIfOffscreen)
   }, 150)
+}
+
+// The popover's height only exists once it has rendered, so the drop-down
+// placement above is provisional: a badge low in the window would push the
+// panel past the bottom edge, where it covers whatever sits there and can no
+// longer be scrolled to. Flip it above the badge in that case.
+function flipIfOffscreen(): void {
+  const rect = badgeRef.value?.getBoundingClientRect()
+  const height = popRef.value?.offsetHeight ?? 0
+  if (!rect || height === 0) return
+  if (rect.bottom + POP_GAP + height <= window.innerHeight - VIEWPORT_MARGIN) return
+  popStyle.value = {
+    ...popStyle.value,
+    top: `${Math.max(VIEWPORT_MARGIN, rect.top - POP_GAP - height)}px`
+  }
 }
 
 function onLeave(): void {
@@ -76,6 +98,51 @@ function onLeave(): void {
     open.value = false
   }, 120)
 }
+
+function closePop(): void {
+  if (openTimer) {
+    clearTimeout(openTimer)
+    openTimer = null
+  }
+  if (closeTimer) {
+    clearTimeout(closeTimer)
+    closeTimer = null
+  }
+  open.value = false
+}
+
+// Hover alone is not enough to dismiss this panel. It is teleported to <body>
+// at a fixed position, so any missed mouseleave — the window losing focus, the
+// snapshot re-rendering the node out from under the cursor — strands a 260px
+// panel over the UI with nothing underneath it clickable. Esc and a click
+// anywhere outside are the explicit escape hatches; blur covers the stranded
+// case. Listeners are attached only while open (capture phase, so a stopped
+// click deeper in the tree still dismisses).
+function onDocKeydown(e: KeyboardEvent): void {
+  if (e.key === 'Escape') closePop()
+}
+
+function onDocPointerDown(e: Event): void {
+  const target = e.target as Node | null
+  if (target && (popRef.value?.contains(target) || badgeRef.value?.contains(target))) return
+  closePop()
+}
+
+function detachDismissListeners(): void {
+  document.removeEventListener('keydown', onDocKeydown, true)
+  document.removeEventListener('pointerdown', onDocPointerDown, true)
+  window.removeEventListener('blur', closePop)
+}
+
+watch(open, (isOpen) => {
+  if (isOpen) {
+    document.addEventListener('keydown', onDocKeydown, true)
+    document.addEventListener('pointerdown', onDocPointerDown, true)
+    window.addEventListener('blur', closePop)
+  } else {
+    detachDismissListeners()
+  }
+})
 
 const { alert: notifyAlert } = useNotify()
 const t = i18n.global.t
@@ -120,6 +187,7 @@ function openAccountSettings(): void {
 onBeforeUnmount(() => {
   if (openTimer) clearTimeout(openTimer)
   if (closeTimer) clearTimeout(closeTimer)
+  detachDismissListeners()
 })
 
 function rowRemaining(w: UsageWindow): string {
@@ -224,6 +292,7 @@ function acctTitle(profileId: string | null): string {
   <Teleport to="body">
     <div
       v-if="open && snap"
+      ref="popRef"
       class="usage-pop"
       :style="popStyle"
       @mouseenter="onEnter"
