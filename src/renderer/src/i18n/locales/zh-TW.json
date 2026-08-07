@@ -180,6 +180,7 @@
       "format-markdown": "markdown",
       "doc-badge": "文件",
       "empty-active": "沒有進行中的計畫。",
+      "empty-flat": "沒有未歸檔的計畫。",
       "empty-all": "尚無任何計畫。請 agent 建立計畫，或將文件升級為計畫。",
       "copy-path-success": "已複製路徑",
       "delete-all": "全部刪除",

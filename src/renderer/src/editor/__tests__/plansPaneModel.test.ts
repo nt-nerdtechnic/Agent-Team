@@ -1,7 +1,6 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import {
-  clearStoredChoice,
   comparePlanRows,
   loadStoredChoice,
   planMatchesQuery,
@@ -155,18 +154,6 @@ describe('loadStoredChoice / saveStoredChoice', () => {
       throw new Error('quota')
     })
     expect(() => saveStoredChoice('navide.plans.sort./ws', 'updated')).not.toThrow()
-    spy.mockRestore()
-  })
-
-  it('clears a superseded key and swallows removal errors', () => {
-    saveStoredChoice('navide.plans.sort./ws', 'updated')
-    clearStoredChoice('navide.plans.sort./ws')
-    expect(localStorage.getItem('navide.plans.sort./ws')).toBeNull()
-
-    const spy = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
-      throw new Error('denied')
-    })
-    expect(() => clearStoredChoice('navide.plans.sort./ws')).not.toThrow()
     spy.mockRestore()
   })
 })

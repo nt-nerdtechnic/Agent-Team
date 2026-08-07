@@ -10,7 +10,6 @@ import {
   PLAN_GROUP_MODES,
   PLAN_SORT_DIRECTIONS,
   PLAN_SORT_MODES,
-  clearStoredChoice,
   comparePlanRows,
   loadStoredChoice,
   planMatchesQuery,
@@ -171,7 +170,7 @@ watch(() => props.workspacePath, (next) => {
   collapsedSections.value = loadCollapsed(next)
   searchQuery.value = ''
   stageFilter.value = loadStoredChoice(filterStorageKey(next), STAGE_FILTERS, 'all')
-  sortMode.value = loadSortMode(next)
+  sortMode.value = loadStoredChoice(sortStorageKey(next), PLAN_SORT_MODES, 'updated')
   sortDirection.value = loadStoredChoice(
     sortDirStorageKey(next),
     PLAN_SORT_DIRECTIONS,
@@ -189,11 +188,11 @@ watch(() => props.backend.status?.value, (status) => {
 // direction and grouping are persisted per workspace with the same fail-safe
 // localStorage contract as the collapse state below.
 const FILTER_KEY_PREFIX = 'navide.plans.filter.'
-// The sort default moved from 'title' to 'updated'. Bumping the key prefix IS
-// the migration: workspaces still holding the old stored default pick up the
-// new one, and the retired v1 key is dropped as it is superseded.
-const LEGACY_SORT_KEY_PREFIX = 'navide.plans.sort.'
-const SORT_KEY_PREFIX = 'navide.plans.sort.v2.'
+// The default moved from 'title' to 'updated'. No migration is needed: these
+// keys are written only by the watchers below, i.e. only once the user has
+// picked something, so a stored value is always an explicit choice and a
+// workspace that was left alone simply reads the new default.
+const SORT_KEY_PREFIX = 'navide.plans.sort.'
 const SORT_DIR_KEY_PREFIX = 'navide.plans.sortdir.'
 const GROUP_KEY_PREFIX = 'navide.plans.group.'
 const STAGE_FILTERS = ['all', ...PLAN_STAGES] as const
@@ -212,15 +211,9 @@ function groupStorageKey(workspacePath: string): string {
   return `${GROUP_KEY_PREFIX}${workspacePath}`
 }
 
-/** Reads the current sort choice and retires the superseded v1 key with it. */
-function loadSortMode(workspacePath: string): PlanSortMode {
-  clearStoredChoice(`${LEGACY_SORT_KEY_PREFIX}${workspacePath}`)
-  return loadStoredChoice(sortStorageKey(workspacePath), PLAN_SORT_MODES, 'updated')
-}
-
 const searchQuery = ref('')
 const stageFilter = ref<StageFilter>(loadStoredChoice(filterStorageKey(props.workspacePath), STAGE_FILTERS, 'all'))
-const sortMode = ref<PlanSortMode>(loadSortMode(props.workspacePath))
+const sortMode = ref<PlanSortMode>(loadStoredChoice(sortStorageKey(props.workspacePath), PLAN_SORT_MODES, 'updated'))
 const sortDirection = ref<PlanSortDirection>(
   loadStoredChoice(sortDirStorageKey(props.workspacePath), PLAN_SORT_DIRECTIONS, DEFAULT_SORT_DIRECTION[sortMode.value]),
 )
@@ -295,6 +288,13 @@ const showDocsSection = computed(
     groupMode.value === 'stage' &&
     stageFilter.value === 'all' &&
     (!searchActive.value || visibleDocItems.value.length > 0),
+)
+
+// Same contract as the doc group: while searching, an empty flat list is not
+// worth a header — the Archived group below may still have matched something,
+// so `noVisibleResults` alone would leave an empty "All plans / 0" above it.
+const showFlatSection = computed(
+  () => groupMode.value === 'flat' && (!searchActive.value || flatRows.value.length > 0),
 )
 
 // A row is one listed file: a plan (meta present) or a plain doc (meta null).
@@ -907,7 +907,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
       </div>
       <div v-if="noVisibleResults" class="plans-empty">{{ t('pane.plans.search-no-results') }}</div>
 
-      <section v-if="groupMode === 'flat' && !noVisibleResults" class="plans-section">
+      <section v-if="showFlatSection" class="plans-section">
         <div
           class="plans-section-head"
           role="button"
@@ -974,7 +974,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
               @keydown.space.stop
             >✕</button>
           </div>
-          <div v-if="!flatRows.length" class="plans-empty">{{ t('pane.plans.empty-active') }}</div>
+          <div v-if="!flatRows.length" class="plans-empty">{{ t('pane.plans.empty-flat') }}</div>
         </template>
       </section>
 

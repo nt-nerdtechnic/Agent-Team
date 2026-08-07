@@ -106,11 +106,16 @@ const IMAGE_EXTENSIONS: Record<string, string> = {
   'image/tiff': 'tiff'
 }
 
-/** `2026-08-07 20.18.33` — mirrors how macOS itself names screenshots. */
+/**
+ * `2026-08-07-20.18.33`. Hyphenated rather than spaced like macOS's own
+ * screenshot names: the path gets pasted straight into a CLI prompt, and a
+ * name with no spaces needs no quoting for the shell and stays a single
+ * recognisable token for an agent scanning the line for a file to read.
+ */
 function timestampName(now: number): string {
   const d = new Date(now)
   const p = (n: number): string => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}.${p(d.getMinutes())}.${p(d.getSeconds())}`
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}.${p(d.getMinutes())}.${p(d.getSeconds())}`
 }
 
 /**
@@ -133,7 +138,7 @@ export async function saveClipboardImage(
   const ext = IMAGE_EXTENSIONS[mediaType]
   if (!ext || !bytes.length) return null
   await mkdir(destDir, { recursive: true })
-  const name = `Pasted Image ${timestampName(now)}.${ext}`
+  const name = `Pasted-Image-${timestampName(now)}.${ext}`
   for (let attempt = 1; attempt <= 50; attempt++) {
     const dest = join(destDir, attempt === 1 ? name : nextCandidate(name, attempt))
     try {

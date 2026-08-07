@@ -135,7 +135,7 @@ describe('saveClipboardImage', () => {
     const path = await saveClipboardImage(png, 'image/png', store, at)
 
     expect(path).not.toBeNull()
-    expect(path!.endsWith('Pasted Image 2026-08-07 20.18.33.png')).toBe(true)
+    expect(path!.endsWith('Pasted-Image-2026-08-07-20.18.33.png')).toBe(true)
     expect(new Uint8Array(await readFile(path!))).toEqual(png)
   })
 

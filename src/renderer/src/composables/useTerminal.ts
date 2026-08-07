@@ -13,7 +13,6 @@ import { installTerminalZoomShortcuts, terminalFontSize } from './useTerminalFon
 import { getResumeConcurrency } from '../lib/resumeConcurrency'
 import { chunkForPty, shouldOpenMentionMenu } from '../lib/cliContext'
 import { settingsGet, settingsSet } from '../lib/settings'
-import { shellEscape } from '../lib/drop'
 import { extractClipboardImage, saveClipboardImage } from '../lib/clipboardImage'
 import { TERMINAL_CREATE_TIMEOUT_MS } from '../lib/resume-command'
 import { setContext } from '../keybindings/contextService'
@@ -1828,8 +1827,11 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         if (term.textarea) term.textarea.value = ''
         selAnchorX = -1
         selAnchorY = -1
+        // Sent unquoted: the generated name has no spaces, so the shell is
+        // happy and an agent scanning for a readable path is not tripped up by
+        // quotes it may not strip.
         void saveClipboardImage(image).then((path) => {
-          if (path) pasteText(shellEscape(path))
+          if (path) pasteText(path)
         })
         return
       }

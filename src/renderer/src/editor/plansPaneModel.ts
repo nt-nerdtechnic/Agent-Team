@@ -121,12 +121,3 @@ export function saveStoredChoice(storageKey: string, value: string): void {
     // Storage unavailable (quota/private mode) — persistence is best-effort.
   }
 }
-
-/** Drop a superseded key so a retired preference does not linger forever. */
-export function clearStoredChoice(storageKey: string): void {
-  try {
-    localStorage.removeItem(storageKey)
-  } catch {
-    // Same best-effort contract as saveStoredChoice.
-  }
-}

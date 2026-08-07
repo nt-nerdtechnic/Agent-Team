@@ -180,6 +180,7 @@
       "format-markdown": "markdown",
       "doc-badge": "doc",
       "empty-active": "No active plans.",
+      "empty-flat": "No unarchived plans.",
       "empty-all": "No plans yet. Ask an agent to draft one, or promote a doc to a plan.",
       "copy-path-success": "Path copied",
       "delete-all": "Delete all",

@@ -1668,7 +1668,7 @@ describe('PlansPane – search, stage filter, sort', () => {
     await wrapper.find('.plans-sort-select').setValue('updated')
     names = wrapper.findAll('.plan-row-name').map((n) => n.text())
     expect(names.indexOf('Zebra Plan')).toBeLessThan(names.indexOf('Apple Plan'))
-    expect(localStorage.getItem('navide.plans.sort.v2./ws')).toBe('updated')
+    expect(localStorage.getItem('navide.plans.sort./ws')).toBe('updated')
   })
 
   it('sorts within a group by done/total ratio when Progress is selected', async () => {
@@ -1774,15 +1774,31 @@ describe('PlansPane – flat list default', () => {
     expect(names.indexOf('New Progress')).toBeLessThan(names.indexOf('Old Draft'))
   })
 
-  it('ignores a stored v1 sort choice and clears the retired key', async () => {
+  it('keeps an explicitly stored sort choice instead of forcing the new default', async () => {
+    // The key is only ever written by the change watcher, so a stored value is
+    // a deliberate pick — the new 'updated' default must not overrule it.
     localStorage.setItem('navide.plans.sort./ws', 'title')
-    const wrapper = mountDefault(crossStageBackend())
+    // Newest is Zebra, so 'updated' would list it first — title order must not.
+    const backend = makeBackend({
+      htmlEntries: [
+        { name: 'aaa_111111.html', rel_path: '.agent-team/plans/aaa_111111.html', is_dir: false },
+        { name: 'zzz_222222.html', rel_path: '.agent-team/plans/zzz_222222.html', is_dir: false },
+      ],
+      htmlFiles: {
+        '.agent-team/plans/aaa_111111.html': flatPlan('Apple Plan', 'draft'),
+        '.agent-team/plans/zzz_222222.html': flatPlan('Zebra Plan', 'in-progress'),
+      },
+      mtimes: {
+        '.agent-team/plans/aaa_111111.html': 100,
+        '.agent-team/plans/zzz_222222.html': 200,
+      },
+    })
+    const wrapper = mountDefault(backend)
     await flushPromises()
 
-    expect(localStorage.getItem('navide.plans.sort./ws')).toBeNull()
-    expect((wrapper.find('.plans-sort-select').element as HTMLSelectElement).value).toBe('updated')
+    expect((wrapper.find('.plans-sort-select').element as HTMLSelectElement).value).toBe('title')
     const names = wrapper.findAll('.plan-row-name').map((n) => n.text())
-    expect(names.indexOf('New Progress')).toBeLessThan(names.indexOf('Old Draft'))
+    expect(names.indexOf('Apple Plan')).toBeLessThan(names.indexOf('Zebra Plan'))
   })
 
   it('flips the order when the direction button is clicked, and persists it', async () => {
@@ -1829,5 +1845,59 @@ describe('PlansPane – flat list default', () => {
     const names = wrapper.findAll('.plan-row-name').map((n) => n.text())
     expect(names).toContain('Active Plan')
     expect(names.indexOf('New Progress')).toBeLessThan(names.indexOf('Active Plan'))
+  })
+})
+
+// ── Flat list edge cases surfaced in review ──────────────────────────────────
+
+describe('PlansPane – flat list empty states', () => {
+  const archivedPlan = (name: string) =>
+    htmlPlan({
+      schemaVersion: 1,
+      name,
+      overview: '',
+      stage: 'done',
+      approvedAt: null,
+      archivedAt: '2026-07-20T00:00:00Z',
+      todos: [],
+      reviewNotes: [],
+    })
+
+  function mountDefault(backend: ReturnType<typeof makeBackend>) {
+    return mount(PlansPane, {
+      props: { workspacePath: '/ws', backend: backend as never },
+      global: { plugins: [i18n] },
+    })
+  }
+
+  function archivedOnlyBackend() {
+    return makeBackend({
+      htmlEntries: [{ name: 'arch_111111.html', rel_path: '.agent-team/plans/arch_111111.html', is_dir: false }],
+      htmlFiles: { '.agent-team/plans/arch_111111.html': archivedPlan('Shipped Thing') },
+      mtimes: { '.agent-team/plans/arch_111111.html': 300 },
+      // Empty the legacy markdown dir too, so the archived plan is the only file.
+      dirEntries: { '.cursor/plans': [] },
+    })
+  }
+
+  it('drops the flat header entirely when a search only matches archived plans', async () => {
+    const wrapper = mountDefault(archivedOnlyBackend())
+    await flushPromises()
+
+    await wrapper.find('.plans-search-input').setValue('Shipped Thing')
+    // The Archived group has the only match; an empty "All plans / 0" header
+    // above it would be pure noise.
+    const sections = wrapper.findAll('.plans-section-title').map((s) => s.text())
+    expect(sections.some((s) => s.includes('All plans'))).toBe(false)
+    expect(sections.some((s) => s.includes('Archived'))).toBe(true)
+    expect(wrapper.text()).not.toContain('No plans match')
+  })
+
+  it('says "no unarchived plans", not "no active plans", when every plan is archived', async () => {
+    const wrapper = mountDefault(archivedOnlyBackend())
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('No unarchived plans.')
+    expect(wrapper.text()).not.toContain('No active plans.')
   })
 })
