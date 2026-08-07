@@ -4,7 +4,7 @@ import { useTerminal } from '../composables/useTerminal'
 import { useTheme } from '../composables/useTheme'
 import type { useBackend } from '../composables/useBackend'
 import type { useCliProfiles } from '../composables/useCliProfiles'
-import { extractDropPaths, shellEscape } from '../lib/drop'
+import { extractDropPaths, shellEscape, stabilizeDroppedPaths } from '../lib/drop'
 import { CLI_CONTEXT_MIME, PANE_ID_MIME, resolveCliDropSource, writeCliPaneDragPayload } from '../lib/cliContext'
 import { PLAN_REF_MIME, isPlanDrag, parsePlanRefPayload, type PlanDragRef } from '../lib/planDrag'
 import { formatLoopTime } from '../lib/loopPrompt'
@@ -219,7 +219,7 @@ function onTerminalContextMenu(): void {
   window.agentTeam?.showTerminalContextMenu?.(terminal.getSelection())
 }
 
-function onTerminalDrop(e: DragEvent): void {
+async function onTerminalDrop(e: DragEvent): Promise<void> {
   isDragOver.value = false
   isCliDragOver.value = false
   isPlanDragOver.value = false
@@ -242,8 +242,9 @@ function onTerminalDrop(e: DragEvent): void {
     if (sourcePaneId) emit('cli-context-drop', sourcePaneId)
     return
   }
-  const paths = extractDropPaths(e)
-  if (!paths.length) return
+  const dropped = extractDropPaths(e)
+  if (!dropped.length) return
+  const paths = await stabilizeDroppedPaths(dropped)
   terminal.pasteText(paths.map(shellEscape).join(' '))
 }
 

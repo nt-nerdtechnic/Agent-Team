@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
-import { extractDropPaths } from '../lib/drop'
+import { extractDropPaths, stabilizeDroppedPaths } from '../lib/drop'
 
 export interface QuestionItem {
   prompt: string
@@ -66,12 +66,16 @@ function submit(): void {
   emit('answer', buildCombined(), [...answers.value])
 }
 
-function onAnswerDrop(i: number, e: DragEvent): void {
-  const paths = extractDropPaths(e)
-  if (!paths.length) return
+async function onAnswerDrop(i: number, e: DragEvent): Promise<void> {
+  const dropped = extractDropPaths(e)
+  if (!dropped.length) return
+  // Read the caret before awaiting — the drop event and the textarea's
+  // selection are only meaningful synchronously.
   const el = e.target as HTMLTextAreaElement
+  const caret = el.selectionStart
+  const paths = await stabilizeDroppedPaths(dropped)
   const cur = answers.value[i] ?? ''
-  const start = el.selectionStart ?? cur.length
+  const start = Math.min(caret ?? cur.length, cur.length)
   setAnswer(i, cur.slice(0, start) + paths.join(' ') + cur.slice(start))
 }
 

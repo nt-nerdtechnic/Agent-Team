@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch, defineAsyncComponent } from 'vue'
 import type { PaneArgContext } from '../agents'
-import { extractDropPaths } from '../lib/drop'
+import { extractDropPaths, stabilizeDroppedPaths } from '../lib/drop'
 import { settingsGet, settingsSet } from '../lib/settings'
 import ViewPanel, { type LayoutMode } from './ViewPanel.vue'
 import RebuildIcon from './RebuildIcon.vue'
@@ -929,15 +929,17 @@ function onWorkspaceDrop(e: DragEvent): void {
   workspacePath.value = paths[0]
 }
 
-function onTaskDrop(e: DragEvent): void {
+async function onTaskDrop(e: DragEvent): Promise<void> {
   isTaskDragOver.value = false
-  const paths = extractDropPaths(e)
-  if (!paths.length) return
-  const text = paths.join(' ')
+  const dropped = extractDropPaths(e)
+  if (!dropped.length) return
+  // Read the caret before awaiting — the drop event is only live synchronously.
   const el = e.target as HTMLTextAreaElement
-  const start = el.selectionStart ?? taskDescription.value.length
-  taskDescription.value =
-    taskDescription.value.slice(0, start) + text + taskDescription.value.slice(start)
+  const caret = el.selectionStart
+  const text = (await stabilizeDroppedPaths(dropped)).join(' ')
+  const cur = taskDescription.value
+  const start = Math.min(caret ?? cur.length, cur.length)
+  taskDescription.value = cur.slice(0, start) + text + cur.slice(start)
 }
 
 // ── pipeline pane: draggable split (top = controls, bottom = agents) ─────────
