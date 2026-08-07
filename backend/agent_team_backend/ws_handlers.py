@@ -5124,8 +5124,19 @@ async def agent_msg_delivered(session: "Session", msg_id: str, msg_type: str, pa
 async def agent_msg_log_snapshot(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
 
-    limit = max(1, min(int(payload.get("limit", 500)), 500))
-    rows = app.agent_message_log.tail(limit)
+    raw_limit = payload.get("limit", 500)
+    try:
+        limit = int(raw_limit)
+    except (TypeError, ValueError, OverflowError):
+        # null / "abc" / Infinity — a bad field is BAD_REQUEST, like the
+        # neighbouring agent_msg.route and agent_msg.delivered handlers.
+        await session.send_json(
+            make_error(
+                msg_id, msg_type, "BAD_REQUEST", "agent_msg.log_snapshot needs a numeric limit"
+            )
+        )
+        return
+    rows = app.agent_message_log.tail(max(1, min(limit, 500)))
     await session.send_json(make_response(msg_id, msg_type, {"rows": rows}))
 
 
@@ -5134,7 +5145,12 @@ async def agent_msg_log_append(session: "Session", msg_id: str, msg_type: str, p
     from . import app
 
     rows = payload.get("rows")
-    written = app.agent_message_log.append(rows if isinstance(rows, list) else [])
+    if not isinstance(rows, list):
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "agent_msg.log_append needs a rows list")
+        )
+        return
+    written = app.agent_message_log.append(rows)
     await session.send_json(make_response(msg_id, msg_type, {"written": written}))
 
 
@@ -5143,7 +5159,14 @@ async def agent_msg_log_update(session: "Session", msg_id: str, msg_type: str, p
     from . import app
 
     updates = payload.get("updates")
-    updated = app.agent_message_log.update(updates if isinstance(updates, list) else [])
+    if not isinstance(updates, list):
+        await session.send_json(
+            make_error(
+                msg_id, msg_type, "BAD_REQUEST", "agent_msg.log_update needs an updates list"
+            )
+        )
+        return
+    updated = app.agent_message_log.update(updates)
     await session.send_json(make_response(msg_id, msg_type, {"updated": updated}))
 
 
@@ -5152,7 +5175,14 @@ async def agent_msg_log_clear(session: "Session", msg_id: str, msg_type: str, pa
     from . import app
 
     keep = payload.get("keep_statuses")
+    if keep is not None and not isinstance(keep, list):
+        await session.send_json(
+            make_error(
+                msg_id, msg_type, "BAD_REQUEST", "agent_msg.log_clear keep_statuses must be a list"
+            )
+        )
+        return
     deleted = app.agent_message_log.clear(
-        [str(s) for s in keep] if isinstance(keep, list) else None
+        [str(s) for s in keep] if keep is not None else None
     )
     await session.send_json(make_response(msg_id, msg_type, {"deleted": deleted}))

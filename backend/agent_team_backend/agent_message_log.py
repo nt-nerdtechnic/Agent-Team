@@ -8,20 +8,24 @@ workspace), so it lives in the global database, not a per-workspace one.
 
 ``uid`` is supplied by the renderer (``<boot-hex>:<local-seq>``) and is
 globally unique; the backend never mints ids, which keeps re-sending the same
-row idempotent (INSERT OR REPLACE). Newest ``MAX_ROWS`` rows are kept — the
-prune runs in the same transaction as the insert. ``from``/``to`` are
-reserved-ish words in SQL, hence the ``sender``/``recipient`` columns.
+row idempotent (upsert). ``uid`` is an opaque key — it is *not* ordered, so
+every read and the prune order by ``created_at`` plus the backend-assigned
+``seq`` insertion counter, which breaks the ties that ``created_at``
+(millisecond resolution) produces for a fan-out queued in one tick.
+``from``/``to`` are reserved-ish words in SQL, hence the
+``sender``/``recipient`` columns.
 
-Resilience follows history_store: a sqlite failure is logged and swallowed,
-never raised at the caller, and the rows stay in the in-memory tail buffer so
-reads within the session still work.
+Surviving a backend restart is this store's entire purpose, so — unlike
+history_store, which serves hot per-run tails — there is no in-memory mirror:
+``tail()`` always reads the database, and what it returns is exactly what is
+persisted. A sqlite failure is logged and swallowed, never raised at the
+caller; it simply means the data was not persisted.
 """
 
 from __future__ import annotations
 
 import logging
 import sqlite3
-from collections import deque
 from threading import RLock
 from typing import Any
 
@@ -31,7 +35,12 @@ log = logging.getLogger("agent_team_backend.agent_message_log")
 
 _COMPONENT = "agent_message_log"
 
-MAX_ROWS = 500  # rows kept on disk, and the in-memory ring buffer size
+MAX_ROWS = 500  # rows kept on disk
+# The store can never retain more than MAX_ROWS, so a larger batch is mostly
+# work thrown away; cap it so a renderer bug cannot block the event loop
+# (append() is a synchronous sqlite call made from an async handler).
+MAX_APPEND_ROWS = MAX_ROWS * 2
+# Characters, not bytes: a CJK message can occupy ~3x this in UTF-8.
 MAX_CONTENT_CHARS = 64 * 1024  # one runaway message must not bloat the db
 _TRUNCATION_MARKER = "…[truncated]"
 
@@ -51,6 +60,11 @@ _COLUMNS = (
     "remote",
     "remote_workspace",
 )
+
+# Upsert: everything but the primary key and ``seq`` is refreshed. Keeping the
+# original ``seq`` is what makes a re-append (the frontend folds a pending
+# status patch into a pending append row) keep its place in the log.
+_CONFLICT_UPDATE = ", ".join(f"{c} = excluded.{c}" for c in _COLUMNS if c != "uid")
 
 
 def _create_schema(cur: sqlite3.Cursor) -> None:
@@ -72,6 +86,28 @@ def _create_schema(cur: sqlite3.Cursor) -> None:
     )
 
 
+def _add_seq(cur: sqlite3.Cursor) -> None:
+    """v2: the insertion counter that breaks ``created_at`` ties.
+
+    Existing rows are backfilled in ``created_at`` order — the best order
+    available for data written before the counter existed.
+    """
+    cur.execute(
+        "ALTER TABLE agent_message_log ADD COLUMN seq INTEGER NOT NULL DEFAULT 0"
+    )
+    existing = cur.execute(
+        "SELECT uid FROM agent_message_log ORDER BY created_at ASC, uid ASC"
+    ).fetchall()
+    for seq, row in enumerate(existing, start=1):
+        cur.execute(
+            "UPDATE agent_message_log SET seq = ? WHERE uid = ?", (seq, row["uid"])
+        )
+    cur.execute("DROP INDEX IF EXISTS agent_message_log_created")
+    cur.execute(
+        "CREATE INDEX agent_message_log_created ON agent_message_log (created_at, seq)"
+    )
+
+
 def _clamp_content(content: str) -> str:
     if len(content) <= MAX_CONTENT_CHARS:
         return content
@@ -89,7 +125,9 @@ def _optional_int(value: Any) -> int | None:
         return None
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: json.loads accepts the non-standard `Infinity`
+        # literal, and int(inf) raises.
         return None
 
 
@@ -124,47 +162,87 @@ def _normalize(row: Any) -> dict[str, Any] | None:
     }
 
 
+def _safe_normalize(row: Any) -> dict[str, Any] | None:
+    """``_normalize`` that can never take the rest of the batch down."""
+    try:
+        return _normalize(row)
+    except Exception as err:  # one hostile value must skip only its own row
+        log.warning("agent message log row skipped: %s", err)
+        return None
+
+
 class AgentMessageLog:
-    """Thread-safe append-only message log with an in-memory tail buffer."""
+    """Thread-safe append-only message log backed only by the database."""
 
     def __init__(self, db: Database) -> None:
         self._lock = RLock()
         self._db = db
         self._db.migrate(_COMPONENT, 1, _create_schema)
-        # Oldest-first mirror of the newest rows, so reads stay correct even
-        # when a write failed and the rows only ever made it to memory.
-        self._tail: deque[dict[str, Any]] = deque(maxlen=MAX_ROWS)
+        self._db.migrate(_COMPONENT, 2, _add_seq)
+        self._seq = self._read_max_seq()
+
+    def _read_max_seq(self) -> int:
+        try:
+            with self._db.transaction() as cur:
+                row = cur.execute(
+                    "SELECT MAX(seq) AS n FROM agent_message_log"
+                ).fetchone()
+        except sqlite3.Error as err:
+            log.warning("agent message log seq seed failed: %s", err)
+            return 0
+        return int(row["n"] or 0) if row is not None else 0
 
     # ───────────────────────── Writing ──────────────────────────────
     def append(self, rows: list[dict[str, Any]]) -> int:
         """Persist a batch of rows; returns how many were written.
 
-        Unusable rows are skipped. A failed write degrades to memory-only:
-        the rows stay in the tail buffer, the failure is logged, and 0 is
-        returned.
+        Unusable rows are skipped, a uid repeated inside the batch keeps only
+        its last occurrence, and anything beyond ``MAX_APPEND_ROWS`` is
+        dropped. A failed write is logged and 0 is returned — nothing was
+        persisted, and ``tail()`` will say so.
         """
-        clean = [r for r in (_normalize(row) for row in rows or []) if r is not None]
+        rows = list(rows or [])
+        if len(rows) > MAX_APPEND_ROWS:
+            log.warning(
+                "agent message log batch of %d rows truncated to %d",
+                len(rows),
+                MAX_APPEND_ROWS,
+            )
+            rows = rows[-MAX_APPEND_ROWS:]  # the newest are the ones kept anyway
+        # dict keyed by uid: a duplicate inside one batch would otherwise be
+        # inserted twice, with the later status lost to the upsert.
+        clean: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            normalized = _safe_normalize(row)
+            if normalized is not None:
+                clean[normalized["uid"]] = normalized
         if not clean:
             return 0
         with self._lock:
-            self._buffer_append(clean)
+            seq = self._seq
+            values = []
+            for row in clean.values():
+                seq += 1
+                values.append(tuple(row[col] for col in _COLUMNS) + (seq,))
             try:
                 with self._db.transaction() as cur:
                     cur.executemany(
-                        "INSERT OR REPLACE INTO agent_message_log"
-                        f" ({', '.join(_COLUMNS)})"
-                        f" VALUES ({', '.join('?' * len(_COLUMNS))})",
-                        [tuple(row[col] for col in _COLUMNS) for row in clean],
+                        "INSERT INTO agent_message_log"
+                        f" ({', '.join(_COLUMNS)}, seq)"
+                        f" VALUES ({', '.join('?' * (len(_COLUMNS) + 1))})"
+                        f" ON CONFLICT(uid) DO UPDATE SET {_CONFLICT_UPDATE}",
+                        values,
                     )
                     cur.execute(
                         "DELETE FROM agent_message_log WHERE uid NOT IN"
                         " (SELECT uid FROM agent_message_log"
-                        "  ORDER BY created_at DESC, uid DESC LIMIT ?)",
+                        "  ORDER BY created_at DESC, seq DESC LIMIT ?)",
                         (MAX_ROWS,),
                     )
             except sqlite3.Error as err:
                 log.warning("agent message log append failed: %s", err)
                 return 0
+            self._seq = seq
         return len(clean)
 
     def update(self, updates: list[dict[str, Any]]) -> int:
@@ -192,7 +270,6 @@ class AgentMessageLog:
                             fields["delivered_at"] = _optional_int(update["delivered_at"])
                         if not fields:
                             continue
-                        self._buffer_update(uid, fields)
                         cur.execute(
                             "UPDATE agent_message_log SET"
                             f" {', '.join(f'{k} = ?' for k in fields)}"
@@ -215,9 +292,6 @@ class AgentMessageLog:
             DEFAULT_KEEP_STATUSES if keep_statuses is None else keep_statuses
         )]
         with self._lock:
-            self._tail = deque(
-                (row for row in self._tail if row["status"] in keep), maxlen=MAX_ROWS
-            )
             try:
                 with self._db.transaction() as cur:
                     if keep:
@@ -235,40 +309,21 @@ class AgentMessageLog:
 
     # ───────────────────────── Reading ──────────────────────────────
     def tail(self, limit: int = MAX_ROWS) -> list[dict[str, Any]]:
-        """The most recent rows, oldest last — the renderer's array order.
+        """The most recent rows, newest last — the renderer's array order.
 
-        Serves from the in-memory buffer when warm, otherwise from the
-        database (warming the buffer for next time).
+        Always a database read: this store exists to survive restarts, so a
+        read must never report anything but what is actually persisted.
         """
         limit = max(1, min(int(limit), MAX_ROWS))
         with self._lock:
-            if self._tail:
-                return [dict(row) for row in list(self._tail)[-limit:]]
             try:
                 with self._db.transaction() as cur:
                     found = cur.execute(
                         f"SELECT {', '.join(_COLUMNS)} FROM agent_message_log"
-                        " ORDER BY created_at DESC, uid DESC LIMIT ?",
-                        (MAX_ROWS,),
+                        " ORDER BY created_at DESC, seq DESC LIMIT ?",
+                        (limit,),
                     ).fetchall()
             except sqlite3.Error as err:
                 log.warning("agent message log read failed: %s", err)
                 return []
-            rows = [dict(row) for row in reversed(found)]
-            self._tail = deque(rows, maxlen=MAX_ROWS)
-            return [dict(row) for row in rows[-limit:]]
-
-    # ───────────────────────── Tail buffer ──────────────────────────
-    def _buffer_append(self, rows: list[dict[str, Any]]) -> None:
-        uids = {row["uid"] for row in rows}
-        if any(row["uid"] in uids for row in self._tail):
-            self._tail = deque(
-                (row for row in self._tail if row["uid"] not in uids), maxlen=MAX_ROWS
-            )
-        self._tail.extend(dict(row) for row in rows)
-
-    def _buffer_update(self, uid: str, fields: dict[str, Any]) -> None:
-        for row in self._tail:
-            if row["uid"] == uid:
-                row.update(fields)
-                return
+        return [dict(row) for row in reversed(found)]

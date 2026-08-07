@@ -428,6 +428,51 @@ def test_manual_pane_rebuild_sweeps_legacy_duplicates(
     assert next(p for p in manual if p.pane_id == "pane-stale").spawn_status == "removed"
 
 
+def test_manual_pane_fresh_rebuild_repoints_session_and_spares_others(
+    store_with_stage: tuple[ProjectStore, str]
+) -> None:
+    # A FRESH rebuild (as opposed to a resume) re-keys through previous_pane_id
+    # while carrying a brand-new session id. The record must follow the new
+    # session — keeping its identity — and the sweep must not touch unrelated
+    # panes, whose sessions differ.
+    store, ws = store_with_stage
+    project = store.load_or_create(ws)
+    project.panes.append(PaneRecord(pane_id="pane-a", origin="manual", agent="claude",
+                                    spawn_status="spawned", session_id="old-sess",
+                                    custom_name="keep-me"))
+    project.panes.append(PaneRecord(pane_id="pane-other", origin="manual", agent="claude",
+                                    spawn_status="spawned", session_id="other-sess"))
+    store.save(project)
+
+    store.record_manual_pane_spawn(ws, pane_id="pane-b", previous_pane_id="pane-a",
+                                   agent="claude", session_id="new-sess")
+
+    manual = [p for p in store.peek(ws).panes if p.origin == "manual"]
+    spawned = {p.pane_id: p for p in manual if p.spawn_status == "spawned"}
+    assert set(spawned) == {"pane-b", "pane-other"}
+    assert spawned["pane-b"].session_id == "new-sess"
+    assert spawned["pane-b"].custom_name == "keep-me"
+    assert spawned["pane-other"].session_id == "other-sess"
+
+
+def test_manual_pane_rebuild_without_session_keeps_the_previous_one(
+    store_with_stage: tuple[ProjectStore, str]
+) -> None:
+    # CLIs that cannot pin a session id at launch send an empty session_id on
+    # rebuild. That must leave the existing pointer alone rather than clearing
+    # it, so the pane still resolves to its transcript.
+    store, ws = store_with_stage
+    store.record_manual_pane_spawn(ws, pane_id="pane-a", agent="qwen", session_id="old-sess")
+
+    store.record_manual_pane_spawn(ws, pane_id="pane-b", previous_pane_id="pane-a",
+                                   agent="qwen", session_id="")
+
+    manual = [p for p in store.peek(ws).panes if p.origin == "manual"]
+    assert len(manual) == 1
+    assert manual[0].pane_id == "pane-b"
+    assert manual[0].session_id == "old-sess"
+
+
 def test_manual_pane_exact_match_beats_session_only_record(
     store_with_stage: tuple[ProjectStore, str]
 ) -> None:

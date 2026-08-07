@@ -472,20 +472,50 @@ async def test_log_clear_handler_honors_explicit_keep_statuses(message_log: Any)
 
 
 @pytest.mark.asyncio
-async def test_log_handlers_tolerate_malformed_payloads(message_log: Any) -> None:
+@pytest.mark.parametrize(
+    ("msg_type", "payload"),
+    [
+        ("agent_msg.log_append", {"rows": "not a list"}),
+        ("agent_msg.log_update", {}),
+        ("agent_msg.log_clear", {"keep_statuses": "delivered"}),
+        ("agent_msg.log_snapshot", {"limit": None}),
+        ("agent_msg.log_snapshot", {"limit": "abc"}),
+        ("agent_msg.log_snapshot", {"limit": float("inf")}),
+    ],
+)
+async def test_log_handlers_answer_bad_request_for_malformed_payloads(
+    message_log: Any, msg_type: str, payload: dict[str, Any]
+) -> None:
     session = _session()
-    await app.handle_message(session, {
-        "id": "lm1",
-        "type": "agent_msg.log_append",
-        "payload": {"rows": "not a list"},
-    })
-    await app.handle_message(session, {
-        "id": "lm2",
-        "type": "agent_msg.log_update",
-        "payload": {},
-    })
-    assert session.websocket.sent[0]["payload"] == {"written": 0}  # type: ignore[attr-defined]
-    assert session.websocket.sent[1]["payload"] == {"updated": 0}  # type: ignore[attr-defined]
+    await app.handle_message(session, {"id": "lm1", "type": msg_type, "payload": payload})
+    frame = session.websocket.sent[0]  # type: ignore[attr-defined]
+    assert frame["ok"] is False
+    assert frame["error"]["code"] == "BAD_REQUEST"
+
+
+@pytest.mark.asyncio
+async def test_log_handlers_never_broadcast(
+    message_log: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Per-window queries: unlike route/delivered, nothing fans out."""
+    events: list[dict[str, Any]] = []
+
+    async def fake_broadcast(event: dict[str, Any], **_kwargs: Any) -> None:
+        events.append(event)
+
+    monkeypatch.setattr(app, "broadcast", fake_broadcast)
+    session = _session()
+    for msg_id, msg_type, payload in (
+        ("nb1", "agent_msg.log_append", {"rows": [_log_row("a:1", 100)]}),
+        ("nb2", "agent_msg.log_update", {"updates": [{"uid": "a:1", "status": "failed"}]}),
+        ("nb3", "agent_msg.log_snapshot", {}),
+        ("nb4", "agent_msg.log_clear", {}),
+    ):
+        await app.handle_message(session, {"id": msg_id, "type": msg_type, "payload": payload})
+    await asyncio.sleep(0)
+
+    assert all(frame["ok"] is True for frame in session.websocket.sent)  # type: ignore[attr-defined]
+    assert events == []
 
 
 def test_handlers_are_registered() -> None:
