@@ -355,7 +355,13 @@ class Session:
             # torn down mid-send.
             self.dead = True
             _SESSIONS.discard(self)
-            log.warning("ws send failed; marking session %#x dead: %s", id(self), err)
+            # DEBUG, not WARNING: a peer that went away is this method's
+            # documented path (window closed, HMR reload, app quit), so it is
+            # not actionable — yet at one line per disconnect it was the single
+            # most numerous message in the log. Logged with the exception TYPE
+            # because these carry no message and rendered as an empty tail that
+            # read like a truncated error.
+            log.debug("ws peer gone (%s); marking session %#x dead", type(err).__name__, id(self))
 
     async def _send_event(self, event: dict[str, Any]) -> None:
         try:

@@ -121,6 +121,29 @@ async def test_concurrent_sends_on_closed_socket_hit_it_once() -> None:
         app_module._SESSIONS.discard(session)
 
 
+async def test_peer_gone_is_not_logged_as_a_warning(caplog) -> None:
+    """A disconnect is this path's documented outcome, not a fault.
+
+    It used to log WARNING once per disconnect — with an empty tail, since
+    these exceptions carry no message — which made it both the log's most
+    numerous line and one that read like a truncated error.
+    """
+    sock = ClosedSocket()
+    session = app_module.Session(sock)  # type: ignore[arg-type]
+    app_module._SESSIONS.add(session)
+    try:
+        with caplog.at_level("DEBUG", logger="agent_team_backend"):
+            await session.send_json({"type": "x"})
+        assert session.dead is True
+        assert [r for r in caplog.records if r.levelname == "WARNING"] == []
+        debug = [r for r in caplog.records if r.levelname == "DEBUG"]
+        assert any("ws peer gone" in r.getMessage() for r in debug)
+        # The rendered line must name the failure instead of trailing off.
+        assert any("RuntimeError" in r.getMessage() for r in debug)
+    finally:
+        app_module._SESSIONS.discard(session)
+
+
 async def test_broadcast_prunes_dead_session() -> None:
     sock = ClosedSocket()
     session = app_module.Session(sock)  # type: ignore[arg-type]
