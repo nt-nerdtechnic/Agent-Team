@@ -2932,10 +2932,28 @@ async def shell_run(session: "Session", msg_id: str, msg_type: str, payload: dic
 async def onboarding_status(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
 
+    # fresh=True re-probes the login-shell PATH (sent right after an install,
+    # whose PATH export the cache cannot have seen yet).
+    fresh = bool(payload.get("fresh"))
     loop = asyncio.get_running_loop()
     status = await loop.run_in_executor(
-        _ONBOARDING_EXECUTOR, app.onboarding_deps.get_status
+        _ONBOARDING_EXECUTOR, lambda: app.onboarding_deps.get_status(fresh=fresh)
     )
+    status["complete"] = app.onboarding_deps.is_complete()
+    status["skip"] = app.onboarding_deps.should_skip()
+    await session.send_json(make_response(msg_id, msg_type, status))
+
+
+@handler("onboarding.status_quick")
+async def onboarding_status_quick(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """PATH-presence-only pass for the UI's first paint (see quick_status).
+
+    Runs inline: pure filesystem stats, no subprocesses — and it must NOT go
+    through _ONBOARDING_EXECUTOR, whose single worker would queue it behind a
+    multi-second full get_status and defeat the point."""
+    from . import app
+
+    status = app.onboarding_deps.quick_status()
     status["complete"] = app.onboarding_deps.is_complete()
     status["skip"] = app.onboarding_deps.should_skip()
     await session.send_json(make_response(msg_id, msg_type, status))

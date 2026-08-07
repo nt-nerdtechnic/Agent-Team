@@ -223,7 +223,7 @@ export function useOnboarding(backend: ReturnType<typeof useBackend>) {
     const tick = async (): Promise<void> => {
       if (watching.value !== key) return
       ticks += 1
-      await refresh()
+      await refresh({ fresh: true })
       if (watching.value !== key) return // superseded or disposed while in flight
       if (isDone()) {
         stopWatch()
@@ -264,10 +264,27 @@ export function useOnboarding(backend: ReturnType<typeof useBackend>) {
     return true
   }
 
-  async function refresh(): Promise<void> {
+  async function refresh(opts?: { fresh?: boolean }): Promise<void> {
     loading.value = true
     try {
-      const resp = await backend.send<OnboardStatus>('onboarding.status', {})
+      if (!status.value) {
+        // First paint: the PATH-presence pass answers instantly (no login
+        // shell, no version subprocesses), so a missing CLI shows "not
+        // installed" immediately instead of after the full batch's slowest
+        // probe. The full pass below replaces it.
+        try {
+          const quick = await backend.send<OnboardStatus>('onboarding.status_quick', {})
+          if (quick.payload && !status.value) status.value = quick.payload
+        } catch {
+          // Older backend without the quick pass — the full status follows.
+        }
+      }
+      // fresh re-probes the backend's login-shell PATH cache; pass it when an
+      // installer just ran and may have written a new PATH export.
+      const resp = await backend.send<OnboardStatus>(
+        'onboarding.status',
+        opts?.fresh ? { fresh: true } : {}
+      )
       if (resp.payload) status.value = resp.payload
     } catch (e) {
       log(`✗ Detection failed: ${e instanceof Error ? e.message : String(e)}`)
@@ -326,7 +343,7 @@ export function useOnboarding(backend: ReturnType<typeof useBackend>) {
       // Skip the immediate re-detect when the work moved to a terminal: it
       // cannot have finished yet, and the watcher polls for it anyway.
       if (!handedToTerminal) {
-        await refresh()
+        await refresh({ fresh: true })
         const after = deps.value.find((d) => d.id === dep.id)
         if (ranInlineOk && after && after.status !== 'ok') {
           log(`⚠ ${dep.label} installed successfully but is still not detected.`)

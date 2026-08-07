@@ -107,7 +107,7 @@ function formatTime(value: string): string {
         <h3 class="cm-title">{{ $t('cli-manage.title') }}</h3>
         <p class="cm-hint">{{ $t('cli-manage.hint') }}</p>
       </div>
-      <button class="cm-btn" :disabled="loading" @click="onboarding.refresh()">
+      <button class="cm-btn" :disabled="loading" @click="onboarding.refresh({ fresh: true })">
         {{ loading ? $t('cli-manage.detecting') : $t('cli-manage.redetect') }}
       </button>
     </div>

@@ -194,9 +194,9 @@ def test_ids_that_left_the_registry_are_dropped(
 def test_status_reports_the_dismissals(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # The renderer decides whether to auto-open the prompt from this field.
     _isolate_state(monkeypatch, tmp_path)
-    monkeypatch.setattr(ob, "detect_dep", lambda dep: {"id": dep.id, "group": dep.group, "status": "missing"})
+    monkeypatch.setattr(ob, "detect_dep", lambda dep, quick=False: {"id": dep.id, "group": dep.group, "status": "missing"})
     monkeypatch.setattr(ob, "detect_ollama_status", lambda: {"models": [], "detail": "", "reachable": False})
-    monkeypatch.setattr(ob, "_refresh_path_from_login_shell", lambda: None)
+    monkeypatch.setattr(ob, "_refresh_path_from_login_shell", lambda force=False: None)
     monkeypatch.setattr(ob, "build_cli_health", lambda deps: {})
     ob.set_install_prompt_dismissed("kilo", True)
     assert ob.get_status()["install_prompt_dismissed"] == ["kilo"]

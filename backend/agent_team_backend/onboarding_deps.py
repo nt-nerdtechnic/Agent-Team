@@ -152,13 +152,28 @@ _FALLBACK_PATH_DIRS = (
 )
 
 
-def _refresh_path_from_login_shell() -> None:
+# The login-shell probe costs ~1-3s (interactive zsh reads the full rc chain),
+# and its result only changes when an installer writes a new PATH export — so
+# cache it. Wizard flows that just ran an installer pass force=True (wired from
+# the frontend's fresh flag); passive status reads reuse the merged PATH, which
+# persists in os.environ anyway. Benign race: two threads may double-probe.
+_PATH_REFRESH_TTL_S = 300.0
+_path_refreshed_at: float | None = None
+
+
+def _refresh_path_from_login_shell(force: bool = False) -> None:
     """Merge PATH from a login shell into os.environ so newly-installed CLIs are visible.
 
     POSIX-only, best-effort: all failures are swallowed silently.
     """
+    global _path_refreshed_at
     if os.name != "posix":
         return
+    now = time.monotonic()
+    if (not force and _path_refreshed_at is not None
+            and now - _path_refreshed_at < _PATH_REFRESH_TTL_S):
+        return
+    _path_refreshed_at = now
     shell_paths: list[str] = []
     try:
         proc = subprocess.run(
@@ -242,14 +257,22 @@ def resolve_executable(dep: Dep) -> str:
     return ""
 
 
-def detect_dep(dep: Dep) -> dict[str, Any]:
-    """Run the dep's check_cmd and classify ok | missing | outdated."""
+def detect_dep(dep: Dep, quick: bool = False) -> dict[str, Any]:
+    """Run the dep's check_cmd and classify ok | missing | outdated.
+
+    quick=True skips the version subprocess: presence on PATH reads "ok"
+    (version empty) until a full pass can grade it. Used by quick_status for
+    the wizard's first paint — missing is exact either way.
+    """
     binary_path = resolve_executable(dep)
     exit_code: int | None = None
     signal_name = ""
     duration_ms: int | None = None
     if not binary_path:
         status = "missing"
+        version = ""
+    elif quick:
+        status = "ok"
         version = ""
     else:
         started = time.monotonic()
@@ -665,9 +688,38 @@ def compute_gate(
     }
 
 
-def get_status() -> dict[str, Any]:
-    """Full onboarding status: every dep + installed models + gate."""
-    _refresh_path_from_login_shell()
+_EMPTY_CLI_HEALTH: dict[str, Any] = {
+    "entries": [], "findings": [], "fingerprint": "", "dismissed": False,
+    "needs_attention": False,
+}
+
+
+def quick_status() -> dict[str, Any]:
+    """PATH-presence-only snapshot: no login-shell probe, no subprocesses.
+
+    Cheap enough to answer inline on the event loop. Serves the UI's first
+    paint so a missing CLI reads "not installed" immediately instead of after
+    the full batch's slowest --version probe; a get_status pass follows and
+    replaces it (real versions, ollama, cli_health)."""
+    deps = [detect_dep(dep, quick=True) for dep in DEPS]
+    return {
+        "deps": deps,
+        "models": [],
+        "ollama_detail": "",
+        "gate": compute_gate(deps, [], False),
+        "model_catalog": MODEL_CATALOG,
+        "cli_health": dict(_EMPTY_CLI_HEALTH),
+        "install_prompt_dismissed": install_prompt_dismissals(),
+        "quick": True,
+    }
+
+
+def get_status(fresh: bool = False) -> dict[str, Any]:
+    """Full onboarding status: every dep + installed models + gate.
+
+    fresh=True re-probes the login-shell PATH even when cached — pass it after
+    running an installer, whose PATH export the cache cannot have seen."""
+    _refresh_path_from_login_shell(force=fresh)
     # Probe every dep concurrently. Each detect_dep runs an independent
     # `--version` subprocess (up to 8s each), so serial execution scaled the
     # whole call with dep count — long enough that a concurrent WS request

@@ -425,7 +425,7 @@ function relaunch(): void {
           {{ $t('cli-install.dont-ask', { label }) }}
         </label>
         <span />
-        <button class="ci-btn ghost ci-redetect" :disabled="loading || !!installing" @click="onboarding.refresh()">
+        <button class="ci-btn ghost ci-redetect" :disabled="loading || !!installing" @click="onboarding.refresh({ fresh: true })">
           {{ loading ? $t('label.detecting') : $t('action.re-detect') }}
         </button>
         <button class="ci-btn ghost ci-close" @click="emit('close')">

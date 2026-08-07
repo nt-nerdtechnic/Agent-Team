@@ -22,6 +22,12 @@ from agent_team_backend.onboarding_deps import (
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 
+@pytest.fixture(autouse=True)
+def _reset_path_probe_cache(monkeypatch):
+    """Each test assumes its call actually probes — clear the TTL cache."""
+    monkeypatch.setattr(onboarding_deps, "_path_refreshed_at", None)
+
+
 def _make_run_result(stdout: str, returncode: int = 0) -> MagicMock:
     result = MagicMock()
     result.stdout = stdout
