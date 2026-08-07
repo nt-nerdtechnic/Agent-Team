@@ -17,7 +17,7 @@ import { withDeadline } from './deadline'
 import { WindowRegistry, type WindowBounds, type WindowEntry } from './window-registry'
 import { setWindowDockTileBadge } from './dock-tile-badge'
 import { BackendBroadcastTracker } from './backend-broadcast'
-import { stabilizeDroppedPaths, pruneDroppedFiles } from './dropped-file-store'
+import { stabilizeDroppedPaths, pruneDroppedFiles, saveClipboardImage } from './dropped-file-store'
 import { watchBackendExit } from './backend-crash'
 import {
   CliBufferRelay,
@@ -1500,6 +1500,21 @@ ipcMain.handle(
       return { ok: false, paths: [] }
     }
     return { ok: true, paths: await stabilizeDroppedPaths(paths, droppedFilesDir()) }
+  }
+)
+
+ipcMain.handle(
+  'clipboard:saveImage',
+  async (
+    _event,
+    args: { bytes: Uint8Array; mediaType: string }
+  ): Promise<{ ok: boolean; path?: string }> => {
+    const bytes = args?.bytes
+    if (!(bytes instanceof Uint8Array) || typeof args?.mediaType !== 'string') {
+      return { ok: false }
+    }
+    const path = await saveClipboardImage(bytes, args.mediaType, droppedFilesDir())
+    return path ? { ok: true, path } : { ok: false }
   }
 )
 

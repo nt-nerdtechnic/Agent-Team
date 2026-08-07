@@ -14,7 +14,7 @@
  * a directory we own, and hand back that path instead. Paths outside temp are
  * already stable and pass through untouched.
  */
-import { copyFile, mkdir, readdir, rm, stat } from 'node:fs/promises'
+import { copyFile, mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { realpathSync } from 'node:fs'
 import { basename, extname, join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -95,6 +95,56 @@ export async function stabilizeDroppedPaths(paths: string[], destDir: string): P
       }
     })
   )
+}
+
+/** Clipboard image types we will write, mapped to the extension we give them. */
+const IMAGE_EXTENSIONS: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'image/tiff': 'tiff'
+}
+
+/** `2026-08-07 20.18.33` — mirrors how macOS itself names screenshots. */
+function timestampName(now: number): string {
+  const d = new Date(now)
+  const p = (n: number): string => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}.${p(d.getMinutes())}.${p(d.getSeconds())}`
+}
+
+/**
+ * Writes clipboard image bytes to a file an agent can read, returning its path.
+ *
+ * A screenshot taken with ⌘⇧4 (no file) lives only on the clipboard as pixels,
+ * so pasting into a CLI pane has nothing to send — the agent cannot read the
+ * clipboard. Landing it in the same store the drag path uses gives the paste
+ * something to reference and gets it pruned on the same schedule.
+ *
+ * Returns null for a media type we do not write, rather than guessing an
+ * extension the agent would then fail to decode.
+ */
+export async function saveClipboardImage(
+  bytes: Uint8Array,
+  mediaType: string,
+  destDir: string,
+  now = Date.now()
+): Promise<string | null> {
+  const ext = IMAGE_EXTENSIONS[mediaType]
+  if (!ext || !bytes.length) return null
+  await mkdir(destDir, { recursive: true })
+  const name = `Pasted Image ${timestampName(now)}.${ext}`
+  for (let attempt = 1; attempt <= 50; attempt++) {
+    const dest = join(destDir, attempt === 1 ? name : nextCandidate(name, attempt))
+    try {
+      // wx: never overwrite, so a second paste in the same second gets its own file.
+      await writeFile(dest, bytes, { flag: 'wx' })
+      return dest
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err
+    }
+  }
+  return null
 }
 
 /** Drops copies older than `maxAgeMs`; the store is a cache, not a library. */

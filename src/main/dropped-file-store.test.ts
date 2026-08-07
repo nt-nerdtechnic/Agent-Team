@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import {
   isSystemTempPath,
   stabilizeDroppedPaths,
+  saveClipboardImage,
   pruneDroppedFiles,
   DROPPED_FILE_MAX_AGE_MS
 } from './dropped-file-store'
@@ -123,5 +124,42 @@ describe('pruneDroppedFiles', () => {
 
   it('is a no-op when the store was never created', async () => {
     await expect(pruneDroppedFiles(join(sandbox, 'nope'))).resolves.toBeUndefined()
+  })
+})
+
+describe('saveClipboardImage', () => {
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47])
+
+  it('writes the bytes to a readable file named like a macOS screenshot', async () => {
+    const at = Date.parse('2026-08-07T20:18:33')
+    const path = await saveClipboardImage(png, 'image/png', store, at)
+
+    expect(path).not.toBeNull()
+    expect(path!.endsWith('Pasted Image 2026-08-07 20.18.33.png')).toBe(true)
+    expect(new Uint8Array(await readFile(path!))).toEqual(png)
+  })
+
+  it('keeps both images when two pastes land in the same second', async () => {
+    const at = Date.parse('2026-08-07T20:18:33')
+    const first = await saveClipboardImage(png, 'image/png', store, at)
+    const second = await saveClipboardImage(new Uint8Array([1, 2]), 'image/png', store, at)
+
+    expect(second).not.toBe(first)
+    expect(second!.endsWith('-2.png')).toBe(true)
+    expect(new Uint8Array(await readFile(first!))).toEqual(png)
+  })
+
+  it('maps the media type to the right extension', async () => {
+    const path = await saveClipboardImage(png, 'image/jpeg', store)
+    expect(path!.endsWith('.jpg')).toBe(true)
+  })
+
+  it('declines a media type it cannot name rather than guessing', async () => {
+    expect(await saveClipboardImage(png, 'application/pdf', store)).toBeNull()
+    expect(existsSync(store)).toBe(false)
+  })
+
+  it('declines empty bytes', async () => {
+    expect(await saveClipboardImage(new Uint8Array(), 'image/png', store)).toBeNull()
   })
 })
