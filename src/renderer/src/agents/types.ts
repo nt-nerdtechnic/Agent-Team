@@ -39,6 +39,17 @@ export interface AgentSpec {
    *  from silence there would inject text and a newline into a pane that is
    *  mid-task, and into a y/n prompt would answer it. */
   turnEndInferredFromSilence?: boolean
+  /** Detection of this CLI's expired-login message in a pane's clean PTY
+   *  output, plus the command typed into the CLI to recover. Undefined = the
+   *  CLI's expired-login message has not been identified yet (only claude's
+   *  has). Matching runs on a whitespace-collapsed buffer tail — see
+   *  lib/cliLoginExpired.ts. */
+  loginExpired?: {
+    /** Matches the CLI's login-expired error in a buffer tail slice. */
+    pattern: RegExp
+    /** Command typed into the CLI to start a re-login. */
+    loginCommand: string
+  }
   /** This vendor's TUI keeps bracketed paste on. Enables chunked clipboard
    *  paste wrapping AND serves as the default Shift+Enter encoding (bracketed
    *  LF inserts a literal newline without submitting). */

@@ -1,33 +1,17 @@
 // Per-CLI detection of expired-login messages in a pane's clean PTY output,
-// plus the login command to send into the CLI to recover. Extend the table as
-// other CLIs' expired-login messages are identified — only `claude` for now.
+// plus the login command to send into the CLI to recover. Each vendor declares
+// its own `loginExpired` spec (see agents/types.ts) — only `claude` for now.
 
-interface LoginExpiredSpec {
-  /** Matches the CLI's login-expired error in a buffer tail slice. */
-  pattern: RegExp
-  /** Command typed into the CLI to start a re-login. */
-  loginCommand: string
-}
+import { AGENT_SPECS } from '../agents'
 
-const LOGIN_EXPIRED_SPECS: Record<string, LoginExpiredSpec> = {
-  // Claude Code prints "Login expired · Please run /login" (also seen as
-  // "Error during compaction: Login expired · Please run /login"). Require BOTH
-  // "Login expired" and the nearby "Please run /login" instruction so ordinary
-  // output that merely mentions the phrase (e.g. this very CLI's assistant text
-  // discussing /login) can't spuriously match — the real error always carries
-  // both, separated only by " · ". Tolerant of any whitespace run between words
-  // (a narrow pane hard-wraps mid-phrase); a trailing boundary after /login
-  // keeps "/login-helper" / "/login2" below the threshold.
-  claude: {
-    pattern: /login\s+expired.{0,40}?please run\s+\/login(?:\s|$)/i,
-    loginCommand: '/login',
-  },
+function loginExpiredSpecFor(agentKey: string): { pattern: RegExp; loginCommand: string } | undefined {
+  return AGENT_SPECS.find((s) => s.agentKey === agentKey)?.loginExpired
 }
 
 /** True when `tail` contains agentKey's login-expired message. Always false
- *  for CLIs without a spec in the table. */
+ *  for CLIs without a loginExpired spec. */
 export function matchLoginExpired(agentKey: string, tail: string): boolean {
-  const spec = LOGIN_EXPIRED_SPECS[agentKey]
+  const spec = loginExpiredSpecFor(agentKey)
   // Collapse whitespace runs to a single space before matching (mirrors
   // matchSessionLimit): cleanBuffer keeps the TUI hard-wrap `\n` a narrow pane
   // inserts mid-phrase, so an unnormalized "Please run\n/login" never matches.
@@ -35,7 +19,7 @@ export function matchLoginExpired(agentKey: string, tail: string): boolean {
 }
 
 /** The login command to send into agentKey's pane, or null when the CLI has
- *  no spec in the table. */
+ *  no loginExpired spec. */
 export function loginCommandFor(agentKey: string): string | null {
-  return LOGIN_EXPIRED_SPECS[agentKey]?.loginCommand ?? null
+  return loginExpiredSpecFor(agentKey)?.loginCommand ?? null
 }
