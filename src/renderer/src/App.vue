@@ -5484,20 +5484,8 @@ interface SessionExistsPayload {
 function looksLikeResumeCommand(agentKey: string, command: string): boolean {
   const cmd = command.trim()
   if (!cmd) return false
-  if (agentKey === 'codex') return /^codex\s+resume\s+\S+/.test(cmd)
-  if (agentKey === 'antigravity') return /^agy\s+--conversation\s+\S+/.test(cmd)
-  if (agentKey === 'grok') return /^grok\s+-s\s+\S+/.test(cmd)
-  if (agentKey === 'opencode') return /^opencode\s+(?:--session|-s)\s+\S+/.test(cmd)
-  if (agentKey === 'kilo') return /^kilo\s+(?:--session|-s)\s+\S+/.test(cmd)
-  if (agentKey === 'pi') return /^pi\s+--session-id\s+\S+/.test(cmd)
-  // Explicit branch: copilot uses the `=` form, which the generic --resume
-  // regex below would not match.
-  if (agentKey === 'copilot') return /^copilot\s+--resume(?:=|\s+)\S+/.test(cmd)
-  // Cursor's executable is `cursor-agent` (newer installs also ship `agent`);
-  // accept both, `=` and space forms.
-  if (agentKey === 'cursor') return /^(?:cursor-)?agent\s+--resume(?:=|\s+)\S+/.test(cmd)
-  // Aider has no session ids; its resume command is id-less.
-  if (agentKey === 'aider') return /^aider\b.*--restore-chat-history\b/.test(cmd)
+  const pattern = agentSpecs.find((spec) => spec.agentKey === agentKey)?.resumeCommandPattern
+  if (pattern) return pattern.test(cmd)
   return new RegExp(`^${agentKey}\\s+--resume\\s+\\S+`).test(cmd)
 }
 

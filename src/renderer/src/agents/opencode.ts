@@ -10,6 +10,7 @@ export const SPEC = {
   // (only the `opencode run` subcommand does)
   // id is `ses_`-prefixed.
   resumeArgs: (id) => `--session ${id}`,
+  resumeCommandPattern: /^opencode\s+(?:--session|-s)\s+\S+/,
   supportsRebuild: true,
   hint: 'generalist'
 } as const satisfies AgentSpec

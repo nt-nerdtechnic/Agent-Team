@@ -9,6 +9,7 @@ export const SPEC = {
   skipPermissionFlag: '--dangerously-bypass-approvals-and-sandbox',
   // Subcommand, NOT a --flag.
   resumeArgs: (id) => `resume ${id}`,
+  resumeCommandPattern: /^codex\s+resume\s+\S+/,
   supportsRebuild: true,
   // Restore-pin self-heals: per-pane CODEX_HOME announces the new session.
   supportsRestorePin: true,

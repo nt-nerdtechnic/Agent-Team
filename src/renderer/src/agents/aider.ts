@@ -12,5 +12,7 @@ export const SPEC = {
   // Give every pane its own chat history: the default shared
   // `<git-root>/.aider.chat.history.md` merges all panes' token accounting.
   paneArg: (ctx) => aiderChatHistoryFlag(aiderHistoryPath(ctx.historyRoot, ctx.paneId)),
+  // Aider has no session ids; its resume command is id-less.
+  resumeCommandPattern: /^aider\b.*--restore-chat-history\b/,
   hint: 'generalist'
 } as const satisfies AgentSpec

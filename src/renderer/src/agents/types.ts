@@ -31,6 +31,10 @@ export interface AgentSpec {
    *  vendor cannot resume by id (aider's lossy restore is special-cased in
    *  buildResumeCommand). */
   resumeArgs?: (sessionId: string) => string
+  /** Recognizes a saved command as this vendor's resume invocation (so a
+   *  restore doesn't replay it as a user-custom base command). Undefined =
+   *  the generic `<agentKey> --resume <id>` shape. */
+  resumeCommandPattern?: RegExp
   /** Panes can be re-spawned via the vendor's resume command. */
   supportsRebuild?: boolean
   /** A restore may keep the SAVED session id pinned so Rebuild stays enabled

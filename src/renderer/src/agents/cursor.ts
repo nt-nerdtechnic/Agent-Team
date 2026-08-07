@@ -11,6 +11,9 @@ export const SPEC = {
   // --force (official alias --yolo) auto-approves all commands
   skipPermissionFlag: '--force',
   resumeArgs: (id) => `--resume=${id}`,
+  // Executable is `cursor-agent` (newer installs also ship `agent`);
+  // accept both, `=` and space forms.
+  resumeCommandPattern: /^(?:cursor-)?agent\s+--resume(?:=|\s+)\S+/,
   supportsRebuild: true,
   hint: 'generalist'
 } as const satisfies AgentSpec
