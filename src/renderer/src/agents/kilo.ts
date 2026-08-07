@@ -10,6 +10,7 @@ export const SPEC = {
   // (only the `kilo run` headless subcommand has `--auto`)
   // id is `ses_`-prefixed (OpenCode fork).
   resumeArgs: (id) => `--session ${id}`,
+  needsSessionMarker: true,
   resumeCommandPattern: /^kilo\s+(?:--session|-s)\s+\S+/,
   supportsRebuild: true,
   hint: 'generalist'

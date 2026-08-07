@@ -9,6 +9,7 @@ export const SPEC = {
   // no skipPermissionFlag: grok-cli has no tool-confirmation gate at all
   // Short flag; 12-hex session id.
   resumeArgs: (id) => `-s ${id}`,
+  needsSessionMarker: true,
   resumeCommandPattern: /^grok\s+-s\s+\S+/,
   supportsRebuild: true,
   hint: 'generalist'

@@ -8,6 +8,7 @@ export const SPEC = {
   defaultCommand: 'qwen',
   skipPermissionFlag: '--yolo',
   resumeArgs: (id) => `--resume ${id}`,
+  needsSessionMarker: true,
   turnEndInferredFromSilence: true,
   supportsRebuild: true,
   hint: 'generalist'

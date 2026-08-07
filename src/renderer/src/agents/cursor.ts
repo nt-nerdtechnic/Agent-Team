@@ -11,6 +11,7 @@ export const SPEC = {
   // --force (official alias --yolo) auto-approves all commands
   skipPermissionFlag: '--force',
   resumeArgs: (id) => `--resume=${id}`,
+  needsSessionMarker: true,
   turnEndInferredFromSilence: true,
   // Executable is `cursor-agent` (newer installs also ship `agent`);
   // accept both, `=` and space forms.

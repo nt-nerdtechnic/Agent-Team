@@ -14,5 +14,6 @@ export const SPEC = {
   paneArg: (ctx) => aiderChatHistoryFlag(aiderHistoryPath(ctx.historyRoot, ctx.paneId)),
   // Aider has no session ids; its resume command is id-less.
   resumeCommandPattern: /^aider\b.*--restore-chat-history\b/,
+  needsSessionMarker: true,
   hint: 'generalist'
 } as const satisfies AgentSpec

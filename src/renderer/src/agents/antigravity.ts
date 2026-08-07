@@ -8,6 +8,7 @@ export const SPEC = {
   defaultCommand: 'agy',
   skipPermissionFlag: '--dangerously-skip-permissions',
   resumeArgs: (id) => `--conversation ${id}`,
+  needsSessionMarker: true,
   resumeCommandPattern: /^agy\s+--conversation\s+\S+/,
   supportsRebuild: true,
   hint: 'generalist'

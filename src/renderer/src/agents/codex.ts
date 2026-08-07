@@ -9,6 +9,7 @@ export const SPEC = {
   skipPermissionFlag: '--dangerously-bypass-approvals-and-sandbox',
   // Subcommand, NOT a --flag.
   resumeArgs: (id) => `resume ${id}`,
+  needsSessionMarker: true,
   resumeCommandPattern: /^codex\s+resume\s+\S+/,
   supportsRebuild: true,
   verifiedTurnText: true,

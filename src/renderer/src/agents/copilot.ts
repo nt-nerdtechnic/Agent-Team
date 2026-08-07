@@ -10,6 +10,7 @@ export const SPEC = {
   skipPermissionFlag: '--yolo',
   // NOTE the `=` form; creates a NEW session when the id doesn't exist.
   resumeArgs: (id) => `--resume=${id}`,
+  needsSessionMarker: true,
   // The `=` form, which the generic --resume shape would not match.
   resumeCommandPattern: /^copilot\s+--resume(?:=|\s+)\S+/,
   supportsRebuild: true,

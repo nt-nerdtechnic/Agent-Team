@@ -3355,6 +3355,17 @@ interface SpawnInternal {
   restoring?: boolean
 }
 
+// Vendors whose fresh panes get an `at-pane:` session marker (declared per
+// spec via needsSessionMarker), and the subset that then WAITS for a session
+// id to be detected from it — aider carries the marker for attribution but has
+// no session ids at all (no resumeArgs), so nothing ever arrives to wait for.
+const SESSION_MARKER_AGENTS = new Set(
+  agentSpecs.filter((s) => s.needsSessionMarker).map((s) => s.agentKey)
+)
+const SESSION_ID_WAIT_AGENTS = new Set(
+  agentSpecs.filter((s) => s.needsSessionMarker && s.resumeArgs).map((s) => s.agentKey)
+)
+
 /** Trailing line embedded in a Codex/Antigravity kickoff so the backend can match
  *  the resulting CLI session file back to this pane (those CLIs can't pin a
  *  session id at launch). Innocuous to the agent; only the marker text matters.
@@ -3473,8 +3484,7 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
   // the marker bootstrap (dismissStartupDialog + pasted marker + Enter) would
   // inject input into it. No marker also means no session overlay for them.
   const sessionMarker =
-    !opts.isResume && !opts.isLogin &&
-    (opts.agentKey === 'codex' || opts.agentKey === 'antigravity' || opts.agentKey === 'grok' || opts.agentKey === 'kimi' || opts.agentKey === 'opencode' || opts.agentKey === 'qwen' || opts.agentKey === 'kilo' || opts.agentKey === 'pi' || opts.agentKey === 'copilot' || opts.agentKey === 'cursor' || opts.agentKey === 'aider')
+    !opts.isResume && !opts.isLogin && SESSION_MARKER_AGENTS.has(opts.agentKey)
       ? `at-pane:${id}`
       : ''
   const pane: ActivePane = {
@@ -10587,7 +10597,7 @@ function panePreparationLabel(p: ActivePane): string {
 }
 
 function paneWaitingForSessionId(p: ActivePane): boolean {
-  return !!p.sessionMarker && !p.pinnedSessionId && ['codex', 'antigravity', 'grok', 'kimi', 'opencode', 'qwen', 'kilo', 'pi', 'copilot', 'cursor'].includes(p.agentKey)
+  return !!p.sessionMarker && !p.pinnedSessionId && SESSION_ID_WAIT_AGENTS.has(p.agentKey)
 }
 
 // Session detection has PRECONDITIONS the user may have to satisfy in the

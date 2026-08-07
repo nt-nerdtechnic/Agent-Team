@@ -10,6 +10,7 @@ export const SPEC = {
   // (bash/edit tools execute directly, nothing to bypass)
   // Creates a NEW session when the id doesn't exist, resumes when it does.
   resumeArgs: (id) => `--session-id ${id}`,
+  needsSessionMarker: true,
   turnEndInferredFromSilence: true,
   resumeCommandPattern: /^pi\s+--session-id\s+\S+/,
   supportsRebuild: true,

@@ -39,6 +39,12 @@ export interface AgentSpec {
    *  from silence there would inject text and a newline into a pane that is
    *  mid-task, and into a y/n prompt would answer it. */
   turnEndInferredFromSilence?: boolean
+  /** Fresh (non-resume, non-login) panes embed an `at-pane:<paneId>` marker
+   *  in this vendor's kickoff so the backend can match the resulting CLI
+   *  session file back to the pane (these CLIs can't pin a session id at
+   *  launch). Claude needs no marker: its sessions are attributed by encoded
+   *  cwd instead. */
+  needsSessionMarker?: boolean
   /** This vendor's log reader carries turn text that has been validated
    *  against real sessions, so turn-text judging (sentinel detection etc.) is
    *  authoritative and the loose in-buffer scan is skipped. Deliberately

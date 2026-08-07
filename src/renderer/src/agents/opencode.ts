@@ -10,6 +10,7 @@ export const SPEC = {
   // (only the `opencode run` subcommand does)
   // id is `ses_`-prefixed.
   resumeArgs: (id) => `--session ${id}`,
+  needsSessionMarker: true,
   resumeCommandPattern: /^opencode\s+(?:--session|-s)\s+\S+/,
   supportsRebuild: true,
   hint: 'generalist'
