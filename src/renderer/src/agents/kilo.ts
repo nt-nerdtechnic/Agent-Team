@@ -8,5 +8,8 @@ export const SPEC = {
   defaultCommand: 'kilo',
   // no skipPermissionFlag: the kilo TUI has no permission-bypass flag
   // (only the `kilo run` headless subcommand has `--auto`)
+  // id is `ses_`-prefixed (OpenCode fork).
+  resumeArgs: (id) => `--session ${id}`,
+  supportsRebuild: true,
   hint: 'generalist'
 } as const satisfies AgentSpec

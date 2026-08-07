@@ -25,4 +25,15 @@ export interface AgentSpec {
    *  file); no other CLI shares state across panes by default. */
   paneArg?: (ctx: PaneArgContext) => string
   hint?: string
+  /** Vendor resume arguments WITHOUT the binary (the binary comes from
+   *  `defaultCommand`, or the caller's custom command override) — e.g.
+   *  `resume <id>` (codex subcommand) or `--resume=<id>`. Undefined = the
+   *  vendor cannot resume by id (aider's lossy restore is special-cased in
+   *  buildResumeCommand). */
+  resumeArgs?: (sessionId: string) => string
+  /** Panes can be re-spawned via the vendor's resume command. */
+  supportsRebuild?: boolean
+  /** A restore may keep the SAVED session id pinned so Rebuild stays enabled
+   *  (only vendors whose stale pin reliably self-heals — see resume-command). */
+  supportsRestorePin?: boolean
 }

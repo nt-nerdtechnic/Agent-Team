@@ -7,5 +7,7 @@ export const SPEC = {
   label: 'Qwen Code',
   defaultCommand: 'qwen',
   skipPermissionFlag: '--yolo',
+  resumeArgs: (id) => `--resume ${id}`,
+  supportsRebuild: true,
   hint: 'generalist'
 } as const satisfies AgentSpec

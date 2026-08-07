@@ -8,5 +8,8 @@ export const SPEC = {
   defaultCommand: 'copilot',
   // --yolo ≡ --allow-all-tools --allow-all-paths --allow-all-urls
   skipPermissionFlag: '--yolo',
+  // NOTE the `=` form; creates a NEW session when the id doesn't exist.
+  resumeArgs: (id) => `--resume=${id}`,
+  supportsRebuild: true,
   hint: 'generalist'
 } as const satisfies AgentSpec

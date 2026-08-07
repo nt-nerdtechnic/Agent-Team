@@ -8,5 +8,8 @@ export const SPEC = {
   defaultCommand: 'pi',
   // no skipPermissionFlag: pi has no permission system at all
   // (bash/edit tools execute directly, nothing to bypass)
+  // Creates a NEW session when the id doesn't exist, resumes when it does.
+  resumeArgs: (id) => `--session-id ${id}`,
+  supportsRebuild: true,
   hint: 'generalist'
 } as const satisfies AgentSpec

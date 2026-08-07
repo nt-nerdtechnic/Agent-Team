@@ -7,5 +7,10 @@ export const SPEC = {
   label: 'Codex',
   defaultCommand: 'codex',
   skipPermissionFlag: '--dangerously-bypass-approvals-and-sandbox',
+  // Subcommand, NOT a --flag.
+  resumeArgs: (id) => `resume ${id}`,
+  supportsRebuild: true,
+  // Restore-pin self-heals: per-pane CODEX_HOME announces the new session.
+  supportsRestorePin: true,
   hint: 'implementer'
 } as const satisfies AgentSpec

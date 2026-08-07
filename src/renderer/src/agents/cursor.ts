@@ -10,5 +10,7 @@ export const SPEC = {
   defaultCommand: 'cursor-agent',
   // --force (official alias --yolo) auto-approves all commands
   skipPermissionFlag: '--force',
+  resumeArgs: (id) => `--resume=${id}`,
+  supportsRebuild: true,
   hint: 'generalist'
 } as const satisfies AgentSpec

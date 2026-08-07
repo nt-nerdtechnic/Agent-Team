@@ -24,6 +24,9 @@
 // appended verbatim — same flags resolveCommand() uses for a fresh launch.
 
 import { aiderChatHistoryFlag } from './aider-history'
+import { AGENT_SPECS, REBUILD_CAPABLE_AGENTS, RESTORE_PIN_AGENTS } from '../agents'
+
+export { REBUILD_CAPABLE_AGENTS, RESTORE_PIN_AGENTS }
 
 const CODEX_UUID_AT_END = /([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})(?:\.jsonl)?$/i
 
@@ -87,28 +90,8 @@ export function dedupeRestorablePanes<T extends { agent?: string; session_id?: s
   return out
 }
 
-/** CLIs whose panes can be re-spawned via `<cli> --resume <id>`. Aider is
- * excluded: it has no session ids, so paneCanRebuild's pinnedSessionId +
- * sessionOnDisk gates (set only by session.detected / resume spawns) can
- * never be satisfied — the button would render permanently disabled. */
-export const REBUILD_CAPABLE_AGENTS = ['claude', 'codex', 'antigravity', 'grok', 'kimi', 'opencode', 'qwen', 'kilo', 'pi', 'copilot', 'cursor']
-
 /** Shared deadline for a terminal create RPC and the STARTING rebuild guard. */
 export const TERMINAL_CREATE_TIMEOUT_MS = 30_000
-
-/** CLIs whose panes may keep the SAVED session id pinned when a restore
- * spawns them fresh (spawn opt sessionKnownOnDisk) so the Rebuild button
- * stays enabled. Restricted to agents whose stale restore-pin reliably
- * self-heals to the pane's real session once one exists: claude (the turn
- * event's attributed id is adopted directly for restore pins) and codex
- * (per-pane CODEX_HOME announces the new session deterministically). Grok
- * binds only via a typed marker — a roleless restored pane never types one —
- * and antigravity/kimi fall back to a single-unclaimed-candidate heuristic
- * that fails with 2+ same-vendor panes in one cwd; their stale pin could
- * never heal, and Rebuild would swap the user's live conversation for the
- * abandoned pre-restart one. Those agents keep the pre-existing behavior:
- * button disabled until session.detected. */
-export const RESTORE_PIN_AGENTS = ['claude', 'codex']
 
 /** Whether the Rebuild (resume) button is RENDERED for a pane. Purely by
  * agentKey, so a resume-capable pane shows the button from spawn (disabled
@@ -202,26 +185,12 @@ export function buildResumeCommand(
   }
   const id = normalizeResumeSessionId(agentKey, sessionId)
   if (!id) return '' // no id → caller falls back to a fresh spawn
-  const base =
-    agentKey === 'codex'
-      ? `codex resume ${id}`
-      : agentKey === 'antigravity'
-        ? `agy --conversation ${id}`
-        : agentKey === 'grok'
-          ? `grok -s ${id}`
-          : agentKey === 'kimi'
-            ? `kimi --session ${id}`
-            : agentKey === 'opencode'
-              ? `opencode --session ${id}`
-              : agentKey === 'kilo'
-                ? `kilo --session ${id}`
-                : agentKey === 'pi'
-                  ? `pi --session-id ${id}`
-                  : agentKey === 'copilot'
-                    ? `copilot --resume=${id}`
-                    : agentKey === 'cursor'
-                      ? `cursor-agent --resume=${id}`
-      : `${agentKey} --resume ${id}`
+  const spec = AGENT_SPECS.find((v) => v.agentKey === agentKey)
+  // The binary comes from the spec's defaultCommand — never a hardcoded name
+  // here. (Custom-binary overrides thread through the caller's baseCommand.)
+  const base = spec?.resumeArgs
+    ? `${spec.defaultCommand} ${spec.resumeArgs(id)}`
+    : `${agentKey} --resume ${id}`
   const flag = skipFlag.trim()
   return flag ? `${base} ${flag}` : base
 }

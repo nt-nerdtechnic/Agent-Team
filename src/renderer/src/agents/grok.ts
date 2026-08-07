@@ -7,5 +7,8 @@ export const SPEC = {
   label: 'Grok CLI',
   defaultCommand: 'grok',
   // no skipPermissionFlag: grok-cli has no tool-confirmation gate at all
+  // Short flag; 12-hex session id.
+  resumeArgs: (id) => `-s ${id}`,
+  supportsRebuild: true,
   hint: 'generalist'
 } as const satisfies AgentSpec

@@ -7,5 +7,9 @@ export const SPEC = {
   label: 'Claude Code',
   defaultCommand: 'claude',
   skipPermissionFlag: '--dangerously-skip-permissions',
+  resumeArgs: (id) => `--resume ${id}`,
+  supportsRebuild: true,
+  // Restore-pin self-heals: the turn event's attributed id is adopted directly.
+  supportsRestorePin: true,
   hint: 'planner + reviewer'
 } as const satisfies AgentSpec

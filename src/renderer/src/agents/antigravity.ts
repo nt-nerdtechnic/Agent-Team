@@ -7,5 +7,7 @@ export const SPEC = {
   label: 'Antigravity CLI',
   defaultCommand: 'agy',
   skipPermissionFlag: '--dangerously-skip-permissions',
+  resumeArgs: (id) => `--conversation ${id}`,
+  supportsRebuild: true,
   hint: 'generalist'
 } as const satisfies AgentSpec

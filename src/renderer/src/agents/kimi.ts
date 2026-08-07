@@ -7,5 +7,8 @@ export const SPEC = {
   label: 'Kimi Code',
   defaultCommand: 'kimi',
   skipPermissionFlag: '--yolo',
+  // id is the `session_<uuid>` dir name.
+  resumeArgs: (id) => `--session ${id}`,
+  supportsRebuild: true,
   hint: 'generalist'
 } as const satisfies AgentSpec

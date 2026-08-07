@@ -46,3 +46,14 @@ export const AGENT_SPECS: AgentSpec[] = [...ORDERED]
 
 /** Specs that are real CLI agents (excludes the plain-shell terminal entry). */
 export const CLI_AGENT_SPECS: AgentSpec[] = AGENT_SPECS.filter((s) => s.agentKey !== 'terminal')
+
+/** CLIs whose panes can be re-spawned via the vendor resume command (aider is
+ *  excluded by its spec: no session ids, the gate flags never satisfy). */
+export const REBUILD_CAPABLE_AGENTS: string[] = CLI_AGENT_SPECS.filter(
+  (s) => s.supportsRebuild
+).map((s) => s.agentKey)
+
+/** CLIs whose restore may keep the saved session id pinned (self-healing). */
+export const RESTORE_PIN_AGENTS: string[] = CLI_AGENT_SPECS.filter(
+  (s) => s.supportsRestorePin
+).map((s) => s.agentKey)

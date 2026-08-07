@@ -8,5 +8,8 @@ export const SPEC = {
   defaultCommand: 'opencode',
   // no skipPermissionFlag: the opencode TUI has no permission-bypass flag
   // (only the `opencode run` subcommand does)
+  // id is `ses_`-prefixed.
+  resumeArgs: (id) => `--session ${id}`,
+  supportsRebuild: true,
   hint: 'generalist'
 } as const satisfies AgentSpec
