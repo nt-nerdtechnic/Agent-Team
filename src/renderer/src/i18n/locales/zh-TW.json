@@ -1,7 +1,6 @@
 {
   "msg": {
     "panel-title": "CLI 互傳訊息",
-    "open-panel": "訊息",
     "pause": "暫停投遞",
     "resume": "恢復投遞",
     "clear-log": "清除記錄",
@@ -1090,7 +1089,8 @@
     "manual-confirm": "手動確認",
     "history": "歷史記錄",
     "tokens": "Tokens",
-    "tasker": "Schedule",
+    "tasker": "排程",
+    "messages": "訊息",
     "current-run": "目前執行",
     "no-active-run": "沒有執行中的任務。",
     "workspace-cumulative": "工作區累計",
@@ -1562,6 +1562,12 @@
     "later": "稍後再說",
     "restart-confirm-title": "重新啟動以安裝更新？",
     "restart-confirm-body": "Agent-Team v{version} 已下載完成。App 會關閉並重新開啟以完成安裝。要現在重新啟動嗎？"
+  },
+  "announce": {
+    "title": "公告通知",
+    "mark-all-read": "全部標為已讀",
+    "close": "關閉",
+    "empty": "目前沒有公告"
   },
   "preview": {
     "binary-file": "二進位檔案",

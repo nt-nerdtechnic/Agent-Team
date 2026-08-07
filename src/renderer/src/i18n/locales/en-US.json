@@ -1,7 +1,6 @@
 {
   "msg": {
     "panel-title": "Inter-CLI Messages",
-    "open-panel": "Messages",
     "pause": "Pause delivery",
     "resume": "Resume delivery",
     "clear-log": "Clear log",
@@ -1091,6 +1090,7 @@
     "history": "History",
     "tokens": "Tokens",
     "tasker": "Schedule",
+    "messages": "Messages",
     "current-run": "Current run",
     "no-active-run": "No active run.",
     "workspace-cumulative": "Workspace cumulative",
@@ -1562,6 +1562,12 @@
     "later": "Later",
     "restart-confirm-title": "Restart to install update?",
     "restart-confirm-body": "Agent-Team v{version} is downloaded. The app will close and reopen to finish installing. Restart now?"
+  },
+  "announce": {
+    "title": "Announcements",
+    "mark-all-read": "Mark all read",
+    "close": "Close",
+    "empty": "No announcements yet"
   },
   "preview": {
     "binary-file": "Binary file",
