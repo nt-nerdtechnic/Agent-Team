@@ -4,7 +4,10 @@
 import { MSG_START, MSG_END, MSG_ENVELOPE_PREFIX, SPAWN_START, SPAWN_END } from '../lib/agentMessaging'
 
 export type StageId = string
-export type AgentKey = 'claude' | 'codex' | 'antigravity' | 'grok' | 'kimi' | 'opencode' | 'qwen' | 'kilo' | 'pi' | 'copilot' | 'cursor' | 'aider'
+// Derived from the per-vendor specs (agents/index.ts) — no hand-written
+// union to drift when a vendor is added.
+export type { AgentKey } from '../agents'
+import type { AgentKey } from '../agents'
 
 /**
  * One participant in a multi-agent parallel stage.

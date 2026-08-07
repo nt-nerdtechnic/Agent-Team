@@ -2,9 +2,9 @@
 
 import type { AgentSpec } from './types'
 
-export const SPEC: AgentSpec = {
+export const SPEC = {
   agentKey: 'terminal',
   label: 'Terminal',
   defaultCommand: '',
   hint: 'plain shell'
-}
+} as const satisfies AgentSpec

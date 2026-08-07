@@ -22,7 +22,7 @@ import { SPEC as terminal } from './terminal'
 export type { AgentSpec, PaneArgContext } from './types'
 
 // Display order (spawn menus, settings) — deliberate, not alphabetical.
-export const AGENT_SPECS: AgentSpec[] = [
+const ORDERED = [
   claude,
   codex,
   antigravity,
@@ -36,7 +36,13 @@ export const AGENT_SPECS: AgentSpec[] = [
   cursor,
   aider,
   terminal
-]
+] as const
+
+/** Literal union of real CLI agent keys, derived from the specs — the single
+ *  source stages.ts and friends re-export instead of hand-written unions. */
+export type AgentKey = Exclude<(typeof ORDERED)[number]['agentKey'], 'terminal'>
+
+export const AGENT_SPECS: AgentSpec[] = [...ORDERED]
 
 /** Specs that are real CLI agents (excludes the plain-shell terminal entry). */
 export const CLI_AGENT_SPECS: AgentSpec[] = AGENT_SPECS.filter((s) => s.agentKey !== 'terminal')

@@ -3,7 +3,7 @@
 import { aiderChatHistoryFlag, aiderHistoryPath } from '../lib/aider-history'
 import type { AgentSpec } from './types'
 
-export const SPEC: AgentSpec = {
+export const SPEC = {
   agentKey: 'aider',
   label: 'Aider',
   defaultCommand: 'aider',
@@ -13,4 +13,4 @@ export const SPEC: AgentSpec = {
   // `<git-root>/.aider.chat.history.md` merges all panes' token accounting.
   paneArg: (ctx) => aiderChatHistoryFlag(aiderHistoryPath(ctx.historyRoot, ctx.paneId)),
   hint: 'generalist'
-}
+} as const satisfies AgentSpec

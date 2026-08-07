@@ -24,14 +24,10 @@ const MultiRepoGit = defineAsyncComponent(() => import('./MultiRepoGit.vue'))
 // Plans sidebar tab. Async-loaded (off first-paint path, pulls in plan machinery).
 const PlanPane = defineAsyncComponent(() => import('../editor/PlanPane.vue'))
 
-export interface AgentSpec {
-  agentKey: string
-  label: string
-  defaultCommand: string
-  skipPermissionFlag?: string
-  paneArg?: (ctx: PaneArgContext) => string
-  hint?: string
-}
+// Re-exported from the canonical per-vendor specs — this was a hand-kept
+// structural mirror before stage 2 of the one-file-per-vendor refactor.
+import type { AgentSpec } from '../agents'
+export type { AgentSpec } from '../agents'
 
 export interface ActivePaneView {
   id: string

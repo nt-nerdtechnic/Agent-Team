@@ -2,10 +2,10 @@
 
 import type { AgentSpec } from './types'
 
-export const SPEC: AgentSpec = {
+export const SPEC = {
   agentKey: 'codex',
   label: 'Codex',
   defaultCommand: 'codex',
   skipPermissionFlag: '--dangerously-bypass-approvals-and-sandbox',
   hint: 'implementer'
-}
+} as const satisfies AgentSpec

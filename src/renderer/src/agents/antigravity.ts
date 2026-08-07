@@ -2,10 +2,10 @@
 
 import type { AgentSpec } from './types'
 
-export const SPEC: AgentSpec = {
+export const SPEC = {
   agentKey: 'antigravity',
   label: 'Antigravity CLI',
   defaultCommand: 'agy',
   skipPermissionFlag: '--dangerously-skip-permissions',
   hint: 'generalist'
-}
+} as const satisfies AgentSpec

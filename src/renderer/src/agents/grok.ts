@@ -2,10 +2,10 @@
 
 import type { AgentSpec } from './types'
 
-export const SPEC: AgentSpec = {
+export const SPEC = {
   agentKey: 'grok',
   label: 'Grok CLI',
   defaultCommand: 'grok',
   // no skipPermissionFlag: grok-cli has no tool-confirmation gate at all
   hint: 'generalist'
-}
+} as const satisfies AgentSpec

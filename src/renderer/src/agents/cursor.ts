@@ -2,7 +2,7 @@
 
 import type { AgentSpec } from './types'
 
-export const SPEC: AgentSpec = {
+export const SPEC = {
   agentKey: 'cursor',
   label: 'Cursor CLI',
   // Newer installs also ship the executable as `agent`; `cursor-agent` is the
@@ -11,4 +11,4 @@ export const SPEC: AgentSpec = {
   // --force (official alias --yolo) auto-approves all commands
   skipPermissionFlag: '--force',
   hint: 'generalist'
-}
+} as const satisfies AgentSpec

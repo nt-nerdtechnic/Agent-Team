@@ -2,11 +2,11 @@
 
 import type { AgentSpec } from './types'
 
-export const SPEC: AgentSpec = {
+export const SPEC = {
   agentKey: 'kilo',
   label: 'Kilo Code',
   defaultCommand: 'kilo',
   // no skipPermissionFlag: the kilo TUI has no permission-bypass flag
   // (only the `kilo run` headless subcommand has `--auto`)
   hint: 'generalist'
-}
+} as const satisfies AgentSpec
