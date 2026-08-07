@@ -17,12 +17,11 @@ You never need to read or modify the shared orchestration code.
 
 ## Frontend
 
-*(This side is being migrated; until `src/renderer/src/agents/` exists,
-register the vendor in `src/renderer/src/lib/agentSpecs.ts` instead.)*
-
 1. Copy `src/renderer/src/agents/_template.ts` to `agents/<key>.ts` and
-   fill in the spec (label, default command, capability flags).
-2. Register it in `agents/index.ts` (one line).
+   fill in the spec (label, default command, resume syntax, capability
+   flags — the template lists every optional field with pointers to the
+   full docs in `agents/types.ts`).
+2. Register it in `agents/index.ts` (one line, display order).
 
 ## Install detection
 
