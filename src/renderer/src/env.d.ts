@@ -132,6 +132,7 @@ declare global {
         defaultPath?: string
       }) => Promise<{ ok: boolean; path?: string; canceled?: boolean }>
       getPathForFile: (file: File) => string
+      stabilizeDroppedPaths: (paths: string[]) => Promise<{ ok: boolean; paths: string[] }>
       openExternal: (url: string) => Promise<{ ok: boolean; error?: string }>
       onSwitchEditorSidebar: (cb: (sidebar: string) => void) => void
       onOpenEditorDiff: (cb: (params: Record<string, string>) => void) => void

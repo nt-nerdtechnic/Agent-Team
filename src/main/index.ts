@@ -17,6 +17,7 @@ import { withDeadline } from './deadline'
 import { WindowRegistry, type WindowBounds, type WindowEntry } from './window-registry'
 import { setWindowDockTileBadge } from './dock-tile-badge'
 import { BackendBroadcastTracker } from './backend-broadcast'
+import { stabilizeDroppedPaths, pruneDroppedFiles } from './dropped-file-store'
 import { watchBackendExit } from './backend-crash'
 import {
   CliBufferRelay,
@@ -1488,6 +1489,23 @@ ipcMain.handle(
     return { ok: true, paths: result.filePaths }
   }
 )
+
+/** Where copies of temp-backed drops live; see dropped-file-store.ts. */
+const droppedFilesDir = (): string => join(app.getPath('userData'), 'dropped-files')
+
+ipcMain.handle(
+  'drop:stabilize',
+  async (_event, paths: string[]): Promise<{ ok: boolean; paths: string[] }> => {
+    if (!Array.isArray(paths) || paths.some((p) => typeof p !== 'string')) {
+      return { ok: false, paths: [] }
+    }
+    return { ok: true, paths: await stabilizeDroppedPaths(paths, droppedFilesDir()) }
+  }
+)
+
+// Sweep stale copies once per launch. Deliberately not awaited: startup must
+// not wait on it, and a failed prune only costs disk.
+app.whenReady().then(() => void pruneDroppedFiles(droppedFilesDir()))
 
 ipcMain.handle('shell:openTerminal', async (_event, command: string) => {
   if (!command || typeof command !== 'string') return { ok: false, error: 'invalid command' }

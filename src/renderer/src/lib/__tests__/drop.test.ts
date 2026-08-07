@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { extractDropPaths, shellEscape } from '../drop'
+import { extractDropPaths, shellEscape, stabilizeDroppedPaths } from '../drop'
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -191,5 +191,53 @@ describe('shellEscape', () => {
 
   it('handles multiple single quotes', () => {
     expect(shellEscape("/a'b'c")).toBe("'/a'\\''b'\\''c'")
+  })
+})
+
+// ── stabilizeDroppedPaths ─────────────────────────────────────────────────────
+
+describe('stabilizeDroppedPaths', () => {
+  const mockStabilize = vi.fn<(paths: string[]) => Promise<{ ok: boolean; paths: string[] }>>()
+
+  beforeEach(() => {
+    mockStabilize.mockReset()
+    vi.stubGlobal('window', {
+      agentTeam: { getPathForFile: mockGetPath, stabilizeDroppedPaths: mockStabilize },
+    })
+  })
+
+  it('returns the paths main hands back', async () => {
+    mockStabilize.mockResolvedValue({ ok: true, paths: ['/userData/dropped-files/shot.png'] })
+    expect(await stabilizeDroppedPaths(['/tmp/NSIRD_x/shot.png'])).toEqual([
+      '/userData/dropped-files/shot.png',
+    ])
+  })
+
+  it('skips the round-trip when there is nothing to stabilize', async () => {
+    expect(await stabilizeDroppedPaths([])).toEqual([])
+    expect(mockStabilize).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the raw paths when the bridge is missing', async () => {
+    vi.stubGlobal('window', { agentTeam: { getPathForFile: mockGetPath } })
+    expect(await stabilizeDroppedPaths(['/tmp/shot.png'])).toEqual(['/tmp/shot.png'])
+  })
+
+  it('falls back when main reports failure', async () => {
+    mockStabilize.mockResolvedValue({ ok: false, paths: [] })
+    expect(await stabilizeDroppedPaths(['/tmp/shot.png'])).toEqual(['/tmp/shot.png'])
+  })
+
+  it('falls back when the reply length does not match the request', async () => {
+    mockStabilize.mockResolvedValue({ ok: true, paths: ['/only/one.png'] })
+    expect(await stabilizeDroppedPaths(['/tmp/a.png', '/tmp/b.png'])).toEqual([
+      '/tmp/a.png',
+      '/tmp/b.png',
+    ])
+  })
+
+  it('falls back when the bridge throws', async () => {
+    mockStabilize.mockRejectedValue(new Error('ipc down'))
+    expect(await stabilizeDroppedPaths(['/tmp/shot.png'])).toEqual(['/tmp/shot.png'])
   })
 })
