@@ -21,7 +21,7 @@ from agent_team_backend.cli_vendors.base import VendorSpec
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VENDORS_DIR = REPO_ROOT / "backend" / "agent_team_backend" / "cli_vendors"
-AGENT_SPECS_TS = REPO_ROOT / "src" / "renderer" / "src" / "lib" / "agentSpecs.ts"
+FRONTEND_AGENTS_DIR = REPO_ROOT / "src" / "renderer" / "src" / "agents"
 
 EXPECTED_KEYS = {
     "aider", "antigravity", "claude", "codex", "copilot", "cursor",
@@ -71,8 +71,14 @@ def test_registry_matches_log_reader_package() -> None:
 def test_registry_matches_frontend_agent_specs() -> None:
     # Read-only regex over the frontend source: the backend must not import
     # or execute TS, but the two sides must never disagree about who exists.
-    source = AGENT_SPECS_TS.read_text(encoding="utf-8")
-    frontend_keys = set(re.findall(r"agentKey: '([a-z]+)'", source))
+    # Canonical location since stage 2: one spec file per vendor under
+    # src/renderer/src/agents/ (underscore files are templates, not specs).
+    frontend_keys: set[str] = set()
+    for path in FRONTEND_AGENTS_DIR.glob("*.ts"):
+        if path.stem.startswith("_") or path.stem in {"index", "types"}:
+            continue
+        source = path.read_text(encoding="utf-8")
+        frontend_keys |= set(re.findall(r"agentKey: '([a-z]+)'", source))
     assert frontend_keys - NON_VENDOR_AGENT_KEYS == set(registry.VENDORS)
 
 
