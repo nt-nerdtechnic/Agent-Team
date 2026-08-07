@@ -11,6 +11,7 @@ import TerminalPane from '../TerminalPane.vue'
 // branch taking precedence, and the fallback when the bridge is unavailable.
 
 const mockPasteText = vi.fn()
+const mockPasteFromClipboard = vi.fn()
 const mockDisplayStatus = { value: 'idle' }
 
 vi.mock('../../composables/useTerminal', async () => {
@@ -19,6 +20,7 @@ vi.mock('../../composables/useTerminal', async () => {
     useTerminal: () => ({
       mount: vi.fn(),
       pasteText: mockPasteText,
+      pasteFromClipboard: mockPasteFromClipboard,
       updateXtermTheme: vi.fn(),
       setDisableStdin: vi.fn(),
       displayStatus: mockDisplayStatus,
@@ -64,6 +66,7 @@ describe('TerminalPane – dropping files onto the terminal', () => {
 
   beforeEach(() => {
     mockPasteText.mockReset()
+    mockPasteFromClipboard.mockReset()
     mockGetPathForFile.mockReset()
     mockStabilize.mockReset()
     mockDisplayStatus.value = 'idle'
@@ -99,28 +102,29 @@ describe('TerminalPane – dropping files onto the terminal', () => {
     expect(mockStabilize).toHaveBeenCalledWith([
       '/var/folders/T/TemporaryItems/NSIRD_x/Screenshot 2026-08-07.png'
     ])
-    expect(mockPasteText).toHaveBeenCalledWith("'/userData/dropped-files/Screenshot 2026-08-07.png'")
+    expect(mockPasteFromClipboard).toHaveBeenCalledWith('/userData/dropped-files/Screenshot\\ 2026-08-07.png')
   })
 
-  it('shell-escapes and space-joins multiple dropped paths', async () => {
-    mockStabilize.mockResolvedValue({ ok: true, paths: ['/a/one.ts', "/b/it's.ts"] })
-    await dropFiles(['/a/one.ts', "/b/it's.ts"])
+  it('escapes metacharacters Terminal.app-style and space-joins multiple paths', async () => {
+    mockStabilize.mockResolvedValue({ ok: true, paths: ['/a/one.ts', "/b/it's a (test).ts"] })
+    await dropFiles(['/a/one.ts', "/b/it's a (test).ts"])
 
-    expect(mockPasteText).toHaveBeenCalledWith("'/a/one.ts' '/b/it'\\''s.ts'")
+    // Unquoted: a quoted path is not recognised as an image by CLI agents.
+    expect(mockPasteFromClipboard).toHaveBeenCalledWith("/a/one.ts /b/it\\'s\\ a\\ \\(test\\).ts")
   })
 
   it('still pastes the raw path when the stabilize bridge is unavailable', async () => {
     vi.stubGlobal('window', { ...window, agentTeam: { getPathForFile: mockGetPathForFile } })
     await dropFiles(['/Users/test/notes.md'])
 
-    expect(mockPasteText).toHaveBeenCalledWith("'/Users/test/notes.md'")
+    expect(mockPasteFromClipboard).toHaveBeenCalledWith('/Users/test/notes.md')
   })
 
   it('still pastes the raw path when stabilizing fails', async () => {
     mockStabilize.mockRejectedValue(new Error('ipc down'))
     await dropFiles(['/Users/test/notes.md'])
 
-    expect(mockPasteText).toHaveBeenCalledWith("'/Users/test/notes.md'")
+    expect(mockPasteFromClipboard).toHaveBeenCalledWith('/Users/test/notes.md')
   })
 
   it('ignores the drop entirely once the pane has exited', async () => {
@@ -128,14 +132,14 @@ describe('TerminalPane – dropping files onto the terminal', () => {
     await dropFiles(['/Users/test/notes.md'])
 
     expect(mockStabilize).not.toHaveBeenCalled()
-    expect(mockPasteText).not.toHaveBeenCalled()
+    expect(mockPasteFromClipboard).not.toHaveBeenCalled()
   })
 
   it('does not touch the file path when the drag is a CLI pane instead', async () => {
     await dropFiles(['/Users/test/notes.md'], ['application/x-pane-id'])
 
     expect(mockStabilize).not.toHaveBeenCalled()
-    expect(mockPasteText).not.toHaveBeenCalled()
+    expect(mockPasteFromClipboard).not.toHaveBeenCalled()
   })
 
   it('does nothing when the drop carries no resolvable path', async () => {
@@ -144,6 +148,6 @@ describe('TerminalPane – dropping files onto the terminal', () => {
     await settle()
 
     expect(mockStabilize).not.toHaveBeenCalled()
-    expect(mockPasteText).not.toHaveBeenCalled()
+    expect(mockPasteFromClipboard).not.toHaveBeenCalled()
   })
 })

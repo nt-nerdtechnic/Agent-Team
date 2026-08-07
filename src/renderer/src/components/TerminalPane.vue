@@ -4,7 +4,7 @@ import { useTerminal } from '../composables/useTerminal'
 import { useTheme } from '../composables/useTheme'
 import type { useBackend } from '../composables/useBackend'
 import type { useCliProfiles } from '../composables/useCliProfiles'
-import { extractDropPaths, shellEscape, stabilizeDroppedPaths } from '../lib/drop'
+import { extractDropPaths, escapeDraggedPath, stabilizeDroppedPaths } from '../lib/drop'
 import { CLI_CONTEXT_MIME, PANE_ID_MIME, resolveCliDropSource, writeCliPaneDragPayload } from '../lib/cliContext'
 import { PLAN_REF_MIME, isPlanDrag, parsePlanRefPayload, type PlanDragRef } from '../lib/planDrag'
 import { formatLoopTime } from '../lib/loopPrompt'
@@ -245,7 +245,7 @@ async function onTerminalDrop(e: DragEvent): Promise<void> {
   const dropped = extractDropPaths(e)
   if (!dropped.length) return
   const paths = await stabilizeDroppedPaths(dropped)
-  terminal.pasteText(paths.map(shellEscape).join(' '))
+  terminal.pasteFromClipboard(paths.map(escapeDraggedPath).join(' '))
 }
 
 // Drag the pane (by its header) onto a tab to move it into that run group,

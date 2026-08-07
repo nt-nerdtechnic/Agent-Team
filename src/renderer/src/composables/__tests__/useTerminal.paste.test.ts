@@ -126,6 +126,22 @@ describe('useTerminal — manual paste', () => {
     return event.defaultPrevented
   }
 
+  /** A paste carrying only an image, the shape a ⌘⇧4 screenshot arrives in. */
+  function pasteImage(mediaType = 'image/png'): boolean {
+    const file = new File([new Uint8Array([0x89, 0x50])], 'shot.png', { type: mediaType })
+    const items = [{ kind: 'file', type: mediaType, getAsFile: () => file }]
+    const event = new Event('paste', { bubbles: true, cancelable: true })
+    Object.assign(event, {
+      clipboardData: {
+        getData: () => '',
+        items: { length: items.length, 0: items[0],
+          [Symbol.iterator]: function* () { yield* items } }
+      }
+    })
+    captured.textarea!.dispatchEvent(event)
+    return event.defaultPrevented
+  }
+
   function pastedData(mock: ReturnType<typeof createMockBackend>): string {
     return mock.sent
       .filter((s) => s.type === 'terminal.input')
@@ -247,6 +263,44 @@ describe('useTerminal — manual paste', () => {
     expect(writes.length).toBe(3) // 1500 + 12 bytes of bracketing → 3 chunks
     expect(writes.every((w) => w.length <= 512)).toBe(true)
     expect(writes.join('')).toBe(`\x1b[200~${text.replace(/\n/g, '\r')}\x1b[201~`)
+    scope.stop()
+  })
+
+  // A screenshot is pixels on the clipboard with no text and no file. It is
+  // written to disk and its path sent as a REAL paste — Claude Code only runs
+  // its image detection on bracketed-paste content, so an unbracketed write
+  // would leave the user with a literal path and no attachment.
+  it('writes a pasted screenshot to disk and sends its path as a bracketed paste', async () => {
+    captured.bracketedPasteMode = true
+    const saveClipboardImage = vi
+      .fn()
+      .mockResolvedValue({ ok: true, path: '/store/Pasted-Image-2026-08-07-20.18.33.png' })
+    ;(window as unknown as { agentTeam: unknown }).agentTeam = { saveClipboardImage }
+
+    const { mock, scope } = await spawnedTerminal('claude')
+    expect(pasteImage()).toBe(true)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(saveClipboardImage).toHaveBeenCalledOnce()
+    expect(pastedData(mock)).toBe(
+      '\x1b[200~/store/Pasted-Image-2026-08-07-20.18.33.png\x1b[201~'
+    )
+    scope.stop()
+  })
+
+  it('leaves a non-image paste with no text alone', async () => {
+    const saveClipboardImage = vi.fn()
+    ;(window as unknown as { agentTeam: unknown }).agentTeam = { saveClipboardImage }
+
+    const { mock, scope } = await spawnedTerminal('claude')
+    const event = new Event('paste', { bubbles: true, cancelable: true })
+    Object.assign(event, { clipboardData: { getData: () => '', items: { length: 0,
+      [Symbol.iterator]: function* () {} } } })
+    captured.textarea!.dispatchEvent(event)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(saveClipboardImage).not.toHaveBeenCalled()
+    expect(pastedData(mock)).toBe('')
     scope.stop()
   })
 })

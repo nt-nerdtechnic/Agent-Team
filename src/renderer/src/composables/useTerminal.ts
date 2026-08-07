@@ -1831,7 +1831,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         // happy and an agent scanning for a readable path is not tripped up by
         // quotes it may not strip.
         void saveClipboardImage(image).then((path) => {
-          if (path) pasteText(path)
+          if (path) pasteFromClipboard(path)
         })
         return
       }
@@ -3057,6 +3057,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     fitTerminal,
     redraw,
     pasteText,
+    pasteFromClipboard,
     status,
     displayStatus,
     startingStartedAt,

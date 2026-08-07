@@ -57,3 +57,21 @@ export async function stabilizeDroppedPaths(paths: string[]): Promise<string[]> 
 export function shellEscape(p: string): string {
   return `'${p.replace(/'/g, "'\\''")}'`
 }
+
+/**
+ * Escapes a dropped path the way Terminal.app does — backslashes before shell
+ * metacharacters, no surrounding quotes.
+ *
+ * Quoting the whole path (shellEscape) is equally correct for the shell, but a
+ * CLI agent scanning the line for a file to read does not recognise a quoted
+ * path: dropping a screenshot then leaves a literal `'…/Screenshot.png'`
+ * string instead of an image attachment. Terminal.app's unquoted form is
+ * understood by both, so drops use this and command construction (which builds
+ * a real argv) keeps shellEscape.
+ *
+ * Non-ASCII is left alone, matching Terminal.app: CJK filenames and the narrow
+ * no-break space macOS puts in screenshot names are not shell metacharacters.
+ */
+export function escapeDraggedPath(p: string): string {
+  return p.replace(/[^A-Za-z0-9/._\-+,:@%=\u0080-\uFFFF]/g, '\\$&')
+}

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { extractDropPaths, shellEscape, stabilizeDroppedPaths } from '../drop'
+import { extractDropPaths, shellEscape, escapeDraggedPath, stabilizeDroppedPaths } from '../drop'
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -239,5 +239,43 @@ describe('stabilizeDroppedPaths', () => {
   it('falls back when the bridge throws', async () => {
     mockStabilize.mockRejectedValue(new Error('ipc down'))
     expect(await stabilizeDroppedPaths(['/tmp/shot.png'])).toEqual(['/tmp/shot.png'])
+  })
+})
+
+// ── escapeDraggedPath ─────────────────────────────────────────────────────────
+
+describe('escapeDraggedPath', () => {
+  it('leaves an ordinary path untouched', () => {
+    expect(escapeDraggedPath('/Users/test/notes.md')).toBe('/Users/test/notes.md')
+  })
+
+  it('backslash-escapes spaces instead of quoting, the way Terminal.app does', () => {
+    expect(escapeDraggedPath('/Users/test/my project.png')).toBe(
+      '/Users/test/my\\ project.png'
+    )
+  })
+
+  it('escapes shell metacharacters', () => {
+    expect(escapeDraggedPath("/a/it's (v2) [x] $y & z;.png")).toBe(
+      "/a/it\\'s\\ \\(v2\\)\\ \\[x\\]\\ \\$y\\ \\&\\ z\\;.png"
+    )
+  })
+
+  it('escapes a literal backslash', () => {
+    expect(escapeDraggedPath('/a/b\\c')).toBe('/a/b\\\\c')
+  })
+
+  it('leaves CJK and the narrow no-break space in macOS screenshot names alone', () => {
+    // Not shell metacharacters, and Terminal.app does not escape them either.
+    expect(escapeDraggedPath('/Users/test/我的專案/Screenshot at 9.22.19 PM.png')).toBe(
+      '/Users/test/我的專案/Screenshot\\ at\\ 9.22.19 PM.png'
+    )
+  })
+
+  it('produces a path the shell resolves back to the original', () => {
+    // The escaped form must round-trip: unescaping every backslash-pair
+    // recovers exactly what was dropped.
+    const original = "/a/weird name's (dir)/shot.png"
+    expect(escapeDraggedPath(original).replace(/\\(.)/g, '$1')).toBe(original)
   })
 })
