@@ -60,6 +60,10 @@ interface Props {
   /** Messaging names of the OTHER CLI panes (self excluded), for the
    *  @-mention autocomplete menu inside this pane's terminal. */
   mentionCandidates?: string[]
+  /** Whether the layout currently shows this pane. Paged-out panes stay mounted
+   *  (their terminals must survive), so the terminal uses this to skip
+   *  display-only upkeep instead of running it for an invisible pane. */
+  onScreen?: boolean
 }
 
 const props = defineProps<Props>()
@@ -128,6 +132,7 @@ const terminal = useTerminal(props.paneId, props.backend, {
   onClear: () => emit('rebuild-clean'),
   onUserResume: () => emit('user-resume'),
   mentionCandidates: () => props.mentionCandidates ?? [],
+  onScreen: () => props.onScreen ?? true,
   onFirstOutput: () => emit('first-output'),
 })
 const { theme } = useTheme()

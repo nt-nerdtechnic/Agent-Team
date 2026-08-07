@@ -857,6 +857,11 @@ interface UseTerminalOptions {
    *  list stays current as panes come and go. */
   mentionCandidates?: () => string[]
   onFirstOutput?: () => void
+  /** Whether App's layout currently shows this pane (onScreenPaneIds). Paged-out
+   *  panes stay mounted so their terminals survive, which also means every
+   *  hidden pane keeps paying for display-only upkeep. Read lazily so it tracks
+   *  layout changes. Defaults to always on screen. */
+  onScreen?: () => boolean
 }
 
 // Throttle for RESUME spawns' terminal.create across all panes. A session
@@ -1091,7 +1096,24 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   const turnCompleteAt = ref<number>(0)
   // Tick so displayStatus re-evaluates after output goes quiet.
   const nowTick = ref<number>(Date.now())
-  const tickInterval = window.setInterval(() => { nowTick.value = Date.now() }, 1_000)
+  const isOnScreen = (): boolean => opts?.onScreen?.() ?? true
+  // Its only consumers — displayStatus's idle check and startingAgeMs — are
+  // display-only. An off-screen pane still needs to settle (its sidebar badge
+  // must reach idle), so the tick slows rather than stops: at one second per
+  // pane, a workspace with dozens of panes spent a wakeup and a computed
+  // re-evaluation per pane per second redrawing nothing anyone was looking at.
+  const TICK_ON_SCREEN_MS = 1_000
+  const TICK_OFF_SCREEN_MS = 10_000
+  const startTick = (ms: number): number =>
+    window.setInterval(() => { nowTick.value = Date.now() }, ms)
+  let tickInterval = startTick(isOnScreen() ? TICK_ON_SCREEN_MS : TICK_OFF_SCREEN_MS)
+  watch(isOnScreen, (onScreen) => {
+    clearInterval(tickInterval)
+    tickInterval = startTick(onScreen ? TICK_ON_SCREEN_MS : TICK_OFF_SCREEN_MS)
+    // A pane coming back on screen must not show a status up to
+    // TICK_OFF_SCREEN_MS stale, so settle it immediately.
+    if (onScreen) nowTick.value = Date.now()
+  })
 
   // Starts when spawn() enters the raw STARTING state, before any reattach,
   // layout, or resume-semaphore wait. App uses this to unlock recovery at the
@@ -1531,6 +1553,11 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // A spawn parked while hidden creates as soon as the pane is measurable.
     if (pendingSpawn.value) { void createWhenMeasurable(); return }
     if (!sessionId.value) return
+    // Reading clientWidth below forces a synchronous layout, and with many
+    // panes mounted that cost is paid every tick for panes the layout already
+    // knows are hidden. The clientWidth check stays: it still catches what
+    // onScreen cannot see (minimized window, zero-height container).
+    if (!isOnScreen()) return
     const el = containerRef.value
     if (!el || el.clientWidth === 0) return  // hidden — nothing to reconcile yet
     const dims = fit.proposeDimensions()

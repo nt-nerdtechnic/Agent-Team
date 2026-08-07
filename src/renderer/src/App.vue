@@ -23,7 +23,7 @@ import Welcome from './components/Welcome.vue'
 import { useNotify } from './composables/useNotify'
 import { migrateTerminalPtyKey } from './composables/useTerminal'
 import { useAgentMessaging, isBroadcastTarget } from './composables/useAgentMessaging'
-import type { RouteResult } from './composables/useAgentMessaging'
+import type { MessageStatus, PersistedMessageRow, PersistedMessageUpdate, RouteResult } from './composables/useAgentMessaging'
 import { MSG_ENVELOPE_PREFIX, VENDORS_WITHOUT_TURN_END, isTurnInFlight, parseMessages, parseSpawns, renderSpawnKickoff } from './lib/agentMessaging'
 import { evaluateTurnSpawns, evaluateSpawnRequest, computeSpawnDepth } from './lib/agentSpawnGate'
 import StageTabBar, { type TabItem } from './components/StageTabBar.vue'
@@ -162,6 +162,7 @@ import { loginCommandFor, matchLoginExpired } from './lib/cliLoginExpired'
 import { entryBelongsToWorkspace, filterWorkspaceEntries, historyEntryLabel, legacyHistoryLogPath, manualLogFileName, updateHistoryCustomName, type HistoryCleanupMode, type HistoryDeletePreview, type HistoryDeleteTarget, type SpawnHistoryEntry, type WorkspaceIdentity } from './lib/spawnHistory'
 import { useKeybindings, registerCommand, setContext } from './keybindings/useKeybindings'
 import { useUiActionBus } from './composables/useUiActionBus'
+import { releaseAnnouncementId, useAnnouncements } from './composables/useAnnouncements'
 
 // Modals/wizard that only render behind a v-if (settings opened, run completed,
 // first-run onboarding) — defer them off the main shell's first-paint bundle.
@@ -172,9 +173,9 @@ const WhatsNewModal = defineAsyncComponent(() => import('./components/WhatsNewMo
 const CliHealthGuide = defineAsyncComponent(() => import('./components/CliHealthGuide.vue'))
 const CliInstallDialog = defineAsyncComponent(() => import('./components/CliInstallDialog.vue'))
 const DebugModal = defineAsyncComponent(() => import('./components/DebugModal.vue'))
-const AgentMessagesPanel = defineAsyncComponent(() => import('./components/AgentMessagesPanel.vue'))
 const RestoreScopeModal = defineAsyncComponent(() => import('./components/RestoreScopeModal.vue'))
 const PipelineManagerModal = defineAsyncComponent(() => import('./components/PipelineManagerModal.vue'))
+const AnnouncementsPanel = defineAsyncComponent(() => import('./components/AnnouncementsPanel.vue'))
 
 const backend = useBackend()
 // Hook the settings cache to the ws: reconciles + flushes queued writes once
@@ -333,9 +334,17 @@ function evaluateWhatsNew(complete: boolean): void {
 }
 function dismissWhatsNew(): void {
   const current = window.agentTeam?.version ?? ''
-  if (current) settingsSet('agentTeam.whatsNew.lastSeenVersion', current)
+  if (current) {
+    settingsSet('agentTeam.whatsNew.lastSeenVersion', current)
+    // The same release is also an item in the announcements feed — reading it
+    // in the modal counts, so the user isn't told about it twice.
+    announcements.markRead(releaseAnnouncementId(current))
+  }
   whatsNewEntry.value = null
 }
+// Announcements centre: the status-bar feed of release notes + updater news.
+const announcements = useAnnouncements()
+const announcementsOpen = ref(false)
 watch(
   onboardingComplete,
   (value) => {
@@ -1213,7 +1222,6 @@ const paneLastActiveAt = new Map<string, number>()
 
 // ── Inter-CLI messaging (name registry + delivery queue wiring) ─────────────
 const messaging = useAgentMessaging()
-const showMessagesPanel = ref(false)
 
 // messagingNames survive restart via localStorage (pane records in project.json
 // are backend-owned). Keyed by pane id — project.json stores the live pane id,
@@ -1718,10 +1726,6 @@ function describeSpawnRefusal(reason: string, requestedName: string, requesterPa
   return `你已經開了一個叫「${requestedName}」的 pane，它正在執行中 — 不需要重開`
 }
 
-function openMessagingPanel(): void {
-  showMessagesPanel.value = true
-}
-
 /** Resolve a manual handle rename against collisions. Returns the handle to
  *  apply (free / this pane's own), or null when the user cancels. On collision
  *  with ANOTHER pane it opens a prompt pre-filled with a unique suggestion the
@@ -1784,6 +1788,70 @@ async function routeRemoteMessage(args: {
   }
 }
 
+// ── Message-log persistence (agent_msg.log_*) ──────────────────────────────
+// A single message walks through queued → delivering → delivered, so writing
+// per transition would be three RPCs per message. Coalesce instead, on the same
+// trailing-debounce shape the spawn-history watcher uses above.
+const MSG_LOG_FLUSH_MS = 200
+const pendingMsgAppends = new Map<string, PersistedMessageRow>()
+const pendingMsgUpdates = new Map<string, PersistedMessageUpdate>()
+let msgLogFlushTimer: number | undefined
+let msgLogFlushing = false
+
+function scheduleMessageLogFlush(): void {
+  if (msgLogFlushTimer !== undefined) window.clearTimeout(msgLogFlushTimer)
+  msgLogFlushTimer = window.setTimeout(() => void flushMessageLog(), MSG_LOG_FLUSH_MS)
+}
+
+async function flushMessageLog(): Promise<void> {
+  if (msgLogFlushTimer !== undefined) {
+    window.clearTimeout(msgLogFlushTimer)
+    msgLogFlushTimer = undefined
+  }
+  // Never two flushes in flight: the append must land before the update that
+  // refers to it, and only sequential flushes guarantee that.
+  if (msgLogFlushing) {
+    if (pendingMsgAppends.size > 0 || pendingMsgUpdates.size > 0) scheduleMessageLogFlush()
+    return
+  }
+  const rowByUid = new Map(pendingMsgAppends)
+  const updates: PersistedMessageUpdate[] = []
+  for (const [uid, patch] of pendingMsgUpdates) {
+    const row = rowByUid.get(uid)
+    // A patch for a row that has not been written yet folds into that row —
+    // sent on its own it would hit no matching uid and be a silent no-op.
+    if (!row) {
+      updates.push(patch)
+      continue
+    }
+    if (patch.status !== undefined) row.status = patch.status
+    if ('reason' in patch) row.reason = patch.reason
+    if ('delivered_at' in patch) row.delivered_at = patch.delivered_at
+  }
+  pendingMsgAppends.clear()
+  pendingMsgUpdates.clear()
+  const rows = [...rowByUid.values()]
+  if (rows.length === 0 && updates.length === 0) return
+  msgLogFlushing = true
+  try {
+    if (rows.length > 0) await sendQuiet('agent_msg.log_append', { rows })
+    if (updates.length > 0) await sendQuiet('agent_msg.log_update', { updates })
+  } finally {
+    msgLogFlushing = false
+  }
+}
+
+/** Restore the persisted log once at boot. Fails soft: a store error here must
+ *  never break startup — the log just starts empty. */
+async function hydrateMessageLog(): Promise<void> {
+  try {
+    const resp = await sendQuiet<{ rows?: PersistedMessageRow[] }>('agent_msg.log_snapshot', {})
+    messaging.hydrateLog(resp?.rows ?? [])
+  } catch (err) {
+    console.warn('[messaging] message log hydrate failed', err)
+  }
+}
+
 let _msgPumpTimer = 0
 let _remoteTargetsTimer = 0
 onMounted(() => {
@@ -1797,15 +1865,46 @@ onMounted(() => {
         .send('agent_msg.delivered', { msg_key: msgKey, ok, reason })
         .catch(() => { /* the sender's log entry just stays queued */ })
     },
+    persistAppend: (rows) => {
+      for (const row of rows) pendingMsgAppends.set(row.uid, row)
+      scheduleMessageLogFlush()
+    },
+    persistUpdate: (patches) => {
+      for (const patch of patches) {
+        pendingMsgUpdates.set(patch.uid, { ...pendingMsgUpdates.get(patch.uid), ...patch })
+      }
+      scheduleMessageLogFlush()
+    },
+    persistClear: (keepStatuses: MessageStatus[]) => {
+      // Drop the pending writes the clear would delete anyway — otherwise a
+      // late append resurrects a row the user just cleared. A queued/delivering
+      // row survives the clear, so its pending write must survive too.
+      for (const [uid, row] of pendingMsgAppends) {
+        if (keepStatuses.includes(row.status)) continue
+        pendingMsgAppends.delete(uid)
+        pendingMsgUpdates.delete(uid)
+      }
+      void sendQuiet('agent_msg.log_clear', { keep_statuses: keepStatuses })
+    },
   })
+  void hydrateMessageLog()
   _msgPumpTimer = window.setInterval(() => { messaging.pump(); syncPaneBusy() }, 1000)
   void refreshRemoteMessagingTargets()
   _remoteTargetsTimer = window.setInterval(() => void refreshRemoteMessagingTargets(), 10_000)
+  window.addEventListener('beforeunload', flushMessageLogOnExit)
 })
 onUnmounted(() => {
   window.clearInterval(_msgPumpTimer)
   window.clearInterval(_remoteTargetsTimer)
+  window.removeEventListener('beforeunload', flushMessageLogOnExit)
+  void flushMessageLog()
 })
+
+/** beforeunload cannot await, but firing the sends still gets them onto the
+ *  socket before teardown, which is what the last transitions need. */
+function flushMessageLogOnExit(): void {
+  void flushMessageLog()
+}
 
 function syncViews(): void {
   paneViews.value = panes.value.map((p) => {
@@ -3598,9 +3697,11 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
         pane.injectionStatus = 'skipped'
         pane.preparationStatus = 'ready'
         syncViews()
-        if (pane.agentKey === 'claude' && pane.pinnedSessionId) {
-          void persistPaneSession(pane, pane.pinnedSessionId)
-        }
+        // No persistPaneSession here: every manual/snap/saved caller sends
+        // manual_pane.spawn with this same pinned session_id right after we
+        // return, and that call is what creates the PaneRecord. Persisting
+        // from inside spawnPane always lost that race and made the backend
+        // log 'pane ... not found — session not persisted' once per pane.
         return id
       }
       scheduleInjection(pane)
@@ -4312,13 +4413,26 @@ provide(
  *  one summary toast. */
 async function restartAgentPanes(agentKey: string): Promise<void> {
   // Rebuild replaces pane ids — capture the batch up front.
-  const ids = panes.value
-    .filter((p) => {
-      const paneRef = paneRefs[p.id]
-      const status = (paneRef?.displayStatus ?? paneRef?.status) as string | undefined
-      return paneNeedsAccountRestart(p, agentKey, status)
-    })
-    .map((p) => p.id)
+  const batch = panes.value.filter((p) => {
+    const paneRef = paneRefs[p.id]
+    const status = (paneRef?.displayStatus ?? paneRef?.status) as string | undefined
+    return paneNeedsAccountRestart(p, agentKey, status)
+  })
+  const ids = batch.map((p) => p.id)
+  // Diagnostics: one line per selected pane, so a partial-restart toast can be
+  // traced back to which panes were eligible and what state they were in.
+  pipelineLog(`⟳ account-switch restart (${agentKey}): ${ids.length} pane(s) selected`)
+  for (const p of batch) {
+    const paneRef = paneRefs[p.id]
+    const status = (paneRef?.displayStatus ?? paneRef?.status) as string | undefined
+    const session = paneResumeSessionId(p)
+    pipelineLog(
+      `   · ${p.id.slice(0, 8)} ${p.customName || p.agentLabel}` +
+        ` status=${status ?? 'unmounted'}` +
+        ` session=${session ? session.slice(0, 8) : 'none'}` +
+        ` onDisk=${p.sessionOnDisk ? 'y' : 'n'}`
+    )
+  }
   await runAccountRestartBatch(
     ids,
     (id) => rebuildPaneViaResume(id, { suppressBusyToast: true, forceWhenRunning: true }),
@@ -4412,6 +4526,9 @@ async function rebuildPaneClean(paneId: string): Promise<void> {
           previous_pane_id: paneId,
           agent: snap.agentKey,
           role: snap.roleKey || '',
+          // A fresh rebuild pins a NEW session; carry it here or the record
+          // keeps pointing at the replaced pane's session id.
+          session_id: panes.value.find((p) => p.id === newId)?.pinnedSessionId ?? '',
           run_group_id: snap.runGroupId || '',
           output_log_file: panes.value.find((p) => p.id === newId)?.outputLogFile ?? '',
         })
@@ -4637,6 +4754,9 @@ const {
   state: updateState, settings: updaterSettings,
   startDownload: startUpdateDownload, installUpdate,
 } = useUpdater()
+// Feed the announcements centre from this one instance — useUpdater is not a
+// singleton, so calling it again there would add another IPC subscription.
+announcements.setUpdateSource(updateState)
 // A run of failed background checks is not an update status of its own — it
 // rides alongside whatever the status is. Surface it in the status bar only
 // once it clears the user's threshold, and only if they asked to be told.
@@ -7600,6 +7720,9 @@ backend.on('agent_msg.deliver', (raw) => {
   const ev = raw as {
     msg_key?: string
     target_pane_id?: string
+    target_name?: string
+    target_workspace_path?: string
+    from_pane_id?: string
     from_display?: string
     from_workspace_path?: string
     content?: string
@@ -7607,6 +7730,20 @@ backend.on('agent_msg.deliver', (raw) => {
     rate_limit?: boolean
   }
   if (!ev?.msg_key || !ev.target_pane_id || !ev.content) return
+  // The broadcast reaches the sending window too. When the sender is one of our
+  // panes, log the outbound side here — a message sent through the MCP cli_send
+  // tool never passed through sendMessage(), so nothing else would record it.
+  if (ev.from_pane_id) {
+    messaging.noteOutboundMessage({
+      msgKey: ev.msg_key,
+      fromPaneId: ev.from_pane_id,
+      targetPaneId: ev.target_pane_id,
+      toDisplay: ev.target_name || '',
+      content: ev.content,
+      crossWorkspace: !!ev.cross_workspace,
+      remoteWorkspace: ev.target_workspace_path,
+    })
+  }
   const accepted = messaging.acceptRemoteMessage({
     msgKey: ev.msg_key,
     targetPaneId: ev.target_pane_id,
@@ -10933,6 +11070,7 @@ function paneIsCommander(p: ActivePane): boolean {
         <TerminalPane
           v-if="p.realized"
           v-show="onScreenPaneIds.has(p.id)"
+          :on-screen="onScreenPaneIds.has(p.id)"
           :style="{ ...floatPaneStyle(p.id), ...dualFocusStyle(p.id) }"
           :ref="(el) => setPaneRef(p.id, el)"
           :data-pane-id="p.id"
@@ -11278,10 +11416,6 @@ function paneIsCommander(p: ActivePane): boolean {
     <div v-if="tokenPanelExpanded" class="resize-handle resize-handle-right" @mousedown="onResizeStart($event, 'right')" />
     <NotificationHost />
     <WhatsNewModal v-if="whatsNewEntry" :entry="whatsNewEntry" @close="dismissWhatsNew" />
-    <AgentMessagesPanel
-      v-if="showMessagesPanel"
-      @close="showMessagesPanel = false"
-    />
     <!-- Status bar -->
     <div class="statusbar">
       <div class="statusbar-left">
@@ -11379,12 +11513,17 @@ function paneIsCommander(p: ActivePane): boolean {
           <span class="sb-reconnect-dismiss" :title="$t('restore.dismiss')" @click="dismissReconnectBanner">✕</span>
         </span>
         <span
-          class="sb-item sb-clickable sb-messages"
+          class="sb-item sb-clickable sb-announce"
+          :class="{ 'sb-announce-unread': announcements.unreadCount.value > 0 }"
           role="button"
           tabindex="0"
-          @click="openMessagingPanel()"
-          @keydown.enter="openMessagingPanel()"
-        >✉ {{ $t('msg.open-panel') }}</span>
+          :title="$t('announce.title')"
+          @click="announcementsOpen = !announcementsOpen"
+          @keydown.enter="announcementsOpen = !announcementsOpen"
+        >
+          <span class="sb-dot" />
+          📢 {{ $t('announce.title') }}<template v-if="announcements.unreadCount.value > 0"> {{ announcements.unreadCount.value }}</template>
+        </span>
         <span class="sb-item sb-build">{{ buildTag }}</span>
         <span
           v-if="!isDetachedWindow && panes.length > 0"
@@ -11418,6 +11557,17 @@ function paneIsCommander(p: ActivePane): boolean {
         >Stop</button>
       </div>
     </div>
+
+    <!-- Announcements centre popover -->
+    <AnnouncementsPanel
+      v-if="announcementsOpen"
+      :items="announcements.items.value"
+      @close="announcementsOpen = false"
+      @mark-all-read="announcements.markAllRead()"
+      @read="announcements.markRead($event)"
+      @download="startUpdateDownload()"
+      @install="onUpdateBadgeClick()"
+    />
   </div>
 </template>
 
@@ -11727,6 +11877,8 @@ function paneIsCommander(p: ActivePane): boolean {
 .sb-update-error .sb-dot { background: var(--danger-fg); }
 .sb-update-check-failed { color: var(--text-muted); }
 .sb-update-check-failed .sb-dot { background: var(--text-muted); }
+.sb-announce-unread { color: var(--text-bright); }
+.sb-announce-unread .sb-dot { background: var(--accent-fg); }
 .sb-clickable { cursor: pointer; }
 
 /* ── Backend supervisor popover ──────────────────────────────────────────── */

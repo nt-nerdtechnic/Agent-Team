@@ -1,8 +1,11 @@
 <script setup lang="ts">
+// Messages tab of the right-hand rail: the inter-CLI delivery log.
+//
+// Laid out for a ~300px column (the rail is resizable down to 180px): every row
+// is two compact lines, and the message body lives in an expandable detail
+// block that scrolls instead of widening the rail.
 import { computed, ref } from 'vue'
 import { useAgentMessaging } from '../composables/useAgentMessaging'
-
-const emit = defineEmits<{ (e: 'close'): void }>()
 
 const messaging = useAgentMessaging()
 
@@ -21,112 +24,108 @@ function fmtTime(ts: number): string {
 </script>
 
 <template>
-  <Teleport to="body">
-    <div class="msg-overlay" @click.self="emit('close')">
-      <div class="msg-panel">
-        <div class="msg-head">
-          <span class="msg-title">{{ $t('msg.panel-title') }}</span>
-          <button
-            class="msg-btn"
-            @click="messaging.paused.value ? messaging.resumeMessaging() : messaging.pauseMessaging()"
-          >
-            {{ messaging.paused.value ? $t('msg.resume') : $t('msg.pause') }}
-          </button>
-          <button class="msg-btn" @click="messaging.clearMessageLog()">{{ $t('msg.clear-log') }}</button>
-          <button class="msg-btn msg-close" @click="emit('close')">✕</button>
+  <div class="msg-panel">
+    <div class="msg-bar">
+      <span class="msg-title">{{ $t('msg.panel-title') }}</span>
+      <span class="msg-acts">
+        <button
+          class="msg-btn"
+          data-act="pause"
+          @click="messaging.paused.value ? messaging.resumeMessaging() : messaging.pauseMessaging()"
+        >
+          {{ messaging.paused.value ? $t('msg.resume') : $t('msg.pause') }}
+        </button>
+        <button class="msg-btn" data-act="clear" @click="messaging.clearMessageLog()">
+          {{ $t('msg.clear-log') }}
+        </button>
+      </span>
+    </div>
+
+    <div v-if="messaging.paused.value" class="msg-paused">{{ $t('msg.paused-banner') }}</div>
+
+    <div class="msg-list">
+      <div v-if="rows.length === 0" class="msg-empty">{{ $t('msg.empty') }}</div>
+      <div
+        v-for="msg in rows"
+        :key="msg.id"
+        class="msg-row"
+        :class="{ expanded: expandedId === msg.id }"
+        :data-msg-id="msg.id"
+        @click="toggleExpand(msg.id)"
+      >
+        <div class="msg-line1">
+          <span class="msg-route">{{ msg.from }} → {{ msg.to }}</span>
+          <span class="msg-st" :data-st="msg.status">{{ $t(`msg.status-${msg.status}`) }}</span>
+          <span v-if="msg.remote" class="msg-xws" :title="msg.remoteWorkspace">
+            {{ $t('msg.cross-workspace-badge') }}
+          </span>
         </div>
-
-        <div v-if="messaging.paused.value" class="msg-paused">{{ $t('msg.paused-banner') }}</div>
-
-        <div class="msg-list">
-          <div v-if="rows.length === 0" class="msg-empty">{{ $t('msg.empty') }}</div>
-          <div
-            v-for="msg in rows"
-            :key="msg.id"
-            class="msg-row"
-            :class="{ expanded: expandedId === msg.id }"
-            @click="toggleExpand(msg.id)"
-          >
-            <div class="msg-row-line">
-              <span class="msg-time">{{ fmtTime(msg.createdAt) }}</span>
-              <span class="msg-route">{{ msg.from }} → {{ msg.to }}</span>
-              <span v-if="msg.remote" class="msg-xws" :title="msg.remoteWorkspace">
-                {{ $t('msg.cross-workspace-badge') }}
-              </span>
-              <span class="msg-st" :data-st="msg.status">{{ $t(`msg.status-${msg.status}`) }}</span>
-              <span class="msg-preview">{{ msg.content }}</span>
-            </div>
-            <div v-if="expandedId === msg.id" class="msg-detail">
-              <pre>{{ msg.content }}</pre>
-              <div v-if="msg.reason" class="msg-reason">{{ msg.reason }}</div>
-            </div>
-          </div>
+        <div class="msg-line2">
+          <span class="msg-time">{{ fmtTime(msg.createdAt) }}</span>
+          <span class="msg-preview">{{ msg.content }}</span>
+        </div>
+        <div v-if="expandedId === msg.id" class="msg-detail">
+          <pre>{{ msg.content }}</pre>
+          <div v-if="msg.reason" class="msg-reason">{{ msg.reason }}</div>
         </div>
       </div>
     </div>
-  </Teleport>
+  </div>
 </template>
 
 <style scoped>
-.msg-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 9000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(0, 0, 0, 0.45);
-  -webkit-app-region: no-drag;
-}
-
 .msg-panel {
-  width: min(720px, 92vw);
-  max-height: 80vh;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  background: var(--bg-base);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 12px;
-  box-shadow: 0 24px 60px var(--shadow-overlay);
   overflow: hidden;
 }
 
-:root[data-theme='light'] .msg-panel {
-  border-color: rgba(31, 35, 40, 0.15);
-}
-
-.msg-head {
+.msg-bar {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 16px;
+  flex-direction: column;
+  gap: 4px;
+  flex: none;
+  padding: 6px 10px;
   border-bottom: 1px solid rgba(128, 128, 128, 0.2);
 }
 
 .msg-title {
-  flex: 1;
-  font-size: 15px;
+  min-width: 0;
+  font-size: 11px;
   font-weight: 700;
   color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.msg-acts {
+  display: flex;
+  /* At the rail's 180px minimum the two labels stack rather than clip. */
+  flex-wrap: wrap;
+  gap: 4px;
 }
 
 .msg-btn {
   background: rgba(128, 128, 128, 0.12);
   color: var(--text-primary);
   border: 1px solid rgba(128, 128, 128, 0.25);
-  border-radius: 6px;
-  padding: 4px 10px;
-  font-size: 12px;
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 10px;
   cursor: pointer;
 }
 
 .msg-btn:hover { background: rgba(128, 128, 128, 0.22); }
 .msg-btn:disabled { opacity: 0.45; cursor: default; }
-.msg-close { font-size: 13px; }
 
 .msg-paused {
-  padding: 6px 16px;
-  font-size: 12.5px;
+  flex: none;
+  padding: 4px 10px;
+  font-size: 10px;
   background: rgba(230, 160, 60, 0.15);
   color: #e8a54b;
   border-bottom: 1px solid rgba(230, 160, 60, 0.25);
@@ -134,50 +133,77 @@ function fmtTime(ts: number): string {
 
 .msg-list {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  padding: 6px 0;
+  overflow-x: hidden;
 }
 
 .msg-empty {
-  padding: 28px 16px;
+  padding: 20px 10px;
   text-align: center;
-  font-size: 13px;
+  font-size: 11px;
   color: var(--text-secondary);
 }
 
 .msg-row {
-  padding: 6px 16px;
+  padding: 5px 10px;
   border-bottom: 1px solid rgba(128, 128, 128, 0.1);
   cursor: pointer;
 }
 
 .msg-row:hover { background: rgba(128, 128, 128, 0.08); }
 
-.msg-row-line {
+.msg-line1 {
   display: flex;
-  align-items: baseline;
-  gap: 10px;
-  font-size: 12.5px;
+  align-items: center;
+  /* The status / cross-workspace badges don't shrink; let them drop to another
+     line instead of being clipped when the rail is near its 180px minimum. */
+  flex-wrap: wrap;
+  gap: 5px;
   min-width: 0;
 }
 
-.msg-time { color: var(--text-secondary); flex: none; }
-.msg-route { color: var(--text-primary); font-weight: 600; flex: none; }
+.msg-line2 {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+  margin-top: 2px;
+}
+
+.msg-route {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.msg-time {
+  flex: none;
+  font-size: 10px;
+  color: var(--text-secondary);
+}
 
 .msg-st {
   flex: none;
-  font-size: 11px;
+  font-size: 9px;
   font-weight: 700;
   border-radius: 99px;
-  padding: 0 8px;
+  padding: 0 6px;
+  white-space: nowrap;
 }
 
 .msg-xws {
   flex: none;
-  font-size: 11px;
+  font-size: 9px;
   font-weight: 700;
   border-radius: 99px;
-  padding: 0 8px;
+  padding: 0 6px;
+  white-space: nowrap;
   background: rgba(110, 150, 230, 0.18);
   color: #7ba3e8;
 }
@@ -193,17 +219,18 @@ function fmtTime(ts: number): string {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 10px;
   color: var(--text-secondary);
 }
 
-.msg-detail { padding: 8px 4px 4px; }
+.msg-detail { padding: 6px 0 2px; }
 
 .msg-detail pre {
   margin: 0;
-  padding: 8px 10px;
+  padding: 6px 8px;
   background: rgba(128, 128, 128, 0.1);
-  border-radius: 6px;
-  font-size: 12px;
+  border-radius: 4px;
+  font-size: 10px;
   white-space: pre-wrap;
   word-break: break-word;
   max-height: 220px;
@@ -212,8 +239,13 @@ function fmtTime(ts: number): string {
 }
 
 .msg-reason {
-  margin-top: 6px;
-  font-size: 12px;
+  margin-top: 4px;
+  font-size: 10px;
   color: #e0706a;
+}
+
+:root[data-theme='light'] .msg-bar,
+:root[data-theme='light'] .msg-row {
+  border-bottom-color: rgba(31, 35, 40, 0.15);
 }
 </style>

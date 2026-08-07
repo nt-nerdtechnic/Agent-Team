@@ -182,6 +182,116 @@ describe('useAgentMessaging — cross-workspace routing', () => {
     expect(msg.status).toBe('queued')
   })
 
+  // ── Outbound logged from the deliver broadcast (MCP cli_send) ────────────
+  it('logs an outbound row only in the window owning the sender pane', () => {
+    m.registerPane('p1', 'claude', 'sender')
+
+    expect(
+      m.noteOutboundMessage({
+        msgKey: 'mcp:1',
+        fromPaneId: 'p1',
+        targetPaneId: 'elsewhere',
+        toDisplay: 'reviewer',
+        content: 'run the tests',
+        crossWorkspace: true,
+        remoteWorkspace: '/ws/beta',
+      }),
+    ).toBe(true)
+    // Another window sees the same broadcast but owns neither pane.
+    expect(
+      m.noteOutboundMessage({
+        msgKey: 'mcp:2',
+        fromPaneId: 'not-ours',
+        targetPaneId: 'elsewhere',
+        toDisplay: 'reviewer',
+        content: 'run the tests',
+        crossWorkspace: true,
+      }),
+    ).toBe(false)
+
+    expect(m.messages.value).toHaveLength(1)
+    const entry = m.messages.value[0]
+    expect(entry.from).toBe('sender')
+    expect(entry.to).toBe('reviewer')
+    expect(entry.status).toBe('queued')
+    expect(entry.remote).toBe('outbound')
+    expect(entry.remoteWorkspace).toBe('/ws/beta')
+    // The sending window never delivers: no envelope, no queue.
+    expect(delivered).toEqual([])
+  })
+
+  it('leaves a same-workspace MCP send unbadged', () => {
+    m.registerPane('p1', 'claude', 'sender')
+    m.noteOutboundMessage({
+      msgKey: 'mcp:1',
+      fromPaneId: 'p1',
+      targetPaneId: 'elsewhere',
+      toDisplay: 'reviewer',
+      content: 'hi',
+      crossWorkspace: false,
+    })
+
+    expect(m.messages.value[0].remote).toBeUndefined()
+  })
+
+  it('skips the outbound row when this window also owns the target pane', () => {
+    m.registerPane('p1', 'claude', 'sender')
+    m.registerPane('p2', 'claude', 'reviewer')
+
+    expect(
+      m.noteOutboundMessage({
+        msgKey: 'mcp:1',
+        fromPaneId: 'p1',
+        targetPaneId: 'p2',
+        toDisplay: 'reviewer',
+        content: 'hi',
+        crossWorkspace: false,
+      }),
+    ).toBe(false)
+    expect(m.messages.value).toHaveLength(0)
+  })
+
+  it('resolves an outbound row logged from the broadcast', () => {
+    m.registerPane('p1', 'claude', 'sender')
+    m.noteOutboundMessage({
+      msgKey: 'mcp:1',
+      fromPaneId: 'p1',
+      targetPaneId: 'elsewhere',
+      toDisplay: 'reviewer',
+      content: 'hi',
+      crossWorkspace: true,
+      remoteWorkspace: '/ws/beta',
+    })
+
+    m.resolveRemoteDelivery('mcp:1', true, '')
+    expect(m.messages.value[0].status).toBe('delivered')
+    expect(m.messages.value[0].deliveredAt).toBe(clock)
+  })
+
+  it('does not log a second row for a message that went through sendMessage', async () => {
+    m.registerPane('p1', 'claude', 'sender')
+    const msg = m.sendMessage('sender', 'beta/reviewer', 'hi')
+    await flush()
+    expect(m.messages.value).toHaveLength(1)
+
+    // The backend echoes the routed message back to every window, this one too.
+    const logged = m.noteOutboundMessage({
+      msgKey: routed[0].msgKey,
+      fromPaneId: 'p1',
+      targetPaneId: 'elsewhere',
+      toDisplay: 'reviewer',
+      content: 'hi',
+      crossWorkspace: true,
+      remoteWorkspace: '/ws/beta',
+    })
+
+    expect(logged).toBe(false)
+    expect(m.messages.value).toHaveLength(1)
+    // …and the original entry still resolves off its own msgKey.
+    m.resolveRemoteDelivery(routed[0].msgKey, true, '')
+    expect(msg.status).toBe('delivered')
+  })
+
   // ── Inbound ──────────────────────────────────────────────────────────────
   it('rejects a delivery whose target pane is not in this window', () => {
     m.registerPane('p1', 'claude', 'local')

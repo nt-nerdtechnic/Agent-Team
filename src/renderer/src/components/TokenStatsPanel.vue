@@ -6,6 +6,7 @@ import { useNotify } from '../composables/useNotify'
 import type { useBackend } from '../composables/useBackend'
 import HistoryPanel from './HistoryPanel.vue'
 import TaskerPanel from './TaskerPanel.vue'
+import AgentMessagesPanel from './AgentMessagesPanel.vue'
 import type { PipelineStatusView } from './ControlPane.vue'
 
 interface Stage {
@@ -54,12 +55,12 @@ watch(expanded, (v) => {
 }, { immediate: true })
 
 // Active right-panel tab — the pipeline History timeline (default), token stats,
-// or Tasker (machine-level crontab / LaunchAgents). Unknown or legacy persisted
-// values fall back to the default.
-const tab = ref<'history' | 'tokens' | 'tasker'>('history')
+// Tasker (machine-level crontab / LaunchAgents), or the inter-CLI message log.
+// Unknown or legacy persisted values fall back to the default.
+const tab = ref<'history' | 'tokens' | 'tasker' | 'messages'>('history')
 {
   const t = settingsGet<string | null>('agentTeam.rightPanel.tab', null)
-  if (t === 'history' || t === 'tokens' || t === 'tasker') tab.value = t
+  if (t === 'history' || t === 'tokens' || t === 'tasker' || t === 'messages') tab.value = t
 }
 watch(tab, (v) => {
   settingsSet('agentTeam.rightPanel.tab', v)
@@ -180,6 +181,10 @@ async function confirmReset(scope: ResetScope): Promise<void> {
         <span class="rail-icon">🗓</span>
         <span class="rail-label">{{ $t('label.tasker') }}</span>
       </button>
+      <button class="rail-btn" :class="{ active: tab === 'messages' }" title="Expand inter-CLI messages" @click="tab = 'messages'; expanded = true">
+        <span class="rail-icon">✉</span>
+        <span class="rail-label">{{ $t('label.messages') }}</span>
+      </button>
     </div>
 
     <!-- Expanded panel -->
@@ -190,11 +195,13 @@ async function confirmReset(scope: ResetScope): Promise<void> {
           <button class="tab" :class="{ active: tab === 'history' }" @click="tab = 'history'">📜 {{ $t('label.history') }}</button>
           <button class="tab" :class="{ active: tab === 'tokens' }" @click="tab = 'tokens'">📊 {{ $t('label.tokens') }}</button>
           <button class="tab" :class="{ active: tab === 'tasker' }" @click="tab = 'tasker'">🗓 {{ $t('label.tasker') }}</button>
+          <button class="tab" :class="{ active: tab === 'messages' }" @click="tab = 'messages'">✉ {{ $t('label.messages') }}</button>
         </div>
       </header>
 
       <HistoryPanel v-if="tab === 'history'" :backend="backend" :workspace-path="workspacePath" :pipeline="pipeline" />
       <TaskerPanel v-else-if="tab === 'tasker'" :backend="backend" />
+      <AgentMessagesPanel v-else-if="tab === 'messages'" />
 
       <template v-else>
       <div v-if="loading && !snapshot" class="msg">{{ $t('label.loading') }}</div>
@@ -315,8 +322,10 @@ async function confirmReset(scope: ResetScope): Promise<void> {
   flex-direction: column;
   align-items: stretch;
   height: 100%;
-  /* The vertical tab labels are tall; a short window would otherwise clip the
-     last tab out of reach (.token-panel hides its overflow). */
+  /* The vertical tab labels are tall and there are four of them; a short window
+     would otherwise clip the last tab out of reach (.token-panel hides its
+     overflow). Scrolling here keeps every tab reachable — the reasoning is
+     unchanged by the extra button, only the height at which it starts to bite. */
   overflow-y: auto;
 }
 .rail-btn {
@@ -387,7 +396,10 @@ async function confirmReset(scope: ResetScope): Promise<void> {
   display: flex;
   gap: 4px;
   flex: 1;
-  /* Three tabs no longer fit on one line at the panel's 180px minimum width. */
+  /* Four tabs no longer fit on one line at the panel's 180px minimum width, so
+     the header grows to a second (or third) row rather than clipping a tab. The
+     header is `flex-shrink: 0` and `.body` owns its own scrolling, so wrapping
+     shortens the body instead of pushing it out of the panel. */
   flex-wrap: wrap;
   min-width: 0;
 }

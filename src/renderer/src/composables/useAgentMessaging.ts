@@ -23,6 +23,10 @@ export type MessageStatus = 'queued' | 'delivering' | 'delivered' | 'failed'
 
 export interface AgentMessage {
   id: number
+  /** Persistence key, `${bootUid}:${id}`. `id` is a module counter that restarts
+   *  at 0 on every reload and is shared-by-value across windows, so only this is
+   *  safe as a key in the (global) backend store. */
+  uid: string
   from: string
   to: string
   /** Raw (unsanitized) content, for display in the log panel. */
@@ -38,6 +42,29 @@ export interface AgentMessage {
   remote?: 'outbound' | 'inbound'
   /** The other workspace involved, for display in the log panel. */
   remoteWorkspace?: string
+}
+
+/** A log row as the backend store holds it (snake_case DB columns; `from`/`to`
+ *  are reserved-ish words in SQL, hence `sender`/`recipient`). */
+export interface PersistedMessageRow {
+  uid: string
+  created_at: number
+  status: MessageStatus
+  sender: string
+  recipient: string
+  content: string
+  reason?: string
+  delivered_at?: number
+  remote?: 'outbound' | 'inbound'
+  remote_workspace?: string
+}
+
+/** A status patch for an already-persisted row. */
+export interface PersistedMessageUpdate {
+  uid: string
+  status?: MessageStatus
+  reason?: string
+  delivered_at?: number
 }
 
 export interface RouteResult {
@@ -65,6 +92,12 @@ export interface MessagingDeps {
   }) => Promise<RouteResult>
   /** Tell the sending window how an inbound cross-workspace message ended. */
   reportDelivery?: (msgKey: string, ok: boolean, reason: string) => void
+  /** Mirror the log into the backend store. All three are optional — without
+   *  them the log stays in-memory only, exactly as it was before. The caller
+   *  batches; these are called once per row/transition. */
+  persistAppend?: (rows: PersistedMessageRow[]) => void
+  persistUpdate?: (updates: PersistedMessageUpdate[]) => void
+  persistClear?: (keepStatuses: MessageStatus[]) => void
 }
 
 export const RATE_LIMIT_MAX = 5
@@ -85,9 +118,63 @@ export function isBroadcastTarget(to: string): boolean {
   return t === 'all' || t === '*'
 }
 
+/** Reason written onto rows that were still in flight when the window died. */
+const HYDRATE_LOST_REASON = 'window reloaded before delivery'
+
 // ── Module-level singleton state ──────────────────────────────────────────
 let deps: MessagingDeps | null = null
 let seq = 0
+
+function newBootUid(): string {
+  const c = globalThis.crypto
+  if (c?.getRandomValues) {
+    const bytes = c.getRandomValues(new Uint8Array(8))
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+  }
+  return Math.random().toString(16).slice(2, 18)
+}
+
+/** Per-boot prefix that makes `uid` unique across windows and reloads. */
+let bootUid = newBootUid()
+
+function nextMessageKeys(): { id: number; uid: string } {
+  const id = ++seq
+  return { id, uid: `${bootUid}:${id}` }
+}
+
+function toPersistedRow(m: AgentMessage): PersistedMessageRow {
+  return {
+    uid: m.uid,
+    created_at: m.createdAt,
+    status: m.status,
+    sender: m.from,
+    recipient: m.to,
+    content: m.content,
+    reason: m.reason,
+    delivered_at: m.deliveredAt,
+    remote: m.remote,
+    remote_workspace: m.remoteWorkspace,
+  }
+}
+
+function fromPersistedRow(row: PersistedMessageRow): AgentMessage {
+  // A restored row keeps its persisted uid but takes a fresh local id: the
+  // in-memory side maps are keyed by id and must stay collision-free.
+  const m: AgentMessage = {
+    id: ++seq,
+    uid: String(row.uid),
+    from: String(row.sender ?? ''),
+    to: String(row.recipient ?? ''),
+    content: String(row.content ?? ''),
+    status: row.status,
+    createdAt: Number(row.created_at) || 0,
+  }
+  if (row.reason) m.reason = row.reason
+  if (row.delivered_at != null) m.deliveredAt = row.delivered_at
+  if (row.remote) m.remote = row.remote
+  if (row.remote_workspace) m.remoteWorkspace = row.remote_workspace
+  return m
+}
 
 const messages = ref<AgentMessage[]>([])
 const paused = ref(false)
@@ -195,6 +282,7 @@ function failMessage(id: number, reason: string): void {
   if (m && m.status !== 'delivered') {
     m.status = 'failed'
     m.reason = reason
+    deps?.persistUpdate?.([{ uid: m.uid, status: 'failed', reason }])
   }
   envelopes.delete(id)
 }
@@ -206,6 +294,35 @@ function pushLog(m: AgentMessage): void {
       envelopes.delete(evicted.id)
     }
   }
+  // The store prunes to the same 500 rows independently, so the eviction above
+  // needs no counterpart write.
+  deps?.persistAppend?.([toPersistedRow(m)])
+}
+
+/**
+ * Replace the in-memory log from a persisted snapshot (oldest-first).
+ *
+ * Restored rows are history only: envelopes, queues and the remote-ack maps are
+ * in-memory and died with the previous window, so a row left `queued` or
+ * `delivering` can never be delivered — pumpPane() would silently drop it. They
+ * are coerced to `failed` here, and the coercion is written back so the panel
+ * and the store agree. Nothing is re-enqueued.
+ */
+function hydrateLog(rows: PersistedMessageRow[]): void {
+  const restored = (rows ?? []).map(fromPersistedRow)
+  const coerced: PersistedMessageUpdate[] = []
+  for (const m of restored) {
+    if (m.status !== 'queued' && m.status !== 'delivering') continue
+    m.status = 'failed'
+    m.reason = HYDRATE_LOST_REASON
+    coerced.push({ uid: m.uid, status: 'failed', reason: HYDRATE_LOST_REASON })
+  }
+  // The snapshot arrives asynchronously; anything this window already logged
+  // stays (and stays deliverable — it still owns an envelope and a queue slot).
+  const restoredUids = new Set(restored.map((m) => m.uid))
+  const live = messages.value.filter((m) => !restoredUids.has(m.uid))
+  messages.value = [...restored, ...live].slice(-LOG_CAP)
+  if (coerced.length > 0) deps?.persistUpdate?.(coerced)
 }
 
 /** Rate-limit key for a sender→target pair.
@@ -251,7 +368,7 @@ function sendMessage(from: string, to: string, content: string, opts: SendOption
   if (!deps) throw new Error('messaging not configured')
   const now = deps.now()
   const msg: AgentMessage = {
-    id: ++seq,
+    ...nextMessageKeys(),
     from,
     to,
     content,
@@ -374,7 +491,7 @@ function acceptRemoteMessage(args: {
     if (overRateLimit(args.fromDisplay, localName, now, true)) {
       const reason = `rate limit: max ${RATE_LIMIT_MAX} msgs / ${RATE_LIMIT_WINDOW_MS / 1000}s per pair`
       pushLog({
-        id: ++seq,
+        ...nextMessageKeys(),
         from: args.fromDisplay,
         to: localName,
         content: args.content,
@@ -392,7 +509,7 @@ function acceptRemoteMessage(args: {
   }
 
   const msg: AgentMessage = {
-    id: ++seq,
+    ...nextMessageKeys(),
     from: args.fromDisplay,
     to: localName,
     content: args.content,
@@ -417,6 +534,58 @@ function acceptRemoteMessage(args: {
   return true
 }
 
+/**
+ * Log the SENDER's side of a message the backend routed without it passing
+ * through sendMessage() — the MCP `cli_send` tool broadcasts `agent_msg.deliver`
+ * straight out, so without this the sending window's log stays empty. Returns
+ * true when this window owns the sender and a row was added.
+ *
+ * No envelope and no enqueue: the window owning the TARGET pane delivers.
+ */
+function noteOutboundMessage(args: {
+  msgKey: string
+  fromPaneId: string
+  /** Target pane, when the event names one. Used to skip the row when this
+   *  window also owns the target — acceptRemoteMessage logs that message. */
+  targetPaneId?: string
+  toDisplay: string
+  content: string
+  crossWorkspace: boolean
+  remoteWorkspace?: string
+}): boolean {
+  if (!deps) return false
+  const fromName = nameByPane.get(args.fromPaneId)
+  if (!fromName) return false
+  // The local sendMessage → agent_msg.route path already logged this message in
+  // dispatchRemote under the same msgKey, and its broadcast comes back here too.
+  if (remoteOutbound.has(args.msgKey)) return false
+  // Sender and target both live in this window: the inbound row already shows
+  // the message and owns its real delivery status, so an outbound row would
+  // duplicate one message in one log.
+  if (args.targetPaneId && nameByPane.has(args.targetPaneId)) return false
+
+  const now = deps.now()
+  const msg: AgentMessage = {
+    ...nextMessageKeys(),
+    from: fromName,
+    to: args.toDisplay,
+    content: args.content,
+    status: 'queued',
+    createdAt: now,
+  }
+  // `remote` means "crossed a workspace boundary" — a same-workspace MCP send
+  // must not get the cross-workspace badge.
+  if (args.crossWorkspace) {
+    msg.remote = 'outbound'
+    msg.remoteWorkspace = args.remoteWorkspace
+  }
+  pushLog(msg)
+  // Hook the row into the ordinary outbound lifecycle: resolveRemoteDelivery()
+  // flips it to delivered/failed, expireStaleRemotes() is the backstop.
+  remoteOutbound.set(args.msgKey, { id: msg.id, sentAt: now })
+  return true
+}
+
 /** Apply a delivery report to this window's outbound log entry (no-op when the
  *  report belongs to another window). */
 function resolveRemoteDelivery(msgKey: string, ok: boolean, reason: string): void {
@@ -428,6 +597,7 @@ function resolveRemoteDelivery(msgKey: string, ok: boolean, reason: string): voi
   if (ok) {
     msg.status = 'delivered'
     msg.deliveredAt = deps ? deps.now() : msg.createdAt
+    deps?.persistUpdate?.([{ uid: msg.uid, status: 'delivered', delivered_at: msg.deliveredAt }])
   } else {
     failMessage(rec.id, reason || 'delivery failed')
   }
@@ -484,6 +654,7 @@ async function pumpPane(paneId: string): Promise<void> {
   }
   delivering.add(paneId)
   msg.status = 'delivering'
+  deps.persistUpdate?.([{ uid: msg.uid, status: 'delivering' }])
   let ackOk = false
   let ackReason = ''
   try {
@@ -491,6 +662,7 @@ async function pumpPane(paneId: string): Promise<void> {
     if (ok) {
       msg.status = 'delivered'
       msg.deliveredAt = deps.now()
+      deps.persistUpdate?.([{ uid: msg.uid, status: 'delivered', delivered_at: msg.deliveredAt }])
       envelopes.delete(id)
       ackOk = true
     } else {
@@ -517,15 +689,19 @@ function resumeMessaging(): void {
   pump()
 }
 
+const CLEAR_KEEP_STATUSES: MessageStatus[] = ['queued', 'delivering']
+
 function clearMessageLog(): void {
   // Keep undelivered entries — they are still queued state, not just history.
-  messages.value = messages.value.filter((m) => m.status === 'queued' || m.status === 'delivering')
+  messages.value = messages.value.filter((m) => CLEAR_KEEP_STATUSES.includes(m.status))
+  deps?.persistClear?.(CLEAR_KEEP_STATUSES)
 }
 
 /** Test-only: wipe all singleton state. */
 export function _resetMessagingForTest(): void {
   deps = null
   seq = 0
+  bootUid = newBootUid()
   messages.value = []
   paused.value = false
   nameByPane.clear()
@@ -553,10 +729,12 @@ export function useAgentMessaging() {
     sendMessage,
     sendBroadcast,
     acceptRemoteMessage,
+    noteOutboundMessage,
     resolveRemoteDelivery,
     pump,
     pauseMessaging,
     resumeMessaging,
     clearMessageLog,
+    hydrateLog,
   }
 }

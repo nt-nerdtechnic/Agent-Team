@@ -6,6 +6,8 @@ import {
   RATE_LIMIT_MAX,
   QUEUE_CAP,
   type MessagingDeps,
+  type PersistedMessageRow,
+  type PersistedMessageUpdate,
 } from '../useAgentMessaging'
 import { MSG_ENVELOPE_PREFIX } from '../../lib/agentMessaging'
 
@@ -249,6 +251,187 @@ describe('useAgentMessaging', () => {
         expect(m.sendBroadcast('claude-1', `n${i}`)[0].status).toBe('queued')
       }
       expect(m.sendBroadcast('claude-1', 'over')[0].status).toBe('failed')
+    })
+  })
+
+  describe('uid', () => {
+    it('is unique per message and shares one boot prefix', () => {
+      m.registerPane('p1', 'claude')
+      m.registerPane('p2', 'codex')
+      const a = m.sendMessage('claude-1', 'codex-1', 'one')
+      const b = m.sendMessage('claude-1', 'codex-1', 'two')
+      expect(a.uid).toMatch(/^[0-9a-f]+:\d+$/)
+      expect(a.uid).not.toBe(b.uid)
+      expect(a.uid.split(':')[0]).toBe(b.uid.split(':')[0])
+      expect(a.uid).toBe(`${a.uid.split(':')[0]}:${a.id}`)
+    })
+
+    it('stays stable across the whole message lifecycle', async () => {
+      m.registerPane('p1', 'claude')
+      m.registerPane('p2', 'codex')
+      const msg = m.sendMessage('claude-1', 'codex-1', 'hi')
+      const uid = msg.uid
+      m.pump()
+      await flush()
+      expect(msg.status).toBe('delivered')
+      expect(msg.uid).toBe(uid)
+    })
+  })
+
+  describe('persistence', () => {
+    let appended: PersistedMessageRow[][]
+    let updated: PersistedMessageUpdate[][]
+    let cleared: string[][]
+
+    function persistingDeps(): MessagingDeps {
+      return {
+        ...deps,
+        persistAppend: (rows) => { appended.push(rows) },
+        persistUpdate: (updates) => { updated.push(updates) },
+        persistClear: (keep) => { cleared.push(keep) },
+      }
+    }
+
+    beforeEach(() => {
+      appended = []
+      updated = []
+      cleared = []
+      m.configureMessaging(persistingDeps())
+      m.registerPane('p1', 'claude') // claude-1
+      m.registerPane('p2', 'codex') // codex-1
+    })
+
+    it('appends every logged row in the backend shape', () => {
+      const msg = m.sendMessage('claude-1', 'codex-1', 'hello')
+      expect(appended.flat()).toEqual([
+        {
+          uid: msg.uid,
+          created_at: msg.createdAt,
+          status: 'queued',
+          sender: 'claude-1',
+          recipient: 'codex-1',
+          content: 'hello',
+          reason: undefined,
+          delivered_at: undefined,
+          remote: undefined,
+          remote_workspace: undefined,
+        },
+      ])
+    })
+
+    it('updates on the delivering → delivered transition', async () => {
+      const msg = m.sendMessage('claude-1', 'codex-1', 'hi')
+      m.pump()
+      await flush()
+      expect(updated.flat()).toEqual([
+        { uid: msg.uid, status: 'delivering' },
+        { uid: msg.uid, status: 'delivered', delivered_at: msg.deliveredAt },
+      ])
+    })
+
+    it('updates on failure with the reason', () => {
+      const msg = m.sendMessage('claude-1', 'ghost', 'hi')
+      expect(updated.flat()).toEqual([
+        { uid: msg.uid, status: 'failed', reason: msg.reason },
+      ])
+    })
+
+    it('clearMessageLog forwards the kept statuses', () => {
+      m.sendMessage('claude-1', 'ghost', 'hi')
+      m.clearMessageLog()
+      expect(cleared).toEqual([['queued', 'delivering']])
+    })
+
+    it('everything still works with no persist deps configured', async () => {
+      m.configureMessaging(deps) // the plain deps, no persistence
+      const msg = m.sendMessage('claude-1', 'codex-1', 'hi')
+      m.pump()
+      await flush()
+      expect(msg.status).toBe('delivered')
+      m.hydrateLog([
+        { uid: 'boot:1', created_at: 1, status: 'queued', sender: 'a', recipient: 'b', content: 'x' },
+      ])
+      expect(m.messages.value.find((x) => x.uid === 'boot:1')?.status).toBe('failed')
+      m.clearMessageLog()
+      expect(appended).toEqual([])
+      expect(updated).toEqual([])
+      expect(cleared).toEqual([])
+    })
+  })
+
+  describe('hydrateLog', () => {
+    const snapshot: PersistedMessageRow[] = [
+      {
+        uid: 'oldboot:1',
+        created_at: 10,
+        status: 'delivered',
+        sender: 'claude-1',
+        recipient: 'codex-1',
+        content: 'done',
+        delivered_at: 12,
+      },
+      {
+        uid: 'oldboot:2',
+        created_at: 20,
+        status: 'failed',
+        sender: 'claude-1',
+        recipient: 'ghost',
+        content: 'nope',
+        reason: 'unknown target "ghost"',
+        remote: 'outbound',
+        remote_workspace: '/w/other',
+      },
+    ]
+
+    it('restores rows into the log, snake_case mapped back', () => {
+      m.hydrateLog(snapshot)
+      expect(m.messages.value).toHaveLength(2)
+      expect(m.messages.value[0]).toMatchObject({
+        uid: 'oldboot:1',
+        from: 'claude-1',
+        to: 'codex-1',
+        content: 'done',
+        status: 'delivered',
+        createdAt: 10,
+        deliveredAt: 12,
+      })
+      expect(m.messages.value[1]).toMatchObject({
+        uid: 'oldboot:2',
+        status: 'failed',
+        reason: 'unknown target "ghost"',
+        remote: 'outbound',
+        remoteWorkspace: '/w/other',
+      })
+    })
+
+    it('coerces restored in-flight rows to failed and persists the coercion', async () => {
+      const updates: PersistedMessageUpdate[][] = []
+      m.configureMessaging({ ...deps, persistUpdate: (u) => { updates.push(u) } })
+      m.registerPane('p2', 'codex') // codex-1: a live target for the restored row
+      m.hydrateLog([
+        { uid: 'oldboot:3', created_at: 30, status: 'queued', sender: 'claude-1', recipient: 'codex-1', content: 'a' },
+        { uid: 'oldboot:4', created_at: 40, status: 'delivering', sender: 'claude-1', recipient: 'codex-1', content: 'b' },
+      ])
+      expect(m.messages.value.map((x) => x.status)).toEqual(['failed', 'failed'])
+      expect(m.messages.value[0].reason).toBe('window reloaded before delivery')
+      expect(updates.flat()).toEqual([
+        { uid: 'oldboot:3', status: 'failed', reason: 'window reloaded before delivery' },
+        { uid: 'oldboot:4', status: 'failed', reason: 'window reloaded before delivery' },
+      ])
+      // Restored rows are history: nothing was enqueued, so nothing delivers.
+      m.pump()
+      await flush()
+      expect(delivered).toEqual([])
+      expect(m.messages.value.map((x) => x.status)).toEqual(['failed', 'failed'])
+    })
+
+    it('keeps rows this window already logged', () => {
+      m.registerPane('p1', 'claude')
+      m.registerPane('p2', 'codex')
+      const live = m.sendMessage('claude-1', 'codex-1', 'live')
+      m.hydrateLog(snapshot)
+      expect(m.messages.value.map((x) => x.uid)).toEqual(['oldboot:1', 'oldboot:2', live.uid])
+      expect(live.status).toBe('queued')
     })
   })
 })
