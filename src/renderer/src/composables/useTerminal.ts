@@ -13,6 +13,8 @@ import { installTerminalZoomShortcuts, terminalFontSize } from './useTerminalFon
 import { getResumeConcurrency } from '../lib/resumeConcurrency'
 import { chunkForPty, shouldOpenMentionMenu } from '../lib/cliContext'
 import { settingsGet, settingsSet } from '../lib/settings'
+import { shellEscape } from '../lib/drop'
+import { extractClipboardImage, saveClipboardImage } from '../lib/clipboardImage'
 import { TERMINAL_CREATE_TIMEOUT_MS } from '../lib/resume-command'
 import { setContext } from '../keybindings/contextService'
 import {
@@ -1815,7 +1817,22 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     _pasteHandler = (e: ClipboardEvent) => {
       if (e.target !== term.textarea) return
       const text = e.clipboardData?.getData('text/plain')
-      if (!text) return
+      if (!text) {
+        // A screenshot is pixels on the clipboard with no text and no file, so
+        // there is nothing to send and the agent cannot read the clipboard
+        // itself. Write it out and paste the path — see lib/clipboardImage.ts.
+        const image = extractClipboardImage(e.clipboardData)
+        if (!image) return
+        e.preventDefault()
+        e.stopPropagation()
+        if (term.textarea) term.textarea.value = ''
+        selAnchorX = -1
+        selAnchorY = -1
+        void saveClipboardImage(image).then((path) => {
+          if (path) pasteText(shellEscape(path))
+        })
+        return
+      }
       e.preventDefault()
       e.stopPropagation()
       // xterm's paste path clears the helper textarea; the right-click handler

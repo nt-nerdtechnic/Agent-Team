@@ -16,6 +16,7 @@ import ControlPane, {
   type AnalyzerStatusView,
   type WorkspaceMode
 } from './components/ControlPane.vue'
+import type { AgentOverviewRow, AgentOverviewStatus } from './components/AgentOverviewPanel.vue'
 import QuestionAlert from './components/QuestionAlert.vue'
 import TokenStatsPanel from './components/TokenStatsPanel.vue'
 import NotificationHost from './components/NotificationHost.vue'
@@ -179,6 +180,7 @@ const RestoreScopeModal = defineAsyncComponent(() => import('./components/Restor
 const PipelineManagerModal = defineAsyncComponent(() => import('./components/PipelineManagerModal.vue'))
 const AnnouncementsPanel = defineAsyncComponent(() => import('./components/AnnouncementsPanel.vue'))
 const ClockPanel = defineAsyncComponent(() => import('./components/ClockPanel.vue'))
+const AgentOverviewPanel = defineAsyncComponent(() => import('./components/AgentOverviewPanel.vue'))
 
 const backend = useBackend()
 // Hook the settings cache to the ws: reconciles + flushes queued writes once
@@ -9809,6 +9811,60 @@ function onSidebarFocusPane(paneId: string, ev?: MouseEvent): void {
   lastClickPaneId.value = paneId
   onFocusPane(paneId)
 }
+
+// ── Agent overview popover (status-bar "N agents") ──────────────────────────
+// Rows for the status-bar agent list. Status comes from paneViews, which
+// syncViews refreshes every 400 ms from each pane's live displayStatus — the
+// only app-wide readable copy of that per-pane state (displayStatus itself
+// lives inside TerminalPane). A lost backend session is not visible there, so
+// disconnectedPaneIds wins over it.
+const agentOverviewRows = computed<AgentOverviewRow[]>(() => {
+  const statusById = new Map(paneViews.value.map((v) => [v.id, v.status]))
+  return panes.value.map((p) => {
+    const name = p.customName || p.autoName || p.agentLabel
+    const vendor = agentSpecs.find((s) => s.agentKey === p.agentKey)?.label ?? p.agentKey
+    return {
+      paneId: p.id,
+      name,
+      // An unnamed pane's display name already IS the vendor label (agentLabel is
+      // assigned spec.label at creation), so emitting both would print it twice
+      // on the default path. Suppressed the same way foreignWorkspace is.
+      vendor: vendor === name ? '' : vendor,
+      status: disconnectedPaneIds.value.includes(p.id)
+        ? 'disconnected'
+        : ((statusById.get(p.id) ?? (p.realized ? 'starting' : 'waiting')) as AgentOverviewStatus),
+      // A manual resume can pull a session in from another folder, so a pane's
+      // workspace is not always the window's. Shown only when it differs.
+      foreignWorkspace:
+        p.workspacePath && p.workspacePath !== currentWorkspace.value
+          ? (p.workspacePath.split('/').filter(Boolean).pop() ?? p.workspacePath)
+          : '',
+    }
+  })
+})
+
+// The overview's status-bar trigger is hidden once the last pane exits, but the
+// popover is not — without this it would stay mounted with a full-viewport
+// backdrop swallowing every click on a status bar that no longer offers a way
+// to dismiss it.
+watch(
+  () => panes.value.length,
+  (count) => {
+    if (count === 0 && openPopover.value === 'agents') closePopover()
+  },
+)
+
+/** Jump from the overview to a pane. Mirrors the sidebar agent list's plain
+ *  click: reveal the pane's tab, then select it as user-initiated so a
+ *  cold-restore placeholder is realized instead of silently focusing nothing.
+ *  A minimized pane is restored first — effectiveFocusPaneId skips minimized
+ *  panes, so focusing one without restoring would show a different pane. */
+function onAgentOverviewJump(paneId: string): void {
+  closePopover()
+  if (minimizedPanes.value.has(paneId)) restorePane(paneId)
+  onSidebarFocusPane(paneId)
+}
+
 // Pane right-click context menu, shared by the agent list, spotlight thumbnails,
 // and pane headers. The menu is rendered once in this component; each surface only
 // raises an open request with the pane id and pointer coords.
@@ -11463,7 +11519,15 @@ function paneIsCommander(p: ActivePane): boolean {
             ? `Stage ${pipeline.stageIndex + 1} / ${stagesApi.stages.value.length || '?'}`
             : pipeline.state }}
         </span>
-        <span v-if="panes.length > 0" class="sb-item sb-agents">
+        <span
+          v-if="panes.length > 0"
+          class="sb-item sb-agents sb-clickable"
+          role="button"
+          tabindex="0"
+          :title="$t('agentOverview.title')"
+          @click="togglePopover('agents')"
+          @keydown.enter="togglePopover('agents')"
+        >
           {{ panes.length }} agent{{ panes.length !== 1 ? 's' : '' }}
         </span>
         <span
@@ -11560,6 +11624,14 @@ function paneIsCommander(p: ActivePane): boolean {
       :project-created-at="projectCreatedAt"
       :build-tag="buildTag"
       @close="closePopover()"
+    />
+
+    <!-- Agent overview popover -->
+    <AgentOverviewPanel
+      v-if="openPopover === 'agents'"
+      :rows="agentOverviewRows"
+      @close="closePopover()"
+      @jump="onAgentOverviewJump"
     />
   </div>
 </template>

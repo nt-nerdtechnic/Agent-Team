@@ -200,7 +200,12 @@
       "sort-by": "排序方式",
       "sort-title": "標題",
       "sort-updated": "最後更新",
-      "sort-progress": "進度"
+      "sort-progress": "進度",
+      "sort-asc": "遞增 — 點擊改為遞減",
+      "sort-desc": "遞減 — 點擊改為遞增",
+      "group-flat": "單一列表 — 點擊改為依階段分組",
+      "group-stage": "依階段分組 — 點擊改為單一列表",
+      "section-all": "全部計畫"
     },
     "terminal": {
       "option-select-hint": "此 CLI 接管了滑鼠 — 按住 {key} 再拖曳即可劃選文字",
@@ -1583,6 +1588,20 @@
     "duration-days": "{count} 天",
     "duration-hours": "{count} 小時",
     "duration-minutes": "{count} 分"
+  },
+  "agentOverview": {
+    "title": "代理總覽",
+    "close": "關閉",
+    "jump": "切換到這個代理",
+    "empty": "此視窗沒有代理",
+    "status-running": "執行中",
+    "status-idle": "閒置",
+    "status-starting": "啟動中",
+    "status-stopped": "已停止",
+    "status-exited": "已結束",
+    "status-error": "錯誤",
+    "status-waiting": "尚未開啟",
+    "status-disconnected": "連線中斷"
   },
   "preview": {
     "binary-file": "二進位檔案",

@@ -200,7 +200,12 @@
       "sort-by": "Sort by",
       "sort-title": "Title",
       "sort-updated": "Last updated",
-      "sort-progress": "Progress"
+      "sort-progress": "Progress",
+      "sort-asc": "Ascending — click for descending",
+      "sort-desc": "Descending — click for ascending",
+      "group-flat": "One list — click to group by stage",
+      "group-stage": "Grouped by stage — click for one list",
+      "section-all": "All plans"
     },
     "terminal": {
       "option-select-hint": "This CLI captures the mouse — hold {key} while dragging to select text",
@@ -1583,6 +1588,20 @@
     "duration-days": "{count}d",
     "duration-hours": "{count}h",
     "duration-minutes": "{count}m"
+  },
+  "agentOverview": {
+    "title": "Agents",
+    "close": "Close",
+    "jump": "Go to this agent",
+    "empty": "No agents in this window",
+    "status-running": "RUNNING",
+    "status-idle": "idle",
+    "status-starting": "starting",
+    "status-stopped": "stopped",
+    "status-exited": "exited",
+    "status-error": "error",
+    "status-waiting": "not opened",
+    "status-disconnected": "disconnected"
   },
   "preview": {
     "binary-file": "Binary file",
