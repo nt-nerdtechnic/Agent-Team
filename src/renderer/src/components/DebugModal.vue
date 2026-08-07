@@ -13,7 +13,7 @@
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { settingsGet, settingsSet } from '../lib/settings'
-import { CLI_AGENT_SPECS } from '../lib/agentSpecs'
+import { CLI_AGENT_SPECS } from '../agents'
 import { aiTerminalPaneId, bracketedPaste, resolveCliCommand } from '../lib/aiCliContext'
 import {
   LOG_LEVELS,

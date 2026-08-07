@@ -83,7 +83,7 @@ import { planDropPrompt, type PlanDragRef } from './lib/planDrag'
 import { allSlotsFinished, applyTurnProgress, isReplayedTurnComplete, loopBackoffMs, loopContinueReady, loopStallVerdict, LOOP_STALL_LIMIT, turnCompleteDone, turnEndsWithSentinel, type SlotSignal } from './lib/completion'
 import { reorderByIds, sortByIdOrder } from './lib/paneOrder'
 import { computeRangeSelection } from './lib/paneSelection'
-import { AGENT_SPECS, type PaneArgContext } from './lib/agentSpecs'
+import { AGENT_SPECS, type PaneArgContext } from './agents'
 import {
   orderedAgentKeys,
   isAgentEnabled,

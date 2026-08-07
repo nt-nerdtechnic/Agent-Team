@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch, defineAsyncComponent } from 'vue'
-import type { PaneArgContext } from '../lib/agentSpecs'
+import type { PaneArgContext } from '../agents'
 import { extractDropPaths } from '../lib/drop'
 import { settingsGet, settingsSet } from '../lib/settings'
 import ViewPanel, { type LayoutMode } from './ViewPanel.vue'

@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import { nextTick, ref, type Ref } from 'vue'
 import { i18n } from '../../i18n'
-import { CLI_AGENT_SPECS } from '../../lib/agentSpecs'
+import { CLI_AGENT_SPECS } from '../../agents'
 import { bracketedPaste } from '../../lib/aiCliContext'
 
 i18n.global.locale.value = 'en-US'

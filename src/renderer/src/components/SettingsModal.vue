@@ -43,7 +43,7 @@ import {
   type DetectedEditor,
 } from '../lib/defaultEditor'
 import { useCliAgentPrefs } from '../composables/useCliAgentPrefs'
-import { CLI_AGENT_SPECS } from '../lib/agentSpecs'
+import { CLI_AGENT_SPECS } from '../agents'
 import {
   LOOP_PROMPT_SETTING_KEY,
   DEFAULT_LOOP_PROMPT,

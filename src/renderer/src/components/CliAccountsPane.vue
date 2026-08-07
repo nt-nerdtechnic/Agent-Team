@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { inject, onMounted, ref } from 'vue'
-import { CLI_AGENT_SPECS } from '../lib/agentSpecs'
+import { CLI_AGENT_SPECS } from '../agents'
 import { cliAccountSwitchKey, type useCliProfiles, type CliProfile } from '../composables/useCliProfiles'
 import { useNotify } from '../composables/useNotify'
 import {

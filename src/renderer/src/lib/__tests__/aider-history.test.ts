@@ -7,7 +7,7 @@ import {
   resolveAiderHistoryRoot,
   resumeAiderHistoryPath,
 } from '../aider-history'
-import { AGENT_SPECS } from '../agentSpecs'
+import { AGENT_SPECS } from '../../agents'
 
 const PANE_ID = '4D4A11FE-b08a-46df-9f86-685589531e65'
 

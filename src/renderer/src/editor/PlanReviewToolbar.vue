@@ -24,7 +24,7 @@ import type { PlanStore, PlanCtx } from '../composables/planStore'
 import type { useBackend } from '../composables/useBackend'
 import { sharePlanToGit } from '../composables/planShare'
 import { useNotify } from '../composables/useNotify'
-import { CLI_AGENT_SPECS } from '../lib/agentSpecs'
+import { CLI_AGENT_SPECS } from '../agents'
 
 const props = defineProps<{
   workspacePath: string

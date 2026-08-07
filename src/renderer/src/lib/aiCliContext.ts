@@ -8,7 +8,7 @@
  * (e.g. the Pipeline Manager's) live next to their window instead.
  */
 
-import { CLI_AGENT_SPECS } from './agentSpecs'
+import { CLI_AGENT_SPECS } from '../agents'
 
 /** Wrap text in a bracketed-paste envelope so TUI CLIs treat it as one paste
  *  (inserted literally, not interpreted keystroke-by-keystroke). */
