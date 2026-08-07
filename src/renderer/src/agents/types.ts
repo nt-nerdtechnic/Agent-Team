@@ -31,6 +31,14 @@ export interface AgentSpec {
    *  vendor cannot resume by id (aider's lossy restore is special-cased in
    *  buildResumeCommand). */
   resumeArgs?: (sessionId: string) => string
+  /** This CLI's logs carry no end-of-turn record at all, so the end of a turn
+   *  can only be inferred from silence. Everything else reports turn ends
+   *  explicitly and MUST be trusted instead: activity is logged per output
+   *  line, not as a heartbeat, so a CLI waiting on a long tool call — or on a
+   *  permission prompt — looks exactly like a CLI that has finished. Inferring
+   *  from silence there would inject text and a newline into a pane that is
+   *  mid-task, and into a y/n prompt would answer it. */
+  turnEndInferredFromSilence?: boolean
   /** Recognizes a saved command as this vendor's resume invocation (so a
    *  restore doesn't replay it as a user-custom base command). Undefined =
    *  the generic `<agentKey> --resume <id>` shape. */

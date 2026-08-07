@@ -8,6 +8,7 @@ export const SPEC = {
   defaultCommand: 'qwen',
   skipPermissionFlag: '--yolo',
   resumeArgs: (id) => `--resume ${id}`,
+  turnEndInferredFromSilence: true,
   supportsRebuild: true,
   hint: 'generalist'
 } as const satisfies AgentSpec

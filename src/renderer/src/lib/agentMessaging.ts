@@ -9,6 +9,8 @@
 // Parsing runs on structured turn text (ActivityEvent.text), never on the
 // terminal buffer.
 
+import { AGENT_SPECS } from '../agents'
+
 export const MSG_START = '---MSG-START---'
 export const MSG_END = '---MSG-END---'
 export const MSG_ENVELOPE_PREFIX = '[Navide MSG] from:'
@@ -209,14 +211,12 @@ export function defaultMessagingName(agentKey: string, taken: Iterable<string>):
 export const TURN_SILENCE_MS = 20_000
 
 /** CLIs whose logs carry no end-of-turn record at all, so the end of a turn can
- *  only be inferred from silence.
- *
- *  Everything else reports turn ends explicitly and MUST be trusted instead:
- *  activity is logged per output line, not as a heartbeat, so a CLI waiting on
- *  a long tool call — or on a permission prompt — looks exactly like a CLI that
- *  has finished. Inferring from silence there would inject text and a newline
- *  into a pane that is mid-task, and into a y/n prompt would answer it. */
-export const VENDORS_WITHOUT_TURN_END: ReadonlySet<string> = new Set(['qwen', 'pi', 'cursor'])
+ *  only be inferred from silence. Each vendor declares this itself — see
+ *  `turnEndInferredFromSilence` in agents/types.ts for why the default (trust
+ *  the explicit turn-end record) must never be overridden lightly. */
+export const VENDORS_WITHOUT_TURN_END: ReadonlySet<string> = new Set(
+  AGENT_SPECS.filter((s) => s.turnEndInferredFromSilence).map((s) => s.agentKey)
+)
 
 /**
  * Whether a pane's CLI is still mid-turn, from its activity timestamps.
