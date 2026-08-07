@@ -36,27 +36,27 @@ export const WHATS_NEW: WhatsNewEntry[] = [
   {
     version: '0.1.78',
     title: {
-      'zh-TW': '對話記錄遺失修復、跨工作區訊息持久化與 CLI 後端一家一檔重構',
-      'en-US': 'Transcript-loss fix, cross-workspace message persistence & per-vendor CLI backend',
+      'zh-TW': '剪貼簿圖片貼上轉檔、拖曳路徑轉義優化與 Agent 總覽詳情面板',
+      'en-US': 'Clipboard image-to-file paste, escaped drop paths & Agent Overview panel',
     },
     highlights: [
       {
         'zh-TW':
-          '修復無聲對話遺失：從 Claude Code 環境裡啟動 Navide 時，pane 會繼承子 session 標記而靜默停寫對話記錄，重啟後 pane 變空白。後端現於啟動時剝除該標記（並防禦 Grok 同型標記），對話記錄保證落盤。',
+          '剪貼簿截圖與拖曳路徑轉義：⌘V 貼上剪貼簿截圖自動寫入實體檔（`userData/dropped-files/`）；拖曳檔案自動使用斜線轉義格式，便於 CLI Agent 直接掃描識別。',
         'en-US':
-          'Fixed silent transcript loss: launching Navide from inside a Claude Code environment made panes inherit a child-session marker and silently stop writing transcripts (blank panes after restart). The backend now strips the marker at startup (plus Grok’s equivalents), so transcripts always persist.',
+          'Clipboard screenshot paste & escaped drop paths: ⌘V pasting a screenshot saves a real image file under `userData/dropped-files/`; dragged paths use backslash escaping for instant CLI agent scanning.',
       },
       {
         'zh-TW':
-          '跨工作區 CLI 訊息升級：訊息紀錄改用 SQLite v2 結構持久化、跨工作區外送追蹤與重連補水，並新增狀態列公告面板與版本/時鐘顯示。',
+          'Agent 狀態總覽與狀態列面板互斥：新增 Agent 總覽面板 (`AgentOverviewPanel`) 與時間詳情面板 (`ClockPanel`)，狀態列 Popover 具備互斥開啟機制，且 UsageBadge 支援 Esc/Blur 自動關閉防護。',
         'en-US':
-          'Cross-workspace CLI messaging upgrade: message logs persist in a SQLite v2 schema with outbound tracking and reconnect hydration, plus a new status-bar announcements panel and version/clock chips.',
+          'Agent Overview & status-bar popover management: added AgentOverviewPanel and ClockPanel, mutually exclusive status-bar popovers, and Esc/blur auto-dismissal for UsageBadge.',
       },
       {
         'zh-TW':
-          '終端效能與架構整併：PTY 生命週期改用獨立執行緒池並一次汲取讀取緩衝（長輸出更順）；後端 CLI 程式碼完成「一家一檔」重構（12 家各自獨立模組 + 統一 registry），新增 CLI 支援從此只需一個檔案。',
+          '對話記錄保護與重連 Session 標題繼承：修復從 Claude/Grok 環境啟動 Navide 時對話紀錄遺失問題，並在恢復舊 Session 時自動繼承面板 `auto_name` 標籤。',
         'en-US':
-          'Terminal performance & architecture: PTY lifecycle moved to an isolated thread pool with drained reads (smoother long outputs); the CLI backend finished its one-file-per-vendor refactor (12 self-contained vendor modules + a single registry), so adding a CLI now takes one file.',
+          'Transcript protection & session auto-name inheritance: fixed transcript loss when launching inside Claude/Grok environments, and carried `auto_name` labels on session resumes.',
       },
     ],
   },
