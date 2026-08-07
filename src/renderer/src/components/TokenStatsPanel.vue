@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch, type Ref } from 'vue'
+import { CLI_AGENT_SPECS } from '../agents'
 import { settingsGet, settingsSet } from '../lib/settings'
 import { useTokens, type TokenBucket, type ResetScope } from '../composables/useTokens'
 import { useNotify } from '../composables/useNotify'
@@ -93,7 +94,9 @@ const VENDOR_LABELS: Record<string, string> = {
   aider: 'Aider',
   analyzer: 'Local analyzer'
 }
-const KNOWN_VENDORS = ['claude', 'codex', 'antigravity', 'grok', 'kimi', 'opencode', 'qwen', 'kilo', 'pi', 'copilot', 'cursor', 'aider', 'analyzer']
+// CLI vendors from the canonical specs, plus the analyzer pseudo-vendor
+// (token accounting only — not a spawnable CLI).
+const KNOWN_VENDORS = [...CLI_AGENT_SPECS.map((s) => s.agentKey), 'analyzer']
 
 // Vendor / Stage breakdowns come from workspace CUMULATIVE (not just current run)
 // so they remain visible even when no pipeline is actively running. The current

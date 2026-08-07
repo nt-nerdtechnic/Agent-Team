@@ -10,10 +10,16 @@ import {
   remainingPercent,
   remainingTier,
   usageFor,
-  USAGE_PROVIDERS,
   type UsageSnapshot
 } from '../useUsage'
 import { __resetSettingsForTest } from '../../lib/settings'
+
+// Local test fixture — the frontend no longer keeps a provider allowlist
+// (the backend payload is the single source of who has a usage provider).
+const TEST_PROVIDERS = [
+  'claude', 'codex', 'kimi', 'grok', 'antigravity', 'opencode',
+  'qwen', 'kilo', 'pi', 'copilot', 'cursor'
+] as const
 
 function snap(overrides: Partial<UsageSnapshot> = {}): UsageSnapshot {
   return {
@@ -75,9 +81,9 @@ describe('useUsage store', () => {
     const { backend, emit } = fakeBackend()
     initUsage(backend as never)
     const providers: Record<string, UsageSnapshot> = {}
-    for (const key of USAGE_PROVIDERS) providers[key] = snap({ provider: key })
+    for (const key of TEST_PROVIDERS) providers[key] = snap({ provider: key })
     emit('usage.changed', { providers })
-    for (const key of USAGE_PROVIDERS) {
+    for (const key of TEST_PROVIDERS) {
       expect(usageFor(key), key).toBeDefined()
     }
     expect(usageFor('aider')).toBeUndefined()
