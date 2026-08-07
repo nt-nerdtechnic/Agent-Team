@@ -7,6 +7,7 @@ import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
 import type { useBackend } from './useBackend'
 import { bufferTail, createRedrawGuard, dropTuiNoise, stripAnsi } from '../lib/buffer'
+import { AGENT_SPECS } from '../agents'
 import { createResizeController, type ResizeController } from './useTerminalResize'
 import { installTerminalZoomShortcuts, terminalFontSize } from './useTerminalFontSize'
 import { getResumeConcurrency } from '../lib/resumeConcurrency'
@@ -130,22 +131,26 @@ export interface SpawnOptions {
   loginProfileId?: string
 }
 
+/** Historic aliases some call sites passed before agent keys were canonical. */
+function terminalSpecFor(agentKey?: string): (typeof AGENT_SPECS)[number] | undefined {
+  const key = agentKey?.toLowerCase()
+  const canonical = key === 'claude-code' ? 'claude' : key === 'agy' ? 'antigravity' : key
+  return AGENT_SPECS.find((s) => s.agentKey === canonical)
+}
+
 /**
  * Encode the shared Shift+Enter UX for the active CLI's terminal protocol.
  *
  * There is no vendor-neutral byte sequence for a modified Enter key in a
- * traditional PTY. Codex understands the CSI-u representation, while Claude
- * Code's xterm.js terminal setup uses ESC+CR. Keep the user-facing shortcut
- * uniform and contain the protocol difference here.
+ * traditional PTY, so each spec declares its protocol (shiftEnterSequence /
+ * bracketedPaste). Keep the user-facing shortcut uniform and contain the
+ * protocol difference here.
  */
 export function encodeShiftEnter(agentKey?: string): string {
-  const key = agentKey?.toLowerCase()
-  if (key === 'codex') return '\x1b[13;2u'
-  // Claude, Grok, Antigravity, and Kimi all support bracketed paste.
-  // Using bracketed paste LF guarantees a literal newline insertion without submitting.
-  if (key === 'claude' || key === 'claude-code' || key === 'agy' || key === 'antigravity' || key === 'grok' || key === 'kimi') {
-    return '\x1b[200~\n\x1b[201~'
-  }
+  const spec = terminalSpecFor(agentKey)
+  if (spec?.shiftEnterSequence) return spec.shiftEnterSequence
+  // Bracketed paste LF guarantees a literal newline insertion without submitting.
+  if (spec?.bracketedPaste) return '\x1b[200~\n\x1b[201~'
   // Plain shells (bash/zsh) treat \x1b\r as Enter and do not always have bracketed paste enabled.
   // Ctrl+V (\x16) + Ctrl+J (\x0a) is the standard way to insert a literal newline in readline/ZLE.
   return '\x16\x0a'
@@ -161,9 +166,7 @@ const OPTION_SELECT_HINT_KEY = 'agentTeam.terminal.optionSelectHintSeen'
 
 /** Agents whose TUI keeps bracketed paste on — see pasteFromClipboard(). */
 function agentUsesBracketedPaste(agentKey?: string): boolean {
-  const key = agentKey?.toLowerCase()
-  return key === 'claude' || key === 'claude-code' || key === 'agy' ||
-    key === 'antigravity' || key === 'grok' || key === 'kimi' || key === 'codex'
+  return terminalSpecFor(agentKey)?.bracketedPaste === true
 }
 
 // ── Edit > Copy bridge ──────────────────────────────────────────────────────

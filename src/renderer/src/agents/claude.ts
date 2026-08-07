@@ -10,6 +10,7 @@ export const SPEC = {
   resumeArgs: (id) => `--resume ${id}`,
   supportsRebuild: true,
   verifiedTurnText: true,
+  bracketedPaste: true,
   // Restore-pin self-heals: the turn event's attributed id is adopted directly.
   supportsRestorePin: true,
   hint: 'planner + reviewer'

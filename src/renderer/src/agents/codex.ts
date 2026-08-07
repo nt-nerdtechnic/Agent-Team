@@ -13,6 +13,8 @@ export const SPEC = {
   resumeCommandPattern: /^codex\s+resume\s+\S+/,
   supportsRebuild: true,
   verifiedTurnText: true,
+  bracketedPaste: true,
+  shiftEnterSequence: '\x1b[13;2u',
   // Restore-pin self-heals: per-pane CODEX_HOME announces the new session.
   supportsRestorePin: true,
   hint: 'implementer'

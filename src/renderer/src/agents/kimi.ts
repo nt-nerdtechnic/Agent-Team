@@ -10,6 +10,7 @@ export const SPEC = {
   // id is the `session_<uuid>` dir name.
   resumeArgs: (id) => `--session ${id}`,
   needsSessionMarker: true,
+  bracketedPaste: true,
   supportsRebuild: true,
   hint: 'generalist'
 } as const satisfies AgentSpec

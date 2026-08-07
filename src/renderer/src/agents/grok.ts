@@ -10,6 +10,7 @@ export const SPEC = {
   // Short flag; 12-hex session id.
   resumeArgs: (id) => `-s ${id}`,
   needsSessionMarker: true,
+  bracketedPaste: true,
   resumeCommandPattern: /^grok\s+-s\s+\S+/,
   supportsRebuild: true,
   hint: 'generalist'

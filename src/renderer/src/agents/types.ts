@@ -39,6 +39,15 @@ export interface AgentSpec {
    *  from silence there would inject text and a newline into a pane that is
    *  mid-task, and into a y/n prompt would answer it. */
   turnEndInferredFromSilence?: boolean
+  /** This vendor's TUI keeps bracketed paste on. Enables chunked clipboard
+   *  paste wrapping AND serves as the default Shift+Enter encoding (bracketed
+   *  LF inserts a literal newline without submitting). */
+  bracketedPaste?: boolean
+  /** Explicit Shift+Enter byte sequence when the vendor prefers something
+   *  other than the bracketed-paste LF default (codex: CSI-u modified Enter).
+   *  There is no vendor-neutral byte sequence for a modified Enter key in a
+   *  traditional PTY — see encodeShiftEnter(). */
+  shiftEnterSequence?: string
   /** Fresh (non-resume, non-login) panes embed an `at-pane:<paneId>` marker
    *  in this vendor's kickoff so the backend can match the resulting CLI
    *  session file back to the pane (these CLIs can't pin a session id at
