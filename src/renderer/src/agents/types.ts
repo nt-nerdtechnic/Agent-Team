@@ -79,6 +79,11 @@ export interface AgentSpec {
    *  restore doesn't replay it as a user-custom base command). Undefined =
    *  the generic `<agentKey> --resume <id>` shape. */
   resumeCommandPattern?: RegExp
+  /** Builds this vendor's ID-LESS resume arguments (aider: the lossy
+   *  `--restore-chat-history`, optionally pointed at the pane's own
+   *  chat-history file). Mutually exclusive with resumeArgs;
+   *  buildResumeCommand ignores the session id when this is set. */
+  resumeWithoutId?: (chatHistoryFile: string) => string
   /** Panes can be re-spawned via the vendor's resume command. */
   supportsRebuild?: boolean
   /** A restore may keep the SAVED session id pinned so Rebuild stays enabled

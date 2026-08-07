@@ -23,7 +23,6 @@
 // `skipFlag` is the vendor's permission-bypass flag (or "" when YOLO is off),
 // appended verbatim — same flags resolveCommand() uses for a fresh launch.
 
-import { aiderChatHistoryFlag } from './aider-history'
 import { AGENT_SPECS, REBUILD_CAPABLE_AGENTS, RESTORE_PIN_AGENTS } from '../agents'
 
 export { REBUILD_CAPABLE_AGENTS, RESTORE_PIN_AGENTS }
@@ -172,25 +171,20 @@ export function buildResumeCommand(
   skipFlag = '',
   chatHistoryFile = ''
 ): string {
-  // Aider has no session ids: resume is always the lossy
-  // `--restore-chat-history` (reads the pane's chat-history file), so the
-  // passed id — always empty for aider — is ignored.
-  if (agentKey === 'aider') {
-    const parts = ['aider']
-    if (chatHistoryFile) parts.push(aiderChatHistoryFlag(chatHistoryFile))
-    parts.push('--restore-chat-history')
-    const aiderFlag = skipFlag.trim()
-    if (aiderFlag) parts.push(aiderFlag)
-    return parts.join(' ')
+  const spec = AGENT_SPECS.find((v) => v.agentKey === agentKey)
+  const flag = skipFlag.trim()
+  // Id-less vendors (aider): resume args come from the spec's resumeWithoutId
+  // hook and the passed id — always empty there — is ignored.
+  if (spec?.resumeWithoutId) {
+    const base = `${spec.defaultCommand} ${spec.resumeWithoutId(chatHistoryFile)}`
+    return flag ? `${base} ${flag}` : base
   }
   const id = normalizeResumeSessionId(agentKey, sessionId)
   if (!id) return '' // no id → caller falls back to a fresh spawn
-  const spec = AGENT_SPECS.find((v) => v.agentKey === agentKey)
   // The binary comes from the spec's defaultCommand — never a hardcoded name
   // here. (Custom-binary overrides thread through the caller's baseCommand.)
   const base = spec?.resumeArgs
     ? `${spec.defaultCommand} ${spec.resumeArgs(id)}`
     : `${agentKey} --resume ${id}`
-  const flag = skipFlag.trim()
   return flag ? `${base} ${flag}` : base
 }
