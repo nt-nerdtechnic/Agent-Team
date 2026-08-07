@@ -49,7 +49,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .base import VendorSpec
+from .base import Dep, VendorSpec
 from ..log_readers.base import (
     ActivityEvent,
     IncrementalParseResult,
@@ -579,4 +579,16 @@ SPEC = VendorSpec(
     session_path=_session_lookup_path,
     home_env_vars=("AIDER_CHAT_HISTORY_FILE", "AIDER_INPUT_HISTORY_FILE"),
     make_log_reader=AiderLogReader,
+    # Aider updates via the `--upgrade` FLAG (not a subcommand) and ships no
+    # doctor. AIDER_CHECK_UPDATE=false is its own startup update-check
+    # opt-out; its global state home is fixed at ~/.aider (no relocating
+    # env), so config_home_env stays empty. `aider --version` prints
+    # `aider X.Y.Z`.
+    install_dep=Dep("aider", "Aider", "Aider AI pair-programming CLI", "agent_cli",
+        ["aider", "--version"], r"(\d+\.\d+\.\d+)",
+        install_cmd="curl -LsSf https://aider.chat/install.sh | sh",
+        needs_terminal=True, requires_binaries=("curl",), optional=True,
+        docs_url="https://aider.chat",
+        update_cmd="aider --upgrade",
+        autoupdate_env="AIDER_CHECK_UPDATE"),
 )

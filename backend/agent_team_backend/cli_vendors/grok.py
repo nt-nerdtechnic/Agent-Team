@@ -37,7 +37,7 @@ import shutil
 import time
 from typing import Any
 
-from .base import VendorSpec
+from .base import Dep, VendorSpec
 from ..usage_common import _num, _snapshot, _window
 from ..log_readers.base import (
     ActivityEvent,
@@ -595,4 +595,9 @@ SPEC = VendorSpec(
         "GROK_DAEMON_CHILD",
     ),
     make_log_reader=GrokLogReader,
+    install_dep=Dep("grok", "Grok CLI", "superagent-ai Grok coding agent", "agent_cli",
+        ["grok", "--version"], r"(\d+\.\d+\.\d+)",
+        install_cmd="curl -fsSL https://raw.githubusercontent.com/superagent-ai/grok-cli/main/install.sh | bash",
+        needs_terminal=True, requires_binaries=("curl",), optional=True, docs_url="https://grokcli.io",
+        update_cmd="grok update"),
 )

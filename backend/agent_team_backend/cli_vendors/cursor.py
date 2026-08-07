@@ -51,7 +51,7 @@ import sys
 import time
 
 from ..log_readers.base import ActivityEvent, IncrementalParseResult, LogReader, TokenUsage
-from .base import VendorSpec, command_text
+from .base import Dep, VendorSpec, command_text
 from ..usage_common import (
     HTTP_TIMEOUT,
     _KEYCHAIN_COOLDOWN_S,
@@ -551,4 +551,17 @@ SPEC = VendorSpec(
     session_path=_session_path,
     session_exists=_session_exists,
     make_log_reader=CursorLogReader,
+    # Cursor CLI (closed source; binary `agent`, legacy installs `cursor-agent`)
+    # ships `agent update` but no doctor subcommand. Autoupdate is on by default
+    # with no confirmed opt-out env, and its data home is fixed at ~/.cursor
+    # (no config-home env) — both stay empty. `cursor-agent` is declared as an
+    # alternate so a machine still carrying the legacy binary is detected and
+    # spawnable instead of being reported as not installed.
+    install_dep=Dep("cursor", "Cursor CLI", "Cursor terminal coding agent CLI", "agent_cli",
+        ["agent", "--version"], r"(\d+\.\d+\.\d+)",
+        alt_commands=("cursor-agent",),
+        install_cmd="curl https://cursor.com/install -fsS | bash",
+        needs_terminal=True, requires_binaries=("curl",), optional=True,
+        docs_url="https://cursor.com/docs/cli",
+        update_cmd="agent update"),
 )

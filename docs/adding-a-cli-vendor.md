@@ -25,9 +25,10 @@ You never need to read or modify the shared orchestration code.
 
 ## Install detection
 
-Add a `Dep(...)` entry for your CLI in
-`backend/agent_team_backend/onboarding_deps.py` so Navide can detect,
-install, and update it.
+Set `install_dep=Dep(...)` in your vendor's `SPEC` (see any existing
+vendor file) so Navide can detect, install, and update your CLI. The
+onboarding wizard aggregates every vendor's entry automatically — no
+other file to edit.
 
 ## Verify
 

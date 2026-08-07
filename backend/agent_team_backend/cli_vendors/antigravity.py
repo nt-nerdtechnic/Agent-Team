@@ -28,7 +28,7 @@ import os
 import sys
 import time
 
-from .base import VendorSpec
+from .base import Dep, VendorSpec
 from ..usage_common import (
     HTTP_TIMEOUT,
     _epoch_to_iso,
@@ -450,4 +450,10 @@ SPEC = VendorSpec(
     fetch_usage=lambda home: fetch_antigravity(home),
     session_path=_session_path,
     make_log_reader=AntigravityLogReader,
+    install_dep=Dep("antigravity", "Antigravity", "Google Antigravity CLI", "agent_cli",
+        ["agy", "--version"], r"(\d+\.\d+\.\d+)",
+        install_cmd="curl -fsSL https://antigravity.google/cli/install.sh | bash",
+        needs_terminal=True, requires_binaries=("curl",), optional=True,
+        docs_url="https://antigravity.google/docs/cli-getting-started",
+        update_cmd="agy update"),
 )

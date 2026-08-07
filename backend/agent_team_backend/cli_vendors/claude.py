@@ -34,7 +34,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .base import VendorSpec, command_text
+from .base import Dep, VendorSpec, command_text
 from ..usage_common import (
     _KEYCHAIN_COOLDOWN_S,
     _snapshot,
@@ -1146,4 +1146,15 @@ SPEC = VendorSpec(
         "CLAUDE_CODE_CHILD_SESSION",
     ),
     make_log_reader=ClaudeLogReader,
+    # Step 2 — Agent CLIs (≥ 1 required) + Analyzer
+    install_dep=Dep("claude", "Claude Code", "Anthropic Claude CLI", "agent_cli",
+        ["claude", "--version"], r"(\d+\.\d+\.\d+)",
+        install_cmd="npm install -g @anthropic-ai/claude-code", needs_terminal=True,
+        requires_binaries=("npm",),
+        optional=True, docs_url="https://docs.anthropic.com/claude-code",
+        update_cmd="claude update", doctor_cmd="claude doctor",
+        npm_package="@anthropic-ai/claude-code",
+        update_state_file=".last-update-result.json",
+        config_home_env="CLAUDE_CONFIG_DIR", config_home_default=".claude",
+        autoupdate_env="DISABLE_AUTOUPDATER"),
 )

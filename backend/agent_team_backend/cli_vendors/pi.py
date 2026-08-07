@@ -44,7 +44,7 @@ from pathlib import Path
 
 import re
 
-from .base import VendorSpec, command_text
+from .base import Dep, VendorSpec, command_text
 from . import _protocols
 from ..usage_common import HTTP_TIMEOUT, _epoch_to_iso, _num, _snapshot, _window, parse_retry_after
 from ..log_readers.base import (
@@ -793,4 +793,15 @@ SPEC = VendorSpec(
         "PI_PACKAGE_DIR",
     ),
     make_log_reader=PiLogReader,
+    # Pi ships `pi update` but no doctor subcommand; PI_SKIP_VERSION_CHECK is
+    # its own opt-out for the startup version check.
+    install_dep=Dep("pi", "Pi", "Pi coding agent CLI", "agent_cli",
+        ["pi", "--version"], r"(\d+\.\d+\.\d+)",
+        install_cmd="npm install -g @earendil-works/pi-coding-agent",
+        needs_terminal=True, requires_binaries=("npm",),
+        optional=True, docs_url="https://pi.dev/docs",
+        update_cmd="pi update",
+        npm_package="@earendil-works/pi-coding-agent",
+        config_home_env="PI_CODING_AGENT_DIR",
+        autoupdate_env="PI_SKIP_VERSION_CHECK"),
 )

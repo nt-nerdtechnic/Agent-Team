@@ -42,7 +42,7 @@ import shutil
 import sys
 import time
 
-from .base import VendorSpec, command_text
+from .base import Dep, VendorSpec, command_text
 from ..usage_common import (
     HTTP_TIMEOUT,
     _num,
@@ -686,4 +686,16 @@ SPEC = VendorSpec(
     session_path=_session_path,
     home_env_vars=("COPILOT_HOME",),
     make_log_reader=CopilotLogReader,
+    # Copilot CLI ships `copilot update` but no doctor subcommand;
+    # COPILOT_AUTO_UPDATE=false is its autoupdate opt-out and COPILOT_HOME
+    # relocates its config/session root.
+    install_dep=Dep("copilot", "Copilot CLI", "GitHub Copilot coding agent CLI", "agent_cli",
+        ["copilot", "--version"], r"(\d+\.\d+\.\d+)",
+        install_cmd="brew install --cask copilot-cli",
+        needs_terminal=True, requires_binaries=("brew",), optional=True,
+        docs_url="https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-copilot-cli",
+        update_cmd="copilot update",
+        npm_package="@github/copilot",
+        config_home_env="COPILOT_HOME",
+        autoupdate_env="COPILOT_AUTO_UPDATE"),
 )

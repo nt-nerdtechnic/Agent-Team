@@ -41,4 +41,9 @@ SPEC = VendorSpec(
     # interrupt_key=b"\x03",
     # --- log reading ---
     # make_log_reader=lambda: MyCliLogReader(),
+    # --- install wizard: detection + install/update commands (see base.Dep) ---
+    # install_dep=Dep("_template", "Human Name", "One-line description", "agent_cli",
+    #     ["mycli", "--version"], r"(\d+\.\d+\.\d+)",
+    #     install_cmd="npm install -g mycli", needs_terminal=True,
+    #     requires_binaries=("npm",), optional=True, docs_url="https://mycli.dev"),
 )

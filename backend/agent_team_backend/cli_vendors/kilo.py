@@ -22,7 +22,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .base import VendorSpec, command_text
+from .base import Dep, VendorSpec, command_text
 from .opencode import OpencodeLogReader  # vendor→vendor: sanctioned fork inheritance
 from ..usage_common import (
     HTTP_TIMEOUT,
@@ -277,4 +277,15 @@ SPEC = VendorSpec(
     session_exists=_session_exists,
     home_env_vars=("KILO_CONFIG_DIR", "KILO_CONFIG", "KILO_DB"),
     make_log_reader=KiloLogReader,
+    # Kilo Code (OpenCode fork) ships `kilo upgrade` but no doctor subcommand
+    # (`kilo debug` is diagnostics-adjacent, not a doctor — no invented command).
+    install_dep=Dep("kilo", "Kilo Code", "Kilo Code terminal coding agent (OpenCode fork)", "agent_cli",
+        ["kilo", "--version"], r"(\d+\.\d+\.\d+)",
+        install_cmd="npm install -g @kilocode/cli",
+        needs_terminal=True, requires_binaries=("npm",), optional=True,
+        docs_url="https://kilo.ai/docs/code-with-ai/platforms/cli",
+        update_cmd="kilo upgrade",
+        npm_package="@kilocode/cli",
+        config_home_env="KILO_CONFIG_DIR",
+        autoupdate_env="KILO_DISABLE_AUTOUPDATE"),
 )

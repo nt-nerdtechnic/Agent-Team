@@ -24,7 +24,7 @@ import re
 import shutil
 import time
 
-from .base import VendorSpec, command_text
+from .base import Dep, VendorSpec, command_text
 from ..applog import app_data_dir
 from ..skills_store import SkillsStore
 from . import _protocols
@@ -929,4 +929,11 @@ SPEC = VendorSpec(
     home_env_vars=("CODEX_HOME",),
     interrupt_key=b"\x1b",
     make_log_reader=CodexLogReader,
+    install_dep=Dep("codex", "Codex", "OpenAI Codex CLI", "agent_cli",
+        ["codex", "--version"], r"(\d+\.\d+\.\d+)",
+        install_cmd="npm install -g @openai/codex", needs_terminal=True,
+        requires_binaries=("npm",),
+        optional=True, docs_url="https://developers.openai.com/codex/cli",
+        update_cmd="codex update", doctor_cmd="codex doctor",
+        npm_package="@openai/codex"),
 )

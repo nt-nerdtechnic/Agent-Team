@@ -24,55 +24,39 @@ import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .applog import app_data_dir
+from .cli_vendors.base import Dep
+from .cli_vendors.registry import VENDORS
 from .db import DB_FILENAME, Database
 from .profiles_store import default_profiles_root
 
 log = logging.getLogger("agent_team_backend.onboarding_deps")
 
 
-@dataclass(frozen=True)
-class Dep:
-    id: str
-    label: str
-    description: str
-    group: str                       # 'foundation' | 'agent_cli' | 'analyzer'
-    check_cmd: list[str]             # e.g. ['node', '--version']
-    version_regex: str = r"(\d+\.\d+(?:\.\d+)?)"
-    # Other executable names the SAME tool ships as (a vendor rename leaves the
-    # old name on older installs). Probed in order only when check_cmd[0] is not
-    # on PATH, so a machine carrying the legacy binary is not reported missing.
-    alt_commands: tuple[str, ...] = ()
-    min_version: str = ""            # '' = any version is fine
-    install_cmd: str = ""            # shell command (whitelist); '' = no auto-install
-    needs_terminal: bool = False     # interactive (sudo / OAuth) → external Terminal
-    optional: bool = False
-    docs_url: str = ""
-    # Binaries install_cmd itself invokes (brew, npm). Checked before running it
-    # so a missing bootstrap tool reports "install brew first" instead of a bare
-    # exit 127 — on a fresh Mac every brew-based install used to fail this way.
-    requires_binaries: tuple[str, ...] = ()
-    # Maintenance — the CLI's OWN official commands. Navide never wraps, parses
-    # or replaces them; it only surfaces and runs them. '' = the vendor ships no
-    # such command, in which case the UI points at docs_url instead of guessing.
-    update_cmd: str = ""             # e.g. 'claude update'
-    doctor_cmd: str = ""             # e.g. 'claude doctor'
-    npm_package: str = ""            # npm package name when installable via npm
-    # Where the CLI itself records the outcome of its own auto-update. Navide
-    # only reads what the vendor already wrote to disk.
-    update_state_file: str = ""      # relative to a config home, e.g. '.last-update-result.json'
-    config_home_env: str = ""        # env var overriding the config home, e.g. 'CLAUDE_CONFIG_DIR'
-    config_home_default: str = ""    # default config home relative to $HOME, e.g. '.claude'
-    autoupdate_env: str = ""         # vendor's own opt-out env var, e.g. 'DISABLE_AUTOUPDATER'
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────
 # NOTE: Agent-CLI install commands are best-effort and may change upstream; they
 # are marked needs_terminal so the user runs/authenticates them interactively.
+
+# The wizard's historical display order. Vendors missing from this tuple (a
+# newly contributed CLI) append in registry order — never silently dropped, and
+# a contributor does not need to touch this file.
+_AGENT_CLI_ORDER = ("claude", "codex", "antigravity", "grok", "kimi", "opencode",
+                    "kilo", "qwen", "pi", "copilot", "cursor", "aider")
+
+
+def _agent_cli_deps() -> list[Dep]:
+    declared = {key: spec.install_dep for key, spec in VENDORS.items()
+                if spec.install_dep is not None}
+    ordered = [declared.pop(key) for key in _AGENT_CLI_ORDER if key in declared]
+    ordered.extend(declared.values())
+    return ordered
+
+
 DEPS: list[Dep] = [
     # Step 1 — Foundation
     Dep("homebrew", "Homebrew", "macOS package manager", "foundation",
@@ -101,121 +85,10 @@ DEPS: list[Dep] = [
         install_cmd="brew install uv", requires_binaries=("brew",),
         docs_url="https://docs.astral.sh/uv"),
 
-    # Step 2 — Agent CLIs (≥ 1 required) + Analyzer
-    Dep("claude", "Claude Code", "Anthropic Claude CLI", "agent_cli",
-        ["claude", "--version"], r"(\d+\.\d+\.\d+)",
-        install_cmd="npm install -g @anthropic-ai/claude-code", needs_terminal=True,
-        requires_binaries=("npm",),
-        optional=True, docs_url="https://docs.anthropic.com/claude-code",
-        update_cmd="claude update", doctor_cmd="claude doctor",
-        npm_package="@anthropic-ai/claude-code",
-        update_state_file=".last-update-result.json",
-        config_home_env="CLAUDE_CONFIG_DIR", config_home_default=".claude",
-        autoupdate_env="DISABLE_AUTOUPDATER"),
-    Dep("codex", "Codex", "OpenAI Codex CLI", "agent_cli",
-        ["codex", "--version"], r"(\d+\.\d+\.\d+)",
-        install_cmd="npm install -g @openai/codex", needs_terminal=True,
-        requires_binaries=("npm",),
-        optional=True, docs_url="https://developers.openai.com/codex/cli",
-        update_cmd="codex update", doctor_cmd="codex doctor",
-        npm_package="@openai/codex"),
-    Dep("antigravity", "Antigravity", "Google Antigravity CLI", "agent_cli",
-        ["agy", "--version"], r"(\d+\.\d+\.\d+)",
-        install_cmd="curl -fsSL https://antigravity.google/cli/install.sh | bash",
-        needs_terminal=True, requires_binaries=("curl",), optional=True,
-        docs_url="https://antigravity.google/docs/cli-getting-started",
-        update_cmd="agy update"),
-    Dep("grok", "Grok CLI", "superagent-ai Grok coding agent", "agent_cli",
-        ["grok", "--version"], r"(\d+\.\d+\.\d+)",
-        install_cmd="curl -fsSL https://raw.githubusercontent.com/superagent-ai/grok-cli/main/install.sh | bash",
-        needs_terminal=True, requires_binaries=("curl",), optional=True, docs_url="https://grokcli.io",
-        update_cmd="grok update"),
-    # Kimi Code ships `kimi doctor` but no update subcommand — update_cmd stays
-    # empty so the UI sends the user to the vendor docs instead of inventing one.
-    Dep("kimi", "Kimi Code", "Moonshot AI Kimi Code CLI", "agent_cli",
-        ["kimi", "--version"], r"(\d+\.\d+\.\d+)",
-        install_cmd="curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash",
-        needs_terminal=True, requires_binaries=("curl",), optional=True,
-        docs_url="https://moonshotai.github.io/kimi-cli/en/",
-        doctor_cmd="kimi doctor"),
-    # OpenCode ships `opencode upgrade` but no doctor subcommand.
-    Dep("opencode", "OpenCode", "OpenCode terminal coding agent", "agent_cli",
-        ["opencode", "--version"], r"(\d+\.\d+\.\d+)",
-        install_cmd="curl -fsSL https://opencode.ai/install | bash",
-        needs_terminal=True, requires_binaries=("curl",), optional=True,
-        docs_url="https://opencode.ai/docs",
-        update_cmd="opencode upgrade",
-        npm_package="opencode-ai",
-        config_home_env="OPENCODE_CONFIG_DIR",
-        autoupdate_env="OPENCODE_DISABLE_AUTOUPDATE"),
-    # Kilo Code (OpenCode fork) ships `kilo upgrade` but no doctor subcommand
-    # (`kilo debug` is diagnostics-adjacent, not a doctor — no invented command).
-    Dep("kilo", "Kilo Code", "Kilo Code terminal coding agent (OpenCode fork)", "agent_cli",
-        ["kilo", "--version"], r"(\d+\.\d+\.\d+)",
-        install_cmd="npm install -g @kilocode/cli",
-        needs_terminal=True, requires_binaries=("npm",), optional=True,
-        docs_url="https://kilo.ai/docs/code-with-ai/platforms/cli",
-        update_cmd="kilo upgrade",
-        npm_package="@kilocode/cli",
-        config_home_env="KILO_CONFIG_DIR",
-        autoupdate_env="KILO_DISABLE_AUTOUPDATE"),
-    # Qwen Code ships `qwen update` but no doctor subcommand; its autoupdate
-    # opt-out is a settings.json key, not an env var — autoupdate_env stays empty.
-    Dep("qwen", "Qwen Code", "Alibaba Qwen Code coding agent CLI", "agent_cli",
-        ["qwen", "--version"], r"(\d+\.\d+\.\d+)",
-        install_cmd="npm install -g @qwen-code/qwen-code", needs_terminal=True,
-        requires_binaries=("npm",),
-        optional=True, docs_url="https://qwenlm.github.io/qwen-code-docs/",
-        update_cmd="qwen update",
-        npm_package="@qwen-code/qwen-code"),
-    # Pi ships `pi update` but no doctor subcommand; PI_SKIP_VERSION_CHECK is
-    # its own opt-out for the startup version check.
-    Dep("pi", "Pi", "Pi coding agent CLI", "agent_cli",
-        ["pi", "--version"], r"(\d+\.\d+\.\d+)",
-        install_cmd="npm install -g @earendil-works/pi-coding-agent",
-        needs_terminal=True, requires_binaries=("npm",),
-        optional=True, docs_url="https://pi.dev/docs",
-        update_cmd="pi update",
-        npm_package="@earendil-works/pi-coding-agent",
-        config_home_env="PI_CODING_AGENT_DIR",
-        autoupdate_env="PI_SKIP_VERSION_CHECK"),
-    # Copilot CLI ships `copilot update` but no doctor subcommand;
-    # COPILOT_AUTO_UPDATE=false is its autoupdate opt-out and COPILOT_HOME
-    # relocates its config/session root.
-    Dep("copilot", "Copilot CLI", "GitHub Copilot coding agent CLI", "agent_cli",
-        ["copilot", "--version"], r"(\d+\.\d+\.\d+)",
-        install_cmd="brew install --cask copilot-cli",
-        needs_terminal=True, requires_binaries=("brew",), optional=True,
-        docs_url="https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-copilot-cli",
-        update_cmd="copilot update",
-        npm_package="@github/copilot",
-        config_home_env="COPILOT_HOME",
-        autoupdate_env="COPILOT_AUTO_UPDATE"),
-    # Cursor CLI (closed source; binary `agent`, legacy installs `cursor-agent`)
-    # ships `agent update` but no doctor subcommand. Autoupdate is on by default
-    # with no confirmed opt-out env, and its data home is fixed at ~/.cursor
-    # (no config-home env) — both stay empty. `cursor-agent` is declared as an
-    # alternate so a machine still carrying the legacy binary is detected and
-    # spawnable instead of being reported as not installed.
-    Dep("cursor", "Cursor CLI", "Cursor terminal coding agent CLI", "agent_cli",
-        ["agent", "--version"], r"(\d+\.\d+\.\d+)",
-        alt_commands=("cursor-agent",),
-        install_cmd="curl https://cursor.com/install -fsS | bash",
-        needs_terminal=True, requires_binaries=("curl",), optional=True,
-        docs_url="https://cursor.com/docs/cli",
-        update_cmd="agent update"),
-    # Aider updates via the `--upgrade` FLAG (not a subcommand) and ships no
-    # doctor. AIDER_CHECK_UPDATE=false is its own startup update-check
-    # opt-out; its global state home is fixed at ~/.aider (no relocating
-    # env), so config_home_env stays empty. `aider --version` prints
-    # `aider X.Y.Z`.
-    Dep("aider", "Aider", "Aider AI pair-programming CLI", "agent_cli",
-        ["aider", "--version"], r"(\d+\.\d+\.\d+)",
-        install_cmd="curl -LsSf https://aider.chat/install.sh | sh",
-        needs_terminal=True, requires_binaries=("curl",), optional=True,
-        docs_url="https://aider.chat",
-        update_cmd="aider --upgrade",
-        autoupdate_env="AIDER_CHECK_UPDATE"),
+    # Step 2 — Agent CLIs (≥ 1 required) + Analyzer.
+    # Each vendor declares its own entry (cli_vendors/<key>.py, spec.install_dep);
+    # aggregated here so the wizard still sees one flat table.
+    *_agent_cli_deps(),
     Dep("ollama", "Ollama", "Local LLM runtime (required for Analyzer)", "analyzer",
         ["ollama", "--version"], r"(\d+\.\d+\.\d+)",
         install_cmd="brew install ollama", requires_binaries=("brew",),

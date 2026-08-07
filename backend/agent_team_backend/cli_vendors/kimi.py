@@ -21,7 +21,7 @@ from pathlib import Path
 
 import re
 
-from .base import VendorSpec, command_text
+from .base import Dep, VendorSpec, command_text
 from ..usage_common import HTTP_TIMEOUT, _epoch_to_iso, _num, _snapshot, _window, parse_retry_after
 from ..log_readers.base import (
     ActivityEvent,
@@ -571,4 +571,12 @@ SPEC = VendorSpec(
     session_exists=_session_exists,
     home_env_vars=("KIMI_CODE_HOME",),
     make_log_reader=KimiLogReader,
+    # Kimi Code ships `kimi doctor` but no update subcommand — update_cmd stays
+    # empty so the UI sends the user to the vendor docs instead of inventing one.
+    install_dep=Dep("kimi", "Kimi Code", "Moonshot AI Kimi Code CLI", "agent_cli",
+        ["kimi", "--version"], r"(\d+\.\d+\.\d+)",
+        install_cmd="curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash",
+        needs_terminal=True, requires_binaries=("curl",), optional=True,
+        docs_url="https://moonshotai.github.io/kimi-cli/en/",
+        doctor_cmd="kimi doctor"),
 )

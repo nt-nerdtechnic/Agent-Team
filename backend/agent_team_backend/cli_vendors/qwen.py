@@ -35,7 +35,7 @@ from ..log_readers.base import (
     user_prompt_text,
 )
 from ..log_readers.base import encode_claude_cwd
-from .base import VendorSpec, command_text
+from .base import Dep, VendorSpec, command_text
 from ..usage_common import (
     HTTP_TIMEOUT,
     _epoch_to_iso,
@@ -736,4 +736,13 @@ SPEC = VendorSpec(
     session_exists=_session_exists,
     home_env_vars=("QWEN_HOME", "QWEN_RUNTIME_DIR"),
     make_log_reader=QwenLogReader,
+    # Qwen Code ships `qwen update` but no doctor subcommand; its autoupdate
+    # opt-out is a settings.json key, not an env var — autoupdate_env stays empty.
+    install_dep=Dep("qwen", "Qwen Code", "Alibaba Qwen Code coding agent CLI", "agent_cli",
+        ["qwen", "--version"], r"(\d+\.\d+\.\d+)",
+        install_cmd="npm install -g @qwen-code/qwen-code", needs_terminal=True,
+        requires_binaries=("npm",),
+        optional=True, docs_url="https://qwenlm.github.io/qwen-code-docs/",
+        update_cmd="qwen update",
+        npm_package="@qwen-code/qwen-code"),
 )

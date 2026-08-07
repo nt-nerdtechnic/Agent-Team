@@ -40,7 +40,7 @@ from pathlib import Path
 
 import re
 
-from .base import VendorSpec, command_text
+from .base import Dep, VendorSpec, command_text
 from . import _protocols
 from ..usage_common import HTTP_TIMEOUT, _epoch_to_iso, _num, _snapshot, _window, parse_retry_after
 from ..log_readers.base import IncrementalParseResult, LogReader, TokenUsage
@@ -514,4 +514,14 @@ SPEC = VendorSpec(
     session_exists=_session_exists,
     home_env_vars=("OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG"),
     make_log_reader=OpencodeLogReader,
+    # OpenCode ships `opencode upgrade` but no doctor subcommand.
+    install_dep=Dep("opencode", "OpenCode", "OpenCode terminal coding agent", "agent_cli",
+        ["opencode", "--version"], r"(\d+\.\d+\.\d+)",
+        install_cmd="curl -fsSL https://opencode.ai/install | bash",
+        needs_terminal=True, requires_binaries=("curl",), optional=True,
+        docs_url="https://opencode.ai/docs",
+        update_cmd="opencode upgrade",
+        npm_package="opencode-ai",
+        config_home_env="OPENCODE_CONFIG_DIR",
+        autoupdate_env="OPENCODE_DISABLE_AUTOUPDATE"),
 )
