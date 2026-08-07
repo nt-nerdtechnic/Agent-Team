@@ -404,7 +404,7 @@ describe('useAgentMessaging', () => {
       })
     })
 
-    it('coerces restored in-flight rows to failed and persists the coercion', async () => {
+    it('coerces restored in-flight rows to failed WITHOUT persisting the coercion', async () => {
       const updates: PersistedMessageUpdate[][] = []
       m.configureMessaging({ ...deps, persistUpdate: (u) => { updates.push(u) } })
       m.registerPane('p2', 'codex') // codex-1: a live target for the restored row
@@ -414,10 +414,9 @@ describe('useAgentMessaging', () => {
       ])
       expect(m.messages.value.map((x) => x.status)).toEqual(['failed', 'failed'])
       expect(m.messages.value[0].reason).toBe('window reloaded before delivery')
-      expect(updates.flat()).toEqual([
-        { uid: 'oldboot:3', status: 'failed', reason: 'window reloaded before delivery' },
-        { uid: 'oldboot:4', status: 'failed', reason: 'window reloaded before delivery' },
-      ])
+      // FINDING 1: the store is GLOBAL. Writing the coercion back would stamp
+      // `failed` over a row another live window is still about to deliver.
+      expect(updates).toEqual([])
       // Restored rows are history: nothing was enqueued, so nothing delivers.
       m.pump()
       await flush()
@@ -432,6 +431,33 @@ describe('useAgentMessaging', () => {
       m.hydrateLog(snapshot)
       expect(m.messages.value.map((x) => x.uid)).toEqual(['oldboot:1', 'oldboot:2', live.uid])
       expect(live.status).toBe('queued')
+    })
+
+    // FINDING 2: a snapshot that already contains a row this window is still
+    // delivering must not replace the live object — the restored copy carries a
+    // NEW local id, so envelopes/queues would point at an orphan and the real
+    // delivery would never show up in the log.
+    it('a live row whose uid is in the snapshot keeps its id and still delivers', async () => {
+      m.registerPane('p1', 'claude')
+      m.registerPane('p2', 'codex')
+      const live = m.sendMessage('claude-1', 'codex-1', 'live')
+      // The 200 ms append flush beat the snapshot response back: the row is in
+      // the store as `queued` while it is still deliverable here.
+      m.hydrateLog([
+        { uid: live.uid, created_at: live.createdAt, status: 'queued', sender: 'claude-1', recipient: 'codex-1', content: 'live' },
+      ])
+      const row = m.messages.value.find((x) => x.uid === live.uid)
+      expect(m.messages.value.filter((x) => x.uid === live.uid)).toHaveLength(1)
+      // Same local id ⇒ still the object envelopes/queues are keyed by.
+      expect(row?.id).toBe(live.id)
+      expect(row?.status).toBe('queued')
+
+      m.pump()
+      await flush()
+      expect(delivered).toHaveLength(1)
+      expect(m.messages.value.find((x) => x.uid === live.uid)?.status).toBe('delivered')
+      // pumpPane mutated the row that is actually in the log, not an orphan.
+      expect(live.status).toBe('delivered')
     })
   })
 })

@@ -23,7 +23,8 @@ import Welcome from './components/Welcome.vue'
 import { useNotify } from './composables/useNotify'
 import { migrateTerminalPtyKey } from './composables/useTerminal'
 import { useAgentMessaging, isBroadcastTarget } from './composables/useAgentMessaging'
-import type { MessageStatus, PersistedMessageRow, PersistedMessageUpdate, RouteResult } from './composables/useAgentMessaging'
+import type { RouteResult } from './composables/useAgentMessaging'
+import { createMessageLogPersistence } from './composables/useMessageLogPersistence'
 import { MSG_ENVELOPE_PREFIX, VENDORS_WITHOUT_TURN_END, isTurnInFlight, parseMessages, parseSpawns, renderSpawnKickoff } from './lib/agentMessaging'
 import { evaluateTurnSpawns, evaluateSpawnRequest, computeSpawnDepth } from './lib/agentSpawnGate'
 import StageTabBar, { type TabItem } from './components/StageTabBar.vue'
@@ -334,12 +335,15 @@ function evaluateWhatsNew(complete: boolean): void {
 }
 function dismissWhatsNew(): void {
   const current = window.agentTeam?.version ?? ''
-  if (current) {
-    settingsSet('agentTeam.whatsNew.lastSeenVersion', current)
-    // The same release is also an item in the announcements feed — reading it
-    // in the modal counts, so the user isn't told about it twice.
-    announcements.markRead(releaseAnnouncementId(current))
-  }
+  // The modal shows the newest AUTHORED entry at or below the running version,
+  // which is often not `current` itself (v0.1.63 running, note written for
+  // v0.1.62). Mark the entry the user actually read — capture it before the
+  // `= null` below, or the announcements badge keeps that note unread forever.
+  const shownVersion = whatsNewEntry.value?.version ?? ''
+  if (current) settingsSet('agentTeam.whatsNew.lastSeenVersion', current)
+  // The same release is also an item in the announcements feed — reading it
+  // in the modal counts, so the user isn't told about it twice.
+  if (shownVersion) announcements.markRead(releaseAnnouncementId(shownVersion))
   whatsNewEntry.value = null
 }
 // Announcements centre: the status-bar feed of release notes + updater news.
@@ -1789,68 +1793,19 @@ async function routeRemoteMessage(args: {
 }
 
 // ── Message-log persistence (agent_msg.log_*) ──────────────────────────────
-// A single message walks through queued → delivering → delivered, so writing
-// per transition would be three RPCs per message. Coalesce instead, on the same
-// trailing-debounce shape the spawn-history watcher uses above.
-const MSG_LOG_FLUSH_MS = 200
-const pendingMsgAppends = new Map<string, PersistedMessageRow>()
-const pendingMsgUpdates = new Map<string, PersistedMessageUpdate>()
-let msgLogFlushTimer: number | undefined
-let msgLogFlushing = false
-
-function scheduleMessageLogFlush(): void {
-  if (msgLogFlushTimer !== undefined) window.clearTimeout(msgLogFlushTimer)
-  msgLogFlushTimer = window.setTimeout(() => void flushMessageLog(), MSG_LOG_FLUSH_MS)
-}
-
-async function flushMessageLog(): Promise<void> {
-  if (msgLogFlushTimer !== undefined) {
-    window.clearTimeout(msgLogFlushTimer)
-    msgLogFlushTimer = undefined
-  }
-  // Never two flushes in flight: the append must land before the update that
-  // refers to it, and only sequential flushes guarantee that.
-  if (msgLogFlushing) {
-    if (pendingMsgAppends.size > 0 || pendingMsgUpdates.size > 0) scheduleMessageLogFlush()
-    return
-  }
-  const rowByUid = new Map(pendingMsgAppends)
-  const updates: PersistedMessageUpdate[] = []
-  for (const [uid, patch] of pendingMsgUpdates) {
-    const row = rowByUid.get(uid)
-    // A patch for a row that has not been written yet folds into that row —
-    // sent on its own it would hit no matching uid and be a silent no-op.
-    if (!row) {
-      updates.push(patch)
-      continue
-    }
-    if (patch.status !== undefined) row.status = patch.status
-    if ('reason' in patch) row.reason = patch.reason
-    if ('delivered_at' in patch) row.delivered_at = patch.delivered_at
-  }
-  pendingMsgAppends.clear()
-  pendingMsgUpdates.clear()
-  const rows = [...rowByUid.values()]
-  if (rows.length === 0 && updates.length === 0) return
-  msgLogFlushing = true
-  try {
-    if (rows.length > 0) await sendQuiet('agent_msg.log_append', { rows })
-    if (updates.length > 0) await sendQuiet('agent_msg.log_update', { updates })
-  } finally {
-    msgLogFlushing = false
-  }
-}
-
-/** Restore the persisted log once at boot. Fails soft: a store error here must
- *  never break startup — the log just starts empty. */
-async function hydrateMessageLog(): Promise<void> {
-  try {
-    const resp = await sendQuiet<{ rows?: PersistedMessageRow[] }>('agent_msg.log_snapshot', {})
-    messaging.hydrateLog(resp?.rows ?? [])
-  } catch (err) {
-    console.warn('[messaging] message log hydrate failed', err)
-  }
-}
+// Batching, serialization and the connect-time retry live in the composable.
+const msgLog = createMessageLogPersistence({
+  send: sendQuiet,
+  isConnected: () => backend.status.value === 'connected',
+  hydrate: (rows) => messaging.hydrateLog(rows),
+})
+// A cold-start snapshot can time out before the backend even accepts the socket,
+// which used to leave the persisted log unloaded for the whole session. Retry on
+// the connected transition, exactly as the settings cache reconciles.
+watch(
+  () => backend.status.value,
+  (s) => { if (s === 'connected') msgLog.onConnected() }
+)
 
 let _msgPumpTimer = 0
 let _remoteTargetsTimer = 0
@@ -1865,46 +1820,22 @@ onMounted(() => {
         .send('agent_msg.delivered', { msg_key: msgKey, ok, reason })
         .catch(() => { /* the sender's log entry just stays queued */ })
     },
-    persistAppend: (rows) => {
-      for (const row of rows) pendingMsgAppends.set(row.uid, row)
-      scheduleMessageLogFlush()
-    },
-    persistUpdate: (patches) => {
-      for (const patch of patches) {
-        pendingMsgUpdates.set(patch.uid, { ...pendingMsgUpdates.get(patch.uid), ...patch })
-      }
-      scheduleMessageLogFlush()
-    },
-    persistClear: (keepStatuses: MessageStatus[]) => {
-      // Drop the pending writes the clear would delete anyway — otherwise a
-      // late append resurrects a row the user just cleared. A queued/delivering
-      // row survives the clear, so its pending write must survive too.
-      for (const [uid, row] of pendingMsgAppends) {
-        if (keepStatuses.includes(row.status)) continue
-        pendingMsgAppends.delete(uid)
-        pendingMsgUpdates.delete(uid)
-      }
-      void sendQuiet('agent_msg.log_clear', { keep_statuses: keepStatuses })
-    },
+    persistAppend: msgLog.persistAppend,
+    persistUpdate: msgLog.persistUpdate,
+    persistClear: msgLog.persistClear,
   })
-  void hydrateMessageLog()
+  void msgLog.hydrate()
   _msgPumpTimer = window.setInterval(() => { messaging.pump(); syncPaneBusy() }, 1000)
   void refreshRemoteMessagingTargets()
   _remoteTargetsTimer = window.setInterval(() => void refreshRemoteMessagingTargets(), 10_000)
-  window.addEventListener('beforeunload', flushMessageLogOnExit)
+  window.addEventListener('beforeunload', msgLog.flushOnExit)
 })
 onUnmounted(() => {
   window.clearInterval(_msgPumpTimer)
   window.clearInterval(_remoteTargetsTimer)
-  window.removeEventListener('beforeunload', flushMessageLogOnExit)
-  void flushMessageLog()
+  window.removeEventListener('beforeunload', msgLog.flushOnExit)
+  void msgLog.flush()
 })
-
-/** beforeunload cannot await, but firing the sends still gets them onto the
- *  socket before teardown, which is what the last transitions need. */
-function flushMessageLogOnExit(): void {
-  void flushMessageLog()
-}
 
 function syncViews(): void {
   paneViews.value = panes.value.map((p) => {

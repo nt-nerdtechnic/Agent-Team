@@ -16,7 +16,8 @@
     "paused-banner": "Delivery paused — messages queue but are not sent",
     "spawn-toast": "“{parent}” spawned “{child}”",
     "cross-workspace-toast": "Instruction from another workspace: “{from}” → “{target}”",
-    "cross-workspace-badge": "cross-workspace"
+    "cross-workspace-badge": "cross-workspace",
+    "expand-rail": "Expand inter-CLI messages"
   },
   "confirm-close": {
     "ws-title": "Close workspace?",

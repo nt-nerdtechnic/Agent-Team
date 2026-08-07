@@ -181,7 +181,7 @@ async function confirmReset(scope: ResetScope): Promise<void> {
         <span class="rail-icon">🗓</span>
         <span class="rail-label">{{ $t('label.tasker') }}</span>
       </button>
-      <button class="rail-btn" :class="{ active: tab === 'messages' }" title="Expand inter-CLI messages" @click="tab = 'messages'; expanded = true">
+      <button class="rail-btn" :class="{ active: tab === 'messages' }" :title="$t('msg.expand-rail')" @click="tab = 'messages'; expanded = true">
         <span class="rail-icon">✉</span>
         <span class="rail-label">{{ $t('label.messages') }}</span>
       </button>

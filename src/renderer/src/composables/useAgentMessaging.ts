@@ -300,29 +300,33 @@ function pushLog(m: AgentMessage): void {
 }
 
 /**
- * Replace the in-memory log from a persisted snapshot (oldest-first).
+ * Merge a persisted snapshot (oldest-first) into the in-memory log.
  *
  * Restored rows are history only: envelopes, queues and the remote-ack maps are
  * in-memory and died with the previous window, so a row left `queued` or
- * `delivering` can never be delivered — pumpPane() would silently drop it. They
- * are coerced to `failed` here, and the coercion is written back so the panel
- * and the store agree. Nothing is re-enqueued.
+ * `delivering` can never be delivered here — pumpPane() would silently drop it.
+ * They are shown as `failed`, but the coercion is NEVER written back: the store
+ * is global, so the same row may be live and about to deliver in another window,
+ * and persisting `failed` over it would corrupt that window's log. A later
+ * hydrate simply re-coerces. Nothing is re-enqueued.
  */
 function hydrateLog(rows: PersistedMessageRow[]): void {
-  const restored = (rows ?? []).map(fromPersistedRow)
-  const coerced: PersistedMessageUpdate[] = []
+  // The snapshot arrives asynchronously; anything this window already logged
+  // wins over its persisted copy. The live object keeps its original `id`, which
+  // envelopes/queues/remoteOutbound are keyed by — replacing it with a restored
+  // copy would strand those bindings and leave a delivered message showing as
+  // failed.
+  const live = messages.value
+  const liveUids = new Set(live.map((m) => m.uid))
+  const restored = (rows ?? [])
+    .filter((row) => !liveUids.has(String(row.uid)))
+    .map(fromPersistedRow)
   for (const m of restored) {
     if (m.status !== 'queued' && m.status !== 'delivering') continue
     m.status = 'failed'
     m.reason = HYDRATE_LOST_REASON
-    coerced.push({ uid: m.uid, status: 'failed', reason: HYDRATE_LOST_REASON })
   }
-  // The snapshot arrives asynchronously; anything this window already logged
-  // stays (and stays deliverable — it still owns an envelope and a queue slot).
-  const restoredUids = new Set(restored.map((m) => m.uid))
-  const live = messages.value.filter((m) => !restoredUids.has(m.uid))
   messages.value = [...restored, ...live].slice(-LOG_CAP)
-  if (coerced.length > 0) deps?.persistUpdate?.(coerced)
 }
 
 /** Rate-limit key for a sender→target pair.

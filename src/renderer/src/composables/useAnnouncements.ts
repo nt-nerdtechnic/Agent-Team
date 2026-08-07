@@ -159,7 +159,10 @@ function markRead(id: string): void {
 function markAllRead(): void {
   const unread = items.value.filter((item) => !item.read).map((item) => item.id)
   if (unread.length === 0) return
-  persist([...readIds.value, ...unread])
+  // persist() truncates to the TAIL, so append oldest-first: `items` is
+  // newest-first, and a batch bigger than MAX_READ_IDS would otherwise drop the
+  // newest ids and resurrect them as unread.
+  persist([...readIds.value, ...unread.reverse()])
 }
 
 /** Hand the live updater state in (call once, right after useUpdater()). */
@@ -178,7 +181,7 @@ function load(): void {
   // No stored set at all — a fresh install. Baseline everything on screen as
   // read (like App.vue does for the What's New watermark) so a new user isn't
   // greeted by every historical release note at once.
-  persist(items.value.map((item) => item.id))
+  persist(items.value.map((item) => item.id).reverse())
 }
 
 export function useAnnouncements() {

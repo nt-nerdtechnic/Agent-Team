@@ -71,7 +71,9 @@ describe('useAnnouncements', () => {
 
     expect(a.unreadCount.value).toBe(0)
     expect(a.items.value.every((i) => i.read)).toBe(true)
-    expect(store.get(READ_IDS_KEY)).toEqual(a.items.value.map((i) => i.id))
+    // Stored oldest-first: persist() truncates to the tail, so the newest ids
+    // have to sit at the end to survive a feed bigger than the cap.
+    expect(store.get(READ_IDS_KEY)).toEqual(a.items.value.map((i) => i.id).reverse())
   })
 
   it('counts stored-but-unseen entries as unread and marks them read', async () => {
@@ -104,6 +106,20 @@ describe('useAnnouncements', () => {
     expect(ids).toHaveLength(100)
     expect(ids[0]).toBe('old:1')
     expect(ids[99]).toBe('release:0.1.77')
+  })
+
+  it('markAllRead appends oldest-first so the cap drops the oldest ids', async () => {
+    store.set(READ_IDS_KEY, [])
+    const { useAnnouncements } = await load()
+    const a = useAnnouncements()
+
+    a.markAllRead()
+    const ids = store.get(READ_IDS_KEY) as string[]
+    // `items` is newest-first and persist() keeps only the tail, so appending
+    // in feed order would put the NEWEST ids first — a feed longer than the cap
+    // would truncate them away and resurrect them as unread.
+    expect(ids[0]).toBe('release:0.1.65')
+    expect(ids[ids.length - 1]).toBe('release:0.1.77')
   })
 
   it('re-localizes the feed when the locale changes', async () => {
