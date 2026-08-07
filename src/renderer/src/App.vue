@@ -11452,8 +11452,7 @@ function paneIsCommander(p: ActivePane): boolean {
           @click="announcementsOpen = !announcementsOpen"
           @keydown.enter="announcementsOpen = !announcementsOpen"
         >
-          <span class="sb-dot" />
-          📢 {{ $t('announce.title') }}<template v-if="announcements.unreadCount.value > 0"> {{ announcements.unreadCount.value }}</template>
+          📢<template v-if="announcements.unreadCount.value > 0"> {{ announcements.unreadCount.value }}</template>
         </span>
         <span class="sb-item sb-build">{{ buildTag }}</span>
         <span
@@ -11808,8 +11807,7 @@ function paneIsCommander(p: ActivePane): boolean {
 .sb-update-error .sb-dot { background: var(--danger-fg); }
 .sb-update-check-failed { color: var(--text-muted); }
 .sb-update-check-failed .sb-dot { background: var(--text-muted); }
-.sb-announce-unread { color: var(--text-bright); }
-.sb-announce-unread .sb-dot { background: var(--accent-fg); }
+.sb-announce-unread { color: var(--accent-fg); }
 .sb-clickable { cursor: pointer; }
 
 /* ── Backend supervisor popover ──────────────────────────────────────────── */
