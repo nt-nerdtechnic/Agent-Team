@@ -9,6 +9,7 @@ export const SPEC = {
   skipPermissionFlag: '--yolo',
   // id is the `session_<uuid>` dir name.
   resumeArgs: (id) => `--session ${id}`,
+  resumeCommandPattern: /^kimi\s+(?:--session|-s)\s+\S+/,
   needsSessionMarker: true,
   bracketedPaste: true,
   supportsRebuild: true,
