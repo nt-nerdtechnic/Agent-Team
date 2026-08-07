@@ -3871,7 +3871,12 @@ async function onManualResume(payload: { agentKey: string, workspacePath: string
   const chatHistoryFile = payload.historyPaneId
     ? await savedAiderHistoryFile(agentKey, workspacePath, payload.historyPaneId)
     : ''
-  const commandOverride = buildResumeCommand(agentKey, sessionId, skipFlag, chatHistoryFile)
+  // Custom-binary override applies to resume too — the spec guarantees the
+  // command starts with defaultCommand, which this replaces when overridden.
+  const commandOverride = commandWithSelectedBinary(
+    agentKey,
+    buildResumeCommand(agentKey, sessionId, skipFlag, chatHistoryFile)
+  )
   const spawnGroupId = resolveManualSpawnGroupId(runGroups.value, activeTab.value)
   const paneId = await spawnPane({
     agentKey: agentKey as AgentKey,
@@ -4193,7 +4198,10 @@ async function rebuildPaneViaResume(
     }
     const spec = agentSpecs.find((s) => s.agentKey === pane.agentKey)
     const skipFlag = yoloEnabled.value ? (spec?.skipPermissionFlag ?? '') : ''
-    const resumeCmd = buildResumeCommand(pane.agentKey, sessionId, skipFlag)
+    const resumeCmd = commandWithSelectedBinary(
+      pane.agentKey,
+      buildResumeCommand(pane.agentKey, sessionId, skipFlag)
+    )
     if (!resumeCmd) {
       if (!opts?.suppressBusyToast) {
         notifyRestore.toast(i18n.global.t('pane.terminal.rebuild-no-session'), { type: 'error' })
@@ -6008,7 +6016,10 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
       const chatHistoryFile = await savedAiderHistoryFile(saved.agent, workspacePath, saved.pane_id)
       if (isStale?.() || currentWorkspace.value !== workspacePath) return
       const resumeCmd = attemptResume
-        ? buildResumeCommand(saved.agent, sessionId, skipFlag, chatHistoryFile)
+        ? commandWithSelectedBinary(
+            saved.agent,
+            buildResumeCommand(saved.agent, sessionId, skipFlag, chatHistoryFile)
+          )
         : ''
       const isResume = !!resumeCmd
       const effectiveResumeId = sessionId
@@ -6249,7 +6260,10 @@ async function performRealizeRestoredPane(paneId: string, aggregateReconnect = f
     const chatHistoryFile = await savedAiderHistoryFile(saved.agent, batch.workspacePath, saved.pane_id)
     if (!deferredPaneStillCurrent(paneId, deferred)) return
     let resumeCmd = attemptResume
-      ? buildResumeCommand(saved.agent, sessionId, skipFlag, chatHistoryFile)
+      ? commandWithSelectedBinary(
+          saved.agent,
+          buildResumeCommand(saved.agent, sessionId, skipFlag, chatHistoryFile)
+        )
       : ''
     const ghostConfirmed = !forceFresh && shouldWarnMissingResume(
       saved.agent, sessionId, canResume, looksLikeResumeCommand(saved.agent, saved.command || ''),
@@ -6268,7 +6282,10 @@ async function performRealizeRestoredPane(paneId: string, aggregateReconnect = f
       })
       if (!deferredPaneStillCurrent(paneId, deferred)) return
       if (repointed) {
-        resumeCmd = buildResumeCommand(saved.agent, reconnectId, skipFlag)
+        resumeCmd = commandWithSelectedBinary(
+          saved.agent,
+          buildResumeCommand(saved.agent, reconnectId, skipFlag)
+        )
         reconnectedCount.value++
         pipelineLog(`↩ ${saved.agent}: auto-reconnected ${saved.pane_id} → ${reconnectId}`)
         if (!aggregateReconnect) {
