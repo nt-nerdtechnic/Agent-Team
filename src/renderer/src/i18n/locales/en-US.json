@@ -1570,6 +1570,20 @@
     "close": "Close",
     "empty": "No announcements yet"
   },
+  "clock": {
+    "title": "Time",
+    "close": "Close",
+    "now": "Current time",
+    "timezone": "Time zone",
+    "uptime": "Session uptime",
+    "project-created": "Project created",
+    "project-unknown": "No project open",
+    "build": "Build time",
+    "duration-less-than-minute": "Less than a minute",
+    "duration-days": "{count}d",
+    "duration-hours": "{count}h",
+    "duration-minutes": "{count}m"
+  },
   "preview": {
     "binary-file": "Binary file",
     "cannot-display-text": "This file type cannot be displayed as text.",

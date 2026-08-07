@@ -164,6 +164,7 @@ import { entryBelongsToWorkspace, filterWorkspaceEntries, historyEntryLabel, leg
 import { useKeybindings, registerCommand, setContext } from './keybindings/useKeybindings'
 import { useUiActionBus } from './composables/useUiActionBus'
 import { releaseAnnouncementId, useAnnouncements } from './composables/useAnnouncements'
+import { useStatusBarPopover } from './composables/useStatusBarPopover'
 
 // Modals/wizard that only render behind a v-if (settings opened, run completed,
 // first-run onboarding) — defer them off the main shell's first-paint bundle.
@@ -177,6 +178,7 @@ const DebugModal = defineAsyncComponent(() => import('./components/DebugModal.vu
 const RestoreScopeModal = defineAsyncComponent(() => import('./components/RestoreScopeModal.vue'))
 const PipelineManagerModal = defineAsyncComponent(() => import('./components/PipelineManagerModal.vue'))
 const AnnouncementsPanel = defineAsyncComponent(() => import('./components/AnnouncementsPanel.vue'))
+const ClockPanel = defineAsyncComponent(() => import('./components/ClockPanel.vue'))
 
 const backend = useBackend()
 // Hook the settings cache to the ws: reconciles + flushes queued writes once
@@ -348,7 +350,9 @@ function dismissWhatsNew(): void {
 }
 // Announcements centre: the status-bar feed of release notes + updater news.
 const announcements = useAnnouncements()
-const announcementsOpen = ref(false)
+// Status-bar popovers (backend / announcements / clock) share one open id, so
+// opening any of them closes whichever was showing.
+const { openPopover, toggle: togglePopover, close: closePopover } = useStatusBarPopover()
 watch(
   onboardingComplete,
   (value) => {
@@ -5345,6 +5349,7 @@ interface ProjectPayload {
     stages?: ProjectStage[]
     panes?: ProjectPane[]          // unified restore source (pipeline + manual)
     manual_panes?: ProjectManualPane[]  // legacy; kept for migration fallback
+    created_at?: string
     updated_at?: string
     layout_mode?: string
     pipeline_id?: string
@@ -5657,6 +5662,7 @@ async function onWorkspaceCheck(path: string): Promise<void> {
   loadCliAgentPrefsFromProject(resp?.project?.cli_agent_order, resp?.project?.cli_agent_disabled)
   void nextTick(() => { applyingRemoteCliPrefs.value = false })
   existingProject.value = resp ? buildExistingProjectInfo(resp) : null
+  projectCreatedAt.value = resp?.project?.created_at ?? ''
   currentMode.value = detectMode(resp)
   applyProjectPaths(resp ?? undefined)
   if (resp?.project) {
@@ -10487,20 +10493,29 @@ function dualFocusStyle(paneId: string): Record<string, string> {
 }
 
 const backendUrl = computed(() => backend.httpUrl.value)
-// Frozen at bundle time. No longer shown on its own; it survives as the version
-// chip's tooltip so a stale dev build is still identifiable at a glance.
+// Frozen at bundle time. Shown as the build-time row of the clock popover, so a
+// stale dev build is still identifiable — it is deliberately NOT a clock.
 const buildTag = typeof __APP_BUILD__ === 'string' ? __APP_BUILD__ : 'dev'
 const appVersion = window.agentTeam?.version ?? ''
 
 // Status-bar clock. Reassigning an identical string is a no-op for Vue's
 // reactivity, so a 1s tick costs nothing between minute boundaries.
 const clockLabel = ref('')
+// Same tick, exposed as epoch ms for the clock popover's seconds display and
+// uptime counter — nothing reads it while the popover is closed, so this stays
+// the app's only always-on timer.
+const clockNow = ref(Date.now())
 function tickClock(): void {
   const d = new Date()
   const p = (n: number): string => String(n).padStart(2, '0')
   clockLabel.value = `${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+  clockNow.value = d.getTime()
 }
 tickClock()
+/** When this renderer booted — uptime is per window, not cumulative. */
+const sessionStartedAt = Date.now()
+/** Project `created_at` as sent by project.peek; '' until a project is open. */
+const projectCreatedAt = ref('')
 let clockTimer: ReturnType<typeof setInterval> | null = null
 onMounted(() => {
   clockTimer = setInterval(tickClock, 1000)
@@ -10511,7 +10526,6 @@ onUnmounted(() => {
 })
 
 // Backend supervisor popover (status bar pill → manage/restart/stop the backend).
-const backendPanelOpen = ref(false)
 const backendBusy = ref(false)
 async function onRestartBackend(): Promise<void> {
   if (backendBusy.value) return
@@ -11399,8 +11413,8 @@ function paneIsCommander(p: ActivePane): boolean {
           :class="'sb-' + backend.status.value"
           role="button"
           tabindex="0"
-          @click="backendPanelOpen = !backendPanelOpen"
-          @keydown.enter="backendPanelOpen = !backendPanelOpen"
+          @click="togglePopover('backend')"
+          @keydown.enter="togglePopover('backend')"
         >
           <span class="sb-dot" />
           {{ backend.status.value === 'connected' ? 'backend' : 'connecting…' }}
@@ -11479,14 +11493,21 @@ function paneIsCommander(p: ActivePane): boolean {
           :class="{ 'sb-announce-unread': announcements.unreadCount.value > 0 }"
           role="button"
           tabindex="0"
-          :title="`${$t('announce.title')} · ${buildTag}`"
-          @click="announcementsOpen = !announcementsOpen"
-          @keydown.enter="announcementsOpen = !announcementsOpen"
+          :title="$t('announce.title')"
+          @click="togglePopover('announcements')"
+          @keydown.enter="togglePopover('announcements')"
         >
           📢<span v-if="appVersion" class="sb-version">v{{ appVersion }}</span
           ><template v-if="announcements.unreadCount.value > 0"> {{ announcements.unreadCount.value }}</template>
         </span>
-        <span class="sb-item sb-clock">{{ clockLabel }}</span>
+        <span
+          class="sb-item sb-clickable sb-clock"
+          role="button"
+          tabindex="0"
+          :title="$t('clock.title')"
+          @click="togglePopover('clock')"
+          @keydown.enter="togglePopover('clock')"
+        >{{ clockLabel }}</span>
         <span
           v-if="!isDetachedWindow && panes.length > 0"
           class="sb-item sb-clickable sb-close-all"
@@ -11497,8 +11518,8 @@ function paneIsCommander(p: ActivePane): boolean {
     </div>
 
     <!-- Backend supervisor popover -->
-    <div v-if="backendPanelOpen" class="bp-backdrop" @click="backendPanelOpen = false" />
-    <div v-if="backendPanelOpen" class="bp-pop" @click.stop>
+    <div v-if="openPopover === 'backend'" class="bp-backdrop" @click="closePopover()" />
+    <div v-if="openPopover === 'backend'" class="bp-pop" @click.stop>
       <div class="bp-head">
         <span class="bp-dot sb-backend" :class="'sb-' + backend.status.value" />
         <span class="bp-title">Backend</span>
@@ -11522,13 +11543,23 @@ function paneIsCommander(p: ActivePane): boolean {
 
     <!-- Announcements centre popover -->
     <AnnouncementsPanel
-      v-if="announcementsOpen"
+      v-if="openPopover === 'announcements'"
       :items="announcements.items.value"
-      @close="announcementsOpen = false"
+      @close="closePopover()"
       @mark-all-read="announcements.markAllRead()"
       @read="announcements.markRead($event)"
       @download="startUpdateDownload()"
       @install="onUpdateBadgeClick()"
+    />
+
+    <!-- Clock popover -->
+    <ClockPanel
+      v-if="openPopover === 'clock'"
+      :now="clockNow"
+      :started-at="sessionStartedAt"
+      :project-created-at="projectCreatedAt"
+      :build-tag="buildTag"
+      @close="closePopover()"
     />
   </div>
 </template>

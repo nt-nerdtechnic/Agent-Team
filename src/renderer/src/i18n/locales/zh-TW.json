@@ -1570,6 +1570,20 @@
     "close": "關閉",
     "empty": "目前沒有公告"
   },
+  "clock": {
+    "title": "時間資訊",
+    "close": "關閉",
+    "now": "目前時間",
+    "timezone": "時區",
+    "uptime": "本次開啟時間",
+    "project-created": "專案建立",
+    "project-unknown": "尚未開啟專案",
+    "build": "建置時間",
+    "duration-less-than-minute": "不到 1 分鐘",
+    "duration-days": "{count} 天",
+    "duration-hours": "{count} 小時",
+    "duration-minutes": "{count} 分"
+  },
   "preview": {
     "binary-file": "二進位檔案",
     "cannot-display-text": "此檔案類型無法以文字顯示。",
