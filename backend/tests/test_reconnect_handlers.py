@@ -77,7 +77,9 @@ async def test_list_orphan_sessions_excludes_live_and_sorts_newest_first(
     _make_transcript(projects_dir, "orphan-new", mtime=3000.0)
 
     project = app.project_store.load_or_create(ws)
-    project.panes = [PaneRecord(pane_id="P", origin="manual", session_id="live-sess")]
+    project.panes = [
+        PaneRecord(pane_id="P", origin="manual", session_id="live-sess", spawn_status="spawned")
+    ]
     app.project_store.save(project)
 
     session = _session()
@@ -97,6 +99,33 @@ async def test_list_orphan_sessions_excludes_live_and_sorts_newest_first(
     assert newest["size_bytes"] > 0
     assert newest["mtime"] == 3000.0
     assert newest["resumable"] is True
+
+
+@pytest.mark.asyncio
+async def test_list_orphan_sessions_still_offers_a_pending_stubs_session(
+    workspace: tuple[str, Path],
+) -> None:
+    """A pending record is a stub whose spawn never landed (see
+    record_manual_pane_session). Its session has no live pane holding it, so
+    reconnect must still offer it — treating the stub as live would hide the
+    transcript forever."""
+    ws, projects_dir = workspace
+    _make_transcript(projects_dir, "stub-sess", mtime=1000.0)
+
+    project = app.project_store.load_or_create(ws)
+    project.panes = [PaneRecord(pane_id="P", origin="manual", session_id="stub-sess")]
+    assert project.panes[0].spawn_status == "pending"
+    app.project_store.save(project)
+
+    session = _session()
+    await app.handle_message(session, {
+        "id": "r1",
+        "type": "workspace.list_orphan_sessions",
+        "payload": {"workspace_path": ws},
+    })
+
+    orphans = _sent(session)["payload"]["orphans"]
+    assert [o["session_id"] for o in orphans] == ["stub-sess"]
 
 
 @pytest.mark.asyncio

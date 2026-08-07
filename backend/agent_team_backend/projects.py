@@ -250,11 +250,12 @@ class ProjectStore:
         # save() must be mutually exclusive to keep the shared .tmp file and
         # snapshot consistent. RLock: set_ui_state holds it across save().
         self._save_lock = threading.RLock()
-        # pane_ids already warned about in record_manual_pane_session, so a
-        # frontend that re-sends manual_pane.session on every activity event
-        # (permanently-missing pane record) floods the log — and the event loop —
-        # with one warning per call. Warn once per pane instead.
-        self._warned_missing_manual_panes: set[str] = set()
+        # pane_ids whose pending stub was raised (or touched) by a rename, so
+        # _adopt_pending_stub knows its empty custom_name is an explicit reset
+        # rather than "never named". Runtime-only: the rename-vs-spawn race it
+        # arbitrates opens and closes within one App lifetime, and forgetting
+        # it degrades to the safe side (keep the carried-over name).
+        self._stub_name_intent: set[str] = set()
 
     def project_dir(self, workspace_path: str) -> Path:
         return Path(workspace_path) / PROJECT_DIR_NAME
@@ -545,20 +546,31 @@ class ProjectStore:
         )
         return project
 
-    def _adopt_rename_stub(self, project: "Project", pane: "PaneRecord", pane_id: str) -> None:
-        """Fold a rename-race stub into the record that survives a spawn/re-key.
+    def _adopt_pending_stub(self, project: "Project", pane: "PaneRecord", pane_id: str) -> None:
+        """Fold a pre-spawn stub into the record that survives a spawn/re-key.
 
-        rename_pane() upserts a pending stub when a rename arrives before the
-        spawn (or before a restart re-keys the previous record onto the new
-        pane_id). Without this fold the stub duplicates the pane_id: lookups
-        and restore hit the re-keyed record first, so the user's name silently
-        disappears. The stub carries the user's latest intent, so its
-        custom_name wins — including "" (an explicit reset).
+        rename_pane(), set_pane_auto_name() and record_manual_pane_session()
+        each upsert a pending stub when their write arrives before the spawn
+        (or before a restart re-keys the previous record onto the new pane_id).
+        Without this fold the stub duplicates the pane_id: lookups and restore
+        hit the re-keyed record first, so the user's name silently disappears.
+
+        custom_name transfers only when a rename actually created/touched the
+        stub (_stub_name_intent) — then it is the user's latest intent and wins
+        even as "" (an explicit reset). A stub raised by a session or auto-name
+        write has an empty custom_name that means "never named", so copying it
+        would erase the name a re-key just carried over. auto_name and
+        session_id transfer when non-empty; the caller applies the spawn's own
+        session id right after, and a spawn that carries one is the more
+        authoritative writer.
         """
         for stub in [p for p in project.panes
                      if p is not pane and p.pane_id == pane_id and p.spawn_status == "pending"]:
-            pane.custom_name = stub.custom_name
+            if pane_id in self._stub_name_intent: pane.custom_name = stub.custom_name
+            if stub.auto_name: pane.auto_name = stub.auto_name
+            if stub.session_id: pane.session_id = stub.session_id
             project.panes.remove(stub)
+        self._stub_name_intent.discard(pane_id)
 
     def _find_slot_pane(self, project: "Project", stage_index: int, slot_label: str) -> "PaneRecord | None":
         return next(
@@ -590,7 +602,7 @@ class ProjectStore:
             pane = PaneRecord(pane_id=pane_id, origin="pipeline",
                               stage_id=stage.stage_id, stage_index=stage_index, slot_label=slot_label)
             project.panes.append(pane)
-        self._adopt_rename_stub(project, pane, pane_id)
+        self._adopt_pending_stub(project, pane, pane_id)
         pane.pane_id = pane_id
         pane.spawn_status = "spawned"
         if agent: pane.agent = agent
@@ -655,10 +667,16 @@ class ProjectStore:
         # (previous_pane_id set) whose chain broke because racing spawns
         # crossed; it must NOT apply to plain spawns, where the user may
         # legitimately open a second pane resuming the session of a live one.
+        # A pending stub (rename/session upsert) shares the new pane_id but
+        # carries no history, so it must NOT outrank the previous record a
+        # re-key is moving onto that id — otherwise the old record survives as
+        # a spawned ghost that restore resurrects. Match the real record first;
+        # _adopt_pending_stub then folds the stub into it.
         manual = [p for p in project.panes if p.origin == "manual"]
         for match in (
-            lambda p: p.pane_id == pane_id,
+            lambda p: p.pane_id == pane_id and p.spawn_status != "pending",
             lambda p: bool(previous_pane_id) and p.pane_id == previous_pane_id,
+            lambda p: p.pane_id == pane_id,
             lambda p: bool(previous_pane_id) and bool(session_id) and p.session_id == session_id,
         ):
             found = next((p for p in manual if match(p)), None)
@@ -686,7 +704,7 @@ class ProjectStore:
         if pane is None:
             pane = PaneRecord(pane_id=pane_id, origin="manual")
             project.panes.append(pane)
-        self._adopt_rename_stub(project, pane, pane_id)
+        self._adopt_pending_stub(project, pane, pane_id)
         pane.pane_id = pane_id
         pane.agent = agent
         pane.role = role
@@ -777,6 +795,8 @@ class ProjectStore:
         if pane is None:
             pane = PaneRecord(pane_id=pane_id, origin="manual")
             project.panes.append(pane)
+        if pane.spawn_status == "pending":
+            self._stub_name_intent.add(pane_id)
         pane.custom_name = custom_name
         # Keep the renderer-owned history mirror consistent at the source:
         # detached windows never persist it themselves and the renderer's
@@ -898,15 +918,25 @@ class ProjectStore:
         pane_id: str,
         session_id: str,
     ) -> Project:
+        """Persist the session id a pane's CLI is writing, keyed by pane_id.
+
+        Upsert, mirroring rename_pane(): session detection can beat
+        manual_pane.spawn to the backend — every vendor's binding funnels into
+        one session.detected event whose persist path is shorter than the
+        spawn's await chain, and a busy event loop widens the gap. Rather than
+        dropping the id, create a pending stub keyed by pane_id; the later
+        spawn finds it via _find_manual_pane and fills in the remaining fields.
+        An unspawned stub stays 'pending' and is skipped by restore, so it
+        can't resurrect an empty pane. Clearing (empty session_id) never
+        creates a stub — there is nothing to preserve.
+        """
         project = self.load_or_create(workspace_path)
         pane = self._find_manual_pane(project, pane_id)
         if pane is None:
-            if pane_id not in self._warned_missing_manual_panes:
-                self._warned_missing_manual_panes.add(pane_id)
-                log.warning("manual_pane.session: pane %s not found — session %r not persisted", pane_id, session_id)
-            return project
-        # Recovered: clear the once-warned mark so a later disappearance re-warns.
-        self._warned_missing_manual_panes.discard(pane_id)
+            if not session_id:
+                return project
+            pane = PaneRecord(pane_id=pane_id, origin="manual")
+            project.panes.append(pane)
         pane.session_id = session_id
         self.save(project)
         return project

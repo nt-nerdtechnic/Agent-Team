@@ -517,39 +517,115 @@ def test_manual_pane_session_fills_in_later(store_with_stage: tuple[ProjectStore
     assert pane.session_id == "codex-sess"
 
 
-def test_manual_pane_session_missing_pane_warns_once(
+def test_manual_pane_session_before_spawn_upserts_stub(
+    store_with_stage: tuple[ProjectStore, str]
+) -> None:
+    """Session detection can beat manual_pane.spawn to the backend. The id must
+    land on a pending stub and survive the later spawn without duplicating."""
+    store, ws = store_with_stage
+    store.record_manual_pane_session(ws, pane_id="race-pane", session_id="sess-early")
+    stub = next((p for p in store.peek(ws).panes if p.pane_id == "race-pane"), None)
+    assert stub is not None
+    assert stub.session_id == "sess-early"
+    assert stub.origin == "manual"
+    # Pending stub is skipped by restore until the spawn upgrades it.
+    assert stub.spawn_status == "pending"
+    # The spawn arrives — it adopts the stub instead of adding a second record.
+    store.record_manual_pane_spawn(ws, pane_id="race-pane", agent="claude")
+    panes = [p for p in store.peek(ws).panes if p.pane_id == "race-pane"]
+    assert len(panes) == 1
+    assert panes[0].spawn_status == "spawned"
+    assert panes[0].agent == "claude"
+    assert panes[0].session_id == "sess-early"
+
+
+def test_manual_pane_session_before_spawn_does_not_duplicate_on_resend(
     store_with_stage: tuple[ProjectStore, str], caplog
 ) -> None:
-    """A frontend that re-sends manual_pane.session on every activity event for a
-    permanently-missing pane must not flood the log (and the event loop) — warn
-    once per pane, not once per call."""
+    """The frontend re-sends manual_pane.session on later activity events. Each
+    resend must update the same stub (never append) and never log a warning."""
     store, ws = store_with_stage
     with caplog.at_level("WARNING"):
         for _ in range(50):
             store.record_manual_pane_session(ws, pane_id="ghost", session_id="s")
-    warnings = [r for r in caplog.records if "not found" in r.getMessage()]
-    assert len(warnings) == 1
+    assert [p.pane_id for p in store.peek(ws).panes if p.pane_id == "ghost"] == ["ghost"]
+    assert [r for r in caplog.records if "manual_pane.session" in r.getMessage()] == []
 
 
-def test_manual_pane_session_rewarns_after_recovery(
-    store_with_stage: tuple[ProjectStore, str], caplog
+def test_manual_pane_session_clear_on_missing_pane_creates_nothing(
+    store_with_stage: tuple[ProjectStore, str]
 ) -> None:
-    """A successful persist clears the once-warned mark, so if the pane later
-    goes missing again the next miss warns afresh (not suppressed forever)."""
+    """Clearing a pointer for a record that doesn't exist has nothing to
+    preserve — it must not leave an empty stub behind for restore to trip on."""
     store, ws = store_with_stage
-    with caplog.at_level("WARNING"):
-        store.record_manual_pane_session(ws, pane_id="pane-1", session_id="s1")  # miss → warn
-        store.record_manual_pane_spawn(ws, pane_id="pane-1", agent="codex")       # record appears
-        store.record_manual_pane_session(ws, pane_id="pane-1", session_id="s2")  # hit → clears mark
-    # Directly drop the record to simulate a later disappearance without relying
-    # on unspawn's mark-removed semantics.
-    project = store.peek(ws)
-    project.panes = [p for p in project.panes if p.pane_id != "pane-1"]
-    store.save(project)
-    with caplog.at_level("WARNING"):
-        store.record_manual_pane_session(ws, pane_id="pane-1", session_id="s3")  # miss → warn again
-    warnings = [r for r in caplog.records if "not found" in r.getMessage()]
-    assert len(warnings) == 2
+    store.record_manual_pane_session(ws, pane_id="ghost", session_id="")
+    assert [p for p in store.peek(ws).panes if p.pane_id == "ghost"] == []
+
+
+def test_manual_pane_session_and_rename_share_one_stub(
+    store_with_stage: tuple[ProjectStore, str]
+) -> None:
+    """Both upserts key off pane_id, so a rename racing the same missing record
+    must land on the SAME stub — one record, both fields, after the spawn."""
+    store, ws = store_with_stage
+    store.record_manual_pane_session(ws, pane_id="race-pane", session_id="sess-early")
+    store.rename_pane(ws, pane_id="race-pane", custom_name="風格")
+    store.record_manual_pane_spawn(ws, pane_id="race-pane", agent="claude")
+    panes = [p for p in store.peek(ws).panes if p.pane_id == "race-pane"]
+    assert len(panes) == 1
+    assert panes[0].session_id == "sess-early"
+    assert panes[0].custom_name == "風格"
+    assert panes[0].spawn_status == "spawned"
+
+
+def test_manual_pane_session_stub_leaves_no_ghost_when_a_rekey_follows(
+    store_with_stage: tuple[ProjectStore, str]
+) -> None:
+    """A session stub keyed to the NEW pane_id must not outrank the record the
+    re-key is moving onto that id: if it did, the previous record would survive
+    as a spawned ghost under its old id and restore would resurrect it."""
+    store, ws = store_with_stage
+    store.record_manual_pane_spawn(ws, pane_id="old-id", agent="claude", session_id="sess-a")
+    store.record_manual_pane_session(ws, pane_id="new-id", session_id="sess-a")
+    store.record_manual_pane_spawn(
+        ws, pane_id="new-id", previous_pane_id="old-id", agent="claude", session_id="sess-a"
+    )
+    panes = [p for p in store.peek(ws).panes if p.origin == "manual"]
+    assert [p.pane_id for p in panes] == ["new-id"]  # re-keyed, stub folded, no ghost
+    assert panes[0].spawn_status == "spawned"
+    assert panes[0].session_id == "sess-a"
+
+
+def test_manual_pane_session_stub_does_not_erase_a_rekeyed_custom_name(
+    store_with_stage: tuple[ProjectStore, str]
+) -> None:
+    """The session stub's custom_name is empty because the pane was never
+    renamed — not because the user cleared it. Folding it must leave the name
+    the re-key carried over from the previous record intact."""
+    store, ws = store_with_stage
+    store.record_manual_pane_spawn(ws, pane_id="old-id", agent="claude", session_id="sess-a")
+    store.rename_pane(ws, pane_id="old-id", custom_name="我的 Pane")
+    store.record_manual_pane_session(ws, pane_id="new-id", session_id="sess-a")
+    store.record_manual_pane_spawn(
+        ws, pane_id="new-id", previous_pane_id="old-id", agent="claude", session_id="sess-a"
+    )
+    panes = [p for p in store.peek(ws).panes if p.origin == "manual"]
+    assert len(panes) == 1
+    assert panes[0].custom_name == "我的 Pane"
+
+
+def test_auto_name_stub_survives_a_rekey(
+    store_with_stage: tuple[ProjectStore, str]
+) -> None:
+    """An auto-name can raise the stub too; folding it must carry the name onto
+    the re-keyed record instead of dropping it with the stub."""
+    store, ws = store_with_stage
+    store.record_manual_pane_spawn(ws, pane_id="old-id", agent="claude")
+    store.set_pane_auto_name(ws, pane_id="new-id", auto_name="Refactor tests")
+    store.record_manual_pane_spawn(ws, pane_id="new-id", previous_pane_id="old-id", agent="claude")
+    panes = [p for p in store.peek(ws).panes if p.origin == "manual"]
+    assert len(panes) == 1
+    assert panes[0].auto_name == "Refactor tests"
 
 
 def test_manual_pane_session_can_be_cleared(store_with_stage: tuple[ProjectStore, str]) -> None:

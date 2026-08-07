@@ -4612,11 +4612,13 @@ def _collect_orphan_sessions(workspace_path: str) -> list[dict]:
     """Enumerate this workspace's Claude transcripts that no live pane holds.
 
     A transcript is orphaned when its session id is not the current session_id
-    of any non-removed pane in the workspace's project — those are the ones a
-    reconnect can safely adopt. Each orphan carries a short human-prompt
-    preview, size/mtime, its resumable flag, and (best-effort) the spawn-history
-    customName last associated with the id. Sorted newest mtime first. Blocking
-    file IO — call via asyncio.to_thread.
+    of any SPAWNED pane in the workspace's project — those are the ones a
+    reconnect can safely adopt. Pending records are stubs whose spawn never
+    landed (see record_manual_pane_session): counting them as live would hide
+    their transcript from reconnect forever. Each orphan carries a short
+    human-prompt preview, size/mtime, its resumable flag, and (best-effort) the
+    spawn-history customName last associated with the id. Sorted newest mtime
+    first. Blocking file IO — call via asyncio.to_thread.
     """
     from . import app
 
@@ -4626,7 +4628,7 @@ def _collect_orphan_sessions(workspace_path: str) -> list[dict]:
     history_names: dict[str, str] = {}
     if project is not None:
         for pane in project.panes:
-            if pane.spawn_status != "removed" and pane.session_id:
+            if pane.spawn_status == "spawned" and pane.session_id:
                 live_ids.add(pane.session_id)
         # Oldest→newest order: overwriting keeps the name last associated.
         for entry in project.ui_spawn_history or []:
