@@ -34,7 +34,7 @@ export const WHATS_NEW_CHROME = {
 
 export const WHATS_NEW: WhatsNewEntry[] = [
   {
-    version: '0.1.78',
+    version: '0.1.79',
     title: {
       'zh-TW': '剪貼簿圖片貼上轉檔、拖曳路徑轉義優化與 Agent 總覽詳情面板',
       'en-US': 'Clipboard image-to-file paste, escaped drop paths & Agent Overview panel',
