@@ -11,6 +11,7 @@ export const SPEC = {
   resumeArgs: (id) => `resume ${id}`,
   resumeCommandPattern: /^codex\s+resume\s+\S+/,
   supportsRebuild: true,
+  verifiedTurnText: true,
   // Restore-pin self-heals: per-pane CODEX_HOME announces the new session.
   supportsRestorePin: true,
   hint: 'implementer'

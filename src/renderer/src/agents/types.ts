@@ -39,6 +39,16 @@ export interface AgentSpec {
    *  from silence there would inject text and a newline into a pane that is
    *  mid-task, and into a y/n prompt would answer it. */
   turnEndInferredFromSilence?: boolean
+  /** This vendor's log reader carries turn text that has been validated
+   *  against real sessions, so turn-text judging (sentinel detection etc.) is
+   *  authoritative and the loose in-buffer scan is skipped. Deliberately
+   *  conservative: copilot, aider, kimi, qwen, pi and grok carry turn text too
+   *  — enough for inter-CLI messaging, which only needs the text — but their
+   *  readers have not been validated against real sessions, and for qwen/pi/
+   *  grok the turn boundary is inferred from silence rather than read from a
+   *  record. They stay unflagged and keep the buffer scan until that
+   *  verification happens. */
+  verifiedTurnText?: boolean
   /** Recognizes a saved command as this vendor's resume invocation (so a
    *  restore doesn't replay it as a user-custom base command). Undefined =
    *  the generic `<agentKey> --resume <id>` shape. */

@@ -7312,20 +7312,15 @@ async function onWorkspaceBrowse(path: string): Promise<void> {
 // question detector so all paths classify a stub identically.
 const QUESTION_PLACEHOLDER_RE = /^<[^>]{1,40}>$/
 
-// Vendors whose log reader delivers assistant turn text. For their panes the
-// strict turn-text sentinel path (judgeTurnText) is authoritative, so the loose
-// in-buffer sentinel scan is skipped — it can false-complete on a TUI redraw
-// that re-echoes the kickoff's sentinel examples. Vendors without turn text
-// keep the buffer scan as their only sentinel source: cursor and antigravity
-// store their transcripts as opaque protobuf, and opencode/kilo parse no
-// activity at all.
-// Deliberately conservative: copilot, aider, kimi, qwen, pi and grok now carry
-// turn text too — enough for the inter-CLI messaging protocol, which only
-// needs the text — but their readers have not been validated against real
-// sessions, and for qwen/pi/grok the turn boundary is inferred from silence
-// rather than read from a record. They stay out of this set and keep the
-// buffer scan until that verification happens.
-const TURN_TEXT_VENDORS = new Set(['claude', 'codex'])
+// Vendors whose log reader delivers VALIDATED assistant turn text. For their
+// panes the strict turn-text sentinel path (judgeTurnText) is authoritative,
+// so the loose in-buffer sentinel scan is skipped — it can false-complete on a
+// TUI redraw that re-echoes the kickoff's sentinel examples. Each vendor
+// declares this itself; see `verifiedTurnText` in agents/types.ts for why the
+// set is deliberately conservative.
+const TURN_TEXT_VENDORS = new Set(
+  agentSpecs.filter((s) => s.verifiedTurnText).map((s) => s.agentKey)
+)
 
 // A turn_complete whose CLI timestamp predates the watcher arming by more than
 // this is a replayed historical event (backend restart re-parses whole logs and

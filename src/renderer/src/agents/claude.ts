@@ -9,6 +9,7 @@ export const SPEC = {
   skipPermissionFlag: '--dangerously-skip-permissions',
   resumeArgs: (id) => `--resume ${id}`,
   supportsRebuild: true,
+  verifiedTurnText: true,
   // Restore-pin self-heals: the turn event's attributed id is adopted directly.
   supportsRestorePin: true,
   hint: 'planner + reviewer'
