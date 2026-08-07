@@ -11,6 +11,7 @@ import type { useRoles, Role } from '../composables/useRoles'
 import type { usePipelines, PipelineSummary } from '../composables/usePipelines'
 import { useStages } from '../composables/useStages'
 import { stageToBackend, type AgentKey, type Stage, type StageSlot } from '../data/stages'
+import { CLI_AGENT_SPECS } from '../agents'
 import { buildPmAiContext } from '../lib/pmAiContext'
 import { aiTerminalPaneId } from '../lib/aiCliContext'
 
@@ -227,11 +228,12 @@ watch(
 // STAGE EDITOR (pipeline detail view)
 // ══════════════════════════════════════════════════════════════════════════════
 
-const AGENT_OPTIONS: { key: AgentKey; label: string }[] = [
-  { key: 'claude', label: 'Claude Code' },
-  { key: 'codex', label: 'Codex' },
-  { key: 'antigravity', label: 'Antigravity CLI' }
-]
+// Every registered CLI vendor is dispatchable — derived from the canonical
+// specs. This list was a hand-kept 3-entry subset (claude/codex/antigravity)
+// for a long time, which silently hid the other nine CLIs from pipelines.
+const AGENT_OPTIONS: { key: AgentKey; label: string }[] = CLI_AGENT_SPECS.map(
+  (s) => ({ key: s.agentKey as AgentKey, label: s.label })
+)
 
 const sSelectedId = ref<string | null>(null)
 const sDraft = ref<Stage | null>(null)
