@@ -6,11 +6,17 @@ import { parsePlanMeta, writePlanMeta } from '../composables/usePlanFile'
 import { resolvePlanStore } from '../composables/planStore'
 import { PLAN_STAGES, type PlanMeta } from '../composables/planModel'
 import {
+  DEFAULT_SORT_DIRECTION,
+  PLAN_GROUP_MODES,
+  PLAN_SORT_DIRECTIONS,
   PLAN_SORT_MODES,
+  clearStoredChoice,
   comparePlanRows,
   loadStoredChoice,
   planMatchesQuery,
   saveStoredChoice,
+  type PlanGroupMode,
+  type PlanSortDirection,
   type PlanSortMode,
 } from './plansPaneModel'
 import {
@@ -165,19 +171,31 @@ watch(() => props.workspacePath, (next) => {
   collapsedSections.value = loadCollapsed(next)
   searchQuery.value = ''
   stageFilter.value = loadStoredChoice(filterStorageKey(next), STAGE_FILTERS, 'all')
-  sortMode.value = loadStoredChoice(sortStorageKey(next), PLAN_SORT_MODES, 'title')
+  sortMode.value = loadSortMode(next)
+  sortDirection.value = loadStoredChoice(
+    sortDirStorageKey(next),
+    PLAN_SORT_DIRECTIONS,
+    DEFAULT_SORT_DIRECTION[sortMode.value],
+  )
+  groupMode.value = loadStoredChoice(groupStorageKey(next), PLAN_GROUP_MODES, 'flat')
   void loadPlans()
 })
 watch(() => props.backend.status?.value, (status) => {
   if (status === 'connected' && waitingForBackend.value) void loadPlans()
 })
 
-// ── Search / stage filter / sort ──────────────────────────────────────────
-// Search is transient (never persisted); stage filter and sort choice are
-// persisted per workspace with the same fail-safe localStorage contract as
-// the collapse state below.
+// ── Search / stage filter / sort / grouping ───────────────────────────────
+// Search is transient (never persisted); stage filter, sort mode, sort
+// direction and grouping are persisted per workspace with the same fail-safe
+// localStorage contract as the collapse state below.
 const FILTER_KEY_PREFIX = 'navide.plans.filter.'
-const SORT_KEY_PREFIX = 'navide.plans.sort.'
+// The sort default moved from 'title' to 'updated'. Bumping the key prefix IS
+// the migration: workspaces still holding the old stored default pick up the
+// new one, and the retired v1 key is dropped as it is superseded.
+const LEGACY_SORT_KEY_PREFIX = 'navide.plans.sort.'
+const SORT_KEY_PREFIX = 'navide.plans.sort.v2.'
+const SORT_DIR_KEY_PREFIX = 'navide.plans.sortdir.'
+const GROUP_KEY_PREFIX = 'navide.plans.group.'
 const STAGE_FILTERS = ['all', ...PLAN_STAGES] as const
 type StageFilter = (typeof STAGE_FILTERS)[number]
 
@@ -187,13 +205,47 @@ function filterStorageKey(workspacePath: string): string {
 function sortStorageKey(workspacePath: string): string {
   return `${SORT_KEY_PREFIX}${workspacePath}`
 }
+function sortDirStorageKey(workspacePath: string): string {
+  return `${SORT_DIR_KEY_PREFIX}${workspacePath}`
+}
+function groupStorageKey(workspacePath: string): string {
+  return `${GROUP_KEY_PREFIX}${workspacePath}`
+}
+
+/** Reads the current sort choice and retires the superseded v1 key with it. */
+function loadSortMode(workspacePath: string): PlanSortMode {
+  clearStoredChoice(`${LEGACY_SORT_KEY_PREFIX}${workspacePath}`)
+  return loadStoredChoice(sortStorageKey(workspacePath), PLAN_SORT_MODES, 'updated')
+}
 
 const searchQuery = ref('')
 const stageFilter = ref<StageFilter>(loadStoredChoice(filterStorageKey(props.workspacePath), STAGE_FILTERS, 'all'))
-const sortMode = ref<PlanSortMode>(loadStoredChoice(sortStorageKey(props.workspacePath), PLAN_SORT_MODES, 'title'))
+const sortMode = ref<PlanSortMode>(loadSortMode(props.workspacePath))
+const sortDirection = ref<PlanSortDirection>(
+  loadStoredChoice(sortDirStorageKey(props.workspacePath), PLAN_SORT_DIRECTIONS, DEFAULT_SORT_DIRECTION[sortMode.value]),
+)
+const groupMode = ref<PlanGroupMode>(loadStoredChoice(groupStorageKey(props.workspacePath), PLAN_GROUP_MODES, 'flat'))
 
 watch(stageFilter, (next) => saveStoredChoice(filterStorageKey(props.workspacePath), next))
 watch(sortMode, (next) => saveStoredChoice(sortStorageKey(props.workspacePath), next))
+watch(sortDirection, (next) => saveStoredChoice(sortDirStorageKey(props.workspacePath), next))
+watch(groupMode, (next) => saveStoredChoice(groupStorageKey(props.workspacePath), next))
+
+// Picking a mode resets the arrow to that mode's natural direction (A→Z for
+// titles, newest/most-complete first otherwise). Done on the change event
+// rather than in a watcher so it cannot race the workspace-switch reload,
+// which assigns both refs in the same tick.
+function onSortModeChange(event: Event): void {
+  const next = (event.target as HTMLSelectElement).value as PlanSortMode
+  sortMode.value = next
+  sortDirection.value = DEFAULT_SORT_DIRECTION[next]
+}
+function toggleSortDirection(): void {
+  sortDirection.value = sortDirection.value === 'asc' ? 'desc' : 'asc'
+}
+function toggleGroupMode(): void {
+  groupMode.value = groupMode.value === 'flat' ? 'stage' : 'flat'
+}
 
 const searchActive = computed(() => searchQuery.value.trim().length > 0)
 
@@ -207,16 +259,23 @@ function itemMatchesSearch(p: PlanItem): boolean {
   })
 }
 
-// Within-group order: title by default (the near-random `_6hex` filename order
-// reads as arbitrary), or the user-selected updated/progress mode.
-function sortRows(rows: PlanStageRow[]): PlanStageRow[] {
+// Row list order: last-updated first by default (the near-random `_6hex`
+// filename order reads as arbitrary and title order buries fresh work), or the
+// user-selected mode and direction.
+function sortRows<T extends PlanListRow>(rows: T[]): T[] {
   return rows.sort((a, b) =>
     comparePlanRows(
       sortMode.value,
-      { title: a.meta.name, mtime: a.item.mtime, done: a.done, total: a.total },
-      { title: b.meta.name, mtime: b.item.mtime, done: b.done, total: b.total },
+      { title: rowTitle(a), mtime: a.item.mtime, done: a.done, total: a.total },
+      { title: rowTitle(b), mtime: b.item.mtime, done: b.done, total: b.total },
+      sortDirection.value,
     ),
   )
+}
+
+/** Docs have no plan meta, so they sort under their filename. */
+function rowTitle(row: PlanListRow): string {
+  return row.meta?.name ?? row.item.name
 }
 
 // Files without valid plan meta (markdown or HTML) are plain docs — listed
@@ -224,19 +283,36 @@ function sortRows(rows: PlanStageRow[]): PlanStageRow[] {
 const docItems = computed(() => plans.value.filter((p) => !p.meta))
 
 // Docs carry no stage, so a specific stage filter hides the whole doc group;
-// while searching, the group only shows when it has matches.
+// while searching, the group only shows when it has matches. The doc group
+// honours the sort selection exactly like the stage groups do.
 const visibleDocItems = computed(() =>
-  stageFilter.value === 'all' ? docItems.value.filter(itemMatchesSearch) : [],
+  stageFilter.value === 'all' && groupMode.value === 'stage'
+    ? sortRows(docItems.value.filter(itemMatchesSearch).map(toListRow)).map((row) => row.item)
+    : [],
 )
 const showDocsSection = computed(
-  () => stageFilter.value === 'all' && (!searchActive.value || visibleDocItems.value.length > 0),
+  () =>
+    groupMode.value === 'stage' &&
+    stageFilter.value === 'all' &&
+    (!searchActive.value || visibleDocItems.value.length > 0),
 )
 
-interface PlanStageRow {
+// A row is one listed file: a plan (meta present) or a plain doc (meta null).
+// Stage groups only ever hold plans, so they narrow `meta` to non-null.
+interface PlanListRow {
   item: PlanItem
-  meta: PlanMeta
+  meta: PlanMeta | null
   done: number
   total: number
+}
+
+interface PlanStageRow extends PlanListRow {
+  meta: PlanMeta
+}
+
+function toListRow(item: PlanItem): PlanListRow {
+  const progress = item.meta ? htmlPlanProgress(item.meta.todos) : { done: 0, total: 0 }
+  return { item, meta: item.meta, done: progress.done, total: progress.total }
 }
 
 // Both formats group by `meta.stage`; progress uses `htmlPlanProgress`
@@ -254,6 +330,23 @@ function stageRows(stages: PlanStage[]): PlanStageRow[] {
     }),
   )
 }
+
+// Flat mode replaces the stage grouping with one list, so the sort order is
+// global: the newest plan in the workspace is the first row whatever stage it
+// sits in. Plans and plain docs share the list; archived plans keep their own
+// group in both modes.
+const flatRows = computed<PlanListRow[]>(() => {
+  if (groupMode.value !== 'flat') return []
+  return sortRows(
+    plans.value.flatMap((p) => {
+      if (p.meta?.archivedAt) return []
+      // Docs carry no stage, so a specific stage filter hides them here too.
+      if (stageFilter.value !== 'all' && p.meta?.stage !== stageFilter.value) return []
+      if (!itemMatchesSearch(p)) return []
+      return [toListRow(p)]
+    }),
+  )
+})
 
 // Archived plans (any stage) collected into their own collapsed group. The
 // group is a cross-stage bucket, so a specific stage filter hides it entirely.
@@ -289,8 +382,9 @@ const archivableDone = computed(() =>
   plans.value.filter((p) => p.meta && p.meta.stage === 'done' && !p.meta.archivedAt)
 )
 
-const stageGroups = computed(() =>
-  (
+const stageGroups = computed(() => {
+  if (groupMode.value !== 'stage') return []
+  return (
     [
       { key: 'draft', label: t('pane.plans.stage-draft'), stages: ['draft'], finished: false },
       { key: 'in-review', label: t('pane.plans.stage-in-review'), stages: ['in-review'], finished: false },
@@ -303,7 +397,7 @@ const stageGroups = computed(() =>
     .filter((group) => stageFilter.value === 'all' || group.key === stageFilter.value)
     .map((group) => ({ ...group, rows: stageRows(group.stages) }))
     .filter((group) => group.rows.length > 0)
-)
+})
 
 // "Nothing to show" while a search or stage filter is active — distinct from
 // the workspace having no plans at all.
@@ -311,6 +405,7 @@ const noVisibleResults = computed(
   () =>
     (searchActive.value || stageFilter.value !== 'all') &&
     !visibleDocItems.value.length &&
+    !flatRows.value.length &&
     !stageGroups.value.length &&
     !archivedRows.value.length,
 )
@@ -782,18 +877,107 @@ async function ctxUpgradeToPlan(): Promise<void> {
             <option value="abandoned">{{ t('pane.plans.stage-abandoned') }}</option>
           </select>
           <select
-            v-model="sortMode"
+            :value="sortMode"
             class="plans-select plans-sort-select"
             :title="t('pane.plans.sort-by')"
             :aria-label="t('pane.plans.sort-by')"
+            @change="onSortModeChange"
           >
             <option value="title">{{ t('pane.plans.sort-title') }}</option>
             <option value="updated">{{ t('pane.plans.sort-updated') }}</option>
             <option value="progress">{{ t('pane.plans.sort-progress') }}</option>
           </select>
+          <button
+            class="plans-toggle-btn plans-sort-dir"
+            type="button"
+            :title="sortDirection === 'asc' ? t('pane.plans.sort-asc') : t('pane.plans.sort-desc')"
+            :aria-label="sortDirection === 'asc' ? t('pane.plans.sort-asc') : t('pane.plans.sort-desc')"
+            @click="toggleSortDirection"
+          >{{ sortDirection === 'asc' ? '↑' : '↓' }}</button>
+          <button
+            class="plans-toggle-btn plans-group-toggle"
+            type="button"
+            :class="{ 'plans-toggle-btn--on': groupMode === 'stage' }"
+            :title="groupMode === 'stage' ? t('pane.plans.group-stage') : t('pane.plans.group-flat')"
+            :aria-label="groupMode === 'stage' ? t('pane.plans.group-stage') : t('pane.plans.group-flat')"
+            :aria-pressed="groupMode === 'stage'"
+            @click="toggleGroupMode"
+          >☰</button>
         </div>
       </div>
       <div v-if="noVisibleResults" class="plans-empty">{{ t('pane.plans.search-no-results') }}</div>
+
+      <section v-if="groupMode === 'flat' && !noVisibleResults" class="plans-section">
+        <div
+          class="plans-section-head"
+          role="button"
+          tabindex="0"
+          @click="toggleSection('all')"
+          @keydown.enter.prevent="toggleSection('all')"
+          @keydown.space.prevent="toggleSection('all')"
+        >
+          <span class="plans-section-title">
+            <span class="plans-section-chevron" :class="{ collapsed: isSectionCollapsed('all') }">▾</span>
+            {{ t('pane.plans.section-all') }}
+          </span>
+          <span>{{ flatRows.length }}</span>
+        </div>
+        <template v-if="!isSectionCollapsed('all')">
+          <div
+            v-for="row in flatRows"
+            :key="row.item.relPath"
+            class="plan-row"
+            :class="{ 'plan-row--done': row.meta?.stage === 'done' || row.meta?.stage === 'abandoned' }"
+            role="button"
+            tabindex="0"
+            draggable="true"
+            @dragstart="onPlanRowDragStart($event, row.item.relPath, row.meta?.name ?? row.item.name, row.meta?.overview)"
+            @click="openPlan(row.item)"
+            @keydown.enter.prevent="openPlan(row.item)"
+            @keydown.space.prevent="openPlan(row.item)"
+            @contextmenu.prevent="openCtxMenu($event, row.item)"
+          >
+            <span class="plan-row-name">{{ row.meta?.name ?? row.item.name }}</span>
+            <span v-if="row.meta?.overview" class="plan-row-overview">{{ row.meta.overview }}</span>
+            <span class="plan-row-path" :title="row.item.relPath">{{ row.item.relPath }}</span>
+            <span class="plan-row-meta">
+              <span v-if="row.meta" class="plan-row-progress">
+                <span
+                  v-if="row.total > 0"
+                  class="plan-progress-bar"
+                  :class="`plan-progress-bar--${row.meta.stage}`"
+                  role="progressbar"
+                  aria-valuemin="0"
+                  :aria-valuenow="row.done"
+                  :aria-valuemax="row.total"
+                  :aria-label="t('pane.plans.progress-done', { done: row.done, total: row.total })"
+                >
+                  <span class="plan-progress-fill" :style="{ width: progressPercent(row.done, row.total) }" />
+                </span>
+                <span>{{ t('pane.plans.progress-done', { done: row.done, total: row.total }) }}</span>
+              </span>
+              <span v-else>
+                {{ row.item.name.endsWith('.html') ? t('pane.plans.format-html') : t('pane.plans.format-markdown') }}
+              </span>
+              <span v-if="row.meta" class="plan-chip" :class="`plan-chip--stage-${row.meta.stage}`">
+                {{ row.meta.stage }}
+              </span>
+              <span v-else class="plan-chip">{{ t('pane.plans.doc-badge') }}</span>
+            </span>
+            <button
+              class="plan-row-delete"
+              type="button"
+              :title="t('pane.plans.menu-delete')"
+              :aria-label="t('pane.plans.menu-delete')"
+              @click.stop="deletePlan(row.item)"
+              @keydown.enter.stop
+              @keydown.space.stop
+            >✕</button>
+          </div>
+          <div v-if="!flatRows.length" class="plans-empty">{{ t('pane.plans.empty-active') }}</div>
+        </template>
+      </section>
+
       <section v-if="showDocsSection" class="plans-section">
         <div
           class="plans-section-head"
@@ -1129,6 +1313,29 @@ async function ctxUpgradeToPlan(): Promise<void> {
   font-size: 11px;
   min-width: 0;
   padding: 3px 4px;
+}
+
+/* Square toggles (sort direction, grouping) sitting next to the selects —
+   fixed width so the two selects keep the rest of the row. */
+.plans-toggle-btn {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex: 0 0 auto;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 7px;
+}
+
+.plans-toggle-btn:hover {
+  color: var(--text-primary);
+}
+
+.plans-toggle-btn--on {
+  border-color: var(--accent-focus);
+  color: var(--text-primary);
 }
 
 .plans-icon-btn,

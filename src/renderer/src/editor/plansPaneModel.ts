@@ -1,14 +1,32 @@
 /**
  * plansPaneModel.ts
  *
- * Pure list-shaping helpers for PlansPane: search matching, within-group row
- * ordering, and the fail-safe localStorage persistence for the pane's stage
- * filter and sort choices. Extracted from PlansPane.vue so the logic is
- * unit-testable without mounting the component.
+ * Pure list-shaping helpers for PlansPane: search matching, row ordering, and
+ * the fail-safe localStorage persistence for the pane's stage filter, sort and
+ * grouping choices. Extracted from PlansPane.vue so the logic is unit-testable
+ * without mounting the component.
  */
 
 export const PLAN_SORT_MODES = ['title', 'updated', 'progress'] as const
 export type PlanSortMode = (typeof PLAN_SORT_MODES)[number]
+
+export const PLAN_SORT_DIRECTIONS = ['asc', 'desc'] as const
+export type PlanSortDirection = (typeof PLAN_SORT_DIRECTIONS)[number]
+
+/**
+ * The direction each mode starts in — the one users expect when they pick it:
+ * A→Z for titles, newest and most-complete first for the other two. Switching
+ * mode resets the direction to this; the arrow button then flips it.
+ */
+export const DEFAULT_SORT_DIRECTION: Record<PlanSortMode, PlanSortDirection> = {
+  title: 'asc',
+  updated: 'desc',
+  progress: 'desc',
+}
+
+/** Flat = one list across every stage; stage = the per-stage groups. */
+export const PLAN_GROUP_MODES = ['flat', 'stage'] as const
+export type PlanGroupMode = (typeof PLAN_GROUP_MODES)[number]
 
 export interface PlanSearchFields {
   title: string
@@ -36,22 +54,45 @@ export interface SortablePlanRow {
 }
 
 /**
- * Comparator for within-group ordering.
- * - 'title': locale order by plan title (the pane's historical default).
- * - 'updated': newest file mtime first; rows without an mtime sort last.
- * - 'progress': highest done/total ratio first; todo-less plans sort last.
- * Ties always fall back to title order so the result is stable.
+ * Locale title order with numeric collation, so "Plan 2" precedes "Plan 10".
  */
-export function comparePlanRows(mode: PlanSortMode, a: SortablePlanRow, b: SortablePlanRow): number {
+function compareTitles(a: string, b: string): number {
+  return a.localeCompare(b, undefined, { numeric: true })
+}
+
+/**
+ * Comparator for list ordering.
+ * - 'title': locale order by plan title.
+ * - 'updated': file mtime order ('desc' = newest first).
+ * - 'progress': done/total ratio order ('desc' = most complete first).
+ * Rows missing the sort key (no mtime, no todos) sink to the bottom in BOTH
+ * directions — flipping the arrow must not float unknowns to the top. Ties
+ * always fall back to ascending title order so the result is stable.
+ */
+export function comparePlanRows(
+  mode: PlanSortMode,
+  a: SortablePlanRow,
+  b: SortablePlanRow,
+  direction: PlanSortDirection = DEFAULT_SORT_DIRECTION[mode],
+): number {
+  const sign = direction === 'asc' ? 1 : -1
   if (mode === 'updated') {
-    const diff = (b.mtime ?? 0) - (a.mtime ?? 0)
-    if (diff !== 0) return diff
+    const missing = Number(a.mtime === undefined) - Number(b.mtime === undefined)
+    if (missing !== 0) return missing
+    const diff = (a.mtime ?? 0) - (b.mtime ?? 0)
+    if (diff !== 0) return diff * sign
   } else if (mode === 'progress') {
-    const ratio = (row: SortablePlanRow): number => (row.total > 0 ? row.done / row.total : -1)
-    const diff = ratio(b) - ratio(a)
-    if (diff !== 0) return diff
+    const missing = Number(a.total <= 0) - Number(b.total <= 0)
+    if (missing !== 0) return missing
+    if (a.total > 0 && b.total > 0) {
+      const diff = a.done / a.total - b.done / b.total
+      if (diff !== 0) return diff * sign
+    }
+  } else {
+    const diff = compareTitles(a.title, b.title)
+    if (diff !== 0) return diff * sign
   }
-  return a.title.localeCompare(b.title)
+  return compareTitles(a.title, b.title)
 }
 
 /**
@@ -78,5 +119,14 @@ export function saveStoredChoice(storageKey: string, value: string): void {
     localStorage.setItem(storageKey, value)
   } catch {
     // Storage unavailable (quota/private mode) — persistence is best-effort.
+  }
+}
+
+/** Drop a superseded key so a retired preference does not linger forever. */
+export function clearStoredChoice(storageKey: string): void {
+  try {
+    localStorage.removeItem(storageKey)
+  } catch {
+    // Same best-effort contract as saveStoredChoice.
   }
 }

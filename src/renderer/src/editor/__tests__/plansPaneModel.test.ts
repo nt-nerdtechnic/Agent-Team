@@ -1,10 +1,12 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import {
+  clearStoredChoice,
   comparePlanRows,
   loadStoredChoice,
   planMatchesQuery,
   saveStoredChoice,
+  type PlanSortDirection,
   type PlanSortMode,
   type SortablePlanRow,
 } from '../plansPaneModel'
@@ -54,8 +56,12 @@ describe('comparePlanRows', () => {
     ...extra,
   })
 
-  const sortTitles = (mode: PlanSortMode, rows: SortablePlanRow[]): string[] =>
-    [...rows].sort((a, b) => comparePlanRows(mode, a, b)).map((r) => r.title)
+  const sortTitles = (
+    mode: PlanSortMode,
+    rows: SortablePlanRow[],
+    direction?: PlanSortDirection,
+  ): string[] =>
+    [...rows].sort((a, b) => comparePlanRows(mode, a, b, direction)).map((r) => r.title)
 
   it('orders by title in title mode', () => {
     expect(sortTitles('title', [row('Zebra'), row('Apple'), row('Mango')])).toEqual([
@@ -89,6 +95,34 @@ describe('comparePlanRows', () => {
     const rows = [row('Zebra', { done: 1, total: 2 }), row('Apple', { done: 2, total: 4 })]
     expect(sortTitles('progress', rows)).toEqual(['Apple', 'Zebra'])
   })
+
+  it('collates digits numerically so "Plan 2" precedes "Plan 10"', () => {
+    expect(sortTitles('title', [row('Plan 10'), row('Plan 2'), row('Plan 1')])).toEqual([
+      'Plan 1',
+      'Plan 2',
+      'Plan 10',
+    ])
+  })
+
+  it('reverses each mode when the direction is flipped', () => {
+    expect(sortTitles('title', [row('Apple'), row('Zebra')], 'desc')).toEqual(['Zebra', 'Apple'])
+    expect(
+      sortTitles('updated', [row('Old', { mtime: 100 }), row('New', { mtime: 200 })], 'asc'),
+    ).toEqual(['Old', 'New'])
+    expect(
+      sortTitles('progress', [row('Full', { done: 2, total: 2 }), row('Empty', { done: 0, total: 2 })], 'asc'),
+    ).toEqual(['Empty', 'Full'])
+  })
+
+  it('keeps rows missing the sort key at the bottom in both directions', () => {
+    const updated = [row('Old', { mtime: 100 }), row('New', { mtime: 200 }), row('None')]
+    expect(sortTitles('updated', updated, 'asc').at(-1)).toBe('None')
+    expect(sortTitles('updated', updated, 'desc').at(-1)).toBe('None')
+
+    const progress = [row('Half', { done: 1, total: 2 }), row('NoTodos'), row('Full', { done: 2, total: 2 })]
+    expect(sortTitles('progress', progress, 'asc').at(-1)).toBe('NoTodos')
+    expect(sortTitles('progress', progress, 'desc').at(-1)).toBe('NoTodos')
+  })
 })
 
 describe('loadStoredChoice / saveStoredChoice', () => {
@@ -121,6 +155,18 @@ describe('loadStoredChoice / saveStoredChoice', () => {
       throw new Error('quota')
     })
     expect(() => saveStoredChoice('navide.plans.sort./ws', 'updated')).not.toThrow()
+    spy.mockRestore()
+  })
+
+  it('clears a superseded key and swallows removal errors', () => {
+    saveStoredChoice('navide.plans.sort./ws', 'updated')
+    clearStoredChoice('navide.plans.sort./ws')
+    expect(localStorage.getItem('navide.plans.sort./ws')).toBeNull()
+
+    const spy = vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
+      throw new Error('denied')
+    })
+    expect(() => clearStoredChoice('navide.plans.sort./ws')).not.toThrow()
     spy.mockRestore()
   })
 })

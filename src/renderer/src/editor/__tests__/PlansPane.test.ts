@@ -234,7 +234,11 @@ function makeBackend(opts?: {
   }
 }
 
+// The pane defaults to the flat, last-updated-first list. Specs below that
+// assert on the stage-grouped layout opt into it explicitly; the flat default
+// has its own describe block at the end of this file.
 function mountPane(backend: ReturnType<typeof makeBackend>) {
+  localStorage.setItem('navide.plans.group./ws', 'stage')
   return mount(PlansPane, {
     props: { workspacePath: '/ws', backend: backend as never },
     global: { plugins: [i18n] },
@@ -1254,6 +1258,7 @@ describe('PlansPane – collapse persistence', () => {
   const KEY = 'navide.plans.collapsed./ws'
 
   function mountAt(workspacePath: string, backend: ReturnType<typeof makeBackend>) {
+    localStorage.setItem(`navide.plans.group.${workspacePath}`, 'stage')
     return mount(PlansPane, {
       props: { workspacePath, backend: backend as never },
       global: { plugins: [i18n] },
@@ -1655,14 +1660,15 @@ describe('PlansPane – search, stage filter, sort', () => {
     const wrapper = mountPane(backend)
     await flushPromises()
 
-    // Default title order lists Apple before Zebra.
+    // Title order lists Apple before Zebra; mtime order is the reverse.
+    await wrapper.find('.plans-sort-select').setValue('title')
     let names = wrapper.findAll('.plan-row-name').map((n) => n.text())
     expect(names.indexOf('Apple Plan')).toBeLessThan(names.indexOf('Zebra Plan'))
 
     await wrapper.find('.plans-sort-select').setValue('updated')
     names = wrapper.findAll('.plan-row-name').map((n) => n.text())
     expect(names.indexOf('Zebra Plan')).toBeLessThan(names.indexOf('Apple Plan'))
-    expect(localStorage.getItem('navide.plans.sort./ws')).toBe('updated')
+    expect(localStorage.getItem('navide.plans.sort.v2./ws')).toBe('updated')
   })
 
   it('sorts within a group by done/total ratio when Progress is selected', async () => {
@@ -1711,5 +1717,117 @@ describe('PlansPane – search, stage filter, sort', () => {
     expect(text).toContain('summary.html')
     expect(text).toContain('loop1.md')
     expect(text).not.toContain('_infra.html')
+  })
+})
+
+// ── Flat (ungrouped) list, the pane default ──────────────────────────────────
+
+describe('PlansPane – flat list default', () => {
+  const flatPlan = (name: string, stage: string) =>
+    htmlPlan({
+      schemaVersion: 1,
+      name,
+      overview: '',
+      stage,
+      approvedAt: null,
+      todos: [],
+      reviewNotes: [],
+    })
+
+  /** No group-mode seeding — exercises the shipped default. */
+  function mountDefault(backend: ReturnType<typeof makeBackend>) {
+    return mount(PlansPane, {
+      props: { workspacePath: '/ws', backend: backend as never },
+      global: { plugins: [i18n] },
+    })
+  }
+
+  function crossStageBackend() {
+    return makeBackend({
+      htmlEntries: [
+        { name: 'aaa_111111.html', rel_path: '.agent-team/plans/aaa_111111.html', is_dir: false },
+        { name: 'zzz_222222.html', rel_path: '.agent-team/plans/zzz_222222.html', is_dir: false },
+      ],
+      htmlFiles: {
+        // Older, and in an earlier stage group than the newer one — under stage
+        // grouping "Old Draft" would always be listed above "New Progress".
+        '.agent-team/plans/aaa_111111.html': flatPlan('Old Draft', 'draft'),
+        '.agent-team/plans/zzz_222222.html': flatPlan('New Progress', 'in-progress'),
+      },
+      mtimes: {
+        '.agent-team/plans/aaa_111111.html': 100,
+        '.agent-team/plans/zzz_222222.html': 200,
+      },
+    })
+  }
+
+  it('defaults to one list ordered newest first, across stages', async () => {
+    const wrapper = mountDefault(crossStageBackend())
+    await flushPromises()
+
+    // One collapsible section, not one per stage (the stage names still appear
+    // in the filter dropdown, so assert on the section headers themselves).
+    const sections = wrapper.findAll('.plans-section-title').map((s) => s.text())
+    expect(sections).toHaveLength(1)
+    expect(sections[0]).toContain('All plans')
+    const names = wrapper.findAll('.plan-row-name').map((n) => n.text())
+    expect(names.indexOf('New Progress')).toBeLessThan(names.indexOf('Old Draft'))
+  })
+
+  it('ignores a stored v1 sort choice and clears the retired key', async () => {
+    localStorage.setItem('navide.plans.sort./ws', 'title')
+    const wrapper = mountDefault(crossStageBackend())
+    await flushPromises()
+
+    expect(localStorage.getItem('navide.plans.sort./ws')).toBeNull()
+    expect((wrapper.find('.plans-sort-select').element as HTMLSelectElement).value).toBe('updated')
+    const names = wrapper.findAll('.plan-row-name').map((n) => n.text())
+    expect(names.indexOf('New Progress')).toBeLessThan(names.indexOf('Old Draft'))
+  })
+
+  it('flips the order when the direction button is clicked, and persists it', async () => {
+    const wrapper = mountDefault(crossStageBackend())
+    await flushPromises()
+
+    await wrapper.find('.plans-sort-dir').trigger('click')
+    const names = wrapper.findAll('.plan-row-name').map((n) => n.text())
+    expect(names.indexOf('Old Draft')).toBeLessThan(names.indexOf('New Progress'))
+    expect(localStorage.getItem('navide.plans.sortdir./ws')).toBe('asc')
+  })
+
+  it('resets the direction to the new mode default when the mode changes', async () => {
+    const wrapper = mountDefault(crossStageBackend())
+    await flushPromises()
+
+    await wrapper.find('.plans-sort-dir').trigger('click')
+    expect(localStorage.getItem('navide.plans.sortdir./ws')).toBe('asc')
+
+    await wrapper.find('.plans-sort-select').setValue('title')
+    expect(localStorage.getItem('navide.plans.sortdir./ws')).toBe('asc')
+
+    await wrapper.find('.plans-sort-select').setValue('updated')
+    expect(localStorage.getItem('navide.plans.sortdir./ws')).toBe('desc')
+  })
+
+  it('switches to stage groups and persists the choice', async () => {
+    const wrapper = mountDefault(crossStageBackend())
+    await flushPromises()
+
+    await wrapper.find('.plans-group-toggle').trigger('click')
+    expect(localStorage.getItem('navide.plans.group./ws')).toBe('stage')
+    expect(wrapper.text()).not.toContain('All plans')
+    expect(wrapper.text()).toContain('Draft')
+    const names = wrapper.findAll('.plan-row-name').map((n) => n.text())
+    expect(names.indexOf('Old Draft')).toBeLessThan(names.indexOf('New Progress'))
+  })
+
+  it('lists plain docs in the same flat list, below plans that carry an mtime', async () => {
+    const wrapper = mountDefault(crossStageBackend())
+    await flushPromises()
+
+    // The .cursor/plans markdown fixtures report no mtime, so they sink.
+    const names = wrapper.findAll('.plan-row-name').map((n) => n.text())
+    expect(names).toContain('Active Plan')
+    expect(names.indexOf('New Progress')).toBeLessThan(names.indexOf('Active Plan'))
   })
 })
