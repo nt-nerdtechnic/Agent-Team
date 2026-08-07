@@ -10477,7 +10477,28 @@ function dualFocusStyle(paneId: string): Record<string, string> {
 }
 
 const backendUrl = computed(() => backend.httpUrl.value)
+// Frozen at bundle time. No longer shown on its own; it survives as the version
+// chip's tooltip so a stale dev build is still identifiable at a glance.
 const buildTag = typeof __APP_BUILD__ === 'string' ? __APP_BUILD__ : 'dev'
+const appVersion = window.agentTeam?.version ?? ''
+
+// Status-bar clock. Reassigning an identical string is a no-op for Vue's
+// reactivity, so a 1s tick costs nothing between minute boundaries.
+const clockLabel = ref('')
+function tickClock(): void {
+  const d = new Date()
+  const p = (n: number): string => String(n).padStart(2, '0')
+  clockLabel.value = `${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+tickClock()
+let clockTimer: ReturnType<typeof setInterval> | null = null
+onMounted(() => {
+  clockTimer = setInterval(tickClock, 1000)
+})
+onUnmounted(() => {
+  if (clockTimer) clearInterval(clockTimer)
+  clockTimer = null
+})
 
 // Backend supervisor popover (status bar pill → manage/restart/stop the backend).
 const backendPanelOpen = ref(false)
@@ -11448,13 +11469,14 @@ function paneIsCommander(p: ActivePane): boolean {
           :class="{ 'sb-announce-unread': announcements.unreadCount.value > 0 }"
           role="button"
           tabindex="0"
-          :title="$t('announce.title')"
+          :title="`${$t('announce.title')} · ${buildTag}`"
           @click="announcementsOpen = !announcementsOpen"
           @keydown.enter="announcementsOpen = !announcementsOpen"
         >
-          📢<template v-if="announcements.unreadCount.value > 0"> {{ announcements.unreadCount.value }}</template>
+          📢<span v-if="appVersion" class="sb-version">v{{ appVersion }}</span
+          ><template v-if="announcements.unreadCount.value > 0"> {{ announcements.unreadCount.value }}</template>
         </span>
-        <span class="sb-item sb-build">{{ buildTag }}</span>
+        <span class="sb-item sb-clock">{{ clockLabel }}</span>
         <span
           v-if="!isDetachedWindow && panes.length > 0"
           class="sb-item sb-clickable sb-close-all"
@@ -12583,7 +12605,9 @@ function paneIsCommander(p: ActivePane): boolean {
   background: var(--danger-bright);
 }
 .sb-url { color: var(--text-muted); font-size: 10px; }
-.sb-build { color: var(--text-muted); }
+.sb-clock { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.sb-version { color: var(--text-muted); margin-left: 4px; }
+.sb-announce-unread .sb-version { color: inherit; }
 .sb-orphans { color: var(--danger, #C0392B); cursor: pointer; font-weight: 600; }
 .sb-orphans:hover { text-decoration: underline; }
 .sb-reconnect { display: inline-flex; align-items: center; gap: 6px; color: var(--accent-bright, #3B5BDB); font-weight: 600; }
