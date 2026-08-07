@@ -3869,7 +3869,7 @@ async function dispatchPlanToPane(relPath: string, agentKey: string): Promise<Pl
 // `historyPaneId`: the id of the pane whose per-pane files this resume belongs
 // to (Agent History knows it; the ad-hoc Resume field does not). Without it an
 // aider resume falls back to whatever the history root already holds.
-async function onManualResume(payload: { agentKey: string, workspacePath: string, sessionId: string, customName?: string, runGroupId?: string, historyPaneId?: string }): Promise<boolean> {
+async function onManualResume(payload: { agentKey: string, workspacePath: string, sessionId: string, customName?: string, autoName?: string, runGroupId?: string, historyPaneId?: string }): Promise<boolean> {
   const { agentKey, workspacePath, runGroupId } = payload
   const sessionId = normalizeResumeSessionId(agentKey, payload.sessionId)
   if (!sessionId) return false
@@ -3899,6 +3899,7 @@ async function onManualResume(payload: { agentKey: string, workspacePath: string
     roleKey: '' as RoleKey,
     stageId: '' as StageId,
     customName: payload.customName,
+    autoName: payload.autoName,
     commandOverride,
     workspacePath,
     origin: 'manual',
@@ -3920,6 +3921,18 @@ async function onManualResume(payload: { agentKey: string, workspacePath: string
       run_group_id: runGroupId || spawnGroupId || undefined,
       output_log_file: panes.value.find((p) => p.id === paneId)?.outputLogFile ?? '',
     })
+    // The auto-title is the displayed name whenever there is no custom one, so
+    // it has to survive the resume the same way custom names do — spawnPane
+    // only put it in memory, this persists it into the new pane's record.
+    // Written before the rename because set_pane_auto_name is set-once and
+    // refuses a record that already carries a custom name.
+    if (payload.autoName) {
+      await sendQuiet('project.set_pane_auto_name', {
+        workspace_path: workspacePath,
+        pane_id: paneId,
+        auto_name: payload.autoName,
+      })
+    }
     if (payload.customName) {
       await sendQuiet('project.rename_pane', {
         workspace_path: workspacePath,
@@ -5245,6 +5258,7 @@ async function onResumeHistoryAgent(entry: SpawnHistoryEntry): Promise<void> {
       workspacePath: entry.workspacePath || currentWorkspace.value,
       sessionId,
       customName: entry.customName,
+      autoName: entry.autoName,
       runGroupId: entry.runGroupId,
       historyPaneId: entry.paneId,
     })
@@ -6581,6 +6595,7 @@ async function onConfirmReconnect(sessionId: string): Promise<void> {
     workspacePath: pane.workspacePath,
     sessionId,
     customName: pane.customName,
+    autoName: pane.autoName,
     runGroupId: pane.runGroupId,
   })
   if (ok) {
