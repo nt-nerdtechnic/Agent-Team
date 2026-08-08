@@ -1037,9 +1037,13 @@ _WAIT_IDLE_QUIET_S = 10.0
 _WAIT_IDLE_MAX_TIMEOUT_S = 120.0
 # Poll the owning window this often (in poll ticks) for its own view of the
 # pane. The registry's busy flag is reported by the frontend and can stay
-# stale, and log-reader activity only exists for the four CLIs that emit it —
-# the renderer's status is the one signal that is always current.
+# stale, and log-reader activity only exists for the CLIs whose reader emits
+# it — the renderer's status is the one signal that is always current.
 _WAIT_IDLE_UI_PROBE_EVERY = 5
+# Deliberately excludes "awaiting": a pane parked on a permission prompt is
+# quiet, but it is waiting on the USER, and sending it work would answer the
+# prompt instead of starting a turn. Waiting it out until the timeout is the
+# safe failure here.
 _UI_IDLE_STATUSES = frozenset({"idle", "exited", "stopped", "error"})
 
 
@@ -1049,8 +1053,9 @@ async def cli_wait_idle(target: str, ctx: Context, timeout_s: float = 60.0) -> d
 
     `target` uses the same addressing as cli_send. `timeout_s` is capped at
     120s. Three signals settle it, in the order they become available: the
-    pane's last activity was a turn_complete (claude/codex/copilot/aider emit
-    it, so detection is precise for them); at least 10s of silence passed
+    pane's last activity was a turn_complete (claude/codex/copilot/aider/kimi/
+    qwen/pi/grok emit it, so detection is precise for them); at least 10s of
+    silence passed
     since its last activity; or, while the registry still reports it busy,
     the owning window reports the pane itself as idle/exited/stopped/error.
     That last one matters because the busy flag is frontend-reported and can

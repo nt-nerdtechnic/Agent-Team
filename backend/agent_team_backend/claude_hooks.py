@@ -48,7 +48,7 @@ def settings_path() -> Path:
     return Path.home() / ".claude" / "settings.json"
 
 
-def _build_curl_command(port_file: str, event_kind: str) -> str:
+def _build_curl_command(port_file: str, event_kind: str, endpoint: str = "claude") -> str:
     """Build a curl invocation that forwards the hook stdin payload to us.
 
     Reads the current backend port from `port_file` at hook-fire time so the
@@ -57,6 +57,11 @@ def _build_curl_command(port_file: str, event_kind: str) -> str:
 
     Hard-caps at 2s + `|| true` so a slow/offline backend never blocks the
     agent's main work. `--data-binary @-` preserves the JSON stdin verbatim.
+
+    `endpoint` is the vendor segment of /hooks/<vendor>; it defaults to claude
+    so hook commands written by earlier builds keep the exact same text (the
+    installer compares by marker, but an unchanged command also means an
+    unchanged settings.json diff).
     """
     safe_port_file = shlex.quote(port_file)
     return (
@@ -66,7 +71,7 @@ def _build_curl_command(port_file: str, event_kind: str) -> str:
         f"-H 'Content-Type: application/json' "
         f"-H 'X-Agent-Team-Event: {event_kind}' "
         f"--data-binary @- "
-        f"\"http://127.0.0.1:$PORT/hooks/claude\" || true"
+        f"\"http://127.0.0.1:$PORT/hooks/{endpoint}\" || true"
     )
 
 
@@ -93,7 +98,8 @@ def _write_settings(path: Path, data: dict[str, Any]) -> None:
     if path.exists() and not backup.exists():
         try:
             shutil.copy2(path, backup)
-            log.info("backed up Claude settings → %s", backup)
+            # No vendor name: qwen_hooks reuses this writer for its own file.
+            log.info("backed up CLI settings → %s", backup)
         except OSError as err:
             log.warning("backup failed (%s); proceeding without backup", err)
     tmp = path.with_suffix(path.suffix + ".tmp")

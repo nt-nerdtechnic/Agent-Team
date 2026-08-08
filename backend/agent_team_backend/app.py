@@ -48,6 +48,8 @@ from .analyzer_settings import AnalyzerSettingsStore
 from .ai_chat_settings import AIChatSettingsStore
 from .applog import app_data_dir, backend_log_path, backend_port_file
 from .claude_hooks import install_hooks as install_claude_hooks
+from .qwen_hooks import install_hooks as install_qwen_hooks
+from .copilot_hooks import install_hooks as install_copilot_hooks
 from .cli_vendors.registry import VENDORS as _CLI_VENDORS
 from .cli_vendors.registry import vendor as cli_vendor
 from .codex_home import CodexHomeManager
@@ -1007,6 +1009,25 @@ async def _start_log_watcher() -> None:
     except Exception as err:  # noqa: BLE001
         log.warning("claude hooks install failed: %s", err)
 
+    # Qwen Code ships Claude's hook design, so the same mechanism gives its
+    # panes the one signal the PTY cannot provide: whether a quiet pane is
+    # parked on a permission prompt or simply done. No-ops when ~/.qwen is
+    # absent (qwen not installed).
+    try:
+        result = install_qwen_hooks(str(backend_port_file()))
+        log.info("qwen hooks install: %s", result)
+    except Exception as err:  # noqa: BLE001
+        log.warning("qwen hooks install failed: %s", err)
+
+    # Copilot loads any *.json under its hooks dir, so this writes one file we
+    # own outright rather than merging into the user's config. No-ops when
+    # ~/.copilot is absent.
+    try:
+        result = install_copilot_hooks(str(backend_port_file()))
+        log.info("copilot hooks install: %s", result)
+    except Exception as err:  # noqa: BLE001
+        log.warning("copilot hooks install failed: %s", err)
+
     # Backend plugin host: discover, load and activate onStartup plugins from
     # the bundled builtin dir plus AGENT_TEAM_PLUGINS_DIR, then apply what
     # they registered (HTTP routes, startup hooks). Guarded — plugins must
@@ -1270,19 +1291,31 @@ async def reset_mcp_servers(payload: dict[str, Any] | None = None) -> dict[str, 
     }
 
 
-@app.post("/hooks/claude")
-async def claude_hook(request: Request) -> dict[str, Any]:
-    """Receive a Claude Code hook payload.
+_HOOK_VENDORS = frozenset({"claude", "qwen", "copilot"})
 
-    Hook commands installed by `claude_hooks.install_hooks` POST here with:
+
+@app.post("/hooks/{vendor}")
+async def cli_hook(vendor: str, request: Request) -> dict[str, Any]:
+    """Receive a CLI hook payload.
+
+    Hook commands installed by `claude_hooks` / `qwen_hooks` / `copilot_hooks`
+    POST here with:
       - Header X-Agent-Team-Event: pre_tool_use | stop | notification
-      - Body: the JSON payload Claude pipes to the hook on stdin
+      - Body: the JSON payload the CLI pipes to the hook on stdin
+
+    The three vendors disagree on where hooks are configured but agree on what
+    a notification says — same `notification_type` vocabulary — so one handler
+    serves all of them and `vendor` only labels the broadcast. The path is
+    parameterized rather than per-vendor so hooks written by an older build,
+    which point at /hooks/claude, keep resolving here unchanged.
 
     We map these to `agent.activity` broadcasts so the frontend watcher gets
     100% reliable signals without buffer-scanning. We do NOT pane-attribute
     here (the hook payload has cwd + session_id; we let the frontend match
     by current-stage panes based on those).
     """
+    if vendor not in _HOOK_VENDORS:
+        return {"ok": False, "reason": f"unknown hook vendor: {vendor!r}"}
     event_kind = request.headers.get("X-Agent-Team-Event", "").strip()
     try:
         payload = await request.json()
@@ -1291,7 +1324,7 @@ async def claude_hook(request: Request) -> dict[str, Any]:
     if not isinstance(payload, dict):
         payload = {}
 
-    # Map Claude's lifecycle to our two event_type buckets.
+    # Map the CLI's lifecycle to our two event_type buckets.
     if event_kind == "stop":
         event_type = "turn_complete"
     elif event_kind in ("pre_tool_use", "notification"):
@@ -1301,13 +1334,21 @@ async def claude_hook(request: Request) -> dict[str, Any]:
 
     session_id = str(payload.get("session_id") or payload.get("sessionId") or "")
     cwd = str(payload.get("cwd") or "")
+    # Notification fires for eight different situations and only some mean "the
+    # user has to act" — permission_prompt blocks the turn, idle_prompt fires
+    # every time Claude finishes and waits for the next instruction. Forwarded
+    # raw; the frontend owns which ones raise its AWAITING badge. Empty on
+    # every other event kind, and on Claude versions that predate the field.
+    # Both vendors use the same vocabulary here (qwen fires permission_prompt /
+    # idle_prompt / auth_success from the same field).
+    notification_type = str(payload.get("notification_type") or "")
     # Resolve pane_id from session_id (claimed by the JSONL path). Hook payloads
     # have no file_path so they can't pass attribute()'s workspace gate; this
     # lookup bypasses it. Race (stop before JSONL claimed the session) → empty
     # pane_id, and the JSONL path's matching event supplies it shortly.
     pane_id, ws_path, stage_id = attribution.pane_for_session(session_id)
     await broadcast(make_event("agent.activity", {
-        "vendor": "claude",
+        "vendor": vendor,
         "event_type": event_type,
         "workspace_path": ws_path or cwd,
         "pane_id": pane_id or "",
@@ -1316,6 +1357,7 @@ async def claude_hook(request: Request) -> dict[str, Any]:
         "cwd": cwd,
         "timestamp": "",
         "detail": f"hook:{event_kind}",
+        "notification_type": notification_type,
     }))
     return {"ok": True}
 
