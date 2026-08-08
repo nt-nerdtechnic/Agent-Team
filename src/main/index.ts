@@ -1838,8 +1838,23 @@ ipcMain.handle('git-accounts:getCredential', (event, workspacePath: string) => {
 // Chrome_InProcGpuThread crashes on shutdown inside fontations_ffi teardown
 // (SIGSEGV at 0x18).  --disable-gpu avoids both problems.
 // WebSocket stability is now handled by the 50ms batch + 64KB cap in terminals.py.
-app.disableHardwareAcceleration()
-app.commandLine.appendSwitch('disable-gpu')
+//
+// The unavoidable cost is that xterm's WebGL renderer can never initialise, so
+// every terminal falls back to the DOM renderer — which rewrites a row of DOM
+// nodes per write and is the dominant cost of typing latency with many panes.
+// NAVIDE_ENABLE_GPU=1 opts back in so the shutdown crash can be re-tested on a
+// newer macOS/Electron without shipping the risk to everyone: the failure mode
+// is a crash on quit, so the default stays off until it is proven fixed.
+const gpuOptIn = process.env.NAVIDE_ENABLE_GPU === '1'
+if (!gpuOptIn) {
+  app.disableHardwareAcceleration()
+  app.commandLine.appendSwitch('disable-gpu')
+} else {
+  console.warn(
+    '[main] NAVIDE_ENABLE_GPU=1 — hardware acceleration ENABLED. ' +
+      'Watch for a SIGSEGV in fontations_ffi on quit; unset to revert.'
+  )
+}
 
 // Dev isolation: give a `npm run dev` instance its own Electron userData so its
 // renderer localStorage (layout, settings) doesn't clobber the packaged app's

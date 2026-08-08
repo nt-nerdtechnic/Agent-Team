@@ -1,9 +1,13 @@
 import { describe, it, expect, vi } from 'vitest'
 
+const killProcessTree = vi.hoisted(() => vi.fn())
+vi.mock('./process-tree', () => ({ killProcessTree }))
+
 // Module-level state (the registry and its one-way abandoned latch), so every
 // test takes a fresh copy the way updater.test.ts does.
 async function load(): Promise<typeof import('./backend-pending')> {
   vi.resetModules()
+  killProcessTree.mockClear()
   return await import('./backend-pending')
 }
 
@@ -74,5 +78,18 @@ describe('pending backend registry', () => {
 
     expect(() => abandonPendingBackends()).not.toThrow()
     expect(other.kill).toHaveBeenCalledWith('SIGKILL')
+  })
+
+  it('kills the spawned tree, not just the process it spawned', async () => {
+    // The child handle is a PyInstaller bootloader; the backend that holds the
+    // port is its child, and SIGKILL is not forwarded there.
+    const { registerPendingBackend, abandonPendingBackends } = await load()
+    const proc = { pid: 4102, ...child() }
+    registerPendingBackend(proc)
+
+    abandonPendingBackends()
+
+    expect(killProcessTree).toHaveBeenCalledWith(4102, 'SIGKILL')
+    expect(proc.kill).not.toHaveBeenCalled()
   })
 })

@@ -13,8 +13,11 @@
  * set — from then on `handle.stop()` is what takes it down.
  */
 
+import { killProcessTree } from './process-tree'
+
 /** The slice of ChildProcess this needs; small enough to fake in a test. */
 export interface PendingChild {
+  pid?: number
   exitCode: number | null
   kill(signal?: NodeJS.Signals): boolean
 }
@@ -25,7 +28,11 @@ let abandoned = false
 function killQuietly(child: PendingChild): void {
   if (child.exitCode !== null) return
   try {
-    child.kill('SIGKILL')
+    // The spawned process only bootstraps the backend — the process that holds
+    // the port and the shared state is its child (see process-tree.ts), and
+    // SIGKILL is not forwarded to it. Name the whole tree when we can.
+    if (typeof child.pid === 'number') killProcessTree(child.pid, 'SIGKILL')
+    else child.kill('SIGKILL')
   } catch {
     /* already gone */
   }

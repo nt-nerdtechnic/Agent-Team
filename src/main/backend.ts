@@ -4,6 +4,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { app } from 'electron'
 import { registerPendingBackend, releasePendingBackend } from './backend-pending'
+import { killProcessTree } from './process-tree'
 
 export interface BackendHandle {
   host: string
@@ -189,8 +190,12 @@ export async function startBackend(healthCheckTimeoutMs = 45_000): Promise<Backe
         // 5s: the backend's shutdown sweep (kill_all — one ps snapshot + 1s
         // grace + watcher/MCP teardown) must finish, or every PTY child is
         // orphaned; 2s cut it off on many-pane workspaces.
+        // Past the grace period the sweep did not happen, so this has to reach
+        // the whole tree by name: SIGKILL is not forwarded by the bootloader,
+        // and killing the handle alone would leave the real backend holding the
+        // port with its PTY children reparented to init.
         const timer = setTimeout(() => {
-          if (proc.exitCode === null) proc.kill('SIGKILL')
+          if (proc.exitCode === null) killProcessTree(proc.pid, 'SIGKILL')
           resolve()
         }, 5000)
         proc.once('exit', () => {
@@ -211,7 +216,9 @@ export async function startBackend(healthCheckTimeoutMs = 45_000): Promise<Backe
   } catch (err) {
     // Health never came up — kill the orphaned child so it can't linger and
     // contend over the shared ~/.agent-team state on the next start attempt.
-    try { proc.kill('SIGKILL') } catch { /* already dead */ }
+    // The process that holds that state is the bootloader's child, not the
+    // handle, so this has to take the tree down rather than just the handle.
+    killProcessTree(proc.pid, 'SIGKILL')
     throw err
   } finally {
     // Settled either way: the handle below owns the process now, or it is dead.
