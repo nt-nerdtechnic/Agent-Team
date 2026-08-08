@@ -215,6 +215,87 @@ describe('useTerminal — RUNNING badge vs self-triggered repaints', () => {
     scope.stop()
   })
 
+  // ── AWAITING: parked on the user ──────────────────────────────────────────
+  // A CLI sitting on a permission prompt paints the prompt once and then goes
+  // silent, which the PTY heuristic alone cannot tell apart from a turn that
+  // finished — both settle to idle. Claude's Notification hook is the only
+  // signal that separates them, routed in as markNeedsInput().
+
+  it('shows AWAITING when markNeedsInput() fires, overriding a latched RUNNING', async () => {
+    const { result, mock, scope } = await spawnedFake()
+    for (let i = 0; i < 5; i++) await chunkThenWait(mock, i, 1_500)
+    expect(result.displayStatus.value).toBe('running')
+    result.markNeedsInput()
+    expect(result.displayStatus.value).toBe('awaiting')
+    scope.stop()
+  })
+
+  it('holds AWAITING through the prompt painting itself (hook and paint race)', async () => {
+    const { result, mock, scope } = await spawnedFake()
+    result.markNeedsInput()
+    // The prompt box is clean output and can land either side of the hook —
+    // one arrives over HTTP, the other over the PTY. Inside the settle window
+    // it is the prompt drawing itself, not the agent resuming.
+    await chunkThenWait(mock, 1, 500)
+    expect(result.displayStatus.value).toBe('awaiting')
+    scope.stop()
+  })
+
+  it('stays AWAITING past the idle timeout instead of decaying to idle', async () => {
+    // The whole point: silence must NOT be read as "done" here. Before this
+    // state a parked pane looked exactly like a finished one after 10s.
+    const { result, mock, scope } = await spawnedFake()
+    for (let i = 0; i < 5; i++) await chunkThenWait(mock, i, 1_500)
+    result.markNeedsInput()
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(result.displayStatus.value).toBe('awaiting')
+    scope.stop()
+  })
+
+  it('leaves AWAITING once real output arrives after the settle window', async () => {
+    const { result, mock, scope } = await spawnedFake()
+    // One chunk first: a pane that has never emitted a byte is still booting,
+    // and booting outranks awaiting (a CLI that hasn't started can't be asking).
+    await chunkThenWait(mock, 0, 100)
+    result.markNeedsInput()
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(result.displayStatus.value).toBe('awaiting')
+    // The user answered and the CLI resumed.
+    await chunkThenWait(mock, 1, 100)
+    expect(result.displayStatus.value).not.toBe('awaiting')
+    scope.stop()
+  })
+
+  it('does not carry AWAITING across a respawn', async () => {
+    // The composable outlives the PTY, so a pane rebuilt while parked on a
+    // prompt would otherwise open showing a question that no longer exists.
+    const { result, mock, scope } = await spawnedFake()
+    await chunkThenWait(mock, 0, 100)
+    result.markNeedsInput()
+    expect(result.displayStatus.value).toBe('awaiting')
+
+    // The PTY ends (backend exit event); spawn() only runs from a dead pane.
+    result.status.value = 'exited'
+    mock.setResponse('terminal.create', { terminal_session_id: 'sess-2', pid: 43 })
+    const respawning = result.spawn({ command: 'bash', cwd: '/tmp', skipReattach: true })
+    await vi.advanceTimersByTimeAsync(200)
+    await respawning
+    await chunkThenWait(mock, 1, 100)
+
+    expect(result.displayStatus.value).not.toBe('awaiting')
+    scope.stop()
+  })
+
+  it('clears AWAITING on markTurnComplete() so a stale hook cannot hold it', async () => {
+    const { result, mock, scope } = await spawnedFake()
+    await chunkThenWait(mock, 0, 100)
+    result.markNeedsInput()
+    expect(result.displayStatus.value).toBe('awaiting')
+    result.markTurnComplete()
+    expect(result.displayStatus.value).toBe('idle')
+    scope.stop()
+  })
+
   it('sets displayStatus to stopped when interrupt() or ESC is triggered, and clears on new input', async () => {
     const { result, mock, scope } = await spawned()
     expect(result.status.value).toBe('running')

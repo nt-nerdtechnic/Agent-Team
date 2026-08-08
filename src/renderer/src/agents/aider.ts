@@ -21,5 +21,21 @@ export const SPEC = {
       .join(' '),
   resumeCommandPattern: /^aider\b.*--restore-chat-history\b/,
   needsSessionMarker: true,
+  // Aider's confirmation suffix, e.g.
+  //   Add file to the chat? (Y)es/(N)o/(A)ll/(S)kip all/(D)on't ask again [Yes]:
+  //   Run shell command? (Y)es/(N)o/(S)kip all/(D)on't ask again [Yes]:
+  // The choice letters and the default-in-brackets are assembled in one place
+  // (io.py) for every question, so matching the suffix covers all of them
+  // without enumerating the question texts. They are hardcoded English with no
+  // translation layer, so this does not move with the user's locale.
+  //
+  // Anchored at the END because aider is line-mode, not a full-screen TUI: an
+  // answered question stays in the scrollback. The rendered text is read
+  // upwards from the CURSOR, so the prompt is last only while aider is
+  // actually sitting on it — once the answer is typed and output resumes, the
+  // line is no longer the tail and stops matching.
+  awaitingInput: {
+    pattern: /\(Y\)es\/\(N\)o(\/\(A\)ll)?(\/\(S\)kip all)?(\/\(D\)on't ask again)? \[[^\]]+\]:\s*$/,
+  },
   hint: 'generalist'
 } as const satisfies AgentSpec

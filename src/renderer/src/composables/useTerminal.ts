@@ -514,11 +514,24 @@ export function readBufferLineBeforeCursor(term: import('@xterm/xterm').Terminal
   return line.slice(0, buf.cursorX)
 }
 
-export function serializeRenderedBuffer(term: import('@xterm/xterm').Terminal, maxLines: number): string {
+export function serializeRenderedBuffer(
+  term: import('@xterm/xterm').Terminal,
+  maxLines: number,
+  from: 'cursor' | 'viewport-bottom' = 'cursor',
+): string {
   const buffer = term.buffer.active
   const lines: string[] = []
   let inTrailingTail = true
-  for (let i = buffer.baseY + buffer.cursorY; i >= 0 && lines.length < maxLines; i--) {
+  // Reading from the cursor is right when the cursor marks where output ended.
+  // A full-screen TUI showing a dialog breaks that: it hides the cursor and
+  // leaves it wherever it last wrote, which can be ABOVE the dialog, so
+  // everything below — including the dialog — would be invisible. Starting at
+  // the viewport bottom instead sees the whole screen; the trailing-blank skip
+  // below still lands on the last real line either way.
+  const start = from === 'cursor'
+    ? buffer.baseY + buffer.cursorY
+    : buffer.baseY + term.rows - 1
+  for (let i = start; i >= 0 && lines.length < maxLines; i--) {
     const text = buffer.getLine(i)?.translateToString(true) ?? ''
     if (inTrailingTail) {
       if (!text.trim() || BOX_ONLY_LINE_RE.test(text)) continue
@@ -868,6 +881,39 @@ interface UseTerminalOptions {
   onScreen?: () => boolean
 }
 
+// Whether this renderer process can create a WebGL context at all, probed once.
+//
+// WebglAddon does not fail in a way a try/catch around loadAddon can observe:
+// when no context can be created it reports that asynchronously from inside
+// activate(), so the catch stayed silent and every pane quietly kept the DOM
+// renderer while looking like it had been upgraded. Probing directly gives an
+// answer that can be logged and asserted on. The probe context is released
+// immediately so it does not eat one of the browser's limited context slots.
+let _webglProbe: boolean | null = null
+function webglAvailable(): boolean {
+  if (_webglProbe !== null) return _webglProbe
+  try {
+    const canvas = document.createElement('canvas')
+    const gl = canvas.getContext('webgl2') ?? canvas.getContext('webgl')
+    if (gl) (gl as WebGLRenderingContext).getExtension('WEBGL_lose_context')?.loseContext()
+    _webglProbe = !!gl
+  } catch {
+    _webglProbe = false
+  }
+  if (!_webglProbe) {
+    console.info(
+      '[terminal] WebGL unavailable — terminals run on the DOM renderer. ' +
+        'On desktop this means hardware acceleration is off (see NAVIDE_ENABLE_GPU).'
+    )
+  }
+  return _webglProbe
+}
+
+/** Test seam: forget the cached probe result. */
+export function _resetWebglProbeForTests(): void {
+  _webglProbe = null
+}
+
 // Throttle for RESUME spawns' terminal.create across all panes. A session
 // restore (App.vue restores panes with Promise.all) or a multi-pane layout can
 // fire N resume spawns at once, and each does serial pre-ack work on the
@@ -1098,6 +1144,18 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // turn_complete), fed in by App.vue. Lets claude/copilot drop to idle
   // immediately instead of waiting out IDLE_CONFIRM_MS.
   const turnCompleteAt = ref<number>(0)
+  // Authoritative "parked on the user" signal, fed in by App.vue from Claude's
+  // Notification hook. Unlike turn_complete this is NOT a turn boundary: the
+  // agent is mid-task, waiting on a permission prompt (or sitting at an empty
+  // prompt), which on the PTY is indistinguishable from a finished turn — the
+  // prompt paints once and then goes silent, so the hysteresis below would
+  // call it idle. See markNeedsInput.
+  const awaitingInputAt = ref<number>(0)
+  // The prompt box the hook announces is itself clean output, and it can land
+  // on either side of the hook (one arrives over HTTP, the other over the PTY).
+  // Clean output inside this window is read as the prompt painting itself;
+  // anything after it means the user answered and the CLI moved on.
+  const AWAITING_SETTLE_MS = 3_000
   // Tick so displayStatus re-evaluates after output goes quiet.
   const nowTick = ref<number>(Date.now())
   const isOnScreen = (): boolean => opts?.onScreen?.() ?? true
@@ -1117,6 +1175,10 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // A pane coming back on screen must not show a status up to
     // TICK_OFF_SCREEN_MS stale, so settle it immediately.
     if (onScreen) nowTick.value = Date.now()
+    // Hand the WebGL context back while off screen so on-screen panes stay
+    // within Chromium's live-context budget (see attachWebgl).
+    if (onScreen) attachWebgl()
+    else detachWebgl()
   })
 
   // Starts when spawn() enters the raw STARTING state, before any reattach,
@@ -1167,6 +1229,17 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // clean chunk would light the badge 2 s later and hold it until the
     // IDLE_CONFIRM_MS timeout. The timeout below stays because silence never
     // calls appendClean, so nothing else can drop the latch.
+    //
+    // AWAITING wins over every idle path below. A CLI parked on a permission
+    // prompt emits nothing once the prompt is painted, so the silence timeout
+    // would report it as idle — visually identical to a finished turn, and the
+    // one case where the user has to act for anything to happen at all. The
+    // settle window absorbs the prompt's own paint; real output past it, or an
+    // authoritative turn end (which clears the flag), means it is over.
+    if (
+      awaitingInputAt.value > 0 &&
+      lastCleanBurstAt.value < awaitingInputAt.value + AWAITING_SETTLE_MS
+    ) return 'awaiting'
     if (turnCompleteAt.value > lastCleanBurstAt.value) return 'idle'
     if (nowTick.value - lastCleanBurstAt.value > IDLE_CONFIRM_MS) return 'idle'
     return runningLatched.value ? 'running' : 'idle'
@@ -1236,13 +1309,34 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   /** Authoritative turn end from the CLI's own conversation log. Drops the
    *  hysteresis latch so the badge goes idle now instead of waiting out
    *  IDLE_CONFIRM_MS. Only vendors whose log reader emits turn_complete reach
-   *  here: claude/codex/copilot/aider (which also carry the turn text) and kimi
-   *  (turn_complete without text). The rest fall back to the silence timeout —
-   *  qwen/pi/cursor emit agent_active only, and antigravity/grok/opencode/kilo
-   *  emit neither (no parse_activity override). */
+   *  here: claude/codex/copilot/aider/kimi/qwen/pi/grok, all of which carry the
+   *  turn text (the last four have no explicit end-of-turn record and infer the
+   *  boundary from a silence window in the log, so they arrive a few seconds
+   *  late). The rest fall back to the silence timeout — cursor emits
+   *  agent_active only, and antigravity/kilo/opencode emit neither (no
+   *  parse_activity override). */
   function markTurnComplete(): void {
     turnCompleteAt.value = Date.now()
     runningLatched.value = false
+    // A turn that ended is not waiting on anyone: clear the flag so a stale
+    // notification can't hold the badge on AWAITING past the turn.
+    awaitingInputAt.value = 0
+  }
+
+  /** The CLI is parked on the user. Two callers, both in App.vue: Claude's
+   *  Notification hook (event-shaped — it fires once, so the settle window and
+   *  markTurnComplete are what end it), and the prompt-pattern watcher for
+   *  vendors with no hook (state-shaped — it re-asserts every poll while the
+   *  prompt is on screen, and calls clearNeedsInput when it goes away). */
+  function markNeedsInput(): void {
+    awaitingInputAt.value = Date.now()
+  }
+
+  /** The prompt is gone — the pattern watcher stopped matching. Only that
+   *  watcher calls this: the hook has nothing to re-check, so clearing it on a
+   *  poll would drop AWAITING while Claude is still parked. */
+  function clearNeedsInput(): void {
+    awaitingInputAt.value = 0
   }
 
   function markBufferPosition(): number {
@@ -1261,6 +1355,14 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
    *  cleanBuffer's tail is dominated by TUI status-footer repaints. */
   function readRenderedText(maxLines: number): string {
     return serializeRenderedBuffer(term, maxLines)
+  }
+
+  /** Like readRenderedText, but read from the bottom of the visible screen
+   *  rather than the cursor — see serializeRenderedBuffer. Used by the
+   *  AWAITING prompt watcher, which must see a dialog a TUI drew below
+   *  wherever it happened to leave the cursor. */
+  function readScreenTail(maxLines: number): string {
+    return serializeRenderedBuffer(term, maxLines, 'viewport-bottom')
   }
 
   /** Cursor-row text up to the cursor column. Used by the pane-drop handler
@@ -1587,26 +1689,50 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     }
   }, RECONCILE_MS)
 
+  // xterm 6 ships only the DOM renderer, which rewrites a row of DOM nodes per
+  // write. That is the dominant cost of typing latency: a CLI repaints its
+  // viewport on every keystroke, and each repaint lands as several writes.
+  // WebGL moves the drawing to the GPU.
+  //
+  // It is attached only while the pane is on screen. Chromium caps how many
+  // live WebGL contexts one page may hold (~16); with more panes than that,
+  // attaching everywhere makes the browser evict the oldest contexts, and each
+  // eviction fires context-loss on a pane that was rendering perfectly well.
+  // Off-screen panes render nothing, so they give their context up.
+  let webglAddon: WebglAddon | null = null
+  /** Which renderer this pane ended up on. Diagnostic — see webglAvailable. */
+  const rendererKind = ref<'dom' | 'webgl'>('dom')
+
+  function attachWebgl(): void {
+    // Load AFTER open(): the addon attaches its canvas to an existing element.
+    if (webglAddon || !containerRef.value) return
+    if (!isOnScreen() || !webglAvailable()) return
+    try {
+      const addon = new WebglAddon()
+      // Context loss (GPU reset, driver recovery, or eviction because too many
+      // contexts are live) leaves a dead canvas behind — fall back to DOM.
+      addon.onContextLoss(() => { detachWebgl() })
+      term.loadAddon(addon)
+      webglAddon = addon
+      rendererKind.value = 'webgl'
+    } catch (err) {
+      console.warn('[terminal] WebGL renderer failed to load, using DOM renderer', err)
+      detachWebgl()
+    }
+  }
+
+  function detachWebgl(): void {
+    const addon = webglAddon
+    webglAddon = null
+    rendererKind.value = 'dom'
+    if (!addon) return
+    try { addon.dispose() } catch { /* xterm may have disposed it already */ }
+  }
+
   function mount(el: HTMLElement): void {
     containerRef.value = el
     term.open(el)
-
-    // xterm 6 ships only the DOM renderer, which rewrites a row of DOM nodes
-    // per write. That is the dominant cost of typing latency: a CLI repaints
-    // its viewport on every keystroke, and each repaint lands as several
-    // writes. WebGL moves the drawing to the GPU. Load AFTER open() — the
-    // addon attaches its canvas to the already-created element — and drop back
-    // to the DOM renderer on context loss (GPU reset, driver recovery) rather
-    // than leaving a dead canvas in place.
-    try {
-      const webgl = new WebglAddon()
-      webgl.onContextLoss(() => { webgl.dispose() })
-      term.loadAddon(webgl)
-    } catch (err) {
-      // No usable WebGL (software rendering, blacklisted driver). The DOM
-      // renderer stays active; the pane is slower but fully functional.
-      console.warn('[terminal] WebGL renderer unavailable, using DOM renderer', err)
-    }
+    attachWebgl()
 
     // Publish terminal focus to the keybinding context (see _onTermFocus doc).
     term.textarea?.addEventListener('focus', _onTermFocus)
@@ -2832,6 +2958,11 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     isStopped.value = false
     runningLatched.value = false
     turnCompleteAt.value = 0
+    // A rebuild/respawn out of AWAITING must not carry the old session's
+    // prompt into the new one: the composable outlives the PTY, so a stale
+    // timestamp here would show the fresh pane as parked on a question that
+    // no longer exists.
+    awaitingInputAt.value = 0
     error.value = ''
     stallReason.value = null  // a retry must not inherit the last attempt's exit
     status.value = 'starting'
@@ -3012,6 +3143,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     cleanupSession()
     clearInterval(tickInterval)
     clearInterval(reconcileInterval)
+    detachWebgl()
     stopStartingWatchdog()
     if (freshSpawnRefitTimer) clearTimeout(freshSpawnRefitTimer)
     if (_hintTimer) clearTimeout(_hintTimer)
@@ -3073,12 +3205,19 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     lastActivityAt,
     lastRawActivityAt,
     markTurnComplete,
+    markNeedsInput,
+    clearNeedsInput,
     markBufferPosition,
     recleanBuffer,
     readRenderedText,
+    readScreenTail,
     readLineBeforeCursor,
     updateXtermTheme,
     isAltBuffer,
+    /** 'webgl' once the GPU renderer actually attached, 'dom' otherwise. The
+     *  addon reports its own failures asynchronously, so this is the only
+     *  reliable signal of which renderer a pane really ended up on. */
+    rendererKind,
     optionSelectHint,
     getSelection: () => term.getSelection(),
     setDisableStdin: (disabled: boolean) => { term.options.disableStdin = disabled },

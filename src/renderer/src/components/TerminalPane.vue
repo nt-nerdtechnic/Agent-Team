@@ -146,9 +146,20 @@ watch(() => props.isPreparing, (isPrep) => {
 
 // RUNNING vs IDLE is derived inside useTerminal from the pane's own clean
 // output, with hysteresis: a sustained burst enters RUNNING, and only a long
-// clean silence leaves it. The CLI's turn_complete (routed here by App.vue via
-// markTurnComplete) is the one authoritative signal, used to drop to idle early.
+// clean silence leaves it. Two authoritative CLI signals are routed here by
+// App.vue: turn_complete (markTurnComplete) drops to idle early, and Claude's
+// Notification hook (markNeedsInput) raises AWAITING, which the PTY stream
+// alone cannot tell apart from a finished turn.
 const displayStatus = terminal.displayStatus
+
+// 'idle' and 'awaiting' both look like a quiet pane but mean opposite things —
+// one is done, the other is blocked on the user — so both explain themselves
+// on hover. The rest are self-evident from the badge text.
+const statusTooltipKey = computed<string>(() => {
+  if (displayStatus.value === 'idle') return 'pane.terminal.idle-status-tooltip'
+  if (displayStatus.value === 'awaiting') return 'pane.terminal.awaiting-status-tooltip'
+  return ''
+})
 
 defineExpose({
   spawn: terminal.spawn,
@@ -168,9 +179,12 @@ defineExpose({
   lastActivityAt: terminal.lastActivityAt,
   lastRawActivityAt: terminal.lastRawActivityAt,
   markTurnComplete: terminal.markTurnComplete,
+  markNeedsInput: terminal.markNeedsInput,
+  clearNeedsInput: terminal.clearNeedsInput,
   markBufferPosition: terminal.markBufferPosition,
   recleanBuffer: terminal.recleanBuffer,
   readRenderedText: terminal.readRenderedText,
+  readScreenTail: terminal.readScreenTail,
   readLineBeforeCursor: terminal.readLineBeforeCursor,
   fitTerminal: terminal.fitTerminal,
   redraw: terminal.redraw,
@@ -410,7 +424,7 @@ onMounted(() => {
         <span
           class="status"
           :data-status="displayStatus"
-          :title="displayStatus === 'idle' ? $t('pane.terminal.idle-status-tooltip') : ''"
+          :title="statusTooltipKey ? $t(statusTooltipKey) : ''"
         >{{ displayStatus === 'stopped' ? 'STOP' : displayStatus }}</span>
         <UsageBadge v-if="agentKey" :agent-key="agentKey" :cli-profiles="cliProfiles" />
       </div>
@@ -666,6 +680,10 @@ onMounted(() => {
 .status[data-status='idle'] {
   background: var(--attention-muted);
   color: var(--attention-fg);
+}
+.status[data-status='awaiting'] {
+  background: color-mix(in srgb, var(--warning-fg) 20%, transparent);
+  color: var(--warning-fg);
 }
 .status[data-status='stopped'] {
   background: #000000;

@@ -2399,6 +2399,14 @@ button.icon-btn.muted:hover {
 .status-dot[data-state='idle'] {
   background: var(--attention-fg);
 }
+/* The CLI asked something and is parked on the answer. It pulses like running
+   rather than sitting flat like idle: this is the one state where nothing at
+   all happens until the user acts, so it must not read as "quiet, all done". */
+.status-dot[data-state='awaiting'] {
+  background: var(--warning-fg);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--warning-fg) 25%, transparent);
+  animation: agent-dot-pulse 1.2s ease-in-out infinite;
+}
 /* Cold-restore placeholder: nothing spawned yet — a hollow ring, so it never
    reads as a live-but-quiet pane. */
 .status-dot[data-state='waiting'] {
@@ -2589,6 +2597,10 @@ button.icon-btn.muted:hover {
 .state[data-state='idle'] {
   background: var(--attention-muted);
   color: var(--attention-fg);
+}
+.state[data-state='awaiting'] {
+  background: color-mix(in srgb, var(--warning-fg) 20%, transparent);
+  color: var(--warning-fg);
 }
 .state[data-state='error'] {
   background: var(--danger-deep);

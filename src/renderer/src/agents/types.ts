@@ -32,7 +32,10 @@ export interface AgentSpec {
    *  buildResumeCommand). */
   resumeArgs?: (sessionId: string) => string
   /** This CLI's logs carry no end-of-turn record at all, so the end of a turn
-   *  can only be inferred from silence. Everything else reports turn ends
+   *  can only be inferred from silence. (The qwen/pi readers do synthesize a
+   *  turn_complete for such panes, but from their own silence window — the
+   *  same inference one layer down, not an explicit record — so the flag stays
+   *  set for them.) Everything else reports turn ends
    *  explicitly and MUST be trusted instead: activity is logged per output
    *  line, not as a heartbeat, so a CLI waiting on a long tool call — or on a
    *  permission prompt — looks exactly like a CLI that has finished. Inferring
@@ -49,6 +52,21 @@ export interface AgentSpec {
     pattern: RegExp
     /** Command typed into the CLI to start a re-login. */
     loginCommand: string
+  }
+  /** Recognizes this CLI parked on the user — a permission/confirmation box or
+   *  a direct question — in the pane's RENDERED screen text. Undefined = the
+   *  vendor reports the state out of band (claude uses its Notification hook)
+   *  or its prompt shape has not been identified, and the pane keeps the plain
+   *  idle/running behaviour. Matched against the rendered buffer rather than
+   *  the raw stream so an answered prompt disappears on its own when the TUI
+   *  repaints over it — see lib/cliAwaitingInput.ts. */
+  awaitingInput?: {
+    /** Matches the live prompt in the last rendered screen lines. Anchor it on
+     *  the part that only exists while the prompt is WAITING (its option list
+     *  or input marker), not on the question text, which survives in the
+     *  scrollback of line-mode CLIs after the answer. Must not carry /g —
+     *  test() is stateful with it and the watcher re-runs on the same text. */
+    pattern: RegExp
   }
   /** This vendor's TUI keeps bracketed paste on. Enables chunked clipboard
    *  paste wrapping AND serves as the default Shift+Enter encoding (bracketed

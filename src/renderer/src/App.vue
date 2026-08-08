@@ -161,6 +161,12 @@ import {
   formatLoopTime,
 } from './lib/loopPrompt'
 import { loginCommandFor, matchLoginExpired } from './lib/cliLoginExpired'
+import {
+  hasAwaitingPattern,
+  matchAwaitingInput,
+  notificationEndsAwaiting,
+  notificationMeansAwaiting,
+} from './lib/cliAwaitingInput'
 import { entryBelongsToWorkspace, filterWorkspaceEntries, historyEntryLabel, legacyHistoryLogPath, manualLogFileName, updateHistoryCustomName, type HistoryCleanupMode, type HistoryDeletePreview, type HistoryDeleteTarget, type SpawnHistoryEntry, type WorkspaceIdentity } from './lib/spawnHistory'
 import { useKeybindings, registerCommand, setContext } from './keybindings/useKeybindings'
 import { useUiActionBus } from './composables/useUiActionBus'
@@ -1217,8 +1223,8 @@ const paneViews = ref<ActivePaneView[]>([])
 // ── Per-pane turn-complete signal (CLI lifecycle, not a buffer guess) ────────
 // The backend broadcasts `agent.activity` with event_type "turn_complete" when
 // a CLI ends its turn (Claude Stop hook = 100% reliable, or a conversation-log
-// turn-end parsed for codex/copilot/aider/kimi — the only other vendors whose
-// reader emits it). We record the wall-clock time per pane. A pane only counts as
+// turn-end parsed for codex/copilot/aider/kimi/qwen/pi/grok — the other vendors
+// whose reader emits it). We record the wall-clock time per pane. A pane only counts as
 // "turn complete for the current stage" when this timestamp is AFTER the
 // watcher armed (see slotFinished), so a stale signal from a prior stage/turn
 // is never reused — no explicit reset needed.
@@ -1831,7 +1837,13 @@ onMounted(() => {
     persistClear: msgLog.persistClear,
   })
   void msgLog.hydrate()
-  _msgPumpTimer = window.setInterval(() => { messaging.pump(); syncPaneBusy() }, 1000)
+  // pollAwaitingPanes runs BEFORE syncPaneBusy: it can flip a pane to AWAITING,
+  // and the busy report that follows must carry that same tick's status.
+  _msgPumpTimer = window.setInterval(() => {
+    messaging.pump()
+    pollAwaitingPanes()
+    syncPaneBusy()
+  }, 1000)
   void refreshRemoteMessagingTargets()
   _remoteTargetsTimer = window.setInterval(() => void refreshRemoteMessagingTargets(), 10_000)
   window.addEventListener('beforeunload', msgLog.flushOnExit)
@@ -1842,6 +1854,41 @@ onUnmounted(() => {
   window.removeEventListener('beforeunload', msgLog.flushOnExit)
   void msgLog.flush()
 })
+
+// ── AWAITING watcher (vendors with no notification hook) ────────────────────
+// Claude reports "parked on the user" out of band, through its Notification
+// hook. Every other CLI only shows it on screen, so the prompt is recognized
+// from the pane's RENDERED text: a TUI repaints its box in place, so an
+// answered prompt stops matching on its own, while the raw clean buffer would
+// keep every frame it ever painted and match forever.
+//
+// Polled rather than checked inside useTerminal's appendClean, which runs once
+// per PTY chunk (macOS splits a read at 1KB — ~20 chunks per keystroke); a
+// regex there would dominate the output path. Unlike the login-expired watcher
+// this consumes nothing it matched: the prompt is a STATE, re-asserted every
+// tick while it is on screen and cleared the moment it is not. Panes whose
+// vendor has no pattern are skipped entirely, so claude's hook-set AWAITING is
+// never cleared here.
+const AWAITING_SCREEN_LINES = 25
+
+function pollAwaitingPanes(): void {
+  for (const pane of panes.value) {
+    if (!pane.realized || !hasAwaitingPattern(pane.agentKey)) continue
+    const ref = paneRefs[pane.id]
+    if (!ref?.readScreenTail) continue
+    // Contained per pane: this shares a tick with messaging.pump and
+    // syncPaneBusy, and a throw here would be deterministic (the same pane
+    // every second), permanently starving the busy reporting that follows.
+    // A badge must never take messaging down with it.
+    try {
+      const screen = ref.readScreenTail(AWAITING_SCREEN_LINES) as unknown as string
+      if (matchAwaitingInput(pane.agentKey, screen)) ref.markNeedsInput?.()
+      else ref.clearNeedsInput?.()
+    } catch {
+      /* leave this pane's badge as-is and carry on with the rest */
+    }
+  }
+}
 
 function syncViews(): void {
   paneViews.value = panes.value.map((p) => {
@@ -7506,7 +7553,7 @@ const sessionGhostHealGate = createGhostHealGate(async (paneId, pinnedSessionId)
 // is working; turn_complete = its turn ended. We timestamp both per pane; the
 // completion logic reads these instead of guessing from the TUI buffer.
 backend.on('agent.activity', (raw) => {
-  const ev = raw as { event_type?: string; pane_id?: string; vendor?: string; session_id?: string; detail?: string; text?: string; timestamp?: string }
+  const ev = raw as { event_type?: string; pane_id?: string; vendor?: string; session_id?: string; detail?: string; text?: string; timestamp?: string; notification_type?: string }
   if (!ev?.pane_id) return
   if (ev.event_type === 'turn_complete') {
     paneTurnCompleteAt.set(ev.pane_id, Date.now())
@@ -7556,9 +7603,32 @@ backend.on('agent.activity', (raw) => {
     }
     // A new turn re-arms 'done' notifications for this pane.
     sysNotify.markActive(ev.pane_id)
-    // Claude's Notification hook (user attention requested, e.g. permission
-    // prompt) arrives as agent_active with detail 'hook:notification'.
-    if (ev.detail === 'hook:notification') notifyAttention(ev.pane_id)
+    // Claude's Notification hook (user attention requested) arrives as
+    // agent_active with detail 'hook:notification'. It is also the only signal
+    // that separates "parked on the user" from "done": the prompt paints once
+    // and then goes quiet, so the pane's own PTY stream settles to idle
+    // exactly like a finished turn would. Only SOME notification types mean
+    // the user has to act, though — idle_prompt fires after every turn, and
+    // raising AWAITING there would both misreport a free pane and stop it
+    // receiving dispatched work.
+    if (ev.detail === 'hook:notification') {
+      const awaiting = notificationMeansAwaiting(ev.notification_type)
+      // Sound the attention chime only when the user actually has to act.
+      // Notification also fires for "turn ended, waiting for your next
+      // instruction", which every turn produces — chiming there would ring
+      // once per turn on top of the existing done notification. Builds that
+      // send no type at all keep the old always-notify behaviour rather than
+      // silently losing a signal the user may already rely on.
+      if (awaiting || !ev.notification_type) notifyAttention(ev.pane_id)
+      if (awaiting) {
+        paneRefs[ev.pane_id]?.markNeedsInput?.()
+      } else if (notificationEndsAwaiting(ev.notification_type)) {
+        // A hook fires once, so waits that end without the CLI producing any
+        // output need this explicit release or the pane stays AWAITING — and
+        // stays excluded from messaging and dispatch — indefinitely.
+        paneRefs[ev.pane_id]?.clearNeedsInput?.()
+      }
+    }
     // Clear the restore-mode badge once the user interacts with the pane.
     const histEntry = spawnHistory.value.find((e) => e.paneId === ev.pane_id)
     if (histEntry?.restoreMode) histEntry.restoreMode = undefined

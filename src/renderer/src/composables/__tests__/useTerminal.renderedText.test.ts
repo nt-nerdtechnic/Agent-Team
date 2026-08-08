@@ -58,6 +58,52 @@ describe('serializeRenderedBuffer', () => {
     } as unknown as Terminal
     expect(serializeRenderedBuffer(term, 100)).toBe('')
   })
+
+  // A full-screen TUI hides the cursor while a dialog is up and leaves it
+  // wherever it last wrote — which can be ABOVE the dialog. The AWAITING
+  // prompt watcher reads from the viewport bottom for exactly this reason.
+  describe('from: viewport-bottom', () => {
+    /** Viewport is the whole fixture (baseY 0); the cursor is parked at
+     *  `cursorY`, not necessarily at the end of the content. */
+    function mockScreen(rows: string[], cursorY: number): Terminal {
+      return {
+        rows: rows.length,
+        buffer: {
+          active: {
+            baseY: 0,
+            cursorY,
+            getLine: (r: number) =>
+              rows[r] === undefined ? undefined : { translateToString: () => rows[r] },
+          },
+        },
+      } as unknown as Terminal
+    }
+
+    const dialog = [
+      'thinking…',
+      'Would you like to run the following command?',
+      '  1. Yes, just this once',
+      '  3. No, and tell Codex what to do differently',
+    ]
+
+    it('reading from the cursor misses a dialog drawn below it', () => {
+      // The bug this option exists to avoid.
+      expect(serializeRenderedBuffer(mockScreen(dialog, 0), 25)).toBe('thinking…')
+    })
+
+    it('reading from the viewport bottom sees the whole screen', () => {
+      expect(serializeRenderedBuffer(mockScreen(dialog, 0), 25, 'viewport-bottom')).toBe(
+        dialog.join('\n')
+      )
+    })
+
+    it('still drops trailing blanks, so the last real line stays the tail', () => {
+      // What keeps aider's end-anchored pattern working: the cursor moves to a
+      // blank line below the prompt, but the prompt is still the tail.
+      const rows = ['Run shell command? (Y)es/(N)o [Yes]:', '', '']
+      expect(serializeRenderedBuffer(mockScreen(rows, 1), 25, 'viewport-bottom')).toBe(rows[0])
+    })
+  })
 })
 describe('readBufferLineBeforeCursor', () => {
   function mockCursorTerm(rows: string[], cursorX: number): Terminal {

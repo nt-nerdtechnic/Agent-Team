@@ -18,6 +18,7 @@ import { useI18n } from 'vue-i18n'
 export type AgentOverviewStatus =
   | 'running'
   | 'idle'
+  | 'awaiting'
   | 'starting'
   | 'stopped'
   | 'exited'

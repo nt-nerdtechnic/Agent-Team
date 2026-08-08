@@ -3,7 +3,8 @@
 // A slot is "finished" only on a *factual* signal — never an LLM guess:
 //   • sentinel — the agent printed the stage's done-marker, or
 //   • turn_complete — the CLI reported its turn ended (Claude Stop hook = 100%,
-//     or a conversation-log turn-end parsed for codex/copilot/aider/kimi),
+//     or a conversation-log turn-end parsed for
+//     codex/copilot/aider/kimi/qwen/pi/grok),
 //     captured AFTER the watcher armed so a stale signal from a prior
 //     stage/turn is never reused.
 //
