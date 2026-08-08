@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -1586,11 +1587,53 @@ def _running_login_terminals(agent_key: str, profile_id: str) -> list[tuple[str,
     return running
 
 
+# CLIs that consult their credential source on every request instead of
+# caching it in memory for the life of the process. Their live panes pick the
+# swapped-in account up on their next turn, so an account switch needs neither
+# the quiescence gate nor a pane restart. Verified by decompiling Claude Code
+# 2.1.223: the client factory awaits a credential re-read before every request,
+# and that re-read happens BEFORE the token-expiry check — see
+# .agent-team/plans/cli-claude-hot-swap_abd651.html. codex caches auth in
+# memory (AuthManager::auth_cached) and reloads only on 401 recovery; kimi and
+# grok are unaudited. Add an agent here only with the same kind of evidence.
+HOT_SWAP_AGENTS = frozenset({"claude"})
+
+# Switching accounts is a manual, deliberate action. These bounds exist so it
+# stays one: without the quiescence gate a hot-swap agent has no friction left,
+# and unbounded programmatic switching would turn multi-account support into
+# automatic rotation ("swap when the quota runs low"), which is a different
+# thing from using several accounts. Deliberately loose — hands never reach it.
+SWITCH_RATE_WINDOW_S = 60.0
+SWITCH_RATE_MAX = 3
+_switch_history: dict[str, list[float]] = {}
+
+
+def _switch_rate_retry_after(agent_key: str) -> float:
+    """Seconds until this agent may switch again; 0.0 while within quota.
+    Prunes the window as a side effect. Callers hold the agent's switch_lock,
+    so no extra synchronization is needed."""
+    now = time.monotonic()
+    recent = [t for t in _switch_history.get(agent_key, []) if now - t < SWITCH_RATE_WINDOW_S]
+    _switch_history[agent_key] = recent
+    if len(recent) < SWITCH_RATE_MAX:
+        return 0.0
+    return SWITCH_RATE_WINDOW_S - (now - recent[0])
+
+
+def _record_switch(agent_key: str) -> None:
+    """Count one completed switch against the rate window. Only swaps that
+    actually happened are recorded — a no-op or a refused switch does not
+    consume quota."""
+    _switch_history.setdefault(agent_key, []).append(time.monotonic())
+
+
 def _running_regular_terminals(agent_key: str) -> list[str]:
     """Terminal ids of every live NON-login pane of the given agent. Every
     regular pane runs on the live credentials in the real home — the very
-    credentials an account switch swaps — so a still-running CLI would keep
-    refreshing the outgoing account's token there mid-swap."""
+    credentials an account switch swaps. For agents outside HOT_SWAP_AGENTS
+    the CLI holds those credentials in memory for the life of the process, so
+    a pane that keeps running after a swap stays on the outgoing account until
+    it is restarted."""
     from . import app
 
     running: list[str] = []
@@ -1644,13 +1687,20 @@ def _slot_needs_login(agent_key: str, slot_id: str) -> bool:
 async def cli_profiles_set_default(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     """Switch the agent's active account: capture the live credentials into the
     outgoing account's slot, then restore the target slot into the real home.
-    Every regular pane runs on those live credentials, so the switch is gated
-    on quiescence: live non-login panes of the agent fail it with PANES_RUNNING
-    unless the request carries force=true (the frontend then restarts the
-    affected panes itself — the backend never kills them). A still-running
-    isolated sign-in for the target account also blocks it (LOGIN_IN_PROGRESS),
-    because the switch harvests its login home into the slot before restoring
-    it."""
+
+    Three ways it can be refused. Every switch is rate limited
+    (SWITCH_RATE_LIMITED, not bypassable). Agents outside HOT_SWAP_AGENTS are
+    additionally gated on quiescence, because their live panes hold the
+    outgoing credentials in memory: live non-login panes fail with
+    PANES_RUNNING unless the request carries force=true (the frontend then
+    restarts the affected panes itself — the backend never kills them).
+    A still-running isolated sign-in for the target account blocks it
+    (LOGIN_IN_PROGRESS), because the switch harvests its login home into the
+    slot before restoring it.
+
+    Hot-swap agents skip the quiescence gate and never get the restart
+    broadcast: their CLI re-reads the credential source every request, so live
+    panes land on the new account by themselves."""
     from . import app
 
     agent_key = str(payload.get("agent_key") or "")
@@ -1701,11 +1751,29 @@ async def cli_profiles_set_default(session: "Session", msg_id: str, msg_type: st
             )
             return
 
-        # Quiescence gate: a live regular pane keeps refreshing the outgoing
-        # account's token in the very live location the swap rewrites. Refuse
-        # unless the caller forces the switch (it then restarts the affected
-        # panes itself; the backend never kills them).
-        if not payload.get("force"):
+        # Rate limit: keeps account switching a manual action (see the
+        # SWITCH_RATE_* constants). Checked before anything is touched, and
+        # deliberately NOT bypassable by force — force means "I accept the pane
+        # restart", not "let me switch as fast as I like".
+        retry_after = _switch_rate_retry_after(agent_key)
+        if retry_after > 0:
+            await session.send_json(
+                make_error(
+                    msg_id, msg_type, "SWITCH_RATE_LIMITED",
+                    f"too many {agent_key} account switches; retry in "
+                    f"{retry_after:.0f}s",
+                    {"retryAfter": retry_after},
+                )
+            )
+            return
+
+        # Quiescence gate: outside HOT_SWAP_AGENTS a live regular pane holds
+        # the outgoing account's credentials in memory and stays on them until
+        # it restarts. Refuse unless the caller forces the switch (it then
+        # restarts the affected panes itself; the backend never kills them).
+        # Hot-swap agents re-read their credential source every request, so
+        # their panes need neither the gate nor a restart.
+        if agent_key not in HOT_SWAP_AGENTS and not payload.get("force"):
             running_count = len(_running_regular_terminals(agent_key))
             if running_count:
                 await session.send_json(
@@ -1767,6 +1835,10 @@ async def cli_profiles_set_default(session: "Session", msg_id: str, msg_type: st
             )
             return
 
+        # The credentials moved — count it, whatever happens to the bookkeeping
+        # below (a persisted-default failure still leaves the new account live).
+        _record_switch(agent_key)
+
         try:
             defaults = app.cli_profiles_store.set_default(agent_key, profile_id)
         except (KeyError, ValueError) as err:
@@ -1777,8 +1849,13 @@ async def cli_profiles_set_default(session: "Session", msg_id: str, msg_type: st
         await session.send_json(
             make_response(msg_id, msg_type, {"defaults": defaults, "needsLogin": needs_login})
         )
+    # `forced` is what makes every window restart its panes of this agent. A
+    # hot-swap agent's panes must never be restarted, so the flag stays False
+    # for them even when the caller passed force=true.
     await _broadcast_profiles_changed(
-        "set_default", agent_key=agent_key, forced=bool(payload.get("force"))
+        "set_default",
+        agent_key=agent_key,
+        forced=agent_key not in HOT_SWAP_AGENTS and bool(payload.get("force")),
     )
     # The usage badges read the active account's credentials — force the poller
     # to re-fetch now so the badge reflects the switch immediately.

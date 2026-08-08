@@ -17,7 +17,7 @@ os.environ.setdefault(
     "AGENT_TEAM_DATA_DIR", tempfile.mkdtemp(prefix="agent-team-tests-")
 )
 
-from agent_team_backend import app
+from agent_team_backend import app, ws_handlers
 from agent_team_backend.credential_vault import CredentialVault
 
 
@@ -69,16 +69,21 @@ def _reset_terminal_singleton():
     loop per test, so reset the singleton and the active-session pointer before
     and after each test to keep them isolated and bound to the current loop.
     _PTY_OWNERS is likewise process-global (cli_profiles.set_default consults it
-    for the running-pane guard) and must not leak between tests."""
+    for the running-pane guard) and must not leak between tests. So is
+    ws_handlers._switch_history: a test suite switches accounts far faster than
+    a person does, so without a reset the account-switch rate limit would start
+    refusing switches partway through the run."""
     app._TERMINALS = None
     app._active_session = None
     app._PTY_OWNERS.clear()
     app._pane_activity.clear()
+    ws_handlers._switch_history.clear()
     yield
     app._TERMINALS = None
     app._active_session = None
     app._PTY_OWNERS.clear()
     app._pane_activity.clear()
+    ws_handlers._switch_history.clear()
 
 
 # ---- shared helpers for the PTY kill/reap tests ----

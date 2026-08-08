@@ -16,6 +16,7 @@ from typing import Any
 import asyncio
 import os
 import shutil
+import time
 
 import pytest
 
@@ -693,18 +694,18 @@ async def test_set_default_noop_when_already_active(
 async def test_set_default_refused_while_agent_panes_running(
     store: CliProfilesStore, events: list[dict[str, Any]], vault: FakeVault
 ) -> None:
-    """Quiescence gate: every regular pane runs on the live credentials being
-    swapped, so a switch with live panes of the agent is refused
-    (PANES_RUNNING + count) — no credentials touched, no pane killed."""
+    """Quiescence gate: a non-hot-swap CLI holds the live credentials in memory,
+    so a switch with live panes of the agent is refused (PANES_RUNNING + count)
+    — no credentials touched, no pane killed."""
     session = _session()
-    profile = store.create(agent_key="claude", name="Work")
-    t1 = _register_running_terminal(session, "t1", "claude")
-    t2 = _register_running_terminal(session, "t2", "claude")
+    profile = store.create(agent_key="codex", name="Work")
+    t1 = _register_running_terminal(session, "t1", "codex")
+    t2 = _register_running_terminal(session, "t2", "codex")
 
     await app.handle_message(session, {
         "id": "b1",
         "type": "cli_profiles.set_default",
-        "payload": {"agent_key": "claude", "profile_id": profile["id"]},
+        "payload": {"agent_key": "codex", "profile_id": profile["id"]},
     })
 
     response = session.websocket.sent[0]  # type: ignore[attr-defined]
@@ -714,8 +715,121 @@ async def test_set_default_refused_while_agent_panes_running(
     assert session.terminals.killed == []  # type: ignore[attr-defined]
     assert t1.proc.poll() is None and t2.proc.poll() is None
     assert vault.switch_calls == []
-    assert store.list()["defaults"]["claude"] is None
+    assert store.list()["defaults"]["codex"] is None
     assert events == []
+
+
+async def test_set_default_claude_not_gated_by_running_panes(
+    store: CliProfilesStore, events: list[dict[str, Any]], vault: FakeVault
+) -> None:
+    """claude is a hot-swap agent: it re-reads its credential source on every
+    request, so live panes neither block the switch nor get restarted. The
+    broadcast must NOT carry forced — that flag is what makes windows rebuild
+    their panes."""
+    session = _session()
+    profile = store.create(agent_key="claude", name="Work")
+    t1 = _register_running_terminal(session, "t1", "claude")
+
+    await app.handle_message(session, {
+        "id": "hs1",
+        "type": "cli_profiles.set_default",
+        "payload": {"agent_key": "claude", "profile_id": profile["id"]},
+    })
+
+    response = session.websocket.sent[0]  # type: ignore[attr-defined]
+    assert response["ok"] is True
+    assert session.terminals.killed == []  # type: ignore[attr-defined]
+    assert t1.proc.poll() is None
+    assert vault.switch_calls == [("claude", "__default__", profile["id"])]
+    assert events[0]["payload"]["forced"] is False
+
+
+async def test_set_default_claude_broadcast_never_forced(
+    store: CliProfilesStore, events: list[dict[str, Any]], vault: FakeVault
+) -> None:
+    """Even an explicit force=true must not set the restart flag for a hot-swap
+    agent: restarting its panes would throw away CLI state for nothing."""
+    session = _session()
+    profile = store.create(agent_key="claude", name="Work")
+    _register_running_terminal(session, "t1", "claude")
+
+    await app.handle_message(session, {
+        "id": "hs2",
+        "type": "cli_profiles.set_default",
+        "payload": {"agent_key": "claude", "profile_id": profile["id"], "force": True},
+    })
+
+    assert session.websocket.sent[0]["ok"] is True  # type: ignore[attr-defined]
+    assert events[0]["payload"]["forced"] is False
+
+
+async def test_set_default_rate_limited_after_burst(
+    store: CliProfilesStore, events: list[dict[str, Any]], vault: FakeVault
+) -> None:
+    """Switching stays a manual action: past the per-agent quota a switch is
+    refused with SWITCH_RATE_LIMITED and a retryAfter, credentials untouched."""
+    session = _session()
+    a = store.create(agent_key="claude", name="A")
+    b = store.create(agent_key="claude", name="B")
+
+    for i in range(ws_handlers.SWITCH_RATE_MAX):
+        await app.handle_message(session, {
+            "id": f"rl{i}",
+            "type": "cli_profiles.set_default",
+            "payload": {"agent_key": "claude", "profile_id": (a if i % 2 == 0 else b)["id"]},
+        })
+    assert len(vault.switch_calls) == ws_handlers.SWITCH_RATE_MAX
+
+    await app.handle_message(session, {
+        "id": "rl-over",
+        "type": "cli_profiles.set_default",
+        "payload": {"agent_key": "claude", "profile_id": None},
+    })
+
+    response = session.websocket.sent[-1]  # type: ignore[attr-defined]
+    assert response["ok"] is False
+    assert response["error"]["code"] == "SWITCH_RATE_LIMITED"
+    assert 0 < response["error"]["details"]["retryAfter"] <= ws_handlers.SWITCH_RATE_WINDOW_S
+    assert len(vault.switch_calls) == ws_handlers.SWITCH_RATE_MAX
+
+
+async def test_switch_rate_limit_not_bypassed_by_force(
+    store: CliProfilesStore, events: list[dict[str, Any]], vault: FakeVault
+) -> None:
+    """force means "I accept the pane restart", not "let me switch as fast as I
+    like" — it must not open a hole in the rate limit."""
+    session = _session()
+    profile = store.create(agent_key="codex", name="Work")
+    ws_handlers._switch_history["codex"] = [time.monotonic()] * ws_handlers.SWITCH_RATE_MAX
+
+    await app.handle_message(session, {
+        "id": "rl-force",
+        "type": "cli_profiles.set_default",
+        "payload": {"agent_key": "codex", "profile_id": profile["id"], "force": True},
+    })
+
+    response = session.websocket.sent[0]  # type: ignore[attr-defined]
+    assert response["ok"] is False
+    assert response["error"]["code"] == "SWITCH_RATE_LIMITED"
+    assert vault.switch_calls == []
+
+
+async def test_switch_rate_limit_ignores_noop_switch(
+    store: CliProfilesStore, events: list[dict[str, Any]], vault: FakeVault
+) -> None:
+    """Re-selecting the active account swaps nothing, so it must not burn
+    quota — otherwise idle UI churn could lock the user out of switching."""
+    session = _session()
+
+    for i in range(ws_handlers.SWITCH_RATE_MAX * 2):
+        await app.handle_message(session, {
+            "id": f"rl-noop{i}",
+            "type": "cli_profiles.set_default",
+            "payload": {"agent_key": "claude", "profile_id": None},
+        })
+
+    assert all(m["ok"] for m in session.websocket.sent)  # type: ignore[attr-defined]
+    assert ws_handlers._switch_history.get("claude", []) == []
 
 
 async def test_set_default_force_switches_despite_running_panes(
@@ -725,21 +839,21 @@ async def test_set_default_force_switches_despite_running_panes(
     stay alive — restarting them is the caller's job, the backend never
     kills."""
     session = _session()
-    profile = store.create(agent_key="claude", name="Work")
-    t1 = _register_running_terminal(session, "t1", "claude")
+    profile = store.create(agent_key="codex", name="Work")
+    t1 = _register_running_terminal(session, "t1", "codex")
 
     await app.handle_message(session, {
         "id": "b1f",
         "type": "cli_profiles.set_default",
-        "payload": {"agent_key": "claude", "profile_id": profile["id"], "force": True},
+        "payload": {"agent_key": "codex", "profile_id": profile["id"], "force": True},
     })
 
     response = session.websocket.sent[0]  # type: ignore[attr-defined]
     assert response["ok"] is True
     assert session.terminals.killed == []  # type: ignore[attr-defined]
     assert t1.proc.poll() is None
-    assert vault.switch_calls == [("claude", "__default__", profile["id"])]
-    assert store.list()["defaults"]["claude"] == profile["id"]
+    assert vault.switch_calls == [("codex", "__default__", profile["id"])]
+    assert store.list()["defaults"]["codex"] == profile["id"]
 
 
 async def test_set_default_already_active_not_gated_by_running_panes(
@@ -765,19 +879,19 @@ async def test_set_default_other_agent_pane_does_not_block(
     store: CliProfilesStore, events: list[dict[str, Any]], vault: FakeVault
 ) -> None:
     session = _session()
-    profile = store.create(agent_key="claude", name="Work")
-    _register_running_terminal(session, "t1", "codex")
-    _register_running_terminal(session, "t2", "claude", closed=True)
+    profile = store.create(agent_key="codex", name="Work")
+    _register_running_terminal(session, "t1", "kimi")
+    _register_running_terminal(session, "t2", "codex", closed=True)
 
     await app.handle_message(session, {
         "id": "b2",
         "type": "cli_profiles.set_default",
-        "payload": {"agent_key": "claude", "profile_id": profile["id"]},
+        "payload": {"agent_key": "codex", "profile_id": profile["id"]},
     })
 
     assert session.websocket.sent[0]["ok"] is True  # type: ignore[attr-defined]
     assert session.terminals.killed == []  # type: ignore[attr-defined]
-    assert vault.switch_calls == [("claude", "__default__", profile["id"])]
+    assert vault.switch_calls == [("codex", "__default__", profile["id"])]
 
 
 async def test_set_default_ignores_running_login_pane(
@@ -786,22 +900,22 @@ async def test_set_default_ignores_running_login_pane(
     """An isolated LOGIN pane is credential-inert: it does not count toward
     the PANES_RUNNING quiescence gate and must never be killed by a switch."""
     session = _session()
-    signing_in = store.create(agent_key="claude", name="New")
-    target = store.create(agent_key="claude", name="Work")
+    signing_in = store.create(agent_key="codex", name="New")
+    target = store.create(agent_key="codex", name="Work")
     _register_running_terminal(
-        session, "t-login", "claude", login_profile_id=signing_in["id"]
+        session, "t-login", "codex", login_profile_id=signing_in["id"]
     )
 
     await app.handle_message(session, {
         "id": "lp1",
         "type": "cli_profiles.set_default",
-        "payload": {"agent_key": "claude", "profile_id": target["id"]},
+        "payload": {"agent_key": "codex", "profile_id": target["id"]},
     })
 
     response = session.websocket.sent[0]  # type: ignore[attr-defined]
     assert response["ok"] is True
     assert session.terminals.killed == []  # type: ignore[attr-defined]
-    assert vault.switch_calls == [("claude", "__default__", target["id"])]
+    assert vault.switch_calls == [("codex", "__default__", target["id"])]
 
 
 async def test_set_default_login_in_progress_refused(
