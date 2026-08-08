@@ -178,6 +178,17 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
             message: i18n.global.t('cli-account.panes-running', { count }),
           }
         }
+        if (code === 'SWITCH_RATE_LIMITED') {
+          // Policy guard rather than a fault: account switching is meant to
+          // stay a manual action. Like PANES_RUNNING it sets no banner — there
+          // is nothing to fix, and the limit clears on its own.
+          const seconds = Math.ceil(Number(resp.error?.details?.retryAfter ?? 0))
+          return {
+            ok: false,
+            code,
+            message: i18n.global.t('cli-account.switch-rate-limited', { seconds }),
+          }
+        }
         const message =
           code === 'PROFILE_SWAP_FAILED'
             ? i18n.global.t('cli-account.swap-failed')

@@ -110,6 +110,29 @@ describe('useCliProfiles', () => {
     scope.stop()
   })
 
+  it('set_default maps SWITCH_RATE_LIMITED to a message without setting the banner error', async () => {
+    const mock = createMockBackend('connected')
+    mock.setResponse('cli_profiles.list', { profiles: [], defaults: {}, supported_agents: SUPPORTED })
+    mock.setResponse('cli_profiles.set_default', null as unknown as object, {
+      ok: false,
+      error: { code: 'SWITCH_RATE_LIMITED', message: 'too many', details: { retryAfter: 42.3 } },
+    })
+    const { result, scope } = withScope(() => useCliProfiles(mock.backend))
+    await flush()
+
+    const res = await result.setDefault('claude', 'p1')
+    expect(res.ok).toBe(false)
+    if (!res.ok) {
+      expect(res.code).toBe('SWITCH_RATE_LIMITED')
+      // Rounded up: telling the user to wait 42s when 42.3s remain would
+      // send them back one retry too early.
+      expect(res.message).toContain('43')
+    }
+    // The limit clears by itself — nothing for a banner to report.
+    expect(result.error.value).toBe('')
+    scope.stop()
+  })
+
   it('set_default maps PROFILE_SWAP_FAILED to a localized error', async () => {
     const mock = createMockBackend('connected')
     mock.setResponse('cli_profiles.list', { profiles: [], defaults: {}, supported_agents: SUPPORTED })

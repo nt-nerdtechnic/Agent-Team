@@ -148,8 +148,8 @@ const { alert: notifyAlert } = useNotify()
 const t = i18n.global.t
 
 // Main window provides the quiescence-aware switch (confirm + force + pane
-// restart). Other windows fall back to plain setDefault, whose PANES_RUNNING
-// failure carries a ready message and surfaces as the alert below.
+// restart). Other windows fall back to plain setDefault, whose expected
+// refusals carry a ready message and surface as the alert below.
 const switchAccount = inject(cliAccountSwitchKey, null)
 
 // The swap round-trips to the backend (30s timeout) and may stop for a confirm

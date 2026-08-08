@@ -136,9 +136,12 @@ async function requestSetDefault(agentKey: string, profileId: string | null): Pr
       refreshUsage()
       return true
     }
-    // PANES_RUNNING skips the composable's banner: with no handler it carries a
-    // ready message — toast it. A declined confirm has no message (stay silent).
-    if (res.code === 'PANES_RUNNING' && res.message) toast(res.message, { type: 'error' })
+    // Expected refusals skip the composable's banner and carry a ready message
+    // — toast it, or the click looks like it did nothing. A declined confirm
+    // has no message (stay silent).
+    if (res.message && (res.code === 'PANES_RUNNING' || res.code === 'SWITCH_RATE_LIMITED')) {
+      toast(res.message, { type: 'error' })
+    }
     return false
   } finally {
     switching.value = null
