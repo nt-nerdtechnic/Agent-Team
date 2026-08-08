@@ -48,6 +48,7 @@ const emit = defineEmits<{
   (e: 'close'): void
   (e: 'kill-all'): void
   (e: 'resume', entry: SpawnHistoryEntry): void
+  (e: 'focus-pane', entry: SpawnHistoryEntry): void
   (e: 'preview', entry: SpawnHistoryEntry): void
   (e: 'close-preview'): void
   (e: 'rename', entry: SpawnHistoryEntry, name: string): void
@@ -65,6 +66,7 @@ const searchQuery = ref('')
 // that's since changed (see runContentSearch).
 const contentMatchedIds = ref<Set<string>>(new Set())
 const contentSearchLoading = ref(false)
+const contentSearchFailed = ref(false)
 let contentSearchSeq = 0
 let contentSearchDebounceTimer: number | undefined
 const statusFilter = ref<HistoryStatusFilter>('all')
@@ -128,8 +130,72 @@ watch(() => props.show, (open) => {
     contentSearchSeq++
     contentMatchedIds.value = new Set()
     contentSearchLoading.value = false
+    contentSearchFailed.value = false
   }
 })
+
+/** Primary action for an entry: a live pane is jumped to, a dead one resumed.
+ *  Mirrors which button the detail pane offers. */
+function runPrimaryAction(entry: SpawnHistoryEntry): void {
+  if (!entry.removedAt) { emit('focus-pane', entry); return }
+  if (entry.sessionId && !props.unavailablePaneIds.has(entry.paneId) && !props.revivingPaneId) {
+    emit('resume', entry)
+  }
+}
+
+/** Keyboard browsing: ↑/↓ walk the list, Enter runs the selected entry's
+ *  primary action. Scoped so it never steals keys a control already owns — the
+ *  rename box, the log-search box (which steps matches with ↑/↓) and the filter
+ *  dropdowns (where ↑/↓ change the selected option) keep theirs; only the main
+ *  search field opts in, because Enter and arrows do nothing there today and
+ *  "type, arrow, enter" is the fast path to a pane. */
+function onBrowseKeydown(e: KeyboardEvent): void {
+  if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== 'Enter') return
+  const target = e.target as HTMLElement | null
+  const isSearchField = !!target?.classList.contains('agent-history-search-input')
+  if (target && !isSearchField) {
+    const tag = target.tagName
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable) return
+    // Rows are <button>s: Enter must keep its native "select this row".
+    if (e.key === 'Enter') return
+  }
+  const entries = filteredSessionHistory.value
+  if (entries.length === 0) return
+  const idx = entries.findIndex((entry) => entry.paneId === selectedPaneId.value)
+  if (e.key === 'Enter') {
+    const entry = idx >= 0 ? entries[idx] : null
+    if (!entry) return
+    e.preventDefault()
+    runPrimaryAction(entry)
+    return
+  }
+  e.preventDefault()
+  const last = entries.length - 1
+  const next = e.key === 'ArrowDown'
+    ? (idx < 0 ? 0 : Math.min(idx + 1, last))
+    : (idx < 0 ? last : Math.max(idx - 1, 0))
+  selectedPaneId.value = entries[next].paneId
+  void nextTick(() => {
+    document
+      .querySelector<HTMLElement>('.agent-history-row.selected')
+      ?.scrollIntoView({ block: 'nearest' })
+  })
+}
+
+/** Escape handling: this modal owns nested confirm dialogs and a dropdown, so
+ *  the global closeModal command must peel those off before closing the modal
+ *  itself (mirrors PipelineManager's closeTopLayer). Returns true when a layer
+ *  was consumed. The rename and log-search inputs stop Escape themselves, so
+ *  they never reach this. */
+function closeTopLayer(): boolean {
+  if (confirmKillAll.value) { confirmKillAll.value = false; return true }
+  if (confirmCleanup.value) { confirmCleanup.value = null; return true }
+  if (confirmDeleteEntry.value) { confirmDeleteEntry.value = null; return true }
+  if (cleanupMenuOpen.value) { cleanupMenuOpen.value = false; return true }
+  return false
+}
+
+defineExpose({ closeTopLayer })
 
 // Debounce the content search ~300ms after typing settles; an empty query
 // (or no search API) cancels/skips it outright. contentSearchSeq is bumped on
@@ -145,6 +211,7 @@ watch([searchQuery, statusFilter, originFilter, starredOnly], ([query]) => {
   if (!trimmed || !props.searchHistoryLogContent) {
     contentMatchedIds.value = new Set()
     contentSearchLoading.value = false
+    contentSearchFailed.value = false
     return
   }
   const seq = contentSearchSeq
@@ -162,9 +229,14 @@ async function runContentSearch(query: string, seq: number): Promise<void> {
     origin: originFilter.value,
     starredOnly: starredOnly.value,
   })
-  const result = await props.searchHistoryLogContent!(candidates, query).catch(() => new Set<string>())
+  // A failed scan must not masquerade as "no matches" — the user would read an
+  // empty list as a definitive answer about their logs.
+  let failed = false
+  const result = await props.searchHistoryLogContent!(candidates, query)
+    .catch(() => { failed = true; return new Set<string>() })
   if (seq !== contentSearchSeq) return // stale: query/filters changed since this search was scheduled
   contentSearchLoading.value = false
+  contentSearchFailed.value = failed
   contentMatchedIds.value = result
 }
 
@@ -356,6 +428,9 @@ const MAX_PREVIEW_CHARS = 512 * 1024
 const logLoading = ref(false)
 // null = no log available for this entry (or not loaded yet).
 const logContent = ref<string | null>(null)
+// Non-empty when the log exists but could not be read — kept apart from
+// logContent so "missing" and "unreadable" never show the same message.
+const logError = ref('')
 const logSearchQuery = ref('')
 const activeMatchIdx = ref(0)
 const logCopied = ref(false)
@@ -365,11 +440,16 @@ let logCopiedTimer: number | undefined
 let logFetchSeq = 0
 const logBodyEl = ref<HTMLElement | null>(null)
 
-watch(selectedPaneId, () => { void loadSelectedLog() })
+// Also re-runs when the log path is back-filled onto a just-spawned entry, not
+// only when the selection changes: a pane spawned while this modal is open gets
+// auto-selected before its log path is known, and without the second source
+// that first (empty) read would stick for the life of the selection.
+watch([selectedPaneId, () => selectedEntry.value?.outputLogFile], () => { void loadSelectedLog() })
 
 async function loadSelectedLog(): Promise<void> {
   const seq = ++logFetchSeq
   logContent.value = null
+  logError.value = ''
   logSearchQuery.value = ''
   activeMatchIdx.value = 0
   logCopied.value = false
@@ -379,9 +459,19 @@ async function loadSelectedLog(): Promise<void> {
     return
   }
   logLoading.value = true
-  const result = await props.fetchHistoryLog(entry).catch(() => null)
+  // fetchHistoryLog resolves null when no path could be resolved but *rejects*
+  // with a localized message when the file exists and the read failed. Folding
+  // both into "no log" hides permission/IO errors behind a wrong explanation.
+  let result: { title: string; content: string } | null = null
+  let failure = ''
+  try {
+    result = await props.fetchHistoryLog(entry)
+  } catch (e) {
+    failure = e instanceof Error ? e.message : String(e)
+  }
   if (seq !== logFetchSeq) return // stale: selection changed while loading
   logLoading.value = false
+  logError.value = failure
   logContent.value = result?.content ?? null
 }
 
@@ -484,7 +574,7 @@ async function copyLogText(): Promise<void> {
 <template>
   <Teleport v-if="show" to="body">
     <div class="history-overlay" @click.self="emit('close')">
-      <div class="history-modal">
+      <div class="history-modal" @keydown="onBrowseKeydown">
         <div class="history-modal-header">
           <div class="history-header-left">
             <span>{{ $t('label.agent-history') }}</span>
@@ -533,6 +623,9 @@ async function copyLogText(): Promise<void> {
               <div v-if="contentSearchLoading" class="agent-history-search-status">
                 {{ $t('label.history-search-loading') }}
               </div>
+              <div v-else-if="contentSearchFailed" class="agent-history-search-status ah-search-failed">
+                {{ $t('label.history-search-failed') }}
+              </div>
               <div class="history-filter-row">
                 <select v-model="statusFilter" class="history-filter-select">
                   <option value="all">{{ $t('label.history-filter-status-all') }}</option>
@@ -566,6 +659,7 @@ async function copyLogText(): Promise<void> {
                   class="agent-history-row"
                   :class="{ selected: entry.paneId === selectedPaneId }"
                   @click="selectedPaneId = entry.paneId"
+                  @dblclick="!entry.removedAt && emit('focus-pane', entry)"
                 >
                   <span class="ah-dot" :class="entry.removedAt ? 'removed' : 'active'"></span>
                   <span class="ah-badge">{{ historyEntryLabel(entry) }}</span>
@@ -663,17 +757,27 @@ async function copyLogText(): Promise<void> {
                   </span>
                 </template>
               </div>
-              <div v-if="selectedEntry.removedAt" class="agent-history-actions">
-                <span
-                  v-if="unavailablePaneIds.has(selectedEntry.paneId)"
-                  class="ah-session-unavailable"
-                >{{ $t('label.history-session-unavailable') }}</span>
+              <div class="agent-history-actions">
+                <template v-if="selectedEntry.removedAt">
+                  <span
+                    v-if="unavailablePaneIds.has(selectedEntry.paneId)"
+                    class="ah-session-unavailable"
+                  >{{ $t('label.history-session-unavailable') }}</span>
+                  <button
+                    v-if="selectedEntry.sessionId && !unavailablePaneIds.has(selectedEntry.paneId)"
+                    class="ah-revive"
+                    :disabled="!!revivingPaneId"
+                    @click="emit('resume', selectedEntry)"
+                  >{{ revivingPaneId === selectedEntry.paneId ? '…' : $t('action.resume-session') }}</button>
+                </template>
+                <!-- Active entries have a live pane, so the useful action is to
+                     go to it rather than resume it. -->
                 <button
-                  v-if="selectedEntry.sessionId && !unavailablePaneIds.has(selectedEntry.paneId)"
-                  class="ah-revive"
-                  :disabled="!!revivingPaneId"
-                  @click="emit('resume', selectedEntry)"
-                >{{ revivingPaneId === selectedEntry.paneId ? '…' : $t('action.resume-session') }}</button>
+                  v-else
+                  class="ah-revive ah-focus"
+                  :title="$t('action.open-pane-title')"
+                  @click="emit('focus-pane', selectedEntry)"
+                >{{ $t('action.open-pane') }}</button>
                 <button
                   class="ah-revive ah-preview"
                   @click="emit('preview', selectedEntry)"
@@ -682,6 +786,7 @@ async function copyLogText(): Promise<void> {
                      entries never show it (their pane keeps running, so
                      deleting the record is ambiguous). -->
                 <button
+                  v-if="selectedEntry.removedAt"
                   class="ah-revive ah-delete"
                   :disabled="deletePreviewPending"
                   @click="openDeleteConfirm"
@@ -725,6 +830,7 @@ async function copyLogText(): Promise<void> {
                 </div>
                 <div ref="logBodyEl" class="ah-log-body">
                   <div v-if="logLoading" class="ah-log-empty">{{ $t('label.loading') }}</div>
+                  <div v-else-if="logError" class="ah-log-empty ah-log-error">{{ logError }}</div>
                   <div v-else-if="logContent === null" class="ah-log-empty">{{ $t('label.history-log-none') }}</div>
                   <!-- Rendered as v-for spans (Vue interpolation escapes text);
                        never v-html. Keep the <pre> content on one line so no
@@ -742,7 +848,7 @@ async function copyLogText(): Promise<void> {
     <div class="history-overlay" @click.self="confirmKillAll = false">
       <div class="history-modal" style="height: auto; max-width: 400px;">
         <div class="history-modal-header">
-          <span>🗑 Kill all agents?</span>
+          <span>{{ $t('label.kill-all-confirm-title') }}</span>
           <button class="history-close" @click="confirmKillAll = false">✕</button>
         </div>
         <div style="padding: 16px 14px; font-size: 13px; color: var(--text-primary);">
@@ -1445,6 +1551,10 @@ async function copyLogText(): Promise<void> {
   font-size: 11px;
   padding: 12px;
   text-align: center;
+}
+.ah-log-error,
+.ah-search-failed {
+  color: var(--warning-fg);
 }
 .ah-log-pre {
   margin: 0;

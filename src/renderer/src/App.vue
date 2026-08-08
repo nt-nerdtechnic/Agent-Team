@@ -3645,10 +3645,6 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
         : `${opts.workspacePath}/.agent-team/manual/${ymd}/${opts.agentKey}-${id.slice(0, 8)}.log`
       : undefined
     pane.outputLogFile = outputLogFile
-    // The history entry was pushed before this path was known — back-fill it
-    // now so Agent History preview can read the real file (see below).
-    const historyEntry = spawnHistory.value.find((e) => e.paneId === id)
-    if (historyEntry) historyEntry.outputLogFile = outputLogFile
 
     await ref.spawn({
       // zsh reads ~/.zshrc (where installers add PATH, e.g. Claude Code's
@@ -3681,6 +3677,15 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
       skipReattach: opts.restoreMode === 'fresh',
       loginProfileId: opts.loginProfileId,
     })
+
+    // The history entry was pushed before this path was known — back-fill it
+    // now so Agent History preview can read the real file. This must happen
+    // after spawn(): the backend creates the log file when it opens the PTY,
+    // and Agent History auto-selects the newest entry during the nextTick
+    // above, so back-filling any earlier points the preview at a file that
+    // does not exist yet and the failed read sticks.
+    const historyEntry = spawnHistory.value.find((e) => e.paneId === id)
+    if (historyEntry) historyEntry.outputLogFile = outputLogFile
 
     // Arm the always-on login-expired watcher for CLIs with a detection spec
     // (the interval self-cleans once the pane is gone or its terminal exited).
@@ -4854,6 +4859,7 @@ async function onMenuAction(action: string): Promise<void> {
 const showKbPanel = ref(false)
 const kbQueryMain = ref('')
 const showHistory = ref(false)
+const historyModalRef = ref<{ closeTopLayer?: () => boolean } | null>(null)
 const revivingHistoryPaneId = ref('')
 const unavailableHistoryPaneIds = ref<Set<string>>(new Set())
 
@@ -4971,6 +4977,10 @@ registerCommand('workbench.action.closeModal', () => {
   else if (showPipelineManager.value) {
     // The modal owns nested confirm dialogs — let it close its own top layer first.
     if (!pmRef.value?.closeTopLayer?.()) showPipelineManager.value = false
+  }
+  else if (showHistory.value) {
+    // Same as the pipeline manager: nested confirms/dropdown close first.
+    if (!historyModalRef.value?.closeTopLayer?.()) showHistory.value = false
   }
   else if (showKbPanel.value) showKbPanel.value = false
   else if (showCompletionModal.value) showCompletionModal.value = false
@@ -5145,7 +5155,7 @@ async function buildUiActionSnapshot(): Promise<{
 }
 useUiActionBus({ backend, currentWorkspace, buildSnapshot: buildUiActionSnapshot })
 
-watch([showSettings, showKbPanel, showCompletionModal, showRestoreScopeModal, showPipelineManager, showDebug], ([s, k, c, r, p, d]) => setContext('modalOpen', s || k || c || r || p || d || previewLogOpen.value))
+watch([showSettings, showKbPanel, showCompletionModal, showRestoreScopeModal, showPipelineManager, showDebug, showHistory], ([s, k, c, r, p, d, h]) => setContext('modalOpen', s || k || c || r || p || d || h || previewLogOpen.value))
 
 /** The sidebar agent list shows panes from every tab; focusing one that lives
  *  in another tab must also activate that tab, or the pane stays v-show-hidden. */
@@ -5187,7 +5197,7 @@ const previewLogContent = ref<string>('')
 const previewLogTitle = ref<string>('')
 const previewLogOpen = ref<boolean>(false)
 watch(previewLogOpen, (open) => {
-  setContext('modalOpen', open || showSettings.value || showKbPanel.value || showCompletionModal.value || showRestoreScopeModal.value || showPipelineManager.value || showDebug.value)
+  setContext('modalOpen', open || showSettings.value || showKbPanel.value || showCompletionModal.value || showRestoreScopeModal.value || showPipelineManager.value || showDebug.value || showHistory.value)
   if (!open) {
     // Drop the (possibly multi-MB) log text once the preview closes so it
     // doesn't linger in memory and doesn't flash stale content on reopen.
@@ -5291,6 +5301,35 @@ async function onPreviewHistoryAgent(entry: SpawnHistoryEntry): Promise<void> {
     previewLogOpen.value = true
   } catch (e) {
     alert(e instanceof Error ? e.message : String(e))
+  }
+}
+
+/** Agent History → jump to the still-running pane behind an active entry.
+ *  Mirrors cycleFocusedPane's placeholder handling: a cold-restored pane has no
+ *  TerminalPane ref yet, so focus has to be re-claimed once it realizes. */
+function onFocusHistoryPane(entry: SpawnHistoryEntry): void {
+  // The record can outlive its pane (killed while the modal was open), and
+  // reconciliation only stamps removedAt on hydrate — re-check against panes.
+  const pane = panes.value.find((p) => p.id === entry.paneId)
+  if (!pane) {
+    unavailableHistoryPaneIds.value = new Set([
+      ...unavailableHistoryPaneIds.value,
+      entry.paneId,
+    ])
+    return
+  }
+  showHistory.value = false
+  // A minimized pane is skipped by effectiveFocusPaneId, so focusing it alone
+  // would silently land on a different pane.
+  if (minimizedPanes.value.has(entry.paneId)) restorePane(entry.paneId)
+  const wasRealized = pane.realized
+  onFocusPane(entry.paneId)
+  if (!wasRealized) {
+    ;(document.activeElement as HTMLElement | null)?.blur?.()
+    void realizeRestoredPane(entry.paneId).then(() => {
+      if (focusPaneId.value !== entry.paneId) return
+      void nextTick(() => { paneRefs[entry.paneId]?.focus?.() })
+    })
   }
 }
 
@@ -11037,6 +11076,7 @@ function paneIsCommander(p: ActivePane): boolean {
       </div>
     </div>
     <AgentHistoryModal
+      ref="historyModalRef"
       :show="showHistory"
       :session-history="sessionHistory"
       :pane-count="panes.length"
@@ -11053,6 +11093,7 @@ function paneIsCommander(p: ActivePane): boolean {
       @close="showHistory = false"
       @kill-all="onKillAll"
       @resume="onResumeHistoryAgent"
+      @focus-pane="onFocusHistoryPane"
       @preview="onPreviewHistoryAgent"
       @close-preview="previewLogOpen = false"
       @rename="onRenameHistoryEntry"

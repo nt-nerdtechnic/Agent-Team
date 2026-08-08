@@ -67,6 +67,20 @@ describe('Log preview modal ESC handling', () => {
   })
 })
 
+describe('History log path back-fill ordering', () => {
+  // Agent History auto-selects the newest entry during the `await nextTick()`
+  // inside spawnPane, so a path written before spawn() points at a file the
+  // backend has not created yet and the failed read sticks. The back-fill must
+  // therefore come after `await ref.spawn(`.
+  it('back-fills historyEntry.outputLogFile only after ref.spawn resolves', () => {
+    const spawnIdx = appSource.indexOf('await ref.spawn({')
+    expect(spawnIdx, 'ref.spawn call should exist').toBeGreaterThan(-1)
+    const backfillIdx = appSource.indexOf('historyEntry.outputLogFile = outputLogFile')
+    expect(backfillIdx, 'history back-fill should exist').toBeGreaterThan(-1)
+    expect(backfillIdx).toBeGreaterThan(spawnIdx)
+  })
+})
+
 describe('Log preview content cleanup', () => {
   it('clears previewLogContent and previewLogTitle when previewLogOpen becomes false', () => {
     const watchBlock = block('watch(previewLogOpen, (open) => {', '})')
