@@ -215,21 +215,24 @@ def _call_transformer(
     port: int | None,
     pane_id: str,
     env: dict[str, str],
+    cwd: str,
 ) -> Any:
-    """Call a spawn transformer, tolerating both earlier argument shapes.
+    """Call a spawn transformer, tolerating every earlier argument shape.
 
     Third-party plugins were written against older contracts; passing them an
     argument they do not accept would raise TypeError, which the caller
     swallows as "broken plugin" — their wiring would stop applying with only a
     log line to show for it. So each older shape keeps its own rung:
-    ``(agent_key, command, port)``, then ``+ pane_id``, then ``+ env``.
+    ``(agent_key, command, port)``, then ``+ pane_id``, ``+ env``, ``+ cwd``.
     """
     arity = _positional_arity(transformer)
     if arity is not None and arity < 4:
         return transformer(agent_key, command, port)
     if arity is not None and arity < 5:
         return transformer(agent_key, command, port, pane_id)
-    return transformer(agent_key, command, port, pane_id, env)
+    if arity is not None and arity < 6:
+        return transformer(agent_key, command, port, pane_id, env)
+    return transformer(agent_key, command, port, pane_id, env, cwd)
 
 
 def apply_spawn_wiring(
@@ -238,6 +241,7 @@ def apply_spawn_wiring(
     command: Any,
     pane_id: str = "",
     env: dict[str, str] | None = None,
+    cwd: str = "",
 ) -> Any:
     """Run every plugin spawn transformer over a pane spawn command.
 
@@ -252,13 +256,16 @@ def apply_spawn_wiring(
     mutated in place: a CLI with no additive command-line flag for MCP takes
     its wiring through an environment variable instead. Passing None gives
     transformers a throwaway dict, so callers that do not care keep working.
+
+    ``cwd`` is the directory the pane spawns in, for the CLIs whose only MCP
+    surface is a per-project config file discovered from there.
     """
     port = backend_port()
     env_patch = env if env is not None else {}
     for plugin_id, transformer in host.spawn_transformers():
         try:
             command = _call_transformer(
-                transformer, agent_key, command, port, pane_id, env_patch
+                transformer, agent_key, command, port, pane_id, env_patch, cwd
             )
         except Exception as err:  # noqa: BLE001 - isolate broken plugins
             log.warning("plugin %s spawn transformer failed: %s", plugin_id, err)

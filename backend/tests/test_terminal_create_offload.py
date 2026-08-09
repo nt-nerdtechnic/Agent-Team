@@ -84,6 +84,7 @@ async def test_codex_home_lookup_prepare_and_spawn_wiring_use_to_thread(
         command: Any,
         _pane_id: str = "",
         _env: dict[str, str] | None = None,
+        _cwd: str = "",
     ) -> Any:
         return command
 
@@ -152,6 +153,7 @@ async def test_claude_spawn_wiring_uses_to_thread_and_preserves_transformer_resu
         command: Any,
         _pane_id: str = "",
         _env: dict[str, str] | None = None,
+        _cwd: str = "",
     ) -> Any:
         return [*command[:-1], f"{command[-1]} --wired"]
 

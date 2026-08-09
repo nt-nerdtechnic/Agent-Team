@@ -82,7 +82,7 @@ def terminal_create_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         app.plugin_wiring,
         "apply_spawn_wiring",
-        lambda _host, _agent, command, _pane_id="", _env=None: command,
+        lambda _host, _agent, command, _pane_id="", _env=None, _cwd="": command,
     )
     app._PTY_OWNERS.clear()
     yield

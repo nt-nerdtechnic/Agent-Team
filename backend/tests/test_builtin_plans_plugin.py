@@ -204,6 +204,26 @@ def test_spawn_wiring_ignores_keyword_only_params_when_picking_the_shape(
     assert seen == [("pane-7", None)]
 
 
+def test_spawn_wiring_tolerates_a_pre_cwd_transformer(tmp_path: Path) -> None:
+    """The rung added for cursor: plugins written against the 5-argument shape
+    must not be handed the cwd."""
+    _stage_port_file(tmp_path)
+    seen: list[dict[str, str]] = []
+
+    def pre_cwd(
+        agent_key: str, command: Any, port: int | None, pane_id: str, env: dict[str, str]
+    ) -> Any:
+        seen.append(env)
+        return command
+
+    host = PluginHost()
+    host.spawn_transformers = lambda: [("third.party", pre_cwd)]  # type: ignore[assignment,method-assign]
+
+    env: dict[str, str] = {"E": "1"}
+    assert wiring.apply_spawn_wiring(host, "claude", "claude", "p", env, "/ws") == "claude"
+    assert seen == [{"E": "1"}]
+
+
 def test_spawn_wiring_passes_env_to_a_varargs_transformer(tmp_path: Path) -> None:
     """An unreadable or *args signature gets the newest shape — withholding
     arguments is the worse guess."""
@@ -218,5 +238,5 @@ def test_spawn_wiring_passes_env_to_a_varargs_transformer(tmp_path: Path) -> Non
     host.spawn_transformers = lambda: [("third.party", anything)]  # type: ignore[assignment,method-assign]
 
     env: dict[str, str] = {}
-    wiring.apply_spawn_wiring(host, "claude", "claude", "pane-2", env)
-    assert seen == [("claude", "claude", 4567, "pane-2", env)]
+    wiring.apply_spawn_wiring(host, "claude", "claude", "pane-2", env, "/ws")
+    assert seen == [("claude", "claude", 4567, "pane-2", env, "/ws")]

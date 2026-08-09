@@ -3501,6 +3501,7 @@ async def _terminal_create_impl(
             payload["command"],
             str(payload.get("pane_id") or ""),
             env,
+            str(payload.get("cwd") or ""),
         )
     if transaction["cancelled"]:
         raise _TerminalCreateCancelled
