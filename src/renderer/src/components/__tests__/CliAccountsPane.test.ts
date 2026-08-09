@@ -13,7 +13,7 @@ import {
   type CliProfileDefaults,
   type CliProfileIdentities,
 } from '../../composables/useCliProfiles'
-import type { UsageSnapshot } from '../../composables/useUsage'
+import { usageVersion, type UsageSnapshot } from '../../composables/useUsage'
 
 // Partial-mock useUsage: stub the store reader (usageFor) and the backend
 // call (refreshUsage), keep the pure formatters (same pattern as
@@ -647,5 +647,48 @@ describe('CliAccountsPane', () => {
     await buttonByText(section(w, 0), 'Set as default')!.trigger('click')
     await flushPromises()
     expect(usage.refreshUsage).toHaveBeenCalledTimes(2)
+  })
+
+  // ── Manual quota refresh ───────────────────────────────────────────────────
+
+  it('re-polls usage from the header button and holds it busy until a payload lands', async () => {
+    usage.usageFor.mockReturnValue(undefined)
+    const w = mountPane(makeApi())
+    expect(usage.refreshUsage).toHaveBeenCalledTimes(1) // mount
+
+    const button = w.get('.cli-refresh')
+    await button.trigger('click')
+    expect(usage.refreshUsage).toHaveBeenCalledTimes(2)
+    expect(button.text()).toBe('Refreshing…')
+    expect(button.attributes('disabled')).toBeDefined()
+
+    // A second click while busy must not spawn another poll (reading Claude
+    // boots a whole CLI).
+    await button.trigger('click')
+    expect(usage.refreshUsage).toHaveBeenCalledTimes(2)
+
+    // The poller broadcast that ends the cycle clears the busy state.
+    usageVersion.value++
+    await flushPromises()
+    expect(button.text()).toBe('Refresh quota')
+    expect(button.attributes('disabled')).toBeUndefined()
+  })
+
+  it('releases the refresh button when no payload ever arrives', async () => {
+    vi.useFakeTimers()
+    try {
+      usage.usageFor.mockReturnValue(undefined)
+      const w = mountPane(makeApi())
+      const button = w.get('.cli-refresh')
+      await button.trigger('click')
+      expect(button.text()).toBe('Refreshing…')
+
+      vi.advanceTimersByTime(60_000)
+      await flushPromises()
+      expect(button.text()).toBe('Refresh quota')
+      expect(button.attributes('disabled')).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

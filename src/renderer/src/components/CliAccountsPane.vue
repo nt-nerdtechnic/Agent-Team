@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { inject, onMounted, ref } from 'vue'
+import { inject, onMounted, onUnmounted, ref, watch } from 'vue'
 import { CLI_AGENT_SPECS } from '../agents'
 import { cliAccountSwitchKey, type useCliProfiles, type CliProfile } from '../composables/useCliProfiles'
 import { useNotify } from '../composables/useNotify'
@@ -12,6 +12,7 @@ import {
   remainingTier,
   TRANSLATED_REFRESH_STATUSES,
   usageFor,
+  usageVersion,
   type UsageSnapshot,
   type UsageWindow,
 } from '../composables/useUsage'
@@ -258,6 +259,40 @@ function avatarInitial(label: string): string {
   return s ? s.charAt(0).toUpperCase() : '?'
 }
 
+// ── Manual quota refresh ─────────────────────────────────────────────────────
+// A card reading "unavailable" is a read that failed, and the poller then sits
+// out a 15-minute cooldown before trying again (reading Claude boots a whole
+// CLI, so a failed read is priced like a successful one). `usage.refresh`
+// clears that cooldown, which is the only way back to a number without waiting
+// — hence a button. It re-polls every provider, not one card: the CLI can only
+// report the account it is signed in as, so there is nothing per-card to ask.
+const refreshingUsage = ref(false)
+// Safety net only. The poller broadcasts when its cycle ends and that is what
+// normally clears the flag; this stops the button latching when no broadcast
+// ever comes (poller disabled, backend gone).
+const REFRESH_BUSY_TIMEOUT_MS = 60_000
+let refreshBusyTimer: ReturnType<typeof setTimeout> | undefined
+
+function clearRefreshBusy(): void {
+  refreshingUsage.value = false
+  clearTimeout(refreshBusyTimer)
+  refreshBusyTimer = undefined
+}
+
+function refreshQuota(): void {
+  if (refreshingUsage.value) return
+  refreshingUsage.value = true
+  clearTimeout(refreshBusyTimer)
+  refreshBusyTimer = setTimeout(clearRefreshBusy, REFRESH_BUSY_TIMEOUT_MS)
+  refreshUsage()
+}
+
+watch(usageVersion, () => {
+  if (refreshingUsage.value) clearRefreshBusy()
+})
+
+onUnmounted(() => clearTimeout(refreshBusyTimer))
+
 // Fresh numbers when the pane opens (same nudge UsageBadge sends on switch).
 onMounted(() => refreshUsage())
 </script>
@@ -265,8 +300,22 @@ onMounted(() => refreshUsage())
 <template>
   <div class="cli-pane">
     <div class="cli-head">
-      <h3 class="cli-title">{{ $t('settings.accounts.cli.title') }}</h3>
-      <p class="cli-hint">{{ $t('settings.accounts.cli.hint') }}</p>
+      <div class="cli-head-text">
+        <h3 class="cli-title">{{ $t('settings.accounts.cli.title') }}</h3>
+        <p class="cli-hint">{{ $t('settings.accounts.cli.hint') }}</p>
+      </div>
+      <button
+        class="cli-btn ghost sm cli-refresh"
+        :disabled="refreshingUsage"
+        :title="$t('settings.accounts.cli.refresh-quota-hint')"
+        @click="refreshQuota"
+      >
+        {{
+          refreshingUsage
+            ? $t('settings.accounts.cli.refreshing-quota')
+            : $t('settings.accounts.cli.refresh-quota')
+        }}
+      </button>
     </div>
 
     <div v-if="error" class="cli-banner danger">{{ error }}</div>
@@ -427,7 +476,15 @@ onMounted(() => refreshUsage())
 
 <style scoped>
 .cli-pane { display: flex; flex-direction: column; }
-.cli-head { margin-bottom: 14px; }
+.cli-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.cli-head-text { min-width: 0; }
+.cli-refresh { flex: none; }
 .cli-title { margin: 0 0 4px; font-size: 13px; font-weight: 600; color: var(--text-bright); }
 .cli-hint { margin: 0; font-size: 11.5px; color: var(--text-secondary); max-width: 52ch; line-height: 1.4; }
 

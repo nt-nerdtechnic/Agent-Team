@@ -1,4 +1,4 @@
-import { reactive, watch } from 'vue'
+import { reactive, ref, watch } from 'vue'
 import type { useBackend } from './useBackend'
 import { settingsGet, settingsSet } from '../lib/settings'
 
@@ -73,12 +73,20 @@ const state = reactive<{
   accounts: Record<string, Record<string, UsageSnapshot>>
 }>({ providers: {}, accounts: {} })
 
+/** Bumped on every payload the backend hands us. A manual refresh has no
+ *  response of its own (the poller answers by broadcasting `usage.changed`
+ *  when the cycle finishes), so this is how a caller knows its request
+ *  landed — reading a Claude account means booting a whole CLI, so that can
+ *  be tens of seconds after the click. */
+export const usageVersion = ref(0)
+
 let backend: Backend | null = null
 let offChanged: (() => void) | null = null
 let stopStatusWatch: (() => void) | null = null
 
 function applyPayload(payload: UsagePayload | null | undefined): void {
   if (!payload || typeof payload !== 'object') return
+  usageVersion.value++
   if (payload.providers && typeof payload.providers === 'object') {
     state.providers = { ...payload.providers }
   }
@@ -237,4 +245,5 @@ export function __resetUsageForTest(): void {
   backend = null
   state.providers = {}
   state.accounts = {}
+  usageVersion.value = 0
 }

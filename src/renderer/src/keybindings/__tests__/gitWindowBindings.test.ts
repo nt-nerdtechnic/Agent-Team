@@ -64,6 +64,26 @@ describe('Git window keybinding rules', () => {
   })
 })
 
+describe('Opening the Git window (cmd+shift+g)', () => {
+  const resolver = new KeyResolver(defaults)
+  const chord = (): KeyboardEvent => keyEvent('g', { metaKey: true, shiftKey: true })
+
+  it('opens the Git window from the main window', () => {
+    expect(resolver.resolve(chord(), { paneStage: true })?.command)
+      .toBe('workbench.action.openGitWindow')
+  })
+
+  it('still focuses the Source Control sidebar inside the Mini IDE', () => {
+    expect(resolver.resolve(chord(), { editorOpen: true })?.command)
+      .toBe('workbench.action.focusSourceControl')
+  })
+
+  it('stays with find navigation while find is open', () => {
+    expect(resolver.resolve(chord(), { paneStage: true, findOpen: true })?.command)
+      .not.toBe('workbench.action.openGitWindow')
+  })
+})
+
 // ── End to end through the real dispatcher ───────────────────────────────────
 
 const Host = defineComponent({

@@ -16,6 +16,7 @@ import { settingsGet, settingsSet } from '../lib/settings'
 import { extractClipboardImage, saveClipboardImage } from '../lib/clipboardImage'
 import { TERMINAL_CREATE_TIMEOUT_MS } from '../lib/resume-command'
 import { setContext } from '../keybindings/contextService'
+import { diagLog } from '../lib/diagLog'
 import {
   formatTerminalExit,
   isTerminalCrashLoopOpen,
@@ -1605,7 +1606,12 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       // that stopped being rendered while the window was away (pane hidden by a
       // layout change), so verify rather than assert focus we never received.
       term.focus()
-      if (document.activeElement !== term.textarea) _releaseTerminalFocus()
+      if (document.activeElement !== term.textarea) {
+        // Typing now goes nowhere the user can see until they click the pane,
+        // which is indistinguishable from "the terminal became laggy".
+        diagLog(backend, 'focus', `pane=${paneId} window returned but the terminal could not retake focus`, 'warning')
+        _releaseTerminalFocus()
+      }
     } else if (active !== term.textarea) {
       _releaseTerminalFocus()
     }
@@ -1621,11 +1627,40 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // Only reads the helper's public surface (isComposing getter, compositionend
   // method), and is optional-chained so an xterm upgrade that relocates it
   // degrades to today's behaviour rather than breaking input entirely.
+  //
+  // The latch itself was derived from xterm's source, never caught in the act,
+  // so it is instrumented: _compositionStartedAt dates the composition that is
+  // still open, and every unlatch reports how long it had been stuck. If input
+  // still feels slow after an input-method switch and NO 'stale composition'
+  // line appears, the latch is not the cause and the search moves elsewhere.
+  let _compositionStartedAt = 0
+  // A composition open this long is no longer someone picking a candidate.
+  const IME_COMPOSITION_WARN_MS = 1500
+  const _onCompositionStart = (): void => { _compositionStartedAt = Date.now() }
+  const _onCompositionEnd = (): void => {
+    const held = _compositionStartedAt ? Date.now() - _compositionStartedAt : 0
+    _compositionStartedAt = 0
+    if (held >= IME_COMPOSITION_WARN_MS) {
+      diagLog(backend, 'ime', `pane=${paneId} composition open ${held}ms before commit`, 'warning')
+    }
+  }
+
   type CompositionHelperLike = { isComposing: boolean, compositionend: () => void }
   function finalizeStaleComposition(): void {
     const helper = (term as unknown as { _core?: { _compositionHelper?: CompositionHelperLike } })
       ._core?._compositionHelper
     if (!helper?.isComposing) return
+    const latched = _compositionStartedAt ? Date.now() - _compositionStartedAt : 0
+    _compositionStartedAt = 0
+    // Always logged, never throttled: on the theory that motivated this code it
+    // fires once per input-method switch. If the log says otherwise, that is
+    // itself the finding.
+    diagLog(
+      backend,
+      'ime',
+      `pane=${paneId} stale composition unlatched after ${latched}ms — xterm was swallowing keys`,
+      'warning'
+    )
     // waitForPropagation: the deferred path sends substring(start) — everything
     // to the end of the textarea — so the pending text is committed whole. The
     // immediate path would use a `end` offset that compositionupdate stopped
@@ -1738,6 +1773,9 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     term.textarea?.addEventListener('focus', _onTermFocus)
     term.textarea?.addEventListener('blur', _onTermBlur)
     window.addEventListener('focus', _onWindowFocus)
+    // Observation only — xterm keeps driving the composition itself.
+    term.textarea?.addEventListener('compositionstart', _onCompositionStart)
+    term.textarea?.addEventListener('compositionend', _onCompositionEnd)
 
     // Anchor for Shift+Arrow keyboard selection
     let selAnchorX = -1
@@ -2406,6 +2444,48 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // otherwise pasting "/clear" and pressing Enter stops triggering onClear.
   let inputBuffer = ''
 
+  // Spawn-phase input gate. A pane is "preparing" for as long as its CLI is
+  // booting (starting → checking-dialog → settling → injecting-role), and the
+  // PTY cannot take keystrokes yet. This used to be xterm's own `disableStdin`,
+  // which makes CoreService swallow keys outright — whatever the user typed in
+  // that window was gone, which reads as "the pane ignored me and then caught
+  // up". Hold the keystrokes here instead and replay them once the pane is
+  // ready, so the input is late rather than lost.
+  //
+  // Only term.onData (real typing) is gated. pasteText stays open on purpose:
+  // the injecting-role step sends the role prompt through it while isPreparing
+  // is still true, so gating that path would deadlock the pane's own startup.
+  let _stdinGated = false
+  let _gatedInput = ''
+  const GATED_INPUT_MAX = 4096
+
+  /** Replay what the user typed while the pane was still preparing. */
+  function _flushGatedInput(): void {
+    const pending = _gatedInput
+    _gatedInput = ''
+    if (!pending) return
+    // A pane that died while preparing has nowhere to replay to; dropping the
+    // buffer is the only option left, and sending would clear isStopped for a
+    // session that no longer exists.
+    if (!sessionId.value || status.value === 'exited' || status.value === 'error') return
+    noteUserInput(pending)
+    void backend.send('terminal.input', {
+      terminal_session_id: sessionId.value,
+      data: pending
+    })
+  }
+
+  // Renderer half of the input round-trip. The pane has no local echo, so the
+  // gap between a keystroke leaving here and the PTY's answer arriving IS the
+  // latency being reported. The backend measures its own half ("input echo
+  // lag"); when the two numbers disagree, the difference is the WebSocket and
+  // this renderer — which is exactly the split no log could show before.
+  let _keystrokeSentAt = 0
+  const ECHO_ROUNDTRIP_WARN_MS = 300
+  // Beyond this the output is the CLI thinking, not an echo, so attributing it
+  // to the keystroke would only manufacture alarming numbers.
+  const ECHO_ROUNDTRIP_MAX_MS = 3000
+
   /** Input bookkeeping shared by term.onData and the manual-paste path. */
   function noteUserInput(text: string): void {
     if (isStopped.value) { isStopped.value = false; opts?.onUserResume?.() }
@@ -2423,6 +2503,13 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   function bindSessionHandlers(): void {
     inputBuffer = ''
     inputDisposer = term.onData((data) => {
+      if (_stdinGated) {
+        // Bounded so a pane stuck in preparation cannot grow this forever. Past
+        // the cap the oldest keystrokes go, since those are the ones the user
+        // has already given up on.
+        _gatedInput = (_gatedInput + data).slice(-GATED_INPUT_MAX)
+        return
+      }
       if (data === '\r' || data === '\n' || data === '\r\n') {
         if (isStopped.value) { isStopped.value = false; opts?.onUserResume?.() }
         if (inputBuffer.trim() === '/clear' && opts?.onClear) {
@@ -2441,6 +2528,11 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         inputBuffer += data.replace(/[\x00-\x1f\x7f]/g, '')
       }
       if (inputBuffer.length > 100) inputBuffer = inputBuffer.slice(-100)
+
+      // Only the first keystroke of a burst is timed, for the reason the
+      // backend's probe does the same: a fast typist re-arming the clock on
+      // every key would never let the lag they are feeling accumulate.
+      if (!_keystrokeSentAt && data.length <= 16) _keystrokeSentAt = Date.now()
 
       void backend.send('terminal.input', {
         terminal_session_id: sessionId.value,
@@ -2462,6 +2554,13 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     outputUnsub = backend.on('terminal.output', (raw) => {
       const payload = raw as { terminal_session_id: string; data: string }
       if (payload.terminal_session_id !== sessionId.value) return
+      if (_keystrokeSentAt) {
+        const roundTrip = Date.now() - _keystrokeSentAt
+        _keystrokeSentAt = 0
+        if (roundTrip >= ECHO_ROUNDTRIP_WARN_MS && roundTrip < ECHO_ROUNDTRIP_MAX_MS) {
+          diagLog(backend, 'echo', `pane=${paneId} keystroke round-trip ${roundTrip}ms`, 'warning')
+        }
+      }
       _pendingOutput += payload.data
       if (_ownsTerminalFocus) {
         // The user is typing in this pane — render the echo now.
@@ -3031,9 +3130,10 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
    * App.vue's injectText relies on to keep large pastes off the tty's limits.
    */
   function pasteFromClipboard(text: string): void {
-    // xterm drops input while stdin is disabled (CoreService); the pane does
-    // that while it is still preparing, and a paste must respect it too.
-    if (!text || term.options.disableStdin) return
+    // The pane gates stdin while it is still preparing, and a paste respects
+    // that too. Rejected rather than buffered: a clipboard paste is a discrete
+    // action the user can simply repeat once the pane is ready, unlike typing.
+    if (!text || _stdinGated) return
     // Same gate pasteText applies. Checked up front so a paste into a dead pane
     // cannot clear `isStopped` (and fire onUserResume) while sending nothing.
     if (!sessionId.value || status.value === 'exited' || status.value === 'error') return
@@ -3160,6 +3260,8 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     term.textarea?.removeEventListener('focus', _onTermFocus)
     term.textarea?.removeEventListener('blur', _onTermBlur)
     window.removeEventListener('focus', _onWindowFocus)
+    term.textarea?.removeEventListener('compositionstart', _onCompositionStart)
+    term.textarea?.removeEventListener('compositionend', _onCompositionEnd)
     // A pane disposed while focused never fires blur — clear the context so
     // `terminalFocus` cannot stay stuck on. Cleared directly rather than through
     // _onTermBlur(), which defers to the window-focus path when the whole window
@@ -3220,6 +3322,10 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     rendererKind,
     optionSelectHint,
     getSelection: () => term.getSelection(),
-    setDisableStdin: (disabled: boolean) => { term.options.disableStdin = disabled },
+    setDisableStdin: (disabled: boolean) => {
+      if (_stdinGated === disabled) return
+      _stdinGated = disabled
+      if (!disabled) _flushGatedInput()
+    },
   }
 }

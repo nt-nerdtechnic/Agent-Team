@@ -249,6 +249,12 @@ export const defaults: KeybindingRule[] = [
   { key: 'ctrl+shift+end',  command: 'editor.action.cursorBottomSelect', when: 'editorTextFocus' },
 
   // ── Git window ───────────────────────────────────────────────────────────────
+  // Opening it is the counterpart of cmd+shift+i for the Mini IDE. 'paneStage'
+  // scopes the override to the main window: the Mini IDE keeps cmd+shift+g for
+  // its Source Control sidebar (the rule above), and this one must sit AFTER
+  // that rule to win where it applies.
+  { key: 'cmd+shift+g', command: 'workbench.action.openGitWindow', when: 'paneStage && !findOpen' },
+
   // Only the standalone Git window (GitWindowApp) sets `gitWindow`, and these
   // rules sit LAST so the reversed resolver tries them first: several of these
   // chords are claimed above by workbench commands that the Git window never
