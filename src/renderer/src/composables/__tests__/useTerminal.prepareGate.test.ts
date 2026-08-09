@@ -98,6 +98,13 @@ describe('useTerminal — spawn-phase input gate', () => {
     for (const ch of text) captured.dataHandler!(ch)
   }
 
+  /** Diagnostics the renderer forwarded to backend.log, newest last. */
+  function diagnostics(mock: ReturnType<typeof createMockBackend>): string[] {
+    return mock.sent
+      .filter((s) => s.type === 'client.diagnostic')
+      .map((s) => (s.payload as { message: string }).message)
+  }
+
   function sentInput(mock: ReturnType<typeof createMockBackend>): string {
     return mock.sent
       .filter((s) => s.type === 'terminal.input')
@@ -158,6 +165,48 @@ describe('useTerminal — spawn-phase input gate', () => {
     const sent = sentInput(mock)
     expect(sent).toHaveLength(4096)
     expect(sent.endsWith('TAIL')).toBe(true)
+    scope.stop()
+  })
+
+  // The renderer's half of the round-trip. The backend logs its own half, and
+  // the gap between the two numbers is the WebSocket plus this renderer — the
+  // split that no log could show before.
+  it('reports a slow keystroke round-trip', async () => {
+    const { mock, scope } = await spawnedTerminal()
+    const now = vi.spyOn(Date, 'now')
+
+    now.mockReturnValue(1_000_000)
+    captured.dataHandler!('a')
+    now.mockReturnValue(1_000_500)
+    mock.emit('terminal.output', { terminal_session_id: 'sess-1', data: 'a' })
+
+    expect(diagnostics(mock)[0]).toContain('keystroke round-trip 500ms')
+    scope.stop()
+  })
+
+  it('stays quiet when the echo comes back promptly', async () => {
+    const { mock, scope } = await spawnedTerminal()
+    const now = vi.spyOn(Date, 'now')
+
+    now.mockReturnValue(1_000_000)
+    captured.dataHandler!('a')
+    now.mockReturnValue(1_000_040)
+    mock.emit('terminal.output', { terminal_session_id: 'sess-1', data: 'a' })
+
+    expect(diagnostics(mock)).toEqual([])
+    scope.stop()
+  })
+
+  it('does not blame the keystroke for output that arrives much later', async () => {
+    const { mock, scope } = await spawnedTerminal()
+    const now = vi.spyOn(Date, 'now')
+
+    now.mockReturnValue(1_000_000)
+    captured.dataHandler!('a')
+    now.mockReturnValue(1_010_000) // the CLI was thinking, not echoing
+    mock.emit('terminal.output', { terminal_session_id: 'sess-1', data: 'result' })
+
+    expect(diagnostics(mock)).toEqual([])
     scope.stop()
   })
 

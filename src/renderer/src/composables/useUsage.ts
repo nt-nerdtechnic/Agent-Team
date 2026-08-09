@@ -153,11 +153,14 @@ export function setUsageRefreshSec(sec: number): void {
   reconfigureUsage()
 }
 
-/** Force an immediate re-poll (clears provider cooldowns backend-side). */
-export function refreshUsage(): void {
+/** Force an immediate re-poll (clears provider cooldowns backend-side).
+ *  Returns false when there is no connected backend to ask — a caller showing
+ *  a "refreshing…" state has nothing to wait for in that case. */
+export function refreshUsage(): boolean {
   const b = backend
-  if (!b || b.status.value !== 'connected') return
+  if (!b || b.status.value !== 'connected') return false
   void b.send('usage.refresh', {}).catch(() => {})
+  return true
 }
 
 /** Snapshot for a pane's agent key, or undefined when the agent has no

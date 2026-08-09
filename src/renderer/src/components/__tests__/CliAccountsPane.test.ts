@@ -23,7 +23,7 @@ const usage = vi.hoisted(() => ({
   accountUsageFor: vi.fn<
     (agentKey: string | undefined | null, profileId: string | null) => UsageSnapshot | undefined
   >(),
-  refreshUsage: vi.fn(),
+  refreshUsage: vi.fn<() => boolean>(() => true),
 }))
 vi.mock('../../composables/useUsage', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../composables/useUsage')>()
@@ -106,6 +106,7 @@ describe('CliAccountsPane', () => {
     vi.clearAllMocks()
     usage.usageFor.mockReset()
     usage.accountUsageFor.mockReset()
+    usage.refreshUsage.mockReturnValue(true) // default: a connected backend
   })
 
   function mountPane(
@@ -670,6 +671,17 @@ describe('CliAccountsPane', () => {
     // The poller broadcast that ends the cycle clears the busy state.
     usageVersion.value++
     await flushPromises()
+    expect(button.text()).toBe('Refresh quota')
+    expect(button.attributes('disabled')).toBeUndefined()
+  })
+
+  it('stays idle when there is no backend to ask', async () => {
+    usage.usageFor.mockReturnValue(undefined)
+    usage.refreshUsage.mockReturnValue(false)
+    const w = mountPane(makeApi())
+
+    const button = w.get('.cli-refresh')
+    await button.trigger('click')
     expect(button.text()).toBe('Refresh quota')
     expect(button.attributes('disabled')).toBeUndefined()
   })

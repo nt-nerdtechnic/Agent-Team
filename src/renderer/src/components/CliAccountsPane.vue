@@ -281,10 +281,12 @@ function clearRefreshBusy(): void {
 
 function refreshQuota(): void {
   if (refreshingUsage.value) return
+  // Nothing was asked (backend not connected) — going busy would promise an
+  // answer that can never arrive.
+  if (!refreshUsage()) return
   refreshingUsage.value = true
   clearTimeout(refreshBusyTimer)
   refreshBusyTimer = setTimeout(clearRefreshBusy, REFRESH_BUSY_TIMEOUT_MS)
-  refreshUsage()
 }
 
 watch(usageVersion, () => {
