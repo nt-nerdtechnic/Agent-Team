@@ -72,10 +72,10 @@ import { findConsecutiveQuestionBlocks, findSentinel } from './lib/buffer'
 import {
   buildCliPaneBufferReply,
   buildExternalPaneContextPaste,
+  buildMentionInsert,
   buildPaneContextPaste,
   buildPaneStatusReply,
   chunkForPty,
-  endsWithMentionTrigger,
   screenToClientPoint,
   CLI_CHIP_LINE_CAP,
   CLI_PASTE_LINE_CAP
@@ -2194,18 +2194,18 @@ function mentionCandidatesFor(paneId: string): string[] {
   return [...local, ...remoteMessagingTargets.value]
 }
 
-/** Mention mode for a pane drop: an "@" typed immediately before the drop means
- *  "insert just this pane's address", completing e.g. "傳給 @" + drop →
- *  "傳給 @codex-1 ". Returns true when the drop belonged to mention mode —
- *  including when it was abandoned because the prompt moved — and false to fall
- *  through to the full context share (the source has no address at all: a plain
- *  terminal, or a remote pane the registry does not know). */
+/** Mention on a pane drop: dropping a pane inserts JUST its address, e.g.
+ *  "傳給 " + drop → "傳給 @codex-1 ". This is the whole gesture for any pane
+ *  that has an address — the scrollback share below is reserved for sources
+ *  that have none (a plain terminal, or a remote pane the registry does not
+ *  know), so the two never compete for the same drop. Returns true when the
+ *  drop was handled — including when it was abandoned because the prompt moved
+ *  — and false to fall through to the full context share. */
 async function tryMentionOnDrop(
   targetPaneId: string,
   resolveAddress: () => string | null | Promise<string | null>,
 ): Promise<boolean> {
   const lineBeforeCursor = paneRefs[targetPaneId]?.readLineBeforeCursor?.()
-  if (lineBeforeCursor === undefined || !endsWithMentionTrigger(lineBeforeCursor)) return false
   const address = await resolveAddress()
   if (!address) return false
   // Resolving a remote address awaits a round trip, so the prompt may have moved
@@ -2213,15 +2213,16 @@ async function tryMentionOnDrop(
   // than splicing an address into the middle of what they wrote; falling through
   // to the scrollback share would be an even bigger surprise.
   if (paneRefs[targetPaneId]?.readLineBeforeCursor?.() !== lineBeforeCursor) return true
-  await pastePaneContext(targetPaneId, address + ' ')
+  await pastePaneContext(targetPaneId, buildMentionInsert(lineBeforeCursor, address))
   return true
 }
 
-// Cross-pane context share: pane A dragged onto pane B's terminal area pastes a
-// tail excerpt of A's rendered scrollback into B's input prompt (TerminalPane's
-// 'cli-context-drop'). Deliberately NOT injectText: no Enter is sent — the text
-// waits in B's prompt for the user to add their question and submit. Bracketed
-// paste keeps the excerpt's newlines literal instead of submitting each line.
+// Cross-pane drop: pane A dragged onto pane B's terminal area writes A's mention
+// into B's input prompt (TerminalPane's 'cli-context-drop'), falling back to a
+// tail excerpt of A's rendered scrollback only for a source with no messaging
+// address. Deliberately NOT injectText: no Enter is sent — the text waits in B's
+// prompt for the user to add their question and submit. Bracketed paste keeps
+// the excerpt's newlines literal instead of submitting each line.
 async function injectPaneContext(sourcePaneId: string, targetPaneId: string): Promise<void> {
   const sourcePane = panes.value.find((p) => p.id === sourcePaneId)
   const sourceRef = paneRefs[sourcePaneId]
@@ -2231,11 +2232,9 @@ async function injectPaneContext(sourcePaneId: string, targetPaneId: string): Pr
   // share, however, so never ask another window to provide stale context for it.
   if (!sourcePane || !sourceRef) {
     if (!sourcePane || sourcePane.realized) {
-      // A source in another window used to have no address, so mention mode
-      // skipped it and always pulled its scrollback over. Now that it can be
-      // reached at `<folder>/<pane>`, an "@" before the drop means the same
-      // thing here as it does locally. Same target liveness rule as the relay
-      // path below — a dead pane is not a drop target.
+      // A source in another window is reachable at `<folder>/<pane>`, so its
+      // drop mentions it exactly like a local one. Same target liveness rule as
+      // the relay path below — a dead pane is not a drop target.
       const targetStatus = paneRefs[targetPaneId]?.displayStatus as string | undefined
       // A pane of THIS window that merely lost its ref still has its local
       // handle — asking the registry for it would always miss, since the listing
@@ -2290,9 +2289,9 @@ async function pastePaneContext(targetPaneId: string, text: string): Promise<voi
   }
 }
 
-// A plan dropped from PlansPane onto a CLI pane: paste the plan goal +
-// execution instruction into that pane's input prompt. No Enter is sent — the
-// text waits for the user to review and submit, matching injectPaneContext.
+// A plan dropped from PlansPane onto a CLI pane: paste the plan document's
+// path into that pane's input prompt. No Enter is sent — the text waits for
+// the user to review and submit, matching injectPaneContext.
 async function injectPlanToPane(ref: PlanDragRef, targetPaneId: string): Promise<void> {
   await pastePaneContext(targetPaneId, planDropPrompt(ref))
 }

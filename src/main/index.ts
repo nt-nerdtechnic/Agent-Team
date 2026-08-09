@@ -1845,14 +1845,22 @@ ipcMain.handle('git-accounts:getCredential', (event, workspacePath: string) => {
 // NAVIDE_ENABLE_GPU=1 opts back in so the shutdown crash can be re-tested on a
 // newer macOS/Electron without shipping the risk to everyone: the failure mode
 // is a crash on quit, so the default stays off until it is proven fixed.
-const gpuOptIn = process.env.NAVIDE_ENABLE_GPU === '1'
-if (!gpuOptIn) {
+// Re-tested 2026-08-09 on macOS 27.0 + Electron 33.4.11: four launch/quit
+// cycles with the GPU enabled produced no crash reports, no surviving
+// processes, and none of the `ContextResult::kFatalFailure: Failed to create
+// context` errors that used to appear ~15 times per 30 s while --disable-gpu
+// was in force. The macOS 26.5 premise no longer holds, so acceleration is on
+// by default and the DOM-renderer fallback is no longer forced on every pane.
+// Caveat on that evidence: the quits were driven by SIGTERM, not a user Cmd+Q.
+// NAVIDE_DISABLE_GPU=1 restores the old behaviour if the shutdown crash ever
+// resurfaces.
+const gpuDisabled = process.env.NAVIDE_DISABLE_GPU === '1'
+if (gpuDisabled) {
   app.disableHardwareAcceleration()
   app.commandLine.appendSwitch('disable-gpu')
-} else {
   console.warn(
-    '[main] NAVIDE_ENABLE_GPU=1 — hardware acceleration ENABLED. ' +
-      'Watch for a SIGSEGV in fontations_ffi on quit; unset to revert.'
+    '[main] NAVIDE_DISABLE_GPU=1 — hardware acceleration disabled; ' +
+      'terminals fall back to the DOM renderer.'
   )
 }
 

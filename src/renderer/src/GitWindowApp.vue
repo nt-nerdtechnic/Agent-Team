@@ -20,8 +20,9 @@
 // worktree/remote shell actions ride the other ui.* host capabilities. All
 // colors map to semantic tokens so the five app themes translate the design.
 
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useKeybindings, registerCommand, setContext } from './keybindings/useKeybindings'
 import { useBackend } from './composables/useBackend'
 import {
   useGit,
@@ -1408,6 +1409,56 @@ const busy = computed(
     isLoadingStatus.value ||
     isLoadingLog.value
 )
+
+// ── Keyboard shortcuts ───────────────────────────────────────────────────────
+// Same wiring as the Mini IDE window: install the shared capture-phase
+// dispatcher, flag this window with a `when` context so the git.* rules in
+// keybindings/defaults.ts only resolve here, then register the handlers.
+// User overrides never load in a plugin view (plugin-preload exposes no
+// `agentTeam`), so what defaults.ts declares is what this window gets.
+useKeybindings()
+setContext('gitWindow', true)
+
+// Mirrors the toolbar buttons' `busy || !isRepo` disabled state — a shortcut
+// must not fire an operation the equivalent button refuses to run.
+function gitActionsReady(): boolean {
+  return isRepo.value && !busy.value
+}
+
+registerCommand('git.refresh', () => {
+  if (hasWorkspace.value) void refreshAll()
+})
+registerCommand('git.commit', () => {
+  if (gitActionsReady()) void onCommit()
+})
+registerCommand('git.amend', () => {
+  if (gitActionsReady()) void onAmend()
+})
+registerCommand('git.generateMessage', () => {
+  if (gitActionsReady()) void onGenerateMessage()
+})
+registerCommand('git.stageAll', () => {
+  if (gitActionsReady()) void onStageAll()
+})
+registerCommand('git.unstageAll', () => {
+  if (gitActionsReady()) void onUnstageAll()
+})
+registerCommand('git.fetch', () => {
+  if (gitActionsReady()) void onFetch()
+})
+registerCommand('git.pull', () => {
+  if (gitActionsReady()) void onPull()
+})
+registerCommand('git.push', () => {
+  if (gitActionsReady()) void onPush()
+})
+registerCommand('git.sync', () => {
+  if (gitActionsReady()) void onSync()
+})
+registerCommand('git.focusAgent', () => {
+  aiDockOpen.value = true
+  void nextTick(() => aiDockRef.value?.terminal?.focus())
+})
 </script>
 
 <template>

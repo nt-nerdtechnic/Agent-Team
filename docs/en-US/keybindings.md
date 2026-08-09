@@ -353,6 +353,29 @@ Run these via `⌘⇧P`. No default keybinding.
 
 ---
 
+## Git Window
+
+Only active in the standalone Git window (`gitWindow` context). Every shortcut
+here yields to the window's AI terminal while it has focus, and stays inert
+while an operation is running or the folder is not a repository — the same
+condition that greys out the matching toolbar button.
+
+| Shortcut | Action |
+|----------|--------|
+| `F5` / `⌘⇧R` | Refresh status, log, branches, remotes, tags, stashes, worktrees |
+| `⌘↩` | Commit staged changes |
+| `⌘⇧↩` | Amend the last commit |
+| `⌘⇧M` | Generate the commit message with AI |
+| `⌘⇧A` | Stage all changes |
+| `⌘⇧U` | Unstage all staged files |
+| `⌘⇧F` | Fetch |
+| `⌘⇧L` | Pull |
+| `⌘⇧P` | Push |
+| `⌘⇧S` | Sync (pull then push) |
+| `⌘L` | Open and focus the AI terminal dock |
+
+---
+
 ## Chord Key Reference (`⌘K …`)
 
 `⌘K` is a chord prefix. In editor text focus, pressing `⌘K` enters chord mode (300 ms timeout); the next key completes the command.

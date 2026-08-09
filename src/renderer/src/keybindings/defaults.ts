@@ -247,4 +247,31 @@ export const defaults: KeybindingRule[] = [
   { key: 'shift+end',  command: 'editor.action.cursorLineEndSelect',   when: 'editorTextFocus' },
   { key: 'ctrl+shift+home', command: 'editor.action.cursorTopSelect',    when: 'editorTextFocus' },
   { key: 'ctrl+shift+end',  command: 'editor.action.cursorBottomSelect', when: 'editorTextFocus' },
+
+  // ── Git window ───────────────────────────────────────────────────────────────
+  // Only the standalone Git window (GitWindowApp) sets `gitWindow`, and these
+  // rules sit LAST so the reversed resolver tries them first: several of these
+  // chords are claimed above by workbench commands that the Git window never
+  // registers (cmd+shift+a toggleAIChat, cmd+shift+u spawnAgent, cmd+shift+p
+  // showCommands, cmd+shift+f findInFiles, cmd+shift+r rebuildFocusedPane) —
+  // and an unregistered binding is NOT consumed, so without this ordering the
+  // key would fall through into the window's AI dock terminal.
+  //
+  // '!terminalFocus' everywhere: the Git window embeds an AiCliDock PTY, where
+  // every one of these chords belongs to the CLI, not to us.
+  { key: 'f5',              command: 'git.refresh',         when: 'gitWindow && !terminalFocus' },
+  { key: 'cmd+shift+r',     command: 'git.refresh',         when: 'gitWindow && !terminalFocus' },
+  { key: 'cmd+enter',       command: 'git.commit',          when: 'gitWindow && !terminalFocus' },
+  { key: 'cmd+shift+enter', command: 'git.amend',           when: 'gitWindow && !terminalFocus' },
+  { key: 'cmd+shift+m',     command: 'git.generateMessage', when: 'gitWindow && !terminalFocus' },
+  { key: 'cmd+shift+a',     command: 'git.stageAll',        when: 'gitWindow && !terminalFocus' },
+  { key: 'cmd+shift+u',     command: 'git.unstageAll',      when: 'gitWindow && !terminalFocus' },
+  // Remote operations follow SourceTree's chords (fetch/pull/push), with sync
+  // on cmd+shift+s since it is this window's primary toolbar action.
+  { key: 'cmd+shift+f',     command: 'git.fetch',           when: 'gitWindow && !terminalFocus' },
+  { key: 'cmd+shift+l',     command: 'git.pull',            when: 'gitWindow && !terminalFocus' },
+  { key: 'cmd+shift+p',     command: 'git.push',            when: 'gitWindow && !terminalFocus' },
+  { key: 'cmd+shift+s',     command: 'git.sync',            when: 'gitWindow && !terminalFocus' },
+  // Same chord the Mini IDE uses to jump into its AI dock.
+  { key: 'cmd+l',           command: 'git.focusAgent',      when: 'gitWindow && !terminalFocus' },
 ]
