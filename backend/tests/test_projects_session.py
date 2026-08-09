@@ -899,6 +899,93 @@ def test_set_pane_auto_name_set_once(store_with_stage: tuple[ProjectStore, str])
     assert pane.auto_name == "First"
 
 
+def test_llm_name_upgrades_a_heuristic_name_once(
+    store_with_stage: tuple[ProjectStore, str]
+) -> None:
+    """The renderer titles a pane instantly from its string heuristic, then
+    asks the model for a better one — that second write is the only one the
+    set-once rule lets through."""
+    store, ws = store_with_stage
+    store.record_slot_spawn(ws, stage_index=0, slot_label="Build",
+                            pane_id="pane-1", agent="claude")
+    store.set_pane_auto_name(ws, pane_id="pane-1", auto_name="please fix the log…",
+                             source="heuristic")
+
+    project, changed = store.set_pane_auto_name(ws, pane_id="pane-1",
+                                                auto_name="Fix login redirect", source="llm")
+    assert changed is True
+    pane = next(p for p in ProjectStore().peek(ws).panes if p.pane_id == "pane-1")
+    assert pane.auto_name == "Fix login redirect"
+    assert pane.auto_name_source == "llm"
+
+    # Frozen from here: a second model answer does not rename the pane again.
+    project, changed = store.set_pane_auto_name(ws, pane_id="pane-1",
+                                                auto_name="Another idea", source="llm")
+    assert changed is False
+    pane = next(p for p in store.peek(ws).panes if p.pane_id == "pane-1")
+    assert pane.auto_name == "Fix login redirect"
+
+
+def test_heuristic_name_never_replaces_an_llm_name(
+    store_with_stage: tuple[ProjectStore, str]
+) -> None:
+    """The upgrade is one-directional: a later turn's heuristic title must not
+    undo the model's."""
+    store, ws = store_with_stage
+    store.record_slot_spawn(ws, stage_index=0, slot_label="Build",
+                            pane_id="pane-1", agent="claude")
+    store.set_pane_auto_name(ws, pane_id="pane-1", auto_name="Fix login redirect",
+                             source="llm")
+    project, changed = store.set_pane_auto_name(ws, pane_id="pane-1",
+                                                auto_name="later turn text", source="heuristic")
+    assert changed is False
+    pane = next(p for p in store.peek(ws).panes if p.pane_id == "pane-1")
+    assert pane.auto_name == "Fix login redirect"
+
+
+def test_llm_name_ignored_when_custom_name_exists(
+    store_with_stage: tuple[ProjectStore, str]
+) -> None:
+    """A model answer arriving after the user renamed the pane is dropped —
+    this is what stops a slow generation from stomping a manual rename."""
+    store, ws = store_with_stage
+    store.record_slot_spawn(ws, stage_index=0, slot_label="Build",
+                            pane_id="pane-1", agent="claude")
+    store.set_pane_auto_name(ws, pane_id="pane-1", auto_name="Heuristic", source="heuristic")
+    store.rename_pane(ws, pane_id="pane-1", custom_name="User Name")
+
+    project, changed = store.set_pane_auto_name(ws, pane_id="pane-1",
+                                                auto_name="Model title", source="llm")
+    assert changed is False
+    pane = next(p for p in store.peek(ws).panes if p.pane_id == "pane-1")
+    assert pane.custom_name == "User Name"
+    assert pane.auto_name == "Heuristic"
+
+
+def test_auto_name_source_defaults_to_heuristic(
+    store_with_stage: tuple[ProjectStore, str]
+) -> None:
+    store, ws = store_with_stage
+    store.record_slot_spawn(ws, stage_index=0, slot_label="Build",
+                            pane_id="pane-1", agent="claude")
+    store.set_pane_auto_name(ws, pane_id="pane-1", auto_name="Fix login bug")
+    pane = next(p for p in ProjectStore().peek(ws).panes if p.pane_id == "pane-1")
+    assert pane.auto_name_source == "heuristic"
+
+
+def test_pane_record_loads_without_auto_name_source(tmp_path: Path) -> None:
+    """Records written before the field existed must still load."""
+    store = ProjectStore()
+    ws = str(tmp_path)
+    project = store.load_or_create(ws)
+    store.save(project)
+    raw = project.to_dict()
+    raw["panes"] = [{"pane_id": "pane-1", "agent": "claude", "auto_name": "Old"}]
+    restored = type(project).from_dict(raw)
+    assert restored.panes[0].auto_name == "Old"
+    assert restored.panes[0].auto_name_source == ""
+
+
 def test_set_pane_auto_name_ignored_when_custom_name_exists(
     store_with_stage: tuple[ProjectStore, str]
 ) -> None:

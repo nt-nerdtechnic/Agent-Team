@@ -923,7 +923,7 @@ async def test_set_pane_auto_name_handler_broadcasts_once_and_mirrors_history(
     assert len(events) == 1
     assert events[0]["type"] == "project.ui_state_changed"
     assert events[0]["payload"]["auto_named_pane"] == {
-        "pane_id": "p1", "auto_name": "Fix login",
+        "pane_id": "p1", "auto_name": "Fix login", "source": "heuristic",
     }
     pane = next(p for p in store.peek(str(tmp_path)).panes if p.pane_id == "p1")
     assert pane.auto_name == "Fix login"
@@ -1019,6 +1019,156 @@ async def test_set_pane_auto_name_handler_skips_broadcast_when_custom_named(
     pane = next(p for p in store.peek(str(tmp_path)).panes if p.pane_id == "p1")
     assert pane.custom_name == "User Name"
     assert pane.auto_name == ""
+
+
+async def test_generate_auto_name_handler_upgrades_and_persists(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A model answer replaces the heuristic title in both stores and reaches
+    peer windows tagged as an llm name, so they stop asking for their own."""
+    from agent_team_backend import app, pane_name_service, ws_handlers
+
+    store = ProjectStore()
+    store.save(store.load_or_create(str(tmp_path)))
+    store.record_manual_pane_spawn(str(tmp_path), pane_id="p1", agent="claude")
+    store.set_ui_state(
+        str(tmp_path), spawn_history=[_entry("p1", workspacePath=str(tmp_path))]
+    )
+    store.set_pane_auto_name(str(tmp_path), pane_id="p1", auto_name="please fix the l…")
+    monkeypatch.setattr(app, "project_store", store)
+
+    events: list[dict[str, Any]] = []
+
+    async def capture(event: dict[str, Any], exclude: Any = None) -> None:
+        events.append(event)
+
+    monkeypatch.setattr(app, "broadcast", capture)
+
+    async def fake_generate(material: str, url: str, model: str) -> dict[str, Any]:
+        return {"ok": True, "name": "Fix login redirect"}
+
+    monkeypatch.setattr(pane_name_service, "generate_pane_name", fake_generate)
+
+    session = app.Session(FakeWebSocket())  # type: ignore[arg-type]
+    fn = ws_handlers.lookup("pane.generate_auto_name")
+    assert fn is not None
+    await fn(session, "m1", "pane.generate_auto_name", {
+        "workspace_path": str(tmp_path), "pane_id": "p1",
+        "material": "please fix the login redirect loop",
+    })
+
+    pane = next(p for p in store.peek(str(tmp_path)).panes if p.pane_id == "p1")
+    assert pane.auto_name == "Fix login redirect"
+    assert pane.auto_name_source == "llm"
+    assert _stored_entries(tmp_path)[0]["autoName"] == "Fix login redirect"
+    assert events[0]["payload"]["auto_named_pane"] == {
+        "pane_id": "p1", "auto_name": "Fix login redirect", "source": "llm",
+    }
+    assert session.websocket.sent[-1]["payload"] == {  # type: ignore[attr-defined]
+        "ok": True, "name": "Fix login redirect", "changed": True,
+    }
+
+
+async def test_generate_auto_name_handler_stays_quiet_when_generation_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """No Ollama, no model, a timeout — the heuristic title stands and nothing
+    is written or broadcast."""
+    from agent_team_backend import app, pane_name_service, ws_handlers
+
+    store = ProjectStore()
+    store.save(store.load_or_create(str(tmp_path)))
+    store.record_manual_pane_spawn(str(tmp_path), pane_id="p1", agent="claude")
+    store.set_pane_auto_name(str(tmp_path), pane_id="p1", auto_name="Heuristic")
+    monkeypatch.setattr(app, "project_store", store)
+
+    events: list[dict[str, Any]] = []
+
+    async def capture(event: dict[str, Any], exclude: Any = None) -> None:
+        events.append(event)
+
+    monkeypatch.setattr(app, "broadcast", capture)
+
+    async def fake_generate(material: str, url: str, model: str) -> dict[str, Any]:
+        return {"ok": False, "error": "connection refused", "name": ""}
+
+    monkeypatch.setattr(pane_name_service, "generate_pane_name", fake_generate)
+
+    session = app.Session(FakeWebSocket())  # type: ignore[arg-type]
+    fn = ws_handlers.lookup("pane.generate_auto_name")
+    assert fn is not None
+    await fn(session, "m1", "pane.generate_auto_name", {
+        "workspace_path": str(tmp_path), "pane_id": "p1", "material": "fix the bug",
+    })
+
+    pane = next(p for p in store.peek(str(tmp_path)).panes if p.pane_id == "p1")
+    assert pane.auto_name == "Heuristic"
+    assert events == []
+    assert session.websocket.sent[-1]["payload"]["ok"] is False  # type: ignore[attr-defined]
+
+
+async def test_generate_auto_name_handler_drops_a_late_answer_after_a_rename(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The user renamed the pane while the model was thinking — the answer is
+    reported back but never applied."""
+    from agent_team_backend import app, pane_name_service, ws_handlers
+
+    store = ProjectStore()
+    store.save(store.load_or_create(str(tmp_path)))
+    store.record_manual_pane_spawn(str(tmp_path), pane_id="p1", agent="claude")
+    store.rename_pane(str(tmp_path), pane_id="p1", custom_name="User Name")
+    monkeypatch.setattr(app, "project_store", store)
+
+    events: list[dict[str, Any]] = []
+
+    async def capture(event: dict[str, Any], exclude: Any = None) -> None:
+        events.append(event)
+
+    monkeypatch.setattr(app, "broadcast", capture)
+
+    async def fake_generate(material: str, url: str, model: str) -> dict[str, Any]:
+        return {"ok": True, "name": "Model title"}
+
+    monkeypatch.setattr(pane_name_service, "generate_pane_name", fake_generate)
+
+    session = app.Session(FakeWebSocket())  # type: ignore[arg-type]
+    fn = ws_handlers.lookup("pane.generate_auto_name")
+    assert fn is not None
+    await fn(session, "m1", "pane.generate_auto_name", {
+        "workspace_path": str(tmp_path), "pane_id": "p1", "material": "fix the bug",
+    })
+
+    pane = next(p for p in store.peek(str(tmp_path)).panes if p.pane_id == "p1")
+    assert pane.custom_name == "User Name"
+    assert pane.auto_name == ""
+    assert events == []
+    assert session.websocket.sent[-1]["payload"]["changed"] is False  # type: ignore[attr-defined]
+
+
+async def test_generate_auto_name_handler_ignores_empty_material(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Never spend a model call on nothing."""
+    from agent_team_backend import app, pane_name_service, ws_handlers
+
+    called = False
+
+    async def fake_generate(material: str, url: str, model: str) -> dict[str, Any]:
+        nonlocal called
+        called = True
+        return {"ok": True, "name": "x"}
+
+    monkeypatch.setattr(pane_name_service, "generate_pane_name", fake_generate)
+
+    session = app.Session(FakeWebSocket())  # type: ignore[arg-type]
+    fn = ws_handlers.lookup("pane.generate_auto_name")
+    assert fn is not None
+    await fn(session, "m1", "pane.generate_auto_name", {
+        "workspace_path": str(tmp_path), "pane_id": "p1", "material": "   ",
+    })
+    assert called is False
+    assert session.websocket.sent[-1]["payload"]["ok"] is False  # type: ignore[attr-defined]
 
 
 def test_delete_entries_bulk_modes_skip_starred(tmp_path: Path) -> None:

@@ -4210,7 +4210,11 @@ async def project_set_pane_auto_name(session: "Session", msg_id: str, msg_type: 
                     "project.ui_state_changed",
                     {
                         "workspace_path": project.workspace_path,
-                        "auto_named_pane": {"pane_id": pane_id, "auto_name": auto_name},
+                        "auto_named_pane": {
+                            "pane_id": pane_id,
+                            "auto_name": auto_name,
+                            "source": source,
+                        },
                     },
                 ),
                 exclude=session,
@@ -4263,7 +4267,11 @@ async def pane_generate_auto_name(session: "Session", msg_id: str, msg_type: str
                 "project.ui_state_changed",
                 {
                     "workspace_path": project.workspace_path,
-                    "auto_named_pane": {"pane_id": pane_id, "auto_name": name},
+                    "auto_named_pane": {
+                        "pane_id": pane_id,
+                        "auto_name": name,
+                        "source": "llm",
+                    },
                 },
             ),
             exclude=session,
