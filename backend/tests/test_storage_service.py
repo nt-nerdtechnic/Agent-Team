@@ -540,8 +540,6 @@ def test_cleaning_a_shim_home_removes_links_not_their_targets(
     (orphan / "credentials.json").symlink_to(real)
     old = time.time() - 90 * 86400
     os.utime(orphan, (old, old))  # the symlink above reset the dir mtime
-    old = time.time() - 90 * 86400
-    os.utime(orphan, (old, old))
 
     # A symlink counts as zero bytes, so the target is not double-counted.
     assert _item(storage_service.collect_usage([str(ws)], 30), "shimPanesStale")["bytes"] == 40

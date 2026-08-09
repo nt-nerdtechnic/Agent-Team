@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shlex
+import stat
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -349,6 +350,93 @@ def test_wire_cursor_git_exclude_is_appended_once(tmp_path: Path) -> None:
     plan_mcp_wiring.wire_command("cursor", "cursor-agent", 4567, "p1", {}, str(tmp_path))
     lines = (info / "exclude").read_text(encoding="utf-8").split()
     assert lines == ["*.log", ".cursor/mcp.json"]
+
+
+def test_wire_cursor_refuses_to_write_the_global_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """~/.cursor/mcp.json is cursor's *global* config. Opening the home
+    directory as a workspace must not put our server into every project the
+    user has — outside Navide the variable is unset and it cannot connect."""
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+    env: dict[str, str] = {}
+    plan_mcp_wiring.wire_command("cursor", "cursor-agent", 4567, "p1", env, str(tmp_path))
+    assert not plan_mcp_wiring.cursor_config_path(tmp_path).exists()
+    assert env == {}
+
+
+def test_wire_cursor_bails_on_a_non_object_mcp_servers(tmp_path: Path) -> None:
+    """Same reasoning as unparseable JSON: the key is the user's, whatever it
+    means, and replacing it would drop whatever it stood for."""
+    path = plan_mcp_wiring.cursor_config_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"mcpServers": ["not-a-map"]}), encoding="utf-8")
+    env: dict[str, str] = {}
+    plan_mcp_wiring.wire_command("cursor", "cursor-agent", 4567, "p1", env, str(tmp_path))
+    assert json.loads(path.read_text(encoding="utf-8")) == {"mcpServers": ["not-a-map"]}
+    assert env == {}
+
+
+def test_wire_cursor_excludes_via_the_repo_root_from_a_subdirectory(tmp_path: Path) -> None:
+    """A pane's cwd is often a subdirectory; only the root's exclude file
+    governs it, and the entry has to be written relative to that root."""
+    (tmp_path / ".git" / "info").mkdir(parents=True)
+    sub = tmp_path / "packages" / "app"
+    sub.mkdir(parents=True)
+    plan_mcp_wiring.wire_command("cursor", "cursor-agent", 4567, "p1", {}, str(sub))
+    exclude = (tmp_path / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+    assert "packages/app/.cursor/mcp.json" in exclude.splitlines()
+
+
+def test_wire_cursor_git_exclude_ignores_a_commented_mention(tmp_path: Path) -> None:
+    info = tmp_path / ".git" / "info"
+    info.mkdir(parents=True)
+    info.joinpath("exclude").write_text(
+        "# .cursor/mcp.json is tracked on purpose\n", encoding="utf-8"
+    )
+    plan_mcp_wiring.wire_command("cursor", "cursor-agent", 4567, "p1", {}, str(tmp_path))
+    lines = (info / "exclude").read_text(encoding="utf-8").splitlines()
+    assert lines[-1] == ".cursor/mcp.json"
+
+
+def test_wire_cursor_keeps_the_permissions_the_users_file_had(tmp_path: Path) -> None:
+    """cursor's mcp.json is where people put API keys for their own servers.
+    Rewriting it must not widen a mode the user tightened."""
+    path = plan_mcp_wiring.cursor_config_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+    path.chmod(0o600)
+    plan_mcp_wiring.wire_command("cursor", "cursor-agent", 4567, "p1", {}, str(tmp_path))
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_wire_cursor_does_not_claim_a_repo_above_the_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A home that is itself a dotfiles repo must not swallow every workspace
+    under it that is not a repo of its own."""
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
+    (tmp_path / ".git" / "info").mkdir(parents=True)
+    ws = tmp_path / "projects" / "not-a-repo"
+    ws.mkdir(parents=True)
+    plan_mcp_wiring.wire_command("cursor", "cursor-agent", 4567, "p1", {}, str(ws))
+    assert plan_mcp_wiring.cursor_config_path(ws).is_file()  # still wired
+    assert not (tmp_path / ".git" / "info" / "exclude").exists()
+
+
+def test_wire_cursor_leaves_a_worktrees_exclude_file_alone(tmp_path: Path) -> None:
+    """In a worktree or submodule .git is a file, and the exclude file that
+    governs it belongs to the superproject."""
+    (tmp_path / ".git").write_text("gitdir: /elsewhere/.git/worktrees/wt", encoding="utf-8")
+    plan_mcp_wiring.wire_command("cursor", "cursor-agent", 4567, "p1", {}, str(tmp_path))
+    assert plan_mcp_wiring.cursor_config_path(tmp_path).is_file()
+    assert (tmp_path / ".git").is_file()  # untouched
+
+
+def test_wire_cursor_leaves_no_temp_file_behind(tmp_path: Path) -> None:
+    plan_mcp_wiring.wire_command("cursor", "cursor-agent", 4567, "p1", {}, str(tmp_path))
+    entries = sorted(p.name for p in plan_mcp_wiring.cursor_config_path(tmp_path).parent.iterdir())
+    assert entries == ["mcp.json"]
 
 
 def test_wire_cursor_without_cwd_is_a_noop(tmp_path: Path) -> None:

