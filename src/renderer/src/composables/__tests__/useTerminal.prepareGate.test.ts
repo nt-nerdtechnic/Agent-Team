@@ -79,7 +79,7 @@ import { useTerminal } from '../useTerminal'
 
 describe('useTerminal — spawn-phase input gate', () => {
   afterEach(() => {
-    vi.clearAllMocks()
+    vi.restoreAllMocks()
     captured.textarea = undefined
     captured.dataHandler = undefined
     localStorage.clear()
