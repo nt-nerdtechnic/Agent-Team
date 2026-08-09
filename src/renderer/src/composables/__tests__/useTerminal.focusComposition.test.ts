@@ -129,6 +129,14 @@ describe('useTerminal — focus transitions and stale IME composition', () => {
     mock.emit('terminal.output', { terminal_session_id: 'sess-1', data })
   }
 
+  /** Diagnostics the renderer forwarded to backend.log, newest last. */
+  function diagnostics(mock: ReturnType<typeof createMockBackend>, category?: string): string[] {
+    return mock.sent
+      .filter((s) => s.type === 'client.diagnostic')
+      .filter((s) => !category || (s.payload as { category: string }).category === category)
+      .map((s) => (s.payload as { message: string }).message)
+  }
+
   function keydown(over: Partial<KeyboardEvent> & { keyCode: number, isComposing: boolean }) {
     return captured.keyHandler!({
       type: 'keydown',
@@ -258,6 +266,74 @@ describe('useTerminal — focus transitions and stale IME composition', () => {
 
       // xterm's own keydown() already finalizes on a non-swallowed key.
       expect(captured.compositionEnds).toBe(0)
+      scope.stop()
+    })
+  })
+
+  // The latch was derived from xterm's source and never observed happening on a
+  // real machine, so it reports itself. An input-method switch that still feels
+  // slow with no 'stale composition' line in the log rules this cause out
+  // instead of leaving it as a standing suspicion.
+  describe('diagnostics forwarded to the backend log', () => {
+    it('reports the stale composition it just rescued', async () => {
+      const { mock, scope } = await spawnedTerminal()
+      captured.helperComposing = true
+
+      keydown({ keyCode: 229, isComposing: false })
+
+      const lines = diagnostics(mock, 'ime')
+      expect(lines).toHaveLength(1)
+      expect(lines[0]).toContain('stale composition unlatched')
+      scope.stop()
+    })
+
+    it('stays quiet when there was no latch to rescue', async () => {
+      const { mock, scope } = await spawnedTerminal()
+      captured.helperComposing = false
+
+      keydown({ keyCode: 229, isComposing: false })
+
+      expect(diagnostics(mock, 'ime')).toEqual([])
+      scope.stop()
+    })
+
+    it('reports a composition that stayed open far longer than a candidate pick', async () => {
+      const { mock, scope } = await spawnedTerminal()
+      const now = vi.spyOn(Date, 'now')
+
+      now.mockReturnValue(1_000_000)
+      captured.textarea!.dispatchEvent(new Event('compositionstart'))
+      now.mockReturnValue(1_002_000)
+      captured.textarea!.dispatchEvent(new Event('compositionend'))
+
+      expect(diagnostics(mock, 'ime')[0]).toContain('composition open 2000ms')
+      scope.stop()
+    })
+
+    it('says nothing about an ordinary composition', async () => {
+      const { mock, scope } = await spawnedTerminal()
+      const now = vi.spyOn(Date, 'now')
+
+      now.mockReturnValue(1_000_000)
+      captured.textarea!.dispatchEvent(new Event('compositionstart'))
+      now.mockReturnValue(1_000_400)
+      captured.textarea!.dispatchEvent(new Event('compositionend'))
+
+      expect(diagnostics(mock, 'ime')).toEqual([])
+      scope.stop()
+    })
+
+    // Typing then goes nowhere visible until the user clicks the pane, which is
+    // indistinguishable from lag unless the log names it.
+    it('reports a window return that could not retake focus', async () => {
+      const { mock, scope } = await spawnedTerminal()
+      captured.textarea!.dispatchEvent(new Event('focus'))
+      vi.spyOn(document, 'hasFocus').mockReturnValue(false)
+      captured.textarea!.dispatchEvent(new Event('blur'))
+
+      window.dispatchEvent(new Event('focus'))
+
+      expect(diagnostics(mock, 'focus')[0]).toContain('could not retake focus')
       scope.stop()
     })
   })

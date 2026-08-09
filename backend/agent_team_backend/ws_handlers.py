@@ -4164,25 +4164,33 @@ async def project_rename_pane(session: "Session", msg_id: str, msg_type: str, pa
 
 @handler("project.set_pane_auto_name")
 async def project_set_pane_auto_name(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
-    """Persist an auto-generated pane title (set-once; custom_name wins).
+    """Persist an auto-generated pane title (custom_name always wins).
+
+    *source* is "heuristic" (the renderer's instant string title) or "llm" (the
+    model's answer, which may upgrade a heuristic title once); see
+    ProjectStore.set_pane_auto_name for the full write ordering. Anything else
+    is treated as "heuristic" rather than rejected — an unknown source from an
+    older window should still be able to name a pane.
 
     An accepted write patches both the project.json spawn-history mirror
     (autoName key, via the store) and the full spawn-history store, the same
     way rename_pane does — the mirror only holds the last 100 entries, so
     older ones would otherwise depend entirely on the renderer's debounced
-    snapshot. A no-op (empty name, or the pane already named either way)
-    touches neither store and is not broadcast — the store is the final
-    arbiter of the cross-window race, so only the winning write reaches peer
-    windows.
+    snapshot. A no-op (empty name, or a write the ordering rejects) touches
+    neither store and is not broadcast — the store is the final arbiter of the
+    cross-window race, so only the winning write reaches peer windows.
     """
     from . import app
 
     ws_raw = payload.get("workspace_path", "") or ""
     pane_id = payload.get("pane_id", "") or ""
     auto_name = (payload.get("auto_name", "") or "").strip()
+    source = (payload.get("source", "") or "heuristic").strip()
+    if source not in ("heuristic", "llm"):
+        source = "heuristic"
     if pane_id:
         project, changed = app.project_store.set_pane_auto_name(
-            ws_raw, pane_id=pane_id, auto_name=auto_name
+            ws_raw, pane_id=pane_id, auto_name=auto_name, source=source
         )
         if project is not None and changed:
             # Patch the full store at the source too: the renderer's debounced
