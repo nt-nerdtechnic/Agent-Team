@@ -9,9 +9,10 @@ Two entry points, both blocking (callers offload with ``asyncio.to_thread``):
 
 Three invariants the whole module is built around:
 
-1. **Symlinks are never followed.** ``~/.codex-panes/*`` and
-   ``<app_data>/runtime/skills/*`` are dense symlink farms pointing back at
-   shared config; following them double-counts and can loop. Every
+1. **Symlinks are never followed.** ``~/.codex-panes/*``, ``~/.navide-panes/*``
+   and ``<app_data>/runtime/skills/*`` are dense symlink farms pointing back at
+   shared config — a ``~/.navide-panes`` home mirrors the whole real home, so
+   following one would walk the user's entire disk. Every
    ``stat``/``is_dir`` call passes ``follow_symlinks=False`` and a symlink
    itself counts as zero bytes.
 2. **Every deletion is root-guarded.** A path is resolved and asserted to be
@@ -43,6 +44,7 @@ from .credential_vault import LOGIN_HOME_DIRNAME
 from .db import DB_FILENAME, MIGRATED_SUFFIX
 from .history_store import HISTORY_FILE
 from .plan_history import HISTORY_DIR_NAME as PLAN_HISTORY_DIR_NAME
+from .plugins.builtin.navide_plans import pane_home
 from .profiles_store import PROFILE_HOME_DIRNAME, default_profiles_root
 from .projects import (
     PROJECT_DIR_NAME,
@@ -136,6 +138,12 @@ def profiles_root() -> Path:
 
 def codex_panes_root() -> Path:
     return Path.home() / ".codex-panes"
+
+
+def shim_panes_root() -> Path:
+    """Per-pane MCP shim homes for kimi/grok/antigravity, one level deeper
+    than the codex panes root: ``<agent>/<pane id>``."""
+    return Path.home() / pane_home.PANES_DIR_NAME
 
 
 def updater_cache_paths() -> list[Path]:
@@ -741,6 +749,46 @@ def _is_deleted_path(path: str) -> bool:
         return os.fspath(parent) not in MOUNT_HOST_DIRS
 
 
+def _classify_pane_homes(
+    panes: Path,
+    referenced: set[str],
+    established: bool,
+    grace_cutoff: float,
+    errors: list[dict[str, str]],
+) -> tuple[list[Path], list[Path]]:
+    """Split a directory whose children are pane-id homes into ``(stale, kept)``.
+
+    Shared by the codex panes root and the MCP shim homes, which are named by
+    the same pane ids and so answer to the same reference set.
+    """
+    stale: list[Path] = []
+    # Loose top-level entries (a stray .DS_Store, a dangling symlink) are not
+    # pane homes, so they are never cleanable — but they still have to land in
+    # a bucket or the group total under-reports them.
+    kept: list[Path] = [
+        p for p in _top_level_entries(panes, errors) if p.is_symlink() or not p.is_dir()
+    ]
+    for pane in _iter_dirs(panes, errors):
+        if pane.name.startswith("."):
+            # Pane homes are named after a pane id; ``prepare()`` never makes a
+            # dotted one. A hidden dir in the panes root belongs to something
+            # else, so it is counted but never offered for deletion.
+            kept.append(pane)
+            continue
+        try:
+            mtime = pane.lstat().st_mtime
+        except OSError as err:
+            # Fail closed: a home we cannot even stat is never offered up.
+            _record_error(errors, pane, err)
+            kept.append(pane)
+            continue
+        if established and pane.name not in referenced and mtime < grace_cutoff:
+            stale.append(pane)
+        else:
+            kept.append(pane)
+    return stale, kept
+
+
 def _referenced_codex_home_ids(
     workspace_paths: list[str], errors: list[dict[str, str]]
 ) -> tuple[set[str], bool]:
@@ -910,31 +958,9 @@ def _cli_homes_group(workspace_paths: list[str], errors: list[dict[str, str]]) -
     referenced, established = _referenced_codex_home_ids(workspace_paths, errors)
     grace_cutoff = time.time() - CODEX_HOME_GRACE_SECONDS
     grace_hours = CODEX_HOME_GRACE_SECONDS // 3600
-    orphan_panes: list[Path] = []
-    # Loose top-level entries (a stray .DS_Store, a dangling symlink) are not
-    # pane homes, so they are never cleanable — but they still have to land in
-    # a bucket or the group total under-reports them.
-    kept_panes: list[Path] = [
-        p for p in _top_level_entries(panes, errors) if p.is_symlink() or not p.is_dir()
-    ]
-    for pane in _iter_dirs(panes, errors):
-        if pane.name.startswith("."):
-            # Pane homes are named after a pane id; ``prepare()`` never makes a
-            # dotted one. A hidden dir in the panes root belongs to something
-            # else, so it is counted but never offered for deletion.
-            kept_panes.append(pane)
-            continue
-        try:
-            mtime = pane.lstat().st_mtime
-        except OSError as err:
-            # Fail closed: a home we cannot even stat is never offered up.
-            _record_error(errors, pane, err)
-            kept_panes.append(pane)
-            continue
-        if established and pane.name not in referenced and mtime < grace_cutoff:
-            orphan_panes.append(pane)
-        else:
-            kept_panes.append(pane)
+    orphan_panes, kept_panes = _classify_pane_homes(
+        panes, referenced, established, grace_cutoff, errors
+    )
 
     orphan_note = (
         "Codex pane homes no pane still points at: no pane record and no Agent "
@@ -977,10 +1003,70 @@ def _cli_homes_group(workspace_paths: list[str], errors: list[dict[str, str]]) -
         errors,
     )
 
+    # MCP shim homes are nested one level deeper (<agent>/<pane id>), so the
+    # per-agent dirs are walked and their pane homes pooled into one bucket.
+    shims = shim_panes_root()
+    shim_orphans: list[Path] = []
+    shim_kept: list[Path] = [
+        p for p in _top_level_entries(shims, errors) if p.is_symlink() or not p.is_dir()
+    ]
+    for agent_dir in _iter_dirs(shims, errors):
+        agent_orphans, agent_kept = _classify_pane_homes(
+            agent_dir, referenced, established, grace_cutoff, errors
+        )
+        shim_orphans += agent_orphans
+        shim_kept += agent_kept
+
+    shim_stale_item = _measured(
+        _Item(
+            "shimPanesStale",
+            risk="caution",
+            cleanable=True,
+            root=shims,
+            paths=shim_orphans,
+            note=(
+                "Per-pane MCP homes for Kimi, Grok and Antigravity that no pane "
+                "still points at, on the same test as the Codex homes above. "
+                "They are mostly symlinks back to your real home, so deleting "
+                "one removes the links, never what they point at."
+                if established
+                else (
+                    "Per-pane MCP homes for Kimi, Grok and Antigravity that no "
+                    "pane still points at. Nothing is listed: a workspace record "
+                    "could not be read this scan, so every home is being kept."
+                )
+            ),
+        ),
+        errors,
+    )
+    shim_recent_item = _measured(
+        _Item(
+            "shimPanesRecent",
+            risk="caution",
+            cleanable=False,
+            root=shims,
+            paths=shim_kept,
+            note=(
+                "Per-pane MCP homes still in use, touched in the last "
+                f"{grace_hours} hours, or loose files sitting next to them."
+            ),
+        ),
+        errors,
+    )
+
     return _Group(
         "cliHomes",
         str(root),
-        [archived_item, caches_item, history_item, other_item, stale_item, recent_item],
+        [
+            archived_item,
+            caches_item,
+            history_item,
+            other_item,
+            stale_item,
+            recent_item,
+            shim_stale_item,
+            shim_recent_item,
+        ],
     )
 
 

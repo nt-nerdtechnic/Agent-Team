@@ -48,11 +48,12 @@ additive spawn-time flags — no user config file is ever modified:
   one that already existed is left to the user to manage. Unparseable JSON
   aborts the write rather than clobbering it.
 
-Deliberately not wired this way: the CLIs whose only MCP surface is a config
-file under a home directory (kimi, grok, antigravity). Their home variable
-relocates credentials and sessions along with the config, so pointing it at a
-Navide-owned directory logs the user out; doing it safely needs a symlink shim
-of the real home (see pane_home.py).
+- kimi / grok / antigravity: no flag, no config variable, and a config root
+  that is a fixed path under the home directory. Each pane gets a shim of that
+  directory instead — mirrored by symlink so credentials and sessions stay the
+  user's, with only the MCP config materialised. See pane_home.py; the env var
+  it hands back is ``KIMI_CODE_HOME`` for kimi and ``HOME`` for the two with no
+  config-dir variable of their own.
 
 The port is read from the discovery file written by __main__ before uvicorn
 starts (same mechanism the Claude hooks use). File absent → wiring no-ops,
@@ -71,7 +72,7 @@ from typing import Any
 from urllib.parse import quote
 
 from agent_team_backend.applog import app_data_dir, backend_port_file
-from agent_team_backend.plugins.builtin.navide_plans import plan_mcp_auth
+from agent_team_backend.plugins.builtin.navide_plans import pane_home, plan_mcp_auth
 
 log = logging.getLogger("agent_team_backend.plugins.builtin.navide_plans.plan_mcp_wiring")
 
@@ -388,6 +389,17 @@ def wire_command(
     if agent_key == "cursor":
         if cwd and ensure_cursor_config(cwd) and env is not None:
             env.setdefault(CURSOR_URL_ENV, plan_mcp_url(port, pane_id))
+        return command
+    if agent_key in pane_home.SHIM_SPECS:
+        # No pane id means no shim: the directory is keyed by it, and a shared
+        # one would have panes overwriting each other's endpoint.
+        if pane_id and env is not None:
+            prepared = pane_home.prepare(
+                agent_key, pane_id, plan_mcp_url(port, pane_id), SERVER_NAME
+            )
+            if prepared is not None:
+                env_var, root = prepared
+                env.setdefault(env_var, root)
         return command
     config_var = INLINE_CONFIG_ENV_VARS.get(agent_key)
     if config_var is not None and env is not None and config_var not in env:
