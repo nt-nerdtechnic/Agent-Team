@@ -855,6 +855,14 @@
           "label": "Referenced Codex pane homes",
           "desc": "Per-pane Codex homes a pane or Agent History entry can still resume."
         },
+        "shimPanesStale": {
+          "label": "Orphaned MCP pane homes",
+          "desc": "Per-pane Kimi, Grok and Antigravity homes no pane record names."
+        },
+        "shimPanesRecent": {
+          "label": "Referenced MCP pane homes",
+          "desc": "Per-pane Kimi, Grok and Antigravity homes still in use."
+        },
         "manualLogsOrphan": {
           "label": "Orphaned agent logs",
           "desc": "Log files with no matching Agent History entry."

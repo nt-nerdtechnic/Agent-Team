@@ -855,6 +855,14 @@
           "label": "仍被參照的 Codex pane 家目錄",
           "desc": "仍有 pane 或 Agent History 可續接的每 pane Codex 家目錄。"
         },
+        "shimPanesStale": {
+          "label": "孤兒 MCP pane 家目錄",
+          "desc": "已無 pane 紀錄參照的每 pane Kimi、Grok、Antigravity 家目錄。"
+        },
+        "shimPanesRecent": {
+          "label": "仍被參照的 MCP pane 家目錄",
+          "desc": "仍在使用中的每 pane Kimi、Grok、Antigravity 家目錄。"
+        },
         "manualLogsOrphan": {
           "label": "孤兒 agent 日誌",
           "desc": "在 Agent History 已找不到對應紀錄的日誌檔。"
