@@ -31,12 +31,28 @@ additive spawn-time flags — no user config file is ever modified:
   value already present in the spawn env is left alone. Note this reaches only
   variables Navide itself set — one exported from the user's shell profile is
   inherited by the CLI process and would be overwritten.
+- qwen: ``--mcp-config <inline JSON>``, same idea as claude but a different
+  server shape — qwen has no ``type`` discriminator and keys a streamable HTTP
+  endpoint as ``httpUrl`` (a plain ``url`` there means SSE). The flag is
+  undocumented in ``qwen --help`` but registered, takes inline JSON or a path,
+  and merges over (rather than replacing) the servers from settings.json.
+
+- cursor: the one CLI with no spawn-time surface at all — no MCP flag, no
+  config variable — so it is also the one exception to "no user config file is
+  ever modified". Its per-project ``<cwd>/.cursor/mcp.json`` is merge-written
+  with a single entry whose URL is the literal ``${env:NAVIDE_MCP_URL}``:
+  cursor interpolates ``${env:...}`` inside ``url`` (among other fields), so
+  the file stays constant while the per-pane credential rides in the spawn
+  env, and two panes on one workspace do not fight over it. A file we created
+  is added to ``.git/info/exclude`` so it stays out of the user's git status;
+  one that already existed is left to the user to manage. Unparseable JSON
+  aborts the write rather than clobbering it.
 
 Deliberately not wired this way: the CLIs whose only MCP surface is a config
-file under a home directory (kimi, grok, qwen, antigravity). Their home
-variable relocates credentials and sessions along with the config, so pointing
-it at a Navide-owned directory logs the user out; doing it safely needs a
-symlink shim of the real home, which is a much larger change than this module.
+file under a home directory (kimi, grok, antigravity). Their home variable
+relocates credentials and sessions along with the config, so pointing it at a
+Navide-owned directory logs the user out; doing it safely needs a symlink shim
+of the real home (see pane_home.py).
 
 The port is read from the discovery file written by __main__ before uvicorn
 starts (same mechanism the Claude hooks use). File absent → wiring no-ops,
@@ -70,6 +86,13 @@ INLINE_CONFIG_ENV_VARS = {
     "opencode": "OPENCODE_CONFIG_CONTENT",
     "kilo": "KILO_CONFIG_CONTENT",
 }
+
+# cursor's project config is written once per workspace and shared by every
+# pane in it, so the pane-specific URL cannot be baked into the file. It holds
+# this variable reference instead and the spawn env carries the real value.
+CURSOR_URL_ENV = "NAVIDE_MCP_URL"
+CURSOR_URL_REF = f"${{env:{CURSOR_URL_ENV}}}"
+CURSOR_CONFIG_RELPATH = Path(".cursor") / "mcp.json"
 
 # Minted at import, not on first use: spawn wiring runs in worker threads and
 # concurrent pane restores would otherwise race to initialise it, burning a
@@ -180,6 +203,20 @@ def inline_mcp_config(port: int, pane_id: str = "") -> str:
     )
 
 
+def inline_qwen_config(port: int, pane_id: str = "") -> str:
+    """Single-line JSON for qwen's ``--mcp-config``.
+
+    qwen keys the transport by field rather than a ``type`` discriminator:
+    ``httpUrl`` is streamable HTTP, a plain ``url`` is SSE, ``command`` is
+    stdio (validation rejects an entry carrying none of them). So this is the
+    same ``mcpServers`` map claude takes with the URL under a different key.
+    """
+    return json.dumps(
+        {"mcpServers": {SERVER_NAME: {"httpUrl": plan_mcp_url(port, pane_id)}}},
+        separators=(",", ":"),
+    )
+
+
 def inline_env_config(port: int, pane_id: str = "") -> str:
     """Single-line JSON for the CLIs configured by an inline-config variable.
 
@@ -203,12 +240,100 @@ def inline_env_config(port: int, pane_id: str = "") -> str:
     )
 
 
+def cursor_config_path(cwd: str | Path) -> Path:
+    """Project MCP config cursor discovers from the pane's working directory."""
+    return Path(cwd) / CURSOR_CONFIG_RELPATH
+
+
+def _write_atomic(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        tmp.write_text(content, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _exclude_from_git(repo: Path, relpath: str) -> None:
+    """Ignore ``relpath`` locally, without touching the user's .gitignore.
+
+    ``.git/info/exclude`` is per-clone and never committed, so a file Navide
+    created does not turn up in the user's git status or get swept into a
+    commit. Only called for a config file we created: an existing one is the
+    user's, and so is the decision to track it.
+    """
+    info = repo / ".git" / "info"
+    if not info.is_dir():
+        return  # no repo, or a worktree/submodule layout that is not ours
+    exclude = info / "exclude"
+    try:
+        text = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
+        if relpath in text.split():
+            return
+        prefix = "" if not text or text.endswith("\n") else "\n"
+        with exclude.open("a", encoding="utf-8") as handle:
+            handle.write(f"{prefix}{relpath}\n")
+    except OSError as err:
+        log.warning("could not exclude %s from git: %s", relpath, err)
+
+
+def ensure_cursor_config(cwd: str | Path) -> bool:
+    """Merge the navide-plans entry into a workspace's ``.cursor/mcp.json``.
+
+    Returns whether the file ends up carrying our entry. The user's own
+    servers are preserved, and a file that does not parse as a JSON object is
+    left exactly as it is — a cursor pane losing MCP wiring is a far smaller
+    harm than eating the servers someone hand-wrote.
+    """
+    root = Path(cwd)
+    if not root.is_dir():
+        return False
+    path = cursor_config_path(root)
+    existed = path.exists()
+    document: dict[str, Any] = {}
+    if existed:
+        try:
+            raw = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return False
+        if raw:
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError:
+                log.warning("%s is not valid JSON — leaving cursor unwired", path)
+                return False
+            if not isinstance(parsed, dict):
+                return False
+            document = parsed
+    servers = document.get("mcpServers")
+    if not isinstance(servers, dict):
+        servers = {}
+    # No "type": cursor reads a bare url as a remote server, and stdio is the
+    # only shape that names its transport.
+    entry = {"url": CURSOR_URL_REF}
+    if servers.get(SERVER_NAME) == entry:
+        return True
+    servers[SERVER_NAME] = entry
+    document["mcpServers"] = servers
+    try:
+        _write_atomic(path, json.dumps(document, indent=2) + "\n")
+    except OSError as err:
+        log.warning("could not write %s: %s", path, err)
+        return False
+    if not existed:
+        _exclude_from_git(root, CURSOR_CONFIG_RELPATH.as_posix())
+    return True
+
+
 def wire_command(
     agent_key: str,
     command: Any,
     port: int | None,
     pane_id: str = "",
     env: dict[str, str] | None = None,
+    cwd: str = "",
     *,
     claude_config: Path | None = None,
 ) -> Any:
@@ -227,6 +352,8 @@ def wire_command(
 
     ``env`` is the spawn environment and is mutated in place for the CLIs
     configured by variable; None (or a variable already set) leaves it alone.
+    ``cwd`` is the pane's working directory, needed only by cursor — with no
+    cwd its project config cannot be located and it goes unwired.
     """
     if port is None:
         return command
@@ -253,6 +380,15 @@ def wire_command(
             return command
         inline = inline_mcp_config(port, pane_id)
         return _append_to_command(command, f"--additional-mcp-config {shlex.quote(inline)}")
+    if agent_key == "qwen":
+        if "--mcp-config" in text:
+            return command
+        inline = inline_qwen_config(port, pane_id)
+        return _append_to_command(command, f"--mcp-config {shlex.quote(inline)}")
+    if agent_key == "cursor":
+        if cwd and ensure_cursor_config(cwd) and env is not None:
+            env.setdefault(CURSOR_URL_ENV, plan_mcp_url(port, pane_id))
+        return command
     config_var = INLINE_CONFIG_ENV_VARS.get(agent_key)
     if config_var is not None and env is not None and config_var not in env:
         env[config_var] = inline_env_config(port, pane_id)

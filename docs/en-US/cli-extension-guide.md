@@ -323,10 +323,10 @@ against installed v1.15.12.
 
 - Core integration: agent spec, marker-based session binding,
   `opencode --session <id>` resume, SQLite log reader, token stats,
-  onboarding registry entry.
+  onboarding registry entry, plan-MCP wiring (via `OPENCODE_CONFIG_CONTENT`).
 - Deliberately skipped layers: CLI profiles / credential vault (account
   isolation not yet researched), usage/quota provider (no vendor quota API),
-  plan-MCP wiring, per-pane home isolation (WAL DB is concurrency-safe).
+  per-pane home isolation (WAL DB is concurrency-safe).
 
 | Question | Finding (v1.15.12) |
 |---|---|

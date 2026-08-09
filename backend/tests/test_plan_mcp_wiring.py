@@ -191,6 +191,43 @@ def test_wire_copilot_keeps_user_additional_config() -> None:
     assert plan_mcp_wiring.SERVER_NAME in wired
 
 
+# ---- wire_command: qwen ----
+
+
+def test_wire_qwen_appends_inline_config_with_http_url() -> None:
+    wired = plan_mcp_wiring.wire_command("qwen", "qwen --yolo", 4567, pane_id="p1")
+    inline = plan_mcp_wiring.inline_qwen_config(4567, "p1")
+    assert wired == f"qwen --yolo --mcp-config {shlex.quote(inline)}"
+    entry = json.loads(inline)["mcpServers"][plan_mcp_wiring.SERVER_NAME]
+    # qwen has no "type" discriminator: httpUrl is streamable HTTP, while a
+    # plain "url" would be read as SSE.
+    assert entry == {"httpUrl": plan_mcp_wiring.plan_mcp_url(4567, "p1")}
+    assert "type" not in entry and "url" not in entry
+
+
+def test_wire_qwen_shell_wrapper_and_host_credential() -> None:
+    command = ["/bin/zsh", "-ilc", "qwen"]
+    wired = plan_mcp_wiring.wire_command("qwen", command, 4567)
+    assert wired[:2] == ["/bin/zsh", "-ilc"]
+    assert wired[2].startswith("qwen --mcp-config ")
+    assert "client=host" in wired[2]
+    assert command[2] == "qwen"  # input untouched
+
+
+def test_wire_qwen_second_run_is_noop() -> None:
+    once = plan_mcp_wiring.wire_command("qwen", "qwen", 4567)
+    assert plan_mcp_wiring.wire_command("qwen", once, 4567) == once
+
+
+def test_wire_qwen_respects_user_mcp_config_flag() -> None:
+    command = "qwen --mcp-config /home/user/my-servers.json"
+    assert plan_mcp_wiring.wire_command("qwen", command, 4567) == command
+
+
+def test_wire_qwen_noop_without_port() -> None:
+    assert plan_mcp_wiring.wire_command("qwen", "qwen", None) == "qwen"
+
+
 # ---- wire_command: opencode / kilo (config in an env var) ----
 
 
@@ -230,6 +267,100 @@ def test_wire_env_cli_without_pane_id_uses_the_host_credential() -> None:
     env: dict[str, str] = {}
     plan_mcp_wiring.wire_command("opencode", "opencode", 4567, "", env)
     assert "client=host" in env["OPENCODE_CONFIG_CONTENT"]
+
+
+# ---- wire_command: cursor (project config file) ----
+
+
+def _cursor_servers(root: Path) -> dict[str, Any]:
+    data = json.loads(plan_mcp_wiring.cursor_config_path(root).read_text(encoding="utf-8"))
+    return data["mcpServers"]
+
+
+def test_wire_cursor_writes_project_config_and_env_url(tmp_path: Path) -> None:
+    env: dict[str, str] = {}
+    wired = plan_mcp_wiring.wire_command("cursor", "cursor-agent", 4567, "p1", env, str(tmp_path))
+    assert wired == "cursor-agent"  # cursor has no flag: the command is untouched
+    # The file is shared by every pane in the workspace, so it holds a
+    # variable reference and the per-pane credential rides in the env.
+    assert _cursor_servers(tmp_path) == {
+        "navide-plans": {"url": "${env:NAVIDE_MCP_URL}"}
+    }
+    assert env["NAVIDE_MCP_URL"] == plan_mcp_wiring.plan_mcp_url(4567, "p1")
+
+
+def test_wire_cursor_keeps_user_servers_and_other_keys(tmp_path: Path) -> None:
+    path = plan_mcp_wiring.cursor_config_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps({"mcpServers": {"mine": {"command": "my-server"}}, "other": 1}),
+        encoding="utf-8",
+    )
+    plan_mcp_wiring.wire_command("cursor", "cursor-agent", 4567, "p1", {}, str(tmp_path))
+    servers = _cursor_servers(tmp_path)
+    assert servers["mine"] == {"command": "my-server"}
+    assert servers["navide-plans"]["url"] == "${env:NAVIDE_MCP_URL}"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["other"] == 1  # unrelated top-level keys survive
+
+
+def test_wire_cursor_never_clobbers_unparseable_json(tmp_path: Path) -> None:
+    path = plan_mcp_wiring.cursor_config_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text("{ not json at all", encoding="utf-8")
+    env: dict[str, str] = {}
+    plan_mcp_wiring.wire_command("cursor", "cursor-agent", 4567, "p1", env, str(tmp_path))
+    assert path.read_text(encoding="utf-8") == "{ not json at all"
+    assert env == {}  # unwired rather than wired against a file we could not merge
+
+
+def test_wire_cursor_second_run_does_not_rewrite(tmp_path: Path) -> None:
+    plan_mcp_wiring.wire_command("cursor", "cursor-agent", 4567, "p1", {}, str(tmp_path))
+    path = plan_mcp_wiring.cursor_config_path(tmp_path)
+    before = path.stat().st_mtime_ns
+    plan_mcp_wiring.wire_command("cursor", "cursor-agent", 4567, "p2", {}, str(tmp_path))
+    assert path.stat().st_mtime_ns == before
+    assert not path.with_suffix(".json.tmp").exists()
+
+
+def test_wire_cursor_excludes_a_file_it_created_from_git(tmp_path: Path) -> None:
+    (tmp_path / ".git" / "info").mkdir(parents=True)
+    plan_mcp_wiring.wire_command("cursor", "cursor-agent", 4567, "p1", {}, str(tmp_path))
+    exclude = (tmp_path / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+    assert ".cursor/mcp.json" in exclude.split()
+
+
+def test_wire_cursor_leaves_git_alone_for_a_preexisting_file(tmp_path: Path) -> None:
+    """An existing config is the user's, and so is the choice to track it."""
+    (tmp_path / ".git" / "info").mkdir(parents=True)
+    path = plan_mcp_wiring.cursor_config_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text("{}", encoding="utf-8")
+    plan_mcp_wiring.wire_command("cursor", "cursor-agent", 4567, "p1", {}, str(tmp_path))
+    assert not (tmp_path / ".git" / "info" / "exclude").exists()
+
+
+def test_wire_cursor_git_exclude_is_appended_once(tmp_path: Path) -> None:
+    info = tmp_path / ".git" / "info"
+    info.mkdir(parents=True)
+    (info / "exclude").write_text("*.log", encoding="utf-8")  # no trailing newline
+    plan_mcp_wiring.wire_command("cursor", "cursor-agent", 4567, "p1", {}, str(tmp_path))
+    plan_mcp_wiring.cursor_config_path(tmp_path).unlink()
+    plan_mcp_wiring.wire_command("cursor", "cursor-agent", 4567, "p1", {}, str(tmp_path))
+    lines = (info / "exclude").read_text(encoding="utf-8").split()
+    assert lines == ["*.log", ".cursor/mcp.json"]
+
+
+def test_wire_cursor_without_cwd_is_a_noop(tmp_path: Path) -> None:
+    env: dict[str, str] = {}
+    assert plan_mcp_wiring.wire_command("cursor", "cursor-agent", 4567, "p1", env) == "cursor-agent"
+    assert env == {}
+
+
+def test_wire_cursor_leaves_a_preset_url_var_alone(tmp_path: Path) -> None:
+    env = {"NAVIDE_MCP_URL": "http://example/preset"}
+    plan_mcp_wiring.wire_command("cursor", "cursor-agent", 4567, "p1", env, str(tmp_path))
+    assert env == {"NAVIDE_MCP_URL": "http://example/preset"}
 
 
 # ---- wire_command: gates ----
