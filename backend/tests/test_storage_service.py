@@ -37,13 +37,15 @@ def roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     app_data = tmp_path / "app-data"
     profiles = tmp_path / "cli-profiles"
     panes = tmp_path / "codex-panes"
-    for path in (app_data, profiles, panes):
+    shims = tmp_path / "navide-panes"
+    for path in (app_data, profiles, panes, shims):
         path.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(storage_service, "app_data_root", lambda: app_data)
     monkeypatch.setattr(storage_service, "profiles_root", lambda: profiles)
     monkeypatch.setattr(storage_service, "codex_panes_root", lambda: panes)
+    monkeypatch.setattr(storage_service, "shim_panes_root", lambda: shims)
     monkeypatch.setattr(storage_service, "updater_cache_paths", list)
-    return {"app_data": app_data, "profiles": profiles, "panes": panes}
+    return {"app_data": app_data, "profiles": profiles, "panes": panes, "shims": shims}
 
 
 def _item(report: dict[str, Any], item_id: str) -> dict[str, Any]:
@@ -452,6 +454,17 @@ def _pane_home(roots: dict[str, Path], name: str, size: int, *, age_days: int = 
     return home
 
 
+def _shim_home(
+    roots: dict[str, Path], agent: str, name: str, size: int, *, age_days: int = 90
+) -> Path:
+    """An MCP shim home, nested one level deeper than a codex pane home."""
+    home = roots["shims"] / agent / name
+    _write(home / "mcp.json", size)
+    old = time.time() - age_days * 86400
+    os.utime(home, (old, old))
+    return home
+
+
 def _pane_workspace(
     tmp_path: Path,
     *,
@@ -491,6 +504,51 @@ def test_a_home_a_pane_record_names_is_never_cleanable(
     storage_service.cleanup(["codexPanesStale"], [str(ws)], 30)
     assert kept.exists()
     assert not orphan.exists()
+
+
+def test_shim_pane_homes_answer_to_the_same_reference_set(
+    roots: dict[str, Path], tmp_path: Path
+) -> None:
+    """MCP shim homes are keyed by pane id like the codex ones, so a pane
+    record protects them on exactly the same test — across every agent dir."""
+    ws = _pane_workspace(tmp_path, panes=[{"pane_id": "kept", "spawn_status": "spawned"}])
+    _registry(roots, [ws])
+    kept = _shim_home(roots, "kimi", "kept", 30)
+    orphan = _shim_home(roots, "grok", "orphan", 40)
+
+    report = storage_service.collect_usage([str(ws)], 30)
+
+    assert _item(report, "shimPanesRecent")["bytes"] == 30
+    assert _item(report, "shimPanesRecent")["cleanable"] is False
+    assert _item(report, "shimPanesStale")["bytes"] == 40
+    assert _item(report, "shimPanesStale")["paths"] == [str(orphan)]
+
+    storage_service.cleanup(["shimPanesStale"], [str(ws)], 30)
+    assert kept.exists()
+    assert not orphan.exists()
+
+
+def test_cleaning_a_shim_home_removes_links_not_their_targets(
+    roots: dict[str, Path], tmp_path: Path
+) -> None:
+    """A shim home is mostly symlinks back into the real home. Deleting one
+    must take the links and leave everything they point at."""
+    ws = _pane_workspace(tmp_path, panes=[{"pane_id": "other", "spawn_status": "spawned"}])
+    _registry(roots, [ws])
+    real = _write(tmp_path / "real-home" / "credentials.json", 100)
+    orphan = _shim_home(roots, "kimi", "orphan", 40)
+    (orphan / "credentials.json").symlink_to(real)
+    old = time.time() - 90 * 86400
+    os.utime(orphan, (old, old))  # the symlink above reset the dir mtime
+    old = time.time() - 90 * 86400
+    os.utime(orphan, (old, old))
+
+    # A symlink counts as zero bytes, so the target is not double-counted.
+    assert _item(storage_service.collect_usage([str(ws)], 30), "shimPanesStale")["bytes"] == 40
+
+    storage_service.cleanup(["shimPanesStale"], [str(ws)], 30)
+    assert not orphan.exists()
+    assert real.exists() and real.stat().st_size == 100
 
 
 def test_a_removed_pane_record_still_protects_its_home(
