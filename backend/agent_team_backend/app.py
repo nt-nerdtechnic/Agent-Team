@@ -84,6 +84,7 @@ from .mcp_settings import (
     MCPSettingsStore,
     redact_mcp_server_secrets,
 )
+from .plan_index import PlanIndex
 from .plan_provisioning import ensure_plan_assets, plan_spec_exists
 from .profile_migration import migrate_legacy_claude_homes
 from .profiles_store import CliProfilesStore
@@ -128,6 +129,7 @@ roles_store = RolesStore(db=database)
 stages_store = StagesStore(db=database)
 tokens_store = TokensStore(db=database)
 history_store = HistoryStore(databases=workspace_databases)
+plan_index = PlanIndex(databases=workspace_databases)
 # Cross-workspace by construction, so it lives in the global database.
 agent_message_log = AgentMessageLog(db=database)
 codex_home_manager = CodexHomeManager()
@@ -404,6 +406,12 @@ def _watch_plans_workspace(ws_path: str, rel_path: str) -> None:
     """A plan/report subtree fs access means a plan surface is open — start watching
     that workspace (idempotent) so plan edits push `plans.changed`."""
     if _git_watcher is not None and any(rel_path.startswith(prefix) for prefix in _PLAN_DOC_PREFIXES):
+        _git_watcher.watch(ws_path)
+
+
+def _watch_plans_workspace_now(ws_path: str) -> None:
+    """Same, for callers whose request *is* the plans list (no rel_path to match)."""
+    if _git_watcher is not None and ws_path:
         _git_watcher.watch(ws_path)
 
 

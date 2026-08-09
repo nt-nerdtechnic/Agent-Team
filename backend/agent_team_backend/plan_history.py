@@ -28,6 +28,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
+from .plan_index import find_nested_plan_roots
 from .projects import PROJECT_DIR_NAME
 
 log = logging.getLogger("agent_team_backend.plan_history")
@@ -110,13 +111,26 @@ def _snapshot_stage(name: str, suffix: str) -> str | None:
 
 
 def snapshot_plans(workspace_path: str) -> list[str]:
-    """Scan the workspace's plans dir; snapshot every plan whose current stage
-    differs from its newest recorded snapshot (or that has no history yet).
+    """Scan every plans dir in the workspace; snapshot each plan whose current
+    stage differs from its newest recorded snapshot (or that has no history yet).
+
+    Covers the workspace's own plans dir and those of nested plan roots, matching
+    what the plans list surfaces — a plan the user can see and stage must get a
+    snapshot like any other.
 
     Returns workspace-relative POSIX paths of the snapshots created. Never
     raises: unreadable or meta-less files are skipped.
     """
-    plans_dir = Path(workspace_path) / PROJECT_DIR_NAME / _PLANS_DIR_NAME
+    root = Path(workspace_path)
+    created: list[str] = []
+    for rel_root in ["", *find_nested_plan_roots(root)]:
+        base = root / rel_root if rel_root else root
+        created.extend(_snapshot_plans_dir(base / PROJECT_DIR_NAME / _PLANS_DIR_NAME, root))
+    return created
+
+
+def _snapshot_plans_dir(plans_dir: Path, workspace_root: Path) -> list[str]:
+    """Snapshot every staged plan in one plans directory."""
     if not plans_dir.is_dir():
         return []
     created: list[str] = []
@@ -150,7 +164,7 @@ def snapshot_plans(workspace_path: str) -> list[str]:
         except OSError as err:
             log.warning("plan snapshot failed for %s: %s", plan, err)
             continue
-        created.append(target.relative_to(Path(workspace_path)).as_posix())
+        created.append(target.relative_to(workspace_root).as_posix())
         _prune(history_dir, suffix)
     return created
 

@@ -380,6 +380,55 @@ def fake_terminals(monkeypatch: pytest.MonkeyPatch) -> _FakeTerminalService:
     return fake
 
 
+async def test_plan_create_from_a_subdirectory_lands_in_the_repo_root(
+    workspace: Path,
+) -> None:
+    """An agent reporting its own cwd must not start a second pile of plans."""
+    (workspace / ".git").mkdir()
+    subdir = workspace / "backend" / "src"
+    subdir.mkdir(parents=True)
+
+    result = await _call(
+        "plan_create",
+        {
+            "workspace_path": str(subdir),
+            "name": "Nested Plan",
+            "overview": "From a subdirectory.",
+            "todos": ["Only task"],
+        },
+    )
+
+    assert not result.isError
+    rel_path = result.structuredContent["rel_path"]
+    assert (workspace / rel_path).is_file()
+    assert not (subdir / ".agent-team").exists()
+
+
+async def test_plan_read_from_a_subdirectory_finds_the_repo_root_plan(
+    workspace: Path,
+) -> None:
+    """Reads resolve the same way writes do, or a created plan is unreachable."""
+    (workspace / ".git").mkdir()
+    subdir = workspace / "backend"
+    subdir.mkdir()
+    created = await _call(
+        "plan_create",
+        {
+            "workspace_path": str(workspace),
+            "name": "Root Plan",
+            "overview": "",
+            "todos": ["Task"],
+        },
+    )
+    rel_path = created.structuredContent["rel_path"]
+
+    result = await _call("plan_read", {"workspace_path": str(subdir), "rel_path": rel_path})
+
+    assert not result.isError
+    assert result.structuredContent["rel_path"] == rel_path
+    assert result.structuredContent["html"]
+
+
 async def test_plan_create_warns_when_no_pane_uses_the_workspace(
     workspace: Path, fake_terminals: _FakeTerminalService
 ) -> None:

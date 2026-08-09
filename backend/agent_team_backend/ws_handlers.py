@@ -318,6 +318,31 @@ async def fs_convert_office(session: "Session", msg_id: str, msg_type: str, payl
     await session.send_json(make_response(msg_id, msg_type, result))
 
 
+# ── Plan documents (plans.*) ────────────────────────────────────────────────
+# One scan of every plan/report directory, carrying the meta the caller parsed
+# last time whenever the file has not changed since. Replaces a per-directory
+# fs.list_dir fan-out plus one fs.read_file per document on every refresh.
+@handler("plans.list_docs")
+async def plans_list_docs(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    from . import app
+
+    ws_path = payload.get("workspace_path") or ""
+    app._watch_plans_workspace_now(ws_path)
+    result = await asyncio.to_thread(app.plan_index.list_docs, ws_path)
+    await session.send_json(make_response(msg_id, msg_type, result))
+
+
+@handler("plans.cache_put")
+async def plans_cache_put(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    from . import app
+
+    ws_path = payload.get("workspace_path") or ""
+    result = await asyncio.to_thread(
+        app.plan_index.cache_put, ws_path, payload.get("entries")
+    )
+    await session.send_json(make_response(msg_id, msg_type, result))
+
+
 # ── Search (search.*) ───────────────────────────────────────────────────────
 @handler("search.find_in_files")
 async def search_find_in_files(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:

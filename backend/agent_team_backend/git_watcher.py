@@ -110,17 +110,27 @@ class _RepoHandler(FileSystemEventHandler):
         """True for a user-facing plan or report document (HTML or markdown) directly
         under one of the supported plan/report directories — infra files (`_` prefix),
         hidden files and `.history/` snapshots are excluded, so snapshot writes
-        triggered by a plans event can never re-trigger it."""
+        triggered by a plans event can never re-trigger it.
+
+        The directory may sit at any depth: a nested plan root (a repository
+        below the workspace) is listed by `plan_index`, so its documents have to
+        push `plans.changed` too, or the list silently stops refreshing for them.
+        Noise segments are still pruned — a plan-shaped path inside
+        `node_modules` is a dependency's document, not the user's."""
         try:
             rel = Path(src).resolve().relative_to(self._root)
         except (ValueError, OSError):
             return False
         parts = rel.parts
-        if len(parts) != 3:
+        if len(parts) < 3:
             return False
-        if (parts[0], parts[1]) not in PLAN_DOC_DIRS:
+        if (parts[-3], parts[-2]) not in PLAN_DOC_DIRS:
             return False
-        name = parts[2]
+        # `.agent-team` is itself an ignored segment (run-log churn), so the
+        # prefix check stops before the plan directory's own two segments.
+        if any(seg in _IGNORE_SEGMENTS for seg in parts[:-3]):
+            return False
+        name = parts[-1]
         return name.endswith((".html", ".plan.md", ".md")) and not name.startswith(("_", "."))
 
     def _is_relevant(self, src: str) -> bool:

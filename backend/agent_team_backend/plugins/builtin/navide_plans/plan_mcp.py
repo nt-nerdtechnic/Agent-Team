@@ -38,6 +38,7 @@ from starlette.types import Receive, Scope, Send
 
 from agent_team_backend.fs_service import FsError, _resolve_safe, write_file
 from agent_team_backend.pending_registry import TIMEOUT, PendingRegistry
+from agent_team_backend.plan_index import resolve_plan_root
 from agent_team_backend.plan_meta import (
     PLAN_STAGES,
     TODO_STATUSES,
@@ -464,6 +465,7 @@ async def plan_list(workspace_path: str, ctx: Context) -> list[dict[str, Any]]:
     overview, todos ({total, by_status} counts), mtime (epoch seconds).
     """
     _resolve_caller(ctx)
+    workspace_path = await asyncio.to_thread(resolve_plan_root, workspace_path)
     return await asyncio.to_thread(_list_plans_sync, workspace_path)
 
 
@@ -477,6 +479,7 @@ async def plan_read(workspace_path: str, rel_path: str, ctx: Context) -> dict[st
     content.
     """
     _resolve_caller(ctx)
+    workspace_path = await asyncio.to_thread(resolve_plan_root, workspace_path)
     return await asyncio.to_thread(_read_plan_sync, workspace_path, rel_path)
 
 
@@ -501,6 +504,7 @@ async def plan_create(
     view will not find it; re-create it under the warned-about workspace.
     """
     _resolve_caller(ctx)
+    workspace_path = await asyncio.to_thread(resolve_plan_root, workspace_path)
     result = await asyncio.to_thread(_create_plan_sync, workspace_path, name, overview, todos)
     warning = await asyncio.to_thread(_workspace_mismatch_warning, workspace_path)
     if warning:
@@ -520,6 +524,7 @@ async def plan_update_stage(
     on disk during the update. Returns {stage, approvedAt}.
     """
     _resolve_caller(ctx)
+    workspace_path = await asyncio.to_thread(resolve_plan_root, workspace_path)
     return await asyncio.to_thread(_update_stage_sync, workspace_path, rel_path, stage)
 
 
@@ -534,6 +539,7 @@ async def plan_update_todo(
     updated todo object.
     """
     _resolve_caller(ctx)
+    workspace_path = await asyncio.to_thread(resolve_plan_root, workspace_path)
     return await asyncio.to_thread(_update_todo_sync, workspace_path, rel_path, todo_id, status)
 
 
@@ -550,6 +556,7 @@ async def plan_add_note(
     next edit. Returns the created note.
     """
     _resolve_caller(ctx)
+    workspace_path = await asyncio.to_thread(resolve_plan_root, workspace_path)
     return await asyncio.to_thread(_add_note_sync, workspace_path, rel_path, text, author)
 
 

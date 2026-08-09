@@ -46,6 +46,23 @@ def test_is_plan_doc_covers_all_supported_dirs(tmp_path: Path) -> None:
         assert h._is_plan_doc(str(tmp_path / p)) is False, p
 
 
+def test_is_plan_doc_covers_nested_plan_roots(tmp_path: Path) -> None:
+    """plan_index lists a nested repository's documents, so they must notify too."""
+    h = _handler(tmp_path)
+    for p in [
+        "project/.agent-team/plans/feature.html",
+        "packages/app/docs/reports/analysis.md",
+    ]:
+        assert h._is_plan_doc(str(tmp_path / p)) is True, p
+
+    for p in [
+        "node_modules/pkg/.agent-team/plans/dep.html",  # a dependency's document
+        "dist/.claude/plans/built.md",                  # build output
+        "project/.agent-team/plans/.history/snap.html",  # snapshot churn
+    ]:
+        assert h._is_plan_doc(str(tmp_path / p)) is False, p
+
+
 def test_build_dirs_are_ignored(tmp_path: Path) -> None:
     h = _handler(tmp_path)
     for noise in ("node_modules/x/y.js", ".venv/lib/z.py", "dist/bundle.js",

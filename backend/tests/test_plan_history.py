@@ -254,3 +254,39 @@ def test_html_and_md_plans_snapshot_independently(tmp_path: Path) -> None:
     assert len(created) == 2
     assert any(c.endswith("_approved.html") for c in created)
     assert any(c.endswith("_in-review.plan.md") for c in created)
+
+
+def test_nested_plan_root_plans_are_snapshotted(tmp_path: Path) -> None:
+    """A nested repository's plans are listed, so they get history too."""
+    (tmp_path / "project" / ".git").mkdir(parents=True)
+    nested_plans = tmp_path / "project" / ".agent-team" / "plans"
+    nested_plans.mkdir(parents=True)
+    (nested_plans / "inner.html").write_text(_plan_html("approved"), encoding="utf-8")
+
+    created = plan_history.snapshot_plans(str(tmp_path))
+
+    assert len(created) == 1
+    assert created[0].startswith("project/.agent-team/plans/.history/inner/")
+    assert (tmp_path / created[0]).is_file()
+
+
+def test_same_named_plans_in_two_roots_keep_separate_histories(tmp_path: Path) -> None:
+    """Sharing one history directory would show each root the other's snapshots."""
+    outer = _plans_dir(tmp_path)
+    (outer / "plan.html").write_text(_plan_html("draft"), encoding="utf-8")
+    (tmp_path / "project" / ".git").mkdir(parents=True)
+    inner = tmp_path / "project" / ".agent-team" / "plans"
+    inner.mkdir(parents=True)
+    (inner / "plan.html").write_text(_plan_html("done"), encoding="utf-8")
+
+    created = plan_history.snapshot_plans(str(tmp_path))
+
+    assert sorted(created) == sorted(
+        [
+            next(p for p in created if p.startswith(".agent-team/")),
+            next(p for p in created if p.startswith("project/")),
+        ]
+    )
+    assert len(created) == 2
+    assert (outer / ".history" / "plan").is_dir()
+    assert (inner / ".history" / "plan").is_dir()

@@ -73,3 +73,23 @@ def test_missing_or_empty_workspace_returns_false(tmp_path):
     assert ensure_plan_assets(str(tmp_path / "does-not-exist")) is False
     assert plan_spec_exists("") is False
     assert plan_spec_exists(str(tmp_path)) is False
+
+
+def test_subdirectory_of_a_repo_provisions_into_the_repo_root(tmp_path):
+    """Provisioning per opened folder is what scatters a project's plans."""
+    (tmp_path / ".git").mkdir()
+    subdir = tmp_path / "backend" / "src"
+    subdir.mkdir(parents=True)
+
+    assert ensure_plan_assets(str(subdir)) is True
+
+    assert (_plans_dir(tmp_path) / SPEC_FILENAME).is_file()
+    assert not (subdir / ".agent-team").exists()
+    # The subdirectory reports the spec as present — same resolution both ways.
+    assert plan_spec_exists(str(subdir)) is True
+
+
+def test_a_container_folder_stays_its_own_plan_root(tmp_path):
+    """No repository above it, so the folder the user opened is the root."""
+    assert ensure_plan_assets(str(tmp_path)) is True
+    assert (_plans_dir(tmp_path) / SPEC_FILENAME).is_file()

@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from .plan_index import resolve_plan_root
 from .projects import ensure_workspace_data_dir
 
 logger = logging.getLogger(__name__)
@@ -25,25 +26,35 @@ _WORKSPACE_NAME_PLACEHOLDER = "{{WORKSPACE_NAME}}"
 
 
 def plan_spec_exists(workspace_path: str) -> bool:
-    """True when the workspace has a provisioned (or hand-installed) spec."""
+    """True when the workspace's plan root has a provisioned (or hand-installed) spec.
+
+    Resolved the same way :func:`ensure_plan_assets` provisions it, so opening a
+    subdirectory of a provisioned project does not report the spec as missing.
+    """
     if not workspace_path:
         return False
     try:
         return (
-            Path(workspace_path) / ".agent-team" / "plans" / SPEC_FILENAME
+            Path(resolve_plan_root(workspace_path)) / ".agent-team" / "plans" / SPEC_FILENAME
         ).is_file()
     except OSError:
         return False
 
 
 def ensure_plan_assets(workspace_path: str) -> bool:
-    """Idempotently copy missing plan assets into the workspace.
+    """Idempotently copy missing plan assets into the workspace's plan root.
+
+    The assets land in the project root (:func:`resolve_plan_root`), not in
+    whatever subdirectory was opened: a spec file is what tells a CLI agent
+    where plans belong, so provisioning one per opened folder is what scatters
+    a project's plans across several piles in the first place.
 
     Returns True when the spec file exists afterwards. Never raises and never
     overwrites an existing file.
     """
     if not workspace_path:
         return False
+    workspace_path = resolve_plan_root(workspace_path)
     try:
         if not Path(workspace_path).is_dir():
             return False
