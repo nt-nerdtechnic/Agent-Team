@@ -51,6 +51,22 @@ describe('deriveAutoName', () => {
     expect(out.includes('好的')).toBe(false)
   })
 
+  it('strips filler from short input too', () => {
+    expect(deriveAutoName('請幫我修 resize bug')).toBe('幫我修 resize bug')
+    expect(deriveAutoName('Can you fix the resize bug')).toBe('fix the resize bug')
+  })
+
+  it('strips filler from the first clause of long input', () => {
+    const material =
+      'Please refactor the reconnect logic. Then add exponential backoff and jitter so clients do not stampede the server after a restart.'
+    expect(deriveAutoName(material)).toBe('refactor the reconnect logic')
+  })
+
+  it('keeps the original when stripping filler would empty the title', () => {
+    expect(deriveAutoName('請')).toBe('請')
+    expect(deriveAutoName('好的，')).toBe('好的，')
+  })
+
   it('caps output at 60 characters', () => {
     const material = 'x'.repeat(300)
     expect(deriveAutoName(material).length).toBeLessThanOrEqual(60)

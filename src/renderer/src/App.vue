@@ -68,6 +68,7 @@ import {
 } from './data/stages'
 import { i18n } from './i18n'
 import { deriveAutoName } from './lib/autoName'
+import { diagLog } from './lib/diagLog'
 import { findConsecutiveQuestionBlocks, findSentinel } from './lib/buffer'
 import {
   buildCliPaneBufferReply,
@@ -3162,9 +3163,32 @@ async function persistPaneSession(pane: ActivePane, sessionId: string): Promise<
   }
 }
 
+// A pane refuses keystrokes for as long as preparationStatus is neither 'ready'
+// nor 'failed', and the steps in between are unbounded waits (an 8s dialog
+// watch, a quiet-settle, a role injection). That whole window was invisible
+// after the fact, so "the pane ignored my first few characters" could not be
+// attributed to a step. Each transition now records how long the step it is
+// leaving actually took.
+const prepStageEnteredAt = new Map<string, number>()
+function setPrepStatus(pane: ActivePane, next: ActivePane['preparationStatus']): void {
+  const prev = pane.preparationStatus
+  pane.preparationStatus = next
+  if (prev === next) return
+  const now = Date.now()
+  const enteredAt = prepStageEnteredAt.get(pane.id)
+  const spent = enteredAt === undefined ? '' : ` after=${now - enteredAt}ms`
+  if (next === 'ready' || next === 'failed') prepStageEnteredAt.delete(pane.id)
+  else prepStageEnteredAt.set(pane.id, now)
+  diagLog(
+    backend,
+    'pane-prep',
+    `pane=${pane.id.slice(0, 8)} agent=${pane.agentKey} ${prev}->${next}${spent}`
+  )
+}
+
 function scheduleInjection(pane: ActivePane): void {
   pane.injectionStatus = 'scheduled'
-  pane.preparationStatus = 'checking-dialog'
+  setPrepStatus(pane, 'checking-dialog')
   syncViews()
   const tag = `[pane ${pane.id.slice(0, 8)}]`
   const startedAt = Date.now()
@@ -3190,7 +3214,7 @@ function scheduleInjection(pane: ActivePane): void {
     //    a dismiss the CLI repaints, so require a fresh quiet window; without
     //    one the buffer is already quiet (dismissStartupDialog proved it), so
     //    a short confirmation suffices.
-    pane.preparationStatus = 'settling'
+    setPrepStatus(pane, 'settling')
     syncViews()
     await waitForQuiet(pane.id, dismissed ? 2000 : 1000, dismissed ? 2500 : ROLE_PROMPT_DELAY_MS)
     if (!paneAlive(pane.id)) return
@@ -3199,7 +3223,7 @@ function scheduleInjection(pane: ActivePane): void {
     //    will receive role + kickoff together at activation time.
     if (!pane.roleKey) {
       pane.injectionStatus = 'skipped'
-      pane.preparationStatus = 'ready'
+      setPrepStatus(pane, 'ready')
       syncViews()
       pipelineLog(`${tag} ⏸ no role selected — skipping role injection`)
       if (pane.origin === 'manual' && pane.agentKey === 'claude' && pane.pinnedSessionId) {
@@ -3209,7 +3233,7 @@ function scheduleInjection(pane: ActivePane): void {
     }
     if (pane.skipRoleInjection) {
       pane.injectionStatus = 'skipped'
-      pane.preparationStatus = 'ready'
+      setPrepStatus(pane, 'ready')
       syncViews()
       pipelineLog(`${tag} ⏸ role deferred (pre-spawn — will inject at stage activation)`)
       return
@@ -3243,7 +3267,7 @@ function scheduleInjection(pane: ActivePane): void {
     const role = rolesApi.find(pane.roleKey)
     if (!role) {
       pane.injectionStatus = 'failed'
-      pane.preparationStatus = 'failed'
+      setPrepStatus(pane, 'failed')
       syncViews()
       pipelineLog(`${tag} ✕ role '${pane.roleKey}' not found in registry`)
       return
@@ -3254,7 +3278,7 @@ function scheduleInjection(pane: ActivePane): void {
     // for this slot's stage to activate (which for late stages is much later).
     const roleContent = role.system_prompt + ROLE_STANDBY_SUFFIX + sessionMarkerLine(pane.sessionMarker)
     pipelineLog(`${tag} ➜ injecting role '${role.label}' (${roleContent.length} chars)`)
-    pane.preparationStatus = 'injecting-role'
+    setPrepStatus(pane, 'injecting-role')
     syncViews()
     await acquireInjectionSlot()
     let ok: boolean
@@ -3267,7 +3291,7 @@ function scheduleInjection(pane: ActivePane): void {
       releaseInjectionSlot()
     }
     pane.injectionStatus = ok ? 'sent' : 'failed'
-    pane.preparationStatus = ok ? 'ready' : 'failed'
+    setPrepStatus(pane, ok ? 'ready' : 'failed')
     syncViews()
     if (ok && pane.origin === 'manual' && pane.agentKey === 'claude' && pane.pinnedSessionId) {
       void persistPaneSession(pane, pane.pinnedSessionId)
@@ -3287,7 +3311,7 @@ function scheduleInjection(pane: ActivePane): void {
     //    the agent's role-acknowledgement output.
     if (pane.kickoffStatus === 'pending') {
       pipelineLog(`${tag} waiting for agent to acknowledge role (up to 30s)`)
-      pane.preparationStatus = 'waiting-agent'
+      setPrepStatus(pane, 'waiting-agent')
       syncViews()
       const result = await waitForActivityThenSettle(pane.id, 2500, 30_000)
       if (!paneAlive(pane.id)) return
@@ -3314,7 +3338,7 @@ function scheduleInjection(pane: ActivePane): void {
         }
       }
       pane.kickoffStatus = ok2 ? 'sent' : 'failed'
-      pane.preparationStatus = ok2 ? 'ready' : 'failed'
+      setPrepStatus(pane, ok2 ? 'ready' : 'failed')
       syncViews()
       if (!ok2) {
         pipelineLog(`${tag} ✕ kickoff injection failed after ${MAX_KICKOFF_ATTEMPTS} attempts — arming watcher anyway`)
@@ -3693,7 +3717,7 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
     if ((ref.status as unknown as string) === 'running') {
       if (pane.origin === 'manual' && !pane.roleKey && !pane.kickoffPrompt) {
         pane.injectionStatus = 'skipped'
-        pane.preparationStatus = 'ready'
+        setPrepStatus(pane, 'ready')
         syncViews()
         // No persistPaneSession here: every manual/snap/saved caller sends
         // manual_pane.spawn with this same pinned session_id right after we
@@ -3708,10 +3732,10 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
       // --resume) is created when the tab is shown. Resume reloads memory, so
       // nothing is injected; this is a ready pane, NOT a spawn failure.
       pane.injectionStatus = 'skipped'
-      pane.preparationStatus = 'ready'
+      setPrepStatus(pane, 'ready')
     } else {
       pane.injectionStatus = 'skipped'
-      pane.preparationStatus = 'failed'
+      setPrepStatus(pane, 'failed')
     }
   } finally {
     syncViews()
@@ -4997,6 +5021,11 @@ registerCommand('workbench.action.findInFiles', async () => {
 registerCommand('workbench.action.openMiniIDE', async () => {
   if (currentWorkspace.value) {
     await window.agentTeam?.openEditorWindow({ workspace_path: currentWorkspace.value })
+  }
+})
+registerCommand('workbench.action.openGitWindow', async () => {
+  if (currentWorkspace.value) {
+    await window.agentTeam?.openGitWindow?.({ workspace_path: currentWorkspace.value })
   }
 })
 registerCommand('workbench.action.openPlans', async () => {
@@ -7521,8 +7550,10 @@ watch(sysNotify.pendingCount, (count) => { window.agentTeam?.setBadgeCount(count
 // a turn that ended to ask a QUESTION isn't mis-notified as completion.
 const paneDoneNotifyTimers = new Map<string, number>()
 
+// Same order the UI titles a pane with — a notification naming the pane
+// differently from its own tab reads as a different pane.
 function paneNotifyLabel(pane: { customName?: string; slotLabel?: string; autoName?: string; agentLabel?: string }): string {
-  return pane.customName || pane.slotLabel || pane.autoName || pane.agentLabel || ''
+  return pane.customName || pane.autoName || pane.slotLabel || pane.agentLabel || ''
 }
 
 function clearDoneNotifyTimer(paneId: string): void {
@@ -7618,7 +7649,9 @@ backend.on('agent.activity', (raw) => {
     // prompt text, name a still-unnamed pane from its first completed turn's
     // text. Set-once via setPaneAutoName; deliberately independent of
     // judgeTurnText and the sentinel paths — it only reads ev.text.
-    if (ev.text) {
+    // Envelope guard mirrors the agent_active path: a reader that echoes the
+    // injected inter-CLI message back as turn text must not title the pane.
+    if (ev.text && !ev.text.startsWith(MSG_ENVELOPE_PREFIX)) {
       const pane = panes.value.find((p) => p.id === ev.pane_id)
       if (pane && !pane.customName && !pane.autoName) {
         setPaneAutoName(ev.pane_id, deriveAutoName(ev.text))
@@ -7920,7 +7953,7 @@ backend.on('terminal.exit', (raw) => {
   }
   if (pane.sessionMarker && !pane.pinnedSessionId) {
     pane.sessionMarker = undefined
-    if (pane.preparationStatus !== 'ready') pane.preparationStatus = 'failed'
+    if (pane.preparationStatus !== 'ready') setPrepStatus(pane, 'failed')
     syncViews()
   }
   if (ev.exit_code === 127 && pane.agentKey !== 'terminal') {
@@ -9355,7 +9388,7 @@ function onRunGroupsRemoteSync(raw: unknown): void {
     workspace_path?: string
     run_groups?: RunGroup[]
     spawn_history?: SpawnHistoryEntry[]
-    renamed_pane?: { pane_id?: string; custom_name?: string; auto_name?: string }
+    renamed_pane?: { pane_id?: string; custom_name?: string }
     auto_named_pane?: { pane_id?: string; auto_name?: string }
     cli_agent_order?: string[]
     cli_agent_disabled?: string[]
@@ -9368,13 +9401,10 @@ function onRunGroupsRemoteSync(raw: unknown): void {
   if (d.renamed_pane?.pane_id) {
     const pane = panes.value.find((p) => p.id === d.renamed_pane!.pane_id)
     if (pane) {
-      // Apply each name field only when the broadcast carries it, so an
-      // auto-name broadcast cannot clear a custom name (and vice versa).
+      // Manual renames only. Auto-names travel under auto_named_pane below, so
+      // this branch can never clear one.
       if (d.renamed_pane.custom_name !== undefined) {
         pane.customName = d.renamed_pane.custom_name.trim() || undefined
-      }
-      if (d.renamed_pane.auto_name !== undefined) {
-        pane.autoName = d.renamed_pane.auto_name.trim() || undefined
       }
     }
   }
