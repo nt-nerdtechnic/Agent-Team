@@ -2,8 +2,6 @@
 // Separate from cliContext.ts because a plan carries no pane identity or buffer
 // — the terminal drop handler must tell the two drags apart by MIME type.
 
-import { planExecutionPrompt } from './planExecutePrompt'
-
 /** MIME type set by a PlansPane plan-row dragstart. Carries a JSON PlanDragRef. */
 export const PLAN_REF_MIME = 'application/x-plan-ref'
 
@@ -50,10 +48,9 @@ export function isPlanDrag(types: readonly string[] | undefined): boolean {
 }
 
 /** Text pasted into the target CLI pane's input prompt when a plan is dropped:
- *  the plan goal (so the agent gets the objective immediately) followed by the
- *  execution instruction pointing at the full plan document. No Enter is sent —
- *  the paste waits for the user to review and submit. */
+ *  just the plan document's workspace-relative path, so the user writes their
+ *  own instruction around it. No Enter is sent — the paste waits for the user
+ *  to review and submit. */
 export function planDropPrompt(ref: PlanDragRef): string {
-  const goal = ref.overview ? `Plan goal: ${ref.overview}\n\n` : ''
-  return goal + planExecutionPrompt(ref.relPath)
+  return ref.relPath
 }

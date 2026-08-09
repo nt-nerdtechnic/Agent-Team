@@ -3,6 +3,7 @@ import {
   buildCliPaneBufferReply,
   buildExternalPaneContextPaste,
   buildPaneStatusReply,
+  buildMentionInsert,
   endsWithMentionTrigger,
   shouldOpenMentionMenu,
   parseCliContextPayload,
@@ -383,6 +384,31 @@ describe('endsWithMentionTrigger', () => {
   it('opts back out when a space follows the "@"', () => {
     expect(endsWithMentionTrigger('傳給 @ ')).toBe(false)
     expect(endsWithMentionTrigger('傳給 ＠ ')).toBe(false)
+  })
+})
+
+describe('buildMentionInsert', () => {
+  it('completes an "@" the user already typed', () => {
+    expect(buildMentionInsert('傳給 @', 'codex-1')).toBe('codex-1 ')
+    expect(buildMentionInsert('傳給 ＠', 'codex-1')).toBe('codex-1 ')
+  })
+
+  it('adds the "@" itself when the prompt has none', () => {
+    expect(buildMentionInsert('', 'codex-1')).toBe('@codex-1 ')
+    expect(buildMentionInsert('│ > 傳給 ', 'codex-1')).toBe('@codex-1 ')
+  })
+
+  it('separates the mention from preceding text', () => {
+    expect(buildMentionInsert('傳給', 'codex-1')).toBe(' @codex-1 ')
+    expect(buildMentionInsert('傳給 @ ', 'codex-1')).toBe('@codex-1 ')
+  })
+
+  it('mentions a cross-workspace address unchanged', () => {
+    expect(buildMentionInsert('ask ', 'other-repo/claude-2')).toBe('@other-repo/claude-2 ')
+  })
+
+  it('falls back to a bare mention when the prompt could not be read', () => {
+    expect(buildMentionInsert(undefined, 'codex-1')).toBe('@codex-1 ')
   })
 })
 

@@ -19,13 +19,28 @@ export const CLI_PASTE_BUFFER_CAP = 8000
 export const CLI_PASTE_LINE_CAP = 300
 export const CLI_CHIP_LINE_CAP = 1000
 
-/** True when the text left of the cursor ends with a bare "@" — the user is
- *  asking the pane drop to insert just the pane's messaging name (mention
- *  mode) instead of the full scrollback excerpt. Strict: the "@" must sit
- *  immediately before the cursor, so "@ " (space typed after) opts back out.
+/** True when the text left of the cursor ends with a bare "@" — the user already
+ *  typed the mention sigil, so the pane drop completes it instead of adding a
+ *  second one. Strict: the "@" must sit immediately before the cursor, so "@ "
+ *  (space typed after) is treated as ordinary text.
  *  Accepts the full-width "＠" (U+FF20) a CJK IME emits, not just ASCII "@". */
 export function endsWithMentionTrigger(lineBeforeCursor: string): boolean {
   return lineBeforeCursor.endsWith('@') || lineBeforeCursor.endsWith('＠')
+}
+
+/** Text a pane drop inserts at the target's cursor: always just the source
+ *  pane's mention, e.g. "傳給 " + drop → "傳給 @codex-1 ". An "@" the user
+ *  already typed is completed rather than doubled, and a separating space is
+ *  added only when the prompt does not already end in whitespace.
+ *  `lineBeforeCursor` is undefined when the prompt could not be read. */
+export function buildMentionInsert(
+  lineBeforeCursor: string | undefined,
+  address: string
+): string {
+  const line = lineBeforeCursor ?? ''
+  if (endsWithMentionTrigger(line)) return `${address} `
+  const gap = line === '' || /\s$/.test(line) ? '' : ' '
+  return `${gap}@${address} `
 }
 
 /** True when typing `ch` (the just-typed char) at end of `lineBeforeCursor`

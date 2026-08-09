@@ -239,7 +239,7 @@ async function onTerminalDrop(e: DragEvent): Promise<void> {
   isPlanDragOver.value = false
   if (terminal.displayStatus.value === 'exited' || terminal.displayStatus.value === 'error') return
   // Plan document dropped onto this terminal: App.vue owns pane state, so it
-  // pastes the plan goal + execution instruction into this pane's input.
+  // pastes the plan's path into this pane's input.
   if (isPlanDrag(e.dataTransfer?.types)) {
     const ref = parsePlanRefPayload(e.dataTransfer?.getData(PLAN_REF_MIME) || '')
     if (ref) emit('plan-drop', ref)
@@ -719,9 +719,6 @@ onMounted(() => {
 }
 .xterm-host.cli-drag-over::after {
   content: 'Drop to paste this pane context';
-}
-.xterm-host.plan-drag-over::after {
-  content: 'Drop to inject plan goal';
 }
 /* Transient teaching hint; must never eat clicks meant for the terminal. */
 .select-hint {

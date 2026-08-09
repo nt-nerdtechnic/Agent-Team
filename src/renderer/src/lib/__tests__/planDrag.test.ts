@@ -64,15 +64,14 @@ describe('isPlanDrag', () => {
 })
 
 describe('planDropPrompt', () => {
-  it('prefixes the plan goal when an overview is present and includes relPath', () => {
+  it('pastes only the relPath, ignoring the overview', () => {
     const out = planDropPrompt({ relPath: '.agent-team/plans/foo_abc123.html', overview: 'Ship foo' })
-    expect(out.startsWith('Plan goal: Ship foo')).toBe(true)
-    expect(out).toContain('.agent-team/plans/foo_abc123.html')
+    expect(out).toBe('.agent-team/plans/foo_abc123.html')
   })
 
-  it('omits the plan goal prefix when no overview but still includes relPath', () => {
-    const out = planDropPrompt({ relPath: '.agent-team/plans/bar_def456.html' })
-    expect(out).not.toContain('Plan goal:')
-    expect(out).toContain('.agent-team/plans/bar_def456.html')
+  it('pastes only the relPath when there is no overview', () => {
+    expect(planDropPrompt({ relPath: '.agent-team/plans/bar_def456.html' })).toBe(
+      '.agent-team/plans/bar_def456.html'
+    )
   })
 })
