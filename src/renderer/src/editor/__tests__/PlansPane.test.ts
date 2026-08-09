@@ -131,6 +131,17 @@ interface MockEntry {
   is_dir: boolean
 }
 
+// Scan order of the backend's plan_index.PLAN_DOC_DIRS.
+const MOCK_PLAN_DOC_DIRS = [
+  '.agent-team/plans',
+  '.agent-team/reports',
+  '.claude/loop-reports',
+  '.claude/plans',
+  '.cursor/plans',
+  'docs/plans',
+  'docs/reports',
+]
+
 function makeBackend(opts?: {
   htmlEntries?: MockEntry[]
   htmlFiles?: Record<string, string>
@@ -166,29 +177,44 @@ function makeBackend(opts?: {
     /** Simulate a backend broadcast to `on()` subscribers. */
     emit: (type: string, payload: unknown) => listeners.get(type)?.forEach((cb) => cb(payload)),
     send: vi.fn(async (channel: string, payload: Record<string, unknown>) => {
-      if (channel === 'fs.list_dir') {
-        const rel = payload.rel_path as string
-        if (opts?.dirEntries && opts.dirEntries[rel]) {
-          return { payload: { ok: true, entries: opts.dirEntries[rel] } }
-        }
-        if (rel === '.cursor/plans') {
-          return {
-            payload: {
-              ok: true,
-              entries: [
-                { name: 'active.plan.md', rel_path: '.cursor/plans/active.plan.md', is_dir: false },
-                { name: 'done.plan.md', rel_path: '.cursor/plans/done.plan.md', is_dir: false },
-              ],
-            },
+      // Stands in for the backend plan_index: one scan of every plan/report
+      // directory, already filtered and ordered the way plan_index.list_docs
+      // does it. Every document is reported as a cache miss, so the pane still
+      // reads and parses each one (which is what most specs here assert on).
+      if (channel === 'plans.list_docs') {
+        if (opts?.htmlListError) return { payload: { ok: false, error: opts.htmlListError } }
+        const entriesFor = (rel: string): MockEntry[] => {
+          if (opts?.dirEntries && opts.dirEntries[rel]) return opts.dirEntries[rel]
+          if (rel === '.cursor/plans') {
+            return [
+              { name: 'active.plan.md', rel_path: '.cursor/plans/active.plan.md', is_dir: false },
+              { name: 'done.plan.md', rel_path: '.cursor/plans/done.plan.md', is_dir: false },
+            ]
           }
+          if (rel === '.agent-team/plans') return opts?.htmlEntries ?? []
+          return []
         }
-        if (rel === '.agent-team/plans') {
-          if (opts?.htmlListError) return { payload: { ok: false, error: opts.htmlListError } }
-          if (!opts?.htmlEntries) return { payload: { ok: false, error: 'not a directory' } }
-          return { payload: { ok: true, entries: opts.htmlEntries } }
-        }
-        return { payload: { ok: false, error: 'not a directory' } }
+        const docs = MOCK_PLAN_DOC_DIRS.flatMap((dir) =>
+          entriesFor(dir)
+            .filter(
+              (e) =>
+                !e.is_dir &&
+                !e.name.startsWith('_') &&
+                !e.name.startsWith('.') &&
+                /\.(html|plan\.md|md)$/i.test(e.name),
+            )
+            .sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()))
+            .map((e) => ({
+              rel_path: e.rel_path,
+              name: e.name,
+              mtime: opts?.mtimes?.[e.rel_path],
+              meta: null,
+              cached: false,
+            })),
+        )
+        return { payload: { ok: true, docs } }
       }
+      if (channel === 'plans.cache_put') return { payload: { ok: true, stored: 0 } }
       if (channel === 'fs.read_file') {
         const rel = payload.rel_path as string
         if (opts?.customFiles && rel in opts.customFiles) {
@@ -627,12 +653,12 @@ describe('PlansPane – plans.changed live refresh', () => {
     const backend = makeBackend()
     const wrapper = mountPane(backend)
     await flushPromises()
-    const callsBefore = backend.send.mock.calls.filter(([type]) => type === 'fs.list_dir').length
+    const callsBefore = backend.send.mock.calls.filter(([type]) => type === 'plans.list_docs').length
 
     backend.emit('plans.changed', { workspace_path: '/ws' })
     await flushPromises()
 
-    const callsAfter = backend.send.mock.calls.filter(([type]) => type === 'fs.list_dir').length
+    const callsAfter = backend.send.mock.calls.filter(([type]) => type === 'plans.list_docs').length
     expect(callsAfter).toBeGreaterThan(callsBefore)
     expect(wrapper.text()).toContain('Active Plan')
   })
@@ -1367,11 +1393,8 @@ function emptyBackend() {
   return {
     status: ref('connected'),
     on: () => () => {},
-    send: vi.fn(async (channel: string, payload: Record<string, unknown>) => {
-      if (channel === 'fs.list_dir') {
-        if (payload.rel_path === '.cursor/plans') return { payload: { ok: true, entries: [] } }
-        return { payload: { ok: false, error: 'not a directory' } }
-      }
+    send: vi.fn(async (channel: string) => {
+      if (channel === 'plans.list_docs') return { payload: { ok: true, docs: [] } }
       return { payload: { ok: false, error: 'unexpected' } }
     }),
   }
@@ -1899,5 +1922,141 @@ describe('PlansPane – flat list empty states', () => {
 
     expect(wrapper.text()).toContain('No unarchived plans.')
     expect(wrapper.text()).not.toContain('No active plans.')
+  })
+})
+
+// ── plan-meta cache (plans.list_docs / plans.cache_put) ──────────────────────
+
+function cachingBackend(docs: Record<string, unknown>[]) {
+  const reads: string[] = []
+  const cachePuts: Record<string, unknown>[][] = []
+  return {
+    status: ref('connected'),
+    on: () => () => {},
+    reads,
+    cachePuts,
+    send: vi.fn(async (channel: string, payload: Record<string, unknown>) => {
+      if (channel === 'plans.list_docs') return { payload: { ok: true, docs } }
+      if (channel === 'fs.read_file') {
+        reads.push(payload.rel_path as string)
+        return { payload: { ok: true, content: HTML_REVIEW_PLAN, mtime: 42 } }
+      }
+      if (channel === 'plans.cache_put') {
+        cachePuts.push(payload.entries as Record<string, unknown>[])
+        return { payload: { ok: true, stored: 1 } }
+      }
+      return { payload: { ok: false, error: 'unexpected' } }
+    }),
+  }
+}
+
+const CACHED_META = {
+  schemaVersion: 1,
+  format: 'html',
+  name: 'Cached Plan',
+  overview: 'Served from the index.',
+  stage: 'approved',
+  approvedAt: null,
+  archivedAt: null,
+  todos: [{ id: 'phase-a', content: 'Task', status: 'done' }],
+  reviewNotes: [],
+}
+
+describe('PlansPane – plan-meta cache', () => {
+  it('renders a cached document without reading the file', async () => {
+    const backend = cachingBackend([
+      {
+        rel_path: '.agent-team/plans/cached.html',
+        name: 'cached.html',
+        mtime: 100,
+        meta: CACHED_META,
+        cached: true,
+      },
+    ])
+    const wrapper = mountPane(backend as never)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Cached Plan')
+    expect(backend.reads).toEqual([])
+    // Nothing was parsed, so nothing needs writing back.
+    expect(backend.cachePuts).toEqual([])
+  })
+
+  it('reads only the documents the cache missed, then writes them back', async () => {
+    const backend = cachingBackend([
+      {
+        rel_path: '.agent-team/plans/cached.html',
+        name: 'cached.html',
+        mtime: 100,
+        meta: CACHED_META,
+        cached: true,
+      },
+      {
+        rel_path: '.agent-team/plans/stale.html',
+        name: 'stale.html',
+        mtime: 200,
+        meta: null,
+        cached: false,
+      },
+    ])
+    const wrapper = mountPane(backend as never)
+    await flushPromises()
+
+    expect(backend.reads).toEqual(['.agent-team/plans/stale.html'])
+    expect(backend.cachePuts).toHaveLength(1)
+    expect(backend.cachePuts[0]).toHaveLength(1)
+    expect(backend.cachePuts[0][0]).toMatchObject({
+      rel_path: '.agent-team/plans/stale.html',
+      // The read's own mtime, not the scan's — it matches the parsed bytes.
+      mtime: 42,
+    })
+    expect(wrapper.text()).toContain('Cached Plan')
+    expect(wrapper.text()).toContain('HTML Review Plan')
+  })
+
+  it('caches a document that has no meta as a hit (no re-read)', async () => {
+    const backend = cachingBackend([
+      {
+        rel_path: '.agent-team/plans/plain.html',
+        name: 'plain.html',
+        mtime: 100,
+        meta: null,
+        cached: true,
+      },
+    ])
+    const wrapper = mountPane(backend as never)
+    await flushPromises()
+
+    expect(backend.reads).toEqual([])
+    expect(wrapper.text()).toContain('plain.html')
+  })
+
+  it('falls back to the file when a cached payload no longer fits the model', async () => {
+    const backend = cachingBackend([
+      {
+        rel_path: '.agent-team/plans/legacy.html',
+        name: 'legacy.html',
+        mtime: 100,
+        meta: { name: 'Written by an older shape' },
+        cached: true,
+      },
+    ])
+    const wrapper = mountPane(backend as never)
+    await flushPromises()
+
+    expect(backend.reads).toEqual(['.agent-team/plans/legacy.html'])
+    expect(wrapper.text()).toContain('HTML Review Plan')
+  })
+
+  it('surfaces a failed listing instead of showing an empty list', async () => {
+    const backend = {
+      status: ref('connected'),
+      on: () => () => {},
+      send: vi.fn(async () => ({ payload: { ok: false, error: 'permission denied' } })),
+    }
+    const wrapper = mountPane(backend as never)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('permission denied')
   })
 })

@@ -335,6 +335,18 @@ describe('PlanWindowApp', () => {
     expect(wrapper.find('.plan-window-empty').exists()).toBe(false)
   })
 
+  it('gives a nested plan root’s HTML plan the same review treatment', async () => {
+    // The plans list surfaces a nested repository's documents with their root as
+    // a path prefix; a prefix-anchored check would silently drop the toolbar.
+    const wrapper = await mountApp()
+    await open(wrapper, 'project/.agent-team/plans/feature_a1b2c3.html')
+
+    const toolbar = wrapper.findComponent({ name: 'PlanReviewToolbar' })
+    expect(toolbar.exists()).toBe(true)
+    expect(toolbar.props('relPath')).toBe('project/.agent-team/plans/feature_a1b2c3.html')
+    expect(wrapper.findComponent({ name: 'PlanDocPreview' }).exists()).toBe(true)
+  })
+
   it('remounts the review toolbar when switching between HTML plans (no stale edit state leaks)', async () => {
     const wrapper = await mountApp()
     await open(wrapper, '.agent-team/plans/feature_a1b2c3.html')

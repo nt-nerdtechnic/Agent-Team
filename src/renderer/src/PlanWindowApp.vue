@@ -46,11 +46,16 @@ const openDoc = ref<{ relPath: string; name: string } | null>(null)
 // snapshot preview renders without a toolbar and ignores write interactions.
 const snapshotPreview = ref<{ relPath: string; label: string } | null>(null)
 
-// Reviewable plan doc: top-level, non-infrastructure `.agent-team/plans/*.html`.
+// Reviewable plan doc: a non-infrastructure `.agent-team/plans/*.html` sitting
+// directly in that directory. The directory may belong to a nested plan root
+// (a repository below the workspace), whose documents the list surfaces with
+// their root as a path prefix — they get the same review treatment.
 function isHtmlPlanDoc(relPath: string): boolean {
   const normalized = relPath.replace(/\\/g, '/') // tolerate Windows separators
-  if (!normalized.startsWith('.agent-team/plans/')) return false
-  const name = normalized.slice('.agent-team/plans/'.length)
+  const marker = '.agent-team/plans/'
+  const at = normalized.lastIndexOf(marker)
+  if (at === -1 || (at > 0 && normalized[at - 1] !== '/')) return false
+  const name = normalized.slice(at + marker.length)
   return name.endsWith('.html') && !name.startsWith('_') && !name.includes('/')
 }
 

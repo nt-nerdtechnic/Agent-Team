@@ -17,6 +17,14 @@ describe('planHistoryDirRelPath', () => {
       '.agent-team/plans/.history/feature_a1b2c3',
     )
   })
+
+  it('keeps a nested plan root’s history beside the plan itself', () => {
+    // Two roots holding a same-named plan must not share one history directory.
+    expect(planHistoryDirRelPath('project/.agent-team/plans/plan.html')).toBe(
+      'project/.agent-team/plans/.history/plan',
+    )
+    expect(planHistoryDirRelPath('docs/reports/plan.html')).toBe('docs/reports/.history/plan')
+  })
 })
 
 describe('parseSnapshotName', () => {

@@ -39,10 +39,16 @@ const emit = defineEmits<{
   (e: 'deleted', relPath: string): void
 }>()
 
-interface FsEntry {
-  name: string
+// One row of `plans.list_docs`. `cached: true` means `meta` is the backend's
+// stored copy and still matches the file on disk, so it needs no re-read;
+// `cached: false` means this document must be read and parsed (and is then fed
+// back through `plans.cache_put`).
+interface PlanDoc {
   rel_path: string
-  is_dir: boolean
+  name: string
+  mtime: number
+  meta: PlanMeta | null
+  cached: boolean
 }
 
 // `meta` carries the unified plan model for BOTH formats: HTML plans parse
@@ -65,6 +71,17 @@ const waitingForBackend = ref(false)
 const error = ref('')
 const plans = ref<PlanItem[]>([])
 
+/**
+ * Whether a cached meta payload can be trusted as-is. `null` is a legitimate
+ * cached outcome ("this file carries no valid meta"); an object must still look
+ * like the current plan model. Anything else — e.g. a payload written by an
+ * older model shape — counts as a miss, and the file on disk wins.
+ */
+function isUsableCachedMeta(meta: PlanMeta | null): boolean {
+  if (meta === null) return true
+  return typeof (meta as { stage?: unknown }).stage === 'string'
+}
+
 async function loadPlans(): Promise<void> {
   if (!props.workspacePath) return
   // Only the very first load (no plans yet) shows the loading overlay. Later
@@ -83,67 +100,47 @@ async function loadPlans(): Promise<void> {
   loading.value = isFirstLoad
   error.value = ''
   try {
-    const loaded: PlanItem[] = []
-
-    const PLAN_DOC_DIRS = [
-      '.agent-team/plans',
-      '.agent-team/reports',
-      '.claude/loop-reports',
-      '.claude/plans',
-      '.cursor/plans',
-      'docs/plans',
-      'docs/reports',
-    ]
-
-    const seenRelPaths = new Set<string>()
-
-    for (const dir of PLAN_DOC_DIRS) {
-      const list = await props.backend.send<{ ok: boolean; entries?: FsEntry[]; error?: string }>('fs.list_dir', {
-        workspace_path: props.workspacePath,
-        rel_path: dir,
-        show_hidden: true,
-      })
-      if (!list.payload?.ok) {
-        if (list.payload?.error !== 'not a directory') {
-          error.value = list.payload?.error || t('pane.plans.list-failed')
-        }
-        continue
-      }
-
-      const entries = (list.payload.entries ?? [])
-        .filter(
-          (entry) =>
-            !entry.is_dir &&
-            !entry.name.startsWith('_') &&
-            !entry.name.startsWith('.') &&
-            /\.(html|plan\.md|md)$/i.test(entry.name) &&
-            !seenRelPaths.has(entry.rel_path),
-        )
-        .sort((a, b) => a.name.localeCompare(b.name))
-
-      for (const entry of entries) {
-        seenRelPaths.add(entry.rel_path)
-      }
-
-      const items = await Promise.all(
-        entries.map(async (entry): Promise<PlanItem | null> => {
-          const read = await props.backend.send<{ ok: boolean; content?: string; mtime?: number; error?: string }>('fs.read_file', {
-            workspace_path: props.workspacePath,
-            rel_path: entry.rel_path,
-          })
-          if (!read.payload?.ok) return null
-          return {
-            relPath: entry.rel_path,
-            name: entry.name,
-            meta: resolvePlanStore(entry.rel_path).parseMeta(read.payload.content ?? ''),
-            mtime: read.payload.mtime,
-          }
-        })
-      )
-      loaded.push(...items.filter((item): item is PlanItem => item !== null))
+    const list = await props.backend.send<{ ok: boolean; docs?: PlanDoc[]; error?: string }>('plans.list_docs', {
+      workspace_path: props.workspacePath,
+    })
+    if (!list.payload?.ok) {
+      error.value = list.payload?.error || t('pane.plans.list-failed')
+      return
     }
 
-    plans.value = loaded
+    // Documents the cache could not answer for get read and parsed here, then
+    // written back so the next refresh skips them.
+    const parsed: { rel_path: string; mtime: number; meta: PlanMeta | null }[] = []
+
+    const items = await Promise.all(
+      (list.payload.docs ?? []).map(async (doc): Promise<PlanItem | null> => {
+        if (doc.cached && isUsableCachedMeta(doc.meta)) {
+          return { relPath: doc.rel_path, name: doc.name, meta: doc.meta, mtime: doc.mtime }
+        }
+        const read = await props.backend.send<{ ok: boolean; content?: string; mtime?: number; error?: string }>('fs.read_file', {
+          workspace_path: props.workspacePath,
+          rel_path: doc.rel_path,
+        })
+        if (!read.payload?.ok) return null
+        const meta = resolvePlanStore(doc.rel_path).parseMeta(read.payload.content ?? '')
+        // The read's own mtime, not the scan's: it is the one that matches the
+        // bytes this meta was parsed from.
+        const mtime = read.payload.mtime ?? doc.mtime
+        parsed.push({ rel_path: doc.rel_path, mtime, meta })
+        return { relPath: doc.rel_path, name: doc.name, meta, mtime }
+      })
+    )
+
+    plans.value = items.filter((item): item is PlanItem => item !== null)
+
+    if (parsed.length) {
+      // Fire-and-forget: the cache is an optimization, so a failed write costs
+      // the next refresh some re-reads and nothing else.
+      void props.backend.send('plans.cache_put', {
+        workspace_path: props.workspacePath,
+        entries: parsed,
+      })
+    }
   } catch (err) {
     error.value = err instanceof Error ? err.message : t('pane.plans.load-failed')
   } finally {

@@ -13,11 +13,20 @@ import { parseHtmlPlanMeta } from '../composables/usePlanHtml'
 import { parsePlanMeta } from '../composables/usePlanFile'
 import type { PlanMeta } from '../composables/planModel'
 
-/** History directory for a plan: `.agent-team/plans/.history/<stem>`. */
+/**
+ * History directory for a plan: `<its own dir>/.history/<stem>`.
+ *
+ * Derived from the plan's directory rather than a fixed prefix, so a document
+ * belonging to a nested plan root keeps its snapshots beside itself — two roots
+ * holding a same-named plan would otherwise share one history directory and
+ * show each other's snapshots.
+ */
 export function planHistoryDirRelPath(planRelPath: string): string {
-  const name = planRelPath.slice(planRelPath.lastIndexOf('/') + 1)
+  const cut = planRelPath.lastIndexOf('/')
+  const dir = cut === -1 ? '.agent-team/plans' : planRelPath.slice(0, cut)
+  const name = planRelPath.slice(cut + 1)
   const stem = name.replace(/\.plan\.md$/, '').replace(/\.html$/, '')
-  return `.agent-team/plans/.history/${stem}`
+  return `${dir}/.history/${stem}`
 }
 
 export interface PlanSnapshotName {
