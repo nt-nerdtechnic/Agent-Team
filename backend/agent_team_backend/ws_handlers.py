@@ -4218,6 +4218,63 @@ async def project_set_pane_auto_name(session: "Session", msg_id: str, msg_type: 
     await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
 
 
+@handler("pane.generate_auto_name")
+async def pane_generate_auto_name(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Ask the local model for a better pane title than the string heuristic.
+
+    Best-effort by construction: the renderer has already titled the pane
+    before it sends this, so a failure here just leaves that title in place.
+    The answer is persisted through the same set_pane_auto_name arbiter (with
+    source="llm"), which is what stops a slow answer from renaming a pane the
+    user has since renamed themselves.
+    """
+    from . import app
+    from . import pane_name_service
+
+    ws_raw = payload.get("workspace_path", "") or ""
+    pane_id = payload.get("pane_id", "") or ""
+    material = payload.get("material", "") or ""
+    model = payload.get("model", "") or app.ANALYZER_DEFAULT_MODEL
+    if not pane_id or not material.strip():
+        await session.send_json(make_response(msg_id, msg_type, {"ok": False, "name": ""}))
+        return
+
+    result = await pane_name_service.generate_pane_name(material, app._az_base_url(), model)
+    if not result.get("ok"):
+        await session.send_json(make_response(
+            msg_id, msg_type, {"ok": False, "name": "", "error": result.get("error", "")}
+        ))
+        return
+
+    name = result["name"]
+    project, changed = app.project_store.set_pane_auto_name(
+        ws_raw, pane_id=pane_id, auto_name=name, source="llm"
+    )
+    if project is not None and changed:
+        await asyncio.to_thread(
+            app.spawn_history_store.patch_entry,
+            ws_raw,
+            pane_id,
+            {"autoName": name},
+            seed=project.ui_spawn_history,
+        )
+        await app.broadcast(
+            make_event(
+                "project.ui_state_changed",
+                {
+                    "workspace_path": project.workspace_path,
+                    "auto_named_pane": {"pane_id": pane_id, "auto_name": name},
+                },
+            ),
+            exclude=session,
+        )
+    # 'changed' is reported so the caller can tell an accepted upgrade from one
+    # the arbiter refused (the pane was renamed while the model was thinking).
+    await session.send_json(make_response(
+        msg_id, msg_type, {"ok": True, "name": name, "changed": changed}
+    ))
+
+
 @handler("project.rename_spawn_history")
 async def project_rename_spawn_history(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     """Rename a spawn-history entry whose pane no longer exists.
