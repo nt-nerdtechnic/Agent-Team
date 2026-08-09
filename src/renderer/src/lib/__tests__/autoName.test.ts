@@ -47,12 +47,19 @@ describe('deriveAutoName', () => {
     const material =
       '好的，我會先檢查後端的 session 註冊流程再修正編碼不一致的問題並補上對應的回歸測試以及檢查指標輪替，確保跨視窗同步不會再遺失資料'
     const out = deriveAutoName(material)
-    expect(out.startsWith('我會先檢查後端的 session 註冊流程')).toBe(true)
+    // Both '好的，' and '我會' are filler and both come off.
+    expect(out.startsWith('先檢查後端的 session 註冊流程')).toBe(true)
     expect(out.includes('好的')).toBe(false)
   })
 
+  it('strips stacked filler openers', () => {
+    // Politeness stacks in both languages; one pass would leave the second one.
+    expect(deriveAutoName('請幫我修 resize bug')).toBe('修 resize bug')
+    expect(deriveAutoName('Can you please fix the resize bug')).toBe('fix the resize bug')
+  })
+
   it('strips filler from short input too', () => {
-    expect(deriveAutoName('請幫我修 resize bug')).toBe('幫我修 resize bug')
+    expect(deriveAutoName('請看一下 resize bug')).toBe('看一下 resize bug')
     expect(deriveAutoName('Can you fix the resize bug')).toBe('fix the resize bug')
   })
 

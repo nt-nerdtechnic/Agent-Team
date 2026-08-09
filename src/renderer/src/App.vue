@@ -800,9 +800,13 @@ interface ActivePane {
   /** User-set display name from the rename action. Overrides agentLabel in all
    *  pane surfaces when non-empty; persisted to project.json (PaneRecord.custom_name). */
   customName?: string
-  /** Auto-derived display name (set once from the pane's task material).
+  /** Auto-derived display name (from the pane's task material).
    *  customName always wins; persisted to project.json (PaneRecord.auto_name). */
   autoName?: string
+  /** Which namer produced autoName. The string heuristic titles the pane
+   *  instantly; the model's answer may replace that once, and never the
+   *  reverse — see setPaneAutoName. */
+  autoNameSource?: 'heuristic' | 'llm'
   /** Inter-CLI messaging address from the messaging registry. Absent for plain
    *  terminal panes. Persisted to localStorage keyed by pane id so names
    *  survive restart (see persistMessagingName). */
@@ -3372,6 +3376,9 @@ interface SpawnInternal {
   customName?: string
   /** Auto-derived pane title, carried forward on rebuild/restore for the same reason. */
   autoName?: string
+  /** Which namer produced autoName. Carried forward so a restored pane whose
+   *  title the model already wrote is not sent for naming a second time. */
+  autoNameSource?: 'heuristic' | 'llm'
   /** Human-readable slot label — set for parallel-stage slots so the context
    *  header for downstream stages can identify which agent produced which output. */
   slotLabel?: string
@@ -3571,6 +3578,7 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
     agentLabel: spec.label,
     customName: opts.customName,
     autoName: opts.autoName,
+    autoNameSource: opts.autoNameSource,
     roleKey: opts.roleKey,
     stageId: opts.stageId,
     slotLabel: opts.slotLabel ?? '',
@@ -3612,9 +3620,13 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
   // panes carry their previous name via preferredMessagingName).
   registerPaneMessaging(pane, opts.preferredMessagingName)
 
-  // Auto-name from the kickoff task material. Set-once semantics live in
+  // Auto-name from the kickoff task material. The heuristic titles the pane
+  // now; the model upgrades that title if it can. Write ordering lives in
   // setPaneAutoName: no-op when a customName or autoName was carried in.
-  if (opts.kickoffPrompt) setPaneAutoName(id, deriveAutoName(opts.kickoffPrompt))
+  if (opts.kickoffPrompt) {
+    setPaneAutoName(id, deriveAutoName(opts.kickoffPrompt))
+    requestLlmPaneName(id, opts.kickoffPrompt)
+  }
 
   // Session detection can legitimately take forever (a fresh CLI sits at its
   // own setup dialog until the user acts), so the blocking overlay gets a hard
@@ -5462,6 +5474,7 @@ interface ProjectPane {
   kickoff_status?: string
   custom_name?: string
   auto_name?: string
+  auto_name_source?: string
   is_minimized?: boolean
   output_log_file?: string
   stopped?: boolean
@@ -5557,6 +5570,7 @@ async function spawnRestoredPane(opts: RestoredPaneSpawnOptions): Promise<Restor
     slotLabel: saved.slot_label,
     customName: saved.custom_name || undefined,
     autoName: saved.auto_name || undefined,
+    autoNameSource: autoNameSourceOf(saved.auto_name_source),
     commandOverride: opts.commandOverride,
     workspacePath: opts.workspacePath,
     origin: saved.origin,
@@ -6094,6 +6108,7 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
         agentLabel: spec?.label ?? saved.agent,
         customName: saved.custom_name || undefined,
         autoName: saved.auto_name || undefined,
+        autoNameSource: autoNameSourceOf(saved.auto_name_source),
         roleKey: saved.role as RoleKey,
         stageId: (saved.stage_id ?? '') as StageId,
         slotLabel: saved.slot_label ?? '',
@@ -7655,6 +7670,7 @@ backend.on('agent.activity', (raw) => {
       const pane = panes.value.find((p) => p.id === ev.pane_id)
       if (pane && !pane.customName && !pane.autoName) {
         setPaneAutoName(ev.pane_id, deriveAutoName(ev.text))
+        requestLlmPaneName(ev.pane_id, ev.text)
       }
     }
   } else if (ev.event_type === 'agent_active') {
@@ -7671,6 +7687,7 @@ backend.on('agent.activity', (raw) => {
       !ev.text.startsWith(MSG_ENVELOPE_PREFIX)
     ) {
       setPaneAutoName(ev.pane_id, deriveAutoName(ev.text))
+      requestLlmPaneName(ev.pane_id, ev.text)
     }
     // A new turn re-arms 'done' notifications for this pane.
     sysNotify.markActive(ev.pane_id)
@@ -9389,7 +9406,7 @@ function onRunGroupsRemoteSync(raw: unknown): void {
     run_groups?: RunGroup[]
     spawn_history?: SpawnHistoryEntry[]
     renamed_pane?: { pane_id?: string; custom_name?: string }
-    auto_named_pane?: { pane_id?: string; auto_name?: string }
+    auto_named_pane?: { pane_id?: string; auto_name?: string; source?: string }
     cli_agent_order?: string[]
     cli_agent_disabled?: string[]
   } | null
@@ -9416,6 +9433,9 @@ function onRunGroupsRemoteSync(raw: unknown): void {
     const pane = panes.value.find((p) => p.id === d.auto_named_pane!.pane_id)
     if (pane) {
       pane.autoName = autoName
+      // Adopt the source too: without it this window would read the peer's
+      // model-written title as still-upgradable and ask for a second one.
+      pane.autoNameSource = autoNameSourceOf(d.auto_named_pane.source)
     }
     // This broadcast carries no spawn_history, so patch our history mirror the
     // same way the local setPaneAutoName path does — otherwise our next
@@ -10157,14 +10177,27 @@ async function setPaneCustomName(paneId: string, rawName: string): Promise<void>
   })
 }
 
-// Applies an auto-derived display name to a pane and persists it. Set-once:
-// a pane that already carries a customName or autoName is never renamed
-// again, so a user rename permanently silences auto-naming.
-function setPaneAutoName(paneId: string, name: string): void {
+/** Narrow a persisted auto_name_source to the union, or undefined.
+ *  Records written before this field existed report undefined, which reads as
+ *  "not the model's" — so such a pane gets one upgrade attempt, the same as a
+ *  pane whose earlier attempt found no model running. Only a stored 'llm'
+ *  suppresses further attempts. */
+function autoNameSourceOf(raw: string | undefined): 'heuristic' | 'llm' | undefined {
+  return raw === 'llm' || raw === 'heuristic' ? raw : undefined
+}
+
+// Applies an auto-derived display name to a pane and persists it. A pane is
+// titled at most twice and only in one direction: the string heuristic names
+// it instantly, and the model's answer may replace that once. A customName
+// always wins and permanently silences auto-naming, so the pane is never
+// renamed turn after turn.
+function setPaneAutoName(paneId: string, name: string, source: 'heuristic' | 'llm' = 'heuristic'): void {
   const pane = panes.value.find((p) => p.id === paneId)
   if (!pane || !name) return
-  if (pane.customName || pane.autoName) return
+  if (pane.customName) return
+  if (pane.autoName && !(source === 'llm' && pane.autoNameSource !== 'llm')) return
   pane.autoName = name
+  pane.autoNameSource = source
   // Mirror into the local history list so Agent History keeps the name after
   // the pane is closed (the backend patches its own copy; this keeps our next
   // snapshot from writing the name back out).
@@ -10192,7 +10225,55 @@ function setPaneAutoName(paneId: string, name: string): void {
     workspace_path: pane.workspacePath,
     pane_id: pane.id,
     auto_name: name,
+    source,
   })
+}
+
+// Panes whose model-generated title is already in flight or settled. Naming
+// material arrives repeatedly (every turn produces a turn_complete), and the
+// point of the upgrade is that it happens once.
+const llmNameRequested = new Set<string>()
+
+/** Ask the backend for a model-written title, upgrading the heuristic one.
+ *
+ * Fire-and-forget on purpose: the pane is already titled, so nothing here is
+ * awaited by a caller and every failure — no Ollama, no model, a timeout, a
+ * refusal — simply leaves the heuristic title in place. Passes the raw
+ * material rather than the heuristic title so the model sees the full request
+ * instead of its own truncation.
+ */
+function requestLlmPaneName(paneId: string, material: string): void {
+  const pane = panes.value.find((p) => p.id === paneId)
+  if (!pane || !pane.workspacePath || !material.trim()) return
+  if (pane.customName || pane.autoNameSource === 'llm') return
+  if (llmNameRequested.has(paneId)) return
+  llmNameRequested.add(paneId)
+  void (async () => {
+    try {
+      const resp = await backend.send<{ ok: boolean; name: string; changed?: boolean; error?: string }>(
+        'pane.generate_auto_name',
+        {
+          workspace_path: pane.workspacePath,
+          pane_id: paneId,
+          material,
+          model: analyzerModel.value || undefined,
+        },
+        // Backend budget is 20s (_BUDGET_S in pane_name_service.py); stay above
+        // it so this never fires while the backend is still within its own.
+        30_000,
+      )
+      // 'changed' is the backend arbiter's verdict, not just "a name came
+      // back". It refuses a write the store already settled — a pane restored
+      // with a model-written title, or one the user renamed while the model
+      // was thinking. Applying the name anyway would show a title the backend
+      // never stored, and the next restart would silently revert it.
+      if (resp.ok && resp.payload?.ok && resp.payload.name && resp.payload.changed) {
+        setPaneAutoName(paneId, resp.payload.name, 'llm')
+      }
+    } catch {
+      // Heuristic title stands. Naming is cosmetic — never surface this.
+    }
+  })()
 }
 
 function confirmRenamePane(): void {

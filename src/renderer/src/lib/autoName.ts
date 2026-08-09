@@ -15,10 +15,19 @@ const CLAUSE_MAX = 50
 const EN_FILLER = /^(can you|please|could you|help me|i need|i want|sure[,!]?|okay[,!]?|ok[,!]?)\s+/i
 const ZH_FILLER = /^(好的|沒問題|收到|了解|我來|我會|請|幫我)[，,、!！:：\s]*/
 
-/** Drop a leading filler phrase. Keeps the original when stripping empties it. */
+/** Drop leading filler phrases. Keeps the original when stripping empties it.
+ *
+ *  Loops because politeness stacks: "Can you please …" and "請幫我…" each carry
+ *  two, and one pass would leave "please …" / "幫我…" at the front of the title.
+ *  The bound is a guard against a pathological input, not a real depth. */
 function stripFiller(text: string): string {
-  const stripped = text.replace(EN_FILLER, '').replace(ZH_FILLER, '').trim()
-  return stripped || text
+  let out = text
+  for (let i = 0; i < 3; i++) {
+    const next = out.replace(EN_FILLER, '').replace(ZH_FILLER, '').trim()
+    if (next === out || !next) break
+    out = next
+  }
+  return out || text
 }
 
 export function deriveAutoName(material: string): string {
