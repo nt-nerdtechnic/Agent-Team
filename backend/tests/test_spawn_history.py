@@ -894,8 +894,7 @@ async def test_set_pane_auto_name_handler_broadcasts_once_and_mirrors_history(
     tmp_path: Path, monkeypatch
 ) -> None:
     """First auto-name write is broadcast to peers and mirrored into
-    ui_spawn_history under autoName; set-once repeats are silent no-ops, and
-    neither touches the full spawn-history store."""
+    ui_spawn_history under autoName; set-once repeats are silent no-ops."""
     from agent_team_backend import app, ws_handlers
 
     store = ProjectStore()
@@ -938,15 +937,56 @@ async def test_set_pane_auto_name_handler_broadcasts_once_and_mirrors_history(
     assert pane.auto_name == "Fix login"
 
     # The mirror carries the winning auto-name; customName stays untouched and
-    # the losing write did not overwrite it. Unlike rename_pane the full store
-    # is still not written.
+    # the losing write did not overwrite it. The full store gets it too — the
+    # patch seeds itself from the mirror when it holds no entry yet.
     history = store.peek(str(tmp_path)).ui_spawn_history
     assert history[0]["autoName"] == "Fix login"
     assert "customName" not in history[0]
-    assert _stored_entries(tmp_path) == []
+    assert _stored_entries(tmp_path)[0]["autoName"] == "Fix login"
 
     ok_responses = session.websocket.sent  # type: ignore[attr-defined]
     assert [r["payload"] for r in ok_responses] == [{"ok": True}, {"ok": True}]
+
+
+async def test_set_pane_auto_name_handler_patches_full_store(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The auto-name must reach the full spawn-history store at the source.
+    The project mirror only keeps the last 100 entries, and the renderer's
+    snapshot merge is debounced, skipped in detached windows, and lost on
+    quit — so an older entry would otherwise never get its title."""
+    from agent_team_backend import app, ws_handlers
+
+    store = ProjectStore()
+    store.save(store.load_or_create(str(tmp_path)))
+    store.record_manual_pane_spawn(str(tmp_path), pane_id="p1", agent="claude")
+    store.set_ui_state(
+        str(tmp_path), spawn_history=[_entry("p1", workspacePath=str(tmp_path))]
+    )
+    app.spawn_history_store.merge(
+        str(tmp_path), [_entry("p1", workspacePath=str(tmp_path))]
+    )
+    monkeypatch.setattr(app, "project_store", store)
+
+    async def no_broadcast(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(app, "broadcast", no_broadcast)
+
+    session = app.Session(FakeWebSocket())  # type: ignore[arg-type]
+    fn = ws_handlers.lookup("project.set_pane_auto_name")
+    assert fn is not None
+    await fn(session, "m1", "project.set_pane_auto_name", {
+        "workspace_path": str(tmp_path), "pane_id": "p1", "auto_name": "Fix login",
+    })
+
+    assert _stored_entries(tmp_path)[0]["autoName"] == "Fix login"
+
+    # Set-once: the losing write leaves the full store alone too.
+    await fn(session, "m2", "project.set_pane_auto_name", {
+        "workspace_path": str(tmp_path), "pane_id": "p1", "auto_name": "Loser",
+    })
+    assert _stored_entries(tmp_path)[0]["autoName"] == "Fix login"
 
 
 async def test_set_pane_auto_name_handler_skips_broadcast_when_custom_named(

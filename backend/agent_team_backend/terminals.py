@@ -222,6 +222,28 @@ _FAST_PATH_MAX_BYTES = 192 * 1024
 # still holds.
 _COALESCE_MS = 2
 
+# Latency probes.  All three stay silent unless the path they watch crosses its
+# threshold, so a healthy session writes nothing at all.  They exist because the
+# input round-trip had NO observability: a "typing lags" report left nothing in
+# the log to tell a slow PTY echo apart from a stalled WS send apart from a CLI
+# that stopped reading its own stdin.  A pane has no local echo, so every
+# keystroke is a full round-trip and any one of those three is directly visible.
+#
+# _ECHO_LAG_WARN_MS   keystroke written to the PTY -> that session's next output
+#                     flush, i.e. the backend half of what the user feels.
+# _ECHO_LAG_MAX_MS    past this the output almost certainly is not the echo (the
+#                     CLI was simply busy), so reporting it would be noise.
+# _READER_SUSPEND_WARN_MS
+#                     how long _flush_output kept the PTY reader detached while
+#                     draining to the WS.  Long holds are the backpressure path:
+#                     the kernel buffer fills and the CLI blocks on write.
+_ECHO_LAG_WARN_MS = 250
+_ECHO_LAG_MAX_MS = 5000
+_READER_SUSPEND_WARN_MS = 100
+# Only a keystroke-sized write arms the echo timer.  Role injection and pastes
+# are bulk writes whose echo is legitimately slower and would only add noise.
+_ECHO_PROBE_MAX_INPUT_CHARS = 16
+
 # PTY lifecycle work — registry register/unregister and zombie reaping — runs
 # on its own pool.  It used to share asyncio's default executor with
 # _snapshot_loop's _ps_snapshot, a full-system process scan that runs
@@ -360,6 +382,14 @@ class TerminalService:
         # per-session rolling counters for fast-path saturation reporting.
         # Remove with _note_fastpath_stats once the measurement round is done.
         self._fastpath_stats: dict[str, dict[str, float]] = {}
+        # Latency probe state (see _ECHO_LAG_WARN_MS).  session_id -> loop time
+        # of the keystroke whose echo is still outstanding.  Only the FIRST
+        # keystroke of a burst is timed: a fast typist would otherwise keep
+        # resetting the clock and the lag they are feeling would never report.
+        self._echo_probe: dict[str, float] = {}
+        # Sessions whose PTY refused input (kernel buffer full).  Tracked so the
+        # condition is logged on the transition rather than on every retry.
+        self._input_blocked: set[str] = set()
         # Background task keeping each live session's descendant snapshot
         # fresh, so the EOF path can reap orphans (see _reap_exit_orphans).
         # The wakeup event lets create() pull the next refresh forward.
@@ -582,6 +612,8 @@ class TerminalService:
         # the caller still logged "✓ sent"). Instead we buffer whatever the
         # kernel won't take and finish it from an add_writer callback. partial
         # writes (os.write accepting < len) are handled the same way.
+        if len(data) <= _ECHO_PROBE_MAX_INPUT_CHARS:
+            self._echo_probe.setdefault(session_id, self._loop.time())
         buf = self._in_buffers.setdefault(session_id, bytearray())
         buf.extend(data.encode("utf-8"))
         self._flush_input(session)
@@ -609,8 +641,18 @@ class TerminalService:
                 break
             del buf[:n]
         if buf:
+            # The PTY's kernel buffer is full, i.e. the CLI has stopped reading
+            # its stdin. The user sees typed characters simply not appear, so
+            # this is worth a line even though it usually self-heals.
+            if session.id not in self._input_blocked:
+                self._input_blocked.add(session.id)
+                log.warning(
+                    "pty input blocked session=%s agent=%s pending=%d bytes",
+                    session.id, session.agent_key, len(buf),
+                )
             self._watch_writable(session)
         else:
+            self._input_blocked.discard(session.id)
             self._unwatch_writable(session)
 
     def _on_writable(self, session: TerminalSession) -> None:
@@ -697,6 +739,9 @@ class TerminalService:
                 self._out_buf_bytes[session.id] = (
                     self._out_buf_bytes.get(session.id, 0) + len(decoded)
                 )
+        # Discard any outstanding echo probe rather than let _flush_output
+        # attribute this resize drain to the user's last keystroke.
+        self._echo_probe.pop(session.id, None)
         # 2. Cancel the pending batch timer; we emit synchronously below.
         handle = self._out_handles.pop(session.id, None)
         if handle:
@@ -1132,6 +1177,17 @@ class TerminalService:
             return
         combined = "".join(chunks)
 
+        # Echo probe: this flush is the first output since the user's keystroke,
+        # so the gap between them is the backend's share of the round-trip.
+        started = self._echo_probe.pop(session.id, None)
+        if started is not None:
+            lag_ms = (self._loop.time() - started) * 1000
+            if _ECHO_LAG_WARN_MS <= lag_ms < _ECHO_LAG_MAX_MS:
+                log.warning(
+                    "input echo lag session=%s agent=%s lag=%.0fms bytes=%d",
+                    session.id, session.agent_key, lag_ms, len(combined),
+                )
+
         # Suspend reading from the PTY while we drain the network buffer.
         # This provides natural backpressure so the CLI blocks when writing
         # instead of OOMing the Python backend or Electron WebSocket receiver.
@@ -1140,11 +1196,21 @@ class TerminalService:
         except (ValueError, KeyError):
             pass
 
+        suspended_at = self._loop.time()
+
         async def _drain() -> None:
             try:
                 for piece in self._split_chunks(combined):
                     await self._emit(self._build_output_event(session, piece))
             finally:
+                # Nothing is read from the PTY for this whole span, so a long
+                # one is the backpressure path reaching the CLI.
+                held_ms = (self._loop.time() - suspended_at) * 1000
+                if held_ms >= _READER_SUSPEND_WARN_MS:
+                    log.warning(
+                        "pty reader suspended session=%s agent=%s held=%.0fms bytes=%d",
+                        session.id, session.agent_key, held_ms, len(combined),
+                    )
                 if not session.closed:
                     try:
                         self._loop.add_reader(session.master_fd, self._on_readable, session)
@@ -1214,6 +1280,8 @@ class TerminalService:
         self._in_buffers.pop(session.id, None)
         self._recent_chunks.pop(session.id, None)
         self._fastpath_stats.pop(session.id, None)
+        self._echo_probe.pop(session.id, None)
+        self._input_blocked.discard(session.id)
         try:
             os.close(session.master_fd)
         except OSError:

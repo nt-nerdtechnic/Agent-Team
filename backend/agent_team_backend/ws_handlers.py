@@ -13,6 +13,7 @@ function-level ``from . import app``.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import threading
 import time
@@ -47,6 +48,11 @@ if TYPE_CHECKING:
 Handler = Callable[["Session", str, str, dict], Awaitable[None]]
 
 _REGISTRY: dict[str, Handler] = {}
+
+# Diagnostics forwarded from the renderer (see the client.diagnostic handler).
+# Its own logger so a reader can tell at a glance which half of the app a line
+# came from, since the two halves now share one file.
+client_log = logging.getLogger("agent_team_backend.client")
 
 # Dedicated pool for onboarding.status, whose dep probing (version subprocesses
 # + config-home scans) can run for seconds. Keeping it off asyncio's shared
@@ -3722,6 +3728,30 @@ async def terminal_log_sent(session: "Session", msg_id: str, msg_type: str, payl
     await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
 
 
+@handler("client.diagnostic")
+async def client_diagnostic(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Write a renderer-side diagnostic line into the backend log.
+
+    The renderer has no log file of its own, so the timings only it can see —
+    how long a pane sat in each preparation step, an IME composition that
+    latched and started swallowing keys — had nowhere to land. An input-latency
+    report therefore arrived with evidence for the PTY half and nothing for the
+    half the user actually touches. Routing these here puts both halves on one
+    timeline, in the file the user already reads.
+
+    Deliberately dumb: the renderer decides what deserves a line (its probes
+    are threshold-gated on that side), this only writes it down.
+    """
+    message = str(payload.get("message") or "")[:1000]
+    if message:
+        category = str(payload.get("category") or "ui")[:40]
+        if payload.get("level") == "warning":
+            client_log.warning("%s: %s", category, message)
+        else:
+            client_log.info("%s: %s", category, message)
+    await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
+
+
 @handler("terminal.resize")
 async def terminal_resize(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     # Drain old-width output BEFORE the ioctl + ack so it reaches the
@@ -4136,11 +4166,14 @@ async def project_rename_pane(session: "Session", msg_id: str, msg_type: str, pa
 async def project_set_pane_auto_name(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     """Persist an auto-generated pane title (set-once; custom_name wins).
 
-    An accepted write also patches the project.json spawn-history mirror
-    (autoName key) via the store, but never the full spawn-history store,
-    and a no-op (empty name, or the pane already named either way) is not
-    broadcast — the store is the final arbiter of the cross-window race, so
-    only the winning write reaches peer windows.
+    An accepted write patches both the project.json spawn-history mirror
+    (autoName key, via the store) and the full spawn-history store, the same
+    way rename_pane does — the mirror only holds the last 100 entries, so
+    older ones would otherwise depend entirely on the renderer's debounced
+    snapshot. A no-op (empty name, or the pane already named either way)
+    touches neither store and is not broadcast — the store is the final
+    arbiter of the cross-window race, so only the winning write reaches peer
+    windows.
     """
     from . import app
 
@@ -4152,6 +4185,16 @@ async def project_set_pane_auto_name(session: "Session", msg_id: str, msg_type: 
             ws_raw, pane_id=pane_id, auto_name=auto_name
         )
         if project is not None and changed:
+            # Patch the full store at the source too: the renderer's debounced
+            # snapshot merge also carries the name, but it can be lost on quit
+            # and never runs in detached windows.
+            await asyncio.to_thread(
+                app.spawn_history_store.patch_entry,
+                ws_raw,
+                pane_id,
+                {"autoName": auto_name},
+                seed=project.ui_spawn_history,
+            )
             # Peers patch their live panes[] state from auto_named_pane so
             # their titles converge on the winning name.
             await app.broadcast(

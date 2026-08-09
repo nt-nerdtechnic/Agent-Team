@@ -119,6 +119,7 @@ class PaneRecord:
     kickoff_status: str = "none"    # none / sent / failed
     custom_name: str = ""           # user-set display name; empty falls back to the default label
     auto_name: str = ""             # auto-generated display name; set once, custom_name wins
+    auto_name_source: str = ""      # "heuristic" | "llm"; an llm name may upgrade a heuristic one once
     output_log_file: str = ""       # conversation log path recorded at spawn time
     stopped: bool = False           # STOP badge: a stop action was issued and the user hasn't taken over yet
 
@@ -567,7 +568,11 @@ class ProjectStore:
         for stub in [p for p in project.panes
                      if p is not pane and p.pane_id == pane_id and p.spawn_status == "pending"]:
             if pane_id in self._stub_name_intent: pane.custom_name = stub.custom_name
-            if stub.auto_name: pane.auto_name = stub.auto_name
+            if stub.auto_name:
+                pane.auto_name = stub.auto_name
+                # Carry the source with the name, or a heuristic stub would look
+                # like an llm one and block the upgrade that is still in flight.
+                pane.auto_name_source = stub.auto_name_source
             if stub.session_id: pane.session_id = stub.session_id
             project.panes.remove(stub)
         self._stub_name_intent.discard(pane_id)
@@ -816,14 +821,22 @@ class ProjectStore:
         *,
         pane_id: str,
         auto_name: str,
+        source: str = "heuristic",
     ) -> tuple[Project | None, bool]:
         """Persist an auto-generated display name for a pane, keyed by pane_id.
 
-        Set-once: this is the final arbiter for the cross-window race — if the
-        record already carries a non-empty custom_name or auto_name, the write
-        is ignored (first writer wins). An empty auto_name is also a no-op.
-        Returns (project, changed); project is None when no project exists for
-        the workspace.
+        This is the final arbiter for the cross-window race. A name is written
+        at most twice, and only ever in one direction:
+
+        * custom_name always wins — a record carrying one is never touched;
+        * an ``llm`` name may replace an existing ``heuristic`` name once, since
+          the renderer titles a pane instantly from its string heuristic and
+          only then asks the model for a better one;
+        * anything else is set-once (first writer wins), so a pane is never
+          renamed again turn after turn.
+
+        An empty auto_name is a no-op. Returns (project, changed); project is
+        None when no project exists for the workspace.
 
         Upsert mirrors rename_pane(): the name can arrive before the spawn
         persists the PaneRecord, so create a pending stub keyed by pane_id.
@@ -836,12 +849,20 @@ class ProjectStore:
         if not auto_name:
             return project, False
         pane = next((p for p in project.panes if p.pane_id == pane_id), None)
-        if pane is not None and (pane.custom_name or pane.auto_name):
+        if pane is not None and pane.custom_name:
             return project, False
+        if pane is not None and pane.auto_name:
+            # The one permitted second write: the model's answer replacing the
+            # heuristic placeholder. Two llm writes racing still resolve
+            # first-wins, so the name settles.
+            upgrading = source == "llm" and pane.auto_name_source != "llm"
+            if not upgrading:
+                return project, False
         if pane is None:
             pane = PaneRecord(pane_id=pane_id, origin="manual")
             project.panes.append(pane)
         pane.auto_name = auto_name
+        pane.auto_name_source = source
         # Keep the renderer-owned history mirror consistent at the source (same
         # reasoning as rename_pane), but under a separate key: customName is the
         # user's name and must never be overwritten by an auto-derived one.
