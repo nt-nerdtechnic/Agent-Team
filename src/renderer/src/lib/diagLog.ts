@@ -29,3 +29,35 @@ export function diagLog(
     /* backend not connected — a dropped diagnostic is not worth an exception */
   }
 }
+
+/**
+ * A diagLog that cannot flood.
+ *
+ * The probes that watch a per-keystroke path have a nasty property: the worse
+ * the problem gets, the more often they fire, so an unthrottled probe adds
+ * WebSocket traffic to the exact path whose slowness it is measuring. Under
+ * sustained trouble the useful fact is that it is happening and roughly how
+ * often — not every individual instance.
+ *
+ * Suppressed lines are counted and reported by the next line that gets through,
+ * so throttling never makes the log understate the problem.
+ */
+export function createThrottledDiag(
+  backend: DiagBackend,
+  category: string,
+  minIntervalMs: number
+): (message: string, level?: 'info' | 'warning') => void {
+  let lastSentAt = 0
+  let suppressed = 0
+  return (message, level = 'info') => {
+    const now = Date.now()
+    if (lastSentAt && now - lastSentAt < minIntervalMs) {
+      suppressed++
+      return
+    }
+    lastSentAt = now
+    const tail = suppressed ? ` (+${suppressed} suppressed since the last line)` : ''
+    suppressed = 0
+    diagLog(backend, category, message + tail, level)
+  }
+}

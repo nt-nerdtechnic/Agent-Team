@@ -16,7 +16,7 @@ import { settingsGet, settingsSet } from '../lib/settings'
 import { extractClipboardImage, saveClipboardImage } from '../lib/clipboardImage'
 import { TERMINAL_CREATE_TIMEOUT_MS } from '../lib/resume-command'
 import { setContext } from '../keybindings/contextService'
-import { diagLog } from '../lib/diagLog'
+import { createThrottledDiag, diagLog } from '../lib/diagLog'
 import {
   formatTerminalExit,
   isTerminalCrashLoopOpen,
@@ -1636,12 +1636,17 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   let _compositionStartedAt = 0
   // A composition open this long is no longer someone picking a candidate.
   const IME_COMPOSITION_WARN_MS = 1500
+  // Both IME probes sit on a per-keystroke path, so they are throttled: if the
+  // latch turns out to fire constantly, the log says so through the suppressed
+  // count instead of adding a WebSocket message per key to an already slow one.
+  const DIAG_THROTTLE_MS = 5000
+  const _imeDiag = createThrottledDiag(backend, 'ime', DIAG_THROTTLE_MS)
   const _onCompositionStart = (): void => { _compositionStartedAt = Date.now() }
   const _onCompositionEnd = (): void => {
     const held = _compositionStartedAt ? Date.now() - _compositionStartedAt : 0
     _compositionStartedAt = 0
     if (held >= IME_COMPOSITION_WARN_MS) {
-      diagLog(backend, 'ime', `pane=${paneId} composition open ${held}ms before commit`, 'warning')
+      _imeDiag(`pane=${paneId} composition open ${held}ms before commit`, 'warning')
     }
   }
 
@@ -1652,12 +1657,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     if (!helper?.isComposing) return
     const latched = _compositionStartedAt ? Date.now() - _compositionStartedAt : 0
     _compositionStartedAt = 0
-    // Always logged, never throttled: on the theory that motivated this code it
-    // fires once per input-method switch. If the log says otherwise, that is
-    // itself the finding.
-    diagLog(
-      backend,
-      'ime',
+    _imeDiag(
       `pane=${paneId} stale composition unlatched after ${latched}ms — xterm was swallowing keys`,
       'warning'
     )
@@ -2485,6 +2485,9 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // Beyond this the output is the CLI thinking, not an echo, so attributing it
   // to the keystroke would only manufacture alarming numbers.
   const ECHO_ROUNDTRIP_MAX_MS = 3000
+  // Throttled for the reason above, and more sharply relevant here: sustained
+  // lag would otherwise mean one diagnostic per keystroke.
+  const _echoDiag = createThrottledDiag(backend, 'echo', 5000)
 
   /** Input bookkeeping shared by term.onData and the manual-paste path. */
   function noteUserInput(text: string): void {
@@ -2558,7 +2561,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         const roundTrip = Date.now() - _keystrokeSentAt
         _keystrokeSentAt = 0
         if (roundTrip >= ECHO_ROUNDTRIP_WARN_MS && roundTrip < ECHO_ROUNDTRIP_MAX_MS) {
-          diagLog(backend, 'echo', `pane=${paneId} keystroke round-trip ${roundTrip}ms`, 'warning')
+          _echoDiag(`pane=${paneId} keystroke round-trip ${roundTrip}ms`, 'warning')
         }
       }
       _pendingOutput += payload.data
