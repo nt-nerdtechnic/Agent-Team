@@ -4160,6 +4160,9 @@ async function onKill(paneId: string, opts: { markRemoved?: boolean, force?: boo
   delete paneRefs[paneId]
   unregisterPaneMessaging(paneId)
   paneMsgProcessedAt.delete(paneId)
+  // A pane closed mid-preparation never reaches ready/failed, which is where
+  // setPrepStatus would otherwise have dropped its timing entry.
+  prepStageEnteredAt.delete(paneId)
   clearDoneNotifyTimer(paneId)
   stopLoopLimitWatcher(paneId)
   stopLoginExpiredWatcher(paneId)
