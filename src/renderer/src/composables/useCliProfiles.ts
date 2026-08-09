@@ -1,5 +1,6 @@
 import { onScopeDispose, ref, type InjectionKey } from 'vue'
 import { i18n } from '../i18n'
+import { paneCanRebuild } from '../lib/resume-command'
 import type { useBackend } from './useBackend'
 
 // A CLI account profile: a stored credential slot for one agent CLI so the
@@ -377,19 +378,34 @@ export function forcedRestartAgentKey(
 
 /**
  * True when a pane belongs in the post-switch restart batch: a realized,
- * non-login pane of the switched agent whose terminal has not died.
- * `status` is the pane's display/terminal status ('exited'/'error' = dead);
- * undefined (terminal ref not mounted yet) keeps the pane in the batch — it
- * may be starting on the old credentials, and skipping it would leave the
- * stale account live.
+ * non-login pane of the switched agent whose terminal has not died AND which
+ * can actually be rebuilt. `status` is the pane's display/terminal status
+ * ('exited'/'error' = dead); undefined (terminal ref not mounted yet) keeps
+ * the pane in the batch — it may be starting on the old credentials, and
+ * skipping it would leave the stale account live.
+ *
+ * The rebuild is a resume, so it needs the same preconditions as the manual
+ * Rebuild button (paneCanRebuild): a pinned session id, its transcript on
+ * disk, and an agent with a resume command. A pane missing any of them — a
+ * freshly opened one that has no session yet, typically — cannot be resumed
+ * however hard the batch tries, and counting its guaranteed failure in the
+ * partial-restart toast reports a problem that is not one. It stays on the
+ * outgoing account until the user restarts it by hand.
  */
 export function paneNeedsAccountRestart(
-  pane: { realized?: boolean; agentKey?: string; isLogin?: boolean },
+  pane: {
+    realized?: boolean
+    agentKey?: string
+    isLogin?: boolean
+    pinnedSessionId?: string
+    sessionOnDisk?: boolean
+  },
   agentKey: string,
   status: string | undefined,
 ): boolean {
   if (!pane.realized || pane.agentKey !== agentKey || pane.isLogin) return false
-  return status !== 'exited' && status !== 'error'
+  if (status === 'exited' || status === 'error') return false
+  return paneCanRebuild({ ...pane, agentKey })
 }
 
 /**

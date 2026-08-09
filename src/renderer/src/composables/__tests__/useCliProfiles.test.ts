@@ -337,7 +337,13 @@ describe('forcedRestartAgentKey', () => {
 })
 
 describe('paneNeedsAccountRestart', () => {
-  const pane = { realized: true, agentKey: 'claude', isLogin: false }
+  const pane = {
+    realized: true,
+    agentKey: 'claude',
+    isLogin: false,
+    pinnedSessionId: 'sess-1',
+    sessionOnDisk: true,
+  }
 
   it('includes a realized, live pane of the switched agent', () => {
     expect(paneNeedsAccountRestart(pane, 'claude', 'running')).toBe(true)
@@ -356,6 +362,20 @@ describe('paneNeedsAccountRestart', () => {
   it('excludes exited and errored panes', () => {
     expect(paneNeedsAccountRestart(pane, 'claude', 'exited')).toBe(false)
     expect(paneNeedsAccountRestart(pane, 'claude', 'error')).toBe(false)
+  })
+
+  // A resume needs a session to resume into. Without one the rebuild fails
+  // every time, and counting that failure reports a problem that is not one.
+  it('excludes a pane that has no session yet', () => {
+    expect(paneNeedsAccountRestart({ ...pane, pinnedSessionId: '' }, 'claude', 'running')).toBe(false)
+  })
+
+  it('excludes a pane whose transcript is not on disk yet', () => {
+    expect(paneNeedsAccountRestart({ ...pane, sessionOnDisk: false }, 'claude', 'running')).toBe(false)
+  })
+
+  it('excludes an agent with no resume support', () => {
+    expect(paneNeedsAccountRestart({ ...pane, agentKey: 'aider' }, 'aider', 'running')).toBe(false)
   })
 })
 
