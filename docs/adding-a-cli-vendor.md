@@ -13,7 +13,16 @@ You never need to read or modify the shared orchestration code.
 2. Register the spec in `cli_vendors/registry.py` (one line, alphabetical).
 3. If the CLI writes local conversation logs, implement the log reader in
    your vendor file and set `make_log_reader`.
-4. Add `backend/tests/vendors/test_<key>.py` covering what you implemented.
+4. Add `backend/agent_team_backend/log_readers/<key>.py`. Every registered
+   vendor needs a module there — a re-export shim when you wrote a reader
+   (copy any existing one), an empty placeholder when you did not. If you
+   wrote one, also list its class in `log_readers/__init__.py`
+   (`_MIGRATED_READERS` and `__all__`).
+5. Add `backend/tests/vendors/test_<key>.py` covering what you implemented.
+6. Add your key to two hardcoded lists in the tests: `EXPECTED_KEYS` in
+   `backend/tests/test_cli_vendors_registry.py`, and the `SNAPSHOT` in
+   `backend/tests/vendors/test_install_deps_snapshot.py` (append your entry
+   last unless you also added the key to `_AGENT_CLI_ORDER`).
 
 ## Frontend
 
