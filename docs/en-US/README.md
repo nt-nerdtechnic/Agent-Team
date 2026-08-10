@@ -36,7 +36,8 @@ The root [README](../../README.md) introduces the product and current distributi
 |---|---|
 | [Contributing](../../CONTRIBUTING.md) | Set up a development environment and submit changes |
 | [Architecture](architecture.md) | Understand process boundaries, state ownership, and major services |
-| [CLI extension guide](cli-extension-guide.md) | Add or maintain an AI coding CLI integration |
+| [Adding a CLI vendor](../adding-a-cli-vendor.md) | Add an AI coding CLI: the two spec files, registration, and the checks CI enforces |
+| [CLI extension guide](cli-extension-guide.md) | Per-vendor integration records: install routes, resume syntax, session storage formats |
 | [Plugin development](plugin-development.md) | Build a frontend view plugin or a backend plugin, then package and sign it |
 | [External MCP control](external-mcp-control.md) | Connect an external MCP client to control a running Navide window, and understand the security model |
 | [Release guide](releases.md) | Version, package, sign, notarize, publish, and recover a release |

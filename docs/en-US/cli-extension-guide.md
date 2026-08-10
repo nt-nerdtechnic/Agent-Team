@@ -1,233 +1,65 @@
 # CLI Extension Guide
 
-How to add a new CLI agent (for example `aider` or `amp`) to the Navide
-pipeline — the impact map (which layers a new CLI touches), the process to
-follow, and a record of past integrations and candidate research.
+Integration records for Navide's built-in CLI agents: the research behind
+each one and the traps found while wiring it.
 
-The codebase uses a consistent key — `agentKey` in the frontend, `agent_key` in
-the backend — to identify which CLI is running in a pane. Adding a new CLI
-means registering that key in each of the following layers.
+**To add a new CLI, follow [Adding a CLI vendor](../adding-a-cli-vendor.md)**
+rather than this file. That guide tracks the current architecture and the
+checks CI enforces; the records in Part 2 here predate it and name files that
+have since moved.
 
 Current built-in agent keys are `claude`, `codex`, `antigravity`, `grok`,
-`kimi`, `opencode`, `qwen`, `kilo`, `pi`, `copilot`, `cursor`, and `aider`.
-The current integration surface is distributed across the application; a
-declarative, capability-based adapter contract is planned in the
-[Product Roadmap](roadmap.md).
-
-Last verified against the codebase: 2026-07-28.
+`kimi`, `opencode`, `qwen`, `kilo`, `pi`, `copilot`, `cursor`, `aider`, and
+`muse`. One key identifies a vendor on both sides — `agentKey` in the
+frontend, `agent_key` in the backend.
 
 ---
 
-## Part 1 — Impact map (checklist)
+## Part 1 — Where the code lives
 
-### 1. Type definition
+Since the one-file-per-vendor refactor (July 2026) an integration is two
+vendor files plus one registration line on each side. No shared module
+carries per-vendor branches, and CI rejects a vendor module that imports
+another vendor or any app module.
 
-**`src/renderer/src/data/stages.ts:5`**
+| Layer | File |
+|-------|------|
+| Backend spec — credentials, usage, resume, session paths, spawn env, log reader, install entry | `backend/agent_team_backend/cli_vendors/<key>.py` |
+| Backend registration | `backend/agent_team_backend/cli_vendors/registry.py` |
+| Frontend spec — label, command, resume syntax, capability flags | `src/renderer/src/agents/<key>.ts` |
+| Frontend registration + display order | `src/renderer/src/agents/index.ts` |
 
-Add the new key to the `AgentKey` union type:
+Everything the old layer-by-layer checklist enumerated now derives from those
+four:
 
-```ts
-export type AgentKey = 'claude' | 'codex' | 'antigravity' | 'grok' | 'your-cli'
-```
+- `AgentKey` is re-exported from `agents/index.ts`; `data/stages.ts` holds no
+  hand-written union to drift.
+- The install wizard's `DEPS` aggregates each spec's `install_dep`
+  (`onboarding_deps.py`), and a vendor absent from `_AGENT_CLI_ORDER` simply
+  appends in registry order.
+- Log readers are collected from the registry at startup (`app.py`), one per
+  spec that defines `make_log_reader`.
+- Session marking, resume syntax, paste protocol and login recovery are spec
+  fields, not conditionals in `App.vue` or `resume-command.ts`.
 
-### 2. Agent spec
+A capability left unset means "unsupported for this vendor": the app degrades
+around it instead of falling back to another vendor's behaviour. Filling a
+field in from a guess is worse than leaving it empty — it hands the resume
+preflight, the credential vault or the log watcher paths that do not exist.
 
-**`src/renderer/src/lib/agentSpecs.ts`** — `AGENT_SPECS` array
-(extracted from `App.vue` in July 2026)
-
-```ts
-{
-  agentKey: 'your-cli',
-  label: 'Your CLI',           // display name in dropdowns
-  defaultCommand: 'your-cli',  // executable name on PATH
-  skipPermissionFlag: '--yes', // flag to bypass interactive prompts (YOLO mode)
-  hint: 'short role description'
-}
-```
-
-`skipPermissionFlag` is appended automatically when YOLO mode is enabled and
-the user has not provided a custom command. The manual-spawn dropdown, Active
-Agents list, and pipeline agent picker all read this array — no extra UI work.
-
-### 3. Session startup logic
-
-**`src/renderer/src/App.vue`** — spawn options / `sessionMarker` (~line 1247)
-
-Claude supports `--session-id` at launch, which lets the backend attribute log
-events to a specific pane precisely. CLIs without such a flag use an embedded
-text marker (`at-pane:<paneId>`) that the log reader later matches to bind the
-session.
-
-If the new CLI **does not** support pinning a session id at launch, add its
-key to the `sessionMarker` condition (currently Codex, Antigravity, and Grok). If it
-**does**, add a branch analogous to the Claude block.
-
-Consequence of marker-based binding: until the marker is detected, the pane
-shows the "detecting session" preparation overlay (`App.vue` ~5696) and cannot
-be resumed. Antigravity is the known-worst case here — see the records below.
-
-### 4. Resume command syntax
-
-**`src/renderer/src/lib/resume-command.ts`**
-
-Each CLI has its own resume syntax; add a branch. Current shapes:
-
-```ts
-// claude --resume <id>       ← flag
-// codex resume <id>          ← subcommand, NOT a --flag
-// agy --conversation <id>    ← different flag name
-// grok -s <id>               ← short flag
-```
-
-Also check `canResumeSession` gating in the same module.
-
-### 5. Backend whitelist
-
-**`backend/agent_team_backend/ws_handlers.py`** — pane-registration
-attribution whitelist (moved from `app.py` in July 2026; search for the
-`agent_key in (` tuple)
-
-The backend validates `agent_key` before registering a pane with the
-attribution layer:
-
-```python
-if agent_key in ("claude", "codex", "antigravity", "grok", "your-cli"):
-```
-
-### 6. Log reader (new file — the big one)
-
-**`backend/agent_team_backend/log_readers/your_cli.py`**
-
-Each CLI writes conversation logs in its own format and location. Implement
-the `LogReader` base class (`base.py`) and register it in `watcher.py`.
-Responsibilities: session file discovery, session-id detection (including
-`at-pane:` marker matching for `session.detected` events), and `TokenUsage`
-parsing for the token stats panel.
-
-Reference implementations, by storage format:
-- JSONL: `claude.py`, `codex.py`
-- SQLite: `antigravity.py`, `grok.py`
-
-This is the effort-dominant step — it requires understanding the CLI's session
-file format, directory layout, and how quickly a new session appears on disk.
-
-### 7. Token stats display
-
-**`src/renderer/src/components/TokenStatsPanel.vue:76`**
-
-Add the vendor to `VENDOR_LABELS` and `KNOWN_VENDORS`.
-
-### 8. Per-pane home isolation (conditional)
-
-**`backend/agent_team_backend/codex_home.py`** (precedent)
-
-If the CLI keeps mutable global state that breaks concurrent panes (Codex:
-global `CODEX_HOME` session dir), replicate the per-pane home pattern:
-`prepare` an isolated home per pane, pass it via spawn env, `find_session_home`
-on resume, `cleanup` on kill. Skip this layer if the CLI tolerates concurrent
-instances (Claude does).
-
-### 9. Kickoff / settle heuristics (usually free)
-
-Role and kickoff injection waits for the CLI's input box to become ready
-(settle detection in `App.vue` ~1000–1108). The heuristics are generic
-(CLI-quiet + echo tail-match), but a CLI with unusual prompt rendering may
-need tuning. Verify manually with a role-assigned spawn.
-
-### 10. Support registry entry (install, update, diagnose)
-
-**`backend/agent_team_backend/onboarding_deps.py`** — `DEPS` registry
-
-One declaration drives onboarding detection, one-click install, and the CLI
-management panel (Settings → CLI Agents). Adding a CLI here is a data change:
-the panel renders whatever the registry declares, with no UI code per CLI.
-
-```python
-Dep("grok", "Grok CLI", "superagent-ai Grok coding agent", "agent_cli",
-    ["grok", "--version"], r"(\d+\.\d+\.\d+)",
-    install_cmd="curl -fsSL https://raw.githubusercontent.com/superagent-ai/grok-cli/main/install.sh | bash",
-    needs_terminal=True, optional=True, docs_url="https://grokcli.io",
-    update_cmd="grok update"),
-```
-
-`needs_terminal=True` makes the wizard run the install in a real pane so the
-user can complete any interactive auth. API-key-based CLIs (Grok needs
-`GROK_API_KEY`) can additionally be wired to the AI-chat settings store
-(`ai_chat_settings.py` already holds an `xai_api_key` field) and injected into
-the spawn env — see the per-pane env pattern in layer 8.
-
-**Maintenance fields — research these before adding the CLI.** Navide does not
-operate a CLI: it surfaces and runs the vendor's own commands, and never
-substitutes one of its own. Every field below is optional, and leaving it empty
-is the correct answer when the vendor ships nothing — the UI then points at
-`docs_url` instead of guessing.
-
-| Field | What to fill in | Find it with |
-|-------|-----------------|--------------|
-| `update_cmd` | The CLI's own update subcommand | `<cli> --help` |
-| `doctor_cmd` | The CLI's own diagnostic | `<cli> --help` |
-| `npm_package` | npm package name, when npm is a supported install route | `npm ls -g` |
-| `update_state_file` | File where the CLI records its own update outcome, relative to a config home | vendor docs / inspect the config dir |
-| `config_home_env` / `config_home_default` | Env var that relocates the config home, and its default under `$HOME` | vendor docs |
-| `autoupdate_env` | The vendor's own auto-update opt-out env var | vendor docs / `strings` on the binary |
-
-Verified at the time of writing: `claude update` / `claude doctor`,
-`codex update` / `codex doctor`, `agy update`, `grok update`, `kimi doctor`
-(Kimi Code ships no update subcommand, so its `update_cmd` stays empty).
-
-Two derived behaviours come for free once the fields are set:
-
-- **Install method** (`_install_method`) is classified from where the binary
-  physically resolves — npm / homebrew / native / script — and shown in the
-  panel. Anything unrecognised stays `unknown` rather than being guessed.
-- **Failed vendor updates** are read back from `update_state_file` across the
-  default home, `config_home_env`, and every profile home under
-  `~/.navide/cli-profiles/<agent>/`, and raised as an `update_failed` finding.
-  A failure whose `version_from` no longer matches the installed version is
-  treated as stale and dropped.
-
-### Effort summary
-
-| Layer | File | Effort |
-|-------|------|--------|
-| Type | `src/renderer/src/data/stages.ts` | trivial |
-| Spec | `src/renderer/src/lib/agentSpecs.ts` | trivial |
-| Session startup | `src/renderer/src/App.vue` (sessionMarker) | low |
-| Resume syntax | `src/renderer/src/lib/resume-command.ts` | low |
-| Backend whitelist | `backend/agent_team_backend/ws_handlers.py` | trivial |
-| Log reader | `backend/agent_team_backend/log_readers/` | **medium–high** |
-| Token stats | `src/renderer/src/components/TokenStatsPanel.vue` | trivial |
-| Per-pane home | `backend/agent_team_backend/codex_home.py` pattern | none–medium (CLI-dependent) |
-| Settle heuristics | `App.vue` injection path | usually none |
-| Support registry (install/update/doctor) | `backend/agent_team_backend/onboarding_deps.py` | trivial (research: low) |
-| CLI management panel | `src/renderer/src/components/CliManagementPanel.vue` | none (registry-driven) |
+`docs/adding-a-cli-vendor.md` carries the full step list, the structural
+tests that act as the checklist, and the import rules.
 
 ---
 
-## Part 2 — Process
+## Part 2 — Integration records
 
-1. **Research first** (before any code). Answer for the candidate CLI:
-   - launch command + install path; does the binary name collide with anything?
-   - interactive & non-interactive modes; permission-skip / YOLO flag
-   - resume: flag or subcommand? is the session id printed / discoverable?
-   - can a session id be pinned at launch (`--session-id` equivalent)?
-   - session storage: directory, format (JSONL/SQLite), per-project layout,
-     how fast a new session file appears
-   - token usage: recorded where, in what units?
-   - concurrent instances: safe, or needs home isolation?
-2. **Write a plan file** under `.cursor/plans/` (see project memory
-   `cursor-plan-format` for filename + frontmatter schema), phased roughly:
-   A) spec + types + whitelist, B) resume + session startup, C) log reader,
-   D) token stats + polish, E) validation.
-3. **Implement by phases**; update plan todo statuses as phases complete.
-4. **Validate**: `pnpm typecheck`, `pnpm test:run`,
-   `uv --project backend run pytest backend/tests` (all bare, no piping), plus
-   manual spawn/resume/token-stats checks. Terminal-adjacent work must respect
-   `.claude/playbook/20-pitfalls.md` (never clear scrollback, etc.).
-
----
-
-## Part 3 — Integration records
+Written against the pre-refactor layout: paths such as `lib/agentSpecs.ts`,
+`log_readers/<cli>.py` and the `ws_handlers.py` agent whitelist no longer
+exist as described, and the per-layer instructions are superseded by Part 1.
+What remains valid — and is recorded nowhere else — is the per-vendor
+research: install routes, resume syntax, session storage formats, token
+accounting, and the trap each CLI hides.
 
 ### Antigravity CLI (`agy`) — added 2026-07-05
 

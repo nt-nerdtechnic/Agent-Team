@@ -98,7 +98,13 @@ Please fill in the pull request template — include a summary of changes and ho
 - Follow PEP 8.
 - Run `uv --project backend run pytest backend/tests` before committing.
 
+**Adding a CLI agent**
+- Follow [`docs/adding-a-cli-vendor.md`](docs/adding-a-cli-vendor.md). An
+  integration is two vendor spec files plus registration — never an
+  `if agent_key == "<yours>"` branch in a shared module.
+
 > 請與現有程式碼風格保持一致。Python 提交前請執行完整 backend tests。
+> 新增 CLI 整合請依 `docs/adding-a-cli-vendor.md`，一家一檔，不要在共用模組加分支。
 
 ---
 

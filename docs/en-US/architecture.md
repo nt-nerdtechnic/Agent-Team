@@ -155,17 +155,11 @@ Claude Code, Codex, Antigravity, Grok, Git clients, model runtimes, and MCP serv
 
 ## Agent integration boundary
 
-An agent integration currently spans:
+An agent integration is declared per vendor rather than threaded through the application. One spec file on each side — `backend/agent_team_backend/cli_vendors/<key>.py` and `src/renderer/src/agents/<key>.ts` — declares that CLI's credentials, usage interface, resume syntax, session paths, spawn environment, log reader and install entry, and one registration line on each side publishes it. Shared modules read the registry instead of branching on the agent key, and a vendor module may not import another vendor or any application module.
 
-- Frontend agent key and launch specification
-- CLI readiness and session-marker behavior
-- Resume-command syntax
-- Backend whitelist and support-registry entry (detection, install, and the CLI's own update and diagnostic commands)
-- Provider log or database reader
-- Session attribution and token display
-- CLI-specific concurrency or home-directory handling when required
+A capability the spec leaves undeclared is treated as unsupported for that vendor and degrades gracefully; it never falls back to another vendor's behavior. This keeps a partial integration honest — a CLI can ship with spawning and install detection while resume, log reading and credential switching stay visibly unavailable until they are verified against a real installation.
 
-See the [CLI Extension Guide](cli-extension-guide.md). A capability-based adapter contract is a roadmap goal because the current integration surface is distributed across several modules.
+See [Adding a CLI vendor](../adding-a-cli-vendor.md) for the procedure, and the [CLI Extension Guide](cli-extension-guide.md) for per-vendor integration records. Credential-vault behavior is the remaining surface that vendor files cannot fully declare.
 
 ## Session synchronization direction
 

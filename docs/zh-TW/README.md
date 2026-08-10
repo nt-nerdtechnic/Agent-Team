@@ -36,7 +36,8 @@ Root [繁體中文 README](../../README.zh-TW.md) 負責介紹產品與目前發
 |---|---|
 | [Contributing — English](../../CONTRIBUTING.md) | 建立開發環境並提交變更 |
 | [Architecture — English](../en-US/architecture.md) | 理解 Process Boundary、State Ownership 與主要 Service |
-| [CLI Extension Guide — English](../en-US/cli-extension-guide.md) | 新增或維護 AI Coding CLI 整合 |
+| [Adding a CLI Vendor — English](../adding-a-cli-vendor.md) | 新增 AI Coding CLI：兩份 Spec 檔、註冊，以及 CI 強制的檢查 |
+| [CLI Extension Guide — English](../en-US/cli-extension-guide.md) | 各家 CLI 的整合紀錄：安裝方式、Resume 語法、Session 儲存格式 |
 | [Plugin Development — English](../en-US/plugin-development.md) | 開發前端 View 插件或後端插件，並打包簽章發布 |
 | [Release Guide — English](../en-US/releases.md) | 版本、封裝、簽章、Notarization、發布與復原 Release |
 
