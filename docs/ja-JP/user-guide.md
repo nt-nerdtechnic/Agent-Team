@@ -40,7 +40,7 @@ Source Code と明示的に共有された Documentation は、Repository にお
 - Main Layout を占有せず PTY を維持するには Pane を Minimize します。
 - Navide が再利用可能な Session ID を検出した後にのみ Rebuild または Resume します。
 
-組み込みで対応する Agent Key は Claude Code、Codex、Antigravity CLI、Grok CLI です。正確な CLI Behavior と Provider Billing は各 External Tool が引き続き管理します。
+組み込みで対応する Agent Key は 13 種類のコーディング CLI（Aider、Antigravity CLI、Claude Code、Codex、Copilot CLI、Cursor CLI、Grok CLI、Kilo Code、Kimi Code、Muse Code、OpenCode、Pi、Qwen Code）です。正確な CLI Behavior と Provider Billing は各 External Tool が引き続き管理します。
 
 ## Pipeline
 

@@ -40,7 +40,7 @@ Use manual spawn for exploration, maintenance, or an Evolution task that does no
 - Minimize a pane to keep its PTY alive without occupying the main layout.
 - Rebuild or resume only after Navide has detected a reusable session ID.
 
-Supported built-in agent keys are Claude Code, Codex, Antigravity CLI, and Grok CLI. The exact CLI behavior and provider billing remain controlled by each external tool.
+Supported built-in agent keys cover 13 coding CLIs: Aider, Antigravity CLI, Claude Code, Codex, Copilot CLI, Cursor CLI, Grok CLI, Kilo Code, Kimi Code, Muse Code, OpenCode, Pi, Qwen Code. The exact CLI behavior and provider billing remain controlled by each external tool.
 
 ## Pipelines
 

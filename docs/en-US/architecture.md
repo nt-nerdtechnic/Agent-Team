@@ -151,7 +151,7 @@ The application data directory contains registries and preferences such as roles
 
 ### Provider-owned
 
-Claude Code, Codex, Antigravity, Grok, Git clients, model runtimes, and MCP servers retain their own configuration, sessions, credentials, logs, and caches. Navide reads selected provider-owned logs or databases for session attribution and usage reporting.
+Supported coding CLIs, Git clients, model runtimes, and MCP servers retain their own configuration, sessions, credentials, logs, and caches. Navide reads selected provider-owned logs or databases for session attribution and usage reporting.
 
 ## Agent integration boundary
 

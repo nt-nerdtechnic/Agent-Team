@@ -40,7 +40,7 @@ Navide 將個人私有 Project Intelligence 儲存在 Workspace 內的 `.agent-t
 - 將 Pane 最小化可以保留 PTY，同時避免占用主要 Layout。
 - 只有 Navide 偵測到可重用 Session ID 後，才進行 Rebuild 或 Resume。
 
-受支援的內建 Agent Key 包含 Claude Code、Codex、Antigravity CLI 與 Grok CLI。實際 CLI 行為與 Provider Billing 仍由各外部工具控制。
+受支援的內建 Agent Key 涵蓋 13 種 coding CLI：Aider、Antigravity CLI、Claude Code、Codex、Copilot CLI、Cursor CLI、Grok CLI、Kilo Code、Kimi Code、Muse Code、OpenCode、Pi、Qwen Code。實際 CLI 行為與 Provider Billing 仍由各外部工具控制。
 
 ## Pipeline
 

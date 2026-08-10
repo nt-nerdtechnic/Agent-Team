@@ -93,12 +93,12 @@ object, so this only bites on `plan_list`.
 | `cli_get_status` | `target` | `{busy, agent_key, last_activity?, ui?}` — `ui` mirrors `ui.pane.getStatus` when the owning window answers |
 | `cli_wait_idle` | `target`, `timeout_s=60` (capped at 120) | Blocks until the pane is idle or the timeout passes |
 
-**Capability boundary — idle/completion detection.** Only four CLIs' log
-readers emit a `turn_complete` event carrying the finished turn's text:
-**claude, codex, copilot, aider**. For those, `cli_wait_idle` and
-`cli_get_status`'s `last_activity.type` resolve on the precise turn-complete
-signal. For every other CLI Navide runs (antigravity, grok, kimi, opencode,
-qwen, kilo, pi, cursor, and plain terminal panes), there is no such signal —
+**Capability boundary — idle/completion detection.** Most CLIs' log readers
+emit a `turn_complete` event carrying the finished turn's text: **aider,
+claude, codex, copilot, cursor, grok, kimi, pi, qwen**. For those,
+`cli_wait_idle` and `cli_get_status`'s `last_activity.type` resolve on the
+precise turn-complete signal. For the remaining CLIs (antigravity, kilo,
+muse, opencode, and plain terminal panes), there is no such signal —
 `cli_wait_idle` falls back to inferring idleness from a 10-second quiet
 period with no new activity (`source: "quiet_period"` in the response), and
 `cli_get_status`'s `last_activity` may only ever report `"agent_active"`.
