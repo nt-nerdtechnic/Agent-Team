@@ -200,6 +200,40 @@ describe('useCliProfiles', () => {
     expect(result.profilesForAgent('codex').map((p) => p.id)).toEqual(['b'])
     scope.stop()
   })
+
+  it('loads unregistered accounts on connect and exposes them via unregisteredFor', async () => {
+    const mock = createMockBackend('connected')
+    mock.setResponse('cli_profiles.list', {
+      profiles: [],
+      defaults: {},
+      supported_agents: SUPPORTED,
+      unregistered: { claude: { email: 'outside@example.com', signedIn: true } },
+    })
+    const { result, scope } = withScope(() => useCliProfiles(mock.backend))
+    await flush()
+
+    expect(result.unregisteredFor('claude')).toEqual({
+      email: 'outside@example.com',
+      signedIn: true,
+    })
+    expect(result.unregisteredFor('codex')).toBeNull()
+    scope.stop()
+  })
+
+  it('syncs the unregistered cache from a cli_profiles.changed broadcast', async () => {
+    const mock = createMockBackend('connected')
+    mock.setResponse('cli_profiles.list', { profiles: [], defaults: {}, supported_agents: SUPPORTED })
+    const { result, scope } = withScope(() => useCliProfiles(mock.backend))
+    await flush()
+    expect(result.unregisteredFor('claude')).toBeNull()
+
+    mock.emit('cli_profiles.changed', {
+      unregistered: { claude: { email: null, signedIn: true } },
+      reason: 'poll',
+    })
+    expect(result.unregisteredFor('claude')).toEqual({ email: null, signedIn: true })
+    scope.stop()
+  })
 })
 
 describe('createCliAccountSwitchHandler', () => {

@@ -40,6 +40,11 @@ export interface CliAccountIdentity {
 // "__default__" (mirrors the backend's reserved slot id).
 export type CliProfileIdentities = Record<string, Record<string, CliAccountIdentity>>
 
+// agentKey -> identity of an account that is live-signed-in via that CLI
+// (e.g. someone ran `/login` in an external terminal) but does not match any
+// registered profile slot. An agentKey is only present when this applies.
+export type CliProfileUnregistered = Record<string, CliAccountIdentity>
+
 const DEFAULT_SLOT_ID = '__default__'
 
 /**
@@ -51,6 +56,7 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
   const profiles = ref<CliProfile[]>([])
   const defaults = ref<CliProfileDefaults>({})
   const identities = ref<CliProfileIdentities>({})
+  const unregistered = ref<CliProfileUnregistered>({})
   const supportedAgents = ref<string[]>([])
   const loaded = ref<boolean>(false)
   const loading = ref<boolean>(false)
@@ -67,6 +73,7 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
         profiles: CliProfile[]
         defaults: CliProfileDefaults
         identities?: CliProfileIdentities
+        unregistered?: CliProfileUnregistered
         supported_agents: string[]
       }>('cli_profiles.list', {})
       if (!resp.ok || !resp.payload) {
@@ -76,6 +83,7 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
       profiles.value = resp.payload.profiles
       defaults.value = resp.payload.defaults
       identities.value = resp.payload.identities ?? {}
+      unregistered.value = resp.payload.unregistered ?? {}
       supportedAgents.value = resp.payload.supported_agents
       loaded.value = true
     } catch (err) {
@@ -231,16 +239,23 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
     return identities.value[agentKey]?.[profileId ?? DEFAULT_SLOT_ID] ?? null
   }
 
+  /** Identity of the agent's live-but-unregistered account, or null. */
+  function unregisteredFor(agentKey: string): CliAccountIdentity | null {
+    return unregistered.value[agentKey] ?? null
+  }
+
   // Keep every window's cache in sync: any mutation broadcasts `cli_profiles.changed`.
   unsubChanged = backend.on('cli_profiles.changed', (raw) => {
     const payload = raw as {
       profiles?: CliProfile[]
       defaults?: CliProfileDefaults
       identities?: CliProfileIdentities
+      unregistered?: CliProfileUnregistered
     }
     if (payload?.profiles) profiles.value = payload.profiles
     if (payload?.defaults) defaults.value = payload.defaults
     if (payload?.identities) identities.value = payload.identities
+    if (payload?.unregistered) unregistered.value = payload.unregistered
   })
 
   // Initial load once connected; re-fetch on reconnect (mirrors useRoles).
@@ -268,6 +283,7 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
     profiles,
     defaults,
     identities,
+    unregistered,
     supportedAgents,
     loaded,
     loading,
@@ -282,6 +298,7 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
     defaultProfileId,
     findProfile,
     identityFor,
+    unregisteredFor,
   }
 }
 
