@@ -34,6 +34,33 @@ export const WHATS_NEW_CHROME = {
 
 export const WHATS_NEW: WhatsNewEntry[] = [
   {
+    version: '0.1.80',
+    title: {
+      'zh-TW': 'LLM 智慧 Pane 命名、Copilot/Qwen Hooks 路由與 WebGL 終端加速',
+      'en-US': 'LLM-assisted Pane Naming, Copilot/Qwen Hooks & WebGL Terminal Acceleration',
+    },
+    highlights: [
+      {
+        'zh-TW':
+          'LLM 智慧標題命名與平滑升級：首回合對話完成後自動請求本地模型生成高適配性 Pane 標題，並在不干擾使用者自訂命名的前提下平滑升級面板名稱。',
+        'en-US':
+          'LLM-assisted pane naming: automatically generates relevant pane titles using local models after the first turn and smoothly upgrades panel labels without overwriting custom renames.',
+      },
+      {
+        'zh-TW':
+          'Copilot / Qwen Hooks 路由與 Plan MCP 隔離：新增 Copilot 與 Qwen CLI 專屬 Hook 路由 Endpoint；Plan MCP Server 支援獨立目錄隔離與權限保護。',
+        'en-US':
+          'Copilot/Qwen CLI hooks & Plan MCP isolation: added dedicated hook endpoint routes for Copilot and Qwen CLI; isolated Plan MCP server homes with permission security.',
+      },
+      {
+        'zh-TW':
+          'WebGL 終端渲染加速與輸入緩衝：Terminal 支援 WebGL 硬體加速渲染，並新增 prepareGate 輸入緩衝防護，防止啟動準備階段丟失輸入按鍵。',
+        'en-US':
+          'WebGL terminal acceleration & input buffering: enabled WebGL hardware-accelerated rendering in Terminal with prepareGate input buffering during pane startup.',
+      },
+    ],
+  },
+  {
     version: '0.1.79',
     title: {
       'zh-TW': '剪貼簿圖片貼上轉檔、拖曳路徑轉義優化與 Agent 總覽詳情面板',
