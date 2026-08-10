@@ -251,7 +251,29 @@ SNAPSHOT = [{'id': 'claude',
   'update_state_file': '',
   'config_home_env': '',
   'config_home_default': '',
-  'autoupdate_env': 'AIDER_CHECK_UPDATE'}]
+  'autoupdate_env': 'AIDER_CHECK_UPDATE'},
+ # Appended after the snapshot was taken: muse is absent from
+ # _AGENT_CLI_ORDER, so it sorts last in registry order.
+ {'id': 'muse',
+  'label': 'Muse Code',
+  'description': 'Meta Muse Code CLI',
+  'group': 'agent_cli',
+  'check_cmd': ['muse', '--version'],
+  'version_regex': '(\\d+\\.\\d+(?:\\.\\d+)?)',
+  'alt_commands': [],
+  'min_version': '',
+  'install_cmd': 'curl -fsSL https://dev.meta.ai/install.sh | sh',
+  'needs_terminal': True,
+  'optional': True,
+  'docs_url': 'https://developer.meta.com/ai/products/muse-code/',
+  'requires_binaries': ['curl'],
+  'update_cmd': '',
+  'doctor_cmd': '',
+  'npm_package': '',
+  'update_state_file': '',
+  'config_home_env': '',
+  'config_home_default': '',
+  'autoupdate_env': ''}]
 
 
 def test_agent_cli_install_entries_unchanged():

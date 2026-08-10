@@ -902,7 +902,7 @@
       "intro": "Read-only reference of every keyboard shortcut the app currently supports. Most bindings are defined in the central keybinding system, but the handlers live across different windows and components, so some keys only take effect in specific contexts.",
       "callout": {
         "title": "Workflow: pick type → spawn",
-        "pick": "Set the CLI type to spawn next: claude / codex / antigravity / grok / kimi / opencode / qwen / kilo / pi / copilot / cursor / aider (and expand the Manual Spawn card)",
+        "pick": "Set the CLI type to spawn next: claude / codex / antigravity / grok / kimi / opencode / qwen / kilo / pi / copilot / cursor / aider / muse (and expand the Manual Spawn card)",
         "spawn": "Immediately spawn a pane using the selected type"
       },
       "col": {

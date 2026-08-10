@@ -14,6 +14,7 @@ import { SPEC as cursor } from './cursor'
 import { SPEC as grok } from './grok'
 import { SPEC as kilo } from './kilo'
 import { SPEC as kimi } from './kimi'
+import { SPEC as muse } from './muse'
 import { SPEC as opencode } from './opencode'
 import { SPEC as pi } from './pi'
 import { SPEC as qwen } from './qwen'
@@ -35,6 +36,7 @@ const ORDERED = [
   copilot,
   cursor,
   aider,
+  muse,
   terminal
 ] as const
 

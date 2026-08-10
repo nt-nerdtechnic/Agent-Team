@@ -902,7 +902,7 @@
       "intro": "整個 app 目前支援的鍵盤操作對照表（唯讀）。多數快捷鍵集中定義在中央 keybinding 系統，但真正掛上動作的位置分佈在不同視窗與元件，因此有些鍵只在特定情境生效。",
       "callout": {
         "title": "工作流：選類型 → 啟動",
-        "pick": "把下次要開的 CLI 種類切成 claude / codex / antigravity / grok / kimi / opencode / qwen / kilo / pi / copilot / cursor / aider（並展開 Manual Spawn 卡片）",
+        "pick": "把下次要開的 CLI 種類切成 claude / codex / antigravity / grok / kimi / opencode / qwen / kilo / pi / copilot / cursor / aider / muse（並展開 Manual Spawn 卡片）",
         "spawn": "用選定類型立刻開一個 pane（spawn）"
       },
       "col": {

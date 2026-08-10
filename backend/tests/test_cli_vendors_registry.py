@@ -25,7 +25,7 @@ FRONTEND_AGENTS_DIR = REPO_ROOT / "src" / "renderer" / "src" / "agents"
 
 EXPECTED_KEYS = {
     "aider", "antigravity", "claude", "codex", "copilot", "cursor",
-    "grok", "kilo", "kimi", "opencode", "pi", "qwen",
+    "grok", "kilo", "kimi", "muse", "opencode", "pi", "qwen",
 }
 
 # DEPS entries that are infrastructure, not CLI vendors.
