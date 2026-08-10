@@ -1269,7 +1269,10 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // latch. Unlike the focus grace below, this must gate the LATCH, not just
     // the activity clock: the latch update is what flips the badge. Bytes are
     // still kept (buffer/liveness) so genuine output isn't lost; a latched
-    // RUNNING simply coasts through the scroll on hysteresis.
+    // RUNNING coasts through the scroll on hysteresis, which is why the wheel
+    // handler advances lastCleanBurstAt itself while RUNNING holds — freezing
+    // the clock here is only safe for as long as the silence timeout hasn't
+    // expired against it.
     const now = Date.now()
     const inScrollGrace = now - lastScrollAt.value < SCROLL_GRACE_MS
     if (!inScrollGrace) {
@@ -1798,7 +1801,21 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         const forward = term.modes.mouseTrackingMode !== 'none'
         // A forwarded wheel event triggers a shifted-viewport repaint that
         // must not read as agent work — arm the scroll grace (see appendClean).
-        if (forward) lastScrollAt.value = Date.now()
+        if (forward) {
+          const now = Date.now()
+          // Carry the activity clock through the scroll. Output arriving inside
+          // the grace can't advance it (a repaint is indistinguishable from real
+          // work there), so a scroll lasting longer than IDLE_CONFIRM_MS used to
+          // age out a run that was still going: displayStatus's silence timeout
+          // reads the frozen lastCleanBurstAt and reports idle while the agent
+          // is visibly working. Gate it on RUNNING actually holding right now,
+          // so scrolling a pane that already went idle cannot resurrect the
+          // badge — the same timeout that decides the badge decides this.
+          if (runningLatched.value && now - lastCleanBurstAt.value <= IDLE_CONFIRM_MS) {
+            lastCleanBurstAt.value = now
+          }
+          lastScrollAt.value = now
+        }
         return forward
       }
       // Main buffer: accumulate pixel-delta for smooth trackpad scrollback.

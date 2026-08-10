@@ -13,7 +13,14 @@ import { createMockBackend, withScope } from './mockBackend'
 //   2. the grace expires — genuine output afterwards still latches;
 //   3. an already-latched RUNNING coasts through a scroll (latch untouched);
 //   4. a main-buffer wheel (swallowed locally, nothing reaches the PTY) does
-//      NOT arm the grace, so concurrent real output still latches.
+//      NOT arm the grace, so concurrent real output still latches;
+//   5. a scroll longer than IDLE_CONFIRM_MS still does not drop RUNNING — the
+//      frozen activity clock used to age out under displayStatus's silence
+//      timeout, so the badge fell to IDLE while the agent was visibly working;
+//   6. the guard on (5): scrolling a pane that already went idle must NOT
+//      resurrect RUNNING;
+//   7. genuine output right after a long scroll keeps RUNNING without having to
+//      re-earn the latch through another MIN_BURST_MS.
 // xterm won't boot in happy-dom; the mock captures the custom wheel handler
 // and the tests drive it directly.
 
@@ -187,6 +194,64 @@ describe('useTerminal — scroll grace vs the RUNNING badge', () => {
       emitChunk(mock, i, 'scroll')
       await vi.advanceTimersByTimeAsync(250)
     }
+    expect(result.displayStatus.value).toBe('running')
+    scope.stop()
+  })
+
+  it('a scroll longer than IDLE_CONFIRM_MS does not drop RUNNING', async () => {
+    const { result, mock, scope } = await spawnedFake()
+    await latchRunning(result, mock)
+    captured.bufferType = 'alternate'
+    captured.mouseTrackingMode = 'vt200'
+    // 15s of sustained scrolling — past IDLE_CONFIRM_MS (10s). Every repaint
+    // chunk lands inside the grace and cannot advance the activity clock, so
+    // nothing but the wheel handler keeps it moving. The agent is still working
+    // throughout; the badge must not report idle.
+    for (let i = 0; i < 60; i++) {
+      expect(captured.wheelHandler!(wheelEvent(-1))).toBe(true)
+      emitChunk(mock, i, 'scroll')
+      await vi.advanceTimersByTimeAsync(250)
+      expect(result.displayStatus.value).toBe('running')
+    }
+    scope.stop()
+  })
+
+  it('scrolling a pane that already went idle does not resurrect RUNNING', async () => {
+    const { result, mock, scope } = await spawnedFake()
+    await latchRunning(result, mock)
+    // Silence past IDLE_CONFIRM_MS settles the badge to idle. The latch itself
+    // is still set — only appendClean clears it, and no output is arriving —
+    // so the wheel handler must consult the same timeout, not the raw latch.
+    await vi.advanceTimersByTimeAsync(15_000)
+    expect(result.displayStatus.value).toBe('idle')
+    captured.bufferType = 'alternate'
+    captured.mouseTrackingMode = 'vt200'
+    for (let i = 0; i < 12; i++) {
+      expect(captured.wheelHandler!(wheelEvent(-1))).toBe(true)
+      emitChunk(mock, i, 'scroll')
+      await vi.advanceTimersByTimeAsync(250)
+    }
+    expect(result.displayStatus.value).toBe('idle')
+    scope.stop()
+  })
+
+  it('output right after a long scroll keeps RUNNING without re-earning the latch', async () => {
+    const { result, mock, scope } = await spawnedFake()
+    await latchRunning(result, mock)
+    captured.bufferType = 'alternate'
+    captured.mouseTrackingMode = 'vt200'
+    for (let i = 0; i < 60; i++) {
+      expect(captured.wheelHandler!(wheelEvent(-1))).toBe(true)
+      emitChunk(mock, i, 'scroll')
+      await vi.advanceTimersByTimeAsync(250)
+    }
+    // Scrolling stops; the grace lapses and the agent's next chunk arrives.
+    // Measured against the carried-forward clock this is a short gap, so the
+    // latch survives — the badge stays RUNNING instead of blinking to IDLE for
+    // another MIN_BURST_MS while the burst is rebuilt.
+    await vi.advanceTimersByTimeAsync(1_200)
+    emitChunk(mock, 99, 'work')
+    await vi.advanceTimersByTimeAsync(100)
     expect(result.displayStatus.value).toBe('running')
     scope.stop()
   })
