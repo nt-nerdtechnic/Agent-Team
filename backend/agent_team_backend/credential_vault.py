@@ -554,6 +554,14 @@ class CredentialVault:
         """The slot's display-only account info (claude's ``oauthAccount``)."""
         return self.read_slot(agent_key, slot_id).account
 
+    def live_account(self, agent_key: str) -> dict | None:
+        """The live display-only account info — claude's ``oauthAccount`` in
+        ``~/.claude.json``, read WITHOUT touching the Keychain. The credential
+        watcher re-reads this on every write to that file (Claude Code rewrites
+        it constantly), and telling one account from another needs no secret.
+        None for the other agents, which have no such block."""
+        return self._read_live_oauth_account() if agent_key == "claude" else None
+
     def identity(self, agent_key: str, slot_id: str | None = None) -> dict:
         """Display-only identity for one account slot (``slot_id=None`` = the
         live state, i.e. the currently active account). ``signedIn`` reflects

@@ -28,6 +28,7 @@ from .cli_vendors.registry import vendor as cli_vendor
 from .ipc import make_error, make_event, make_response
 from .log_readers.claude import ClaudeLogReader, first_user_prompts
 from .credential_vault import DEFAULT_SLOT_ID, vault_to_thread
+from .credential_watcher import unregistered_live_accounts
 from .mcp_settings import (
     MCPSettingsConflictError,
     MCPSettingsError,
@@ -1406,6 +1407,9 @@ async def _broadcast_profiles_changed(
         "profiles": doc["profiles"],
         "defaults": doc["defaults"],
         "identities": await asyncio.to_thread(_profile_identities),
+        # Live logins that match no registered slot — the user signed in
+        # outside Navide with an account it has never seen.
+        "unregistered": await asyncio.to_thread(unregistered_live_accounts),
         "reason": reason,
     }
     if harvested_profile_ids:
@@ -1435,6 +1439,7 @@ async def cli_profiles_list(session: "Session", msg_id: str, msg_type: str, payl
                 "profiles": doc["profiles"],
                 "defaults": doc["defaults"],
                 "identities": await asyncio.to_thread(_profile_identities),
+                "unregistered": await asyncio.to_thread(unregistered_live_accounts),
                 "supported_agents": list(PROFILE_AGENT_KEYS),
             },
         )

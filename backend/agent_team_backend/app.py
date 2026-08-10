@@ -75,6 +75,7 @@ from .log_readers import (
 from .log_readers.attribution import Attribution
 from .log_readers.claude import encode_claude_cwd
 from .credential_vault import CredentialVault
+from .credential_watcher import CredentialWatcher, reconcile_live_account
 from .doc_injector import fetch_stage_docs
 from .mcp_manager import MCPManager
 from .mcp_settings import (
@@ -254,6 +255,7 @@ _readers = [
 attribution = Attribution(_readers, db=database)
 _log_watcher: LogWatcher | None = None
 _git_watcher: GitWatcher | None = None
+_credential_watcher: CredentialWatcher | None = None
 
 
 # Module-level registry of all currently-connected WebSocket sessions so that
@@ -1004,6 +1006,14 @@ async def _start_log_watcher() -> None:
     _git_watcher = GitWatcher(_broadcast_git_changed, on_plans_change=_broadcast_plans_changed)
     _git_watcher.start()
 
+    # CLI credential watcher: a sign-in outside Navide (a plain `claude /login`)
+    # rewrites the live credentials without touching the profile ledger. This
+    # notices the new identity and re-points `defaults[agentKey]` at the account
+    # that is actually live — no credential is ever moved.
+    global _credential_watcher
+    _credential_watcher = CredentialWatcher(reconcile_live_account)
+    _credential_watcher.start()
+
     # Start MCP servers in the background so they're ready for the first pipeline run.
     asyncio.create_task(mcp_manager.startup())
 
@@ -1053,7 +1063,7 @@ async def _start_log_watcher() -> None:
 
 @app.on_event("shutdown")
 async def _stop_log_watcher() -> None:
-    global _log_watcher, _git_watcher
+    global _log_watcher, _git_watcher, _credential_watcher
     if _ownerless_sweeper_task is not None:
         _ownerless_sweeper_task.cancel()
     # PTY children are detached process groups (start_new_session=True); they
@@ -1072,6 +1082,8 @@ async def _stop_log_watcher() -> None:
         log.warning("token store shutdown flush failed: %s", err)
     if _git_watcher is not None:
         _git_watcher.stop()
+    if _credential_watcher is not None:
+        _credential_watcher.stop()
     await mcp_manager.shutdown()
     try:
         await plugin_wiring.run_shutdown_hooks(plugin_host)
@@ -1092,6 +1104,7 @@ async def _stop_log_watcher() -> None:
         log.warning("database close failed: %s", err)
     _log_watcher = None
     _git_watcher = None
+    _credential_watcher = None
 
 
 @app.get("/health")
