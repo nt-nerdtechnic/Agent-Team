@@ -34,6 +34,33 @@ export const WHATS_NEW_CHROME = {
 
 export const WHATS_NEW: WhatsNewEntry[] = [
   {
+    version: '0.1.81',
+    title: {
+      'zh-TW': '外部 CLI 憑證自動監控同步、Terminal 滾動無痕狀態與 Meta Muse Code Agent 支援',
+      'en-US': 'Automatic credential sync watcher, smooth terminal scroll activity & Meta Muse Code CLI support',
+    },
+    highlights: [
+      {
+        'zh-TW':
+          '外部 CLI 憑證自動監控同步：新增背景 Credential Watcher 服務，本機外部 CLI 登入或 Token 變更時自動同步寫入 Vault 快取與帳號切換面板。',
+        'en-US':
+          'Automatic credential sync watcher: added a background Credential Watcher service that syncs external CLI login changes into the profile vault and account switcher instantly.',
+      },
+      {
+        'zh-TW':
+          'Terminal 滾動活動時間繼承：優化終端機滾動狀態，長滾動期間活動時間戳記自動繼承，防止查看歷史紀錄時 RUNNING 狀態標籤誤閃為 IDLE。',
+        'en-US':
+          'Smooth terminal scroll activity: activity timestamps carry forward during sustained scrolling, preventing the RUNNING badge from flickering to IDLE while browsing history.',
+      },
+      {
+        'zh-TW':
+          'Meta Muse Code Agent 支援：新增對 Meta Muse Code CLI Agent 的選單支援、啟動與安裝檢測，並完備 CLI Vendor 開發手冊。',
+        'en-US':
+          'Meta Muse Code Agent support: added menu options, spawn detection, and installer checks for the Meta Muse Code CLI agent.',
+      },
+    ],
+  },
+  {
     version: '0.1.80',
     title: {
       'zh-TW': 'LLM 智慧 Pane 命名、Copilot/Qwen Hooks 路由與 WebGL 終端加速',
