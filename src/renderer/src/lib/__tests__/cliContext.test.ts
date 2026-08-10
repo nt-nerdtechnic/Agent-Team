@@ -5,6 +5,7 @@ import {
   buildPaneStatusReply,
   buildMentionInsert,
   endsWithMentionTrigger,
+  shouldMentionOnDrop,
   shouldOpenMentionMenu,
   parseCliContextPayload,
   writeCliPaneDragPayload,
@@ -384,6 +385,30 @@ describe('endsWithMentionTrigger', () => {
   it('opts back out when a space follows the "@"', () => {
     expect(endsWithMentionTrigger('傳給 @ ')).toBe(false)
     expect(endsWithMentionTrigger('傳給 ＠ ')).toBe(false)
+  })
+})
+
+describe('shouldMentionOnDrop', () => {
+  // Regression guard. A pane drop has two gestures competing for the same
+  // target: insert the source's address, or share its scrollback. The typed
+  // "@" is the only thing that separates them — drop this precondition and the
+  // mention path answers every drop, silently removing the context share.
+  it('selects mention mode only when the prompt ends with a typed "@"', () => {
+    expect(shouldMentionOnDrop('傳給 @')).toBe(true)
+    expect(shouldMentionOnDrop('傳給 ＠')).toBe(true)
+    expect(shouldMentionOnDrop('@')).toBe(true)
+  })
+
+  it('leaves a prompt without "@" to the scrollback context share', () => {
+    expect(shouldMentionOnDrop('')).toBe(false)
+    expect(shouldMentionOnDrop('│ > 幫我看這個')).toBe(false)
+    expect(shouldMentionOnDrop('傳給')).toBe(false)
+    // "@" followed by a space is ordinary text, not a pending mention.
+    expect(shouldMentionOnDrop('傳給 @ ')).toBe(false)
+  })
+
+  it('never mentions into a prompt it could not read', () => {
+    expect(shouldMentionOnDrop(undefined)).toBe(false)
   })
 })
 

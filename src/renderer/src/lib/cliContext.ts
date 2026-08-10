@@ -28,6 +28,19 @@ export function endsWithMentionTrigger(lineBeforeCursor: string): boolean {
   return lineBeforeCursor.endsWith('@') || lineBeforeCursor.endsWith('＠')
 }
 
+/** Which gesture a pane drop belongs to: true means "insert the source pane's
+ *  address", false means "share the source pane's scrollback".
+ *
+ *  A typed "@" is what selects mention mode, and that is the whole rule. Both
+ *  gestures land on the same drop target, so without this precondition the
+ *  mention path answers every drop and the context share becomes unreachable —
+ *  exactly the regression this function exists to make visible. An unreadable
+ *  prompt (undefined) is not a mention: never splice an address into a prompt
+ *  whose contents are unknown. */
+export function shouldMentionOnDrop(lineBeforeCursor: string | undefined): boolean {
+  return lineBeforeCursor !== undefined && endsWithMentionTrigger(lineBeforeCursor)
+}
+
 /** Text a pane drop inserts at the target's cursor: always just the source
  *  pane's mention, e.g. "傳給 " + drop → "傳給 @codex-1 ". An "@" the user
  *  already typed is completed rather than doubled, and a separating space is
