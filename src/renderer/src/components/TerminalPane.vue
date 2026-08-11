@@ -16,6 +16,9 @@ import RestoredPanePlaceholder from './RestoredPanePlaceholder.vue'
 interface Props {
   paneId: string
   title: string
+  /** The title was written by the auto-namer, not the user — marked with a dot
+   *  so a name you did not choose is recognisable at a glance. */
+  autoNamed?: boolean
   subtitle?: string
   /** CLI vendor key (e.g. 'claude', 'codex') carried in the cli-context drag payload. */
   agentKey?: string
@@ -398,6 +401,11 @@ onMounted(() => {
           :title="$t('pane.terminal.rename-title-tooltip')"
           @dblclick.stop="startTitleEdit"
         >{{ title }}</span>
+        <span
+          v-if="autoNamed && !editingTitle"
+          class="auto-name-mark"
+          :title="$t('pane.terminal.auto-named-tooltip')"
+        >◦</span>
         <span v-if="isCommander" class="commander-inline" :title="$t('pane.terminal.commander-tooltip')">🎯 Mgr</span>
         <span
           v-if="loopActive"
@@ -571,6 +579,19 @@ onMounted(() => {
 }
 .title {
   font-weight: 600;
+}
+/* Auto-name marker: quiet enough to ignore while scanning the header, present
+   enough to answer "did I name this?" without hovering. */
+.auto-name-mark {
+  font-size: 0.75em;
+  line-height: 1;
+  opacity: 0.45;
+  /* Pulls back most of .header-main's 8px gap: the mark belongs to the title,
+     and at a full gap it reads as a separate badge. */
+  margin-left: -6px;
+  flex-shrink: 0;
+  cursor: default;
+  user-select: none;
 }
 .title-edit {
   font: inherit;

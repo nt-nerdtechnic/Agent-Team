@@ -32,6 +32,9 @@ export interface ActivePaneView {
   id: string
   agentKey: string
   agentLabel: string
+  /** agentLabel is the auto-derived title, not a name the user chose. The lists
+   *  mark it with a ◦ so an unchosen name is recognisable without hovering. */
+  autoNamed?: boolean
   roleKey: RoleKey
   roleLabel: string
   stageId: StageId
@@ -1176,6 +1179,11 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
               :title="$t('action.rename')"
               @dblclick.stop="startRename(p)"
             >{{ p.agentLabel }}</span>
+            <span
+              v-if="p.autoNamed && renamingPaneId !== p.id"
+              class="auto-name-mark"
+              :title="$t('pane.terminal.auto-named-tooltip')"
+            >◦</span>
             <span v-if="p.isCommander" class="manager-inline" title="Stage manager — controls flow and decides ---STAGE-DONE---">🎯 Mgr</span>
             <span v-if="expandedPaneId !== p.id && props.focusPaneId !== p.id" class="agent-line-sub">{{ agentTypeLabel(p.agentKey) }} · {{ p.roleLabel || 'No role' }}</span>
             <span v-if="p.isMinimized" class="minimized-tag" title="Docked in sidebar">
@@ -2526,6 +2534,15 @@ button.icon-btn.muted:hover {
 .badge.role {
   background: var(--accent-muted);
   color: var(--accent-bright);
+}
+/* Auto-name marker — same treatment as the pane header's. */
+.auto-name-mark {
+  flex-shrink: 0;
+  font-size: 10px;
+  line-height: 1;
+  opacity: 0.45;
+  margin-left: -4px; /* pulls back .agent-line's 6px gap */
+  user-select: none;
 }
 .minimized-tag {
   margin-left: auto;

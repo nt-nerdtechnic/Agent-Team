@@ -22,8 +22,10 @@ function functionBody(name: string): string {
 describe('auto-name upgrade ordering', () => {
   it('setPaneAutoName lets an llm name replace a heuristic one, once', () => {
     const body = functionBody('setPaneAutoName')
-    // customName is checked on its own — it must block both sources.
-    expect(body).toContain('if (pane.customName) return')
+    // The user's claim on the title is checked on its own — it must block both
+    // sources, and nameLocked covers the cases customName cannot (a cleared
+    // name, or a title typed to match the vendor label).
+    expect(body).toContain('if (pane.customName || pane.nameLocked) return')
     // The single permitted second write.
     expect(body).toContain("if (pane.autoName && !(source === 'llm' && pane.autoNameSource !== 'llm')) return")
     expect(body).toContain('pane.autoNameSource = source')
@@ -36,8 +38,8 @@ describe('auto-name upgrade ordering', () => {
     const body = functionBody('requestLlmPaneName')
     expect(body).toContain('llmNameRequested.has(paneId)')
     expect(body).toContain('llmNameRequested.add(paneId)')
-    // A pane the model already named, or the user renamed, is never sent.
-    expect(body).toContain("if (pane.customName || pane.autoNameSource === 'llm') return")
+    // A pane the model already named, or the user ever named, is never sent.
+    expect(body).toContain("if (pane.customName || pane.nameLocked || pane.autoNameSource === 'llm') return")
   })
 
   it('requestLlmPaneName applies a name only when the backend accepted it', () => {
@@ -75,6 +77,38 @@ describe('auto-name upgrade ordering', () => {
     expect(appSource).toContain('autoNameSource: autoNameSourceOf(saved.auto_name_source)')
     // And a peer window's broadcast has to carry it for the same reason.
     expect(appSource).toContain('pane.autoNameSource = autoNameSourceOf(d.auto_named_pane.source)')
+  })
+
+  it('renaming a pane locks it out of auto-naming for good', () => {
+    const body = functionBody('setPaneCustomName')
+    // Set unconditionally, after the customName assignment: typing the vendor
+    // label resolves to no customName, and clearing the name is still the user
+    // naming this pane. Either case must still lock it.
+    expect(body).toContain('pane.nameLocked = true')
+    // The lock reaches the backend through rename_pane, which sets it there.
+    expect(body).toContain("backend.send('project.rename_pane'")
+  })
+
+  it('the lock survives a new pane id and a peer window', () => {
+    // Restore, rebuild and resume each produce a different pane id; without
+    // carrying the flag the new record looks never-named.
+    expect(appSource).toContain('nameLocked: saved.name_locked || undefined')
+    expect(appSource).toContain('nameLocked: snap.nameLocked')
+    expect(appSource).toContain('nameLocked: payload.nameLocked')
+    // A peer window's rename locks the pane in this window too.
+    expect(appSource).toContain('pane.nameLocked = true')
+  })
+
+  it('the turn_complete fallback respects the lock', () => {
+    expect(appSource).toContain('if (pane && !pane.customName && !pane.nameLocked && !pane.autoName) {')
+  })
+
+  it('the auto-name marker is derived from the pane, not the title string', () => {
+    const body = functionBody('paneIsAutoNamed')
+    // messagingName leads the display chain and is synced TO the auto-title,
+    // so comparing rendered strings would mislabel user-named panes. nameLocked
+    // covers the rename that resolves to no customName (the vendor label).
+    expect(body).toContain('return !p.customName && !p.nameLocked && !!p.autoName')
   })
 
   it('autoNameSourceOf only trusts the two known sources', () => {

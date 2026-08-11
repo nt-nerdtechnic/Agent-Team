@@ -2,6 +2,8 @@
 const props = defineProps<{
   paneId: string
   title: string
+  /** Title came from the auto-namer — see TerminalPane's matching prop. */
+  autoNamed?: boolean
   subtitle?: string
   pipeTag?: string
   isFocus?: boolean
@@ -40,6 +42,11 @@ function activate(): void {
       <div class="header-main">
         <span v-if="pipeTag" class="pipe-tag">{{ pipeTag }}</span>
         <span class="title">{{ title }}</span>
+        <span
+          v-if="autoNamed"
+          class="auto-name-mark"
+          :title="$t('pane.terminal.auto-named-tooltip')"
+        >◦</span>
       </div>
       <span v-if="subtitle" class="header-sub">{{ subtitle }}</span>
     </header>
@@ -119,6 +126,17 @@ function activate(): void {
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Matches TerminalPane's marker so a cold placeholder and a live pane read the
+   same. */
+.auto-name-mark {
+  flex-shrink: 0;
+  font-size: 0.75em;
+  line-height: 1;
+  opacity: 0.45;
+  margin-left: -6px; /* same gap pull-back as TerminalPane's header */
+  user-select: none;
 }
 
 .minimize-btn {

@@ -3,11 +3,12 @@ import { mount } from '@vue/test-utils'
 import { describe, expect, it } from 'vitest'
 import RestoredPanePlaceholder from '../RestoredPanePlaceholder.vue'
 
-function mountPlaceholder(realizing = false) {
+function mountPlaceholder(realizing = false, autoNamed = false) {
   return mount(RestoredPanePlaceholder, {
     props: {
       paneId: 'saved-pane-1',
       title: 'Planning',
+      autoNamed,
       subtitle: 'Claude · Architect',
       pipeTag: 'P01',
       isFocus: true,
@@ -37,6 +38,15 @@ describe('RestoredPanePlaceholder', () => {
     expect(wrapper.text()).toContain('Click to resume')
     expect(wrapper.find('.terminal').exists()).toBe(false)
     expect(wrapper.find('.xterm').exists()).toBe(false)
+  })
+
+  it('marks an auto-derived title and leaves a user-set one unmarked', () => {
+    expect(mountPlaceholder(false, false).find('.auto-name-mark').exists()).toBe(false)
+
+    const auto = mountPlaceholder(false, true)
+    expect(auto.get('.auto-name-mark').text()).toBe('◦')
+    // The mark is decoration next to the title, never part of it.
+    expect(auto.get('.title').text()).toBe('Planning')
   })
 
   it('offers a real button so resuming is not mouse-only', async () => {

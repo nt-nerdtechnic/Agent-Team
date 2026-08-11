@@ -806,6 +806,12 @@ interface ActivePane {
   /** User-set display name from the rename action. Overrides agentLabel in all
    *  pane surfaces when non-empty; persisted to project.json (PaneRecord.custom_name). */
   customName?: string
+  /** The user named this pane at least once, so no auto-namer writes to it
+   *  again. Separate from customName because clearing the name is still an act
+   *  of naming, and because a title typed to match agentLabel resolves to no
+   *  customName at all. It blocks NEW auto-names only — an autoName already
+   *  stored keeps showing. One-way; persisted (PaneRecord.name_locked). */
+  nameLocked?: boolean
   /** Auto-derived display name (from the pane's task material).
    *  customName always wins; persisted to project.json (PaneRecord.auto_name). */
   autoName?: string
@@ -1930,6 +1936,7 @@ function syncViews(): void {
       id: p.id,
       agentKey: p.agentKey,
       agentLabel: p.customName || p.autoName || p.agentLabel,
+      autoNamed: paneIsAutoNamed(p),
       roleKey: p.roleKey,
       roleLabel: roleLabel(p.roleKey),
       stageId: p.stageId,
@@ -3405,6 +3412,10 @@ interface SpawnInternal {
   /** User-set pane title. Runtime replacements such as rebuild must carry it
    *  forward because they receive a new pane id. */
   customName?: string
+  /** Whether the user has ever named this pane. Carried forward on
+   *  rebuild/restore, or the new pane id would look never-named and the
+   *  auto-namer would title a pane the user already claimed. */
+  nameLocked?: boolean
   /** Auto-derived pane title, carried forward on rebuild/restore for the same reason. */
   autoName?: string
   /** Which namer produced autoName. Carried forward so a restored pane whose
@@ -3608,6 +3619,7 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
     agentKey: opts.agentKey,
     agentLabel: spec.label,
     customName: opts.customName,
+    nameLocked: opts.nameLocked,
     autoName: opts.autoName,
     autoNameSource: opts.autoNameSource,
     roleKey: opts.roleKey,
@@ -3987,7 +3999,7 @@ async function dispatchPlanToPane(relPath: string, agentKey: string): Promise<Pl
 // `historyPaneId`: the id of the pane whose per-pane files this resume belongs
 // to (Agent History knows it; the ad-hoc Resume field does not). Without it an
 // aider resume falls back to whatever the history root already holds.
-async function onManualResume(payload: { agentKey: string, workspacePath: string, sessionId: string, customName?: string, autoName?: string, runGroupId?: string, historyPaneId?: string }): Promise<boolean> {
+async function onManualResume(payload: { agentKey: string, workspacePath: string, sessionId: string, customName?: string, nameLocked?: boolean, autoName?: string, runGroupId?: string, historyPaneId?: string }): Promise<boolean> {
   const { agentKey, workspacePath, runGroupId } = payload
   const sessionId = normalizeResumeSessionId(agentKey, payload.sessionId)
   if (!sessionId) return false
@@ -4017,6 +4029,7 @@ async function onManualResume(payload: { agentKey: string, workspacePath: string
     roleKey: '' as RoleKey,
     stageId: '' as StageId,
     customName: payload.customName,
+    nameLocked: payload.nameLocked,
     autoName: payload.autoName,
     commandOverride,
     workspacePath,
@@ -4051,11 +4064,14 @@ async function onManualResume(payload: { agentKey: string, workspacePath: string
         auto_name: payload.autoName,
       })
     }
-    if (payload.customName) {
+    // A resume gets a fresh pane id, so the lock has to be re-asserted on the
+    // new record — including when the user's name is empty, which is exactly
+    // the case a customName-only condition would drop.
+    if (payload.customName || payload.nameLocked) {
       await sendQuiet('project.rename_pane', {
         workspace_path: workspacePath,
         pane_id: paneId,
-        custom_name: payload.customName,
+        custom_name: payload.customName ?? '',
       })
     }
     return true
@@ -4375,6 +4391,7 @@ async function rebuildPaneViaResume(
     const snap = {
       agentKey: pane.agentKey,
       customName: pane.customName,
+      nameLocked: pane.nameLocked,
       autoName: pane.autoName,
       roleKey: pane.roleKey,
       stageId: pane.stageId,
@@ -4393,6 +4410,7 @@ async function rebuildPaneViaResume(
     const newId = await spawnPane({
       agentKey: snap.agentKey,
       customName: snap.customName,
+      nameLocked: snap.nameLocked,
       autoName: snap.autoName,
       roleKey: snap.roleKey,
       stageId: snap.stageId,
@@ -4581,6 +4599,7 @@ async function rebuildPaneClean(paneId: string): Promise<void> {
   const snap = {
     agentKey: pane.agentKey,
     customName: pane.customName,
+    nameLocked: pane.nameLocked,
     autoName: pane.autoName,
     roleKey: pane.roleKey,
     stageId: pane.stageId,
@@ -4596,6 +4615,7 @@ async function rebuildPaneClean(paneId: string): Promise<void> {
     const newId = await spawnPane({
       agentKey: snap.agentKey,
       customName: snap.customName,
+      nameLocked: snap.nameLocked,
       autoName: snap.autoName,
       roleKey: snap.roleKey,
       stageId: snap.stageId,
@@ -5521,6 +5541,7 @@ interface ProjectPane {
   slot_label?: string
   kickoff_status?: string
   custom_name?: string
+  name_locked?: boolean
   auto_name?: string
   auto_name_source?: string
   is_minimized?: boolean
@@ -5617,6 +5638,7 @@ async function spawnRestoredPane(opts: RestoredPaneSpawnOptions): Promise<Restor
     stageId: (saved.stage_id ?? '') as StageId,
     slotLabel: saved.slot_label,
     customName: saved.custom_name || undefined,
+    nameLocked: saved.name_locked || undefined,
     autoName: saved.auto_name || undefined,
     autoNameSource: autoNameSourceOf(saved.auto_name_source),
     commandOverride: opts.commandOverride,
@@ -6155,6 +6177,7 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
         agentKey: saved.agent,
         agentLabel: spec?.label ?? saved.agent,
         customName: saved.custom_name || undefined,
+        nameLocked: saved.name_locked || undefined,
         autoName: saved.auto_name || undefined,
         autoNameSource: autoNameSourceOf(saved.auto_name_source),
         roleKey: saved.role as RoleKey,
@@ -6772,6 +6795,7 @@ async function onConfirmReconnect(sessionId: string): Promise<void> {
     workspacePath: pane.workspacePath,
     sessionId,
     customName: pane.customName,
+    nameLocked: pane.nameLocked,
     autoName: pane.autoName,
     runGroupId: pane.runGroupId,
   })
@@ -7719,7 +7743,7 @@ backend.on('agent.activity', (raw) => {
     // injected inter-CLI message back as turn text must not title the pane.
     if (ev.text && !ev.text.startsWith(MSG_ENVELOPE_PREFIX)) {
       const pane = panes.value.find((p) => p.id === ev.pane_id)
-      if (pane && !pane.customName && !pane.autoName) {
+      if (pane && !pane.customName && !pane.nameLocked && !pane.autoName) {
         setPaneAutoName(ev.pane_id, deriveAutoName(ev.text))
         requestLlmPaneName(ev.pane_id, ev.text)
       }
@@ -9474,6 +9498,9 @@ function onRunGroupsRemoteSync(raw: unknown): void {
       if (d.renamed_pane.custom_name !== undefined) {
         pane.customName = d.renamed_pane.custom_name.trim() || undefined
       }
+      // The peer's rename locks the pane here too, or this window would keep
+      // auto-naming a pane the user has already claimed in another window.
+      pane.nameLocked = true
     }
   }
   // A peer window auto-named a pane (backend broadcasts this under its own
@@ -10211,6 +10238,11 @@ async function setPaneCustomName(paneId: string, rawName: string): Promise<void>
     }
   }
   pane.customName = nextCustomName
+  // Naming the pane — including clearing the name, and including typing the
+  // vendor label itself (which resolves to no customName) — permanently opts it
+  // out of auto-naming. Without this the auto-namer would take a pane back the
+  // moment its custom name resolves to nothing.
+  pane.nameLocked = true
   updateHistoryCustomName(spawnHistory.value, {
     paneId,
     agentKey: pane.agentKey,
@@ -10226,6 +10258,20 @@ async function setPaneCustomName(paneId: string, rawName: string): Promise<void>
     pane_id: pane.id,
     custom_name: pane.customName ?? '',
   })
+}
+
+/** Whether the title a pane surface is showing is one the user never chose.
+ *
+ *  Derived from the pane rather than the rendered string, because the string
+ *  can't tell you: messagingName leads the display chain and gets synced TO the
+ *  auto-title, so a pane whose handle equals its auto-name looks user-named.
+ *
+ *  nameLocked is checked as well as customName: a title the user typed to match
+ *  the vendor label resolves to no customName at all, and the pane would then
+ *  be marked auto-named despite them having named it. The mark means "you have
+ *  not touched this name", so any rename clears it for good. */
+function paneIsAutoNamed(p: { customName?: string; nameLocked?: boolean; autoName?: string }): boolean {
+  return !p.customName && !p.nameLocked && !!p.autoName
 }
 
 /** Narrow a persisted auto_name_source to the union, or undefined.
@@ -10245,7 +10291,7 @@ function autoNameSourceOf(raw: string | undefined): 'heuristic' | 'llm' | undefi
 function setPaneAutoName(paneId: string, name: string, source: 'heuristic' | 'llm' = 'heuristic'): void {
   const pane = panes.value.find((p) => p.id === paneId)
   if (!pane || !name) return
-  if (pane.customName) return
+  if (pane.customName || pane.nameLocked) return
   if (pane.autoName && !(source === 'llm' && pane.autoNameSource !== 'llm')) return
   pane.autoName = name
   pane.autoNameSource = source
@@ -10296,7 +10342,7 @@ const llmNameRequested = new Set<string>()
 function requestLlmPaneName(paneId: string, material: string): void {
   const pane = panes.value.find((p) => p.id === paneId)
   if (!pane || !pane.workspacePath || !material.trim()) return
-  if (pane.customName || pane.autoNameSource === 'llm') return
+  if (pane.customName || pane.nameLocked || pane.autoNameSource === 'llm') return
   if (llmNameRequested.has(paneId)) return
   llmNameRequested.add(paneId)
   void (async () => {
@@ -11395,6 +11441,7 @@ function paneIsCommander(p: ActivePane): boolean {
           :data-pane-id="p.id"
           :pane-id="p.id"
           :title="p.messagingName || p.customName || p.autoName || p.agentLabel"
+          :auto-named="paneIsAutoNamed(p)"
           :agent-key="p.agentKey"
           :cli-session-id="p.pinnedSessionId"
           :session-home-id="p.sessionHomeId"
@@ -11440,6 +11487,7 @@ function paneIsCommander(p: ActivePane): boolean {
           :data-pane-id="p.id"
           :pane-id="p.id"
           :title="p.customName || p.autoName || p.agentLabel"
+          :auto-named="paneIsAutoNamed(p)"
           :subtitle="paneSubtitle(p)"
           :pipe-tag="p.origin === 'pipeline' && p.stageId ? `P${p.stageId}` : undefined"
           :is-focus="p.id === effectiveFocusPaneId"
@@ -11486,6 +11534,11 @@ function paneIsCommander(p: ActivePane): boolean {
                   :title="$t('action.rename')"
                   @dblclick.stop="startInlineRename(p)"
                 >{{ p.agentLabel }}</span>
+                <span
+                  v-if="p.autoNamed && inlineRenamingId !== p.id"
+                  class="auto-name-mark"
+                  :title="$t('pane.terminal.auto-named-tooltip')"
+                >◦</span>
               </div>
               <span class="meeting-sub">
                 {{ agentSpecs.find(s => s.agentKey === p.agentKey)?.label ?? p.agentKey }}<span v-if="p.roleLabel"> · {{ p.roleLabel }}</span>
@@ -11540,6 +11593,11 @@ function paneIsCommander(p: ActivePane): boolean {
                 :title="$t('action.rename')"
                 @dblclick.stop="startInlineRename(p)"
               >{{ p.agentLabel }}</span>
+              <span
+                v-if="p.autoNamed && inlineRenamingId !== p.id"
+                class="auto-name-mark"
+                :title="$t('pane.terminal.auto-named-tooltip')"
+              >◦</span>
             </div>
             <span class="spotlight-thumb-role">
               {{ agentSpecs.find(s => s.agentKey === p.agentKey)?.label ?? p.agentKey }}<span v-if="p.roleLabel"> · {{ p.roleLabel }}</span>
@@ -11608,6 +11666,11 @@ function paneIsCommander(p: ActivePane): boolean {
                   :title="$t('action.rename')"
                   @dblclick.stop="startInlineRename(p)"
                 >{{ p.agentLabel }}</span>
+                <span
+                  v-if="p.autoNamed && inlineRenamingId !== p.id"
+                  class="auto-name-mark"
+                  :title="$t('pane.terminal.auto-named-tooltip')"
+                >◦</span>
               </div>
               <span class="meeting-sub">
                 {{ agentSpecs.find(s => s.agentKey === p.agentKey)?.label ?? p.agentKey }}<span v-if="p.roleLabel"> · {{ p.roleLabel }}</span>
@@ -12723,6 +12786,16 @@ function paneIsCommander(p: ActivePane): boolean {
   overflow: hidden;
   text-overflow: ellipsis;
   font-weight: 500;
+}
+/* Auto-name marker, shared by the sidebar/stack lists and the spotlight strip.
+   Same weight as TerminalPane's so one pane reads identically everywhere. */
+.auto-name-mark {
+  flex-shrink: 0;
+  font-size: 0.75em;
+  line-height: 1;
+  opacity: 0.45;
+  margin-left: -2px; /* pulls back the row gap so the mark hugs the name */
+  user-select: none;
 }
 .meeting-sub {
   font-size: 10px;
