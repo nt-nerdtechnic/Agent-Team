@@ -16,10 +16,13 @@ const { workspacePath } = defineProps<{
 
 const plansPaneRef = ref<InstanceType<typeof PlansPane> | null>(null)
 
-// Open the clicked plan in the detached wide plan window.
-function openInWindow(relPath: string): void {
+// Open the clicked plan in the detached wide plan window. `root` is the project
+// root the rel_path is relative to — the workspace itself unless it is a
+// subdirectory of the repository the plans live in, in which case the window
+// would resolve the path against the wrong base.
+function openInWindow(relPath: string, root: string): void {
   void window.agentTeam?.openPlansWindow({
-    workspace_path: workspacePath,
+    workspace_path: root || workspacePath,
     rel_path: relPath,
   })
 }
@@ -42,7 +45,7 @@ onUnmounted(() => window.removeEventListener('keydown', onWindowKeydown))
     class="plan-pane"
     :workspace-path="workspacePath"
     :backend="backend"
-    @open-file="(payload) => openInWindow(payload.filepath)"
+    @open-file="(payload) => openInWindow(payload.filepath, payload.root)"
   />
 </template>
 

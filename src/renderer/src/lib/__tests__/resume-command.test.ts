@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { AGENT_SPECS } from '../../agents'
 import {
   acquirePaneRebuildLock,
   buildResumeCommand,
@@ -273,6 +274,15 @@ describe('buildResumeCommand', () => {
     )
   })
 
+  it('uses the resume subcommand (no --) for muse', () => {
+    expect(buildResumeCommand('muse', '4d4a11fe-b08a-46df-9f86-685589531e65')).toBe(
+      'muse resume 4d4a11fe-b08a-46df-9f86-685589531e65'
+    )
+    expect(buildResumeCommand('muse', 'abc', '--disable-approval')).toBe(
+      'muse resume abc --disable-approval'
+    )
+  })
+
   it('uses the id-less --restore-chat-history for aider (no session ids)', () => {
     const id = '4d4a11fe-b08a-46df-9f86-685589531e65'
     expect(buildResumeCommand('aider', id)).toBe('aider --restore-chat-history')
@@ -329,5 +339,32 @@ describe('buildResumeCommand', () => {
 
   it('trims the session id', () => {
     expect(buildResumeCommand('antigravity', '  abc  ')).toBe('agy --conversation abc')
+  })
+})
+
+describe('resumeCommandPattern', () => {
+  // Mirrors App.vue's looksLikeResumeCommand: the spec pattern when there is
+  // one, else the generic `<agentKey> --resume <id>` shape.
+  const looksLikeResume = (agentKey: string, command: string): boolean => {
+    const pattern = AGENT_SPECS.find((s) => s.agentKey === agentKey)?.resumeCommandPattern
+    if (pattern) return pattern.test(command.trim())
+    return new RegExp(`^${agentKey}\\s+--resume\\s+\\S+`).test(command.trim())
+  }
+
+  it('recognizes the resume command each subcommand-style vendor builds', () => {
+    for (const agentKey of ['codex', 'muse']) {
+      const cmd = buildResumeCommand(agentKey, '4d4a11fe-b08a-46df-9f86-685589531e65')
+      expect(cmd).not.toBe('')
+      expect(looksLikeResume(agentKey, cmd)).toBe(true)
+      // With the flag appended it must still read as a resume, not a custom
+      // base command.
+      expect(looksLikeResume(agentKey, `${cmd} --disable-approval`)).toBe(true)
+    }
+  })
+
+  it('does not mistake a fresh muse launch for a resume', () => {
+    expect(looksLikeResume('muse', 'muse')).toBe(false)
+    expect(looksLikeResume('muse', 'muse resume')).toBe(false)
+    expect(looksLikeResume('muse', "muse exec 'run the tests'")).toBe(false)
   })
 })

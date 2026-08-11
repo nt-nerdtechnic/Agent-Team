@@ -151,6 +151,8 @@ function makeBackend(opts?: {
   customFiles?: Record<string, string>
   /** Per-rel-path mtimes echoed by fs.read_file (for the last-updated sort). */
   mtimes?: Record<string, number>
+  /** Project root reported by plans.list_docs; absent means "the workspace". */
+  root?: string
 }) {
   // Tracks concurrent .agent-team reads so tests can assert parallel fan-out.
   const htmlReads = { inflight: 0, max: 0 }
@@ -212,7 +214,7 @@ function makeBackend(opts?: {
               cached: false,
             })),
         )
-        return { payload: { ok: true, docs } }
+        return { payload: { ok: true, docs, ...(opts?.root ? { root: opts.root } : {}) } }
       }
       if (channel === 'plans.cache_put') return { payload: { ok: true, stored: 0 } }
       if (channel === 'fs.read_file') {
@@ -285,7 +287,7 @@ describe('PlansPane', () => {
     await flushPromises()
     await wrapper.find('.plan-row').trigger('click')
     expect(wrapper.emitted('open-file')?.[0]).toEqual([
-      { filepath: '.cursor/plans/active.plan.md', name: 'active.plan.md' },
+      { filepath: '.cursor/plans/active.plan.md', name: 'active.plan.md', root: '/ws' },
     ])
   })
 
@@ -483,7 +485,7 @@ describe('PlansPane', () => {
     await htmlRow.trigger('click')
     const emitted = wrapper.emitted('open-file')!
     expect(emitted[emitted.length - 1]).toEqual([
-      { filepath: '.agent-team/plans/review_a1b2c3.html', name: 'review_a1b2c3.html' },
+      { filepath: '.agent-team/plans/review_a1b2c3.html', name: 'review_a1b2c3.html', root: '/ws' },
     ])
   })
 
@@ -648,6 +650,69 @@ describe('PlansPane', () => {
   })
 })
 
+// A workspace opened on a subdirectory of the repository its plans live in:
+// plans.list_docs answers with the repository root, and every rel_path it
+// returned is relative to THAT, not to the workspace. fs.read_file refuses to
+// escape the workspace it is given, so addressing these files with the
+// workspace is exactly the "Failed to load the plan document" case.
+describe('PlansPane – resolved plan root', () => {
+  const htmlEntries = [
+    { name: 'review_a1b2c3.html', rel_path: '.agent-team/plans/review_a1b2c3.html', is_dir: false },
+  ]
+
+  it('reads, caches and opens against the root the backend reported', async () => {
+    const backend = makeBackend({ root: '/repo', htmlEntries, dirEntries: { '.cursor/plans': [] } })
+    const wrapper = mountPane(backend)
+    await flushPromises()
+
+    expect(backend.send).toHaveBeenCalledWith('fs.read_file', {
+      workspace_path: '/repo',
+      rel_path: '.agent-team/plans/review_a1b2c3.html',
+    })
+    expect(backend.send).toHaveBeenCalledWith(
+      'plans.cache_put',
+      expect.objectContaining({ workspace_path: '/repo' }),
+    )
+    // The list itself still asks with the workspace — resolving it is the
+    // backend's job, and asking with the root would make it unresolvable.
+    expect(backend.send).toHaveBeenCalledWith('plans.list_docs', { workspace_path: '/ws' })
+
+    await wrapper.find('.plan-row').trigger('click')
+    expect(wrapper.emitted('open-file')?.[0]).toEqual([
+      {
+        filepath: '.agent-team/plans/review_a1b2c3.html',
+        name: 'review_a1b2c3.html',
+        root: '/repo',
+      },
+    ])
+  })
+
+  it('refreshes on a plans.changed broadcast naming the resolved root', async () => {
+    const backend = makeBackend({ root: '/repo', htmlEntries, dirEntries: { '.cursor/plans': [] } })
+    mountPane(backend)
+    await flushPromises()
+    const before = backend.send.mock.calls.filter((c) => c[0] === 'plans.list_docs').length
+
+    // The watcher reports the path it was started on, which is the root.
+    backend.emit('plans.changed', { workspace_path: '/repo' })
+    await flushPromises()
+
+    const after = backend.send.mock.calls.filter((c) => c[0] === 'plans.list_docs').length
+    expect(after).toBe(before + 1)
+  })
+
+  it('falls back to the workspace when the backend reports no root', async () => {
+    const backend = makeBackend({ htmlEntries, dirEntries: { '.cursor/plans': [] } })
+    mountPane(backend)
+    await flushPromises()
+
+    expect(backend.send).toHaveBeenCalledWith('fs.read_file', {
+      workspace_path: '/ws',
+      rel_path: '.agent-team/plans/review_a1b2c3.html',
+    })
+  })
+})
+
 describe('PlansPane – plans.changed live refresh', () => {
   it('reloads the plan list on a matching-workspace broadcast', async () => {
     const backend = makeBackend()
@@ -790,7 +855,7 @@ describe('PlansPane – context menu', () => {
     await menuItem(wrapper, 'Open').trigger('click')
     const emitted = wrapper.emitted('open-file')!
     expect(emitted[emitted.length - 1]).toEqual([
-      { filepath: '.agent-team/plans/review_a1b2c3.html', name: 'review_a1b2c3.html' },
+      { filepath: '.agent-team/plans/review_a1b2c3.html', name: 'review_a1b2c3.html', root: '/ws' },
     ])
     expect(wrapper.find('.ctx-menu').exists()).toBe(false)
   })
@@ -1443,7 +1508,7 @@ describe('PlansPane – row accessibility', () => {
     const emitted = wrapper.emitted('open-file')!
     expect(emitted.length).toBe(2)
     expect(emitted[0]).toEqual([
-      { filepath: '.agent-team/plans/review_a1b2c3.html', name: 'review_a1b2c3.html' },
+      { filepath: '.agent-team/plans/review_a1b2c3.html', name: 'review_a1b2c3.html', root: '/ws' },
     ])
     expect(emitted[1]).toEqual(emitted[0])
   })

@@ -14,5 +14,9 @@ export const SPEC = {
   turnEndInferredFromSilence: true,
   resumeCommandPattern: /^pi\s+--session-id\s+\S+/,
   supportsRebuild: true,
+  // Restore-pin self-heals: `pi --session-id <id>` is documented as "Use exact
+  // project session ID, creating it if missing", so a pin that never gets
+  // replaced still resumes/claims a real session instead of dead-ending.
+  supportsRestorePin: true,
   hint: 'generalist'
 } as const satisfies AgentSpec

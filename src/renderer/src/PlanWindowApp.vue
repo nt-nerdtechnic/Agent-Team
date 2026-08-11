@@ -37,6 +37,23 @@ const backend = useBackend()
 // Hook the settings cache to this window's own ws connection so theme changes
 // made in other windows arrive as ui.settings_changed broadcasts.
 initSettingsBackend(backend)
+
+// Plan documents live in the project root, which is the workspace itself
+// unless the workspace is a subdirectory of the repository holding them (see
+// plans.list_docs). Every rel_path in this window is relative to this root, so
+// it must be settled before the first document opens — the preview components
+// load once and do not re-resolve a changed workspace.
+const planRoot = ref(workspacePath)
+async function resolvePlanRoot(): Promise<void> {
+  try {
+    const res = await backend.send<{ ok: boolean; root?: string }>('plans.resolve_root', {
+      workspace_path: workspacePath,
+    })
+    if (res.payload?.ok && res.payload.root) planRoot.value = res.payload.root
+  } catch {
+    // Keep the workspace as the root: unchanged from the pre-resolution behaviour.
+  }
+}
 const { loadTheme } = useTheme()
 const { t } = useI18n()
 const { toast, confirm } = useNotify()
@@ -164,7 +181,7 @@ function onOutlineScroll(anchor: string): void {
 // retry once on a conflict; a mutation that leaves the content unchanged is a
 // silent no-op success). The host still sanitizes untrusted frame HTML first.
 function planCtx(relPath: string): PlanCtx {
-  return { backend, workspacePath, relPath }
+  return { backend, workspacePath: planRoot.value, relPath }
 }
 
 function applyBodyWriteResult(result: WriteResult): void {
@@ -267,14 +284,14 @@ async function buildPlanContext(): Promise<string> {
     } else {
       const resp = await backend
         .send<{ ok: boolean; content?: string }>('fs.read_file', {
-          workspace_path: workspacePath,
+          workspace_path: planRoot.value,
           rel_path: relPath,
         })
         .catch(() => null)
       content = resp?.payload?.ok ? (resp.payload.content ?? null) : null
     }
   }
-  return buildPlanCliContext({ workspacePath, relPath, meta, content })
+  return buildPlanCliContext({ workspacePath: planRoot.value, relPath, meta, content })
 }
 
 let offThemeSettingsChange: (() => void) | null = null
@@ -293,11 +310,16 @@ onMounted(() => {
   // preview in place so the scroll position is preserved.
   offPlansChanged = backend.on('plans.changed', (payload) => {
     const p = payload as { workspace_path?: unknown } | null
-    if (p && p.workspace_path === workspacePath) planPreviewRefresh.value++
+    // The watcher reports the path it was started on — the resolved root once
+    // any plan surface has listed this workspace.
+    if (p && (p.workspace_path === workspacePath || p.workspace_path === planRoot.value)) {
+      planPreviewRefresh.value++
+    }
   })
   window.addEventListener('keydown', onWindowKeydown)
-  // Auto-open the plan this window was launched for.
-  openRelPath(initialRelPath)
+  // Auto-open the plan this window was launched for, once the root its path is
+  // relative to is known.
+  void resolvePlanRoot().then(() => openRelPath(initialRelPath))
   // While the window stays open, the sidebar clicking another plan focuses this
   // window and asks it to switch (no reopen).
   offPlanOpenDoc = window.agentTeam?.onPlanOpenDoc?.((relPath) => openRelPath(relPath)) ?? null
@@ -330,7 +352,7 @@ onUnmounted(() => {
               </div>
               <PlanDocPreview
                 :key="snapshotPreview.relPath"
-                :workspace-path="workspacePath"
+                :workspace-path="planRoot"
                 :rel-path="snapshotPreview.relPath"
                 :backend="backend"
                 :refresh="0"
@@ -341,7 +363,7 @@ onUnmounted(() => {
               <PlanReviewToolbar
                 ref="toolbarRef"
                 :key="openDoc.relPath"
-                :workspace-path="workspacePath"
+                :workspace-path="planRoot"
                 :rel-path="openDoc.relPath"
                 :backend="backend"
                 :store="planStore"
@@ -352,7 +374,7 @@ onUnmounted(() => {
               <PlanDocPreview
                 ref="previewRef"
                 :key="openDoc.relPath"
-                :workspace-path="workspacePath"
+                :workspace-path="planRoot"
                 :rel-path="openDoc.relPath"
                 :backend="backend"
                 :refresh="planPreviewRefresh"
@@ -367,7 +389,7 @@ onUnmounted(() => {
           <FilePreviewPane
             v-else
             :key="openDoc.relPath"
-            :workspace-path="workspacePath"
+            :workspace-path="planRoot"
             :rel-path="openDoc.relPath"
             :name="openDoc.name"
             :backend="backend"
@@ -389,7 +411,7 @@ onUnmounted(() => {
               </div>
               <PlanFileView
                 :key="snapshotPreview.relPath"
-                :workspace-path="workspacePath"
+                :workspace-path="planRoot"
                 :rel-path="snapshotPreview.relPath"
                 :backend="backend"
                 :readonly="true"
@@ -399,7 +421,7 @@ onUnmounted(() => {
               <PlanReviewToolbar
                 ref="toolbarRef"
                 :key="openDoc.relPath"
-                :workspace-path="workspacePath"
+                :workspace-path="planRoot"
                 :rel-path="openDoc.relPath"
                 :backend="backend"
                 :store="planStore"
@@ -410,7 +432,7 @@ onUnmounted(() => {
               <PlanMarkdownBody
                 ref="mdBodyRef"
                 :key="openDoc.relPath"
-                :workspace-path="workspacePath"
+                :workspace-path="planRoot"
                 :rel-path="openDoc.relPath"
                 :backend="backend"
                 :refresh="planPreviewRefresh"
@@ -421,7 +443,7 @@ onUnmounted(() => {
           <PlanFileView
             v-else-if="mdKind === 'doc'"
             :key="openDoc.relPath"
-            :workspace-path="workspacePath"
+            :workspace-path="planRoot"
             :rel-path="openDoc.relPath"
             :backend="backend"
           />

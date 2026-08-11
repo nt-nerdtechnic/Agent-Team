@@ -59,6 +59,10 @@ vi.mock('../../composables/useNotify', () => ({
 // Backing file state for the body write path (section edit/delete).
 const fsState = vi.hoisted(() => ({ content: '', writes: [] as string[] }))
 
+// What plans.resolve_root answers: empty means "no root reported", which is
+// how a workspace that already IS the project root behaves.
+const planRootState = vi.hoisted(() => ({ root: '' }))
+
 // Listener bus backing the useBackend mock's on(); lets tests simulate
 // backend server-push broadcasts (plans.changed).
 const backendBus = vi.hoisted(() => {
@@ -193,6 +197,9 @@ vi.mock('../../composables/useBackend', () => ({
     pid: ref(0),
     lastError: ref(''),
     send: vi.fn(async (type: string, payload: Record<string, unknown>) => {
+      if (type === 'plans.resolve_root') {
+        return { payload: { ok: true, ...(planRootState.root ? { root: planRootState.root } : {}) } }
+      }
       if (type === 'fs.read_file') return { payload: { ok: true, content: fsState.content, mtime: 1 } }
       if (type === 'fs.write_file') {
         fsState.writes.push(payload.content as string)
@@ -230,6 +237,7 @@ async function mountApp(): Promise<VueWrapper> {
 
 afterEach(() => {
   while (mountedApps.length) mountedApps.pop()!.unmount()
+  planRootState.root = ''
 })
 
 async function open(wrapper: VueWrapper, filepath: string): Promise<void> {
@@ -706,5 +714,72 @@ describe('PlanWindowApp – auto-open + live switch', () => {
     const preview = wrapper.findComponent({ name: 'PlanDocPreview' })
     expect(preview.exists()).toBe(true)
     expect(preview.props('relPath')).toBe('.agent-team/plans/feature_a1b2c3.html')
+  })
+})
+
+// The window may be launched straight at a rel_path (sidebar click, menu, MCP)
+// without listing first, and that path is relative to the project root the
+// plans live in — the workspace itself unless it is a subdirectory of the
+// repository. The preview components load once and do not re-resolve a changed
+// workspace, so the root has to be settled before the first document opens.
+describe('PlanWindowApp – resolved plan root', () => {
+  afterEach(() => {
+    window.history.replaceState({}, '', '/?window=plans&workspace_path=/tmp/demo-ws')
+  })
+
+  it('opens the launch plan against the resolved root, not the workspace', async () => {
+    planRootState.root = '/tmp/repo'
+    window.history.replaceState(
+      {},
+      '',
+      '/?window=plans&workspace_path=/tmp/repo/packages/app&rel_path=.agent-team/plans/feature_a1b2c3.html',
+    )
+
+    const wrapper = await mountApp()
+
+    const preview = wrapper.findComponent({ name: 'PlanDocPreview' })
+    expect(preview.exists()).toBe(true)
+    expect(preview.props('workspacePath')).toBe('/tmp/repo')
+    expect(preview.props('relPath')).toBe('.agent-team/plans/feature_a1b2c3.html')
+    // The plan list resolves on its own, and the CLI dock runs in the
+    // workspace the user actually opened — neither moves to the root.
+    expect(wrapper.findComponent({ name: 'PlansPane' }).props('workspacePath')).toBe(
+      '/tmp/repo/packages/app',
+    )
+    expect(wrapper.findComponent({ name: 'AiCliDock' }).props('workspacePath')).toBe(
+      '/tmp/repo/packages/app',
+    )
+  })
+
+  it('keeps the workspace as the root when the backend reports none', async () => {
+    window.history.replaceState(
+      {},
+      '',
+      '/?window=plans&workspace_path=/tmp/demo-ws&rel_path=.agent-team/plans/feature_a1b2c3.html',
+    )
+
+    const wrapper = await mountApp()
+
+    expect(wrapper.findComponent({ name: 'PlanDocPreview' }).props('workspacePath')).toBe(
+      '/tmp/demo-ws',
+    )
+  })
+
+  it('refreshes the preview on a plans.changed naming the resolved root', async () => {
+    planRootState.root = '/tmp/repo'
+    window.history.replaceState(
+      {},
+      '',
+      '/?window=plans&workspace_path=/tmp/repo/packages/app&rel_path=.agent-team/plans/feature_a1b2c3.html',
+    )
+    const wrapper = await mountApp()
+    const before = wrapper.findComponent({ name: 'PlanDocPreview' }).props('refresh')
+
+    backendBus.emit('plans.changed', { workspace_path: '/tmp/repo' })
+    await flushPromises()
+
+    expect(wrapper.findComponent({ name: 'PlanDocPreview' }).props('refresh')).toBe(
+      (before as number) + 1,
+    )
   })
 })

@@ -35,9 +35,17 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  (e: 'open-file', payload: { filepath: string; name: string }): void
+  (e: 'open-file', payload: { filepath: string; name: string; root: string }): void
   (e: 'deleted', relPath: string): void
 }>()
+
+// The project root plans actually live in, reported by `plans.list_docs`. It
+// differs from `workspacePath` only when the workspace is a subdirectory of a
+// repository: every writer (the MCP tools, asset provisioning) resolves up to
+// the repository root, so reads, writes and rel_paths must use the same root or
+// they address a file that is not there. Seeded with the workspace so the first
+// render before the list arrives behaves as it always did.
+const planRoot = ref(props.workspacePath)
 
 // One row of `plans.list_docs`. `cached: true` means `meta` is the backend's
 // stored copy and still matches the file on disk, so it needs no re-read;
@@ -100,13 +108,15 @@ async function loadPlans(): Promise<void> {
   loading.value = isFirstLoad
   error.value = ''
   try {
-    const list = await props.backend.send<{ ok: boolean; docs?: PlanDoc[]; error?: string }>('plans.list_docs', {
+    const list = await props.backend.send<{ ok: boolean; docs?: PlanDoc[]; root?: string; error?: string }>('plans.list_docs', {
       workspace_path: props.workspacePath,
     })
     if (!list.payload?.ok) {
       error.value = list.payload?.error || t('pane.plans.list-failed')
       return
     }
+    // Every rel_path below is relative to this root, not to the workspace.
+    planRoot.value = list.payload.root || props.workspacePath
 
     // Documents the cache could not answer for get read and parsed here, then
     // written back so the next refresh skips them.
@@ -118,7 +128,7 @@ async function loadPlans(): Promise<void> {
           return { relPath: doc.rel_path, name: doc.name, meta: doc.meta, mtime: doc.mtime }
         }
         const read = await props.backend.send<{ ok: boolean; content?: string; mtime?: number; error?: string }>('fs.read_file', {
-          workspace_path: props.workspacePath,
+          workspace_path: planRoot.value,
           rel_path: doc.rel_path,
         })
         if (!read.payload?.ok) return null
@@ -137,7 +147,7 @@ async function loadPlans(): Promise<void> {
       // Fire-and-forget: the cache is an optimization, so a failed write costs
       // the next refresh some re-reads and nothing else.
       void props.backend.send('plans.cache_put', {
-        workspace_path: props.workspacePath,
+        workspace_path: planRoot.value,
         entries: parsed,
       })
     }
@@ -155,7 +165,11 @@ onMounted(() => {
   void loadPlans()
   offPlansChanged = props.backend.on('plans.changed', (payload) => {
     const p = payload as { workspace_path?: unknown } | null
-    if (p && p.workspace_path === props.workspacePath) void loadPlans()
+    // The watcher reports whichever path it was started on, which is the
+    // resolved root once a subdirectory workspace has listed once.
+    if (p && (p.workspace_path === props.workspacePath || p.workspace_path === planRoot.value)) {
+      void loadPlans()
+    }
   })
 })
 onUnmounted(() => {
@@ -164,6 +178,7 @@ onUnmounted(() => {
   removeCtxListeners()
 })
 watch(() => props.workspacePath, (next) => {
+  planRoot.value = next // re-resolved by the next list
   collapsedSections.value = loadCollapsed(next)
   searchQuery.value = ''
   stageFilter.value = loadStoredChoice(filterStorageKey(next), STAGE_FILTERS, 'all')
@@ -464,7 +479,7 @@ function isSectionCollapsed(key: string): boolean {
 }
 
 function openPlan(item: PlanItem): void {
-  emit('open-file', { filepath: item.relPath, name: item.name })
+  emit('open-file', { filepath: item.relPath, name: item.name, root: planRoot.value })
 }
 
 async function deleteCompleted(): Promise<void> {
@@ -478,7 +493,7 @@ async function deleteCompleted(): Promise<void> {
   let deleted = 0
   for (const item of deletablePlans.value) {
     const resp = await props.backend.send<{ ok: boolean; error?: string }>('fs.delete', {
-      workspace_path: props.workspacePath,
+      workspace_path: planRoot.value,
       rel_path: item.relPath,
     })
     if (resp.payload?.ok) deleted++
@@ -493,7 +508,7 @@ async function deleteCompleted(): Promise<void> {
 // set (null clears it). Writes go through the optimistic-lock store.writeMeta
 // so concurrent external edits are preserved, unlike the unlocked fs.delete.
 function planCtx(relPath: string) {
-  return { backend: props.backend, workspacePath: props.workspacePath, relPath }
+  return { backend: props.backend, workspacePath: planRoot.value, relPath }
 }
 
 async function setArchived(item: PlanItem, archivedAt: string | null): Promise<void> {
@@ -614,7 +629,7 @@ async function ctxShareToGit(): Promise<void> {
   const item = ctxMenu.value.item
   closeCtxMenu()
   if (!item) return
-  const result = await sharePlanToGit(props.backend, props.workspacePath, item.relPath)
+  const result = await sharePlanToGit(props.backend, planRoot.value, item.relPath)
   if (result.ok) toast(t('pane.plans.share-git-success'), { type: 'success' })
   else toast(result.error ?? t('pane.plans.share-git-failed'), { type: 'error' })
 }
@@ -673,7 +688,7 @@ async function submitRename(): Promise<void> {
   }
   const dir = item.relPath.slice(0, item.relPath.lastIndexOf('/'))
   const resp = await props.backend.send<{ ok: boolean; error?: string }>('fs.rename', {
-    workspace_path: props.workspacePath,
+    workspace_path: planRoot.value,
     src_path: item.relPath,
     dst_path: `${dir}/${newName}`,
   })
@@ -708,7 +723,7 @@ async function deletePlan(item: PlanItem): Promise<void> {
     if (!ok2) return
   }
   const resp = await props.backend.send<{ ok: boolean; error?: string }>('fs.delete', {
-    workspace_path: props.workspacePath,
+    workspace_path: planRoot.value,
     rel_path: item.relPath,
   })
   if (!resp.payload?.ok) {
@@ -796,7 +811,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
   closeCtxMenu()
   if (!item) return
   const read = await props.backend.send<{ ok: boolean; content?: string; error?: string }>('fs.read_file', {
-    workspace_path: props.workspacePath,
+    workspace_path: planRoot.value,
     rel_path: item.relPath,
   })
   if (!read.payload?.ok || read.payload.content === undefined) {
@@ -810,7 +825,7 @@ async function ctxUpgradeToPlan(): Promise<void> {
     return
   }
   const resp = await props.backend.send<{ ok: boolean; error?: string }>('fs.write_file', {
-    workspace_path: props.workspacePath,
+    workspace_path: planRoot.value,
     rel_path: item.relPath,
     content: next,
   })

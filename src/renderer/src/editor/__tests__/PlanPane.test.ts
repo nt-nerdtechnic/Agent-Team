@@ -81,6 +81,26 @@ describe('PlanPane', () => {
     expect(wrapper.find('.plan-pane-doc-view').exists()).toBe(false)
   })
 
+  it('hands the window the root the rel_path is relative to', async () => {
+    // Workspace opened on a subdirectory of the repository holding the plans:
+    // the list resolved up to the repository, so the window must be launched
+    // there or it would resolve the path against a directory it is not under.
+    const wrapper = await mountApp()
+    wrapper.findComponent({ name: 'PlansPane' }).vm.$emit('open-file', {
+      filepath: '.agent-team/plans/feature_a1b2c3.html',
+      name: 'feature_a1b2c3.html',
+      root: '/tmp/repo',
+    })
+    await flushPromises()
+
+    const openPlansWindow = (window as unknown as { agentTeam: { openPlansWindow: ReturnType<typeof vi.fn> } })
+      .agentTeam.openPlansWindow
+    expect(openPlansWindow).toHaveBeenCalledWith({
+      workspace_path: '/tmp/repo',
+      rel_path: '.agent-team/plans/feature_a1b2c3.html',
+    })
+  })
+
   it('forwards markdown plan clicks the same way', async () => {
     const wrapper = await mountApp()
     wrapper
