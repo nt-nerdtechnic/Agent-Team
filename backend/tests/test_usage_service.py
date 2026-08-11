@@ -2144,6 +2144,15 @@ class _RecordingVault:
     def login_secret_present(self, agent_key: str, slot_id: str) -> bool:
         return False
 
+    def slot_is_empty(self, agent_key: str, slot_id: str) -> bool:
+        return True  # this fake never stores a secret
+
+    def identity(self, agent_key: str, slot_id: str | None = None) -> dict:
+        # An account the vault cannot name is never folded into another
+        # profile, so these tests stay about the harvest bookkeeping alone
+        # (de-duplication has its own suite: test_login_dedupe.py).
+        return {"email": None, "signedIn": False}
+
     def restore(self, agent_key: str, slot_id: str) -> None:
         self.restored.append((agent_key, slot_id))
 

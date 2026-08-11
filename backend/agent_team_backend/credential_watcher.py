@@ -24,9 +24,10 @@ That makes the event stream extremely noisy: ``~/.claude.json`` is Claude
 Code's entire config, rewritten on every prompt. So a file event never
 reconciles anything by itself — it only triggers an identity fingerprint read,
 and the work below runs solely when the fingerprint differs from the last one
-seen. Reconciliation itself NEVER touches credentials: the live state already
-belongs to whichever account the user signed into, so only the ledger pointer
-is corrected.
+seen. Reconciliation never WRITES the live credentials: the live state already
+belongs to whichever account the user signed into. Normally only the ledger
+pointer is corrected; a login no profile holds at all also gets a profile of
+its own, whose (empty by construction) slot is filled from the live snapshot.
 """
 
 from __future__ import annotations
@@ -138,19 +139,80 @@ def _match_live_slot(agent_key: str) -> tuple[str | None, str, str | None]:
     return raw_email, active, None
 
 
+def _adopt_unregistered_live_account(agent_key: str, email: str) -> str | None:
+    """Give a live login no slot holds its own profile and make it the active
+    one; returns the new profile id, or None when nothing was registered.
+
+    Without this the ledger keeps naming some other account, and the next
+    switch would capture this login into a slot that belongs to a different
+    one. The live credentials are never written: ``harvest`` only fills the
+    new slot — empty by construction — from the live state.
+
+    That fill is mandatory. A registered profile with an empty slot is a logout
+    trap: ``restore`` on it clears the live credentials. So a harvest that does
+    not happen takes the profile back down with it rather than leave the trap
+    behind. Every failure is contained here — the caller still broadcasts, and
+    the account then shows up as an unregistered live login instead. Blocking;
+    call inside ``switch_lock(agent_key)``."""
+    from . import app
+
+    store = app.cli_profiles_store
+    vault = app.credential_vault
+    try:
+        profile = store.create(agent_key=agent_key, name=email)
+    except Exception as err:  # noqa: BLE001 — a watcher must never crash
+        log.warning("registering the live %s account failed: %s", agent_key, err)
+        return None
+    profile_id = str(profile["id"])
+    registered = False
+    try:
+        if vault.harvest(agent_key, profile_id):
+            store.set_default(agent_key, profile_id)
+            registered = True
+        else:
+            log.warning("the live %s credentials could not be snapshotted", agent_key)
+    except Exception as err:  # noqa: BLE001
+        log.warning("registering the live %s account failed: %s", agent_key, err)
+    if not registered:
+        # Secrets first, then the store's archive-by-rename (the order
+        # cli_profiles.delete uses — see delete_slot_secrets). Separate
+        # attempts: failing to clean a secret must not leave the profile
+        # itself registered, which is the half-done state that hurts.
+        try:
+            vault.delete_slot_secrets(agent_key, profile_id)
+        except Exception as err:  # noqa: BLE001
+            log.warning("cleaning up slot %s/%s failed: %s", agent_key, profile_id, err)
+        try:
+            store.delete(profile_id)
+        except Exception as err:  # noqa: BLE001
+            log.error("undoing profile %s for %s failed: %s", profile_id, agent_key, err)
+        return None
+    log.info(
+        "live %s account %s was unregistered; registered it as profile %s",
+        agent_key, email, profile_id,
+    )
+    return profile_id
+
+
 def align_default_to_live(agent_key: str) -> str | None:
     """Point ``defaults[agent_key]`` at the slot whose snapshot matches the
-    live credentials; returns the slot id when the pointer moved, else None.
+    live credentials, registering a profile for the account when no slot holds
+    it (see ``_adopt_unregistered_live_account``); returns the slot id when the
+    pointer moved, else None.
 
-    Credentials are never read for a swap, captured, restored or cleared here —
+    The live credentials are never captured, restored, swapped or cleared here —
     the live state is already the account the user signed into, and the only
     thing that can be wrong is which profile Navide believes that is. Call
     inside ``credential_vault.switch_lock(agent_key)`` so a manual
     ``cli_profiles.set_default`` cannot interleave. Blocking."""
     from . import app
 
-    _email, active, matched = _match_live_slot(agent_key)
-    if matched is None or matched == active:
+    email, active, matched = _match_live_slot(agent_key)
+    if matched is None:
+        # An account nothing holds. Registering it needs an identity to name
+        # it by, which is exactly what a None email says we do not have.
+        return None if email is None else _adopt_unregistered_live_account(agent_key, email)
+    if matched == active:
         return None
     app.cli_profiles_store.set_default(
         agent_key, None if matched == DEFAULT_SLOT_ID else matched

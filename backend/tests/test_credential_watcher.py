@@ -92,10 +92,14 @@ def _write_slot(agent_key: str, slot_id: str, secret: str) -> None:
     (slot / "auth.json").write_text(secret, encoding="utf-8")
 
 
-def _forbid_credential_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+def _forbid_credential_writes(
+    monkeypatch: pytest.MonkeyPatch, allow: tuple[str, ...] = ()
+) -> None:
     """Reconciliation corrects bookkeeping only — the live credentials already
     belong to the account it aligns to. Any vault call that MOVES a credential
-    is a bug, so make them all fail loudly."""
+    is a bug, so make them all fail loudly. ``allow`` exempts the slot-only
+    calls a test expects (registering an unknown account harvests into its new
+    slot, which never writes the live state)."""
     def refuse(name: str):
         def _call(*_args: Any, **_kwargs: Any) -> None:
             raise AssertionError(f"reconcile must not call credential_vault.{name}")
@@ -105,7 +109,8 @@ def _forbid_credential_writes(monkeypatch: pytest.MonkeyPatch) -> None:
         "switch", "capture", "restore", "clear_live", "write_live", "write_slot",
         "harvest", "harvest_login_home", "delete_slot_secrets",
     ):
-        monkeypatch.setattr(app.credential_vault, name, refuse(name))
+        if name not in allow:
+            monkeypatch.setattr(app.credential_vault, name, refuse(name))
 
 
 # ---- watcher: de-noising ---------------------------------------------------
@@ -226,22 +231,56 @@ async def test_reconcile_moves_default_to_the_matching_slot(
     assert payload["unregistered"] == {}
 
 
-async def test_reconcile_reports_an_unknown_account_as_unregistered(
+async def test_reconcile_registers_an_unknown_account(
     store: CliProfilesStore,
     events: list[dict[str, Any]],
     codex_live,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An account no slot holds gets a profile of its own, holding a snapshot
+    of the live credentials, and becomes the active one."""
     work = store.create(agent_key="codex", name="Work")
     store.set_default("codex", work["id"])
     _write_slot("codex", work["id"], _codex_auth("work@example.com"))
     codex_live("stranger@example.com")
-    _forbid_credential_writes(monkeypatch)
+    # Everything that would MOVE the live credentials is still forbidden — only
+    # the slot-only pair the snapshot needs may run.
+    _forbid_credential_writes(monkeypatch, allow=("harvest", "write_slot"))
 
     await reconcile_live_account("codex")
 
-    # Nothing to point at — the ledger stays where it was and the live login
-    # is surfaced instead.
+    new_id = store.list()["defaults"]["codex"]
+    assert new_id not in (None, work["id"])
+    assert app.credential_vault.read_slot("codex", new_id).secret == _codex_auth(
+        "stranger@example.com"
+    )
+    # Now that it is registered, it is no longer an unregistered login.
+    assert unregistered_live_accounts() == {}
+    assert ws_handlers._switch_history.get("codex", []) == []
+    payload = [e for e in events if e["type"] == "cli_profiles.changed"][0]["payload"]
+    assert payload["forced"] is False
+    assert payload["unregistered"] == {}
+    assert [p["id"] for p in payload["profiles"]] == [work["id"], new_id]
+
+
+async def test_registration_failure_leaves_no_credential_less_profile(
+    store: CliProfilesStore,
+    events: list[dict[str, Any]],
+    codex_live,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A profile whose slot stayed empty would log the user out the moment it
+    is restored, so a failed snapshot takes the profile back down and the
+    account falls back to being reported as an unregistered live login."""
+    work = store.create(agent_key="codex", name="Work")
+    store.set_default("codex", work["id"])
+    _write_slot("codex", work["id"], _codex_auth("work@example.com"))
+    codex_live("stranger@example.com")
+    _forbid_credential_writes(monkeypatch)  # harvest raises
+
+    await reconcile_live_account("codex")
+
+    assert [p["id"] for p in store.list()["profiles"]] == [work["id"]]
     assert store.list()["defaults"]["codex"] == work["id"]
     assert unregistered_live_accounts() == {
         "codex": {"email": "stranger@example.com", "signedIn": True}
@@ -250,6 +289,28 @@ async def test_reconcile_reports_an_unknown_account_as_unregistered(
     assert payload["unregistered"] == {
         "codex": {"email": "stranger@example.com", "signedIn": True}
     }
+
+
+async def test_an_unidentifiable_live_login_registers_nothing(
+    store: CliProfilesStore,
+    events: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """kimi carries no identity field, so its live login can never be told
+    apart from any other — there is nothing to name a profile after."""
+    monkeypatch.setattr(app.credential_vault, "_platform", "linux")
+    live = tmp_path / "vault-home" / ".kimi-code" / "credentials"
+    live.mkdir(parents=True)
+    (live / "kimi-code.json").write_text('{"access_token": "tok"}', encoding="utf-8")
+    parked = store.create(agent_key="kimi", name="Parked")
+    store.set_default("kimi", parked["id"])
+    _forbid_credential_writes(monkeypatch)
+
+    await reconcile_live_account("kimi")
+
+    assert [p["id"] for p in store.list()["profiles"]] == [parked["id"]]
+    assert store.list()["defaults"]["kimi"] == parked["id"]
 
 
 async def test_unregistered_is_empty_for_an_unmanaged_login(

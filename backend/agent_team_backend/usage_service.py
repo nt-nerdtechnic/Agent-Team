@@ -339,22 +339,96 @@ def _active_profile_id(agent_key: str) -> str | None:
         return None
 
 
+def _duplicate_account_profile(vault, store, agent_key: str, profile_id: str) -> str | None:
+    """Another profile of ``agent_key`` whose slot snapshot holds the same
+    account as ``profile_id``'s slot, or None when there is no such profile.
+
+    The identity is display-only and not always readable: kimi has no identity
+    field at all, and a claude long-lived-token login carries no oauthAccount.
+    An account that cannot be named matches nothing — merging two logins on a
+    guess would destroy a profile the user still needs. Blocking reads."""
+    from .credential_watcher import _norm_email
+
+    email = _norm_email(vault.identity(agent_key, profile_id).get("email"))
+    if email is None:
+        return None
+    for profile in store.list()["profiles"]:
+        other_id = str(profile.get("id") or "")
+        if not other_id or other_id == profile_id or profile.get("agentKey") != agent_key:
+            continue
+        if _norm_email(vault.identity(agent_key, other_id).get("email")) == email:
+            return other_id
+    return None
+
+
+def _dedupe_harvested_login(vault, agent_key: str, profile_id: str) -> str | None:
+    """Fold a just-harvested login into the profile that already holds that
+    account and drop the duplicate ``profile_id`` was created for. Returns the
+    surviving profile id, or None when nothing was folded.
+
+    ``cli_profiles.create`` only enforces a unique id, so signing into an
+    account a profile already exists for leaves two slots holding the same
+    login. The fresh login wins over the survivor's older snapshot.
+
+    Ordering is load-bearing: the ledger pointer moves BEFORE the delete
+    (``CliProfilesStore.delete`` nulls a default that names the deleted
+    profile), and the slot secrets go before the store archives the slot dir,
+    or claude's Keychain slot item is stranded forever. Blocking; call inside
+    ``switch_lock(agent_key)``."""
+    store = _get_profiles_store()
+    if store is None:
+        return None
+    keep_id = _duplicate_account_profile(vault, store, agent_key, profile_id)
+    if keep_id is None:
+        return None
+    vault.write_slot(agent_key, keep_id, vault.read_slot(agent_key, profile_id))
+    if store.list()["defaults"].get(agent_key) == profile_id:
+        store.set_default(agent_key, keep_id)
+    vault.delete_slot_secrets(agent_key, profile_id)
+    store.delete(profile_id)
+    log.info(
+        "%s login duplicated profile %s; merged into existing profile %s",
+        agent_key, profile_id, keep_id,
+    )
+    return keep_id
+
+
 async def _harvest_login_home_locked(vault, agent_key: str, profile_id: str) -> bool:
     """Harvest the profile's pending login home under the agent's switch lock.
     Skipped (False) while the profile's login pane CLI is still running. When
     the harvested profile is the ACTIVE account, the slot is immediately
     restored to live — the active row's identity is read from the live state,
     and the next capture() mirrors live into the slot, which would otherwise
-    erase the fresh login. Returns True when something was harvested."""
+    erase the fresh login. A login that landed in a profile created for it and
+    turns out to be an account another profile already holds is folded into
+    that profile (see ``_dedupe_harvested_login``). Returns True when something
+    was harvested."""
     if _login_pane_running(agent_key, profile_id):
         return False
     async with vault.switch_lock(agent_key):
+        # Read before the harvest fills it: an empty slot is what tells the
+        # de-duplication that this profile was created for this login. Signing
+        # back into a profile that already had credentials is the user
+        # re-logging a slot they arranged themselves — never ours to remove.
+        slot_was_empty = await vault_to_thread(
+            vault.slot_is_empty, agent_key, profile_id
+        )
         harvested = await vault_to_thread(
             vault.harvest_login_home, agent_key, profile_id
         )
-        if harvested and _active_profile_id(agent_key) == profile_id:
-            await vault_to_thread(vault.restore, agent_key, profile_id)
-        return harvested
+        if not harvested:
+            return False
+        slot_id = profile_id
+        if slot_was_empty:
+            try:
+                slot_id = await vault_to_thread(
+                    _dedupe_harvested_login, vault, agent_key, profile_id
+                ) or profile_id
+            except Exception as err:  # noqa: BLE001 — both profiles stay usable
+                log.warning("de-duplicating the %s login failed: %s", agent_key, err)
+        if _active_profile_id(agent_key) == slot_id:
+            await vault_to_thread(vault.restore, agent_key, slot_id)
+        return True
 
 
 async def _harvest_pending_login_homes(store, vault) -> list[str]:
