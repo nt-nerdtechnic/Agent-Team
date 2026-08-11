@@ -196,6 +196,45 @@ class TestStageUnstage:
         assert f.read_text() == "v2-modified-after-staging"  # working file preserved
 
     @pytest.mark.asyncio
+    async def test_unstage_untracked_path_is_a_noop(self, tmp_path):
+        # The UI acts on a status snapshot, so a row can already be out of the
+        # index when the click lands. git rejects the whole batch for such a path
+        # ("pathspec ... did not match any file(s) known to git"), leaving the
+        # genuinely staged files staged — unstage must retry without the stale ones.
+        init_repo(tmp_path)
+        (tmp_path / "untracked.txt").write_text("new")
+        (tmp_path / "staged.txt").write_text("new")
+        subprocess.run(["git", "add", "staged.txt"], cwd=tmp_path, check=True, capture_output=True)
+        result = await git_service.unstage_files(
+            str(tmp_path), ["untracked.txt", "gone.txt", "staged.txt"]
+        )
+        assert result["ok"] is True, result
+        assert result["error"] == ""
+        status = await git_service.get_status(str(tmp_path))
+        assert status["staged"] == []
+        assert (tmp_path / "untracked.txt").exists()
+
+    @pytest.mark.asyncio
+    async def test_unstage_accepts_directory_pathspec(self, tmp_path):
+        # git expands a directory pathspec itself; the stale-path retry must not
+        # narrow unstage to exact file paths.
+        init_repo(tmp_path)
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "z.txt").write_text("z")
+        subprocess.run(["git", "add", "sub/z.txt"], cwd=tmp_path, check=True, capture_output=True)
+        result = await git_service.unstage_files(str(tmp_path), ["sub"])
+        assert result["ok"] is True, result
+        status = await git_service.get_status(str(tmp_path))
+        assert status["staged"] == []
+
+    @pytest.mark.asyncio
+    async def test_unstage_still_reports_other_errors(self, tmp_path):
+        # Only the stale-pathspec case is absorbed; anything else must surface.
+        result = await git_service.unstage_files(str(tmp_path), ["a.txt"])  # not a repo
+        assert result["ok"] is False
+        assert result["error"]
+
+    @pytest.mark.asyncio
     async def test_status_rename_uses_new_path(self, tmp_path):
         # A staged rename renders as "old -> new"; status must expose the new
         # path (a real file) rather than the literal "old -> new" string.

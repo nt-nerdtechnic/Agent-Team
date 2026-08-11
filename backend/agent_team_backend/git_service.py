@@ -2011,10 +2011,8 @@ async def stage_files(workspace_path: str, files: list[str]) -> dict[str, Any]:
     return {"ok": rc == 0, "error": stderr.strip() if rc != 0 else ""}
 
 
-@_serialize_write
-async def unstage_files(workspace_path: str, files: list[str]) -> dict[str, Any]:
-    if not files:
-        return {"ok": True}
+async def _run_unstage(workspace_path: str, files: list[str]) -> tuple[int, str]:
+    """Drop *files* from the index, keeping the working tree. Returns (rc, stderr)."""
     # Before the first commit there is no HEAD, so `git restore --staged` fails
     # with "could not resolve HEAD". In that case unstage by removing the entries
     # from the index (the working-tree files are kept).
@@ -2027,7 +2025,34 @@ async def unstage_files(workspace_path: str, files: list[str]) -> dict[str, Any]
         # writing to). --cached keeps the working-tree file; we only drop the
         # index entry, so forcing is safe here.
         rc, _, stderr = await _run(["git", "rm", "--cached", "-f", "--quiet", "--"] + files, workspace_path)
-    return {"ok": rc == 0, "error": stderr.strip() if rc != 0 else ""}
+    return rc, stderr.strip()
+
+
+@_serialize_write
+async def unstage_files(workspace_path: str, files: list[str]) -> dict[str, Any]:
+    if not files:
+        return {"ok": True}
+    rc, stderr = await _run_unstage(workspace_path, files)
+    if rc == 0:
+        return {"ok": True, "error": ""}
+    # The UI acts on a status snapshot, so a path can already be out of the index
+    # when the click lands (a parallel agent ran git, or the row was untracked all
+    # along). git rejects the WHOLE batch for one such path — the genuinely staged
+    # files stay staged — with "pathspec ... did not match any file(s) known to git".
+    # Retry with only the paths that are staged right now; for the dropped ones the
+    # requested end state already holds. Everything that succeeded before still runs
+    # unfiltered on the first attempt, so directory/glob pathspecs keep working.
+    if "did not match any file" not in stderr:
+        return {"ok": False, "error": stderr}
+    status = await get_status(workspace_path)
+    staged_paths = {f["path"] for f in status.get("staged", [])}
+    remaining = [f for f in files if f in staged_paths]
+    if not remaining:
+        return {"ok": True, "error": ""}
+    if len(remaining) == len(files):
+        return {"ok": False, "error": stderr}  # nothing stale to drop — the error is real
+    rc, stderr = await _run_unstage(workspace_path, remaining)
+    return {"ok": rc == 0, "error": stderr if rc != 0 else ""}
 
 
 @_serialize_write
