@@ -45,8 +45,9 @@ caller has no pane identity and therefore no workspace of its own: every
 tool that addresses a pane (`cli_send`, `cli_read_log`, `cli_get_status`,
 `cli_wait_idle`) requires the fully-qualified `<folder>/<pane>` form rather
 than a bare pane name, and every tool that addresses UI state
-(`ui_invoke`, `ui_snapshot`, `ui_list_actions`) requires an explicit
-`workspace_path`.
+(`ui_invoke`, `ui_snapshot`, `ui_list_actions`) or a plan document
+(`plan_*`) requires an explicit `workspace_path` — a caller running as a
+pane may omit it and get that pane's own workspace.
 
 Implementation: [`plan_mcp.py`](../../backend/agent_team_backend/plugins/builtin/navide_plans/plan_mcp.py)
 (tools), [`plan_mcp_auth.py`](../../backend/agent_team_backend/plugins/builtin/navide_plans/plan_mcp_auth.py)
@@ -67,6 +68,10 @@ Implementation: [`plan_mcp.py`](../../backend/agent_team_backend/plugins/builtin
 | `plan_update_todo` | `workspace_path`, `rel_path`, `todo_id`, `status` | Set one todo's status: `pending`, `in-progress`, `done`, `skipped` |
 | `plan_add_note` | `workspace_path`, `rel_path`, `text`, `author?` (`ai`\|`user`, default `ai`) | Append a review note |
 
+`workspace_path` is required here because an external client is not a pane;
+a pane caller omits it and the tools use that pane's own workspace, which is
+what the plan window resolves plans against.
+
 `plan_create` returns a `warning` field when `workspace_path` doesn't match
 any live pane's workspace — the file is written, but Navide's plan window
 won't find it.
@@ -83,13 +88,21 @@ object, so this only bites on `plan_list`.
 |---|---|---|
 | `cli_list_targets` | — | List addressable CLI panes: `name`, `address`, `workspace_path`, `same_workspace`, `busy` |
 | `cli_send` | `to`, `text` | Deliver an instruction to another pane once it's idle (queued if busy) |
-| `cli_open_agent` | `agent`, `name`, `task`, `workspace_path` (required for a non-pane caller) | Spawn a new CLI pane with a task; returns `{ok, name, address}` |
+| `cli_open_agent` | `agent`, `name`, `task`, `workspace_path` (required for a non-pane caller) | Spawn a new CLI pane with a task; returns `{ok, name, address}`, plus `advisories` when the spawn crossed an advisory threshold |
+
+Spawning is not capped. A pane may spawn any number of children, a workspace
+may hold any number of CLI panes, and a spawn chain may run any depth — past
+advisory thresholds (3 children, 8 workspace panes, depth 2) the call still
+succeeds and returns `advisories` naming the cost, e.g. that each pane holds
+250-500MB. What still fails is a malformed request: an unknown agent key, a
+missing or already-taken name, an empty task. Those advisories are also
+recorded as diagnostics, readable via `ui_diagnostics`.
 
 ### CLI panes — reading back
 
 | Tool | Parameters | What it does |
 |---|---|---|
-| `cli_read_log` | `target`, `tail_lines=200` | Tail of the pane's conversation log (≤64KB and ≤`tail_lines` lines) |
+| `cli_read_log` | `target`, `tail_lines=200` | Tail of the pane's conversation log (≤512KB and ≤`tail_lines` lines) |
 | `cli_get_status` | `target` | `{busy, agent_key, last_activity?, ui?}` — `ui` mirrors `ui.pane.getStatus` when the owning window answers |
 | `cli_wait_idle` | `target`, `timeout_s=60` (capped at 120) | Blocks until the pane is idle or the timeout passes |
 

@@ -224,3 +224,39 @@ describe('computeSpawnDepth', () => {
     expect(computeSpawnDepth('a', (id) => loop[id])).toBe(1)
   })
 })
+
+describe('evaluateTurnSpawns — names claimed within the turn', () => {
+  it('rejects a second block asking for a name the first already claimed', () => {
+    // isNameTaken only knows about panes that already exist, so without the
+    // turn-local claim set both would pass and the second would be silently
+    // renamed downstream.
+    const gateCtx = ctx()
+
+    const results = evaluateTurnSpawns(
+      [
+        { agent: 'claude', name: 'worker', task: 'first' },
+        { agent: 'claude', name: 'worker', task: 'second' },
+      ],
+      gateCtx,
+    )
+
+    expect(results[0].ok).toBe(true)
+    expect(results[1].ok).toBe(false)
+    expect(results[1].ok === false && results[1].reason).toContain('已被其他 pane 使用')
+  })
+
+  it('a rejected block does not claim its name', () => {
+    const gateCtx = ctx()
+
+    const results = evaluateTurnSpawns(
+      [
+        { agent: 'nope', name: 'worker', task: 'rejected for a bad agent key' },
+        { agent: 'claude', name: 'worker', task: 'should still get the name' },
+      ],
+      gateCtx,
+    )
+
+    expect(results[0].ok).toBe(false)
+    expect(results[1].ok).toBe(true)
+  })
+})

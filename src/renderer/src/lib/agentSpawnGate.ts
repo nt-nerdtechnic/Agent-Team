@@ -98,18 +98,31 @@ export function evaluateSpawnRequest(
  *  (depth is unchanged — every spawn in a turn is the same parent's direct
  *  child), so opening five panes in one turn sees its advisories cross
  *  threshold partway through, not stay pinned at the turn's starting counts.
- *  A rejected request does not bump anything — it never spawns. */
+ *  A rejected request does not bump anything — it never spawns.
+ *
+ *  Names claimed earlier in the same turn count as taken. `isNameTaken` only
+ *  knows about panes that already exist, so without this two blocks asking for
+ *  the same name would both pass and the second would be quietly renamed with
+ *  a suffix downstream — a clear rejection is more useful than a silent
+ *  rename. Only reachable since a turn stopped being limited to one spawn. */
 export function evaluateTurnSpawns(
   requests: ParsedSpawnRequest[],
   ctx: SpawnGateContext,
 ): SpawnGateResult[] {
   let parentChildCount = ctx.parentChildCount
   let cliPaneCount = ctx.cliPaneCount
+  const claimedThisTurn = new Set<string>()
   return requests.map((req) => {
-    const result = evaluateSpawnRequest(req, { ...ctx, parentChildCount, cliPaneCount })
+    const result = evaluateSpawnRequest(req, {
+      ...ctx,
+      parentChildCount,
+      cliPaneCount,
+      isNameTaken: (name) => claimedThisTurn.has(name) || ctx.isNameTaken(name),
+    })
     if (result.ok) {
       parentChildCount++
       cliPaneCount++
+      claimedThisTurn.add(result.name)
     }
     return result
   })
