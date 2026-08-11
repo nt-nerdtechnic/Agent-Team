@@ -235,6 +235,44 @@ async def test_open_agent_broadcasts_the_request_and_returns_the_verdict(
 
 
 @pytest.mark.asyncio
+async def test_open_agent_forwards_advisories_from_the_verdict(
+    captured: list[dict[str, Any]],
+) -> None:
+    """The window's verdict may carry volume advisories (child/CLI-pane/depth
+    counts past their threshold) alongside ok: True — cli_open_agent should
+    hand those straight back rather than swallowing them."""
+    _seed()
+
+    async def answer() -> None:
+        for _ in range(200):
+            keys = list(plan_mcp._pending_spawns)
+            if keys:
+                agent_messaging.register("new-pane", "reviewer3", "/ws/alpha")
+                plan_mcp.resolve_spawn(
+                    keys[0],
+                    {
+                        "ok": True,
+                        "pane_id": "new-pane",
+                        "name": "reviewer3",
+                        "advisories": ["此工作區已有 8 個 CLI pane（建議值 8）"],
+                    },
+                )
+                return
+            await asyncio.sleep(0.005)
+
+    task = asyncio.create_task(answer())
+    result = await plan_mcp.cli_open_agent("codex", "reviewer3", "review the PR", _ctx())
+    await task
+
+    assert result == {
+        "ok": True,
+        "name": "reviewer3",
+        "address": "alpha/reviewer3",
+        "advisories": ["此工作區已有 8 個 CLI pane（建議值 8）"],
+    }
+
+
+@pytest.mark.asyncio
 async def test_open_agent_surfaces_a_refusal_reason(captured: list[dict[str, Any]]) -> None:
     _seed()
 
