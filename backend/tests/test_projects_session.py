@@ -962,6 +962,48 @@ def test_llm_name_ignored_when_custom_name_exists(
     assert pane.auto_name == "Heuristic"
 
 
+def test_rename_locks_the_pane_against_later_auto_names(
+    store_with_stage: tuple[ProjectStore, str]
+) -> None:
+    """Clearing a name back to the default is still the user naming the pane:
+    the lock survives it, so the auto-namer never takes the pane back."""
+    store, ws = store_with_stage
+    store.record_slot_spawn(ws, stage_index=0, slot_label="Build",
+                            pane_id="pane-1", agent="claude")
+    store.rename_pane(ws, pane_id="pane-1", custom_name="User Name")
+    store.rename_pane(ws, pane_id="pane-1", custom_name="")
+
+    pane = next(p for p in store.peek(ws).panes if p.pane_id == "pane-1")
+    assert pane.custom_name == ""
+    assert pane.name_locked is True
+
+    project, changed = store.set_pane_auto_name(ws, pane_id="pane-1",
+                                                auto_name="Model title", source="llm")
+    assert changed is False
+    pane = next(p for p in ProjectStore().peek(ws).panes if p.pane_id == "pane-1")
+    assert pane.auto_name == ""
+    assert pane.name_locked is True
+
+
+def test_name_lock_adopted_from_a_record_written_before_the_field(
+    tmp_path: Path,
+) -> None:
+    """Old records carry the intent only in custom_name; adopt it on load so a
+    pane the user already named is not auto-renamed after the upgrade."""
+    ws = str(tmp_path)
+    project = ProjectStore().load_or_create(ws)
+    project.panes = [PaneRecord(pane_id="pane-1", custom_name="User Name")]
+    doc = project.to_dict()
+    for pane_doc in doc["panes"]:
+        pane_doc.pop("name_locked", None)
+    legacy = tmp_path / ".agent-team" / "project.json"
+    legacy.write_text(json.dumps(doc), encoding="utf-8")
+    os.utime(legacy, (time.time() + 100,) * 2)  # written after the kv row
+
+    pane = next(p for p in ProjectStore().load_or_create(ws).panes if p.pane_id == "pane-1")
+    assert pane.name_locked is True
+
+
 def test_auto_name_source_defaults_to_heuristic(
     store_with_stage: tuple[ProjectStore, str]
 ) -> None:

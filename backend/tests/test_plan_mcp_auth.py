@@ -144,7 +144,7 @@ def test_resolve_caller_rejects_a_bad_external_token_even_when_enabled() -> None
 @pytest.mark.asyncio
 async def test_plan_list_rejects_a_request_with_no_credential(tmp_path) -> None:
     with pytest.raises(plan_mcp.CallerUnknown):
-        await plan_mcp.plan_list(str(tmp_path), _ctx())
+        await plan_mcp.plan_list(_ctx(), workspace_path=str(tmp_path))
 
 
 @pytest.mark.asyncio
@@ -152,7 +152,7 @@ async def test_plan_list_accepts_a_host_credential(tmp_path) -> None:
     # No plans directory yet — plan_list just returns [] rather than erroring,
     # so reaching that (instead of CallerUnknown) proves the credential passed.
     result = await plan_mcp.plan_list(
-        str(tmp_path), _ctx(client="host", t=plan_mcp_auth.internal_token())
+        _ctx(client="host", t=plan_mcp_auth.internal_token()), workspace_path=str(tmp_path)
     )
     assert result == []
 

@@ -890,6 +890,60 @@ async def test_rename_pane_handler_patches_full_store(
     assert stored[0]["customName"] == "Live name"
 
 
+async def test_renamed_pane_is_never_auto_named_again(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """End-to-end through the handlers: once the user has named a pane, no
+    later auto-name reaches it — not even after they clear the name back to the
+    default label, which leaves custom_name empty and used to look never-named.
+    """
+    from agent_team_backend import app, ws_handlers
+
+    store = ProjectStore()
+    store.save(store.load_or_create(str(tmp_path)))
+    store.record_manual_pane_spawn(str(tmp_path), pane_id="p1", agent="claude")
+    store.set_ui_state(
+        str(tmp_path), spawn_history=[_entry("p1", workspacePath=str(tmp_path))]
+    )
+    monkeypatch.setattr(app, "project_store", store)
+
+    events: list[dict[str, Any]] = []
+
+    async def capture(event: dict[str, Any], exclude: Any = None) -> None:
+        events.append(event)
+
+    monkeypatch.setattr(app, "broadcast", capture)
+
+    session = app.Session(FakeWebSocket())  # type: ignore[arg-type]
+    rename = ws_handlers.lookup("project.rename_pane")
+    auto_name = ws_handlers.lookup("project.set_pane_auto_name")
+    assert rename is not None and auto_name is not None
+
+    await rename(session, "m1", "project.rename_pane", {
+        "workspace_path": str(tmp_path), "pane_id": "p1", "custom_name": "My pane",
+    })
+    # Cleared back to the default label — still the user's pane.
+    await rename(session, "m2", "project.rename_pane", {
+        "workspace_path": str(tmp_path), "pane_id": "p1", "custom_name": "",
+    })
+    events.clear()
+
+    await auto_name(session, "m3", "project.set_pane_auto_name", {
+        "workspace_path": str(tmp_path), "pane_id": "p1", "auto_name": "Fix login",
+    })
+    await auto_name(session, "m4", "project.set_pane_auto_name", {
+        "workspace_path": str(tmp_path), "pane_id": "p1",
+        "auto_name": "Fix the login redirect", "source": "llm",
+    })
+
+    # Nothing written, nothing broadcast, nothing mirrored into the history.
+    assert events == []
+    pane = next(p for p in store.peek(str(tmp_path)).panes if p.pane_id == "p1")
+    assert pane.auto_name == ""
+    assert pane.name_locked is True
+    assert "autoName" not in store.peek(str(tmp_path)).ui_spawn_history[0]
+
+
 async def test_set_pane_auto_name_handler_broadcasts_once_and_mirrors_history(
     tmp_path: Path, monkeypatch
 ) -> None:

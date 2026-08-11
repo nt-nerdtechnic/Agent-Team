@@ -4,7 +4,11 @@ Mounted on the backend's FastAPI app in the same process (later phases must
 reach in-process singletons like TerminalService, so no stdio subprocess).
 The backend has no single "current workspace" — every ws_handler receives
 ``workspace_path`` per request from the client — so the MCP tools follow the
-same convention and take ``workspace_path`` as a call-time argument.
+same convention and take ``workspace_path`` as a call-time argument. A caller
+authenticated as a pane may omit it: the tools then use that pane's own
+workspace, which is the value Navide's plan window resolves plans against, so
+a plan cannot land where the window will not look for it (see
+:func:`_caller_workspace`).
 
 Path safety reuses :func:`fs_service._resolve_safe` (the same guard the fs.*
 handlers use), plus a plans-subtree containment check on top.
@@ -56,14 +60,16 @@ server = FastMCP(
         f"{PLANS_REL_DIR}/ in a workspace, which the user reads and approves "
         "in Navide's Plan view.\n"
         "\n"
-        "workspace_path: every tool takes it as its first argument — pass the "
-        "absolute path of the project root you are working in (the workspace "
-        "the user opened, normally your current working directory or its "
-        "repository root). There is no implicit current workspace, and "
-        "pointing it at a different project reads that project's plans. If a "
-        "tool warns that no pane uses your workspace_path, Navide is not "
-        "watching that project and will not show the plan — check "
-        "cli_list_targets for the workspaces panes actually use.\n"
+        "workspace_path: omit it. Running as a Navide CLI pane, every tool "
+        "defaults to the workspace of the pane you are in — the same workspace "
+        "Navide's plan view resolves plans against, so an omitted argument can "
+        "never send a plan somewhere the user cannot open it. Pass it only to "
+        "work on a different project on purpose, as the absolute path of that "
+        "project root; a tool then warns when no pane uses it, meaning Navide "
+        "is not watching that project and will not show the plan (check "
+        "cli_list_targets for the workspaces panes actually use). An external "
+        "client, which is not a pane, has no default and must always pass "
+        "it.\n"
         "\n"
         "When to use: whenever the user asks for a plan, or a task is large "
         "enough that its steps and progress should be tracked. Create the "
@@ -397,7 +403,43 @@ def _add_note_sync(
     return dict(note)
 
 
-# ── workspace sanity check ──────────────────────────────────────────────────
+# ── workspace resolution ────────────────────────────────────────────────────
+
+_WORKSPACE_REQUIRED = (
+    "workspace_path is required for a caller with no pane identity — only a "
+    "Navide CLI pane has an own workspace to fall back to. Pass the absolute "
+    "path of the project root."
+)
+
+
+def _caller_workspace(caller: _Caller) -> str:
+    """The calling pane's own workspace, or "" for a caller that is not a pane.
+
+    Navide's plan window resolves plans against the *pane's* workspace, so
+    defaulting to it is the one value that cannot mismatch (a self-reported one
+    can, and then the window shows "Failed to load the plan document"). host and
+    external callers have no pane identity, hence no default.
+    """
+    if caller.kind != "pane":
+        return ""
+    from agent_team_backend import agent_messaging
+
+    pane = agent_messaging.get(caller.pane_id)
+    # _resolve_caller has just rejected a stale pane id, so this is set.
+    return pane.workspace_path if pane else ""
+
+
+async def _plan_workspace(caller: _Caller, workspace_path: str) -> str:
+    """The plan root a call operates on: the argument, else the caller's pane.
+
+    Both go through :func:`resolve_plan_root`, the same normalisation
+    plan_provisioning applies before writing _template.html: a plan and the
+    assets it is built from must land under one root or creation fails outright.
+    """
+    chosen = workspace_path or _caller_workspace(caller)
+    if not chosen:
+        raise FsError(_WORKSPACE_REQUIRED)
+    return await asyncio.to_thread(resolve_plan_root, chosen)
 
 
 def _norm_workspace(path: str) -> str:
@@ -457,40 +499,46 @@ def _workspace_mismatch_warning(workspace_path: str) -> str | None:
 
 
 @server.tool()
-async def plan_list(workspace_path: str, ctx: Context) -> list[dict[str, Any]]:
+async def plan_list(ctx: Context, workspace_path: str = "") -> list[dict[str, Any]]:
     """List plan documents in the workspace's .agent-team/plans/ directory.
 
     Skips provisioned assets (basename starting with "_") and files without a
     valid plan-meta island. Each entry has: rel_path (workspace-relative, e.g.
     ".agent-team/plans/foo.html" — pass it to plan_read), name, stage,
     overview, todos ({total, by_status} counts), mtime (epoch seconds).
+
+    workspace_path defaults to your own pane's workspace; pass it only to read
+    another project's plans.
     """
-    _resolve_caller(ctx)
-    workspace_path = await asyncio.to_thread(resolve_plan_root, workspace_path)
+    caller = _resolve_caller(ctx)
+    workspace_path = await _plan_workspace(caller, workspace_path)
     return await asyncio.to_thread(_list_plans_sync, workspace_path)
 
 
 @server.tool()
-async def plan_read(workspace_path: str, rel_path: str, ctx: Context) -> dict[str, Any]:
+async def plan_read(rel_path: str, ctx: Context, workspace_path: str = "") -> dict[str, Any]:
     """Read one plan document from the workspace's .agent-team/plans/ directory.
 
     rel_path is the workspace-relative path returned by plan_list (a bare
     filename is also accepted). Returns {rel_path, meta, html}: the parsed
     plan-meta dict (null if the island is missing/invalid) and the raw file
     content.
+
+    workspace_path defaults to your own pane's workspace; pass it only to read
+    another project's plan.
     """
-    _resolve_caller(ctx)
-    workspace_path = await asyncio.to_thread(resolve_plan_root, workspace_path)
+    caller = _resolve_caller(ctx)
+    workspace_path = await _plan_workspace(caller, workspace_path)
     return await asyncio.to_thread(_read_plan_sync, workspace_path, rel_path)
 
 
 @server.tool()
 async def plan_create(
-    workspace_path: str,
     name: str,
     overview: str,
     todos: list[str | dict[str, str]],
     ctx: Context,
+    workspace_path: str = "",
 ) -> dict[str, Any]:
     """Create a new plan document in the workspace's .agent-team/plans/ directory.
 
@@ -503,9 +551,12 @@ async def plan_create(
     Returns {rel_path, name, stage}, plus "warning" when workspace_path does
     not match any pane's workspace — the plan is on disk but Navide's plan
     view will not find it; re-create it under the warned-about workspace.
+
+    workspace_path defaults to your own pane's workspace, which is where the
+    user can open the plan — pass it only to create a plan in another project.
     """
-    _resolve_caller(ctx)
-    workspace_path = await asyncio.to_thread(resolve_plan_root, workspace_path)
+    caller = _resolve_caller(ctx)
+    workspace_path = await _plan_workspace(caller, workspace_path)
     result = await asyncio.to_thread(_create_plan_sync, workspace_path, name, overview, todos)
     warning = await asyncio.to_thread(_workspace_mismatch_warning, workspace_path)
     if warning:
@@ -515,7 +566,7 @@ async def plan_create(
 
 @server.tool()
 async def plan_update_stage(
-    workspace_path: str, rel_path: str, stage: str, ctx: Context
+    rel_path: str, stage: str, ctx: Context, workspace_path: str = ""
 ) -> dict[str, Any]:
     """Set a plan's lifecycle stage (island + visible stage pill).
 
@@ -523,30 +574,36 @@ async def plan_update_stage(
     abandoned. Setting "approved" also stamps approvedAt with the current UTC
     time (ISO-8601, Z suffix). Fails with a conflict error if the file changed
     on disk during the update. Returns {stage, approvedAt}.
+
+    workspace_path defaults to your own pane's workspace; pass it only to
+    update another project's plan.
     """
-    _resolve_caller(ctx)
-    workspace_path = await asyncio.to_thread(resolve_plan_root, workspace_path)
+    caller = _resolve_caller(ctx)
+    workspace_path = await _plan_workspace(caller, workspace_path)
     return await asyncio.to_thread(_update_stage_sync, workspace_path, rel_path, stage)
 
 
 @server.tool()
 async def plan_update_todo(
-    workspace_path: str, rel_path: str, todo_id: str, status: str, ctx: Context
+    rel_path: str, todo_id: str, status: str, ctx: Context, workspace_path: str = ""
 ) -> dict[str, Any]:
     """Set one todo's status (island + the todo's visible row markup).
 
     status must be one of: pending, in-progress, done, skipped. An unknown
     todo_id fails with an error listing the plan's valid todo ids. Returns the
     updated todo object.
+
+    workspace_path defaults to your own pane's workspace; pass it only to
+    update another project's plan.
     """
-    _resolve_caller(ctx)
-    workspace_path = await asyncio.to_thread(resolve_plan_root, workspace_path)
+    caller = _resolve_caller(ctx)
+    workspace_path = await _plan_workspace(caller, workspace_path)
     return await asyncio.to_thread(_update_todo_sync, workspace_path, rel_path, todo_id, status)
 
 
 @server.tool()
 async def plan_add_note(
-    workspace_path: str, rel_path: str, text: str, ctx: Context, author: str = "ai"
+    rel_path: str, text: str, ctx: Context, author: str = "ai", workspace_path: str = ""
 ) -> dict[str, Any]:
     """Append a review note to a plan's plan-meta island.
 
@@ -555,9 +612,12 @@ async def plan_add_note(
     update discipline, app-side note writes touch only the plan-meta island —
     visible note markup may lag and is re-synced by the authoring agent on its
     next edit. Returns the created note.
+
+    workspace_path defaults to your own pane's workspace; pass it only to
+    annotate another project's plan.
     """
-    _resolve_caller(ctx)
-    workspace_path = await asyncio.to_thread(resolve_plan_root, workspace_path)
+    caller = _resolve_caller(ctx)
+    workspace_path = await _plan_workspace(caller, workspace_path)
     return await asyncio.to_thread(_add_note_sync, workspace_path, rel_path, text, author)
 
 

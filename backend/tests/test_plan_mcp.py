@@ -10,11 +10,12 @@ import httpx
 import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
 
+from agent_team_backend import agent_messaging
 from agent_team_backend import app as backend_app
 from agent_team_backend.app import app
 from agent_team_backend.plan_meta import parse_plan_meta
 from agent_team_backend.plugins import wiring as plugin_wiring
-from agent_team_backend.plugins.builtin.navide_plans import plan_mcp, plan_mcp_auth
+from agent_team_backend.plugins.builtin.navide_plans import plan_mcp, plan_mcp_auth, plan_mcp_wiring
 from agent_team_backend.plugins.host import PluginHost
 
 
@@ -469,6 +470,136 @@ async def test_plan_create_does_not_warn_when_a_pane_matches(
     )
     assert not result.isError
     assert "warning" not in result.structuredContent
+
+
+# ── workspace defaults to the calling pane's own ────────────────────────────
+
+
+@pytest.fixture
+def clean_registry() -> Any:
+    agent_messaging._reset_for_test()
+    yield
+    agent_messaging._reset_for_test()
+
+
+def _pane_ctx(pane_id: str = "pa") -> SimpleNamespace:
+    """A Context carrying a live pane's credential, the way a wired CLI spawn
+    does (plan_mcp_wiring.plan_mcp_url)."""
+    params = {"pane": pane_id, "t": plan_mcp_wiring.caller_token()}
+    return SimpleNamespace(
+        request_context=SimpleNamespace(request=SimpleNamespace(query_params=params))
+    )
+
+
+async def _pane_call(tool: str, args: dict, pane_id: str = "pa") -> _ToolResult:
+    try:
+        value = await getattr(plan_mcp, tool)(**args, ctx=_pane_ctx(pane_id))
+    except Exception as err:  # noqa: BLE001 — mirrors the MCP session's isError wrapping
+        return _ToolResult(error=err)
+    return _ToolResult(value=value)
+
+
+async def test_plan_create_without_a_workspace_uses_the_callers_pane(
+    workspace: Path, clean_registry: Any
+) -> None:
+    """The pane's workspace is what Navide's plan view resolves against, so a
+    plan created without an argument is always one the user can open."""
+    agent_messaging.register("pa", "builder", str(workspace), agent_key="claude")
+
+    result = await _pane_call(
+        "plan_create", {"name": "Pane Plan", "overview": "", "todos": ["Task"]}
+    )
+
+    assert not result.isError
+    assert (workspace / result.structuredContent["rel_path"]).is_file()
+
+
+async def test_plan_list_without_a_workspace_uses_the_callers_pane(
+    workspace: Path, clean_registry: Any
+) -> None:
+    agent_messaging.register("pa", "builder", str(workspace), agent_key="claude")
+
+    result = await _pane_call("plan_list", {})
+
+    assert not result.isError
+    assert {p["name"] for p in result.structuredContent["result"]} == {"Alpha", "Beta"}
+
+
+async def test_an_explicit_workspace_still_wins_over_the_panes(
+    workspace: Path, tmp_path: Path, clean_registry: Any
+) -> None:
+    """Naming another project stays possible — the default is a fallback, not
+    a lock."""
+    other = tmp_path / "other-project"
+    (other / ".agent-team" / "plans").mkdir(parents=True)
+    agent_messaging.register("pa", "builder", str(workspace), agent_key="claude")
+
+    result = await _pane_call(
+        "plan_create",
+        {"name": "Elsewhere", "overview": "", "todos": ["Task"], "workspace_path": str(other)},
+    )
+
+    assert not result.isError
+    assert (other / result.structuredContent["rel_path"]).is_file()
+    assert not (workspace / result.structuredContent["rel_path"]).exists()
+
+
+async def test_a_pane_workspace_inside_a_repo_resolves_to_the_repo_root(
+    workspace: Path, clean_registry: Any
+) -> None:
+    """The fallback normalises like an explicit argument does, because
+    plan_provisioning writes _template.html to the resolved root — a plan
+    written anywhere else cannot be created at all.
+
+    Note the pre-existing gap this pins down rather than fixes: the read side
+    (plans.list_docs, fs.read_file) uses the workspace verbatim, so a pane
+    opened on a repo *subdirectory* still lists plans from that subdirectory
+    while every writer puts them in the repo root. Panes opened on a repo root
+    — the normal case — are unaffected.
+    """
+    (workspace / ".git").mkdir()
+    subdir = workspace / "packages" / "app"
+    subdir.mkdir(parents=True)
+    agent_messaging.register("pa", "builder", str(subdir), agent_key="claude")
+
+    result = await _pane_call(
+        "plan_create", {"name": "Sub Plan", "overview": "", "todos": ["Task"]}
+    )
+
+    assert not result.isError
+    rel_path = result.structuredContent["rel_path"]
+    assert (workspace / rel_path).is_file()
+    assert not (subdir / ".agent-team").exists()
+
+
+async def test_the_pane_default_never_warns_about_its_own_workspace(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, clean_registry: Any
+) -> None:
+    """The warning tells an agent its workspace is one Navide cannot show. The
+    pane's own workspace is by definition not that, so a default that trips it
+    would be advising the agent to move a plan that is already in the right
+    place."""
+    fake = _FakeTerminalService([_fake_session("s1", cwd=str(workspace))])
+    monkeypatch.setattr(backend_app, "get_terminals", lambda: fake)
+    agent_messaging.register("pa", "builder", str(workspace), agent_key="claude")
+
+    result = await _pane_call(
+        "plan_create", {"name": "Own Workspace", "overview": "", "todos": ["Task"]}
+    )
+
+    assert not result.isError
+    assert "warning" not in result.structuredContent
+
+
+async def test_a_caller_with_no_pane_identity_must_pass_a_workspace(
+    workspace: Path, clean_registry: Any
+) -> None:
+    """host/external callers are not panes and have no workspace to fall back
+    to — erroring beats silently picking one."""
+    result = await _call("plan_list", {})
+
+    assert result.isError
+    assert "workspace_path is required" in result.content[0].text
 
 
 async def test_mounted_endpoint_serves_mcp(workspace: Path) -> None:

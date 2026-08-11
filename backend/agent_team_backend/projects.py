@@ -118,6 +118,7 @@ class PaneRecord:
     slot_label: str = ""
     kickoff_status: str = "none"    # none / sent / failed
     custom_name: str = ""           # user-set display name; empty falls back to the default label
+    name_locked: bool = False       # the user named this pane at least once; auto-naming is off for good, even after they clear the name
     auto_name: str = ""             # auto-generated display name; set once, custom_name wins
     auto_name_source: str = ""      # "heuristic" | "llm"; an llm name may upgrade a heuristic one once
     output_log_file: str = ""       # conversation log path recorded at spawn time
@@ -198,6 +199,13 @@ class Project:
                 PaneRecord(**{k: v for k, v in p.items() if k in pane_known})
                 for p in d["panes"] if isinstance(p, dict)
             ]
+            # Records written before name_locked existed carry the intent only in
+            # custom_name. Adopt it once so a pane the user already named keeps
+            # its lock; a pane they named and then cleared is unrecoverable —
+            # that intent was never stored.
+            for pane in panes:
+                if pane.custom_name:
+                    pane.name_locked = True
         else:
             panes = []
             for i, raw_stage in enumerate(d.get("stages", [])):
@@ -568,6 +576,11 @@ class ProjectStore:
         for stub in [p for p in project.panes
                      if p is not pane and p.pane_id == pane_id and p.spawn_status == "pending"]:
             if pane_id in self._stub_name_intent: pane.custom_name = stub.custom_name
+            # The lock is one-way, so OR it in rather than transferring it: a
+            # rename that raised the stub locked the pane even when its
+            # custom_name is "" (an explicit reset), and a re-keyed record that
+            # was already locked must not be unlocked by an unrelated stub.
+            pane.name_locked = pane.name_locked or stub.name_locked
             if stub.auto_name:
                 pane.auto_name = stub.auto_name
                 # Carry the source with the name, or a heuristic stub would look
@@ -803,6 +816,12 @@ class ProjectStore:
         if pane.spawn_status == "pending":
             self._stub_name_intent.add(pane_id)
         pane.custom_name = custom_name
+        # Naming a pane — including clearing the name — is the user taking
+        # ownership of the title, so no auto-namer writes to this record again.
+        # A name already stored in auto_name keeps showing (clearing custom_name
+        # falls back to it); the lock stops NEW auto-names, it doesn't rewrite
+        # the display chain.
+        pane.name_locked = True
         # Keep the renderer-owned history mirror consistent at the source:
         # detached windows never persist it themselves and the renderer's
         # debounced snapshot can be lost on quit, so patch it here too.
@@ -828,6 +847,8 @@ class ProjectStore:
         This is the final arbiter for the cross-window race. A name is written
         at most twice, and only ever in one direction:
 
+        * a name_locked record is never touched — the user named this pane once,
+          so it stays theirs even if they later cleared the name;
         * custom_name always wins — a record carrying one is never touched;
         * an ``llm`` name may replace an existing ``heuristic`` name once, since
           the renderer titles a pane instantly from its string heuristic and
@@ -849,7 +870,7 @@ class ProjectStore:
         if not auto_name:
             return project, False
         pane = next((p for p in project.panes if p.pane_id == pane_id), None)
-        if pane is not None and pane.custom_name:
+        if pane is not None and (pane.custom_name or pane.name_locked):
             return project, False
         if pane is not None and pane.auto_name:
             # The one permitted second write: the model's answer replacing the
