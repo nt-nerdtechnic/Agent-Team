@@ -34,6 +34,33 @@ export const WHATS_NEW_CHROME = {
 
 export const WHATS_NEW: WhatsNewEntry[] = [
   {
+    version: '0.1.82',
+    title: {
+      'zh-TW': 'Agents 側邊欄分頁獨立、未註冊帳號自動歸併與 Git Unstage 容錯優化',
+      'en-US': 'Dedicated Agents sidebar tab, automatic account registration/deduplication & resilient Git unstage',
+    },
+    highlights: [
+      {
+        'zh-TW':
+          'Agents 側邊欄分頁獨立：將代理人列表獨立為標籤分頁（⌘1 Agents、⌘2 Pipeline、⌘3 Explorer、⌘4 Git、⌘5 Plans），享有全高度獨佔捲動空間。',
+        'en-US':
+          'Dedicated Agents sidebar tab: split the agents list into its own tab (⌘1 Agents, ⌘2 Pipeline, ⌘3 Explorer, ⌘4 Git, ⌘5 Plans) with full-height scrollable space.',
+      },
+      {
+        'zh-TW':
+          '帳號自動註冊與重複去重：偵測到本機外部 CLI 登入自動建立 Profile 進行管理，並對同信箱多重登入自動去重歸併，保持選單簡潔。',
+        'en-US':
+          'Automatic account registration & deduplication: automatically creates profiles for new CLI logins and folds duplicate same-email credentials into single profiles.',
+      },
+      {
+        'zh-TW':
+          'Plan MCP 鑑權與 Git Unstage 容錯：Plan MCP 服務加入 Token 安全鑑權；Git 面板取消暫存（Unstage）自動過濾過期路徑並進行容錯重試。',
+        'en-US':
+          'Plan MCP auth & resilient Git unstage: added token security for Plan MCP server and auto-filtered stale pathspec retries on Git unstage actions.',
+      },
+    ],
+  },
+  {
     version: '0.1.81',
     title: {
       'zh-TW': '外部 CLI 憑證自動監控同步、Terminal 滾動無痕狀態與 Meta Muse Code Agent 支援',
