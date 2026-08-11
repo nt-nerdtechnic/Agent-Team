@@ -59,7 +59,6 @@ export const MIGRATED_LOCALSTORAGE_KEYS: readonly string[] = [
   'agentTeam.git.autoCommit',
   'agentTeam.gitTopRatio',
   'agentTeam.search.opts',
-  'agentTeam.pipelineTopRatio',
   'agent-team.benchmark-results',
 ]
 
@@ -69,6 +68,8 @@ export const MIGRATED_LOCALSTORAGE_KEYS: readonly string[] = [
 // user-level prefs (the pane is gone; the CLI dock replaced it).
 export const PURGED_LOCALSTORAGE_KEYS: readonly string[] = [
   'agentTeam.pipelineTaskDescription',
+  // Pipeline/agents split divider — the two panes are separate sidebar tabs now.
+  'agentTeam.pipelineTopRatio',
   'ai-chat-send-mode',
   'ai-chat-auto-accept',
   'ai-chat-smart-context',

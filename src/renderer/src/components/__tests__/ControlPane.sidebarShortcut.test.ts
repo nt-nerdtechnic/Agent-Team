@@ -12,8 +12,9 @@ import ControlPane from '../ControlPane.vue'
 
 // Minimal props: keep `backend` undefined so the Explorer/Git child panes (both
 // `v-if="backend"`) never render, and seed the tab to 'explorer' so the heavy
-// pipeline block (`v-if="sidebarTab === 'pipeline'"`) stays unmounted. The only
-// DOM we assert on is the always-rendered `.tab-btn` nav.
+// pipeline block stays unmounted. The only DOM we assert on is the
+// always-rendered `.tab-btn` nav — but $t is still mocked because the shortcut
+// cases switch tabs, which does mount the pipeline/agents blocks.
 const minimalProps = {
   backendStatus: 'connected',
   backendUrl: '',
@@ -33,9 +34,9 @@ function keydown(init: KeyboardEventInit): void {
   document.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, ...init }))
 }
 
-/** Active sidebar tab read off the nav: 0=explorer, 1=pipeline, 2=git, 3=plans. */
-function activeTab(wrapper: VueWrapper): 'explorer' | 'pipeline' | 'git' | 'plans' | null {
-  const order = ['explorer', 'pipeline', 'git', 'plans'] as const
+/** Active tab off the nav: 0=agents, 1=pipeline, 2=explorer, 3=git, 4=plans. */
+function activeTab(wrapper: VueWrapper): 'agents' | 'pipeline' | 'explorer' | 'git' | 'plans' | null {
+  const order = ['agents', 'pipeline', 'explorer', 'git', 'plans'] as const
   const btns = wrapper.findAll('.sidebar-tabs .tab-btn')
   const idx = btns.findIndex((b) => b.classes().includes('active'))
   return idx >= 0 ? order[idx] : null
@@ -47,7 +48,10 @@ describe('ControlPane – Cmd+number sidebar shortcut', () => {
   beforeEach(() => {
     sessionStorage.setItem('agentTeam.sidebarTab', 'explorer')
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    wrapper = shallowMount(ControlPane as any, { props: minimalProps })
+    wrapper = shallowMount(ControlPane as any, {
+      props: minimalProps,
+      global: { mocks: { $t: (key: string) => key } }
+    })
   })
 
   afterEach(() => {
@@ -66,28 +70,36 @@ describe('ControlPane – Cmd+number sidebar shortcut', () => {
     expect(activeTab(wrapper)).toBe('explorer')
   })
 
-  it('Cmd+3 switches to the git tab', async () => {
-    keydown({ key: '3', metaKey: true })
+  it('Cmd+4 switches to the git tab', async () => {
+    keydown({ key: '4', metaKey: true })
     await wrapper.vm.$nextTick()
     expect(activeTab(wrapper)).toBe('git')
   })
 
-  it('Cmd+4 switches to the plans tab', async () => {
-    keydown({ key: '4', metaKey: true })
+  it('Cmd+5 switches to the plans tab', async () => {
+    keydown({ key: '5', metaKey: true })
     await wrapper.vm.$nextTick()
     expect(activeTab(wrapper)).toBe('plans')
   })
 
-  it('Cmd+1 switches back to the explorer tab', async () => {
-    keydown({ key: '3', metaKey: true })
+  it('Cmd+1 switches to the agents tab', async () => {
+    keydown({ key: '4', metaKey: true })
     await wrapper.vm.$nextTick()
     keydown({ key: '1', metaKey: true })
+    await wrapper.vm.$nextTick()
+    expect(activeTab(wrapper)).toBe('agents')
+  })
+
+  it('Cmd+3 switches back to the explorer tab', async () => {
+    keydown({ key: '4', metaKey: true })
+    await wrapper.vm.$nextTick()
+    keydown({ key: '3', metaKey: true })
     await wrapper.vm.$nextTick()
     expect(activeTab(wrapper)).toBe('explorer')
   })
 
-  it('out-of-range Cmd+5 is ignored', async () => {
-    keydown({ key: '5', metaKey: true })
+  it('out-of-range Cmd+6 is ignored', async () => {
+    keydown({ key: '6', metaKey: true })
     await wrapper.vm.$nextTick()
     expect(activeTab(wrapper)).toBe('explorer')
   })

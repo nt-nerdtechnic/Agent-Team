@@ -30,7 +30,7 @@ describe('ControlPane – compact agent rows with click-to-expand', () => {
   let wrapper: VueWrapper
 
   beforeEach(() => {
-    sessionStorage.setItem('agentTeam.sidebarTab', 'pipeline')
+    sessionStorage.setItem('agentTeam.sidebarTab', 'agents')
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     wrapper = shallowMount(ControlPane as any, {
       props: minimalProps,

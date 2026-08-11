@@ -2,7 +2,6 @@
 import { computed, onMounted, onUnmounted, ref, watch, defineAsyncComponent } from 'vue'
 import type { PaneArgContext } from '../agents'
 import { extractDropPaths, stabilizeDroppedPaths } from '../lib/drop'
-import { settingsGet, settingsSet } from '../lib/settings'
 import ViewPanel, { type LayoutMode } from './ViewPanel.vue'
 import RebuildIcon from './RebuildIcon.vue'
 import ExplorerPane from './ExplorerPane.vue'
@@ -442,9 +441,6 @@ watch(workspacePath, (v) => {
 }, { immediate: true })
 onUnmounted(() => {
   if (workspaceDebounce !== null) window.clearTimeout(workspaceDebounce)
-  // Guard against unmounting mid-drag leaving stale document listeners.
-  document.removeEventListener('mousemove', onPipelineDividerMove)
-  document.removeEventListener('mouseup', onPipelineDividerEnd)
 })
 
 defineExpose({ openPipelineDetail, showResumeError, selectSidebarTab })
@@ -502,22 +498,22 @@ watch(
   { immediate: true }
 )
 
-// ── Top-level tab: explorer | pipeline | git | plans ──────────────────────────
+// ── Top-level tab: agents | pipeline | explorer | git | plans ─────────────────
 const _TAB_KEY = 'agentTeam.sidebarTab'
-type SidebarTab = 'explorer' | 'pipeline' | 'git' | 'plans'
+type SidebarTab = 'agents' | 'pipeline' | 'explorer' | 'git' | 'plans'
 const sidebarTab = ref<SidebarTab>(
   (() => {
     try {
       const v = sessionStorage.getItem(_TAB_KEY) as SidebarTab | null
-      // Backward-compat: unknown / legacy values fall back to 'pipeline'.
-      return v === 'explorer' || v === 'pipeline' || v === 'git' || v === 'plans' ? v : 'pipeline'
-    } catch { return 'pipeline' }
+      // Backward-compat: unknown / legacy values fall back to the first tab.
+      return v === 'agents' || v === 'pipeline' || v === 'explorer' || v === 'git' || v === 'plans' ? v : 'agents'
+    } catch { return 'agents' }
   })()
 )
 watch(sidebarTab, (v) => { try { sessionStorage.setItem(_TAB_KEY, v) } catch { /* ignore */ } })
 
-// Cmd+1/2/3/4 → switch sidebar tab (Explorer / Pipeline / Git / Plans)
-const SIDEBAR_TABS: SidebarTab[] = ['explorer', 'pipeline', 'git', 'plans']
+// Cmd+1/2/3/4/5 → switch sidebar tab (Agents / Pipeline / Explorer / Git / Plans)
+const SIDEBAR_TABS: SidebarTab[] = ['agents', 'pipeline', 'explorer', 'git', 'plans']
 function onSidebarTabShortcut(e: KeyboardEvent): void {
   if (!e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return
   // e.key is 'Meta' on the bare Cmd keydown — parseInt → NaN, which slips past
@@ -548,14 +544,16 @@ registerCommand('workbench.action.focusSourceControl', () => selectSidebarTab('g
 // "Open Agent" button); spawn() itself no-ops when canSpawn is false.
 registerCommand('workbench.action.spawnAgent', () => spawn())
 // Ctrl+<n> → pick the Nth manual CLI type for the next spawn. Only sets
-// pickedAgent (does not touch existing panes); expands the Manual Spawn card so
-// the changed dropdown is visible. Slots past the list are no-ops.
+// pickedAgent (does not touch existing panes); switches to the Agents tab and
+// expands the Manual Spawn card so the changed dropdown is visible. Slots past
+// the list are no-ops.
 for (let i = 1; i <= 9; i++) {
   registerCommand(`controlPane.selectCliType${i}`, () => {
     const spec = manualAgentSpecs.value[i - 1]
     if (spec) {
       pickedAgent.value = spec.agentKey
       manualSpawnOpen.value = true
+      selectSidebarTab('agents')
     }
   })
 }
@@ -583,7 +581,7 @@ function backToList(): void {
 // Switch the left sidebar tab. Entering the Pipeline tab always lands on the
 // list view (never a stale detail) — openPipelineDetail is the only path into
 // the detail view, so the panel can't render blank after the opened pipeline
-// goes away. Used by the tab buttons, Cmd+1/2/3, and Cmd+Shift+E/R/G.
+// goes away. Used by the tab buttons, Cmd+1..5, and Cmd+Shift+E/R/G.
 function selectSidebarTab(tab: SidebarTab): void {
   sidebarTab.value = tab
   if (tab === 'pipeline') sidebarView.value = 'list'
@@ -705,6 +703,12 @@ function resumeAgent(): void {
 
 function showResumeError(message: string): void {
   resumeNotice.value = message
+  // The notice renders inside the spawn card body, which only mounts on the
+  // Agents tab and only while the card is open. Callers reach here from the
+  // Agent History modal and from pane reconnect, so surface both — otherwise
+  // the message lands in an unmounted subtree and the failure looks silent.
+  selectSidebarTab('agents')
+  manualSpawnOpen.value = true
 }
 
 // Stage count for the pipeline currently being viewed (may differ from active pipeline)
@@ -942,55 +946,27 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
   taskDescription.value = cur.slice(0, start) + text + cur.slice(start)
 }
 
-// ── pipeline pane: draggable split (top = controls, bottom = agents) ─────────
-const pipelineTopEl = ref<HTMLElement | null>(null)
-const pipelineTopRatio = ref<number>(
-  parseFloat(settingsGet('agentTeam.pipelineTopRatio', '')) || 0.55
-)
-watch(pipelineTopRatio, (v) => { settingsSet('agentTeam.pipelineTopRatio', String(v)) })
-
-let _plDragStartY = 0, _plDragStartTopPx = 0, _plDragContainerPx = 0
-function onPipelineDividerStart(e: MouseEvent): void {
-  const top = pipelineTopEl.value
-  if (!top) return
-  _plDragStartY = e.clientY
-  _plDragStartTopPx = top.getBoundingClientRect().height
-  _plDragContainerPx = top.parentElement?.getBoundingClientRect().height || 0
-  document.body.style.userSelect = 'none'
-  document.body.style.cursor = 'row-resize'
-  document.addEventListener('mousemove', onPipelineDividerMove)
-  document.addEventListener('mouseup', onPipelineDividerEnd)
-  e.preventDefault()
-}
-function onPipelineDividerMove(e: MouseEvent): void {
-  if (!_plDragContainerPx) return
-  const ratio = (_plDragStartTopPx + e.clientY - _plDragStartY) / _plDragContainerPx
-  pipelineTopRatio.value = Math.max(0.15, Math.min(0.85, ratio))
-}
-function onPipelineDividerEnd(): void {
-  document.body.style.userSelect = ''
-  document.body.style.cursor = ''
-  document.removeEventListener('mousemove', onPipelineDividerMove)
-  document.removeEventListener('mouseup', onPipelineDividerEnd)
-}
 </script>
 
 <template>
   <aside class="sidebar">
     <!-- ── Top-level tab nav (icon style, Cursor-like) ────────────────────── -->
     <div class="sidebar-tabs">
-      <button :class="['tab-btn', { active: sidebarTab === 'explorer' }]" title="Explorer (⌘1)" @click="selectSidebarTab('explorer')">
-        <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M1.75 1A1.75 1.75 0 0 0 0 2.75v10.5C0 14.216.784 15 1.75 15h12.5A1.75 1.75 0 0 0 16 13.25v-8.5A1.75 1.75 0 0 0 14.25 3H7.5L6.2 1.7A1.75 1.75 0 0 0 4.96 1H1.75Z"/></svg>
+      <button :class="['tab-btn', { active: sidebarTab === 'agents' }]" title="Agents (⌘1)" @click="selectSidebarTab('agents')">
+        <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M2 3.5a1.25 1.25 0 1 1 2.5 0 1.25 1.25 0 0 1-2.5 0Zm0 4.5a1.25 1.25 0 1 1 2.5 0A1.25 1.25 0 0 1 2 8Zm0 4.5a1.25 1.25 0 1 1 2.5 0 1.25 1.25 0 0 1-2.5 0ZM6.5 2.75A.75.75 0 0 1 7.25 2h7a.75.75 0 0 1 0 1.5h-7a.75.75 0 0 1-.75-.75Zm0 4.5A.75.75 0 0 1 7.25 6.5h7a.75.75 0 0 1 0 1.5h-7a.75.75 0 0 1-.75-.75Zm0 4.5a.75.75 0 0 1 .75-.75h7a.75.75 0 0 1 0 1.5h-7a.75.75 0 0 1-.75-.75Z"/></svg>
       </button>
 
       <button :class="['tab-btn', { active: sidebarTab === 'pipeline' }]" title="Pipeline (⌘2)" @click="selectSidebarTab('pipeline')">
         <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M0 1.75C0 .784.784 0 1.75 0h3.5C6.216 0 7 .784 7 1.75v3.5A1.75 1.75 0 0 1 5.25 7H4v4a1 1 0 0 0 1 1h4v-1.25C9 9.784 9.784 9 10.75 9h3.5c.966 0 1.75.784 1.75 1.75v3.5A1.75 1.75 0 0 1 14.25 16h-3.5A1.75 1.75 0 0 1 9 14.25v-.75H5A2.5 2.5 0 0 1 2.5 11V7h-.75A1.75 1.75 0 0 1 0 5.25Zm1.75-.25a.25.25 0 0 0-.25.25v3.5c0 .138.112.25.25.25h3.5a.25.25 0 0 0 .25-.25v-3.5a.25.25 0 0 0-.25-.25Zm9 9a.25.25 0 0 0-.25.25v3.5c0 .138.112.25.25.25h3.5a.25.25 0 0 0 .25-.25v-3.5a.25.25 0 0 0-.25-.25Z"/></svg>
       </button>
-      <button :class="['tab-btn', { active: sidebarTab === 'git' }]" title="Git (⌘3)" @click="selectSidebarTab('git')">
+      <button :class="['tab-btn', { active: sidebarTab === 'explorer' }]" title="Explorer (⌘3)" @click="selectSidebarTab('explorer')">
+        <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M1.75 1A1.75 1.75 0 0 0 0 2.75v10.5C0 14.216.784 15 1.75 15h12.5A1.75 1.75 0 0 0 16 13.25v-8.5A1.75 1.75 0 0 0 14.25 3H7.5L6.2 1.7A1.75 1.75 0 0 0 4.96 1H1.75Z"/></svg>
+      </button>
+      <button :class="['tab-btn', { active: sidebarTab === 'git' }]" title="Git (⌘4)" @click="selectSidebarTab('git')">
         <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M9.5 3.25a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.493 2.493 0 0 1 6 7h4a1 1 0 0 0 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25z"/></svg>
         <span v-if="gitChangesCount > 0" class="git-badge">{{ gitChangesCount > 99 ? '99+' : gitChangesCount }}</span>
       </button>
-      <button :class="['tab-btn', { active: sidebarTab === 'plans' }]" title="Plans (⌘4)" @click="selectSidebarTab('plans')">
+      <button :class="['tab-btn', { active: sidebarTab === 'plans' }]" title="Plans (⌘5)" @click="selectSidebarTab('plans')">
         <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M5 2a1 1 0 0 0-1 1H2.75A1.75 1.75 0 0 0 1 4.75v9.5c0 .966.784 1.75 1.75 1.75h10.5A1.75 1.75 0 0 0 15 14.25v-9.5A1.75 1.75 0 0 0 13.25 3H12a1 1 0 0 0-1-1H5Zm0 2h6v1a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4Zm-2.25.5H4a2.5 2.5 0 0 0 2 1h4a2.5 2.5 0 0 0 2-1h1.25a.25.25 0 0 1 .25.25v9.5a.25.25 0 0 1-.25.25H2.75a.25.25 0 0 1-.25-.25v-9.5a.25.25 0 0 1 .25-.25Z"/></svg>
       </button>
     </div>
@@ -1023,12 +999,9 @@ function onPipelineDividerEnd(): void {
       </div>
     </div>
 
-    <!-- ── Pipeline tab ──────────────────────────────────────────────────── -->
-    <div v-if="sidebarTab === 'pipeline'" class="pipeline-split">
-
-    <!-- ══ LIST VIEW: top (controls) / divider / bottom (agents) ═══════════ -->
-    <template v-if="sidebarView === 'list'">
-    <div class="part-top" ref="pipelineTopEl" :style="{ height: (pipelineTopRatio * 100) + '%' }">
+    <!-- ── Pipeline tab · list view (full-height scroll) ─────────────────── -->
+    <div v-if="sidebarTab === 'pipeline' && sidebarView === 'list'" class="pipeline-split">
+    <div class="part-top">
 
     <section class="block panel-section">
       <label class="checkbox-row">
@@ -1144,9 +1117,10 @@ function onPipelineDividerEnd(): void {
     </section>
 
     </div><!-- /part-top -->
-    <div class="part-resize" title="Drag to resize" @mousedown="onPipelineDividerStart">
-      <div class="part-resize-grip" />
-    </div>
+    </div><!-- end pipeline tab · list view -->
+
+    <!-- ── Agents tab ────────────────────────────────────────────────────── -->
+    <div v-if="sidebarTab === 'agents'" class="agents-split">
     <div class="part-bottom">
 
     <!-- ── Active agents ──────────────────────────────────────────────────── -->
@@ -1326,10 +1300,11 @@ function onPipelineDividerEnd(): void {
     </section>
 
     </div><!-- /part-bottom -->
-    </template><!-- /sidebarView === 'list' -->
+    </div><!-- end agents tab -->
 
-    <!-- ══ DETAIL VIEW: no split, full-height scroll ══════════════════════════ -->
-    <div v-else class="pipeline-detail-scroll">
+    <!-- ── Pipeline tab · detail view (no split, full-height scroll) ──────── -->
+    <div v-if="sidebarTab === 'pipeline' && sidebarView === 'pipeline'" class="pipeline-split">
+    <div class="pipeline-detail-scroll">
       <section class="block pipeline-detail-header">
         <div class="pipeline-detail-nav">
           <button class="ghost back-btn" @click="backToList">← Back</button>
@@ -1478,8 +1453,7 @@ function onPipelineDividerEnd(): void {
         </template>
       </section>
     </div><!-- /pipeline-detail-scroll -->
-
-    </div><!-- end sidebarTab === 'pipeline' / pipeline-split -->
+    </div><!-- end pipeline tab · detail view -->
 
     <!-- ── Plans tab (embedded PlanPane, fits the narrow sidebar) ── -->
     <PlanPane
@@ -2719,9 +2693,10 @@ button.icon-btn.muted:hover {
   border-top: 1px solid var(--border-muted);
 }
 
-/* ── Shared split-scroll layout (pipeline + explorer) ───────────────────── */
+/* ── Shared split-scroll layout (pipeline + explorer + agents) ──────────── */
 .pane-split,
-.pipeline-split {
+.pipeline-split,
+.agents-split {
   flex: 1;
   min-height: 0;
   display: flex;
@@ -2737,6 +2712,7 @@ button.icon-btn.muted:hover {
 }
 .pane-split .part-top,
 .pipeline-split .part-top {
+  flex: 1;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -2744,8 +2720,13 @@ button.icon-btn.muted:hover {
   padding: 0 14px 4px;
   min-height: 0;
 }
+/* Pipeline list is the whole scroll area now (nothing sits below it), so it
+   needs the same bottom breathing room the agent pane has. */
+.pipeline-split .part-top {
+  padding-bottom: 14px;
+}
 .pane-split .part-bottom,
-.pipeline-split .part-bottom {
+.agents-split .part-bottom {
   flex: 1;
   overflow-y: auto;
   display: flex;
@@ -2754,8 +2735,7 @@ button.icon-btn.muted:hover {
   padding: 0 14px 14px;
   min-height: 0;
 }
-.pane-split .part-resize,
-.pipeline-split .part-resize {
+.pane-split .part-resize {
   flex-shrink: 0;
   height: 11px;
   cursor: row-resize;
@@ -2766,12 +2746,10 @@ button.icon-btn.muted:hover {
   border-bottom: 1px solid var(--border-muted);
   transition: background 0.1s;
 }
-.pane-split .part-resize:hover,
-.pipeline-split .part-resize:hover {
+.pane-split .part-resize:hover {
   background: var(--bg-elevated);
 }
-.pane-split .part-resize-grip,
-.pipeline-split .part-resize-grip {
+.pane-split .part-resize-grip {
   margin: 0 auto;
   width: 44px;
   height: 3px;
@@ -2780,9 +2758,7 @@ button.icon-btn.muted:hover {
   transition: height 0.1s, width 0.1s, background 0.1s;
 }
 .pane-split .part-resize:hover .part-resize-grip,
-.pipeline-split .part-resize:hover .part-resize-grip,
-.pane-split .part-resize:active .part-resize-grip,
-.pipeline-split .part-resize:active .part-resize-grip {
+.pane-split .part-resize:active .part-resize-grip {
   height: 4px;
   width: 60px;
   background: var(--accent-focus);

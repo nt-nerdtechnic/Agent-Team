@@ -48,7 +48,7 @@ describe('ControlPane – reorder-pane drag & drop on the agent list', () => {
   let wrapper: VueWrapper
 
   beforeEach(() => {
-    sessionStorage.setItem('agentTeam.sidebarTab', 'pipeline')
+    sessionStorage.setItem('agentTeam.sidebarTab', 'agents')
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     wrapper = shallowMount(ControlPane as any, {
       props: minimalProps,

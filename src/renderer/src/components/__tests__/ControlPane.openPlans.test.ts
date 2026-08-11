@@ -53,15 +53,15 @@ describe('ControlPane – Plans sidebar tab', () => {
 
   it('renders a Plans tab button in the sidebar icon rail', () => {
     const btns = wrapper.findAll('.sidebar-tabs .tab-btn')
-    // explorer, pipeline, git, plans
-    expect(btns).toHaveLength(4)
-    expect(btns[3].attributes('title')).toContain('Plans')
+    // agents, pipeline, explorer, git, plans
+    expect(btns).toHaveLength(5)
+    expect(btns[4].attributes('title')).toContain('Plans')
   })
 
   it('mounts PlanPane in the sidebar when the Plans tab is picked', async () => {
     // Pipeline tab: no PlanPane yet.
     expect(wrapper.find('.plans-split').exists()).toBe(false)
-    await wrapper.findAll('.sidebar-tabs .tab-btn')[3].trigger('click')
+    await wrapper.findAll('.sidebar-tabs .tab-btn')[4].trigger('click')
     await wrapper.vm.$nextTick()
     // Plans now live in-sidebar; the mounted PlanPane is the observable effect
     // (the tab no longer emits update:sidebar-tab — App.vue does not consume it).
