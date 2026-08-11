@@ -28,7 +28,6 @@ from .cli_vendors.registry import vendor as cli_vendor
 from .ipc import make_error, make_event, make_response
 from .log_readers.claude import ClaudeLogReader, first_user_prompts
 from .credential_vault import DEFAULT_SLOT_ID, vault_to_thread
-from .credential_watcher import unregistered_live_accounts
 from .mcp_settings import (
     MCPSettingsConflictError,
     MCPSettingsError,
@@ -1383,28 +1382,63 @@ def _profile_error(err: Exception) -> str:
     return str(err.args[0]) if err.args else str(err)
 
 
-def _profile_identities() -> dict:
-    """{agentKey: {slotId: {email, signedIn}}} for every account row the UI
-    shows. The active slot's identity comes from the live credential state
-    (slot storage lags live until the next capture/harvest); ``__default__``
-    keys the built-in Default row. Blocking reads (files, plus the Keychain
-    for claude secrets) — run in a thread."""
+def _profile_account_view() -> dict:
+    """``{"identities": {agentKey: {slotId: {email, signedIn}}},
+    "duplicates": {agentKey: {slotId: {email, slotIds}}}}`` for every account
+    row the UI shows. ``__default__`` keys the built-in Default row.
+
+    ``identities`` is what a row displays: the active slot's identity comes
+    from the live credential state (slot storage lags live until the next
+    capture/harvest).
+
+    ``duplicates`` answers a different question — which rows hold the SAME
+    account — and so compares slot snapshots only, the active row included:
+    the live state belongs to exactly one account, and reading it for the
+    active row would make that row duplicate whichever row actually stores
+    the account. Emails match case-insensitively; a snapshot carrying no email
+    (kimi, an empty ``__default__``, a claude login with no ``oauthAccount``)
+    names no account and takes no part. Every slot of a duplicated account is
+    listed, its own included, ``__default__`` among them — that row stores a
+    snapshot and can be deleted like any other.
+
+    Blocking reads (files, plus the Keychain for claude secrets) — run in a
+    thread."""
     from . import app
 
     doc = app.cli_profiles_store.list()
-    out: dict[str, dict] = {}
+    identities: dict[str, dict] = {}
+    duplicates: dict[str, dict] = {}
     for agent_key in PROFILE_AGENT_KEYS:
         active = doc["defaults"].get(agent_key) or DEFAULT_SLOT_ID
         slot_ids = [DEFAULT_SLOT_ID] + [
             p["id"] for p in doc["profiles"] if p.get("agentKey") == agent_key
         ]
-        out[agent_key] = {
-            sid: app.credential_vault.identity(
-                agent_key, None if sid == active else sid
+        rows: dict[str, dict] = {}
+        groups: dict[str, list[str]] = {}
+        labels: dict[str, str] = {}
+        for sid in slot_ids:
+            snapshot = app.credential_vault.identity(agent_key, sid)
+            rows[sid] = (
+                app.credential_vault.identity(agent_key, None)
+                if sid == active
+                else snapshot
             )
-            for sid in slot_ids
+            email = snapshot.get("email")
+            if not isinstance(email, str) or not email:
+                continue
+            key = email.casefold()
+            groups.setdefault(key, []).append(sid)
+            labels.setdefault(key, email)
+        identities[agent_key] = rows
+        dupes = {
+            sid: {"email": labels[key], "slotIds": ids}
+            for key, ids in groups.items()
+            if len(ids) > 1
+            for sid in ids
         }
-    return out
+        if dupes:
+            duplicates[agent_key] = dupes
+    return {"identities": identities, "duplicates": duplicates}
 
 
 def _profile_pin_for_spawn(agent_key: str, payload_profile_id: object) -> str:
@@ -1436,13 +1470,14 @@ async def _broadcast_profiles_changed(
     from . import app
 
     doc = app.cli_profiles_store.list()
+    view = await asyncio.to_thread(_profile_account_view)
     payload = {
         "profiles": doc["profiles"],
         "defaults": doc["defaults"],
-        "identities": await asyncio.to_thread(_profile_identities),
-        # Live logins that match no registered slot — the user signed in
-        # outside Navide with an account it has never seen.
-        "unregistered": await asyncio.to_thread(unregistered_live_accounts),
+        "identities": view["identities"],
+        # Account rows storing the same login as another row of the same agent
+        # — the Accounts pane flags them so the user can delete the spare.
+        "duplicates": view["duplicates"],
         "reason": reason,
     }
     if harvested_profile_ids:
@@ -1464,6 +1499,7 @@ async def cli_profiles_list(session: "Session", msg_id: str, msg_type: str, payl
     from . import app
 
     doc = app.cli_profiles_store.list()
+    view = await asyncio.to_thread(_profile_account_view)
     await session.send_json(
         make_response(
             msg_id,
@@ -1471,8 +1507,8 @@ async def cli_profiles_list(session: "Session", msg_id: str, msg_type: str, payl
             {
                 "profiles": doc["profiles"],
                 "defaults": doc["defaults"],
-                "identities": await asyncio.to_thread(_profile_identities),
-                "unregistered": await asyncio.to_thread(unregistered_live_accounts),
+                "identities": view["identities"],
+                "duplicates": view["duplicates"],
                 "supported_agents": list(PROFILE_AGENT_KEYS),
             },
         )

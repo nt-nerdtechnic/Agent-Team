@@ -152,8 +152,8 @@ def _adopt_unregistered_live_account(agent_key: str, email: str) -> str | None:
     trap: ``restore`` on it clears the live credentials. So a harvest that does
     not happen takes the profile back down with it rather than leave the trap
     behind. Every failure is contained here — the caller still broadcasts, and
-    the account then shows up as an unregistered live login instead. Blocking;
-    call inside ``switch_lock(agent_key)``."""
+    the ledger keeps naming whichever profile it named before. Blocking; call
+    inside ``switch_lock(agent_key)``."""
     from . import app
 
     store = app.cli_profiles_store
@@ -222,23 +222,6 @@ def align_default_to_live(agent_key: str) -> str | None:
         agent_key, matched,
     )
     return matched
-
-
-def unregistered_live_accounts() -> dict[str, dict]:
-    """``{agentKey: {"email", "signedIn"}}`` for every agent whose live login
-    matches no registered slot — the user signed into an account Navide has
-    never seen. Absent keys mean "the live login is accounted for" (or cannot
-    be identified, which is not evidence of anything). Blocking."""
-    out: dict[str, dict] = {}
-    for agent_key in SUPPORTED_AGENT_KEYS:
-        try:
-            email, _active, matched = _match_live_slot(agent_key)
-        except Exception as err:  # noqa: BLE001 — display-only, never fatal
-            log.warning("live %s identity lookup failed: %s", agent_key, err)
-            continue
-        if email is not None and matched is None:
-            out[agent_key] = {"email": email, "signedIn": True}
-    return out
 
 
 async def reconcile_live_account(agent_key: str) -> None:

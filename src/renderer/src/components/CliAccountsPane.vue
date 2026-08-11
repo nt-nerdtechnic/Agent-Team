@@ -53,6 +53,33 @@ function rowName(agentKey: string, profile: CliProfile | null): string {
   return profile ? t('settings.accounts.cli.not-signed-in') : t('cli-account.default')
 }
 
+// ── Duplicate accounts (two rows storing the same login) ─────────────────────
+// Which rows duplicate which comes from the backend: the active row's identity
+// is the LIVE account rather than its own snapshot, so comparing the identities
+// the cards display would both invent pairs and miss real ones.
+function rowDuplicate(agentKey: string, profileId: string | null) {
+  return props.api.duplicateFor(agentKey, profileId)
+}
+
+// Duplicate cards all display the same email, so the warning names the rows by
+// their internal label — the only thing that tells them apart.
+function rowLabel(profile: CliProfile | null): string {
+  return profile?.name ?? t('cli-account.default')
+}
+
+/** The other rows holding this row's account, labeled and comma-joined. */
+function duplicateOthers(agentKey: string, profileId: string | null): string {
+  const dup = rowDuplicate(agentKey, profileId)
+  if (!dup) return ''
+  const self = profileId ?? '__default__'
+  return dup.slotIds
+    .filter((id) => id !== self)
+    .map((id) =>
+      id === '__default__' ? t('cli-account.default') : (props.api.findProfile(id)?.name ?? id),
+    )
+    .join(', ')
+}
+
 // Sign-in spawns a login pane inside the current workspace; without one the
 // flow dead-ends in the app shell. Block early — BEFORE creating a profile
 // row — so a click can't leave an orphan "Not signed in" row behind.
@@ -376,6 +403,26 @@ onMounted(() => refreshUsage())
                 : $t('settings.accounts.cli.not-signed-in')
             }}</span>
 
+            <!-- Another card stores this same account; the user picks which to
+                 delete (Delete below), we only point it out. -->
+            <template
+              v-for="d in [rowDuplicate(spec.agentKey, p?.id ?? null)]"
+              :key="'dup'"
+            >
+              <div v-if="d" class="cli-card-dup">
+                <span class="cli-card-dup-flag">{{
+                  $t('settings.accounts.cli.duplicate-flag')
+                }}</span>
+                <span>{{
+                  $t('settings.accounts.cli.duplicate-hint', {
+                    self: rowLabel(p),
+                    others: duplicateOthers(spec.agentKey, p?.id ?? null),
+                    email: d.email,
+                  })
+                }}</span>
+              </div>
+            </template>
+
             <!-- Quota area (single-element v-for = local display-model alias). -->
             <template
               v-for="u in [cardUsage(spec.agentKey, p?.id ?? null)]"
@@ -558,6 +605,25 @@ onMounted(() => refreshUsage())
 }
 .cli-card-id.dim { font-weight: 400; color: var(--text-muted); }
 .cli-card-meta { font-size: 10.5px; color: var(--text-secondary); }
+.cli-card-dup {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 3px 6px;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--attention-fg);
+}
+.cli-card-dup-flag {
+  flex: none;
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 999px;
+  color: var(--attention-fg);
+  background: var(--attention-subtle, var(--bg-muted));
+  border: 1px solid var(--attention-muted, var(--border-default));
+}
 
 .cli-card-big {
   font-size: 20px;

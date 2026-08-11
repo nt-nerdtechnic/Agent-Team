@@ -40,14 +40,6 @@ const switchProfiles = computed(() => props.cliProfiles.profilesForAgent(props.a
 const activeProfileId = computed(() => props.cliProfiles.defaultProfileId(props.agentKey) ?? '')
 const critSwitch = computed(() => tier.value === 'crit')
 
-// A live CLI login that does not match any registered profile slot (e.g. the
-// user ran `/login` in an external terminal). It cannot be switched to — it is
-// already the active account — so it renders as an informational row, not a
-// button. The account list needs to render for this alone even when the agent
-// has no profiles yet.
-const unregisteredAccount = computed(() => props.cliProfiles.unregisteredFor(props.agentKey))
-const showAcctList = computed(() => canSwitch.value || unregisteredAccount.value !== null)
-
 const open = ref(false)
 const popStyle = ref<{ top: string; left: string }>({ top: '0px', left: '0px' })
 const badgeRef = ref<HTMLElement | null>(null)
@@ -339,23 +331,8 @@ function acctTitle(profileId: string | null): string {
         <div v-if="canSwitch" class="usage-pop-switch-title" :class="{ crit: critSwitch }">
           {{ critSwitch ? $t('usage.switch-low') : $t('usage.switch-title') }}
         </div>
-        <div v-if="showAcctList" class="usage-acct-list" role="listbox">
-          <div
-            v-if="unregisteredAccount"
-            class="usage-acct usage-acct-unregistered"
-            role="option"
-            aria-disabled="true"
-          >
-            <span class="usage-acct-av default">{{
-              avatarInitial(unregisteredAccount.email ?? $t('usage.switch-unregistered-unknown'))
-            }}</span>
-            <span class="usage-acct-name">{{
-              unregisteredAccount.email ?? $t('usage.switch-unregistered-unknown')
-            }}</span>
-            <span class="usage-acct-flag">{{ $t('usage.switch-unregistered-flag') }}</span>
-          </div>
+        <div v-if="canSwitch" class="usage-acct-list" role="listbox">
           <button
-            v-if="canSwitch"
             class="usage-acct"
             role="option"
             :class="{ active: activeProfileId === '' }"
@@ -663,23 +640,6 @@ function acctTitle(profileId: string | null): string {
   opacity: 0.6;
   text-decoration: underline dotted;
   text-underline-offset: 2px;
-}
-/* Informational row, not a switch target: no pointer cursor, no hover fill. */
-.usage-acct-unregistered {
-  cursor: default;
-}
-.usage-acct-unregistered:hover {
-  background: transparent;
-}
-.usage-acct-flag {
-  flex-shrink: 0;
-  font-size: 9px;
-  font-weight: 600;
-  padding: 1px 5px;
-  border-radius: 999px;
-  color: var(--attention-fg);
-  background: var(--attention-subtle);
-  border: 1px solid var(--attention-muted);
 }
 .usage-acct-manage {
   display: flex;

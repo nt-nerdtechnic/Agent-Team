@@ -11,6 +11,7 @@ import {
   type CliAccountSwitchHandler,
   type CliProfile,
   type CliProfileDefaults,
+  type CliProfileDuplicates,
   type CliProfileIdentities,
 } from '../../composables/useCliProfiles'
 import { usageVersion, type UsageSnapshot } from '../../composables/useUsage'
@@ -52,6 +53,7 @@ interface ApiOptions {
   profiles?: CliProfile[]
   defaults?: CliProfileDefaults
   identities?: CliProfileIdentities
+  duplicates?: CliProfileDuplicates
   supported?: string[]
   error?: string
 }
@@ -62,6 +64,7 @@ function makeApi(opts: ApiOptions = {}) {
   const profiles = ref<CliProfile[]>(opts.profiles ?? [])
   const defaults = ref<CliProfileDefaults>(opts.defaults ?? {})
   const identities = ref<CliProfileIdentities>(opts.identities ?? {})
+  const duplicates = ref<CliProfileDuplicates>(opts.duplicates ?? {})
   const supportedAgents = ref<string[]>(opts.supported ?? SUPPORTED)
   const error = ref<string>(opts.error ?? '')
 
@@ -69,6 +72,7 @@ function makeApi(opts: ApiOptions = {}) {
     profiles,
     defaults,
     identities,
+    duplicates,
     supportedAgents,
     loaded: ref(true),
     loading: ref(false),
@@ -89,6 +93,8 @@ function makeApi(opts: ApiOptions = {}) {
       id ? profiles.value.find((p) => p.id === id) : undefined,
     identityFor: (agentKey: string, profileId: string | null) =>
       identities.value[agentKey]?.[profileId ?? '__default__'] ?? null,
+    duplicateFor: (agentKey: string, profileId: string | null) =>
+      duplicates.value[agentKey]?.[profileId ?? '__default__'] ?? null,
   }
   return api as unknown as ReturnType<typeof useCliProfiles>
 }
@@ -185,6 +191,54 @@ describe('CliAccountsPane', () => {
       .map((n) => n.text())
     // Row 0 is the built-in Default (no identity -> "Default" label).
     expect(names).toEqual(['Default', 'me@example.com', 'Account 3', 'Not signed in'])
+  })
+
+  // ── duplicate accounts ─────────────────────────────────────────────────────
+
+  it('warns on every card of a duplicate group, naming this row and the others', () => {
+    const api = makeApi({
+      profiles: [profile('p1', 'claude', 'Account 3'), profile('p2', 'claude', 'Account 5')],
+      identities: {
+        claude: {
+          p1: { email: 'same@example.com', signedIn: true },
+          p2: { email: 'same@example.com', signedIn: true },
+        },
+      },
+      duplicates: {
+        claude: {
+          p1: { email: 'same@example.com', slotIds: ['p1', 'p2'] },
+          p2: { email: 'same@example.com', slotIds: ['p1', 'p2'] },
+        },
+      },
+    })
+    const w = mountPane(api)
+
+    const cards = section(w, 0).findAll('.cli-card')
+    // The built-in Default is not in the group.
+    expect(cards[0].find('.cli-card-dup').exists()).toBe(false)
+    const first = cards[1].get('.cli-card-dup').text()
+    expect(first).toContain('Duplicate')
+    // Both cards display the same email, so the warning names the rows.
+    expect(first).toContain('"Account 3" and Account 5')
+    expect(first).toContain('same@example.com')
+    expect(cards[2].get('.cli-card-dup').text()).toContain('"Account 5" and Account 3')
+    // Deleting stays the user's call — the existing Delete button, nothing new.
+    expect(buttonByText(cards[1], 'Delete')).toBeDefined()
+  })
+
+  it('shows no duplicate warning when every card holds its own account', () => {
+    const api = makeApi({
+      profiles: [profile('p1', 'claude', 'Account 3'), profile('p2', 'claude', 'Account 5')],
+      identities: {
+        claude: {
+          p1: { email: 'one@example.com', signedIn: true },
+          p2: { email: 'two@example.com', signedIn: true },
+        },
+      },
+    })
+    const w = mountPane(api)
+
+    expect(section(w, 0).findAll('.cli-card-dup')).toHaveLength(0)
   })
 
   // ── addAccount ─────────────────────────────────────────────────────────────

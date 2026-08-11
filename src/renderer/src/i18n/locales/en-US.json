@@ -973,6 +973,8 @@
         "delete": "Delete",
         "cancel": "Cancel",
         "delete-confirm": "Delete this account? Its saved sign-in will also be removed.",
+        "duplicate-flag": "Duplicate",
+        "duplicate-hint": "\"{self}\" and {others} store the same account ({email}). Delete the spare one.",
         "unsupported": "This agent does not support multiple accounts.",
         "active-error": "This account is currently active and cannot be deleted. Switch to another account first.",
         "login-in-progress-error": "A sign-in for this account is still running. Finish or close its login pane first."
@@ -1909,8 +1911,6 @@
     "switch-default": "Default (built-in)",
     "switch-low": "Quota low — switch account",
     "switch-manage": "Add / manage accounts…",
-    "switch-unregistered-flag": "Unregistered",
-    "switch-unregistered-unknown": "Signed in, identity unknown",
     "settings-title": "CLI quota badge",
     "settings-enabled": "Show remaining quota in CLI pane headers",
     "settings-refresh": "Refresh interval",

@@ -973,6 +973,8 @@
         "delete": "刪除",
         "cancel": "取消",
         "delete-confirm": "確定刪除此帳號？其儲存的登入憑證也會一併移除。",
+        "duplicate-flag": "重複",
+        "duplicate-hint": "「{self}」與 {others} 存的是同一個帳號（{email}），建議刪除多餘的那一個。",
         "unsupported": "此 agent 不支援多帳號。",
         "active-error": "此帳號目前使用中，請先切換到其他帳號再刪除。",
         "login-in-progress-error": "此帳號的登入程序仍在進行中，請先完成或關閉其登入 pane。"
@@ -1909,8 +1911,6 @@
     "switch-default": "Default（內建）",
     "switch-low": "額度不足，可切換帳號",
     "switch-manage": "新增／管理帳號…",
-    "switch-unregistered-flag": "未登記",
-    "switch-unregistered-unknown": "已登入但無法辨識身分",
     "settings-title": "CLI 額度徽章",
     "settings-enabled": "在 CLI pane 標題列顯示剩餘額度",
     "settings-refresh": "刷新間隔",

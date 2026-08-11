@@ -24,21 +24,8 @@ from agent_team_backend import app, ws_handlers
 from agent_team_backend.credential_watcher import (
     CredentialWatcher,
     reconcile_live_account,
-    unregistered_live_accounts,
 )
 from agent_team_backend.profiles_store import CliProfilesStore
-
-
-class FakeWebSocket:
-    def __init__(self) -> None:
-        self.sent: list[dict[str, Any]] = []
-
-    async def send_json(self, payload: dict[str, Any]) -> None:
-        self.sent.append(payload)
-
-
-def _session() -> app.Session:
-    return app.Session(FakeWebSocket())  # type: ignore[arg-type]
 
 
 def _codex_auth(email: str) -> str:
@@ -228,7 +215,6 @@ async def test_reconcile_moves_default_to_the_matching_slot(
     # forced=True makes every window restart its panes of this agent — wrong
     # here, since no credential moved under them.
     assert payload["forced"] is False
-    assert payload["unregistered"] == {}
 
 
 async def test_reconcile_registers_an_unknown_account(
@@ -254,12 +240,9 @@ async def test_reconcile_registers_an_unknown_account(
     assert app.credential_vault.read_slot("codex", new_id).secret == _codex_auth(
         "stranger@example.com"
     )
-    # Now that it is registered, it is no longer an unregistered login.
-    assert unregistered_live_accounts() == {}
     assert ws_handlers._switch_history.get("codex", []) == []
     payload = [e for e in events if e["type"] == "cli_profiles.changed"][0]["payload"]
     assert payload["forced"] is False
-    assert payload["unregistered"] == {}
     assert [p["id"] for p in payload["profiles"]] == [work["id"], new_id]
 
 
@@ -271,7 +254,7 @@ async def test_registration_failure_leaves_no_credential_less_profile(
 ) -> None:
     """A profile whose slot stayed empty would log the user out the moment it
     is restored, so a failed snapshot takes the profile back down and the
-    account falls back to being reported as an unregistered live login."""
+    ledger keeps naming the profile it named before."""
     work = store.create(agent_key="codex", name="Work")
     store.set_default("codex", work["id"])
     _write_slot("codex", work["id"], _codex_auth("work@example.com"))
@@ -282,13 +265,7 @@ async def test_registration_failure_leaves_no_credential_less_profile(
 
     assert [p["id"] for p in store.list()["profiles"]] == [work["id"]]
     assert store.list()["defaults"]["codex"] == work["id"]
-    assert unregistered_live_accounts() == {
-        "codex": {"email": "stranger@example.com", "signedIn": True}
-    }
-    payload = [e for e in events if e["type"] == "cli_profiles.changed"][0]["payload"]
-    assert payload["unregistered"] == {
-        "codex": {"email": "stranger@example.com", "signedIn": True}
-    }
+    assert [e["type"] for e in events] == ["cli_profiles.changed"]
 
 
 async def test_an_unidentifiable_live_login_registers_nothing(
@@ -313,30 +290,19 @@ async def test_an_unidentifiable_live_login_registers_nothing(
     assert store.list()["defaults"]["kimi"] == parked["id"]
 
 
-async def test_unregistered_is_empty_for_an_unmanaged_login(
-    store: CliProfilesStore, codex_live
+async def test_an_unmanaged_login_registers_no_profile(
+    store: CliProfilesStore,
+    events: list[dict[str, Any]],
+    codex_live,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The common install: no profiles at all, so the live login IS the
-    built-in Default account even though that slot holds no snapshot."""
+    built-in Default account even though that slot holds no snapshot.
+    Registering a profile for it would fire on every untouched install."""
     codex_live("solo@example.com")
+    _forbid_credential_writes(monkeypatch)
 
-    assert unregistered_live_accounts() == {}
+    await reconcile_live_account("codex")
 
-
-async def test_cli_profiles_list_carries_unregistered(
-    store: CliProfilesStore, events: list[dict[str, Any]], codex_live
-) -> None:
-    work = store.create(agent_key="codex", name="Work")
-    store.set_default("codex", work["id"])
-    _write_slot("codex", work["id"], _codex_auth("work@example.com"))
-    codex_live("stranger@example.com")
-    session = _session()
-
-    await app.handle_message(session, {
-        "id": "l1", "type": "cli_profiles.list", "payload": {},
-    })
-
-    payload = session.websocket.sent[0]["payload"]  # type: ignore[attr-defined]
-    assert payload["unregistered"] == {
-        "codex": {"email": "stranger@example.com", "signedIn": True}
-    }
+    assert store.list()["profiles"] == []
+    assert store.list()["defaults"].get("codex") is None

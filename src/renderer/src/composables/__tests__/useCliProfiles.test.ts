@@ -201,37 +201,52 @@ describe('useCliProfiles', () => {
     scope.stop()
   })
 
-  it('loads unregistered accounts on connect and exposes them via unregisteredFor', async () => {
+  it('loads duplicate account groups on connect and exposes them via duplicateFor', async () => {
     const mock = createMockBackend('connected')
     mock.setResponse('cli_profiles.list', {
-      profiles: [],
+      profiles: [profile('p1', 'claude', 'Account 3'), profile('p2', 'claude', 'Account 5')],
       defaults: {},
       supported_agents: SUPPORTED,
-      unregistered: { claude: { email: 'outside@example.com', signedIn: true } },
+      duplicates: {
+        claude: {
+          p1: { email: 'same@example.com', slotIds: ['p1', 'p2'] },
+          p2: { email: 'same@example.com', slotIds: ['p1', 'p2'] },
+        },
+      },
     })
     const { result, scope } = withScope(() => useCliProfiles(mock.backend))
     await flush()
 
-    expect(result.unregisteredFor('claude')).toEqual({
-      email: 'outside@example.com',
-      signedIn: true,
+    expect(result.duplicateFor('claude', 'p1')).toEqual({
+      email: 'same@example.com',
+      slotIds: ['p1', 'p2'],
     })
-    expect(result.unregisteredFor('codex')).toBeNull()
+    expect(result.duplicateFor('claude', null)).toBeNull()
+    expect(result.duplicateFor('codex', 'p1')).toBeNull()
     scope.stop()
   })
 
-  it('syncs the unregistered cache from a cli_profiles.changed broadcast', async () => {
+  it('syncs the duplicate cache from a cli_profiles.changed broadcast, clears included', async () => {
     const mock = createMockBackend('connected')
     mock.setResponse('cli_profiles.list', { profiles: [], defaults: {}, supported_agents: SUPPORTED })
     const { result, scope } = withScope(() => useCliProfiles(mock.backend))
     await flush()
-    expect(result.unregisteredFor('claude')).toBeNull()
+    expect(result.duplicateFor('claude', '__default__')).toBeNull()
 
     mock.emit('cli_profiles.changed', {
-      unregistered: { claude: { email: null, signedIn: true } },
+      duplicates: {
+        claude: { __default__: { email: 'dup@example.com', slotIds: ['__default__', 'p1'] } },
+      },
       reason: 'poll',
     })
-    expect(result.unregisteredFor('claude')).toEqual({ email: null, signedIn: true })
+    expect(result.duplicateFor('claude', null)).toEqual({
+      email: 'dup@example.com',
+      slotIds: ['__default__', 'p1'],
+    })
+
+    // The spare row was deleted: an empty map must clear the warning.
+    mock.emit('cli_profiles.changed', { duplicates: {}, reason: 'delete' })
+    expect(result.duplicateFor('claude', null)).toBeNull()
     scope.stop()
   })
 })

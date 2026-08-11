@@ -351,6 +351,77 @@ async def test_cli_profiles_changed_broadcast_includes_identities(
     assert events[0]["payload"]["identities"]["claude"]["__default__"] == {
         "email": None, "signedIn": False,
     }
+    assert events[0]["payload"]["duplicates"] == {}
+
+
+# ---- duplicate accounts (two rows storing the same login) ----
+
+
+def _codex_auth(email: str) -> str:
+    """A codex auth.json whose id_token JWT payload carries ``email`` — the
+    shape ``cli_vendors.codex.identity_from_secret`` reads."""
+    import base64
+    import json
+
+    body = base64.urlsafe_b64encode(
+        json.dumps({"email": email}).encode()
+    ).decode().rstrip("=")
+    return json.dumps({"tokens": {"access_token": "tok", "id_token": f"h.{body}.s"}})
+
+
+def _write_slot(agent_key: str, slot_id: str, filename: str, secret: str) -> None:
+    slot = app.credential_vault.slot_dir(agent_key, slot_id)
+    slot.mkdir(parents=True, exist_ok=True)
+    (slot / filename).write_text(secret, encoding="utf-8")
+
+
+async def _list_duplicates() -> dict[str, Any]:
+    session = _session()
+    await app.handle_message(session, {
+        "id": "l1", "type": "cli_profiles.list", "payload": {},
+    })
+    return session.websocket.sent[0]["payload"]["duplicates"]  # type: ignore[attr-defined]
+
+
+async def test_cli_profiles_list_flags_duplicate_accounts(
+    store: CliProfilesStore,
+) -> None:
+    """Two profiles whose snapshots hold the same login are both flagged, with
+    the whole group on each so the pane can name the spare. Emails match
+    case-insensitively — the CLIs do not agree on casing."""
+    third = store.create(agent_key="codex", name="Account 3")
+    fifth = store.create(agent_key="codex", name="Account 5")
+    _write_slot("codex", third["id"], "auth.json", _codex_auth("same@example.com"))
+    _write_slot("codex", fifth["id"], "auth.json", _codex_auth("SAME@example.com"))
+
+    duplicates = await _list_duplicates()
+
+    assert set(duplicates["codex"]) == {third["id"], fifth["id"]}
+    assert duplicates["codex"][third["id"]] == {
+        "email": "same@example.com",
+        "slotIds": [third["id"], fifth["id"]],
+    }
+    assert duplicates["codex"][fifth["id"]]["slotIds"] == [third["id"], fifth["id"]]
+
+
+async def test_distinct_accounts_are_not_duplicates(store: CliProfilesStore) -> None:
+    third = store.create(agent_key="codex", name="Account 3")
+    fifth = store.create(agent_key="codex", name="Account 5")
+    _write_slot("codex", third["id"], "auth.json", _codex_auth("one@example.com"))
+    _write_slot("codex", fifth["id"], "auth.json", _codex_auth("two@example.com"))
+
+    assert await _list_duplicates() == {}
+
+
+async def test_slots_without_an_email_never_duplicate(store: CliProfilesStore) -> None:
+    """kimi stores no identity field, so two of its slots holding a token
+    cannot be told apart — flagging them would accuse accounts at random."""
+    second = store.create(agent_key="kimi", name="Account 2")
+    third = store.create(agent_key="kimi", name="Account 3")
+    for profile in (second, third):
+        _write_slot("kimi", profile["id"], "kimi-code.json", '{"access_token": "tok"}')
+
+    assert await _list_duplicates() == {}
 
 
 async def test_cli_profiles_create_rejects_unsupported_agent(

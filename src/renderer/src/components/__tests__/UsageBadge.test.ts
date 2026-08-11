@@ -70,7 +70,6 @@ function makeCliProfiles(
     profiles?: CliProfile[]
     defaultId?: string | null
     identities?: Record<string, CliAccountIdentity>
-    unregistered?: CliAccountIdentity | null
     setDefault?: ReturnType<typeof vi.fn>
   } = {},
 ) {
@@ -86,7 +85,6 @@ function makeCliProfiles(
       (_agent: string, profileId: string | null): CliAccountIdentity | null =>
         opts.identities?.[profileId ?? '__default__'] ?? null,
     ),
-    unregisteredFor: vi.fn((): CliAccountIdentity | null => opts.unregistered ?? null),
   }
   return { fake, setDefault }
 }
@@ -345,56 +343,12 @@ describe('UsageBadge – popover account list', () => {
     expect(wrapper.findAll('.usage-acct-pct')).toHaveLength(0)
   })
 
-  it('renders an extra row for a live but unregistered account, labeled by its email', async () => {
+  it('renders no account list at all when the agent has no extra profiles', async () => {
     usage.usageFor.mockReturnValue(snapshot())
-    const { fake } = makeCliProfiles({
-      profiles: [profile('p1', 'Work')],
-      unregistered: { email: 'outside@example.com', signedIn: true },
-    })
-    wrapper = mountBadge(fake)
+    wrapper = mountBadge(makeCliProfiles().fake)
     await openPopover(wrapper)
-    const unregisteredRow = wrapper.get('.usage-acct-unregistered')
-    expect(unregisteredRow.text()).toContain('outside@example.com')
-    expect(unregisteredRow.text()).toContain('Unregistered')
-    // It comes first, ahead of Default and the registered profiles.
-    expect(wrapper.findAll('.usage-acct')[0].element).toBe(unregisteredRow.element)
-  })
-
-  it('falls back to an "identity unknown" label when the unregistered account has no email', async () => {
-    usage.usageFor.mockReturnValue(snapshot())
-    const { fake } = makeCliProfiles({ unregistered: { email: null, signedIn: true } })
-    wrapper = mountBadge(fake)
-    await openPopover(wrapper)
-    expect(wrapper.get('.usage-acct-unregistered').text()).toContain('identity unknown')
-  })
-
-  it('shows the account list for the unregistered row alone, with no other profiles', async () => {
-    usage.usageFor.mockReturnValue(snapshot())
-    const { fake } = makeCliProfiles({ unregistered: { email: 'solo@example.com', signedIn: true } })
-    wrapper = mountBadge(fake)
-    await openPopover(wrapper)
-    expect(wrapper.findAll('.usage-acct')).toHaveLength(1)
-    expect(wrapper.get('.usage-acct-unregistered').text()).toContain('solo@example.com')
-  })
-
-  it('does not render the unregistered row when the agent has none', async () => {
-    usage.usageFor.mockReturnValue(snapshot())
-    wrapper = mountBadge(makeCliProfiles({ profiles: [profile('p1', 'Work')] }).fake)
-    await openPopover(wrapper)
-    expect(wrapper.find('.usage-acct-unregistered').exists()).toBe(false)
-  })
-
-  it('the unregistered row is not a button and does not trigger a switch', async () => {
-    usage.usageFor.mockReturnValue(snapshot())
-    const { fake, setDefault } = makeCliProfiles({
-      unregistered: { email: 'outside@example.com', signedIn: true },
-    })
-    wrapper = mountBadge(fake)
-    await openPopover(wrapper)
-    const row = wrapper.get('.usage-acct-unregistered')
-    expect(row.element.tagName).not.toBe('BUTTON')
-    await row.trigger('click')
-    expect(setDefault).not.toHaveBeenCalled()
+    expect(wrapper.find('.usage-acct-list').exists()).toBe(false)
+    expect(wrapper.findAll('.usage-acct')).toHaveLength(0)
   })
 })
 

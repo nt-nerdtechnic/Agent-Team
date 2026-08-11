@@ -40,10 +40,18 @@ export interface CliAccountIdentity {
 // "__default__" (mirrors the backend's reserved slot id).
 export type CliProfileIdentities = Record<string, Record<string, CliAccountIdentity>>
 
-// agentKey -> identity of an account that is live-signed-in via that CLI
-// (e.g. someone ran `/login` in an external terminal) but does not match any
-// registered profile slot. An agentKey is only present when this applies.
-export type CliProfileUnregistered = Record<string, CliAccountIdentity>
+// One account row whose stored credentials name the same account as another
+// row of the same agent. `email` is that account; `slotIds` lists every row
+// holding it — this one included, the built-in Default keyed "__default__".
+// The backend decides what counts as duplicate (row identities cannot be
+// compared here: the active row shows the live account, not its own slot).
+export interface CliAccountDuplicate {
+  email: string
+  slotIds: string[]
+}
+
+// agentKey -> slotId -> duplicate group. Rows that are unique are absent.
+export type CliProfileDuplicates = Record<string, Record<string, CliAccountDuplicate>>
 
 const DEFAULT_SLOT_ID = '__default__'
 
@@ -56,7 +64,7 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
   const profiles = ref<CliProfile[]>([])
   const defaults = ref<CliProfileDefaults>({})
   const identities = ref<CliProfileIdentities>({})
-  const unregistered = ref<CliProfileUnregistered>({})
+  const duplicates = ref<CliProfileDuplicates>({})
   const supportedAgents = ref<string[]>([])
   const loaded = ref<boolean>(false)
   const loading = ref<boolean>(false)
@@ -73,7 +81,7 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
         profiles: CliProfile[]
         defaults: CliProfileDefaults
         identities?: CliProfileIdentities
-        unregistered?: CliProfileUnregistered
+        duplicates?: CliProfileDuplicates
         supported_agents: string[]
       }>('cli_profiles.list', {})
       if (!resp.ok || !resp.payload) {
@@ -83,7 +91,7 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
       profiles.value = resp.payload.profiles
       defaults.value = resp.payload.defaults
       identities.value = resp.payload.identities ?? {}
-      unregistered.value = resp.payload.unregistered ?? {}
+      duplicates.value = resp.payload.duplicates ?? {}
       supportedAgents.value = resp.payload.supported_agents
       loaded.value = true
     } catch (err) {
@@ -239,9 +247,10 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
     return identities.value[agentKey]?.[profileId ?? DEFAULT_SLOT_ID] ?? null
   }
 
-  /** Identity of the agent's live-but-unregistered account, or null. */
-  function unregisteredFor(agentKey: string): CliAccountIdentity | null {
-    return unregistered.value[agentKey] ?? null
+  /** Duplicate group one account row belongs to, or null when it is unique.
+   *  `profileId` null = built-in Default. */
+  function duplicateFor(agentKey: string, profileId: string | null): CliAccountDuplicate | null {
+    return duplicates.value[agentKey]?.[profileId ?? DEFAULT_SLOT_ID] ?? null
   }
 
   // Keep every window's cache in sync: any mutation broadcasts `cli_profiles.changed`.
@@ -250,12 +259,15 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
       profiles?: CliProfile[]
       defaults?: CliProfileDefaults
       identities?: CliProfileIdentities
-      unregistered?: CliProfileUnregistered
+      duplicates?: CliProfileDuplicates
     }
     if (payload?.profiles) profiles.value = payload.profiles
     if (payload?.defaults) defaults.value = payload.defaults
     if (payload?.identities) identities.value = payload.identities
-    if (payload?.unregistered) unregistered.value = payload.unregistered
+    // Assigned unconditionally: the last duplicate clearing (a row deleted)
+    // broadcasts an empty map, and skipping falsy payloads would keep the
+    // stale warning on screen.
+    if (payload?.duplicates !== undefined) duplicates.value = payload.duplicates
   })
 
   // Initial load once connected; re-fetch on reconnect (mirrors useRoles).
@@ -283,7 +295,7 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
     profiles,
     defaults,
     identities,
-    unregistered,
+    duplicates,
     supportedAgents,
     loaded,
     loading,
@@ -298,7 +310,7 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
     defaultProfileId,
     findProfile,
     identityFor,
-    unregisteredFor,
+    duplicateFor,
   }
 }
 
