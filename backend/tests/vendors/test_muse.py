@@ -1,10 +1,10 @@
-"""Muse Code vendor spec — identity, install detection, and the deliberate
-absence of every other capability.
+"""Muse Code vendor spec — identity, install detection, resume parsing, and
+the deliberate absence of every other capability.
 
 The unset-capability test is the point of this file: Muse Code's credential
-layout, resume syntax and log format are unverified, and a future round that
-fills one in should have to update this test consciously rather than acquire
-half-working behaviour by accident.
+layout, session-file location and log format are still unverified, and a
+future round that fills one in should have to update this test consciously
+rather than acquire half-working behaviour by accident.
 """
 
 from __future__ import annotations
@@ -45,6 +45,27 @@ def test_install_dep_claims_no_maintenance_commands() -> None:
     assert dep.docs_url
 
 
+def test_resume_id_is_read_from_the_documented_subcommand() -> None:
+    # Meta documents `muse resume <id>` — a subcommand, not a --flag.
+    parse = SPEC.resume_id_from_command
+    assert parse is not None
+    assert parse("muse resume 4d4a11fe-b08a-46df-9f86-685589531e65") == (
+        "4d4a11fe-b08a-46df-9f86-685589531e65")
+    assert parse("muse resume abc --disable-approval") == "abc"
+    # The real command is the last element of the frontend's shell wrapper.
+    assert parse(["/bin/zsh", "-ilc", "muse resume abc"]) == "abc"
+
+
+def test_non_resume_commands_yield_no_id() -> None:
+    parse = SPEC.resume_id_from_command
+    assert parse is not None
+    assert parse("muse") == ""
+    assert parse("muse resume") == ""
+    assert parse("muse exec 'run the tests'") == ""
+    # Never claim another vendor's command.
+    assert parse("codex resume abc") == ""
+
+
 def test_unverified_capabilities_stay_unset() -> None:
     assert SPEC.live_file is None
     assert SPEC.slot_file is None
@@ -52,9 +73,12 @@ def test_unverified_capabilities_stay_unset() -> None:
     assert SPEC.profile_home_secret_file is None
     assert SPEC.login_home_env is None
     assert SPEC.fetch_usage is None
-    assert SPEC.resume_id_from_command is None
+    # Session lookup: the docs never state where a session file lands, so a
+    # known id cannot be turned into a path. Both stay unset so the resume
+    # preflight passes through rather than vetoing on a guessed location.
     assert SPEC.session_path is None
     assert SPEC.session_exists is None
+    # No real session.jsonl sample to validate a reader against.
     assert SPEC.make_log_reader is None
     assert SPEC.home_env_vars == ()
     assert SPEC.interrupt_key is None

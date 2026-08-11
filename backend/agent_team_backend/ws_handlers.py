@@ -34,6 +34,7 @@ from .mcp_settings import (
     MCPSettingsError,
     restore_mcp_server_secrets,
 )
+from .plan_index import resolve_plan_root
 from .profiles_store import SUPPORTED_AGENT_KEYS as PROFILE_AGENT_KEYS
 from .skills_store import (
     SkillConflictError,
@@ -331,17 +332,45 @@ async def fs_convert_office(session: "Session", msg_id: str, msg_type: str, payl
 async def plans_list_docs(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
 
-    ws_path = payload.get("workspace_path") or ""
+    # Plans live in the project root (plan_provisioning writes the spec there,
+    # and every writer resolves to it), so a workspace opened on a
+    # subdirectory must look up to find them — otherwise a plan an agent just
+    # created is invisible in the very window that asked for it. `root` goes
+    # back with the list because rel_path is relative to it, and fs.read_file
+    # refuses to escape the workspace it is given.
+    ws_path = await asyncio.to_thread(
+        resolve_plan_root, str(payload.get("workspace_path") or "")
+    )
     app._watch_plans_workspace_now(ws_path)
     result = await asyncio.to_thread(app.plan_index.list_docs, ws_path)
+    if isinstance(result, dict) and result.get("ok"):
+        result["root"] = ws_path
     await session.send_json(make_response(msg_id, msg_type, result))
+
+
+@handler("plans.resolve_root")
+async def plans_resolve_root(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """The project root a workspace's plans live in — see plans.list_docs.
+
+    For a surface that opens one plan without listing first (the plan window
+    launched straight at a rel_path), which would otherwise resolve that path
+    against a workspace the file is not under.
+    """
+    ws_path = await asyncio.to_thread(
+        resolve_plan_root, str(payload.get("workspace_path") or "")
+    )
+    await session.send_json(make_response(msg_id, msg_type, {"ok": True, "root": ws_path}))
 
 
 @handler("plans.cache_put")
 async def plans_cache_put(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
 
-    ws_path = payload.get("workspace_path") or ""
+    # Same root as the scan that produced these entries, or the cache keys
+    # would never match on the next list.
+    ws_path = await asyncio.to_thread(
+        resolve_plan_root, str(payload.get("workspace_path") or "")
+    )
     result = await asyncio.to_thread(
         app.plan_index.cache_put, ws_path, payload.get("entries")
     )

@@ -31,3 +31,49 @@ def test_session_exists_checks_the_jsonl() -> None:
     assert app_module._session_exists(
         "claude", "/no/such/workspace-xyz", "no-such-session"
     ) is False
+
+
+def test_session_exists_finds_a_session_under_another_project(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Claude Code >= 2.1.223 resolves an id against every project on the
+    machine, so a transcript filed under a different project dir is resumable
+    even though it is not under this workspace's own project dir."""
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    ws = "/Users/me/proj"
+    other = tmp_path / ".claude" / "projects" / "-Users-me-other-proj"
+    other.mkdir(parents=True)
+    (other / "sid-elsewhere.jsonl").write_text("{}\n", encoding="utf-8")
+
+    assert app_module._session_exists("claude", ws, "sid-elsewhere") is True
+    assert app_module._session_exists("claude", ws, "sid-nowhere") is False
+    # The reported lookup path stays the single per-workspace one.
+    assert app_module._session_lookup_path("claude", ws, "sid-elsewhere") == str(
+        tmp_path / ".claude" / "projects" / encode_claude_cwd(ws)
+        / "sid-elsewhere.jsonl"
+    )
+
+
+def test_session_exists_honours_claude_config_dir(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Preflight resolves its root the same way the log reader does."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "empty-home")
+    cfg = tmp_path / "cfg"
+    (cfg / "projects" / "-ws").mkdir(parents=True)
+    (cfg / "projects" / "-ws" / "sid-cfg.jsonl").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+
+    assert app_module._session_exists("claude", "/ws", "sid-cfg") is True
+
+
+def test_session_exists_rejects_path_walking_ids(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (tmp_path / ".claude" / "projects" / "-ws").mkdir(parents=True)
+    (tmp_path / ".claude" / "escape.jsonl").write_text("{}\n", encoding="utf-8")
+
+    assert app_module._session_exists("claude", "/ws", "../escape") is False

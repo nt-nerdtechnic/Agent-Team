@@ -115,26 +115,33 @@ def _int(v) -> int:  # noqa: ANN001
         return 0
 
 
+def claude_projects_root() -> Path | None:
+    """First-hit-wins default projects root (backend-process view).
+
+    $CLAUDE_CONFIG_DIR overrides; the fallbacks are tried in CodexBar order.
+    Returning a single root (not all of them) avoids double-counting if a
+    user has both ~/.config/claude and ~/.claude populated by accident.
+
+    Module-level so the log reader and the resume preflight resolve the root
+    the same way — the preflight used to hardcode ~/.claude.
+    """
+    env_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    candidates: list[Path] = []
+    if env_dir:
+        candidates.append(Path(env_dir) / "projects")
+    candidates.append(Path.home() / ".config" / "claude" / "projects")
+    candidates.append(Path.home() / ".claude" / "projects")
+    for p in candidates:
+        if p.is_dir():
+            return p
+    return None
+
+
 class ClaudeLogReader(LogReader):
     vendor: str = "claude"
 
     def _default_root(self) -> Path | None:
-        """First-hit-wins default projects root (backend-process view).
-
-        $CLAUDE_CONFIG_DIR overrides; the fallbacks are tried in CodexBar order.
-        Returning a single root (not all of them) avoids double-counting if a
-        user has both ~/.config/claude and ~/.claude populated by accident.
-        """
-        env_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-        candidates: list[Path] = []
-        if env_dir:
-            candidates.append(Path(env_dir) / "projects")
-        candidates.append(Path.home() / ".config" / "claude" / "projects")
-        candidates.append(Path.home() / ".claude" / "projects")
-        for p in candidates:
-            if p.is_dir():
-                return p
-        return None
+        return claude_projects_root()
 
     def project_dirs(self) -> list[Path]:
         """The single default projects root (empty list when none exists).
@@ -1119,8 +1126,42 @@ def _session_path(workspace_path: str, session_id: str) -> Path:
     # home, but that home's ``projects`` is symlinked back to the real home
     # (credential_vault), so the session jsonl always resolves to the default
     # location — one check covers every account.
+    # Stays a SINGLE path: it is what _session_lookup_path reports for
+    # diagnostics ("this is where we looked"). The wider search that mirrors
+    # the CLI lives in _session_exists below.
+    root = claude_projects_root() or Path.home() / ".claude" / "projects"
     project_dir = encode_claude_cwd(workspace_path)
-    return Path.home() / ".claude" / "projects" / project_dir / f"{session_id}.jsonl"
+    return root / project_dir / f"{session_id}.jsonl"
+
+
+def _session_exists(workspace_path: str, session_id: str) -> bool:
+    """True when the id names a transcript under ANY project in the root.
+
+    Claude Code >= 2.1.223 widened the id search: "When you pass a session ID,
+    Claude Code searches the current project directory and its git worktrees,
+    then every other project on this machine. Before v2.1.223, the ID search
+    covered only the current project directory and its git worktrees."
+    (https://code.claude.com/docs/en/cli-reference)
+
+    Checking only this workspace's project dir therefore rejected resumes the
+    CLI would have honoured — the preflight blocked the launch and Agent
+    History reported resumable=false, so the pane came back with no memory.
+    Sibling project dirs also cover the git worktrees of this project, which
+    Claude stores as their own encoded-cwd directories.
+    """
+    if not session_id or "/" in session_id or session_id.startswith("."):
+        return False  # ids are filename stems; never let one walk the tree
+    if _session_path(workspace_path, session_id).is_file():
+        return True  # this workspace's own project — the common case
+    root = claude_projects_root()
+    if root is None:
+        return False
+    name = f"{session_id}.jsonl"
+    try:
+        return any((d / name).is_file() for d in root.iterdir() if d.is_dir())
+    except OSError as err:
+        log.debug("scan %s for %s failed: %s", root, name, err)
+        return False
 
 
 # ---- vendor spec -----------------------------------------------------------
@@ -1138,6 +1179,7 @@ SPEC = VendorSpec(
     # exemption list and are NOT routed through this spec.
     resume_id_from_command=_resume_id_from_command,
     session_path=_session_path,
+    session_exists=_session_exists,
     home_env_vars=(
         "CLAUDE_CONFIG_DIR",
         # Claude Code stamps its own subprocesses with this; inherited, a

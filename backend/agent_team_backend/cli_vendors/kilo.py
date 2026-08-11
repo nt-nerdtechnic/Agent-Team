@@ -53,6 +53,7 @@ class KiloLogReader(OpencodeLogReader):
 # IS the Kilo bearer token (1-year expiry, no refresh rotation needed for
 # reads). The Kilo Pass query string is tRPC batch syntax for input {"0":null}.
 KILO_DEFAULT_BASE = "https://api.kilo.ai"
+# Default (no XDG_DATA_HOME) location under $HOME — see _kilo_auth_file.
 KILO_AUTH_FILE_REL = (".local", "share", "kilo", "auth.json")
 KILO_LEGACY_CONFIG_REL = (".kilocode", "cli", "config.json")
 KILO_BALANCE_PATH = "/api/profile/balance"
@@ -103,12 +104,27 @@ def _kilo_legacy_credentials(home: Path) -> dict | None:
     return None
 
 
+def _kilo_auth_file(home: Path, env: dict) -> Path:
+    """auth.json under Kilo's XDG data dir. Kilo (an OpenCode fork) stores its
+    data under ``$XDG_DATA_HOME/kilo`` and only falls back to
+    ``<home>/.local/share/kilo`` when the variable is unset — same resolution
+    OpencodeLogReader._data_dir already does for the databases, and the lever
+    the vendor's own blog post uses to run a second isolated instance
+    (https://blog.kilo.ai/p/run-a-second-isolated-kilo-code-without). Reading
+    the fixed ``~/.local/share`` path made the quota look logged-out for anyone
+    who sets XDG_DATA_HOME."""
+    base = env.get("XDG_DATA_HOME")
+    if base:
+        return Path(base) / "kilo" / "auth.json"
+    return home.joinpath(*KILO_AUTH_FILE_REL)
+
+
 def read_kilo_credentials(home: Path, env: dict | None = None) -> dict | None:
     """The Kilo bearer token + optional organization id, resolved the way the
     Kilo CLI does (read-only): ``KILO_AUTH_CONTENT`` env injects the whole
-    auth.json content, otherwise ``~/.local/share/kilo/auth.json`` is read;
-    the legacy ``~/.kilocode/cli/config.json`` is the last fallback. Returns
-    ``{token, org_id}`` or None."""
+    auth.json content, otherwise ``<XDG_DATA_HOME|~/.local/share>/kilo/auth.json``
+    is read; the legacy ``~/.kilocode/cli/config.json`` is the last fallback.
+    Returns ``{token, org_id}`` or None."""
     env = env or {}
     raw = env.get("KILO_AUTH_CONTENT")
     if raw:
@@ -119,7 +135,7 @@ def read_kilo_credentials(home: Path, env: dict | None = None) -> dict | None:
     else:
         try:
             data = json.loads(
-                home.joinpath(*KILO_AUTH_FILE_REL).read_text(encoding="utf-8"))
+                _kilo_auth_file(home, env).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             data = None
     creds = _kilo_entry_credentials(data.get("kilo")) \
@@ -275,7 +291,18 @@ SPEC = VendorSpec(
     fetch_usage=lambda home: fetch_kilo(home),
     resume_id_from_command=_resume_id_from_command,
     session_exists=_session_exists,
-    home_env_vars=("KILO_CONFIG_DIR", "KILO_CONFIG", "KILO_DB"),
+    # Only the env vars Kilo actually documents (kilo-config.md defines
+    # KILO_CONFIG, KILO_CONFIG_DIR, KILO_CONFIG_CONTENT and
+    # KILO_DISABLE_PROJECT_CONFIG — there is no KILO_DB, so listing it stripped
+    # a variable no Kilo build reads):
+    # https://github.com/Kilo-Org/kilocode/blob/main/packages/opencode/src/kilocode/skills/kilo-config.md
+    # NOTE (unverified — kilo is not installed here, this is documentation-only):
+    # neither of these relocates kilo.db / auth.json. KILO_CONFIG_DIR only
+    # APPENDS to the config search list, so it is not an isolation lever; the
+    # real lever is XDG_DATA_HOME, which is a general-purpose variable and
+    # cannot go in this strip-list. Kilo's data locations can be confirmed on a
+    # machine that has it installed with `kilo debug paths`.
+    home_env_vars=("KILO_CONFIG_DIR", "KILO_CONFIG"),
     make_log_reader=KiloLogReader,
     # Kilo Code (OpenCode fork) ships `kilo upgrade` but no doctor subcommand
     # (`kilo debug` is diagnostics-adjacent, not a doctor — no invented command).
@@ -286,6 +313,8 @@ SPEC = VendorSpec(
         docs_url="https://kilo.ai/docs/code-with-ai/platforms/cli",
         update_cmd="kilo upgrade",
         npm_package="@kilocode/cli",
+        # Update-state lookup only (see onboarding_deps._config_homes); this is
+        # an additional config SEARCH dir, not a relocatable config home.
         config_home_env="KILO_CONFIG_DIR",
         autoupdate_env="KILO_DISABLE_AUTOUPDATE"),
 )

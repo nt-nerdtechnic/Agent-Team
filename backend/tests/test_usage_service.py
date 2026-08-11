@@ -250,6 +250,23 @@ def test_kilo_credentials_api_and_oauth_forms(tmp_path):
         "token": "kilo-at", "org_id": "org-1"}
 
 
+def test_kilo_credentials_follow_xdg_data_home(tmp_path):
+    # XDG_DATA_HOME relocates Kilo's data dir, auth.json included; the default
+    # ~/.local/share copy must not win over it.
+    _write(tmp_path / ".local" / "share" / "kilo" / "auth.json",
+           {"kilo": {"type": "api", "key": "home-key"}})
+    xdg = tmp_path / "xdg-data"
+    _write(xdg / "kilo" / "auth.json", {"kilo": {"type": "api", "key": "xdg-key"}})
+    assert us.read_kilo_credentials(tmp_path, {"XDG_DATA_HOME": str(xdg)}) == {
+        "token": "xdg-key", "org_id": None}
+    # An XDG data dir with no auth.json falls through to the legacy config.
+    _write(tmp_path / ".kilocode" / "cli" / "config.json", {"providers": [
+        {"provider": "kilocode", "kilocodeToken": "legacy-tok"}]})
+    empty = tmp_path / "xdg-empty"
+    assert us.read_kilo_credentials(tmp_path, {"XDG_DATA_HOME": str(empty)}) == {
+        "token": "legacy-tok", "org_id": None}
+
+
 def test_kilo_credentials_env_content_wins(tmp_path):
     _write(tmp_path / ".local" / "share" / "kilo" / "auth.json",
            {"kilo": {"type": "api", "key": "file-key"}})

@@ -39,6 +39,7 @@ import yaml
 import asyncio
 import re
 import shutil
+import sqlite3
 import sys
 import time
 
@@ -675,6 +676,56 @@ def _session_path(workspace_path: str, session_id: str) -> Path:
     return copilot_root() / "session-state" / session_id / "events.jsonl"
 
 
+def _session_has_turns(session_id: str) -> bool:
+    """True when <root>/session-store.db records a conversation turn for the id.
+
+    Copilot CLI 1.0.78 keeps sessions in a central SQLite store
+    (<root>/session-store.db: sessions / turns / checkpoints / session_files /
+    session_refs / assistant_usage_events / search_index*), whose `sessions`
+    rows correspond 1:1 with the <root>/session-state/<uuid>/ directories.
+
+    We require a `turns` row rather than just a `sessions` row: `--resume=<id>`
+    silently starts a blank NEW session when the id is unknown, and resuming a
+    zero-turn session restores nothing — both are the same "the user thinks
+    they reattached but didn't" failure this preflight exists to prevent.
+    Confirmed against the local store: the throwaway zero-conversation
+    sessions all have 0 `turns` rows (and a NULL `summary`), while the one
+    session with a real exchange has a turn row.
+    """
+    if not session_id:
+        return False
+    db = copilot_root() / "session-store.db"
+    if not db.is_file():
+        return False
+    try:
+        # Read-only URI so preflight can never write to the CLI's own store.
+        with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM turns WHERE session_id = ? LIMIT 1", (session_id,)
+            ).fetchone()
+        return row is not None
+    except sqlite3.Error as err:  # older/no-turns schema, locked or corrupt db
+        log.debug("copilot session-store probe failed for %s: %s", session_id, err)
+        return False
+
+
+def _session_exists(workspace_path: str, session_id: str) -> bool:
+    """Store first, events.jsonl second.
+
+    KNOWN VERIFICATION GAP: we could not establish under read-only inspection
+    whether 1.0.78 still writes events.jsonl at all — locally only 1 of 7
+    session-state dirs has one, but the other 6 are zero-turn probe sessions
+    that would have no events either way. So the file check stays as the
+    back-compat fallback (older CLIs wrote only events.jsonl), and whether
+    CopilotLogReader now misses tokens/turns for real sessions still needs one
+    live session to settle. This function deliberately does not touch the
+    reader.
+    """
+    return _session_has_turns(session_id) or _session_path(
+        workspace_path, session_id
+    ).is_file()
+
+
 # ---- vendor spec -----------------------------------------------------------
 
 SPEC = VendorSpec(
@@ -684,6 +735,7 @@ SPEC = VendorSpec(
     fetch_usage=lambda home: fetch_copilot(home),
     resume_id_from_command=_resume_id_from_command,
     session_path=_session_path,
+    session_exists=_session_exists,
     home_env_vars=("COPILOT_HOME",),
     make_log_reader=CopilotLogReader,
     # Copilot CLI ships `copilot update` but no doctor subcommand;

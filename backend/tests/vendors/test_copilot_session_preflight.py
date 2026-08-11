@@ -4,6 +4,7 @@ required to pass unchanged after it."""
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -42,3 +43,53 @@ def test_session_exists_follows_lookup_path(
     target.parent.mkdir(parents=True)
     target.write_text("{}", encoding="utf-8")
     assert app_module._session_exists("copilot", "/ws", "sid-9") is True
+
+
+def _write_session_store(root: Path, rows: list[tuple[str, int]]) -> None:
+    """Minimal stand-in for copilot's session-store.db: (session_id, turns)."""
+    conn = sqlite3.connect(root / "session-store.db")
+    conn.executescript(
+        "CREATE TABLE sessions (id TEXT PRIMARY KEY, summary TEXT);"
+        "CREATE TABLE turns (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " session_id TEXT NOT NULL, turn_index INTEGER,"
+        " user_message TEXT, assistant_response TEXT);"
+    )
+    for sid, turns in rows:
+        conn.execute("INSERT INTO sessions (id) VALUES (?)", (sid,))
+        for i in range(turns):
+            conn.execute(
+                "INSERT INTO turns (session_id, turn_index, user_message)"
+                " VALUES (?, ?, ?)", (sid, i, "hi"),
+            )
+    conn.commit()
+    conn.close()
+
+
+def test_session_exists_reads_the_central_session_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Copilot CLI 1.0.78 records sessions in <root>/session-store.db; a session
+    with turns there is resumable even with no events.jsonl on disk."""
+    monkeypatch.setenv("COPILOT_HOME", str(tmp_path))
+    _write_session_store(tmp_path, [("sid-db", 2), ("sid-empty", 0)])
+
+    assert app_module._session_exists("copilot", "/ws", "sid-db") is True
+    # A zero-turn session restores nothing, so it is not "resumable".
+    assert app_module._session_exists("copilot", "/ws", "sid-empty") is False
+    # Neither in the store nor on disk.
+    assert app_module._session_exists("copilot", "/ws", "sid-unknown") is False
+
+
+def test_session_exists_falls_back_when_the_store_is_unusable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-store CLI (no db) or an unreadable db must still resolve sessions
+    through the legacy events.jsonl path."""
+    monkeypatch.setenv("COPILOT_HOME", str(tmp_path))
+    (tmp_path / "session-store.db").write_text("not a database", encoding="utf-8")
+    assert app_module._session_exists("copilot", "/ws", "sid-legacy") is False
+
+    target = Path(app_module._session_lookup_path("copilot", "/ws", "sid-legacy"))
+    target.parent.mkdir(parents=True)
+    target.write_text("{}", encoding="utf-8")
+    assert app_module._session_exists("copilot", "/ws", "sid-legacy") is True
