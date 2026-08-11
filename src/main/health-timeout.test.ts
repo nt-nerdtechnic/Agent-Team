@@ -8,14 +8,18 @@ import {
   readHealthCheckTimeoutSec,
   writeHealthCheckTimeoutSec,
   DEFAULT_HEALTH_CHECK_TIMEOUT_SEC,
+  MAX_HEALTH_CHECK_TIMEOUT_SEC,
 } from './health-timeout'
 
 describe('clampHealthCheckTimeoutSec', () => {
   it('clamps below the 15s floor', () => {
     expect(clampHealthCheckTimeoutSec(1)).toBe(15)
   })
-  it('clamps above the 120s ceiling', () => {
-    expect(clampHealthCheckTimeoutSec(500)).toBe(120)
+  it('clamps above the ceiling', () => {
+    expect(clampHealthCheckTimeoutSec(5_000)).toBe(MAX_HEALTH_CHECK_TIMEOUT_SEC)
+  })
+  it('leaves a long-but-allowed wait alone — a slow first launch is not a failure', () => {
+    expect(clampHealthCheckTimeoutSec(300)).toBe(300)
   })
   it('rounds an in-range value', () => {
     expect(clampHealthCheckTimeoutSec(60.6)).toBe(61)
@@ -57,8 +61,8 @@ describe('readHealthCheckTimeoutSec / writeHealthCheckTimeoutSec', () => {
   })
 
   it('clamps an out-of-range value on write', () => {
-    writeHealthCheckTimeoutSec(file, 999)
-    expect(readHealthCheckTimeoutSec(file)).toBe(120)
+    writeHealthCheckTimeoutSec(file, 9_999)
+    expect(readHealthCheckTimeoutSec(file)).toBe(MAX_HEALTH_CHECK_TIMEOUT_SEC)
   })
 
   it('survives a corrupt file on disk', () => {

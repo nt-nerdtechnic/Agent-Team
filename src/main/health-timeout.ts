@@ -8,7 +8,11 @@ import { readFileSync, writeFileSync } from 'node:fs'
 
 export const DEFAULT_HEALTH_CHECK_TIMEOUT_SEC = 45
 export const MIN_HEALTH_CHECK_TIMEOUT_SEC = 15
-export const MAX_HEALTH_CHECK_TIMEOUT_SEC = 120
+// Ceiling on what the user may configure. Waiting longer costs nothing but
+// patience, while too low a ceiling turns a slow first launch — building the
+// Python venv, a cold disk, antivirus inspecting every file — into a reported
+// failure of a backend that was starting fine.
+export const MAX_HEALTH_CHECK_TIMEOUT_SEC = 600
 
 export function clampHealthCheckTimeoutSec(raw: number): number {
   if (!Number.isFinite(raw)) return DEFAULT_HEALTH_CHECK_TIMEOUT_SEC

@@ -94,9 +94,10 @@ server = FastMCP(
         "Delegating to a new agent: cli_open_agent opens a fresh CLI pane and "
         "hands it a task. Use it when work is better done in parallel or by a "
         "different CLI than yours; the new pane reports back to you by message "
-        "when it finishes, so you do not poll it. Limits apply (3 child panes "
-        "per pane, 8 CLI panes per workspace, chain depth 2) and the call tells "
-        "you if one was hit.\n"
+        "when it finishes, so you do not poll it. There is no hard cap on child "
+        "panes, workspace CLI panes, or spawn-chain depth, but going well past "
+        "sane advisory thresholds gets logged as a diagnostic warning (readable "
+        "via ui_diagnostics) rather than refused.\n"
         "\n"
         "Checking on another pane: cli_read_log reads the tail of a pane's "
         "conversation log, cli_get_status reports whether it is busy and its "
@@ -757,9 +758,9 @@ async def cli_open_agent(
     Pane callers open the pane in their own workspace; `workspace_path` is
     ignored for them. A caller with no pane identity (host / external
     credential) has no workspace of its own, so `workspace_path` is required —
-    the pane opens there with no parent: it does not count against any pane's
-    3-child-per-pane limit or the spawn chain depth, but the workspace's 8
-    CLI-panes cap still applies.
+    the pane opens there with no parent, so it has no child/depth counts of
+    its own; the workspace's CLI-pane count is still tracked for the advisory
+    below.
 
     This returns once the pane exists, which takes a few seconds. Its CLI then
     boots and receives the task in the background — if that part fails you are
@@ -771,8 +772,12 @@ async def cli_open_agent(
     Use the returned name, not the one you asked for: a concurrent request may
     have taken that name, in which case yours gets a suffix.
 
-    Refused when the name is taken, the agent key is unknown, or a limit is hit.
-    Returns {ok, name, address} or {ok: false, error}.
+    Refused when the name is taken, the agent key is unknown, or the task is
+    empty. A high child/workspace/depth count never refuses the spawn — it
+    just gets logged as a diagnostic warning and, on success, also returned
+    here as `advisories` (a list of human-readable notes; the key is absent
+    when there is nothing to report).
+    Returns {ok, name, address, advisories?} or {ok: false, error}.
     """
     from agent_team_backend import agent_messaging, app
     from agent_team_backend.ipc import make_event
@@ -833,11 +838,14 @@ async def cli_open_agent(
     if not verdict.get("ok"):
         return {"ok": False, "error": str(verdict.get("error") or "spawn refused")}
     entry = agent_messaging.get(str(verdict.get("pane_id") or ""))
-    return {
+    result: dict[str, Any] = {
         "ok": True,
         "name": str(verdict.get("name") or pane_name),
         "address": entry.qualified_name if entry else str(verdict.get("name") or pane_name),
     }
+    if verdict.get("advisories"):
+        result["advisories"] = verdict["advisories"]
+    return result
 
 
 @server.tool()
@@ -910,7 +918,12 @@ async def cli_send(to: str, text: str, ctx: Context) -> dict[str, Any]:
 
 # ── Reading another pane (cli_read_log / cli_get_status / cli_wait_idle) ────
 
-_LOG_TAIL_MAX_BYTES = 64 * 1024
+# Bounds one read of an arbitrarily large conversation log. The cost here is
+# the caller's context window, not backend memory — a string this size is
+# nothing to the process — and the tool also returns log_path so a caller that
+# needs the whole file can read it directly. Sized to let an agent review a
+# genuinely long exchange in one call rather than paging through it.
+_LOG_TAIL_MAX_BYTES = 512 * 1024
 
 
 def _read_log_tail(path: Path, tail_lines: int) -> tuple[str, bool]:

@@ -74,15 +74,19 @@ _ONBOARDING_EXECUTOR = ThreadPoolExecutor(
 # to_thread in the backend — including the credential I/O that runs while an
 # agent's switch_lock is held, so the lock was never released and the very
 # spawns that filled the pool then deadlocked waiting for it.
-# Eight workers: probes are subprocess-bound, not CPU-bound, so this only has
-# to stay clear of the default executor's ~12-16 — it does not have to be
-# small. Sizing it smaller would regress the case this pool does NOT protect:
-# fresh spawns are not throttled frontend-side (only resumes are), so a
-# pipeline fan-out arrives all at once, and at 4 workers a 16-pane burst would
-# serialize past the frontend's 30s terminal.create timeout on a cold machine
-# where each probe nears its 8s budget.
+# Workers: probes are subprocess-bound, not CPU-bound — the thread spends its
+# budget waiting on a child process — so this pool is sized by the burst it
+# must absorb, not by core count. Fresh spawns are not throttled frontend-side
+# (only resumes are), so a fan-out arrives all at once. With an 8s probe budget
+# against the frontend's 30s terminal.create timeout, each worker clears ~3
+# panes before that deadline, so N workers absorb a ~3N burst. Eight covered
+# the old 8-pane-per-workspace cap with room to spare; that cap is gone (see
+# agentSpawnGate.ts — spawn quotas are advisory now), so a burst is bounded by
+# what the user asks for rather than by a constant. Thirty-two keeps a ~96-pane
+# fan-out inside the timeout, which is far past where per-CLI memory
+# (~150-440MB each) becomes the real ceiling.
 _CLI_PROBE_EXECUTOR = ThreadPoolExecutor(
-    max_workers=8, thread_name_prefix="cli-probe"
+    max_workers=32, thread_name_prefix="cli-probe"
 )
 
 # Ceiling on acquiring an agent's credential switch lock before a spawn: a
@@ -5212,15 +5216,15 @@ async def agent_spawn_result(session: "Session", msg_id: str, msg_type: str, pay
             make_error(msg_id, msg_type, "BAD_REQUEST", "agent_spawn.result needs request_id")
         )
         return
-    delivered = plan_mcp.resolve_spawn(
-        request_id,
-        {
-            "ok": bool(payload.get("ok", False)),
-            "error": str(payload.get("error") or ""),
-            "pane_id": str(payload.get("pane_id") or ""),
-            "name": str(payload.get("name") or ""),
-        },
-    )
+    verdict: dict[str, Any] = {
+        "ok": bool(payload.get("ok", False)),
+        "error": str(payload.get("error") or ""),
+        "pane_id": str(payload.get("pane_id") or ""),
+        "name": str(payload.get("name") or ""),
+    }
+    if payload.get("advisories"):
+        verdict["advisories"] = payload["advisories"]
+    delivered = plan_mcp.resolve_spawn(request_id, verdict)
     await session.send_json(make_response(msg_id, msg_type, {"ok": True, "delivered": delivered}))
 
 

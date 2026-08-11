@@ -26,8 +26,13 @@ import { migrateTerminalPtyKey } from './composables/useTerminal'
 import { useAgentMessaging, isBroadcastTarget } from './composables/useAgentMessaging'
 import type { RouteResult } from './composables/useAgentMessaging'
 import { createMessageLogPersistence } from './composables/useMessageLogPersistence'
-import { MSG_ENVELOPE_PREFIX, VENDORS_WITHOUT_TURN_END, isTurnInFlight, parseMessages, parseSpawns, renderSpawnKickoff } from './lib/agentMessaging'
-import { evaluateTurnSpawns, evaluateSpawnRequest, computeSpawnDepth } from './lib/agentSpawnGate'
+import { MSG_ENVELOPE_PREFIX, VENDORS_WITHOUT_TURN_END, isTurnInFlight, normalizeMessagingName, parseMessages, parseSpawns, renderSpawnKickoff } from './lib/agentMessaging'
+import {
+  evaluateTurnSpawns,
+  evaluateSpawnRequest,
+  computeSpawnDepth,
+  spawnAdvisoriesFor,
+} from './lib/agentSpawnGate'
 import StageTabBar, { type TabItem } from './components/StageTabBar.vue'
 import { useBackend } from './composables/useBackend'
 import { useTheme } from './composables/useTheme'
@@ -1436,6 +1441,9 @@ async function handleSpawnRequestsForTurn(
       sendSpawnFeedback(parentName, `SPAWN 失敗：${result.reason}`)
       continue
     }
+    for (const advisory of result.advisories ?? []) {
+      recordDiagnostic({ level: 'warn', code: 'spawn.advisory', message: advisory, paneId: parentPaneId })
+    }
     const ok = await spawnRequestedPane(parent, parentName, result)
     if (!ok) {
       sendSpawnFeedback(parentName, `SPAWN 失敗：pane「${result.name}」啟動或任務注入失敗`)
@@ -1660,15 +1668,26 @@ async function handleMcpSpawnRequest(ev: {
     parentName = parent.messagingName ?? ev.requester_pane_id
   }
 
-  const report = (verdict: { ok: boolean; error?: string; paneId?: string; name?: string }): void => {
+  const report = (verdict: {
+    ok: boolean
+    error?: string
+    paneId?: string
+    name?: string
+    advisories?: string[]
+  }): void => {
+    const payload: Record<string, unknown> = {
+      request_id: ev.request_id,
+      ok: verdict.ok,
+      error: verdict.error ?? '',
+      pane_id: verdict.paneId ?? '',
+      name: verdict.name ?? '',
+    }
+    // Only present when the gate actually raised a note — the tool's return
+    // dict should not gain an empty `advisories: []` key on every ordinary
+    // spawn (cli_open_agent's docstring documents "present only when non-empty").
+    if (verdict.advisories && verdict.advisories.length > 0) payload.advisories = verdict.advisories
     backend
-      .send('agent_spawn.result', {
-        request_id: ev.request_id,
-        ok: verdict.ok,
-        error: verdict.error ?? '',
-        pane_id: verdict.paneId ?? '',
-        name: verdict.name ?? '',
-      })
+      .send('agent_spawn.result', payload)
       .catch(() => { /* the tool call times out and says so */ })
   }
 
@@ -1682,6 +1701,14 @@ async function handleMcpSpawnRequest(ev: {
       error: parent ? describeSpawnRefusal(gate.reason, ev.name, ev.requester_pane_id) : gate.reason,
     })
     return
+  }
+  for (const advisory of gate.advisories ?? []) {
+    recordDiagnostic({
+      level: 'warn',
+      code: 'spawn.advisory',
+      message: advisory,
+      paneId: parent ? parent.id : undefined,
+    })
   }
   let paneId: string | null = null
   try {
@@ -1708,7 +1735,7 @@ async function handleMcpSpawnRequest(ev: {
     // and injected the task (or left the pane empty if there was none) before
     // returning paneId above. There is no parent pane to report back to, so
     // no kickoffRequestedPane / report-back marker either.
-    report({ ok: true, paneId, name: childName })
+    report({ ok: true, paneId, name: childName, advisories: gate.advisories })
     return
   }
   // Shut the injection window before the caller learns this pane's name, not
@@ -1716,7 +1743,7 @@ async function handleMcpSpawnRequest(ev: {
   // own task yet.
   if (child) child.kickoffStatus = 'pending'
   notifyRestore.toast(i18n.global.t('msg.spawn-toast', { parent: parentName, child: childName }))
-  report({ ok: true, paneId, name: childName })
+  report({ ok: true, paneId, name: childName, advisories: gate.advisories })
 
   void kickoffRequestedPane(paneId, parentName, gate.task)
     .then((ok) => {
@@ -5077,6 +5104,17 @@ registerCommand('ui.pane.create', async (args) => {
   if (!a.agent || !currentWorkspace.value) {
     throw new Error('ui.pane.create requires an agent and an open workspace')
   }
+  // Held to the same gate as the SPAWN-block and cli_open_agent paths: a
+  // taken name is rejected rather than silently suffixed, and volume
+  // advisories are recorded so they reach the caller via ui.invoke.result's
+  // warnings channel (see useUiActionBus).
+  const gateCtx = standaloneSpawnGateContext()
+  if (a.name) {
+    const name = normalizeMessagingName(a.name)
+    if (name && gateCtx.isNameTaken(name)) {
+      throw new Error(`名稱「${name}」已被其他 pane 使用，請換一個名稱`)
+    }
+  }
   const runGroupId = resolveManualSpawnGroupId(runGroups.value, activeTab.value)
   const paneId = await spawnPane({
     agentKey: a.agent as AgentKey,
@@ -5090,6 +5128,9 @@ registerCommand('ui.pane.create', async (args) => {
     preferredMessagingName: a.name,
   })
   if (!paneId) throw new Error(`ui.pane.create failed to spawn agent "${a.agent}"`)
+  for (const advisory of spawnAdvisoriesFor(gateCtx)) {
+    recordDiagnostic({ level: 'warn', code: 'spawn.advisory', message: advisory, paneId })
+  }
   void sendQuiet<ProjectPayload>('manual_pane.spawn', {
     workspace_path: currentWorkspace.value,
     pane_id: paneId,
@@ -7499,8 +7540,11 @@ const TURN_TEXT_REPLAY_TOLERANCE_MS = 60_000
 
 // Absolute ceiling on a single stage so a wedged agent can't block the
 // pipeline forever. The agent's own sentinel (or the analyzer reading its
-// output) ends a stage long before this — the cap is just a backstop.
-const STAGE_MAX_DURATION_MS = 15 * 60_000
+// output) ends a stage long before this — the cap is just a backstop, so it
+// should sit well past how long real work runs. Fifteen minutes did not: a
+// full test suite, a broad refactor or a deep review routinely runs longer,
+// and the cap then fired on an agent that was working fine.
+const STAGE_MAX_DURATION_MS = 60 * 60_000
 
 // turn_complete must remain the LATEST signal this long before it counts as
 // completion — lets the buffer's QUESTION text (which can lag the hook/JSONL

@@ -252,8 +252,14 @@ _ECHO_PROBE_MAX_INPUT_CHARS = 16
 # where it hurts most: create()'s register call is what the terminal.create ack
 # waits on, so a queued process scan delays opening a pane.  Keeping the scans
 # on the default executor and the lifecycle calls here decouples the two.
+# Four workers matched the old 8-pane-per-workspace spawn cap. That cap is now
+# advisory (see agentSpawnGate.ts), so a fan-out is bounded by what the user
+# asks for — and create()'s register call is what the terminal.create ack waits
+# on, so a queue here shows up as "opening panes got slow" rather than as an
+# error anyone can trace. These calls are I/O-bound (fork/exec, /dev/ptmx,
+# process bookkeeping), so oversubscribing costs idle threads, not CPU.
 _LIFECYCLE_EXECUTOR = ThreadPoolExecutor(
-    max_workers=4, thread_name_prefix="pty-lifecycle"
+    max_workers=32, thread_name_prefix="pty-lifecycle"
 )
 
 

@@ -89,8 +89,8 @@ name: <新 pane 的名稱，不可與現有名稱重複>
 task: <任務內容；task: 之後到區塊結尾全是任務，可多行>
 ${SPAWN_END}
 
-規則：每個 turn 只會處理第一個 SPAWN 區塊；每個 pane 最多啟動 3 個子 pane，工作區 CLI pane 總數上限 8，spawn 鏈深度上限 2。
-新 pane 完成任務後會用 MSG 區塊回報結果給你；spawn 被拒絕時你會收到說明原因的訊息。
+規則：一個 turn 可以輸出多個 SPAWN 區塊，全部都會被處理。子 pane 數、工作區 CLI pane 總數、spawn 鏈深度沒有強制上限，但數量偏多或鏈太深時你會在回報中收到提醒。
+新 pane 完成任務後會用 MSG 區塊回報結果給你；spawn 因名稱衝突、agent key 不合法或任務內容缺漏而被拒絕時，你會收到說明原因的訊息。
 沒有派工需求時不要輸出 SPAWN 區塊。
 
 `

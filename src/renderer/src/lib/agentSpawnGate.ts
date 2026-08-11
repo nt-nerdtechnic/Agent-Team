@@ -1,16 +1,25 @@
 // Gate logic for agent-initiated pane spawns (SPAWN blocks). Pure functions —
 // App.vue supplies the runtime context; unit tests inject fakes. Failure
-// reasons are agent-facing text (delivered back to the requesting pane), so
-// they follow the protocol language in data/stages.ts.
+// reasons and advisories are agent-facing text (delivered back to the
+// requesting pane), so they follow the protocol language in data/stages.ts.
+//
+// This gate only rejects on correctness (unknown agent, bad/taken name, empty
+// task) — it never rejects on volume. Child/workspace/depth counts above the
+// advisory thresholds below still succeed; the caller just gets an
+// `advisories` note back to relay or log.
 
 import { normalizeMessagingName, type ParsedSpawnRequest } from './agentMessaging'
 
-/** Max live child panes one pane may have spawned. */
-export const SPAWN_MAX_CHILDREN_PER_PARENT = 3
-/** Max AI CLI panes (terminal excluded) across the whole workspace. */
-export const SPAWN_MAX_CLI_PANES = 8
-/** Max spawn-chain depth: user-opened pane = 0, its spawns = 1, theirs = 2. */
-export const SPAWN_MAX_DEPTH = 2
+/** Advisory threshold for live child panes one pane has spawned — crossing it
+ *  does not block the spawn, it just adds a note to the result. */
+export const SPAWN_ADVISORY_CHILDREN_PER_PARENT = 3
+/** Advisory threshold for AI CLI panes (terminal excluded) across the whole
+ *  workspace — crossing it does not block the spawn, it just adds a note. */
+export const SPAWN_ADVISORY_CLI_PANES = 8
+/** Advisory threshold for spawn-chain depth: user-opened pane = 0, its spawns
+ *  = 1, theirs = 2. Crossing it does not block the spawn, it just adds a note
+ *  about how hard the chain will be to trace. */
+export const SPAWN_ADVISORY_DEPTH = 2
 
 export interface SpawnGateContext {
   /** Allowed agent keys (agentSpecs minus the plain-shell terminal). */
@@ -26,11 +35,42 @@ export interface SpawnGateContext {
 }
 
 export type SpawnGateResult =
-  | { ok: true; agentKey: string; name: string; task: string }
+  | { ok: true; agentKey: string; name: string; task: string; advisories?: string[] }
   | { ok: false; reason: string }
 
-/** Validate one spawn request against the whitelist, naming rules, quotas and
- *  the depth limit. Returns the normalized fields on success. */
+/** The advisory notes for one spawn's volume context (chain depth, children
+ *  per parent, workspace CLI panes) — never a rejection, just what would be
+ *  reported back on a successful spawn. Pulled out of evaluateSpawnRequest so
+ *  a caller that bypasses the gate (e.g. ui.pane.create) can still surface
+ *  the same notes. */
+export function spawnAdvisoriesFor(
+  ctx: Pick<SpawnGateContext, 'parentDepth' | 'parentChildCount' | 'cliPaneCount'>,
+): string[] {
+  const advisories: string[] = []
+  if (ctx.parentDepth >= SPAWN_ADVISORY_DEPTH) {
+    advisories.push(
+      `spawn 鏈深度即將達到 ${ctx.parentDepth + 1}（建議值 ${SPAWN_ADVISORY_DEPTH}）：鏈太深時，` +
+        `孫代 pane 的產出很難回溯到最初的請求者，追蹤與除錯會變困難`,
+    )
+  }
+  if (ctx.parentChildCount >= SPAWN_ADVISORY_CHILDREN_PER_PARENT) {
+    advisories.push(
+      `此 pane 即將啟動第 ${ctx.parentChildCount + 1} 個子 pane（建議值 ${SPAWN_ADVISORY_CHILDREN_PER_PARENT}）`,
+    )
+  }
+  if (ctx.cliPaneCount >= SPAWN_ADVISORY_CLI_PANES) {
+    advisories.push(
+      `此工作區已有 ${ctx.cliPaneCount} 個 CLI pane（建議值 ${SPAWN_ADVISORY_CLI_PANES}）；` +
+        `每個約佔用 250–500MB 記憶體，數量偏多時請留意系統負載`,
+    )
+  }
+  return advisories
+}
+
+/** Validate one spawn request against the whitelist, naming rules and
+ *  correctness checks — the only things that reject. Volume (children per
+ *  parent, workspace CLI panes, chain depth) never rejects; past its advisory
+ *  threshold it's reported back in `advisories` on the success result. */
 export function evaluateSpawnRequest(
   req: ParsedSpawnRequest,
   ctx: SpawnGateContext,
@@ -44,29 +84,35 @@ export function evaluateSpawnRequest(
     return { ok: false, reason: `名稱「${name}」已被其他 pane 使用，請換一個名稱` }
   }
   if (!req.task) return { ok: false, reason: 'task 欄位不可為空' }
-  if (ctx.parentDepth >= SPAWN_MAX_DEPTH) {
-    return { ok: false, reason: `spawn 鏈深度已達上限（${SPAWN_MAX_DEPTH}），此 pane 不可再啟動子 pane` }
-  }
-  if (ctx.parentChildCount >= SPAWN_MAX_CHILDREN_PER_PARENT) {
-    return { ok: false, reason: `此 pane 的子 pane 數已達上限（${SPAWN_MAX_CHILDREN_PER_PARENT}）` }
-  }
-  if (ctx.cliPaneCount >= SPAWN_MAX_CLI_PANES) {
-    return { ok: false, reason: `工作區 CLI pane 總數已達上限（${SPAWN_MAX_CLI_PANES}）` }
-  }
-  return { ok: true, agentKey: req.agent, name, task: req.task }
+
+  const advisories = spawnAdvisoriesFor(ctx)
+
+  return advisories.length > 0
+    ? { ok: true, agentKey: req.agent, name, task: req.task, advisories }
+    : { ok: true, agentKey: req.agent, name, task: req.task }
 }
 
-/** One spawn per turn: only the first block is evaluated; every extra block
- *  fails with an explanation for the requesting agent. */
+/** Evaluate every SPAWN block in a turn — no longer just the first. Each
+ *  request is checked against the running counts: a successful request bumps
+ *  `parentChildCount` and `cliPaneCount` for the next one in the same turn
+ *  (depth is unchanged — every spawn in a turn is the same parent's direct
+ *  child), so opening five panes in one turn sees its advisories cross
+ *  threshold partway through, not stay pinned at the turn's starting counts.
+ *  A rejected request does not bump anything — it never spawns. */
 export function evaluateTurnSpawns(
   requests: ParsedSpawnRequest[],
   ctx: SpawnGateContext,
 ): SpawnGateResult[] {
-  return requests.map((req, i) =>
-    i === 0
-      ? evaluateSpawnRequest(req, ctx)
-      : { ok: false, reason: '每個 turn 只處理第一個 SPAWN 區塊，此區塊已被忽略' },
-  )
+  let parentChildCount = ctx.parentChildCount
+  let cliPaneCount = ctx.cliPaneCount
+  return requests.map((req) => {
+    const result = evaluateSpawnRequest(req, { ...ctx, parentChildCount, cliPaneCount })
+    if (result.ok) {
+      parentChildCount++
+      cliPaneCount++
+    }
+    return result
+  })
 }
 
 /** Spawn-chain depth of a pane: number of `spawnedBy` links walkable from it.

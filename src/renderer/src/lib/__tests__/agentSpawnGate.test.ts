@@ -1,11 +1,12 @@
 import { describe, it, expect } from 'vitest'
 import {
-  SPAWN_MAX_CHILDREN_PER_PARENT,
-  SPAWN_MAX_CLI_PANES,
-  SPAWN_MAX_DEPTH,
+  SPAWN_ADVISORY_CHILDREN_PER_PARENT,
+  SPAWN_ADVISORY_CLI_PANES,
+  SPAWN_ADVISORY_DEPTH,
   evaluateSpawnRequest,
   evaluateTurnSpawns,
   computeSpawnDepth,
+  spawnAdvisoriesFor,
   type SpawnGateContext,
 } from '../agentSpawnGate'
 
@@ -56,52 +57,151 @@ describe('evaluateSpawnRequest', () => {
     if (!res.ok) expect(res.reason).toContain('task')
   })
 
-  it('enforces the spawn-chain depth limit', () => {
-    expect(evaluateSpawnRequest(goodReq, ctx({ parentDepth: SPAWN_MAX_DEPTH - 1 })).ok).toBe(true)
-    const res = evaluateSpawnRequest(goodReq, ctx({ parentDepth: SPAWN_MAX_DEPTH }))
-    expect(res.ok).toBe(false)
-    if (!res.ok) expect(res.reason).toContain('深度')
+  it('never rejects on volume: depth past the advisory threshold still spawns, with a note', () => {
+    const below = evaluateSpawnRequest(goodReq, ctx({ parentDepth: SPAWN_ADVISORY_DEPTH - 1 }))
+    expect(below.ok).toBe(true)
+    if (below.ok) expect(below.advisories).toBeUndefined()
+
+    const above = evaluateSpawnRequest(goodReq, ctx({ parentDepth: SPAWN_ADVISORY_DEPTH }))
+    expect(above.ok).toBe(true)
+    if (above.ok) {
+      expect(above.advisories?.length).toBeGreaterThan(0)
+      expect(above.advisories?.some((a) => a.includes('深度'))).toBe(true)
+    }
   })
 
-  it('enforces the per-parent child quota', () => {
-    expect(
-      evaluateSpawnRequest(goodReq, ctx({ parentChildCount: SPAWN_MAX_CHILDREN_PER_PARENT - 1 })).ok,
-    ).toBe(true)
+  it('never rejects on volume: child count past the advisory threshold still spawns, with a note', () => {
+    const below = evaluateSpawnRequest(
+      goodReq,
+      ctx({ parentChildCount: SPAWN_ADVISORY_CHILDREN_PER_PARENT - 1 }),
+    )
+    expect(below.ok).toBe(true)
+    if (below.ok) expect(below.advisories).toBeUndefined()
+
+    const above = evaluateSpawnRequest(
+      goodReq,
+      ctx({ parentChildCount: SPAWN_ADVISORY_CHILDREN_PER_PARENT }),
+    )
+    expect(above.ok).toBe(true)
+    if (above.ok) {
+      expect(above.advisories?.length).toBeGreaterThan(0)
+      expect(above.advisories?.some((a) => a.includes('子 pane'))).toBe(true)
+    }
+  })
+
+  it('never rejects on volume: workspace CLI pane count past the advisory threshold still spawns, with a note', () => {
+    const below = evaluateSpawnRequest(goodReq, ctx({ cliPaneCount: SPAWN_ADVISORY_CLI_PANES - 1 }))
+    expect(below.ok).toBe(true)
+    if (below.ok) expect(below.advisories).toBeUndefined()
+
+    const above = evaluateSpawnRequest(goodReq, ctx({ cliPaneCount: SPAWN_ADVISORY_CLI_PANES }))
+    expect(above.ok).toBe(true)
+    if (above.ok) {
+      expect(above.advisories?.length).toBeGreaterThan(0)
+      expect(above.advisories?.some((a) => a.includes('CLI pane'))).toBe(true)
+    }
+  })
+
+  it('combines advisories when multiple thresholds are crossed at once', () => {
     const res = evaluateSpawnRequest(
       goodReq,
-      ctx({ parentChildCount: SPAWN_MAX_CHILDREN_PER_PARENT }),
+      ctx({
+        parentDepth: SPAWN_ADVISORY_DEPTH,
+        parentChildCount: SPAWN_ADVISORY_CHILDREN_PER_PARENT,
+        cliPaneCount: SPAWN_ADVISORY_CLI_PANES,
+      }),
     )
-    expect(res.ok).toBe(false)
-    if (!res.ok) expect(res.reason).toContain('子 pane')
+    expect(res.ok).toBe(true)
+    if (res.ok) expect(res.advisories?.length).toBe(3)
+  })
+})
+
+describe('spawnAdvisoriesFor', () => {
+  it('returns the same notes evaluateSpawnRequest would attach, given the same counts', () => {
+    const c = { parentDepth: SPAWN_ADVISORY_DEPTH, parentChildCount: 0, cliPaneCount: 0 }
+    const direct = spawnAdvisoriesFor(c)
+    const viaGate = evaluateSpawnRequest(goodReq, ctx(c))
+    expect(viaGate.ok).toBe(true)
+    if (viaGate.ok) expect(direct).toEqual(viaGate.advisories)
   })
 
-  it('enforces the workspace-wide CLI pane quota', () => {
-    expect(evaluateSpawnRequest(goodReq, ctx({ cliPaneCount: SPAWN_MAX_CLI_PANES - 1 })).ok).toBe(true)
-    const res = evaluateSpawnRequest(goodReq, ctx({ cliPaneCount: SPAWN_MAX_CLI_PANES }))
-    expect(res.ok).toBe(false)
-    if (!res.ok) expect(res.reason).toContain('總數')
+  it('returns an empty array when nothing crosses a threshold', () => {
+    expect(spawnAdvisoriesFor({ parentDepth: 0, parentChildCount: 0, cliPaneCount: 0 })).toEqual([])
   })
 })
 
 describe('evaluateTurnSpawns', () => {
-  it('evaluates only the first block; extras fail with a one-per-turn reason', () => {
-    const second = { agent: 'codex', name: 'other', task: 'more' }
-    const results = evaluateTurnSpawns([goodReq, second, second], ctx())
-    expect(results[0].ok).toBe(true)
-    for (const res of results.slice(1)) {
-      expect(res.ok).toBe(false)
-      if (!res.ok) expect(res.reason).toContain('只處理第一個')
-    }
+  it('evaluates every block in the turn, not just the first', () => {
+    const requests = [
+      { agent: 'claude', name: 'worker-a', task: 'a' },
+      { agent: 'codex', name: 'worker-b', task: 'b' },
+      { agent: 'claude', name: 'worker-c', task: 'c' },
+    ]
+    const results = evaluateTurnSpawns(requests, ctx())
+    expect(results).toHaveLength(3)
+    expect(results.every((r) => r.ok)).toBe(true)
   })
 
-  it('still reports a failing first block', () => {
-    const results = evaluateTurnSpawns([{ ...goodReq, agent: 'gpt' }], ctx())
-    expect(results).toHaveLength(1)
-    expect(results[0].ok).toBe(false)
+  it('rejects each invalid block independently, without short-circuiting the rest', () => {
+    const requests = [
+      { agent: 'gpt', name: 'bad-agent', task: 'x' },
+      { agent: 'claude', name: 'worker-a', task: 'a' },
+      { agent: 'claude', name: '', task: 'x' },
+    ]
+    const results = evaluateTurnSpawns(requests, ctx())
+    expect(results.map((r) => r.ok)).toEqual([false, true, false])
   })
 
   it('returns empty for no requests', () => {
     expect(evaluateTurnSpawns([], ctx())).toEqual([])
+  })
+
+  it('accumulates parentChildCount and cliPaneCount across the turn, so an advisory appears once the running count crosses the threshold', () => {
+    // Starting one below both thresholds: the first two requests should stay
+    // clean, and only the third (which pushes the running counts to the
+    // threshold) should carry an advisory.
+    const requests = [
+      { agent: 'claude', name: 'worker-a', task: 'a' },
+      { agent: 'claude', name: 'worker-b', task: 'b' },
+      { agent: 'claude', name: 'worker-c', task: 'c' },
+    ]
+    const results = evaluateTurnSpawns(
+      requests,
+      ctx({
+        parentChildCount: SPAWN_ADVISORY_CHILDREN_PER_PARENT - 2,
+        cliPaneCount: SPAWN_ADVISORY_CLI_PANES - 2,
+      }),
+    )
+    expect(results.every((r) => r.ok)).toBe(true)
+    const [first, second, third] = results
+    if (first.ok) expect(first.advisories).toBeUndefined()
+    if (second.ok) expect(second.advisories).toBeUndefined()
+    if (third.ok) {
+      expect(third.advisories?.length).toBeGreaterThan(0)
+      expect(third.advisories?.some((a) => a.includes('子 pane'))).toBe(true)
+      expect(third.advisories?.some((a) => a.includes('CLI pane'))).toBe(true)
+    }
+  })
+
+  it('does not bump the running counts for a rejected request', () => {
+    const requests = [
+      { agent: 'gpt', name: 'bad-agent', task: 'x' }, // rejected: bad agent key
+      { agent: 'claude', name: 'worker-a', task: 'a' },
+    ]
+    const results = evaluateTurnSpawns(
+      requests,
+      ctx({ parentChildCount: SPAWN_ADVISORY_CHILDREN_PER_PARENT }),
+    )
+    expect(results[0].ok).toBe(false)
+    // The second request still sees the un-bumped starting count (already at
+    // threshold from ctx, not threshold+1) — proves the rejection above did
+    // not advance the running counter.
+    expect(results[1].ok).toBe(true)
+    if (results[1].ok) {
+      expect(
+        results[1].advisories?.some((a) => a.includes(`第 ${SPAWN_ADVISORY_CHILDREN_PER_PARENT + 1} 個子 pane`)),
+      ).toBe(true)
+    }
   })
 })
 
