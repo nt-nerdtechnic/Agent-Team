@@ -353,7 +353,7 @@ describe('resumeCommandPattern', () => {
 
   it('recognizes the resume command each subcommand-style vendor builds', () => {
     for (const agentKey of ['codex', 'muse']) {
-      const cmd = buildResumeCommand(agentKey, '4d4a11fe-b08a-46df-9f86-685589531e65')
+      const cmd = buildResumeCommand(agentKey, 'session-12345')
       expect(cmd).not.toBe('')
       expect(looksLikeResume(agentKey, cmd)).toBe(true)
       // With the flag appended it must still read as a resume, not a custom

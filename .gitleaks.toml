@@ -16,4 +16,5 @@ title = "Agent-Team gitleaks config"
   # Paths that only contain fixture / example data
   paths = [
     '''backend/tests/''',
+    '''__tests__/''',
   ]

@@ -3594,9 +3594,11 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
   // Pi COULD pin an id at launch (`pi --session-id` creates the session when
   // the id doesn't exist) but joins the marker camp for now; launch-time
   // pinning is a later unified refactor.
-  // Copilot COULD pin an id at launch too (`copilot --resume=<id>` creates the
-  // session when the id doesn't exist) but joins the marker camp for now;
-  // launch-time pinning is a later unified refactor.
+  // Copilot COULD pin an id at launch too, but via `copilot --session-id <id>`
+  // ("Resume an existing session or task by ID, or set the UUID for a new
+  // session" — 1.0.78 --help), NOT via the `--resume=<id>` this app spawns:
+  // 1.0.78 scopes --resume to an id that already exists. It joins the marker
+  // camp for now; launch-time pinning is a later unified refactor.
   // Cursor joins the marker camp: its create-chat pin path has a known hang
   // bug, so launch-time id pinning is not used.
   // Aider joins the marker camp: it has no session ids, but the typed marker
