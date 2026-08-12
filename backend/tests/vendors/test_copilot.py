@@ -1,13 +1,21 @@
-"""CopilotLogReader: cumulative modelMetrics deltas + workspace.yaml cwd
-+ dir-name session id + has_session + incremental + attribution binding.
+"""CopilotLogReader across BOTH storage generations.
 
-Fixture event shapes were captured live against copilot-cli 1.0.75.
+1.0.78+: the central ``<root>/session-store.db`` — usage-row token watermark,
+turn-row activity, marker binding, store failure tolerance.
+1.0.75:  per-session ``events.jsonl`` — cumulative modelMetrics deltas,
+workspace.yaml cwd, dir-name session id, incremental offsets.
+Plus the shared surface: has_session, path claiming, attribution binding.
+
+Fixture event shapes were captured live against copilot-cli 1.0.75; the store
+schema and its token-column semantics against 1.0.78 (schema_version 6).
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -17,6 +25,7 @@ from agent_team_backend.log_readers.base import TokenUsage
 from agent_team_backend.cli_vendors.copilot import (
     CopilotLogReader,
     _metrics_totals,
+    _reset_db_warning,
     copilot_root,
 )
 
@@ -118,6 +127,86 @@ def fake_copilot_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "copilot-home"
     monkeypatch.setenv("COPILOT_HOME", str(root))
     return root
+
+
+@pytest.fixture(autouse=True)
+def _rearm_store_warning() -> None:
+    """The store-read WARNING fires once per PROCESS; re-arm it per test."""
+    _reset_db_warning()
+
+
+# ─────────────────────────── 1.0.78 store fixtures ───────────────────────────
+
+# Only the columns the reader touches, in the live column order (schema_version
+# 6) so a positional SELECT mistake would surface here too.
+_STORE_SCHEMA = """
+CREATE TABLE sessions (
+    id TEXT PRIMARY KEY, cwd TEXT, repository TEXT, host_type TEXT,
+    branch TEXT, summary TEXT, created_at TEXT, updated_at TEXT);
+CREATE TABLE turns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+    turn_index INTEGER NOT NULL, user_message TEXT, assistant_response TEXT,
+    timestamp TEXT, UNIQUE(session_id, turn_index));
+CREATE TABLE assistant_usage_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+    turn_index INTEGER, agent_id TEXT, parent_tool_call_id TEXT,
+    model TEXT NOT NULL, input_tokens INTEGER, output_tokens INTEGER,
+    cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+    reasoning_tokens INTEGER, total_nano_aiu INTEGER, request_multiplier REAL,
+    duration_ms INTEGER, time_to_first_token_ms INTEGER,
+    inter_token_latency_ms INTEGER, initiator TEXT, api_endpoint TEXT,
+    reasoning_effort TEXT, finish_reason TEXT, content_filter_triggered INTEGER,
+    token_details_json TEXT, created_at TEXT);
+"""
+
+
+def _store(root: Path) -> Path:
+    """Create (once) and return <root>/session-store.db."""
+    root.mkdir(parents=True, exist_ok=True)
+    db = root / "session-store.db"
+    if not db.exists():
+        con = sqlite3.connect(db)
+        con.executescript(_STORE_SCHEMA)
+        con.commit()
+        con.close()
+    return db
+
+
+def _exec(db: Path, sql: str, params: tuple = ()) -> None:
+    con = sqlite3.connect(db)
+    con.execute(sql, params)
+    con.commit()
+    con.close()
+
+
+def _add_session(db: Path, sid: str = _SID, cwd: str = _CWD) -> None:
+    _exec(db, "INSERT INTO sessions (id, cwd, created_at) VALUES (?, ?, ?)",
+          (sid, cwd, _TS))
+
+
+def _add_turn(db: Path, sid: str = _SID, index: int = 0, user: str = "hi",
+              assistant: str = "ok", ts: str = _TS) -> None:
+    _exec(db, "INSERT INTO turns (session_id, turn_index, user_message, "
+              "assistant_response, timestamp) VALUES (?, ?, ?, ?, ?)",
+          (sid, index, user, assistant, ts))
+
+
+def _add_usage(db: Path, sid: str = _SID, *, input_tokens: int = 19898,
+               output_tokens: int = 39, cache_read: int = 0,
+               cache_write: int = 19889, reasoning: int = 20,
+               model: str = "claude-haiku-4.5", ts: str = _TS) -> None:
+    """One assistant_usage_events row.
+
+    Defaults reproduce the live row measured against 1.0.78: input_tokens
+    19898 ALREADY equals 9 raw input + 0 cache_read + 19889 cache_write, and
+    output_tokens 39 already includes the 20 reasoning tokens.
+    """
+    _exec(db, "INSERT INTO assistant_usage_events (session_id, turn_index, "
+              "model, input_tokens, output_tokens, cache_read_tokens, "
+              "cache_write_tokens, reasoning_tokens, created_at) "
+              "VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?)",
+          (sid, model, input_tokens, output_tokens, cache_read, cache_write,
+           reasoning, ts))
 
 
 # ─────────────────────────── root / layout ───────────────────────────────────
@@ -495,12 +584,20 @@ def test_marker_in_user_message_binds_pane(
     assert binding.workspace_path == "/ws"
 
 
-def test_single_candidate_fallback_binds_without_marker(
+def test_single_candidate_fallback_still_binds_a_markerless_session(
     copilot_attr: tuple[Attribution, Path],
 ) -> None:
-    """A lone fresh pane still captures its new session when the marker is
-    absent (e.g. the injection lost the startup timing race)."""
+    """Copilot binds through the shared-store path, but attribution must FALL
+    THROUGH when that scan finds nothing.
+
+    Copilot's at-pane marker is typed into the TUI, so injection can lose the
+    startup race and leave no marker anywhere. Returning unconditionally from
+    the shared-db path stranded such a pane forever — and an unbound pane
+    resumes with an unknown id, which copilot answers by silently opening a
+    blank new session.
+    """
     attr, root = copilot_attr
+    assert CopilotLogReader.binds_new_session_single_candidate is True
     attr.register_pane("p1", vendor="copilot", cwd="/ws", workspace_path="/ws",
                        session_marker="at-pane:p1")
     f = _write_session(root, sid="sess-new", cwd="/ws", events=[
@@ -511,22 +608,46 @@ def test_single_candidate_fallback_binds_without_marker(
     assert binding is not None
     assert binding.pane_id == "p1"
     assert binding.resume_id == "sess-new"
-    # Announce-once: a later watcher event for the same session is silent.
-    assert attr.maybe_announce_session(_usage("sess-new", f)) is None
 
 
-def test_fallback_ignores_baseline_sessions(
+def test_single_candidate_fallback_does_not_override_marker_binding(
     copilot_attr: tuple[Attribution, Path],
 ) -> None:
-    """A session that predates the pane's spawn is another conversation —
-    never fallback-bind it."""
+    """The fallback is a last resort: with two candidate panes it must stay
+    out of the way so marker matching can resolve them later."""
     attr, root = copilot_attr
-    f = _write_session(root, sid="sess-old", cwd="/ws", events=[
-        _session_start(cwd="/ws", sid="sess-old"), _user(),
-    ])
     attr.register_pane("p1", vendor="copilot", cwd="/ws", workspace_path="/ws",
                        session_marker="at-pane:p1")
-    assert attr.maybe_announce_session(_usage("sess-old", f)) is None
+    attr.register_pane("p2", vendor="copilot", cwd="/ws", workspace_path="/ws",
+                       session_marker="at-pane:p2")
+    f = _write_session(root, sid="sess-ambiguous", cwd="/ws", events=[
+        _session_start(cwd="/ws", sid="sess-ambiguous"), _user("no marker"),
+    ])
+
+    assert attr.maybe_announce_session(_usage("sess-ambiguous", f)) is None
+
+
+def test_marker_never_cross_binds_another_workspace(
+    copilot_attr: tuple[Attribution, Path],
+) -> None:
+    """A marker echoed by a session running in a different project must not
+    bind this pane — neither through the marker scan (Attribution's workspace
+    gate over the reader's cwd) nor through the single-candidate fallback the
+    marker scan now falls through to, which gates on the same cwd.
+
+    The probe carries cwd="/other" because that is what the session sink
+    builds: _on_session_file fills usage.cwd from reader.cwd_from_file(path),
+    i.e. this session's workspace.yaml — not the pane's.
+    """
+    attr, root = copilot_attr
+    attr.register_pane("p1", vendor="copilot", cwd="/ws", workspace_path="/ws",
+                       session_marker="at-pane:p1")
+    f = _write_session(root, sid="sess-elsewhere", cwd="/other", events=[
+        _session_start(cwd="/other", sid="sess-elsewhere"),
+        _user("hi <!-- agent-team-session: at-pane:p1 -->"),
+    ])
+    assert attr.maybe_announce_session(
+        _usage("sess-elsewhere", f, cwd="/other")) is None
 
 
 def test_workspace_attribution_via_workspace_yaml_cwd(
@@ -548,3 +669,435 @@ def test_workspace_attribution_via_workspace_yaml_cwd(
     ])
     usage2 = reader.parse_session_file(f2, set())[0]
     assert attr.attribute(usage2).workspace_path is None
+
+
+# ══════════════════════ 1.0.78+ central session store ════════════════════════
+
+# ─────────────────────────── claiming / layout ───────────────────────────────
+
+def test_root_is_claimed_so_the_store_is_seen(fake_copilot_root: Path) -> None:
+    """project_dirs() must be the ROOT, not session-state: claims_path() and
+    watch_dirs() derive from it, and session-store.db sits one level above
+    session-state. Scoping to session-state is exactly what left 1.0.78
+    sessions unread."""
+    reader = CopilotLogReader()
+    db = _store(fake_copilot_root)
+    events = _write_session(fake_copilot_root, sid="sid-old")
+
+    assert reader.project_dirs() == [fake_copilot_root]
+    assert reader.claims_path(db.resolve()) is True
+    assert reader.claims_path(events.resolve()) is True
+    assert set(reader.session_files()) == {db, events}
+    # The store spans every workspace, so it can never be scoped away.
+    assert db in reader.session_files_for_workspace("/nowhere")
+
+
+def test_store_session_id_from_path_and_unrelated_root_files(
+    fake_copilot_root: Path,
+) -> None:
+    """The store gets a non-empty pseudo id purely so the session sink
+    proceeds to marker binding (grok.db does the same); everything else under
+    the root stays '' so no bogus resume id is ever coined."""
+    reader = CopilotLogReader()
+    db = _store(fake_copilot_root)
+    assert reader.session_id_from_path(db) == "session-store"
+    assert reader.cwd_from_file(db) == ""
+    for name in ("config.json", "settings.json", "vscode.session.metadata.cache.json"):
+        assert reader.session_id_from_path(fake_copilot_root / name) == ""
+
+
+def test_unrelated_root_files_parse_to_nothing(fake_copilot_root: Path) -> None:
+    """Widening project_dirs() routes ~/.copilot/config.json here too; every
+    parse path must no-op on it rather than treat it as a session file."""
+    reader = CopilotLogReader()
+    fake_copilot_root.mkdir(parents=True, exist_ok=True)
+    cfg = fake_copilot_root / "config.json"
+    cfg.write_text('{"lastLoggedInUser": {"login": "me"}}', encoding="utf-8")
+    assert reader.parse_session_file(cfg, set()) == []
+    assert reader.parse_activity(cfg, set()) == []
+    parsed = reader.parse_incremental(cfg, {})
+    assert parsed.events == []
+    assert parsed.checkpoint == {}
+
+
+# ─────────────────────────── store token parsing ─────────────────────────────
+
+def test_store_token_columns_are_already_folded(fake_copilot_root: Path) -> None:
+    """input_tokens ALREADY includes cache read+write and output_tokens
+    already includes reasoning (measured: 19898 == 9 + 0 + 19889, matching
+    that session's 1.0.75 events.jsonl byte for byte). Re-adding the cache
+    columns here would double-count, so they pass straight through."""
+    reader = CopilotLogReader()
+    db = _store(fake_copilot_root)
+    _add_session(db)
+    _add_usage(db)
+
+    events = reader.parse_session_file(db, set())
+    assert len(events) == 1
+    ev = events[0]
+    assert ev.vendor == "copilot"
+    assert ev.input_tokens == 19898
+    assert ev.output_tokens == 39
+    assert ev.cwd == _CWD
+    assert ev.session_id == _SID
+    assert ev.model == "claude-haiku-4.5"
+    assert ev.timestamp == _TS
+    assert ev.dedup_key == "copilot_usage::1"
+
+
+def test_store_wins_over_the_same_sessions_events_jsonl(
+    fake_copilot_root: Path,
+) -> None:
+    """One run recorded twice must be credited once.
+
+    1.0.75 wrote BOTH the store and events.jsonl for the same session
+    (measured: sessions.created_at 1ms before the events.jsonl session.start,
+    identical totals). The two branches' dedup_keys AND file_paths differ, so
+    no downstream dedup can tell they describe the same tokens — the store is
+    the authority and the events.jsonl file yields nothing at all, tokens and
+    activity alike.
+    """
+    reader = CopilotLogReader()
+    db = _store(fake_copilot_root)
+    _add_session(db)
+    _add_usage(db, input_tokens=100, output_tokens=10)
+    _add_turn(db)
+    f = _write_session(fake_copilot_root, events=[
+        _session_start(), _user("hi"), _assistant("ok"),
+        _event("assistant.turn_end", {}),
+        _shutdown(input=100, cache_read=0, cache_write=0, output=10),
+    ])
+
+    store_events = reader.parse_session_file(db, set())
+    assert [(e.input_tokens, e.output_tokens) for e in store_events] == [(100, 10)]
+    assert reader.parse_session_file(f, set()) == []
+    assert reader.parse_incremental(f, {}).events == []
+    assert reader.parse_activity(f, set()) == []
+
+
+def test_events_jsonl_still_read_when_the_store_lacks_the_session(
+    fake_copilot_root: Path,
+) -> None:
+    """The store only owns the sessions it actually lists: one holding a
+    different session leaves the events.jsonl fallback in charge."""
+    reader = CopilotLogReader()
+    db = _store(fake_copilot_root)
+    _add_session(db, sid="a-different-session")
+    f = _write_session(fake_copilot_root, events=[
+        _shutdown(input=100, cache_read=0, cache_write=0, output=10),
+    ])
+
+    events = reader.parse_session_file(f, set())
+    assert [(e.input_tokens, e.output_tokens) for e in events] == [(100, 10)]
+
+
+def test_store_zero_token_rows_are_skipped(fake_copilot_root: Path) -> None:
+    reader = CopilotLogReader()
+    db = _store(fake_copilot_root)
+    _add_session(db)
+    _add_usage(db, input_tokens=0, output_tokens=0, cache_read=0,
+               cache_write=0, reasoning=0)
+    assert reader.parse_session_file(db, set()) == []
+
+
+def test_store_incremental_watermark_never_recounts(
+    fake_copilot_root: Path,
+) -> None:
+    """Live per-API-call rows: each poll credits only rows above the row-id
+    watermark, so a long-running session accrues tokens without ever
+    re-counting what it already reported."""
+    reader = CopilotLogReader()
+    db = _store(fake_copilot_root)
+    _add_session(db)
+    _add_usage(db, input_tokens=100, output_tokens=10)
+
+    p1 = reader.parse_incremental(db, {})
+    assert [(e.input_tokens, e.output_tokens) for e in p1.events] == [(100, 10)]
+    assert p1.checkpoint["kind"] == "sqlite"
+    assert p1.checkpoint["row_id"] == 1
+    # Same store again: nothing new.
+    assert reader.parse_incremental(db, p1.checkpoint).events == []
+
+    _add_usage(db, input_tokens=40, output_tokens=5)
+    p2 = reader.parse_incremental(db, p1.checkpoint)
+    assert [(e.input_tokens, e.output_tokens) for e in p2.events] == [(40, 5)]
+    assert p2.checkpoint["row_id"] == 2
+    assert reader.parse_incremental(db, p2.checkpoint).events == []
+    # Totals credited == totals written, exactly once.
+    assert sum(e.input_tokens for e in p1.events + p2.events) == 140
+
+
+def test_store_watermark_rollback_reanchors_without_rescan(
+    fake_copilot_root: Path,
+) -> None:
+    """If the store is rebuilt/truncated under the same inode the watermark
+    outruns MAX(id). Re-anchor to the new max — rescanning from 0 would credit
+    the surviving history a second time."""
+    reader = CopilotLogReader()
+    db = _store(fake_copilot_root)
+    _add_session(db)
+    for _ in range(3):
+        _add_usage(db, input_tokens=100, output_tokens=10)
+    p1 = reader.parse_incremental(db, {})
+    assert len(p1.events) == 3
+    assert p1.checkpoint["row_id"] == 3
+
+    _exec(db, "DELETE FROM assistant_usage_events WHERE id > 1")
+    p2 = reader.parse_incremental(db, p1.checkpoint)
+    assert p2.events == []
+    assert p2.checkpoint["row_id"] == 1  # re-anchored, not reset to 0
+
+    _add_usage(db, input_tokens=7, output_tokens=3)  # reuses id 2
+    p3 = reader.parse_incremental(db, p2.checkpoint)
+    assert [(e.input_tokens, e.output_tokens) for e in p3.events] == [(7, 3)]
+
+
+def test_store_replacement_resets_the_watermark(fake_copilot_root: Path) -> None:
+    """A different inode is a different store — start from the beginning."""
+    reader = CopilotLogReader()
+    db = _store(fake_copilot_root)
+    _add_session(db)
+    _add_usage(db, input_tokens=100, output_tokens=10)
+    p1 = reader.parse_incremental(db, {})
+    assert len(p1.events) == 1
+
+    replacement = fake_copilot_root / "replacement.db"
+    con = sqlite3.connect(replacement)
+    con.executescript(_STORE_SCHEMA)
+    con.commit()
+    con.close()
+    _add_session(replacement, sid="sid-fresh", cwd=_CWD)
+    _add_usage(replacement, sid="sid-fresh", input_tokens=55, output_tokens=6)
+    os.replace(replacement, db)
+
+    p2 = reader.parse_incremental(db, p1.checkpoint)
+    assert [(e.input_tokens, e.output_tokens) for e in p2.events] == [(55, 6)]
+
+
+# ─────────────────────────── store activity ──────────────────────────────────
+
+def test_store_turn_row_emits_user_active_then_turn_complete(
+    fake_copilot_root: Path,
+) -> None:
+    """A `turns` row IS the turn boundary and carries both sides of it, so it
+    yields the user's agent_active (pane auto-naming) followed by
+    turn_complete carrying assistant_response (inter-CLI messaging)."""
+    reader = CopilotLogReader()
+    db = _store(fake_copilot_root)
+    _add_session(db)
+    _add_turn(db, user="fix the login bug", assistant="all done")
+
+    events = reader.parse_activity(db, set())
+    assert [(e.event_type, e.detail) for e in events] == [
+        ("agent_active", "user"),
+        ("turn_complete", "turn_row"),
+    ]
+    assert events[0].text == "fix the login bug"
+    assert events[1].text == "all done"
+    # A real, parseable timestamp: the frontend dedups messaging turns by it
+    # and treats an unparseable one as always-fresh (resend + replay).
+    assert all(e.timestamp == _TS for e in events)
+    assert all(e.session_id == _SID and e.cwd == _CWD for e in events)
+
+
+def test_store_usage_rows_are_in_turn_heartbeats(fake_copilot_root: Path) -> None:
+    """assistant_usage_events land DURING a turn, so they keep the pane marked
+    active before any turn row exists — and turn_complete still closes the
+    batch when both arrive in one poll."""
+    reader = CopilotLogReader()
+    seen: set[str] = set()
+    db = _store(fake_copilot_root)
+    _add_session(db)
+    _add_usage(db)
+
+    mid_turn = reader.parse_activity(db, seen)
+    assert [(e.event_type, e.detail) for e in mid_turn] == [
+        ("agent_active", "assistant"),
+    ]
+    _add_usage(db)
+    _add_turn(db)
+    closing = reader.parse_activity(db, seen)
+    assert [(e.event_type, e.detail) for e in closing] == [
+        ("agent_active", "assistant"),
+        ("agent_active", "user"),
+        ("turn_complete", "turn_row"),
+    ]
+    # Re-polling an unchanged store emits nothing.
+    assert reader.parse_activity(db, seen) == []
+
+
+def test_store_marker_bootstrap_turn_carries_no_pane_name(
+    fake_copilot_root: Path,
+) -> None:
+    """The injected "<...>"-prefixed marker bootstrap must not become the
+    pane's auto-name (shared user_prompt_text filter)."""
+    reader = CopilotLogReader()
+    db = _store(fake_copilot_root)
+    _add_session(db)
+    _add_turn(db, index=0, user="<!-- agent-team-session: at-pane:p1 -->")
+    _add_turn(db, index=1, user="p" * 600)
+
+    texts = [e.text for e in reader.parse_activity(db, set())
+             if e.detail == "user"]
+    assert texts == ["", "p" * 500]
+
+
+# ─────────────────────────── store marker binding ────────────────────────────
+
+def test_find_sessions_by_marker_reads_turn_user_messages(
+    fake_copilot_root: Path,
+) -> None:
+    reader = CopilotLogReader()
+    db = _store(fake_copilot_root)
+    _add_session(db, sid="sess-a", cwd="/proj/a")
+    _add_session(db, sid="sess-b", cwd="/proj/b")
+    _add_turn(db, sid="sess-a", user="hi <!-- agent-team-session: at-pane:p1 -->")
+    _add_turn(db, sid="sess-b", user="hi <!-- agent-team-session: at-pane:p2 -->")
+
+    found = reader.find_sessions_by_marker(["at-pane:p2", "at-pane:p9"])
+    assert found == {"at-pane:p2": ("sess-b", "/proj/b")}
+    assert reader.find_sessions_by_marker([]) == {}
+
+
+def test_find_sessions_by_marker_falls_back_to_events_jsonl(
+    fake_copilot_root: Path,
+) -> None:
+    """1.0.75 layouts have no store at all, and Attribution's shared-db path
+    returns before the per-file marker path can run — so the events.jsonl scan
+    has to live here or old sessions stop binding entirely."""
+    reader = CopilotLogReader()
+    _write_session(fake_copilot_root, sid="sess-old", cwd="/proj/old", events=[
+        _session_start(cwd="/proj/old", sid="sess-old"),
+        _user("hi <!-- agent-team-session: at-pane:p1 -->"),
+    ])
+    assert not (fake_copilot_root / "session-store.db").exists()
+    assert reader.find_sessions_by_marker(["at-pane:p1"]) == {
+        "at-pane:p1": ("sess-old", "/proj/old"),
+    }
+
+
+def test_store_marker_binds_pane_end_to_end(
+    copilot_attr: tuple[Attribution, Path],
+) -> None:
+    """Attribution's shared-store path resolves the marker to the session id
+    `copilot --resume=<id>` accepts."""
+    attr, root = copilot_attr
+    db = _store(root)
+    attr.register_pane("p1", vendor="copilot", cwd="/ws", workspace_path="/ws",
+                       session_marker="at-pane:p1")
+    attr.register_pane("p2", vendor="copilot", cwd="/ws", workspace_path="/ws",
+                       session_marker="at-pane:p2")
+    _add_session(db, sid="sess-two", cwd="/ws")
+    _add_turn(db, sid="sess-two",
+              user="hi <!-- agent-team-session: at-pane:p2 -->")
+
+    binding = attr.maybe_announce_session(_usage("session-store", db, cwd=""))
+    assert binding is not None
+    assert binding.pane_id == "p2"
+    assert binding.resume_id == "sess-two"
+    assert binding.workspace_path == "/ws"
+
+
+# ─────────────────────────── failure tolerance ───────────────────────────────
+
+def test_store_failures_never_raise_and_fall_back_to_events_jsonl(
+    fake_copilot_root: Path,
+) -> None:
+    """A corrupt/locked/schema-drifted store is "no new data this cycle": the
+    reader stays silent-safe AND the events.jsonl branch keeps working."""
+    reader = CopilotLogReader()
+    fake_copilot_root.mkdir(parents=True, exist_ok=True)
+    db = fake_copilot_root / "session-store.db"
+    db.write_bytes(b"this is not a sqlite database at all")
+    f = _write_session(fake_copilot_root, events=[
+        _shutdown(input=7, cache_read=0, cache_write=0, output=3),
+    ])
+
+    assert reader.parse_session_file(db, set()) == []
+    assert reader.parse_activity(db, set()) == []
+    assert reader.parse_incremental(db, {}).events == []
+    assert reader.find_sessions_by_marker(["at-pane:p1"]) == {}
+    # The old path is untouched by the store's failure.
+    assert [(e.input_tokens, e.output_tokens)
+            for e in reader.parse_session_file(f, set())] == [(7, 3)]
+
+
+def test_store_failure_warns_exactly_once(
+    fake_copilot_root: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The 1.0.78 move went unnoticed for weeks because this reader never said
+    anything when its input vanished. A store read that fails must leave one
+    WARNING in the app log — and only one, so a locked store can't spam it."""
+    reader = CopilotLogReader()
+    fake_copilot_root.mkdir(parents=True, exist_ok=True)
+    db = fake_copilot_root / "session-store.db"
+    db.write_bytes(b"not sqlite")
+
+    with caplog.at_level(logging.WARNING,
+                         logger="agent_team_backend.log_readers.copilot"):
+        for _ in range(3):
+            reader.parse_session_file(db, set())
+            reader.parse_activity(db, set())
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    assert "session-store" in warnings[0].getMessage()
+
+
+def test_missing_store_is_not_a_failure(
+    fake_copilot_root: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No store = an older CLI (or none installed), which is normal and must
+    not warn."""
+    reader = CopilotLogReader()
+    _write_session(fake_copilot_root, sid="sid-old")
+    with caplog.at_level(logging.WARNING,
+                         logger="agent_team_backend.log_readers.copilot"):
+        assert reader.find_sessions_by_marker(["at-pane:p1"]) == {}
+        assert reader.session_files() == [
+            fake_copilot_root / "session-state" / "sid-old" / "events.jsonl",
+        ]
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+# ─────────────────────────── shared surface ──────────────────────────────────
+
+def test_has_session_prefers_store_turns(fake_copilot_root: Path) -> None:
+    """A store session only counts once it has a turn: resuming a zero-turn
+    session restores nothing, the same failure `--resume=<stale-id>` silently
+    produces. events.jsonl stays the 1.0.75 fallback."""
+    reader = CopilotLogReader()
+    db = _store(fake_copilot_root)
+    _add_session(db, sid="sid-empty")
+    _add_session(db, sid="sid-real")
+    _add_turn(db, sid="sid-real")
+
+    assert reader.has_session("sid-real") is True
+    assert reader.has_session("sid-empty") is False
+    assert reader.has_session("sid-unknown") is False
+    _write_session(fake_copilot_root, sid="sid-legacy")
+    assert reader.has_session("sid-legacy") is True
+
+
+def test_workspace_and_pane_match_normalize_symlinked_roots(
+    fake_copilot_root: Path, tmp_path: Path,
+) -> None:
+    """sessions.cwd records the CLI's RESOLVED launch dir (macOS: /private/tmp/…)
+    while a pane may carry the symlink form (/tmp/…); a plain string compare
+    would drop every such event."""
+    reader = CopilotLogReader()
+    real = tmp_path / "real-workspace"
+    real.mkdir()
+    link = tmp_path / "linked-workspace"
+    link.symlink_to(real)
+
+    db = _store(fake_copilot_root)
+    _add_session(db, sid="sid-link", cwd=str(real))
+    _add_usage(db, sid="sid-link", input_tokens=11, output_tokens=2)
+    usage = reader.parse_session_file(db, set())[0]
+
+    assert reader.workspace_match(usage, str(link)) is True
+    assert reader.workspace_match(usage, str(real)) is True
+    assert reader.workspace_match(usage, str(tmp_path / "elsewhere")) is False
+    assert reader.workspace_match(usage, "") is False
+    assert reader.pane_cwd_match(usage, str(link), "p1") is True
+    assert reader.pane_cwd_match(usage, str(tmp_path / "elsewhere"), "p1") is False

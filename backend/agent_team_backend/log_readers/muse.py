@@ -1,13 +1,25 @@
-"""Placeholder — muse ships no log reader yet.
-
-Every registered vendor needs a module here: ``test_cli_vendors_registry``
-keeps this package's module set equal to the registry's key set, so a vendor
-whose reader is not written yet still declares its slot. Muse Code's local
-conversation-log format has not been verified against a real installation, so
-``cli_vendors.muse`` leaves ``make_log_reader`` unset and this module exports
-nothing.
+"""Re-export shim — muse's reader lives in ``cli_vendors.muse`` (one file per
+vendor). Lazy for the same reason as the qwen shim: an eager re-import would
+re-enter the vendor module mid-initialization when the import chain starts
+from the registry.
 """
 
 from __future__ import annotations
 
-__all__: list[str] = []
+from typing import Any
+
+_EXPORTS = (
+    "MuseLogReader",
+    "muse_data_root",
+    "muse_sessions_root",
+)
+
+__all__ = list(_EXPORTS)
+
+
+def __getattr__(name: str) -> Any:
+    if name in _EXPORTS:
+        from ..cli_vendors import muse as _vendor
+
+        return getattr(_vendor, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

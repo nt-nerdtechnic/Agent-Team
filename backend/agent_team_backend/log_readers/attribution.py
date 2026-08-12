@@ -354,7 +354,16 @@ class Attribution:
             shared_db_reader is not None
             and shared_db_reader.binds_shared_db_by_marker
         ):
-            return self._bind_shared_db_by_marker(usage)
+            binding = self._bind_shared_db_by_marker(usage)
+            # A shared-db vendor whose marker injection lost the startup race
+            # has no marker to find, so returning unconditionally here would
+            # leave that pane permanently unbound (copilot types its marker
+            # into the TUI). Fall through to the single-candidate fallback
+            # when the vendor declares it. Inert for the other shared-db
+            # vendors (grok/opencode/cursor): none of them declare it.
+            if binding or not shared_db_reader.binds_new_session_single_candidate:
+                return binding
+            return self._bind_new_session_single_candidate(usage)
         # Tuple = vendors not yet migrated to reader hooks; a migrated
         # vendor's reader declares binds_by_marker_file instead.
         marker_reader = self._readers.get(usage.vendor)

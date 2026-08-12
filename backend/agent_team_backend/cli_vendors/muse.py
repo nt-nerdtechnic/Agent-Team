@@ -1,29 +1,87 @@
-"""Meta Muse Code — spawn, install detection and resume-command parsing.
+"""Meta Muse Code — spawn, install detection, resume parsing and log reader.
 
 Muse Code is a terminal coding agent Meta released in beta for macOS and
 Linux; it installs from a shell script rather than a package manager and is
-driven by the ``muse`` binary (``muse exec`` for headless runs).
+driven by the ``muse`` binary (``muse exec`` for headless runs). Resuming from
+the CLI is the subcommand ``muse resume <id>``, which is the shape
+``resume_id_from_command`` parses back out.
 
-Meta's public documentation (https://dev.meta.ai/docs/muse-code/, checked
-2026-08-11) now covers auth, permissions, interactive use, configuration and
-headless operation, so the one resume fact it states exactly is wired up:
-resuming from the CLI is the subcommand ``muse resume <id>``, which is the
-shape ``resume_id_from_command`` parses back out.
+Session log layout (data root = ``$XDG_DATA_HOME``, default
+``~/.local/share``)::
 
-Every other capability stays at its default, which the app reads as
-"unsupported for this vendor" and degrades gracefully around:
+  <data-root>/muse/sessions/<YYYY>/<MM>/<DD>/<session-id>/session.jsonl
+  <data-root>/muse/sessions/.../<session-id>/subagent/<child-id>/session.jsonl
+  <data-root>/muse/sessions/.../<session-id>/tool-outputs/
 
-* ``session_path`` / ``session_exists`` — the docs describe a session as an
-  append-only JSONL event log and offer ``--no-session-log`` to skip it, but
-  they never state where that log lands, and the layout reported outside the
-  docs (``sessions/<Y>/<M>/<D>/<opaque-dir>/session.jsonl``) gives no rule for
-  locating a KNOWN id's file. A preflight that guesses wrong vetoes resumes
-  that would have worked, which is worse than no preflight; with both unset
-  the check passes through instead.
-* ``make_log_reader`` — no real ``session.jsonl`` sample exists here to
-  validate fields against, and a guessed reader emits plausible-looking but
-  wrong activity/token signals. Deferred until a sample from a real
-  installation is available.
+The three date levels are the LOCAL date the session opened, and the session
+DIRECTORY's name is the session id (every log file is named session.jsonl).
+
+Every line is an envelope::
+
+  {"schema_version":1,"id":"…","stream":{"kind":"session","id":"<session-id>"},
+   "sequence":42,"recorded_at":1786491820389652,"record_type":"event",
+   "payload_type":"runtime.session","payload":{"kind":"run","event":{…}}}
+
+``stream.id`` equals the directory name and is the only id ``muse resume``
+accepts. The ids INSIDE the payload — ``event.record.owner.session_id``,
+``command_intake``'s ``command_id`` and ``session_stream.id`` — are internal
+COMMAND ids and differ from it (observed: directory ``b3ef50f0-…`` alongside
+``owner.session_id`` ``4c39ad2b-…``); binding to one of those makes every
+resume fail, so the session id is only ever taken from the directory name.
+
+``recorded_at`` is a MICROsecond unix timestamp (16 digits) and ``sequence``
+increases monotonically.
+
+Field map (every entry verified against real session files):
+
+  cwd            payload_type ``runtime.session.metadata``
+                 -> ``payload.record.workspace_root``
+  user prompt    payload_type ``runtime.command_intake.received``
+                 -> ``payload.record.command.prompt``, only when
+                 ``payload.record.command.kind == "turn_submit"``
+  assistant text ``event.kind == "assistant_message_committed"``
+                 -> ``event.text``
+  turn end       ``event.kind == "terminal"`` -> ``event.terminal``
+                 (observed "completed"/"failed"; also ``reason``,
+                 ``turn_duration_ms``) — an EXPLICIT end-of-turn record, so
+                 nothing here infers a turn boundary from silence
+  tokens         ``event.kind == "goal_usage_attribution"`` ->
+                 ``event.record.quantity.{input,output,cached,reasoning}_tokens``
+                 deduped on ``event.record.usage_id``
+
+Token mapping into TokenUsage (cache folded into input, reasoning into output)::
+
+  input_tokens  = quantity.input_tokens  + quantity.cached_tokens
+  output_tokens = quantity.output_tokens + quantity.reasoning_tokens
+
+UNVERIFIED — this addition and the requester_kind filter below are the two
+token decisions no real sample has ever exercised. Every
+``goal_usage_attribution`` row in every local session is ALL ZERO (they were
+recorded with ``--provider echo``), so ``_main_usage`` returns None for all of
+them and the entire token path has only ever run on synthetic test fixtures.
+The direction is a guess in both places, and the copilot reader is the standing
+warning: its fields looked equally addable and turned out to be pre-folded, so
+adding them would have doubled every number. Re-verify against a session from a
+REAL provider before trusting these figures — see ``_main_usage``.
+
+Only rows with ``event.record.owner.requester_kind == "main"`` are counted:
+a subagent's usage is attributed into the PARENT log too, and the child's own
+``subagent/<id>/session.jsonl`` repeats it, so counting the non-main rows —
+or the child files — would double-count. ``event.kind == "model_completed"``
+carries the same figures per model call (``event.usage.*`` plus
+``duration_ms``) and is deliberately not counted for the same reason.
+``quantity.reported`` is a bool the log carries but nothing here filters on:
+an unreported row that is genuinely empty is already dropped by the
+all-zero check.
+
+Kickoff markers work: ``at-pane:<id>`` lands verbatim in the intake record's
+prompt, so marker binding reads it straight out of the file.
+
+Capabilities still unset on purpose:
+
+* ``session_path`` — a known id maps to a directory name, but not to a single
+  path: the three date levels are the (unknown) day the session opened. The
+  discoverable form is ``session_exists``, which globs those levels.
 * credential fields, ``login_home_env``, ``fetch_usage`` — Meta documents
   ``META_API_KEY``, ``muse auth set`` and ``muse logout``, but not where a
   stored credential lives, and no env var relocating the config home
@@ -31,9 +89,523 @@ Every other capability stays at its default, which the app reads as
   dashboard only; there is no CLI usage command to call.
 """
 
-import re
+from __future__ import annotations
 
+import json
+import logging
+import os
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from ..log_readers.base import (
+    ActivityEvent,
+    IncrementalParseResult,
+    LogReader,
+    TokenUsage,
+    read_jsonl_tail,
+    user_prompt_text,
+)
 from .base import Dep, VendorSpec, command_text
+
+log = logging.getLogger("agent_team_backend.log_readers.muse")
+
+_SESSION_FILE = "session.jsonl"
+_SUBAGENT_DIR = "subagent"
+#: runtime.session.metadata is the log's first record; a short head scan finds
+#: workspace_root without reading a session that has grown to megabytes.
+_METADATA_SCAN_LINES = 20
+_RECENT_KEYS_MAX = 64
+#: Sentinel prefix inside parse_activity's seen_keys set: the assistant text
+#: and the terminal record are separate LINES, so the text has to survive
+#: between calls (line dedup means a later call never re-reads it).
+_TEXT_PREFIX = "muse_text::"
+_TEXT_MAX_CHARS = 4_000
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+#: runtime.session event kinds that prove the agent is doing work. Muse logs
+#: its internal task graph in the same stream, so this is a whitelist rather
+#: than "every run event": the diagnostic/configuration kinds
+#: (context_block_diagnostic, model_request_configured, task_stream_linked,
+#: model_input_trace_recorded, resource_usage_sampled, …) say nothing about
+#: progress. `side_effect_intent` is muse's closest analogue to a tool_use
+#: record — it is where an actual side effect is declared.
+_ACTIVE_EVENT_KINDS = frozenset({
+    "started",
+    "assistant_message_committed",
+    "side_effect_intent",
+    "model_completed",
+    "completed",
+    "failed",
+})
+
+
+def muse_data_root() -> Path:
+    """Muse's XDG data directory (``$XDG_DATA_HOME``, default
+    ``~/.local/share``) — the parent of ``sessions/``."""
+    env = (os.environ.get("XDG_DATA_HOME") or "").strip()
+    base = Path(env) if env else Path.home() / ".local" / "share"
+    return base / "muse"
+
+
+def muse_sessions_root() -> Path:
+    """Root holding the ``<YYYY>/<MM>/<DD>/<session-id>/`` session tree."""
+    return muse_data_root() / "sessions"
+
+
+def _is_main_session_file(path: Path) -> bool:
+    """True for a MAIN session's log, false for a subagent's and for siblings.
+
+    A subagent log sits at ``<session>/subagent/<child>/session.jsonl``, so its
+    grandparent is literally named ``subagent`` while a main session's
+    grandparent is the day directory. Everything else in the session dir
+    (.session.lock, cron.db, tool-outputs/) fails the filename test.
+    """
+    return path.name == _SESSION_FILE and path.parent.parent.name != _SUBAGENT_DIR
+
+
+def _same_path(a: str, b: str) -> bool:
+    """Path equality tolerant of symlinked roots.
+
+    ``workspace_root`` records the RESOLVED launch dir (measured:
+    ``/private/tmp/…`` on macOS) while a pane may carry the symlink form
+    (``/tmp/…``), so a plain string compare drops those events.
+    """
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    try:
+        return os.path.realpath(a) == os.path.realpath(b)
+    except OSError:
+        return False
+
+
+def _iso_from_micros(value: Any) -> str:
+    """``recorded_at`` (microsecond unix timestamp) as ISO 8601 ('' when
+    unusable). Activity events must carry the record's OWN time: the frontend
+    dedups messaging turns by timestamp and treats an unparseable one as
+    always-fresh, which would resend a turn after a backend restart."""
+    try:
+        micros = int(value)
+    except (TypeError, ValueError):
+        return ""
+    try:
+        return datetime.fromtimestamp(micros / 1_000_000, timezone.utc).isoformat()
+    except (OSError, OverflowError, ValueError):
+        return ""
+
+
+def _int(v: Any) -> int:
+    try:
+        return max(0, int(v))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _cap_text(text: str) -> str:
+    if len(text) <= _TEXT_MAX_CHARS:
+        return text
+    half = _TEXT_MAX_CHARS // 2
+    return f"{text[:half]}\n…\n{text[-half:]}"
+
+
+def _read_sentinel(seen_keys: set[str], prefix: str) -> str:
+    for k in seen_keys:
+        if k.startswith(prefix):
+            return k[len(prefix):]
+    return ""
+
+
+def _write_sentinel(seen_keys: set[str], prefix: str, value: str) -> None:
+    seen_keys.difference_update({k for k in seen_keys if k.startswith(prefix)})
+    if value:
+        seen_keys.add(f"{prefix}{value}")
+
+
+def _run_event(rec: dict) -> dict | None:
+    """The ``payload.event`` of a ``runtime.session`` envelope (None for any
+    other payload_type, and for the run-start envelope that has no event)."""
+    if rec.get("payload_type") != "runtime.session":
+        return None
+    payload = rec.get("payload")
+    event = payload.get("event") if isinstance(payload, dict) else None
+    return event if isinstance(event, dict) else None
+
+
+def _payload_record(rec: dict) -> dict | None:
+    """``payload.record`` of a non-run envelope (metadata, command_intake)."""
+    payload = rec.get("payload")
+    record = payload.get("record") if isinstance(payload, dict) else None
+    return record if isinstance(record, dict) else None
+
+
+def _turn_prompt(rec: dict) -> str | None:
+    """The user's prompt from a ``runtime.command_intake.received`` envelope,
+    or None when this is not a submitted turn (slash commands, cancels and
+    other intake kinds are not user turns)."""
+    if rec.get("payload_type") != "runtime.command_intake.received":
+        return None
+    record = _payload_record(rec)
+    command = record.get("command") if record is not None else None
+    if not isinstance(command, dict) or command.get("kind") != "turn_submit":
+        return None
+    return str(command.get("prompt") or "")
+
+
+def _main_usage(event: dict) -> tuple[str, int, int] | None:
+    """``(usage_id, input_tokens, output_tokens)`` for a MAIN-requester
+    ``goal_usage_attribution``; None for every other event, for a subagent's
+    attribution row, and for an all-zero row (nothing to add).
+
+    NOT VERIFIED AGAINST REAL DATA — two guesses live in this function:
+
+    * the ADDITIVE fold (``cached_tokens`` into input, ``reasoning_tokens``
+      into output) assumes the quantity fields are disjoint components. If muse
+      instead reports pre-folded totals — which is exactly what copilot turned
+      out to do, measured — every number here is doubled.
+    * the ``requester_kind == "main"`` filter assumes subagent usage arrives
+      under a different value. Only ``"main"`` has ever been observed locally;
+      no subagent attribution row has been seen at all, so nothing proves this
+      filter drops anything (or that it does not drop rows it should keep).
+
+    Both are unexercised because every local ``goal_usage_attribution`` row is
+    all zero (``--provider echo`` runs), which this function rejects before
+    either decision matters. Re-verify both against a session recorded with a
+    real provider; do not treat the tests covering them as evidence — their
+    fixtures were written from the same assumptions.
+    """
+    if event.get("kind") != "goal_usage_attribution":
+        return None
+    record = event.get("record")
+    if not isinstance(record, dict):
+        return None
+    owner = record.get("owner")
+    if not isinstance(owner, dict) or owner.get("requester_kind") != "main":
+        return None
+    quantity = record.get("quantity")
+    if not isinstance(quantity, dict):
+        return None
+    usage_id = str(record.get("usage_id") or "")
+    if not usage_id:
+        return None
+    input_tokens = _int(quantity.get("input_tokens")) + _int(
+        quantity.get("cached_tokens"))
+    output_tokens = _int(quantity.get("output_tokens")) + _int(
+        quantity.get("reasoning_tokens"))
+    if input_tokens == 0 and output_tokens == 0:
+        return None
+    return usage_id, input_tokens, output_tokens
+
+
+class MuseLogReader(LogReader):
+    vendor: str = "muse"
+
+    def project_dirs(self) -> list[Path]:
+        root = muse_sessions_root()
+        return [root] if root.is_dir() else []
+
+    def watch_dirs(self) -> list[Path]:
+        """Watch the stable ancestor that exists.
+
+        The date directories are created per local day — a session started
+        after the backend booted lands in a directory nobody subscribed to —
+        and on a machine that has never run muse the whole tree is missing.
+        Watches are recursive, so subscribing ``sessions/`` covers every future
+        day, and falling back to the muse data root covers the first run ever
+        (the watcher re-checks this list each rescan, so the narrower root is
+        picked up as soon as it appears).
+        """
+        root = muse_sessions_root()
+        if root.is_dir():
+            return [root]
+        parent = root.parent
+        return [parent] if parent.is_dir() else []
+
+    def session_files(self) -> list[Path]:
+        """Every MAIN session log: exactly ``<Y>/<M>/<D>/<id>/session.jsonl``.
+
+        The four-level glob already stops at the session directory, so the
+        deeper ``subagent/<child>/session.jsonl`` logs are never enumerated;
+        the explicit filter keeps that intent visible (counting a child log
+        would double-count its tokens, which the parent already attributes).
+        """
+        out: list[Path] = []
+        for root in self.project_dirs():
+            try:
+                for f in root.glob(f"*/*/*/*/{_SESSION_FILE}"):
+                    if f.is_file() and _is_main_session_file(f):
+                        out.append(f)
+            except OSError as err:
+                log.debug("glob %s failed: %s", root, err)
+        return out
+
+    def cwd_from_file(self, path: Path) -> str:
+        """The session's exact cwd, from the ``runtime.session.metadata``
+        record's ``workspace_root`` (the log's first row)."""
+        try:
+            with path.open(encoding="utf-8", errors="replace") as fh:
+                for _ in range(_METADATA_SCAN_LINES):
+                    line = fh.readline()
+                    if not line:
+                        break
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(rec, dict):
+                        continue
+                    if rec.get("payload_type") != "runtime.session.metadata":
+                        continue
+                    record = _payload_record(rec)
+                    if record is not None:
+                        return str(record.get("workspace_root") or "")
+        except OSError as err:
+            log.debug("open %s failed: %s", path, err)
+        return ""
+
+    def session_id_from_path(self, path: Path) -> str:
+        """The session id is the DIRECTORY name — every log file is called
+        session.jsonl, so the stem carries nothing. Returns '' for siblings
+        and for subagent logs so the resume-binding sink never coins an id
+        that ``muse resume`` would reject."""
+        return path.parent.name if _is_main_session_file(path) else ""
+
+    def has_session(self, session_id: str) -> bool:
+        """True when some day directory holds ``<session_id>/session.jsonl``.
+
+        The date levels are not derivable from an id, so they are globbed. The
+        id is shape-checked first: it is interpolated into a glob pattern, and
+        a stray ``*`` or ``[`` would otherwise match a different session.
+        """
+        session_id = session_id.strip()
+        if not session_id or not _SESSION_ID_RE.match(session_id):
+            return False
+        for root in self.project_dirs():
+            try:
+                for f in root.glob(f"*/*/*/{session_id}/{_SESSION_FILE}"):
+                    if f.is_file():
+                        return True
+            except OSError:
+                continue
+        return False
+
+    def parse_session_file(
+        self, path: Path, seen_keys: set[str]
+    ) -> list[TokenUsage]:
+        out: list[TokenUsage] = []
+        cwd = self.cwd_from_file(path)
+        session_id = self.session_id_from_path(path)
+        try:
+            fh = path.open(encoding="utf-8")
+        except OSError as err:
+            log.debug("open %s failed: %s", path, err)
+            return out
+
+        with fh:
+            for line_no, raw in enumerate(fh, 1):
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    rec = json.loads(raw)
+                except json.JSONDecodeError:
+                    log.debug("%s:%d malformed JSON, skipping", path.name, line_no)
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                event = _run_event(rec)
+                if event is None:
+                    continue
+                usage = _main_usage(event)
+                if usage is None:
+                    continue
+                usage_id, input_tokens, output_tokens = usage
+                if usage_id in seen_keys:
+                    continue
+                seen_keys.add(usage_id)
+                out.append(TokenUsage(
+                    vendor="muse",
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cwd=cwd,
+                    session_id=session_id,
+                    file_path=str(path),
+                    dedup_key=usage_id,
+                    timestamp=_iso_from_micros(rec.get("recorded_at")),
+                ))
+        return out
+
+    def parse_incremental(
+        self,
+        path: Path,
+        checkpoint: dict,
+    ) -> IncrementalParseResult:
+        """Parse only complete JSONL records after the persisted byte offset.
+
+        Muse appends whole envelopes, so a byte offset plus a short recent
+        usage_id window guarantees no double count across a rotation.
+        """
+        if not _is_main_session_file(path):
+            return IncrementalParseResult([], dict(checkpoint))
+        records, final_checkpoint, rotated = read_jsonl_tail(path, checkpoint)
+        recent = (
+            [] if rotated
+            else [str(k) for k in checkpoint.get("recent_keys", [])][-_RECENT_KEYS_MAX:]
+        )
+        recent_set = set(recent)
+        out: list[TokenUsage] = []
+        session_id = self.session_id_from_path(path)
+        # The cwd lives in the log's FIRST record, which a tail read has
+        # normally already passed — read the head separately for it.
+        cwd = self.cwd_from_file(path)
+
+        for end, rec in records:
+            if rec is None:
+                continue
+            event = _run_event(rec)
+            if event is None:
+                continue
+            usage = _main_usage(event)
+            if usage is None:
+                continue
+            usage_id, input_tokens, output_tokens = usage
+            if usage_id in recent_set:
+                continue
+            recent.append(usage_id)
+            recent = recent[-_RECENT_KEYS_MAX:]
+            recent_set = set(recent)
+            event_checkpoint = dict(final_checkpoint)
+            event_checkpoint["offset"] = end
+            event_checkpoint["recent_keys"] = list(recent)
+            out.append(TokenUsage(
+                vendor="muse",
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cwd=cwd,
+                session_id=session_id,
+                file_path=str(path),
+                dedup_key=usage_id,
+                timestamp=_iso_from_micros(rec.get("recorded_at")),
+                checkpoint=event_checkpoint,
+            ))
+
+        final_checkpoint["recent_keys"] = recent
+        return IncrementalParseResult(out, final_checkpoint)
+
+    def parse_activity(
+        self, path: Path, seen_keys: set[str]
+    ) -> list[ActivityEvent]:
+        """Emit `agent_active` for user prompts and work events, and
+        `turn_complete` on the explicit ``terminal`` record.
+
+        Muse writes a real end-of-turn record, so unlike qwen/pi nothing here
+        infers a boundary from silence — a pane parked on a long tool call or
+        a permission prompt is never mistaken for a finished one.
+
+        The turn's assistant text arrives on an EARLIER line than ``terminal``,
+        and line-level dedup means a later call will not re-read it, so the
+        text is carried in a seen_keys sentinel between calls and cleared once
+        a turn has claimed it.
+        """
+        if not _is_main_session_file(path):
+            return []
+        out: list[ActivityEvent] = []
+        cwd = self.cwd_from_file(path)
+        session_id = self.session_id_from_path(path)
+        last_text = _read_sentinel(seen_keys, _TEXT_PREFIX)
+
+        try:
+            fh = path.open(encoding="utf-8")
+        except OSError:
+            return out
+
+        with fh:
+            for line_no, raw in enumerate(fh, 1):
+                raw = raw.strip()
+                if not raw:
+                    continue
+                key = f"act:{line_no}"
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                try:
+                    rec = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                ts = _iso_from_micros(rec.get("recorded_at"))
+
+                prompt = _turn_prompt(rec)
+                if prompt is not None:
+                    # detail="user" is part of the cross-end contract: the
+                    # frontend names a pane from the first user-prompt event.
+                    out.append(ActivityEvent(
+                        vendor="muse", event_type="agent_active",
+                        cwd=cwd, session_id=session_id, file_path=str(path),
+                        dedup_key=key, timestamp=ts, detail="user",
+                        text=user_prompt_text(prompt),
+                    ))
+                    continue
+
+                event = _run_event(rec)
+                if event is None:
+                    continue
+                kind = str(event.get("kind") or "")
+
+                if kind == "assistant_message_committed":
+                    reply = str(event.get("text") or "").strip()
+                    if reply:
+                        last_text = _cap_text(reply)
+
+                if kind in _ACTIVE_EVENT_KINDS:
+                    out.append(ActivityEvent(
+                        vendor="muse", event_type="agent_active",
+                        cwd=cwd, session_id=session_id, file_path=str(path),
+                        dedup_key=key, timestamp=ts, detail=kind,
+                    ))
+
+                if kind == "terminal":
+                    # Any terminal value ends the turn — the pane is idle
+                    # again whether the run completed or failed — and the
+                    # value itself rides in `detail`.
+                    out.append(ActivityEvent(
+                        vendor="muse", event_type="turn_complete",
+                        cwd=cwd, session_id=session_id, file_path=str(path),
+                        dedup_key=f"turn:{line_no}", timestamp=ts,
+                        detail=str(event.get("terminal") or ""),
+                        text=last_text,
+                    ))
+                    last_text = ""
+
+        _write_sentinel(seen_keys, _TEXT_PREFIX, last_text)
+        return out
+
+    # ---- attribution/watch hooks (see log_readers.base.LogReader) --------
+
+    #: `at-pane:<id>` lands verbatim in the intake record's prompt, near the
+    #: head of the file, so the generic marker read finds it.
+    binds_by_marker_file = True
+    emits_session_sink = True
+    #: A resumed session opens a NEW session directory and gets no kickoff
+    #: marker; the single-unbound-candidate fallback is what captures its id.
+    binds_new_session_single_candidate = True
+
+    def workspace_match(
+        self, usage: TokenUsage, ws_path: str,
+        owner_workspace: str | None = None,
+    ) -> bool | None:
+        # Reader emits cwd = metadata.workspace_root, the session's exact cwd
+        # in its RESOLVED form, so compare through realpath.
+        return _same_path(usage.cwd, ws_path)
+
+    def pane_cwd_match(
+        self, usage: TokenUsage, pane_cwd: str, pane_id: str
+    ) -> bool | None:
+        return _same_path(usage.cwd, pane_cwd)
+
 
 # ---- resume / session ------------------------------------------------------
 
@@ -46,12 +618,23 @@ def _resume_id_from_command(command) -> str:
     return m.group(1) if m else ""
 
 
+def _session_exists(workspace_path: str, session_id: str) -> bool:
+    # Sessions are filed by DATE, not by workspace, so the workspace argument
+    # cannot narrow the search; the reader globs the date levels for the
+    # session directory. `session_path` stays unset because the same fact cuts
+    # the other way: an id maps to a directory NAME, and only a scan can say
+    # which day it lives under, so there is no single path to return.
+    return MuseLogReader().has_session(session_id)
+
+
 # ---- vendor spec -----------------------------------------------------------
 
 SPEC = VendorSpec(
     key="muse",
     label="Muse Code",
     resume_id_from_command=_resume_id_from_command,
+    session_exists=_session_exists,
+    make_log_reader=MuseLogReader,
     install_dep=Dep(
         "muse", "Muse Code", "Meta Muse Code CLI", "agent_cli",
         ["muse", "--version"],

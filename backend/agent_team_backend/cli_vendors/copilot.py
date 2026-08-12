@@ -1,30 +1,97 @@
 """GitHub Copilot CLI conversation log reader.
 
-Layout (root = $COPILOT_HOME, default ~/.copilot):
-  <root>/session-state/<uuid>/events.jsonl    (dir name = session id — the
-  exact id accepted by `copilot --resume=<id>`)
-  <root>/session-state/<uuid>/workspace.yaml  (id / cwd / timestamps)
+TWO storage layouts live under the root ($COPILOT_HOME, default ~/.copilot);
+the reader dispatches on the file NAME:
 
-Structure captured live against copilot-cli 1.0.75. Every events.jsonl line
-is `{type, data, id, timestamp, parentId}` (ISO 8601 timestamps). Types this
-reader consumes:
-  * user.message       — data.content is the VERBATIM user text, so the
-                         kickoff's at-pane marker lands in the file.
+  <root>/session-store.db                     — every version (central SQLite)
+  <root>/session-state/<uuid>/events.jsonl    — 1.0.75 only (per-session JSONL)
+  <root>/session-state/<uuid>/workspace.yaml  — id / cwd / timestamps
+
+`<uuid>` (the session-state dir name, = sessions.id in the store) is the exact
+id `copilot --resume=<id>` accepts, in both layouts.
+
+They are NOT two generations that never overlap: 1.0.75 wrote BOTH. Measured
+on the local data for session e6495800-dfd4-4a75-b2ab-d70980f83b89:
+
+  events.jsonl session.start   copilotVersion 1.0.75  18:33:56.867Z
+  sessions.created_at (store)                         18:33:56.866Z
+  assistant_usage_events                              input 19898 / output 39
+  events.jsonl session.shutdown modelMetrics          input 19898 / output 39
+
+One run, one millisecond apart, identical totals. What 1.0.78 changed is only
+that it STOPPED writing events.jsonl — so a 1.0.75 session carries two
+complete, independent records of the same tokens. See "Never counted twice".
+
+── 1.0.78+: session-store.db ────────────────────────────────────────────────
+Copilot CLI 1.0.78 moved session data into one central SQLite store and stopped
+writing events.jsonl at session start: the only local events.jsonl records
+copilotVersion 1.0.75 in its own session.start line, while every session dir
+created afterwards has none. Every read path used to take events.jsonl as its
+ONLY input, so 1.0.78 sessions were silently invisible — no tokens, no
+agent_active, no turn_complete (which also broke pane auto-naming, marker
+binding, Agent History and inter-CLI messaging for Copilot panes).
+
+Tables consumed (schema_version 6):
+  * sessions(id, cwd, …)            — cwd, so workspace.yaml is not needed.
+  * turns(id, session_id, turn_index, user_message, assistant_response,
+    timestamp) — one row per completed turn. The row IS the turn boundary
+    (measured: turn row 18:34:04.115 vs the 1.0.75 assistant.turn_end
+    18:34:04.104), so unlike grok no idle-timeout inference is needed.
+    user_message is the VERBATIM user text, so kickoff at-pane markers land
+    here.
+  * assistant_usage_events(id AUTOINCREMENT, session_id, model, input_tokens,
+    output_tokens, cache_*_tokens, reasoning_tokens, created_at) — written per
+    API call, i.e. live during a turn. This also fixes the long-standing
+    events.jsonl defect where a long-running session showed 0 tokens until
+    shutdown/compaction.
+
+Token buckets (verified live against the local store, and byte-identical to
+the same session's 1.0.75 events.jsonl): input_tokens ALREADY includes
+cache_read_tokens + cache_write_tokens (19898 = 9 input + 0 cache_read +
+19889 cache_write, cross-checked against token_details_json), and
+output_tokens already includes reasoning_tokens. They therefore map STRAIGHT
+onto TokenUsage's cache-folded-into-input / reasoning-folded-into-output
+design — re-adding the cache columns would double-count.
+
+Known semantic difference vs the 1.0.75 path: the turn boundary and the user
+text only become visible when the turn ENDS, so pane auto-naming and marker
+binding land one turn later than they used to. Since the store now serves
+1.0.75 sessions too (see below), that latency applies to every Copilot pane.
+cursor / opencode already have comparable latency.
+
+── 1.0.75: events.jsonl (fallback only) ─────────────────────────────────────
+Every line is `{type, data, id, timestamp, parentId}` (ISO 8601). Types:
+  * user.message       — data.content is the VERBATIM user text.
   * assistant.message  — data.content / data.model (activity + turn text).
   * assistant.turn_end — explicit end-of-turn record → turn_complete.
   * session.shutdown   — data.modelMetrics.<model>.usage carries the run's
-                         token buckets; compaction events are expected to
-                         carry the same shape mid-run.
-
-Token buckets (verified 1.0.75): usage.inputTokens ALREADY includes
-cacheReadTokens + cacheWriteTokens, and usage.outputTokens already includes
-reasoningTokens — they map straight onto TokenUsage's cache-folded-into-input
-/ reasoning-folded-into-output design. Totals appear only on shutdown /
-compaction events and are point-in-time snapshots, so they are treated as
+                         token buckets; compaction events carry the same shape
+                         mid-run.
+usage.inputTokens already folds cacheRead+cacheWrite and usage.outputTokens
+already folds reasoning (same convention as the store). Totals appear only on
+shutdown / compaction and are point-in-time snapshots, so they are treated as
 CUMULATIVE like the Codex reader: emit the delta against the previous
 snapshot, and silently reset the baseline when totals shrink (session
 rotation, or a resumed run restarting its in-process counters — this never
 double-counts, at worst it undercounts a resumed run).
+
+Never counted twice: disjoint dedup_key prefixes are NOT a defence. The two
+branches differ in both dedup_key (`copilot_usage::` vs `copilot_cumulative::`)
+and file_path, and tokens_store dedups on dedup_key alone — so nothing
+downstream can tell that a 1.0.75 session's store rows and its events.jsonl
+snapshot describe the same tokens, and both would be credited. The store is
+therefore the single authority: the whole events.jsonl branch (tokens AND
+activity) bails out for a session id that `session-store.db` already lists in
+`sessions` (`_db_owns_session`). events.jsonl is read only when the store is
+missing, unreadable, or does not know the session — which also covers the
+never-ruled-out case of 1.0.78 creating events.jsonl lazily, since a session
+the store knows is served by the store either way.
+
+Concurrency: the copilot process owns the store's writer, so every connection
+here is read-only (`file:…?mode=ro`), short-lived and busy-tolerant — any
+sqlite error is "no new data this cycle". The FIRST such error also emits one
+WARNING, because this whole class of breakage went unnoticed for weeks
+precisely because the reader never said anything when its input vanished.
 """
 
 from __future__ import annotations
@@ -32,6 +99,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Iterable
 from pathlib import Path
 
 import yaml
@@ -70,11 +138,81 @@ log = logging.getLogger("agent_team_backend.log_readers.copilot")
 _CUM_PREFIX = "__cum__:"
 _TEXT_PREFIX = "__lasttext__:"
 
+#: 1.0.78+ central session store, directly under the root.
+_DB_NAME = "session-store.db"
+#: Row-fetch busy wait: long enough to ride out a copilot write transaction,
+#: short enough not to stall the watcher's drain thread (grok's budget).
+_BUSY_TIMEOUT_MS = 250
+
+_USAGE_SQL = """
+SELECT a.id, a.session_id, a.model, a.input_tokens, a.output_tokens,
+       a.created_at, COALESCE(s.cwd, '')
+FROM assistant_usage_events a
+LEFT JOIN sessions s ON s.id = a.session_id
+ORDER BY a.id
+"""
+
+_TURNS_SQL = """
+SELECT t.id, t.session_id, t.user_message, t.assistant_response, t.timestamp,
+       COALESCE(s.cwd, '')
+FROM turns t
+LEFT JOIN sessions s ON s.id = t.session_id
+ORDER BY t.id
+"""
+
+_SESSION_ROW_SQL = "SELECT 1 FROM sessions WHERE id = ? LIMIT 1"
+
+_MARKER_SQL = """
+SELECT t.session_id, t.user_message, COALESCE(s.cwd, '')
+FROM turns t
+LEFT JOIN sessions s ON s.id = t.session_id
+WHERE t.user_message LIKE '%at-pane:%'
+ORDER BY t.id
+"""
+
+#: One WARNING per process for a failed store read (see module docstring).
+_db_warned = False
+
+
+def _reset_db_warning() -> None:
+    """Test hook: re-arm the once-per-process store warning."""
+    global _db_warned
+    _db_warned = False
+
+
+def _warn_db_once(path: Path, err: object) -> None:
+    global _db_warned
+    if _db_warned:
+        return
+    _db_warned = True
+    log.warning(
+        "copilot session-store read failed (%s): %s — Copilot token/turn "
+        "tracking is degraded; the store schema may have changed",
+        path, err,
+    )
+
 
 def copilot_root() -> Path:
     """Copilot CLI's config/session root ($COPILOT_HOME, default ~/.copilot)."""
     env = os.environ.get("COPILOT_HOME")
     return Path(env) if env else Path.home() / ".copilot"
+
+
+def _same_path(a: str, b: str) -> bool:
+    """Path equality tolerant of symlinked roots.
+
+    ``sessions.cwd`` records the resolved path the CLI was launched in
+    (macOS: ``/private/tmp/…``) while a pane may carry the symlink form
+    (``/tmp/…``), so a plain string compare drops those events.
+    """
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    try:
+        return os.path.realpath(a) == os.path.realpath(b)
+    except OSError:
+        return False
 
 
 def _int(v) -> int:  # noqa: ANN001
@@ -155,21 +293,49 @@ class CopilotLogReader(LogReader):
     def _sessions_root(self) -> Path:
         return copilot_root() / "session-state"
 
+    def _db_path(self) -> Path:
+        return copilot_root() / _DB_NAME
+
     def project_dirs(self) -> list[Path]:
-        """The single session-state root (empty list when it doesn't exist)."""
-        default = self._sessions_root()
+        """The CLI root itself (empty list when it doesn't exist).
+
+        NOT session-state: the 1.0.78 store sits one level above it, and
+        claims_path()/watch_dirs() derive from this list — scoping to
+        session-state would leave session-store.db unclaimed and unwatched.
+        """
+        default = copilot_root()
         return [default] if default.is_dir() else []
 
     def session_files(self) -> list[Path]:
+        """The central store (1.0.78+) plus every events.jsonl (1.0.75)."""
         out: list[Path] = []
-        for root in self.project_dirs():
-            try:
-                for f in root.glob("*/events.jsonl"):
-                    if f.is_file():
-                        out.append(f)
-            except OSError as err:
-                log.debug("glob %s failed: %s", root, err)
+        db = self._db_path()
+        if db.is_file():
+            out.append(db)
+        root = self._sessions_root()
+        try:
+            for f in root.glob("*/events.jsonl"):
+                if f.is_file():
+                    out.append(f)
+        except OSError as err:
+            log.debug("glob %s failed: %s", root, err)
         return out
+
+    def _query(self, path: Path, sql: str, params: tuple = ()) -> list[tuple] | None:
+        """Short-lived read-only query. None = store unreadable this cycle
+        (missing / busy / locked / schema drift) — callers treat it as no
+        data, and the first failure warns once."""
+        try:
+            con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            try:
+                con.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+                return con.execute(sql, params).fetchall()
+            finally:
+                con.close()
+        except (sqlite3.Error, OSError) as err:
+            _warn_db_once(path, err)
+            log.debug("sqlite read %s failed: %s", path, err)
+            return None
 
     def _workspace_meta(self, path: Path) -> dict:
         """The session's sibling workspace.yaml ({} when unreadable)."""
@@ -181,43 +347,266 @@ class CopilotLogReader(LogReader):
         return rec if isinstance(rec, dict) else {}
 
     def cwd_from_file(self, path: Path) -> str:
+        # The store spans every workspace, so no single cwd names it; per-row
+        # cwd comes from the sessions JOIN instead.
+        if path.name == _DB_NAME:
+            return ""
         return str(self._workspace_meta(path).get("cwd") or "")
 
     def session_id_from_path(self, path: Path) -> str:
         """Id is the session dir name (what `copilot --resume=<id>` accepts),
-        NOT the stem — every session file is events.jsonl. Sibling files in
-        the session dir (session.db, workspace.yaml, checkpoints/) are not
+        NOT the stem — every 1.0.75 session file is events.jsonl. Sibling
+        files in the session dir (workspace.yaml, checkpoints/) are not
         session files → '' so the resume sink skips them instead of coining
-        bogus ids like "session" or "workspace"."""
+        bogus ids like "workspace".
+
+        The 1.0.78 store holds EVERY session, so no single id names it; it
+        returns its stem purely so the session sink proceeds to marker
+        binding (which resolves real ids from the db), exactly as grok's
+        grok.db does. Nothing consumes this value as a resume id.
+        """
+        if path.name == _DB_NAME:
+            return path.stem
         if path.name != "events.jsonl" or path.parent.parent.name != "session-state":
             return ""
         return path.parent.name
 
     def has_session(self, session_id: str) -> bool:
-        """True when <root>/session-state/<id>/events.jsonl exists. The
-        resume preflight uses this because `copilot --resume=<stale-id>`
-        would not fail — it silently starts a blank NEW session under that
-        UUID."""
+        """True when the id names a resumable session: a store turn (1.0.78+)
+        or an events.jsonl (1.0.75). The resume preflight uses this because
+        `copilot --resume=<stale-id>` would not fail — it silently starts a
+        blank NEW session under that UUID."""
         session_id = session_id.strip()
         if not session_id or "/" in session_id:
             return False
-        return any(
-            (root / session_id / "events.jsonl").is_file()
-            for root in self.project_dirs()
-        )
+        if _session_has_turns(session_id):
+            return True
+        return (self._sessions_root() / session_id / "events.jsonl").is_file()
 
     def session_files_for_workspace(self, workspace_path: str) -> list[Path]:
-        """Only sessions whose workspace.yaml cwd matches this workspace
-        (Copilot keys session dirs by uuid, not by cwd)."""
-        return [
+        """The store (it holds every workspace's sessions, so it can never be
+        scoped away) plus the events.jsonl files whose workspace.yaml cwd
+        matches — Copilot keys session dirs by uuid, not by cwd."""
+        out: list[Path] = []
+        db = self._db_path()
+        if db.is_file():
+            out.append(db)
+        out.extend(
             p for p in self.session_files()
-            if self.cwd_from_file(p) == workspace_path
-        ]
+            if p.name == "events.jsonl"
+            and _same_path(self.cwd_from_file(p), workspace_path)
+        )
+        return out
+
+    # ---- 1.0.78+ store ----------------------------------------------------
+
+    def _usage_from_row(
+        self, path: Path, row: tuple, checkpoint: dict | None = None
+    ) -> TokenUsage | None:
+        """One assistant_usage_events row → TokenUsage (None when empty).
+
+        input_tokens/output_tokens are used AS THEY STAND: the store already
+        folds cache read+write into input and reasoning into output (see the
+        module docstring's live cross-check), which is exactly TokenUsage's
+        convention. Adding the cache columns here would double-count.
+        """
+        row_id, session_id, model, inp, outp, created_at, cwd = row
+        input_tokens = _int(inp)
+        output_tokens = _int(outp)
+        if input_tokens == 0 and output_tokens == 0:
+            return None
+        return TokenUsage(
+            vendor="copilot",
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cwd=str(cwd or ""),
+            session_id=str(session_id or ""),
+            file_path=str(path),
+            # Prefix disjoint from the events.jsonl branch's
+            # "copilot_cumulative::". That is only a namespace, NOT the
+            # anti-double-count guard — _db_owns_session is (see docstring).
+            dedup_key=f"copilot_usage::{row_id}",
+            timestamp=str(created_at or ""),
+            model=str(model or ""),
+            checkpoint=dict(checkpoint or {}),
+        )
+
+    def _parse_db_session_file(
+        self, path: Path, seen_keys: set[str]
+    ) -> list[TokenUsage]:
+        rows = self._query(path, _USAGE_SQL)
+        if rows is None:
+            return []
+        out: list[TokenUsage] = []
+        for row in rows:
+            key = f"copilot_usage::{row[0]}"
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            event = self._usage_from_row(path, row)
+            if event is not None:
+                out.append(event)
+        return out
+
+    def _parse_db_incremental(
+        self, path: Path, checkpoint: dict
+    ) -> IncrementalParseResult:
+        try:
+            stat = path.stat()
+        except OSError:
+            return IncrementalParseResult([], dict(checkpoint))
+        identity = f"{stat.st_dev}:{stat.st_ino}"
+        replaced = bool(
+            checkpoint.get("identity") and checkpoint.get("identity") != identity
+        )
+        last_row_id = 0 if replaced else max(0, int(checkpoint.get("row_id") or 0))
+        rows = self._query(path, _USAGE_SQL.replace(
+            "ORDER BY a.id", f"WHERE a.id > {last_row_id} ORDER BY a.id"))
+        if rows is None:
+            return IncrementalParseResult([], dict(checkpoint))
+        if not rows and last_row_id:
+            max_rows = self._query(
+                path, "SELECT COALESCE(MAX(id), 0) FROM assistant_usage_events")
+            if max_rows is not None:
+                max_row_id = int(max_rows[0][0]) if max_rows else 0
+                if max_row_id < last_row_id:
+                    # Watermark dropped (store rebuilt / rotated under the same
+                    # inode): RE-ANCHOR, never rescan — everything at or below
+                    # the new max was already credited under the old numbering,
+                    # so rescanning would credit the whole history twice.
+                    last_row_id = max_row_id
+
+        out: list[TokenUsage] = []
+        next_row_id = last_row_id
+        for row in rows:
+            next_row_id = max(next_row_id, int(row[0]))
+            cursor = {"kind": "sqlite", "row_id": next_row_id, "identity": identity}
+            event = self._usage_from_row(path, row, cursor)
+            if event is not None:
+                out.append(event)
+        return IncrementalParseResult(
+            out, {"kind": "sqlite", "row_id": next_row_id, "identity": identity},
+        )
+
+    def _parse_db_activity(
+        self, path: Path, seen_keys: set[str]
+    ) -> list[ActivityEvent]:
+        """Store activity: usage rows are the in-turn heartbeat, turn rows are
+        the boundary.
+
+        A `turns` row appears only when the turn ENDS and carries both sides of
+        it, so each new row yields the user's `agent_active` (pane auto-naming
+        reads the first one) immediately followed by `turn_complete` carrying
+        assistant_response — the text the frontend parses the inter-CLI
+        messaging protocol out of. Heartbeats are emitted first so
+        turn_complete always closes the batch.
+
+        Consequence of the store's design: user text and turn boundaries are
+        one turn late compared with the 1.0.75 events.jsonl path, which saw
+        user.message the moment it was typed.
+        """
+        out: list[ActivityEvent] = []
+
+        usage_rows = self._query(path, _USAGE_SQL)
+        for row in usage_rows or []:
+            key = f"db_act:usage:{row[0]}"
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            out.append(ActivityEvent(
+                vendor="copilot", event_type="agent_active",
+                cwd=str(row[6] or ""), session_id=str(row[1] or ""),
+                file_path=str(path), dedup_key=key,
+                timestamp=str(row[5] or ""), detail="assistant",
+            ))
+
+        turn_rows = self._query(path, _TURNS_SQL)
+        for row_id, session_id, user_message, assistant_response, ts, cwd in turn_rows or []:
+            key = f"db_act:turn:{row_id}"
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            sid = str(session_id or "")
+            cwd = str(cwd or "")
+            ts = str(ts or "")
+            out.append(ActivityEvent(
+                vendor="copilot", event_type="agent_active",
+                cwd=cwd, session_id=sid, file_path=str(path), dedup_key=key,
+                timestamp=ts, detail="user",
+                text=user_prompt_text(str(user_message or "")),
+            ))
+            out.append(ActivityEvent(
+                vendor="copilot", event_type="turn_complete",
+                cwd=cwd, session_id=sid, file_path=str(path),
+                dedup_key=f"db_turn:{row_id}", timestamp=ts, detail="turn_row",
+                text=str(assistant_response or ""),
+            ))
+        return out
+
+    def find_sessions_by_marker(
+        self, markers: Iterable[str]
+    ) -> dict[str, tuple[str, str]]:
+        """marker → (session_id, session cwd) for kickoff markers.
+
+        The store's `turns.user_message` keeps the user's text verbatim, so the
+        at-pane marker lands there — but only once the turn ENDS, hence the
+        one-turn binding latency noted in the module docstring. Falls back to
+        scanning 1.0.75 events.jsonl files, which is the only marker source on
+        a CLI old enough to have no store (attribution's shared-db path
+        returns before the per-file marker path can run).
+        """
+        wanted = [m for m in markers if m]
+        if not wanted:
+            return {}
+        found: dict[str, tuple[str, str]] = {}
+        db = self._db_path()
+        if db.is_file():
+            for session_id, user_message, cwd in self._query(db, _MARKER_SQL) or []:
+                text = str(user_message or "")
+                for marker in wanted:
+                    if marker not in found and marker in text:
+                        found[marker] = (str(session_id or ""), str(cwd or ""))
+        if all(m in found for m in wanted):
+            return found
+        for events in self.session_files():
+            if events.name != "events.jsonl":
+                continue
+            try:
+                # Markers live in the first user turn; cap the read so a long
+                # session doesn't cost a full scan on every watcher event.
+                text = events.read_text(encoding="utf-8", errors="ignore")[:524_288]
+            except OSError:
+                continue
+            for marker in wanted:
+                if marker not in found and marker in text:
+                    found[marker] = (events.parent.name, self.cwd_from_file(events))
+        return found
+
+    # ---- 1.0.75 events.jsonl ----------------------------------------------
+
+    def _db_owns_session(self, path: Path) -> bool:
+        """True when the store already covers this events.jsonl's session.
+
+        1.0.75 wrote the store AND events.jsonl for the same run (see the
+        module docstring's measurement), and the two branches' events are
+        indistinguishable downstream — so whenever `sessions` lists the id,
+        the store is the authority and this file is skipped entirely.
+        A missing or unreadable store answers False, which keeps the
+        events.jsonl branch as the fallback it is meant to be.
+        """
+        session_id = path.parent.name
+        db = self._db_path()
+        if not session_id or not db.is_file():
+            return False
+        rows = self._query(db, _SESSION_ROW_SQL, (session_id,))
+        return bool(rows)
 
     def parse_session_file(
         self, path: Path, seen_keys: set[str]
     ) -> list[TokenUsage]:
-        if path.name != "events.jsonl":
+        if path.name == _DB_NAME:
+            return self._parse_db_session_file(path, seen_keys)
+        if path.name != "events.jsonl" or self._db_owns_session(path):
             return []
         try:
             fh = path.open(encoding="utf-8")
@@ -291,7 +680,14 @@ class CopilotLogReader(LogReader):
         emit nothing; when one lands, emit its delta against the persisted
         totals, which are a high-water mark: a downward blip emits nothing and
         leaves the baseline where it was.
+
+        The 1.0.78 store takes the row-watermark branch instead; anything else
+        under the root (config.json, logs) is not a session file.
         """
+        if path.name == _DB_NAME:
+            return self._parse_db_incremental(path, checkpoint)
+        if path.name != "events.jsonl" or self._db_owns_session(path):
+            return IncrementalParseResult([], dict(checkpoint))
         records, next_checkpoint, rotated = read_jsonl_tail(path, checkpoint)
         replaced = bool(
             rotated
@@ -365,7 +761,9 @@ class CopilotLogReader(LogReader):
         records, and `turn_complete` on assistant.turn_end — Copilot's
         explicit end-of-turn record — carrying the turn's last assistant text.
         """
-        if path.name != "events.jsonl":
+        if path.name == _DB_NAME:
+            return self._parse_db_activity(path, seen_keys)
+        if path.name != "events.jsonl" or self._db_owns_session(path):
             return []
         out: list[ActivityEvent] = []
         cwd = self.cwd_from_file(path)
@@ -444,15 +842,33 @@ class CopilotLogReader(LogReader):
 # ---- attribution/watch hooks ----------------------------------------------
 
 def _workspace_match(self, usage, ws_path, owner_workspace=None):
-    # Reader emits cwd = the session's workspace.yaml cwd.
-    return bool(usage.cwd and usage.cwd == ws_path)
+    # Reader emits cwd = sessions.cwd (1.0.78+) or the workspace.yaml cwd.
+    # Both are the CLI's resolved launch dir, so compare through realpath.
+    return _same_path(usage.cwd, ws_path)
 
 
 def _pane_cwd_match(self, usage, pane_cwd, pane_id):
-    return usage.cwd == pane_cwd
+    return _same_path(usage.cwd, pane_cwd)
 
 
-CopilotLogReader.binds_by_marker_file = True
+# Marker binding is reader-driven (find_sessions_by_marker) because the 1.0.78
+# store holds every session in one file — the same path grok/opencode/cursor
+# take. It supersedes binds_by_marker_file, which attribution never reaches
+# once binds_shared_db_by_marker is set; the events.jsonl marker scan lives in
+# find_sessions_by_marker instead so 1.0.75 layouts still bind.
+CopilotLogReader.binds_shared_db_by_marker = True
+# Reached when the shared-db marker scan finds nothing: attribution falls
+# through from binds_shared_db_by_marker to the single-candidate fallback.
+# It exists because copilot's at-pane marker is TYPED into the TUI (kickoff
+# dismisses the startup dialog, pastes, hits Enter) and can lose that race —
+# without a fallback the pane is never bound and the next restart runs
+# `copilot --resume=<unknown-id>`, which silently opens a blank new session.
+# Scope: it can only ever rescue an events.jsonl pane. A store-sourced event
+# carries usage.file_path = session-store.db, which already existed when the
+# pane registered, so reg.baseline_files filters it out of the candidate set.
+# Since _db_owns_session hands every store-known session to the store branch,
+# what is left is the install with no readable store at all — the pure 1.0.75
+# layout. Narrow, but the alternative is a pane that can never bind.
 CopilotLogReader.binds_new_session_single_candidate = True
 CopilotLogReader.emits_session_sink = True
 CopilotLogReader.workspace_match = _workspace_match
@@ -710,16 +1126,12 @@ def _session_has_turns(session_id: str) -> bool:
 
 
 def _session_exists(workspace_path: str, session_id: str) -> bool:
-    """Store first, events.jsonl second.
+    """Store first, events.jsonl second — same order (and same reasoning) as
+    CopilotLogReader.has_session.
 
-    KNOWN VERIFICATION GAP: we could not establish under read-only inspection
-    whether 1.0.78 still writes events.jsonl at all — locally only 1 of 7
-    session-state dirs has one, but the other 6 are zero-turn probe sessions
-    that would have no events either way. So the file check stays as the
-    back-compat fallback (older CLIs wrote only events.jsonl), and whether
-    CopilotLogReader now misses tokens/turns for real sessions still needs one
-    live session to settle. This function deliberately does not touch the
-    reader.
+    The file check stays as the back-compat fallback: 1.0.75 wrote only
+    events.jsonl, and read-only inspection could not rule out that 1.0.78
+    creates it lazily at the first user message.
     """
     return _session_has_turns(session_id) or _session_path(
         workspace_path, session_id
