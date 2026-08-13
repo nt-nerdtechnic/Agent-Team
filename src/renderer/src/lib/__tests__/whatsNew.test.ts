@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
+  WHATS_NEW,
   pickWhatsNew,
   pickText,
   whatsNewFor,
@@ -21,6 +22,32 @@ describe('cmpSemver', () => {
   })
 })
 
+describe('WHATS_NEW', () => {
+  // v0.1.78's announcement was once lost by writing the next release's notes
+  // over the existing entry instead of prepending a new one. Ordering and
+  // uniqueness both survive that mistake — only a gap check catches it.
+  it('announces every version with no gaps', () => {
+    const versions = WHATS_NEW.map((entry) => entry.version).sort(cmpSemver)
+    const missing: string[] = []
+    for (let i = 1; i < versions.length; i++) {
+      const [prevMajor, prevMinor, prevPatch] = versions[i - 1].split('.').map(Number)
+      const [major, minor, patch] = versions[i].split('.').map(Number)
+      // A minor or major bump restarts patch numbering, so the last patch of
+      // the previous line is unknowable here — only same-line pairs can gap.
+      if (major !== prevMajor || minor !== prevMinor) continue
+      for (let p = prevPatch + 1; p < patch; p++) missing.push(`${major}.${minor}.${p}`)
+    }
+    expect(missing).toEqual([])
+  })
+
+  it('has no duplicate versions', () => {
+    // The sibling of the gap above: an in-place edit can also leave two entries
+    // claiming the same version, which the gap check cannot see.
+    const versions = WHATS_NEW.map((entry) => entry.version)
+    expect(versions).toHaveLength(new Set(versions).size)
+  })
+})
+
 describe('pickWhatsNew', () => {
   it('returns the entry when the current version has one and it is unseen', () => {
     expect(pickWhatsNew('0.1.65', '')?.version).toBe('0.1.65')
@@ -33,7 +60,10 @@ describe('pickWhatsNew', () => {
   it('still fires for a later version whose update jumped past the entry', () => {
     // The module ships from a later release, so an entry authored under an
     // already-shipped version must still show to anyone updating past it.
-    expect(pickWhatsNew('0.1.66', '')?.version).toBe('0.1.65')
+    // Read the newest entry rather than naming a version: the list is now
+    // contiguous, so any hard-coded gap would close on the next release.
+    const newest = WHATS_NEW.reduce((a, b) => (cmpSemver(b.version, a.version) > 0 ? b : a))
+    expect(pickWhatsNew('9.9.9', '')?.version).toBe(newest.version)
   })
 
   it('does not show an announcement for a version not yet running', () => {

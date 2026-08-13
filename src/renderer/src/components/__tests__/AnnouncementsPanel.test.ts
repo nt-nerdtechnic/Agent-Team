@@ -107,6 +107,47 @@ describe('AnnouncementsPanel', () => {
     expect(wrapper.findAll('.an-acts')).toHaveLength(0)
   })
 
+  it('pages the feed behind a load-more button instead of rendering it all', async () => {
+    // 20 releases: the first page shows 8, then each click reveals 8 more.
+    const feed = Array.from({ length: 20 }, (_, i) => release(`0.1.${80 - i}`))
+    wrapper = mountPanel(feed)
+
+    expect(rowIds(wrapper)).toHaveLength(8)
+    expect(rowIds(wrapper)[0]).toBe('release:0.1.80')
+    // The label carries the remaining count, and is a real translation.
+    expect(wrapper.get('[data-act="load-more"]').text()).toBe(
+      i18n.global.t('announce.load-more', { count: 12 }),
+    )
+    expect(wrapper.get('[data-act="load-more"]').text()).not.toContain('announce.')
+
+    await wrapper.get('[data-act="load-more"]').trigger('click')
+    expect(rowIds(wrapper)).toHaveLength(16)
+
+    await wrapper.get('[data-act="load-more"]').trigger('click')
+    expect(rowIds(wrapper)).toHaveLength(20)
+    // Nothing left to reveal, so the button goes away.
+    expect(wrapper.findAll('[data-act="load-more"]')).toHaveLength(0)
+  })
+
+  it('loading more is not a row interaction and leaves the open row open', async () => {
+    const feed = Array.from({ length: 12 }, (_, i) => release(`0.1.${80 - i}`))
+    wrapper = mountPanel(feed)
+
+    await wrapper.get('[data-ann-id="release:0.1.80"]').trigger('click')
+    await wrapper.get('[data-act="load-more"]').trigger('click')
+
+    // Revealing the rest neither collapses the open row nor marks anything read.
+    expect(wrapper.findAll('.an-detail')).toHaveLength(1)
+    expect(wrapper.findAll('[data-ann-id="release:0.1.80"] .an-detail')).toHaveLength(1)
+    expect(wrapper.emitted('read')).toEqual([['release:0.1.80']])
+  })
+
+  it('offers no load-more button when the whole feed already fits', () => {
+    wrapper = mountPanel([release('0.1.77'), release('0.1.76')])
+
+    expect(wrapper.findAll('[data-act="load-more"]')).toHaveLength(0)
+  })
+
   it('shows an empty state when there is nothing to announce', () => {
     wrapper = mountPanel([])
 

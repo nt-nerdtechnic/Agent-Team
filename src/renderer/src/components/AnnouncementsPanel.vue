@@ -4,10 +4,10 @@
 //
 // Purely prop/emit driven: the feed and the updater actions live in App.vue, so
 // this component only decides layout, expansion and which button a row offers.
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import type { Announcement } from '../composables/useAnnouncements'
 
-defineProps<{ items: Announcement[] }>()
+const props = defineProps<{ items: Announcement[] }>()
 const emit = defineEmits<{
   close: []
   'mark-all-read': []
@@ -17,6 +17,18 @@ const emit = defineEmits<{
 }>()
 
 const expandedId = ref<string | null>(null)
+
+/** Rows rendered per page — the rest wait behind the load-more button. The
+ *  popover is v-if'd by its opener, so this resets on every open. */
+const PAGE_SIZE = 8
+const visibleCount = ref(PAGE_SIZE)
+
+const visibleItems = computed(() => props.items.slice(0, visibleCount.value))
+const remainingCount = computed(() => props.items.length - visibleItems.value.length)
+
+function loadMore(): void {
+  visibleCount.value += PAGE_SIZE
+}
 
 function toggle(item: Announcement): void {
   if (expandedId.value === item.id) {
@@ -53,7 +65,7 @@ function fmtTime(ts: number): string {
     <div class="an-list">
       <div v-if="items.length === 0" class="an-empty">{{ $t('announce.empty') }}</div>
       <div
-        v-for="item in items"
+        v-for="item in visibleItems"
         :key="item.id"
         class="an-row"
         :class="{ expanded: expandedId === item.id, unread: !item.read }"
@@ -91,6 +103,11 @@ function fmtTime(ts: number): string {
           </ul>
           <div v-if="item.note" class="an-note">{{ item.note }}</div>
         </div>
+      </div>
+      <div v-if="remainingCount > 0" class="an-more">
+        <button class="an-btn" data-act="load-more" @click="loadMore">
+          {{ $t('announce.load-more', { count: remainingCount }) }}
+        </button>
       </div>
     </div>
   </div>
@@ -160,6 +177,11 @@ function fmtTime(ts: number): string {
   padding: 20px 10px;
   text-align: center;
   color: var(--text-muted);
+}
+.an-more {
+  padding: 8px 10px;
+  display: flex;
+  justify-content: center;
 }
 .an-row {
   padding: 7px 10px;

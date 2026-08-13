@@ -4,7 +4,9 @@
 // hasn't seen that version's announcement yet — App.vue shows WhatsNewModal
 // once. To announce a future release (a rename, a headline feature, a migration
 // note, …), just add an entry: the modal machinery handles showing it a single
-// time, keyed on the app version.
+// time, keyed on the app version. Prepend a NEW entry — retitling the one on
+// top loses the release it belonged to (v0.1.78 was lost that way), which the
+// no-gaps test in whatsNew.test.ts now catches.
 //
 // Content lives here (not in the i18n JSON) so an announcement is one self
 // contained edit. Each field carries both supported locales; pickText falls
@@ -138,6 +140,33 @@ export const WHATS_NEW: WhatsNewEntry[] = [
           '對話記錄保護與重連 Session 標題繼承：修復從 Claude/Grok 環境啟動 Navide 時對話紀錄遺失問題，並在恢復舊 Session 時自動繼承面板 `auto_name` 標籤。',
         'en-US':
           'Transcript protection & session auto-name inheritance: fixed transcript loss when launching inside Claude/Grok environments, and carried `auto_name` labels on session resumes.',
+      },
+    ],
+  },
+  {
+    version: '0.1.78',
+    title: {
+      'zh-TW': '對話記錄遺失修復、跨工作區訊息持久化與 CLI 後端一家一檔重構',
+      'en-US': 'Transcript-loss fix, cross-workspace message persistence & per-vendor CLI backend',
+    },
+    highlights: [
+      {
+        'zh-TW':
+          '修復無聲對話遺失：從 Claude Code 環境裡啟動 Navide 時，pane 會繼承子 session 標記而靜默停寫對話記錄，重啟後 pane 變空白。後端現於啟動時剝除該標記（並防禦 Grok 同型標記），對話記錄保證落盤。',
+        'en-US':
+          'Fixed silent transcript loss: launching Navide from inside a Claude Code environment made panes inherit a child-session marker and silently stop writing transcripts (blank panes after restart). The backend now strips the marker at startup (plus Grok’s equivalents), so transcripts always persist.',
+      },
+      {
+        'zh-TW':
+          '跨工作區 CLI 訊息升級：訊息紀錄改用 SQLite v2 結構持久化、跨工作區外送追蹤與重連補水，並新增狀態列公告面板與版本/時鐘顯示。',
+        'en-US':
+          'Cross-workspace CLI messaging upgrade: message logs persist in a SQLite v2 schema with outbound tracking and reconnect hydration, plus a new status-bar announcements panel and version/clock chips.',
+      },
+      {
+        'zh-TW':
+          '終端效能與架構整併：PTY 生命週期改用獨立執行緒池並一次汲取讀取緩衝（長輸出更順）；後端 CLI 程式碼完成「一家一檔」重構（12 家各自獨立模組 + 統一 registry），新增 CLI 支援從此只需一個檔案。',
+        'en-US':
+          'Terminal performance & architecture: PTY lifecycle moved to an isolated thread pool with drained reads (smoother long outputs); the CLI backend finished its one-file-per-vendor refactor (12 self-contained vendor modules + a single registry), so adding a CLI now takes one file.',
       },
     ],
   },
@@ -358,6 +387,31 @@ export const WHATS_NEW: WhatsNewEntry[] = [
     ],
   },
   {
+    version: '0.1.69',
+    title: {
+      'zh-TW': '更新檢查更即時、滾輪捲動不再誤鎖 RUNNING 狀態',
+      'en-US': 'More responsive update checks & scroll no longer latches the RUNNING badge',
+    },
+    highlights: [
+      {
+        'zh-TW':
+          '自動更新檢查間隔由較長週期縮短為 30 分鐘，且開啟「自動檢查」時立刻重新檢查一次，不必等下一輪。',
+        'en-US':
+          'Background update checks now run every 30 minutes, and enabling auto-check re-checks immediately instead of waiting for the next cycle.',
+      },
+      {
+        'zh-TW': '終端轉發的滾輪捲動不再被當成活動訊號，瀏覽歷史時 RUNNING 標籤不會被鎖住。',
+        'en-US':
+          'Wheel scrolls forwarded to the terminal no longer count as activity, so browsing history keeps the RUNNING badge from latching on.',
+      },
+      {
+        'zh-TW': 'Agent 歷史載入時，對已無對應 pane 的項目補上移除時間戳，時間欄位不再空白。',
+        'en-US':
+          'Agent History stamps a removal time on load for entries with no live pane, so their timestamp column is no longer blank.',
+      },
+    ],
+  },
+  {
     version: '0.1.68',
     title: {
       'zh-TW': '儲存架構升級：更快、更可靠',
@@ -389,6 +443,59 @@ export const WHATS_NEW: WhatsNewEntry[] = [
       'en-US':
         'Note: if you later downgrade to an older version, the app will look freshly installed (your data is not lost — rename the *.migrated-v1 files back to restore it).',
     },
+  },
+  {
+    version: '0.1.67',
+    title: {
+      'zh-TW': '儲存空間監控與安全清理、Claude 憑證跨目錄複製修復與終端效能調校',
+      'en-US': 'Storage monitor with guarded cleanup, Claude credential fix & terminal performance',
+    },
+    highlights: [
+      {
+        'zh-TW':
+          '設定新增 Storage 分頁：檢視各項資料佔用的空間並進行清理，清理只會動它能證明無人使用的資料（Codex pane home 等），live 資料受保護。',
+        'en-US':
+          'New Storage tab in Settings: see what is using disk and reclaim it. Cleanup only offers data it can prove no pane still references (stale Codex pane homes and the like) — live data is protected.',
+      },
+      {
+        'zh-TW':
+          '憑證修復：停止跨 config 目錄複製 Claude token（切帳號後舊 pane 顯示 Login expired 的根因），改由該 Profile 自己的 home 讀取登入狀態；aider 每個 pane 也有各自的對話歷史檔。',
+        'en-US':
+          'Credential fixes: stopped copying Claude tokens across config dirs (the root cause of “Login expired” on older panes after an account switch) and read a managed profile’s login from its own home; aider panes now get their own chat-history file.',
+      },
+      {
+        'zh-TW':
+          '終端與效能：修復 RUNNING 標籤中途誤閃 idle、localStorage 滿時靜默丟失 scrollback、--resume 產生的重複 PTY；PTY 每次喚醒改讀整個 viewport，token 匯入改為五分鐘合併並只追加變動日誌。',
+        'en-US':
+          'Terminal & performance: fixed the RUNNING badge flickering to idle mid-task, scrollback silently dropped when localStorage is full, and the duplicate PTY a --resume spawn left behind; PTY wakeups now repaint a whole viewport and token ingestion coalesces into a five-minute window with an append-only delta log.',
+      },
+    ],
+  },
+  {
+    version: '0.1.66',
+    title: {
+      'zh-TW': '多家 CLI 額度偵測、帳號切換器餘額顯示與 Agent SPAWN 開面板',
+      'en-US': 'Quota detection for more CLIs, per-account remaining quota & agent SPAWN blocks',
+    },
+    highlights: [
+      {
+        'zh-TW':
+          '額度偵測擴充至 opencode、qwen、kilo、pi、copilot、cursor 等供應商，帳號切換器直接顯示每個帳號的剩餘額度。',
+        'en-US':
+          'Quota fetchers added for opencode, qwen, kilo, pi, copilot and cursor, with each account’s remaining quota shown right in the account switcher.',
+      },
+      {
+        'zh-TW': 'CLI Agent 可用 SPAWN 區塊直接開出新的 CLI 面板，把工作交給另一個 agent。',
+        'en-US':
+          'CLI agents can open new CLI panes themselves via SPAWN blocks, handing work off to another agent.',
+      },
+      {
+        'zh-TW':
+          'CLI 還原可設定為延遲載入（開啟時才起 CLI）；Claude Profile Home 改以執行中狀態優先播種，避免舊快照覆蓋剛刷新的 token。',
+        'en-US':
+          'CLI restore can be configured to load lazily (a CLI starts when you open it), and Claude profile homes seed runtime-first so an old snapshot can no longer overwrite a freshly refreshed token.',
+      },
+    ],
   },
   {
     version: '0.1.65',

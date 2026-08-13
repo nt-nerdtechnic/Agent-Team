@@ -1593,7 +1593,8 @@
     "title": "Announcements",
     "mark-all-read": "Mark all read",
     "close": "Close",
-    "empty": "No announcements yet"
+    "empty": "No announcements yet",
+    "load-more": "Load more ({count} left)"
   },
   "clock": {
     "title": "Time",

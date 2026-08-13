@@ -1593,7 +1593,8 @@
     "title": "公告通知",
     "mark-all-read": "全部標為已讀",
     "close": "關閉",
-    "empty": "目前沒有公告"
+    "empty": "目前沒有公告",
+    "load-more": "載入更多（還有 {count} 則）"
   },
   "clock": {
     "title": "時間資訊",

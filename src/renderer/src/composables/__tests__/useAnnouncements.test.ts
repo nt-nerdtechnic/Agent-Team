@@ -46,7 +46,8 @@ describe('useAnnouncements', () => {
 
     expect(a.items.value.map((i) => i.version)).toEqual([
       '0.1.77', '0.1.76', '0.1.75', '0.1.74', '0.1.73',
-      '0.1.72', '0.1.71', '0.1.70', '0.1.68', '0.1.65',
+      '0.1.72', '0.1.71', '0.1.70', '0.1.69', '0.1.68',
+      '0.1.67', '0.1.66', '0.1.65',
     ])
     expect(a.items.value.every((i) => i.kind === 'release')).toBe(true)
     expect(a.items.value[0].id).toBe('release:0.1.77')
@@ -61,7 +62,7 @@ describe('useAnnouncements', () => {
     const { useAnnouncements } = await load()
 
     expect(useAnnouncements().items.value.map((i) => i.version)).toEqual([
-      '0.1.70', '0.1.68', '0.1.65',
+      '0.1.70', '0.1.69', '0.1.68', '0.1.67', '0.1.66', '0.1.65',
     ])
   })
 
@@ -81,10 +82,10 @@ describe('useAnnouncements', () => {
     const { useAnnouncements } = await load()
     const a = useAnnouncements()
 
-    expect(a.unreadCount.value).toBe(9)
+    expect(a.unreadCount.value).toBe(12)
 
     a.markRead('release:0.1.77')
-    expect(a.unreadCount.value).toBe(8)
+    expect(a.unreadCount.value).toBe(11)
     expect(store.get(READ_IDS_KEY)).toEqual(['release:0.1.65', 'release:0.1.77'])
 
     // Marking the same id again is a no-op, not a duplicate.
@@ -93,7 +94,7 @@ describe('useAnnouncements', () => {
 
     a.markAllRead()
     expect(a.unreadCount.value).toBe(0)
-    expect((store.get(READ_IDS_KEY) as string[]).length).toBe(10)
+    expect((store.get(READ_IDS_KEY) as string[]).length).toBe(13)
   })
 
   it('caps the persisted read set so the shared settings document stays small', async () => {
