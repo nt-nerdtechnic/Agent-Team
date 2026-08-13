@@ -9,6 +9,12 @@ export const CLI_CONTEXT_MIME = 'application/x-cli-context'
 /** MIME type carrying a bare pane id. Set (as an inline literal) by pane
  *  reorder drag sources: TerminalPane's header and ControlPane's agent list. */
 export const PANE_ID_MIME = 'application/x-pane-id'
+/** MIME type carrying every pane id a multi-select drag moves, newline-separated
+ *  in pane order. Only set when the drag carries more than one pane, so its mere
+ *  presence marks a batch drag — and since TYPES are readable during dragover,
+ *  drop targets can style themselves for a batch before the payload is legible.
+ *  Travels with the drag, so a drop in ANOTHER window sees the same batch. */
+export const PANE_BATCH_MIME = 'application/x-pane-batch'
 /** Tail cap applied to the pane buffer before pasting it into another pane's
  *  input prompt. Much smaller than the chip cap: a 128KB blob is unusable as
  *  CLI prompt input. */
@@ -79,10 +85,25 @@ export interface CliContextPayload {
  *  rich context carried by TerminalPane headers. */
 export function writeCliPaneDragPayload(
   dataTransfer: Pick<DataTransfer, 'setData'>,
-  payload: CliContextPayload
+  payload: CliContextPayload,
+  batchIds?: readonly string[]
 ): void {
   dataTransfer.setData(PANE_ID_MIME, payload.paneId)
   dataTransfer.setData(CLI_CONTEXT_MIME, JSON.stringify(payload))
+  // A one-pane "batch" is just a normal drag — writing the MIME anyway would
+  // make every drop target announce a batch it isn't handling.
+  if (batchIds && batchIds.length > 1) {
+    dataTransfer.setData(PANE_BATCH_MIME, batchIds.join('\n'))
+  }
+}
+
+/** Parse the batch MIME written by `writeCliPaneDragPayload`. Empty for an
+ *  absent or blank payload — i.e. a single-pane drag. */
+export function parsePaneDragBatch(raw: string): string[] {
+  return raw
+    .split('\n')
+    .map((id) => id.trim())
+    .filter(Boolean)
 }
 
 /** Vendor-neutral reference to a live CLI conversation. The append-only
@@ -140,6 +161,23 @@ export function resolveCliDropSource(
   const payload = resolveCliDropPayload(cliRaw, paneIdRaw)
   if (!payload || payload === 'malformed') return null
   return payload.paneId === targetPaneId ? null : payload.paneId
+}
+
+/** Every SOURCE pane a CLI-pane drag should share, in the order the batch was
+ *  dragged in. A batch drag shares all of its panes (minus the drop target
+ *  itself, which cannot share with itself); a plain drag keeps the single-source
+ *  behaviour of `resolveCliDropSource`. Works for cross-window drops too — the
+ *  batch rides in the drag payload rather than in the source window's state. */
+export function resolveCliDropSources(
+  cliRaw: string,
+  paneIdRaw: string,
+  batchRaw: string,
+  targetPaneId: string
+): string[] {
+  const batch = parsePaneDragBatch(batchRaw)
+  if (batch.length > 1) return batch.filter((id) => id !== targetPaneId)
+  const single = resolveCliDropSource(cliRaw, paneIdRaw, targetPaneId)
+  return single ? [single] : []
 }
 
 /** Build the text pasted into the TARGET pane's input prompt when a CLI pane is

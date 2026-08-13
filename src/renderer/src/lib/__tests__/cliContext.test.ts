@@ -8,9 +8,12 @@ import {
   shouldMentionOnDrop,
   shouldOpenMentionMenu,
   parseCliContextPayload,
+  parsePaneDragBatch,
   writeCliPaneDragPayload,
   screenToClientPoint,
   resolveCliDropSource,
+  resolveCliDropSources,
+  PANE_BATCH_MIME,
   buildPaneContextPaste,
   buildCliSessionReference,
   chunkForPty,
@@ -161,6 +164,30 @@ describe('writeCliPaneDragPayload', () => {
     expect(written.get('application/x-pane-id')).toBe('p-aux')
     expect(JSON.parse(written.get('application/x-cli-context') ?? '')).toEqual(payload)
   })
+
+  it('writes the batch MIME when the drag carries a multi-selection', () => {
+    const written = new Map<string, string>()
+    writeCliPaneDragPayload(
+      { setData: (type, value) => written.set(type, value) },
+      { paneId: 'p-1' },
+      ['p-1', 'p-2', 'p-3']
+    )
+
+    expect(written.get(PANE_BATCH_MIME)).toBe('p-1\np-2\np-3')
+    // The grabbed pane still identifies the drag for single-pane consumers.
+    expect(written.get('application/x-pane-id')).toBe('p-1')
+  })
+
+  it('omits the batch MIME for a one-pane drag', () => {
+    const written = new Map<string, string>()
+    writeCliPaneDragPayload(
+      { setData: (type, value) => written.set(type, value) },
+      { paneId: 'p-1' },
+      ['p-1']
+    )
+
+    expect(written.has(PANE_BATCH_MIME)).toBe(false)
+  })
 })
 
 describe('parseCliContextPayload', () => {
@@ -216,6 +243,48 @@ describe('resolveCliDropSource', () => {
   it('returns null for a malformed payload or a drag with no pane identity', () => {
     expect(resolveCliDropSource('{not json', '', 'pane-b')).toBeNull()
     expect(resolveCliDropSource('', '', 'pane-b')).toBeNull()
+  })
+})
+
+describe('parsePaneDragBatch', () => {
+  it('splits the newline-separated batch payload', () => {
+    expect(parsePaneDragBatch('pane-a\npane-b\npane-c')).toEqual(['pane-a', 'pane-b', 'pane-c'])
+  })
+
+  it('is empty for an absent or blank payload (a single-pane drag)', () => {
+    expect(parsePaneDragBatch('')).toEqual([])
+    expect(parsePaneDragBatch('\n \n')).toEqual([])
+  })
+
+  it('trims stray whitespace and drops empty entries', () => {
+    expect(parsePaneDragBatch(' pane-a \n\n pane-b')).toEqual(['pane-a', 'pane-b'])
+  })
+})
+
+describe('resolveCliDropSources', () => {
+  const payload = (paneId: string): string => JSON.stringify({ paneId, agentKey: 'claude' })
+
+  it('falls back to the single source when no batch travelled with the drag', () => {
+    expect(resolveCliDropSources(payload('pane-a'), 'pane-a', '', 'pane-b')).toEqual(['pane-a'])
+    expect(resolveCliDropSources('', 'pane-a', '', 'pane-b')).toEqual(['pane-a'])
+  })
+
+  it('returns every pane of a batch drag, in drag order', () => {
+    expect(resolveCliDropSources(payload('pane-c'), 'pane-c', 'pane-a\npane-c', 'pane-b'))
+      .toEqual(['pane-a', 'pane-c'])
+  })
+
+  it('excludes the drop target from the batch — a pane cannot share with itself', () => {
+    expect(resolveCliDropSources(payload('pane-a'), 'pane-a', 'pane-a\npane-b', 'pane-b'))
+      .toEqual(['pane-a'])
+  })
+
+  it('is empty for a self-drop with no batch', () => {
+    expect(resolveCliDropSources(payload('pane-a'), 'pane-a', '', 'pane-a')).toEqual([])
+  })
+
+  it('is empty for a drag carrying no pane identity at all', () => {
+    expect(resolveCliDropSources('', '', '', 'pane-b')).toEqual([])
   })
 })
 

@@ -5,9 +5,11 @@ import { useTheme } from '../composables/useTheme'
 import type { useBackend } from '../composables/useBackend'
 import type { useCliProfiles } from '../composables/useCliProfiles'
 import { extractDropPaths, escapeDraggedPath, stabilizeDroppedPaths } from '../lib/drop'
-import { CLI_CONTEXT_MIME, PANE_ID_MIME, resolveCliDropSource, writeCliPaneDragPayload } from '../lib/cliContext'
+import { CLI_CONTEXT_MIME, PANE_BATCH_MIME, PANE_ID_MIME, resolveCliDropSources, writeCliPaneDragPayload } from '../lib/cliContext'
 import { PLAN_REF_MIME, isPlanDrag, parsePlanRefPayload, type PlanDragRef } from '../lib/planDrag'
 import { formatLoopTime } from '../lib/loopPrompt'
+import { setBatchDragImage } from '../lib/batchDragImage'
+import { i18n } from '../i18n'
 import { isMacPlatform } from '../keybindings/parseKey'
 import RebuildIcon from './RebuildIcon.vue'
 import UsageBadge from './UsageBadge.vue'
@@ -32,6 +34,10 @@ interface Props {
   /** True when this pane is part of the multi-select set (Cmd/Ctrl/Shift-click
    *  on the header), so batch context-menu actions target it. */
   isSelected?: boolean
+  /** Pane ids of the current multi-selection in pane order, or empty when fewer
+   *  than two panes are selected. Dragging a pane that appears here drags the
+   *  whole selection, matching the context menu's batch actions. */
+  selectionBatchIds?: string[]
   /** True when this pane's agent is resume-capable — RENDERS the rebuild button
    *  (disabled until canRebuild), so the control is discoverable from spawn. */
   rebuildVisible?: boolean
@@ -78,9 +84,10 @@ const emit = defineEmits<{
   (e: 'rename', name: string): void
   (e: 'context-menu', ev: MouseEvent): void
   (e: 'reorder-drop', draggedPaneId: string): void
-  /** Another CLI pane was dropped onto this pane's terminal area — App.vue
-   *  pastes that pane's recent output into this pane's input prompt. */
-  (e: 'cli-context-drop', sourcePaneId: string): void
+  /** CLI pane(s) were dropped onto this pane's terminal area — App.vue pastes
+   *  each source pane's recent output into this pane's input prompt, in order.
+   *  More than one id when a multi-selection was dragged. */
+  (e: 'cli-context-drop', sourcePaneIds: string[]): void
   /** A plan document was dropped onto this pane's terminal area — App.vue
    *  pastes the plan goal + execution instruction into this pane's input. */
   (e: 'plan-drop', ref: PlanDragRef): void
@@ -251,12 +258,13 @@ async function onTerminalDrop(e: DragEvent): Promise<void> {
   // CLI pane dropped onto this terminal: share its recent output with this pane.
   // App.vue owns pane state, so it resolves the buffer and does the paste.
   if (isCliPaneDrag(e)) {
-    const sourcePaneId = resolveCliDropSource(
+    const sourcePaneIds = resolveCliDropSources(
       e.dataTransfer?.getData(CLI_CONTEXT_MIME) || '',
       e.dataTransfer?.getData(PANE_ID_MIME) || '',
+      e.dataTransfer?.getData(PANE_BATCH_MIME) || '',
       props.paneId
     )
-    if (sourcePaneId) emit('cli-context-drop', sourcePaneId)
+    if (sourcePaneIds.length) emit('cli-context-drop', sourcePaneIds)
     return
   }
   const dropped = extractDropPaths(e)
@@ -267,8 +275,16 @@ async function onTerminalDrop(e: DragEvent): Promise<void> {
 
 // Drag the pane (by its header) onto a tab to move it into that run group,
 // or onto another pane's header to reorder (see the drop handlers below).
+/** Pane ids this header drag carries — the whole multi-selection when this pane
+ *  belongs to one, otherwise just this pane. */
+function headerDragBatch(): string[] {
+  const batch = props.selectionBatchIds ?? []
+  return batch.includes(props.paneId) ? batch : [props.paneId]
+}
+
 function onHeaderDragStart(e: DragEvent): void {
   if (!e.dataTransfer) return
+  const batch = headerDragBatch()
   // Carry a fast local snapshot; AI Chat still fetches authoritative live
   // metadata and rendered output on drop through the pane-buffer IPC relay.
   writeCliPaneDragPayload(e.dataTransfer, {
@@ -279,9 +295,24 @@ function onHeaderDragStart(e: DragEvent): void {
     sessionHomeId: props.sessionHomeId ?? '',
     workspacePath: props.workspacePath ?? '',
     conversationLogPath: props.conversationLogPath ?? ''
-  })
+  }, batch)
+  setBatchDragImage(
+    e.dataTransfer,
+    batch.length,
+    i18n.global.t('action.dragging-panes', { count: batch.length })
+  )
   e.dataTransfer.effectAllowed = 'move'
   draggingSelf = true
+}
+
+/** True when the in-flight drag is a batch this pane is itself part of — the
+ *  pane is being dragged, so it is not a reorder target for its own batch.
+ *  Only same-window batches can be recognised during dragover (the payload is
+ *  unreadable then); a batch from another window has no local selection to
+ *  match, and dropping it here is a legitimate move. */
+function isOwnBatchMember(e: DragEvent): boolean {
+  return !!e.dataTransfer?.types.includes(PANE_BATCH_MIME)
+    && (props.selectionBatchIds ?? []).includes(props.paneId)
 }
 
 // Drop target for pane reordering: another pane's header dropped onto this
@@ -305,11 +336,11 @@ function onHeaderDragEnd(e: DragEvent): void {
   // drag; main drops the release when it lands inside this window's own
   // bounds, which covers the common cancel-in-place case.)
   if (e.dataTransfer?.dropEffect !== 'none') return
-  window.agentTeam?.cliPaneDragEnd?.(props.paneId, e.screenX, e.screenY)
+  window.agentTeam?.cliPaneDragEnd?.(props.paneId, e.screenX, e.screenY, headerDragBatch())
 }
 
 function onHeaderDragOver(e: DragEvent): void {
-  if (draggingSelf || !e.dataTransfer?.types.includes('application/x-pane-id')) return
+  if (draggingSelf || isOwnBatchMember(e) || !e.dataTransfer?.types.includes('application/x-pane-id')) return
   e.preventDefault()
   isReorderDragOver.value = true
 }
