@@ -91,9 +91,6 @@ const props = defineProps<{
   /** True when a workspace is open — CLI account sign-in needs one to spawn
    *  the login pane. */
   workspaceOpen?: boolean
-  /** Basename of the currently open workspace, shown in the sidebar header.
-   *  Falls back to the app name when not provided. */
-  workspaceName?: string
   /** Workspaces the app knows about — the Storage tab scans them for
    *  reclaimable build output and logs. */
   workspacePaths?: string[]
@@ -127,10 +124,6 @@ const activeTab = ref<Tab>(props.initialTab ?? 'general')
 watch(() => props.initialTab, (tab) => {
   if (tab) activeTab.value = tab
 })
-
-// Sidebar workspace header label — the open workspace's basename, falling back
-// to the app name when no workspace is passed in.
-const workspaceLabel = computed(() => props.workspaceName?.trim() || 'Agent-Team')
 
 // ── CLI Agents (enable/disable + reorder for the manual spawn dropdown) ────────
 const { order: cliOrder, disabled: cliDisabled } = useCliAgentPrefs()
@@ -1278,13 +1271,14 @@ watch(activeTab, (tab) => {
     <div class="s-overlay" @click.self="emit('close')">
       <div class="s-modal">
 
-        <!-- ── Sidebar (workspace header + search + grouped nav) ─────────── -->
+        <!-- ── Sidebar (title + search + grouped nav) ────────────────────── -->
         <aside class="s-sidebar">
           <div class="s-ws-header">
-            <div class="s-ws-avatar" aria-hidden="true">{{ workspaceLabel.charAt(0) }}</div>
+            <div class="s-ws-avatar" aria-hidden="true">
+              <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v1.8M8 12.7v1.8M14.5 8h-1.8M3.3 8H1.5M12.6 3.4l-1.3 1.3M4.7 11.3l-1.3 1.3M12.6 12.6l-1.3-1.3M4.7 4.7 3.4 3.4"/></svg>
+            </div>
             <div class="s-ws-meta">
-              <span class="s-ws-name" :title="workspaceLabel">{{ workspaceLabel }}</span>
-              <span class="s-ws-sub">{{ $t('settings.nav.current-workspace') }}</span>
+              <span class="s-ws-name">{{ $t('settings.nav.title') }}</span>
             </div>
           </div>
 
@@ -2696,9 +2690,6 @@ watch(activeTab, (tab) => {
   justify-content: center;
   background: var(--bg-selected);
   color: var(--accent-fg);
-  font-size: 14px;
-  font-weight: 700;
-  text-transform: uppercase;
 }
 .s-ws-meta {
   display: flex;
@@ -2713,10 +2704,6 @@ watch(activeTab, (tab) => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.s-ws-sub {
-  font-size: 11px;
-  color: var(--text-secondary);
 }
 
 /* ── Grouped nav ─────────────────────────────────────────────────────────────  */

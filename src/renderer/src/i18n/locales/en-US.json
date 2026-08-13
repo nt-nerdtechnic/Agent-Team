@@ -635,7 +635,7 @@
       "extensions": "🧩 Extensions"
     },
     "nav": {
-      "current-workspace": "Current Workspace",
+      "title": "Settings",
       "group": {
         "general": "General",
         "accountsAgents": "Accounts & Agents",

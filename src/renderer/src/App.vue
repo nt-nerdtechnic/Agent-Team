@@ -11237,7 +11237,6 @@ function paneIsCommander(p: ActivePane): boolean {
       :pipelines-api="pipelinesApi"
       :cli-profiles-api="cliProfilesApi"
       :workspace-open="!!currentWorkspace"
-      :workspace-name="currentWorkspace ? workspaceBaseName : undefined"
       :workspace-paths="knownWorkspacePaths"
       :initial-tab="settingsInitialTab"
       v-model:confirm-before-close="confirmBeforeClose"

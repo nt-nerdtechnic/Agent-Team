@@ -635,7 +635,7 @@
       "extensions": "🧩 擴充功能"
     },
     "nav": {
-      "current-workspace": "目前工作區",
+      "title": "設定",
       "group": {
         "general": "一般",
         "accountsAgents": "帳號與代理",
