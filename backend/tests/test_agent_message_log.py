@@ -298,15 +298,15 @@ def test_clear_failure_is_swallowed_and_leaves_the_rows_in_place(log, monkeypatc
     assert any("agent message log clear failed" in r.message for r in caplog.records)
 
 
-def test_a_fresh_database_migrates_straight_to_v2(tmp_path):
+def test_a_fresh_database_migrates_straight_to_the_current_schema(tmp_path):
     db = Database(tmp_path / "navide.db")
     AgentMessageLog(db=db)
-    assert db.schema_version("agent_message_log") == 2
+    assert db.schema_version("agent_message_log") == 3
     with db.transaction() as cur:
         columns = {
             r["name"] for r in cur.execute("PRAGMA table_info(agent_message_log)").fetchall()
         }
-    assert "seq" in columns
+    assert {"seq", "sender_agent", "recipient_agent"} <= columns
 
 
 def test_an_existing_v1_database_upgrades_and_backfills_seq(tmp_path):
@@ -322,7 +322,7 @@ def test_an_existing_v1_database_upgrades_and_backfills_seq(tmp_path):
             )
 
     store = AgentMessageLog(db=db)
-    assert db.schema_version("agent_message_log") == 2
+    assert db.schema_version("agent_message_log") == 3
     with db.transaction() as cur:
         seqs = {
             r["uid"]: r["seq"]
@@ -335,3 +335,33 @@ def test_an_existing_v1_database_upgrades_and_backfills_seq(tmp_path):
     assert [r["uid"] for r in AgentMessageLog(db=db).tail()] == [
         "a3f9:10", "a3f9:1", "a3f9:2", "a3f9:11",
     ]
+
+
+def test_rows_written_before_v3_keep_no_vendor(tmp_path):
+    """The vendor columns are additive: a pre-v3 row still reads back, with both
+    sides unknown rather than guessed from whatever runs under that name now."""
+    db = Database(tmp_path / "navide.db")
+    db.migrate("agent_message_log", 1, _create_schema)
+    with db.transaction() as cur:
+        cur.execute(
+            "INSERT INTO agent_message_log"
+            " (uid, created_at, status, sender, recipient, content)"
+            " VALUES ('old:1', 100, 'delivered', 'alpha', 'beta', 'x')"
+        )
+
+    store = AgentMessageLog(db=db)
+    rows = store.tail()
+
+    assert len(rows) == 1
+    assert rows[0]["sender_agent"] is None
+    assert rows[0]["recipient_agent"] is None
+
+
+def test_vendors_round_trip(tmp_path):
+    store = AgentMessageLog(db=Database(tmp_path / "navide.db"))
+    store.append([_row("a:1", 100) | {"sender_agent": "claude", "recipient_agent": "codex"}])
+
+    row = store.tail()[0]
+
+    assert row["sender_agent"] == "claude"
+    assert row["recipient_agent"] == "codex"

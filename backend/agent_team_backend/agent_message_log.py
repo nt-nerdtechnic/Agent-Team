@@ -59,6 +59,8 @@ _COLUMNS = (
     "delivered_at",
     "remote",
     "remote_workspace",
+    "sender_agent",
+    "recipient_agent",
 )
 
 # Upsert: everything but the primary key and ``seq`` is refreshed. Keeping the
@@ -106,6 +108,18 @@ def _add_seq(cur: sqlite3.Cursor) -> None:
     cur.execute(
         "CREATE INDEX agent_message_log_created ON agent_message_log (created_at, seq)"
     )
+
+
+def _add_agent_keys(cur: sqlite3.Cursor) -> None:
+    """v3: which CLI vendor each side of a message is.
+
+    Rows written before these columns existed keep NULL — the log panel shows a
+    handle with no vendor rather than guessing one, because a pane can be
+    rebuilt onto a different CLI and the registry only knows what is running
+    now, not what sent the message back then.
+    """
+    cur.execute("ALTER TABLE agent_message_log ADD COLUMN sender_agent TEXT")
+    cur.execute("ALTER TABLE agent_message_log ADD COLUMN recipient_agent TEXT")
 
 
 def _clamp_content(content: str) -> str:
@@ -159,6 +173,8 @@ def _normalize(row: Any) -> dict[str, Any] | None:
         "delivered_at": _optional_int(row.get("delivered_at")),
         "remote": _optional_text(row.get("remote")),
         "remote_workspace": _optional_text(row.get("remote_workspace")),
+        "sender_agent": _optional_text(row.get("sender_agent")),
+        "recipient_agent": _optional_text(row.get("recipient_agent")),
     }
 
 
@@ -179,6 +195,7 @@ class AgentMessageLog:
         self._db = db
         self._db.migrate(_COMPONENT, 1, _create_schema)
         self._db.migrate(_COMPONENT, 2, _add_seq)
+        self._db.migrate(_COMPONENT, 3, _add_agent_keys)
         self._seq = self._read_max_seq()
 
     def _read_max_seq(self) -> int:

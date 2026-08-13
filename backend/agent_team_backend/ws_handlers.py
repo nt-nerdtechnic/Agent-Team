@@ -5345,15 +5345,33 @@ async def agent_msg_route(session: "Session", msg_id: str, msg_type: str, payloa
 
     result = agent_messaging.resolve(from_pane_id, to)
     if result.pane is None:
+        # `code`/`params` let the sending window show the failure in the user's
+        # language instead of parsing the English sentence in `error`.
         await session.send_json(
-            make_response(msg_id, msg_type, {"ok": False, "error": result.error or "unresolved"})
+            make_response(
+                msg_id,
+                msg_type,
+                {
+                    "ok": False,
+                    "error": result.error or "unresolved",
+                    "code": result.code,
+                    "params": result.params or {},
+                },
+            )
         )
         return
 
     if result.pane.pane_id == from_pane_id:
         await session.send_json(
             make_response(
-                msg_id, msg_type, {"ok": False, "error": "sender and target are the same pane"}
+                msg_id,
+                msg_type,
+                {
+                    "ok": False,
+                    "error": "sender and target are the same pane",
+                    "code": "self-send",
+                    "params": {},
+                },
             )
         )
         return
@@ -5371,9 +5389,11 @@ async def agent_msg_route(session: "Session", msg_id: str, msg_type: str, payloa
                     "target_pane_id": result.pane.pane_id,
                     "target_workspace_path": result.pane.workspace_path,
                     "target_name": result.pane.name,
+                    "target_agent_key": result.pane.agent_key,
                     "from_pane_id": from_pane_id,
                     "from_display": from_display,
                     "from_workspace_path": sender.workspace_path if sender else "",
+                    "from_agent_key": sender.agent_key if sender else "",
                     "cross_workspace": result.cross_workspace,
                     "content": content,
                 },
@@ -5389,6 +5409,7 @@ async def agent_msg_route(session: "Session", msg_id: str, msg_type: str, payloa
                 "target_pane_id": result.pane.pane_id,
                 "target_workspace_path": result.pane.workspace_path,
                 "target_display": result.pane.qualified_name,
+                "target_agent_key": result.pane.agent_key,
                 "cross_workspace": result.cross_workspace,
             },
         )

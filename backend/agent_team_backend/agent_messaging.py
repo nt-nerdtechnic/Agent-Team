@@ -54,7 +54,19 @@ class RegisteredPane:
 class ResolveResult:
     pane: RegisteredPane | None = None
     error: str | None = None
+    #: Stable machine code for the same failure, plus its substitutions. `error`
+    #: stays the English sentence — it is what the MCP tools hand back to a
+    #: calling agent — while the UI localizes from the code instead of parsing
+    #: that sentence.
+    code: str | None = None
+    params: dict[str, str] | None = None
     cross_workspace: bool = False
+
+
+def _resolve_error(code: str, error: str, **params: object) -> ResolveResult:
+    return ResolveResult(
+        error=error, code=code, params={k: str(v) for k, v in params.items()}
+    )
 
 
 # pane_id -> RegisteredPane
@@ -166,32 +178,39 @@ def resolve(from_pane_id: str, to: str) -> ResolveResult:
     """
     target = (to or "").strip()
     if not target:
-        return ResolveResult(error="empty target")
+        return _resolve_error("empty-target", "empty target")
 
     sender = _PANES.get(from_pane_id)
 
     if "/" not in target:
         if sender is None:
-            return ResolveResult(error=f'unknown target "{target}"')
+            return _resolve_error("unknown-target", f'unknown target "{target}"', to=target)
         for entry in _PANES.values():
             if entry.workspace_path == sender.workspace_path and entry.name == target:
                 return ResolveResult(pane=entry)
-        return ResolveResult(error=f'unknown target "{target}"')
+        return _resolve_error("unknown-target", f'unknown target "{target}"', to=target)
 
     # From here on the target is workspace-qualified.
 
     ws_part, _, name = target.rpartition("/")
     name = name.strip()
     if not name:
-        return ResolveResult(error=f'missing pane name in "{target}"')
+        return _resolve_error(
+            "missing-pane-name", f'missing pane name in "{target}"', to=target
+        )
 
     candidates = _match_workspaces(ws_part)
     if not candidates:
-        return ResolveResult(error=f'unknown workspace "{ws_part}"')
+        return _resolve_error(
+            "unknown-workspace", f'unknown workspace "{ws_part}"', ws=ws_part
+        )
     if len(candidates) > 1:
-        return ResolveResult(
-            error=f'ambiguous workspace "{ws_part}" ({len(candidates)} matches) '
-            f"— use the full path"
+        return _resolve_error(
+            "ambiguous-workspace",
+            f'ambiguous workspace "{ws_part}" ({len(candidates)} matches) '
+            f"— use the full path",
+            ws=ws_part,
+            n=len(candidates),
         )
 
     workspace = candidates[0]
@@ -201,11 +220,20 @@ def resolve(from_pane_id: str, to: str) -> ResolveResult:
     # instruction into whichever pane happened to register first.
     hits = [e for e in _PANES.values() if e.workspace_path == workspace and e.name == name]
     if not hits:
-        return ResolveResult(error=f'unknown target "{name}" in workspace "{ws_part}"')
+        return _resolve_error(
+            "unknown-target-in-workspace",
+            f'unknown target "{name}" in workspace "{ws_part}"',
+            name=name,
+            ws=ws_part,
+        )
     if len(hits) > 1:
-        return ResolveResult(
-            error=f'ambiguous target "{name}" in workspace "{ws_part}" '
-            f"({len(hits)} panes share that name) — rename one of them"
+        return _resolve_error(
+            "ambiguous-target",
+            f'ambiguous target "{name}" in workspace "{ws_part}" '
+            f"({len(hits)} panes share that name) — rename one of them",
+            name=name,
+            ws=ws_part,
+            n=len(hits),
         )
     entry = hits[0]
     cross = sender is None or sender.workspace_path != entry.workspace_path

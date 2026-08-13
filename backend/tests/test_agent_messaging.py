@@ -162,6 +162,48 @@ def test_empty_and_malformed_targets() -> None:
     assert agent_messaging.resolve("p1", "beta/").error is not None
 
 
+def test_every_failure_carries_a_code_and_its_substitutions() -> None:
+    """The UI localizes from `code`/`params`; only `error` stays English, and it
+    is what the MCP tools hand back to a calling agent."""
+    _seed_two_workspaces()
+    agent_messaging.register("p4", "claude-2", "/ws/beta")
+    agent_messaging.register("p5", "claude-2", "/ws/beta")
+
+    cases = [
+        ("", "empty-target", {}),
+        ("beta/", "missing-pane-name", {"to": "beta/"}),
+        ("nobody", "unknown-target", {"to": "nobody"}),
+        ("gamma/reviewer", "unknown-workspace", {"ws": "gamma"}),
+        ("beta/nobody", "unknown-target-in-workspace", {"name": "nobody", "ws": "beta"}),
+        ("beta/claude-2", "ambiguous-target", {"name": "claude-2", "ws": "beta", "n": "2"}),
+    ]
+    for target, code, params in cases:
+        result = agent_messaging.resolve("p1", target)
+        assert result.pane is None, target
+        assert result.code == code, target
+        assert result.params == params, target
+        assert result.error, target
+
+
+def test_ambiguous_workspace_reports_the_match_count() -> None:
+    agent_messaging.register("p1", "sender", "/ws/alpha")
+    agent_messaging.register("p2", "reviewer", "/one/shared")
+    agent_messaging.register("p3", "reviewer", "/two/shared")
+
+    result = agent_messaging.resolve("p1", "shared/reviewer")
+
+    assert result.pane is None
+    assert result.code == "ambiguous-workspace"
+    assert result.params == {"ws": "shared", "n": "2"}
+
+
+def test_successful_resolve_carries_no_error_code() -> None:
+    _seed_two_workspaces()
+    result = agent_messaging.resolve("p1", "beta/reviewer")
+    assert result.pane is not None
+    assert result.code is None and result.params is None
+
+
 def test_sender_display_is_always_qualified() -> None:
     _seed_two_workspaces()
     assert agent_messaging.sender_display("p1", "fallback") == "alpha/claude-1"

@@ -953,11 +953,13 @@ async def cli_send(to: str, text: str, ctx: Context) -> dict[str, Any]:
                 "target_pane_id": result.pane.pane_id,
                 "target_workspace_path": result.pane.workspace_path,
                 "target_name": result.pane.name,
+                "target_agent_key": result.pane.agent_key,
                 "from_pane_id": me,
                 "from_display": agent_messaging.sender_display(
                     me, "an external client" if caller.kind == "external" else "a host client"
                 ),
                 "from_workspace_path": sender.workspace_path if sender else "",
+                "from_agent_key": sender.agent_key if sender else "",
                 "cross_workspace": result.cross_workspace,
                 "content": text,
                 # The frontend applies the per-pair rate limit when it sends;
