@@ -324,3 +324,38 @@ def test_has_session_checks_the_shared_db(data_dir: Path) -> None:
     assert reader.has_session(_SID) is True
     assert reader.has_session("ses_missing") is False
     assert reader.has_session("") is False
+
+
+# ── credentials (multi-account slot layout + identity) ───────────────────────
+
+def test_spec_declares_the_credential_slot_layout() -> None:
+    """The credential-swap fields: the live file is the path `kilo auth list`
+    prints, and no login-home isolation is claimed (kilo has no config-home
+    variable — a login pane signs in against the real home)."""
+    from agent_team_backend.cli_vendors.kilo import KILO_AUTH_FILE_REL, SPEC
+
+    assert SPEC.live_file == KILO_AUTH_FILE_REL == (
+        ".local", "share", "kilo", "auth.json")
+    assert SPEC.slot_file == "auth.json"
+    assert SPEC.login_home_env is None
+    assert SPEC.login_home_secret_file is None
+
+
+@pytest.mark.parametrize("secret,signed_in", [
+    ('{"kilo": {"type": "api", "key": "kilo_abc"}}', True),
+    ('{"kilo": {"type": "oauth", "access": "at", "accountId": "org-1"}}', True),
+    ('{"kilo": {"type": "api", "key": ""}}', False),
+    ('{"kilo": {"type": "oauth", "accountId": "org-1"}}', False),
+    ('{"kilo": "not-an-object"}', False),
+    ('{"anthropic": {"type": "api", "key": "k"}}', False),
+    ("{not json", False),
+    ("[]", False),
+    (None, False),
+])
+def test_identity_from_secret_reports_only_presence(secret, signed_in: bool) -> None:
+    """kilo's auth.json carries no email/user id (``accountId`` is the ORG), so
+    the identity is a presence flag and the email stays empty rather than
+    borrowing a field that names something else."""
+    from agent_team_backend.cli_vendors.kilo import identity_from_secret
+
+    assert identity_from_secret(secret) == {"email": None, "signedIn": signed_in}

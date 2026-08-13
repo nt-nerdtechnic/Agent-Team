@@ -1091,6 +1091,73 @@ def test_identity_kimi_signed_in_without_email(tmp_path: Path) -> None:
     assert vault.identity("kimi") == {"email": None, "signedIn": True}
 
 
+@pytest.mark.parametrize("entry", [
+    {"type": "api", "key": "kilo_abc"},
+    {"type": "oauth", "access": "kilo-at", "accountId": "org-1"},
+])
+def test_identity_kilo_signed_in_without_email(tmp_path: Path, entry: dict) -> None:
+    """Both credential forms count as signed in, and neither names the user:
+    kilo's auth.json has no email, and ``accountId`` is the organization."""
+    vault = _file_vault(tmp_path)
+    _write(tmp_path / "home" / ".local" / "share" / "kilo" / "auth.json",
+           json.dumps({"kilo": entry}))
+
+    assert vault.identity("kilo") == {"email": None, "signedIn": True}
+
+
+@pytest.mark.parametrize("payload", [
+    "{not json",
+    '{"kilo": {"type": "api", "key": ""}}',
+    '{"kilo": {"type": "oauth"}}',
+    '{"other": {"type": "api", "key": "k"}}',
+])
+def test_identity_kilo_unusable_secret_is_signed_out(
+    tmp_path: Path, payload: str
+) -> None:
+    vault = _file_vault(tmp_path)
+    _write(tmp_path / "home" / ".local" / "share" / "kilo" / "auth.json", payload)
+
+    assert vault.identity("kilo") == {"email": None, "signedIn": False}
+
+
+def test_identity_kilo_slot_snapshot_and_missing_file(tmp_path: Path) -> None:
+    vault = _file_vault(tmp_path)
+    assert vault.identity("kilo") == {"email": None, "signedIn": False}
+
+    vault.write_slot("kilo", "slot1", LiveCredentials(
+        secret=json.dumps({"kilo": {"type": "api", "key": "k"}})))
+
+    assert vault.identity("kilo", "slot1") == {"email": None, "signedIn": True}
+    assert vault.identity("kilo", "missing") == {"email": None, "signedIn": False}
+
+
+def test_kilo_switch_swaps_the_live_auth_file(tmp_path: Path) -> None:
+    """End to end over the generic file path: capture the live credential into
+    the outgoing slot, publish the target slot to ~/.local/share/kilo."""
+    vault = _file_vault(tmp_path)
+    live = tmp_path / "home" / ".local" / "share" / "kilo" / "auth.json"
+    _write(live, '{"kilo": {"type": "api", "key": "A"}}')
+    vault.write_slot("kilo", "b", LiveCredentials(
+        secret='{"kilo": {"type": "api", "key": "B"}}'))
+
+    vault.switch("kilo", DEFAULT_SLOT_ID, "b")
+
+    assert live.read_text(encoding="utf-8") == '{"kilo": {"type": "api", "key": "B"}}'
+    assert vault.read_slot("kilo", DEFAULT_SLOT_ID).secret == \
+        '{"kilo": {"type": "api", "key": "A"}}'
+
+
+def test_login_spawn_env_kilo_has_no_isolation(tmp_path: Path) -> None:
+    """kilo has no config-home variable, so its sign-in runs against the real
+    home: no env override and — just as important — no login home directory,
+    whose existence alone would send the switch handler and the usage poller
+    into a harvest that has no secret file to read."""
+    vault = _file_vault(tmp_path)
+
+    assert vault.login_spawn_env("kilo", "slot1") == ({}, [])
+    assert not vault.login_home_path("kilo", "slot1").exists()
+
+
 def test_identity_logged_out_and_garbage_never_raise(tmp_path: Path) -> None:
     vault = _file_vault(tmp_path)
     _write(tmp_path / "home" / ".codex" / "auth.json", "not json")

@@ -26,6 +26,21 @@ def _store(tmp_path: Path) -> CliProfilesStore:
 # ---- registry CRUD ----
 
 
+def test_supported_agents_are_the_vendors_declaring_a_slot_file() -> None:
+    """The vendor spec's ``slot_file`` is the single switch that turns
+    multi-account support on: it registers the vendor in the vault's tables,
+    puts it in ``supported_agents`` and lights its accounts UI. kilo declares
+    one, so it must be here — and after the four originally-ordered keys."""
+    from agent_team_backend.cli_vendors.registry import VENDORS
+
+    assert profiles_mod.SUPPORTED_AGENT_KEYS == (
+        "claude", "codex", "kimi", "grok", "kilo",
+    )
+    assert {k for k, s in VENDORS.items() if s.slot_file is not None} == set(
+        profiles_mod.SUPPORTED_AGENT_KEYS
+    )
+
+
 def test_create_and_list(tmp_path: Path) -> None:
     store = _store(tmp_path)
     profile = store.create(agent_key="claude", name="Work")
@@ -37,7 +52,9 @@ def test_create_and_list(tmp_path: Path) -> None:
 
     doc = store.list()
     assert doc["profiles"] == [profile]
-    assert doc["defaults"] == {"claude": None, "codex": None, "kimi": None, "grok": None}
+    assert doc["defaults"] == {
+        "claude": None, "codex": None, "kimi": None, "grok": None, "kilo": None,
+    }
     assert store.get(profile["id"]) == profile
     # Stored document carries the schema version.
     stored = store._db.kv_get(profiles_mod._KV_KEY)
@@ -180,7 +197,9 @@ def test_corrupt_registry_starts_empty(tmp_path: Path) -> None:
     legacy.write_text("{not json", encoding="utf-8")
     assert store.list() == {
         "profiles": [],
-        "defaults": {"claude": None, "codex": None, "kimi": None, "grok": None},
+        "defaults": {
+            "claude": None, "codex": None, "kimi": None, "grok": None, "kilo": None,
+        },
     }
 
 

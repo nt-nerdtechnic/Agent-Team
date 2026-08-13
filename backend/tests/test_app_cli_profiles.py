@@ -287,9 +287,11 @@ async def test_cli_profiles_create_and_list(
     listing = session.websocket.sent[1]  # type: ignore[attr-defined]
     assert listing["payload"]["profiles"] == [profile]
     assert listing["payload"]["defaults"] == {
-        "claude": None, "codex": None, "kimi": None, "grok": None,
+        "claude": None, "codex": None, "kimi": None, "grok": None, "kilo": None,
     }
-    assert listing["payload"]["supported_agents"] == ["claude", "codex", "kimi", "grok"]
+    assert listing["payload"]["supported_agents"] == [
+        "claude", "codex", "kimi", "grok", "kilo",
+    ]
 
 
 async def test_cli_profiles_list_includes_identities(
@@ -1391,6 +1393,7 @@ def test_login_spawn_command_variants() -> None:
     assert app._login_spawn_command(
         "codex", ["/bin/zsh", "-ilc", "'/opt/my codex/codex' --flag"]
     ) == ["/bin/zsh", "-ilc", "'/opt/my codex/codex' login"]
+    assert app._login_spawn_command("kilo", "kilo --flag") == "kilo auth login"
     assert app._login_spawn_command("terminal", "bash") == "bash"
 
 

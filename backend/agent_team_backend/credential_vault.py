@@ -770,10 +770,24 @@ class CredentialVault:
     def login_spawn_env(self, agent_key: str, slot_id: str) -> tuple[dict[str, str], list[str]]:
         """Env for spawning ``agent_key``'s login pane inside the profile's
         isolated login home: ``(env_set, env_remove)``. Creates the login home
-        (0700 — it will hold fresh credentials). Blocking I/O — call off the
+        (0700 — it will hold fresh credentials). A CLI with no way to relocate
+        its credential file gets no isolation and no login home — an empty pair
+        means "sign in against the real home". Blocking I/O — call off the
         event loop."""
         if agent_key not in _SLOT_FILES:
             raise ValueError(f"unsupported agent for CLI login homes: {agent_key!r}")
+        spec = _cli_vendor_spec(agent_key)
+        if agent_key not in ("claude", "grok") and (
+            spec is None or spec.login_home_env is None
+        ):
+            # No isolation lever exists for this CLI (kilo: only the
+            # general-purpose XDG_DATA_HOME, which would relocate every
+            # XDG-aware program in the pane). The sign-in runs against the real
+            # home and the live credential it writes is captured into a slot by
+            # the ordinary capture/harvest paths. No login home is created:
+            # its mere existence is what makes the switch handler and the usage
+            # poller try to harvest one, and they have no secret file to read.
+            return {}, []
         home = self.login_home_path(agent_key, slot_id)
         home.mkdir(parents=True, exist_ok=True)
         os.chmod(home, 0o700)  # umask-proof: the home will hold fresh secrets
@@ -783,7 +797,6 @@ class CredentialVault:
             # CLAUDE_CONFIG_DIR string; the canonical path here must match the
             # one harvest_login_home hashes later, byte for byte.
             return {"CLAUDE_CONFIG_DIR": home_str}, list(CLAUDE_ENV_OVERRIDES)
-        spec = _cli_vendor_spec(agent_key)
         if spec is not None and spec.login_home_env is not None:
             return {spec.login_home_env: home_str}, []
         # grok: HOME shim; its .grok dir lives one level in.

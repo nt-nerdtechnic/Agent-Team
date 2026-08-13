@@ -82,6 +82,29 @@ def _kilo_entry_credentials(entry: Any) -> dict | None:
     return None
 
 
+def identity_from_secret(secret):
+    """Display identity for the accounts UI, from an ``auth.json`` payload.
+
+    ``email`` stays empty on purpose: kilo's auth.json carries no email, no
+    display name and no user id — an ``api`` entry holds only the key, an
+    ``oauth`` entry the access token plus ``accountId``, which is the
+    ORGANIZATION id (it ships as the X-KILOCODE-ORGANIZATIONID header), not the
+    person. Two members of one org share it, so putting it in ``email`` would
+    both label the card with an id that names the wrong thing and make the
+    duplicate-account detection — which groups rows by exactly this field —
+    declare two different logins the same account. With no identity to show,
+    the accounts UI names the row by the profile name the user typed (the same
+    fallback kimi uses). All this can report is whether a credential exists."""
+    data = None
+    if secret is not None:
+        try:
+            data = json.loads(secret)
+        except ValueError:
+            data = None
+    entry = data.get("kilo") if isinstance(data, dict) else None
+    return {"email": None, "signedIn": _kilo_entry_credentials(entry) is not None}
+
+
 def _kilo_legacy_credentials(home: Path) -> dict | None:
     """Legacy ``~/.kilocode/cli/config.json``: providers[] entries with
     provider == "kilocode" carry kilocodeToken (+ kilocodeOrganizationId)."""
@@ -287,6 +310,30 @@ def _session_exists(workspace_path: str, session_id: str) -> bool:
 SPEC = VendorSpec(
     key="kilo",
     label="Kilo Code",
+    # Multi-account (credential swap): the vault parks and restores this exact
+    # file — `kilo auth list` prints the path itself, and it is the same tuple
+    # the quota reader already resolves against.
+    #
+    # KNOWN LIMIT: XDG_DATA_HOME is NOT honoured here. CredentialVault resolves
+    # a live file as <real home>/<live_file> (_live_file), while _kilo_auth_file
+    # above follows kilo and prefers $XDG_DATA_HOME/kilo/auth.json. A user who
+    # sets XDG_DATA_HOME therefore has account switching read and write
+    # ~/.local/share/kilo/auth.json while the CLI keeps using the XDG copy, so
+    # the switch silently does nothing (the quota badge, which does follow XDG,
+    # keeps reporting the account that is really live). Left as is on purpose:
+    # _live_file is the shared resolution for every vendor, and teaching it
+    # env-var lookups for this one rare setup would change path resolution for
+    # claude/codex/kimi/grok too.
+    live_file=KILO_AUTH_FILE_REL,
+    slot_file="auth.json",
+    identity_from_secret=identity_from_secret,
+    # login_home_env / login_home_secret_file stay unset: kilo has no dedicated
+    # config-home variable (`kilo debug paths` reports only the generic XDG
+    # dirs), so a login pane cannot be given its own credential file without
+    # exporting XDG_DATA_HOME — which would relocate every XDG-aware program in
+    # that pane, Navide itself included when launched from it. A kilo sign-in
+    # therefore runs against the real home and the vault captures the result
+    # afterwards (see credential_vault.login_spawn_env).
     # Late-bound (module global at call time) so tests can monkeypatch.
     fetch_usage=lambda home: fetch_kilo(home),
     resume_id_from_command=_resume_id_from_command,

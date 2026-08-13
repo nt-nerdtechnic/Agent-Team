@@ -1627,6 +1627,7 @@ _LOGIN_COMMAND_ARGS = {
     "codex": "login",
     "kimi": "login",
     "grok": "",
+    "kilo": "auth login",
 }
 
 
