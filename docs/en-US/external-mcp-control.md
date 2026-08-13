@@ -143,7 +143,7 @@ documented argument shapes.
 
 | Action | Args | Effect |
 |---|---|---|
-| `ui.settings.open` | `{tab?}` (one of `general`, `mcp`, `analyzer`, `updates`, `appearance`, `accounts`, `storage`) | Open Settings, optionally to a specific tab |
+| `ui.settings.open` | `{tab?}` (one of `general`, `mcp`, `analyzer`, `updates`, `appearance`, `accounts`, `storage`, `keybindings`) | Open Settings, optionally to a specific tab |
 | `ui.settings.close` | — | Close Settings |
 | `ui.pane.create` | `{agent, name?, task?}` | Spawn a pane for `agent` in the window's open workspace; `task`, if given, is sent as the kickoff prompt and skips role injection |
 | `ui.pane.close` | `{paneId}` | Kill a pane |

@@ -137,8 +137,9 @@ declare global {
       openExternal: (url: string) => Promise<{ ok: boolean; error?: string }>
       onSwitchEditorSidebar: (cb: (sidebar: string) => void) => void
       onOpenEditorDiff: (cb: (params: Record<string, string>) => void) => void
-      readKeybindings: () => Promise<{ ok: boolean; content?: string }>
+      readKeybindings: () => Promise<{ ok: boolean; content?: string; error?: string }>
       writeKeybindings: (content: string) => Promise<{ ok: boolean; error?: string }>
+      onKeybindingsChanged: (cb: (content: string) => void) => void
       getBootstrapSettings: () => string
       broadcastLanguageChange: (locale: string) => void
       onLanguageChanged: (cb: (locale: string) => void) => void
@@ -200,9 +201,19 @@ declare global {
           buffer: string
         } | { error: string }
       ) => void
-      cliPaneDragEnd: (paneId: string, screenX: number, screenY: number) => void
+      cliPaneDragEnd: (
+        paneId: string,
+        screenX: number,
+        screenY: number,
+        paneIds?: string[]
+      ) => void
       onExternalPaneDrop: (
-        handler: (args: { paneId: string; screenX: number; screenY: number }) => void
+        handler: (args: {
+          paneId: string
+          paneIds?: string[]
+          screenX: number
+          screenY: number
+        }) => void
       ) => () => void
       showTerminalContextMenu: (selection: string) => void
       setBadgeCount: (count: number) => void

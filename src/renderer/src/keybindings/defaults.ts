@@ -176,6 +176,16 @@ export const defaults: KeybindingRule[] = [
   { key: 'ctrl+8', command: 'controlPane.selectCliType8' },
   { key: 'ctrl+9', command: 'controlPane.selectCliType9' },
 
+  // ── Main-window sidebar tabs ─────────────────────────────────────────────────
+  // Cmd+<n> picks the Nth sidebar view. 'paneStage' scopes them to the main
+  // window, so they never collide with the editor's Cmd+1..9 tab jumps below
+  // (those are gated on 'editorOpen', a context only the Mini IDE sets).
+  { key: 'cmd+1', command: 'controlPane.selectSidebarTab1', when: 'paneStage && !editorOpen' },
+  { key: 'cmd+2', command: 'controlPane.selectSidebarTab2', when: 'paneStage && !editorOpen' },
+  { key: 'cmd+3', command: 'controlPane.selectSidebarTab3', when: 'paneStage && !editorOpen' },
+  { key: 'cmd+4', command: 'controlPane.selectSidebarTab4', when: 'paneStage && !editorOpen' },
+  { key: 'cmd+5', command: 'controlPane.selectSidebarTab5', when: 'paneStage && !editorOpen' },
+
   // ── Editor tabs ──────────────────────────────────────────────────────────────
   { key: 'ctrl+tab',       command: 'workbench.action.openNextEditor' },
   { key: 'ctrl+shift+tab', command: 'workbench.action.openPreviousEditor' },

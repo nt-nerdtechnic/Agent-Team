@@ -63,7 +63,7 @@ import GitAccountsPane from './GitAccountsPane.vue'
 import CliAccountsPane from './CliAccountsPane.vue'
 import CliManagementPanel from './CliManagementPanel.vue'
 import type { useCliProfiles } from '../composables/useCliProfiles'
-import KeyboardShortcutsHelp from './KeyboardShortcutsHelp.vue'
+import KeyboardShortcutsEditor from './KeyboardShortcutsEditor.vue'
 import CliMessagingHelp from './CliMessagingHelp.vue'
 import McpHelp from './McpHelp.vue'
 import ExtensionsPane from './ExtensionsPane.vue'
@@ -98,6 +98,8 @@ const props = defineProps<{
   analyzerApi: ReturnType<typeof useAnalyzer>
   pipelinesApi?: ReturnType<typeof usePipelines>
   initialTab?: Tab
+  /** Bumped by the caller to re-assert initialTab even when its value is unchanged. */
+  tabRequest?: number
   confirmBeforeClose?: boolean
 }>()
 const emit = defineEmits<{
@@ -112,10 +114,10 @@ const confirmBeforeCloseModel = computed({
 })
 
 // ── Tab ───────────────────────────────────────────────────────────────────────
-type Tab = 'mcp' | 'skills' | 'analyzer' | 'cliAgents' | 'general' | 'updates' | 'appearance' | 'accounts' | 'extensions' | 'storage' | 'help'
+type Tab = 'mcp' | 'skills' | 'analyzer' | 'cliAgents' | 'general' | 'updates' | 'appearance' | 'accounts' | 'extensions' | 'storage' | 'keybindings' | 'help'
 
 /** Topics inside the Help tab — read-only reference material, no settings. */
-type HelpTopic = 'messaging' | 'mcp' | 'shortcuts'
+type HelpTopic = 'messaging' | 'mcp'
 const helpTopic = ref<HelpTopic>('messaging')
 const activeTab = ref<Tab>(props.initialTab ?? 'general')
 // initialTab is only read once at mount by the ref initializer above; when the
@@ -123,6 +125,21 @@ const activeTab = ref<Tab>(props.initialTab ?? 'general')
 // action), react to the prop changing too.
 watch(() => props.initialTab, (tab) => {
   if (tab) activeTab.value = tab
+})
+// A repeated request for the tab already named in initialTab does not change
+// the prop, so watch the counter too — otherwise pressing Cmd+K Cmd+S while
+// Settings sits on another tab does nothing at all.
+watch(() => props.tabRequest, () => {
+  if (props.initialTab) activeTab.value = props.initialTab
+})
+// Watching the prop is not enough on its own: re-issuing the same request (⌘K ⌘S
+// twice, with a manual tab switch in between) leaves initialTab unchanged, so the
+// watcher never fires and the shortcut looks dead. Callers that need to switch an
+// already-open modal go through here instead.
+defineExpose({
+  setTab: (tab: Tab): void => {
+    activeTab.value = tab
+  },
 })
 
 // ── CLI Agents (enable/disable + reorder for the manual spawn dropdown) ────────
@@ -360,13 +377,21 @@ const settingsSearchItems = computed<SettingsSearchItem[]>(() => [
   },
   {
     id: 'shortcuts',
-    tab: 'help',
-    section: 'help',
-    helpTopic: 'shortcuts',
-    title: 'Keyboard Shortcuts / 快捷鍵',
-    group: 'Help',
-    summary: 'Read-only reference of all keyboard shortcuts across workbench, AI chat, editor, terminal, and native menu.',
+    tab: 'keybindings',
+    section: 'keybindings',
+    title: 'Keyboard Shortcuts Reference / 快捷鍵對照',
+    group: 'System',
+    summary: 'Every shortcut in one place: the editable rule table, plus read-only sections for terminal and native-menu keys.',
     keywords: 'keyboard shortcuts keys keybinding hotkey 快捷鍵 鍵盤 按鍵 workbench editor terminal cli ctrl cmd shift option',
+  },
+  {
+    id: 'keybindings',
+    tab: 'keybindings',
+    section: 'keybindings',
+    title: 'Customize Shortcuts / 自訂快捷鍵',
+    group: 'System',
+    summary: 'Rebind, add or remove keyboard shortcuts. Records the keys you press, flags conflicts, and resets to defaults per row.',
+    keywords: 'keybinding keybindings customize rebind remap shortcut shortcuts hotkey chord conflict reset 自訂 快捷鍵 改鍵 重新綁定 衝突 還原 keybindings.json',
   },
   {
     id: 'storage',
@@ -649,6 +674,7 @@ const settingsScopeNotes: Record<SettingsTab, { scope: string; storage: keyof Se
   accounts: { scope: 'User / Workspace bindings', storage: 'safeStorage' },
   extensions: { scope: 'User', storage: 'mainProcess' },
   storage: { scope: 'User', storage: 'app_data_dir' },
+  keybindings: { scope: 'User', storage: 'mainProcess' },
 }
 
 async function loadSettingsPaths(): Promise<void> {
@@ -1368,6 +1394,11 @@ watch(activeTab, (tab) => {
               <SettingsNavItem :label="$t('settings.nav.storage')" :active="activeTab === 'storage'" @select="activeTab = 'storage'">
                 <template #icon>
                   <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="3.8" rx="5.2" ry="2"/><path d="M2.8 3.8v4.4c0 1.1 2.3 2 5.2 2s5.2-.9 5.2-2V3.8"/><path d="M2.8 8.2v4c0 1.1 2.3 2 5.2 2s5.2-.9 5.2-2v-4"/></svg>
+                </template>
+              </SettingsNavItem>
+              <SettingsNavItem :label="$t('settings.nav.keybindings')" :active="activeTab === 'keybindings'" @select="activeTab = 'keybindings'">
+                <template #icon>
+                  <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="1.3" y="3.8" width="13.4" height="8.4" rx="1.4"/><path d="M4 6.4h0.01M6.4 6.4h0.01M8.8 6.4h0.01M11.2 6.4h0.01M4 8.8h0.01M11.2 8.8h0.01M6 10.6h4"/></svg>
                 </template>
               </SettingsNavItem>
               <SettingsNavItem :label="$t('settings.nav.updates')" :active="activeTab === 'updates'" @select="activeTab = 'updates'">
@@ -2574,6 +2605,14 @@ watch(activeTab, (tab) => {
 
         <!-- ── KEYBOARD SHORTCUTS TAB ────────────────────────────────────── -->
         <!-- ── HELP TAB (read-only reference: messaging + shortcuts) ─────── -->
+        <!-- ── KEYBINDINGS TAB (editable; the Help tab keeps the read-only
+             reference, which also covers xterm and native-menu keys that the
+             central rule table does not own) ─────────────────────────────── -->
+        <div v-show="activeTab === 'keybindings'" class="s-body" data-settings-section="keybindings">
+          <h1 class="s-page-title">{{ $t('settings.nav.keybindings') }}</h1>
+          <KeyboardShortcutsEditor v-if="activeTab === 'keybindings'" />
+        </div>
+
         <div v-show="activeTab === 'help'" class="s-body help-body" data-settings-section="help">
           <h1 class="s-page-title">{{ $t('settings.nav.help') }}</h1>
           <div class="help-topics" role="tablist">
@@ -2591,17 +2630,9 @@ watch(activeTab, (tab) => {
               :aria-selected="helpTopic === 'mcp'"
               @click="helpTopic = 'mcp'"
             >{{ $t('settings.help.topic.mcp') }}</button>
-            <button
-              class="help-topic"
-              :class="{ active: helpTopic === 'shortcuts' }"
-              role="tab"
-              :aria-selected="helpTopic === 'shortcuts'"
-              @click="helpTopic = 'shortcuts'"
-            >{{ $t('settings.help.topic.shortcuts') }}</button>
           </div>
           <CliMessagingHelp v-if="activeTab === 'help' && helpTopic === 'messaging'" />
-          <McpHelp v-else-if="activeTab === 'help' && helpTopic === 'mcp'" />
-          <KeyboardShortcutsHelp v-else-if="activeTab === 'help'" />
+          <McpHelp v-else-if="activeTab === 'help'" />
         </div>
 
         <!-- ── EXTENSIONS TAB (flag-gated) ───────────────────────────────── -->

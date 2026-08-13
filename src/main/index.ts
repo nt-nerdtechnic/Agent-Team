@@ -1297,9 +1297,14 @@ ipcMain.handle('cli:get-pane-buffer', (_event, paneId: string): Promise<CliPaneB
 // covered underneath it.
 ipcMain.on(
   PANE_DRAG_END_CHANNEL,
-  (event, args: { paneId?: string; screenX?: number; screenY?: number }) => {
+  (event, args: { paneId?: string; paneIds?: string[]; screenX?: number; screenY?: number }) => {
     const paneId = String(args?.paneId ?? '')
     if (!paneId) return
+    // A multi-select drag reports every pane it carried; older senders report
+    // only paneId, so the batch falls back to that single pane.
+    const paneIds = Array.isArray(args?.paneIds)
+      ? args.paneIds.map((id) => String(id)).filter(Boolean)
+      : []
     const point = { x: Number(args?.screenX ?? 0), y: Number(args?.screenY ?? 0) }
     const sender = BrowserWindow.fromWebContents(event.sender)
     // A release inside the source window's own bounds means the user let go
@@ -1332,6 +1337,7 @@ ipcMain.on(
     if (!win || !validTargets.has(win)) return
     win.webContents.send(EXTERNAL_PANE_DROP_CHANNEL, {
       paneId,
+      paneIds: paneIds.length > 1 ? paneIds : [paneId],
       screenX: point.x,
       screenY: point.y
     })
@@ -1617,16 +1623,31 @@ ipcMain.handle('keybindings:read', async () => {
   try {
     const content = await readFile(filePath, 'utf-8')
     return { ok: true, content }
-  } catch {
-    return { ok: true, content: '[]' }
+  } catch (e) {
+    // "No file yet" is the normal first-run case and means no customisations.
+    // Anything else — a corrupt file, a permissions problem — must not be
+    // reported the same way: the renderer would fall back to defaults, the user
+    // would see their bindings silently revert, and the next write would
+    // overwrite the file they still had.
+    if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') return { ok: true, content: '[]' }
+    return { ok: false, error: String(e) }
   }
 })
 
-ipcMain.handle('keybindings:write', async (_event, content: string) => {
+ipcMain.handle('keybindings:write', async (event, content: string) => {
   if (typeof content !== 'string') return { ok: false, error: 'invalid content' }
   const filePath = join(app.getPath('userData'), 'keybindings.json')
   try {
     await writeFile(filePath, content, 'utf-8')
+    // Each renderer keeps its own key resolver, so the Mini IDE / Git / Plan
+    // windows would otherwise run the shipped defaults until reopened.
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.isDestroyed()) continue
+      // Skip the writer: it already applied these rules, and echoing them back
+      // rebuilds its resolver a second time for nothing.
+      if (win.webContents.id === event.sender.id) continue
+      win.webContents.send('keybindings:changed', content)
+    }
     return { ok: true }
   } catch (e) {
     return { ok: false, error: String(e) }

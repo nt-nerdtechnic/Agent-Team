@@ -277,10 +277,13 @@ contextBridge.exposeInMainWorld('agentTeam', {
     bytes: Uint8Array
     mediaType: string
   }): Promise<{ ok: boolean; path?: string }> => ipcRenderer.invoke('clipboard:saveImage', args),
-  readKeybindings: (): Promise<{ ok: boolean; content?: string }> =>
+  readKeybindings: (): Promise<{ ok: boolean; content?: string; error?: string }> =>
     ipcRenderer.invoke('keybindings:read'),
   writeKeybindings: (content: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('keybindings:write', content),
+  onKeybindingsChanged: (cb: (content: string) => void): void => {
+    ipcRenderer.on('keybindings:changed', (_event, content: string) => cb(content))
+  },
   // Synchronous on purpose: seeds the renderer settings cache before first
   // paint (zero-flash theme/language). Returns the ui_settings.json text,
   // '{}' when missing/corrupt.
@@ -403,16 +406,23 @@ contextBridge.exposeInMainWorld('agentTeam', {
   // Cross-window pane drop handoff: HTML5 DnD events never reach another
   // BrowserWindow, so the drag source reports the release point (screen coords
   // from dragend) and main forwards it to the window under that point.
-  cliPaneDragEnd: (paneId: string, screenX: number, screenY: number): void => {
-    ipcRenderer.send('cli:pane-drag-end', { paneId, screenX, screenY })
+  // `paneIds` carries every pane of a multi-select drag (the dragged pane alone
+  // when there is no selection), so the receiving window can share all of them.
+  cliPaneDragEnd: (
+    paneId: string,
+    screenX: number,
+    screenY: number,
+    paneIds?: string[]
+  ): void => {
+    ipcRenderer.send('cli:pane-drag-end', { paneId, screenX, screenY, paneIds })
   },
   // Returns a disposer — the AI Chat mounts/unmounts with the panel toggle.
   onExternalPaneDrop: (
-    handler: (args: { paneId: string; screenX: number; screenY: number }) => void
+    handler: (args: { paneId: string; paneIds?: string[]; screenX: number; screenY: number }) => void
   ): (() => void) => {
     const listener = (
       _event: unknown,
-      args: { paneId: string; screenX: number; screenY: number }
+      args: { paneId: string; paneIds?: string[]; screenX: number; screenY: number }
     ): void => handler(args)
     ipcRenderer.on('cli:external-pane-drop', listener)
     return () => ipcRenderer.removeListener('cli:external-pane-drop', listener)

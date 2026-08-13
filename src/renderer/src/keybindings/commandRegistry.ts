@@ -6,12 +6,18 @@ export function registerCommand(id: string, handler: CommandHandler): void {
   _commands.set(id, handler)
 }
 
-// Returns true if a handler was found and called.
+// Returns true if a handler was found and it consumed the invocation.
+//
+// A handler that returns exactly `false` declines: the dispatcher then leaves
+// the key event alone instead of calling preventDefault(). This matters for
+// handlers that guard on focus — e.g. the sidebar-tab commands no-op while the
+// user is typing in a text field, and swallowing the key there would strip the
+// native behaviour and every downstream listener. Any other return value
+// (including undefined, the common case) counts as handled.
 export function executeCommand(id: string, args?: unknown): boolean {
   const handler = _commands.get(id)
   if (!handler) return false
-  void handler(args)
-  return true
+  return handler(args) !== false
 }
 
 export function hasCommand(id: string): boolean {

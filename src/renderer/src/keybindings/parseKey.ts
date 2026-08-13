@@ -90,6 +90,107 @@ function eventKeyMatches(expectedKey: string, e: KeyboardEvent): boolean {
   return false
 }
 
+// ── Reverse direction: KeyboardEvent → rule string ────────────────────────────
+// Used by the Settings shortcut recorder. The base key it emits must be the one
+// `eventKeyMatches` above would accept, so the three physical-key fallbacks are
+// mirrored here: a recorded Option+Z has to become 'alt+z' (never 'alt+Ω'), and
+// a digit recorded under an IME has to become the digit (never 'Process').
+
+const MODIFIER_KEYS = new Set(['Meta', 'Control', 'Shift', 'Alt'])
+// e.key values that carry no usable character; the physical code is the only
+// signal left.
+const OPAQUE_KEYS = new Set(['process', 'unidentified', 'dead'])
+
+function baseKeyFromEvent(e: KeyboardEvent): string | null {
+  if (MODIFIER_KEYS.has(e.key)) return null
+
+  // Digits: always prefer the physical key so IME-intercepted and shifted
+  // presses (Shift+3 → '#') both record as the digit the matcher looks for.
+  const digit = /^(?:Digit|Numpad)([0-9])$/.exec(e.code || '')
+  if (digit) return digit[1]
+
+  if (e.code === 'Slash' || e.code === 'NumpadDivide') return '/'
+
+  // Option+letter types a special character on macOS; the matcher falls back to
+  // the physical letter, so the recorder must too.
+  const letter = /^Key([A-Z])$/.exec(e.code || '')
+  if (e.altKey && letter) return letter[1].toLowerCase()
+
+  const key = (e.key || '').toLowerCase()
+  if (!key || OPAQUE_KEYS.has(key)) return letter ? letter[1].toLowerCase() : null
+  // A literal space would split the chord spec in two; use its alias instead.
+  if (key === ' ') return 'space'
+  return key
+}
+
+// Canonical modifier order so two spellings of the same combo compare equal.
+export function formatParsedKey(pk: ParsedKey): string {
+  const parts: string[] = []
+  if (pk.meta) parts.push('cmd')
+  if (pk.ctrl) parts.push('ctrl')
+  if (pk.alt) parts.push('alt')
+  if (pk.shift) parts.push('shift')
+  parts.push(pk.key === ' ' ? 'space' : pk.key)
+  return parts.join('+')
+}
+
+// Rewrites a spec into canonical form ('shift+cmd+s' → 'cmd+shift+s') so
+// conflict detection is not fooled by ordering or aliases.
+export function canonicalizeKeySpec(spec: string): string {
+  return parseKeySpec(spec).map(formatParsedKey).join(' ')
+}
+
+export interface KeySpecError {
+  ok: false
+  /** Machine-readable reason; the UI maps it to an i18n message. */
+  reason: 'empty' | 'too-many-segments' | 'modifiers-only' | 'unknown-key'
+  detail?: string
+}
+
+const MAX_CHORD_SEGMENTS = 2
+
+/**
+ * Rejects specs the resolver cannot honour. The important one is a third chord
+ * segment: `parseKeySpec` happily returns three, but `KeyResolver` only ever
+ * compares one or two, so a `cmd+k cmd+s cmd+t` rule parses cleanly and then
+ * never fires — silently, which is the worst way to be wrong.
+ */
+export function validateKeySpec(spec: string): { ok: true } | KeySpecError {
+  const trimmed = spec.trim()
+  if (!trimmed) return { ok: false, reason: 'empty' }
+
+  const segments = trimmed.split(/\s+/)
+  if (segments.length > MAX_CHORD_SEGMENTS) {
+    return { ok: false, reason: 'too-many-segments', detail: String(segments.length) }
+  }
+
+  for (const segment of segments) {
+    const parsed = parseKey(segment)
+    if (!parsed.key) return { ok: false, reason: 'modifiers-only', detail: segment }
+    // A base key is a single character, a known named key, or f1..f24. Anything
+    // else is a typo like 'cmmd+s', which would parse into a key nothing emits.
+    const named = /^(escape|enter|tab|backspace|delete|space|home|end|pageup|pagedown|arrow(up|down|left|right)|f([1-9]|1[0-9]|2[0-4]))$/
+    if (parsed.key.length !== 1 && !named.test(parsed.key) && parsed.key !== ' ') {
+      return { ok: false, reason: 'unknown-key', detail: parsed.key }
+    }
+  }
+  return { ok: true }
+}
+
+// Returns null while the user is still holding only modifiers, or when the
+// event carries no identifiable key at all.
+export function eventToKeyString(e: KeyboardEvent): string | null {
+  const base = baseKeyFromEvent(e)
+  if (base === null) return null
+  const parts: string[] = []
+  if (e.metaKey) parts.push('cmd')
+  if (e.ctrlKey) parts.push('ctrl')
+  if (e.altKey) parts.push('alt')
+  if (e.shiftKey) parts.push('shift')
+  parts.push(base)
+  return parts.join('+')
+}
+
 export function matchesEvent(parsed: ParsedKey, e: KeyboardEvent): boolean {
   if (parsed.meta !== e.metaKey) return false
   if (parsed.ctrl !== e.ctrlKey) return false

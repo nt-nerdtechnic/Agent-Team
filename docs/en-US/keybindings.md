@@ -7,6 +7,10 @@ and when-clause conditions.
 
 > **macOS symbols:** `⌘` Cmd · `⌥` Option/Alt · `⌃` Ctrl · `⇧` Shift · `↩` Enter
 
+Every binding below can be changed in **Settings → Shortcuts**; see
+[Customizing shortcuts](#customizing-shortcuts) for the file format and the
+rules the editor writes.
+
 ---
 
 ## Workbench
@@ -421,14 +425,88 @@ Keybindings can be gated by context conditions:
 | `terminalFocus` | The terminal area has focus |
 | `!editorTextFocus` | Editor open but text area not focused |
 
-Conditions support `&&` (and), `||` (or), `!` (not).
+Conditions support `&&` (and), `||` (or), `!` (not). There are no parentheses
+and no comparisons — `&&` simply binds tighter than `||`, and an unknown
+identifier evaluates to `false`. The Settings editor therefore shows `when`
+read-only; to write a new condition, edit `keybindings.json` by hand.
+
+---
+
+## Customizing shortcuts
+
+**Settings → Shortcuts** (also reachable with `⌘K ⌘S`) lists every command as
+one row per (command, `when`) pair. Click a key cap to record a replacement, `+` to add a
+second binding, `✕` to remove one, and `↺` to restore that row's defaults.
+Overrides are written to `keybindings.json` in the Electron `userData`
+directory and broadcast to every open window, so they apply without a restart.
+
+### File format
+
+The file is a flat array of the same `KeybindingRule` shape `defaults.ts` uses.
+Later rules win over earlier ones, and user rules are appended after the
+defaults:
+
+```jsonc
+[
+  // cancel the shipped binding…
+  { "key": "cmd+s", "command": "-editor.action.save", "when": "editorOpen && !terminalFocus" },
+  // …and put the command somewhere else
+  { "key": "cmd+alt+s", "command": "editor.action.save", "when": "editorOpen && !terminalFocus" }
+]
+```
+
+A command prefixed with `-` is a **removal**: it cancels the rule that binds
+that same key to that same command. Removal is deliberately narrow rather than
+"blank the key", because several keys carry more than one command separated
+only by their `when` clause — `⌘⇧G` is `focusSourceControl` in the Mini IDE and
+`openGitWindow` in the main window, and unbinding one must not take the other
+down with it. Removals are matched on the canonical form of the key, so
+`shift+cmd+p` and `cmd+shift+p` refer to the same binding.
+
+A malformed entry is skipped rather than discarding the whole file.
+
+### Commands with no default key
+
+The list is generated from a static command manifest (`COMMAND_IDS` in
+`commandCatalog.ts`) joined with `defaults.ts`, not from `defaults.ts` alone —
+about a quarter of the app's commands ship with no key, and those are exactly
+the ones worth binding. They appear as `unassigned` and can be given a key like
+any other row. `commandManifest.test.ts` scans the source and fails if the
+manifest and the `registerCommand` calls drift apart.
+
+### Import / export
+
+**Export** writes the current overrides to a file you choose. **Import**
+replaces them wholesale, after checking every entry: a rule whose key is
+malformed, whose chord has three segments, or whose command this build does not
+have is listed as rejected rather than dropped quietly.
+
+### Protected shortcuts
+
+`workbench.action.openSettings` and `workbench.action.openKeyboardShortcuts`
+must keep at least one binding — removing the last one would hide the only
+screen that could undo it. They can still be rebound freely; the editor shows a
+lock instead of the remove button on the final key, and a hand-edit that would
+strand them is ignored on load.
+
+### What cannot be rebound here
+
+Both of these are listed read-only at the bottom of the Shortcuts page, since
+that page replaced the old reference:
+
+- **Terminal keys** (`⇧↩`, `⌘←`, `⌥⌫`, …) are intercepted by `useTerminal` and
+  turned into control sequences before the rule table is consulted.
+- **Electron menu accelerators** (`⌘R`, `⌥⌘I`, `⌘Q`, `⌃⌘F`, …) fire in the main
+  process ahead of the renderer. They also fire while the Settings recorder is
+  capturing, so those combinations cannot be recorded as shortcuts.
 
 ---
 
 ## Implementation Architecture
 
 ```
-KeybindingRule (defaults.ts)
+KeybindingRule (defaults.ts)  +  user overrides (keybindings.json)
+    ↓  merged, later rules win; '-command' rules cancel their target
     ↓  resolved by KeyResolver
 useKeybindings — window.addEventListener('keydown', handler, { capture: true })
     ↓  match found → stopPropagation
@@ -442,3 +520,5 @@ EditorWindowApp → activeEditor() → EditorPane → EditorView
 - **Capture phase** — interception happens before the event reaches any target element, allowing chords to override native browser/OS behaviour.
 - **Command registry** — commands are decoupled from UI; the palette and keybindings share the same `registerCommand` registry.
 - **No-op safety** — unregistered commands return `false` without calling `stopPropagation`, so native element behaviour falls through unaffected.
+- **Per-window resolvers** — each renderer window builds its own `KeyResolver`, so a write to `keybindings.json` is broadcast from the main process (`keybindings:changed`) and re-applied everywhere.
+- **Recording** — while the Settings recorder is reading raw keystrokes it calls `setKeyCaptureActive(true)`, which suspends the dispatcher; the dispatcher's listener is installed first and window capture-phase listeners run in registration order, so the recorder cannot outrank it any other way.
