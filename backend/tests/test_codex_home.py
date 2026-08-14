@@ -2,6 +2,8 @@ import json
 import os
 from pathlib import Path
 
+import pytest
+
 from agent_team_backend.codex_home import CodexHomeManager
 from agent_team_backend.skills_store import SkillsStore
 
@@ -86,6 +88,47 @@ def test_find_session_home_refreshes_managed_skills_for_resume(tmp_path: Path) -
     assert manager.find_session_home("resume-id") == home
     assert not (home / "skills" / "enabled").exists()
     assert (home / "skills" / "native").exists()
+
+
+def test_archived_session_routes_home_but_is_not_resumable(tmp_path: Path) -> None:
+    # `codex archive` moves the rollout into archived_sessions/ and codex then
+    # REFUSES `codex resume <id>` ("session <id> is archived. Run `codex
+    # unarchive <id>` ..."). Routing still needs the owning home; preflight
+    # must report the session as gone so the pane can heal onto a fresh id.
+    real = tmp_path / "real-codex"
+    (real / "sessions").mkdir(parents=True)
+    panes = tmp_path / "panes"
+    archived = panes / "pane-home" / "archived_sessions"
+    archived.mkdir(parents=True)
+    (archived / "rollout-2026-06-10T12-00-00-archived-id-1.jsonl").write_text(
+        "{}", encoding="utf-8")
+    live = panes / "pane-home" / "sessions" / "2026" / "06" / "11"
+    live.mkdir(parents=True)
+    (live / "rollout-2026-06-11T12-00-00-live-id-1.jsonl").write_text("{}", encoding="utf-8")
+    manager = CodexHomeManager(real_home=real, panes_root=panes)
+
+    assert manager.find_session_home("archived-id-1") == panes / "pane-home"
+    assert manager.find_resumable_session_home("archived-id-1") is None
+    # A live rollout answers both questions the same way.
+    assert manager.find_session_home("live-id-1") == panes / "pane-home"
+    assert manager.find_resumable_session_home("live-id-1") == panes / "pane-home"
+
+
+def test_session_exists_preflight_rejects_archived_rollout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_team_backend.cli_vendors import codex as codex_vendor
+
+    archived = tmp_path / ".codex" / "archived_sessions"
+    archived.mkdir(parents=True)
+    (archived / "rollout-2026-06-10T12-00-00-archived-id-2.jsonl").write_text(
+        "{}", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+
+    assert codex_vendor._session_exists("/ws", "archived-id-2") is False
+    # ... while routing still knows which home owns it.
+    assert codex_vendor.CodexHomeManager().find_session_home(
+        "archived-id-2") == tmp_path / ".codex"
 
 
 def test_find_session_home_rejects_unsafe_or_empty_id(tmp_path: Path) -> None:

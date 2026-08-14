@@ -72,7 +72,8 @@ without rotating anything the CLI owns.
 Snapshots are normalized to one shape so the frontend never sees provider
 quirks (epoch seconds, used/limit ratios, cent amounts are converted here):
 
-    { provider, status: ok|no-credentials|expired|rate-limited|unavailable|error,
+    { provider, status: ok|no-credentials|expired|rate-limited|unavailable|
+                        cli-missing|not-measured|error,
       planType, windows: [{ kind, label, usedPercent, resetsAt }], fetchedAt,
       error }
 

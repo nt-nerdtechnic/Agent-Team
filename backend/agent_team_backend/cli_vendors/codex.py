@@ -3,6 +3,7 @@
 Format reference: docs/cli-log-formats.md (Codex section).
 
 Files: ~/.codex/sessions/{Y}/{M}/{D}/rollout-{ts}-{uuid}.jsonl
+       (`codex archive` moves a rollout to ~/.codex/archived_sessions/)
 Event filter: type=event_msg, payload.type=token_count
 Token fields are CUMULATIVE session totals — we compute delta against the
 previous totals seen in the same file.
@@ -445,6 +446,14 @@ class CodexLogReader(LogReader):
 
 _SAFE_HOME_ID = re.compile(r"^[A-Za-z0-9_.:-]+$")
 
+# CODEX_HOME *routing* lookup only: which home physically holds a rollout.
+# `sessions` is nested {Y}/{M}/{D}; `codex archive` moves a rollout into the
+# flat `archived_sessions` instead. Do NOT reuse this for watcher roots or for
+# `_pane_id_from_home_path` — that helper hardcodes `parts[1] == "sessions"`,
+# so an archived path would silently attribute to no pane (empty pane id).
+# Resumability is a separate question: see `find_resumable_session_home`.
+_SESSION_SUBDIRS = ("sessions", "archived_sessions")
+
 class CodexHomeManager:
     """Create isolated CODEX_HOME dirs while sharing stable user config."""
 
@@ -619,32 +628,59 @@ class CodexHomeManager:
             shutil.rmtree(path)
 
     def find_session_home(self, resume_id: str) -> Path | None:
-        """Locate the CODEX_HOME that recorded this session, if any.
+        """Locate the CODEX_HOME that physically holds this session, if any.
 
-        `codex resume <id>` only finds a session inside the home it was
-        recorded under (rollout file + that home's own state db). Checks the
-        real ~/.codex first (sessions predating per-pane homes), then every
-        per-pane home (covers persisted home ids that drifted from the dir
-        actually holding the session). Returns None when no home has it.
+        Routing only: `codex resume <id>` reads the home it was recorded under
+        (rollout file + that home's own state db), so a resume must be spawned
+        with that CODEX_HOME rather than a fresh per-pane one. Checks the real
+        ~/.codex first (sessions predating per-pane homes), then every per-pane
+        home (covers persisted home ids that drifted from the dir actually
+        holding the session). Returns None when no home has it.
+
+        Archived rollouts count here — `codex archive` only moves the file into
+        archived_sessions/, and routing to the owning home is still the right
+        env for an unarchive. It does NOT mean the session can be resumed: use
+        `find_resumable_session_home` for that question.
         """
+        return self._locate_session_home(resume_id, _SESSION_SUBDIRS)
+
+    def find_resumable_session_home(self, resume_id: str) -> Path | None:
+        """Like `find_session_home`, but only for sessions codex will resume.
+
+        `sessions/` only: codex refuses to resume an archived thread — the
+        0.147.0 binary carries "session <id> is archived. Run `codex unarchive
+        <id>` to unarchive it first." (alongside "failed to locate archived
+        thread id"). Treating an archived id as existing would pass preflight
+        and launch a doomed `codex resume`.
+        """
+        return self._locate_session_home(resume_id, ("sessions",))
+
+    def _locate_session_home(
+        self, resume_id: str, subdirs: tuple[str, ...]
+    ) -> Path | None:
         rid = resume_id.strip()
         if not _SAFE_HOME_ID.match(rid):
             return None
         pattern = f"rollout-*{rid}.jsonl"
-        default_sessions = self.real_home / "sessions"
-        if default_sessions.is_dir():
-            try:
-                if next(default_sessions.rglob(pattern), None) is not None:
-                    return self.real_home
-            except OSError:
-                pass
+
+        def holds_session(home: Path) -> bool:
+            for name in subdirs:
+                subdir = home / name
+                if not subdir.is_dir():
+                    continue
+                if next(subdir.rglob(pattern), None) is not None:
+                    return True
+            return False
+
+        try:
+            if holds_session(self.real_home):
+                return self.real_home
+        except OSError:
+            pass
         if self.panes_root.is_dir():
             try:
                 for pane_home in sorted(self.panes_root.iterdir()):
-                    sessions = pane_home / "sessions"
-                    if not sessions.is_dir():
-                        continue
-                    if next(sessions.rglob(pattern), None) is not None:
+                    if holds_session(pane_home):
                         self._prepare_skills_view(pane_home, self.real_home / "skills")
                         return pane_home
             except OSError:
@@ -903,7 +939,9 @@ def _session_exists(workspace_path: str, session_id: str) -> bool:
     # Agent History stores only a pointer to the vendor-owned rollout. A
     # stale pointer must not pass preflight and launch a doomed
     # `codex resume`; search both the real and isolated per-pane homes.
-    return CodexHomeManager().find_session_home(session_id) is not None
+    # Archived rollouts are deliberately excluded — codex refuses to resume
+    # them, so "exists" here means "resumable".
+    return CodexHomeManager().find_resumable_session_home(session_id) is not None
 
 
 # ---- vendor spec -----------------------------------------------------------
@@ -934,7 +972,7 @@ SPEC = VendorSpec(
         ["codex", "--version"], r"(\d+\.\d+\.\d+)",
         install_cmd="npm install -g @openai/codex", needs_terminal=True,
         requires_binaries=("npm",),
-        optional=True, docs_url="https://developers.openai.com/codex/cli",
+        optional=True, docs_url="https://learn.chatgpt.com/docs/codex/cli",
         update_cmd="codex update", doctor_cmd="codex doctor",
         npm_package="@openai/codex"),
 )

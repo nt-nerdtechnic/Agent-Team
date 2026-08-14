@@ -572,12 +572,14 @@ SPEC = VendorSpec(
     session_exists=_session_exists,
     home_env_vars=("KIMI_CODE_HOME",),
     make_log_reader=KimiLogReader,
-    # Kimi Code ships `kimi doctor` but no update subcommand — update_cmd stays
-    # empty so the UI sends the user to the vendor docs instead of inventing one.
+    # Kimi Code ships `kimi doctor` and `kimi upgrade` (aliased `update`);
+    # verified with `kimi --help` on 1.x.
     install_dep=Dep("kimi", "Kimi Code", "Moonshot AI Kimi Code CLI", "agent_cli",
         ["kimi", "--version"], r"(\d+\.\d+\.\d+)",
         install_cmd="curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash",
         needs_terminal=True, requires_binaries=("curl",), optional=True,
-        docs_url="https://moonshotai.github.io/kimi-cli/en/",
+        # kimi-cli's docs site is being wound down in favour of kimi-code.
+        docs_url="https://moonshotai.github.io/kimi-code/",
+        update_cmd="kimi upgrade",
         doctor_cmd="kimi doctor"),
 )

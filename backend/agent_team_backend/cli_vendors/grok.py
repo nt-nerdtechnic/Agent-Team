@@ -601,6 +601,6 @@ SPEC = VendorSpec(
     install_dep=Dep("grok", "Grok CLI", "superagent-ai Grok coding agent", "agent_cli",
         ["grok", "--version"], r"(\d+\.\d+\.\d+)",
         install_cmd="curl -fsSL https://raw.githubusercontent.com/superagent-ai/grok-cli/main/install.sh | bash",
-        needs_terminal=True, requires_binaries=("curl",), optional=True, docs_url="https://grokcli.io",
+        needs_terminal=True, requires_binaries=("curl",), optional=True, docs_url="https://github.com/superagent-ai/grok-cli",
         update_cmd="grok update"),
 )

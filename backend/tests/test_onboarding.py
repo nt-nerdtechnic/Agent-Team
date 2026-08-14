@@ -166,7 +166,7 @@ def test_maintenance_command_returns_the_vendor_command(monkeypatch: pytest.Monk
     result = ob.maintenance_command("claude", "update")
 
     assert result == {"ok": True, "needs_terminal": True, "command": "claude update",
-                      "docs_url": "https://docs.anthropic.com/claude-code"}
+                      "docs_url": "https://platform.claude.com/docs/claude-code"}
     assert ran == []  # resolving a command must never execute it
 
 
@@ -176,10 +176,26 @@ def test_maintenance_command_rejects_unknown_agent_and_action() -> None:
     assert ob.maintenance_command("claude", "")["ok"] is False
 
 
+def _dep_without_update_cmd() -> Dep | None:
+    """First agent CLI that ships no official update command.
+
+    Picked dynamically on purpose: naming a vendor here has twice gone stale
+    when that vendor later gained an `update_cmd`, silently retiring the
+    "Navide never invents a command" invariant this file guards.
+    """
+    return next(
+        (d for d in ob.DEPS if d.group == "agent_cli" and not d.update_cmd),
+        None,
+    )
+
+
 def test_maintenance_command_points_at_docs_when_vendor_has_none() -> None:
-    result = ob.maintenance_command("kimi", "update")
+    dep = _dep_without_update_cmd()
+    if dep is None:
+        pytest.skip("every agent CLI now ships an update command")
+    result = ob.maintenance_command(dep.id, "update")
     assert result["ok"] is False
-    assert result["docs_url"] == "https://moonshotai.github.io/kimi-cli/en/"
+    assert result["docs_url"] == dep.docs_url
     assert "command" not in result
 
 
@@ -870,8 +886,12 @@ def test_cli_health_entries_carry_registry_commands(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Entry commands come from the registry, never from a per-agent hardcode."""
+    no_update = _dep_without_update_cmd()
     installed = {"kimi": _make_executable(tmp_path / "bin" / "kimi"),
                  "grok": _make_executable(tmp_path / "bin" / "grok")}
+    if no_update is not None:
+        cmd = no_update.check_cmd[0]
+        installed[cmd] = _make_executable(tmp_path / "bin" / cmd)
     monkeypatch.setattr(ob, "_distinct_executables", lambda command: (
         [_candidate_entry(installed[command])] if command in installed else []
     ))
@@ -880,10 +900,14 @@ def test_cli_health_entries_carry_registry_commands(
 
     entries = {e["agent_key"]: e for e in ob.build_cli_health([])["entries"]}
 
-    # kimi ships a doctor but no update subcommand — no invented command.
+    # kimi ships both a doctor and an upgrade subcommand.
     assert entries["kimi"]["diagnostic_command"] == "kimi doctor"
-    assert entries["kimi"]["update_command"] == ""
+    assert entries["kimi"]["update_command"] == "kimi upgrade"
     assert entries["kimi"]["docs_url"]
     # grok ships an update but no doctor — diagnostics fall back to the probe.
     assert entries["grok"]["update_command"] == "grok update"
     assert entries["grok"]["diagnostic_command"] == "grok --version"
+    # A vendor with no official update command gets "" — Navide never invents
+    # one (dynamic pick: see _dep_without_update_cmd).
+    if no_update is not None:
+        assert entries[no_update.id]["update_command"] == ""

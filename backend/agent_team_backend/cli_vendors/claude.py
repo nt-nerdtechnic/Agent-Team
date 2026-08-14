@@ -907,6 +907,15 @@ async def fetch_claude_usage_via_cli(home: Path) -> dict[str, Any] | None:
     except Exception:  # noqa: BLE001
         binary = ""
     if not binary:
+        # The one failure here that leaves no other trace: nothing was spawned,
+        # so no CLI output explains it. The backend inherits the GUI's PATH
+        # (topped up from a login shell at startup and before every spawn), so
+        # this is what a CLI installed somewhere that probe never saw looks
+        # like — log the PATH that was searched, or the report is unactionable.
+        log.warning(
+            "claude /usage skipped: no claude binary found on PATH=%s",
+            os.environ.get("PATH", ""),
+        )
         return None
     try:
         raw = await read_usage_panel(binary)
@@ -1137,8 +1146,13 @@ async def fetch_claude(home: Path) -> dict:
     this reads what it printed. It replaced a direct HTTP call this app made
     while presenting itself as ``claude-code/<version>``. ``home`` locates the
     live credential for the logged-out precheck; the CLI itself still reads
-    whichever credential is live."""
-    return await fetch_claude_usage_via_cli(home) or _snapshot("claude", "unavailable")
+    whichever credential is live.
+
+    No CLI to ask is its own status: ``unavailable`` reads as "this provider
+    has no usage surface", which is wrong here and leaves the one thing the
+    user can act on — install it, or point the app at the right binary —
+    indistinguishable from a panel that failed to render."""
+    return await fetch_claude_usage_via_cli(home) or _snapshot("claude", "cli-missing")
 
 
 
@@ -1233,11 +1247,19 @@ SPEC = VendorSpec(
     ),
     make_log_reader=ClaudeLogReader,
     # Step 2 — Agent CLIs (≥ 1 required) + Analyzer
+    # Anthropic now lists `curl -fsSL https://claude.ai/install.sh | bash` (or
+    # the Homebrew cask) as the primary install and npm under "Advanced
+    # installation options". npm is still officially supported and is kept here
+    # deliberately: the rest of this Dep describes an npm-managed install —
+    # requires_binaries gates on npm, npm_package drives duplicate-install
+    # detection and the uninstall command, and `claude update` reads
+    # .last-update-result.json. Switching install_cmd alone would install a
+    # native binary none of those fields describe.
     install_dep=Dep("claude", "Claude Code", "Anthropic Claude CLI", "agent_cli",
         ["claude", "--version"], r"(\d+\.\d+\.\d+)",
         install_cmd="npm install -g @anthropic-ai/claude-code", needs_terminal=True,
         requires_binaries=("npm",),
-        optional=True, docs_url="https://docs.anthropic.com/claude-code",
+        optional=True, docs_url="https://platform.claude.com/docs/claude-code",
         update_cmd="claude update", doctor_cmd="claude doctor",
         npm_package="@anthropic-ai/claude-code",
         update_state_file=".last-update-result.json",

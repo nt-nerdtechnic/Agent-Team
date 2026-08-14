@@ -549,7 +549,8 @@ PiLogReader.pane_cwd_match = _pane_cwd_match
 # its key endpoint; BYOK / github-copilot / xai entries have no readable
 # quota and map to unavailable.
 
-# pi (Pi coding agent, @mariozechner/pi-coding-agent). auth.json is keyed by
+# pi (Pi coding agent, @earendil-works/pi-coding-agent; the older
+# @mariozechner/pi-coding-agent package is deprecated). auth.json is keyed by
 # provider id; oauth entries are {type: "oauth", access, refresh, expires
 # (epoch ms)}, BYOK keys are {type: "api_key", key}. Credentials are read-only
 # here and never refreshed (pi rotates its own refresh tokens): an expired
@@ -797,7 +798,8 @@ SPEC = VendorSpec(
     # its own opt-out for the startup version check.
     install_dep=Dep("pi", "Pi", "Pi coding agent CLI", "agent_cli",
         ["pi", "--version"], r"(\d+\.\d+\.\d+)",
-        install_cmd="npm install -g @earendil-works/pi-coding-agent",
+        # --ignore-scripts matches pi's official Quick Start.
+        install_cmd="npm install -g --ignore-scripts @earendil-works/pi-coding-agent",
         needs_terminal=True, requires_binaries=("npm",),
         optional=True, docs_url="https://pi.dev/docs",
         update_cmd="pi update",

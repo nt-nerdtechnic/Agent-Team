@@ -9,6 +9,7 @@ renderer exists for.
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime
 from pathlib import Path
@@ -305,6 +306,28 @@ async def test_a_spawned_but_empty_read_is_priced_like_a_success(monkeypatch, tm
 
     assert snap["status"] == "unavailable"
     assert snap["costlyRead"] is True
+
+
+async def test_a_missing_binary_is_its_own_status(monkeypatch, tmp_path, caplog) -> None:
+    """Nothing is spawned when there is no CLI, so this failure leaves no other
+    trace: it needs a status the UI can act on and a log line naming the PATH
+    that was searched. Folded into ``unavailable`` it read as "this provider
+    has no usage API", which is the one thing it does not mean."""
+    from agent_team_backend import ai_chat_cli_engine
+
+    async def creds(home):
+        return {"accessToken": "x"}
+
+    monkeypatch.setattr(cu, "read_claude_credentials", creds)
+    monkeypatch.setattr(ai_chat_cli_engine, "resolve_cli_binary", lambda name: "")
+    monkeypatch.setenv("PATH", "/nowhere/bin")
+
+    with caplog.at_level(logging.WARNING):
+        snap = await cu.fetch_claude(tmp_path)
+
+    assert snap["status"] == "cli-missing"
+    assert "no claude binary" in caplog.text
+    assert "/nowhere/bin" in caplog.text
 
 
 def test_probe_env_drops_credentials_and_home_relocations(monkeypatch) -> None:
