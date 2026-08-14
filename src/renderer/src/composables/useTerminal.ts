@@ -1672,9 +1672,9 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   }
 
   // Copy and paste are discrete human actions, so unlike the IME and echo
-  // probes these are not throttled: at human rates they cannot flood, and
-  // which individual attempt failed is exactly what a "the paste vanished"
-  // report needs to answer.
+  // probes these are not throttled: which individual attempt failed is exactly
+  // what a "the paste vanished" report needs to answer. The one path that can
+  // outrun a human is a held ⌘C, which gates its own line on e.repeat.
   const _clipboardDiag = (message: string, level: 'info' | 'warning' = 'info'): void =>
     diagLog(backend, 'clipboard', message, level)
 
@@ -1960,12 +1960,24 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
           // ever runs (menu.ts binds CmdOrCtrl+C, and native accelerators fire
           // first) — so the success line is what tells the two copy paths
           // apart in the log when a copy goes missing.
+          // Holding ⌘C auto-repeats keydown at the OS rate, so the log is gated
+          // on the first press: what matters is which path ran and whether it
+          // worked, not one WebSocket message per repeat.
+          const firstPress = !e.repeat
           void navigator.clipboard.writeText(selection).then(
-            () => _clipboardDiag(`pane=${paneId} Cmd+C copied ${selection.length} chars (renderer path)`),
-            (err) => _clipboardDiag(
-              `pane=${paneId} Cmd+C clipboard write rejected (${selection.length} chars): ${String(err)}`,
-              'warning'
-            )
+            () => {
+              if (firstPress) {
+                _clipboardDiag(`pane=${paneId} Cmd+C copied ${selection.length} chars (renderer path)`)
+              }
+            },
+            (err) => {
+              if (firstPress) {
+                _clipboardDiag(
+                  `pane=${paneId} Cmd+C clipboard write rejected (${selection.length} chars): ${String(err)}`,
+                  'warning'
+                )
+              }
+            }
           )
           return false
         }
@@ -2022,7 +2034,18 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         // there is nothing to send and the agent cannot read the clipboard
         // itself. Write it out and paste the path — see lib/clipboardImage.ts.
         const image = extractClipboardImage(e.clipboardData)
-        if (!image) return
+        if (!image) {
+          // Neither text nor pixels. This is what a copy that never landed
+          // leaves behind — Edit > Copy falls back to a webContents.copy() that
+          // cannot work over a terminal — and until now ⌘V on an empty
+          // clipboard returned from here without a trace, which is the exact
+          // shape of "I pasted and the text just disappeared".
+          _clipboardDiag(
+            `pane=${paneId} paste ignored — the clipboard held neither text nor an image`,
+            'warning'
+          )
+          return
+        }
         e.preventDefault()
         e.stopPropagation()
         if (term.textarea) term.textarea.value = ''
@@ -2033,6 +2056,10 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         // quotes it may not strip.
         void saveClipboardImage(image).then((path) => {
           if (path) pasteFromClipboard(path)
+          // saveClipboardImage resolves null (it never rejects) when the bridge
+          // is missing or main declined the media type. The screenshot then
+          // silently produced nothing — the same "paste did nothing" symptom.
+          else _clipboardDiag(`pane=${paneId} clipboard image could not be saved — nothing pasted`, 'warning')
         })
         return
       }
@@ -3175,7 +3202,9 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // landed — see the Cmd+C path above and menu.ts) and a still-preparing
     // pane look identical from the outside. Split them so the log says which.
     if (!text) {
-      _clipboardDiag(`pane=${paneId} paste ignored — the clipboard held no text`, 'warning')
+      // Reached from ⌘V on an empty clipboard and from a file drop that
+      // resolved no paths, so the wording stays neutral about the source.
+      _clipboardDiag(`pane=${paneId} paste ignored — no text to send`, 'warning')
       return
     }
     // The pane gates stdin while it is still preparing, and a paste respects
@@ -3190,7 +3219,13 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     }
     // Same gate pasteText applies. Checked up front so a paste into a dead pane
     // cannot clear `isStopped` (and fire onUserResume) while sending nothing.
-    if (!sessionId.value || status.value === 'exited' || status.value === 'error') return
+    if (!sessionId.value || status.value === 'exited' || status.value === 'error') {
+      _clipboardDiag(
+        `pane=${paneId} paste dropped — pane is ${status.value || 'unspawned'} (${text.length} chars discarded)`,
+        'warning'
+      )
+      return
+    }
     // Same normalization xterm applies: a PTY expects CR, never CRLF/LF.
     const normalized = text.replace(/\r?\n/g, '\r')
     // Bracket when xterm knows the CLI asked for it, and — only for text that

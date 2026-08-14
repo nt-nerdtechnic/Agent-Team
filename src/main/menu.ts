@@ -118,6 +118,9 @@ export function installApplicationMenu(
         if (!target || target.isDestroyed()) return
         const startedAt = Date.now()
         let selection: unknown = ''
+        // Set when the read threw, so the fallback below does not also report
+        // "the page said there is no selection" — the page said nothing at all.
+        let readThrew = false
         try {
           // executeJavaScript never settles while the page is navigating, which
           // would strand Copy with no fallback — race it against a short
@@ -127,9 +130,13 @@ export function installApplicationMenu(
             new Promise((resolve) => setTimeout(() => resolve(SELECTION_TIMED_OUT), SELECTION_READ_TIMEOUT_MS))
           ])
         } catch (err) {
-          // Page not ready — falls through to the built-in copy, but say so:
-          // over a terminal that fallback copies nothing at all.
-          console.warn(`[menu] Copy: reading the page selection threw: ${String(err)}`)
+          readThrew = true
+          // A plugin view (different preload, no terminal global) rejects the
+          // eval. Expected, but still worth a line: the fallback below copies
+          // nothing at all over a terminal.
+          console.warn(
+            `[menu] Copy: reading the page selection threw — falling back to webContents.copy(): ${String(err)}`
+          )
         }
         // The WebContents can be gone by the time the round-trip returns.
         if (target.isDestroyed()) return
@@ -141,12 +148,15 @@ export function installApplicationMenu(
           // user-select: none), so landing here means the user pressed Copy and
           // got an unchanged clipboard. Name the branch: a renderer too busy to
           // answer reads very differently from a page that promptly said there
-          // is no selection, and only the first scales with CLI output.
-          console.warn(
-            selection === SELECTION_TIMED_OUT
-              ? `[menu] Copy: page did not answer within ${SELECTION_READ_TIMEOUT_MS}ms (busy renderer?) — falling back to webContents.copy(), which copies nothing over a terminal`
-              : `[menu] Copy: page reported no terminal selection in ${Date.now() - startedAt}ms — falling back to webContents.copy()`
-          )
+          // is no selection, and only the first scales with CLI output. A throw
+          // already reported itself above.
+          if (!readThrew) {
+            console.warn(
+              selection === SELECTION_TIMED_OUT
+                ? `[menu] Copy: page did not answer within ${SELECTION_READ_TIMEOUT_MS}ms (busy renderer?) — falling back to webContents.copy(), which copies nothing over a terminal`
+                : `[menu] Copy: page reported no terminal selection in ${Date.now() - startedAt}ms — falling back to webContents.copy()`
+            )
+          }
           target.copy()
         }
       } catch { /* window torn down mid-copy — nothing useful to do */ }

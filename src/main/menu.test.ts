@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import type { MenuItemConstructorOptions } from 'electron'
 
 // Shared, hoisted capture of the template passed to Menu.buildFromTemplate,
@@ -30,10 +30,14 @@ const clipboardWrites = h.clipboardWrites
 const focused = {
   selection: '',
   throws: false,
+  hangs: false,
   copyCalls: 0,
   isDestroyed: (): boolean => false,
   executeJavaScript: async (): Promise<string> => {
     if (focused.throws) throw new Error('no such page')
+    // A renderer too busy to service the eval — what a CLI pane painting hard
+    // does to Copy's selection race.
+    if (focused.hangs) return new Promise<string>(() => {})
     return focused.selection
   },
   copy: (): void => { focused.copyCalls++ }
@@ -75,15 +79,26 @@ function makeHooks(): AppMenuHooks & { calls: string[] } {
 
 describe('installApplicationMenu', () => {
   let hooks: ReturnType<typeof makeHooks>
+  /** Copy reports every path that ends in an unchanged clipboard. */
+  let warnings: string[]
 
   beforeEach(() => {
     hooks = makeHooks()
+    warnings = []
+    vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+      warnings.push(args.map(String).join(' '))
+    })
     clipboardWrites.length = 0
     focused.selection = ''
     focused.throws = false
+    focused.hangs = false
     focused.copyCalls = 0
     h.focusedWebContents = focused
     installApplicationMenu(hooks)
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
   })
 
   it('app menu (macOS) / File menu (non-macOS) has Settings… with ⌘, and Check for Updates…', () => {
@@ -206,6 +221,47 @@ describe('installApplicationMenu', () => {
       h.focusedWebContents = destroyed
       await expect(clickCopy()).resolves.toBeUndefined()
       expect(clipboardWrites).toEqual([])
+    })
+
+    // Every branch below ends at webContents.copy(), which copies nothing at
+    // all over a terminal (.xterm is user-select: none) — so a user who pressed
+    // Copy got an unchanged clipboard. They are very different failures and the
+    // log has to tell them apart.
+    describe('reports why a copy produced nothing', () => {
+      it('names the timeout when the page loses the selection race', async () => {
+        vi.useFakeTimers()
+        focused.hangs = true
+        const pending = clickCopy()
+        await vi.advanceTimersByTimeAsync(300)
+        await pending
+        vi.useRealTimers()
+
+        expect(clipboardWrites).toEqual([])
+        expect(focused.copyCalls).toBe(1)
+        expect(warnings.filter((w) => w.includes('did not answer within 300ms'))).toHaveLength(1)
+      })
+
+      it('names the empty answer when the page replies promptly', async () => {
+        focused.selection = ''
+        await clickCopy()
+        expect(warnings.filter((w) => w.includes('reported no terminal selection'))).toHaveLength(1)
+      })
+
+      // The throw reports itself; adding "the page said there is no selection"
+      // on top would be wrong — the page said nothing at all.
+      it('reports a failed read once, not twice', async () => {
+        focused.throws = true
+        await clickCopy()
+        const copyWarnings = warnings.filter((w) => w.includes('[menu] Copy:'))
+        expect(copyWarnings).toHaveLength(1)
+        expect(copyWarnings[0]).toContain('threw')
+      })
+
+      it('stays quiet when the copy succeeds', async () => {
+        focused.selection = 'selected terminal text'
+        await clickCopy()
+        expect(warnings.filter((w) => w.includes('[menu] Copy:'))).toEqual([])
+      })
     })
   })
 

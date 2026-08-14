@@ -127,6 +127,19 @@ describe('useTerminal — Cmd+C copies the terminal selection', () => {
       .map((s) => (s.payload as { data: string }).data)
   }
 
+  /** The clipboard diagnostics useTerminal forwards into backend.log. */
+  function clipboardDiags(
+    mock: ReturnType<typeof createMockBackend>
+  ): { message: string, level?: string }[] {
+    return mock.sent
+      .filter((s) => s.type === 'client.diagnostic')
+      .map((s) => s.payload as { category: string, message: string, level?: string })
+      .filter((p) => p.category === 'clipboard')
+  }
+
+  /** Lets the writeText promise (and the diagnostic hanging off it) settle. */
+  const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
+
   it('writes the selection to the clipboard and swallows the key', async () => {
     const { mock, scope } = await spawnedTerminal()
     captured.selection = 'npm run build'
@@ -138,6 +151,70 @@ describe('useTerminal — Cmd+C copies the terminal selection', () => {
     expect(e.preventDefault).toHaveBeenCalled()
     expect(writeText).toHaveBeenCalledWith('npm run build')
     expect(inputsSent(mock)).toEqual([]) // nothing leaks into the PTY
+    scope.stop()
+  })
+
+  // Two copy paths bind ⌘C — this one and Edit > Copy's CmdOrCtrl+C accelerator
+  // in menu.ts, which fires first on macOS. When a copy goes missing, the log
+  // line is what says which of them actually ran.
+  it('names the renderer path on a successful copy', async () => {
+    const { mock, scope } = await spawnedTerminal()
+    captured.selection = 'npm run build'
+
+    captured.keyHandler!(keyEvent({ key: 'c', metaKey: true }))
+    await settle()
+
+    const lines = clipboardDiags(mock)
+    expect(lines).toHaveLength(1)
+    expect(lines[0].message).toContain('renderer path')
+    expect(lines[0].message).toContain('13 chars')
+    scope.stop()
+  })
+
+  // Holding ⌘C auto-repeats keydown at the OS rate. The copy itself repeats as
+  // it always did; the diagnostic must not become one WS message per repeat.
+  it('logs a held ⌘C once, without changing what it copies', async () => {
+    const { mock, scope } = await spawnedTerminal()
+    captured.selection = 'npm run build'
+
+    captured.keyHandler!(keyEvent({ key: 'c', metaKey: true }))
+    captured.keyHandler!(keyEvent({ key: 'c', metaKey: true, repeat: true }))
+    captured.keyHandler!(keyEvent({ key: 'c', metaKey: true, repeat: true }))
+    await settle()
+
+    expect(writeText).toHaveBeenCalledTimes(3)
+    expect(clipboardDiags(mock)).toHaveLength(1)
+    scope.stop()
+  })
+
+  // Chromium rejects writeText when the document is not focused, and the key is
+  // already swallowed by then — so this used to be a copy the user believed had
+  // happened, with nothing anywhere to say otherwise.
+  it('reports a clipboard write the browser rejected', async () => {
+    const { mock, scope } = await spawnedTerminal()
+    captured.selection = 'npm run build'
+    writeText.mockRejectedValueOnce(new Error('Document is not focused'))
+
+    captured.keyHandler!(keyEvent({ key: 'c', metaKey: true }))
+    await settle()
+
+    const lines = clipboardDiags(mock)
+    expect(lines).toHaveLength(1)
+    expect(lines[0].level).toBe('warning')
+    expect(lines[0].message).toContain('rejected')
+    expect(lines[0].message).toContain('Document is not focused')
+    scope.stop()
+  })
+
+  it('says nothing when there was no selection to copy', async () => {
+    const { mock, scope } = await spawnedTerminal()
+    captured.selection = ''
+
+    captured.keyHandler!(keyEvent({ key: 'c', metaKey: true }))
+    await settle()
+
+    expect(writeText).not.toHaveBeenCalled() // the branch was not entered at all
+    expect(clipboardDiags(mock)).toEqual([])
     scope.stop()
   })
 

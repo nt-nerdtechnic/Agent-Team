@@ -149,6 +149,16 @@ describe('useTerminal — manual paste', () => {
       .join('')
   }
 
+  /** The clipboard diagnostics useTerminal forwards into backend.log. */
+  function clipboardDiags(
+    mock: ReturnType<typeof createMockBackend>
+  ): { message: string, level?: string }[] {
+    return mock.sent
+      .filter((s) => s.type === 'client.diagnostic')
+      .map((s) => s.payload as { category: string, message: string, level?: string })
+      .filter((p) => p.category === 'clipboard')
+  }
+
   it('brackets a multi-line paste for an agent even while xterm thinks mode 2004 is off', async () => {
     const { mock, scope } = await spawnedTerminal('antigravity')
     expect(paste('first\nsecond')).toBe(true)
@@ -195,6 +205,70 @@ describe('useTerminal — manual paste', () => {
     paste('must not reach the pty')
     expect(pastedData(mock)).toBe('')
     scope.stop()
+  })
+
+  // Every way a paste can come to nothing used to return silently, so they were
+  // indistinguishable in a "the paste vanished" report. Each now says which one
+  // it was, and the ones that had text say how much of it was lost.
+  describe('a paste that reaches the pty with nothing says why', () => {
+    it('reports the drop while the pane is still preparing', async () => {
+      const { mock, scope, terminal } = await spawnedTerminal('claude')
+      terminal.setDisableStdin(true)
+      paste('must not reach the pty')
+      expect(pastedData(mock)).toBe('') // the guard still drops it, log or no log
+      const lines = clipboardDiags(mock)
+      expect(lines).toHaveLength(1)
+      expect(lines[0].message).toContain('still preparing')
+      expect(lines[0].message).toContain('22 chars')
+      expect(lines[0].level).toBe('warning')
+      scope.stop()
+    })
+
+    // The third guard: a pane that never spawned, or whose CLI has since exited.
+    it('reports a paste into a pane with no live session', async () => {
+      const mock = createMockBackend()
+      const { result, scope } = withScope(() => useTerminal('pane-1', mock.backend))
+      result.mount(document.createElement('div'))
+      result.pasteFromClipboard('text with nowhere to go')
+      expect(pastedData(mock)).toBe('')
+      const lines = clipboardDiags(mock)
+      expect(lines).toHaveLength(1)
+      expect(lines[0].message).toContain('paste dropped')
+      expect(lines[0].message).toContain('23 chars')
+      expect(lines[0].level).toBe('warning')
+      scope.stop()
+    })
+
+    // ⌘V on an empty clipboard returns from the image branch, well before the
+    // paste path proper, so the guard that reports it has to live there too.
+    it('reports a ⌘V that found neither text nor an image', async () => {
+      const { mock, scope } = await spawnedTerminal('claude')
+      expect(paste('')).toBe(false) // nothing to paste, so the event is not consumed
+      expect(pastedData(mock)).toBe('')
+      const lines = clipboardDiags(mock)
+      expect(lines).toHaveLength(1)
+      expect(lines[0].message).toContain('neither text nor an image')
+      expect(lines[0].level).toBe('warning')
+      scope.stop()
+    })
+
+    // The programmatic entry point (a drag-and-drop that resolved no paths).
+    it('reports an empty programmatic paste', async () => {
+      const { mock, scope, terminal } = await spawnedTerminal('claude')
+      terminal.pasteFromClipboard('')
+      const lines = clipboardDiags(mock)
+      expect(lines).toHaveLength(1)
+      expect(lines[0].message).toContain('no text to send')
+      scope.stop()
+    })
+
+    it('stays quiet when the paste actually lands', async () => {
+      const { mock, scope } = await spawnedTerminal('claude')
+      paste('real text')
+      expect(pastedData(mock)).toBe('real text')
+      expect(clipboardDiags(mock)).toEqual([])
+      scope.stop()
+    })
   })
 
   // The paste bypasses term.onData, so the /clear detection that lives there
