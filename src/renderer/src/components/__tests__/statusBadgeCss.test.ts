@@ -1,0 +1,115 @@
+// @vitest-environment node
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { describe, expect, it } from 'vitest'
+import type { DisplayStatus } from '../../composables/useTerminal'
+
+// Every surface that paints a pane status does it with a `[data-status='x']` /
+// `[data-state='x']` CSS rule, and a status with no rule silently falls back to
+// the neutral default. That is not a hypothetical: AgentOverviewPanel had no
+// rule for idle, awaiting or stopped, so all three rendered the same grey dot —
+// "finished" and "waiting on you" were indistinguishable. Component tests do
+// not catch it because scoped <style> is stripped before mounting and the
+// markup is identical either way, so the rules are checked as source here.
+//
+// Deliberately NOT asserting colours: this pins that a status is styled at all,
+// not what it looks like.
+
+function read(rel: string): string {
+  return readFileSync(resolve(process.cwd(), rel), 'utf8')
+}
+
+/** Statuses a surface must style, and the ones it legitimately need not. */
+const ALL: readonly DisplayStatus[] = [
+  'idle',
+  'starting',
+  'running',
+  'exited',
+  'error',
+  'stopped',
+  'awaiting',
+  'question',
+]
+
+interface Surface {
+  name: string
+  file: string
+  /** How that file writes the selector for a status. */
+  selector: (status: string) => string
+  /** Statuses this surface is allowed to leave to the default, with a reason. */
+  exempt?: Partial<Record<DisplayStatus, string>>
+}
+
+const SURFACES: Surface[] = [
+  {
+    name: 'TerminalPane status pill',
+    file: 'src/renderer/src/components/TerminalPane.vue',
+    selector: (s) => `.status[data-status='${s}']`,
+  },
+  {
+    name: 'ControlPane sidebar dot',
+    file: 'src/renderer/src/components/ControlPane.vue',
+    selector: (s) => `.status-dot[data-state='${s}']`,
+    exempt: {
+      // The base .status-dot is already the idle/quiet look; running, idle and
+      // stopped are painted by the shared rule rather than their own.
+      idle: 'painted by the base .status-dot rule',
+      running: 'painted by the base .status-dot rule',
+      stopped: 'painted by the base .status-dot rule',
+      starting: 'painted by the base .status-dot rule',
+    },
+  },
+  {
+    name: 'ControlPane expanded-row badge',
+    file: 'src/renderer/src/components/ControlPane.vue',
+    selector: (s) => `.state[data-state='${s}']`,
+  },
+  {
+    name: 'App meeting badge',
+    file: 'src/renderer/src/App.vue',
+    selector: (s) => `.meeting-badge[data-status="${s}"]`,
+  },
+  {
+    name: 'App spotlight thumbnail badge',
+    file: 'src/renderer/src/App.vue',
+    selector: (s) => `.spotlight-thumb-badge[data-status="${s}"]`,
+  },
+  {
+    name: 'AgentOverviewPanel row',
+    file: 'src/renderer/src/components/AgentOverviewPanel.vue',
+    selector: (s) => `.ao-row[data-status='${s}']`,
+  },
+]
+
+describe('every pane status is styled on every surface that paints one', () => {
+  for (const surface of SURFACES) {
+    const source = read(surface.file)
+    for (const status of ALL) {
+      const exemption = surface.exempt?.[status]
+      const label = exemption
+        ? `${surface.name}: ${status} is exempt (${exemption})`
+        : `${surface.name}: ${status} has its own rule`
+      it(label, () => {
+        if (exemption) return
+        expect(source).toContain(surface.selector(status))
+      })
+    }
+  }
+
+  it('styles the two states that mean "waiting on the user" differently', () => {
+    // The whole point of splitting them: a permission prompt and a question
+    // need different reactions, so they must not share a colour.
+    const pane = read('src/renderer/src/components/TerminalPane.vue')
+    const awaiting = pane.slice(pane.indexOf(".status[data-status='awaiting']"))
+    const question = pane.slice(pane.indexOf(".status[data-status='question']"))
+    expect(awaiting.slice(0, 200)).toContain('--warning-fg')
+    expect(question.slice(0, 200)).toContain('--question-fg')
+  })
+
+  it('defines --question-fg as a real token, not a hardcoded colour', () => {
+    // Aliased to --done-fg so it follows each theme's contrast-tuned value;
+    // a literal hex here would be wrong in at least one of the five themes.
+    const tokens = read('src/renderer/src/styles/tokens/semantic.css')
+    expect(tokens).toContain('--question-fg: var(--done-fg)')
+  })
+})

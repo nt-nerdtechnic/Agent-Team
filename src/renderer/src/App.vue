@@ -8,6 +8,9 @@ import ReconnectSessionModal, { type OrphanSession } from './components/Reconnec
 import ControlPane, {
   type AgentSpec,
   type ActivePaneView,
+  type InjectionStatus,
+  type KickoffStatus,
+  type PreparationStatus,
   type SpawnPayload,
   type ResumePayload,
   type PipelineState,
@@ -16,13 +19,13 @@ import ControlPane, {
   type AnalyzerStatusView,
   type WorkspaceMode
 } from './components/ControlPane.vue'
-import type { AgentOverviewRow, AgentOverviewStatus } from './components/AgentOverviewPanel.vue'
+import type { AgentOverviewRow } from './components/AgentOverviewPanel.vue'
 import QuestionAlert from './components/QuestionAlert.vue'
 import TokenStatsPanel from './components/TokenStatsPanel.vue'
 import NotificationHost from './components/NotificationHost.vue'
 import Welcome from './components/Welcome.vue'
 import { useNotify } from './composables/useNotify'
-import { migrateTerminalPtyKey } from './composables/useTerminal'
+import { migrateTerminalPtyKey, type DisplayStatus } from './composables/useTerminal'
 import { useAgentMessaging, encodeReason, isBroadcastTarget } from './composables/useAgentMessaging'
 import type { RouteResult } from './composables/useAgentMessaging'
 import { createMessageLogPersistence } from './composables/useMessageLogPersistence'
@@ -177,6 +180,7 @@ import {
   matchAwaitingInput,
   notificationEndsAwaiting,
   notificationMeansAwaiting,
+  questionActionFor,
 } from './lib/cliAwaitingInput'
 import { entryBelongsToWorkspace, filterWorkspaceEntries, historyEntryLabel, legacyHistoryLogPath, manualLogFileName, updateHistoryCustomName, type HistoryCleanupMode, type HistoryDeletePreview, type HistoryDeleteTarget, type SpawnHistoryEntry, type WorkspaceIdentity } from './lib/spawnHistory'
 import { useKeybindings, registerCommand, setContext } from './keybindings/useKeybindings'
@@ -797,10 +801,6 @@ function resolveCommand(agentKey: string, override: string, paneArgCtx?: PaneArg
   return commandWithSelectedBinary(agentKey, parts.join(' '))
 }
 
-type InjectionStatus = 'pending' | 'scheduled' | 'sent' | 'failed' | 'skipped'
-type KickoffStatus = 'none' | 'pending' | 'sent' | 'failed'
-type PreparationStatus = 'starting' | 'checking-dialog' | 'settling' | 'injecting-role' | 'waiting-agent' | 'ready' | 'failed'
-
 interface RunGroup {
   id: string
   name: string
@@ -1401,7 +1401,13 @@ function messagingHoldKey(paneId: string): string | null {
   const pane = panes.value.find((p) => p.id === paneId)
   if (!pane) return 'gone'
   const status = paneRefs[paneId]?.displayStatus as string | undefined
-  if (status !== 'running' && status !== 'idle') return 'not-ready'
+  // 'question' passes deliberately. It is a relabelling of panes that were
+  // already reaching this gate as 'idle' (a turn ending on a question, or an
+  // AskUserQuestion box the badge used to show as running-then-idle), so
+  // holding it back would newly park those panes out of inter-CLI dispatch —
+  // a behaviour change the state was never meant to make. AWAITING stays out:
+  // that one is a permission prompt, and it was already excluded.
+  if (status !== 'running' && status !== 'idle' && status !== 'question') return 'not-ready'
   if (pane.injectionStatus === 'scheduled' || pane.kickoffStatus === 'pending') return 'starting'
   const now = Date.now()
   const lastActive = paneLastActiveAt.get(paneId) ?? 0
@@ -1982,7 +1988,9 @@ function syncViews(): void {
       stageId: p.stageId,
       command: p.command,
       status: p.realized
-        ? (ref?.displayStatus as string | undefined) ?? (ref?.status as string | undefined) ?? 'starting'
+        ? (ref?.displayStatus as DisplayStatus | undefined) ??
+          (ref?.status as DisplayStatus | undefined) ??
+          'starting'
         : 'waiting',
       error: ref?.error as string | undefined,
       injectionStatus: p.injectionStatus,
@@ -7779,6 +7787,15 @@ const sessionGhostHealGate = createGhostHealGate(async (paneId, pinnedSessionId)
 backend.on('agent.activity', (raw) => {
   const ev = raw as { event_type?: string; pane_id?: string; vendor?: string; session_id?: string; detail?: string; text?: string; timestamp?: string; notification_type?: string }
   if (!ev?.pane_id) return
+  // QUESTION badge: "the agent asked you something and is waiting". Decided in
+  // one place for both event types because both carry a half of it — the turn
+  // text on turn_complete, and the AskUserQuestion box (which pauses the turn
+  // mid-flight and so produces no turn_complete at all) on agent_active. The
+  // rules live in questionActionFor so they can be executed by the suite;
+  // App.vue is an SFC the tests cannot mount.
+  const questionAction = questionActionFor(ev)
+  if (questionAction === 'raise') paneRefs[ev.pane_id]?.markQuestion?.()
+  else if (questionAction === 'clear') paneRefs[ev.pane_id]?.clearQuestion?.()
   if (ev.event_type === 'turn_complete') {
     paneTurnCompleteAt.set(ev.pane_id, Date.now())
     // Badge: authoritative turn end → drop the RUNNING hysteresis latch now.
@@ -10174,7 +10191,7 @@ const agentOverviewRows = computed<AgentOverviewRow[]>(() => {
       vendor: vendor === name ? '' : vendor,
       status: disconnectedPaneIds.value.includes(p.id)
         ? 'disconnected'
-        : ((statusById.get(p.id) ?? (p.realized ? 'starting' : 'waiting')) as AgentOverviewStatus),
+        : (statusById.get(p.id) ?? (p.realized ? 'starting' : 'waiting')),
       // A manual resume can pull a session in from another folder, so a pane's
       // workspace is not always the window's. Shown only when it differs.
       foreignWorkspace:
@@ -12705,6 +12722,7 @@ function paneIsCommander(p: ActivePane): boolean {
 .spotlight-thumb-badge[data-status="error"]    { background: var(--danger-subtle); color: var(--danger-fg); border: 1px solid var(--danger-emphasis); }
 .spotlight-thumb-badge[data-status="stopped"]  { background: #000000; color: #ffffff; border: 1px solid #3f3f46; }
 .spotlight-thumb-badge[data-status="awaiting"] { background: color-mix(in srgb, var(--warning-fg) 20%, transparent); color: var(--warning-fg); border: 1px solid color-mix(in srgb, var(--warning-fg) 45%, transparent); }
+.spotlight-thumb-badge[data-status="question"] { background: color-mix(in srgb, var(--question-fg) 20%, transparent); color: var(--question-fg); border: 1px solid color-mix(in srgb, var(--question-fg) 45%, transparent); }
 .spotlight-thumb-badge[data-status="exited"]   { background: var(--bg-muted); color: var(--text-primary); border: 1px solid var(--border-default); }
 .spotlight-thumb-loop {
   font-size: 9px;
@@ -12840,6 +12858,7 @@ function paneIsCommander(p: ActivePane): boolean {
 .meeting-badge[data-status="starting"] { background: var(--status-starting-subtle); color: var(--status-starting-fg); border: 1px solid var(--status-starting-emphasis); }
 .meeting-badge[data-status="error"]    { background: var(--danger-subtle); color: var(--danger-bright); border: 1px solid var(--danger-emphasis); }
 .meeting-badge[data-status="awaiting"] { background: color-mix(in srgb, var(--warning-fg) 20%, transparent); color: var(--warning-fg); border: 1px solid color-mix(in srgb, var(--warning-fg) 45%, transparent); }
+.meeting-badge[data-status="question"] { background: color-mix(in srgb, var(--question-fg) 20%, transparent); color: var(--question-fg); border: 1px solid color-mix(in srgb, var(--question-fg) 45%, transparent); }
 .meeting-badge[data-status="exited"]   { background: var(--bg-muted); color: var(--text-primary); border: 1px solid var(--border-default); }
 .meeting-loop {
   font-size: 10px;

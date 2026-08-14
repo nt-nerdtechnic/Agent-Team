@@ -199,6 +199,15 @@ function installTerminalSelectionGlobal(): void {
 
 export type TerminalStatus = 'idle' | 'starting' | 'running' | 'exited' | 'error' | 'stopped'
 
+/** Every value `displayStatus` can report — the badge vocabulary.
+ *
+ *  A superset of TerminalStatus: the PTY lifecycle knows nothing about a pane
+ *  parked on the user, which is derived from out-of-band CLI signals. Keep this
+ *  the single source: AgentOverviewStatus extends it, and every status-keyed
+ *  CSS block and i18n key is written against these exact strings. Adding a
+ *  value here is what makes the compiler point at the places that must follow. */
+export type DisplayStatus = TerminalStatus | 'awaiting' | 'question'
+
 // The reattach key (`terminal-pty:<resumeKey>`) follows the CLI's session id,
 // but a CLI rewrites its session id on every resume (claude --resume A records
 // a NEW session B). Carry the live PTY id over to the rotated key — otherwise
@@ -1157,6 +1166,14 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // Clean output inside this window is read as the prompt painting itself;
   // anything after it means the user answered and the CLI moved on.
   const AWAITING_SETTLE_MS = 3_000
+  // "The agent asked you something", fed in by App.vue. Distinct from
+  // awaitingInputAt: that one is a permission prompt the CLI raised to run a
+  // tool, this one is the agent putting a question to the user — either its
+  // AskUserQuestion box (which pauses the turn mid-flight, so no turn_complete
+  // ever arrives) or a turn that ended on a question. Both look exactly like a
+  // finished turn on the PTY. Same settle semantics as awaiting: clean output
+  // past the window means the user answered and the CLI moved on.
+  const questionAt = ref<number>(0)
   // Tick so displayStatus re-evaluates after output goes quiet.
   const nowTick = ref<number>(Date.now())
   const isOnScreen = (): boolean => opts?.onScreen?.() ?? true
@@ -1201,7 +1218,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
 
   const isStopped = ref(false)
 
-  const displayStatus = computed<string>(() => {
+  const displayStatus = computed<DisplayStatus>(() => {
     if (status.value === 'exited' || status.value === 'error') return status.value
     if (isStopped.value) return 'stopped'
     // A resume parked for a hidden tab hasn't created its PTY yet — a resumed
@@ -1241,6 +1258,15 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       awaitingInputAt.value > 0 &&
       lastCleanBurstAt.value < awaitingInputAt.value + AWAITING_SETTLE_MS
     ) return 'awaiting'
+    // QUESTION sits just under AWAITING: both park the pane on the user, but a
+    // permission prompt blocks a tool call the agent already decided to make,
+    // so it is the more urgent of the two. It must outrank every idle path
+    // below — including the authoritative turn end, because a turn that ends
+    // ON a question reports turn_complete and would otherwise read as idle.
+    if (
+      questionAt.value > 0 &&
+      lastCleanBurstAt.value < questionAt.value + AWAITING_SETTLE_MS
+    ) return 'question'
     if (turnCompleteAt.value > lastCleanBurstAt.value) return 'idle'
     if (nowTick.value - lastCleanBurstAt.value > IDLE_CONFIRM_MS) return 'idle'
     return runningLatched.value ? 'running' : 'idle'
@@ -1341,6 +1367,20 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
    *  poll would drop AWAITING while Claude is still parked. */
   function clearNeedsInput(): void {
     awaitingInputAt.value = 0
+  }
+
+  /** The agent put a question to the user. Called from App.vue on the reader's
+   *  `assistant:question` detail (Claude's AskUserQuestion box) and on a
+   *  turn_complete whose text ends on a question. */
+  function markQuestion(): void {
+    questionAt.value = Date.now()
+  }
+
+  /** The question was answered — or the turn that follows one started. Called
+   *  on the user's next prompt and on any turn_complete that does NOT end on a
+   *  question, so a stale flag can't hold the badge past the answer. */
+  function clearQuestion(): void {
+    questionAt.value = 0
   }
 
   function markBufferPosition(): number {
@@ -3129,6 +3169,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // timestamp here would show the fresh pane as parked on a question that
     // no longer exists.
     awaitingInputAt.value = 0
+    questionAt.value = 0
     error.value = ''
     stallReason.value = null  // a retry must not inherit the last attempt's exit
     status.value = 'starting'
@@ -3398,6 +3439,8 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     markTurnComplete,
     markNeedsInput,
     clearNeedsInput,
+    markQuestion,
+    clearQuestion,
     markBufferPosition,
     recleanBuffer,
     readRenderedText,

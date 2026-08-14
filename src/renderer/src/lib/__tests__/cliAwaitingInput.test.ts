@@ -4,6 +4,9 @@ import {
   notificationEndsAwaiting,
   hasAwaitingPattern,
   matchAwaitingInput,
+  textEndsOnQuestion,
+  questionActionFor,
+  QUESTION_DETAIL,
 } from '../cliAwaitingInput'
 
 // AWAITING means "the CLI stopped and cannot continue until the user answers".
@@ -158,5 +161,103 @@ describe('matchAwaitingInput — vendors without a spec', () => {
   it('never matches for an unknown agent key', () => {
     expect(hasAwaitingPattern('not-a-real-cli')).toBe(false)
     expect(matchAwaitingInput('not-a-real-cli', 'anything at all')).toBe(false)
+  })
+})
+
+// QUESTION's text half. A turn that ends on "shall I go ahead?" is not idle,
+// but nothing in the log says so — only the prose does.
+describe('textEndsOnQuestion', () => {
+  it('is true when the closing line ends on a question mark', () => {
+    expect(textEndsOnQuestion('Done. Want me to commit this?')).toBe(true)
+    expect(textEndsOnQuestion('全部修好了。要我接著發版嗎？')).toBe(true)
+  })
+
+  it('accepts the full-width question mark on its own', () => {
+    expect(textEndsOnQuestion('要選哪一個？')).toBe(true)
+  })
+
+  it('is false for a statement', () => {
+    expect(textEndsOnQuestion('All 3937 tests pass.')).toBe(false)
+    expect(textEndsOnQuestion('已經全部修好了。')).toBe(false)
+  })
+
+  it('judges the LAST line, not the whole turn', () => {
+    // The event carries the entire assistant message. A rhetorical "?" in the
+    // body must not light the badge on a turn that asks nothing at the end.
+    expect(textEndsOnQuestion('So why did it fail?\nBecause the lock was held.')).toBe(false)
+    // ...and a question at the end still counts however long the body is.
+    expect(textEndsOnQuestion('Line one.\nLine two.\nShould I proceed?')).toBe(true)
+  })
+
+  it('sees through trailing blank lines', () => {
+    expect(textEndsOnQuestion('Ready to go?\n\n  \n')).toBe(true)
+  })
+
+  it('sees through markdown emphasis and closing brackets', () => {
+    expect(textEndsOnQuestion('**Which one do you want?**')).toBe(true)
+    expect(textEndsOnQuestion('- Ship it now?')).toBe(true)
+    expect(textEndsOnQuestion('He asked "are we done?"')).toBe(true)
+  })
+
+  it('is false for empty text', () => {
+    // Stop-hook / thinking-only turn_complete events carry no text at all.
+    expect(textEndsOnQuestion('')).toBe(false)
+    expect(textEndsOnQuestion('   \n\n')).toBe(false)
+  })
+})
+
+// The seam where both halves of QUESTION meet. App.vue's agent.activity handler
+// is a closure inside an SFC the suite cannot mount, so the rules live here and
+// the handler is a two-line adapter over them — this describe block is what
+// actually exercises the wiring rather than reading it.
+describe('questionActionFor — activity event → QUESTION badge', () => {
+  it('raises on the AskUserQuestion box (which never produces a turn_complete)', () => {
+    expect(questionActionFor({ event_type: 'agent_active', detail: QUESTION_DETAIL })).toBe('raise')
+  })
+
+  it('raises on a turn that ended on a question', () => {
+    expect(
+      questionActionFor({ event_type: 'turn_complete', text: 'Done. Want me to commit?' })
+    ).toBe('raise')
+  })
+
+  it('clears on a turn that ended on anything else', () => {
+    expect(questionActionFor({ event_type: 'turn_complete', text: 'All done.' })).toBe('clear')
+  })
+
+  it('clears on an empty-text turn_complete rather than inheriting a verdict', () => {
+    // Stop-hook and thinking-only turns carry no text. Treating "no text" as a
+    // question would strand the badge; carrying the last turn's answer forward
+    // would report a question that was already answered.
+    expect(questionActionFor({ event_type: 'turn_complete' })).toBe('clear')
+    expect(questionActionFor({ event_type: 'turn_complete', text: '' })).toBe('clear')
+  })
+
+  it("clears on the answer coming back, in every vendor's spelling", () => {
+    for (const detail of ['user', 'prompt', 'user_message']) {
+      expect(questionActionFor({ event_type: 'agent_active', detail })).toBe('clear')
+    }
+  })
+
+  it('leaves the badge alone for ordinary activity', () => {
+    // The common case by far: tool calls and assistant chatter. Clearing here
+    // would drop the badge the moment anything else happened in the pane —
+    // and an AskUserQuestion box emits a plain `assistant` event alongside the
+    // question one, so "clear on unknown" would cancel it immediately.
+    expect(questionActionFor({ event_type: 'agent_active', detail: 'assistant' })).toBeNull()
+    expect(questionActionFor({ event_type: 'agent_active', detail: 'tool_use' })).toBeNull()
+    expect(questionActionFor({ event_type: 'agent_active', detail: 'hook:pre_tool_use' })).toBeNull()
+    expect(questionActionFor({ event_type: 'agent_active' })).toBeNull()
+  })
+
+  it('ignores event types it has no opinion about', () => {
+    expect(questionActionFor({ event_type: 'something_new', detail: QUESTION_DETAIL })).toBeNull()
+    expect(questionActionFor({})).toBeNull()
+  })
+
+  it('matches the detail string the claude reader actually emits', () => {
+    // Cross-end contract: backend/agent_team_backend/cli_vendors/claude.py
+    // writes this literal, and backend/tests/vendors/test_claude.py asserts it.
+    expect(QUESTION_DETAIL).toBe('assistant:question')
   })
 })

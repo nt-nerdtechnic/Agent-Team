@@ -61,6 +61,25 @@ def _assistant_text(msg: dict) -> str:
     return join_text_blocks(msg.get("content"), "text")
 
 
+# Claude's tool for putting a multiple-choice question to the user. The turn
+# pauses on it with stop_reason=tool_use, so no turn_complete is emitted and
+# the pane would otherwise just fall silent and drift to idle.
+_QUESTION_TOOL = "AskUserQuestion"
+
+
+def _asks_user_question(msg: dict) -> bool:
+    """True when this assistant message parks the turn on a user question."""
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(b, dict)
+        and b.get("type") == "tool_use"
+        and b.get("name") == _QUESTION_TOOL
+        for b in content
+    )
+
+
 _PREVIEW_MAX_CHARS = 80
 
 
@@ -370,6 +389,20 @@ class ClaudeLogReader(LogReader):
                         dedup_key=key, timestamp=ts,
                         detail="assistant",
                     ))
+                    # AskUserQuestion parks the turn on the user without ending
+                    # it, so it produces no turn_complete. Emit a distinct
+                    # detail the frontend can raise QUESTION on; the matching
+                    # tool_result arrives as a plain `user` event and releases
+                    # it. Separate dedup key so it rides alongside the
+                    # `assistant` event above rather than replacing it.
+                    if _asks_user_question(msg):
+                        out.append(ActivityEvent(
+                            vendor="claude",
+                            event_type="agent_active",
+                            cwd=cwd, session_id=session_id, file_path=str(path),
+                            dedup_key=f"q:{line_no}", timestamp=ts,
+                            detail="assistant:question",
+                        ))
                     # end_turn = clean finish, not a tool_use pause.
                     if stop_reason == "end_turn":
                         out.append(ActivityEvent(

@@ -296,6 +296,97 @@ describe('useTerminal — RUNNING badge vs self-triggered repaints', () => {
     scope.stop()
   })
 
+  it('reports QUESTION once the agent asks something', async () => {
+    const { result, mock, scope } = await spawnedFake()
+    for (let i = 0; i < 5; i++) await chunkThenWait(mock, i, 1_500)
+    expect(result.displayStatus.value).toBe('running')
+    result.markQuestion()
+    expect(result.displayStatus.value).toBe('question')
+    scope.stop()
+  })
+
+  it('stays QUESTION past the idle timeout instead of decaying to idle', async () => {
+    // Same failure this state exists to prevent: a pane waiting on an answer
+    // is silent, and silence used to be read as "done".
+    const { result, mock, scope } = await spawnedFake()
+    for (let i = 0; i < 5; i++) await chunkThenWait(mock, i, 1_500)
+    result.markQuestion()
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(result.displayStatus.value).toBe('question')
+    scope.stop()
+  })
+
+  it('holds QUESTION over an authoritative turn end (a turn can END on a question)', async () => {
+    // Claude reports turn_complete for a turn that closed on "shall I?", so
+    // QUESTION has to outrank the turnCompleteAt idle path or it never shows.
+    const { result, mock, scope } = await spawnedFake()
+    await chunkThenWait(mock, 0, 100)
+    result.markTurnComplete()
+    result.markQuestion()
+    expect(result.displayStatus.value).toBe('question')
+    scope.stop()
+  })
+
+  it('lets AWAITING outrank QUESTION when both are raised', async () => {
+    // A permission prompt blocks a tool call the agent already committed to,
+    // so it is the more urgent of the two ways a pane parks on the user.
+    const { result, mock, scope } = await spawnedFake()
+    await chunkThenWait(mock, 0, 100)
+    result.markQuestion()
+    result.markNeedsInput()
+    expect(result.displayStatus.value).toBe('awaiting')
+    scope.stop()
+  })
+
+  it('leaves QUESTION once real output arrives after the settle window', async () => {
+    const { result, mock, scope } = await spawnedFake()
+    await chunkThenWait(mock, 0, 100)
+    result.markQuestion()
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(result.displayStatus.value).toBe('question')
+    await chunkThenWait(mock, 1, 100)
+    expect(result.displayStatus.value).not.toBe('question')
+    scope.stop()
+  })
+
+  it('clears QUESTION on clearQuestion() when the answer comes back', async () => {
+    const { result, mock, scope } = await spawnedFake()
+    await chunkThenWait(mock, 0, 100)
+    result.markQuestion()
+    expect(result.displayStatus.value).toBe('question')
+    result.clearQuestion()
+    expect(result.displayStatus.value).not.toBe('question')
+    scope.stop()
+  })
+
+  it('does not carry QUESTION across a respawn', async () => {
+    const { result, mock, scope } = await spawnedFake()
+    await chunkThenWait(mock, 0, 100)
+    result.markQuestion()
+    expect(result.displayStatus.value).toBe('question')
+
+    result.status.value = 'exited'
+    mock.setResponse('terminal.create', { terminal_session_id: 'sess-2', pid: 43 })
+    const respawning = result.spawn({ command: 'bash', cwd: '/tmp', skipReattach: true })
+    await vi.advanceTimersByTimeAsync(200)
+    await respawning
+    await chunkThenWait(mock, 1, 100)
+
+    expect(result.displayStatus.value).not.toBe('question')
+    scope.stop()
+  })
+
+  it('keeps a dead pane reporting its exit rather than a question', async () => {
+    // exited/error short-circuit above every parked state — a pane that is
+    // gone cannot be waiting for an answer.
+    const { result, mock, scope } = await spawnedFake()
+    await chunkThenWait(mock, 0, 100)
+    result.markQuestion()
+    result.status.value = 'exited'
+    expect(result.displayStatus.value).toBe('exited')
+    scope.stop()
+  })
+
   it('sets displayStatus to stopped when interrupt() or ESC is triggered, and clears on new input', async () => {
     const { result, mock, scope } = await spawned()
     expect(result.status.value).toBe('running')

@@ -8,6 +8,7 @@ import { setBatchDragImage } from '../lib/batchDragImage'
 import RebuildIcon from './RebuildIcon.vue'
 import ExplorerPane from './ExplorerPane.vue'
 import type { BackendStatus, useBackend } from '../composables/useBackend'
+import type { DisplayStatus } from '../composables/useTerminal'
 import type { Role, RoleKey } from '../data/roles'
 import type { Stage, StageId } from '../data/stages'
 import type { Issue, IssueDetail, IssueProvider, IssueHandlerMode } from '../composables/useIssues'
@@ -30,6 +31,25 @@ const PlanPane = defineAsyncComponent(() => import('../editor/PlanPane.vue'))
 import type { AgentSpec } from '../agents'
 export type { AgentSpec } from '../agents'
 
+// The three small state machines a pane runs through while it is being made
+// ready. Declared here, next to the view they travel in, and imported by
+// App.vue (which owns the pane model) rather than restated there — they used
+// to be written out twice, inline in ActivePaneView and again as aliases in
+// App.vue, with nothing tying the two copies together.
+/** Whether the pane's role prompt has been handed to the CLI yet. */
+export type InjectionStatus = 'pending' | 'scheduled' | 'sent' | 'failed' | 'skipped'
+/** Whether the pipeline's opening instruction has been sent. */
+export type KickoffStatus = 'none' | 'pending' | 'sent' | 'failed'
+/** How far the spawn-to-ready sequence has got; shown in the pane subtitle. */
+export type PreparationStatus =
+  | 'starting'
+  | 'checking-dialog'
+  | 'settling'
+  | 'injecting-role'
+  | 'waiting-agent'
+  | 'ready'
+  | 'failed'
+
 export interface ActivePaneView {
   id: string
   agentKey: string
@@ -41,11 +61,16 @@ export interface ActivePaneView {
   roleLabel: string
   stageId: StageId
   command: string
-  status: string
+  /** The pane's badge status, copied from its terminal's displayStatus, plus
+   *  'waiting' for a cold-restore placeholder that has no terminal yet. Typed
+   *  rather than `string` so the value survives the trip from useTerminal to
+   *  the sidebar and the agent-overview rows — it used to widen here, which is
+   *  why the consumer had to cast it back. */
+  status: DisplayStatus | 'waiting'
   error?: string
-  injectionStatus: 'pending' | 'scheduled' | 'sent' | 'failed' | 'skipped'
-  preparationStatus?: 'starting' | 'checking-dialog' | 'settling' | 'injecting-role' | 'waiting-agent' | 'ready' | 'failed'
-  kickoffStatus?: 'none' | 'pending' | 'sent' | 'failed'
+  injectionStatus: InjectionStatus
+  preparationStatus?: PreparationStatus
+  kickoffStatus?: KickoffStatus
   origin: 'manual' | 'pipeline'
   /** True when this pane corresponds to a slot marked is_commander=true in
    *  the stage config — shown as 🎯 指揮官 badge in the active-agents list
@@ -2422,6 +2447,14 @@ button.icon-btn.muted:hover {
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--warning-fg) 25%, transparent);
   animation: agent-dot-pulse 1.2s ease-in-out infinite;
 }
+/* The agent put a question to the user. Pulses for the same reason awaiting
+   does — nothing moves until someone answers — in its own hue so the two
+   reasons a pane is parked stay tellable apart at 8px. */
+.status-dot[data-state='question'] {
+  background: var(--question-fg);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--question-fg) 25%, transparent);
+  animation: agent-dot-pulse 1.2s ease-in-out infinite;
+}
 /* Cold-restore placeholder: nothing spawned yet — a hollow ring, so it never
    reads as a live-but-quiet pane. */
 .status-dot[data-state='waiting'] {
@@ -2625,6 +2658,10 @@ button.icon-btn.muted:hover {
 .state[data-state='awaiting'] {
   background: color-mix(in srgb, var(--warning-fg) 20%, transparent);
   color: var(--warning-fg);
+}
+.state[data-state='question'] {
+  background: color-mix(in srgb, var(--question-fg) 20%, transparent);
+  color: var(--question-fg);
 }
 .state[data-state='error'] {
   background: var(--danger-deep);

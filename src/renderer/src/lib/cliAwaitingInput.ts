@@ -90,6 +90,72 @@ export function notificationEndsAwaiting(notificationType: string | undefined): 
   return notificationType !== undefined && RESOLVED_NOTIFICATION_TYPES.has(notificationType)
 }
 
+/** True when a completed turn's text ends on a question to the user.
+ *
+ *  The second half of the QUESTION state, and the weaker half. Claude's
+ *  AskUserQuestion box is a structured signal the reader can name exactly; a
+ *  turn that simply ENDS on "shall I go ahead?" has no marker at all, and the
+ *  only thing separating it from a finished turn is the prose. So this reads
+ *  the last non-empty line and asks whether it closes on a question mark.
+ *
+ *  Judged on the LAST LINE, never the whole turn: `text` carries the entire
+ *  assistant message (up to 200k chars), and a mid-report rhetorical "?" would
+ *  otherwise light the badge on turns that ask nothing. Trailing emphasis and
+ *  list/quote punctuation are stripped first because a question routinely ends
+ *  "**...?**" or "- ...?" once markdown is in play.
+ *
+ *  This is deliberately advisory. QUESTION passes the messaging gate exactly
+ *  like idle does (see messagingHoldKey), so a false positive costs a wrong
+ *  badge and nothing else — it can never park a pane out of inter-CLI dispatch. */
+export function textEndsOnQuestion(text: string): boolean {
+  const lines = text.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim()
+    if (!line) continue
+    return /[?？]["'’”）)\]*_`]*$/.test(line)
+  }
+  return false
+}
+
+/** Record types a reader attaches the user's own prompt text to. Shared by the
+ *  question release below and App.vue's auto-namer, which keys off the same
+ *  three spellings ('user' for most vendors, 'prompt' for kimi/aider,
+ *  'user_message' for codex). */
+const USER_RECORD_DETAILS: ReadonlySet<string> = new Set(['user', 'prompt', 'user_message'])
+
+/** The reader's name for an assistant message that opened a question box. */
+export const QUESTION_DETAIL = 'assistant:question'
+
+/** What one `agent.activity` event means for the QUESTION badge.
+ *
+ *  Pure, so the decision can be executed in a test instead of only inspected in
+ *  App.vue's source — the handler is a closure inside an SFC that the suite
+ *  cannot mount, and this is the seam where the two halves of QUESTION (the
+ *  structured signal and the turn text) actually meet.
+ *
+ *  Returns null for the events that say nothing either way; the caller must
+ *  leave the badge untouched then, NOT clear it. Most activity is tool calls
+ *  and assistant chatter, and clearing on those would drop the badge the
+ *  instant anything else happened in the pane. */
+export function questionActionFor(ev: {
+  event_type?: string
+  detail?: string
+  text?: string
+}): 'raise' | 'clear' | null {
+  if (ev.event_type === 'turn_complete') {
+    // Judged per turn, never retained: an empty-text turn_complete (Stop hook,
+    // thinking-only record) must not inherit the previous turn's verdict, and a
+    // turn that ends on anything else is the answer to an earlier question.
+    return textEndsOnQuestion(ev.text ?? '') ? 'raise' : 'clear'
+  }
+  if (ev.event_type !== 'agent_active') return null
+  if (ev.detail === QUESTION_DETAIL) return 'raise'
+  // The answer to an AskUserQuestion box comes back as a plain user record,
+  // which is also what a fresh prompt looks like. Both end the wait.
+  if (ev.detail !== undefined && USER_RECORD_DETAILS.has(ev.detail)) return 'clear'
+  return null
+}
+
 function awaitingSpecFor(agentKey: string): { pattern: RegExp } | undefined {
   return AGENT_SPECS.find((s) => s.agentKey === agentKey)?.awaitingInput
 }

@@ -288,6 +288,99 @@ def test_parse_activity_text_joins_only_text_blocks(
     assert turns[0].text == "第一段\n---PLAN-DONE---"
 
 
+# ── parse_activity: AskUserQuestion ──────────────────────────────────────────
+# The tool that puts a multiple-choice question to the user pauses the turn
+# with stop_reason=tool_use, so it produces NO turn_complete and no text. Left
+# unnamed, the pane simply falls silent and the frontend reads it as idle —
+# the one case where nothing at all happens until the user acts.
+
+def test_parse_activity_names_ask_user_question(
+    fake_claude: tuple[ClaudeLogReader, Path],
+) -> None:
+    reader, root = fake_claude
+    session = root / "-tmp-demo" / "q-001.jsonl"
+    _write_jsonl(session, [
+        {
+            "type": "assistant",
+            "timestamp": "2026-08-14T02:10:00Z",
+            "message": {
+                "stop_reason": "tool_use",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "AskUserQuestion",
+                        "input": {"questions": [{"question": "要選哪一個？"}]},
+                    },
+                ],
+            },
+        },
+    ])
+    seen: set[str] = set()
+    events = reader.parse_activity(session, seen)
+
+    # No turn ended, so no turn_complete — this is exactly why the extra
+    # event is needed.
+    assert [e for e in events if e.event_type == "turn_complete"] == []
+    questions = [e for e in events if e.detail == "assistant:question"]
+    assert len(questions) == 1
+    assert questions[0].event_type == "agent_active"
+    # Rides ALONGSIDE the plain assistant event rather than replacing it, so
+    # liveness tracking is untouched.
+    assert any(e.detail == "assistant" for e in events)
+    # Distinct dedup key or the two would collapse into one.
+    assert questions[0].dedup_key != next(
+        e.dedup_key for e in events if e.detail == "assistant"
+    )
+
+
+def test_parse_activity_ignores_other_tools(
+    fake_claude: tuple[ClaudeLogReader, Path],
+) -> None:
+    reader, root = fake_claude
+    session = root / "-tmp-demo" / "q-002.jsonl"
+    _write_jsonl(session, [
+        {
+            "type": "assistant",
+            "timestamp": "2026-08-14T02:11:00Z",
+            "message": {
+                "stop_reason": "tool_use",
+                "content": [
+                    {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}},
+                ],
+            },
+        },
+    ])
+    seen: set[str] = set()
+    events = reader.parse_activity(session, seen)
+    assert [e for e in events if e.detail == "assistant:question"] == []
+
+
+def test_parse_activity_question_survives_text_alongside_it(
+    fake_claude: tuple[ClaudeLogReader, Path],
+) -> None:
+    # Claude routinely writes a paragraph and THEN opens the question box, so
+    # the tool_use block is not necessarily the only content.
+    reader, root = fake_claude
+    session = root / "-tmp-demo" / "q-003.jsonl"
+    _write_jsonl(session, [
+        {
+            "type": "assistant",
+            "timestamp": "2026-08-14T02:12:00Z",
+            "message": {
+                "stop_reason": "tool_use",
+                "content": [
+                    {"type": "text", "text": "兩個做法："},
+                    {"type": "tool_use", "name": "AskUserQuestion", "input": {}},
+                ],
+            },
+        },
+    ])
+    seen: set[str] = set()
+    events = reader.parse_activity(session, seen)
+    assert len([e for e in events if e.detail == "assistant:question"]) == 1
+
+
 def test_parse_activity_text_rides_user_events_and_turn_complete(
     fake_claude: tuple[ClaudeLogReader, Path],
 ) -> None:

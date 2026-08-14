@@ -82,6 +82,11 @@ export interface ReusablePaneCandidate {
  * Pick a pane the dispatch can reuse: same agent, same workspace, a live PTY
  * session, and currently 'idle' (the existing displayStatus signal: process
  * alive, agent finished its last turn, sitting at the interactive prompt).
+ *
+ * A whitelist, so 'question' is excluded and meant to be: that pane is holding
+ * an open question, and on Claude an AskUserQuestion box is a select widget —
+ * a dispatched prompt typed into it would be swallowed as the answer instead
+ * of starting a turn. Spawning a fresh pane is the correct fallback.
  */
 export function pickReusablePane<T extends ReusablePaneCandidate>(
   panes: T[],

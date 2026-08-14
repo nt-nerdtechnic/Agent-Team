@@ -1126,7 +1126,13 @@ _WAIT_IDLE_UI_PROBE_EVERY = 5
 # quiet, but it is waiting on the USER, and sending it work would answer the
 # prompt instead of starting a turn. Waiting it out until the timeout is the
 # safe failure here.
-_UI_IDLE_STATUSES = frozenset({"idle", "exited", "stopped", "error"})
+#
+# "question" is included, and for the opposite reason: it renames panes the
+# renderer already reported as "idle" here (a turn that ended on a question),
+# so leaving it out would make cli_wait_idle newly block until timeout on
+# exchanges it has always returned from. It mirrors the messaging gate in
+# App.vue, which passes "question" for the same reason.
+_UI_IDLE_STATUSES = frozenset({"idle", "exited", "stopped", "error", "question"})
 
 
 @server.tool()

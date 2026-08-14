@@ -11,20 +11,17 @@
 // jump, this component only renders rows and re-emits the click.
 import { onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
+import type { DisplayStatus } from '../composables/useTerminal'
 
 /** Status values a pane row can carry: useTerminal's `displayStatus`, plus
  *  'waiting' for a cold-restore placeholder that was never realized and
- *  'disconnected' for a pane whose backend session was lost. */
-export type AgentOverviewStatus =
-  | 'running'
-  | 'idle'
-  | 'awaiting'
-  | 'starting'
-  | 'stopped'
-  | 'exited'
-  | 'error'
-  | 'waiting'
-  | 'disconnected'
+ *  'disconnected' for a pane whose backend session was lost.
+ *
+ *  Derived from DisplayStatus rather than restating it. It used to be a
+ *  hand-copied second list kept in sync by comment, so adding a badge value
+ *  silently left this one behind — and a row whose status is not in the union
+ *  renders a raw i18n key. */
+export type AgentOverviewStatus = DisplayStatus | 'waiting' | 'disconnected'
 
 export interface AgentOverviewRow {
   paneId: string
@@ -208,6 +205,8 @@ function statusLabel(status: AgentOverviewStatus): string {
 .ao-row[data-status='idle'] .ao-dot { background: var(--attention-fg); }
 .ao-row[data-status='awaiting'] .ao-status { color: var(--warning-fg); }
 .ao-row[data-status='awaiting'] .ao-dot { background: var(--warning-fg); }
+.ao-row[data-status='question'] .ao-status { color: var(--question-fg); }
+.ao-row[data-status='question'] .ao-dot { background: var(--question-fg); }
 .ao-row[data-status='stopped'] .ao-status { color: var(--text-secondary); }
 .ao-row[data-status='stopped'] .ao-dot { background: var(--text-disabled); }
 .ao-row[data-status='waiting'] .ao-name { color: var(--text-secondary); }

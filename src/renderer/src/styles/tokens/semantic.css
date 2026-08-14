@@ -101,6 +101,11 @@
   /* ── Done (purple) ────────────────────────────────────────── */
   --done-fg: var(--purple-0);         /* #bc8cff */
   --done-emphasis: var(--purple-1);   /* #a855f7 */
+  /* The CLI QUESTION badge — "the agent asked you something". Purple is the
+     only hue no pane status had claimed (green running / blue starting /
+     amber idle / orange awaiting / red error). Aliased rather than given its
+     own value so it inherits each theme's contrast-tuned --done-fg. */
+  --question-fg: var(--done-fg);
 
   /* ── Diff (additions / deletions) ─────────────────────────── */
   --diff-add-fg: var(--green-2);

@@ -162,12 +162,14 @@ watch(() => props.isPreparing, (isPrep) => {
 // alone cannot tell apart from a finished turn.
 const displayStatus = terminal.displayStatus
 
-// 'idle' and 'awaiting' both look like a quiet pane but mean opposite things —
-// one is done, the other is blocked on the user — so both explain themselves
-// on hover. The rest are self-evident from the badge text.
+// 'idle', 'awaiting' and 'question' all look like a quiet pane but mean
+// different things — done, blocked on a permission prompt, or waiting for an
+// answer — so each explains itself on hover. The rest are self-evident from
+// the badge text.
 const statusTooltipKey = computed<string>(() => {
   if (displayStatus.value === 'idle') return 'pane.terminal.idle-status-tooltip'
   if (displayStatus.value === 'awaiting') return 'pane.terminal.awaiting-status-tooltip'
+  if (displayStatus.value === 'question') return 'pane.terminal.question-status-tooltip'
   return ''
 })
 
@@ -191,6 +193,8 @@ defineExpose({
   markTurnComplete: terminal.markTurnComplete,
   markNeedsInput: terminal.markNeedsInput,
   clearNeedsInput: terminal.clearNeedsInput,
+  markQuestion: terminal.markQuestion,
+  clearQuestion: terminal.clearQuestion,
   markBufferPosition: terminal.markBufferPosition,
   recleanBuffer: terminal.recleanBuffer,
   readRenderedText: terminal.readRenderedText,
@@ -736,6 +740,10 @@ onMounted(() => {
 .status[data-status='awaiting'] {
   background: color-mix(in srgb, var(--warning-fg) 20%, transparent);
   color: var(--warning-fg);
+}
+.status[data-status='question'] {
+  background: color-mix(in srgb, var(--question-fg) 20%, transparent);
+  color: var(--question-fg);
 }
 .status[data-status='stopped'] {
   background: #000000;

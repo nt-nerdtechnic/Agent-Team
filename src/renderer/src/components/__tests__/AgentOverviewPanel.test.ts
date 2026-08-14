@@ -28,6 +28,29 @@ function mountPanel(rows: AgentOverviewRow[]): VueWrapper {
   return mount(AgentOverviewPanel, { props: { rows }, global: { plugins: [i18n] } })
 }
 
+// Listed by hand so the assertions stay readable, then checked against the
+// union below — this list used to silently omit 'awaiting', so the coverage
+// test claimed to render "every status variant" while two went unchecked and,
+// in the i18n test, unverified for translation.
+const ALL_STATUSES = [
+  'running',
+  'idle',
+  'awaiting',
+  'question',
+  'starting',
+  'stopped',
+  'exited',
+  'error',
+  'waiting',
+  'disconnected',
+] as const satisfies readonly AgentOverviewRow['status'][]
+
+// Compile-time exhaustiveness: a new status that is not listed above makes
+// `Missing` that literal instead of never, and `true` stops being assignable —
+// the build fails naming exactly what was forgotten.
+type MissingStatus = Exclude<AgentOverviewRow['status'], (typeof ALL_STATUSES)[number]>
+const _allStatusesCovered: MissingStatus extends never ? true : MissingStatus = true
+
 describe('AgentOverviewPanel', () => {
   let wrapper: VueWrapper | undefined
   const previousLocale = i18n.global.locale.value
@@ -53,20 +76,13 @@ describe('AgentOverviewPanel', () => {
   })
 
   it('renders every status variant with its own label and data-status', () => {
-    const statuses: AgentOverviewRow['status'][] = [
-      'running',
-      'idle',
-      'starting',
-      'stopped',
-      'exited',
-      'error',
-      'waiting',
-      'disconnected',
-    ]
+    const statuses = ALL_STATUSES
+    expect(_allStatusesCovered).toBe(true)
+
     wrapper = mountPanel(statuses.map((status, i) => makeRow({ paneId: `p${i}`, status })))
 
     const rows = wrapper.findAll('[data-row="pane"]')
-    expect(rows.map((el) => el.attributes('data-status'))).toEqual(statuses)
+    expect(rows.map((el) => el.attributes('data-status'))).toEqual([...statuses])
     for (const [i, status] of statuses.entries()) {
       expect(rows[i].get('[data-part="status"]').text()).toBe(
         i18n.global.t(`agentOverview.status-${status}`)
@@ -151,7 +167,9 @@ describe('AgentOverviewPanel', () => {
   it('renders no untranslated i18n keys in either locale', () => {
     for (const locale of ['en-US', 'zh-TW'] as const) {
       i18n.global.locale.value = locale
-      const panel = mountPanel([makeRow({ status: 'running' }), makeRow({ paneId: 'b', status: 'waiting' })])
+      // Every status, not a sample: a status whose label key is missing falls
+      // back to rendering the raw key, and that only shows if it is mounted.
+      const panel = mountPanel(ALL_STATUSES.map((status, i) => makeRow({ paneId: `p${i}`, status })))
       expect(panel.text()).not.toContain('agentOverview.')
       // html() also covers the keys that only reach `title` attributes.
       expect(panel.html()).not.toContain('agentOverview.')
