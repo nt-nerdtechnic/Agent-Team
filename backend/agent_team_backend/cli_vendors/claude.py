@@ -1199,10 +1199,20 @@ def _session_exists(workspace_path: str, session_id: str) -> bool:
 
 # ---- vendor spec -----------------------------------------------------------
 
+def _install_hooks(port_file: str) -> Any:
+    # Lazy import: claude_hooks lives outside cli_vendors, and a module-level
+    # import here would be a cycle. Inside a function it is a plain runtime
+    # backreference (see test_vendor_modules_import_only_allowed_modules).
+    from ..claude_hooks import install_hooks
+
+    return install_hooks(port_file)
+
+
 SPEC = VendorSpec(
     key="claude",
     label="Claude Code",
     login_command_args="auth login",
+    install_hooks=_install_hooks,
     live_file=(".claude", ".credentials.json"),
     slot_file=".credentials.json",
     profile_home_secret_file=(".credentials.json",),

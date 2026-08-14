@@ -47,9 +47,6 @@ from .analyzer_ollama import (
 from .analyzer_settings import AnalyzerSettingsStore
 from .ai_chat_settings import AIChatSettingsStore
 from .applog import app_data_dir, backend_log_path, backend_port_file
-from .claude_hooks import install_hooks as install_claude_hooks
-from .qwen_hooks import install_hooks as install_qwen_hooks
-from .copilot_hooks import install_hooks as install_copilot_hooks
 from .cli_vendors.registry import VENDORS as _CLI_VENDORS
 from .cli_vendors.registry import vendor as cli_vendor
 from .codex_home import CodexHomeManager
@@ -1005,34 +1002,19 @@ async def _start_log_watcher() -> None:
     # Start MCP servers in the background so they're ready for the first pipeline run.
     asyncio.create_task(mcp_manager.startup())
 
-    # Best-effort install Claude Code hooks pointing at this backend so we
-    # get reliable "agent active / turn complete" signals (independent of
-    # buffer scanning). Failure is non-fatal — the orchestrator falls back
-    # to log-tail + sentinel detection.
-    try:
-        result = install_claude_hooks(str(backend_port_file()))
-        log.info("claude hooks install: %s", result)
-    except Exception as err:  # noqa: BLE001
-        log.warning("claude hooks install failed: %s", err)
-
-    # Qwen Code ships Claude's hook design, so the same mechanism gives its
-    # panes the one signal the PTY cannot provide: whether a quiet pane is
-    # parked on a permission prompt or simply done. No-ops when ~/.qwen is
-    # absent (qwen not installed).
-    try:
-        result = install_qwen_hooks(str(backend_port_file()))
-        log.info("qwen hooks install: %s", result)
-    except Exception as err:  # noqa: BLE001
-        log.warning("qwen hooks install failed: %s", err)
-
-    # Copilot loads any *.json under its hooks dir, so this writes one file we
-    # own outright rather than merging into the user's config. No-ops when
-    # ~/.copilot is absent.
-    try:
-        result = install_copilot_hooks(str(backend_port_file()))
-        log.info("copilot hooks install: %s", result)
-    except Exception as err:  # noqa: BLE001
-        log.warning("copilot hooks install failed: %s", err)
+    # Best-effort install of every vendor's CLI hooks, pointing them at this
+    # backend for reliable "agent active / turn complete / parked on a prompt"
+    # signals that buffer scanning cannot give. Each installer no-ops when its
+    # CLI's config root is absent, and failure is non-fatal — the orchestrator
+    # falls back to log-tail + sentinel detection.
+    for _key, _spec in _CLI_VENDORS.items():
+        if _spec.install_hooks is None:
+            continue
+        try:
+            result = _spec.install_hooks(str(backend_port_file()))
+            log.info("%s hooks install: %s", _key, result)
+        except Exception as err:  # noqa: BLE001
+            log.warning("%s hooks install failed: %s", _key, err)
 
     # Backend plugin host: discover, load and activate onStartup plugins from
     # the bundled builtin dir plus AGENT_TEAM_PLUGINS_DIR, then apply what
@@ -1300,7 +1282,12 @@ async def reset_mcp_servers(payload: dict[str, Any] | None = None) -> dict[str, 
     }
 
 
-_HOOK_VENDORS = frozenset({"claude", "qwen", "copilot"})
+# Derived, not listed: a vendor that installs hooks is exactly the one allowed
+# to post them back. Keeping these in step by construction means a new vendor
+# cannot end up installing hooks the endpoint then rejects.
+_HOOK_VENDORS = frozenset(
+    key for key, spec in _CLI_VENDORS.items() if spec.install_hooks is not None
+)
 
 
 @app.post("/hooks/{vendor}")

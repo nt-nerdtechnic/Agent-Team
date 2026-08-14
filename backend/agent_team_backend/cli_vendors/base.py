@@ -151,3 +151,11 @@ class VendorSpec:
     # --- install wizard (mirrors the legacy onboarding_deps agent_cli table) ---
     # This vendor's install/detect/update entry; onboarding_deps aggregates it.
     install_dep: Dep | None = None
+
+    # --- lifecycle hooks ---
+    # (backend_port_file: str) -> install result. Set when this CLI can be
+    # configured to POST turn/permission events to /hooks/<key>, which is a
+    # 100%-reliable signal the PTY cannot provide. Declaring it both installs
+    # the hooks at startup and admits the vendor to that endpoint, so a vendor
+    # cannot be one without the other. None = no hook mechanism.
+    install_hooks: Callable[[str], Any] | None = None

@@ -134,3 +134,36 @@ def test_unknown_event_kind_is_rejected_without_broadcasting(
     )
     assert resp.json()["ok"] is False
     assert events == []
+
+
+def test_hook_vendors_are_exactly_those_declaring_an_installer() -> None:
+    """Installing hooks and being allowed to post them are one decision.
+
+    They used to be two: a `frozenset` here and three hand-written install
+    blocks at startup. A vendor added to one and not the other would either
+    install hooks the endpoint rejects, or be admitted to an endpoint nothing
+    ever points at it.
+    """
+    from agent_team_backend.cli_vendors.registry import VENDORS
+
+    declared = {k for k, s in VENDORS.items() if s.install_hooks is not None}
+
+    assert declared == set(app_module._HOOK_VENDORS)
+    assert declared == {"claude", "copilot", "qwen"}
+
+
+def test_each_declared_installer_is_callable_and_isolated(monkeypatch, tmp_path) -> None:
+    """Every installer runs against a config root that does not exist, which
+    is what a machine without that CLI looks like: it must no-op, not raise —
+    startup treats a raising installer as non-fatal but logs it as a failure.
+    """
+    from agent_team_backend.cli_vendors.registry import VENDORS
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    port_file = tmp_path / "port.txt"
+    port_file.write_text("54321")
+    for key, spec in VENDORS.items():
+        if spec.install_hooks is None:
+            continue
+        result = spec.install_hooks(str(port_file))
+        assert isinstance(result, dict), f"{key} installer returned {type(result)}"

@@ -723,9 +723,18 @@ def _session_exists(workspace_path: str, session_id: str) -> bool:
 
 # ---- vendor spec -----------------------------------------------------------
 
+def _install_hooks(port_file: str) -> Any:
+    # Qwen Code ships Claude's hook design, so the same mechanism gives its
+    # panes the one signal the PTY cannot provide. Lazy import — see claude.py.
+    from ..qwen_hooks import install_hooks
+
+    return install_hooks(port_file)
+
+
 SPEC = VendorSpec(
     key="qwen",
     label="Qwen Code",
+    install_hooks=_install_hooks,
     # Late-bound on purpose: the module global is looked up at call time, so
     # tests can monkeypatch `cli_vendors.qwen.fetch_qwen` and the poller sees
     # the patched function. Binding the function object directly would freeze

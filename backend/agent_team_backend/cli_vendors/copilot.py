@@ -1140,9 +1140,19 @@ def _session_exists(workspace_path: str, session_id: str) -> bool:
 
 # ---- vendor spec -----------------------------------------------------------
 
+def _install_hooks(port_file: str) -> Any:
+    # Copilot loads any *.json under its hooks dir, so this writes one file we
+    # own outright rather than merging into the user's config. Lazy import —
+    # see claude.py.
+    from ..copilot_hooks import install_hooks
+
+    return install_hooks(port_file)
+
+
 SPEC = VendorSpec(
     key="copilot",
     label="Copilot CLI",
+    install_hooks=_install_hooks,
     # Late-bound (module global at call time) so tests can monkeypatch.
     fetch_usage=lambda home: fetch_copilot(home),
     resume_id_from_command=_resume_id_from_command,

@@ -97,13 +97,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .applog import app_data_dir
+from .cli_vendors.registry import VENDORS as _CLI_VENDORS
 from .cli_vendors.registry import vendor as _cli_vendor
 from .credential_vault import vault_to_thread
 
 log = logging.getLogger(__name__)
-
-PROVIDERS = ("claude", "codex", "kimi", "grok", "antigravity", "opencode", "qwen",
-             "kilo", "pi", "copilot", "cursor")
 
 # How long a `/usage` panel reading stands before the CLI is asked again. The
 # read costs a full Claude Code start, so it deliberately does not follow the
@@ -911,20 +909,21 @@ class UsageService:
             if self._blocked_until.get(key, 0) <= now:
                 claude_tasks[slot_id] = asyncio.create_task(coro())
 
-        # One-file-per-vendor bridge: a migrated vendor's fetch lives in its
-        # spec and its legacy lambda below is deleted in that vendor's round.
-        # Iteration runs over PROVIDERS (not the legacy table) so deleting a
-        # lambda cannot silently drop the vendor from the poll.
+        # Declaring `fetch_usage` in the vendor file is what puts a vendor in
+        # the poll — adding one needs no edit here, which is the promise
+        # docs/adding-a-cli-vendor.md makes. The inverse risk (a fetch quietly
+        # disappearing and the vendor dropping out unnoticed) is covered by
+        # test_usage_providers.py, which pins the expected set.
         tasks: dict[str, Any] = {}
-        for provider in PROVIDERS:
+        for provider, spec in _CLI_VENDORS.items():
             if provider == "claude":  # claude polls per-slot above
+                continue
+            if spec.fetch_usage is None:
                 continue
             if self._blocked_until.get(provider, 0) > now:
                 continue
-            spec = _cli_vendor(provider)
-            if spec is not None and spec.fetch_usage is not None:
-                fetch = spec.fetch_usage
-                tasks[provider] = asyncio.create_task(fetch(home))
+            fetch = spec.fetch_usage
+            tasks[provider] = asyncio.create_task(fetch(home))
         for slot_id, task in claude_tasks.items():
             try:
                 snap = await task
