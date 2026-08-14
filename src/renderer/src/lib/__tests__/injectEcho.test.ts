@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
-import { echoLanded, echoTimeoutFor, growthNeededFor, normalizeForMatch, TAIL_MATCH_LEN } from '../injectEcho'
+import {
+  echoLanded, echoTimeoutFor, growthNeededFor, normalizeForMatch, submitLanded, TAIL_MATCH_LEN
+} from '../injectEcho'
 
 describe('normalizeForMatch', () => {
   it('drops whitespace so a re-indented echo still matches', () => {
@@ -53,6 +55,46 @@ describe('echoLanded', () => {
     const short = normalizeForMatch('回答 A 或 B')
 
     expect(echoLanded('unrelated', 'nomatch', 10, short.length)).toBe(true)
+  })
+})
+
+describe('submitLanded', () => {
+  const text = '請只用一句話回答，不要使用任何工具：db/schema.sql 裡定義了哪些資料表？'
+  const tail = normalizeForMatch(text).slice(-TAIL_MATCH_LEN)
+
+  it('reports unsubmitted while the composer still holds our tail', () => {
+    // The antigravity failure: its spinner repaints the buffer non-stop, so
+    // growth alone said "delivered" while the text sat in the input box.
+    expect(submitLanded({
+      tailWasOnScreen: true,
+      tail,
+      screen: `❯ ${text}\n  esc to clear`,
+      grownBy: 4_000,
+    })).toBe(false)
+  })
+
+  it('reports submitted once the tail leaves the composer', () => {
+    expect(submitLanded({
+      tailWasOnScreen: true,
+      tail,
+      screen: '✻ Thinking…\n❯ \n  esc to interrupt',
+      grownBy: 12,
+    })).toBe(true)
+  })
+
+  it('falls back to any reaction when the tail never echoed verbatim', () => {
+    // A TUI that collapses a big paste into "[Pasted text +12 lines]" never
+    // shows the tail, so there is nothing to watch for leaving.
+    expect(submitLanded({
+      tailWasOnScreen: false, tail, screen: '[Pasted text +12 lines]', grownBy: 1,
+    })).toBe(true)
+    expect(submitLanded({
+      tailWasOnScreen: false, tail, screen: '[Pasted text +12 lines]', grownBy: 0,
+    })).toBe(false)
+  })
+
+  it('falls back to growth when the screen cannot be read at all', () => {
+    expect(submitLanded({ tailWasOnScreen: false, tail, screen: '', grownBy: 5 })).toBe(true)
   })
 })
 

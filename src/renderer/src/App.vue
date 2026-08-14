@@ -101,7 +101,10 @@ import {
 } from './composables/useCliAgentPrefs'
 import { pickReusablePane, runReportedDispatch, validatePlanDispatch, type PlanDispatchOutcome, type PlanDispatchPayload } from './lib/planDispatch'
 import { planExecutionPrompt } from './lib/planExecutePrompt'
-import { echoLanded, echoTimeoutFor, normalizeForMatch, TAIL_MATCH_LEN } from './lib/injectEcho'
+import {
+  echoLanded, echoTimeoutFor, normalizeForMatch, submitLanded,
+  SUBMIT_CONFIRM_MS, SUBMIT_SCREEN_LINES, TAIL_MATCH_LEN
+} from './lib/injectEcho'
 import { recordDiagnostic, readDiagnostics, currentDiagnosticSeq } from './lib/uiDiagnostics'
 import { injectStandaloneTask, type StandaloneTaskInjectionDeps } from './lib/standalonePaneTask'
 import { quickClassify } from './lib/quick-classify'
@@ -2163,10 +2166,17 @@ async function injectText(
     return false
   }
 
-  // Submit. Baseline captured AFTER the box is ready, so growth beyond it means
-  // the agent reacted to Enter (not the echo of our paste). No reaction ⇒ the
-  // \r didn't take ⇒ resend it.
+  // Submit. Baseline captured AFTER the box is ready. What counts as "it went"
+  // is judged from the input box rather than from raw output — see
+  // submitLanded(): a repainting TUI grows the buffer whether or not Enter took.
   const before = cleanBytes()
+  const readScreen = paneId !== undefined
+    ? (paneRefs[paneId]?.readScreenTail as ((n: number) => string) | undefined)
+    : undefined
+  const screenTail = (): string => (readScreen ? readScreen(SUBMIT_SCREEN_LINES) : '')
+  // Whether the composer is holding our tail RIGHT NOW decides which signal we
+  // can trust below, so sample it before pressing Enter.
+  const tailWasOnScreen = !!tail && normalizeForMatch(screenTail()).includes(tail)
   const MAX_SUBMITS = 3
   for (let attempt = 1; attempt <= MAX_SUBMITS; attempt++) {
     if (shouldAbort?.()) return false
@@ -2177,19 +2187,31 @@ async function injectText(
       return false
     }
     if (paneId === undefined || before < 0) return true
-    // Wait for agent to show first reaction (thinking spinner appears quickly).
-    await sleep(2_500)
-    if (cleanBytes() > before) return true
+    // Poll instead of one flat sleep: a fast agent clears the composer in a few
+    // hundred ms, and waiting the full gap on every attempt costs seconds.
+    const deadline = Date.now() + SUBMIT_CONFIRM_MS
+    let landed = false
+    while (Date.now() < deadline && !landed) {
+      await sleep(200)
+      if (shouldAbort?.()) return false
+      landed = submitLanded({
+        tailWasOnScreen,
+        tail,
+        screen: screenTail(),
+        grownBy: cleanBytes() - before
+      })
+    }
+    if (landed) return true
     if (attempt < MAX_SUBMITS) {
       console.warn(
-        `[injectText] no reaction 2.5s after Enter (attempt ${attempt}/${MAX_SUBMITS}) — ` +
-        'resending Enter'
+        `[injectText] input box still holds the text ${SUBMIT_CONFIRM_MS}ms after Enter ` +
+        `(attempt ${attempt}/${MAX_SUBMITS}) — resending Enter`
       )
     }
   }
-  // Content was confirmed in the box and Enter was re-sent 3× but the agent
-  // never reacted. Report honestly; the caller still arms the stage watcher.
-  console.error('[injectText] no agent reaction after 3 Enters — content likely truncated or unsubmitted')
+  // Content was confirmed in the box and Enter was re-sent 3× but the box never
+  // let go of it. Report honestly; the caller still arms the stage watcher.
+  console.error('[injectText] text still in the input box after 3 Enters — never submitted')
   return false
 }
 

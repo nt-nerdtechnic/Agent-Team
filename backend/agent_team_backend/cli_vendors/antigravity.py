@@ -1,15 +1,18 @@
-"""Antigravity CLI conversation reader (session discovery only).
+"""Antigravity CLI conversation reader (session discovery + activity).
 
 Files: ~/.gemini/antigravity-cli/conversations/<uuid>.db — SQLite databases
 whose payloads are undocumented protobuf blobs. Token usage is therefore NOT
-parsed (parse_session_file returns []); this reader exists so that:
+parsed (parse_session_file returns []). What this reader does provide:
 
   • the watcher's session sink can bind a conversation to its pane via the
     kickoff marker (the .db filename stem is the id `agy --conversation`
-    resumes), and
+    resumes),
   • cwd_from_file() can map a conversation to its workspace — the
     trajectory_metadata_blob table embeds the workspace as a `file:///…` URI,
-    extractable without decoding protobuf.
+    extractable without decoding protobuf, and
+  • parse_activity() reports per-step activity: the `steps` table keeps
+    `idx`/`step_type`/`status` as plain integers, so working-vs-done needs no
+    protobuf at all, and only the turn's text is decoded out of a blob.
 """
 
 from __future__ import annotations
@@ -38,7 +41,12 @@ from ..usage_common import (
     communicate_or_kill as _communicate_or_kill,
     parse_retry_after,
 )
-from ..log_readers.base import LogReader, TokenUsage
+from ..log_readers.base import (
+    ActivityEvent,
+    LogReader,
+    TokenUsage,
+    user_prompt_text,
+)
 
 log = logging.getLogger("agent_team_backend.log_readers.antigravity")
 
@@ -66,6 +74,148 @@ def _extract_cwd(text: str) -> str:
         key=lambda p: (not Path(p).is_dir(), -counts[p], len(p)),
     )
     return candidates[0]
+
+
+# Read-only busy wait: long enough to ride out an agent write transaction,
+# short enough not to stall the watcher's drain thread (same as Cursor).
+_BUSY_TIMEOUT_MS = 250
+
+# Sentinel prefix persisted inside the watcher-owned per-file seen_keys set,
+# carrying the highest `steps.idx` already reported for this conversation.
+# `idx` is a monotonic primary key, so it plays the role a byte offset plays
+# for a JSONL reader.
+_IDX_PREFIX = "agy_idx::"
+
+# Steps read per pass. A resumed conversation can be thousands of rows deep;
+# the watcher only needs the recent tail to decide "working" vs "done".
+_MAX_STEPS_PER_PASS = 256
+
+# `steps.step_type` values, established by decoding the payloads of ~15k steps
+# across the on-disk conversations. Anything not listed here is a tool call or
+# an internal bookkeeping step — still real agent activity, just unnamed.
+_STEP_USER = 14        # payload field 19 = the user's prompt, verbatim
+_STEP_ASSISTANT = 15   # payload field 20 = the assistant's text for this step
+_STEP_QUESTION = 138   # ask_question tool: the agent is waiting on the user
+
+# `steps.status`: 3 is the only value a finished step ever carries.
+_STATUS_DONE = 3
+
+# `step_payload` / `metadata` field numbers (protobuf, no .proto available;
+# established by decoding the on-disk conversations).
+_F_USER_PAYLOAD = 19
+_F_ASSISTANT_PAYLOAD = 20
+_F_META_END_TS = (8, 7, 6)  # end, then start — first one present wins
+
+# Fields INSIDE those payloads. The assistant payload separates the reply the
+# user sees from the model's own reasoning, which is what makes a real
+# end-of-turn signal possible: a step carrying reply text finished saying
+# something, a step carrying only reasoning is still mid-thought. (A `bot-<uuid>`
+# in field 6 is an id, not text, and is deliberately not read.)
+_F_USER_TEXT = (2,)
+_F_REPLY_TEXT = (1, 8)
+_F_THINKING_TEXT = (3,)
+
+
+def _varint(buf: bytes, i: int) -> tuple[int | None, int]:
+    """(value, next index), or (None, …) on a truncated/oversized varint."""
+    shift = 0
+    val = 0
+    while i < len(buf):
+        byte = buf[i]
+        i += 1
+        val |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return val, i
+        shift += 7
+        if shift > 63:
+            return None, i
+    return None, i
+
+
+def _pb_scan(blob: bytes) -> list[tuple[int, int, int | bytes]]:
+    """Top-level (field number, wire type, value) triples of a protobuf blob.
+
+    Stops at the first byte that does not parse rather than raising: these
+    blobs are undocumented and a partially-written one must not take the
+    watcher down.
+    """
+    out: list[tuple[int, int, int | bytes]] = []
+    i, n = 0, len(blob)
+    while i < n:
+        key, i = _varint(blob, i)
+        if key is None:
+            break
+        field, wire = key >> 3, key & 7
+        if wire == 0:
+            val, i = _varint(blob, i)
+            if val is None:
+                break
+            out.append((field, wire, val))
+        elif wire == 2:
+            ln, i = _varint(blob, i)
+            if ln is None or i + ln > n:
+                break
+            out.append((field, wire, blob[i:i + ln]))
+            i += ln
+        elif wire == 5:
+            i += 4
+        elif wire == 1:
+            i += 8
+        else:  # groups (3/4) and anything invalid — we cannot resynchronize
+            break
+    return out
+
+
+def _pb_bytes(blob: bytes, field: int) -> bytes:
+    for f, wire, val in _pb_scan(blob):
+        if f == field and wire == 2 and isinstance(val, bytes):
+            return val
+    return b""
+
+
+def _pb_varint(blob: bytes, field: int) -> int | None:
+    for f, wire, val in _pb_scan(blob):
+        if f == field and wire == 0 and isinstance(val, int):
+            return val
+    return None
+
+
+def _pb_text(payload: bytes, outer: int, inner: tuple[int, ...]) -> str:
+    """Text of `payload`'s `outer` submessage, from the first `inner` field
+    that holds a clean string ("" when none does).
+
+    Neighbouring fields hold the same text re-wrapped with a length prefix, so
+    a decodable-looking field is not enough — anything carrying protobuf
+    framing (control characters, which real prose does not contain) is skipped.
+    """
+    blob = _pb_bytes(payload, outer)
+    if not blob:
+        return ""
+    for field in inner:
+        for f, wire, val in _pb_scan(blob):
+            if f != field or wire != 2 or not isinstance(val, bytes):
+                continue
+            try:
+                text = val.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            if any(ch < " " and ch not in "\t\n\r" for ch in text):
+                continue
+            if text.strip():
+                return text.strip()
+    return ""
+
+
+def _step_timestamp(metadata: bytes) -> str:
+    """ISO 8601 for a step, from the google.protobuf.Timestamp in metadata."""
+    for field in _F_META_END_TS:
+        ts = _pb_bytes(metadata, field)
+        if not ts:
+            continue
+        seconds = _pb_varint(ts, 1)
+        if seconds:
+            return _epoch_to_iso(seconds) or ""
+    return ""
 
 
 class AntigravityLogReader(LogReader):
@@ -139,6 +289,128 @@ class AntigravityLogReader(LogReader):
         # Token counts live in undocumented protobuf blobs — intentionally not
         # parsed. Session binding happens via the watcher session sink instead.
         return []
+
+    # ── activity ────────────────────────────────────────────────────────────
+
+    def parse_activity(
+        self, path: Path, seen_keys: set[str]
+    ) -> list[ActivityEvent]:
+        """One event per new row in the conversation's `steps` table.
+
+        Unlike the other SQLite-backed vendors, the columns that matter here
+        (`idx`, `step_type`, `status`) are plain integers, so this is a real
+        per-step signal rather than a "the file changed" approximation. Only
+        the text rides in protobuf, and only the fields we decode below.
+
+        Without this, antigravity emitted neither `agent_active` nor
+        `turn_complete`, which left the inter-CLI messaging gate permanently
+        open: a message could be injected mid-turn, where the TUI leaves it
+        sitting unsent in the composer.
+        """
+        session_id = self.session_id_from_path(path)
+        if not session_id:
+            return []
+        prev = next(
+            (k[len(_IDX_PREFIX):] for k in seen_keys if k.startswith(_IDX_PREFIX)),
+            None,
+        )
+        rows = self._read_steps(path, int(prev) if prev is not None else -1)
+        if not rows:
+            return []
+        seen_keys.difference_update(
+            {k for k in seen_keys if k.startswith(_IDX_PREFIX)}
+        )
+        seen_keys.add(_IDX_PREFIX + str(rows[-1][0]))
+        # First sight of a conversation: the rows already there are history,
+        # not activity happening now. Record where we are and report nothing,
+        # so resuming an old conversation cannot show its pane as working.
+        if prev is None:
+            return []
+        cwd = self.cwd_from_file(path)
+        return [
+            ev for row in rows
+            for ev in self._step_event(path, session_id, cwd, row)
+        ]
+
+    def _read_steps(
+        self, path: Path, after_idx: int
+    ) -> list[tuple[int, int, int, bytes, bytes]]:
+        """(idx, step_type, status, metadata, step_payload) rows after
+        `after_idx`, oldest first ([] when the db cannot be read)."""
+        try:
+            con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            try:
+                con.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+                rows = con.execute(
+                    "SELECT idx, step_type, status, metadata, step_payload "
+                    "FROM steps WHERE idx > ? ORDER BY idx LIMIT ?",
+                    (after_idx, _MAX_STEPS_PER_PASS),
+                ).fetchall()
+            finally:
+                con.close()
+        except (sqlite3.Error, OSError) as err:
+            log.debug("steps read %s failed: %s", path, err)
+            return []
+        return [
+            (
+                int(idx),
+                int(step_type or 0),
+                int(status or 0),
+                metadata if isinstance(metadata, bytes) else b"",
+                payload if isinstance(payload, bytes) else b"",
+            )
+            for idx, step_type, status, metadata, payload in rows
+            if idx is not None
+        ]
+
+    def _step_event(
+        self,
+        path: Path,
+        session_id: str,
+        cwd: str,
+        row: tuple[int, int, int, bytes, bytes],
+    ) -> list[ActivityEvent]:
+        idx, step_type, status, metadata, payload = row
+
+        def make(event_type: str, detail: str, text: str = "") -> ActivityEvent:
+            return ActivityEvent(
+                vendor="antigravity",
+                event_type=event_type,
+                cwd=cwd,
+                session_id=session_id,
+                file_path=str(path),
+                dedup_key=f"step:{session_id}:{idx}",
+                timestamp=_step_timestamp(metadata),
+                detail=detail,
+                text=text,
+            )
+
+        if step_type == _STEP_USER:
+            return [make(
+                "agent_active", "user",
+                user_prompt_text(
+                    _pb_text(payload, _F_USER_PAYLOAD, _F_USER_TEXT)
+                ),
+            )]
+        if step_type == _STEP_QUESTION:
+            # The agent asked and is now blocked on an answer — the turn is
+            # over as far as "can this pane take a message" is concerned.
+            return [make("turn_complete", "assistant:question")]
+        if step_type == _STEP_ASSISTANT:
+            reply = _pb_text(payload, _F_ASSISTANT_PAYLOAD, _F_REPLY_TEXT)
+            # The format has no end-of-turn flag. A finished step that carries
+            # a reply is the closest thing to one: the agent said something to
+            # the user. Steps holding only reasoning, or only a tool call the
+            # reply will follow, keep the pane marked active instead.
+            if reply and status == _STATUS_DONE:
+                return [make("turn_complete", "assistant", reply)]
+            thinking = _pb_text(
+                payload, _F_ASSISTANT_PAYLOAD, _F_THINKING_TEXT
+            )
+            return [make(
+                "agent_active", "assistant:thinking" if thinking else "assistant"
+            )]
+        return [make("agent_active", f"step-{step_type}")]
 
 
 # ---- attribution/watch hooks ----------------------------------------------

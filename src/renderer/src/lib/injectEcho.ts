@@ -49,6 +49,38 @@ export function echoLanded(
   return grownBy >= growthNeededFor(normalizedLength)
 }
 
+/** Lines at the bottom of the visible screen that hold the input box. Small
+ *  on purpose: a TUI redraws the submitted message just ABOVE the composer, so
+ *  a generous window keeps matching our tail after a successful submit. */
+export const SUBMIT_SCREEN_LINES = 8
+
+/** How long to watch the input box after each Enter before resending it. */
+export const SUBMIT_CONFIRM_MS = 2_500
+
+/** Did Enter actually submit? Buffer growth cannot answer this: a TUI with a
+ *  spinner or a status footer repaints constantly, so the buffer grows whether
+ *  or not the composer was ever emptied — antigravity reported every injected
+ *  message as delivered while the text sat unsent in its input box.
+ *
+ *  When our tail echoed into the composer we have a far better signal: it
+ *  LEAVES the composer once submitted. Only when the tail never echoed
+ *  verbatim (a TUI that collapses a big paste into a placeholder) do we fall
+ *  back to "the terminal reacted at all".
+ *
+ *  `screen` is the rendered bottom of the visible screen
+ *  (useTerminal.readScreenTail), not the raw scrollback. */
+export function submitLanded(opts: {
+  tailWasOnScreen: boolean
+  tail: string
+  screen: string
+  grownBy: number
+}): boolean {
+  if (opts.tailWasOnScreen && opts.tail) {
+    return !normalizeForMatch(opts.screen).includes(opts.tail)
+  }
+  return opts.grownBy > 0
+}
+
 /** How long to wait for the echo before concluding the bytes never landed.
  *
  *  Scales with payload size, but the floor is what matters: a CLI that has
