@@ -107,10 +107,18 @@ function conflictTitle(row: BindingRow): string {
   const list = conflicts.value.get(row.id) ?? []
   return list
     .map((c) => {
-      const others = c.rows.filter((r) => r.id !== row.id).map(labelFor)
-      return `${c.key} → ${others.join(', ')}`
+      // Name the guard each rival waits for. Without it the tooltip says the key
+      // is shared but not the thing the user actually needs — which of them wins
+      // when they press it, and where.
+      const others = c.rows
+        .filter((r) => r.id !== row.id)
+        .map((r) => `${labelFor(r)}${r.when ? ` (${r.when})` : ''}`)
+      const verdict = c.shadowed.some((r) => r.id === row.id)
+        ? t('settings.keybindings.conflict-shadowed')
+        : t('settings.keybindings.conflict-shared')
+      return `${formatKeySpec(c.key)} — ${verdict}\n  ${others.join('\n  ')}`
     })
-    .join('\n')
+    .join('\n\n')
 }
 
 // ── Persistence ───────────────────────────────────────────────────────────────

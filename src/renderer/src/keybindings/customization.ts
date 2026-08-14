@@ -12,6 +12,7 @@
 import type { KeybindingRule } from './types'
 import { isRemovalRule, removalTarget } from './types'
 import { canonicalizeKeySpec, validateKeySpec } from './parseKey'
+import { evaluateWhen } from './whenEvaluator'
 import { COMMAND_IDS, describeCommand } from './commandCatalog'
 import { defaults } from './defaults'
 
@@ -245,25 +246,79 @@ export function resetRow(userRules: KeybindingRule[], row: BindingRow): Keybindi
 export interface KeyConflict {
   key: string
   rows: BindingRow[]
+  /** Rows that lose in every window and every state — the only real breakage. */
+  shadowed: BindingRow[]
   hard: boolean
 }
 
 /**
- * True when `outer` holding guarantees `inner` holds too, so a rule guarded by
- * `outer` always shadows one guarded by `inner` on the same key.
+ * The windows a shortcut can be pressed in.
  *
- * Only plain `&&` chains are analysed: `a && b` implies `b`. Anything with `||`
- * is left alone, since a disjunction can be satisfied in ways the other guard
- * is not, and calling that a hard conflict would cry wolf. Being conservative
- * here is deliberate — a missed shadow shows as a soft warning, whereas a false
- * one tells the user a perfectly good binding is broken.
+ * The context keys below are not independent flags — they are window
+ * identities, and no window ever sets two of them. Treating them as free
+ * booleans is what made almost every shared key look broken: `⌘⇧F` is
+ * findInFiles with no guard at all and git.fetch under `gitWindow`, which reads
+ * as "always collides" unless you know the two can only ever meet inside the
+ * Git window, where the override is the whole point.
  */
-function whenImplies(outer: string, inner: string): boolean {
-  if (outer.includes('||') || inner.includes('||')) return false
-  const clauses = (w: string): string[] =>
-    w.split('&&').map((s) => s.trim()).filter(Boolean)
-  const have = new Set(clauses(outer))
-  return clauses(inner).every((c) => have.has(c))
+const WINDOW_SCENES: { id: string; ctx: Record<string, boolean> }[] = [
+  { id: 'main', ctx: { paneStage: true } },
+  { id: 'miniIde', ctx: { editorOpen: true } },
+  { id: 'git', ctx: { gitWindow: true } },
+  // Plan / Pipeline and friends: none of the identity flags.
+  { id: 'other', ctx: {} },
+]
+
+/**
+ * Transient state a guard can also test. Unlike the window identities these
+ * come and go while a window is open, so a rule that needs one is not broken —
+ * it just waits for it. Every combination is tried when asking whether a rule
+ * can ever win.
+ */
+const TRANSIENT_KEYS = ['findOpen', 'modalOpen', 'terminalFocus', 'editorTextFocus'] as const
+
+function transientAssignments(): Record<string, boolean>[] {
+  const out: Record<string, boolean>[] = []
+  for (let mask = 0; mask < 1 << TRANSIENT_KEYS.length; mask++) {
+    const ctx: Record<string, boolean> = {}
+    TRANSIENT_KEYS.forEach((k, i) => { ctx[k] = Boolean(mask & (1 << i)) })
+    out.push(ctx)
+  }
+  return out
+}
+
+/**
+ * Rows competing for `key`, in resolver priority order (last wins).
+ *
+ * `rows` arrives in declaration order, so a later row is a later rule.
+ */
+function contendersFor(rows: BindingRow[], key: string): BindingRow[] {
+  return rows.filter((r) => r.keys.some((k) => k.key === key))
+}
+
+/**
+ * Can this row ever be the rule that fires for `key`?
+ *
+ * Walks every window against every combination of transient state and asks who
+ * the resolver would pick. A row that never comes out on top is genuinely dead
+ * — that is the only thing worth showing in red. A row that wins somewhere is
+ * merely sharing the key, however loudly the guards overlap on paper.
+ */
+function canEverWin(row: BindingRow, contenders: BindingRow[]): boolean {
+  const passes = (r: BindingRow, ctx: Record<string, boolean>): boolean =>
+    !r.when || evaluateWhen(r.when, ctx)
+
+  for (const scene of WINDOW_SCENES) {
+    for (const transient of transientAssignments()) {
+      const ctx = { ...scene.ctx, ...transient }
+      if (!passes(row, ctx)) continue
+      // The resolver checks later rules first, so the last passing rule wins.
+      let winner: BindingRow | null = null
+      for (const c of contenders) if (passes(c, ctx)) winner = c
+      if (winner === row) return true
+    }
+  }
+  return false
 }
 
 export function findKeyConflicts(rows: BindingRow[]): KeyConflict[] {
@@ -278,16 +333,9 @@ export function findKeyConflicts(rows: BindingRow[]): KeyConflict[] {
   const out: KeyConflict[] = []
   for (const [key, list] of byKey) {
     if (list.length < 2) continue
-    const whens = list.map((r) => r.when ?? '')
-    // Identical guards always collide. So does a stricter guard against a looser
-    // one: cmd+shift+g is `!findOpen` for focusSourceControl and
-    // `paneStage && !findOpen` for openGitWindow, and in the main window both
-    // hold at once — the later rule wins and the earlier one can never fire.
-    // Comparing guard strings alone would report that as harmless.
-    const hard = whens.some((w, i) =>
-      whens.some((other, j) => i !== j && (w === other ? j < i : whenImplies(other, w))),
-    )
-    out.push({ key, rows: list, hard })
+    const contenders = contendersFor(rows, key)
+    const shadowed = list.filter((row) => !canEverWin(row, contenders))
+    out.push({ key, rows: list, shadowed, hard: shadowed.length > 0 })
   }
   return out
 }

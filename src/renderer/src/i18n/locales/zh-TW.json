@@ -1204,6 +1204,8 @@
       "invalid-key": "{key} 不能當作快捷鍵",
       "add-binding": "新增另一組綁定",
       "unbound": "未綁定",
+      "conflict-shadowed": "這一列永遠搶不到；下列規則會先取走這個鍵",
+      "conflict-shared": "與以下規則共用，靠生效條件區分",
       "conflict-hard": "衝突",
       "conflict-soft": "共用按鍵",
       "when-any": "總是生效",

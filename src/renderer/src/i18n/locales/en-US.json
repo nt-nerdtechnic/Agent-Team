@@ -1204,6 +1204,8 @@
       "invalid-key": "{key} cannot be used as a shortcut",
       "add-binding": "Add another binding",
       "unbound": "unbound",
+      "conflict-shadowed": "this row never wins; the rules below always take the key",
+      "conflict-shared": "shared with, and separated by, these conditions",
       "conflict-hard": "conflict",
       "conflict-soft": "shared key",
       "when-any": "always",

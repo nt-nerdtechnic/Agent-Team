@@ -220,18 +220,6 @@ describe('conflict reporting', () => {
     expect(conflict.hard).toBe(true)
   })
 
-  it('reports a hard conflict when one when-clause implies the other', () => {
-    // cmd+shift+g is focusSourceControl under `!findOpen` and openGitWindow
-    // under `paneStage && !findOpen`. The second guard is strictly narrower, so
-    // wherever it holds the first one does too — and it is declared later, so it
-    // wins. focusSourceControl can never fire in the main window. Comparing the
-    // guard strings alone would call that harmless and show the user a dead
-    // binding marked as fine.
-    const rows = buildRows([], base)
-    const conflict = findKeyConflicts(rows).find((c) => c.key === 'cmd+shift+g')
-    expect(conflict?.hard).toBe(true)
-    expect(conflict?.rows).toHaveLength(2)
-  })
 
   it('reports a soft conflict when neither when-clause implies the other', () => {
     const rows = buildRows([], [
@@ -242,15 +230,6 @@ describe('conflict reporting', () => {
     expect(conflict?.hard).toBe(false)
   })
 
-  it('does not call a disjunction a hard conflict', () => {
-    // `a || b` can hold where `a` does not, so the narrower-guard reasoning does
-    // not apply; staying soft avoids crying wolf.
-    const rows = buildRows([], [
-      { key: 'cmd+e', command: 'a.one', when: 'editorOpen' },
-      { key: 'cmd+e', command: 'a.two', when: 'editorOpen || terminalFocus' },
-    ])
-    expect(findKeyConflicts(rows).find((c) => c.key === 'cmd+e')?.hard).toBe(false)
-  })
 
   it('does not report a key owned by a single row', () => {
     const rows = buildRows([], base)
@@ -551,10 +530,6 @@ describe('setRowKeys key validation', () => {
 
 // ── Conflict severity accounts for one guard implying another ─────────────────
 describe('hard conflicts include implied guards', () => {
-  it('flags ⌘⇧G: !findOpen can never fire where paneStage && !findOpen also holds', () => {
-    const conflict = findKeyConflicts(buildRows([])).find((c) => c.key === 'cmd+shift+g')
-    expect(conflict?.hard).toBe(true)
-  })
 
   it('still treats genuinely exclusive guards as a soft share', () => {
     const rows = buildRows([], [
@@ -562,5 +537,69 @@ describe('hard conflicts include implied guards', () => {
       { key: 'cmd+j', command: 'a.two', when: 'gitWindow' },
     ])
     expect(findKeyConflicts(rows).find((c) => c.key === 'cmd+j')?.hard).toBe(false)
+  })
+})
+
+// ── Conflict severity is decided per window, not per guard string ─────────────
+// The guards alone say `⌘⇧F` collides: findInFiles has no guard and git.fetch
+// wants `gitWindow`. They only ever meet inside the Git window, where the
+// override is the entire point — so the honest answer is "shared", not "broken".
+describe('conflict severity across windows', () => {
+  const conflictFor = (key: string, rows = buildRows([])) =>
+    findKeyConflicts(rows).find((c) => c.key === key)
+
+  it('no shipped default is fully shadowed', () => {
+    const broken = findKeyConflicts(buildRows([])).filter((c) => c.hard)
+    expect(broken.map((c) => c.key)).toEqual([])
+  })
+
+  it('a window-scoped override is shared, not broken', () => {
+    const c = conflictFor('cmd+shift+f')
+    expect(c?.rows.length).toBeGreaterThan(1)
+    expect(c?.hard).toBe(false)
+    expect(c?.shadowed).toEqual([])
+  })
+
+  it('⌘⇧G keeps all three owners: each wins in some window', () => {
+    const c = conflictFor('cmd+shift+g')
+    expect(c?.rows).toHaveLength(3)
+    expect(c?.shadowed).toEqual([])
+  })
+
+  // The detector must still bite, or it is just a green light.
+  it('flags a row that can never win anywhere', () => {
+    const rows = buildRows([], [
+      { key: 'cmd+j', command: 'a.loser', when: 'editorOpen' },
+      { key: 'cmd+j', command: 'a.winner', when: 'editorOpen' },
+    ])
+    const c = findKeyConflicts(rows).find((x) => x.key === 'cmd+j')
+    expect(c?.hard).toBe(true)
+    expect(c?.shadowed.map((r) => r.command)).toEqual(['a.loser'])
+  })
+
+  it('flags an unguarded row buried under a later unguarded one', () => {
+    const rows = buildRows([], [
+      { key: 'cmd+j', command: 'a.first' },
+      { key: 'cmd+j', command: 'a.second' },
+    ])
+    const c = findKeyConflicts(rows).find((x) => x.key === 'cmd+j')
+    expect(c?.shadowed.map((r) => r.command)).toEqual(['a.first'])
+  })
+
+  it('a guard that is strictly narrower does not shadow the broader one', () => {
+    // The narrow rule wins where it applies; the broad one still wins elsewhere.
+    const rows = buildRows([], [
+      { key: 'cmd+j', command: 'a.broad' },
+      { key: 'cmd+j', command: 'a.narrow', when: 'gitWindow' },
+    ])
+    expect(findKeyConflicts(rows).find((x) => x.key === 'cmd+j')?.hard).toBe(false)
+  })
+
+  it('mutually exclusive windows are never a conflict', () => {
+    const rows = buildRows([], [
+      { key: 'cmd+j', command: 'a.git', when: 'gitWindow' },
+      { key: 'cmd+j', command: 'a.main', when: 'paneStage' },
+    ])
+    expect(findKeyConflicts(rows).find((x) => x.key === 'cmd+j')?.hard).toBe(false)
   })
 })
