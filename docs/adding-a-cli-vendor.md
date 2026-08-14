@@ -50,6 +50,32 @@ vendor file) so Navide can detect, install, and update your CLI. The
 onboarding wizard aggregates every vendor's entry automatically — no
 other file to edit.
 
+## Known exemptions
+
+"No shared module carries per-vendor branches" holds for the orchestration
+you go through when adding a vendor. Three places are deliberately outside
+that rule — you do not need to touch them, but do not be surprised to find
+vendor names there:
+
+- **Credential vault** (`credential_vault.py`, `ws_handlers.py`'s hot-swap
+  path). Account switching is per-vendor by nature — where a secret lives,
+  whether a login home isolates it, how an identity is read out of it. A new
+  vendor gets multi-account support by filling in the credential fields of its
+  own `SPEC`; the vault's remaining `claude` branches are its own history.
+- **`CODEX_HOME` per-pane isolation** (`ws_handlers.py`, `codex_home.py`).
+  `CodexHomeManager` is owned by the app and injected into the spawn path, so
+  moving it into `cli_vendors/codex.py` would invert the import direction that
+  `cli_vendors/base.py` forbids. It stays put until the spawn path grows a
+  hook that can express it.
+- **Plugins** (`plugins/builtin/**`). Plugin wiring — MCP server injection,
+  per-pane shim homes, skills — still branches on `agent_key` inside each
+  plugin. Plugins are not part of the vendor contract: a new vendor works
+  without touching them, and gains plugin-specific behaviour only if that
+  plugin adds it.
+
+Anything else that makes you edit a shared module to add a vendor is a gap in
+the contract. Open an issue rather than adding a branch.
+
 ## Verify
 
 ```sh

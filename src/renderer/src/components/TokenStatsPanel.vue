@@ -76,25 +76,17 @@ const cumulative = computed<TokenBucket>(() =>
 )
 const allTime = computed<TokenBucket>(() => snapshot.value?.global?.all_time ?? EMPTY)
 
+// Names come from the specs, which already carry each vendor's display label
+// — a second table here drifted from them silently. The analyzer is the one
+// pseudo-vendor with no spec: it exists in token accounting only, and is not
+// a spawnable CLI. (Cursor CLI stores no token data locally, so its row shows
+// a label with empty stats.)
+const ANALYZER = 'analyzer'
 const VENDOR_LABELS: Record<string, string> = {
-  claude: 'Claude',
-  codex: 'Codex',
-  antigravity: 'Antigravity',
-  grok: 'Grok',
-  kimi: 'Kimi',
-  opencode: 'OpenCode',
-  qwen: 'Qwen Code',
-  kilo: 'Kilo Code',
-  pi: 'Pi',
-  copilot: 'Copilot CLI',
-  // Cursor CLI stores no token data locally; label shown, stats stay empty.
-  cursor: 'Cursor CLI',
-  aider: 'Aider',
-  analyzer: 'Local analyzer'
+  ...Object.fromEntries(CLI_AGENT_SPECS.map((s) => [s.agentKey, s.label])),
+  [ANALYZER]: 'Local analyzer'
 }
-// CLI vendors from the canonical specs, plus the analyzer pseudo-vendor
-// (token accounting only — not a spawnable CLI).
-const KNOWN_VENDORS = [...CLI_AGENT_SPECS.map((s) => s.agentKey), 'analyzer']
+const KNOWN_VENDORS = [...CLI_AGENT_SPECS.map((s) => s.agentKey), ANALYZER]
 
 // Vendor / Stage breakdowns come from workspace CUMULATIVE (not just current run)
 // so they remain visible even when no pipeline is actively running. The current

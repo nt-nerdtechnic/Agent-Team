@@ -30,6 +30,14 @@ const PlanPane = defineAsyncComponent(() => import('../editor/PlanPane.vue'))
 // structural mirror before stage 2 of the one-file-per-vendor refactor.
 import type { AgentSpec } from '../agents'
 export type { AgentSpec } from '../agents'
+import { CLI_AGENT_SPECS } from '../agents'
+
+/** CLIs YOLO mode actually affects: the ones declaring a bypass flag. Derived,
+ *  because the hand-written hint here listed three while eight qualified. */
+const yoloVendors = CLI_AGENT_SPECS
+  .filter((s) => s.skipPermissionFlag)
+  .map((s) => s.agentKey)
+  .join(' / ')
 
 // The three small state machines a pane runs through while it is being made
 // ready. Declared here, next to the view they travel in, and imported by
@@ -1060,7 +1068,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
         <input v-model="yoloLocal" type="checkbox" />
         <span>
           <strong>{{ $t('label.yolo-mode') }}</strong> {{ $t('label.yolo-bypass') }}
-          <span class="muted-inline">(claude / codex / antigravity)</span>
+          <span class="muted-inline">({{ yoloVendors }})</span>
         </span>
       </label>
     </section>
