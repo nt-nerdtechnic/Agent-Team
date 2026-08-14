@@ -10,7 +10,7 @@ Navide は、一人の人間が複数の Coding Agent を指揮するための�
 
 [English](README.md) | [繁體中文](README.zh-TW.md) | 日本語
 
-[v0.1.82 をダウンロード](https://github.com/nt-nerdtechnic/Navide/releases/tag/v0.1.82) | [はじめに](docs/ja-JP/getting-started.md) | [ドキュメント](docs/ja-JP/README.md) | [ロードマップ](docs/ja-JP/roadmap.md)
+[v0.1.83 をダウンロード](https://github.com/nt-nerdtechnic/Navide/releases/tag/v0.1.83) | [はじめに](docs/ja-JP/getting-started.md) | [ドキュメント](docs/ja-JP/README.md) | [ロードマップ](docs/ja-JP/roadmap.md)
 
 [![Latest release](https://img.shields.io/github/v/release/nt-nerdtechnic/Navide?sort=semver&label=release&logo=github)](https://github.com/nt-nerdtechnic/Navide/releases/latest)
 [![Electron](https://img.shields.io/badge/Electron-33-47848F?logo=electron)](https://www.electronjs.org/)
@@ -115,10 +115,10 @@ Local-first は常に完全オフラインという意味ではありません�
 
 ## Navide を試す
 
-Navide は Apple silicon 上の macOS 13 以降をサポートします。v0.1.82 は Developer ID で署名され、Apple の Notarization を通過した正式版です。
+Navide は Apple silicon 上の macOS 13 以降をサポートします。v0.1.83 は Developer ID で署名され、Apple の Notarization を通過した正式版です。
 
-- [DMG をダウンロード](https://github.com/nt-nerdtechnic/Navide/releases/download/v0.1.82/Navide-0.1.82-arm64.dmg)
-- [ZIP をダウンロード](https://github.com/nt-nerdtechnic/Navide/releases/download/v0.1.82/Navide-0.1.82-arm64.zip)
+- [DMG をダウンロード](https://github.com/nt-nerdtechnic/Navide/releases/download/v0.1.83/Navide-0.1.83-arm64.dmg)
+- [ZIP をダウンロード](https://github.com/nt-nerdtechnic/Navide/releases/download/v0.1.83/Navide-0.1.83-arm64.zip)
 
 Navide を Applications にコピーすればそのまま開けます。Gatekeeper の回避は不要です。このリリース以降、アプリ内自動アップデートが利用できます。
 
