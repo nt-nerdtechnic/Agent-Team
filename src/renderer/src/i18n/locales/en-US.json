@@ -1948,8 +1948,8 @@
     "scope-all": "Resume all CLIs",
     "scope-fresh": "Start all fresh",
     "session-not-found": "Couldn't find {agent}'s previous conversation — opened a new one instead.",
-    "codex-session-unavailable": "Codex's saved conversation is unavailable, so its placeholder was kept.",
-    "codex-session-unknown": "Couldn't verify Codex's saved conversation, so its placeholder was kept."
+    "session-unavailable": "{agent}'s saved conversation is unavailable, so its placeholder was kept.",
+    "session-unknown": "Couldn't verify {agent}'s saved conversation, so its placeholder was kept."
   },
   "backfill": {
     "title": "Backfilling historical token usage in the background",

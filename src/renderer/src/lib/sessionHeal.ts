@@ -1,9 +1,15 @@
-// Frontend defenses against "ghost" Claude session ids — persisted ids whose
+// Frontend defenses against "ghost" session ids — persisted ids whose
 // transcript never materialized on disk (e.g. /clear re-rolled the CLI's real
 // id, or the pinned id was never adopted). A ghost id survives restarts as a
 // dead pointer: it cannot be resumed, and pre-fix logic both refused to learn
 // the real id and minted a NEW ghost on every cold start. The helpers here are
 // the pure/testable cores consumed by App.vue.
+//
+// Only a vendor that can be handed a session id at launch has ghosts at all,
+// which is what `pinsSessionIdAtLaunch` in its spec declares — currently just
+// Claude, which is why the vocabulary here is shaped by it.
+
+import { AGENT_SPECS } from '../agents'
 
 /** How the attribution handler should react to a backend-attributed session id. */
 export type AttributionAction = 'adopt' | 'verify'
@@ -34,7 +40,7 @@ export function shouldAttemptResume(canResume: SessionResumability): boolean {
 /** Only the first restore-fallback spawn may reuse a saved session id — a
  *  second record carrying the same id would collide on `--session-id`.
  *  Claims are scoped to one restore batch (the caller owns `usedIds`); a
- *  duplicate gets '' so pinFreshClaudeSession mints a new uuid instead. */
+ *  duplicate gets '' so pinFreshSessionAtLaunch mints a new uuid instead. */
 export function claimFreshSessionId(usedIds: Set<string>, sessionId: string): string {
   const id = sessionId.trim()
   if (!id || usedIds.has(id)) return ''
@@ -90,30 +96,39 @@ export function createGhostHealGate(
   }
 }
 
-/** Hand-written `--session-id <uuid>` in a custom command. Claude only accepts
- *  a UUID here, so a strict UUID match is the deterministic parse; anything
- *  else (odd quoting/placeholder) yields no pin — same as before. */
-const HANDWRITTEN_SESSION_ID_RE =
-  /--session-id[=\s]+([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})(?![0-9a-fA-F-])/
+/** Can this vendor be handed a session id at launch? The flag and the
+ *  hand-written form are the vendor's own knowledge (`pinsSessionIdAtLaunch`);
+ *  everything below is vendor-neutral. */
+export function pinsSessionAtLaunch(agentKey: string | undefined): boolean {
+  return !!AGENT_SPECS.find((s) => s.agentKey === agentKey)?.pinsSessionIdAtLaunch
+}
 
-/** Fresh (non-resume) Claude launch pinning — extracted from spawnPane.
+/** Can a ghost pane of this vendor be repointed at a real session instead of
+ *  silently starting over? Requires sessions attributable by cwd, which is why
+ *  it is declared per vendor rather than assumed. */
+export function supportsGhostReconnect(agentKey: string | undefined): boolean {
+  return !!AGENT_SPECS.find((s) => s.agentKey === agentKey)?.supportsGhostReconnect
+}
+
+/** Fresh (non-resume) launch pinning — extracted from spawnPane.
  *
  *  `requestedId` lets a restore/rebuild of a NOT-resumable session reuse the
- *  SAME saved id for the fresh spawn: the id has no transcript, so
- *  `--session-id <old>` is valid for a fresh CLI session, cold-start rebuild
- *  becomes idempotent (no ghost-id rotation), and if the user then types, the
+ *  SAME saved id for the fresh spawn: the id has no transcript, so pinning the
+ *  old id is valid for a fresh CLI session, cold-start rebuild becomes
+ *  idempotent (no ghost-id rotation), and if the user then types, the
  *  transcript materializes under that id so future resumes work. */
-export function pinFreshClaudeSession(
+export function pinFreshSessionAtLaunch(
   agentKey: string,
   isResume: boolean,
   command: string,
   requestedId: string | undefined,
   generate: () => string
 ): { command: string; explicitSessionId: string } {
-  if (agentKey !== 'claude' || isResume) {
+  const pin = AGENT_SPECS.find((s) => s.agentKey === agentKey)?.pinsSessionIdAtLaunch
+  if (!pin || isResume) {
     return { command, explicitSessionId: '' }
   }
-  if (command.includes('--session-id')) {
+  if (command.includes(pin.flag)) {
     // Hand-written --session-id: the pane's session IS that id — definitive
     // provenance from the launch command itself. Surface it as the explicit
     // pin so (a) the backend binds session→pane deterministically instead of
@@ -121,11 +136,11 @@ export function pinFreshClaudeSession(
     // (b) the attribution handler sees a pinned id and never blind-adopts a
     // mis-routed sibling session (a pane's session must never be silently
     // replaced). An unparseable form keeps the old no-pin behavior.
-    const handwritten = command.match(HANDWRITTEN_SESSION_ID_RE)
+    const handwritten = command.match(pin.handwritten)
     return { command, explicitSessionId: handwritten ? handwritten[1] : '' }
   }
   const id = requestedId?.trim() || generate()
-  return { command: `${command} --session-id ${id}`, explicitSessionId: id }
+  return { command: `${command} ${pin.flag} ${id}`, explicitSessionId: id }
 }
 
 /** project.set_ui_state persists freshly computed spawn-history/run-group

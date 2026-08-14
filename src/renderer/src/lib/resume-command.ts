@@ -24,21 +24,24 @@
 // appended verbatim — same flags resolveCommand() uses for a fresh launch.
 
 import { AGENT_SPECS, REBUILD_CAPABLE_AGENTS, RESTORE_PIN_AGENTS } from '../agents'
+import type { AgentSpec } from '../agents/types'
 
 export { REBUILD_CAPABLE_AGENTS, RESTORE_PIN_AGENTS }
 
-const CODEX_UUID_AT_END = /([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})(?:\.jsonl)?$/i
+/** The registered spec for an agent key, if any. */
+function specFor(agentKey: string): AgentSpec | undefined {
+  return AGENT_SPECS.find((s) => s.agentKey === agentKey)
+}
 
 /** Canonical id accepted by the vendor resume command.
  *
- * Older Agent-Team builds could persist a Codex rollout filename/path before
- * session_meta was readable. Recover only a strict trailing UUID; arbitrary
- * Codex strings and every other vendor stay unchanged.
+ * The repair itself is per-vendor knowledge and lives in the vendor's
+ * `normalizeSessionId`; a vendor that declares none keeps its id verbatim.
  */
 export function normalizeResumeSessionId(agentKey: string, sessionId: string): string {
   const id = sessionId.trim()
-  if (agentKey !== 'codex' || !id) return id
-  return id.match(CODEX_UUID_AT_END)?.[1] ?? id
+  if (!id) return id
+  return specFor(agentKey)?.normalizeSessionId?.(id) ?? id
 }
 
 /** A saved Codex conversation is data, not permission to start a replacement.
@@ -49,7 +52,9 @@ export function shouldPreserveMissingSessionOnRestore(
   savedSessionId: string,
   canResume: boolean,
 ): boolean {
-  return agentKey === 'codex' && !!savedSessionId.trim() && !canResume
+  return !!specFor(agentKey)?.preserveMissingSessionOnRestore
+    && !!savedSessionId.trim()
+    && !canResume
 }
 
 /** A prior resume that is definitively missing needs a visible fallback warning.
@@ -60,7 +65,31 @@ export function shouldWarnMissingResume(
   canResume: boolean | null,
   lastCommandWasResume: boolean,
 ): boolean {
-  return agentKey !== 'codex' && !!savedSessionId.trim() && canResume === false && lastCommandWasResume
+  return !specFor(agentKey)?.preserveMissingSessionOnRestore
+    && !!savedSessionId.trim()
+    && canResume === false
+    && lastCommandWasResume
+}
+
+/** Does this vendor keep its state in a per-pane home directory? */
+export function usesSessionHome(agentKey: string): boolean {
+  return !!specFor(agentKey)?.needsSessionHome
+}
+
+/** The stable id for this pane's per-vendor session home ("" when the vendor
+ * keeps no per-pane home). `saved` is the id a restore is carrying over;
+ * `paneId` is the fallback a fresh pane names its home after.
+ *
+ * Codex is the only such vendor: its CODEX_HOME holds the rollout a resume
+ * reads back, so the home id must survive a pane id changing across restores.
+ */
+export function sessionHomeIdFor(
+  agentKey: string,
+  paneId: string,
+  saved?: string | null,
+): string {
+  if (!usesSessionHome(agentKey)) return ''
+  return (saved ?? '').trim() || paneId
 }
 
 /** Collapse restorable panes that point at the SAME conversation. Legacy

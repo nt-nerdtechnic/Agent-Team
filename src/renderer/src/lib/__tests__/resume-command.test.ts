@@ -10,9 +10,39 @@ import {
   paneCanRebuild,
   paneRebuildVisible,
   TERMINAL_CREATE_TIMEOUT_MS,
+  sessionHomeIdFor,
   shouldPreserveMissingSessionOnRestore,
   shouldWarnMissingResume,
 } from '../resume-command'
+
+describe('sessionHomeIdFor', () => {
+  it('names a fresh home after the pane when the vendor keeps one', () => {
+    expect(sessionHomeIdFor('codex', 'pane-1')).toBe('pane-1')
+  })
+
+  it('carries a saved home id across a restore that changed the pane id', () => {
+    // The whole point of the id: CODEX_HOME holds the rollout a resume reads
+    // back, so following the new pane id would resume into an empty home.
+    expect(sessionHomeIdFor('codex', 'pane-NEW', 'pane-ORIGINAL')).toBe('pane-ORIGINAL')
+  })
+
+  it('falls back to the pane id when the saved value is blank', () => {
+    expect(sessionHomeIdFor('codex', 'pane-1', '   ')).toBe('pane-1')
+    expect(sessionHomeIdFor('codex', 'pane-1', null)).toBe('pane-1')
+  })
+
+  it('gives every other vendor no session home', () => {
+    for (const key of ['claude', 'aider', 'qwen', 'opencode']) {
+      expect(sessionHomeIdFor(key, 'pane-1', 'saved'), key).toBe('')
+    }
+  })
+
+  it('is driven by the spec, not by a vendor name', () => {
+    const declared = AGENT_SPECS.filter((s) => s.needsSessionHome).map((s) => s.agentKey)
+
+    expect(declared).toEqual(['codex'])
+  })
+})
 
 describe('normalizeResumeSessionId', () => {
   const uuid = '019f6155-a2ae-72a2-a455-bf454b8f9f90'

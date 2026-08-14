@@ -1948,8 +1948,8 @@
     "scope-all": "恢復全部 CLI",
     "scope-fresh": "全部全新開始",
     "session-not-found": "找不到 {agent} 的先前對話，已改開新對話。",
-    "codex-session-unavailable": "Codex 已儲存的對話無法使用，因此保留 placeholder。",
-    "codex-session-unknown": "無法確認 Codex 已儲存的對話，因此保留 placeholder。"
+    "session-unavailable": "{agent} 已儲存的對話無法使用，因此保留 placeholder。",
+    "session-unknown": "無法確認 {agent} 已儲存的對話，因此保留 placeholder。"
   },
   "backfill": {
     "title": "背景整理歷史 token 用量",

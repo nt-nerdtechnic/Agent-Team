@@ -4,6 +4,10 @@
  * vendor file never imports the assembler (no cycles).
  */
 
+/** Lists one directory's entry names; null when it isn't listable. Supplied by
+ *  the app so a spec can inspect the filesystem without owning an RPC client. */
+export type DirLister = (dir: string) => Promise<string[] | null>
+
 /** Inputs a spec's `paneArg` is computed from. */
 export interface PaneArgContext {
   /** Pane UUID — the identity the per-pane file is named after. */
@@ -113,4 +117,43 @@ export interface AgentSpec {
   /** A restore may keep the SAVED session id pinned so Rebuild stays enabled
    *  (only vendors whose stale pin reliably self-heals — see resume-command). */
   supportsRestorePin?: boolean
+  /** This CLI keeps its state in a per-pane home directory, so each pane needs
+   *  a stable id for it — one that survives a restore even when the pane id
+   *  changes. Only codex: its `CODEX_HOME` holds the rollout a resume reads
+   *  back, so a pane that lost its home cannot resume at all. */
+  needsSessionHome?: boolean
+  /** Repairs a persisted session id into the form this vendor's resume command
+   *  accepts. Undefined = the id is already canonical. Only codex needs one:
+   *  older builds could persist a rollout filename before session_meta was
+   *  readable. */
+  normalizeSessionId?: (sessionId: string) => string
+  /** A saved conversation this vendor cannot currently resume is data, not
+   *  permission to start a replacement: keep the pane's record untouched and
+   *  leave a fresh spawn to the user. Vendors without this get the opposite
+   *  treatment — a warning plus a fresh pane. */
+  preserveMissingSessionOnRestore?: boolean
+  /** This CLI accepts a session id at launch, so a fresh pane can pin one
+   *  instead of waiting for the log reader to attribute it. `flag` is the
+   *  argument that carries it; `handwritten` recognizes an id the user typed
+   *  into a custom command (the pin is then theirs, not ours). Only claude. */
+  pinsSessionIdAtLaunch?: {
+    flag: string
+    handwritten: RegExp
+  }
+  /** A pane whose saved session left no transcript ("ghost") can be repointed
+   *  at a real one from the same workspace instead of silently starting over.
+   *  Requires a vendor whose sessions are attributable by cwd. Only claude. */
+  supportsGhostReconnect?: boolean
+  /** Where this pane's per-pane files live (its git root, else its cwd) — only
+   *  for a vendor that writes them, and needed at spawn time to build
+   *  `paneArg`'s context. Only aider. */
+  paneHistoryRoot?: (cwd: string, listDir: DirLister) => Promise<string>
+  /** The history file this pane must RESUME from, for a vendor whose resume
+   *  reads one back (see `resumeWithoutId`). '' when there is none. Only
+   *  aider. */
+  resumeHistoryFile?: (
+    workspacePath: string,
+    paneId: string,
+    listDir: DirLister,
+  ) => Promise<string>
 }

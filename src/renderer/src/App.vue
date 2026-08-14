@@ -111,13 +111,14 @@ import {
 import { recordDiagnostic, readDiagnostics, currentDiagnosticSeq } from './lib/uiDiagnostics'
 import { injectStandaloneTask, type StandaloneTaskInjectionDeps } from './lib/standalonePaneTask'
 import { quickClassify } from './lib/quick-classify'
-import { resolveAiderHistoryRoot, resumeAiderHistoryPath, type DirLister } from './lib/aider-history'
+import type { DirLister } from './agents/types'
 import {
   buildResumeCommand,
   acquirePaneRebuildLock,
   cancelStalePendingCreate,
   dedupeRestorablePanes,
   normalizeResumeSessionId,
+  sessionHomeIdFor,
   paneBusyForRebuild,
   paneCanRebuild,
   paneRebuildVisible,
@@ -133,7 +134,9 @@ import {
   createGhostHealGate,
   createUiStateSeqGuard,
   mapOrphanSession,
-  pinFreshClaudeSession,
+  pinFreshSessionAtLaunch,
+  pinsSessionAtLaunch,
+  supportsGhostReconnect,
   reconnectCandidateSessionIds,
   resolveDeterministicReconnect,
   sendWithUiStateRetry,
@@ -741,13 +744,6 @@ watch(
   { immediate: true }
 )
 
-// ONLY the resolved root is memoized: a workspace's git root can't move while
-// the App runs, and each probe costs one fs.list_dir per ancestor level. The
-// directory's ENTRY NAMES are deliberately NOT cached — the per-pane history
-// file appears the moment aider first writes it, and a stale "absent" would pin
-// a pane to the legacy shared file for the rest of the App's life.
-const paneHistoryRootCache = new Map<string, string>()
-
 const listPaneDir: DirLister = async (dir) => {
   const resp = await sendQuiet<{ entries?: { name: string }[] }>('fs.list_dir', {
     workspace_path: dir,
@@ -757,36 +753,24 @@ const listPaneDir: DirLister = async (dir) => {
   return resp?.entries?.map((entry) => entry.name) ?? null
 }
 
-/** Where a pane's per-pane files live: its git root, else its cwd. Mirrors the
- *  backend's aider_history_path(), which is the only place its log reader
- *  looks. */
-async function paneHistoryRoot(cwd: string): Promise<string> {
-  const cached = paneHistoryRootCache.get(cwd)
-  if (cached !== undefined) return cached
-  const { root } = await resolveAiderHistoryRoot(cwd, listPaneDir)
-  paneHistoryRootCache.set(cwd, root)
-  return root
+/** Where a pane's per-pane files live, for the vendors that write them; '' for
+ *  the rest. The resolution (and its memoization) belongs to the vendor — see
+ *  `paneHistoryRoot` in agents/types.ts. */
+async function paneHistoryRootFor(agentKey: string, cwd: string): Promise<string> {
+  const resolve = agentSpecs.find((s) => s.agentKey === agentKey)?.paneHistoryRoot
+  return resolve ? resolve(cwd, listPaneDir) : ''
 }
 
-/** The chat-history file an aider pane must RESUME from: its own, or — for a
- *  pane spawned before per-pane files existed — the legacy shared file it has
- *  been writing all along (see resumeAiderHistoryPath). '' for every other
- *  agent, and when the pane has no cwd to resolve a root from.
- *
- *  Exactly one directory listing answers both questions: the walk-up's final
- *  listing IS the root's, and an already-resolved root needs only that listing. */
-async function savedAiderHistoryFile(
+/** The history file a pane must RESUME from, for a vendor whose resume reads
+ *  one back. '' for every other agent, and when the pane has no cwd. */
+async function savedHistoryFile(
   agent: string,
   workspacePath: string,
   paneId: string
 ): Promise<string> {
-  if (agent !== 'aider' || !workspacePath) return ''
-  const cachedRoot = paneHistoryRootCache.get(workspacePath)
-  const { root, entries } = cachedRoot === undefined
-    ? await resolveAiderHistoryRoot(workspacePath, listPaneDir)
-    : { root: cachedRoot, entries: (await listPaneDir(cachedRoot)) ?? [] }
-  paneHistoryRootCache.set(workspacePath, root)
-  return resumeAiderHistoryPath(root, paneId, entries)
+  const resolve = agentSpecs.find((s) => s.agentKey === agent)?.resumeHistoryFile
+  if (!resolve || !workspacePath) return ''
+  return resolve(workspacePath, paneId, listPaneDir)
 }
 
 function resolveCommand(agentKey: string, override: string, paneArgCtx?: PaneArgContext): string {
@@ -3350,7 +3334,7 @@ function scheduleInjection(pane: ActivePane): void {
       setPrepStatus(pane, 'ready')
       syncViews()
       pipelineLog(`${tag} ⏸ no role selected — skipping role injection`)
-      if (pane.origin === 'manual' && pane.agentKey === 'claude' && pane.pinnedSessionId) {
+      if (pane.origin === 'manual' && pinsSessionAtLaunch(pane.agentKey) && pane.pinnedSessionId) {
         void persistPaneSession(pane, pane.pinnedSessionId)
       }
       return
@@ -3417,7 +3401,7 @@ function scheduleInjection(pane: ActivePane): void {
     pane.injectionStatus = ok ? 'sent' : 'failed'
     setPrepStatus(pane, ok ? 'ready' : 'failed')
     syncViews()
-    if (ok && pane.origin === 'manual' && pane.agentKey === 'claude' && pane.pinnedSessionId) {
+    if (ok && pane.origin === 'manual' && pinsSessionAtLaunch(pane.agentKey) && pane.pinnedSessionId) {
       void persistPaneSession(pane, pane.pinnedSessionId)
     }
     if (!ok) {
@@ -3625,7 +3609,7 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
   // pane id AND the directory the backend log reader watches. Without a cwd
   // there is nothing to resolve, so the spec falls back to its shared default.
   const paneArgCtx: PaneArgContext | undefined = spec.paneArg && opts.workspacePath
-    ? { paneId: id, historyRoot: await paneHistoryRoot(opts.workspacePath) }
+    ? { paneId: id, historyRoot: await paneHistoryRootFor(opts.agentKey, opts.workspacePath) }
     : undefined
   let command = resolveCommand(opts.agentKey, opts.commandOverride, paneArgCtx)
   const userShell = backend.shell.value || 'bash'
@@ -3639,19 +3623,17 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
   // it, panes sharing one workspace are matched by a first-come-claim heuristic
   // that mis-routed a pane's turn_complete to a sibling (the Stage 01 bug).
   // freshSessionId (restore fallback of a not-resumable session) reuses the
-  // saved id instead of minting a new one — see pinFreshClaudeSession.
-  const pinned = pinFreshClaudeSession(
+  // saved id instead of minting a new one — see pinFreshSessionAtLaunch.
+  const pinned = pinFreshSessionAtLaunch(
     opts.agentKey, opts.isResume ?? false, command, opts.freshSessionId,
     () => crypto.randomUUID()
   )
   command = pinned.command
   const explicitSessionId = pinned.explicitSessionId
-  const sessionHomeId = opts.agentKey === 'codex'
-    ? (opts.sessionHomeId || id)
-    : ''
+  const sessionHomeId = sessionHomeIdFor(opts.agentKey, id, opts.sessionHomeId)
   const pinnedSessionId = opts.isResume
     ? (opts.resumeSessionId?.trim() || undefined)
-    : (opts.agentKey === 'claude' ? explicitSessionId || undefined : undefined)
+    : (explicitSessionId || undefined)
   // Restore-with-confirmed-transcript: the caller probed the saved session and
   // its transcript exists on disk, but this spawn is fresh (user chose "start
   // fresh"). Pin the saved id on the PANE (any agent) so the Rebuild (resume)
@@ -4099,7 +4081,7 @@ async function onManualResume(payload: { agentKey: string, workspacePath: string
   const spec = agentSpecs.find((s) => s.agentKey === agentKey)
   const skipFlag = yoloEnabled.value ? (spec?.skipPermissionFlag ?? '') : ''
   const chatHistoryFile = payload.historyPaneId
-    ? await savedAiderHistoryFile(agentKey, workspacePath, payload.historyPaneId)
+    ? await savedHistoryFile(agentKey, workspacePath, payload.historyPaneId)
     : ''
   // Custom-binary override applies to resume too — the spec guarantees the
   // command starts with defaultCommand, which this replaces when overridden.
@@ -6237,9 +6219,9 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
       const spec = agentSpecs.find((s) => s.agentKey === saved.agent)
       const rawSessionId = (saved.session_id ?? '').trim()
       const sessionId = normalizeResumeSessionId(saved.agent, rawSessionId)
-      const sessionHomeId = saved.agent === 'codex'
-        ? ((saved.session_home_id ?? '').trim() || saved.pane_id)
-        : ''
+      const sessionHomeId = sessionHomeIdFor(
+        saved.agent, saved.pane_id, saved.session_home_id,
+      )
       const savedGid = saved.run_group_id || ''
       const runGroupId = savedGid
         ? ensureSavedGroup(savedGid)
@@ -6289,9 +6271,9 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
     await Promise.all(toRestore.map(async (saved, restoreIdx) => {
       const rawSessionId = (saved.session_id ?? '').trim()
       const sessionId = normalizeResumeSessionId(saved.agent, rawSessionId)
-      const sessionHomeId = saved.agent === 'codex'
-        ? ((saved.session_home_id ?? '').trim() || saved.pane_id)
-        : ''
+      const sessionHomeId = sessionHomeIdFor(
+        saved.agent, saved.pane_id, saved.session_home_id,
+      )
       const spec = agentSpecs.find((s) => s.agentKey === saved.agent)
       const skipFlag = yoloEnabled.value ? (spec?.skipPermissionFlag ?? '') : ''
       // A pane with a saved group keeps it, recreating the tab if it is missing
@@ -6306,7 +6288,7 @@ async function restoreWorkspacePanes(payload: ProjectPayload, workspacePath: str
       if (isStale?.() || currentWorkspace.value !== workspacePath) return
       if (shouldPreserveMissingSessionOnRestore(saved.agent, sessionId, canResume === true)) return
       const attemptResume = shouldAttemptResume(canResume)
-      const chatHistoryFile = await savedAiderHistoryFile(saved.agent, workspacePath, saved.pane_id)
+      const chatHistoryFile = await savedHistoryFile(saved.agent, workspacePath, saved.pane_id)
       if (isStale?.() || currentWorkspace.value !== workspacePath) return
       const resumeCmd = attemptResume
         ? commandWithSelectedBinary(
@@ -6543,14 +6525,14 @@ async function performRealizeRestoredPane(paneId: string, aggregateReconnect = f
     const canResume = await canResumeSession(saved.agent, batch.workspacePath, sessionId, { timeoutMs: 2500 })
     if (!deferredPaneStillCurrent(paneId, deferred)) return
     if (!forceFresh && shouldPreserveMissingSessionOnRestore(saved.agent, sessionId, canResume === true)) {
-      const unavailable = canResume === false ? 'restore.codex-session-unavailable' : 'restore.codex-session-unknown'
+      const unavailable = canResume === false ? 'restore.session-unavailable' : 'restore.session-unknown'
       pipelineLog(`⚠ ${saved.agent} session ${sessionId} is ${canResume === false ? 'unavailable' : 'unknown'}; preserving saved pane`)
       notifyRestore.toast(i18n.global.t(unavailable), { type: 'error', duration: 8000 })
       return
     }
 
     const attemptResume = !forceFresh && shouldAttemptResume(canResume)
-    const chatHistoryFile = await savedAiderHistoryFile(saved.agent, batch.workspacePath, saved.pane_id)
+    const chatHistoryFile = await savedHistoryFile(saved.agent, batch.workspacePath, saved.pane_id)
     if (!deferredPaneStillCurrent(paneId, deferred)) return
     let resumeCmd = attemptResume
       ? commandWithSelectedBinary(
@@ -6562,7 +6544,7 @@ async function performRealizeRestoredPane(paneId: string, aggregateReconnect = f
       saved.agent, sessionId, canResume, looksLikeResumeCommand(saved.agent, saved.command || ''),
     )
     let reconnectId = ''
-    if (ghostConfirmed && saved.agent === 'claude') {
+    if (ghostConfirmed && supportsGhostReconnect(saved.agent)) {
       reconnectId = await resolveReconnectForPane(saved, batch.workspacePath, batch.savedClaims)
       if (!deferredPaneStillCurrent(paneId, deferred)) return
     }
@@ -6589,7 +6571,7 @@ async function performRealizeRestoredPane(paneId: string, aggregateReconnect = f
       }
     }
     if (ghostConfirmed && !reconnectId) {
-      wasDisconnected = saved.agent === 'claude'
+      wasDisconnected = supportsGhostReconnect(saved.agent)
       pipelineLog(`⚠ ${saved.agent}: previous conversation ${sessionId} not found at ${batch.workspacePath}; opened a fresh one`)
       notifyRestore.toast(i18n.global.t('restore.session-not-found', { agent: saved.agent }), { type: 'error', duration: 8000 })
     }
@@ -6817,7 +6799,7 @@ async function resolveReconnectForPane(
 /** Ghost gating for the pane context menu: a Claude pane flagged disconnected
  *  during the last restore (its saved id had no transcript). */
 function isGhostPane(view: ActivePaneView | null): boolean {
-  return !!view && view.agentKey === 'claude' && disconnectedPaneIds.value.includes(view.id)
+  return !!view && supportsGhostReconnect(view.agentKey) && disconnectedPaneIds.value.includes(view.id)
 }
 
 function dismissReconnectBanner(): void {
@@ -7878,7 +7860,7 @@ backend.on('agent.activity', (raw) => {
     const histEntry = spawnHistory.value.find((e) => e.paneId === ev.pane_id)
     if (histEntry?.restoreMode) histEntry.restoreMode = undefined
   }
-  if (ev.vendor === 'claude' && ev.session_id) {
+  if (pinsSessionAtLaunch(ev.vendor) && ev.session_id) {
     const pane = panes.value.find((p) => p.id === ev.pane_id)
     if (pane) {
       // A claude turn event means the CLI is writing its transcript — the

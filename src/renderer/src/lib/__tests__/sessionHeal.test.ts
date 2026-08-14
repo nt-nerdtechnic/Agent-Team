@@ -8,7 +8,9 @@ import {
   createUiStateSeqGuard,
   isRetriableUiStateTimeout,
   mapOrphanSession,
-  pinFreshClaudeSession,
+  pinFreshSessionAtLaunch,
+  pinsSessionAtLaunch,
+  supportsGhostReconnect,
   reconnectCandidateSessionIds,
   resolveDeterministicReconnect,
   sendWithUiStateRetry,
@@ -155,7 +157,7 @@ describe('claimFreshSessionId', () => {
     expect(claimFreshSessionId(used, 'dup-id')).toBe('dup-id')
     // Pre-fix: the second record also received 'dup-id' → --session-id clash.
     expect(claimFreshSessionId(used, 'dup-id')).toBe('')
-    const second = pinFreshClaudeSession(
+    const second = pinFreshSessionAtLaunch(
       'claude', false, 'claude', claimFreshSessionId(used, 'dup-id'), () => 'fresh-uuid'
     )
     expect(second.explicitSessionId).toBe('fresh-uuid')
@@ -206,12 +208,12 @@ describe('confirmGhostAdoption', () => {
 
 // ── Bug B: not-resumable rebuild reuses the SAME session id ──────────────────
 
-describe('pinFreshClaudeSession', () => {
+describe('pinFreshSessionAtLaunch', () => {
   const generate = (): string => 'generated-uuid'
 
   it('reuses the requested (saved, not-resumable) id — no new uuid rotation', () => {
     const gen = vi.fn(generate)
-    const res = pinFreshClaudeSession('claude', false, 'claude', 'saved-id', gen)
+    const res = pinFreshSessionAtLaunch('claude', false, 'claude', 'saved-id', gen)
     expect(res.explicitSessionId).toBe('saved-id')
     expect(res.command).toBe('claude --session-id saved-id')
     expect(gen).not.toHaveBeenCalled()
@@ -219,16 +221,16 @@ describe('pinFreshClaudeSession', () => {
 
   it('generates a fresh id when none is requested', () => {
     for (const requested of [undefined, '', '   ']) {
-      const res = pinFreshClaudeSession('claude', false, 'claude', requested, generate)
+      const res = pinFreshSessionAtLaunch('claude', false, 'claude', requested, generate)
       expect(res.explicitSessionId).toBe('generated-uuid')
       expect(res.command).toBe('claude --session-id generated-uuid')
     }
   })
 
   it('never pins for resumes or other agents', () => {
-    expect(pinFreshClaudeSession('claude', true, 'claude --resume x', 'saved-id', generate))
+    expect(pinFreshSessionAtLaunch('claude', true, 'claude --resume x', 'saved-id', generate))
       .toEqual({ command: 'claude --resume x', explicitSessionId: '' })
-    expect(pinFreshClaudeSession('codex', false, 'codex', 'saved-id', generate))
+    expect(pinFreshSessionAtLaunch('codex', false, 'codex', 'saved-id', generate))
       .toEqual({ command: 'codex', explicitSessionId: '' })
   })
 
@@ -246,20 +248,20 @@ describe('pinFreshClaudeSession', () => {
       `claude --session-id=${handwrittenId}`,
       `claude --session-id ${handwrittenId} --model opus`,
     ]) {
-      expect(pinFreshClaudeSession('claude', false, cmd, undefined, generate))
+      expect(pinFreshSessionAtLaunch('claude', false, cmd, undefined, generate))
         .toEqual({ command: cmd, explicitSessionId: handwrittenId })
     }
   })
 
   it('an unparseable hand-written --session-id keeps the old no-pin behavior', () => {
     for (const cmd of ['claude --session-id abc', 'claude --session-id "$SID"']) {
-      expect(pinFreshClaudeSession('claude', false, cmd, 'saved-id', generate))
+      expect(pinFreshSessionAtLaunch('claude', false, cmd, 'saved-id', generate))
         .toEqual({ command: cmd, explicitSessionId: '' })
     }
   })
 
   it('hand-written pin + divergent attribution routes through ghost verification, never blind adopt', () => {
-    const { explicitSessionId } = pinFreshClaudeSession(
+    const { explicitSessionId } = pinFreshSessionAtLaunch(
       'claude', false, `claude --session-id ${handwrittenId}`, undefined, generate
     )
     // spawnPane assigns pinnedSessionId = explicitSessionId || undefined.
@@ -404,5 +406,40 @@ describe('mapOrphanSession', () => {
     expect(mapOrphanSession({ session_id: 's2' })).toEqual({
       session_id: 's2', name: '', preview: [], size_bytes: 0, mtime: 0, resumable: false,
     })
+  })
+})
+
+describe('vendor capability lookups', () => {
+  // These replaced `agentKey === 'claude'` checks scattered through App.vue.
+  // Pinning them here is what keeps that move honest: the behaviour is now
+  // "whatever the specs declare", so the specs are what the tests assert.
+  it('reports pinning only for vendors that accept an id at launch', () => {
+    expect(pinsSessionAtLaunch('claude')).toBe(true)
+    for (const key of ['codex', 'aider', 'qwen', 'opencode', 'cursor']) {
+      expect(pinsSessionAtLaunch(key), key).toBe(false)
+    }
+  })
+
+  it('reports ghost reconnect only for vendors attributable by cwd', () => {
+    expect(supportsGhostReconnect('claude')).toBe(true)
+    for (const key of ['codex', 'aider', 'qwen', 'opencode', 'cursor']) {
+      expect(supportsGhostReconnect(key), key).toBe(false)
+    }
+  })
+
+  it('treats an absent vendor key as no capability', () => {
+    // agent.activity events carry an optional vendor field.
+    expect(pinsSessionAtLaunch(undefined)).toBe(false)
+    expect(supportsGhostReconnect(undefined)).toBe(false)
+    expect(pinsSessionAtLaunch('not-a-vendor')).toBe(false)
+  })
+
+  it('pins with the flag the vendor declares, not a hardcoded one', () => {
+    const { command, explicitSessionId } = pinFreshSessionAtLaunch(
+      'claude', false, 'claude', undefined, () => 'fixed-uuid',
+    )
+
+    expect(command).toBe('claude --session-id fixed-uuid')
+    expect(explicitSessionId).toBe('fixed-uuid')
   })
 })

@@ -17,6 +17,19 @@ export const SPEC = {
   shiftEnterSequence: '\x1b[13;2u',
   // Restore-pin self-heals: per-pane CODEX_HOME announces the new session.
   supportsRestorePin: true,
+  // Each pane gets its own CODEX_HOME, which is where the rollout a resume
+  // reads back actually lives — so the pane needs an id for that home that
+  // outlives a pane-id change across restores.
+  needsSessionHome: true,
+  // Older Agent-Team builds could persist a rollout filename or full path
+  // before session_meta was readable. Recover only a strict trailing UUID;
+  // any other Codex string is left exactly as it is.
+  normalizeSessionId: (id) =>
+    id.match(/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})(?:\.jsonl)?$/i)?.[1] ?? id,
+  // A saved conversation whose rollout is missing keeps its placeholder rather
+  // than being replaced: starting a fresh Codex pane must stay an explicit
+  // action from Agent History.
+  preserveMissingSessionOnRestore: true,
   // Codex's approval dialog. Detected from the screen rather than a hook on
   // purpose: Codex gates newly-installed hooks behind a trust screen the user
   // must clear on every pane (and again whenever the hook file changes), so

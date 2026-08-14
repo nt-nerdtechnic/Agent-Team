@@ -11,7 +11,7 @@
 // resolves to (nearest ancestor of the pane cwd containing `.git`, else the
 // cwd) — that is the only place the log reader looks.
 
-import { shellEscape } from './drop'
+import { shellEscape } from '../../lib/drop'
 
 /** Aider's default, pane-agnostic history file — the one every pane shared
  *  before per-pane files existed. */
@@ -103,4 +103,45 @@ export async function resolveAiderHistoryRoot(
     dir = dir.slice(0, dir.lastIndexOf('/'))
   }
   return { root: base, entries: baseEntries ?? [] }
+}
+
+// ── spec-facing entry points ────────────────────────────────────────────────
+// App.vue used to hold both of these plus an `agent !== 'aider'` guard. They
+// live here so the shared spawn/restore code asks the spec instead of knowing
+// which vendor keeps per-pane history files.
+
+/** ONLY the resolved root is memoized: a workspace's git root can't move while
+ *  the app runs, and each probe costs one directory listing per ancestor level.
+ *  The ENTRY NAMES are deliberately not cached — the per-pane history file
+ *  appears the moment aider first writes it, and a stale "absent" would pin a
+ *  pane to the legacy shared file for the rest of the session. */
+const rootCache = new Map<string, string>()
+
+/** Where this pane's per-pane files live: its git root, else its cwd. */
+export async function paneHistoryRoot(cwd: string, listDir: DirLister): Promise<string> {
+  const cached = rootCache.get(cwd)
+  if (cached !== undefined) return cached
+  const { root } = await resolveAiderHistoryRoot(cwd, listDir)
+  rootCache.set(cwd, root)
+  return root
+}
+
+/** The chat-history file this pane must RESUME from: its own, or — for a pane
+ *  spawned before per-pane files existed — the legacy shared file it has been
+ *  writing all along. '' when there is no cwd to resolve a root from.
+ *
+ *  Exactly one directory listing answers both questions: the walk-up's final
+ *  listing IS the root's, and an already-resolved root needs only that listing. */
+export async function resumeHistoryFile(
+  workspacePath: string,
+  paneId: string,
+  listDir: DirLister
+): Promise<string> {
+  if (!workspacePath) return ''
+  const cachedRoot = rootCache.get(workspacePath)
+  const { root, entries } = cachedRoot === undefined
+    ? await resolveAiderHistoryRoot(workspacePath, listDir)
+    : { root: cachedRoot, entries: (await listDir(cachedRoot)) ?? [] }
+  rootCache.set(workspacePath, root)
+  return resumeAiderHistoryPath(root, paneId, entries)
 }

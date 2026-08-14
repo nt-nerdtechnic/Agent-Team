@@ -1,6 +1,11 @@
 /** Aider — per-vendor agent spec (see types.ts; assembled by index.ts). */
 
-import { aiderChatHistoryFlag, aiderHistoryPath } from '../lib/aider-history'
+import {
+  aiderChatHistoryFlag,
+  aiderHistoryPath,
+  paneHistoryRoot,
+  resumeHistoryFile,
+} from './aider/history'
 import type { AgentSpec } from './types'
 
 export const SPEC = {
@@ -12,6 +17,11 @@ export const SPEC = {
   // Give every pane its own chat history: the default shared
   // `<git-root>/.aider.chat.history.md` merges all panes' token accounting.
   paneArg: (ctx) => aiderChatHistoryFlag(aiderHistoryPath(ctx.historyRoot, ctx.paneId)),
+  // Both sides of that per-pane file: where it lives (spawn) and which one to
+  // read back (resume). App.vue asks the spec for these instead of holding an
+  // `agent !== 'aider'` guard of its own.
+  paneHistoryRoot,
+  resumeHistoryFile,
   // Aider has no session ids; its resume command is id-less. Resume is always
   // the lossy --restore-chat-history, reading the pane's chat-history file
   // when one is known (empty falls back to aider's default shared file).

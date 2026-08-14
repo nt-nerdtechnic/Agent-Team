@@ -1,6 +1,6 @@
 import type { RoleKey } from '../data/roles'
 import type { StageId } from '../data/stages'
-import { normalizeResumeSessionId } from './resume-command'
+import { normalizeResumeSessionId, usesSessionHome } from './resume-command'
 
 export interface HistoryTitleEntry {
   paneId: string
@@ -228,9 +228,13 @@ export function updateHistoryCustomName(
       continue
     }
 
+    // A vendor with a per-pane session home keeps that home id stable across
+    // restores, so it identifies the same conversation even after the pane id
+    // changed — which is what a rename has to follow.
     const sessionHomeId = source.sessionHomeId?.trim()
-    if (source.agentKey === 'codex' && sessionHomeId) {
-      if (candidate.agentKey === 'codex' && (candidate.sessionHomeId?.trim() === sessionHomeId || candidate.paneId === sessionHomeId)) {
+    if (source.agentKey && usesSessionHome(source.agentKey) && sessionHomeId) {
+      if (candidate.agentKey === source.agentKey
+        && (candidate.sessionHomeId?.trim() === sessionHomeId || candidate.paneId === sessionHomeId)) {
         candidate.customName = nameToSet
         updated = true
         continue

@@ -6,8 +6,8 @@ import {
   aiderPaneToken,
   resolveAiderHistoryRoot,
   resumeAiderHistoryPath,
-} from '../aider-history'
-import { AGENT_SPECS } from '../../agents'
+} from '../history'
+import { AGENT_SPECS } from '../../index'
 
 const PANE_ID = '4D4A11FE-b08a-46df-9f86-685589531e65'
 
@@ -166,5 +166,50 @@ describe('aider spawn argv', () => {
   it('leaves every other agent spec without a per-pane argument', () => {
     const withPaneArg = AGENT_SPECS.filter((s) => s.paneArg).map((s) => s.agentKey)
     expect(withPaneArg).toEqual(['aider'])
+  })
+})
+
+describe('spec-facing history hooks', () => {
+  // These moved out of App.vue, which used to guard them with
+  // `agent !== 'aider'`. The shared code now asks the spec, so what the spec
+  // declares IS the behaviour.
+  const spec = AGENT_SPECS.find((s) => s.agentKey === 'aider')!
+
+  it('is the only vendor declaring per-pane history hooks', () => {
+    const withHooks = AGENT_SPECS
+      .filter((s) => s.resumeHistoryFile || s.paneHistoryRoot)
+      .map((s) => s.agentKey)
+
+    expect(withHooks).toEqual(['aider'])
+  })
+
+  it('resolves the root through the vendor hook', async () => {
+    const listed: string[] = []
+    const listDir = async (dir: string): Promise<string[] | null> => {
+      listed.push(dir)
+      return dir === '/repo' ? ['.git', 'src'] : []
+    }
+
+    expect(await spec.paneHistoryRoot!('/repo/src', listDir)).toBe('/repo')
+    // Memoized: a second call must not walk the tree again.
+    const before = listed.length
+    expect(await spec.paneHistoryRoot!('/repo/src', listDir)).toBe('/repo')
+    expect(listed.length).toBe(before)
+  })
+
+  it('picks the pane-private file through the vendor hook', async () => {
+    const paneId = 'abcdef12-3456-7890-abcd-ef1234567890'
+    const listDir = async (): Promise<string[] | null> =>
+      ['.git', '.aider.chat.history.abcdef12.md']
+
+    const file = await spec.resumeHistoryFile!('/proj', paneId, listDir)
+
+    expect(file).toBe('/proj/.aider.chat.history.abcdef12.md')
+  })
+
+  it('has no history file without a workspace', async () => {
+    const listDir = async (): Promise<string[] | null> => []
+
+    expect(await spec.resumeHistoryFile!('', 'pane-1', listDir)).toBe('')
   })
 })
