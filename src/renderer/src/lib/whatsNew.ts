@@ -36,6 +36,33 @@ export const WHATS_NEW_CHROME = {
 
 export const WHATS_NEW: WhatsNewEntry[] = [
   {
+    version: '0.1.83',
+    title: {
+      'zh-TW': '自訂快捷鍵編輯器、多面板批量拖曳與 CLI 提問狀態提示',
+      'en-US': 'Custom Keybindings Editor, Multi-Pane Batch Dragging & QUESTION Status Badge',
+    },
+    highlights: [
+      {
+        'zh-TW':
+          '自訂快捷鍵編輯器：重構全域快捷鍵系統並提供 Keybindings 編輯器，支援按鍵錄製、衝突偵測與一鍵恢復預設值。',
+        'en-US':
+          'Custom Keybindings Editor: overhauled keybinding engine with an interactive editor supporting live key recording, conflict detection, and default resets.',
+      },
+      {
+        'zh-TW':
+          '多面板批量拖曳與 Drop 貼上：支援 Shift 多選面板批量拖曳與 Ghost 懸浮圖示，可一次性拖入終端機貼上批量 @mention 標籤。',
+        'en-US':
+          'Multi-pane batch dragging & dropping: Shift-select multiple agent panes to drag with a ghost image and drop all @mention tags into terminals at once.',
+      },
+      {
+        'zh-TW':
+          'CLI 提問 QUESTION 標章與通訊優化：Agent 在終端等待提問回答時自動切換為橙色 QUESTION 標章，並優化 Agent 跨工作區通訊與訊息日誌持久化。',
+        'en-US':
+          'QUESTION badge & agent messaging: displays an orange QUESTION badge when an agent awaits input, with persistent agent message logging across workspaces.',
+      },
+    ],
+  },
+  {
     version: '0.1.82',
     title: {
       'zh-TW': 'Agents 側邊欄分頁獨立、未註冊帳號自動歸併與 Git Unstage 容錯優化',
