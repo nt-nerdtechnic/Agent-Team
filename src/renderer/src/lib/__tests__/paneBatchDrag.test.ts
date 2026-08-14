@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { ref } from 'vue'
 import { resolveDragBatch, reorderBatchByIds } from '../paneBatchDrag'
 import { reorderByIds } from '../paneOrder'
 
@@ -45,12 +46,18 @@ describe('resolveDragBatch', () => {
 })
 
 describe('reorderBatchByIds', () => {
-  it('matches reorderByIds exactly for a single mover in both directions', () => {
-    for (const [from, to] of [['a', 'c'], ['d', 'b'], ['a', 'b'], ['b', 'a']] as const) {
-      const batch = panes()
-      const single = panes()
-      expect(reorderBatchByIds(batch, [from], to)).toBe(reorderByIds(single, from, to))
-      expect(ids(batch)).toEqual(ids(single))
+  // Zero-regression guard: a drag that carries one pane must behave exactly as
+  // it did before batching existed, for EVERY source/target pair — including
+  // the no-op ones (same id, unknown id).
+  it('matches reorderByIds exactly for every single-mover pair', () => {
+    const all = ['a', 'b', 'c', 'd', 'ghost']
+    for (const from of all) {
+      for (const to of all) {
+        const batch = panes()
+        const single = panes()
+        expect(reorderBatchByIds(batch, [from], to)).toBe(reorderByIds(single, from, to))
+        expect(ids(batch)).toEqual(ids(single))
+      }
     }
   })
 
@@ -123,5 +130,43 @@ describe('reorderBatchByIds', () => {
     const items = panes()
     expect(reorderBatchByIds(items, ['a', 'b', 'c', 'd'], 'c')).toBe(false)
     expect(ids(items)).toEqual(['a', 'b', 'c', 'd'])
+  })
+
+  it('mutates a Vue reactive array in place (App.vue passes panes.value)', () => {
+    // App.vue reorders the live pane list, so the splice must land on the same
+    // array the template renders — a copy would drop the reorder silently.
+    const list = ref([{ id: 'a' }, { id: 'b' }, { id: 'c' }])
+    const before = list.value
+    expect(reorderBatchByIds(list.value, ['a', 'b'], 'c')).toBe(true)
+    expect(list.value).toBe(before)
+    expect(list.value.map((i) => i.id)).toEqual(['c', 'a', 'b'])
+  })
+
+  // Exhaustive invariant sweep: for a 5-item list, every non-empty batch and
+  // every target must keep the set intact, land the batch contiguously, and
+  // preserve the batch's internal order. A pane that vanished or got duplicated
+  // by a reorder would be a data-loss bug no example test is likely to catch.
+  it('never loses, duplicates or scrambles panes for any batch/target pair', () => {
+    const all = ['a', 'b', 'c', 'd', 'e']
+    for (let mask = 1; mask < 1 << all.length; mask++) {
+      const batch = all.filter((_, i) => mask & (1 << i))
+      for (const target of all) {
+        const items = all.map((id) => ({ id }))
+        const changed = reorderBatchByIds(items, batch, target)
+        const result = items.map((i) => i.id)
+
+        expect([...result].sort()).toEqual([...all].sort())
+        if (batch.includes(target)) {
+          expect(changed).toBe(false)
+          expect(result).toEqual(all)
+          continue
+        }
+        const positions = batch.map((id) => result.indexOf(id))
+        // Contiguous block…
+        expect(Math.max(...positions) - Math.min(...positions)).toBe(batch.length - 1)
+        // …in the batch's original relative order.
+        expect([...positions].sort((x, y) => x - y)).toEqual(positions)
+      }
+    }
   })
 })

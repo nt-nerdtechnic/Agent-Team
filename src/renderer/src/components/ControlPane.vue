@@ -1549,14 +1549,6 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
 
 <style scoped>
 .sidebar {
-  /* Fill whatever the parent allots instead of inferring a width from content.
-     The panel has never declared one — it happened to work because .app's grid
-     track sized it from the outside. Swap that container for a flex one and the
-     panel would collapse to its content while agentTeam.leftWidth still looked
-     like it was working, which is a hard failure to trace back here. */
-  width: 100%;
-  height: 100%;
-  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;

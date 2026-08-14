@@ -19,6 +19,10 @@ export type UsageStatus =
   | 'expired'
   | 'rate-limited'
   | 'unavailable'
+  // Claude only: its quota comes from driving the CLI, so a missing binary is
+  // not the same as "this provider has no usage surface" — it is the one
+  // failure the user can act on.
+  | 'cli-missing'
   // Parked Claude accounts: the CLI's `/usage` panel only speaks for whoever is
   // signed in, so a non-active account carries no figure at all.
   | 'not-measured'
@@ -33,6 +37,7 @@ export const TRANSLATED_REFRESH_STATUSES: ReadonlySet<string> = new Set<UsageSta
   'expired',
   'rate-limited',
   'unavailable',
+  'cli-missing',
   'not-measured',
   'error'
 ])

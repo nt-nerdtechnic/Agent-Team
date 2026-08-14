@@ -176,6 +176,18 @@ describe('UsageBadge – badge rendering', () => {
     expect(badge.text()).toBe('⚠')
   })
 
+  it('surfaces a missing Claude CLI instead of rendering nothing', () => {
+    // No binary means no reading and no cached figure to fall back to, so
+    // every other branch of `visible` is false — without its own the badge
+    // would hide the one failure the user can fix.
+    usage.usageFor.mockReturnValue(snapshot({ status: 'cli-missing', windows: [] }))
+    wrapper = mountBadge(makeCliProfiles().fake)
+    const badge = wrapper.find('.usage-badge')
+    expect(badge.exists()).toBe(true)
+    expect(badge.text()).toBe('⚠')
+    expect(badge.attributes('title')).toContain('PATH')
+  })
+
   it('renders nothing when the agent has no usage snapshot', () => {
     usage.usageFor.mockReturnValue(undefined)
     wrapper = mountBadge(makeCliProfiles().fake)

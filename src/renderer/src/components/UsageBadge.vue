@@ -32,7 +32,15 @@ const remaining = computed(() => remainingPercent(snap.value))
 const tier = computed(() => (remaining.value === null ? 'ok' : remainingTier(remaining.value)))
 const expired = computed(() => snap.value?.status === 'expired')
 const cached = computed(() => snap.value?.stale === true)
-const visible = computed(() => remaining.value !== null || expired.value || cached.value)
+// Claude's quota needs its CLI; without the binary there is nothing to read and
+// no cached figure to fall back to either, so the badge would render nothing at
+// all and the one actionable failure would be invisible.
+const cliMissing = computed(
+  () => snap.value?.status === 'cli-missing' || snap.value?.refreshStatus === 'cli-missing'
+)
+const visible = computed(
+  () => remaining.value !== null || expired.value || cached.value || cliMissing.value
+)
 
 // Account-switch block: only shown when this agent has ≥1 extra profile.
 const canSwitch = computed(() => props.cliProfiles.hasProfiles(props.agentKey))
@@ -277,7 +285,15 @@ function acctTitle(profileId: string | null): string {
     :title="
       open
         ? ''
-        : $t(expired ? 'usage.expired-tooltip' : cached ? 'usage.cached-tooltip' : 'usage.badge-tooltip')
+        : $t(
+          expired
+            ? 'usage.expired-tooltip'
+            : cliMissing
+              ? 'usage.cli-missing-tooltip'
+              : cached
+                ? 'usage.cached-tooltip'
+                : 'usage.badge-tooltip'
+        )
     "
     @mouseenter="onEnter"
     @mouseleave="onLeave"
@@ -303,6 +319,7 @@ function acctTitle(profileId: string | null): string {
         <span v-if="snap.planType" class="usage-pop-plan">{{ snap.planType }}</span>
       </div>
       <div v-if="expired" class="usage-pop-expired">{{ $t('usage.expired-tooltip') }}</div>
+      <div v-if="cliMissing" class="usage-pop-missing">{{ $t('usage.cli-missing-tooltip') }}</div>
       <div v-if="cached" class="usage-pop-cached">
         {{ $t('usage.cached-at', { time: formatResetAbsolute(snap.lastSuccessAt ?? snap.fetchedAt) }) }}
         · {{ $t('usage.refresh-status', { status: refreshStatusLabel(snap.refreshStatus) }) }}
@@ -461,7 +478,8 @@ function acctTitle(profileId: string | null): string {
   color: var(--danger-fg);
   margin-bottom: 6px;
 }
-.usage-pop-cached {
+.usage-pop-cached,
+.usage-pop-missing {
   color: var(--attention-fg);
   margin-bottom: 6px;
 }

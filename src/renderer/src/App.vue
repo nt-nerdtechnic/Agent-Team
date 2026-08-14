@@ -6527,7 +6527,10 @@ async function performRealizeRestoredPane(paneId: string, aggregateReconnect = f
     if (!forceFresh && shouldPreserveMissingSessionOnRestore(saved.agent, sessionId, canResume === true)) {
       const unavailable = canResume === false ? 'restore.session-unavailable' : 'restore.session-unknown'
       pipelineLog(`⚠ ${saved.agent} session ${sessionId} is ${canResume === false ? 'unavailable' : 'unknown'}; preserving saved pane`)
-      notifyRestore.toast(i18n.global.t(unavailable), { type: 'error', duration: 8000 })
+      notifyRestore.toast(
+        i18n.global.t(unavailable, { agent: spec?.label ?? saved.agent }),
+        { type: 'error', duration: 8000 },
+      )
       return
     }
 
@@ -12393,14 +12396,10 @@ function paneIsCommander(p: ActivePane): boolean {
 .bp-btn:disabled { opacity: 0.45; cursor: default; }
 .bp-restart { border-color: var(--accent-focus); color: var(--accent-fg); }
 .bp-stop { border-color: var(--danger-fg); color: var(--danger-fg); }
-/* Grid items sharing a cell with the panel they resize, rather than absolutely
-   positioned off a copy of that panel's width. The old form read --left-width /
-   --token-panel-width to place itself, the only place a column width leaked out
-   of grid-template-columns — change the track definition and the handle would
-   still drag correctly while being drawn somewhere else entirely. Sitting in the
-   cell and hugging its edge keeps the two in step by construction. */
 .resize-handle {
-  align-self: stretch;
+  position: absolute;
+  top: 0;
+  bottom: 0;
   width: 8px;
   cursor: col-resize;
   z-index: 50;
@@ -12418,15 +12417,18 @@ function paneIsCommander(p: ActivePane): boolean {
 .is-resizing-shell .resize-handle::after {
   background: color-mix(in srgb, var(--accent-focus) 40%, transparent);
 }
+/* Reads the same vars grid-template-columns does. That duplication is a real
+   hazard for the layout rewrite — change the track definition and these still
+   drag correctly while being drawn in the old place — but it is the shipped
+   behaviour, and Phase 0 is not the place to change behaviour. The slot shell
+   replaces both together. */
 .resize-handle-left {
-  grid-column: 1;
-  justify-self: end;
-  transform: translateX(50%);
+  left: var(--left-width, 360px);
+  transform: translateX(-50%);
 }
 .resize-handle-right {
-  grid-column: 3;
-  justify-self: start;
-  transform: translateX(-50%);
+  right: var(--token-panel-width, 36px);
+  transform: translateX(50%);
 }
 .stage {
   position: relative;

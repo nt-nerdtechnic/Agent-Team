@@ -309,11 +309,14 @@ function onHeaderDragStart(e: DragEvent): void {
   draggingSelf = true
 }
 
-/** True when the in-flight drag is a batch this pane is itself part of — the
- *  pane is being dragged, so it is not a reorder target for its own batch.
- *  Only same-window batches can be recognised during dragover (the payload is
- *  unreadable then); a batch from another window has no local selection to
- *  match, and dropping it here is a legitimate move. */
+/** True when a batch drag is in flight and this pane belongs to THIS window's
+ *  multi-selection — the pane is being dragged, so it is not a reorder target
+ *  for its own batch. The payload is unreadable during dragover, so the test is
+ *  the batch TYPE plus the local selection. That over-matches for a batch
+ *  dragged in from another window (this window may have its own selection), and
+ *  the effect is only that no drop highlight appears: a cross-window header drop
+ *  reorders nothing either way, since the dragged ids are not panes of this
+ *  window. */
 function isOwnBatchMember(e: DragEvent): boolean {
   return !!e.dataTransfer?.types.includes(PANE_BATCH_MIME)
     && (props.selectionBatchIds ?? []).includes(props.paneId)

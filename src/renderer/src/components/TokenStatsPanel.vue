@@ -297,11 +297,7 @@ async function confirmReset(scope: ResetScope): Promise<void> {
 
 <style scoped>
 .token-panel {
-  /* Same reasoning as ControlPane's .sidebar: own the fill rather than relying
-     on the grid track to supply it. */
-  width: 100%;
   height: 100%;
-  min-width: 0;
   background: var(--bg-base);
   border-left: 1px solid var(--border-muted);
   display: flex;
