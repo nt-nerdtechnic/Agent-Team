@@ -215,6 +215,31 @@ describe('questionActionFor — activity event → QUESTION badge', () => {
     expect(questionActionFor({ event_type: 'agent_active', detail: QUESTION_DETAIL })).toBe('raise')
   })
 
+  it('raises on the named signal whichever event type a vendor attaches it to', () => {
+    // Regression: the two vendors that emit assistant:question disagree about
+    // the type. Claude's AskUserQuestion pauses a turn that continues, so its
+    // reader calls it agent_active (cli_vendors/claude.py); antigravity treats
+    // an ask_question step as the end of the turn and reports turn_complete
+    // (cli_vendors/antigravity.py, pinned by test_antigravity_activity.py).
+    // Reading the type first meant antigravity's event — which carries no text
+    // — scored as "did not end on a question" and CLEARED the badge, so its one
+    // reliable signal actively extinguished the state it should have raised.
+    expect(
+      questionActionFor({ event_type: 'turn_complete', detail: QUESTION_DETAIL, text: '' })
+    ).toBe('raise')
+  })
+
+  it('lets the named signal beat the text of the same event', () => {
+    // Should a vendor ever send both, the structured claim is the reliable one.
+    expect(
+      questionActionFor({
+        event_type: 'turn_complete',
+        detail: QUESTION_DETAIL,
+        text: 'All done, nothing left.',
+      })
+    ).toBe('raise')
+  })
+
   it('raises on a turn that ended on a question', () => {
     expect(
       questionActionFor({ event_type: 'turn_complete', text: 'Done. Want me to commit?' })
@@ -251,8 +276,20 @@ describe('questionActionFor — activity event → QUESTION badge', () => {
   })
 
   it('ignores event types it has no opinion about', () => {
-    expect(questionActionFor({ event_type: 'something_new', detail: QUESTION_DETAIL })).toBeNull()
+    expect(questionActionFor({ event_type: 'something_new' })).toBeNull()
+    expect(questionActionFor({ event_type: 'something_new', detail: 'assistant' })).toBeNull()
     expect(questionActionFor({})).toBeNull()
+  })
+
+  it('still honours the named signal on an event type it does not recognise', () => {
+    // Deliberately NOT fail-closed, and the assertion here used to say the
+    // opposite. Being strict about the event type is exactly what silenced
+    // antigravity: a vendor that names the situation has told us more than the
+    // envelope it arrived in, and the next vendor to add this signal should not
+    // have to also match a type this function happens to know about.
+    expect(questionActionFor({ event_type: 'something_new', detail: QUESTION_DETAIL })).toBe(
+      'raise'
+    )
   })
 
   it('matches the detail string the claude reader actually emits', () => {

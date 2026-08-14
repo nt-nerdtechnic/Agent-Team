@@ -34,10 +34,13 @@
 //   cursor    —      No permission event. Its beforeShellExecution hook is a
 //                    synchronous gate — using it would make Navide part of the
 //                    approval decision, not an observer of it.
-//   antigravity —    Hook docs unpublished; no known waiting event.
+//   antigravity —    Hook docs unpublished, and no permission event. It does
+//                    have an ask_question step its reader now names, but that
+//                    is QUESTION (see below), not a permission prompt.
 //   grok      —      Hooks exist but carry no permission event; its
 //                    Notification is for background delegations. The TUI is
 //                    compiled to bytecode, so no strings to match either.
+//   muse      —      No hook system and no permission record in its log.
 //   pi        —      Documented as deliberately having no permission prompts.
 //                    It never stops to ask, so the state does not exist.
 
@@ -142,6 +145,15 @@ export function questionActionFor(ev: {
   detail?: string
   text?: string
 }): 'raise' | 'clear' | null {
+  // The named signal wins over everything, and is checked before the event
+  // type because the two vendors that emit it disagree about which type it
+  // belongs to. Claude's AskUserQuestion pauses a turn that then continues, so
+  // its reader calls it agent_active; antigravity treats an ask_question step
+  // as the end of the turn and reports turn_complete. Both mean the same
+  // thing. Reading the type first cost antigravity its only reliable signal:
+  // that event carries no text, so the turn_complete branch below scored it as
+  // "did not end on a question" and actively CLEARED the badge.
+  if (ev.detail === QUESTION_DETAIL) return 'raise'
   if (ev.event_type === 'turn_complete') {
     // Judged per turn, never retained: an empty-text turn_complete (Stop hook,
     // thinking-only record) must not inherit the previous turn's verdict, and a
@@ -149,7 +161,6 @@ export function questionActionFor(ev: {
     return textEndsOnQuestion(ev.text ?? '') ? 'raise' : 'clear'
   }
   if (ev.event_type !== 'agent_active') return null
-  if (ev.detail === QUESTION_DETAIL) return 'raise'
   // The answer to an AskUserQuestion box comes back as a plain user record,
   // which is also what a fresh prompt looks like. Both end the wait.
   if (ev.detail !== undefined && USER_RECORD_DETAILS.has(ev.detail)) return 'clear'
