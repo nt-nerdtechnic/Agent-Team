@@ -121,3 +121,23 @@ export function saveStoredChoice(storageKey: string, value: string): void {
     // Storage unavailable (quota/private mode) — persistence is best-effort.
   }
 }
+
+/**
+ * Fail-safe read of a persisted free-form value (a plan's rel_path), which has
+ * no closed set of allowed values to validate against. Missing or unreadable
+ * storage reads as "nothing persisted".
+ */
+export function loadStoredValue(storageKey: string): string {
+  try {
+    return localStorage.getItem(storageKey) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+const LAST_OPENED_PREFIX = 'navide.plans.lastopen.'
+
+/** Per-workspace key holding the rel_path of the plan opened most recently. */
+export function lastOpenedStorageKey(workspacePath: string): string {
+  return `${LAST_OPENED_PREFIX}${workspacePath}`
+}

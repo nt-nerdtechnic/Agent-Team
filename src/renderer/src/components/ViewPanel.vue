@@ -27,10 +27,6 @@ const modes: [LayoutMode, string, string][] = [
 
 <style scoped>
 .view-panel {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  z-index: 10;
   display: flex;
   gap: 2px;
   background: var(--bg-overlay);

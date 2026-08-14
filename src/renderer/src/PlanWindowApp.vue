@@ -16,6 +16,8 @@ import { useNotify } from './composables/useNotify'
 import { resolvePlanStore, type PlanCtx, type WriteResult } from './composables/planStore'
 import { sanitizePlanSectionHtml } from './editor/planRuntime'
 import PlansPane from './editor/PlansPane.vue'
+import { lastOpenedStorageKey, loadStoredValue, saveStoredChoice } from './editor/plansPaneModel'
+import { isMacPlatform } from './keybindings/parseKey'
 import PlanReviewToolbar from './editor/PlanReviewToolbar.vue'
 import PlanFileView from './editor/PlanFileView.vue'
 import PlanMarkdownBody from './editor/PlanMarkdownBody.vue'
@@ -32,6 +34,9 @@ const workspaceBaseName = workspacePath.split('/').filter(Boolean).at(-1) ?? wor
 // Plan to auto-open on mount: the sidebar list clicked a plan, which opened
 // this window with the plan carried in the query string.
 const initialRelPath = params.get('rel_path') ?? ''
+// Launched without one (Window menu), the window reopens on whichever plan this
+// workspace last had open, keyed per workspace like the sidebar's own choices.
+const lastOpenedKey = lastOpenedStorageKey(workspacePath)
 
 const backend = useBackend()
 // Hook the settings cache to this window's own ws connection so theme changes
@@ -115,6 +120,10 @@ async function probeMarkdownKind(relPath: string): Promise<void> {
 function onOpenFile(payload: { filepath: string; name: string }): void {
   openDoc.value = { relPath: payload.filepath, name: payload.name }
   snapshotPreview.value = null
+  saveStoredChoice(lastOpenedKey, payload.filepath)
+  // Keep the sidebar's Recent section in step with opens it did not originate
+  // (launch path, plan:open-doc switch, the restore above).
+  plansPaneRef.value?.noteOpened?.(payload.filepath)
   if (isMarkdownDoc(payload.filepath)) void probeMarkdownKind(payload.filepath)
 }
 
@@ -123,6 +132,34 @@ function onOpenFile(payload: { filepath: string; name: string }): void {
 function openRelPath(relPath: string): void {
   if (!relPath) return
   onOpenFile({ filepath: relPath, name: relPath.split('/').pop() ?? relPath })
+}
+
+// Open what this window was launched for; with no rel_path in the query string
+// fall back to the plan this workspace last had open. A stored plan that has
+// since been deleted or renamed is dropped silently — opening the window onto
+// an error is worse than opening it empty.
+async function openInitialDoc(): Promise<void> {
+  if (initialRelPath) {
+    openRelPath(initialRelPath)
+    return
+  }
+  const stored = loadStoredValue(lastOpenedKey)
+  if (!stored || !(await planDocExists(stored))) return
+  // The list was interactive during the existence check; a plan opened in the
+  // meantime (click, or a plan:open-doc switch) wins over the restore.
+  if (openDoc.value) return
+  openRelPath(stored)
+}
+
+async function planDocExists(relPath: string): Promise<boolean> {
+  try {
+    const res = await backend.send<{ ok: boolean; exists?: boolean }>('fs.stat_path', {
+      path: `${planRoot.value}/${relPath}`,
+    })
+    return res.payload?.exists === true
+  } catch {
+    return false
+  }
 }
 
 // A plan deleted from the list clears the right pane when it's the open one.
@@ -221,12 +258,28 @@ async function onSectionDelete(anchor: string): Promise<void> {
   applyBodyWriteResult(result)
 }
 
+// Quick open (⌘P / Ctrl+P). This window runs its own keydown handler rather
+// than the shared keybinding registry, so the chord is matched here — on the
+// platform modifier only, keeping the terminal's own Ctrl+P on macOS, and never
+// while focus sits in the CLI dock, whose PTY owns its keys.
+function isQuickOpenChord(event: KeyboardEvent): boolean {
+  if (event.key.toLowerCase() !== 'p' || event.altKey || event.shiftKey) return false
+  const chord = isMacPlatform() ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey
+  if (!chord) return false
+  return !(event.target as HTMLElement | null)?.closest?.('.ai-dock-panel')
+}
+
 // ESC overlay priority: cancel/close the innermost active overlay before
 // falling through to closing the window. Order: an in-frame section edit
 // (when focus is outside the frame — inside it the runtime handles ESC
 // itself), then the plan list's context menu / rename input, then an unsent
 // review note, then a read-only snapshot; otherwise close the window.
 function onWindowKeydown(event: KeyboardEvent): void {
+  if (isQuickOpenChord(event)) {
+    event.preventDefault()
+    void plansPaneRef.value?.openQuickOpen?.()
+    return
+  }
   if (event.key !== 'Escape') return
   if (previewRef.value?.isEditing?.()) {
     previewRef.value.cancelEdit()
@@ -319,7 +372,7 @@ onMounted(() => {
   window.addEventListener('keydown', onWindowKeydown)
   // Auto-open the plan this window was launched for, once the root its path is
   // relative to is known.
-  void resolvePlanRoot().then(() => openRelPath(initialRelPath))
+  void resolvePlanRoot().then(() => openInitialDoc())
   // While the window stays open, the sidebar clicking another plan focuses this
   // window and asks it to switch (no reopen).
   offPlanOpenDoc = window.agentTeam?.onPlanOpenDoc?.((relPath) => openRelPath(relPath)) ?? null
@@ -370,6 +423,7 @@ onUnmounted(() => {
                 @updated="planPreviewRefresh++"
                 @scroll-to-anchor="onOutlineScroll"
                 @preview-snapshot="onPreviewSnapshot"
+                @deleted="onPlanDeleted"
               />
               <PlanDocPreview
                 ref="previewRef"
@@ -428,6 +482,7 @@ onUnmounted(() => {
                 @updated="planPreviewRefresh++"
                 @scroll-to-anchor="onOutlineScroll"
                 @preview-snapshot="onPreviewSnapshot"
+                @deleted="onPlanDeleted"
               />
               <PlanMarkdownBody
                 ref="mdBodyRef"

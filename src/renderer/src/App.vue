@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, provide, reactive, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, provide, reactive, ref, watch, type Ref } from 'vue'
 import ViewPanel, { type LayoutMode } from './components/ViewPanel.vue'
 import TerminalPane from './components/TerminalPane.vue'
 import RestoredPanePlaceholder from './components/RestoredPanePlaceholder.vue'
@@ -91,6 +91,7 @@ import { planDropPrompt, type PlanDragRef } from './lib/planDrag'
 import { allSlotsFinished, applyTurnProgress, isReplayedTurnComplete, loopBackoffMs, loopContinueReady, loopStallVerdict, LOOP_STALL_LIMIT, turnCompleteDone, turnEndsWithSentinel, type SlotSignal } from './lib/completion'
 import { reorderByIds, sortByIdOrder } from './lib/paneOrder'
 import { computeRangeSelection } from './lib/paneSelection'
+import { resolveDragBatch, reorderBatchByIds } from './lib/paneBatchDrag'
 import { AGENT_SPECS, type PaneArgContext } from './agents'
 import {
   orderedAgentKeys,
@@ -252,7 +253,7 @@ onMounted(() => {
   // same-app cross-window drops) and is handled by that target directly. This
   // IPC covers the remaining case — a release main's hit-test routed here —
   // and injects only when the point lands on a terminal area.
-  window.agentTeam?.onExternalPaneDrop?.(({ paneId, screenX, screenY }) => {
+  window.agentTeam?.onExternalPaneDrop?.(({ paneId, paneIds, screenX, screenY }) => {
     if (!paneId) return
     const { x, y } = screenToClientPoint(
       { screenX, screenY },
@@ -263,8 +264,9 @@ onMounted(() => {
     if (!targetPaneId || targetPaneId === paneId) return
     // Same entry point as a drop the target consumed itself, so the mention
     // gesture behaves identically whether the release landed on the terminal
-    // area or was routed here by main's hit-test.
-    void injectPaneContext(paneId, targetPaneId)
+    // area or was routed here by main's hit-test — and a multi-select drag
+    // shares every pane it carried, exactly like a locally consumed drop.
+    void injectPaneContextSources(paneIds?.length ? paneIds : [paneId], targetPaneId)
   })
   window.addEventListener('resize', onWindowResize)
   // Warm the heaviest deferred panel (Settings) during idle: it stays lazy to
@@ -616,6 +618,9 @@ watch(confirmBeforeClose, pushQuitConfirmConfig)
 const tokenPanelExpanded = ref<boolean>(
   settingsGet<string | null>('agentTeam.tokenPanel.expanded', null) === '1'
 )
+// The panel is controlled now, so persisting belongs here with the value rather
+// than inside the component that merely renders it.
+watch(tokenPanelExpanded, (v) => { settingsSet('agentTeam.tokenPanel.expanded', v ? '1' : '0') })
 const rightPanelWidth = ref<number>(
   parseInt(settingsGet('agentTeam.rightWidth', '300')) || 300
 )
@@ -631,14 +636,18 @@ type DragTarget = 'left' | 'right'
 let _dragTarget: DragTarget | null = null
 let _dragStartX = 0
 let _dragStartW = 0
-const isDragging = ref(false)
+// One flag per handle family. They used to share a single `isDragging`, so
+// dragging a grid splitter also lit up the shell handles at the window edges
+// and vice versa — the highlight told you the wrong thing was moving.
+const isShellDragging = ref(false)
+const isGridDragging = ref(false)
 
 function onResizeStart(e: MouseEvent, target: DragTarget): void {
   if (target === 'right' && !tokenPanelExpanded.value) return
   _dragTarget = target
   _dragStartX = e.clientX
   _dragStartW = target === 'left' ? leftPanelWidth.value : rightPanelWidth.value
-  isDragging.value = true
+  isShellDragging.value = true
   document.body.style.userSelect = 'none'
   document.body.style.cursor = 'col-resize'
   document.addEventListener('mousemove', onResizeMove)
@@ -677,7 +686,7 @@ function onWindowResize(): void {
 
 function onResizeEnd(): void {
   _dragTarget = null
-  isDragging.value = false
+  isShellDragging.value = false
   document.body.style.userSelect = ''
   document.body.style.cursor = ''
   document.removeEventListener('mousemove', onResizeMove)
@@ -2341,6 +2350,21 @@ async function injectPaneContext(sourcePaneId: string, targetPaneId: string): Pr
   if (!text) return // no session reference or buffer worth sharing
 
   await pastePaneContext(targetPaneId, text)
+}
+
+/** A multi-selection dropped onto a terminal shares every dragged pane's context
+ *  with that terminal. Strictly sequential: each share is a bracketed paste into
+ *  the same PTY, and interleaving two of them would splice one pane's scrollback
+ *  into the middle of another's. A target inside the batch is skipped — a pane
+ *  cannot share context with itself. */
+async function injectPaneContextSources(
+  sourcePaneIds: string[],
+  targetPaneId: string
+): Promise<void> {
+  for (const id of sourcePaneIds) {
+    if (id === targetPaneId) continue
+    await injectPaneContext(id, targetPaneId)
+  }
 }
 
 // Shared delivery tail for both context-share paths (same-window and
@@ -4874,7 +4898,19 @@ watch(currentWorkspace, (workspacePath) => {
   }
 })
 
-const settingsInitialTab = ref<'general' | 'mcp' | 'analyzer' | 'updates' | 'appearance' | 'accounts' | 'storage'>('general')
+// Bumped on every request to open Settings at a specific tab. The tab name
+// alone is not enough: asking for the tab you are already on leaves the prop
+// unchanged, so the modal's watcher never fires and the request is dropped.
+const settingsTabRequest = ref(0)
+const settingsInitialTab = ref<'general' | 'mcp' | 'analyzer' | 'updates' | 'appearance' | 'accounts' | 'storage' | 'keybindings'>('general')
+// Needed to retarget an already-open modal: initialTab is only honoured on mount
+// and by its own watcher, so re-issuing the same tab is a no-op without this.
+const settingsModalRef = ref<{ setTab: (tab: string) => void } | null>(null)
+function openSettingsAt(tab: typeof settingsInitialTab.value): void {
+  settingsInitialTab.value = tab
+  if (showSettings.value) settingsModalRef.value?.setTab(tab)
+  else showSettings.value = true
+}
 // Workspaces the Storage tab scans: the open one first, then the recents that
 // still exist on disk.
 const knownWorkspacePaths = computed<string[]>(() => {
@@ -4938,7 +4974,9 @@ async function onMenuAction(action: string): Promise<void> {
     return
   }
   if (action === 'show-shortcuts') {
-    showKbPanel.value = true
+    // Same destination as Cmd+K Cmd+S: two entry points labelled "Keyboard
+    // Shortcuts" must not show two different lists.
+    openSettingsAt('keybindings')
     return
   }
   if (action === 'check-updates') {
@@ -4975,37 +5013,10 @@ async function onMenuAction(action: string): Promise<void> {
     return
   }
 }
-const showKbPanel = ref(false)
-const kbQueryMain = ref('')
 const showHistory = ref(false)
 const historyModalRef = ref<{ closeTopLayer?: () => boolean } | null>(null)
 const revivingHistoryPaneId = ref('')
 const unavailableHistoryPaneIds = ref<Set<string>>(new Set())
-
-// ── Keyboard Shortcuts Panel ──────────────────────────────────────────────────
-const MAIN_SHORTCUTS = [
-  { label: 'Open Settings',              keys: '⌘,' },
-  { label: 'Open Mini-IDE',              keys: '⌘⇧I' },
-  { label: 'Open Agent',                 keys: '⌘⇧U' },
-  { label: 'Rebuild Pane (Resume)',      keys: '⌘⇧R / ⌘⇧B' },
-  { label: 'Find in Files',             keys: '⌘⇧F' },
-  { label: 'Show Keyboard Shortcuts',   keys: '⌘K ⌘S' },
-  { label: 'Open Debug',                keys: '⌘⇧L' },
-  { label: 'New Main Window',           keys: '⌘⇧N' },
-  { label: 'Toggle AI Chat',            keys: '⌘⇧A / ⌘J' },
-  { label: 'Show Explorer',             keys: '⌘⇧E' },
-  { label: 'Show Pipeline',             keys: '⌘⇧Y' },
-  { label: 'Show Source Control',       keys: '⌘⇧G' },
-  { label: 'Toggle Sidebar',            keys: '⌘B' },
-  { label: 'Sidebar: Explorer Tab',     keys: '⌘1' },
-  { label: 'Sidebar: Pipeline Tab',     keys: '⌘2' },
-  { label: 'Sidebar: Git Tab',          keys: '⌘3' },
-  { label: 'Close Modal / Escape',      keys: 'Esc' },
-]
-const kbMainItems = computed(() => {
-  const q = kbQueryMain.value.toLowerCase()
-  return q ? MAIN_SHORTCUTS.filter(s => s.label.toLowerCase().includes(q) || s.keys.toLowerCase().includes(q)) : MAIN_SHORTCUTS
-})
 
 // ── Titlebar & Status Bar ─────────────────────────────────────────────────────
 const workspaceBaseName = computed(() => {
@@ -5101,12 +5112,13 @@ registerCommand('workbench.action.closeModal', () => {
     // Same as the pipeline manager: nested confirms/dropdown close first.
     if (!historyModalRef.value?.closeTopLayer?.()) showHistory.value = false
   }
-  else if (showKbPanel.value) showKbPanel.value = false
   else if (showCompletionModal.value) showCompletionModal.value = false
 })
+// Cmd+K Cmd+S opens the editable Shortcuts settings, matching VS Code. The Help
+// menu's "show-shortcuts" lands here too — there is exactly one shortcuts
+// surface now, generated from the rule table rather than hand-maintained.
 registerCommand('workbench.action.openKeyboardShortcuts', () => {
-  showKbPanel.value = true
-  kbQueryMain.value = ''
+  openSettingsAt('keybindings')
 })
 registerCommand('workbench.action.findInFiles', async () => {
   const api = (window as Window & { agentTeam?: { openEditorWindow?: (args: { workspace_path: string; sidebar: 'search' }) => Promise<{ ok: boolean }> } }).agentTeam
@@ -5140,13 +5152,14 @@ registerCommand('workbench.action.focusPreviousPane', () => { cycleFocusedPane(-
 // ── External UI action bus (MCP-driven) ─────────────────────────────────────
 // Actions a UI-control MCP client can invoke via ui.invoke.request. See
 // useUiActionBus for the request/reply plumbing and ownership check.
-const UI_SETTINGS_TABS = ['general', 'mcp', 'analyzer', 'updates', 'appearance', 'accounts', 'storage'] as const
+const UI_SETTINGS_TABS = ['general', 'mcp', 'analyzer', 'updates', 'appearance', 'accounts', 'storage', 'keybindings'] as const
 registerCommand('ui.settings.open', (args) => {
   const tab = (args as { tab?: string } | undefined)?.tab
   if (tab && (UI_SETTINGS_TABS as readonly string[]).includes(tab)) {
-    settingsInitialTab.value = tab as typeof settingsInitialTab.value
+    openSettingsAt(tab as typeof settingsInitialTab.value)
+  } else {
+    showSettings.value = true
   }
-  showSettings.value = true
 })
 registerCommand('ui.settings.close', () => { showSettings.value = false })
 registerCommand('ui.pane.create', async (args) => {
@@ -5293,7 +5306,7 @@ async function buildUiActionSnapshot(): Promise<{
 }
 useUiActionBus({ backend, currentWorkspace, buildSnapshot: buildUiActionSnapshot })
 
-watch([showSettings, showKbPanel, showCompletionModal, showRestoreScopeModal, showPipelineManager, showDebug, showHistory], ([s, k, c, r, p, d, h]) => setContext('modalOpen', s || k || c || r || p || d || h || previewLogOpen.value))
+watch([showSettings, showCompletionModal, showRestoreScopeModal, showPipelineManager, showDebug, showHistory], ([s, c, r, p, d, h]) => setContext('modalOpen', s || c || r || p || d || h || previewLogOpen.value))
 
 /** The sidebar agent list shows panes from every tab; focusing one that lives
  *  in another tab must also activate that tab, or the pane stays v-show-hidden. */
@@ -5335,7 +5348,7 @@ const previewLogContent = ref<string>('')
 const previewLogTitle = ref<string>('')
 const previewLogOpen = ref<boolean>(false)
 watch(previewLogOpen, (open) => {
-  setContext('modalOpen', open || showSettings.value || showKbPanel.value || showCompletionModal.value || showRestoreScopeModal.value || showPipelineManager.value || showDebug.value || showHistory.value)
+  setContext('modalOpen', open || showSettings.value || showCompletionModal.value || showRestoreScopeModal.value || showPipelineManager.value || showDebug.value || showHistory.value)
   if (!open) {
     // Drop the (possibly multi-MB) log text once the preview closes so it
     // doesn't linger in memory and doesn't flash stale content on reopen.
@@ -9432,6 +9445,14 @@ const minimizedPanes = ref(new Set<string>())
 // Multi-select set for batch context-menu actions (Cmd/Ctrl/Shift-click a pane
 // header). Pruned to live pane ids by the panes watcher; a plain click clears it.
 const selectedPaneIds = ref(new Set<string>())
+// The multi-selection as an ordered id list, or empty below two panes. Drag
+// sources need the batch as a payload they can hand to another window, and one
+// shared array keeps every pane's prop identity stable across re-renders.
+const selectionBatchIds = computed<string[]>(() =>
+  selectedPaneIds.value.size < 2
+    ? []
+    : panes.value.map((p) => p.id).filter((id) => selectedPaneIds.value.has(id))
+)
 // Anchor for Shift-click range selection (same semantics as GitPane's
 // lastClickKey): set by plain and Cmd/Ctrl clicks, left untouched by Shift
 // clicks, nulled by the panes watcher when the pane disappears.
@@ -9769,15 +9790,18 @@ function reorderRunGroupTab(fromKey: string, toKey: string): void {
   void persistTabOrder()
 }
 
-/** Move one pane into another tab (drag-and-drop target). The "manual" tab maps
- *  to an empty run group (ungrouped). */
+/** Move a pane — and the rest of its multi-selection, if it is part of one —
+ *  into another tab (drag-and-drop target). The "manual" tab maps to an empty
+ *  run group (ungrouped). Panes already in the target group are skipped, so a
+ *  batch spanning several tabs only writes the ones that actually move. */
 async function movePaneToGroup(paneId: string, targetKey: string): Promise<void> {
-  const pane = panes.value.find((p) => p.id === paneId)
-  if (!pane) return
   const targetGroupId = targetKey === 'manual' ? '' : targetKey
-  if ((pane.runGroupId ?? '') === targetGroupId) return
-  pane.runGroupId = targetGroupId || undefined
-  await persistPaneRunGroup(pane, targetGroupId)
+  for (const id of paneDragBatch(paneId)) {
+    const pane = panes.value.find((p) => p.id === id)
+    if (!pane || (pane.runGroupId ?? '') === targetGroupId) continue
+    pane.runGroupId = targetGroupId || undefined
+    await persistPaneRunGroup(pane, targetGroupId)
+  }
 }
 
 /** Delete a RunGroup tab.
@@ -9945,12 +9969,22 @@ function restorePane(id: string): void {
   syncViews()
 }
 
-/** Drag-reorder: move the pane `fromId` to the slot currently occupied by
- *  `toId`. `panes.value` is the single source of truth for pane order, so the
- *  Grid and the Active Agents list both update from this one splice. No-op for
- *  identical or unknown ids; the new order is persisted only when it changed. */
+/** The panes a drag started on `paneId` carries: the whole multi-selection when
+ *  that pane belongs to one (same rule as the context menu's ctxTargetIds), the
+ *  single pane otherwise. Ordered by `panes.value` so a batch keeps its relative
+ *  arrangement wherever it lands. */
+function paneDragBatch(paneId: string): string[] {
+  return resolveDragBatch(paneId, selectedPaneIds.value, panes.value.map((p) => p.id))
+}
+
+/** Drag-reorder: move the pane `fromId` — and the rest of its multi-selection,
+ *  if it is part of one — to the slot currently occupied by `toId`.
+ *  `panes.value` is the single source of truth for pane order, so the Grid and
+ *  the Active Agents list both update from this one splice. No-op for identical
+ *  or unknown ids, or when the target is itself part of the dragged batch; the
+ *  new order is persisted only when it changed. */
 function reorderPane(fromId: string, toId: string): void {
-  if (!reorderByIds(panes.value, fromId, toId)) return
+  if (!reorderBatchByIds(panes.value, paneDragBatch(fromId), toId)) return
   syncViews() // reflect the new order in the Active Agents list immediately
   void persistPaneOrder()
 }
@@ -9961,7 +9995,7 @@ function reorderPane(fromId: string, toId: string): void {
 // reorder each other and still be dropped onto tabs, terminals, or AI Chat.
 const {
   dragOverPaneId: auxiliaryDragOverPaneId,
-  draggingPaneId: auxiliaryDraggingPaneId,
+  draggingBatchIds: auxiliaryDraggingBatchIds,
   onDragStart: onAuxiliaryPaneDragStart,
   onDragEnd: onAuxiliaryPaneDragEnd,
   onDragOver: onAuxiliaryPaneDragOver,
@@ -9981,9 +10015,10 @@ const {
       conversationLogPath: pane.outputLogFile,
     }
   },
+  batchFor: paneDragBatch,
   reorder: reorderPane,
   handOff: (paneId, screenX, screenY) => {
-    window.agentTeam?.cliPaneDragEnd?.(paneId, screenX, screenY)
+    window.agentTeam?.cliPaneDragEnd?.(paneId, screenX, screenY, paneDragBatch(paneId))
   },
 })
 
@@ -10475,14 +10510,22 @@ watch(floatPipWidth, (v) => { settingsSet('agentTeam.floatPipWidth', String(v)) 
 // panes are picked by scrolling. The corner handle resizes this fixed height.
 const floatPipListHeight = ref(320)
 
+// Template refs rather than querySelector: the old lookup fell back to a
+// hardcoded 800x600 when it missed, so renaming or wrapping .stage would clamp
+// the PiP to a bogus box with no error, no warning and nothing in the console —
+// only a panel that drifts to the wrong place. A ref cannot silently miss.
+const stageRef = ref<HTMLElement | null>(null)
+const floatPipRef = ref<HTMLElement | null>(null)
+
 function _pipStageSize(): { sw: number; sh: number } {
-  const el = document.querySelector('.stage') as HTMLElement
-  return { sw: el?.clientWidth ?? 800, sh: el?.clientHeight ?? 600 }
+  const el = stageRef.value
+  if (!el) return { sw: 0, sh: 0 } // pre-mount only; clamping to 0 is a no-op
+  return { sw: el.clientWidth, sh: el.clientHeight }
 }
 
 function clampPipPos(): void {
   nextTick(() => {
-    const pip = document.querySelector('.float-pip') as HTMLElement
+    const pip = floatPipRef.value
     if (!pip) return
     const { sw, sh } = _pipStageSize()
     floatPipPos.value = {
@@ -10498,7 +10541,7 @@ watch(effectiveLayoutMode, (mode) => {
     floatPipListHeight.value = 320
     floatPipExpanded.value = true
     nextTick(() => {
-      const pip = document.querySelector('.float-pip') as HTMLElement
+      const pip = floatPipRef.value
       const { sw, sh } = _pipStageSize()
       const pipH = pip?.offsetHeight ?? 360
       floatPipPos.value = {
@@ -10636,8 +10679,18 @@ const numRows = computed(() => {
   return Math.max(1, Math.ceil(gridPagePanes.value.length / numCols.value))
 })
 
-watch(numCols, (n) => { colWidths.value = Array(n).fill(1) }, { immediate: true })
-watch(numRows, (n) => { rowHeights.value = Array(n).fill(1) }, { immediate: true })
+// Reset the tracks to equal shares when the grid changes shape — but not on the
+// very first run, or the sizes just restored from settings are overwritten with
+// an even split and written straight back, which is why dragged column widths
+// have never survived a restart. A stored array of the right length is by
+// definition still valid for this shape, so keep it; anything else (a different
+// preset, a stale value) falls through to the even split as before.
+function resetTracks(track: Ref<number[]>, n: number, first: boolean): void {
+  if (first && track.value.length === n) return
+  track.value = Array(n).fill(1)
+}
+watch(numCols, (n, prev) => { resetTracks(colWidths, n, prev === undefined) }, { immediate: true })
+watch(numRows, (n, prev) => { resetTracks(rowHeights, n, prev === undefined) }, { immediate: true })
 
 const gridTemplateColumns = computed(() => {
   switch (effectiveLayoutMode.value) {
@@ -10736,7 +10789,7 @@ function onGridHandleStart(e: MouseEvent, axis: GridHandleAxis, index: number): 
     _gA = dualFocusSplitPx.value > 0 ? dualFocusSplitPx.value : _gSize / 2
     _gB = 0
   }
-  isDragging.value = true
+  isGridDragging.value = true
   document.body.style.cursor = axis === 'row' ? 'row-resize' : 'col-resize'
   document.body.style.userSelect = 'none'
   document.addEventListener('mousemove', onGridHandleMove)
@@ -10773,7 +10826,7 @@ function onGridHandleMove(e: MouseEvent): void {
 
 function onGridHandleEnd(): void {
   _gAxis = null
-  isDragging.value = false
+  isGridDragging.value = false
   document.body.style.cursor = ''
   document.body.style.userSelect = ''
   document.removeEventListener('mousemove', onGridHandleMove)
@@ -11128,7 +11181,7 @@ function paneIsCommander(p: ActivePane): boolean {
       </div>
     </div>
   </Transition>
-  <div class="app" :style="{ '--token-panel-width': tokenPanelWidth, '--left-width': leftPanelWidth + 'px' }" :class="{ 'is-resizing': isDragging }">
+  <div class="app" :style="{ '--token-panel-width': tokenPanelWidth, '--left-width': leftPanelWidth + 'px' }" :class="{ 'is-resizing-shell': isShellDragging, 'is-resizing-grid': isGridDragging }">
     <!-- Custom titlebar: traffic lights on left (via hiddenInset), name centre, gear right -->
     <div class="titlebar">
       <template v-if="workspaceSelected">
@@ -11165,7 +11218,6 @@ function paneIsCommander(p: ActivePane): boolean {
       :existing-project="existingProject"
       :workspace="currentWorkspace"
       :mode="currentMode"
-      :layout-mode="layoutMode"
       :analyzer-status="analyzerStatus"
       :pipelines="pipelinesApi.pipelines.value"
       :active-pipeline-id="pipelinesApi.activePipelineId.value"
@@ -11189,7 +11241,6 @@ function paneIsCommander(p: ActivePane): boolean {
       @rebuild-all="rebuildPanesViaResume('all')"
       @restore="restorePane"
       @context-menu="(id, ev) => openPaneCtxMenu(ev, id)"
-      @update:layout-mode="onUserChangeLayoutMode"
       @pipeline-start="onPipelineStart"
       @pipeline-next="onPipelineNext"
       @pipeline-abort="onPipelineAbort"
@@ -11261,6 +11312,7 @@ function paneIsCommander(p: ActivePane): boolean {
       @close="showCompletionModal = false"
     />
     <SettingsModal
+      ref="settingsModalRef"
       v-if="showSettings"
       :backend="backend"
       :roles-api="rolesApi"
@@ -11271,6 +11323,7 @@ function paneIsCommander(p: ActivePane): boolean {
       :workspace-open="!!currentWorkspace"
       :workspace-paths="knownWorkspacePaths"
       :initial-tab="settingsInitialTab"
+      :tab-request="settingsTabRequest"
       v-model:confirm-before-close="confirmBeforeClose"
       @close="showSettings = false; settingsInitialTab = 'general'"
       @reopen-onboarding="() => { showSettings = false; reopenOnboarding() }"
@@ -11294,27 +11347,6 @@ function paneIsCommander(p: ActivePane): boolean {
       :workspace-path="currentWorkspace"
       @close="showDebug = false"
     />
-    <div v-if="showKbPanel" class="kb-overlay" @mousedown.self="showKbPanel = false">
-      <div class="kb-panel">
-        <div class="kb-panel-header">
-          <span class="kb-panel-title">Keyboard Shortcuts</span>
-          <button class="kb-panel-close" @click="showKbPanel = false">✕</button>
-        </div>
-        <input
-          v-model="kbQueryMain"
-          class="kb-panel-search"
-          placeholder="Search shortcuts…"
-          autofocus
-          @keydown.esc.stop="showKbPanel = false"
-        />
-        <ul class="kb-panel-list">
-          <li v-for="s in kbMainItems" :key="s.label" class="kb-panel-item">
-            <span class="kb-panel-label">{{ s.label }}</span>
-            <span class="kb-panel-key">{{ s.keys }}</span>
-          </li>
-        </ul>
-      </div>
-    </div>
     <AgentHistoryModal
       ref="historyModalRef"
       :show="showHistory"
@@ -11349,6 +11381,7 @@ function paneIsCommander(p: ActivePane): boolean {
       @select="onConfirmReconnect"
     />
     <main
+      ref="stageRef"
       class="stage"
       :class="{ 'stage--tabbed': stageTabs.length > 0 }"
       :data-layout="effectiveLayoutMode"
@@ -11369,7 +11402,11 @@ function paneIsCommander(p: ActivePane): boolean {
         @reorder-tab="(fromKey, toKey) => reorderRunGroupTab(fromKey, toKey)"
         @detach="(key, x, y) => onDetachGroup(key, x, y)"
         @update:model-value="onUserSelectTab"
-      />
+      >
+        <template #actions>
+          <ViewPanel :model-value="layoutMode" @update:model-value="onUserChangeLayoutMode" />
+        </template>
+      </StageTabBar>
       <div v-if="panes.length === 0" class="empty">
         <!-- Pipeline is starting but the first pane hasn't appeared yet.
              The orchestrator typically takes 10-30s for the first stage:
@@ -11484,6 +11521,7 @@ function paneIsCommander(p: ActivePane): boolean {
           :is-commander="paneIsCommander(p)"
           :is-focus="p.id === effectiveFocusPaneId"
           :is-selected="selectedPaneIds.has(p.id)"
+          :selection-batch-ids="selectionBatchIds"
           :rebuild-visible="paneRebuildVisible(p)"
           :can-rebuild="paneCanRebuild(p)"
           :rebuilding="paneRebuilding(p)"
@@ -11506,7 +11544,7 @@ function paneIsCommander(p: ActivePane): boolean {
           @rename="(name) => setPaneCustomName(p.id, name)"
           @context-menu="(ev) => openPaneCtxMenu(ev, p.id)"
           @reorder-drop="(draggedId) => reorderPane(draggedId, p.id)"
-          @cli-context-drop="(sourceId) => injectPaneContext(sourceId, p.id)"
+          @cli-context-drop="(sourceIds) => injectPaneContextSources(sourceIds, p.id)"
           @plan-drop="(ref) => injectPlanToPane(ref, p.id)"
           @toggle-loop="togglePaneLoop(p.id)"
           @loop-resume-now="resumeLoopNow(p.id)"
@@ -11536,7 +11574,7 @@ function paneIsCommander(p: ActivePane): boolean {
             v-for="p in paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id))"
             :key="p.id"
             class="meeting-item"
-            :class="{ 'meeting-item--active': p.id === effectiveFocusPaneId, 'meeting-item--selected': selectedPaneIds.has(p.id), 'pane-drag-over': auxiliaryDragOverPaneId === p.id, 'pane-dragging': auxiliaryDraggingPaneId === p.id }"
+            :class="{ 'meeting-item--active': p.id === effectiveFocusPaneId, 'meeting-item--selected': selectedPaneIds.has(p.id), 'pane-drag-over': auxiliaryDragOverPaneId === p.id, 'pane-dragging': auxiliaryDraggingBatchIds.includes(p.id) }"
             draggable="true"
             title="Drag to reorder or click to focus"
             @dragstart="onAuxiliaryPaneDragStart($event, p.id)"
@@ -11595,7 +11633,7 @@ function paneIsCommander(p: ActivePane): boolean {
           v-for="p in paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id))"
           :key="p.id"
           class="spotlight-thumb"
-          :class="{ 'spotlight-thumb--active': p.id === effectiveFocusPaneId, 'spotlight-thumb--selected': selectedPaneIds.has(p.id), 'pane-drag-over': auxiliaryDragOverPaneId === p.id, 'pane-dragging': auxiliaryDraggingPaneId === p.id }"
+          :class="{ 'spotlight-thumb--active': p.id === effectiveFocusPaneId, 'spotlight-thumb--selected': selectedPaneIds.has(p.id), 'pane-drag-over': auxiliaryDragOverPaneId === p.id, 'pane-dragging': auxiliaryDraggingBatchIds.includes(p.id) }"
           draggable="true"
           title="Drag to reorder or click to focus"
           @dragstart="onAuxiliaryPaneDragStart($event, p.id)"
@@ -11652,6 +11690,7 @@ function paneIsCommander(p: ActivePane): boolean {
       <!-- Fullscreen mode: collapsible PiP agent list (draggable) -->
       <div
         v-if="effectiveLayoutMode === 'fullscreen'"
+        ref="floatPipRef"
         class="float-pip"
         :style="{ top: floatPipPos.top + 'px', left: floatPipPos.left + 'px', width: floatPipWidth + 'px' }"
       >
@@ -11668,7 +11707,7 @@ function paneIsCommander(p: ActivePane): boolean {
             v-for="p in paneViews.filter(v => !v.isMinimized && tabFilteredPaneIds.has(v.id))"
             :key="p.id"
             class="meeting-item"
-            :class="{ 'meeting-item--active': p.id === effectiveFocusPaneId, 'meeting-item--selected': selectedPaneIds.has(p.id), 'pane-drag-over': auxiliaryDragOverPaneId === p.id, 'pane-dragging': auxiliaryDraggingPaneId === p.id }"
+            :class="{ 'meeting-item--active': p.id === effectiveFocusPaneId, 'meeting-item--selected': selectedPaneIds.has(p.id), 'pane-drag-over': auxiliaryDragOverPaneId === p.id, 'pane-dragging': auxiliaryDraggingBatchIds.includes(p.id) }"
             draggable="true"
             title="Drag to reorder or click to focus"
             @dragstart="onAuxiliaryPaneDragStart($event, p.id)"
@@ -11729,7 +11768,8 @@ function paneIsCommander(p: ActivePane): boolean {
       :stages="stagesApi.stages.value"
       :panes="paneViews"
       :pipeline="pipelineView"
-      v-model:expanded="tokenPanelExpanded"
+      :expanded="tokenPanelExpanded"
+      @update:expanded="tokenPanelExpanded = $event"
     />
     <Welcome
       v-if="!workspaceSelected"
@@ -12185,86 +12225,6 @@ function paneIsCommander(p: ActivePane): boolean {
   color: var(--text-bright);
 }
 
-/* ── Keyboard Shortcuts Panel ────────────────────────────────────────────────── */
-.kb-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 500;
-  background: rgba(0, 0, 0, 0.45);
-  display: flex;
-  justify-content: center;
-  padding-top: 80px;
-}
-.kb-panel {
-  width: 560px;
-  max-height: 520px;
-  display: flex;
-  flex-direction: column;
-  background: var(--bg-overlay, var(--bg-inset));
-  border: 1px solid var(--border-default);
-  border-radius: 10px;
-  overflow: hidden;
-  box-shadow: 0 16px 48px rgba(0,0,0,0.4);
-}
-.kb-panel-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 16px 0;
-}
-.kb-panel-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-.kb-panel-close {
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  font-size: 14px;
-  padding: 2px 6px;
-  border-radius: 4px;
-}
-.kb-panel-close:hover { background: var(--bg-hover); color: var(--text-bright); }
-.kb-panel-search {
-  margin: 10px 12px;
-  padding: 6px 12px;
-  font-size: 13px;
-  background: var(--bg-inset);
-  border: 1px solid var(--border-muted);
-  border-radius: 6px;
-  color: var(--text-primary);
-  outline: none;
-}
-.kb-panel-search:focus { border-color: var(--border-focus, #4a90d9); }
-.kb-panel-list {
-  list-style: none;
-  margin: 0;
-  padding: 0 0 8px;
-  overflow-y: auto;
-  flex: 1;
-}
-.kb-panel-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 16px;
-  font-size: 13px;
-}
-.kb-panel-item:hover { background: var(--bg-hover); }
-.kb-panel-label { color: var(--text-primary); }
-.kb-panel-key {
-  font-family: ui-monospace, monospace;
-  font-size: 11px;
-  color: var(--text-secondary);
-  background: var(--bg-inset);
-  border: 1px solid var(--border-muted);
-  border-radius: 4px;
-  padding: 1px 6px;
-  white-space: nowrap;
-}
-
 /* ── Status Bar ──────────────────────────────────────────────────────────────── */
 .statusbar {
   position: absolute;
@@ -12412,10 +12372,14 @@ function paneIsCommander(p: ActivePane): boolean {
 .bp-btn:disabled { opacity: 0.45; cursor: default; }
 .bp-restart { border-color: var(--accent-focus); color: var(--accent-fg); }
 .bp-stop { border-color: var(--danger-fg); color: var(--danger-fg); }
+/* Grid items sharing a cell with the panel they resize, rather than absolutely
+   positioned off a copy of that panel's width. The old form read --left-width /
+   --token-panel-width to place itself, the only place a column width leaked out
+   of grid-template-columns — change the track definition and the handle would
+   still drag correctly while being drawn somewhere else entirely. Sitting in the
+   cell and hugging its edge keeps the two in step by construction. */
 .resize-handle {
-  position: absolute;
-  top: 0;
-  bottom: 0;
+  align-self: stretch;
   width: 8px;
   cursor: col-resize;
   z-index: 50;
@@ -12430,16 +12394,18 @@ function paneIsCommander(p: ActivePane): boolean {
 .resize-handle:hover::after {
   background: color-mix(in srgb, var(--accent-focus) 27%, transparent);
 }
-.is-resizing .resize-handle::after {
+.is-resizing-shell .resize-handle::after {
   background: color-mix(in srgb, var(--accent-focus) 40%, transparent);
 }
 .resize-handle-left {
-  left: var(--left-width, 360px);
-  transform: translateX(-50%);
+  grid-column: 1;
+  justify-self: end;
+  transform: translateX(50%);
 }
 .resize-handle-right {
-  right: var(--token-panel-width, 36px);
-  transform: translateX(50%);
+  grid-column: 3;
+  justify-self: start;
+  transform: translateX(-50%);
 }
 .stage {
   position: relative;
@@ -12477,7 +12443,7 @@ function paneIsCommander(p: ActivePane): boolean {
   transition: background 0.15s;
 }
 .grid-handle:hover::after,
-.is-resizing .grid-handle::after {
+.is-resizing-grid .grid-handle::after {
   background: color-mix(in srgb, var(--accent-focus) 33%, transparent);
 }
 .grid-handle-v {
@@ -12716,6 +12682,8 @@ function paneIsCommander(p: ActivePane): boolean {
 .spotlight-thumb-badge[data-status="starting"] { background: var(--status-starting-subtle); color: var(--status-starting-fg); border: 1px solid var(--status-starting-emphasis); }
 .spotlight-thumb-badge[data-status="error"]    { background: var(--danger-subtle); color: var(--danger-fg); border: 1px solid var(--danger-emphasis); }
 .spotlight-thumb-badge[data-status="stopped"]  { background: #000000; color: #ffffff; border: 1px solid #3f3f46; }
+.spotlight-thumb-badge[data-status="awaiting"] { background: color-mix(in srgb, var(--warning-fg) 20%, transparent); color: var(--warning-fg); border: 1px solid color-mix(in srgb, var(--warning-fg) 45%, transparent); }
+.spotlight-thumb-badge[data-status="exited"]   { background: var(--bg-muted); color: var(--text-primary); border: 1px solid var(--border-default); }
 .spotlight-thumb-loop {
   font-size: 9px;
   padding: 1px 5px;
@@ -12849,6 +12817,8 @@ function paneIsCommander(p: ActivePane): boolean {
 .meeting-badge[data-status="stopped"]  { background: #000000; color: #ffffff; border: 1px solid #3f3f46; }
 .meeting-badge[data-status="starting"] { background: var(--status-starting-subtle); color: var(--status-starting-fg); border: 1px solid var(--status-starting-emphasis); }
 .meeting-badge[data-status="error"]    { background: var(--danger-subtle); color: var(--danger-bright); border: 1px solid var(--danger-emphasis); }
+.meeting-badge[data-status="awaiting"] { background: color-mix(in srgb, var(--warning-fg) 20%, transparent); color: var(--warning-fg); border: 1px solid color-mix(in srgb, var(--warning-fg) 45%, transparent); }
+.meeting-badge[data-status="exited"]   { background: var(--bg-muted); color: var(--text-primary); border: 1px solid var(--border-default); }
 .meeting-loop {
   font-size: 10px;
   padding: 2px 6px;

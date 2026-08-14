@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch, defineAsyncComponent } from 'vue'
+import { computed, onUnmounted, ref, watch, defineAsyncComponent } from 'vue'
 import type { PaneArgContext } from '../agents'
 import { extractDropPaths, stabilizeDroppedPaths } from '../lib/drop'
-import ViewPanel, { type LayoutMode } from './ViewPanel.vue'
+import { PANE_BATCH_MIME } from '../lib/cliContext'
+import { resolveDragBatch } from '../lib/paneBatchDrag'
+import { setBatchDragImage } from '../lib/batchDragImage'
 import RebuildIcon from './RebuildIcon.vue'
 import ExplorerPane from './ExplorerPane.vue'
 import type { BackendStatus, useBackend } from '../composables/useBackend'
@@ -184,8 +186,6 @@ interface Props {
   workspace?: string
   /** Entry mode; drives which sections lead (spawn → manual spawn open). */
   mode?: WorkspaceMode
-  /** Current layout mode for the terminal grid; passed through to ViewPanel. */
-  layoutMode?: LayoutMode
   /** All pipeline summaries from usePipelines. */
   pipelines?: PipelineSummary[]
   /** Currently active pipeline id (global). */
@@ -282,7 +282,6 @@ const emit = defineEmits<{
   (e: 'open-history'): void
   (e: 'switch-workspace'): void
   (e: 'workspace-browse', path: string): void
-  (e: 'update:layoutMode', v: LayoutMode): void
   (e: 'dispatch-issue', payload: { paneId: string; issue: IssueDetail }): void
   (e: 'spawn-for-issue', payload: { agentKey: string; mode: IssueHandlerMode; issue: Issue; provider: IssueProvider }): void
   (e: 'open-git-accounts'): void
@@ -516,30 +515,35 @@ const sidebarTab = ref<SidebarTab>(
 watch(sidebarTab, (v) => { try { sessionStorage.setItem(_TAB_KEY, v) } catch { /* ignore */ } })
 
 // Cmd+1/2/3/4/5 → switch sidebar tab (Agents / Pipeline / Explorer / Git / Plans)
+//
+// These used to be a bare `document.addEventListener('keydown')` sitting
+// outside the keybinding system, which meant Settings could neither list nor
+// rebind them — and worse, unbinding Cmd+1 there still left this listener
+// switching the sidebar. They are ordinary commands now; only the text-input
+// guard stayed behind, because the central dispatcher does not look at
+// `e.target` and this shortcut must not fire while someone is typing.
 const SIDEBAR_TABS: SidebarTab[] = ['agents', 'pipeline', 'explorer', 'git', 'plans']
-function onSidebarTabShortcut(e: KeyboardEvent): void {
-  if (!e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return
-  // e.key is 'Meta' on the bare Cmd keydown — parseInt → NaN, which slips past
-  // the range check below (NaN comparisons are always false) and would blank the
-  // panel via SIDEBAR_TABS[NaN] === undefined. Guard the NaN explicitly.
-  const idx = parseInt(e.key) - 1
-  if (Number.isNaN(idx) || idx < 0 || idx >= SIDEBAR_TABS.length) return
+
+function typingInTextField(): boolean {
   const el = document.activeElement as HTMLElement | null
   const tag = el?.tagName ?? ''
-  // Allow from xterm helper textarea; block from other inputs and contenteditable
+  // The xterm helper textarea is not real text entry — the shortcut works there.
   const isXterm = tag === 'TEXTAREA' && el?.classList.contains('xterm-helper-textarea')
-  if (!isXterm && (tag === 'INPUT' || tag === 'TEXTAREA' || el?.isContentEditable)) return
-  e.preventDefault()
-  selectSidebarTab(SIDEBAR_TABS[idx])
+  return !isXterm && (tag === 'INPUT' || tag === 'TEXTAREA' || !!el?.isContentEditable)
 }
-onMounted(() => {
-  document.addEventListener('keydown', onSidebarTabShortcut)
-})
-onUnmounted(() => document.removeEventListener('keydown', onSidebarTabShortcut))
 
-// VS Code-style sidebar shortcuts routed through the keybinding system (more
-// robust than the bare keydown listener above, and consistent with the editor
-// window which uses the same command ids): Cmd+Shift+E / R / G.
+for (let i = 1; i <= SIDEBAR_TABS.length; i++) {
+  registerCommand(`controlPane.selectSidebarTab${i}`, () => {
+    // Decline rather than no-op: returning false keeps the dispatcher from
+    // calling preventDefault(), so the keystroke still reaches the text field
+    // and anything else listening. The old raw listener behaved this way.
+    if (typingInTextField()) return false
+    selectSidebarTab(SIDEBAR_TABS[i - 1])
+  })
+}
+
+// VS Code-style sidebar shortcuts, consistent with the editor window which uses
+// the same command ids: Cmd+Shift+E / R / G.
 registerCommand('workbench.action.focusExplorer', () => selectSidebarTab('explorer'))
 registerCommand('workbench.action.focusPipeline', () => selectSidebarTab('pipeline'))
 registerCommand('workbench.action.focusSourceControl', () => selectSidebarTab('git'))
@@ -894,27 +898,47 @@ function onAgentLineClick(paneId: string, ev?: MouseEvent): void {
 // happens on drop.
 const reorderDragOverId = ref('')
 let draggingPaneId = ''
+// Every pane the in-flight drag moves: the whole multi-selection when the
+// grabbed row is part of one (App.vue reorders the batch), else just that row.
+// Rendered as dragging, and excluded from being a drop target for itself.
+const draggingBatchIds = ref<string[]>([])
 
 function onAgentDragStart(e: DragEvent, paneId: string): void {
   if (!e.dataTransfer) return
+  const batch = resolveDragBatch(paneId, props.selectedPaneIds, props.panes.map((p) => p.id))
   e.dataTransfer.setData('application/x-pane-id', paneId)
+  // Only a real batch writes the MIME — its presence is what marks a batch drag
+  // for drop targets, including ones in another window.
+  if (batch.length > 1) e.dataTransfer.setData(PANE_BATCH_MIME, batch.join('\n'))
+  setBatchDragImage(
+    e.dataTransfer,
+    batch.length,
+    i18n.global.t('action.dragging-panes', { count: batch.length })
+  )
   e.dataTransfer.effectAllowed = 'move'
   draggingPaneId = paneId
+  draggingBatchIds.value = batch
 }
 
 function onAgentDragEnd(e: DragEvent): void {
   const paneId = draggingPaneId
+  const batch = draggingBatchIds.value
   draggingPaneId = ''
+  draggingBatchIds.value = []
   reorderDragOverId.value = ''
   // Cross-window handoff, same contract as TerminalPane's header dragend:
   // dropEffect 'none' ⇒ nothing in this window consumed the drag, so let main
   // route the pane to whatever window sits under the release point.
   if (!paneId || e.dataTransfer?.dropEffect !== 'none') return
-  window.agentTeam?.cliPaneDragEnd?.(paneId, e.screenX, e.screenY)
+  window.agentTeam?.cliPaneDragEnd?.(paneId, e.screenX, e.screenY, batch)
 }
 
 function onAgentDragOver(e: DragEvent, paneId: string): void {
-  if (draggingPaneId === paneId || !e.dataTransfer?.types.includes('application/x-pane-id')) return
+  if (
+    draggingPaneId === paneId
+    || draggingBatchIds.value.includes(paneId)
+    || !e.dataTransfer?.types.includes('application/x-pane-id')
+  ) return
   e.preventDefault()
   reorderDragOverId.value = paneId
 }
@@ -1131,10 +1155,6 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
       <div class="row between agent-list-hdr">
         <label class="lbl">{{ $t('label.active-agents', { running: runningCount, total: panes.length }) }}</label>
         <div class="agent-header-actions">
-          <ViewPanel
-            :model-value="layoutMode ?? 'auto'"
-            @update:model-value="emit('update:layoutMode', $event)"
-          />
           <button
             class="agent-rebuild-all-btn"
             :class="{ busy: rebuildingAll }"
@@ -1154,7 +1174,7 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
           v-for="p in panes"
           :key="p.id"
           class="agent-item"
-          :class="{ pipeline: p.origin === 'pipeline', manager: p.isCommander, minimized: p.isMinimized, 'agent-item--focus': p.id === props.focusPaneId, 'agent-item--selected': props.selectedPaneIds?.has(p.id), 'drag-over': reorderDragOverId === p.id, expanded: expandedPaneId === p.id || props.focusPaneId === p.id }"
+          :class="{ pipeline: p.origin === 'pipeline', manager: p.isCommander, minimized: p.isMinimized, 'agent-item--focus': p.id === props.focusPaneId, 'agent-item--selected': props.selectedPaneIds?.has(p.id), 'agent-item--dragging': draggingBatchIds.includes(p.id), 'drag-over': reorderDragOverId === p.id, expanded: expandedPaneId === p.id || props.focusPaneId === p.id }"
           @dragover="onAgentDragOver($event, p.id)"
           @dragenter="onAgentDragOver($event, p.id)"
           @dragleave="onAgentDragLeave(p.id)"
@@ -1496,6 +1516,14 @@ async function onTaskDrop(e: DragEvent): Promise<void> {
 
 <style scoped>
 .sidebar {
+  /* Fill whatever the parent allots instead of inferring a width from content.
+     The panel has never declared one — it happened to work because .app's grid
+     track sized it from the outside. Swap that container for a flex one and the
+     panel would collapse to its content while agentTeam.leftWidth still looked
+     like it was working, which is a hard failure to trace back here. */
+  width: 100%;
+  height: 100%;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -2336,6 +2364,11 @@ button.icon-btn.muted:hover {
   background: color-mix(in srgb, var(--accent-focus) 16%, transparent);
   box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent-focus) 55%, transparent);
 }
+/* Every row a batch drag is carrying fades out together, so it is obvious the
+   whole selection is moving and not just the grabbed row. */
+.agent-item--dragging {
+  opacity: 0.45;
+}
 /* Reorder drop target feedback, matching .pane-header.drag-over in TerminalPane.vue. */
 .agent-item.drag-over {
   background: var(--accent-subtle);
@@ -2600,9 +2633,10 @@ button.icon-btn.muted:hover {
 .state[data-state='exited'] {
   background: var(--bg-muted);
 }
-/* Override ViewPanel's absolute positioning when used inline in the sidebar */
-.agent-header-actions :deep(.view-panel) {
-  position: static;
+.state[data-state='stopped'] {
+  background: #000000;
+  color: #ffffff;
+  border: 1px solid #3f3f46;
 }
 .agent-item.minimized {
   opacity: 0.7;

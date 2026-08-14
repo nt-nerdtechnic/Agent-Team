@@ -2125,3 +2125,184 @@ describe('PlansPane – plan-meta cache', () => {
     expect(wrapper.text()).toContain('permission denied')
   })
 })
+
+// The list orders by mtime, which any CLI agent writing another plan outranks.
+// The Recent section records opens instead, and pins hold a long-running plan
+// above them.
+describe('PlansPane – recent and pinned', () => {
+  const ACTIVE = '.cursor/plans/active.plan.md'
+  const DONE = '.cursor/plans/done.plan.md'
+
+  function recentNames(wrapper: ReturnType<typeof mountPane>): string[] {
+    return wrapper.findAll('.plan-row--compact .plan-row-name').map((n) => n.text())
+  }
+
+  it('has no Recent section until a plan is opened', async () => {
+    const wrapper = mountPane(makeBackend())
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('Recent')
+    expect(wrapper.findAll('.plan-row--compact')).toHaveLength(0)
+  })
+
+  it('lists opened plans most-recent first and persists them per workspace', async () => {
+    const wrapper = mountPane(makeBackend())
+    await flushPromises()
+    const rows = wrapper.findAll('.plan-row:not(.plan-row--compact)')
+    await rows[0].trigger('click')
+    await rows[1].trigger('click')
+    await flushPromises()
+
+    expect(JSON.parse(localStorage.getItem('navide.plans.recent./ws') ?? '[]')).toEqual([DONE, ACTIVE])
+    expect(recentNames(wrapper)).toEqual(['Done Plan', 'Active Plan'])
+  })
+
+  it('re-opening a plan moves it back to the top without duplicating it', async () => {
+    localStorage.setItem('navide.plans.recent./ws', JSON.stringify([DONE, ACTIVE]))
+    const wrapper = mountPane(makeBackend())
+    await flushPromises()
+    expect(recentNames(wrapper)).toEqual(['Done Plan', 'Active Plan'])
+
+    await wrapper.findAll('.plan-row--compact')[1].trigger('click')
+    await flushPromises()
+    expect(recentNames(wrapper)).toEqual(['Active Plan', 'Done Plan'])
+  })
+
+  it('keeps at most five entries', async () => {
+    const older = ['a', 'b', 'c', 'd', 'e'].map((n) => `.cursor/plans/${n}.plan.md`)
+    localStorage.setItem('navide.plans.recent./ws', JSON.stringify(older))
+    const wrapper = mountPane(makeBackend())
+    await flushPromises()
+    await wrapper.findAll('.plan-row:not(.plan-row--compact)')[0].trigger('click')
+
+    const stored = JSON.parse(localStorage.getItem('navide.plans.recent./ws') ?? '[]')
+    expect(stored).toHaveLength(5)
+    expect(stored[0]).toBe(ACTIVE)
+    expect(stored).not.toContain(older[4])
+  })
+
+  it('drops a remembered plan that no longer exists', async () => {
+    localStorage.setItem(
+      'navide.plans.recent./ws',
+      JSON.stringify(['.cursor/plans/deleted.plan.md', ACTIVE]),
+    )
+    const wrapper = mountPane(makeBackend())
+    await flushPromises()
+    expect(recentNames(wrapper)).toEqual(['Active Plan'])
+  })
+
+  it('holds pinned plans above the recently opened ones', async () => {
+    localStorage.setItem('navide.plans.recent./ws', JSON.stringify([DONE]))
+    localStorage.setItem('navide.plans.pinned./ws', JSON.stringify([ACTIVE]))
+    const wrapper = mountPane(makeBackend())
+    await flushPromises()
+    expect(recentNames(wrapper)).toEqual(['Active Plan', 'Done Plan'])
+  })
+
+  it('pins and unpins from the row without opening the plan', async () => {
+    localStorage.setItem('navide.plans.recent./ws', JSON.stringify([ACTIVE]))
+    const wrapper = mountPane(makeBackend())
+    await flushPromises()
+
+    await wrapper.find('.plan-row--compact .plan-row-pin').trigger('click')
+    expect(JSON.parse(localStorage.getItem('navide.plans.pinned./ws') ?? '[]')).toEqual([ACTIVE])
+    expect(wrapper.find('.plan-row--compact .plan-row-pin').classes()).toContain('plan-row-pin--on')
+    expect(wrapper.emitted('open-file')).toBeUndefined()
+
+    await wrapper.find('.plan-row--compact .plan-row-pin').trigger('click')
+    expect(JSON.parse(localStorage.getItem('navide.plans.pinned./ws') ?? '[]')).toEqual([])
+  })
+
+  it('survives corrupt stored values', async () => {
+    localStorage.setItem('navide.plans.recent./ws', '{not json')
+    localStorage.setItem('navide.plans.pinned./ws', '"a string"')
+    const wrapper = mountPane(makeBackend())
+    await flushPromises()
+    expect(wrapper.findAll('.plan-row--compact')).toHaveLength(0)
+    expect(wrapper.text()).toContain('Active Plan')
+  })
+
+  it('records an open the host performed itself (noteOpened)', async () => {
+    const wrapper = mountPane(makeBackend())
+    await flushPromises()
+    ;(wrapper.vm as unknown as { noteOpened: (p: string) => void }).noteOpened(ACTIVE)
+    await flushPromises()
+
+    expect(recentNames(wrapper)).toEqual(['Active Plan'])
+    expect(wrapper.emitted('open-file')).toBeUndefined()
+  })
+})
+
+// Quick open: a name-first way into a plan when the workspace holds hundreds.
+describe('PlansPane – quick open', () => {
+  const ACTIVE = '.cursor/plans/active.plan.md'
+
+  async function openPanel(wrapper: ReturnType<typeof mountPane>) {
+    await (wrapper.vm as unknown as { openQuickOpen: () => Promise<void> }).openQuickOpen()
+    await flushPromises()
+    return wrapper
+  }
+
+  function rowNames(wrapper: ReturnType<typeof mountPane>): string[] {
+    return wrapper.findAll('.quick-open-row .plan-row-name').map((n) => n.text())
+  }
+
+  it('offers the recent shortlist before anything is typed', async () => {
+    localStorage.setItem('navide.plans.recent./ws', JSON.stringify([ACTIVE]))
+    const wrapper = await openPanel(mountPane(makeBackend()))
+    expect(rowNames(wrapper)).toEqual(['Active Plan'])
+  })
+
+  it('filters on the typed query and opens the highlighted row on Enter', async () => {
+    const wrapper = await openPanel(mountPane(makeBackend()))
+    await wrapper.find('.quick-open input').setValue('done')
+    expect(rowNames(wrapper)).toEqual(['Done Plan'])
+
+    await wrapper.find('.quick-open input').trigger('keydown', { key: 'Enter' })
+    expect(wrapper.emitted('open-file')?.[0]).toEqual([
+      { filepath: '.cursor/plans/done.plan.md', name: 'done.plan.md', root: '/ws' },
+    ])
+    expect(wrapper.find('.quick-open').exists()).toBe(false)
+  })
+
+  it('moves the highlight with the arrow keys and wraps around', async () => {
+    const wrapper = await openPanel(mountPane(makeBackend()))
+    await wrapper.find('.quick-open input').setValue('plan')
+    expect(rowNames(wrapper).length).toBeGreaterThan(1)
+
+    await wrapper.find('.quick-open input').trigger('keydown', { key: 'ArrowDown' })
+    expect(wrapper.findAll('.quick-open-row')[1].classes()).toContain('quick-open-row--active')
+
+    await wrapper.find('.quick-open input').trigger('keydown', { key: 'ArrowUp' })
+    expect(wrapper.findAll('.quick-open-row')[0].classes()).toContain('quick-open-row--active')
+  })
+
+  it('resets the highlight when the query changes', async () => {
+    const wrapper = await openPanel(mountPane(makeBackend()))
+    await wrapper.find('.quick-open input').setValue('plan')
+    await wrapper.find('.quick-open input').trigger('keydown', { key: 'ArrowDown' })
+    await wrapper.find('.quick-open input').setValue('plan ')
+    expect(wrapper.findAll('.quick-open-row')[0].classes()).toContain('quick-open-row--active')
+  })
+
+  it('records the opened plan in Recent', async () => {
+    const wrapper = await openPanel(mountPane(makeBackend()))
+    await wrapper.find('.quick-open input').setValue('active')
+    await wrapper.find('.quick-open input').trigger('keydown', { key: 'Enter' })
+    expect(JSON.parse(localStorage.getItem('navide.plans.recent./ws') ?? '[]')).toEqual([ACTIVE])
+  })
+
+  it('closes through the host ESC path', async () => {
+    const wrapper = await openPanel(mountPane(makeBackend()))
+    const closed = (wrapper.vm as unknown as { closeActiveOverlay: () => boolean }).closeActiveOverlay()
+    await flushPromises()
+    expect(closed).toBe(true)
+    expect(wrapper.find('.quick-open').exists()).toBe(false)
+  })
+
+  it('says so when nothing matches', async () => {
+    const wrapper = await openPanel(mountPane(makeBackend()))
+    await wrapper.find('.quick-open input').setValue('zzzz')
+    expect(wrapper.findAll('.quick-open-row')).toHaveLength(0)
+    expect(wrapper.find('.quick-open-empty').exists()).toBe(true)
+  })
+})

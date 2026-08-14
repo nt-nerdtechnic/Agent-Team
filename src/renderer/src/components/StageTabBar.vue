@@ -121,7 +121,8 @@ function onRenameKeydown(e: KeyboardEvent, key: string): void {
 </script>
 
 <template>
-  <div class="stage-tab-bar" role="tablist">
+  <div class="stage-tab-bar">
+    <div class="stage-tab-scroll" role="tablist">
     <template v-for="tab in tabs" :key="tab.key">
       <button
         role="tab"
@@ -170,6 +171,8 @@ function onRenameKeydown(e: KeyboardEvent, key: string): void {
     >
       <RebuildIcon />
     </button>
+    </div>
+    <div class="stage-tab-actions"><slot name="actions" /></div>
   </div>
 
   <Teleport to="body">
@@ -189,12 +192,26 @@ function onRenameKeydown(e: KeyboardEvent, key: string): void {
   background: var(--bg-subtle);
   border-bottom: 1px solid var(--border-muted);
   padding: 0 8px;
-  gap: 2px;
   flex-shrink: 0;
+}
+/* Tabs scroll; the action slot stays pinned to the right edge. */
+.stage-tab-scroll {
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 2px;
   overflow-x: auto;
   scrollbar-width: none;
 }
-.stage-tab-bar::-webkit-scrollbar { display: none; }
+.stage-tab-scroll::-webkit-scrollbar { display: none; }
+.stage-tab-actions {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  margin-left: 8px;
+}
 
 .tab-btn {
   display: flex;

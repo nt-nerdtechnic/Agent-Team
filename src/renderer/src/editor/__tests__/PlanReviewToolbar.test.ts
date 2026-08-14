@@ -55,6 +55,8 @@ interface Harness {
   writeCalls: { relPath: string; content: string }[]
   /** Every write attempt (including refused conflicts) with its expected_mtime. */
   writeAttempts: { relPath: string; expectedMtime?: number }[]
+  /** Every fs.delete the toolbar sent (the ⋯ menu's Delete action). */
+  deleteAttempts: { workspacePath: string; relPath: string }[]
   /** The store instance the toolbar was mounted with (real HtmlPlanStore by default). */
   store: PlanStore
   setContent: (c: string) => void
@@ -73,11 +75,18 @@ const PLAN_REL_PATH = '.agent-team/plans/test-plan_a1b2c3.html'
 
 async function mountToolbar(
   content: string,
-  opts: { failWrite?: string; conflictWrites?: number; history?: HistoryOpts; store?: PlanStore } = {},
+  opts: {
+    failWrite?: string
+    failDelete?: string
+    conflictWrites?: number
+    history?: HistoryOpts
+    store?: PlanStore
+  } = {},
 ): Promise<Harness> {
   const writes: string[] = []
   const writeCalls: { relPath: string; content: string }[] = []
   const writeAttempts: { relPath: string; expectedMtime?: number }[] = []
+  const deleteAttempts: { workspacePath: string; relPath: string }[] = []
   let current = content
   // Emulated file mtime: bumped on every successful plan write and on
   // setContent (external edit), mirroring the backend's optimistic lock.
@@ -130,6 +139,14 @@ async function mountToolbar(
         }
         return { payload: { ok: true, mtime: mtimeNow } }
       }
+      if (type === 'fs.delete') {
+        deleteAttempts.push({
+          workspacePath: payload.workspace_path as string,
+          relPath: payload.rel_path as string,
+        })
+        if (opts.failDelete !== undefined) return { payload: { ok: false, error: opts.failDelete } }
+        return { payload: { ok: true } }
+      }
       return { payload: { ok: true } }
     }),
   }
@@ -152,6 +169,7 @@ async function mountToolbar(
     writes,
     writeCalls,
     writeAttempts,
+    deleteAttempts,
     store,
     setContent: (c: string) => {
       current = c
@@ -166,6 +184,14 @@ function lastWrittenMeta(writes: string[]): HtmlPlanMeta {
   const parsed = parseHtmlPlanMeta(writes[writes.length - 1])
   expect(parsed).not.toBeNull()
   return parsed!.meta
+}
+
+// The compact bar keeps only the icon buttons an edit session reaches for;
+// navigation, export and lifecycle actions live behind ⋯ and are absent from
+// the DOM until it is opened. Menu items dismiss the menu when clicked, so a
+// test driving two of them opens it again in between.
+async function openOverflow(wrapper: VueWrapper): Promise<void> {
+  await wrapper.find('.prt-overflow-btn').trigger('click')
 }
 
 describe('PlanReviewToolbar – display', () => {
@@ -204,9 +230,13 @@ describe('PlanReviewToolbar – display', () => {
       ],
     })
     const { wrapper } = await mountToolbar(planDoc(meta))
-    expect(wrapper.find('.prt-notes-btn').text()).toContain('1 unresolved')
+    // Unresolved notes keep the button on the bar. It is icon-only now, so the
+    // count shows as a badge and the wording moved into the tooltip/aria-label.
+    const notesBtn = wrapper.find('.prt-icon-btn.prt-notes-btn')
+    expect(notesBtn.attributes('aria-label')).toContain('1 unresolved')
+    expect(notesBtn.find('.prt-icon-count').text()).toBe('1')
 
-    await wrapper.find('.prt-notes-btn').trigger('click')
+    await notesBtn.trigger('click')
     const notes = wrapper.findAll('.prt-note')
     expect(notes).toHaveLength(2)
     expect(notes[0].find('.prt-note-author').text()).toBe('user')
@@ -319,7 +349,9 @@ describe('PlanReviewToolbar – notes', () => {
       reviewNotes: [{ id: 'n2', author: 'ai', text: 'Existing', resolved: true, reply: '', anchor: '' }],
     })
     const { wrapper, writes } = await mountToolbar(planDoc(meta))
-    await wrapper.find('.prt-notes-btn').trigger('click')
+    // Nothing unresolved yet, so Review Notes sits in the ⋯ menu.
+    await openOverflow(wrapper)
+    await wrapper.find('.prt-menu .prt-notes-btn').trigger('click')
 
     await wrapper.find('.prt-input').setValue('  Please add tests  ')
     await wrapper.find('.prt-send').trigger('click')
@@ -336,14 +368,18 @@ describe('PlanReviewToolbar – notes', () => {
       anchor: '',
     })
     expect((wrapper.find('.prt-input').element as HTMLInputElement).value).toBe('')
-    expect(wrapper.find('.prt-notes-btn').text()).toContain('1 unresolved')
+    // The now-unresolved note promotes the button back onto the bar.
+    expect(wrapper.find('.prt-icon-btn.prt-notes-btn').attributes('aria-label')).toContain(
+      '1 unresolved',
+    )
   })
 })
 
 describe('PlanReviewToolbar – IME composition', () => {
   it('ignores Enter pressed during IME composition', async () => {
     const { wrapper, writes } = await mountToolbar(planDoc(baseMeta()))
-    await wrapper.find('.prt-notes-btn').trigger('click')
+    await openOverflow(wrapper)
+    await wrapper.find('.prt-menu .prt-notes-btn').trigger('click')
     await wrapper.find('.prt-input').setValue('中文留言')
 
     await wrapper.find('.prt-input').trigger('keydown', { key: 'Enter', isComposing: true })
@@ -355,7 +391,8 @@ describe('PlanReviewToolbar – IME composition', () => {
 
   it('submits on Enter when not composing', async () => {
     const { wrapper, writes } = await mountToolbar(planDoc(baseMeta()))
-    await wrapper.find('.prt-notes-btn').trigger('click')
+    await openOverflow(wrapper)
+    await wrapper.find('.prt-menu .prt-notes-btn').trigger('click')
     await wrapper.find('.prt-input').setValue('中文留言')
 
     await wrapper.find('.prt-input').trigger('keydown', { key: 'Enter', isComposing: false })
@@ -398,7 +435,8 @@ describe('PlanReviewToolbar – read-before-write', () => {
 
   it('recomputes the submitted note id against fresh notes', async () => {
     const { wrapper, writes, setContent } = await mountToolbar(planDoc(baseMeta()))
-    await wrapper.find('.prt-notes-btn').trigger('click')
+    await openOverflow(wrapper)
+    await wrapper.find('.prt-menu .prt-notes-btn').trigger('click')
 
     // External agent appended n5 after the toolbar's initial read.
     setContent(
@@ -445,6 +483,7 @@ describe('PlanReviewToolbar – share to git', () => {
     const freshDoc = planDoc(baseMeta({ stage: 'approved', approvedAt: '2026-07-19T00:00:00Z' }))
     setContent(freshDoc)
 
+    await openOverflow(wrapper)
     await wrapper.find('.prt-share').trigger('click')
     await flushPromises()
 
@@ -460,6 +499,7 @@ describe('PlanReviewToolbar – share to git', () => {
       failWrite: 'disk full',
     })
 
+    await openOverflow(wrapper)
     await wrapper.find('.prt-share').trigger('click')
     await flushPromises()
 
@@ -539,6 +579,7 @@ describe('PlanReviewToolbar – stage controls', () => {
     confirmMock.mockClear()
     confirmMock.mockResolvedValueOnce(true)
     const { wrapper, writes } = await mountToolbar(markupDoc(baseMeta()))
+    await openOverflow(wrapper)
     expect(wrapper.find('.prt-reopen').exists()).toBe(false)
 
     await wrapper.find('.prt-abandon').trigger('click')
@@ -555,6 +596,7 @@ describe('PlanReviewToolbar – stage controls', () => {
     confirmMock.mockResolvedValueOnce(false)
     const { wrapper, writes } = await mountToolbar(markupDoc(baseMeta()))
 
+    await openOverflow(wrapper)
     await wrapper.find('.prt-abandon').trigger('click')
     await flushPromises()
 
@@ -564,6 +606,7 @@ describe('PlanReviewToolbar – stage controls', () => {
   it('reopens a done plan into in-review and clears approvedAt', async () => {
     const meta = baseMeta({ stage: 'done', approvedAt: '2026-07-01T00:00:00Z' })
     const { wrapper, writes } = await mountToolbar(markupDoc(meta))
+    await openOverflow(wrapper)
     expect(wrapper.find('.prt-abandon').exists()).toBe(false)
 
     await wrapper.find('.prt-reopen').trigger('click')
@@ -583,6 +626,7 @@ describe('PlanReviewToolbar – stage controls', () => {
     // External agent finished the plan after the toolbar's read.
     setContent(markupDoc(baseMeta({ stage: 'done' })))
 
+    await openOverflow(wrapper)
     await wrapper.find('.prt-abandon').trigger('click')
     await flushPromises()
 
@@ -652,6 +696,7 @@ describe('PlanReviewToolbar – history panel', () => {
       },
     })
 
+    await openOverflow(wrapper)
     await wrapper.find('.prt-history-btn').trigger('click')
     await flushPromises()
 
@@ -668,6 +713,7 @@ describe('PlanReviewToolbar – history panel', () => {
       history: { error: 'not a directory' },
     })
 
+    await openOverflow(wrapper)
     await wrapper.find('.prt-history-btn').trigger('click')
     await flushPromises()
 
@@ -679,6 +725,7 @@ describe('PlanReviewToolbar – history panel', () => {
     const { wrapper } = await mountToolbar(planDoc(baseMeta()), {
       history: { entries: [{ name: '20260601T080000_draft.html', is_dir: false }] },
     })
+    await openOverflow(wrapper)
     await wrapper.find('.prt-history-btn').trigger('click')
     await flushPromises()
 
@@ -715,6 +762,7 @@ describe('PlanReviewToolbar – history panel', () => {
         files: { [`${HISTORY_DIR}/20260601T080000_draft.html`]: snapshot },
       },
     })
+    await openOverflow(wrapper)
     await wrapper.find('.prt-history-btn').trigger('click')
     await flushPromises()
 
@@ -738,6 +786,7 @@ describe('PlanReviewToolbar – history panel', () => {
         files: { [`${HISTORY_DIR}/20260601T080000_in-review.html`]: doc },
       },
     })
+    await openOverflow(wrapper)
     await wrapper.find('.prt-history-btn').trigger('click')
     await flushPromises()
 
@@ -1148,12 +1197,208 @@ describe('PlanReviewToolbar – optimistic write lock', () => {
   it('share-to-git snapshots write without expected_mtime (overwrite semantics)', async () => {
     const { wrapper, writeAttempts } = await mountToolbar(planDoc(baseMeta()))
 
+    await openOverflow(wrapper)
     await wrapper.find('.prt-share').trigger('click')
     await flushPromises()
 
     const shareAttempt = writeAttempts.find((a) => a.relPath === '.plans/test-plan_a1b2c3.html')
     expect(shareAttempt).toBeDefined()
     expect(shareAttempt!.expectedMtime).toBeUndefined()
+  })
+})
+
+// ── Overflow (⋯) menu ──────────────────────────────────────────────────────
+// The bar keeps a handful of icon buttons; everything else moved behind ⋯ and
+// is only rendered while the menu is open.
+
+const MENU_ONLY_ACTIONS = [
+  '.prt-history-btn',
+  '.prt-share',
+  '.prt-open-browser',
+  '.prt-archive',
+  '.prt-abandon',
+  '.prt-delete',
+]
+
+describe('PlanReviewToolbar – overflow menu', () => {
+  it('keeps the moved actions out of the DOM until ⋯ is clicked', async () => {
+    const { wrapper } = await mountToolbar(planDoc(baseMeta()))
+    expect(wrapper.find('.prt-menu').exists()).toBe(false)
+    for (const sel of MENU_ONLY_ACTIONS) expect(wrapper.find(sel).exists()).toBe(false)
+
+    await openOverflow(wrapper)
+    expect(wrapper.find('.prt-menu').exists()).toBe(true)
+    for (const sel of MENU_ONLY_ACTIONS) expect(wrapper.find(sel).exists()).toBe(true)
+  })
+
+  it('closes on a backdrop click', async () => {
+    const { wrapper } = await mountToolbar(planDoc(baseMeta()))
+    await openOverflow(wrapper)
+
+    await wrapper.find('.prt-menu-backdrop').trigger('click')
+
+    expect(wrapper.find('.prt-menu').exists()).toBe(false)
+  })
+
+  it('closeActiveOverlay dismisses the menu before collapsing an open panel', async () => {
+    const { wrapper } = await mountToolbar(planDoc(baseMeta()))
+    const vm = wrapper.vm as unknown as { closeActiveOverlay: () => boolean }
+    await wrapper.find('.prt-todos-btn').trigger('click')
+    await openOverflow(wrapper)
+
+    // ESC peels the topmost surface only: the menu first, the panel under it
+    // survives to the next press.
+    expect(vm.closeActiveOverlay()).toBe(true)
+    await nextTick()
+    expect(wrapper.find('.prt-menu').exists()).toBe(false)
+    expect(wrapper.find('.prt-todo-row').exists()).toBe(true)
+
+    expect(vm.closeActiveOverlay()).toBe(true)
+    await nextTick()
+    expect(wrapper.find('.prt-todo-row').exists()).toBe(false)
+  })
+
+  it('keeps Review Notes on the bar only while notes are unresolved', async () => {
+    // All resolved: nothing for the review stage to surface, so it demotes
+    // into the menu.
+    const { wrapper: resolved } = await mountToolbar(
+      planDoc(
+        baseMeta({
+          reviewNotes: [{ id: 'n1', author: 'user', text: 'Done', resolved: true, reply: '', anchor: '' }],
+        }),
+      ),
+    )
+    expect(resolved.find('.prt-icon-btn.prt-notes-btn').exists()).toBe(false)
+    await openOverflow(resolved)
+    expect(resolved.find('.prt-menu .prt-notes-btn').exists()).toBe(true)
+
+    // One still open: promoted onto the bar and no longer duplicated in the menu.
+    const { wrapper: open } = await mountToolbar(
+      planDoc(
+        baseMeta({
+          reviewNotes: [{ id: 'n1', author: 'user', text: 'Open', resolved: false, reply: '', anchor: '' }],
+        }),
+      ),
+    )
+    expect(open.find('.prt-icon-btn.prt-notes-btn').exists()).toBe(true)
+    await openOverflow(open)
+    expect(open.find('.prt-menu .prt-notes-btn').exists()).toBe(false)
+  })
+})
+
+describe('PlanReviewToolbar – delete', () => {
+  it('does nothing when the first confirmation is declined', async () => {
+    confirmMock.mockClear()
+    confirmMock.mockResolvedValueOnce(false)
+    const { wrapper, deleteAttempts } = await mountToolbar(planDoc(baseMeta()))
+
+    await openOverflow(wrapper)
+    await wrapper.find('.prt-delete').trigger('click')
+    await flushPromises()
+
+    expect(confirmMock).toHaveBeenCalledTimes(1)
+    expect(deleteAttempts).toHaveLength(0)
+    expect(wrapper.emitted('deleted')).toBeUndefined()
+  })
+
+  it('asks a second time for an approved plan and aborts when that is declined', async () => {
+    confirmMock.mockClear()
+    confirmMock.mockResolvedValueOnce(true).mockResolvedValueOnce(false)
+    const { wrapper, deleteAttempts } = await mountToolbar(
+      planDoc(baseMeta({ stage: 'approved', approvedAt: '2026-07-19T00:00:00Z' })),
+    )
+
+    await openOverflow(wrapper)
+    await wrapper.find('.prt-delete').trigger('click')
+    await flushPromises()
+
+    // Same two-step guard as the plan list: a plan under review or already
+    // approved is worth losing work over, so it confirms twice.
+    expect(confirmMock).toHaveBeenCalledTimes(2)
+    expect(deleteAttempts).toHaveLength(0)
+    expect(wrapper.emitted('deleted')).toBeUndefined()
+  })
+
+  it('deletes the file and emits deleted with the plan rel path', async () => {
+    confirmMock.mockClear()
+    const { wrapper, deleteAttempts } = await mountToolbar(planDoc(baseMeta()))
+
+    await openOverflow(wrapper)
+    await wrapper.find('.prt-delete').trigger('click')
+    await flushPromises()
+
+    expect(deleteAttempts).toEqual([{ workspacePath: '/ws', relPath: PLAN_REL_PATH }])
+    expect(wrapper.emitted('deleted')).toEqual([[PLAN_REL_PATH]])
+  })
+
+  it('toasts the backend error and emits nothing when the delete fails', async () => {
+    confirmMock.mockClear()
+    toastMock.mockClear()
+    const { wrapper, deleteAttempts } = await mountToolbar(planDoc(baseMeta()), {
+      failDelete: 'permission denied',
+    })
+
+    await openOverflow(wrapper)
+    await wrapper.find('.prt-delete').trigger('click')
+    await flushPromises()
+
+    expect(deleteAttempts).toHaveLength(1)
+    expect(toastMock).toHaveBeenCalledWith('permission denied', { type: 'error' })
+    // The host must not drop the open document when the file is still there.
+    expect(wrapper.emitted('deleted')).toBeUndefined()
+  })
+})
+
+describe('PlanReviewToolbar – narrow-bar demotion', () => {
+  // happy-dom reports every element as 0×0, so drive refitBar() against a
+  // stubbed bar whose scrollWidth shrinks as buttons leave it — that is the
+  // feedback loop the real layout provides.
+  async function measuredBar(): Promise<{ wrapper: VueWrapper; fitTo: (px: number) => Promise<void> }> {
+    const { wrapper } = await mountToolbar(
+      planDoc(baseMeta({ stage: 'approved', approvedAt: '2026-07-19T00:00:00Z' })),
+    )
+    const el = wrapper.find('.prt-bar').element
+    let clientWidth = 0
+    Object.defineProperty(el, 'clientWidth', { get: () => clientWidth, configurable: true })
+    Object.defineProperty(el, 'scrollWidth', {
+      get: () => el.querySelectorAll('.prt-icon-btn').length * 30,
+      configurable: true,
+    })
+    const refit = (wrapper.vm as unknown as { refitBar: () => Promise<void> }).refitBar
+    return {
+      wrapper,
+      fitTo: async (px: number) => {
+        clientWidth = px
+        await refit()
+        await nextTick()
+      },
+    }
+  }
+
+  it('demotes Todos first, then Execute, then Approve as the bar narrows', async () => {
+    const { wrapper, fitTo } = await measuredBar()
+    // Todos, Execute, Approve, ⋯ — all four fit.
+    await fitTo(200)
+    await openOverflow(wrapper)
+    expect(wrapper.find('.prt-icon-btn.prt-todos-btn').exists()).toBe(true)
+    expect(wrapper.find('.prt-menu-todos').exists()).toBe(false)
+
+    // Room for three: Todos goes first.
+    await fitTo(100)
+    expect(wrapper.find('.prt-icon-btn.prt-todos-btn').exists()).toBe(false)
+    expect(wrapper.find('.prt-menu-todos').exists()).toBe(true)
+    expect(wrapper.find('.prt-icon-btn.prt-execute').exists()).toBe(true)
+    expect(wrapper.find('.prt-icon-btn.prt-approve').exists()).toBe(true)
+
+    // Room for two: Execute follows.
+    await fitTo(70)
+    expect(wrapper.find('.prt-menu-execute').exists()).toBe(true)
+    expect(wrapper.find('.prt-icon-btn.prt-approve').exists()).toBe(true)
+
+    // Approve is last to go — it is what the review flow leads to.
+    await fitTo(20)
+    expect(wrapper.find('.prt-icon-btn.prt-approve').exists()).toBe(false)
+    expect(wrapper.find('.prt-menu-approve').exists()).toBe(true)
   })
 })
 
@@ -1174,20 +1419,27 @@ describe('PlanReviewToolbar – outline navigation', () => {
 
   it('lists section and phase anchors and emits scroll-to-anchor on pick', async () => {
     const { wrapper } = await mountToolbar(outlineDoc(baseMeta()))
-    const select = wrapper.find('.prt-outline')
-    expect(select.exists()).toBe(true)
-    const labels = wrapper.findAll('.prt-outline option').map((o) => o.text())
-    expect(labels).toEqual(['Outline', 'Goals', 'Phases', 'Phase A · Alpha'])
+    await openOverflow(wrapper)
+    const parent = wrapper.find('.prt-menu-outline')
+    expect(parent.exists()).toBe(true)
+    expect(parent.text()).toContain('Outline')
+    // The anchors are a submenu: collapsed until the Outline row is expanded.
+    expect(wrapper.find('.prt-menu-anchor').exists()).toBe(false)
 
-    await select.setValue('Phase A · Alpha')
+    await parent.trigger('click')
+    const labels = wrapper.findAll('.prt-menu-anchor').map((b) => b.text())
+    expect(labels).toEqual(['Goals', 'Phases', 'Phase A · Alpha'])
+
+    await wrapper.findAll('.prt-menu-anchor')[2].trigger('click')
     expect(wrapper.emitted('scroll-to-anchor')).toEqual([['Phase A · Alpha']])
-    // The select resets so the same entry can be picked again.
-    expect((select.element as HTMLSelectElement).value).toBe('')
+    // Picking dismisses the menu; reopening offers the same entry again.
+    expect(wrapper.find('.prt-menu').exists()).toBe(false)
   })
 
-  it('hides the outline dropdown when the document has no headings', async () => {
+  it('hides the outline entry when the document has no headings', async () => {
     const { wrapper } = await mountToolbar(planDoc(baseMeta()))
-    expect(wrapper.find('.prt-outline').exists()).toBe(false)
+    await openOverflow(wrapper)
+    expect(wrapper.find('.prt-menu-outline').exists()).toBe(false)
   })
 })
 
@@ -1237,7 +1489,9 @@ describe('PlanReviewToolbar – review note CRUD', () => {
       reviewNotes: [{ id: 'n1', author: 'user', text: 'old', resolved: true, reply: '', anchor: '' }],
     })
     const { wrapper, writes } = await mountToolbar(planDoc(meta0))
-    await wrapper.find('.prt-notes-btn').trigger('click')
+    // The only note is resolved, so Review Notes lives in the ⋯ menu.
+    await openOverflow(wrapper)
+    await wrapper.find('.prt-menu .prt-notes-btn').trigger('click')
     await wrapper.find('.prt-note .prt-ghost').trigger('click') // Edit
     await wrapper.find('.prt-note .prt-input').setValue('new text')
     await wrapper.find('.prt-note .prt-send').trigger('click')
@@ -1322,8 +1576,10 @@ describe('PlanReviewToolbar – ESC overlay query', () => {
     const { wrapper } = await mountToolbar(planDoc(baseMeta()))
     const vm = wrapper.vm as unknown as { closeActiveOverlay: () => boolean }
     expect(vm.closeActiveOverlay()).toBe(false)
-    // Unsent note text is an overlay.
-    await wrapper.find('.prt-notes-btn').trigger('click')
+    // Unsent note text is an overlay. No unresolved notes here, so Review
+    // Notes is opened from the ⋯ menu.
+    await openOverflow(wrapper)
+    await wrapper.find('.prt-menu .prt-notes-btn').trigger('click')
     await wrapper.find('.prt-new .prt-input').setValue('draft note')
     expect(vm.closeActiveOverlay()).toBe(true) // clears the composer text first
     expect(vm.closeActiveOverlay()).toBe(true) // then collapses the still-open notes panel
@@ -1450,6 +1706,7 @@ describe('PlanReviewToolbar – markdown plans', () => {
       global: { plugins: [i18n] },
     })
     await flushPromises()
+    await openOverflow(wrapper)
     await wrapper.find('.prt-history-btn').trigger('click')
     await flushPromises()
     const rows = wrapper.findAll('.prt-history-row')
@@ -1461,6 +1718,7 @@ describe('PlanReviewToolbar – markdown plans', () => {
 describe('PlanReviewToolbar – archive', () => {
   it('shows the Archive button and no archived pill for an unarchived plan', async () => {
     const { wrapper } = await mountToolbar(planDoc(baseMeta()))
+    await openOverflow(wrapper)
     expect(wrapper.find('.prt-archive').exists()).toBe(true)
     expect(wrapper.find('.prt-unarchive').exists()).toBe(false)
     expect(wrapper.find('.prt-archived-pill').exists()).toBe(false)
@@ -1468,13 +1726,17 @@ describe('PlanReviewToolbar – archive', () => {
 
   it('archives the plan, writing archivedAt (stage untouched) and showing the pill + Unarchive', async () => {
     const { wrapper, writes } = await mountToolbar(planDoc(baseMeta()))
+    await openOverflow(wrapper)
     await wrapper.find('.prt-archive').trigger('click')
     await flushPromises()
 
     const written = lastWrittenMeta(writes)
     expect(typeof written.archivedAt).toBe('string')
     expect(written.stage).toBe('in-review') // archive is orthogonal to stage
+    // The pill lives on the bar; the archive/unarchive pair needs the menu
+    // reopened because acting on an item dismisses it.
     expect(wrapper.find('.prt-archived-pill').exists()).toBe(true)
+    await openOverflow(wrapper)
     expect(wrapper.find('.prt-unarchive').exists()).toBe(true)
     expect(wrapper.find('.prt-archive').exists()).toBe(false)
   })
@@ -1483,11 +1745,13 @@ describe('PlanReviewToolbar – archive', () => {
     const { wrapper, writes } = await mountToolbar(planDoc(baseMeta({ archivedAt: '2026-07-20T00:00:00Z' })))
     expect(wrapper.find('.prt-archived-pill').exists()).toBe(true)
 
+    await openOverflow(wrapper)
     await wrapper.find('.prt-unarchive').trigger('click')
     await flushPromises()
 
     expect(lastWrittenMeta(writes).archivedAt).toBeNull()
     expect(wrapper.find('.prt-archived-pill').exists()).toBe(false)
+    await openOverflow(wrapper)
     expect(wrapper.find('.prt-archive').exists()).toBe(true)
   })
 })

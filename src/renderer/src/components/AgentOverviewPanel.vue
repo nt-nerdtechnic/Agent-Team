@@ -195,7 +195,21 @@ function statusLabel(status: AgentOverviewStatus): string {
 .ao-row[data-status='error'] .ao-dot,
 .ao-row[data-status='exited'] .ao-dot { background: var(--danger-fg); }
 .ao-row[data-status='disconnected'] .ao-status { color: var(--attention-fg); }
-.ao-row[data-status='disconnected'] .ao-dot { background: var(--attention-fg); }
+/* Hollow ring so a dropped connection never reads as the (also amber) idle dot. */
+.ao-row[data-status='disconnected'] .ao-dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--attention-fg);
+}
+.ao-row[data-status='waiting'] .ao-dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--text-muted);
+}
+.ao-row[data-status='idle'] .ao-status { color: var(--attention-fg); }
+.ao-row[data-status='idle'] .ao-dot { background: var(--attention-fg); }
+.ao-row[data-status='awaiting'] .ao-status { color: var(--warning-fg); }
+.ao-row[data-status='awaiting'] .ao-dot { background: var(--warning-fg); }
+.ao-row[data-status='stopped'] .ao-status { color: var(--text-secondary); }
+.ao-row[data-status='stopped'] .ao-dot { background: var(--text-disabled); }
 .ao-row[data-status='waiting'] .ao-name { color: var(--text-secondary); }
 .ao-empty {
   padding: 10px 8px;

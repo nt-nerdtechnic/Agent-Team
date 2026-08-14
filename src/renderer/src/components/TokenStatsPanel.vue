@@ -30,6 +30,8 @@ interface Props {
   stages: Stage[]
   panes: ActivePane[]
   pipeline: PipelineStatusView
+  /** Owned by the parent: this panel renders it and asks for changes. */
+  expanded: boolean
 }
 
 const props = defineProps<Props>()
@@ -41,19 +43,15 @@ const { snapshot, loading, reset } = useTokens(props.backend, workspacePathRef)
 
 // ─────────────────────── Sticky panel state ───────────────────────────────
 
-function loadBool(key: string, fallback: boolean): boolean {
-  const v = settingsGet<string | null>(key, null)
-  return v === null ? fallback : v === '1'
-}
-function saveBool(key: string, v: boolean): void {
-  settingsSet(key, v ? '1' : '0')
-}
-
-const expanded = ref<boolean>(loadBool('agentTeam.tokenPanel.expanded', false))
-watch(expanded, (v) => {
-  saveBool('agentTeam.tokenPanel.expanded', v)
+// Controlled, not mirrored. This used to be a local ref seeded from the same
+// settings key the parent reads, with `update:expanded` emitted one way — so
+// `v-model:expanded` looked two-way but was not: the parent could never open or
+// close the panel, and both sides persisted the key independently. The parent
+// owns the value and the write; this component only asks.
+const expanded = computed(() => props.expanded)
+function setExpanded(v: boolean): void {
   emit('update:expanded', v)
-}, { immediate: true })
+}
 
 // Active right-panel tab — the pipeline History timeline (default), token stats,
 // Tasker (machine-level crontab / LaunchAgents), or the inter-CLI message log.
@@ -171,20 +169,20 @@ async function confirmReset(scope: ResetScope): Promise<void> {
   <aside class="token-panel" :class="{ 'is-expanded': expanded, 'is-collapsed': !expanded }">
     <!-- Collapsed rail: one icon per tab — click to expand + switch tab -->
     <div v-if="!expanded" class="rail">
-      <button class="rail-btn" :class="{ active: tab === 'history' }" title="Expand pipeline history" @click="tab = 'history'; expanded = true">
+      <button class="rail-btn" :class="{ active: tab === 'history' }" title="Expand pipeline history" @click="tab = 'history'; setExpanded(true)">
         <span class="rail-icon">📜</span>
         <span class="rail-label">{{ $t('label.history') }}</span>
       </button>
-      <button class="rail-btn" :class="{ active: tab === 'tokens' }" :title="`Expand token stats · ${collapsedTotal} so far`" @click="tab = 'tokens'; expanded = true">
+      <button class="rail-btn" :class="{ active: tab === 'tokens' }" :title="`Expand token stats · ${collapsedTotal} so far`" @click="tab = 'tokens'; setExpanded(true)">
         <span class="rail-icon">📊</span>
         <span class="rail-label">{{ $t('label.tokens') }}</span>
         <span v-if="runTotals.calls > 0" class="rail-badge">{{ collapsedTotal }}</span>
       </button>
-      <button class="rail-btn" :class="{ active: tab === 'tasker' }" title="Expand scheduled tasks" @click="tab = 'tasker'; expanded = true">
+      <button class="rail-btn" :class="{ active: tab === 'tasker' }" title="Expand scheduled tasks" @click="tab = 'tasker'; setExpanded(true)">
         <span class="rail-icon">🗓</span>
         <span class="rail-label">{{ $t('label.tasker') }}</span>
       </button>
-      <button class="rail-btn" :class="{ active: tab === 'messages' }" :title="$t('msg.expand-rail')" @click="tab = 'messages'; expanded = true">
+      <button class="rail-btn" :class="{ active: tab === 'messages' }" :title="$t('msg.expand-rail')" @click="tab = 'messages'; setExpanded(true)">
         <span class="rail-icon">✉</span>
         <span class="rail-label">{{ $t('label.messages') }}</span>
       </button>
@@ -193,7 +191,7 @@ async function confirmReset(scope: ResetScope): Promise<void> {
     <!-- Expanded panel -->
     <template v-else>
       <header class="hdr">
-        <button class="collapse" :title="$t('action.collapse')" @click="expanded = false">‹</button>
+        <button class="collapse" :title="$t('action.collapse')" @click="setExpanded(false)">‹</button>
         <div class="tabs">
           <button class="tab" :class="{ active: tab === 'history' }" @click="tab = 'history'">📜 {{ $t('label.history') }}</button>
           <button class="tab" :class="{ active: tab === 'tokens' }" @click="tab = 'tokens'">📊 {{ $t('label.tokens') }}</button>
@@ -307,7 +305,11 @@ async function confirmReset(scope: ResetScope): Promise<void> {
 
 <style scoped>
 .token-panel {
+  /* Same reasoning as ControlPane's .sidebar: own the fill rather than relying
+     on the grid track to supply it. */
+  width: 100%;
   height: 100%;
+  min-width: 0;
   background: var(--bg-base);
   border-left: 1px solid var(--border-muted);
   display: flex;

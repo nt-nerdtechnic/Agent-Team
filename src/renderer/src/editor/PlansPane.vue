@@ -189,6 +189,8 @@ watch(() => props.workspacePath, (next) => {
     DEFAULT_SORT_DIRECTION[sortMode.value],
   )
   groupMode.value = loadStoredChoice(groupStorageKey(next), PLAN_GROUP_MODES, 'flat')
+  recentRelPaths.value = loadStringList(recentStorageKey(next))
+  pinnedRelPaths.value = loadStringList(pinnedStorageKey(next))
   void loadPlans()
 })
 watch(() => props.backend.status?.value, (status) => {
@@ -478,8 +480,146 @@ function isSectionCollapsed(key: string): boolean {
   return collapsedSections.value.has(key)
 }
 
+// ── Recent / pinned ───────────────────────────────────────────────────────
+// The list below orders by mtime, which any CLI agent writing another plan
+// outranks — it does not answer "the one I was working on". This section
+// records opens instead, and lets long-running plans be pinned above them.
+// Both are per-workspace localStorage, same fail-safe contract as the rest.
+const RECENT_KEY_PREFIX = 'navide.plans.recent.'
+const PINNED_KEY_PREFIX = 'navide.plans.pinned.'
+/** Recent entries kept on disk; the section shows at most this many. */
+const RECENT_LIMIT = 5
+
+function recentStorageKey(workspacePath: string): string {
+  return `${RECENT_KEY_PREFIX}${workspacePath}`
+}
+function pinnedStorageKey(workspacePath: string): string {
+  return `${PINNED_KEY_PREFIX}${workspacePath}`
+}
+
+function loadStringList(storageKey: string): string[] {
+  try {
+    const raw = localStorage.getItem(storageKey)
+    if (raw === null) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((v): v is string => typeof v === 'string')
+  } catch {
+    return []
+  }
+}
+
+function saveStringList(storageKey: string, list: string[]): void {
+  try {
+    localStorage.setItem(storageKey, JSON.stringify(list))
+  } catch {
+    // Storage unavailable (quota/private mode) — persistence is best-effort.
+  }
+}
+
+const recentRelPaths = ref<string[]>(loadStringList(recentStorageKey(props.workspacePath)))
+const pinnedRelPaths = ref<string[]>(loadStringList(pinnedStorageKey(props.workspacePath)))
+
+/**
+ * Record a plan as just-opened. Called for clicks in this pane and, in the plan
+ * window, for every other way a document is opened (launch path, plan:open-doc,
+ * the restore of the last opened plan).
+ */
+function noteOpened(relPath: string): void {
+  if (!relPath) return
+  const next = [relPath, ...recentRelPaths.value.filter((p) => p !== relPath)].slice(0, RECENT_LIMIT)
+  recentRelPaths.value = next
+  saveStringList(recentStorageKey(props.workspacePath), next)
+}
+
+function isPinned(relPath: string): boolean {
+  return pinnedRelPaths.value.includes(relPath)
+}
+
+function togglePin(relPath: string): void {
+  const next = isPinned(relPath)
+    ? pinnedRelPaths.value.filter((p) => p !== relPath)
+    : [...pinnedRelPaths.value, relPath]
+  pinnedRelPaths.value = next
+  saveStringList(pinnedStorageKey(props.workspacePath), next)
+}
+
+// Pinned first (in pin order), then the most recently opened. A remembered
+// path with no matching row — deleted or renamed since — simply drops out.
+const recentRows = computed<PlanListRow[]>(() => {
+  const byRelPath = new Map(plans.value.map((p) => [p.relPath, p]))
+  const inSection = (relPath: string): PlanItem | null => {
+    const item = byRelPath.get(relPath)
+    if (!item || !itemMatchesSearch(item)) return null
+    if (stageFilter.value !== 'all' && item.meta?.stage !== stageFilter.value) return null
+    return item
+  }
+  const pinned = pinnedRelPaths.value.map(inSection).filter((p): p is PlanItem => p !== null)
+  const recent = recentRelPaths.value
+    .filter((relPath) => !isPinned(relPath))
+    .map(inSection)
+    .filter((p): p is PlanItem => p !== null)
+  return [...pinned, ...recent].map(toListRow)
+})
+
 function openPlan(item: PlanItem): void {
+  noteOpened(item.relPath)
   emit('open-file', { filepath: item.relPath, name: item.name, root: planRoot.value })
+}
+
+// ── Quick open ────────────────────────────────────────────────────────────
+// Name-first way into a plan when the workspace holds hundreds: type part of
+// the title or filename, Enter opens it. Matching is the search box's, and the
+// list it searches is already in memory — no extra backend call.
+const QUICK_OPEN_LIMIT = 8
+const quickOpenActive = ref(false)
+const quickOpenQuery = ref('')
+const quickOpenIndex = ref(0)
+const quickOpenInput = ref<HTMLInputElement | null>(null)
+
+const quickOpenRows = computed<PlanListRow[]>(() => {
+  // Nothing typed yet: offer the recent/pinned shortlist rather than an
+  // arbitrary slice of the whole workspace.
+  if (!quickOpenQuery.value.trim()) return recentRows.value.slice(0, QUICK_OPEN_LIMIT)
+  return sortRows(
+    plans.value.flatMap((p) =>
+      planMatchesQuery(quickOpenQuery.value, {
+        title: p.meta?.name ?? p.name,
+        filename: p.name,
+        overview: p.meta?.overview,
+      })
+        ? [toListRow(p)]
+        : [],
+    ),
+  ).slice(0, QUICK_OPEN_LIMIT)
+})
+
+watch(quickOpenQuery, () => (quickOpenIndex.value = 0))
+
+async function openQuickOpen(): Promise<void> {
+  quickOpenActive.value = true
+  quickOpenQuery.value = ''
+  quickOpenIndex.value = 0
+  await nextTick()
+  quickOpenInput.value?.focus()
+}
+
+function closeQuickOpen(): void {
+  quickOpenActive.value = false
+  quickOpenQuery.value = ''
+}
+
+function moveQuickOpen(delta: number): void {
+  const count = quickOpenRows.value.length
+  if (!count) return
+  quickOpenIndex.value = (quickOpenIndex.value + delta + count) % count
+}
+
+function confirmQuickOpen(): void {
+  const row = quickOpenRows.value[quickOpenIndex.value]
+  if (!row) return
+  closeQuickOpen()
+  openPlan(row.item)
 }
 
 async function deleteCompleted(): Promise<void> {
@@ -669,10 +809,14 @@ function closeActiveOverlay(): boolean {
     cancelRename()
     return true
   }
+  if (quickOpenActive.value) {
+    closeQuickOpen()
+    return true
+  }
   return false
 }
 
-defineExpose({ closeActiveOverlay })
+defineExpose({ closeActiveOverlay, noteOpened, openQuickOpen })
 
 async function submitRename(): Promise<void> {
   const item = renameTarget.value
@@ -918,6 +1062,55 @@ async function ctxUpgradeToPlan(): Promise<void> {
         </div>
       </div>
       <div v-if="noVisibleResults" class="plans-empty">{{ t('pane.plans.search-no-results') }}</div>
+
+      <section v-if="recentRows.length" class="plans-section">
+        <div
+          class="plans-section-head"
+          role="button"
+          tabindex="0"
+          @click="toggleSection('recent')"
+          @keydown.enter.prevent="toggleSection('recent')"
+          @keydown.space.prevent="toggleSection('recent')"
+        >
+          <span class="plans-section-title">
+            <span class="plans-section-chevron" :class="{ collapsed: isSectionCollapsed('recent') }">▾</span>
+            {{ t('pane.plans.section-recent') }}
+          </span>
+          <span>{{ recentRows.length }}</span>
+        </div>
+        <template v-if="!isSectionCollapsed('recent')">
+          <div
+            v-for="row in recentRows"
+            :key="row.item.relPath"
+            class="plan-row plan-row--compact"
+            role="button"
+            tabindex="0"
+            draggable="true"
+            @dragstart="onPlanRowDragStart($event, row.item.relPath, row.meta?.name ?? row.item.name, row.meta?.overview)"
+            @click="openPlan(row.item)"
+            @keydown.enter.prevent="openPlan(row.item)"
+            @keydown.space.prevent="openPlan(row.item)"
+            @contextmenu.prevent="openCtxMenu($event, row.item)"
+          >
+            <span class="plan-row-name">{{ row.meta?.name ?? row.item.name }}</span>
+            <span v-if="row.meta" class="plan-chip" :class="`plan-chip--stage-${row.meta.stage}`">
+              {{ row.meta.stage }}
+            </span>
+            <span v-else class="plan-chip">{{ t('pane.plans.doc-badge') }}</span>
+            <button
+              class="plan-row-pin"
+              type="button"
+              :class="{ 'plan-row-pin--on': isPinned(row.item.relPath) }"
+              :title="isPinned(row.item.relPath) ? t('pane.plans.unpin') : t('pane.plans.pin')"
+              :aria-label="isPinned(row.item.relPath) ? t('pane.plans.unpin') : t('pane.plans.pin')"
+              :aria-pressed="isPinned(row.item.relPath)"
+              @click.stop="togglePin(row.item.relPath)"
+              @keydown.enter.stop
+              @keydown.space.stop
+            >📌</button>
+          </div>
+        </template>
+      </section>
 
       <section v-if="showFlatSection" class="plans-section">
         <div
@@ -1231,6 +1424,38 @@ async function ctxUpgradeToPlan(): Promise<void> {
         </div>
       </div>
     </template>
+
+    <template v-if="quickOpenActive">
+      <div class="ctx-backdrop" @click="closeQuickOpen" />
+      <div class="quick-open">
+        <input
+          ref="quickOpenInput"
+          v-model="quickOpenQuery"
+          class="rename-input"
+          :placeholder="t('pane.plans.quick-open-placeholder')"
+          @keydown.down.prevent="moveQuickOpen(1)"
+          @keydown.up.prevent="moveQuickOpen(-1)"
+          @keydown.enter.prevent="confirmQuickOpen"
+          @keydown.escape="closeQuickOpen"
+        />
+        <div v-if="!quickOpenRows.length" class="quick-open-empty">
+          {{ t('pane.plans.search-no-results') }}
+        </div>
+        <div
+          v-for="(row, i) in quickOpenRows"
+          :key="row.item.relPath"
+          class="quick-open-row"
+          :class="{ 'quick-open-row--active': i === quickOpenIndex }"
+          @mousemove="quickOpenIndex = i"
+          @click="confirmQuickOpen"
+        >
+          <span class="plan-row-name">{{ row.meta?.name ?? row.item.name }}</span>
+          <span v-if="row.meta" class="plan-chip" :class="`plan-chip--stage-${row.meta.stage}`">
+            {{ row.meta.stage }}
+          </span>
+        </div>
+      </div>
+    </template>
   </div>
 </template>
 
@@ -1485,6 +1710,61 @@ async function ctxUpgradeToPlan(): Promise<void> {
   color: var(--danger-fg);
 }
 
+/* Recent/pinned rows are a single line: title, stage, pin toggle. The full row
+   (overview, path, progress) stays the job of the list below. */
+.plan-row--compact {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  padding-right: 28px;
+}
+
+.plan-row--compact .plan-row-name {
+  flex: 1;
+  min-width: 0;
+}
+
+.plan-row-pin {
+  align-items: center;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  font-size: 11px;
+  height: 20px;
+  justify-content: center;
+  /* Hidden until the row is touched — except when pinned, where it is the
+     badge that explains why the row sits at the top. */
+  opacity: 0;
+  padding: 0;
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 20px;
+}
+
+.plan-row-pin--on,
+.plan-row:hover .plan-row-pin,
+.plan-row:focus-within .plan-row-pin {
+  opacity: 1;
+}
+
+.plan-row-pin:not(.plan-row-pin--on) {
+  filter: grayscale(1);
+}
+
+.plan-row-pin:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent-focus);
+  outline-offset: -1px;
+}
+
+.plan-row-pin:hover {
+  background: var(--bg-hover-strong);
+}
+
 .plan-row-name {
   color: var(--text-primary);
   font-size: 12.5px;
@@ -1687,6 +1967,46 @@ async function ctxUpgradeToPlan(): Promise<void> {
   transform: translateX(-50%);
   width: min(360px, 90vw);
   z-index: 41;
+}
+
+/* Quick open sits where the rename dialog does, sized for a result list. */
+.quick-open {
+  background: var(--bg-base);
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.25);
+  left: 50%;
+  padding: 10px;
+  position: fixed;
+  top: 18%;
+  transform: translateX(-50%);
+  width: min(420px, 92vw);
+  z-index: 41;
+}
+
+.quick-open-row {
+  align-items: center;
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+  padding: 5px 8px;
+}
+
+.quick-open-row .plan-row-name {
+  flex: 1;
+  min-width: 0;
+}
+
+.quick-open-row--active {
+  background: var(--bg-hover-strong);
+}
+
+.quick-open-empty {
+  color: var(--text-muted);
+  font-size: 11px;
+  padding: 8px;
 }
 
 .rename-title {

@@ -51,6 +51,7 @@ const emit = defineEmits<{
   (e: 'updated'): void
   (e: 'scroll-to-anchor', anchor: string): void
   (e: 'preview-snapshot', payload: { relPath: string; label: string }): void
+  (e: 'deleted', relPath: string): void
 }>()
 
 const { t } = useI18n()
@@ -160,13 +161,13 @@ const unresolvedCount = computed(() => (meta.value?.reviewNotes ?? []).filter((n
 const canApprove = computed(
   () => (meta.value?.stage === 'draft' || meta.value?.stage === 'in-review') && unresolvedCount.value === 0
 )
-// Outline entries (section h2 / phase-head leading text) for the nav dropdown.
+// Outline entries (section h2 / phase-head leading text) for the ⋯ menu's
+// section-navigation submenu.
 const outline = computed(() => props.store.outline(rawContent.value))
 
-function onOutlinePick(event: Event): void {
-  const select = event.target as HTMLSelectElement
-  if (select.value) emit('scroll-to-anchor', select.value)
-  select.value = '' // reset so re-picking the same entry fires change again
+function pickOutlineAnchor(anchor: string): void {
+  closeOverflow()
+  emit('scroll-to-anchor', anchor)
 }
 
 // Read-before-write, delegated to the store: it re-reads the file and applies
@@ -631,6 +632,10 @@ async function deleteNote(id: string): Promise<void> {
 // edit, or clear a non-empty unsent composer, topmost-first. Returns whether
 // something was actually closed so the host stops before closing the window.
 function closeActiveOverlay(): boolean {
+  if (overflowOpen.value) {
+    closeOverflow()
+    return true
+  }
   if (editingTodoId.value) {
     cancelEditTodo()
     return true
@@ -798,12 +803,108 @@ async function openInBrowser(): Promise<void> {
 
 // In-document interactions (validated by the host) reuse these existing
 // write paths — the injected runtime never writes to disk on its own.
-defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverlay })
+// ── Overflow menu (⋯) ─────────────────────────────────────────────────────
+// The bar keeps only what an edit session actually reaches for; navigation,
+// export and lifecycle actions live in this menu, with the irreversible ones
+// fenced off at the bottom. Dismissal follows the plan list's menu: a
+// full-viewport backdrop for outside clicks, ESC via closeActiveOverlay.
+const overflowOpen = ref(false)
+const outlineOpen = ref(false)
+
+function toggleOverflow(): void {
+  overflowOpen.value = !overflowOpen.value
+  if (!overflowOpen.value) outlineOpen.value = false
+}
+
+function closeOverflow(): void {
+  overflowOpen.value = false
+  outlineOpen.value = false
+}
+
+// Menu actions dismiss the menu first: several of them raise a confirm dialog,
+// and leaving an open menu behind it reads as two competing surfaces.
+function runFromOverflow(action: () => unknown): void {
+  closeOverflow()
+  void action()
+}
+
+// Delete lives here as well as in the list's context menu, so the open document
+// can be dealt with without going back to the sidebar. Same two-step guard as
+// the list: a plan under review or already approved asks a second time.
+async function deletePlan(): Promise<void> {
+  const name = meta.value?.name ?? props.relPath.split('/').pop() ?? props.relPath
+  const ok = await confirm(t('pane.plans.delete-confirm', { name }), {
+    title: t('pane.plans.menu-delete'),
+    confirmText: t('pane.plans.menu-delete'),
+  })
+  if (!ok) return
+  const stage = meta.value?.stage
+  if (stage === 'in-review' || stage === 'approved') {
+    const ok2 = await confirm(t('pane.plans.delete-confirm-review', { stage }), {
+      title: t('pane.plans.menu-delete'),
+      confirmText: t('pane.plans.menu-delete'),
+    })
+    if (!ok2) return
+  }
+  const resp = await props.backend.send<{ ok: boolean; error?: string }>('fs.delete', {
+    workspace_path: props.workspacePath,
+    rel_path: props.relPath,
+  })
+  if (!resp.payload?.ok) {
+    toast(resp.payload?.error ?? t('pane.plans.delete-failed'), { type: 'error' })
+    return
+  }
+  emit('deleted', props.relPath)
+}
+
+// ── Narrow-width demotion ─────────────────────────────────────────────────
+// The bar must never wrap. When the buttons no longer fit, they move into the
+// ⋯ menu in reverse priority — Todos goes first, Approve last, because that is
+// the action the whole review flow leads to.
+const DEMOTION_ORDER = ['todos', 'execute', 'approve'] as const
+type DemotableAction = (typeof DEMOTION_ORDER)[number]
+
+const barEl = ref<HTMLElement | null>(null)
+const demotedCount = ref(0)
+let refitting = false
+
+function isDemoted(action: DemotableAction): boolean {
+  return DEMOTION_ORDER.indexOf(action) < demotedCount.value
+}
+
+// Measure, demote one, measure again — at most three passes. Done against the
+// live layout rather than width breakpoints because the information block
+// (stage, progress) has no fixed width.
+async function refitBar(): Promise<void> {
+  const el = barEl.value
+  if (!el || refitting) return
+  refitting = true
+  try {
+    demotedCount.value = 0
+    await nextTick()
+    while (demotedCount.value < DEMOTION_ORDER.length && el.scrollWidth > el.clientWidth + 1) {
+      demotedCount.value++
+      await nextTick()
+    }
+  } finally {
+    refitting = false
+  }
+}
+
+let barResizeObserver: ResizeObserver | null = null
+onMounted(() => {
+  if (typeof ResizeObserver === 'undefined' || !barEl.value) return
+  barResizeObserver = new ResizeObserver(() => void refitBar())
+  barResizeObserver.observe(barEl.value)
+})
+onBeforeUnmount(() => barResizeObserver?.disconnect())
+
+defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverlay, refitBar })
 </script>
 
 <template>
   <div v-if="meta" class="prt">
-    <div class="prt-bar">
+    <div ref="barEl" class="prt-bar">
       <span class="prt-stage" :class="`prt-stage--${meta.stage}`">{{ t(`pane.plans.stage-${meta.stage}`) }}</span>
       <span v-if="isArchived" class="prt-archived-pill">{{ t('pane.plans.archived') }}</span>
       <span class="prt-progress">{{ t('pane.plans.progress-done', { done: progress.done, total: progress.total }) }}</span>
@@ -819,80 +920,147 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
       >
         <span class="prt-progress-fill" :style="{ width: progressPercent }" />
       </span>
-      <select v-if="outline.length" class="prt-outline" value="" @change="onOutlinePick">
-        <option value="" disabled selected>{{ t('pane.plans.outline') }}</option>
-        <option v-for="anchor in outline" :key="anchor" :value="anchor">{{ anchor }}</option>
-      </select>
       <span class="prt-spacer" />
+      <!-- Persistent actions: icon-only, named by their tooltip. Unresolved
+           review notes rejoin them — burying "2 still open" in a menu hides
+           exactly what the review stage exists to surface. -->
       <button
-        class="prt-todos-btn"
-        :class="{ 'prt-todos-btn--open': todosOpen }"
+        v-if="!isDemoted('todos')"
+        class="prt-icon-btn prt-todos-btn"
+        :class="{ 'prt-icon-btn--on': todosOpen }"
+        :title="t('pane.plans.todos')"
+        :aria-label="t('pane.plans.todos')"
+        :aria-pressed="todosOpen"
         @click="todosOpen = !todosOpen"
-      >{{ t('pane.plans.todos') }}</button>
-      <button class="prt-notes-btn" :class="{ 'prt-notes-btn--open': notesOpen }" @click="notesOpen = !notesOpen">
-        {{ t('pane.plans.review-notes') }} · {{ t('pane.plans.review-unresolved', { count: unresolvedCount }) }}
-      </button>
+      >☑</button>
       <button
-        class="prt-history-btn"
-        :class="{ 'prt-history-btn--open': historyOpen }"
-        @click="toggleHistory"
-      >{{ t('pane.plans.history') }}</button>
+        v-if="unresolvedCount > 0"
+        class="prt-icon-btn prt-icon-btn--attention prt-notes-btn"
+        :class="{ 'prt-icon-btn--on': notesOpen }"
+        :title="`${t('pane.plans.review-notes')} · ${t('pane.plans.review-unresolved', { count: unresolvedCount })}`"
+        :aria-label="`${t('pane.plans.review-notes')} · ${t('pane.plans.review-unresolved', { count: unresolvedCount })}`"
+        :aria-pressed="notesOpen"
+        @click="notesOpen = !notesOpen"
+      >💬<span class="prt-icon-count">{{ unresolvedCount }}</span></button>
       <button
-        v-if="canReopen"
-        class="prt-reopen"
-        :disabled="saving"
-        :title="t('pane.plans.reopen-tooltip')"
-        @click="reopen"
-      >{{ t('pane.plans.reopen') }}</button>
-      <button
-        v-if="canAbandon"
-        class="prt-abandon"
-        :disabled="saving"
-        :title="t('pane.plans.abandon-tooltip')"
-        @click="abandon"
-      >{{ t('pane.plans.abandon') }}</button>
-      <button
-        v-if="isArchived"
-        class="prt-unarchive"
-        :disabled="saving"
-        :title="t('pane.plans.unarchive-tooltip')"
-        @click="unarchive"
-      >{{ t('pane.plans.unarchive') }}</button>
-      <button
-        v-else
-        class="prt-archive"
-        :disabled="saving"
-        :title="t('pane.plans.archive-tooltip')"
-        @click="archive"
-      >{{ t('pane.plans.archive') }}</button>
-      <button
-        class="prt-share"
-        :disabled="sharing"
-        :title="t('pane.plans.share-git-tooltip')"
-        @click="shareToGit"
-      >{{ t('pane.plans.share-git') }}</button>
-      <button
-        v-if="props.relPath.endsWith('.html')"
-        class="prt-open-browser"
-        :disabled="openingInBrowser"
-        :title="t('pane.plans.open-in-browser-tooltip')"
-        @click="openInBrowser"
-      >{{ t('pane.plans.open-in-browser') }}</button>
-      <button
-        v-if="canExecute"
-        class="prt-execute"
-        :class="{ 'prt-execute--open': executeOpen }"
+        v-if="canExecute && !isDemoted('execute')"
+        class="prt-icon-btn prt-icon-btn--execute prt-execute"
+        :class="{ 'prt-icon-btn--on': executeOpen }"
         :disabled="saving || dispatching"
         :title="t('pane.plans.execute-tooltip')"
+        :aria-label="t('pane.plans.execute')"
+        :aria-pressed="executeOpen"
         @click="executeOpen = !executeOpen"
-      >{{ t('pane.plans.execute') }}</button>
+      >▶</button>
       <button
-        class="prt-approve"
+        v-if="!isDemoted('approve')"
+        class="prt-icon-btn prt-icon-btn--approve prt-approve"
         :disabled="!canApprove || saving"
-        :title="canApprove ? '' : t('pane.plans.review-approve-hint')"
+        :title="canApprove ? t('pane.plans.review-approve') : t('pane.plans.review-approve-hint')"
+        :aria-label="t('pane.plans.review-approve')"
         @click="approve"
-      >{{ t('pane.plans.review-approve') }}</button>
+      >✓</button>
+      <button
+        class="prt-icon-btn prt-overflow-btn"
+        :class="{ 'prt-icon-btn--on': overflowOpen }"
+        :title="t('pane.plans.more-actions')"
+        :aria-label="t('pane.plans.more-actions')"
+        :aria-expanded="overflowOpen"
+        @click="toggleOverflow"
+      >⋯</button>
     </div>
+
+    <template v-if="overflowOpen">
+      <div class="prt-menu-backdrop" @click="closeOverflow" @contextmenu.prevent="closeOverflow" />
+      <div class="prt-menu" @click.stop>
+        <template v-if="isDemoted('todos')">
+          <button class="prt-menu-item prt-menu-todos" @click="closeOverflow(); todosOpen = !todosOpen">
+            {{ t('pane.plans.todos') }}
+          </button>
+        </template>
+        <template v-if="canExecute && isDemoted('execute')">
+          <button
+            class="prt-menu-item prt-menu-execute"
+            :disabled="saving || dispatching"
+            @click="closeOverflow(); executeOpen = !executeOpen"
+          >{{ t('pane.plans.execute') }}</button>
+        </template>
+        <template v-if="isDemoted('approve')">
+          <button
+            class="prt-menu-item prt-menu-approve"
+            :disabled="!canApprove || saving"
+            @click="runFromOverflow(approve)"
+          >{{ t('pane.plans.review-approve') }}</button>
+        </template>
+
+        <button
+          v-if="outline.length"
+          class="prt-menu-item prt-menu-item--parent prt-menu-outline"
+          :aria-expanded="outlineOpen"
+          @click="outlineOpen = !outlineOpen"
+        >
+          <span>{{ t('pane.plans.outline') }}</span>
+          <span class="prt-menu-chevron" :class="{ open: outlineOpen }">▸</span>
+        </button>
+        <button
+          v-for="anchor in outlineOpen ? outline : []"
+          :key="anchor"
+          class="prt-menu-item prt-menu-item--child prt-menu-anchor"
+          @click="pickOutlineAnchor(anchor)"
+        >{{ anchor }}</button>
+        <button
+          v-if="unresolvedCount === 0"
+          class="prt-menu-item prt-notes-btn"
+          @click="closeOverflow(); notesOpen = !notesOpen"
+        >{{ t('pane.plans.review-notes') }}</button>
+        <button class="prt-menu-item prt-history-btn" @click="runFromOverflow(toggleHistory)">
+          {{ t('pane.plans.history') }}
+        </button>
+
+        <div class="prt-menu-sep" />
+        <button class="prt-menu-item prt-share" :disabled="sharing" @click="runFromOverflow(shareToGit)">
+          {{ t('pane.plans.share-git') }}
+        </button>
+        <button
+          v-if="props.relPath.endsWith('.html')"
+          class="prt-menu-item prt-open-browser"
+          :disabled="openingInBrowser"
+          @click="runFromOverflow(openInBrowser)"
+        >{{ t('pane.plans.open-in-browser') }}</button>
+
+        <div class="prt-menu-sep" />
+        <button
+          v-if="canReopen"
+          class="prt-menu-item prt-reopen"
+          :disabled="saving"
+          @click="runFromOverflow(reopen)"
+        >{{ t('pane.plans.reopen') }}</button>
+        <button
+          v-if="isArchived"
+          class="prt-menu-item prt-unarchive"
+          :disabled="saving"
+          @click="runFromOverflow(unarchive)"
+        >{{ t('pane.plans.unarchive') }}</button>
+        <button
+          v-else
+          class="prt-menu-item prt-archive"
+          :disabled="saving"
+          @click="runFromOverflow(archive)"
+        >{{ t('pane.plans.archive') }}</button>
+
+        <!-- Irreversible actions, fenced off from everything above. -->
+        <div class="prt-menu-sep" />
+        <button
+          v-if="canAbandon"
+          class="prt-menu-item prt-menu-item--danger prt-abandon"
+          :disabled="saving"
+          @click="runFromOverflow(abandon)"
+        >{{ t('pane.plans.abandon') }}</button>
+        <button class="prt-menu-item prt-menu-item--danger prt-delete" @click="runFromOverflow(deletePlan)">
+          {{ t('pane.plans.menu-delete') }}
+        </button>
+      </div>
+    </template>
 
     <div v-if="executeOpen && canExecute" class="prt-panel">
       <div class="prt-execute-pick">{{ t('pane.plans.execute-pick-agent') }}</div>
@@ -1086,14 +1254,141 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
   flex-shrink: 0;
   font-family: var(--font-ui, system-ui, sans-serif);
   font-size: 12px;
+  /* Anchor for the ⋯ menu. */
+  position: relative;
 }
 
+/* Never wraps: when the buttons stop fitting they demote into the ⋯ menu
+   (refitBar) rather than pushing the bar onto a second line. */
 .prt-bar {
   align-items: center;
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 6px 10px;
+  overflow: hidden;
   padding: 6px 12px;
+}
+
+.prt-icon-btn {
+  align-items: center;
+  background: var(--bg-muted);
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  color: var(--text-primary);
+  cursor: pointer;
+  display: flex;
+  flex-shrink: 0;
+  font-size: 11px;
+  gap: 3px;
+  height: 22px;
+  justify-content: center;
+  min-width: 26px;
+  padding: 0 6px;
+}
+
+.prt-icon-btn:hover:not(:disabled) {
+  background: var(--bg-hover-strong);
+}
+
+.prt-icon-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.prt-icon-btn--on {
+  border-color: var(--accent-focus);
+}
+
+.prt-icon-btn--execute {
+  background: var(--accent-subtle);
+  border-color: var(--accent-fg);
+  color: var(--accent-fg);
+}
+
+.prt-icon-btn--approve {
+  background: var(--success-subtle);
+  border-color: var(--success-fg);
+  color: var(--success-fg);
+}
+
+.prt-icon-btn--attention {
+  background: var(--attention-subtle);
+  border-color: var(--attention-bright);
+  color: var(--attention-bright);
+}
+
+.prt-icon-count {
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.prt-menu-backdrop {
+  inset: 0;
+  position: fixed;
+  z-index: 40;
+}
+
+.prt-menu {
+  background: var(--bg-base);
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.25);
+  min-width: 190px;
+  padding: 4px;
+  position: absolute;
+  right: 10px;
+  top: 32px;
+  z-index: 41;
+}
+
+.prt-menu-item {
+  align-items: center;
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  color: var(--text-primary);
+  cursor: pointer;
+  display: flex;
+  font-size: 11.5px;
+  gap: 8px;
+  justify-content: space-between;
+  padding: 5px 8px;
+  text-align: left;
+  width: 100%;
+}
+
+.prt-menu-item:hover:not(:disabled) {
+  background: var(--bg-hover-strong);
+}
+
+.prt-menu-item:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.prt-menu-item--child {
+  color: var(--text-muted);
+  font-size: 11px;
+  padding-left: 20px;
+}
+
+.prt-menu-item--danger {
+  color: var(--danger-fg);
+}
+
+.prt-menu-chevron {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.prt-menu-chevron.open {
+  transform: rotate(90deg);
+}
+
+.prt-menu-sep {
+  background: var(--border-subtle);
+  height: 1px;
+  margin: 4px 2px;
 }
 
 .prt-stage {
@@ -1182,17 +1477,6 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
   background: var(--danger-fg);
 }
 
-.prt-outline {
-  background: var(--bg-muted);
-  border: 1px solid var(--border-default);
-  border-radius: 6px;
-  color: var(--text-primary);
-  cursor: pointer;
-  font-size: 11px;
-  max-width: 200px;
-  padding: 3px 6px;
-}
-
 .prt-note-anchor {
   background: var(--accent-subtle);
   border-radius: 999px;
@@ -1228,17 +1512,7 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
   flex: 1;
 }
 
-.prt-notes-btn,
-.prt-todos-btn,
-.prt-history-btn,
 .prt-history-action,
-.prt-share,
-.prt-open-browser,
-.prt-approve,
-.prt-abandon,
-.prt-reopen,
-.prt-archive,
-.prt-unarchive,
 .prt-note-resolve,
 .prt-send {
   background: var(--bg-muted);
@@ -1248,17 +1522,6 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
   cursor: pointer;
   font-size: 11px;
   padding: 3px 10px;
-}
-
-.prt-archive:hover:not(:disabled),
-.prt-unarchive:hover:not(:disabled) {
-  background: var(--bg-hover-strong);
-}
-
-.prt-archive:disabled,
-.prt-unarchive:disabled {
-  cursor: not-allowed;
-  opacity: 0.45;
 }
 
 .prt-archived-pill {
@@ -1273,21 +1536,12 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
   text-transform: uppercase;
 }
 
-.prt-notes-btn:hover,
-.prt-todos-btn:hover,
-.prt-history-btn:hover,
 .prt-history-action:hover,
-.prt-share:hover:not(:disabled),
-.prt-open-browser:hover:not(:disabled),
-.prt-reopen:hover:not(:disabled),
 .prt-note-resolve:hover:not(:disabled),
 .prt-send:hover:not(:disabled) {
   background: var(--bg-hover-strong);
 }
 
-.prt-notes-btn--open,
-.prt-todos-btn--open,
-.prt-history-btn--open,
 .prt-history-action--open {
   border-color: var(--accent-focus);
 }
@@ -1325,22 +1579,6 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
   line-height: 1.5;
   margin: 2px 0 6px;
   padding-left: 8px;
-}
-
-.prt-abandon {
-  background: var(--danger-subtle);
-  border-color: var(--danger-fg);
-  color: var(--danger-fg);
-}
-
-.prt-abandon:hover:not(:disabled) {
-  background: var(--danger-muted, var(--danger-subtle));
-}
-
-.prt-abandon:disabled,
-.prt-reopen:disabled {
-  cursor: not-allowed;
-  opacity: 0.45;
 }
 
 .prt-todo-row {
@@ -1453,33 +1691,6 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
   overflow-wrap: break-word;
 }
 
-.prt-approve {
-  background: var(--success-subtle);
-  border-color: var(--success-fg);
-  color: var(--success-fg);
-  font-weight: 600;
-}
-
-.prt-execute {
-  background: var(--accent-subtle);
-  border: 1px solid var(--accent-fg);
-  border-radius: 6px;
-  color: var(--accent-fg);
-  cursor: pointer;
-  font-size: 11px;
-  font-weight: 600;
-  padding: 3px 10px;
-}
-
-.prt-execute--open {
-  border-color: var(--accent-focus);
-}
-
-.prt-execute:disabled {
-  cursor: not-allowed;
-  opacity: 0.45;
-}
-
 .prt-execute-pick {
   color: var(--text-secondary);
   padding: 2px 0 6px;
@@ -1522,9 +1733,6 @@ defineExpose({ cycleTodo, toggleSkipTodo, startNoteWithAnchor, closeActiveOverla
   font-size: 11px;
 }
 
-.prt-share:disabled,
-.prt-open-browser:disabled,
-.prt-approve:disabled,
 .prt-note-resolve:disabled,
 .prt-send:disabled {
   cursor: not-allowed;

@@ -47,7 +47,19 @@ const mdBodySpies = vi.hoisted(() => ({
   isEditing: vi.fn(() => false),
   cancelEdit: vi.fn(),
 }))
-const plansPaneSpies = vi.hoisted(() => ({ closeActiveOverlay: vi.fn(() => false) }))
+const plansPaneSpies = vi.hoisted(() => ({
+  closeActiveOverlay: vi.fn(() => false),
+  noteOpened: vi.fn(),
+  openQuickOpen: vi.fn(async () => undefined),
+}))
+
+// The quick-open chord is the platform modifier, so the tests drive the
+// platform rather than inheriting happy-dom's.
+const platformState = vi.hoisted(() => ({ mac: true }))
+vi.mock('../../keybindings/parseKey', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../keybindings/parseKey')>()),
+  isMacPlatform: () => platformState.mac,
+}))
 
 // Notify mock: section-delete confirms host-side; default accept.
 const toastMock = vi.hoisted(() => vi.fn())
@@ -62,6 +74,10 @@ const fsState = vi.hoisted(() => ({ content: '', writes: [] as string[] }))
 // What plans.resolve_root answers: empty means "no root reported", which is
 // how a workspace that already IS the project root behaves.
 const planRootState = vi.hoisted(() => ({ root: '' }))
+
+// What fs.stat_path answers when the window probes a restored plan, plus the
+// absolute paths it was asked about.
+const statState = vi.hoisted(() => ({ exists: true, paths: [] as string[] }))
 
 // Listener bus backing the useBackend mock's on(); lets tests simulate
 // backend server-push broadcasts (plans.changed).
@@ -179,12 +195,20 @@ beforeEach(() => {
   mdBodySpies.isEditing.mockReset().mockReturnValue(false)
   mdBodySpies.cancelEdit.mockClear()
   plansPaneSpies.closeActiveOverlay.mockReset().mockReturnValue(false)
+  plansPaneSpies.noteOpened.mockClear()
+  plansPaneSpies.openQuickOpen.mockClear()
+  platformState.mac = true
   for (const spy of Object.values(cliTermSpies)) spy.mockClear()
   toastMock.mockClear()
   confirmMock.mockReset().mockResolvedValue(true)
   fsState.content = ''
   fsState.writes.length = 0
   backendBus.listeners.clear()
+  statState.exists = true
+  statState.paths.length = 0
+  // The window persists the last opened plan per workspace; leaking it would
+  // auto-open a document in suites that expect the empty state.
+  localStorage.clear()
 })
 
 vi.mock('../../composables/useBackend', () => ({
@@ -199,6 +223,10 @@ vi.mock('../../composables/useBackend', () => ({
     send: vi.fn(async (type: string, payload: Record<string, unknown>) => {
       if (type === 'plans.resolve_root') {
         return { payload: { ok: true, ...(planRootState.root ? { root: planRootState.root } : {}) } }
+      }
+      if (type === 'fs.stat_path') {
+        statState.paths.push(String(payload.path ?? ''))
+        return { payload: { ok: true, exists: statState.exists } }
       }
       if (type === 'fs.read_file') return { payload: { ok: true, content: fsState.content, mtime: 1 } }
       if (type === 'fs.write_file') {
@@ -717,6 +745,70 @@ describe('PlanWindowApp – auto-open + live switch', () => {
   })
 })
 
+// Opened from the Window menu there is no rel_path to launch at, and the
+// sidebar's mtime ordering does not point at the plan the user was writing —
+// any CLI agent touching another plan outranks it. The window remembers the
+// last plan it opened, per workspace.
+describe('PlanWindowApp – restores the last opened plan', () => {
+  const KEY = 'navide.plans.lastopen./tmp/demo-ws'
+  const PLAN = '.agent-team/plans/feature_a1b2c3.html'
+
+  afterEach(() => {
+    window.history.replaceState({}, '', '/?window=plans&workspace_path=/tmp/demo-ws')
+  })
+
+  it('records the opened plan and reopens it when launched without a rel_path', async () => {
+    const first = await mountApp()
+    await open(first, PLAN)
+    expect(localStorage.getItem(KEY)).toBe(PLAN)
+
+    const second = await mountApp()
+    expect(second.findComponent({ name: 'PlanDocPreview' }).props('relPath')).toBe(PLAN)
+    expect(second.find('.plan-window-empty').exists()).toBe(false)
+  })
+
+  it('stays on the empty state without an error when the stored plan is gone', async () => {
+    localStorage.setItem(KEY, PLAN)
+    statState.exists = false
+
+    const wrapper = await mountApp()
+    expect(wrapper.find('.plan-window-empty').exists()).toBe(true)
+    expect(wrapper.findComponent({ name: 'PlanDocPreview' }).exists()).toBe(false)
+    expect(toastMock).not.toHaveBeenCalled()
+  })
+
+  it('probes the stored plan against the resolved root, not the workspace', async () => {
+    planRootState.root = '/tmp/repo'
+    localStorage.setItem(KEY, PLAN)
+
+    await mountApp()
+    expect(statState.paths).toEqual([`/tmp/repo/${PLAN}`])
+  })
+
+  it('lets an explicit rel_path win over the stored plan', async () => {
+    localStorage.setItem(KEY, PLAN)
+    window.history.replaceState(
+      {},
+      '',
+      '/?window=plans&workspace_path=/tmp/demo-ws&rel_path=.agent-team/plans/other_d4e5f6.html',
+    )
+
+    const wrapper = await mountApp()
+    expect(wrapper.findComponent({ name: 'PlanDocPreview' }).props('relPath')).toBe(
+      '.agent-team/plans/other_d4e5f6.html',
+    )
+    expect(statState.paths).toEqual([])
+  })
+
+  it('keeps the stored plan per workspace', async () => {
+    localStorage.setItem(KEY, PLAN)
+    window.history.replaceState({}, '', '/?window=plans&workspace_path=/tmp/other-ws')
+
+    const wrapper = await mountApp()
+    expect(wrapper.find('.plan-window-empty').exists()).toBe(true)
+  })
+})
+
 // The window may be launched straight at a rel_path (sidebar click, menu, MCP)
 // without listing first, and that path is relative to the project root the
 // plans live in — the workspace itself unless it is a subdirectory of the
@@ -781,5 +873,53 @@ describe('PlanWindowApp – resolved plan root', () => {
     expect(wrapper.findComponent({ name: 'PlanDocPreview' }).props('refresh')).toBe(
       (before as number) + 1,
     )
+  })
+})
+
+// Quick open is matched by this window's own keydown handler (it does not run
+// the shared keybinding registry), so the chord must be the platform modifier
+// and must leave the CLI dock's PTY keys alone.
+describe('PlanWindowApp – quick open chord', () => {
+  function press(init: KeyboardEventInit, target: EventTarget = window): void {
+    target.dispatchEvent(new KeyboardEvent('keydown', { key: 'p', bubbles: true, ...init }))
+  }
+
+  it('opens the plan list quick-open panel on the platform modifier', async () => {
+    await mountApp()
+    press({ metaKey: true })
+    expect(plansPaneSpies.openQuickOpen).toHaveBeenCalled()
+  })
+
+  it('leaves Ctrl+P to the terminal on macOS', async () => {
+    await mountApp()
+    press({ ctrlKey: true })
+    expect(plansPaneSpies.openQuickOpen).not.toHaveBeenCalled()
+  })
+
+  it('uses Ctrl+P off macOS', async () => {
+    platformState.mac = false
+    await mountApp()
+    press({ ctrlKey: true })
+    expect(plansPaneSpies.openQuickOpen).toHaveBeenCalled()
+  })
+
+  it('ignores the chord while focus is in the CLI dock', async () => {
+    await mountApp()
+    const panel = document.createElement('div')
+    panel.className = 'ai-dock-panel'
+    const inner = document.createElement('div')
+    panel.appendChild(inner)
+    document.body.appendChild(panel)
+
+    press({ metaKey: true }, inner)
+    expect(plansPaneSpies.openQuickOpen).not.toHaveBeenCalled()
+    panel.remove()
+  })
+
+  it('does not fire with extra modifiers held', async () => {
+    await mountApp()
+    press({ metaKey: true, shiftKey: true })
+    press({ metaKey: true, altKey: true })
+    expect(plansPaneSpies.openQuickOpen).not.toHaveBeenCalled()
   })
 })
