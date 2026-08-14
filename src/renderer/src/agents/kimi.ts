@@ -9,7 +9,9 @@ export const SPEC = {
   skipPermissionFlag: '--yolo',
   // id is the `session_<uuid>` dir name.
   resumeArgs: (id) => `--session ${id}`,
-  resumeCommandPattern: /^kimi\s+(?:--session|-s)\s+\S+/,
+  // Short flag is uppercase `-S` (verified with `kimi --help`); kimi does not
+  // accept a lowercase `-s`, so it is not matched here.
+  resumeCommandPattern: /^kimi\s+(?:--session|-S)\s+\S+/,
   // wire.jsonl carries no turn-end record: a turn is closed by the NEXT
   // turn.prompt, and the latest one only after an 8s quiet window
   // (_TURN_IDLE_MS in cli_vendors/kimi.py). The newest turn — the one the

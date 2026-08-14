@@ -72,7 +72,7 @@ describe('resolveCliCommand', () => {
 
   it('uses the spec default command, not the agent key (no binary override)', () => {
     expect(resolveCliCommand({ ...base, agentKey: 'cursor', yoloStored: '0' }))
-      .toBe('cursor-agent')
+      .toBe('agent')
   })
 
   it('aider gets its per-pane chat-history file from the hex pane-id prefix', () => {

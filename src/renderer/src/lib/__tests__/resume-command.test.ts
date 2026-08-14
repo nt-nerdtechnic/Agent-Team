@@ -298,9 +298,9 @@ describe('buildResumeCommand', () => {
     )
   })
 
-  it('uses cursor-agent --resume=<id> for cursor (UUID id, `=` form)', () => {
+  it('uses agent --resume=<id> for cursor (UUID id, `=` form)', () => {
     expect(buildResumeCommand('cursor', '4d4a11fe-b08a-46df-9f86-685589531e65')).toBe(
-      'cursor-agent --resume=4d4a11fe-b08a-46df-9f86-685589531e65'
+      'agent --resume=4d4a11fe-b08a-46df-9f86-685589531e65'
     )
   })
 
@@ -390,6 +390,32 @@ describe('resumeCommandPattern', () => {
       // base command.
       expect(looksLikeResume(agentKey, `${cmd} --disable-approval`)).toBe(true)
     }
+  })
+
+  it('still reads a legacy cursor-agent resume command as a resume', () => {
+    // defaultCommand moved from `cursor-agent` to `agent`, so panes saved by an
+    // older build replay `cursor-agent --resume=<id>`. Both binary names and
+    // both `=`/space forms must keep matching — otherwise the saved command is
+    // treated as a user-authored custom command and replayed verbatim.
+    const id = '0a1b2c3d-1111-2222-3333-444455556666'
+    expect(looksLikeResume('cursor', `cursor-agent --resume=${id}`)).toBe(true)
+    expect(looksLikeResume('cursor', `cursor-agent --resume ${id}`)).toBe(true)
+    expect(looksLikeResume('cursor', `agent --resume=${id}`)).toBe(true)
+    expect(looksLikeResume('cursor', `agent --resume ${id}`)).toBe(true)
+    expect(looksLikeResume('cursor', `cursor-agent --resume=${id} --force`)).toBe(true)
+    // The command this build actually emits.
+    expect(looksLikeResume('cursor', buildResumeCommand('cursor', id))).toBe(true)
+    // A fresh launch is not a resume.
+    expect(looksLikeResume('cursor', 'agent')).toBe(false)
+    expect(looksLikeResume('cursor', 'cursor-agent --resume')).toBe(false)
+  })
+
+  it('matches kimi short resume flag only in its uppercase form', () => {
+    // kimi's commander parser is case sensitive: `-S` is the documented short
+    // form of --session; `-s` is not a resume flag at all.
+    expect(looksLikeResume('kimi', 'kimi -S session_abc')).toBe(true)
+    expect(looksLikeResume('kimi', 'kimi --session session_abc')).toBe(true)
+    expect(looksLikeResume('kimi', 'kimi -s session_abc')).toBe(false)
   })
 
   it('does not mistake a fresh muse launch for a resume', () => {

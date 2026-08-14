@@ -1,13 +1,24 @@
 // Builds the CLI command that resumes a prior conversation by session id, so a
 // pane reloads the agent's memory on App restart.
 //
-// Per-vendor syntax (verified against each CLI; none support pinning an id at
-// launch, but all support resuming a known id):
+// Per-vendor syntax (verified against each CLI). Every vendor supports
+// resuming a known id; three also accept an id AT LAUNCH, minting the session
+// when the id is unknown: claude `--session-id`, copilot `--session-id` and pi
+// `--session-id`. Of those, only claude's launch pin is actually used: App.vue
+// pins a fresh `--session-id` on every non-resume claude spawn so backend
+// attribution binds THAT pane, and the ghost-heal path in sessionHeal.ts is
+// built on it. copilot and pi could pin at launch but do not — a fresh spawn
+// carries no id; they and every other vendor bind a pane to its session
+// through a session marker instead (see App.vue).
+// (Cursor is sometimes said to mint an id up front via `create-chat` — that is
+// an unverified vendor-doc claim, unused and unimplemented here.)
+// The list below is the resume syntax only:
 //   • claude --resume <id>
 //   • codex resume <id>      ← subcommand, NOT a --flag
 //   • agy --conversation <id>
 //   • grok -s <id>           ← short flag (12-hex session id)
 //   • kimi --session <id>    ← id is the `session_<uuid>` dir name
+//                              (short form is uppercase `-S`)
 //   • opencode --session <id> ← id is `ses_`-prefixed
 //   • qwen --resume <id>      ← id is a UUID (default `--resume` branch)
 //   • kilo --session <id>     ← id is `ses_`-prefixed
@@ -15,7 +26,8 @@
 //                                id doesn't exist, resumes when it does)
 //   • copilot --resume=<id>   ← id is a UUID; NOTE the `=` form (creates a NEW
 //                                session when the id doesn't exist)
-//   • cursor-agent --resume=<id> ← id is a UUID; `=` form
+//   • agent --resume=<id>     ← id is a UUID; `=` form (legacy binary name:
+//                                `cursor-agent`)
 //   • aider --chat-history-file <path> --restore-chat-history
 //                             ← NO session ids at all; lossy restore from the
 //                               pane's own chat-history file
@@ -44,9 +56,9 @@ export function normalizeResumeSessionId(agentKey: string, sessionId: string): s
   return specFor(agentKey)?.normalizeSessionId?.(id) ?? id
 }
 
-/** A saved Codex conversation is data, not permission to start a replacement.
- * Keep the record untouched when its rollout is unavailable; fresh spawn must
- * remain an explicit user action from Agent History. */
+/** A saved conversation is data, not permission to start a replacement. For a
+ * vendor that says so, keep the record untouched when its transcript is
+ * unavailable; a fresh spawn stays an explicit user action from Agent History. */
 export function shouldPreserveMissingSessionOnRestore(
   agentKey: string,
   savedSessionId: string,
@@ -58,7 +70,8 @@ export function shouldPreserveMissingSessionOnRestore(
 }
 
 /** A prior resume that is definitively missing needs a visible fallback warning.
- * Unknown probe results retain --resume, and Codex is preserved in place. */
+ * Unknown probe results retain --resume, and a preserve-on-missing vendor is
+ * kept in place instead (the two are deliberately complementary). */
 export function shouldWarnMissingResume(
   agentKey: string,
   savedSessionId: string,
