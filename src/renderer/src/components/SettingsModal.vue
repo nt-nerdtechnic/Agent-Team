@@ -2608,7 +2608,7 @@ watch(activeTab, (tab) => {
         <!-- ── KEYBINDINGS TAB (editable; the Help tab keeps the read-only
              reference, which also covers xterm and native-menu keys that the
              central rule table does not own) ─────────────────────────────── -->
-        <div v-show="activeTab === 'keybindings'" class="s-body" data-settings-section="keybindings">
+        <div v-show="activeTab === 'keybindings'" class="s-body keybindings-body" data-settings-section="keybindings">
           <h1 class="s-page-title">{{ $t('settings.nav.keybindings') }}</h1>
           <KeyboardShortcutsEditor v-if="activeTab === 'keybindings'" />
         </div>
@@ -3029,6 +3029,10 @@ watch(activeTab, (tab) => {
 /* Storage tab is a two-column settings page like appearance/general: the bare
    .s-body clips instead of scrolling, so it needs its own scroll + padding. */
 .storage-body { overflow-y: auto; padding: 18px 22px; }
+/* Same as the other padded tabs: without a modifier the bare .s-body is
+   overflow:hidden with no gutter, which clips the shortcut list instead of
+   scrolling it. */
+.keybindings-body { overflow-y: auto; padding: 18px 22px; }
 /* Full-bleed tabs (roles/pipelines/mcp/skills/analyzer/accounts/extensions) keep
    edge-to-edge bars and split panes, so their body cannot carry the page gutter.
    The page title carries it instead, matching the 18px/22px inset the padded tab

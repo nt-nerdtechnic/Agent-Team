@@ -561,10 +561,16 @@ const visibleReference = computed(() => {
   align-items: center;
   flex-wrap: wrap;
   position: sticky;
+  /* The scroll container is .keybindings-body, whose 18px/22px gutter sits
+     inside the scrollport. The negative margin cancels that gutter so the bar
+     starts flush at the top and repaints the full width; its own padding gives
+     the gutter back visually, and rows scroll underneath instead of through. */
   top: 0;
-  z-index: 2;
-  padding: 4px 0;
-  background: var(--bg-default, var(--bg-subtle));
+  z-index: 3;
+  margin: -18px -22px 0;
+  padding: 18px 22px 10px;
+  background: var(--bg-base);
+  border-bottom: 1px solid var(--border-muted);
 }
 .kse-search {
   flex: 1 1 220px;
@@ -643,10 +649,16 @@ const visibleReference = computed(() => {
 .kse-group-title {
   margin: 0;
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-muted);
+  letter-spacing: 0.08em;
+  color: var(--text-secondary);
+}
+/* The column header repeats once per category. It earns its place when the page
+   is scrolled, but it should read as a ruler, not as five competing headings. */
+.kse-table thead th {
+  font-size: 9.5px;
+  opacity: 0.75;
 }
 .kse-table-scroll {
   overflow-x: auto;
@@ -656,6 +668,10 @@ const visibleReference = computed(() => {
 }
 .kse-table {
   width: 100%;
+  /* Each category renders its own <table>. With auto layout every one of them
+     sizes its columns independently, so the groups do not line up down the page
+     — fixed layout plus the explicit widths below keeps one grid throughout. */
+  table-layout: fixed;
   border-collapse: collapse;
   font-size: 13px;
 }
@@ -681,13 +697,11 @@ const visibleReference = computed(() => {
 .kse-table tr.customized td:first-child {
   box-shadow: inset 2px 0 0 var(--accent-fg);
 }
-.kse-th-when {
-  width: 20%;
-}
-.kse-th-source,
-.kse-th-actions {
-  width: 1%;
-}
+.kse-th-command { width: 28%; }
+.kse-th-keys    { width: 30%; }
+.kse-th-when    { width: 26%; }
+.kse-th-source  { width: 10%; }
+.kse-th-actions { width: 6%; }
 
 /* ── source badge ── */
 .kse-source {
@@ -727,13 +741,21 @@ const visibleReference = computed(() => {
   font-family: monospace;
   font-size: 10.5px;
   color: var(--text-muted);
+  /* Fixed table layout will not widen for a long id; clip instead of forcing a
+     wrap that would double every row's height. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .kse-td-when code {
+  display: inline-block;
+  max-width: 100%;
   font-family: monospace;
   font-size: 11px;
+  line-height: 1.45;
   color: var(--text-secondary);
-  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 .kse-when-any {
   font-size: 11px;
@@ -746,6 +768,12 @@ const visibleReference = computed(() => {
   flex-wrap: wrap;
   gap: 6px;
   align-items: center;
+}
+/* Conflict / shared-key notices sit on their own line. Inline they read as part
+   of the chord itself, which is exactly the thing they are commenting on. */
+.kse-chips .kse-conflict {
+  flex-basis: 100%;
+  margin-top: 2px;
 }
 .kse-chip {
   display: inline-flex;
@@ -854,6 +882,7 @@ const visibleReference = computed(() => {
   font-size: 11px;
   color: var(--text-muted);
   font-style: italic;
+  order: -1;
 }
 
 .kse-conflict {
