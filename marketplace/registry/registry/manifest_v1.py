@@ -16,10 +16,11 @@ KNOWN_CAPABILITIES: frozenset[str] = frozenset(
         "ui",
         "issues",
         "plans",
-        "storage",
     }
 )
-LEGACY_KNOWN_CAPABILITIES: frozenset[str] = KNOWN_CAPABILITIES - {"storage"}
+# Keep the named alias for callers that distinguish the legacy compatibility
+# model from the broader manifest module facade.
+LEGACY_KNOWN_CAPABILITIES: frozenset[str] = KNOWN_CAPABILITIES
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9-]*$")
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")

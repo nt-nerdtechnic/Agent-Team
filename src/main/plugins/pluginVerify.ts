@@ -26,10 +26,9 @@ import {
 } from './pluginPathPolicy'
 
 /** Capability namespaces the host can authorize. Mirror of the backend
- *  `manifest.KNOWN_CAPABILITIES` (including v2 `storage`). */
+ *  `manifest.KNOWN_CAPABILITIES` for the current runtime contract. */
 export const KNOWN_CAPABILITIES: readonly string[] = [
   'fs',
-  'storage',
   'git',
   'terminal',
   'search',
@@ -203,9 +202,20 @@ export function assertKnownCapabilities(requires: readonly string[]): void {
   }
 }
 
-/** Reject a package-relative file path that is not canonical and safe. */
+/**
+ * Reject a legacy manifest entry path that could escape the extraction root.
+ * Keep this permissive for v1 compatibility; canonical archive validation is
+ * performed separately by {@link assertSafeArchiveEntries}.
+ */
 export function assertSafeEntryPath(name: string): void {
-  if (canonicalArchivePath(name, 'regular') === null) {
+  const bad =
+    name.length === 0 ||
+    name.startsWith('/') ||
+    name.startsWith('\\') ||
+    name.includes('\\') ||
+    /^[a-zA-Z]:/.test(name) ||
+    name.split('/').some((segment) => segment === '..')
+  if (bad) {
     throw new PluginVerifyError('ZIP_SLIP', `unsafe archive entry path: ${name}`)
   }
 }
@@ -216,7 +226,7 @@ export function assertSafeArchiveEntries(
 ): void {
   const seen = new Set<string>()
   const regularPaths = new Set<string>()
-  const descendantPaths = new Set<string>()
+  const ancestorPaths = new Set<string>()
   for (const entry of entries) {
     if (entry.type !== undefined && entry.type !== 'regular' && entry.type !== 'directory') {
       throw new PluginVerifyError(
@@ -243,11 +253,11 @@ export function assertSafeArchiveEntries(
     if (kind === 'regular') regularPaths.add(collisionKey)
     const segments = collisionKey.split('/')
     for (let index = 1; index < segments.length; index += 1) {
-      descendantPaths.add(segments.slice(0, index).join('/'))
+      ancestorPaths.add(segments.slice(0, index).join('/'))
     }
   }
   for (const path of regularPaths) {
-    if (descendantPaths.has(path)) {
+    if (ancestorPaths.has(path)) {
       throw new PluginVerifyError(
         'ZIP_DUPLICATE',
         `archive path collides with regular file ancestor: ${path}`

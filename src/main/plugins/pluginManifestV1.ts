@@ -42,7 +42,7 @@ export function parseManifestV1(raw: Record<string, unknown>): LegacyInstalledMa
   }
   const requires = Array.isArray(raw.requires) ? raw.requires.map(String) : []
   if (requires.includes('storage')) {
-    throw new InstalledPluginError("legacy manifests cannot declare v2 permission 'storage'")
+    throw new InstalledPluginError("legacy manifests cannot declare unsupported capability 'storage'")
   }
   try {
     assertKnownCapabilities(requires)

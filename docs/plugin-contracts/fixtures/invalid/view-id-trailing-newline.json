@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 2,
+  "apiVersion": "^1.0.0",
+  "id": "acme.trailing-view",
+  "name": "Trailing View",
+  "version": "1.2.3",
+  "publisher": "acme",
+  "permissions": {},
+  "marketplace": { "description": "A trailing view id test.", "license": "MIT" },
+  "contributes": {
+    "views": [
+      {
+        "id": "main\n",
+        "kind": "custom",
+        "location": "main",
+        "title": "Main",
+        "entry": "frontend/main/index.html"
+      }
+    ]
+  }
+}

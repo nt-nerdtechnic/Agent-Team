@@ -93,6 +93,14 @@ def test_not_a_zip_rejected() -> None:
         read_package(b"not a zip file")
 
 
+def test_zip64_end_of_central_directory_rejected() -> None:
+    data = bytearray(build_package())
+    data[-14:-12] = (0xFFFF).to_bytes(2, "little")
+    data[-12:-10] = (0xFFFF).to_bytes(2, "little")
+    with pytest.raises(PackageError, match="ZIP64 archives are not supported"):
+        read_package(bytes(data))
+
+
 def test_missing_manifest_rejected() -> None:
     with pytest.raises(PackageError, match="missing manifest.json"):
         read_package(build_package(omit_manifest=True))

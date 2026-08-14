@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 2,
+  "apiVersion": "^1.0.0",
+  "id": "acme.too-many-views",
+  "name": "Too Many Views",
+  "version": "1.0.0",
+  "publisher": "acme",
+  "permissions": {},
+  "marketplace": { "description": "Too many views.", "license": "MIT" },
+  "contributes": {
+    "views": [
+      { "id": "view-0", "kind": "custom", "location": "main", "title": "View 0", "entry": "frontend/view-0/index.html" },
+      { "id": "view-1", "kind": "custom", "location": "main", "title": "View 1", "entry": "frontend/view-1/index.html" },
+      { "id": "view-2", "kind": "custom", "location": "main", "title": "View 2", "entry": "frontend/view-2/index.html" },
+      { "id": "view-3", "kind": "custom", "location": "main", "title": "View 3", "entry": "frontend/view-3/index.html" },
+      { "id": "view-4", "kind": "custom", "location": "main", "title": "View 4", "entry": "frontend/view-4/index.html" },
+      { "id": "view-5", "kind": "custom", "location": "main", "title": "View 5", "entry": "frontend/view-5/index.html" },
+      { "id": "view-6", "kind": "custom", "location": "main", "title": "View 6", "entry": "frontend/view-6/index.html" },
+      { "id": "view-7", "kind": "custom", "location": "main", "title": "View 7", "entry": "frontend/view-7/index.html" },
+      { "id": "view-8", "kind": "custom", "location": "main", "title": "View 8", "entry": "frontend/view-8/index.html" },
+      { "id": "view-9", "kind": "custom", "location": "main", "title": "View 9", "entry": "frontend/view-9/index.html" },
+      { "id": "view-10", "kind": "custom", "location": "main", "title": "View 10", "entry": "frontend/view-10/index.html" },
+      { "id": "view-11", "kind": "custom", "location": "main", "title": "View 11", "entry": "frontend/view-11/index.html" },
+      { "id": "view-12", "kind": "custom", "location": "main", "title": "View 12", "entry": "frontend/view-12/index.html" },
+      { "id": "view-13", "kind": "custom", "location": "main", "title": "View 13", "entry": "frontend/view-13/index.html" },
+      { "id": "view-14", "kind": "custom", "location": "main", "title": "View 14", "entry": "frontend/view-14/index.html" },
+      { "id": "view-15", "kind": "custom", "location": "main", "title": "View 15", "entry": "frontend/view-15/index.html" },
+      { "id": "view-16", "kind": "custom", "location": "main", "title": "View 16", "entry": "frontend/view-16/index.html" }
+    ]
+  }
+}

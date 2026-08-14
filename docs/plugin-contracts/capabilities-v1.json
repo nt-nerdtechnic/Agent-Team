@@ -2,27 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "catalogVersion": 1,
   "status": "draft",
+  "runtimeStatus": "declarative-only-until-issue-03",
   "manifestPermissionContract": {
     "shape": "permission-id-to-access-array",
     "scopeSource": "catalog",
     "duplicateObjectKeys": "reject-before-schema-validation",
     "unknownPermissionOrAccess": "reject"
-  },
-  "storagePartitionContract": {
-    "plugin": {
-      "logicalIdentity": ["hostBoundPluginId"],
-      "sharedBy": "all runtime instances of the active plugin package",
-      "callerSuppliedIdentity": false
-    },
-    "workspace": {
-      "logicalIdentity": ["hostBoundPluginId", "hostBoundCurrentWorkspaceId"],
-      "sharedBy": "runtime instances of the active plugin package bound to the same workspace",
-      "callerSuppliedIdentity": false,
-      "unboundBehavior": "WORKSPACE_SCOPE_VIOLATION"
-    },
-    "scopeParameter": "selects an allowed partition class; it never supplies or overrides identity",
-    "crossPluginAccess": "denied",
-    "packageVersion": "host-owned snapshot selector; not part of the author-visible key"
   },
   "errors": [
     "CAPABILITY_DENIED",
@@ -67,30 +52,6 @@
       "params": { "type": "object", "additionalProperties": false, "required": ["path"], "properties": { "path": { "type": "string" } } },
       "result": { "type": "object", "additionalProperties": false, "required": ["kind", "size", "modifiedAt"], "properties": { "kind": { "enum": ["file", "directory"] }, "size": { "type": "integer", "minimum": 0 }, "modifiedAt": { "type": "string", "format": "date-time" } } },
       "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
-    },
-    {
-      "address": "storage.get",
-      "visibility": "public",
-      "permission": { "id": "storage", "access": "read", "scope": "plugin-or-workspace" },
-      "params": { "type": "object", "additionalProperties": false, "required": ["scope", "key"], "properties": { "scope": { "enum": ["plugin", "workspace"] }, "key": { "type": "string", "minLength": 1 } } },
-      "result": { "type": "object", "additionalProperties": false, "required": ["value"], "properties": { "value": {} } },
-      "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "INTERNAL_ERROR"]
-    },
-    {
-      "address": "storage.set",
-      "visibility": "public",
-      "permission": { "id": "storage", "access": "write", "scope": "plugin-or-workspace" },
-      "params": { "type": "object", "additionalProperties": false, "required": ["scope", "key", "value"], "properties": { "scope": { "enum": ["plugin", "workspace"] }, "key": { "type": "string", "minLength": 1 }, "value": {} } },
-      "result": { "type": "object", "additionalProperties": false, "required": ["stored"], "properties": { "stored": { "const": true } } },
-      "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "INTERNAL_ERROR"]
-    },
-    {
-      "address": "storage.delete",
-      "visibility": "public",
-      "permission": { "id": "storage", "access": "write", "scope": "plugin-or-workspace" },
-      "params": { "type": "object", "additionalProperties": false, "required": ["scope", "key"], "properties": { "scope": { "enum": ["plugin", "workspace"] }, "key": { "type": "string", "minLength": 1 } } },
-      "result": { "type": "object", "additionalProperties": false, "required": ["deleted"], "properties": { "deleted": { "type": "boolean" } } },
-      "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "INTERNAL_ERROR"]
     },
     {
       "address": "ui.openInEditor",

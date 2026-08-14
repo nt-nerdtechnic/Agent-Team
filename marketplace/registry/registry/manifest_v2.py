@@ -9,11 +9,12 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .path_policy import canonical_html_path, canonical_package_path
+from .versions import _V2_VERSION_RE
 
 _V2_CATEGORY_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+_V2_DISPLAY_TEXT_RE = r"^[^\r\n<>]+$"
 _V2_PERMISSION_ACCESS: dict[str, frozenset[str]] = {
     "fs": frozenset({"read"}),
-    "storage": frozenset({"read", "write"}),
     "ui": frozenset({"openInEditor", "openExternal"}),
 }
 
@@ -83,7 +84,7 @@ class ManifestV2View(ManifestV2Model):
     id: str = Field(pattern=r"^[a-z][a-z0-9-]*$")
     kind: Literal["custom"]
     location: Literal["top", "bottom", "right", "left", "main", "window"]
-    title: str = Field(min_length=1)
+    title: str = Field(min_length=1, max_length=80, pattern=_V2_DISPLAY_TEXT_RE)
     icon: str | None = Field(default=None, min_length=1)
     entry: str = Field(min_length=1)
 
@@ -103,7 +104,7 @@ class ManifestV2View(ManifestV2Model):
 
 
 class ManifestV2Contributes(ManifestV2Model):
-    views: list[ManifestV2View] = Field(min_length=1)
+    views: list[ManifestV2View] = Field(min_length=1, max_length=16)
 
     @model_validator(mode="after")
     def _check_unique_view_ids(self) -> ManifestV2Contributes:
@@ -138,8 +139,8 @@ class ManifestV2(ManifestV2Model):
     schemaVersion: Literal[2]
     apiVersion: str = Field(pattern=r"^[~^]?\d+\.\d+\.\d+$")
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)+$")
-    name: str = Field(min_length=1, max_length=80)
-    version: str = Field(pattern=r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")
+    name: str = Field(min_length=1, max_length=80, pattern=_V2_DISPLAY_TEXT_RE)
+    version: str = Field(pattern=_V2_VERSION_RE.pattern)
     publisher: str = Field(pattern=r"^[a-z0-9][a-z0-9-]*$")
     engines: ManifestV2Engines | None = None
     permissions: dict[str, list[str]]

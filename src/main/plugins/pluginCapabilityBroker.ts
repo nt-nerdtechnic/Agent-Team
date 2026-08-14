@@ -5,7 +5,7 @@
 // `frontendPluginManager.ts`.
 
 import { eventNamespace, resolveWsType } from './capabilityMap'
-import type { PluginCapabilityPolicy, PluginPermissionGrant } from './pluginPermissions'
+import type { PluginCapabilityPolicy } from './pluginPermissions'
 import type { WsResponse } from '../../shared/wsClient'
 
 /** A capability call as it arrives from a plugin view over IPC. */
@@ -35,7 +35,6 @@ export type CapabilityErrorCode =
   | 'UNKNOWN'
   | 'BAD_REQUEST'
   | 'BACKEND_ERROR'
-  | 'USER_GESTURE_REQUIRED'
 
 /**
  * Namespaces the host grants without an explicit `requires` declaration. `ping`
@@ -53,17 +52,6 @@ export function isCapabilityAllowed(requires: readonly string[], ns: string): bo
   return requires.includes(ns)
 }
 
-/** Exact public v2 method-to-grant mapping. Legacy namespace grants remain
- * broad for compatibility; v2 calls are limited to this catalog. */
-const V2_METHOD_GRANTS: Readonly<Record<string, PluginPermissionGrant>> = {
-  'fs.read_file': { permission: 'fs', access: 'read' },
-  'fs.list_dir': { permission: 'fs', access: 'read' },
-  'fs.glob_files': { permission: 'fs', access: 'read' },
-  'fs.stat_path': { permission: 'fs', access: 'read' },
-  'ui.open_in_editor': { permission: 'ui', access: 'openInEditor' },
-  'ui.open_external': { permission: 'ui', access: 'openExternal' },
-}
-
 export type CapabilityPolicyInput = PluginCapabilityPolicy | readonly string[]
 
 function isRequirementsArray(policy: CapabilityPolicyInput): policy is readonly string[] {
@@ -76,7 +64,8 @@ function isLegacyPolicy(
   return !isRequirementsArray(policy) && (policy as PluginCapabilityPolicy).kind === 'legacy'
 }
 
-/** Check the namespace for legacy callers, or the exact method grant for v2. */
+/** Check the namespace for legacy callers. Manifest v2 runtime calls remain
+ *  fail-closed until the public capability-grant contract is implemented. */
 export function isCallAllowed(
   policy: CapabilityPolicyInput,
   ns: string,
@@ -85,11 +74,8 @@ export function isCallAllowed(
   if (isRequirementsArray(policy)) return isCapabilityAllowed(policy, ns)
   if (isLegacyPolicy(policy)) return isCapabilityAllowed(policy.requires, ns)
   if (BUILTIN_CAPABILITIES.includes(ns)) return true
-  const required = V2_METHOD_GRANTS[`${ns}.${method}`]
-  if (!required) return false
-  return policy.grants.some(
-    (grant) => grant.permission === required.permission && grant.access === required.access
-  )
+  void method
+  return false
 }
 
 /** V2 has no legacy namespace event projection; in particular, it must never

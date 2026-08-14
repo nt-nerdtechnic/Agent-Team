@@ -90,6 +90,11 @@ describe('assertSafeEntryPath (zip-slip)', () => {
     expect(() => assertSafeEntryPath('manifest.json')).not.toThrow()
   })
 
+  it('preserves legacy v1 path compatibility', () => {
+    expect(() => assertSafeEntryPath('./dist/index.html')).not.toThrow()
+    expect(() => assertSafeEntryPath('assets//icon.png')).not.toThrow()
+  })
+
   it.each([
     '../escape.js',
     'a/../../etc/passwd',

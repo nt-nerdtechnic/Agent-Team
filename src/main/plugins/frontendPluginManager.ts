@@ -116,8 +116,6 @@ const IPC_EVENT = 'plugin:cap:event'
 const IPC_READY = 'plugin:ready'
 const IPC_HIDE_SELF = 'plugin:hideSelf'
 const IPC_OPEN_TARGET = 'plugin:openTarget'
-const IPC_GESTURE = 'plugin:userGesture'
-const USER_GESTURE_TTL_MS = 1000
 
 /** `workspace_path` param of an entry query ('' when absent) — the view's
  *  identity in {@link FrontendPluginManager.open}. Deliberately blind to
@@ -166,8 +164,6 @@ export class FrontendPluginManager {
   private readonly running = new Map<string, RunningPlugin>()
   /** webContents.id → pluginId, so a call's origin can be trusted, not the payload. */
   private readonly bySender = new Map<number, string>()
-  /** One short-lived trusted user gesture credit per running plugin. */
-  private readonly gestureCredits = new Map<string, number>()
   /** Installed/available plugin descriptors keyed by id (loader registry). The
    *  mini-IDE is registered here as the first built-in; third-party installs are
    *  added by {@link loadInstalledPlugins} / {@link registerDescriptor}. */
@@ -262,13 +258,6 @@ export class FrontendPluginManager {
     ipcMain.on(IPC_READY, (event) => {
       const pluginId = this.bySender.get(event.sender.id)
       if (pluginId) console.log(`[plugin] ${pluginId} ready`)
-    })
-
-    // The preload emits this only for trusted pointerup/keydown events. The
-    // sender mapping is authoritative; no plugin-supplied token is accepted.
-    ipcMain.on(IPC_GESTURE, (event) => {
-      const pluginId = this.bySender.get(event.sender.id)
-      if (pluginId) this.gestureCredits.set(pluginId, Date.now() + USER_GESTURE_TTL_MS)
     })
 
     // A plugin dismisses its own view (e.g. the mini-IDE's Esc-close). Scoped
@@ -400,25 +389,7 @@ export class FrontendPluginManager {
     }
     if (action === 'open_external') {
       const url = typeof args.url === 'string' ? args.url : ''
-      const v2 = plugin.capabilityPolicy.kind === 'manifest-v2'
-      if (v2) {
-        let isHttps = false
-        try {
-          isHttps = new URL(url).protocol === 'https:' && /^https:\/\/[^\s]+$/i.test(url)
-        } catch {
-          isHttps = false
-        }
-        if (!isHttps) {
-          return buildError(call.reqId, 'BAD_REQUEST', 'only https urls allowed')
-        }
-        if (!this.consumeUserGesture(plugin.id)) {
-          return buildError(
-            call.reqId,
-            'USER_GESTURE_REQUIRED',
-            'ui.open_external requires a recent trusted user gesture'
-          )
-        }
-      } else if (!/^https?:\/\/[^\s]+$/i.test(url)) {
+      if (!/^https?:\/\/[^\s]+$/i.test(url)) {
         return buildError(call.reqId, 'BAD_REQUEST', 'only http/https urls allowed')
       }
       const r = await shell.openExternal(url)
@@ -452,19 +423,15 @@ export class FrontendPluginManager {
     return buildError(call.reqId, 'UNKNOWN', `no host action '${String(action)}'`)
   }
 
-  private consumeUserGesture(pluginId: string): boolean {
-    const expiresAt = this.gestureCredits.get(pluginId)
-    this.gestureCredits.delete(pluginId)
-    return expiresAt !== undefined && expiresAt >= Date.now()
-  }
-
   /** Fan a transport status transition out to every backend-needing plugin as
    *  the host-synthesized `nav.backend_status` event, so plugin-side useBackend
    *  shims track real liveness instead of assuming 'connected'. */
   private dispatchBackendStatus(status: WsClientStatus): void {
     this.wsStatus = status
     for (const plugin of this.running.values()) {
-      if (plugin.requires.length > 0) this.emit(plugin.id, 'nav.backend_status', { status })
+      if (plugin.requires.length > 0 && plugin.capabilityPolicy.kind !== 'manifest-v2') {
+        this.emit(plugin.id, 'nav.backend_status', { status })
+      }
     }
   }
 
@@ -781,7 +748,6 @@ export class FrontendPluginManager {
       current.detachHostResize = null
       this.running.delete(descriptor.id)
       this.bySender.delete(current.senderId)
-      this.gestureCredits.delete(descriptor.id)
       // Same terminal teardown as destroy(): a renderer crash must also stop
       // pending output delivery, while the retained route marks keep the PTYs
       // re-claimable by this plugin only.
@@ -800,7 +766,11 @@ export class FrontendPluginManager {
       // Replay the current transport status: transitions before this load (or
       // while a queued view was still booting) would otherwise be missed and
       // the plugin's optimistic 'connected' default never corrected.
-      if (current.requires.length > 0 && this.wsClient) {
+      if (
+        current.requires.length > 0 &&
+        current.capabilityPolicy.kind !== 'manifest-v2' &&
+        this.wsClient
+      ) {
         this.emit(descriptor.id, 'nav.backend_status', { status: this.wsStatus })
       }
     })
@@ -889,7 +859,6 @@ export class FrontendPluginManager {
     plugin.detachHostResize = null
     this.running.delete(pluginId)
     this.bySender.delete(plugin.senderId)
-    this.gestureCredits.delete(pluginId)
     // The PTY itself keeps running — drop its pending output, keep the routes
     // marked with this pluginId so only a reopened view of the SAME plugin can
     // re-claim them (see releaseTerminalOwnership).

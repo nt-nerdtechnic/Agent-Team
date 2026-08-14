@@ -3,7 +3,6 @@ import { parseManifestJson } from './pluginManifestJson'
 import { parseManifestV1, type LegacyInstalledManifest } from './pluginManifestV1'
 import { parseManifestV2, type PluginManifestV2, type PluginManifestV2View } from './pluginManifestV2'
 import {
-  formatPermissionGrant,
   legacyCapabilityPolicy,
   manifestV2CapabilityPolicy,
   type PluginCapabilityPolicy,
@@ -42,16 +41,10 @@ export function manifestCapabilities(manifest: InstalledManifest): string[] {
   return isManifestV2(manifest) ? Object.keys(manifest.permissions) : manifest.requires
 }
 
-/** Exact v2 grants used by the access-aware runtime policy and install UI. */
 export function manifestCapabilityPolicy(manifest: InstalledManifest): PluginCapabilityPolicy {
   return isManifestV2(manifest)
     ? manifestV2CapabilityPolicy(manifest.permissions)
     : legacyCapabilityPolicy(manifest.requires)
-}
-
-export function manifestPermissionLabels(manifest: InstalledManifest): string[] {
-  const policy = manifestCapabilityPolicy(manifest)
-  return policy.kind === 'manifest-v2' ? policy.grants.map(formatPermissionGrant) : []
 }
 
 export function manifestReferencedFiles(manifest: InstalledManifest): string[] {

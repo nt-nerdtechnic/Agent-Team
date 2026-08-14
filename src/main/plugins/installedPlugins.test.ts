@@ -51,7 +51,7 @@ describe('parseInstalledManifest', () => {
 
   it('keeps the v2 storage permission out of the legacy manifest path', () => {
     expect(() => parseInstalledManifest({ ...VALID, requires: ['storage'] })).toThrow(
-      /legacy manifests/
+      /unsupported capability/
     )
   })
 
@@ -75,6 +75,80 @@ describe('Manifest v2 contract corpus', () => {
 
   it.each(INVALID_V2_FIXTURES)('rejects invalid fixture %s', (name) => {
     expect(() => parseInstalledManifest(JSON.parse(readFixture('invalid', name)))).toThrow()
+  })
+
+  it.each(['1.2.3-.', '1.2.3-a..b', '1.2.3-01', '1.2.3-0.01', '01.02.03'])(
+    'rejects malformed v2 version %s',
+    (version) => {
+      const manifest = JSON.parse(readFixture('valid', 'frontend-multi-view.json')) as Record<
+        string,
+        unknown
+      >
+      manifest.version = version
+      expect(() => parseInstalledManifest(manifest)).toThrow(/semver/)
+    }
+  )
+
+  it('accepts a valid v2 prerelease version', () => {
+    const manifest = JSON.parse(readFixture('valid', 'frontend-multi-view.json')) as Record<
+      string,
+      unknown
+    >
+    manifest.version = '1.2.3-0.3.7'
+    expect(parseInstalledManifest(manifest).version).toBe('1.2.3-0.3.7')
+  })
+
+  it('accepts v2 build metadata', () => {
+    const manifest = JSON.parse(readFixture('valid', 'frontend-multi-view.json')) as Record<
+      string,
+      unknown
+    >
+    manifest.version = '1.2.3-alpha.1+build.4'
+    expect(parseInstalledManifest(manifest).version).toBe('1.2.3-alpha.1+build.4')
+  })
+
+  it.each([
+    ['name', 'x'.repeat(81)],
+    ['name', 'line\nname'],
+    ['name', '<name>'],
+    ['title', 'x'.repeat(81)],
+    ['title', 'line\ntitle'],
+    ['title', '<title>'],
+  ])('rejects unsafe or oversized v2 display text %s', (field, value) => {
+    const manifest = JSON.parse(readFixture('valid', 'frontend-multi-view.json')) as Record<
+      string,
+      any
+    >
+    if (field === 'name') manifest.name = value
+    else manifest.contributes.views[0].title = value
+    expect(() => parseInstalledManifest(manifest)).toThrow(new RegExp(field))
+  })
+
+  it('accepts sixteen v2 views and rejects seventeen', () => {
+    const manifest = JSON.parse(readFixture('valid', 'frontend-multi-view.json')) as Record<
+      string,
+      any
+    >
+    manifest.contributes.views = Array.from({ length: 16 }, (_, index) => ({
+      id: `view-${index}`,
+      kind: 'custom',
+      location: 'main',
+      title: `View ${index}`,
+      entry: `frontend/view-${index}/index.html`,
+    }))
+    const parsed = parseInstalledManifest(manifest)
+    expect(parsed.schemaVersion).toBe(2)
+    if (parsed.schemaVersion === 2) {
+      expect(parsed.contributes?.views).toHaveLength(16)
+    }
+    manifest.contributes.views.push({
+      id: 'view-16',
+      kind: 'custom',
+      location: 'main',
+      title: 'View 16',
+      entry: 'frontend/view-16/index.html',
+    })
+    expect(() => parseInstalledManifest(manifest)).toThrow(/views/)
   })
 
   it('rejects duplicate object keys before manifest validation', () => {

@@ -25,23 +25,6 @@ interface CapabilityResponse {
 type EventListener = (data: unknown) => void
 const listeners = new Map<string, Set<EventListener>>()
 
-// A host gesture is deliberately a one-way signal. Main validates the sender
-// against the running plugin view and grants one short-lived credit; calls do
-// not carry a renderer-controlled token.
-function announceTrustedGesture(event: { isTrusted: boolean }): void {
-  if (event.isTrusted) ipcRenderer.send('plugin:userGesture')
-}
-
-const pluginGlobal = globalThis as typeof globalThis & {
-  addEventListener: (
-    type: string,
-    listener: (event: { isTrusted: boolean }) => void,
-    options?: boolean
-  ) => void
-}
-pluginGlobal.addEventListener('pointerup', announceTrustedGesture, true)
-pluginGlobal.addEventListener('keydown', announceTrustedGesture, true)
-
 ipcRenderer.on('plugin:cap:event', (_event, payload: { type: string; data: unknown }) => {
   listeners.get(payload.type)?.forEach((cb) => cb(payload.data))
 })

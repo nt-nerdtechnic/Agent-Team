@@ -9,13 +9,33 @@ the contract checks used during documentation review:
 from __future__ import annotations
 
 import json
+import re
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, validators
+from jsonschema.exceptions import ValidationError
 
 
 ROOT = Path(__file__).resolve().parent
+
+
+def _validate_pattern(
+    _validator: Any,
+    pattern: str,
+    instance: Any,
+    _schema: Any,
+) -> Iterator[ValidationError]:
+    """Use whole-string matching so Python does not treat final newlines as ends."""
+    if isinstance(instance, str) and re.fullmatch(pattern, instance) is None:
+        yield ValidationError(f"{instance!r} does not match {pattern!r}")
+
+
+StrictDraft202012Validator = validators.extend(
+    Draft202012Validator,
+    {"pattern": _validate_pattern},
+)
 
 
 class DuplicateKeyError(ValueError):
@@ -69,7 +89,7 @@ def _catalog_permission_pairs(catalog: dict[str, Any]) -> dict[tuple[str, str], 
 def main() -> None:
     schema = _load_strict(ROOT / "plugin-manifest-v2.schema.json")
     Draft202012Validator.check_schema(schema)
-    validator = Draft202012Validator(schema)
+    validator = StrictDraft202012Validator(schema)
 
     for path in sorted((ROOT / "fixtures" / "valid").glob("*.json")):
         manifest = _load_strict(path)

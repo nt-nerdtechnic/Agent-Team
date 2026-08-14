@@ -6,7 +6,8 @@ from pathlib import Path
 import pytest
 
 from registry.manifest import ManifestError, parse_manifest
-from tests.fixtures import valid_manifest
+from registry.versions import latest_version, version_key
+from tests.fixtures import contract_manifest, valid_manifest
 
 
 CONTRACT_FIXTURES = Path(__file__).parents[3] / "docs" / "plugin-contracts" / "fixtures"
@@ -72,12 +73,126 @@ def test_bad_version_rejected() -> None:
         parse_manifest(valid_manifest(version="1.0"))
 
 
+@pytest.mark.parametrize(
+    "version",
+    [
+        "1.2.3-.",
+        "1.2.3-a..b",
+        "1.2.3-01",
+        "1.2.3-0.01",
+        "01.02.03",
+    ],
+)
+def test_manifest_v2_malformed_version_rejected(version: str) -> None:
+    manifest = contract_manifest()
+    manifest["version"] = version
+    with pytest.raises(ManifestError, match="version"):
+        parse_manifest(manifest)
+
+
+def test_manifest_v2_valid_prerelease_accepted() -> None:
+    manifest = contract_manifest()
+    manifest["version"] = "1.2.3-0.3.7"
+    assert parse_manifest(manifest).version == "1.2.3-0.3.7"
+
+
+def test_manifest_v2_build_metadata_is_accepted() -> None:
+    manifest = contract_manifest()
+    manifest["version"] = "1.2.3-alpha.1+build.4"
+    assert parse_manifest(manifest).version == "1.2.3-alpha.1+build.4"
+
+
+def test_latest_version_orders_valid_prerelease() -> None:
+    assert latest_version(["1.2.3-alpha.1", "1.2.3"]) == "1.2.3"
+
+
+@pytest.mark.parametrize(
+    ("versions", "expected"),
+    [
+        (["1.0.0-foo", "1.0.0"], "1.0.0"),
+        (["1.0.0-1", "1.0.0-foo"], "1.0.0-foo"),
+        (["1.0.0-alpha", "1.0.0-alpha.1"], "1.0.0-alpha.1"),
+        (["1.2.3-x.7.z.91", "1.2.3-x.7.z.92"], "1.2.3-x.7.z.92"),
+        (["1.2.3-0.3.7", "1.2.3-0.3.8"], "1.2.3-0.3.8"),
+    ],
+)
+def test_latest_version_uses_semver_precedence(
+    versions: list[str], expected: str
+) -> None:
+    assert latest_version(versions) == expected
+
+
+def test_version_precedence_ignores_build_metadata() -> None:
+    assert version_key("1.2.3+build.1") == version_key("1.2.3+build.2")
+    assert latest_version(["1.2.3-alpha+build.1", "1.2.3"]) == "1.2.3"
+    assert latest_version(["1.2.3-alpha.beta+build.1", "1.2.3-alpha.beta+build.2"]) == (
+        "1.2.3-alpha.beta+build.1"
+    )
+
+
+def test_latest_version_keeps_legacy_numeric_versions_orderable() -> None:
+    assert version_key("01.02.03") == version_key("1.2.3")
+    assert latest_version(["01.02.03", "1.2.4"]) == "1.2.4"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("name", "x" * 81),
+        ("name", "line\nname"),
+        ("name", "<name>"),
+        ("title", "x" * 81),
+        ("title", "line\ntitle"),
+        ("title", "<title>"),
+    ],
+)
+def test_manifest_v2_display_text_limits_rejected(field: str, value: str) -> None:
+    manifest = contract_manifest()
+    if field == "name":
+        manifest[field] = value
+    else:
+        manifest["contributes"]["views"][0][field] = value
+    with pytest.raises(ManifestError, match=field):
+        parse_manifest(manifest)
+
+
+def test_manifest_v2_accepts_sixteen_views() -> None:
+    manifest = contract_manifest()
+    manifest["contributes"]["views"] = [
+        {
+            "id": f"view-{index}",
+            "kind": "custom",
+            "location": "main",
+            "title": f"View {index}",
+            "entry": f"frontend/view-{index}/index.html",
+        }
+        for index in range(16)
+    ]
+    assert len(parse_manifest(manifest).contributes.views) == 16
+
+
+def test_manifest_v2_rejects_seventeen_views() -> None:
+    manifest = contract_manifest()
+    manifest["contributes"]["views"] = [
+        {
+            "id": f"view-{index}",
+            "kind": "custom",
+            "location": "main",
+            "title": f"View {index}",
+            "entry": f"frontend/view-{index}/index.html",
+        }
+        for index in range(17)
+    ]
+    with pytest.raises(ManifestError, match="views"):
+        parse_manifest(manifest)
+
+
 def test_unknown_capability_rejected() -> None:
     with pytest.raises(ManifestError, match="capabilities"):
         parse_manifest(valid_manifest(requires=["fs", "bogus"]))
 
 
-def test_v2_storage_permission_is_not_accepted_as_legacy_requires() -> None:
+def test_unsupported_storage_capability_is_not_accepted_as_legacy_requires() -> None:
     with pytest.raises(ManifestError, match="storage"):
         parse_manifest(valid_manifest(requires=["storage"]))
 

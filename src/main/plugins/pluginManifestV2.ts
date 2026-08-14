@@ -3,14 +3,13 @@ import { canonicalHtmlPath, canonicalPackagePath } from './pluginPathPolicy'
 
 const V2_ID_RE = /^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)+$/
 const V2_API_VERSION_RE = /^[~^]?\d+\.\d+\.\d+$/
-const V2_VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/
+const V2_VERSION_RE = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/
 const V2_PUBLISHER_RE = /^[a-z0-9][a-z0-9-]*$/
 const V2_VIEW_ID_RE = /^[a-z][a-z0-9-]*$/
 const V2_HTTPS_URI_RE = /^https:\/\/[^\s]+$/
 export const V2_VIEW_LOCATIONS = ['top', 'bottom', 'right', 'left', 'main', 'window'] as const
 export const V2_PERMISSION_ACCESS: Readonly<Record<string, readonly string[]>> = {
   fs: ['read'],
-  storage: ['read', 'write'],
   ui: ['openInEditor', 'openExternal'],
 }
 
@@ -51,6 +50,58 @@ export type PluginManifestV2 = {
   entry?: never
 }
 
+type ParsedSemver = {
+  core: [string, string, string]
+  prerelease: string[]
+}
+
+function parseSemver(value: string): ParsedSemver | null {
+  const match = V2_VERSION_RE.exec(value)
+  if (!match) return null
+  return {
+    core: [match[1], match[2], match[3]],
+    prerelease: match[4] ? match[4].split('.') : [],
+  }
+}
+
+function compareNumericIdentifiers(left: string, right: string): number {
+  if (left.length !== right.length) return left.length < right.length ? -1 : 1
+  if (left === right) return 0
+  return left < right ? -1 : 1
+}
+
+/** Compare SemVer 2.0.0 precedence; build metadata is intentionally ignored. */
+export function compareSemver(left: string, right: string): number | null {
+  const a = parseSemver(left)
+  const b = parseSemver(right)
+  if (!a || !b) return null
+
+  for (let index = 0; index < a.core.length; index += 1) {
+    const result = compareNumericIdentifiers(a.core[index], b.core[index])
+    if (result !== 0) return result
+  }
+  if (a.prerelease.length === 0 || b.prerelease.length === 0) {
+    if (a.prerelease.length === b.prerelease.length) return 0
+    return a.prerelease.length === 0 ? 1 : -1
+  }
+  for (let index = 0; index < Math.max(a.prerelease.length, b.prerelease.length); index += 1) {
+    const leftIdentifier = a.prerelease[index]
+    const rightIdentifier = b.prerelease[index]
+    if (leftIdentifier === undefined || rightIdentifier === undefined) {
+      return leftIdentifier === undefined ? -1 : 1
+    }
+    if (leftIdentifier === rightIdentifier) continue
+    const leftNumeric = /^[0-9]+$/.test(leftIdentifier)
+    const rightNumeric = /^[0-9]+$/.test(rightIdentifier)
+    if (leftNumeric && rightNumeric) {
+      return compareNumericIdentifiers(leftIdentifier, rightIdentifier)
+    }
+    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1
+    return leftIdentifier < rightIdentifier ? -1 : 1
+  }
+  return 0
+}
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -83,15 +134,19 @@ function requiredValue(value: Record<string, unknown>, key: string, label: strin
 }
 
 function stringValue(value: unknown, label: string, minLength = 0, maxLength?: number): string {
-  const length = typeof value === 'string' ? Array.from(value).length : -1
-  if (
-    typeof value !== 'string' ||
-    length < minLength ||
-    (maxLength !== undefined && length > maxLength)
-  ) {
-    fail(`${label} must be a string${minLength ? ` with at least ${minLength} character(s)` : ''}`)
+  if (typeof value !== 'string') fail(`${label} must be a string`)
+  const length = Array.from(value).length
+  if (length < minLength) fail(`${label} must be a string with at least ${minLength} character(s)`)
+  if (maxLength !== undefined && length > maxLength) {
+    fail(`${label} must be a string with at most ${maxLength} character(s)`)
   }
   return value
+}
+
+function displayText(value: unknown, label: string): string {
+  const text = stringValue(value, label, 1, 80)
+  if (/\r|\n|[<>]/.test(text)) fail(`${label} contains unsafe characters`)
+  return text
 }
 
 function stringArray(value: unknown, label: string, minItems = 0, maxItems?: number): string[] {
@@ -154,7 +209,7 @@ export function parseManifestV2(raw: Record<string, unknown>): PluginManifestV2 
   if (!V2_API_VERSION_RE.test(apiVersion)) fail('manifest apiVersion must be a simple semver range')
   const id = stringValue(requiredValue(raw, 'id', 'manifest'), 'manifest id', 1)
   if (!V2_ID_RE.test(id)) fail(`manifest id must be lowercase dot-separated segments, got ${id}`)
-  const name = stringValue(requiredValue(raw, 'name', 'manifest'), 'manifest name', 1, 80)
+  const name = displayText(requiredValue(raw, 'name', 'manifest'), 'manifest name')
   const version = stringValue(requiredValue(raw, 'version', 'manifest'), 'manifest version', 1)
   if (!V2_VERSION_RE.test(version)) fail(`manifest version must be semver, got ${version}`)
   const publisher = stringValue(requiredValue(raw, 'publisher', 'manifest'), 'manifest publisher', 1)
@@ -256,6 +311,9 @@ export function parseManifestV2(raw: Record<string, unknown>): PluginManifestV2 
     if (!Array.isArray(value.views) || value.views.length < 1) {
       fail('manifest contributes.views must contain at least one view')
     }
+    if (value.views.length > 16) {
+      fail('manifest contributes.views must contain between 1 and 16 views')
+    }
     const views: PluginManifestV2View[] = value.views.map((rawView, index) => {
       const view = assertObject(rawView, `manifest contributes.views[${index}]`)
       assertOnlyKeys(
@@ -278,10 +336,9 @@ export function parseManifestV2(raw: Record<string, unknown>): PluginManifestV2 
       if (!(V2_VIEW_LOCATIONS as readonly string[]).includes(location)) {
         fail(`manifest contributes.views[${index}].location is unsupported`)
       }
-      const title = stringValue(
+      const title = displayText(
         requiredValue(view, 'title', `manifest contributes.views[${index}]`),
-        `manifest contributes.views[${index}].title`,
-        1
+        `manifest contributes.views[${index}].title`
       )
       const entry = htmlPath(
         requiredValue(view, 'entry', `manifest contributes.views[${index}]`),

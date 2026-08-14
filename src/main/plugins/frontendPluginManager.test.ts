@@ -1318,15 +1318,13 @@ describe('ui.open_in_editor host capability — workspace containment / caller r
   })
 })
 
-describe('Manifest v2 ui.open_external gesture gate', () => {
+describe('Manifest v2 capability runtime deferral', () => {
   const CALL = 'plugin:cap:call'
-  const GESTURE = 'plugin:userGesture'
 
   function openV2External(): {
     view: FakeViewLike
     opened: string[]
     call: (url: string) => Promise<{ ok?: boolean; error?: { code: string; message?: string } }>
-    announceGesture: () => void
   } {
     const mgr = new FrontendPluginManager()
     const host = new FakeBrowserWindow()
@@ -1353,9 +1351,7 @@ describe('Manifest v2 ui.open_external gesture gate', () => {
       pickFolder: async () => null,
     })
     const handler = ipcHandlers.get(CALL)
-    const gesture = ipcListeners.get(GESTURE)
     expect(handler).toBeDefined()
-    expect(gesture).toBeDefined()
     return {
       view,
       opened,
@@ -1366,23 +1362,12 @@ describe('Manifest v2 ui.open_external gesture gate', () => {
           method: 'open_external',
           args: { url },
         })) as { ok?: boolean; error?: { code: string; message?: string } },
-      announceGesture: () => gesture!({ sender: { id: view.webContents.id } }),
     }
   }
 
-  it('requires a trusted gesture and consumes the credit once', async () => {
-    const { opened, call, announceGesture } = openV2External()
-    expect((await call('https://example.com')).error?.code).toBe('USER_GESTURE_REQUIRED')
-    announceGesture()
-    expect((await call('https://example.com')).ok).toBe(true)
-    expect((await call('https://example.com/again')).error?.code).toBe('USER_GESTURE_REQUIRED')
-    expect(opened).toEqual(['https://example.com'])
-  })
-
-  it('rejects plaintext URLs even when a gesture was announced', async () => {
-    const { opened, call, announceGesture } = openV2External()
-    announceGesture()
-    expect((await call('http://example.com')).error?.code).toBe('BAD_REQUEST')
+  it('denies deferred v2 host capabilities before reaching the host', async () => {
+    const { opened, call } = openV2External()
+    expect((await call('https://example.com')).error?.code).toBe('CAP_DENIED')
     expect(opened).toEqual([])
   })
 })

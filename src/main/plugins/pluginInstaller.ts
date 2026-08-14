@@ -28,12 +28,12 @@ import {
   assertManifestFiles,
   isManifestV2,
   manifestCapabilities,
-  manifestPermissionLabels,
   manifestToDescriptor,
   OFFICIAL_RECEIPT_NAME,
   type InstalledManifest,
   type OfficialReceipt,
 } from './installedPlugins'
+import { compareSemver } from './pluginManifestV2'
 import type { PluginLaunchDescriptor } from './frontendPluginManager'
 
 /** What a caller must supply to install a specific marketplace version. The
@@ -62,8 +62,6 @@ export interface PreparedInstall {
   entries: ZipEntry[]
   trustTier: TrustTier
   sensitive: string[]
-  /** Exact v2 permission grants for the install confirmation surface. */
-  grants: string[]
   /** True when the plugin declares a sensitive capability and the UI must
    *  obtain a second confirmation before {@link commitInstall}. */
   requiresConfirmation: boolean
@@ -195,7 +193,6 @@ export async function prepareInstall(
     entries,
     trustTier,
     sensitive,
-    grants: manifestPermissionLabels(manifest),
     requiresConfirmation: sensitive.length > 0,
     official: isOfficialPluginId(manifest.id),
     digest,
@@ -274,17 +271,6 @@ export function removePlugin(
  */
 export function isUpdateAvailable(installedVersion: string, latestVersion: string | null): boolean {
   if (!latestVersion) return false
-  const a = parseSemver(installedVersion)
-  const b = parseSemver(latestVersion)
-  if (!a || !b) return false
-  for (let i = 0; i < 3; i++) {
-    if (b[i] > a[i]) return true
-    if (b[i] < a[i]) return false
-  }
-  return false
-}
-
-function parseSemver(v: string): [number, number, number] | null {
-  const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(v)
-  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null
+  const comparison = compareSemver(installedVersion, latestVersion)
+  return comparison !== null && comparison < 0
 }

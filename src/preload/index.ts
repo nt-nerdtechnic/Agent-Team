@@ -56,7 +56,6 @@ export interface InstalledPluginSummary {
   id: string
   requires: string[]
   sensitive: string[]
-  grants?: string[]
 }
 
 export interface MarketplaceExtension {
@@ -85,7 +84,6 @@ export interface PreparedInstallSummary {
   trustTier: 'signed-verified' | 'unsigned'
   sensitive: string[]
   requiresConfirmation: boolean
-  grants?: string[]
 }
 
 const pendingEditorOpenFiles: Record<string, string>[] = []

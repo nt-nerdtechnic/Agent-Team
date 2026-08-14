@@ -48,7 +48,7 @@ function manifestV2(overrides: Record<string, unknown> = {}): string {
     name: 'Demo',
     version: '1.0.0',
     publisher: 'acme',
-    permissions: { storage: ['write'] },
+    permissions: {},
     marketplace: { description: 'Demo view', license: 'MIT' },
     contributes: {
       views: [
@@ -187,9 +187,24 @@ describe('prepareInstall', () => {
     const prepared = await prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
     expect(prepared.manifest.schemaVersion).toBe(2)
     if (prepared.manifest.schemaVersion !== 2) throw new Error('expected Manifest v2')
-    expect(prepared.manifest.permissions).toEqual({ storage: ['write'] })
-    expect(prepared.grants).toEqual(['storage:write'])
+    expect(prepared.manifest.permissions).toEqual({})
     expect(prepared.requiresConfirmation).toBe(false)
+  })
+
+  it('rejects a v2 storage permission before installation', async () => {
+    const storageBytes = new Uint8Array(
+      makeZip([
+        { name: 'manifest.json', data: manifestV2({ permissions: { storage: ['write'] } }) },
+        { name: 'frontend/left/index.html', data: '<!doctype html>' },
+      ])
+    )
+    const storageDigest = sha256Hex(storageBytes)
+    const { deps, removed, writes } = fakeDeps(storageBytes, storageDigest)
+    await expect(
+      prepareInstall({ ...REQ_BASE, expectedDigest: storageDigest }, deps)
+    ).rejects.toThrow(/storage/)
+    expect(removed).toEqual([])
+    expect(writes.size).toBe(0)
   })
 
   it('rejects a backend-only v2 package before any install confirmation or side effect', async () => {
@@ -483,11 +498,14 @@ describe('isUpdateAvailable', () => {
     expect(isUpdateAvailable('1.0.0', '1.0.1')).toBe(true)
     expect(isUpdateAvailable('1.0.0', '2.0.0')).toBe(true)
     expect(isUpdateAvailable('1.2.0', '1.10.0')).toBe(true)
+    expect(isUpdateAvailable('1.2.3-alpha.1', '1.2.3')).toBe(true)
   })
 
   it('is false for same or older or missing versions', () => {
     expect(isUpdateAvailable('1.0.0', '1.0.0')).toBe(false)
     expect(isUpdateAvailable('2.0.0', '1.9.9')).toBe(false)
+    expect(isUpdateAvailable('1.2.3', '1.2.3+build.4')).toBe(false)
+    expect(isUpdateAvailable('1.2.3-alpha+build.1', '1.2.3-alpha+build.2')).toBe(false)
     expect(isUpdateAvailable('1.0.0', null)).toBe(false)
     expect(isUpdateAvailable('1.0.0', 'not-semver')).toBe(false)
   })

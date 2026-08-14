@@ -76,7 +76,18 @@ export function readZipEntries(bytes: Uint8Array): ZipEntry[] {
   const buf = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   const eocd = findEocd(buf)
   const entryCount = buf.readUInt16LE(eocd + 10)
-  let ptr = buf.readUInt32LE(eocd + 16) // central directory offset
+  const entriesOnDisk = buf.readUInt16LE(eocd + 8)
+  const centralDirectorySize = buf.readUInt32LE(eocd + 12)
+  const centralDirectoryOffset = buf.readUInt32LE(eocd + 16)
+  if (
+    entriesOnDisk === 0xffff ||
+    entryCount === 0xffff ||
+    centralDirectorySize === 0xffffffff ||
+    centralDirectoryOffset === 0xffffffff
+  ) {
+    throw new PluginPackageError('ZIP64 archives are not supported')
+  }
+  let ptr = centralDirectoryOffset
 
   const entries: ZipEntry[] = []
   let totalOutput = 0
@@ -103,6 +114,8 @@ export function readZipEntries(bytes: Uint8Array): ZipEntry[] {
     ptr = centralEnd
 
     const platform = versionMadeBy >>> 8
+    // This classifies archive metadata only; extraction never creates symlinks
+    // and writes accepted entries as regular files.
     const unixMode = platform === 3 ? externalAttributes >>> 16 : 0
     const unixType = unixMode & 0o170000
     let type: ZipEntryType = 'regular'

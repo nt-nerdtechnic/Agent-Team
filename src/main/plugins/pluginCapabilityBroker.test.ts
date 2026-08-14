@@ -196,19 +196,15 @@ describe('Manifest v2 access-aware policy', () => {
   const policy = manifestV2CapabilityPolicy({
     fs: ['read'],
     ui: ['openExternal'],
-    storage: ['write'],
   })
 
-  it('allows only the public filesystem read methods', () => {
-    expect(isCallAllowed(policy, 'fs', 'read_file')).toBe(true)
-    expect(isCallAllowed(policy, 'fs', 'list_dir')).toBe(true)
-    expect(isCallAllowed(policy, 'fs', 'glob_files')).toBe(true)
-    expect(isCallAllowed(policy, 'fs', 'stat_path')).toBe(true)
-    expect(isCallAllowed(policy, 'fs', 'write_file')).toBe(false)
-    expect(isCallAllowed(policy, 'fs', 'list_files_flat')).toBe(false)
+  it('keeps the issue 01 runtime surface fail-closed except for ping', () => {
+    expect(isCallAllowed(policy, 'ping', 'ping')).toBe(true)
+    expect(isCallAllowed(policy, 'fs', 'read_file')).toBe(false)
+    expect(isCallAllowed(policy, 'ui', 'open_external')).toBe(false)
   })
 
-  it('does not turn a storage grant into an unimplemented runtime surface', () => {
+  it('does not turn a deferred storage declaration into a runtime surface', () => {
     expect(isCallAllowed(policy, 'storage', 'get')).toBe(false)
     expect(isCallAllowed(policy, 'storage', 'delete')).toBe(false)
   })

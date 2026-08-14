@@ -111,6 +111,13 @@ describe('readZipEntries', () => {
     expect(() => readZipEntries(new Uint8Array([1, 2, 3]))).toThrow(PluginPackageError)
   })
 
+  it('rejects ZIP64 end-of-central-directory sentinels', () => {
+    const zip = makeZip([{ name: 'manifest.json', data: '{"id":"acme.demo"}' }])
+    zip.writeUInt16LE(0xffff, zip.length - 14)
+    zip.writeUInt16LE(0xffff, zip.length - 12)
+    expect(() => readZipEntries(zip)).toThrow(/ZIP64 archives are not supported/)
+  })
+
   it('rejects a zip bomb (deflate inflating past the per-entry limit)', () => {
     // 60 MB of zeros compresses to a few KB but exceeds the 50 MB entry cap;
     // inflating it must raise a PluginPackageError, not exhaust memory.

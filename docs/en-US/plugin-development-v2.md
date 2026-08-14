@@ -5,6 +5,10 @@
 > This document is the author-facing contract that the v2 migration must
 > implement before third-party publishing opens.
 >
+> The issue 01 implementation currently validates the manifest and discovers
+> custom-view metadata only. Capability execution, user-gesture authorization,
+> events, and storage are deferred to their owning follow-up issues.
+>
 > **Migration decision:** Plan B (the B0-B9 checkpoint path) was approved on
 > 2026-08-13. Plans A and C are not active implementation alternatives.
 
@@ -23,7 +27,7 @@ first-party implementation. A bundled plugin such as `navide.git` can use them;
 a third-party plugin cannot. They are not compatibility promises or examples of
 the public dependency graph.
 
-The packages will be published to npm with normal semver versions. Third-party
+The packages will be published to npm with normal SemVer 2.0.0 versions. Third-party
 projects must use registry versions, never `workspace:` dependencies. The v2
 release gate requires a public package tarball smoke test from a directory
 outside the Navide workspace.
@@ -327,6 +331,10 @@ placement and mounts the plugin's isolated custom view into the selected
 workbench region. `window` is the only value that creates a separate top-level
 window.
 
+The manifest `name` and every view `title` are plain display text with 1–80
+Unicode code points; carriage returns, newlines, and angle brackets are
+rejected. A manifest may declare at most 16 views.
+
 | Value | Placement |
 |---|---|
 | `top` | Top workbench region |
@@ -389,7 +397,7 @@ The version axes are independent:
 |---|---|---|
 | `schemaVersion` | Manifest document shape | Only when adopting another manifest schema |
 | `apiVersion` | Public SDK and capability contract | When the plugin consumes another public API range |
-| `version` | This plugin package release | Every published plugin release |
+| `version` | This plugin package release; SemVer 2.0.0 prerelease and build metadata are accepted | Every published plugin release |
 | `engines.navide` | Optional product/runtime requirement | Only when the plugin needs a particular Navide product feature |
 | `backend.protocolVersion` | Navide child-process wire profile; `1` freezes the MCP 2026-07-28-aligned conventions above | Only when adopting another supported Navide wire profile |
 
@@ -398,6 +406,9 @@ values. Each ID appears at most once because duplicate JSON object keys are
 rejected before schema validation. The manifest never declares scope: the
 capability catalog assigns scope to each access, and the Host derives the
 runtime workspace, plugin, and view identity from its authenticated binding.
+
+The top-level `name` is the display name; it is plain display text with 1–80
+Unicode code points and no newlines or angle brackets.
 
 `marketplace` is required for every v2 package and is covered by the package
 signature. It is the only source of author-controlled listing metadata:
@@ -411,8 +422,8 @@ signature. It is the only source of author-controlled listing metadata:
 | `categories` | Optional; at most five unique lowercase slugs |
 | `icon` | Optional safe package-relative path; the packaged file must exist |
 
-`name` is the display name; v2 does not define a second `displayName`. The
-registry keeps the immutable metadata snapshot for every version and presents
+The v2 manifest does not define a second `displayName`. The registry keeps the
+immutable metadata snapshot for every version and presents
 the latest non-yanked version. Yanking that version falls back to the previous
 non-yanked version. Publisher identity comes from the verified package and
 authenticated namespace, never from a marketplace field.
@@ -504,14 +515,21 @@ The normative method/event catalog is
 defines its address, request/result or event schema, required permission,
 scope, visibility, and possible public errors.
 
-The first public release contains:
+The issue 01 manifest parser only validates these declarative permission
+values. A permission declaration is not user consent, an install-time grant,
+or runtime authorization; issue 01 does not show v2 grant UI or execute v2
+capability calls. The table describes the target catalog mapping for the
+follow-up runtime contract:
 
-| Permission | Public methods/events | Scope |
+| Permission | Target catalog methods/events | Scope |
 |---|---|---|
 | `fs:read` | `fs.readFile`, `fs.listDirectory`, `fs.glob`, `fs.stat`, `workspace.filesChanged` | Current workspace only |
-| `storage:read/write` | `storage.get`, `storage.set`, `storage.delete` | Plugin or current workspace partition |
 | `ui:openInEditor` | `ui.openInEditor` | Current workspace only |
-| `ui:openExternal` | `ui.openExternal` | HTTPS only; requires an active user gesture |
+| `ui:openExternal` | `ui.openExternal` | HTTPS only; future runtime requires an active user gesture |
+
+Storage permissions are reserved for issues 03 and 16. They are not accepted
+by the current issue 01 manifest contract; the storage design below is a
+future target and is not an available runtime surface.
 
 ### Storage partitions
 

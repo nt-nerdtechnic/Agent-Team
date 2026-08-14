@@ -56,7 +56,7 @@ def _validate_archive_entries(
 ) -> list[tuple[zipfile.ZipInfo, str, str]]:
     seen: set[str] = set()
     regular_paths: set[str] = set()
-    descendant_paths: set[str] = set()
+    ancestor_paths: set[str] = set()
     validated: list[tuple[zipfile.ZipInfo, str, str]] = []
     for info in infos:
         kind = _archive_entry_type(info)
@@ -76,17 +76,18 @@ def _validate_archive_entries(
         if kind == "regular":
             regular_paths.add(collision_key)
         segments = collision_key.split("/")
-        descendant_paths.update(
+        ancestor_paths.update(
             "/".join(segments[:index]) for index in range(1, len(segments))
         )
         validated.append((info, path, kind))
     for path in regular_paths:
-        if path in descendant_paths:
+        if path in ancestor_paths:
             raise PackageError(f"archive path collides with regular file ancestor: {path}")
     return validated
 
 
 def _archive_entry_type(info: zipfile.ZipInfo) -> str:
+    """Classify archive metadata; this is not proof of symlink authenticity."""
     mode = ((info.external_attr >> 16) & 0xFFFF) if info.create_system == 3 else 0
     file_type = stat.S_IFMT(mode)
     if info.create_system == 3 and file_type not in (0, stat.S_IFREG, stat.S_IFDIR):
@@ -98,6 +99,23 @@ def _archive_entry_type(info: zipfile.ZipInfo) -> str:
     ):
         return "directory"
     return "regular"
+
+
+def _has_zip64_end_of_central_directory(data: bytes) -> bool:
+    marker = b"PK\x05\x06"
+    offset = data.rfind(marker)
+    if offset < 0 or len(data) - offset < 22:
+        return False
+    entries_on_disk = int.from_bytes(data[offset + 8 : offset + 10], "little")
+    entry_count = int.from_bytes(data[offset + 10 : offset + 12], "little")
+    central_directory_size = int.from_bytes(data[offset + 12 : offset + 16], "little")
+    central_directory_offset = int.from_bytes(data[offset + 16 : offset + 20], "little")
+    return (
+        entries_on_disk == 0xFFFF
+        or entry_count == 0xFFFF
+        or central_directory_size == 0xFFFFFFFF
+        or central_directory_offset == 0xFFFFFFFF
+    )
 
 
 @dataclass(frozen=True)
@@ -125,6 +143,8 @@ def read_package(data: bytes) -> LoadedPackage:
     """
     if not zipfile.is_zipfile(BytesIO(data)):
         raise PackageError("package is not a valid ZIP archive")
+    if _has_zip64_end_of_central_directory(data):
+        raise PackageError("ZIP64 archives are not supported")
 
     with zipfile.ZipFile(BytesIO(data)) as zf:
         infos = zf.infolist()

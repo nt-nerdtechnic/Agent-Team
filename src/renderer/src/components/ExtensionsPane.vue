@@ -103,7 +103,7 @@ onMounted(refreshInstalled)
           <span v-if="p.sensitive.length" class="ext-badge ext-sensitive">
             sensitive: {{ p.sensitive.join(', ') }}
           </span>
-          <span class="ext-requires">{{ (p.grants?.length ? p.grants : p.requires).join(', ') }}</span>
+          <span class="ext-requires">{{ p.requires.join(', ') }}</span>
           <button class="ext-remove" @click="remove(p.id)">Remove</button>
         </li>
         <li v-if="!installed.length" class="ext-empty">No plugins installed.</li>
@@ -131,12 +131,7 @@ onMounted(refreshInstalled)
         <p>
           <strong>{{ pendingConfirm.ext.namespace }}.{{ pendingConfirm.ext.name }}</strong>
           requests sensitive capabilities:
-          <strong>{{
-            (pendingConfirm.prepared.grants?.length
-              ? pendingConfirm.prepared.grants
-              : pendingConfirm.prepared.sensitive
-            ).join(', ')
-          }}</strong>.
+          <strong>{{ pendingConfirm.prepared.sensitive.join(', ') }}</strong>.
         </p>
         <p class="ext-trust-tier">
           <span

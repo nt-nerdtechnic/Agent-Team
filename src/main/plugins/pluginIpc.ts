@@ -18,7 +18,6 @@ import {
   type PreparedInstall,
 } from './pluginInstaller'
 import { sensitiveCapabilities, assertRegistryUrlAllowed } from './pluginVerify'
-import { formatPermissionGrant } from './pluginPermissions'
 import type { FrontendPluginManager } from './frontendPluginManager'
 
 const DEFAULT_MARKETPLACE_URL = 'http://localhost:8787'
@@ -36,7 +35,6 @@ interface InstalledSummary {
   id: string
   requires: string[]
   sensitive: string[]
-  grants?: string[]
 }
 
 /** Register every `plugins:*` handler exactly once. `pluginsRoot` is where
@@ -49,18 +47,11 @@ export function registerPluginIpc(
   const prepared = new Map<string, PreparedInstall>()
 
   ipcMain.handle('plugins:listInstalled', (): InstalledSummary[] => {
-    return manager.listDescriptors().map((d) => {
-      const grants =
-        d.capabilityPolicy?.kind === 'manifest-v2'
-          ? d.capabilityPolicy.grants.map(formatPermissionGrant)
-          : []
-      return {
-        id: d.id,
-        requires: d.requires,
-        sensitive: sensitiveCapabilities(d.requires),
-        ...(grants.length ? { grants } : {}),
-      }
-    })
+    return manager.listDescriptors().map((d) => ({
+      id: d.id,
+      requires: d.requires,
+      sensitive: sensitiveCapabilities(d.requires),
+    }))
   })
 
   ipcMain.handle('plugins:marketplaceSearch', async (_e, query?: string) => {
@@ -116,7 +107,6 @@ export function registerPluginIpc(
         trustTier: result.trustTier,
         sensitive: result.sensitive,
         requiresConfirmation: result.requiresConfirmation,
-        ...(result.grants.length ? { grants: result.grants } : {}),
       }
     }
   )
