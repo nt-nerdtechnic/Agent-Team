@@ -1,13 +1,20 @@
 <script setup lang="ts">
 // Messages tab of the right-hand rail: the inter-CLI delivery log.
 //
-// Laid out for a ~300px column (the rail is resizable down to 180px): every row
-// is two compact lines, and the message body lives in an expandable detail
-// block that scrolls instead of widening the rail.
+// Laid out for a ~300px column (the rail is resizable down to 180px): the route
+// gets a line of its own and wraps rather than clipping (with both handles
+// qualified, `from → to` does not survive one ellipsised line), then a meta
+// line, then the preview. The message body lives in an expandable detail block
+// that scrolls instead of widening the rail.
 import { computed, ref } from 'vue'
-import { useAgentMessaging } from '../composables/useAgentMessaging'
+import { useI18n } from 'vue-i18n'
+import { AGENT_SPECS } from '../agents'
+import { useAgentMessaging, type MessageReason } from '../composables/useAgentMessaging'
+
+const AGENT_LABELS = new Map(AGENT_SPECS.map((s) => [s.agentKey, s.label]))
 
 const messaging = useAgentMessaging()
+const { t } = useI18n()
 
 const expandedId = ref<number | null>(null)
 
@@ -20,6 +27,38 @@ function toggleExpand(id: number): void {
 
 function fmtTime(ts: number): string {
   return new Date(ts).toLocaleTimeString()
+}
+
+/** A failure reason is stored as an i18n key plus its substitutions, so the log
+ *  reads in the user's language whichever layer produced the failure. */
+function reasonText(reason: MessageReason): string {
+  return t(`msg.reason-${reason.key}`, reason.params ?? {})
+}
+
+/** Split a handle into its `<workspace>/` prefix and the pane name. The pane
+ *  name is the identifying half, so it is rendered at full contrast and the
+ *  prefix is dimmed. */
+function splitHandle(handle: string): { ws: string | null; name: string } {
+  const cut = handle.lastIndexOf('/')
+  return cut === -1
+    ? { ws: null, name: handle }
+    : { ws: handle.slice(0, cut), name: handle.slice(cut + 1) }
+}
+
+/** Which CLI a party is, as the vendor label used everywhere else in the app.
+ *
+ *  Suppressed when the handle is still the auto-assigned `<agentKey>-<n>`,
+ *  which already names the vendor — "claude-1 (Claude Code)" says it twice.
+ *  Unknown agentKey (or none: an external MCP client, or a row restored from
+ *  before vendors were recorded) shows no vendor rather than a guess. */
+function vendorOf(agentKey: string | undefined, handle: string): string | null {
+  if (!agentKey) return null
+  const label = AGENT_LABELS.get(agentKey)
+  if (!label) return null
+  const name = splitHandle(handle).name.toLowerCase()
+  const autoPrefix = `${agentKey.toLowerCase()}-`
+  const isAutoName = name.startsWith(autoPrefix) && /^\d+$/.test(name.slice(autoPrefix.length))
+  return isAutoName ? null : label
 }
 </script>
 
@@ -53,20 +92,48 @@ function fmtTime(ts: number): string {
         :data-msg-id="msg.id"
         @click="toggleExpand(msg.id)"
       >
-        <div class="msg-line1">
-          <span class="msg-route">{{ msg.from }} → {{ msg.to }}</span>
+        <div class="msg-route" :title="`${msg.from} → ${msg.to}`">
+          <span class="msg-party msg-from">
+            <span v-if="vendorOf(msg.fromAgent, msg.from)" class="msg-vendor"
+              >{{ vendorOf(msg.fromAgent, msg.from) }} ·
+            </span>
+            <span v-if="splitHandle(msg.from).ws" class="msg-ws">{{ splitHandle(msg.from).ws }}/</span
+            ><span class="msg-name">{{ splitHandle(msg.from).name }}</span>
+          </span>
+          <span class="msg-arrow">→</span>
+          <span class="msg-party msg-to">
+            <span v-if="vendorOf(msg.toAgent, msg.to)" class="msg-vendor"
+              >{{ vendorOf(msg.toAgent, msg.to) }} ·
+            </span>
+            <span v-if="splitHandle(msg.to).ws" class="msg-ws">{{ splitHandle(msg.to).ws }}/</span
+            ><span class="msg-name">{{ splitHandle(msg.to).name }}</span>
+          </span>
+        </div>
+        <div class="msg-meta">
+          <span class="msg-time">{{ fmtTime(msg.createdAt) }}</span>
           <span class="msg-st" :data-st="msg.status">{{ $t(`msg.status-${msg.status}`) }}</span>
           <span v-if="msg.remote" class="msg-xws" :title="msg.remoteWorkspace">
             {{ $t('msg.cross-workspace-badge') }}
           </span>
+          <button
+            v-if="msg.status === 'failed'"
+            class="msg-btn msg-retry"
+            data-act="retry"
+            @click.stop="messaging.retryMessage(msg.id)"
+          >
+            {{ $t('msg.retry') }}
+          </button>
         </div>
-        <div class="msg-line2">
-          <span class="msg-time">{{ fmtTime(msg.createdAt) }}</span>
-          <span class="msg-preview">{{ msg.content }}</span>
+        <div class="msg-preview">{{ msg.content }}</div>
+        <!-- Why this row is where it is, without having to expand it. -->
+        <div v-if="msg.reason" class="msg-reason" :title="reasonText(msg.reason)">
+          {{ reasonText(msg.reason) }}
+        </div>
+        <div v-else-if="msg.hold" class="msg-hold">
+          {{ $t(`msg.hold-${msg.hold.key}`, { n: msg.hold.n ?? 0 }) }}
         </div>
         <div v-if="expandedId === msg.id" class="msg-detail">
           <pre>{{ msg.content }}</pre>
-          <div v-if="msg.reason" class="msg-reason">{{ msg.reason }}</div>
         </div>
       </div>
     </div>
@@ -153,33 +220,47 @@ function fmtTime(ts: number): string {
 
 .msg-row:hover { background: rgba(128, 128, 128, 0.08); }
 
-.msg-line1 {
-  display: flex;
-  align-items: center;
-  /* The status / cross-workspace badges don't shrink; let them drop to another
-     line instead of being clipped when the rail is near its 180px minimum. */
-  flex-wrap: wrap;
-  gap: 5px;
-  min-width: 0;
-}
-
-.msg-line2 {
+.msg-route {
   display: flex;
   align-items: baseline;
-  gap: 5px;
-  min-width: 0;
-  margin-top: 2px;
-}
-
-.msg-route {
-  flex: 1;
+  /* Wraps rather than clips: with both handles qualified, `from → to` cannot
+     survive one ellipsised line at this width, and the route is the one part of
+     a row that has to stay readable. */
+  flex-wrap: wrap;
+  gap: 0 4px;
   min-width: 0;
   font-size: 11px;
   font-weight: 600;
   color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+}
+
+.msg-party {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* The pane name identifies the party; the CLI vendor and workspace prefix are
+   context, so they recede the same way. */
+.msg-ws,
+.msg-vendor {
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+.msg-arrow {
+  flex: none;
+  color: var(--text-secondary);
+}
+
+.msg-meta {
+  display: flex;
+  align-items: center;
+  /* The badges don't shrink; let them drop to another line instead of being
+     clipped when the rail is near its 180px minimum. */
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+  margin-top: 3px;
 }
 
 .msg-time {
@@ -213,15 +294,25 @@ function fmtTime(ts: number): string {
 .msg-st[data-st='delivered'] { background: rgba(80, 190, 100, 0.18); color: #4fae5f; }
 .msg-st[data-st='failed'] { background: rgba(220, 80, 70, 0.18); color: #e0706a; }
 
-.msg-preview {
-  flex: 1;
+/* Pushed to the row's trailing edge so the badges stay grouped on the left. */
+.msg-retry {
+  margin-left: auto;
+  font-size: 9px;
+  padding: 0 5px;
+}
+
+.msg-preview,
+.msg-reason,
+.msg-hold {
   min-width: 0;
+  margin-top: 2px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 10px;
-  color: var(--text-secondary);
 }
+
+.msg-preview { color: var(--text-secondary); }
 
 .msg-detail { padding: 6px 0 2px; }
 
@@ -238,10 +329,11 @@ function fmtTime(ts: number): string {
   color: var(--text-primary);
 }
 
-.msg-reason {
-  margin-top: 4px;
-  font-size: 10px;
-  color: #e0706a;
+.msg-reason { color: #e0706a; }
+
+.msg-hold {
+  color: var(--text-secondary);
+  font-style: italic;
 }
 
 :root[data-theme='light'] .msg-bar,

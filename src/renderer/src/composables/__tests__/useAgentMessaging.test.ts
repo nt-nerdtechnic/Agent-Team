@@ -3,6 +3,7 @@ import {
   useAgentMessaging,
   _resetMessagingForTest,
   isBroadcastTarget,
+  encodeReason,
   RATE_LIMIT_MAX,
   QUEUE_CAP,
   type MessagingDeps,
@@ -100,13 +101,13 @@ describe('useAgentMessaging', () => {
     it('fails on unknown target', () => {
       const msg = m.sendMessage('claude-1', 'ghost', 'hi')
       expect(msg.status).toBe('failed')
-      expect(msg.reason).toContain('unknown target')
+      expect(msg.reason?.key).toBe('unknown-target')
     })
 
     it('fails on self-send', () => {
       const msg = m.sendMessage('claude-1', 'claude-1', 'hi')
       expect(msg.status).toBe('failed')
-      expect(msg.reason).toContain('same pane')
+      expect(msg.reason?.key).toBe('self-send')
     })
 
     it('rate-limits a sender→target pair independently', () => {
@@ -139,7 +140,7 @@ describe('useAgentMessaging', () => {
       }
       const over = m.sendMessage('kimi-1', 'codex-1', 'over')
       expect(over.status).toBe('failed')
-      expect(over.reason).toContain('queue full')
+      expect(over.reason?.key).toBe('queue-full')
     })
   })
 
@@ -179,7 +180,7 @@ describe('useAgentMessaging', () => {
       m.pump()
       await flush()
       expect(msg.status).toBe('failed')
-      expect(msg.reason).toContain('injection failed')
+      expect(msg.reason?.key).toBe('inject-failed')
     })
 
     it('delivers FIFO per target, one at a time', async () => {
@@ -210,7 +211,7 @@ describe('useAgentMessaging', () => {
       const msg = m.sendMessage('claude-1', 'codex-1', 'hi')
       m.unregisterPane('p2')
       expect(msg.status).toBe('failed')
-      expect(msg.reason).toContain('closed')
+      expect(msg.reason?.key).toBe('pane-closed')
       expect(m.paneIdOf('codex-1')).toBeNull()
     })
   })
@@ -315,6 +316,8 @@ describe('useAgentMessaging', () => {
           delivered_at: undefined,
           remote: undefined,
           remote_workspace: undefined,
+          sender_agent: 'claude',
+          recipient_agent: 'codex',
         },
       ])
     })
@@ -332,7 +335,7 @@ describe('useAgentMessaging', () => {
     it('updates on failure with the reason', () => {
       const msg = m.sendMessage('claude-1', 'ghost', 'hi')
       expect(updated.flat()).toEqual([
-        { uid: msg.uid, status: 'failed', reason: msg.reason },
+        { uid: msg.uid, status: 'failed', reason: encodeReason(msg.reason!) },
       ])
     })
 
@@ -377,7 +380,7 @@ describe('useAgentMessaging', () => {
         sender: 'claude-1',
         recipient: 'ghost',
         content: 'nope',
-        reason: 'unknown target "ghost"',
+        reason: encodeReason({ key: 'unknown-target', params: { to: 'ghost' } }),
         remote: 'outbound',
         remote_workspace: '/w/other',
       },
@@ -398,7 +401,7 @@ describe('useAgentMessaging', () => {
       expect(m.messages.value[1]).toMatchObject({
         uid: 'oldboot:2',
         status: 'failed',
-        reason: 'unknown target "ghost"',
+        reason: { key: 'unknown-target', params: { to: 'ghost' } },
         remote: 'outbound',
         remoteWorkspace: '/w/other',
       })
@@ -413,7 +416,7 @@ describe('useAgentMessaging', () => {
         { uid: 'oldboot:4', created_at: 40, status: 'delivering', sender: 'claude-1', recipient: 'codex-1', content: 'b' },
       ])
       expect(m.messages.value.map((x) => x.status)).toEqual(['failed', 'failed'])
-      expect(m.messages.value[0].reason).toBe('window reloaded before delivery')
+      expect(m.messages.value[0].reason).toEqual({ key: 'window-reloaded' })
       // FINDING 1: the store is GLOBAL. Writing the coercion back would stamp
       // `failed` over a row another live window is still about to deliver.
       expect(updates).toEqual([])
@@ -458,6 +461,174 @@ describe('useAgentMessaging', () => {
       expect(m.messages.value.find((x) => x.uid === live.uid)?.status).toBe('delivered')
       // pumpPane mutated the row that is actually in the log, not an orphan.
       expect(live.status).toBe('delivered')
+    })
+  })
+
+  describe('hold reasons', () => {
+    beforeEach(() => {
+      m.registerPane('p1', 'claude', 'alpha')
+      m.registerPane('p3', 'qwen', 'gamma') // not in idlePanes
+    })
+
+    it('annotates the queue head with the target gate and the rest by position', () => {
+      m.configureMessaging({ ...deps, idleHoldKey: () => 'mid-turn' })
+      m.sendMessage('alpha', 'gamma', 'one')
+      m.sendMessage('alpha', 'gamma', 'two')
+      m.sendMessage('alpha', 'gamma', 'three')
+
+      m.pump()
+
+      expect(m.messages.value.map((msg) => msg.hold)).toEqual([
+        { key: 'mid-turn' },
+        { key: 'behind', n: 1 },
+        { key: 'behind', n: 2 },
+      ])
+    })
+
+    it('falls back to a generic reason when the host supplies no gate detail', () => {
+      m.sendMessage('alpha', 'gamma', 'one')
+      m.pump()
+
+      expect(m.messages.value[0].hold).toEqual({ key: 'busy' })
+    })
+
+    it('reports the pause rather than a stale gate reason', () => {
+      m.configureMessaging({ ...deps, idleHoldKey: () => 'mid-turn' })
+      m.sendMessage('alpha', 'gamma', 'one')
+      m.pump()
+      expect(m.messages.value[0].hold).toEqual({ key: 'mid-turn' })
+
+      m.pauseMessaging()
+
+      expect(m.messages.value[0].hold).toEqual({ key: 'paused' })
+    })
+
+    it('clears the hold once the message leaves the queue', async () => {
+      m.sendMessage('alpha', 'p2-none', 'fails immediately')
+      idlePanes.add('p3')
+      m.sendMessage('alpha', 'gamma', 'goes through')
+      m.pump()
+      await flush()
+
+      // Failed and delivered rows show an outcome, so a hold would contradict it.
+      expect(m.messages.value.map((msg) => msg.hold)).toEqual([undefined, undefined])
+    })
+
+    it('explains an outbound cross-workspace message that is waiting on a report', () => {
+      m.configureMessaging({
+        ...deps,
+        routeRemote: async () => ({ ok: true, targetWorkspacePath: '/ws/other' }),
+      })
+      m.sendMessage('alpha', 'other/beta', 'across the boundary')
+
+      expect(m.messages.value[0].hold).toEqual({ key: 'remote-ack' })
+    })
+  })
+
+  describe('vendor stamping', () => {
+    it('records each side\'s CLI on a local send', () => {
+      m.registerPane('p1', 'claude', 'alpha')
+      m.registerPane('p2', 'codex', 'beta')
+
+      const msg = m.sendMessage('alpha', 'beta', 'hi')
+
+      expect(msg.fromAgent).toBe('claude')
+      expect(msg.toAgent).toBe('codex')
+    })
+
+    it('persists and restores the vendors', () => {
+      const rows: PersistedMessageRow[][] = []
+      m.configureMessaging({ ...deps, persistAppend: (r) => { rows.push(r) } })
+      m.registerPane('p1', 'claude', 'alpha')
+      m.registerPane('p2', 'codex', 'beta')
+      m.sendMessage('alpha', 'beta', 'hi')
+
+      expect(rows[0][0]).toMatchObject({ sender_agent: 'claude', recipient_agent: 'codex' })
+
+      _resetMessagingForTest()
+      m.configureMessaging(deps)
+      m.hydrateLog(rows[0])
+
+      expect(m.messages.value[0]).toMatchObject({ fromAgent: 'claude', toAgent: 'codex' })
+    })
+
+    it('takes the remote sender\'s CLI from the event and the target\'s from the registry', () => {
+      m.registerPane('p2', 'codex', 'reviewer')
+
+      m.acceptRemoteMessage({
+        msgKey: 'k1',
+        targetPaneId: 'p2',
+        fromDisplay: 'other/analysis',
+        fromAgent: 'claude',
+        content: 'hi',
+      })
+
+      expect(m.messages.value[0]).toMatchObject({ fromAgent: 'claude', toAgent: 'codex' })
+    })
+
+    it('leaves the vendor unset when the sender is not a pane', () => {
+      m.registerPane('p2', 'codex', 'reviewer')
+
+      m.acceptRemoteMessage({
+        msgKey: 'k1',
+        targetPaneId: 'p2',
+        fromDisplay: 'an external client',
+        content: 'hi',
+      })
+
+      expect(m.messages.value[0].fromAgent).toBeUndefined()
+      expect(m.messages.value[0].toAgent).toBe('codex')
+    })
+
+    it('forgets a pane\'s vendor when it unregisters', () => {
+      m.registerPane('p1', 'claude', 'alpha')
+      m.registerPane('p2', 'codex', 'beta')
+      m.unregisterPane('p2')
+      m.registerPane('p2', 'grok', 'beta')
+
+      expect(m.sendMessage('alpha', 'beta', 'hi').toAgent).toBe('grok')
+    })
+  })
+
+  describe('retryMessage', () => {
+    beforeEach(() => {
+      m.registerPane('p1', 'claude', 'alpha')
+    })
+
+    it('re-sends a failed message once the target exists', () => {
+      const original = m.sendMessage('alpha', 'beta', 'hello')
+      expect(original.status).toBe('failed')
+
+      m.registerPane('p2', 'codex', 'beta')
+      const retried = m.retryMessage(original.id)
+
+      expect(retried).not.toBeNull()
+      expect(retried?.status).toBe('queued')
+      expect(retried?.id).not.toBe(original.id)
+      // The original stays as the historical record of what failed.
+      expect(original.status).toBe('failed')
+      expect(m.messages.value).toHaveLength(2)
+    })
+
+    it('spends the pair budget, so retrying cannot bypass the rate limit', () => {
+      m.registerPane('p2', 'codex', 'beta')
+      for (let i = 0; i < RATE_LIMIT_MAX; i++) m.sendMessage('alpha', 'beta', `msg ${i}`)
+      const blocked = m.sendMessage('alpha', 'beta', 'over the limit')
+      expect(blocked.status).toBe('failed')
+
+      const retried = m.retryMessage(blocked.id)
+
+      expect(retried?.status).toBe('failed')
+      expect(retried?.reason?.key).toBe('rate-limit')
+    })
+
+    it('ignores an unknown id and anything that did not fail', () => {
+      m.registerPane('p2', 'codex', 'beta')
+      const queued = m.sendMessage('alpha', 'beta', 'still going')
+
+      expect(m.retryMessage(queued.id)).toBeNull()
+      expect(m.retryMessage(9999)).toBeNull()
+      expect(m.messages.value).toHaveLength(1)
     })
   })
 })

@@ -4,6 +4,8 @@ import {
   _resetMessagingForTest,
   RATE_LIMIT_MAX,
   QUEUE_CAP,
+  encodeReason,
+  type MessageReason,
   type MessagingDeps,
   type RouteResult,
 } from '../useAgentMessaging'
@@ -20,7 +22,7 @@ describe('useAgentMessaging — cross-workspace routing', () => {
   let deliverResult: boolean
   let routed: Array<{ fromPaneId: string; fromName: string; to: string; content: string; msgKey: string }>
   let routeResult: RouteResult
-  let reports: Array<{ msgKey: string; ok: boolean; reason: string }>
+  let reports: Array<{ msgKey: string; ok: boolean; reason: MessageReason | null }>
   let m: ReturnType<typeof useAgentMessaging>
 
   const deps: MessagingDeps = {
@@ -77,7 +79,7 @@ describe('useAgentMessaging — cross-workspace routing', () => {
 
     expect(routed).toEqual([])
     expect(msg.status).toBe('failed')
-    expect(msg.reason).toContain('unknown target')
+    expect(msg.reason?.key).toBe('unknown-target')
   })
 
   it('prefers a local pane whose own name contains a slash', async () => {
@@ -98,7 +100,38 @@ describe('useAgentMessaging — cross-workspace routing', () => {
     await flush()
 
     expect(msg.status).toBe('failed')
-    expect(msg.reason).toContain('unknown workspace')
+    // No code from the backend → its sentence is shown verbatim.
+    expect(msg.reason).toEqual({ key: 'raw', params: { text: 'unknown workspace "gamma"' } })
+  })
+
+  it('prefers the backend error code over its sentence, so the log can localize', async () => {
+    m.registerPane('p1', 'claude', 'sender')
+    routeResult = {
+      ok: false,
+      error: 'unknown workspace "gamma"',
+      errorCode: 'unknown-workspace',
+      errorParams: { ws: 'gamma' },
+    }
+    const msg = m.sendMessage('sender', 'gamma/reviewer', 'hi')
+    await flush()
+
+    expect(msg.reason).toEqual({ key: 'unknown-workspace', params: { ws: 'gamma' } })
+  })
+
+  it('takes the remote target\'s CLI from the resolved route', async () => {
+    m.registerPane('p1', 'claude', 'sender')
+    routeResult = {
+      ok: true,
+      targetDisplay: 'beta/reviewer',
+      targetWorkspacePath: '/ws/beta',
+      targetAgentKey: 'codex',
+    }
+    const msg = m.sendMessage('sender', 'beta/reviewer', 'hi')
+    await flush()
+
+    expect(msg.fromAgent).toBe('claude')
+    // Only the backend registry knows a pane living in another window.
+    expect(msg.toAgent).toBe('codex')
   })
 
   it('reports a routing exception rather than hanging in queued', async () => {
@@ -113,7 +146,7 @@ describe('useAgentMessaging — cross-workspace routing', () => {
     await flush()
 
     expect(msg.status).toBe('failed')
-    expect(msg.reason).toContain('backend down')
+    expect(msg.reason).toEqual({ key: 'route-error', params: { error: 'backend down' } })
   })
 
   it('degrades to the old local-only failure when no router is configured', async () => {
@@ -127,7 +160,7 @@ describe('useAgentMessaging — cross-workspace routing', () => {
     await flush()
 
     expect(msg.status).toBe('failed')
-    expect(msg.reason).toContain('unknown target')
+    expect(msg.reason?.key).toBe('unknown-target')
   })
 
   it('applies the per-pair rate limit to cross-workspace sends', async () => {
@@ -141,7 +174,7 @@ describe('useAgentMessaging — cross-workspace routing', () => {
 
     expect(routed).toHaveLength(RATE_LIMIT_MAX)
     expect(blocked.status).toBe('failed')
-    expect(blocked.reason).toContain('rate limit')
+    expect(blocked.reason?.key).toBe('rate-limit')
   })
 
   it('refuses to route when the sender is not a registered pane', async () => {
@@ -168,9 +201,9 @@ describe('useAgentMessaging — cross-workspace routing', () => {
     const msg = m.sendMessage('sender', 'beta/reviewer', 'hi')
     await flush()
 
-    m.resolveRemoteDelivery(routed[0].msgKey, false, 'injection failed (echo not verified)')
+    m.resolveRemoteDelivery(routed[0].msgKey, false, encodeReason({ key: 'inject-failed' }))
     expect(msg.status).toBe('failed')
-    expect(msg.reason).toContain('echo not verified')
+    expect(msg.reason?.key).toBe('inject-failed')
   })
 
   it('ignores a delivery result belonging to another window', async () => {
@@ -321,7 +354,7 @@ describe('useAgentMessaging — cross-workspace routing', () => {
     expect(delivered[0].paneId).toBe('p2')
     expect(delivered[0].text).toContain(`${MSG_ENVELOPE_PREFIX} alpha/sender`)
     expect(delivered[0].text).toContain('run the tests')
-    expect(reports).toEqual([{ msgKey: 'k1', ok: true, reason: '' }])
+    expect(reports).toEqual([{ msgKey: 'k1', ok: true, reason: null }])
 
     const entry = m.messages.value[0]
     expect(entry.remote).toBe('inbound')
@@ -362,7 +395,7 @@ describe('useAgentMessaging — cross-workspace routing', () => {
 
     expect(reports).toHaveLength(1)
     expect(reports[0].ok).toBe(false)
-    expect(reports[0].reason).toContain('echo not verified')
+    expect(reports[0].reason?.key).toBe('inject-failed')
   })
 
   it('applies the rate limit to inbound messages that ask for it', async () => {
@@ -389,7 +422,7 @@ describe('useAgentMessaging — cross-workspace routing', () => {
 
     expect(reports).toHaveLength(1)
     expect(reports[0]).toMatchObject({ msgKey: 'over', ok: false })
-    expect(reports[0].reason).toContain('rate limit')
+    expect(reports[0].reason?.key).toBe('rate-limit')
     expect(delivered).toHaveLength(RATE_LIMIT_MAX)
   })
 
@@ -427,7 +460,7 @@ describe('useAgentMessaging — cross-workspace routing', () => {
 
     expect(accepted).toBe(true)
     expect(reports).toEqual([
-      { msgKey: 'overflow', ok: false, reason: `target queue full (${QUEUE_CAP})` },
+      { msgKey: 'overflow', ok: false, reason: { key: 'queue-full', params: { cap: QUEUE_CAP } } },
     ])
   })
 
@@ -459,7 +492,7 @@ describe('useAgentMessaging — cross-workspace routing', () => {
     expect(reports).toEqual([])
 
     m.unregisterPane('p3')
-    expect(reports).toEqual([{ msgKey: 'k1', ok: false, reason: 'target pane closed' }])
+    expect(reports).toEqual([{ msgKey: 'k1', ok: false, reason: { key: 'pane-closed' } }])
   })
 
   it('fails an outbound message whose target window never reports back', async () => {
@@ -475,7 +508,7 @@ describe('useAgentMessaging — cross-workspace routing', () => {
     clock += 2 * 60_000
     m.pump()
     expect(msg.status).toBe('failed')
-    expect(msg.reason).toContain('no delivery report')
+    expect(msg.reason?.key).toBe('no-report')
   })
 
   it('expires stale outbound messages even while delivery is paused', async () => {
@@ -505,7 +538,7 @@ describe('useAgentMessaging — cross-workspace routing', () => {
 
     expect(routed).toHaveLength(RATE_LIMIT_MAX)
     expect(blocked.status).toBe('failed')
-    expect(blocked.reason).toContain('rate limit')
+    expect(blocked.reason?.key).toBe('rate-limit')
   })
 
   it('keeps separate rate-limit budgets for local panes whose names contain a slash', async () => {

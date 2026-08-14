@@ -37,8 +37,15 @@ function rowIds(wrapper: VueWrapper): (string | undefined)[] {
   return wrapper.findAll('[data-msg-id]').map((el) => el.attributes('data-msg-id'))
 }
 
+/** The route renders each party as vendor + workspace prefix + pane name, all
+ *  separate elements; recompose just the handles for the assertions below. */
 function routes(wrapper: VueWrapper): string[] {
-  return wrapper.findAll('.msg-route').map((el) => el.text())
+  return wrapper
+    .findAll('.msg-route')
+    .map(
+      (el) =>
+        `${el.get('.msg-from').get('.msg-name').text()} → ${el.get('.msg-to').get('.msg-name').text()}`
+    )
 }
 
 describe('AgentMessagesPanel', () => {
@@ -86,12 +93,126 @@ describe('AgentMessagesPanel', () => {
     expect(wrapper.find('.msg-detail').exists()).toBe(false)
 
     await wrapper.get('[data-msg-id="1"]').trigger('click')
-    const detail = wrapper.get('.msg-detail')
-    expect(detail.get('pre').text()).toBe('the full body')
-    // The failure reason only shows in the expanded block.
-    expect(detail.get('.msg-reason').text()).toContain('unknown target')
+    expect(wrapper.get('.msg-detail').get('pre').text()).toBe('the full body')
 
     await wrapper.get('[data-msg-id="1"]').trigger('click')
+    expect(wrapper.find('.msg-detail').exists()).toBe(false)
+  })
+
+  it('shows a failure reason without having to expand the row', () => {
+    m.registerPane('p1', 'claude', 'alpha')
+    m.sendMessage('alpha', 'nobody', 'the full body')
+    wrapper = mountPanel()
+
+    expect(wrapper.find('.msg-detail').exists()).toBe(false)
+    expect(wrapper.get('.msg-reason').text()).toBe(
+      i18n.global.t('msg.reason-unknown-target', { to: 'nobody' })
+    )
+  })
+
+  it('renders a reason from a store that predates structured reasons verbatim', () => {
+    m.hydrateLog([
+      {
+        uid: 'old:1',
+        created_at: 1_000,
+        status: 'failed',
+        sender: 'alpha',
+        recipient: 'beta',
+        content: 'from an older build',
+        reason: 'unknown target "beta"',
+      },
+    ])
+    wrapper = mountPanel()
+
+    expect(wrapper.get('.msg-reason').text()).toBe('unknown target "beta"')
+  })
+
+  it('names the CLI vendor on each side of the route', () => {
+    m.registerPane('p1', 'claude', 'analysis')
+    m.registerPane('p2', 'codex', 'reviewer')
+    m.sendMessage('analysis', 'reviewer', 'take a look')
+    wrapper = mountPanel()
+
+    expect(wrapper.get('.msg-from').get('.msg-vendor').text()).toBe('Claude Code ·')
+    expect(wrapper.get('.msg-to').get('.msg-vendor').text()).toBe('Codex ·')
+  })
+
+  it('omits the vendor when the handle is still the auto-assigned one', () => {
+    // `claude-1` already names the vendor; repeating it reads as noise.
+    m.registerPane('p1', 'claude') // → claude-1
+    m.registerPane('p2', 'codex', 'reviewer')
+    m.sendMessage('claude-1', 'reviewer', 'hi')
+    wrapper = mountPanel()
+
+    expect(wrapper.get('.msg-from').find('.msg-vendor').exists()).toBe(false)
+    expect(wrapper.get('.msg-to').get('.msg-vendor').text()).toBe('Codex ·')
+  })
+
+  it('shows no vendor for a sender that is not a pane we know', () => {
+    m.registerPane('p2', 'codex', 'reviewer')
+    // An external MCP client has no pane, so the event carries no agent key.
+    m.acceptRemoteMessage({
+      msgKey: 'k1',
+      targetPaneId: 'p2',
+      fromDisplay: 'an external client',
+      content: 'hello',
+    })
+    wrapper = mountPanel()
+
+    expect(wrapper.get('.msg-from').find('.msg-vendor').exists()).toBe(false)
+    expect(wrapper.get('.msg-to').get('.msg-vendor').text()).toBe('Codex ·')
+  })
+
+  it('dims the workspace prefix and keeps the pane name whole', () => {
+    m.registerPane('p2', 'codex', 'beta')
+    m.acceptRemoteMessage({
+      msgKey: 'k1',
+      targetPaneId: 'p2',
+      fromDisplay: 'other-project/analysis',
+      content: 'hello',
+    })
+    wrapper = mountPanel()
+
+    const from = wrapper.get('.msg-from')
+    expect(from.get('.msg-ws').text()).toBe('other-project/')
+    expect(from.get('.msg-name').text()).toBe('analysis')
+    // An unqualified handle has no prefix to dim.
+    expect(wrapper.get('.msg-to').find('.msg-ws').exists()).toBe(false)
+    expect(wrapper.get('.msg-to').get('.msg-name').text()).toBe('beta')
+  })
+
+  it('explains why a queued message has not been delivered', async () => {
+    m.registerPane('p1', 'claude', 'alpha')
+    m.registerPane('p2', 'codex', 'beta') // never idle
+    m.sendMessage('alpha', 'beta', 'first')
+    m.sendMessage('alpha', 'beta', 'second')
+    m.pump()
+    wrapper = mountPanel()
+    await flushPromises()
+
+    // Newest first: the second message is behind the first, which is waiting on
+    // the target itself.
+    expect(wrapper.findAll('.msg-hold').map((el) => el.text())).toEqual([
+      i18n.global.t('msg.hold-behind', { n: 1 }),
+      i18n.global.t('msg.hold-busy'),
+    ])
+  })
+
+  it('resends a failed message from the row and leaves the original alone', async () => {
+    m.registerPane('p1', 'claude', 'alpha')
+    m.sendMessage('alpha', 'beta', 'no such pane yet')
+    wrapper = mountPanel()
+    expect(wrapper.get('.msg-reason').text()).toBe(
+      i18n.global.t('msg.reason-unknown-target', { to: 'beta' })
+    )
+
+    // The target shows up, then the user retries.
+    m.registerPane('p2', 'codex', 'beta')
+    await wrapper.get('[data-act="retry"]').trigger('click')
+
+    expect(rowIds(wrapper)).toEqual(['2', '1'])
+    expect(m.messages.value.map((msg) => msg.status)).toEqual(['failed', 'queued'])
+    // Retrying must not also expand the row it was clicked in.
     expect(wrapper.find('.msg-detail').exists()).toBe(false)
   })
 

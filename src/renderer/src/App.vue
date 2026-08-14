@@ -23,7 +23,7 @@ import NotificationHost from './components/NotificationHost.vue'
 import Welcome from './components/Welcome.vue'
 import { useNotify } from './composables/useNotify'
 import { migrateTerminalPtyKey } from './composables/useTerminal'
-import { useAgentMessaging, isBroadcastTarget } from './composables/useAgentMessaging'
+import { useAgentMessaging, encodeReason, isBroadcastTarget } from './composables/useAgentMessaging'
 import type { RouteResult } from './composables/useAgentMessaging'
 import { createMessageLogPersistence } from './composables/useMessageLogPersistence'
 import { MSG_ENVELOPE_PREFIX, VENDORS_WITHOUT_TURN_END, isTurnInFlight, normalizeMessagingName, parseMessages, parseSpawns, renderSpawnKickoff } from './lib/agentMessaging'
@@ -1378,22 +1378,32 @@ async function deliverAgentMessage(paneId: string, text: string): Promise<boolea
   return true
 }
 
-/** isPaneIdle() dep: PTY alive and past startup, not mid role/kickoff
- *  injection, latest CLI signal is "turn ended" (not agent_active), and no
- *  activity in the last 2s. */
-function isPaneIdleForMessaging(paneId: string): boolean {
+/** idleHoldKey() dep: why a message cannot be injected into this pane right
+ *  now, as an i18n key suffix under `msg.hold-*`, or null when it can be.
+ *  Gate: PTY alive and past startup, not mid role/kickoff injection, latest CLI
+ *  signal is "turn ended" (not agent_active), and no activity in the last 2s.
+ *
+ *  isPaneIdleForMessaging() is derived from this rather than duplicating it, so
+ *  the reason shown in the Messages panel cannot drift from the real gate. */
+function messagingHoldKey(paneId: string): string | null {
   const pane = panes.value.find((p) => p.id === paneId)
-  if (!pane) return false
+  if (!pane) return 'gone'
   const status = paneRefs[paneId]?.displayStatus as string | undefined
-  if (status !== 'running' && status !== 'idle') return false
-  if (pane.injectionStatus === 'scheduled' || pane.kickoffStatus === 'pending') return false
+  if (status !== 'running' && status !== 'idle') return 'not-ready'
+  if (pane.injectionStatus === 'scheduled' || pane.kickoffStatus === 'pending') return 'starting'
   const now = Date.now()
   const lastActive = paneLastActiveAt.get(paneId) ?? 0
   const inFlight = isTurnInFlight(lastActive, paneTurnCompleteAt.get(paneId) ?? 0, now, {
     inferEndFromSilence: VENDORS_WITHOUT_TURN_END.has(pane.agentKey),
   })
-  if (inFlight) return false
-  return now - lastActive >= 2000
+  if (inFlight) return 'mid-turn'
+  if (now - lastActive < 2000) return 'settling'
+  return null
+}
+
+/** isPaneIdle() dep. See messagingHoldKey() for the gate itself. */
+function isPaneIdleForMessaging(paneId: string): boolean {
+  return messagingHoldKey(paneId) === null
 }
 
 // Per-pane timestamp of the last turn_complete whose text was scanned for MSG
@@ -1817,8 +1827,11 @@ async function routeRemoteMessage(args: {
   const resp = await backend.send<{
     ok?: boolean
     error?: string
+    code?: string
+    params?: Record<string, string>
     target_display?: string
     target_workspace_path?: string
+    target_agent_key?: string
   }>(
     'agent_msg.route',
     {
@@ -1834,12 +1847,21 @@ async function routeRemoteMessage(args: {
   )
   const p = resp.payload
   if (!resp.ok || !p?.ok) {
-    return { ok: false, error: p?.error || resp.error?.message || 'cross-workspace routing failed' }
+    // Backend code first (localizable), then whatever text we got (a transport
+    // failure has no code), and only then a generic "it didn't route".
+    const text = p?.error || resp.error?.message
+    return {
+      ok: false,
+      error: text,
+      errorCode: p?.code || (text ? undefined : 'route-unavailable'),
+      errorParams: p?.params,
+    }
   }
   return {
     ok: true,
     targetDisplay: p.target_display,
     targetWorkspacePath: p.target_workspace_path,
+    targetAgentKey: p.target_agent_key,
   }
 }
 
@@ -1865,10 +1887,16 @@ onMounted(() => {
     now: () => Date.now(),
     deliver: deliverAgentMessage,
     isPaneIdle: isPaneIdleForMessaging,
+    idleHoldKey: messagingHoldKey,
     routeRemote: routeRemoteMessage,
     reportDelivery: (msgKey, ok, reason) => {
       backend
-        .send('agent_msg.delivered', { msg_key: msgKey, ok, reason })
+        .send('agent_msg.delivered', {
+          msg_key: msgKey,
+          ok,
+          // The wire field is text; the sending window decodes it back.
+          reason: reason ? encodeReason(reason) : '',
+        })
         .catch(() => { /* the sender's log entry just stays queued */ })
     },
     persistAppend: msgLog.persistAppend,
@@ -7921,9 +7949,11 @@ backend.on('agent_msg.deliver', (raw) => {
     target_pane_id?: string
     target_name?: string
     target_workspace_path?: string
+    target_agent_key?: string
     from_pane_id?: string
     from_display?: string
     from_workspace_path?: string
+    from_agent_key?: string
     content?: string
     cross_workspace?: boolean
     rate_limit?: boolean
@@ -7938,6 +7968,7 @@ backend.on('agent_msg.deliver', (raw) => {
       fromPaneId: ev.from_pane_id,
       targetPaneId: ev.target_pane_id,
       toDisplay: ev.target_name || '',
+      toAgent: ev.target_agent_key,
       content: ev.content,
       crossWorkspace: !!ev.cross_workspace,
       remoteWorkspace: ev.target_workspace_path,
@@ -7947,6 +7978,7 @@ backend.on('agent_msg.deliver', (raw) => {
     msgKey: ev.msg_key,
     targetPaneId: ev.target_pane_id,
     fromDisplay: ev.from_display || 'unknown',
+    fromAgent: ev.from_agent_key,
     content: ev.content,
     remoteWorkspace: ev.from_workspace_path,
     // Senders that bypassed sendMessage (the MCP tools) carry no rate-limit

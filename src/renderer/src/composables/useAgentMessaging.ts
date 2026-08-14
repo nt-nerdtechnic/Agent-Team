@@ -21,6 +21,55 @@ import {
 
 export type MessageStatus = 'queued' | 'delivering' | 'delivered' | 'failed'
 
+/**
+ * Why a message is still sitting in `queued`. `key` is an i18n key suffix the
+ * log panel renders as `msg.hold-<key>`; `n` is its only parameter (the number
+ * of messages ahead of this one). Transient by design — it describes a live
+ * gate, so it is never persisted and never restored.
+ */
+export interface MessageHold {
+  key: string
+  n?: number
+}
+
+/**
+ * Why a message failed. `key` is an i18n key suffix the log panel renders as
+ * `msg.reason-<key>`, with `params` as its substitutions.
+ *
+ * `raw` is the escape hatch for text this app did not author — an exception
+ * message, or an error from a backend old enough not to send a code — and
+ * renders the text verbatim.
+ */
+export interface MessageReason {
+  key: string
+  params?: Record<string, string | number>
+}
+
+export function rawReason(text: string): MessageReason {
+  return { key: 'raw', params: { text } }
+}
+
+/** Reasons cross a process boundary twice — the log store and the delivery
+ *  report to another window — and both carry text, so they travel as JSON. */
+export function encodeReason(reason: MessageReason): string {
+  return JSON.stringify(reason)
+}
+
+/** The inverse, and the compatibility path: a row written before reasons were
+ *  structured holds a plain English sentence, which decodes to `raw`. */
+export function decodeReason(encoded: string | undefined | null): MessageReason | undefined {
+  if (!encoded) return undefined
+  try {
+    const parsed = JSON.parse(encoded)
+    if (parsed && typeof parsed === 'object' && typeof parsed.key === 'string') {
+      return parsed as MessageReason
+    }
+  } catch {
+    /* not JSON — a pre-structured reason, handled below */
+  }
+  return rawReason(encoded)
+}
+
 export interface AgentMessage {
   id: number
   /** Persistence key, `${bootUid}:${id}`. `id` is a module counter that restarts
@@ -29,11 +78,20 @@ export interface AgentMessage {
   uid: string
   from: string
   to: string
+  /** Which CLI vendor each side is (an `agentKey`), captured when the message
+   *  was sent. Snapshotted rather than looked up on render: a pane can be
+   *  renamed, closed, or rebuilt onto a different CLI, and the log has to keep
+   *  showing who actually took part. Absent for a sender outside any pane (an
+   *  external MCP client) and for rows restored from before this was stored. */
+  fromAgent?: string
+  toAgent?: string
   /** Raw (unsanitized) content, for display in the log panel. */
   content: string
   status: MessageStatus
   /** Failure reason when status === 'failed'. */
-  reason?: string
+  reason?: MessageReason
+  /** Why this message has not been injected yet, while status === 'queued'. */
+  hold?: MessageHold
   createdAt: number
   deliveredAt?: number
   /** Set when the message crossed a workspace boundary. 'outbound' entries live
@@ -53,25 +111,37 @@ export interface PersistedMessageRow {
   sender: string
   recipient: string
   content: string
+  /** JSON-encoded MessageReason; see encodeReason(). */
   reason?: string
   delivered_at?: number
   remote?: 'outbound' | 'inbound'
   remote_workspace?: string
+  sender_agent?: string
+  recipient_agent?: string
 }
 
 /** A status patch for an already-persisted row. */
 export interface PersistedMessageUpdate {
   uid: string
   status?: MessageStatus
+  /** JSON-encoded MessageReason; see encodeReason(). */
   reason?: string
   delivered_at?: number
 }
 
 export interface RouteResult {
   ok: boolean
+  /** The backend's English sentence, kept as the fallback when it sends no
+   *  code (an older backend). */
   error?: string
+  /** Machine code for the same failure, resolved against `msg.reason-*`. */
+  errorCode?: string
+  errorParams?: Record<string, string | number>
   targetDisplay?: string
   targetWorkspacePath?: string
+  /** The resolved target's CLI vendor, which only the backend registry knows
+   *  for a pane in another window. */
+  targetAgentKey?: string
 }
 
 export interface MessagingDeps {
@@ -80,6 +150,10 @@ export interface MessagingDeps {
   deliver: (paneId: string, text: string) => Promise<boolean>
   /** True when the pane can accept an injection right now (idle + settled). */
   isPaneIdle: (paneId: string) => boolean
+  /** Why isPaneIdle() said no, as an i18n key suffix under `msg.hold-*`. Must
+   *  be derived from the same gate as isPaneIdle so the log cannot claim a
+   *  reason the gate does not actually apply. Absent → a generic 'busy'. */
+  idleHoldKey?: (paneId: string) => string | null
   /** Ask the backend registry to route a target this window does not own.
    *  Absent (or throwing) → cross-workspace addressing degrades to the previous
    *  local-only behaviour. */
@@ -90,8 +164,9 @@ export interface MessagingDeps {
     content: string
     msgKey: string
   }) => Promise<RouteResult>
-  /** Tell the sending window how an inbound cross-workspace message ended. */
-  reportDelivery?: (msgKey: string, ok: boolean, reason: string) => void
+  /** Tell the sending window how an inbound cross-workspace message ended.
+   *  The caller serializes; see encodeReason(). */
+  reportDelivery?: (msgKey: string, ok: boolean, reason: MessageReason | null) => void
   /** Mirror the log into the backend store. All three are optional — without
    *  them the log stays in-memory only, exactly as it was before. The caller
    *  batches; these are called once per row/transition. */
@@ -111,6 +186,12 @@ const LOG_CAP = 500
  *  queue full — is reported explicitly well before this fires. */
 const REMOTE_ACK_TIMEOUT_MS = 30 * 60_000
 
+const RATE_LIMIT_REASON: MessageReason = {
+  key: 'rate-limit',
+  params: { max: RATE_LIMIT_MAX, seconds: RATE_LIMIT_WINDOW_MS / 1000 },
+}
+const QUEUE_FULL_REASON: MessageReason = { key: 'queue-full', params: { cap: QUEUE_CAP } }
+
 /** Reserved `to:` keywords that fan a message out to every other pane instead
  *  of a single named target. `all` (case-insensitive) or `*`. */
 export function isBroadcastTarget(to: string): boolean {
@@ -119,7 +200,7 @@ export function isBroadcastTarget(to: string): boolean {
 }
 
 /** Reason written onto rows that were still in flight when the window died. */
-const HYDRATE_LOST_REASON = 'window reloaded before delivery'
+const HYDRATE_LOST_REASON: MessageReason = { key: 'window-reloaded' }
 
 // ── Module-level singleton state ──────────────────────────────────────────
 let deps: MessagingDeps | null = null
@@ -150,10 +231,12 @@ function toPersistedRow(m: AgentMessage): PersistedMessageRow {
     sender: m.from,
     recipient: m.to,
     content: m.content,
-    reason: m.reason,
+    reason: m.reason ? encodeReason(m.reason) : undefined,
     delivered_at: m.deliveredAt,
     remote: m.remote,
     remote_workspace: m.remoteWorkspace,
+    sender_agent: m.fromAgent,
+    recipient_agent: m.toAgent,
   }
 }
 
@@ -169,10 +252,12 @@ function fromPersistedRow(row: PersistedMessageRow): AgentMessage {
     status: row.status,
     createdAt: Number(row.created_at) || 0,
   }
-  if (row.reason) m.reason = row.reason
+  if (row.reason) m.reason = decodeReason(row.reason)
   if (row.delivered_at != null) m.deliveredAt = row.delivered_at
   if (row.remote) m.remote = row.remote
   if (row.remote_workspace) m.remoteWorkspace = row.remote_workspace
+  if (row.sender_agent) m.fromAgent = row.sender_agent
+  if (row.recipient_agent) m.toAgent = row.recipient_agent
   return m
 }
 
@@ -181,6 +266,8 @@ const paused = ref(false)
 
 const nameByPane = new Map<string, string>()
 const paneByName = new Map<string, string>()
+/** Each registered pane's CLI vendor (agentKey), for stamping messages. */
+const agentByPane = new Map<string, string>()
 /** FIFO of message ids per target paneId. */
 const queues = new Map<string, number[]>()
 /** Target paneIds with an injection currently in flight. */
@@ -210,7 +297,14 @@ function registerPane(paneId: string, agentKey: string, preferredName?: string):
     : defaultMessagingName(agentKey, paneByName.keys())
   nameByPane.set(paneId, name)
   paneByName.set(name, paneId)
+  agentByPane.set(paneId, agentKey)
   return name
+}
+
+/** The CLI vendor behind a handle, or undefined when it is not a local pane. */
+function agentOfName(name: string): string | undefined {
+  const paneId = paneByName.get(name)
+  return paneId ? agentByPane.get(paneId) : undefined
 }
 
 /** Re-derive a pane's handle from a new base (its title). Collision-suffixed;
@@ -246,16 +340,17 @@ function renamePane(paneId: string, rawName: string): boolean {
 function unregisterPane(paneId: string): void {
   const q = queues.get(paneId) ?? []
   for (const id of q) {
-    failMessage(id, 'target pane closed')
+    failMessage(id, { key: 'pane-closed' })
     // Undelivered cross-workspace messages must not leave the sending window
     // waiting for a report that will never come.
-    ackInbound(id, false, 'target pane closed')
+    ackInbound(id, false, { key: 'pane-closed' })
   }
   queues.delete(paneId)
   delivering.delete(paneId)
   const name = nameByPane.get(paneId)
   if (name) paneByName.delete(name)
   nameByPane.delete(paneId)
+  agentByPane.delete(paneId)
 }
 
 function nameOf(paneId: string): string | null {
@@ -277,14 +372,45 @@ function findMessage(id: number): AgentMessage | undefined {
   return messages.value.find((m) => m.id === id)
 }
 
-function failMessage(id: number, reason: string): void {
+function failMessage(id: number, reason: MessageReason): void {
   const m = findMessage(id)
   if (m && m.status !== 'delivered') {
     m.status = 'failed'
     m.reason = reason
-    deps?.persistUpdate?.([{ uid: m.uid, status: 'failed', reason }])
+    delete m.hold
+    deps?.persistUpdate?.([{ uid: m.uid, status: 'failed', reason: encodeReason(reason) }])
   }
   envelopes.delete(id)
+}
+
+/**
+ * Explain a target's queue: the head carries why the gate is closed (null when
+ * it is open and the head is about to go out), everything behind it carries its
+ * own position. Only `queued` rows are annotated — a row that already moved on
+ * has an outcome to show instead.
+ */
+function annotateHold(q: number[], headKey: string | null): void {
+  q.forEach((id, i) => {
+    const m = findMessage(id)
+    if (!m || m.status !== 'queued') return
+    if (i > 0) m.hold = { key: 'behind', n: i }
+    else if (headKey) m.hold = { key: headKey }
+    else delete m.hold
+  })
+}
+
+/** Record which CLI vendor each side is, skipping the ones we cannot name. */
+function stampAgents(m: AgentMessage, from?: string, to?: string): void {
+  if (from) m.fromAgent = from
+  if (to) m.toAgent = to
+}
+
+/** Re-persist a row whose fields were filled in after it was first logged (the
+ *  cross-workspace route resolves the target asynchronously). The store upserts
+ *  on `uid` and keeps the original insertion order, so this refreshes the row
+ *  rather than duplicating it. */
+function repersist(m: AgentMessage): void {
+  deps?.persistAppend?.([toPersistedRow(m)])
 }
 
 function pushLog(m: AgentMessage): void {
@@ -353,7 +479,7 @@ function overRateLimit(from: string, to: string, now: number, remote = false): b
 
 /** Report an inbound cross-workspace message's outcome back to the sending
  *  window. Idempotent: only the first call for a message reports. */
-function ackInbound(id: number, ok: boolean, reason: string): void {
+function ackInbound(id: number, ok: boolean, reason: MessageReason | null): void {
   const msgKey = remoteInbound.get(id)
   if (msgKey === undefined) return
   remoteInbound.delete(id)
@@ -379,6 +505,7 @@ function sendMessage(from: string, to: string, content: string, opts: SendOption
     status: 'queued',
     createdAt: now,
   }
+  stampAgents(msg, agentOfName(from), agentOfName(to))
   pushLog(msg)
 
   const targetPane = paneIdOf(to)
@@ -389,20 +516,20 @@ function sendMessage(from: string, to: string, content: string, opts: SendOption
       dispatchRemote(msg, from, to, content, now)
       return msg
     }
-    failMessage(msg.id, `unknown target "${to}"`)
+    failMessage(msg.id, { key: 'unknown-target', params: { to } })
     return msg
   }
   if (from === to) {
-    failMessage(msg.id, 'sender and target are the same pane')
+    failMessage(msg.id, { key: 'self-send' })
     return msg
   }
   if (overRateLimit(from, to, now)) {
-    failMessage(msg.id, `rate limit: max ${RATE_LIMIT_MAX} msgs / ${RATE_LIMIT_WINDOW_MS / 1000}s per pair`)
+    failMessage(msg.id, RATE_LIMIT_REASON)
     return msg
   }
   const q = queues.get(targetPane) ?? []
   if (q.length >= QUEUE_CAP) {
-    failMessage(msg.id, `target queue full (${QUEUE_CAP})`)
+    failMessage(msg.id, QUEUE_FULL_REASON)
     return msg
   }
 
@@ -415,6 +542,15 @@ function sendMessage(from: string, to: string, content: string, opts: SendOption
 }
 
 // ── Cross-workspace routing ────────────────────────────────────────────────
+/** Turn a rejected route into a displayable reason: prefer the backend's code
+ *  so the log localizes, fall back to its English sentence (a backend older
+ *  than the code), and finally to the target that could not be resolved. */
+function routeFailureReason(result: RouteResult, to: string): MessageReason {
+  if (result.errorCode) return { key: result.errorCode, params: result.errorParams }
+  if (result.error) return rawReason(result.error)
+  return { key: 'unknown-target', params: { to } }
+}
+
 /**
  * Hand a `<folder>/<pane>` target to the backend registry. The message stays
  * `queued` here until the receiving window reports back, so the log reflects
@@ -431,25 +567,25 @@ function dispatchRemote(
 ): void {
   const routeRemote = deps?.routeRemote
   if (!routeRemote) {
-    failMessage(msg.id, `unknown target "${to}"`)
+    failMessage(msg.id, { key: 'unknown-target', params: { to } })
     return
   }
   const fromPaneId = paneIdOf(from)
   if (!fromPaneId) {
-    failMessage(msg.id, `unknown target "${to}"`)
+    failMessage(msg.id, { key: 'unknown-target', params: { to } })
     return
   }
   if (overRateLimit(from, to, now, true)) {
-    failMessage(
-      msg.id,
-      `rate limit: max ${RATE_LIMIT_MAX} msgs / ${RATE_LIMIT_WINDOW_MS / 1000}s per pair`,
-    )
+    failMessage(msg.id, RATE_LIMIT_REASON)
     return
   }
   const key = pairKey(from, to, true)
   pairSends.set(key, [...(pairSends.get(key) ?? []), now])
 
   msg.remote = 'outbound'
+  // The target's queue lives in another window, so nothing local explains this
+  // row's `queued` — say so rather than leaving it looking stuck.
+  msg.hold = { key: 'remote-ack' }
   const msgKey = `${fromPaneId}:${msg.id}`
   remoteOutbound.set(msgKey, { id: msg.id, sentAt: now })
 
@@ -458,13 +594,18 @@ function dispatchRemote(
       const result = await routeRemote({ fromPaneId, fromName: from, to, content, msgKey })
       if (!result.ok) {
         remoteOutbound.delete(msgKey)
-        failMessage(msg.id, result.error || `unknown target "${to}"`)
+        failMessage(msg.id, routeFailureReason(result, to))
         return
       }
       msg.remoteWorkspace = result.targetWorkspacePath
+      stampAgents(msg, undefined, result.targetAgentKey)
+      repersist(msg)
     } catch (err) {
       remoteOutbound.delete(msgKey)
-      failMessage(msg.id, `routing error: ${err instanceof Error ? err.message : String(err)}`)
+      failMessage(msg.id, {
+        key: 'route-error',
+        params: { error: err instanceof Error ? err.message : String(err) },
+      })
     }
   })()
 }
@@ -481,6 +622,8 @@ function acceptRemoteMessage(args: {
   fromDisplay: string
   content: string
   remoteWorkspace?: string
+  /** The sending pane's CLI vendor, as reported by the backend registry. */
+  fromAgent?: string
   /** Apply the per-pair rate limit here — set for senders that did not pass
    *  through sendMessage (the MCP tools), which would otherwise have no loop
    *  guard at all. */
@@ -493,8 +636,8 @@ function acceptRemoteMessage(args: {
   if (args.rateLimit) {
     const now = deps.now()
     if (overRateLimit(args.fromDisplay, localName, now, true)) {
-      const reason = `rate limit: max ${RATE_LIMIT_MAX} msgs / ${RATE_LIMIT_WINDOW_MS / 1000}s per pair`
-      pushLog({
+      const reason = RATE_LIMIT_REASON
+      const rejected: AgentMessage = {
         ...nextMessageKeys(),
         from: args.fromDisplay,
         to: localName,
@@ -504,7 +647,9 @@ function acceptRemoteMessage(args: {
         createdAt: now,
         remote: 'inbound',
         remoteWorkspace: args.remoteWorkspace,
-      })
+      }
+      stampAgents(rejected, args.fromAgent, agentByPane.get(args.targetPaneId))
+      pushLog(rejected)
       deps.reportDelivery?.(args.msgKey, false, reason)
       return true
     }
@@ -522,12 +667,13 @@ function acceptRemoteMessage(args: {
     remote: 'inbound',
     remoteWorkspace: args.remoteWorkspace,
   }
+  stampAgents(msg, args.fromAgent, agentByPane.get(args.targetPaneId))
   pushLog(msg)
 
   const q = queues.get(args.targetPaneId) ?? []
   if (q.length >= QUEUE_CAP) {
-    failMessage(msg.id, `target queue full (${QUEUE_CAP})`)
-    deps.reportDelivery?.(args.msgKey, false, `target queue full (${QUEUE_CAP})`)
+    failMessage(msg.id, QUEUE_FULL_REASON)
+    deps.reportDelivery?.(args.msgKey, false, QUEUE_FULL_REASON)
     return true
   }
   envelopes.set(msg.id, renderEnvelope(args.fromDisplay, args.content))
@@ -553,6 +699,8 @@ function noteOutboundMessage(args: {
    *  window also owns the target — acceptRemoteMessage logs that message. */
   targetPaneId?: string
   toDisplay: string
+  /** The target pane's CLI vendor, as reported by the backend registry. */
+  toAgent?: string
   content: string
   crossWorkspace: boolean
   remoteWorkspace?: string
@@ -583,6 +731,8 @@ function noteOutboundMessage(args: {
     msg.remote = 'outbound'
     msg.remoteWorkspace = args.remoteWorkspace
   }
+  msg.hold = { key: 'remote-ack' }
+  stampAgents(msg, agentByPane.get(args.fromPaneId), args.toAgent)
   pushLog(msg)
   // Hook the row into the ordinary outbound lifecycle: resolveRemoteDelivery()
   // flips it to delivered/failed, expireStaleRemotes() is the backstop.
@@ -601,9 +751,10 @@ function resolveRemoteDelivery(msgKey: string, ok: boolean, reason: string): voi
   if (ok) {
     msg.status = 'delivered'
     msg.deliveredAt = deps ? deps.now() : msg.createdAt
+    delete msg.hold
     deps?.persistUpdate?.([{ uid: msg.uid, status: 'delivered', delivered_at: msg.deliveredAt }])
   } else {
-    failMessage(rec.id, reason || 'delivery failed')
+    failMessage(rec.id, decodeReason(reason) ?? { key: 'delivery-failed' })
   }
 }
 
@@ -614,7 +765,7 @@ function expireStaleRemotes(now: number): void {
   for (const [msgKey, rec] of [...remoteOutbound]) {
     if (now - rec.sentAt < REMOTE_ACK_TIMEOUT_MS) continue
     remoteOutbound.delete(msgKey)
-    failMessage(rec.id, 'no delivery report from the target window')
+    failMessage(rec.id, { key: 'no-report' })
   }
 }
 
@@ -638,29 +789,39 @@ function pump(): void {
   // Runs even while paused: pausing stops local injection, it does not make a
   // dead target window start answering.
   expireStaleRemotes(deps.now())
-  if (paused.value) return
+  if (paused.value) {
+    for (const q of queues.values()) annotateHold(q, 'paused')
+    return
+  }
   for (const paneId of queues.keys()) void pumpPane(paneId)
 }
 
 async function pumpPane(paneId: string): Promise<void> {
-  if (!deps || paused.value || delivering.has(paneId)) return
+  if (!deps || paused.value) return
   const q = queues.get(paneId)
   if (!q || q.length === 0) return
-  if (!deps.isPaneIdle(paneId)) return
+  // Mid-injection: the head has no hold and the rest already carry their
+  // positions from the call that let the head through.
+  if (delivering.has(paneId)) return
+  if (!deps.isPaneIdle(paneId)) {
+    annotateHold(q, deps.idleHoldKey?.(paneId) ?? 'busy')
+    return
+  }
+  annotateHold(q, null)
 
   const id = q[0]
   const msg = findMessage(id)
   const envelope = envelopes.get(id)
   if (!msg || !envelope) {
     q.shift()
-    ackInbound(id, false, 'message dropped before delivery')
+    ackInbound(id, false, { key: 'dropped' })
     return
   }
   delivering.add(paneId)
   msg.status = 'delivering'
   deps.persistUpdate?.([{ uid: msg.uid, status: 'delivering' }])
   let ackOk = false
-  let ackReason = ''
+  let ackReason: MessageReason | null = null
   try {
     const ok = await deps.deliver(paneId, envelope)
     if (ok) {
@@ -670,11 +831,14 @@ async function pumpPane(paneId: string): Promise<void> {
       envelopes.delete(id)
       ackOk = true
     } else {
-      ackReason = 'injection failed (echo not verified)'
+      ackReason = { key: 'inject-failed' }
       failMessage(id, ackReason)
     }
   } catch (err) {
-    ackReason = `injection error: ${err instanceof Error ? err.message : String(err)}`
+    ackReason = {
+      key: 'inject-error',
+      params: { error: err instanceof Error ? err.message : String(err) },
+    }
     failMessage(id, ackReason)
   } finally {
     q.shift()
@@ -686,6 +850,24 @@ async function pumpPane(paneId: string): Promise<void> {
 // ── Pause / log ────────────────────────────────────────────────────────────
 function pauseMessaging(): void {
   paused.value = true
+  // Don't make the log wait for the next pump tick to explain itself.
+  for (const q of queues.values()) annotateHold(q, 'paused')
+}
+
+/**
+ * Re-send a failed entry as a brand-new message. Everything is re-validated
+ * from scratch — target lookup, rate limit, queue cap — so a retry can fail
+ * again for a different reason, and it spends the pair's budget like any other
+ * send, which is what stops the button from being a loop hole.
+ *
+ * A retried cross-workspace message is logged as an ordinary send: the original
+ * routing key was consumed when its failure was reported, and re-deriving the
+ * route from `to` is exactly what sendMessage already does.
+ */
+function retryMessage(id: number): AgentMessage | null {
+  const m = findMessage(id)
+  if (!m || m.status !== 'failed') return null
+  return sendMessage(m.from, m.to, m.content)
 }
 
 function resumeMessaging(): void {
@@ -710,6 +892,7 @@ export function _resetMessagingForTest(): void {
   paused.value = false
   nameByPane.clear()
   paneByName.clear()
+  agentByPane.clear()
   queues.clear()
   delivering.clear()
   envelopes.clear()
@@ -732,6 +915,7 @@ export function useAgentMessaging() {
     suggestName,
     sendMessage,
     sendBroadcast,
+    retryMessage,
     acceptRemoteMessage,
     noteOutboundMessage,
     resolveRemoteDelivery,
