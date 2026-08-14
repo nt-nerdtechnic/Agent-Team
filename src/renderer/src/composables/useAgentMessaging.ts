@@ -393,10 +393,19 @@ function annotateHold(q: number[], headKey: string | null): void {
   q.forEach((id, i) => {
     const m = findMessage(id)
     if (!m || m.status !== 'queued') return
-    if (i > 0) m.hold = { key: 'behind', n: i }
-    else if (headKey) m.hold = { key: headKey }
-    else delete m.hold
+    if (i > 0) setHold(m, { key: 'behind', n: i })
+    else if (headKey) setHold(m, { key: headKey })
+    else setHold(m, undefined)
   })
+}
+
+/** Assign only on a real change. pump() re-annotates every second, and a fresh
+ *  object each tick would invalidate the log panel on every one of them even
+ *  though nothing it displays moved. */
+function setHold(m: AgentMessage, hold: MessageHold | undefined): void {
+  if (m.hold?.key === hold?.key && m.hold?.n === hold?.n) return
+  if (hold) m.hold = hold
+  else delete m.hold
 }
 
 /** Record which CLI vendor each side is, skipping the ones we cannot name. */

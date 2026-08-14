@@ -514,6 +514,20 @@ describe('useAgentMessaging', () => {
       expect(m.messages.value.map((msg) => msg.hold)).toEqual([undefined, undefined])
     })
 
+    it('reuses the hold object across pumps, so an idle queue stops re-rendering', () => {
+      m.configureMessaging({ ...deps, idleHoldKey: () => 'mid-turn' })
+      m.sendMessage('alpha', 'gamma', 'one')
+      m.pump()
+      const first = m.messages.value[0].hold
+
+      m.pump()
+      m.pump()
+
+      // Identity, not equality: pump() runs every second and a fresh object
+      // each tick would invalidate the log panel for no visible change.
+      expect(m.messages.value[0].hold).toBe(first)
+    })
+
     it('explains an outbound cross-workspace message that is waiting on a report', () => {
       m.configureMessaging({
         ...deps,

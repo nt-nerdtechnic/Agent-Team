@@ -573,3 +573,24 @@ def test_handlers_are_registered() -> None:
         "agent_msg.log_clear",
     ):
         assert ws_handlers.lookup(msg_type) is not None
+
+
+def test_every_resolve_code_has_a_ui_string() -> None:
+    """The log panel renders `msg.reason-<code>`; a code with no string there
+    shows the raw key to the user. Nothing else ties the two layers together,
+    so adding a code without its strings has to fail here."""
+    import json
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    source = (root / "backend/agent_team_backend/agent_messaging.py").read_text()
+    codes = set(re.findall(r'_resolve_error\(\s*\n?\s*"([a-z-]+)"', source))
+    assert codes, "no codes found — has _resolve_error been renamed?"
+
+    for locale in ("en-US", "zh-TW"):
+        strings = json.loads(
+            (root / f"src/renderer/src/i18n/locales/{locale}.json").read_text()
+        )["msg"]
+        missing = sorted(c for c in codes if f"reason-{c}" not in strings)
+        assert not missing, f"{locale} is missing msg.reason-* for: {missing}"
