@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 2,
+  "apiVersion": "^1.0.0",
+  "id": "acme.duplicate-permission",
+  "name": "Duplicate permission",
+  "version": "1.0.0",
+  "publisher": "acme",
+  "permissions": {
+    "ui": ["openInEditor"],
+    "ui": ["openExternal"]
+  },
+  "marketplace": { "description": "Attempt to overwrite a permission key.", "license": "MIT" },
+  "backend": { "entry": "backend/acme-plugin", "protocolVersion": 1, "activation": "startup" }
+}

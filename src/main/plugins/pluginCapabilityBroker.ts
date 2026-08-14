@@ -4,7 +4,8 @@
 // The IPC wiring that calls into these functions lives in
 // `frontendPluginManager.ts`.
 
-import { resolveWsType } from './capabilityMap'
+import { eventNamespace, resolveWsType } from './capabilityMap'
+import type { PluginCapabilityPolicy, PluginPermissionGrant } from './pluginPermissions'
 import type { WsResponse } from '../../shared/wsClient'
 
 /** A capability call as it arrives from a plugin view over IPC. */
@@ -29,7 +30,12 @@ export interface CapabilityResponse {
   error?: { code: CapabilityErrorCode; message?: string }
 }
 
-export type CapabilityErrorCode = 'CAP_DENIED' | 'UNKNOWN' | 'BAD_REQUEST' | 'BACKEND_ERROR'
+export type CapabilityErrorCode =
+  | 'CAP_DENIED'
+  | 'UNKNOWN'
+  | 'BAD_REQUEST'
+  | 'BACKEND_ERROR'
+  | 'USER_GESTURE_REQUIRED'
 
 /**
  * Namespaces the host grants without an explicit `requires` declaration. `ping`
@@ -45,6 +51,56 @@ export const BUILTIN_CAPABILITIES: readonly string[] = ['ping']
 export function isCapabilityAllowed(requires: readonly string[], ns: string): boolean {
   if (BUILTIN_CAPABILITIES.includes(ns)) return true
   return requires.includes(ns)
+}
+
+/** Exact public v2 method-to-grant mapping. Legacy namespace grants remain
+ * broad for compatibility; v2 calls are limited to this catalog. */
+const V2_METHOD_GRANTS: Readonly<Record<string, PluginPermissionGrant>> = {
+  'fs.read_file': { permission: 'fs', access: 'read' },
+  'fs.list_dir': { permission: 'fs', access: 'read' },
+  'fs.glob_files': { permission: 'fs', access: 'read' },
+  'fs.stat_path': { permission: 'fs', access: 'read' },
+  'ui.open_in_editor': { permission: 'ui', access: 'openInEditor' },
+  'ui.open_external': { permission: 'ui', access: 'openExternal' },
+}
+
+export type CapabilityPolicyInput = PluginCapabilityPolicy | readonly string[]
+
+function isRequirementsArray(policy: CapabilityPolicyInput): policy is readonly string[] {
+  return Array.isArray(policy)
+}
+
+function isLegacyPolicy(
+  policy: CapabilityPolicyInput
+): policy is { kind: 'legacy'; requires: readonly string[] } {
+  return !isRequirementsArray(policy) && (policy as PluginCapabilityPolicy).kind === 'legacy'
+}
+
+/** Check the namespace for legacy callers, or the exact method grant for v2. */
+export function isCallAllowed(
+  policy: CapabilityPolicyInput,
+  ns: string,
+  method: string
+): boolean {
+  if (isRequirementsArray(policy)) return isCapabilityAllowed(policy, ns)
+  if (isLegacyPolicy(policy)) return isCapabilityAllowed(policy.requires, ns)
+  if (BUILTIN_CAPABILITIES.includes(ns)) return true
+  const required = V2_METHOD_GRANTS[`${ns}.${method}`]
+  if (!required) return false
+  return policy.grants.some(
+    (grant) => grant.permission === required.permission && grant.access === required.access
+  )
+}
+
+/** V2 has no legacy namespace event projection; in particular, it must never
+ * receive the internal `git.changed` event. Public v2 event routing is added
+ * only when its host-side payload contract is implemented. */
+export function isEventAllowed(policy: CapabilityPolicyInput, event: string): boolean {
+  const ns = eventNamespace(event)
+  if (!ns) return false
+  if (isRequirementsArray(policy)) return isCapabilityAllowed(policy, ns)
+  if (isLegacyPolicy(policy)) return isCapabilityAllowed(policy.requires, ns)
+  return false
 }
 
 /** Build a success envelope. */
@@ -137,12 +193,20 @@ export type CapabilityPlan =
  */
 export function planCapabilityCall(
   call: CapabilityCall,
-  requires: readonly string[]
+  policy: CapabilityPolicyInput
 ): CapabilityPlan {
-  if (!isCapabilityAllowed(requires, call.ns)) {
+  if (!isCallAllowed(policy, call.ns, call.method)) {
+    const label =
+      isRequirementsArray(policy) || isLegacyPolicy(policy)
+        ? call.ns
+        : `${call.ns}.${call.method}`
     return {
       kind: 'respond',
-      response: buildError(call.reqId, 'CAP_DENIED', `capability '${call.ns}' not granted`),
+      response: buildError(
+        call.reqId,
+        'CAP_DENIED',
+        `capability '${label}' not granted`
+      ),
     }
   }
   if (call.ns === 'ping') {

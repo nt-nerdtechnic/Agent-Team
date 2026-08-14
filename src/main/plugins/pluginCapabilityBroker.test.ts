@@ -10,8 +10,11 @@ import {
   createTerminalOutputBatcher,
   terminalSessionIdOf,
   terminalSessionsFromResponse,
+  isCallAllowed,
+  isEventAllowed,
   type CapabilityCall,
 } from './pluginCapabilityBroker'
+import { manifestV2CapabilityPolicy } from './pluginPermissions'
 import type { WsResponse } from '../../shared/wsClient'
 
 describe('isCapabilityAllowed', () => {
@@ -186,6 +189,33 @@ describe('planCapabilityCall', () => {
     const plan = planCapabilityCall(call({ ns: 'ui', method: 'open_in_editor' }), ['fs', 'git'])
     expect(plan.kind).toBe('respond')
     if (plan.kind === 'respond') expect(plan.response.error?.code).toBe('CAP_DENIED')
+  })
+})
+
+describe('Manifest v2 access-aware policy', () => {
+  const policy = manifestV2CapabilityPolicy({
+    fs: ['read'],
+    ui: ['openExternal'],
+    storage: ['write'],
+  })
+
+  it('allows only the public filesystem read methods', () => {
+    expect(isCallAllowed(policy, 'fs', 'read_file')).toBe(true)
+    expect(isCallAllowed(policy, 'fs', 'list_dir')).toBe(true)
+    expect(isCallAllowed(policy, 'fs', 'glob_files')).toBe(true)
+    expect(isCallAllowed(policy, 'fs', 'stat_path')).toBe(true)
+    expect(isCallAllowed(policy, 'fs', 'write_file')).toBe(false)
+    expect(isCallAllowed(policy, 'fs', 'list_files_flat')).toBe(false)
+  })
+
+  it('does not turn a storage grant into an unimplemented runtime surface', () => {
+    expect(isCallAllowed(policy, 'storage', 'get')).toBe(false)
+    expect(isCallAllowed(policy, 'storage', 'delete')).toBe(false)
+  })
+
+  it('does not expose legacy first-party events to v2 plugins', () => {
+    expect(isEventAllowed(policy, 'git.changed')).toBe(false)
+    expect(isEventAllowed(policy, 'ui.settings_changed')).toBe(false)
   })
 })
 

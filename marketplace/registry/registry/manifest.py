@@ -1,125 +1,126 @@
-"""Plugin manifest model for the marketplace registry.
-
-The core fields and validation mirror the in-app plugin host manifest
-(`backend/agent_team_backend/plugins/manifest.py`) so a package the registry
-accepts is also loadable by the app. A small set of optional presentation
-fields (displayName, description, categories, icon) is added for marketplace
-discovery -- an additive superset, not a divergent schema.
-"""
+"""Compatibility façade for legacy and Manifest v2 registry models."""
 
 from __future__ import annotations
 
-import re
+from collections.abc import Mapping
+from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import ValidationError
 
-KNOWN_CAPABILITIES: frozenset[str] = frozenset(
-    {"fs", "git", "terminal", "search", "chat", "ui", "issues", "plans"}
+from .manifest_v1 import (
+    KNOWN_CAPABILITIES,
+    LEGACY_KNOWN_CAPABILITIES,
+    CommandContribution,
+    Contributes,
+    Manifest,
+    ViewContribution,
+)
+from .manifest_v2 import (
+    ManifestV2,
+    ManifestV2Backend,
+    ManifestV2Contributes,
+    ManifestV2Engines,
+    ManifestV2Marketplace,
+    ManifestV2Model,
+    ManifestV2View,
 )
 
-_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9-]*$")
-_SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
-_ACTIVATION_RE = re.compile(r"^(onStartup|onView:.+|onCommand:.+)$")
+__all__ = [
+    "KNOWN_CAPABILITIES",
+    "LEGACY_KNOWN_CAPABILITIES",
+    "CommandContribution",
+    "Contributes",
+    "Manifest",
+    "ManifestError",
+    "ManifestLike",
+    "ManifestV2",
+    "ManifestV2Backend",
+    "ManifestV2Contributes",
+    "ManifestV2Engines",
+    "ManifestV2Marketplace",
+    "ManifestV2Model",
+    "ManifestV2View",
+    "ViewContribution",
+    "is_manifest_v2",
+    "manifest_capabilities",
+    "manifest_icon",
+    "manifest_referenced_files",
+    "parse_manifest",
+]
 
 
 class ManifestError(ValueError):
     """Raised when a manifest fails to parse or validate."""
 
 
-class ViewContribution(BaseModel):
-    id: str = Field(min_length=1)
-    title: str = Field(min_length=1)
-
-
-class CommandContribution(BaseModel):
-    id: str = Field(min_length=1)
-    title: str = Field(min_length=1)
-
-
-class Contributes(BaseModel):
-    views: list[ViewContribution] = Field(default_factory=list)
-    commands: list[CommandContribution] = Field(default_factory=list)
-
-
-class Manifest(BaseModel):
-    # Core fields -- identical to the in-app plugin manifest.
-    id: str
-    name: str = Field(min_length=1)
-    version: str
-    publisher: str = Field(min_length=1)
-    engines: dict[str, str] = Field(min_length=1)
-    entry: str | None = None
-    contributes: Contributes | None = None
-    requires: list[str] = Field(default_factory=list)
-    activationEvents: list[str] = Field(default_factory=list)
-
-    # Marketplace presentation fields -- optional additive superset.
-    displayName: str | None = None
-    description: str | None = None
-    categories: list[str] = Field(default_factory=list)
-    icon: str | None = None
-
-    @field_validator("id")
-    @classmethod
-    def _check_id(cls, value: str) -> str:
-        if not _ID_RE.match(value):
-            raise ValueError(
-                "must be '<namespace>.<name>' in lowercase "
-                "(e.g. 'navide.mini-ide')"
-            )
-        return value
-
-    @field_validator("version")
-    @classmethod
-    def _check_version(cls, value: str) -> str:
-        if not _SEMVER_RE.match(value):
-            raise ValueError("must be semver MAJOR.MINOR.PATCH (e.g. '0.1.0')")
-        return value
-
-    @field_validator("requires")
-    @classmethod
-    def _check_requires(cls, value: list[str]) -> list[str]:
-        unknown = [c for c in value if c not in KNOWN_CAPABILITIES]
-        if unknown:
-            known = ", ".join(sorted(KNOWN_CAPABILITIES))
-            raise ValueError(
-                f"unknown capabilities {unknown}; known are: {known}"
-            )
-        return value
-
-    @field_validator("activationEvents")
-    @classmethod
-    def _check_activation(cls, value: list[str]) -> list[str]:
-        bad = [e for e in value if not _ACTIVATION_RE.match(e)]
-        if bad:
-            raise ValueError(
-                f"invalid activation events {bad}; expected 'onStartup', "
-                "'onView:<id>' or 'onCommand:<id>'"
-            )
-        return value
-
-    @property
-    def namespace(self) -> str:
-        """Publisher namespace derived from the id (`namespace.name`)."""
-        return self.id.split(".", 1)[0]
-
-    @property
-    def extension_name(self) -> str:
-        """Extension name derived from the id (`namespace.name`)."""
-        return self.id.split(".", 1)[1]
+ManifestLike = Manifest | ManifestV2
 
 
 def _format_validation_error(exc: ValidationError) -> str:
     parts = []
-    for err in exc.errors():
-        loc = ".".join(str(p) for p in err["loc"]) or "<root>"
-        parts.append(f"{loc}: {err['msg']}")
+    for error in exc.errors():
+        loc = ".".join(str(part) for part in error["loc"]) or "<root>"
+        parts.append(f"{loc}: {error['msg']}")
     return "; ".join(parts)
 
 
-def parse_manifest(data: dict) -> Manifest:
-    """Validate a manifest dict, raising ManifestError on failure."""
+def parse_manifest(data: dict[str, Any]) -> ManifestLike:
+    """Validate a legacy or v2 manifest dict."""
     try:
+        if any(key in data for key in ("schemaVersion", "permissions", "marketplace")):
+            return ManifestV2.model_validate(data)
         return Manifest.model_validate(data)
     except ValidationError as exc:
         raise ManifestError(_format_validation_error(exc)) from exc
+
+
+def is_manifest_v2(manifest: ManifestLike) -> bool:
+    return isinstance(manifest, ManifestV2)
+
+
+def manifest_capabilities(
+    manifest: ManifestLike | Mapping[str, object],
+) -> list[str]:
+    """Project v2 permission namespaces and legacy requires to one API list."""
+    if isinstance(manifest, ManifestV2):
+        return list(manifest.permissions)
+    if isinstance(manifest, Manifest):
+        return list(manifest.requires)
+    permissions = manifest.get("permissions")
+    if isinstance(permissions, dict):
+        return [str(key) for key in permissions]
+    requires = manifest.get("requires", [])
+    if isinstance(requires, list):
+        return [str(value) for value in requires]
+    return []
+
+
+def manifest_referenced_files(manifest: ManifestLike) -> list[str]:
+    """Return v2 package files that must be present in the archive."""
+    if not isinstance(manifest, ManifestV2):
+        return []
+    paths: set[str] = set()
+    if manifest.contributes is not None:
+        for view in manifest.contributes.views:
+            paths.add(view.entry)
+            if view.icon is not None:
+                paths.add(view.icon)
+    if manifest.marketplace.icon is not None:
+        paths.add(manifest.marketplace.icon)
+    if manifest.backend is not None:
+        paths.add(manifest.backend.entry)
+    return sorted(paths)
+
+
+def manifest_icon(manifest: ManifestLike | Mapping[str, object]) -> str | None:
+    """Read a marketplace icon from either a parsed or stored manifest."""
+    if isinstance(manifest, ManifestV2):
+        return manifest.marketplace.icon
+    if isinstance(manifest, Manifest):
+        return manifest.icon
+    marketplace = manifest.get("marketplace")
+    if isinstance(marketplace, dict):
+        icon = marketplace.get("icon")
+        return icon if isinstance(icon, str) else None
+    icon = manifest.get("icon")
+    return icon if isinstance(icon, str) else None

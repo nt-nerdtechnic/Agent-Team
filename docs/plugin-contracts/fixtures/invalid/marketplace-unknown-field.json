@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 2,
+  "apiVersion": "^1.0.0",
+  "id": "acme.unknown-metadata",
+  "name": "Unknown metadata",
+  "version": "1.0.0",
+  "publisher": "acme",
+  "permissions": {},
+  "marketplace": { "description": "Publish an unknown metadata field.", "license": "MIT", "donate": "https://example.com/donate" },
+  "backend": { "entry": "backend/acme-plugin", "protocolVersion": 1, "activation": "startup" }
+}

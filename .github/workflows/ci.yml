@@ -47,9 +47,13 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           uv --project backend sync --locked
+          uv --project marketplace/registry sync --locked
 
       - name: Lint backend (event-loop guardrail)
         run: uv --project backend run ruff check backend
+
+      - name: Lint marketplace registry
+        run: uv --project marketplace/registry run ruff check marketplace/registry/registry marketplace/registry/tests
 
       - name: Typecheck
         run: pnpm typecheck
@@ -59,3 +63,9 @@ jobs:
 
       - name: Backend tests
         run: uv --project backend run pytest backend/tests
+
+      - name: Marketplace registry tests
+        run: uv --project marketplace/registry run pytest marketplace/registry/tests
+
+      - name: Plugin contract fixtures
+        run: uv --project marketplace/registry run python docs/plugin-contracts/validate-fixtures.py

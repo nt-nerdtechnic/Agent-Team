@@ -1,9 +1,35 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from registry.manifest import ManifestError, parse_manifest
 from tests.fixtures import valid_manifest
+
+
+CONTRACT_FIXTURES = Path(__file__).parents[3] / "docs" / "plugin-contracts" / "fixtures"
+VALID_V2_FIXTURES = sorted((CONTRACT_FIXTURES / "valid").glob("*.json"))
+INVALID_V2_FIXTURES = sorted((CONTRACT_FIXTURES / "invalid").glob("*.json"))
+
+
+def _read_fixture(group: str, name: str) -> str:
+    return (CONTRACT_FIXTURES / group / name).read_text(encoding="utf-8")
+
+
+def _read_strict(text: str) -> dict:
+    def unique(pairs: list[tuple[str, object]]) -> dict:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON object key: {key}")
+            result[key] = value
+        return result
+
+    value = json.loads(text, object_pairs_hook=unique)
+    assert isinstance(value, dict)
+    return value
 
 
 def test_valid_manifest_parses() -> None:
@@ -51,6 +77,11 @@ def test_unknown_capability_rejected() -> None:
         parse_manifest(valid_manifest(requires=["fs", "bogus"]))
 
 
+def test_v2_storage_permission_is_not_accepted_as_legacy_requires() -> None:
+    with pytest.raises(ManifestError, match="storage"):
+        parse_manifest(valid_manifest(requires=["storage"]))
+
+
 def test_all_client_capabilities_accepted() -> None:
     # Mirrors backend plugins/manifest.py and client pluginVerify.ts.
     all_caps = ["fs", "git", "terminal", "search", "chat", "ui", "issues"]
@@ -66,3 +97,28 @@ def test_bad_activation_event_rejected() -> None:
 def test_empty_engines_rejected() -> None:
     with pytest.raises(ManifestError, match="engines"):
         parse_manifest(valid_manifest(engines={}))
+
+
+@pytest.mark.parametrize(
+    "name",
+    [path.name for path in VALID_V2_FIXTURES],
+)
+def test_manifest_v2_valid_fixture_parses(name: str) -> None:
+    manifest = parse_manifest(_read_strict(_read_fixture("valid", name)))
+    assert manifest.schemaVersion == 2
+
+
+@pytest.mark.parametrize("path", INVALID_V2_FIXTURES, ids=lambda path: path.name)
+def test_manifest_v2_invalid_fixture_rejected(path: Path) -> None:
+    with pytest.raises(ManifestError):
+        parse_manifest(_read_strict(path.read_text(encoding="utf-8")))
+
+
+def test_manifest_v2_duplicate_key_fixture_rejected_before_validation() -> None:
+    with pytest.raises(ValueError, match="duplicate JSON object key: ui"):
+        _read_strict(_read_fixture("invalid-raw", "duplicate-permission-key.json"))
+
+
+def test_manifest_v2_bom_fixture_rejected_before_validation() -> None:
+    with pytest.raises(json.JSONDecodeError, match="BOM"):
+        _read_strict(_read_fixture("invalid-raw", "manifest-utf8-bom.json"))

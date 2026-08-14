@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 2,
+  "apiVersion": "^1.0.0",
+  "id": "navide.skills",
+  "name": "Skills",
+  "version": "1.0.0",
+  "publisher": "navide",
+  "permissions": {},
+  "marketplace": {
+    "description": "Provide reusable skills to Navide agents.",
+    "license": "MIT",
+    "categories": ["developer-tools"]
+  },
+  "backend": {
+    "entry": "backend/navide-skills",
+    "protocolVersion": 1,
+    "activation": "startup"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 2,
+  "apiVersion": "^1.0.0",
+  "id": "acme.null-root",
+  "name": "Null Root Fields",
+  "version": "1.0.0",
+  "publisher": "acme",
+  "engines": null,
+  "permissions": {},
+  "marketplace": {
+    "description": "Reject explicit null optional root fields.",
+    "license": "MIT"
+  },
+  "contributes": {
+    "views": [
+      {
+        "id": "main",
+        "kind": "custom",
+        "location": "main",
+        "title": "Main",
+        "entry": "frontend/main/index.html"
+      }
+    ]
+  },
+  "backend": null
+}

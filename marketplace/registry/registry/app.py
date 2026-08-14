@@ -16,6 +16,7 @@ from .auth import PublisherIdentity, get_publisher_identity
 from .config import VERIFIER_ACCEPTING, Settings, load_settings
 from .db import create_db_engine
 from .models import Extension, ExtensionVersion, Publisher
+from .manifest import ManifestV2, manifest_capabilities
 from .package import PackageError, read_package
 from .repository import RegistryRepository, rating_average
 from .schemas import (
@@ -101,7 +102,7 @@ def _package_key(namespace: str, name: str, version: str) -> str:
 
 
 def _version_info(row: ExtensionVersion) -> VersionInfo:
-    capabilities = list(row.manifest.get("requires", []))
+    capabilities = manifest_capabilities(row.manifest)
     return VersionInfo(
         version=row.version,
         package_digest=row.package_digest,
@@ -225,13 +226,22 @@ def _register_routes(app: FastAPI) -> None:
 
         trust_tier = compute_trust_tier(signed=signature is not None)
 
+        if isinstance(manifest, ManifestV2):
+            display_name = manifest.name
+            description = manifest.marketplace.description
+            categories = manifest.marketplace.categories
+        else:
+            display_name = manifest.displayName or manifest.name
+            description = manifest.description
+            categories = manifest.categories
+
         extension = repo.get_or_create_extension(
             publisher=publisher,
             namespace=namespace,
             name=name,
-            display_name=manifest.displayName or manifest.name,
-            description=manifest.description,
-            categories=manifest.categories,
+            display_name=display_name,
+            description=description,
+            categories=categories,
         )
 
         if repo.get_version(extension.id, manifest.version) is not None:
@@ -248,7 +258,7 @@ def _register_routes(app: FastAPI) -> None:
         row = repo.add_version(
             extension=extension,
             version=manifest.version,
-            manifest=manifest.model_dump(),
+            manifest=manifest.model_dump(exclude_none=True),
             package_digest=loaded.digest,
             package_key=key,
             signature=signature,

@@ -40,15 +40,53 @@ function pkg(files?: ZipFile[]): { bytes: Uint8Array; digest: string } {
   return { bytes: new Uint8Array(zip), digest: sha256Hex(new Uint8Array(zip)) }
 }
 
+function manifestV2(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    schemaVersion: 2,
+    apiVersion: '^1.0.0',
+    id: 'acme.demo',
+    name: 'Demo',
+    version: '1.0.0',
+    publisher: 'acme',
+    permissions: { storage: ['write'] },
+    marketplace: { description: 'Demo view', license: 'MIT' },
+    contributes: {
+      views: [
+        {
+          id: 'left',
+          kind: 'custom',
+          location: 'left',
+          title: 'Demo',
+          entry: 'frontend/left/index.html',
+        },
+      ],
+    },
+    ...overrides,
+  })
+}
+
+function v2Pkg(
+  files: ZipFile[] = [
+    { name: 'manifest.json', data: manifestV2() },
+    { name: 'frontend/left/index.html', data: '<!doctype html>' },
+  ]
+): { bytes: Uint8Array; digest: string } {
+  const zip = makeZip(files)
+  return { bytes: new Uint8Array(zip), digest: sha256Hex(new Uint8Array(zip)) }
+}
+
 /** Deps that serve a fixed package and capture filesystem writes in a map. */
 function fakeDeps(bytes: Uint8Array, digestHeader: string | null = 'from-header') {
   const writes = new Map<string, Uint8Array>()
   const removed: string[] = []
+  const dirs: string[] = []
   const deps: InstallerDeps = {
     async download() {
       return { bytes, digestHeader }
     },
-    mkdirp() {},
+    mkdirp(dir) {
+      dirs.push(dir)
+    },
     writeFile(path, data) {
       writes.set(path, data)
     },
@@ -56,7 +94,7 @@ function fakeDeps(bytes: Uint8Array, digestHeader: string | null = 'from-header'
       removed.push(dir)
     },
   }
-  return { deps, writes, removed }
+  return { deps, writes, removed, dirs }
 }
 
 describe('prepareInstall', () => {
@@ -142,9 +180,110 @@ describe('prepareInstall', () => {
       prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
     ).rejects.toThrow(/network/)
   })
+
+  it('accepts a v2 frontend contribution and verifies its entry file', async () => {
+    const { bytes, digest } = v2Pkg()
+    const { deps } = fakeDeps(bytes, digest)
+    const prepared = await prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
+    expect(prepared.manifest.schemaVersion).toBe(2)
+    if (prepared.manifest.schemaVersion !== 2) throw new Error('expected Manifest v2')
+    expect(prepared.manifest.permissions).toEqual({ storage: ['write'] })
+    expect(prepared.grants).toEqual(['storage:write'])
+    expect(prepared.requiresConfirmation).toBe(false)
+  })
+
+  it('rejects a backend-only v2 package before any install confirmation or side effect', async () => {
+    const { bytes, digest } = v2Pkg([
+      {
+        name: 'manifest.json',
+        data: manifestV2({
+          contributes: undefined,
+          backend: { entry: 'backend/entry', protocolVersion: 1, activation: 'startup' },
+        }),
+      },
+      { name: 'backend/entry', data: 'backend' },
+    ])
+    const { deps, removed, writes } = fakeDeps(bytes, digest)
+    await expect(
+      prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
+    ).rejects.toThrow(/frontend installer requires/)
+    expect(removed).toEqual([])
+    expect(writes.size).toBe(0)
+  })
+
+  it('rejects a v2 package whose contribution entry is absent', async () => {
+    const { bytes, digest } = v2Pkg([{ name: 'manifest.json', data: manifestV2() }])
+    const { deps } = fakeDeps(bytes, digest)
+    await expect(
+      prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
+    ).rejects.toThrow(/referenced file is missing/)
+  })
+
+  it('rejects duplicate archive entries before any install side effect', async () => {
+    const { bytes, digest } = pkg([
+      { name: 'manifest.json', data: manifest() },
+      { name: 'dist/main.js', data: 'first' },
+      { name: 'dist/main.js', data: 'second' },
+    ])
+    const { deps, removed, writes } = fakeDeps(bytes, digest)
+    await expect(
+      prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
+    ).rejects.toThrow(/duplicate archive entry path/)
+    expect(removed).toEqual([])
+    expect(writes.size).toBe(0)
+  })
+
+  it('rejects a non-canonical manifest alias before any install side effect', async () => {
+    const { bytes, digest } = pkg([
+      { name: 'manifest.json', data: manifest() },
+      {
+        name: './manifest.json',
+        data: manifest({ entry: 'evil.html', requires: ['terminal'] }),
+      },
+      { name: 'dist/main.js', data: 'x' },
+      { name: 'evil.html', data: 'blocked' },
+    ])
+    const { deps, removed, writes } = fakeDeps(bytes, digest)
+    await expect(
+      prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
+    ).rejects.toThrow(/unsafe archive entry/)
+    expect(removed).toEqual([])
+    expect(writes.size).toBe(0)
+  })
+
+  it.each([
+    { name: '../escape/', kind: 'directory' as const, message: 'unsafe archive entry' },
+    { name: 'link', kind: 'symlink' as const, message: 'regular file or directory' },
+    { name: 'device', kind: 'special' as const, message: 'regular file or directory' },
+  ])('rejects unsafe $kind entries before any install side effect', async ({ name, kind, message }) => {
+    const { bytes, digest } = pkg([
+      { name: 'manifest.json', data: manifest() },
+      { name, kind, data: '' },
+      { name: 'dist/main.js', data: 'x' },
+    ])
+    const { deps, removed, writes } = fakeDeps(bytes, digest)
+    await expect(
+      prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
+    ).rejects.toThrow(new RegExp(message))
+    expect(removed).toEqual([])
+    expect(writes.size).toBe(0)
+  })
 })
 
 describe('commitInstall', () => {
+  it('creates directory entries without writing directory bytes', async () => {
+    const { bytes, digest } = pkg([
+      { name: 'manifest.json', data: manifest() },
+      { name: 'dist/', kind: 'directory', data: '' },
+      { name: 'dist/main.js', data: 'x' },
+    ])
+    const { deps, dirs, writes } = fakeDeps(bytes, digest)
+    const prepared = await prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
+    commitInstall(prepared, '/plugins', deps)
+    expect(dirs).toContain('/plugins/acme.demo/dist')
+    expect(writes.has('/plugins/acme.demo/dist/')).toBe(false)
+  })
+
   it('writes verified entries under <root>/<id> and returns a descriptor', async () => {
     const { bytes, digest } = pkg()
     const { deps, writes, removed } = fakeDeps(bytes, digest)
@@ -158,14 +297,48 @@ describe('commitInstall', () => {
     expect(desc.entryFile).toBe('/plugins/acme.demo/dist/main.js')
   })
 
-  it('refuses a zip-slip entry before writing outside the root', async () => {
+  it('returns all v2 view contributions from a committed package', async () => {
+    const { bytes, digest } = v2Pkg()
+    const { deps, writes } = fakeDeps(bytes, digest)
+    const prepared = await prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
+    const desc = commitInstall(prepared, '/plugins', deps)
+    expect(desc.views).toEqual([
+      expect.objectContaining({
+        contributionKey: 'acme.demo.left',
+        location: 'left',
+        entryFile: '/plugins/acme.demo/frontend/left/index.html',
+      }),
+    ])
+    expect(writes.has('/plugins/acme.demo/frontend/left/index.html')).toBe(true)
+  })
+
+  it('refuses a zip-slip entry before any install side effect', async () => {
     const { bytes, digest } = pkg([
       { name: 'manifest.json', data: manifest() },
       { name: '../evil.js', data: 'pwned' },
     ])
-    const { deps } = fakeDeps(bytes, digest)
+    const { deps, removed, writes } = fakeDeps(bytes, digest)
+    await expect(
+      prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
+    ).rejects.toThrow(/unsafe archive entry/)
+    expect(removed).toEqual([])
+    expect(writes.size).toBe(0)
+  })
+
+  it('rechecks archive paths before removing an existing install', async () => {
+    const { bytes, digest } = pkg()
+    const { deps, removed, writes } = fakeDeps(bytes, digest)
     const prepared = await prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
+    prepared.entries.push({
+      path: './manifest.json',
+      data: Buffer.from('blocked'),
+      kind: 'file',
+      type: 'regular',
+    })
+
     expect(() => commitInstall(prepared, '/plugins', deps)).toThrow(/unsafe archive entry/)
+    expect(removed).toEqual([])
+    expect(writes.size).toBe(0)
   })
 })
 

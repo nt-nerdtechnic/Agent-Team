@@ -7,17 +7,28 @@
 //
 // The reader is intentionally small: it walks the End-Of-Central-Directory
 // record → central directory → each local file header, and hands back decoded
-// entries. Zip-slip defence is NOT applied here (paths are returned verbatim);
-// the caller runs `assertSafeEntryPath` from `pluginVerify` before writing, so
-// path policy lives in one place.
+// entries. Archive path/type defence is applied by `assertSafeArchiveEntries`
+// from `pluginVerify` before manifest parsing or writing, so policy lives in
+// one place.
 
 import { inflateRawSync } from 'node:zlib'
+import { TextDecoder } from 'node:util'
+import { parseManifestJson } from './pluginManifest'
+import { canonicalArchivePath } from './pluginPathPolicy'
+import { assertSafeArchiveEntries } from './pluginVerify'
+
+export type ZipEntryKind = 'file' | 'directory'
+export type ZipEntryType = 'regular' | 'directory' | 'symlink' | 'special'
 
 export interface ZipEntry {
   /** Archive-relative path exactly as stored (unvalidated). */
   path: string
   /** Decompressed file bytes. */
   data: Buffer
+  /** Whether the archive entry represents a file or directory. */
+  kind: ZipEntryKind
+  /** Unix/DOS type classification retained for extraction preflight. */
+  type: ZipEntryType
 }
 
 export class PluginPackageError extends Error {
@@ -30,11 +41,22 @@ export class PluginPackageError extends Error {
 const SIG_EOCD = 0x06054b50
 const SIG_CENTRAL = 0x02014b50
 const SIG_LOCAL = 0x04034b50
+const UTF8_DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
 
 /** Zip-bomb defence: cap the decompressed output of a single entry and of the
  *  whole archive so a small deflate stream cannot inflate to exhaust memory. */
 const MAX_ENTRY_OUTPUT = 50 * 1024 * 1024 // 50 MB per entry
 const MAX_TOTAL_OUTPUT = 200 * 1024 * 1024 // 200 MB per archive
+
+function decodeUtf8(bytes: Uint8Array, label: string): string {
+  try {
+    return UTF8_DECODER.decode(bytes)
+  } catch (error) {
+    throw new PluginPackageError(
+      `${label} is not valid UTF-8: ${error instanceof Error ? error.message : String(error)}`
+    )
+  }
+}
 
 /** Locate the End-Of-Central-Directory record by scanning back from the end
  *  (the trailing 22-byte record may be followed by a variable comment). */
@@ -68,10 +90,31 @@ export function readZipEntries(bytes: Uint8Array): ZipEntry[] {
     const extraLen = buf.readUInt16LE(ptr + 30)
     const commentLen = buf.readUInt16LE(ptr + 32)
     const localOffset = buf.readUInt32LE(ptr + 42)
-    const name = buf.toString('utf8', ptr + 46, ptr + 46 + nameLen)
-    ptr += 46 + nameLen + extraLen + commentLen
+    const versionMadeBy = buf.readUInt16LE(ptr + 4)
+    const externalAttributes = buf.readUInt32LE(ptr + 38)
+    const centralEnd = ptr + 46 + nameLen + extraLen + commentLen
+    if (centralEnd > buf.length) {
+      throw new PluginPackageError('central directory entry out of bounds')
+    }
+    const name = decodeUtf8(
+      buf.subarray(ptr + 46, ptr + 46 + nameLen),
+      'archive entry name'
+    )
+    ptr = centralEnd
 
-    if (name.endsWith('/')) continue // directory entry — no data
+    const platform = versionMadeBy >>> 8
+    const unixMode = platform === 3 ? externalAttributes >>> 16 : 0
+    const unixType = unixMode & 0o170000
+    let type: ZipEntryType = 'regular'
+    const unixSpecial = unixType !== 0 && unixType !== 0o100000 && unixType !== 0o040000
+    if (unixSpecial) type = unixType === 0o120000 ? 'symlink' : 'special'
+    else if (
+      name.endsWith('/') ||
+      unixType === 0o040000 ||
+      (platform !== 3 && (externalAttributes & 0x10) !== 0)
+    ) {
+      type = 'directory'
+    }
 
     // Bounds-check the local header before reading it: a malformed central
     // directory could point past the buffer, which would otherwise raise an
@@ -82,7 +125,7 @@ export function readZipEntries(bytes: Uint8Array): ZipEntry[] {
     const lNameLen = buf.readUInt16LE(localOffset + 26)
     const lExtraLen = buf.readUInt16LE(localOffset + 28)
     const dataStart = localOffset + 30 + lNameLen + lExtraLen
-    if (dataStart + compSize > buf.length) {
+    if (dataStart > buf.length || compSize > buf.length - dataStart) {
       throw new PluginPackageError(`entry data out of bounds for ${name}`)
     }
     const raw = buf.subarray(dataStart, dataStart + compSize)
@@ -108,7 +151,7 @@ export function readZipEntries(bytes: Uint8Array): ZipEntry[] {
       )
     }
 
-    entries.push({ path: name, data })
+    entries.push({ path: name, data, kind: type === 'directory' ? 'directory' : 'file', type })
   }
   return entries
 }
@@ -116,14 +159,14 @@ export function readZipEntries(bytes: Uint8Array): ZipEntry[] {
 /** Read and JSON-parse the root `manifest.json` from a package's entries.
  *  Throws {@link PluginPackageError} if absent or not valid JSON. */
 export function readManifestFromEntries(entries: ZipEntry[]): Record<string, unknown> {
-  const entry = entries.find((e) => e.path === 'manifest.json')
+  assertSafeArchiveEntries(entries)
+  const entry = entries.find(
+    (e) =>
+      e.type === 'regular' && canonicalArchivePath(e.path, 'regular') === 'manifest.json'
+  )
   if (!entry) throw new PluginPackageError('package has no manifest.json at its root')
   try {
-    const parsed = JSON.parse(entry.data.toString('utf8'))
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      throw new PluginPackageError('manifest.json is not a JSON object')
-    }
-    return parsed as Record<string, unknown>
+    return parseManifestJson(decodeUtf8(entry.data, 'manifest.json'))
   } catch (err) {
     if (err instanceof PluginPackageError) throw err
     throw new PluginPackageError(`manifest.json is not valid JSON: ${(err as Error).message}`)

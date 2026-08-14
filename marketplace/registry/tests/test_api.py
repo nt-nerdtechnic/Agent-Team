@@ -5,7 +5,7 @@ from io import BytesIO
 
 from fastapi.testclient import TestClient
 
-from tests.fixtures import build_package, valid_manifest
+from tests.fixtures import build_package, build_v2_package, valid_manifest
 
 
 def _publish(client: TestClient, data: bytes, signature: str | None = None):
@@ -31,6 +31,20 @@ def test_publish_new_version(client: TestClient) -> None:
     assert body["name"] == "hello"
     assert body["version"] == "1.0.0"
     assert len(body["package_digest"]) == 64
+
+
+def test_publish_manifest_v2_maps_marketplace_metadata(client: TestClient) -> None:
+    resp = _publish(client, build_v2_package())
+    assert resp.status_code == 201
+
+    detail = client.get("/api/extensions/acme/files").json()
+    assert detail["display_name"] == "Files"
+    assert detail["description"] == (
+        "Browse workspace files in workbench regions or a separate window."
+    )
+    assert detail["categories"] == ["productivity"]
+    assert detail["versions"][0]["capabilities"] == ["fs", "ui"]
+    assert detail["versions"][0]["sensitive_capabilities"] == ["fs"]
 
 
 def test_publish_rejects_malformed(client: TestClient) -> None:

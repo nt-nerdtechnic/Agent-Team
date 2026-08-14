@@ -1,0 +1,46 @@
+{
+  "valid": {
+    "directory-entry": [
+      { "path": "manifest.json", "type": "regular" },
+      { "path": "dist/", "type": "directory" },
+      { "path": "dist/main.js", "type": "regular" }
+    ],
+    "metadata-directory": [
+      { "path": "manifest.json", "type": "regular" },
+      { "path": "assets", "type": "directory" },
+      { "path": "assets/icon.png", "type": "regular" }
+    ]
+  },
+  "invalid": {
+    "dot-segment": [
+      { "path": "./manifest.json", "type": "regular" }
+    ],
+    "empty-segment": [
+      { "path": "assets//main.js", "type": "regular" }
+    ],
+    "file-directory-collision": [
+      { "path": "assets", "type": "regular" },
+      { "path": "assets/", "type": "directory" }
+    ],
+    "file-ancestor-collision": [
+      { "path": "assets", "type": "regular" },
+      { "path": "assets/icon.png", "type": "regular" }
+    ],
+    "case-fold-collision": [
+      { "path": "assets/icon.png", "type": "regular" },
+      { "path": "assets/ICON.PNG", "type": "regular" }
+    ],
+    "portable-ancestor-collision": [
+      { "path": "Assets", "type": "regular" },
+      { "path": "assets/icon.png", "type": "regular" }
+    ],
+    "trailing-alias-collision": [
+      { "path": "assets/icon", "type": "regular" },
+      { "path": "assets/icon.", "type": "regular" }
+    ],
+    "raw-duplicate": [
+      { "path": "manifest.json", "type": "regular" },
+      { "path": "manifest.json", "type": "regular" }
+    ]
+  }
+}

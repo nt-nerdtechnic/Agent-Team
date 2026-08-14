@@ -1,5 +1,11 @@
 # Plugin development guide
 
+> **Current runtime (manifest v1).** This guide documents the implementation
+> available today. The proposed public manifest v2, SDK, permissions, and
+> compatibility policy are specified separately in the
+> [Plugin Developer Spec v2 draft](plugin-development-v2.md). Do not use the v2
+> examples until the migration plan marks that contract as implemented.
+
 Navide plugins extend the app with new surfaces and new backend behavior. This
 guide covers both plugin kinds, the manifest schema, the capability permission
 model, and the packaging and signing rules.

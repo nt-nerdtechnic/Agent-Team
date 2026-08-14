@@ -20,11 +20,16 @@
 // flags `fs`/`terminal` as sensitive. Kept in sync deliberately.
 
 import { createHash, createPublicKey, timingSafeEqual, verify as cryptoVerify } from 'node:crypto'
+import {
+  canonicalArchivePath,
+  portableArchiveCollisionKey,
+} from './pluginPathPolicy'
 
 /** Capability namespaces the host can authorize. Mirror of the backend
- *  `manifest.KNOWN_CAPABILITIES` (fs/git/terminal/search/chat/ui/issues/plans). */
+ *  `manifest.KNOWN_CAPABILITIES` (including v2 `storage`). */
 export const KNOWN_CAPABILITIES: readonly string[] = [
   'fs',
+  'storage',
   'git',
   'terminal',
   'search',
@@ -48,6 +53,8 @@ export type VerifyErrorCode =
   | 'SIGNATURE_INVALID'
   | 'CAP_UNKNOWN'
   | 'ZIP_SLIP'
+  | 'ZIP_DUPLICATE'
+  | 'ZIP_ENTRY_TYPE'
   | 'NOT_OFFICIAL'
 
 export class PluginVerifyError extends Error {
@@ -196,21 +203,56 @@ export function assertKnownCapabilities(requires: readonly string[]): void {
   }
 }
 
-/**
- * Reject a zip entry name that would escape the extraction root (zip-slip):
- * absolute paths, drive letters, backslashes, or any `..` segment. Called for
- * every archive entry before it is written.
- */
+/** Reject a package-relative file path that is not canonical and safe. */
 export function assertSafeEntryPath(name: string): void {
-  const bad =
-    name.length === 0 ||
-    name.startsWith('/') ||
-    name.startsWith('\\') ||
-    name.includes('\\') ||
-    /^[a-zA-Z]:/.test(name) ||
-    name.split('/').some((seg) => seg === '..')
-  if (bad) {
+  if (canonicalArchivePath(name, 'regular') === null) {
     throw new PluginVerifyError('ZIP_SLIP', `unsafe archive entry path: ${name}`)
+  }
+}
+
+/** Validate every decoded archive entry before manifest parsing or extraction. */
+export function assertSafeArchiveEntries(
+  entries: readonly { path: string; type?: 'regular' | 'directory' | 'symlink' | 'special' }[]
+): void {
+  const seen = new Set<string>()
+  const regularPaths = new Set<string>()
+  const descendantPaths = new Set<string>()
+  for (const entry of entries) {
+    if (entry.type !== undefined && entry.type !== 'regular' && entry.type !== 'directory') {
+      throw new PluginVerifyError(
+        'ZIP_ENTRY_TYPE',
+        `archive entry is not a regular file or directory: ${entry.path}`
+      )
+    }
+    const kind = entry.type === 'directory' ? 'directory' : 'regular'
+    const canonical = canonicalArchivePath(entry.path, kind)
+    if (canonical === null) {
+      throw new PluginVerifyError('ZIP_SLIP', `unsafe archive entry path: ${entry.path}`)
+    }
+    const collisionKey = portableArchiveCollisionKey(canonical)
+    if (collisionKey === null) {
+      throw new PluginVerifyError('ZIP_SLIP', `unsafe archive entry path: ${entry.path}`)
+    }
+    if (seen.has(collisionKey)) {
+      throw new PluginVerifyError(
+        'ZIP_DUPLICATE',
+        `duplicate archive entry path: ${entry.path}`
+      )
+    }
+    seen.add(collisionKey)
+    if (kind === 'regular') regularPaths.add(collisionKey)
+    const segments = collisionKey.split('/')
+    for (let index = 1; index < segments.length; index += 1) {
+      descendantPaths.add(segments.slice(0, index).join('/'))
+    }
+  }
+  for (const path of regularPaths) {
+    if (descendantPaths.has(path)) {
+      throw new PluginVerifyError(
+        'ZIP_DUPLICATE',
+        `archive path collides with regular file ancestor: ${path}`
+      )
+    }
   }
 }
 

@@ -18,7 +18,7 @@ class VersionInfo(BaseModel):
     Enables the client to re-verify and reach the `signed-verified` trust tier."""
     trust_tier: str
     capabilities: list[str]
-    """Declared `manifest.requires` capability allowlist."""
+    """Declared v2 permission namespaces or legacy `manifest.requires`."""
     sensitive_capabilities: list[str]
     """Subset of `capabilities` flagged for elevated scrutiny (fs/terminal)."""
     download_count: int

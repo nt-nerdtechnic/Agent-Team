@@ -1,5 +1,12 @@
 # Navide plugin package format (`.vsix`-style)
 
+> **Status: current manifest v1 implementation.** This file documents the
+> existing registry reader and includes legacy fields such as `requires` and
+> `activationEvents`. It is not the target Manifest v2 author contract. The v2
+> target archive layout, path safety, target-specific backend artifact, and
+> signing requirements are defined in
+> [`docs/en-US/plugin-development-v2.md`](../../docs/en-US/plugin-development-v2.md).
+
 A publishable plugin is a single **ZIP archive** (conventionally `*.vsix`) that
 contains a `manifest.json` at its root plus optional asset files. The layout is
 intentionally close to the VS Code `.vsix` idea (a ZIP with a manifest and
@@ -26,6 +33,9 @@ Rules enforced by the reader (`registry/package.py`):
 - If `manifest.icon` is set, the referenced path MUST exist inside the archive.
 - Any other file is treated as an asset and recorded as an asset reference
   (path, size, guessed content-type).
+- Archive paths MUST use canonical relative POSIX segments: no empty, `.`, or
+  `..` segments, backslashes, duplicate canonical paths, or regular-file
+  ancestor collisions. A directory entry may have one trailing `/`.
 
 A malformed archive is rejected with a clear `PackageError`.
 

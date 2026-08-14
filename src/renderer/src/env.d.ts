@@ -273,6 +273,7 @@ declare global {
     id: string
     requires: string[]
     sensitive: string[]
+    grants?: string[]
   }
 
   interface MarketplaceExtension {
@@ -301,6 +302,7 @@ declare global {
     trustTier: 'signed-verified' | 'unsigned'
     sensitive: string[]
     requiresConfirmation: boolean
+    grants?: string[]
   }
 }
 

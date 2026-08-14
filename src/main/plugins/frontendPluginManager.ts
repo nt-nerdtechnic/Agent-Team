@@ -15,7 +15,7 @@ import {
   parseCapabilityCall,
   planCapabilityCall,
   backendResponseToCapability,
-  isCapabilityAllowed,
+  isEventAllowed,
   buildError,
   buildSuccess,
   CASTABLE_WS_TYPES,
@@ -35,6 +35,7 @@ import {
 } from '../../shared/pluginCapabilities'
 import { loadPluginDir, scanInstalledPlugins, verifyOfficialInstall } from './installedPlugins'
 import { resolveOfficialPublisherKey } from './pluginVerify'
+import { legacyCapabilityPolicy, type PluginCapabilityPolicy } from './pluginPermissions'
 import {
   createWsClient,
   type WsClient,
@@ -48,6 +49,8 @@ export interface PluginLaunchDescriptor {
   id: string
   /** Capabilities the plugin's manifest declares (drives broker scoping). */
   requires: string[]
+  /** Access-aware policy for Manifest v2; omitted descriptors retain V1 behavior. */
+  capabilityPolicy?: PluginCapabilityPolicy
   /** Dev-server URL for the plugin entry (used when running under electron-vite dev). */
   devUrl: string
   /** Absolute file path to the built plugin entry (packaged / built runs). */
@@ -55,6 +58,20 @@ export interface PluginLaunchDescriptor {
   /** Optional `?a=b` query appended to the entry (e.g. the mini-IDE workspace
    *  path the app reads from `window.location.search`). Omitted → no query. */
   query?: string
+  /** Manifest v2 contributions discovered for this package. Legacy descriptors
+   *  omit this field and continue to use their single top-level entryFile.
+   *  Issue 01 exposes validated metadata only; issue 14 owns runtime instances. */
+  views?: PluginViewLaunchDescriptor[]
+}
+
+export interface PluginViewLaunchDescriptor {
+  id: string
+  contributionKey: string
+  kind: 'custom'
+  location: 'top' | 'bottom' | 'right' | 'left' | 'main' | 'window'
+  title: string
+  icon?: string
+  entryFile: string
 }
 
 export interface PluginBounds {
@@ -71,6 +88,7 @@ export type PluginViewBounds = PluginBounds | 'fill'
 interface RunningPlugin {
   id: string
   requires: string[]
+  capabilityPolicy: PluginCapabilityPolicy
   view: WebContentsView
   hostWindow: BrowserWindow
   /** Query string the entry was last loaded with (drives reload-on-change). */
@@ -98,6 +116,8 @@ const IPC_EVENT = 'plugin:cap:event'
 const IPC_READY = 'plugin:ready'
 const IPC_HIDE_SELF = 'plugin:hideSelf'
 const IPC_OPEN_TARGET = 'plugin:openTarget'
+const IPC_GESTURE = 'plugin:userGesture'
+const USER_GESTURE_TTL_MS = 1000
 
 /** `workspace_path` param of an entry query ('' when absent) — the view's
  *  identity in {@link FrontendPluginManager.open}. Deliberately blind to
@@ -146,6 +166,8 @@ export class FrontendPluginManager {
   private readonly running = new Map<string, RunningPlugin>()
   /** webContents.id → pluginId, so a call's origin can be trusted, not the payload. */
   private readonly bySender = new Map<number, string>()
+  /** One short-lived trusted user gesture credit per running plugin. */
+  private readonly gestureCredits = new Map<string, number>()
   /** Installed/available plugin descriptors keyed by id (loader registry). The
    *  mini-IDE is registered here as the first built-in; third-party installs are
    *  added by {@link loadInstalledPlugins} / {@link registerDescriptor}. */
@@ -197,7 +219,7 @@ export class FrontendPluginManager {
 
       // Enforce scoping + route. A denied namespace is rejected here and never
       // reaches the backend; `ping`/unknown resolve in-process.
-      const plan = planCapabilityCall(call, plugin.requires)
+      const plan = planCapabilityCall(call, plugin.capabilityPolicy)
       if (plan.kind === 'respond') return plan.response
 
       // Host-implemented capability (ui.open_in_editor): main services it
@@ -240,6 +262,13 @@ export class FrontendPluginManager {
     ipcMain.on(IPC_READY, (event) => {
       const pluginId = this.bySender.get(event.sender.id)
       if (pluginId) console.log(`[plugin] ${pluginId} ready`)
+    })
+
+    // The preload emits this only for trusted pointerup/keydown events. The
+    // sender mapping is authoritative; no plugin-supplied token is accepted.
+    ipcMain.on(IPC_GESTURE, (event) => {
+      const pluginId = this.bySender.get(event.sender.id)
+      if (pluginId) this.gestureCredits.set(pluginId, Date.now() + USER_GESTURE_TTL_MS)
     })
 
     // A plugin dismisses its own view (e.g. the mini-IDE's Esc-close). Scoped
@@ -371,7 +400,25 @@ export class FrontendPluginManager {
     }
     if (action === 'open_external') {
       const url = typeof args.url === 'string' ? args.url : ''
-      if (!/^https?:\/\//i.test(url)) {
+      const v2 = plugin.capabilityPolicy.kind === 'manifest-v2'
+      if (v2) {
+        let isHttps = false
+        try {
+          isHttps = new URL(url).protocol === 'https:' && /^https:\/\/[^\s]+$/i.test(url)
+        } catch {
+          isHttps = false
+        }
+        if (!isHttps) {
+          return buildError(call.reqId, 'BAD_REQUEST', 'only https urls allowed')
+        }
+        if (!this.consumeUserGesture(plugin.id)) {
+          return buildError(
+            call.reqId,
+            'USER_GESTURE_REQUIRED',
+            'ui.open_external requires a recent trusted user gesture'
+          )
+        }
+      } else if (!/^https?:\/\/[^\s]+$/i.test(url)) {
         return buildError(call.reqId, 'BAD_REQUEST', 'only http/https urls allowed')
       }
       const r = await shell.openExternal(url)
@@ -403,6 +450,12 @@ export class FrontendPluginManager {
       return buildSuccess(call.reqId, { ok: true, path: picked })
     }
     return buildError(call.reqId, 'UNKNOWN', `no host action '${String(action)}'`)
+  }
+
+  private consumeUserGesture(pluginId: string): boolean {
+    const expiresAt = this.gestureCredits.get(pluginId)
+    this.gestureCredits.delete(pluginId)
+    return expiresAt !== undefined && expiresAt >= Date.now()
   }
 
   /** Fan a transport status transition out to every backend-needing plugin as
@@ -467,7 +520,7 @@ export class FrontendPluginManager {
     const ns = eventNamespace(event)
     if (!ns) return
     for (const plugin of this.running.values()) {
-      if (isCapabilityAllowed(plugin.requires, ns)) {
+      if (isEventAllowed(plugin.capabilityPolicy, event)) {
         this.emit(plugin.id, event, payload)
       }
     }
@@ -552,7 +605,7 @@ export class FrontendPluginManager {
       console.debug(`[plugin] cast dropped: malformed call from ${pluginId}`)
       return 'malformed'
     }
-    const plan = planCapabilityCall(call, plugin.requires)
+    const plan = planCapabilityCall(call, plugin.capabilityPolicy)
     if (plan.kind === 'host') {
       console.debug(
         `[plugin] cast dropped: ${pluginId} ${call.ns}.${call.method} is a host capability (not castable)`
@@ -690,6 +743,7 @@ export class FrontendPluginManager {
     const record: RunningPlugin = {
       id: descriptor.id,
       requires: descriptor.requires,
+      capabilityPolicy: descriptor.capabilityPolicy ?? legacyCapabilityPolicy(descriptor.requires),
       view,
       hostWindow,
       query: descriptor.query ?? '',
@@ -727,6 +781,7 @@ export class FrontendPluginManager {
       current.detachHostResize = null
       this.running.delete(descriptor.id)
       this.bySender.delete(current.senderId)
+      this.gestureCredits.delete(descriptor.id)
       // Same terminal teardown as destroy(): a renderer crash must also stop
       // pending output delivery, while the retained route marks keep the PTYs
       // re-claimable by this plugin only.
@@ -834,6 +889,7 @@ export class FrontendPluginManager {
     plugin.detachHostResize = null
     this.running.delete(pluginId)
     this.bySender.delete(plugin.senderId)
+    this.gestureCredits.delete(pluginId)
     // The PTY itself keeps running — drop its pending output, keep the routes
     // marked with this pluginId so only a reopened view of the SAME plugin can
     // re-claim them (see releaseTerminalOwnership).
@@ -892,6 +948,16 @@ export class FrontendPluginManager {
   /** All registered (installed + built-in) descriptors. */
   listDescriptors(): PluginLaunchDescriptor[] {
     return [...this.descriptors.values()]
+  }
+
+  /**
+   * Flatten validated Manifest v2 contribution metadata for Host discovery.
+   * This is the issue 01 seam; issue 14 consumes this catalog for instance
+   * creation and owns placement, mounting, and lifecycle. This method does not
+   * create or reuse runtime views.
+   */
+  listViewContributions(): PluginViewLaunchDescriptor[] {
+    return [...this.descriptors.values()].flatMap((descriptor) => descriptor.views ?? [])
   }
 
   /**
