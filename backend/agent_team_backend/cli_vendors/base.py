@@ -113,6 +113,15 @@ class VendorSpec:
     # in the vault by design).
     login_home_env: str | None = None
 
+    # Arguments that turn this CLI's binary into its direct sign-in trigger,
+    # e.g. "auth login". A login pane keeps the resolved binary and replaces
+    # everything after it with these, so YOLO flags never reach an auth
+    # subcommand. Two distinct empty-ish values:
+    #   None -> the CLI has no sign-in invocation; leave the command alone.
+    #   ""   -> signing in IS the bare binary (grok's TUI prompts on launch),
+    #           so the flags are still stripped but nothing is appended.
+    login_command_args: str | None = None
+
     # --- usage quota ---
     # async (home: Path) -> snapshot dict, same shape usage_service._snapshot
     # produces. None = vendor has no quota interface (aider) or not migrated.

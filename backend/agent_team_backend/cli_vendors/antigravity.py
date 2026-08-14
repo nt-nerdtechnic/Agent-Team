@@ -314,23 +314,45 @@ class AntigravityLogReader(LogReader):
             (k[len(_IDX_PREFIX):] for k in seen_keys if k.startswith(_IDX_PREFIX)),
             None,
         )
-        rows = self._read_steps(path, int(prev) if prev is not None else -1)
+        def remember(idx: int) -> None:
+            seen_keys.difference_update(
+                {k for k in seen_keys if k.startswith(_IDX_PREFIX)}
+            )
+            seen_keys.add(_IDX_PREFIX + str(idx))
+
+        # First sight of a conversation: the rows already there are history,
+        # not activity happening now. Skip to the LAST step rather than the end
+        # of one capped page — a long conversation would otherwise replay its
+        # remaining pages as fresh activity on the next pass, showing a resumed
+        # pane as working.
+        if prev is None:
+            newest = self._max_step_idx(path)
+            if newest is not None:
+                remember(newest)
+            return []
+        rows = self._read_steps(path, int(prev))
         if not rows:
             return []
-        seen_keys.difference_update(
-            {k for k in seen_keys if k.startswith(_IDX_PREFIX)}
-        )
-        seen_keys.add(_IDX_PREFIX + str(rows[-1][0]))
-        # First sight of a conversation: the rows already there are history,
-        # not activity happening now. Record where we are and report nothing,
-        # so resuming an old conversation cannot show its pane as working.
-        if prev is None:
-            return []
+        remember(rows[-1][0])
         cwd = self.cwd_from_file(path)
         return [
             ev for row in rows
             for ev in self._step_event(path, session_id, cwd, row)
         ]
+
+    def _max_step_idx(self, path: Path) -> int | None:
+        """Highest `steps.idx` in the conversation (None when unreadable)."""
+        try:
+            con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            try:
+                con.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+                row = con.execute("SELECT MAX(idx) FROM steps").fetchone()
+            finally:
+                con.close()
+        except (sqlite3.Error, OSError) as err:
+            log.debug("steps max read %s failed: %s", path, err)
+            return None
+        return int(row[0]) if row and row[0] is not None else None
 
     def _read_steps(
         self, path: Path, after_idx: int

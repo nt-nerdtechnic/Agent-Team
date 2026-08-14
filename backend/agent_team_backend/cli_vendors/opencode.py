@@ -43,7 +43,13 @@ import re
 from .base import Dep, VendorSpec, command_text
 from . import _protocols
 from ..usage_common import HTTP_TIMEOUT, _epoch_to_iso, _num, _snapshot, _window, parse_retry_after
-from ..log_readers.base import IncrementalParseResult, LogReader, TokenUsage
+from ..log_readers.base import (
+    ActivityEvent,
+    IncrementalParseResult,
+    LogReader,
+    TokenUsage,
+    user_prompt_text,
+)
 
 log = logging.getLogger("agent_team_backend.log_readers.opencode")
 
@@ -82,11 +88,46 @@ ORDER BY p.time_created
 """
 
 
+# Activity watermark: `part.rowid`. Unlike `message` — whose rows are updated
+# in place while a reply streams, which is why the token path needs its
+# `pending` list — `part` is append-only content blocks, so a rowid watermark
+# can never skip one.
+_ACTIVITY_PREFIX = "opencode_part::"
+_MAX_PARTS_PER_PASS = 256
+
+# parent_id comes along so a subagent's turn end can be told apart from the
+# pane's own: child sessions share their parent's `directory`, so both resolve
+# to the same pane and a child's "stop" would open the messaging gate while the
+# parent is still working.
+_ACTIVITY_SQL = """
+SELECT p.rowid, p.session_id, p.message_id, p.data, m.data,
+       COALESCE(s.directory, ''), s.parent_id, p.time_created
+FROM part p
+JOIN message m ON m.id = p.message_id
+JOIN session s ON s.id = p.session_id
+WHERE p.rowid > ?
+ORDER BY p.rowid
+LIMIT ?
+"""
+
+# Text blocks of one message, for the reply a completed turn carries.
+_TURN_TEXT_SQL = "SELECT data FROM part WHERE message_id = ? ORDER BY rowid"
+
+
 def _int(v) -> int:  # noqa: ANN001
     try:
         return max(0, int(v))
     except (TypeError, ValueError):
         return 0
+
+
+def _json_obj(raw) -> dict:  # noqa: ANN001
+    """Parsed JSON column, {} when absent or malformed."""
+    try:
+        parsed = json.loads(str(raw or ""))
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _data_dir(app_dir: str) -> Path:
@@ -297,6 +338,112 @@ class OpencodeLogReader(LogReader):
                 continue
             out.append(replace(event, checkpoint=_cursor()))
         return IncrementalParseResult(out, _cursor())
+
+    # ── activity ────────────────────────────────────────────────────────────
+
+    def parse_activity(
+        self, path: Path, seen_keys: set[str]
+    ) -> list[ActivityEvent]:
+        """One event per new `part` row.
+
+        This vendor records turn ends outright, which is rarer than it sounds:
+        a `step-finish` part carries the LLM's own finish reason, and `"stop"`
+        means the agent has finished replying (as opposed to `"tool-calls"`,
+        which means it is pausing to run something). No silence window and no
+        inference is needed.
+
+        Without this, opencode and kilo emitted no activity at all, leaving the
+        inter-CLI messaging gate permanently open — a message could land in the
+        composer mid-turn, where the TUI leaves it unsent.
+        """
+        if path.name != self._db_name:
+            return []
+        prev = next(
+            (k[len(_ACTIVITY_PREFIX):] for k in seen_keys if k.startswith(_ACTIVITY_PREFIX)),
+            None,
+        )
+        def remember(row_id: int) -> None:
+            seen_keys.difference_update(
+                {k for k in seen_keys if k.startswith(_ACTIVITY_PREFIX)}
+            )
+            seen_keys.add(_ACTIVITY_PREFIX + str(row_id))
+
+        # First sight of the db: everything in it is history, not activity
+        # happening now. The db is shared across every session this CLI has
+        # ever run, so reporting it would light up panes that are doing
+        # nothing. Skip to the LAST row rather than the last row of one capped
+        # page — otherwise the pages after it read as fresh activity next pass.
+        if prev is None:
+            newest = self._query(path, "SELECT MAX(rowid) FROM part")
+            if newest and newest[0][0] is not None:
+                remember(int(newest[0][0]))
+            return []
+        rows = self._query(path, _ACTIVITY_SQL, (int(prev), _MAX_PARTS_PER_PASS))
+        if not rows:
+            return []
+        remember(int(rows[-1][0]))
+        return [ev for row in rows for ev in self._activity_from_part(path, row)]
+
+    def _turn_reply_text(self, path: Path, message_id: str) -> str:
+        """The assistant text of one message, joined across its text parts."""
+        rows = self._query(path, _TURN_TEXT_SQL, (message_id,))
+        if not rows:
+            return ""
+        chunks: list[str] = []
+        for (data_json,) in rows:
+            part = _json_obj(data_json)
+            if part.get("type") == "text":
+                text = str(part.get("text") or "").strip()
+                if text:
+                    chunks.append(text)
+        return "\n".join(chunks)
+
+    def _activity_from_part(self, path: Path, row: tuple) -> list[ActivityEvent]:
+        row_id, session_id, message_id, part_json, msg_json, directory, parent_id, created_ms = row
+        part = _json_obj(part_json)
+        part_type = str(part.get("type") or "")
+        role = str(_json_obj(msg_json).get("role") or "")
+
+        def make(event_type: str, detail: str, text: str = "") -> ActivityEvent:
+            return ActivityEvent(
+                vendor=self.vendor,  # kilo inherits this reader unchanged
+                event_type=event_type,
+                cwd=str(directory or ""),
+                session_id=str(session_id or ""),
+                file_path=str(path),
+                dedup_key=f"part:{int(row_id)}",
+                timestamp=_epoch_to_iso(_int(created_ms) / 1000) or "",
+                detail=detail,
+                text=text,
+            )
+
+        if part_type == "step-finish":
+            reason = str(part.get("reason") or "")
+            # "tool-calls" is a pause to run something, not the end of a turn.
+            if reason != "stop":
+                return [make("agent_active", f"step-finish:{reason or 'unknown'}")]
+            if parent_id:
+                # A subagent finished. Its parent is still working, and both
+                # share a directory, so calling this a turn end would hand the
+                # pane's gate to the wrong session.
+                return [make("agent_active", "subagent:done")]
+            return [make(
+                "turn_complete", "assistant",
+                self._turn_reply_text(path, str(message_id or "")),
+            )]
+        if part_type == "tool":
+            return [make("agent_active", f"tool:{part.get('tool') or 'unknown'}")]
+        if part_type == "text" and role == "user":
+            # "user" is the cross-end contract detail panes are named from.
+            return [make(
+                "agent_active", "user",
+                user_prompt_text(str(part.get("text") or "")),
+            )]
+        if part_type == "reasoning":
+            return [make("agent_active", "assistant:thinking")]
+        if part_type == "text":
+            return [make("agent_active", "assistant")]
+        return [make("agent_active", part_type or "part")]
 
     def find_sessions_by_marker(
         self, markers: Iterable[str]

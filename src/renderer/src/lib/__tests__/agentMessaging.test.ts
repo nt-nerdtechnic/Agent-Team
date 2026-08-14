@@ -316,7 +316,16 @@ describe('isTurnInFlight', () => {
   })
 
   it('lists exactly the vendors whose logs carry no end-of-turn record', () => {
-    expect([...VENDORS_WITHOUT_TURN_END].sort()).toEqual(['cursor', 'pi', 'qwen'])
+    // The test is where the boundary comes from, not whether a turn_complete
+    // arrives. cursor emits none. grok/kimi/pi/qwen all emit one, but their
+    // readers synthesize it from a quiet window (_TURN_IDLE_SECONDS /
+    // _TURN_IDLE_MS in their backend vendor files) — inference one layer down.
+    // Vendors that read a real record stay out even when it is indirect:
+    // opencode a `step-finish` reason, antigravity a completed step carrying a
+    // reply. See turnEndInferredFromSilence in agents/types.ts.
+    expect([...VENDORS_WITHOUT_TURN_END].sort()).toEqual([
+      'cursor', 'grok', 'kimi', 'pi', 'qwen',
+    ])
   })
 })
 

@@ -31,16 +31,22 @@ export interface AgentSpec {
    *  vendor cannot resume by id (aider's lossy restore is special-cased in
    *  buildResumeCommand). */
   resumeArgs?: (sessionId: string) => string
-  /** This CLI's logs carry no end-of-turn record at all, so the end of a turn
-   *  can only be inferred from silence. (The qwen/pi readers do synthesize a
-   *  turn_complete for such panes, but from their own silence window — the
-   *  same inference one layer down, not an explicit record — so the flag stays
-   *  set for them.) Everything else reports turn ends
-   *  explicitly and MUST be trusted instead: activity is logged per output
-   *  line, not as a heartbeat, so a CLI waiting on a long tool call — or on a
-   *  permission prompt — looks exactly like a CLI that has finished. Inferring
-   *  from silence there would inject text and a newline into a pane that is
-   *  mid-task, and into a y/n prompt would answer it. */
+  /** This CLI's logs carry no end-of-turn RECORD, so a turn's end can only be
+   *  inferred from silence.
+   *
+   *  The test is where the boundary comes from, NOT whether a turn_complete
+   *  event arrives. cursor emits none at all; grok, kimi, pi and qwen do emit
+   *  one, but their readers synthesize it from their own quiet window — the
+   *  same inference one layer down — so the flag is set for all five. A vendor
+   *  whose log states the boundary outright leaves it unset even when that
+   *  statement is indirect: opencode reads a `step-finish` reason, antigravity
+   *  a completed step carrying a reply. Both are records, not timers.
+   *
+   *  Unset MUST be trusted instead of second-guessed: activity is logged per
+   *  output line, not as a heartbeat, so a CLI waiting on a long tool call —
+   *  or on a permission prompt — looks exactly like a CLI that has finished.
+   *  Inferring from silence there would inject text and a newline into a pane
+   *  that is mid-task, and into a y/n prompt would answer it. */
   turnEndInferredFromSilence?: boolean
   /** Detection of this CLI's expired-login message in a pane's clean PTY
    *  output, plus the command typed into the CLI to recover. Undefined = the

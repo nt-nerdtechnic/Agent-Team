@@ -310,6 +310,7 @@ def _session_exists(workspace_path: str, session_id: str) -> bool:
 SPEC = VendorSpec(
     key="kilo",
     label="Kilo Code",
+    login_command_args="auth login",
     # Multi-account (credential swap): the vault parks and restores this exact
     # file — `kilo auth list` prints the path itself, and it is the same tuple
     # the quota reader already resolves against.

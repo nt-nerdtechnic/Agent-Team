@@ -911,6 +911,7 @@ def _session_exists(workspace_path: str, session_id: str) -> bool:
 SPEC = VendorSpec(
     key="codex",
     label="Codex",
+    login_command_args="login",
     live_file=(".codex", "auth.json"),
     slot_file="auth.json",
     login_home_secret_file=("auth.json",),

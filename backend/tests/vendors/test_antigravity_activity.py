@@ -11,6 +11,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from agent_team_backend.cli_vendors import antigravity as antigravity_mod
 from agent_team_backend.log_readers import AntigravityLogReader
 
 
@@ -97,6 +98,21 @@ def test_first_pass_records_watermark_without_reporting_history(
 
     assert reader.parse_activity(db, seen) == []
     assert seen == {"agy_idx::1"}
+
+
+def test_first_pass_skips_past_a_capped_page(tmp_path: Path, monkeypatch) -> None:
+    # Regression: the watermark used to come from the last row of ONE capped
+    # page, so a long conversation replayed its remaining pages as fresh
+    # activity on the next pass — showing a resumed pane as working.
+    monkeypatch.setattr(antigravity_mod, "_MAX_STEPS_PER_PASS", 2)
+    reader, db = _db_with(tmp_path, monkeypatch, [
+        (idx, 21, 3, b"", b"") for idx in range(6)
+    ])
+    seen: set[str] = set()
+
+    assert reader.parse_activity(db, seen) == []
+    assert seen == {"agy_idx::5"}  # not ::1
+    assert reader.parse_activity(db, seen) == []
 
 
 def test_assistant_reply_completes_the_turn_with_its_text(

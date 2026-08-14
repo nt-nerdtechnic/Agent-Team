@@ -560,6 +560,7 @@ def _session_exists(workspace_path: str, session_id: str) -> bool:
 SPEC = VendorSpec(
     key="kimi",
     label="Kimi Code",
+    login_command_args="login",
     live_file=(".kimi-code", "credentials", "kimi-code.json"),
     slot_file="kimi-code.json",
     login_home_secret_file=("credentials", "kimi-code.json"),

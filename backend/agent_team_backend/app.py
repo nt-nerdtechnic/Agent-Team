@@ -56,19 +56,7 @@ from .codex_home import CodexHomeManager
 from .ipc import make_error, make_event, make_response
 from .log_readers import (
     ActivityEvent,
-    AiderLogReader,
-    AntigravityLogReader,
-    ClaudeLogReader,
-    CodexLogReader,
-    CopilotLogReader,
-    CursorLogReader,
-    GrokLogReader,
-    KiloLogReader,
-    KimiLogReader,
     LogWatcher,
-    OpencodeLogReader,
-    PiLogReader,
-    QwenLogReader,
     TokenSinkResult,
     TokenUsage,
 )
@@ -1616,30 +1604,20 @@ def _command_with_installed_cli_alias(agent_key: str, command: Any) -> Any:
     return _with_replaced_executable(command, text, installed)
 
 
-# Direct sign-in trigger per CLI, appended to the pane's resolved binary. A
-# login pane must jump straight into the vendor's browser/device sign-in flow
-# instead of sitting at a bare REPL waiting for the user to type a command.
-# grok has no login subcommand — its TUI starts first-run auth by itself
-# inside the empty isolated login home (verified against the locally installed
-# CLIs' --help output, 2026-07-25).
-_LOGIN_COMMAND_ARGS = {
-    "claude": "auth login",
-    "codex": "login",
-    "kimi": "login",
-    "grok": "",
-    "kilo": "auth login",
-}
-
-
 def _login_spawn_command(agent_key: str, command: Any) -> Any:
     """Rewrite a login pane's command to the CLI's direct sign-in trigger.
+
+    A login pane must jump straight into the vendor's browser/device sign-in
+    flow instead of sitting at a bare REPL. The trigger itself is per-vendor
+    knowledge and lives in each vendor's `login_command_args`.
 
     Keeps the first token (the resolved binary, possibly an override path from
     _command_with_persisted_cli_binary) and drops every other flag — YOLO
     flags like --dangerously-skip-permissions don't apply to auth subcommands.
     Preserves the frontend's [shell, -lc, cmd] wrapper.
     """
-    args = _LOGIN_COMMAND_ARGS.get(agent_key)
+    spec = cli_vendor(agent_key)
+    args = spec.login_command_args if spec is not None else None
     if args is None:
         return command
     text = _command_text(command)

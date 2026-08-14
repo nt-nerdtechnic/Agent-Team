@@ -1313,13 +1313,12 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   /** Authoritative turn end from the CLI's own conversation log. Drops the
    *  hysteresis latch so the badge goes idle now instead of waiting out
    *  IDLE_CONFIRM_MS. Only vendors whose log reader emits turn_complete reach
-   *  here: claude/codex/copilot/aider/kimi/qwen/pi/grok/antigravity, all of
-   *  which carry the turn text (qwen/pi/grok/kimi have no explicit
-   *  end-of-turn record and infer the boundary from a silence window in the
-   *  log, so they arrive a few seconds late; antigravity has none either and
-   *  treats a finished step that carries a reply as the end of a turn). The
-   *  rest fall back to the silence timeout — cursor emits agent_active only,
-   *  and kilo/opencode emit neither (no parse_activity override). */
+   *  here: every vendor except cursor, which emits agent_active only and so
+   *  falls back to the silence timeout. Four of them (grok/kimi/pi/qwen) have
+   *  no turn-end record in the log and flush a turn after their reader's own
+   *  quiet window, so they arrive a few seconds late; the rest read the
+   *  boundary from a record — opencode a `step-finish` reason, antigravity a
+   *  completed step that carries a reply. */
   function markTurnComplete(): void {
     turnCompleteAt.value = Date.now()
     runningLatched.value = false

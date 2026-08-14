@@ -580,6 +580,9 @@ async def fetch_grok(home: Path, env: dict | None = None) -> dict:
 SPEC = VendorSpec(
     key="grok",
     label="Grok CLI",
+    # Empty, not None: grok has no auth subcommand — its TUI prompts for
+    # sign-in on a bare launch — so the flags are stripped and nothing added.
+    login_command_args="",
     live_file=(".grok", "auth.json"),
     slot_file="auth.json",
     login_home_secret_file=("home", ".grok", "auth.json"),

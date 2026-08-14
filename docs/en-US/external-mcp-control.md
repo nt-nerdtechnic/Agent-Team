@@ -108,10 +108,11 @@ recorded as diagnostics, readable via `ui_diagnostics`.
 
 **Capability boundary — idle/completion detection.** Most CLIs' log readers
 emit a `turn_complete` event carrying the finished turn's text: **aider,
-antigravity, claude, codex, copilot, cursor, grok, kimi, pi, qwen**. For those,
-`cli_wait_idle` and `cli_get_status`'s `last_activity.type` resolve on the
-precise turn-complete signal. For the remaining CLIs (kilo, muse, opencode,
-and plain terminal panes), there is no such signal —
+antigravity, claude, codex, copilot, grok, kilo, kimi, muse, opencode, pi,
+qwen**. For those, `cli_wait_idle` and `cli_get_status`'s
+`last_activity.type` resolve on the precise turn-complete signal. For the
+remaining CLIs (cursor, which reports only that its store was written, and
+plain terminal panes), there is no such signal —
 `cli_wait_idle` falls back to inferring idleness from a 10-second quiet
 period with no new activity (`source: "quiet_period"` in the response), and
 `cli_get_status`'s `last_activity` may only ever report `"agent_active"`.

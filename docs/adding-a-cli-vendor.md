@@ -31,6 +31,17 @@ You never need to read or modify the shared orchestration code.
    flags — the template lists every optional field with pointers to the
    full docs in `agents/types.ts`).
 2. Register it in `agents/index.ts` (one line, display order).
+3. Run `pnpm vitest run src/renderer/src/agents` — the structural tests there
+   check your spec against the rules the template states (key matches the
+   filename, the file is registered, `resumeCommandPattern` matches the
+   command Navide builds for you, no `/g` on a matcher). They need no edit
+   when you add a vendor; they discover your file on their own.
+
+Write the spec as `export const SPEC = { … } as const satisfies AgentSpec`,
+never `SPEC: AgentSpec`. The annotation widens `agentKey` to `string`, and
+`index.ts` derives the app-wide `AgentKey` union from these literals — one
+annotated spec collapses that union everywhere. A compile-time assertion in
+`agents/__tests__/specs.test.ts` fails if this regresses.
 
 ## Install detection
 

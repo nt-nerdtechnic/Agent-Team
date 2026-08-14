@@ -25,7 +25,7 @@
 
 import type { AgentSpec } from './types'
 
-export const SPEC: AgentSpec = {
+export const SPEC = {
   agentKey: 'muse',
   label: 'Muse Code',
   defaultCommand: 'muse',
@@ -50,4 +50,4 @@ export const SPEC: AgentSpec = {
   needsSessionMarker: true,
   supportsRebuild: true,
   hint: 'generalist'
-}
+} as const satisfies AgentSpec

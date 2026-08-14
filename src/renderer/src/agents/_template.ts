@@ -6,7 +6,10 @@
 
 import type { AgentSpec } from './types'
 
-export const SPEC: AgentSpec = {
+// `as const satisfies` — NOT `: AgentSpec`. The annotation would widen
+// agentKey to `string`, and index.ts derives the AgentKey union from these
+// literals: one annotated spec collapses the union for the whole app.
+export const SPEC = {
   agentKey: '_template', // must match the filename
   label: 'Human Name',
   defaultCommand: 'mycli',
@@ -28,4 +31,4 @@ export const SPEC: AgentSpec = {
   // ── Recovery ──
   // loginExpired: { pattern: /.../i, loginCommand: '/login' },
   hint: 'generalist'
-}
+} as const satisfies AgentSpec
