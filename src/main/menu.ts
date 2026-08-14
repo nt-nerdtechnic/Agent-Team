@@ -77,6 +77,16 @@ export const TERMINAL_SELECTION_EXPRESSION = 'window.__navideTerminalSelection?.
 /** How long Edit > Copy waits for the page before falling back to its own copy. */
 const SELECTION_READ_TIMEOUT_MS = 300
 
+/**
+ * Marks the timeout arm of the selection race.
+ *
+ * Both a slow page and a page reporting no selection end up at the same
+ * fallback, but they are very different failures — one is a busy renderer
+ * losing a 300ms race, the other is genuinely nothing to copy. Without a
+ * distinct value the log cannot tell them apart.
+ */
+const SELECTION_TIMED_OUT = Symbol('selection-read-timed-out')
+
 export function installApplicationMenu(
   hooks: AppMenuHooks = {},
   recents: RecentMenuEntry[] = []
@@ -106,6 +116,7 @@ export function installApplicationMenu(
           // this app creates is a BrowserWindow, so the narrowing is safe.
           (win as BrowserWindow | undefined)?.webContents
         if (!target || target.isDestroyed()) return
+        const startedAt = Date.now()
         let selection: unknown = ''
         try {
           // executeJavaScript never settles while the page is navigating, which
@@ -113,15 +124,31 @@ export function installApplicationMenu(
           // deadline and treat a slow page as "no terminal selection".
           selection = await Promise.race([
             target.executeJavaScript(TERMINAL_SELECTION_EXPRESSION, true),
-            new Promise((resolve) => setTimeout(() => resolve(''), SELECTION_READ_TIMEOUT_MS))
+            new Promise((resolve) => setTimeout(() => resolve(SELECTION_TIMED_OUT), SELECTION_READ_TIMEOUT_MS))
           ])
-        } catch { /* page not ready — fall through to the built-in copy */ }
+        } catch (err) {
+          // Page not ready — falls through to the built-in copy, but say so:
+          // over a terminal that fallback copies nothing at all.
+          console.warn(`[menu] Copy: reading the page selection threw: ${String(err)}`)
+        }
         // The WebContents can be gone by the time the round-trip returns.
         if (target.isDestroyed()) return
         // Written from main, so it never depends on the page holding DOM focus
         // (opening the menu takes it away) — same reason context-menu.ts does.
         if (typeof selection === 'string' && selection) clipboard.writeText(selection)
-        else target.copy()
+        else {
+          // webContents.copy() copies nothing over a terminal (.xterm is
+          // user-select: none), so landing here means the user pressed Copy and
+          // got an unchanged clipboard. Name the branch: a renderer too busy to
+          // answer reads very differently from a page that promptly said there
+          // is no selection, and only the first scales with CLI output.
+          console.warn(
+            selection === SELECTION_TIMED_OUT
+              ? `[menu] Copy: page did not answer within ${SELECTION_READ_TIMEOUT_MS}ms (busy renderer?) — falling back to webContents.copy(), which copies nothing over a terminal`
+              : `[menu] Copy: page reported no terminal selection in ${Date.now() - startedAt}ms — falling back to webContents.copy()`
+          )
+          target.copy()
+        }
       } catch { /* window torn down mid-copy — nothing useful to do */ }
     }
   }

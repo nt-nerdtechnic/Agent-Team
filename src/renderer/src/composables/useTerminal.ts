@@ -1671,6 +1671,13 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     helper.compositionend()
   }
 
+  // Copy and paste are discrete human actions, so unlike the IME and echo
+  // probes these are not throttled: at human rates they cannot flood, and
+  // which individual attempt failed is exactly what a "the paste vanished"
+  // report needs to answer.
+  const _clipboardDiag = (message: string, level: 'info' | 'warning' = 'info'): void =>
+    diagLog(backend, 'clipboard', message, level)
+
   // Set when a reattached pane is waiting to repaint. We never force_redraw at
   // reattach time: the renderer is mid-reflow then (reload, or a hidden tab
   // being shown), so the width is transient and would repaint the live agent
@@ -1946,7 +1953,20 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         const selection = term.getSelection()
         if (selection) {
           e.preventDefault()
-          void navigator.clipboard.writeText(selection)
+          // Two things this has to report. Chromium rejects writeText when the
+          // document is not focused, and the key is already swallowed by then,
+          // so a rejection is a copy the user believes happened and did not.
+          // And the Edit > Copy accelerator may claim ⌘C before this handler
+          // ever runs (menu.ts binds CmdOrCtrl+C, and native accelerators fire
+          // first) — so the success line is what tells the two copy paths
+          // apart in the log when a copy goes missing.
+          void navigator.clipboard.writeText(selection).then(
+            () => _clipboardDiag(`pane=${paneId} Cmd+C copied ${selection.length} chars (renderer path)`),
+            (err) => _clipboardDiag(
+              `pane=${paneId} Cmd+C clipboard write rejected (${selection.length} chars): ${String(err)}`,
+              'warning'
+            )
+          )
           return false
         }
       }
@@ -3150,10 +3170,24 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
    * App.vue's injectText relies on to keep large pastes off the tty's limits.
    */
   function pasteFromClipboard(text: string): void {
+    // Both rejections below are silent by design, and that is what made "the
+    // paste vanished" unanswerable: an empty clipboard (a copy that never
+    // landed — see the Cmd+C path above and menu.ts) and a still-preparing
+    // pane look identical from the outside. Split them so the log says which.
+    if (!text) {
+      _clipboardDiag(`pane=${paneId} paste ignored — the clipboard held no text`, 'warning')
+      return
+    }
     // The pane gates stdin while it is still preparing, and a paste respects
     // that too. Rejected rather than buffered: a clipboard paste is a discrete
     // action the user can simply repeat once the pane is ready, unlike typing.
-    if (!text || _stdinGated) return
+    if (_stdinGated) {
+      _clipboardDiag(
+        `pane=${paneId} paste dropped — pane still preparing (${text.length} chars discarded)`,
+        'warning'
+      )
+      return
+    }
     // Same gate pasteText applies. Checked up front so a paste into a dead pane
     // cannot clear `isStopped` (and fire onUserResume) while sending nothing.
     if (!sessionId.value || status.value === 'exited' || status.value === 'error') return
