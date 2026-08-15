@@ -21,5 +21,8 @@ export const SPEC = {
   // The `=` form, which the generic --resume shape would not match.
   resumeCommandPattern: /^copilot\s+--resume(?:=|\s+)\S+/,
   supportsRebuild: true,
+  // Measured on a real PTY: the CLI itself emits `ESC[?1049h` during startup
+  // (probe read 333 bytes of startup output) and keeps the conversation there.
+  fullScreenTui: true,
   hint: 'generalist'
 } as const satisfies AgentSpec

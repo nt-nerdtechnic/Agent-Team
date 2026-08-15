@@ -279,25 +279,51 @@ describe('createCliAccountSwitchHandler', () => {
   })
 
   it('starts a sign-in when the switched-to account has no usable credentials', async () => {
-    const setDefault = vi.fn<SetDefaultFn>().mockResolvedValue({ ok: true, needsLogin: true })
+    const setDefault = vi.fn<SetDefaultFn>().mockResolvedValue({
+      ok: true,
+      needsLogin: true,
+      needsLoginReason: 'signed-out',
+    })
     const caps = makeCaps()
     const handler = createCliAccountSwitchHandler({ setDefault }, caps)
 
     const res = await handler('claude', 'p1')
-    expect(res).toEqual({ ok: true, needsLogin: true })
-    expect(caps.startLogin).toHaveBeenCalledWith('claude')
+    expect(res).toEqual({ ok: true, needsLogin: true, needsLoginReason: 'signed-out' })
+    expect(caps.startLogin).toHaveBeenCalledWith('claude', 'signed-out')
+  })
+
+  it('passes the expired reason through so the toast can tell it apart', async () => {
+    const setDefault = vi.fn<SetDefaultFn>().mockResolvedValue({
+      ok: true,
+      needsLogin: true,
+      needsLoginReason: 'expired',
+    })
+    const caps = makeCaps()
+    const handler = createCliAccountSwitchHandler({ setDefault }, caps)
+
+    await handler('claude', 'p1')
+    expect(caps.startLogin).toHaveBeenCalledWith('claude', 'expired')
+  })
+
+  it('starts a sign-in for a backend that sends no reason at all', async () => {
+    const setDefault = vi.fn<SetDefaultFn>().mockResolvedValue({ ok: true, needsLogin: true })
+    const caps = makeCaps()
+    const handler = createCliAccountSwitchHandler({ setDefault }, caps)
+
+    await handler('claude', 'p1')
+    expect(caps.startLogin).toHaveBeenCalledWith('claude', undefined)
   })
 
   it('starts a sign-in after a FORCED switch onto a signed-out account', async () => {
     const setDefault = vi
       .fn<SetDefaultFn>()
       .mockResolvedValueOnce({ ok: false, code: 'PANES_RUNNING', count: 1, message: 'in use' })
-      .mockResolvedValueOnce({ ok: true, needsLogin: true })
+      .mockResolvedValueOnce({ ok: true, needsLogin: true, needsLoginReason: 'signed-out' })
     const caps = makeCaps()
     const handler = createCliAccountSwitchHandler({ setDefault }, caps)
 
     await handler('claude', 'p1')
-    expect(caps.startLogin).toHaveBeenCalledWith('claude')
+    expect(caps.startLogin).toHaveBeenCalledWith('claude', 'signed-out')
   })
 
   it('leaves a usable account alone (no sign-in)', async () => {

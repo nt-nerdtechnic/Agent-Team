@@ -62,6 +62,12 @@ export interface UsageSnapshot {
   refreshStatus?: UsageStatus | 'not-refreshed'
   refreshAttemptedAt?: string | null
   staleExpired?: boolean
+  /** Claude only: this account just became active and its figure is being read
+   *  right now. Reading it boots a whole Claude Code, so the numbers on screen
+   *  belong to an earlier reading until the poll lands — say so rather than
+   *  let them pass for the switch's result. Cleared by the snapshot the poll
+   *  writes, whatever that snapshot turns out to be. */
+  refreshPending?: boolean
 }
 
 interface UsagePayload {

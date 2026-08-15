@@ -764,7 +764,6 @@
       "model": "模型",
       "effort": "推理強度",
       "context": "上下文",
-      "agent": "Agent",
       "attachments": "附件",
       "attachments-hint": "此處僅供檢視；請開啟資料夾管理附件。",
       "no-attachments": "沒有附件",
@@ -2045,7 +2044,8 @@
     "switch-restart-confirm-confirm": "切換並重啟",
     "switch-restart-confirm-cancel": "取消",
     "switch-restart-partial": "帳號切換後有 {failed}/{total} 個 pane 未能重啟，詳情請見紀錄。",
-    "needs-login": "這個帳號未登入，正在開啟登入流程。"
+    "needs-login": "這個帳號未登入，正在開啟登入流程。",
+    "needs-login-expired": "這個帳號閒置期間 token 已過期，正在開啟登入流程重新取得授權。"
   },
   "cliDrop": {
     "source-closed": "來源 CLI pane 已關閉",
@@ -2195,6 +2195,9 @@
     "cached-account-tooltip": "快取 — 此帳號無法輪詢，數字取自 {time}",
     "cached-window-expired": "重置時間已過",
     "no-data": "尚無額度資料",
+    "reading-now": "正在讀取這個帳號的額度，最多約一分鐘",
+    "reading-short": "讀取中",
+    "reading-tooltip": "這個帳號剛切換為使用中。讀取額度需要啟動一次 Claude Code，因此在完成前下方顯示的是上一次的數字，最多約一分鐘。",
     "refresh-status": "刷新：{status}",
     "refresh-status-ok": "已是最新",
     "refresh-status-not-refreshed": "尚未刷新",

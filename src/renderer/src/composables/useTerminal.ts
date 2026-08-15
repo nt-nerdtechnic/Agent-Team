@@ -2750,7 +2750,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // the normal buffer, which holds the conversation, is worth restoring; the
   // CLI repaints its own alt-buffer view when it reattaches.
   //
-  // A `fullScreenTui` vendor (claude, codex) inverts that: its CONVERSATION is
+  // A `fullScreenTui` vendor inverts that: its CONVERSATION is
   // the alt buffer, so excluding it saved an all but empty snapshot and both the
   // periodic save and the reattach replay were doing nothing for those panes.
   // Include the alt buffer there and strip the enter sequence, so the screen

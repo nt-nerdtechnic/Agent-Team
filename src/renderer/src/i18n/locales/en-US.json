@@ -764,7 +764,6 @@
       "model": "Model",
       "effort": "Effort",
       "context": "Context",
-      "agent": "Agent",
       "attachments": "Attachments",
       "attachments-hint": "Attachments are read-only here. Open the folder to manage them.",
       "no-attachments": "No attachments",
@@ -2045,7 +2044,8 @@
     "switch-restart-confirm-confirm": "Switch & restart",
     "switch-restart-confirm-cancel": "Cancel",
     "switch-restart-partial": "{failed} of {total} pane(s) could not be restarted after the account switch — see the log for details.",
-    "needs-login": "This account is signed out — starting a sign-in."
+    "needs-login": "This account is signed out — starting a sign-in.",
+    "needs-login-expired": "This account's token expired while it was parked — starting a sign-in to renew it."
   },
   "cliDrop": {
     "source-closed": "CLI pane is no longer open",
@@ -2195,6 +2195,9 @@
     "cached-account-tooltip": "Cached — this account could not be polled; numbers are from {time}",
     "cached-window-expired": "reset passed",
     "no-data": "No quota data yet",
+    "reading-now": "Reading this account's quota — up to about a minute",
+    "reading-short": "reading",
+    "reading-tooltip": "This account just became active. Reading its quota starts a Claude Code, so the numbers below are the previous reading until that finishes — up to about a minute.",
     "refresh-status": "Refresh: {status}",
     "refresh-status-ok": "up to date",
     "refresh-status-not-refreshed": "not refreshed yet",

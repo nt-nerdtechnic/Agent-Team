@@ -680,6 +680,48 @@ describe('CliAccountsPane', () => {
     expect(card.get('.cli-card-cache').text()).toContain('Cached')
   })
 
+  it('says a read is in flight instead of labelling the old figure stale', () => {
+    // Right after a switch the card still holds the incoming account's PREVIOUS
+    // reading. Calling that "not measured" reads as a dead end; the honest
+    // statement is that a read is running and this number predates it.
+    usage.accountUsageFor.mockReturnValue(
+      usageSnapshot({
+        stale: true,
+        refreshPending: true,
+        lastSuccessAt: '2026-07-26T04:00:00Z',
+        refreshStatus: 'not-measured',
+      }),
+    )
+    const w = mountPane(
+      makeApi({
+        identities: { claude: { __default__: { email: 'me@example.com', signedIn: true } } },
+      }),
+    )
+
+    const card = section(w, 0).findAll('.cli-card')[0]
+    expect(card.get('.cli-card-refresh').text()).toContain('Reading this account')
+    // The age of what is on screen still belongs there — it is why the number
+    // has not moved.
+    expect(card.get('.cli-card-cache').text()).toContain('Cached')
+    // ...but not alongside the refresh state it replaces.
+    expect(card.text()).not.toContain('Not measured')
+  })
+
+  it('says a read is in flight on a card that has no figure at all yet', () => {
+    usage.accountUsageFor.mockReturnValue(
+      usageSnapshot({ status: 'not-measured', refreshPending: true, windows: [] }),
+    )
+    const w = mountPane(
+      makeApi({
+        identities: { claude: { __default__: { email: 'me@example.com', signedIn: true } } },
+      }),
+    )
+
+    const card = section(w, 0).findAll('.cli-card')[0]
+    expect(card.get('.cli-card-none').text()).toContain('No quota data yet')
+    expect(card.get('.cli-card-refresh').text()).toContain('Reading this account')
+  })
+
   it('shows no data only for a signed-in account without a snapshot', () => {
     usage.accountUsageFor.mockReturnValue(undefined)
     const api = makeApi({
@@ -727,6 +769,30 @@ describe('CliAccountsPane', () => {
     await flushPromises()
     expect(button.text()).toBe('Refresh quota')
     expect(button.attributes('disabled')).toBeUndefined()
+  })
+
+  it('keeps the refresh button busy through an announcement payload', async () => {
+    // Switching accounts broadcasts a payload immediately to announce the
+    // wait. Treating that as "the cycle finished" put an idle Refresh button
+    // directly above a card still reading "Reading this account's quota".
+    usage.usageFor.mockReturnValue(undefined)
+    const w = mountPane(makeApi())
+    const button = w.get('.cli-refresh')
+    await button.trigger('click')
+    expect(button.text()).toBe('Refreshing…')
+
+    usage.usageFor.mockImplementation((agentKey) =>
+      agentKey === 'claude' ? usageSnapshot({ refreshPending: true }) : undefined,
+    )
+    usageVersion.value++
+    await flushPromises()
+    expect(button.text()).toBe('Refreshing…')
+
+    // The payload that actually ends the read releases it.
+    usage.usageFor.mockReturnValue(undefined)
+    usageVersion.value++
+    await flushPromises()
+    expect(button.text()).toBe('Refresh quota')
   })
 
   it('stays idle when there is no backend to ask', async () => {

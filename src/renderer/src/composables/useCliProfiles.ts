@@ -18,10 +18,14 @@ export interface CliProfile {
 // Outcome of `setDefault`. `count` is set for PANES_RUNNING refusals — the
 // number of live non-login panes the backend saw for the agent. `needsLogin`
 // marks a switch onto an account whose stored credentials cannot authenticate
-// (empty slot, or an expired token the backend could not refresh) — the CLI is
-// now signed out and the caller should start a sign-in.
+// — the CLI is now signed out and the caller should start a sign-in.
+// `needsLoginReason` says which kind, because they read very differently to
+// the user: 'signed-out' (the slot holds nothing) versus 'expired' (a parked
+// account's access token aged out, which is routine and not a lost login).
+export type CliLoginReason = 'signed-out' | 'expired'
+
 export type SetDefaultResult =
-  | { ok: true; needsLogin?: boolean }
+  | { ok: true; needsLogin?: boolean; needsLoginReason?: CliLoginReason }
   | { ok: false; code?: string; message?: string; count?: number }
 
 // Map of agentKey -> default profile id, or null for the built-in Default
@@ -180,6 +184,7 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
       const resp = await backend.send<{
         defaults: CliProfileDefaults
         needsLogin?: boolean
+        needsLoginReason?: CliLoginReason | null
       }>('cli_profiles.set_default', payload, 30_000)
       if (!resp.ok || !resp.payload) {
         const code = resp.error?.code
@@ -214,7 +219,13 @@ export function useCliProfiles(backend: ReturnType<typeof useBackend>) {
         return { ok: false, code, message }
       }
       defaults.value = resp.payload.defaults
-      return { ok: true, needsLogin: resp.payload.needsLogin === true }
+      return {
+        ok: true,
+        needsLogin: resp.payload.needsLogin === true,
+        // A backend that predates the reason field still says `needsLogin`;
+        // fall back to the reading it used to imply.
+        needsLoginReason: resp.payload.needsLoginReason ?? undefined,
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'set default failed'
       error.value = message
@@ -339,8 +350,9 @@ export interface CliAccountSwitchCaps {
   agentLabel: (agentKey: string) => string
   /** Start a live sign-in for the agent — used when the switch landed on an
    *  account whose stored credentials cannot authenticate. The account is
-   *  already active by then, so this is a LIVE login (not an isolated one). */
-  startLogin: (agentKey: string) => void
+   *  already active by then, so this is a LIVE login (not an isolated one).
+   *  `reason` is what the pane's own explanation should say. */
+  startLogin: (agentKey: string, reason?: CliLoginReason) => void
 }
 
 /**
@@ -359,7 +371,7 @@ export function createCliAccountSwitchHandler(
   // right now, so start the sign-in for the user instead of leaving them at a
   // login prompt to resolve by hand.
   function afterSwitch(agentKey: string, res: SetDefaultResult): SetDefaultResult {
-    if (res.ok && res.needsLogin) caps.startLogin(agentKey)
+    if (res.ok && res.needsLogin) caps.startLogin(agentKey, res.needsLoginReason)
     return res
   }
 

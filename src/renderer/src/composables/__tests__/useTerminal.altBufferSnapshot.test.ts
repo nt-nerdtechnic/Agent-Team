@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 //
-// Full-screen TUI vendors (claude, codex) draw their conversation in the
+// Full-screen TUI vendors draw their conversation in the
 // terminal's ALTERNATE screen buffer, so a snapshot serialized with
 // `excludeAltBuffer: true` came back empty and neither the periodic save nor
 // the reattach replay did anything for those panes. These tests pin the two
@@ -155,7 +155,24 @@ describe('useTerminal — alternate-buffer scrollback snapshot', () => {
 
   it('flags exactly the vendors verified to own the alt buffer', () => {
     const flagged = AGENT_SPECS.filter((s) => s.fullScreenTui).map((s) => s.agentKey)
-    expect(flagged.sort()).toEqual(['claude', 'codex'])
+    // Each of these was measured on a real PTY (or, for codex, in the shipped
+    // binary) emitting `ESC[?1049h` at startup. Vendors probed and found to
+    // stay in the NORMAL buffer — grok, kimi, pi, aider — must stay off the
+    // list, as must anything unmeasured (muse never tripped the probe;
+    // cursor and antigravity are not installed locally).
+    expect(flagged.sort()).toEqual(['claude', 'codex', 'copilot', 'kilo', 'opencode', 'qwen'])
+  })
+
+  it('never flags a line-mode CLI or the plain shell pane', () => {
+    // aider's conversation is already in the normal buffer, and `terminal` is
+    // where a TRANSIENT full-screen view (vim, a pager) shows up — saving
+    // either one's alt screen as history is the bug excludeAltBuffer prevents.
+    const byKey = new Map(AGENT_SPECS.map((s) => [s.agentKey, s]))
+    for (const key of ['aider', 'terminal']) {
+      const spec = byKey.get(key)
+      expect(spec, `${key} spec is missing`).toBeDefined()
+      expect(spec?.fullScreenTui).toBeFalsy()
+    }
   })
 
   it('replays the snapshot before the mouse-mode reset', async () => {

@@ -200,6 +200,7 @@ interface CardUsage {
   expired: boolean
   noData: boolean
   cached: boolean
+  pending: boolean
   resetExpired: boolean
   big: string
   tier: 'ok' | 'warn' | 'crit'
@@ -224,6 +225,9 @@ function cardUsage(agentKey: string, profileId: string | null): CardUsage | unde
   const base = {
     expired: snap.status === 'expired' || snap.refreshStatus === 'expired',
     cached,
+    // A read is in flight for this account (it just became active). Whatever
+    // the card shows below is an earlier reading until that lands.
+    pending: snap.refreshPending === true,
     resetExpired: cached && windows.length === 0 && snap.windows.length > 0,
     lastSuccess: formatResetAbsolute(snap.lastSuccessAt ?? snap.fetchedAt),
     refreshStatus,
@@ -316,8 +320,19 @@ function refreshQuota(): void {
   refreshBusyTimer = setTimeout(clearRefreshBusy, REFRESH_BUSY_TIMEOUT_MS)
 }
 
+/** True while the backend says a quota read is running for some account. */
+function readInFlight(): boolean {
+  return CLI_AGENT_SPECS.some(
+    (spec) => usageFor(spec.agentKey)?.refreshPending === true
+  )
+}
+
 watch(usageVersion, () => {
-  if (refreshingUsage.value) clearRefreshBusy()
+  // Every payload used to mean "the cycle finished". An account switch now
+  // broadcasts one straight away to announce the wait, so clearing on that
+  // would put an idle Refresh button above a card reading "reading its quota".
+  // The busy timeout still bounds this if no completing payload ever lands.
+  if (refreshingUsage.value && !readInFlight()) clearRefreshBusy()
 })
 
 onUnmounted(() => clearTimeout(refreshBusyTimer))
@@ -457,7 +472,10 @@ onMounted(() => refreshUsage())
                 <div v-if="u.cached" class="cli-card-cache">
                   {{ $t('usage.cached-at', { time: u.lastSuccess }) }}
                 </div>
-                <div v-if="u.cached" class="cli-card-refresh">
+                <div v-if="u.pending" class="cli-card-refresh pending">
+                  {{ $t('usage.reading-now') }}
+                </div>
+                <div v-else-if="u.cached" class="cli-card-refresh">
                   {{ $t('usage.refresh-status', { status: u.refreshStatus }) }}
                 </div>
               </template>
@@ -470,7 +488,10 @@ onMounted(() => refreshUsage())
                 <span v-if="u?.expired" class="cli-card-expired">
                   ⚠ {{ $t('usage.expired-tooltip') }}
                 </span>
-                <span v-if="u?.refreshStatus" class="cli-card-refresh">
+                <span v-if="u?.pending" class="cli-card-refresh pending">
+                  {{ $t('usage.reading-now') }}
+                </span>
+                <span v-else-if="u?.refreshStatus" class="cli-card-refresh">
                   {{ $t('usage.refresh-status', { status: u.refreshStatus }) }}
                 </span>
               </div>
@@ -652,6 +673,9 @@ onMounted(() => refreshUsage())
 .cli-card-foot { font-size: 10px; color: var(--text-muted); }
 .cli-card-cache { font-size: 10px; font-weight: 600; color: var(--attention-fg); }
 .cli-card-refresh { font-size: 10px; color: var(--text-muted); }
+/* A read is in flight — the only line on the card that is about right now,
+   so it must not read as quietly as the historical ones around it. */
+.cli-card-refresh.pending { color: var(--accent-fg); font-weight: 600; }
 .cli-card-expired { font-size: 11px; font-weight: 600; color: var(--danger-fg); }
 .cli-card-none { display: flex; flex-direction: column; gap: 2px; }
 .cli-card-dash {

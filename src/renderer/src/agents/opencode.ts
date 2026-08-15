@@ -20,5 +20,8 @@ export const SPEC = {
   needsSessionMarker: true,
   resumeCommandPattern: /^opencode\s+(?:--session|-s)\s+\S+/,
   supportsRebuild: true,
+  // Measured on a real PTY: the CLI itself emits `ESC[?1049h` during startup
+  // (probe read 8626 bytes of startup output) and keeps the conversation there.
+  fullScreenTui: true,
   hint: 'generalist'
 } as const satisfies AgentSpec
