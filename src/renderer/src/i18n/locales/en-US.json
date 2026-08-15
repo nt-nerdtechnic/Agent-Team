@@ -245,6 +245,11 @@
     },
     "terminal": {
       "option-select-hint": "This CLI captures the mouse — hold {key} while dragging to select text",
+      "clipboard-empty": "Nothing to paste — the clipboard is empty",
+      "clipboard-preparing": "{pane} is still starting — {chars} characters were discarded, paste again in a moment",
+      "clipboard-no-session": "{pane} has no running session — {chars} characters were discarded",
+      "clipboard-image-failed": "The pasted image could not be saved — nothing was sent to {pane}",
+      "clipboard-copy-failed": "Copy failed — the clipboard could not be written",
       "click-to-resume": "Click to resume",
       "resuming": "Resuming…",
       "rebuild-tooltip": "Rebuild (resume) ⌘⇧R — kill and re-spawn via --resume at the current size to clear ghosting/overlap that can't be repainted. Interrupts the in-progress turn and reprints the conversation.",

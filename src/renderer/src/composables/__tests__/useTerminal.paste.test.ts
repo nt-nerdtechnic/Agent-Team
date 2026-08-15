@@ -338,6 +338,68 @@ describe('useTerminal — manual paste', () => {
     })
   })
 
+  // The diagnostic log answers a bug report after the fact; it does nothing for
+  // the person watching the pane. Every failure is also handed to the pane so
+  // it can say so — reported, not shown here, because this composable owns
+  // neither i18n nor the toast host.
+  describe('reports clipboard failures to the pane', () => {
+    async function withFailureReports(): Promise<{
+      failures: Array<{ reason: string, chars: number }>
+      result: ReturnType<typeof useTerminal>
+      scope: { stop: () => void }
+      mock: ReturnType<typeof createMockBackend>
+    }> {
+      const failures: Array<{ reason: string, chars: number }> = []
+      const mock = createMockBackend()
+      mock.setResponse('terminal.create', { terminal_session_id: 'sess-1', pid: 42 })
+      const { result, scope } = withScope(() =>
+        useTerminal('pane-1', mock.backend, {
+          onClipboardFailure: (reason, chars) => { failures.push({ reason, chars }) }
+        })
+      )
+      result.mount(document.createElement('div'))
+      await result.spawn({ command: 'bash', cwd: '/tmp', agentKey: 'claude' })
+      return { failures, result, scope, mock }
+    }
+
+    it('reports a gated paste, with how much was discarded', async () => {
+      const { failures, result, scope } = await withFailureReports()
+      result.setDisableStdin(true)
+      paste('must not reach the pty')
+      expect(failures).toEqual([{ reason: 'preparing', chars: 22 }])
+      scope.stop()
+    })
+
+    it('reports a ⌘V that found nothing on the clipboard', async () => {
+      const { failures, scope } = await withFailureReports()
+      paste('')
+      expect(failures).toEqual([{ reason: 'empty', chars: 0 }])
+      scope.stop()
+    })
+
+    it('reports a paste into a pane with no live session', async () => {
+      const failures: Array<{ reason: string, chars: number }> = []
+      const mock = createMockBackend()
+      const { result, scope } = withScope(() =>
+        useTerminal('pane-1', mock.backend, {
+          onClipboardFailure: (reason, chars) => { failures.push({ reason, chars }) }
+        })
+      )
+      result.mount(document.createElement('div'))
+      result.pasteFromClipboard('text with nowhere to go')
+      expect(failures).toEqual([{ reason: 'no-session', chars: 23 }])
+      scope.stop()
+    })
+
+    it('says nothing when the paste actually lands', async () => {
+      const { failures, mock, scope } = await withFailureReports()
+      paste('real text')
+      expect(pastedData(mock)).toBe('real text')
+      expect(failures).toEqual([])
+      scope.stop()
+    })
+  })
+
   // Edit > Copy used to evaluate that global at ⌘C time, on a 300ms deadline
   // main lost whenever this renderer was busy painting — and its fallback
   // copies nothing at all over a terminal. The pane pushes instead, so the read

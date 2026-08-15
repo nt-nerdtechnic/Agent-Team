@@ -889,7 +889,27 @@ interface UseTerminalOptions {
    *  hidden pane keeps paying for display-only upkeep. Read lazily so it tracks
    *  layout changes. Defaults to always on screen. */
   onScreen?: () => boolean
+  /** A copy or paste that came to nothing, for the pane to surface.
+   *
+   *  Reported rather than shown here: this composable deliberately imports
+   *  neither i18n nor useNotify (the pane owns both), the same split onClear
+   *  and onUserResume follow. The diagnostic log line is written regardless —
+   *  it serves a bug report, this serves the person watching the pane. */
+  onClipboardFailure?: (reason: ClipboardFailureReason, chars: number) => void
 }
+
+/** Why a clipboard action produced nothing. One key per user-visible message. */
+export type ClipboardFailureReason =
+  /** Nothing on the clipboard to send (⌘V on an empty one, or a drop that resolved no paths). */
+  | 'empty'
+  /** The pane is still starting and gates stdin; the text was discarded, not queued. */
+  | 'preparing'
+  /** No live session to receive it — never spawned, or the CLI has exited. */
+  | 'no-session'
+  /** A pasted image could not be written to disk, so no path was sent. */
+  | 'image-failed'
+  /** The browser refused the clipboard write, so ⌘C copied nothing. */
+  | 'copy-failed'
 
 // Whether this renderer process can create a WebGL context at all, probed once.
 //
@@ -1773,6 +1793,26 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   const _clipboardDiag = (message: string, level: 'info' | 'warning' = 'info'): void =>
     diagLog(backend, 'clipboard', message, level)
 
+  /**
+   * Report a clipboard failure to both audiences at once.
+   *
+   * A log line answers "why did that paste vanish?" after the fact; it does
+   * nothing for the person watching the pane as it happens — and "I pasted and
+   * nothing appeared" is exactly the report of someone who was given no
+   * feedback. So the log keeps the detail a maintainer needs (pane, sizes, the
+   * underlying error) and the pane is told the one thing the user needs, which
+   * is that it failed at all. Pairing them in a single call is what stops a
+   * future failure path from being wired to only one of the two.
+   */
+  const _clipboardFailure = (
+    logMessage: string,
+    reason: ClipboardFailureReason,
+    chars = 0
+  ): void => {
+    _clipboardDiag(logMessage, 'warning')
+    opts?.onClipboardFailure?.(reason, chars)
+  }
+
   // Set when a reattached pane is waiting to repaint. We never force_redraw at
   // reattach time: the renderer is mid-reflow then (reload, or a hidden tab
   // being shown), so the width is transient and would repaint the live agent
@@ -2067,9 +2107,10 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
             },
             (err) => {
               if (firstPress) {
-                _clipboardDiag(
+                _clipboardFailure(
                   `pane=${paneId} Cmd+C clipboard write rejected (${selection.length} chars): ${String(err)}`,
-                  'warning'
+                  'copy-failed',
+                  selection.length
                 )
               }
             }
@@ -2135,9 +2176,9 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
           // cannot work over a terminal — and until now ⌘V on an empty
           // clipboard returned from here without a trace, which is the exact
           // shape of "I pasted and the text just disappeared".
-          _clipboardDiag(
+          _clipboardFailure(
             `pane=${paneId} paste ignored — the clipboard held neither text nor an image`,
-            'warning'
+            'empty'
           )
           return
         }
@@ -2154,7 +2195,12 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
           // saveClipboardImage resolves null (it never rejects) when the bridge
           // is missing or main declined the media type. The screenshot then
           // silently produced nothing — the same "paste did nothing" symptom.
-          else _clipboardDiag(`pane=${paneId} clipboard image could not be saved — nothing pasted`, 'warning')
+          else {
+            _clipboardFailure(
+              `pane=${paneId} clipboard image could not be saved — nothing pasted`,
+              'image-failed'
+            )
+          }
         })
         return
       }
@@ -3329,25 +3375,30 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     if (!text) {
       // Reached from ⌘V on an empty clipboard and from a file drop that
       // resolved no paths, so the wording stays neutral about the source.
-      _clipboardDiag(`pane=${paneId} paste ignored — no text to send`, 'warning')
+      _clipboardFailure(
+        `pane=${paneId} paste ignored — no text to send`,
+        'empty'
+      )
       return
     }
     // The pane gates stdin while it is still preparing, and a paste respects
     // that too. Rejected rather than buffered: a clipboard paste is a discrete
     // action the user can simply repeat once the pane is ready, unlike typing.
     if (_stdinGated) {
-      _clipboardDiag(
+      _clipboardFailure(
         `pane=${paneId} paste dropped — pane still preparing (${text.length} chars discarded)`,
-        'warning'
+        'preparing',
+        text.length
       )
       return
     }
     // Same gate pasteText applies. Checked up front so a paste into a dead pane
     // cannot clear `isStopped` (and fire onUserResume) while sending nothing.
     if (!sessionId.value || status.value === 'exited' || status.value === 'error') {
-      _clipboardDiag(
+      _clipboardFailure(
         `pane=${paneId} paste dropped — pane is ${status.value || 'unspawned'} (${text.length} chars discarded)`,
-        'warning'
+        'no-session',
+        text.length
       )
       return
     }

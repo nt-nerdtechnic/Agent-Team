@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
-import { useTerminal } from '../composables/useTerminal'
+import { useTerminal, type ClipboardFailureReason } from '../composables/useTerminal'
 import { useTheme } from '../composables/useTheme'
+import { useNotify } from '../composables/useNotify'
 import type { useBackend } from '../composables/useBackend'
 import type { useCliProfiles } from '../composables/useCliProfiles'
 import { extractDropPaths, escapeDraggedPath, stabilizeDroppedPaths } from '../lib/drop'
@@ -137,6 +138,35 @@ function onTitleKeydown(e: KeyboardEvent): void {
   if (e.key === 'Escape') { e.preventDefault(); _cancelledTitle = true; editingTitle.value = false }
 }
 
+const { toast: notifyToast } = useNotify()
+
+// How urgent each clipboard failure is. "Try again in a moment" is not the same
+// news as "this pane is dead" or "the copy you think you made did not happen".
+const CLIPBOARD_TOAST_TYPE: Record<ClipboardFailureReason, 'info' | 'error'> = {
+  empty: 'info',
+  preparing: 'info',
+  'no-session': 'error',
+  'image-failed': 'error',
+  'copy-failed': 'error',
+}
+// These repeat easily — ⌘V a few times while a pane starts and every press
+// reports — and useNotify has no dedupe of its own, so identical toasts would
+// stack up to its cap. One per reason per few seconds says as much.
+const CLIPBOARD_TOAST_GAP_MS = 3000
+const lastClipboardToastAt = new Map<ClipboardFailureReason, number>()
+
+function onClipboardFailure(reason: ClipboardFailureReason, chars: number): void {
+  const now = Date.now()
+  if (now - (lastClipboardToastAt.get(reason) ?? 0) < CLIPBOARD_TOAST_GAP_MS) return
+  lastClipboardToastAt.set(reason, now)
+  // The pane name is in the message because the toast is global: with several
+  // panes open, "paste dropped" alone does not say which one ignored you.
+  notifyToast(
+    i18n.global.t(`pane.terminal.clipboard-${reason}`, { pane: props.title, chars }),
+    { type: CLIPBOARD_TOAST_TYPE[reason] }
+  )
+}
+
 const terminal = useTerminal(props.paneId, props.backend, {
   workspacePath: props.workspacePath,
   onClear: () => emit('rebuild-clean'),
@@ -144,6 +174,7 @@ const terminal = useTerminal(props.paneId, props.backend, {
   mentionCandidates: () => props.mentionCandidates ?? [],
   onScreen: () => props.onScreen ?? true,
   onFirstOutput: () => emit('first-output'),
+  onClipboardFailure,
 })
 const { theme } = useTheme()
 watch(theme, () => terminal.updateXtermTheme())
