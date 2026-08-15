@@ -432,6 +432,12 @@ contextBridge.exposeInMainWorld('agentTeam', {
   showTerminalContextMenu: (selection: string): void => {
     ipcRenderer.send('terminal:context-menu', selection)
   },
+  // Terminal selection, pushed as it changes. Edit > Copy then reads it from
+  // main synchronously instead of racing this renderer for an answer — see
+  // terminal-selection-cache.ts.
+  reportTerminalSelection: (selection: string): void => {
+    ipcRenderer.send('terminal:selection-changed', selection)
+  },
   setBadgeCount: (count: number): void => {
     ipcRenderer.send('window:setBadgeCount', count)
   },

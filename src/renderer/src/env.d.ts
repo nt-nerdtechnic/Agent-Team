@@ -216,6 +216,7 @@ declare global {
         }) => void
       ) => () => void
       showTerminalContextMenu: (selection: string) => void
+      reportTerminalSelection?: (selection: string) => void
       setBadgeCount: (count: number) => void
       reportWorkspace: (workspacePath: string) => void
       restore?: {

@@ -73,6 +73,10 @@ vi.mock('@xterm/xterm', () => {
     focus(): void {}
     select(): void {}
     clearSelection(): void {}
+    hasSelection(): boolean { return false }
+    onSelectionChange(_handler: () => void): { dispose: () => void } {
+      return { dispose: (): void => {} }
+    }
     scrollLines(lines: number): void {
       captured.scrollLines(lines)
     }

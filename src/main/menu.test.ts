@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import type { MenuItemConstructorOptions } from 'electron'
+import { setTerminalSelection, forgetTerminalSelection } from './terminal-selection-cache'
 
 // Shared, hoisted capture of the template passed to Menu.buildFromTemplate,
 // plus the clipboard / focused-WebContents doubles Edit > Copy drives.
@@ -27,13 +28,18 @@ import { installApplicationMenu, type AppMenuHooks } from './menu'
 const clipboardWrites = h.clipboardWrites
 
 /** Stand-in for the WebContents that currently holds focus. */
+const FOCUSED_ID = 42
+
 const focused = {
+  id: FOCUSED_ID,
   selection: '',
   throws: false,
   hangs: false,
   copyCalls: 0,
+  evalCalls: 0,
   isDestroyed: (): boolean => false,
   executeJavaScript: async (): Promise<string> => {
+    focused.evalCalls++
     if (focused.throws) throw new Error('no such page')
     // A renderer too busy to service the eval — what a CLI pane painting hard
     // does to Copy's selection race.
@@ -93,6 +99,8 @@ describe('installApplicationMenu', () => {
     focused.throws = false
     focused.hangs = false
     focused.copyCalls = 0
+    focused.evalCalls = 0
+    forgetTerminalSelection(FOCUSED_ID) // module state outlives a single case
     h.focusedWebContents = focused
     installApplicationMenu(hooks)
   })
@@ -177,6 +185,38 @@ describe('installApplicationMenu', () => {
       await clickCopy()
       expect(clipboardWrites).toEqual(['selected terminal text'])
       expect(focused.copyCalls).toBe(0)
+    })
+
+    // The pane pushes its selection as it changes, so the case that used to
+    // lose the 300ms race is now a synchronous read that never runs one.
+    describe('prefers what the page already pushed', () => {
+      it('copies the pushed selection without asking the page at all', async () => {
+        setTerminalSelection(FOCUSED_ID, 'pushed from the pane')
+        focused.selection = 'should never be read'
+        await clickCopy()
+        expect(clipboardWrites).toEqual(['pushed from the pane'])
+        expect(focused.evalCalls).toBe(0)
+      })
+
+      // A busy renderer is exactly the case the old path failed on: the eval
+      // never lands in time. With a pushed selection there is nothing to wait
+      // for, so Copy is correct even while the pane is painting.
+      it('copies while the renderer is too busy to answer an eval', async () => {
+        setTerminalSelection(FOCUSED_ID, 'pushed before the pane got busy')
+        focused.hangs = true
+        await clickCopy()
+        expect(clipboardWrites).toEqual(['pushed before the pane got busy'])
+        expect(focused.copyCalls).toBe(0)
+      })
+
+      // Nothing pushed means the page has no terminal selection, or never
+      // reports one (a plugin view on another preload) — ask, as before.
+      it('still asks the page when nothing was pushed', async () => {
+        focused.selection = 'read from the page'
+        await clickCopy()
+        expect(clipboardWrites).toEqual(['read from the page'])
+        expect(focused.evalCalls).toBe(1)
+      })
     })
 
     it('falls back to the built-in copy when the page reports no selection', async () => {

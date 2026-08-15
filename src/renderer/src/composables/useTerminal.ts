@@ -1615,19 +1615,70 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // and strand it there whenever the window returns without handing focus back
   // to the textarea, so every later keystroke echoes a frame late.
   let _blurredWithWindow = false
+
+  // ── Edit > Copy: report the selection instead of being asked for it ────────
+  // main used to evaluate a global in this page when the user pressed ⌘C, on a
+  // 300ms deadline (menu.ts). A renderer busy painting CLI output loses that
+  // race, and the fallback copies nothing at all over a terminal — so Copy
+  // silently did nothing exactly when the pane was busiest. Pushing moves that
+  // work to when the selection changes, off the path the user waits on.
+  //
+  // Only the focus owner reports: panes in a window share one WebContents, so
+  // a background pane's stale highlight would otherwise answer a Copy aimed at
+  // this one. Same rule the global it replaces followed.
+  let _selectionPushTimer: ReturnType<typeof setTimeout> | null = null
+  // Long enough to coalesce a drag, far short of the time it takes to let go of
+  // the mouse and reach for ⌘C.
+  const SELECTION_PUSH_DEBOUNCE_MS = 60
+  const _reportSelection = (selection: string): void => {
+    try {
+      window.agentTeam?.reportTerminalSelection?.(selection)
+    } catch { /* no bridge (tests, plugin preload) — Copy keeps its own fallback */ }
+  }
+  const _cancelSelectionPush = (): void => {
+    if (!_selectionPushTimer) return
+    clearTimeout(_selectionPushTimer)
+    _selectionPushTimer = null
+  }
+  const _onSelectionChange = (): void => {
+    if (_focusOwner !== term) return
+    _cancelSelectionPush()
+    // hasSelection() is a boolean; getSelection() joins every selected row. On
+    // each change the latter would make a drag across a long scrollback pay for
+    // the whole range on every mouse move — the very renderer stall this exists
+    // to route around. So clearing reports at once (cheap, and a stale entry
+    // would let Copy return text the user just deselected) while a growing
+    // selection is read once, after the drag settles.
+    if (!term.hasSelection()) {
+      _reportSelection('')
+      return
+    }
+    _selectionPushTimer = setTimeout(() => {
+      _selectionPushTimer = null
+      if (_focusOwner === term) _reportSelection(term.getSelection())
+    }, SELECTION_PUSH_DEBOUNCE_MS)
+  }
+
   // Every path that concludes "this pane no longer holds focus" goes through
   // here, so Edit > Copy ownership can never outlive the keybinding context —
   // a stale owner would answer Copy with an old selection and suppress main's
   // fallback for good.
   const _releaseTerminalFocus = (): void => {
     _ownsTerminalFocus = false
-    if (_focusOwner === term) _focusOwner = null
+    if (_focusOwner === term) {
+      _focusOwner = null
+      _cancelSelectionPush()
+      _reportSelection('') // main must not answer Copy from a pane that lost focus
+    }
     setContext('terminalFocus', false)
   }
   const _onTermFocus = (): void => {
     _blurredWithWindow = false
     _ownsTerminalFocus = true
     _focusOwner = term  // answers Edit > Copy for this window
+    // Publish what is already highlighted, so Copy is right from the first
+    // press rather than only after the next selection change.
+    _reportSelection(term.hasSelection() ? term.getSelection() : '')
     setContext('terminalFocus', true)
   }
   const _onTermBlur = (): void => {
@@ -1659,6 +1710,10 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       _releaseTerminalFocus()
     }
   }
+
+  // Subscribed for the life of the pane; the handler is a no-op unless this
+  // pane owns focus, so background panes cost one comparison per change.
+  const _selectionDisposer = term.onSelectionChange(_onSelectionChange)
 
   // xterm's CompositionHelper latches on compositionstart and only unlatches on
   // compositionend — which macOS does not reliably deliver when the user
@@ -3384,7 +3439,12 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     if (mountedEl && _mousePosTracker) mountedEl.removeEventListener('mousemove', _mousePosTracker)
     if (mountedEl && _cmdClickHandler) mountedEl.removeEventListener('mousedown', _cmdClickHandler, { capture: true })
     if (mountedEl && _pasteHandler) mountedEl.removeEventListener('paste', _pasteHandler, true)
-    if (_focusOwner === term) _focusOwner = null
+    _selectionDisposer.dispose()
+    _cancelSelectionPush()
+    if (_focusOwner === term) {
+      _focusOwner = null
+      _reportSelection('') // a disposed pane must not keep answering Copy
+    }
     document.querySelector('.term-file-picker-root')?.remove()
     closeMentionMenu()  // tear down any open @-mention menu (detaches doc listeners)
     term.textarea?.removeEventListener('focus', _onTermFocus)

@@ -1,4 +1,5 @@
 import { app, clipboard, Menu, webContents, type BrowserWindow, type MenuItemConstructorOptions } from 'electron'
+import { getTerminalSelection } from './terminal-selection-cache'
 
 /**
  * Application menu.
@@ -116,6 +117,16 @@ export function installApplicationMenu(
           // this app creates is a BrowserWindow, so the narrowing is safe.
           (win as BrowserWindow | undefined)?.webContents
         if (!target || target.isDestroyed()) return
+        // The page reports its selection as it changes, so the case that used
+        // to lose the race below is now a synchronous read that never runs one.
+        const pushed = getTerminalSelection(target.id)
+        if (pushed) {
+          clipboard.writeText(pushed)
+          return
+        }
+        // Nothing on file: either the page holds no terminal selection, or it
+        // never reports any — a plugin view on a different preload, a window
+        // with no terminal. Ask it directly, exactly as before.
         const startedAt = Date.now()
         let selection: unknown = ''
         // Set when the read threw, so the fallback below does not also report

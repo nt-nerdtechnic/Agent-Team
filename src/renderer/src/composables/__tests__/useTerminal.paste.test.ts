@@ -30,6 +30,7 @@ const captured = vi.hoisted(() => ({
   clearedSelection: 0,
   dataHandler: undefined as ((data: string) => void) | undefined,
   selection: '',
+  selectionHandler: undefined as (() => void) | undefined,
 }))
 
 vi.mock('@xterm/xterm', () => {
@@ -43,6 +44,13 @@ vi.mock('@xterm/xterm', () => {
     clearedSelection = 0
     getSelection(): string {
       return captured.selection
+    }
+    hasSelection(): boolean {
+      return !!captured.selection
+    }
+    onSelectionChange(handler: () => void): { dispose(): void } {
+      captured.selectionHandler = handler
+      return { dispose: (): void => { captured.selectionHandler = undefined } }
     }
     get modes(): { mouseTrackingMode: string; bracketedPasteMode: boolean } {
       return { mouseTrackingMode: 'none', bracketedPasteMode: captured.bracketedPasteMode }
@@ -107,6 +115,9 @@ describe('useTerminal — manual paste', () => {
     captured.clearedSelection = 0
     captured.dataHandler = undefined
     captured.selection = ''
+    captured.selectionHandler = undefined
+    vi.useRealTimers()
+    delete (window as unknown as { agentTeam?: unknown }).agentTeam
     localStorage.clear() // drop the persisted PTY id so the next spawn is fresh
   })
 
@@ -324,6 +335,100 @@ describe('useTerminal — manual paste', () => {
       focusTerminal(true)
       scope.stop()
       expect(window.__navideTerminalSelection?.()).toBe('')
+    })
+  })
+
+  // Edit > Copy used to evaluate that global at ⌘C time, on a 300ms deadline
+  // main lost whenever this renderer was busy painting — and its fallback
+  // copies nothing at all over a terminal. The pane pushes instead, so the read
+  // happens when the selection changes rather than while the user waits.
+  describe('pushes the selection to main for Edit > Copy', () => {
+    let reported: string[]
+
+    /** Installs the preload bridge and starts recording from a clean slate. */
+    function recordPushes(): void {
+      reported = []
+      ;(window as unknown as { agentTeam: unknown }).agentTeam = {
+        reportTerminalSelection: (s: string): void => { reported.push(s) }
+      }
+    }
+    function focusTerminal(focused: boolean): void {
+      captured.textarea!.dispatchEvent(new Event(focused ? 'focus' : 'blur'))
+    }
+
+    it('publishes what is already highlighted when the pane takes focus', async () => {
+      const { scope } = await spawnedTerminal('claude')
+      recordPushes()
+      captured.selection = 'already highlighted'
+      focusTerminal(true)
+      expect(reported).toEqual(['already highlighted'])
+      scope.stop()
+    })
+
+    it('clears the entry when the pane loses focus', async () => {
+      const { scope } = await spawnedTerminal('claude')
+      captured.selection = 'highlighted'
+      focusTerminal(true)
+      recordPushes()
+      focusTerminal(false)
+      expect(reported).toEqual([''])
+      scope.stop()
+    })
+
+    // Immediate, unlike a growing selection: a stale entry would let Copy
+    // return text the user just deselected.
+    it('reports a cleared selection at once, without coalescing', async () => {
+      const { scope } = await spawnedTerminal('claude')
+      captured.selection = 'highlighted'
+      focusTerminal(true)
+      recordPushes()
+      captured.selection = ''
+      captured.selectionHandler!()
+      expect(reported).toEqual([''])
+      scope.stop()
+    })
+
+    // getSelection() joins every selected row, so reading it on each change
+    // would make a drag across a long scrollback pay for the whole range on
+    // every mouse move — the renderer stall this change exists to avoid.
+    it('coalesces a growing selection into a single read', async () => {
+      const { scope } = await spawnedTerminal('claude')
+      captured.selection = 'a'
+      focusTerminal(true)
+      recordPushes()
+      vi.useFakeTimers()
+
+      captured.selection = 'ab'
+      captured.selectionHandler!()
+      captured.selection = 'abc'
+      captured.selectionHandler!()
+      expect(reported).toEqual([]) // still coalescing — nothing read yet
+
+      await vi.advanceTimersByTimeAsync(60)
+      expect(reported).toEqual(['abc']) // one read, of the settled value
+
+      vi.useRealTimers()
+      scope.stop()
+    })
+
+    // Panes in a window share one WebContents, so a background pane reporting
+    // would answer a Copy aimed at the focused one.
+    it('stays silent while this pane does not own focus', async () => {
+      const { scope } = await spawnedTerminal('claude')
+      recordPushes()
+      captured.selection = 'background highlight'
+      captured.selectionHandler!()
+      expect(reported).toEqual([])
+      scope.stop()
+    })
+
+    it('clears the entry when a focused pane is disposed', async () => {
+      const { scope } = await spawnedTerminal('claude')
+      captured.selection = 'highlighted'
+      focusTerminal(true)
+      recordPushes()
+      scope.stop()
+      expect(reported).toEqual([''])
     })
   })
 

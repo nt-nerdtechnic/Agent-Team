@@ -54,6 +54,12 @@ vi.mock('@xterm/xterm', () => {
     getSelection(): string {
       return captured.selection
     }
+    hasSelection(): boolean {
+      return !!captured.selection
+    }
+    onSelectionChange(_handler: () => void): { dispose(): void } {
+      return { dispose(): void {} }
+    }
     write(): void {}
     writeln(): void {}
     resize(): void {}

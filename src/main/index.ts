@@ -46,6 +46,7 @@ import {
 } from './editors'
 import { findManualLogFile } from './manual-log-search'
 import { searchLogFiles } from './log-content-search'
+import { setTerminalSelection, forgetTerminalSelection } from './terminal-selection-cache'
 import {
   getPermissionStatuses,
   requestPermission,
@@ -872,6 +873,23 @@ ipcMain.handle('window:openMain', (_event, args?: { workspace_path?: string }) =
   }
   void createWindow(params)
   return { ok: true }
+})
+
+// Pages push their terminal selection as it changes so Edit > Copy can read it
+// without asking (see terminal-selection-cache.ts). Cleanup is bound once per
+// WebContents: ids are reused, and a stale entry would answer Copy for whatever
+// page inherits the id.
+const selectionCleanupBound = new Set<number>()
+ipcMain.on('terminal:selection-changed', (event, selection: unknown) => {
+  const contents = event.sender
+  const id = contents.id
+  setTerminalSelection(id, typeof selection === 'string' ? selection : '')
+  if (selectionCleanupBound.has(id)) return
+  selectionCleanupBound.add(id)
+  contents.once('destroyed', () => {
+    forgetTerminalSelection(id)
+    selectionCleanupBound.delete(id)
+  })
 })
 
 // The renderer switches workspaces at runtime (Welcome picker / back-to-Welcome)
