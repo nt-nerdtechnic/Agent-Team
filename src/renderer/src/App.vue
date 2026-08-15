@@ -4590,12 +4590,19 @@ provide(
   createCliAccountSwitchHandler(cliProfilesApi, {
     confirm: (message, opts) => notifyRestore.confirm(message, opts),
     agentLabel: (agentKey) => agentSpecs.find((s) => s.agentKey === agentKey)?.label ?? agentKey,
-    // The account we just switched to cannot authenticate (empty slot, or a
-    // token too old to refresh). It is the active account now, so this is a
-    // live login — the poller harvests it back into the slot. The toast says
-    // why a login pane appeared on its own.
-    startLogin: (agentKey) => {
-      notifyRestore.toast(i18n.global.t('cli-account.needs-login'), { type: 'info' })
+    // The account we just switched to cannot authenticate. It is the active
+    // account now, so this is a live login — the poller harvests it back into
+    // the slot. The toast says why a login pane appeared on its own, and an
+    // aged-out token is told apart from a lost login: the first is what
+    // parking an account normally does to it, and calling that "signed out"
+    // reads as the switch having broken something.
+    startLogin: (agentKey, reason) => {
+      notifyRestore.toast(
+        i18n.global.t(
+          reason === 'expired' ? 'cli-account.needs-login-expired' : 'cli-account.needs-login'
+        ),
+        { type: 'info' }
+      )
       void onCliLoginSpawn(agentKey)
     }
   })

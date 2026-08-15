@@ -142,6 +142,48 @@ describe('MENU_OWNED_SPECS covers the whole menu', () => {
   })
 })
 
+describe('the macOS column matches what Electron actually installs', () => {
+  // Captured from Electron 33.4.11 with `npx electron scripts/probe-menu-roles.mjs`
+  // (MenuItem.getDefaultRoleAccelerator, canonicalised). Three entries in the
+  // table disagreed with this before the probe existed: pasteAndMatchStyle was
+  // ⇧⌘V rather than ⌥⇧⌘V, redo claimed Ctrl+Y off macOS, and quit claimed no
+  // key there at all.
+  //
+  // A unit test cannot run Electron, so this is a snapshot, not a live check:
+  // it guards edits to the table, not an Electron upgrade. Re-run the script
+  // after upgrading and update both sides together.
+  const PROBED_MAC: Record<string, string | null> = {
+    about: null, close: 'cmd+w', cut: 'cmd+x', delete: null, front: null,
+    help: null, hide: 'cmd+h', hideOthers: 'cmd+alt+h', minimize: 'cmd+m',
+    paste: 'cmd+v', pasteAndMatchStyle: 'cmd+alt+shift+v', quit: 'cmd+q',
+    redo: 'cmd+shift+z', reload: 'cmd+r', selectAll: 'cmd+a', services: null,
+    toggleDevTools: 'cmd+alt+i', togglefullscreen: 'cmd+ctrl+f', undo: 'cmd+z',
+    unhide: null, zoom: null,
+  }
+
+  it('agrees with the probe on every role it installs on macOS', () => {
+    const mismatched: string[] = []
+    for (const [role, entry] of Object.entries(MENU_ROLE_ACCELERATORS)) {
+      // `close` is the one role whose macOS column is deliberately null while
+      // Electron does have a key for it: menu.ts stops installing it there.
+      if (role === 'close') continue
+      const ours = entry.mac ? acceleratorToSpec(entry.mac, true) : null
+      if (ours !== PROBED_MAC[role]) mismatched.push(`${role}: ours=${ours} probed=${PROBED_MAC[role]}`)
+    }
+    expect(mismatched).toEqual([])
+  })
+
+  it('drops close on macOS even though Electron would bind ⌘W', () => {
+    expect(MENU_ROLE_ACCELERATORS.close.mac).toBeNull()
+    expect(PROBED_MAC.close).toBe('cmd+w')
+  })
+
+  it('agrees with the probe on the omitted roles too', () => {
+    expect(acceleratorToSpec(MENU_OMITTED_ROLES.forceReload, true)).toBe('cmd+shift+r')
+    expect(acceleratorToSpec(MENU_OMITTED_ROLES.resetZoom, true)).toBe('cmd+0')
+  })
+})
+
 describe('platform differences survive the transcription', () => {
   const mac = menuOwnedSpecs(true)
   const other = menuOwnedSpecs(false)
@@ -152,18 +194,31 @@ describe('platform differences survive the transcription', () => {
     expect(other.has('cmd+r')).toBe(false)
   })
 
-  it('keeps the roles that differ per platform apart', () => {
+  it('keeps the roles that genuinely differ per platform apart', () => {
+    // Only these two branch inside Electron. Their `other` values are the one
+    // part of the table a macOS probe cannot confirm — see externalKeys.ts.
     expect(mac.has('cmd+ctrl+f')).toBe(true) // togglefullscreen
     expect(other.has('f11')).toBe(true)
     expect(mac.has('cmd+alt+i')).toBe(true) // toggleDevTools
     expect(other.has('ctrl+shift+i')).toBe(true)
-    expect(mac.has('cmd+shift+z')).toBe(true) // redo
-    expect(other.has('ctrl+y')).toBe(true)
+  })
+
+  it('carries the cross-platform roles to both', () => {
+    // redo and quit read as platform-specific and are not: Electron gives both
+    // a single CommandOrControl string. Guessing otherwise put 'ctrl+y' and a
+    // missing 'ctrl+q' in this table until the probe was run.
+    expect(mac.has('cmd+shift+z')).toBe(true)
+    expect(other.has('ctrl+shift+z')).toBe(true)
+    expect(other.has('ctrl+y')).toBe(false)
+    expect(mac.has('cmd+q')).toBe(true)
+    expect(other.has('ctrl+q')).toBe(true)
   })
 
   it('drops the macOS-only roles off macOS', () => {
-    for (const spec of ['cmd+h', 'cmd+alt+h', 'cmd+q']) expect(mac.has(spec)).toBe(true)
-    for (const spec of ['ctrl+h', 'ctrl+alt+h', 'ctrl+q']) expect(other.has(spec)).toBe(false)
+    // Not "roles Electron limits to macOS" — roles menu.ts only installs in its
+    // isMac arm. pasteAndMatchStyle belongs here for that reason alone.
+    for (const spec of ['cmd+h', 'cmd+alt+h', 'cmd+alt+shift+v']) expect(mac.has(spec)).toBe(true)
+    for (const spec of ['ctrl+h', 'ctrl+alt+h', 'ctrl+alt+shift+v']) expect(other.has(spec)).toBe(false)
   })
 })
 

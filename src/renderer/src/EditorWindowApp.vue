@@ -932,9 +932,20 @@ for (let _i = 1; _i <= 9; _i++) {
     if (f) activeKey.value = tabKey(f)
   })
 }
-registerCommand('workbench.action.closeActiveEditor', async () => {
+registerCommand('workbench.action.closeActiveEditor', () => {
   if (!activeKey.value) return
-  await closeFile(activeKey.value)
+  // Focus in a find/goto text input: ⌘W belongs to the input, not the tab.
+  // Decline rather than no-op, so the keystroke still reaches it.
+  //
+  // onAppKeydown has carried this guard all along; it only starts mattering now
+  // that the menu's `close` role stopped swallowing ⌘W before the renderer ever
+  // saw it (main/menu.ts). INPUT only, deliberately — Monaco's editing surface
+  // is a TEXTAREA, and ⌘W must still close the tab from inside the editor.
+  if ((document.activeElement as HTMLElement | null)?.tagName === 'INPUT') return false
+  // Returned, not awaited: the handler has to be synchronous to decline at all
+  // (executeCommand compares the return value to `false`), while invokeCommand
+  // still awaits the promise this hands back.
+  return closeFile(activeKey.value)
 })
 // ⌘⇧W. Routed through closeEditorWindow so it keeps the unsaved-changes prompt
 // and the plugin-view branch, exactly like Escape and the traffic lights.

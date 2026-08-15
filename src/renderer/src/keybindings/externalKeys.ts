@@ -83,8 +83,15 @@ export const MENU_LITERAL_ACCELERATORS = [
  *
  * Electron owns these strings; nothing in this repo declares them. `menuAccelerators.test.ts`
  * pins the ROLE SET against `src/main/menu.ts`, so a role added or dropped there
- * fails the build. It cannot see Electron changing the accelerator behind a role,
- * so an Electron upgrade still needs a manual pass over this table.
+ * fails the build. It cannot see Electron changing the accelerator behind a role.
+ *
+ * The `mac` column was read out of Electron 33.4.11 itself with
+ * `scripts/probe-menu-roles.mjs` — three entries here were wrong before it was
+ * run. Re-run it after an Electron upgrade, and run it ON Windows or Linux to
+ * fill in `other`: MenuItem.getDefaultRoleAccelerator() reports the accelerator
+ * for the platform it executes on, so a macOS run cannot see the other arm of
+ * the roles that branch (toggleDevTools, togglefullscreen). Those two `other`
+ * values are from Electron's documentation and remain unverified.
  */
 export const MENU_ROLE_ACCELERATORS: Record<string, { mac: string | null; other: string | null }> = {
   about: { mac: null, other: null },
@@ -100,11 +107,11 @@ export const MENU_ROLE_ACCELERATORS: Record<string, { mac: string | null; other:
   hideOthers: { mac: 'Command+Alt+H', other: null },
   minimize: { mac: 'CmdOrCtrl+M', other: 'CmdOrCtrl+M' },
   paste: { mac: 'CmdOrCtrl+V', other: 'CmdOrCtrl+V' },
-  pasteAndMatchStyle: { mac: 'Shift+CmdOrCtrl+V', other: 'Shift+CmdOrCtrl+V' },
-  // No accelerator off macOS: Windows and Linux have no single agreed quit key,
-  // and Electron leaves the role unbound there rather than inventing one.
-  quit: { mac: 'Command+Q', other: null },
-  redo: { mac: 'Shift+CmdOrCtrl+Z', other: 'Ctrl+Y' },
+  // ⌥⇧⌘V, not ⇧⌘V — and macOS-only, because menu.ts installs this role in the
+  // isMac arm alone.
+  pasteAndMatchStyle: { mac: 'Cmd+Option+Shift+V', other: null },
+  quit: { mac: 'Command+Q', other: 'CommandOrControl+Q' },
+  redo: { mac: 'Shift+CmdOrCtrl+Z', other: 'Shift+CmdOrCtrl+Z' },
   reload: { mac: 'CmdOrCtrl+R', other: 'CmdOrCtrl+R' },
   selectAll: { mac: 'CmdOrCtrl+A', other: 'CmdOrCtrl+A' },
   services: { mac: null, other: null },
