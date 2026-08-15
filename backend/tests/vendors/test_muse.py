@@ -346,9 +346,10 @@ def test_cwd_is_empty_without_a_metadata_record(fake_muse_root: Path) -> None:
 
 # ───────────────────────────────── token parsing ─────────────────────────────
 
-def test_token_mapping_folds_cache_and_reasoning(fake_muse_root: Path) -> None:
-    """TokenUsage's contract: cache read folds into input, reasoning into
-    output."""
+def test_token_mapping_takes_totals_verbatim(fake_muse_root: Path) -> None:
+    """``cached_tokens``/``reasoning_tokens`` are breakdown detail already
+    inside the two totals (Meta Model API semantics), so the totals are used
+    as-is."""
     f = _session_file(fake_muse_root)
     _write_jsonl(f, [
         _metadata(),
@@ -358,13 +359,28 @@ def test_token_mapping_folds_cache_and_reasoning(fake_muse_root: Path) -> None:
     events = MuseLogReader().parse_session_file(f, set())
     assert len(events) == 1
     e = events[0]
-    assert (e.input_tokens, e.output_tokens) == (500, 27)
+    assert (e.input_tokens, e.output_tokens) == (100, 20)
     assert e.vendor == "muse"
     assert e.cwd == _CWD
     assert e.session_id == _SID
     assert e.dedup_key == "u-1"
     # recorded_at is MICROseconds; the ISO stamp must be that instant, not now.
     assert e.timestamp.startswith("2026-08-11T")
+
+
+def test_cached_and_reasoning_are_subsets_not_extras(
+        fake_muse_root: Path) -> None:
+    """A realistic subset row: 80 of the 100 input tokens were a cache hit and
+    15 of the 40 output tokens were reasoning. Adding either back would report
+    180/55 for a request that Meta bills as 100/40."""
+    f = _session_file(fake_muse_root)
+    _write_jsonl(f, [
+        _metadata(),
+        _usage_row("u-1", 10, input_tokens=100, output_tokens=40,
+                   cached=80, reasoning=15),
+    ])
+    events = MuseLogReader().parse_session_file(f, set())
+    assert [(e.input_tokens, e.output_tokens) for e in events] == [(100, 40)]
 
 
 def test_subagent_usage_rows_are_not_counted(fake_muse_root: Path) -> None:
