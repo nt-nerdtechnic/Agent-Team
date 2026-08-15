@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 2,
+  "apiVersion": "^1.0.0",
+  "id": "acme.fs-write",
+  "name": "Filesystem writer",
+  "version": "1.0.0",
+  "publisher": "acme",
+  "permissions": { "fs": ["write"] },
+  "marketplace": { "description": "Request filesystem write access.", "license": "MIT" },
+  "contributes": {
+    "views": [{ "id": "main", "kind": "custom", "location": "window", "title": "Main", "entry": "frontend/index.html" }]
+  }
+}

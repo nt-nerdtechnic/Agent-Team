@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { deflateRawSync } from 'node:zlib'
 import { readZipEntries, readManifestFromEntries, PluginPackageError } from './pluginPackage'
+import { assertSafeArchiveEntries } from './pluginVerify'
 import { makeZip } from './zipFixture'
 
 const u16 = (n: number): Buffer => {
@@ -15,7 +18,34 @@ const u32 = (n: number): Buffer => {
 }
 
 describe('readZipEntries', () => {
-  it('decodes stored entries and skips directory entries', () => {
+  it.each(
+    (
+      JSON.parse(
+        readFileSync(join(process.cwd(), 'docs/plugin-contracts/archive-entry-types-v1.json'), 'utf8')
+      ) as {
+        cases: Array<{
+          name: string
+          path: string
+          type: 'regular' | 'directory' | 'symlink' | 'special'
+          creator: 'unix' | 'dos'
+          dosDirectory: boolean
+          expected: 'regular' | 'directory' | 'rejected'
+        }>
+      }
+    ).cases
+  )('$name uses the shared archive entry-type contract', ({ path, type, creator, dosDirectory, expected }) => {
+    const kind = type === 'regular' ? 'file' : type
+    const entries = readZipEntries(
+      makeZip([{ name: path, data: '', kind, creator, dosDirectory }])
+    )
+    if (expected === 'rejected') {
+      expect(() => assertSafeArchiveEntries(entries)).toThrow(/regular file or directory/)
+    } else {
+      expect(entries[0].type).toBe(expected)
+    }
+  })
+
+  it('decodes stored entries and preserves directory metadata', () => {
     const zip = makeZip([
       { name: 'manifest.json', data: '{"id":"acme.demo"}' },
       { name: 'dist/', data: '' },
@@ -23,8 +53,26 @@ describe('readZipEntries', () => {
     ])
     const entries = readZipEntries(zip)
     const paths = entries.map((e) => e.path).sort()
-    expect(paths).toEqual(['dist/main.js', 'manifest.json'])
+    expect(paths).toEqual(['dist/', 'dist/main.js', 'manifest.json'])
+    expect(entries.find((e) => e.path === 'dist/')?.kind).toBe('directory')
+    expect(entries.find((e) => e.path === 'dist/')?.type).toBe('directory')
     expect(entries.find((e) => e.path === 'dist/main.js')?.data.toString()).toBe('console.log(1)')
+  })
+
+  it('keeps trailing-slash symlinks classified as symlinks', () => {
+    const entries = readZipEntries(makeZip([{ name: 'link/', data: 'target', kind: 'symlink' }]))
+    expect(entries[0].type).toBe('symlink')
+    expect(() => assertSafeArchiveEntries(entries)).toThrow(/regular file or directory/)
+  })
+
+  it('rejects case-folded archive aliases before manifest selection', () => {
+    const entries = readZipEntries(
+      makeZip([
+        { name: 'manifest.json', data: '{"id":"acme.demo"}' },
+        { name: 'MANIFEST.JSON', data: '{"id":"acme.attacker"}' },
+      ])
+    )
+    expect(() => readManifestFromEntries(entries)).toThrow(/duplicate archive entry path/)
   })
 
   it('decodes deflate (method 8) entries', () => {
@@ -61,6 +109,13 @@ describe('readZipEntries', () => {
 
   it('throws on a non-zip buffer', () => {
     expect(() => readZipEntries(new Uint8Array([1, 2, 3]))).toThrow(PluginPackageError)
+  })
+
+  it('rejects ZIP64 end-of-central-directory sentinels', () => {
+    const zip = makeZip([{ name: 'manifest.json', data: '{"id":"acme.demo"}' }])
+    zip.writeUInt16LE(0xffff, zip.length - 14)
+    zip.writeUInt16LE(0xffff, zip.length - 12)
+    expect(() => readZipEntries(zip)).toThrow(/ZIP64 archives are not supported/)
   })
 
   it('rejects a zip bomb (deflate inflating past the per-entry limit)', () => {
@@ -116,5 +171,33 @@ describe('readManifestFromEntries', () => {
   it('throws on invalid manifest JSON', () => {
     const zip = makeZip([{ name: 'manifest.json', data: '{ not json' }])
     expect(() => readManifestFromEntries(readZipEntries(zip))).toThrow(/not valid JSON/)
+  })
+
+  it('rejects invalid UTF-8 in manifest bytes instead of replacing it', () => {
+    const zip = makeZip([
+      { name: 'manifest.json', data: Buffer.from([0x7b, 0x22, 0xff, 0x22, 0x3a, 0x31, 0x7d]) },
+    ])
+    expect(() => readManifestFromEntries(readZipEntries(zip))).toThrow(
+      /manifest\.json is not valid UTF-8/
+    )
+  })
+
+  it('rejects duplicate keys from the shared contract fixture', () => {
+    const raw = readFileSync(
+      join(process.cwd(), 'docs/plugin-contracts/fixtures/invalid-raw/duplicate-permission-key.json'),
+      'utf8'
+    )
+    const zip = makeZip([{ name: 'manifest.json', data: raw }])
+    expect(() => readManifestFromEntries(readZipEntries(zip))).toThrow(
+      /duplicate JSON object key: ui/
+    )
+  })
+
+  it('rejects a UTF-8 BOM in manifest bytes', () => {
+    const raw = readFileSync(
+      join(process.cwd(), 'docs/plugin-contracts/fixtures/invalid-raw/manifest-utf8-bom.json')
+    )
+    const zip = makeZip([{ name: 'manifest.json', data: raw }])
+    expect(() => readManifestFromEntries(readZipEntries(zip))).toThrow(/BOM/)
   })
 })

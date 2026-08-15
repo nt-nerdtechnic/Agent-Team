@@ -5,6 +5,10 @@ from __future__ import annotations
 import io
 import json
 import zipfile
+from pathlib import Path
+
+
+CONTRACT_FIXTURES = Path(__file__).parents[3] / "docs" / "plugin-contracts" / "fixtures"
 
 
 def valid_manifest(
@@ -58,4 +62,44 @@ def build_package(
             zf.writestr("icon.png", b"\x89PNG\r\n\x1a\n-fake-icon-bytes")
         for path, content in (extra_files or {}).items():
             zf.writestr(path, content)
+    return buffer.getvalue()
+
+
+def contract_manifest(name: str = "frontend-multi-view.json") -> dict:
+    """Load one normative Manifest v2 fixture for package/API tests."""
+    path = CONTRACT_FIXTURES / "valid" / name
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def build_v2_package(
+    manifest: dict | None = None,
+    *,
+    omit_paths: set[str] | None = None,
+) -> bytes:
+    """Build a package containing every file referenced by a v2 manifest."""
+    manifest = manifest if manifest is not None else contract_manifest()
+    omitted = omit_paths or set()
+    paths: set[str] = set()
+    marketplace = manifest.get("marketplace", {})
+    if isinstance(marketplace, dict) and isinstance(marketplace.get("icon"), str):
+        paths.add(marketplace["icon"])
+    contributes = manifest.get("contributes", {})
+    if isinstance(contributes, dict):
+        for view in contributes.get("views", []):
+            if not isinstance(view, dict):
+                continue
+            if isinstance(view.get("entry"), str):
+                paths.add(view["entry"])
+            if isinstance(view.get("icon"), str):
+                paths.add(view["icon"])
+    backend = manifest.get("backend", {})
+    if isinstance(backend, dict) and isinstance(backend.get("entry"), str):
+        paths.add(backend["entry"])
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps(manifest))
+        zf.writestr("README.md", b"# Contract fixture\n")
+        for path in sorted(paths - omitted):
+            zf.writestr(path, b"<!doctype html>\n" if path.endswith(".html") else b"asset")
     return buffer.getvalue()

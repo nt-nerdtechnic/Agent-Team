@@ -6,6 +6,14 @@
 export interface ZipFile {
   name: string
   data: Buffer | string
+  /** Optional Unix entry kind used by archive-boundary tests. */
+  kind?: 'file' | 'directory' | 'symlink' | 'special'
+  /** Optional Unix mode; when omitted, it follows `kind`/the file name. */
+  unixMode?: number
+  /** ZIP creator platform encoded in the central-directory metadata. */
+  creator?: 'unix' | 'dos'
+  /** DOS directory attribute used when `creator` is not Unix. */
+  dosDirectory?: boolean
 }
 
 function u16(n: number): Buffer {
@@ -29,6 +37,20 @@ export function makeZip(files: ZipFile[]): Buffer {
   for (const file of files) {
     const name = Buffer.from(file.name, 'utf8')
     const data = typeof file.data === 'string' ? Buffer.from(file.data, 'utf8') : file.data
+    const kind = file.kind ?? (file.name.endsWith('/') ? 'directory' : 'file')
+    const unixMode =
+      file.unixMode ??
+      (kind === 'directory'
+        ? 0o040755
+        : kind === 'symlink'
+          ? 0o120777
+          : kind === 'special'
+            ? 0o010644
+            : 0o100644)
+    const creator = file.creator ?? 'unix'
+    const versionMadeBy = creator === 'unix' ? 0x0314 : 0x0014
+    const externalAttributes =
+      ((creator === 'unix' ? unixMode << 16 : 0) | (file.dosDirectory ? 0x10 : 0)) >>> 0
 
     const local = Buffer.concat([
       u32(0x04034b50), // local header sig
@@ -49,7 +71,7 @@ export function makeZip(files: ZipFile[]): Buffer {
 
     const central = Buffer.concat([
       u32(0x02014b50), // central header sig
-      u16(20), // version made by
+      u16(versionMadeBy), // version made by: Unix or DOS, 2.0
       u16(20), // version needed
       u16(0), // flags
       u16(0), // method
@@ -63,7 +85,7 @@ export function makeZip(files: ZipFile[]): Buffer {
       u16(0), // comment len
       u16(0), // disk start
       u16(0), // internal attrs
-      u32(0), // external attrs
+      u32(externalAttributes), // Unix mode or DOS attributes
       u32(offset), // local header offset
       name,
     ])

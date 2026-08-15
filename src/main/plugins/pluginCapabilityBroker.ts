@@ -4,7 +4,8 @@
 // The IPC wiring that calls into these functions lives in
 // `frontendPluginManager.ts`.
 
-import { resolveWsType } from './capabilityMap'
+import { eventNamespace, resolveWsType } from './capabilityMap'
+import type { PluginCapabilityPolicy } from './pluginPermissions'
 import type { WsResponse } from '../../shared/wsClient'
 
 /** A capability call as it arrives from a plugin view over IPC. */
@@ -29,7 +30,11 @@ export interface CapabilityResponse {
   error?: { code: CapabilityErrorCode; message?: string }
 }
 
-export type CapabilityErrorCode = 'CAP_DENIED' | 'UNKNOWN' | 'BAD_REQUEST' | 'BACKEND_ERROR'
+export type CapabilityErrorCode =
+  | 'CAP_DENIED'
+  | 'UNKNOWN'
+  | 'BAD_REQUEST'
+  | 'BACKEND_ERROR'
 
 /**
  * Namespaces the host grants without an explicit `requires` declaration. `ping`
@@ -45,6 +50,43 @@ export const BUILTIN_CAPABILITIES: readonly string[] = ['ping']
 export function isCapabilityAllowed(requires: readonly string[], ns: string): boolean {
   if (BUILTIN_CAPABILITIES.includes(ns)) return true
   return requires.includes(ns)
+}
+
+export type CapabilityPolicyInput = PluginCapabilityPolicy | readonly string[]
+
+function isRequirementsArray(policy: CapabilityPolicyInput): policy is readonly string[] {
+  return Array.isArray(policy)
+}
+
+function isLegacyPolicy(
+  policy: CapabilityPolicyInput
+): policy is { kind: 'legacy'; requires: readonly string[] } {
+  return !isRequirementsArray(policy) && (policy as PluginCapabilityPolicy).kind === 'legacy'
+}
+
+/** Check the namespace for legacy callers. Manifest v2 runtime calls remain
+ *  fail-closed until the public capability-grant contract is implemented. */
+export function isCallAllowed(
+  policy: CapabilityPolicyInput,
+  ns: string,
+  method: string
+): boolean {
+  if (isRequirementsArray(policy)) return isCapabilityAllowed(policy, ns)
+  if (isLegacyPolicy(policy)) return isCapabilityAllowed(policy.requires, ns)
+  if (BUILTIN_CAPABILITIES.includes(ns)) return true
+  void method
+  return false
+}
+
+/** V2 has no legacy namespace event projection; in particular, it must never
+ * receive the internal `git.changed` event. Public v2 event routing is added
+ * only when its host-side payload contract is implemented. */
+export function isEventAllowed(policy: CapabilityPolicyInput, event: string): boolean {
+  const ns = eventNamespace(event)
+  if (!ns) return false
+  if (isRequirementsArray(policy)) return isCapabilityAllowed(policy, ns)
+  if (isLegacyPolicy(policy)) return isCapabilityAllowed(policy.requires, ns)
+  return false
 }
 
 /** Build a success envelope. */
@@ -137,12 +179,20 @@ export type CapabilityPlan =
  */
 export function planCapabilityCall(
   call: CapabilityCall,
-  requires: readonly string[]
+  policy: CapabilityPolicyInput
 ): CapabilityPlan {
-  if (!isCapabilityAllowed(requires, call.ns)) {
+  if (!isCallAllowed(policy, call.ns, call.method)) {
+    const label =
+      isRequirementsArray(policy) || isLegacyPolicy(policy)
+        ? call.ns
+        : `${call.ns}.${call.method}`
     return {
       kind: 'respond',
-      response: buildError(call.reqId, 'CAP_DENIED', `capability '${call.ns}' not granted`),
+      response: buildError(
+        call.reqId,
+        'CAP_DENIED',
+        `capability '${label}' not granted`
+      ),
     }
   }
   if (call.ns === 'ping') {

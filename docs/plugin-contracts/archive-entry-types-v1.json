@@ -1,0 +1,36 @@
+{
+  "cases": [
+    {
+      "name": "unix-symlink-trailing-slash",
+      "path": "link/",
+      "type": "symlink",
+      "creator": "unix",
+      "dosDirectory": false,
+      "expected": "rejected"
+    },
+    {
+      "name": "unix-special-entry",
+      "path": "device",
+      "type": "special",
+      "creator": "unix",
+      "dosDirectory": false,
+      "expected": "rejected"
+    },
+    {
+      "name": "non-unix-high-mode-ignored",
+      "path": "file",
+      "type": "symlink",
+      "creator": "dos",
+      "dosDirectory": false,
+      "expected": "regular"
+    },
+    {
+      "name": "non-unix-dos-directory-bit",
+      "path": "directory",
+      "type": "regular",
+      "creator": "dos",
+      "dosDirectory": true,
+      "expected": "directory"
+    }
+  ]
+}

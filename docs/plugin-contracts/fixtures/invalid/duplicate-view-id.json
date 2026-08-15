@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 2,
+  "apiVersion": "^1.0.0",
+  "id": "acme.duplicate-view",
+  "name": "Duplicate view",
+  "version": "1.0.0",
+  "publisher": "acme",
+  "permissions": {},
+  "marketplace": {
+    "description": "A package with duplicate view identifiers.",
+    "license": "MIT"
+  },
+  "contributes": {
+    "views": [
+      {
+        "id": "left",
+        "kind": "custom",
+        "location": "left",
+        "title": "Left",
+        "entry": "frontend/left/index.html"
+      },
+      {
+        "id": "left",
+        "kind": "custom",
+        "location": "right",
+        "title": "Right",
+        "entry": "frontend/right/index.html"
+      }
+    ]
+  }
+}

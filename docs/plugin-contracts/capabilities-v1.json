@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "catalogVersion": 1,
+  "status": "draft",
+  "runtimeStatus": "declarative-only-until-issue-03",
+  "manifestPermissionContract": {
+    "shape": "permission-id-to-access-array",
+    "scopeSource": "catalog",
+    "duplicateObjectKeys": "reject-before-schema-validation",
+    "unknownPermissionOrAccess": "reject"
+  },
+  "errors": [
+    "CAPABILITY_DENIED",
+    "METHOD_NOT_FOUND",
+    "INVALID_ARGUMENT",
+    "WORKSPACE_SCOPE_VIOLATION",
+    "USER_CANCELLED",
+    "TIMEOUT",
+    "BACKEND_UNAVAILABLE",
+    "PLUGIN_STOPPING",
+    "INTERNAL_ERROR"
+  ],
+  "methods": [
+    {
+      "address": "fs.readFile",
+      "visibility": "public",
+      "permission": { "id": "fs", "access": "read", "scope": "workspace" },
+      "params": { "type": "object", "additionalProperties": false, "required": ["path"], "properties": { "path": { "type": "string" } } },
+      "result": { "type": "object", "additionalProperties": false, "required": ["content"], "properties": { "content": { "type": "string" } } },
+      "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
+    },
+    {
+      "address": "fs.listDirectory",
+      "visibility": "public",
+      "permission": { "id": "fs", "access": "read", "scope": "workspace" },
+      "params": { "type": "object", "additionalProperties": false, "required": ["path"], "properties": { "path": { "type": "string" } } },
+      "result": { "type": "object", "additionalProperties": false, "required": ["entries"], "properties": { "entries": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["name", "kind"], "properties": { "name": { "type": "string" }, "kind": { "enum": ["file", "directory"] } } } } } },
+      "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
+    },
+    {
+      "address": "fs.glob",
+      "visibility": "public",
+      "permission": { "id": "fs", "access": "read", "scope": "workspace" },
+      "params": { "type": "object", "additionalProperties": false, "required": ["pattern"], "properties": { "pattern": { "type": "string" } } },
+      "result": { "type": "object", "additionalProperties": false, "required": ["paths"], "properties": { "paths": { "type": "array", "items": { "type": "string" } } } },
+      "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
+    },
+    {
+      "address": "fs.stat",
+      "visibility": "public",
+      "permission": { "id": "fs", "access": "read", "scope": "workspace" },
+      "params": { "type": "object", "additionalProperties": false, "required": ["path"], "properties": { "path": { "type": "string" } } },
+      "result": { "type": "object", "additionalProperties": false, "required": ["kind", "size", "modifiedAt"], "properties": { "kind": { "enum": ["file", "directory"] }, "size": { "type": "integer", "minimum": 0 }, "modifiedAt": { "type": "string", "format": "date-time" } } },
+      "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "BACKEND_UNAVAILABLE", "INTERNAL_ERROR"]
+    },
+    {
+      "address": "ui.openInEditor",
+      "visibility": "public",
+      "permission": { "id": "ui", "access": "openInEditor", "scope": "workspace" },
+      "params": { "type": "object", "additionalProperties": false, "required": ["path"], "properties": { "path": { "type": "string" }, "line": { "type": "integer", "minimum": 1 }, "column": { "type": "integer", "minimum": 1 } } },
+      "result": { "type": "object", "additionalProperties": false, "required": ["opened"], "properties": { "opened": { "type": "boolean" } } },
+      "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "WORKSPACE_SCOPE_VIOLATION", "INTERNAL_ERROR"]
+    },
+    {
+      "address": "ui.openExternal",
+      "visibility": "public",
+      "permission": { "id": "ui", "access": "openExternal", "scope": "plugin" },
+      "requiresUserGesture": true,
+      "params": { "type": "object", "additionalProperties": false, "required": ["url"], "properties": { "url": { "type": "string", "format": "uri", "pattern": "^https://" } } },
+      "result": { "type": "object", "additionalProperties": false, "required": ["opened"], "properties": { "opened": { "type": "boolean" } } },
+      "errors": ["CAPABILITY_DENIED", "INVALID_ARGUMENT", "USER_CANCELLED", "INTERNAL_ERROR"]
+    }
+  ],
+  "events": [
+    {
+      "address": "workspace.filesChanged",
+      "visibility": "public",
+      "permission": { "id": "fs", "access": "read", "scope": "workspace" },
+      "payload": { "type": "object", "additionalProperties": false, "required": ["changes"], "properties": { "changes": { "type": "array", "items": { "type": "object", "additionalProperties": false, "required": ["path", "kind"], "properties": { "path": { "type": "string" }, "kind": { "enum": ["created", "changed", "deleted"] } } } } } }
+    }
+  ],
+  "firstPartyNamespaces": ["git", "terminal", "search", "chat", "issues", "plans", "ui.settings"],
+  "legacyExceptions": [
+    { "event": "git.changed", "authorizedBy": "fs", "replacement": "workspace.filesChanged" }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 2,
+  "apiVersion": "^1.0.0",
+  "id": "acme.unsafe",
+  "name": "Unsafe",
+  "version": "1.0.0",
+  "publisher": "acme",
+  "permissions": {},
+  "marketplace": { "description": "Non-canonical entry path.", "license": "MIT" },
+  "backend": { "entry": "./backend/plugin", "protocolVersion": 1, "activation": "startup" }
+}

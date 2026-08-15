@@ -15,7 +15,7 @@ import {
   parseCapabilityCall,
   planCapabilityCall,
   backendResponseToCapability,
-  isCapabilityAllowed,
+  isEventAllowed,
   buildError,
   buildSuccess,
   CASTABLE_WS_TYPES,
@@ -35,6 +35,7 @@ import {
 } from '../../shared/pluginCapabilities'
 import { loadPluginDir, scanInstalledPlugins, verifyOfficialInstall } from './installedPlugins'
 import { resolveOfficialPublisherKey } from './pluginVerify'
+import { legacyCapabilityPolicy, type PluginCapabilityPolicy } from './pluginPermissions'
 import {
   createWsClient,
   type WsClient,
@@ -48,6 +49,8 @@ export interface PluginLaunchDescriptor {
   id: string
   /** Capabilities the plugin's manifest declares (drives broker scoping). */
   requires: string[]
+  /** Access-aware policy for Manifest v2; omitted descriptors retain V1 behavior. */
+  capabilityPolicy?: PluginCapabilityPolicy
   /** Dev-server URL for the plugin entry (used when running under electron-vite dev). */
   devUrl: string
   /** Absolute file path to the built plugin entry (packaged / built runs). */
@@ -55,6 +58,20 @@ export interface PluginLaunchDescriptor {
   /** Optional `?a=b` query appended to the entry (e.g. the mini-IDE workspace
    *  path the app reads from `window.location.search`). Omitted → no query. */
   query?: string
+  /** Manifest v2 contributions discovered for this package. Legacy descriptors
+   *  omit this field and continue to use their single top-level entryFile.
+   *  Issue 01 exposes validated metadata only; issue 14 owns runtime instances. */
+  views?: PluginViewLaunchDescriptor[]
+}
+
+export interface PluginViewLaunchDescriptor {
+  id: string
+  contributionKey: string
+  kind: 'custom'
+  location: 'top' | 'bottom' | 'right' | 'left' | 'main' | 'window'
+  title: string
+  icon?: string
+  entryFile: string
 }
 
 export interface PluginBounds {
@@ -71,6 +88,7 @@ export type PluginViewBounds = PluginBounds | 'fill'
 interface RunningPlugin {
   id: string
   requires: string[]
+  capabilityPolicy: PluginCapabilityPolicy
   view: WebContentsView
   hostWindow: BrowserWindow
   /** Query string the entry was last loaded with (drives reload-on-change). */
@@ -197,7 +215,7 @@ export class FrontendPluginManager {
 
       // Enforce scoping + route. A denied namespace is rejected here and never
       // reaches the backend; `ping`/unknown resolve in-process.
-      const plan = planCapabilityCall(call, plugin.requires)
+      const plan = planCapabilityCall(call, plugin.capabilityPolicy)
       if (plan.kind === 'respond') return plan.response
 
       // Host-implemented capability (ui.open_in_editor): main services it
@@ -371,7 +389,7 @@ export class FrontendPluginManager {
     }
     if (action === 'open_external') {
       const url = typeof args.url === 'string' ? args.url : ''
-      if (!/^https?:\/\//i.test(url)) {
+      if (!/^https?:\/\/[^\s]+$/i.test(url)) {
         return buildError(call.reqId, 'BAD_REQUEST', 'only http/https urls allowed')
       }
       const r = await shell.openExternal(url)
@@ -411,7 +429,9 @@ export class FrontendPluginManager {
   private dispatchBackendStatus(status: WsClientStatus): void {
     this.wsStatus = status
     for (const plugin of this.running.values()) {
-      if (plugin.requires.length > 0) this.emit(plugin.id, 'nav.backend_status', { status })
+      if (plugin.requires.length > 0 && plugin.capabilityPolicy.kind !== 'manifest-v2') {
+        this.emit(plugin.id, 'nav.backend_status', { status })
+      }
     }
   }
 
@@ -467,7 +487,7 @@ export class FrontendPluginManager {
     const ns = eventNamespace(event)
     if (!ns) return
     for (const plugin of this.running.values()) {
-      if (isCapabilityAllowed(plugin.requires, ns)) {
+      if (isEventAllowed(plugin.capabilityPolicy, event)) {
         this.emit(plugin.id, event, payload)
       }
     }
@@ -552,7 +572,7 @@ export class FrontendPluginManager {
       console.debug(`[plugin] cast dropped: malformed call from ${pluginId}`)
       return 'malformed'
     }
-    const plan = planCapabilityCall(call, plugin.requires)
+    const plan = planCapabilityCall(call, plugin.capabilityPolicy)
     if (plan.kind === 'host') {
       console.debug(
         `[plugin] cast dropped: ${pluginId} ${call.ns}.${call.method} is a host capability (not castable)`
@@ -690,6 +710,7 @@ export class FrontendPluginManager {
     const record: RunningPlugin = {
       id: descriptor.id,
       requires: descriptor.requires,
+      capabilityPolicy: descriptor.capabilityPolicy ?? legacyCapabilityPolicy(descriptor.requires),
       view,
       hostWindow,
       query: descriptor.query ?? '',
@@ -745,7 +766,11 @@ export class FrontendPluginManager {
       // Replay the current transport status: transitions before this load (or
       // while a queued view was still booting) would otherwise be missed and
       // the plugin's optimistic 'connected' default never corrected.
-      if (current.requires.length > 0 && this.wsClient) {
+      if (
+        current.requires.length > 0 &&
+        current.capabilityPolicy.kind !== 'manifest-v2' &&
+        this.wsClient
+      ) {
         this.emit(descriptor.id, 'nav.backend_status', { status: this.wsStatus })
       }
     })
@@ -892,6 +917,16 @@ export class FrontendPluginManager {
   /** All registered (installed + built-in) descriptors. */
   listDescriptors(): PluginLaunchDescriptor[] {
     return [...this.descriptors.values()]
+  }
+
+  /**
+   * Flatten validated Manifest v2 contribution metadata for Host discovery.
+   * This is the issue 01 seam; issue 14 consumes this catalog for instance
+   * creation and owns placement, mounting, and lifecycle. This method does not
+   * create or reuse runtime views.
+   */
+  listViewContributions(): PluginViewLaunchDescriptor[] {
+    return [...this.descriptors.values()].flatMap((descriptor) => descriptor.views ?? [])
   }
 
   /**

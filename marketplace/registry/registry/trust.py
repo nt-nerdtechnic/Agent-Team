@@ -1,7 +1,8 @@
 """Capability + trust-tier policy (metadata/gate layer, NOT a sandbox).
 
-A package's `manifest.requires` is its declared capability set. This module
-turns publish-time facts into two pieces of trust metadata the Extensions view
+A package's `manifest.permissions` namespaces (or legacy `manifest.requires`)
+are its declared capability set. This module turns publish-time facts into two
+pieces of trust metadata the Extensions view
 can surface to warn users:
 
 - **trust tier** -- `signed-verified` when a signature verified against the

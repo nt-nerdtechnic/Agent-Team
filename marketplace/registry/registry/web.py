@@ -26,6 +26,7 @@ from fastapi.templating import Jinja2Templates
 from markdown_it import MarkdownIt
 from sqlmodel import Session
 
+from .manifest import manifest_capabilities, manifest_icon
 from .models import Extension, ExtensionVersion, Publisher
 from .repository import RegistryRepository, rating_average
 from .storage import StorageError
@@ -68,7 +69,7 @@ def _latest_active(versions: list[ExtensionVersion]) -> ExtensionVersion | None:
 
 def _card(extension: Extension, versions: list[ExtensionVersion]) -> dict:
     latest = _latest_active(versions)
-    caps = list(latest.manifest.get("requires", [])) if latest else []
+    caps = manifest_capabilities(latest.manifest) if latest else []
     return {
         "namespace": extension.namespace,
         "name": extension.name,
@@ -173,16 +174,16 @@ def create_web_router() -> APIRouter:
                     "yanked": v.yanked,
                     "published_at": v.published_at,
                     "download_count": v.download_count,
-                    "capabilities": list(v.manifest.get("requires", [])),
+                    "capabilities": manifest_capabilities(v.manifest),
                     "sensitive_capabilities": sensitive_capabilities(
-                        list(v.manifest.get("requires", []))
+                        manifest_capabilities(v.manifest)
                     ),
                 }
                 for v in ordered
             ]
             readme_html = _extract_readme(request, latest) if latest else None
             screenshots = _screenshots(repo, latest) if latest else []
-            icon_path = latest.manifest.get("icon") if latest else None
+            icon_path = manifest_icon(latest.manifest) if latest else None
             pub = repo.session.get(Publisher, extension.publisher_id)
             publisher_display = pub.name if pub else extension.namespace
             context = {
@@ -249,7 +250,7 @@ def create_web_router() -> APIRouter:
 
 
 def _screenshots(repo: RegistryRepository, row: ExtensionVersion) -> list[str]:
-    icon = row.manifest.get("icon")
+    icon = manifest_icon(row.manifest)
     paths = []
     for asset in repo.list_assets(row.id):
         if asset.content_type.startswith("image/") and asset.path != icon:

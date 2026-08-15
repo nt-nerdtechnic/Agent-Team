@@ -188,6 +188,7 @@ import {
   registerBundledMiniIde,
   type PluginLaunchDescriptor,
 } from './frontendPluginManager'
+import { manifestV2CapabilityPolicy } from './pluginPermissions'
 
 interface FakeWebContentsLike {
   id: number
@@ -354,6 +355,41 @@ describe('registerDescriptor reserved-id guard', () => {
     const mgr = new FrontendPluginManager()
     mgr.registerDescriptor(descriptor('acme.demo'))
     expect(mgr.getDescriptor('acme.demo')?.id).toBe('acme.demo')
+  })
+
+  it('lists validated Manifest v2 view contributions for Host discovery', () => {
+    const mgr = new FrontendPluginManager()
+    mgr.registerDescriptor({
+      ...descriptor('acme.files'),
+      views: [
+        {
+          id: 'left',
+          contributionKey: 'acme.files.left',
+          kind: 'custom',
+          location: 'left',
+          title: 'Files',
+          entryFile: '/plugins/acme.files/frontend/left/index.html',
+        },
+        {
+          id: 'window',
+          contributionKey: 'acme.files.window',
+          kind: 'custom',
+          location: 'window',
+          title: 'Files window',
+          entryFile: '/plugins/acme.files/frontend/window/index.html',
+        },
+      ],
+    })
+    expect(mgr.listViewContributions()).toEqual([
+      expect.objectContaining({
+        contributionKey: 'acme.files.left',
+        location: 'left',
+      }),
+      expect.objectContaining({
+        contributionKey: 'acme.files.window',
+        location: 'window',
+      }),
+    ])
   })
 })
 
@@ -1279,5 +1315,59 @@ describe('ui.open_in_editor host capability — workspace containment / caller r
     const resp = await call({ filepath: '.' })
     expect(resp.error?.code).toBe('BAD_REQUEST')
     expect(opens).toEqual([])
+  })
+})
+
+describe('Manifest v2 capability runtime deferral', () => {
+  const CALL = 'plugin:cap:call'
+
+  function openV2External(): {
+    view: FakeViewLike
+    opened: string[]
+    call: (url: string) => Promise<{ ok?: boolean; error?: { code: string; message?: string } }>
+  } {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    mgr.open(
+      asHost(host),
+      {
+        id: 'acme.links',
+        requires: ['ui'],
+        capabilityPolicy: manifestV2CapabilityPolicy({ ui: ['openExternal'] }),
+        devUrl: '',
+        entryFile: '/plugins/acme.links/index.html',
+      },
+      'fill'
+    )
+    const view = views[views.length - 1]
+    const opened: string[] = []
+    mgr.setHostShellHandlers({
+      openExternal: async (url) => {
+        opened.push(url)
+        return { ok: true }
+      },
+      revealPath: () => ({ ok: true }),
+      openWorkspace: () => ({ ok: true }),
+      pickFolder: async () => null,
+    })
+    const handler = ipcHandlers.get(CALL)
+    expect(handler).toBeDefined()
+    return {
+      view,
+      opened,
+      call: async (url) =>
+        (await handler!({ sender: { id: view.webContents.id } }, {
+          reqId: 'r1',
+          ns: 'ui',
+          method: 'open_external',
+          args: { url },
+        })) as { ok?: boolean; error?: { code: string; message?: string } },
+    }
+  }
+
+  it('denies deferred v2 host capabilities before reaching the host', async () => {
+    const { opened, call } = openV2External()
+    expect((await call('https://example.com')).error?.code).toBe('CAP_DENIED')
+    expect(opened).toEqual([])
   })
 })

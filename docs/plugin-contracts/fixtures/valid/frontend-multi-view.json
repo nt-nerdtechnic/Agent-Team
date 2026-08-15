@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 2,
+  "apiVersion": "^1.0.0",
+  "id": "acme.files",
+  "name": "Files",
+  "version": "1.0.0",
+  "publisher": "acme",
+  "permissions": {
+    "fs": ["read"],
+    "ui": ["openInEditor", "openExternal"]
+  },
+  "marketplace": {
+    "description": "Browse workspace files in workbench regions or a separate window.",
+    "license": "MIT",
+    "repository": "https://github.com/acme/navide-files",
+    "homepage": "https://acme.example/navide-files",
+    "categories": ["productivity"],
+    "icon": "assets/files.png"
+  },
+  "contributes": {
+    "views": [
+      { "id": "top", "kind": "custom", "location": "top", "title": "Files Top", "entry": "frontend/top/index.html" },
+      { "id": "bottom", "kind": "custom", "location": "bottom", "title": "Files Bottom", "entry": "frontend/bottom/index.html" },
+      { "id": "right", "kind": "custom", "location": "right", "title": "Files Right", "entry": "frontend/right/index.html" },
+      { "id": "left", "kind": "custom", "location": "left", "title": "Files Left", "entry": "frontend/left/index.html" },
+      { "id": "main", "kind": "custom", "location": "main", "title": "Files Main", "entry": "frontend/main/index.html" },
+      { "id": "window", "kind": "custom", "location": "window", "title": "Files Window", "entry": "frontend/window/index.html" }
+    ]
+  }
+}

@@ -13,9 +13,10 @@
 
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { canonicalArchivePath } from './pluginPathPolicy'
 import {
   verifyPackage,
-  assertSafeEntryPath,
+  assertSafeArchiveEntries,
   assertOfficialPublisher,
   isOfficialPluginId,
   resolveOfficialPublisherKey,
@@ -24,11 +25,15 @@ import {
 import { readZipEntries, readManifestFromEntries, type ZipEntry } from './pluginPackage'
 import {
   parseInstalledManifest,
+  assertManifestFiles,
+  isManifestV2,
+  manifestCapabilities,
   manifestToDescriptor,
   OFFICIAL_RECEIPT_NAME,
   type InstalledManifest,
   type OfficialReceipt,
 } from './installedPlugins'
+import { compareSemver } from './pluginManifestV2'
 import type { PluginLaunchDescriptor } from './frontendPluginManager'
 
 /** What a caller must supply to install a specific marketplace version. The
@@ -109,6 +114,15 @@ function downloadUrl(req: InstallRequest): string {
   return `${base}/api/extensions/${req.namespace}/${req.name}/${req.version}/download`
 }
 
+function canonicalEntryPath(entry: ZipEntry): string {
+  const path = canonicalArchivePath(
+    entry.path,
+    entry.type === 'directory' ? 'directory' : 'regular'
+  )
+  if (path === null) throw new InstallError(`unsafe archive entry path: ${entry.path}`)
+  return path
+}
+
 /**
  * Download + fully verify a package WITHOUT writing anything. Runs the digest,
  * signature, and capability-scope checks, cross-checks the identity, and reads
@@ -129,10 +143,22 @@ export async function prepareInstall(
     )
   }
 
-  // Read the manifest first so capability scope feeds the verification chain.
+  // Validate every archive path before reading the manifest or any later install step.
   const entries = readZipEntries(bytes)
+  assertSafeArchiveEntries(entries)
   const rawManifest = readManifestFromEntries(entries)
   const manifest = parseInstalledManifest(rawManifest)
+  assertManifestFiles(
+    manifest,
+    entries
+      .filter((entry) => entry.type === 'regular')
+      .map((entry) => canonicalEntryPath(entry))
+  )
+  if (isManifestV2(manifest) && (manifest.contributes?.views.length ?? 0) === 0) {
+    throw new InstallError(
+      'frontend installer requires at least one custom view contribution'
+    )
+  }
 
   const expectedId = `${req.namespace}.${req.name}`
   if (manifest.id !== expectedId) {
@@ -152,7 +178,7 @@ export async function prepareInstall(
     signature: req.signature,
     publicKey: req.publicKey,
     claimedTrustTier: req.claimedTrustTier,
-    requires: manifest.requires,
+    requires: manifestCapabilities(manifest),
   })
 
   // Official-namespace policy: a `navide.` package must be signed by the
@@ -176,8 +202,8 @@ export async function prepareInstall(
 
 /**
  * Write a prepared, verified package into `<pluginsRoot>/<id>/`, replacing any
- * previous install of the same id (so update reuses this path). Every entry
- * path is re-checked against zip-slip before it is written. Returns the launch
+ * previous install of the same id (so update reuses this path). The archive is
+ * revalidated before the existing directory is removed. Returns the launch
  * descriptor the loader registers.
  */
 export function commitInstall(
@@ -186,17 +212,29 @@ export function commitInstall(
   deps: InstallerDeps = defaultInstallerDeps
 ): PluginLaunchDescriptor {
   const dir = join(pluginsRoot, prepared.id)
+  assertSafeArchiveEntries(prepared.entries)
+  const safeEntries = prepared.entries.map((entry) => ({
+    entry,
+    path: canonicalEntryPath(entry),
+  }))
+  if (safeEntries.some(({ path }) => path === OFFICIAL_RECEIPT_NAME)) {
+    throw new InstallError(`package must not contain ${OFFICIAL_RECEIPT_NAME}`)
+  }
+  // Resolve the frontend descriptor before any replacement writes. Backend-only
+  // v2 packages are valid registry artifacts but are not loadable by this
+  // frontend installer yet; reject them without leaving a partial install.
+  const descriptor = manifestToDescriptor(prepared.manifest, dir)
   deps.rmrf(dir) // idempotent replace (fresh install or update)
-  for (const entry of prepared.entries) {
-    assertSafeEntryPath(entry.path)
-    // The receipt name is written exclusively by the host below — a package
-    // must not be able to smuggle its own (forged) install receipt.
-    if (entry.path === OFFICIAL_RECEIPT_NAME) {
-      throw new InstallError(`package must not contain ${OFFICIAL_RECEIPT_NAME}`)
+  for (const { entry, path } of safeEntries) {
+    const target = join(dir, path)
+    if (entry.type === 'directory') {
+      deps.mkdirp(target)
+    } else if (entry.type === 'regular') {
+      deps.mkdirp(dirname(target))
+      deps.writeFile(target, entry.data)
+    } else {
+      throw new InstallError(`archive entry is not a regular file: ${entry.path}`)
     }
-    const target = join(dir, entry.path)
-    deps.mkdirp(dirname(target))
-    deps.writeFile(target, entry.data)
   }
   // Official installs persist the verified digest + signature so the loader
   // can re-verify against the pinned key on every startup (see
@@ -214,7 +252,7 @@ export function commitInstall(
       new TextEncoder().encode(JSON.stringify(receipt, null, 2))
     )
   }
-  return manifestToDescriptor(prepared.manifest, dir)
+  return descriptor
 }
 
 /** Remove an installed plugin's directory. Idempotent. */
@@ -233,17 +271,6 @@ export function removePlugin(
  */
 export function isUpdateAvailable(installedVersion: string, latestVersion: string | null): boolean {
   if (!latestVersion) return false
-  const a = parseSemver(installedVersion)
-  const b = parseSemver(latestVersion)
-  if (!a || !b) return false
-  for (let i = 0; i < 3; i++) {
-    if (b[i] > a[i]) return true
-    if (b[i] < a[i]) return false
-  }
-  return false
-}
-
-function parseSemver(v: string): [number, number, number] | null {
-  const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(v)
-  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null
+  const comparison = compareSemver(installedVersion, latestVersion)
+  return comparison !== null && comparison < 0
 }

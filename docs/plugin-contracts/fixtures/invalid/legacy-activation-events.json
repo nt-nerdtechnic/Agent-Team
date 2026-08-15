@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 2,
+  "apiVersion": "^1.0.0",
+  "id": "acme.legacy",
+  "name": "Legacy",
+  "version": "1.0.0",
+  "publisher": "acme",
+  "permissions": {},
+  "marketplace": { "description": "Use a legacy activation event.", "license": "MIT" },
+  "activationEvents": ["onStartup"],
+  "backend": { "entry": "backend/legacy", "protocolVersion": 1, "activation": "startup" }
+}

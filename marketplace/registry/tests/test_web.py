@@ -8,7 +8,7 @@ import zipfile
 
 from fastapi.testclient import TestClient
 
-from tests.fixtures import build_package, valid_manifest
+from tests.fixtures import build_package, build_v2_package, contract_manifest, valid_manifest
 
 
 def _publish(client: TestClient, data: bytes):
@@ -88,6 +88,19 @@ def test_detail_renders_readme_versions_and_trust(client: TestClient) -> None:
     # Trust badge present (unsigned in dev posture).
     assert "unsigned" in html
     assert "badge" in html
+
+
+def test_detail_renders_semver_prerelease_versions(client: TestClient) -> None:
+    older = contract_manifest()
+    older["version"] = "1.2.3-alpha.beta"
+    newer = contract_manifest()
+    newer["version"] = "1.2.3-x.7.z.92"
+    assert _publish(client, build_v2_package(older)).status_code == 201
+    assert _publish(client, build_v2_package(newer)).status_code == 201
+
+    resp = client.get("/extensions/acme/files")
+    assert resp.status_code == 200
+    assert "1.2.3-x.7.z.92" in resp.text
 
 
 def test_detail_missing_404(client: TestClient) -> None:

@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 2,
+  "apiVersion": "^1.0.0",
+  "id": "acme.trailing-version",
+  "name": "Trailing Version",
+  "version": "1.2.3\n",
+  "publisher": "acme",
+  "permissions": {},
+  "marketplace": { "description": "A trailing version test.", "license": "MIT" },
+  "backend": { "entry": "backend/acme-plugin", "protocolVersion": 1, "activation": "startup" }
+}

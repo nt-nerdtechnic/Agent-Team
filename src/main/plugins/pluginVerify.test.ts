@@ -1,10 +1,13 @@
 import { describe, it, expect } from 'vitest'
 import { generateKeyPairSync, sign as edSign } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import {
   sha256Hex,
   verifyEd25519,
   assertKnownCapabilities,
   assertSafeEntryPath,
+  assertSafeArchiveEntries,
   assertRegistryUrlAllowed,
   assertOfficialPublisher,
   isOfficialPluginId,
@@ -33,6 +36,12 @@ function signDigest(digest: string): {
 
 const BYTES = new Uint8Array([1, 2, 3, 4, 5])
 const DIGEST = sha256Hex(BYTES)
+const ARCHIVE_PATH_CONTRACT = JSON.parse(
+  readFileSync(join(process.cwd(), 'docs/plugin-contracts/archive-paths-v1.json'), 'utf8')
+) as {
+  valid: Record<string, { path: string; type: 'regular' | 'directory' }[]>
+  invalid: Record<string, { path: string; type: 'regular' | 'directory' }[]>
+}
 
 describe('sha256Hex', () => {
   it('matches a known sha256', () => {
@@ -81,6 +90,11 @@ describe('assertSafeEntryPath (zip-slip)', () => {
     expect(() => assertSafeEntryPath('manifest.json')).not.toThrow()
   })
 
+  it('preserves legacy v1 path compatibility', () => {
+    expect(() => assertSafeEntryPath('./dist/index.html')).not.toThrow()
+    expect(() => assertSafeEntryPath('assets//icon.png')).not.toThrow()
+  })
+
   it.each([
     '../escape.js',
     'a/../../etc/passwd',
@@ -96,6 +110,35 @@ describe('assertSafeEntryPath (zip-slip)', () => {
       expect(err).toBeInstanceOf(PluginVerifyError)
       expect((err as PluginVerifyError).code).toBe('ZIP_SLIP')
     }
+  })
+})
+
+describe('assertSafeArchiveEntries', () => {
+  it('accepts the shared canonical archive path fixtures', () => {
+    for (const entries of Object.values(ARCHIVE_PATH_CONTRACT.valid)) {
+      expect(() => assertSafeArchiveEntries(entries)).not.toThrow()
+    }
+  })
+
+  it('rejects the shared unsafe and colliding archive path fixtures', () => {
+    for (const entries of Object.values(ARCHIVE_PATH_CONTRACT.invalid)) {
+      expect(() => assertSafeArchiveEntries(entries)).toThrow()
+    }
+  })
+
+  it('rejects duplicate archive paths', () => {
+    expect(() =>
+      assertSafeArchiveEntries([{ path: 'manifest.json' }, { path: 'manifest.json' }])
+    ).toThrow(/duplicate archive entry path/)
+  })
+
+  it('rejects symlink and special-file metadata', () => {
+    expect(() =>
+      assertSafeArchiveEntries([{ path: 'link', type: 'symlink' }])
+    ).toThrow(/regular file or directory/)
+    expect(() =>
+      assertSafeArchiveEntries([{ path: 'device', type: 'special' }])
+    ).toThrow(/regular file or directory/)
   })
 })
 
