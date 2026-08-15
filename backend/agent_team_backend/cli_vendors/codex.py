@@ -25,7 +25,7 @@ import re
 import shutil
 import time
 
-from .base import Dep, McpWiring, VendorSpec, command_text
+from .base import Dep, McpWiring, SkillsWiring, VendorSpec, command_text
 from ..applog import app_data_dir
 from ..skills_store import SkillsStore
 from . import _protocols
@@ -948,6 +948,13 @@ def _session_exists(workspace_path: str, session_id: str) -> bool:
 
 SPEC = VendorSpec(
     key="codex",
+    # Verified 2026-08-15: codex resolves its skills from $CODEX_HOME/skills.
+    skills_supported=True,
+    skills_wiring=SkillsWiring(
+        root_env="CODEX_HOME",
+        root_home=(".codex",),
+        skills_rel=("skills",),
+    ),
     label="Codex",
     # No JSON document at all: `-c` is a one-shot TOML override merged over
     # config.toml at process start, and stays valid after a subcommand

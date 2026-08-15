@@ -23,14 +23,23 @@ const skill = {
   attachments: [{ path: 'references/checklist.md', size: 42 }],
 }
 
+const agents = [
+  { key: 'claude', label: 'Claude Code', state: 'wired' },
+  { key: 'kimi', label: 'Kimi Code', state: 'wired' },
+  { key: 'pi', label: 'Pi', state: 'wired' },
+  { key: 'codex', label: 'Codex', state: 'planned' },
+  { key: 'aider', label: 'Aider', state: 'unsupported' },
+]
+
 function mockBackend(overrides: Record<string, unknown> = {}) {
   const responses: Record<string, unknown> = {
-    'skills.list': { ok: true, payload: { skills: [skill], root: '/tmp/skills' } },
+    'skills.list': { ok: true, payload: { skills: [skill], root: '/tmp/skills', agents } },
     'skills.get': { ok: true, payload: { skill } },
     'skills.create': { ok: true, payload: { skill } },
     'skills.save': { ok: true, payload: { ok: true, skill: { ...skill, revision: 'rev-2' } } },
     'skills.set_enabled': { ok: true, payload: { skill: { ...skill, enabled: false } } },
     'skills.delete': { ok: true, payload: { name: skill.name, deleted: true } },
+    'skills.set_targets': { ok: true, payload: { skill } },
     ...overrides,
   }
   const send = vi.fn(async (type: string) => responses[type])
@@ -182,5 +191,129 @@ describe('SkillsPane', () => {
     await wrapper.get('.skill-editor-actions .danger').trigger('click')
     await flushPromises()
     expect(send).toHaveBeenCalledWith('skills.delete', { name: 'review-code' })
+  })
+})
+
+describe('SkillsPane capability matrix', () => {
+  let wrapper: VueWrapper | undefined
+
+  beforeEach(() => {
+    i18n.global.locale.value = 'en-US'
+    window.agentTeam = {} as unknown as typeof window.agentTeam
+  })
+
+  afterEach(() => {
+    wrapper?.unmount()
+    wrapper = undefined
+    vi.restoreAllMocks()
+  })
+
+  async function openMatrix(overrides: Record<string, unknown> = {}) {
+    const mocked = mockBackend(overrides)
+    wrapper = mount(SkillsPane, { props: { backend: mocked.backend }, global: { plugins: [i18n] } })
+    await flushPromises()
+    await wrapper.findAll('.skills-view-switch button')[1].trigger('click')
+    await flushPromises()
+    return mocked
+  }
+
+  it('renders one column per agent and marks the three capability states apart', async () => {
+    await openMatrix()
+
+    const headers = wrapper!.findAll('.skills-matrix thead th')
+    expect(headers.map((th) => th.text())).toEqual([
+      'Skill', 'claude', 'kimi', 'pi', 'codex', 'aider', '',
+    ])
+    const cells = wrapper!.findAll('.skills-matrix tbody td')
+    // Targets are unset, so every wired agent receives it.
+    expect(cells[0].classes()).toContain('on')
+    expect(cells[1].classes()).toContain('on')
+    expect(cells[2].classes()).toContain('on')
+    expect(cells[3].classes()).toContain('planned')
+    expect(cells[4].classes()).toContain('unsupported')
+  })
+
+  it('never lets an unwired agent be toggled', async () => {
+    const { send } = await openMatrix()
+    const cells = wrapper!.findAll('.skills-matrix tbody td')
+
+    expect((cells[3].find('button').element as HTMLButtonElement).disabled).toBe(true)
+    expect((cells[4].find('button').element as HTMLButtonElement).disabled).toBe(true)
+
+    await cells[4].find('button').trigger('click')
+    await flushPromises()
+    expect(send).not.toHaveBeenCalledWith('skills.set_targets', expect.anything())
+  })
+
+  it('materializes the implicit all-agents list when one cell is switched off', async () => {
+    const { send } = await openMatrix()
+
+    await wrapper!.findAll('.skills-matrix tbody td')[1].find('button').trigger('click')
+    await flushPromises()
+
+    expect(send).toHaveBeenCalledWith('skills.set_targets', {
+      name: 'review-code',
+      agents: ['claude', 'pi'],
+    })
+  })
+
+  it('returns to the unrestricted list when every wired agent is selected again', async () => {
+    const { send } = await openMatrix({
+      'skills.list': {
+        ok: true,
+        payload: { skills: [{ ...skill, targets: ['claude', 'pi'] }], root: '/tmp/skills', agents },
+      },
+    })
+
+    await wrapper!.findAll('.skills-matrix tbody td')[1].find('button').trigger('click')
+    await flushPromises()
+
+    // Not ['claude','pi','kimi'] — an explicit full list would freeze today's
+    // agents and stop following newly wired ones.
+    expect(send).toHaveBeenCalledWith('skills.set_targets', {
+      name: 'review-code',
+      agents: null,
+    })
+  })
+
+  it('sends null for the whole row and an empty list for none', async () => {
+    const { send } = await openMatrix()
+    const bulk = wrapper!.findAll('.skills-matrix td.bulk button')
+
+    await bulk[1].trigger('click')
+    await flushPromises()
+    expect(send).toHaveBeenCalledWith('skills.set_targets', { name: 'review-code', agents: [] })
+
+    await bulk[0].trigger('click')
+    await flushPromises()
+    expect(send).toHaveBeenCalledWith('skills.set_targets', { name: 'review-code', agents: null })
+  })
+
+  it('rolls the cell back when the backend rejects the change', async () => {
+    await openMatrix({ 'skills.set_targets': { ok: false, error: { message: 'nope' } } })
+    const cell = () => wrapper!.findAll('.skills-matrix tbody td')[1]
+
+    await cell().find('button').trigger('click')
+    await flushPromises()
+
+    expect(cell().classes()).toContain('on')
+    expect(wrapper!.find('.skills-error').text()).toBeTruthy()
+  })
+
+  it('shows a disabled skill as delivered nowhere', async () => {
+    await openMatrix({
+      'skills.list': {
+        ok: true,
+        payload: { skills: [{ ...skill, enabled: false }], root: '/tmp/skills', agents },
+      },
+    })
+
+    const row = wrapper!.find('.skills-matrix tbody tr')
+    expect(row.classes()).toContain('off')
+    expect(wrapper!.findAll('.skills-matrix tbody td.on')).toHaveLength(0)
+    expect(
+      (wrapper!.findAll('.skills-matrix tbody td')[0].find('button').element as HTMLButtonElement)
+        .disabled
+    ).toBe(true)
   })
 })

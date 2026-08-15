@@ -37,7 +37,7 @@ import shutil
 import time
 from typing import Any
 
-from .base import Dep, McpServerConfig, McpValue, McpWiring, VendorSpec
+from .base import Dep, McpServerConfig, McpValue, McpWiring, SkillsWiring, VendorSpec
 from ..usage_common import _num, _snapshot, _window
 from ..log_readers.base import (
     ActivityEvent,
@@ -579,6 +579,14 @@ async def fetch_grok(home: Path, env: dict | None = None) -> dict:
 
 SPEC = VendorSpec(
     key="grok",
+    # Verified 2026-08-15: grok's own error message points at
+    # ~/.agents/skills/<name>/SKILL.md. It has no dedicated relocation
+    # variable, so this rides the HOME shim its MCP wiring already builds.
+    skills_supported=True,
+    skills_wiring=SkillsWiring(
+        root_env="HOME",
+        skills_rel=(".agents", "skills"),
+    ),
     label="Grok CLI",
     # No flag, no config variable, no config-dir variable: the config root is
     # hardcoded under the home directory. Servers are a LIST under mcp.servers

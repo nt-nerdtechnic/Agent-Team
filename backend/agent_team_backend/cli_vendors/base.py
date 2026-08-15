@@ -161,6 +161,62 @@ class McpWiring:
     config_file: tuple[str, ...] = ()  # relative to config_dir
 
 
+@dataclass(frozen=True)
+class SkillsWiring:
+    """How a pane spawn points this CLI at a directory of managed skills.
+
+    A CLI offers exactly one surface: ``flag`` (a repeatable command-line
+    flag) or ``config_env`` (a variable carrying a whole config document). A
+    CLI with no skills mechanism at all declares no wiring, which is what the
+    UI reads to mark it unavailable rather than merely switched off.
+
+    Declarative like ``McpWiring``: the skills library belongs to a plugin,
+    and a vendor module must not import one.
+    """
+
+    # --- repeatable spawn-time flag ---
+    flag: str = ""
+    # What one occurrence of the flag takes: the directory holding every skill
+    # ("root"), or a single skill's own directory, repeated per skill ("each").
+    flag_takes: str = "root"
+    # The flag suppresses the CLI's own discovery, so whatever it would have
+    # found has to be passed back alongside ours or the user silently loses
+    # their own skills.
+    replaces_discovery: bool = False
+    # Discovery roots to re-add when ``replaces_discovery``: paths under the
+    # user's home, then paths under the pane's working directory. Only the
+    # ones that exist are passed.
+    discovery_home: tuple[tuple[str, ...], ...] = ()
+    discovery_project: tuple[tuple[str, ...], ...] = ()
+
+    # --- whole config document in an environment variable ---
+    config_env: str = ""
+    # Where the list of skill roots lives inside that document.
+    config_paths_key: tuple[str, ...] = ()
+
+    # --- a directory the CLI reads out of its own config home ---
+    # The variable relocating that home. "HOME" is accepted but is a blunt
+    # instrument: the shim mirrors the real home so the pane still sees
+    # everything else the user has.
+    root_env: str = ""
+    # Where the real root sits under the user's home; () means the home itself.
+    root_home: tuple[str, ...] = ()
+    # The skills directory relative to that root.
+    skills_rel: tuple[str, ...] = ()
+
+    # --- a directory the CLI reads out of the workspace ---
+    # Last resort for a CLI with no relocation variable: the path is inside the
+    # user's own repository, so only our own entries may ever be written or
+    # removed there.
+    project_rel: tuple[str, ...] = ()
+
+    # Layout the view directory must have for this CLI to find skills below
+    # the path we hand it; empty means the skills sit directly in the view.
+    view_layout: tuple[str, ...] = ()
+    # Substring whose presence in a command means the spawn is already wired.
+    already_wired: str = ""
+
+
 def mcp_entry(
     config: McpServerConfig, *, name: str, label: str, url: str
 ) -> dict[str, Any]:
@@ -286,6 +342,15 @@ class VendorSpec:
     # How a spawn points this CLI at an MCP server. None = the CLI has no MCP
     # surface at all (aider, muse, pi).
     mcp_wiring: McpWiring | None = None
+
+    # --- skills wiring ---
+    # How a spawn points this CLI at the managed skills library. None = the
+    # CLI has no skills mechanism (kilo, aider), or Navide has not wired the
+    # one it has yet; ``skills_supported`` tells those two apart.
+    skills_wiring: SkillsWiring | None = None
+    # The CLI has a skills mechanism, verified against the binary or its
+    # official docs. False = no such feature exists to wire.
+    skills_supported: bool = False
 
     # --- log reading ---
     # () -> LogReader instance for this vendor. None = reader not migrated

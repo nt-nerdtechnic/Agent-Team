@@ -34,7 +34,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .base import Dep, McpServerConfig, McpValue, McpWiring, VendorSpec, command_text
+from .base import Dep, McpServerConfig, McpValue, McpWiring, SkillsWiring, VendorSpec, command_text
 from ..usage_common import (
     _KEYCHAIN_COOLDOWN_S,
     _snapshot,
@@ -1224,6 +1224,14 @@ def _install_hooks(port_file: str) -> Any:
 
 SPEC = VendorSpec(
     key="claude",
+    skills_supported=True,
+    # --add-dir adds another project directory, and Claude Code discovers a
+    # project's skills below .claude/skills — so the view has to carry that
+    # layout for the flag to reach them.
+    skills_wiring=SkillsWiring(
+        flag="--add-dir",
+        view_layout=(".claude", "skills"),
+    ),
     label="Claude Code",
     # `--mcp-config` takes a literal JSON string as well as a path, and servers
     # from it load IN ADDITION to the user's own config (we never pass

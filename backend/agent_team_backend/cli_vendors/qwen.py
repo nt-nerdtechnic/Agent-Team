@@ -35,7 +35,7 @@ from ..log_readers.base import (
     user_prompt_text,
 )
 from ..log_readers.base import encode_claude_cwd
-from .base import Dep, McpServerConfig, McpValue, McpWiring, VendorSpec, command_text
+from .base import Dep, McpServerConfig, McpValue, McpWiring, SkillsWiring, VendorSpec, command_text
 from ..usage_common import (
     HTTP_TIMEOUT,
     _epoch_to_iso,
@@ -733,6 +733,14 @@ def _install_hooks(port_file: str) -> Any:
 
 SPEC = VendorSpec(
     key="qwen",
+    # Verified 2026-08-15: QWEN_HOME *is* the .qwen directory (its
+    # resolveQwenHome falls back to ~/.qwen), so skills sit one level in.
+    skills_supported=True,
+    skills_wiring=SkillsWiring(
+        root_env="QWEN_HOME",
+        root_home=(".qwen",),
+        skills_rel=("skills",),
+    ),
     label="Qwen Code",
     # `--mcp-config` is undocumented in `qwen --help` but registered, takes
     # inline JSON or a path, and merges over settings.json. No "type"

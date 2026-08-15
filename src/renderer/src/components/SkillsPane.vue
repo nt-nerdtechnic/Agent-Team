@@ -12,7 +12,16 @@ interface SkillSummary {
   enabled: boolean
   valid?: boolean
   nativeConflict?: boolean
+  /** Agent keys this skill is restricted to; null = every wired agent. */
+  targets: string[] | null
   path?: string
+}
+
+/** One CLI vendor and what the managed library can do with it. */
+interface SkillAgent {
+  key: string
+  label: string
+  state: 'wired' | 'planned' | 'unsupported'
 }
 
 interface SkillAttachment {
@@ -30,7 +39,6 @@ interface SkillDraft extends SkillSummary {
   model: string
   effort: string
   context: string
-  agent: string
   attachments: SkillAttachment[]
   fieldKeys: Set<string>
 }
@@ -44,6 +52,8 @@ const props = defineProps<{ backend: Backend }>()
 const { t } = useI18n()
 
 const skills = ref<SkillSummary[]>([])
+const agents = ref<SkillAgent[]>([])
+const view = ref<'list' | 'matrix'>('list')
 const rootPath = ref('')
 const selectedName = ref('')
 const draft = ref<SkillDraft | null>(null)
@@ -86,8 +96,27 @@ function normalizeSummary(value: unknown): SkillSummary | null {
     nativeConflict: typeof (value.native_conflict ?? value.nativeConflict) === 'boolean'
       ? Boolean(value.native_conflict ?? value.nativeConflict)
       : undefined,
+    targets: normalizeTargets(value.targets),
     path: stringValue(value.path) || undefined,
   }
+}
+
+function normalizeTargets(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null
+  return value.filter((item): item is string => typeof item === 'string')
+}
+
+function normalizeAgents(value: unknown): SkillAgent[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((entry) => {
+    if (!isRecord(entry) || typeof entry.key !== 'string' || !entry.key) return []
+    const state = entry.state
+    return [{
+      key: entry.key,
+      label: stringValue(entry.label) || entry.key,
+      state: state === 'wired' || state === 'planned' ? state : 'unsupported',
+    }]
+  })
 }
 
 function normalizeAttachments(value: unknown): SkillAttachment[] {
@@ -123,7 +152,6 @@ function normalizeDraft(value: unknown): SkillDraft | null {
     model: stringValue(fields.model),
     effort: stringValue(fields.effort),
     context: stringValue(fields.context),
-    agent: stringValue(fields.agent),
     attachments: normalizeAttachments(value.attachments ?? value.files),
     fieldKeys: new Set(Object.keys(fields)),
   }
@@ -161,10 +189,13 @@ async function loadSkills(preferredName = selectedName.value): Promise<void> {
   error.value = ''
   conflict.value = false
   try {
-    const resp = await props.backend.send<{ skills?: unknown[]; root?: string; ok?: boolean; error?: string }>(
-      'skills.list',
-      {}
-    )
+    const resp = await props.backend.send<{
+      skills?: unknown[]
+      agents?: unknown[]
+      root?: string
+      ok?: boolean
+      error?: string
+    }>('skills.list', {})
     if (!resp.ok || resp.payload?.ok === false) {
       error.value = responseMessage(resp, t('settings.skills.error-load'))
       return
@@ -173,6 +204,7 @@ async function loadSkills(preferredName = selectedName.value): Promise<void> {
       const skill = normalizeSummary(item)
       return skill ? [skill] : []
     })
+    agents.value = normalizeAgents(resp.payload?.agents)
     rootPath.value = stringValue(resp.payload?.root)
     const next = skills.value.find((skill) => skill.name === preferredName)?.name
       ?? skills.value[0]?.name
@@ -264,7 +296,6 @@ async function saveSkill(): Promise<void> {
       ['model', null, current.model],
       ['effort', null, current.effort],
       ['context', null, current.context],
-      ['agent', null, current.agent],
     ]
     for (const [key, legacyKey, value] of advanced) {
       if (
@@ -351,6 +382,71 @@ async function openSkillFolder(): Promise<void> {
   if (path) await window.agentTeam?.openPath?.(path)
 }
 
+const wiredAgents = computed(() => agents.value.filter((agent) => agent.state === 'wired'))
+
+/** Whether this agent currently receives this skill. */
+function delivers(skill: SkillSummary, agent: SkillAgent): boolean {
+  if (agent.state !== 'wired' || !skill.enabled) return false
+  return skill.targets === null || skill.targets.includes(agent.key)
+}
+
+function cellState(skill: SkillSummary, agent: SkillAgent): string {
+  if (agent.state !== 'wired') return agent.state
+  if (!skill.enabled) return 'off'
+  return delivers(skill, agent) ? 'on' : 'off'
+}
+
+function cellHint(skill: SkillSummary, agent: SkillAgent): string {
+  if (agent.state === 'planned') return t('settings.skills.matrix-planned-hint', { agent: agent.label })
+  if (agent.state === 'unsupported') {
+    return t('settings.skills.matrix-unsupported-hint', { agent: agent.label })
+  }
+  return t('settings.skills.matrix-cell', { skill: skill.name, agent: agent.label })
+}
+
+async function setTargets(skill: SkillSummary, next: string[] | null): Promise<void> {
+  if (busy.value) return
+  busy.value = true
+  error.value = ''
+  const previous = skill.targets
+  skill.targets = next
+  try {
+    const resp = await props.backend.send<{ ok?: boolean; error?: string }>('skills.set_targets', {
+      name: skill.name,
+      agents: next,
+    })
+    if (!resp.ok || resp.payload?.ok === false) {
+      skill.targets = previous
+      error.value = responseMessage(resp, t('settings.skills.error-targets'))
+      return
+    }
+    if (draft.value?.name === skill.name) draft.value.targets = next
+  } catch (err) {
+    skill.targets = previous
+    error.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    busy.value = false
+  }
+}
+
+/** Toggle one cell, materializing the implicit "every agent" list first. */
+async function toggleCell(skill: SkillSummary, agent: SkillAgent): Promise<void> {
+  if (agent.state !== 'wired' || !skill.enabled) return
+  const current = skill.targets ?? wiredAgents.value.map((entry) => entry.key)
+  const next = current.includes(agent.key)
+    ? current.filter((key) => key !== agent.key)
+    : [...current, agent.key]
+  // Back to every wired agent means no restriction at all, so the skill keeps
+  // following the agent list instead of freezing today's members.
+  const all = wiredAgents.value.every((entry) => next.includes(entry.key))
+  await setTargets(skill, all ? null : next)
+}
+
+async function setRow(skill: SkillSummary, all: boolean): Promise<void> {
+  if (!skill.enabled) return
+  await setTargets(skill, all ? null : [])
+}
+
 onMounted(() => void loadSkills())
 </script>
 
@@ -362,6 +458,20 @@ onMounted(() => void loadSkills())
         <p>{{ t('settings.skills.intro') }}</p>
       </div>
       <div class="skills-toolbar-actions">
+        <div class="skills-view-switch" role="group" :aria-label="t('settings.skills.view-matrix')">
+          <button
+            type="button"
+            :class="{ on: view === 'list' }"
+            :aria-pressed="view === 'list'"
+            @click="view = 'list'"
+          >{{ t('settings.skills.view-list') }}</button>
+          <button
+            type="button"
+            :class="{ on: view === 'matrix' }"
+            :aria-pressed="view === 'matrix'"
+            @click="view = 'matrix'"
+          >{{ t('settings.skills.view-matrix') }}</button>
+        </div>
         <button type="button" :disabled="loading || busy" @click="loadSkills()">
           {{ t('action.refresh') }}
         </button>
@@ -397,7 +507,75 @@ onMounted(() => void loadSkills())
       </div>
     </form>
 
-    <div class="skills-layout">
+    <section v-if="view === 'matrix'" class="skills-matrix">
+      <p class="skills-matrix-intro">{{ t('settings.skills.matrix-intro') }}</p>
+      <div v-if="filteredSkills.length === 0" class="skills-state">
+        {{ t('settings.skills.matrix-none') }}
+      </div>
+      <div v-else class="skills-matrix-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col" class="corner">{{ t('settings.skills.matrix-skill') }}</th>
+              <th
+                v-for="agent in agents"
+                :key="agent.key"
+                scope="col"
+                :class="agent.state"
+                :title="agent.label"
+              >{{ agent.key }}</th>
+              <th scope="col" class="bulk"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="skill in filteredSkills"
+              :key="skill.name"
+              :class="{ off: !skill.enabled, active: selectedName === skill.name }"
+            >
+              <th scope="row">
+                <button type="button" class="matrix-name" @click="selectSkill(skill.name)">
+                  {{ skill.name }}
+                </button>
+                <span v-if="!skill.enabled" class="matrix-note">
+                  {{ t('settings.skills.matrix-disabled-row') }}
+                </span>
+              </th>
+              <td
+                v-for="agent in agents"
+                :key="agent.key"
+                :class="cellState(skill, agent)"
+              >
+                <button
+                  type="button"
+                  :disabled="agent.state !== 'wired' || !skill.enabled || busy"
+                  :aria-pressed="delivers(skill, agent)"
+                  :aria-label="cellHint(skill, agent)"
+                  :title="cellHint(skill, agent)"
+                  @click="toggleCell(skill, agent)"
+                >{{ agent.state === 'unsupported' ? '—' : agent.state === 'planned' ? '·' : delivers(skill, agent) ? '✓' : '' }}</button>
+              </td>
+              <td class="bulk">
+                <button type="button" :disabled="!skill.enabled || busy" @click="setRow(skill, true)">
+                  {{ t('settings.skills.matrix-row-all') }}
+                </button>
+                <button type="button" :disabled="!skill.enabled || busy" @click="setRow(skill, false)">
+                  {{ t('settings.skills.matrix-row-none') }}
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <ul class="skills-matrix-legend">
+        <li><span class="swatch on">✓</span>{{ t('settings.skills.matrix-legend-on') }}</li>
+        <li><span class="swatch off"></span>{{ t('settings.skills.matrix-legend-off') }}</li>
+        <li><span class="swatch planned">·</span>{{ t('settings.skills.matrix-legend-planned') }}</li>
+        <li><span class="swatch unsupported">—</span>{{ t('settings.skills.matrix-legend-unsupported') }}</li>
+      </ul>
+    </section>
+
+    <div v-show="view === 'list'" class="skills-layout">
       <aside class="skills-library" :aria-label="t('settings.skills.library')">
         <input
           v-model="query"
@@ -501,7 +679,6 @@ onMounted(() => void loadSkills())
                 <label><span>{{ t('settings.skills.model') }}</span><input v-model="draft.model" /></label>
                 <label><span>{{ t('settings.skills.effort') }}</span><input v-model="draft.effort" /></label>
                 <label><span>{{ t('settings.skills.context') }}</span><input v-model="draft.context" /></label>
-                <label><span>{{ t('settings.skills.agent') }}</span><input v-model="draft.agent" /></label>
               </div>
             </details>
 
@@ -739,4 +916,116 @@ input:disabled { color: var(--text-muted); background: var(--bg-muted); }
   .skill-attachments { grid-template-columns: 1fr; }
   .skill-switches label + label { border-left: 0; border-top: 1px solid var(--border-muted); }
 }
+/* ── Capability matrix ─────────────────────────────────────────────────── */
+.skills-view-switch {
+  display: inline-flex;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-control);
+  overflow: hidden;
+}
+.skills-view-switch button {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 5px 11px;
+  font-size: 11px;
+}
+.skills-view-switch button.on { background: var(--bg-elevated); color: var(--text-bright); font-weight: 600; }
+.skills-matrix {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 9px;
+}
+.skills-matrix-intro { margin: 0; color: var(--text-secondary); font-size: 11px; }
+/* The matrix is the one place a horizontal scrollbar is correct: one column
+   per vendor cannot be reflowed without losing the comparison it exists for. */
+.skills-matrix-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-control);
+}
+.skills-matrix table { border-collapse: separate; border-spacing: 0; font-size: 11px; width: 100%; }
+.skills-matrix th,
+.skills-matrix td { border-bottom: 1px solid var(--border-muted); padding: 0; white-space: nowrap; }
+.skills-matrix thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg-muted);
+  color: var(--text-secondary);
+  font-weight: 600;
+  padding: 6px 7px;
+  text-align: center;
+}
+.skills-matrix thead th.planned,
+.skills-matrix thead th.unsupported { opacity: 0.55; }
+.skills-matrix thead th.corner,
+.skills-matrix tbody th {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--bg-muted);
+  text-align: left;
+  padding: 4px 9px 4px 7px;
+  min-width: 150px;
+}
+.skills-matrix thead th.corner { z-index: 3; }
+.skills-matrix tbody th { background: var(--bg-base); }
+.skills-matrix tr.active tbody th,
+.skills-matrix tbody tr.active th { color: var(--text-bright); }
+.skills-matrix .matrix-name {
+  border: 0;
+  background: transparent;
+  padding: 2px 0;
+  font-size: 11px;
+  color: inherit;
+  text-align: left;
+}
+.skills-matrix .matrix-name:hover { text-decoration: underline; background: transparent; }
+.skills-matrix .matrix-note { display: block; color: var(--text-secondary); font-size: 10px; }
+.skills-matrix tbody tr.off th,
+.skills-matrix tbody tr.off td { opacity: 0.5; }
+.skills-matrix td > button {
+  width: 100%;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 5px 7px;
+  min-width: 34px;
+  font-size: 11px;
+  line-height: 1.4;
+  text-align: center;
+}
+.skills-matrix td.on > button { color: var(--accent-success, #6BC77F); font-weight: 700; }
+.skills-matrix td.planned > button,
+.skills-matrix td.unsupported > button { color: var(--text-secondary); opacity: 0.6; }
+.skills-matrix td.unsupported { background: var(--bg-muted); }
+.skills-matrix td.bulk { padding: 3px 7px; display: flex; gap: 5px; }
+.skills-matrix td.bulk button { padding: 2px 7px; font-size: 10px; }
+.skills-matrix-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--text-secondary);
+  font-size: 10.5px;
+}
+.skills-matrix-legend li { display: flex; align-items: center; gap: 5px; }
+.skills-matrix-legend .swatch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 15px;
+  border: 1px solid var(--border-muted);
+  border-radius: 3px;
+}
+.skills-matrix-legend .swatch.on { color: var(--accent-success, #6BC77F); font-weight: 700; }
+.skills-matrix-legend .swatch.unsupported { background: var(--bg-muted); }
 </style>

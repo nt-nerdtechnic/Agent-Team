@@ -36,21 +36,22 @@ def test_create_list_and_get_skill(store: SkillsStore) -> None:
     assert created["skill"]["enabled"] is True
     assert created["skill"]["native_conflict"] is False
     assert store.runtime_root.joinpath("review-code").is_symlink()
-    assert store.list_skills() == {
-        "skills": [
-            {
-                "name": "review-code",
-                "description": "Review a change",
-                "enabled": True,
-                "native_conflict": False,
-                "revision": created["skill"]["revision"],
-                "valid": True,
-                "path": str(store.root / "review-code"),
-                "attachments": [],
-            }
-        ],
-        "root": str(store.root),
-    }
+    listed = store.list_skills()
+    assert listed["skills"] == [
+        {
+            "name": "review-code",
+            "description": "Review a change",
+            "enabled": True,
+            "native_conflict": False,
+            "targets": None,
+            "revision": created["skill"]["revision"],
+            "valid": True,
+            "path": str(store.root / "review-code"),
+            "attachments": [],
+        }
+    ]
+    assert listed["root"] == str(store.root)
+    assert {entry["key"] for entry in listed["agents"]} >= {"claude", "kimi", "pi", "opencode"}
 
 
 def test_save_preserves_unknown_nested_frontmatter_and_body(store: SkillsStore) -> None:
@@ -404,3 +405,92 @@ def test_broken_native_symlink_reports_name_conflict(tmp_path: Path) -> None:
 
     assert created["skill"]["native_conflict"] is True
     assert store.list_skills()["skills"][0]["native_conflict"] is True
+
+
+def test_targets_default_to_every_agent_and_stay_out_of_the_state_file(
+    store: SkillsStore,
+) -> None:
+    store.create_skill("shared", "Shared")
+
+    assert store.get_skill("shared")["skill"]["targets"] is None
+    assert store.targets_for("kimi") == ["shared"]
+    # No targets set means no "targets" key at all: an untouched library keeps
+    # the state file byte-identical to what earlier versions wrote.
+    assert json.loads(store.state_path.read_text(encoding="utf-8")) == {
+        "enabled": {"shared": True}
+    }
+
+
+def test_set_targets_restricts_delivery_and_survives_a_reload(store: SkillsStore) -> None:
+    store.create_skill("only-pi", "Pi only")
+    store.create_skill("everywhere", "All agents")
+
+    store.set_targets("only-pi", ["pi"])
+
+    assert store.targets_for("pi") == ["everywhere", "only-pi"]
+    assert store.targets_for("claude") == ["everywhere"]
+    assert json.loads(store.state_path.read_text(encoding="utf-8"))["targets"] == {
+        "only-pi": ["pi"]
+    }
+    assert store.list_skills()["skills"][1]["targets"] == ["pi"]
+
+
+def test_set_targets_none_restores_every_agent(store: SkillsStore) -> None:
+    store.create_skill("scoped", "Scoped")
+    store.set_targets("scoped", ["pi"])
+
+    store.set_targets("scoped", None)
+
+    assert store.targets_for("claude") == ["scoped"]
+    assert "targets" not in json.loads(store.state_path.read_text(encoding="utf-8"))
+
+
+def test_empty_targets_deliver_to_nobody(store: SkillsStore) -> None:
+    store.create_skill("parked", "Parked")
+
+    store.set_targets("parked", [])
+
+    assert store.targets_for("claude") == []
+    assert store.get_skill("parked")["skill"]["targets"] == []
+
+
+def test_disabled_skill_is_never_targeted(store: SkillsStore) -> None:
+    store.create_skill("off", "Off")
+    store.set_targets("off", ["pi"])
+
+    store.set_enabled("off", False)
+
+    assert store.targets_for("pi") == []
+    # Toggling enabled must not drop the target list it was carrying.
+    assert store.get_skill("off")["skill"]["targets"] == ["pi"]
+
+
+def test_set_targets_rejects_unusable_agent_keys(store: SkillsStore) -> None:
+    store.create_skill("guarded", "Guarded")
+
+    for agents in (["../escape"], ["UPPER"], [""], "pi", [1]):
+        with pytest.raises(SkillValidationError):
+            store.set_targets("guarded", agents)  # type: ignore[arg-type]
+
+    assert store.get_skill("guarded")["skill"]["targets"] is None
+
+
+def test_set_targets_requires_an_existing_skill(store: SkillsStore) -> None:
+    with pytest.raises(SkillNotFoundError):
+        store.set_targets("missing", ["pi"])
+
+
+def test_agent_targets_reports_every_vendors_capability() -> None:
+    states = {entry["key"]: entry["state"] for entry in skills_store.agent_targets()}
+
+    # Every CLI with a skills mechanism is wired to the managed library.
+    for key in (
+        "claude", "codex", "copilot", "qwen", "kimi", "grok",
+        "opencode", "pi", "muse", "cursor", "antigravity",
+    ):
+        assert states[key] == "wired", key
+    # No skills mechanism exists in these CLIs at all, so the matrix must show
+    # them as impossible rather than merely switched off.
+    assert states["kilo"] == "unsupported"
+    assert states["aider"] == "unsupported"
+    assert set(states.values()) <= {"wired", "planned", "unsupported"}

@@ -49,20 +49,42 @@ Field map (every entry verified against real session files):
                  ``event.record.quantity.{input,output,cached,reasoning}_tokens``
                  deduped on ``event.record.usage_id``
 
-Token mapping into TokenUsage (cache folded into input, reasoning into output)::
+Token mapping into TokenUsage — the four quantity fields are NOT added up;
+``cached_tokens`` and ``reasoning_tokens`` are breakdown detail already
+contained in the two totals::
 
-  input_tokens  = quantity.input_tokens  + quantity.cached_tokens
-  output_tokens = quantity.output_tokens + quantity.reasoning_tokens
+  input_tokens  = quantity.input_tokens
+  output_tokens = quantity.output_tokens
 
-UNVERIFIED — this addition and the requester_kind filter below are the two
-token decisions no real sample has ever exercised. Every
-``goal_usage_attribution`` row in every local session is ALL ZERO (they were
-recorded with ``--provider echo``), so ``_main_usage`` returns None for all of
-them and the entire token path has only ever run on synthetic test fixtures.
-The direction is a guess in both places, and the copilot reader is the standing
-warning: its fields looked equally addable and turned out to be pre-folded, so
-adding them would have doubled every number. Re-verify against a session from a
-REAL provider before trusting these figures — see ``_main_usage``.
+muse's own JSONL event schema is not published (``goal_usage_attribution``
+appears nowhere in Meta's docs), so this is INFERRED from the semantics of the
+Meta Model API that muse runs on — not from a muse definition. The three
+upstream statements it rests on:
+
+* https://dev.meta.ai/docs/prompt-caching.md — "``cached_tokens`` is a subset
+  of your input tokens, not an extra charge. The cached prefix is still
+  counted once in ``input_tokens``".
+* https://dev.meta.ai/docs/reasoning.md — "Reasoning tokens count toward both
+  your output-token limit and billed completion tokens".
+* https://dev.meta.ai/docs/protocols/responses.md — the usage example is
+  ``{input_tokens: 69, output_tokens: 163, total_tokens: 232}`` (69 + 163 =
+  232), with the breakdown living in ``input_tokens_details.cached_tokens``
+  and ``output_tokens_details.reasoning_tokens``. muse's four flat fields are
+  that object with the ``*_details`` nesting flattened away.
+
+Same-shaped precedent: copilot's ``assistant_usage_events.input_tokens``
+likewise already includes cache reads (measured: 19898 = 9 + 0 + 19889), and
+the additive fold there over-reported by roughly double until it was changed
+to pass the fields through as-is. (Anthropic is the counterexample that stops
+this being generalised: its cache fields ARE additive by documented
+definition, so the answer has to come from the provider behind each CLI.)
+
+STILL TO VERIFY, and the only thing that turns the inference into fact: run a
+real muse session against a NON-echo provider and confirm
+``cached_tokens <= input_tokens`` and ``reasoning_tokens <= output_tokens``.
+Every ``goal_usage_attribution`` row in every local session is ALL ZERO (they
+were recorded with ``--provider echo``), so ``_main_usage`` returns None for
+all of them and the token path has only ever run on synthetic fixtures.
 
 Only rows with ``event.record.owner.requester_kind == "main"`` are counted:
 a subagent's usage is attributed into the PARENT log too, and the child's own
@@ -107,7 +129,7 @@ from ..log_readers.base import (
     read_jsonl_tail,
     user_prompt_text,
 )
-from .base import Dep, VendorSpec, command_text
+from .base import Dep, SkillsWiring, VendorSpec, command_text
 
 log = logging.getLogger("agent_team_backend.log_readers.muse")
 
@@ -259,22 +281,25 @@ def _main_usage(event: dict) -> tuple[str, int, int] | None:
     ``goal_usage_attribution``; None for every other event, for a subagent's
     attribution row, and for an all-zero row (nothing to add).
 
-    NOT VERIFIED AGAINST REAL DATA — two guesses live in this function:
+    ``cached_tokens`` and ``reasoning_tokens`` are deliberately NOT added:
+    per the Meta Model API docs cited in the module docstring, the cached
+    prefix is a subset of ``input_tokens`` and reasoning is billed inside
+    ``output_tokens``, so adding either would double-count. That is inferred
+    from the upstream API (muse's own event schema is unpublished) plus the
+    measured copilot precedent — verify it by running a session against a
+    non-echo provider and checking ``cached_tokens <= input_tokens`` and
+    ``reasoning_tokens <= output_tokens``.
 
-    * the ADDITIVE fold (``cached_tokens`` into input, ``reasoning_tokens``
-      into output) assumes the quantity fields are disjoint components. If muse
-      instead reports pre-folded totals — which is exactly what copilot turned
-      out to do, measured — every number here is doubled.
-    * the ``requester_kind == "main"`` filter assumes subagent usage arrives
-      under a different value. Only ``"main"`` has ever been observed locally;
-      no subagent attribution row has been seen at all, so nothing proves this
-      filter drops anything (or that it does not drop rows it should keep).
+    The ``requester_kind == "main"`` filter remains UNVERIFIED: it assumes
+    subagent usage arrives under a different value. Only ``"main"`` has ever
+    been observed locally; no subagent attribution row has been seen at all,
+    so nothing proves this filter drops anything (or that it does not drop
+    rows it should keep).
 
     Both are unexercised because every local ``goal_usage_attribution`` row is
     all zero (``--provider echo`` runs), which this function rejects before
-    either decision matters. Re-verify both against a session recorded with a
-    real provider; do not treat the tests covering them as evidence — their
-    fixtures were written from the same assumptions.
+    either decision matters; the tests covering them are fixtures written from
+    the same reasoning, not evidence.
     """
     if event.get("kind") != "goal_usage_attribution":
         return None
@@ -290,10 +315,8 @@ def _main_usage(event: dict) -> tuple[str, int, int] | None:
     usage_id = str(record.get("usage_id") or "")
     if not usage_id:
         return None
-    input_tokens = _int(quantity.get("input_tokens")) + _int(
-        quantity.get("cached_tokens"))
-    output_tokens = _int(quantity.get("output_tokens")) + _int(
-        quantity.get("reasoning_tokens"))
+    input_tokens = _int(quantity.get("input_tokens"))
+    output_tokens = _int(quantity.get("output_tokens"))
     if input_tokens == 0 and output_tokens == 0:
         return None
     return usage_id, input_tokens, output_tokens
@@ -631,6 +654,14 @@ def _session_exists(workspace_path: str, session_id: str) -> bool:
 
 SPEC = VendorSpec(
     key="muse",
+    # Verified 2026-08-15: `muse skills list --source user` reports skills
+    # from ~/.claude/skills and ~/.agents/skills. Only HOME relocates those,
+    # so this is the one vendor whose shim exists for skills alone.
+    skills_supported=True,
+    skills_wiring=SkillsWiring(
+        root_env="HOME",
+        skills_rel=(".agents", "skills"),
+    ),
     label="Muse Code",
     resume_id_from_command=_resume_id_from_command,
     session_exists=_session_exists,

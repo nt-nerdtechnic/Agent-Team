@@ -111,7 +111,7 @@ import sqlite3
 import sys
 import time
 
-from .base import Dep, McpServerConfig, McpValue, McpWiring, VendorSpec, command_text
+from .base import Dep, McpServerConfig, McpValue, McpWiring, SkillsWiring, VendorSpec, command_text
 from ..usage_common import (
     HTTP_TIMEOUT,
     _num,
@@ -1151,6 +1151,18 @@ def _install_hooks(port_file: str) -> Any:
 
 SPEC = VendorSpec(
     key="copilot",
+    # Verified 2026-08-15: `copilot skill list` under a relocated COPILOT_HOME
+    # lists exactly the skills below <home>/skills.
+    skills_supported=True,
+    skills_wiring=SkillsWiring(
+        root_env="COPILOT_HOME",
+        root_home=(".copilot",),
+        skills_rel=("skills",),
+        # Verified the hard way: with COPILOT_HOME set, copilot stops scanning
+        # ~/.agents/skills, so those skills are linked into the leaf or the
+        # user silently loses them.
+        discovery_home=((".agents", "skills"),),
+    ),
     label="Copilot CLI",
     # Same inline `mcpServers` document claude takes, under a flag documented
     # as augmenting ~/.copilot/mcp-config.json for the session and repeatable —

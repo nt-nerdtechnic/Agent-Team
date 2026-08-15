@@ -1755,20 +1755,22 @@ def _running_regular_terminals(agent_key: str) -> list[str]:
     return running
 
 
-def _slot_needs_login(agent_key: str, slot_id: str) -> bool:
-    """True when restoring this slot leaves the CLI unable to authenticate, so
-    the caller should start a sign-in right after the switch.
+def _slot_login_reason(agent_key: str, slot_id: str) -> str | None:
+    """Why restoring this slot leaves the CLI unable to authenticate, or None
+    when it can. The caller starts a sign-in for any reason it returns.
 
-    Three cases: the slot holds no secret at all (restore() then CLEARS the live
-    credentials — an empty slot signs the user out), claude's snapshot was wiped
-    in place by Claude Code (both tokens emptied after an ``invalid_grant``, so
-    it restores as a non-credential), or claude's snapshot sat
-    parked long enough for its access token to expire. Nothing renews a parked
-    slot — the CLI is the only refresher — so the expired token goes live and
-    Claude Code renews it from the restored refresh token on its next run;
-    offering a sign-in is the fallback for when that refresh token is dead too.
-    A claude login with no OAuth block (long-lived token) carries nothing to
-    judge, so it counts as usable. Blocking reads (Keychain) — thread it."""
+    Two shapes, and the difference is worth telling the user. ``signed-out``:
+    the slot holds no secret at all (restore() then CLEARS the live credentials
+    — an empty slot signs the user out), or claude's snapshot was wiped in place
+    by Claude Code (both tokens emptied after an ``invalid_grant``, so it
+    restores as a non-credential). ``expired``: claude's snapshot sat parked
+    long enough for its access token to expire. Nothing renews a parked slot —
+    the CLI is the only refresher — so the expired token goes live and Claude
+    Code renews it from the restored refresh token on its next run; offering a
+    sign-in is the fallback for when that refresh token is dead too, which is
+    why this case must not be announced as "signed out". A claude login with no
+    OAuth block (long-lived token) carries nothing to judge, so it counts as
+    usable. Blocking reads (Keychain) — thread it."""
     from . import app
     from .credential_vault import _claude_credential_is_wiped
     from .usage_service import claude_token_expired, parse_claude_credentials
@@ -1776,17 +1778,19 @@ def _slot_needs_login(agent_key: str, slot_id: str) -> bool:
     try:
         creds = app.credential_vault.read_slot(agent_key, slot_id)
     except Exception:  # noqa: BLE001 — a read failure must not invent a logout
-        return False
+        return None
     if creds.secret is None:
-        return True
+        return "signed-out"
     if agent_key != "claude":
-        return False
+        return None
     # A wiped blob parses as "no OAuth block to judge", which the expiry check
     # below would pass as usable — catch it before that.
     if _claude_credential_is_wiped(creds.secret):
-        return True
+        return "signed-out"
     oauth = parse_claude_credentials(creds.secret)
-    return oauth is not None and claude_token_expired(oauth)
+    if oauth is not None and claude_token_expired(oauth):
+        return "expired"
+    return None
 
 
 @handler("cli_profiles.set_default")
@@ -1924,8 +1928,8 @@ async def cli_profiles_set_default(session: "Session", msg_id: str, msg_type: st
         # live: an empty or dead-token slot signs the CLI out, and the caller
         # opens a sign-in instead of leaving the user at a "not logged in"
         # prompt they have to resolve by hand.
-        needs_login = await vault_to_thread(
-            _slot_needs_login, agent_key, profile_id or DEFAULT_SLOT_ID
+        login_reason = await vault_to_thread(
+            _slot_login_reason, agent_key, profile_id or DEFAULT_SLOT_ID
         )
 
         try:
@@ -1953,7 +1957,14 @@ async def cli_profiles_set_default(session: "Session", msg_id: str, msg_type: st
             )
             return
         await session.send_json(
-            make_response(msg_id, msg_type, {"defaults": defaults, "needsLogin": needs_login})
+            make_response(msg_id, msg_type, {
+                "defaults": defaults,
+                "needsLogin": login_reason is not None,
+                # Which of the two is on screen decides whether the sign-in
+                # pane reads as "you were logged out" or "this needs
+                # re-authenticating" — the latter is routine after parking.
+                "needsLoginReason": login_reason,
+            })
         )
     # `forced` is what makes every window restart its panes of this agent. A
     # hot-swap agent's panes must never be restarted, so the flag stays False
@@ -1967,7 +1978,22 @@ async def cli_profiles_set_default(session: "Session", msg_id: str, msg_type: st
     # to re-fetch now so the badge reflects the switch immediately.
     from .usage_service import service
 
-    service.request_refresh()
+    if agent_key == "claude":
+        # A Claude read boots a whole CLI, so "immediately" is tens of seconds
+        # away. Announce the new active account and mark it as being read, or
+        # the badge sits on the outgoing account's numbers with no sign why.
+        # An account that has to sign in first gets the pointer but not the
+        # promise: "reading its quota" next to a login pane is a contradiction.
+        try:
+            await service.announce_claude_switch(profile_id, reading=login_reason is None)
+        except Exception:  # noqa: BLE001
+            # The switch itself already succeeded and was answered. Letting this
+            # escape would send a second, contradictory frame for a message the
+            # caller has resolved; the worst real cost is a badge that waits for
+            # the next poll, which is where it was before this announcement.
+            log.exception("usage: failed to announce the claude account switch")
+    else:
+        service.request_refresh()
 
 
 # ── Agent session / orphans (agent.*) ───────────────────────────────────────
@@ -2272,6 +2298,28 @@ async def skills_set_enabled(
         app.skills_store.set_enabled,
         name,
         payload.get("enabled"),
+        name=name,
+    )
+    if result is not None:
+        await session.send_json(make_response(msg_id, msg_type, result))
+
+
+@handler("skills.set_targets")
+async def skills_set_targets(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Restrict one skill to a set of agents; a null ``agents`` means all."""
+    from . import app
+
+    name = payload.get("name", "")
+    agents = payload.get("agents")
+    result = await _run_skill_operation(
+        session,
+        msg_id,
+        msg_type,
+        app.skills_store.set_targets,
+        name,
+        agents,
         name=name,
     )
     if result is not None:

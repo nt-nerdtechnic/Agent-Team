@@ -31,7 +31,7 @@ import os
 import sys
 import time
 
-from .base import Dep, McpServerConfig, McpValue, McpWiring, VendorSpec
+from .base import Dep, McpServerConfig, McpValue, McpWiring, SkillsWiring, VendorSpec
 from ..usage_common import (
     HTTP_TIMEOUT,
     _epoch_to_iso,
@@ -739,6 +739,14 @@ def _session_path(workspace_path: str, session_id: str) -> Path:
 
 SPEC = VendorSpec(
     key="antigravity",
+    # Verified 2026-08-15: `gemini skills list` reports locations under
+    # ~/.gemini/skills — not the ~/.gemini/antigravity-cli/skills that other
+    # shared configs assume. Rides the HOME shim its MCP wiring builds.
+    skills_supported=True,
+    skills_wiring=SkillsWiring(
+        root_env="HOME",
+        skills_rel=(".gemini", "skills"),
+    ),
     label="Antigravity",
     # No flag, no config variable, and no config-dir variable either — the
     # config root is hardcoded under the home directory, shared with the

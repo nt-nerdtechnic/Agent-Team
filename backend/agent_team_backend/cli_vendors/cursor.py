@@ -51,7 +51,7 @@ import sys
 import time
 
 from ..log_readers.base import ActivityEvent, IncrementalParseResult, LogReader, TokenUsage
-from .base import Dep, McpServerConfig, McpValue, McpWiring, VendorSpec, command_text
+from .base import Dep, McpServerConfig, McpValue, McpWiring, SkillsWiring, VendorSpec, command_text
 from ..usage_common import (
     HTTP_TIMEOUT,
     _KEYCHAIN_COOLDOWN_S,
@@ -544,6 +544,12 @@ def _session_exists(workspace_path: str, session_id: str) -> bool:
 
 SPEC = VendorSpec(
     key="cursor",
+    # Verified 2026-08-15 (docs): .cursor/skills and .agents/skills in the
+    # project, ~/.cursor/skills globally, and no relocation variable at all —
+    # the same corner its MCP wiring is in, so the workspace file is again the
+    # only surface. Its CLI is also documented not to load ~/.agents/skills.
+    skills_supported=True,
+    skills_wiring=SkillsWiring(project_rel=(".cursor", "skills")),
     label="Cursor CLI",
     # The one CLI with no spawn-time surface — no MCP flag, no config
     # variable — so its per-project config file is the only way in. A bare

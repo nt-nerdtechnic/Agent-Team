@@ -44,7 +44,7 @@ from pathlib import Path
 
 import re
 
-from .base import Dep, VendorSpec, command_text
+from .base import Dep, SkillsWiring, VendorSpec, command_text
 from . import _protocols
 from ..usage_common import HTTP_TIMEOUT, _epoch_to_iso, _num, _snapshot, _window, parse_retry_after
 from ..log_readers.base import (
@@ -783,6 +783,10 @@ def _session_exists(workspace_path: str, session_id: str) -> bool:
 
 SPEC = VendorSpec(
     key="pi",
+    skills_supported=True,
+    # --skill takes one skill (file or directory) and is repeated; it adds to
+    # discovery rather than replacing it (--no-skills is the opt-out).
+    skills_wiring=SkillsWiring(flag="--skill", flag_takes="each"),
     label="Pi",
     # Late-bound (module global at call time) so tests can monkeypatch.
     fetch_usage=lambda home: fetch_pi(home),

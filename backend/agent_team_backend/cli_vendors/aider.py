@@ -575,6 +575,8 @@ def _session_lookup_path(workspace_path: str, session_id: str) -> Path:
 
 SPEC = VendorSpec(
     key="aider",
+    # Verified 2026-08-15: aider's package never mentions "skill".
+    skills_supported=False,
     label="Aider",
     session_path=_session_lookup_path,
     home_env_vars=("AIDER_CHAT_HISTORY_FILE", "AIDER_INPUT_HISTORY_FILE"),

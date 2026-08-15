@@ -72,7 +72,7 @@ MAX_REPORTED_PATHS = 5
 # Mirrors the path built in plugins/builtin/navide_skills/skills_wiring.py; the
 # plugin has no constant to import and importing a plugin from here would be
 # the wrong direction.
-CLAUDE_SKILLS_RUNTIME_DIR = "runtime/claude-managed-skills"
+SKILLS_VIEWS_RUNTIME_DIR = "runtime/skills-views"
 
 MANUAL_LOGS_DIRNAME = "manual"
 PIPELINE_LOG_FILE = "pipeline.log"
@@ -477,7 +477,7 @@ def _appdata_and_electron_groups(
             # dir: git_askpass_helper.py lives beside them and its path is
             # resolved once at import, so removing it breaks every
             # authenticated git operation until the backend restarts.
-            paths=[root / SKILLS_RUNTIME_DIR, root / CLAUDE_SKILLS_RUNTIME_DIR],
+            paths=[root / SKILLS_RUNTIME_DIR, root / SKILLS_VIEWS_RUNTIME_DIR],
             note="Skill projections; rebuilt on the next app start.",
         ),
         errors,

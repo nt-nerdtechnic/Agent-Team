@@ -26,10 +26,34 @@ SKILL_FILE = "SKILL.md"
 SKILL_FILE_SIZE_LIMIT = 1_000_000
 _STATE_FILE_SIZE_LIMIT = 1_000_000
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_AGENT_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 _FRONTMATTER_RE = re.compile(
     r"\A---[ \t]*\r?\n(?P<yaml>.*?)^---[ \t]*(?:\r?\n|\Z)(?P<body>.*)\Z",
     re.MULTILINE | re.DOTALL,
 )
+
+
+def agent_targets() -> list[dict[str, Any]]:
+    """Every CLI vendor and what the managed library can actually do with it.
+
+    Three states, because "off" and "impossible" must not look alike in the
+    UI: ``wired`` (a spawn carries the library to it), ``planned`` (the CLI
+    has skills but Navide does not wire them yet), ``unsupported`` (no skills
+    mechanism exists to wire).
+    """
+    from .cli_vendors.registry import VENDORS
+
+    agents: list[dict[str, Any]] = []
+    for key in sorted(VENDORS):
+        spec = VENDORS[key]
+        if spec.skills_wiring is not None:
+            state = "wired"
+        elif spec.skills_supported:
+            state = "planned"
+        else:
+            state = "unsupported"
+        agents.append({"key": key, "label": spec.label, "state": state})
+    return agents
 
 
 class SkillsStoreError(Exception):
@@ -88,6 +112,7 @@ class SkillsStore:
     def list_skills(self) -> dict[str, Any]:
         self._ensure_safe_root()
         state = self._read_state()
+        targets = self._read_targets()
         skills: list[dict[str, Any]] = []
         if self._root.exists():
             if self._root.is_symlink() or not self._root.is_dir():
@@ -97,7 +122,7 @@ class SkillsStore:
                     continue
                 try:
                     name = self._validate_name(entry.name)
-                    skill = self._read_skill(name, state)
+                    skill = self._read_skill(name, state, targets)
                     skills.append(self._summary(skill))
                 except SkillsStoreError as exc:
                     if _NAME_RE.fullmatch(entry.name):
@@ -107,16 +132,17 @@ class SkillsStore:
                                 "description": "",
                                 "enabled": bool(state.get(entry.name, True)),
                                 "native_conflict": self._native_conflict(entry.name),
+                                "targets": targets.get(entry.name),
                                 "valid": False,
                                 "error": str(exc),
                                 "path": str(entry),
                             }
                         )
-        return {"skills": skills, "root": str(self._root)}
+        return {"skills": skills, "root": str(self._root), "agents": agent_targets()}
 
     def get_skill(self, name: str) -> dict[str, Any]:
         self._ensure_safe_root()
-        return {"skill": self._read_skill(name, self._read_state())}
+        return {"skill": self._read_skill(name, self._read_state(), self._read_targets())}
 
     def create_skill(self, name: str, description: str = "") -> dict[str, Any]:
         self._ensure_safe_root()
@@ -175,9 +201,46 @@ class SkillsStore:
         self._require_safe_skill_dir(name)
         state = self._read_state()
         state[name] = enabled
-        self._write_state(state)
+        self._write_state(state, self._read_targets())
         self._refresh_runtime_projection()
         return self.get_skill(name)
+
+    def set_targets(self, name: str, agents: list[str] | None) -> dict[str, Any]:
+        """Restrict ``name`` to ``agents``, or to every wired agent when None.
+
+        Stored beside the enabled flags rather than in SKILL.md: which of the
+        user's CLIs a skill goes to is this machine's routing, not part of the
+        portable skill, and writing it into the file would make an exported
+        skill carry another machine's agent list.
+        """
+        self._ensure_safe_root()
+        name = self._validate_name(name)
+        self._require_safe_skill_dir(name)
+        targets = self._read_targets()
+        if agents is None:
+            targets.pop(name, None)
+        else:
+            targets[name] = self._validate_agents(agents)
+        self._write_state(self._read_state(), targets)
+        return self.get_skill(name)
+
+    def targets_for(self, agent_key: str) -> list[str]:
+        """Enabled skill names this agent receives, in directory order."""
+        self._ensure_safe_root()
+        state = self._read_state()
+        targets = self._read_targets()
+        names: list[str] = []
+        if not self._root.is_dir():
+            return names
+        for entry in sorted(self._root.iterdir(), key=lambda path: path.name):
+            name = entry.name
+            if not _NAME_RE.fullmatch(name) or not state.get(name, True):
+                continue
+            allowed = targets.get(name)
+            if allowed is not None and agent_key not in allowed:
+                continue
+            names.append(name)
+        return names
 
     def delete_skill(self, name: str) -> dict[str, Any]:
         self._ensure_safe_root()
@@ -236,7 +299,12 @@ class SkillsStore:
         except Exception as exc:  # noqa: BLE001 - projection is derived and retryable
             log.warning("Managed Skills saved but runtime projection refresh failed: %s", exc)
 
-    def _read_skill(self, name: str, state: dict[str, bool]) -> dict[str, Any]:
+    def _read_skill(
+        self,
+        name: str,
+        state: dict[str, bool],
+        targets: dict[str, list[str]] | None = None,
+    ) -> dict[str, Any]:
         name = self._validate_name(name)
         skill_dir = self._require_safe_skill_dir(name)
         skill_file = skill_dir / SKILL_FILE
@@ -261,6 +329,7 @@ class SkillsStore:
             "body": body,
             "enabled": bool(state.get(name, True)),
             "native_conflict": self._native_conflict(name),
+            "targets": (targets or {}).get(name),
             "revision": hashlib.sha256(raw).hexdigest(),
             "valid": True,
             "path": str(skill_dir),
@@ -302,7 +371,7 @@ class SkillsStore:
             raise SkillValidationError(f"{SKILL_FILE} exceeds the 1 MB size limit")
         self._atomic_write(path, encoded)
 
-    def _read_state(self) -> dict[str, bool]:
+    def _read_state_document(self) -> dict[str, Any]:
         if not self._state_path.exists():
             return {}
         if self._state_path.is_symlink() or not self._state_path.is_file():
@@ -313,7 +382,13 @@ class SkillsStore:
             raw = json.loads(self._state_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise SkillValidationError(f"invalid skills state: {exc}") from exc
-        enabled = raw.get("enabled") if isinstance(raw, dict) else None
+        return raw if isinstance(raw, dict) else {}
+
+    def _read_state(self) -> dict[str, bool]:
+        raw = self._read_state_document()
+        if not raw:
+            return {}
+        enabled = raw.get("enabled")
         if not isinstance(enabled, dict):
             raise SkillValidationError("skills state must contain an enabled object")
         clean: dict[str, bool] = {}
@@ -324,8 +399,38 @@ class SkillsStore:
             clean[name] = value
         return clean
 
-    def _write_state(self, state: dict[str, bool]) -> None:
-        payload = json.dumps({"enabled": state}, indent=2, ensure_ascii=False).encode("utf-8")
+    def _read_targets(self) -> dict[str, list[str]]:
+        """Per-skill agent allow-lists; a missing entry means "every agent"."""
+        raw = self._read_state_document().get("targets")
+        if raw is None:
+            return {}
+        if not isinstance(raw, dict):
+            raise SkillValidationError("skills targets must be an object")
+        clean: dict[str, list[str]] = {}
+        for name, agents in raw.items():
+            self._validate_name(name)
+            clean[name] = self._validate_agents(agents)
+        return clean
+
+    @staticmethod
+    def _validate_agents(agents: Any) -> list[str]:
+        if not isinstance(agents, list):
+            raise SkillValidationError("skill targets must be a list of agent keys")
+        clean: list[str] = []
+        for agent in agents:
+            if not isinstance(agent, str) or not _AGENT_RE.fullmatch(agent):
+                raise SkillValidationError("invalid agent key in skill targets")
+            if agent not in clean:
+                clean.append(agent)
+        return clean
+
+    def _write_state(
+        self, state: dict[str, bool], targets: dict[str, list[str]] | None = None
+    ) -> None:
+        document: dict[str, Any] = {"enabled": state}
+        if targets:
+            document["targets"] = targets
+        payload = json.dumps(document, indent=2, ensure_ascii=False).encode("utf-8")
         self._atomic_write(self._state_path, payload)
 
     def _atomic_write(self, path: Path, payload: bytes) -> None:

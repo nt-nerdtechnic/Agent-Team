@@ -555,6 +555,11 @@ class UsageService:
         self.account_snapshots: dict[str, dict[str, dict]] = {}
         self._last_good: dict[str, dict[str, dict]] = {}
         self._active_claude_slot = "__default__"
+        # Bumped by every announced account switch. A poll cycle reads who is
+        # active once, near its start, and then spends tens of seconds in the
+        # CLI; comparing this counter tells it whether that answer is still
+        # true before it writes anything based on it.
+        self._switch_epoch = 0
         self._cache_path = cache_path
         self._active_claude_slot_reader = active_claude_slot_reader
         self._blocked_until: dict[object, float] = {}
@@ -840,6 +845,49 @@ class UsageService:
         self._blocked_until.clear()
         self._wake.set()
 
+    async def announce_claude_switch(
+        self, slot_id: str | None, *, reading: bool = True
+    ) -> None:
+        """Point the badges at the account that just became active, and say its
+        figure is still being read.
+
+        The active slot is otherwise only learned inside ``poll_once``, so
+        every badge kept showing the *outgoing* account's numbers from the
+        moment the swap returned until the end of the next cycle — with nothing
+        on screen saying a read was in flight. That gap is long: reading
+        Claude's panel boots a whole Claude Code, and the refresh this requests
+        queues behind a cycle already running. Long enough that the switch
+        reads as having done nothing. So flip the pointer now and mark the
+        incoming snapshot as being refreshed; whatever ``poll_once`` writes for
+        the slot replaces the snapshot and drops the mark with it.
+
+        The mark is only set when the poller is enabled — with no cycle coming,
+        promising one would leave the wait on screen forever. `reading` is the
+        caller's way of saying a read is not what happens next: switching onto
+        an account that has to sign in first would otherwise promise a figure
+        while a login pane opens.
+
+        The epoch bump is what stops a poll cycle already in flight from
+        undoing all of this — see `poll_once`."""
+        slot = slot_id or "__default__"
+        self._active_claude_slot = slot
+        self._switch_epoch += 1
+        account = self.account_snapshots.setdefault("claude", {})
+        if slot not in account:
+            # Never polled (or polled before this account existed): give it the
+            # same last-good-or-nothing snapshot a parked slot gets, so the card
+            # has something to carry the mark.
+            self._record_parked_claude_slot(slot)
+        if self.enabled and reading:
+            account[slot]["refreshPending"] = True
+        else:
+            account[slot].pop("refreshPending", None)
+        self.request_refresh()
+        from . import app
+        from .ipc import make_event
+
+        await app.broadcast(make_event("usage.changed", self.payload()))
+
     async def _harvest_active_slots(self) -> None:
         """Opportunistic harvest: (a) when an agent's ACTIVE account slot is
         still empty but live credentials exist (the user just logged in inside
@@ -888,6 +936,10 @@ class UsageService:
         # every account independently without switching the active profile.
         await self._harvest_active_slots()
         now = time.monotonic()
+        # Everything below about Claude rests on this answer to "who is active".
+        # Capture the epoch first: if a switch lands while the cycle is out
+        # reading the CLI, the answer is stale and must not be written back.
+        switch_epoch = self._switch_epoch
         claude_accounts = await self._claude_credentials_by_slot()
         cache_changed = False
         # Claude quota comes from the CLI's own `/usage` panel — Claude Code
@@ -901,9 +953,10 @@ class UsageService:
             claude_active, credentials = claude_accounts
             parked_slots = [s for s in credentials if s != claude_active]
         claude_coros = {claude_active: lambda: fetch_claude(home)}
-        for slot_id in parked_slots:
-            self._record_parked_claude_slot(slot_id)
-        self._active_claude_slot = claude_active
+        if self._switch_epoch == switch_epoch:
+            for slot_id in parked_slots:
+                self._record_parked_claude_slot(slot_id)
+            self._active_claude_slot = claude_active
         claude_tasks: dict[str, asyncio.Task] = {}
         for slot_id, coro in claude_coros.items():
             key = ("claude", slot_id)
@@ -945,7 +998,25 @@ class UsageService:
                 cooldown = CLAUDE_CLI_READ_INTERVAL
             if cooldown:
                 self._blocked_until[("claude", slot_id)] = time.monotonic() + cooldown
+            if self._switch_epoch != switch_epoch:
+                # The account changed while this read was running. The CLI
+                # reports whoever is signed in *now*, so filing this figure
+                # under the slot that was active when the read started would
+                # attribute one account's quota to another — and persist it.
+                # Drop it; the switch already asked for another cycle.
+                log.info("usage: discarding claude read for %s — account "
+                         "switched mid-read", slot_id)
+                continue
             cache_changed = self._record_claude_snapshot(slot_id, snap) or cache_changed
+        if self._switch_epoch == switch_epoch:
+            # Any slot this cycle did not write cannot have a read in flight —
+            # clear a mark left by an announcement the poller could not act on
+            # (an unresolvable ledger leaves every named slot untouched), or it
+            # would say "reading" forever.
+            touched = set(parked_slots) | set(claude_coros)
+            for slot_id, snapshot in self.account_snapshots.get("claude", {}).items():
+                if slot_id not in touched:
+                    snapshot.pop("refreshPending", None)
         for provider, task in tasks.items():
             try:
                 snap = await task

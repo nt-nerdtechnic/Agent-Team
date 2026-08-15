@@ -309,6 +309,8 @@ def _session_exists(workspace_path: str, session_id: str) -> bool:
 
 SPEC = VendorSpec(
     key="kilo",
+    # Verified 2026-08-15: kilo's bundle carries no SKILL.md handling at all.
+    skills_supported=False,
     label="Kilo Code",
     # An OpenCode fork: identical config document, its own variable.
     mcp_wiring=McpWiring(

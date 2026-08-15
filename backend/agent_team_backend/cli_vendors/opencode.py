@@ -40,7 +40,7 @@ from pathlib import Path
 
 import re
 
-from .base import Dep, McpServerConfig, McpValue, McpWiring, VendorSpec, command_text
+from .base import Dep, McpServerConfig, McpValue, McpWiring, SkillsWiring, VendorSpec, command_text
 from . import _protocols
 from ..usage_common import HTTP_TIMEOUT, _epoch_to_iso, _num, _snapshot, _window, parse_retry_after
 from ..log_readers.base import (
@@ -654,6 +654,13 @@ def _session_exists(workspace_path: str, session_id: str) -> bool:
 
 SPEC = VendorSpec(
     key="opencode",
+    skills_supported=True,
+    # skills.paths registers extra roots; opencode deep-merges this document
+    # over the user's own config, so their skills keep loading.
+    skills_wiring=SkillsWiring(
+        config_env="OPENCODE_CONFIG_CONTENT",
+        config_paths_key=("skills", "paths"),
+    ),
     label="OpenCode",
     # No MCP flag; instead a whole config document read out of
     # OPENCODE_CONFIG_CONTENT and deep-merged over the user's files, so nothing
