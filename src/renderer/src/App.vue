@@ -518,6 +518,22 @@ const workspaceSelected = ref<boolean>(
 // first window to ask gets the list and shows the restore prompt.
 watch(currentWorkspace, (v) => { window.agentTeam?.reportWorkspace?.(v) }, { immediate: true })
 
+// Windows booted with a workspace URL param (Finder "Open With", the macOS
+// Quick Action, CLI path args, crash-restore) skip Welcome's click handler,
+// which is otherwise the only place that records a recent entry — without this
+// an externally opened folder never shows up in the Recent list. Wait for the
+// backend to accept requests, then record it once.
+if (_bootWorkspace) {
+  let bootTouched = false
+  const touchBootWorkspace = (): void => {
+    if (bootTouched || backend.status.value !== 'connected') return
+    bootTouched = true
+    void touchRecentWorkspace(_bootWorkspace)
+  }
+  touchBootWorkspace()
+  watch(() => backend.status.value, touchBootWorkspace)
+}
+
 // Feed the native File > Open Recent submenu: push a slim list to main whenever
 // the recent-workspaces cache changes.
 watch(recentWorkspaces, (list) => {
@@ -5004,6 +5020,7 @@ async function onMenuAction(action: string): Promise<void> {
     // Same folder already open in another window → focus it instead of
     // duplicating (two windows on one folder means conflicting PTY/git ops).
     if (await window.agentTeam?.focusWorkspaceWindow?.(picked)) return
+    void touchRecentWorkspace(picked) // bump to front of recents
     if (!currentWorkspace.value) {
       // Welcome is showing — open in place via Welcome's @select handler.
       onWorkspaceSelected(picked)
