@@ -161,6 +161,34 @@ export function encodeShiftEnter(agentKey?: string): string {
 /** Clipboard bytes per `terminal.input` write, matching App.vue's injectText. */
 const PASTE_CHUNK = 512
 
+/**
+ * Mouse tracking (and focus reporting) a previous session may have left on.
+ *
+ * Stale state here forwards events to the process's stdin before it has had a
+ * chance to re-enable what it actually wants, so it is cleared whenever a pane
+ * rebinds to a PTY.
+ */
+const MOUSE_MODE_RESET = '\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?1004l'
+
+/**
+ * The same reset, plus bracketed paste (DEC 2004) — for a NEW process only.
+ *
+ * Kept separate on purpose. Clearing 2004 was never about stale mouse state: it
+ * rode along in the original reset (a9e7247c, whose comments and message
+ * describe only mouse tracking) and six weeks later produced the "paste gets
+ * cut off" report, because it desynchronises the two ends. The reset is
+ * one-way — xterm forgets, the CLI does not, and having already announced the
+ * mode it never announces it again, so the pane stays wrong until it closes.
+ *
+ * It stays for a resume spawn because there the PTY behind the pane is a fresh
+ * process: a replayed snapshot ends in the OLD session's `?2004h`, and until
+ * the new process announces its own, a paste would wrap text the other end
+ * never asked to be wrapped — a shell would then show a literal "[200~".
+ * Reattaching to a LIVE PTY is the opposite case: the mode the snapshot
+ * restores is the mode the CLI is still in, which is exactly what we want.
+ */
+const MOUSE_MODE_RESET_NEW_PROCESS = `${MOUSE_MODE_RESET}\x1b[?2004l`
+
 /** Set once the "hold ⌥ to select" hint has been shown — it teaches once.
  *  Goes through settings (backend-persisted) rather than localStorage, which
  *  this app has been migrating away from and which plugin bundles don't share. */
@@ -910,6 +938,8 @@ export type ClipboardFailureReason =
   | 'image-failed'
   /** The browser refused the clipboard write, so ⌘C copied nothing. */
   | 'copy-failed'
+  /** Some of the paste never left: the send queue rejected it, or it timed out. */
+  | 'send-failed'
 
 // Whether this renderer process can create a WebGL context at all, probed once.
 //
@@ -2894,7 +2924,9 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     }
     // Reset mouse tracking modes so no stale xterm mouse state forwards events
     // to the process's stdin before it has a chance to re-enable what it needs.
-    term.write('\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?1004l\x1b[?2004l')
+    // Bracketed paste is deliberately NOT reset: the PTY is the same live
+    // process, so the mode the snapshot restores is the mode it is still in.
+    term.write(MOUSE_MODE_RESET)
     sessionId.value = prev
     status.value = 'running'
     if (reattachOpts?.agentKey) activeAgentKey = reattachOpts.agentKey
@@ -2929,8 +2961,10 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     } catch {
       return // WS not ready yet; the next status-change will retry
     }
-    // Reset mouse tracking modes on reconnect for the same reason as tryReattach.
-    term.write('\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?1004l\x1b[?2004l')
+    // Reset mouse tracking modes on reconnect for the same reason as tryReattach
+    // — and leave bracketed paste alone for the same reason too. This path does
+    // not even replay: xterm's view of the mode never stopped being correct.
+    term.write(MOUSE_MODE_RESET)
     cleanupSession()
     bindSessionHandlers()
     pendingReattachRedraw = true
@@ -3079,7 +3113,10 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         snapshotReplayed = true
         term.write(snap)
         // Reset any mouse tracking modes the previous session may have enabled.
-        term.write('\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?1004l\x1b[?2004l')
+        // Bracketed paste goes too, and only here: the snapshot just replayed
+        // the OLD session's `?2004h`, but the process about to start is a new
+        // one that has not asked for it yet.
+        term.write(MOUSE_MODE_RESET_NEW_PROCESS)
         term.write('\r\n\x1b[2m\x1b[38;5;240m─── reconnected ───\x1b[0m\r\n')
       }
     }
@@ -3355,17 +3392,47 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   }
 
   /**
+   * pasteText, but the caller can tell whether the write actually left.
+   *
+   * Rejects on the three ways a chunk goes missing: the session disappeared
+   * mid-paste, the transport refused it (a full send queue or a timeout, both
+   * of which reject), or the backend answered `ok: false` — which wsClient
+   * resolves rather than rejects, so it has to be checked here.
+   */
+  function _sendPasteChunk(text: string): Promise<unknown> {
+    if (!sessionId.value || status.value === 'exited' || status.value === 'error') {
+      return Promise.reject(new Error('session went away mid-paste'))
+    }
+    return backend
+      .send('terminal.input', { terminal_session_id: sessionId.value, data: text })
+      .then((reply) => {
+        if (reply && typeof reply === 'object' && (reply as { ok?: unknown }).ok === false) {
+          throw new Error('backend refused the write')
+        }
+        return reply
+      })
+  }
+
+  /**
    * Send clipboard text the way programmatic injection already does.
    *
    * xterm's built-in paste writes the whole clipboard in one call and decides
-   * on bracketing from ITS view of DEC mode 2004. That view is wrong in exactly
-   * the case that hurts most: a reattached pane runs a fresh xterm (mode off by
-   * default, and tryReattach explicitly resets it) while the CLI on the other
-   * end is still in bracketed-paste mode. An unbracketed multi-line paste then
-   * reaches the CLI as one Enter per line — the first line submits and the rest
-   * spill into the next prompt, which is the "paste gets cut off" report.
-   * So bracket by what the AGENT supports, and reuse the 512-byte chunking that
-   * App.vue's injectText relies on to keep large pastes off the tty's limits.
+   * on bracketing from ITS view of DEC mode 2004. That view used to be wrong in
+   * exactly the case that hurts most: reattaching reset the mode behind xterm's
+   * back while the CLI on the other end was still in bracketed paste, so an
+   * unbracketed multi-line paste reached it as one Enter per line — the first
+   * line submits, the rest spill into the next prompt. That is the "paste gets
+   * cut off" report, and the reset that caused it is gone from the live-PTY
+   * paths (see MOUSE_MODE_RESET), so xterm's view is now trustworthy there.
+   *
+   * The agent fallback below stays as a belt-and-braces for the one path that
+   * still resets — a resume spawn — and for a CLI that enabled the mode before
+   * this pane was watching. It is limited to multi-line text on purpose: only
+   * multi-line text can be split by stray Enters, and wrapping a single line
+   * for a shell that never asked would show it a literal "[200~".
+   *
+   * Chunking at 512 bytes is the same thing App.vue's injectText does, to keep
+   * large pastes off the tty's write limits.
    */
   function pasteFromClipboard(text: string): void {
     // Both rejections below are silent by design, and that is what made "the
@@ -3415,7 +3482,24 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // The rest of what term.onData would have done for us (CoreService's
     // _onUserInput plus this composable's own input bookkeeping).
     noteUserInput(normalized)
-    for (const chunk of chunkForPty(payload, PASTE_CHUNK)) pasteText(chunk)
+    // Sent as one burst rather than awaited chunk by chunk: wsClient writes in
+    // call order, so the PTY still receives them in sequence, and a large paste
+    // does not pay a round trip per 512 bytes. Awaiting the settled results is
+    // what makes a lost chunk visible at all — the send queue rejects once it
+    // is full and every request carries its own timeout, either of which used
+    // to leave a paste truncated in the middle with nothing said. Nothing to
+    // retry from here: the bytes that did land are already in the CLI's input,
+    // so re-sending would duplicate them. Say so and let the user decide.
+    const chunks = chunkForPty(payload, PASTE_CHUNK)
+    void Promise.allSettled(chunks.map((chunk) => _sendPasteChunk(chunk))).then((results) => {
+      const failed = results.filter((r) => r.status === 'rejected').length
+      if (!failed) return
+      _clipboardFailure(
+        `pane=${paneId} paste truncated — ${failed}/${chunks.length} chunk(s) never left`,
+        'send-failed',
+        normalized.length
+      )
+    })
     term.scrollToBottom()
     term.clearSelection()
   }

@@ -160,6 +160,9 @@ describe('useTerminal — manual paste', () => {
       .join('')
   }
 
+  /** Lets the chunk sends (and the failure report hanging off them) settle. */
+  const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
+
   /** The clipboard diagnostics useTerminal forwards into backend.log. */
   function clipboardDiags(
     mock: ReturnType<typeof createMockBackend>
@@ -394,8 +397,27 @@ describe('useTerminal — manual paste', () => {
     it('says nothing when the paste actually lands', async () => {
       const { failures, mock, scope } = await withFailureReports()
       paste('real text')
+      await settle()
       expect(pastedData(mock)).toBe('real text')
       expect(failures).toEqual([])
+      scope.stop()
+    })
+
+    // Chunks were sent and forgotten, so a paste could arrive with a hole in
+    // the middle and nothing anywhere would say so. wsClient resolves an
+    // `ok: false` reply rather than rejecting it, which is why the send path
+    // has to inspect the answer rather than just catch.
+    it('reports a paste the backend refused', async () => {
+      const { failures, scope, mock } = await withFailureReports()
+      mock.setResponse('terminal.input', null, {
+        ok: false,
+        error: { code: 'BAD_REQUEST', message: 'no such terminal session' }
+      })
+
+      paste('some text')
+      await settle()
+
+      expect(failures).toEqual([{ reason: 'send-failed', chars: 9 }])
       scope.stop()
     })
   })

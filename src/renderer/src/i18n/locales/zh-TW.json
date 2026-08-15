@@ -250,6 +250,7 @@
       "clipboard-no-session": "{pane} 沒有執行中的工作階段 — 已捨棄 {chars} 個字元",
       "clipboard-image-failed": "貼上的圖片無法儲存 — 沒有任何內容送到 {pane}",
       "clipboard-copy-failed": "複製失敗 — 無法寫入剪貼簿",
+      "clipboard-send-failed": "只有部分內容送達 {pane} — 其餘在傳送途中遺失",
       "click-to-resume": "點擊以續接",
       "resuming": "續接中…",
       "rebuild-tooltip": "重建 (resume) ⌘⇧R — 殺掉並用 --resume 在當前尺寸重新開,清除無法重畫的疊影/跑版。會中斷進行中的回合、重印對話。",

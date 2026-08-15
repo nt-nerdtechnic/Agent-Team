@@ -250,6 +250,7 @@
       "clipboard-no-session": "{pane} has no running session — {chars} characters were discarded",
       "clipboard-image-failed": "The pasted image could not be saved — nothing was sent to {pane}",
       "clipboard-copy-failed": "Copy failed — the clipboard could not be written",
+      "clipboard-send-failed": "Only part of the paste reached {pane} — the rest was lost on the way",
       "click-to-resume": "Click to resume",
       "resuming": "Resuming…",
       "rebuild-tooltip": "Rebuild (resume) ⌘⇧R — kill and re-spawn via --resume at the current size to clear ghosting/overlap that can't be repainted. Interrupts the in-progress turn and reprints the conversation.",

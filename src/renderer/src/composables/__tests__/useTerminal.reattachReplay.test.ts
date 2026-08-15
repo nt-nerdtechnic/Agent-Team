@@ -104,8 +104,13 @@ const SNAP_KEY = 'terminal-scroll:pane-1'
 const SNAP_FORMAT = 'nv1\n'
 const HISTORY = 'PRIOR-CONVERSATION'
 // Written by tryReattach right after the replay so no stale xterm mouse state
-// forwards events to the live process.
+// forwards events to the live process. Prefix only — the exact tail differs by
+// path, which is the point of the next constant.
 const MOUSE_RESET = '\x1b[?1000l'
+// Bracketed paste. Reset only when the PTY is a NEW process; never on a live
+// one. Asserted separately so "tidying" the reset strings back into one shared
+// constant fails here rather than in a user's pane.
+const BRACKETED_PASTE_RESET = '\x1b[?2004l'
 
 /** A pane whose PTY survived, with the backend confirming the id is alive. */
 function livePane() {
@@ -137,6 +142,22 @@ describe('useTerminal — scrollback replay on reattach', () => {
     expect(writes.indexOf(HISTORY)).toBeLessThan(
       writes.findIndex((w) => w.startsWith(MOUSE_RESET))
     )
+    scope.stop()
+  })
+
+  // The CLI on the other end is the same live process, still in whatever
+  // bracketed-paste mode it announced. Clearing that behind its back
+  // desynchronised the two ends for good: xterm forgot, the CLI never
+  // re-announced, and from then on every multi-line paste in the pane arrived
+  // as one Enter per line — the "paste gets cut off" report.
+  it('leaves a live CLI bracketed-paste mode alone', async () => {
+    localStorage.setItem(SNAP_KEY, SNAP_FORMAT + HISTORY)
+    const { result, scope } = livePane()
+
+    expect(await result.tryReattach()).toBe(true)
+
+    expect(writes.some((w) => w.includes(BRACKETED_PASTE_RESET))).toBe(false)
+    expect(writes.some((w) => w.startsWith(MOUSE_RESET))).toBe(true) // still reset
     scope.stop()
   })
 
