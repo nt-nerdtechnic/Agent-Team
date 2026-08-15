@@ -82,6 +82,30 @@ def test_registry_matches_frontend_agent_specs() -> None:
     assert frontend_keys - NON_VENDOR_AGENT_KEYS == set(registry.VENDORS)
 
 
+def test_mcp_wiring_declares_exactly_one_surface() -> None:
+    """A spawn dispatches on which surface field is set, so a spec with two
+    would silently take the first branch and a spec with none would no-op —
+    both of which look like "this CLI has no MCP" at runtime."""
+    for key, spec in registry.VENDORS.items():
+        wiring = spec.mcp_wiring
+        if wiring is None:
+            continue  # the CLI has no MCP surface at all
+        surfaces = [
+            name
+            for name in ("flag", "config_env", "project_config", "config_file")
+            if getattr(wiring, name)
+        ]
+        assert len(surfaces) == 1, (
+            f"{key} declares MCP surfaces {surfaces} — exactly one is dispatched"
+        )
+        # Every surface but codex's TOML override carries a config document.
+        if not wiring.flag_value:
+            assert wiring.config is not None, f"{key} has no config vocabulary"
+        # A project file is shared by every pane, so its URL can only be a
+        # reference to a variable the spawn env carries.
+        assert bool(wiring.url_env_template) == bool(wiring.project_config)
+
+
 def test_vendor_modules_import_only_allowed_modules() -> None:
     for path in sorted(VENDORS_DIR.glob("*.py")):
         if path.stem.startswith("_") or path.stem in {"base", "registry"}:

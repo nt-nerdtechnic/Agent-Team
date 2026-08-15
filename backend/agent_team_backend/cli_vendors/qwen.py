@@ -35,7 +35,7 @@ from ..log_readers.base import (
     user_prompt_text,
 )
 from ..log_readers.base import encode_claude_cwd
-from .base import Dep, VendorSpec, command_text
+from .base import Dep, McpServerConfig, McpValue, McpWiring, VendorSpec, command_text
 from ..usage_common import (
     HTTP_TIMEOUT,
     _epoch_to_iso,
@@ -734,6 +734,16 @@ def _install_hooks(port_file: str) -> Any:
 SPEC = VendorSpec(
     key="qwen",
     label="Qwen Code",
+    # `--mcp-config` is undocumented in `qwen --help` but registered, takes
+    # inline JSON or a path, and merges over settings.json. No "type"
+    # discriminator: httpUrl is streamable HTTP, a plain url would be SSE.
+    mcp_wiring=McpWiring(
+        config=McpServerConfig(
+            section=("mcpServers",),
+            entry=(("httpUrl", McpValue.URL),),
+        ),
+        flag="--mcp-config",
+    ),
     install_hooks=_install_hooks,
     # Late-bound on purpose: the module global is looked up at call time, so
     # tests can monkeypatch `cli_vendors.qwen.fetch_qwen` and the poller sees

@@ -22,7 +22,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .base import Dep, VendorSpec, command_text
+from .base import Dep, McpServerConfig, McpValue, McpWiring, VendorSpec, command_text
 from .opencode import OpencodeLogReader  # vendor→vendor: sanctioned fork inheritance
 from ..usage_common import (
     HTTP_TIMEOUT,
@@ -310,6 +310,19 @@ def _session_exists(workspace_path: str, session_id: str) -> bool:
 SPEC = VendorSpec(
     key="kilo",
     label="Kilo Code",
+    # An OpenCode fork: identical config document, its own variable.
+    mcp_wiring=McpWiring(
+        config=McpServerConfig(
+            section=("mcp",),
+            entry=(
+                ("type", "remote"),
+                ("url", McpValue.URL),
+                ("enabled", True),
+            ),
+            document=(("$schema", "https://opencode.ai/config.json"),),
+        ),
+        config_env="KILO_CONFIG_CONTENT",
+    ),
     login_command_args="auth login",
     # Multi-account (credential swap): the vault parks and restores this exact
     # file — `kilo auth list` prints the path itself, and it is the same tuple

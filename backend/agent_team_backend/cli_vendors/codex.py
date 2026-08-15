@@ -25,7 +25,7 @@ import re
 import shutil
 import time
 
-from .base import Dep, VendorSpec, command_text
+from .base import Dep, McpWiring, VendorSpec, command_text
 from ..applog import app_data_dir
 from ..skills_store import SkillsStore
 from . import _protocols
@@ -949,6 +949,14 @@ def _session_exists(workspace_path: str, session_id: str) -> bool:
 SPEC = VendorSpec(
     key="codex",
     label="Codex",
+    # No JSON document at all: `-c` is a one-shot TOML override merged over
+    # config.toml at process start, and stays valid after a subcommand
+    # (`codex resume`). The dotted key doubles as the already-wired marker.
+    mcp_wiring=McpWiring(
+        flag="-c",
+        flag_value='mcp_servers.{name}.url="{url}"',
+        already_wired="mcp_servers.{name}",
+    ),
     login_command_args="login",
     live_file=(".codex", "auth.json"),
     slot_file="auth.json",

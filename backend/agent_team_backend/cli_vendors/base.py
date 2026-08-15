@@ -22,6 +22,7 @@ modules — those import the registry, and a back-edge would be a cycle.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 
@@ -76,6 +77,144 @@ class Dep:
     config_home_env: str = ""        # env var overriding the config home, e.g. 'CLAUDE_CONFIG_DIR'
     config_home_default: str = ""    # default config home relative to $HOME, e.g. '.claude'
     autoupdate_env: str = ""         # vendor's own opt-out env var, e.g. 'DISABLE_AUTOUPDATER'
+
+
+class McpValue(Enum):
+    """What a declarative server record cannot know: the server's identity.
+
+    A vendor module may not import the plugin that serves an MCP endpoint, so
+    the record below is a template — these stand in for the values the server's
+    owner supplies, and ``mcp_entry`` substitutes them."""
+
+    NAME = "name"
+    LABEL = "label"
+    URL = "url"
+
+
+@dataclass(frozen=True)
+class McpServerConfig:
+    """The vocabulary one CLI reads MCP servers in.
+
+    Verbatim shapes: every CLI names the transport differently (``type: http``,
+    a bare ``httpUrl``, ``type: remote``) and rejects the others, so this is
+    described rather than normalised.
+    """
+
+    # Path to the container holding server records inside the document, e.g.
+    # ("mcpServers",). Every level but the last is a plain map.
+    section: tuple[str, ...]
+    # One record's fields in the order the CLI's own config writes them, with
+    # McpValue members standing in for the server's identity.
+    entry: tuple[tuple[str, Any], ...]
+    # Document-level fields the CLI expects beside the section, e.g. opencode's
+    # "$schema". Written only where the document does not have them already.
+    document: tuple[tuple[str, Any], ...] = ()
+    # Non-empty when the container is a LIST of self-identifying records rather
+    # than a map keyed by the server name: the field our record is recognised
+    # by, so a previous run's entry is replaced instead of duplicated.
+    list_key: str = ""
+
+
+@dataclass(frozen=True)
+class McpWiring:
+    """How a pane spawn points this CLI at an MCP server.
+
+    Which fields are set selects the surface, and a CLI offers exactly one:
+    ``flag`` (a spawn-time command-line flag), ``config_env`` (a variable
+    carrying a whole config document), ``project_config`` (a file in the
+    workspace) or ``config_file`` (a file in the CLI's own config directory,
+    which the caller has to shim per pane). A CLI with no MCP surface at all
+    declares no wiring.
+
+    Declarative by necessity, like ``Dep``: the endpoint belongs to a plugin,
+    and a vendor module must not import one.
+    """
+
+    config: McpServerConfig | None = None
+
+    # --- spawn-time flag ---
+    flag: str = ""
+    # The flag's value as a format template over {name} and {url}; empty means
+    # the JSON config document itself (codex takes a TOML override instead).
+    flag_value: str = ""
+    # Substring whose presence in a command means "leave it alone" — already
+    # wired by us, or wired by the user and not ours to second-guess. Format
+    # template over {flag} and {name}.
+    already_wired: str = "{flag}"
+    # The flag also accepts a path, so a spawn that cannot use a per-spawn
+    # document can be handed a config file instead.
+    flag_accepts_path: bool = False
+
+    # --- whole config document in an environment variable ---
+    config_env: str = ""
+
+    # --- config file in the workspace, relative to the pane's cwd ---
+    project_config: tuple[str, ...] = ()
+    # The CLI interpolates an environment variable inside the URL, in this
+    # syntax (%s = the variable name). A project file is shared by every pane
+    # in the workspace, so only a variable can carry a per-pane URL.
+    url_env_template: str = ""
+
+    # --- config file in the CLI's own config directory ---
+    config_dir: str = ""               # relative to the real home, e.g. ".grok"
+    config_dir_env: str = ""           # variable relocating it; "" = the CLI has none
+    config_file: tuple[str, ...] = ()  # relative to config_dir
+
+
+def mcp_entry(
+    config: McpServerConfig, *, name: str, label: str, url: str
+) -> dict[str, Any]:
+    """One server record in ``config``'s vocabulary, placeholders resolved."""
+    supplied = {McpValue.NAME: name, McpValue.LABEL: label, McpValue.URL: url}
+    return {
+        key: (supplied[value] if isinstance(value, McpValue) else value)
+        for key, value in config.entry
+    }
+
+
+def mcp_document(
+    config: McpServerConfig,
+    existing: dict[str, Any],
+    *,
+    name: str,
+    label: str = "",
+    url: str,
+) -> dict[str, Any]:
+    """``existing`` with this server's record merged in.
+
+    Pure data in, data out: the caller owns the file (or the flag value, or the
+    variable) and the server's identity. An ``existing`` of ``{}`` builds the
+    document from scratch. Anything already in the container that is not ours
+    is kept — a user's own servers are never displaced.
+    """
+    document = dict(existing)
+    for key, value in config.document:
+        document.setdefault(key, value)
+    node = document
+    for step in config.section[:-1]:
+        child = node.get(step)
+        child = dict(child) if isinstance(child, dict) else {}
+        node[step] = child
+        node = child
+    leaf = config.section[-1]
+    record = mcp_entry(config, name=name, label=label, url=url)
+    if config.list_key:
+        items = node.get(leaf)
+        ours = record.get(config.list_key)
+        kept = [
+            item
+            for item in (items if isinstance(items, list) else [])
+            if isinstance(item, dict) and item.get(config.list_key) != ours
+        ]
+        kept.append(record)
+        node[leaf] = kept
+    else:
+        servers = node.get(leaf)
+        node[leaf] = {
+            **(servers if isinstance(servers, dict) else {}),
+            name: record,
+        }
+    return document
 
 
 @dataclass(frozen=True)
@@ -142,6 +281,11 @@ class VendorSpec:
     home_env_vars: tuple[str, ...] = ()
     # Byte sent to interrupt the CLI in its PTY; None = legacy default (^C).
     interrupt_key: bytes | None = None
+
+    # --- MCP wiring ---
+    # How a spawn points this CLI at an MCP server. None = the CLI has no MCP
+    # surface at all (aider, muse, pi).
+    mcp_wiring: McpWiring | None = None
 
     # --- log reading ---
     # () -> LogReader instance for this vendor. None = reader not migrated

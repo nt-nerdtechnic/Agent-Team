@@ -111,7 +111,7 @@ import sqlite3
 import sys
 import time
 
-from .base import Dep, VendorSpec, command_text
+from .base import Dep, McpServerConfig, McpValue, McpWiring, VendorSpec, command_text
 from ..usage_common import (
     HTTP_TIMEOUT,
     _num,
@@ -1152,6 +1152,18 @@ def _install_hooks(port_file: str) -> Any:
 SPEC = VendorSpec(
     key="copilot",
     label="Copilot CLI",
+    # Same inline `mcpServers` document claude takes, under a flag documented
+    # as augmenting ~/.copilot/mcp-config.json for the session and repeatable —
+    # so a user's own --additional-mcp-config is augmented rather than stepped
+    # aside for, and only our own entry means "already wired".
+    mcp_wiring=McpWiring(
+        config=McpServerConfig(
+            section=("mcpServers",),
+            entry=(("type", "http"), ("url", McpValue.URL)),
+        ),
+        flag="--additional-mcp-config",
+        already_wired="{name}",
+    ),
     install_hooks=_install_hooks,
     # Late-bound (module global at call time) so tests can monkeypatch.
     fetch_usage=lambda home: fetch_copilot(home),

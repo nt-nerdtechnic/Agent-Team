@@ -13,6 +13,7 @@ from agent_team_backend.plugins.builtin.navide_plans import pane_home, plan_mcp_
 
 URL = "http://127.0.0.1:4567/plan-mcp?pane=p1&t=tok"
 SERVER = "navide-plans"
+LABEL = "Navide Plans"
 
 
 @pytest.fixture
@@ -124,7 +125,7 @@ def test_grok_shim_writes_a_list_entry_and_copies_the_settings_file(home: Path) 
         json.dumps({"apiKey": "xai-secret", "mcp": {"servers": [{"id": "mine"}]}}),
         encoding="utf-8",
     )
-    _, root = pane_home.prepare("grok", "p1", URL, SERVER)  # type: ignore[misc]
+    _, root = pane_home.prepare("grok", "p1", URL, SERVER, LABEL)  # type: ignore[misc]
     config = _config(home, "grok", "p1")
     # The API key shares this file with the MCP servers, so it cannot be a
     # symlink — the pane runs against a copy.
@@ -136,12 +137,14 @@ def test_grok_shim_writes_a_list_entry_and_copies_the_settings_file(home: Path) 
     assert [s["id"] for s in servers] == ["mine", SERVER]
     ours = servers[-1]
     assert ours["transport"] == "http" and ours["url"] == URL and ours["enabled"] is True
+    # The server's display name is the caller's, not this module's.
+    assert ours["label"] == LABEL
 
 
 def test_grok_shim_replaces_our_entry_rather_than_appending(home: Path) -> None:
     (home / ".grok").mkdir()
-    pane_home.prepare("grok", "p1", URL, SERVER)
-    pane_home.prepare("grok", "p1", URL + "&again=1", SERVER)
+    pane_home.prepare("grok", "p1", URL, SERVER, LABEL)
+    pane_home.prepare("grok", "p1", URL + "&again=1", SERVER, LABEL)
     servers = _load(_config(home, "grok", "p1"))["mcp"]["servers"]
     assert [s["id"] for s in servers] == [SERVER]  # not accumulating per spawn
 

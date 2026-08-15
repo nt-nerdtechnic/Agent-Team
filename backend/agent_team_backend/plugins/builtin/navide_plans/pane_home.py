@@ -40,6 +40,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from agent_team_backend.cli_vendors import registry
+from agent_team_backend.cli_vendors.base import McpWiring, mcp_document
+
 log = logging.getLogger(
     "agent_team_backend.plugins.builtin.navide_plans.pane_home"
 )
@@ -61,15 +64,13 @@ _SAFE_PANE_ID = re.compile(r"^(?!\.+$)[A-Za-z0-9_.:-]+$")
 class ShimSpec:
     """How one vendor's shim is assembled.
 
-    ``config_relpath`` is relative to the vendor directory, and every level of
-    it is rebuilt as a real directory so that only the leaf is ours.
+    Everything about the CLI itself — which directory, which variable (if
+    any), which config file inside it, which config vocabulary — comes from
+    the vendor registry. Only the fields below exist because of this mirror,
+    which is why they are not vendor knowledge and do not live there.
     """
 
-    env_var: str
-    vendor_dir: str
-    config_relpath: tuple[str, ...]
-    shims_home: bool
-    url_key: str
+    mcp: McpWiring
     # Entries inside the vendor dir linked from the first spawn, by creating
     # the real one empty when the CLI has not made it yet. _adopt() would move
     # them back on the *next* spawn anyway, but that leaves the first pane's
@@ -86,40 +87,44 @@ class ShimSpec:
     # header, so stale frames would be written into the user's real database.
     volatile: tuple[str, ...] = ()
 
+    @property
+    def vendor_dir(self) -> str:
+        return self.mcp.config_dir
 
-SHIM_SPECS: dict[str, ShimSpec] = {
-    # url without a transport field is read as streamable HTTP.
-    "kimi": ShimSpec(
-        "KIMI_CODE_HOME",
-        ".kimi-code",
-        ("mcp.json",),
-        False,
-        "url",
-        seeded_dirs=("sessions", "credentials", "oauth"),
-    ),
-    # Shares ~/.gemini with the Antigravity IDE. "url"/"httpUrl" are rejected
-    # as legacy — a remote server is keyed by serverUrl.
-    "antigravity": ShimSpec(
-        "HOME",
-        ".gemini",
-        ("config", "mcp_config.json"),
-        True,
-        "serverUrl",
-        seeded_dirs=("antigravity-cli",),
-    ),
-    # Servers are a list under mcp.servers, not a map (see _grok_document).
+    @property
+    def config_relpath(self) -> tuple[str, ...]:
+        """Relative to the vendor directory; every level of it is rebuilt as a
+        real directory so that only the leaf is ours."""
+        return self.mcp.config_file
+
+    @property
+    def shims_home(self) -> bool:
+        """A CLI with no config-dir variable can only be relocated by $HOME."""
+        return not self.mcp.config_dir_env
+
+    @property
+    def env_var(self) -> str:
+        return self.mcp.config_dir_env or "HOME"
+
+
+# Only the mirror's own knobs. The vendors are whichever ones the registry says
+# reach their MCP config through a file in their config directory.
+_MIRROR_EXTRAS: dict[str, dict[str, tuple[str, ...]]] = {
+    "kimi": {"seeded_dirs": ("sessions", "credentials", "oauth")},
+    "antigravity": {"seeded_dirs": ("antigravity-cli",)},
     # The sqlite sidecars are seeded for the same reason credential_vault's
     # grok shim lists them explicitly: they are absent after a clean shutdown,
     # so "link it only if it already exists" would leave them pane-local.
-    "grok": ShimSpec(
-        "HOME",
-        ".grok",
-        ("user-settings.json",),
-        True,
-        "url",
-        seeded_files=("grok.db", "grok.db-wal", "grok.db-shm"),
-        volatile=("grok.db-wal", "grok.db-shm"),
-    ),
+    "grok": {
+        "seeded_files": ("grok.db", "grok.db-wal", "grok.db-shm"),
+        "volatile": ("grok.db-wal", "grok.db-shm"),
+    },
+}
+
+SHIM_SPECS: dict[str, ShimSpec] = {
+    key: ShimSpec(spec.mcp_wiring, **_MIRROR_EXTRAS.get(key, {}))
+    for key, spec in registry.VENDORS.items()
+    if spec.mcp_wiring is not None and spec.mcp_wiring.config_file
 }
 
 
@@ -276,46 +281,6 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _map_document(existing: dict[str, Any], server_name: str, url: str, url_key: str) -> dict[str, Any]:
-    """Merge our entry into the ``mcpServers`` map kimi and antigravity use."""
-    document = dict(existing)
-    servers = document.get("mcpServers")
-    document["mcpServers"] = {
-        **(servers if isinstance(servers, dict) else {}),
-        server_name: {url_key: url},
-    }
-    return document
-
-
-def _grok_document(existing: dict[str, Any], server_name: str, url: str) -> dict[str, Any]:
-    """Merge our entry into grok's ``mcp.servers`` *list*.
-
-    Keyed by ``id``, so a previous run's entry is replaced rather than
-    accumulating a duplicate each spawn.
-    """
-    document = dict(existing)
-    section = document.get("mcp")
-    section = dict(section) if isinstance(section, dict) else {}
-    servers = section.get("servers")
-    kept = [
-        item
-        for item in (servers if isinstance(servers, list) else [])
-        if isinstance(item, dict) and item.get("id") != server_name
-    ]
-    kept.append(
-        {
-            "id": server_name,
-            "label": "Navide Plans",
-            "enabled": True,
-            "transport": "http",
-            "url": url,
-        }
-    )
-    section["servers"] = kept
-    document["mcp"] = section
-    return document
-
-
 def _seed_link_targets(spec: ShimSpec, real_vendor: Path) -> None:
     """Create the empty real targets the seeded names need to be linkable."""
     if not real_vendor.is_dir():
@@ -388,12 +353,20 @@ def _write_config(path: Path, document: dict[str, Any]) -> None:
         raise
 
 
-def prepare(agent_key: str, pane_id: str, url: str, server_name: str) -> tuple[str, str] | None:
+def prepare(
+    agent_key: str,
+    pane_id: str,
+    url: str,
+    server_name: str,
+    server_label: str = "",
+) -> tuple[str, str] | None:
     """Build (or refresh) the pane's shim and return ``(env_var, path)``.
 
     None when the vendor has no shim, the pane id is unusable as a path
     segment, or the filesystem work fails — the caller then spawns unwired.
-    Blocking I/O: call off the event loop.
+    The server's name and display label are the caller's: this module must not
+    import the one that serves the endpoint. Blocking I/O: call off the event
+    loop.
     """
     spec = SHIM_SPECS.get(agent_key)
     root = shim_root(agent_key, pane_id)
@@ -430,10 +403,12 @@ def prepare(agent_key: str, pane_id: str, url: str, server_name: str) -> tuple[s
             _mirror(dst, src, {name}, adopt=True, volatile=spec.volatile)
             src, dst = src / name, dst / name
         existing = _base_config(src, dst)
-        document = (
-            _grok_document(existing, server_name, url)
-            if agent_key == "grok"
-            else _map_document(existing, server_name, url, spec.url_key)
+        document = mcp_document(
+            spec.mcp.config,
+            existing,
+            name=server_name,
+            label=server_label,
+            url=url,
         )
         _write_config(dst, document)
     except OSError as err:

@@ -34,7 +34,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .base import Dep, VendorSpec, command_text
+from .base import Dep, McpServerConfig, McpValue, McpWiring, VendorSpec, command_text
 from ..usage_common import (
     _KEYCHAIN_COOLDOWN_S,
     _snapshot,
@@ -1225,6 +1225,18 @@ def _install_hooks(port_file: str) -> Any:
 SPEC = VendorSpec(
     key="claude",
     label="Claude Code",
+    # `--mcp-config` takes a literal JSON string as well as a path, and servers
+    # from it load IN ADDITION to the user's own config (we never pass
+    # --strict-mcp-config). A command that already carries the flag is the
+    # user's deliberate MCP setup and is left alone.
+    mcp_wiring=McpWiring(
+        config=McpServerConfig(
+            section=("mcpServers",),
+            entry=(("type", "http"), ("url", McpValue.URL)),
+        ),
+        flag="--mcp-config",
+        flag_accepts_path=True,
+    ),
     login_command_args="auth login",
     install_hooks=_install_hooks,
     live_file=(".claude", ".credentials.json"),

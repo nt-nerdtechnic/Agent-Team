@@ -51,7 +51,7 @@ import sys
 import time
 
 from ..log_readers.base import ActivityEvent, IncrementalParseResult, LogReader, TokenUsage
-from .base import Dep, VendorSpec, command_text
+from .base import Dep, McpServerConfig, McpValue, McpWiring, VendorSpec, command_text
 from ..usage_common import (
     HTTP_TIMEOUT,
     _KEYCHAIN_COOLDOWN_S,
@@ -545,6 +545,19 @@ def _session_exists(workspace_path: str, session_id: str) -> bool:
 SPEC = VendorSpec(
     key="cursor",
     label="Cursor CLI",
+    # The one CLI with no spawn-time surface — no MCP flag, no config
+    # variable — so its per-project config file is the only way in. A bare
+    # "url" is read as a remote server (stdio is the shape that names its
+    # transport), and cursor interpolates ${env:...} inside it, which is what
+    # lets one shared file serve panes with different per-pane URLs.
+    mcp_wiring=McpWiring(
+        config=McpServerConfig(
+            section=("mcpServers",),
+            entry=(("url", McpValue.URL),),
+        ),
+        project_config=(".cursor", "mcp.json"),
+        url_env_template="${env:%s}",
+    ),
     # Late-bound (module global at call time) so tests can monkeypatch.
     fetch_usage=lambda home: fetch_cursor(home),
     resume_id_from_command=_resume_id_from_command,
