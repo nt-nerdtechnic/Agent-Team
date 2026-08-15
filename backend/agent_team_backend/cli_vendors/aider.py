@@ -589,6 +589,15 @@ SPEC = VendorSpec(
         install_cmd="curl -LsSf https://aider.chat/install.sh | sh",
         needs_terminal=True, requires_binaries=("curl",), optional=True,
         docs_url="https://aider.chat",
+        # `--upgrade` says "from PyPI" while install_cmd above installs through
+        # uv, so the two look mismatched. Verified against a real install (uv
+        # tool, aider 0.86.2): it works. get_pip_install() builds
+        # `sys.executable -m pip install --upgrade aider-chat`, and uv's tool
+        # venv ships pip, so the command runs. It is also the more portable
+        # choice than `uv tool upgrade` — it upgrades a pip install too.
+        # Two consequences worth knowing: it prompts ("Run pip install?") so
+        # the update pane waits on the user, and writing into uv's venv with
+        # pip leaves uv's own tool metadata stating the old version.
         update_cmd="aider --upgrade",
         autoupdate_env="AIDER_CHECK_UPDATE"),
 )
