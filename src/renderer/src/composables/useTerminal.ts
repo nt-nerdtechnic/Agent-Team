@@ -2521,6 +2521,11 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // unlike the old raw buffer there is nothing to clear — the content lives in
   // xterm itself, which is still on screen at that point.
   let snapshotDiscarded = false
+  // Set once this pane's xterm has had the snapshot written into it. Both entry
+  // points (tryReattach on a live PTY, _doCreate on a fresh one) read the same
+  // stored payload, and replaying it a second time into the same terminal would
+  // print the history twice.
+  let snapshotReplayed = false
   // Marks a snapshot as a serialized buffer. Snapshots written before this
   // format existed are raw PTY bytes: replaying those is exactly the bug this
   // format was introduced to fix, so an unmarked snapshot is dropped rather
@@ -2812,12 +2817,35 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     } catch {
       return false  // backend unreachable; let the caller decide (it will spawn)
     }
-    // PTY is alive — do NOT replay the snapshot here. The snapshot contains
-    // cursor-positioning escape codes written at the prior terminal width;
-    // replaying them into a fresh xterm (which may differ in width) garbles
-    // the TUI layout. The live PTY will repaint cleanly once the reconciler
-    // fires terminal.reattach with the settled cols/rows (~2 s). Snapshot
-    // replay is reserved for _doCreate (PTY dead, falls back to --resume).
+    // PTY is alive. Replay the stored scrollback into this fresh xterm before
+    // rebinding, so the pane comes back with its history rather than blank.
+    //
+    // This used to be skipped, and the reason has expired. The snapshot was raw
+    // PTY bytes back then — absolute cursor moves whose coordinates only hold at
+    // the width they were recorded at, so replaying them at another width
+    // garbled the layout. fab56a5 changed the payload to a SerializeAddon
+    // rendering: glyphs and SGR, no cursor positioning, so it can only re-wrap
+    // at a new width, never land in the wrong cell. That is the same property
+    // the _doCreate replay already relies on, and the `nv1` format marker in
+    // loadScrollSnapshot drops any pre-fab56a5 raw snapshot rather than render
+    // it. What was left instead was a silent loss: a reattached pane showed only
+    // what the CLI repaints on the deferred SIGWINCH — a whole screen for a
+    // full-screen TUI, but just the prompt line for a line-mode CLI (aider) or a
+    // shell, with the conversation above it simply gone.
+    //
+    // The live CLI's repaint (deferred to the reconciler, ~2 s) writes over the
+    // viewport, so it replaces the snapshot's last screenful and leaves the
+    // history above it intact. Ordering matters twice: the write must come
+    // BEFORE the mouse-mode reset below (a serialized buffer ends with the modes
+    // it captured, mouse tracking and bracketed paste among them) and before
+    // bindSessionHandlers, so live output can never interleave into it.
+    if (!snapshotReplayed) {
+      const snap = loadScrollSnapshot()
+      if (snap) {
+        snapshotReplayed = true
+        term.write(snap)
+      }
+    }
     // Reset mouse tracking modes so no stale xterm mouse state forwards events
     // to the process's stdin before it has a chance to re-enable what it needs.
     term.write('\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?1004l\x1b[?2004l')
@@ -2996,12 +3024,13 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // Replay stored scrollback into the fresh xterm so prior history is visible
     // before the new PTY starts writing. Only for resume spawns that have a saved
     // snapshot — fresh spawns (no resumeKey) have no snapshot to replay.
-    if (opts.resumeKey && opts.restoreMode !== 'fresh') {
+    if (opts.resumeKey && opts.restoreMode !== 'fresh' && !snapshotReplayed) {
       // The snapshot is a serialized buffer — glyphs and colours, no cursor
       // positioning — so it renders correctly whatever width this pane now has.
       // It re-wraps; it cannot land in the wrong cell.
       const snap = loadScrollSnapshot()
       if (snap) {
+        snapshotReplayed = true
         term.write(snap)
         // Reset any mouse tracking modes the previous session may have enabled.
         term.write('\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?1004l\x1b[?2004l')
