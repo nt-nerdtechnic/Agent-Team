@@ -220,9 +220,26 @@ describe('KeyResolver – defaults integration (new shortcuts)', () => {
       .toBe('editor.action.addSelectionToNextFindMatch')
   })
 
-  it('cmd+p → quickOpen (no when clause)', () => {
-    expect(dr.resolve(mkEvent('p', { metaKey: true }), {})?.command)
-      .toBe('workbench.action.quickOpen')
+  it('mod+p → quickOpen on the platform modifier (no when clause)', () => {
+    // The only 'mod' rule in defaults, because the Plan window matched this
+    // chord itself before it joined the table and Ctrl+P off macOS came with
+    // it. 'mod' resolves at PARSE time, so each platform needs its own
+    // resolver — reusing `dr` would test whatever platform it was built on.
+    const original = navigator.platform
+    const on = (platform: string): KeyResolver => {
+      Object.defineProperty(navigator, 'platform', { value: platform, configurable: true })
+      return new KeyResolver(defaults)
+    }
+    try {
+      expect(on('MacIntel').resolve(mkEvent('p', { metaKey: true }), {})?.command)
+        .toBe('workbench.action.quickOpen')
+      expect(on('Win32').resolve(mkEvent('p', { ctrlKey: true }), {})?.command)
+        .toBe('workbench.action.quickOpen')
+      // macOS keeps Ctrl+P for the terminal, which is why this is not two rules.
+      expect(on('MacIntel').resolve(mkEvent('p', { ctrlKey: true }), {})).toBeNull()
+    } finally {
+      Object.defineProperty(navigator, 'platform', { value: original, configurable: true })
+    }
   })
 
   it('cmd+shift+t → reopenClosedEditor (no when clause)', () => {
@@ -289,6 +306,17 @@ describe('KeyResolver – defaults integration (new shortcuts)', () => {
 
   it('escape does nothing without modalOpen', () => {
     expect(dr.resolve(mkEvent('Escape'), {})).toBeNull()
+  })
+
+  it('escape → closeModal in the Plan window, which has no modalOpen', () => {
+    // Its ESC walks an overlay ladder and ends at closing the window, so the
+    // rule is scoped to the window rather than to a modal being open.
+    expect(dr.resolve(mkEvent('Escape'), { planWindow: true })?.command)
+      .toBe('workbench.action.closeModal')
+  })
+
+  it('escape stays with the CLI dock while the Plan window terminal has focus', () => {
+    expect(dr.resolve(mkEvent('Escape'), { planWindow: true, terminalFocus: true })).toBeNull()
   })
 
   it('ctrl+up → scrollLineUp (editorTextFocus)', () => {

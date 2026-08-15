@@ -22,6 +22,7 @@ rules the editor writes.
 | `⌘S` | Save current file |
 | `⌘⇧S` | Save all |
 | `⌘W` | Close active editor |
+| `⌘⇧W` | Close the current window |
 | `⌘K ⌘W` | Close all editors |
 | `⌘O` | Open file |
 | `⌘N` | New file |
@@ -414,20 +415,37 @@ condition that greys out the matching toolbar button.
 
 ## When-Clause Conditions
 
-Keybindings can be gated by context conditions:
+Keybindings can be gated by context conditions. These eight are the whole set —
+every condition any rule tests, and every one any window publishes.
+
+**Window identity.** No window ever sets two of these, which is what lets the
+same key mean different things in different windows (`⌘⇧G` is `openGitWindow` in
+the main window and `focusSourceControl` in the Mini IDE). Settings' conflict
+detection relies on it: without knowing the two can never meet, almost every
+shared key would report as broken.
+
+| Condition | Set by | True in |
+|-----------|--------|---------|
+| `paneStage` | main window | The workspace window with the CLI panes |
+| `editorOpen` | Mini IDE | At least one editor tab is open — also how a rule says "the Mini IDE" |
+| `gitWindow` | Git window | The standalone Git window |
+| `planWindow` | Plan window | The standalone plan review window |
+
+**Transient state.** Unlike the identities, these come and go while a window
+stays open, so a rule that waits on one is not dead — it just waits.
 
 | Condition | Description |
 |-----------|-------------|
-| `editorOpen` | At least one editor tab is open |
 | `editorTextFocus` | The editor text area has keyboard focus |
 | `findOpen` | The find widget is currently open |
 | `modalOpen` | A modal dialog is currently open |
-| `terminalFocus` | The terminal area has focus |
-| `!editorTextFocus` | Editor open but text area not focused |
+| `terminalFocus` | A terminal has focus — ESC and friends belong to the PTY |
 
-Conditions support `&&` (and), `||` (or), `!` (not). There are no parentheses
-and no comparisons — `&&` simply binds tighter than `||`, and an unknown
-identifier evaluates to `false`. The Settings editor therefore shows `when`
+Conditions support `&&` (and), `||` (or), `!` (not); `!editorTextFocus` reads as
+"the editor is there but the text area does not have focus". There are no
+parentheses and no comparisons — `&&` simply binds tighter than `||`, and an
+unknown identifier evaluates to `false`, so a typo silently disables the rule
+rather than reporting anything. The Settings editor therefore shows `when`
 read-only; to write a new condition, edit `keybindings.json` by hand.
 
 ---

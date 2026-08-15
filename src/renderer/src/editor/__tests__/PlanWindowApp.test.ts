@@ -12,6 +12,7 @@ import PlanWindowApp from '../../PlanWindowApp.vue'
 import { i18n } from '../../i18n'
 import { resolvePlanStore } from '../../composables/planStore'
 import { aiTerminalPaneId } from '../../lib/aiCliContext'
+import { setContext, setUserRules } from '../../keybindings/useKeybindings'
 
 i18n.global.locale.value = 'en-US'
 
@@ -55,11 +56,20 @@ const plansPaneSpies = vi.hoisted(() => ({
 
 // The quick-open chord is the platform modifier, so the tests drive the
 // platform rather than inheriting happy-dom's.
-const platformState = vi.hoisted(() => ({ mac: true }))
-vi.mock('../../keybindings/parseKey', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../keybindings/parseKey')>()),
-  isMacPlatform: () => platformState.mac,
-}))
+//
+// Driven through navigator, not by mocking isMacPlatform: the rule is 'mod+p'
+// and parseKey() calls isMacPlatform() from inside its own module, where a
+// module mock cannot reach it. Setting the real signal keeps both in step.
+// Rebuilding the resolver matters too — 'mod' is resolved once, at parse time,
+// and the shared resolver is built when useKeybindings is first imported.
+const originalPlatform = navigator.platform
+function setPlatform(mac: boolean): void {
+  Object.defineProperty(navigator, 'platform', {
+    value: mac ? 'MacIntel' : 'Win32',
+    configurable: true,
+  })
+  setUserRules([]) // rebuilds the shared resolver against the platform just set
+}
 
 // Notify mock: section-delete confirms host-side; default accept.
 const toastMock = vi.hoisted(() => vi.fn())
@@ -197,7 +207,7 @@ beforeEach(() => {
   plansPaneSpies.closeActiveOverlay.mockReset().mockReturnValue(false)
   plansPaneSpies.noteOpened.mockClear()
   plansPaneSpies.openQuickOpen.mockClear()
-  platformState.mac = true
+  setPlatform(true)
   for (const spy of Object.values(cliTermSpies)) spy.mockClear()
   toastMock.mockClear()
   confirmMock.mockReset().mockResolvedValue(true)
@@ -266,6 +276,7 @@ async function mountApp(): Promise<VueWrapper> {
 afterEach(() => {
   while (mountedApps.length) mountedApps.pop()!.unmount()
   planRootState.root = ''
+  Object.defineProperty(navigator, 'platform', { value: originalPlatform, configurable: true })
 })
 
 async function open(wrapper: VueWrapper, filepath: string): Promise<void> {
@@ -643,6 +654,10 @@ describe('PlanWindowApp – inline section edit/delete', () => {
   })
 })
 
+// The ladder itself is unchanged by the move into the shared rule table — these
+// cases are what says so. The two at the end cover what the move added: a
+// window-scoped context to gate the rule, and the PTY exemption that comes with
+// every other ESC binding.
 describe('PlanWindowApp – ESC overlay priority', () => {
   function pressEsc(): void {
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
@@ -700,6 +715,39 @@ describe('PlanWindowApp – ESC overlay priority', () => {
     pressEsc()
     expect(closeSpy).toHaveBeenCalled()
     closeSpy.mockRestore()
+  })
+
+  it('leaves ESC to the CLI dock while its PTY holds focus', async () => {
+    // New with the move: ESC is the CLI's interrupt key, and the rule now
+    // carries the same !terminalFocus guard every other ESC binding has. The
+    // window-local handler this replaced had no such exemption.
+    const wrapper = await mountApp()
+    await open(wrapper, '.agent-team/plans/feature_a1b2c3.html')
+    const closeSpy = vi.spyOn(window, 'close').mockImplementation(() => {})
+    setContext('terminalFocus', true)
+    try {
+      pressEsc()
+      expect(closeSpy).not.toHaveBeenCalled()
+    } finally {
+      setContext('terminalFocus', false)
+      closeSpy.mockRestore()
+    }
+  })
+
+  it('does nothing once the window is gone (context no longer claims ESC)', async () => {
+    // The rule is scoped to `planWindow`; nothing else in the app sets it, so a
+    // stray ESC cannot reach this handler from another window.
+    const wrapper = await mountApp()
+    await open(wrapper, '.agent-team/plans/feature_a1b2c3.html')
+    wrapper.unmount()
+    const closeSpy = vi.spyOn(window, 'close').mockImplementation(() => {})
+    setContext('planWindow', false)
+    try {
+      pressEsc()
+      expect(closeSpy).not.toHaveBeenCalled()
+    } finally {
+      closeSpy.mockRestore()
+    }
   })
 })
 
@@ -876,9 +924,10 @@ describe('PlanWindowApp – resolved plan root', () => {
   })
 })
 
-// Quick open is matched by this window's own keydown handler (it does not run
-// the shared keybinding registry), so the chord must be the platform modifier
-// and must leave the CLI dock's PTY keys alone.
+// Quick open now comes from the shared rule table ('mod+p' in defaults.ts), not
+// from a chord this window matches itself. The behaviour it used to guarantee
+// still has to hold: the platform modifier on both platforms, and the CLI
+// dock's PTY keys left alone.
 describe('PlanWindowApp – quick open chord', () => {
   function press(init: KeyboardEventInit, target: EventTarget = window): void {
     target.dispatchEvent(new KeyboardEvent('keydown', { key: 'p', bubbles: true, ...init }))
@@ -897,7 +946,7 @@ describe('PlanWindowApp – quick open chord', () => {
   })
 
   it('uses Ctrl+P off macOS', async () => {
-    platformState.mac = false
+    setPlatform(false)
     await mountApp()
     press({ ctrlKey: true })
     expect(plansPaneSpies.openQuickOpen).toHaveBeenCalled()
@@ -907,9 +956,13 @@ describe('PlanWindowApp – quick open chord', () => {
     await mountApp()
     const panel = document.createElement('div')
     panel.className = 'ai-dock-panel'
-    const inner = document.createElement('div')
+    // Focusable, because the handler reads document.activeElement: the shared
+    // dispatcher hands commands no event, so where focus IS is the only signal
+    // left. Same thing in practice — a keydown's target is the focused element.
+    const inner = document.createElement('input')
     panel.appendChild(inner)
     document.body.appendChild(panel)
+    inner.focus()
 
     press({ metaKey: true }, inner)
     expect(plansPaneSpies.openQuickOpen).not.toHaveBeenCalled()
@@ -921,5 +974,28 @@ describe('PlanWindowApp – quick open chord', () => {
     press({ metaKey: true, shiftKey: true })
     press({ metaKey: true, altKey: true })
     expect(plansPaneSpies.openQuickOpen).not.toHaveBeenCalled()
+  })
+})
+
+// Joining the shared table is only worth anything if rules this window never
+// declares reach it. ⌘⇧W is the one that matters: it replaced the `close` menu
+// role dropped in main/menu.ts, and this was the last window still deaf to it.
+describe('PlanWindowApp – shortcuts inherited from the shared table', () => {
+  it('closes the window on ⌘⇧W', async () => {
+    await mountApp()
+    const closeSpy = vi.spyOn(window, 'close').mockImplementation(() => {})
+    window.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'w', metaKey: true, shiftKey: true, bubbles: true }),
+    )
+    expect(closeSpy).toHaveBeenCalled()
+    closeSpy.mockRestore()
+  })
+
+  it('does not close on a plain ⌘W, which belongs to editor tabs', async () => {
+    await mountApp()
+    const closeSpy = vi.spyOn(window, 'close').mockImplementation(() => {})
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', metaKey: true, bubbles: true }))
+    expect(closeSpy).not.toHaveBeenCalled()
+    closeSpy.mockRestore()
   })
 })

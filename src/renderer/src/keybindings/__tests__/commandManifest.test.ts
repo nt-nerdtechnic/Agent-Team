@@ -18,7 +18,6 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { COMMAND_IDS } from '../commandCatalog'
-import { MENU_OWNED_SPECS } from '../externalKeys'
 
 const SRC = join(process.cwd(), 'src/renderer/src')
 
@@ -167,14 +166,7 @@ describe('the drift guard actually catches drift', () => {
   })
 })
 
-describe('menu-owned keys stay flagged', () => {
-  it('every MENU_OWNED_SPECS entry is actually bound in defaults.ts', () => {
-    // The marker only helps if it lands on rows the user can see. If a binding
-    // is dropped from defaults, its spec here becomes dead weight and the next
-    // reader has no way to tell.
-    const text = stripComments(readFileSync(join(SRC, 'keybindings/defaults.ts'), 'utf-8'))
-    const boundKeys = new Set([...text.matchAll(/key: '([^']+)'/g)].map((m) => m[1]))
-    const orphaned = [...MENU_OWNED_SPECS].filter((spec) => !boundKeys.has(spec))
-    expect(orphaned).toEqual([])
-  })
-})
+// The menu-owned key checks used to live here, back when MENU_OWNED_SPECS held
+// only the specs defaults.ts also binds and "is it still bound?" was the only
+// thing worth asking. The set is now the whole application menu, so those checks
+// moved to menuAccelerators.test.ts, which pins it against src/main/menu.ts.

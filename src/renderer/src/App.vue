@@ -5131,6 +5131,10 @@ registerCommand('workbench.action.newWindow', async () => {
   // Always open a fresh Welcome window — do not inherit the current workspace.
   await api?.openMainWindow?.({})
 })
+// ⌘⇧W. Goes through window.close() rather than any shortcut of its own, so the
+// window's existing close handling (confirm-before-quit, PTY teardown) runs
+// exactly as it does when the traffic lights are used.
+registerCommand('workbench.action.closeWindow', () => { window.close() })
 registerCommand('workbench.action.openSettings', () => { showSettings.value = true })
 registerCommand('workbench.action.openSettingsAccounts', () => openSettingsAccounts())
 registerCommand('workbench.action.openPipelineManager', () => { openPipelineManager() })

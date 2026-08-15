@@ -12,6 +12,8 @@
 // read-only reference sections. Moved here verbatim from the old
 // KeyboardShortcutsHelp page, which this replaces.
 
+import { canonicalizeKeySpec, isMacPlatform } from './parseKey'
+
 export interface ExternalKeyRow {
   /** Display glyphs, space-separated; '/' and '–' read as separators. */
   keys: string
@@ -43,20 +45,126 @@ export const NATIVE_MENU_KEYS: ExternalKeyRow[] = [
   { keys: '⌥ ⌘ I', desc: 'devTools' },
   { keys: '⌃ ⌘ F', desc: 'fullScreen' },
   { keys: '⌘ C / V / X / Z / A', desc: 'clipboard' },
-  { keys: '⌘ W / ⌘ Q / ⌘ M', desc: 'windowControls' },
+  { keys: '⌘ Q / ⌘ M', desc: 'windowControls' },
   { keys: '⌘ H / ⌥ ⌘ H', desc: 'hide' },
 ]
 
+// ── What the application menu owns ────────────────────────────────────────────
+//
+// Every accelerator below fires in the main process before the renderer sees the
+// key, so a rule bound to one of them looks changed in Settings and does
+// nothing. The editor flags these caps so that promise is not made silently.
+//
+// This used to hold only the three specs `defaults.ts` also binds, on the
+// reasoning that a key the rule table never claims has nothing to mislabel.
+// That holds for the shipped defaults and fails for user overrides: recording
+// ⌘R onto any row produces exactly the overlap the marker exists to catch, and
+// a set built from the defaults cannot see it. So the set is now the whole menu.
+
 /**
- * Matcher-form specs for the menu accelerators that a rule in `defaults.ts` also
- * claims. Rebinding the *command* works; clearing the *key* does not, because
- * the menu fires first and the renderer never sees it. The editor flags these
- * caps so that promise is not made silently.
+ * Accelerators `src/main/menu.ts` writes itself, in Electron's syntax.
  *
- * Only these three overlap today — the rest of the menu (⌘R, ⌥⌘I, ⌘Q …) has no
- * counterpart in the rule table, so there is nothing to mislabel.
+ * Pinned here rather than derived, because they are the entries with nothing
+ * else pointing at them: Copy (the app re-implements `role: 'copy'` to read a
+ * terminal selection), Settings…, New Window and Open Workspace….
  */
-export const MENU_OWNED_SPECS = new Set(['cmd+,', 'cmd+n', 'cmd+o'])
+export const MENU_LITERAL_ACCELERATORS = [
+  'CmdOrCtrl+C',
+  'CmdOrCtrl+,',
+  'CmdOrCtrl+N',
+  'CmdOrCtrl+O',
+] as const
+
+/**
+ * Every Electron role `src/main/menu.ts` installs, and the accelerator that role
+ * carries. `null` means the role ships no accelerator at all — listed anyway, so
+ * that a role appearing in the menu with no entry here is a missing transcription
+ * rather than a deliberate "no key".
+ *
+ * Electron owns these strings; nothing in this repo declares them. `menuAccelerators.test.ts`
+ * pins the ROLE SET against `src/main/menu.ts`, so a role added or dropped there
+ * fails the build. It cannot see Electron changing the accelerator behind a role,
+ * so an Electron upgrade still needs a manual pass over this table.
+ */
+export const MENU_ROLE_ACCELERATORS: Record<string, { mac: string | null; other: string | null }> = {
+  about: { mac: null, other: null },
+  // macOS installs no `close` role at all — ⌘W belongs to closeActiveEditor
+  // (menu.ts explains it). The role is still in the Window menu off macOS,
+  // where Ctrl+W collides with nothing, so this entry cannot simply go away.
+  close: { mac: null, other: 'CmdOrCtrl+W' },
+  cut: { mac: 'CmdOrCtrl+X', other: 'CmdOrCtrl+X' },
+  delete: { mac: null, other: null },
+  front: { mac: null, other: null },
+  help: { mac: null, other: null },
+  hide: { mac: 'Command+H', other: null },
+  hideOthers: { mac: 'Command+Alt+H', other: null },
+  minimize: { mac: 'CmdOrCtrl+M', other: 'CmdOrCtrl+M' },
+  paste: { mac: 'CmdOrCtrl+V', other: 'CmdOrCtrl+V' },
+  pasteAndMatchStyle: { mac: 'Shift+CmdOrCtrl+V', other: 'Shift+CmdOrCtrl+V' },
+  // No accelerator off macOS: Windows and Linux have no single agreed quit key,
+  // and Electron leaves the role unbound there rather than inventing one.
+  quit: { mac: 'Command+Q', other: null },
+  redo: { mac: 'Shift+CmdOrCtrl+Z', other: 'Ctrl+Y' },
+  reload: { mac: 'CmdOrCtrl+R', other: 'CmdOrCtrl+R' },
+  selectAll: { mac: 'CmdOrCtrl+A', other: 'CmdOrCtrl+A' },
+  services: { mac: null, other: null },
+  toggleDevTools: { mac: 'Alt+Command+I', other: 'Ctrl+Shift+I' },
+  togglefullscreen: { mac: 'Control+Command+F', other: 'F11' },
+  undo: { mac: 'CmdOrCtrl+Z', other: 'CmdOrCtrl+Z' },
+  unhide: { mac: null, other: null },
+  zoom: { mac: null, other: null },
+}
+
+/**
+ * Roles deliberately left out of the menu so the renderer can have their keys,
+ * with the binding each one would otherwise shadow.
+ *
+ * `menu.ts` explains the reasoning; this is the machine-readable half, so that
+ * re-adding one of them fails a test instead of silently killing a shortcut the
+ * user can still see in Settings.
+ */
+export const MENU_OMITTED_ROLES: Record<string, string> = {
+  // ⇧⌘R — the renderer's Rebuild-pane chord (defaults.ts).
+  forceReload: 'Shift+CmdOrCtrl+R',
+  // ⌘0 / ⌘+ / ⌘- scale the whole window; zoom here is per-pane content zoom.
+  resetZoom: 'CmdOrCtrl+0',
+  zoomIn: 'CmdOrCtrl+Plus',
+  zoomOut: 'CmdOrCtrl+-',
+}
+
+/** Electron accelerator syntax → the canonical spec form the rule table uses. */
+export function acceleratorToSpec(accelerator: string, mac: boolean): string {
+  const parts = accelerator.split('+').map((raw) => {
+    const part = raw.toLowerCase()
+    if (part === 'cmdorctrl' || part === 'commandorcontrol') return mac ? 'cmd' : 'ctrl'
+    if (part === 'command') return 'cmd'
+    if (part === 'control') return 'ctrl'
+    if (part === 'option') return 'alt'
+    return part
+  })
+  return canonicalizeKeySpec(parts.join('+'))
+}
+
+/**
+ * The specs the application menu owns on a given platform.
+ *
+ * Platform-dependent because several roles differ: redo is ⇧⌘Z on macOS and
+ * Ctrl+Y elsewhere, full screen is ⌃⌘F versus F11, and the whole hide/quit
+ * family is macOS-only.
+ */
+export function menuOwnedSpecs(mac: boolean): Set<string> {
+  const specs = new Set<string>()
+  for (const accelerator of MENU_LITERAL_ACCELERATORS) {
+    specs.add(acceleratorToSpec(accelerator, mac))
+  }
+  for (const role of Object.values(MENU_ROLE_ACCELERATORS)) {
+    const accelerator = mac ? role.mac : role.other
+    if (accelerator) specs.add(acceleratorToSpec(accelerator, mac))
+  }
+  return specs
+}
+
+export const MENU_OWNED_SPECS = menuOwnedSpecs(isMacPlatform())
 
 const SEPARATORS = new Set(['/', '–'])
 

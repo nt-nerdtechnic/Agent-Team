@@ -1425,6 +1425,17 @@ function gitActionsReady(): boolean {
   return isRepo.value && !busy.value
 }
 
+// ⌘⇧W. Inside the plugin view there is no window of our own to close — ask the
+// host to hide the view instead, the same fallback EditorWindowApp takes.
+registerCommand('workbench.action.closeWindow', () => {
+  const navBridge = (window as unknown as { nav?: { hideSelf?: () => void } }).nav
+  if (navBridge?.hideSelf) {
+    navBridge.hideSelf()
+    return
+  }
+  window.close()
+})
+
 registerCommand('git.refresh', () => {
   if (hasWorkspace.value) void refreshAll()
 })

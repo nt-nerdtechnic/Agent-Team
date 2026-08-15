@@ -9,10 +9,21 @@ export const defaults: KeybindingRule[] = [
   { key: 'cmd+shift+f', command: 'workbench.action.findInFiles' },
   { key: 'cmd+,',       command: 'workbench.action.openSettings' },
   { key: 'cmd+w',       command: 'workbench.action.closeActiveEditor', when: 'editorOpen && !modalOpen' },
+  // Closing a WINDOW, not a tab. ⌘W used to do this through the menu's `close`
+  // role, which was dropped so the rule above could have the key (main/menu.ts);
+  // this restores the capability on a chord no role claims. Every window that
+  // registers it routes to the same path the traffic lights take, so whatever
+  // close guard a window already has still runs.
+  { key: 'cmd+shift+w', command: 'workbench.action.closeWindow' },
   { key: 'cmd+shift+s', command: 'workbench.action.saveAll',             when: 'editorOpen' },
   // !terminalFocus: a modal may embed a CLI terminal (Pipeline Manager), where
   // Esc is the CLI's own interrupt key and must reach the PTY.
   { key: 'escape',      command: 'workbench.action.closeModal', when: 'modalOpen && !terminalFocus' },
+  // The Plan window has no `modalOpen` to gate on: its ESC walks a priority
+  // ladder of overlays and ends at closing the window, so the rule is scoped to
+  // the window instead and the ladder lives in its handler. Same !terminalFocus
+  // reason as above — that window embeds an AiCliDock PTY.
+  { key: 'escape',      command: 'workbench.action.closeModal', when: 'planWindow && !terminalFocus' },
 
   // ── Editor ───────────────────────────────────────────────────────────────
   { key: 'cmd+s', command: 'editor.action.save',          when: 'editorOpen && !terminalFocus' },
@@ -136,7 +147,10 @@ export const defaults: KeybindingRule[] = [
   { key: 'cmd+shift+p', command: 'workbench.action.showCommands' },
   { key: 'f1',          command: 'workbench.action.showCommands' },
   { key: 'cmd+k cmd+w', command: 'workbench.action.closeAllEditors' },
-  { key: 'cmd+p',       command: 'workbench.action.quickOpen' },
+  // 'mod', not 'cmd': the Plan window used to match this chord itself, on the
+  // platform modifier, and folding it into the rule table must not cost Ctrl+P
+  // off macOS (PlanWindowApp.test.ts pins that). Same key on macOS either way.
+  { key: 'mod+p',       command: 'workbench.action.quickOpen' },
   { key: 'cmd+shift+t', command: 'workbench.action.reopenClosedEditor' },
 
   // ── Workbench: sidebar & view ────────────────────────────────────────────────

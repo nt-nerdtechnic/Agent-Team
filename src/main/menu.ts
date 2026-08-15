@@ -13,7 +13,7 @@ import { getTerminalSelection } from './terminal-selection-cache'
  *     Updates… (platforms without an app menu)
  *   - Window: Pipeline Manager
  *
- * TWO deliberate omissions from the default menu remain, both because native
+ * THREE deliberate omissions from the default menu remain, all because native
  * accelerators fire before the renderer's key handlers:
  *
  *   - The View submenu's `resetZoom` / `zoomIn` / `zoomOut` roles. Those roles
@@ -24,6 +24,14 @@ import { getTerminalSelection } from './terminal-selection-cache'
  *   - The View submenu's `forceReload` role, which owns ⇧⌘R. That chord is the
  *     renderer's Rebuild-pane shortcut (keybindings/defaults.ts). `reload` (⌘R)
  *     stays, so a plain reload is still one keystroke away.
+ *   - The File submenu's `close` role ON macOS, which owns ⌘W. That key is the
+ *     renderer's closeActiveEditor — close a TAB, not the window. The role won
+ *     every time, so the binding users could see in Settings never ran. Off
+ *     macOS the role stays in the Window menu: there it answers Ctrl+W, which
+ *     no rule claims, and it is the only keyboard way to close a window there.
+ *     The cost on macOS is that closing a window is now the traffic lights or
+ *     ⌘Q — no window-closing key at all, since no rule binds ⌘W outside an
+ *     editor. Accepted deliberately; ⌘W closing a tab is the common case.
  *
  * Installing a menu without them is the only way to drop them: Electron has no
  * API to edit the default menu in place.
@@ -225,11 +233,13 @@ export function installApplicationMenu(
               }))
             : [{ label: 'No Recent Workspaces', enabled: false }]
         },
-        { type: 'separator' },
-        // No app menu off macOS — surface the same entries under File.
+        // No app menu off macOS — surface the same entries under File. macOS
+        // gets nothing here: its Settings… live in the app menu, and `close` is
+        // omitted so ⌘W reaches the renderer (see the doc comment above).
         ...(isMac
-          ? [{ role: 'close' } as MenuItemConstructorOptions]
+          ? []
           : [
+              { type: 'separator' } as MenuItemConstructorOptions,
               settingsItem,
               checkUpdatesItem,
               { type: 'separator' } as MenuItemConstructorOptions,

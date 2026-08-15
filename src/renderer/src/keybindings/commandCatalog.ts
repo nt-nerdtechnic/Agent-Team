@@ -255,6 +255,7 @@ export const COMMAND_IDS: readonly string[] = [
   'workbench.action.closeEditorsToTheRight',
   'workbench.action.closeModal',
   'workbench.action.closeOtherEditors',
+  'workbench.action.closeWindow',
   'workbench.action.copyFilePath',
   'workbench.action.copyRelativeFilePath',
   'workbench.action.findInFiles',

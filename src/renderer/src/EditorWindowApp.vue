@@ -936,6 +936,9 @@ registerCommand('workbench.action.closeActiveEditor', async () => {
   if (!activeKey.value) return
   await closeFile(activeKey.value)
 })
+// ⌘⇧W. Routed through closeEditorWindow so it keeps the unsaved-changes prompt
+// and the plugin-view branch, exactly like Escape and the traffic lights.
+registerCommand('workbench.action.closeWindow', () => { void closeEditorWindow() })
 // Save every dirty file buffer to disk (reuses EditorPane.save, which carries
 // the mtime-conflict protection).
 async function saveDirtyFiles(): Promise<void> {

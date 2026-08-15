@@ -265,7 +265,8 @@ const WINDOW_SCENES: { id: string; ctx: Record<string, boolean> }[] = [
   { id: 'main', ctx: { paneStage: true } },
   { id: 'miniIde', ctx: { editorOpen: true } },
   { id: 'git', ctx: { gitWindow: true } },
-  // Plan / Pipeline and friends: none of the identity flags.
+  { id: 'plan', ctx: { planWindow: true } },
+  // Pipeline Manager and friends: none of the identity flags.
   { id: 'other', ctx: {} },
 ]
 

@@ -1103,6 +1103,7 @@
         "workbench_action_closeEditorsToTheRight": "Close Editors To The Right",
         "workbench_action_closeModal": "Close Modal",
         "workbench_action_closeOtherEditors": "Close Other Editors",
+        "workbench_action_closeWindow": "Close Window",
         "workbench_action_copyFilePath": "Copy File Path",
         "workbench_action_copyRelativeFilePath": "Copy Relative File Path",
         "workbench_action_findInFiles": "Find In Files",
@@ -1197,7 +1198,7 @@
           "devTools": "Developer tools",
           "fullScreen": "Full screen",
           "clipboard": "Copy / paste / cut / undo / select all",
-          "windowControls": "Close / quit / minimize",
+          "windowControls": "Quit / minimize",
           "hide": "Hide / hide others"
         }
       },

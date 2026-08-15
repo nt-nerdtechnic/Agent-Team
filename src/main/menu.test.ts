@@ -305,6 +305,23 @@ describe('installApplicationMenu', () => {
     })
   })
 
+  it.runIf(isMac)('File has no Close Window on macOS (deliberate omission)', () => {
+    // `role: 'close'` owns ⌘W, which fires in the main process ahead of the
+    // renderer's closeActiveEditor. Putting it back silently kills tab-closing
+    // while leaving the binding visible in Settings.
+    const closeRoles = submenuOf('File').filter(
+      (i) => typeof i.role === 'string' && i.role.toLowerCase() === 'close'
+    )
+    expect(closeRoles).toEqual([])
+  })
+
+  it.runIf(!isMac)('Window keeps Close off macOS, where Ctrl+W is free', () => {
+    const closeRoles = submenuOf('Window').filter(
+      (i) => typeof i.role === 'string' && i.role.toLowerCase() === 'close'
+    )
+    expect(closeRoles).toHaveLength(1)
+  })
+
   it('View still has no webContents zoom roles (deliberate omission)', () => {
     const view = submenuOf('View')
     const zoomRoles = view.filter(

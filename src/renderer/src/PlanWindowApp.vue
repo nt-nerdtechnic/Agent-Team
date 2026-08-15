@@ -17,7 +17,8 @@ import { resolvePlanStore, type PlanCtx, type WriteResult } from './composables/
 import { sanitizePlanSectionHtml } from './editor/planRuntime'
 import PlansPane from './editor/PlansPane.vue'
 import { lastOpenedStorageKey, loadStoredValue, saveStoredChoice } from './editor/plansPaneModel'
-import { isMacPlatform } from './keybindings/parseKey'
+import { useKeybindings, setContext } from './keybindings/useKeybindings'
+import { registerCommand } from './keybindings/commandRegistry'
 import PlanReviewToolbar from './editor/PlanReviewToolbar.vue'
 import PlanFileView from './editor/PlanFileView.vue'
 import PlanMarkdownBody from './editor/PlanMarkdownBody.vue'
@@ -258,57 +259,55 @@ async function onSectionDelete(anchor: string): Promise<void> {
   applyBodyWriteResult(result)
 }
 
-// Quick open (⌘P / Ctrl+P). This window runs its own keydown handler rather
-// than the shared keybinding registry, so the chord is matched here — on the
-// platform modifier only, keeping the terminal's own Ctrl+P on macOS, and never
-// while focus sits in the CLI dock, whose PTY owns its keys.
-function isQuickOpenChord(event: KeyboardEvent): boolean {
-  if (event.key.toLowerCase() !== 'p' || event.altKey || event.shiftKey) return false
-  const chord = isMacPlatform() ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey
-  if (!chord) return false
-  return !(event.target as HTMLElement | null)?.closest?.('.ai-dock-panel')
-}
+useKeybindings()
+// Window identity, the same way GitWindowApp declares `gitWindow`: it gates the
+// ESC rule below, which must not fire in the windows that have their own.
+setContext('planWindow', true)
 
-// ESC overlay priority: cancel/close the innermost active overlay before
-// falling through to closing the window. Order: an in-frame section edit
-// (when focus is outside the frame — inside it the runtime handles ESC
-// itself), then the plan list's context menu / rename input, then an unsent
-// review note, then a read-only snapshot; otherwise close the window.
-function onWindowKeydown(event: KeyboardEvent): void {
-  if (isQuickOpenChord(event)) {
-    event.preventDefault()
-    void plansPaneRef.value?.openQuickOpen?.()
-    return
-  }
-  if (event.key !== 'Escape') return
+// Quick open (⌘P), from the shared rule table like every other window. Handlers
+// that return false do not consume the event, which is how the CLI dock keeps
+// its own ⌘P: the PTY owns every key while focus is inside it.
+registerCommand('workbench.action.quickOpen', () => {
+  if (document.activeElement?.closest('.ai-dock-panel')) return false
+  void plansPaneRef.value?.openQuickOpen?.()
+  return undefined
+})
+
+// ⌘⇧W. This window has no unsaved-buffer state of its own — an in-flight
+// section edit is cancelled through ESC below — so it closes outright.
+registerCommand('workbench.action.closeWindow', () => { window.close() })
+
+// ESC, bound centrally as closeModal on `planWindow` (keybindings/defaults.ts).
+//
+// The priority walk stays here rather than becoming five bindings: each step is
+// internal window state, and only the last one — closing the window — is a
+// decision the user could reasonably want on a different key. That one already
+// has its own command (⌘⇧W above); this is the same action reached by falling
+// through everything nearer.
+//
+// Order: an in-frame section edit (only when focus is outside the frame —
+// inside it the srcdoc runtime handles ESC and it never reaches us), then the
+// plan list's context menu / rename input, then an unsent review note, then a
+// read-only snapshot; otherwise close the window.
+registerCommand('workbench.action.closeModal', () => {
   if (previewRef.value?.isEditing?.()) {
     previewRef.value.cancelEdit()
-    event.preventDefault()
     return
   }
   // Markdown body's inline section edit — same priority as the HTML preview's
   // in-frame edit (only one body is ever mounted).
   if (mdBodyRef.value?.isEditing?.()) {
     mdBodyRef.value.cancelEdit()
-    event.preventDefault()
     return
   }
-  if (plansPaneRef.value?.closeActiveOverlay?.()) {
-    event.preventDefault()
-    return
-  }
-  if (toolbarRef.value?.closeActiveOverlay?.()) {
-    event.preventDefault()
-    return
-  }
+  if (plansPaneRef.value?.closeActiveOverlay?.()) return
+  if (toolbarRef.value?.closeActiveOverlay?.()) return
   if (snapshotPreview.value) {
     closeSnapshotPreview()
-    event.preventDefault()
     return
   }
-  event.preventDefault()
   window.close()
-}
+})
 
 // Pane id for the CLI dock, derived per (surface, workspace): Plan windows for
 // different workspaces coexist, and a shared fixed id would let one window's
@@ -369,7 +368,6 @@ onMounted(() => {
       planPreviewRefresh.value++
     }
   })
-  window.addEventListener('keydown', onWindowKeydown)
   // Auto-open the plan this window was launched for, once the root its path is
   // relative to is known.
   void resolvePlanRoot().then(() => openInitialDoc())
@@ -381,7 +379,6 @@ onUnmounted(() => {
   offThemeSettingsChange?.()
   offPlansChanged?.()
   offPlanOpenDoc?.()
-  window.removeEventListener('keydown', onWindowKeydown)
 })
 </script>
 

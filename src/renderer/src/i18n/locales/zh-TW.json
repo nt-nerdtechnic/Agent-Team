@@ -1103,6 +1103,7 @@
         "workbench_action_closeEditorsToTheRight": "關閉右側所有編輯器",
         "workbench_action_closeModal": "關閉對話框",
         "workbench_action_closeOtherEditors": "關閉其他編輯器",
+        "workbench_action_closeWindow": "關閉視窗",
         "workbench_action_copyFilePath": "複製檔案完整路徑",
         "workbench_action_copyRelativeFilePath": "複製檔案相對路徑",
         "workbench_action_findInFiles": "跨檔搜尋",
@@ -1197,7 +1198,7 @@
           "devTools": "開發者工具",
           "fullScreen": "全螢幕",
           "clipboard": "複製 / 貼上 / 剪下 / 復原 / 全選",
-          "windowControls": "關閉 / 結束 / 最小化",
+          "windowControls": "結束 / 最小化",
           "hide": "隱藏 / 隱藏其他"
         }
       },
