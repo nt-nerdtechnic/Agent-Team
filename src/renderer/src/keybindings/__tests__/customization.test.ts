@@ -243,6 +243,22 @@ describe('conflict reporting', () => {
     expect(index.has(rowId('editor.action.save', 'editorOpen'))).toBe(false)
   })
 
+  it('ranks a user override above every default competing for the key', () => {
+    // The resolver is built as [...defaults, ...userRules] and the last match
+    // wins, so a key the user assigned outranks a default no matter where its
+    // row sits in the table. Ordering contenders by row position instead would
+    // invert both verdicts here.
+    const rows = buildRows(
+      [{ key: 'cmd+j', command: 'a.early' }],
+      [
+        { key: 'cmd+1', command: 'a.early' },
+        { key: 'cmd+j', command: 'a.late' },
+      ],
+    )
+    const conflict = findKeyConflicts(rows).find((c) => c.key === 'cmd+j')
+    expect(conflict?.shadowed.map((r) => r.command)).toEqual(['a.late'])
+  })
+
   it('surfaces a conflict introduced by the user’s own rebind', () => {
     const rows = buildRows([], base)
     const rules = setRowKeys([], rowFor(rows, 'editor.action.save', 'editorOpen'), ['cmd+k cmd+s'])

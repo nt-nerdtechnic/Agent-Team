@@ -290,10 +290,16 @@ function transientAssignments(): Record<string, boolean>[] {
 /**
  * Rows competing for `key`, in resolver priority order (last wins).
  *
- * `rows` arrives in declaration order, so a later row is a later rule.
+ * Priority is NOT row order. The resolver is built as `[...defaults,
+ * ...userRules]`, so every user rule outranks every default however early its
+ * row appears in the table — and a row keeps its defaults position even when
+ * the key in question is one the user added. Group by where the key came from
+ * first, then by declaration order within each group.
  */
 function contendersFor(rows: BindingRow[], key: string): BindingRow[] {
-  return rows.filter((r) => r.keys.some((k) => k.key === key))
+  const holds = (r: BindingRow, source: 'default' | 'user'): boolean =>
+    r.keys.some((k) => k.key === key && k.source === source)
+  return [...rows.filter((r) => holds(r, 'default')), ...rows.filter((r) => holds(r, 'user'))]
 }
 
 /**
