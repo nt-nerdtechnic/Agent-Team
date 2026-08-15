@@ -25,7 +25,7 @@ import TokenStatsPanel from './components/TokenStatsPanel.vue'
 import NotificationHost from './components/NotificationHost.vue'
 import Welcome from './components/Welcome.vue'
 import { useNotify } from './composables/useNotify'
-import { migrateTerminalPtyKey, type DisplayStatus } from './composables/useTerminal'
+import { migrateTerminalPtyKey, saveAllScrollSnapshots, type DisplayStatus } from './composables/useTerminal'
 import { useAgentMessaging, encodeReason, isBroadcastTarget } from './composables/useAgentMessaging'
 import type { RouteResult } from './composables/useAgentMessaging'
 import { createMessageLogPersistence } from './composables/useMessageLogPersistence'
@@ -1931,11 +1931,18 @@ onMounted(() => {
   void refreshRemoteMessagingTargets()
   _remoteTargetsTimer = window.setInterval(() => void refreshRemoteMessagingTargets(), 10_000)
   window.addEventListener('beforeunload', msgLog.flushOnExit)
+  // A hard teardown (⌘R's `role: 'reload'`, app quit) never runs a pane's
+  // onScopeDispose, so this is the last chance to catch the ≤60s of scrollback
+  // the panes' own periodic save has not written yet. Like flushOnExit it
+  // cannot await, so it only stores what xterm has already parsed — the
+  // periodic save is what makes the snapshot faithful.
+  window.addEventListener('beforeunload', saveAllScrollSnapshots)
 })
 onUnmounted(() => {
   window.clearInterval(_msgPumpTimer)
   window.clearInterval(_remoteTargetsTimer)
   window.removeEventListener('beforeunload', msgLog.flushOnExit)
+  window.removeEventListener('beforeunload', saveAllScrollSnapshots)
   void msgLog.flush()
 })
 
@@ -8090,8 +8097,11 @@ backend.on('session.detected', (raw) => {
   // The CLI rotated its session id (e.g. claude --resume records a NEW id).
   // The reattach key follows pinnedSessionId — carry the live PTY id to the
   // new key so the next restore reattaches instead of spawning a second CLI
-  // beside the still-running one.
-  migrateTerminalPtyKey(pane.pinnedSessionId ?? '', sessionId)
+  // beside the still-running one. Falling back to the pane id covers the
+  // FIRST binding: a pane that has not detected a session yet is keyed by
+  // pane.id, so passing '' here would no-op and strand both the PTY entry
+  // and the scrollback snapshot under a key nothing reads again.
+  migrateTerminalPtyKey(pane.pinnedSessionId || pane.id, sessionId)
   pane.pinnedSessionId = sessionId
   pane.sessionOnDisk = true
   // The detected id IS the pane's real session — a restore-pinned placeholder

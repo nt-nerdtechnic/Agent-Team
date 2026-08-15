@@ -236,20 +236,68 @@ export type TerminalStatus = 'idle' | 'starting' | 'running' | 'exited' | 'error
  *  value here is what makes the compiler point at the places that must follow. */
 export type DisplayStatus = TerminalStatus | 'awaiting' | 'question'
 
-// The reattach key (`terminal-pty:<resumeKey>`) follows the CLI's session id,
-// but a CLI rewrites its session id on every resume (claude --resume A records
-// a NEW session B). Carry the live PTY id over to the rotated key — otherwise
-// the next restore can't find the running PTY, spawns a second CLI, and the
-// old one lingers detached until the backend janitor reaps it.
+// Every live useTerminal instance, so the module-level helpers below can reach
+// each pane's scrollback snapshot: the app-exit save (App.vue's beforeunload),
+// the session-id rotation, and the orphan-first eviction inside a pane.
+interface TerminalSnapshotHooks {
+  /** The pane's current persistence key (the `terminal-pty:` / `terminal-scroll:` suffix). */
+  currentKey: () => string
+  /** Follow a session-id rotation, so later saves land on the key the next restore reads. */
+  retargetKey: (key: string) => void
+  /** Persist this pane's scrollback right now. */
+  save: () => void
+}
+const _liveTerminals = new Set<TerminalSnapshotHooks>()
+
+/** Persist every live pane's scrollback snapshot.
+ *
+ *  Called from App.vue's `beforeunload`, which is the only notice a hard page
+ *  teardown (⌘R's `role: 'reload'`, app quit) gives — `onScopeDispose` never
+ *  runs there. `beforeunload` cannot await, so this only catches what xterm has
+ *  already parsed; the periodic save inside each pane is what makes the stored
+ *  snapshot complete, and this is the ≤60s catch-up on top of it. */
+export function saveAllScrollSnapshots(): void {
+  for (const hooks of _liveTerminals) {
+    try { hooks.save() } catch { /* one pane must not stop the rest */ }
+  }
+}
+
+/** `terminal-scroll:` keys a live pane still owns. Everything else under that
+ *  prefix is an orphan — no pane will ever write or replay it again. */
+function liveScrollSnapKeys(): Set<string> {
+  const keys = new Set<string>()
+  for (const hooks of _liveTerminals) {
+    const key = hooks.currentKey()
+    if (key) keys.add(`terminal-scroll:${key}`)
+  }
+  return keys
+}
+
+// The persistence key (`terminal-pty:<resumeKey>`, `terminal-scroll:<resumeKey>`)
+// follows the CLI's session id, but a CLI rewrites its session id on every
+// resume (claude --resume A records a NEW session B). Carry both the live PTY id
+// and the scrollback snapshot over to the rotated key — otherwise the next
+// restore can't find the running PTY, spawns a second CLI, and the old one
+// lingers detached until the backend janitor reaps it; and the snapshot, written
+// under the old id but read back under the new one, is invisible history that
+// still competes for the shared localStorage quota.
 export function migrateTerminalPtyKey(oldKey: string, newKey: string): void {
   if (!oldKey || !newKey || oldKey === newKey) return
   try {
-    const pty = localStorage.getItem(`terminal-pty:${oldKey}`)
-    if (pty) {
-      localStorage.setItem(`terminal-pty:${newKey}`, pty)
-      localStorage.removeItem(`terminal-pty:${oldKey}`)
+    for (const prefix of ['terminal-pty:', 'terminal-scroll:']) {
+      const value = localStorage.getItem(prefix + oldKey)
+      if (value == null) continue
+      localStorage.setItem(prefix + newKey, value)
+      localStorage.removeItem(prefix + oldKey)
     }
   } catch { /* ignore */ }
+  // Moving the stored entries is only half the job: the pane that owns them
+  // captured its key at spawn() time and keeps writing to it, so without this
+  // every later save would land back on the dead key — leaving a fresh orphan
+  // behind and freezing the migrated snapshot at the moment of rotation.
+  for (const hooks of _liveTerminals) {
+    if (hooks.currentKey() === oldKey) hooks.retargetKey(newKey)
+  }
 }
 
 // Cached dimensions from any visible terminal. Hidden tabs use these to start
@@ -2586,7 +2634,19 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // terminal history survives a reload or restart. On next spawn of the same
   // resumeKey, the snapshot is replayed into the fresh xterm instance before
   // the new PTY starts writing — giving instant scrollback access to prior work.
-  const SCROLL_SNAP_MAX = 256 * 1024  // 256 KB rolling cap
+  // Per-pane cap, in characters. localStorage bills in UTF-16, so a cap of N
+  // characters costs 2N bytes of the ~5 MB per-origin quota shared by every
+  // pane: at the old 256 KB cap ten panes exhausted it, and from there each
+  // save evicted a neighbour (measured: 2000 serialized lines ≈ 202 KB). That
+  // was survivable while the only save was at teardown; with the periodic save
+  // below it would turn occasional eviction into constant churn. 64 KB ≈ 128 KB
+  // of quota, so ~40 panes fit — and at the measured ~100 characters per line
+  // it still keeps ~640 lines of history per pane. Chosen over a cap that
+  // scales with the live pane count because the quota is shared with snapshots
+  // of panes that no longer exist (and with other renderer state), so a
+  // computed budget would be confidently wrong; the halving loop in
+  // saveScrollSnapshot already adapts to real pressure.
+  const SCROLL_SNAP_MAX = 64 * 1024
   // Scrollback is measured in lines, not bytes: the payload is produced by
   // serializing xterm's buffer, and the only safe way to shrink it is to
   // serialize fewer lines. Slicing the string would cut through an escape
@@ -2620,18 +2680,32 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     } catch { return '' }
   }
   // localStorage quota is shared across every pane's snapshot, and snapshots
-  // of closed panes linger. On overflow, evict another pane's stale snapshot
-  // and retry — dropping old history beats silently losing the newest.
-  function evictLargestOtherSnapshot(selfKey: string): boolean {
-    let victim = ''
-    let victimLen = -1
+  // of closed panes linger. On overflow, evict another snapshot and retry —
+  // dropping old history beats silently losing the newest.
+  //
+  // Orphans go first: a `terminal-scroll:` key no live pane owns is history
+  // nobody can ever replay, while a live pane's snapshot is scrollback the user
+  // may still come back to. Only when there is no orphan left do live panes
+  // start taking from each other (which is what the periodic save would
+  // otherwise make continuous).
+  function evictOtherSnapshot(selfKey: string): boolean {
+    const live = liveScrollSnapKeys()
+    let orphan = ''
+    let orphanLen = -1
+    let owned = ''
+    let ownedLen = -1
     try {
       for (let i = 0; i < localStorage.length; i++) {
         const k = localStorage.key(i)
         if (!k || k === selfKey || !k.startsWith('terminal-scroll:')) continue
         const len = (localStorage.getItem(k) ?? '').length
-        if (len > victimLen) { victim = k; victimLen = len }
+        if (live.has(k)) {
+          if (len > ownedLen) { owned = k; ownedLen = len }
+        } else if (len > orphanLen) {
+          orphan = k; orphanLen = len
+        }
       }
+      const victim = orphan || owned
       if (!victim) return false
       localStorage.removeItem(victim)
       return true
@@ -2666,7 +2740,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         localStorage.setItem(key, SNAP_FORMAT + payload)
         return
       } catch {
-        if (evictLargestOtherSnapshot(key)) continue
+        if (evictOtherSnapshot(key)) continue
         if (lines > SCROLL_SNAP_MIN_LINES) {
           lines = Math.floor(lines / 2)
           payload = serializeSnapshot(lines)
@@ -2677,6 +2751,51 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       }
     }
   }
+
+  // ── Periodic snapshot ────────────────────────────────────────────────────────
+  // Teardown is not a reliable save point: a hard page reload (⌘R is Electron's
+  // `role: 'reload'`) and an app restart both drop the renderer without running
+  // onScopeDispose, so the pane came back with nothing to replay. Save while the
+  // pane is idle instead, riding the per-pane status tick above (1s on screen,
+  // 10s off) rather than adding an interval of its own.
+  //
+  // Saving at idle is also MORE faithful than saving at teardown: output is
+  // coalesced for _BACKGROUND_COALESCE_MS before it reaches xterm, and the
+  // teardown path serializes the buffer BEFORE cleanupSession flushes that
+  // pending chunk — so the teardown snapshot is structurally missing its last
+  // ~100ms. After SNAP_QUIET_MS of silence there is nothing left in flight.
+  const SNAP_QUIET_MS = 3_000       // PTY silence (incl. TUI repaints) before saving
+  const SNAP_MIN_GAP_MS = 60_000    // floor on how often a pane rewrites its snapshot
+  let lastSnapSavedAt = 0
+  // lastRawActivityAt as of the last save. Any byte since then — TUI repaint
+  // included — means the buffer may have changed; equal means it cannot have,
+  // so there is nothing to re-serialize. Cheaper and steadier than diffing the
+  // payload, which would cost a 9ms serialize per tick just to find no change.
+  let lastSnapActivityAt = 0
+  function maybeSaveScrollSnapshot(): void {
+    // The session ended: its snapshot was deliberately removed (see the exit
+    // handler). Writing it back here would resurrect a closed session's
+    // scrollback for the next pane that reuses the key.
+    if (snapshotDiscarded) return
+    if (displayStatus.value === 'running') return
+    const raw = lastRawActivityAt.value
+    if (raw === 0) return                      // nothing has ever been rendered
+    if (raw === lastSnapActivityAt) return     // unchanged since the last save
+    const now = Date.now()
+    if (now - raw < SNAP_QUIET_MS) return      // still mid-output / mid-repaint
+    if (now - lastSnapSavedAt < SNAP_MIN_GAP_MS) return
+    saveScrollSnapshot()
+    lastSnapSavedAt = now
+    lastSnapActivityAt = raw
+  }
+  watch(nowTick, maybeSaveScrollSnapshot)
+
+  const _snapshotHooks: TerminalSnapshotHooks = {
+    currentKey: () => persistKey,
+    retargetKey: (key: string) => { persistKey = key },
+    save: saveScrollSnapshot,
+  }
+  _liveTerminals.add(_snapshotHooks)
 
   // Rolling tail of what the user typed on the current line, used to spot the
   // `/clear` command. Lives out here (rather than inside bindSessionHandlers)
@@ -3589,6 +3708,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     isDisposed = true
     void cancelPendingCreate().catch(() => {})
     saveScrollSnapshot()  // persist scrollback before the pane is torn down
+    _liveTerminals.delete(_snapshotHooks)  // stop answering app-exit saves / key rotations
     cleanupSession()
     clearInterval(tickInterval)
     clearInterval(reconcileInterval)
