@@ -82,6 +82,22 @@ export interface AgentSpec {
    *  paste wrapping AND serves as the default Shift+Enter encoding (bracketed
    *  LF inserts a literal newline without submitting). */
   bracketedPaste?: boolean
+  /** This vendor draws its CONVERSATION in the terminal's alternate screen
+   *  buffer (verified per vendor by probing the PTY / the shipped binary for
+   *  `ESC[?1049h`), so a scrollback snapshot taken with `excludeAltBuffer: true`
+   *  comes back all but empty. Set it and the snapshot includes the alt buffer
+   *  instead — see serializeSnapshot in useTerminal.
+   *
+   *  Ceiling: xterm keeps NO scrollback for the alternate buffer, so what this
+   *  recovers from a running session is the LAST SCREENFUL, never the whole
+   *  conversation. (History does accumulate across restarts, because each
+   *  replayed snapshot lands in the normal buffer the next one serializes.)
+   *
+   *  Leave it unset for anything whose full-screen views are TRANSIENT — a
+   *  plain shell where the user opens vim or a pager, or a line-mode CLI whose
+   *  conversation is already in the normal buffer. Saving a pager's screen as
+   *  "history" is exactly what excludeAltBuffer exists to prevent. */
+  fullScreenTui?: boolean
   /** Explicit Shift+Enter byte sequence when the vendor prefers something
    *  other than the bracketed-paste LF default (codex: CSI-u modified Enter).
    *  There is no vendor-neutral byte sequence for a modified Enter key in a

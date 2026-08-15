@@ -11,6 +11,9 @@ export const SPEC = {
   supportsRebuild: true,
   verifiedTurnText: true,
   bracketedPaste: true,
+  // Measured on a real PTY: Claude Code emits `ESC[?1049h` within the first
+  // dozen bytes of startup and keeps the conversation there.
+  fullScreenTui: true,
   // Claude Code prints "Login expired · Please run /login" (also seen as
   // "Error during compaction: Login expired · Please run /login"). Require
   // BOTH "Login expired" and the nearby "Please run /login" instruction so

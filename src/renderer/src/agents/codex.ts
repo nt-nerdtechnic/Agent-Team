@@ -14,6 +14,10 @@ export const SPEC = {
   supportsRebuild: true,
   verifiedTurnText: true,
   bracketedPaste: true,
+  // The shipped binary carries `ESC[?1049h` and crossterm's
+  // `EnterAlternateScreen`, and documents `--no-alt-screen` as "Disable
+  // alternate screen mode" — the conversation lives in the alt buffer.
+  fullScreenTui: true,
   shiftEnterSequence: '\x1b[13;2u',
   // Restore-pin self-heals: per-pane CODEX_HOME announces the new session.
   supportsRestorePin: true,

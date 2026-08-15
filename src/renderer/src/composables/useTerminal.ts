@@ -189,6 +189,40 @@ const MOUSE_MODE_RESET = '\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015
  */
 const MOUSE_MODE_RESET_NEW_PROCESS = `${MOUSE_MODE_RESET}\x1b[?2004l`
 
+/** The alternate-screen ENTER sequence, plus the cursor-home the serializer
+ *  always pairs with it. `?1047h` / `?47h` are the pre-xterm-88 spellings —
+ *  matched for completeness, not because this addon emits them. */
+const ALT_SCREEN_ENTER = /\x1b\[\?(?:1049|1047|47)h(?:\x1b\[H)?/
+
+/**
+ * Remove the alternate-screen ENTER sequence from a snapshot serialized with
+ * `excludeAltBuffer: false`.
+ *
+ * @xterm/addon-serialize renders the normal buffer first and, when the terminal
+ * sits in its alternate buffer, appends a literal `ESC[?1049h ESC[H` followed by
+ * the alt screen. Replaying that verbatim leaves the fresh terminal PARKED in
+ * its alternate buffer (measured: `buffer.active.type === 'alternate'`) — the
+ * user cannot scroll back, the normal history is hidden underneath, and every
+ * later write (mouse reset, the reconnected divider, live output) lands on a
+ * screen that is thrown away. Without the sequence the alt screenful replays as
+ * ordinary normal-buffer lines: scrollable, re-wrappable, the same shape as the
+ * rest of the payload.
+ *
+ * Only the FIRST occurrence is touched. The serializer emits it exactly once,
+ * as the boundary between the two buffers, and no other part of a serialized
+ * payload can reproduce it — buffer cells hold glyphs, never raw ESC, and the
+ * trailing mode section only ever writes 1h/66h/2004h/4h/6h/45h/1004h/7l/mouse.
+ * When the boundary is not at position 0 the normal buffer had content of its
+ * own, so the sequence becomes a line break instead of vanishing, keeping the
+ * restored screen off the end of the last history line.
+ */
+export function stripAltScreenEnter(payload: string): string {
+  const found = ALT_SCREEN_ENTER.exec(payload)
+  if (!found) return payload
+  const rest = payload.slice(found.index + found[0].length)
+  return found.index === 0 ? rest : `${payload.slice(0, found.index)}\r\n${rest}`
+}
+
 /** Set once the "hold ⌥ to select" hint has been shown — it teaches once.
  *  Goes through settings (backend-persisted) rather than localStorage, which
  *  this app has been migrating away from and which plugin bundles don't share. */
@@ -2715,9 +2749,27 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // TUI's transient full-screen view (vim, a pager) out of the snapshot — only
   // the normal buffer, which holds the conversation, is worth restoring; the
   // CLI repaints its own alt-buffer view when it reattaches.
+  //
+  // A `fullScreenTui` vendor (claude, codex) inverts that: its CONVERSATION is
+  // the alt buffer, so excluding it saved an all but empty snapshot and both the
+  // periodic save and the reattach replay were doing nothing for those panes.
+  // Include the alt buffer there and strip the enter sequence, so the screen
+  // replays as normal-buffer lines instead of parking the terminal in the
+  // alternate buffer (see stripAltScreenEnter).
+  //
+  // Ceiling: xterm keeps NO scrollback for the alternate buffer, so this
+  // recovers the LAST SCREENFUL of a running session, never the whole
+  // conversation. History still accumulates across restarts — the replayed
+  // snapshot lands in the normal buffer, which the next save serializes ahead
+  // of the current screen.
   function serializeSnapshot(lines: number): string {
+    const altIsHistory = terminalSpecFor(activeAgentKey)?.fullScreenTui === true
     try {
-      return serializer.serialize({ scrollback: lines, excludeAltBuffer: true })
+      const payload = serializer.serialize({
+        scrollback: lines,
+        excludeAltBuffer: !altIsHistory,
+      })
+      return altIsHistory ? stripAltScreenEnter(payload) : payload
     } catch {
       return ''
     }
