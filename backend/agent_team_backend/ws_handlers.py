@@ -45,6 +45,7 @@ from .spawn_history import canonical_workspace_path, filter_foreign_entries
 
 if TYPE_CHECKING:
     from .app import Session
+    from .projects import Project
 
 Handler = Callable[["Session", str, str, dict], Awaitable[None]]
 
@@ -4660,11 +4661,45 @@ async def project_log_event(session: "Session", msg_id: str, msg_type: str, payl
 
 
 # ── Pipeline execution (pipeline.*) ──────────────────────────────────────────
+def _mirror_pipeline_state(project: "Project") -> None:
+    """Copy a pipeline's state onto its recent-workspaces entry.
+
+    The store keeps last_known_state/task purely so Welcome can badge a folder
+    with how its last run ended; nothing else writes them, so without this every
+    entry falls through to the 'spawn-only' default. Called from the handlers
+    that move Project.state (start / resume / complete / abort) — the backend is
+    the authority, and mirroring here also survives the window being closed
+    right after a run.
+    """
+    from . import app
+
+    try:
+        app.recent_workspaces_store.touch(
+            project.workspace_path,
+            state=project.state,
+            task=project.task_description,
+        )
+        recent = app.recent_workspaces_store.list()
+    except Exception:  # noqa: BLE001 — a badge must not fail a pipeline
+        # Callers are the start/complete/abort handlers, which had no dependency
+        # on the recent store before this. A store failure here would answer
+        # their request with an error for a run that actually succeeded, so it
+        # stays local: the badge falls back to whatever it showed before.
+        app.log.exception("recent-workspaces: failed to mirror pipeline state")
+        return
+    asyncio.create_task(
+        app.broadcast(
+            make_event("workspace.recent_changed", {"recent": recent, "reason": "pipeline"})
+        )
+    )
+
+
 @handler("pipeline.resume")
 async def pipeline_resume(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
 
     project, resume_index = app.project_store.resume_pipeline(payload["workspace_path"])
+    _mirror_pipeline_state(project)
     resp = app._project_payload(project)
     resp["resume_index"] = resume_index
     await session.send_json(make_response(msg_id, msg_type, resp))
@@ -4683,6 +4718,7 @@ async def pipeline_start(session: "Session", msg_id: str, msg_type: str, payload
         pipeline_id=payload.get("pipeline_id", "") or app.stages_store.get_active_pipeline_id(),
     )
     app._register_workspace_and_backfill(project.workspace_path)
+    _mirror_pipeline_state(project)
     # Start a fresh token-stats run for this workspace.
     log_name = project.log_file_name or ""
     run_dir = log_name.rsplit("/", 1)[0] if "/" in log_name else ""
@@ -4788,6 +4824,7 @@ async def pipeline_complete(session: "Session", msg_id: str, msg_type: str, payl
     from . import app
 
     project = app.project_store.complete_pipeline(payload["workspace_path"])
+    _mirror_pipeline_state(project)
     app.tokens_store.end_run(project.workspace_path)
     asyncio.create_task(
         app.broadcast(make_event("tokens.changed", app.tokens_store.snapshot(project.workspace_path)))
@@ -4804,6 +4841,7 @@ async def pipeline_abort(session: "Session", msg_id: str, msg_type: str, payload
     project = app.project_store.abort_pipeline(
         payload["workspace_path"], reason=payload.get("reason", "user")
     )
+    _mirror_pipeline_state(project)
     app.tokens_store.end_run(project.workspace_path)
     asyncio.create_task(
         app.broadcast(make_event("tokens.changed", app.tokens_store.snapshot(project.workspace_path)))

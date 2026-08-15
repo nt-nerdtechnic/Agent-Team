@@ -76,6 +76,7 @@ import {
 } from './data/stages'
 import { i18n } from './i18n'
 import { deriveAutoName } from './lib/autoName'
+import { bootWorkspaceToRecord } from './lib/bootWorkspace'
 import { diagLog } from './lib/diagLog'
 import { findConsecutiveQuestionBlocks, findSentinel } from './lib/buffer'
 import {
@@ -518,17 +519,15 @@ const workspaceSelected = ref<boolean>(
 // first window to ask gets the list and shows the restore prompt.
 watch(currentWorkspace, (v) => { window.agentTeam?.reportWorkspace?.(v) }, { immediate: true })
 
-// Windows booted with a workspace URL param (Finder "Open With", the macOS
-// Quick Action, CLI path args, crash-restore) skip Welcome's click handler,
-// which is otherwise the only place that records a recent entry — without this
-// an externally opened folder never shows up in the Recent list. Wait for the
-// backend to accept requests, then record it once.
-if (_bootWorkspace) {
+// Record an externally opened folder in Recent once the backend accepts
+// requests — see bootWorkspaceToRecord for which boots qualify.
+const _bootRecordWorkspace = bootWorkspaceToRecord(window.location.search)
+if (_bootRecordWorkspace) {
   let bootTouched = false
   const touchBootWorkspace = (): void => {
     if (bootTouched || backend.status.value !== 'connected') return
     bootTouched = true
-    void touchRecentWorkspace(_bootWorkspace)
+    void touchRecentWorkspace(_bootRecordWorkspace)
   }
   touchBootWorkspace()
   watch(() => backend.status.value, touchBootWorkspace)
