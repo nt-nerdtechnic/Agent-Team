@@ -46,7 +46,8 @@ Activity: parse_activity watermarks on blobs.rowid (monotonic per INSERT) and
 turns each new JSON message row into an event — role=user → agent_active,
 role=assistant → turn_complete carrying the reply text. That turn_complete is
 what lets a Cursor pane send inter-CLI messages: the frontend only parses the
----MSG-START--- protocol out of a turn_complete that has text.
+---MSG-START--- protocol out of a turn_complete that has text. Nothing else is
+reported: there is deliberately NO db-write heartbeat (see parse_activity).
 
 Everything here is maximally defensive: any missing table, unexpected
 schema, undecodable value, or sqlite error is tolerated by silently skipping
@@ -111,13 +112,7 @@ _UUID_RE = re.compile(
 )
 
 # Sentinel prefix persisted inside the watcher-owned per-file seen_keys set
-# (same trick as Kimi's turn state): the last observed mtime/size, so
-# parse_activity emits agent_active only when the db actually changed.
-_STAT_PREFIX = "cursor_stat::"
-
-# Second sentinel in the same set: the last scanned blobs.rowid. Kept apart
-# from _STAT_PREFIX so the two signals never overwrite each other's state (and
-# their dedup keys, "stat:…" vs "blob:…", can never collide either).
+# (same trick as Kimi's turn state): the last scanned blobs.rowid.
 _ACTIVITY_PREFIX = "cursor_blob::"
 
 # rowid is monotonic per INSERT; a content-addressed row re-inserted under an
@@ -148,6 +143,25 @@ _MAX_TURN_TEXT = 8000
 # <user_query> at all. Without the distinction that injection would read as
 # the user's opening message and name the pane after it.
 _USER_QUERY_RE = re.compile(r"<user_query>\s*(.*?)\s*</user_query>", re.DOTALL)
+
+# Navide's own session marker, as it reaches the store. Cursor cannot pin a
+# session id at launch, so a fresh pane's marker is TYPED into the TUI as a
+# standalone prompt (App.vue sendSessionMarkerBootstrap pastes
+# `<!-- agent-team-session: at-pane:<paneId> -->` and hits Enter). Cursor wraps
+# it like any other prompt, so it arrives as a perfectly normal <user_query>
+# row — indistinguishable from something the person typed unless matched here.
+# It is Navide talking to itself, never user activity, so a row whose whole
+# body is the marker emits nothing.
+#
+# Anchored on the ENTIRE unwrapped body on purpose: a real prompt that merely
+# mentions `at-pane:` (discussing this very mechanism, forwarding a pane id)
+# is a genuine prompt and must still be reported.
+_MARKER_ONLY_RE = re.compile(
+    r"^(?:<!--\s*agent-team-session:\s*)?"
+    r"at-pane:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    r"(?:\s*-->)?$"
+)
 
 
 def _read_meta_json(session_dir: Path) -> dict:
@@ -307,87 +321,58 @@ class CursorLogReader(LogReader):
         lives in parse_activity."""
         return IncrementalParseResult([], dict(checkpoint))
 
-    # ── activity: db-write heartbeat + per-message blob scan ────────────────
+    # ── activity: per-message blob scan ─────────────────────────────────────
 
     def parse_activity(
         self, path: Path, seen_keys: set[str]
     ) -> list[ActivityEvent]:
-        """Turn events from the JSON message blobs, plus a write heartbeat.
+        """Turn events from the JSON message blobs — and nothing else.
 
-        Two signals, because they cover different halves of a turn:
+        There is deliberately no db-write (mtime/size) heartbeat. It used to
+        exist to prove "still working" between turn boundaries, since the
+        writes in between are protobuf structure nodes with no decodable role,
+        but that rationale assumed reader events drive the pane's RUNNING
+        display. They do not: RUNNING comes from raw PTY bytes
+        (useTerminal's lastRawActivityAt), so a pane mid-turn still looks busy
+        with no heartbeat at all.
 
-        * the blob scan (_blob_activity) only fires at turn boundaries — a
-          user message and, at the end, an assistant message. Everything in
-          between (tool calls, streamed chunks) is written as protobuf
-          structure nodes, which carry no decodable role;
-        * the mtime/size heartbeat (_stat_activity) is therefore kept: it is
-          the only proof the agent is still working mid-turn. Its dedup keys
-          ("stat:…") and watermark are disjoint from the blob scan's.
-
-        The heartbeat is emitted first so that a pass which observes both
-        reads as "working, then done" rather than the reverse.
+        What the heartbeat DID drive is the App's paneLastActiveAt — and there
+        it was actively harmful. A live store keeps writing protobuf rows
+        AFTER the turn's last assistant row (sampled: rowids 20/23 and 32
+        follow assistant rows 19 and 30). A pass that observed only those
+        would emit a bare agent_active stamped LATER than the turn_complete,
+        and completion.ts's turnCompleteDone requires
+        turnCompleteAt >= lastActiveAt — so the pane would never read as done:
+        no notification, and an unattended loop stalls forever waiting for
+        loopContinueReady.
         """
         session_id = self.session_id_from_path(path)
         if not session_id:
             return []
         cwd = self.cwd_from_file(path)
-        out = self._stat_activity(path, session_id, cwd, seen_keys)
-        out.extend(self._blob_activity(path, session_id, cwd, seen_keys))
-        return out
+        return self._blob_activity(path, session_id, cwd, seen_keys)
 
-    def _store_timestamp(self, path: Path) -> str:
-        """ISO-8601 stamp for this pass's events.
+    def _store_epoch(self, path: Path) -> float:
+        """Epoch seconds to stamp this pass's events with.
 
         blobs has no time column at all, so there is no per-message timestamp
         to read; the closest real one is meta.json's `updatedAtMs`, which the
         CLI rewrites as part of each turn's commit (so consecutive turns get
-        distinct values). The db's mtime is the fallback and the scan clock
-        the last resort: the field must never be empty or unparseable —
-        the frontend dedups messaging turns by timestamp and treats an
-        unparseable one as always-fresh, which resends a delivered turn.
+        distinct values). The scan clock is the only fallback.
+
+        The db's own mtime is NOT usable, tempting as it looks: store.db runs
+        in WAL mode, and a WAL commit lands in store.db-wal without touching
+        the main file's mtime or size (measured: 30 consecutive commits, no
+        change; only close/checkpoint moves it). Falling back to it would
+        stamp every turn of a session with the session's start time, and past
+        60s isReplayedTurnComplete would then silently discard all of them —
+        killing done notifications, pipeline sentinels and the inter-CLI
+        messaging this reader exists for.
         """
         updated = _num(_read_meta_json(path.parent).get("updatedAtMs"))
         if updated:
-            iso = _epoch_to_iso(updated / 1000)
-            if iso:
-                return iso
-        try:
-            iso = _epoch_to_iso(path.stat().st_mtime)
-        except OSError:
-            iso = None
-        return iso or _epoch_to_iso(time.time()) or ""
-
-    def _stat_activity(
-        self, path: Path, session_id: str, cwd: str, seen_keys: set[str]
-    ) -> list[ActivityEvent]:
-        """One `agent_active` per observed db mtime/size change."""
-        try:
-            stat = path.stat()
-        except OSError:
-            return []
-        token = f"{stat.st_mtime_ns}:{stat.st_size}"
-        prev = next(
-            (k[len(_STAT_PREFIX):] for k in seen_keys if k.startswith(_STAT_PREFIX)),
-            None,
-        )
-        if prev == token:
-            return []
-        seen_keys.difference_update(
-            {k for k in seen_keys if k.startswith(_STAT_PREFIX)}
-        )
-        seen_keys.add(_STAT_PREFIX + token)
-        return [
-            ActivityEvent(
-                vendor="cursor",
-                event_type="agent_active",
-                cwd=cwd,
-                session_id=session_id,
-                file_path=str(path),
-                dedup_key=f"stat:{token}",
-                timestamp=self._store_timestamp(path),
-                detail="db-write",
-            )
-        ]
+            return updated / 1000
+        return time.time()
 
     def _blob_activity(
         self, path: Path, session_id: str, cwd: str, seen_keys: set[str]
@@ -429,8 +414,19 @@ class CursorLogReader(LogReader):
             return []
         remember(int(rows[-1][0]))
 
-        timestamp = self._store_timestamp(path)
+        base = self._store_epoch(path)
         out: list[ActivityEvent] = []
+
+        def stamp() -> str:
+            # One pass can carry several events, and meta.json gives the whole
+            # pass a single time. Nudge each event 1ms past the previous one:
+            # App.vue's onTurnCompleteForMessaging admits a turn only when
+            # eventMs > paneMsgProcessedAt (STRICTLY greater), so two turns
+            # sharing an identical stamp would lose the second one's
+            # ---MSG--- block. Still plain ISO-8601 — an unparseable stamp
+            # reads as always-fresh and resends a delivered turn.
+            return _epoch_to_iso(base + len(out) * 0.001) or ""
+
         for _row_id, blob_id, data in rows:
             message = _json_message(data)
             if message is None:
@@ -447,7 +443,7 @@ class CursorLogReader(LogReader):
                 out.append(ActivityEvent(
                     vendor="cursor", event_type="turn_complete", cwd=cwd,
                     session_id=session_id, file_path=str(path), dedup_key=key,
-                    timestamp=timestamp, detail="assistant",
+                    timestamp=stamp(), detail="assistant",
                     text=join_text_blocks(content, "text")[:_MAX_TURN_TEXT],
                 ))
             elif role == "user":
@@ -460,11 +456,17 @@ class CursorLogReader(LogReader):
                 query = _USER_QUERY_RE.search(join_text_blocks(content, "text"))
                 if query is None:
                     continue
+                typed = query.group(1).strip()
+                # Navide's own session marker is typed into the TUI as a
+                # standalone prompt, so it lands in a normal <user_query> row
+                # at spawn time. It is not user activity (see _MARKER_ONLY_RE).
+                if _MARKER_ONLY_RE.match(typed):
+                    continue
                 out.append(ActivityEvent(
                     vendor="cursor", event_type="agent_active", cwd=cwd,
                     session_id=session_id, file_path=str(path), dedup_key=key,
-                    timestamp=timestamp, detail="user",
-                    text=user_prompt_text(query.group(1)),
+                    timestamp=stamp(), detail="user",
+                    text=user_prompt_text(typed),
                 ))
             # role=system (the prompt preamble) is not activity.
         return out

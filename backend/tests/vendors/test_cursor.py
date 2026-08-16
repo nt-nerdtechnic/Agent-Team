@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -60,11 +62,21 @@ def _make_store(
     Blob values are protobuf-ish (see _PROTOBUF_BLOB) with the user text
     embedded verbatim as UTF-8 bytes. `cwd` also writes the meta.json sidecar,
     which is where the real CLI records the workspace.
+
+    WAL is not decoration: the live store runs in WAL mode (confirmed on the
+    2026-08-16 sample, which carries -wal/-shm siblings). Under the CLI's
+    long-lived connection a commit lands in store.db-wal and leaves store.db's
+    own mtime AND size untouched (measured: 30 commits, neither moved), which
+    is why no reader logic here may lean on either. These helpers open and
+    close a connection per write, and closing the last connection checkpoints
+    — so the fixture's own mtime still moves; tests that care force the
+    real-world stale mtime with os.utime rather than trusting the fixture.
     """
     d = chats / project_hash / session_id
     d.mkdir(parents=True)
     db = d / "store.db"
     con = sqlite3.connect(db)
+    con.execute("PRAGMA journal_mode=WAL")
     con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
     con.execute("INSERT INTO meta VALUES ('0', ?)", (_hex_meta(session_id),))
     con.execute("CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB)")
@@ -341,31 +353,36 @@ def _armed(reader, db: Path) -> set[str]:
     return seen
 
 
-def test_db_write_heartbeat_fires_once_per_change(
+def test_protobuf_only_writes_report_nothing(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """The coarse mtime/size signal is what proves the agent is still working
-    mid-turn: everything between the user and assistant messages is written as
-    protobuf structure nodes with no decodable role."""
+    """No db-write heartbeat: a write that decodes to no chat message is
+    silent.
+
+    A live store keeps appending protobuf rows AFTER the turn's last assistant
+    row. A heartbeat would turn those into a bare agent_active stamped later
+    than the turn_complete, and turnCompleteDone (completion.ts) requires
+    turnCompleteAt >= lastActiveAt — a pane that can never read as done, so
+    'done' notifications vanish and an unattended loop stalls forever.
+    """
     reader = _reader_rooted_at(tmp_path, monkeypatch)
     db = _make_store(tmp_path / ".cursor" / "chats", "6" * 32, _SID)
 
     seen: set[str] = set()
-    first = reader.parse_activity(db, seen)
-    # First sight anchors the blob watermark, so only the heartbeat fires.
-    assert [e.event_type for e in first] == ["agent_active"]
-    assert first[0].detail == "db-write"
-    assert first[0].session_id == _SID
-    # Unchanged db → no repeat signal.
-    assert reader.parse_activity(db, seen) == []
+    assert reader.parse_activity(db, seen) == []  # first sight anchors only
+    assert reader.parse_activity(db, seen) == []  # unchanged db
 
     _append_blobs(db, "pb", b"\x0a\x03\x08\x01\x12")
-    again = reader.parse_activity(db, seen)
-    # A protobuf-only write is a heartbeat and nothing else — the node is
-    # skipped, never decoded.
-    assert [e.event_type for e in again] == ["agent_active"]
-    assert again[0].detail == "db-write"
-    assert again[0].dedup_key != first[0].dedup_key
+    assert reader.parse_activity(db, seen) == []
+
+    # The trailing-write shape that used to strand the pane: an assistant row
+    # (turn_complete) followed by more protobuf nodes in a LATER pass.
+    _append_blobs(db, "t", _assistant("done"))
+    assert [e.event_type for e in reader.parse_activity(db, seen)] == [
+        "turn_complete"
+    ]
+    _append_blobs(db, "tail", b"\x0a\x02\x08\x09", b"\x0a\x02\x08\x0a")
+    assert reader.parse_activity(db, seen) == []
 
 
 def test_assistant_blob_completes_the_turn_without_reasoning(
@@ -387,7 +404,6 @@ def test_assistant_blob_completes_the_turn_without_reasoning(
 
     kinds = [(e.event_type, e.detail) for e in events]
     assert kinds == [
-        ("agent_active", "db-write"),
         ("agent_active", "user"),
         ("turn_complete", "assistant"),
     ]
@@ -401,7 +417,33 @@ def test_assistant_blob_completes_the_turn_without_reasoning(
     # The user event carries what the person typed, unwrapped from Cursor's
     # <user_query>. Without unwrapping, user_prompt_text drops the whole row
     # for starting with '<' and panes lose their auto-name.
-    assert events[1].text == "say two"
+    assert events[0].text == "say two"
+
+
+def test_events_in_one_pass_get_strictly_increasing_timestamps(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """meta.json gives a whole pass ONE time, but App.vue's
+    onTurnCompleteForMessaging admits a turn only when
+    eventMs > paneMsgProcessedAt (strictly greater). Identical stamps would
+    silently drop the second turn's ---MSG--- block."""
+    reader = _reader_rooted_at(tmp_path, monkeypatch)
+    db = _make_store(
+        tmp_path / ".cursor" / "chats", "6" * 32, _SID, cwd="/work/proj"
+    )
+    seen = _armed(reader, db)
+
+    _append_blobs(
+        db, "t",
+        _user("<user_query>\nfirst\n</user_query>"),
+        _assistant("one"),
+        _user("<user_query>\nsecond\n</user_query>"),
+        _assistant("two"),
+    )
+    events = reader.parse_activity(db, seen)
+    assert len(events) == 4
+    stamps = [datetime.fromisoformat(e.timestamp) for e in events]
+    assert stamps == sorted(stamps) and len(set(stamps)) == 4
 
 
 def test_injected_context_row_is_not_user_activity(tmp_path: Path, monkeypatch) -> None:
@@ -423,13 +465,39 @@ def test_injected_context_row_is_not_user_activity(tmp_path: Path, monkeypatch) 
     )
     events = reader.parse_activity(db, seen)
 
-    # Only ONE user event: the <rules> row is skipped. The heartbeat rides
-    # ahead of it, as it does for every pass that sees the db change.
+    # Only ONE user event: the <rules> row is skipped.
     assert [(e.event_type, e.detail) for e in events] == [
-        ("agent_active", "db-write"),
         ("agent_active", "user"),
     ]
     assert events[-1].text == "real prompt"
+
+
+def test_marker_only_row_is_not_user_activity(tmp_path: Path, monkeypatch) -> None:
+    """Navide's own session marker is typed into the TUI as a standalone
+    prompt, so Cursor wraps it in a normal <user_query> row. It is the app
+    talking to itself at spawn time, not activity — but a real prompt that
+    merely MENTIONS at-pane: is still the user's and must be reported."""
+    reader = _reader_rooted_at(tmp_path, monkeypatch)
+    db = _make_store(
+        tmp_path / ".cursor" / "chats", "a" * 32, _SID, cwd="/work/proj"
+    )
+    seen = _armed(reader, db)
+    marker = "at-pane:2d215901-c03c-4a4e-852a-0584d14e977d"
+
+    _append_blobs(
+        db, "m",
+        # The exact wire form App.vue's sendSessionMarkerBootstrap pastes.
+        _user(f"<user_query>\n<!-- agent-team-session: {marker} -->\n</user_query>"),
+        # A bare marker (kickoff-appended form, whitespace around it).
+        _user(f"<user_query>\n  {marker}  \n</user_query>"),
+        _user(f"<user_query>\nwhy does {marker} show up in the store?\n</user_query>"),
+    )
+    events = reader.parse_activity(db, seen)
+
+    assert [(e.event_type, e.detail) for e in events] == [
+        ("agent_active", "user"),
+    ]
+    assert events[0].text == f"why does {marker} show up in the store?"
 
 
 def test_activity_watermark_does_not_replay(tmp_path: Path, monkeypatch) -> None:
@@ -439,7 +507,7 @@ def test_activity_watermark_does_not_replay(tmp_path: Path, monkeypatch) -> None
 
     _append_blobs(db, "t", _assistant("one"))
     assert [e.event_type for e in reader.parse_activity(db, seen)] == [
-        "agent_active", "turn_complete",
+        "turn_complete",
     ]
     # Same rows again → nothing; only the new blob of the next turn counts.
     assert reader.parse_activity(db, seen) == []
@@ -459,7 +527,7 @@ def test_activity_reanchors_when_the_store_shrinks(
     db = _make_store(chats, "6" * 32, _SID)
     seen = _armed(reader, db)
     _append_blobs(db, "t", _assistant("one"), _assistant("two"))
-    assert len(reader.parse_activity(db, seen)) == 3
+    assert len(reader.parse_activity(db, seen)) == 2
 
     con = sqlite3.connect(db)
     con.execute("DELETE FROM blobs")
@@ -469,10 +537,8 @@ def test_activity_reanchors_when_the_store_shrinks(
     con.close()
 
     # Re-anchored: the surviving row is below the old watermark, so it counts
-    # as history — only the heartbeat fires this pass.
-    assert [e.event_type for e in reader.parse_activity(db, seen)] == [
-        "agent_active"
-    ]
+    # as history — nothing is reported this pass.
+    assert reader.parse_activity(db, seen) == []
     _append_blobs(db, "after", _assistant("next"))
     after = [e for e in reader.parse_activity(db, seen)
              if e.event_type == "turn_complete"]
@@ -490,7 +556,28 @@ def test_activity_survives_an_unreadable_db(tmp_path: Path, monkeypatch) -> None
     db.write_bytes(b"this is not sqlite at all")
 
     seen: set[str] = set()
-    events = reader.parse_activity(db, seen)
-    # Only the file-level heartbeat: the blob scan found nothing readable.
-    assert [e.event_type for e in events] == ["agent_active"]
+    assert reader.parse_activity(db, seen) == []
     assert not any(k.startswith("cursor_blob::") for k in seen)
+
+
+def test_timestamp_falls_back_to_now_not_the_db_mtime(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """store.db is WAL: a commit lands in store.db-wal and leaves the main
+    file's mtime at the session's start. With meta.json missing or corrupt,
+    an mtime fallback would stamp every turn of the session with that start
+    time — past 60s isReplayedTurnComplete discards them all, silencing done
+    notifications, pipeline sentinels and inter-CLI messaging alike."""
+    reader = _reader_rooted_at(tmp_path, monkeypatch)
+    db = _make_store(tmp_path / ".cursor" / "chats", "6" * 32, _SID)
+    assert not (db.parent / "meta.json").exists()
+    seen = _armed(reader, db)
+
+    _append_blobs(db, "t", _assistant("late reply"))
+    stale = time.time() - 7200
+    os.utime(db, (stale, stale))
+
+    events = reader.parse_activity(db, seen)
+    assert [e.event_type for e in events] == ["turn_complete"]
+    stamped = datetime.fromisoformat(events[0].timestamp).timestamp()
+    assert abs(stamped - time.time()) < 60
