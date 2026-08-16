@@ -1473,7 +1473,18 @@ function onTurnCompleteForMessaging(paneId: string, text: string, timestamp: str
       }
       // Same turn-complete path handles SPAWN blocks (freshness-deduped above,
       // so a turn replayed by both the hook and the watcher spawns only once).
-      void handleSpawnRequestsForTurn(paneId, senderName, text)
+      // Caught rather than left to `void`: every outcome inside is reported to
+      // the requester as a notice, so a rejection escaping to the window would
+      // be the one path that says nothing at all — and it would do it as an
+      // unhandled rejection.
+      void handleSpawnRequestsForTurn(paneId, senderName, text).catch((err) => {
+        recordDiagnostic({
+          level: 'error',
+          code: 'spawn.turn-failed',
+          message: err instanceof Error ? err.message : String(err),
+          paneId,
+        })
+      })
     }
   }
   // A turn ending is exactly when this pane's queue can flush.
@@ -1514,9 +1525,25 @@ async function handleSpawnRequestsForTurn(
     for (const advisory of result.advisories ?? []) {
       recordDiagnostic({ level: 'warn', code: 'spawn.advisory', message: advisory, paneId: parentPaneId })
     }
-    const ok = await spawnRequestedPane(parent, parentName, result)
-    if (!ok) {
-      sendSpawnFeedback(parentName, 'failed', `pane「${result.name}」啟動或任務注入失敗`)
+    // `failed` and `partial` ask for opposite responses (see renderSpawnNotice),
+    // so which one this is matters: reporting a pane that exists as `failed`
+    // invites the same request again, and the retry collides with the pane
+    // sitting right there.
+    const spawned = await spawnRequestedPane(parent, parentName, result)
+    if (spawned.outcome === 'failed') {
+      sendSpawnFeedback(parentName, 'failed', `pane「${result.name}」啟動失敗`)
+    } else if (spawned.outcome === 'partial' && spawned.error) {
+      sendSpawnFeedback(
+        parentName,
+        'partial',
+        `pane「${spawned.name}」已開啟，但任務注入出錯：${spawned.error}`,
+      )
+    } else if (spawned.outcome === 'partial') {
+      sendSpawnFeedback(
+        parentName,
+        'partial',
+        `pane「${spawned.name}」已開啟，但任務注入失敗，請自行確認`,
+      )
     }
   }
 }
@@ -1682,19 +1709,40 @@ async function kickoffRequestedPane(
 
 /** Spawn + kick off a pane requested by a SPAWN block. Mirrors
  *  dispatchPlanToPane's create path: the kickoff is injected directly because
- *  scheduleInjection never injects a roleless manual pane's kickoffPrompt. */
+ *  scheduleInjection never injects a roleless manual pane's kickoffPrompt.
+ *
+ *  Reports which half failed, not just that something did: once the pane
+ *  exists, a kickoff that never lands is `partial` — the same verdict the MCP
+ *  spawn path reports — and `name` is the handle the pane actually took, which
+ *  a concurrent spawn may have pushed to a suffix.
+ *
+ *  A kickoff that THROWS is the same verdict as one that returns false: the
+ *  pane is open either way. kickoffRequestedPane runs a long chain of awaits
+ *  (bootstrap, dialog dismissal, quiet wait, injection) with only a `finally`
+ *  of its own, so letting a rejection escape here would leave the requester
+ *  with no notice at all — the one outcome that tells it nothing. */
 async function spawnRequestedPane(
   parent: ActivePane,
   parentName: string,
   req: { agentKey: string; name: string; task: string },
-): Promise<boolean> {
+): Promise<{ outcome: 'ok' | 'failed' | 'partial'; name: string; error?: string }> {
   const paneId = await createRequestedPane(parent, req)
-  if (!paneId) return false
+  if (!paneId) return { outcome: 'failed', name: req.name }
   const pane = panes.value.find((p) => p.id === paneId)
+  const childName = pane?.messagingName ?? req.name
   notifyRestore.toast(
-    i18n.global.t('msg.spawn-toast', { parent: parentName, child: pane?.messagingName ?? req.name }),
+    i18n.global.t('msg.spawn-toast', { parent: parentName, child: childName }),
   )
-  return await kickoffRequestedPane(paneId, parentName, req.task)
+  try {
+    const kicked = await kickoffRequestedPane(paneId, parentName, req.task)
+    return { outcome: kicked ? 'ok' : 'partial', name: childName }
+  } catch (err) {
+    return {
+      outcome: 'partial',
+      name: childName,
+      error: err instanceof Error ? err.message : String(err),
+    }
+  }
 }
 
 /** The spawn-gate context for a pane in this window. Shared by the SPAWN block
