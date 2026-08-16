@@ -599,8 +599,12 @@ execution plan is returned.
 
 First-party identity affects eligibility only. It never grants a namespace,
 selects a package version, or bypasses the user grant. Git is not an
-independent permission; future approved Git CLI entries belong in the Host
-shell allowlist. Issue 03 does not define Git method/event mapping.
+independent permission. The Host shell executable allowlist contains `git`;
+all packages, including `navide.git`, must still declare `shell: "allowlist"`
+and pass the same package-version grant and authenticated binding checks.
+The allowlist matches only the canonical top-level executable name: it does
+not accept wrappers, aliases, or path-qualified replacements, and it defines
+no Git subcommand or argument-pattern policy.
 
 ### Embedded AI CLI public mapping
 

@@ -18,6 +18,7 @@ import {
   type HostCapabilityContext,
   type CapabilityCall,
 } from './pluginCapabilityBroker'
+import { HOST_SHELL_EXECUTABLE_ALLOWLIST } from './pluginCapabilityCatalog'
 import { manifestV2CapabilityPolicy } from './pluginPermissions'
 import type { WsResponse } from '../../shared/wsClient'
 
@@ -220,7 +221,7 @@ describe('Manifest v2 access-aware policy', () => {
   })
 })
 
-describe('Issue 03 public Host planner', () => {
+describe('Issue 03/04 public Host planner', () => {
   const policy = manifestV2CapabilityPolicy({ system: ['aiCli'], shell: 'allowlist' })
   const binding = {
     pluginId: 'acme.ai-cli',
@@ -233,7 +234,6 @@ describe('Issue 03 public Host planner', () => {
     publisherEligible: true,
     userGrant: { packageVersion: '1.0.0', system: ['aiCli'], shell: 'allowlist' },
     runtimeBinding: binding,
-    shellAllowlist: ['git', 'echo'],
     aiCliProfiles: ['codex'],
     sessionBindings: new Map(),
     ...overrides,
@@ -289,6 +289,61 @@ describe('Issue 03 public Host planner', () => {
         call({ ns: 'shell', method: 'run', args: { command: 'git status' } }),
         noShellPolicy,
         context({ userGrant: { packageVersion: '1.0.0', system: ['fs'] } })
+      )
+    ).toMatchObject({ kind: 'deny', response: { error: { code: 'CAPABILITY_DENIED' } } })
+  })
+
+  it('records Git as the only Host-maintained shell executable', () => {
+    expect(HOST_SHELL_EXECUTABLE_ALLOWLIST).toEqual(['git'])
+    expect(
+      planPublicCapabilityCall(
+        call({ ns: 'shell', method: 'run', args: { command: 'git status' } }),
+        policy,
+        context()
+      )
+    ).toMatchObject({ kind: 'allow', plan: { address: 'shell.run', shellMode: 'allowlist' } })
+  })
+
+  it('gives an official Git package no identity-based shell bypass', () => {
+    const officialBinding = { ...binding, pluginId: 'navide.git' }
+    const officialCall = call({
+      pluginId: 'navide.git',
+      ns: 'shell',
+      method: 'run',
+      args: { command: 'git status' },
+    })
+    expect(
+      planPublicCapabilityCall(
+        officialCall,
+        manifestV2CapabilityPolicy({}),
+        context({ runtimeBinding: officialBinding })
+      )
+    ).toMatchObject({ kind: 'deny', response: { error: { code: 'CAPABILITY_DENIED' } } })
+    expect(
+      planPublicCapabilityCall(
+        officialCall,
+        policy,
+        context({ runtimeBinding: officialBinding, userGrant: null })
+      )
+    ).toMatchObject({ kind: 'deny', response: { error: { code: 'CAPABILITY_DENIED' } } })
+  })
+
+  it.each([
+    ['unknown executable', 'curl https://example.com'],
+    ['wrapper', 'env git status'],
+    ['absolute path substitution', '/usr/bin/git status'],
+    ['relative path substitution', './git status'],
+    ['command substitution', 'git $(echo status)'],
+    ['redirection', 'git status > output.txt'],
+    ['alias', 'g status'],
+    ['unallowlisted pipeline segment', 'git status | cat'],
+    ['unallowlisted command-chain segment', 'git status && echo done'],
+  ])('fails closed for %s', (_case, command) => {
+    expect(
+      planPublicCapabilityCall(
+        call({ ns: 'shell', method: 'run', args: { command } }),
+        policy,
+        context()
       )
     ).toMatchObject({ kind: 'deny', response: { error: { code: 'CAPABILITY_DENIED' } } })
   })

@@ -8,6 +8,10 @@
 export type PublicCapabilityScope = 'workspace' | 'plugin'
 export type PublicCapabilityEligibility = 'public' | 'firstParty'
 
+/** Executable names accepted by the public shell.run allowlist mode.
+ * Package identity cannot add to or bypass this Host-owned policy. */
+export const HOST_SHELL_EXECUTABLE_ALLOWLIST: readonly string[] = ['git']
+
 export interface PublicCapabilityCatalogEntry {
   address: string
   kind: 'method' | 'event'

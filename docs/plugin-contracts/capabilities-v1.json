@@ -9,6 +9,7 @@
     "duplicateObjectKeys": "reject-before-schema-validation",
     "unknownPermissionOrAccess": "reject"
   },
+  "hostShellExecutableAllowlist": ["git"],
   "errors": [
     "CAPABILITY_DENIED",
     "METHOD_NOT_FOUND",

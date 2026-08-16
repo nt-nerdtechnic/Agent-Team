@@ -9,6 +9,8 @@ All notable released changes to Navide will be documented in this file. The form
 - Enforce Manifest v2 coarse `system` namespace and `shell` grants through the
   Host capability catalog, authenticated workspace binding, package-version
   approval, and fail-closed AI CLI/shell request planning.
+- Allow the canonical `git` executable through Manifest v2 `shell.run`
+  allowlist mode without adding a Git permission or first-party bypass.
 - Configurable lazy CLI restore: resume one CLI, the first Grid page, or the active tab when opening a workspace; preserve manual-tab grouping and recover uniquely attributable missing Claude conversations on realization.
 - Add Meta Muse Code as a spawnable CLI agent, including install detection and one-click install. Resume, log reading and credential switching remain unavailable for it until they are verified against a real installation.
 - Validate Manifest v2 frontend contributions consistently in the App and marketplace registry, including strict view discovery and package-entry checks.

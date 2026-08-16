@@ -5,7 +5,11 @@
 // `frontendPluginManager.ts`.
 
 import { eventNamespace, resolveWsType } from './capabilityMap'
-import { publicCapabilityEntry, type PublicCapabilityScope } from './pluginCapabilityCatalog'
+import {
+  HOST_SHELL_EXECUTABLE_ALLOWLIST,
+  publicCapabilityEntry,
+  type PublicCapabilityScope,
+} from './pluginCapabilityCatalog'
 import type { PluginShellMode, PluginSystemNamespace } from './pluginManifestV2'
 import type { PluginCapabilityPolicy } from './pluginPermissions'
 import type { WsResponse } from '../../shared/wsClient'
@@ -69,8 +73,6 @@ export interface HostCapabilityContext {
   userGrant: HostCapabilityGrant | null
   /** Host-authenticated identity; never read from a plugin request. */
   runtimeBinding: AuthenticatedRuntimeBinding | null
-  /** Host-maintained executable names for shell allowlist mode. */
-  shellAllowlist: readonly string[]
   /** Host-configured AI CLI profile ids; the Plugin cannot define profiles. */
   aiCliProfiles?: readonly string[]
   /** Host-owned AI CLI session bindings, keyed by opaque session id. */
@@ -471,7 +473,7 @@ export function planPublicCapabilityCall(
   }
 
   if (entry.namespace === 'shell' && policy.shell === 'allowlist') {
-    if (!shellCommandAllowed(String(args.command), context.shellAllowlist)) {
+    if (!shellCommandAllowed(String(args.command), HOST_SHELL_EXECUTABLE_ALLOWLIST)) {
       return publicDenied(call.reqId, 'CAPABILITY_DENIED', 'shell executable is not Host-allowlisted')
     }
   }
