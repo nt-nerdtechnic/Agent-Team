@@ -9,14 +9,23 @@ all keep working exactly as before.
 Name uniqueness is per workspace — the same handle may exist in two different
 workspaces, and a bare `to: <name>` still resolves only within the sender's own
 workspace, which is today's behaviour unchanged.
+
+Addresses carry an optional third dimension, the device: `to:
+<device>/<workspace>/<pane>` names a pane on a specific machine. Only this
+machine's own device id resolves for now; a foreign one is reported as such
+rather than delivered, because remote panes are only knowable through a roster
+this backend does not have yet.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
+
+from . import device_identity
 
 #: How long a disconnected window's panes stay in the registry, flagged offline,
 #: before they are forgotten for good. The renderer's reconnect backoff is
@@ -24,6 +33,15 @@ from typing import Any
 #: outlast a couple of those attempts — a window that is merely reloading or
 #: riding out a network blip must not have its panes reported as non-existent.
 OFFLINE_GRACE_S = 90.0
+
+#: A device segment is always a UUID (device_identity mints and validates it as
+#: one), and that is the whole reason `<device>/<workspace>/<pane>` can be told
+#: apart from the two-segment `<workspace>/<pane>` — whose workspace part may
+#: itself contain slashes (`parent/proj/pane`). A leading segment that is not
+#: UUID-shaped is therefore read as workspace, exactly as before.
+_DEVICE_SEGMENT_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 
 
 @dataclass
@@ -84,9 +102,49 @@ class ResolveResult:
     cross_workspace: bool = False
 
 
+@dataclass
+class Address:
+    """A `to:` target broken into its parts — the structured shape used for
+    cross-device addressing.
+
+    `device_id` and `workspace` are empty when the address did not name them,
+    which is what keeps `<workspace>/<pane>` and a bare `<pane>` meaning today
+    what they meant yesterday. `pane_id` is only ever a hint: a detach or a
+    reattach mints a new pane id, so the stable identity is the other three
+    parts and the hint is checked against them before it is trusted.
+    """
+
+    pane_name: str = ""
+    workspace: str = ""
+    device_id: str = ""
+    pane_id: str = ""
+
+    @property
+    def local_target(self) -> str:
+        """The `<workspace>/<pane>` (or bare `<pane>`) string this address
+        resolves as on the device that owns the pane."""
+        return f"{self.workspace}/{self.pane_name}" if self.workspace else self.pane_name
+
+    def to_string(self) -> str:
+        """The address as an agent would have typed it."""
+        return f"{self.device_id}/{self.local_target}" if self.device_id else self.local_target
+
+
 def _resolve_error(code: str, error: str, **params: object) -> ResolveResult:
     return ResolveResult(
         error=error, code=code, params={k: str(v) for k, v in params.items()}
+    )
+
+
+def _unknown_device(device: str, to: str) -> ResolveResult:
+    """Reported instead of "unknown target": the address may well be right, it
+    just names a machine this backend cannot look up yet."""
+    return _resolve_error(
+        "unknown-device",
+        f'unknown device "{device}" in target "{to}" — cross-device addressing '
+        f"needs the remote device roster, which is not available yet",
+        device=device,
+        to=to,
     )
 
 
@@ -188,6 +246,16 @@ def get(pane_id: str) -> RegisteredPane | None:
     return _PANES.get(pane_id)
 
 
+def owner(pane_id: str) -> Any | None:
+    """The WS connection of the window mirroring this pane, or None.
+
+    Delivery normally reaches a window by broadcast, but a request that has to
+    be answered inside a hook's timeout cannot afford to ask every window and
+    wait for the right one to speak up — see `hook_drain`.
+    """
+    return _OWNERS.get(pane_id)
+
+
 def set_busy(pane_id: str, busy: bool) -> bool:
     """Record whether a pane's agent is mid-turn. Returns whether it changed."""
     entry = _PANES.get(pane_id)
@@ -230,6 +298,37 @@ def _match_workspaces(ws_part: str) -> list[str]:
     return matched
 
 
+def is_local_device(device: str) -> bool:
+    """Whether a device segment names this machine."""
+    return bool(device) and device == device_identity.device_id()
+
+
+def _split_device_segment(target: str) -> tuple[str, str]:
+    """Split a leading device segment off a target, or return no device.
+
+    Only a UUID-shaped first segment of a three-or-more segment address counts
+    (see _DEVICE_SEGMENT_RE): `parent/proj/pane` has to keep meaning the pane
+    `pane` in the workspace `parent/proj`, which it did before devices existed.
+    """
+    head, sep, rest = target.partition("/")
+    if not sep or "/" not in rest or not _DEVICE_SEGMENT_RE.match(head):
+        return "", target
+    return head, rest
+
+
+def parse_target(to: str) -> Address:
+    """Split a `to:` string into its addressing parts.
+
+    `<device>/<workspace>/<pane>` fills all three, `<workspace>/<pane>` leaves
+    the device empty, and a bare `<pane>` leaves the workspace empty too — the
+    pane name is always the trailing segment, so a workspace part may contain
+    slashes while a pane name may not.
+    """
+    device, rest = _split_device_segment((to or "").strip())
+    workspace, _, pane_name = rest.rpartition("/")
+    return Address(pane_name=pane_name.strip(), workspace=workspace, device_id=device)
+
+
 def _prefer_online(hits: list[RegisteredPane]) -> list[RegisteredPane]:
     """A connected pane always wins over an offline one at the same address, so
     the entry a dropped connection left behind cannot shadow — or be mistaken as
@@ -265,11 +364,19 @@ def resolve(from_pane_id: str, to: str) -> ResolveResult:
     A bare `name` only ever looks inside the sender's own workspace — the
     existing single-workspace behaviour. A `folder/name` target selects the
     workspace first; an unknown or ambiguous folder is an error rather than a
-    silent fallback, so a typo can never inject into the wrong project.
+    silent fallback, so a typo can never inject into the wrong project. A
+    `device/folder/name` target aimed at this machine resolves exactly like the
+    `folder/name` it wraps; aimed anywhere else it cannot be resolved here.
     """
     target = (to or "").strip()
     if not target:
         return _resolve_error("empty-target", "empty target")
+
+    device, rest = _split_device_segment(target)
+    if device:
+        if not is_local_device(device):
+            return _unknown_device(device, target)
+        target = rest
 
     purge_expired()
     sender = _PANES.get(from_pane_id)
@@ -336,6 +443,42 @@ def resolve(from_pane_id: str, to: str) -> ResolveResult:
     entry = hits[0]
     cross = sender is None or sender.workspace_path != entry.workspace_path
     return _accept(entry, target, cross_workspace=cross)
+
+
+def _hint_matches(
+    entry: RegisteredPane, address: Address, sender: RegisteredPane | None
+) -> bool:
+    """Whether a cached pane id still sits at the address that produced it."""
+    if entry.name != address.pane_name:
+        return False
+    if not address.workspace:
+        # A bare name never leaves the sender's workspace, hint or not.
+        return sender is not None and entry.workspace_path == sender.workspace_path
+    return entry.workspace_path in _match_workspaces(address.workspace)
+
+
+def resolve_address(from_pane_id: str, address: Address) -> ResolveResult:
+    """Resolve a structured target, treating `pane_id` as a hint only.
+
+    The hint is the fast path: when it still names a pane sitting at the same
+    (workspace, pane name), that pane is the answer without a scan. Otherwise
+    the address is resolved from the stable parts instead, because a detach or
+    a reattach mints a new pane id and a sender's cached hint goes stale — the
+    caller reads the current id back off `result.pane.pane_id` and updates its
+    cache. A hint pointing at a different pane is never followed.
+    """
+    if address.device_id and not is_local_device(address.device_id):
+        return _unknown_device(address.device_id, address.to_string())
+
+    if address.pane_id and address.pane_name:
+        purge_expired()
+        entry = _PANES.get(address.pane_id)
+        sender = _PANES.get(from_pane_id)
+        if entry is not None and _hint_matches(entry, address, sender):
+            cross = sender is None or sender.workspace_path != entry.workspace_path
+            return _accept(entry, address.local_target, cross_workspace=cross)
+
+    return resolve(from_pane_id, address.local_target)
 
 
 def sender_display(from_pane_id: str, fallback: str) -> str:

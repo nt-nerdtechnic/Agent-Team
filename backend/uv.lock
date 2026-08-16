@@ -17,6 +17,7 @@ dependencies = [
     { name = "send2trash" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "watchdog" },
+    { name = "websockets" },
 ]
 
 [package.dev-dependencies]
@@ -39,6 +40,7 @@ requires-dist = [
     { name = "send2trash", specifier = ">=2.1.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
     { name = "watchdog", specifier = ">=4.0" },
+    { name = "websockets", specifier = ">=14" },
 ]
 
 [package.metadata.requires-dev]

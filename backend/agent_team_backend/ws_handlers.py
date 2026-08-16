@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from pydantic import ValidationError
 
-from . import agent_messaging, executions_service, storage_service
+from . import agent_messaging, executions_service, server_link, storage_service
 from .cli_vendors.registry import VENDORS as CLI_VENDORS
 from .cli_vendors.registry import vendor as cli_vendor
 from .ipc import make_error, make_event, make_response
@@ -5372,6 +5372,9 @@ async def agent_msg_register(session: "Session", msg_id: str, msg_type: str, pay
         agent_key=str(payload.get("agent_key") or ""),
         owner=session,
     )
+    # A register is also how a rename and a post-reconnect re-mirror arrive, so
+    # this is the single point where the remote roster learns about all three.
+    server_link.roster_changed()
     await session.send_json(make_response(msg_id, msg_type, entry.to_dict()))
 
 
@@ -5384,6 +5387,7 @@ async def agent_msg_unregister(session: "Session", msg_id: str, msg_type: str, p
         # so drop its cached activity instead of leaking one entry per pane.
         from . import app
         app.forget_pane_activity(pane_id)
+        server_link.roster_changed()
     await session.send_json(make_response(msg_id, msg_type, {"ok": True, "removed": removed}))
 
 
@@ -5393,6 +5397,8 @@ async def agent_msg_set_busy(session: "Session", msg_id: str, msg_type: str, pay
     cli_list_targets can tell a caller that a target is working."""
     pane_id = str(payload.get("pane_id") or "")
     changed = bool(pane_id) and agent_messaging.set_busy(pane_id, bool(payload.get("busy")))
+    if changed:
+        server_link.roster_changed()
     await session.send_json(make_response(msg_id, msg_type, {"ok": True, "changed": changed}))
 
 
@@ -5605,6 +5611,12 @@ async def agent_msg_delivered(session: "Session", msg_id: str, msg_type: str, pa
     # outcome for, so the MCP server records it for cli_check_message. Ignores
     # every key it did not mint.
     plan_mcp.record_delivery_result(
+        msg_key, bool(payload.get("ok", False)), str(payload.get("reason") or "")
+    )
+    # A message relayed in from another device is acked back to the server from
+    # here — this is the only place the receiving window's verdict is observed.
+    # Ignores every key that did not arrive over the link.
+    server_link.note_delivery_result(
         msg_key, bool(payload.get("ok", False)), str(payload.get("reason") or "")
     )
     asyncio.create_task(

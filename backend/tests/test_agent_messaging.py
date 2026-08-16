@@ -299,6 +299,167 @@ def test_sender_display_is_always_qualified() -> None:
     assert agent_messaging.sender_display("nope", "fallback") == "fallback"
 
 
+# ── Device dimension ───────────────────────────────────────────────────────
+FOREIGN_DEVICE = "11111111-2222-3333-4444-555555555555"
+
+
+def _this_device() -> str:
+    from agent_team_backend import device_identity
+
+    return device_identity.device_id()
+
+
+def test_parse_target_splits_one_two_and_three_segment_forms() -> None:
+    bare = agent_messaging.parse_target("reviewer")
+    assert (bare.device_id, bare.workspace, bare.pane_name) == ("", "", "reviewer")
+
+    two = agent_messaging.parse_target("beta/reviewer")
+    assert (two.device_id, two.workspace, two.pane_name) == ("", "beta", "reviewer")
+
+    three = agent_messaging.parse_target(f"{FOREIGN_DEVICE}/beta/reviewer")
+    assert (three.device_id, three.workspace, three.pane_name) == (
+        FOREIGN_DEVICE,
+        "beta",
+        "reviewer",
+    )
+    assert three.local_target == "beta/reviewer"
+    assert three.to_string() == f"{FOREIGN_DEVICE}/beta/reviewer"
+
+
+def test_three_segment_address_for_this_device_resolves_exactly_as_two() -> None:
+    _seed_two_workspaces()
+    plain = agent_messaging.resolve("p1", "beta/reviewer")
+    with_device = agent_messaging.resolve("p1", f"{_this_device()}/beta/reviewer")
+    assert with_device.pane is plain.pane
+    assert with_device.pane.pane_id == "p3"
+    assert with_device.cross_workspace == plain.cross_workspace is True
+
+
+def test_this_device_segment_also_carries_an_absolute_workspace_path() -> None:
+    _seed_two_workspaces()
+    result = agent_messaging.resolve("p1", f"{_this_device()}//ws/beta/reviewer")
+    assert result.pane is not None and result.pane.pane_id == "p3"
+
+
+def test_unknown_device_is_reported_apart_from_unknown_target() -> None:
+    """A foreign device may well be the right address — it just cannot be
+    looked up here — so it must not read as "that pane does not exist"."""
+    _seed_two_workspaces()
+    result = agent_messaging.resolve("p1", f"{FOREIGN_DEVICE}/beta/reviewer")
+    assert result.pane is None
+    assert result.code == "unknown-device"
+    assert result.params == {
+        "device": FOREIGN_DEVICE,
+        "to": f"{FOREIGN_DEVICE}/beta/reviewer",
+    }
+    assert "roster" in result.error
+    assert agent_messaging.resolve("p1", "beta/nobody").code == "unknown-target-in-workspace"
+
+
+def test_two_segment_and_bare_addressing_is_untouched_by_the_device_dimension() -> None:
+    """The hard requirement: nobody on one machine has to rewrite anything."""
+    _seed_two_workspaces()
+    assert agent_messaging.resolve("p1", "reviewer").pane.pane_id == "p2"
+    assert agent_messaging.resolve("p1", "beta/reviewer").pane.pane_id == "p3"
+    assert agent_messaging.resolve("p1", "/ws/beta/reviewer").pane.pane_id == "p3"
+
+
+def test_a_multi_segment_workspace_is_not_mistaken_for_a_device() -> None:
+    """`parent/proj/pane` predates devices and still means the workspace
+    `parent/proj` — only a UUID-shaped leading segment is read as a device."""
+    agent_messaging.register("p1", "a", "/one/proj")
+    agent_messaging.register("p2", "target", "/two/proj")
+    assert agent_messaging.resolve("p1", "two/proj/target").pane.pane_id == "p2"
+
+
+def test_a_human_readable_leading_segment_is_read_as_workspace() -> None:
+    """Device *names* need a roster this round does not build, so `laptop/...`
+    stays a workspace address and fails as one."""
+    _seed_two_workspaces()
+    result = agent_messaging.resolve("p1", "laptop-b/beta/reviewer")
+    assert result.code == "unknown-workspace"
+    assert result.params == {"ws": "laptop-b/beta"}
+
+
+def test_a_pane_name_containing_a_slash_behaves_the_same_with_a_device_segment() -> None:
+    """The pane name is the trailing segment, before and after the device
+    dimension: everything ahead of it is still the workspace."""
+    agent_messaging.register("p1", "sender", "/ws/alpha")
+    agent_messaging.register("p2", "feature/x", "/ws/alpha")
+
+    plain = agent_messaging.resolve("p1", "alpha/feature/x")
+    with_device = agent_messaging.resolve("p1", f"{_this_device()}/alpha/feature/x")
+    assert plain.code == with_device.code == "unknown-workspace"
+    assert plain.params == with_device.params == {"ws": "alpha/feature"}
+
+
+def test_resolve_address_uses_a_matching_pane_id_hint() -> None:
+    _seed_two_workspaces()
+    address = agent_messaging.Address(
+        pane_name="reviewer", workspace="beta", device_id=_this_device(), pane_id="p3"
+    )
+    result = agent_messaging.resolve_address("p1", address)
+    assert result.pane is not None and result.pane.pane_id == "p3"
+    assert result.cross_workspace is True
+
+
+def test_resolve_address_falls_back_when_the_hint_went_stale() -> None:
+    """A detach/reattach mints a new pane id; the sender's cached one is not an
+    identity, so resolution falls back to (workspace, pane name) and the caller
+    reads the new id off the result."""
+    agent_messaging.register("p1", "sender", "/ws/alpha")
+    agent_messaging.register("reattached", "reviewer", "/ws/beta")
+
+    address = agent_messaging.Address(
+        pane_name="reviewer", workspace="beta", pane_id="detached-old-id"
+    )
+    result = agent_messaging.resolve_address("p1", address)
+    assert result.pane is not None and result.pane.pane_id == "reattached"
+
+
+def test_resolve_address_ignores_a_hint_that_now_names_another_pane() -> None:
+    agent_messaging.register("p1", "sender", "/ws/alpha")
+    agent_messaging.register("recycled", "someone-else", "/ws/beta")
+    agent_messaging.register("p3", "reviewer", "/ws/beta")
+
+    address = agent_messaging.Address(
+        pane_name="reviewer", workspace="beta", pane_id="recycled"
+    )
+    assert agent_messaging.resolve_address("p1", address).pane.pane_id == "p3"
+
+
+def test_resolve_address_hint_for_a_bare_name_stays_in_the_sender_workspace() -> None:
+    _seed_two_workspaces()
+    address = agent_messaging.Address(pane_name="reviewer", pane_id="p3")
+    result = agent_messaging.resolve_address("p1", address)
+    # p3 is the /ws/beta pane; a bare name must not reach it, hint or not.
+    assert result.pane is not None and result.pane.pane_id == "p2"
+    assert result.cross_workspace is False
+
+
+def test_resolve_address_reports_an_offline_hint_target_as_offline() -> None:
+    window = object()
+    agent_messaging.register("p1", "sender", "/ws/alpha")
+    agent_messaging.register("p2", "reviewer", "/ws/beta", owner=window)
+    agent_messaging.drop_owner(window)
+
+    address = agent_messaging.Address(
+        pane_name="reviewer", workspace="beta", pane_id="p2"
+    )
+    assert agent_messaging.resolve_address("p1", address).code == "target-offline"
+
+
+def test_resolve_address_refuses_a_foreign_device_before_looking_anywhere() -> None:
+    _seed_two_workspaces()
+    address = agent_messaging.Address(
+        pane_name="reviewer", workspace="beta", device_id=FOREIGN_DEVICE, pane_id="p3"
+    )
+    result = agent_messaging.resolve_address("p1", address)
+    assert result.pane is None
+    assert result.code == "unknown-device"
+    assert result.params["to"] == f"{FOREIGN_DEVICE}/beta/reviewer"
+
+
 # ── WS handlers ────────────────────────────────────────────────────────────
 @pytest.mark.asyncio
 async def test_register_handler_mirrors_pane() -> None:
@@ -557,6 +718,36 @@ async def test_delivered_handler_also_settles_a_cli_send_for_cli_check_message(
         assert captured[0]["type"] == "agent_msg.delivery_result"
     finally:
         plan_mcp._mcp_message_status.clear()
+
+
+@pytest.mark.asyncio
+async def test_delivered_handler_also_acks_a_message_relayed_in_from_another_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """This handler is the only place a receiving window's verdict is seen, so
+    it is where a cross-device message turns into its messages.ack."""
+    from agent_team_backend import server_link
+
+    reported: list[tuple[str, bool, str]] = []
+
+    async def fake_broadcast(event: dict[str, Any], **_kwargs: Any) -> None:
+        pass
+
+    monkeypatch.setattr(app, "broadcast", fake_broadcast)
+    monkeypatch.setattr(
+        server_link,
+        "note_delivery_result",
+        lambda key, ok, reason: reported.append((key, ok, reason)) or True,
+    )
+    session = _session()
+    await app.handle_message(session, {
+        "id": "x1",
+        "type": "agent_msg.delivered",
+        "payload": {"msg_key": "remote-key", "ok": True, "reason": ""},
+    })
+    await asyncio.sleep(0)
+
+    assert reported == [("remote-key", True, "")]
 
 
 # ── Message-log persistence handlers ───────────────────────────────────────

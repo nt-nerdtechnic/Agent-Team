@@ -92,6 +92,7 @@ from . import issue_service
 from . import fs_service
 from . import pty_registry
 from . import search_service
+from . import server_link
 from . import editor_service
 from . import onboarding_deps
 from . import plan_history
@@ -999,6 +1000,12 @@ async def _start_log_watcher() -> None:
     _credential_watcher = CredentialWatcher(reconcile_live_account)
     _credential_watcher.start()
 
+    # Navide-Server control-plane link: dials out to the configured server and
+    # publishes this machine's pane roster so agents on other devices can
+    # address it. Does nothing at all when no server URL / access token is
+    # configured, which is every single-machine install.
+    await server_link.start()
+
     # Start MCP servers in the background so they're ready for the first pipeline run.
     asyncio.create_task(mcp_manager.startup())
 
@@ -1054,6 +1061,7 @@ async def _stop_log_watcher() -> None:
         _git_watcher.stop()
     if _credential_watcher is not None:
         _credential_watcher.stop()
+    await server_link.stop()
     await mcp_manager.shutdown()
     try:
         await plugin_wiring.run_shutdown_hooks(plugin_host)
@@ -1409,6 +1417,7 @@ async def ws(websocket: WebSocket) -> None:
         # just reconnecting, and a deleted entry told callers the pane did not
         # exist. See agent_messaging.drop_owner.
         agent_messaging.drop_owner(session)
+        server_link.roster_changed()
         # PTYs survive this disconnect so the frontend can reattach after a
         # transient network outage. They are killed only when the user explicitly
         # closes a pane (terminal.kill) or the whole app process exits.

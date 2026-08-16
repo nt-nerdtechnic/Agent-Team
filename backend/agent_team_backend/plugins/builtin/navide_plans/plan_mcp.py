@@ -929,6 +929,86 @@ async def cli_open_agent(
     return result
 
 
+# Server-side refusals of messages.send, in the vocabulary the local resolver
+# already uses. DEVICE_OFFLINE stays distinct from "target-offline": one is the
+# whole machine unreachable, the other one window disconnected, and only the
+# second is worth waiting out.
+_RELAY_ERROR_CODES = {
+    "DEVICE_OFFLINE": "device-offline",
+    "NOT_FOUND": "unknown-target",
+    # Minted by the link itself (server_link.LINK_OFFLINE / LINK_UNAUTHORIZED),
+    # not by the server: the message never left this machine. Spelled out rather
+    # than imported to keep this module free of a server_link import at import
+    # time; server_link defines the same two strings.
+    "LINK_OFFLINE": "link-offline",
+    "LINK_UNAUTHORIZED": "link-unauthorized",
+}
+
+# The subset of the above that describes *this machine's* link, not the target.
+# They get a different sentence because "refused" would point the agent at its
+# address when the address was never the problem.
+_LINK_STATE_CODES = frozenset({"link-offline", "link-unauthorized"})
+
+
+async def _send_to_device(
+    address: Any, text: str, *, caller: Any, me: str
+) -> dict[str, Any] | None:
+    """Relay a `<device>/<workspace>/<pane>` message through the server link.
+
+    Returns None when there is no link to relay over, so the caller can answer
+    the way it always did for an unknown device.
+    """
+    from agent_team_backend import agent_messaging, server_link
+
+    sender = agent_messaging.get(me) if me else None
+    msg_key = f"{me or caller.kind}:mcp:{secrets.token_hex(8)}"
+    reply = await server_link.send_message(
+        to={
+            "deviceId": address.device_id,
+            "workspace": address.workspace,
+            "paneName": address.pane_name,
+        },
+        sender=(
+            {
+                "workspace": sender.workspace_label,
+                "paneName": sender.name,
+                "paneId": sender.pane_id,
+            }
+            if sender
+            else None
+        ),
+        text=text,
+        msg_key=msg_key,
+    )
+    if reply is None:
+        return None
+    if not reply.get("ok"):
+        error = reply.get("error") if isinstance(reply.get("error"), dict) else {}
+        code = str(error.get("code") or "SEND_FAILED")
+        detail = str(error.get("message") or "")
+        mapped = _RELAY_ERROR_CODES.get(code, code)
+        if mapped in _LINK_STATE_CODES:
+            return {
+                "ok": False,
+                "error": f'"{address.to_string()}" could not be reached — '
+                + (detail or code),
+                "error_code": mapped,
+            }
+        return {
+            "ok": False,
+            "error": f'sending to "{address.to_string()}" was refused ({code})'
+            + (f": {detail}" if detail else ""),
+            "error_code": mapped,
+        }
+    _record_message_sent(msg_key, address.to_string())
+    return {
+        "ok": True,
+        "target": address.to_string(),
+        "cross_workspace": True,
+        "msg_key": msg_key,
+    }
+
+
 @server.tool()
 async def cli_send(to: str, text: str, ctx: Context) -> dict[str, Any]:
     """Send an instruction to another CLI pane, in this or another workspace.
@@ -950,6 +1030,20 @@ async def cli_send(to: str, text: str, ctx: Context) -> dict[str, Any]:
     `error_code` "target-offline" is not "unknown-target": the pane exists but
     its Navide window is disconnected. Wait for it to come back and retry —
     re-sending elsewhere or reopening the pane would duplicate the work.
+
+    A `<device>/<workspace>/<pane>` target names a pane on another machine and
+    is relayed through the configured Navide-Server. "device-offline" means
+    that machine has no connection at all, so waiting is the only option; the
+    receiving device may also refuse on policy grounds, which shows up in
+    cli_check_message as status "rejected".
+
+    Three error codes tell apart the ways cross-device sending can fail before
+    the message even leaves here, and only the first is about the address:
+    "unknown-device" (no server is configured on this machine, so no device but
+    this one can be named), "link-offline" (a server is configured but this
+    machine is not connected to it — the address may be perfectly good, retry
+    shortly) and "link-unauthorized" (this machine's server credential was
+    rejected or revoked; retrying cannot help until it is signed in again).
     """
     from agent_team_backend import agent_messaging, app
     from agent_team_backend.ipc import make_event
@@ -963,6 +1057,16 @@ async def cli_send(to: str, text: str, ctx: Context) -> dict[str, Any]:
     me = caller.pane_id if caller.kind == "pane" else ""
     if caller.kind != "pane" and "/" not in (to or ""):
         return {"ok": False, "error": _QUALIFIED_TARGET_REQUIRED}
+
+    address = agent_messaging.parse_target(to)
+    if address.device_id and not agent_messaging.is_local_device(address.device_id):
+        relayed = await _send_to_device(address, text, caller=caller, me=me)
+        # None means no server was ever configured on this machine; falling
+        # through leaves the answer exactly what it was before cross-device
+        # addressing existed. A configured-but-unreachable server does not come
+        # back as None — it answers "link-offline" above.
+        if relayed is not None:
+            return relayed
 
     result = agent_messaging.resolve(me, to)
     if result.pane is None:
@@ -1069,6 +1173,27 @@ def record_delivery_result(msg_key: str, ok: bool, reason: str) -> bool:
     return True
 
 
+# A remote ack keeps its three-way state instead of collapsing to ok/not-ok:
+# "rejected" means the receiving device's pane policy refused, and re-sending
+# will refuse again. An agent that cannot tell that apart from a transient
+# failure retries a permission problem until someone notices.
+_REMOTE_ACK_STATES = ("delivered", "failed", "rejected")
+
+
+def record_remote_ack(msg_key: str, state: str, reason: str) -> bool:
+    """Record another device's messages.ack for a message sent from here.
+
+    Returns False for a msg_key this server never sent, which is not an error.
+    """
+    entry = _mcp_message_status.get(msg_key)
+    if entry is None:
+        return False
+    entry["status"] = state if state in _REMOTE_ACK_STATES else "failed"
+    entry["reason"] = reason or None
+    entry["delivered_at"] = time.monotonic()
+    return True
+
+
 @server.tool()
 async def cli_check_message(msg_key: str, ctx: Context) -> dict[str, Any]:
     """Look up what became of a message you sent with cli_send.
@@ -1081,6 +1206,10 @@ async def cli_check_message(msg_key: str, ctx: Context) -> dict[str, Any]:
                       actually injected.
       - "delivered" — the receiving window injected and submitted it.
       - "failed"    — the receiving window refused or lost it; see `reason`.
+      - "rejected"  — only for a message sent to another device: that device's
+                      pane policy refuses this sender. Re-sending refuses
+                      again; this is a permission question for a human, not
+                      something to retry.
 
     `reason` values come from the receiving window: "rate-limit" (too many
     messages between the same pair too quickly), "queue-full" (the target's

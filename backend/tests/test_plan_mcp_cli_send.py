@@ -721,3 +721,153 @@ async def test_a_pane_whose_own_window_is_offline_keeps_its_credential() -> None
 
     result = await plan_mcp.cli_list_targets(_ctx())
     assert result["you"] == "alpha/sender"
+
+
+# ── Cross-device targets ───────────────────────────────────────────────────
+# A `<device>/<workspace>/<pane>` target is relayed through the server link.
+# The link itself is covered by test_server_link.py against a fake WebSocket;
+# these cover the branch cli_send takes to reach it.
+
+REMOTE_DEVICE = "11111111-2222-3333-4444-555555555555"
+
+
+@pytest.mark.asyncio
+async def test_a_remote_target_without_a_server_link_answers_exactly_as_before(
+    captured: list[dict[str, Any]],
+) -> None:
+    """The no-server regression line: with nothing configured the answer is
+    still today's "unknown device", and nothing is broadcast."""
+    _seed()
+    result = await plan_mcp.cli_send(f"{REMOTE_DEVICE}/beta/reviewer", "hi", _ctx())
+    assert result["ok"] is False
+    assert result["error_code"] == "unknown-device"
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_a_remote_target_is_relayed_and_tracked(
+    monkeypatch: pytest.MonkeyPatch, captured: list[dict[str, Any]]
+) -> None:
+    from agent_team_backend import server_link
+
+    sent: list[dict[str, Any]] = []
+
+    async def fake_send_message(**kwargs: Any) -> dict[str, Any]:
+        sent.append(kwargs)
+        return {"ok": True, "payload": {"msgKey": kwargs["msg_key"], "state": "pending"}}
+
+    monkeypatch.setattr(server_link, "send_message", fake_send_message)
+    _seed()
+
+    result = await plan_mcp.cli_send(f"{REMOTE_DEVICE}/beta/reviewer", "hi", _ctx())
+    assert result["ok"] is True
+    assert result["target"] == f"{REMOTE_DEVICE}/beta/reviewer"
+    assert result["cross_workspace"] is True
+    # Relayed, not injected here.
+    assert captured == []
+    assert sent[0]["to"] == {
+        "deviceId": REMOTE_DEVICE,
+        "workspace": "beta",
+        "paneName": "reviewer",
+    }
+    assert sent[0]["sender"] == {"workspace": "alpha", "paneName": "sender", "paneId": "pa"}
+    assert sent[0]["text"] == "hi"
+
+    # The outcome is tracked under the same msg_key cli_check_message reads.
+    msg_key = result["msg_key"]
+    assert (await plan_mcp.cli_check_message(msg_key, _ctx()))["status"] == "queued"
+    assert plan_mcp.record_remote_ack(msg_key, "rejected", "policy-denied") is True
+    status = await plan_mcp.cli_check_message(msg_key, _ctx())
+    # "rejected" stays distinct from "failed": a policy refusal must not be
+    # retried, and an agent that cannot tell them apart retries it forever.
+    assert status["status"] == "rejected"
+    assert status["reason"] == "policy-denied"
+
+
+@pytest.mark.asyncio
+async def test_an_offline_remote_device_is_reported_as_such(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_team_backend import server_link
+
+    async def fake_send_message(**_kwargs: Any) -> dict[str, Any]:
+        return {"ok": False, "error": {"code": "DEVICE_OFFLINE", "message": "no connection"}}
+
+    monkeypatch.setattr(server_link, "send_message", fake_send_message)
+    _seed()
+
+    result = await plan_mcp.cli_send(f"{REMOTE_DEVICE}/beta/reviewer", "hi", _ctx())
+    assert result["ok"] is False
+    # Not "target-offline": the whole machine is unreachable, not one window.
+    assert result["error_code"] == "device-offline"
+
+
+@pytest.mark.asyncio
+async def test_a_configured_but_disconnected_server_is_not_an_unknown_device(
+    monkeypatch: pytest.MonkeyPatch, captured: list[dict[str, Any]]
+) -> None:
+    """The whole point of the distinction: "unknown-device" sends the agent to
+    check the address it typed, and the address was never the problem."""
+    from agent_team_backend import server_link
+
+    async def fake_send_message(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "error": {"code": server_link.LINK_OFFLINE, "message": "not connected right now"},
+        }
+
+    monkeypatch.setattr(server_link, "send_message", fake_send_message)
+    _seed()
+
+    result = await plan_mcp.cli_send(f"{REMOTE_DEVICE}/beta/reviewer", "hi", _ctx())
+    assert result["ok"] is False
+    assert result["error_code"] == "link-offline"
+    assert "unknown device" not in result["error"]
+    # Not "refused" either: the message never reached a server to be refused.
+    assert "refused" not in result["error"]
+    assert "not connected right now" in result["error"]
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_a_revoked_server_credential_is_reported_as_such(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_team_backend import server_link
+
+    async def fake_send_message(**_kwargs: Any) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "error": {
+                "code": server_link.LINK_UNAUTHORIZED,
+                "message": "the navide-server link stopped for good: access revoked",
+            },
+        }
+
+    monkeypatch.setattr(server_link, "send_message", fake_send_message)
+    _seed()
+
+    result = await plan_mcp.cli_send(f"{REMOTE_DEVICE}/beta/reviewer", "hi", _ctx())
+    # Distinct from link-offline: retrying this one can never succeed.
+    assert result["error_code"] == "link-unauthorized"
+    assert "access revoked" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_this_device_id_still_resolves_locally(
+    monkeypatch: pytest.MonkeyPatch, captured: list[dict[str, Any]]
+) -> None:
+    """A target naming this machine never touches the link."""
+    from agent_team_backend import device_identity, server_link
+
+    async def fail(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("a local target must not be relayed")
+
+    monkeypatch.setattr(server_link, "send_message", fail)
+    _seed()
+
+    me = device_identity.device_id()
+    result = await plan_mcp.cli_send(f"{me}/beta/reviewer", "hi", _ctx())
+    assert result["ok"] is True
+    assert result["target"] == "beta/reviewer"
+    assert captured[0]["payload"]["target_pane_id"] == "pb"

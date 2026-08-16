@@ -40,6 +40,7 @@
     "reason-unknown-target-in-workspace": "No pane named “{name}” in workspace “{ws}”",
     "reason-ambiguous-target": "{n} panes in “{ws}” are named “{name}” — rename one of them",
     "reason-target-offline": "“{to}” is offline — its window disconnected {seconds}s ago; the pane still exists",
+    "reason-unknown-device": "Unknown device “{device}” — addressing another machine needs the cross-device roster, which is not available yet",
     "rename-collision-title": "Messaging name in use",
     "rename-collision-body": "The name “{name}” is already used by another CLI. Choose a different messaging name:",
     "rename-collision-confirm": "Rename",

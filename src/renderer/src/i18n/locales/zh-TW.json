@@ -40,6 +40,7 @@
     "reason-unknown-target-in-workspace": "工作區「{ws}」中找不到名為「{name}」的 pane",
     "reason-ambiguous-target": "工作區「{ws}」中有 {n} 個 pane 都叫「{name}」 — 請重新命名其中一個",
     "reason-target-offline": "「{to}」目前離線 — 所屬視窗已斷線 {seconds} 秒，該 pane 仍然存在",
+    "reason-unknown-device": "找不到裝置「{device}」 — 定址到其他機器需要跨裝置名冊，目前尚未可用",
     "rename-collision-title": "訊息名稱重複",
     "rename-collision-body": "名稱「{name}」已被其他 CLI 使用。請設定另一個訊息名稱：",
     "rename-collision-confirm": "確認",
