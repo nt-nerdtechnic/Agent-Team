@@ -29,7 +29,7 @@ import { migrateTerminalPtyKey, saveAllScrollSnapshots, type DisplayStatus } fro
 import { useAgentMessaging, encodeReason, isBroadcastTarget } from './composables/useAgentMessaging'
 import type { RouteResult } from './composables/useAgentMessaging'
 import { createMessageLogPersistence } from './composables/useMessageLogPersistence'
-import { MSG_ENVELOPE_PREFIX, VENDORS_WITHOUT_TURN_END, isTurnInFlight, normalizeMessagingName, parseMessages, parseSpawns, renderSpawnKickoff } from './lib/agentMessaging'
+import { VENDORS_WITHOUT_TURN_END, isInjectedMessageText, isTurnInFlight, normalizeMessagingName, parseMessages, parseSpawns, renderSpawnKickoff } from './lib/agentMessaging'
 import {
   evaluateTurnSpawns,
   evaluateSpawnRequest,
@@ -7891,7 +7891,7 @@ backend.on('agent.activity', (raw) => {
     // judgeTurnText and the sentinel paths — it only reads ev.text.
     // Envelope guard mirrors the agent_active path: a reader that echoes the
     // injected inter-CLI message back as turn text must not title the pane.
-    if (ev.text && !ev.text.startsWith(MSG_ENVELOPE_PREFIX)) {
+    if (ev.text && !isInjectedMessageText(ev.text)) {
       const pane = panes.value.find((p) => p.id === ev.pane_id)
       if (pane && !pane.customName && !pane.nameLocked && !pane.autoName) {
         setPaneAutoName(ev.pane_id, deriveAutoName(ev.text))
@@ -7909,7 +7909,7 @@ backend.on('agent.activity', (raw) => {
     if (
       (ev.detail === 'user' || ev.detail === 'prompt' || ev.detail === 'user_message') &&
       ev.text &&
-      !ev.text.startsWith(MSG_ENVELOPE_PREFIX)
+      !isInjectedMessageText(ev.text)
     ) {
       setPaneAutoName(ev.pane_id, deriveAutoName(ev.text))
       requestLlmPaneName(ev.pane_id, ev.text)

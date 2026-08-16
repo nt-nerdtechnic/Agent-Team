@@ -1,7 +1,7 @@
 // Pipeline stage type definitions and utility functions.
 // The actual stage data is loaded dynamically from the backend via useStages().
 
-import { MSG_START, MSG_END, MSG_ENVELOPE_PREFIX, SPAWN_START, SPAWN_END } from '../lib/agentMessaging'
+import { MSG_START, MSG_END, MSG_ENVELOPE_PREFIX, MSG_NOTICE_PREFIX, SPAWN_START, SPAWN_END } from '../lib/agentMessaging'
 
 export type StageId = string
 // Derived from the per-vendor specs (agents/index.ts) — no hand-written
@@ -75,6 +75,7 @@ ${MSG_START} to: Agent-Team/reviewer
 資料夾名重複時改寫完整路徑（例如 /Users/me/Agent-Team/reviewer）。all 只會廣播給同一個工作區。
 
 收到開頭為 ${MSG_ENVELOPE_PREFIX} <名稱> 的輸入時，那是其他 agent 傳來的訊息；需要回覆就用上述 MSG 區塊指名對方（跨工作區來的訊息，名稱本身就已經帶工作區前綴，照原樣回覆即可）。
+訊息送不到時，你會收到開頭為 ${MSG_NOTICE_PREFIX} 的通知，裡面有目標名稱與英文的失敗原因；那是 Navide 發出的，不要回覆它。
 沒有溝通需求時不要輸出 MSG 區塊。
 
 `
