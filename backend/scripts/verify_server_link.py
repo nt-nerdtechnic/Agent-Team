@@ -666,11 +666,15 @@ async def main() -> int:
             row_b,
         )
         check(row_b.get("hostOnline") is True, "B 在線時它的列 hostOnline=true", row_b)
-        if "deviceName" not in row_b:
-            print(
-                "  ⓘ sessions.directory 不帶 deviceName（Server 的 devices 表有，但沒 join 進來）"
-                " —— 人類可讀的裝置名定址只能退回 deviceId，待 Server 端補欄位"
-            )
+        # deviceName is what lets a person address a machine by a name instead of
+        # copying a UUID, so it is asserted rather than merely noted: the server
+        # joins it in from the devices table, and a regression there would show
+        # up as addressing silently falling back to device ids.
+        check(
+            row_b.get("deviceName") == "verify-B",
+            "目錄帶 deviceName（auth.hello 報的那個名字，經 devices 表 join 回來）",
+            row_b.get("deviceName"),
+        )
 
         # Both directions, from one snapshot: the only difference between the
         # two views is which device is "me".
@@ -705,6 +709,25 @@ async def main() -> int:
             match.address is not None and match.address.device_id == DEVICE_B,
             "名冊讓這個位址解析得出裝置（形狀判定之外的第二次解讀）",
             {"error": match.error},
+        )
+        # The point of deviceName: a person addresses "the laptop", not a UUID.
+        named = agent_messaging.parse_remote_target(
+            f"verify-B/{WORKSPACE_LABEL}/{PANE_NAME}"
+        )
+        check(
+            named.address is not None and named.address.device_id == DEVICE_B,
+            "人類可讀的裝置名解析到同一台裝置（使用者不必複製 UUID）",
+            {"error": named.error},
+        )
+        # The server stores the name exactly as auth.hello reported it and never
+        # resolves anything by it, so the case a person types is ours to forgive.
+        cased = agent_messaging.parse_remote_target(
+            f"VeRiFy-b/{WORKSPACE_LABEL}/{PANE_NAME}"
+        )
+        check(
+            cased.address is not None and cased.address.device_id == DEVICE_B,
+            "裝置名大小寫不同也解析得到（server 原樣存名字，比對規則由本機定）",
+            {"error": cased.error},
         )
 
         # A device leaving changes no session row, so only presence.changed

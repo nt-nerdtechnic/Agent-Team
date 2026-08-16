@@ -153,11 +153,29 @@ def test_a_device_answers_to_its_id_and_to_its_name():
     remote_roster.replace([row(deviceName="Studio Mac")], local_device_id=LOCAL)
     assert remote_roster.devices_named(FAR) == [FAR]
     assert remote_roster.devices_named("Studio Mac") == [FAR]
-    assert remote_roster.devices_named("studio mac") == []
     (pane,) = remote_roster.list_panes()
     # The advertised address stays the id form even when a name is known.
     assert pane.device_label == "Studio Mac"
     assert pane.address == f"{FAR}/proj/reviewer"
+
+
+@pytest.mark.parametrize("typed", ["studio mac", "STUDIO MAC", "Studio mAc"])
+def test_a_device_name_is_matched_whatever_the_case(typed: str):
+    """Someone who named the machine "Studio Mac" types "studio mac" — the name
+    is human text, and the server neither normalises nor resolves by it."""
+    remote_roster.replace([row(deviceName="Studio Mac")], local_device_id=LOCAL)
+    assert remote_roster.devices_named(typed) == [FAR]
+    assert (
+        agent_messaging.parse_remote_target(f"{typed}/proj/reviewer").address.device_id == FAR
+    )
+
+
+@pytest.mark.parametrize("typed", ["FAR-DEVICE", "Far-Device"])
+def test_a_device_id_stays_an_exact_match(typed: str):
+    """Unlike the name: an id is machine-issued and opaque, so folding its case
+    could only make two distinct ids answer to one label."""
+    remote_roster.replace([row(deviceId="far-device", deviceName="Studio Mac")], local_device_id=LOCAL)
+    assert remote_roster.devices_named(typed) == []
 
 
 def test_a_shared_device_name_reports_every_match():
@@ -169,6 +187,23 @@ def test_a_shared_device_name_reports_every_match():
         local_device_id=LOCAL,
     )
     assert remote_roster.devices_named("laptop") == ["d1", "d2"]
+
+
+def test_names_that_differ_only_in_case_collide_and_are_refused():
+    """Case folding makes these one name, which must widen the *ambiguous*
+    answer, not resolve to whichever device the directory listed first: sending
+    an instruction to the wrong machine is not undone by reading an error."""
+    remote_roster.replace(
+        [
+            row(sessionId="s1", deviceId="d1", deviceName="Laptop"),
+            row(sessionId="s2", deviceId="d2", deviceName="laptop"),
+        ],
+        local_device_id=LOCAL,
+    )
+    assert remote_roster.devices_named("LAPTOP") == ["d1", "d2"]
+    refused = agent_messaging.parse_remote_target("laptop/proj/reviewer")
+    assert refused.address is None
+    assert refused.code == "ambiguous-device"
 
 
 def test_clear_forgets_everything():

@@ -171,6 +171,9 @@ def test_a_pane_actually_named_with_a_star_matches_literally() -> None:
     ids=["member", "device", "workspace", "pane"],
 )
 def test_matching_is_case_sensitive(overrides: dict[str, str]) -> None:
+    """Stays case-sensitive even though ``remote_roster.devices_named`` matches
+    device *names* case-insensitively: that one only finds a machine to aim at,
+    this one grants execution, and a wider match here is an over-grant."""
     assert allows(policy(rule()), **overrides) is False
 
 

@@ -65,6 +65,13 @@ WILDCARD = "*"
 # same case-sensitive comparison the on-machine addressing already uses. Case
 # insensitivity would only ever widen a grant, which is the wrong direction
 # under deny-by-default.
+#
+# ``remote_roster.devices_named`` matches deviceName case-*insensitively*, and
+# the difference is intended rather than an inconsistency to iron out: that
+# function only turns a human-typed label into a device to aim at, where being
+# too strict costs a "device not found" the sender sees immediately, while this
+# one decides whether a remote pane may drive a local one, where being too
+# loose is unauthorized execution nobody sees. Ids are exact on both sides.
 _FIELDS = (
     ("from", "memberId"),
     ("from", "deviceId"),

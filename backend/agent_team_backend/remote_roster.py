@@ -205,17 +205,44 @@ def list_panes() -> list[RemotePane]:
 
 
 def devices_named(label: str) -> list[str]:
-    """Device ids addressable as ``label`` — its name or its id, matched exactly.
+    """Device ids addressable as ``label``: its id exactly, or its name
+    case-insensitively.
 
     Returns every match, so the caller can refuse an ambiguous name instead of
     picking a machine for the user: two people can name their laptops the same
     thing, and sending an instruction to the wrong one is not recoverable by
-    reading an error message afterwards.
+    reading an error message afterwards. Case folding makes that collision
+    slightly more likely (``Laptop`` and ``laptop`` are now one name) and it is
+    still refused, never resolved to whichever came first.
     """
     want = _text(label)
     if not want:
         return []
-    return sorted({p.device_id for p in _PANES.values() if want in (p.device_id, p.device_name)})
+    # The two halves of the label are different kinds of string, so they get
+    # different rules. A deviceId is an opaque machine-issued identifier: folding
+    # its case can only make two distinct ids collide, never help anyone, so it
+    # stays exact. A deviceName is typed by the person who named the machine
+    # "MacBook" and then addresses it as "macbook"; Navide-Server stores that
+    # name verbatim (no normalisation) and never resolves anything by it, so how
+    # loosely it is matched is entirely this machine's call and cannot diverge
+    # from the server's.
+    #
+    # Deliberately the opposite of ``pane_policy``, which compares every field
+    # case-sensitively — see the note beside ``pane_policy._FIELDS``. The
+    # asymmetry is in the cost of being wrong: loosening a *policy* match widens
+    # a grant under deny-by-default, i.e. it authorizes what the rule's author
+    # meant to refuse, while loosening an *address* match only ever reaches a
+    # machine the sender already named. The failure here is "device not found",
+    # and a collision is refused rather than guessed
+    # (``agent_messaging.parse_remote_target``).
+    folded = want.casefold()
+    return sorted(
+        {
+            p.device_id
+            for p in _PANES.values()
+            if want == p.device_id or (p.device_name and folded == p.device_name.casefold())
+        }
+    )
 
 
 def clear() -> None:
