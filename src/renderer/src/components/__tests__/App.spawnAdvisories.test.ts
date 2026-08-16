@@ -84,3 +84,24 @@ describe('cli_open_agent advisories forwarding (agent_spawn.result)', () => {
     }
   })
 })
+
+describe('spawn feedback is a system notice, not a message', () => {
+  const fn = block('function sendSpawnFeedback(', '\nasync function handleSpawnRequestsForTurn(')
+
+  it('sends under the reserved handle, as a notice, with no envelope', () => {
+    expect(fn).toContain('messaging.sendMessage(NOTICE_SENDER, parentName, renderSpawnNotice(outcome, detail)')
+    expect(fn).toContain("kind: 'notice'")
+    // An envelope would announce `from: Navide` and ask for a reply to a handle
+    // nothing can address; the notice text is injected verbatim instead.
+    expect(fn).not.toContain('includeReplyHint')
+    expect(fn).not.toContain('renderEnvelope')
+  })
+
+  it('every caller classifies the outcome, so the two prefixes stay accurate', () => {
+    const calls = [...appSource.matchAll(/sendSpawnFeedback\(\s*parentName,\s*'(failed|partial)'/g)]
+    expect(calls.length).toBe(4)
+    // A pane that exists but never got its task must not be reported as a
+    // failed spawn — retrying that one collides with the open pane.
+    expect(calls.filter((c) => c[1] === 'partial').length).toBe(2)
+  })
+})

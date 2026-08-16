@@ -1,7 +1,7 @@
 // Pipeline stage type definitions and utility functions.
 // The actual stage data is loaded dynamically from the backend via useStages().
 
-import { MSG_START, MSG_END, MSG_ENVELOPE_PREFIX, MSG_NOTICE_PREFIX, SPAWN_START, SPAWN_END } from '../lib/agentMessaging'
+import { MSG_START, MSG_END, MSG_ENVELOPE_PREFIX, MSG_NOTICE_PREFIX, MSG_SPAWN_FAILED_PREFIX, MSG_SPAWN_PARTIAL_PREFIX, SPAWN_START, SPAWN_END } from '../lib/agentMessaging'
 
 export type StageId = string
 // Derived from the per-vendor specs (agents/index.ts) — no hand-written
@@ -91,7 +91,10 @@ task: <任務內容；task: 之後到區塊結尾全是任務，可多行>
 ${SPAWN_END}
 
 規則：一個 turn 可以輸出多個 SPAWN 區塊，全部都會被處理。子 pane 數、工作區 CLI pane 總數、spawn 鏈深度沒有強制上限，但數量偏多或鏈太深時你會在回報中收到提醒。
-新 pane 完成任務後會用 MSG 區塊回報結果給你；spawn 因名稱衝突、agent key 不合法或任務內容缺漏而被拒絕時，你會收到說明原因的訊息。
+新 pane 完成任務後會用 MSG 區塊回報結果給你。
+spawn 因名稱衝突、agent key 不合法或任務內容缺漏而沒開成 pane 時，你會收到開頭為 ${MSG_SPAWN_FAILED_PREFIX} 的通知，可以修正後重試。
+pane 已經開起來但任務沒注入成功時，開頭是 ${MSG_SPAWN_PARTIAL_PREFIX} —— 那個 pane 已經存在，不要用同一個名稱重新 spawn。
+這兩種都是 Navide 發出的系統通知，和投遞失敗通知一樣不要回覆。
 沒有派工需求時不要輸出 SPAWN 區塊。
 
 `

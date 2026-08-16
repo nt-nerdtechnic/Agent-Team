@@ -217,6 +217,40 @@ describe('AgentMessagesPanel', () => {
     expect(wrapper.find('.msg-detail').exists()).toBe(false)
   })
 
+  it('badges a delivery-failure notice and offers no Resend for it', async () => {
+    m.registerPane('p1', 'claude', 'alpha')
+    m.sendMessage('alpha', 'nobody', 'this one failed')
+    wrapper = mountPanel()
+
+    // Row 2 is the notice Navide sent back to alpha; row 1 is the failed send.
+    expect(rowIds(wrapper)).toEqual(['2', '1'])
+    const notice = wrapper.get('[data-msg-id="2"]')
+    expect(notice.get('.msg-notice').text()).toBe(i18n.global.t('msg.notice-badge'))
+    expect(notice.find('[data-act="retry"]').exists()).toBe(false)
+    // The row it is about keeps its own Resend.
+    expect(wrapper.get('[data-msg-id="1"]').find('[data-act="retry"]').exists()).toBe(true)
+  })
+
+  it('keeps the notice badge after a reload, without reading the text', async () => {
+    // `kind` is persisted, so a restored row does not have to be recognized by
+    // its content prefix.
+    m.hydrateLog([
+      {
+        uid: 'oldboot:1',
+        created_at: 10,
+        status: 'failed',
+        sender: 'Navide',
+        recipient: 'alpha',
+        content: 'anything at all',
+        kind: 'notice',
+      },
+    ])
+    wrapper = mountPanel()
+
+    expect(wrapper.get('.msg-notice').text()).toBe(i18n.global.t('msg.notice-badge'))
+    expect(wrapper.find('[data-act="retry"]').exists()).toBe(false)
+  })
+
   it('shows only one expanded row at a time', async () => {
     m.registerPane('p1', 'claude', 'alpha')
     m.sendMessage('alpha', 'nobody', 'one')

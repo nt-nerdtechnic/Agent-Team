@@ -26,6 +26,12 @@ export const MSG_ENVELOPE_PREFIX = `${MSG_INJECTED_PREFIX} from:`
  *  MSG_ENVELOPE_PREFIX: an agent must be able to tell "someone messaged me"
  *  from "my message bounced" by the first line alone. */
 export const MSG_NOTICE_PREFIX = `${MSG_INJECTED_PREFIX} delivery failed`
+/** A spawn request that produced no pane. */
+export const MSG_SPAWN_FAILED_PREFIX = `${MSG_INJECTED_PREFIX} spawn failed`
+/** A spawn request whose pane exists but never received its task. Kept separate
+ *  from "failed" because the two call for opposite responses: retrying a failed
+ *  spawn is right, retrying this one collides with the pane already open. */
+export const MSG_SPAWN_PARTIAL_PREFIX = `${MSG_INJECTED_PREFIX} spawn partial`
 
 /** True when a turn's text is something Navide injected rather than something
  *  the agent wrote — a CLI reader echoes an injection back as a user record,
@@ -271,6 +277,19 @@ export function renderFailureNotice(to: string, reasonText: string, content: str
     `reason: ${reasonText}\n` +
     `（原訊息開頭：${sanitizeMessageContent(excerpt)}）`
   )
+}
+
+/**
+ * Notice injected back into the REQUESTING pane about a spawn it asked for.
+ *
+ * Same shape and same delivery path as a failure notice: a leading prefix that
+ * says what happened, and nothing that invites a reply. `detail` is collapsed
+ * onto the prefix line and sanitized, so the whole notice is one unambiguous
+ * line even when it carries an exception message.
+ */
+export function renderSpawnNotice(outcome: 'failed' | 'partial', detail: string): string {
+  const prefix = outcome === 'failed' ? MSG_SPAWN_FAILED_PREFIX : MSG_SPAWN_PARTIAL_PREFIX
+  return `${prefix} — ${sanitizeMessageContent(detail.replace(/\s+/g, ' ').trim())}`
 }
 
 /** Smallest free `<agentKey>-<n>` name not present in `taken`. */

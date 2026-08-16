@@ -6,12 +6,19 @@ import {
   encodeReason,
   RATE_LIMIT_MAX,
   QUEUE_CAP,
+  NOTICE_SENDER,
   type AgentMessage,
   type MessagingDeps,
   type PersistedMessageRow,
   type PersistedMessageUpdate,
 } from '../useAgentMessaging'
-import { MSG_ENVELOPE_PREFIX, MSG_NOTICE_PREFIX, MSG_START } from '../../lib/agentMessaging'
+import {
+  MSG_ENVELOPE_PREFIX,
+  MSG_NOTICE_PREFIX,
+  MSG_SPAWN_FAILED_PREFIX,
+  MSG_START,
+  renderSpawnNotice,
+} from '../../lib/agentMessaging'
 
 function flush(): Promise<void> {
   return new Promise((r) => setTimeout(r, 0))
@@ -84,6 +91,17 @@ describe('useAgentMessaging', () => {
       // A title synced onto the handle takes a suffix instead of failing.
       m.registerPane('p3', 'codex')
       expect(m.setDerivedName('p3', 'Navide', 'codex')).toBe('Navide-3')
+    })
+
+    it('keeps a suffixed handle stable when its title is re-synced', () => {
+      // setDerivedName runs on every auto-name and rename. It frees the current
+      // handle before re-deriving, so a pane already parked on the suffix must
+      // reclaim the SAME one — otherwise a pane titled Navide would climb
+      // -2, -3, -4… once per sync.
+      expect(m.registerPane('p1', 'claude', 'Navide')).toBe('Navide-2')
+      expect(m.setDerivedName('p1', 'Navide', 'claude')).toBe('Navide-2')
+      expect(m.setDerivedName('p1', 'Navide', 'claude')).toBe('Navide-2')
+      expect(m.paneIdOf('Navide-2')).toBe('p1')
     })
 
     it('suggestName returns the base when free, else a suffixed variant', () => {
@@ -492,6 +510,24 @@ describe('useAgentMessaging', () => {
       })
     })
 
+    it('round-trips `kind`, so a restored notice is still known to be one', () => {
+      const appended: PersistedMessageRow[] = []
+      m.configureMessaging({ ...deps, persistAppend: (rows) => { appended.push(...rows) } })
+      m.registerPane('p1', 'claude') // claude-1
+      m.sendMessage('claude-1', 'ghost', 'bounce me')
+
+      // The failed send, then the notice it produced — as the store sees them.
+      expect(appended.map((r) => r.kind)).toEqual([undefined, 'notice'])
+
+      // A fresh window restoring that snapshot must not parse text to work out
+      // which row Navide wrote.
+      _resetMessagingForTest()
+      m.configureMessaging(deps)
+      m.hydrateLog(appended)
+
+      expect(m.messages.value.map((x) => x.kind)).toEqual([undefined, 'notice'])
+    })
+
     it('coerces restored in-flight rows to failed WITHOUT persisting the coercion', async () => {
       const updates: PersistedMessageUpdate[][] = []
       m.configureMessaging({ ...deps, persistUpdate: (u) => { updates.push(u) } })
@@ -762,6 +798,25 @@ describe('useAgentMessaging', () => {
       // English regardless of the user's UI locale — the agent reads this.
       expect(delivered[0].text).toContain('reason: No pane named “ghost”')
       expect(delivered[0].text).toContain('please review src/main.ts')
+    })
+
+    it('injects spawn feedback the same way — verbatim, as a notice', async () => {
+      // What App.vue's sendSpawnFeedback does; the wiring itself is guarded in
+      // App.spawnAdvisories.test.ts.
+      const sent = m.sendMessage(
+        NOTICE_SENDER,
+        'claude-1',
+        renderSpawnNotice('failed', '名稱已被使用'),
+        { kind: 'notice' },
+      )
+      expect(sent.kind).toBe('notice')
+
+      m.pump()
+      await flush()
+      expect(delivered[0].paneId).toBe('p1')
+      expect(delivered[0].text).toBe(`${MSG_SPAWN_FAILED_PREFIX} — 名稱已被使用`)
+      expect(delivered[0].text).not.toContain(MSG_ENVELOPE_PREFIX)
+      expect(delivered[0].text).not.toContain(MSG_START)
     })
 
     it('goes through the ordinary idle gate, not a private path', async () => {

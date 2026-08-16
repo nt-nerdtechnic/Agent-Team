@@ -91,9 +91,10 @@ export interface AgentMessage {
   content: string
   status: MessageStatus
   /** 'notice' marks a message Navide wrote itself (delivery-failure feedback to
-   *  a sending pane) rather than one an agent sent. Its only job is to stop a
-   *  bounced notice from producing another one, so it is in-memory only: a
-   *  restored row is history and can never be re-delivered. */
+   *  a sending pane) rather than one an agent sent. It stops a bounced notice
+   *  from producing another one, and it is what the log panel reads to suppress
+   *  Resend — so unlike `hold` it is persisted: after a reload the panel must
+   *  still know what a row is without parsing its text. */
   kind?: 'notice'
   /** Failure reason when status === 'failed'. */
   reason?: MessageReason
@@ -129,6 +130,9 @@ export interface PersistedMessageRow {
   remote_workspace?: string
   sender_agent?: string
   recipient_agent?: string
+  /** See AgentMessage.kind. Absent on rows written before the column existed,
+   *  which is exactly right — every one of them is an ordinary message. */
+  kind?: 'notice'
 }
 
 /** A status patch for an already-persisted row. */
@@ -264,6 +268,7 @@ function toPersistedRow(m: AgentMessage): PersistedMessageRow {
     remote_workspace: m.remoteWorkspace,
     sender_agent: m.fromAgent,
     recipient_agent: m.toAgent,
+    kind: m.kind,
   }
 }
 
@@ -285,6 +290,7 @@ function fromPersistedRow(row: PersistedMessageRow): AgentMessage {
   if (row.remote_workspace) m.remoteWorkspace = row.remote_workspace
   if (row.sender_agent) m.fromAgent = row.sender_agent
   if (row.recipient_agent) m.toAgent = row.recipient_agent
+  if (row.kind === 'notice') m.kind = row.kind
   return m
 }
 

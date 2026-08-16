@@ -131,8 +131,14 @@ function vendorOf(agentKey: string | undefined, handle: string): string | null {
           <span v-if="msg.inReplyTo" class="msg-reply" :title="repliedTo(msg)?.content">
             {{ $t('msg.reply-badge') }}
           </span>
+          <span v-if="msg.kind === 'notice'" class="msg-notice">
+            {{ $t('msg.notice-badge') }}
+          </span>
+          <!-- No Resend on a notice: it only reports another row's failure, so
+               re-sending it would deliver stale news, and the row it is about
+               has its own Resend. -->
           <button
-            v-if="msg.status === 'failed'"
+            v-if="msg.status === 'failed' && msg.kind !== 'notice'"
             class="msg-btn msg-retry"
             data-act="retry"
             @click.stop="messaging.retryMessage(msg.id)"
@@ -314,6 +320,17 @@ function vendorOf(agentKey: string | undefined, handle: string): string | null {
   white-space: nowrap;
   background: rgba(140, 190, 140, 0.18);
   color: #7cb37c;
+}
+
+.msg-notice {
+  flex: none;
+  font-size: 9px;
+  font-weight: 700;
+  border-radius: 99px;
+  padding: 0 6px;
+  white-space: nowrap;
+  background: rgba(200, 160, 90, 0.18);
+  color: #c8a05a;
 }
 
 .msg-st[data-st='queued'] { background: rgba(128, 128, 128, 0.18); color: var(--text-secondary); }

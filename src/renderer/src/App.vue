@@ -26,10 +26,10 @@ import NotificationHost from './components/NotificationHost.vue'
 import Welcome from './components/Welcome.vue'
 import { useNotify } from './composables/useNotify'
 import { migrateTerminalPtyKey, saveAllScrollSnapshots, type DisplayStatus } from './composables/useTerminal'
-import { useAgentMessaging, encodeReason, isBroadcastTarget } from './composables/useAgentMessaging'
+import { useAgentMessaging, encodeReason, isBroadcastTarget, NOTICE_SENDER } from './composables/useAgentMessaging'
 import type { RouteResult } from './composables/useAgentMessaging'
 import { createMessageLogPersistence } from './composables/useMessageLogPersistence'
-import { VENDORS_WITHOUT_TURN_END, isInjectedMessageText, isTurnInFlight, normalizeMessagingName, parseMessages, parseSpawns, renderSpawnKickoff } from './lib/agentMessaging'
+import { VENDORS_WITHOUT_TURN_END, isInjectedMessageText, isTurnInFlight, normalizeMessagingName, parseMessages, parseSpawns, renderSpawnKickoff, renderSpawnNotice } from './lib/agentMessaging'
 import {
   evaluateTurnSpawns,
   evaluateSpawnRequest,
@@ -1453,12 +1453,19 @@ function onTurnCompleteForMessaging(paneId: string, text: string, timestamp: str
 }
 
 // ── Agent-initiated pane spawning (SPAWN blocks) ────────────────────────────
-const SPAWN_FEEDBACK_SENDER = 'Navide'
-
-/** Feedback to the requesting pane through the ordinary messaging queue (idle
- *  gate, delivery log) — no reply hint, Navide is not an addressable pane. */
-function sendSpawnFeedback(parentName: string, text: string): void {
-  messaging.sendMessage(SPAWN_FEEDBACK_SENDER, parentName, text, { includeReplyHint: false })
+/** Feedback to the requesting pane, as a system notice: the ordinary messaging
+ *  queue (idle gate, delivery log, Navide's own rate-limit pair) carrying text
+ *  that is injected verbatim. Identical treatment to a delivery-failure notice,
+ *  and for the same reason — an envelope would announce a sender named Navide
+ *  and ask for a reply to a handle nothing can address. */
+function sendSpawnFeedback(
+  parentName: string,
+  outcome: 'failed' | 'partial',
+  detail: string,
+): void {
+  messaging.sendMessage(NOTICE_SENDER, parentName, renderSpawnNotice(outcome, detail), {
+    kind: 'notice',
+  })
 }
 
 async function handleSpawnRequestsForTurn(
@@ -1473,7 +1480,7 @@ async function handleSpawnRequestsForTurn(
   const results = evaluateTurnSpawns(requests, spawnGateContextFor(parentPaneId))
   for (const result of results) {
     if (!result.ok) {
-      sendSpawnFeedback(parentName, `SPAWN 失敗：${result.reason}`)
+      sendSpawnFeedback(parentName, 'failed', result.reason)
       continue
     }
     for (const advisory of result.advisories ?? []) {
@@ -1481,7 +1488,7 @@ async function handleSpawnRequestsForTurn(
     }
     const ok = await spawnRequestedPane(parent, parentName, result)
     if (!ok) {
-      sendSpawnFeedback(parentName, `SPAWN 失敗：pane「${result.name}」啟動或任務注入失敗`)
+      sendSpawnFeedback(parentName, 'failed', `pane「${result.name}」啟動或任務注入失敗`)
     }
   }
 }
@@ -1783,12 +1790,13 @@ async function handleMcpSpawnRequest(ev: {
   void kickoffRequestedPane(paneId, parentName, gate.task)
     .then((ok) => {
       if (!ok) {
-        sendSpawnFeedback(parentName, `pane「${childName}」已開啟，但任務注入失敗，請自行確認`)
+        sendSpawnFeedback(parentName, 'partial', `pane「${childName}」已開啟，但任務注入失敗，請自行確認`)
       }
     })
     .catch((err) => {
       sendSpawnFeedback(
         parentName,
+        'partial',
         `pane「${childName}」已開啟，但任務注入出錯：${err instanceof Error ? err.message : String(err)}`,
       )
     })

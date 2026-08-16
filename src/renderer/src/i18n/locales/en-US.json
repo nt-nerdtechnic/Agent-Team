@@ -48,6 +48,7 @@
     "cross-workspace-toast": "Instruction from another workspace: “{from}” → “{target}”",
     "cross-workspace-badge": "cross-workspace",
     "reply-badge": "reply",
+    "notice-badge": "system notice",
     "expand-rail": "Expand inter-CLI messages"
   },
   "confirm-close": {
