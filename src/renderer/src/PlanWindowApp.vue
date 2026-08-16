@@ -276,6 +276,9 @@ registerCommand('workbench.action.quickOpen', () => {
 // ⌘⇧W. This window has no unsaved-buffer state of its own — an in-flight
 // section edit is cancelled through ESC below — so it closes outright.
 registerCommand('workbench.action.closeWindow', () => { window.close() })
+// ⇧⌘R. Same reasoning: plans live on disk, so a reload costs nothing but an
+// in-progress section edit, which ESC discards anyway.
+registerCommand('workbench.action.reloadWindow', () => { location.reload() })
 
 // ESC, bound centrally as closeModal on `planWindow` (keybindings/defaults.ts).
 //

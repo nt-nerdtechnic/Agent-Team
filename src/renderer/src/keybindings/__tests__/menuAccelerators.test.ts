@@ -98,11 +98,15 @@ describe('deliberately omitted roles stay out of the menu', () => {
 describe('MENU_OWNED_SPECS covers the whole menu', () => {
   const mac = menuOwnedSpecs(true)
 
-  it('includes the reload key that started this', () => {
-    // ⌘R reloads the entire renderer from the main process. It was absent from
-    // this set for as long as no default bound it, which left a user recording
-    // ⌘R onto a row with no warning at all.
-    expect(mac.has('cmd+r')).toBe(true)
+  it('no longer owns ⌘R — the key this whole table started from', () => {
+    // Three states, in order. It was absent while no default bound it, which
+    // left a user recording ⌘R onto a row with no warning at all. Then it was
+    // present and correct, because the menu really did own it. Now the `reload`
+    // role is gone from the menu (⌘R rebuilds the focused pane), so the warning
+    // has to stop as well — a stale ⚠ on a key that works is its own bug.
+    expect(mac.has('cmd+r')).toBe(false)
+    expect(acceleratorToSpec(MENU_OMITTED_ROLES.reload, true)).toBe('cmd+r')
+    expect(boundSpecs().has('cmd+r')).toBe(true)
   })
 
   it('keeps the three specs defaults.ts also binds', () => {
@@ -189,9 +193,11 @@ describe('platform differences survive the transcription', () => {
   const other = menuOwnedSpecs(false)
 
   it('maps CmdOrCtrl to the platform modifier', () => {
-    expect(mac.has('cmd+r')).toBe(true)
-    expect(other.has('ctrl+r')).toBe(true)
-    expect(other.has('cmd+r')).toBe(false)
+    // undo, because it is a role the menu still installs on both platforms —
+    // reload used to be the example here until it left the menu entirely.
+    expect(mac.has('cmd+z')).toBe(true)
+    expect(other.has('ctrl+z')).toBe(true)
+    expect(other.has('cmd+z')).toBe(false)
   })
 
   it('keeps the roles that genuinely differ per platform apart', () => {

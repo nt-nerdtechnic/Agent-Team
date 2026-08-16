@@ -13,7 +13,7 @@ import { getTerminalSelection } from './terminal-selection-cache'
  *     Updates… (platforms without an app menu)
  *   - Window: Pipeline Manager
  *
- * THREE deliberate omissions from the default menu remain, all because native
+ * FOUR deliberate omissions from the default menu remain, all because native
  * accelerators fire before the renderer's key handlers:
  *
  *   - The View submenu's `resetZoom` / `zoomIn` / `zoomOut` roles. Those roles
@@ -21,9 +21,13 @@ import { getTerminalSelection } from './terminal-selection-cache'
  *     — chrome, layout, every pane. Zoom in this app is per-pane content zoom
  *     only (xterm font size in useTerminal.ts, Monaco font size in
  *     EditorViewMonaco.vue), so the built-in roles must not exist.
- *   - The View submenu's `forceReload` role, which owns ⇧⌘R. That chord is the
- *     renderer's Rebuild-pane shortcut (keybindings/defaults.ts). `reload` (⌘R)
- *     stays, so a plain reload is still one keystroke away.
+ *   - The View submenu's `forceReload` role, which owns ⇧⌘R.
+ *   - The View submenu's `reload` role, which owns ⌘R. Between them those two
+ *     held both halves of the reload/rebuild pair, and had them backwards: ⌘R
+ *     reloaded the whole renderer — every PTY, every unsaved buffer — while
+ *     rebuilding one pane needed the longer chord. Now ⌘R rebuilds the focused
+ *     pane and ⇧⌘R reloads the window, mirroring ⌘W / ⇧⌘W. Reloading is still
+ *     in the View menu, as a plain item carrying no accelerator of its own.
  *   - The File submenu's `close` role ON macOS, which owns ⌘W. That key is the
  *     renderer's closeActiveEditor — close a TAB, not the window. The role won
  *     every time, so the binding users could see in Settings never ran. Off
@@ -271,9 +275,19 @@ export function installApplicationMenu(
     },
     {
       label: 'View',
-      // No resetZoom / zoomIn / zoomOut, no forceReload — see the doc comment above.
+      // No resetZoom / zoomIn / zoomOut, no forceReload, no `role: 'reload'` —
+      // see the doc comment above.
       submenu: [
-        { role: 'reload' },
+        // Same action the role performs, minus the accelerator it comes with.
+        // Reloading stays reachable by mouse while ⌘R belongs to the renderer.
+        {
+          label: 'Reload Window',
+          click: (_item, win) => {
+            const target =
+              webContents.getFocusedWebContents() ?? (win as BrowserWindow | undefined)?.webContents
+            if (target && !target.isDestroyed()) target.reload()
+          }
+        },
         { role: 'toggleDevTools' },
         { type: 'separator' },
         { role: 'togglefullscreen' }

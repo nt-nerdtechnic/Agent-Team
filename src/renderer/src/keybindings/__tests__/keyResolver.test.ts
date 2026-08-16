@@ -403,6 +403,28 @@ describe('KeyResolver – defaults integration (new shortcuts)', () => {
     expect(dr.resolve(mkEvent('w', { metaKey: true }), { editorOpen: false })).toBeNull()
   })
 
+  it('cmd+r rebuilds one pane, cmd+shift+r reloads the window', () => {
+    // The same two tiers as ⌘W / ⇧⌘W, and the reverse of what the app menu had:
+    // it put reloading the whole renderer on the shorter chord.
+    expect(dr.resolve(mkEvent('r', { metaKey: true }), {})?.command)
+      .toBe('workbench.action.rebuildFocusedPane')
+    expect(dr.resolve(mkEvent('r', { metaKey: true, shiftKey: true }), {})?.command)
+      .toBe('workbench.action.reloadWindow')
+  })
+
+  it('cmd+shift+r stays git.refresh in the Git window', () => {
+    expect(dr.resolve(mkEvent('r', { metaKey: true, shiftKey: true }), { gitWindow: true })?.command)
+      .toBe('git.refresh')
+  })
+
+  it('cmd+shift+r reaches the PTY in the Git window, reloading nothing', () => {
+    // git.refresh yields on terminalFocus. Without the !gitWindow guard on the
+    // reload rule, the chord would fall through and reload the window out from
+    // under the AI dock instead of reaching the CLI.
+    expect(dr.resolve(mkEvent('r', { metaKey: true, shiftKey: true }), { gitWindow: true, terminalFocus: true }))
+      .toBeNull()
+  })
+
   it('cmd+shift+s → saveAll (editorOpen)', () => {
     expect(dr.resolve(mkEvent('S', { metaKey: true, shiftKey: true }), { editorOpen: true })?.command)
       .toBe('workbench.action.saveAll')

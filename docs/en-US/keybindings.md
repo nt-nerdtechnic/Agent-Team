@@ -41,7 +41,8 @@ rules the editor writes.
 | `⌘⇧A` | Toggle AI Terminal panel |
 | `` ⌃` `` | Toggle AI Terminal panel |
 | `⌘⇧U` | Open Agent |
-| `⌘⇧B` | Rebuild Pane (Resume) |
+| `⌘R` / `⌘⇧B` | Rebuild the focused pane (resume) |
+| `⌘⇧R` | Reload the window (Git window: refresh) |
 | `⌘⇧L` | Open Debug (backend log, shell, AI) — outside the Mini IDE, where this chord belongs to the editor |
 | `Escape` | Close modal dialog |
 
@@ -514,9 +515,11 @@ that page replaced the old reference:
 
 - **Terminal keys** (`⇧↩`, `⌘←`, `⌥⌫`, …) are intercepted by `useTerminal` and
   turned into control sequences before the rule table is consulted.
-- **Electron menu accelerators** (`⌘R`, `⌥⌘I`, `⌘Q`, `⌃⌘F`, …) fire in the main
-  process ahead of the renderer. They also fire while the Settings recorder is
-  capturing, so those combinations cannot be recorded as shortcuts.
+- **Electron menu accelerators** (`⌥⌘I`, `⌘Q`, `⌃⌘F`, `⌘C`/`⌘V`/`⌘Z`/`⌘A`, …)
+  fire in the main process ahead of the renderer. They also fire while the
+  Settings recorder is capturing, so those combinations cannot be recorded as
+  shortcuts. `⌘R`, `⇧⌘R` and `⌘W` are **not** on this list: their menu roles
+  were dropped precisely so the rule table could have them.
 
 ---
 

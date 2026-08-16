@@ -254,7 +254,7 @@
       "clipboard-send-failed": "Only part of the paste reached {pane} — the rest was lost on the way",
       "click-to-resume": "Click to resume",
       "resuming": "Resuming…",
-      "rebuild-tooltip": "Rebuild (resume) ⌘⇧R — kill and re-spawn via --resume at the current size to clear ghosting/overlap that can't be repainted. Interrupts the in-progress turn and reprints the conversation.",
+      "rebuild-tooltip": "Rebuild (resume) ⌘R — kill and re-spawn via --resume at the current size to clear ghosting/overlap that can't be repainted. Interrupts the in-progress turn and reprints the conversation.",
       "rebuild-tooltip-disabled": "Rebuild needs an existing session to resume. Send a message first — the conversation transcript is created after the first turn.",
       "rebuild-busy-skipped": "CLI is busy — kept the running work, skipped rebuild",
       "rebuild-busy-skipped-batch": "{count} CLI(s) busy — kept running work, skipped rebuild",

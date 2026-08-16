@@ -112,7 +112,6 @@ export const MENU_ROLE_ACCELERATORS: Record<string, { mac: string | null; other:
   pasteAndMatchStyle: { mac: 'Cmd+Option+Shift+V', other: null },
   quit: { mac: 'Command+Q', other: 'CommandOrControl+Q' },
   redo: { mac: 'Shift+CmdOrCtrl+Z', other: 'Shift+CmdOrCtrl+Z' },
-  reload: { mac: 'CmdOrCtrl+R', other: 'CmdOrCtrl+R' },
   selectAll: { mac: 'CmdOrCtrl+A', other: 'CmdOrCtrl+A' },
   services: { mac: null, other: null },
   toggleDevTools: { mac: 'Alt+Command+I', other: 'Ctrl+Shift+I' },
@@ -131,8 +130,11 @@ export const MENU_ROLE_ACCELERATORS: Record<string, { mac: string | null; other:
  * user can still see in Settings.
  */
 export const MENU_OMITTED_ROLES: Record<string, string> = {
-  // ⇧⌘R — the renderer's Rebuild-pane chord (defaults.ts).
+  // ⇧⌘R — reloadWindow in the rule table (defaults.ts).
   forceReload: 'Shift+CmdOrCtrl+R',
+  // ⌘R — rebuildFocusedPane. The View menu keeps a Reload Window item with no
+  // accelerator, so reloading survives as a mouse action.
+  reload: 'CmdOrCtrl+R',
   // ⌘0 / ⌘+ / ⌘- scale the whole window; zoom here is per-pane content zoom.
   resetZoom: 'CmdOrCtrl+0',
   zoomIn: 'CmdOrCtrl+Plus',

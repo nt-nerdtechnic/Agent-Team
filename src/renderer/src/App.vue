@@ -5233,6 +5233,10 @@ registerCommand('workbench.action.openPlans', async () => {
 registerCommand('workbench.action.rebuildFocusedPane', async () => {
   if (effectiveFocusPaneId.value) await rebuildPaneViaResume(effectiveFocusPaneId.value)
 })
+// ⇧⌘R. No prompt: every CLI lives in a backend PTY that outlives the renderer,
+// so a reload here reconnects and restores the panes rather than losing them.
+// The Mini IDE, whose unsaved buffers only exist in the renderer, guards its own.
+registerCommand('workbench.action.reloadWindow', () => { location.reload() })
 // Ctrl+Tab / Ctrl+Shift+Tab — see cycleFocusedPane near the grid pagination
 // state. 'paneStage' marks this as the window that owns the CLI pane grid; the
 // keybinding rules gate on it so plugin windows keep their editor-tab behavior.

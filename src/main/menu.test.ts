@@ -46,7 +46,9 @@ const focused = {
     if (focused.hangs) return new Promise<string>(() => {})
     return focused.selection
   },
-  copy: (): void => { focused.copyCalls++ }
+  copy: (): void => { focused.copyCalls++ },
+  reloadCalls: 0,
+  reload: (): void => { focused.reloadCalls++ }
 }
 
 const isMac = process.platform === 'darwin'
@@ -100,6 +102,7 @@ describe('installApplicationMenu', () => {
     focused.hangs = false
     focused.copyCalls = 0
     focused.evalCalls = 0
+    focused.reloadCalls = 0
     forgetTerminalSelection(FOCUSED_ID) // module state outlives a single case
     h.focusedWebContents = focused
     installApplicationMenu(hooks)
@@ -320,6 +323,18 @@ describe('installApplicationMenu', () => {
       (i) => typeof i.role === 'string' && i.role.toLowerCase() === 'close'
     )
     expect(closeRoles).toHaveLength(1)
+  })
+
+  it('View reloads through a plain item, never the accelerator-carrying role', () => {
+    const view = submenuOf('View')
+    // `role: 'reload'` would bring ⌘R back with it, and the main process wins
+    // that race — the renderer's rebuild-pane binding would stop firing without
+    // a trace, which is the exact failure this whole area was fixing.
+    expect(view.filter((i) => typeof i.role === 'string' && i.role.toLowerCase() === 'reload')).toEqual([])
+    const reload = itemIn(view, 'Reload Window')
+    expect(reload.accelerator).toBeUndefined()
+    fire(reload)
+    expect(focused.reloadCalls).toBe(1)
   })
 
   it('View still has no webContents zoom roles (deliberate omission)', () => {

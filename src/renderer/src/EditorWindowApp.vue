@@ -950,6 +950,19 @@ registerCommand('workbench.action.closeActiveEditor', () => {
 // ⌘⇧W. Routed through closeEditorWindow so it keeps the unsaved-changes prompt
 // and the plugin-view branch, exactly like Escape and the traffic lights.
 registerCommand('workbench.action.closeWindow', () => { void closeEditorWindow() })
+// ⇧⌘R. Unlike the main window, everything unsaved here lives only in the
+// renderer, so a reload discards it outright — ask first when it would.
+registerCommand('workbench.action.reloadWindow', async () => {
+  const dirty = openFiles.value.filter((f) => f.kind === 'file' && f.dirty)
+  if (dirty.length > 0) {
+    const ok = await confirm(
+      `${dirty.length} file(s) have unsaved changes. Reload and discard them?`,
+      { title: 'Reload Window', confirmText: 'Reload' }
+    )
+    if (!ok) return
+  }
+  location.reload()
+})
 // Save every dirty file buffer to disk (reuses EditorPane.save, which carries
 // the mtime-conflict protection).
 async function saveDirtyFiles(): Promise<void> {

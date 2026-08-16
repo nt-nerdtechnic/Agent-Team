@@ -180,8 +180,20 @@ export const defaults: KeybindingRule[] = [
   // Rebuild is reachable two ways: cmd+shift+r is the primary chord (freed by
   // dropping the forceReload menu role in main/menu.ts), cmd+shift+b is kept as
   // the original alias.
-  { key: 'cmd+shift+r', command: 'workbench.action.rebuildFocusedPane' },
+  // ⌘R rebuilds ONE pane, ⇧⌘R reloads the whole window — the same two tiers as
+  // ⌘W / ⇧⌘W. Both keys were the app menu's until main/menu.ts dropped the
+  // `reload` and `forceReload` roles; before that the pair was inverted, with
+  // the destructive one (reload every PTY and unsaved buffer) on the shorter
+  // chord. cmd+shift+b stays as the original Rebuild alias.
+  //
+  // rebuildPaneViaResume already prompts before interrupting a running turn, so
+  // ⌘R inherits that guard without adding one.
+  { key: 'cmd+r',       command: 'workbench.action.rebuildFocusedPane' },
   { key: 'cmd+shift+b', command: 'workbench.action.rebuildFocusedPane' },
+  // !gitWindow, not bare: that window spends ⇧⌘R on git.refresh, and while its
+  // AI dock has focus the chord belongs to the PTY. An unguarded rule here would
+  // reload the window out from under the terminal instead.
+  { key: 'cmd+shift+r', command: 'workbench.action.reloadWindow', when: '!gitWindow' },
 
   // ── CLI type quick-select (ControlPane) ──────────────────────────────────────
   // Ctrl+<n> selects the Nth manual CLI type for the next spawn (no-op past the
