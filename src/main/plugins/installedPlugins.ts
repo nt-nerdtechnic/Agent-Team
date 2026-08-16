@@ -10,7 +10,7 @@
 // This loader covers third-party installs; bundled builtin directories are
 // validated through the same `loadPluginDir` path.
 
-import { lstatSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { closeSync, lstatSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs'
 import { TextDecoder } from 'node:util'
 import { join } from 'node:path'
 import { verifyEd25519 } from './pluginVerify'
@@ -23,6 +23,7 @@ import {
   parseInstalledManifest,
   parseManifestJson,
   type InstalledManifest,
+  type PluginManifestV2,
 } from './pluginManifest'
 import type { PluginLaunchDescriptor, PluginViewLaunchDescriptor } from './frontendPluginManager'
 
@@ -53,6 +54,45 @@ function readUtf8File(path: string, label: string): string {
   }
 }
 
+function assertBackendExecutableOnDisk(manifest: PluginManifestV2, pluginDir: string): void {
+  if (!manifest.backend) return
+  const path = manifest.backend.entry
+  const entryPath = join(pluginDir, path)
+  let entry
+  try {
+    entry = lstatSync(entryPath)
+  } catch {
+    throw new Error(`backend entry is missing or unsafe: ${path}`)
+  }
+  if (!entry.isFile() || entry.isSymbolicLink()) {
+    throw new Error(`backend entry is not a regular file: ${path}`)
+  }
+  if (entry.size === 0) throw new Error(`backend entry is empty: ${path}`)
+  if ((entry.mode & 0o111) === 0) {
+    throw new Error(`backend entry is not executable: ${path}`)
+  }
+
+  const prefix = Buffer.alloc(5)
+  const fd = openSync(entryPath, 'r')
+  let bytesRead = 0
+  try {
+    bytesRead = readSync(fd, prefix, 0, prefix.length, 0)
+  } finally {
+    closeSync(fd)
+  }
+  const startsWithShebang = bytesRead >= 2 && prefix[0] === 0x23 && prefix[1] === 0x21
+  const startsWithBomShebang =
+    bytesRead >= 5 &&
+    prefix[0] === 0xef &&
+    prefix[1] === 0xbb &&
+    prefix[2] === 0xbf &&
+    prefix[3] === 0x23 &&
+    prefix[4] === 0x21
+  if (startsWithShebang || startsWithBomShebang) {
+    throw new Error(`backend entry must not be a script: ${path}`)
+  }
+}
+
 function assertManifestFilesOnDisk(manifest: InstalledManifest, pluginDir: string): void {
   try {
     const root = lstatSync(pluginDir)
@@ -78,6 +118,23 @@ function assertManifestFilesOnDisk(manifest: InstalledManifest, pluginDir: strin
       throw new Error(`manifest referenced file is missing or unsafe: ${path}`)
     }
   }
+
+  if (isManifestV2(manifest)) assertBackendExecutableOnDisk(manifest, pluginDir)
+}
+
+function manifestViewsToDescriptors(
+  manifest: PluginManifestV2,
+  pluginDir: string
+): PluginViewLaunchDescriptor[] {
+  return (manifest.contributes?.views ?? []).map((view) => ({
+    id: view.id,
+    contributionKey: `${manifest.id}.${view.id}`,
+    kind: view.kind,
+    location: view.location,
+    title: view.title,
+    icon: view.icon,
+    entryFile: join(pluginDir, view.entry),
+  }))
 }
 
 /**
@@ -91,19 +148,10 @@ export function manifestToDescriptor(
   query = ''
 ): PluginLaunchDescriptor {
   if (isManifestV2(manifest)) {
-    const views = manifest.contributes?.views ?? []
-    if (views.length === 0) {
+    const launchViews = manifestViewsToDescriptors(manifest, pluginDir)
+    if (launchViews.length === 0) {
       throw new Error(`manifest ${manifest.id} has no frontend custom view contribution`)
     }
-    const launchViews: PluginViewLaunchDescriptor[] = views.map((view) => ({
-      id: view.id,
-      contributionKey: `${manifest.id}.${view.id}`,
-      kind: view.kind,
-      location: view.location,
-      title: view.title,
-      icon: view.icon,
-      entryFile: join(pluginDir, view.entry),
-    }))
     return {
       id: manifest.id,
       requires: manifestCapabilities(manifest),
@@ -122,6 +170,63 @@ export function manifestToDescriptor(
     entryFile: join(pluginDir, manifest.entry),
     query,
   }
+}
+
+export interface PluginBackendActivation {
+  entryFile: string
+  protocolVersion: 1
+  activation: 'startup'
+}
+
+export interface PluginActivationCatalogEntry {
+  pluginId: string
+  packageVersion: string
+  packageDir: string
+  views: PluginViewLaunchDescriptor[]
+  backend?: PluginBackendActivation
+}
+
+/** Derive every runtime contribution atomically from one validated v2 package. */
+export function manifestToActivation(
+  manifest: PluginManifestV2,
+  pluginDir: string
+): PluginActivationCatalogEntry {
+  const views = manifestViewsToDescriptors(manifest, pluginDir)
+  return {
+    pluginId: manifest.id,
+    packageVersion: manifest.version,
+    packageDir: pluginDir,
+    views,
+    backend: manifest.backend
+      ? {
+          entryFile: join(pluginDir, manifest.backend.entry),
+          protocolVersion: manifest.backend.protocolVersion,
+          activation: manifest.backend.activation,
+        }
+      : undefined,
+  }
+}
+
+/** Aggregate validated package activations without allowing duplicate active ids. */
+export function buildActivationCatalog(
+  entries: Iterable<PluginActivationCatalogEntry>
+): PluginActivationCatalogEntry[] {
+  const versions = new Map<string, string>()
+  const catalog: PluginActivationCatalogEntry[] = []
+  for (const entry of entries) {
+    const activeVersion = versions.get(entry.pluginId)
+    if (activeVersion !== undefined) {
+      if (activeVersion !== entry.packageVersion) {
+        throw new Error(
+          `plugin ${entry.pluginId} has multiple active versions: ${activeVersion} and ${entry.packageVersion}`
+        )
+      }
+      throw new Error(`plugin ${entry.pluginId}@${entry.packageVersion} appears more than once`)
+    }
+    versions.set(entry.pluginId, entry.packageVersion)
+    catalog.push(entry)
+  }
+  return catalog
 }
 
 // ── Official install receipt ────────────────────────────────────────────────
@@ -189,10 +294,28 @@ export function verifyOfficialInstall(
 export interface ScannedPlugin {
   /** The plugin's on-disk directory. */
   dir: string
+  /** Package-level inventory data derived from the validated manifest. */
+  packageSummary?: InstalledPluginPackageSummary
   /** The parsed descriptor, when the manifest was valid. */
   descriptor?: PluginLaunchDescriptor
+  /** Atomic v2 frontend/backend contributions from this validated package. */
+  activation?: PluginActivationCatalogEntry
   /** The parse/validation error message, when the directory was rejected. */
   error?: string
+}
+
+export interface InstalledPluginPackageSummary {
+  id: string
+  requires: string[]
+}
+
+export function manifestToInstalledPackageSummary(
+  manifest: InstalledManifest
+): InstalledPluginPackageSummary {
+  return {
+    id: manifest.id,
+    requires: manifestCapabilities(manifest),
+  }
 }
 
 /**
@@ -204,8 +327,22 @@ export function loadPluginDir(dir: string): ScannedPlugin {
   try {
     const raw = parseManifestJson(readUtf8File(join(dir, 'manifest.json'), 'manifest.json'))
     const manifest = parseInstalledManifest(raw)
-    if (isManifestV2(manifest)) assertManifestFilesOnDisk(manifest, dir)
-    return { dir, descriptor: manifestToDescriptor(manifest, dir) }
+    if (isManifestV2(manifest)) {
+      assertManifestFilesOnDisk(manifest, dir)
+      const activation = manifestToActivation(manifest, dir)
+      const descriptor = manifest.contributes ? manifestToDescriptor(manifest, dir) : undefined
+      return {
+        dir,
+        packageSummary: manifestToInstalledPackageSummary(manifest),
+        descriptor,
+        activation,
+      }
+    }
+    return {
+      dir,
+      packageSummary: manifestToInstalledPackageSummary(manifest),
+      descriptor: manifestToDescriptor(manifest, dir),
+    }
   } catch (error) {
     return { dir, error: error instanceof Error ? error.message : String(error) }
   }

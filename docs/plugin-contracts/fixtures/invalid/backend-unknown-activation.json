@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 2,
+  "apiVersion": "^1.0.0",
+  "id": "acme.lazy-backend",
+  "name": "Lazy Backend",
+  "version": "1.0.0",
+  "publisher": "acme",
+  "permissions": {},
+  "marketplace": { "description": "Reject an unknown backend activation.", "license": "MIT" },
+  "backend": { "entry": "backend/acme-lazy", "protocolVersion": 1, "activation": "onDemand" }
+}

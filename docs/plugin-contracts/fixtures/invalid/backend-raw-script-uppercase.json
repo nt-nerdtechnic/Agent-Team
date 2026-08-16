@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 2,
+  "apiVersion": "^1.0.0",
+  "id": "acme.raw-script-uppercase",
+  "name": "Raw Script Uppercase",
+  "version": "1.0.0",
+  "publisher": "acme",
+  "permissions": {},
+  "marketplace": { "description": "Reject a raw backend script regardless of suffix case.", "license": "MIT" },
+  "backend": { "entry": "backend/MAIN.PY", "protocolVersion": 1, "activation": "startup" }
+}

@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"req-1","reason":"view destroyed"}}

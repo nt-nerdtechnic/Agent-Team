@@ -17,6 +17,26 @@ _V2_PERMISSION_ACCESS: dict[str, frozenset[str]] = {
     "fs": frozenset({"read"}),
     "ui": frozenset({"openInEditor", "openExternal"}),
 }
+# Manifest-level guard for recognizable source/script filenames. Proving that
+# archive bytes are the correct target executable belongs to the B8 packager.
+_KNOWN_SOURCE_BACKEND_SCRIPT_EXTENSIONS = frozenset(
+    {
+        ".py",
+        ".pyw",
+        ".js",
+        ".mjs",
+        ".cjs",
+        ".ts",
+        ".tsx",
+        ".sh",
+        ".bash",
+        ".zsh",
+        ".fish",
+        ".ps1",
+        ".cmd",
+        ".bat",
+    }
+)
 
 
 class ManifestV2Model(BaseModel):
@@ -132,6 +152,9 @@ class ManifestV2Backend(ManifestV2Model):
     def _check_entry(cls, value: str) -> str:
         if canonical_package_path(value) is None:
             raise ValueError("must be a safe package-relative path")
+        suffix = "." + value.rsplit("/", 1)[-1].rsplit(".", 1)[-1].lower()
+        if suffix in _KNOWN_SOURCE_BACKEND_SCRIPT_EXTENSIONS:
+            raise ValueError("must reference a packaged executable, not a raw script")
         return value
 
 

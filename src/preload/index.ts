@@ -506,8 +506,11 @@ contextBridge.exposeInMainWorld('agentTeam', {
       name: string
       version?: string
     }): Promise<PreparedInstallSummary> => ipcRenderer.invoke('plugins:prepareInstall', args),
-    commitInstall: (id: string): Promise<{ id: string; requires: string[] }> =>
-      ipcRenderer.invoke('plugins:commitInstall', { id }),
+    commitInstall: (
+      id: string,
+      confirmed = false
+    ): Promise<{ id: string; requires: string[] }> =>
+      ipcRenderer.invoke('plugins:commitInstall', { id, confirmed }),
     remove: (id: string): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke('plugins:remove', { id }),
   },

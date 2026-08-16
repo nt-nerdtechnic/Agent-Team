@@ -29,6 +29,8 @@ export interface ZipEntry {
   kind: ZipEntryKind
   /** Unix/DOS type classification retained for extraction preflight. */
   type: ZipEntryType
+  /** True only for a regular Unix entry with at least one execute bit set. */
+  executable: boolean
 }
 
 export class PluginPackageError extends Error {
@@ -164,7 +166,13 @@ export function readZipEntries(bytes: Uint8Array): ZipEntry[] {
       )
     }
 
-    entries.push({ path: name, data, kind: type === 'directory' ? 'directory' : 'file', type })
+    entries.push({
+      path: name,
+      data,
+      kind: type === 'directory' ? 'directory' : 'file',
+      type,
+      executable: type === 'regular' && (unixMode & 0o111) !== 0,
+    })
   }
   return entries
 }

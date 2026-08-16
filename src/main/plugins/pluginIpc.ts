@@ -4,13 +4,14 @@
 // zip-slip); this module only wires it to `ipcMain` and the loader registry.
 //
 // Install is two-step so the renderer can interpose a trust confirmation for
-// sensitive (fs/terminal) capabilities: `plugins:prepareInstall` downloads +
+// sensitive (fs/terminal) capabilities or native backend code:
+// `plugins:prepareInstall` downloads +
 // verifies and returns the trust facts WITHOUT writing to disk; the renderer
 // shows the warning, then `plugins:commitInstall` writes the verified package.
 // Download bytes never cross to the renderer — the prepared package is held
 // main-side, keyed by id, until commit.
 
-import { app, ipcMain } from 'electron'
+import { app, BrowserWindow, ipcMain, type IpcMainInvokeEvent } from 'electron'
 import {
   prepareInstall,
   commitInstall,
@@ -18,6 +19,7 @@ import {
   type PreparedInstall,
 } from './pluginInstaller'
 import { sensitiveCapabilities, assertRegistryUrlAllowed } from './pluginVerify'
+import { manifestToInstalledPackageSummary } from './installedPlugins'
 import type { FrontendPluginManager } from './frontendPluginManager'
 
 const DEFAULT_MARKETPLACE_URL = 'http://localhost:8787'
@@ -37,24 +39,51 @@ interface InstalledSummary {
   sensitive: string[]
 }
 
+/** Restrict plugin management to the owning WebContents of a live Host window. */
+export function isTrustedPluginManagementSender(
+  event: Pick<IpcMainInvokeEvent, 'sender' | 'senderFrame'>,
+  trustedWindows: ReadonlySet<BrowserWindow>
+): boolean {
+  const window = BrowserWindow.fromWebContents(event.sender)
+  return Boolean(
+    window &&
+      !window.isDestroyed() &&
+      trustedWindows.has(window) &&
+      window.webContents === event.sender &&
+      !event.senderFrame?.parent
+  )
+}
+
 /** Register every `plugins:*` handler exactly once. `pluginsRoot` is where
  *  verified packages are written (`userData/plugins`). */
 export function registerPluginIpc(
   manager: FrontendPluginManager,
-  pluginsRoot: string
+  pluginsRoot: string,
+  authorizeSender: (event: IpcMainInvokeEvent) => boolean
 ): void {
   // Packages verified by prepareInstall, awaiting a commit, keyed by plugin id.
   const prepared = new Map<string, PreparedInstall>()
 
-  ipcMain.handle('plugins:listInstalled', (): InstalledSummary[] => {
-    return manager.listDescriptors().map((d) => ({
-      id: d.id,
-      requires: d.requires,
-      sensitive: sensitiveCapabilities(d.requires),
+  const assertAuthorized = (event: IpcMainInvokeEvent): void => {
+    if (!authorizeSender(event)) throw new Error('unauthorized plugin management request')
+  }
+
+  ipcMain.handle('plugins:listInstalled', (event): InstalledSummary[] => {
+    assertAuthorized(event)
+    const summaries = new Map<string, { id: string; requires: string[] }>()
+    for (const descriptor of manager.listDescriptors()) {
+      summaries.set(descriptor.id, { id: descriptor.id, requires: descriptor.requires })
+    }
+    for (const pkg of manager.listInstalledPackages()) summaries.set(pkg.id, pkg)
+    return [...summaries.values()].map((summary) => ({
+      id: summary.id,
+      requires: summary.requires,
+      sensitive: sensitiveCapabilities(summary.requires),
     }))
   })
 
-  ipcMain.handle('plugins:marketplaceSearch', async (_e, query?: string) => {
+  ipcMain.handle('plugins:marketplaceSearch', async (event, query?: string) => {
+    assertAuthorized(event)
     const url = new URL('/api/extensions', marketplaceUrl())
     if (query) url.searchParams.set('q', query)
     const res = await fetch(url)
@@ -64,7 +93,8 @@ export function registerPluginIpc(
 
   ipcMain.handle(
     'plugins:prepareInstall',
-    async (_e, args: { namespace: string; name: string; version?: string }) => {
+    async (event, args: { namespace: string; name: string; version?: string }) => {
+      assertAuthorized(event)
       const base = marketplaceUrl().replace(/\/+$/, '')
       const detailRes = await fetch(`${base}/api/extensions/${args.namespace}/${args.name}`)
       if (!detailRes.ok) throw new Error(`extension not found: HTTP ${detailRes.status}`)
@@ -106,23 +136,36 @@ export function registerPluginIpc(
         version: result.version,
         trustTier: result.trustTier,
         sensitive: result.sensitive,
+        containsBackendExecutable: result.containsBackendExecutable,
         requiresConfirmation: result.requiresConfirmation,
       }
     }
   )
 
-  ipcMain.handle('plugins:commitInstall', (_e, args: { id: string }) => {
-    const pkg = prepared.get(args.id)
-    if (!pkg) throw new Error(`no prepared install for ${args.id}; call prepareInstall first`)
-    const descriptor = commitInstall(pkg, pluginsRoot)
-    // `official` was earned in prepareInstall (pinned-official-key check); it
-    // is what allows a verified `navide.` install to claim its reserved id.
-    manager.registerDescriptor(descriptor, { official: pkg.official })
-    prepared.delete(args.id)
-    return { id: descriptor.id, requires: descriptor.requires }
-  })
+  ipcMain.handle(
+    'plugins:commitInstall',
+    (event, args: { id: string; confirmed?: boolean }) => {
+      assertAuthorized(event)
+      const pkg = prepared.get(args.id)
+      if (!pkg) throw new Error(`no prepared install for ${args.id}; call prepareInstall first`)
+      if (pkg.requiresConfirmation && args.confirmed !== true) {
+        throw new Error(`install confirmation is required for ${args.id}`)
+      }
+      const descriptor = commitInstall(pkg, pluginsRoot)
+      const summary = manifestToInstalledPackageSummary(pkg.manifest)
+      // `official` was earned in prepareInstall (pinned-official-key check); it
+      // is what allows a verified `navide.` install to claim its reserved id.
+      manager.registerInstalledPackage(summary, descriptor, { official: pkg.official })
+      prepared.delete(args.id)
+      return {
+        id: pkg.id,
+        requires: summary.requires,
+      }
+    }
+  )
 
-  ipcMain.handle('plugins:remove', (_e, args: { id: string }) => {
+  ipcMain.handle('plugins:remove', (event, args: { id: string }) => {
+    assertAuthorized(event)
     prepared.delete(args.id)
     removePlugin(pluginsRoot, args.id)
     manager.removeInstalledPlugin(args.id)

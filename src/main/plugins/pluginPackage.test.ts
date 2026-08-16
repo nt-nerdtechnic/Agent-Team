@@ -59,6 +59,21 @@ describe('readZipEntries', () => {
     expect(entries.find((e) => e.path === 'dist/main.js')?.data.toString()).toBe('console.log(1)')
   })
 
+  it('retains only the regular-file executable intent from Unix metadata', () => {
+    const entries = readZipEntries(
+      makeZip([
+        { name: 'backend/entry', data: 'binary', unixMode: 0o100755 },
+        { name: 'frontend/index.html', data: 'html', unixMode: 0o100644 },
+        { name: 'dos.exe', data: 'binary', creator: 'dos' },
+        { name: 'dir/', data: '', unixMode: 0o040755 },
+      ])
+    )
+    expect(entries.find((entry) => entry.path === 'backend/entry')?.executable).toBe(true)
+    expect(entries.find((entry) => entry.path === 'frontend/index.html')?.executable).toBe(false)
+    expect(entries.find((entry) => entry.path === 'dos.exe')?.executable).toBe(false)
+    expect(entries.find((entry) => entry.path === 'dir/')?.executable).toBe(false)
+  })
+
   it('keeps trailing-slash symlinks classified as symlinks', () => {
     const entries = readZipEntries(makeZip([{ name: 'link/', data: 'target', kind: 'symlink' }]))
     expect(entries[0].type).toBe('symlink')

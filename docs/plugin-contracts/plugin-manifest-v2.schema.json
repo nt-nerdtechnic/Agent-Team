@@ -104,7 +104,7 @@
       "additionalProperties": false,
       "required": ["entry", "protocolVersion", "activation"],
       "properties": {
-        "entry": { "$ref": "#/$defs/safePath" },
+        "entry": { "$ref": "#/$defs/backendEntry" },
         "protocolVersion": {
           "const": 1,
           "description": "Navide Backend Wire v1, aligned with MCP revision 2026-07-28 base message and stdio conventions."
@@ -116,6 +116,15 @@
       "type": "string",
       "minLength": 1,
       "pattern": "^(?!/)(?!.*//)(?!.*(?:^|/)\\.(?:/|$))(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)(?!.*\\/$)[A-Za-z0-9._/-]+$"
+    },
+    "backendEntry": {
+      "description": "Manifest-level rejection of recognizable source/script filenames. Target executable verification belongs to package validation.",
+      "allOf": [
+        { "$ref": "#/$defs/safePath" },
+        {
+          "pattern": "^(?!.*\\.(?:[Pp][Yy][Ww]?|[Jj][Ss]|[Mm][Jj][Ss]|[Cc][Jj][Ss]|[Tt][Ss]|[Tt][Ss][Xx]|[Ss][Hh]|[Bb][Aa][Ss][Hh]|[Zz][Ss][Hh]|[Ff][Ii][Ss][Hh]|[Pp][Ss]1|[Cc][Mm][Dd]|[Bb][Aa][Tt])$).+$"
+        }
+      ]
     },
     "htmlPath": {
       "type": "string",

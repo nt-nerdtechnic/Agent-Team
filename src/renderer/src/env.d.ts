@@ -263,7 +263,10 @@ declare global {
           name: string
           version?: string
         }) => Promise<PreparedInstallSummary>
-        commitInstall: (id: string) => Promise<{ id: string; requires: string[] }>
+        commitInstall: (
+          id: string,
+          confirmed?: boolean
+        ) => Promise<{ id: string; requires: string[] }>
         remove: (id: string) => Promise<{ ok: boolean }>
       }
     }
@@ -300,6 +303,7 @@ declare global {
     version: string
     trustTier: 'signed-verified' | 'unsigned'
     sensitive: string[]
+    containsBackendExecutable: boolean
     requiresConfirmation: boolean
   }
 }

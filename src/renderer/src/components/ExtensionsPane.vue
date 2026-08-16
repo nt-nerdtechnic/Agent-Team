@@ -1,8 +1,8 @@
 <script setup lang="ts">
 // Extensions view (minimal): lists installed plugins with their trust/capability
 // badges and lets the user search the marketplace and install. Sensitive
-// capabilities (fs/terminal) trigger a confirmation dialog after the package is
-// downloaded + verified (prepareInstall) but before it is written (commitInstall).
+// capabilities and native backend executables trigger the existing confirmation
+// dialog after verification but before the package is written.
 //
 // All privileged work is brokered through the main process via
 // `window.agentTeam.plugins`; this component holds no secrets and never touches
@@ -16,7 +16,7 @@ const results = ref<MarketplaceExtension[]>([])
 const query = ref('')
 const busy = ref(false)
 const error = ref('')
-// A prepared, verified install awaiting a sensitive-capability confirmation.
+// A prepared, verified install awaiting the existing install-risk confirmation.
 const pendingConfirm = ref<{ ext: MarketplaceExtension; prepared: PreparedInstallSummary } | null>(
   null
 )
@@ -51,7 +51,7 @@ async function install(ext: MarketplaceExtension): Promise<void> {
       pendingConfirm.value = { ext, prepared }
       return
     }
-    await commit(prepared.id)
+    await commit(prepared.id, false)
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
   } finally {
@@ -59,18 +59,18 @@ async function install(ext: MarketplaceExtension): Promise<void> {
   }
 }
 
-async function commit(id: string): Promise<void> {
+async function commit(id: string, confirmed: boolean): Promise<void> {
   if (!plugins) return
-  await plugins.commitInstall(id)
+  await plugins.commitInstall(id, confirmed)
   pendingConfirm.value = null
   await refreshInstalled()
 }
 
-async function confirmSensitive(): Promise<void> {
+async function confirmInstall(): Promise<void> {
   if (!pendingConfirm.value) return
   busy.value = true
   try {
-    await commit(pendingConfirm.value.prepared.id)
+    await commit(pendingConfirm.value.prepared.id, true)
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
   } finally {
@@ -78,7 +78,7 @@ async function confirmSensitive(): Promise<void> {
   }
 }
 
-function cancelSensitive(): void {
+function cancelInstall(): void {
   pendingConfirm.value = null
 }
 
@@ -127,8 +127,13 @@ onMounted(refreshInstalled)
 
     <div v-if="pendingConfirm" class="ext-trust-dialog" role="dialog" aria-modal="true">
       <div class="ext-trust-body">
-        <h4>Confirm sensitive install</h4>
-        <p>
+        <h4>Confirm plugin install</h4>
+        <p v-if="pendingConfirm.prepared.containsBackendExecutable" class="ext-backend-risk">
+          <strong>{{ pendingConfirm.ext.namespace }}.{{ pendingConfirm.ext.name }}</strong>
+          contains a native backend executable that can run with your user account's
+          operating-system permissions.
+        </p>
+        <p v-if="pendingConfirm.prepared.sensitive.length">
           <strong>{{ pendingConfirm.ext.namespace }}.{{ pendingConfirm.ext.name }}</strong>
           requests sensitive capabilities:
           <strong>{{ pendingConfirm.prepared.sensitive.join(', ') }}</strong>.
@@ -145,8 +150,8 @@ onMounted(refreshInstalled)
           </span>
         </p>
         <div class="ext-trust-actions">
-          <button class="ext-confirm" @click="confirmSensitive">Install anyway</button>
-          <button class="ext-cancel" @click="cancelSensitive">Cancel</button>
+          <button class="ext-confirm" @click="confirmInstall">Install anyway</button>
+          <button class="ext-cancel" @click="cancelInstall">Cancel</button>
         </div>
       </div>
     </div>

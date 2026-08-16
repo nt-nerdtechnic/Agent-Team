@@ -8,7 +8,7 @@ import { startBackend, getResolvedUserPath, type BackendHandle } from './backend
 import { abandonPendingBackends } from './backend-pending'
 import { installApplicationMenu, type AppMenuHooks, type RecentMenuEntry } from './menu'
 import { openNoopPluginView, openFsProbePluginView, openMiniIdePluginView, devMiniIdePluginDescriptor, openPlansPluginView, devPlansPluginDescriptor, openGitPluginView, devGitPluginDescriptor, registerBundledMiniIde, registerBundledPlans, registerBundledGit, frontendPluginManager } from './plugins/frontendPluginManager'
-import { registerPluginIpc } from './plugins/pluginIpc'
+import { isTrustedPluginManagementSender, registerPluginIpc } from './plugins/pluginIpc'
 import { registerStorageIpc } from './storage-ipc'
 import { lockPageZoom } from './web-contents-zoom'
 import { installContextMenu, registerTerminalContextMenu } from './context-menu'
@@ -402,7 +402,9 @@ app.on('browser-window-created', (_event, win) => {
 // Extensions view: install/update/remove third-party plugins. Verified packages
 // are written under userData/plugins and scanned back on next launch.
 const pluginsRoot = (): string => join(app.getPath('userData'), 'plugins')
-registerPluginIpc(frontendPluginManager, pluginsRoot())
+registerPluginIpc(frontendPluginManager, pluginsRoot(), (event) =>
+  isTrustedPluginManagementSender(event, mainWindows)
+)
 frontendPluginManager.loadInstalledPlugins(pluginsRoot())
 
 // Storage usage & cleanup: clears only Electron-owned caches (Chromium HTTP/

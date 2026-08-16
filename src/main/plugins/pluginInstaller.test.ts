@@ -1,8 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { spawnSync } from 'node:child_process'
 import { generateKeyPairSync, sign as edSign, type KeyObject } from 'node:crypto'
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   prepareInstall,
   commitInstall,
+  defaultInstallerDeps,
   removePlugin,
   isUpdateAvailable,
   type InstallerDeps,
@@ -80,6 +85,7 @@ function fakeDeps(bytes: Uint8Array, digestHeader: string | null = 'from-header'
   const writes = new Map<string, Uint8Array>()
   const removed: string[] = []
   const dirs: string[] = []
+  const modes = new Map<string, number>()
   const deps: InstallerDeps = {
     async download() {
       return { bytes, digestHeader }
@@ -90,11 +96,14 @@ function fakeDeps(bytes: Uint8Array, digestHeader: string | null = 'from-header'
     writeFile(path, data) {
       writes.set(path, data)
     },
+    chmod(path, mode) {
+      modes.set(path, mode)
+    },
     rmrf(dir) {
       removed.push(dir)
     },
   }
-  return { deps, writes, removed, dirs }
+  return { deps, writes, removed, dirs, modes }
 }
 
 describe('prepareInstall', () => {
@@ -207,7 +216,7 @@ describe('prepareInstall', () => {
     expect(writes.size).toBe(0)
   })
 
-  it('rejects a backend-only v2 package before any install confirmation or side effect', async () => {
+  it('requires confirmation for a backend-only v2 package with empty permissions', async () => {
     const { bytes, digest } = v2Pkg([
       {
         name: 'manifest.json',
@@ -216,14 +225,77 @@ describe('prepareInstall', () => {
           backend: { entry: 'backend/entry', protocolVersion: 1, activation: 'startup' },
         }),
       },
-      { name: 'backend/entry', data: 'backend' },
+      { name: 'backend/entry', data: Buffer.from([0x7f, 0x45, 0x4c, 0x46]), unixMode: 0o100755 },
     ])
     const { deps, removed, writes } = fakeDeps(bytes, digest)
-    await expect(
-      prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
-    ).rejects.toThrow(/frontend installer requires/)
+    const prepared = await prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
+    expect(prepared.manifest.schemaVersion).toBe(2)
+    if (prepared.manifest.schemaVersion !== 2) throw new Error('expected Manifest v2')
+    expect(prepared.manifest.permissions).toEqual({})
+    expect(prepared.containsBackendExecutable).toBe(true)
+    expect(prepared.requiresConfirmation).toBe(true)
     expect(removed).toEqual([])
     expect(writes.size).toBe(0)
+  })
+
+  it('rejects a backend entry without archive executable metadata', async () => {
+    const { bytes, digest } = v2Pkg([
+      {
+        name: 'manifest.json',
+        data: manifestV2({
+          contributes: undefined,
+          backend: { entry: 'backend/entry', protocolVersion: 1, activation: 'startup' },
+        }),
+      },
+      { name: 'backend/entry', data: Buffer.from([0x7f, 0x45, 0x4c, 0x46]) },
+    ])
+    const { deps, removed, writes } = fakeDeps(bytes, digest)
+
+    await expect(
+      prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
+    ).rejects.toThrow(/not marked executable/)
+    expect(removed).toEqual([])
+    expect(writes.size).toBe(0)
+  })
+
+  it.each([
+    { label: 'shebang', data: Buffer.from('#!/bin/sh\nexit 0\n') },
+    { label: 'BOM-prefixed shebang', data: Buffer.from('\ufeff#!/bin/sh\nexit 0\n') },
+  ])('rejects an executable extensionless $label script', async ({ data }) => {
+    const { bytes, digest } = v2Pkg([
+      {
+        name: 'manifest.json',
+        data: manifestV2({
+          contributes: undefined,
+          backend: { entry: 'backend/entry', protocolVersion: 1, activation: 'startup' },
+        }),
+      },
+      { name: 'backend/entry', data, unixMode: 0o100755 },
+    ])
+    const { deps, removed, writes } = fakeDeps(bytes, digest)
+
+    await expect(
+      prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
+    ).rejects.toThrow(/raw script/)
+    expect(removed).toEqual([])
+    expect(writes.size).toBe(0)
+  })
+
+  it('rejects an empty executable backend entry', async () => {
+    const { bytes, digest } = v2Pkg([
+      {
+        name: 'manifest.json',
+        data: manifestV2({
+          contributes: undefined,
+          backend: { entry: 'backend/entry', protocolVersion: 1, activation: 'startup' },
+        }),
+      },
+      { name: 'backend/entry', data: '', unixMode: 0o100755 },
+    ])
+    const { deps } = fakeDeps(bytes, digest)
+    await expect(
+      prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
+    ).rejects.toThrow(/backend entry is empty/)
   })
 
   it('rejects a v2 package whose contribution entry is absent', async () => {
@@ -286,6 +358,63 @@ describe('prepareInstall', () => {
 })
 
 describe('commitInstall', () => {
+  it('writes a backend-only package without creating a frontend descriptor', async () => {
+    const { bytes, digest } = v2Pkg([
+      {
+        name: 'manifest.json',
+        data: manifestV2({
+          contributes: undefined,
+          backend: { entry: 'backend/entry', protocolVersion: 1, activation: 'startup' },
+        }),
+      },
+      { name: 'backend/entry', data: Buffer.from([0x7f, 0x45, 0x4c, 0x46]), unixMode: 0o100755 },
+    ])
+    const { deps, writes, modes } = fakeDeps(bytes, digest)
+    const prepared = await prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
+
+    expect(commitInstall(prepared, '/plugins', deps)).toBeUndefined()
+    expect(writes.has('/plugins/acme.demo/backend/entry')).toBe(true)
+    expect(modes.get('/plugins/acme.demo/backend/entry')).toBe(0o700)
+  })
+
+  if (process.platform === 'darwin' || process.platform === 'linux') {
+    it('installs a backend entry that can be spawned directly', async () => {
+      const executablePath = process.platform === 'darwin' ? '/usr/bin/true' : '/bin/true'
+      const { bytes, digest } = v2Pkg([
+        {
+          name: 'manifest.json',
+          data: manifestV2({
+            contributes: undefined,
+            backend: { entry: 'backend/entry', protocolVersion: 1, activation: 'startup' },
+          }),
+        },
+        {
+          name: 'backend/entry',
+          data: readFileSync(executablePath),
+          unixMode: 0o100755,
+        },
+      ])
+      const deps: InstallerDeps = {
+        ...defaultInstallerDeps,
+        async download() {
+          return { bytes, digestHeader: digest }
+        },
+      }
+      const root = mkdtempSync(join(tmpdir(), 'navide-plugin-install-'))
+      try {
+        const prepared = await prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
+        commitInstall(prepared, root, deps)
+        const installed = join(root, 'acme.demo', 'backend', 'entry')
+        expect(statSync(installed).mode & 0o777).toBe(0o700)
+        const spawned = spawnSync(installed)
+        expect(spawned.error).toBeUndefined()
+        expect(spawned.status).toBe(0)
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+  }
+
   it('creates directory entries without writing directory bytes', async () => {
     const { bytes, digest } = pkg([
       { name: 'manifest.json', data: manifest() },
@@ -304,6 +433,7 @@ describe('commitInstall', () => {
     const { deps, writes, removed } = fakeDeps(bytes, digest)
     const prepared = await prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
     const desc = commitInstall(prepared, '/plugins', deps)
+    if (!desc) throw new Error('expected frontend descriptor')
     expect(removed).toContain('/plugins/acme.demo')
     expect([...writes.keys()].sort()).toEqual([
       '/plugins/acme.demo/dist/main.js',
@@ -317,6 +447,7 @@ describe('commitInstall', () => {
     const { deps, writes } = fakeDeps(bytes, digest)
     const prepared = await prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
     const desc = commitInstall(prepared, '/plugins', deps)
+    if (!desc) throw new Error('expected frontend descriptor')
     expect(desc.views).toEqual([
       expect.objectContaining({
         contributionKey: 'acme.demo.left',
@@ -349,9 +480,32 @@ describe('commitInstall', () => {
       data: Buffer.from('blocked'),
       kind: 'file',
       type: 'regular',
+      executable: false,
     })
 
     expect(() => commitInstall(prepared, '/plugins', deps)).toThrow(/unsafe archive entry/)
+    expect(removed).toEqual([])
+    expect(writes.size).toBe(0)
+  })
+
+  it('rechecks backend executable metadata before replacing an install', async () => {
+    const { bytes, digest } = v2Pkg([
+      {
+        name: 'manifest.json',
+        data: manifestV2({
+          contributes: undefined,
+          backend: { entry: 'backend/entry', protocolVersion: 1, activation: 'startup' },
+        }),
+      },
+      { name: 'backend/entry', data: Buffer.from([0x7f, 0x45, 0x4c, 0x46]), unixMode: 0o100755 },
+    ])
+    const { deps, removed, writes } = fakeDeps(bytes, digest)
+    const prepared = await prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
+    const backend = prepared.entries.find((entry) => entry.path === 'backend/entry')
+    if (!backend) throw new Error('expected backend entry')
+    backend.executable = false
+
+    expect(() => commitInstall(prepared, '/plugins', deps)).toThrow(/not marked executable/)
     expect(removed).toEqual([])
     expect(writes.size).toBe(0)
   })

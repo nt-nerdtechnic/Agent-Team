@@ -13,6 +13,25 @@ export const V2_PERMISSION_ACCESS: Readonly<Record<string, readonly string[]>> =
   ui: ['openInEditor', 'openExternal'],
 }
 
+// Manifest-level guard for recognizable source/script filenames. Proving that
+// archive bytes are the correct target executable belongs to the B8 packager.
+const KNOWN_SOURCE_BACKEND_SCRIPT_EXTENSIONS = new Set([
+  '.py',
+  '.pyw',
+  '.js',
+  '.mjs',
+  '.cjs',
+  '.ts',
+  '.tsx',
+  '.sh',
+  '.bash',
+  '.zsh',
+  '.fish',
+  '.ps1',
+  '.cmd',
+  '.bat',
+])
+
 export type PluginManifestV2View = {
   id: string
   kind: 'custom'
@@ -168,6 +187,16 @@ function safePath(value: unknown, label: string): string {
   const path = stringValue(value, label, 1)
   if (canonicalPackagePath(path) === null) fail(`${label} is not a safe package-relative path`)
   return path
+}
+
+function backendEntry(value: unknown): string {
+  const entry = safePath(value, 'manifest backend.entry')
+  const filename = entry.slice(entry.lastIndexOf('/') + 1).toLowerCase()
+  const dot = filename.lastIndexOf('.')
+  if (dot >= 0 && KNOWN_SOURCE_BACKEND_SCRIPT_EXTENSIONS.has(filename.slice(dot))) {
+    fail('manifest backend.entry must reference a packaged executable, not a raw script')
+  }
+  return entry
 }
 
 function htmlPath(value: unknown, label: string): string {
@@ -367,7 +396,7 @@ export function parseManifestV2(raw: Record<string, unknown>): PluginManifestV2 
     if (value.protocolVersion !== 1) fail('manifest backend.protocolVersion must be 1')
     if (value.activation !== 'startup') fail('manifest backend.activation must be startup')
     backend = {
-      entry: safePath(requiredValue(value, 'entry', 'manifest backend'), 'manifest backend.entry'),
+      entry: backendEntry(requiredValue(value, 'entry', 'manifest backend')),
       protocolVersion: 1,
       activation: 'startup',
     }

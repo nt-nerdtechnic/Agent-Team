@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 2,
+  "apiVersion": "^1.0.0",
+  "id": "acme.metadata-only",
+  "name": "Metadata Only",
+  "version": "1.0.0",
+  "publisher": "acme",
+  "permissions": {},
+  "marketplace": { "description": "Reject a package without a runtime surface.", "license": "MIT" }
+}

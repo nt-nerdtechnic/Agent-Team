@@ -139,12 +139,36 @@ def test_manifest_without_icon_allows_missing_file() -> None:
     assert loaded.manifest.icon is None
 
 
-def test_read_valid_manifest_v2_package() -> None:
-    loaded = read_package(build_v2_package())
+@pytest.mark.parametrize(
+    "name",
+    [path.name for path in sorted((CONTRACT_FIXTURES / "valid").glob("*.json"))],
+)
+def test_read_valid_manifest_v2_package(name: str) -> None:
+    loaded = read_package(build_v2_package(contract_manifest(name)))
     assert loaded.manifest.schemaVersion == 2
-    assert loaded.manifest.contributes is not None
-    assert len(loaded.manifest.contributes.views) == 6
-    assert loaded.manifest.marketplace.icon == "assets/files.png"
+
+
+def test_manifest_v2_backend_entry_requires_executable_metadata() -> None:
+    manifest = contract_manifest("backend-only-skills.json")
+    with pytest.raises(PackageError, match="not marked executable"):
+        read_package(build_v2_package(manifest, backend_mode=stat.S_IFREG | 0o644))
+
+
+@pytest.mark.parametrize(
+    "data",
+    [b"#!/bin/sh\nexit 0\n", b"\xef\xbb\xbf#!/bin/sh\nexit 0\n"],
+    ids=["shebang", "bom-shebang"],
+)
+def test_manifest_v2_backend_entry_rejects_extensionless_scripts(data: bytes) -> None:
+    manifest = contract_manifest("backend-only-skills.json")
+    with pytest.raises(PackageError, match="raw script"):
+        read_package(build_v2_package(manifest, backend_data=data))
+
+
+def test_manifest_v2_backend_entry_rejects_empty_file() -> None:
+    manifest = contract_manifest("backend-only-skills.json")
+    with pytest.raises(PackageError, match="backend entry is empty"):
+        read_package(build_v2_package(manifest, backend_data=b""))
 
 
 def test_manifest_v2_referenced_file_is_required() -> None:
@@ -175,7 +199,9 @@ def test_duplicate_archive_entry_is_rejected_before_manifest_read() -> None:
 
 def test_trailing_slash_symlink_is_rejected_as_special_entry() -> None:
     with pytest.raises(PackageError, match="not a regular file"):
-        _validate_archive_entries(_archive_infos([{"path": "link/", "type": "symlink"}]))
+        _validate_archive_entries(
+            _archive_infos([{"path": "link/", "type": "symlink"}])
+        )
 
 
 def test_case_folded_manifest_alias_is_rejected_before_manifest_read() -> None:
@@ -185,7 +211,9 @@ def test_case_folded_manifest_alias_is_rejected_before_manifest_read() -> None:
         read_package(_zip_with_entries(entries))
 
 
-@pytest.mark.parametrize("case", _archive_entry_type_contract(), ids=lambda case: case["name"])
+@pytest.mark.parametrize(
+    "case", _archive_entry_type_contract(), ids=lambda case: case["name"]
+)
 def test_shared_archive_entry_type_contract(case: dict[str, object]) -> None:
     infos = _archive_infos(
         [
@@ -206,7 +234,9 @@ def test_shared_archive_entry_type_contract(case: dict[str, object]) -> None:
 
 
 @pytest.mark.parametrize("name, entries", _archive_path_contract()["valid"].items())
-def test_shared_archive_path_contract_accepts(name: str, entries: list[dict[str, str]]) -> None:
+def test_shared_archive_path_contract_accepts(
+    name: str, entries: list[dict[str, str]]
+) -> None:
     del name
     _validate_archive_entries(_archive_infos(entries))
 

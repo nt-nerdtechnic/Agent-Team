@@ -55,6 +55,17 @@ def _load_strict(path: Path) -> Any:
     return json.loads(path.read_text(), object_pairs_hook=_unique_object)
 
 
+def _load_wire_frame(path: Path) -> Any:
+    raw = path.read_bytes().decode("utf-8")
+    if raw.endswith("\n"):
+        raw = raw[:-1]
+        if raw.endswith("\r"):
+            raw = raw[:-1]
+    if "\n" in raw or "\r" in raw:
+        raise ValueError("Backend Wire frame must contain exactly one line")
+    return json.loads(raw, object_pairs_hook=_unique_object)
+
+
 def _validate_manifest_semantics(manifest: Any) -> None:
     """Validate invariants that Draft 2020-12 cannot express by itself."""
     if not isinstance(manifest, dict):
@@ -153,6 +164,32 @@ def main() -> None:
             f"catalog-only={sorted(set(catalog_pairs) - schema_pairs)}"
         )
     print(f"CATALOG {len(catalog_pairs)} permission/access pairs")
+
+    wire_schema = _load_strict(ROOT / "backend-wire-v1.schema.json")
+    Draft202012Validator.check_schema(wire_schema)
+    wire_validator = StrictDraft202012Validator(wire_schema)
+    wire_fixtures = ROOT / "backend-wire-fixtures"
+    for path in sorted((wire_fixtures / "valid").glob("*.json")):
+        frame = _load_wire_frame(path)
+        errors = list(wire_validator.iter_errors(frame))
+        if errors:
+            raise AssertionError(
+                f"valid Backend Wire fixture rejected: {path}: {errors[0].message}"
+            )
+        print(f"WIRE    {path.name}")
+    for path in sorted((wire_fixtures / "invalid").glob("*.json")):
+        frame = _load_wire_frame(path)
+        if not list(wire_validator.iter_errors(frame)):
+            raise AssertionError(f"invalid Backend Wire fixture accepted: {path}")
+        print(f"WIRE-NO {path.name}")
+    for path in sorted((wire_fixtures / "invalid-raw").glob("*.json")):
+        try:
+            _load_wire_frame(path)
+        except (DuplicateKeyError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
+            pass
+        else:
+            raise AssertionError(f"invalid raw Backend Wire fixture parsed: {path}")
+        print(f"WIRE-RAW {path.name}")
 
 
 if __name__ == "__main__":

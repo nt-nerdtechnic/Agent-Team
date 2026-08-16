@@ -11,7 +11,7 @@
 // confirmation (sensitive `fs`/`terminal` capabilities) AFTER verification but
 // BEFORE anything is written to disk.
 
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { chmodSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { canonicalArchivePath } from './pluginPathPolicy'
 import {
@@ -62,8 +62,10 @@ export interface PreparedInstall {
   entries: ZipEntry[]
   trustTier: TrustTier
   sensitive: string[]
-  /** True when the plugin declares a sensitive capability and the UI must
-   *  obtain a second confirmation before {@link commitInstall}. */
+  /** True when the verified package contains a declared backend executable. */
+  containsBackendExecutable: boolean
+  /** True when the plugin declares a sensitive capability or contains native
+   *  backend code and the UI must obtain confirmation before commit. */
   requiresConfirmation: boolean
   /** True only for a `navide.` package that passed the pinned-official-key
    *  check in prepareInstall. Drives the receipt write + trusted registration. */
@@ -87,6 +89,8 @@ export interface InstallerDeps {
   download(url: string): Promise<{ bytes: Uint8Array; digestHeader: string | null }>
   mkdirp(dir: string): void
   writeFile(path: string, data: Uint8Array): void
+  /** Apply a controlled mode after writing the declared backend executable. */
+  chmod(path: string, mode: number): void
   rmrf(dir: string): void
 }
 
@@ -103,6 +107,9 @@ export const defaultInstallerDeps: InstallerDeps = {
   },
   writeFile(path, data) {
     writeFileSync(path, data)
+  },
+  chmod(path, mode) {
+    chmodSync(path, mode)
   },
   rmrf(dir) {
     rmSync(dir, { recursive: true, force: true })
@@ -121,6 +128,40 @@ function canonicalEntryPath(entry: ZipEntry): string {
   )
   if (path === null) throw new InstallError(`unsafe archive entry path: ${entry.path}`)
   return path
+}
+
+function startsWithExecutableShebang(data: Uint8Array): boolean {
+  const offset = data[0] === 0xef && data[1] === 0xbb && data[2] === 0xbf ? 3 : 0
+  return data[offset] === 0x23 && data[offset + 1] === 0x21
+}
+
+/** Validate the narrow Issue 02 POSIX executable contract. Exact binary
+ * format and OS/architecture validation remain owned by Issue 27. */
+function assertBackendExecutable(
+  manifest: InstalledManifest,
+  entries: readonly ZipEntry[]
+): string | undefined {
+  if (!isManifestV2(manifest) || !manifest.backend) return undefined
+  const backendPath = manifest.backend.entry
+  const entry = entries.find(
+    (candidate) =>
+      candidate.type === 'regular' && canonicalEntryPath(candidate) === backendPath
+  )
+  if (!entry) {
+    throw new InstallError(`backend entry is missing or not a regular file: ${backendPath}`)
+  }
+  if (entry.data.length === 0) {
+    throw new InstallError(`backend entry is empty: ${backendPath}`)
+  }
+  if (!entry.executable) {
+    throw new InstallError(`backend entry is not marked executable: ${backendPath}`)
+  }
+  if (startsWithExecutableShebang(entry.data)) {
+    throw new InstallError(
+      `backend entry must be a packaged executable, not a raw script: ${backendPath}`
+    )
+  }
+  return backendPath
 }
 
 /**
@@ -154,12 +195,7 @@ export async function prepareInstall(
       .filter((entry) => entry.type === 'regular')
       .map((entry) => canonicalEntryPath(entry))
   )
-  if (isManifestV2(manifest) && (manifest.contributes?.views.length ?? 0) === 0) {
-    throw new InstallError(
-      'frontend installer requires at least one custom view contribution'
-    )
-  }
-
+  const backendEntry = assertBackendExecutable(manifest, entries)
   const expectedId = `${req.namespace}.${req.name}`
   if (manifest.id !== expectedId) {
     throw new InstallError(
@@ -193,7 +229,8 @@ export async function prepareInstall(
     entries,
     trustTier,
     sensitive,
-    requiresConfirmation: sensitive.length > 0,
+    containsBackendExecutable: backendEntry !== undefined,
+    requiresConfirmation: sensitive.length > 0 || backendEntry !== undefined,
     official: isOfficialPluginId(manifest.id),
     digest,
     signature: req.signature ?? null,
@@ -203,14 +240,15 @@ export async function prepareInstall(
 /**
  * Write a prepared, verified package into `<pluginsRoot>/<id>/`, replacing any
  * previous install of the same id (so update reuses this path). The archive is
- * revalidated before the existing directory is removed. Returns the launch
- * descriptor the loader registers.
+ * revalidated before the existing directory is removed. Returns the frontend
+ * launch descriptor when the package contributes views; backend-only packages
+ * return undefined and are discovered through the activation catalog.
  */
 export function commitInstall(
   prepared: PreparedInstall,
   pluginsRoot: string,
   deps: InstallerDeps = defaultInstallerDeps
-): PluginLaunchDescriptor {
+): PluginLaunchDescriptor | undefined {
   const dir = join(pluginsRoot, prepared.id)
   assertSafeArchiveEntries(prepared.entries)
   const safeEntries = prepared.entries.map((entry) => ({
@@ -220,10 +258,11 @@ export function commitInstall(
   if (safeEntries.some(({ path }) => path === OFFICIAL_RECEIPT_NAME)) {
     throw new InstallError(`package must not contain ${OFFICIAL_RECEIPT_NAME}`)
   }
-  // Resolve the frontend descriptor before any replacement writes. Backend-only
-  // v2 packages are valid registry artifacts but are not loadable by this
-  // frontend installer yet; reject them without leaving a partial install.
-  const descriptor = manifestToDescriptor(prepared.manifest, dir)
+  const backendEntry = assertBackendExecutable(prepared.manifest, prepared.entries)
+  const descriptor =
+    isManifestV2(prepared.manifest) && prepared.manifest.contributes === undefined
+      ? undefined
+      : manifestToDescriptor(prepared.manifest, dir)
   deps.rmrf(dir) // idempotent replace (fresh install or update)
   for (const { entry, path } of safeEntries) {
     const target = join(dir, path)
@@ -232,6 +271,7 @@ export function commitInstall(
     } else if (entry.type === 'regular') {
       deps.mkdirp(dirname(target))
       deps.writeFile(target, entry.data)
+      if (path === backendEntry) deps.chmod(target, 0o700)
     } else {
       throw new InstallError(`archive entry is not a regular file: ${entry.path}`)
     }

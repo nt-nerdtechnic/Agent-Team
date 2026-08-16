@@ -146,6 +146,13 @@ protocol.
 | `navide-plugin package` | Python, its required modules, and the plugin code are bundled into a target-specific executable by an author-selected tool such as PyInstaller or Nuitka. | `backend.entry` names the resulting executable inside the archive. |
 | Install and runtime | No Python installation, `pip`, virtual environment, source checkout, or author build tool may be required on the user's machine. | The Host verifies and spawns `backend.entry` directly, without a shell, then communicates only through the declared backend protocol. |
 
+Manifest validation rejects recognizable source or script suffixes. Package
+validation also rejects empty backend entries, POSIX entries without executable
+metadata, and extensionless executable files whose contents begin with a
+shebang. The installer writes the declared backend entry with owner-only `0700`
+mode. These checks prove archive executable intent; binary-format and exact
+OS/architecture validation remain part of the canonical artifact work in B8.
+
 The same publish rule applies to every implementation language: Go or Rust may
 compile directly; Node.js requires a distributable executable that does not
 depend on a separately installed Node.js runtime. The manifest does not contain
@@ -259,28 +266,36 @@ backend calls that have no such binding.
 {"jsonrpc":"2.0","id":"req-1","method":"navide/call","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"navide-host","version":"0.2.0"}},"name":"plans.list","arguments":{"filter":"open"},"runtime":{"pluginId":"navide.plans","packageVersion":"1.0.0","workspaceId":"ws-1","instanceId":"view-1","contributionKey":"navide.plans.left","hostWindowId":"window-1"}}}
 ```
 
-A successful call response includes MCP's required `resultType` discriminator
-and a `value`; the final response that gracefully closes a subscription may
-omit `value`. A failed protocol request uses standard JSON-RPC/MCP protocol
-codes and may omit `id` when the request ID could not be read. A handled Plugin
-error uses application error code `1000` and the original request ID; its stable public
-`PluginError` string is placed in `error.data.code`. Internal stack traces,
-Python exceptions, transport details, and Host routes never cross the SDK
-Interface.
+A successful call response includes MCP's required `resultType` discriminator,
+a `value`, and `_meta.io.modelcontextprotocol/serverInfo` with the backend
+implementation name and version. Navide requires this MCP result metadata even
+though the base protocol makes it optional. The final response that gracefully
+closes a subscription may omit `value`, but it carries both `serverInfo` and the
+subscription ID. A failed protocol request uses the standard JSON-RPC/MCP error
+envelope, which has no result `_meta`, and may omit `id` when the request ID
+could not be read. A handled Plugin error uses application error code `1000`
+and the original request ID; its stable public `PluginError` string is placed in
+`error.data.code`. Internal stack traces, Python exceptions, transport details,
+and Host routes never cross the SDK Interface.
 
 ```json
-{"jsonrpc":"2.0","id":"req-1","result":{"resultType":"complete","value":[{"id":"plan-1"}]}}
+{"jsonrpc":"2.0","id":"req-1","result":{"resultType":"complete","value":[{"id":"plan-1"}],"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"navide.plans","version":"1.0.0"}}}}
 {"jsonrpc":"2.0","id":"req-2","error":{"code":1000,"message":"Workspace is unavailable","data":{"code":"WORKSPACE_SCOPE_VIOLATION"}}}
 ```
 
-Issue 02 must publish the normative backend wire schema and its
-accepted/rejected fixture corpus before backend-only or combined packages are
-enabled. Until that blocking contract is merged, the examples in this section
-are design guidance rather than an installable backend contract. Future AI
-integration is a separate adapter: it
-may expose an explicit allowlist of schema-described package methods as MCP
-tools. No package method is AI-callable by default, and adopting this wire
-profile does not itself create a tool catalog.
+The normative Backend Wire v1 schema and accepted/rejected fixture corpus are
+published under `docs/plugin-contracts/` and validated together with the
+Manifest v2 corpus. This contract enables backend-only and combined package
+description and installation; child-process execution remains owned by the
+later Host runtime issues. Future AI integration is a separate adapter: it may
+expose an explicit allowlist of schema-described package methods as MCP tools.
+No package method is AI-callable by default, and adopting this wire profile
+does not itself create a tool catalog.
+
+After installation, frontend-only, backend-only, and combined packages appear
+in the Extensions installed list and can be removed there. Package inventory is
+independent of frontend view descriptors, so a backend-only package remains
+manageable even though it contributes no view.
 
 The exact OS/architecture identifiers, archive size limits, and deterministic
 ZIP metadata are B8 decisions. Until they are published, examples must not be

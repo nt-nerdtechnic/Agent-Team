@@ -33,7 +33,14 @@ import {
   MINI_IDE_PLUGIN_REQUIRES,
   PLANS_PLUGIN_REQUIRES,
 } from '../../shared/pluginCapabilities'
-import { loadPluginDir, scanInstalledPlugins, verifyOfficialInstall } from './installedPlugins'
+import {
+  buildActivationCatalog,
+  loadPluginDir,
+  scanInstalledPlugins,
+  verifyOfficialInstall,
+  type InstalledPluginPackageSummary,
+  type PluginActivationCatalogEntry,
+} from './installedPlugins'
 import { resolveOfficialPublisherKey } from './pluginVerify'
 import { legacyCapabilityPolicy, type PluginCapabilityPolicy } from './pluginPermissions'
 import {
@@ -168,6 +175,9 @@ export class FrontendPluginManager {
    *  mini-IDE is registered here as the first built-in; third-party installs are
    *  added by {@link loadInstalledPlugins} / {@link registerDescriptor}. */
   private readonly descriptors = new Map<string, PluginLaunchDescriptor>()
+  /** Validated packages installed under userData/plugins, including packages
+   *  with no frontend descriptor. */
+  private readonly installedPackages = new Map<string, InstalledPluginPackageSummary>()
   /** Host-bundled builtin descriptors kept as fallbacks: removing a marketplace
    *  override of a bundled plugin reverts to the bundled copy instead of
    *  leaving the surface unavailable (see {@link removeInstalledPlugin}). */
@@ -897,14 +907,14 @@ export class FrontendPluginManager {
   }
 
   /**
-   * Register a host-bundled builtin descriptor. If a descriptor for the id is
-   * already registered (an officially-verified marketplace install scanned
-   * before this call), the installed copy stays active and the builtin is only
+   * Register a host-bundled builtin descriptor. If an officially-verified
+   * marketplace package for the id was scanned first, its frontend descriptor
+   * or backend-only inventory entry takes precedence. The builtin is only
    * remembered as the fallback {@link removeInstalledPlugin} reverts to.
    */
   registerBuiltin(descriptor: PluginLaunchDescriptor): void {
     this.builtinFallbacks.set(descriptor.id, descriptor)
-    if (!this.descriptors.has(descriptor.id)) {
+    if (!this.installedPackages.has(descriptor.id) && !this.descriptors.has(descriptor.id)) {
       this.registerDescriptor(descriptor, { builtin: true })
     }
   }
@@ -917,6 +927,41 @@ export class FrontendPluginManager {
   /** All registered (installed + built-in) descriptors. */
   listDescriptors(): PluginLaunchDescriptor[] {
     return [...this.descriptors.values()]
+  }
+
+  /** All validated packages installed from disk, including backend-only packages. */
+  listInstalledPackages(): InstalledPluginPackageSummary[] {
+    return [...this.installedPackages.values()].map((summary) => ({
+      id: summary.id,
+      requires: [...summary.requires],
+    }))
+  }
+
+  /** Replace one installed package's inventory and optional frontend descriptor
+   *  together. A backend-only update therefore cannot retain an older view. */
+  registerInstalledPackage(
+    summary: InstalledPluginPackageSummary,
+    descriptor?: PluginLaunchDescriptor,
+    opts: { official?: boolean } = {}
+  ): void {
+    if (descriptor && descriptor.id !== summary.id) {
+      throw new Error(
+        `installed package id '${summary.id}' does not match descriptor id '${descriptor.id}'`
+      )
+    }
+    if (!opts.official && isReservedPluginId(summary.id)) {
+      throw new Error(
+        `refusing to register reserved plugin id '${summary.id}' without official verification`
+      )
+    }
+
+    this.destroy(summary.id)
+    this.descriptors.delete(summary.id)
+    if (descriptor) this.registerDescriptor(descriptor, opts)
+    this.installedPackages.set(summary.id, {
+      id: summary.id,
+      requires: [...summary.requires],
+    })
   }
 
   /**
@@ -932,43 +977,82 @@ export class FrontendPluginManager {
   /**
    * Scan an installed-plugins root and register a descriptor for every valid
    * plugin found. A directory with an invalid manifest is skipped and returned
-   * in `errors` rather than aborting the scan. Pure parse/validation lives in
-   * `installedPlugins`; this only wires it to the registry.
+   * in `errors` rather than aborting the scan. The returned activation catalog
+   * contains only validated, trusted v2 packages whose optional frontend
+   * registration succeeded; `loaded` retains its descriptor-only meaning.
    */
-  loadInstalledPlugins(root: string): { loaded: string[]; errors: string[] } {
+  loadInstalledPlugins(root: string): {
+    loaded: string[]
+    errors: string[]
+    activationCatalog: PluginActivationCatalogEntry[]
+  } {
     const loaded: string[] = []
     const errors: string[] = []
+    const approved: Array<{
+      scanned: ReturnType<typeof scanInstalledPlugins>[number]
+      pluginId: string
+      packageSummary: InstalledPluginPackageSummary
+      opts: { official?: boolean }
+    }> = []
+
     for (const scanned of scanInstalledPlugins(root)) {
-      if (scanned.descriptor) {
-        // A reserved `navide.` id must prove its install receipt still verifies
-        // against the pinned official key before it may register (fail-closed:
-        // no receipt / no pin / bad signature → skipped, reported as an error).
-        let opts: { official?: boolean } = {}
-        if (isReservedPluginId(scanned.descriptor.id)) {
-          const check = verifyOfficialInstall(
-            scanned.dir,
-            scanned.descriptor.id,
-            resolveOfficialPublisherKey()
-          )
-          if (!check.ok) {
-            errors.push(`${scanned.dir}: ${check.reason}`)
-            continue
-          }
-          opts = { official: true }
-        }
-        try {
-          this.registerDescriptor(scanned.descriptor, opts)
-          loaded.push(scanned.descriptor.id)
-        } catch (err) {
-          // A reserved-id spoof (or other registration refusal) is reported and
-          // skipped, never aborting the rest of the scan.
-          errors.push(`${scanned.dir}: ${err instanceof Error ? err.message : String(err)}`)
-        }
-      } else if (scanned.error) {
+      if (scanned.error) {
         errors.push(`${scanned.dir}: ${scanned.error}`)
+        continue
+      }
+      const pluginId = scanned.activation?.pluginId ?? scanned.descriptor?.id
+      if (pluginId === undefined || scanned.packageSummary === undefined) continue
+
+      // Reserved backend-only packages must pass the same receipt gate as view
+      // packages before any contribution can enter the activation catalog.
+      let opts: { official?: boolean } = {}
+      if (isReservedPluginId(pluginId)) {
+        const check = verifyOfficialInstall(scanned.dir, pluginId, resolveOfficialPublisherKey())
+        if (!check.ok) {
+          errors.push(`${scanned.dir}: ${check.reason}`)
+          continue
+        }
+        opts = { official: true }
+      }
+      approved.push({ scanned, pluginId, packageSummary: scanned.packageSummary, opts })
+    }
+
+    // A plugin identity may be supplied by either a legacy descriptor or a v2
+    // activation. Reject duplicates before registering either contribution so
+    // a v1 frontend cannot combine with a v2 backend from another directory.
+    const packageGroups = new Map<string, typeof approved>()
+    for (const entry of approved) {
+      const group = packageGroups.get(entry.pluginId) ?? []
+      group.push(entry)
+      packageGroups.set(entry.pluginId, group)
+    }
+    const uniqueApproved: typeof approved = []
+    for (const [pluginId, entries] of packageGroups) {
+      if (entries.length === 1) {
+        uniqueApproved.push(entries[0])
+        continue
+      }
+      const directories = entries.map(({ scanned }) => scanned.dir).join(', ')
+      errors.push(`${pluginId}: duplicate plugin packages found in ${directories}`)
+    }
+
+    const activations = uniqueApproved.flatMap(({ scanned }) =>
+      scanned.activation ? [scanned.activation] : []
+    )
+    let activationCatalog = buildActivationCatalog(activations)
+
+    for (const { scanned, packageSummary, opts } of uniqueApproved) {
+      try {
+        this.registerInstalledPackage(packageSummary, scanned.descriptor, opts)
+        if (scanned.descriptor) loaded.push(scanned.descriptor.id)
+      } catch (err) {
+        errors.push(`${scanned.dir}: ${err instanceof Error ? err.message : String(err)}`)
+        if (scanned.activation) {
+          activationCatalog = activationCatalog.filter((entry) => entry !== scanned.activation)
+        }
       }
     }
-    return { loaded, errors }
+    return { loaded, errors, activationCatalog }
   }
 
   /** Unregister a descriptor and tear down its view if it is open. Used by the
@@ -977,6 +1061,7 @@ export class FrontendPluginManager {
    *  (recorded by {@link registerBuiltin}) so the surface keeps working. */
   removeInstalledPlugin(id: string): void {
     this.destroy(id)
+    this.installedPackages.delete(id)
     this.descriptors.delete(id)
     const fallback = this.builtinFallbacks.get(id)
     if (fallback) this.registerDescriptor(fallback, { builtin: true })
