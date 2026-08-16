@@ -26,6 +26,9 @@ const PLANS_SENT_TYPES = [
   'fs.read_file', 'fs.write_file', 'fs.list_dir', 'fs.list_files_flat',
   'fs.glob_files', 'fs.delete', 'fs.rename', 'fs.list_archive',
   'fs.convert_office', 'fs.stat_path',
+  // plans — the document index (PlanWindowApp root resolution, PlansPane
+  // listing + parsed-meta cache write-back)
+  'plans.resolve_root', 'plans.list_docs', 'plans.cache_put',
   // ui / settings (theme sync via lib/settings.ts)
   'ui.settings.get', 'ui.settings.set',
   // embedded AiCliDock — interactive PTY (useTerminal)
@@ -53,14 +56,14 @@ describe('plugin.json manifest', () => {
     expect(manifest.activationEvents).toBeUndefined()
   })
 
-  it('grants exactly the namespaces the capability map uses (plus the plans event ns)', () => {
+  it('grants exactly the namespaces the capability map uses', () => {
     const raw = readFileSync(MANIFEST_PATH, 'utf-8')
     const manifest = JSON.parse(raw) as { requires: string[] }
     const mappedNs = new Set(Object.values(TYPE_TO_CAP).map((ref) => ref.ns))
     for (const ns of mappedNs) expect(manifest.requires).toContain(ns)
-    // `plans` maps no request types — it only gates the `plans.changed` event.
+    // `plans` gates both the document-index calls and the `plans.changed` event.
     expect(manifest.requires).toContain('plans')
-    expect(mappedNs.has('plans')).toBe(false)
+    expect(mappedNs.has('plans')).toBe(true)
   })
 })
 
@@ -80,6 +83,18 @@ describe('TYPE_TO_CAP coverage', () => {
   it('splits the uniform fs namespace on the dotted method', () => {
     expect(resolveCapability('fs.read_file')).toEqual({ ns: 'fs', method: 'read_file' })
     expect(resolveCapability('fs.list_dir')).toEqual({ ns: 'fs', method: 'list_dir' })
+  })
+
+  it('splits the uniform plans namespace on the dotted method', () => {
+    // Unmapped, PlanWindowApp's mount-time root resolution and PlansPane's
+    // listing both fail with UNMAPPED_CAPABILITY inside the plugin sandbox,
+    // leaving the window with the raw query-string workspace as its root.
+    expect(resolveCapability('plans.resolve_root')).toEqual({
+      ns: 'plans',
+      method: 'resolve_root',
+    })
+    expect(resolveCapability('plans.list_docs')).toEqual({ ns: 'plans', method: 'list_docs' })
+    expect(resolveCapability('plans.cache_put')).toEqual({ ns: 'plans', method: 'cache_put' })
   })
 
   it('remaps the non-uniform settings family onto the ui namespace', () => {
@@ -108,6 +123,7 @@ describe('TYPE_TO_CAP coverage', () => {
     expect(resolveCapability('editor.rewrite')).toBeNull()
     expect(resolveCapability('ai.chat.start')).toBeNull()
     expect(resolveCapability('search.find_in_files')).toBeNull()
+    expect(resolveCapability('plans.nope')).toBeNull()
     expect(resolveCapability('totally.unknown')).toBeNull()
     expect(resolveCapability('')).toBeNull()
   })
