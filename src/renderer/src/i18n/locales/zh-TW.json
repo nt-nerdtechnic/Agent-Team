@@ -740,12 +740,12 @@
     },
     "skills": {
       "title": "受管 Skills",
-      "intro": "維護可注入支援之 CLI agent 的可重用指令。",
+      "intro": "在同一處看見所有 CLI 的 skill、決定誰收到哪一個，並在 ~/.agents/skills 建立新的。這裡不會搬動或修改各 CLI 自己資料夾裡的 skill。",
       "new": "新增 skill",
       "library": "Skills 資料庫",
       "search": "搜尋 skills",
       "empty-title": "尚無受管 skills",
-      "empty-body": "建立一個 skill 來加入可重用指令。",
+      "empty-body": "在 ~/.agents/skills 建立一個 skill，或替任一 CLI 安裝一個。",
       "no-description": "沒有說明",
       "enable": "啟用 {name}",
       "disable": "停用 {name}",
@@ -787,7 +787,7 @@
       "error-delete": "無法將 skill 移至垃圾桶；未刪除任何內容。",
       "view-list": "清單",
       "view-matrix": "能力矩陣",
-      "matrix-intro": "哪個 agent 收到哪個 skill。未指定的 skill 會送到所有收得到的 agent。",
+      "matrix-intro": "哪個 agent 收到哪個 skill。● 表示該 agent 自己就讀得到；✓ 格由 Navide 投遞，可點擊切換。",
       "matrix-skill": "Skill",
       "matrix-none": "沒有可顯示的 skills。",
       "matrix-legend-on": "已送達",
@@ -800,7 +800,24 @@
       "matrix-disabled-row": "已停用 — 不會送到任何 agent",
       "matrix-row-all": "全選",
       "matrix-row-none": "全不選",
-      "error-targets": "無法變更投遞目標。"
+      "error-targets": "無法變更投遞目標。",
+      "matrix-legend-auto": "自己就讀得到（不經 Navide）",
+      "matrix-auto-shared-hint": "{agent} 自己會讀 ~/.agents/skills，不需投遞。",
+      "matrix-auto-native-hint": "{agent} 擁有這個 skill，直接讀取。",
+      "source-shared": "共用 · 在此建立",
+      "source-shared-user": "共用 · 你的",
+      "source-native": "{agent} 自家的",
+      "native-group": "各 CLI 自己保管的 skills",
+      "editor-readonly-hint": "這個 skill 是你的，不是 Navide 建的——請到它所在的位置編輯。",
+      "consent-body": "Navide 會把這個 skill 建在你自己的資料夾裡：\n\n{root}\n\n六家 CLI（codex、copilot、grok、opencode、muse、cursor）本來就會讀這個資料夾，所以 skill 會立刻對它們生效。Navide 只會編輯或刪除它自己在這裡建的 skill——資料夾裡的其他東西都是你的，不會被碰。\n\n之後不會再問。要繼續嗎？",
+      "migrate": "移入",
+      "migrate-hint": "把這個 skill 搬進 ~/.agents/skills，原位留一條捷徑",
+      "migrate-body": "要把「{name}」搬進 Navide 的共用庫嗎？\n\n1. 它會從\n   {from}\n   搬到\n   {root}\n\n2. 原位置會留下一條捷徑（symlink），{agent} 仍會像以前一樣讀到它。\n\n3. 隨時可以用「還原」撤銷——它會搬回去，捷徑會消失。\n\n兩個資料夾裡的其他東西都不會被碰。要繼續嗎？",
+      "restore": "還原",
+      "restore-body": "要把「{name}」搬回\n\n{to}\n\n並移除 Navide 的捷徑嗎？共用庫裡的那份會刪除；原位置會拿回真正的資料夾。",
+      "source-migrated": "共用 · 移入的",
+      "error-migrate": "無法搬動這個 skill。什麼都沒有改變。",
+      "error-restore": "無法還原這個 skill。什麼都沒有改變。"
     },
     "section": {
       "general-behavior": "一般行為",
@@ -873,10 +890,6 @@
         "usageCache": {
           "label": "CLI 額度快取",
           "desc": "額度徽章背後快取的查詢結果。"
-        },
-        "installedSkills": {
-          "label": "已安裝的 Skills",
-          "desc": "安裝在 app 資料目錄下的所有 skill 套件。"
         },
         "appDataOther": {
           "label": "其他 App 資料",

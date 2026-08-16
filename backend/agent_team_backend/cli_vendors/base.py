@@ -210,6 +210,12 @@ class SkillsWiring:
     # removed there.
     project_rel: tuple[str, ...] = ()
 
+    # The CLI already discovers ``~/.agents/skills`` on its own. A skill in
+    # the shared library reaches it with no delivery at all — and, just as
+    # importantly, cannot be withheld from it without touching the user's
+    # directory. The UI shows those cells as "automatic", not as a switch.
+    reads_shared_root: bool = False
+
     # Layout the view directory must have for this CLI to find skills below
     # the path we hand it; empty means the skills sit directly in the view.
     view_layout: tuple[str, ...] = ()

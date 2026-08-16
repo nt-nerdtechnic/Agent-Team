@@ -37,6 +37,7 @@ from .plan_index import resolve_plan_root
 from .profiles_store import SUPPORTED_AGENT_KEYS as PROFILE_AGENT_KEYS
 from .skills_store import (
     SkillConflictError,
+    SkillConsentRequired,
     SkillNotFoundError,
     SkillValidationError,
     SkillsStoreError,
@@ -2173,9 +2174,10 @@ async def _run_skill_operation(
     *args: Any,
     name: str = "",
     expected_revision: Any = None,
+    kwargs: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     try:
-        return await asyncio.to_thread(operation, *args)
+        return await asyncio.to_thread(operation, *args, **(kwargs or {}))
     except SkillNotFoundError as err:
         await session.send_json(
             make_error(
@@ -2197,6 +2199,17 @@ async def _run_skill_operation(
             pass
         await session.send_json(
             make_error(msg_id, msg_type, "SKILL_CONFLICT", str(err), details)
+        )
+    except SkillConsentRequired as err:
+        # Not a failure: the UI asks the user, then retries with consent=True.
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "SKILL_CONSENT_REQUIRED",
+                str(err),
+                {"root": err.root},
+            )
         )
     except SkillValidationError as err:
         await session.send_json(
@@ -2257,6 +2270,7 @@ async def skills_create(session: "Session", msg_id: str, msg_type: str, payload:
         name,
         payload.get("description", ""),
         name=name,
+        kwargs={"consent": payload.get("consent") is True},
     )
     if result is not None:
         await session.send_json(make_response(msg_id, msg_type, result))
@@ -2321,6 +2335,70 @@ async def skills_set_targets(
         name,
         agents,
         name=name,
+    )
+    if result is not None:
+        await session.send_json(make_response(msg_id, msg_type, result))
+
+
+def _set_native_targets_op(store: Any, real_path: str, agents: Any) -> dict[str, Any]:
+    store.set_native_targets(real_path, agents)
+    return {"ok": True}
+
+
+@handler("skills.set_native_targets")
+async def skills_set_native_targets(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Deliver a CLI's own skill to other agents; keyed by real path, opt-in."""
+    from . import app
+
+    real_path = payload.get("real_path", "")
+    agents = payload.get("agents")
+    result = await _run_skill_operation(
+        session,
+        msg_id,
+        msg_type,
+        _set_native_targets_op,
+        app.skills_store,
+        real_path,
+        agents,
+    )
+    if result is not None:
+        await session.send_json(make_response(msg_id, msg_type, result))
+
+
+@handler("skills.migrate_native")
+async def skills_migrate_native(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Move a CLI's own skill into ~/.agents/skills, leaving a link behind.
+
+    Consent is per item and never remembered: it must arrive on every call."""
+    from . import app
+
+    real_path = payload.get("real_path", "")
+    result = await _run_skill_operation(
+        session,
+        msg_id,
+        msg_type,
+        app.skills_store.migrate_native,
+        real_path,
+        kwargs={"consent": payload.get("consent") is True},
+    )
+    if result is not None:
+        await session.send_json(make_response(msg_id, msg_type, result))
+
+
+@handler("skills.restore_native")
+async def skills_restore_native(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Undo a migration: the skill goes back where it came from."""
+    from . import app
+
+    name = payload.get("name", "")
+    result = await _run_skill_operation(
+        session, msg_id, msg_type, app.skills_store.restore_native, name, name=name
     )
     if result is not None:
         await session.send_json(make_response(msg_id, msg_type, result))

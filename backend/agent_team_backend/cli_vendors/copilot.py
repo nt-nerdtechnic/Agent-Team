@@ -1156,6 +1156,7 @@ SPEC = VendorSpec(
     skills_supported=True,
     skills_wiring=SkillsWiring(
         root_env="COPILOT_HOME",
+        reads_shared_root=True,
         root_home=(".copilot",),
         skills_rel=("skills",),
         # Verified the hard way: with COPILOT_HOME set, copilot stops scanning

@@ -740,12 +740,12 @@
     },
     "skills": {
       "title": "Managed Skills",
-      "intro": "Maintain reusable instructions injected into supported CLI agents.",
+      "intro": "One place to see every skill your CLIs have, decide who receives which, and create new ones in ~/.agents/skills. Nothing here moves or edits the skills your CLIs keep in their own folders.",
       "new": "New skill",
       "library": "Skills library",
       "search": "Search skills",
       "empty-title": "No managed skills yet",
-      "empty-body": "Create a skill to add reusable instructions.",
+      "empty-body": "Create a skill in ~/.agents/skills, or install one into any of your CLIs.",
       "no-description": "No description",
       "enable": "Enable {name}",
       "disable": "Disable {name}",
@@ -787,7 +787,7 @@
       "error-delete": "Could not move the skill to Trash. Nothing was deleted.",
       "view-list": "List",
       "view-matrix": "Capability matrix",
-      "matrix-intro": "Which agent receives which skill. A skill with no selection goes to every agent that can receive one.",
+      "matrix-intro": "Which agent receives which skill. ● means the agent already reads it on its own; ✓ cells are delivered by Navide and can be toggled.",
       "matrix-skill": "Skill",
       "matrix-none": "No skills to show.",
       "matrix-legend-on": "delivered",
@@ -800,7 +800,24 @@
       "matrix-disabled-row": "Disabled — no agent receives it",
       "matrix-row-all": "All",
       "matrix-row-none": "None",
-      "error-targets": "Could not change the delivery targets."
+      "error-targets": "Could not change the delivery targets.",
+      "matrix-legend-auto": "already reads it (not via Navide)",
+      "matrix-auto-shared-hint": "{agent} reads ~/.agents/skills on its own; nothing to deliver.",
+      "matrix-auto-native-hint": "{agent} owns this skill and reads it directly.",
+      "source-shared": "Shared · created here",
+      "source-shared-user": "Shared · yours",
+      "source-native": "{agent}'s own",
+      "native-group": "Skills your CLIs keep themselves",
+      "editor-readonly-hint": "This skill is yours, not Navide's — edit it where it lives.",
+      "consent-body": "Navide will create this skill inside your own folder:\n\n{root}\n\nSix CLIs (codex, copilot, grok, opencode, muse, cursor) already read that folder, so the skill reaches them immediately. Navide will only ever edit or delete skills it created there — anything else in the folder stays yours and untouched.\n\nYou will not be asked again. Continue?",
+      "migrate": "Move here",
+      "migrate-hint": "Move this skill into ~/.agents/skills, leaving a link where it was",
+      "migrate-body": "Move “{name}” into Navide's shared library?\n\n1. It will be moved from\n   {from}\n   into\n   {root}\n\n2. A link will be left in its old place, so {agent} keeps reading it exactly as before.\n\n3. You can undo this at any time with “Restore” — it moves back and the link goes away.\n\nNothing else in either folder is touched. Continue?",
+      "restore": "Restore",
+      "restore-body": "Move “{name}” back to\n\n{to}\n\nand remove Navide's link? The shared copy is deleted; the original location gets the real folder back.",
+      "source-migrated": "Shared · moved here",
+      "error-migrate": "Could not move the skill. Nothing was changed.",
+      "error-restore": "Could not restore the skill. Nothing was changed."
     },
     "section": {
       "general-behavior": "General behavior",
@@ -873,10 +890,6 @@
         "usageCache": {
           "label": "CLI quota cache",
           "desc": "Cached quota responses behind the pane usage badges."
-        },
-        "installedSkills": {
-          "label": "Installed skills",
-          "desc": "Every skill package installed into the app data dir."
         },
         "appDataOther": {
           "label": "Other app data",

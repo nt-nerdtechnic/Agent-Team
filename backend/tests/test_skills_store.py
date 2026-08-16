@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from agent_team_backend import skills_store
 from agent_team_backend.skills_store import (
     SKILL_FILE_SIZE_LIMIT,
     SkillConflictError,
+    SkillConsentRequired,
     SkillNotFoundError,
     SkillValidationError,
     SkillsStore,
@@ -16,14 +18,30 @@ from agent_team_backend.skills_store import (
 )
 
 
-@pytest.fixture
-def store(tmp_path: Path) -> SkillsStore:
-    return SkillsStore(
+def _store(tmp_path: Path, *, consented: bool = True) -> SkillsStore:
+    store = SkillsStore(
         root=tmp_path / "skills",
         state_path=tmp_path / "skills.json",
         runtime_root=tmp_path / "runtime" / "skills",
         native_roots=[],
     )
+    if consented:
+        # The shared root is the user's directory; the first write needs their
+        # say-so. Most tests are about what happens after it was given.
+        store.create_skill("consent-probe", "", consent=True)
+        store.delete_skill("consent-probe")
+    return store
+
+
+@pytest.fixture
+def store(tmp_path: Path) -> SkillsStore:
+    return _store(tmp_path)
+
+
+@pytest.fixture
+def fresh_store(tmp_path: Path) -> SkillsStore:
+    """No consent given yet."""
+    return _store(tmp_path, consented=False)
 
 
 def test_create_list_and_get_skill(store: SkillsStore) -> None:
@@ -44,6 +62,8 @@ def test_create_list_and_get_skill(store: SkillsStore) -> None:
             "enabled": True,
             "native_conflict": False,
             "targets": None,
+            "managed": True,
+            "migrated_from": None,
             "revision": created["skill"]["revision"],
             "valid": True,
             "path": str(store.root / "review-code"),
@@ -51,6 +71,8 @@ def test_create_list_and_get_skill(store: SkillsStore) -> None:
         }
     ]
     assert listed["root"] == str(store.root)
+    # The marker is what makes it ours; it must never surface as an attachment.
+    assert (store.root / "review-code" / ".navide").is_file()
     assert {entry["key"] for entry in listed["agents"]} >= {"claude", "kimi", "pi", "opencode"}
 
 
@@ -101,25 +123,33 @@ def test_stale_save_does_not_modify_file(store: SkillsStore) -> None:
 
 @pytest.mark.parametrize("name", ["../escape", "UPPER", ".hidden", "two words", "a" * 65])
 def test_create_rejects_invalid_names(store: SkillsStore, name: str) -> None:
+    before = sorted(store.root.iterdir()) if store.root.exists() else []
+
     with pytest.raises(SkillValidationError):
         store.create_skill(name, "Description")
 
-    assert not store.root.exists()
+    after = sorted(store.root.iterdir()) if store.root.exists() else []
+    assert after == before  # a rejected name leaves no trace
 
 
-def test_symlink_skill_directory_is_rejected(store: SkillsStore, tmp_path: Path) -> None:
+def test_a_users_symlink_out_of_the_root_is_read_only(store: SkillsStore, tmp_path: Path) -> None:
+    """A link the user made may point anywhere; Navide reads it, never writes."""
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "SKILL.md").write_text("---\nname: escape\n---\n", encoding="utf-8")
-    store.root.mkdir()
+    store.root.mkdir(exist_ok=True)
     (store.root / "escape").symlink_to(outside, target_is_directory=True)
 
-    with pytest.raises(SkillValidationError):
-        store.get_skill("escape")
+    skill = store.get_skill("escape")["skill"]
+    assert skill["valid"] is True
+    assert skill["managed"] is False
 
-    listed = store.list_skills()["skills"]
-    assert listed[0]["valid"] is False
-    assert listed[0]["native_conflict"] is False
+    # Every write path refuses: nothing can reach `outside` through the link.
+    with pytest.raises(SkillValidationError, match="not created by Navide"):
+        store.save_skill("escape", {"description": "x"}, "y", skill["revision"])
+    with pytest.raises(SkillValidationError, match="not created by Navide"):
+        store.delete_skill("escape")
+    assert (outside / "SKILL.md").read_text(encoding="utf-8") == "---\nname: escape\n---\n"
 
 
 def test_symlink_root_is_rejected_by_every_public_store_operation(
@@ -222,7 +252,8 @@ def test_enable_state_controls_runtime_projection(store: SkillsStore) -> None:
     assert (store.runtime_root / "second").is_symlink()
     assert (store.root / "first" / "SKILL.md").exists()
     assert json.loads(store.state_path.read_text(encoding="utf-8")) == {
-        "enabled": {"first": False, "second": True}
+        "enabled": {"first": False, "second": True},
+        "write_consented": True,
     }
 
 
@@ -256,7 +287,10 @@ def test_delete_moves_directory_to_trash_and_removes_state(
     assert store.delete_skill("review-code") == {"name": "review-code", "deleted": True}
     assert trashed == [str(store.root / "review-code")]
     assert store.list_skills()["skills"] == []
-    assert json.loads(store.state_path.read_text(encoding="utf-8")) == {"enabled": {}}
+    assert json.loads(store.state_path.read_text(encoding="utf-8")) == {
+        "enabled": {},
+        "write_consented": True,
+    }
     assert list(store.runtime_root.iterdir()) == []
 
 
@@ -342,6 +376,8 @@ def test_skill_payloads_report_native_claude_or_codex_name_conflicts(
         runtime_root=tmp_path / "runtime" / "skills",
         native_roots=[claude_native, codex_native],
     )
+    store.create_skill("consent-probe", "", consent=True)
+    store.delete_skill("consent-probe")
 
     review = store.create_skill("review-code", "Review")["skill"]
     explain = store.create_skill("explain-code", "Explain")["skill"]
@@ -383,6 +419,8 @@ def test_native_conflict_inspection_failure_is_non_blocking(
         runtime_root=tmp_path / "runtime" / "skills",
         native_roots=[native_root],
     )
+    store.create_skill("consent-probe", "", consent=True)
+    store.delete_skill("consent-probe")
 
     created = store.create_skill("review-code", "Review")
 
@@ -400,6 +438,8 @@ def test_broken_native_symlink_reports_name_conflict(tmp_path: Path) -> None:
         runtime_root=tmp_path / "runtime" / "skills",
         native_roots=[native_root],
     )
+    store.create_skill("consent-probe", "", consent=True)
+    store.delete_skill("consent-probe")
 
     created = store.create_skill("review-code", "Review")
 
@@ -417,7 +457,8 @@ def test_targets_default_to_every_agent_and_stay_out_of_the_state_file(
     # No targets set means no "targets" key at all: an untouched library keeps
     # the state file byte-identical to what earlier versions wrote.
     assert json.loads(store.state_path.read_text(encoding="utf-8")) == {
-        "enabled": {"shared": True}
+        "enabled": {"shared": True},
+        "write_consented": True,
     }
 
 
@@ -494,3 +535,389 @@ def test_agent_targets_reports_every_vendors_capability() -> None:
     assert states["kilo"] == "unsupported"
     assert states["aider"] == "unsupported"
     assert set(states.values()) <= {"wired", "planned", "unsupported"}
+
+
+# ── The shared root is the user's directory: Navide only touches its own ────
+
+
+def _user_skill(store: SkillsStore, name: str, description: str = "Theirs") -> Path:
+    """A skill the user put in the shared root by hand — no marker."""
+    path = store.root / name
+    path.mkdir(parents=True)
+    (path / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\nbody\n", encoding="utf-8"
+    )
+    return path
+
+
+def test_a_users_own_skill_is_listed_read_only(store: SkillsStore) -> None:
+    _user_skill(store, "theirs")
+    store.create_skill("ours", "Ours")
+
+    listed = {s["name"]: s for s in store.list_skills()["skills"]}
+
+    assert listed["theirs"]["managed"] is False
+    assert listed["ours"]["managed"] is True
+    # Read-only still means visible and deliverable.
+    assert store.targets_for("claude") == ["ours", "theirs"]
+
+
+def test_navide_refuses_to_delete_a_skill_it_did_not_create(store: SkillsStore) -> None:
+    path = _user_skill(store, "theirs")
+
+    with pytest.raises(SkillValidationError, match="not created by Navide"):
+        store.delete_skill("theirs")
+
+    assert (path / "SKILL.md").is_file()
+
+
+def test_navide_refuses_to_edit_a_skill_it_did_not_create(store: SkillsStore) -> None:
+    _user_skill(store, "theirs")
+    current = store.get_skill("theirs")["skill"]
+
+    with pytest.raises(SkillValidationError, match="not created by Navide"):
+        store.save_skill("theirs", {"description": "hijacked"}, "new body", current["revision"])
+
+    assert (store.root / "theirs" / "SKILL.md").read_text(encoding="utf-8").endswith("body\n")
+
+
+def test_deleting_our_own_skill_still_works(store: SkillsStore) -> None:
+    store.create_skill("ours", "Ours")
+
+    result = store.delete_skill("ours")
+
+    assert result == {"name": "ours", "deleted": True}
+    assert not (store.root / "ours").exists()
+
+
+def test_the_marker_never_leaks_into_attachments(store: SkillsStore) -> None:
+    store.create_skill("ours", "Ours")
+    (store.root / "ours" / "notes.md").write_text("x", encoding="utf-8")
+
+    attachments = store.get_skill("ours")["skill"]["attachments"]
+
+    assert [a["path"] for a in attachments] == ["notes.md"]
+
+
+def test_native_reflection_excludes_what_the_shared_root_already_holds(
+    store: SkillsStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A native link pointing into the shared root is the same skill twice."""
+    home = tmp_path / "home"
+    (home / ".claude" / "skills").mkdir(parents=True)
+    store.create_skill("shared-one", "Shared")
+    (home / ".claude" / "skills" / "shared-one").symlink_to(
+        store.root / "shared-one", target_is_directory=True
+    )
+    (home / ".claude" / "skills" / "native-one").mkdir()
+    (home / ".claude" / "skills" / "native-one" / "SKILL.md").write_text(
+        "---\nname: native-one\ndescription: N\n---\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(skills_store.native_skills, "_home", lambda: home)
+
+    native = [s.name for s in store.native_skills()]
+
+    assert native == ["native-one"]
+
+
+def test_create_and_delete_preserve_other_skills_targets(store: SkillsStore) -> None:
+    """Regression: create/delete used to rewrite skills.json without targets."""
+    store.create_skill("kept", "Kept")
+    store.set_targets("kept", ["pi"])
+
+    store.create_skill("other", "Other")
+    assert store.get_skill("kept")["skill"]["targets"] == ["pi"]
+
+    store.delete_skill("other")
+    assert store.get_skill("kept")["skill"]["targets"] == ["pi"]
+
+
+# ── Native targets: opt-in delivery keyed by real path ───────────────────────
+
+
+def test_native_targets_default_to_nobody(store: SkillsStore) -> None:
+    assert store.native_targets() == {}
+    assert store.native_targets_for("claude") == []
+
+
+def test_native_targets_round_trip_and_clear(store: SkillsStore) -> None:
+    store.set_native_targets("/Users/x/.copilot/skills/bug-buster", ["claude", "pi"])
+
+    assert store.native_targets_for("claude") == ["/Users/x/.copilot/skills/bug-buster"]
+    assert store.native_targets_for("kimi") == []
+    assert json.loads(store.state_path.read_text(encoding="utf-8"))["native_targets"] == {
+        "/Users/x/.copilot/skills/bug-buster": ["claude", "pi"]
+    }
+
+    store.set_native_targets("/Users/x/.copilot/skills/bug-buster", None)
+    assert store.native_targets() == {}
+    assert "native_targets" not in json.loads(store.state_path.read_text(encoding="utf-8"))
+
+
+def test_native_targets_survive_shared_skill_edits(store: SkillsStore) -> None:
+    store.set_native_targets("/Users/x/.copilot/skills/bug-buster", ["claude"])
+    store.create_skill("ours", "Ours")
+    store.set_targets("ours", ["pi"])
+    store.set_enabled("ours", False)
+    store.delete_skill("ours")
+
+    assert store.native_targets_for("claude") == ["/Users/x/.copilot/skills/bug-buster"]
+
+
+@pytest.mark.parametrize("bad", ["relative/path", "", "~/.copilot/skills/x"])
+def test_native_targets_reject_non_absolute_keys(store: SkillsStore, bad: str) -> None:
+    with pytest.raises(SkillValidationError):
+        store.set_native_targets(bad, ["claude"])
+
+
+def test_a_users_symlinked_skill_in_the_shared_root_is_accepted(
+    store: SkillsStore, tmp_path: Path
+) -> None:
+    """ego-browser installs itself as a link in ~/.agents/skills."""
+    real = tmp_path / "elsewhere" / "ego-browser"
+    real.mkdir(parents=True)
+    (real / "SKILL.md").write_text("---\nname: ego-browser\ndescription: E\n---\n", encoding="utf-8")
+    (real / "helper.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    store.root.mkdir(parents=True, exist_ok=True)
+    (store.root / "ego-browser").symlink_to(real, target_is_directory=True)
+
+    listed = {s["name"]: s for s in store.list_skills()["skills"]}
+
+    assert listed["ego-browser"]["valid"] is True
+    assert listed["ego-browser"]["managed"] is False
+    assert [a["path"] for a in listed["ego-browser"]["attachments"]] == ["helper.sh"]
+    # Delivered like any other, and the view resolves to the real directory.
+    assert store.targets_for("claude") == ["ego-browser"]
+    store.rebuild_runtime_projection()
+    assert (store.runtime_root / "ego-browser").resolve() == real.resolve()
+
+
+def test_our_own_skill_must_still_be_a_real_directory(store: SkillsStore, tmp_path: Path) -> None:
+    real = tmp_path / "elsewhere" / "ours"
+    real.mkdir(parents=True)
+    (real / ".navide").write_text("", encoding="utf-8")
+    (real / "SKILL.md").write_text("---\nname: ours\ndescription: O\n---\n", encoding="utf-8")
+    store.root.mkdir(parents=True, exist_ok=True)
+    (store.root / "ours").symlink_to(real, target_is_directory=True)
+
+    listed = {s["name"]: s for s in store.list_skills()["skills"]}
+
+    assert listed["ours"]["valid"] is False
+    assert "must not be a symlink" in listed["ours"]["error"]
+
+
+
+# ── Consent: the first write into the user's directory is asked, once ───────
+
+
+def test_first_create_needs_consent_and_writes_nothing_without_it(fresh_store: SkillsStore) -> None:
+    assert fresh_store.write_consented() is False
+
+    with pytest.raises(SkillConsentRequired) as info:
+        fresh_store.create_skill("first", "First")
+
+    assert info.value.root == str(fresh_store.root)
+    assert not fresh_store.root.exists()  # not even the root directory
+    assert not fresh_store.state_path.exists()
+
+
+def test_consent_is_recorded_once_and_survives_later_writes(fresh_store: SkillsStore) -> None:
+    fresh_store.create_skill("first", "First", consent=True)
+    assert fresh_store.write_consented() is True
+
+    # Never asked again, and no later rewrite of skills.json drops the flag.
+    fresh_store.create_skill("second", "Second")
+    fresh_store.set_targets("second", ["pi"])
+    fresh_store.set_enabled("first", False)
+    fresh_store.delete_skill("first")
+
+    assert fresh_store.write_consented() is True
+    assert json.loads(fresh_store.state_path.read_text(encoding="utf-8"))["write_consented"] is True
+
+
+def test_list_reports_consent_state(fresh_store: SkillsStore) -> None:
+    assert fresh_store.list_skills()["write_consented"] is False
+    fresh_store.create_skill("x", "", consent=True)
+    assert fresh_store.list_skills()["write_consented"] is True
+
+
+# ── Migration: the one operation that changes a user's directory ────────────
+
+
+def _vendor_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, vendor: str = "copilot") -> Path:
+    """A fake ~/.<vendor>/skills, registered as a native root."""
+    home = tmp_path / "home"
+    root = home / f".{vendor}" / "skills"
+    root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(skills_store.native_skills, "_home", lambda: home)
+    return root
+
+
+def _native_skill(root: Path, name: str) -> Path:
+    path = root / name
+    path.mkdir(parents=True)
+    (path / "SKILL.md").write_text(f"---\nname: {name}\ndescription: N\n---\nbody\n", encoding="utf-8")
+    (path / "scripts").mkdir()
+    (path / "scripts" / "run.sh").write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+    return path
+
+
+def _tree(path: Path) -> dict[str, str]:
+    """Every regular file under path with its content — the round-trip witness."""
+    out = {}
+    for p in sorted(path.rglob("*")):
+        if p.is_file() and not p.is_symlink() and p.name != ".navide":
+            out[str(p.relative_to(path))] = p.read_text(encoding="utf-8")
+    return out
+
+
+def test_migrate_requires_per_item_consent_every_time(
+    store: SkillsStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = _native_skill(_vendor_root(tmp_path, monkeypatch), "bug-buster")
+
+    with pytest.raises(SkillConsentRequired):
+        store.migrate_native(str(src))
+    assert src.is_dir() and not src.is_symlink()
+    assert not (store.root / "bug-buster").exists()
+
+
+def test_migrate_moves_the_skill_and_leaves_a_working_link(
+    store: SkillsStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = _native_skill(_vendor_root(tmp_path, monkeypatch), "bug-buster")
+    before = _tree(src)
+
+    result = store.migrate_native(str(src), consent=True)
+
+    target = store.root / "bug-buster"
+    assert target.is_dir() and not target.is_symlink()
+    assert _tree(target) == before
+    # The owning CLI still finds it where it always was.
+    assert src.is_symlink() and src.resolve() == target.resolve()
+    assert (src / "SKILL.md").read_text(encoding="utf-8") == before["SKILL.md"]
+    # It is now ours, and it remembers where it came from.
+    assert result["skill"]["managed"] is True
+    assert result["from"] == str(src)
+    assert "migrated-from" in (target / ".navide").read_text(encoding="utf-8")
+
+
+def test_restore_puts_everything_back_byte_for_byte(
+    store: SkillsStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = _native_skill(_vendor_root(tmp_path, monkeypatch), "bug-buster")
+    before = _tree(src)
+    store.migrate_native(str(src), consent=True)
+
+    result = store.restore_native("bug-buster")
+
+    assert result == {"name": "bug-buster", "restored_to": str(src)}
+    assert src.is_dir() and not src.is_symlink()
+    assert _tree(src) == before
+    assert not (src / ".navide").exists()
+    assert not (store.root / "bug-buster").exists()
+    assert "bug-buster" not in store.list_skills()["skills"]
+
+
+def test_migrate_refuses_a_name_the_shared_root_already_has(
+    store: SkillsStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = _native_skill(_vendor_root(tmp_path, monkeypatch), "clash")
+    store.create_skill("clash", "Ours")
+
+    with pytest.raises(SkillValidationError, match="already has a skill named"):
+        store.migrate_native(str(src), consent=True)
+    assert src.is_dir() and not src.is_symlink()
+
+
+def test_migrate_refuses_anything_outside_a_cli_skills_directory(
+    store: SkillsStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _vendor_root(tmp_path, monkeypatch)
+    stray = tmp_path / "home" / "Documents" / "not-a-skill"
+    stray.mkdir(parents=True)
+    (stray / "SKILL.md").write_text("---\nname: not-a-skill\n---\n", encoding="utf-8")
+
+    with pytest.raises(SkillValidationError, match="own skills directory"):
+        store.migrate_native(str(stray), consent=True)
+
+
+def test_migrate_refuses_a_link_it_did_not_understand(
+    store: SkillsStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ego-browser is a link into ~/.local/share; that is another tool's
+    arrangement and not ours to rewrite."""
+    root = _vendor_root(tmp_path, monkeypatch)
+    real = tmp_path / "share" / "ego"
+    real.mkdir(parents=True)
+    (real / "SKILL.md").write_text("---\nname: ego\n---\n", encoding="utf-8")
+    (root / "ego").symlink_to(real, target_is_directory=True)
+
+    with pytest.raises(SkillValidationError, match="real directory"):
+        store.migrate_native(str(root / "ego"), consent=True)
+
+
+def test_restore_refuses_a_skill_that_was_not_migrated(store: SkillsStore) -> None:
+    store.create_skill("born-here", "Ours")
+
+    with pytest.raises(SkillValidationError, match="not migrated"):
+        store.restore_native("born-here")
+    assert (store.root / "born-here").is_dir()
+
+
+def test_restore_refuses_when_the_origin_is_no_longer_our_link(
+    store: SkillsStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The user replaced the link with something of their own; never clobber it."""
+    src = _native_skill(_vendor_root(tmp_path, monkeypatch), "bug-buster")
+    store.migrate_native(str(src), consent=True)
+    src.unlink()
+    src.mkdir()
+    (src / "SKILL.md").write_text("theirs now", encoding="utf-8")
+
+    with pytest.raises(SkillValidationError, match="no longer holds Navide's link"):
+        store.restore_native("bug-buster")
+    assert (src / "SKILL.md").read_text(encoding="utf-8") == "theirs now"
+    assert (store.root / "bug-buster").is_dir()
+
+
+@pytest.mark.parametrize("fail_at", ["copytree", "rename", "symlink"])
+def test_migrate_failure_at_any_step_leaves_the_original_exactly_as_it_was(
+    store: SkillsStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_at: str
+) -> None:
+    src = _native_skill(_vendor_root(tmp_path, monkeypatch), "bug-buster")
+    before = _tree(src)
+
+    if fail_at == "copytree":
+        monkeypatch.setattr(skills_store.shutil, "copytree", lambda *a, **k: (_ for _ in ()).throw(OSError("disk")))
+    elif fail_at == "rename":
+        real_rename = os.rename
+        def rename(a, b):
+            if str(a) == str(src): raise OSError("busy")
+            return real_rename(a, b)
+        monkeypatch.setattr(skills_store.os, "rename", rename)
+    else:
+        monkeypatch.setattr(skills_store.os, "symlink", lambda *a, **k: (_ for _ in ()).throw(OSError("no")))
+
+    with pytest.raises(OSError):
+        store.migrate_native(str(src), consent=True)
+
+    assert src.is_dir() and not src.is_symlink()
+    assert _tree(src) == before
+    assert not (store.root / "bug-buster").exists()
+    assert not src.with_name(".bug-buster.navide-migrating").exists()
+
+
+def test_migrate_then_restore_round_trips_the_state_file(
+    store: SkillsStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = _native_skill(_vendor_root(tmp_path, monkeypatch), "bug-buster")
+    store.set_native_targets(str(src.resolve()), ["claude"])
+
+    store.migrate_native(str(src), consent=True)
+    # It is a shared skill now: its native opt-in is gone, shared default applies.
+    assert store.native_targets() == {}
+    assert store.targets_for("claude") == ["bug-buster"]
+
+    store.restore_native("bug-buster")
+    assert store.targets_for("claude") == []

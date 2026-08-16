@@ -952,6 +952,7 @@ SPEC = VendorSpec(
     skills_supported=True,
     skills_wiring=SkillsWiring(
         root_env="CODEX_HOME",
+        reads_shared_root=True,
         root_home=(".codex",),
         skills_rel=("skills",),
     ),

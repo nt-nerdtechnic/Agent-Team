@@ -14,7 +14,32 @@ interface SkillSummary {
   nativeConflict?: boolean
   /** Agent keys this skill is restricted to; null = every wired agent. */
   targets: string[] | null
+  /** Created by Navide (editable, deletable) vs. put in the shared root by the user. */
+  managed: boolean
+  /** Original location, when this skill was migrated from a CLI's own directory. */
+  migratedFrom: string | null
   path?: string
+}
+
+/**
+ * A skill a CLI keeps in its own directory. Read-only reflection: Navide
+ * lists it and can deliver it to *other* agents, but never edits or moves it.
+ */
+interface NativeSkill {
+  name: string
+  description: string
+  /** Root it was found under, e.g. "copilot". */
+  source: string
+  /** Agent that already reads it without Navide's help. */
+  ownerAgent: string
+  path: string
+  /** Resolved directory — the identity, since names collide across roots. */
+  realPath: string
+  aliases: string[]
+  valid: boolean
+  error: string
+  /** Agents the user chose to deliver it to; opt-in, empty by default. */
+  targets: string[]
 }
 
 /** One CLI vendor and what the managed library can do with it. */
@@ -22,7 +47,14 @@ interface SkillAgent {
   key: string
   label: string
   state: 'wired' | 'planned' | 'unsupported'
+  /** Discovers ~/.agents/skills itself: shared skills reach it with no delivery. */
+  readsSharedRoot: boolean
 }
+
+/** One matrix row: a shared skill or a native one, behind one interface. */
+type MatrixRow =
+  | { kind: 'shared'; key: string; skill: SkillSummary }
+  | { kind: 'native'; key: string; skill: NativeSkill }
 
 interface SkillAttachment {
   name: string
@@ -52,7 +84,10 @@ const props = defineProps<{ backend: Backend }>()
 const { t } = useI18n()
 
 const skills = ref<SkillSummary[]>([])
+const nativeSkills = ref<NativeSkill[]>([])
 const agents = ref<SkillAgent[]>([])
+/** Whether the user has once allowed writes into ~/.agents/skills. */
+const writeConsented = ref(false)
 const view = ref<'list' | 'matrix'>('list')
 const rootPath = ref('')
 const selectedName = ref('')
@@ -65,6 +100,18 @@ const conflict = ref(false)
 const creating = ref(false)
 const newName = ref('')
 const newDescription = ref('')
+
+const filteredNative = computed(() => {
+  const needle = query.value.trim().toLowerCase()
+  if (!needle) return nativeSkills.value
+  return nativeSkills.value.filter((skill) =>
+    `${skill.name} ${skill.description} ${skill.source}`.toLowerCase().includes(needle)
+  )
+})
+
+async function openNativeFolder(skill: NativeSkill): Promise<void> {
+  if (skill.path) await window.agentTeam?.openPath?.(skill.path)
+}
 
 const filteredSkills = computed(() => {
   const needle = query.value.trim().toLowerCase()
@@ -97,8 +144,39 @@ function normalizeSummary(value: unknown): SkillSummary | null {
       ? Boolean(value.native_conflict ?? value.nativeConflict)
       : undefined,
     targets: normalizeTargets(value.targets),
+    managed: booleanValue(value.managed, true),
+    migratedFrom: stringValue(value.migrated_from) || null,
     path: stringValue(value.path) || undefined,
   }
+}
+
+function normalizeNative(value: unknown, targets: Record<string, string[]>): NativeSkill | null {
+  if (!isRecord(value) || typeof value.name !== 'string' || !value.name) return null
+  const realPath = stringValue(value.real_path)
+  if (!realPath) return null
+  return {
+    name: value.name,
+    description: stringValue(value.description),
+    source: stringValue(value.source),
+    ownerAgent: stringValue(value.owner_agent) || stringValue(value.source),
+    path: stringValue(value.path),
+    realPath,
+    aliases: Array.isArray(value.aliases)
+      ? value.aliases.filter((item): item is string => typeof item === 'string')
+      : [],
+    valid: booleanValue(value.valid, true),
+    error: stringValue(value.error),
+    targets: targets[realPath] ?? [],
+  }
+}
+
+function normalizeNativeTargets(value: unknown): Record<string, string[]> {
+  if (!isRecord(value)) return {}
+  const out: Record<string, string[]> = {}
+  for (const [real, agents] of Object.entries(value)) {
+    if (Array.isArray(agents)) out[real] = agents.filter((a): a is string => typeof a === 'string')
+  }
+  return out
 }
 
 function normalizeTargets(value: unknown): string[] | null {
@@ -115,6 +193,7 @@ function normalizeAgents(value: unknown): SkillAgent[] {
       key: entry.key,
       label: stringValue(entry.label) || entry.key,
       state: state === 'wired' || state === 'planned' ? state : 'unsupported',
+      readsSharedRoot: booleanValue(entry.reads_shared_root, false),
     }]
   })
 }
@@ -191,8 +270,11 @@ async function loadSkills(preferredName = selectedName.value): Promise<void> {
   try {
     const resp = await props.backend.send<{
       skills?: unknown[]
+      native?: unknown[]
+      native_targets?: unknown
       agents?: unknown[]
       root?: string
+      write_consented?: boolean
       ok?: boolean
       error?: string
     }>('skills.list', {})
@@ -205,7 +287,13 @@ async function loadSkills(preferredName = selectedName.value): Promise<void> {
       return skill ? [skill] : []
     })
     agents.value = normalizeAgents(resp.payload?.agents)
+    const nativeTargets = normalizeNativeTargets(resp.payload?.native_targets)
+    nativeSkills.value = (resp.payload?.native ?? []).flatMap((item) => {
+      const skill = normalizeNative(item, nativeTargets)
+      return skill ? [skill] : []
+    })
     rootPath.value = stringValue(resp.payload?.root)
+    writeConsented.value = booleanValue(resp.payload?.write_consented, false)
     const next = skills.value.find((skill) => skill.name === preferredName)?.name
       ?? skills.value[0]?.name
       ?? ''
@@ -246,20 +334,47 @@ async function selectSkill(name: string): Promise<void> {
   }
 }
 
+/**
+ * Ask once before the first write into the user's own ~/.agents/skills.
+ * The text names the exact directory and what will land there; declining
+ * writes nothing. Consent is recorded server-side and never asked again.
+ */
+function askWriteConsent(root: string): boolean {
+  return window.confirm(t('settings.skills.consent-body', { root }))
+}
+
 async function createSkill(): Promise<void> {
   const name = newName.value.trim()
   if (!name || busy.value) return
   busy.value = true
   error.value = ''
   try {
-    const resp = await props.backend.send<{ ok?: boolean; error?: string }>('skills.create', {
+    let consent = writeConsented.value
+    if (!consent) {
+      consent = askWriteConsent(rootPath.value)
+      if (!consent) return
+    }
+    let resp = await props.backend.send<{ ok?: boolean; error?: string }>('skills.create', {
       name,
       description: newDescription.value.trim(),
+      consent,
     })
+    // The backend is the source of truth for consent; if it still wants it
+    // (e.g. state file reset), ask now rather than fail.
+    if (!resp.ok && resp.error?.code === 'SKILL_CONSENT_REQUIRED') {
+      const root = (resp.error.details as { root?: string } | undefined)?.root ?? rootPath.value
+      if (!askWriteConsent(root)) return
+      resp = await props.backend.send<{ ok?: boolean; error?: string }>('skills.create', {
+        name,
+        description: newDescription.value.trim(),
+        consent: true,
+      })
+    }
     if (!resp.ok || resp.payload?.ok === false) {
       error.value = responseMessage(resp, t('settings.skills.error-create'))
       return
     }
+    writeConsented.value = true
     creating.value = false
     newName.value = ''
     newDescription.value = ''
@@ -384,24 +499,76 @@ async function openSkillFolder(): Promise<void> {
 
 const wiredAgents = computed(() => agents.value.filter((agent) => agent.state === 'wired'))
 
-/** Whether this agent currently receives this skill. */
-function delivers(skill: SkillSummary, agent: SkillAgent): boolean {
-  if (agent.state !== 'wired' || !skill.enabled) return false
-  return skill.targets === null || skill.targets.includes(agent.key)
-}
+/** Every matrix row: shared skills first, then the CLIs' own, in one shape. */
+const matrixRows = computed<MatrixRow[]>(() => {
+  const needle = query.value.trim().toLowerCase()
+  const match = (name: string, description: string) =>
+    !needle || `${name} ${description}`.toLowerCase().includes(needle)
+  return [
+    ...skills.value
+      .filter((skill) => match(skill.name, skill.description))
+      .map((skill): MatrixRow => ({ kind: 'shared', key: `shared:${skill.name}`, skill })),
+    ...nativeSkills.value
+      .filter((skill) => match(skill.name, skill.description))
+      .map((skill): MatrixRow => ({ kind: 'native', key: `native:${skill.realPath}`, skill })),
+  ]
+})
 
-function cellState(skill: SkillSummary, agent: SkillAgent): string {
+type CellState = 'auto' | 'on' | 'off' | 'planned' | 'unsupported'
+
+/**
+ * What one matrix cell means. "auto" is the state a switch cannot express:
+ * the agent already reads this skill on its own, so it is delivered without
+ * Navide and cannot be withheld without touching the user's directory.
+ */
+function cellState(row: MatrixRow, agent: SkillAgent): CellState {
   if (agent.state !== 'wired') return agent.state
-  if (!skill.enabled) return 'off'
-  return delivers(skill, agent) ? 'on' : 'off'
+  if (row.kind === 'shared') {
+    if (agent.readsSharedRoot) return 'auto'
+    if (!row.skill.enabled) return 'off'
+    return row.skill.targets === null || row.skill.targets.includes(agent.key) ? 'on' : 'off'
+  }
+  if (agent.key === row.skill.ownerAgent) return 'auto'
+  if (!row.skill.valid) return 'off'
+  return row.skill.targets.includes(agent.key) ? 'on' : 'off'
 }
 
-function cellHint(skill: SkillSummary, agent: SkillAgent): string {
-  if (agent.state === 'planned') return t('settings.skills.matrix-planned-hint', { agent: agent.label })
-  if (agent.state === 'unsupported') {
-    return t('settings.skills.matrix-unsupported-hint', { agent: agent.label })
+function delivers(row: MatrixRow, agent: SkillAgent): boolean {
+  const state = cellState(row, agent)
+  return state === 'on' || state === 'auto'
+}
+
+/** A cell the user can toggle: wired agent, not automatic, row not switched off. */
+function cellEditable(row: MatrixRow, agent: SkillAgent): boolean {
+  if (agent.state !== 'wired') return false
+  if (row.kind === 'shared') return !agent.readsSharedRoot && row.skill.enabled
+  return agent.key !== row.skill.ownerAgent && row.skill.valid
+}
+
+function cellHint(row: MatrixRow, agent: SkillAgent): string {
+  const skill = row.skill.name
+  const state = cellState(row, agent)
+  if (state === 'planned') return t('settings.skills.matrix-planned-hint', { agent: agent.label })
+  if (state === 'unsupported') return t('settings.skills.matrix-unsupported-hint', { agent: agent.label })
+  if (state === 'auto') {
+    return row.kind === 'shared'
+      ? t('settings.skills.matrix-auto-shared-hint', { agent: agent.label })
+      : t('settings.skills.matrix-auto-native-hint', { agent: agent.label })
   }
-  return t('settings.skills.matrix-cell', { skill: skill.name, agent: agent.label })
+  return t('settings.skills.matrix-cell', { skill, agent: agent.label })
+}
+
+function cellGlyph(row: MatrixRow, agent: SkillAgent): string {
+  const state = cellState(row, agent)
+  if (state === 'unsupported') return '—'
+  if (state === 'planned') return '·'
+  if (state === 'auto') return '●'
+  return state === 'on' ? '✓' : ''
+}
+
+/** Agents a row can be toggled for — the ones a full "All" would name. */
+function editableAgents(row: MatrixRow): SkillAgent[] {
+  return wiredAgents.value.filter((agent) => cellEditable(row, agent))
 }
 
 async function setTargets(skill: SkillSummary, next: string[] | null): Promise<void> {
@@ -429,22 +596,127 @@ async function setTargets(skill: SkillSummary, next: string[] | null): Promise<v
   }
 }
 
-/** Toggle one cell, materializing the implicit "every agent" list first. */
-async function toggleCell(skill: SkillSummary, agent: SkillAgent): Promise<void> {
-  if (agent.state !== 'wired' || !skill.enabled) return
-  const current = skill.targets ?? wiredAgents.value.map((entry) => entry.key)
+async function setNativeTargets(skill: NativeSkill, next: string[]): Promise<void> {
+  if (busy.value) return
+  busy.value = true
+  error.value = ''
+  const previous = skill.targets
+  skill.targets = next
+  try {
+    const resp = await props.backend.send<{ ok?: boolean; error?: string }>(
+      'skills.set_native_targets',
+      { real_path: skill.realPath, agents: next }
+    )
+    if (!resp.ok || resp.payload?.ok === false) {
+      skill.targets = previous
+      error.value = responseMessage(resp, t('settings.skills.error-targets'))
+    }
+  } catch (err) {
+    skill.targets = previous
+    error.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    busy.value = false
+  }
+}
+
+/** Toggle one cell. Shared rows materialize the implicit "every agent" list first. */
+async function toggleCell(row: MatrixRow, agent: SkillAgent): Promise<void> {
+  if (!cellEditable(row, agent)) return
+  if (row.kind === 'native') {
+    const current = row.skill.targets
+    const next = current.includes(agent.key)
+      ? current.filter((key) => key !== agent.key)
+      : [...current, agent.key]
+    await setNativeTargets(row.skill, next)
+    return
+  }
+  const editable = editableAgents(row).map((entry) => entry.key)
+  const current = row.skill.targets ?? editable
   const next = current.includes(agent.key)
     ? current.filter((key) => key !== agent.key)
     : [...current, agent.key]
-  // Back to every wired agent means no restriction at all, so the skill keeps
-  // following the agent list instead of freezing today's members.
-  const all = wiredAgents.value.every((entry) => next.includes(entry.key))
-  await setTargets(skill, all ? null : next)
+  // Back to every editable agent means no restriction at all, so the skill
+  // keeps following the agent list instead of freezing today's members.
+  const all = editable.every((key) => next.includes(key))
+  await setTargets(row.skill, all ? null : next)
 }
 
-async function setRow(skill: SkillSummary, all: boolean): Promise<void> {
-  if (!skill.enabled) return
-  await setTargets(skill, all ? null : [])
+async function setRow(row: MatrixRow, all: boolean): Promise<void> {
+  if (row.kind === 'native') {
+    if (!row.skill.valid) return
+    await setNativeTargets(row.skill, all ? editableAgents(row).map((a) => a.key) : [])
+    return
+  }
+  if (!row.skill.enabled) return
+  await setTargets(row.skill, all ? null : [])
+}
+
+/**
+ * Migrate a CLI's own skill into ~/.agents/skills. Per-item, every time,
+ * with the three facts the plan requires spelled out: what moves, what is
+ * left in its place, and that it can be undone. Declining does nothing.
+ */
+async function migrateNative(skill: NativeSkill): Promise<void> {
+  if (busy.value || !skill.valid) return
+  const ok = window.confirm(
+    t('settings.skills.migrate-body', { name: skill.name, from: skill.path, root: rootPath.value, agent: skill.source })
+  )
+  if (!ok) return
+  busy.value = true
+  error.value = ''
+  try {
+    const resp = await props.backend.send<{ ok?: boolean; error?: string }>('skills.migrate_native', {
+      real_path: skill.realPath,
+      consent: true,
+    })
+    if (!resp.ok || resp.payload?.ok === false) {
+      error.value = responseMessage(resp, t('settings.skills.error-migrate'))
+      return
+    }
+    await loadSkills(skill.name)
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    busy.value = false
+  }
+}
+
+/** Undo a migration: the skill goes back where it came from, the link goes away. */
+async function restoreNative(skill: SkillSummary): Promise<void> {
+  if (busy.value || !skill.migratedFrom) return
+  const ok = window.confirm(t('settings.skills.restore-body', { name: skill.name, to: skill.migratedFrom }))
+  if (!ok) return
+  busy.value = true
+  error.value = ''
+  try {
+    const resp = await props.backend.send<{ ok?: boolean; error?: string }>('skills.restore_native', {
+      name: skill.name,
+    })
+    if (!resp.ok || resp.payload?.ok === false) {
+      error.value = responseMessage(resp, t('settings.skills.error-restore'))
+      return
+    }
+    await loadSkills()
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    busy.value = false
+  }
+}
+
+function rowSourceLabel(row: MatrixRow): string {
+  if (row.kind === 'shared') {
+    if (row.skill.migratedFrom) return t('settings.skills.source-migrated')
+    return row.skill.managed
+      ? t('settings.skills.source-shared')
+      : t('settings.skills.source-shared-user')
+  }
+  return t('settings.skills.source-native', { agent: row.skill.source })
+}
+
+async function openRowFolder(row: MatrixRow): Promise<void> {
+  const path = row.kind === 'shared' ? row.skill.path : row.skill.path
+  if (path) await window.agentTeam?.openPath?.(path)
 }
 
 onMounted(() => void loadSkills())
@@ -509,7 +781,13 @@ onMounted(() => void loadSkills())
 
     <section v-if="view === 'matrix'" class="skills-matrix">
       <p class="skills-matrix-intro">{{ t('settings.skills.matrix-intro') }}</p>
-      <div v-if="filteredSkills.length === 0" class="skills-state">
+      <input
+        v-model="query"
+        class="skills-search skills-matrix-search"
+        type="search"
+        :placeholder="t('settings.skills.search')"
+      />
+      <div v-if="matrixRows.length === 0" class="skills-state">
         {{ t('settings.skills.matrix-none') }}
       </div>
       <div v-else class="skills-matrix-scroll">
@@ -529,45 +807,68 @@ onMounted(() => void loadSkills())
           </thead>
           <tbody>
             <tr
-              v-for="skill in filteredSkills"
-              :key="skill.name"
-              :class="{ off: !skill.enabled, active: selectedName === skill.name }"
+              v-for="row in matrixRows"
+              :key="row.key"
+              :class="{
+                off: row.kind === 'shared' ? !row.skill.enabled : !row.skill.valid,
+                native: row.kind === 'native',
+                active: row.kind === 'shared' && selectedName === row.skill.name,
+              }"
             >
               <th scope="row">
-                <button type="button" class="matrix-name" @click="selectSkill(skill.name)">
-                  {{ skill.name }}
-                </button>
-                <span v-if="!skill.enabled" class="matrix-note">
+                <button
+                  v-if="row.kind === 'shared'"
+                  type="button"
+                  class="matrix-name"
+                  @click="selectSkill(row.skill.name); view = 'list'"
+                >{{ row.skill.name }}</button>
+                <button
+                  v-else
+                  type="button"
+                  class="matrix-name"
+                  :title="row.skill.path"
+                  @click="openRowFolder(row)"
+                >{{ row.skill.name }}</button>
+                <span class="matrix-source" :class="row.kind">{{ rowSourceLabel(row) }}</span>
+                <span v-if="row.kind === 'shared' && !row.skill.enabled" class="matrix-note">
                   {{ t('settings.skills.matrix-disabled-row') }}
+                </span>
+                <span v-else-if="row.kind === 'native' && !row.skill.valid" class="matrix-note">
+                  {{ row.skill.error || t('settings.skills.invalid') }}
                 </span>
               </th>
               <td
                 v-for="agent in agents"
                 :key="agent.key"
-                :class="cellState(skill, agent)"
+                :class="cellState(row, agent)"
               >
                 <button
                   type="button"
-                  :disabled="agent.state !== 'wired' || !skill.enabled || busy"
-                  :aria-pressed="delivers(skill, agent)"
-                  :aria-label="cellHint(skill, agent)"
-                  :title="cellHint(skill, agent)"
-                  @click="toggleCell(skill, agent)"
-                >{{ agent.state === 'unsupported' ? '—' : agent.state === 'planned' ? '·' : delivers(skill, agent) ? '✓' : '' }}</button>
+                  :disabled="!cellEditable(row, agent) || busy"
+                  :aria-pressed="delivers(row, agent)"
+                  :aria-label="cellHint(row, agent)"
+                  :title="cellHint(row, agent)"
+                  @click="toggleCell(row, agent)"
+                >{{ cellGlyph(row, agent) }}</button>
               </td>
               <td class="bulk">
-                <button type="button" :disabled="!skill.enabled || busy" @click="setRow(skill, true)">
-                  {{ t('settings.skills.matrix-row-all') }}
-                </button>
-                <button type="button" :disabled="!skill.enabled || busy" @click="setRow(skill, false)">
-                  {{ t('settings.skills.matrix-row-none') }}
-                </button>
+                <button
+                  type="button"
+                  :disabled="editableAgents(row).length === 0 || busy"
+                  @click="setRow(row, true)"
+                >{{ t('settings.skills.matrix-row-all') }}</button>
+                <button
+                  type="button"
+                  :disabled="editableAgents(row).length === 0 || busy"
+                  @click="setRow(row, false)"
+                >{{ t('settings.skills.matrix-row-none') }}</button>
               </td>
             </tr>
           </tbody>
         </table>
       </div>
       <ul class="skills-matrix-legend">
+        <li><span class="swatch auto">●</span>{{ t('settings.skills.matrix-legend-auto') }}</li>
         <li><span class="swatch on">✓</span>{{ t('settings.skills.matrix-legend-on') }}</li>
         <li><span class="swatch off"></span>{{ t('settings.skills.matrix-legend-off') }}</li>
         <li><span class="swatch planned">·</span>{{ t('settings.skills.matrix-legend-planned') }}</li>
@@ -584,11 +885,11 @@ onMounted(() => void loadSkills())
           :placeholder="t('settings.skills.search')"
         />
         <div v-if="loading" class="skills-state">{{ t('label.loading') }}</div>
-        <div v-else-if="filteredSkills.length === 0" class="skills-state">
+        <div v-else-if="filteredSkills.length === 0 && filteredNative.length === 0" class="skills-state">
           <strong>{{ t('settings.skills.empty-title') }}</strong>
           <span>{{ t('settings.skills.empty-body') }}</span>
         </div>
-        <template v-else>
+        <template v-if="!loading">
           <div
             v-for="skill in filteredSkills"
             :key="skill.name"
@@ -615,6 +916,39 @@ onMounted(() => void loadSkills())
             />
           </div>
         </template>
+        <template v-if="filteredNative.length > 0">
+          <div class="skills-group-title">{{ t('settings.skills.native-group') }}</div>
+          <div
+            v-for="skill in filteredNative"
+            :key="skill.realPath"
+            class="skill-list-item native"
+          >
+            <button
+              type="button"
+              class="skill-select"
+              :title="skill.path"
+              @click="openNativeFolder(skill)"
+            >
+              <span class="skill-status-rail" aria-hidden="true">
+                <span class="enabled"></span>
+                <span :class="skill.valid ? 'valid' : 'invalid'"></span>
+                <span class="clear"></span>
+              </span>
+              <span class="skill-list-copy">
+                <strong>{{ skill.name }}</strong>
+                <span>{{ skill.description || skill.error || t('settings.skills.no-description') }}</span>
+              </span>
+            </button>
+            <span class="skill-source-tag">{{ t('settings.skills.source-native', { agent: skill.source }) }}</span>
+            <button
+              type="button"
+              class="skill-migrate"
+              :disabled="busy || !skill.valid"
+              :title="t('settings.skills.migrate-hint')"
+              @click.stop="migrateNative(skill)"
+            >{{ t('settings.skills.migrate') }}</button>
+          </div>
+        </template>
       </aside>
 
       <main class="skills-editor">
@@ -629,8 +963,9 @@ onMounted(() => void loadSkills())
                 <h3>{{ draft.name }}</h3>
                 <span v-if="draft.valid === false" class="skill-badge danger">{{ t('settings.skills.invalid') }}</span>
                 <span v-if="draft.nativeConflict" class="skill-badge warning">{{ t('settings.skills.native-conflict') }}</span>
+                <span v-if="!draft.managed" class="skill-badge">{{ t('settings.skills.source-shared-user') }}</span>
               </div>
-              <p>{{ t('settings.skills.editor-hint') }}</p>
+              <p>{{ draft.managed ? t('settings.skills.editor-hint') : t('settings.skills.editor-readonly-hint') }}</p>
             </div>
             <button type="button" :disabled="!draft.path && !rootPath" @click="openSkillFolder">
               {{ t('settings.skills.open-folder') }}
@@ -696,10 +1031,17 @@ onMounted(() => void loadSkills())
             </section>
 
             <footer class="skill-editor-actions">
-              <button type="button" class="danger" :disabled="busy" @click="deleteSkill">
+              <button
+                v-if="draft.migratedFrom"
+                type="button"
+                :disabled="busy"
+                :title="draft.migratedFrom"
+                @click="restoreNative(draft)"
+              >{{ t('settings.skills.restore') }}</button>
+              <button type="button" class="danger" :disabled="busy || !draft.managed" @click="deleteSkill">
                 {{ t('settings.skills.delete') }}
               </button>
-              <button type="button" class="primary" :disabled="busy || draft.valid === false" @click="saveSkill">
+              <button type="button" class="primary" :disabled="busy || draft.valid === false || !draft.managed" @click="saveSkill">
                 {{ t('settings.skills.save') }}
               </button>
             </footer>
@@ -1028,4 +1370,41 @@ input:disabled { color: var(--text-muted); background: var(--bg-muted); }
 }
 .skills-matrix-legend .swatch.on { color: var(--accent-success, #6BC77F); font-weight: 700; }
 .skills-matrix-legend .swatch.unsupported { background: var(--bg-muted); }
+/* ── Two sources ─────────────────────────────────────────────────────── */
+.skills-group-title {
+  margin: 10px 4px 4px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.skill-list-item.native .skill-select { cursor: default; }
+.skill-migrate { padding: 3px 8px; font-size: 11px; white-space: nowrap; }
+.skill-list-item.native .skill-select:hover { background: transparent; }
+.skill-source-tag,
+.skills-matrix .matrix-source {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border-muted);
+  font-size: 10px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.skills-matrix .matrix-source { margin-left: 6px; }
+.skills-matrix .matrix-source.native { border-style: dashed; }
+.skills-matrix-search { max-width: 260px; }
+.skills-matrix td.auto > button {
+  color: var(--accent-success, #6BC77F);
+  background: color-mix(in srgb, var(--accent-success, #6BC77F) 14%, transparent);
+  cursor: default;
+}
+.skills-matrix td.auto > button:disabled { opacity: 1; }
+.skills-matrix tbody tr.native th { border-left: 3px dashed var(--border-muted); }
+.skills-matrix-legend .swatch.auto {
+  color: var(--accent-success, #6BC77F);
+  background: color-mix(in srgb, var(--accent-success, #6BC77F) 14%, transparent);
+  border-color: transparent;
+}
 </style>

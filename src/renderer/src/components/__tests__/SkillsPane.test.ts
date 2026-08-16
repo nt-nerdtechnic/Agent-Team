@@ -24,25 +24,40 @@ const skill = {
 }
 
 const agents = [
-  { key: 'claude', label: 'Claude Code', state: 'wired' },
-  { key: 'kimi', label: 'Kimi Code', state: 'wired' },
-  { key: 'pi', label: 'Pi', state: 'wired' },
-  { key: 'codex', label: 'Codex', state: 'planned' },
-  { key: 'aider', label: 'Aider', state: 'unsupported' },
+  { key: 'claude', label: 'Claude Code', state: 'wired', reads_shared_root: false },
+  { key: 'kimi', label: 'Kimi Code', state: 'wired', reads_shared_root: false },
+  { key: 'pi', label: 'Pi', state: 'wired', reads_shared_root: false },
+  { key: 'codex', label: 'Codex', state: 'wired', reads_shared_root: true },
+  { key: 'aider', label: 'Aider', state: 'unsupported', reads_shared_root: false },
 ]
+
+const nativeSkill = {
+  name: 'bug-buster',
+  description: 'Fixes bugs',
+  source: 'copilot',
+  owner_agent: 'copilot',
+  path: '/Users/x/.copilot/skills/bug-buster',
+  real_path: '/Users/x/.copilot/skills/bug-buster',
+  aliases: [],
+  valid: true,
+  error: '',
+}
 
 function mockBackend(overrides: Record<string, unknown> = {}) {
   const responses: Record<string, unknown> = {
-    'skills.list': { ok: true, payload: { skills: [skill], root: '/tmp/skills', agents } },
+    // Consent already on record: the default fixture is about everything
+    // *after* the first write into ~/.agents/skills was allowed.
+    'skills.list': { ok: true, payload: { skills: [skill], root: '/tmp/skills', agents, write_consented: true } },
     'skills.get': { ok: true, payload: { skill } },
     'skills.create': { ok: true, payload: { skill } },
     'skills.save': { ok: true, payload: { ok: true, skill: { ...skill, revision: 'rev-2' } } },
     'skills.set_enabled': { ok: true, payload: { skill: { ...skill, enabled: false } } },
     'skills.delete': { ok: true, payload: { name: skill.name, deleted: true } },
     'skills.set_targets': { ok: true, payload: { skill } },
+    'skills.set_native_targets': { ok: true, payload: { ok: true } },
     ...overrides,
   }
-  const send = vi.fn(async (type: string) => responses[type])
+  const send = vi.fn(async (type: string, _payload?: unknown) => responses[type])
   return { backend: { send } as never, send }
 }
 
@@ -92,6 +107,7 @@ describe('SkillsPane', () => {
     expect(send).toHaveBeenCalledWith('skills.create', {
       name: 'new-skill',
       description: 'A new skill',
+      consent: true,
     })
   })
 
@@ -225,12 +241,40 @@ describe('SkillsPane capability matrix', () => {
       'Skill', 'claude', 'kimi', 'pi', 'codex', 'aider', '',
     ])
     const cells = wrapper!.findAll('.skills-matrix tbody td')
-    // Targets are unset, so every wired agent receives it.
+    // Targets are unset, so every deliverable agent receives it.
     expect(cells[0].classes()).toContain('on')
     expect(cells[1].classes()).toContain('on')
     expect(cells[2].classes()).toContain('on')
-    expect(cells[3].classes()).toContain('planned')
+    // codex reads ~/.agents/skills itself: automatic, not a switch.
+    expect(cells[3].classes()).toContain('auto')
     expect(cells[4].classes()).toContain('unsupported')
+  })
+
+  it('paints an automatic cell as delivered but never toggleable', async () => {
+    const { send } = await openMatrix()
+    const codex = wrapper!.findAll('.skills-matrix tbody td')[3]
+
+    expect(codex.find('button').text()).toBe('●')
+    expect((codex.find('button').element as HTMLButtonElement).disabled).toBe(true)
+    await codex.find('button').trigger('click')
+    await flushPromises()
+    expect(send).not.toHaveBeenCalledWith('skills.set_targets', expect.anything())
+  })
+
+  it('does not count automatic agents when deciding a row is "all"', async () => {
+    const { send } = await openMatrix({
+      'skills.list': {
+        ok: true,
+        payload: { skills: [{ ...skill, targets: ['claude', 'pi'] }], root: '/tmp/skills', agents },
+      },
+    })
+
+    // Re-adding kimi completes the editable set {claude, kimi, pi}; codex is
+    // automatic and must not keep the row from collapsing back to null.
+    await wrapper!.findAll('.skills-matrix tbody td')[1].find('button').trigger('click')
+    await flushPromises()
+
+    expect(send).toHaveBeenCalledWith('skills.set_targets', { name: 'review-code', agents: null })
   })
 
   it('never lets an unwired agent be toggled', async () => {
@@ -315,5 +359,306 @@ describe('SkillsPane capability matrix', () => {
       (wrapper!.findAll('.skills-matrix tbody td')[0].find('button').element as HTMLButtonElement)
         .disabled
     ).toBe(true)
+  })
+})
+
+
+describe('SkillsPane native skills', () => {
+  let wrapper: VueWrapper | undefined
+
+  beforeEach(() => {
+    i18n.global.locale.value = 'en-US'
+    window.agentTeam = { openPath: vi.fn().mockResolvedValue({ ok: true }) } as unknown as typeof window.agentTeam
+  })
+
+  afterEach(() => {
+    wrapper?.unmount()
+    wrapper = undefined
+    vi.restoreAllMocks()
+  })
+
+  async function open(view: 'list' | 'matrix', extra: Record<string, unknown> = {}) {
+    const mocked = mockBackend({
+      'skills.list': {
+        ok: true,
+        payload: {
+          skills: [skill],
+          native: [nativeSkill],
+          native_targets: {},
+          root: '/tmp/skills',
+          agents,
+          ...extra,
+        },
+      },
+    })
+    wrapper = mount(SkillsPane, { props: { backend: mocked.backend }, global: { plugins: [i18n] } })
+    await flushPromises()
+    if (view === 'matrix') {
+      await wrapper.findAll('.skills-view-switch button')[1].trigger('click')
+      await flushPromises()
+    }
+    return mocked
+  }
+
+  it('lists a native skill read-only under its own group with its source', async () => {
+    await open('list')
+
+    const item = wrapper!.find('.skill-list-item.native')
+    expect(item.exists()).toBe(true)
+    expect(item.text()).toContain('bug-buster')
+    expect(item.find('.skill-source-tag').text()).toBe("copilot's own")
+    // No enable switch: it is not ours to switch.
+    expect(item.findAll('input[type="checkbox"], [role="switch"]')).toHaveLength(0)
+  })
+
+  it('shows a native row in the matrix, automatic for its owner and opt-in elsewhere', async () => {
+    await open('matrix')
+
+    const rows = wrapper!.findAll('.skills-matrix tbody tr')
+    expect(rows).toHaveLength(2)
+    const native = rows[1]
+    expect(native.classes()).toContain('native')
+    const cells = native.findAll('td')
+    // Owner (copilot) is not among the fixture agents; every wired cell is
+    // opt-in and therefore off by default.
+    expect(cells[0].classes()).toContain('off')
+    expect(cells[1].classes()).toContain('off')
+    expect(cells[3].classes()).toContain('off') // codex: native rows are not "auto" for shared-root readers
+    expect(cells[4].classes()).toContain('unsupported')
+  })
+
+  it('opts a native skill in to another agent by real path', async () => {
+    const { send } = await open('matrix')
+
+    await wrapper!.findAll('.skills-matrix tbody tr')[1].findAll('td')[0].find('button').trigger('click')
+    await flushPromises()
+
+    expect(send).toHaveBeenCalledWith('skills.set_native_targets', {
+      real_path: '/Users/x/.copilot/skills/bug-buster',
+      agents: ['claude'],
+    })
+  })
+
+  it('marks the owner cell automatic when the owner is a listed agent', async () => {
+    await open('matrix', {
+      native: [{ ...nativeSkill, source: 'claude', owner_agent: 'claude', path: '/Users/x/.claude/skills/bug-buster', real_path: '/Users/x/.claude/skills/bug-buster' }],
+    })
+
+    const cells = wrapper!.findAll('.skills-matrix tbody tr')[1].findAll('td')
+    expect(cells[0].classes()).toContain('auto')
+    expect((cells[0].find('button').element as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('never delivers an invalid native skill', async () => {
+    const { send } = await open('matrix', {
+      native: [{ ...nativeSkill, valid: false, error: 'SKILL.md missing' }],
+    })
+    const row = wrapper!.findAll('.skills-matrix tbody tr')[1]
+
+    expect(row.classes()).toContain('off')
+    expect(row.text()).toContain('SKILL.md missing')
+    await row.findAll('td')[0].find('button').trigger('click')
+    await flushPromises()
+    expect(send).not.toHaveBeenCalledWith('skills.set_native_targets', expect.anything())
+  })
+
+  it('makes a shared skill the user created read-only in the editor', async () => {
+    const mocked = mockBackend({
+      'skills.list': {
+        ok: true,
+        payload: { skills: [{ ...skill, managed: false }], native: [], root: '/tmp/skills', agents },
+      },
+      'skills.get': { ok: true, payload: { skill: { ...skill, managed: false } } },
+    })
+    wrapper = mount(SkillsPane, { props: { backend: mocked.backend }, global: { plugins: [i18n] } })
+    await flushPromises()
+
+    const buttons = wrapper.findAll('.skill-editor-actions button')
+    expect(buttons.every((b) => (b.element as HTMLButtonElement).disabled)).toBe(true)
+    expect(wrapper.text()).toContain('edit it where it lives')
+  })
+})
+
+describe('SkillsPane write consent', () => {
+  let wrapper: VueWrapper | undefined
+
+  beforeEach(() => {
+    i18n.global.locale.value = 'en-US'
+    window.agentTeam = {} as unknown as typeof window.agentTeam
+  })
+
+  afterEach(() => {
+    wrapper?.unmount()
+    wrapper = undefined
+    vi.restoreAllMocks()
+  })
+
+  async function startCreate(consented: boolean) {
+    const mocked = mockBackend({
+      'skills.list': {
+        ok: true,
+        payload: { skills: [], native: [], root: '/Users/x/.agents/skills', agents, write_consented: consented },
+      },
+    })
+    wrapper = mount(SkillsPane, { props: { backend: mocked.backend }, global: { plugins: [i18n] } })
+    await flushPromises()
+    const newButton = wrapper.findAll('.skills-toolbar-actions button').find((b) => b.text() === 'New skill')!
+    await newButton.trigger('click')
+    await wrapper.find('.skills-create input').setValue('fresh')
+    return mocked
+  }
+
+  it('asks once, names the exact folder, and sends consent only after yes', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { send } = await startCreate(false)
+
+    await wrapper!.find('.skills-create').trigger('submit')
+    await flushPromises()
+
+    expect(confirm).toHaveBeenCalledTimes(1)
+    expect(confirm.mock.calls[0][0]).toContain('/Users/x/.agents/skills')
+    expect(send).toHaveBeenCalledWith('skills.create', {
+      name: 'fresh', description: '', consent: true,
+    })
+  })
+
+  it('writes nothing when the user declines', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const { send } = await startCreate(false)
+
+    await wrapper!.find('.skills-create').trigger('submit')
+    await flushPromises()
+
+    expect(send).not.toHaveBeenCalledWith('skills.create', expect.anything())
+  })
+
+  it('does not ask again once consent is on record', async () => {
+    const confirm = vi.spyOn(window, 'confirm')
+    const { send } = await startCreate(true)
+
+    await wrapper!.find('.skills-create').trigger('submit')
+    await flushPromises()
+
+    expect(confirm).not.toHaveBeenCalled()
+    expect(send).toHaveBeenCalledWith('skills.create', {
+      name: 'fresh', description: '', consent: true,
+    })
+  })
+
+  it('re-asks when the backend still wants consent, then retries', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const mocked = mockBackend({
+      'skills.list': {
+        ok: true,
+        payload: { skills: [], native: [], root: '/Users/x/.agents/skills', agents, write_consented: true },
+      },
+    })
+    let calls = 0
+    mocked.send.mockImplementation(async (type: string) => {
+      if (type === 'skills.create' && calls++ === 0) {
+        return { ok: false, error: { code: 'SKILL_CONSENT_REQUIRED', message: 'x', details: { root: '/Users/x/.agents/skills' } } }
+      }
+      return type === 'skills.create'
+        ? { ok: true, payload: { skill } }
+        : { ok: true, payload: { skills: [], native: [], root: '/Users/x/.agents/skills', agents, write_consented: true } }
+    })
+    wrapper = mount(SkillsPane, { props: { backend: mocked.backend }, global: { plugins: [i18n] } })
+    await flushPromises()
+    const newButton = wrapper.findAll('.skills-toolbar-actions button').find((b) => b.text() === 'New skill')!
+    await newButton.trigger('click')
+    await wrapper.find('.skills-create input').setValue('fresh')
+
+    await wrapper.find('.skills-create').trigger('submit')
+    await flushPromises()
+
+    expect(confirm).toHaveBeenCalledTimes(1)
+    const creates = mocked.send.mock.calls.filter((c) => c[0] === 'skills.create')
+    expect(creates).toHaveLength(2)
+    expect(creates[1][1]).toMatchObject({ consent: true })
+  })
+})
+
+describe('SkillsPane migrate and restore', () => {
+  let wrapper: VueWrapper | undefined
+
+  beforeEach(() => {
+    i18n.global.locale.value = 'en-US'
+    window.agentTeam = { openPath: vi.fn() } as unknown as typeof window.agentTeam
+  })
+
+  afterEach(() => {
+    wrapper?.unmount()
+    wrapper = undefined
+    vi.restoreAllMocks()
+  })
+
+  async function openList(payload: Record<string, unknown>, extra: Record<string, unknown> = {}) {
+    const mocked = mockBackend({
+      'skills.list': { ok: true, payload: { skills: [], native: [], root: '/Users/x/.agents/skills', agents, write_consented: true, ...payload } },
+      'skills.migrate_native': { ok: true, payload: { skill, from: nativeSkill.path } },
+      'skills.restore_native': { ok: true, payload: { name: 'review-code', restored_to: '/x' } },
+      ...extra,
+    })
+    wrapper = mount(SkillsPane, { props: { backend: mocked.backend }, global: { plugins: [i18n] } })
+    await flushPromises()
+    return mocked
+  }
+
+  it('migrates only after a confirm that names source, destination and undo', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const { send } = await openList({ native: [nativeSkill] })
+
+    await wrapper!.find('.skill-migrate').trigger('click')
+    await flushPromises()
+
+    const text = confirm.mock.calls[0][0] as string
+    expect(text).toContain('/Users/x/.copilot/skills/bug-buster')   // from
+    expect(text).toContain('/Users/x/.agents/skills')               // to
+    expect(text).toContain('copilot keeps reading it')              // link stays
+    expect(text).toContain('Restore')                               // undo
+    expect(send).toHaveBeenCalledWith('skills.migrate_native', {
+      real_path: '/Users/x/.copilot/skills/bug-buster',
+      consent: true,
+    })
+  })
+
+  it('does nothing when the migrate confirm is declined', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const { send } = await openList({ native: [nativeSkill] })
+
+    await wrapper!.find('.skill-migrate').trigger('click')
+    await flushPromises()
+
+    expect(send).not.toHaveBeenCalledWith('skills.migrate_native', expect.anything())
+  })
+
+  it('never offers migrate for an invalid native skill', async () => {
+    await openList({ native: [{ ...nativeSkill, valid: false, error: 'SKILL.md missing' }] })
+
+    expect((wrapper!.find('.skill-migrate').element as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('shows restore only for a migrated skill and confirms the destination', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const migrated = { ...skill, migrated_from: '/Users/x/.copilot/skills/review-code' }
+    const { send } = await openList(
+      { skills: [migrated] },
+      { 'skills.get': { ok: true, payload: { skill: migrated } } }
+    )
+
+    const restore = wrapper!.findAll('.skill-editor-actions button').find((b) => b.text() === 'Restore')
+    expect(restore).toBeDefined()
+    await restore!.trigger('click')
+    await flushPromises()
+
+    expect(confirm.mock.calls[0][0]).toContain('/Users/x/.copilot/skills/review-code')
+    expect(send).toHaveBeenCalledWith('skills.restore_native', { name: 'review-code' })
+  })
+
+  it('has no restore button for a skill born in the shared root', async () => {
+    await openList({ skills: [skill] })
+
+    const labels = wrapper!.findAll('.skill-editor-actions button').map((b) => b.text())
+    expect(labels).not.toContain('Restore')
   })
 })

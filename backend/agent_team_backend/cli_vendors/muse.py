@@ -660,6 +660,7 @@ SPEC = VendorSpec(
     skills_supported=True,
     skills_wiring=SkillsWiring(
         root_env="HOME",
+        reads_shared_root=True,
         skills_rel=(".agents", "skills"),
     ),
     label="Muse Code",

@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import shlex
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from agent_team_backend import native_skills
 from agent_team_backend.cli_vendors.base import SkillsWiring
 from agent_team_backend.cli_vendors.registry import VENDORS
 from agent_team_backend.plugins.builtin.navide_skills import skills_wiring
@@ -18,11 +20,20 @@ def _skill(root: Path, name: str) -> Path:
 
 
 class _Store:
-    """Minimal SkillsStore stand-in: a managed root and a per-agent list."""
+    """Minimal SkillsStore stand-in: a shared root, per-agent lists, and an
+    optional set of native skills with their own opt-in targets."""
 
-    def __init__(self, managed: Path, targets: dict[str, list[str]] | None = None) -> None:
+    def __init__(
+        self,
+        managed: Path,
+        targets: dict[str, list[str]] | None = None,
+        native: list[Any] | None = None,
+        native_targets: dict[str, list[str]] | None = None,
+    ) -> None:
         self._managed = managed
         self._targets = targets or {}
+        self._native = native or []
+        self._native_targets = native_targets or {}
 
     @property
     def runtime_root(self) -> Path:
@@ -37,6 +48,28 @@ class _Store:
         if not self._managed.is_dir():
             return []
         return sorted(entry.name for entry in self._managed.iterdir())
+
+    def native_skills(self) -> list[Any]:
+        return self._native
+
+    def native_targets_for(self, agent_key: str) -> list[str]:
+        return [real for real, agents in self._native_targets.items() if agent_key in agents]
+
+
+def _native(tmp_path: Path, name: str, owner: str = "copilot") -> Any:
+    """A native skill living under a fake vendor root, owned by ``owner``."""
+    real = tmp_path / "vendor" / owner / name
+    real.mkdir(parents=True, exist_ok=True)
+    (real / "SKILL.md").write_text(f"---\nname: {name}\ndescription: d\n---\n", encoding="utf-8")
+    return native_skills.NativeSkill(
+        name=name, description="d", source=owner, owner_agent=owner,
+        path=str(real), real_path=str(real.resolve()),
+    )
+
+
+def _store_with_native(tmp_path: Path, agent_key: str, name: str = "alpha", owner: str = "copilot") -> _Store:
+    skill = _native(tmp_path, name, owner)
+    return _Store(tmp_path / "managed", native=[skill], native_targets={skill.real_path: [agent_key]})
 
 
 def _view(
@@ -274,14 +307,18 @@ def _root(
     pane_id: str = "pane-1",
     env: dict[str, str] | None = None,
     targets: dict[str, list[str]] | None = None,
+    store: _Store | None = None,
 ) -> tuple[str | None, dict[str, str]]:
     env = {} if env is None else env
+    # codex/grok read the shared root themselves, so the thing that reaches
+    # them through delivery is a native skill from another CLI.
+    store = store or _store_with_native(tmp_path, agent_key)
     result = skills_wiring.prepare_root(
         agent_key,
         wiring,
         pane_id,
         env,
-        store=_Store(tmp_path / "managed", targets),
+        store=store,
         native_root=tmp_path / "native",
         home=tmp_path / "home",
     )
@@ -309,7 +346,7 @@ def test_config_home_mirrors_the_real_root_and_owns_only_the_skills_dir(
     # The skills directory is ours, and carries both sides.
     assert not (shim / "skills").is_symlink()
     assert sorted(p.name for p in (shim / "skills").iterdir()) == ["alpha", "mine"]
-    assert (shim / "skills" / "alpha").resolve() == (tmp_path / "managed" / "alpha").resolve()
+    assert (shim / "skills" / "alpha").resolve() == (tmp_path / "vendor" / "copilot" / "alpha").resolve()
     assert (shim / "skills" / "mine").resolve() == (real / "skills" / "mine").resolve()
     assert env == {}
 
@@ -418,12 +455,12 @@ def test_wire_command_sets_the_home_variable_without_touching_the_command(
 CURSOR = SkillsWiring(project_rel=(".cursor", "skills"))
 
 
-def _sync(tmp_path: Path, cwd: Path, targets: dict[str, list[str]] | None = None) -> bool:
+def _sync(tmp_path: Path, cwd: Path, store: _Store | None = None) -> bool:
     return skills_wiring.sync_project_dir(
         "cursor",
         CURSOR,
         str(cwd),
-        store=_Store(tmp_path / "managed", targets),
+        store=store or _store_with_native(tmp_path, "cursor"),
         native_root=tmp_path / "native",
     )
 
@@ -436,7 +473,7 @@ def test_project_dir_adds_our_links_and_keeps_them_out_of_git(tmp_path: Path) ->
     assert _sync(tmp_path, cwd) is True
 
     link = cwd / ".cursor" / "skills" / "alpha"
-    assert link.resolve() == (tmp_path / "managed" / "alpha").resolve()
+    assert link.resolve() == (tmp_path / "vendor" / "copilot" / "alpha").resolve()
     exclude = (cwd / ".git" / "info" / "exclude").read_text(encoding="utf-8")
     assert "/.cursor/skills/" in exclude
 
@@ -445,14 +482,16 @@ def test_project_dir_adds_our_links_and_keeps_them_out_of_git(tmp_path: Path) ->
 
 
 def test_project_dir_removes_only_our_own_stale_links(tmp_path: Path) -> None:
-    _skill(tmp_path / "managed", "alpha")
-    _skill(tmp_path / "managed", "beta")
+    alpha, beta = _native(tmp_path, "alpha"), _native(tmp_path, "beta")
+    both = _Store(tmp_path / "managed", native=[alpha, beta],
+                  native_targets={alpha.real_path: ["cursor"], beta.real_path: ["cursor"]})
     cwd = tmp_path / "repo"
-    _sync(tmp_path, cwd)
+    _sync(tmp_path, cwd, both)
     assert (cwd / ".cursor" / "skills" / "beta").is_symlink()
 
-    (tmp_path / "managed" / "beta").rmdir()
-    _sync(tmp_path, cwd)
+    only_alpha = _Store(tmp_path / "managed", native=[alpha],
+                        native_targets={alpha.real_path: ["cursor"]})
+    _sync(tmp_path, cwd, only_alpha)
 
     assert not (cwd / ".cursor" / "skills" / "beta").is_symlink()
     assert (cwd / ".cursor" / "skills" / "alpha").is_symlink()
@@ -537,7 +576,12 @@ def test_config_home_keeps_a_suppressed_discovery_root_reachable(
         discovery_home=((".agents", "skills"),),
     )
 
-    root, _ = _root(tmp_path, wiring, agent_key="copilot")
+    # copilot reads the shared root itself, so what reaches it by delivery is
+    # a native skill from another CLI (here: one of claude's).
+    root, _ = _root(
+        tmp_path, wiring, agent_key="copilot",
+        store=_store_with_native(tmp_path, "copilot", "alpha", owner="claude"),
+    )
 
     assert sorted(p.name for p in (Path(root) / "skills").iterdir()) == [
         "alpha", "shared", "theirs",
@@ -603,3 +647,79 @@ def test_config_home_does_not_reconcile_a_shim_it_does_not_own(
 
     assert (shim / ".grok" / "mcp.json").is_file()
     assert not (tmp_path / "home" / ".grok").exists()
+
+
+# ── Two sources, two "already reads it" rules ───────────────────────────────
+
+
+def _sources(tmp_path: Path, agent_key: str, store: _Store) -> list[str]:
+    return [p.name for p in skills_wiring._managed_sources(agent_key, store, tmp_path / "native")]
+
+
+def test_shared_skill_is_not_delivered_to_a_cli_that_reads_the_shared_root(tmp_path: Path) -> None:
+    _skill(tmp_path / "managed", "tdd")
+    store = _Store(tmp_path / "managed")
+
+    # claude does not read ~/.agents/skills → delivered.
+    assert _sources(tmp_path, "claude", store) == ["tdd"]
+    # codex reads it itself → a second copy would only shadow the original.
+    assert _sources(tmp_path, "codex", store) == []
+
+
+def test_native_skill_is_delivered_to_other_agents_but_never_its_owner(tmp_path: Path) -> None:
+    skill = _native(tmp_path, "bug-buster", owner="copilot")
+    store = _Store(
+        tmp_path / "managed", native=[skill],
+        native_targets={skill.real_path: ["claude", "copilot", "codex"]},
+    )
+
+    assert _sources(tmp_path, "claude", store) == ["bug-buster"]
+    assert _sources(tmp_path, "codex", store) == ["bug-buster"]
+    # copilot already reads its own directory.
+    assert _sources(tmp_path, "copilot", store) == []
+
+
+def test_native_skill_is_opt_in(tmp_path: Path) -> None:
+    skill = _native(tmp_path, "bug-buster")
+    store = _Store(tmp_path / "managed", native=[skill])  # no targets
+
+    assert _sources(tmp_path, "claude", store) == []
+
+
+def test_invalid_native_skill_is_never_delivered(tmp_path: Path) -> None:
+    skill = _native(tmp_path, "broken")
+    broken = native_skills.NativeSkill(**{**skill.__dict__, "valid": False, "error": "x"})
+    store = _Store(tmp_path / "managed", native=[broken], native_targets={broken.real_path: ["claude"]})
+
+    assert _sources(tmp_path, "claude", store) == []
+
+
+def test_same_directory_reached_twice_is_delivered_once(tmp_path: Path) -> None:
+    """A shared skill the user also linked from a native root: one skill."""
+    shared = _skill(tmp_path / "managed", "dup")
+    linked = native_skills.NativeSkill(
+        name="dup", description="", source="claude", owner_agent="claude",
+        path=str(tmp_path / "native" / "dup"), real_path=str(shared.resolve()),
+    )
+    store = _Store(tmp_path / "managed", native=[linked], native_targets={linked.real_path: ["kimi"]})
+
+    assert _sources(tmp_path, "kimi", store) == ["dup"]
+
+
+def test_native_name_collision_still_favours_the_native_copy(tmp_path: Path) -> None:
+    """Shared 'plan' vs a different native 'plan' in the target's own root."""
+    _skill(tmp_path / "managed", "plan")
+    _skill(tmp_path / "native", "plan")  # claude's own, different directory
+    store = _Store(tmp_path / "managed")
+
+    assert _sources(tmp_path, "claude", store) == []
+
+
+def test_every_shared_root_reader_is_declared() -> None:
+    """The 'automatic' matrix cells come from this flag; keep it honest."""
+    readers = sorted(
+        key for key, spec in VENDORS.items()
+        if spec.skills_wiring is not None and spec.skills_wiring.reads_shared_root
+    )
+    # Verified 2026-08-15 against each binary / official docs.
+    assert readers == ["codex", "copilot", "cursor", "grok", "muse", "opencode"]

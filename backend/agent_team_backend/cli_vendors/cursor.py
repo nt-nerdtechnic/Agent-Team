@@ -770,7 +770,12 @@ SPEC = VendorSpec(
     # the same corner its MCP wiring is in, so the workspace file is again the
     # only surface. Its CLI is also documented not to load ~/.agents/skills.
     skills_supported=True,
-    skills_wiring=SkillsWiring(project_rel=(".cursor", "skills")),
+    skills_wiring=SkillsWiring(
+        project_rel=(".cursor", "skills"),
+        # ~/.agents/skills too, per its docs — though its CLI is documented
+        # not to load that root, so the automatic cell is best-effort here.
+        reads_shared_root=True,
+    ),
     label="Cursor CLI",
     # The one CLI with no spawn-time surface — no MCP flag, no config
     # variable — so its per-project config file is the only way in. A bare

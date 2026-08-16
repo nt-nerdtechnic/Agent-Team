@@ -53,7 +53,7 @@ from .projects import (
     _KV_KEY as PROJECT_KV_KEY,
 )
 from .recent_workspaces import RECENT_FILE, _KV_KEY as RECENT_KV_KEY
-from .skills_store import SKILLS_DIR, SKILLS_RUNTIME_DIR
+from .skills_store import SKILLS_RUNTIME_DIR
 from .spawn_history import (
     SPAWN_HISTORY_FILE,
     _KV_KEY as SPAWN_HISTORY_KV_KEY,
@@ -493,18 +493,6 @@ def _appdata_and_electron_groups(
         ),
         errors,
     )
-    skills = _measured(
-        _Item(
-            "installedSkills",
-            risk="danger",
-            cleanable=True,
-            root=root,
-            paths=[root / SKILLS_DIR],
-            note="Removes every installed skill; they must be reinstalled.",
-        ),
-        errors,
-    )
-
     chromium = _measured(
         _Item(
             "chromiumCache",
@@ -552,7 +540,6 @@ def _appdata_and_electron_groups(
         backups,
         runtime,
         usage_cache,
-        skills,
     ]
     other = _Item(
         "appDataOther",

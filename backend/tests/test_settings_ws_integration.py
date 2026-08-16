@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
 import json
 import os
 import shutil
@@ -121,7 +122,7 @@ def test_settings_paths_and_bundle_redact_mcp_without_skills_content(
             },
         ]
     )
-    skills_store.create_skill("private-skill", "must not be bundled")
+    skills_store.create_skill("private-skill", "must not be bundled", consent=True)
     attachment = skills_store.root / "private-skill" / "references" / "secret.txt"
     attachment.parent.mkdir()
     attachment.write_text("attachment-content", encoding="utf-8")
@@ -260,7 +261,7 @@ async def test_bundle_import_restores_local_mcp_secrets_and_ignores_skills(
             },
         ]
     )
-    skills_store.create_skill("keep-me", "untouched")
+    skills_store.create_skill("keep-me", "untouched", consent=True)
     session = _session()
 
     response = await _request(
@@ -319,7 +320,7 @@ async def test_skills_handlers_run_store_operations_in_worker_threads(
     created = await _request(
         session,
         "skills.create",
-        {"name": "demo", "description": "first"},
+        {"name": "demo", "description": "first", "consent": True},
         msg_id="create",
     )
     revision = created["payload"]["skill"]["revision"]
@@ -376,7 +377,7 @@ async def test_skills_handlers_map_expected_store_errors(
     invalid = await _request(
         session, "skills.create", {"name": "../escape"}, msg_id="invalid"
     )
-    created = skills_store.create_skill("conflict", "initial")["skill"]
+    created = skills_store.create_skill("conflict", "initial", consent=True)["skill"]
     skills_store.save_skill(
         "conflict",
         {"description": "external"},
@@ -410,3 +411,32 @@ async def test_skills_handlers_map_expected_store_errors(
     assert conflict["error"]["details"]["expected_revision"] == created["revision"]
     assert conflict["error"]["details"]["actual_revision"] != created["revision"]
     assert store_error["error"]["code"] == "SKILLS_STORE_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_skills_create_over_ws_asks_for_consent_before_the_first_write(monkeypatch) -> None:
+    """The handler must surface consent as its own error code, not a generic
+    validation failure, so the UI can ask and retry."""
+    from agent_team_backend import app as app_module
+    from agent_team_backend.skills_store import SkillsStore
+
+    tmp = Path(tempfile.mkdtemp())
+    store = SkillsStore(
+        root=tmp / "skills", state_path=tmp / "skills.json",
+        runtime_root=tmp / "runtime" / "skills", native_roots=[],
+    )
+    monkeypatch.setattr(app_module, "skills_store", store)
+    session = app_module.Session(FakeWebSocket())  # type: ignore[arg-type]
+
+    refused = await _request(
+        session, "skills.create", {"name": "demo", "description": "d"}, msg_id="c1"
+    )
+    assert refused["error"]["code"] == "SKILL_CONSENT_REQUIRED"
+    assert refused["error"]["details"]["root"] == str(store.root)
+    assert not store.root.exists()
+
+    granted = await _request(
+        session, "skills.create", {"name": "demo", "description": "d", "consent": True}, msg_id="c2"
+    )
+    assert granted["payload"]["skill"]["name"] == "demo"
+    assert store.write_consented() is True

@@ -242,41 +242,80 @@ def sync_project_dir(
     """Keep our links in the workspace's skill directory up to date.
 
     The last-resort surface, for a CLI with no relocation variable: the
-    directory belongs to the user's repository, so only links that point into
-    our own view tree are ever written or removed. Anything else found there
-    is the user's and is left untouched.
+    directory belongs to the user's repository, so only links *we planted*
+    are ever written or removed there. Which those are cannot be inferred
+    from where a link points — a delivered native skill lives in another
+    CLI's directory, exactly like a link the user might make themselves — so
+    the set is recorded in a manifest beside the links. Anything not in the
+    manifest is the user's and is left untouched.
     """
     if not cwd:
         return False
     try:
         target = Path(cwd).joinpath(*wiring.project_rel)
         sources = _managed_sources(agent_key, store, native_root)
-        managed_root = _managed_root(store)
-        if not sources and not target.is_dir():
+        planted = _read_manifest(target)
+        if not sources and not planted and not target.is_dir():
             return False
         target.mkdir(parents=True, exist_ok=True)
         wanted = {source.name: source for source in sources}
-        for entry in target.iterdir():
-            if entry.name in wanted:
+        # Remove what we planted before and no longer want; never anything else.
+        for name in sorted(planted):
+            if name in wanted:
                 continue
-            if _points_into(entry, managed_root):
-                entry.unlink(missing_ok=True)
+            link = target / name
+            if link.is_symlink():
+                link.unlink(missing_ok=True)
+            planted.discard(name)
         for name, source in wanted.items():
             link = target / name
             if link.is_symlink():
                 if _resolve(link) == _resolve(source):
+                    planted.add(name)
                     continue
-                if not _points_into(link, managed_root):
+                if name not in planted:
                     continue  # the user's own link wins
                 link.unlink(missing_ok=True)
             elif link.exists():
                 continue  # a real directory here is the user's skill
             link.symlink_to(source, target_is_directory=True)
+            planted.add(name)
+        _write_manifest(target, planted)
         _exclude_from_git(target)
         return bool(sources)
     except Exception as err:  # noqa: BLE001 - optional wiring must never block spawn
         log.warning("Managed-skills project directory for %s failed: %s", agent_key, err)
         return False
+
+
+#: Names of the links Navide planted in a workspace skills directory. Lives
+#: beside them so it travels with the checkout and is covered by the same
+#: git exclude.
+MANIFEST_FILE = ".navide-links"
+
+
+def _read_manifest(target: Path) -> set[str]:
+    manifest = target / MANIFEST_FILE
+    try:
+        if not manifest.is_file():
+            return set()
+        return {
+            line.strip()
+            for line in manifest.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.startswith("#")
+        }
+    except OSError:
+        return set()
+
+
+def _write_manifest(target: Path, planted: set[str]) -> None:
+    manifest = target / MANIFEST_FILE
+    if not planted:
+        manifest.unlink(missing_ok=True)
+        return
+    body = "# links planted by Navide; edit or delete freely, Navide only touches these\n"
+    body += "".join(f"{name}\n" for name in sorted(planted))
+    manifest.write_text(body, encoding="utf-8")
 
 
 def wire_command(
@@ -337,17 +376,71 @@ def _managed_sources(
     store: SkillsStore | None,
     native_root: Path | None,
 ) -> list[Path]:
-    """Enabled skills targeted at this agent, minus native-name collisions."""
+    """Every skill this agent should receive through delivery.
+
+    Two sources feed a pane, and each has a case where delivering would only
+    double what the agent already reads on its own:
+
+    - **shared** (``~/.agents/skills``): skipped entirely for a CLI that
+      discovers the shared root itself (``reads_shared_root``) — it sees them
+      without us, and a second copy in the view would shadow the original.
+    - **native** (another CLI's own directory): skipped for the CLI that owns
+      that directory, delivered to everyone else. This is how a copilot skill
+      reaches claude without anyone moving a file.
+
+    A native skill whose name collides with a shared one is dropped from the
+    view for *this* agent (native > shared, the same rule the store applies),
+    unless both names resolve to the very same directory — that is one skill
+    seen twice, not a collision.
+    """
     store = store or SkillsStore()
-    managed_root = store.rebuild_runtime_projection()
     native_root = native_root or (Path.home() / ".claude" / "skills")
-    native_names = _directory_names(native_root)
-    sources = [
-        managed_root / name
-        for name in store.targets_for(agent_key)
-        if name not in native_names
+    wiring = skills_wiring(agent_key)
+    sources: list[Path] = []
+    seen_real: set[Path] = set()
+
+    if not (wiring is not None and wiring.reads_shared_root):
+        managed_root = store.rebuild_runtime_projection()
+        # A same-named native skill wins for the CLI whose root it lives in;
+        # ``native_root`` is that root for the delivery target.
+        native_names = _directory_names(native_root)
+        for name in store.targets_for(agent_key):
+            candidate = managed_root / name
+            if not (candidate.is_dir() or candidate.is_symlink()):
+                continue
+            if name in native_names:
+                try:
+                    if (native_root / name).resolve() != candidate.resolve():
+                        continue
+                except OSError:
+                    continue
+            sources.append(candidate)
+            seen_real.add(_resolve(candidate))
+
+    for skill in _native_targets(store, agent_key):
+        real = Path(skill.real_path)
+        if real in seen_real:
+            continue
+        seen_real.add(real)
+        sources.append(real)
+    return sources
+
+
+def _native_targets(store: SkillsStore, agent_key: str) -> list[Any]:
+    """Native skills to deliver to ``agent_key``: enabled, targeted, not its own."""
+    try:
+        native = store.native_skills()
+    except Exception as err:  # noqa: BLE001 - reflection is optional
+        log.warning("native skills scan failed: %s", err)
+        return []
+    wanted = set(store.native_targets_for(agent_key))
+    return [
+        skill
+        for skill in native
+        if skill.valid
+        and skill.owner_agent != agent_key
+        and skill.real_path in wanted
     ]
-    return [source for source in sources if source.is_dir() or source.is_symlink()]
 
 
 def _materialise(
@@ -449,21 +542,6 @@ def _resolve(path: Path) -> Path:
         return path.resolve()
     except OSError:
         return path
-
-
-def _points_into(entry: Path, root: Path) -> bool:
-    """Whether ``entry`` is a link we planted (a link into our view tree).
-
-    The containment check is what keeps the workspace surface safe: a link the
-    user made, or a real directory, is never ours to remove.
-    """
-    if not entry.is_symlink():
-        return False
-    try:
-        _resolve(entry).relative_to(_resolve(root))
-    except ValueError:
-        return False
-    return True
 
 
 def _exclude_from_git(target: Path) -> None:

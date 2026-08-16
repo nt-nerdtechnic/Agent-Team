@@ -204,7 +204,7 @@ def test_prepare_refreshes_default_central_projection(tmp_path: Path) -> None:
     real = tmp_path / "real-codex"
     (real / "skills" / "native").mkdir(parents=True)
     store = SkillsStore()
-    store.create_skill("managed", "Managed")
+    store.create_skill("managed", "Managed", consent=True)
     manager = CodexHomeManager(real_home=real, panes_root=tmp_path / "panes")
 
     home = manager.prepare("pane-1")

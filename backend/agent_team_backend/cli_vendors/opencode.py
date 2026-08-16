@@ -659,6 +659,7 @@ SPEC = VendorSpec(
     # over the user's own config, so their skills keep loading.
     skills_wiring=SkillsWiring(
         config_env="OPENCODE_CONFIG_CONTENT",
+        reads_shared_root=True,
         config_paths_key=("skills", "paths"),
     ),
     label="OpenCode",
