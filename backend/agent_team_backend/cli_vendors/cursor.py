@@ -133,6 +133,22 @@ _MAX_BLOBS_PER_PASS = 512
 # intent: enough for the messaging protocol, not a transcript dump).
 _MAX_TURN_TEXT = 8000
 
+# What the user actually typed, inside Cursor's prompt wrapper. Sampled rows:
+#
+#   <timestamp>Sunday, Aug 16, 2026, 10:33 AM (UTC+9)</timestamp>
+#   <user_query>
+#   Reply with exactly: ok
+#   </user_query>
+#
+# The tag does double duty. It recovers the text panes are named from —
+# user_prompt_text drops anything '<'-prefixed, so the raw row always
+# filtered down to '' — and it separates a real prompt from the context
+# Cursor injects as its own `user` row: the first row of a session is
+# ~30k characters of <user_info>/<rules>/<agent_transcripts> and carries no
+# <user_query> at all. Without the distinction that injection would read as
+# the user's opening message and name the pane after it.
+_USER_QUERY_RE = re.compile(r"<user_query>\s*(.*?)\s*</user_query>", re.DOTALL)
+
 
 def _read_meta_json(session_dir: Path) -> dict:
     """The plain-JSON sidecar next to store.db ({} when absent/unreadable).
@@ -436,15 +452,19 @@ class CursorLogReader(LogReader):
                 ))
             elif role == "user":
                 # "user" is the cross-end contract detail panes are named
-                # from. Cursor wraps every prompt (<user_info>…, <timestamp>…
-                # <user_query>), and user_prompt_text drops '<'-prefixed
-                # injected wrappers, so in practice this text is '' — the
-                # shared filter's deliberate behaviour, not a gap here.
+                # from, so it has to carry what the person typed. Unwrap
+                # Cursor's <user_query> first (see _USER_QUERY_RE): a row
+                # without it is the injected context, not a prompt, and
+                # reporting that as user activity would name the pane after
+                # ~30k characters of rules.
+                query = _USER_QUERY_RE.search(join_text_blocks(content, "text"))
+                if query is None:
+                    continue
                 out.append(ActivityEvent(
                     vendor="cursor", event_type="agent_active", cwd=cwd,
                     session_id=session_id, file_path=str(path), dedup_key=key,
                     timestamp=timestamp, detail="user",
-                    text=user_prompt_text(join_text_blocks(content, "text")),
+                    text=user_prompt_text(query.group(1)),
                 ))
             # role=system (the prompt preamble) is not activity.
         return out

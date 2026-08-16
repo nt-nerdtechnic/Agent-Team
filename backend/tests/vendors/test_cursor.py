@@ -398,9 +398,38 @@ def test_assistant_blob_completes_the_turn_without_reasoning(
     # The timestamp must parse: the frontend dedups messaging turns by it and
     # treats an unparseable one as always-fresh (resending the turn).
     assert datetime.fromisoformat(turn.timestamp) is not None
-    # Cursor wraps every prompt, and user_prompt_text drops '<'-prefixed
-    # injected wrappers, so the user event carries no name text.
-    assert events[1].text == ""
+    # The user event carries what the person typed, unwrapped from Cursor's
+    # <user_query>. Without unwrapping, user_prompt_text drops the whole row
+    # for starting with '<' and panes lose their auto-name.
+    assert events[1].text == "say two"
+
+
+def test_injected_context_row_is_not_user_activity(tmp_path: Path, monkeypatch) -> None:
+    """Cursor's own first `user` row is context, not something anyone typed.
+
+    It is ~30k characters of <user_info>/<rules>/<agent_transcripts> and has
+    no <user_query>. Reporting it would name the pane after the rule set.
+    """
+    reader = _reader_rooted_at(tmp_path, monkeypatch)
+    db = _make_store(
+        tmp_path / ".cursor" / "chats", "8" * 32, _SID, cwd="/work/proj"
+    )
+    seen = _armed(reader, db)
+
+    _append_blobs(
+        db, "c",
+        _user("<user_info>\nWorkspace Path: /work/proj\n</user_info>\n<rules>x</rules>"),
+        _user("<timestamp>Sun</timestamp>\n<user_query>\nreal prompt\n</user_query>"),
+    )
+    events = reader.parse_activity(db, seen)
+
+    # Only ONE user event: the <rules> row is skipped. The heartbeat rides
+    # ahead of it, as it does for every pass that sees the db change.
+    assert [(e.event_type, e.detail) for e in events] == [
+        ("agent_active", "db-write"),
+        ("agent_active", "user"),
+    ]
+    assert events[-1].text == "real prompt"
 
 
 def test_activity_watermark_does_not_replay(tmp_path: Path, monkeypatch) -> None:
