@@ -760,12 +760,15 @@ async def cli_list_targets(ctx: Context) -> dict[str, Any]:
     """List the CLI panes you can send instructions to with cli_send.
 
     Returns {you, targets}. Each target: {name, address, workspace_path,
-    same_workspace, busy}. Address a pane in YOUR workspace by its bare name; a
-    pane in another workspace window by the `<folder>/<pane>` address given
-    here. A caller with no pane identity (host / external credential) has no
-    "own workspace" — every target comes back with same_workspace false and
+    same_workspace, busy, offline}. Address a pane in YOUR workspace by its bare
+    name; a pane in another workspace window by the `<folder>/<pane>` address
+    given here. A caller with no pane identity (host / external credential) has
+    no "own workspace" — every target comes back with same_workspace false and
     "you" set to the credential kind ("host" or "external"); always use the
     qualified address. Read-only.
+
+    `offline` marks a pane whose Navide window has lost its connection: it still
+    exists and is expected back, but sending to it fails until it returns.
     """
     from agent_team_backend import agent_messaging
 
@@ -782,6 +785,7 @@ async def cli_list_targets(ctx: Context) -> dict[str, Any]:
                 "workspace_path": entry.workspace_path,
                 "same_workspace": bool(me_entry and me_entry.workspace_path == entry.workspace_path),
                 "busy": entry.busy,
+                "offline": entry.offline,
             }
             for entry in agent_messaging.list_panes()
             if entry.pane_id != caller.pane_id
@@ -794,6 +798,7 @@ async def cli_list_targets(ctx: Context) -> dict[str, Any]:
             "workspace_path": entry.workspace_path,
             "same_workspace": False,
             "busy": entry.busy,
+            "offline": entry.offline,
         }
         for entry in agent_messaging.list_panes()
     ]
@@ -938,9 +943,13 @@ async def cli_send(to: str, text: str, ctx: Context) -> dict[str, Any]:
 
     Delivery is asynchronous: this returns once the message is accepted for
     delivery, not once the other agent has read it. Returns
-    {ok, target, cross_workspace, msg_key} or {ok: false, error}. Pass
-    `msg_key` to cli_check_message to learn whether the receiving window
+    {ok, target, cross_workspace, msg_key} or {ok: false, error, error_code}.
+    Pass `msg_key` to cli_check_message to learn whether the receiving window
     actually delivered it.
+
+    `error_code` "target-offline" is not "unknown-target": the pane exists but
+    its Navide window is disconnected. Wait for it to come back and retry —
+    re-sending elsewhere or reopening the pane would duplicate the work.
     """
     from agent_team_backend import agent_messaging, app
     from agent_team_backend.ipc import make_event
@@ -957,7 +966,11 @@ async def cli_send(to: str, text: str, ctx: Context) -> dict[str, Any]:
 
     result = agent_messaging.resolve(me, to)
     if result.pane is None:
-        return {"ok": False, "error": result.error or f'unknown target "{to}"'}
+        return {
+            "ok": False,
+            "error": result.error or f'unknown target "{to}"',
+            "error_code": result.code or "unknown-target",
+        }
     if me and result.pane.pane_id == me:
         return {"ok": False, "error": "that is your own pane"}
 
@@ -1182,7 +1195,11 @@ async def cli_read_log(
 
     result = agent_messaging.resolve(me, target)
     if result.pane is None:
-        return {"ok": False, "error": result.error or f'unknown target "{target}"'}
+        return {
+            "ok": False,
+            "error": result.error or f'unknown target "{target}"',
+            "error_code": result.code or "unknown-target",
+        }
 
     def _find_log_path() -> str:
         project = app.project_store.peek(result.pane.workspace_path)
@@ -1260,7 +1277,11 @@ async def cli_get_status(target: str, ctx: Context) -> dict[str, Any]:
 
     result = agent_messaging.resolve(me, target)
     if result.pane is None:
-        return {"ok": False, "error": result.error or f'unknown target "{target}"'}
+        return {
+            "ok": False,
+            "error": result.error or f'unknown target "{target}"',
+            "error_code": result.code or "unknown-target",
+        }
     pane = result.pane
 
     status: dict[str, Any] = {
@@ -1356,7 +1377,11 @@ async def cli_wait_idle(target: str, ctx: Context, timeout_s: float = 60.0) -> d
 
     result = agent_messaging.resolve(me, target)
     if result.pane is None:
-        return {"ok": False, "error": result.error or f'unknown target "{target}"'}
+        return {
+            "ok": False,
+            "error": result.error or f'unknown target "{target}"',
+            "error_code": result.code or "unknown-target",
+        }
     pane_id = result.pane.pane_id
 
     workspace_path = result.pane.workspace_path
@@ -1512,7 +1537,11 @@ async def cli_send_and_wait(
         return {"ok": False, "error": _QUALIFIED_TARGET_REQUIRED}
     resolved = agent_messaging.resolve(me, to)
     if resolved.pane is None:
-        return {"ok": False, "error": resolved.error or f'unknown target "{to}"'}
+        return {
+            "ok": False,
+            "error": resolved.error or f'unknown target "{to}"',
+            "error_code": resolved.code or "unknown-target",
+        }
     pane_id = resolved.pane.pane_id
 
     baseline = app.pane_activity(pane_id)
@@ -1620,6 +1649,52 @@ def resolve_ui_invoke(request_id: str, result: dict[str, Any]) -> bool:
     return _ui_invoke_pending.resolve(request_id, result)
 
 
+def _ui_timeout_error(workspace_path: str, timeout: float) -> dict[str, Any]:
+    """Explain an unanswered ui.invoke.request as one of two failures.
+
+    A request is broadcast and every window decides for itself whether it owns
+    workspace_path, so a silent deadline could mean "nobody there" or "someone
+    there is stuck" — opposite fixes (check the path vs. retry/inspect that
+    window), which one blended sentence left the caller guessing.
+
+    Windows mirror their CLI panes into agent_messaging, so a workspace with a
+    connected pane provably has a live window: that case is a real action
+    timeout. The reverse is a strong hint but not proof — a window with no CLI
+    pane open owns its workspace and answers ui.invoke while leaving no trace in
+    the registry — so that branch names the failure it can prove (no window
+    *known*), hands over the workspaces the backend can see, and says so. Both
+    read the registry the backend already holds; neither adds a round trip.
+    """
+    from agent_team_backend import agent_messaging
+
+    connected = [e for e in agent_messaging.list_panes(workspace_path) if not e.offline]
+    if connected:
+        return {
+            "ok": False,
+            "result": None,
+            "error": (
+                f"a Navide window is connected for workspace_path {workspace_path!r} "
+                f"but did not answer within {timeout:.0f}s — the action may still be "
+                "running there. Retry, or check that window; the workspace_path is "
+                "not the problem"
+            ),
+            "error_code": "ui_action_timeout",
+        }
+    known = sorted({e.workspace_path for e in agent_messaging.list_panes() if not e.offline})
+    return {
+        "ok": False,
+        "result": None,
+        "error": (
+            f"no reply for workspace_path {workspace_path!r} within {timeout:.0f}s, and "
+            f"the backend sees no connected window for it. Workspaces it can see a "
+            f"window for: {known}. Check workspace_path against that list first — but a "
+            "window with no CLI pane open leaves no trace there, so if the path is "
+            "right, treat this as a timeout and retry"
+        ),
+        "error_code": "ui_no_window_known",
+    }
+
+
 async def _ui_request(
     workspace_path: str,
     op: str,
@@ -1648,22 +1723,19 @@ async def _ui_request(
         sent = await app.unicast_any(event)
         if not sent:
             _ui_invoke_pending.discard(request_id)
-            return {"ok": False, "result": None, "error": "no Navide window is open to handle this request"}
+            return {
+                "ok": False,
+                "result": None,
+                "error": "no Navide window is open to handle this request",
+                "error_code": "ui_no_window",
+            }
     else:
         await app.broadcast(event)
 
     timeout = _UI_INVOKE_SLOW_TIMEOUT_S if action in _UI_INVOKE_SLOW_ACTIONS else _UI_INVOKE_TIMEOUT_S
     result = await _ui_invoke_pending.wait(request_id, fut, timeout=timeout)
     if result is TIMEOUT:
-        return {
-            "ok": False,
-            "result": None,
-            "error": (
-                f"no reply for workspace_path {workspace_path!r} within "
-                f"{timeout:.0f}s — either no Navide window owns that "
-                "workspace, or the action timed out while executing"
-            ),
-        }
+        return _ui_timeout_error(workspace_path, timeout)
     return result
 
 

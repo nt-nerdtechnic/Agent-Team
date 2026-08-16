@@ -1404,8 +1404,10 @@ async def ws(websocket: WebSocket) -> None:
         orphaned = [tid for tid, owner in _PTY_OWNERS.items() if owner is session]
         for tid in orphaned:
             del _PTY_OWNERS[tid]
-        # Forget the messaging handles this window mirrored, so a closed window's
-        # panes stop showing up as cross-workspace targets.
+        # Flag the messaging handles this window mirrored as offline. They are
+        # kept for a grace period rather than dropped: the window is usually
+        # just reconnecting, and a deleted entry told callers the pane did not
+        # exist. See agent_messaging.drop_owner.
         agent_messaging.drop_owner(session)
         # PTYs survive this disconnect so the frontend can reattach after a
         # transient network outage. They are killed only when the user explicitly

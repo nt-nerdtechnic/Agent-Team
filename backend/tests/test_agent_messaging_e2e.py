@@ -151,8 +151,28 @@ async def test_closing_a_window_removes_its_targets() -> None:
 
     resp = [m for m in window_a.websocket.sent if m.get("id") == "3"][0]  # type: ignore[attr-defined]
     assert resp["payload"]["ok"] is False
-    assert "unknown workspace" in resp["payload"]["error"]
+    # Offline, not gone: the window is expected back, and the sender is told to
+    # wait rather than that it addressed something that does not exist.
+    assert resp["payload"]["code"] == "target-offline"
+    assert "offline" in resp["payload"]["error"]
     assert _events(window_a, "agent_msg.deliver") == []
+
+    # Once the grace period lapses without the window returning, the target
+    # really is gone and resolution says so.
+    agent_messaging.get("pb").offline_since -= agent_messaging.OFFLINE_GRACE_S + 1
+    await app.handle_message(window_a, {
+        "id": "4",
+        "type": "agent_msg.route",
+        "payload": {
+            "from_pane_id": "pa",
+            "to": "beta/reviewer",
+            "content": "hi",
+            "msg_key": "pa:2",
+        },
+    })
+    await asyncio.sleep(0)
+    expired = [m for m in window_a.websocket.sent if m.get("id") == "4"][0]  # type: ignore[attr-defined]
+    assert expired["payload"]["code"] == "unknown-workspace"
 
 
 @pytest.mark.asyncio

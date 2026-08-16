@@ -70,13 +70,102 @@ def test_trailing_slash_workspace_is_normalized() -> None:
     assert agent_messaging.list_panes("/ws/alpha")[0].pane_id == "p1"
 
 
-def test_drop_owner_forgets_only_that_windows_panes() -> None:
+def test_drop_owner_takes_offline_only_that_windows_panes() -> None:
     win_a, win_b = object(), object()
     agent_messaging.register("p1", "a", "/ws/alpha", owner=win_a)
     agent_messaging.register("p2", "b", "/ws/beta", owner=win_b)
     dropped = agent_messaging.drop_owner(win_a)
     assert dropped == ["p1"]
-    assert [e.pane_id for e in agent_messaging.list_panes()] == ["p2"]
+    # The entry stays — a disconnected window is usually reconnecting — but is
+    # flagged, so callers can tell "offline" from "does not exist".
+    assert [e.pane_id for e in agent_messaging.list_panes()] == ["p1", "p2"]
+    assert agent_messaging.get("p1").offline is True
+    assert agent_messaging.get("p2").offline is False
+
+
+# ── Offline lifecycle ──────────────────────────────────────────────────────
+def test_offline_pane_survives_disconnect_and_is_restored_by_reconnect() -> None:
+    window = object()
+    agent_messaging.register("p1", "a", "/ws/alpha", owner=window)
+    agent_messaging.register("p2", "sender", "/ws/alpha", owner=window)
+    agent_messaging.set_busy("p1", True)
+    agent_messaging.drop_owner(window)
+
+    offline = agent_messaging.get("p1")
+    assert offline is not None and offline.offline is True
+    assert offline.to_dict()["offline"] is True
+
+    # Reconnect: the window re-runs agent_msg.register for each pane it mirrors.
+    reconnected = object()
+    agent_messaging.register("p1", "a", "/ws/alpha", owner=reconnected)
+    agent_messaging.register("p2", "sender", "/ws/alpha", owner=reconnected)
+    restored = agent_messaging.get("p1")
+    assert restored is not None
+    assert restored.offline is False
+    assert restored.offline_since is None
+    assert restored.busy is True  # a reconnect is not a state change
+    assert agent_messaging.resolve("p2", "a").pane is restored
+
+
+def test_offline_pane_is_forgotten_after_the_grace_period() -> None:
+    window = object()
+    agent_messaging.register("p1", "a", "/ws/alpha", owner=window)
+    agent_messaging.drop_owner(window)
+
+    entry = agent_messaging.get("p1")
+    assert entry is not None
+    # Backdate past the grace period; the sweep runs lazily off any read.
+    entry.offline_since -= agent_messaging.OFFLINE_GRACE_S + 1
+    assert agent_messaging.get("p1") is None
+    assert agent_messaging.list_panes() == []
+
+
+def test_offline_pane_stays_within_the_grace_period() -> None:
+    window = object()
+    agent_messaging.register("p1", "a", "/ws/alpha", owner=window)
+    agent_messaging.drop_owner(window)
+
+    entry = agent_messaging.get("p1")
+    assert entry is not None
+    entry.offline_since -= agent_messaging.OFFLINE_GRACE_S - 5
+    assert agent_messaging.get("p1") is not None
+
+
+def test_resolving_an_offline_target_is_not_unknown_target() -> None:
+    window_a, window_b = object(), object()
+    agent_messaging.register("p1", "sender", "/ws/alpha", owner=window_a)
+    agent_messaging.register("p2", "reviewer", "/ws/beta", owner=window_b)
+    agent_messaging.drop_owner(window_b)
+
+    result = agent_messaging.resolve("p1", "beta/reviewer")
+    assert result.pane is None
+    assert result.code == "target-offline"
+    assert "offline" in result.error
+    # The failure a caller must not confuse it with.
+    assert agent_messaging.resolve("p1", "beta/nobody").code == "unknown-target-in-workspace"
+
+
+def test_resolving_an_offline_target_by_bare_name_reports_offline() -> None:
+    window = object()
+    agent_messaging.register("p1", "sender", "/ws/alpha", owner=window)
+    agent_messaging.register("p2", "reviewer", "/ws/alpha", owner=window)
+    agent_messaging.drop_owner(window)
+
+    assert agent_messaging.resolve("p1", "reviewer").code == "target-offline"
+
+
+def test_a_live_pane_wins_over_an_offline_one_with_the_same_address() -> None:
+    old_window, new_window = object(), object()
+    agent_messaging.register("p1", "sender", "/ws/alpha", owner=old_window)
+    agent_messaging.register("old", "reviewer", "/ws/beta", owner=old_window)
+    agent_messaging.drop_owner(old_window)
+    agent_messaging.register("p1", "sender", "/ws/alpha", owner=new_window)
+    agent_messaging.register("new", "reviewer", "/ws/beta", owner=new_window)
+
+    # Both entries exist; the offline one must neither shadow the live pane nor
+    # make the address look ambiguous.
+    assert agent_messaging.resolve("p1", "beta/reviewer").pane.pane_id == "new"
+    assert agent_messaging.resolve("p1", "reviewer").pane is None  # different workspace
 
 
 # ── Resolution ─────────────────────────────────────────────────────────────

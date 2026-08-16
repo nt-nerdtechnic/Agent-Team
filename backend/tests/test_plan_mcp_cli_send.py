@@ -628,3 +628,96 @@ async def test_open_agent_from_a_pane_caller_never_sends_target_workspace(
 
     assert result["ok"] is True
     assert "target_workspace" not in captured[0]["payload"]
+
+
+# ── Offline targets (a disconnected window, not a missing pane) ─────────────
+@pytest.mark.asyncio
+async def test_send_to_an_offline_target_is_refused_apart_from_unknown_target(
+    captured: list[dict[str, Any]],
+) -> None:
+    """A dropped WS connection used to erase the window's panes, so cli_send
+    answered "unknown target" — "you got the name wrong" — for a pane that was
+    only unreachable. The two now carry different codes."""
+    window = object()
+    agent_messaging.register("pa", "sender", "/ws/alpha", owner=object())
+    agent_messaging.register("pb", "reviewer", "/ws/beta", owner=window)
+    agent_messaging.drop_owner(window)
+
+    offline = await plan_mcp.cli_send("beta/reviewer", "x", _ctx())
+    assert offline["ok"] is False
+    assert offline["error_code"] == "target-offline"
+    assert "offline" in offline["error"]
+
+    missing = await plan_mcp.cli_send("beta/nobody", "x", _ctx())
+    assert missing["error_code"] == "unknown-target-in-workspace"
+    # Nothing was handed to a window that could not receive it.
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_send_works_again_once_the_window_reconnects(
+    captured: list[dict[str, Any]],
+) -> None:
+    window = object()
+    agent_messaging.register("pa", "sender", "/ws/alpha", owner=object())
+    agent_messaging.register("pb", "reviewer", "/ws/beta", owner=window)
+    agent_messaging.drop_owner(window)
+    assert (await plan_mcp.cli_send("beta/reviewer", "x", _ctx()))["ok"] is False
+
+    agent_messaging.register("pb", "reviewer", "/ws/beta", owner=object())
+    result = await plan_mcp.cli_send("beta/reviewer", "x", _ctx())
+    assert result["ok"] is True
+    assert len(captured) == 1
+
+
+@pytest.mark.asyncio
+async def test_send_reports_unknown_target_once_the_grace_period_lapses() -> None:
+    window = object()
+    agent_messaging.register("pa", "sender", "/ws/alpha", owner=object())
+    agent_messaging.register("pb", "reviewer", "/ws/beta", owner=window)
+    agent_messaging.drop_owner(window)
+    agent_messaging.get("pb").offline_since -= agent_messaging.OFFLINE_GRACE_S + 1
+
+    result = await plan_mcp.cli_send("beta/reviewer", "x", _ctx())
+    assert result["ok"] is False
+    assert result["error_code"] == "unknown-workspace"
+
+
+@pytest.mark.asyncio
+async def test_get_status_of_an_offline_pane_is_not_unknown_target() -> None:
+    window = object()
+    agent_messaging.register("pa", "sender", "/ws/alpha", owner=object())
+    agent_messaging.register("pb", "reviewer", "/ws/beta", owner=window)
+    agent_messaging.drop_owner(window)
+
+    result = await plan_mcp.cli_get_status("beta/reviewer", _ctx())
+    assert result["ok"] is False
+    assert result["error_code"] == "target-offline"
+
+
+@pytest.mark.asyncio
+async def test_list_targets_flags_an_offline_pane_instead_of_hiding_it() -> None:
+    window = object()
+    agent_messaging.register("pa", "sender", "/ws/alpha", owner=object())
+    agent_messaging.register("pb", "reviewer", "/ws/beta", owner=window)
+    agent_messaging.drop_owner(window)
+
+    by_address = {t["address"]: t for t in (await plan_mcp.cli_list_targets(_ctx()))["targets"]}
+    assert by_address["beta/reviewer"]["offline"] is True
+
+    agent_messaging.register("pb", "reviewer", "/ws/beta", owner=object())
+    by_address = {t["address"]: t for t in (await plan_mcp.cli_list_targets(_ctx()))["targets"]}
+    assert by_address["beta/reviewer"]["offline"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_pane_whose_own_window_is_offline_keeps_its_credential() -> None:
+    """The CLI keeps running through its window's disconnect, so its own
+    /plan-mcp credential must not start failing the liveness check."""
+    window = object()
+    agent_messaging.register("pa", "sender", "/ws/alpha", owner=window)
+    agent_messaging.register("pc", "helper", "/ws/alpha", owner=object())
+    agent_messaging.drop_owner(window)
+
+    result = await plan_mcp.cli_list_targets(_ctx())
+    assert result["you"] == "alpha/sender"
