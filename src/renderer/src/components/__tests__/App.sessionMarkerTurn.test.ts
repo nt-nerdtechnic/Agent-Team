@@ -43,7 +43,9 @@ describe('session-marker gate wiring', () => {
 
   it('a marker reply never chimes done, names the pane, or carries MSG blocks', () => {
     const body = activityHandler()
-    expect(body).toContain('if (!markerReply) scheduleDoneNotify(')
+    // Matched loosely: what this test owns is that `markerReply` guards the
+    // chime, not which other conditions share the same `if`.
+    expect(body).toMatch(/if \(!markerReply[^)]*\) scheduleDoneNotify\(/)
     expect(body).toContain("onTurnCompleteForMessaging(ev.pane_id, markerReply ? '' : (ev.text ?? '')")
     const fallback = body.slice(body.indexOf('Auto-name fallback'))
     expect(fallback).toContain('!markerReply')

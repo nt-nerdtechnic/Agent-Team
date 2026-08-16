@@ -100,6 +100,10 @@ export interface AgentMessage {
   reason?: MessageReason
   /** Why this message has not been injected yet, while status === 'queued'. */
   hold?: MessageHold
+  /** Set on a message handed to a claude pane through its Stop hook instead of
+   *  being typed into it. Like `hold` it is in-memory only: it describes how a
+   *  live row got out, and a restored log has no delivery left to explain. */
+  route?: 'hook'
   /** `uid` of the message this one answers, set when the sender echoed back the
    *  correlation id carried in that message's envelope. Like `hold` it describes
    *  an in-memory relation between two live rows, so it is never persisted. */
@@ -1011,6 +1015,84 @@ async function pumpPane(paneId: string): Promise<void> {
   }
 }
 
+/**
+ * Reserve the next deliverable message for `paneId` and return its envelope,
+ * for a caller that will hand it over WITHOUT injecting it — today that is a
+ * claude pane's Stop hook, which passes the text to the agent as its next
+ * instruction (see the backend's `hook_drain`).
+ *
+ * The gates that still apply are the ones about whether the message may go out
+ * at all: the global pause, and the per-pane in-flight guard (a message being
+ * typed into the pane right now must finish before another one starts). The
+ * per-pair rate limit needs no check here — it is spent when a message is sent,
+ * so anything already queued has paid for itself.
+ *
+ * The gates that do NOT apply are the ones about the input box: the idle gate
+ * (the turn is ending, which is why we were asked) and the typing hold (nothing
+ * is written to the pane, so a half-typed line cannot be submitted by this).
+ *
+ * Reserved, not consumed. The row stays at the head of its queue, marked
+ * `delivering` with the pane held in-flight — the same state pumpPane keeps a
+ * message in while its write is unconfirmed — until settleHookDrain() says
+ * whether the hand-over landed. That is what makes a Stop hook that gave up
+ * before its answer arrived cost nothing: the message is still exactly where
+ * it was, for the ordinary typed path to pick up.
+ */
+function drainForHook(paneId: string): string | null {
+  if (!deps || paused.value) return null
+  if (delivering.has(paneId)) return null
+  const q = queues.get(paneId)
+  if (!q || q.length === 0) return null
+  const id = q[0]
+  const msg = findMessage(id)
+  const envelope = envelopes.get(id)
+  if (!msg || !envelope) {
+    q.shift()
+    ackInbound(id, false, { key: 'dropped' })
+    return null
+  }
+  delivering.add(paneId)
+  msg.status = 'delivering'
+  msg.route = 'hook'
+  delete msg.hold
+  deps.persistUpdate?.([{ uid: msg.uid, status: 'delivering' }])
+  return envelope
+}
+
+/**
+ * Close a drainForHook() reservation. `ok` means the envelope reached the Stop
+ * hook that was waiting for it; anything else — the hook timed out first, the
+ * socket failed — restores the message, because nothing was written anywhere
+ * and no agent has seen it.
+ *
+ * A pane that closed in between has already failed everything it had queued
+ * (see unregisterPane), so there is nothing left to settle.
+ */
+function settleHookDrain(paneId: string, ok: boolean): void {
+  if (!deps) return
+  delivering.delete(paneId)
+  const q = queues.get(paneId)
+  const id = q?.[0]
+  if (!q || id === undefined) return
+  const msg = findMessage(id)
+  if (!msg || msg.status !== 'delivering' || msg.route !== 'hook') return
+  if (!ok) {
+    msg.status = 'queued'
+    delete msg.route
+    deps.persistUpdate?.([{ uid: msg.uid, status: 'queued' }])
+    return
+  }
+  q.shift()
+  envelopes.delete(id)
+  msg.status = 'delivered'
+  msg.deliveredAt = deps.now()
+  deps.persistUpdate?.([{ uid: msg.uid, status: 'delivered', delivered_at: msg.deliveredAt }])
+  // Same report the injection path sends, so a cross-workspace sender's row
+  // leaves `queued` whichever way its message actually arrived — and only once
+  // it actually has.
+  ackInbound(id, true, null)
+}
+
 // ── Pause / log ────────────────────────────────────────────────────────────
 function pauseMessaging(): void {
   paused.value = true
@@ -1084,6 +1166,8 @@ export function useAgentMessaging() {
     acceptRemoteMessage,
     noteOutboundMessage,
     resolveRemoteDelivery,
+    drainForHook,
+    settleHookDrain,
     pump,
     pauseMessaging,
     resumeMessaging,

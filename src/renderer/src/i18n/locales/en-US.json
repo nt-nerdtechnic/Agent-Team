@@ -52,6 +52,8 @@
     "cross-workspace-badge": "cross-workspace",
     "reply-badge": "reply",
     "notice-badge": "system notice",
+    "hook-badge": "via hook",
+    "hook-badge-title": "Handed to the agent as its next instruction when its turn ended, instead of being typed into the pane",
     "expand-rail": "Expand inter-CLI messages"
   },
   "confirm-close": {

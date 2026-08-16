@@ -131,6 +131,9 @@ function vendorOf(agentKey: string | undefined, handle: string): string | null {
           <span v-if="msg.inReplyTo" class="msg-reply" :title="repliedTo(msg)?.content">
             {{ $t('msg.reply-badge') }}
           </span>
+          <span v-if="msg.route === 'hook'" class="msg-route" :title="$t('msg.hook-badge-title')">
+            {{ $t('msg.hook-badge') }}
+          </span>
           <span v-if="msg.kind === 'notice'" class="msg-notice">
             {{ $t('msg.notice-badge') }}
           </span>
@@ -320,6 +323,17 @@ function vendorOf(agentKey: string | undefined, handle: string): string | null {
   white-space: nowrap;
   background: rgba(140, 190, 140, 0.18);
   color: #7cb37c;
+}
+
+.msg-route {
+  flex: none;
+  font-size: 9px;
+  font-weight: 700;
+  border-radius: 99px;
+  padding: 0 6px;
+  white-space: nowrap;
+  background: rgba(160, 140, 220, 0.18);
+  color: #a08cdc;
 }
 
 .msg-notice {

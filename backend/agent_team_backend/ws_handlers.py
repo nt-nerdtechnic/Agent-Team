@@ -5652,6 +5652,33 @@ async def agent_msg_route(session: "Session", msg_id: str, msg_type: str, payloa
     )
 
 
+@handler("agent_msg.hook_drain_result")
+async def agent_msg_hook_drain_result(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """A window's answer to `agent_msg.hook_drain`, handed to the Stop hook that
+    is holding a claude pane open while it waits.
+
+    An empty `envelope` is a valid answer — it means the pane's queue had
+    nothing deliverable — and is what lets the hook return promptly instead of
+    sitting out its timeout.
+    """
+    from . import hook_drain
+
+    request_id = str(payload.get("request_id") or "")
+    if not request_id:
+        await session.send_json(
+            make_error(
+                msg_id, msg_type, "BAD_REQUEST", "agent_msg.hook_drain_result needs request_id"
+            )
+        )
+        return
+    delivered = hook_drain.resolve_drain(
+        request_id, {"envelope": str(payload.get("envelope") or "")}
+    )
+    await session.send_json(make_response(msg_id, msg_type, {"ok": True, "delivered": delivered}))
+
+
 @handler("agent_msg.delivered")
 async def agent_msg_delivered(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     """The receiving window reports the outcome so the sending window's message

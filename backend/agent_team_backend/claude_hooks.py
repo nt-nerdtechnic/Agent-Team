@@ -48,6 +48,13 @@ def settings_path() -> Path:
     return Path.home() / ".claude" / "settings.json"
 
 
+#: Response timeout for the Stop hook, which is the one event whose reply the
+#: CLI acts on. Wider than the others' 2s so it outlasts the backend's own
+#: `hook_drain.DRAIN_TIMEOUT_S` wait for the owning window — a curl that gave up
+#: first would throw away a message the window had already marked delivered.
+_STOP_TIMEOUT_S = 4
+
+
 def _build_curl_command(port_file: str, event_kind: str, endpoint: str = "claude") -> str:
     """Build a curl invocation that forwards the hook stdin payload to us.
 
@@ -55,8 +62,16 @@ def _build_curl_command(port_file: str, event_kind: str, endpoint: str = "claude
     command survives backend restarts with different ports. If the file is
     absent (backend not running), the curl is skipped via the `|| true` tail.
 
-    Hard-caps at 2s + `|| true` so a slow/offline backend never blocks the
+    Hard-caps the request + `|| true` so a slow/offline backend never blocks the
     agent's main work. `--data-binary @-` preserves the JSON stdin verbatim.
+
+    The Stop hook keeps the response body, because that is where Claude Code
+    reads a hook's decision from: an inter-CLI message waiting for this pane
+    comes back as `{"decision": "block", ...}` and becomes the agent's next
+    instruction without ever touching its input box (see `hook_drain`). Nothing
+    to deliver means an empty body, which is exactly "no decision to report".
+    Every other event still discards it — their responses are acks, and an
+    unrecognized object on a hook's stdout is reported as a hook error.
 
     `endpoint` is the vendor segment of /hooks/<vendor>; it defaults to claude
     so hook commands written by earlier builds keep the exact same text (the
@@ -64,10 +79,15 @@ def _build_curl_command(port_file: str, event_kind: str, endpoint: str = "claude
     unchanged settings.json diff).
     """
     safe_port_file = shlex.quote(port_file)
+    # Claude's Stop hook only: qwen borrows this builder, and nothing has
+    # established that its CLI reads a hook's stdout the same way.
+    keeps_body = event_kind == "stop" and endpoint == "claude"
+    sink = "" if keeps_body else "-o /dev/null "
+    timeout = _STOP_TIMEOUT_S if keeps_body else 2
     return (
         f"{_AGENT_TEAM_MARKER} kind={event_kind}\n"
         f"PORT=$(cat {safe_port_file} 2>/dev/null); "
-        f"[ -n \"$PORT\" ] && curl -fsS -m 2 -o /dev/null -X POST "
+        f"[ -n \"$PORT\" ] && curl -fsS -m {timeout} {sink}-X POST "
         f"-H 'Content-Type: application/json' "
         f"-H 'X-Agent-Team-Event: {event_kind}' "
         f"--data-binary @- "

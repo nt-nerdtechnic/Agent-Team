@@ -7973,7 +7973,7 @@ const sessionGhostHealGate = createGhostHealGate(async (paneId, pinnedSessionId)
 // is working; turn_complete = its turn ended. We timestamp both per pane; the
 // completion logic reads these instead of guessing from the TUI buffer.
 backend.on('agent.activity', (raw) => {
-  const ev = raw as { event_type?: string; pane_id?: string; vendor?: string; session_id?: string; detail?: string; text?: string; timestamp?: string; notification_type?: string }
+  const ev = raw as { event_type?: string; pane_id?: string; vendor?: string; session_id?: string; detail?: string; text?: string; timestamp?: string; notification_type?: string; superseded?: boolean }
   if (!ev?.pane_id) return
   // QUESTION badge: "the agent asked you something and is waiting". Decided in
   // one place for both event types because both carry a half of it — the turn
@@ -7999,10 +7999,16 @@ backend.on('agent.activity', (raw) => {
     markerReply = action === 'suppress'
   }
   if (ev.event_type === 'turn_complete') {
-    paneTurnCompleteAt.set(ev.pane_id, Date.now())
+    // `superseded`: the CLI's log describes a turn its Stop hook blocked, so
+    // the agent took a queued message instead of stopping and is working on it
+    // now (see the backend's hook_drain). The turn's text below is real and
+    // still wanted — only "the pane is free" is not, so only the two things
+    // that say so are skipped: the idle timestamp the delivery queue and the
+    // unattended loop both read, and the finished notification.
+    if (!ev.superseded) paneTurnCompleteAt.set(ev.pane_id, Date.now())
     // Badge: authoritative turn end → drop the RUNNING hysteresis latch now.
     paneRefs[ev.pane_id]?.markTurnComplete?.()
-    if (!markerReply) scheduleDoneNotify(ev.pane_id, ev.timestamp ?? '')
+    if (!markerReply && !ev.superseded) scheduleDoneNotify(ev.pane_id, ev.timestamp ?? '')
     // Judge THIS turn's own text (not a retained map): an empty-text
     // turn_complete (Claude Stop hook, thinking-only record, Codex cross-batch)
     // must never be judged against a previous turn's text.
@@ -8279,6 +8285,38 @@ backend.on('agent_spawn.request', (raw) => {
     task: ev.task ?? '',
     target_workspace: ev.target_workspace,
   })
+})
+
+// A claude pane's Stop hook is holding its agent open while the backend asks
+// whether anything is queued for it. Answering with an envelope hands that text
+// to the agent as its next instruction — no injection, so no input box, no
+// typing hold, and no idle gate. Answering with '' lets the turn end normally.
+// Sent to this window alone (the backend knows who owns the pane), and the hook
+// gives up quickly, so reply on the spot rather than awaiting anything.
+backend.on('agent_msg.hook_drain', (raw) => {
+  const ev = raw as { request_id?: string; pane_id?: string }
+  if (!ev?.request_id) return
+  const paneId = ev.pane_id ?? ''
+  const envelope = (paneId && panes.value.some((p) => p.id === paneId))
+    ? messaging.drainForHook(paneId)
+    : null
+  // The message is only reserved until the backend confirms the hook was still
+  // waiting for it. `delivered: false` means it gave up first and Claude has
+  // already stopped, so the reservation is released and the message goes back
+  // to waiting for the ordinary typed delivery — the alternative is a row
+  // marked delivered that no agent ever saw.
+  backend
+    .send<{ delivered?: boolean }>(
+      'agent_msg.hook_drain_result',
+      { request_id: ev.request_id, envelope: envelope ?? '' },
+      // Answered as soon as the socket carries it; a bound here only stops a
+      // dropped reply from holding the reservation for the default timeout.
+      5000,
+    )
+    .then((resp) => {
+      if (envelope) messaging.settleHookDrain(paneId, !!resp.ok && !!resp.payload?.delivered)
+    })
+    .catch(() => { if (envelope) messaging.settleHookDrain(paneId, false) })
 })
 
 backend.on('agent_msg.delivery_result', (raw) => {

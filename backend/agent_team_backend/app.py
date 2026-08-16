@@ -19,13 +19,14 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import ValidationError
 from uvicorn.protocols.utils import ClientDisconnected
 
 from . import __version__
 from . import agent_messaging
+from . import hook_drain
 from .analyzer import DEFAULT_MODEL as ANALYZER_DEFAULT_MODEL
 from .analyzer import (
     classify as _llama_classify,
@@ -682,6 +683,7 @@ def _record_pane_activity(pane_id: str, event_type: str, text: str) -> None:
 def forget_pane_activity(pane_id: str) -> None:
     """Drop a closed pane's entry so the cache tracks live panes only."""
     _pane_activity.pop(pane_id, None)
+    hook_drain.forget_pane(pane_id)
 
 
 async def _on_log_activity(event: ActivityEvent) -> None:
@@ -704,12 +706,25 @@ async def _on_log_activity(event: ActivityEvent) -> None:
         if attributed.workspace_path is None:
             # External session — skip; no pane to deliver to.
             return
-        _record_pane_activity(attributed.pane_id or "", event.event_type, event.text)
+        pane_id = attributed.pane_id or ""
+        # A turn a Stop hook blocked is still written to the conversation log,
+        # and its reader reports it as a turn end — after the hook already said
+        # the agent is working on the message it was handed. Flagged rather than
+        # relabelled: everything this event carries (the turn's text, and the
+        # MSG blocks, sentinels and pane name derived from it) is real and still
+        # wanted. Only "the pane is free now" is wrong, so only that is dropped.
+        superseded = event.event_type == "turn_complete" and hook_drain.turn_end_is_superseded(
+            pane_id
+        )
+        _record_pane_activity(
+            pane_id, "agent_active" if superseded else event.event_type, event.text
+        )
         await broadcast(make_event("agent.activity", {
             "vendor": event.vendor,
             "event_type": event.event_type,
+            "superseded": superseded,
             "workspace_path": attributed.workspace_path,
-            "pane_id": attributed.pane_id or "",
+            "pane_id": pane_id,
             "stage_id": attributed.stage_id or "",
             "session_id": event.session_id,
             "cwd": event.cwd,
@@ -1299,7 +1314,7 @@ _HOOK_VENDORS = frozenset(
 
 
 @app.post("/hooks/{vendor}")
-async def cli_hook(vendor: str, request: Request) -> dict[str, Any]:
+async def cli_hook(vendor: str, request: Request) -> Any:
     """Receive a CLI hook payload.
 
     Hook commands installed by `claude_hooks` / `qwen_hooks` / `copilot_hooks`
@@ -1351,6 +1366,21 @@ async def cli_hook(vendor: str, request: Request) -> dict[str, Any]:
     # lookup bypasses it. Race (stop before JSONL claimed the session) → empty
     # pane_id, and the JSONL path's matching event supplies it shortly.
     pane_id, ws_path, stage_id = attribution.pane_for_session(session_id)
+    # Stop-hook delivery: a claude pane with a message waiting is told to keep
+    # going and act on it, instead of stopping and being typed at afterwards.
+    # Only claude, because only its Stop hook can block — and only its hook
+    # command forwards this response body to the CLI's stdin-reading parser.
+    blocked_envelope = ""
+    if vendor == "claude" and event_kind == "stop":
+        blocked_envelope = await hook_drain.drain_for_stop_hook(
+            pane_id or "", stop_hook_active=bool(payload.get("stop_hook_active"))
+        )
+        if blocked_envelope:
+            # The turn did not end: Claude picks the message up as its next
+            # instruction. Reporting turn_complete here would make the frontend
+            # call the pane idle and start injecting the NEXT queued message
+            # over stdin, into a pane that is already working.
+            event_type = "agent_active"
     if pane_id:
         # The log-reader sink is not the only writer of _pane_activity any
         # more: for the hook vendors the Stop hook is the earliest and most
@@ -1370,9 +1400,16 @@ async def cli_hook(vendor: str, request: Request) -> dict[str, Any]:
         "session_id": session_id,
         "cwd": cwd,
         "timestamp": "",
-        "detail": f"hook:{event_kind}",
+        "detail": "hook:stop-blocked" if blocked_envelope else f"hook:{event_kind}",
         "notification_type": notification_type,
     }))
+    if vendor == "claude" and event_kind == "stop":
+        # This body is read by Claude Code as the Stop hook's own output, so it
+        # is either a valid decision object or nothing at all: an unrecognized
+        # object on a hook's stdout is reported to the user as a hook error.
+        if blocked_envelope:
+            return JSONResponse({"decision": "block", "reason": blocked_envelope})
+        return Response(status_code=200)
     return {"ok": True}
 
 
