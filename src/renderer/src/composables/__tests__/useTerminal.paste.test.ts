@@ -205,6 +205,33 @@ describe('useTerminal — manual paste', () => {
     scope.stop()
   })
 
+  // Published for App.vue's injectText, which writes to the PTY without going
+  // through xterm and so has no other way to learn what the program on the
+  // other end asked for. Same source this file's own bracketing decisions use.
+  describe('isBracketedPasteActive', () => {
+    it('reports mode 2004 off', async () => {
+      const { scope, terminal } = await spawnedTerminal('claude')
+      expect(terminal.isBracketedPasteActive()).toBe(false)
+      scope.stop()
+    })
+
+    it('reports mode 2004 on', async () => {
+      captured.bracketedPasteMode = true
+      const { scope, terminal } = await spawnedTerminal('claude')
+      expect(terminal.isBracketedPasteActive()).toBe(true)
+      scope.stop()
+    })
+
+    it('follows the mode changing under it, rather than caching the first read', async () => {
+      // A claude pane dropping into `!` shell mode turns 2004 off mid-session.
+      const { scope, terminal } = await spawnedTerminal('claude')
+      expect(terminal.isBracketedPasteActive()).toBe(false)
+      captured.bracketedPasteMode = true
+      expect(terminal.isBracketedPasteActive()).toBe(true)
+      scope.stop()
+    })
+  })
+
   it('scrolls to the bottom and drops the selection, as xterm would', async () => {
     const { scope } = await spawnedTerminal('claude')
     paste('anything')

@@ -25,7 +25,7 @@ import TokenStatsPanel from './components/TokenStatsPanel.vue'
 import NotificationHost from './components/NotificationHost.vue'
 import Welcome from './components/Welcome.vue'
 import { useNotify } from './composables/useNotify'
-import { migrateTerminalPtyKey, saveAllScrollSnapshots, type DisplayStatus } from './composables/useTerminal'
+import { agentUsesBracketedPaste, migrateTerminalPtyKey, saveAllScrollSnapshots, type DisplayStatus } from './composables/useTerminal'
 import { useAgentMessaging, encodeReason, isBroadcastTarget, NOTICE_SENDER } from './composables/useAgentMessaging'
 import type { RouteResult } from './composables/useAgentMessaging'
 import { createMessageLogPersistence } from './composables/useMessageLogPersistence'
@@ -86,7 +86,9 @@ import {
   buildPaneContextPaste,
   shouldMentionOnDrop,
   buildPaneStatusReply,
-  chunkForPty,
+  injectionChunks,
+  BRACKETED_PASTE_START,
+  BRACKETED_PASTE_END,
   screenToClientPoint,
   CLI_CHIP_LINE_CAP,
   CLI_PASTE_LINE_CAP
@@ -1397,10 +1399,21 @@ async function deliverAgentMessage(paneId: string, text: string): Promise<boolea
   return true
 }
 
+/** How long after the last keystroke a pane still counts as being typed at.
+ *
+ *  An injection is a paste plus Enter, so it submits whatever the composer
+ *  holds — including a line the user is still writing. `hasDraft` covers a
+ *  line with text in it; this covers the gaps around it, where the composer is
+ *  momentarily empty but the person is plainly still there (they just cleared
+ *  it, or are pausing between words). Long enough to bridge a normal typing
+ *  pause, short enough that a pane someone glanced at is not parked. */
+const TYPING_HOLD_MS = 4000
+
 /** idleHoldKey() dep: why a message cannot be injected into this pane right
  *  now, as an i18n key suffix under `msg.hold-*`, or null when it can be.
- *  Gate: PTY alive and past startup, not mid role/kickoff injection, latest CLI
- *  signal is "turn ended" (not agent_active), and no activity in the last 2s.
+ *  Gate: PTY alive and past startup, nobody typing into it, not mid role/kickoff
+ *  injection, latest CLI signal is "turn ended" (not agent_active), and no
+ *  activity in the last 2s.
  *
  *  isPaneIdleForMessaging() is derived from this rather than duplicating it, so
  *  the reason shown in the Messages panel cannot drift from the real gate. */
@@ -1417,6 +1430,13 @@ function messagingHoldKey(paneId: string): string | null {
   if (status !== 'running' && status !== 'idle' && status !== 'question') return 'not-ready'
   if (pane.injectionStatus === 'scheduled' || pane.kickoffStatus === 'pending') return 'starting'
   const now = Date.now()
+  // Ahead of the CLI-side reasons on purpose: those describe what the agent is
+  // doing, this one describes the person at the keyboard, and a half-typed line
+  // is lost the same way whether the agent is mid-turn or idle.
+  const typist = paneRefs[paneId]
+  const hasDraft = typist?.hasDraft as boolean | undefined
+  const lastKey = (typist?.lastUserKeyAt as number | undefined) ?? 0
+  if (hasDraft || (lastKey > 0 && now - lastKey < TYPING_HOLD_MS)) return 'typing'
   const lastActive = paneLastActiveAt.get(paneId) ?? 0
   const inFlight = isTurnInFlight(lastActive, paneTurnCompleteAt.get(paneId) ?? 0, now, {
     inferEndFromSilence: VENDORS_WITHOUT_TURN_END.has(pane.agentKey),
@@ -2054,12 +2074,6 @@ onUnmounted(() => {
 })
 watch(panes, syncViews, { deep: true, immediate: true })
 
-// PTY-friendly paste: wraps text with bracketed-paste escape sequences so
-// modern CLIs (Claude Code / Codex / Antigravity TUI) accept it as a single paste
-// rather than interpreting embedded newlines as submit signals.
-const BRACKETED_PASTE_START = '\x1b[200~'
-const BRACKETED_PASTE_END = '\x1b[201~'
-
 // Flatten multi-line prompts so they survive any CLI input mode (raw / cooked
 // / bracketed-paste-off-during-init). Embedded newlines would otherwise hit
 // the agent's Enter handler and submit fragments. We preserve paragraph
@@ -2114,20 +2128,34 @@ async function injectText(
   // Send in modest chunks to avoid hitting any tty input-buffer limits and to
   // give the CLI's render loop a chance to keep up.
   const CHUNK = 512
-  const payload = preserveNewlines
-    // Bracketed-paste so the TUI treats embedded newlines as literal chars
-    // instead of Enter keypresses (Claude Code / Codex / Antigravity all support it).
-    ? BRACKETED_PASTE_START + text + BRACKETED_PASTE_END
-    : flattenForInjection(text)
+  const body = preserveNewlines ? text : flattenForInjection(text)
+  // Bracketed paste for every injection the vendor can take it, not just the
+  // multi-line ones: it is what makes the write land as a paste the TUI inserts
+  // whole, instead of a stream of keypresses interleaved with whatever the user
+  // is typing at the same moment. Multi-line text is wrapped regardless — there
+  // the guards are what stop embedded newlines from submitting fragments, which
+  // is worse than a vendor showing a literal "[200~".
+  //
+  // The vendor key alone is not enough for the single-line case: it says which
+  // CLI the pane was started with, not what is reading the PTY right now. A
+  // claude pane dropped into `!` shell mode, fallen back to bash, or sitting on
+  // a raw login prompt has mode 2004 off, and a login-fix or nudge written into
+  // that would arrive as a literal "[200~". So ask xterm what the program on the
+  // other end last declared — the same source pasteFromClipboard trusts.
+  const bracketed = preserveNewlines
+    || (agentUsesBracketedPaste(panes.value.find((p) => p.id === paneId)?.agentKey)
+        && paneId !== undefined
+        && paneRefs[paneId]?.isBracketedPasteActive?.() === true)
+  const chunks = injectionChunks(body, CHUNK, bracketed)
   const sendChunks = async (): Promise<boolean> => {
-    for (let i = 0; i < payload.length; i += CHUNK) {
+    for (let i = 0; i < chunks.length; i++) {
       try {
         await backend.send('terminal.input', {
           terminal_session_id: sessionId,
-          data: payload.slice(i, i + CHUNK)
+          data: chunks[i]
         })
       } catch (err) {
-        console.error(`[injectText] content send failed at ${i}/${payload.length}:`, err)
+        console.error(`[injectText] content send failed at chunk ${i + 1}/${chunks.length}:`, err)
         return false
       }
     }
@@ -2431,8 +2459,9 @@ async function injectPaneContextSources(
 async function pastePaneContext(targetPaneId: string, text: string): Promise<void> {
   const targetSessionId = paneRefs[targetPaneId]?.sessionId as string | undefined
   if (!targetSessionId) return // target has no live PTY
-  const payload = BRACKETED_PASTE_START + text + BRACKETED_PASTE_END
-  for (const chunk of chunkForPty(payload, 512)) {
+  // Guards as their own writes (see injectionChunks): chunking the wrapped
+  // string splits one of them as soon as the text is long enough.
+  for (const chunk of injectionChunks(text, 512, true)) {
     try {
       await backend.send('terminal.input', { terminal_session_id: targetSessionId, data: chunk })
     } catch (err) {

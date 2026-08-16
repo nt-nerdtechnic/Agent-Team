@@ -11,7 +11,7 @@ import { AGENT_SPECS } from '../agents'
 import { createResizeController, type ResizeController } from './useTerminalResize'
 import { installTerminalZoomShortcuts, terminalFontSize } from './useTerminalFontSize'
 import { getResumeConcurrency } from '../lib/resumeConcurrency'
-import { chunkForPty, shouldOpenMentionMenu } from '../lib/cliContext'
+import { chunkForPty, shouldOpenMentionMenu, stripInputSequences } from '../lib/cliContext'
 import { settingsGet, settingsSet } from '../lib/settings'
 import { extractClipboardImage, saveClipboardImage } from '../lib/clipboardImage'
 import { TERMINAL_CREATE_TIMEOUT_MS } from '../lib/resume-command'
@@ -228,9 +228,28 @@ export function stripAltScreenEnter(payload: string): string {
  *  this app has been migrating away from and which plugin bundles don't share. */
 const OPTION_SELECT_HINT_KEY = 'agentTeam.terminal.optionSelectHintSeen'
 
-/** Agents whose TUI keeps bracketed paste on — see pasteFromClipboard(). */
-function agentUsesBracketedPaste(agentKey?: string): boolean {
+/** Agents whose TUI keeps bracketed paste on — see pasteFromClipboard(), and
+ *  App.vue's injectText, which wraps its writes for the same vendors. */
+export function agentUsesBracketedPaste(agentKey?: string): boolean {
   return terminalSpecFor(agentKey)?.bracketedPaste === true
+}
+
+/** A mouse report, which xterm delivers through the SAME data event as a
+ *  keystroke. Without this, a CLI that turned mouse tracking on would make a
+ *  pane look actively typed at for as long as the pointer sits over it. SGR
+ *  (`ESC[<…M/m`) and X10 (`ESC[M…`) are the encodings xterm emits. */
+const MOUSE_REPORT = /^\x1b\[(?:<[\d;]*[Mm]|M)/
+
+/** A focus report (`ESC[I` in, `ESC[O` out), sent when a CLI has focus tracking
+ *  on. Same problem as a mouse report: the terminal is telling the program the
+ *  pointer/focus moved, which is not the user typing. */
+const FOCUS_REPORT = /^\x1b\[[IO]/
+
+/** What the terminal reports on its own rather than what the user typed. Both
+ *  the keystroke clock and the draft buffer read this: neither may be advanced
+ *  by moving the mouse over a pane or clicking into and out of it. */
+function isTerminalReport(data: string): boolean {
+  return MOUSE_REPORT.test(data) || FOCUS_REPORT.test(data)
 }
 
 // ── Edit > Copy bridge ──────────────────────────────────────────────────────
@@ -2865,6 +2884,89 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // otherwise pasting "/clear" and pressing Enter stops triggering onClear.
   let inputBuffer = ''
 
+  /** When a real keystroke last reached this pane (mouse reports excluded).
+   *  Zero until the user types. */
+  const lastUserKeyAt = ref(0)
+
+  /** Past this, an unsent line stops counting as a draft. The buffer itself is
+   *  kept (it is also how `/clear` is recognised) — only the claim on delivery
+   *  expires.
+   *
+   *  It exists because the buffer can only be emptied by a key that says so
+   *  (Enter, Backspace, Ctrl+C/U/W, Escape), and there are inputs no such key
+   *  ever follows: a permission prompt or an AskUserQuestion box answered with
+   *  a bare `1`/`y`, which the CLI consumes on the keypress. The transition out
+   *  of those two states clears the buffer below, and this is the backstop for
+   *  every case that transition does not see. A minute is long enough that a
+   *  real half-written line is still protected while someone is thinking about
+   *  it, and the alternative to expiring at all is a pane whose messages never
+   *  arrive again — and which `syncPaneBusy` keeps reporting as busy. */
+  const DRAFT_STALE_MS = 60_000
+
+  /** Longest buffer `onLeftUserPrompt` will throw away. The latch it exists to
+   *  break is a prompt answered with a bare `1`/`2`/`y`/`n`, so anything longer
+   *  than that is a line the user was writing, not an answer the CLI consumed —
+   *  and leaving a prompt is not proof it was answered at all. `idle_prompt` and
+   *  the other resolved Notification types end `awaiting` on their own (see
+   *  cliAwaitingInput's RESOLVED_NOTIFICATION_TYPES), so an unconditional clear
+   *  there would drop a real half-written line and let the next injection submit
+   *  what was left of it. Those longer lines fall to DRAFT_STALE_MS instead. */
+  const SINGLE_KEY_ANSWER_MAX = 2
+
+  const draftPending = ref(false)
+
+  /** True while that line holds something the user has not submitted yet.
+   *
+   *  Published because an unsent draft is not visible to anyone outside this
+   *  composable, and injecting into a pane that has one appends the injected
+   *  text to the draft and submits both together — see App.vue's messaging
+   *  idle gate, which holds delivery on it. */
+  const hasDraft = computed(() =>
+    draftPending.value &&
+    lastUserKeyAt.value > 0 &&
+    // nowTick, not Date.now(): a computed reading the clock directly would be
+    // cached at whatever the first read saw and never expire.
+    nowTick.value - lastUserKeyAt.value < DRAFT_STALE_MS
+  )
+
+  function syncDraft(): void {
+    draftPending.value = inputBuffer.trim() !== ''
+  }
+
+  /** Whether the program on the other end of this PTY has mode 2004 on right
+   *  now, as xterm parsed it off that program's own output.
+   *
+   *  A plain getter, not a ref: xterm mutates `term.modes` outside Vue, so a
+   *  computed would cache the first answer. Published because an injection is
+   *  written straight to the PTY without going through xterm, so App.vue's
+   *  injectText has no other way to know whether guards will be understood —
+   *  and a CLI that dropped to a sub-shell, a bare bash, or a raw login prompt
+   *  turns the mode off while the pane's vendor key still says it uses it. */
+  function isBracketedPasteActive(): boolean {
+    return term.modes.bracketedPasteMode === true
+  }
+
+  /** The other half of the same problem, and the precise one: a prompt answered
+   *  with a single key never reaches Enter, so nothing above empties the buffer
+   *  and the pane stays "being typed at" for good. Leaving `awaiting`/`question`
+   *  is the moment the CLI took that answer, so whatever the line held is gone.
+   *
+   *  Deliberately narrow. Clearing on any turn signal instead would drop a line
+   *  the user really is half-way through writing while the agent works, which is
+   *  the exact case this gate exists for. And someone who answered a prompt and
+   *  kept typing is still covered — lastUserKeyAt holds delivery on its own for
+   *  a few seconds after every keystroke.
+   *
+   *  Wired further down, where displayStatus is safe to evaluate. */
+  function onLeftUserPrompt(now: DisplayStatus, before: DisplayStatus): void {
+    const wasParked = before === 'awaiting' || before === 'question'
+    const stillParked = now === 'awaiting' || now === 'question'
+    if (!wasParked || stillParked) return
+    if (inputBuffer.trim().length > SINGLE_KEY_ANSWER_MAX) return
+    inputBuffer = ''
+    syncDraft()
+  }
+
   // Spawn-phase input gate. A pane is "preparing" for as long as its CLI is
   // booting (starting → checking-dialog → settling → injecting-role), and the
   // PTY cannot take keystrokes yet. This used to be xterm's own `disableStdin`,
@@ -2945,20 +3047,29 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   /** Input bookkeeping shared by term.onData and the manual-paste path. */
   function noteUserInput(text: string): void {
     if (isStopped.value) { isStopped.value = false; opts?.onUserResume?.() }
+    // A clipboard paste is the user putting something in the composer they have
+    // not sent yet, so it counts as input for the draft gate exactly like typing.
+    lastUserKeyAt.value = Date.now()
     // Only what follows the last CR is still on the current line — without this
     // a pasted "/clear\n" leaves "/clear" behind and the user's NEXT Enter
     // fires onClear again.
     const lastBreak = text.lastIndexOf('\r')
     if (lastBreak >= 0) inputBuffer = ''
-    inputBuffer += text.slice(lastBreak + 1).replace(/[\x00-\x1f\x7f]/g, '')
+    inputBuffer += stripInputSequences(text.slice(lastBreak + 1))
     if (inputBuffer.length > 100) inputBuffer = inputBuffer.slice(-100)
+    syncDraft()
   }
 
   // Wire input/output/exit handlers for the current sessionId. Shared by a fresh
   // spawn and a reattach so both bind identically.
   function bindSessionHandlers(): void {
     inputBuffer = ''
+    syncDraft()
     inputDisposer = term.onData((data) => {
+      // Before the gates below: a keystroke held back for a preparing pane is
+      // still the user typing, and refusing to send one does not make the
+      // person at the keyboard go away.
+      if (!isTerminalReport(data)) lastUserKeyAt.value = Date.now()
       if (_stdinGated) {
         // Bounded so a pane stuck in preparation cannot grow this forever. Past
         // the cap the oldest keystrokes go, since those are the ones the user
@@ -2975,20 +3086,39 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         if (isStopped.value) { isStopped.value = false; opts?.onUserResume?.() }
         if (inputBuffer.trim() === '/clear' && opts?.onClear) {
           inputBuffer = ''
+          syncDraft()
           opts.onClear()
           return
         }
         inputBuffer = ''
       } else if (data === '\x7f' || data === '\b') {
         inputBuffer = inputBuffer.slice(0, -1)
+      } else if (data === '\x03' || data === '\x15' || data === '\x1b') {
+        // The three ways a composer is emptied without sending it: Ctrl+C,
+        // Ctrl+U, and Escape. Tracked because the draft signal latches
+        // otherwise — the line is gone from the CLI's input box while this
+        // buffer still holds it, and the pane stays "being typed at" until the
+        // user's next Enter.
+        inputBuffer = ''
+      } else if (data === '\x17') {
+        // Ctrl+W deletes back to the previous word boundary rather than
+        // clearing, so mirror that instead of emptying the buffer: treating it
+        // as a clear would call a still-half-written line finished, which is
+        // the failure this whole gate exists to prevent.
+        inputBuffer = inputBuffer.replace(/\s*\S+\s*$/, '')
       } else if (data.length === 1 && data.charCodeAt(0) >= 32) {
         if (isStopped.value) { isStopped.value = false; opts?.onUserResume?.() }
         inputBuffer += data
       } else if (data.length > 1) {
         if (isStopped.value) { isStopped.value = false; opts?.onUserResume?.() }
-        inputBuffer += data.replace(/[\x00-\x1f\x7f]/g, '')
+        // Terminal reports ride this same channel and are not typed text.
+        // Dropping escape sequences is not enough for the mouse ones: X10
+        // encodes the button and coordinates as three PRINTABLE bytes after
+        // `ESC[M`, which would land in the buffer as a draft that never clears.
+        if (!isTerminalReport(data)) inputBuffer += stripInputSequences(data)
       }
       if (inputBuffer.length > 100) inputBuffer = inputBuffer.slice(-100)
+      syncDraft()
 
       // Only the first keystroke of a burst is timed, for the reason the
       // backend's probe does the same: a fast typist re-arming the clock on
@@ -3224,6 +3354,10 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // container is genuinely measurable — i.e. when the tab is shown.
   // A ref so displayStatus can reflect a parked (deferred) spawn as idle.
   const pendingSpawn = shallowRef<SpawnOptions | null>(null)
+  // Registered here rather than beside onLeftUserPrompt itself: watch() runs its
+  // source once to capture the initial value, and displayStatus reads
+  // pendingSpawn — which does not exist until this line.
+  watch(displayStatus, onLeftUserPrompt)
   let activeCreateGeneration: string | null = null
   let pendingCreateCancel: Promise<boolean> | null = null
   const createCancelRequests = new Map<string, Promise<boolean>>()
@@ -3721,7 +3855,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // second case is the reattach hole this exists for; restricting it to
     // multi-line text keeps a single-line paste on xterm's own judgement, so a
     // sub-shell that never enabled mode 2004 cannot receive a literal "[200~".
-    const bracketed = term.modes.bracketedPasteMode ||
+    const bracketed = isBracketedPasteActive() ||
       (normalized.includes('\r') && agentUsesBracketedPaste(activeAgentKey))
     const payload = bracketed ? `\x1b[200~${normalized}\x1b[201~` : normalized
     // The rest of what term.onData would have done for us (CoreService's
@@ -3913,6 +4047,9 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     cleanBytesSeen,
     lastActivityAt,
     lastRawActivityAt,
+    hasDraft,
+    lastUserKeyAt,
+    isBracketedPasteActive,
     markTurnComplete,
     markNeedsInput,
     clearNeedsInput,

@@ -16,6 +16,7 @@
     "hold-gone": "目標 pane 已不存在",
     "hold-not-ready": "目標 pane 未在執行",
     "hold-starting": "目標 pane 仍在啟動中",
+    "hold-typing": "使用者正在該 pane 輸入中",
     "hold-mid-turn": "目標 agent 正在執行中",
     "hold-settling": "等待目標靜置",
     "hold-remote-ack": "已送出，等待對方視窗回報",

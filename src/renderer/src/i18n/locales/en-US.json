@@ -16,6 +16,7 @@
     "hold-gone": "Target pane no longer exists",
     "hold-not-ready": "Target pane is not running",
     "hold-starting": "Target pane is still starting up",
+    "hold-typing": "Someone is typing in the target pane",
     "hold-mid-turn": "Target agent is mid-turn",
     "hold-settling": "Waiting for the target to settle",
     "hold-remote-ack": "Sent — awaiting the target window's report",
