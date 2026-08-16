@@ -156,12 +156,15 @@ describe('useTerminal — alternate-buffer scrollback snapshot', () => {
   it('flags exactly the vendors verified to own the alt buffer', () => {
     const flagged = AGENT_SPECS.filter((s) => s.fullScreenTui).map((s) => s.agentKey)
     // Every entry was measured on a real PTY emitting `ESC[?1049h` at startup.
-    // Vendors probed and found to stay in the NORMAL buffer — grok, kimi, pi,
-    // aider, cursor and codex — must stay off the list, as must anything
-    // unmeasured: muse never tripped the probe, so its binary carrying the
-    // sequence is not evidence it enters the alternate buffer. codex is the
-    // cautionary case: it was briefly listed on that same binary-only
-    // evidence and the probe later showed it paints inline.
+    // Probed and found to stay in the NORMAL buffer, so all off the list:
+    // grok, kimi, pi, aider, cursor, codex and muse.
+    //
+    // codex and muse are the cautionary pair. Both binaries contain the
+    // sequence, and codex was briefly listed on that evidence alone — then a
+    // probe with a real window size (TIOCGWINSZ, not $COLUMNS) that also
+    // answered the workspace-trust prompt showed both painting inline. A
+    // string in a binary proves a code path exists, never that startup
+    // reaches it.
     expect(flagged.sort()).toEqual([
       'antigravity', 'claude', 'copilot', 'kilo', 'opencode', 'qwen'
     ])
