@@ -88,9 +88,15 @@ const nativeSkills = ref<NativeSkill[]>([])
 const agents = ref<SkillAgent[]>([])
 /** Whether the user has once allowed writes into ~/.agents/skills. */
 const writeConsented = ref(false)
-const view = ref<'list' | 'matrix'>('list')
+/** Two views over one dataset: browse (cards) and route (matrix). */
+const view = ref<'browse' | 'route'>('browse')
+/** Source filter shared by both views: 'all' | 'shared' | a native source key. */
+const sourceFilter = ref('all')
 const rootPath = ref('')
+/** Name of the shared skill loaded into the editor draft, if any. */
 const selectedName = ref('')
+/** Row key of whatever is open in the detail drawer (shared or native). */
+const selectedKey = ref('')
 const draft = ref<SkillDraft | null>(null)
 const query = ref('')
 const loading = ref(false)
@@ -101,25 +107,11 @@ const creating = ref(false)
 const newName = ref('')
 const newDescription = ref('')
 
-const filteredNative = computed(() => {
-  const needle = query.value.trim().toLowerCase()
-  if (!needle) return nativeSkills.value
-  return nativeSkills.value.filter((skill) =>
-    `${skill.name} ${skill.description} ${skill.source}`.toLowerCase().includes(needle)
-  )
-})
 
 async function openNativeFolder(skill: NativeSkill): Promise<void> {
   if (skill.path) await window.agentTeam?.openPath?.(skill.path)
 }
 
-const filteredSkills = computed(() => {
-  const needle = query.value.trim().toLowerCase()
-  if (!needle) return skills.value
-  return skills.value.filter((skill) =>
-    `${skill.name} ${skill.description}`.toLowerCase().includes(needle)
-  )
-})
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
@@ -294,14 +286,12 @@ async function loadSkills(preferredName = selectedName.value): Promise<void> {
     })
     rootPath.value = stringValue(resp.payload?.root)
     writeConsented.value = booleanValue(resp.payload?.write_consented, false)
-    const next = skills.value.find((skill) => skill.name === preferredName)?.name
-      ?? skills.value[0]?.name
-      ?? ''
+    // Keep whatever was open if it still exists; otherwise the drawer stays
+    // closed. Auto-opening the first skill made a read-only entry look like
+    // the page's main content.
+    const next = skills.value.find((skill) => skill.name === preferredName)?.name ?? ''
     if (next) await selectSkill(next)
-    else {
-      selectedName.value = ''
-      draft.value = null
-    }
+    else if (selectedRow.value === null) closeDrawer()
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
   } finally {
@@ -310,6 +300,7 @@ async function loadSkills(preferredName = selectedName.value): Promise<void> {
 }
 
 async function selectSkill(name: string): Promise<void> {
+  selectedKey.value = `shared:${name}`
   selectedName.value = name
   draft.value = null
   busy.value = true
@@ -500,19 +491,89 @@ async function openSkillFolder(): Promise<void> {
 const wiredAgents = computed(() => agents.value.filter((agent) => agent.state === 'wired'))
 
 /** Every matrix row: shared skills first, then the CLIs' own, in one shape. */
+/**
+ * Every row, in one shape, after the search box and the source filter.
+ * Both views render from this list, so a filter set in one is what the other
+ * shows too — the point of merging them.
+ */
 const matrixRows = computed<MatrixRow[]>(() => {
   const needle = query.value.trim().toLowerCase()
   const match = (name: string, description: string) =>
     !needle || `${name} ${description}`.toLowerCase().includes(needle)
+  const filter = sourceFilter.value
+  const rows: MatrixRow[] = []
+  if (filter === 'all' || filter === 'shared') {
+    for (const skill of skills.value) {
+      if (match(skill.name, skill.description)) rows.push({ kind: 'shared', key: `shared:${skill.name}`, skill })
+    }
+  }
+  for (const skill of nativeSkills.value) {
+    if (filter !== 'all' && filter !== skill.source) continue
+    if (match(skill.name, skill.description)) rows.push({ kind: 'native', key: `native:${skill.realPath}`, skill })
+  }
+  return rows
+})
+
+/** Rows grouped by source, for the matrix's group rows and the browse view's sections. */
+const groupedRows = computed<Array<{ source: string; label: string; rows: MatrixRow[] }>>(() => {
+  const groups = new Map<string, MatrixRow[]>()
+  for (const row of matrixRows.value) {
+    const source = row.kind === 'shared' ? 'shared' : row.skill.source
+    const list = groups.get(source) ?? []
+    list.push(row)
+    groups.set(source, list)
+  }
+  return [...groups.entries()].map(([source, rows]) => ({
+    source,
+    label: source === 'shared'
+      ? t('settings.skills.group-shared', { root: '~/.agents/skills' })
+      : t('settings.skills.group-native', { agent: source }),
+    rows,
+  }))
+})
+
+/** Source chips for the filter bar, with counts over the unfiltered set. */
+const sourceChips = computed(() => {
+  const counts = new Map<string, number>()
+  for (const skill of nativeSkills.value) counts.set(skill.source, (counts.get(skill.source) ?? 0) + 1)
   return [
-    ...skills.value
-      .filter((skill) => match(skill.name, skill.description))
-      .map((skill): MatrixRow => ({ kind: 'shared', key: `shared:${skill.name}`, skill })),
-    ...nativeSkills.value
-      .filter((skill) => match(skill.name, skill.description))
-      .map((skill): MatrixRow => ({ kind: 'native', key: `native:${skill.realPath}`, skill })),
+    { key: 'all', label: t('settings.skills.filter-all'), count: skills.value.length + nativeSkills.value.length },
+    { key: 'shared', label: t('settings.skills.filter-shared'), count: skills.value.length },
+    ...[...counts.entries()].sort().map(([key, count]) => ({ key, label: key, count })),
   ]
 })
+
+const selectedRow = computed<MatrixRow | null>(
+  () => matrixRows.value.find((row) => row.key === selectedKey.value) ?? null
+)
+
+/** Open the drawer for a row; shared rows also load their editor draft. */
+async function openRow(row: MatrixRow): Promise<void> {
+  selectedKey.value = row.key
+  if (row.kind === 'shared') await selectSkill(row.skill.name)
+  else {
+    selectedName.value = ''
+    draft.value = null
+  }
+}
+
+function closeDrawer(): void {
+  selectedKey.value = ''
+  selectedName.value = ''
+  draft.value = null
+}
+
+/** One-line "who receives it" summary for a card, without a full matrix. */
+function deliverySummary(row: MatrixRow): { auto: string[]; on: string[] } {
+  const auto: string[] = []
+  const on: string[] = []
+  for (const agent of agents.value) {
+    const state = cellState(row, agent)
+    if (state === 'auto') auto.push(agent.key)
+    else if (state === 'on') on.push(agent.key)
+  }
+  return { auto, on }
+}
 
 type CellState = 'auto' | 'on' | 'off' | 'planned' | 'unsupported'
 
@@ -714,36 +775,18 @@ function rowSourceLabel(row: MatrixRow): string {
   return t('settings.skills.source-native', { agent: row.skill.source })
 }
 
-async function openRowFolder(row: MatrixRow): Promise<void> {
-  const path = row.kind === 'shared' ? row.skill.path : row.skill.path
-  if (path) await window.agentTeam?.openPath?.(path)
-}
-
 onMounted(() => void loadSkills())
 </script>
 
 <template>
   <div class="skills-pane" data-settings-section="skills">
+    <!-- ── Toolbar: title, filter chips, view switch, actions ─────────── -->
     <div class="skills-toolbar">
       <div>
         <h2>{{ t('settings.skills.title') }}</h2>
         <p>{{ t('settings.skills.intro') }}</p>
       </div>
       <div class="skills-toolbar-actions">
-        <div class="skills-view-switch" role="group" :aria-label="t('settings.skills.view-matrix')">
-          <button
-            type="button"
-            :class="{ on: view === 'list' }"
-            :aria-pressed="view === 'list'"
-            @click="view = 'list'"
-          >{{ t('settings.skills.view-list') }}</button>
-          <button
-            type="button"
-            :class="{ on: view === 'matrix' }"
-            :aria-pressed="view === 'matrix'"
-            @click="view = 'matrix'"
-          >{{ t('settings.skills.view-matrix') }}</button>
-        </div>
         <button type="button" :disabled="loading || busy" @click="loadSkills()">
           {{ t('action.refresh') }}
         </button>
@@ -779,199 +822,274 @@ onMounted(() => void loadSkills())
       </div>
     </form>
 
-    <section v-if="view === 'matrix'" class="skills-matrix">
-      <p class="skills-matrix-intro">{{ t('settings.skills.matrix-intro') }}</p>
+    <!-- One filter bar drives both views: what you narrow to in browse is
+         what the matrix shows, and vice versa. -->
+    <div class="skills-filterbar">
+      <div class="skills-chips" role="group" :aria-label="t('settings.skills.filter-label')">
+        <button
+          v-for="chip in sourceChips"
+          :key="chip.key"
+          type="button"
+          class="skills-chip"
+          :class="{ on: sourceFilter === chip.key }"
+          :aria-pressed="sourceFilter === chip.key"
+          @click="sourceFilter = chip.key"
+        >{{ chip.label }}<span class="count">{{ chip.count }}</span></button>
+      </div>
       <input
         v-model="query"
-        class="skills-search skills-matrix-search"
+        class="skills-search"
         type="search"
         :placeholder="t('settings.skills.search')"
       />
-      <div v-if="matrixRows.length === 0" class="skills-state">
-        {{ t('settings.skills.matrix-none') }}
+      <div class="skills-view-switch" role="group" :aria-label="t('settings.skills.view-label')">
+        <button
+          type="button"
+          :class="{ on: view === 'browse' }"
+          :aria-pressed="view === 'browse'"
+          @click="view = 'browse'"
+        >{{ t('settings.skills.view-browse') }}</button>
+        <button
+          type="button"
+          :class="{ on: view === 'route' }"
+          :aria-pressed="view === 'route'"
+          @click="view = 'route'"
+        >{{ t('settings.skills.view-route') }}</button>
       </div>
-      <div v-else class="skills-matrix-scroll">
-        <table>
-          <thead>
-            <tr>
-              <th scope="col" class="corner">{{ t('settings.skills.matrix-skill') }}</th>
-              <th
-                v-for="agent in agents"
-                :key="agent.key"
-                scope="col"
-                :class="agent.state"
-                :title="agent.label"
-              >{{ agent.key }}</th>
-              <th scope="col" class="bulk"></th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="row in matrixRows"
-              :key="row.key"
-              :class="{
-                off: row.kind === 'shared' ? !row.skill.enabled : !row.skill.valid,
-                native: row.kind === 'native',
-                active: row.kind === 'shared' && selectedName === row.skill.name,
-              }"
-            >
-              <th scope="row">
-                <button
-                  v-if="row.kind === 'shared'"
-                  type="button"
-                  class="matrix-name"
-                  @click="selectSkill(row.skill.name); view = 'list'"
-                >{{ row.skill.name }}</button>
-                <button
-                  v-else
-                  type="button"
-                  class="matrix-name"
-                  :title="row.skill.path"
-                  @click="openRowFolder(row)"
-                >{{ row.skill.name }}</button>
-                <span class="matrix-source" :class="row.kind">{{ rowSourceLabel(row) }}</span>
-                <span v-if="row.kind === 'shared' && !row.skill.enabled" class="matrix-note">
-                  {{ t('settings.skills.matrix-disabled-row') }}
-                </span>
-                <span v-else-if="row.kind === 'native' && !row.skill.valid" class="matrix-note">
-                  {{ row.skill.error || t('settings.skills.invalid') }}
-                </span>
-              </th>
-              <td
-                v-for="agent in agents"
-                :key="agent.key"
-                :class="cellState(row, agent)"
-              >
-                <button
-                  type="button"
-                  :disabled="!cellEditable(row, agent) || busy"
-                  :aria-pressed="delivers(row, agent)"
-                  :aria-label="cellHint(row, agent)"
-                  :title="cellHint(row, agent)"
-                  @click="toggleCell(row, agent)"
-                >{{ cellGlyph(row, agent) }}</button>
-              </td>
-              <td class="bulk">
-                <button
-                  type="button"
-                  :disabled="editableAgents(row).length === 0 || busy"
-                  @click="setRow(row, true)"
-                >{{ t('settings.skills.matrix-row-all') }}</button>
-                <button
-                  type="button"
-                  :disabled="editableAgents(row).length === 0 || busy"
-                  @click="setRow(row, false)"
-                >{{ t('settings.skills.matrix-row-none') }}</button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <ul class="skills-matrix-legend">
-        <li><span class="swatch auto">●</span>{{ t('settings.skills.matrix-legend-auto') }}</li>
-        <li><span class="swatch on">✓</span>{{ t('settings.skills.matrix-legend-on') }}</li>
-        <li><span class="swatch off"></span>{{ t('settings.skills.matrix-legend-off') }}</li>
-        <li><span class="swatch planned">·</span>{{ t('settings.skills.matrix-legend-planned') }}</li>
-        <li><span class="swatch unsupported">—</span>{{ t('settings.skills.matrix-legend-unsupported') }}</li>
-      </ul>
-    </section>
+    </div>
 
-    <div v-show="view === 'list'" class="skills-layout">
-      <aside class="skills-library" :aria-label="t('settings.skills.library')">
-        <input
-          v-model="query"
-          class="skills-search"
-          type="search"
-          :placeholder="t('settings.skills.search')"
-        />
+    <div class="skills-body" :class="{ 'drawer-open': selectedRow !== null }">
+      <!-- ── Main region: browse (cards) or route (matrix) ──────────── -->
+      <div class="skills-main">
         <div v-if="loading" class="skills-state">{{ t('label.loading') }}</div>
-        <div v-else-if="filteredSkills.length === 0 && filteredNative.length === 0" class="skills-state">
+        <div v-else-if="matrixRows.length === 0" class="skills-state">
           <strong>{{ t('settings.skills.empty-title') }}</strong>
           <span>{{ t('settings.skills.empty-body') }}</span>
         </div>
-        <template v-if="!loading">
-          <div
-            v-for="skill in filteredSkills"
-            :key="skill.name"
-            class="skill-list-item"
-            :class="{ active: selectedName === skill.name }"
-          >
-            <button type="button" class="skill-select" @click="selectSkill(skill.name)">
-              <span class="skill-status-rail" aria-hidden="true">
-                <span :class="skill.enabled ? 'enabled' : 'disabled'"></span>
-                <span :class="skill.valid === false ? 'invalid' : skill.valid === true ? 'valid' : 'unknown'"></span>
-                <span :class="skill.nativeConflict === true ? 'conflicted' : skill.nativeConflict === false ? 'clear' : 'unknown'"></span>
-              </span>
-              <span class="skill-list-copy">
-                <strong>{{ skill.name }}</strong>
-                <span>{{ skill.description || t('settings.skills.no-description') }}</span>
-              </span>
-            </button>
-            <ToggleSwitch
-              :model-value="skill.enabled"
-              :disabled="busy"
-              :aria-label="t(skill.enabled ? 'settings.skills.disable' : 'settings.skills.enable', { name: skill.name })"
-              @click.stop
-              @update:model-value="setEnabled(skill, $event)"
-            />
-          </div>
-        </template>
-        <template v-if="filteredNative.length > 0">
-          <div class="skills-group-title">{{ t('settings.skills.native-group') }}</div>
-          <div
-            v-for="skill in filteredNative"
-            :key="skill.realPath"
-            class="skill-list-item native"
-          >
-            <button
-              type="button"
-              class="skill-select"
-              :title="skill.path"
-              @click="openNativeFolder(skill)"
-            >
-              <span class="skill-status-rail" aria-hidden="true">
-                <span class="enabled"></span>
-                <span :class="skill.valid ? 'valid' : 'invalid'"></span>
-                <span class="clear"></span>
-              </span>
-              <span class="skill-list-copy">
-                <strong>{{ skill.name }}</strong>
-                <span>{{ skill.description || skill.error || t('settings.skills.no-description') }}</span>
-              </span>
-            </button>
-            <span class="skill-source-tag">{{ t('settings.skills.source-native', { agent: skill.source }) }}</span>
-            <button
-              type="button"
-              class="skill-migrate"
-              :disabled="busy || !skill.valid"
-              :title="t('settings.skills.migrate-hint')"
-              @click.stop="migrateNative(skill)"
-            >{{ t('settings.skills.migrate') }}</button>
-          </div>
-        </template>
-      </aside>
 
-      <main class="skills-editor">
-        <div v-if="!draft" class="skills-state editor-empty">
-          <strong>{{ t('settings.skills.select-title') }}</strong>
-          <span>{{ t('settings.skills.select-body') }}</span>
-        </div>
-        <template v-else>
-          <header class="skill-editor-head">
-            <div>
-              <div class="skill-editor-title-row">
-                <h3>{{ draft.name }}</h3>
-                <span v-if="draft.valid === false" class="skill-badge danger">{{ t('settings.skills.invalid') }}</span>
-                <span v-if="draft.nativeConflict" class="skill-badge warning">{{ t('settings.skills.native-conflict') }}</span>
-                <span v-if="!draft.managed" class="skill-badge">{{ t('settings.skills.source-shared-user') }}</span>
-              </div>
-              <p>{{ draft.managed ? t('settings.skills.editor-hint') : t('settings.skills.editor-readonly-hint') }}</p>
+        <!-- Browse: cards grouped by source. Each card carries one source
+             badge and a compact "who receives it" line — enough to scan,
+             never a full control surface. -->
+        <template v-else-if="view === 'browse'">
+          <section v-for="group in groupedRows" :key="group.source" class="skills-group">
+            <h3 class="skills-group-title">
+              {{ group.label }}<span class="count">{{ group.rows.length }}</span>
+            </h3>
+            <div class="skills-cards">
+              <button
+                v-for="row in group.rows"
+                :key="row.key"
+                type="button"
+                class="skill-card"
+                :class="{
+                  active: selectedKey === row.key,
+                  off: row.kind === 'shared' ? !row.skill.enabled : !row.skill.valid,
+                  native: row.kind === 'native',
+                }"
+                @click="openRow(row)"
+              >
+                <span class="skill-card-head">
+                  <strong>{{ row.skill.name }}</strong>
+                  <span class="skill-source-tag" :class="row.kind">{{ rowSourceLabel(row) }}</span>
+                </span>
+                <span class="skill-card-desc">
+                  {{ row.skill.description || (row.kind === 'native' ? row.skill.error : '') || t('settings.skills.no-description') }}
+                </span>
+                <span class="skill-card-delivery" aria-hidden="true">
+                  <span v-if="deliverySummary(row).auto.length" class="dchip auto">
+                    {{ t('settings.skills.delivery-auto', { n: deliverySummary(row).auto.length }) }}
+                  </span>
+                  <span v-for="key in deliverySummary(row).on" :key="key" class="dchip on">{{ key }}</span>
+                  <span
+                    v-if="!deliverySummary(row).auto.length && !deliverySummary(row).on.length"
+                    class="dchip none"
+                  >{{ t('settings.skills.delivery-none') }}</span>
+                </span>
+              </button>
             </div>
-            <button type="button" :disabled="!draft.path && !rootPath" @click="openSkillFolder">
+          </section>
+        </template>
+
+        <!-- Route: the matrix, with source group rows. Same rows, same
+             filter; the row name opens the same drawer as a card does. -->
+        <section v-else class="skills-matrix">
+          <div class="skills-matrix-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col" class="corner">{{ t('settings.skills.matrix-skill') }}</th>
+                  <th
+                    v-for="agent in agents"
+                    :key="agent.key"
+                    scope="col"
+                    :class="agent.state"
+                    :title="agent.label"
+                  >{{ agent.key }}</th>
+                  <th scope="col" class="bulk"></th>
+                </tr>
+              </thead>
+              <tbody v-for="group in groupedRows" :key="group.source">
+                <tr class="group">
+                  <th scope="rowgroup" :colspan="agents.length + 2">{{ group.label }}</th>
+                </tr>
+                <tr
+                  v-for="row in group.rows"
+                  :key="row.key"
+                  :class="{
+                    off: row.kind === 'shared' ? !row.skill.enabled : !row.skill.valid,
+                    native: row.kind === 'native',
+                    active: selectedKey === row.key,
+                  }"
+                >
+                  <th scope="row">
+                    <button type="button" class="matrix-name" @click="openRow(row)">{{ row.skill.name }}</button>
+                    <span v-if="row.kind === 'shared' && !row.skill.enabled" class="matrix-note">
+                      {{ t('settings.skills.matrix-disabled-row') }}
+                    </span>
+                    <span v-else-if="row.kind === 'native' && !row.skill.valid" class="matrix-note">
+                      {{ row.skill.error || t('settings.skills.invalid') }}
+                    </span>
+                  </th>
+                  <td
+                    v-for="agent in agents"
+                    :key="agent.key"
+                    :class="cellState(row, agent)"
+                  >
+                    <button
+                      type="button"
+                      :disabled="!cellEditable(row, agent) || busy"
+                      :aria-pressed="delivers(row, agent)"
+                      :aria-label="cellHint(row, agent)"
+                      :title="cellHint(row, agent)"
+                      @click="toggleCell(row, agent)"
+                    >{{ cellGlyph(row, agent) }}</button>
+                  </td>
+                  <td class="bulk">
+                    <button
+                      type="button"
+                      :disabled="editableAgents(row).length === 0 || busy"
+                      @click="setRow(row, true)"
+                    >{{ t('settings.skills.matrix-row-all') }}</button>
+                    <button
+                      type="button"
+                      :disabled="editableAgents(row).length === 0 || busy"
+                      @click="setRow(row, false)"
+                    >{{ t('settings.skills.matrix-row-none') }}</button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <ul class="skills-matrix-legend">
+            <li><span class="swatch auto">●</span>{{ t('settings.skills.matrix-legend-auto') }}</li>
+            <li><span class="swatch on">✓</span>{{ t('settings.skills.matrix-legend-on') }}</li>
+            <li><span class="swatch off"></span>{{ t('settings.skills.matrix-legend-off') }}</li>
+            <li><span class="swatch unsupported">—</span>{{ t('settings.skills.matrix-legend-unsupported') }}</li>
+          </ul>
+        </section>
+      </div>
+
+      <!-- ── Drawer: one detail surface for any row ────────────────── -->
+      <aside v-if="selectedRow" class="skills-drawer" :aria-label="selectedRow.skill.name">
+        <header class="skill-drawer-head">
+          <div class="skill-drawer-title">
+            <h3>{{ selectedRow.skill.name }}</h3>
+            <span class="skill-source-tag" :class="selectedRow.kind">{{ rowSourceLabel(selectedRow) }}</span>
+            <span
+              v-if="selectedRow.kind === 'shared' && selectedRow.skill.valid === false"
+              class="skill-badge danger"
+            >{{ t('settings.skills.invalid') }}</span>
+            <span
+              v-if="selectedRow.kind === 'shared' && selectedRow.skill.nativeConflict"
+              class="skill-badge warning"
+              :title="t('settings.skills.native-conflict-hint')"
+            >{{ t('settings.skills.native-conflict') }}</span>
+          </div>
+          <button type="button" class="skill-drawer-close" :aria-label="t('action.close')" @click="closeDrawer">✕</button>
+        </header>
+
+        <!-- Shared rows carry Navide's own on/off; a native skill has no such
+             switch because it is not Navide's to switch. -->
+        <section v-if="selectedRow.kind === 'shared'" class="skill-drawer-section skill-drawer-toggle">
+          <span>
+            <strong>{{ t('settings.skills.enabled') }}</strong>
+            <small>{{ t('settings.skills.enabled-hint') }}</small>
+          </span>
+          <ToggleSwitch
+            :model-value="selectedRow.skill.enabled"
+            :disabled="busy"
+            :aria-label="t(selectedRow.skill.enabled ? 'settings.skills.disable' : 'settings.skills.enable', { name: selectedRow.skill.name })"
+            @update:model-value="setEnabled(selectedRow.skill, $event)"
+          />
+        </section>
+
+        <!-- Delivery, in the same words for every row -->
+        <section class="skill-drawer-section">
+          <h4>{{ t('settings.skills.delivery-title') }}</h4>
+          <div class="skill-drawer-chips">
+            <template v-for="agent in agents" :key="agent.key">
+              <button
+                v-if="cellState(selectedRow, agent) !== 'unsupported'"
+                type="button"
+                class="dchip"
+                :class="cellState(selectedRow, agent)"
+                :disabled="!cellEditable(selectedRow, agent) || busy"
+                :aria-pressed="delivers(selectedRow, agent)"
+                :title="cellHint(selectedRow, agent)"
+                @click="toggleCell(selectedRow, agent)"
+              >{{ agent.key }}</button>
+            </template>
+          </div>
+          <p class="skill-drawer-hint">{{ t('settings.skills.delivery-hint') }}</p>
+        </section>
+
+        <!-- Native: read-only preview + the one place "move here" lives -->
+        <template v-if="selectedRow.kind === 'native'">
+          <section class="skill-drawer-section">
+            <h4>{{ t('settings.skills.location') }}</h4>
+            <code class="skill-drawer-path">{{ selectedRow.skill.path }}</code>
+            <p v-if="selectedRow.skill.aliases.length" class="skill-drawer-hint">
+              {{ t('settings.skills.also-linked-from', { roots: selectedRow.skill.aliases.join(', ') }) }}
+            </p>
+            <p v-if="!selectedRow.skill.valid" class="skills-error">{{ selectedRow.skill.error }}</p>
+          </section>
+          <footer class="skill-drawer-actions">
+            <button type="button" @click="openNativeFolder(selectedRow.skill)">
               {{ t('settings.skills.open-folder') }}
             </button>
-          </header>
+            <button
+              type="button"
+              class="primary"
+              :disabled="busy || !selectedRow.skill.valid"
+              :title="t('settings.skills.migrate-hint')"
+              @click="migrateNative(selectedRow.skill)"
+            >{{ t('settings.skills.migrate') }}</button>
+          </footer>
+        </template>
 
+        <!-- Shared but the user's own: read-only preview -->
+        <template v-else-if="draft && !draft.managed">
+          <section class="skill-drawer-section">
+            <h4>{{ t('settings.skills.location') }}</h4>
+            <code class="skill-drawer-path">{{ draft.path }}</code>
+            <p class="skill-drawer-hint">{{ t('settings.skills.editor-readonly-hint') }}</p>
+          </section>
+          <section v-if="draft.description" class="skill-drawer-section">
+            <h4>{{ t('settings.skills.description') }}</h4>
+            <p class="skill-drawer-prose">{{ draft.description }}</p>
+          </section>
+          <section v-if="draft.body" class="skill-drawer-section">
+            <h4>{{ t('settings.skills.instructions') }}</h4>
+            <pre class="skill-drawer-prose">{{ draft.body.slice(0, 600) }}{{ draft.body.length > 600 ? '…' : '' }}</pre>
+          </section>
+          <footer class="skill-drawer-actions">
+            <button type="button" @click="openSkillFolder">{{ t('settings.skills.open-folder') }}</button>
+          </footer>
+        </template>
+
+        <!-- Shared and ours: the editor -->
+        <template v-else-if="draft">
+          <p class="skill-drawer-hint">{{ t('settings.skills.editor-hint') }}</p>
           <div class="skill-form">
             <label>
               <span>{{ t('settings.skills.name') }}</span>
@@ -1046,8 +1164,13 @@ onMounted(() => void loadSkills())
               </button>
             </footer>
           </div>
+          <footer class="skill-drawer-actions secondary">
+            <button type="button" @click="openSkillFolder">{{ t('settings.skills.open-folder') }}</button>
+          </footer>
         </template>
-      </main>
+
+        <div v-else class="skills-state">{{ t('label.loading') }}</div>
+      </aside>
     </div>
   </div>
 </template>
@@ -1157,39 +1280,7 @@ textarea { resize: vertical; line-height: 1.5; }
 input:focus,
 textarea:focus { border-color: var(--accent-emphasis); }
 input:disabled { color: var(--text-muted); background: var(--bg-muted); }
-.skills-layout {
-  display: grid;
-  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
-  min-height: 0;
-  flex: 1;
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-card);
-  overflow: hidden;
-  background: var(--bg-subtle);
-}
-.skills-library {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  padding: 10px;
-  gap: 7px;
-  border-right: 1px solid var(--border-default);
-  overflow-y: auto;
-}
 .skills-search { flex: 0 0 auto; }
-.skill-list-item {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 5px;
-  width: 100%;
-  min-height: 52px;
-  padding: 7px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-control);
-}
-.skill-list-item.active { background: var(--bg-muted); border-color: var(--border-default); }
-.skill-select {
   display: grid;
   grid-template-columns: 5px minmax(0, 1fr);
   align-items: center;
@@ -1202,25 +1293,8 @@ input:disabled { color: var(--text-muted); background: var(--bg-muted); }
   background: transparent;
   text-align: left;
 }
-.skill-select:hover:not(:disabled) { background: transparent; }
-.skill-status-rail { align-self: stretch; display: grid; grid-template-rows: repeat(3, 1fr); gap: 2px; }
-.skill-status-rail span { width: 4px; min-height: 6px; border-radius: 1px; background: var(--text-disabled); }
-.skill-status-rail .enabled,
-.skill-status-rail .valid,
-.skill-status-rail .clear { background: var(--success-fg); }
-.skill-status-rail .disabled { background: var(--text-disabled); }
-.skill-status-rail .invalid,
-.skill-status-rail .conflicted { background: var(--danger-fg); }
-.skill-list-copy { display: flex; flex-direction: column; min-width: 0; gap: 2px; }
-.skill-list-copy strong { overflow: hidden; text-overflow: ellipsis; color: var(--text-bright); font-size: 12px; }
-.skill-list-copy > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); font-size: 10px; }
-.skill-list-item :deep(.toggle-switch) { width: 32px; height: 18px; }
-.skill-list-item :deep(.toggle-switch-thumb) { width: 14px; height: 14px; }
-.skill-list-item :deep(.toggle-switch.on .toggle-switch-thumb) { left: 16px; }
-.skills-editor { min-width: 0; min-height: 0; overflow-y: auto; padding: 14px 16px 18px; }
 .skills-state { display: flex; flex-direction: column; gap: 4px; padding: 18px 8px; color: var(--text-secondary); font-size: 11px; text-align: center; }
 .skills-state strong { color: var(--text-bright); }
-.editor-empty { height: 100%; align-items: center; justify-content: center; }
 .skill-editor-title-row { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
 .skill-badge { border-radius: var(--radius-pill); padding: 2px 7px; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
 .skill-badge.danger { color: var(--danger-fg); background: color-mix(in srgb, var(--danger-fg) 12%, transparent); }
@@ -1247,17 +1321,165 @@ input:disabled { color: var(--text-muted); background: var(--bg-muted); }
 .skill-attachments ul { padding-left: 18px; font-family: Menlo, Monaco, monospace; }
 .skill-editor-actions { padding-top: 2px; }
 
-@media (max-width: 800px) {
+/* ── Filter bar: one bar, both views ───────────────────────────────────── */
+.skills-filterbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.skills-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.skills-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+}
+.skills-chip.on { background: var(--bg-elevated); color: var(--text-bright); border-color: var(--border-emphasis, var(--border-default)); font-weight: 600; }
+.skills-chip .count { font-size: 10px; opacity: 0.6; font-variant-numeric: tabular-nums; }
+.skills-filterbar .skills-search { flex: 1; min-width: 140px; max-width: 260px; }
+.skills-filterbar .skills-view-switch { margin-left: auto; }
+
+/* ── Body: main region + optional drawer ───────────────────────────────── */
+.skills-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-height: 0;
+  flex: 1;
+  gap: 12px;
+}
+.skills-body.drawer-open { grid-template-columns: minmax(0, 1fr) minmax(300px, 380px); }
+.skills-main { min-width: 0; min-height: 0; overflow-y: auto; }
+.skills-state { display: flex; flex-direction: column; gap: 4px; padding: 18px 8px; color: var(--text-secondary); font-size: 11px; text-align: center; }
+.skills-state strong { color: var(--text-bright); }
+
+/* ── Browse: cards grouped by source ───────────────────────────────────── */
+.skills-group { margin-bottom: 16px; }
+.skills-group-title {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0 2px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--text-secondary);
+}
+.skills-group-title .count { font-size: 10px; font-weight: 500; opacity: 0.6; font-variant-numeric: tabular-nums; }
+.skills-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 8px;
+}
+.skill-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
+  padding: 9px 11px;
+  text-align: left;
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-card);
+  background: var(--bg-subtle);
+  min-width: 0;
+}
+.skill-card:hover:not(:disabled) { background: var(--bg-muted); border-color: var(--border-default); }
+.skill-card.active { border-color: var(--accent-fg, var(--border-emphasis)); background: var(--bg-muted); }
+.skill-card.off { opacity: 0.55; }
+.skill-card-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; min-width: 0; }
+.skill-card-head strong { font-size: 12px; color: var(--text-bright); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skill-card-desc {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.skill-card-delivery { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 2px; }
+
+/* delivery chips — cards (read-only) and drawer (interactive) share the look */
+.dchip {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  font-size: 10px;
+  font-weight: 600;
+  border: 1px solid var(--border-muted);
+  color: var(--text-secondary);
+  background: transparent;
+  white-space: nowrap;
+  line-height: 1.5;
+}
+.dchip.on { color: var(--success-fg); border-color: color-mix(in srgb, var(--success-fg) 40%, transparent); }
+.dchip.auto { color: var(--success-fg); background: color-mix(in srgb, var(--success-fg) 14%, transparent); border-color: transparent; }
+.dchip.none { font-style: italic; opacity: 0.8; }
+.dchip.planned, .dchip.off { opacity: 0.7; }
+button.dchip { cursor: pointer; }
+button.dchip:disabled { cursor: default; opacity: 1; }
+button.dchip.off:disabled { opacity: 0.45; }
+button.dchip.on:hover:not(:disabled), button.dchip.off:hover:not(:disabled) { background: var(--bg-elevated); }
+
+/* one source tag, everywhere */
+.skill-source-tag {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-muted);
+  font-size: 10px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  flex: none;
+}
+.skill-source-tag.native { border-style: dashed; }
+
+/* ── Drawer ────────────────────────────────────────────────────────────── */
+.skills-drawer {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 14px 16px;
+  gap: 12px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-card);
+  background: var(--bg-subtle);
+}
+.skill-drawer-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.skill-drawer-title { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.skill-drawer-title h3 { margin: 0; font-size: 14px; color: var(--text-bright); }
+.skill-drawer-close { padding: 2px 7px; font-size: 12px; line-height: 1; }
+.skill-drawer-section { display: flex; flex-direction: column; gap: 6px; }
+.skill-drawer-section h4 { margin: 0; font-size: 10px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-secondary); }
+.skill-drawer-toggle { flex-direction: row; align-items: center; justify-content: space-between; gap: 10px; }
+.skill-drawer-toggle strong { display: block; font-size: 12px; color: var(--text-bright); }
+.skill-drawer-toggle small { display: block; font-size: 10.5px; color: var(--text-secondary); }
+.skill-drawer-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.skill-drawer-hint { margin: 0; font-size: 10.5px; color: var(--text-secondary); line-height: 1.4; }
+.skill-drawer-path { display: block; font-size: 10.5px; padding: 5px 8px; border-radius: var(--radius-control); background: var(--bg-muted); word-break: break-all; }
+.skill-drawer-prose { margin: 0; font-size: 11.5px; line-height: 1.5; color: var(--text-primary); white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow-y: auto; }
+.skill-drawer-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.skill-drawer-actions.secondary { justify-content: flex-start; margin-top: 0; }
+.skill-badge { border-radius: var(--radius-pill); padding: 2px 7px; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+.skill-badge.danger { color: var(--danger-fg); background: color-mix(in srgb, var(--danger-fg) 12%, transparent); }
+.skill-badge.warning { color: var(--attention-fg); background: color-mix(in srgb, var(--attention-fg) 12%, transparent); }
+
+@media (max-width: 900px) {
   .skills-pane { overflow-y: auto; }
-  .skills-layout { grid-template-columns: 1fr; overflow: visible; }
-  .skills-library { max-height: 240px; border-right: 0; border-bottom: 1px solid var(--border-default); }
-  .skills-editor { overflow: visible; }
+  .skills-body, .skills-body.drawer-open { grid-template-columns: 1fr; }
+  .skills-main { overflow: visible; }
+  .skills-drawer { overflow: visible; }
   .skills-create { grid-template-columns: 1fr; }
   .skill-switches,
   .skill-advanced-grid,
   .skill-attachments { grid-template-columns: 1fr; }
   .skill-switches label + label { border-left: 0; border-top: 1px solid var(--border-muted); }
 }
+
 /* ── Capability matrix ─────────────────────────────────────────────────── */
 .skills-view-switch {
   display: inline-flex;
@@ -1280,7 +1502,6 @@ input:disabled { color: var(--text-muted); background: var(--bg-muted); }
   flex-direction: column;
   gap: 9px;
 }
-.skills-matrix-intro { margin: 0; color: var(--text-secondary); font-size: 11px; }
 /* The matrix is the one place a horizontal scrollbar is correct: one column
    per vendor cannot be reflowed without losing the comparison it exists for. */
 .skills-matrix-scroll {
@@ -1379,9 +1600,7 @@ input:disabled { color: var(--text-muted); background: var(--bg-muted); }
   text-transform: uppercase;
   color: var(--text-secondary);
 }
-.skill-list-item.native .skill-select { cursor: default; }
 .skill-migrate { padding: 3px 8px; font-size: 11px; white-space: nowrap; }
-.skill-list-item.native .skill-select:hover { background: transparent; }
 .skill-source-tag,
 .skills-matrix .matrix-source {
   display: inline-block;
@@ -1392,9 +1611,19 @@ input:disabled { color: var(--text-muted); background: var(--bg-muted); }
   color: var(--text-secondary);
   white-space: nowrap;
 }
-.skills-matrix .matrix-source { margin-left: 6px; }
-.skills-matrix .matrix-source.native { border-style: dashed; }
-.skills-matrix-search { max-width: 260px; }
+.skills-matrix tbody tr.group th {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--bg-muted);
+  text-align: left;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  padding: 5px 9px 4px 7px;
+}
 .skills-matrix td.auto > button {
   color: var(--accent-success, #6BC77F);
   background: color-mix(in srgb, var(--accent-success, #6BC77F) 14%, transparent);

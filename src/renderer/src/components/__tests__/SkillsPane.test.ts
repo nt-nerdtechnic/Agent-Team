@@ -61,6 +61,21 @@ function mockBackend(overrides: Record<string, unknown> = {}) {
   return { backend: { send } as never, send }
 }
 
+/** In the merged layout nothing is selected on load: click a card to open the drawer. */
+async function openCard(wrapper: VueWrapper, name: string): Promise<void> {
+  const card = wrapper.findAll('.skill-card').find((c) => c.find('strong').text() === name)
+  if (!card) throw new Error(`no card named ${name}`)
+  await card.trigger('click')
+  await flushPromises()
+}
+
+/** Switch to the route (matrix) view. */
+async function openMatrixView(wrapper: VueWrapper): Promise<void> {
+  const btn = wrapper.findAll('.skills-view-switch button').find((b) => b.text() === 'Route')
+  await btn!.trigger('click')
+  await flushPromises()
+}
+
 describe('SkillsPane', () => {
   let wrapper: VueWrapper | undefined
   const openPath = vi.fn().mockResolvedValue({ ok: true })
@@ -83,12 +98,17 @@ describe('SkillsPane', () => {
     await flushPromises()
 
     expect(send).toHaveBeenCalledWith('skills.list', {})
+    // Nothing is auto-selected any more; the card is the entry point.
+    expect(wrapper.find('.skills-drawer').exists()).toBe(false)
+    expect(wrapper.get('.skill-card strong').text()).toBe('review-code')
+
+    await openCard(wrapper, 'review-code')
     expect(send).toHaveBeenCalledWith('skills.get', { name: 'review-code' })
-    expect(wrapper.get('.skill-list-copy strong').text()).toBe('review-code')
     expect((wrapper.get('.skill-body').element as HTMLTextAreaElement).value).toBe('Check the diff.')
     expect(wrapper.get('.skill-attachments').text()).toContain('references/checklist.md')
 
-    await wrapper.get('.skill-editor-head button').trigger('click')
+    const open = wrapper.findAll('.skills-drawer button').find((b) => b.text() === 'Open folder')
+    await open!.trigger('click')
     expect(openPath).toHaveBeenCalledWith('/tmp/skills/review-code')
   })
 
@@ -122,6 +142,7 @@ describe('SkillsPane', () => {
     wrapper = mount(SkillsPane, { props: { backend }, global: { plugins: [i18n] } })
     await flushPromises()
 
+    await openCard(wrapper, 'review-code')
     await wrapper.get('.skill-body').setValue('Unsaved local draft')
     await wrapper.get('.skill-editor-actions .primary').trigger('click')
     await flushPromises()
@@ -160,6 +181,7 @@ describe('SkillsPane', () => {
     })
     wrapper = mount(SkillsPane, { props: { backend }, global: { plugins: [i18n] } })
     await flushPromises()
+    await openCard(wrapper, 'review-code')
 
     await wrapper.get('.skill-editor-actions .primary').trigger('click')
     await flushPromises()
@@ -189,9 +211,21 @@ describe('SkillsPane', () => {
     })
     wrapper = mount(SkillsPane, { props: { backend }, global: { plugins: [i18n] } })
     await flushPromises()
+    await openCard(wrapper, 'review-code')
 
-    expect(wrapper.find('.skill-status-rail .conflicted').exists()).toBe(true)
-    expect(wrapper.get('.skill-badge.warning').text()).toBe(i18n.global.t('settings.skills.native-conflict'))
+    // Only shown when a CLI's own skill really shares the name — never as
+    // decoration on an ordinary shared skill.
+    expect(wrapper.get('.skills-drawer .skill-badge.warning').text())
+      .toBe(i18n.global.t('settings.skills.native-conflict'))
+  })
+
+  it('does not show the native-conflict badge when there is no collision', async () => {
+    const { backend } = mockBackend()
+    wrapper = mount(SkillsPane, { props: { backend }, global: { plugins: [i18n] } })
+    await flushPromises()
+    await openCard(wrapper, 'review-code')
+
+    expect(wrapper.find('.skills-drawer .skill-badge.warning').exists()).toBe(false)
   })
 
   it('updates enabled state only after success and moves deletions to Trash', async () => {
@@ -199,8 +233,9 @@ describe('SkillsPane', () => {
     const { backend, send } = mockBackend()
     wrapper = mount(SkillsPane, { props: { backend }, global: { plugins: [i18n] } })
     await flushPromises()
+    await openCard(wrapper, 'review-code')
 
-    await wrapper.get('.skill-list-item [role="switch"]').trigger('click')
+    await wrapper.get('.skill-drawer-toggle [role="switch"]').trigger('click')
     await flushPromises()
     expect(send).toHaveBeenCalledWith('skills.set_enabled', { name: 'review-code', enabled: false })
 
@@ -228,8 +263,7 @@ describe('SkillsPane capability matrix', () => {
     const mocked = mockBackend(overrides)
     wrapper = mount(SkillsPane, { props: { backend: mocked.backend }, global: { plugins: [i18n] } })
     await flushPromises()
-    await wrapper.findAll('.skills-view-switch button')[1].trigger('click')
-    await flushPromises()
+    await openMatrixView(wrapper)
     return mocked
   }
 
@@ -352,7 +386,7 @@ describe('SkillsPane capability matrix', () => {
       },
     })
 
-    const row = wrapper!.find('.skills-matrix tbody tr')
+    const row = wrapper!.find('.skills-matrix tbody tr:not(.group)')
     expect(row.classes()).toContain('off')
     expect(wrapper!.findAll('.skills-matrix tbody td.on')).toHaveLength(0)
     expect(
@@ -377,7 +411,7 @@ describe('SkillsPane native skills', () => {
     vi.restoreAllMocks()
   })
 
-  async function open(view: 'list' | 'matrix', extra: Record<string, unknown> = {}) {
+  async function open(view: 'browse' | 'route', extra: Record<string, unknown> = {}) {
     const mocked = mockBackend({
       'skills.list': {
         ok: true,
@@ -393,28 +427,32 @@ describe('SkillsPane native skills', () => {
     })
     wrapper = mount(SkillsPane, { props: { backend: mocked.backend }, global: { plugins: [i18n] } })
     await flushPromises()
-    if (view === 'matrix') {
-      await wrapper.findAll('.skills-view-switch button')[1].trigger('click')
-      await flushPromises()
-    }
+    if (view === 'route') await openMatrixView(wrapper)
     return mocked
   }
 
   it('lists a native skill read-only under its own group with its source', async () => {
-    await open('list')
+    await open('browse')
 
-    const item = wrapper!.find('.skill-list-item.native')
-    expect(item.exists()).toBe(true)
-    expect(item.text()).toContain('bug-buster')
-    expect(item.find('.skill-source-tag').text()).toBe("copilot's own")
-    // No enable switch: it is not ours to switch.
-    expect(item.findAll('input[type="checkbox"], [role="switch"]')).toHaveLength(0)
+    // Its own group, its own source tag on the card, and no enable switch
+    // anywhere for it: it is not ours to switch.
+    const groups = wrapper!.findAll('.skills-group-title').map((g) => g.text())
+    expect(groups.some((g) => g.startsWith("copilot's own"))).toBe(true)
+    const card = wrapper!.find('.skill-card.native')
+    expect(card.text()).toContain('bug-buster')
+    expect(card.find('.skill-source-tag').text()).toBe("copilot's own")
+
+    await card.trigger('click')
+    await flushPromises()
+    expect(wrapper!.find('.skills-drawer').exists()).toBe(true)
+    expect(wrapper!.findAll('.skills-drawer [role="switch"]')).toHaveLength(0)
+    expect(wrapper!.find('.skills-drawer textarea').exists()).toBe(false)
   })
 
   it('shows a native row in the matrix, automatic for its owner and opt-in elsewhere', async () => {
-    await open('matrix')
+    await open('route')
 
-    const rows = wrapper!.findAll('.skills-matrix tbody tr')
+    const rows = wrapper!.findAll('.skills-matrix tbody tr:not(.group)')
     expect(rows).toHaveLength(2)
     const native = rows[1]
     expect(native.classes()).toContain('native')
@@ -428,9 +466,9 @@ describe('SkillsPane native skills', () => {
   })
 
   it('opts a native skill in to another agent by real path', async () => {
-    const { send } = await open('matrix')
+    const { send } = await open('route')
 
-    await wrapper!.findAll('.skills-matrix tbody tr')[1].findAll('td')[0].find('button').trigger('click')
+    await wrapper!.findAll('.skills-matrix tbody tr:not(.group)')[1].findAll('td')[0].find('button').trigger('click')
     await flushPromises()
 
     expect(send).toHaveBeenCalledWith('skills.set_native_targets', {
@@ -440,20 +478,20 @@ describe('SkillsPane native skills', () => {
   })
 
   it('marks the owner cell automatic when the owner is a listed agent', async () => {
-    await open('matrix', {
+    await open('route', {
       native: [{ ...nativeSkill, source: 'claude', owner_agent: 'claude', path: '/Users/x/.claude/skills/bug-buster', real_path: '/Users/x/.claude/skills/bug-buster' }],
     })
 
-    const cells = wrapper!.findAll('.skills-matrix tbody tr')[1].findAll('td')
+    const cells = wrapper!.findAll('.skills-matrix tbody tr:not(.group)')[1].findAll('td')
     expect(cells[0].classes()).toContain('auto')
     expect((cells[0].find('button').element as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('never delivers an invalid native skill', async () => {
-    const { send } = await open('matrix', {
+    const { send } = await open('route', {
       native: [{ ...nativeSkill, valid: false, error: 'SKILL.md missing' }],
     })
-    const row = wrapper!.findAll('.skills-matrix tbody tr')[1]
+    const row = wrapper!.findAll('.skills-matrix tbody tr:not(.group)')[1]
 
     expect(row.classes()).toContain('off')
     expect(row.text()).toContain('SKILL.md missing')
@@ -472,9 +510,12 @@ describe('SkillsPane native skills', () => {
     })
     wrapper = mount(SkillsPane, { props: { backend: mocked.backend }, global: { plugins: [i18n] } })
     await flushPromises()
+    await openCard(wrapper, 'review-code')
 
-    const buttons = wrapper.findAll('.skill-editor-actions button')
-    expect(buttons.every((b) => (b.element as HTMLButtonElement).disabled)).toBe(true)
+    // A read-only skill gets a preview, not an editor: no inputs, no save.
+    expect(wrapper.find('.skills-drawer textarea').exists()).toBe(false)
+    expect(wrapper.find('.skills-drawer input:not([type="search"])').exists()).toBe(false)
+    expect(wrapper.find('.skill-editor-actions').exists()).toBe(false)
     expect(wrapper.text()).toContain('edit it where it lives')
   })
 })
@@ -604,12 +645,19 @@ describe('SkillsPane migrate and restore', () => {
     return mocked
   }
 
+  /** Migrate lives in the drawer: open the native card, then click it. */
+  async function clickMigrate(): Promise<void> {
+    await openCard(wrapper!, 'bug-buster')
+    const btn = wrapper!.findAll('.skills-drawer button').find((b) => b.text() === 'Move into shared library')
+    await btn!.trigger('click')
+    await flushPromises()
+  }
+
   it('migrates only after a confirm that names source, destination and undo', async () => {
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
     const { send } = await openList({ native: [nativeSkill] })
 
-    await wrapper!.find('.skill-migrate').trigger('click')
-    await flushPromises()
+    await clickMigrate()
 
     const text = confirm.mock.calls[0][0] as string
     expect(text).toContain('/Users/x/.copilot/skills/bug-buster')   // from
@@ -626,16 +674,17 @@ describe('SkillsPane migrate and restore', () => {
     vi.spyOn(window, 'confirm').mockReturnValue(false)
     const { send } = await openList({ native: [nativeSkill] })
 
-    await wrapper!.find('.skill-migrate').trigger('click')
-    await flushPromises()
+    await clickMigrate()
 
     expect(send).not.toHaveBeenCalledWith('skills.migrate_native', expect.anything())
   })
 
   it('never offers migrate for an invalid native skill', async () => {
     await openList({ native: [{ ...nativeSkill, valid: false, error: 'SKILL.md missing' }] })
+    await openCard(wrapper!, 'bug-buster')
 
-    expect((wrapper!.find('.skill-migrate').element as HTMLButtonElement).disabled).toBe(true)
+    const btn = wrapper!.findAll('.skills-drawer button').find((b) => b.text() === 'Move into shared library')
+    expect((btn!.element as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('shows restore only for a migrated skill and confirms the destination', async () => {
@@ -645,6 +694,7 @@ describe('SkillsPane migrate and restore', () => {
       { skills: [migrated] },
       { 'skills.get': { ok: true, payload: { skill: migrated } } }
     )
+    await openCard(wrapper!, 'review-code')
 
     const restore = wrapper!.findAll('.skill-editor-actions button').find((b) => b.text() === 'Restore')
     expect(restore).toBeDefined()
@@ -657,8 +707,131 @@ describe('SkillsPane migrate and restore', () => {
 
   it('has no restore button for a skill born in the shared root', async () => {
     await openList({ skills: [skill] })
+    await openCard(wrapper!, 'review-code')
 
     const labels = wrapper!.findAll('.skill-editor-actions button').map((b) => b.text())
     expect(labels).not.toContain('Restore')
+  })
+})
+
+describe('SkillsPane merged browse/route layout', () => {
+  let wrapper: VueWrapper | undefined
+
+  beforeEach(() => {
+    i18n.global.locale.value = 'en-US'
+    window.agentTeam = { openPath: vi.fn() } as unknown as typeof window.agentTeam
+  })
+
+  afterEach(() => {
+    wrapper?.unmount()
+    wrapper = undefined
+    vi.restoreAllMocks()
+  })
+
+  const second = { ...nativeSkill, name: 'code-review-expert', path: '/Users/x/.copilot/skills/code-review-expert', real_path: '/Users/x/.copilot/skills/code-review-expert' }
+  const claudeOne = { ...nativeSkill, name: 'minimax-vision', source: 'claude', owner_agent: 'claude', path: '/Users/x/.claude/skills/minimax-vision', real_path: '/Users/x/.claude/skills/minimax-vision' }
+
+  async function mountAll() {
+    const mocked = mockBackend({
+      'skills.list': {
+        ok: true,
+        payload: { skills: [skill], native: [nativeSkill, second, claudeOne], native_targets: {}, root: '/tmp/skills', agents, write_consented: true },
+      },
+    })
+    wrapper = mount(SkillsPane, { props: { backend: mocked.backend }, global: { plugins: [i18n] } })
+    await flushPromises()
+    return mocked
+  }
+
+  it('groups cards by source with counts and one source tag per card', async () => {
+    await mountAll()
+
+    const titles = wrapper!.findAll('.skills-group-title').map((g) => [
+      g.text().replace(g.find('.count').text(), '').trim(),
+      g.find('.count').text(),
+    ])
+    expect(titles).toEqual([
+      ['Shared library · ~/.agents/skills', '1'],
+      ["copilot's own", '2'],
+      ["claude's own", '1'],
+    ])
+    // exactly one source tag per card, never a second badge or a per-row button
+    for (const card of wrapper!.findAll('.skill-card')) {
+      expect(card.findAll('.skill-source-tag')).toHaveLength(1)
+      expect(card.findAll('button')).toHaveLength(0)
+    }
+  })
+
+  it('applies one source filter to both views', async () => {
+    await mountAll()
+    const chip = wrapper!.findAll('.skills-chip').find((c) => c.text().startsWith('copilot'))!
+    await chip.trigger('click')
+
+    expect(wrapper!.findAll('.skill-card')).toHaveLength(2)
+    expect(wrapper!.findAll('.skill-card').every((c) => c.classes('native'))).toBe(true)
+
+    await openMatrixView(wrapper!)
+    const rows = wrapper!.findAll('.skills-matrix tbody tr:not(.group)')
+    expect(rows).toHaveLength(2)
+    expect(wrapper!.findAll('.skills-matrix tbody tr.group')).toHaveLength(1)
+  })
+
+  it('opens the same drawer from a card and from a matrix row name', async () => {
+    await mountAll()
+
+    await openCard(wrapper!, 'bug-buster')
+    expect(wrapper!.get('.skills-drawer h3').text()).toBe('bug-buster')
+    expect(wrapper!.get('.skills-drawer .skill-source-tag').text()).toBe("copilot's own")
+
+    await openMatrixView(wrapper!)
+    const claudeRow = wrapper!.findAll('.skills-matrix tbody tr:not(.group)').find((r) => r.find('th').text().includes('minimax-vision'))!
+    await claudeRow.find('.matrix-name').trigger('click')
+    await flushPromises()
+    expect(wrapper!.get('.skills-drawer h3').text()).toBe('minimax-vision')
+    // The matrix row and the drawer agree on which row is active.
+    expect(claudeRow.classes()).toContain('active')
+  })
+
+  it('shows delivery on the card without making it a control', async () => {
+    await mountAll()
+    const shared = wrapper!.findAll('.skill-card').find((c) => c.find('strong').text() === 'review-code')!
+
+    // codex is a shared-root reader → "1 read it themselves"; claude/kimi/pi are delivered.
+    const chips = shared.findAll('.dchip').map((c) => c.text())
+    expect(chips).toContain('1 read it themselves')
+    expect(chips).toEqual(expect.arrayContaining(['claude', 'kimi', 'pi']))
+    // native, opt-in, nothing chosen → says so
+    const native = wrapper!.findAll('.skill-card').find((c) => c.find('strong').text() === 'bug-buster')!
+    expect(native.text()).toContain('not delivered anywhere')
+  })
+
+  it('lets the drawer toggle delivery for a shared skill with chips', async () => {
+    const { send } = await mountAll()
+    await openCard(wrapper!, 'review-code')
+
+    const kimi = wrapper!.findAll('.skill-drawer-chips button').find((b) => b.text() === 'kimi')!
+    expect(kimi.classes()).toContain('on')
+    await kimi.trigger('click')
+    await flushPromises()
+
+    expect(send).toHaveBeenCalledWith('skills.set_targets', { name: 'review-code', agents: ['claude', 'pi'] })
+    // codex chip is automatic: present, marked, and disabled
+    const codex = wrapper!.findAll('.skill-drawer-chips button').find((b) => b.text() === 'codex')!
+    expect(codex.classes()).toContain('auto')
+    expect((codex.element as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('closes the drawer and keeps nothing selected on reload', async () => {
+    await mountAll()
+    await openCard(wrapper!, 'review-code')
+    expect(wrapper!.find('.skills-drawer').exists()).toBe(true)
+
+    await wrapper!.get('.skill-drawer-close').trigger('click')
+    expect(wrapper!.find('.skills-drawer').exists()).toBe(false)
+
+    const refresh = wrapper!.findAll('.skills-toolbar-actions button').find((b) => b.text() === 'Refresh')!
+    await refresh.trigger('click')
+    await flushPromises()
+    expect(wrapper!.find('.skills-drawer').exists()).toBe(false)
   })
 })
