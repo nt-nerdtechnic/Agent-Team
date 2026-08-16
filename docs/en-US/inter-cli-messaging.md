@@ -28,6 +28,8 @@ shows as its title. The name you see is the address.
   the vendor label when there is none.
 - Handles survive a restart.
 - Plain terminal panes have no handle. They cannot send or receive.
+- `Navide` is reserved — it is the name Navide's own messages come from. A pane
+  titled that takes a suffix (`Navide-2`), and renaming a pane to it is refused.
 
 Typing `@` in a CLI pane opens a completion menu of every handle you can
 address from there, including panes in other workspace windows. Dropping a pane
@@ -126,6 +128,31 @@ Senders that are not a live CLI pane in the window get no notice: a pane that
 closed before the failure, a plain terminal, or an external MCP client (which
 has `cli_check_message` to poll instead).
 
+### Spawn feedback notices
+
+A spawn request that does not work out is reported the same way, to the pane
+that asked for it:
+
+```
+[Navide MSG] spawn failed — 名稱「reviewer」已被其他 pane 使用，請換一個名稱
+```
+
+```
+[Navide MSG] spawn partial — pane「reviewer」已開啟，但任務注入失敗，請自行確認
+```
+
+The two prefixes are deliberately different because they call for opposite
+responses. `spawn failed` means no pane was created — fix the request and try
+again. `spawn partial` means the pane **is** open and only its task never
+landed; spawning it again would collide with the pane already there.
+
+A successful spawn sends nothing: the new pane reports to its parent itself,
+with an ordinary MSG block.
+
+Both of these are system notices, exactly like a delivery failure — Navide
+wrote them, nothing can address `Navide`, and they should not be replied to.
+In the Messages panel they carry a `system notice` badge and no Resend.
+
 ---
 
 ## Spawning a pane
@@ -146,7 +173,7 @@ task: Review the diff on this branch and report blocking issues.
 field to the end of the block. Spawning is not capped — past advisory
 thresholds the call still succeeds and the requester is told what it costs. A
 malformed request (unknown agent key, missing or taken name, empty task) comes
-back as a rejection message naming the problem.
+back as a [spawn feedback notice](#spawn-feedback-notices) naming the problem.
 
 ---
 
@@ -206,6 +233,8 @@ queued — why it has not gone out yet.
 - **Clear log** drops finished rows and keeps the ones still in flight.
 - **Resend** re-sends a failed row as a brand-new message, re-validating
   everything from scratch, so it can fail again for a different reason.
+  Delivery-failure notices carry a `system notice` badge and no Resend — a
+  notice only reports another row's failure, and that row has its own.
 - The log is mirrored into the backend store and restored on reload. Rows
   that were still in flight when the window died come back as failed
   (`window-reloaded`) — queues do not survive a reload, and nothing is
