@@ -14,10 +14,16 @@ export const SPEC = {
   supportsRebuild: true,
   verifiedTurnText: true,
   bracketedPaste: true,
-  // The shipped binary carries `ESC[?1049h` and crossterm's
-  // `EnterAlternateScreen`, and documents `--no-alt-screen` as "Disable
-  // alternate screen mode" — the conversation lives in the alt buffer.
-  fullScreenTui: true,
+  // No fullScreenTui: 0.147.0 paints inline, in the NORMAL buffer, so its
+  // conversation is already in the snapshot. Measured on a real PTY past the
+  // directory-trust prompt (40k bytes of a fully drawn TUI): not one
+  // `ESC[?1049h`, `?1047h` or `?47h`, with or without --no-alt-screen.
+  // The binary does carry the sequence and crossterm's EnterAlternateScreen,
+  // and --no-alt-screen is documented as "Disable alternate screen mode" —
+  // an earlier round set the flag on that evidence alone and was wrong. A
+  // string in a binary proves a code path exists, not that startup reaches
+  // it; only the probe settles it. Re-measure before trusting either source
+  // if a future release changes this.
   shiftEnterSequence: '\x1b[13;2u',
   // Restore-pin self-heals: per-pane CODEX_HOME announces the new session.
   supportsRestorePin: true,

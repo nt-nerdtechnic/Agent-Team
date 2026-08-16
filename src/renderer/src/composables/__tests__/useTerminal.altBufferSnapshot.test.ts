@@ -155,14 +155,15 @@ describe('useTerminal — alternate-buffer scrollback snapshot', () => {
 
   it('flags exactly the vendors verified to own the alt buffer', () => {
     const flagged = AGENT_SPECS.filter((s) => s.fullScreenTui).map((s) => s.agentKey)
-    // Each of these was measured on a real PTY (or, for codex, in the shipped
-    // binary) emitting `ESC[?1049h` at startup. Vendors probed and found to
-    // stay in the NORMAL buffer — grok, kimi, pi, aider, cursor — must stay
-    // off the list, as must anything unmeasured: muse never tripped the probe,
-    // so its binary carrying the sequence is not evidence it enters the
-    // alternate buffer.
+    // Every entry was measured on a real PTY emitting `ESC[?1049h` at startup.
+    // Vendors probed and found to stay in the NORMAL buffer — grok, kimi, pi,
+    // aider, cursor and codex — must stay off the list, as must anything
+    // unmeasured: muse never tripped the probe, so its binary carrying the
+    // sequence is not evidence it enters the alternate buffer. codex is the
+    // cautionary case: it was briefly listed on that same binary-only
+    // evidence and the probe later showed it paints inline.
     expect(flagged.sort()).toEqual([
-      'antigravity', 'claude', 'codex', 'copilot', 'kilo', 'opencode', 'qwen'
+      'antigravity', 'claude', 'copilot', 'kilo', 'opencode', 'qwen'
     ])
   })
 
