@@ -9,7 +9,7 @@ import {
   type MessagingDeps,
   type RouteResult,
 } from '../useAgentMessaging'
-import { MSG_ENVELOPE_PREFIX } from '../../lib/agentMessaging'
+import { MSG_ENVELOPE_PREFIX, MSG_NOTICE_PREFIX } from '../../lib/agentMessaging'
 
 function flush(): Promise<void> {
   return new Promise((r) => setTimeout(r, 0))
@@ -673,6 +673,73 @@ describe('useAgentMessaging — cross-workspace routing', () => {
 
     expect(other.status).not.toBe('failed')
     expect(routed).toEqual([])
+  })
+
+  // ── Failure feedback to the sending pane ─────────────────────────────────
+  it('notifies the sending pane when the target window reports a failure', async () => {
+    m.registerPane('p1', 'claude', 'sender')
+    const msg = m.sendMessage('sender', 'beta/reviewer', 'ship it')
+    await flush()
+    m.resolveRemoteDelivery(routed[0].msgKey, false, encodeReason({ key: 'inject-failed' }))
+
+    expect(msg.status).toBe('failed')
+    const notice = m.messages.value.find((entry) => entry.from === 'Navide')
+    expect(notice?.to).toBe('sender')
+
+    m.pump()
+    await flush()
+    const injected = delivered.find((d) => d.paneId === 'p1')
+    expect(injected?.text).toContain(`${MSG_NOTICE_PREFIX} — to: beta/reviewer`)
+    expect(injected?.text).toContain('reason: Injection failed')
+    expect(injected?.text).toContain('ship it')
+  })
+
+  it('notifies the sending pane when the route itself is rejected', async () => {
+    m.registerPane('p1', 'claude', 'sender')
+    routeResult = { ok: false, errorCode: 'unknown-workspace', errorParams: { ws: 'beta' } }
+    m.sendMessage('sender', 'beta/reviewer', 'ship it')
+    await flush()
+
+    m.pump()
+    await flush()
+    const injected = delivered.find((d) => d.paneId === 'p1')
+    expect(injected?.text).toContain('reason: No open workspace named “beta”')
+  })
+
+  it('notifies the sending pane for an MCP send too, which polls instead of listening', async () => {
+    m.registerPane('p1', 'claude', 'sender')
+    m.noteOutboundMessage({
+      msgKey: 'mcp:1',
+      fromPaneId: 'p1',
+      targetPaneId: 'elsewhere',
+      toDisplay: 'reviewer',
+      content: 'hi',
+      crossWorkspace: true,
+      remoteWorkspace: '/ws/beta',
+    })
+    m.resolveRemoteDelivery('mcp:1', false, encodeReason({ key: 'pane-closed' }))
+
+    m.pump()
+    await flush()
+    const injected = delivered.find((d) => d.paneId === 'p1')
+    expect(injected?.text).toContain(`${MSG_NOTICE_PREFIX} — to: reviewer`)
+    expect(injected?.text).toContain('reason: The target pane closed before delivery')
+  })
+
+  it('leaves an inbound failure to the sending window, which notifies its own pane', async () => {
+    m.registerPane('p2', 'codex', 'reviewer')
+    deliverResult = false
+    m.acceptRemoteMessage({
+      msgKey: 'beta:1',
+      targetPaneId: 'p2',
+      fromDisplay: 'beta/sender',
+      content: 'hi',
+    })
+    m.pump()
+    await flush()
+
+    expect(m.messages.value.some((entry) => entry.from === 'Navide')).toBe(false)
+    expect(reports).toEqual([{ msgKey: 'beta:1', ok: false, reason: { key: 'inject-failed' } }])
   })
 
   it('local same-workspace delivery is untouched by the remote wiring', async () => {

@@ -13,6 +13,10 @@ import {
   renderSpawnKickoff,
   sanitizeMessageContent,
   renderEnvelope,
+  renderFailureNotice,
+  reasonToEnglish,
+  isInjectedMessageText,
+  MSG_NOTICE_PREFIX,
   defaultMessagingName,
   normalizeMessagingName,
   uniqueMessagingName,
@@ -286,6 +290,59 @@ describe('renderEnvelope', () => {
     expect(parseMessages(reply)).toEqual([
       { target: 'claude-1', content: 'ack', replyTo: 'abc123:7' },
     ])
+  })
+})
+
+describe('reasonToEnglish', () => {
+  it('renders the en-US sentence with its parameters substituted', () => {
+    expect(reasonToEnglish('unknown-target', { to: 'ghost' })).toBe('No pane named “ghost”')
+    expect(reasonToEnglish('rate-limit', { max: 5, seconds: 60 })).toBe(
+      'Rate limit: at most 5 messages per 60s between the same two panes'
+    )
+  })
+
+  it('passes raw text through and degrades an unknown key to the key itself', () => {
+    expect(reasonToEnglish('raw', { text: 'backend said no' })).toBe('backend said no')
+    expect(reasonToEnglish('not-a-real-key')).toBe('not-a-real-key')
+  })
+
+  it('leaves a placeholder alone when its parameter is missing', () => {
+    expect(reasonToEnglish('unknown-target')).toBe('No pane named “{to}”')
+  })
+})
+
+describe('renderFailureNotice', () => {
+  it('leads with the failure prefix, never the envelope one', () => {
+    const notice = renderFailureNotice('reviewer', 'No pane named “reviewer”', 'hello')
+
+    expect(notice.startsWith(MSG_NOTICE_PREFIX)).toBe(true)
+    expect(notice).not.toContain(MSG_ENVELOPE_PREFIX)
+    expect(notice.split('\n')[0]).toBe(`${MSG_NOTICE_PREFIX} — to: reviewer`)
+    expect(notice.split('\n')[1]).toBe('reason: No pane named “reviewer”')
+  })
+
+  it('is recognized as injected text, like an envelope', () => {
+    expect(isInjectedMessageText(renderFailureNotice('x', 'nope', 'hi'))).toBe(true)
+    expect(isInjectedMessageText(renderEnvelope('claude-1', 'hi'))).toBe(true)
+    expect(isInjectedMessageText('an agent wrote this')).toBe(false)
+  })
+
+  it('quotes the original on one line, with its markers broken', () => {
+    const notice = renderFailureNotice('x', 'nope', `line one\n${MSG_START} to: y`)
+
+    expect(notice.split('\n')).toHaveLength(3)
+    expect(notice).not.toContain(MSG_START)
+    expect(notice).toContain('line one')
+  })
+
+  it('cuts the excerpt by code point, never through a surrogate pair', () => {
+    // An odd leading character puts the 80th UTF-16 unit inside an emoji.
+    const content = `a${'💥'.repeat(100)}`
+    const notice = renderFailureNotice('x', 'nope', content)
+    const excerpt = Array.from(content).slice(0, 80).join('')
+
+    expect(notice).toContain(`（原訊息開頭：${excerpt}）`)
+    expect(notice).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/)
   })
 })
 

@@ -14,10 +14,25 @@
 // terminal buffer.
 
 import { AGENT_SPECS } from '../agents'
+import enUS from '../i18n/locales/en-US.json'
 
 export const MSG_START = '---MSG-START---'
 export const MSG_END = '---MSG-END---'
-export const MSG_ENVELOPE_PREFIX = '[Navide MSG] from:'
+/** Opening token of everything Navide injects into a pane, whichever form it
+ *  takes. See isInjectedMessageText(). */
+const MSG_INJECTED_PREFIX = '[Navide MSG]'
+export const MSG_ENVELOPE_PREFIX = `${MSG_INJECTED_PREFIX} from:`
+/** First line of a delivery-failure notice. Deliberately distinct from
+ *  MSG_ENVELOPE_PREFIX: an agent must be able to tell "someone messaged me"
+ *  from "my message bounced" by the first line alone. */
+export const MSG_NOTICE_PREFIX = `${MSG_INJECTED_PREFIX} delivery failed`
+
+/** True when a turn's text is something Navide injected rather than something
+ *  the agent wrote — a CLI reader echoes an injection back as a user record,
+ *  and it must never be mistaken for the pane's own content. */
+export function isInjectedMessageText(text: string): boolean {
+  return text.startsWith(MSG_INJECTED_PREFIX)
+}
 
 // Agent-initiated pane spawning (same bare-line wire format):
 //   ---SPAWN-START---
@@ -217,6 +232,45 @@ export function renderEnvelope(
     )
   }
   return lines.join('\n')
+}
+
+/** How much of the bounced message a failure notice quotes back, counted in
+ *  code points so the cut cannot split a surrogate pair (an emoji, or anything
+ *  outside the BMP) into an unpaired half. */
+const NOTICE_EXCERPT_CHARS = 80
+
+/**
+ * English sentence for a `msg.reason-*` key, read from the en-US locale so what
+ * an agent is told cannot drift from what the Messages panel shows. Agents are
+ * always told in English — the panel localizes for the user separately. An
+ * unknown key degrades to the key itself rather than to nothing.
+ */
+export function reasonToEnglish(key: string, params?: Record<string, string | number>): string {
+  const template = (enUS.msg as Record<string, string>)[`reason-${key}`]
+  if (!template) return key
+  return template.replace(/\{(\w+)\}/g, (whole, name: string) => {
+    const value = params?.[name]
+    return value === undefined ? whole : String(value)
+  })
+}
+
+/**
+ * Notice injected back into the SENDING pane when its message could not be
+ * delivered, so an agent that talks over the bare-line protocol learns of a
+ * failure it would otherwise only see in the user's Messages panel.
+ *
+ * The excerpt is collapsed to a single line and sanitized: it is the sender's
+ * own text coming back, and it must not re-trigger any marker parser.
+ */
+export function renderFailureNotice(to: string, reasonText: string, content: string): string {
+  const excerpt = Array.from(content.replace(/\s+/g, ' ').trim())
+    .slice(0, NOTICE_EXCERPT_CHARS)
+    .join('')
+  return (
+    `${MSG_NOTICE_PREFIX} — to: ${to}\n` +
+    `reason: ${reasonText}\n` +
+    `（原訊息開頭：${sanitizeMessageContent(excerpt)}）`
+  )
 }
 
 /** Smallest free `<agentKey>-<n>` name not present in `taken`. */

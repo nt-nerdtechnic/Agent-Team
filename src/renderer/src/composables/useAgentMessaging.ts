@@ -1,6 +1,8 @@
 import { readonly, ref } from 'vue'
 import {
   renderEnvelope,
+  renderFailureNotice,
+  reasonToEnglish,
   defaultMessagingName,
   isQualifiedTarget,
   normalizeMessagingName,
@@ -88,6 +90,11 @@ export interface AgentMessage {
   /** Raw (unsanitized) content, for display in the log panel. */
   content: string
   status: MessageStatus
+  /** 'notice' marks a message Navide wrote itself (delivery-failure feedback to
+   *  a sending pane) rather than one an agent sent. Its only job is to stop a
+   *  bounced notice from producing another one, so it is in-memory only: a
+   *  restored row is history and can never be re-delivered. */
+  kind?: 'notice'
   /** Failure reason when status === 'failed'. */
   reason?: MessageReason
   /** Why this message has not been injected yet, while status === 'queued'. */
@@ -202,6 +209,12 @@ const RATE_LIMIT_REASON: MessageReason = {
   params: { max: RATE_LIMIT_MAX, seconds: RATE_LIMIT_WINDOW_MS / 1000 },
 }
 const QUEUE_FULL_REASON: MessageReason = { key: 'queue-full', params: { cap: QUEUE_CAP } }
+
+/** Handle Navide writes its own messages under — delivery-failure notices here,
+ *  SPAWN feedback in App.vue. Reserved rather than merely unregistered: a pane
+ *  answering to it would share the feedback rate-limit budget, and paneIdOf()
+ *  would hand Navide's own notices to that pane instead of failing. */
+export const NOTICE_SENDER = 'Navide'
 /** Verdict for an outbound message the receiving window never answered for.
  *  See expireStaleRemotes(). */
 const NO_REPORT_REASON: MessageReason = { key: 'no-report' }
@@ -304,15 +317,27 @@ function configureMessaging(d: MessagingDeps): void {
 }
 
 // ── Name registry ──────────────────────────────────────────────────────────
+/** Whether a handle claims {@link NOTICE_SENDER}. Case-insensitive: the point
+ *  is that no pane answers to the name Navide speaks under, and `navide` reads
+ *  as that name to everyone involved. */
+function isReservedName(name: string): boolean {
+  return name.toLowerCase() === NOTICE_SENDER.toLowerCase()
+}
+
+/** A free handle for `base`. The reserved handle counts as taken even though no
+ *  pane holds it, so claiming it takes a suffix exactly like colliding with
+ *  another pane does. */
+function uniqueHandle(base: string): string {
+  return uniqueMessagingName(isReservedName(base) ? `${base}-2` : base, paneByName.keys())
+}
+
 function registerPane(paneId: string, agentKey: string, preferredName?: string): string {
   const existing = nameByPane.get(paneId)
   if (existing) return existing
   // A requested handle (persisted name / pane title) keeps its base and only
   // gains a -N suffix on collision; with no valid request, use <agent>-N.
   const base = preferredName ? normalizeMessagingName(preferredName) : null
-  const name = base
-    ? uniqueMessagingName(base, paneByName.keys())
-    : defaultMessagingName(agentKey, paneByName.keys())
+  const name = base ? uniqueHandle(base) : defaultMessagingName(agentKey, paneByName.keys())
   nameByPane.set(paneId, name)
   paneByName.set(name, paneId)
   agentByPane.set(paneId, agentKey)
@@ -335,9 +360,7 @@ function setDerivedName(paneId: string, base: string | null, agentKey: string): 
   // relative to OTHER panes only).
   paneByName.delete(current)
   const norm = base ? normalizeMessagingName(base) : null
-  const name = norm
-    ? uniqueMessagingName(norm, paneByName.keys())
-    : defaultMessagingName(agentKey, paneByName.keys())
+  const name = norm ? uniqueHandle(norm) : defaultMessagingName(agentKey, paneByName.keys())
   nameByPane.set(paneId, name)
   paneByName.set(name, paneId)
   return name
@@ -348,7 +371,9 @@ function renamePane(paneId: string, rawName: string): boolean {
   if (!name) return false
   const current = nameByPane.get(paneId)
   if (name === current) return true
-  if (paneByName.has(name)) return false
+  // Rejected rather than suffixed: a manual rename is an explicit choice, and
+  // the caller already handles a refusal by asking for another name.
+  if (isReservedName(name) || paneByName.has(name)) return false
   if (current) paneByName.delete(current)
   nameByPane.set(paneId, name)
   paneByName.set(name, paneId)
@@ -382,7 +407,7 @@ function paneIdOf(name: string): string | null {
 /** A free handle near `base` (base itself, or `base-2`, `base-3`…). Used to
  *  pre-fill the collision-resolution prompt on a manual rename. */
 function suggestName(base: string): string {
-  return uniqueMessagingName(base, paneByName.keys())
+  return uniqueHandle(base)
 }
 
 // ── Queue ──────────────────────────────────────────────────────────────────
@@ -397,8 +422,35 @@ function failMessage(id: number, reason: MessageReason): void {
     m.reason = reason
     delete m.hold
     deps?.persistUpdate?.([{ uid: m.uid, status: 'failed', reason: encodeReason(reason) }])
+    notifySenderOfFailure(m)
   }
   envelopes.delete(id)
+}
+
+/**
+ * Tell the SENDING pane that its message bounced.
+ *
+ * An agent writing bare-line `---MSG-START---` blocks has no other way to learn
+ * this: the failure is otherwise only visible in the user's Messages panel. The
+ * notice goes out as an ordinary message, so it takes the same queue, idle gate
+ * and verified injection as everything else rather than a private path.
+ *
+ * Skipped for anything whose sender is not a live CLI pane in this window: an
+ * inbound cross-workspace row (the sending window is told by reportDelivery and
+ * notifies its own pane), a closed or plain-terminal pane (not in the registry),
+ * an MCP client (which polls `cli_check_message` instead), and a notice itself —
+ * a bounced notice is logged and left there, never answered with another.
+ */
+function notifySenderOfFailure(m: AgentMessage): void {
+  if (!deps || !m.reason) return
+  if (m.kind === 'notice' || m.remote === 'inbound') return
+  if (!paneByName.has(m.from)) return
+  sendMessage(
+    NOTICE_SENDER,
+    m.from,
+    renderFailureNotice(m.to, reasonToEnglish(m.reason.key, m.reason.params), m.content),
+    { kind: 'notice' },
+  )
 }
 
 /**
@@ -528,6 +580,8 @@ export interface SendOptions {
   includeReplyHint?: boolean
   /** Correlation id the sender echoed back, when this message is a reply. */
   replyTo?: string
+  /** Internal: marks a Navide-authored notice. See notifySenderOfFailure(). */
+  kind?: 'notice'
 }
 
 /**
@@ -545,6 +599,9 @@ function sendMessage(from: string, to: string, content: string, opts: SendOption
     status: 'queued',
     createdAt: now,
   }
+  // Stamped before anything can reject the send: every rejection below runs
+  // through failMessage, which must already see this row for what it is.
+  if (opts.kind) msg.kind = opts.kind
   stampAgents(msg, agentOfName(from), agentOfName(to))
   // Linked before the row is logged so even a rejected reply shows what it was
   // answering.
@@ -578,16 +635,25 @@ function sendMessage(from: string, to: string, content: string, opts: SendOption
 
   const key = pairKey(from, to, false)
   pairSends.set(key, [...(pairSends.get(key) ?? []), now])
-  // `uid` is already unique across windows and reloads, so it doubles as the
-  // correlation id for a locally delivered message.
-  envelopes.set(
-    msg.id,
-    renderEnvelope(from, content, {
-      includeReplyHint: opts.includeReplyHint,
-      correlationId: msg.uid,
-    }),
-  )
-  correlations.set(msg.uid, { id: msg.id, sentAt: now })
+  if (msg.kind === 'notice') {
+    // A notice is Navide's own text, already in the form the pane must see: its
+    // first line says "delivery failed", which is how an agent tells it apart
+    // from a message. An envelope would bury that under `from: Navide` and ask
+    // for a reply to a handle nothing can address — so it is injected verbatim,
+    // and hands out no correlation id, because it is not a message to answer.
+    envelopes.set(msg.id, content)
+  } else {
+    // `uid` is already unique across windows and reloads, so it doubles as the
+    // correlation id for a locally delivered message.
+    envelopes.set(
+      msg.id,
+      renderEnvelope(from, content, {
+        includeReplyHint: opts.includeReplyHint,
+        correlationId: msg.uid,
+      }),
+    )
+    correlations.set(msg.uid, { id: msg.id, sentAt: now })
+  }
   q.push(msg.id)
   queues.set(targetPane, q)
   return msg

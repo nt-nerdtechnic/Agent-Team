@@ -210,8 +210,9 @@ describe('AgentMessagesPanel', () => {
     m.registerPane('p2', 'codex', 'beta')
     await wrapper.get('[data-act="retry"]').trigger('click')
 
-    expect(rowIds(wrapper)).toEqual(['2', '1'])
-    expect(m.messages.value.map((msg) => msg.status)).toEqual(['failed', 'queued'])
+    // 1 failed, 2 is the failure notice sent back to alpha, 3 is the retry.
+    expect(rowIds(wrapper)).toEqual(['3', '2', '1'])
+    expect(m.messages.value.map((msg) => msg.status)).toEqual(['failed', 'queued', 'queued'])
     // Retrying must not also expand the row it was clicked in.
     expect(wrapper.find('.msg-detail').exists()).toBe(false)
   })
@@ -223,7 +224,8 @@ describe('AgentMessagesPanel', () => {
     wrapper = mountPanel()
 
     await wrapper.get('[data-msg-id="1"]').trigger('click')
-    await wrapper.get('[data-msg-id="2"]').trigger('click')
+    // 2 is the failure notice for the first message; 3 is the second send.
+    await wrapper.get('[data-msg-id="3"]').trigger('click')
 
     expect(wrapper.findAll('.msg-detail')).toHaveLength(1)
     expect(wrapper.get('.msg-detail').get('pre').text()).toBe('two')
@@ -253,11 +255,12 @@ describe('AgentMessagesPanel', () => {
     m.sendMessage('alpha', 'nobody', 'this one failed')
     m.sendMessage('alpha', 'beta', 'still queued')
     wrapper = mountPanel()
-    expect(rowIds(wrapper)).toEqual(['2', '1'])
+    // 2 is the failure notice sent back to alpha, itself queued behind the gate.
+    expect(rowIds(wrapper)).toEqual(['3', '2', '1'])
 
     await wrapper.get('[data-act="clear"]').trigger('click')
 
-    expect(rowIds(wrapper)).toEqual(['2'])
+    expect(rowIds(wrapper)).toEqual(['3', '2'])
     expect(wrapper.get('.msg-preview').text()).toBe('still queued')
   })
 

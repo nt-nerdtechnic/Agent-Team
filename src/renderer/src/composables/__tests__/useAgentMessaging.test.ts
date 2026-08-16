@@ -6,11 +6,12 @@ import {
   encodeReason,
   RATE_LIMIT_MAX,
   QUEUE_CAP,
+  type AgentMessage,
   type MessagingDeps,
   type PersistedMessageRow,
   type PersistedMessageUpdate,
 } from '../useAgentMessaging'
-import { MSG_ENVELOPE_PREFIX } from '../../lib/agentMessaging'
+import { MSG_ENVELOPE_PREFIX, MSG_NOTICE_PREFIX, MSG_START } from '../../lib/agentMessaging'
 
 function flush(): Promise<void> {
   return new Promise((r) => setTimeout(r, 0))
@@ -65,6 +66,24 @@ describe('useAgentMessaging', () => {
       expect(m.paneIdOf('claude-1')).toBeNull()
       expect(m.renamePane('p2', '前端組')).toBe(false)
       expect(m.renamePane('p2', '   ')).toBe(false)
+    })
+
+    it('reserves the handle Navide speaks under', () => {
+      // Suffixed like any other collision, in whatever casing was asked for —
+      // a pane answering to it would intercept Navide's own feedback.
+      expect(m.registerPane('p1', 'claude', 'Navide')).toBe('Navide-2')
+      expect(m.registerPane('p2', 'codex', 'navide')).toBe('navide-2')
+      expect(m.paneIdOf('Navide')).toBeNull()
+      expect(m.suggestName('Navide')).toBe('Navide-3') // Navide-2 went to p1
+
+      // A manual rename is an explicit choice, so it is refused outright.
+      expect(m.renamePane('p1', 'Navide')).toBe(false)
+      expect(m.renamePane('p1', 'NAVIDE')).toBe(false)
+      expect(m.nameOf('p1')).toBe('Navide-2')
+
+      // A title synced onto the handle takes a suffix instead of failing.
+      m.registerPane('p3', 'codex')
+      expect(m.setDerivedName('p3', 'Navide', 'codex')).toBe('Navide-3')
     })
 
     it('suggestName returns the base when free, else a suffixed variant', () => {
@@ -576,8 +595,10 @@ describe('useAgentMessaging', () => {
       m.pump()
       await flush()
 
-      // Failed and delivered rows show an outcome, so a hold would contradict it.
-      expect(m.messages.value.map((msg) => msg.hold)).toEqual([undefined, undefined])
+      // Failed and delivered rows show an outcome, so a hold would contradict
+      // it. Three rows: the two sends plus the failure notice sent back to
+      // alpha, which was delivered too.
+      expect(m.messages.value.map((msg) => msg.hold)).toEqual([undefined, undefined, undefined])
     })
 
     it('reuses the hold object across pumps, so an idle queue stops re-rendering', () => {
@@ -687,7 +708,8 @@ describe('useAgentMessaging', () => {
       expect(retried?.id).not.toBe(original.id)
       // The original stays as the historical record of what failed.
       expect(original.status).toBe('failed')
-      expect(m.messages.value).toHaveLength(2)
+      // Original, the failure notice it produced, and the retry.
+      expect(m.messages.value).toHaveLength(3)
     })
 
     it('spends the pair budget, so retrying cannot bypass the rate limit', () => {
@@ -709,6 +731,99 @@ describe('useAgentMessaging', () => {
       expect(m.retryMessage(queued.id)).toBeNull()
       expect(m.retryMessage(9999)).toBeNull()
       expect(m.messages.value).toHaveLength(1)
+    })
+  })
+
+  describe('delivery failure feedback', () => {
+    beforeEach(() => {
+      m.registerPane('p1', 'claude') // claude-1
+      m.registerPane('p2', 'codex') // codex-1
+    })
+
+    const notices = (): readonly AgentMessage[] =>
+      m.messages.value.filter((entry) => entry.from === 'Navide')
+
+    it('tells the sending pane why its message failed', async () => {
+      m.sendMessage('claude-1', 'ghost', 'please review src/main.ts')
+
+      expect(notices()).toHaveLength(1)
+      expect(notices()[0].to).toBe('claude-1')
+
+      m.pump()
+      await flush()
+      expect(delivered).toHaveLength(1)
+      expect(delivered[0].paneId).toBe('p1')
+      // Injected verbatim: the first line is what tells an agent this bounced
+      // rather than arrived, so no envelope may wrap it.
+      expect(delivered[0].text.startsWith(`${MSG_NOTICE_PREFIX} — to: ghost`)).toBe(true)
+      expect(delivered[0].text).not.toContain(MSG_ENVELOPE_PREFIX)
+      // Nothing invites a reply: `Navide` is not an address.
+      expect(delivered[0].text).not.toContain(MSG_START)
+      // English regardless of the user's UI locale — the agent reads this.
+      expect(delivered[0].text).toContain('reason: No pane named “ghost”')
+      expect(delivered[0].text).toContain('please review src/main.ts')
+    })
+
+    it('goes through the ordinary idle gate, not a private path', async () => {
+      idlePanes.delete('p1')
+      m.sendMessage('claude-1', 'ghost', 'hi')
+      m.pump()
+      await flush()
+      expect(delivered).toHaveLength(0)
+      expect(notices()[0].status).toBe('queued')
+
+      idlePanes.add('p1')
+      m.pump()
+      await flush()
+      expect(notices()[0].status).toBe('delivered')
+    })
+
+    it('does not answer a bounced notice with another notice', async () => {
+      deliverResult = false
+      m.sendMessage('claude-1', 'ghost', 'hi')
+      m.pump()
+      await flush()
+
+      expect(notices()).toHaveLength(1)
+      expect(notices()[0].status).toBe('failed')
+      expect(notices()[0].reason?.key).toBe('inject-failed')
+    })
+
+    it('says nothing when the sender is not a registered CLI pane', () => {
+      // A plain terminal pane never registers a handle, and neither does an
+      // external MCP client — there is no PTY of ours to write feedback into.
+      m.sendMessage('terminal-1', 'ghost', 'hi')
+      expect(notices()).toHaveLength(0)
+    })
+
+    it('says nothing when the sending pane closed before the failure', () => {
+      idlePanes.clear()
+      m.sendMessage('claude-1', 'codex-1', 'hi')
+      m.unregisterPane('p1')
+      m.unregisterPane('p2')
+      expect(notices()).toHaveLength(0)
+    })
+
+    it('notifies when the target closes and the sender is still open', () => {
+      idlePanes.clear()
+      const msg = m.sendMessage('claude-1', 'codex-1', 'hi')
+      m.unregisterPane('p2')
+
+      expect(msg.reason?.key).toBe('pane-closed')
+      expect(notices()).toHaveLength(1)
+      expect(notices()[0].to).toBe('claude-1')
+    })
+
+    it('carries its own rate-limit pair, so it cannot flood or starve the sender', () => {
+      idlePanes.clear()
+      for (let i = 0; i < RATE_LIMIT_MAX + 2; i++) m.sendMessage('claude-1', 'ghost', `n${i}`)
+
+      // Navide→claude-1 is a pair of its own: the overflow notices are dropped
+      // (and never answered with further notices)…
+      expect(notices().filter((n) => n.status === 'queued')).toHaveLength(RATE_LIMIT_MAX)
+      expect(notices().filter((n) => n.reason?.key === 'rate-limit')).toHaveLength(2)
+      // …while the sender's own budget is untouched.
+      expect(m.sendMessage('claude-1', 'codex-1', 'still allowed').status).toBe('queued')
     })
   })
 })
