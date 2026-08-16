@@ -45,6 +45,7 @@ Navide は Agent 時代のエンジニアリングツールです。一人の人
 
 | ドキュメント | 目的 |
 |---|---|
+| [Inter-CLI Messaging — English](../en-US/inter-cli-messaging.md) | CLI Agent 間のアドレス指定、送信、受信、トラブルシューティング |
 | [Keyboard Shortcuts — English](../en-US/keybindings.md) | デフォルトの Keyboard Command と操作方法を確認する |
 | [Editor Design — English](../en-US/editor-design.md) | 現在の Editor Architecture と設計方針を理解する |
 | [Historical Milestone Record — English](../en-US/spec.md) | 当初の実装 Milestone 記録を確認する |

@@ -45,6 +45,7 @@ Root [繁體中文 README](../../README.zh-TW.md) 負責介紹產品與目前發
 
 | 文件 | 用途 |
 |---|---|
+| [Inter-CLI Messaging — English](../en-US/inter-cli-messaging.md) | CLI Agent 之間的定址、傳送、接收與問題排查 |
 | [Keyboard Shortcuts — English](../en-US/keybindings.md) | 查閱預設鍵盤 Command 與互動方式 |
 | [Editor Design — English](../en-US/editor-design.md) | 理解目前 Editor Architecture 與設計方向 |
 | [Historical Milestone Record — English](../en-US/spec.md) | 查閱原始實作 Milestone 紀錄 |

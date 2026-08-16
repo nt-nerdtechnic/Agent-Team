@@ -84,6 +84,10 @@ object, so this only bites on `plan_list`.
 
 ### CLI panes — messaging and spawning
 
+These tools feed the same delivery queue an agent reaches by printing a
+bare-line `---MSG-START---` block; [Inter-CLI messaging](inter-cli-messaging.md)
+documents the addresses, the idle gate and the guard rails they share.
+
 | Tool | Parameters | What it does |
 |---|---|---|
 | `cli_list_targets` | — | List addressable CLI panes: `name`, `address`, `workspace_path`, `same_workspace`, `busy` |
@@ -101,6 +105,13 @@ many messages between the same pair too quickly), `queue-full` (the target's
 pending-message queue is at its cap), `inject-failed` (typing it into the
 pane did not take), `pane-closed` (the target went away before delivery), or
 `no-report` (the attempt never reported an outcome).
+
+A failure is also pushed at the sending pane without being asked for: Navide
+writes a `[Navide MSG] delivery failed` notice naming the target and the
+reason into that pane once it is idle, through the same queue and injection
+path as an ordinary message. It is a heads-up for an agent that never polls —
+`cli_check_message` stays the authoritative answer, and the notice is not
+addressable, so nothing should reply to it.
 
 That table is backend **memory**, not a log: it holds the last 500 sends for
 one hour and is lost on backend restart. An unknown `msg_key` returns
