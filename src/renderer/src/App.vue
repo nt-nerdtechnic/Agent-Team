@@ -149,9 +149,11 @@ import { planPaneCycle, type CycleDirection } from './lib/paneCycle'
 import { parseLegacyRunGroups, resolveActiveTab, resolveManualSpawnGroupId } from './lib/runGroups'
 import {
   ALL_SCOPE_RESTORE_CONCURRENCY,
+  AUTO_RESUME_ON_RECONNECT_SETTING_KEY,
   RESUME_BEHAVIOR_SETTING_KEY,
   RESTORE_SCOPE_SETTING_KEY,
   createWorkspaceRestoreSession,
+  normalizeAutoResumeOnReconnect,
   pendingRestorePaneIds,
   resolveWorkspaceRestoreSession,
   restoreScopeTargetIds,
@@ -4385,6 +4387,69 @@ const rebuildablePaneCount = computed(
 const rebuildableAllPaneCount = computed(
   () => panes.value.filter((p) => p.realized && paneCanRebuild(p)).length
 )
+
+// Panes report a lost PTY one at a time, as each one's reattach probe answers.
+// Batching turns N toasts into one and lets a single concurrency limit apply to
+// the whole wave instead of every pane racing to spawn at once.
+const PTY_LOST_BATCH_MS = 1200
+const pendingPtyLostPanes = new Set<string>()
+let ptyLostFlushTimer: number | null = null
+
+/**
+ * A pane's PTY did not survive a backend outage (TerminalPane `pty-lost`).
+ *
+ * The PTY itself is unrecoverable — a backend restart kills every one of them —
+ * but the CLI's own session is a file on disk that usually outlives it, so the
+ * conversation can be picked up with the vendor's resume command. That is
+ * exactly what the Rebuild button already does, so this reuses
+ * rebuildPaneViaResume rather than growing a second resume path.
+ */
+function onPanePtyLost(paneId: string): void {
+  if (!normalizeAutoResumeOnReconnect(settingsGet(AUTO_RESUME_ON_RECONNECT_SETTING_KEY, true))) return
+  pendingPtyLostPanes.add(paneId)
+  if (ptyLostFlushTimer !== null) window.clearTimeout(ptyLostFlushTimer)
+  ptyLostFlushTimer = window.setTimeout(() => { void flushPtyLostResumes() }, PTY_LOST_BATCH_MS)
+}
+
+/**
+ * Resume the batch of panes that lost their PTY.
+ *
+ * Scope is deliberately the panes the user can currently see. Respawning every
+ * restorable pane would spend real memory (and, on metered plans, real quota)
+ * continuing work nobody is looking at; the rest keep their dead pane and
+ * resume on the next explicit Rebuild, which is the same deal cold restore
+ * already offers. `forceWhenRunning` is safe here precisely because the PTY is
+ * already gone — there is no in-flight turn left to interrupt, and no user
+ * standing by to answer a confirm.
+ */
+async function flushPtyLostResumes(): Promise<void> {
+  ptyLostFlushTimer = null
+  const ids = [...pendingPtyLostPanes].filter((id) => onScreenPaneIds.value.has(id))
+  pendingPtyLostPanes.clear()
+  if (!ids.length) return
+  let resumed = 0
+  let failed = 0
+  await runWithConcurrency(ids, ALL_SCOPE_RESTORE_CONCURRENCY, async (paneId) => {
+    const failure = await rebuildPaneViaResume(paneId, {
+      suppressBusyToast: true,
+      forceWhenRunning: true,
+    })
+    if (failure) failed++
+    else resumed++
+  })
+  if (resumed > 0) {
+    notifyRestore.toast(
+      i18n.global.t('pane.terminal.session-resumed', { count: resumed }),
+      { type: 'success' }
+    )
+  }
+  if (failed > 0) {
+    notifyRestore.toast(
+      i18n.global.t('pane.terminal.session-resume-failed', { count: failed }),
+      { type: 'error', duration: 8000 }
+    )
+  }
+}
 
 /** Failure outcomes of `rebuildPaneViaResume` — success resolves undefined.
  *  Existing batch callers only compare `=== 'busy'`; the other tokens let
@@ -11089,6 +11154,19 @@ function dualFocusStyle(paneId: string): Record<string, string> {
 }
 
 const backendUrl = computed(() => backend.httpUrl.value)
+/** Status-bar label for the backend pill.
+ *
+ *  It used to read "connecting…" for every non-connected state, which made a
+ *  backend that had died and given up look identical to one that was a second
+ *  away — the pill is the only always-visible indicator once the boot overlay
+ *  is gone, so that difference is the whole point of showing it. */
+const backendPillLabel = computed(() => {
+  if (backend.status.value === 'connected') return 'backend'
+  const auto = backend.autoRestart.value
+  if (auto) return `restarting ${auto.attempt}/${auto.max}…`
+  if (backend.status.value === 'error') return 'backend down'
+  return 'connecting…'
+})
 // Frozen at bundle time. Shown as the build-time row of the clock popover, so a
 // stale dev build is still identifiable — it is deliberately NOT a clock.
 const buildTag = typeof __APP_BUILD__ === 'string' ? __APP_BUILD__ : 'dev'
@@ -11672,6 +11750,7 @@ function paneIsCommander(p: ActivePane): boolean {
           @loop-resume-now="resumeLoopNow(p.id)"
           @fix-login="fixPaneLogin(p.id)"
           @user-resume="persistPaneStopped(p.id, false)"
+          @pty-lost="onPanePtyLost(p.id)"
         />
         <RestoredPanePlaceholder
           v-else
@@ -12018,7 +12097,7 @@ function paneIsCommander(p: ActivePane): boolean {
           @keydown.enter="togglePopover('backend')"
         >
           <span class="sb-dot" />
-          {{ backend.status.value === 'connected' ? 'backend' : 'connecting…' }}
+          {{ backendPillLabel }}
           <span v-if="backendUrl" class="sb-url">· {{ backendUrl }}</span>
         </span>
         <span

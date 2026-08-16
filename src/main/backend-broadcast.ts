@@ -10,9 +10,17 @@
 export class BackendBroadcastTracker<T> {
   private pending = new Map<number, T>()
 
-  /** Decide whether a window should get `payload` immediately, or have it queued. */
-  dispatch(winId: number, focused: boolean, payload: T): { immediate: boolean } {
-    if (focused) {
+  /**
+   * Decide whether a window should get `payload` immediately, or have it queued.
+   *
+   * `urgent` overrides the focus gate. The gate exists to stop a transient blip
+   * from flashing "reconnecting" everywhere at once, and a backend that has
+   * given up for good is the opposite of transient: a backgrounded window that
+   * is not told keeps reconnect-looping against a dead port — up to one attempt
+   * every 30 s — until the user happens to click on it.
+   */
+  dispatch(winId: number, focused: boolean, payload: T, urgent = false): { immediate: boolean } {
+    if (focused || urgent) {
       this.pending.delete(winId)
       return { immediate: true }
     }

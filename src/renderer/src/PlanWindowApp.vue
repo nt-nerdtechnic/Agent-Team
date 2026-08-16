@@ -7,7 +7,7 @@
 // PlanMarkdownBody. Other HTML docs keep the plain sandboxed FilePreviewPane;
 // plain markdown (no frontmatter meta) falls back to the read-only PlanFileView.
 // Plans only — no file tree, terminal, or git.
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useBackend } from './composables/useBackend'
 import { initSettingsBackend, onSettingsChanged } from './lib/settings'
@@ -113,10 +113,44 @@ function isMarkdownDoc(relPath: string): boolean {
 // actions, and legacy .plan.md already carry frontmatter from the first read.
 async function probeMarkdownKind(relPath: string): Promise<void> {
   mdKind.value = 'loading'
-  const result = await resolvePlanStore(relPath).readMeta(planCtx(relPath))
+  let result: Awaited<ReturnType<ReturnType<typeof resolvePlanStore>['readMeta']>>
+  try {
+    result = await resolvePlanStore(relPath).readMeta(planCtx(relPath))
+  } catch {
+    // Transport down mid-probe. The rejection used to escape here, leaving the
+    // doc on 'loading' forever with nothing to re-probe it — a markdown plan
+    // opened while the backend was away simply spun for the rest of the
+    // session. Stay on 'loading' (the answer is genuinely unknown; calling it a
+    // plain doc would drop the review toolbar off a real plan) and retry when
+    // the backend is back.
+    pendingMarkdownProbe = relPath
+    return
+  }
+  pendingMarkdownProbe = ''
   if (openDoc.value?.relPath !== relPath) return // superseded by a newer open
   mdKind.value = result ? 'plan' : 'doc'
 }
+
+/** A meta probe that could not reach the backend, retried on reconnect. */
+let pendingMarkdownProbe = ''
+/** A restore-on-open that could not verify the stored plan, same deal. */
+let pendingInitialOpen = ''
+
+watch(
+  () => backend.status.value,
+  (s) => {
+    if (s !== 'connected') return
+    if (pendingMarkdownProbe) {
+      const relPath = pendingMarkdownProbe
+      pendingMarkdownProbe = ''
+      if (openDoc.value?.relPath === relPath) void probeMarkdownKind(relPath)
+    }
+    if (pendingInitialOpen) {
+      pendingInitialOpen = ''
+      if (!openDoc.value) void openInitialDoc()
+    }
+  }
+)
 
 function onOpenFile(payload: { filepath: string; name: string }): void {
   openDoc.value = { relPath: payload.filepath, name: payload.name }
@@ -145,21 +179,31 @@ async function openInitialDoc(): Promise<void> {
     return
   }
   const stored = loadStoredValue(lastOpenedKey)
-  if (!stored || !(await planDocExists(stored))) return
+  if (!stored) return
+  const exists = await planDocExists(stored)
+  if (exists === false) return
+  if (exists === null) {
+    // Could not ask. Treating that as "gone" silently dropped the plan the user
+    // had open and brought the window up empty for no visible reason, so hold
+    // the restore and try again once the backend answers.
+    pendingInitialOpen = stored
+    return
+  }
   // The list was interactive during the existence check; a plan opened in the
   // meantime (click, or a plan:open-doc switch) wins over the restore.
   if (openDoc.value) return
   openRelPath(stored)
 }
 
-async function planDocExists(relPath: string): Promise<boolean> {
+/** true = present, false = definitely absent, null = could not ask. */
+async function planDocExists(relPath: string): Promise<boolean | null> {
   try {
     const res = await backend.send<{ ok: boolean; exists?: boolean }>('fs.stat_path', {
       path: `${planRoot.value}/${relPath}`,
     })
     return res.payload?.exists === true
   } catch {
-    return false
+    return null
   }
 }
 

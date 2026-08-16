@@ -1006,6 +1006,12 @@ interface UseTerminalOptions {
    *  and onUserResume follow. The diagnostic log line is written regardless —
    *  it serves a bug report, this serves the person watching the pane. */
   onClipboardFailure?: (reason: ClipboardFailureReason, chars: number) => void
+  /** The pane's PTY did not survive the disconnect — a backend restart kills
+   *  every PTY, and the ownerless janitor eventually reaps the rest. Reported
+   *  rather than handled here because resuming is the owner's job: only App
+   *  knows the agent, the session id, and how to build the vendor's resume
+   *  command. */
+  onPtyLostWhileDisconnected?: () => void
 }
 
 /** Why a clipboard action produced nothing. One key per user-visible message. */
@@ -1610,7 +1616,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       const name = candidates[idx]
       closeMentionMenu()
       term.focus()
-      if (name) {
+      if (name && inputTransportReady()) {
         void backend.send('terminal.input', {
           terminal_session_id: sessionId.value,
           data: name + ' ',
@@ -1680,11 +1686,15 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       } else if (e.key === 'Backspace') {
         e.preventDefault(); e.stopPropagation()
         closeMentionMenu(); term.focus()
-        void backend.send('terminal.input', { terminal_session_id: sessionId.value, data: '\x7f' })
+        if (inputTransportReady()) {
+          void backend.send('terminal.input', { terminal_session_id: sessionId.value, data: '\x7f' })
+        }
       } else if (e.key.length === 1) {
         e.preventDefault(); e.stopPropagation()
         closeMentionMenu(); term.focus()
-        void backend.send('terminal.input', { terminal_session_id: sessionId.value, data: e.key })
+        if (inputTransportReady()) {
+          void backend.send('terminal.input', { terminal_session_id: sessionId.value, data: e.key })
+        }
       }
     }
 
@@ -2870,11 +2880,30 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   let _gatedInput = ''
   const GATED_INPUT_MAX = 4096
 
+  /**
+   * True while the transport can actually carry a keystroke.
+   *
+   * Input must never ride wsClient's send queue. That queue exists so a request
+   * survives a brief reconnect, which is right for a status poll and wrong for
+   * a keystroke: on a fast reconnect it replays the whole burst into the TUI at
+   * once — every Enter and Ctrl-C the user pressed at a pane that looked frozen
+   * — and on a slow one (backoff reaches 30 s, the queue's timeout is 10 s) it
+   * drops them with no error at all, because these sends are fire-and-forget.
+   * Refusing is the honest option; the pane's disconnected overlay is what
+   * tells the user why their typing is going nowhere.
+   */
+  function inputTransportReady(): boolean {
+    return backend.status.value === 'connected'
+  }
+
   /** Replay what the user typed while the pane was still preparing. */
   function _flushGatedInput(): void {
+    if (!_gatedInput) return
+    // Hold the buffer while the transport is down rather than burning it on a
+    // send that cannot leave; the reconnect watcher flushes it.
+    if (!inputTransportReady()) return
     const pending = _gatedInput
     _gatedInput = ''
-    if (!pending) return
     // A pane that died while preparing has nowhere to replay to; dropping the
     // buffer is the only option left, and sending would clear isStopped for a
     // session that no longer exists.
@@ -2924,6 +2953,10 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         _gatedInput = (_gatedInput + data).slice(-GATED_INPUT_MAX)
         return
       }
+      // Backstop for the disconnected overlay: refuse rather than queue. The
+      // overlay already blocks the pointer, but focus can still be in the
+      // terminal when the socket drops mid-keystroke.
+      if (!inputTransportReady()) return
       if (data === '\r' || data === '\n' || data === '\r\n') {
         if (isStopped.value) { isStopped.value = false; opts?.onUserResume?.() }
         if (inputBuffer.trim() === '/clear' && opts?.onClear) {
@@ -3113,6 +3146,12 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // same deferred-redraw pattern as tryReattach: cols/rows 0 skips the immediate
   // SIGWINCH; the reconciler fires it once the width has settled.
   async function reattachAfterReconnect(): Promise<void> {
+    // 'running' is the only state that owns a PTY: `status` goes starting →
+    // running on create and never back, and the idle a user sees is
+    // displayStatus, derived from output silence, not a state of its own. A
+    // pane still in 'starting' may hold a PREVIOUS session id that its
+    // in-flight create is about to replace, so probing on it would reattach to
+    // the wrong PTY.
     if (status.value !== 'running' || !sessionId.value) return
     const id = sessionId.value
     try {
@@ -3127,6 +3166,10 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         term.writeln('\r\n\x1b[33m[session ended while disconnected]\x1b[0m')
         rememberSessionId('')
         cleanupSession()
+        // The PTY is gone for good (a backend restart kills all of them), but
+        // the CLI's own session usually is not: hand the pane to the owner so
+        // it can resume that conversation instead of leaving a dead pane.
+        opts?.onPtyLostWhileDisconnected?.()
         return
       }
     } catch {
@@ -3147,6 +3190,10 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   watch(() => backend.status.value, (newStatus, oldStatus) => {
     if (newStatus === 'connected' && oldStatus !== 'connected') {
       void reattachAfterReconnect()
+      // Keys typed while the pane was preparing AND the socket was down were
+      // held rather than sent (see _flushGatedInput); the transport is back, so
+      // they can go now.
+      if (!_stdinGated) _flushGatedInput()
     }
   })
 
@@ -3556,6 +3603,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
 
   function pasteText(text: string): void {
     if (!sessionId.value || status.value === 'exited' || status.value === 'error') return
+    if (!inputTransportReady()) return
     void backend.send('terminal.input', {
       terminal_session_id: sessionId.value,
       data: text
@@ -3573,6 +3621,9 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   function _sendPasteChunk(text: string): Promise<unknown> {
     if (!sessionId.value || status.value === 'exited' || status.value === 'error') {
       return Promise.reject(new Error('session went away mid-paste'))
+    }
+    if (!inputTransportReady()) {
+      return Promise.reject(new Error('backend disconnected mid-paste'))
     }
     return backend
       .send('terminal.input', { terminal_session_id: sessionId.value, data: text })

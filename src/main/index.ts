@@ -19,6 +19,7 @@ import { setWindowDockTileBadge } from './dock-tile-badge'
 import { BackendBroadcastTracker } from './backend-broadcast'
 import { stabilizeDroppedPaths, pruneDroppedFiles, saveClipboardImage } from './dropped-file-store'
 import { watchBackendExit } from './backend-crash'
+import { createBackendAutoRestart } from './backend-autorestart'
 import {
   CliBufferRelay,
   CLI_BUFFER_REPLY_CHANNEL,
@@ -73,6 +74,12 @@ let backendStarting: Promise<void> | null = null
 // can show a real error instead of sitting in "starting" forever after a
 // retry also fails. Cleared as soon as a start attempt succeeds.
 let backendLastError: string | null = null
+// Set while a crashed backend has an auto-restart attempt scheduled. It keeps
+// the reported status at 'starting' rather than the terminal 'error', so the
+// renderer waits for the respawn instead of failing every send fast. Cleared
+// when a restart succeeds, when the attempt budget runs out, and by any
+// deliberate lifecycle op.
+let backendRestartPending: { attempt: number; max: number; reason: string } | null = null
 // Confirm-before-quit config, driven from the renderer (shared "confirm before
 // close" setting). Localized strings are supplied by the renderer.
 let quitConfirm = {
@@ -353,6 +360,19 @@ function requestPipelineManager(): void {
 
 function backendInfoPayload() {
   if (!backend) {
+    // A scheduled auto-restart outranks the crash message: the backend IS
+    // coming back, so report the same 'starting' the initial spawn reports and
+    // let the renderer show "reconnecting" instead of a terminal error.
+    if (backendRestartPending) {
+      return {
+        status: 'starting' as const,
+        autoRestart: {
+          attempt: backendRestartPending.attempt,
+          max: backendRestartPending.max,
+          reason: backendRestartPending.reason,
+        },
+      }
+    }
     return backendLastError
       ? { status: 'error' as const, error: backendLastError }
       : { status: 'starting' as const }
@@ -382,9 +402,11 @@ function broadcastBackendChanged(): void {
   // (it must not proxy through a renderer), so it needs the wsUrl the same way
   // the renderers do — pushed on every backend transition.
   frontendPluginManager.setBackendWsUrl(payload.status === 'ready' ? payload.wsUrl : null)
+  // A terminal error bypasses the focus gate — see BackendBroadcastTracker.
+  const urgent = payload.status === 'error'
   for (const win of BrowserWindow.getAllWindows()) {
     if (win.isDestroyed()) continue
-    const { immediate } = backendBroadcastTracker.dispatch(win.id, win.isFocused(), payload)
+    const { immediate } = backendBroadcastTracker.dispatch(win.id, win.isFocused(), payload, urgent)
     if (immediate) win.webContents.send('backend:changed', payload)
   }
 }
@@ -450,14 +472,23 @@ ipcMain.handle('backend:info', () => backendInfoPayload())
 // A backend that dies after a successful start must not keep reporting
 // 'ready' with a dead port: watch its exit and, if it is still the active
 // handle (deliberate stop/restart/quit paths clear `backend` BEFORE killing
-// the process, so those exits are ignored), surface the crash so every
-// window's useBackend reaches the terminal 'error' state and the existing
-// Retry UI takes over. Deliberately no auto-restart.
+// the process, so those exits are ignored), respawn it within a bounded
+// budget. Only once that budget is spent does the terminal 'error' state and
+// the existing Retry UI take over, so an unrecoverable backend is still
+// visible rather than respawning forever.
 function watchBackendCrash(b: BackendHandle): void {
   watchBackendExit(b.proc, () => backend === b, (message) => {
     console.error(`[main] ${message}`)
     backend = null
-    backendLastError = message
+    const attempt = backendAutoRestart.onCrash()
+    if (attempt === null) {
+      backendRestartPending = null
+      backendLastError = message
+    } else {
+      const max = backendAutoRestart.maxAttempts()
+      backendRestartPending = { attempt, max, reason: message }
+      console.log(`[main] backend auto-restart scheduled (attempt ${attempt}/${max})`)
+    }
     broadcastBackendChanged()
   })
 }
@@ -466,9 +497,58 @@ function watchBackendCrash(b: BackendHandle): void {
 // stop against a start.
 let backendBusy = false
 
+// Bounded respawn of a crashed backend (see backend-autorestart.ts for why it
+// is bounded and why a stability window guards the reset).
+const backendAutoRestart = createBackendAutoRestart({
+  restart: () => { void autoRestartBackend() },
+  onGiveUp: (attempts) => {
+    console.error(`[main] backend auto-restart gave up after ${attempts} attempts`)
+  },
+})
+
+/** One scheduled respawn attempt. A deliberate restart/stop already in flight
+ *  wins: it either brings a backend up itself or intends none to be running. */
+async function autoRestartBackend(): Promise<void> {
+  if (backend) {
+    // Something else already brought one up; drop the now-meaningless pending
+    // marker so the reported status stops claiming a respawn is due.
+    backendRestartPending = null
+    return
+  }
+  if (backendBusy) return
+  backendBusy = true
+  try {
+    backend = await startBackend(readHealthCheckTimeoutSec(healthTimeoutPath()) * 1000)
+    backendLastError = null
+    backendRestartPending = null
+    watchBackendCrash(backend)
+    backendAutoRestart.onHealthy()
+    console.log(`[main] backend auto-restarted at ${backend.host}:${backend.port}`)
+  } catch (err) {
+    // A failed attempt spends budget the same way a crash does; when the
+    // budget is gone the error becomes terminal.
+    console.error('[main] backend auto-restart failed', err)
+    backend = null
+    const attempt = backendAutoRestart.onCrash()
+    if (attempt === null) {
+      backendRestartPending = null
+      backendLastError = String(err)
+    } else {
+      backendRestartPending = { attempt, max: backendAutoRestart.maxAttempts(), reason: String(err) }
+    }
+  } finally {
+    backendBusy = false
+  }
+  broadcastBackendChanged()
+}
+
 ipcMain.handle('backend:restart', async () => {
   if (backendBusy) return backendInfoPayload()
   backendBusy = true
+  // Manual intervention supersedes the automatic budget: drop any pending
+  // attempt and give the user's restart a full budget of its own.
+  backendAutoRestart.cancel()
+  backendRestartPending = null
   try {
     // A restart during the initial spawn must not double-spawn: wait for the
     // in-flight start to settle first (its promise never rejects) so the
@@ -503,6 +583,10 @@ ipcMain.handle('backend:restart', async () => {
 ipcMain.handle('backend:stop', async () => {
   if (backendBusy) return { ok: false }
   backendBusy = true
+  // An explicit stop means the user wants no backend running — a pending
+  // respawn would undo that.
+  backendAutoRestart.cancel()
+  backendRestartPending = null
   try {
     if (backend) {
       const b = backend
@@ -2245,6 +2329,9 @@ const BACKEND_STOP_WAIT_MS = 6000
 async function teardownBackendAndQuit(): Promise<void> {
   // A user-initiated quit is a clean exit — nothing to restore next launch.
   windowRegistry.markCleanExit()
+  // Drop any scheduled respawn: quitting must not race a backend back to life.
+  backendAutoRestart.cancel()
+  backendRestartPending = null
   // If the backend is still spawning (quit mid-startup), wait for it (capped) so
   // we can stop it rather than orphan the process.
   if (!backend && backendStarting) await withDeadline(backendStarting, BACKEND_SPAWN_WAIT_MS)

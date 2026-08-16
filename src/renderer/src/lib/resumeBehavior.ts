@@ -10,6 +10,24 @@ export type RestoreScope = 'single' | 'page' | 'tab' | 'all'
 /** Settings-store key (ui_settings.json via lib/settings.ts). */
 export const RESUME_BEHAVIOR_SETTING_KEY = 'agentTeam.resumeBehavior'
 export const RESTORE_SCOPE_SETTING_KEY = 'agentTeam.restoreScope'
+/** Whether a pane whose PTY died with the backend is resumed automatically
+ *  once the backend comes back. */
+export const AUTO_RESUME_ON_RECONNECT_SETTING_KEY = 'agentTeam.autoResumeOnReconnect'
+
+/**
+ * Guard for the auto-resume-on-reconnect setting. Default ON, so the point of
+ * the setting is to turn the automation off.
+ *
+ * Deliberately NOT folded into `resumeBehavior`. That preference governs
+ * opening a workspace, where 'ask' is reasonable: the user has just arrived and
+ * is choosing what to bring back. This one governs a backend crash that
+ * interrupted work already under way — the pane was already open, already
+ * resumed once, and the user did not ask for any of it to stop. Asking again
+ * there only puts a dialog between them and the work they were doing.
+ */
+export function normalizeAutoResumeOnReconnect(v: unknown): boolean {
+  return v !== false
+}
 
 /** Guard for values read from the settings store: anything but a known
  *  behavior falls back to 'always' (the pre-preference behavior). */

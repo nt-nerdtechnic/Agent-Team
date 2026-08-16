@@ -39,6 +39,7 @@
     "reason-ambiguous-workspace": "「{ws}」符合 {n} 個工作區 — 請改用完整路徑",
     "reason-unknown-target-in-workspace": "工作區「{ws}」中找不到名為「{name}」的 pane",
     "reason-ambiguous-target": "工作區「{ws}」中有 {n} 個 pane 都叫「{name}」 — 請重新命名其中一個",
+    "reason-target-offline": "「{to}」目前離線 — 所屬視窗已斷線 {seconds} 秒，該 pane 仍然存在",
     "rename-collision-title": "訊息名稱重複",
     "rename-collision-body": "名稱「{name}」已被其他 CLI 使用。請設定另一個訊息名稱：",
     "rename-collision-confirm": "確認",
@@ -246,6 +247,11 @@
       "unpin": "取消釘選"
     },
     "terminal": {
+      "backend-reconnecting": "後端已中斷 — 重新連線中，暫停輸入。",
+      "backend-restarting": "後端已崩潰 — 重新啟動中（{attempt}/{max}），暫停輸入。",
+      "backend-unavailable": "後端無法使用 — 重新啟動前暫停輸入。",
+      "session-resumed": "後端重啟後已接回 {count} 個工作階段",
+      "session-resume-failed": "後端重啟後有 {count} 個工作階段無法接回 — 可用「重建」重試",
       "option-select-hint": "此 CLI 接管了滑鼠 — 按住 {key} 再拖曳即可劃選文字",
       "clipboard-empty": "沒有可貼上的內容 — 剪貼簿是空的",
       "clipboard-preparing": "{pane} 還在啟動 — 已捨棄 {chars} 個字元，請稍後再貼一次",
@@ -604,6 +610,8 @@
       "bundle-hint": "匯出內容包含 Roles、Pipelines、MCP、Analyzer、AI Chat 非敏感設定與外觀偏好；API key 和 token 會被遮蔽，匯入時不會覆蓋。"
     },
     "general": {
+      "auto-resume-reconnect": "後端重啟後自動接回工作階段",
+      "auto-resume-reconnect-hint": "後端崩潰時會一併帶走所有 CLI 行程。開啟後，後端恢復時會自動接回目前看得見的 pane 的對話，不必逐一手動重建。",
       "default-editor": "預設編輯器",
       "default-editor-hint": "Navide 開啟檔案與資料夾的去向。Diff 檢視一律使用 Mini-IDE。",
       "default-editor-not-installed": "未安裝",

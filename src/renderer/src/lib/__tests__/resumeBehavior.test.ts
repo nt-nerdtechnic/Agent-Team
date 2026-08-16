@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   createWorkspaceRestoreSession,
+  normalizeAutoResumeOnReconnect,
   normalizeResumeBehavior,
   normalizeRestoreScope,
   pendingRestorePaneIds,
@@ -23,6 +24,21 @@ describe('normalizeResumeBehavior', () => {
     expect(normalizeResumeBehavior(null)).toBe('always')
     expect(normalizeResumeBehavior('sometimes')).toBe('always')
     expect(normalizeResumeBehavior(42)).toBe('always')
+  })
+})
+
+describe('normalizeAutoResumeOnReconnect', () => {
+  // Default ON: a backend crash interrupted work the user never asked to stop,
+  // so the automation is the expected behavior and the setting exists to
+  // switch it off. An install that predates the key gets the automation too.
+  it('defaults to on for anything that is not an explicit false', () => {
+    expect(normalizeAutoResumeOnReconnect(undefined)).toBe(true)
+    expect(normalizeAutoResumeOnReconnect(null)).toBe(true)
+    expect(normalizeAutoResumeOnReconnect(true)).toBe(true)
+  })
+
+  it('is off only when explicitly disabled', () => {
+    expect(normalizeAutoResumeOnReconnect(false)).toBe(false)
   })
 })
 

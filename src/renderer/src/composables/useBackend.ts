@@ -16,6 +16,18 @@ interface BackendInfo {
   httpUrl?: string
   wsUrl?: string
   error?: string
+  /** Present while main has a bounded respawn scheduled for a crashed backend
+   *  (see src/main/backend-autorestart.ts). Status stays 'starting' in that
+   *  window so the UI waits instead of failing every send fast. */
+  autoRestart?: { attempt: number; max: number; reason?: string }
+}
+
+/** What the UI shows while a crashed backend is being respawned. Null whenever
+ *  no automatic attempt is outstanding. */
+export interface AutoRestartInfo {
+  attempt: number
+  max: number
+  reason: string
 }
 
 export function useBackend() {
@@ -26,6 +38,7 @@ export function useBackend() {
   const port = ref<number>(0)
   const pid = ref<number>(0)
   const lastError = ref<string>('')
+  const autoRestart = ref<AutoRestartInfo | null>(null)
 
   // All WebSocket transport — request/response correlation, the send queue,
   // reconnect backoff, and the ping liveness probe — lives in the shared
@@ -63,6 +76,9 @@ export function useBackend() {
     // Old socket + any queued/in-flight requests targeted the old backend/port
     // — reject them rather than replay on the new socket.
     client.reset('backend changed')
+    autoRestart.value = info.autoRestart
+      ? { attempt: info.autoRestart.attempt, max: info.autoRestart.max, reason: info.autoRestart.reason ?? '' }
+      : null
     if (info.status === 'ready' && info.wsUrl) {
       wsUrl.value = info.wsUrl
       httpUrl.value = info.httpUrl ?? ''
@@ -95,6 +111,9 @@ export function useBackend() {
   function restart(): Promise<unknown> {
     status.value = 'connecting'
     lastError.value = ''
+    // Main cancels the automatic budget on a manual restart; mirror that here
+    // so the UI stops reporting an attempt that no longer exists.
+    autoRestart.value = null
     return window.agentTeam?.restartBackend?.() ?? Promise.resolve()
   }
 
@@ -141,5 +160,5 @@ export function useBackend() {
     client.dispose('ws not open')
   })
 
-  return { status, wsUrl, httpUrl, shell, port, pid, lastError, send, on, restart, stop }
+  return { status, wsUrl, httpUrl, shell, port, pid, lastError, autoRestart, send, on, restart, stop }
 }

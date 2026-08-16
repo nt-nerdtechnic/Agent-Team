@@ -17,8 +17,10 @@ import {
   usageRefreshSec,
 } from '../composables/useUsage'
 import {
+  AUTO_RESUME_ON_RECONNECT_SETTING_KEY,
   RESUME_BEHAVIOR_SETTING_KEY,
   RESTORE_SCOPE_SETTING_KEY,
+  normalizeAutoResumeOnReconnect,
   normalizeResumeBehavior,
   normalizeRestoreScope,
   type ResumeBehavior,
@@ -555,6 +557,16 @@ const restoreScopeModel = ref<RestoreScope>(
 function onRestoreScopeChange(value: string): void {
   restoreScopeModel.value = normalizeRestoreScope(value)
   settingsSet(RESTORE_SCOPE_SETTING_KEY, restoreScopeModel.value)
+}
+
+// Whether a pane whose PTY died with the backend is resumed automatically once
+// the backend is back. Separate from resumeBehavior above: that one is about
+// opening a workspace, this one about a crash interrupting work in progress.
+const autoResumeOnReconnectModel = ref(
+  normalizeAutoResumeOnReconnect(settingsGet(AUTO_RESUME_ON_RECONNECT_SETTING_KEY, true))
+)
+function onAutoResumeOnReconnectChange(): void {
+  settingsSet(AUTO_RESUME_ON_RECONNECT_SETTING_KEY, autoResumeOnReconnectModel.value)
 }
 
 // Max resume spawns that run terminal.create concurrently (the rest queue).
@@ -2085,6 +2097,20 @@ watch(activeTab, (tab) => {
                     <option value="tab">{{ $t('settings.appearance.restore-scope-tab') }}</option>
                     <option value="all">{{ $t('settings.appearance.restore-scope-all') }}</option>
                   </select>
+                </template>
+              </SettingRow>
+
+              <SettingRow
+                data-settings-section="general-auto-resume-reconnect"
+                :title="$t('settings.general.auto-resume-reconnect')"
+                :description="$t('settings.general.auto-resume-reconnect-hint')"
+              >
+                <template #control>
+                  <ToggleSwitch
+                    v-model="autoResumeOnReconnectModel"
+                    :aria-label="$t('settings.general.auto-resume-reconnect')"
+                    @update:modelValue="onAutoResumeOnReconnectChange"
+                  />
                 </template>
               </SettingRow>
 

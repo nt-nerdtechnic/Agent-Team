@@ -104,6 +104,9 @@ const emit = defineEmits<{
    *  clears + un-persists the STOP badge. */
   (e: 'user-resume'): void
   (e: 'first-output'): void
+  /** This pane's PTY did not survive a backend outage — App.vue resumes the
+   *  CLI session so the conversation continues instead of leaving a dead pane. */
+  (e: 'pty-lost'): void
 }>()
 const containerRef = ref<HTMLElement | null>(null)
 const isDragOver = ref(false)
@@ -176,9 +179,35 @@ const terminal = useTerminal(props.paneId, props.backend, {
   onScreen: () => props.onScreen ?? true,
   onFirstOutput: () => emit('first-output'),
   onClipboardFailure,
+  onPtyLostWhileDisconnected: () => emit('pty-lost'),
 })
 const { theme } = useTheme()
 watch(theme, () => terminal.updateXtermTheme())
+
+/**
+ * The banner text while the backend is unreachable, or '' when there is
+ * nothing to say.
+ *
+ * Only panes holding a PTY get it: a pane that never spawned has no work to
+ * lose, and the boot overlay already owns the initial start. The three
+ * messages are genuinely different situations — a transient reconnect, a
+ * crashed backend being respawned within its budget, and a backend that gave
+ * up for good — and the status bar's old single "connecting…" for all three is
+ * what made a dead backend look like a slow one.
+ */
+const disconnectedNotice = computed<string>(() => {
+  // Optional-chained throughout, like the rest of this file: the pane's tests
+  // stub both useTerminal and the backend with partial objects.
+  const status = props.backend?.status?.value
+  if (!status || status === 'connected') return ''
+  if (!terminal.sessionId?.value) return ''
+  const auto = props.backend?.autoRestart?.value
+  if (auto) {
+    return i18n.global.t('pane.terminal.backend-restarting', { attempt: auto.attempt, max: auto.max })
+  }
+  if (status === 'error') return i18n.global.t('pane.terminal.backend-unavailable')
+  return i18n.global.t('pane.terminal.backend-reconnecting')
+})
 
 watch(() => props.isPreparing, (isPrep) => {
   if (terminal.setDisableStdin) {
@@ -520,6 +549,14 @@ onMounted(() => {
       @dragleave="onTerminalDragLeave"
       @drop.prevent="onTerminalDrop"
     ></div>
+    <!-- Backend down: a frozen pane is indistinguishable from a thinking CLI,
+         and keystrokes are refused while it shows (see inputTransportReady).
+         Deliberately a banner, not a cover: the history stays readable and
+         selectable, since nothing about it stopped being true. -->
+    <div v-if="disconnectedNotice" class="disconnected-banner" role="status" aria-live="polite">
+      <span class="disconnected-dot" />
+      <span class="disconnected-text">{{ disconnectedNotice }}</span>
+    </div>
     <!-- Optional-chained: the pane's tests stub useTerminal with partial objects. -->
     <div v-if="terminal.optionSelectHint?.value" class="select-hint" aria-live="polite">
       {{ $t('pane.terminal.option-select-hint', { key: selectModifierLabel }) }}
@@ -828,6 +865,45 @@ onMounted(() => {
   color: var(--text-secondary);
   font-size: 11px;
   pointer-events: none;
+}
+/* Sits over the top of the terminal area rather than covering it: the
+   scrollback stays readable and selectable while the backend is away. */
+.disconnected-banner {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  top: 35px;
+  z-index: 9;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px;
+  border: 1px solid var(--danger-fg);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  pointer-events: none;
+}
+.disconnected-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--danger-fg);
+  animation: disconnected-pulse 1.6s ease-in-out infinite;
+}
+.disconnected-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@keyframes disconnected-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .disconnected-dot { animation: none; }
 }
 .prep-overlay {
   position: absolute;
