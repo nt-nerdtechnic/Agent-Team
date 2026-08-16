@@ -388,7 +388,18 @@ describe('KeyResolver – defaults integration (new shortcuts)', () => {
     expect(dr.resolve(mkEvent('w', { metaKey: true }), { editorOpen: true, modalOpen: true })).toBeNull()
   })
 
-  it('cmd+w blocked when editorOpen false', () => {
+  it('cmd+w → closeActivePane in the main window (paneStage && !modalOpen)', () => {
+    // Same key, one unit of whatever the window holds: a tab above, the focused
+    // CLI pane here. The two guards are window identities and never both hold.
+    expect(dr.resolve(mkEvent('w', { metaKey: true }), { paneStage: true, modalOpen: false })?.command)
+      .toBe('workbench.action.closeActivePane')
+  })
+
+  it('cmd+w blocked in the main window while a modal is open', () => {
+    expect(dr.resolve(mkEvent('w', { metaKey: true }), { paneStage: true, modalOpen: true })).toBeNull()
+  })
+
+  it('cmd+w does nothing in a window that is neither', () => {
     expect(dr.resolve(mkEvent('w', { metaKey: true }), { editorOpen: false })).toBeNull()
   })
 

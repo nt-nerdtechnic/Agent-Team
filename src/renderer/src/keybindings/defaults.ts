@@ -9,6 +9,13 @@ export const defaults: KeybindingRule[] = [
   { key: 'cmd+shift+f', command: 'workbench.action.findInFiles' },
   { key: 'cmd+,',       command: 'workbench.action.openSettings' },
   { key: 'cmd+w',       command: 'workbench.action.closeActiveEditor', when: 'editorOpen && !modalOpen' },
+  // Same key, the other window: ⌘W closes one unit of whatever the window
+  // holds — a tab in the Mini IDE, the focused CLI pane here. The two guards
+  // are window identities and never both hold, so this is not a conflict.
+  //
+  // No !terminalFocus: a focused CLI pane is exactly when you want this, and ⌘W
+  // means nothing to a PTY (Ctrl+W is the one shells use).
+  { key: 'cmd+w',       command: 'workbench.action.closeActivePane', when: 'paneStage && !modalOpen' },
   // Closing a WINDOW, not a tab. ⌘W used to do this through the menu's `close`
   // role, which was dropped so the rule above could have the key (main/menu.ts);
   // this restores the capability on a chord no role claims. Every window that

@@ -4245,6 +4245,36 @@ async function onReinject(paneId: string): Promise<void> {
   syncViews()
 }
 
+/**
+ * ⌘W's close: kill the focused pane, asking first only while a turn is running.
+ *
+ * The ✕ button calls onKill outright, which is right for a deliberate mouse
+ * click but not for a key you can hit one-handed while typing into the very CLI
+ * it would kill. `force: true` gives no second chance, so a running turn gets
+ * the same prompt Rebuild already shows for interrupting one. An idle pane
+ * closes without ceremony — matching the button, and the common case.
+ */
+async function closeFocusedPane(paneId: string): Promise<void> {
+  const paneRef = paneRefs[paneId]
+  const busy = paneBusyForRebuild(
+    paneRef?.displayStatus as string | undefined,
+    paneRef?.status as string | undefined,
+    paneRef?.startingAgeMs as number | null | undefined
+  )
+  if (busy === 'running') {
+    const ok = await notifyRestore.confirm(
+      i18n.global.t('pane.terminal.close-running-confirm-body'),
+      {
+        title: i18n.global.t('pane.terminal.close-running-confirm-title'),
+        confirmText: i18n.global.t('pane.terminal.close-running-confirm-confirm'),
+        cancelText: i18n.global.t('pane.terminal.rebuild-running-confirm-cancel')
+      }
+    )
+    if (!ok) return
+  }
+  await onKill(paneId)
+}
+
 async function onKill(paneId: string, opts: { markRemoved?: boolean, force?: boolean, keepInList?: boolean } = {}): Promise<void> {
   const markRemoved = opts.markRemoved ?? true
   const force = opts.force ?? true
@@ -5148,6 +5178,15 @@ registerCommand('workbench.action.newWindow', async () => {
 // window's existing close handling (confirm-before-quit, PTY teardown) runs
 // exactly as it does when the traffic lights are used.
 registerCommand('workbench.action.closeWindow', () => { window.close() })
+// ⌘W. The pane-level counterpart, so this window has the same two tiers the
+// Mini IDE does (⌘W a unit, ⌘⇧W the container). ⌘W was an empty key here
+// before: closeActiveEditor guards on `editorOpen`, which this window never
+// sets. Declines when nothing is focused so the keystroke is left alone.
+registerCommand('workbench.action.closeActivePane', () => {
+  const paneId = focusPaneId.value
+  if (!paneId) return false
+  return closeFocusedPane(paneId)
+})
 registerCommand('workbench.action.openSettings', () => { showSettings.value = true })
 registerCommand('workbench.action.openSettingsAccounts', () => openSettingsAccounts())
 registerCommand('workbench.action.openPipelineManager', () => { openPipelineManager() })

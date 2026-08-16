@@ -250,6 +250,7 @@ export const COMMAND_IDS: readonly string[] = [
   'workbench.action.addSelectionToChat',
   'workbench.action.changeLanguageMode',
   'workbench.action.closeActiveEditor',
+  'workbench.action.closeActivePane',
   'workbench.action.closeAllEditors',
   'workbench.action.closeEditorsToTheLeft',
   'workbench.action.closeEditorsToTheRight',
