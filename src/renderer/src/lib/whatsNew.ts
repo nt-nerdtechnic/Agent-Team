@@ -36,6 +36,39 @@ export const WHATS_NEW_CHROME = {
 
 export const WHATS_NEW: WhatsNewEntry[] = [
   {
+    version: '0.1.84',
+    title: {
+      'zh-TW': 'CLI 互傳訊息：投遞失敗回報、Claude Stop hook 直送、打字時暫緩投遞',
+      'en-US': 'Inter-CLI Messaging: Delivery-Failure Notices, Claude Stop-Hook Hand-Over & Typing Hold',
+    },
+    highlights: [
+      {
+        'zh-TW':
+          '投遞失敗回報：訊息送不到時，寄件 pane 會收到一則 `[Navide MSG] delivery failed` 系統通知，說明目標與原因。',
+        'en-US':
+          'Delivery-failure notices: when a message cannot be delivered, the sending pane receives a `[Navide MSG] delivery failed` notice naming the target and the reason.',
+      },
+      {
+        'zh-TW':
+          'Claude Stop hook 直送：Claude pane 回合結束時若有訊息在等，會直接經由 Stop hook 交給 agent 當下一步指令，完全不經過輸入框。',
+        'en-US':
+          'Claude Stop-hook hand-over: a message waiting for a Claude pane is handed to the agent as its next instruction when its turn ends, without ever touching the input box.',
+      },
+      {
+        'zh-TW':
+          '打字時暫緩投遞與整段貼上：目標 pane 有人在輸入時訊息會顯示為「輸入中」暫緩，注入一律以 bracketed paste 整段送入，不再打斷你打到一半的提示。',
+        'en-US':
+          'Typing hold & whole-paste injection: delivery waits while someone is typing in the target pane, and injections land as a single bracketed paste so a half-written prompt is never submitted with them.',
+      },
+      {
+        'zh-TW':
+          '訊息種類持久化與系統通知標章：訊息記錄面板會記住每則訊息的種類，系統通知重新載入後仍顯示「系統通知」標章。',
+        'en-US':
+          'Kind persistence & system-notice badge: the message log remembers each message\'s kind, so system notices keep their "system notice" badge across reloads.',
+      },
+    ],
+  },
+  {
     version: '0.1.83',
     title: {
       'zh-TW': '自訂快捷鍵編輯器、多面板批量拖曳與 CLI 提問狀態提示',

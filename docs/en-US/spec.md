@@ -102,6 +102,7 @@ Legend: ✅ shipped & stable · 🟡 in working tree but not yet released · �
 - Installer auto-merges into `~/.claude/settings.json` on backend startup (`PreToolUse` / `Stop` / `Notification`)
 - Hook commands curl to `/hooks/claude` endpoint — most reliable "is agent working?" signal
 - Incoming hook payloads feed the ActivityEvent stream
+- The `Stop` hook is also a delivery channel: its response may answer `{"decision": "block", "reason": <envelope>}` to hand a queued inter-CLI message to the agent without typing it (`hook_drain.py`; see `inter-cli-messaging.md`)
 
 ### M8 · Activity Event system
 **Status**: ✅ Done · files: `log_readers/{base,claude,codex,gemini}.py`

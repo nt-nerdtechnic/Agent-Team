@@ -195,16 +195,109 @@ is not. For the vendors whose logs carry no end-of-turn record, "the turn
 ended" is inferred from a long enough silence instead, so those panes accept a
 message a little later than the rest.
 
+**Delivery also waits for you.** An injection ends in Enter, so it would submit
+whatever the composer is holding — including a line you are still writing. A
+pane whose input line has unsent text in it, or that received a keystroke in
+the last few seconds, is held as `typing` until you send or clear what you
+started. Mouse movement over a pane is not typing; a clipboard paste is.
+
+The unsent line is read from what you send to the pane, not from the CLI's
+input box, which Navide cannot see into. One case falls through that gap: text
+the CLI itself puts in the box — recalling an earlier prompt with the up arrow,
+or accepting a completion — leaves the box full while Navide sees nothing
+typed, so only the few-second keystroke window protects it.
+
+The same gap runs the other way, and it matters more: a permission prompt or a
+question answered with a bare `1` or `y` is taken on the keypress, so no Enter
+ever follows to tell Navide the line is gone. A pane leaving `awaiting` or
+`question` therefore counts as its answer being taken, and an unsent line stops
+holding delivery a minute after the last keystroke either way. Without that a
+single `1` would park the pane for good — every later message stuck on
+`typing`, and the pane reported busy to everything that asks.
+
 **One at a time, in order.** Each target has its own FIFO queue and at most one
 injection in flight. Injection itself is a bracketed paste plus a verified
 submit — if the pane never echoes the text back, the message is failed rather
-than assumed delivered.
+than assumed delivered. The paste guards keep the write a single insertion the
+TUI takes whole, instead of a stream of keypresses that could interleave with
+your own; every message carries them, whatever the vendor. Navide's other
+injections (a role prompt, a kickoff, a loop nudge) now carry them too — for the
+vendors whose TUI is known to keep bracketed paste on, and only while that TUI
+still has it on. A claude pane dropped into `!` shell mode or sitting on a raw
+login prompt has turned it off, and a guard written into one of those would
+arrive as a literal `[200~`, so single-line injections ask the terminal what the
+program on the other end last declared rather than trusting the vendor alone.
+Multi-line text is wrapped regardless: there the guards are what stop an
+embedded newline from submitting half a prompt.
 
 **Cross-workspace delivery belongs to the receiving window.** The sending
 window hands the address to the backend registry, and the window that owns the
 target pane queues, injects and reports the outcome. Until that report arrives
 the message stays queued. If the report never comes — the other window was
 killed, the machine slept — the message is failed after about 30 minutes.
+
+---
+
+## Stop-hook delivery (claude)
+
+Everything above describes messages being **typed** into a pane. A `claude`
+pane has a second way in, and it does not use the input box at all.
+
+Claude Code runs a Stop hook when a turn ends, and a Stop hook may answer
+"don't stop — do this instead". Navide already installs that hook. So when a
+claude pane's turn ends with a message waiting for it, the hook's answer *is*
+the message: Claude picks it up as its next instruction and keeps working.
+
+What that changes:
+
+- **The input box is never touched.** No bracketed paste, no Enter, no verified
+  submit — so a line you are half-way through typing cannot be submitted by an
+  arriving message, and the `typing` hold has nothing to protect against.
+- **The idle gate does not apply either.** The pane is not idle, it is *ending
+  a turn*, which is the moment the hook fires.
+- **The guards that decide whether a message may go out still apply.** Global
+  pause, FIFO order, the per-target queue, and the per-pair rate limit — the
+  last of which is spent when a message is sent, so anything already queued has
+  paid for it.
+
+The window that owns the pane is asked, and it **reserves** the message rather
+than consuming it: the row is held in flight — invisible to the ordinary queue,
+so the same message can never also be injected — and only becomes delivered
+once the hand-over is confirmed. A cross-workspace message reports back to its
+sender at that same moment, not before. In the Messages panel the row carries a
+**via hook** badge, which is in-memory only — after a reload it reads as an
+ordinary delivered message.
+
+The hook blocks the agent for as long as it runs, so the window has **1.5s** to
+answer. Past that the hook stops waiting and the pane stops normally; the
+reserved message is put back at the head of its queue and goes out the ordinary
+typed way. Nothing is lost and nothing is delivered twice — a late answer is
+told the hook had already given up.
+
+An answer of "nothing queued" is an **empty response**, not a JSON one: Claude
+Code reads a hook's stdout as its decision, and a JSON object it does not
+recognize is reported to you as a hook error. Empty means "no decision", which
+is exactly right.
+
+A turn that was blocked is still written to the CLI's conversation log, and its
+reader reports it as a turn end a moment later. Navide flags that record as
+superseded: everything read out of it (the MSG blocks the pane addressed to
+others, its sentinels, its auto-name) still counts, but it no longer means the
+pane is free — because it isn't.
+
+### What it does not cover
+
+- **Only the moment a turn ends.** A claude pane sitting idle runs no hook, so
+  a message arriving then still waits for the ordinary typed delivery. This is
+  the path for a message that shows up while the agent is working.
+- **Only claude.** No other CLI has a hook that can block its own stop.
+- **Only when the hook reaches Navide.** Hooks not installed, backend not
+  running, hook request timed out — every one of those falls back to typing,
+  with no behaviour change at all.
+- **Repeats are capped.** After 5 messages in a row this way, the pane is
+  allowed to stop; whatever is left in its queue goes out by typing. Claude
+  Code enforces its own limit at 8 consecutive blocks, and stopping first keeps
+  the limit ours to explain.
 
 ---
 
@@ -247,6 +340,7 @@ queued — why it has not gone out yet.
 | `behind` | Waiting behind other messages for the same target |
 | `busy` / `not-ready` | Target pane is not in a state that accepts input |
 | `starting` | Target pane is still starting up |
+| `typing` | Someone is typing in the target pane |
 | `mid-turn` | Target agent is working |
 | `settling` | Target just went quiet; waiting for it to settle |
 | `paused` | Delivery is paused for the window |
@@ -288,5 +382,7 @@ queued — why it has not gone out yet.
 | Markers, parser, envelope and notice rendering (pure functions) | `src/renderer/src/lib/agentMessaging.ts` |
 | Handle registry, queues, guard rails, delivery state machine | `src/renderer/src/composables/useAgentMessaging.ts` |
 | Injection, the idle gate, turn-text hook | `src/renderer/src/App.vue` |
+| Stop-hook delivery: asking the owning window inside the hook's timeout | `backend/agent_team_backend/hook_drain.py` |
+| The installed hook command, and which event keeps its response | `backend/agent_team_backend/claude_hooks.py` |
 | The protocol text handed to agents | `src/renderer/src/data/stages.ts` |
 | The delivery log UI | `src/renderer/src/components/AgentMessagesPanel.vue` |
