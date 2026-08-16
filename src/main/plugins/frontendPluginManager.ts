@@ -16,6 +16,7 @@ import {
   planCapabilityCall,
   backendResponseToCapability,
   isEventAllowed,
+  isPublicCapabilityEventAllowed,
   buildError,
   buildSuccess,
   CASTABLE_WS_TYPES,
@@ -25,9 +26,13 @@ import {
   HOST_CAPABILITIES,
   type CapabilityCall,
   type CapabilityResponse,
+  type AuthenticatedRuntimeBinding,
+  type HostCapabilityContext,
+  type PublicCapabilityExecutionPlan,
   type TerminalOutputBatcher,
 } from './pluginCapabilityBroker'
-import { CAP_EVENTS, eventNamespace } from './capabilityMap'
+import { CAP_EVENTS } from './capabilityMap'
+import { PUBLIC_CAPABILITY_EVENT_ADDRESSES } from './pluginCapabilityCatalog'
 import {
   GIT_PLUGIN_REQUIRES,
   MINI_IDE_PLUGIN_REQUIRES,
@@ -58,6 +63,8 @@ export interface PluginLaunchDescriptor {
   requires: string[]
   /** Access-aware policy for Manifest v2; omitted descriptors retain V1 behavior. */
   capabilityPolicy?: PluginCapabilityPolicy
+  /** Host-authenticated v2 grant/binding context; never serialized to a plugin. */
+  capabilityContext?: HostCapabilityContext
   /** Dev-server URL for the plugin entry (used when running under electron-vite dev). */
   devUrl: string
   /** Absolute file path to the built plugin entry (packaged / built runs). */
@@ -96,6 +103,7 @@ interface RunningPlugin {
   id: string
   requires: string[]
   capabilityPolicy: PluginCapabilityPolicy
+  capabilityContext: HostCapabilityContext | null
   view: WebContentsView
   hostWindow: BrowserWindow
   /** Query string the entry was last loaded with (drives reload-on-change). */
@@ -190,6 +198,10 @@ export class FrontendPluginManager {
   /** Last transport status, replayed to late-loading plugin views so their
    *  useBackend shims start from real liveness instead of assuming it. */
   private wsStatus: WsClientStatus = 'disconnected'
+  /** Host-owned executor seam for cataloged v2 plans. */
+  private publicCapabilityHandler:
+    | ((plan: PublicCapabilityExecutionPlan) => unknown | Promise<unknown>)
+    | null = null
   /** `terminal_session_id` → owning pluginId. Registered from terminal.create /
    *  terminal.reattach responses ({@link noteTerminalRoutes}); terminal.output
    *  and terminal.exit are delivered to the owner only, falling back to the
@@ -225,8 +237,28 @@ export class FrontendPluginManager {
 
       // Enforce scoping + route. A denied namespace is rejected here and never
       // reaches the backend; `ping`/unknown resolve in-process.
-      const plan = planCapabilityCall(call, plugin.capabilityPolicy)
+      const plan = planCapabilityCall(
+        call,
+        plugin.capabilityPolicy,
+        plugin.capabilityContext ?? undefined
+      )
       if (plan.kind === 'respond') return plan.response
+
+      if (plan.kind === 'public') {
+        const handler = this.publicCapabilityHandler
+        if (!handler) {
+          return buildError(
+            call.reqId,
+            'BACKEND_UNAVAILABLE',
+            'public capability broker is not connected'
+          )
+        }
+        try {
+          return buildSuccess(call.reqId, await handler(plan))
+        } catch {
+          return buildError(call.reqId, 'INTERNAL_ERROR', 'public capability failed')
+        }
+      }
 
       // Host-implemented capability (ui.open_in_editor): main services it
       // directly — no backend round-trip.
@@ -325,6 +357,27 @@ export class FrontendPluginManager {
 
   setOpenInEditorHandler(fn: (params: Record<string, string>) => boolean | Promise<boolean>): void {
     this.openInEditorHandler = fn
+  }
+
+  /** Install the Host-owned execution adapter for an already-authorized v2
+   * plan. The adapter receives no raw shell, PTY, executable, or transport
+   * handle from the Plugin. */
+  setPublicCapabilityHandler(
+    fn: ((plan: PublicCapabilityExecutionPlan) => unknown | Promise<unknown>) | null
+  ): void {
+    this.publicCapabilityHandler = fn
+  }
+
+  /** Host-only event ingress for cataloged public events. A workspace event
+   * must carry the authenticated Host source binding; unbound backend fan-out
+   * is intentionally dropped by {@link dispatchEvent}. */
+  dispatchPublicCapabilityEvent(
+    event: string,
+    payload: unknown,
+    sourceBinding: AuthenticatedRuntimeBinding
+  ): void {
+    if (!PUBLIC_CAPABILITY_EVENT_ADDRESSES.includes(event)) return
+    this.dispatchEvent(event, payload, sourceBinding)
   }
 
   /** Main-registered handlers for the shell-level host capabilities
@@ -464,7 +517,7 @@ export class FrontendPluginManager {
         WebSocketImpl: NodeWebSocket as unknown as WsConstructor,
         onStatus: (s) => this.dispatchBackendStatus(s),
       })
-      for (const event of Object.keys(CAP_EVENTS)) {
+      for (const event of new Set([...Object.keys(CAP_EVENTS), ...PUBLIC_CAPABILITY_EVENT_ADDRESSES])) {
         client.on(event, (payload) => this.dispatchEvent(event, payload))
       }
       client.connect(this.backendWsUrl)
@@ -478,7 +531,11 @@ export class FrontendPluginManager {
    *  per-session micro-batcher instead of going out per event, and
    *  terminal.exit flushes that batch first (ordering barrier) then retires the
    *  session's route. */
-  private dispatchEvent(event: string, payload: unknown): void {
+  private dispatchEvent(
+    event: string,
+    payload: unknown,
+    sourceBinding?: AuthenticatedRuntimeBinding
+  ): void {
     if (event === 'terminal.output') {
       const sessionId = terminalSessionIdOf(payload)
       if (sessionId) {
@@ -494,10 +551,19 @@ export class FrontendPluginManager {
         return
       }
     }
-    const ns = eventNamespace(event)
-    if (!ns) return
     for (const plugin of this.running.values()) {
-      if (isEventAllowed(plugin.capabilityPolicy, event)) {
+      const allowed =
+        plugin.capabilityPolicy.kind === 'manifest-v2'
+          ? plugin.capabilityContext !== null &&
+            isPublicCapabilityEventAllowed(
+              plugin.capabilityPolicy,
+              event,
+              payload,
+              plugin.capabilityContext,
+              sourceBinding
+            )
+          : isEventAllowed(plugin.capabilityPolicy, event)
+      if (allowed) {
         this.emit(plugin.id, event, payload)
       }
     }
@@ -582,7 +648,15 @@ export class FrontendPluginManager {
       console.debug(`[plugin] cast dropped: malformed call from ${pluginId}`)
       return 'malformed'
     }
-    const plan = planCapabilityCall(call, plugin.capabilityPolicy)
+    const plan = planCapabilityCall(
+      call,
+      plugin.capabilityPolicy,
+      plugin.capabilityContext ?? undefined
+    )
+    if (plan.kind === 'public') {
+      console.debug(`[plugin] cast dropped: ${pluginId} public capabilities are request/response only`)
+      return 'not-castable'
+    }
     if (plan.kind === 'host') {
       console.debug(
         `[plugin] cast dropped: ${pluginId} ${call.ns}.${call.method} is a host capability (not castable)`
@@ -649,6 +723,7 @@ export class FrontendPluginManager {
         // through to a fresh create; loadEntry on a dead webContents would brick.
         this.destroy(descriptor.id)
       } else {
+        existing.capabilityContext = descriptor.capabilityContext ?? existing.capabilityContext
         const query = descriptor.query ?? ''
         const prevQuery = existing.query
         existing.query = query
@@ -721,6 +796,7 @@ export class FrontendPluginManager {
       id: descriptor.id,
       requires: descriptor.requires,
       capabilityPolicy: descriptor.capabilityPolicy ?? legacyCapabilityPolicy(descriptor.requires),
+      capabilityContext: descriptor.capabilityContext ?? null,
       view,
       hostWindow,
       query: descriptor.query ?? '',
@@ -922,6 +998,16 @@ export class FrontendPluginManager {
   /** Look up a registered descriptor by id. */
   getDescriptor(id: string): PluginLaunchDescriptor | undefined {
     return this.descriptors.get(id)
+  }
+
+  /** Inject a Host-authenticated grant/binding after package approval. This is
+   * deliberately separate from registerDescriptor/official eligibility so a
+   * first-party identity can never become an automatic capability grant. */
+  setCapabilityContext(pluginId: string, context: HostCapabilityContext | null): void {
+    const descriptor = this.descriptors.get(pluginId)
+    if (descriptor) this.descriptors.set(pluginId, { ...descriptor, capabilityContext: context ?? undefined })
+    const running = this.running.get(pluginId)
+    if (running) running.capabilityContext = context
   }
 
   /** All registered (installed + built-in) descriptors. */

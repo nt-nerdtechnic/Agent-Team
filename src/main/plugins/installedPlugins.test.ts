@@ -178,7 +178,7 @@ describe('Manifest v2 contract corpus', () => {
 
   it('rejects duplicate object keys before manifest validation', () => {
     expect(() => parseManifestJson(readFixture('invalid-raw', 'duplicate-permission-key.json'))).toThrow(
-      /duplicate JSON object key: ui/
+      /duplicate JSON object key: system/
     )
   })
 
@@ -193,13 +193,15 @@ describe('Manifest v2 contract corpus', () => {
       JSON.parse(readFixture('valid', 'frontend-multi-view.json'))
     )
     const descriptor = manifestToDescriptor(manifest, '/plugins/acme.files')
-    expect(descriptor.requires).toEqual(['fs', 'ui'])
+    expect(descriptor.requires).toEqual(['fs', 'ui', 'shell'])
     expect(descriptor.capabilityPolicy).toEqual({
       kind: 'manifest-v2',
+      system: ['fs', 'ui'],
+      shell: 'allowlist',
       grants: [
-        { permission: 'fs', access: 'read' },
-        { permission: 'ui', access: 'openInEditor' },
-        { permission: 'ui', access: 'openExternal' },
+        { permission: 'system', namespace: 'fs' },
+        { permission: 'system', namespace: 'ui' },
+        { permission: 'shell', mode: 'allowlist' },
       ],
     })
     expect(descriptor.views).toHaveLength(6)

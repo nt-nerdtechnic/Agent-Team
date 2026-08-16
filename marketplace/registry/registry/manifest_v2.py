@@ -13,10 +13,8 @@ from .versions import _V2_VERSION_RE
 
 _V2_CATEGORY_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 _V2_DISPLAY_TEXT_RE = r"^[^\r\n<>]+$"
-_V2_PERMISSION_ACCESS: dict[str, frozenset[str]] = {
-    "fs": frozenset({"read"}),
-    "ui": frozenset({"openInEditor", "openExternal"}),
-}
+V2_SYSTEM_NAMESPACES: frozenset[str] = frozenset({"fs", "ui", "aiCli"})
+V2_SHELL_MODES: frozenset[str] = frozenset({"allowlist", "full"})
 # Manifest-level guard for recognizable source/script filenames. Proving that
 # archive bytes are the correct target executable belongs to the B8 packager.
 _KNOWN_SOURCE_BACKEND_SCRIPT_EXTENSIONS = frozenset(
@@ -158,6 +156,24 @@ class ManifestV2Backend(ManifestV2Model):
         return value
 
 
+class ManifestV2Permissions(ManifestV2Model):
+    """Coarse Manifest v2 grants; method access remains Host-catalog-owned."""
+
+    system: list[Literal["fs", "ui", "aiCli"]] | None = Field(
+        default=None, min_length=1, max_length=3
+    )
+    shell: Literal["allowlist", "full"] | None = None
+
+    @field_validator("system")
+    @classmethod
+    def _check_unique_system_namespaces(
+        cls, value: list[str] | None
+    ) -> list[str] | None:
+        if value is not None and len(set(value)) != len(value):
+            raise ValueError("permissions.system must contain unique namespaces")
+        return value
+
+
 class ManifestV2(ManifestV2Model):
     schemaVersion: Literal[2]
     apiVersion: str = Field(pattern=r"^[~^]?\d+\.\d+\.\d+$")
@@ -166,31 +182,10 @@ class ManifestV2(ManifestV2Model):
     version: str = Field(pattern=_V2_VERSION_RE.pattern)
     publisher: str = Field(pattern=r"^[a-z0-9][a-z0-9-]*$")
     engines: ManifestV2Engines | None = None
-    permissions: dict[str, list[str]]
+    permissions: ManifestV2Permissions
     marketplace: ManifestV2Marketplace
     contributes: ManifestV2Contributes | None = None
     backend: ManifestV2Backend | None = None
-
-    @field_validator("permissions")
-    @classmethod
-    def _check_permissions(cls, value: dict[str, list[str]]) -> dict[str, list[str]]:
-        unknown = sorted(set(value) - set(_V2_PERMISSION_ACCESS))
-        if unknown:
-            raise ValueError(f"unknown permissions {unknown}")
-        for permission, accesses in value.items():
-            if not accesses:
-                raise ValueError(f"permissions.{permission} must not be empty")
-            if len(set(accesses)) != len(accesses):
-                raise ValueError(f"permissions.{permission} must contain unique values")
-            allowed = _V2_PERMISSION_ACCESS[permission]
-            bad = sorted(set(accesses) - allowed)
-            if bad:
-                raise ValueError(
-                    f"permissions.{permission} contains unknown accesses {bad}"
-                )
-            if permission == "fs" and accesses != ["read"]:
-                raise ValueError("permissions.fs only accepts ['read']")
-        return value
 
     @model_validator(mode="after")
     def _check_runtime_surface(self) -> ManifestV2:

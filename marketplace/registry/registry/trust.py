@@ -7,9 +7,9 @@ can surface to warn users:
 
 - **trust tier** -- `signed-verified` when a signature verified against the
   publisher's registered key at publish time; otherwise `unsigned`.
-- **sensitive capabilities** -- `fs` and `terminal` grant filesystem and shell
-  reach, so they warrant higher scrutiny; the rest (`git`, `search`, `chat`,
-  `ui`) are standard.
+- **sensitive capabilities** -- `fs`, `aiCli`, and `shell` grant filesystem,
+  brokered process, or shell reach, so they warrant higher scrutiny. The
+  legacy `terminal` label remains sensitive only for the v1 compatibility path.
 
 This is deliberately simple and declarative. Actually sandboxing/enforcing the
 capabilities at runtime is out of scope (that's a runtime executor).
@@ -20,7 +20,9 @@ from __future__ import annotations
 TRUST_SIGNED = "signed-verified"
 TRUST_UNSIGNED = "unsigned"
 
-SENSITIVE_CAPABILITIES: frozenset[str] = frozenset({"fs", "terminal"})
+SENSITIVE_CAPABILITIES: frozenset[str] = frozenset(
+    {"fs", "aiCli", "shell", "terminal"}
+)
 
 
 def compute_trust_tier(*, signed: bool) -> str:

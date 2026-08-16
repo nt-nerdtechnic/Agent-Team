@@ -5,6 +5,8 @@
 // `frontendPluginManager.ts`.
 
 import { eventNamespace, resolveWsType } from './capabilityMap'
+import { publicCapabilityEntry, type PublicCapabilityScope } from './pluginCapabilityCatalog'
+import type { PluginShellMode, PluginSystemNamespace } from './pluginManifestV2'
 import type { PluginCapabilityPolicy } from './pluginPermissions'
 import type { WsResponse } from '../../shared/wsClient'
 
@@ -35,6 +37,61 @@ export type CapabilityErrorCode =
   | 'UNKNOWN'
   | 'BAD_REQUEST'
   | 'BACKEND_ERROR'
+  | 'CAPABILITY_DENIED'
+  | 'METHOD_NOT_FOUND'
+  | 'INVALID_ARGUMENT'
+  | 'WORKSPACE_SCOPE_VIOLATION'
+  | 'USER_CANCELLED'
+  | 'TIMEOUT'
+  | 'BACKEND_UNAVAILABLE'
+  | 'PLUGIN_STOPPING'
+  | 'INTERNAL_ERROR'
+
+export interface AuthenticatedRuntimeBinding {
+  pluginId: string
+  packageVersion: string
+  workspaceId: string | null
+  instanceId: string | null
+  audience: string | null
+}
+
+export interface HostCapabilityGrant {
+  packageVersion: string
+  system: readonly PluginSystemNamespace[]
+  shell?: PluginShellMode
+  highRiskShellConfirmed?: boolean
+}
+
+export interface HostCapabilityContext {
+  /** Eligibility is an install/Host fact, never a grant. */
+  publisherEligible: boolean
+  /** The user-approved package-version grant, or null before approval. */
+  userGrant: HostCapabilityGrant | null
+  /** Host-authenticated identity; never read from a plugin request. */
+  runtimeBinding: AuthenticatedRuntimeBinding | null
+  /** Host-maintained executable names for shell allowlist mode. */
+  shellAllowlist: readonly string[]
+  /** Host-configured AI CLI profile ids; the Plugin cannot define profiles. */
+  aiCliProfiles?: readonly string[]
+  /** Host-owned AI CLI session bindings, keyed by opaque session id. */
+  sessionBindings?: ReadonlyMap<string, AuthenticatedRuntimeBinding>
+  /** Host-owned pending start bindings, keyed by opaque request id. */
+  pendingStartBindings?: ReadonlyMap<string, AuthenticatedRuntimeBinding>
+}
+
+export interface PublicCapabilityExecutionPlan {
+  kind: 'public'
+  address: string
+  scope: PublicCapabilityScope
+  args: Record<string, unknown>
+  runtime: AuthenticatedRuntimeBinding
+  shellMode?: PluginShellMode
+  session?: AuthenticatedRuntimeBinding
+}
+
+export type PublicCapabilityDecision =
+  | { kind: 'allow'; plan: PublicCapabilityExecutionPlan }
+  | { kind: 'deny'; response: CapabilityResponse }
 
 /**
  * Namespaces the host grants without an explicit `requires` declaration. `ping`
@@ -64,8 +121,14 @@ function isLegacyPolicy(
   return !isRequirementsArray(policy) && (policy as PluginCapabilityPolicy).kind === 'legacy'
 }
 
-/** Check the namespace for legacy callers. Manifest v2 runtime calls remain
- *  fail-closed until the public capability-grant contract is implemented. */
+function isManifestV2Policy(
+  policy: CapabilityPolicyInput
+): policy is Extract<PluginCapabilityPolicy, { kind: 'manifest-v2' }> {
+  return !isRequirementsArray(policy) && (policy as PluginCapabilityPolicy).kind === 'manifest-v2'
+}
+
+/** Check the namespace projection for legacy callers and coarse v2 policy
+ *  inspection. Actual v2 execution still requires Host authorization context. */
 export function isCallAllowed(
   policy: CapabilityPolicyInput,
   ns: string,
@@ -74,14 +137,19 @@ export function isCallAllowed(
   if (isRequirementsArray(policy)) return isCapabilityAllowed(policy, ns)
   if (isLegacyPolicy(policy)) return isCapabilityAllowed(policy.requires, ns)
   if (BUILTIN_CAPABILITIES.includes(ns)) return true
+  const v2 = policy
   void method
-  return false
+  return v2.system.includes(ns as PluginSystemNamespace) || (ns === 'shell' && v2.shell !== undefined)
 }
 
-/** V2 has no legacy namespace event projection; in particular, it must never
- * receive the internal `git.changed` event. Public v2 event routing is added
- * only when its host-side payload contract is implemented. */
+/** V2 events require the authenticated Host binding and therefore cannot use
+ * this legacy declaration-only helper. Callers must use
+ * {@link isPublicCapabilityEventAllowed} with Host context. */
 export function isEventAllowed(policy: CapabilityPolicyInput, event: string): boolean {
+  if (isManifestV2Policy(policy)) {
+    void event
+    return false
+  }
   const ns = eventNamespace(event)
   if (!ns) return false
   if (isRequirementsArray(policy)) return isCapabilityAllowed(policy, ns)
@@ -159,6 +227,339 @@ export const HOST_CAPABILITIES: Readonly<Record<string, string>> = {
   'ui.pick_folder': 'pick_folder',
 }
 
+function publicDenied(reqId: string, code: CapabilityErrorCode, message: string): PublicCapabilityDecision {
+  return { kind: 'deny', response: buildError(reqId, code, message) }
+}
+
+function sameBinding(
+  left: AuthenticatedRuntimeBinding,
+  right: AuthenticatedRuntimeBinding
+): boolean {
+  return (
+    left.pluginId === right.pluginId &&
+    left.packageVersion === right.packageVersion &&
+    left.workspaceId === right.workspaceId &&
+    left.instanceId === right.instanceId &&
+    left.audience === right.audience
+  )
+}
+
+function publicRequestArgs(call: CapabilityCall): Record<string, unknown> | null {
+  return typeof call.args === 'object' && call.args !== null && !Array.isArray(call.args)
+    ? { ...(call.args as Record<string, unknown>) }
+    : null
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Return the executable token at the start of every shell pipeline/chain segment.
+ * This is intentionally a lexical check: the Host never executes or expands the
+ * command while deciding whether it is allowlisted. Version 1 does not inspect
+ * subcommands or arguments. */
+export function shellTopLevelExecutables(command: string): string[] | null {
+  if (command.trim().length === 0) return null
+  const segments: string[] = []
+  let segmentStart = 0
+  let quote: 'single' | 'double' | null = null
+  let escaped = false
+
+  const pushSegment = (end: number): boolean => {
+    const segment = command.slice(segmentStart, end).trim()
+    if (!segment) return false
+    segments.push(segment)
+    return true
+  }
+
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index]
+    if (escaped) {
+      escaped = false
+      continue
+    }
+    if (char === '\\' && quote !== 'single') {
+      escaped = true
+      continue
+    }
+    if (quote === 'single') {
+      if (char === "'") quote = null
+      continue
+    }
+    if (quote === 'double') {
+      if (char === '`' || (char === '$' && command[index + 1] === '(')) return null
+      if (char === '"') quote = null
+      continue
+    }
+    if (
+      char === '`' ||
+      (char === '$' && command[index + 1] === '(') ||
+      char === '<' ||
+      char === '>'
+    ) {
+      return null
+    }
+    if (char === "'") {
+      quote = 'single'
+      continue
+    }
+    if (char === '"') {
+      quote = 'double'
+      continue
+    }
+    if (char === ';' || char === '|' || char === '&' || char === '\n' || char === '\r') {
+      if (!pushSegment(index)) return null
+      if ((char === '|' || char === '&') && command[index + 1] === char) index += 1
+      segmentStart = index + 1
+    }
+  }
+  if (quote !== null || escaped || !pushSegment(command.length)) return null
+
+  const executables: string[] = []
+  for (const segment of segments) {
+    let index = 0
+    while (/\s/.test(segment[index] ?? '')) index += 1
+    if (index === segment.length) return null
+    let token = ''
+    let tokenQuote: 'single' | 'double' | null = null
+    let tokenEscaped = false
+    for (; index < segment.length; index += 1) {
+      const char = segment[index]
+      if (tokenEscaped) {
+        token += char
+        tokenEscaped = false
+        continue
+      }
+      if (char === '\\' && tokenQuote !== 'single') {
+        tokenEscaped = true
+        continue
+      }
+      if (tokenQuote === 'single') {
+        if (char === "'") tokenQuote = null
+        else token += char
+        continue
+      }
+      if (tokenQuote === 'double') {
+        if (char === '"') tokenQuote = null
+        else token += char
+        continue
+      }
+      if (char === "'") {
+        tokenQuote = 'single'
+        continue
+      }
+      if (char === '"') {
+        tokenQuote = 'double'
+        continue
+      }
+      if (/\s/.test(char)) break
+      token += char
+    }
+    if (!token || tokenQuote !== null || tokenEscaped) return null
+    // A path-qualified token is not reduced to a basename: doing so would let
+    // a Plugin replace an allowlisted command with an arbitrary same-named
+    // executable from the workspace or a temporary directory.
+    if (token.includes('/') || token.includes('\\')) return null
+    executables.push(token.trim())
+  }
+  return executables.every((value) => value.length > 0) ? executables : null
+}
+
+function shellCommandAllowed(command: string, allowlist: readonly string[]): boolean {
+  const executables = shellTopLevelExecutables(command)
+  return executables !== null && executables.every((executable) => allowlist.includes(executable))
+}
+
+function requiresWorkspace(
+  binding: AuthenticatedRuntimeBinding | null
+): binding is AuthenticatedRuntimeBinding {
+  return binding !== null && typeof binding.workspaceId === 'string' && binding.workspaceId.length > 0
+}
+
+function requiresAiCliBinding(
+  binding: AuthenticatedRuntimeBinding | null
+): binding is AuthenticatedRuntimeBinding {
+  return (
+    requiresWorkspace(binding) &&
+    typeof binding.instanceId === 'string' &&
+    binding.instanceId.length > 0 &&
+    typeof binding.audience === 'string' &&
+    binding.audience.length > 0
+  )
+}
+
+/** Pure Issue 03 authorization seam. It returns a plan only; process, PTY,
+ * backend, and Electron side effects belong to later Host adapters. */
+export function planPublicCapabilityCall(
+  call: CapabilityCall,
+  policy: Extract<PluginCapabilityPolicy, { kind: 'manifest-v2' }>,
+  context: HostCapabilityContext
+): PublicCapabilityDecision {
+  const address = `${call.ns}.${call.method}`
+  const entry = publicCapabilityEntry(address)
+  if (!entry || entry.kind !== 'method') {
+    return publicDenied(call.reqId, 'METHOD_NOT_FOUND', `unknown public capability '${address}'`)
+  }
+
+  if (entry.namespace === 'shell') {
+    if (!policy.shell) return publicDenied(call.reqId, 'CAPABILITY_DENIED', 'shell access is not declared')
+  } else if (!policy.system.includes(entry.namespace)) {
+    return publicDenied(call.reqId, 'CAPABILITY_DENIED', `system namespace '${entry.namespace}' is not declared`)
+  }
+
+  if (entry.eligibility === 'firstParty' && !context.publisherEligible) {
+    return publicDenied(call.reqId, 'CAPABILITY_DENIED', 'publisher is not eligible for this capability')
+  }
+
+  const binding = context.runtimeBinding
+  if (!binding || binding.pluginId !== call.pluginId) {
+    return publicDenied(call.reqId, 'CAPABILITY_DENIED', 'authenticated runtime binding is missing')
+  }
+  if (entry.scope === 'workspace' && !requiresWorkspace(binding)) {
+    return publicDenied(call.reqId, 'WORKSPACE_SCOPE_VIOLATION', 'workspace binding is required')
+  }
+  if (entry.namespace === 'aiCli' && !requiresAiCliBinding(binding)) {
+    return publicDenied(call.reqId, 'CAPABILITY_DENIED', 'AI CLI view binding is required')
+  }
+
+  const grant = context.userGrant
+  if (!grant || grant.packageVersion !== binding.packageVersion) {
+    return publicDenied(call.reqId, 'CAPABILITY_DENIED', 'package-version grant is missing')
+  }
+  if (entry.namespace === 'shell') {
+    if (grant.shell !== policy.shell) {
+      return publicDenied(call.reqId, 'CAPABILITY_DENIED', 'shell mode is not user-approved')
+    }
+    if (policy.shell === 'full' && grant.highRiskShellConfirmed !== true) {
+      return publicDenied(call.reqId, 'CAPABILITY_DENIED', 'full shell requires high-risk confirmation')
+    }
+  } else if (!grant.system.includes(entry.namespace)) {
+    return publicDenied(call.reqId, 'CAPABILITY_DENIED', `system namespace '${entry.namespace}' is not user-approved`)
+  }
+
+  const args = publicRequestArgs(call)
+  if (!args || !entry.validateRequest?.(args)) {
+    return publicDenied(call.reqId, 'INVALID_ARGUMENT', `invalid request for '${address}'`)
+  }
+  if (
+    entry.address === 'aiCli.startSession' &&
+    (!context.aiCliProfiles || !context.aiCliProfiles.includes(String(args.profileId)))
+  ) {
+    return publicDenied(call.reqId, 'CAPABILITY_DENIED', 'AI CLI profile is not Host-allowlisted')
+  }
+
+  let session: AuthenticatedRuntimeBinding | undefined
+  if (entry.address === 'aiCli.cancelStart') {
+    const requestId = args.requestId
+    const pending =
+      typeof requestId === 'string' && context.pendingStartBindings
+        ? context.pendingStartBindings.get(requestId)
+        : undefined
+    if (!pending || !sameBinding(pending, binding)) {
+      return publicDenied(call.reqId, 'CAPABILITY_DENIED', 'AI CLI start request ownership mismatch')
+    }
+  }
+  if (entry.namespace === 'aiCli' && 'sessionId' in args) {
+    const sessionId = args.sessionId
+    if (typeof sessionId !== 'string' || !context.sessionBindings) {
+      return publicDenied(call.reqId, 'CAPABILITY_DENIED', 'AI CLI session is not Host-bound')
+    }
+    session = context.sessionBindings.get(sessionId)
+    if (!session || !sameBinding(session, binding)) {
+      return publicDenied(call.reqId, 'CAPABILITY_DENIED', 'AI CLI session ownership mismatch')
+    }
+  }
+
+  if (entry.namespace === 'shell' && policy.shell === 'allowlist') {
+    if (!shellCommandAllowed(String(args.command), context.shellAllowlist)) {
+      return publicDenied(call.reqId, 'CAPABILITY_DENIED', 'shell executable is not Host-allowlisted')
+    }
+  }
+
+  return {
+    kind: 'allow',
+    plan: {
+      kind: 'public',
+      address,
+      scope: entry.scope,
+      args,
+      runtime: binding,
+      ...(policy.shell && entry.namespace === 'shell' ? { shellMode: policy.shell } : {}),
+      ...(session ? { session } : {}),
+    },
+  }
+}
+
+/** Route a cataloged event only to the Host-authenticated session audience. */
+export function isPublicCapabilityEventAllowed(
+  policy: Extract<PluginCapabilityPolicy, { kind: 'manifest-v2' }>,
+  event: string,
+  payload: unknown,
+  context: HostCapabilityContext,
+  sourceBinding?: AuthenticatedRuntimeBinding
+): boolean {
+  const entry = publicCapabilityEntry(event)
+  if (!entry || entry.kind !== 'event') return false
+  if (!policy.system.includes(entry.namespace as PluginSystemNamespace)) return false
+  if (entry.eligibility === 'firstParty' && !context.publisherEligible) return false
+  const binding = context.runtimeBinding
+  if (!binding || !requiresWorkspace(binding)) return false
+  const grant = context.userGrant
+  if (
+    !grant ||
+    grant.packageVersion !== binding.packageVersion ||
+    !grant.system.includes(entry.namespace as PluginSystemNamespace)
+  ) {
+    return false
+  }
+  if (event === 'workspace.filesChanged') {
+    if (
+      !sourceBinding ||
+      !requiresWorkspace(sourceBinding) ||
+      sourceBinding.workspaceId !== binding.workspaceId
+    ) {
+      return false
+    }
+    return (
+      isRecord(payload) &&
+      Object.keys(payload).every((key) => key === 'changes') &&
+      Array.isArray(payload.changes) &&
+      payload.changes.every(
+        (change) =>
+          isRecord(change) &&
+          Object.keys(change).every((key) => key === 'path' || key === 'kind') &&
+          typeof change.path === 'string' &&
+          ['created', 'changed', 'deleted'].includes(String(change.kind))
+      )
+    )
+  }
+  if (event !== 'aiCli.output' && event !== 'aiCli.exited') return false
+  if (!requiresAiCliBinding(binding) || !isRecord(payload)) return false
+  if (!context.sessionBindings) return false
+  if (event === 'aiCli.output') {
+    return (
+      Object.keys(payload).every((key) => key === 'sessionId' || key === 'data') &&
+      typeof payload.data === 'string' &&
+      typeof payload.sessionId === 'string' &&
+      context.sessionBindings.get(payload.sessionId) !== undefined &&
+      sameBinding(context.sessionBindings.get(payload.sessionId)!, binding)
+    )
+  }
+  if (
+    Object.keys(payload).some((key) => key !== 'sessionId' && key !== 'exitCode') ||
+    typeof payload.sessionId !== 'string' ||
+    !Object.prototype.hasOwnProperty.call(payload, 'exitCode') ||
+    (payload.exitCode !== null &&
+      !(typeof payload.exitCode === 'number' && Number.isInteger(payload.exitCode)))
+  ) {
+    return false
+  }
+  const sessionId = payload.sessionId
+  if (typeof sessionId !== 'string' || !context.sessionBindings) return false
+  const session = context.sessionBindings.get(sessionId)
+  return session !== undefined && sameBinding(session, binding)
+}
+
 /**
  * A decision about how to service a capability call. `respond` carries a
  * ready-made envelope (deny / built-in ping / unknown); `backend` names the
@@ -169,6 +570,7 @@ export type CapabilityPlan =
   | { kind: 'respond'; response: CapabilityResponse }
   | { kind: 'backend'; wsType: string }
   | { kind: 'host'; action: string }
+  | PublicCapabilityExecutionPlan
 
 /**
  * M2 dispatch planner. Enforces scoping first (an un-granted namespace is
@@ -179,8 +581,21 @@ export type CapabilityPlan =
  */
 export function planCapabilityCall(
   call: CapabilityCall,
-  policy: CapabilityPolicyInput
+  policy: CapabilityPolicyInput,
+  authorization?: HostCapabilityContext
 ): CapabilityPlan {
+  if (isManifestV2Policy(policy)) {
+    if (!authorization) {
+      return {
+        kind: 'respond',
+        response: buildError(call.reqId, 'CAPABILITY_DENIED', 'Host authorization context is missing'),
+      }
+    }
+    const decision = planPublicCapabilityCall(call, policy, authorization)
+    return decision.kind === 'allow'
+      ? decision.plan
+      : { kind: 'respond', response: decision.response }
+  }
   if (!isCallAllowed(policy, call.ns, call.method)) {
     const label =
       isRequirementsArray(policy) || isLegacyPolicy(policy)

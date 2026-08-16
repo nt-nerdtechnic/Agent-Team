@@ -204,7 +204,7 @@ describe('readManifestFromEntries', () => {
     )
     const zip = makeZip([{ name: 'manifest.json', data: raw }])
     expect(() => readManifestFromEntries(readZipEntries(zip))).toThrow(
-      /duplicate JSON object key: ui/
+      /duplicate JSON object key: system/
     )
   })
 

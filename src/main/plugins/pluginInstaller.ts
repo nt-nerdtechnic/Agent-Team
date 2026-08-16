@@ -8,7 +8,7 @@
 // whole flow can be driven in tests without a real registry or disk.
 //
 // Install is split into prepare → commit so the UI can interpose a trust
-// confirmation (sensitive `fs`/`terminal` capabilities) AFTER verification but
+// confirmation (sensitive `fs`/`aiCli`/`shell` capabilities) AFTER verification but
 // BEFORE anything is written to disk.
 
 import { chmodSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'

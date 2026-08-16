@@ -1,13 +1,16 @@
 # Plugin Developer Spec v2
 
-> **Status: target draft, not implemented.** The current runtime uses manifest
+> **Status: target draft; Issue 03 contract enforcement is implemented.** The current runtime uses manifest
 > v1 and is documented in [Plugin development guide](plugin-development.md).
 > This document is the author-facing contract that the v2 migration must
 > implement before third-party publishing opens.
 >
-> The issue 01 implementation currently validates the manifest and discovers
-> custom-view metadata only. Capability execution, user-gesture authorization,
-> events, and storage are deferred to their owning follow-up issues.
+> Issue 03 adds strict Manifest v2 grant parsing, catalog validation, and the
+> Host authorization/planning seam. Actual backend child-process lifecycle
+> remains deferred to its owning follow-up issue. Issue 03 completes the
+> parser, catalog, authorization planner, and Host enforcement seams.
+> Production execution adapters and persisted consent wiring remain disabled
+> and belong to the later runtime integration issue.
 >
 > **Migration decision:** Plan B (the B0-B9 checkpoint path) was approved on
 > 2026-08-13. Plans A and C are not active implementation alternatives.
@@ -316,8 +319,7 @@ The normative schema is
   "publisher": "acme",
   "engines": { "navide": ">=0.2.0" },
   "permissions": {
-    "fs": ["read"],
-    "ui": ["openInEditor", "openExternal"]
+    "system": ["fs", "ui"]
   },
   "marketplace": {
     "description": "Browse workspace files in the left workbench region.",
@@ -374,7 +376,7 @@ does not have a second manifest:
   "version": "1.0.0",
   "publisher": "acme",
   "permissions": {
-    "fs": ["read"]
+    "system": ["fs"]
   },
   "marketplace": {
     "description": "Browse workspace files and maintain an index.",
@@ -416,11 +418,12 @@ The version axes are independent:
 | `engines.navide` | Optional product/runtime requirement | Only when the plugin needs a particular Navide product feature |
 | `backend.protocolVersion` | Navide child-process wire profile; `1` freezes the MCP 2026-07-28-aligned conventions above | Only when adopting another supported Navide wire profile |
 
-`permissions` is a map from a public permission ID to its requested access
-values. Each ID appears at most once because duplicate JSON object keys are
-rejected before schema validation. The manifest never declares scope: the
-capability catalog assigns scope to each access, and the Host derives the
-runtime workspace, plugin, and view identity from its authenticated binding.
+`permissions` contains one coarse `system` namespace array and an optional
+`shell` mode. Each key appears at most once because duplicate JSON object keys
+are rejected before schema validation. The manifest never declares scope: the
+capability catalog assigns scope to each catalog entry, and the Host derives
+the runtime workspace, plugin, and view identity from its authenticated
+binding.
 
 The top-level `name` is the display name; it is plain display text with 1–80
 Unicode code points and no newlines or angle brackets.
@@ -530,23 +533,40 @@ The normative method/event catalog is
 defines its address, request/result or event schema, required permission,
 scope, visibility, and possible public errors.
 
-The issue 01 manifest parser only validates these declarative permission
-values. A permission declaration is not user consent, an install-time grant,
-or runtime authorization; issue 01 does not show v2 grant UI or execute v2
-capability calls. The table describes the target catalog mapping for the
-follow-up runtime contract:
+Manifest v2 uses one coarse system namespace array and one shell mode:
 
-| Permission | Target catalog methods/events | Scope |
+```json
+{
+  "permissions": {
+    "system": ["fs", "ui", "aiCli"],
+    "shell": "allowlist"
+  }
+}
+```
+
+`system` accepts only `fs`, `ui`, and `aiCli`. It is not a map of methods or
+read/write accesses: declaring `fs` allows catalog validation to consider the
+filesystem methods, but does not bypass method schemas, scope checks, or Host
+policy. `shell` accepts only `allowlist` or `full`; omission denies
+`shell.run`. Storage, `git`, `terminal`, raw PTY, and arbitrary process access
+are not Manifest v2 permissions.
+
+| Namespace/address | Catalog methods/events | Scope |
 |---|---|---|
-| `fs:read` | `fs.readFile`, `fs.listDirectory`, `fs.glob`, `fs.stat`, `workspace.filesChanged` | Current workspace only |
-| `ui:openInEditor` | `ui.openInEditor` | Current workspace only |
-| `ui:openExternal` | `ui.openExternal` | HTTPS only; future runtime requires an active user gesture |
+| `system:fs` | `fs.readFile`, `fs.listDirectory`, `fs.glob`, `fs.stat`, `workspace.filesChanged` | `workspace` |
+| `system:ui` | `ui.openInEditor` | `workspace` |
+| `system:ui` | `ui.openExternal` | `plugin` (HTTPS; Host user-gesture gate) |
+| `system:aiCli` | `aiCli.startSession`, `cancelStart`, `reattachSession`, `sendInput`, `resizeSession`, `redrawSession`, `interruptSession`, `stopSession`, `output`, `exited` | `workspace` |
+| `shell` | `shell.run` | `workspace` |
 
-Storage permissions are reserved for issues 03 and 16. They are not accepted
-by the current issue 01 manifest contract; the storage design below is a
-future target and is not an available runtime surface.
+`workspace` is a resource boundary, not raw workspace filesystem access. The
+Host derives `workspaceId` from authenticated runtime binding. There is no
+public `runtime` scope. Workspace events also require a Host-authenticated
+event source for the same workspace; an unbound shared event is dropped.
 
 ### Storage partitions
+
+Storage runtime remains deferred and is not opened by Issue 03.
 
 `storage.get`, `storage.set`, and `storage.delete` accept a partition class in
 `scope`; they do not accept a plugin ID, workspace ID, package version, or
@@ -571,91 +591,55 @@ binding. The `scope` argument only selects one of the two permitted partition
 classes and cannot override identity or authorization.
 
 The Host derives the authorization scope, workspace root, plugin identity, and
-view identity from the catalog plus authenticated runtime binding. Paths are
-workspace-relative and plugins cannot supply an authorization root. `git`,
-terminal/PTY, search, chat, issues, plans, and raw settings remain `firstParty`;
-their presence in current Navide code does not make them public. `firstParty`
-is catalog eligibility, not an implicit grant: bundled plugins must still
-declare every required access in their manifest and receive a package-version
-grant. The Git access groups and exact method mapping are a B0 contract
-blocker. The proposal awaiting author approval uses `git.read`,
-`git.workingTreeWrite`, `git.historyWrite`, `git.repositoryAdmin`,
-`git.remoteNetwork`, `git.issueRead`, and `git.issueWrite`. The internal
-`issues.*` transport namespace does not become a separate manifest permission:
-`issues.provider`, `issues.list`, and `issues.get` map to `git.issueRead`;
-`issues.create`, `issues.comment`, and `issues.set_state` map to
-`git.issueWrite`. `navide.git` does not request terminal access, but the
-embedded `AiCliDock` remains a core B3/B4 feature. It uses the proposed
-first-party `aiCli.startSession` and `aiCli.controlSession` accesses. The Host,
-not the plugin, selects an allowlisted configured AI CLI profile and binds its
-executable, arguments, working directory, environment, credentials, workspace,
-session, and event audience. The plugin cannot supply a raw command, shell,
-executable, environment, or workspace root. Terminal permissions remain a
-separate B0 decision for Plans and miniIDE only. Until the remaining mappings
-are approved and published, Manifest v2 cannot validly express the permissions
-required by `navide.git`, and the Host must not bypass permission checks based
-on the package ID.
+view identity from the catalog plus authenticated runtime binding. Plugin
+requests cannot supply or override any of those values. Every declared method
+must pass catalog/request validation, publisher eligibility where required, the
+explicit package-version user grant, and authenticated binding checks before an
+execution plan is returned.
 
-The same B0 decision must cover every legacy namespace, not only Git and
-Terminal. The current proposal is:
+First-party identity affects eligibility only. It never grants a namespace,
+selects a package version, or bypasses the user grant. Git is not an
+independent permission; future approved Git CLI entries belong in the Host
+shell allowlist. Issue 03 does not define Git method/event mapping.
 
-| Legacy transport surface | Manifest v2 disposition |
+### Embedded AI CLI public mapping
+
+`AiCliDock` currently consumes the generic terminal transport. The public
+catalog exposes only the Host-mediated AI CLI addresses below:
+
+| Public address | Meaning |
 | --- | --- |
-| filesystem reads | `fs.read` |
-| filesystem mutations | first-party `fs.write` |
-| `search.find_in_files` / `search.replace_in_files` | `fs.read` / `fs.write`; no `search` permission |
-| Git repository operations and `issues.*` | the `git` access groups above; no `issues` permission |
-| command and PTY operations | proposed `terminal.runCommand` / `terminal.interactiveSession` for the miniIDE general Terminal surface only |
-| embedded AI CLI in Git, Plans, or miniIDE | `aiCli.startSession` / `aiCli.controlSession`; Host-managed allowlisted profiles only, with no raw terminal parameters |
-| editor AI, code review, and commit-message generation | proposed first-party `ai.editorAssist`, `ai.codeReview`, and `ai.generateCommitMessage` |
-| plugin preferences | `storage.read/write`; raw `ui.settings` is not a v2 permission |
-| `plans.changed` | same-package backend event routing after B5/B6; no Host capability permission |
+| `aiCli.startSession` | Start a Host-selected, allowlisted profile |
+| `aiCli.cancelStart` | Cancel a Host-owned start request |
+| `aiCli.reattachSession` | Reattach to an already Host-bound session |
+| `aiCli.sendInput` | Send input to an owned session |
+| `aiCli.resizeSession` | Resize an owned session |
+| `aiCli.redrawSession` | Redraw an owned session |
+| `aiCli.interruptSession` | Interrupt an owned session |
+| `aiCli.stopSession` | Stop an owned session |
+| `aiCli.output` / `aiCli.exited` | Directed output and exit events |
 
-The existing public `ui.openInEditor` and `ui.openExternal` accesses remain.
-The bundled Git window additionally needs proposed first-party
-`ui.revealPath`, `ui.openWorkspace`, and `ui.pickFolder` accesses. Legacy
-`chat.settings_get/set` must not expose provider credentials or be copied into
-plugin storage; B0 needs a safe Host AI-configuration port before the AI access
-groups can be finalized. This entire mapping remains blocking and must not be
-partially promoted into the schema or catalog.
-
-### Embedded AI CLI legacy-to-v2 mapping
-
-`AiCliDock` currently consumes the generic terminal transport. B3/B4 keeps the
-dock but replaces each address as follows:
-
-| Legacy address | Required access | Target address |
-| --- | --- | --- |
-| `terminal.create` | `aiCli.startSession` | `aiCli.startSession` |
-| `terminal.create.cancel` | `aiCli.startSession` | `aiCli.cancelStart` |
-| `terminal.reattach` | `aiCli.startSession` | `aiCli.reattachSession` |
-| `terminal.input` | `aiCli.controlSession` | `aiCli.sendInput` |
-| `terminal.log_sent` | none | no public target; the Host derives audit metadata from accepted input |
-| `terminal.resize` | `aiCli.controlSession` | `aiCli.resizeSession` |
-| `terminal.redraw` | `aiCli.controlSession` | `aiCli.redrawSession` |
-| `terminal.interrupt` | `aiCli.controlSession` | `aiCli.interruptSession` |
-| `terminal.kill` | `aiCli.controlSession` | `aiCli.stopSession` |
-| `terminal.output` | `aiCli.controlSession` | `aiCli.output` |
-| `terminal.exit` | `aiCli.controlSession` | `aiCli.exited` |
-
-`aiCli.startSession` accepts an allowlisted `profileId` and terminal display
-dimensions. The Host derives the command, arguments, working directory,
-environment, credentials, workspace, pane metadata, and event audience. It
-returns an opaque Host-generated session ID. Every control call validates that
-session against the authenticated plugin, workspace, and view audience.
+`aiCli.startSession` accepts only an allowlisted `profileId` and terminal
+display dimensions. The Host derives the command, arguments, working directory,
+environment, credentials, workspace, pane metadata, session ID, view instance,
+and event audience. Every control call validates the opaque session against the
+authenticated plugin, package version, workspace, view instance, and audience.
+Directed output and exit events are delivered only to the authenticated
+audience that created or reattached the session.
 `shell.run`, raw command/executable/arguments/environment/working-directory
 parameters, and PID control have no `aiCli` mapping and must fail closed.
+The Host executor also applies the catalog's active user-gesture requirement
+for `ui.openExternal` before opening a URL.
 Filesystem calls used by the dock's `@`-file picker remain authorized by
-`fs.read`; they are not absorbed into the AI CLI permission.
+the public `system:fs` catalog; they are not absorbed into the AI CLI
+permission.
 
-Before install, Navide normalizes the permission map into `(permissionId,
-access)` pairs, resolves each pair's scope through the catalog, and shows a
-plain-language explanation. Installation needs an explicit confirmation;
-denial cancels installation. An update that adds an access pair remains staged
-until the user confirms the delta. Removing access needs no new prompt. Runtime
-calls are checked against the confirmed package-version grant; there is no
-prompt-on-first-use except `ui.openExternal`, which additionally requires the
-initiating user gesture.
+Before install, Navide shows the declared system namespaces and shell mode,
+resolves their catalog scope, and asks for an explicit package-version grant.
+An update that adds a namespace or changes shell mode remains staged until the
+user confirms the delta. Runtime calls are checked against that confirmed
+package-version grant; `full` shell additionally requires a separate high-risk
+confirmation. There is no package-ID auto-grant.
 
 The legacy `git.changed` event is unusually authorized by `fs`. The v2 public
 replacement is `workspace.filesChanged`; third-party code must not subscribe to

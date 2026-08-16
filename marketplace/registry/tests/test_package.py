@@ -186,7 +186,7 @@ def test_duplicate_manifest_key_is_rejected_in_package_reader() -> None:
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("manifest.json", raw)
         zf.writestr("left.html", b"<!doctype html>")
-    with pytest.raises(PackageError, match="duplicate JSON object key: ui"):
+    with pytest.raises(PackageError, match="duplicate JSON object key: system"):
         read_package(buffer.getvalue())
 
 

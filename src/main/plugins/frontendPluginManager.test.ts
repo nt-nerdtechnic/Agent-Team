@@ -1526,7 +1526,7 @@ describe('Manifest v2 capability runtime deferral', () => {
       {
         id: 'acme.links',
         requires: ['ui'],
-        capabilityPolicy: manifestV2CapabilityPolicy({ ui: ['openExternal'] }),
+        capabilityPolicy: manifestV2CapabilityPolicy({ system: ['ui'] }),
         devUrl: '',
         entryFile: '/plugins/acme.links/index.html',
       },
@@ -1560,7 +1560,114 @@ describe('Manifest v2 capability runtime deferral', () => {
 
   it('denies deferred v2 host capabilities before reaching the host', async () => {
     const { opened, call } = openV2External()
-    expect((await call('https://example.com')).error?.code).toBe('CAP_DENIED')
+    expect((await call('https://example.com')).error?.code).toBe('CAPABILITY_DENIED')
     expect(opened).toEqual([])
+  })
+
+  it('passes an authenticated public plan to the Host-owned executor', async () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    mgr.open(
+      asHost(host),
+      {
+        id: 'acme.shell',
+        requires: ['shell'],
+        capabilityPolicy: manifestV2CapabilityPolicy({ shell: 'allowlist' }),
+        capabilityContext: {
+          publisherEligible: false,
+          userGrant: { packageVersion: '1.0.0', system: [], shell: 'allowlist' },
+          runtimeBinding: {
+            pluginId: 'acme.shell',
+            packageVersion: '1.0.0',
+            workspaceId: 'workspace-1',
+            instanceId: 'instance-1',
+            audience: 'audience-1',
+          },
+          shellAllowlist: ['git'],
+        },
+        devUrl: '',
+        entryFile: '/plugins/acme.shell/index.html',
+      },
+      'fill'
+    )
+    const view = views[views.length - 1]
+    const plans: unknown[] = []
+    mgr.setPublicCapabilityHandler((plan) => {
+      plans.push(plan)
+      return { accepted: true }
+    })
+    const handler = ipcHandlers.get(CALL)
+    expect(handler).toBeDefined()
+    const response = await handler!({ sender: { id: view.webContents.id } }, {
+      reqId: 'r1',
+      ns: 'shell',
+      method: 'run',
+      args: { command: 'git status' },
+    })
+    expect(response).toMatchObject({ ok: true, result: { accepted: true } })
+    expect(plans).toHaveLength(1)
+    expect(plans[0]).toMatchObject({ kind: 'public', address: 'shell.run' })
+
+    mgr.setPublicCapabilityHandler(() => {
+      throw new Error('sensitive host detail')
+    })
+    const failed = await handler!({ sender: { id: view.webContents.id } }, {
+      reqId: 'r2',
+      ns: 'shell',
+      method: 'run',
+      args: { command: 'git status' },
+    })
+    expect(failed).toEqual({
+      reqId: 'r2',
+      ok: false,
+      error: { code: 'INTERNAL_ERROR', message: 'public capability failed' },
+    })
+  })
+
+  it('routes workspace events only with a matching Host source binding', () => {
+    const mgr = new FrontendPluginManager()
+    const host = new FakeBrowserWindow()
+    const binding = {
+      pluginId: 'acme.files',
+      packageVersion: '1.0.0',
+      workspaceId: 'workspace-1',
+      instanceId: null,
+      audience: null,
+    } as const
+    mgr.open(
+      asHost(host),
+      {
+        id: 'acme.files',
+        requires: ['fs'],
+        capabilityPolicy: manifestV2CapabilityPolicy({ system: ['fs'] }),
+        capabilityContext: {
+          publisherEligible: false,
+          userGrant: { packageVersion: '1.0.0', system: ['fs'] },
+          runtimeBinding: binding,
+          shellAllowlist: [],
+        },
+        devUrl: '',
+        entryFile: '/plugins/acme.files/index.html',
+      },
+      'fill'
+    )
+    const view = views[views.length - 1]
+    const eventPayload = { changes: [{ path: 'README.md', kind: 'changed' }] }
+    mgr.dispatchPublicCapabilityEvent('workspace.filesChanged', eventPayload, {
+      ...binding,
+      pluginId: 'host',
+    })
+    expect(view.webContents.sent).toContainEqual({
+      channel: 'plugin:cap:event',
+      args: [{ type: 'workspace.filesChanged', data: eventPayload }],
+    })
+
+    const before = view.webContents.sent.length
+    mgr.dispatchPublicCapabilityEvent('workspace.filesChanged', eventPayload, {
+      ...binding,
+      pluginId: 'host',
+      workspaceId: 'workspace-2',
+    })
+    expect(view.webContents.sent).toHaveLength(before)
   })
 })

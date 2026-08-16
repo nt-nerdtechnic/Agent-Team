@@ -81,20 +81,40 @@ def _validate_manifest_semantics(manifest: Any) -> None:
         raise ValueError("contributes.views must contain unique ids")
 
 
-def _catalog_permission_pairs(catalog: dict[str, Any]) -> dict[tuple[str, str], str]:
-    pairs: dict[tuple[str, str], str] = {}
+def _catalog_permissions(catalog: dict[str, Any]) -> tuple[set[str], int]:
+    system_namespaces: set[str] = set()
+    shell_entries = 0
+    allowed_system = {"fs", "ui", "aiCli"}
     for item in [*catalog["methods"], *catalog["events"]]:
         if item["visibility"] != "public":
             continue
-        permission = item["permission"]
-        key = (permission["id"], permission["access"])
-        scope = permission["scope"]
-        previous = pairs.setdefault(key, scope)
-        if previous != scope:
-            raise AssertionError(
-                f"catalog assigns conflicting scopes to {key}: {previous!r} and {scope!r}"
-            )
-    return pairs
+        permission = item.get("permission")
+        if not isinstance(permission, dict):
+            raise AssertionError(f"catalog entry has no permission: {item['address']}")
+        permission_id = permission.get("id")
+        scope = permission.get("scope")
+        if scope not in {"workspace", "plugin"}:
+            raise AssertionError(f"catalog has unsupported scope on {item['address']}")
+        if permission_id == "system":
+            if set(permission) != {"id", "access", "scope"}:
+                raise AssertionError(f"system catalog permission is malformed: {item['address']}")
+            access = permission.get("access")
+            if access not in allowed_system:
+                raise AssertionError(
+                    f"catalog has unsupported system namespace on {item['address']}"
+                )
+            system_namespaces.add(access)
+        elif permission_id == "shell":
+            if (
+                set(permission) != {"id", "scope"}
+                or item["address"] != "shell.run"
+                or scope != "workspace"
+            ):
+                raise AssertionError(f"shell catalog entry is malformed: {item['address']}")
+            shell_entries += 1
+        else:
+            raise AssertionError(f"catalog has unsupported permission id: {permission_id!r}")
+    return system_namespaces, shell_entries
 
 
 def main() -> None:
@@ -145,25 +165,24 @@ def main() -> None:
     if len(addresses) != len(set(addresses)):
         raise AssertionError("capability catalog contains duplicate addresses")
 
-    catalog_pairs = _catalog_permission_pairs(catalog)
+    catalog_system_namespaces, shell_entries = _catalog_permissions(catalog)
     permission_properties = schema["properties"]["permissions"]["properties"]
-    schema_pairs: set[tuple[str, str]] = set()
-    for permission_id, permission_schema in permission_properties.items():
-        item_schema = permission_schema["items"]
-        access_values = (
-            [item_schema["const"]]
-            if "const" in item_schema
-            else item_schema["enum"]
-        )
-        schema_pairs.update((permission_id, access) for access in access_values)
-
-    if schema_pairs != set(catalog_pairs):
+    schema_system_namespaces = set(permission_properties["system"]["items"]["enum"])
+    schema_shell_modes = set(permission_properties["shell"]["enum"])
+    if schema_system_namespaces != catalog_system_namespaces:
         raise AssertionError(
-            "manifest permissions and public capability catalog differ: "
-            f"schema-only={sorted(schema_pairs - set(catalog_pairs))}, "
-            f"catalog-only={sorted(set(catalog_pairs) - schema_pairs)}"
+            "manifest system namespaces and public capability catalog differ: "
+            f"schema-only={sorted(schema_system_namespaces - catalog_system_namespaces)}, "
+            f"catalog-only={sorted(catalog_system_namespaces - schema_system_namespaces)}"
         )
-    print(f"CATALOG {len(catalog_pairs)} permission/access pairs")
+    if shell_entries != 1:
+        raise AssertionError(f"expected one public shell.run catalog entry, got {shell_entries}")
+    if schema_shell_modes != {"allowlist", "full"}:
+        raise AssertionError("manifest shell modes and public capability policy differ")
+    print(
+        f"CATALOG {len(catalog_system_namespaces)} system namespaces + "
+        f"{shell_entries} shell entry"
+    )
 
     wire_schema = _load_strict(ROOT / "backend-wire-v1.schema.json")
     Draft202012Validator.check_schema(wire_schema)

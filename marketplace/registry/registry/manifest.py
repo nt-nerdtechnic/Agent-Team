@@ -22,6 +22,7 @@ from .manifest_v2 import (
     ManifestV2Engines,
     ManifestV2Marketplace,
     ManifestV2Model,
+    ManifestV2Permissions,
     ManifestV2View,
 )
 
@@ -39,6 +40,7 @@ __all__ = [
     "ManifestV2Engines",
     "ManifestV2Marketplace",
     "ManifestV2Model",
+    "ManifestV2Permissions",
     "ManifestV2View",
     "ViewContribution",
     "is_manifest_v2",
@@ -83,12 +85,19 @@ def manifest_capabilities(
 ) -> list[str]:
     """Project v2 permission namespaces and legacy requires to one API list."""
     if isinstance(manifest, ManifestV2):
-        return list(manifest.permissions)
+        namespaces = list(manifest.permissions.system or [])
+        if manifest.permissions.shell is not None:
+            namespaces.append("shell")
+        return namespaces
     if isinstance(manifest, Manifest):
         return list(manifest.requires)
     permissions = manifest.get("permissions")
     if isinstance(permissions, dict):
-        return [str(key) for key in permissions]
+        system = permissions.get("system")
+        capabilities = [str(value) for value in system] if isinstance(system, list) else []
+        if permissions.get("shell") is not None:
+            capabilities.append("shell")
+        return capabilities
     requires = manifest.get("requires", [])
     if isinstance(requires, list):
         return [str(value) for value in requires]

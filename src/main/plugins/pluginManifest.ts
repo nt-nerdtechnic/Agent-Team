@@ -9,7 +9,11 @@ import {
 } from './pluginPermissions'
 
 export type { LegacyInstalledManifest } from './pluginManifestV1'
-export type { PluginManifestV2, PluginManifestV2View } from './pluginManifestV2'
+export type {
+  PluginManifestV2,
+  PluginManifestV2Permissions,
+  PluginManifestV2View,
+} from './pluginManifestV2'
 export { InstalledPluginError } from './pluginManifestErrors'
 export { parseManifestJson } from './pluginManifestJson'
 
@@ -38,7 +42,11 @@ export function isManifestV2(manifest: InstalledManifest): manifest is PluginMan
 
 /** Namespace projection retained for legacy broker/install callers. */
 export function manifestCapabilities(manifest: InstalledManifest): string[] {
-  return isManifestV2(manifest) ? Object.keys(manifest.permissions) : manifest.requires
+  if (!isManifestV2(manifest)) return manifest.requires
+  return [
+    ...(manifest.permissions.system ?? []),
+    ...(manifest.permissions.shell ? ['shell'] : []),
+  ]
 }
 
 export function manifestCapabilityPolicy(manifest: InstalledManifest): PluginCapabilityPolicy {

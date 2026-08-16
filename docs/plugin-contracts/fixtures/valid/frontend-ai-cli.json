@@ -1,19 +1,19 @@
 {
   "schemaVersion": 2,
   "apiVersion": "^1.0.0",
-  "id": "acme.storage",
-  "name": "Storage",
+  "id": "acme.ai-cli",
+  "name": "AI CLI",
   "version": "1.0.0",
   "publisher": "acme",
-  "permissions": { "system": ["storage"] },
-  "marketplace": { "description": "Storage is deferred.", "license": "MIT" },
+  "permissions": { "system": ["aiCli"] },
+  "marketplace": { "description": "A Host-mediated AI CLI view.", "license": "MIT" },
   "contributes": {
     "views": [
       {
         "id": "main",
         "kind": "custom",
         "location": "main",
-        "title": "Main",
+        "title": "AI CLI",
         "entry": "frontend/main/index.html"
       }
     ]

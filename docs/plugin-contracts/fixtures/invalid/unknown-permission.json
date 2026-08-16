@@ -5,7 +5,7 @@
   "name": "Unsafe permission",
   "version": "1.0.0",
   "publisher": "acme",
-  "permissions": { "terminal": ["run"] },
+  "permissions": { "system": ["terminal"] },
   "marketplace": { "description": "Request an unpublished capability.", "license": "MIT" },
   "contributes": {
     "views": [{ "id": "main", "kind": "custom", "location": "window", "title": "Main", "entry": "frontend/index.html" }]

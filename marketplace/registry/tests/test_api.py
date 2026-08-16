@@ -48,8 +48,8 @@ def test_publish_manifest_v2_maps_marketplace_metadata(client: TestClient) -> No
         "Browse workspace files in workbench regions or a separate window."
     )
     assert detail["categories"] == ["productivity"]
-    assert detail["versions"][0]["capabilities"] == ["fs", "ui"]
-    assert detail["versions"][0]["sensitive_capabilities"] == ["fs"]
+    assert detail["versions"][0]["capabilities"] == ["fs", "ui", "shell"]
+    assert detail["versions"][0]["sensitive_capabilities"] == ["fs", "shell"]
 
 
 def test_publish_rejects_malformed(client: TestClient) -> None:

@@ -8,9 +8,14 @@ const V2_PUBLISHER_RE = /^[a-z0-9][a-z0-9-]*$/
 const V2_VIEW_ID_RE = /^[a-z][a-z0-9-]*$/
 const V2_HTTPS_URI_RE = /^https:\/\/[^\s]+$/
 export const V2_VIEW_LOCATIONS = ['top', 'bottom', 'right', 'left', 'main', 'window'] as const
-export const V2_PERMISSION_ACCESS: Readonly<Record<string, readonly string[]>> = {
-  fs: ['read'],
-  ui: ['openInEditor', 'openExternal'],
+export const V2_SYSTEM_NAMESPACES = ['fs', 'ui', 'aiCli'] as const
+export const V2_SHELL_MODES = ['allowlist', 'full'] as const
+export type PluginSystemNamespace = (typeof V2_SYSTEM_NAMESPACES)[number]
+export type PluginShellMode = (typeof V2_SHELL_MODES)[number]
+
+export type PluginManifestV2Permissions = {
+  system?: PluginSystemNamespace[]
+  shell?: PluginShellMode
 }
 
 // Manifest-level guard for recognizable source/script filenames. Proving that
@@ -49,7 +54,7 @@ export type PluginManifestV2 = {
   version: string
   publisher: string
   engines?: { navide: string }
-  permissions: Record<string, string[]>
+  permissions: PluginManifestV2Permissions
   marketplace: {
     description: string
     license: string
@@ -261,23 +266,21 @@ export function parseManifestV2(raw: Record<string, unknown>): PluginManifestV2 
     requiredValue(raw, 'permissions', 'manifest'),
     'manifest permissions'
   )
-  assertOnlyKeys(permissionsValue, Object.keys(V2_PERMISSION_ACCESS), 'manifest permissions')
-  const permissions: Record<string, string[]> = {}
-  for (const [permission, allowedAccess] of Object.entries(V2_PERMISSION_ACCESS)) {
-    if (permissionsValue[permission] === undefined) continue
-    const accesses = stringArray(
-      permissionsValue[permission],
-      `manifest permissions.${permission}`,
-      1,
-      permission === 'fs' ? 1 : undefined
-    )
-    if (permission === 'fs' && accesses[0] !== 'read') {
-      fail('manifest permissions.fs only accepts read')
+  assertOnlyKeys(permissionsValue, ['system', 'shell'], 'manifest permissions')
+  const permissions: PluginManifestV2Permissions = {}
+  if (permissionsValue.system !== undefined) {
+    const namespaces = stringArray(permissionsValue.system, 'manifest permissions.system', 1, 3)
+    if (namespaces.some((namespace) => !(V2_SYSTEM_NAMESPACES as readonly string[]).includes(namespace))) {
+      fail('manifest permissions.system contains an unknown namespace')
     }
-    if (accesses.some((access) => !allowedAccess.includes(access))) {
-      fail(`manifest permissions.${permission} contains an unknown access`)
+    permissions.system = namespaces as PluginSystemNamespace[]
+  }
+  if (permissionsValue.shell !== undefined) {
+    const shell = stringValue(permissionsValue.shell, 'manifest permissions.shell', 1)
+    if (!(V2_SHELL_MODES as readonly string[]).includes(shell)) {
+      fail('manifest permissions.shell must be allowlist or full')
     }
-    permissions[permission] = accesses
+    permissions.shell = shell as PluginShellMode
   }
 
   const marketplaceValue = assertObject(

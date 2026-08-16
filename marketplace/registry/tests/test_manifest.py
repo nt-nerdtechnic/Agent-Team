@@ -230,7 +230,7 @@ def test_manifest_v2_invalid_fixture_rejected(path: Path) -> None:
 
 
 def test_manifest_v2_duplicate_key_fixture_rejected_before_validation() -> None:
-    with pytest.raises(ValueError, match="duplicate JSON object key: ui"):
+    with pytest.raises(ValueError, match="duplicate JSON object key: system"):
         _read_strict(_read_fixture("invalid-raw", "duplicate-permission-key.json"))
 
 

@@ -4,7 +4,7 @@
 // zip-slip); this module only wires it to `ipcMain` and the loader registry.
 //
 // Install is two-step so the renderer can interpose a trust confirmation for
-// sensitive (fs/terminal) capabilities or native backend code:
+// sensitive (fs/aiCli/shell) capabilities or native backend code:
 // `plugins:prepareInstall` downloads +
 // verifies and returns the trust facts WITHOUT writing to disk; the renderer
 // shows the warning, then `plugins:commitInstall` writes the verified package.

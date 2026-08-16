@@ -10,14 +10,15 @@
 //                    verification blocks the install. Unsigned packages are not
 //                    blocked (their trust tier is surfaced to the user instead).
 //   3. capabilities— every declared `requires` namespace MUST be a known
-//                    capability; an unknown namespace is a scope-escalation and
+//                    declared capability namespace; an unknown namespace is a scope-escalation and
 //                    is rejected (namespace over-reach).
 // Zip-slip path-traversal defence lives here too (`assertSafeEntryPath`) and is
 // applied by the unpack shell before any bytes hit disk.
 //
 // Mirrors the registry's own chain: `signing.py` signs/verifies a base64
 // Ed25519 signature over the ascii-encoded sha256 *hex* digest; `trust.py`
-// flags `fs`/`terminal` as sensitive. Kept in sync deliberately.
+// flags `fs`/`aiCli`/`shell` as sensitive for v2; `terminal` remains sensitive
+// only for the legacy compatibility path. Kept in sync deliberately.
 
 import { createHash, createPublicKey, timingSafeEqual, verify as cryptoVerify } from 'node:crypto'
 import {
@@ -29,18 +30,21 @@ import {
  *  `manifest.KNOWN_CAPABILITIES` for the current runtime contract. */
 export const KNOWN_CAPABILITIES: readonly string[] = [
   'fs',
+  'ui',
+  'aiCli',
+  'shell',
+  // Legacy v1 namespaces remain parseable only through the compatibility path.
   'git',
   'terminal',
   'search',
   'chat',
-  'ui',
   'issues',
   'plans',
 ]
 
-/** Capabilities that grant filesystem / shell reach and warrant a second
- *  confirmation before install. Mirror of the registry `trust.py`. */
-export const SENSITIVE_CAPABILITIES: readonly string[] = ['fs', 'terminal']
+/** Capabilities that grant filesystem / brokered process / shell reach and
+ *  warrant a second confirmation before install. Mirror of the registry. */
+export const SENSITIVE_CAPABILITIES: readonly string[] = ['fs', 'aiCli', 'shell', 'terminal']
 
 export const TRUST_SIGNED = 'signed-verified'
 export const TRUST_UNSIGNED = 'unsigned'
@@ -181,7 +185,7 @@ export function assertOfficialPublisher(
   }
 }
 
-/** Subset of declared capabilities flagged sensitive (fs/terminal). */
+/** Subset of declared capabilities flagged sensitive. */
 export function sensitiveCapabilities(requires: readonly string[]): string[] {
   return requires.filter((c) => SENSITIVE_CAPABILITIES.includes(c))
 }

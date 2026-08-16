@@ -20,7 +20,7 @@ class VersionInfo(BaseModel):
     capabilities: list[str]
     """Declared v2 permission namespaces or legacy `manifest.requires`."""
     sensitive_capabilities: list[str]
-    """Subset of `capabilities` flagged for elevated scrutiny (fs/terminal)."""
+    """Subset of `capabilities` flagged for elevated scrutiny (fs/aiCli/shell)."""
     download_count: int
     """Downloads recorded for this specific version."""
 

@@ -22,19 +22,14 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "fs": {
+        "system": {
           "type": "array",
           "minItems": 1,
-          "maxItems": 1,
+          "maxItems": 3,
           "uniqueItems": true,
-          "items": { "const": "read" }
+          "items": { "enum": ["fs", "ui", "aiCli"] }
         },
-        "ui": {
-          "type": "array",
-          "minItems": 1,
-          "uniqueItems": true,
-          "items": { "enum": ["openInEditor", "openExternal"] }
-        }
+        "shell": { "enum": ["allowlist", "full"] }
       }
     },
     "marketplace": { "$ref": "#/$defs/marketplace" },
