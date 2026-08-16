@@ -188,6 +188,7 @@ import {
   notificationMeansAwaiting,
   questionActionFor,
 } from './lib/cliAwaitingInput'
+import { markerTurnActionFor } from './lib/sessionMarkerTurn'
 import { entryBelongsToWorkspace, filterWorkspaceEntries, historyEntryLabel, legacyHistoryLogPath, manualLogFileName, updateHistoryCustomName, type HistoryCleanupMode, type HistoryDeletePreview, type HistoryDeleteTarget, type SpawnHistoryEntry, type WorkspaceIdentity } from './lib/spawnHistory'
 import { useKeybindings, registerCommand, setContext } from './keybindings/useKeybindings'
 import { useUiActionBus } from './composables/useUiActionBus'
@@ -887,6 +888,11 @@ interface ActivePane {
    *  backend can match the right session file to this pane when several
    *  same-vendor panes share a workspace. */
   sessionMarker?: string
+  /** Runtime-only: the marker was typed into this pane as a standalone prompt
+   *  and the CLI's answer to it has not been seen yet. See sessionMarkerTurn.ts
+   *  — that answer is a turn the user never started, so it must not name the
+   *  pane, chime "done", or be scanned for MSG blocks. */
+  markerReplyPending?: boolean
   /** True once the session-detect overlay's grace window has elapsed. Session
    *  detection itself keeps running (subtitle still says "detecting"); only the
    *  BLOCKING overlay is dropped — detection has preconditions the user may
@@ -3630,6 +3636,9 @@ async function sendSessionMarkerBootstrap(pane: ActivePane, tag: string): Promis
       terminal_session_id: ref.sessionId as string,
       data: '\r'
     })
+    // The marker is a real prompt, so the CLI will answer it. Arm the gate that
+    // keeps that answer from being treated as a turn the user asked for.
+    pane.markerReplyPending = true
     pipelineLog(`${tag} ✓ session marker sent for resume capture`)
     return true
   } catch (err) {
@@ -7937,11 +7946,25 @@ backend.on('agent.activity', (raw) => {
   const questionAction = questionActionFor(ev)
   if (questionAction === 'raise') paneRefs[ev.pane_id]?.markQuestion?.()
   else if (questionAction === 'clear') paneRefs[ev.pane_id]?.clearQuestion?.()
+  // Session-marker gate: sendSessionMarkerBootstrap typed Navide's own marker
+  // into this pane as a standalone prompt, so the CLI answers it with an
+  // ordinary assistant message that every marker-camp reader reports as a full
+  // turn_complete. Drop that turn's user-visible effects — it is not work the
+  // user asked for. Bookkeeping (badge, timestamps, queue pump) still runs:
+  // the pane really did go idle. See sessionMarkerTurn.ts for why this needs
+  // no time window and cannot swallow a genuine first turn.
+  let markerReply = false
+  const markerPane = panes.value.find((p) => p.id === ev.pane_id)
+  if (markerPane?.markerReplyPending) {
+    const action = markerTurnActionFor(ev)
+    if (action) markerPane.markerReplyPending = undefined
+    markerReply = action === 'suppress'
+  }
   if (ev.event_type === 'turn_complete') {
     paneTurnCompleteAt.set(ev.pane_id, Date.now())
     // Badge: authoritative turn end → drop the RUNNING hysteresis latch now.
     paneRefs[ev.pane_id]?.markTurnComplete?.()
-    scheduleDoneNotify(ev.pane_id, ev.timestamp ?? '')
+    if (!markerReply) scheduleDoneNotify(ev.pane_id, ev.timestamp ?? '')
     // Judge THIS turn's own text (not a retained map): an empty-text
     // turn_complete (Claude Stop hook, thinking-only record, Codex cross-batch)
     // must never be judged against a previous turn's text.
@@ -7957,14 +7980,16 @@ backend.on('agent.activity', (raw) => {
     // ends its turn for real every time, so only the TEXT reveals the spin.
     noteLoopTurnProgress(ev.pane_id, ev.text ?? '', ev.timestamp ?? '')
     // Inter-CLI messaging: scan this turn's text for MSG blocks, then pump.
-    onTurnCompleteForMessaging(ev.pane_id, ev.text ?? '', ev.timestamp ?? '')
+    // A marker reply is scanned as empty text — nothing in it was addressed to
+    // anyone — but the pump still runs, since the pane is now idle.
+    onTurnCompleteForMessaging(ev.pane_id, markerReply ? '' : (ev.text ?? ''), ev.timestamp ?? '')
     // Auto-name fallback: for vendors whose readers can't surface the user's
     // prompt text, name a still-unnamed pane from its first completed turn's
     // text. Set-once via setPaneAutoName; deliberately independent of
     // judgeTurnText and the sentinel paths — it only reads ev.text.
     // Envelope guard mirrors the agent_active path: a reader that echoes the
     // injected inter-CLI message back as turn text must not title the pane.
-    if (ev.text && !isInjectedMessageText(ev.text)) {
+    if (ev.text && !markerReply && !isInjectedMessageText(ev.text)) {
       const pane = panes.value.find((p) => p.id === ev.pane_id)
       if (pane && !pane.customName && !pane.nameLocked && !pane.autoName) {
         setPaneAutoName(ev.pane_id, deriveAutoName(ev.text))

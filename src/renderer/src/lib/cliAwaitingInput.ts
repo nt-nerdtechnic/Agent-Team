@@ -121,10 +121,10 @@ export function textEndsOnQuestion(text: string): boolean {
 }
 
 /** Record types a reader attaches the user's own prompt text to. Shared by the
- *  question release below and App.vue's auto-namer, which keys off the same
- *  three spellings ('user' for most vendors, 'prompt' for kimi/aider,
- *  'user_message' for codex). */
-const USER_RECORD_DETAILS: ReadonlySet<string> = new Set(['user', 'prompt', 'user_message'])
+ *  question release below, the session-marker gate, and App.vue's auto-namer,
+ *  which all key off the same three spellings ('user' for most vendors,
+ *  'prompt' for kimi/aider, 'user_message' for codex). */
+export const USER_RECORD_DETAILS: ReadonlySet<string> = new Set(['user', 'prompt', 'user_message'])
 
 /** The reader's name for an assistant message that opened a question box. */
 export const QUESTION_DETAIL = 'assistant:question'
