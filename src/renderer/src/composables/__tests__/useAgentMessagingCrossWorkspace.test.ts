@@ -20,7 +20,14 @@ describe('useAgentMessaging — cross-workspace routing', () => {
   let idlePanes: Set<string>
   let delivered: Array<{ paneId: string; text: string }>
   let deliverResult: boolean
-  let routed: Array<{ fromPaneId: string; fromName: string; to: string; content: string; msgKey: string }>
+  let routed: Array<{
+    fromPaneId: string
+    fromName: string
+    to: string
+    content: string
+    msgKey: string
+    replyTo?: string
+  }>
   let routeResult: RouteResult
   let reports: Array<{ msgKey: string; ok: boolean; reason: MessageReason | null }>
   let m: ReturnType<typeof useAgentMessaging>
@@ -361,6 +368,103 @@ describe('useAgentMessaging — cross-workspace routing', () => {
     expect(entry.from).toBe('alpha/sender')
     expect(entry.to).toBe('reviewer')
     expect(entry.status).toBe('delivered')
+  })
+
+  it('offers the routing key as the correlation id, and links the reply to it', async () => {
+    m.registerPane('p2', 'claude', 'reviewer')
+    m.acceptRemoteMessage({
+      msgKey: 'k1',
+      targetPaneId: 'p2',
+      fromDisplay: 'alpha/sender',
+      content: 'run the tests',
+      remoteWorkspace: '/ws/alpha',
+    })
+    await flush()
+    expect(delivered[0].text).toContain('re: k1')
+
+    const reply = m.sendMessage('reviewer', 'alpha/sender', 'all green', { replyTo: 'k1' })
+    await flush()
+    expect(reply.inReplyTo).toBe(m.messages.value[0].uid)
+  })
+
+  // ── Correlation across the workspace boundary ─────────────────────────────
+  it('carries the correlation id back to the sending window when replying remotely', async () => {
+    m.registerPane('p2', 'claude', 'reviewer')
+    m.acceptRemoteMessage({
+      msgKey: 'k1',
+      targetPaneId: 'p2',
+      fromDisplay: 'alpha/sender',
+      content: 'run the tests',
+      remoteWorkspace: '/ws/alpha',
+    })
+    await flush()
+
+    m.sendMessage('reviewer', 'alpha/sender', 'all green', { replyTo: 'k1' })
+    await flush()
+
+    expect(routed).toHaveLength(1)
+    expect(routed[0].replyTo).toBe('k1')
+  })
+
+  it('links an inbound reply to the outbound message it answers', async () => {
+    m.registerPane('p1', 'claude', 'sender')
+    const outbound = m.sendMessage('sender', 'beta/reviewer', 'run the tests')
+    await flush()
+    const corrId = routed[0].msgKey
+
+    // The other window echoes our routing key back as the reply's correlation id.
+    const accepted = m.acceptRemoteMessage({
+      msgKey: 'beta-1',
+      targetPaneId: 'p1',
+      fromDisplay: 'beta/reviewer',
+      content: 'all green',
+      remoteWorkspace: '/ws/beta',
+      replyTo: corrId,
+    })
+    await flush()
+
+    expect(accepted).toBe(true)
+    const reply = m.messages.value.find((x) => x.content === 'all green')
+    expect(reply?.inReplyTo).toBe(outbound.uid)
+  })
+
+  it('leaves an inbound message unlinked when no correlation id came back', async () => {
+    m.registerPane('p1', 'claude', 'sender')
+    m.sendMessage('sender', 'beta/reviewer', 'run the tests')
+    await flush()
+    // A fresh message carries no correlation id to the backend.
+    expect(routed[0].replyTo).toBeUndefined()
+
+    m.acceptRemoteMessage({
+      msgKey: 'beta-1',
+      targetPaneId: 'p1',
+      fromDisplay: 'beta/reviewer',
+      content: 'all green',
+      remoteWorkspace: '/ws/beta',
+    })
+    await flush()
+
+    const reply = m.messages.value.find((x) => x.content === 'all green')
+    expect(reply?.inReplyTo).toBeUndefined()
+  })
+
+  it('ignores a correlation id this window never handed out', async () => {
+    m.registerPane('p1', 'claude', 'sender')
+    m.sendMessage('sender', 'beta/reviewer', 'run the tests')
+    await flush()
+
+    m.acceptRemoteMessage({
+      msgKey: 'beta-1',
+      targetPaneId: 'p1',
+      fromDisplay: 'beta/reviewer',
+      content: 'all green',
+      remoteWorkspace: '/ws/beta',
+      replyTo: 'never-issued',
+    })
+    await flush()
+
+    const reply = m.messages.value.find((x) => x.content === 'all green')
+    expect(reply?.inReplyTo).toBeUndefined()
   })
 
   it('honours the idle gate for inbound messages', async () => {

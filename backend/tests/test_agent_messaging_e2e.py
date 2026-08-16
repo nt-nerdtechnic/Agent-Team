@@ -4,25 +4,39 @@ Exercises the real broadcast fan-out (not a monkeypatched one) so the full loop
 is covered: window A registers a pane, window B registers a pane in another
 workspace, A routes a message, both windows see the deliver event, B reports the
 outcome, and only A sees the delivery result.
+
+The second half of the file does the same for the MCP tools, which is where the
+layers actually meet: cli_send broadcasts through app.broadcast, a simulated
+window answers over the real ws handler, the handler hands the verdict back to
+the MCP server, and cli_check_message / cli_send_and_wait read it. Nothing in
+between is stubbed except the one boundary that needs a real CLI on disk
+(attribution's log-file → pane lookup, in the `log_activity` fixture).
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from agent_team_backend import agent_messaging, app
+from agent_team_backend.log_readers import ActivityEvent
+from agent_team_backend.plugins.builtin.navide_plans import plan_mcp, plan_mcp_wiring
 
 
 @pytest.fixture(autouse=True)
 def _clean_state() -> Any:
     agent_messaging._reset_for_test()
     app._SESSIONS.clear()
+    plan_mcp._mcp_message_status.clear()
     yield
     agent_messaging._reset_for_test()
     app._SESSIONS.clear()
+    plan_mcp._mcp_message_status.clear()
 
 
 class FakeWebSocket:
@@ -246,3 +260,339 @@ async def test_registry_survives_a_rename_and_readdresses() -> None:
     fresh = agent_messaging.resolve("pa", "beta/qa")
     assert stale.pane is None
     assert fresh.pane is not None and fresh.pane.pane_id == "pb"
+
+
+# ── MCP tools against the same live wiring ─────────────────────────────────
+# Everything above drives the ws handlers only. These drive an agent's actual
+# tools — cli_send / cli_check_message / cli_send_and_wait / cli_read_log —
+# against the same sessions, so a break anywhere along the chain shows up here
+# even when each layer's own unit tests still pass.
+
+
+def _ctx(pane_id: str) -> Any:
+    """A Context carrying the query string the pane's MCP client sends."""
+    params = {"pane": pane_id, "t": plan_mcp_wiring.caller_token()}
+    return SimpleNamespace(
+        request_context=SimpleNamespace(request=SimpleNamespace(query_params=params))
+    )
+
+
+@pytest.fixture
+def log_activity(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Emit an activity event the way a CLI's log reader does.
+
+    Only attribution is stubbed — mapping a log file back to a pane needs a
+    real CLI session file on disk. `app._on_log_activity` itself runs for real,
+    so what lands in `_pane_activity` (and in the `agent.activity` broadcast
+    every window sees) is what a live pane would produce.
+    """
+    bindings: dict[str, tuple[str, str]] = {}
+
+    def fake_attribute(usage: Any) -> Any:
+        pane_id, workspace_path = bindings.get(usage.session_id, ("", ""))
+        return SimpleNamespace(
+            pane_id=pane_id or None,
+            workspace_path=workspace_path or None,
+            stage_id=None,
+        )
+
+    monkeypatch.setattr(app.attribution, "attribute", fake_attribute)
+
+    async def emit(pane_id: str, workspace: str, event_type: str, text: str = "") -> None:
+        session_id = f"sess-{pane_id}"
+        bindings[session_id] = (pane_id, workspace)
+        await app._on_log_activity(ActivityEvent(
+            vendor="claude",
+            event_type=event_type,
+            cwd=workspace,
+            session_id=session_id,
+            file_path=f"/logs/{pane_id}.jsonl",
+            dedup_key=f"{pane_id}:{event_type}:{time.monotonic_ns()}",
+            text=text,
+        ))
+
+    return emit
+
+
+async def _register(session: app.Session, pane_id: str, name: str, workspace: str) -> None:
+    await app.handle_message(session, {
+        "id": f"reg-{pane_id}",
+        "type": "agent_msg.register",
+        "payload": {
+            "pane_id": pane_id,
+            "name": name,
+            "workspace_path": workspace,
+            "agent_key": "claude",
+        },
+    })
+
+
+async def _report_delivered(
+    session: app.Session, msg_key: str, ok: bool, reason: str = ""
+) -> None:
+    """What a receiving window sends once it has tried to inject the message."""
+    await app.handle_message(session, {
+        "id": f"delivered-{msg_key}",
+        "type": "agent_msg.delivered",
+        "payload": {"msg_key": msg_key, "ok": ok, "reason": reason},
+    })
+    await asyncio.sleep(0)
+
+
+async def _await_delivery(session: app.Session) -> dict[str, Any]:
+    """Wait for the receiving window to see the deliver broadcast."""
+    for _ in range(400):
+        events = _events(session, "agent_msg.deliver")
+        if events:
+            return events[0]["payload"]
+        await asyncio.sleep(0.005)
+    raise AssertionError("the deliver event never reached the window")
+
+
+@pytest.mark.asyncio
+async def test_cli_send_delivery_is_reported_all_the_way_back_to_cli_check_message() -> None:
+    """The full delivery loop: the tool broadcasts, the receiving window sees
+    it and answers over the ws handler, and the sending agent reads the verdict
+    back out of the tool it started from."""
+    window_a = _window()
+    window_b = _window()
+    await _register(window_a, "pa", "sender", "/ws/alpha")
+    await _register(window_b, "pb", "reviewer", "/ws/beta")
+
+    sent = await plan_mcp.cli_send("beta/reviewer", "run the tests", _ctx("pa"))
+    assert sent["ok"] is True
+
+    payload = await _await_delivery(window_b)
+    assert payload["msg_key"] == sent["msg_key"]
+    assert payload["target_pane_id"] == "pb"
+    assert payload["content"] == "run the tests"
+    # cli_send never passed through the frontend's per-pair throttle, so the
+    # receiving window has to apply it.
+    assert payload["rate_limit"] is True
+
+    pending = await plan_mcp.cli_check_message(sent["msg_key"], _ctx("pa"))
+    assert pending["status"] == "queued"
+
+    await _report_delivered(window_b, sent["msg_key"], ok=True)
+
+    settled = await plan_mcp.cli_check_message(sent["msg_key"], _ctx("pa"))
+    assert settled["status"] == "delivered"
+    assert settled["target"] == "beta/reviewer"
+    assert "reason" not in settled
+    assert isinstance(settled["settled_after_s"], float)
+
+
+@pytest.mark.asyncio
+async def test_cli_send_failure_is_reported_all_the_way_back_to_cli_check_message() -> None:
+    """A refused delivery has to reach the sender as a refusal with its reason;
+    silently staying "queued" would read as "still on its way"."""
+    window_a = _window()
+    window_b = _window()
+    await _register(window_a, "pa", "sender", "/ws/alpha")
+    await _register(window_b, "pb", "reviewer", "/ws/beta")
+
+    sent = await plan_mcp.cli_send("beta/reviewer", "run the tests", _ctx("pa"))
+    await _await_delivery(window_b)
+    await _report_delivered(
+        window_b,
+        sent["msg_key"],
+        ok=False,
+        reason='{"key":"rate-limit","params":{"seconds":30}}',
+    )
+
+    settled = await plan_mcp.cli_check_message(sent["msg_key"], _ctx("pa"))
+    assert settled["status"] == "failed"
+    assert settled["reason"] == "rate-limit"
+    # The rebroadcast every window relies on still happens alongside it.
+    results = _events(window_a, "agent_msg.delivery_result")
+    assert len(results) == 1
+    assert results[0]["payload"]["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_cli_send_and_wait_returns_the_turn_the_target_produced(
+    monkeypatch: pytest.MonkeyPatch, log_activity: Any
+) -> None:
+    """A → B → A end to end: the tool sends, window B delivers it, B's agent
+    works and its log reader reports the finished turn, and the tool hands the
+    caller what B said."""
+    monkeypatch.setattr(plan_mcp, "_WAIT_IDLE_POLL_S", 0.005)
+    window_a = _window()
+    window_b = _window()
+    await _register(window_a, "pa", "sender", "/ws/alpha")
+    await _register(window_b, "pw", "worker", "/ws/beta")
+    # B answered something else before this exchange started.
+    await log_activity("pw", "/ws/beta", "turn_complete", "the answer to the PREVIOUS question")
+
+    async def window_b_behaviour() -> None:
+        payload = await _await_delivery(window_b)
+        await _report_delivered(window_b, payload["msg_key"], ok=True)
+        await log_activity("pw", "/ws/beta", "agent_active", "")
+        await asyncio.sleep(0.01)
+        await log_activity("pw", "/ws/beta", "turn_complete", "all green, 2460 passed")
+
+    task = asyncio.create_task(window_b_behaviour())
+    result = await plan_mcp.cli_send_and_wait(
+        "beta/worker", "run the tests", _ctx("pa"), timeout_s=5.0
+    )
+    await task
+
+    assert result["ok"] is True
+    assert result["idle"] is True
+    assert result["source"] == "turn_complete"
+    assert result["target"] == "beta/worker"
+    assert result["last_activity"]["text"] == "all green, 2460 passed"
+    # The key it returns is the one that threads the whole exchange together.
+    check = await plan_mcp.cli_check_message(result["msg_key"], _ctx("pa"))
+    assert check["status"] == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_cli_send_and_wait_never_passes_off_the_previous_turn_as_the_reply(
+    monkeypatch: pytest.MonkeyPatch, log_activity: Any
+) -> None:
+    """The reason this tool exists. The message is genuinely delivered, but the
+    target agent never picks it up — so the only turn on record is the one from
+    before the send, and returning that would be a false "it answered you"."""
+    monkeypatch.setattr(plan_mcp, "_WAIT_IDLE_POLL_S", 0.005)
+    monkeypatch.setattr(plan_mcp, "_SEND_AND_WAIT_START_GRACE_S", 0.02)
+    window_a = _window()
+    window_b = _window()
+    await _register(window_a, "pa", "sender", "/ws/alpha")
+    await _register(window_b, "pw", "worker", "/ws/beta")
+    await log_activity("pw", "/ws/beta", "turn_complete", "the answer to the PREVIOUS question")
+
+    async def window_b_delivers_but_the_agent_stays_silent() -> None:
+        payload = await _await_delivery(window_b)
+        await _report_delivered(window_b, payload["msg_key"], ok=True)
+
+    task = asyncio.create_task(window_b_delivers_but_the_agent_stays_silent())
+    result = await plan_mcp.cli_send_and_wait(
+        "beta/worker", "run the tests", _ctx("pa"), timeout_s=0.3
+    )
+    await task
+
+    assert result["idle"] is False
+    assert result["source"] == "timeout"
+    assert result["reason"] == "never_started"
+    assert "last_activity" not in result
+    # Delivery itself was fine; the silence is the agent's, and the two have to
+    # stay tellable apart.
+    check = await plan_mcp.cli_check_message(result["msg_key"], _ctx("pa"))
+    assert check["status"] == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_cli_send_and_wait_reports_a_target_that_vanishes_mid_wait(
+    monkeypatch: pytest.MonkeyPatch, log_activity: Any
+) -> None:
+    """The send lands, then the target's window closes while we wait for it.
+    The wait can no longer resolve the address, but the message did go out —
+    so this has to stay ok:true with a source that says the finish is
+    unconfirmed. Answering ok:false would read as "never sent" and get the
+    work dispatched twice."""
+    monkeypatch.setattr(plan_mcp, "_WAIT_IDLE_POLL_S", 0.005)
+    monkeypatch.setattr(plan_mcp, "_SEND_AND_WAIT_START_GRACE_S", 0.02)
+    window_a = _window()
+    window_b = _window()
+    await _register(window_a, "pa", "sender", "/ws/alpha")
+    await _register(window_b, "pw", "worker", "/ws/beta")
+    await log_activity("pw", "/ws/beta", "turn_complete", "the answer to the PREVIOUS question")
+
+    async def window_b_delivers_then_disappears() -> None:
+        payload = await _await_delivery(window_b)
+        await _report_delivered(window_b, payload["msg_key"], ok=True)
+        agent_messaging.unregister("pw")
+
+    task = asyncio.create_task(window_b_delivers_then_disappears())
+    result = await plan_mcp.cli_send_and_wait(
+        "beta/worker", "run the tests", _ctx("pa"), timeout_s=1.0
+    )
+    await task
+
+    assert result["ok"] is True
+    assert result["idle"] is False
+    assert result["source"] == "target_lost"
+    assert result["error"]
+    # `reason` belongs to "timeout" alone; this is not one.
+    assert "reason" not in result
+    # The send is still on record under the key it returned.
+    assert result["target"] == "beta/worker"
+    check = await plan_mcp.cli_check_message(result["msg_key"], _ctx("pa"))
+    assert check["status"] == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_reading_a_worker_log_incrementally_across_an_exchange(
+    tmp_path: Path, log_activity: Any
+) -> None:
+    """Read the log, send work, and read again with the cursor: the second read
+    is the reply alone, not the whole conversation over again."""
+    workspace = str(tmp_path)
+    window = _window()
+    await _register(window, "pa", "sender", workspace)
+    await _register(window, "pw", "worker", workspace)
+    log = tmp_path / "worker.log"
+    log.write_text("$ boot\nready\n", encoding="utf-8")
+    app.project_store.record_manual_pane_spawn(
+        workspace, pane_id="pw", agent="claude", output_log_file=str(log)
+    )
+
+    first = await plan_mcp.cli_read_log("worker", _ctx("pa"))
+    assert first["ok"] is True
+    assert first["text"] == "$ boot\nready"
+
+    sent = await plan_mcp.cli_send("worker", "run the tests", _ctx("pa"))
+    payload = await _await_delivery(window)
+    assert payload["cross_workspace"] is False
+    await _report_delivered(window, sent["msg_key"], ok=True)
+    with log.open("a", encoding="utf-8") as f:
+        f.write("> run the tests\nall green\n")
+    await log_activity("pw", workspace, "turn_complete", "all green")
+
+    second = await plan_mcp.cli_read_log("worker", _ctx("pa"), since=first["next_cursor"])
+
+    assert second["text"] == "> run the tests\nall green"
+    assert second["rotated"] is False
+    assert second["next_cursor"] == log.stat().st_size
+    # And a third read with the new cursor adds nothing.
+    third = await plan_mcp.cli_read_log("worker", _ctx("pa"), since=second["next_cursor"])
+    assert third["text"] == ""
+
+
+@pytest.mark.asyncio
+async def test_a_reply_carries_the_correlation_id_of_the_cli_send_it_answers() -> None:
+    """The receiving agent echoes the msg_key it was handed; the route handler
+    passes it through untouched, so the window that made the cli_send can link
+    the answer to the message it sent."""
+    window_a = _window()
+    window_b = _window()
+    await _register(window_a, "pa", "sender", "/ws/alpha")
+    await _register(window_b, "pb", "reviewer", "/ws/beta")
+
+    sent = await plan_mcp.cli_send("beta/reviewer", "run the tests", _ctx("pa"))
+    delivered = await _await_delivery(window_b)
+    await _report_delivered(window_b, sent["msg_key"], ok=True)
+
+    # B's agent answers, echoing the correlation id it was delivered with.
+    await app.handle_message(window_b, {
+        "id": "reply",
+        "type": "agent_msg.route",
+        "payload": {
+            "from_pane_id": "pb",
+            "to": "alpha/sender",
+            "content": "all green",
+            "msg_key": "pb:1",
+            "reply_to": delivered["msg_key"],
+        },
+    })
+    await asyncio.sleep(0)
+
+    # Window A saw both halves of the exchange: its own outbound message (every
+    # window sees every deliver) and the answer addressed back to it.
+    outbound, back = (e["payload"] for e in _events(window_a, "agent_msg.deliver"))
+    assert outbound["msg_key"] == sent["msg_key"] and "reply_to" not in outbound
+    assert back["target_pane_id"] == "pa"
+    assert back["reply_to"] == sent["msg_key"]
+    assert back["content"] == "all green"
+    assert back["cross_workspace"] is True

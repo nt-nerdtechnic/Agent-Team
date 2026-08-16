@@ -9,7 +9,11 @@
 import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { AGENT_SPECS } from '../agents'
-import { useAgentMessaging, type MessageReason } from '../composables/useAgentMessaging'
+import {
+  useAgentMessaging,
+  type AgentMessage,
+  type MessageReason,
+} from '../composables/useAgentMessaging'
 
 const AGENT_LABELS = new Map(AGENT_SPECS.map((s) => [s.agentKey, s.label]))
 
@@ -20,6 +24,15 @@ const expandedId = ref<number | null>(null)
 
 // Newest first for the log list.
 const rows = computed(() => [...messaging.messages.value].reverse())
+
+// Rows by uid, so a reply can name the message it answers without scanning the
+// whole log once per row.
+const byUid = computed(() => new Map(messaging.messages.value.map((m) => [m.uid, m])))
+
+/** The message a reply answers, when it is still in the log. */
+function repliedTo(msg: AgentMessage): AgentMessage | undefined {
+  return msg.inReplyTo ? byUid.value.get(msg.inReplyTo) : undefined
+}
 
 function toggleExpand(id: number): void {
   expandedId.value = expandedId.value === id ? null : id
@@ -114,6 +127,9 @@ function vendorOf(agentKey: string | undefined, handle: string): string | null {
           <span class="msg-st" :data-st="msg.status">{{ $t(`msg.status-${msg.status}`) }}</span>
           <span v-if="msg.remote" class="msg-xws" :title="msg.remoteWorkspace">
             {{ $t('msg.cross-workspace-badge') }}
+          </span>
+          <span v-if="msg.inReplyTo" class="msg-reply" :title="repliedTo(msg)?.content">
+            {{ $t('msg.reply-badge') }}
           </span>
           <button
             v-if="msg.status === 'failed'"
@@ -287,6 +303,17 @@ function vendorOf(agentKey: string | undefined, handle: string): string | null {
   white-space: nowrap;
   background: rgba(110, 150, 230, 0.18);
   color: #7ba3e8;
+}
+
+.msg-reply {
+  flex: none;
+  font-size: 9px;
+  font-weight: 700;
+  border-radius: 99px;
+  padding: 0 6px;
+  white-space: nowrap;
+  background: rgba(140, 190, 140, 0.18);
+  color: #7cb37c;
 }
 
 .msg-st[data-st='queued'] { background: rgba(128, 128, 128, 0.18); color: var(--text-secondary); }

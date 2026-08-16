@@ -5418,6 +5418,10 @@ async def agent_msg_route(session: "Session", msg_id: str, msg_type: str, payloa
     to = str(payload.get("to") or "")
     content = str(payload.get("content") or "")
     msg_key = str(payload.get("msg_key") or "")
+    # Correlation id the sender echoed back when this message is a reply. Carried
+    # through untouched so the window that handed it out can link the two rows;
+    # absent for a message that starts a thread.
+    reply_to = str(payload.get("reply_to") or "")
     if not from_pane_id or not to or not msg_key:
         await session.send_json(
             make_error(
@@ -5466,26 +5470,24 @@ async def agent_msg_route(session: "Session", msg_id: str, msg_type: str, payloa
     from_display = agent_messaging.sender_display(
         from_pane_id, str(payload.get("from_name") or "")
     )
-    asyncio.create_task(
-        app.broadcast(
-            make_event(
-                "agent_msg.deliver",
-                {
-                    "msg_key": msg_key,
-                    "target_pane_id": result.pane.pane_id,
-                    "target_workspace_path": result.pane.workspace_path,
-                    "target_name": result.pane.name,
-                    "target_agent_key": result.pane.agent_key,
-                    "from_pane_id": from_pane_id,
-                    "from_display": from_display,
-                    "from_workspace_path": sender.workspace_path if sender else "",
-                    "from_agent_key": sender.agent_key if sender else "",
-                    "cross_workspace": result.cross_workspace,
-                    "content": content,
-                },
-            )
-        )
-    )
+    deliver_payload: dict[str, Any] = {
+        "msg_key": msg_key,
+        "target_pane_id": result.pane.pane_id,
+        "target_workspace_path": result.pane.workspace_path,
+        "target_name": result.pane.name,
+        "target_agent_key": result.pane.agent_key,
+        "from_pane_id": from_pane_id,
+        "from_display": from_display,
+        "from_workspace_path": sender.workspace_path if sender else "",
+        "from_agent_key": sender.agent_key if sender else "",
+        "cross_workspace": result.cross_workspace,
+        "content": content,
+    }
+    # Only present for a reply, so a sender that never sends one keeps seeing the
+    # exact payload it saw before.
+    if reply_to:
+        deliver_payload["reply_to"] = reply_to
+    asyncio.create_task(app.broadcast(make_event("agent_msg.deliver", deliver_payload)))
     await session.send_json(
         make_response(
             msg_id,
@@ -5513,6 +5515,7 @@ async def agent_msg_delivered(session: "Session", msg_id: str, msg_type: str, pa
     matching msg_key ignore the event.
     """
     from . import app
+    from .plugins.builtin.navide_plans import plan_mcp
 
     msg_key = str(payload.get("msg_key") or "")
     if not msg_key:
@@ -5520,6 +5523,12 @@ async def agent_msg_delivered(session: "Session", msg_id: str, msg_type: str, pa
             make_error(msg_id, msg_type, "BAD_REQUEST", "agent_msg.delivered needs msg_key")
         )
         return
+    # A message that came from cli_send has no window of its own to keep the
+    # outcome for, so the MCP server records it for cli_check_message. Ignores
+    # every key it did not mint.
+    plan_mcp.record_delivery_result(
+        msg_key, bool(payload.get("ok", False)), str(payload.get("reason") or "")
+    )
     asyncio.create_task(
         app.broadcast(
             make_event(

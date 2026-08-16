@@ -2,9 +2,13 @@
 // envelope, and content sanitizing. Pure functions — no DOM, no side effects.
 //
 // Wire format (bare lines, never inside a fenced code block):
-//   ---MSG-START--- to: <target messagingName>
+//   ---MSG-START--- to: <target messagingName> [re: <correlationId>]
 //   <content, any number of lines>
 //   ---MSG-END---
+//
+// `re:` is optional and carries back the correlation id the envelope handed
+// out, which is what links a reply to the request it answers. Agents that never
+// echo it (and every message written before it existed) still parse.
 //
 // Parsing runs on structured turn text (ActivityEvent.text), never on the
 // terminal buffer.
@@ -29,9 +33,15 @@ export interface ParsedAgentMessage {
   target: string
   /** Message body, trimmed. */
   content: string
+  /** Correlation id from the optional `re:` field, identifying the message this
+   *  one answers. Absent when the sender wrote no `re:` — the original format,
+   *  which stays a plain unrelated message. */
+  replyTo?: string
 }
 
-const START_RE = /^---MSG-START---\s*to\s*:\s*(.*?)\s*$/
+// `re:` is split off the target lazily, and only when whitespace precedes it, so
+// a handle that merely contains "re" keeps its whole name as the target.
+const START_RE = /^---MSG-START---\s*to\s*:\s*(.*?)(?:\s+re\s*:\s*(\S+))?\s*$/
 const END_RE = /^---MSG-END---\s*$/
 const FENCE_RE = /^\s*(```|~~~)/
 // Any ---UPPER-CASE--- control-marker token, wherever it appears in a line.
@@ -50,12 +60,16 @@ export function parseMessages(turnText: string): ParsedAgentMessage[] {
   if (!turnText) return out
 
   let inFence = false
-  let current: { target: string; lines: string[] } | null = null
+  let current: { target: string; replyTo?: string; lines: string[] } | null = null
 
   const close = (): void => {
     if (!current) return
     const content = current.lines.join('\n').trim()
-    if (current.target && content) out.push({ target: current.target, content })
+    if (current.target && content) {
+      const parsed: ParsedAgentMessage = { target: current.target, content }
+      if (current.replyTo) parsed.replyTo = current.replyTo
+      out.push(parsed)
+    }
     current = null
   }
 
@@ -72,7 +86,7 @@ export function parseMessages(turnText: string): ParsedAgentMessage[] {
     const start = START_RE.exec(line)
     if (start) {
       close()
-      current = { target: start[1], lines: [] }
+      current = { target: start[1], replyTo: start[2], lines: [] }
       continue
     }
     if (current) {
@@ -181,17 +195,25 @@ export function sanitizeMessageContent(content: string): string {
 /**
  * Wrap a message for injection into the target pane. The reply hint stays on
  * a single line so it can never parse as a bare marker.
+ *
+ * `correlationId` is asked back verbatim in the reply's `re:` field, which is
+ * what lets the reply be matched to this message instead of arriving as an
+ * unrelated one. Omitting it renders exactly the pre-correlation hint.
  */
 export function renderEnvelope(
   sender: string,
   content: string,
-  opts: { includeReplyHint?: boolean } = {},
+  opts: { includeReplyHint?: boolean; correlationId?: string } = {},
 ): string {
   const lines = [`${MSG_ENVELOPE_PREFIX} ${sender}`, sanitizeMessageContent(content)]
   if (opts.includeReplyHint !== false) {
+    const head = opts.correlationId
+      ? `to: ${sender} re: ${opts.correlationId}`
+      : `to: ${sender}`
+    const echo = opts.correlationId ? 're 欄位請原樣帶回，' : ''
     lines.push(
-      `（回覆方式：輸出裸行區塊 ${MSG_START} to: ${sender}，下一行起為訊息內容，` +
-        `最後一行 ${MSG_END}；marker 必須獨立整行且不可放在 code block 內）`,
+      `（回覆方式：輸出裸行區塊 ${MSG_START} ${head}，下一行起為訊息內容，` +
+        `最後一行 ${MSG_END}；${echo}marker 必須獨立整行且不可放在 code block 內）`,
     )
   }
   return lines.join('\n')

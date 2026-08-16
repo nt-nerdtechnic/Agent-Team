@@ -94,6 +94,42 @@ ${MSG_END}`
   })
 })
 
+describe('parseMessages correlation id', () => {
+  it('parses a `re:` field alongside the target', () => {
+    const text = `${MSG_START} to: codex-1 re: abc123:7
+done
+${MSG_END}`
+    expect(parseMessages(text)).toEqual([
+      { target: 'codex-1', content: 'done', replyTo: 'abc123:7' },
+    ])
+  })
+
+  it('leaves replies without a `re:` field unlinked (older format)', () => {
+    const text = `${MSG_START} to: codex-1
+done
+${MSG_END}`
+    const [block] = parseMessages(text)
+    expect(block).toEqual({ target: 'codex-1', content: 'done' })
+    expect(block.replyTo).toBeUndefined()
+  })
+
+  it('keeps a target whose name merely contains "re"', () => {
+    const text = `${MSG_START} to: restore-1
+hi
+${MSG_END}`
+    expect(parseMessages(text)).toEqual([{ target: 'restore-1', content: 'hi' }])
+  })
+
+  it('keeps a qualified target intact when a `re:` field follows', () => {
+    const text = `${MSG_START} to: other-ws/codex-1 re: k1
+hi
+${MSG_END}`
+    expect(parseMessages(text)).toEqual([
+      { target: 'other-ws/codex-1', content: 'hi', replyTo: 'k1' },
+    ])
+  })
+})
+
 describe('parseSpawns', () => {
   it('parses a full block', () => {
     const text = `前言
@@ -225,6 +261,31 @@ describe('renderEnvelope', () => {
   it('omits the reply hint when disabled', () => {
     const env = renderEnvelope('claude-1', 'hello', { includeReplyHint: false })
     expect(env).toBe(`${MSG_ENVELOPE_PREFIX} claude-1\nhello`)
+  })
+
+  it('asks for the correlation id back in the reply hint', () => {
+    const env = renderEnvelope('claude-1', 'hello', { correlationId: 'abc123:7' })
+    const hint = env.split('\n').pop() ?? ''
+    expect(hint).toContain('to: claude-1 re: abc123:7')
+    // Still not a parseable bare marker line.
+    expect(parseMessages(env)).toEqual([])
+  })
+
+  it('carries no correlation id when none is given, and none when hinting is off', () => {
+    expect(renderEnvelope('claude-1', 'hello')).not.toContain('re:')
+    expect(
+      renderEnvelope('claude-1', 'hello', { includeReplyHint: false, correlationId: 'abc123:7' }),
+    ).toBe(`${MSG_ENVELOPE_PREFIX} claude-1\nhello`)
+  })
+
+  it('round-trips: a reply written to the hint parses back to the same id', () => {
+    const env = renderEnvelope('claude-1', 'hello', { correlationId: 'abc123:7' })
+    const hint = env.split('\n').pop() ?? ''
+    const head = /---MSG-START--- (to: [^，]+)/.exec(hint)?.[1] ?? ''
+    const reply = `${MSG_START} ${head}\nack\n${MSG_END}`
+    expect(parseMessages(reply)).toEqual([
+      { target: 'claude-1', content: 'ack', replyTo: 'abc123:7' },
+    ])
   })
 })
 

@@ -47,6 +47,7 @@
     "spawn-toast": "“{parent}” spawned “{child}”",
     "cross-workspace-toast": "Instruction from another workspace: “{from}” → “{target}”",
     "cross-workspace-badge": "cross-workspace",
+    "reply-badge": "reply",
     "expand-rail": "Expand inter-CLI messages"
   },
   "confirm-close": {

@@ -87,8 +87,40 @@ object, so this only bites on `plan_list`.
 | Tool | Parameters | What it does |
 |---|---|---|
 | `cli_list_targets` | — | List addressable CLI panes: `name`, `address`, `workspace_path`, `same_workspace`, `busy` |
-| `cli_send` | `to`, `text` | Deliver an instruction to another pane once it's idle (queued if busy) |
+| `cli_send` | `to`, `text` | Deliver an instruction to another pane once it's idle (queued if busy); returns `msg_key` |
+| `cli_check_message` | `msg_key` | What became of one `cli_send`: `{status, target, age_seconds, reason?, settled_after_s?}` |
+| `cli_send_and_wait` | `to`, `text`, `timeout_s=60` (capped at 120) | `cli_send` plus the wait for that turn to finish; returns `cli_wait_idle`'s result plus `{ok, target, msg_key}` |
 | `cli_open_agent` | `agent`, `name`, `task`, `workspace_path` (required for a non-pane caller) | Spawn a new CLI pane with a task; returns `{ok, name, address}`, plus `advisories` when the spawn crossed an advisory threshold |
+
+`cli_send` returns once the message is *accepted* for delivery, not once the
+other agent read it. `cli_check_message` closes that loop: `status` is
+`queued` (broadcast, no window has reported back — a message held for a busy
+pane stays here until it is actually injected), `delivered`, or `failed`.
+On `failed`, `reason` is the receiving window's verdict: `rate-limit` (too
+many messages between the same pair too quickly), `queue-full` (the target's
+pending-message queue is at its cap), `inject-failed` (typing it into the
+pane did not take), `pane-closed` (the target went away before delivery), or
+`no-report` (the attempt never reported an outcome).
+
+That table is backend **memory**, not a log: it holds the last 500 sends for
+one hour and is lost on backend restart. An unknown `msg_key` returns
+`{ok: false, error}` and means "not tracked any more", not "never sent".
+
+`cli_send_and_wait` handles the race a manual `cli_send` + `cli_wait_idle`
+pair loses to — the target is idle at the moment you send, so a plain wait
+returns "already idle" before it ever read the message. It records the
+target's last activity before sending and only accepts a *newer* turn as the
+answer, so `last_activity.text` is what the other agent said in reply. Its
+timeout `reason` is `cli_wait_idle`'s, plus `never_started` for a target that
+stayed idle and never showed any sign of picking the message up. A send
+refused outright returns `cli_send`'s `{ok: false, error}` unchanged.
+
+If the target stops being addressable *during* the wait — its window closed,
+its pane was killed — the result is `{ok: true, idle: false, source:
+"target_lost", error}`. It stays `ok: true` deliberately: the send already
+happened and the `msg_key` is still valid, so reporting a failure there would
+read as "never sent" and invite a resend, dispatching the work twice. Read it
+as "delivered, but I can no longer confirm it was finished".
 
 Spawning is not capped. A pane may spawn any number of children, a workspace
 may hold any number of CLI panes, and a spawn chain may run any depth — past
@@ -102,15 +134,36 @@ recorded as diagnostics, readable via `ui_diagnostics`.
 
 | Tool | Parameters | What it does |
 |---|---|---|
-| `cli_read_log` | `target`, `tail_lines=200` | Tail of the pane's conversation log (≤512KB and ≤`tail_lines` lines) |
+| `cli_read_log` | `target`, `tail_lines=200`, `since?` | Tail of the pane's conversation log (≤512KB and ≤`tail_lines` lines); returns `next_cursor` and `rotated` |
 | `cli_get_status` | `target` | `{busy, agent_key, last_activity?, ui?}` — `ui` mirrors `ui.pane.getStatus` when the owning window answers |
-| `cli_wait_idle` | `target`, `timeout_s=60` (capped at 120) | Blocks until the pane is idle or the timeout passes |
+| `cli_wait_idle` | `target`, `timeout_s=60` (capped at 120) | Blocks until the pane is idle or the timeout passes; returns `{idle, source, waited_s, last_activity?, ui_status?}`, plus `reason` on timeout |
+
+`cli_read_log`'s `since` reads incrementally: pass back the `next_cursor` from
+your previous call to get only what the pane has said since then, instead of
+re-reading the same tail. The cursor is a byte offset into an append-only
+capture file, so it stops meaning anything if that file is truncated or
+replaced — the call then returns a plain tail with `rotated: true`, which is a
+fresh start rather than new output.
+
+`cli_wait_idle`'s `last_activity` is what `cli_get_status` reports under the
+same key, so a caller that waited out a turn also gets what the turn said
+without a second call; `ui_status` is the owning window's own word for the
+pane, present only when a probe reached it during the wait. On timeout,
+`reason` separates three failures that look alike but aren't: `awaiting` (the
+pane is parked on a permission prompt, waiting on a **human** — answer it in
+the UI), `busy` (it really is still working; wait longer), and `unreachable`
+(the window that owns the pane stopped answering, so nothing in the result is
+current).
 
 **Capability boundary — idle/completion detection.** Most CLIs' log readers
 emit a `turn_complete` event carrying the finished turn's text: **aider,
 antigravity, claude, codex, copilot, grok, kilo, kimi, muse, opencode, pi,
 qwen**. For those, `cli_wait_idle` and `cli_get_status`'s
-`last_activity.type` resolve on the precise turn-complete signal. For the
+`last_activity.type` resolve on the precise turn-complete signal — with one
+qualification: **grok, kimi, pi, qwen** have no end-of-turn record of their
+own and synthesize `turn_complete` from 8 seconds of silence in the log, so
+for those four the event is itself an inference, and a long enough pause
+mid-turn can end the wait early. For the
 remaining CLIs (cursor, which reports only that its store was written, and
 plain terminal panes), there is no such signal —
 `cli_wait_idle` falls back to inferring idleness from a 10-second quiet
@@ -118,6 +171,17 @@ period with no new activity (`source: "quiet_period"` in the response), and
 `cli_get_status`'s `last_activity` may only ever report `"agent_active"`.
 Treat a quiet-period-based idle result as a heuristic, not a guarantee the
 CLI has actually finished.
+
+This is also why `source` is the field to read on a `cli_send_and_wait`
+result: the shape is identical whichever CLI produced it, but the confidence
+is not. `turn_complete` from aider/antigravity/claude/codex/copilot/kilo/
+muse/opencode is the CLI's own word that the turn ended; the same value from
+grok/kimi/pi/qwen is the 8-second-silence inference above; and
+`quiet_period` — the only outcome available for cursor and plain terminal
+panes — means nothing reported an end of turn at all, so check the content
+rather than trusting the signal. `target_lost` is the fourth value and the
+only one that is not a verdict on the turn: it says the pane went away before
+the wait could reach one.
 
 ### UI action bus
 

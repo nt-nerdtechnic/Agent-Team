@@ -47,6 +47,7 @@
     "spawn-toast": "「{parent}」啟動了「{child}」",
     "cross-workspace-toast": "來自其他工作區的指令：「{from}」→「{target}」",
     "cross-workspace-badge": "跨工作區",
+    "reply-badge": "回覆",
     "expand-rail": "展開 CLI 互傳訊息"
   },
   "confirm-close": {

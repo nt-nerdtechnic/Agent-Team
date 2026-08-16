@@ -1435,10 +1435,12 @@ function onTurnCompleteForMessaging(paneId: string, text: string, timestamp: str
     if (fresh) {
       if (!Number.isNaN(eventMs)) paneMsgProcessedAt.set(paneId, eventMs)
       for (const msg of parseMessages(text)) {
+        // `replyTo` is the correlation id this agent echoed back from the
+        // envelope it is answering; absent for a message that starts a thread.
         if (isBroadcastTarget(msg.target)) {
-          messaging.sendBroadcast(senderName, msg.content)
+          messaging.sendBroadcast(senderName, msg.content, { replyTo: msg.replyTo })
         } else {
-          messaging.sendMessage(senderName, msg.target, msg.content)
+          messaging.sendMessage(senderName, msg.target, msg.content, { replyTo: msg.replyTo })
         }
       }
       // Same turn-complete path handles SPAWN blocks (freshness-deduped above,
@@ -1840,6 +1842,7 @@ async function routeRemoteMessage(args: {
   to: string
   content: string
   msgKey: string
+  replyTo?: string
 }): Promise<RouteResult> {
   const resp = await backend.send<{
     ok?: boolean
@@ -1857,6 +1860,9 @@ async function routeRemoteMessage(args: {
       to: args.to,
       content: args.content,
       msg_key: args.msgKey,
+      // Only for a reply: the backend passes it through to the deliver event so
+      // the window that handed out the id can link the two rows.
+      ...(args.replyTo ? { reply_to: args.replyTo } : {}),
     },
     // Generous: the handler broadcasts the delivery BEFORE it replies, so a
     // timeout here would report failure for a message the target already got.
@@ -8028,6 +8034,7 @@ backend.on('agent_msg.deliver', (raw) => {
     content?: string
     cross_workspace?: boolean
     rate_limit?: boolean
+    reply_to?: string
   }
   if (!ev?.msg_key || !ev.target_pane_id || !ev.content) return
   // The broadcast reaches the sending window too. When the sender is one of our
@@ -8055,6 +8062,9 @@ backend.on('agent_msg.deliver', (raw) => {
     // Senders that bypassed sendMessage (the MCP tools) carry no rate-limit
     // accounting of their own.
     rateLimit: !!ev.rate_limit,
+    // Set when this message answers one this window sent; an id we never handed
+    // out (or an older backend that drops the field) leaves the row unlinked.
+    replyTo: ev.reply_to,
   })
   if (!accepted || !ev.cross_workspace) return
   // The instruction came from another project — say so, since nothing else in

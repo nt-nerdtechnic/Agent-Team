@@ -279,6 +279,65 @@ describe('useAgentMessaging', () => {
     })
   })
 
+  describe('reply correlation', () => {
+    beforeEach(() => {
+      m.registerPane('p1', 'claude') // claude-1
+      m.registerPane('p2', 'codex') // codex-1
+    })
+
+    it('hands the correlation id to the target in the envelope', async () => {
+      const req = m.sendMessage('claude-1', 'codex-1', 'please review')
+      m.pump()
+      await flush()
+      expect(delivered[0].text).toContain(`re: ${req.uid}`)
+    })
+
+    it('links a reply that echoes the correlation id back', () => {
+      const req = m.sendMessage('claude-1', 'codex-1', 'please review')
+      const reply = m.sendMessage('codex-1', 'claude-1', 'done', { replyTo: req.uid })
+      expect(reply.inReplyTo).toBe(req.uid)
+    })
+
+    it('leaves a reply carrying no correlation id unlinked, and delivers it as before', async () => {
+      m.sendMessage('claude-1', 'codex-1', 'please review')
+      const reply = m.sendMessage('codex-1', 'claude-1', 'done')
+      expect(reply.inReplyTo).toBeUndefined()
+      m.pump()
+      await flush()
+      m.pump()
+      await flush()
+      expect(reply.status).toBe('delivered')
+    })
+
+    it('ignores a correlation id this window never handed out', () => {
+      const reply = m.sendMessage('codex-1', 'claude-1', 'done', { replyTo: 'nobody:1' })
+      expect(reply.inReplyTo).toBeUndefined()
+      expect(reply.status).toBe('queued')
+    })
+
+    it('links a rejected reply too, so the log still shows what it answered', () => {
+      const req = m.sendMessage('claude-1', 'codex-1', 'please review')
+      const reply = m.sendMessage('codex-1', 'ghost', 'done', { replyTo: req.uid })
+      expect(reply.status).toBe('failed')
+      expect(reply.inReplyTo).toBe(req.uid)
+    })
+
+    it('forgets correlation ids once they age past the ack window', () => {
+      const req = m.sendMessage('claude-1', 'codex-1', 'please review')
+      clock += 29 * 60_000
+      m.pump()
+      expect(
+        m.sendMessage('codex-1', 'claude-1', 'in time', { replyTo: req.uid }).inReplyTo,
+      ).toBe(req.uid)
+
+      clock += 2 * 60_000
+      m.pump()
+      expect(
+        m.sendMessage('codex-1', 'claude-1', 'too late', { replyTo: req.uid }).inReplyTo,
+      ).toBeUndefined()
+    })
+  })
+
   describe('persistence', () => {
     let appended: PersistedMessageRow[][]
     let updated: PersistedMessageUpdate[][]
@@ -320,6 +379,13 @@ describe('useAgentMessaging', () => {
           recipient_agent: 'codex',
         },
       ])
+    })
+
+    it('keeps the reply link out of the store (in-memory, like hold)', () => {
+      const req = m.sendMessage('claude-1', 'codex-1', 'please review')
+      const reply = m.sendMessage('codex-1', 'claude-1', 'done', { replyTo: req.uid })
+      expect(reply.inReplyTo).toBe(req.uid)
+      for (const row of appended.flat()) expect(row).not.toHaveProperty('inReplyTo')
     })
 
     it('updates on the delivering → delivered transition', async () => {

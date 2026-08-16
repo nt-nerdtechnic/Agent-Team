@@ -167,3 +167,89 @@ def test_each_declared_installer_is_callable_and_isolated(monkeypatch, tmp_path)
             continue
         result = spec.install_hooks(str(port_file))
         assert isinstance(result, dict), f"{key} installer returned {type(result)}"
+
+
+def test_stop_hook_records_pane_activity_so_wait_idle_sees_it(
+    client: TestClient, events: list[dict], monkeypatch
+) -> None:
+    """The hook is the earliest and most reliable end-of-turn signal there is,
+    but it only ever reached the frontend: `_pane_activity` was written from
+    the log-reader sink alone, so cli_wait_idle could not see a hook-reported
+    turn end and had to sit out its 10s quiet threshold instead.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    from agent_team_backend import agent_messaging
+    from agent_team_backend.plugins.builtin.navide_plans import plan_mcp, plan_mcp_wiring
+
+    agent_messaging._reset_for_test()
+    app_module._pane_activity.clear()
+    monkeypatch.setattr(
+        app_module.attribution, "pane_for_session", lambda _sid: ("pw", "/ws/alpha", "")
+    )
+    agent_messaging.register("pw", "worker", "/ws/alpha", agent_key="claude")
+    agent_messaging.register("other", "caller", "/ws/somewhere-else")
+    try:
+        client.post(
+            "/hooks/claude",
+            headers={"X-Agent-Team-Event": "stop"},
+            json={"session_id": "s-1", "cwd": "/ws/alpha"},
+        )
+
+        assert app_module._pane_activity["pw"]["event_type"] == "turn_complete"
+
+        ctx = SimpleNamespace(
+            request_context=SimpleNamespace(
+                request=SimpleNamespace(
+                    query_params={"pane": "other", "t": plan_mcp_wiring.caller_token()}
+                )
+            )
+        )
+        result = asyncio.run(plan_mcp.cli_wait_idle("alpha/worker", ctx, timeout_s=5.0))
+
+        assert result["idle"] is True
+        assert result["source"] == "turn_complete"
+        assert result["waited_s"] == 0.0
+    finally:
+        agent_messaging._reset_for_test()
+        app_module._pane_activity.clear()
+
+
+def test_stop_hook_does_not_blank_the_turn_text_the_log_reader_recorded(
+    client: TestClient, events: list[dict], monkeypatch
+) -> None:
+    """Hook payloads carry no assistant text. Recording one over a
+    turn_complete the JSONL reader already described would cost cli_wait_idle
+    and cli_get_status the text of the turn that just ended."""
+    app_module._pane_activity.clear()
+    monkeypatch.setattr(
+        app_module.attribution, "pane_for_session", lambda _sid: ("pw", "/ws/alpha", "")
+    )
+    app_module._record_pane_activity("pw", "turn_complete", "what the agent said")
+    try:
+        client.post(
+            "/hooks/claude",
+            headers={"X-Agent-Team-Event": "stop"},
+            json={"session_id": "s-1", "cwd": "/ws/alpha"},
+        )
+        assert app_module._pane_activity["pw"]["text"] == "what the agent said"
+    finally:
+        app_module._pane_activity.clear()
+
+
+def test_hook_with_no_resolvable_pane_records_nothing(
+    client: TestClient, events: list[dict], monkeypatch
+) -> None:
+    # Stop can arrive before the JSONL path claimed the session; there is no
+    # pane to attribute it to, and inventing one would be worse than waiting.
+    app_module._pane_activity.clear()
+    monkeypatch.setattr(
+        app_module.attribution, "pane_for_session", lambda _sid: (None, None, None)
+    )
+    client.post(
+        "/hooks/claude",
+        headers={"X-Agent-Team-Event": "stop"},
+        json={"session_id": "unclaimed", "cwd": "/ws/alpha"},
+    )
+    assert app_module._pane_activity == {}

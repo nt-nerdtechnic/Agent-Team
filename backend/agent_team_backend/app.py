@@ -1343,6 +1343,16 @@ async def cli_hook(vendor: str, request: Request) -> dict[str, Any]:
     # lookup bypasses it. Race (stop before JSONL claimed the session) → empty
     # pane_id, and the JSONL path's matching event supplies it shortly.
     pane_id, ws_path, stage_id = attribution.pane_for_session(session_id)
+    if pane_id:
+        # The log-reader sink is not the only writer of _pane_activity any
+        # more: for the hook vendors the Stop hook is the earliest and most
+        # reliable end-of-turn signal there is, and cli_wait_idle could not see
+        # it — it had to sit out the 10s quiet threshold instead. Hook payloads
+        # carry no assistant text, so keep the text the sink already recorded
+        # for this same turn rather than blanking it.
+        prior = _pane_activity.get(pane_id)
+        prior_text = prior["text"] if prior and event_type == "turn_complete" else ""
+        _record_pane_activity(pane_id, event_type, prior_text)
     await broadcast(make_event("agent.activity", {
         "vendor": vendor,
         "event_type": event_type,

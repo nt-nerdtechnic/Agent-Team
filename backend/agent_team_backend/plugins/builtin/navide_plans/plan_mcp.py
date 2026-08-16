@@ -25,6 +25,7 @@ lifespan task — safe for the anyio task group inside.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import secrets
 import time
@@ -922,7 +923,9 @@ async def cli_send(to: str, text: str, ctx: Context) -> dict[str, Any]:
 
     Delivery is asynchronous: this returns once the message is accepted for
     delivery, not once the other agent has read it. Returns
-    {ok, target, cross_workspace} or {ok: false, error}.
+    {ok, target, cross_workspace, msg_key} or {ok: false, error}. Pass
+    `msg_key` to cli_check_message to learn whether the receiving window
+    actually delivered it.
     """
     from agent_team_backend import agent_messaging, app
     from agent_team_backend.ipc import make_event
@@ -971,11 +974,121 @@ async def cli_send(to: str, text: str, ctx: Context) -> dict[str, Any]:
             },
         )
     )
+    _record_message_sent(msg_key, result.pane.qualified_name)
     return {
         "ok": True,
         "target": result.pane.qualified_name,
         "cross_workspace": result.cross_workspace,
+        "msg_key": msg_key,
     }
+
+
+# ── Delivery outcome of a cli_send (cli_check_message) ─────────────────────
+# msg_key is minted per cli_send call and exists nowhere else in the backend:
+# the SQLite message log is keyed by a separate uid the renderer owns, and the
+# sending window's own map of msg_key lives in renderer memory. So the outcome
+# is tracked here, in memory, bounded by both a count and a TTL — a restart
+# loses it, which is fine for a key nothing outlives the process anyway.
+_MESSAGE_STATUS_MAX = 500
+_MESSAGE_STATUS_TTL_S = 3600.0
+_mcp_message_status: dict[str, dict[str, Any]] = {}
+
+
+def _prune_message_status(now: float) -> None:
+    for key, entry in list(_mcp_message_status.items()):
+        if now - entry["created_at"] >= _MESSAGE_STATUS_TTL_S:
+            del _mcp_message_status[key]
+    # Insertion-ordered, so the front of the dict is the oldest send.
+    while len(_mcp_message_status) >= _MESSAGE_STATUS_MAX:
+        _mcp_message_status.pop(next(iter(_mcp_message_status)))
+
+
+def _record_message_sent(msg_key: str, target: str) -> None:
+    now = time.monotonic()
+    _prune_message_status(now)
+    _mcp_message_status[msg_key] = {
+        "status": "queued",
+        "target": target,
+        "reason": None,
+        "delivered_at": None,
+        "created_at": now,
+    }
+
+
+def _decode_reason(reason: str) -> str:
+    """The renderer encodes its structured reason as JSON; keep the key only."""
+    try:
+        parsed = json.loads(reason)
+    except (ValueError, TypeError):
+        return reason
+    if isinstance(parsed, dict) and isinstance(parsed.get("key"), str):
+        return parsed["key"]
+    return reason
+
+
+def record_delivery_result(msg_key: str, ok: bool, reason: str) -> bool:
+    """Record a receiving window's agent_msg.delivered verdict for cli_check_message.
+
+    Returns False for a msg_key this server never sent (every message the UI
+    sends goes through the same event), which is not an error.
+    """
+    entry = _mcp_message_status.get(msg_key)
+    if entry is None:
+        return False
+    entry["status"] = "delivered" if ok else "failed"
+    entry["reason"] = _decode_reason(reason) if reason else None
+    entry["delivered_at"] = time.monotonic()
+    return True
+
+
+@server.tool()
+async def cli_check_message(msg_key: str, ctx: Context) -> dict[str, Any]:
+    """Look up what became of a message you sent with cli_send.
+
+    `msg_key` is the value cli_send returned. Returns {ok, msg_key, status,
+    target, age_seconds, reason?, settled_after_s?}. `status` is one of:
+
+      - "queued"    — broadcast for delivery; no window has reported back yet.
+                      A message held for a busy pane stays here until it is
+                      actually injected.
+      - "delivered" — the receiving window injected and submitted it.
+      - "failed"    — the receiving window refused or lost it; see `reason`.
+
+    `reason` values come from the receiving window: "rate-limit" (too many
+    messages between the same pair too quickly), "queue-full" (the target's
+    pending-message queue is at its cap), "inject-failed" (typing it into the
+    pane did not take), "pane-closed" (the target went away before delivery),
+    "no-report" (the delivery attempt never reported an outcome).
+
+    Bounds: this is in-memory backend state, not a log. It is lost on backend
+    restart, keeps only the last hour, and only the most recent few hundred
+    sends — an unknown `msg_key` means "not tracked any more", not "never
+    sent". Returns {ok: false, error} for an unknown key.
+    """
+    try:
+        _resolve_caller(ctx)
+    except CallerUnknown as err:
+        return {"ok": False, "error": str(err)}
+    key = (msg_key or "").strip()
+    entry = _mcp_message_status.get(key)
+    if entry is None:
+        return {
+            "ok": False,
+            "error": f"unknown msg_key {key!r} — it was never sent from here, or it "
+            "aged out of the in-memory table (last hour only)",
+        }
+    status: dict[str, Any] = {
+        "ok": True,
+        "msg_key": key,
+        "status": entry["status"],
+        "target": entry["target"],
+        "age_seconds": round(time.monotonic() - entry["created_at"], 1),
+    }
+    if entry["reason"]:
+        status["reason"] = entry["reason"]
+    if entry["delivered_at"] is not None:
+        status["settled_after_s"] = round(entry["delivered_at"] - entry["created_at"], 1)
+    return status
 
 
 # ── Reading another pane (cli_read_log / cli_get_status / cli_wait_idle) ────
@@ -988,40 +1101,59 @@ async def cli_send(to: str, text: str, ctx: Context) -> dict[str, Any]:
 _LOG_TAIL_MAX_BYTES = 512 * 1024
 
 
-def _read_log_tail(path: Path, tail_lines: int) -> tuple[str, bool]:
-    """Tail of a log file, bounded by both a byte window and a line count.
+def _read_log_window(path: Path, since: int | None, tail_lines: int) -> tuple[str, bool, bool, int]:
+    """A window of a log file, bounded by both a byte budget and a line count.
 
-    Reads at most _LOG_TAIL_MAX_BYTES from the end of the file (bounds memory
-    for an arbitrarily large log), then keeps only the last `tail_lines` lines
-    of that window. `truncated` is True whenever content before the returned
-    text was dropped — either the byte window clipped mid-file, or more lines
-    existed in the window than `tail_lines` kept.
+    With `since` None this is the tail: at most _LOG_TAIL_MAX_BYTES from the
+    end of the file (bounds memory for an arbitrarily large log). With `since`
+    set it is everything appended after that byte offset, still capped by the
+    same byte budget. Either way only the last `tail_lines` lines survive.
+
+    Returns (text, truncated, rotated, next_cursor). `truncated` is True
+    whenever content before the returned text was dropped — the byte budget
+    clipped the window, or more lines existed in it than `tail_lines` kept.
+    `rotated` is True when `since` pointed past the end of the file, meaning
+    the log was truncated or replaced and the cursor no longer refers to
+    anything; the read then falls back to a plain tail. `next_cursor` is the
+    offset to pass as `since` next time.
     """
     size = path.stat().st_size
-    read_bytes = min(size, _LOG_TAIL_MAX_BYTES)
+    rotated = since is not None and since > size
+    base = 0 if (since is None or rotated) else max(0, since)
+    start = max(base, size - _LOG_TAIL_MAX_BYTES)
     with path.open("rb") as f:
-        if read_bytes < size:
-            f.seek(size - read_bytes)
+        if start:
+            f.seek(start)
         data = f.read()
     text = data.decode("utf-8", errors="replace")
-    byte_truncated = read_bytes < size
+    byte_truncated = start > base
     lines = text.splitlines()
     line_truncated = len(lines) > tail_lines
     if line_truncated:
         lines = lines[-tail_lines:]
-    return "\n".join(lines), byte_truncated or line_truncated
+    return "\n".join(lines), byte_truncated or line_truncated, rotated, size
 
 
 @server.tool()
-async def cli_read_log(target: str, ctx: Context, tail_lines: int = 200) -> dict[str, Any]:
-    """Read the tail of a CLI pane's conversation log file.
+async def cli_read_log(
+    target: str, ctx: Context, tail_lines: int = 200, since: int | None = None
+) -> dict[str, Any]:
+    """Read a CLI pane's conversation log file.
 
     `target` uses the same addressing as cli_send (cli_list_targets shows the
     forms); a caller with no pane identity must use the qualified
-    `<folder>/<pane>` form. Returns {ok, target, log_path, text, truncated} —
-    `text` is at most 64KB and `tail_lines` lines, whichever is smaller;
-    `truncated` is true when older content was dropped to fit. Fails when the
-    target is unknown or its log file was never recorded / no longer exists.
+    `<folder>/<pane>` form. Returns
+    {ok, target, log_path, text, truncated, next_cursor, rotated} — `text` is
+    at most 512KB and `tail_lines` lines, whichever is smaller; `truncated` is
+    true when older content was dropped to fit. Fails when the target is
+    unknown or its log file was never recorded / no longer exists.
+
+    `since` reads incrementally: pass the `next_cursor` from your previous
+    call to get only what the pane has said since then, instead of re-reading
+    the same tail. The cursor is a byte offset into an append-only capture
+    file. If the file was truncated or replaced under you the cursor no longer
+    means anything — the call then returns a plain tail with `rotated: true`,
+    so treat that read as a fresh start rather than as new output.
     """
     from agent_team_backend import agent_messaging, app
 
@@ -1054,14 +1186,40 @@ async def cli_read_log(target: str, ctx: Context, tail_lines: int = 200) -> dict
     if not log_path.is_file():
         return {"ok": False, "error": f"log file no longer exists: {log_path}"}
 
-    text, truncated = await asyncio.to_thread(_read_log_tail, log_path, max(1, int(tail_lines)))
+    text, truncated, rotated, next_cursor = await asyncio.to_thread(
+        _read_log_window,
+        log_path,
+        None if since is None else max(0, int(since)),
+        max(1, int(tail_lines)),
+    )
     return {
         "ok": True,
         "target": result.pane.qualified_name,
         "log_path": str(log_path),
         "text": text,
         "truncated": truncated,
+        "rotated": rotated,
+        "next_cursor": next_cursor,
     }
+
+
+def _activity_summary(pane_id: str) -> dict[str, Any] | None:
+    """The pane's last recorded activity, shaped for a tool result.
+
+    Only turn_complete carries text; agent_active never does.
+    """
+    from agent_team_backend import app
+
+    activity = app.pane_activity(pane_id)
+    if activity is None:
+        return None
+    last: dict[str, Any] = {
+        "type": activity["event_type"],
+        "age_seconds": round(time.monotonic() - activity["ts_monotonic"], 1),
+    }
+    if activity["text"]:
+        last["text"] = activity["text"]
+    return last
 
 
 @server.tool()
@@ -1075,7 +1233,7 @@ async def cli_get_status(target: str, ctx: Context) -> dict[str, Any]:
     {status, buffer, logPath?} straight from the renderer; it is omitted
     (not a failure) when the window does not reply.
     """
-    from agent_team_backend import agent_messaging, app
+    from agent_team_backend import agent_messaging
 
     try:
         caller = _resolve_caller(ctx)
@@ -1096,14 +1254,8 @@ async def cli_get_status(target: str, ctx: Context) -> dict[str, Any]:
         "agent_key": pane.agent_key,
         "busy": pane.busy,
     }
-    activity = app.pane_activity(pane.pane_id)
-    if activity is not None:
-        last: dict[str, Any] = {
-            "type": activity["event_type"],
-            "age_seconds": round(time.monotonic() - activity["ts_monotonic"], 1),
-        }
-        if activity["text"]:
-            last["text"] = activity["text"]
+    last = _activity_summary(pane.pane_id)
+    if last is not None:
         status["last_activity"] = last
 
     ui_result = await _ui_request(
@@ -1122,6 +1274,12 @@ _WAIT_IDLE_MAX_TIMEOUT_S = 120.0
 # stale, and log-reader activity only exists for the CLIs whose reader emits
 # it — the renderer's status is the one signal that is always current.
 _WAIT_IDLE_UI_PROBE_EVERY = 5
+# A window that misses one probe is not necessarily gone — it may just be busy
+# enough to miss the deadline — but with no window listening at all every probe
+# burns the full _ui_request timeout. So back off (the interval doubles per
+# consecutive failure) instead of retrying at the normal rate, and only give up
+# for good after this many failures in a row.
+_WAIT_IDLE_UI_MAX_FAILURES = 3
 # Deliberately excludes "awaiting": a pane parked on a permission prompt is
 # quiet, but it is waiting on the USER, and sending it work would answer the
 # prompt instead of starting a turn. Waiting it out until the timeout is the
@@ -1141,20 +1299,35 @@ async def cli_wait_idle(target: str, ctx: Context, timeout_s: float = 60.0) -> d
 
     `target` uses the same addressing as cli_send. `timeout_s` is capped at
     120s. Three signals settle it, in the order they become available: the
-    pane's last activity was a turn_complete (claude/codex/copilot/aider/kimi/
-    qwen/pi/grok emit it, so detection is precise for them); at least 10s of
-    silence passed
-    since its last activity; or, while the registry still reports it busy,
+    pane's last activity was a turn_complete (aider/antigravity/claude/codex/
+    copilot/kilo/muse/opencode report one directly, so detection is precise for
+    them; grok/kimi/pi/qwen synthesize one from 8s of silence, so theirs is
+    already an inference; cursor emits none at all); at least 10s of silence
+    passed since its last activity; or, while the registry still reports busy,
     the owning window reports the pane itself as idle/exited/stopped/error.
     That last one matters because the busy flag is frontend-reported and can
-    stay stale. Returns {idle, source, waited_s} where source is
-    "turn_complete", "quiet_period", "ui_status", "never_started", or
-    "timeout"; or {ok: false, error} if `target` cannot be resolved.
+    stay stale. Returns {idle, source, waited_s, last_activity?, ui_status?}
+    where source is "turn_complete", "quiet_period", "ui_status",
+    "never_started", or "timeout"; or {ok: false, error} if `target` cannot be
+    resolved.
+
+    `last_activity` is what cli_get_status reports under the same key — {type,
+    text? (turn_complete only), age_seconds} — so a caller that waited for a
+    turn to end also gets what the turn said, without a second call. It is
+    absent for a pane whose CLI records no activity at all. `ui_status` is the
+    owning window's own word for the pane, present only when a probe reached
+    it during the wait.
 
     "never_started" is idle in the sense that nothing is running, but the pane
     has shown no activity at all — a CLI that finished booting and is sitting
     at its prompt. If you just gave it a task, that task has not begun yet;
     keep waiting rather than treating it as done.
+
+    On timeout the result also carries `reason`, which separates three very
+    different failures: "awaiting" (the pane is parked on a permission prompt
+    and is waiting on a HUMAN, not on work — answer it in the UI), "busy" (it
+    really is still working; wait longer), and "unreachable" (the window that
+    owns the pane stopped answering, so nothing here is current).
     """
     from agent_team_backend import agent_messaging, app
 
@@ -1175,10 +1348,47 @@ async def cli_wait_idle(target: str, ctx: Context, timeout_s: float = 60.0) -> d
     timeout = min(max(float(timeout_s), 0.0), _WAIT_IDLE_MAX_TIMEOUT_S)
     started = time.monotonic()
 
-    def done(source: str) -> dict[str, Any]:
-        return {"idle": True, "source": source, "waited_s": round(time.monotonic() - started, 1)}
-
     ui_reachable = True
+    ui_failures = 0
+    next_ui_probe_tick = 0
+    ui_status: str | None = None
+
+    def done(source: str) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "idle": True,
+            "source": source,
+            "waited_s": round(time.monotonic() - started, 1),
+        }
+        last = _activity_summary(pane_id)
+        if last is not None:
+            out["last_activity"] = last
+        if ui_status is not None:
+            out["ui_status"] = ui_status
+        return out
+
+    def timed_out(waited: float) -> dict[str, Any]:
+        # Three failures a caller has to tell apart, and only one of them is
+        # "wait longer": parked on a human, genuinely working, or nobody left
+        # to ask.
+        if ui_status == "awaiting":
+            reason = "awaiting"
+        elif not ui_reachable or (ui_failures and ui_status is None):
+            reason = "unreachable"
+        else:
+            reason = "busy"
+        out: dict[str, Any] = {
+            "idle": False,
+            "source": "timeout",
+            "reason": reason,
+            "waited_s": round(waited, 1),
+        }
+        last = _activity_summary(pane_id)
+        if last is not None:
+            out["last_activity"] = last
+        if ui_status is not None:
+            out["ui_status"] = ui_status
+        return out
+
     tick = 0
     while True:
         entry = agent_messaging.get(pane_id)
@@ -1191,29 +1401,184 @@ async def cli_wait_idle(target: str, ctx: Context, timeout_s: float = 60.0) -> d
                 return done("turn_complete")
             if time.monotonic() - activity["ts_monotonic"] >= _WAIT_IDLE_QUIET_S:
                 return done("quiet_period")
-        elif ui_reachable and tick % _WAIT_IDLE_UI_PROBE_EVERY == 0:
+        elif ui_reachable and tick >= next_ui_probe_tick:
             # busy says otherwise, so ask the window that can actually see the
-            # pane. Stop probing once it fails: with no window listening every
-            # probe burns the full _ui_request timeout.
+            # pane.
             ui = await _ui_request(
                 workspace_path, "invoke", action="ui.pane.getStatus", args={"paneId": pane_id}
             )
             payload = ui.get("result") if ui.get("ok") else None
             if not isinstance(payload, dict):
-                ui_reachable = False
-            elif payload.get("status") in _UI_IDLE_STATUSES:
-                # A window reporting idle only means "not working right now".
-                # For a pane that has never shown any activity that means "has
-                # not started yet", not "finished" — a caller that just handed
-                # it a task must be able to tell those apart.
-                if app.pane_activity(pane_id) is None:
-                    return done("never_started")
-                return done("ui_status")
+                ui_failures += 1
+                if ui_failures >= _WAIT_IDLE_UI_MAX_FAILURES:
+                    ui_reachable = False
+                else:
+                    next_ui_probe_tick = tick + _WAIT_IDLE_UI_PROBE_EVERY * (2**ui_failures)
+            else:
+                ui_failures = 0
+                next_ui_probe_tick = tick + _WAIT_IDLE_UI_PROBE_EVERY
+                ui_status = str(payload.get("status") or "")
+                if ui_status in _UI_IDLE_STATUSES:
+                    # A window reporting idle only means "not working right
+                    # now". For a pane that has never shown any activity that
+                    # means "has not started yet", not "finished" — a caller
+                    # that just handed it a task must be able to tell those
+                    # apart.
+                    if app.pane_activity(pane_id) is None:
+                        return done("never_started")
+                    return done("ui_status")
         tick += 1
         waited = time.monotonic() - started
         if waited >= timeout:
-            return {"idle": False, "source": "timeout", "waited_s": round(waited, 1)}
+            return timed_out(waited)
         await asyncio.sleep(_WAIT_IDLE_POLL_S)
+
+
+# How long to keep watching for the target to pick the message up before
+# falling through to the idle wait. Delivery is queued behind whatever the
+# pane is doing and the injected text only shows up as activity once its CLI
+# records the prompt, so "nothing yet" right after the send is normal.
+_SEND_AND_WAIT_START_GRACE_S = 10.0
+
+
+@server.tool()
+async def cli_send_and_wait(
+    to: str, text: str, ctx: Context, timeout_s: float = 60.0
+) -> dict[str, Any]:
+    """Send an instruction to another CLI pane and wait for it to finish it.
+
+    cli_send followed by cli_wait_idle, with the race between them handled:
+    the target is idle at the moment you send, so a plain wait would return
+    "already idle" before it ever read your message. This one remembers the
+    target's last activity before sending and only accepts a turn NEWER than
+    that as your answer.
+
+    `to`, `text` and addressing are cli_send's. `timeout_s` (capped at 120s)
+    covers the whole thing, not just the wait.
+
+    On success returns cli_wait_idle's result — {idle: true, source, waited_s,
+    last_activity?, ui_status?} — plus {ok: true, target, msg_key}.
+    `last_activity.text` is what the other agent said, when its CLI records
+    that. ALWAYS read `source`, because it says how much the "finished" is
+    worth:
+
+      - "turn_complete" — the CLI reported the turn ended. Trustworthy.
+        aider/antigravity/claude/codex/copilot/kilo/muse/opencode report it
+        directly; grok/kimi/pi/qwen infer it from 8s of silence, so it is a
+        heuristic for them and a long pause mid-turn can end the wait early.
+      - "quiet_period" — no end-of-turn signal ever arrived, the pane just
+        went quiet. This is the only outcome available for a CLI with no
+        turn_complete at all (e.g. cursor, whose reader emits coarse activity
+        and no end-of-turn record). Treat it as a guess and check the content.
+      - "ui_status" — the owning window reports the pane idle.
+      - "target_lost" — the target stopped being addressable during the wait
+        (its window closed, the pane was killed), so the wait could not
+        finish. The send still happened and `msg_key` is still valid; this is
+        "delivered, but I can no longer confirm it was finished", NOT a failed
+        send — do not resend on it. `error` carries the resolve failure.
+
+    On timeout returns {ok: true, idle: false, source: "timeout", reason,
+    ...}: `reason` is cli_wait_idle's ("awaiting" / "busy" / "unreachable"),
+    or "never_started" when the target stayed idle and never showed any sign
+    of having read the message. `reason` is only meaningful for "timeout" and
+    is absent from every other source. A send that is refused outright returns
+    cli_send's {ok: false, error} unchanged.
+    """
+    from agent_team_backend import agent_messaging, app
+
+    try:
+        caller = _resolve_caller(ctx)
+    except CallerUnknown as err:
+        return {"ok": False, "error": str(err)}
+    me = caller.pane_id if caller.kind == "pane" else ""
+    # Same gate as cli_send, applied before the resolve below so an unqualified
+    # address gets the same answer here as it would there.
+    if caller.kind != "pane" and "/" not in (to or ""):
+        return {"ok": False, "error": _QUALIFIED_TARGET_REQUIRED}
+    resolved = agent_messaging.resolve(me, to)
+    if resolved.pane is None:
+        return {"ok": False, "error": resolved.error or f'unknown target "{to}"'}
+    pane_id = resolved.pane.pane_id
+
+    baseline = app.pane_activity(pane_id)
+    baseline_ts = baseline["ts_monotonic"] if baseline else None
+
+    def has_new_activity() -> bool:
+        current = app.pane_activity(pane_id)
+        if current is None:
+            return False
+        return baseline_ts is None or current["ts_monotonic"] > baseline_ts
+
+    started = time.monotonic()
+    timeout = min(max(float(timeout_s), 0.0), _WAIT_IDLE_MAX_TIMEOUT_S)
+    sent = await cli_send(to, text, ctx)
+    if not sent.get("ok"):
+        return sent
+
+    def remaining() -> float:
+        return timeout - (time.monotonic() - started)
+
+    def wrap(result: dict[str, Any]) -> dict[str, Any]:
+        return {**result, "ok": True, "target": sent["target"], "msg_key": sent["msg_key"]}
+
+    def target_lost(result: dict[str, Any]) -> dict[str, Any]:
+        """Translate cli_wait_idle's {ok: false, error} into a wait outcome.
+
+        It refuses that way when the target stops being addressable partway
+        through — its window closed, the pane was killed — and passing that
+        shape to wrap() would bury an `ok: false` under wrap's `ok: true` and
+        return a result that contradicts itself. The send itself succeeded and
+        `msg_key` is real, so answering `ok: false` would tell the caller the
+        message never went out and invite a resend — duplicate dispatch, which
+        is far worse than an unconfirmed wait. Report the send as the success
+        it was, and let `source` say that the finish can no longer be
+        confirmed. No `reason`: that key only means anything for "timeout".
+        """
+        return wrap(
+            {
+                "idle": False,
+                "source": "target_lost",
+                "error": result.get("error") or "the target is no longer addressable",
+                "waited_s": round(time.monotonic() - started, 1),
+            }
+        )
+
+    # Give the target a moment to pick the message up, so the wait below is
+    # about its turn rather than about the state it was already in.
+    grace_deadline = started + min(timeout, _SEND_AND_WAIT_START_GRACE_S)
+    while True:
+        if has_new_activity() or time.monotonic() >= grace_deadline:
+            break
+        await asyncio.sleep(_WAIT_IDLE_POLL_S)
+
+    while True:
+        left = remaining()
+        if left <= 0:
+            break
+        waited = await cli_wait_idle(to, ctx, timeout_s=left)
+        if waited.get("ok") is False:
+            return target_lost(waited)
+        if not waited.get("idle"):
+            return wrap(waited)
+        if has_new_activity():
+            return wrap(waited)
+        # Idle, but nothing has happened since the send — it has not started
+        # the work yet, so this idleness is the state we sent into.
+        if remaining() <= 0:
+            break
+        await asyncio.sleep(_WAIT_IDLE_POLL_S)
+
+    # No last_activity here on purpose: the only thing on record is the state
+    # the pane was in BEFORE the send, and handing that back is exactly the
+    # mistake this tool exists to avoid.
+    return wrap(
+        {
+            "idle": False,
+            "source": "timeout",
+            "reason": "never_started",
+            "waited_s": round(time.monotonic() - started, 1),
+        }
+    )
 
 
 # ── UI control (ui_invoke / ui_snapshot / ui_list_actions) ─────────────────

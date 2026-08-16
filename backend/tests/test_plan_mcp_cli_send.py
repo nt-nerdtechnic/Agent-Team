@@ -20,8 +20,10 @@ from agent_team_backend.plugins.builtin.navide_plans import plan_mcp, plan_mcp_a
 @pytest.fixture(autouse=True)
 def _clean_registry() -> Any:
     agent_messaging._reset_for_test()
+    plan_mcp._mcp_message_status.clear()
     yield
     agent_messaging._reset_for_test()
+    plan_mcp._mcp_message_status.clear()
 
 
 def _external_ctx() -> Any:
@@ -117,7 +119,11 @@ async def test_send_broadcasts_the_delivery(captured: list[dict[str, Any]]) -> N
     _seed()
     result = await plan_mcp.cli_send("beta/reviewer", "run the tests", _ctx())
 
-    assert result == {"ok": True, "target": "beta/reviewer", "cross_workspace": True}
+    assert result["ok"] is True
+    assert result["target"] == "beta/reviewer"
+    assert result["cross_workspace"] is True
+    # The result is an agent-facing contract; nothing may quietly join it.
+    assert set(result) == {"ok", "target", "cross_workspace", "msg_key"}
     assert len(captured) == 1
     payload = captured[0]["payload"]
     assert captured[0]["type"] == "agent_msg.deliver"
@@ -178,6 +184,125 @@ async def test_message_key_is_unique_per_send(captured: list[dict[str, Any]]) ->
     await plan_mcp.cli_send("beta/reviewer", "two", _ctx())
     keys = {e["payload"]["msg_key"] for e in captured}
     assert len(keys) == 2
+
+
+@pytest.mark.asyncio
+async def test_send_returns_the_msg_key_it_broadcast(captured: list[dict[str, Any]]) -> None:
+    """Without it the sender cannot ask cli_check_message about its own
+    message — the key exists only inside the broadcast payload."""
+    _seed()
+    result = await plan_mcp.cli_send("beta/reviewer", "run the tests", _ctx())
+    assert result["msg_key"] == captured[0]["payload"]["msg_key"]
+
+
+# ── cli_check_message ──────────────────────────────────────────────────────
+@pytest.mark.asyncio
+async def test_check_message_reports_queued_until_a_window_answers(
+    captured: list[dict[str, Any]],
+) -> None:
+    _seed()
+    sent = await plan_mcp.cli_send("beta/reviewer", "hi", _ctx())
+
+    result = await plan_mcp.cli_check_message(sent["msg_key"], _ctx())
+
+    assert result["ok"] is True
+    assert result["status"] == "queued"
+    assert result["target"] == "beta/reviewer"
+    assert "reason" not in result
+    assert "settled_after_s" not in result
+
+
+@pytest.mark.asyncio
+async def test_check_message_reports_a_delivery(captured: list[dict[str, Any]]) -> None:
+    _seed()
+    sent = await plan_mcp.cli_send("beta/reviewer", "hi", _ctx())
+    assert plan_mcp.record_delivery_result(sent["msg_key"], True, "") is True
+
+    result = await plan_mcp.cli_check_message(sent["msg_key"], _ctx())
+
+    assert result["status"] == "delivered"
+    assert isinstance(result["settled_after_s"], float)
+
+
+@pytest.mark.asyncio
+async def test_check_message_decodes_the_windows_structured_failure_reason(
+    captured: list[dict[str, Any]],
+) -> None:
+    """The renderer sends its reason as JSON; an agent should read the key,
+    not the wire format."""
+    _seed()
+    sent = await plan_mcp.cli_send("beta/reviewer", "hi", _ctx())
+    plan_mcp.record_delivery_result(
+        sent["msg_key"], False, '{"key":"rate-limit","params":{"seconds":30}}'
+    )
+
+    result = await plan_mcp.cli_check_message(sent["msg_key"], _ctx())
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "rate-limit"
+
+
+@pytest.mark.asyncio
+async def test_check_message_keeps_an_undecodable_reason_verbatim(
+    captured: list[dict[str, Any]],
+) -> None:
+    # Rows written before reasons were structured carry a plain sentence.
+    _seed()
+    sent = await plan_mcp.cli_send("beta/reviewer", "hi", _ctx())
+    plan_mcp.record_delivery_result(sent["msg_key"], False, "pane closed")
+
+    result = await plan_mcp.cli_check_message(sent["msg_key"], _ctx())
+    assert result["reason"] == "pane closed"
+
+
+@pytest.mark.asyncio
+async def test_check_message_rejects_an_unknown_key() -> None:
+    _seed()
+    result = await plan_mcp.cli_check_message("nope", _ctx())
+    assert result["ok"] is False
+    assert "unknown msg_key" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_check_message_refuses_an_unidentified_caller(
+    captured: list[dict[str, Any]],
+) -> None:
+    _seed()
+    sent = await plan_mcp.cli_send("beta/reviewer", "hi", _ctx())
+    result = await plan_mcp.cli_check_message(sent["msg_key"], _ctx(pane_id=None))
+    assert result["ok"] is False
+    assert "identify your pane" in result["error"]
+
+
+def test_delivery_result_for_a_key_this_server_never_sent_is_ignored() -> None:
+    # Every window reports every delivery, including ones the UI sent.
+    assert plan_mcp.record_delivery_result("someone-elses-key", True, "") is False
+
+
+@pytest.mark.asyncio
+async def test_message_status_table_is_bounded_by_count(
+    captured: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed()
+    monkeypatch.setattr(plan_mcp, "_MESSAGE_STATUS_MAX", 3)
+    keys = [(await plan_mcp.cli_send("beta/reviewer", f"m{i}", _ctx()))["msg_key"] for i in range(5)]
+
+    assert len(plan_mcp._mcp_message_status) <= 3
+    # The oldest sends are the ones evicted; the newest survive.
+    assert keys[-1] in plan_mcp._mcp_message_status
+    assert keys[0] not in plan_mcp._mcp_message_status
+
+
+@pytest.mark.asyncio
+async def test_message_status_table_is_bounded_by_ttl(
+    captured: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed()
+    monkeypatch.setattr(plan_mcp, "_MESSAGE_STATUS_TTL_S", 0.0)
+    old = (await plan_mcp.cli_send("beta/reviewer", "old", _ctx()))["msg_key"]
+    await plan_mcp.cli_send("beta/reviewer", "new", _ctx())
+
+    assert old not in plan_mcp._mcp_message_status
 
 
 # ── Listing ────────────────────────────────────────────────────────────────
@@ -367,12 +492,19 @@ def test_re_register_keeps_busy_but_a_fresh_pane_starts_idle() -> None:
 @pytest.mark.asyncio
 async def test_tools_are_registered_without_a_ctx_argument() -> None:
     tools = {t.name: t for t in await plan_mcp.server.list_tools()}
-    assert set(tools) >= {"cli_send", "cli_list_targets", "cli_open_agent"}
+    assert set(tools) >= {
+        "cli_send", "cli_list_targets", "cli_open_agent", "cli_check_message",
+        "cli_send_and_wait",
+    }
     # The Context parameter is injected, never asked of the agent.
     assert set((tools["cli_send"].inputSchema.get("properties") or {})) == {"to", "text"}
     assert not (tools["cli_list_targets"].inputSchema.get("properties") or {})
     assert set((tools["cli_open_agent"].inputSchema.get("properties") or {})) == {
         "agent", "name", "task", "workspace_path",
+    }
+    assert set((tools["cli_check_message"].inputSchema.get("properties") or {})) == {"msg_key"}
+    assert set((tools["cli_send_and_wait"].inputSchema.get("properties") or {})) == {
+        "to", "text", "timeout_s",
     }
 
 
@@ -408,7 +540,10 @@ async def test_send_from_an_external_caller_delivers_to_a_qualified_target(
     _seed()
     result = await plan_mcp.cli_send("beta/reviewer", "run the tests", _external_ctx())
 
-    assert result == {"ok": True, "target": "beta/reviewer", "cross_workspace": True}
+    assert result["ok"] is True
+    assert result["target"] == "beta/reviewer"
+    assert result["cross_workspace"] is True
+    assert set(result) == {"ok", "target", "cross_workspace", "msg_key"}
     payload = captured[0]["payload"]
     assert payload["from_pane_id"] == ""
     assert payload["from_display"] == "an external client"

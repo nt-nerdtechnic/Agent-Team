@@ -322,6 +322,42 @@ async def test_route_handler_broadcasts_deliver_event(
     assert payload["from_display"] == "alpha/claude-1"
     assert payload["content"] == "run the tests"
     assert payload["msg_key"] == "k1"
+    # A message that starts a thread carries no correlation id, and the payload
+    # stays exactly what an older window expects.
+    assert "reply_to" not in payload
+
+
+@pytest.mark.asyncio
+async def test_route_handler_passes_reply_to_through_to_deliver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reply echoes the correlation id of the message it answers; the registry
+    hands it back untouched so the sending window can link the two rows."""
+    _seed_two_workspaces()
+    events: list[dict[str, Any]] = []
+
+    async def fake_broadcast(event: dict[str, Any], **_kwargs: Any) -> None:
+        events.append(event)
+
+    monkeypatch.setattr(app, "broadcast", fake_broadcast)
+    session = _session()
+    await app.handle_message(session, {
+        "id": "d3",
+        "type": "agent_msg.route",
+        "payload": {
+            "from_pane_id": "p3",
+            "to": "alpha/claude-1",
+            "content": "all green",
+            "msg_key": "k3",
+            "reply_to": "p1:7",
+        },
+    })
+    await asyncio.sleep(0)
+
+    assert session.websocket.sent[0]["payload"]["ok"] is True  # type: ignore[attr-defined]
+    assert len(events) == 1
+    assert events[0]["payload"]["reply_to"] == "p1:7"
+    assert events[0]["payload"]["msg_key"] == "k3"
 
 
 @pytest.mark.asyncio
@@ -400,6 +436,38 @@ async def test_delivered_handler_broadcasts_result_to_every_window(
     assert event["type"] == "agent_msg.delivery_result"
     assert event["payload"] == {"msg_key": "k1", "ok": True, "reason": ""}
     assert exclude is None
+
+
+@pytest.mark.asyncio
+async def test_delivered_handler_also_settles_a_cli_send_for_cli_check_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A message sent through the MCP cli_send has no window holding its
+    msg_key, so the outcome has to be handed to the MCP server too — without
+    disturbing the rebroadcast every window relies on."""
+    from agent_team_backend.plugins.builtin.navide_plans import plan_mcp
+
+    captured: list[dict[str, Any]] = []
+
+    async def fake_broadcast(event: dict[str, Any], **_kwargs: Any) -> None:
+        captured.append(event)
+
+    monkeypatch.setattr(app, "broadcast", fake_broadcast)
+    plan_mcp._record_message_sent("mcp-key", "beta/reviewer")
+    try:
+        session = _session()
+        await app.handle_message(session, {
+            "id": "x1",
+            "type": "agent_msg.delivered",
+            "payload": {"msg_key": "mcp-key", "ok": False, "reason": '{"key":"queue-full"}'},
+        })
+        await asyncio.sleep(0)
+
+        assert plan_mcp._mcp_message_status["mcp-key"]["status"] == "failed"
+        assert plan_mcp._mcp_message_status["mcp-key"]["reason"] == "queue-full"
+        assert captured[0]["type"] == "agent_msg.delivery_result"
+    finally:
+        plan_mcp._mcp_message_status.clear()
 
 
 # ── Message-log persistence handlers ───────────────────────────────────────

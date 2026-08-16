@@ -92,6 +92,10 @@ export interface AgentMessage {
   reason?: MessageReason
   /** Why this message has not been injected yet, while status === 'queued'. */
   hold?: MessageHold
+  /** `uid` of the message this one answers, set when the sender echoed back the
+   *  correlation id carried in that message's envelope. Like `hold` it describes
+   *  an in-memory relation between two live rows, so it is never persisted. */
+  inReplyTo?: string
   createdAt: number
   deliveredAt?: number
   /** Set when the message crossed a workspace boundary. 'outbound' entries live
@@ -163,6 +167,9 @@ export interface MessagingDeps {
     to: string
     content: string
     msgKey: string
+    /** Correlation id this message is answering, echoed back to the window that
+     *  handed it out. Absent for a message that starts a thread. */
+    replyTo?: string
   }) => Promise<RouteResult>
   /** Tell the sending window how an inbound cross-workspace message ended.
    *  The caller serializes; see encodeReason(). */
@@ -185,6 +192,10 @@ const LOG_CAP = 500
  *  drains, and every orderly outcome — delivered, injection failed, pane closed,
  *  queue full — is reported explicitly well before this fires. */
 const REMOTE_ACK_TIMEOUT_MS = 30 * 60_000
+/** How long a correlation id handed out in an envelope stays linkable. Same
+ *  window as the remote-ack backstop: long enough for a slow turn to answer,
+ *  short enough that the table cannot grow for the life of the session. */
+const CORRELATION_TTL_MS = REMOTE_ACK_TIMEOUT_MS
 
 const RATE_LIMIT_REASON: MessageReason = {
   key: 'rate-limit',
@@ -280,6 +291,10 @@ const pairSends = new Map<string, number[]>()
 const remoteOutbound = new Map<string, { id: number; sentAt: number }>()
 /** Inbound cross-workspace messages to report back on, message id → msgKey. */
 const remoteInbound = new Map<number, string>()
+/** Message ids by the correlation id their envelope handed out, so a reply that
+ *  echoes one back can be linked to the message it answers. Populated wherever
+ *  an envelope is rendered; pruned by expireCorrelations(). */
+const correlations = new Map<string, { id: number; sentAt: number }>()
 
 function configureMessaging(d: MessagingDeps): void {
   deps = d
@@ -408,6 +423,17 @@ function setHold(m: AgentMessage, hold: MessageHold | undefined): void {
   else delete m.hold
 }
 
+/** Mark a message as the answer to the one whose envelope handed out `corrId`.
+ *  An id this window never handed out — expired, evicted, or issued by another
+ *  window — leaves the message unlinked, which is exactly how a reply written
+ *  without a `re:` field behaves. */
+function linkReply(m: AgentMessage, corrId: string): void {
+  const rec = correlations.get(corrId)
+  if (!rec) return
+  const original = findMessage(rec.id)
+  if (original) m.inReplyTo = original.uid
+}
+
 /** Record which CLI vendor each side is, skipping the ones we cannot name. */
 function stampAgents(m: AgentMessage, from?: string, to?: string): void {
   if (from) m.fromAgent = from
@@ -497,6 +523,8 @@ function ackInbound(id: number, ok: boolean, reason: MessageReason | null): void
 
 export interface SendOptions {
   includeReplyHint?: boolean
+  /** Correlation id the sender echoed back, when this message is a reply. */
+  replyTo?: string
 }
 
 /**
@@ -515,6 +543,9 @@ function sendMessage(from: string, to: string, content: string, opts: SendOption
     createdAt: now,
   }
   stampAgents(msg, agentOfName(from), agentOfName(to))
+  // Linked before the row is logged so even a rejected reply shows what it was
+  // answering.
+  if (opts.replyTo) linkReply(msg, opts.replyTo)
   pushLog(msg)
 
   const targetPane = paneIdOf(to)
@@ -522,7 +553,7 @@ function sendMessage(from: string, to: string, content: string, opts: SendOption
     // A `<folder>/<pane>` target this window does not own may live in another
     // workspace window; anything else keeps failing straight away as before.
     if (deps.routeRemote && isQualifiedTarget(to)) {
-      dispatchRemote(msg, from, to, content, now)
+      dispatchRemote(msg, from, to, content, now, opts.replyTo)
       return msg
     }
     failMessage(msg.id, { key: 'unknown-target', params: { to } })
@@ -544,7 +575,16 @@ function sendMessage(from: string, to: string, content: string, opts: SendOption
 
   const key = pairKey(from, to, false)
   pairSends.set(key, [...(pairSends.get(key) ?? []), now])
-  envelopes.set(msg.id, renderEnvelope(from, content, opts))
+  // `uid` is already unique across windows and reloads, so it doubles as the
+  // correlation id for a locally delivered message.
+  envelopes.set(
+    msg.id,
+    renderEnvelope(from, content, {
+      includeReplyHint: opts.includeReplyHint,
+      correlationId: msg.uid,
+    }),
+  )
+  correlations.set(msg.uid, { id: msg.id, sentAt: now })
   q.push(msg.id)
   queues.set(targetPane, q)
   return msg
@@ -573,6 +613,7 @@ function dispatchRemote(
   to: string,
   content: string,
   now: number,
+  replyTo?: string,
 ): void {
   const routeRemote = deps?.routeRemote
   if (!routeRemote) {
@@ -597,10 +638,13 @@ function dispatchRemote(
   msg.hold = { key: 'remote-ack' }
   const msgKey = `${fromPaneId}:${msg.id}`
   remoteOutbound.set(msgKey, { id: msg.id, sentAt: now })
+  // The receiving window renders its envelope with this same key, so a reply
+  // that echoes it back lands on this row.
+  correlations.set(msgKey, { id: msg.id, sentAt: now })
 
   void (async () => {
     try {
-      const result = await routeRemote({ fromPaneId, fromName: from, to, content, msgKey })
+      const result = await routeRemote({ fromPaneId, fromName: from, to, content, msgKey, replyTo })
       if (!result.ok) {
         remoteOutbound.delete(msgKey)
         failMessage(msg.id, routeFailureReason(result, to))
@@ -637,6 +681,9 @@ function acceptRemoteMessage(args: {
    *  through sendMessage (the MCP tools), which would otherwise have no loop
    *  guard at all. */
   rateLimit?: boolean
+  /** Correlation id the sender echoed back when this message is a reply to one
+   *  this window sent. Unknown ids leave the row unlinked. */
+  replyTo?: string
 }): boolean {
   if (!deps) return false
   const localName = nameByPane.get(args.targetPaneId)
@@ -658,6 +705,7 @@ function acceptRemoteMessage(args: {
         remoteWorkspace: args.remoteWorkspace,
       }
       stampAgents(rejected, args.fromAgent, agentByPane.get(args.targetPaneId))
+      if (args.replyTo) linkReply(rejected, args.replyTo)
       pushLog(rejected)
       deps.reportDelivery?.(args.msgKey, false, reason)
       return true
@@ -677,6 +725,7 @@ function acceptRemoteMessage(args: {
     remoteWorkspace: args.remoteWorkspace,
   }
   stampAgents(msg, args.fromAgent, agentByPane.get(args.targetPaneId))
+  if (args.replyTo) linkReply(msg, args.replyTo)
   pushLog(msg)
 
   const q = queues.get(args.targetPaneId) ?? []
@@ -685,7 +734,13 @@ function acceptRemoteMessage(args: {
     deps.reportDelivery?.(args.msgKey, false, QUEUE_FULL_REASON)
     return true
   }
-  envelopes.set(msg.id, renderEnvelope(args.fromDisplay, args.content))
+  // The routing key is what the sending side already knows this message by, so
+  // it is the correlation id the reply is asked to echo.
+  envelopes.set(
+    msg.id,
+    renderEnvelope(args.fromDisplay, args.content, { correlationId: args.msgKey }),
+  )
+  correlations.set(args.msgKey, { id: msg.id, sentAt: msg.createdAt })
   remoteInbound.set(msg.id, args.msgKey)
   q.push(msg.id)
   queues.set(args.targetPaneId, q)
@@ -746,6 +801,9 @@ function noteOutboundMessage(args: {
   // Hook the row into the ordinary outbound lifecycle: resolveRemoteDelivery()
   // flips it to delivered/failed, expireStaleRemotes() is the backstop.
   remoteOutbound.set(args.msgKey, { id: msg.id, sentAt: now })
+  // The receiving window renders its envelope with this key, so a reply echoing
+  // it back links to this row — same as a send through dispatchRemote.
+  correlations.set(args.msgKey, { id: msg.id, sentAt: now })
   return true
 }
 
@@ -778,6 +836,14 @@ function expireStaleRemotes(now: number): void {
   }
 }
 
+/** Drop correlation ids old enough that no reply is still coming, so the table
+ *  stays bounded over a long session. */
+function expireCorrelations(now: number): void {
+  for (const [corrId, rec] of [...correlations]) {
+    if (now - rec.sentAt >= CORRELATION_TTL_MS) correlations.delete(corrId)
+  }
+}
+
 /**
  * Broadcast: fan `content` out to every registered pane except `from`, each as
  * an ordinary single-target message (so per-pair rate limit, queue cap, idle
@@ -797,7 +863,9 @@ function pump(): void {
   if (!deps) return
   // Runs even while paused: pausing stops local injection, it does not make a
   // dead target window start answering.
-  expireStaleRemotes(deps.now())
+  const now = deps.now()
+  expireStaleRemotes(now)
+  expireCorrelations(now)
   if (paused.value) {
     for (const q of queues.values()) annotateHold(q, 'paused')
     return
@@ -908,6 +976,7 @@ export function _resetMessagingForTest(): void {
   pairSends.clear()
   remoteOutbound.clear()
   remoteInbound.clear()
+  correlations.clear()
 }
 
 export function useAgentMessaging() {
