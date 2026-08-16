@@ -152,6 +152,20 @@ def backend_port() -> int | None:
         return None
 
 
+def _harden(path: Path) -> None:
+    """Tighten a config file left group/world readable by an older version.
+
+    Everything written below is already 0600, but an unchanged-content run
+    returns before rewriting anything, so a file from before that would keep
+    its old mode forever.
+    """
+    try:
+        if path.stat().st_mode & 0o077:
+            path.chmod(0o600)
+    except OSError:
+        pass
+
+
 def write_claude_config(port: int, path: Path | None = None) -> Path:
     """Write the claude ``--mcp-config`` file pointing at ``port``.
 
@@ -159,18 +173,28 @@ def write_claude_config(port: int, path: Path | None = None) -> Path:
     the user's own MCP config is a separate surface we never touch), so this
     is a plain idempotent rewrite: unchanged content is left alone, a stale
     port from a previous run is overwritten. Atomic via os.replace.
+
+    The URL embeds the host internal token, so the file must never exist
+    group/world readable — see _harden and the 0600 create below.
     """
     path = path or claude_config_path()
     content = json.dumps(config_document("claude", plan_mcp_url(port)), indent=2) + "\n"
     try:
         if path.read_text(encoding="utf-8") == content:
+            _harden(path)
             return path
     except OSError:
         pass
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     try:
-        tmp.write_text(content, encoding="utf-8")
+        # os.open sets the mode at creation, so the token is never readable
+        # between a default-mode create and a chmod; the explicit chmod covers
+        # a umask that widened it. os.replace carries the mode over.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        os.chmod(tmp, 0o600)
         os.replace(tmp, path)
     except OSError:
         tmp.unlink(missing_ok=True)

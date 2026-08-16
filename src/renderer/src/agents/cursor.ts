@@ -14,7 +14,6 @@ export const SPEC = {
   skipPermissionFlag: '--force',
   resumeArgs: (id) => `--resume=${id}`,
   needsSessionMarker: true,
-  turnEndInferredFromSilence: true,
   // Executable is `agent` (the installer also creates the legacy
   // `cursor-agent`); accept both, `=` and space forms, so a command saved by
   // an older build still reads as a resume rather than a custom command.

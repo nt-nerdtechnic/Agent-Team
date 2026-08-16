@@ -358,8 +358,9 @@ describe('isTurnInFlight', () => {
   })
 
   it('infers the end from silence only where that is the only signal', () => {
-    // qwen/pi/cursor never advance lastTurnCompleteAt, so without this the pane
-    // would count as busy forever and stop accepting messages.
+    // qwen/pi only advance lastTurnCompleteAt once their reader's own quiet
+    // window has elapsed, so without this the pane would count as busy while it
+    // sits idle and stop accepting messages.
     const opts = { inferEndFromSilence: true }
     expect(isTurnInFlight(NOW - 19_000, 0, NOW, opts)).toBe(true)
     expect(isTurnInFlight(NOW - 21_000, 0, NOW, opts)).toBe(false)
@@ -378,14 +379,15 @@ describe('isTurnInFlight', () => {
 
   it('lists exactly the vendors whose logs carry no end-of-turn record', () => {
     // The test is where the boundary comes from, not whether a turn_complete
-    // arrives. cursor emits none. grok/kimi/pi/qwen all emit one, but their
-    // readers synthesize it from a quiet window (_TURN_IDLE_SECONDS /
-    // _TURN_IDLE_MS in their backend vendor files) — inference one layer down.
-    // Vendors that read a real record stay out even when it is indirect:
-    // opencode a `step-finish` reason, antigravity a completed step carrying a
-    // reply. See turnEndInferredFromSilence in agents/types.ts.
+    // arrives — every reader emits one. grok/kimi/pi/qwen synthesize theirs
+    // from a quiet window (_TURN_IDLE_SECONDS / _TURN_IDLE_MS in their backend
+    // vendor files) — inference one layer down. Vendors that read a real record
+    // stay out even when it is indirect: opencode (and kilo, on its reader) a
+    // `step-finish` reason, antigravity a completed step carrying a reply,
+    // cursor an assistant row in store.db. See turnEndInferredFromSilence in
+    // agents/types.ts.
     expect([...VENDORS_WITHOUT_TURN_END].sort()).toEqual([
-      'cursor', 'grok', 'kimi', 'pi', 'qwen',
+      'grok', 'kimi', 'pi', 'qwen',
     ])
   })
 })

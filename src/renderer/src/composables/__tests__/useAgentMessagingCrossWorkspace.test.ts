@@ -615,6 +615,24 @@ describe('useAgentMessaging — cross-workspace routing', () => {
     expect(msg.reason?.key).toBe('no-report')
   })
 
+  it('reports the ack timeout to the backend so cli_check_message can settle', async () => {
+    m.registerPane('p1', 'claude', 'sender')
+    m.sendMessage('sender', 'beta/reviewer', 'hi')
+    await flush()
+    const msgKey = routed[0].msgKey
+    expect(reports).toEqual([])
+
+    clock += 31 * 60_000
+    m.pump()
+    expect(reports).toEqual([{ msgKey, ok: false, reason: { key: 'no-report' } }])
+
+    // The report comes back as a delivery_result broadcast; the row is already
+    // resolved and must not be reported or failed a second time.
+    m.resolveRemoteDelivery(msgKey, false, encodeReason({ key: 'no-report' }))
+    m.pump()
+    expect(reports).toHaveLength(1)
+  })
+
   it('expires stale outbound messages even while delivery is paused', async () => {
     m.registerPane('p1', 'claude', 'sender')
     const msg = m.sendMessage('sender', 'beta/reviewer', 'hi')

@@ -141,7 +141,7 @@ const comparison: CompareRow[] = [
       </div>
       <p class="mh-note">
         詳細用法見本頁的「CLI 互傳訊息」主題。
-        「等對方做完」是盡力而為：多數 CLI 會自己回報回合結束，但 Cursor 完全沒有這個訊號，
+        「等對方做完」是盡力而為：多數 CLI（含 Cursor）會自己回報回合結束，
         Kimi／Grok／Pi／Qwen 是靠 8 秒沒動靜推論的。回傳的 <code>source</code> 就是在講
         這次的「做完」有多可信，這幾家請當作參考而不是保證。
         若等待途中對方的視窗被關掉、pane 被砍掉，<code>source</code> 會是

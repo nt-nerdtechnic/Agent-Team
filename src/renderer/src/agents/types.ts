@@ -39,12 +39,14 @@ export interface AgentSpec {
    *  inferred from silence.
    *
    *  The test is where the boundary comes from, NOT whether a turn_complete
-   *  event arrives. cursor emits none at all; grok, kimi, pi and qwen do emit
-   *  one, but their readers synthesize it from their own quiet window — the
-   *  same inference one layer down — so the flag is set for all five. A vendor
+   *  event arrives — every vendor's reader emits one. grok, pi and qwen
+   *  synthesize theirs from their own 8-second quiet window, and kimi flushes
+   *  the latest turn on the same timer when no following prompt closes it: the
+   *  same inference one layer down, so the flag is set for all four. A vendor
    *  whose log states the boundary outright leaves it unset even when that
-   *  statement is indirect: opencode reads a `step-finish` reason, antigravity
-   *  a completed step carrying a reply. Both are records, not timers.
+   *  statement is indirect: opencode (and kilo, which reuses its reader) reads
+   *  a `step-finish` reason, antigravity a completed step carrying a reply,
+   *  cursor an assistant row in its store.db. Records, not timers.
    *
    *  Unset MUST be trusted instead of second-guessed: activity is logged per
    *  output line, not as a heartbeat, so a CLI waiting on a long tool call —
@@ -112,12 +114,12 @@ export interface AgentSpec {
   /** This vendor's log reader carries turn text that has been validated
    *  against real sessions, so turn-text judging (sentinel detection etc.) is
    *  authoritative and the loose in-buffer scan is skipped. Deliberately
-   *  conservative: copilot, aider, kimi, qwen, pi and grok carry turn text too
-   *  — enough for inter-CLI messaging, which only needs the text — but their
-   *  readers have not been validated against real sessions, and for qwen/pi/
-   *  grok the turn boundary is inferred from silence rather than read from a
-   *  record. They stay unflagged and keep the buffer scan until that
-   *  verification happens. */
+   *  conservative: copilot, aider, kimi, qwen, pi, grok, cursor, muse,
+   *  opencode, kilo and antigravity carry turn text too — enough for inter-CLI
+   *  messaging, which only needs the text — but their readers have not been
+   *  validated against real sessions, and for qwen/pi/grok/kimi the turn
+   *  boundary is inferred from silence rather than read from a record. They
+   *  stay unflagged and keep the buffer scan until that verification happens. */
   verifiedTurnText?: boolean
   /** Recognizes a saved command as this vendor's resume invocation (so a
    *  restore doesn't replay it as a user-custom base command). Undefined =

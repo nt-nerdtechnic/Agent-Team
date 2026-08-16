@@ -202,6 +202,9 @@ const RATE_LIMIT_REASON: MessageReason = {
   params: { max: RATE_LIMIT_MAX, seconds: RATE_LIMIT_WINDOW_MS / 1000 },
 }
 const QUEUE_FULL_REASON: MessageReason = { key: 'queue-full', params: { cap: QUEUE_CAP } }
+/** Verdict for an outbound message the receiving window never answered for.
+ *  See expireStaleRemotes(). */
+const NO_REPORT_REASON: MessageReason = { key: 'no-report' }
 
 /** Reserved `to:` keywords that fan a message out to every other pane instead
  *  of a single named target. `all` (case-insensitive) or `*`. */
@@ -827,12 +830,24 @@ function resolveRemoteDelivery(msgKey: string, ok: boolean, reason: string): voi
 
 /** Fail outbound messages whose target window never reported back, so they stop
  *  sitting in `queued` (which clearMessageLog deliberately keeps) and stop
- *  holding a remoteOutbound entry. */
+ *  holding a remoteOutbound entry.
+ *
+ *  The same verdict goes out over the ordinary reportDelivery path, because the
+ *  backend keeps its own per-msgKey status for the MCP `cli_check_message` tool
+ *  and nothing else will ever close this one: the window that was supposed to
+ *  report is gone. Without it that status sits on `queued` until its TTL drops
+ *  it — precisely the case (target window killed, machine slept) the tool
+ *  exists to answer.
+ *
+ *  Reported only AFTER the remoteOutbound entry is dropped: the report comes
+ *  back as an `agent_msg.delivery_result` broadcast, and resolveRemoteDelivery()
+ *  must find nothing left to resolve rather than fail the row a second time. */
 function expireStaleRemotes(now: number): void {
   for (const [msgKey, rec] of [...remoteOutbound]) {
     if (now - rec.sentAt < REMOTE_ACK_TIMEOUT_MS) continue
     remoteOutbound.delete(msgKey)
-    failMessage(rec.id, { key: 'no-report' })
+    failMessage(rec.id, NO_REPORT_REASON)
+    deps?.reportDelivery?.(msgKey, false, NO_REPORT_REASON)
   }
 }
 

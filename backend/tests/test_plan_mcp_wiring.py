@@ -49,6 +49,24 @@ def test_write_claude_config_idempotent(tmp_path: Path) -> None:
     assert not path.with_suffix(".json.tmp").exists()
 
 
+def test_write_claude_config_is_owner_only(tmp_path: Path) -> None:
+    # The URL embeds the host internal token, so the file must never be
+    # group/world readable.
+    path = tmp_path / "plan-mcp.json"
+    plan_mcp_wiring.write_claude_config(4567, path)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_write_claude_config_hardens_existing_wide_file(tmp_path: Path) -> None:
+    # Unchanged content returns before rewriting, so a file left 0644 by an
+    # older version has to be tightened on that path too.
+    path = tmp_path / "plan-mcp.json"
+    plan_mcp_wiring.write_claude_config(4567, path)
+    path.chmod(0o644)
+    plan_mcp_wiring.write_claude_config(4567, path)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
 # ---- backend_port ----
 
 

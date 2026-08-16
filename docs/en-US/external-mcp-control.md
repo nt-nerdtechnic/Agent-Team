@@ -157,15 +157,14 @@ current).
 
 **Capability boundary — idle/completion detection.** Most CLIs' log readers
 emit a `turn_complete` event carrying the finished turn's text: **aider,
-antigravity, claude, codex, copilot, grok, kilo, kimi, muse, opencode, pi,
-qwen**. For those, `cli_wait_idle` and `cli_get_status`'s
+antigravity, claude, codex, copilot, cursor, grok, kilo, kimi, muse,
+opencode, pi, qwen**. For those, `cli_wait_idle` and `cli_get_status`'s
 `last_activity.type` resolve on the precise turn-complete signal — with one
 qualification: **grok, kimi, pi, qwen** have no end-of-turn record of their
 own and synthesize `turn_complete` from 8 seconds of silence in the log, so
 for those four the event is itself an inference, and a long enough pause
-mid-turn can end the wait early. For the
-remaining CLIs (cursor, which reports only that its store was written, and
-plain terminal panes), there is no such signal —
+mid-turn can end the wait early. For a plain terminal pane there is no such
+signal at all —
 `cli_wait_idle` falls back to inferring idleness from a 10-second quiet
 period with no new activity (`source: "quiet_period"` in the response), and
 `cli_get_status`'s `last_activity` may only ever report `"agent_active"`.
@@ -174,11 +173,11 @@ CLI has actually finished.
 
 This is also why `source` is the field to read on a `cli_send_and_wait`
 result: the shape is identical whichever CLI produced it, but the confidence
-is not. `turn_complete` from aider/antigravity/claude/codex/copilot/kilo/
-muse/opencode is the CLI's own word that the turn ended; the same value from
-grok/kimi/pi/qwen is the 8-second-silence inference above; and
-`quiet_period` — the only outcome available for cursor and plain terminal
-panes — means nothing reported an end of turn at all, so check the content
+is not. `turn_complete` from aider/antigravity/claude/codex/copilot/cursor/
+kilo/muse/opencode is the CLI's own word that the turn ended; the same value
+from grok/kimi/pi/qwen is the 8-second-silence inference above; and
+`quiet_period` — the only outcome available for a plain terminal pane —
+means nothing reported an end of turn at all, so check the content
 rather than trusting the signal. `target_lost` is the fourth value and the
 only one that is not a verdict on the turn: it says the pane went away before
 the wait could reach one.

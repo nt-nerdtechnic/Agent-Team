@@ -95,8 +95,23 @@ server = FastMCP(
         "who exists and how to address them (a bare pane name in your own "
         "workspace, `<folder>/<pane>` for another one). Use it when the user "
         "asks you to hand work to, ask something of, or coordinate with "
-        "another pane or project; delivery waits for that pane to be idle, so "
-        "it is not an instant reply channel.\n"
+        "another pane or project; delivery is queued until that pane is idle, "
+        "so cli_send returns before the other agent has read anything. It "
+        "returns a msg_key — pass it to cli_check_message to find out whether "
+        "the message was delivered, refused (with a reason) or still queued. "
+        "That table is backend memory, not a log: only the last hour and the "
+        "last few hundred sends, gone on restart, so an unknown key means "
+        "\"no longer tracked\", not \"never sent\".\n"
+        "\n"
+        "When you need the answer and not just the send, use cli_send_and_wait "
+        "instead: it sends and then waits for that pane to finish the turn, "
+        "handling the race a hand-written cli_send + cli_wait_idle loses (the "
+        "target is still idle the instant you send, so a plain wait returns "
+        "\"already idle\" before it has read you — this one only accepts a "
+        "turn newer than the one it saw before sending). Always read the "
+        "returned `source`: \"turn_complete\" is the other CLI's own word that "
+        "its turn ended, while \"quiet_period\" only means the pane went "
+        "silent, so check what it actually said before trusting it.\n"
         "\n"
         "Delegating to a new agent: cli_open_agent opens a fresh CLI pane and "
         "hands it a task. Use it when work is better done in parallel or by a "
@@ -1300,9 +1315,9 @@ async def cli_wait_idle(target: str, ctx: Context, timeout_s: float = 60.0) -> d
     `target` uses the same addressing as cli_send. `timeout_s` is capped at
     120s. Three signals settle it, in the order they become available: the
     pane's last activity was a turn_complete (aider/antigravity/claude/codex/
-    copilot/kilo/muse/opencode report one directly, so detection is precise for
-    them; grok/kimi/pi/qwen synthesize one from 8s of silence, so theirs is
-    already an inference; cursor emits none at all); at least 10s of silence
+    copilot/cursor/kilo/muse/opencode report one directly, so detection is
+    precise for them; grok/kimi/pi/qwen synthesize one from 8s of silence, so
+    theirs is already an inference); at least 10s of silence
     passed since its last activity; or, while the registry still reports busy,
     the owning window reports the pane itself as idle/exited/stopped/error.
     That last one matters because the busy flag is frontend-reported and can
@@ -1463,13 +1478,13 @@ async def cli_send_and_wait(
     worth:
 
       - "turn_complete" — the CLI reported the turn ended. Trustworthy.
-        aider/antigravity/claude/codex/copilot/kilo/muse/opencode report it
-        directly; grok/kimi/pi/qwen infer it from 8s of silence, so it is a
+        aider/antigravity/claude/codex/copilot/cursor/kilo/muse/opencode report
+        it directly; grok/kimi/pi/qwen infer it from 8s of silence, so it is a
         heuristic for them and a long pause mid-turn can end the wait early.
       - "quiet_period" — no end-of-turn signal ever arrived, the pane just
-        went quiet. This is the only outcome available for a CLI with no
-        turn_complete at all (e.g. cursor, whose reader emits coarse activity
-        and no end-of-turn record). Treat it as a guess and check the content.
+        went quiet. This is the only outcome available for a plain terminal
+        pane, and the fallback whenever a turn ends without its reader
+        recording one. Treat it as a guess and check the content.
       - "ui_status" — the owning window reports the pane idle.
       - "target_lost" — the target stopped being addressable during the wait
         (its window closed, the pane was killed), so the wait could not

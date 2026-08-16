@@ -232,8 +232,10 @@ export function defaultMessagingName(agentKey: string, taken: Iterable<string>):
  *  where silence is the only available signal. See {@link isTurnInFlight}. */
 export const TURN_SILENCE_MS = 20_000
 
-/** CLIs whose logs carry no end-of-turn record at all, so the end of a turn can
- *  only be inferred from silence. Each vendor declares this itself — see
+/** CLIs whose reported turn end cannot be trusted as a boundary, because their
+ *  logs carry no end-of-turn record and the reader synthesizes one from its own
+ *  quiet window. They do emit `turn_complete` — the question is what it is made
+ *  of, not whether it arrives. Each vendor declares this itself — see
  *  `turnEndInferredFromSilence` in agents/types.ts for why the default (trust
  *  the explicit turn-end record) must never be overridden lightly. */
 export const VENDORS_WITHOUT_TURN_END: ReadonlySet<string> = new Set(
@@ -244,10 +246,11 @@ export const VENDORS_WITHOUT_TURN_END: ReadonlySet<string> = new Set(
  * Whether a pane's CLI is still mid-turn, from its activity timestamps.
  *
  * The signal is "activity newer than the last reported turn end". For the
- * vendors in {@link VENDORS_WITHOUT_TURN_END} that alone would latch forever,
- * since their `lastTurnCompleteAt` never advances — those panes would stop
- * accepting inter-CLI messages the moment they did any work — so there, and
- * only there, a long enough silence is taken to mean the turn ended.
+ * vendors in {@link VENDORS_WITHOUT_TURN_END} that signal is unreliable: their
+ * `lastTurnCompleteAt` only advances once their reader's own quiet window has
+ * elapsed, so it can lag arbitrarily far behind the activity it should close —
+ * those panes would stop accepting inter-CLI messages while they sit idle — so
+ * there, and only there, a long enough silence is taken to mean the turn ended.
  */
 export function isTurnInFlight(
   lastActiveAt: number,
