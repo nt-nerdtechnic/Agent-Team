@@ -11,10 +11,11 @@ Two links are opened for the *same member* on two different deviceIds, because
 the server's identity model is a person and "one person, two machines" is the
 case where a message can be echoed back to its own sender.
 
-Sections 1-8 walk the happy path. Sections 9-13 are the boundaries a working
+Sections 1-8 walk the happy path. Sections 9-14 are the boundaries a working
 deployment actually meets: a message key that arrives twice, a policy that
-refuses, a pane whose id changed under a cached hint, a device that went
-offline, and the server itself going away mid-session and coming back.
+refuses, a pane whose id changed under a cached hint, two devices discovering
+each other's panes, a device that went offline, and the server itself going away
+mid-session and coming back.
 
 Usage (server must already be running)::
 
@@ -24,12 +25,12 @@ Usage (server must already be running)::
 Environment:
     NAVIDE_WS            WebSocket URL (default ws://localhost:8787/ws)
     NAVIDE_ADMIN_TOKEN   member credential to authenticate with (default dev-token)
-    NAVIDE_SERVER_DIR    server checkout, used only by section 13 to run a
+    NAVIDE_SERVER_DIR    server checkout, used only by section 14 to run a
                          *disposable second instance* it may kill and restart
                          (default ~/Desktop/Navide-Server/server)
     NAVIDE_VERIFY_PORT   port for that disposable instance (default 8799)
 
-Section 13 never touches the server under NAVIDE_WS: killing a shared instance
+Section 14 never touches the server under NAVIDE_WS: killing a shared instance
 would take down whoever else is using it. It launches its own process, on its
 own port, against its own throwaway database outside the server's repo.
 
@@ -58,7 +59,13 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from agent_team_backend import agent_messaging, app, device_identity, server_link  # noqa: E402
+from agent_team_backend import (  # noqa: E402
+    agent_messaging,
+    app,
+    device_identity,
+    remote_roster,
+    server_link,
+)
 from agent_team_backend.server_link import ServerLink, ServerLinkConfig  # noqa: E402
 
 URL = os.environ.get("NAVIDE_WS") or "ws://localhost:8787/ws"
@@ -80,7 +87,7 @@ PANE_NAME = "receiver"
 RUN = secrets.token_hex(4)
 DEVICE_A = f"verify-a-{RUN}"
 DEVICE_B = f"verify-b-{RUN}"
-#: Section 13 only, against the disposable server.
+#: Section 14 only, against the disposable server.
 DEVICE_C = f"verify-c-{RUN}"
 DEVICE_D = f"verify-d-{RUN}"
 
@@ -172,6 +179,7 @@ class Recorder:
         self.calls: list[dict[str, Any]] = []
         self.pending: list[dict[str, Any]] = []
         self.acked: list[dict[str, Any]] = []
+        self.directories: list[dict[str, Any]] = []
 
         original_request = link._request
 
@@ -197,6 +205,16 @@ class Recorder:
             original_acked(payload)
 
         link._on_message_acked = on_acked  # type: ignore[method-assign]
+
+        original_apply = link._apply_directory
+
+        def on_directory(payload: Any) -> None:
+            # Records both halves of the roster path: the one fetch per
+            # connection and every sessions.changed push after it.
+            self.directories.append(payload if isinstance(payload, dict) else {})
+            original_apply(payload)
+
+        link._apply_directory = on_directory  # type: ignore[method-assign]
 
     def last(self, msg_type: str) -> dict[str, Any] | None:
         for entry in reversed(self.calls):
@@ -254,7 +272,7 @@ async def _wait_for_port(port: int, want_open: bool, timeout: float = 30.0) -> b
 class DisposableServer:
     """A second Navide-Server this script owns outright.
 
-    Section 13 has to watch a link survive its server disappearing, and the only
+    Section 14 has to watch a link survive its server disappearing, and the only
     honest way to test that is to make one disappear. The instance under
     NAVIDE_WS is shared — taking it down would break whoever else is on it — so
     this starts a private one: own port, own database in a temp dir, never a
@@ -613,9 +631,105 @@ async def main() -> int:
             stale_ack,
         )
 
-        print("\n== 12. DEVICE_OFFLINE ==")
-        await link_b._request("sessions.sync", {"sessions": []})
+        print("\n== 12. 遠端名冊：兩台裝置互相看得見對方的 pane ==")
+        # The half stage 2 left out. Without it an agent can address
+        # `<device>/<workspace>/<pane>` but has no way to learn that any device
+        # or pane exists, so the whole cross-device path needs a human to paste
+        # a device id in.
+        check(bool(rec_a.directories), "連線建立時就抓過一次 sessions.directory")
+        before = len(rec_a.directories)
+        # Nudge both reporters: this script has no ws_handlers calling
+        # server_link.roster_changed(), so nothing else would push before the
+        # 30s sweep.
+        link_a.notify_roster_changed()
+        link_b.notify_roster_changed()
+
+        def _both_devices_listed() -> bool:
+            if len(rec_a.directories) <= before:
+                return False
+            rows = (rec_a.directories[-1] or {}).get("sessions") or []
+            listed = {str(r.get("deviceId") or "") for r in rows if isinstance(r, dict)}
+            return {DEVICE_A, DEVICE_B} <= listed
+
+        check(
+            await until(_both_devices_listed, "A 收到含兩台裝置的 sessions.changed"),
+            "名冊變更由 server 主動推播（不必輪詢）",
+        )
+        rows = [r for r in ((rec_a.directories[-1] or {}).get("sessions") or []) if isinstance(r, dict)]
+        row_b = next((r for r in rows if r.get("deviceId") == DEVICE_B), {})
+        check(
+            all(
+                key in row_b
+                for key in ("deviceId", "workspace", "workspacePath", "paneId", "title", "status", "hostOnline")
+            ),
+            "目錄每一列都帶定址與狀態需要的欄位",
+            row_b,
+        )
+        check(row_b.get("hostOnline") is True, "B 在線時它的列 hostOnline=true", row_b)
+        if "deviceName" not in row_b:
+            print(
+                "  ⓘ sessions.directory 不帶 deviceName（Server 的 devices 表有，但沒 join 進來）"
+                " —— 人類可讀的裝置名定址只能退回 deviceId，待 Server 端補欄位"
+            )
+
+        # Both directions, from one snapshot: the only difference between the
+        # two views is which device is "me".
+        remote_roster.replace(rows, local_device_id=DEVICE_A)
+        a_view = {p.address for p in remote_roster.list_panes()}
+        check(
+            not any(p.device_id == DEVICE_A for p in remote_roster.list_panes()),
+            "A 的遠端名冊不含自己的 pane（本機那份在 agent_messaging）",
+            sorted(a_view),
+        )
+        check(
+            f"{DEVICE_B}/{WORKSPACE_LABEL}/{PANE_NAME}" in a_view,
+            "A 看得到 B 上的 pane，位址可直接複製去送",
+            sorted(a_view),
+        )
+        remote_roster.replace(rows, local_device_id=DEVICE_B)
+        b_view = {p.address for p in remote_roster.list_panes()}
+        check(
+            f"{DEVICE_A}/{WORKSPACE_LABEL}/{PANE_NAME}" in b_view,
+            "B 也看得到 A 上的 pane",
+            sorted(b_view),
+        )
+
+        remote_roster.replace(rows, local_device_id=DEVICE_A)
+        target = f"{DEVICE_B}/{WORKSPACE_LABEL}/{PANE_NAME}"
+        check(
+            agent_messaging.parse_target(target).device_id == "",
+            "（前提）非 UUID 形狀的 deviceId 舊的形狀判定認不出來",
+        )
+        match = agent_messaging.parse_remote_target(target)
+        check(
+            match.address is not None and match.address.device_id == DEVICE_B,
+            "名冊讓這個位址解析得出裝置（形狀判定之外的第二次解讀）",
+            {"error": match.error},
+        )
+
+        # A device leaving changes no session row, so only presence.changed
+        # reports it — without that push the roster would keep saying B is
+        # reachable. Stopping B here also sets up section 13.
         await link_b.stop()
+        check(
+            await until(
+                lambda: bool(remote_roster.list_panes())
+                and all(p.offline for p in remote_roster.list_panes() if p.device_id == DEVICE_B),
+                "A 的名冊把 B 的 pane 標成離線",
+            ),
+            "presence.changed 讓離線裝置的 pane 立刻變成 offline",
+            sorted((p.address, p.host_online, p.status) for p in remote_roster.list_panes()),
+        )
+        # B is gone, so it can no longer clean up after itself; this member is
+        # an admin, so A removes its rows instead of leaving them on a shared
+        # server.
+        for row_left in rows:
+            if row_left.get("deviceId") == DEVICE_B and row_left.get("sessionId"):
+                await link_a._request("sessions.remove", {"sessionId": row_left["sessionId"]})
+        remote_roster._reset_for_test()
+
+        print("\n== 13. DEVICE_OFFLINE ==")
+        # link_b was stopped and its rows removed at the end of section 12.
         await asyncio.sleep(0.6)
         offline_reply = await link_a.send_message(
             to={"deviceId": DEVICE_B, "workspace": WORKSPACE_LABEL, "paneName": PANE_NAME},
@@ -651,14 +765,14 @@ async def main() -> int:
 
 
 async def check_server_outage() -> None:
-    """Section 13: the server disappears mid-session, then comes back.
+    """Section 14: the server disappears mid-session, then comes back.
 
     Runs against its own disposable instance, so the shared one under NAVIDE_WS
     is never taken down. Everything here is about a *configured* link: the
     no-server-configured path is a different branch entirely and is covered by
     backend/tests (it must never reach this module at all).
     """
-    print("\n== 13. Server 中途斷線與自動恢復 ==")
+    print("\n== 14. Server 中途斷線與自動恢復 ==")
     if not SERVER_DIR.exists():
         check(False, f"找不到 server 目錄 {SERVER_DIR}（用 NAVIDE_SERVER_DIR 指定）")
         return

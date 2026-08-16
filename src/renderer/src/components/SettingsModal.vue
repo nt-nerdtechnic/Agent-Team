@@ -288,6 +288,15 @@ const settingsSearchItems = computed<SettingsSearchItem[]>(() => [
     keywords: 'settings management export import bundle config path location scope user workspace 設定管理 匯出 匯入 全集 位置 路徑 層級',
   },
   {
+    id: 'general-p2p',
+    tab: 'general',
+    section: 'general-p2p',
+    title: 'Cross-device Messaging / 跨裝置傳訊',
+    group: 'General',
+    summary: 'Link this machine to a Navide-Server so agents can message agents on your other devices.',
+    keywords: 'p2p cross device remote server url access token navide-server connect link relay 跨裝置 遠端 伺服器 網址 權杖 連線 傳訊',
+  },
+  {
     id: 'appearance-language',
     tab: 'appearance',
     section: 'appearance-language',
@@ -831,6 +840,90 @@ const THEME_SWATCHES: Record<string, string[]> = {
   'high-contrast': ['#0a0c10', '#14171c', '#71b7ff', '#4ae168'],
 }
 
+// ── Cross-device link (Navide-Server) ─────────────────────────────────────────
+// The server URL lives in ui_settings and the access token in the credential
+// vault, but both go out through one backend call so the link reconnects once,
+// with the final pair, instead of dialling on a half-edited configuration.
+interface P2pLinkStatus {
+  state: 'unconfigured' | 'connecting' | 'connected' | 'unreachable' | 'unauthorized'
+  serverUrl: string
+  hasToken: boolean
+  detail: string
+  deviceId: string
+  memberId: string
+}
+/** "Connecting" has to resolve on its own, so the section re-asks while it is
+ *  on screen rather than freezing on whatever the save call answered. */
+const P2P_POLL_MS = 3000
+const p2pServerUrl = ref('')
+/** Write-only. The backend never sends a stored token back, so an empty box
+ *  means "keep what is stored", not "there is none". */
+const p2pTokenInput = ref('')
+const p2pStatus = ref<P2pLinkStatus | null>(null)
+const p2pBusy = ref(false)
+const p2pError = ref('')
+let p2pUrlSeeded = false
+let p2pTimer: ReturnType<typeof setInterval> | null = null
+
+async function loadP2pStatus(): Promise<void> {
+  try {
+    const resp = await props.backend.send<{ status: P2pLinkStatus }>('p2p.link.status', {})
+    if (!resp.ok || !resp.payload?.status) return
+    p2pStatus.value = resp.payload.status
+    // Seeded once: the poll must not overwrite a URL the user is halfway
+    // through typing.
+    if (!p2pUrlSeeded) {
+      p2pServerUrl.value = resp.payload.status.serverUrl
+      p2pUrlSeeded = true
+    }
+  } catch { /* non-fatal — the status line keeps its last value */ }
+}
+
+async function applyP2pLink(payload: Record<string, unknown>): Promise<void> {
+  p2pBusy.value = true
+  p2pError.value = ''
+  try {
+    const resp = await props.backend.send<{ status: P2pLinkStatus }>('p2p.link.configure', payload)
+    if (!resp.ok) {
+      p2pError.value = resp.error?.message ?? 'Failed to apply the cross-device settings'
+      return
+    }
+    p2pTokenInput.value = ''
+    if (resp.payload?.status) p2pStatus.value = resp.payload.status
+  } catch (err) {
+    p2pError.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    p2pBusy.value = false
+  }
+}
+
+async function saveP2pLink(): Promise<void> {
+  const payload: Record<string, unknown> = { serverUrl: p2pServerUrl.value }
+  if (p2pTokenInput.value) payload.token = p2pTokenInput.value
+  await applyP2pLink(payload)
+}
+
+async function clearP2pLink(): Promise<void> {
+  p2pServerUrl.value = ''
+  p2pTokenInput.value = ''
+  await applyP2pLink({ serverUrl: '', token: '' })
+}
+
+const p2pState = computed(() => p2pStatus.value?.state ?? 'unconfigured')
+const p2pDotClass = computed(() => {
+  if (p2pState.value === 'connected') return 'ok'
+  if (p2pState.value === 'unauthorized') return 'err'
+  if (p2pState.value === 'unreachable') return 'warn'
+  return 'idle'
+})
+
+watch(activeTab, (tab) => {
+  if (p2pTimer) { clearInterval(p2pTimer); p2pTimer = null }
+  if (tab !== 'general') return
+  void loadP2pStatus()
+  p2pTimer = setInterval(() => { void loadP2pStatus() }, P2P_POLL_MS)
+}, { immediate: true })
+
 // Close on ESC
 function onKeyDown(e: KeyboardEvent) { if (e.key === 'Escape') emit('close') }
 onMounted(() => {
@@ -841,6 +934,7 @@ onMounted(() => {
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeyDown)
   if (previewTimer) { clearTimeout(previewTimer); previewTimer = null }
+  if (p2pTimer) { clearInterval(p2pTimer); p2pTimer = null }
 })
 
 // ── Analyzer tab local state ──────────────────────────────────────────────────
@@ -2299,6 +2393,50 @@ watch(activeTab, (tab) => {
               </div>
             </SettingsCard>
           </SettingsSection>
+
+          <SettingsSection :label="$t('settings.p2p.title')">
+            <SettingsCard>
+              <div class="s-fullrow" data-settings-section="general-p2p">
+                <p class="ap-hint">{{ $t('settings.p2p.hint') }}</p>
+                <div class="field">
+                  <label class="lbl" for="p2p-server-url">{{ $t('settings.p2p.server-url') }}</label>
+                  <input
+                    id="p2p-server-url"
+                    v-model="p2pServerUrl"
+                    type="text"
+                    spellcheck="false"
+                    autocomplete="off"
+                    :disabled="p2pBusy"
+                    :placeholder="$t('settings.p2p.server-url-placeholder')"
+                  />
+                </div>
+                <div class="field p2p-field">
+                  <label class="lbl" for="p2p-token">{{ $t('settings.p2p.token') }}</label>
+                  <input
+                    id="p2p-token"
+                    v-model="p2pTokenInput"
+                    type="password"
+                    spellcheck="false"
+                    autocomplete="off"
+                    :disabled="p2pBusy"
+                    :placeholder="p2pStatus?.hasToken ? $t('settings.p2p.token-stored') : $t('settings.p2p.token-placeholder')"
+                  />
+                  <p class="ap-hint">{{ $t('settings.p2p.token-hint') }}</p>
+                </div>
+                <div class="row-g gap p2p-actions">
+                  <button class="ap-reset" :disabled="p2pBusy" @click="saveP2pLink">{{ $t('settings.p2p.save') }}</button>
+                  <button class="ap-reset" :disabled="p2pBusy" @click="clearP2pLink">{{ $t('settings.p2p.clear') }}</button>
+                </div>
+                <p class="p2p-status">
+                  <span class="p2p-dot" :class="p2pDotClass"></span>
+                  <span>{{ $t('settings.p2p.state-' + p2pState) }}</span>
+                </p>
+                <p v-if="p2pStatus?.detail" class="p2p-detail">{{ p2pStatus.detail }}</p>
+                <p v-if="p2pStatus?.deviceId" class="p2p-detail">{{ $t('settings.p2p.device-id') }}: {{ p2pStatus.deviceId }}</p>
+                <p v-if="p2pError" class="err-msg">{{ p2pError }}</p>
+              </div>
+            </SettingsCard>
+          </SettingsSection>
         </div>
 
         <!-- ══ UPDATES TAB ══ -->
@@ -3184,7 +3322,7 @@ button.tiny {
 /* ── Fields ───────────────────────────────────────────────────────────────── */
 .field { display: flex; flex-direction: column; gap: 4px; }
 .lbl { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-secondary); }
-input[type='text'], input[type='email'], input[type='number'], textarea, select {
+input[type='text'], input[type='email'], input[type='number'], input[type='password'], textarea, select {
   background: var(--bg-subtle);
   border: 1px solid var(--border-default);
   color: var(--text-bright);
@@ -3224,6 +3362,18 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 
 /* ── Messages ─────────────────────────────────────────────────────────────── */
 .err-msg { color: var(--danger-fg); font-size: 11px; margin: 0; }
+
+/* Cross-device link */
+.p2p-field { margin-top: 10px; }
+.p2p-field .ap-hint { margin: 4px 0 0; }
+.p2p-actions { margin-top: 12px; }
+.p2p-status { display: flex; align-items: center; margin: 12px 0 0; font-size: 11.5px; color: var(--text-bright); }
+.p2p-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; flex-shrink: 0; }
+.p2p-dot.ok { background: var(--success-fg); }
+.p2p-dot.err { background: var(--danger-fg); }
+.p2p-dot.warn { background: var(--attention-fg); }
+.p2p-dot.idle { background: var(--text-secondary); }
+.p2p-detail { margin: 4px 0 0; font-size: 11px; color: var(--text-secondary); word-break: break-all; }
 .hint-msg { color: var(--text-secondary); font-size: 11px; margin: 0; }
 
 /* ── Appearance tab ─────────────────────────────────────────────────────────── */

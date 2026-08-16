@@ -109,6 +109,9 @@ def default_responder(conn: "FakeConnection", message: dict) -> dict | None:
     if kind == "sessions.remove":
         conn.removes.append(payload)
         return _ok(message, {"removed": True})
+    if kind == "sessions.directory":
+        conn.directories.append(payload)
+        return _ok(message, {"sessions": conn.server.directory})
     if kind == "policy.get":
         conn.policy_gets.append(payload)
         return _ok(
@@ -158,6 +161,7 @@ class FakeConnection:
         self.upserts: list[dict] = []
         self.syncs: list[dict] = []
         self.removes: list[dict] = []
+        self.directories: list[dict] = []
         self.policy_gets: list[dict] = []
         self.sends: list[dict] = []
         self.acks: list[dict] = []
@@ -212,6 +216,9 @@ class FakeServer:
         self.urls: list[str] = []
         self.policy = ALLOW_ALL_POLICY if policy is None else policy
         self.policy_revision = 1
+        #: What sessions.directory answers with — the whole team space, this
+        #: device's own rows included, exactly as the real server sends it.
+        self.directory: list[dict] = []
 
     def connect(self, url: str):
         self.urls.append(url)
@@ -818,6 +825,164 @@ async def test_a_stale_pane_id_hint_is_re_resolved_and_the_new_id_acked(broadcas
         await link.stop()
 
 
+# ---- remote roster ----------------------------------------------------------
+# The other direction of the roster: what the *server* says about other
+# machines' panes. server_link is the only writer of remote_roster, so these
+# cover the wiring — one full read per connection, then the push — while
+# test_remote_roster.py covers the cache's own rules.
+
+
+def _row(session_id: str, device_id: str, **overrides) -> dict:
+    row = {
+        "sessionId": session_id,
+        "deviceId": device_id,
+        "workspace": "proj-b",
+        "workspacePath": "/home/other/proj-b",
+        "title": "builder",
+        "paneId": f"pane-{session_id}",
+        "agentKey": "codex",
+        "status": "waiting",
+        "hostOnline": True,
+    }
+    row.update(overrides)
+    return row
+
+
+async def test_the_directory_is_read_once_per_connection_without_our_own_rows():
+    from agent_team_backend import remote_roster
+
+    from agent_team_backend import device_identity
+
+    agent_messaging.register("p1", "reviewer", "/tmp/proj-a", agent_key="claude")
+    server = FakeServer()
+    # The directory the server sends back always includes this device's own
+    # rows; keeping them would give one pane two answers, the server's copy
+    # being the stale one.
+    server.directory = [
+        _row("s-far", "dev-far"),
+        _row("s-mine", device_identity.device_id(), workspace="proj-a", title="reviewer"),
+    ]
+    link = await _connected(server)
+    try:
+        conn = server.opened[0]
+        await _until(lambda: bool(conn.directories))
+        assert len(conn.directories) == 1
+        assert [p.device_id for p in remote_roster.list_panes()] == ["dev-far"]
+        assert remote_roster.list_panes()[0].address == "dev-far/proj-b/builder"
+    finally:
+        await link.stop()
+        remote_roster._reset_for_test()
+
+
+async def test_a_sessions_changed_push_replaces_the_roster():
+    from agent_team_backend import remote_roster
+
+    server = FakeServer()
+    link = await _connected(server)
+    try:
+        conn = server.opened[0]
+        await conn.push(
+            {"type": "sessions.changed", "payload": {"sessions": [_row("s1", "dev-far")]}}
+        )
+        await _until(lambda: len(remote_roster.list_panes()) == 1)
+
+        await conn.push(
+            {
+                "type": "sessions.changed",
+                "payload": {"sessions": [_row("s2", "dev-far", title="other")]},
+            }
+        )
+        await _until(lambda: remote_roster.list_panes()[0].pane_name == "other")
+        assert len(remote_roster.list_panes()) == 1
+    finally:
+        await link.stop()
+        remote_roster._reset_for_test()
+
+
+async def test_presence_changed_marks_a_departed_device_offline():
+    """A device leaving changes no session row, so sessions.changed never fires
+    for it; without presence.changed the roster would keep calling it online."""
+    from agent_team_backend import remote_roster
+
+    server = FakeServer()
+    link = await _connected(server)
+    try:
+        conn = server.opened[0]
+        await conn.push(
+            {"type": "sessions.changed", "payload": {"sessions": [_row("s1", "dev-far")]}}
+        )
+        await _until(lambda: len(remote_roster.list_panes()) == 1)
+        assert remote_roster.list_panes()[0].offline is False
+
+        await conn.push({"type": "presence.changed", "payload": {"devices": []}})
+        await _until(lambda: remote_roster.list_panes()[0].offline is True)
+        assert remote_roster.list_panes()[0].host_online is False
+
+        await conn.push(
+            {"type": "presence.changed", "payload": {"devices": [{"deviceId": "dev-far"}]}}
+        )
+        await _until(lambda: remote_roster.list_panes()[0].host_online is True)
+    finally:
+        await link.stop()
+        remote_roster._reset_for_test()
+
+
+async def test_the_remote_roster_outlives_the_connection_that_fetched_it():
+    """Same call as the policy cache: a link that dropped a second ago does not
+    make the panes it knew about stop existing."""
+    from agent_team_backend import remote_roster
+
+    server = FakeServer()
+    server.directory = [_row("s1", "dev-far")]
+    link = await _connected(server)
+    try:
+        await _until(lambda: len(remote_roster.list_panes()) == 1)
+        await server.opened[0].close()
+        await _until(lambda: link._ws is None)
+        assert len(remote_roster.list_panes()) == 1
+
+        # And the reconnect re-reads it, because pushes sent while this device
+        # was away were missed.
+        await _until(lambda: len(server.opened) >= 2 and bool(server.opened[1].directories))
+    finally:
+        await link.stop()
+        remote_roster._reset_for_test()
+
+
+async def test_a_rejected_directory_read_leaves_the_previous_cache_in_force():
+    from agent_team_backend import remote_roster
+
+    def no_directory(conn: FakeConnection, message: dict):
+        if message.get("type") == "sessions.directory":
+            conn.directories.append(message.get("payload") or {})
+            return _bad_request(message, "nope")
+        return default_responder(conn, message)
+
+    remote_roster.replace([_row("s1", "dev-far")], local_device_id="whoever")
+    server = FakeServer(responder=no_directory)
+    link = await _connected(server)
+    try:
+        await _until(lambda: bool(server.opened[0].directories))
+        await asyncio.sleep(0.05)
+        assert len(remote_roster.list_panes()) == 1
+    finally:
+        await link.stop()
+        remote_roster._reset_for_test()
+
+
+async def test_an_unconfigured_link_never_touches_the_remote_roster():
+    """The no-server guarantee, at this module's edge: nothing is dialled, so
+    nothing can ever land in the cache."""
+    from agent_team_backend import remote_roster
+
+    server = FakeServer()
+    link = make_link(server, config=ServerLinkConfig())
+    assert await link.start() is False
+    await asyncio.sleep(0.05)
+    assert remote_roster.list_panes() == []
+    await link.stop()
+
+
 # ---- configuration ----------------------------------------------------------
 
 
@@ -885,3 +1050,282 @@ async def test_module_helpers_do_nothing_without_a_link():
     )
     assert server_link.note_delivery_result("k", True, "") is False
     await server_link.stop()
+
+# ---- reconfiguring without a backend restart --------------------------------
+
+
+@pytest.fixture
+def module_link(monkeypatch):
+    """Drive the process-wide link (start/stop/reconfigure/status) against the
+    fake server, with the configuration under the test's control.
+
+    Both ``ServerLink`` and ``load_config`` are swapped: ``start()`` constructs
+    the class by name and ``status()`` reads the module function, so patching
+    one without the other would leave half the path talking to the real
+    Keychain. The factory deliberately passes no ``config_loader`` so the
+    instance picks up whatever ``load_config`` is patched to at the moment it
+    is built — which is how a test can hand the link the real config path.
+    """
+    state = {"config": ServerLinkConfig()}
+    server = FakeServer(count=16)
+
+    def factory() -> ServerLink:
+        return ServerLink(
+            connect=server.connect,
+            token_clearer=lambda: None,
+            device_name="test-box",
+        )
+
+    monkeypatch.setattr(server_link, "ServerLink", factory)
+    monkeypatch.setattr(server_link, "load_config", lambda: state["config"])
+    yield state, server
+
+
+async def test_reconfigure_dials_once_the_settings_are_filled_in(module_link):
+    """The gap a Settings UI walks straight into: start() runs at boot, so a
+    configuration saved afterwards has to be picked up without a restart."""
+    state, server = module_link
+    await server_link.start()
+    try:
+        assert server_link._link is None
+        assert server.opened == []
+        assert (await server_link.status())["state"] == server_link.STATE_UNCONFIGURED
+
+        # The URL a connected link reports comes from ui_settings, not from the
+        # loader the fixture fakes — that is where the Settings pane wrote it.
+        app.ui_settings_store.set({server_link.SERVER_URL_SETTING: CONFIG.url})
+        state["config"] = CONFIG
+        await server_link.reconfigure()
+        await _until(lambda: bool(server.opened and server.opened[0].syncs))
+        assert server.urls == [CONFIG.url]
+        status = await server_link.status()
+        assert status["state"] == server_link.STATE_CONNECTED
+        assert status["serverUrl"] == CONFIG.url
+        assert status["hasToken"] is True
+    finally:
+        await server_link.stop()
+        app.ui_settings_store.set({server_link.SERVER_URL_SETTING: None})
+
+
+async def test_reconfigure_replaces_the_link_rather_than_adding_one(module_link):
+    """Two links for one device would both publish the roster and both take
+    delivery of the same relayed message."""
+    state, server = module_link
+    state["config"] = CONFIG
+    await server_link.start()
+    try:
+        first = server_link._link
+        await _until(lambda: bool(server.opened and server.opened[0].syncs))
+
+        state["config"] = ServerLinkConfig(url="ws://elsewhere/ws", token="tok-2")
+        await server_link.reconfigure()
+        await _until(lambda: len(server.opened) == 2 and bool(server.opened[1].syncs))
+
+        assert server_link._link is not first
+        assert first is not None and first._task is None
+        assert server.urls == [CONFIG.url, "ws://elsewhere/ws"]
+    finally:
+        await server_link.stop()
+
+
+async def test_clearing_the_settings_takes_the_link_back_to_inert(module_link):
+    """The regression line: erasing the configuration must restore exactly the
+    behaviour of a machine that never had a server."""
+    state, server = module_link
+    state["config"] = CONFIG
+    await server_link.start()
+    try:
+        await _until(lambda: bool(server.opened and server.opened[0].syncs))
+
+        state["config"] = ServerLinkConfig()
+        await server_link.reconfigure()
+
+        assert server_link._link is None
+        assert len(server.opened) == 1
+        assert (await server_link.status())["state"] == server_link.STATE_UNCONFIGURED
+        assert (
+            await server_link.send_message(to={}, sender=None, text="hi", msg_key="k")
+            is None
+        )
+        server_link.roster_changed()  # must not raise
+    finally:
+        await server_link.stop()
+
+
+async def test_status_reports_a_rejected_token_as_unauthorized(module_link):
+    state, server = module_link
+    state["config"] = CONFIG
+    server.connections = [
+        FakeConnection(rejecting_responder("AUTH_REJECTED"), server) for _ in range(4)
+    ]
+    await server_link.start()
+    try:
+        await _until(
+            lambda: server_link._link is not None
+            and server_link._link.state() == server_link.STATE_UNAUTHORIZED
+        )
+        status = await server_link.status()
+        assert status["state"] == server_link.STATE_UNAUTHORIZED
+        assert "AUTH_REJECTED" in status["detail"]
+        assert status["hasToken"] is True
+    finally:
+        await server_link.stop()
+
+
+async def test_status_never_carries_the_access_token(module_link):
+    state, server = module_link
+    state["config"] = CONFIG
+    await server_link.start()
+    try:
+        await _until(lambda: bool(server.opened and server.opened[0].syncs))
+        status = await server_link.status()
+        assert CONFIG.token not in json.dumps(status)
+        assert "token" not in status
+    finally:
+        await server_link.stop()
+
+
+async def test_state_is_unreachable_after_a_failed_dial():
+    """A server that is merely down must not read the same as a rejected
+    credential: one of the two is worth retyping the token for."""
+
+    def refuse(url: str):
+        raise ConnectionError("connection refused")
+
+    link = ServerLink(
+        connect=refuse, config_loader=lambda: CONFIG, device_name="test-box"
+    )
+    assert await link.start() is True
+    try:
+        assert link.state() == server_link.STATE_CONNECTING
+        await _until(lambda: link.state() == server_link.STATE_UNREACHABLE)
+        assert "connection refused" in link.last_error
+    finally:
+        await link.stop()
+
+
+async def test_a_reconnect_clears_the_stale_error():
+    """last_error is what tells "cannot reach" from "not tried yet", so a link
+    that comes back must stop reporting the failure that preceded it."""
+    server = FakeServer()
+    dials = {"n": 0}
+
+    def flaky(url: str):
+        dials["n"] += 1
+        if dials["n"] == 1:
+            raise ConnectionError("connection refused")
+        return server.connect(url)
+
+    link = ServerLink(
+        connect=flaky, config_loader=lambda: CONFIG, device_name="test-box"
+    )
+    await link.start()
+    try:
+        await _until(lambda: link.state() == server_link.STATE_UNREACHABLE)
+        await _until(lambda: link.state() == server_link.STATE_CONNECTED)
+        assert link.last_error == ""
+    finally:
+        await link.stop()
+
+
+# ---- ws handlers ------------------------------------------------------------
+
+
+class FakeWebSocket:
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+
+    async def send_json(self, payload: dict) -> None:
+        self.sent.append(payload)
+
+
+def _ws_session() -> "app.Session":
+    return app.Session(FakeWebSocket())  # type: ignore[arg-type]
+
+
+async def test_configure_handler_writes_both_halves_and_reconnects(
+    module_link, tmp_path, monkeypatch
+):
+    """One call has to land the URL in ui_settings, the token in the vault, and
+    a dialling link — the three things a user cannot do from the UI otherwise."""
+    state, server = module_link
+    vault = CredentialVault(
+        root=tmp_path / "vault", real_home=tmp_path / "home", platform="linux"
+    )
+    monkeypatch.setattr(app, "credential_vault", vault)
+    # The handler writes through the real config path; the link reads the
+    # fixture's, so `state` is followed along by hand.
+    monkeypatch.setattr(
+        server_link,
+        "load_config",
+        lambda: ServerLinkConfig(url=server_link.server_url(), token=server_link.access_token()),
+    )
+    session = _ws_session()
+    try:
+        await app.handle_message(
+            session,
+            {
+                "id": "c1",
+                "type": "p2p.link.configure",
+                "payload": {"serverUrl": "  ws://localhost:8787/ws  ", "token": "tok-abc"},
+            },
+        )
+        reply = session.websocket.sent[0]
+        assert reply["type"] == "p2p.link.configure.result"
+        assert reply["ok"] is True
+        assert vault.read_app_secret(server_link.ACCESS_TOKEN_SECRET) == "tok-abc"
+        assert server_link.server_url() == CONFIG.url
+        await _until(lambda: bool(server.opened and server.opened[0].syncs))
+
+        session2 = _ws_session()
+        await app.handle_message(session2, {"id": "s1", "type": "p2p.link.status", "payload": {}})
+        status = session2.websocket.sent[0]["payload"]["status"]
+        assert status["state"] == server_link.STATE_CONNECTED
+        assert status["hasToken"] is True
+        assert "token" not in status
+    finally:
+        await server_link.stop()
+        app.ui_settings_store.set({server_link.SERVER_URL_SETTING: None})
+
+
+async def test_configure_handler_leaves_the_token_alone_when_absent(
+    module_link, tmp_path, monkeypatch
+):
+    """The UI never shows the stored token, so saving a new URL must not wipe
+    the credential the user could not have retyped."""
+    module_link  # the link is patched so nothing dials the real network
+    vault = CredentialVault(
+        root=tmp_path / "vault", real_home=tmp_path / "home", platform="linux"
+    )
+    monkeypatch.setattr(app, "credential_vault", vault)
+    vault.write_app_secret(server_link.ACCESS_TOKEN_SECRET, "tok-abc")
+    session = _ws_session()
+    try:
+        await app.handle_message(
+            session,
+            {"id": "c1", "type": "p2p.link.configure", "payload": {"serverUrl": "ws://x/ws"}},
+        )
+        assert session.websocket.sent[0]["ok"] is True
+        assert vault.read_app_secret(server_link.ACCESS_TOKEN_SECRET) == "tok-abc"
+
+        # An explicit empty string is how the user erases it.
+        await app.handle_message(
+            session,
+            {"id": "c2", "type": "p2p.link.configure", "payload": {"token": ""}},
+        )
+        assert session.websocket.sent[1]["ok"] is True
+        assert vault.read_app_secret(server_link.ACCESS_TOKEN_SECRET) is None
+    finally:
+        await server_link.stop()
+        app.ui_settings_store.set({server_link.SERVER_URL_SETTING: None})
+
+
+async def test_configure_handler_rejects_a_non_string_url():
+    session = _ws_session()
+    await app.handle_message(
+        session,
+        {"id": "c1", "type": "p2p.link.configure", "payload": {"serverUrl": 42}},
+    )
+    reply = session.websocket.sent[0]
+    assert reply["ok"] is False
+    assert reply["error"]["code"] == "BAD_REQUEST"

@@ -837,6 +837,24 @@
       "other": "Other",
       "updates": "Updates"
     },
+    "p2p": {
+      "title": "Cross-device messaging",
+      "hint": "Link this machine to a Navide-Server so agents here can send messages to agents running on your other devices. Leave both fields empty and nothing leaves this machine.",
+      "server-url": "Server URL",
+      "server-url-placeholder": "wss://navide.example.com/ws",
+      "token": "Access token",
+      "token-placeholder": "Paste the token issued by your server",
+      "token-stored": "A token is stored — leave empty to keep it",
+      "token-hint": "Kept in the system keychain and never shown again.",
+      "save": "Save and connect",
+      "clear": "Disconnect",
+      "device-id": "This device",
+      "state-unconfigured": "Not configured",
+      "state-connecting": "Connecting…",
+      "state-connected": "Connected",
+      "state-unreachable": "Cannot reach the server",
+      "state-unauthorized": "Access token rejected"
+    },
     "storage": {
       "intro": "Disk space used by this app, its CLI agent homes, and the workspaces you have opened.",
       "rescan": "Rescan",

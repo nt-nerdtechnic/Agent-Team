@@ -19,6 +19,18 @@ def _clean_registry() -> Any:
     agent_messaging._reset_for_test()
 
 
+@pytest.fixture
+def remote_roster_clean() -> Any:
+    """Only for the tests that seed a remote roster. Deliberately not autouse:
+    every other test in this file must run against a roster nothing ever
+    touched, which is the state of a machine with no server configured."""
+    from agent_team_backend import remote_roster
+
+    remote_roster._reset_for_test()
+    yield
+    remote_roster._reset_for_test()
+
+
 class FakeWebSocket:
     def __init__(self) -> None:
         self.sent: list[dict[str, Any]] = []
@@ -373,12 +385,100 @@ def test_a_multi_segment_workspace_is_not_mistaken_for_a_device() -> None:
 
 
 def test_a_human_readable_leading_segment_is_read_as_workspace() -> None:
-    """Device *names* need a roster this round does not build, so `laptop/...`
-    stays a workspace address and fails as one."""
+    """`resolve` is local-only addressing and stays that way: a non-UUID leading
+    segment is a workspace here and fails as one. Device names are a second
+    reading, tried by the caller afterwards — see parse_remote_target."""
     _seed_two_workspaces()
     result = agent_messaging.resolve("p1", "laptop-b/beta/reviewer")
     assert result.code == "unknown-workspace"
     assert result.params == {"ws": "laptop-b/beta"}
+
+
+# ── Device labels from the remote roster ───────────────────────────────────
+# `parse_remote_target` is the second reading of a target, consulted only after
+# `resolve` has already failed on it. These pin that ordering, because getting
+# it backwards would silently re-point addresses that work today.
+
+
+def _seed_remote(**overrides: object) -> None:
+    from agent_team_backend import remote_roster
+
+    row = {
+        "sessionId": "sess-1",
+        "deviceId": "far-device",
+        "deviceName": "laptop-b",
+        "workspace": "beta",
+        "workspacePath": "/home/other/beta",
+        "title": "reviewer",
+        "paneId": "p-far",
+        "agentKey": "claude",
+        "status": "waiting",
+        "hostOnline": True,
+    }
+    row.update(overrides)
+    remote_roster.replace([row], local_device_id="this-device")
+
+
+def test_parse_remote_target_finds_nothing_without_a_roster() -> None:
+    """The no-server line: an empty roster makes every second reading a no-op,
+    so the caller's answer is the one it always gave."""
+    empty = agent_messaging.parse_remote_target("laptop-b/beta/reviewer")
+    assert (empty.address, empty.error, empty.code) == (None, None, None)
+
+
+def test_a_device_name_resolves_once_the_roster_knows_it(remote_roster_clean) -> None:
+    _seed_remote()
+    match = agent_messaging.parse_remote_target("laptop-b/beta/reviewer")
+    assert match.address is not None
+    assert match.address.device_id == "far-device"
+    assert match.address.workspace == "beta"
+    assert match.address.pane_name == "reviewer"
+    # The id form reads the same way, which is what cli_list_targets advertises.
+    by_id = agent_messaging.parse_remote_target("far-device/beta/reviewer")
+    assert by_id.address is not None and by_id.address.device_id == "far-device"
+
+
+def test_local_resolution_wins_over_a_device_of_the_same_name(remote_roster_clean) -> None:
+    """The protection that must survive device names: `two/proj/target` names a
+    workspace today, and a machine called `two` must not take it away. `resolve`
+    still answers it, and the caller only ever consults the roster after
+    `resolve` has failed."""
+    agent_messaging.register("p1", "a", "/one/proj")
+    agent_messaging.register("p2", "target", "/two/proj")
+    _seed_remote(deviceName="two", workspace="proj", title="target")
+
+    assert agent_messaging.resolve("p1", "two/proj/target").pane.pane_id == "p2"
+
+
+def test_a_two_segment_target_is_never_read_as_a_device(remote_roster_clean) -> None:
+    """`folder/pane` stays a workspace address, matching the rule for id-shaped
+    device segments — otherwise a device name would swallow it whole."""
+    _seed_remote()
+    assert agent_messaging.parse_remote_target("laptop-b/reviewer").address is None
+
+
+def test_an_ambiguous_device_name_is_refused_not_guessed(remote_roster_clean) -> None:
+    from agent_team_backend import remote_roster
+
+    remote_roster.replace(
+        [
+            {
+                "sessionId": f"s{i}",
+                "deviceId": f"d{i}",
+                "deviceName": "laptop",
+                "workspace": "beta",
+                "title": "reviewer",
+                "status": "waiting",
+                "hostOnline": True,
+            }
+            for i in (1, 2)
+        ],
+        local_device_id="this-device",
+    )
+    match = agent_messaging.parse_remote_target("laptop/beta/reviewer")
+    assert match.address is None
+    assert match.code == "ambiguous-device"
+    assert match.params == {"device": "laptop", "n": "2"}
 
 
 def test_a_pane_name_containing_a_slash_behaves_the_same_with_a_device_segment() -> None:

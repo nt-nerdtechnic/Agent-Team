@@ -2524,6 +2524,70 @@ async def ui_settings_set(session: "Session", msg_id: str, msg_type: str, payloa
         )
 
 
+# ── Cross-device link (p2p.*) ───────────────────────────────────────────────
+# The Navide-Server URL lives in ui_settings and its access token in the
+# credential vault, so a settings pane that wrote them through the generic
+# handlers would need two round trips in the right order — and would still not
+# make the link dial, because server_link.start() only runs at boot. These two
+# handlers exist so the whole configuration is one write followed by one
+# reconnect, and so the token only ever travels toward the vault.
+@handler("p2p.link.status")
+async def p2p_link_status(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    await session.send_json(
+        make_response(msg_id, msg_type, {"status": await server_link.status()})
+    )
+
+
+@handler("p2p.link.configure")
+async def p2p_link_configure(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Persist the server URL and/or the access token, then reconnect.
+
+    Both fields are optional and absence means "leave it alone", so the UI can
+    save a new URL without making the user retype a token it is never allowed
+    to show them. An empty string is not absence: it is how the user clears a
+    field, which is what takes the link back to doing nothing at all.
+    """
+    from . import app
+
+    url = payload.get("serverUrl")
+    token = payload.get("token")
+    if url is not None and not isinstance(url, str):
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "serverUrl must be a string")
+        )
+        return
+    if token is not None and not isinstance(token, str):
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "token must be a string")
+        )
+        return
+
+    delta: dict = {}
+    if url is not None:
+        cleaned = url.strip()
+        delta = app.ui_settings_store.set(
+            {server_link.SERVER_URL_SETTING: cleaned or None}
+        )
+    if token is not None:
+        try:
+            await vault_to_thread(server_link.set_access_token, token)
+        except Exception as err:  # noqa: BLE001
+            await session.send_json(
+                make_error(msg_id, msg_type, "P2P_TOKEN_WRITE_FAILED", str(err))
+            )
+            return
+
+    await server_link.reconfigure()
+    await session.send_json(
+        make_response(msg_id, msg_type, {"status": await server_link.status()})
+    )
+    if delta:
+        # Same reason as ui.settings.set: other windows cache ui_settings. The
+        # sender is not excluded because it wrote through this handler rather
+        # than through its own settings cache, so it needs the delta too.
+        await app.broadcast(make_event("ui.settings_changed", {"settings": delta}))
+
+
 # ── Settings bundle / metadata (settings.*) ─────────────────────────────────
 @handler("settings.paths")
 async def settings_paths(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:

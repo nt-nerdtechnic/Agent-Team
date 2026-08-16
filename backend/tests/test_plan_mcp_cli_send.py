@@ -871,3 +871,196 @@ async def test_this_device_id_still_resolves_locally(
     assert result["ok"] is True
     assert result["target"] == "beta/reviewer"
     assert captured[0]["payload"]["target_pane_id"] == "pb"
+
+
+# ── Remote pane discovery ──────────────────────────────────────────────────
+# Without a remote roster an agent could send to `<device>/<workspace>/<pane>`
+# but had no way to learn that any such device or pane existed, which made the
+# whole cross-device path unusable without a human pasting a device id in.
+
+
+@pytest.fixture
+def roster() -> Any:
+    """Seeds nothing: the default is an empty roster, i.e. a machine with no
+    server configured, and most tests in this file must run against that."""
+    from agent_team_backend import remote_roster
+
+    remote_roster._reset_for_test()
+    yield remote_roster
+    remote_roster._reset_for_test()
+
+
+def _remote_row(**overrides: Any) -> dict[str, Any]:
+    row = {
+        "sessionId": "sess-1",
+        "deviceId": "far-device-id",
+        "workspace": "gamma",
+        "workspacePath": "/home/other/gamma",
+        "title": "builder",
+        "paneId": "p-far",
+        "agentKey": "codex",
+        "status": "waiting",
+        "hostOnline": True,
+    }
+    row.update(overrides)
+    return row
+
+
+@pytest.mark.asyncio
+async def test_list_targets_without_a_server_is_byte_for_byte_what_it_always_was(
+    roster: Any,
+) -> None:
+    """The zero-regression line: no server means no remote key at all, not an
+    empty one."""
+    _seed()
+    result = await plan_mcp.cli_list_targets(_ctx())
+    assert set(result) == {"you", "targets"}
+    assert set(result["targets"][0]) == {
+        "name", "address", "workspace_path", "same_workspace", "busy", "offline",
+    }
+
+
+@pytest.mark.asyncio
+async def test_list_targets_shows_remote_panes_in_their_own_bucket(roster: Any) -> None:
+    _seed()
+    roster.replace([_remote_row()], local_device_id="this-device")
+    result = await plan_mcp.cli_list_targets(_ctx())
+
+    # The local list is untouched — a remote pane is never mixed into it.
+    assert {t["address"] for t in result["targets"]} == {"beta/reviewer", "alpha/helper"}
+    (remote,) = result["remote_targets"]
+    assert remote == {
+        "name": "builder",
+        "address": "far-device-id/gamma/builder",
+        "device": "far-device-id",
+        "workspace": "gamma",
+        "workspace_path": "/home/other/gamma",
+        "agent_key": "codex",
+        "busy": False,
+        "offline": False,
+        "host_online": True,
+        "status": "waiting",
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_host_caller_sees_remote_panes_too(roster: Any) -> None:
+    _seed()
+    roster.replace([_remote_row()], local_device_id="this-device")
+    result = await plan_mcp.cli_list_targets(_host_ctx())
+    assert result["you"] == "host"
+    assert [t["address"] for t in result["remote_targets"]] == ["far-device-id/gamma/builder"]
+
+
+@pytest.mark.asyncio
+async def test_the_advertised_remote_address_is_the_one_cli_send_accepts(
+    roster: Any, monkeypatch: pytest.MonkeyPatch, captured: list[dict[str, Any]]
+) -> None:
+    """The point of listing: an agent copies `address` and it works. The device
+    id here is not UUID-shaped, so this only resolves through the roster."""
+    from agent_team_backend import server_link
+
+    sent: list[dict[str, Any]] = []
+
+    async def fake_send_message(**kwargs: Any) -> dict[str, Any]:
+        sent.append(kwargs)
+        return {"ok": True, "payload": {"state": "pending"}}
+
+    monkeypatch.setattr(server_link, "send_message", fake_send_message)
+    _seed()
+    roster.replace([_remote_row()], local_device_id="this-device")
+
+    address = (await plan_mcp.cli_list_targets(_ctx()))["remote_targets"][0]["address"]
+    result = await plan_mcp.cli_send(address, "hi", _ctx())
+    assert result["ok"] is True
+    assert result["target"] == "far-device-id/gamma/builder"
+    assert sent[0]["to"] == {
+        "deviceId": "far-device-id",
+        "workspace": "gamma",
+        "paneName": "builder",
+    }
+    # Nothing was injected on this machine.
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_a_device_name_reaches_the_same_pane(
+    roster: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_team_backend import server_link
+
+    sent: list[dict[str, Any]] = []
+
+    async def fake_send_message(**kwargs: Any) -> dict[str, Any]:
+        sent.append(kwargs)
+        return {"ok": True, "payload": {"state": "pending"}}
+
+    monkeypatch.setattr(server_link, "send_message", fake_send_message)
+    _seed()
+    roster.replace([_remote_row(deviceName="studio")], local_device_id="this-device")
+
+    result = await plan_mcp.cli_send("studio/gamma/builder", "hi", _ctx())
+    assert result["ok"] is True
+    assert sent[0]["to"]["deviceId"] == "far-device-id"
+
+
+@pytest.mark.asyncio
+async def test_a_local_workspace_beats_a_device_of_the_same_name(
+    roster: Any, monkeypatch: pytest.MonkeyPatch, captured: list[dict[str, Any]]
+) -> None:
+    """The protection device names must not break: `two/proj/target` names a
+    local workspace today, and a machine called `two` cannot take it away."""
+    from agent_team_backend import server_link
+
+    async def fail(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("a locally resolvable target must never be relayed")
+
+    monkeypatch.setattr(server_link, "send_message", fail)
+    agent_messaging.register("pa", "sender", "/ws/alpha")
+    agent_messaging.register("pt", "target", "/two/proj")
+    roster.replace(
+        [_remote_row(deviceName="two", workspace="proj", title="target")],
+        local_device_id="this-device",
+    )
+
+    result = await plan_mcp.cli_send("two/proj/target", "hi", _ctx())
+    assert result["ok"] is True
+    assert captured[0]["payload"]["target_pane_id"] == "pt"
+
+
+@pytest.mark.asyncio
+async def test_an_ambiguous_device_name_is_refused(
+    roster: Any, monkeypatch: pytest.MonkeyPatch, captured: list[dict[str, Any]]
+) -> None:
+    from agent_team_backend import server_link
+
+    async def fail(**_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("an ambiguous device must not be picked for the sender")
+
+    monkeypatch.setattr(server_link, "send_message", fail)
+    _seed()
+    roster.replace(
+        [
+            _remote_row(sessionId="s1", deviceId="d1", deviceName="laptop"),
+            _remote_row(sessionId="s2", deviceId="d2", deviceName="laptop"),
+        ],
+        local_device_id="this-device",
+    )
+
+    result = await plan_mcp.cli_send("laptop/gamma/builder", "hi", _ctx())
+    assert result["ok"] is False
+    assert result["error_code"] == "ambiguous-device"
+    assert "2 devices" in result["error"]
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_target_still_answers_as_before_with_a_roster_loaded(
+    roster: Any, captured: list[dict[str, Any]]
+) -> None:
+    """A roster that matches nothing must not change the error a typo gets."""
+    _seed()
+    roster.replace([_remote_row()], local_device_id="this-device")
+    result = await plan_mcp.cli_send("beta/nobody", "hi", _ctx())
+    assert result["error_code"] == "unknown-target-in-workspace"
+    assert captured == []

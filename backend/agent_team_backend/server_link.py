@@ -49,7 +49,7 @@ from typing import Any, Callable
 
 import websockets
 
-from . import agent_messaging, device_identity, pane_policy
+from . import agent_messaging, device_identity, pane_policy, remote_roster
 
 log = logging.getLogger("agent_team_backend.server_link")
 
@@ -122,6 +122,17 @@ MESSAGE_MEMORY_TTL_S = 3600.0
 #: retrying can only produce the same answer until the user signs in again).
 LINK_OFFLINE = "LINK_OFFLINE"
 LINK_UNAUTHORIZED = "LINK_UNAUTHORIZED"
+
+#: What the Settings UI shows for the link. These exist because "I saved a URL
+#: and a token, is it working?" is otherwise unanswerable from the frontend: a
+#: wrong URL and a rejected token both end with no messages getting through, but
+#: only one of them is worth retyping the token for. UNREACHABLE is transient
+#: (the reconnect loop keeps trying), UNAUTHORIZED is terminal.
+STATE_UNCONFIGURED = "unconfigured"
+STATE_CONNECTING = "connecting"
+STATE_CONNECTED = "connected"
+STATE_UNREACHABLE = "unreachable"
+STATE_UNAUTHORIZED = "unauthorized"
 
 
 class ServerLinkTerminated(RuntimeError):
@@ -293,6 +304,10 @@ class ServerLink:
         self._device_id = ""
         self.member_id = ""
         self.terminated_reason = ""
+        # Why the last dial or session failed, kept so `state()` can tell a
+        # server that is not answering apart from one that has not been tried
+        # yet. Cleared the moment a connection authenticates.
+        self.last_error = ""
 
     # ---- lifecycle ----
 
@@ -338,6 +353,21 @@ class ServerLink:
         """Ask the reporter to diff the roster. Cheap and idempotent."""
         self._roster_dirty.set()
 
+    def state(self) -> str:
+        """One of the STATE_* values, for the Settings UI.
+
+        Order matters: a terminated link still holds whatever the last socket
+        error was, and "your token was rejected" is the answer the user has to
+        act on.
+        """
+        if self.terminated_reason:
+            return STATE_UNAUTHORIZED
+        if self._authenticated:
+            return STATE_CONNECTED
+        if self.last_error:
+            return STATE_UNREACHABLE
+        return STATE_CONNECTING
+
     # ---- connection loop ----
 
     async def _run(self) -> None:
@@ -349,6 +379,9 @@ class ServerLink:
                     "navide-server link stopping: the server URL or access token "
                     "is no longer configured"
                 )
+                # The remote roster was this server's answer to "who else is
+                # out there"; with no server, there is no one else.
+                remote_roster.clear()
                 return
             try:
                 authenticated = await self._session(config)
@@ -360,6 +393,7 @@ class ServerLink:
                 return
             except Exception as err:  # noqa: BLE001
                 authenticated = False
+                self.last_error = str(err) or type(err).__name__
                 log.warning("navide-server link failed (%s)", err)
             if self.terminated_reason:
                 # Set by a server push (auth.revoked) rather than raised.
@@ -385,6 +419,7 @@ class ServerLink:
                 await self._authenticate(config)
                 authenticated = True
                 self._authenticated = True
+                self.last_error = ""
                 # A fresh connection knows nothing about what this backend told
                 # the previous one, so the whole roster is flattened again.
                 self._reported.clear()
@@ -394,6 +429,11 @@ class ServerLink:
                 # missed, so the cached revision cannot be trusted after a
                 # reconnect. One fetch per connection, not per message.
                 await self._refresh_policy()
+                # Same reasoning for the other direction's roster: every
+                # sessions.changed pushed while this device was away was missed,
+                # so the cache is realigned from a full directory read once per
+                # connection and kept current by the push after that.
+                await self._refresh_directory()
                 reporter = asyncio.create_task(self._report_loop())
                 try:
                     done, _ = await asyncio.wait(
@@ -445,6 +485,14 @@ class ServerLink:
             return
         if msg_type == "policy.changed":
             self._spawn(self._on_policy_changed(message.get("payload")))
+            return
+        if msg_type == "sessions.changed":
+            # Carries the whole directory, so it needs no follow-up request and
+            # is applied inline rather than off the read loop.
+            self._apply_directory(message.get("payload"))
+            return
+        if msg_type == "presence.changed":
+            self._on_presence_changed(message.get("payload"))
             return
         log.debug("navide-server event %r is not wired yet; ignoring it", msg_type)
 
@@ -661,6 +709,68 @@ class ServerLink:
         data = payload if isinstance(payload, dict) else {}
         revision = data.get("revision")
         await self._refresh_policy(revision=revision if isinstance(revision, int) else None)
+
+    # ---- remote roster ----
+
+    async def _refresh_directory(self) -> None:
+        """Read the team space's whole session directory into the local cache.
+
+        Never raises, for the same reason ``_refresh_policy`` does not: a
+        directory this device could not fetch leaves the previous cache in
+        force, which is a worse answer than the truth but a far better one than
+        an empty roster or a dropped connection.
+        """
+        try:
+            reply = await self._request("sessions.directory", {})
+        except Exception as err:  # noqa: BLE001
+            log.warning("navide-server sessions.directory failed: %s", err)
+            return
+        if not reply.get("ok"):
+            log.warning("navide-server rejected sessions.directory: %s", reply.get("error"))
+            return
+        self._apply_directory(reply.get("payload"))
+
+    def _apply_directory(self, payload: Any) -> None:
+        """Replace the remote roster from a directory payload.
+
+        ``sessions.directory`` and the ``sessions.changed`` push carry the same
+        shape — the entire directory, this device's own rows included — so both
+        land here and both replace wholesale. Our own rows are dropped by
+        ``remote_roster.replace``: the server's copy of them is whatever was
+        last reported, while ``agent_messaging`` holds the live ones.
+
+        Note the rows carry no ``deviceName`` today: the server stores one per
+        device (from ``auth.hello``) but does not join it into the session
+        directory, so the only human-readable label available here is the
+        device id. ``remote_roster`` reads the field anyway, so a server that
+        starts sending it lights this up with no change on this side.
+        """
+        data = payload if isinstance(payload, dict) else {}
+        sessions = data.get("sessions")
+        remote_roster.replace(
+            sessions if isinstance(sessions, list) else [],
+            local_device_id=self._device_id,
+        )
+
+    def _on_presence_changed(self, payload: Any) -> None:
+        """Re-flag the cached panes when a device joins or leaves.
+
+        A device going offline changes no session row, so it produces no
+        ``sessions.changed`` — only this event. Without it the roster would go
+        on reporting a machine that has left as reachable until something else
+        happened to touch one of its sessions.
+        """
+        data = payload if isinstance(payload, dict) else {}
+        devices = data.get("devices")
+        if not isinstance(devices, list):
+            return
+        remote_roster.set_online_devices(
+            {
+                str(device.get("deviceId") or "")
+                for device in devices
+                if isinstance(device, dict)
+            }
+        )
 
     # ---- messages ----
 
@@ -947,6 +1057,58 @@ async def stop() -> None:
     if _link is not None:
         await _link.stop()
         _link = None
+
+
+async def reconfigure() -> None:
+    """Apply a configuration change without restarting the backend.
+
+    ``start()`` runs once at boot, so before this existed a user who filled in
+    the server URL and token saw nothing happen — and the failure they got was
+    the "unknown device" answer for a machine with no server configured, which
+    reads as a typo in the address rather than "the link never dialled".
+
+    Tearing the old link down *before* the new one dials is the whole point:
+    two links for one device would both publish the same roster and both take
+    delivery of the same relayed message. ``stop()`` on a None link and
+    ``start()`` with no configuration are each already no-ops, so clearing the
+    settings lands back in the inert state by the same path.
+    """
+    await stop()
+    await start()
+
+
+async def status() -> dict[str, Any]:
+    """What the Settings UI needs to answer "is my configuration right?".
+
+    Never returns the token: the UI only has to know whether one is stored, and
+    a long-lived credential that is echoed back is a credential that leaks into
+    a renderer process, a log, or a screenshot.
+    """
+    link = _link
+    if link is not None:
+        # A link exists only because start() found both halves, so the token is
+        # known to be stored without asking the Keychain again — and the
+        # Settings pane polls this while it is open.
+        return {
+            "state": link.state(),
+            "serverUrl": await asyncio.to_thread(server_url),
+            "hasToken": True,
+            "detail": link.terminated_reason or link.last_error,
+            "deviceId": link._device_id,
+            "memberId": link.member_id,
+        }
+    config = await asyncio.to_thread(load_config)
+    return {
+        "state": STATE_UNCONFIGURED,
+        "serverUrl": config.url,
+        # Reported even with no URL: it is what lets the token field say "one is
+        # already stored" instead of asking for a credential the user cannot see
+        # and would have no way to retype.
+        "hasToken": bool(config.token),
+        "detail": "",
+        "deviceId": "",
+        "memberId": "",
+    }
 
 
 def roster_changed() -> None:

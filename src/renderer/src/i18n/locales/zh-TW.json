@@ -837,6 +837,24 @@
       "other": "其他",
       "updates": "更新"
     },
+    "p2p": {
+      "title": "跨裝置傳訊",
+      "hint": "把這台機器連上 Navide-Server，這裡的 agent 就能傳訊息給你其他裝置上的 agent。兩個欄位都留空的話，任何東西都不會離開這台機器。",
+      "server-url": "伺服器網址",
+      "server-url-placeholder": "wss://navide.example.com/ws",
+      "token": "存取權杖",
+      "token-placeholder": "貼上伺服器核發的權杖",
+      "token-stored": "已儲存權杖 — 留空即保留原本的",
+      "token-hint": "存放於系統金鑰鏈，不會再顯示出來。",
+      "save": "儲存並連線",
+      "clear": "中斷連線",
+      "device-id": "本機裝置",
+      "state-unconfigured": "尚未設定",
+      "state-connecting": "連線中…",
+      "state-connected": "已連線",
+      "state-unreachable": "無法連上伺服器",
+      "state-unauthorized": "存取權杖遭拒"
+    },
     "storage": {
       "intro": "本 app、CLI agent 家目錄，以及你開過的工作區所佔用的磁碟空間。",
       "rescan": "重新掃描",

@@ -11,10 +11,11 @@ workspaces, and a bare `to: <name>` still resolves only within the sender's own
 workspace, which is today's behaviour unchanged.
 
 Addresses carry an optional third dimension, the device: `to:
-<device>/<workspace>/<pane>` names a pane on a specific machine. Only this
-machine's own device id resolves for now; a foreign one is reported as such
-rather than delivered, because remote panes are only knowable through a roster
-this backend does not have yet.
+<device>/<workspace>/<pane>` names a pane on a specific machine. A UUID-shaped
+leading segment is read as a device id here; anything else is only reconsidered
+as a device *after* local resolution has failed, against the remote roster
+(`parse_remote_target`), so no address that resolves on this machine today can
+be re-pointed at another one.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from . import device_identity
+from . import device_identity, remote_roster
 
 #: How long a disconnected window's panes stay in the registry, flagged offline,
 #: before they are forgotten for good. The renderer's reconnect backoff is
@@ -327,6 +328,62 @@ def parse_target(to: str) -> Address:
     device, rest = _split_device_segment((to or "").strip())
     workspace, _, pane_name = rest.rpartition("/")
     return Address(pane_name=pane_name.strip(), workspace=workspace, device_id=device)
+
+
+@dataclass
+class RemoteTarget:
+    """What a second, roster-aware reading of a `to:` string produced.
+
+    All three fields empty means "this names no remote device" — the ordinary
+    answer, and the only one a machine with no server configured ever gets.
+    """
+
+    address: Address | None = None
+    error: str | None = None
+    code: str | None = None
+    params: dict[str, str] | None = None
+
+
+def parse_remote_target(to: str) -> RemoteTarget:
+    """Re-read a target as `<device>/<workspace>/<pane>` against the remote roster.
+
+    **Local addressing wins, always.** This is only ever consulted after the
+    local resolver has already failed on the same string, which is what keeps a
+    device name from silently stealing an address that works today: `two/proj/
+    target` means the pane `target` in the workspace `two/proj` whether or not
+    some machine in the team space is called `two`, because the workspace
+    reading is tried first and, when it succeeds, this function is never called.
+    The reverse order — device names first — would move a working address to
+    another machine the moment a colleague named a laptop after a folder, and
+    the sender would have no way to notice.
+
+    So a name can only ever *add* reachability where the answer used to be an
+    error. Three or more segments are required, matching the rule for id-shaped
+    device segments: a two-segment `folder/pane` stays a workspace address.
+
+    A label naming more than one device is refused rather than guessed —
+    delivering an instruction to the wrong machine is not something the sender
+    can undo after reading about it.
+    """
+    device_part, sep, rest = (to or "").strip().partition("/")
+    if not sep or "/" not in rest:
+        return RemoteTarget()
+    matches = remote_roster.devices_named(device_part)
+    if not matches:
+        return RemoteTarget()
+    if len(matches) > 1:
+        return RemoteTarget(
+            error=f'ambiguous device "{device_part}" ({len(matches)} devices answer '
+            f"to that name) — use the device id shown by cli_list_targets",
+            code="ambiguous-device",
+            params={"device": device_part, "n": str(len(matches))},
+        )
+    workspace, _, pane_name = rest.rpartition("/")
+    return RemoteTarget(
+        address=Address(
+            pane_name=pane_name.strip(), workspace=workspace, device_id=matches[0]
+        )
+    )
 
 
 def _prefer_online(hits: list[RegisteredPane]) -> list[RegisteredPane]:

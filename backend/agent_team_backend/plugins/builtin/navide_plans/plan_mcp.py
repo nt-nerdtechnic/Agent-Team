@@ -769,8 +769,20 @@ async def cli_list_targets(ctx: Context) -> dict[str, Any]:
 
     `offline` marks a pane whose Navide window has lost its connection: it still
     exists and is expected back, but sending to it fails until it returns.
+
+    `remote_targets` appears only when this machine is linked to a Navide-Server
+    and that server knows of panes on *other* machines. Those are a separate
+    list because they are a separate deal: their `address` is the three-part
+    `<device>/<workspace>/<pane>` form, the message travels through the server
+    (so it can fail in ways a local one cannot — the far machine may be offline,
+    or refuse on policy grounds), and there is no reading their output from
+    here. Each carries `device` (the machine's human-readable label, or its id
+    when the server knows no name), `host_online` (that whole machine is
+    reachable) and `status` (the server's own word for the pane). `offline` is
+    true when either half says the message would not land right now. Prefer a
+    local target when one would do.
     """
-    from agent_team_backend import agent_messaging
+    from agent_team_backend import agent_messaging, remote_roster
 
     try:
         caller = _resolve_caller(ctx)
@@ -790,19 +802,27 @@ async def cli_list_targets(ctx: Context) -> dict[str, Any]:
             for entry in agent_messaging.list_panes()
             if entry.pane_id != caller.pane_id
         ]
-        return {"you": me_entry.qualified_name if me_entry else None, "targets": targets}
-    targets = [
-        {
-            "name": entry.name,
-            "address": entry.qualified_name,
-            "workspace_path": entry.workspace_path,
-            "same_workspace": False,
-            "busy": entry.busy,
-            "offline": entry.offline,
-        }
-        for entry in agent_messaging.list_panes()
-    ]
-    return {"you": caller.kind, "targets": targets}
+        result = {"you": me_entry.qualified_name if me_entry else None, "targets": targets}
+    else:
+        targets = [
+            {
+                "name": entry.name,
+                "address": entry.qualified_name,
+                "workspace_path": entry.workspace_path,
+                "same_workspace": False,
+                "busy": entry.busy,
+                "offline": entry.offline,
+            }
+            for entry in agent_messaging.list_panes()
+        ]
+        result = {"you": caller.kind, "targets": targets}
+    # Absent, not empty, when there is nothing to say: a machine with no server
+    # configured has an empty roster and must see byte-for-byte the answer it
+    # saw before cross-device addressing existed.
+    remote = [pane.to_dict() for pane in remote_roster.list_panes()]
+    if remote:
+        result["remote_targets"] = remote
+    return result
 
 
 # Spawn verdicts come from the window that owns the requesting pane — only it
@@ -1032,9 +1052,12 @@ async def cli_send(to: str, text: str, ctx: Context) -> dict[str, Any]:
     re-sending elsewhere or reopening the pane would duplicate the work.
 
     A `<device>/<workspace>/<pane>` target names a pane on another machine and
-    is relayed through the configured Navide-Server. "device-offline" means
-    that machine has no connection at all, so waiting is the only option; the
-    receiving device may also refuse on policy grounds, which shows up in
+    is relayed through the configured Navide-Server. Copy the address from
+    cli_list_targets' `remote_targets` rather than assembling it: `device` may
+    be either the machine's id or its name, and only the id is guaranteed not
+    to collide with one of this machine's own workspace paths. "device-offline"
+    means that machine has no connection at all, so waiting is the only option;
+    the receiving device may also refuse on policy grounds, which shows up in
     cli_check_message as status "rejected".
 
     Three error codes tell apart the ways cross-device sending can fail before
@@ -1070,6 +1093,19 @@ async def cli_send(to: str, text: str, ctx: Context) -> dict[str, Any]:
 
     result = agent_messaging.resolve(me, to)
     if result.pane is None:
+        # Only now is the leading segment reconsidered as a device *name*. A
+        # target that resolves on this machine never reaches here, so naming a
+        # laptop after a folder can never redirect an address that works today
+        # (see agent_messaging.parse_remote_target). With no server configured
+        # the roster is empty and this is a no-op, leaving the answer below
+        # exactly what it always was.
+        remote = agent_messaging.parse_remote_target(to)
+        if remote.error:
+            return {"ok": False, "error": remote.error, "error_code": remote.code}
+        if remote.address is not None:
+            relayed = await _send_to_device(remote.address, text, caller=caller, me=me)
+            if relayed is not None:
+                return relayed
         return {
             "ok": False,
             "error": result.error or f'unknown target "{to}"',
