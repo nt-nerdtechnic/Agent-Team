@@ -47,7 +47,14 @@ export function useBackend() {
   const client = createWsClient({
     onStatus: (s) => {
       status.value = s
-      if (s === 'connected') lastError.value = ''
+      if (s === 'connected') {
+        lastError.value = ''
+        // A live socket is proof no respawn is outstanding. applyBackendChanged
+        // normally clears this, but it is the only place that does, and it can
+        // be skipped for a socket that is already healthy — a stale attempt
+        // would then mislabel the next ordinary blip as a crash recovery.
+        autoRestart.value = null
+      }
     },
     onError: () => {
       lastError.value = 'WebSocket error'

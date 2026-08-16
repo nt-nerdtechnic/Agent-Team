@@ -2879,6 +2879,10 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   let _stdinGated = false
   let _gatedInput = ''
   const GATED_INPUT_MAX = 4096
+  /** When the held buffer was last written to, for the staleness bound below. */
+  let _gatedInputAt = 0
+  /** Past this, a held buffer is a stale reflex rather than a pending line. */
+  const GATED_INPUT_MAX_AGE_MS = 60_000
 
   /**
    * True while the transport can actually carry a keystroke.
@@ -2902,6 +2906,15 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // Hold the buffer while the transport is down rather than burning it on a
     // send that cannot leave; the reconnect watcher flushes it.
     if (!inputTransportReady()) return
+    // …but only while it is still plausibly what the user meant to send. A PTY
+    // survives an ownerless hour, so without an age bound a buffer typed before
+    // a long outage would land minutes later as one burst — every Enter in it
+    // included. That is the same failure the refuse-don't-queue rule exists to
+    // prevent, arriving by the one path allowed to hold input.
+    if (Date.now() - _gatedInputAt > GATED_INPUT_MAX_AGE_MS) {
+      _gatedInput = ''
+      return
+    }
     const pending = _gatedInput
     _gatedInput = ''
     // A pane that died while preparing has nowhere to replay to; dropping the
@@ -2951,6 +2964,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         // the cap the oldest keystrokes go, since those are the ones the user
         // has already given up on.
         _gatedInput = (_gatedInput + data).slice(-GATED_INPUT_MAX)
+        _gatedInputAt = Date.now()
         return
       }
       // Backstop for the disconnected overlay: refuse rather than queue. The
@@ -3189,11 +3203,16 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // output resumes and the TUI repaints at the correct width.
   watch(() => backend.status.value, (newStatus, oldStatus) => {
     if (newStatus === 'connected' && oldStatus !== 'connected') {
-      void reattachAfterReconnect()
-      // Keys typed while the pane was preparing AND the socket was down were
-      // held rather than sent (see _flushGatedInput); the transport is back, so
-      // they can go now.
-      if (!_stdinGated) _flushGatedInput()
+      // Held keys go only AFTER the reattach settles. Flushing alongside it
+      // raced: reattachAfterReconnect yields at its first await, so a synchronous
+      // flush wrote to a PTY this connection had not reclaimed yet — the CLI
+      // echoed into a dropped output stream — or, when the PTY had died, wrote
+      // to a dead session id and emptied the buffer against a send that could
+      // never land. Settling first means the flush sees the real outcome:
+      // reclaimed, or exited and correctly discarded.
+      void reattachAfterReconnect().then(() => {
+        if (!_stdinGated) _flushGatedInput()
+      })
     }
   })
 
@@ -3601,13 +3620,17 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     await createWhenMeasurable()
   }
 
-  function pasteText(text: string): void {
-    if (!sessionId.value || status.value === 'exited' || status.value === 'error') return
-    if (!inputTransportReady()) return
+  /** Returns false when nothing was sent, so a caller staging a paste in parts
+   *  can stop rather than send the tail on its own — an Enter that arrives
+   *  without the text it was meant to submit is its own kind of wrong. */
+  function pasteText(text: string): boolean {
+    if (!sessionId.value || status.value === 'exited' || status.value === 'error') return false
+    if (!inputTransportReady()) return false
     void backend.send('terminal.input', {
       terminal_session_id: sessionId.value,
       data: text
     })
+    return true
   }
 
   /**
@@ -3728,6 +3751,13 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
 
   async function interrupt(): Promise<void> {
     if (!sessionId.value) return
+    // Guarded like every other user input, and for the sharpest case of it: a
+    // frozen-looking pane is exactly when someone hits STOP, so a queued SIGINT
+    // would land on whatever turn the CLI happens to be running once the socket
+    // returns — possibly one started after the reconnect. The flag is set only
+    // once the request is on its way, so the STOP badge cannot advertise an
+    // interrupt that never left.
+    if (!inputTransportReady()) return
     isStopped.value = true
     await backend.send('terminal.interrupt', { terminal_session_id: sessionId.value })
   }

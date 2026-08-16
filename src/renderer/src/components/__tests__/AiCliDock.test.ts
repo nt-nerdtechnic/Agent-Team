@@ -32,7 +32,9 @@ vi.mock('../../lib/settings', () => ({
 const termSpies = vi.hoisted(() => ({
   spawn: vi.fn(async () => undefined),
   tryReattach: vi.fn(async () => undefined),
-  pasteText: vi.fn(),
+  // Returns true like the real one: pasteText reports whether the write left,
+  // and a staged paste stops rather than send its CR when it did not.
+  pasteText: vi.fn(() => true),
   interrupt: vi.fn(async () => undefined),
   kill: vi.fn(async () => undefined),
   cancelPendingCreate: vi.fn(async () => undefined),
@@ -337,6 +339,28 @@ describe('AiCliDock — start guards and spawn path', () => {
     expect(termSpies.pasteText).not.toHaveBeenCalledWith('\r')
     await new Promise((r) => setTimeout(r, 350))
     expect(termSpies.pasteText).toHaveBeenCalledWith('\r')
+  })
+
+  // The context and its submitting CR are two sends 300 ms apart, so the
+  // transport can go down between them. A CR on its own submits whatever the
+  // prompt already held — or an empty line — as if it were the context.
+  it('does not follow a refused context paste with a bare CR', async () => {
+    const buildContext = vi.fn(() => 'CONTEXT SNAPSHOT')
+    // Once, so the stub's default stays true for every other test in the file
+    // (clearAllMocks resets calls, not implementations).
+    termSpies.pasteText.mockReturnValueOnce(false) // e.g. the backend went away
+    termSpies.spawn.mockImplementation(async () => {
+      termState.status.value = 'running'
+      termState.lastRawActivityAt.value = Date.now() - 60000
+    })
+    const wrapper = mountDock({ buildContext })
+    await openDock(wrapper)
+    await wrapper.find('.ai-cli-btn.primary').trigger('click')
+    await flushPromises()
+    await new Promise((r) => setTimeout(r, 350))
+
+    expect(termSpies.pasteText).toHaveBeenCalledWith(bracketedPaste('CONTEXT SNAPSHOT'))
+    expect(termSpies.pasteText).not.toHaveBeenCalledWith('\r')
   })
 
   it('injects nothing when the host provides no buildContext', async () => {

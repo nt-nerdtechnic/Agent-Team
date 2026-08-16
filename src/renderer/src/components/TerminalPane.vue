@@ -200,7 +200,18 @@ const disconnectedNotice = computed<string>(() => {
   // stub both useTerminal and the backend with partial objects.
   const status = props.backend?.status?.value
   if (!status || status === 'connected') return ''
-  if (!terminal.sessionId?.value) return ''
+  // Which panes have something at stake: one holding a PTY ('running'), and one
+  // mid-spawn ('starting'), whose keystrokes the input guard is already
+  // refusing — leaving that one silent was the worse half, since the user got
+  // no feedback at all for keys that went nowhere. A pane that exited or never
+  // spawned has nothing the outage can take, and telling it "typing is paused"
+  // promises a connection it is not waiting for.
+  //
+  // sessionId is the wrong test: it is assigned once and never cleared (not by
+  // cleanupSession, not on exit), so it stays truthy on a pane whose CLI ended
+  // long ago.
+  const paneStatus = terminal.status?.value
+  if (paneStatus !== 'running' && paneStatus !== 'starting') return ''
   const auto = props.backend?.autoRestart?.value
   if (auto) {
     return i18n.global.t('pane.terminal.backend-restarting', { attempt: auto.attempt, max: auto.max })

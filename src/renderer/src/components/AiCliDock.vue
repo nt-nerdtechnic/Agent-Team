@@ -254,7 +254,10 @@ async function pasteContext(
 ): Promise<void> {
   const text = await build()
   if (!text) return
-  term.pasteText(bracketedPaste(text))
+  // The two halves are separate sends 300 ms apart, so the transport can go
+  // down between them. Sending the CR regardless would submit whatever the
+  // prompt already held — or an empty line — as if it were this context.
+  if (!term.pasteText(bracketedPaste(text))) return
   // Let the CLI ingest the paste before the submitting CR.
   await new Promise((r) => setTimeout(r, 300))
   term.pasteText('\r')
@@ -301,8 +304,8 @@ function stop(): void {
   else void term.kill()
 }
 
-function pasteText(text: string): void {
-  termRef.value?.pasteText(text)
+function pasteText(text: string): boolean {
+  return termRef.value?.pasteText(text) ?? false
 }
 
 defineExpose({ start, stop, interrupt, pasteText, injectNow, toggle, terminal: termRef })

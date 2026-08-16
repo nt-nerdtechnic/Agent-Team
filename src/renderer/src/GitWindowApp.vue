@@ -507,7 +507,11 @@ async function sendPromptToAgent(prompt: string): Promise<{ ok: boolean; error?:
     await waitForCliQuiet(term)
     if (term()?.status !== 'running') return { ok: false, error: t('label.resolve-agent-start-failed') }
   }
-  dock.pasteText(bracketedPaste(prompt))
+  // Report a refused paste rather than following it with a bare CR: the two
+  // sends are 300 ms apart and the transport can drop in between.
+  if (!dock.pasteText(bracketedPaste(prompt))) {
+    return { ok: false, error: t('label.resolve-agent-start-failed') }
+  }
   // Let the CLI ingest the paste before the submitting CR (the dock's own
   // context injection uses the same 300 ms gap).
   await new Promise((r) => setTimeout(r, 300))

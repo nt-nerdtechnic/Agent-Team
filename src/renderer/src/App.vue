@@ -4415,6 +4415,12 @@ let ptyLostFlushTimer: number | null = null
  */
 function onPanePtyLost(paneId: string): void {
   if (!normalizeAutoResumeOnReconnect(settingsGet(AUTO_RESUME_ON_RECONNECT_SETTING_KEY, true))) return
+  // Decide visibility now rather than at flush time. The debounce window is
+  // exactly when someone staring at a frozen app clicks around, and in the
+  // sidebar/spotlight layouts onScreenPaneIds is only the focused pane — read
+  // 1.2 s later it would resume whichever pane they had landed on instead of
+  // the ones that actually lost their PTY.
+  if (!onScreenPaneIds.value.has(paneId)) return
   pendingPtyLostPanes.add(paneId)
   if (ptyLostFlushTimer !== null) window.clearTimeout(ptyLostFlushTimer)
   ptyLostFlushTimer = window.setTimeout(() => { void flushPtyLostResumes() }, PTY_LOST_BATCH_MS)
@@ -4433,7 +4439,10 @@ function onPanePtyLost(paneId: string): void {
  */
 async function flushPtyLostResumes(): Promise<void> {
   ptyLostFlushTimer = null
-  const ids = [...pendingPtyLostPanes].filter((id) => onScreenPaneIds.value.has(id))
+  // Visibility was already decided when each pane reported in (see
+  // onPanePtyLost); panes closed or rebuilt since then fall out in
+  // rebuildPaneViaResume's own 'missing-pane' check.
+  const ids = [...pendingPtyLostPanes]
   pendingPtyLostPanes.clear()
   if (!ids.length) return
   let resumed = 0

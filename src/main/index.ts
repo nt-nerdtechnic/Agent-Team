@@ -80,6 +80,12 @@ let backendLastError: string | null = null
 // when a restart succeeds, when the attempt budget runs out, and by any
 // deliberate lifecycle op.
 let backendRestartPending: { attempt: number; max: number; reason: string } | null = null
+// Bumped by every deliberate lifecycle op (manual restart, stop, quit). An
+// auto-restart already awaiting startBackend when one of those lands must not
+// adopt the process it eventually gets: the user has since asked for a
+// different backend, or for none at all. Without this the spawn wins by virtue
+// of finishing later, and an explicit Stop ends with a running backend.
+let backendLifecycleEpoch = 0
 // Confirm-before-quit config, driven from the renderer (shared "confirm before
 // close" setting). Localized strings are supplied by the renderer.
 let quitConfirm = {
@@ -509,16 +515,37 @@ const backendAutoRestart = createBackendAutoRestart({
 /** One scheduled respawn attempt. A deliberate restart/stop already in flight
  *  wins: it either brings a backend up itself or intends none to be running. */
 async function autoRestartBackend(): Promise<void> {
-  if (backend) {
-    // Something else already brought one up; drop the now-meaningless pending
-    // marker so the reported status stops claiming a respawn is due.
+  if (backend || backendBusy) {
+    // Something else owns the lifecycle right now — it either already brought a
+    // backend up or is about to. Either way no respawn is due, so drop the
+    // pending marker: leaving it set would report `starting` forever, with no
+    // backend, no timer and no terminal error to escape it.
     backendRestartPending = null
+    broadcastBackendChanged()
     return
   }
-  if (backendBusy) return
+  const epoch = backendLifecycleEpoch
   backendBusy = true
+  // Publish the in-flight spawn so the quit path can see it. Without this,
+  // `backend` and `backendStarting` are both null while this awaits, so
+  // before-quit takes its early return and the child we are spawning is
+  // orphaned — reparented, still holding the port and the shared app-data
+  // state for the next launch to fight over.
+  let settle = (): void => {}
+  const inFlight = new Promise<void>((resolve) => { settle = resolve })
+  backendStarting = inFlight
   try {
-    backend = await startBackend(readHealthCheckTimeoutSec(healthTimeoutPath()) * 1000)
+    const started = await startBackend(readHealthCheckTimeoutSec(healthTimeoutPath()) * 1000)
+    if (epoch !== backendLifecycleEpoch) {
+      // A stop/restart/quit landed while this was spawning. What the user asked
+      // for wins; this process must not become the live backend, and must not
+      // be left running either.
+      backendRestartPending = null
+      console.log('[main] discarding auto-restarted backend: superseded by a deliberate lifecycle op')
+      await started.stop()
+      return
+    }
+    backend = started
     backendLastError = null
     backendRestartPending = null
     watchBackendCrash(backend)
@@ -529,26 +556,36 @@ async function autoRestartBackend(): Promise<void> {
     // budget is gone the error becomes terminal.
     console.error('[main] backend auto-restart failed', err)
     backend = null
-    const attempt = backendAutoRestart.onCrash()
-    if (attempt === null) {
+    if (epoch !== backendLifecycleEpoch) {
       backendRestartPending = null
-      backendLastError = String(err)
     } else {
-      backendRestartPending = { attempt, max: backendAutoRestart.maxAttempts(), reason: String(err) }
+      const attempt = backendAutoRestart.onCrash()
+      if (attempt === null) {
+        backendRestartPending = null
+        backendLastError = String(err)
+      } else {
+        backendRestartPending = { attempt, max: backendAutoRestart.maxAttempts(), reason: String(err) }
+      }
     }
   } finally {
     backendBusy = false
+    settle()
+    // Only clear our own marker: the quit path may have already replaced it.
+    if (backendStarting === inFlight) backendStarting = null
+    broadcastBackendChanged()
   }
-  broadcastBackendChanged()
 }
 
 ipcMain.handle('backend:restart', async () => {
-  if (backendBusy) return backendInfoPayload()
-  backendBusy = true
-  // Manual intervention supersedes the automatic budget: drop any pending
-  // attempt and give the user's restart a full budget of its own.
+  // Supersede the automatic budget BEFORE the busy guard. An auto-restart can
+  // hold `backendBusy` for a full health-check timeout (45 s by default), and
+  // bailing out first would leave its schedule armed and its in-flight spawn
+  // free to become the live backend — the user's intent silently discarded.
+  backendLifecycleEpoch++
   backendAutoRestart.cancel()
   backendRestartPending = null
+  if (backendBusy) return backendInfoPayload()
+  backendBusy = true
   try {
     // A restart during the initial spawn must not double-spawn: wait for the
     // in-flight start to settle first (its promise never rejects) so the
@@ -577,16 +614,27 @@ ipcMain.handle('backend:restart', async () => {
     return backendInfoPayload()
   } finally {
     backendBusy = false
+    // A crash can land inside the awaits above (the pre-restart handle dying),
+    // re-arming the automatic budget behind the user's back. Clearing again on
+    // the way out keeps "manual intervention wins" true for the whole handler,
+    // not just its first statement — otherwise a failed manual restart reports
+    // `starting` with a phantom attempt badge instead of a terminal error.
+    backendAutoRestart.cancel()
+    backendRestartPending = null
   }
 })
 
 ipcMain.handle('backend:stop', async () => {
-  if (backendBusy) return { ok: false }
-  backendBusy = true
-  // An explicit stop means the user wants no backend running — a pending
-  // respawn would undo that.
+  // Cancel BEFORE the busy guard, for the reason spelled out in backend:restart:
+  // an auto-restart holding the lock would otherwise outlive the very stop that
+  // was meant to end it, and hand the user a running backend they just asked to
+  // shut down. Bumping the epoch also disowns its in-flight spawn, which stops
+  // itself on arrival.
+  backendLifecycleEpoch++
   backendAutoRestart.cancel()
   backendRestartPending = null
+  if (backendBusy) return { ok: false }
+  backendBusy = true
   try {
     if (backend) {
       const b = backend
@@ -2330,6 +2378,9 @@ async function teardownBackendAndQuit(): Promise<void> {
   // A user-initiated quit is a clean exit — nothing to restore next launch.
   windowRegistry.markCleanExit()
   // Drop any scheduled respawn: quitting must not race a backend back to life.
+  // The epoch bump also disowns an auto-restart that is mid-spawn, so the
+  // handle it produces is stopped rather than adopted on the way out.
+  backendLifecycleEpoch++
   backendAutoRestart.cancel()
   backendRestartPending = null
   // If the backend is still spawning (quit mid-startup), wait for it (capped) so

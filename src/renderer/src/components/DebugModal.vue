@@ -351,7 +351,9 @@ async function injectAiContext(term: InstanceType<typeof AiCliTerminal>): Promis
       await new Promise((r) => setTimeout(r, 250))
       if (term.status !== 'running') return
     }
-    term.pasteText(bracketedPaste(buildAiContext()))
+    // Skip the submitting CR when the context itself never left, so a dropped
+    // transport cannot submit an empty prompt in its place.
+    if (!term.pasteText(bracketedPaste(buildAiContext()))) return
     await new Promise((r) => setTimeout(r, 300))
     term.pasteText('\r')
   } catch { /* best-effort */ }

@@ -123,6 +123,7 @@ function inputsSent(mock: ReturnType<typeof createMockBackend>): unknown[] {
 
 describe('useTerminal — keystrokes while the backend is away', () => {
   afterEach(() => {
+    vi.restoreAllMocks() // the staleness test stubs Date.now
     vi.clearAllMocks()
     localStorage.clear()
     writes.length = 0
@@ -199,6 +200,34 @@ describe('useTerminal — keystrokes while the backend is away', () => {
     scope.stop()
   })
 
+  // Callers stage a paste in two sends 300 ms apart (text, then the submitting
+  // CR). They need to know the first half was refused, or the CR arrives alone
+  // and submits whatever the prompt already held.
+  it('reports whether the paste actually left', async () => {
+    const { mock, result, scope } = await spawnedPane()
+
+    expect(result.pasteText('hello')).toBe(true)
+    mock.status.value = 'disconnected'
+    expect(result.pasteText('hello')).toBe(false)
+
+    scope.stop()
+  })
+
+  // The pane a user hits STOP on is precisely the one that looks frozen, so a
+  // queued SIGINT would land on whatever turn is running once the socket is
+  // back — possibly one that started after the reconnect.
+  it('refuses an interrupt while disconnected, and does not claim it stopped', async () => {
+    const { mock, result, scope } = await spawnedPane()
+    const before = mock.sent.filter((s) => s.type === 'terminal.interrupt').length
+
+    mock.status.value = 'disconnected'
+    await result.interrupt()
+
+    expect(mock.sent.filter((s) => s.type === 'terminal.interrupt')).toHaveLength(before)
+    expect(result.isStopped.value).toBe(false)
+    scope.stop()
+  })
+
   // Keys typed at a pane that was still preparing are buffered by the stdin
   // gate. Sending that buffer at a moment the transport cannot carry it would
   // burn it, so it is held and flushed on the reconnect instead.
@@ -222,10 +251,76 @@ describe('useTerminal — keystrokes while the backend is away', () => {
     expect((after[after.length - 1] as { payload: { data: string } }).payload.data).toBe('queued')
     scope.stop()
   })
+
+  // A PTY survives an ownerless hour, so a held buffer can outlive the intent
+  // behind it. Replaying one typed before a long outage would deliver the very
+  // burst — every Enter included — that refusing input exists to prevent.
+  it('discards a held buffer that outlived the outage', async () => {
+    const { mock, result, scope } = await spawnedPane()
+    result.setDisableStdin(true)
+    typed.handler?.('stale')
+    mock.status.value = 'disconnected'
+    await nextTick()
+    result.setDisableStdin(false)
+    const before = inputsSent(mock).length
+
+    const realNow = Date.now
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + 61_000)
+    mock.status.value = 'connected'
+    await nextTick()
+    await flush()
+
+    expect(inputsSent(mock)).toHaveLength(before)
+    scope.stop()
+  })
+
+  // Flushing alongside the reattach rather than after it wrote to a PTY this
+  // connection had not reclaimed yet — the CLI's echo went to a dropped output
+  // stream — or, when the PTY had died, emptied the buffer into a dead session.
+  it('flushes held input only after the reattach has settled', async () => {
+    const { mock, result, scope } = await spawnedPane()
+    result.setDisableStdin(true)
+    typed.handler?.('queued')
+    mock.status.value = 'disconnected'
+    await nextTick()
+    result.setDisableStdin(false)
+    mock.sent.length = 0
+
+    mock.status.value = 'connected'
+    await nextTick()
+    await flush()
+
+    const reattachAt = mock.sent.findIndex((s) => s.type === 'terminal.reattach')
+    const inputAt = mock.sent.findIndex((s) => s.type === 'terminal.input')
+    expect(reattachAt).toBeGreaterThanOrEqual(0)
+    expect(inputAt).toBeGreaterThan(reattachAt)
+    scope.stop()
+  })
+
+  // A dead PTY means the held keys have nowhere to go; they must be dropped,
+  // not written into a session id that no longer resolves.
+  it('drops held input when the PTY did not survive', async () => {
+    const { mock, result, scope } = await spawnedPane()
+    result.setDisableStdin(true)
+    typed.handler?.('queued')
+    mock.status.value = 'disconnected'
+    await nextTick()
+    result.setDisableStdin(false)
+    mock.setResponse('terminal.reattach', { alive: [], dead: ['sess-1'] })
+    mock.sent.length = 0
+
+    mock.status.value = 'connected'
+    await nextTick()
+    await flush()
+
+    expect(mock.sent.some((s) => s.type === 'terminal.input')).toBe(false)
+    scope.stop()
+  })
 })
 
 describe('useTerminal — reattach after the backend comes back', () => {
   afterEach(() => {
+    vi.restoreAllMocks() // the staleness test stubs Date.now
     vi.clearAllMocks()
     localStorage.clear()
     writes.length = 0
