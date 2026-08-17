@@ -1,0 +1,19 @@
+{
+  "name": "acme-navide-files-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/stage-package.mjs",
+    "check": "navide-plugin validate dist/package",
+    "package": "navide-plugin package dist/package --out dist/acme-files.vsix"
+  },
+  "dependencies": {
+    "@navide/plugin-contracts": "^1.0.0",
+    "@navide/plugin-sdk": "^1.0.0",
+    "@navide/plugin-ui": "^1.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0"
+  }
+}

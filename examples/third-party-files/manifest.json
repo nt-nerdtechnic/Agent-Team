@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 2,
+  "apiVersion": "^1.0.0",
+  "id": "acme.files",
+  "name": "Acme Files",
+  "version": "1.0.0",
+  "publisher": "acme",
+  "permissions": {
+    "system": ["fs"]
+  },
+  "marketplace": {
+    "description": "A small third-party file view using the public Navide Plugin SDK.",
+    "license": "MIT"
+  },
+  "contributes": {
+    "views": [
+      {
+        "id": "main",
+        "kind": "custom",
+        "location": "main",
+        "title": "Files",
+        "entry": "frontend/index.html"
+      }
+    ]
+  }
+}

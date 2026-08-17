@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "src",
+    "outDir": "dist",
+    "paths": {
+      "@navide/plugin-contracts": ["../plugin-contracts/dist/index.d.ts"]
+    }
+  }
+}

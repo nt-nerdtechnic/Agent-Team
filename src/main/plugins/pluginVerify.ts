@@ -22,8 +22,8 @@
 
 import { createHash, createPublicKey, timingSafeEqual, verify as cryptoVerify } from 'node:crypto'
 import {
-  canonicalArchivePath,
-  portableArchiveCollisionKey,
+  validatePortableArchiveEntries,
+  type PortableArchiveEntry,
 } from './pluginPathPolicy'
 
 /** Capability namespaces the host can authorize. Mirror of the backend
@@ -229,9 +229,6 @@ export function assertSafeEntryPath(name: string): void {
 export function assertSafeArchiveEntries(
   entries: readonly { path: string; type?: 'regular' | 'directory' | 'symlink' | 'special' }[]
 ): void {
-  const seen = new Set<string>()
-  const regularPaths = new Set<string>()
-  const ancestorPaths = new Set<string>()
   for (const entry of entries) {
     if (entry.type !== undefined && entry.type !== 'regular' && entry.type !== 'directory') {
       throw new PluginVerifyError(
@@ -239,36 +236,24 @@ export function assertSafeArchiveEntries(
         `archive entry is not a regular file or directory: ${entry.path}`
       )
     }
-    const kind = entry.type === 'directory' ? 'directory' : 'regular'
-    const canonical = canonicalArchivePath(entry.path, kind)
-    if (canonical === null) {
-      throw new PluginVerifyError('ZIP_SLIP', `unsafe archive entry path: ${entry.path}`)
-    }
-    const collisionKey = portableArchiveCollisionKey(canonical)
-    if (collisionKey === null) {
-      throw new PluginVerifyError('ZIP_SLIP', `unsafe archive entry path: ${entry.path}`)
-    }
-    if (seen.has(collisionKey)) {
-      throw new PluginVerifyError(
-        'ZIP_DUPLICATE',
-        `duplicate archive entry path: ${entry.path}`
-      )
-    }
-    seen.add(collisionKey)
-    if (kind === 'regular') regularPaths.add(collisionKey)
-    const segments = collisionKey.split('/')
-    for (let index = 1; index < segments.length; index += 1) {
-      ancestorPaths.add(segments.slice(0, index).join('/'))
-    }
   }
-  for (const path of regularPaths) {
-    if (ancestorPaths.has(path)) {
-      throw new PluginVerifyError(
-        'ZIP_DUPLICATE',
-        `archive path collides with regular file ancestor: ${path}`
-      )
-    }
+
+  const portableEntries: PortableArchiveEntry[] = entries.map((entry) => ({
+    path: entry.path,
+    type: entry.type === 'directory' ? 'directory' : 'regular',
+  }))
+  const issue = validatePortableArchiveEntries(portableEntries)
+  if (!issue) return
+  if (issue.kind === 'unsafe-path') {
+    throw new PluginVerifyError('ZIP_SLIP', `unsafe archive entry path: ${issue.path}`)
   }
+  if (issue.kind === 'duplicate') {
+    throw new PluginVerifyError('ZIP_DUPLICATE', `duplicate archive entry path: ${issue.path}`)
+  }
+  throw new PluginVerifyError(
+    'ZIP_DUPLICATE',
+    `archive path collides with regular file ancestor: ${issue.path}`
+  )
 }
 
 /**

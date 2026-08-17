@@ -1,0 +1,22 @@
+{
+  "name": "@navide/plugin-ui",
+  "version": "1.0.0",
+  "description": "Stable, framework-neutral UI tokens and primitives for Navide plugins.",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  }
+}

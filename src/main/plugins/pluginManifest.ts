@@ -1,3 +1,4 @@
+import { manifestReferencedFiles as publicManifestReferencedFiles } from '../../../packages/plugin-contracts/src/index'
 import { InstalledPluginError } from './pluginManifestErrors'
 import { parseManifestJson } from './pluginManifestJson'
 import { parseManifestV1, type LegacyInstalledManifest } from './pluginManifestV1'
@@ -57,14 +58,7 @@ export function manifestCapabilityPolicy(manifest: InstalledManifest): PluginCap
 
 export function manifestReferencedFiles(manifest: InstalledManifest): string[] {
   if (!isManifestV2(manifest)) return []
-  const paths = new Set<string>()
-  for (const view of manifest.contributes?.views ?? []) {
-    paths.add(view.entry)
-    if (view.icon) paths.add(view.icon)
-  }
-  if (manifest.marketplace.icon) paths.add(manifest.marketplace.icon)
-  if (manifest.backend?.entry) paths.add(manifest.backend.entry)
-  return [...paths]
+  return publicManifestReferencedFiles(manifest)
 }
 
 export function assertManifestFiles(manifest: InstalledManifest, availablePaths: Iterable<string>): void {

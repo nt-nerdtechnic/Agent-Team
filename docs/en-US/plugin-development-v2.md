@@ -12,12 +12,17 @@
 > Production execution adapters and persisted consent wiring remain disabled
 > and belong to the later runtime integration issue.
 >
+> Issue 06 adds the public package boundary and the external frontend workflow.
+> The checked-in SDK CLI currently supports `validate` and frontend-only
+> `package`; `init`, `dev`, backend packaging, signing, publishing, and runtime
+> transport remain deferred to their owning issues.
+>
 > **Migration decision:** Plan B (the B0-B9 checkpoint path) was approved on
 > 2026-08-13. Plans A and C are not active implementation alternatives.
 
 ## What is public
 
-Third-party plugins may depend only on these published npm packages:
+Third-party plugins may depend only on these public package names:
 
 - `@navide/plugin-contracts`: manifest types, capability addresses, payloads,
   error codes, and JSON Schema exports.
@@ -30,10 +35,14 @@ first-party implementation. A bundled plugin such as `navide.git` can use them;
 a third-party plugin cannot. They are not compatibility promises or examples of
 the public dependency graph.
 
-The packages will be published to npm with normal SemVer 2.0.0 versions. Third-party
-projects must use registry versions, never `workspace:` dependencies. The v2
-release gate requires a public package tarball smoke test from a directory
-outside the Navide workspace.
+The package manifests declare public npm publication metadata and use normal
+SemVer 2.0.0 versions, but registry publication is future work outside Issue
+06. The package implementations live under
+`packages/plugin-{contracts,sdk,ui}/` and have no dependency on
+`packages/features/*`. Third-party projects must use registry versions in a
+published workflow, never `workspace:` dependencies. The Issue 06 release
+gate packs those public packages and installs the tarballs in a directory
+outside the Navide workspace; it does not publish to npm.
 
 ## Recommended source project
 
@@ -65,9 +74,10 @@ acme-files/
 ```json
 {
   "scripts": {
-    "build": "vite build",
-    "check": "navide-plugin validate manifest.json",
-    "dev": "navide-plugin dev"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/stage-package.mjs",
+    "check": "navide-plugin validate dist/package",
+    "package": "navide-plugin package dist/package --out dist/acme-files.vsix"
   },
   "dependencies": {
     "@navide/plugin-contracts": "^1.0.0",
@@ -77,12 +87,46 @@ acme-files/
 }
 ```
 
-The SDK distribution must include a `navide-plugin` executable with `init`,
-`validate`, `dev`, and `package` commands. `init` generates this layout;
-`validate` checks the same schema and capability catalog as the Host;
-`dev` registers an unpacked directory and prints renderer/backend logs; and
-`package` creates the canonical signed archive input. These commands are a v2
-release requirement, not current v1 behavior.
+The Issue 06 SDK distribution includes a `navide-plugin` executable with these
+commands:
+
+```text
+navide-plugin validate <directory>
+navide-plugin package <directory> [--out <file>]
+```
+
+`validate` rejects duplicate JSON keys, unknown manifest fields, unsafe paths,
+symlinks, missing referenced files, and files outside the frontend/assets
+package boundary. `package` emits a deterministic `.vsix` ZIP with a root
+`manifest.json`; it rejects manifests containing backend contributions. The
+CLI has no Host transport, process execution, signing, registry publishing,
+scaffolding, or development server.
+
+## Issue 06 external workspace workflow
+
+The repository example at `examples/third-party-files/` is copied into a
+temporary project outside the Navide workspace for the release smoke test. Its
+package manifest declares SemVer ranges for the three public packages. The
+smoke test replaces those ranges, including the TypeScript toolchain, with
+local packed tarballs and installs them with `pnpm --offline` only to test the
+packed-package boundary; the example itself contains no `workspace:` or
+private feature dependency.
+
+From the external project, the supported workflow is:
+
+```text
+pnpm install
+pnpm run typecheck
+pnpm run build
+pnpm run check
+pnpm run package
+```
+
+The example declares the `fs` system namespace and successfully invokes
+`fs.readFile`. It also attempts `shell.run` without declaring `shell`; the Host
+authorization seam rejects that call with `CAPABILITY_DENIED`. The example
+does not implement backend wire handling, subscriptions, Git transport, or
+any later package lifecycle.
 
 ## Normative publish artifact
 
@@ -122,8 +166,9 @@ The publish staging directory and final archive obey these rules:
 - All archive entry names are relative POSIX paths. Absolute paths, empty,
   `.`, or `..` segments, backslashes, duplicate canonical entries, regular-file
   ancestor collisions, symlinks, and non-regular special files are rejected
-  before extraction. A directory entry may have one trailing `/`; that slash
-  is removed for canonical comparison and extraction.
+  before extraction. Each entry name is at most 1024 characters. A directory
+  entry may have one trailing `/`; that slash is removed for canonical
+  comparison and extraction.
 - `.navide-receipt.json`, `.navide-registry-receipt.json`,
   `.navide-package.zip`, `.navide-registry-trust.json`, version selectors,
   activation catalogs, storage snapshots, and active/previous state are
@@ -521,6 +566,10 @@ export declare function definePlugin(
 ): PluginDefinition
 ```
 
+Issue 06 implements `definePlugin` as a transport-free definition factory. It
+does not open a preload channel, send `ready`, or provide a runtime adapter;
+those responsibilities remain with the later Host integration.
+
 `instanceId` is a Host-generated opaque JSON string. Do not parse, construct,
 persist, or use it as authorization input. The SDK sends `ready` only after the
 `activate` promise resolves. `reportProgress` is diagnostic and does not extend
@@ -748,18 +797,17 @@ internal v1 loader/adapter. It is not the third-party API support policy.
 
 ## Development and publishing flow
 
-1. Run `navide-plugin init` and choose a frontend, backend, or combined package.
-2. Declare the smallest permissions and run `navide-plugin validate`.
-3. Run `navide-plugin dev`; Navide Developer Mode loads the unpacked directory,
-   displays an unsigned-code warning when needed, and streams scoped logs.
-4. Run the generated unit tests with an in-memory SDK adapter. Test denied,
-   cancelled, timeout, and multi-instance behavior before manual UI checks.
-5. Run `navide-plugin package`. Inspect the canonical file list, signed
-   marketplace metadata, and digest.
-6. Sign with a registered publisher key and upload the OS/architecture artifact.
-7. The registry revalidates strict JSON parsing, schema, SPDX license,
-   capability/catalog parity, marketplace asset paths, archive safety, digest,
-   signature, key status, and compatibility before accepting a release.
+Issue 06 supports the following external frontend workflow:
 
-Third-party publishing stays closed until the SDK packages, CLI, schema parity,
-trust operations, example plugin, and outside-workspace smoke test all exist.
+1. Install the three public packages from their SemVer registry ranges.
+2. Declare the smallest permissions and run `navide-plugin validate <directory>`.
+3. Run the plugin project's `typecheck` and `build` scripts to create a
+   frontend-only staging directory.
+4. Run `navide-plugin package <directory> --out <file>` and inspect the root
+   manifest and explicit frontend/assets file list.
+5. Run the outside-workspace smoke test with an in-memory Host adapter. It
+   covers one declared capability success and one undeclared capability denial.
+
+`navide-plugin init`, `navide-plugin dev`, backend executable packaging,
+signing, registry publishing, and target-specific artifact lifecycle are later
+contracts. This issue deliberately does not implement them.

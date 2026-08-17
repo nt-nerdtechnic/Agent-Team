@@ -6,6 +6,9 @@ All notable released changes to Navide will be documented in this file. The form
 
 ### Added
 
+- Add the public Plugin Platform v2 contracts, SDK CLI, UI package boundary,
+  and an external-workspace frontend package smoke workflow with fail-closed
+  capability-denial coverage.
 - Enforce Manifest v2 coarse `system` namespace and `shell` grants through the
   Host capability catalog, authenticated workspace binding, package-version
   approval, and fail-closed AI CLI/shell request planning.
