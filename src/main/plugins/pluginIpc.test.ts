@@ -527,7 +527,7 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
     process.env['AGENT_TEAM_MARKETPLACE_URL'] = 'https://registry.acme.test'
     process.env['AGENT_TEAM_REGISTRY_ROOT_APPROVAL_FILE'] = approvalFile
     try {
-      registerPluginIpc(new FrontendPluginManager(), '/plugins', () => true)
+      registerPluginIpc(new FrontendPluginManager(), '/plugins', () => true, TRUST_CONFIG)
       const handler = handlers.get('plugins:prepareInstall')
       if (!handler) throw new Error('prepareInstall handler not registered')
       await expect(handler(null, { namespace: 'acme', name: 'demo' })).resolves.toMatchObject({
