@@ -15,7 +15,9 @@ Sections 1-8 walk the happy path. Sections 9-14 are the boundaries a working
 deployment actually meets: a message key that arrives twice, a policy that
 refuses, a pane whose id changed under a cached hint, two devices discovering
 each other's panes, a device that went offline, and the server itself going away
-mid-session and coming back.
+mid-session and coming back. Section 15 covers the team roster itself: the role
+auth.hello granted, what a member row does and does not carry, and the invite /
+set_role / revoke round trip.
 
 Usage (server must already be running)::
 
@@ -40,6 +42,12 @@ somewhere else would fail the suite on every machine that does not have one.
 Every run uses freshly generated deviceIds so repeated runs never inherit state
 (a policy set by a previous run would hide "never configured" behaviour), and it
 cleans up the session rows it created. It never writes to the server's repo.
+
+One thing it cannot clean up: the member section 15 invites. The server has no
+delete-member call — only revoke, which disables the account and keeps it for the
+audit trail — so every run leaves one *disabled* ``verify-member-<run>`` row on
+the shared roster. That is the server's data model, not an unclean script: the
+run revokes what it created and never touches a member it did not create.
 """
 
 from __future__ import annotations
@@ -90,6 +98,11 @@ DEVICE_B = f"verify-b-{RUN}"
 #: Section 14 only, against the disposable server.
 DEVICE_C = f"verify-c-{RUN}"
 DEVICE_D = f"verify-d-{RUN}"
+#: Section 15 only: the device the member invited by this run signs in from.
+DEVICE_M = f"verify-m-{RUN}"
+#: The member section 15 creates. Named per run so a leftover row is obviously
+#: this script's and never collides with a real teammate.
+MEMBER_NAME = f"verify-member-{RUN}"
 
 #: The address every A→B message in sections 6-11 uses.
 TO_B = {"deviceId": DEVICE_B, "workspace": WORKSPACE_LABEL, "paneName": PANE_NAME}
@@ -233,10 +246,15 @@ async def until(predicate, label: str, timeout: float = 15.0) -> bool:
     return False
 
 
-async def open_link(device_id: str, name: str, url: str = "") -> tuple[ServerLink, Recorder]:
+async def open_link(
+    device_id: str, name: str, url: str = "", token: str = ""
+) -> tuple[ServerLink, Recorder]:
     target = url or URL
+    # Section 15 signs in as the member it just invited, so the credential is a
+    # parameter; everything else uses the admin token from the environment.
+    credential = token or TOKEN
     link = ServerLink(
-        config_loader=lambda: ServerLinkConfig(url=target, token=TOKEN),
+        config_loader=lambda: ServerLinkConfig(url=target, token=credential),
         token_clearer=lambda: None,
         device_name=f"verify-{name}",
     )
@@ -803,6 +821,7 @@ async def main() -> int:
         agent_messaging._reset_for_test()
 
     await check_server_outage()
+    await check_team_members()
 
     print(f"\n== 結果：{_passed} 通過 / {_failed} 失敗 ==")
     return 1 if _failed else 0
@@ -925,6 +944,202 @@ async def check_server_outage() -> None:
         await disposable.stop()
         shutil.rmtree(db_dir, ignore_errors=True)
         agent_messaging._reset_for_test()
+
+
+def _members_of(reply: dict[str, Any]) -> list[dict[str, Any]]:
+    """The roster rows out of a team.members.* reply frame."""
+    payload = reply.get("payload")
+    rows = payload.get("members") if isinstance(payload, dict) else None
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+
+def _row_for(rows: list[dict[str, Any]], member_id: str) -> dict[str, Any]:
+    return next((row for row in rows if row.get("memberId") == member_id), {})
+
+
+async def check_team_members() -> None:
+    """Section 15: the team roster, against the real server.
+
+    Membership is the newest cross-device surface and the only one that has met
+    nothing but the in-process fake — the same gap that once let sessions.sync
+    ship with the wrong status vocabulary while every test was green. So the
+    questions asked here are the ones a fake cannot answer honestly: what role
+    auth.hello really grants, which fields a member row really carries, whether
+    the invite token really appears exactly once, and whether the one rule this
+    backend deliberately does not re-implement — an admin cannot demote itself —
+    is really enforced on the server.
+
+    It runs on the shared server (the roster lives there, not on a disposable
+    instance) and reuses DEVICE_A, whose device row sections 1-13 already
+    created. agent_messaging is empty by now, so neither link here registers a
+    session.
+    """
+    print("\n== 15. 團隊成員管理 ==")
+    link_admin, _ = await open_link(DEVICE_A, "A")
+    link_member: ServerLink | None = None
+    created_id = ""
+    revoked = False
+    try:
+        # --- the role is the server's answer, never this side's guess ---
+        check(
+            link_admin.member_role == "admin",
+            "auth.hello 回帶 role=admin（成員管理按鈕出不出現由它決定）",
+            {"role": link_admin.member_role, "memberId": link_admin.member_id},
+        )
+        check(
+            link_admin.members_snapshot() is not None,
+            "連線建立時就抓過一次 team.members.list（快取不是「從未抓過」）",
+        )
+
+        # --- what a roster row carries, and what it must not ---
+        listed = await link_admin._request("team.members.list", {})
+        check(listed.get("ok") is True, "team.members.list 被接受", listed)
+        rows = _members_of(listed)
+        check(bool(rows), "名冊至少有一列（admin 自己）", listed)
+        me_row = _row_for(rows, link_admin.member_id)
+        check(
+            all(key in me_row for key in ("memberId", "displayName", "role", "disabled", "createdAt")),
+            "每一列帶 memberId/displayName/role/disabled/createdAt",
+            me_row,
+        )
+        check(me_row.get("role") == "admin", "自己那一列的角色與 auth.hello 說的一致", me_row)
+        # Security-shaped, so it is proven rather than trusted to the server's
+        # publicMember() stripping it: a roster that leaked tokens would hand
+        # every observer everyone else's credential.
+        leaking = [str(row.get("memberId") or "") for row in rows if "token" in row]
+        check(not leaking, "名冊沒有任何一列帶 token（server 端 publicMember 濾掉了）", leaking)
+
+        # --- invite: the token exists exactly once ---
+        invite = await link_admin.members_request(
+            "team.members.invite", {"displayName": MEMBER_NAME, "role": "member"}
+        )
+        check(invite.get("ok") is True, "invite 被接受", invite)
+        invited = invite.get("payload") if isinstance(invite.get("payload"), dict) else {}
+        created_id = str(invited.get("memberId") or "")
+        invite_token = str(invited.get("token") or "")
+        redacted = {key: value for key, value in invited.items() if key != "token"}
+        check(bool(created_id), "invite 回帶新成員的 memberId", redacted)
+        check(bool(invite_token), "invite 的回應帶 token", redacted)
+        check(invited.get("role") == "member", "invite 回帶要求的角色", redacted)
+
+        after_invite = _members_of(await link_admin._request("team.members.list", {}))
+        new_row = _row_for(after_invite, created_id)
+        check(bool(new_row), "新成員出現在名冊裡", created_id)
+        check(new_row.get("displayName") == MEMBER_NAME, "名冊裡是我們給的顯示名", new_row)
+        check(new_row.get("disabled") is False, "新成員一開始沒有被停用", new_row)
+        check(
+            "token" not in new_row,
+            "之後的名冊那一列不含 token（token 只在 invite 回應出現那一次，關掉就要不回來）",
+            new_row,
+        )
+        cached = link_admin.members_snapshot() or []
+        check(
+            any(isinstance(row, dict) and row.get("memberId") == created_id for row in cached),
+            "members_request 成功後就地重讀名冊（UI 不必等 team.members.changed 推播）",
+        )
+
+        # --- that token is a working credential, and it comes back as a role ---
+        if invite_token:
+            try:
+                link_member, _ = await open_link(DEVICE_M, "M", token=invite_token)
+            except SystemExit as err:
+                print(f"  （用 invite token 連線失敗：{err}）")
+        check(link_member is not None, "invite 發的 token 真的連得上 server")
+        if link_member is not None:
+            check(
+                link_member.member_id == created_id,
+                "那條連線認證出來的就是剛建立的成員",
+                {"memberId": link_member.member_id, "expected": created_id},
+            )
+            check(
+                link_member.member_role == "member",
+                "auth.hello 給它的角色就是 invite 指定的 member",
+                link_member.member_role,
+            )
+
+        # --- set_role takes effect ---
+        role_reply = await link_admin.members_request(
+            "team.members.set_role", {"memberId": created_id, "role": "observer"}
+        )
+        check(role_reply.get("ok") is True, "set_role 被接受", role_reply)
+        after_role = _members_of(await link_admin._request("team.members.list", {}))
+        check(
+            _row_for(after_role, created_id).get("role") == "observer",
+            "重讀名冊確認角色真的變成 observer",
+            _row_for(after_role, created_id),
+        )
+
+        # --- the rule this backend does not re-implement ---
+        # The UI only greys out its own row's dropdown; nothing on this side
+        # refuses the request. That is only safe if the server refuses it, which
+        # is what this asks.
+        self_demote = await link_admin.members_request(
+            "team.members.set_role", {"memberId": link_admin.member_id, "role": "member"}
+        )
+        check(
+            self_demote.get("ok") is False,
+            "admin 對自己降級被 server 拒絕（後端刻意沒重做這條規則）",
+            self_demote,
+        )
+        check(
+            ((self_demote.get("error") or {}).get("code")) == "BAD_REQUEST",
+            "拒絕的錯誤碼是 BAD_REQUEST",
+            self_demote,
+        )
+        still_admin = _members_of(await link_admin._request("team.members.list", {}))
+        check(
+            _row_for(still_admin, link_admin.member_id).get("role") == "admin",
+            "被拒之後自己仍然是 admin（沒有半套生效）",
+            _row_for(still_admin, link_admin.member_id),
+        )
+
+        # --- revoke drops the connections that member holds ---
+        revoke_reply = await link_admin.members_request(
+            "team.members.revoke", {"memberId": created_id}
+        )
+        revoked = revoke_reply.get("ok") is True
+        check(revoked, "revoke 被接受", revoke_reply)
+        result = revoke_reply.get("payload") if isinstance(revoke_reply.get("payload"), dict) else {}
+        dropped = result.get("droppedConnections")
+        counted = isinstance(dropped, int) and not isinstance(dropped, bool)
+        check(counted, "revoke 回帶 droppedConnections", result)
+        if link_member is not None:
+            check(
+                counted and dropped > 0,
+                "被停用者當時握著一條連線，droppedConnections 大於 0",
+                result,
+            )
+        else:
+            print("  … 這次沒能替被停用者建立連線，droppedConnections 非零的情形沒驗到")
+        check(result.get("disabled") is True, "revoke 回帶 disabled=true（停用，不是刪除）", result)
+
+        after_revoke = _members_of(await link_admin._request("team.members.list", {}))
+        revoked_row = _row_for(after_revoke, created_id)
+        check(bool(revoked_row), "被停用的成員仍留在名冊（server 沒有刪除介面，保留審計軌跡）", created_id)
+        check(revoked_row.get("disabled") is True, "那一列的 disabled 變成 true", revoked_row)
+        if link_member is not None:
+            member_link = link_member
+            check(
+                await until(
+                    lambda: bool(member_link.terminated_reason), "M 收到 auth.revoked"
+                ),
+                "被停用的那條連線收到 auth.revoked，而且不再自動重連",
+                member_link.terminated_reason,
+            )
+    finally:
+        if created_id and not revoked:
+            # Never leave an enabled account behind on a shared server, even
+            # when a check above failed partway through.
+            with contextlib.suppress(Exception):
+                await link_admin.members_request("team.members.revoke", {"memberId": created_id})
+        if link_member is not None:
+            await link_member.stop()
+        await link_admin.stop()
+        if created_id:
+            print(
+                f"  （留下一筆已停用的成員 {MEMBER_NAME}：server 只有 revoke、沒有刪除介面，"
+                f"所以每跑一次就多一列停用成員，不是腳本沒清乾淨）"
+            )
 
 
 if __name__ == "__main__":
