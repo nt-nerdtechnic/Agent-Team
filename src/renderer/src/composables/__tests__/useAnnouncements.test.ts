@@ -200,4 +200,49 @@ describe('useAnnouncements', () => {
     const { releaseAnnouncementId } = await load()
     expect(releaseAnnouncementId('0.1.77')).toBe('release:0.1.77')
   })
+
+  describe('backend upgrade', () => {
+    it('tops the feed with what an upgrade means for MCP clients', async () => {
+      store.set(READ_IDS_KEY, [])
+      const { useAnnouncements } = await load()
+      const a = useAnnouncements()
+
+      a.noteBackendUpgrade('0.1.85', '0.1.86')
+
+      const top = a.items.value[0]
+      expect(top.id).toBe('mcp-tools:0.1.86')
+      expect(top.version).toBe('0.1.86')
+      // The version it replaced is what tells the reader which clients are old.
+      expect(top.note).toContain('0.1.85')
+      expect(top.read).toBe(false)
+    })
+
+    it('says nothing at all when the backend did not change version', async () => {
+      store.set(READ_IDS_KEY, [])
+      const { useAnnouncements } = await load()
+      const a = useAnnouncements()
+      const before = a.items.value.length
+
+      a.noteBackendUpgrade('0.1.86', '0.1.86')
+      a.noteBackendUpgrade('', '0.1.86')
+
+      expect(a.items.value).toHaveLength(before)
+    })
+
+    it('stays one item across the reconnects that report it again', async () => {
+      store.set(READ_IDS_KEY, [])
+      const { useAnnouncements } = await load()
+      const a = useAnnouncements()
+
+      a.noteBackendUpgrade('0.1.85', '0.1.86')
+      a.markRead('mcp-tools:0.1.86')
+      a.noteBackendUpgrade('0.1.85', '0.1.86')
+
+      const rows = a.items.value.filter((i) => i.id === 'mcp-tools:0.1.86')
+      expect(rows).toHaveLength(1)
+      // Reading it is final: the backend re-reporting on reconnect must not
+      // resurrect it as unread.
+      expect(rows[0].read).toBe(true)
+    })
+  })
 })

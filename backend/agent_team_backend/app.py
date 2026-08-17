@@ -84,7 +84,7 @@ from .recent_workspaces import RecentWorkspacesStore
 from .roles_store import RolesStore
 from .stages_store import StagesStore
 from .db import DB_FILENAME, Database, WorkspaceDatabases
-from .store_migrations import run_startup_migrations
+from .store_migrations import run_startup_migrations, version_change
 from .terminals import TerminalService
 from .tokens_store import TokensStore
 from .ui_settings import UiSettingsStore
@@ -1556,6 +1556,17 @@ async def ws(websocket: WebSocket) -> None:
     log.info("ws client connected")
     session = Session(websocket)
     _SESSIONS.add(session)
+    # An MCP client reads this backend's tool list once, when it connects, so a
+    # CLI that was already talking to the previous backend keeps the tools it
+    # saw then. Told to the window rather than logged: only the window can put
+    # it in front of the person who has to reopen the pane. Sent on every
+    # connect because a window may open at any point after startup; the feed
+    # dedupes it by id.
+    changed = version_change()
+    if changed is not None:
+        await session.send_json(
+            make_event("app.version_changed", {"from": changed[0], "to": changed[1]})
+        )
     try:
         while True:
             if session.dead:

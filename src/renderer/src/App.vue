@@ -8535,6 +8535,14 @@ backend.on('agent_msg.delivery_result', (raw) => {
   messaging.resolveRemoteDelivery(ev.msg_key, !!ev.ok, ev.reason || '')
 })
 
+// This backend started at a different version than the one before it, so any
+// MCP client still connected from then is holding that backend's tool list.
+backend.on('app.version_changed', (raw) => {
+  const ev = raw as { from?: string; to?: string }
+  if (!ev?.from || !ev.to) return
+  announcements.noteBackendUpgrade(ev.from, ev.to)
+})
+
 backend.on('session.detected', (raw) => {
   const ev = raw as { pane_id?: string; session_id?: string }
   if (!ev?.pane_id || !ev.session_id) return

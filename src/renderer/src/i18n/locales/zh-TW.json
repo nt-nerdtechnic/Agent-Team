@@ -1990,7 +1990,9 @@
     "mark-all-read": "全部標為已讀",
     "close": "關閉",
     "empty": "目前沒有公告",
-    "load-more": "載入更多（還有 {count} 則）"
+    "load-more": "載入更多（還有 {count} 則）",
+    "mcp-tools-changed": "MCP 工具可能已變更",
+    "mcp-tools-changed-note": "CLI agent 只在啟動時讀一次 Navide 的 MCP 工具清單。從上一個版本（{from}）就連著的對象——CLI pane 或外部 MCP client——拿到的還是當時那份清單；重開 pane 或重新連線才會拿到新的工具。"
   },
   "clock": {
     "title": "時間資訊",

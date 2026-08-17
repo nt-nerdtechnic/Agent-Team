@@ -1990,7 +1990,9 @@
     "mark-all-read": "Mark all read",
     "close": "Close",
     "empty": "No announcements yet",
-    "load-more": "Load more ({count} left)"
+    "load-more": "Load more ({count} left)",
+    "mcp-tools-changed": "MCP tools may have changed",
+    "mcp-tools-changed-note": "A CLI agent reads Navide's MCP tool list once, when it starts. Anything still connected from the previous version ({from}) — a CLI pane, or an external MCP client — keeps the tools it saw then; reopen the pane or reconnect the client to pick up new ones."
   },
   "clock": {
     "title": "Time",

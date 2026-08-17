@@ -211,6 +211,47 @@ class TestStartupBackup:
         assert len(list((tmp_path / sm.BACKUP_DIR).iterdir())) == 1
 
 
+# ─────────────────── version-change report ───────────────────
+
+
+class TestVersionChange:
+    """What app.py tells a connecting window, so it can warn that an MCP client
+    from the previous backend is holding that backend's tool list."""
+
+    def test_reports_the_transition_once_the_version_moved(self, tmp_path):
+        _write_json(tmp_path / PIPELINES_FILE, _valid_pipelines_doc(1))
+        (tmp_path / sm.MARKER_FILE).write_text("1.0.0", encoding="utf-8")
+
+        sm.run_startup_migrations(tmp_path, "1.0.1")
+
+        assert sm.version_change() == ("1.0.0", "1.0.1")
+
+    def test_same_version_reports_nothing(self, tmp_path):
+        (tmp_path / sm.MARKER_FILE).write_text("9.9.9", encoding="utf-8")
+
+        sm.run_startup_migrations(tmp_path, "9.9.9")
+
+        assert sm.version_change() is None
+
+    def test_a_first_start_is_not_an_upgrade(self, tmp_path):
+        # No marker: nothing was ever running against this dir, so no client can
+        # be holding an older tool list.
+        _write_json(tmp_path / PIPELINES_FILE, _valid_pipelines_doc(1))
+
+        sm.run_startup_migrations(tmp_path, "2.0.0")
+
+        assert sm.version_change() is None
+
+    def test_a_later_same_version_start_clears_an_earlier_report(self, tmp_path):
+        (tmp_path / sm.MARKER_FILE).write_text("1.0.0", encoding="utf-8")
+        sm.run_startup_migrations(tmp_path, "1.0.1")
+        assert sm.version_change() is not None
+
+        sm.run_startup_migrations(tmp_path, "1.0.1")
+
+        assert sm.version_change() is None
+
+
 # ─────────────────── retention ───────────────────
 
 
