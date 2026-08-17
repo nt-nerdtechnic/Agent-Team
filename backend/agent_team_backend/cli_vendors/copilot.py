@@ -1175,7 +1175,9 @@ SPEC = VendorSpec(
             entry=(("type", "http"), ("url", McpValue.URL)),
         ),
         flag="--additional-mcp-config",
-        already_wired="{name}",
+        # Quoted: the inline JSON we inject always carries `"navide"`, while a
+        # bare `navide` would also match unrelated argv such as `~/navide-web`.
+        already_wired='"{name}"',
     ),
     install_hooks=_install_hooks,
     # Late-bound (module global at call time) so tests can monkeypatch.

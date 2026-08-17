@@ -24,6 +24,7 @@ All notable released changes to Navide will be documented in this file. The form
 
 ### Changed
 
+- Rename the built-in MCP server from `navide-plans` to `navide`: tools now appear as `mcp__navide__*`, and a per-tool "always allow" saved for the old prefix will be asked once more. Stale `navide-plans` entries Navide itself wrote (Cursor project config, per-pane shim configs) are replaced in place; anything you added yourself is left alone.
 - Wait for an inter-CLI message to be delivered before waiting for the turn it should produce: `cli_send_and_wait` spends at most half its timeout getting the message in, and answers `not_delivered` — with the hold or the refusal reason — when it never arrives. It previously reported the target as idle in that case, which reads as "it finished your work" when the work was never handed over.
 - Hold an inter-CLI message while someone is typing into the target pane: a pane with an unsent input line, or one that took a keystroke in the last few seconds, is reported as `typing` in the Messages panel until the line is sent or cleared, so a delivery can no longer submit a half-written prompt along with itself.
 - Write every injection into a CLI pane as a bracketed paste for the vendors whose TUI keeps the mode on, instead of only multi-line ones, and send the paste guards as whole writes so a chunk boundary can never cut one in half.
