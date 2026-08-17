@@ -26,6 +26,10 @@ export const MSG_ENVELOPE_PREFIX = `${MSG_INJECTED_PREFIX} from:`
  *  MSG_ENVELOPE_PREFIX: an agent must be able to tell "someone messaged me"
  *  from "my message bounced" by the first line alone. */
 export const MSG_NOTICE_PREFIX = `${MSG_INJECTED_PREFIX} delivery failed`
+/** First line of a still-held notice. Distinct from the failure prefix because
+ *  it reports the opposite state: the message has not gone in and has not been
+ *  given up on either. */
+export const MSG_STALE_PREFIX = `${MSG_INJECTED_PREFIX} still held`
 /** A spawn request that produced no pane. */
 export const MSG_SPAWN_FAILED_PREFIX = `${MSG_INJECTED_PREFIX} spawn failed`
 /** A spawn request whose pane exists but never received its task. Kept separate
@@ -252,8 +256,22 @@ const NOTICE_EXCERPT_CHARS = 80
  * unknown key degrades to the key itself rather than to nothing.
  */
 export function reasonToEnglish(key: string, params?: Record<string, string | number>): string {
-  const template = (enUS.msg as Record<string, string>)[`reason-${key}`]
-  if (!template) return key
+  return enUsSentence(`reason-${key}`, key, params)
+}
+
+/** English sentence for a `msg.hold-*` key — why a message has not gone out
+ *  yet — read from the same locale, for the same reason. */
+export function holdToEnglish(key: string, params?: Record<string, string | number>): string {
+  return enUsSentence(`hold-${key}`, key, params)
+}
+
+function enUsSentence(
+  localeKey: string,
+  fallback: string,
+  params?: Record<string, string | number>,
+): string {
+  const template = (enUS.msg as Record<string, string>)[localeKey]
+  if (!template) return fallback
   return template.replace(/\{(\w+)\}/g, (whole, name: string) => {
     const value = params?.[name]
     return value === undefined ? whole : String(value)
@@ -275,6 +293,31 @@ export function renderFailureNotice(to: string, reasonText: string, content: str
   return (
     `${MSG_NOTICE_PREFIX} — to: ${to}\n` +
     `reason: ${reasonText}\n` +
+    `（原訊息開頭：${sanitizeMessageContent(excerpt)}）`
+  )
+}
+
+/**
+ * Notice injected back into the SENDING pane when its message has been queued
+ * long enough to be worth looking at, and has still neither gone in nor failed.
+ *
+ * Deliberately not a failure: nothing has given up on the message, and it will
+ * still be delivered when the target frees up. What it buys the sender is the
+ * chance to decide — wait, ask someone else, or tell the user — instead of
+ * assuming the work was handed over minutes ago.
+ */
+export function renderStaleNotice(
+  to: string,
+  holdText: string,
+  minutes: number,
+  content: string,
+): string {
+  const excerpt = Array.from(content.replace(/\s+/g, ' ').trim())
+    .slice(0, NOTICE_EXCERPT_CHARS)
+    .join('')
+  return (
+    `${MSG_STALE_PREFIX} — to: ${to}\n` +
+    `reason: ${holdText} — waiting ${minutes} min so far\n` +
     `（原訊息開頭：${sanitizeMessageContent(excerpt)}）`
   )
 }

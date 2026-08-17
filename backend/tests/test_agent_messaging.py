@@ -839,7 +839,7 @@ async def test_delivered_handler_also_settles_a_cli_send_for_cli_check_message(
         captured.append(event)
 
     monkeypatch.setattr(app, "broadcast", fake_broadcast)
-    plan_mcp._record_message_sent("mcp-key", "beta/reviewer")
+    plan_mcp._record_message_sent("mcp-key", "beta/reviewer", "pa", "hi")
     try:
         session = _session()
         await app.handle_message(session, {
@@ -1089,7 +1089,7 @@ async def test_hold_update_hands_the_reason_to_the_mcp_server() -> None:
     exists nowhere else — and an MCP caller has no Messages panel to read."""
     from agent_team_backend.plugins.builtin.navide_plans import plan_mcp
 
-    plan_mcp._record_message_sent("mcp-key", "beta/reviewer")
+    plan_mcp._record_message_sent("mcp-key", "beta/reviewer", "pa", "hi")
     try:
         session = _session()
         await app.handle_message(session, {
@@ -1109,7 +1109,7 @@ async def test_hold_update_hands_the_reason_to_the_mcp_server() -> None:
 async def test_hold_update_with_a_null_hold_clears_it() -> None:
     from agent_team_backend.plugins.builtin.navide_plans import plan_mcp
 
-    plan_mcp._record_message_sent("mcp-key", "beta/reviewer")
+    plan_mcp._record_message_sent("mcp-key", "beta/reviewer", "pa", "hi")
     plan_mcp.record_message_hold("mcp-key", {"key": "typing"})
     try:
         session = _session()

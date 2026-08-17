@@ -1030,7 +1030,7 @@ async def _send_to_device(
             + (f": {detail}" if detail else ""),
             "error_code": mapped,
         }
-    _record_message_sent(msg_key, address.to_string())
+    _record_message_sent(msg_key, address.to_string(), me or caller.kind, text)
     return {
         "ok": True,
         "target": address.to_string(),
@@ -1173,7 +1173,7 @@ async def cli_send(
             },
         )
     )
-    _record_message_sent(msg_key, result.pane.qualified_name)
+    _record_message_sent(msg_key, result.pane.qualified_name, me or caller.kind, text)
     return await _with_delivery_wait(
         {
             "ok": True,
@@ -1193,6 +1193,14 @@ async def cli_send(
 # loses it, which is fine for a key nothing outlives the process anyway.
 _MESSAGE_STATUS_MAX = 500
 _MESSAGE_STATUS_TTL_S = 3600.0
+# How long a message may sit in "queued" before it stops reading as "on its way"
+# and starts reading as "stuck". Deliberately far below the receiving window's
+# 30-minute no-report backstop: this is the point where a sender should look,
+# not the point where the message is given up on.
+_STALE_HOLD_S = 120.0
+# How much of a message cli_inbox_summary quotes back, counted in code points so
+# the cut cannot split a surrogate pair.
+_INBOX_EXCERPT_CHARS = 60
 _mcp_message_status: dict[str, dict[str, Any]] = {}
 # Calls parked in cli_send(wait_for_delivery_s=…), by the key they are waiting
 # on. One event per waiting call rather than one per key: two agents may wait on
@@ -1209,7 +1217,7 @@ def _prune_message_status(now: float) -> None:
         _mcp_message_status.pop(next(iter(_mcp_message_status)))
 
 
-def _record_message_sent(msg_key: str, target: str) -> None:
+def _record_message_sent(msg_key: str, target: str, origin: str, text: str) -> None:
     now = time.monotonic()
     _prune_message_status(now)
     _mcp_message_status[msg_key] = {
@@ -1223,6 +1231,12 @@ def _record_message_sent(msg_key: str, target: str) -> None:
         # before any hold was ever reported.
         "hold": None,
         "hold_since": None,
+        # Who sent it, as cli_inbox_summary identifies its own caller: a pane id
+        # for a pane, otherwise the caller kind. The msg_key already starts with
+        # this, but a pane id may contain anything, so it is kept as its own
+        # field rather than parsed back out of the key.
+        "origin": origin,
+        "excerpt": "".join(list(" ".join(text.split()))[:_INBOX_EXCERPT_CHARS]),
     }
 
 
@@ -1275,6 +1289,22 @@ def _hold_view(entry: dict[str, Any], now: float) -> dict[str, Any]:
     if entry.get("hold_since") is not None:
         view["held_for_s"] = round(now - entry["hold_since"], 1)
     return view
+
+
+def _is_stale(entry: dict[str, Any], now: float) -> bool:
+    """True once a queued message has waited long enough to be worth looking at.
+
+    Read from the send's own age rather than from `hold_since`: a hold that
+    flips between "mid-turn" and "typing" restarts that clock every time, and a
+    message no window ever reported a hold for — the case this exists for —
+    has no hold clock at all.
+
+    Computed on read rather than stamped by a timer. Nothing on the backend
+    needs to act at the moment the threshold is crossed: the renderer owns the
+    queue and pushes the still-held notice itself (STALE_HOLD_MS in
+    useAgentMessaging), and everything here answers a question that was asked.
+    """
+    return entry["status"] == "queued" and now - entry["created_at"] >= _STALE_HOLD_S
 
 
 def _hold_reason_for(target: str) -> str | None:
@@ -1395,6 +1425,8 @@ def _delivery_outcome(msg_key: str, waited: float) -> dict[str, Any]:
     if entry["status"] == "queued":
         outcome["waited_s"] = round(waited, 1)
         outcome.update(_hold_view(entry, now))
+        if _is_stale(entry, now):
+            outcome["stale"] = True
         return outcome
     if entry["reason"]:
         outcome["reason"] = entry["reason"]
@@ -1424,8 +1456,8 @@ async def cli_check_message(msg_key: str, ctx: Context) -> dict[str, Any]:
     """Look up what became of a message you sent with cli_send.
 
     `msg_key` is the value cli_send returned. Returns {ok, msg_key, status,
-    target, age_seconds, reason?, settled_after_s?, hold?, held_for_s?}.
-    `status` is one of:
+    target, age_seconds, reason?, settled_after_s?, hold?, held_for_s?,
+    stale?}. `status` is one of:
 
       - "queued"    — broadcast for delivery; no window has reported back yet.
                       A message held for a busy pane stays here until it is
@@ -1450,6 +1482,11 @@ async def cli_check_message(msg_key: str, ctx: Context) -> dict[str, Any]:
     "starting", "settling", "not-ready", "gone", "paused" or "remote-ack". Both
     keys are absent once the message settles, and while no window has reported
     a hold at all — a message queued with no hold is simply on its way in.
+
+    `stale` is true once a queued message has been waiting more than two
+    minutes. It is not a failure and nothing has given up on it — it is the
+    point at which waiting longer is probably not the answer, so read `hold`
+    and decide whether to wait, address someone else, or tell the user.
 
     Bounds: this is in-memory backend state, not a log. It is lost on backend
     restart, keeps only the last hour, and only the most recent few hundred
@@ -1481,7 +1518,62 @@ async def cli_check_message(msg_key: str, ctx: Context) -> dict[str, Any]:
     if entry["delivered_at"] is not None:
         status["settled_after_s"] = round(entry["delivered_at"] - entry["created_at"], 1)
     status.update(_hold_view(entry, now))
+    if _is_stale(entry, now):
+        status["stale"] = True
     return status
+
+
+@server.tool()
+async def cli_inbox_summary(ctx: Context) -> dict[str, Any]:
+    """List the messages you sent that are stuck or that never got through.
+
+    Takes no arguments and asks about no one but you: it returns the sends made
+    from this caller — this pane, or this external client — that are currently
+    stale (queued more than two minutes) or failed. Everything that was
+    delivered, and everything still on its way in, is left out.
+
+    This is the pull half of delivery feedback, and it exists for the agent the
+    push half cannot reach. A failure notice is typed back into the sending
+    pane once that pane is idle, so an agent that stays busy for an hour never
+    sees one, and an external client has no pane to type into at all. Calling
+    this between pieces of your own work is how you find out that the message
+    you sent twenty minutes ago is still sitting in a queue.
+
+    Returns {ok, count, messages: [{msg_key, target, status, age_seconds,
+    stale?, reason?, hold?, held_for_s?, excerpt}]}, newest send last. `excerpt`
+    is the first 60 characters of what you sent, so a message is recognizable
+    without keeping every msg_key. The same in-memory bounds as
+    cli_check_message apply: the last hour, the last few hundred sends, gone on
+    backend restart. An empty list means nothing of yours is stuck — it never
+    means nothing was sent.
+    """
+    try:
+        caller = _resolve_caller(ctx)
+    except CallerUnknown as err:
+        return {"ok": False, "error": str(err)}
+    origin = (caller.pane_id if caller.kind == "pane" else "") or caller.kind
+    now = time.monotonic()
+    messages: list[dict[str, Any]] = []
+    for key, entry in _mcp_message_status.items():
+        if entry.get("origin") != origin:
+            continue
+        stale = _is_stale(entry, now)
+        if not stale and entry["status"] not in ("failed", "rejected"):
+            continue
+        row: dict[str, Any] = {
+            "msg_key": key,
+            "target": entry["target"],
+            "status": entry["status"],
+            "age_seconds": round(now - entry["created_at"], 1),
+            "excerpt": entry.get("excerpt", ""),
+        }
+        if stale:
+            row["stale"] = True
+        if entry["reason"]:
+            row["reason"] = entry["reason"]
+        row.update(_hold_view(entry, now))
+        messages.append(row)
+    return {"ok": True, "count": len(messages), "messages": messages}
 
 
 # ── Reading another pane (cli_read_log / cli_get_status / cli_wait_idle) ────
@@ -1867,7 +1959,7 @@ def _never_arrived(sent: dict[str, Any], started: float) -> dict[str, Any]:
         "delivery_status": sent.get("status", "queued"),
         "waited_s": round(time.monotonic() - started, 1),
     }
-    for key in ("reason", "hold", "held_for_s"):
+    for key in ("reason", "hold", "held_for_s", "stale"):
         if key in sent:
             result[key] = sent[key]
     return result

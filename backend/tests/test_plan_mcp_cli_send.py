@@ -1346,3 +1346,179 @@ async def test_a_settled_message_stops_explaining_its_target(
     reviewer = next(t for t in result["targets"] if t["address"] == "beta/reviewer")
 
     assert "hold_reason" not in reviewer
+
+
+# ── stale holds (cli_check_message / cli_send wait) ─────────────────────────
+
+
+def _age(msg_key: str, seconds: float) -> None:
+    """Backdate a tracked send, so a threshold can be crossed without waiting."""
+    plan_mcp._mcp_message_status[msg_key]["created_at"] -= seconds
+
+
+@pytest.mark.asyncio
+async def test_a_message_queued_past_the_threshold_reads_as_stale(
+    captured: list[dict[str, Any]],
+) -> None:
+    _seed()
+    sent = await plan_mcp.cli_send("beta/reviewer", "hi", _ctx())
+    plan_mcp.record_message_hold(sent["msg_key"], {"key": "typing"})
+    _age(sent["msg_key"], plan_mcp._STALE_HOLD_S + 1)
+
+    result = await plan_mcp.cli_check_message(sent["msg_key"], _ctx())
+
+    assert result["status"] == "queued"
+    assert result["stale"] is True
+    # Still says why, and still says nothing about having failed.
+    assert result["hold"] == {"key": "typing"}
+    assert "reason" not in result
+
+
+@pytest.mark.asyncio
+async def test_a_message_queued_with_no_hold_can_still_be_stale(
+    captured: list[dict[str, Any]],
+) -> None:
+    """The case this exists for: nothing ever reported a hold, so `held_for_s`
+    has no clock to run on and only the send's own age can answer."""
+    _seed()
+    sent = await plan_mcp.cli_send("beta/reviewer", "hi", _ctx())
+    _age(sent["msg_key"], plan_mcp._STALE_HOLD_S + 1)
+
+    result = await plan_mcp.cli_check_message(sent["msg_key"], _ctx())
+
+    assert result["stale"] is True
+    assert "hold" not in result
+
+
+@pytest.mark.asyncio
+async def test_a_message_below_the_threshold_is_not_stale(
+    captured: list[dict[str, Any]],
+) -> None:
+    _seed()
+    sent = await plan_mcp.cli_send("beta/reviewer", "hi", _ctx())
+    _age(sent["msg_key"], plan_mcp._STALE_HOLD_S - 5)
+
+    result = await plan_mcp.cli_check_message(sent["msg_key"], _ctx())
+
+    assert "stale" not in result
+
+
+@pytest.mark.asyncio
+async def test_a_settled_message_is_never_stale(captured: list[dict[str, Any]]) -> None:
+    """Age alone does not make it stuck — it went in, and old is not stuck."""
+    _seed()
+    sent = await plan_mcp.cli_send("beta/reviewer", "hi", _ctx())
+    plan_mcp.record_delivery_result(sent["msg_key"], True, "")
+    _age(sent["msg_key"], plan_mcp._STALE_HOLD_S * 10)
+
+    result = await plan_mcp.cli_check_message(sent["msg_key"], _ctx())
+
+    assert result["status"] == "delivered"
+    assert "stale" not in result
+
+
+@pytest.mark.asyncio
+async def test_a_timed_out_wait_says_the_message_is_stale(
+    captured: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An agent that waited and got nothing needs the same verdict in the same
+    answer — that is the whole point of waiting in-band."""
+    _seed()
+    monkeypatch.setattr(plan_mcp, "_STALE_HOLD_S", 0.0)
+
+    result = await plan_mcp.cli_send("beta/reviewer", "hi", _ctx(), wait_for_delivery_s=0.05)
+
+    assert result["ok"] is True
+    assert result["status"] == "queued"
+    assert result["stale"] is True
+
+
+# ── cli_inbox_summary ──────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_inbox_summary_lists_my_stuck_and_failed_sends(
+    captured: list[dict[str, Any]],
+) -> None:
+    _seed()
+    stuck = await plan_mcp.cli_send("beta/reviewer", "please review the diff", _ctx())
+    plan_mcp.record_message_hold(stuck["msg_key"], {"key": "typing"})
+    _age(stuck["msg_key"], plan_mcp._STALE_HOLD_S + 1)
+    bounced = await plan_mcp.cli_send("beta/reviewer", "and the tests", _ctx())
+    plan_mcp.record_delivery_result(bounced["msg_key"], False, "pane-closed")
+
+    result = await plan_mcp.cli_inbox_summary(_ctx())
+
+    assert result["ok"] is True
+    assert result["count"] == 2
+    first, second = result["messages"]
+    assert first["msg_key"] == stuck["msg_key"]
+    assert first["status"] == "queued"
+    assert first["stale"] is True
+    assert first["hold"] == {"key": "typing"}
+    assert first["excerpt"] == "please review the diff"
+    assert second["status"] == "failed"
+    assert second["reason"] == "pane-closed"
+
+
+@pytest.mark.asyncio
+async def test_inbox_summary_leaves_out_what_is_fine(
+    captured: list[dict[str, Any]],
+) -> None:
+    """Delivered, and still on its way in, are both "nothing to do here"."""
+    _seed()
+    done = await plan_mcp.cli_send("beta/reviewer", "hi", _ctx())
+    plan_mcp.record_delivery_result(done["msg_key"], True, "")
+    await plan_mcp.cli_send("beta/reviewer", "just sent", _ctx())
+
+    result = await plan_mcp.cli_inbox_summary(_ctx())
+
+    assert result["count"] == 0
+    assert result["messages"] == []
+
+
+@pytest.mark.asyncio
+async def test_inbox_summary_answers_about_the_caller_only(
+    captured: list[dict[str, Any]],
+) -> None:
+    """One backend serves every pane; another agent's stuck message is its own
+    problem to notice, not something to hand this one."""
+    _seed()
+    theirs = await plan_mcp.cli_send("beta/reviewer", "from helper", _ctx(pane_id="pc"))
+    _age(theirs["msg_key"], plan_mcp._STALE_HOLD_S + 1)
+
+    result = await plan_mcp.cli_inbox_summary(_ctx(pane_id="pa"))
+
+    assert result["count"] == 0
+
+    theirs_view = await plan_mcp.cli_inbox_summary(_ctx(pane_id="pc"))
+    assert [m["msg_key"] for m in theirs_view["messages"]] == [theirs["msg_key"]]
+
+
+@pytest.mark.asyncio
+async def test_inbox_summary_refuses_a_caller_it_cannot_identify() -> None:
+    _seed()
+    result = await plan_mcp.cli_inbox_summary(_ctx(pane_id=None))
+
+    assert result["ok"] is False
+    assert "identify your pane" in result["error"]
+
+
+def test_a_send_and_wait_that_never_arrived_carries_the_stale_verdict() -> None:
+    """cli_send_and_wait's not_delivered answer is the sender's only report on a
+    message that never went in — it has to say everything cli_send's wait said."""
+    sent = {
+        "target": "beta/reviewer",
+        "msg_key": "k",
+        "status": "queued",
+        "hold": {"key": "typing"},
+        "held_for_s": 130.0,
+        "stale": True,
+    }
+
+    result = plan_mcp._never_arrived(sent, time.monotonic())
+
+    assert result["source"] == "not_delivered"
+    assert result["delivery_status"] == "queued"
+    assert result["stale"] is True
+    assert result["hold"] == {"key": "typing"}

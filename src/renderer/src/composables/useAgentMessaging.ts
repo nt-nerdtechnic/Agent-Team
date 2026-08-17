@@ -2,7 +2,9 @@ import { readonly, ref } from 'vue'
 import {
   renderEnvelope,
   renderFailureNotice,
+  renderStaleNotice,
   reasonToEnglish,
+  holdToEnglish,
   defaultMessagingName,
   isQualifiedTarget,
   normalizeMessagingName,
@@ -101,6 +103,10 @@ export interface AgentMessage {
   reason?: MessageReason
   /** Why this message has not been injected yet, while status === 'queued'. */
   hold?: MessageHold
+  /** Set once the sender has been told this message is still held, so it is
+   *  told once and not every second. In-memory only, like `hold`: a restored
+   *  row is not queued any more and has nothing left to warn about. */
+  staleNotified?: true
   /** Set on a message that reached its pane without being typed in: `hook` for
    *  a claude Stop hook that was handed it as its next instruction, `push:<kind>`
    *  for one of the vendor push channels. Like `hold` it is in-memory only: it
@@ -249,6 +255,13 @@ const REMOTE_ACK_TIMEOUT_MS = 30 * 60_000
  *  window as the remote-ack backstop: long enough for a slow turn to answer,
  *  short enough that the table cannot grow for the life of the session. */
 const CORRELATION_TTL_MS = REMOTE_ACK_TIMEOUT_MS
+/** How long a message may stay queued before its sender is told it is stuck.
+ *  Matches the backend's _STALE_HOLD_S, which answers the same question for an
+ *  MCP caller (cli_check_message's `stale`). The two clocks start a round trip
+ *  apart — the row is created here, the backend entry when the send reaches it —
+ *  and nothing compares them, so they need to agree on the threshold and not on
+ *  the moment. */
+export const STALE_HOLD_MS = 120_000
 
 const RATE_LIMIT_REASON: MessageReason = {
   key: 'rate-limit',
@@ -503,6 +516,45 @@ function notifySenderOfFailure(m: AgentMessage): void {
     renderFailureNotice(m.to, reasonToEnglish(m.reason.key, m.reason.params), m.content),
     { kind: 'notice' },
   )
+}
+
+/**
+ * Tell the SENDING pane that its message is still queued, once it has been
+ * waiting long enough that "it is on its way" has stopped being a useful thing
+ * to assume.
+ *
+ * Same audience and same path as a failure notice, and the same exclusions —
+ * with one addition: a message that already produced one of these does not
+ * produce another, so a target that stays busy for an hour costs its senders
+ * one notice each rather than one a second.
+ *
+ * This is where the still-held warning lives for EVERY sender that is a pane,
+ * whichever way the message was sent. The backend tracks only `cli_send`
+ * messages and could warn about those alone; the queue, the sender's name and
+ * the injection path are all here, so nothing is gained by splitting the job in
+ * two and a message would risk being reported twice.
+ */
+function notifyStaleHolds(now: number): void {
+  if (!deps) return
+  // Copied first: each notice appends to the log being iterated.
+  for (const m of [...messages.value]) {
+    if (m.status !== 'queued' || m.staleNotified) continue
+    if (m.kind === 'notice' || m.remote === 'inbound') continue
+    if (now - m.createdAt < STALE_HOLD_MS) continue
+    if (!paneByName.has(m.from)) continue
+    m.staleNotified = true
+    sendMessage(
+      NOTICE_SENDER,
+      m.from,
+      renderStaleNotice(
+        m.to,
+        holdToEnglish(m.hold?.key ?? 'busy', { n: m.hold?.n ?? 0 }),
+        Math.round((now - m.createdAt) / 60_000),
+        m.content,
+      ),
+      { kind: 'notice' },
+    )
+  }
 }
 
 /**
@@ -1027,6 +1079,9 @@ function pump(): void {
     for (const q of queues.values()) annotateHold(q, 'paused')
     return
   }
+  // After the pause check, not before: while delivery is paused everything is
+  // held on purpose, and the notice itself would be stuck in the same queue.
+  notifyStaleHolds(now)
   for (const paneId of queues.keys()) void pumpPane(paneId)
 }
 
