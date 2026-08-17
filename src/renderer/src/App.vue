@@ -840,6 +840,12 @@ interface ActivePane {
    *  terminal panes. Persisted to localStorage keyed by pane id so names
    *  survive restart (see persistMessagingName). */
   messagingName?: string
+  /** Pane ids this pane's CLI process was reached under before the pane was
+   *  rebuilt around it (restore that reattached a live PTY, detach, group
+   *  reattach). Mirrored to the backend so the /plan-mcp URL that process was
+   *  spawned with — which carries the id of that moment forever — still
+   *  resolves to this pane. */
+  formerPaneIds?: string[]
   /** Pane id of the parent that spawned this pane via a SPAWN block. Runtime
    *  only — deliberately NOT persisted: after a restart every pane counts as
    *  root (spawn depth 0) again, accepted for the MVP. */
@@ -1375,6 +1381,10 @@ function mirrorMessagingHandle(pane: ActivePane): void {
       name: pane.messagingName,
       workspace_path: pane.workspacePath,
       agent_key: pane.agentKey,
+      // Re-sent on every mirror (rename, reconnect), not only the first: the
+      // backend forgets a pane whose window stayed away too long, and with it
+      // the aliases that pane owned.
+      former_pane_ids: pane.formerPaneIds ?? [],
     })
     .catch(() => { /* local messaging is unaffected */ })
 }
@@ -3775,6 +3785,10 @@ interface SpawnInternal {
   /** Persisted messaging name carried through a restore so inter-CLI messaging
    *  addresses survive restart. */
   preferredMessagingName?: string
+  /** Pane ids the CLI this pane may reattach to was reachable under before.
+   *  Only ever the immediate predecessor is needed — the backend flattens the
+   *  chain, so A→B→C leaves both A and B pointing at C. */
+  formerPaneIds?: string[]
   /** Parent pane id for an agent-requested spawn (SPAWN block). Runtime-only
    *  lineage for the spawn-depth/quota gate; never persisted. */
   spawnedBy?: string
@@ -3957,6 +3971,7 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
     profileId: opts.profileId || undefined,
     sessionMarker: sessionMarker || undefined,
     spawnedBy: opts.spawnedBy,
+    formerPaneIds: opts.formerPaneIds?.length ? [...opts.formerPaneIds] : undefined,
   }
   // If this spawn carries its kickoff directly (fallback path), embed the
   // marker now. Pre-spawned panes get it at activateStage injection time.
@@ -6105,6 +6120,12 @@ async function spawnRestoredPane(opts: RestoredPaneSpawnOptions): Promise<Restor
     sessionKnownOnDisk: opts.sessionKnownOnDisk,
     freshSessionId: opts.freshSessionId,
     preferredMessagingName: persistedMessagingName(saved.pane_id),
+    // Every restore path lands here, and any of them may reattach a PTY that
+    // never stopped running — its CLI still quotes the pane id it was spawned
+    // with. Passed whether or not the reattach takes: a pane that respawned
+    // instead has a CLI holding the NEW id, so the alias names nothing and
+    // costs nothing.
+    formerPaneIds: [saved.pane_id],
     replacePaneId: opts.replacePaneId,
     restoring: opts.restoring,
   })
