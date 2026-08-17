@@ -27,7 +27,7 @@ import Welcome from './components/Welcome.vue'
 import { useNotify } from './composables/useNotify'
 import { agentUsesBracketedPaste, migrateTerminalPtyKey, saveAllScrollSnapshots, type DisplayStatus } from './composables/useTerminal'
 import { useAgentMessaging, encodeReason, isBroadcastTarget, NOTICE_SENDER } from './composables/useAgentMessaging'
-import type { RouteResult } from './composables/useAgentMessaging'
+import type { PushOutcome, RouteResult } from './composables/useAgentMessaging'
 import { createMessageLogPersistence } from './composables/useMessageLogPersistence'
 import { VENDORS_WITHOUT_TURN_END, isInjectedMessageText, isTurnInFlight, normalizeMessagingName, parseMessages, parseSpawns, renderSpawnKickoff, renderSpawnNotice } from './lib/agentMessaging'
 import {
@@ -1377,6 +1377,8 @@ function mirrorMessagingHandle(pane: ActivePane): void {
 function unregisterPaneMessaging(paneId: string, opts: { keepPersisted?: boolean } = {}): void {
   messaging.unregisterPane(paneId)
   paneBusyReported.delete(paneId)
+  pushReadyPanes.delete(paneId)
+  pushCooldownUntil.delete(paneId)
   backend.send('agent_msg.unregister', { pane_id: paneId }).catch(() => { /* best effort */ })
   if (!opts.keepPersisted) dropPersistedMessagingName(paneId)
 }
@@ -1417,7 +1419,10 @@ const TYPING_HOLD_MS = 4000
  *
  *  isPaneIdleForMessaging() is derived from this rather than duplicating it, so
  *  the reason shown in the Messages panel cannot drift from the real gate. */
-function messagingHoldKey(paneId: string): string | null {
+function messagingHoldKey(
+  paneId: string,
+  opts: { ignoreTyping?: boolean } = {},
+): string | null {
   const pane = panes.value.find((p) => p.id === paneId)
   if (!pane) return 'gone'
   const status = paneRefs[paneId]?.displayStatus as string | undefined
@@ -1433,10 +1438,15 @@ function messagingHoldKey(paneId: string): string | null {
   // Ahead of the CLI-side reasons on purpose: those describe what the agent is
   // doing, this one describes the person at the keyboard, and a half-typed line
   // is lost the same way whether the agent is mid-turn or idle.
-  const typist = paneRefs[paneId]
-  const hasDraft = typist?.hasDraft as boolean | undefined
-  const lastKey = (typist?.lastUserKeyAt as number | undefined) ?? 0
-  if (hasDraft || (lastKey > 0 && now - lastKey < TYPING_HOLD_MS)) return 'typing'
+  // `ignoreTyping` is for a push channel whose text never reaches the composer:
+  // there is no Enter to submit a half-written line with, so the person at the
+  // keyboard has nothing to lose by a message arriving now.
+  if (!opts.ignoreTyping) {
+    const typist = paneRefs[paneId]
+    const hasDraft = typist?.hasDraft as boolean | undefined
+    const lastKey = (typist?.lastUserKeyAt as number | undefined) ?? 0
+    if (hasDraft || (lastKey > 0 && now - lastKey < TYPING_HOLD_MS)) return 'typing'
+  }
   const lastActive = paneLastActiveAt.get(paneId) ?? 0
   const inFlight = isTurnInFlight(lastActive, paneTurnCompleteAt.get(paneId) ?? 0, now, {
     inferEndFromSilence: VENDORS_WITHOUT_TURN_END.has(pane.agentKey),
@@ -1449,6 +1459,68 @@ function messagingHoldKey(paneId: string): string | null {
 /** isPaneIdle() dep. See messagingHoldKey() for the gate itself. */
 function isPaneIdleForMessaging(paneId: string): boolean {
   return messagingHoldKey(paneId) === null
+}
+
+/** Panes whose CLI currently has a push channel, by the backend's kind label.
+ *  Announced by the backend because only it knows whether a channel is really
+ *  there: a spawn can fail to wire one, and a hook channel exists only while
+ *  the CLI has a waiter parked. */
+const pushReadyPanes = new Map<string, string>()
+/** How long a pane's push channel is left alone after one failed to land, so a
+ *  channel that is declared but broken costs one attempt per minute instead of
+ *  one per pump tick. */
+const PUSH_COOLDOWN_MS = 60_000
+/** The same, for a CLI whose server simply is not listening yet. That is what a
+ *  pane looks like for the first seconds of its life, and it fixes itself — so
+ *  it is worth a handful of quick retries rather than a minute's silence. */
+const PUSH_RETRY_COOLDOWN_MS = 5_000
+/** Failures that say "not yet" rather than "not working". */
+const PUSH_RETRYABLE_REASONS = new Set(['not-listening'])
+const pushCooldownUntil = new Map<string, number>()
+
+/** pushTarget() dep: the channel that could take a message for this pane right
+ *  now, or null. Applies the gates that channel still answers to — every
+ *  CLI-side one, and the typing hold only for a channel that writes the
+ *  composer — so the composable can treat a non-null answer as "go". */
+function pushTargetForMessaging(paneId: string): { kind: string } | null {
+  const kind = pushReadyPanes.get(paneId)
+  if (!kind) return null
+  const pane = panes.value.find((p) => p.id === paneId)
+  const channel = pane
+    ? agentSpecs.find((s) => s.agentKey === pane.agentKey)?.pushChannel
+    : undefined
+  if (!channel) return null
+  if ((pushCooldownUntil.get(paneId) ?? 0) > Date.now()) return null
+  if (messagingHoldKey(paneId, { ignoreTyping: !channel.holdsInputBox }) !== null) return null
+  return { kind }
+}
+
+/** pushDeliver() dep: hand the envelope to the backend, which owns every push
+ *  transport. A refusal is not a failed message — the composable still gets it
+ *  out, by typing — so it only costs this pane a cooldown.
+ *
+ *  `unclear` is the backend saying the CLI may still be holding our text: the
+ *  message must go back in the queue rather than be typed in on top of itself.
+ */
+async function pushDeliverAgentMessage(paneId: string, text: string): Promise<PushOutcome> {
+  let reason = 'push-request-failed'
+  let unclear = false
+  try {
+    const resp = await backend.send<{ ok?: boolean; reason?: string; unclear?: boolean }>(
+      'agent_msg.push',
+      { pane_id: paneId, text },
+    )
+    if (resp.ok && resp.payload?.ok) return 'landed'
+    reason = resp.payload?.reason || resp.error?.message || reason
+    unclear = !!resp.payload?.unclear
+  } catch {
+    /* the backend never answered — treat it as an ordinary refusal */
+  }
+  const cooldown = PUSH_RETRYABLE_REASONS.has(reason)
+    ? PUSH_RETRY_COOLDOWN_MS
+    : PUSH_COOLDOWN_MS
+  pushCooldownUntil.set(paneId, Date.now() + cooldown)
+  return unclear ? 'unclear' : 'declined'
 }
 
 // Per-pane timestamp of the last turn_complete whose text was scanned for MSG
@@ -1995,6 +2067,8 @@ onMounted(() => {
     deliver: deliverAgentMessage,
     isPaneIdle: isPaneIdleForMessaging,
     idleHoldKey: messagingHoldKey,
+    pushTarget: pushTargetForMessaging,
+    pushDeliver: pushDeliverAgentMessage,
     routeRemote: routeRemoteMessage,
     reportDelivery: (msgKey, ok, reason) => {
       backend
@@ -2005,6 +2079,14 @@ onMounted(() => {
           reason: reason ? encodeReason(reason) : '',
         })
         .catch(() => { /* the sender's log entry just stays queued */ })
+    },
+    // Not caught here: a rejection is how the composable learns the request
+    // never left, and puts the row back to plain waiting.
+    requestRemoteCancel: (msgKey) => backend.send('agent_msg.cancel', { msg_key: msgKey }),
+    reportHold: (msgKey, hold) => {
+      backend
+        .send('agent_msg.hold_update', { msg_key: msgKey, hold: hold ?? null })
+        .catch(() => { /* an MCP caller just sees the message as queued */ })
     },
     persistAppend: msgLog.persistAppend,
     persistUpdate: msgLog.persistUpdate,
@@ -8365,6 +8447,29 @@ backend.on('agent_msg.hook_drain', (raw) => {
       if (envelope) messaging.settleHookDrain(paneId, !!resp.ok && !!resp.payload?.delivered)
     })
     .catch(() => { if (envelope) messaging.settleHookDrain(paneId, false) })
+})
+
+// A pane's CLI gained or lost the way in that does not go through its PTY.
+// Broadcast to every window; only the one that owns the pane has anything to
+// record, and a pane that closes drops its entry with the rest of its state.
+backend.on('agent_msg.push_state', (raw) => {
+  const ev = raw as { pane_id?: string; kind?: string; ready?: boolean }
+  if (!ev?.pane_id) return
+  if (ev.ready && ev.kind) {
+    pushReadyPanes.set(ev.pane_id, ev.kind)
+    pushCooldownUntil.delete(ev.pane_id)
+  } else {
+    pushReadyPanes.delete(ev.pane_id)
+  }
+})
+
+// A sending window withdrew a message before it went in. Every window sees the
+// request; only the one holding that message in a queue has anything to drop,
+// and it reports the cancellation back over the ordinary delivery-report path.
+backend.on('agent_msg.cancel', (raw) => {
+  const ev = raw as { msg_key?: string }
+  if (!ev?.msg_key) return
+  messaging.cancelRemoteInbound(ev.msg_key)
 })
 
 backend.on('agent_msg.delivery_result', (raw) => {

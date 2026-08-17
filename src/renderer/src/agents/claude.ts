@@ -41,5 +41,13 @@ export const SPEC = {
   // Sessions are attributed by encoded cwd, so a pane whose saved id left no
   // transcript can be repointed at a real session from the same workspace.
   supportsGhostReconnect: true,
+  // A background hook parked on the backend, woken with the envelope on its
+  // stderr. It reaches the agent as a system reminder, never the input box, so
+  // a pane someone is typing in can still take a message.
+  //
+  // This is the idle half of Stop-hook delivery, not a replacement for it: the
+  // Stop hook covers a message that arrives while the agent is working, and the
+  // mid-turn hold below leaves that where it belongs.
+  pushChannel: { kind: 'rewake', holdsInputBox: false },
   hint: 'planner + reviewer'
 } as const satisfies AgentSpec

@@ -23,5 +23,10 @@ export const SPEC = {
   // Measured on a real PTY: the CLI itself emits `ESC[?1049h` during startup
   // (probe read 8626 bytes of startup output) and keeps the conversation there.
   fullScreenTui: true,
+  // The pane is spawned with a port and a message is appended to the composer
+  // and submitted over it. `holdsInputBox` because that is literally what
+  // `/tui/append-prompt` does — verified on 1.15.12, repeated calls concatenate
+  // into the same composer — so a half-written line still has to be protected.
+  pushChannel: { kind: 'tui-http', holdsInputBox: true },
   hint: 'generalist'
 } as const satisfies AgentSpec

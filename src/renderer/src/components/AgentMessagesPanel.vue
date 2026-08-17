@@ -34,6 +34,26 @@ function repliedTo(msg: AgentMessage): AgentMessage | undefined {
   return msg.inReplyTo ? byUid.value.get(msg.inReplyTo) : undefined
 }
 
+/** The push channel a message went out through, or '' when it was typed in.
+ *  The kind is the backend's own label and is shown verbatim — inventing a
+ *  friendlier word per mechanism would leave the log unable to say which one a
+ *  row actually used. */
+function pushKind(msg: AgentMessage): string {
+  return msg.route?.startsWith('push:') ? msg.route.slice('push:'.length) : ''
+}
+
+/** Channel kinds whose push writes the CLI's composer. Keyed on the mechanism
+ *  rather than the vendor because the mechanism is what the route records, and
+ *  it is the mechanism that decides the fact worth telling: those panes still
+ *  hold a message while someone is typing in them, and the others do not. */
+const KINDS_WRITING_INPUT_BOX = new Set(['tui-http'])
+
+function pushBadgeTitleKey(msg: AgentMessage): string {
+  return KINDS_WRITING_INPUT_BOX.has(pushKind(msg))
+    ? 'msg.push-badge-title-box'
+    : 'msg.push-badge-title-direct'
+}
+
 function toggleExpand(id: number): void {
   expandedId.value = expandedId.value === id ? null : id
 }
@@ -134,15 +154,34 @@ function vendorOf(agentKey: string | undefined, handle: string): string | null {
           <span v-if="msg.route === 'hook'" class="msg-route" :title="$t('msg.hook-badge-title')">
             {{ $t('msg.hook-badge') }}
           </span>
+          <span
+            v-else-if="pushKind(msg)"
+            class="msg-route"
+            :title="$t(pushBadgeTitleKey(msg))"
+          >
+            {{ $t('msg.push-badge', { kind: pushKind(msg) }) }}
+          </span>
           <span v-if="msg.kind === 'notice'" class="msg-notice">
             {{ $t('msg.notice-badge') }}
           </span>
+          <!-- Only while it is still waiting: once a row is `delivering` the
+               envelope is being written into the pane and there is nothing left
+               to take back. -->
+          <button
+            v-if="msg.status === 'queued'"
+            class="msg-btn msg-act"
+            data-act="cancel"
+            :title="$t('msg.cancel-title')"
+            @click.stop="messaging.cancelMessage(msg.id)"
+          >
+            {{ $t('msg.cancel') }}
+          </button>
           <!-- No Resend on a notice: it only reports another row's failure, so
                re-sending it would deliver stale news, and the row it is about
                has its own Resend. -->
           <button
-            v-if="msg.status === 'failed' && msg.kind !== 'notice'"
-            class="msg-btn msg-retry"
+            v-else-if="(msg.status === 'failed' || msg.status === 'cancelled') && msg.kind !== 'notice'"
+            class="msg-btn msg-act"
             data-act="retry"
             @click.stop="messaging.retryMessage(msg.id)"
           >
@@ -351,9 +390,15 @@ function vendorOf(agentKey: string | undefined, handle: string): string | null {
 .msg-st[data-st='delivering'] { background: rgba(230, 160, 60, 0.18); color: #e8a54b; }
 .msg-st[data-st='delivered'] { background: rgba(80, 190, 100, 0.18); color: #4fae5f; }
 .msg-st[data-st='failed'] { background: rgba(220, 80, 70, 0.18); color: #e0706a; }
+/* Withdrawn on purpose, so it recedes rather than alarming like a failure. */
+.msg-st[data-st='cancelled'] {
+  background: rgba(128, 128, 128, 0.12);
+  color: var(--text-secondary);
+  text-decoration: line-through;
+}
 
 /* Pushed to the row's trailing edge so the badges stay grouped on the left. */
-.msg-retry {
+.msg-act {
   margin-left: auto;
   font-size: 9px;
   padding: 0 5px;

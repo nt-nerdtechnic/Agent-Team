@@ -181,6 +181,29 @@ function toggleCliAgent(k: string): void {
   }
   cliDisabled.value = [...set]
 }
+// ── Push channels (which CLIs may be handed a message without typing) ────────
+// A negative list, like cliDisabled above: every declared channel is on until
+// the user says otherwise, so a vendor that gains one later needs no migration.
+// The backend reads the same key and is the only place the switch is applied.
+const PUSH_DISABLED_KEY = 'pushChannelsDisabled'
+const pushDisabled = ref<string[]>(settingsGet<string[]>(PUSH_DISABLED_KEY, []))
+const pushChannelRows = computed(() =>
+  CLI_AGENT_SPECS.filter((s) => s.pushChannel)
+)
+function pushChannelEnabled(k: string): boolean {
+  return !pushDisabled.value.includes(k)
+}
+function togglePushChannel(k: string): void {
+  const set = new Set(pushDisabled.value)
+  // No "keep at least one" rule here, unlike the CLI list: turning every
+  // channel off is a valid choice — messages are simply typed in, which is
+  // what every pane did before channels existed.
+  if (set.has(k)) set.delete(k)
+  else set.add(k)
+  pushDisabled.value = [...set]
+  settingsSet(PUSH_DISABLED_KEY, pushDisabled.value)
+}
+
 const cliDragKey = ref('')
 const cliDragOverKey = ref('')
 function onCliDragStart(e: DragEvent, k: string): void {
@@ -2273,6 +2296,24 @@ watch(activeTab, (tab) => {
                 <span v-if="spec.hint" class="cli-agent-hint">{{ spec.hint }}</span>
               </li>
             </ul>
+          </section>
+          <section class="ap-section" data-settings-section="cli-agents-push">
+            <h3 class="ap-title">{{ $t('settings.pushChannels.title') }}</h3>
+            <p class="ap-hint">{{ $t('settings.pushChannels.hint') }}</p>
+            <ul class="cli-agent-list">
+              <li v-for="spec in pushChannelRows" :key="spec.agentKey" class="cli-agent-row">
+                <label class="cli-agent-toggle">
+                  <input
+                    type="checkbox"
+                    :checked="pushChannelEnabled(spec.agentKey)"
+                    @change="togglePushChannel(spec.agentKey)"
+                  />
+                  <span class="cli-agent-label">{{ spec.label }}</span>
+                </label>
+                <span class="cli-agent-hint">{{ $t(`settings.pushChannels.cost-${spec.agentKey}`) }}</span>
+              </li>
+            </ul>
+            <p class="ap-hint">{{ $t('settings.pushChannels.restart-note') }}</p>
           </section>
           <section class="ap-section" data-settings-section="cli-agents-maintenance">
             <CliManagementPanel v-if="activeTab === 'cliAgents'" :backend="props.backend" />

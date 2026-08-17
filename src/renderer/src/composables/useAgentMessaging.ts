@@ -18,10 +18,11 @@ import {
  *
  * Delivery discipline: one in-flight injection per target pane, only when the
  * pane is idle, FIFO per target. Loop guards: per sender→target rate limit,
- * per-target queue cap, global pause switch.
+ * per-target queue cap, global pause switch. A message that has not been taken
+ * off its queue yet can still be withdrawn — see cancelMessage().
  */
 
-export type MessageStatus = 'queued' | 'delivering' | 'delivered' | 'failed'
+export type MessageStatus = 'queued' | 'delivering' | 'delivered' | 'failed' | 'cancelled'
 
 /**
  * Why a message is still sitting in `queued`. `key` is an i18n key suffix the
@@ -100,10 +101,12 @@ export interface AgentMessage {
   reason?: MessageReason
   /** Why this message has not been injected yet, while status === 'queued'. */
   hold?: MessageHold
-  /** Set on a message handed to a claude pane through its Stop hook instead of
-   *  being typed into it. Like `hold` it is in-memory only: it describes how a
-   *  live row got out, and a restored log has no delivery left to explain. */
-  route?: 'hook'
+  /** Set on a message that reached its pane without being typed in: `hook` for
+   *  a claude Stop hook that was handed it as its next instruction, `push:<kind>`
+   *  for one of the vendor push channels. Like `hold` it is in-memory only: it
+   *  describes how a live row got out, and a restored log has no delivery left
+   *  to explain. */
+  route?: 'hook' | `push:${string}`
   /** `uid` of the message this one answers, set when the sender echoed back the
    *  correlation id carried in that message's envelope. Like `hold` it describes
    *  an in-memory relation between two live rows, so it is never persisted. */
@@ -148,6 +151,23 @@ export interface PersistedMessageUpdate {
   delivered_at?: number
 }
 
+/**
+ * How a push attempt ended.
+ *
+ * The distinction that matters is the last one. Some channels write the CLI's
+ * composer, and a failure after that write leaves the envelope sitting in it:
+ * typing the same message in on top would submit it twice over, concatenated.
+ * So an 'unclear' push is not retried in the same breath — the message goes
+ * back to the head of its queue and the next pump decides again, by which time
+ * the pane has either sent what it was holding or been cleared.
+ *
+ * - `landed`   — the CLI took it; nothing further to do.
+ * - `declined` — the channel did not take it and touched nothing. Safe to type
+ *                the message in right away.
+ * - `unclear`  — the channel may be holding the text. Re-queue, never type.
+ */
+export type PushOutcome = 'landed' | 'declined' | 'unclear'
+
 export interface RouteResult {
   ok: boolean
   /** The backend's English sentence, kept as the fallback when it sends no
@@ -173,6 +193,15 @@ export interface MessagingDeps {
    *  be derived from the same gate as isPaneIdle so the log cannot claim a
    *  reason the gate does not actually apply. Absent → a generic 'busy'. */
   idleHoldKey?: (paneId: string) => string | null
+  /** The push channel that could take a message for this pane right now, or
+   *  null when there is none — the vendor has no channel, it is not armed, or
+   *  the gates that channel still answers to are closed. Non-null is what lets
+   *  a message skip isPaneIdle(), so the caller must have applied whichever
+   *  gates that channel does keep. */
+  pushTarget?: (paneId: string) => { kind: string } | null
+  /** Hand the envelope to that channel. See {@link PushOutcome} — anything but
+   *  'landed' ends in the typed path, immediately or on a later tick. */
+  pushDeliver?: (paneId: string, text: string) => Promise<PushOutcome>
   /** Ask the backend registry to route a target this window does not own.
    *  Absent (or throwing) → cross-workspace addressing degrades to the previous
    *  local-only behaviour. */
@@ -189,6 +218,15 @@ export interface MessagingDeps {
   /** Tell the sending window how an inbound cross-workspace message ended.
    *  The caller serializes; see encodeReason(). */
   reportDelivery?: (msgKey: string, ok: boolean, reason: MessageReason | null) => void
+  /** Ask the window that owns the target's queue to drop a message this window
+   *  sent. The answer comes back over the ordinary delivery-report path, so a
+   *  window that is gone (or a message already on its way in) simply leaves the
+   *  row as it was. Rejecting means the request never left this machine. */
+  requestRemoteCancel?: (msgKey: string) => Promise<unknown> | void
+  /** Tell the backend why a tracked message has not gone out yet, so an MCP
+   *  caller can read the hold this panel shows. Called only when a message's
+   *  hold KEY changes — never on the per-second re-annotation. */
+  reportHold?: (msgKey: string, hold: MessageHold | null) => void
   /** Mirror the log into the backend store. All three are optional — without
    *  them the log stays in-memory only, exactly as it was before. The caller
    *  batches; these are called once per row/transition. */
@@ -236,6 +274,10 @@ export function isBroadcastTarget(to: string): boolean {
 
 /** Reason written onto rows that were still in flight when the window died. */
 const HYDRATE_LOST_REASON: MessageReason = { key: 'window-reloaded' }
+/** Verdict reported back for a message the sender withdrew. Travels the same
+ *  reportDelivery path as a failure, and the sending window reads the key to
+ *  land its own row on `cancelled` rather than `failed`. */
+const CANCELLED_REASON: MessageReason = { key: 'cancelled' }
 
 // ── Module-level singleton state ──────────────────────────────────────────
 let deps: MessagingDeps | null = null
@@ -484,8 +526,27 @@ function annotateHold(q: number[], headKey: string | null): void {
  *  though nothing it displays moved. */
 function setHold(m: AgentMessage, hold: MessageHold | undefined): void {
   if (m.hold?.key === hold?.key && m.hold?.n === hold?.n) return
+  const keyChanged = m.hold?.key !== hold?.key
   if (hold) m.hold = hold
   else delete m.hold
+  if (keyChanged) reportHoldChange(m, hold)
+}
+
+/**
+ * Report a hold change for a message the backend tracks by `msgKey` — one that
+ * arrived through `agent_msg.deliver`, so an MCP `cli_send` or another window's
+ * send. A message between two panes of this window is known nowhere else and
+ * has nobody to tell.
+ *
+ * Only a changed hold KEY is worth the round trip: `n` moving as the queue
+ * drains says nothing about why the head is stuck, and pump() re-annotates
+ * every second. Delivery clears the hold on the backend's side, so there is
+ * nothing to send when a message leaves the queue.
+ */
+function reportHoldChange(m: AgentMessage, hold: MessageHold | undefined): void {
+  const msgKey = remoteInbound.get(m.id)
+  if (msgKey === undefined) return
+  deps?.reportHold?.(msgKey, hold ?? null)
 }
 
 /** Mark a message as the answer to the one whose envelope handed out `corrId`.
@@ -900,7 +961,12 @@ function resolveRemoteDelivery(msgKey: string, ok: boolean, reason: string): voi
     delete msg.hold
     deps?.persistUpdate?.([{ uid: msg.uid, status: 'delivered', delivered_at: msg.deliveredAt }])
   } else {
-    failMessage(rec.id, decodeReason(reason) ?? { key: 'delivery-failed' })
+    const decoded = decodeReason(reason) ?? { key: 'delivery-failed' }
+    // The message was called off before it went in — either this window asked,
+    // or the receiving one dropped it from its own panel. Withdrawn, not failed:
+    // nothing went wrong, so the sending pane gets no failure notice.
+    if (decoded.key === CANCELLED_REASON.key) markCancelled(msg)
+    else failMessage(rec.id, decoded)
   }
 }
 
@@ -971,7 +1037,12 @@ async function pumpPane(paneId: string): Promise<void> {
   // Mid-injection: the head has no hold and the rest already carry their
   // positions from the call that let the head through.
   if (delivering.has(paneId)) return
-  if (!deps.isPaneIdle(paneId)) {
+  // A push channel answers to its own gates, which the caller has already
+  // applied — so a pane it accepts needs no second opinion from the typed
+  // path's gate, which is exactly what makes a message reach a pane someone is
+  // typing in.
+  const push = deps.pushTarget?.(paneId) ?? null
+  if (!push && !deps.isPaneIdle(paneId)) {
     annotateHold(q, deps.idleHoldKey?.(paneId) ?? 'busy')
     return
   }
@@ -990,9 +1061,20 @@ async function pumpPane(paneId: string): Promise<void> {
   deps.persistUpdate?.([{ uid: msg.uid, status: 'delivering' }])
   let ackOk = false
   let ackReason: MessageReason | null = null
+  let requeued = false
   try {
-    const ok = await deps.deliver(paneId, envelope)
-    if (ok) {
+    const ok = await deliverOnce(paneId, msg, envelope, push)
+    if (ok === null) {
+      // Pushed and it did not land, and typing it in now is not an option —
+      // either the channel may still be holding the text, or the typed path's
+      // own gate is shut because the push was chosen for a pane someone is
+      // typing in. Put the message back at the head of its queue with nothing
+      // spent: the next pump sends it whichever way is open then.
+      requeued = true
+      msg.status = 'queued'
+      delete msg.route
+      deps.persistUpdate?.([{ uid: msg.uid, status: 'queued' }])
+    } else if (ok) {
       msg.status = 'delivered'
       msg.deliveredAt = deps.now()
       deps.persistUpdate?.([{ uid: msg.uid, status: 'delivered', delivered_at: msg.deliveredAt }])
@@ -1009,10 +1091,44 @@ async function pumpPane(paneId: string): Promise<void> {
     }
     failMessage(id, ackReason)
   } finally {
-    q.shift()
     delivering.delete(paneId)
-    ackInbound(id, ackOk, ackReason)
+    if (!requeued) {
+      q.shift()
+      ackInbound(id, ackOk, ackReason)
+    }
   }
+}
+
+/**
+ * One delivery attempt for the head of a pane's queue.
+ *
+ * Returns true when the message reached the pane, false when it demonstrably
+ * did not, and null when a push failed and typing it in now would be wrong —
+ * the caller puts the message back rather than choosing between losing it and
+ * writing it into a pane that cannot take it.
+ *
+ * Two separate reasons to hold off, and both have to be checked. The channel
+ * may still be holding the text ('unclear'), in which case typing would submit
+ * the envelope twice over. And the push may have been chosen precisely because
+ * the typed path's gate was shut — someone is typing in the pane — so the
+ * fallback is re-gated rather than assumed.
+ */
+async function deliverOnce(
+  paneId: string,
+  msg: AgentMessage,
+  envelope: string,
+  push: { kind: string } | null,
+): Promise<boolean | null> {
+  if (!deps) return false
+  if (push && deps.pushDeliver) {
+    msg.route = `push:${push.kind}`
+    const outcome = await deps.pushDeliver(paneId, envelope)
+    if (outcome === 'landed') return true
+    delete msg.route
+    if (outcome === 'unclear') return null
+    if (!deps.isPaneIdle(paneId)) return null
+  }
+  return deps.deliver(paneId, envelope)
 }
 
 /**
@@ -1093,6 +1209,104 @@ function settleHookDrain(paneId: string, ok: boolean): void {
   ackInbound(id, true, null)
 }
 
+// ── Cancel ─────────────────────────────────────────────────────────────────
+/** The queue a message is sitting in, or null when nothing local holds it —
+ *  it was already taken, or its queue lives in another window. */
+function queuedLocation(id: number): { paneId: string; q: number[]; index: number } | null {
+  for (const [paneId, q] of queues) {
+    const index = q.indexOf(id)
+    if (index !== -1) return { paneId, q, index }
+  }
+  return null
+}
+
+/** Take a message out of its local queue, if it is still there to take.
+ *
+ *  Only the head can be mid-injection — pumpPane and drainForHook both hold
+ *  `q[0]` and shift it when they are done — so that is the one entry a pane
+ *  with an injection in flight must keep. Everything behind it splices out
+ *  safely, and the head those two are holding stays exactly where it was. */
+function unqueue(id: number): boolean {
+  const loc = queuedLocation(id)
+  if (!loc) return false
+  if (loc.index === 0 && delivering.has(loc.paneId)) return false
+  loc.q.splice(loc.index, 1)
+  return true
+}
+
+/** Mark a message withdrawn. Deliberately not failMessage(): the send was
+ *  called off on purpose, so there is nothing to tell the sending pane about —
+ *  a "delivery failed" notice injected into the pane that just cancelled would
+ *  be the noise cancelling exists to avoid. */
+function markCancelled(m: AgentMessage): void {
+  m.status = 'cancelled'
+  delete m.hold
+  envelopes.delete(m.id)
+  deps?.persistUpdate?.([{ uid: m.uid, status: 'cancelled' }])
+}
+
+/** The routing key an outbound cross-workspace message is known by, while it is
+ *  still awaiting a report. */
+function outboundKeyOf(id: number): string | null {
+  for (const [msgKey, rec] of remoteOutbound) {
+    if (rec.id === id) return msgKey
+  }
+  return null
+}
+
+/**
+ * Withdraw a message that has not gone in yet. Returns false when it is too
+ * late — anything already `delivering`, `delivered` or `failed` is beyond
+ * recall, because the text is being (or has been) written into the pane.
+ *
+ * A message whose queue this window owns is dropped on the spot. One handed to
+ * another window is only a request: that window owns the queue and decides, and
+ * the answer arrives as an ordinary delivery report, so a message that went in
+ * while the request was in flight stays `delivered` rather than being rewritten
+ * as cancelled here.
+ */
+function cancelMessage(id: number): boolean {
+  const m = findMessage(id)
+  if (!m || m.status !== 'queued') return false
+  if (unqueue(id)) {
+    markCancelled(m)
+    // An inbound cross-workspace row's sender is still waiting on a verdict.
+    ackInbound(id, false, CANCELLED_REASON)
+    return true
+  }
+  const msgKey = outboundKeyOf(id)
+  const request = deps?.requestRemoteCancel
+  if (!msgKey || !request) return false
+  setHold(m, { key: 'cancelling' })
+  void (async () => {
+    try {
+      await request(msgKey)
+    } catch {
+      // The request never left. Put the row back to waiting rather than leaving
+      // it claiming a cancellation nobody was asked for.
+      if (m.status === 'queued') setHold(m, { key: 'remote-ack' })
+    }
+  })()
+  return true
+}
+
+/**
+ * Honor another window's cancel request for a message queued here. Returns
+ * false when it is too late, which is why nothing is reported in that case:
+ * the delivery that beat the request will report the real outcome itself.
+ */
+function cancelRemoteInbound(msgKey: string): boolean {
+  for (const [id, key] of remoteInbound) {
+    if (key !== msgKey) continue
+    const m = findMessage(id)
+    if (!m || m.status !== 'queued' || !unqueue(id)) return false
+    markCancelled(m)
+    ackInbound(id, false, CANCELLED_REASON)
+    return true
+  }
+  return false
+}
+
 // ── Pause / log ────────────────────────────────────────────────────────────
 function pauseMessaging(): void {
   paused.value = true
@@ -1101,7 +1315,7 @@ function pauseMessaging(): void {
 }
 
 /**
- * Re-send a failed entry as a brand-new message. Everything is re-validated
+ * Re-send a finished entry as a brand-new message. Everything is re-validated
  * from scratch — target lookup, rate limit, queue cap — so a retry can fail
  * again for a different reason, and it spends the pair's budget like any other
  * send, which is what stops the button from being a loop hole.
@@ -1109,10 +1323,13 @@ function pauseMessaging(): void {
  * A retried cross-workspace message is logged as an ordinary send: the original
  * routing key was consumed when its failure was reported, and re-deriving the
  * route from `to` is exactly what sendMessage already does.
+ *
+ * A cancelled row is re-sendable for the same reason a failed one is: the text
+ * never reached anyone, so sending it again delivers it once, not twice.
  */
 function retryMessage(id: number): AgentMessage | null {
   const m = findMessage(id)
-  if (!m || m.status !== 'failed') return null
+  if (!m || (m.status !== 'failed' && m.status !== 'cancelled')) return null
   return sendMessage(m.from, m.to, m.content)
 }
 
@@ -1163,6 +1380,8 @@ export function useAgentMessaging() {
     sendMessage,
     sendBroadcast,
     retryMessage,
+    cancelMessage,
+    cancelRemoteInbound,
     acceptRemoteMessage,
     noteOutboundMessage,
     resolveRemoteDelivery,

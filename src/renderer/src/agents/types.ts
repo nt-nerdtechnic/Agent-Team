@@ -121,6 +121,23 @@ export interface AgentSpec {
    *  boundary is inferred from silence rather than read from a record. They
    *  stay unflagged and keep the buffer scan until that verification happens. */
   verifiedTurnText?: boolean
+  /** This CLI accepts an inter-CLI message through something other than its
+   *  PTY — an HTTP server it runs, a file it watches, a hook it leaves parked.
+   *  Undefined = it has none, and every message to it is typed in.
+   *
+   *  The mechanism itself is the backend's (`push_delivery`); what the frontend
+   *  needs from the spec is which gates still apply, because that differs per
+   *  CLI and only the delivery side can know it. */
+  pushChannel?: {
+    /** Route label recorded on a message delivered this way, matching the
+     *  backend's own kind so the log and the docs agree. */
+    kind: 'tui-http' | 'input-file' | 'rewake'
+    /** The push writes the CLI's composer, so it occupies the input box just
+     *  as typing would and the typing hold still has to protect a half-written
+     *  line. False = the text never reaches the composer, and a pane someone is
+     *  typing in can take a message anyway. */
+    holdsInputBox?: boolean
+  }
   /** Recognizes a saved command as this vendor's resume invocation (so a
    *  restore doesn't replay it as a user-custom base command). Undefined =
    *  the generic `<agentKey> --resume <id>` shape. */

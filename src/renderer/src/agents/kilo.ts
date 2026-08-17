@@ -18,5 +18,7 @@ export const SPEC = {
   // Measured on a real PTY: the CLI itself emits `ESC[?1049h` during startup
   // (probe read 11490 bytes of startup output) and keeps the conversation there.
   fullScreenTui: true,
+  // Same `/tui/*` channel as OpenCode (its upstream), password-protected here.
+  pushChannel: { kind: 'tui-http', holdsInputBox: true },
   hint: 'generalist'
 } as const satisfies AgentSpec

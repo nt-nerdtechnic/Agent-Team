@@ -9,7 +9,10 @@
     "status-delivering": "Delivering",
     "status-delivered": "Delivered",
     "status-failed": "Failed",
+    "status-cancelled": "Withdrawn",
     "retry": "Resend",
+    "cancel": "Withdraw",
+    "cancel-title": "Take this message back before it reaches the target pane",
     "hold-busy": "Target is not ready to receive",
     "hold-paused": "Delivery is paused",
     "hold-behind": "Waiting behind {n} message(s)",
@@ -20,6 +23,7 @@
     "hold-mid-turn": "Target agent is mid-turn",
     "hold-settling": "Waiting for the target to settle",
     "hold-remote-ack": "Sent — awaiting the target window's report",
+    "hold-cancelling": "Withdrawing — awaiting the target window's answer",
     "reason-raw": "{text}",
     "reason-unknown-target": "No pane named “{to}”",
     "reason-self-send": "A pane cannot message itself",
@@ -54,6 +58,9 @@
     "notice-badge": "system notice",
     "hook-badge": "via hook",
     "hook-badge-title": "Handed to the agent as its next instruction when its turn ended, instead of being typed into the pane",
+    "push-badge": "via {kind}",
+    "push-badge-title-box": "Handed to the CLI over its own local interface rather than typed key by key — it still went into the pane's input box, so it waited for you to stop typing",
+    "push-badge-title-direct": "Handed straight to the CLI without ever reaching the pane's input box, so nothing you were typing could be submitted with it",
     "expand-rail": "Expand inter-CLI messages"
   },
   "confirm-close": {
@@ -1408,6 +1415,15 @@
       "badge-pass": "Pass",
       "badge-excluded": "Excluded",
       "gguf-path-placeholder": "e.g. /Users/me/models/qwen.gguf"
+    },
+    "pushChannels": {
+      "title": "Push channels",
+      "hint": "Some CLIs can be handed a message directly instead of having it typed into the pane. This is per CLI; switching one off means every message to those panes is typed in, exactly as it was before. A pane already running keeps its channel until it is restarted, but nothing is pushed to it any more.",
+      "restart-note": "Claude's channel is a hook in its settings file: switching it off stops Navide using it at once, and the hook itself is removed the next time the backend restarts.",
+      "cost-opencode": "Opens a local port with no password — anything running as you can drive the pane. The message still goes into the input box.",
+      "cost-kilo": "Opens a local port protected by a per-pane password. The message still goes into the input box.",
+      "cost-qwen": "Keeps a per-pane file in Navide's data directory; each message is written to it in the clear until the pane closes. Never touches the input box.",
+      "cost-claude": "Installs a background hook that waits on Navide, so an idle agent can be woken. Never touches the input box."
     }
   },
   "label": {

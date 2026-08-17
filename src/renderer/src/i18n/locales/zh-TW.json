@@ -9,7 +9,10 @@
     "status-delivering": "投遞中",
     "status-delivered": "已投遞",
     "status-failed": "失敗",
+    "status-cancelled": "已撤回",
     "retry": "重送",
+    "cancel": "撤回",
+    "cancel-title": "在訊息送進目標 pane 之前收回",
     "hold-busy": "目標尚未就緒，無法接收",
     "hold-paused": "投遞已暫停",
     "hold-behind": "前面還有 {n} 則訊息",
@@ -20,6 +23,7 @@
     "hold-mid-turn": "目標 agent 正在執行中",
     "hold-settling": "等待目標靜置",
     "hold-remote-ack": "已送出，等待對方視窗回報",
+    "hold-cancelling": "撤回中，等待對方視窗回應",
     "reason-raw": "{text}",
     "reason-unknown-target": "找不到名為「{to}」的 pane",
     "reason-self-send": "pane 不能傳訊息給自己",
@@ -54,6 +58,9 @@
     "notice-badge": "系統通知",
     "hook-badge": "經由 hook",
     "hook-badge-title": "在該 pane 的回合結束時直接交給代理當成下一步指令，沒有寫進輸入框",
+    "push-badge": "經由 {kind}",
+    "push-badge-title-box": "經由該 CLI 自己的本機介面送入，不是逐字打進去——但文字仍然進了 pane 的輸入框，所以還是等你停止打字才送",
+    "push-badge-title-direct": "直接交給該 CLI，全程沒有經過 pane 的輸入框，你正在打的字不可能被一起送出",
     "expand-rail": "展開 CLI 互傳訊息"
   },
   "confirm-close": {
@@ -1408,6 +1415,15 @@
       "badge-pass": "通過",
       "badge-excluded": "排除",
       "gguf-path-placeholder": "例如 /Users/me/models/qwen.gguf"
+    },
+    "pushChannels": {
+      "title": "推送通道",
+      "hint": "部分 CLI 可以直接收下訊息，不必把字打進 pane。逐家設定；關掉之後送往那些 pane 的訊息一律改用打字，跟以前完全一樣。已經開著的 pane 會保留通道直到重啟，但不會再被推送。",
+      "restart-note": "Claude 的通道是寫在它設定檔裡的 hook：關掉後 Navide 立即停用，hook 本身要等後端下次重啟才移除。",
+      "cost-opencode": "會開一個沒有密碼的本機埠——同一台機器上以你身分執行的程式都能驅動該 pane。訊息仍會進入輸入框。",
+      "cost-kilo": "會開一個帶每 pane 密碼的本機埠。訊息仍會進入輸入框。",
+      "cost-qwen": "會在 Navide 資料目錄放一個每 pane 檔案，每則訊息以明文寫入，直到 pane 關閉。完全不碰輸入框。",
+      "cost-claude": "會裝一支停在 Navide 上等待的背景 hook，讓閒置的 agent 可以被喚醒。完全不碰輸入框。"
     }
   },
   "label": {

@@ -217,6 +217,43 @@ describe('AgentMessagesPanel', () => {
     expect(wrapper.find('.msg-detail').exists()).toBe(false)
   })
 
+  it('withdraws a queued message from the row, then offers to resend it', async () => {
+    m.registerPane('p1', 'claude', 'alpha')
+    m.registerPane('p2', 'codex', 'beta') // never idle → the message stays queued
+    m.sendMessage('alpha', 'beta', 'never mind')
+    wrapper = mountPanel()
+
+    await wrapper.get('[data-act="cancel"]').trigger('click')
+
+    expect(wrapper.get('[data-st]').attributes('data-st')).toBe('cancelled')
+    expect(wrapper.find('[data-act="cancel"]').exists()).toBe(false)
+    // Withdrawing must not also expand the row it was clicked in.
+    expect(wrapper.find('.msg-detail').exists()).toBe(false)
+
+    await wrapper.get('[data-act="retry"]').trigger('click')
+    expect(m.messages.value.map((msg) => msg.status)).toEqual(['cancelled', 'queued'])
+  })
+
+  it('offers no Withdraw once a message is on its way in', async () => {
+    let release = (): void => {}
+    deliverGate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    m.registerPane('p1', 'claude', 'alpha')
+    m.registerPane('p2', 'codex', 'beta')
+    idlePanes.add('p2')
+    m.sendMessage('alpha', 'beta', 'in flight')
+    m.pump()
+    await flushPromises()
+    wrapper = mountPanel()
+
+    expect(wrapper.get('[data-st]').attributes('data-st')).toBe('delivering')
+    expect(wrapper.find('[data-act="cancel"]').exists()).toBe(false)
+
+    release()
+    await flushPromises()
+  })
+
   it('badges a delivery-failure notice and offers no Resend for it', async () => {
     m.registerPane('p1', 'claude', 'alpha')
     m.sendMessage('alpha', 'nobody', 'this one failed')
