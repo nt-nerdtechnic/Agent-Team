@@ -1777,13 +1777,30 @@ _WAIT_IDLE_UI_MAX_FAILURES = 3
 # quiet, but it is waiting on the USER, and sending it work would answer the
 # prompt instead of starting a turn. Waiting it out until the timeout is the
 # safe failure here.
+_UI_IDLE_STATUSES = frozenset({"idle", "exited", "stopped", "error"})
+
+# ...with one exception inside "awaiting". The renderer merged its two parked
+# states into one badge, so "awaiting" now covers both a permission prompt and
+# the agent asking a question, and only `awaitingKind` separates them. A
+# question renames panes the renderer already reported as "idle" here (a turn
+# that ended on one), so treating it as busy would make cli_wait_idle newly
+# block until timeout on exchanges it has always returned from. It mirrors the
+# messaging gate in App.vue, which passes a question for the same reason.
 #
-# "question" is included, and for the opposite reason: it renames panes the
-# renderer already reported as "idle" here (a turn that ended on a question),
-# so leaving it out would make cli_wait_idle newly block until timeout on
-# exchanges it has always returned from. It mirrors the messaging gate in
-# App.vue, which passes "question" for the same reason.
-_UI_IDLE_STATUSES = frozenset({"idle", "exited", "stopped", "error", "question"})
+# A reply with no awaitingKind is treated as the permission case: this crosses
+# a language boundary that no type checker guards, so an older window that
+# does not send the field must fail toward the safe side.
+_UI_IDLE_AWAITING_KINDS = frozenset({"question"})
+
+
+def _ui_status_is_idle(payload: dict[str, Any]) -> bool:
+    """Whether a `ui.pane.getStatus` reply means the pane can take work."""
+    status = str(payload.get("status") or "")
+    if status in _UI_IDLE_STATUSES:
+        return True
+    if status != "awaiting":
+        return False
+    return str(payload.get("awaitingKind") or "") in _UI_IDLE_AWAITING_KINDS
 
 
 @server.tool()
@@ -1915,7 +1932,7 @@ async def cli_wait_idle(target: str, ctx: Context, timeout_s: float = 60.0) -> d
                 ui_failures = 0
                 next_ui_probe_tick = tick + _WAIT_IDLE_UI_PROBE_EVERY
                 ui_status = str(payload.get("status") or "")
-                if ui_status in _UI_IDLE_STATUSES:
+                if _ui_status_is_idle(payload):
                     # A window reporting idle only means "not working right
                     # now". For a pane that has never shown any activity that
                     # means "has not started yet", not "finished" — a caller
