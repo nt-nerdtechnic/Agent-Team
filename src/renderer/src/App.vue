@@ -184,6 +184,7 @@ import {
 } from './lib/loopPrompt'
 import { loginCommandFor, matchLoginExpired } from './lib/cliLoginExpired'
 import {
+  awaitingClearsOnMiss,
   hasAwaitingPattern,
   matchAwaitingInput,
   notificationEndsAwaiting,
@@ -1432,13 +1433,18 @@ function messagingHoldKey(
   const pane = panes.value.find((p) => p.id === paneId)
   if (!pane) return 'gone'
   const status = paneRefs[paneId]?.displayStatus as string | undefined
-  // 'question' passes deliberately. It is a relabelling of panes that were
-  // already reaching this gate as 'idle' (a turn ending on a question, or an
-  // AskUserQuestion box the badge used to show as running-then-idle), so
-  // holding it back would newly park those panes out of inter-CLI dispatch —
-  // a behaviour change the state was never meant to make. AWAITING stays out:
-  // that one is a permission prompt, and it was already excluded.
-  if (status !== 'running' && status !== 'idle' && status !== 'question') return 'not-ready'
+  // A question passes deliberately. Those panes were already reaching this gate
+  // as 'idle' (a turn ending on a question, or an AskUserQuestion box the badge
+  // used to show as running-then-idle), so holding them back would newly park
+  // them out of inter-CLI dispatch — a behaviour change the state was never
+  // meant to make. A permission prompt stays out: it was already excluded.
+  //
+  // The badge merged the two into 'awaiting', so the split is read from
+  // awaitingKind instead. This gate is exactly why that accessor exists —
+  // do not simplify it back to the badge value.
+  const awaitingKind = paneRefs[paneId]?.awaitingKind as string | null | undefined
+  const parkedOnQuestion = status === 'awaiting' && awaitingKind === 'question'
+  if (status !== 'running' && status !== 'idle' && !parkedOnQuestion) return 'not-ready'
   if (pane.injectionStatus === 'scheduled' || pane.kickoffStatus === 'pending') return 'starting'
   const now = Date.now()
   // Ahead of the CLI-side reasons on purpose: those describe what the agent is
@@ -2123,8 +2129,13 @@ onUnmounted(() => {
 // regex there would dominate the output path. Unlike the login-expired watcher
 // this consumes nothing it matched: the prompt is a STATE, re-asserted every
 // tick while it is on screen and cleared the moment it is not. Panes whose
-// vendor has no pattern are skipped entirely, so claude's hook-set AWAITING is
-// never cleared here.
+// vendor has no pattern are skipped entirely.
+//
+// Clearing is per vendor (awaitingClearsOnMiss). For a pattern-only vendor the
+// match IS the state, so a miss ends it. claude also has a Notification hook
+// and its pattern is additive — it catches the AskUserQuestion box the hook
+// never reports — so a miss there is not evidence the wait ended and must not
+// clear what the hook raised.
 const AWAITING_SCREEN_LINES = 25
 
 function pollAwaitingPanes(): void {
@@ -2139,7 +2150,7 @@ function pollAwaitingPanes(): void {
     try {
       const screen = ref.readScreenTail(AWAITING_SCREEN_LINES) as unknown as string
       if (matchAwaitingInput(pane.agentKey, screen)) ref.markNeedsInput?.()
-      else ref.clearNeedsInput?.()
+      else if (awaitingClearsOnMiss(pane.agentKey)) ref.clearNeedsInput?.()
     } catch {
       /* leave this pane's badge as-is and carry on with the rest */
     }
@@ -5630,7 +5641,11 @@ registerCommand('ui.pane.getStatus', (args) => {
   return buildPaneStatusReply(
     pane,
     ref
-      ? { displayStatus: ref.displayStatus as string | undefined, buffer: readPaneShareText(ref, CLI_CHIP_LINE_CAP) }
+      ? {
+          displayStatus: ref.displayStatus as string | undefined,
+          awaitingKind: ref.awaitingKind as string | null | undefined,
+          buffer: readPaneShareText(ref, CLI_CHIP_LINE_CAP),
+        }
       : null,
   )
 })
@@ -13204,7 +13219,6 @@ function paneIsCommander(p: ActivePane): boolean {
 .spotlight-thumb-badge[data-status="error"]    { background: var(--danger-subtle); color: var(--danger-fg); border: 1px solid var(--danger-emphasis); }
 .spotlight-thumb-badge[data-status="stopped"]  { background: #000000; color: #ffffff; border: 1px solid #3f3f46; }
 .spotlight-thumb-badge[data-status="awaiting"] { background: color-mix(in srgb, var(--warning-fg) 20%, transparent); color: var(--warning-fg); border: 1px solid color-mix(in srgb, var(--warning-fg) 45%, transparent); }
-.spotlight-thumb-badge[data-status="question"] { background: color-mix(in srgb, var(--question-fg) 20%, transparent); color: var(--question-fg); border: 1px solid color-mix(in srgb, var(--question-fg) 45%, transparent); }
 .spotlight-thumb-badge[data-status="exited"]   { background: var(--bg-muted); color: var(--text-primary); border: 1px solid var(--border-default); }
 .spotlight-thumb-loop {
   font-size: 9px;
@@ -13340,7 +13354,6 @@ function paneIsCommander(p: ActivePane): boolean {
 .meeting-badge[data-status="starting"] { background: var(--status-starting-subtle); color: var(--status-starting-fg); border: 1px solid var(--status-starting-emphasis); }
 .meeting-badge[data-status="error"]    { background: var(--danger-subtle); color: var(--danger-bright); border: 1px solid var(--danger-emphasis); }
 .meeting-badge[data-status="awaiting"] { background: color-mix(in srgb, var(--warning-fg) 20%, transparent); color: var(--warning-fg); border: 1px solid color-mix(in srgb, var(--warning-fg) 45%, transparent); }
-.meeting-badge[data-status="question"] { background: color-mix(in srgb, var(--question-fg) 20%, transparent); color: var(--question-fg); border: 1px solid color-mix(in srgb, var(--question-fg) 45%, transparent); }
 .meeting-badge[data-status="exited"]   { background: var(--bg-muted); color: var(--text-primary); border: 1px solid var(--border-default); }
 .meeting-loop {
   font-size: 10px;

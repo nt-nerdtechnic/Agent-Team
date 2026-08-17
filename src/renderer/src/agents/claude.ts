@@ -49,5 +49,33 @@ export const SPEC = {
   // Stop hook covers a message that arrives while the agent is working, and the
   // mid-turn hold below leaves that where it belongs.
   pushChannel: { kind: 'rewake', holdsInputBox: false },
+  // Claude has a Notification hook, and it stays the authoritative signal —
+  // but it cannot cover every box that parks the pane on the user, so the
+  // screen is read as well and whichever fires first wins:
+  //
+  //  • A permission prompt does fire the hook, yet the hook is a single event
+  //    that can be lost outright (a settings.json rewritten by something else,
+  //    an unreachable backend); the screen keeps asserting for as long as the
+  //    box is painted.
+  //  • AskUserQuestion has no notification type of its own, and its record
+  //    only reaches the conversation log once the ANSWER is written — measured
+  //    at 5m16s after the box appeared, in the same batch as the event that
+  //    clears it. The log route is structurally too late; only the screen is
+  //    on time.
+  //
+  // Two anchors, either of which is enough. The first is the permission box's
+  // last option, identical across its edit / command / MCP variants. The
+  // second is the option-picker footer, which AskUserQuestion and the
+  // permission box both draw and neither leaves behind: answering repaints it
+  // away, and the watcher re-checks every poll, so a stale match cannot hold.
+  // The gap is bounded because `matchAwaitingInput` collapses whitespace to
+  // single spaces before testing, and the footer's own separators vary.
+  awaitingInput: {
+    pattern: /No, and tell Claude what to do differently|Enter to select ·.{0,80}?Esc to cancel/,
+    // Additive to the hook, never authoritative over it: an MCP elicitation
+    // draws no option box, so a non-match here says nothing about a wait the
+    // hook raised. See the field's own doc comment.
+    clearsOnMiss: false,
+  },
   hint: 'planner + reviewer'
 } as const satisfies AgentSpec

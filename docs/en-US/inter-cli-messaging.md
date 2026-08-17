@@ -236,8 +236,8 @@ typed, so only the few-second keystroke window protects it.
 
 The same gap runs the other way, and it matters more: a permission prompt or a
 question answered with a bare `1` or `y` is taken on the keypress, so no Enter
-ever follows to tell Navide the line is gone. A pane leaving `awaiting` or
-`question` therefore counts as its answer being taken, and an unsent line stops
+ever follows to tell Navide the line is gone. A pane leaving `awaiting`
+therefore counts as its answer being taken, and an unsent line stops
 holding delivery a minute after the last keystroke either way. Without that a
 single `1` would park the pane for good — every later message stuck on
 `typing`, and the pane reported busy to everything that asks.

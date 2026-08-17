@@ -67,11 +67,11 @@ export interface AgentSpec {
   }
   /** Recognizes this CLI parked on the user — a permission/confirmation box or
    *  a direct question — in the pane's RENDERED screen text. Undefined = the
-   *  vendor reports the state out of band (claude uses its Notification hook)
-   *  or its prompt shape has not been identified, and the pane keeps the plain
-   *  idle/running behaviour. Matched against the rendered buffer rather than
-   *  the raw stream so an answered prompt disappears on its own when the TUI
-   *  repaints over it — see lib/cliAwaitingInput.ts. */
+   *  vendor reports the state out of band, or its prompt shape has not been
+   *  identified, and the pane keeps the plain idle/running behaviour. Matched
+   *  against the rendered buffer rather than the raw stream so an answered
+   *  prompt disappears on its own when the TUI repaints over it — see
+   *  lib/cliAwaitingInput.ts. */
   awaitingInput?: {
     /** Matches the live prompt in the last rendered screen lines. Anchor it on
      *  the part that only exists while the prompt is WAITING (its option list
@@ -79,6 +79,19 @@ export interface AgentSpec {
      *  scrollback of line-mode CLIs after the answer. Must not carry /g —
      *  test() is stateful with it and the watcher re-runs on the same text. */
     pattern: RegExp
+    /** Whether a poll that does NOT match should clear the state. True (the
+     *  default) for a vendor whose only signal is this pattern: the match IS
+     *  the state, so losing it means the prompt is gone.
+     *
+     *  False for a vendor that also has a notification hook. There the screen
+     *  is a second, additive source — it catches boxes the hook never reports
+     *  (claude's AskUserQuestion) and covers a hook that failed to reach the
+     *  backend — but it does not see everything the hook does (an MCP
+     *  elicitation paints no option box), so a non-match is not evidence the
+     *  wait ended and must not clear what the hook raised. Nothing leaks: a
+     *  screen-raised wait ages out through the settle window as soon as real
+     *  output lands, and the hook's own release path still runs. */
+    clearsOnMiss?: boolean
   }
   /** This vendor's TUI keeps bracketed paste on. Enables chunked clipboard
    *  paste wrapping AND serves as the default Shift+Enter encoding (bracketed
