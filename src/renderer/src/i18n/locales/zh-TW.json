@@ -264,6 +264,8 @@
       "session-resumed": "後端重啟後已接回 {count} 個工作階段",
       "session-resume-failed": "後端重啟後有 {count} 個工作階段無法接回 — 可用「重建」重試",
       "option-select-hint": "此 CLI 接管了滑鼠 — 按住 {key} 再拖曳即可劃選文字",
+      "continue": "↻ 繼續",
+      "continue-tooltip": "這個工作階段是恢復回來的，正停在提示字元等待 — 送出「繼續」讓它接續未完成的工作",
       "clipboard-empty": "沒有可貼上的內容 — 剪貼簿是空的",
       "clipboard-preparing": "{pane} 還在啟動 — 已捨棄 {chars} 個字元，請稍後再貼一次",
       "clipboard-no-session": "{pane} 沒有執行中的工作階段 — 已捨棄 {chars} 個字元",
@@ -1419,7 +1421,7 @@
     "pushChannels": {
       "title": "推送通道",
       "hint": "部分 CLI 可以直接收下訊息，不必把字打進 pane。逐家設定；關掉之後送往那些 pane 的訊息一律改用打字，跟以前完全一樣。已經開著的 pane 會保留通道直到重啟，但不會再被推送。",
-      "restart-note": "Claude 的通道是寫在它設定檔裡的 hook：關掉後 Navide 立即停用，hook 本身要等後端下次重啟才移除。",
+      "restart-note": "Claude 的通道是寫在它設定檔裡的 hook。不論開或關都會立即更新 ~/.claude/settings.json，但已經開著的 Claude pane 是用舊設定啟動的，要等它下一次啟動才拿到新設定。",
       "cost-opencode": "會開一個沒有密碼的本機埠——同一台機器上以你身分執行的程式都能驅動該 pane。訊息仍會進入輸入框。",
       "cost-kilo": "會開一個帶每 pane 密碼的本機埠。訊息仍會進入輸入框。",
       "cost-qwen": "會在 Navide 資料目錄放一個每 pane 檔案，每則訊息以明文寫入，直到 pane 關閉。完全不碰輸入框。",

@@ -434,14 +434,15 @@ Prompt が消えてしまうためです。
 されるようになります。これは Channel が存在する前にすべての Pane がしていたこと
 です。すでに実行中の Pane は起動時に与えられたものを保持し——Port は開いたまま、
 Watch File もそのまま——ですが、もう何も Push されず、そのために再起動は不要です。
-claude の Channel は自身の Settings File にある hook です。無効にすると Navide は
-ただちにそれを使うのをやめ、hook 自体は次に Backend が再起動したときに削除され
-ます。
+claude の Channel は自身の Settings File にある hook です。有効・無効のどちらに
+切り替えても `~/.claude/settings.json` はただちに書き換えられ、その entry は
+Backend の次の再起動を待たずに Switch と一緒に現れたり消えたりします。
 
 再度有効にすると同じ Pane がまた使えるようになります。claude 以外はただちに有効
-です。claude Pane の待機役は無効にした時点で解放されているため、その Pane の次の
-Turn 終了、あるいは次の Session 開始で初めて新しい待機役が配置されます。それまで、
-そこへのメッセージは入力されます。
+です。claude Pane は起動時にその Settings File を読むため、すでに開いている Pane
+はそのときに与えられた hook のまま動いています。切り替えがその Pane に届くのは
+次回の起動時で、それまで、そこへのメッセージは入力されます。切り替えのあとに開いた
+Pane は最初から新しい Settings File を持っています。
 
 ---
 

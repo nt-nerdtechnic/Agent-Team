@@ -431,13 +431,14 @@ is what every pane did before channels existed. A pane already running keeps
 what it was given at launch — its port stays open, its watch file stays where
 it is — but nothing is pushed to it any more, and it needs no restart for that
 to take effect. Claude's channel is a hook in its own settings file: switching
-it off stops Navide using it immediately, and the hook itself is removed the
-next time the backend restarts.
+it either way rewrites `~/.claude/settings.json` straight away, so the entry
+appears or disappears with the switch rather than one backend restart later.
 
 Switching one back on makes the same panes usable again, immediately for every
-channel except claude's: a claude pane's waiter was released when you switched
-it off, and only the pane's next turn end — or its next session start — puts
-another one in place. Until then its messages are typed in.
+channel except claude's. A claude pane reads that settings file when it starts,
+so one already open is still running the hooks it was given then: the switch
+reaches it at its next start, and until then its messages are typed in. A pane
+opened after the switch has the new file from the outset.
 
 ---
 

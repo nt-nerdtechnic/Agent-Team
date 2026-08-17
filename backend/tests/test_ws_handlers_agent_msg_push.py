@@ -11,11 +11,13 @@ pane already acting on this one.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from agent_team_backend import app, push_delivery
+from agent_team_backend import app, claude_hooks, push_delivery
 from agent_team_backend.cli_vendors.base import PushChannel
 
 
@@ -211,6 +213,109 @@ async def test_switching_a_channel_off_and_on_is_announced_both_ways(
     finally:
         push_delivery.set_disabled_reader(None)
         app.ui_settings_store.set({push_delivery.DISABLED_SETTING_KEY: []})
+
+
+@pytest.fixture()
+def claude_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point the real hook installer at a throwaway settings file.
+
+    The file not existing is itself an assertion these tests make — it is how
+    they tell that the installer never ran.
+    """
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    return tmp_path / "settings.json"
+
+
+@pytest.fixture()
+def switches():
+    """The disabled-channel setting, wired exactly as the app wires it."""
+    push_delivery.set_disabled_reader(
+        lambda: set(app.ui_settings_store.get().get(push_delivery.DISABLED_SETTING_KEY) or [])
+    )
+    try:
+        yield
+    finally:
+        push_delivery.set_disabled_reader(None)
+        app.ui_settings_store.set({push_delivery.DISABLED_SETTING_KEY: []})
+
+
+async def _write_switches(session: app.Session, disabled: list[str]) -> dict[str, Any]:
+    await app.handle_message(session, {
+        "id": "m1", "type": "ui.settings.set",
+        "payload": {"updates": {push_delivery.DISABLED_SETTING_KEY: disabled}},
+    })
+    return session.websocket.sent[-1]  # type: ignore[attr-defined]
+
+
+def _rewake_entries(settings_file: Path) -> int:
+    if not settings_file.is_file():
+        return 0
+    hooks = json.loads(settings_file.read_text(encoding="utf-8")).get("hooks", {})
+    return sum(
+        1
+        for entries in hooks.values()
+        for entry in entries
+        for hook in entry.get("hooks", [])
+        if hook.get("asyncRewake")
+    )
+
+
+@pytest.mark.asyncio
+async def test_switching_claudes_channel_on_reinstalls_its_hook_at_once(
+    broadcasts, switches, claude_settings,
+) -> None:
+    """Claude's channel is a hook in the user's own settings file, so switching
+    it back on has to put the entry there. Waiting for the next backend restart
+    would leave nothing for the pane's next turn end to arm."""
+    app.ui_settings_store.set({push_delivery.DISABLED_SETTING_KEY: ["claude"]})
+    response = await _write_switches(_session(), [])
+    assert response["payload"] == {"ok": True}
+    assert _rewake_entries(claude_settings) > 0
+
+
+@pytest.mark.asyncio
+async def test_switching_claudes_channel_off_takes_its_hook_out_at_once(
+    broadcasts, switches, claude_settings,
+) -> None:
+    claude_hooks.install_hooks("/tmp/port")
+    assert _rewake_entries(claude_settings) > 0
+    await _write_switches(_session(), ["claude"])
+    assert _rewake_entries(claude_settings) == 0
+
+
+@pytest.mark.asyncio
+async def test_another_vendors_switch_leaves_claudes_settings_file_alone(
+    broadcasts, switches, claude_settings,
+) -> None:
+    """Only claude's channel lives outside Navide, so only claude's switch is
+    worth rewriting a settings file for."""
+    _, state = push_delivery.wire_spawn("qwen", "qwen", "pane-1", {})
+    assert state is not None
+    await _write_switches(_session(), ["opencode"])
+    assert [e["payload"] for e in broadcasts if e["type"] == "agent_msg.push_state"] == [
+        {"pane_id": "pane-1", "kind": "input-file", "ready": True}
+    ]
+    assert not claude_settings.exists()
+
+
+@pytest.mark.asyncio
+async def test_a_failing_hook_installer_does_not_take_the_settings_write_with_it(
+    broadcasts, switches, claude_settings, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The setting is already written by the time the installer runs, and a
+    failure only puts the hook back where it used to settle — at the next
+    backend restart."""
+    def boom(*_args: Any, **_kwargs: Any) -> dict:
+        raise OSError("settings.json is read-only")
+
+    monkeypatch.setattr(claude_hooks, "install_hooks", boom)
+    _, state = push_delivery.wire_spawn("qwen", "qwen", "pane-1", {})
+    assert state is not None
+    response = await _write_switches(_session(), ["claude"])
+    assert response["payload"] == {"ok": True}
+    assert [e["payload"] for e in broadcasts if e["type"] == "agent_msg.push_state"] == [
+        {"pane_id": "pane-1", "kind": "input-file", "ready": True}
+    ]
 
 
 @pytest.mark.asyncio

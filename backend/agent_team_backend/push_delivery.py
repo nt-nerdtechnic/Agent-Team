@@ -70,6 +70,11 @@ REWAKE_TOKEN_FILENAME = "push_rewake_token"
 #: process rather than minting one per call, which would refuse every hook.
 _EPHEMERAL_REWAKE_TOKEN = secrets.token_urlsafe(24)
 
+#: Whether the fallback above has already been reported. A data dir that cannot
+#: be written stays that way, and `rewake_token` is called per hook request, so
+#: without this the same line is logged for every one of them.
+_ephemeral_token_warned = False
+
 #: Serialises the mint, so two installers starting at once cannot bake
 #: different values into different panes.
 _token_lock = threading.Lock()
@@ -202,10 +207,13 @@ def rewake_token() -> str:
         try:
             _write_rewake_token(path, token)
         except OSError as err:
-            log.warning(
-                "could not persist the rewake token (%s); using a per-run one, "
-                "which panes started before this run will not match", err
-            )
+            global _ephemeral_token_warned
+            if not _ephemeral_token_warned:
+                _ephemeral_token_warned = True
+                log.warning(
+                    "could not persist the rewake token (%s); using a per-run one, "
+                    "which panes started before this run will not match", err
+                )
             return _EPHEMERAL_REWAKE_TOKEN
         return token
 
@@ -684,5 +692,8 @@ def _push_hook(state: PaneChannel, text: str) -> tuple[bool, str]:
 
 
 def _reset_for_test() -> None:
+    global _ephemeral_token_warned
+
     _panes.clear()
     _waiters.pending.clear()
+    _ephemeral_token_warned = False

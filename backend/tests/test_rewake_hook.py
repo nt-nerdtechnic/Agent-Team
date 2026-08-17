@@ -320,8 +320,8 @@ def _signal_hooks(hooks: dict, event: str) -> list[dict]:
 
 
 def test_switching_the_channel_off_installs_no_waiter(tmp_path, monkeypatch) -> None:
-    """The Settings copy says the hook is removed at the next backend restart,
-    and the installer is the only thing that ever runs at one."""
+    """The installer is the only thing that ever writes the entry, so it is
+    also the only thing that can leave it out."""
     push_delivery.set_disabled_reader(lambda: {"claude"})
     try:
         hooks = _installed(tmp_path)
@@ -350,7 +350,8 @@ def test_switching_the_channel_off_removes_a_waiter_already_installed(tmp_path) 
     assert _rewake_hooks(hooks, "Stop") == []
     assert "SessionStart" not in hooks
 
-    # ...and switching it back on puts it there again at the next restart.
+    # ...and the next run puts it back, which is how switching the channel on
+    # again restores it (see the ws-handler test that re-runs this installer).
     claude_hooks.install_hooks("/tmp/port", settings_file=settings)
     hooks = json.loads(settings.read_text(encoding="utf-8"))["hooks"]
     assert len(_rewake_hooks(hooks, "Stop")) == 1

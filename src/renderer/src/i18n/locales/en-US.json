@@ -264,6 +264,8 @@
       "session-resumed": "Resumed {count} session(s) after the backend restarted",
       "session-resume-failed": "Could not resume {count} session(s) after the backend restarted — use Rebuild to retry",
       "option-select-hint": "This CLI captures the mouse — hold {key} while dragging to select text",
+      "continue": "↻ Continue",
+      "continue-tooltip": "This session was restored and is waiting at the prompt — send \"continue\" to pick the work back up",
       "clipboard-empty": "Nothing to paste — the clipboard is empty",
       "clipboard-preparing": "{pane} is still starting — {chars} characters were discarded, paste again in a moment",
       "clipboard-no-session": "{pane} has no running session — {chars} characters were discarded",
@@ -1419,7 +1421,7 @@
     "pushChannels": {
       "title": "Push channels",
       "hint": "Some CLIs can be handed a message directly instead of having it typed into the pane. This is per CLI; switching one off means every message to those panes is typed in, exactly as it was before. A pane already running keeps its channel until it is restarted, but nothing is pushed to it any more.",
-      "restart-note": "Claude's channel is a hook in its settings file: switching it off stops Navide using it at once, and the hook itself is removed the next time the backend restarts.",
+      "restart-note": "Claude's channel is a hook in its settings file. Switching it either way rewrites ~/.claude/settings.json straight away, but a Claude pane already open started with the old file and only picks the change up the next time it starts.",
       "cost-opencode": "Opens a local port with no password — anything running as you can drive the pane. The message still goes into the input box.",
       "cost-kilo": "Opens a local port protected by a per-pane password. The message still goes into the input box.",
       "cost-qwen": "Keeps a per-pane file in Navide's data directory; each message is written to it in the clear until the pane closes. Never touches the input box.",

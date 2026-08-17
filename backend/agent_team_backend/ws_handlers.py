@@ -2514,6 +2514,35 @@ async def ui_settings_get(session: "Session", msg_id: str, msg_type: str, payloa
     )
 
 
+async def _reinstall_claude_hooks() -> None:
+    """Re-run claude's hook installer after its push-channel switch moved.
+
+    Claude's channel is not something Navide holds — it is an entry in the
+    user's own settings file, written by the installer, which otherwise runs
+    only at startup. Without this the entry would appear or disappear a backend
+    restart late, and switching the channel back on would promise a waiter that
+    has no hook to come from. Same call the startup installer makes; the
+    installer itself decides whether the rewake entry belongs, so both
+    directions are this one call.
+
+    A pane already running fired up with whatever the file said then, so this
+    reaches the next CLI start, not the panes open now. Failure is logged and
+    swallowed: the setting was already written, and the old behaviour — the
+    hook settling at the next restart — is what a failure falls back to.
+    """
+    from . import app
+    from .applog import backend_port_file
+
+    spec = CLI_VENDORS.get("claude")
+    if spec is None or spec.install_hooks is None:
+        return
+    try:
+        result = await asyncio.to_thread(spec.install_hooks, str(backend_port_file()))
+        app.log.info("claude hooks reinstalled after a push-channel switch: %s", result)
+    except Exception as err:  # noqa: BLE001
+        app.log.warning("claude hooks reinstall failed: %s", err)
+
+
 @handler("ui.settings.set")
 async def ui_settings_set(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
@@ -2521,6 +2550,12 @@ async def ui_settings_set(session: "Session", msg_id: str, msg_type: str, payloa
     from . import push_delivery
 
     updates = payload.get("updates")
+    touches_channels = (
+        isinstance(updates, dict) and push_delivery.DISABLED_SETTING_KEY in updates
+    )
+    claude_was_off = (
+        "claude" in push_delivery.disabled_agents() if touches_channels else False
+    )
     delta = app.ui_settings_store.set(updates) if isinstance(updates, dict) else {}
     await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
     if push_delivery.DISABLED_SETTING_KEY in delta:
@@ -2532,6 +2567,8 @@ async def ui_settings_set(session: "Session", msg_id: str, msg_type: str, payloa
             await app.broadcast(make_event("agent_msg.push_state", {
                 "pane_id": pane_id, "kind": kind, "ready": ready,
             }))
+        if ("claude" in push_delivery.disabled_agents()) != claude_was_off:
+            await _reinstall_claude_hooks()
     if delta:
         # Other windows (EditorWindow, roles/stages) hold their own ws
         # connections — broadcast the merged delta so their caches
