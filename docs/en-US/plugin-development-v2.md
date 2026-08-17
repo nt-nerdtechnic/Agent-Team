@@ -151,7 +151,7 @@ protocol.
 | Source development | Authors may use `.py` files, a virtual environment, and any Python build/test layout. | None. Source layout is not an installed interface. |
 | `navide-plugin dev` | The author-owned development tool may launch the local Python interpreter or a temporary build. It must expose the same protocol-compatible child process used by the packaged backend. | Developer Mode receives a development launch descriptor; this exception is unsigned, local-only, and cannot be published or auto-updated. |
 | `navide-plugin package` | Python, its required modules, and the plugin code are bundled into a target-specific executable by an author-selected tool such as PyInstaller or Nuitka. | `backend.entry` names the resulting executable inside the archive. |
-| Install and runtime target | No Python installation, `pip`, virtual environment, source checkout, or author build tool may be required on the user's machine. | The future Electron child-process supervisor will re-verify the Host-approved activation record, spawn `backend.entry` directly without a shell, and communicate only through the declared backend protocol. Issue 05 currently emits a fail-closed activation catalog; it does not spawn third-party v2 backends. |
+| Install and runtime target | No Python installation, `pip`, virtual environment, source checkout, or author build tool may be required on the user's machine. | The Electron main process now has an internal Issue 07 conformance seam that can spawn an approved entry directly without a shell and communicate through Backend Wire v1. Approved catalog startup wiring and the complete plugin lifecycle remain later runtime work; Issue 05 still emits the fail-closed activation catalog but does not activate third-party v2 backends. |
 
 Manifest validation rejects recognizable source or script suffixes. Package
 validation also rejects empty backend entries, POSIX entries without executable
@@ -223,6 +223,10 @@ The profile deliberately adopts only these MCP conventions:
 - stdout contains protocol frames only. Human-readable logs use stderr.
 - Closing stdin is the graceful shutdown signal. The Host waits for a bounded
   period before terminating a process that does not exit.
+- The Host supplies an explicit environment map for each backend process. The
+  child does not inherit the Electron main process environment; invalid keys,
+  non-string values, and NUL characters reject activation. Timed-out or
+  cancelled request IDs are retained only for bounded late-response handling.
 
 Navide does **not** initially implement MCP `server/discover`, tools, resources,
 prompts, Multi Round-Trip Requests, MCP authorization, or the full MCP
@@ -293,8 +297,10 @@ and Host routes never cross the SDK Interface.
 The normative Backend Wire v1 schema and accepted/rejected fixture corpus are
 published under `docs/plugin-contracts/` and validated together with the
 Manifest v2 corpus. This contract enables backend-only and combined package
-description and installation; child-process execution remains owned by the
-later Host runtime issues. Future AI integration is a separate adapter: it may
+description and installation. Issue 07 adds a private Electron-main
+supervisor/stdio conformance seam for health and unary calls; it is not a
+public SDK surface and does not activate the installed catalog. Future AI
+integration is a separate adapter: it may
 expose an explicit allowlist of schema-described package methods as MCP tools.
 No package method is AI-callable by default, and adopting this wire profile
 does not itself create a tool catalog.
