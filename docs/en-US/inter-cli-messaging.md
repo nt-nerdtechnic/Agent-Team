@@ -35,6 +35,14 @@ Typing `@` in a CLI pane opens a completion menu of every handle you can
 address from there, including panes in other workspace windows. Dropping a pane
 onto another pane right after typing `@` inserts that pane's address.
 
+An address is always a handle. A pane also has an internal **id**, and it shows
+up in exactly one place: the MCP connection URL a CLI is spawned with, which is
+how `cli_send` and the rest know who is calling. That id belongs to the pane
+rather than to the process inside it, so a pane rebuilt around a CLI that never
+stopped — a window reload, a detach — gets a new one while the CLI keeps
+quoting the old. The old id goes on resolving to the pane the process is
+attached to; see [External MCP control](external-mcp-control.md#a-panes-id-outlives-its-pane).
+
 ---
 
 ## Sending

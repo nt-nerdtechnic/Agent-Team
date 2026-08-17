@@ -265,6 +265,42 @@ copilot/cursor/kilo/muse/opencode 的 `turn_complete` 是 CLI 自己說回合結
 agentKey, workspacePath, status?}], activeTab, settingsOpen,
 openWorkspaces}`。
 
+## Pane 的 id 活得比 Pane 久
+
+CLI Pane 的連線 URL 只在 Pane 生成的那一刻寫入一次，CLI Process 只要還活著就一直
+帶著它。裡面的 `pane=<id>` 是那一刻的 Pane id —— 而 Pane id 屬於 Pane 本身，不屬
+於裡面的 Process。重載視窗、把 Run Group 拆出去、或把它收回來，都會用同一個還在跑
+的 CLI 重建一個 Pane 並發給它新的 id，於是 URL 裡留下的是舊的那個。
+
+那個舊 id 仍然有效。視窗會記下它去了哪裡，所以帶著舊 id 的呼叫會以「這個 Process
+實際附著的 Pane」的身分被回答：`plan_*` 預設的 Workspace 一樣、`cli_list_targets`
+裡的 `you` 一樣、`cli_send` 用來判斷裸名與自寄的身分也一樣。重載兩次也不會斷鏈 ——
+每一跳都會被壓平到當前的 Pane —— 而且 id 永遠不允許跟著 Pane 跨到別的 Workspace。
+
+Pane 的[Push 通道](inter-cli-messaging.md#push-通道)大致也是這樣跟著走，但有一個例外。
+重載視窗會保留通道，Run Group 從拆出的子視窗收回來也會。**拆出（detach）**則不會：
+交出 Pane 的那個視窗會在接收端認領它之前就先釋放 Pane、連同通道一起，所以被拆出的
+Pane 會回到「用打字送訊息」的舊行為，直到它的 CLI 重新啟動為止。claude Pane 不受影
+響：它的 hook 會在下一次回合結束時自行重新掛上。
+
+「哪個 id 被哪個取代」是由 Navide 視窗宣告的，而且會被直接採信 —— 因為 detach 時被
+宣告的那個 id 本來就還活著、而且屬於正在放手的那個視窗，所以「宣稱一個仍活著的
+Pane」與「合法的交接」在後端無法分辨，只會記 log 而不會拒絕。真正不可逆的那件事則
+另外擋掉：只要還有連線中的視窗在鏡射某個 Pane，它的推送通道就不會被任何人拿走。
+
+有一個已知情況會在沒有實際交接的前提下印出那則警告：主視窗在某個 Run Group 已被拆
+出時重載，它會在得知該 Group 已經在別處之前就先還原那個 Group 的 Pane，因而短暫地
+宣告了子視窗的 id。一旦主視窗被告知就會自行修正，而子視窗的 Push 通道從頭到尾不會
+被拿走。
+
+仍然會被拒絕的，是一個什麼都指不到的 id：Pane 已經關閉，或擁有它的視窗離開夠久已
+被遺忘。此時沒有任何身分可以代表，因此這個 Endpoint 上的每個 Tool 都會回
+`this pane's id is stale`，解法是重新開啟該 Pane。（這跟上面排隊訊息上的 `stale`
+是不同的字：那個只是說訊息已經等了超過兩分鐘。）
+
+這跟下面的 Tool **清單**不是同一個問題。清單是 Client 連線當下拍下的快照，Navide
+無從更新；id 則是 Navide 每次呼叫都重新解析的。
+
 ## Tool 清單只讀一次
 
 MCP Client 會在連線時向 Server 索取一次 Tool 清單，而 Navide 的 `/plan-mcp` 之後

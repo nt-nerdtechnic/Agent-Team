@@ -305,6 +305,54 @@ argument shape.
 agentKey, workspacePath, status?}], activeTab, settingsOpen,
 openWorkspaces}`.
 
+## A pane's id outlives its pane
+
+A CLI pane's connection URL is written once, when the pane spawns, and the CLI
+process keeps it for as long as it runs. The `pane=<id>` in it is that pane's id
+at that moment — and a pane id belongs to the pane, not to the process inside
+it. Reloading a window, detaching a run group, or taking one back from a
+detached window rebuilds the pane around the same running CLI and gives it a new
+id, leaving the URL naming the old one.
+
+That old id still works. The window records where it went, so a call carrying it
+is answered as the pane the process is actually attached to: the same workspace
+the `plan_*` tools default to, the same `you` in `cli_list_targets`, the same
+identity `cli_send` checks a bare name and a self-send against. Reloading twice
+does not break the chain — each hop is flattened onto the current pane — and an
+id is never allowed to follow a pane into another workspace.
+
+A pane's [push channel](inter-cli-messaging.md#push-channels) mostly follows the
+same way, with one exception. A window reload keeps it, and so does a run group
+coming back from a detached window. A **detach** does not: the window handing
+the pane over releases it — and its channel with it — before the receiving
+window claims the pane, so a detached pane is typed into as it was before
+channels existed, until its CLI is restarted. A Claude pane is unaffected: its
+hook re-arms itself at the next turn end.
+
+Which id superseded which is something a Navide window declares, and it is taken
+at its word — during a detach the id being claimed is still live and owned by
+the window letting go of it, so a claim over a live pane cannot be told apart
+from a legitimate hand-over and is logged rather than refused. The one
+irreversible consequence is refused separately: a pane a connected window still
+mirrors never gives up its push channel, whoever asks.
+
+One case is known to log that warning without a hand-over behind it: a main
+window reloading while one of its run groups is detached restores that group's
+panes before it learns the group is somewhere else, and briefly claims the child
+window's ids. It corrects itself the moment the window is told, and the child's
+push channel is never taken.
+
+What is still refused is an id that names nothing at all: the pane was closed,
+or the window that owned it has been gone long enough to be forgotten. There is
+no identity left to act as, so every tool on the endpoint answers `this pane's
+id is stale`, and reopening the pane is the remedy. (That is a different word
+from the `stale` flag on a queued message above, which only says a message has
+been waiting more than two minutes.)
+
+This is not the same problem as the tool *list* below. The list is a snapshot
+the client took when it connected and Navide has no way to refresh it; the id is
+resolved by Navide on every call.
+
 ## The tool list is read once
 
 An MCP client asks for a server's tool list when it connects, and Navide's

@@ -32,6 +32,10 @@ All notable released changes to Navide will be documented in this file. The form
 - Hold an inter-CLI message while someone is typing into the target pane: a pane with an unsent input line, or one that took a keystroke in the last few seconds, is reported as `typing` in the Messages panel until the line is sent or cleared, so a delivery can no longer submit a half-written prompt along with itself.
 - Write every injection into a CLI pane as a bracketed paste for the vendors whose TUI keeps the mode on, instead of only multi-line ones, and send the paste guards as whole writes so a chunk boundary can never cut one in half.
 
+### Fixed
+
+- Keep a CLI agent's Navide tools working after its pane is rebuilt around it. Reloading a window, detaching a run group or taking one back gives the pane a new id while the CLI keeps quoting the one it was launched with, which used to fail every MCP tool for that pane — plan documents included — with "this pane's id is stale". The old id now resolves to the pane the process is actually attached to, and so do the pane's Claude Stop-hook delivery and what `cli_get_status` reports. Its push channel follows a window reload and a run group returning from a detached window, but not a detach itself — the window handing the pane over releases the channel before the receiving window claims the pane, so a detached pane is typed into until its CLI is restarted (a Claude pane re-arms its own hook at the next turn end and is unaffected). An id that names no pane at all is still refused.
+
 ## [0.1.62] — 2026-07-26 — signed release
 
 ### Added

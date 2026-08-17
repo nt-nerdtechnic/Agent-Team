@@ -34,6 +34,13 @@ Pane 空下來時，把訊息輸入進去。
 Handle，包含其他 Workspace 視窗中的 Pane。剛輸入 `@` 之後把一個 Pane 拖放到另一
 個 Pane 上，會插入該 Pane 的位址。
 
+位址永遠是 Handle。Pane 另外還有一個內部 **id**，而它只出現在一個地方：CLI 生成時
+拿到的 MCP 連線 URL —— `cli_send` 這些 Tool 就是靠它知道呼叫者是誰。那個 id 屬於
+Pane 本身，不屬於裡面的 Process，所以用一個從未停止的 CLI 重建出來的 Pane（重載視
+窗、拆出視窗）會拿到新的 id，而 CLI 仍然帶著舊的。舊 id 會繼續解析到該 Process 實
+際附著的 Pane；詳見
+[外部 MCP 控制](external-mcp-control.md#pane-的-id-活得比-pane-久)。
+
 ---
 
 ## 傳送
