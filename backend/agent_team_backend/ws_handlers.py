@@ -2706,6 +2706,146 @@ async def _policy_payload() -> dict:
     return state
 
 
+# Team membership: who belongs to this team space, and what they may do. It
+# lives entirely on the server — this device asks and the server decides, so
+# these handlers add no authorization of their own beyond keeping obviously
+# malformed requests off the wire. The read answers for every role; the three
+# writes are admin-only and come back as the server's refusal for anyone else.
+# None of them touches the on-machine path, which has no concept of a member.
+#
+# Deliberately absent: delete. The server has no such request — ``revoke``
+# disables a member and drops their connections, and the row stays.
+MEMBER_ROLES = ("admin", "member", "observer")
+
+
+@handler("p2p.members.list")
+async def p2p_members_list(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    await session.send_json(make_response(msg_id, msg_type, await server_link.members_state()))
+
+
+async def _members_write(
+    session: "Session", msg_id: str, msg_type: str, remote_type: str, remote_payload: dict
+) -> None:
+    """Carry one membership write and answer with its result plus fresh state.
+
+    The refreshed state rides along so the pane never has to choose between
+    showing a stale roster and firing a second request: ``members_request``
+    re-reads on success, so by the time this runs the cache already holds the
+    change.
+    """
+    reply = await server_link.members_request(remote_type, remote_payload)
+    if reply is None:
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "P2P_NOT_CONFIGURED",
+                "no navide-server is configured, so this machine has no team",
+            )
+        )
+        return
+    if not reply.get("ok"):
+        error = reply.get("error") if isinstance(reply.get("error"), dict) else {}
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                str(error.get("code") or "P2P_MEMBERS_WRITE_FAILED"),
+                str(error.get("message") or "the navide-server rejected the change"),
+            )
+        )
+        return
+    result = reply.get("payload")
+    await session.send_json(
+        make_response(
+            msg_id,
+            msg_type,
+            {
+                "result": result if isinstance(result, dict) else {},
+                "state": await server_link.members_state(),
+            },
+        )
+    )
+
+
+@handler("p2p.members.invite")
+async def p2p_members_invite(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Mint a member and their one-time invite token.
+
+    The token comes back in ``result.token`` and *only* there: the server filters
+    it out of every later roster read, so a UI that loses it has no way to ask
+    for it again — the member has to be revoked and re-invited.
+    """
+    remote: dict = {}
+    for field in ("email", "displayName"):
+        value = payload.get(field)
+        if value is not None and not isinstance(value, str):
+            await session.send_json(
+                make_error(msg_id, msg_type, "BAD_REQUEST", f"{field} must be a string")
+            )
+            return
+        if isinstance(value, str) and value.strip():
+            remote[field] = value.strip()
+    role = payload.get("role")
+    if role is not None:
+        if role not in MEMBER_ROLES:
+            await session.send_json(
+                make_error(
+                    msg_id,
+                    msg_type,
+                    "BAD_REQUEST",
+                    f"role must be one of {', '.join(MEMBER_ROLES)}",
+                )
+            )
+            return
+        remote["role"] = role
+    await _members_write(session, msg_id, msg_type, "team.members.invite", remote)
+
+
+@handler("p2p.members.set_role")
+async def p2p_members_set_role(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    member_id = payload.get("memberId")
+    role = payload.get("role")
+    if not isinstance(member_id, str) or not member_id.strip():
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "memberId is required")
+        )
+        return
+    if role not in MEMBER_ROLES:
+        await session.send_json(
+            make_error(
+                msg_id, msg_type, "BAD_REQUEST", f"role must be one of {', '.join(MEMBER_ROLES)}"
+            )
+        )
+        return
+    await _members_write(
+        session,
+        msg_id,
+        msg_type,
+        "team.members.set_role",
+        {"memberId": member_id.strip(), "role": role},
+    )
+
+
+@handler("p2p.members.revoke")
+async def p2p_members_revoke(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Disable a member and drop the connections they currently hold.
+
+    ``result.droppedConnections`` is the second half and the reason this is not
+    just a flag flip: disabling only refused the *next* auth.hello, so a device
+    already signed in kept working until it happened to reconnect.
+    """
+    member_id = payload.get("memberId")
+    if not isinstance(member_id, str) or not member_id.strip():
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "memberId is required")
+        )
+        return
+    await _members_write(
+        session, msg_id, msg_type, "team.members.revoke", {"memberId": member_id.strip()}
+    )
+
+
 # ── Settings bundle / metadata (settings.*) ─────────────────────────────────
 @handler("settings.paths")
 async def settings_paths(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:

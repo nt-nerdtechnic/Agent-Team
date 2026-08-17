@@ -303,6 +303,17 @@ class ServerLink:
         self._tasks: set[asyncio.Task] = set()
         self._device_id = ""
         self.member_id = ""
+        # The role auth.hello granted this member: "admin", "member" or
+        # "observer". Stored because it is the only thing that may decide
+        # whether the Settings pane offers the member-management actions — a UI
+        # guessing at it would show buttons every request is going to refuse.
+        self.member_role = ""
+        # The team roster as the server last sent it, from team.members.list or
+        # the team.members.changed push. None means "never fetched", which an
+        # empty list must not be confused with. Kept across reconnects for the
+        # same reason the policy cache is: the Settings pane has to be able to
+        # show who is on the team while the link is down.
+        self._members: list[Any] | None = None
         self.terminated_reason = ""
         # Why the last dial or session failed, kept so `state()` can tell a
         # server that is not answering apart from one that has not been tried
@@ -434,6 +445,11 @@ class ServerLink:
                 # so the cache is realigned from a full directory read once per
                 # connection and kept current by the push after that.
                 await self._refresh_directory()
+                # And the same for the team roster: team.members.changed pushes
+                # missed while this device was away cannot be recovered, so the
+                # cache is realigned once per connection and kept current by the
+                # push after that.
+                await self._refresh_members()
                 reporter = asyncio.create_task(self._report_loop())
                 try:
                     done, _ = await asyncio.wait(
@@ -493,6 +509,12 @@ class ServerLink:
             return
         if msg_type == "presence.changed":
             self._on_presence_changed(message.get("payload"))
+            return
+        if msg_type == "team.members.changed":
+            # Carries the whole roster, like sessions.changed, so it needs no
+            # follow-up request and is applied inline rather than off the read
+            # loop.
+            self._apply_members(message.get("payload"))
             return
         log.debug("navide-server event %r is not wired yet; ignoring it", msg_type)
 
@@ -578,6 +600,7 @@ class ServerLink:
         payload = reply.get("payload")
         payload = payload if isinstance(payload, dict) else {}
         self.member_id = str(payload.get("memberId") or "")
+        self.member_role = str(payload.get("role") or "")
         log.info(
             "navide-server link authenticated as member %s (%s) for device %s",
             self.member_id or "unknown",
@@ -763,6 +786,76 @@ class ServerLink:
         data = payload if isinstance(payload, dict) else {}
         revision = data.get("revision")
         await self._refresh_policy(revision=revision if isinstance(revision, int) else None)
+
+    # ---- team members ----
+
+    async def _refresh_members(self) -> None:
+        """Read the team roster into the cache.
+
+        Never raises, for the same reason ``_refresh_policy`` does not: a roster
+        this device could not fetch leaves the previous cache in force, which is
+        a staler answer than the truth but a far better one than an empty team
+        or a dropped connection. Every role may read it, so this runs once per
+        connection regardless of who this device is signed in as.
+        """
+        try:
+            reply = await self._request("team.members.list", {})
+        except Exception as err:  # noqa: BLE001
+            log.warning("navide-server team.members.list failed: %s", err)
+            return
+        if not reply.get("ok"):
+            log.warning("navide-server rejected team.members.list: %s", reply.get("error"))
+            return
+        self._apply_members(reply.get("payload"))
+
+    def _apply_members(self, payload: Any) -> None:
+        """Replace the cached roster from a ``{members: [...]}`` payload.
+
+        ``team.members.list`` and the ``team.members.changed`` push carry the
+        same shape, so both land here and both replace wholesale. A payload with
+        no list is ignored rather than treated as an empty team.
+        """
+        data = payload if isinstance(payload, dict) else {}
+        members = data.get("members")
+        if isinstance(members, list):
+            self._members = members
+
+    def members_snapshot(self) -> list[Any] | None:
+        """The cached roster, or None if one was never fetched."""
+        return self._members
+
+    async def members_request(self, msg_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Forward one membership *write* to the server and re-read the roster.
+
+        Same shape as ``set_policy``: the server's reply frame, or a locally
+        minted error frame naming the link state when the write cannot leave
+        this machine. The server also decides who may write — an admin-only
+        request from a member comes back as its refusal, which is the answer the
+        UI should show rather than one this side invented.
+
+        The re-read on success is belt and braces: the server broadcasts
+        ``team.members.changed`` after every change, but a UI that has just
+        renamed a role must not depend on a push arriving to show it.
+        """
+        if self._ws is None or not self._authenticated:
+            return self._unavailable()
+        try:
+            reply = await self._request(msg_type, payload)
+        except Exception as err:  # noqa: BLE001
+            log.warning("navide-server %s failed: %s", msg_type, err)
+            return {
+                "ok": False,
+                "error": {
+                    "code": LINK_OFFLINE,
+                    "message": (
+                        f"the navide-server link failed mid-request ({err}); it "
+                        f"reconnects on its own, so retry shortly"
+                    ),
+                },
+            }
+        if reply.get("ok"):
+            await self._refresh_members()
+        return reply
 
     # ---- remote roster ----
 
@@ -1211,6 +1304,50 @@ async def set_policy(policy: Any) -> dict[str, Any] | None:
     if _link is None:
         return None
     return await _link.set_policy(policy)
+
+
+async def members_state() -> dict[str, Any]:
+    """What the team-members pane needs: the roster, and whether it may act.
+
+    Answered whatever the link is doing, because the roster is cached on this
+    machine — an admin whose server has just gone down should still see who is
+    on the team, with the actions off, rather than an empty list.
+
+    ``canManage`` is the honest half, and it is deliberately *not* something the
+    renderer derives: only an admin on a live connection can carry an invite, a
+    role change or a revoke, and every other role's request is refused by the
+    server. ``members`` never carries an invite token — the server strips it from
+    everything but the invite reply itself.
+    """
+    link = _link
+    if link is None:
+        return {
+            "state": STATE_UNCONFIGURED,
+            "role": "",
+            "memberId": "",
+            "canManage": False,
+            "members": [],
+        }
+    state = link.state()
+    members = link.members_snapshot()
+    return {
+        "state": state,
+        "role": link.member_role,
+        "memberId": link.member_id,
+        "canManage": state == STATE_CONNECTED and link.member_role == "admin",
+        "members": members if members is not None else [],
+    }
+
+
+async def members_request(msg_type: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Forward a membership write, or None when no server is configured.
+
+    None means what it means everywhere else in this module: this machine never
+    had a server, so there is no team anywhere to change.
+    """
+    if _link is None:
+        return None
+    return await _link.members_request(msg_type, payload)
 
 
 def roster_changed() -> None:
