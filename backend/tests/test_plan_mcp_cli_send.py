@@ -98,9 +98,10 @@ async def test_send_refuses_a_bad_caller_token(captured: list[dict[str, Any]]) -
 async def test_send_refuses_a_pane_id_that_is_no_longer_live(
     captured: list[dict[str, Any]],
 ) -> None:
-    """A re-attached pane (detach, window reload) gets a NEW pane id without
-    re-running spawn wiring, so the CLI keeps quoting the old one. Acting on it
-    would break self-send detection and strip the sender's identity."""
+    """An id naming no pane at all — closed, or its window gone long enough to
+    be forgotten. Acting on it would break self-send detection and strip the
+    sender's identity. (An id a live pane inherited resolves instead — see
+    test_plan_mcp_stale_alias.py.)"""
     _seed()
     result = await plan_mcp.cli_send("beta/reviewer", "hi", _ctx(pane_id="long-gone"))
     assert result["ok"] is False

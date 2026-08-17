@@ -65,12 +65,25 @@ def resolve_drain(request_id: str, result: dict[str, Any]) -> bool:
     return _pending.resolve(request_id, result)
 
 
+def _current(pane_id: str) -> str:
+    """The id this pane answers to now.
+
+    Both entry points here are reached with whatever pane id session attribution
+    recorded when the PTY was created, and a pane rebuilt around a live PTY (a
+    window reload, a detach) has a newer one. Following the alias keeps the
+    counters below on a single key per pane, and is what lets a reattached
+    claude pane still be handed a message by its Stop hook.
+    """
+    return agent_messaging.resolve_alias(pane_id) or pane_id
+
+
 def turn_end_is_superseded(pane_id: str) -> bool:
     """Whether a turn end reported for this pane describes a turn we blocked.
 
     Expires by itself, so a pane whose hooks stop arriving cannot be held as
     working forever.
     """
+    pane_id = _current(pane_id)
     started = _blocked_at.get(pane_id)
     if started is None:
         return False
@@ -99,6 +112,7 @@ async def drain_for_stop_hook(pane_id: str, *, stop_hook_active: bool) -> str:
     # lands inside that window — early enough to be believed and report the pane
     # idle. Retracted below the moment it turns out nothing was drained, so a
     # pane that simply stopped is never held on a mark it did not earn.
+    pane_id = _current(pane_id) if pane_id else pane_id
     if pane_id:
         _blocked_at.setdefault(pane_id, time.monotonic())
     envelope = await _drain(pane_id, stop_hook_active=stop_hook_active)

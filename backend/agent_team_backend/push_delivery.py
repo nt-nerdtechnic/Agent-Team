@@ -36,7 +36,7 @@ import secrets
 import shlex
 import socket
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -409,6 +409,44 @@ def sweep_runtime_files() -> int:
 def get(pane_id: str) -> PaneChannel | None:
     """This pane's registered channel, or None."""
     return _panes.get(pane_id)
+
+
+def adopt(pane_id: str, former_pane_ids: Iterable[str]) -> str:
+    """Re-key a still-running pane's channel onto the id it answers to now.
+
+    A channel is wired when the PTY is created, under the pane id of that
+    moment. Reattaching to a live PTY never creates one, so the pane comes back
+    with a new id and its channel is filed under the old one — invisible to
+    every lookup. Nothing about the transport changed: the port is still
+    served, the watch file is still the same path, so moving the entry is the
+    whole repair. This is what a window reload and a run group coming back from
+    a detached window need; a *detach* has nothing left to move, because the
+    parent window drops the pane (and with it the channel, watch file included)
+    before the child ever registers it.
+
+    Only a former id nothing live is holding gives its channel up. A pane a
+    connected window still mirrors keeps it, however the id came to be declared
+    — resolving an old id through an alias is additive and harmless, while
+    taking the channel is neither: it would strand the pane it was taken from,
+    which cannot be repaired without restarting its CLI.
+
+    A pane that already has a channel of its own keeps it. Returns the former id
+    the channel was taken from, or "" when there was nothing to adopt.
+    """
+    if pane_id in _panes:
+        return ""
+    from . import agent_messaging
+
+    for former in former_pane_ids:
+        if not agent_messaging.is_vacated(former):
+            continue
+        state = _panes.pop(former, None)
+        if state is None:
+            continue
+        state.pane_id = pane_id
+        _panes[pane_id] = state
+        return former
+    return ""
 
 
 def is_ready(pane_id: str) -> bool:

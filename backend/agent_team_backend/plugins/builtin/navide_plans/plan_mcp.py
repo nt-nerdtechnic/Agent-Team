@@ -673,10 +673,11 @@ _UNWIRED = (
     "can wire it, or use the ---MSG-START--- output protocol"
 )
 _STALE = (
-    "this pane's id is stale (it was re-attached to a new pane since the CLI "
-    "started, e.g. by a detach or a window reload) — reopen the pane to send "
-    "messages through these tools, or use the ---MSG-START--- output protocol, "
-    "which always resolves against the pane's current identity"
+    "this pane's id is stale and names no pane any more — if this pane was just "
+    "closed, or its window has been gone long enough to be forgotten, there is "
+    "nothing left to act as. Reopen the pane to use these tools, or use the "
+    "---MSG-START--- output protocol, which always resolves against the pane's "
+    "current identity"
 )
 _HOST_TOKEN_REJECTED = "host token rejected"
 _EXTERNAL_TOKEN_REJECTED = "external token rejected"
@@ -720,11 +721,19 @@ def _resolve_caller(ctx: Context) -> _Caller:
     For the pane kind specifically: the id is fixed at spawn time while a
     pane's id is not — re-attaching a live PTY (detach to a window, reload)
     mints a new pane id without re-running spawn wiring, leaving the CLI
-    holding one that no longer refers to anything. Acting on a stale id would
-    be worse than refusing — the sender resolves to nobody, which turns every
-    same-workspace name into "unknown target", makes the pane fail its own
-    self-send check (so it can message itself in a loop), and shows the
-    recipient an unaddressable sender. So require the id to still be live.
+    holding one that no longer refers to anything by itself. The window records
+    where that id went (agent_messaging.add_aliases), so the caller is resolved
+    to the pane its process is actually attached to and the answer carries that
+    pane's *current* identity — every downstream check (self-send, the caller's
+    own workspace, who "you" is in cli_list_targets) is made against the live
+    pane, so following the alias costs no protection.
+
+    What is still refused is an id that resolves to nothing at all: a pane that
+    was closed, or one whose window has been gone long enough to be forgotten.
+    Acting on that would leave the sender resolving to nobody — every
+    same-workspace name becomes "unknown target", the pane fails its own
+    self-send check (so it can message itself in a loop), and the recipient is
+    shown an unaddressable sender.
     """
     from agent_team_backend import agent_messaging
     from agent_team_backend.plugins.builtin.navide_plans import plan_mcp_auth, plan_mcp_wiring
@@ -750,9 +759,10 @@ def _resolve_caller(ctx: Context) -> _Caller:
         raise CallerUnknown(_UNWIRED)
     if not secrets.compare_digest(token, plan_mcp_wiring.caller_token()):
         raise CallerUnknown("caller token rejected; reopen the pane to re-wire it")
-    if agent_messaging.get(pane_id) is None:
+    entry = agent_messaging.current(pane_id)
+    if entry is None:
         raise CallerUnknown(_STALE)
-    return _Caller(kind="pane", pane_id=pane_id)
+    return _Caller(kind="pane", pane_id=entry.pane_id)
 
 
 def _target_view(entry: Any, same_workspace: bool) -> dict[str, Any]:

@@ -20,6 +20,7 @@ be re-pointed at another one.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import time
@@ -27,6 +28,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import device_identity, remote_roster
+
+log = logging.getLogger("agent_team_backend.agent_messaging")
 
 #: How long a disconnected window's panes stay in the registry, flagged offline,
 #: before they are forgotten for good. The renderer's reconnect backoff is
@@ -149,10 +152,34 @@ def _unknown_device(device: str, to: str) -> ResolveResult:
     )
 
 
+@dataclass
+class PaneAlias:
+    """A pane id something outside this process still carries, and the pane it
+    now names.
+
+    A pane id is minted per pane *object*, not per CLI process: reattaching a
+    live PTY (a window reload, a detach, taking a run group back from a detached
+    window) builds a new pane around the same running CLI and mints a new id.
+    Anything that was handed the old id at spawn time — the `?pane=` in the
+    CLI's own /plan-mcp URL above all — keeps quoting it for as long as that
+    process lives. The alias is how the old id keeps resolving to the pane it
+    describes, instead of resolving to nothing.
+
+    ``workspace_path`` is the workspace the alias was accepted for: an id is
+    only ever allowed to follow a pane inside the project it belonged to, so a
+    former id cannot be claimed by a pane in another workspace.
+    """
+
+    pane_id: str
+    workspace_path: str
+
+
 # pane_id -> RegisteredPane
 _PANES: dict[str, RegisteredPane] = {}
 # pane_id -> owning WS connection (opaque; only identity is used)
 _OWNERS: dict[str, Any] = {}
+# superseded pane_id -> the pane that took its place
+_ALIASES: dict[str, PaneAlias] = {}
 
 
 def _normalize_workspace(path: str) -> str:
@@ -186,6 +213,111 @@ def register(
     return entry
 
 
+def add_aliases(pane_id: str, former_pane_ids: list[str], workspace_path: str) -> list[str]:
+    """Record the pane ids this pane used to be known by. Returns those accepted.
+
+    Called from the same register the owning window runs after it rebuilds a
+    pane around a CLI that never stopped running, so the id that CLI was given
+    at spawn time keeps naming it.
+
+    Two rules keep an alias from meaning more than it should. A former id is
+    refused when it is already tied to a *different* workspace — a pane may
+    inherit its own past, never another project's. And a chain is flattened as
+    it grows: reloading twice makes A→B and then B→C, so everything that
+    pointed at B is repointed at C. One lookup always suffices, and forgetting
+    B cannot strand A.
+
+    What is *not* checked is whether the former id still names a live pane of
+    somebody else's, and it cannot be: a detach registers the pane in the child
+    window before the parent lets go of it, so at that moment the id is live,
+    online, and owned by a different window — exactly what a mistaken claim
+    would look like. The declaration is trusted because it comes from a Navide
+    renderer, which is inside the trust boundary; a claim over a pane that is
+    still online is logged so it is at least visible, and the one thing it must
+    not be allowed to do — take a live pane's push channel away — is refused
+    separately (push_delivery.adopt).
+
+    One case is known to reach that warning without a hand-over behind it, and
+    is left as a limitation rather than worked around here: a main window
+    reloading while one of its run groups is detached restores that group's
+    panes (`restoreWorkspacePanes` has no filter for it) before
+    `getDetachedGroups` answers, so for a moment it claims the child window's
+    ids. It cannot be fixed by ordering alone — the main process answers that
+    query with an empty list until it knows the window's workspace — and the
+    window drops those panes as soon as it is told, which retires the aliases
+    with them.
+    """
+    workspace = _normalize_workspace(workspace_path)
+    accepted: list[str] = []
+    for raw in former_pane_ids:
+        former = (raw or "").strip()
+        if not former or former == pane_id:
+            continue
+        known = _PANES.get(former)
+        if known is not None and known.workspace_path != workspace:
+            continue
+        existing = _ALIASES.get(former)
+        if existing is not None and existing.workspace_path != workspace:
+            continue
+        if known is not None and not known.offline:
+            log.warning(
+                "pane %s claims %s as a former id while it is still online "
+                "(same owner: %s) — expected during a detach, otherwise a "
+                "window restored a pane another window owns",
+                pane_id, former, _OWNERS.get(former) is _OWNERS.get(pane_id),
+            )
+        for key in [k for k, alias in _ALIASES.items() if alias.pane_id == former]:
+            if key == pane_id:
+                # The pane is that id again (A→B, then A comes back declaring
+                # B). An alias from an id to itself is not an alias.
+                _ALIASES.pop(key, None)
+                continue
+            _ALIASES[key] = PaneAlias(pane_id=pane_id, workspace_path=workspace)
+        _ALIASES[former] = PaneAlias(pane_id=pane_id, workspace_path=workspace)
+        accepted.append(former)
+    return accepted
+
+
+def is_vacated(pane_id: str) -> bool:
+    """Whether nothing live is still holding this pane id.
+
+    True when the id was unregistered, or when the window that mirrored it is
+    away. Asked before anything is *taken* from a former id rather than merely
+    resolved through it — resolving is additive, moving is not.
+    """
+    entry = _PANES.get(pane_id)
+    return entry is None or entry.offline
+
+
+def resolve_alias(pane_id: str) -> str:
+    """The pane id that superseded ``pane_id``, or "" when none did."""
+    alias = _ALIASES.get(pane_id)
+    return alias.pane_id if alias is not None else ""
+
+
+def current(pane_id: str) -> RegisteredPane | None:
+    """The pane a possibly-superseded id names right now.
+
+    An id that has been superseded is never itself any more, even while its own
+    entry is still in the registry waiting out the offline grace period — the
+    CLI quoting it is attached to the successor, and answering with the old
+    entry would let the pane see itself as somebody else.
+    """
+    purge_expired()
+    alias = _ALIASES.get(pane_id)
+    if alias is not None:
+        return _PANES.get(alias.pane_id)
+    return _PANES.get(pane_id)
+
+
+def _forget_aliases_to(pane_id: str) -> None:
+    """Drop the former ids of a pane that is gone for good. Aliases *keyed* by
+    it are left alone: an id being unregistered right after something else
+    adopted it is exactly what a detach looks like."""
+    for key in [k for k, alias in _ALIASES.items() if alias.pane_id == pane_id]:
+        _ALIASES.pop(key, None)
+
+
 def unregister(pane_id: str, owner: Any = None) -> bool:
     """Forget a pane. With ``owner`` given, the entry is kept when another window
     has since claimed the same pane id — which is what a detach does: the child
@@ -195,6 +327,7 @@ def unregister(pane_id: str, owner: Any = None) -> bool:
         return False
     _PANES.pop(pane_id, None)
     _OWNERS.pop(pane_id, None)
+    _forget_aliases_to(pane_id)
     return True
 
 
@@ -239,6 +372,7 @@ def purge_expired() -> list[str]:
     for pane_id in expired:
         _PANES.pop(pane_id, None)
         _OWNERS.pop(pane_id, None)
+        _forget_aliases_to(pane_id)
     return expired
 
 
@@ -548,3 +682,4 @@ def sender_display(from_pane_id: str, fallback: str) -> str:
 def _reset_for_test() -> None:
     _PANES.clear()
     _OWNERS.clear()
+    _ALIASES.clear()

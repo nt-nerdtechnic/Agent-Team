@@ -5717,6 +5717,12 @@ async def agent_msg_register(session: "Session", msg_id: str, msg_type: str, pay
         agent_key=str(payload.get("agent_key") or ""),
         owner=session,
     )
+    # The ids this same CLI process was known by before the window rebuilt its
+    # pane around it (reload, detach, group reattach). They stay resolvable, so
+    # a CLI still quoting the id baked into its /plan-mcp URL at spawn time is
+    # answered as the pane it is actually attached to.
+    former_pane_ids = [str(x) for x in (payload.get("former_pane_ids") or [])]
+    aliased = agent_messaging.add_aliases(pane_id, former_pane_ids, workspace_path)
     # A register is also how a rename and a post-reconnect re-mirror arrive, so
     # this is the single point where the remote roster learns about all three.
     server_link.roster_changed()
@@ -5726,6 +5732,12 @@ async def agent_msg_register(session: "Session", msg_id: str, msg_type: str, pay
     # as it lives.
     from . import push_delivery
 
+    # A pane whose window reloaded keeps the channel its CLI was launched with,
+    # and that channel is filed under the pane id the launch used. Move it onto
+    # the id the pane answers to now, or the pane would be typed into for the
+    # rest of its life despite having a working push channel. Only an id nobody
+    # live is holding gives it up — see push_delivery.adopt.
+    push_delivery.adopt(pane_id, aliased)
     state = push_delivery.get(pane_id)
     if state is not None and push_delivery.is_ready(pane_id):
         await session.send_json(

@@ -673,6 +673,11 @@ def pane_activity(pane_id: str) -> dict[str, Any] | None:
 def _record_pane_activity(pane_id: str, event_type: str, text: str) -> None:
     if not pane_id:
         return
+    # Both writers here identify the pane through session attribution, which
+    # records the id the PTY was created under — a pane rebuilt around a live
+    # PTY (window reload, detach) answers to a newer one. cli_get_status and
+    # cli_wait_idle look the pane up by its current id, so file the entry there.
+    pane_id = agent_messaging.resolve_alias(pane_id) or pane_id
     _pane_activity[pane_id] = {
         "event_type": event_type,
         # Same cap as the broadcast path — this dict must not become the one
@@ -1516,6 +1521,10 @@ async def claude_rewake_hook(request: Request) -> Response:
         payload = {}
     session_id = str((payload or {}).get("session_id") or "") if isinstance(payload, dict) else ""
     pane_id = await _rewake_pane_id(session_id) if session_id else ""
+    # Session attribution answers with the id the PTY was created under; the
+    # window pushes to the id the pane answers to now. Park the waiter on the
+    # latter or a reattached pane would never be woken.
+    pane_id = agent_messaging.resolve_alias(pane_id) or pane_id
     if not pane_id:
         return Response(status_code=200)
     if push_delivery.register_hook_pane(pane_id, "claude") is None:
