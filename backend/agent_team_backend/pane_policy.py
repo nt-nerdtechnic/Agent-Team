@@ -137,6 +137,38 @@ def is_allowed(
     return policy.get("default") == "allow"
 
 
+def validate(policy: Any) -> str:
+    """Why *policy* must not be written, or ``""`` when it may be.
+
+    ``is_allowed`` forgives everything, because what it reads was authored
+    elsewhere and one bad rule must not void the rules around it. The *write*
+    path is the opposite: what leaves this machine was authored by our own
+    editor, the server stores it verbatim without ever interpreting it, and a
+    rule this build would later skip is a grant the user believes they made.
+    Refusing the write is the only moment anyone can be told about it.
+    """
+    if not isinstance(policy, dict):
+        return "policy must be an object"
+    version = policy.get("version")
+    if isinstance(version, bool) or version != POLICY_VERSION:
+        return f"policy version must be {POLICY_VERSION}"
+    if policy.get("default") not in ("deny", "allow"):
+        return "policy default must be 'deny' or 'allow'"
+    rules = policy.get("rules")
+    if not isinstance(rules, list):
+        return "policy rules must be a list"
+    for index, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            return f"rule {index} must be an object"
+        if rule.get("action") != "allow":
+            return f"rule {index} must have action 'allow'"
+        for section, key in _FIELDS:
+            block = rule.get(section)
+            if not isinstance(block, dict) or not _usable(block.get(key)):
+                return f"rule {index} needs a {section}.{key} string"
+    return ""
+
+
 def _usable(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
 

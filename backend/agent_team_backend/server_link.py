@@ -701,6 +701,60 @@ class ServerLink:
         self._policy_revision = raw_revision if isinstance(raw_revision, int) else 0
         log.info("navide-server pane policy is at revision %s", self._policy_revision)
 
+    def policy_snapshot(self) -> dict[str, Any]:
+        """The cached policy and the revision it came at, for the editor UI.
+
+        Reads the cache rather than the server: the cache is what actually
+        decides every inbound message, and it survives a disconnect, so the
+        editor can still show the rules that are refusing messages while the
+        link is down.
+        """
+        return {"policy": self._policy, "revision": self._policy_revision}
+
+    async def set_policy(self, policy: Any) -> dict[str, Any]:
+        """Write this device's policy to the server and adopt the new revision.
+
+        Same shape as ``send_message``: the server's reply frame, or a locally
+        minted error frame naming the link state when the write cannot leave
+        this machine. Only the device itself (or an admin) may write its policy,
+        so there is no target to name beyond our own deviceId.
+        """
+        if self._ws is None or not self._authenticated:
+            return self._unavailable()
+        try:
+            reply = await self._request(
+                "policy.set", {"deviceId": self._device_id, "policy": policy}
+            )
+        except Exception as err:  # noqa: BLE001
+            log.warning("navide-server policy.set failed: %s", err)
+            return {
+                "ok": False,
+                "error": {
+                    "code": LINK_OFFLINE,
+                    "message": (
+                        f"the navide-server link failed mid-request ({err}); it "
+                        f"reconnects on its own, so retry shortly"
+                    ),
+                },
+            }
+        if reply.get("ok"):
+            payload = reply.get("payload")
+            revision = payload.get("revision") if isinstance(payload, dict) else None
+            if isinstance(revision, int) and not isinstance(revision, bool):
+                # Adopt what was just written instead of waiting for the
+                # policy.changed push: that push is only a nudge, and
+                # _refresh_policy skips a revision the cache already holds, so a
+                # UI re-reading right after the save must not be shown the
+                # policy it just replaced.
+                self._policy = policy
+                self._policy_revision = revision
+            else:
+                # No revision to pin the cache to — re-read rather than guess,
+                # since a cache pinned to the wrong revision would ignore the
+                # very push that would have corrected it.
+                await self._refresh_policy()
+        return reply
+
     async def _on_policy_changed(self, payload: Any) -> None:
         """The server says this device's policy moved. Re-fetch only if the
         revision differs from the cached one — the event is a nudge, not the
@@ -1109,6 +1163,54 @@ async def status() -> dict[str, Any]:
         "deviceId": "",
         "memberId": "",
     }
+
+
+async def policy_state() -> dict[str, Any]:
+    """What the pane-policy editor needs to answer "who may command me?".
+
+    Answered whatever the link is doing, because the policy is cached on this
+    machine and a user whose messages are being refused has to be able to read
+    the rules doing the refusing. ``editable`` is the honest half: the policy
+    lives on the server, so an offline link can show it and not write it.
+
+    Reads no configuration and touches no keychain — the Settings pane polls
+    this while it is open, and the unconfigured answer is a constant.
+    """
+    link = _link
+    if link is None:
+        return {
+            "state": STATE_UNCONFIGURED,
+            "editable": False,
+            "policy": None,
+            "revision": None,
+            "deviceId": "",
+            "memberId": "",
+        }
+    state = link.state()
+    snapshot = link.policy_snapshot()
+    return {
+        "state": state,
+        # Only a live, authenticated link can carry a policy.set, and a UI that
+        # offered the buttons anyway would leave the user believing a rule was
+        # saved that never left the machine.
+        "editable": state == STATE_CONNECTED,
+        "policy": snapshot["policy"],
+        "revision": snapshot["revision"],
+        "deviceId": link._device_id,
+        "memberId": link.member_id,
+    }
+
+
+async def set_policy(policy: Any) -> dict[str, Any] | None:
+    """Write this device's pane policy, or None when no server is configured.
+
+    None means the same thing it means for ``send_message``: this machine never
+    had a server, so there is no policy anywhere to write. Every other failure
+    is a reply frame carrying LINK_OFFLINE or LINK_UNAUTHORIZED.
+    """
+    if _link is None:
+        return None
+    return await _link.set_policy(policy)
 
 
 def roster_changed() -> None:

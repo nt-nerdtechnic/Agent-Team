@@ -865,7 +865,29 @@
       "state-connecting": "Connecting…",
       "state-connected": "Connected",
       "state-unreachable": "Cannot reach the server",
-      "state-unauthorized": "Access token rejected"
+      "state-unauthorized": "Access token rejected",
+      "policy": {
+        "title": "Who may command panes on this machine",
+        "hint": "Applies only to messages arriving from another device. Agents on this machine keep talking to each other exactly as before.",
+        "default-deny": "Nothing is allowed by default: a message from another device is refused unless a rule below matches it, and the sender is told it was rejected.",
+        "readonly": "These rules live on the server, so they can only be changed while the link is connected. This is the last policy this machine received.",
+        "own-devices": "Allow my own other devices",
+        "own-devices-hint": "Any device signed in with this same account may message any pane here. Devices you add later are covered without editing anything.",
+        "rules": "Rules",
+        "empty": "No rules — every message from another device is refused.",
+        "add-title": "Add a rule",
+        "add": "Add rule",
+        "remove": "Remove",
+        "source-member": "From account",
+        "source-device": "From device",
+        "target-workspace": "To workspace",
+        "target-pane": "To pane",
+        "blank-is-any": "Leave blank for any",
+        "my-account": "My account",
+        "any-member": "Any account",
+        "any-device": "Any device",
+        "any": "any"
+      }
     },
     "storage": {
       "intro": "Disk space used by this app, its CLI agent homes, and the workspaces you have opened.",

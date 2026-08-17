@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { useBackend } from '../composables/useBackend'
 import type { useRoles } from '../composables/useRoles'
 import type { useStages } from '../composables/useStages'
@@ -45,6 +46,16 @@ import {
   type DetectedEditor,
 } from '../lib/defaultEditor'
 import { useCliAgentPrefs } from '../composables/useCliAgentPrefs'
+import {
+  ANY as POLICY_ANY,
+  addRule as addPolicyRuleTo,
+  allowsOwnDevices,
+  makeRule as makePolicyRule,
+  readPolicy,
+  removeRuleAt as removePolicyRuleAt,
+  withOwnDevices,
+  type PolicyDocument,
+} from '../lib/panePolicy'
 import { CLI_AGENT_SPECS } from '../agents'
 import {
   LOOP_PROMPT_SETTING_KEY,
@@ -295,6 +306,15 @@ const settingsSearchItems = computed<SettingsSearchItem[]>(() => [
     group: 'General',
     summary: 'Link this machine to a Navide-Server so agents can message agents on your other devices.',
     keywords: 'p2p cross device remote server url access token navide-server connect link relay 跨裝置 遠端 伺服器 網址 權杖 連線 傳訊',
+  },
+  {
+    id: 'general-p2p-policy',
+    tab: 'general',
+    section: 'general-p2p-policy',
+    title: 'Cross-device Authorization / 跨裝置授權',
+    group: 'General',
+    summary: 'Choose which remote devices may send instructions to panes on this machine. Everything is refused until a rule allows it.',
+    keywords: 'policy permission authorization allow rule deny default pane cross device remote rejected 政策 權限 授權 允許 規則 拒絕 跨裝置 被擋',
   },
   {
     id: 'appearance-language',
@@ -917,11 +937,122 @@ const p2pDotClass = computed(() => {
   return 'idle'
 })
 
+// ── Cross-device authorization (receiver-side pane policy) ───────────────────
+// Who, on another device, may drive a pane on *this* machine. Deny by default
+// with allow-only rules, stored on the server and cached here — so the list is
+// readable while the link is down and writable only while it is up. Panes on
+// one machine never consult it, which is why the whole block only appears once
+// a server is configured.
+const { t } = useI18n()
+interface P2pPolicyDevice { deviceId: string; deviceName: string; paneCount: number }
+interface P2pPolicyState {
+  state: string
+  editable: boolean
+  policy: unknown
+  revision: number | null
+  deviceId: string
+  memberId: string
+  devices: P2pPolicyDevice[]
+}
+const p2pPolicy = ref<P2pPolicyState | null>(null)
+const p2pPolicyBusy = ref(false)
+const p2pPolicyError = ref('')
+const newRuleMemberScope = ref<'mine' | 'any'>('mine')
+const newRuleDeviceId = ref('')
+const newRuleWorkspace = ref('')
+const newRulePaneName = ref('')
+
+const policyDoc = computed<PolicyDocument>(() => readPolicy(p2pPolicy.value?.policy))
+const policyMemberId = computed(() => p2pPolicy.value?.memberId ?? '')
+const policyDevices = computed<P2pPolicyDevice[]>(() => p2pPolicy.value?.devices ?? [])
+const policyEditable = computed(() => p2pPolicy.value?.editable === true && !p2pPolicyBusy.value)
+const policyAllowsOwnDevices = computed(() =>
+  allowsOwnDevices(policyDoc.value, policyMemberId.value)
+)
+
+async function loadP2pPolicy(): Promise<void> {
+  // A save owns the state while it is in flight; a poll landing after it would
+  // put the pre-save rules back on screen for one tick.
+  if (p2pPolicyBusy.value) return
+  try {
+    const resp = await props.backend.send<P2pPolicyState>('p2p.policy.get', {})
+    if (!resp.ok || !resp.payload) return
+    p2pPolicy.value = resp.payload
+  } catch { /* non-fatal — the list keeps its last value */ }
+}
+
+async function saveP2pPolicy(next: PolicyDocument): Promise<boolean> {
+  p2pPolicyBusy.value = true
+  p2pPolicyError.value = ''
+  try {
+    const resp = await props.backend.send<P2pPolicyState>('p2p.policy.set', { policy: next })
+    if (!resp.ok) {
+      p2pPolicyError.value = resp.error?.message ?? 'Failed to save the authorization rules'
+      return false
+    }
+    if (resp.payload) p2pPolicy.value = resp.payload
+    return true
+  } catch (err) {
+    p2pPolicyError.value = err instanceof Error ? err.message : String(err)
+    return false
+  } finally {
+    p2pPolicyBusy.value = false
+  }
+}
+
+async function toggleOwnDevices(input: HTMLInputElement): Promise<void> {
+  if (!policyMemberId.value) return
+  await saveP2pPolicy(withOwnDevices(policyDoc.value, policyMemberId.value, input.checked))
+  // A refused save leaves the computed exactly as it was, and an unchanged
+  // binding re-renders nothing — so the box would keep the click and show a
+  // permission that was never granted.
+  input.checked = policyAllowsOwnDevices.value
+}
+
+async function addP2pPolicyRule(): Promise<void> {
+  const rule = makePolicyRule({
+    memberId: newRuleMemberScope.value === 'mine' ? policyMemberId.value : POLICY_ANY,
+    deviceId: newRuleDeviceId.value || POLICY_ANY,
+    workspace: newRuleWorkspace.value,
+    paneName: newRulePaneName.value,
+  })
+  if (await saveP2pPolicy(addPolicyRuleTo(policyDoc.value, rule))) {
+    newRuleDeviceId.value = ''
+    newRuleWorkspace.value = ''
+    newRulePaneName.value = ''
+  }
+}
+
+async function removeP2pPolicyRule(index: number): Promise<void> {
+  await saveP2pPolicy(removePolicyRuleAt(policyDoc.value, index))
+}
+
+/** Rule fields as the list renders them: `*` becomes the localized "any". */
+function policyFieldLabel(value: string): string {
+  return value === POLICY_ANY ? t('settings.p2p.policy.any') : value
+}
+
+function policyMemberLabel(memberId: string): string {
+  if (memberId === POLICY_ANY) return t('settings.p2p.policy.any-member')
+  if (memberId === policyMemberId.value) return t('settings.p2p.policy.my-account')
+  return memberId
+}
+
+function policyDeviceLabel(deviceId: string): string {
+  if (deviceId === POLICY_ANY) return t('settings.p2p.policy.any-device')
+  const known = policyDevices.value.find((device) => device.deviceId === deviceId)
+  return known?.deviceName || deviceId
+}
+
 watch(activeTab, (tab) => {
   if (p2pTimer) { clearInterval(p2pTimer); p2pTimer = null }
   if (tab !== 'general') return
   void loadP2pStatus()
-  p2pTimer = setInterval(() => { void loadP2pStatus() }, P2P_POLL_MS)
+  void loadP2pPolicy()
+  p2pTimer = setInterval(() => {
+    void loadP2pStatus()
+    void loadP2pPolicy()
+  }, P2P_POLL_MS)
 }, { immediate: true })
 
 // Close on ESC
@@ -2436,6 +2567,96 @@ watch(activeTab, (tab) => {
                 <p v-if="p2pError" class="err-msg">{{ p2pError }}</p>
               </div>
             </SettingsCard>
+
+            <!-- Only meaningful once a server is configured: with no server no
+                 message can arrive from another device, and messages between
+                 panes on this machine never consult this policy. -->
+            <SettingsCard v-if="p2pState !== 'unconfigured'">
+              <div class="s-fullrow" data-settings-section="general-p2p-policy">
+                <h3 class="policy-title">{{ $t('settings.p2p.policy.title') }}</h3>
+                <p class="ap-hint">{{ $t('settings.p2p.policy.hint') }}</p>
+                <p class="policy-deny">{{ $t('settings.p2p.policy.default-deny') }}</p>
+                <p v-if="!p2pPolicy?.editable" class="policy-readonly">{{ $t('settings.p2p.policy.readonly') }}</p>
+
+                <label class="policy-switch">
+                  <input
+                    type="checkbox"
+                    :checked="policyAllowsOwnDevices"
+                    :disabled="!policyEditable || !policyMemberId"
+                    @change="toggleOwnDevices($event.target as HTMLInputElement)"
+                  />
+                  <span>
+                    <span class="policy-switch-label">{{ $t('settings.p2p.policy.own-devices') }}</span>
+                    <span class="ap-hint">{{ $t('settings.p2p.policy.own-devices-hint') }}</span>
+                  </span>
+                </label>
+
+                <p class="policy-section-label">{{ $t('settings.p2p.policy.rules') }}</p>
+                <p v-if="!policyDoc.rules.length" class="policy-empty">{{ $t('settings.p2p.policy.empty') }}</p>
+                <ul v-else class="policy-rules">
+                  <li v-for="(rule, index) in policyDoc.rules" :key="index" class="policy-rule">
+                    <span class="policy-rule-text">
+                      {{ policyMemberLabel(rule.from.memberId) }} · {{ policyDeviceLabel(rule.from.deviceId) }}
+                      →
+                      {{ policyFieldLabel(rule.to.workspace) }} / {{ policyFieldLabel(rule.to.paneName) }}
+                    </span>
+                    <button class="ap-reset" :disabled="!policyEditable" @click="removeP2pPolicyRule(index)">
+                      {{ $t('settings.p2p.policy.remove') }}
+                    </button>
+                  </li>
+                </ul>
+
+                <p class="policy-section-label">{{ $t('settings.p2p.policy.add-title') }}</p>
+                <div class="policy-add">
+                  <div class="field">
+                    <label class="lbl" for="policy-member">{{ $t('settings.p2p.policy.source-member') }}</label>
+                    <select id="policy-member" v-model="newRuleMemberScope" :disabled="!policyEditable || !policyMemberId">
+                      <option value="mine">{{ $t('settings.p2p.policy.my-account') }}</option>
+                      <option value="any">{{ $t('settings.p2p.policy.any-member') }}</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label class="lbl" for="policy-device">{{ $t('settings.p2p.policy.source-device') }}</label>
+                    <select id="policy-device" v-model="newRuleDeviceId" :disabled="!policyEditable">
+                      <option value="">{{ $t('settings.p2p.policy.any-device') }}</option>
+                      <option v-for="device in policyDevices" :key="device.deviceId" :value="device.deviceId">
+                        {{ device.deviceName || device.deviceId }}
+                      </option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label class="lbl" for="policy-workspace">{{ $t('settings.p2p.policy.target-workspace') }}</label>
+                    <input
+                      id="policy-workspace"
+                      v-model="newRuleWorkspace"
+                      type="text"
+                      spellcheck="false"
+                      autocomplete="off"
+                      :disabled="!policyEditable"
+                      :placeholder="$t('settings.p2p.policy.blank-is-any')"
+                    />
+                  </div>
+                  <div class="field">
+                    <label class="lbl" for="policy-pane">{{ $t('settings.p2p.policy.target-pane') }}</label>
+                    <input
+                      id="policy-pane"
+                      v-model="newRulePaneName"
+                      type="text"
+                      spellcheck="false"
+                      autocomplete="off"
+                      :disabled="!policyEditable"
+                      :placeholder="$t('settings.p2p.policy.blank-is-any')"
+                    />
+                  </div>
+                </div>
+                <div class="row-g gap p2p-actions">
+                  <button class="ap-reset" :disabled="!policyEditable" @click="addP2pPolicyRule">
+                    {{ $t('settings.p2p.policy.add') }}
+                  </button>
+                </div>
+                <p v-if="p2pPolicyError" class="err-msg">{{ p2pPolicyError }}</p>
+              </div>
+            </SettingsCard>
           </SettingsSection>
         </div>
 
@@ -3374,6 +3595,21 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 .p2p-dot.warn { background: var(--attention-fg); }
 .p2p-dot.idle { background: var(--text-secondary); }
 .p2p-detail { margin: 4px 0 0; font-size: 11px; color: var(--text-secondary); word-break: break-all; }
+
+/* Cross-device authorization (pane policy) */
+.policy-title { margin: 0 0 6px; font-size: 12.5px; color: var(--text-bright); }
+.policy-deny { margin: 8px 0 0; font-size: 11px; color: var(--attention-fg); }
+.policy-readonly { margin: 6px 0 0; font-size: 11px; color: var(--text-secondary); }
+.policy-switch { display: flex; align-items: flex-start; gap: 8px; margin: 12px 0 0; cursor: pointer; }
+.policy-switch input { margin-top: 2px; flex-shrink: 0; }
+.policy-switch-label { display: block; font-size: 12px; color: var(--text-bright); }
+.policy-switch .ap-hint { margin: 2px 0 0; }
+.policy-section-label { margin: 14px 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-secondary); }
+.policy-empty { margin: 0; font-size: 11.5px; color: var(--text-secondary); }
+.policy-rules { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.policy-rule { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 8px; border: 1px solid var(--border-default); border-radius: 5px; background: var(--bg-muted); }
+.policy-rule-text { font-size: 11.5px; color: var(--text-bright); word-break: break-all; }
+.policy-add { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .hint-msg { color: var(--text-secondary); font-size: 11px; margin: 0; }
 
 /* ── Appearance tab ─────────────────────────────────────────────────────────── */

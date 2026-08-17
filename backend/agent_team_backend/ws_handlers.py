@@ -22,7 +22,14 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from pydantic import ValidationError
 
-from . import agent_messaging, executions_service, server_link, storage_service
+from . import (
+    agent_messaging,
+    executions_service,
+    pane_policy,
+    remote_roster,
+    server_link,
+    storage_service,
+)
 from .cli_vendors.registry import VENDORS as CLI_VENDORS
 from .cli_vendors.registry import vendor as cli_vendor
 from .ipc import make_error, make_event, make_response
@@ -2586,6 +2593,69 @@ async def p2p_link_configure(session: "Session", msg_id: str, msg_type: str, pay
         # sender is not excluded because it wrote through this handler rather
         # than through its own settings cache, so it needs the delta too.
         await app.broadcast(make_event("ui.settings_changed", {"settings": delta}))
+
+
+# The receiver-side pane policy: who, on another device, may drive a pane on
+# this machine. It lives on the server (only this device or an admin may write
+# it) and is cached here, so the two handlers below are a read that always
+# answers and a write that only a connected link can carry. Neither touches the
+# on-machine path — panes on one machine have never consulted this policy.
+@handler("p2p.policy.get")
+async def p2p_policy_get(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    await session.send_json(make_response(msg_id, msg_type, await _policy_payload()))
+
+
+@handler("p2p.policy.set")
+async def p2p_policy_set(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Replace this device's pane policy with the one the editor composed.
+
+    The whole document is written at once because that is the server's only
+    write: it stores the policy verbatim and never merges. The editor therefore
+    sends back the rules it was shown plus its edit.
+    """
+    policy = payload.get("policy")
+    problem = pane_policy.validate(policy)
+    if problem:
+        await session.send_json(make_error(msg_id, msg_type, "BAD_REQUEST", problem))
+        return
+
+    reply = await server_link.set_policy(policy)
+    if reply is None:
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "P2P_NOT_CONFIGURED",
+                "no navide-server is configured, so this device has no policy to write",
+            )
+        )
+        return
+    if not reply.get("ok"):
+        error = reply.get("error") if isinstance(reply.get("error"), dict) else {}
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                str(error.get("code") or "P2P_POLICY_WRITE_FAILED"),
+                str(error.get("message") or "the navide-server rejected the policy"),
+            )
+        )
+        return
+    await session.send_json(make_response(msg_id, msg_type, await _policy_payload()))
+
+
+async def _policy_payload() -> dict:
+    """The policy plus the devices a rule could name, in one answer.
+
+    The device list comes from the cached session directory rather than a
+    device registry, because that directory is all the server sends — and a
+    rule naming a device that has never had a pane grants nothing anyone could
+    have used. It is a convenience for the picker, never a constraint: the
+    policy is written with ids, so an id typed by hand works the same.
+    """
+    state = await server_link.policy_state()
+    state["devices"] = remote_roster.list_devices()
+    return state
 
 
 # ── Settings bundle / metadata (settings.*) ─────────────────────────────────

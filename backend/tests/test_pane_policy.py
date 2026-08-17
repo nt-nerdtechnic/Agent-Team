@@ -349,3 +349,47 @@ def test_a_missing_request_field_is_reported(caplog) -> None:
     with caplog.at_level(logging.WARNING, logger="agent_team_backend.pane_policy"):
         allows(policy(rule()), member_id="")
     assert any(record.levelno == logging.WARNING for record in caplog.records)
+
+
+# ---- validate (the write path) ----------------------------------------------
+# is_allowed forgives a malformed rule because it was authored elsewhere; the
+# editor's own writes are held to the stricter standard, since a rule that
+# would later be skipped is a grant the user believes they made.
+
+
+def test_a_well_formed_policy_may_be_written() -> None:
+    assert pane_policy.validate(policy()) == ""
+    assert pane_policy.validate(policy(rule(device_id="*"))) == ""
+    assert pane_policy.validate(policy(default="allow")) == ""
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        None,
+        "policy",
+        [],
+        {"version": 2, "default": "deny", "rules": []},
+        {"version": True, "default": "deny", "rules": []},
+        {"version": 1, "default": "maybe", "rules": []},
+        {"version": 1, "default": "deny", "rules": {}},
+        {"version": 1, "default": "deny", "rules": ["nope"]},
+        policy(rule(action="deny")),
+        policy(rule(member_id="")),
+        policy({"from": {"memberId": MEMBER}, "to": {"workspace": "*", "paneName": "*"},
+                "action": "allow"}),
+        policy({"from": {"memberId": MEMBER, "deviceId": DEVICE}, "action": "allow"}),
+    ],
+    ids=[
+        "none", "string", "list", "other-version", "bool-version", "bad-default",
+        "rules-not-a-list", "rule-not-an-object", "deny-rule", "blank-member",
+        "no-device-field", "no-to-block",
+    ],
+)
+def test_a_policy_this_build_would_not_honour_is_refused(candidate: Any) -> None:
+    assert pane_policy.validate(candidate) != ""
+
+
+def test_every_refusal_names_what_is_wrong() -> None:
+    assert "version" in pane_policy.validate({"version": 9, "default": "deny", "rules": []})
+    assert "rule 1" in pane_policy.validate(policy(rule(), rule(action="deny")))

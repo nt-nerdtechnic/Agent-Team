@@ -204,6 +204,28 @@ def list_panes() -> list[RemotePane]:
     )
 
 
+def list_devices() -> list[dict[str, Any]]:
+    """The devices this cache knows of, for the pane-policy editor's picker.
+
+    Derived from the panes rather than tracked separately: the session
+    directory is the only thing the server sends, so a device with no session
+    in it is one nobody could have addressed anyway. ``deviceName`` may be
+    empty — the server does not put it on session rows today (see
+    ``_pane_from_row``) — so a caller rendering a label falls back to the id,
+    which is what a rule is written against either way.
+    """
+    devices: dict[str, dict[str, Any]] = {}
+    for pane in _PANES.values():
+        entry = devices.setdefault(
+            pane.device_id,
+            {"deviceId": pane.device_id, "deviceName": "", "paneCount": 0},
+        )
+        entry["paneCount"] = int(entry["paneCount"]) + 1
+        if not entry["deviceName"] and pane.device_name:
+            entry["deviceName"] = pane.device_name
+    return sorted(devices.values(), key=lambda d: (d["deviceName"] or d["deviceId"]))
+
+
 def devices_named(label: str) -> list[str]:
     """Device ids addressable as ``label``: its id exactly, or its name
     case-insensitively.

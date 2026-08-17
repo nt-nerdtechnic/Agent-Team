@@ -210,3 +210,38 @@ def test_clear_forgets_everything():
     remote_roster.replace([row()], local_device_id=LOCAL)
     remote_roster.clear()
     assert remote_roster.list_panes() == []
+
+
+# ---- the policy editor's device picker ---------------------------------------
+
+
+def test_devices_are_listed_once_with_their_pane_count():
+    remote_roster.replace(
+        [
+            row(sessionId="s1", deviceId="d1", deviceName="Laptop", title="reviewer"),
+            row(sessionId="s2", deviceId="d1", deviceName="Laptop", title="builder"),
+            row(sessionId="s3", deviceId="d2", deviceName="Desktop"),
+        ],
+        local_device_id=LOCAL,
+    )
+    assert remote_roster.list_devices() == [
+        {"deviceId": "d2", "deviceName": "Desktop", "paneCount": 1},
+        {"deviceId": "d1", "deviceName": "Laptop", "paneCount": 2},
+    ]
+
+
+def test_a_device_the_server_never_named_is_still_listed_by_id():
+    """deviceName is not on a session row today, so the picker has to stay
+    usable with nothing but ids — the rule is written against the id anyway."""
+    remote_roster.replace([row(deviceId="d1")], local_device_id=LOCAL)
+    assert remote_roster.list_devices() == [
+        {"deviceId": "d1", "deviceName": "", "paneCount": 1}
+    ]
+
+
+def test_this_machine_is_not_offered_as_a_remote_source():
+    remote_roster.replace(
+        [row(sessionId="s1", deviceId=LOCAL), row(sessionId="s2", deviceId=FAR)],
+        local_device_id=LOCAL,
+    )
+    assert [device["deviceId"] for device in remote_roster.list_devices()] == [FAR]

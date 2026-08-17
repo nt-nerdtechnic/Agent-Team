@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from agent_team_backend import agent_messaging, app, server_link
+from agent_team_backend import agent_messaging, app, remote_roster, server_link
 from agent_team_backend.credential_vault import CredentialVault, CredentialVaultError
 from agent_team_backend.server_link import ServerLink, ServerLinkConfig
 
@@ -123,6 +123,18 @@ def default_responder(conn: "FakeConnection", message: dict) -> dict | None:
                 "updatedAt": 0,
             },
         )
+    if kind == "policy.set":
+        conn.policy_sets.append(payload)
+        conn.server.policy = payload.get("policy")
+        conn.server.policy_revision += 1
+        return _ok(
+            message,
+            {
+                "deviceId": payload.get("deviceId"),
+                "revision": conn.server.policy_revision,
+                "updatedAt": 0,
+            },
+        )
     if kind == "messages.send":
         conn.sends.append(payload)
         return _ok(message, {"msgKey": payload.get("msgKey"), "state": "pending"})
@@ -163,6 +175,7 @@ class FakeConnection:
         self.removes: list[dict] = []
         self.directories: list[dict] = []
         self.policy_gets: list[dict] = []
+        self.policy_sets: list[dict] = []
         self.sends: list[dict] = []
         self.acks: list[dict] = []
         self.closed = False
@@ -806,6 +819,123 @@ async def test_the_policy_is_fetched_once_and_refetched_only_on_a_new_revision(b
         await link.stop()
 
 
+# ---- writing the policy (the Settings editor) --------------------------------
+
+
+def _allow_own_devices(member_id: str = "m1") -> dict:
+    return {
+        "version": 1,
+        "default": "deny",
+        "rules": [
+            {
+                "from": {"memberId": member_id, "deviceId": "*"},
+                "to": {"workspace": "*", "paneName": "*"},
+                "action": "allow",
+            }
+        ],
+    }
+
+
+async def test_writing_the_policy_publishes_it_and_adopts_the_new_revision():
+    server = FakeServer()
+    link = await _connected(server)
+    try:
+        conn = server.opened[0]
+        await _until(lambda: bool(conn.policy_gets))
+        document = _allow_own_devices()
+
+        reply = await link.set_policy(document)
+
+        assert reply["ok"] is True
+        assert conn.policy_sets[0]["deviceId"] == link._device_id
+        assert conn.policy_sets[0]["policy"] == document
+        # Adopted locally, so the editor re-reading right after the save is not
+        # shown the policy it just replaced.
+        assert link.policy_snapshot() == {"policy": document, "revision": 2}
+        # And the push that follows the write is a no-op, since the cache is
+        # already at that revision.
+        await conn.push({"type": "policy.changed", "payload": {"revision": 2}})
+        await asyncio.sleep(0.05)
+        assert len(conn.policy_gets) == 1
+    finally:
+        await link.stop()
+
+
+async def test_a_write_the_server_does_not_number_is_re_read_rather_than_guessed():
+    def unnumbered(conn: FakeConnection, message: dict) -> dict | None:
+        if message.get("type") == "policy.set":
+            conn.policy_sets.append(message.get("payload") or {})
+            conn.server.policy = (message.get("payload") or {}).get("policy")
+            conn.server.policy_revision += 1
+            return _ok(message, {"deviceId": "d1"})
+        return default_responder(conn, message)
+
+    server = FakeServer(responder=unnumbered)
+    link = await _connected(server)
+    try:
+        conn = server.opened[0]
+        await _until(lambda: bool(conn.policy_gets))
+
+        assert (await link.set_policy(_allow_own_devices()))["ok"] is True
+
+        assert len(conn.policy_gets) == 2
+        assert link.policy_snapshot()["revision"] == 2
+    finally:
+        await link.stop()
+
+
+async def test_a_disconnected_link_refuses_the_write_instead_of_dropping_it():
+    """The policy lives on the server, so an offline editor must be told the
+    rule was not saved rather than shown it in a list that will vanish."""
+    server = FakeServer()
+    link = await _connected(server)
+    try:
+        await server.opened[0].close()
+        await _until(lambda: link._ws is None)
+
+        reply = await link.set_policy(_allow_own_devices())
+
+        assert reply["ok"] is False
+        assert reply["error"]["code"] == server_link.LINK_OFFLINE
+    finally:
+        await link.stop()
+
+
+async def test_the_editor_reads_the_cached_policy_while_the_link_is_down(monkeypatch):
+    server = FakeServer(policy=ALLOW_ALL_POLICY)
+    link = await _connected(server)
+    monkeypatch.setattr(server_link, "_link", link)
+    try:
+        await _until(lambda: link._policy_revision == 1)
+        assert (await server_link.policy_state())["editable"] is True
+
+        await server.opened[0].close()
+        await _until(lambda: link._ws is None)
+
+        state = await server_link.policy_state()
+        # Readable, and honest about not being writable.
+        assert state["policy"] == ALLOW_ALL_POLICY
+        assert state["revision"] == 1
+        assert state["editable"] is False
+        assert state["memberId"] == "m1"
+    finally:
+        await link.stop()
+
+
+async def test_with_no_server_there_is_no_policy_to_read_or_write(monkeypatch):
+    monkeypatch.setattr(server_link, "_link", None)
+    state = await server_link.policy_state()
+    assert state == {
+        "state": server_link.STATE_UNCONFIGURED,
+        "editable": False,
+        "policy": None,
+        "revision": None,
+        "deviceId": "",
+        "memberId": "",
+    }
+    assert await server_link.set_policy(_allow_own_devices()) is None
+
+
 async def test_a_stale_pane_id_hint_is_re_resolved_and_the_new_id_acked(broadcasts):
     """A detach or reattach mints a new pane id, so the sender's cached hint
     goes stale; (workspace, paneName) is the stable identity."""
@@ -1329,3 +1459,115 @@ async def test_configure_handler_rejects_a_non_string_url():
     reply = session.websocket.sent[0]
     assert reply["ok"] is False
     assert reply["error"]["code"] == "BAD_REQUEST"
+
+
+# ---- the policy editor's handlers -------------------------------------------
+
+
+async def test_policy_get_answers_with_no_server_configured():
+    """The whole section is hidden for a machine with no server, so this answer
+    is what tells the UI to hide it — it must never fail or block."""
+    session = _ws_session()
+    await app.handle_message(session, {"id": "g1", "type": "p2p.policy.get", "payload": {}})
+    payload = session.websocket.sent[0]["payload"]
+    assert payload["state"] == server_link.STATE_UNCONFIGURED
+    assert payload["editable"] is False
+    assert payload["policy"] is None
+    assert payload["devices"] == []
+
+
+async def test_policy_get_and_set_round_trip_through_the_handlers(module_link):
+    state, server = module_link
+    state["config"] = CONFIG
+    await server_link.start()
+    try:
+        await _until(lambda: bool(server.opened and server.opened[0].syncs))
+        remote_roster.replace(
+            [
+                {
+                    "sessionId": "s1",
+                    "deviceId": "far-1",
+                    "deviceName": "Laptop",
+                    "workspace": "proj",
+                    "title": "reviewer",
+                    "status": "waiting",
+                    "hostOnline": True,
+                }
+            ],
+            local_device_id="local",
+        )
+
+        session = _ws_session()
+        await app.handle_message(session, {"id": "g1", "type": "p2p.policy.get", "payload": {}})
+        before = session.websocket.sent[0]["payload"]
+        assert before["editable"] is True
+        assert before["memberId"] == "m1"
+        # The picker's device list rides along with the policy.
+        assert before["devices"] == [
+            {"deviceId": "far-1", "deviceName": "Laptop", "paneCount": 1}
+        ]
+
+        document = _allow_own_devices()
+        await app.handle_message(
+            session,
+            {"id": "s1", "type": "p2p.policy.set", "payload": {"policy": document}},
+        )
+        reply = session.websocket.sent[1]
+        assert reply["ok"] is True
+        # The write answers with the state the editor should now show, so no
+        # second round trip can show it the policy it just replaced.
+        assert reply["payload"]["policy"] == document
+        assert reply["payload"]["revision"] == 2
+        assert server.opened[0].policy_sets[0]["policy"] == document
+    finally:
+        await server_link.stop()
+        remote_roster._reset_for_test()
+
+
+async def test_a_policy_this_build_would_not_honour_never_reaches_the_server(module_link):
+    state, server = module_link
+    state["config"] = CONFIG
+    await server_link.start()
+    try:
+        await _until(lambda: bool(server.opened and server.opened[0].syncs))
+        session = _ws_session()
+
+        await app.handle_message(
+            session,
+            {
+                "id": "s1",
+                "type": "p2p.policy.set",
+                # An empty deviceId is exactly what a rule the delivery path
+                # would silently skip looks like.
+                "payload": {
+                    "policy": {
+                        "version": 1,
+                        "default": "deny",
+                        "rules": [
+                            {
+                                "from": {"memberId": "m1", "deviceId": ""},
+                                "to": {"workspace": "*", "paneName": "*"},
+                                "action": "allow",
+                            }
+                        ],
+                    }
+                },
+            },
+        )
+        reply = session.websocket.sent[0]
+        assert reply["ok"] is False
+        assert reply["error"]["code"] == "BAD_REQUEST"
+        assert server.opened[0].policy_sets == []
+    finally:
+        await server_link.stop()
+
+
+async def test_writing_a_policy_with_no_server_says_so_instead_of_failing_silently():
+    session = _ws_session()
+    await app.handle_message(
+        session,
+        {"id": "s1", "type": "p2p.policy.set", "payload": {"policy": _allow_own_devices()}},
+    )
+    reply = session.websocket.sent[0]
+    assert reply["ok"] is False
+    assert reply["error"]["code"] == "P2P_NOT_CONFIGURED"

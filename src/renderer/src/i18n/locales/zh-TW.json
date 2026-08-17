@@ -865,7 +865,29 @@
       "state-connecting": "連線中…",
       "state-connected": "已連線",
       "state-unreachable": "無法連上伺服器",
-      "state-unauthorized": "存取權杖遭拒"
+      "state-unauthorized": "存取權杖遭拒",
+      "policy": {
+        "title": "誰可以對這台機器上的 pane 下指令",
+        "hint": "只作用於從其他裝置送進來的訊息。這台機器上的 agent 互相傳訊完全不受影響。",
+        "default-deny": "預設一律不允許：從其他裝置來的訊息，除非符合下面某條規則，否則會被拒收，發送端會收到「已拒絕」。",
+        "readonly": "這些規則存在伺服器上，只有在連線狀態才能修改。以下顯示的是這台機器最後收到的政策。",
+        "own-devices": "允許我自己的其他裝置",
+        "own-devices-hint": "任何以同一個帳號登入的裝置，都可以對這裡的任何 pane 傳訊。日後新增的裝置也自動涵蓋，不必再改規則。",
+        "rules": "規則",
+        "empty": "沒有任何規則 — 從其他裝置來的訊息一律拒收。",
+        "add-title": "新增規則",
+        "add": "新增規則",
+        "remove": "移除",
+        "source-member": "來源帳號",
+        "source-device": "來源裝置",
+        "target-workspace": "目標工作區",
+        "target-pane": "目標 pane",
+        "blank-is-any": "留空代表不限",
+        "my-account": "我的帳號",
+        "any-member": "任何帳號",
+        "any-device": "任何裝置",
+        "any": "不限"
+      }
     },
     "storage": {
       "intro": "本 app、CLI agent 家目錄，以及你開過的工作區所佔用的磁碟空間。",
