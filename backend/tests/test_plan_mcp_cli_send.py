@@ -1105,7 +1105,9 @@ async def test_send_waits_for_the_delivery_and_reports_it(
             await asyncio.sleep(0.001)
 
     task = asyncio.create_task(deliver_shortly())
+    started = time.monotonic()
     result = await plan_mcp.cli_send("beta/reviewer", "hi", _ctx(), wait_for_delivery_s=5.0)
+    elapsed = time.monotonic() - started
     await task
 
     assert result["ok"] is True
@@ -1113,6 +1115,10 @@ async def test_send_waits_for_the_delivery_and_reports_it(
     assert result["msg_key"] == keys[0]
     assert isinstance(result["settled_after_s"], float)
     assert "hold" not in result
+    # It must come back ON the report, not by outliving the timeout. Without
+    # this the same assertions pass with the wake-up wiring entirely dead —
+    # five seconds later, and the caller's turn paid for every one of them.
+    assert elapsed < 2.0
 
 
 @pytest.mark.asyncio
@@ -1269,6 +1275,11 @@ async def test_delivery_clears_the_hold(captured: list[dict[str, Any]]) -> None:
     assert result["status"] == "delivered"
     assert "hold" not in result
     assert "held_for_s" not in result
+    # The stored entry, not only the answer. Every reader guards on status as
+    # well, so without this the clearing itself is invisible to the suite — and
+    # the next reader that forgets the guard would surface a stale hold.
+    assert plan_mcp._mcp_message_status[sent["msg_key"]]["hold"] is None
+    assert plan_mcp._mcp_message_status[sent["msg_key"]]["hold_since"] is None
 
 
 @pytest.mark.asyncio

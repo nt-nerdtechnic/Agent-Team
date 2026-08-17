@@ -86,10 +86,7 @@ describe('useAgentMessaging — hold reporting', () => {
     expect(holds.map((h) => h.hold?.key)).toEqual(['typing', 'mid-turn', 'settling'])
   })
 
-  it('ignores a changing queue position, which explains nothing', () => {
-    // Three messages for the same held pane: the two behind the head go from
-    // `behind n=1` / `n=2` to `n=1` as the queue drains, and neither move says
-    // anything about why the head is stuck.
+  it('says nothing when a re-annotation changes nothing', () => {
     accept('mcp:1')
     accept('mcp:2')
     accept('mcp:3')
@@ -98,6 +95,24 @@ describe('useAgentMessaging — hold reporting', () => {
     m.pump()
 
     expect(holds).toEqual([])
+  })
+
+  it('ignores a queue position moving up, which explains nothing new', () => {
+    // The one case the key-only guard is for. Withdraw the head and the queue
+    // shuffles: the new head's reason genuinely changed (`behind` → whatever is
+    // holding the pane), but the message behind it only went from third to
+    // second — same reason, new number, and nothing an MCP caller can act on.
+    accept('mcp:1', 'first')
+    accept('mcp:2', 'second')
+    accept('mcp:3', 'third')
+    m.pump()
+    holds = []
+
+    const first = m.messages.value.find((x) => x.content === 'first')
+    expect(first && m.cancelMessage(first.id)).toBe(true)
+    m.pump()
+
+    expect(holds).toEqual([{ msgKey: 'mcp:2', hold: { key: 'typing' } }])
   })
 
   it('reports the hold clearing when the pane frees up', async () => {
