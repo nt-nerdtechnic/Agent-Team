@@ -2,6 +2,7 @@ const PROTOCOL_REVISION = '2026-07-28'
 const SERVER_INFO_KEY = 'io.modelcontextprotocol/serverInfo'
 
 const pendingDelays = new Map()
+const subscriptions = new Map()
 let cancelledCount = 0
 let input = Buffer.alloc(0)
 
@@ -24,6 +25,10 @@ function isClientMeta(value) {
   return isRecord(value) &&
     value['io.modelcontextprotocol/protocolVersion'] === PROTOCOL_REVISION &&
     isRecord(value['io.modelcontextprotocol/clientCapabilities'])
+}
+
+function isEventName(value) {
+  return typeof value === 'string' && /^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)*$/.test(value)
 }
 
 function isRuntime(value) {
@@ -158,10 +163,66 @@ function isCallRequest(frame) {
     isRuntime(frame.params.runtime)
 }
 
+function isListenRequest(frame) {
+  return exactKeys(frame, ['jsonrpc', 'id', 'method', 'params']) &&
+    frame.jsonrpc === '2.0' &&
+    isRequestId(frame.id) &&
+    frame.method === 'subscriptions/listen' &&
+    exactKeys(frame.params, ['_meta', 'notifications', 'runtime']) &&
+    isClientMeta(frame.params._meta) &&
+    exactKeys(frame.params.notifications, ['dev.navide/pluginEvents']) &&
+    Array.isArray(frame.params.notifications['dev.navide/pluginEvents']) &&
+    frame.params.notifications['dev.navide/pluginEvents'].length > 0 &&
+    new Set(frame.params.notifications['dev.navide/pluginEvents']).size ===
+      frame.params.notifications['dev.navide/pluginEvents'].length &&
+    frame.params.notifications['dev.navide/pluginEvents'].every(isEventName) &&
+    isRuntime(frame.params.runtime)
+}
+
+function acknowledgeSubscription(id, events) {
+  writeFrame({
+    jsonrpc: '2.0',
+    method: 'notifications/subscriptions/acknowledged',
+    params: {
+      _meta: { 'io.modelcontextprotocol/subscriptionId': id },
+      notifications: { 'dev.navide/pluginEvents': events },
+    },
+  })
+}
+
+function emitSubscriptionEvent(id, event, payload) {
+  writeFrame({
+    jsonrpc: '2.0',
+    method: 'notifications/navide/event',
+    params: {
+      _meta: { 'io.modelcontextprotocol/subscriptionId': id },
+      event,
+      payload,
+    },
+  })
+}
+
+function closeSubscription(id) {
+  writeFrame({
+    jsonrpc: '2.0',
+    id,
+    result: {
+      resultType: 'complete',
+      _meta: {
+        [SERVER_INFO_KEY]: { name: 'fixture.backend', version: '1.0.0' },
+        'io.modelcontextprotocol/subscriptionId': id,
+      },
+    },
+  })
+}
+
 function handle(frame) {
   if (frame?.jsonrpc === '2.0' && frame.method === 'notifications/cancelled') {
     if (!exactKeys(frame, ['jsonrpc', 'method', 'params']) ||
-      !exactKeys(frame.params, ['requestId']) ||
+      !isRecord(frame.params) ||
+      !Object.keys(frame.params).every((key) => key === 'requestId' || key === 'reason') ||
+      !Object.prototype.hasOwnProperty.call(frame.params, 'requestId') ||
+      (frame.params.reason !== undefined && typeof frame.params.reason !== 'string') ||
       !isRequestId(frame.params.requestId)) {
       writeProtocolError(undefined)
       return
@@ -172,10 +233,21 @@ function handle(frame) {
       pendingDelays.delete(String(frame.params.requestId))
       cancelledCount += 1
     }
+    const subscription = subscriptions.get(String(frame.params.requestId))
+    if (
+      subscription &&
+      process.env.NAVIDE_FIXTURE_LATE_ACK_AFTER_CANCEL === '1' &&
+      !subscription.acknowledged
+    ) {
+      acknowledgeSubscription(subscription.id, subscription.events)
+      emitSubscriptionEvent(subscription.id, subscription.events[0], { afterCancel: true })
+      closeSubscription(subscription.id)
+    }
+    if (subscriptions.delete(String(frame.params.requestId))) cancelledCount += 1
     return
   }
 
-  if (!isHealthRequest(frame) && !isCallRequest(frame)) {
+  if (!isHealthRequest(frame) && !isCallRequest(frame) && !isListenRequest(frame)) {
     writeProtocolError(frame?.id)
     return
   }
@@ -187,6 +259,19 @@ function handle(frame) {
       requestIdIsNonNull: frame.id !== null,
       clientCapabilities: frame.params._meta['io.modelcontextprotocol/clientCapabilities'],
     })
+    return
+  }
+
+  if (frame.method === 'subscriptions/listen') {
+    const id = String(frame.id)
+    const events = frame.params.notifications['dev.navide/pluginEvents']
+    subscriptions.set(id, { id: frame.id, events, acknowledged: false })
+    if (process.env.NAVIDE_FIXTURE_LATE_ACK_AFTER_CANCEL === '1') return
+    if (process.env.NAVIDE_FIXTURE_EVENT_BEFORE_ACK === '1') {
+      emitSubscriptionEvent(frame.id, events[0], { beforeAck: true })
+    }
+    acknowledgeSubscription(frame.id, events)
+    subscriptions.get(id).acknowledged = true
     return
   }
 
@@ -228,6 +313,75 @@ function handle(frame) {
   }
   if (name === 'fixture.cancelcount') {
     response(frame.id, cancelledCount)
+    return
+  }
+  if (name === 'fixture.emit') {
+    const requestedId = isRecord(args) ? args.subscriptionId : undefined
+    const subscription = isRequestId(requestedId)
+      ? subscriptions.get(String(requestedId))
+      : subscriptions.values().next().value
+    if (!subscription || !isRecord(args) || !isEventName(args.event) || !isJsonPayload(args.payload)) {
+      writeProtocolError(frame.id)
+      return
+    }
+    emitSubscriptionEvent(subscription.id, args.event, args.payload)
+    response(frame.id, { ok: true })
+    return
+  }
+  if (name === 'fixture.forgedevent') {
+    const subscriptionId = isRecord(args) && isRequestId(args.subscriptionId)
+      ? args.subscriptionId
+      : 'forged-subscription'
+    emitSubscriptionEvent(subscriptionId, 'fixture.changed', { forged: true })
+    response(frame.id, { ok: true })
+    return
+  }
+  if (name === 'fixture.duplicateevent') {
+    const subscription = subscriptions.values().next().value
+    const subscriptionId = JSON.stringify(subscription?.id ?? 'forged-subscription')
+    process.stdout.write(
+      `{"jsonrpc":"2.0","method":"notifications/navide/event","params":{"_meta":{"io.modelcontextprotocol/subscriptionId":${subscriptionId},"io.modelcontextprotocol/subscriptionId":${subscriptionId}},"event":"fixture.changed","payload":{}}}\n`
+    )
+    return
+  }
+  if (name === 'fixture.unknownnotification') {
+    writeFrame({ jsonrpc: '2.0', method: 'notifications/unknown', params: {} })
+    return
+  }
+  if (name === 'fixture.progress') {
+    const requestedId = isRecord(args) ? args.subscriptionId : undefined
+    const subscription = isRequestId(requestedId)
+      ? subscriptions.get(String(requestedId))
+      : subscriptions.values().next().value
+    if (!subscription) {
+      writeProtocolError(frame.id)
+      return
+    }
+    writeFrame({
+      jsonrpc: '2.0',
+      method: 'notifications/progress',
+      params: {
+        progressToken: subscription.id,
+        progress: 1,
+        total: 2,
+        message: 'fixture progress',
+      },
+    })
+    response(frame.id, { ok: true })
+    return
+  }
+  if (name === 'fixture.close') {
+    const requestedId = isRecord(args) ? args.subscriptionId : undefined
+    const subscription = isRequestId(requestedId)
+      ? subscriptions.get(String(requestedId))
+      : subscriptions.values().next().value
+    if (!subscription) {
+      writeProtocolError(frame.id)
+      return
+    }
+    subscriptions.delete(String(subscription.id))
+    closeSubscription(subscription.id)
+    response(frame.id, { ok: true })
     return
   }
   if (name === 'fixture.lateresponse') {
@@ -293,6 +447,14 @@ function handle(frame) {
     id: frame.id,
     error: { code: -32601, message: 'Method not found' },
   })
+}
+
+function isJsonPayload(value) {
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') return true
+  if (typeof value === 'number') return Number.isFinite(value)
+  if (Array.isArray(value)) return value.every(isJsonPayload)
+  if (!isRecord(value)) return false
+  return Object.values(value).every(isJsonPayload)
 }
 
 function failClosed() {

@@ -2,16 +2,15 @@ import { randomUUID } from 'node:crypto'
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptions } from 'node:child_process'
 import { TextDecoder } from 'node:util'
 
-/**
- * Private Electron-main seam for the unary subset of Backend Wire v1.
- * Catalog activation, subscriptions, events, and restart policy belong to
- * later runtime issues; this module owns one child and one in-flight call map.
- */
+/** Private Electron-main seam for Backend Wire v1 conformance tests. */
 export const MCP_PROTOCOL_REVISION = '2026-07-28'
 const SERVER_INFO_KEY = 'io.modelcontextprotocol/serverInfo'
+const SUBSCRIPTION_ID_KEY = 'io.modelcontextprotocol/subscriptionId'
+const EVENT_FILTER_KEY = 'dev.navide/pluginEvents'
 const PROTOCOL_ERROR_MESSAGE = 'Backend plugin returned an invalid protocol message.'
 const ENVIRONMENT_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u
 const MAX_IGNORED_REQUEST_IDS = 256
+const MAX_ACTIVE_SUBSCRIPTIONS = 256
 
 export type JsonValue =
   | null
@@ -36,12 +35,17 @@ export interface BackendPluginLaunchSpec {
   entryFile: string
   protocolVersion: 1
   activation: 'startup'
+  /** Host-projected package event allowlist; never supplied by the child. */
+  approvedEvents: readonly string[]
 }
 
 const AUTHENTICATED_RUNTIME = Symbol('navide.authenticatedBackendRuntime')
+const AUTHENTICATED_AUDIENCE = Symbol('navide.authenticatedBackendAudience')
+const AUTHENTICATED_RUNTIMES = new WeakSet<object>()
 
 export type AuthenticatedBackendRuntime = BackendRuntimeContext & {
   readonly [AUTHENTICATED_RUNTIME]: true
+  readonly [AUTHENTICATED_AUDIENCE]: object
 }
 
 export type BackendPluginErrorCode =
@@ -81,6 +85,7 @@ export class BackendPluginError extends Error {
   ) {
     super(message)
     this.name = 'BackendPluginError'
+    this.stack = undefined
     this.code = code
     this.requestId = options.requestId
     this.pluginCode = options.pluginCode
@@ -94,12 +99,57 @@ export interface BackendPluginCallOptions {
   timeoutMs?: number
 }
 
+export interface BackendPluginEvent {
+  subscriptionId: WireRequestId
+  event: string
+  payload: JsonValue
+}
+
+export interface BackendPluginProgress {
+  progressToken: WireRequestId
+  progress: number
+  total?: number
+  message?: string
+}
+
+export interface BackendPluginSubscriptionOptions {
+  signal?: AbortSignal
+  timeoutMs?: number
+  onProgress?: (progress: BackendPluginProgress) => void
+}
+
+export type BackendPluginSubscriptionCloseReason =
+  | 'backend-closed'
+  | 'backend-unavailable'
+  | 'cancelled'
+  | 'view-destroyed'
+  | 'plugin-stopping'
+  | 'protocol-error'
+  | 'timeout'
+
+export interface BackendPluginSubscriptionResult {
+  reason: BackendPluginSubscriptionCloseReason
+  error?: BackendPluginError
+}
+
+export interface BackendPluginSubscription {
+  readonly subscriptionId: WireRequestId | undefined
+  readonly acknowledged: Promise<void>
+  readonly settled: Promise<BackendPluginSubscriptionResult>
+  dispose(reason?: 'cancelled' | 'view-destroyed'): void
+}
+
 export interface PluginBackendClient {
   call<Result extends JsonValue>(
     name: string,
     args: JsonValue,
     options?: BackendPluginCallOptions
   ): Promise<Result>
+  subscribe(
+    events: readonly string[],
+    listener: (event: BackendPluginEvent) => void,
+    options?: BackendPluginSubscriptionOptions
+  ): BackendPluginSubscription
 }
 
 export interface BackendServerInfo {
@@ -133,8 +183,9 @@ interface PendingRequest {
 interface SuccessResponse {
   kind: 'success'
   id: WireRequestId
-  value: JsonValue
+  value?: JsonValue
   serverInfo: BackendServerInfo
+  subscriptionId?: WireRequestId
 }
 
 interface PluginErrorResponse {
@@ -145,12 +196,63 @@ interface PluginErrorResponse {
 
 interface ProtocolErrorResponse {
   kind: 'protocol-error'
-  id: WireRequestId
+  id?: WireRequestId
 }
 
 type BackendWireResponse = SuccessResponse | PluginErrorResponse | ProtocolErrorResponse
 
-type SupervisorState = 'idle' | 'starting' | 'ready' | 'failed' | 'closed'
+interface SubscriptionAcknowledgedNotification {
+  kind: 'subscription-acknowledged'
+  subscriptionId: WireRequestId
+  events: readonly string[]
+}
+
+interface EventNotification {
+  kind: 'event'
+  subscriptionId: WireRequestId
+  event: string
+  payload: JsonValue
+}
+
+interface ProgressNotification {
+  kind: 'progress'
+  progressToken: WireRequestId
+  progress: number
+  total?: number
+  message?: string
+}
+
+type BackendWireNotification =
+  | SubscriptionAcknowledgedNotification
+  | EventNotification
+  | ProgressNotification
+
+type SubscriptionPhase = 'pending-ack' | 'active' | 'reconnecting' | 'settled'
+
+interface SubscriptionState {
+  readonly events: readonly string[]
+  readonly runtime: BackendRuntimeContext
+  readonly binding: AuthenticatedBackendRuntime
+  readonly listener: (event: BackendPluginEvent) => void
+  readonly onProgress?: (progress: BackendPluginProgress) => void
+  readonly signal?: AbortSignal
+  readonly acknowledged: Promise<void>
+  readonly resolveAcknowledged: () => void
+  readonly rejectAcknowledged: (error: BackendPluginError) => void
+  readonly settled: Promise<BackendPluginSubscriptionResult>
+  readonly resolveSettled: (result: BackendPluginSubscriptionResult) => void
+  publicSubscription: BackendPluginSubscription
+  readonly timeoutAt?: number
+  timeoutTimer?: ReturnType<typeof setTimeout>
+  abortListener?: () => void
+  phase: SubscriptionPhase
+  requestId?: WireRequestId
+  progressToken?: WireRequestId
+  settledOnce: boolean
+  acknowledgedOnce: boolean
+}
+
+type SupervisorState = 'idle' | 'starting' | 'ready' | 'restarting' | 'failed' | 'closed'
 
 class JsonScanner {
   private index = 0
@@ -339,6 +441,10 @@ function hasExactKeys(value: unknown, keys: readonly string[]): value is { [key:
   )
 }
 
+function hasOnlyKeys(value: unknown, keys: readonly string[]): value is { [key: string]: unknown } {
+  return isRecord(value) && Object.keys(value).every((key) => keys.includes(key))
+}
+
 function isRequestId(value: unknown): value is WireRequestId {
   return (
     (typeof value === 'string' && value.length > 0) ||
@@ -406,24 +512,49 @@ function validateSuccessResponse(frame: { [key: string]: unknown }): SuccessResp
   if (!hasExactKeys(frame, ['jsonrpc', 'id', 'result']) || frame.jsonrpc !== '2.0') {
     throw new Error(PROTOCOL_ERROR_MESSAGE)
   }
-  if (!isRequestId(frame.id) || !hasExactKeys(frame.result, ['resultType', 'value', '_meta'])) {
+  if (!isRequestId(frame.id) || !isRecord(frame.result)) {
     throw new Error(PROTOCOL_ERROR_MESSAGE)
   }
-  if (frame.result.resultType !== 'complete' || !isJsonValue(frame.result.value)) {
+  if (
+    !hasOnlyKeys(frame.result, ['resultType', 'value', '_meta']) ||
+    !Object.prototype.hasOwnProperty.call(frame.result, 'resultType') ||
+    !Object.prototype.hasOwnProperty.call(frame.result, '_meta') ||
+    frame.result.resultType !== 'complete'
+  ) {
     throw new Error(PROTOCOL_ERROR_MESSAGE)
   }
+  const hasValue = Object.prototype.hasOwnProperty.call(frame.result, 'value')
+  if (hasValue && !isJsonValue(frame.result.value)) throw new Error(PROTOCOL_ERROR_MESSAGE)
   const meta = frame.result._meta
   if (!isRecord(meta)) throw new Error(PROTOCOL_ERROR_MESSAGE)
   const info = serverInfo(meta[SERVER_INFO_KEY])
   if (!info) throw new Error(PROTOCOL_ERROR_MESSAGE)
-  return { kind: 'success', id: frame.id, value: frame.result.value, serverInfo: info }
+  const subscriptionId = meta[SUBSCRIPTION_ID_KEY]
+  if (subscriptionId !== undefined && !isRequestId(subscriptionId)) {
+    throw new Error(PROTOCOL_ERROR_MESSAGE)
+  }
+  if (!hasValue && subscriptionId === undefined) throw new Error(PROTOCOL_ERROR_MESSAGE)
+  const value = frame.result.value
+  return {
+    kind: 'success',
+    id: frame.id,
+    ...(hasValue ? { value: value as JsonValue } : {}),
+    serverInfo: info,
+    ...(subscriptionId !== undefined ? { subscriptionId } : {}),
+  }
 }
 
 function validateErrorResponse(frame: { [key: string]: unknown }): BackendWireResponse {
-  if (!hasExactKeys(frame, ['jsonrpc', 'id', 'error']) || frame.jsonrpc !== '2.0') {
+  if (
+    !hasOnlyKeys(frame, ['jsonrpc', 'id', 'error']) ||
+    !Object.prototype.hasOwnProperty.call(frame, 'jsonrpc') ||
+    !Object.prototype.hasOwnProperty.call(frame, 'error') ||
+    frame.jsonrpc !== '2.0'
+  ) {
     throw new Error(PROTOCOL_ERROR_MESSAGE)
   }
-  if (!isRequestId(frame.id) || !isRecord(frame.error)) {
+  const hasId = Object.prototype.hasOwnProperty.call(frame, 'id')
+  if ((hasId && !isRequestId(frame.id)) || !isRecord(frame.error)) {
     throw new Error(PROTOCOL_ERROR_MESSAGE)
   }
   const errorKeys = Object.keys(frame.error)
@@ -445,15 +576,19 @@ function validateErrorResponse(frame: { [key: string]: unknown }): BackendWireRe
   }
   if (frame.error.code === 1000) {
     if (
+      !hasId ||
       !isRecord(frame.error.data) ||
       typeof frame.error.data.code !== 'string' ||
       !/^[A-Z][A-Z0-9_]*$/u.test(frame.error.data.code)
     ) {
       throw new Error(PROTOCOL_ERROR_MESSAGE)
     }
-    return { kind: 'plugin-error', id: frame.id, pluginCode: frame.error.data.code }
+    return { kind: 'plugin-error', id: frame.id as WireRequestId, pluginCode: frame.error.data.code }
   }
-  return { kind: 'protocol-error', id: frame.id }
+  return {
+    kind: 'protocol-error',
+    ...(hasId ? { id: frame.id as WireRequestId } : {}),
+  }
 }
 
 function validateResponse(frame: JsonValue): BackendWireResponse {
@@ -461,6 +596,83 @@ function validateResponse(frame: JsonValue): BackendWireResponse {
   if (Object.prototype.hasOwnProperty.call(frame, 'result')) return validateSuccessResponse(frame)
   if (Object.prototype.hasOwnProperty.call(frame, 'error')) return validateErrorResponse(frame)
   throw new Error(PROTOCOL_ERROR_MESSAGE)
+}
+
+function subscriptionMeta(value: unknown): WireRequestId {
+  if (!hasExactKeys(value, [SUBSCRIPTION_ID_KEY]) || !isRequestId(value[SUBSCRIPTION_ID_KEY])) {
+    throw new Error(PROTOCOL_ERROR_MESSAGE)
+  }
+  return value[SUBSCRIPTION_ID_KEY]
+}
+
+function eventFilter(value: unknown): readonly string[] {
+  if (!Array.isArray(value) || value.length === 0) throw new Error(PROTOCOL_ERROR_MESSAGE)
+  const events = value.map((event) => {
+    if (!isMethodName(event)) throw new Error(PROTOCOL_ERROR_MESSAGE)
+    return event
+  })
+  if (new Set(events).size !== events.length) throw new Error(PROTOCOL_ERROR_MESSAGE)
+  return events
+}
+
+function validateNotification(frame: JsonValue): BackendWireNotification {
+  if (!isRecord(frame) || !hasExactKeys(frame, ['jsonrpc', 'method', 'params']) || frame.jsonrpc !== '2.0') {
+    throw new Error(PROTOCOL_ERROR_MESSAGE)
+  }
+  if (frame.method === 'notifications/subscriptions/acknowledged') {
+    if (!hasExactKeys(frame.params, ['_meta', 'notifications'])) {
+      throw new Error(PROTOCOL_ERROR_MESSAGE)
+    }
+    const notifications = frame.params.notifications
+    if (!hasExactKeys(notifications, [EVENT_FILTER_KEY])) {
+      throw new Error(PROTOCOL_ERROR_MESSAGE)
+    }
+    return {
+      kind: 'subscription-acknowledged',
+      subscriptionId: subscriptionMeta(frame.params._meta),
+      events: eventFilter(notifications[EVENT_FILTER_KEY]),
+    }
+  }
+  if (frame.method === 'notifications/navide/event') {
+    if (!hasExactKeys(frame.params, ['_meta', 'event', 'payload']) || !isMethodName(frame.params.event)) {
+      throw new Error(PROTOCOL_ERROR_MESSAGE)
+    }
+    if (!isJsonValue(frame.params.payload)) throw new Error(PROTOCOL_ERROR_MESSAGE)
+    return {
+      kind: 'event',
+      subscriptionId: subscriptionMeta(frame.params._meta),
+      event: frame.params.event,
+      payload: frame.params.payload,
+    }
+  }
+  if (frame.method === 'notifications/progress') {
+    if (!hasOnlyKeys(frame.params, ['progressToken', 'progress', 'total', 'message'])) {
+      throw new Error(PROTOCOL_ERROR_MESSAGE)
+    }
+    if (
+      !isRecord(frame.params) ||
+      !isRequestId(frame.params.progressToken) ||
+      typeof frame.params.progress !== 'number' ||
+      !Number.isFinite(frame.params.progress) ||
+      (frame.params.total !== undefined &&
+        (typeof frame.params.total !== 'number' || !Number.isFinite(frame.params.total))) ||
+      (frame.params.message !== undefined && typeof frame.params.message !== 'string')
+    ) {
+      throw new Error(PROTOCOL_ERROR_MESSAGE)
+    }
+    return {
+      kind: 'progress',
+      progressToken: frame.params.progressToken,
+      progress: frame.params.progress,
+      ...(frame.params.total !== undefined ? { total: frame.params.total } : {}),
+      ...(frame.params.message !== undefined ? { message: frame.params.message } : {}),
+    }
+  }
+  throw new Error(PROTOCOL_ERROR_MESSAGE)
+}
+
+function sameEventFilter(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((event) => right.includes(event))
 }
 
 function encodeFrame(frame: JsonValue): Buffer {
@@ -508,12 +720,20 @@ export function createAuthenticatedBackendRuntime(
     writable: false,
     configurable: false,
   })
+  Object.defineProperty(copy, AUTHENTICATED_AUDIENCE, {
+    value: Object.freeze({}),
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  })
+  AUTHENTICATED_RUNTIMES.add(copy)
   return Object.freeze(copy) as AuthenticatedBackendRuntime
 }
 
 export class PluginBackendSupervisor {
   private readonly spawnProcess: NonNullable<PluginBackendSupervisorOptions['spawnProcess']>
   private readonly environment: Readonly<Record<string, string>>
+  private readonly approvedEvents: readonly string[]
   private readonly clientCapabilities: { [key: string]: JsonValue }
   private readonly clientInfo?: { name: string; version: string }
   private readonly healthTimeoutMs: number
@@ -526,16 +746,21 @@ export class PluginBackendSupervisor {
   private childExited = false
   private stdoutBuffer = Buffer.alloc(0)
   private readonly pending = new Map<WireRequestId, PendingRequest>()
+  private readonly subscriptions = new Set<SubscriptionState>()
+  private readonly subscriptionsByRequestId = new Map<WireRequestId, SubscriptionState>()
+  private readonly subscriptionsByProgressToken = new Map<WireRequestId, SubscriptionState>()
   private readonly ignoredRequestIds = new Set<WireRequestId>()
   private startTask?: Promise<BackendHealth>
+  private restartTask?: Promise<BackendHealth>
   private health?: BackendHealth
   private failure?: BackendPluginError
   private exitPromise?: Promise<void>
   private resolveExit?: () => void
   private terminationTask?: Promise<void>
+  private readonly activation: BackendPluginLaunchSpec
 
   constructor(
-    private readonly activation: BackendPluginLaunchSpec,
+    activation: BackendPluginLaunchSpec,
     options: PluginBackendSupervisorOptions
   ) {
     if (
@@ -548,12 +773,18 @@ export class PluginBackendSupervisor {
       activation.entryFile.length === 0 ||
       activation.protocolVersion !== 1 ||
       activation.activation !== 'startup' ||
+      !isApprovedEventList(activation.approvedEvents) ||
       !options ||
       !isEnvironmentMap(options.environment)
     ) {
       throw new BackendPluginError('INVALID_ACTIVATION')
     }
+    this.activation = Object.freeze({
+      ...activation,
+      approvedEvents: Object.freeze([...activation.approvedEvents]),
+    })
     this.environment = Object.freeze({ ...options.environment })
+    this.approvedEvents = this.activation.approvedEvents
     this.spawnProcess = options.spawnProcess ?? defaultSpawnProcess
     this.clientCapabilities = options.clientCapabilities ?? {}
     this.clientInfo = options.clientInfo
@@ -583,6 +814,7 @@ export class PluginBackendSupervisor {
   async start(): Promise<BackendHealth> {
     if (this.state === 'ready' && this.health) return this.health
     if (this.state === 'starting' && this.startTask) return this.startTask
+    if (this.state === 'restarting' && this.restartTask) return this.restartTask
     if (this.state === 'failed') {
       throw this.failure ?? new BackendPluginError('BACKEND_UNAVAILABLE')
     }
@@ -614,18 +846,307 @@ export class PluginBackendSupervisor {
         args: JsonValue,
         options?: BackendPluginCallOptions
       ): Promise<Result> => this.callWithRuntime<Result>(runtime, name, args, options),
+      subscribe: (
+        events: readonly string[],
+        listener: (event: BackendPluginEvent) => void,
+        options?: BackendPluginSubscriptionOptions
+      ): BackendPluginSubscription => this.subscribeWithRuntime(binding, runtime, events, listener, options),
     })
+  }
+
+  async restart(): Promise<BackendHealth> {
+    if (this.state === 'closed') throw new BackendPluginError('PLUGIN_STOPPING')
+    if (this.state === 'idle' || this.state === 'starting') {
+      throw new BackendPluginError('NOT_READY')
+    }
+    if (this.state === 'restarting' && this.restartTask) return this.restartTask
+
+    this.restartTask = this.restartInternal()
+    try {
+      return await this.restartTask
+    } finally {
+      this.restartTask = undefined
+    }
   }
 
   async close(): Promise<void> {
     if (this.state === 'closed' && !this.child) return
     this.state = 'closed'
     this.rejectPending(new BackendPluginError('PLUGIN_STOPPING'))
+    this.settleAllSubscriptions({ reason: 'plugin-stopping', error: new BackendPluginError('PLUGIN_STOPPING') })
     this.ignoredRequestIds.clear()
     const child = this.child
     if (!child) return
     await this.requestTermination(false)
     this.child = undefined
+  }
+
+  private subscribeWithRuntime(
+    binding: AuthenticatedBackendRuntime,
+    runtime: BackendRuntimeContext,
+    events: readonly string[],
+    listener: (event: BackendPluginEvent) => void,
+    options: BackendPluginSubscriptionOptions = {}
+  ): BackendPluginSubscription {
+    if (this.state !== 'ready') {
+      throw this.failure ?? new BackendPluginError(this.state === 'closed' ? 'PLUGIN_STOPPING' : 'NOT_READY')
+    }
+    if (
+      !isRecord(options) ||
+      (options.signal !== undefined && !isAbortSignalLike(options.signal)) ||
+      (options.onProgress !== undefined && typeof options.onProgress !== 'function')
+    ) {
+      throw new BackendPluginError('INVALID_ARGUMENT')
+    }
+    if (!isViewRuntime(runtime) || !isAuthenticatedRuntime(binding) || !isRuntimeContext(binding)) {
+      throw new BackendPluginError('INVALID_RUNTIME')
+    }
+    if (
+      !isApprovedEventList(events) ||
+      events.length === 0 ||
+      events.some((event) => !this.approvedEvents.includes(event)) ||
+      typeof listener !== 'function' ||
+      (options.timeoutMs !== undefined && !isPositiveFiniteNumber(options.timeoutMs))
+    ) {
+      throw new BackendPluginError('INVALID_ARGUMENT')
+    }
+    if (this.subscriptions.size >= MAX_ACTIVE_SUBSCRIPTIONS) {
+      throw new BackendPluginError('INVALID_ARGUMENT')
+    }
+    if (options.signal?.aborted) {
+      throw new BackendPluginError('USER_CANCELLED')
+    }
+
+    let resolveAcknowledged!: () => void
+    let rejectAcknowledged!: (error: BackendPluginError) => void
+    const acknowledged = new Promise<void>((resolve, reject) => {
+      resolveAcknowledged = resolve
+      rejectAcknowledged = reject
+    })
+    let resolveSettled!: (result: BackendPluginSubscriptionResult) => void
+    const settled = new Promise<BackendPluginSubscriptionResult>((resolve) => {
+      resolveSettled = resolve
+    })
+    const timeoutAt = options.timeoutMs === undefined ? undefined : Date.now() + options.timeoutMs
+    const state = {
+      events: Object.freeze([...events]),
+      runtime: Object.freeze({ ...runtime }),
+      binding,
+      listener,
+      ...(options.onProgress ? { onProgress: options.onProgress } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
+      acknowledged,
+      resolveAcknowledged,
+      rejectAcknowledged,
+      settled,
+      resolveSettled,
+      publicSubscription: undefined as unknown as BackendPluginSubscription,
+      ...(timeoutAt !== undefined ? { timeoutAt } : {}),
+      phase: 'pending-ack' as SubscriptionPhase,
+      settledOnce: false,
+      acknowledgedOnce: false,
+    } as SubscriptionState
+    const publicSubscription: BackendPluginSubscription = {
+      get subscriptionId(): WireRequestId | undefined {
+        return state.requestId
+      },
+      acknowledged,
+      settled,
+      dispose: (reason = 'cancelled'): void => {
+        this.cancelSubscription(state, reason)
+      },
+    }
+    state.publicSubscription = publicSubscription
+    this.subscriptions.add(state)
+    if (options.timeoutMs !== undefined) {
+      state.timeoutTimer = setTimeout(() => this.timeoutSubscription(state), options.timeoutMs)
+    }
+    if (options.signal) {
+      state.abortListener = (): void => this.cancelSubscription(state, 'cancelled')
+      options.signal.addEventListener('abort', state.abortListener, { once: true })
+    }
+    this.issueSubscription(state)
+    return publicSubscription
+  }
+
+  private issueSubscription(state: SubscriptionState): void {
+    if (state.settledOnce || this.state !== 'ready') return
+    const requestId = this.nextRequestId()
+    state.requestId = requestId
+    state.progressToken = requestId
+    state.phase = 'pending-ack'
+    this.subscriptionsByRequestId.set(requestId, state)
+    this.subscriptionsByProgressToken.set(requestId, state)
+    try {
+      if (!this.child || this.childExited || this.child.stdin.destroyed || this.child.stdin.writableEnded) {
+        throw new Error('closed')
+      }
+      this.child.stdin.write(
+        encodeFrame({
+          jsonrpc: '2.0',
+          id: requestId,
+          method: 'subscriptions/listen',
+          params: {
+            _meta: this.clientMeta(requestId),
+            notifications: { [EVENT_FILTER_KEY]: [...state.events] },
+            runtime: { ...state.runtime },
+          },
+        })
+      )
+    } catch {
+      this.failProcess('BACKEND_UNAVAILABLE')
+    }
+  }
+
+  private timeoutSubscription(state: SubscriptionState): void {
+    if (state.settledOnce) return
+    this.cancelSubscription(state, 'cancelled', 'timeout')
+  }
+
+  private cancelSubscription(
+    state: SubscriptionState,
+    reason: 'cancelled' | 'view-destroyed',
+    timeout?: 'timeout'
+  ): void {
+    if (state.settledOnce) return
+    const requestId = state.requestId
+    const error = new BackendPluginError(
+      timeout === 'timeout' ? 'TIMEOUT' : 'USER_CANCELLED',
+      undefined,
+      requestId === undefined ? {} : { requestId }
+    )
+    this.settleSubscription(
+      state,
+      {
+        reason: timeout === 'timeout' ? 'timeout' : reason === 'view-destroyed' ? 'view-destroyed' : 'cancelled',
+        error,
+      },
+      true
+    )
+  }
+
+  private settleSubscription(
+    state: SubscriptionState,
+    result: BackendPluginSubscriptionResult,
+    sendCancellation: boolean
+  ): void {
+    if (state.settledOnce) return
+    state.settledOnce = true
+    state.phase = 'settled'
+    const requestId = state.requestId
+    if (requestId !== undefined) {
+      this.subscriptionsByRequestId.delete(requestId)
+      this.subscriptionsByProgressToken.delete(requestId)
+      if (sendCancellation) {
+        this.rememberIgnoredRequestId(requestId)
+        this.sendCancellation(requestId, result.reason)
+      }
+    }
+    if (state.timeoutTimer !== undefined) clearTimeout(state.timeoutTimer)
+    if (state.abortListener && state.signal) {
+      state.signal.removeEventListener('abort', state.abortListener)
+    }
+    state.abortListener = undefined
+    if (!state.acknowledgedOnce) {
+      state.acknowledgedOnce = true
+      state.rejectAcknowledged(
+        result.error ?? new BackendPluginError('BACKEND_UNAVAILABLE', undefined, requestId === undefined ? {} : { requestId })
+      )
+    }
+    this.subscriptions.delete(state)
+    state.resolveSettled(result)
+  }
+
+  private settleAllSubscriptions(result: BackendPluginSubscriptionResult): void {
+    for (const state of [...this.subscriptions]) {
+      this.settleSubscription(state, result, false)
+    }
+  }
+
+  private detachSubscriptionsForRestart(): void {
+    for (const state of [...this.subscriptions]) {
+      if (state.settledOnce) continue
+      if (state.timeoutAt !== undefined && state.timeoutAt <= Date.now()) {
+        this.cancelSubscription(state, 'cancelled', 'timeout')
+        continue
+      }
+      if (!this.isRestorableSubscription(state)) {
+        this.settleSubscription(
+          state,
+          { reason: 'backend-unavailable', error: new BackendPluginError('BACKEND_UNAVAILABLE') },
+          false
+        )
+        continue
+      }
+      if (state.requestId !== undefined) {
+        this.rememberIgnoredRequestId(state.requestId)
+        this.subscriptionsByRequestId.delete(state.requestId)
+        this.subscriptionsByProgressToken.delete(state.requestId)
+      }
+      state.requestId = undefined
+      state.progressToken = undefined
+      state.phase = 'reconnecting'
+    }
+  }
+
+  private restoreSubscriptions(): void {
+    for (const state of [...this.subscriptions]) {
+      if (state.settledOnce) continue
+      if (state.timeoutAt !== undefined && state.timeoutAt <= Date.now()) {
+        this.cancelSubscription(state, 'cancelled', 'timeout')
+        continue
+      }
+      if (!this.isRestorableSubscription(state)) {
+        this.settleSubscription(
+          state,
+          { reason: 'backend-unavailable', error: new BackendPluginError('BACKEND_UNAVAILABLE') },
+          false
+        )
+        continue
+      }
+      this.issueSubscription(state)
+    }
+  }
+
+  private isRestorableSubscription(state: SubscriptionState): boolean {
+    return (
+      isAuthenticatedRuntime(state.binding) &&
+      isRuntimeContext(state.binding) &&
+      state.binding.pluginId === this.activation.pluginId &&
+      state.binding.packageVersion === this.activation.packageVersion &&
+      isViewRuntime(state.runtime) &&
+      state.events.every((event) => this.approvedEvents.includes(event))
+    )
+  }
+
+  private async restartInternal(): Promise<BackendHealth> {
+    this.state = 'restarting'
+    this.rejectPending(new BackendPluginError('BACKEND_UNAVAILABLE'), true)
+    this.detachSubscriptionsForRestart()
+    await this.requestTermination(true)
+    if ((this.state as SupervisorState) === 'closed') {
+      throw new BackendPluginError('PLUGIN_STOPPING')
+    }
+    this.child = undefined
+    this.failure = undefined
+    this.state = 'starting'
+    this.startTask = this.startInternal()
+    try {
+      const health = await this.startTask
+      if ((this.state as SupervisorState) !== 'ready') {
+        throw this.failure ?? new BackendPluginError('BACKEND_UNAVAILABLE')
+      }
+      this.restoreSubscriptions()
+      return health
+    } catch (value) {
+      const error = value instanceof BackendPluginError
+        ? value
+        : new BackendPluginError('BACKEND_UNAVAILABLE')
+      this.settleAllSubscriptions({ reason: 'backend-unavailable', error })
+      throw error
+    } finally {
+      this.startTask = undefined
+    }
   }
 
   private async startInternal(): Promise<BackendHealth> {
@@ -673,6 +1194,7 @@ export class PluginBackendSupervisor {
     }
     this.childExited = false
     this.stdoutBuffer = Buffer.alloc(0)
+    this.terminationTask = undefined
     this.exitPromise = new Promise<void>((resolve) => {
       this.resolveExit = resolve
     })
@@ -710,7 +1232,7 @@ export class PluginBackendSupervisor {
         return
       }
       try {
-        this.handleResponse(frame)
+        this.handleFrame(frame)
       } catch {
         this.failProcess('PROTOCOL_ERROR')
         return
@@ -732,39 +1254,142 @@ export class PluginBackendSupervisor {
     this.ignoredRequestIds.clear()
     this.resolveExit?.()
     this.resolveExit = undefined
-    if (this.state !== 'closed' && this.state !== 'failed') {
+    if (this.state !== 'closed' && this.state !== 'failed' && this.state !== 'restarting') {
       this.failProcess(this.stdoutBuffer.length > 0 ? 'PROTOCOL_ERROR' : 'BACKEND_UNAVAILABLE', false)
+    }
+  }
+
+  private handleFrame(frame: JsonValue): void {
+    if (isRecord(frame) && typeof frame.method === 'string') {
+      const notification = validateNotification(frame)
+      this.handleNotification(notification)
+      return
+    }
+    this.handleResponse(frame)
+  }
+
+  private handleNotification(notification: BackendWireNotification): void {
+    if (notification.kind === 'subscription-acknowledged') {
+      const state = this.subscriptionsByRequestId.get(notification.subscriptionId)
+      if (!state) {
+        if (this.ignoredRequestIds.has(notification.subscriptionId)) return
+        throw new Error(PROTOCOL_ERROR_MESSAGE)
+      }
+      if (
+        state.phase !== 'pending-ack' ||
+        !sameEventFilter(state.events, notification.events)
+      ) {
+        throw new Error(PROTOCOL_ERROR_MESSAGE)
+      }
+      state.phase = 'active'
+      if (!state.acknowledgedOnce) {
+        state.acknowledgedOnce = true
+        state.resolveAcknowledged()
+      }
+      return
+    }
+    if (notification.kind === 'event') {
+      const state = this.subscriptionsByRequestId.get(notification.subscriptionId)
+      if (!state) {
+        if (this.ignoredRequestIds.has(notification.subscriptionId)) return
+        throw new Error(PROTOCOL_ERROR_MESSAGE)
+      }
+      if (state.phase !== 'active' || !state.events.includes(notification.event)) {
+        throw new Error(PROTOCOL_ERROR_MESSAGE)
+      }
+      try {
+        state.listener({
+          subscriptionId: notification.subscriptionId,
+          event: notification.event,
+          payload: notification.payload,
+        })
+      } catch {
+        /* Listener failures must not alter protocol ownership. */
+      }
+      return
+    }
+    const state = this.subscriptionsByProgressToken.get(notification.progressToken)
+    if (!state) {
+      if (this.ignoredRequestIds.has(notification.progressToken)) return
+      throw new Error(PROTOCOL_ERROR_MESSAGE)
+    }
+    if (state.phase !== 'pending-ack' && state.phase !== 'active') {
+      throw new Error(PROTOCOL_ERROR_MESSAGE)
+    }
+    if (state.onProgress) {
+      try {
+        state.onProgress({
+          progressToken: notification.progressToken,
+          progress: notification.progress,
+          ...(notification.total !== undefined ? { total: notification.total } : {}),
+          ...(notification.message !== undefined ? { message: notification.message } : {}),
+        })
+      } catch {
+        /* Diagnostic listeners must not affect protocol ownership. */
+      }
     }
   }
 
   private handleResponse(frame: JsonValue): void {
     const response = validateResponse(frame)
-    const pending = this.pending.get(response.id)
-    if (!pending) {
-      if (this.ignoredRequestIds.delete(response.id)) return
+    const requestId = response.id
+    if (requestId === undefined) {
       throw new Error(PROTOCOL_ERROR_MESSAGE)
     }
-    if (response.kind === 'success') {
-      this.settle(response.id, () => pending.resolve(response))
-      return
-    }
-    if (response.kind === 'plugin-error') {
+    const pending = this.pending.get(requestId)
+    if (pending) {
+      if (response.kind === 'success') {
+        this.settle(requestId, () => pending.resolve(response))
+        return
+      }
+      if (response.kind === 'plugin-error') {
+        this.settle(
+          requestId,
+          () =>
+            pending.reject(
+              new BackendPluginError('PLUGIN_ERROR', undefined, {
+                requestId,
+                pluginCode: response.pluginCode,
+              })
+            )
+        )
+        return
+      }
       this.settle(
-        response.id,
-        () =>
-          pending.reject(
-            new BackendPluginError('PLUGIN_ERROR', undefined, {
-              requestId: response.id,
-              pluginCode: response.pluginCode,
-            })
-          )
+        requestId,
+        () => pending.reject(new BackendPluginError('PROTOCOL_ERROR', undefined, { requestId }))
       )
       return
     }
-    this.settle(
-      response.id,
-      () => pending.reject(new BackendPluginError('PROTOCOL_ERROR', undefined, { requestId: response.id }))
-    )
+
+    const subscription = this.subscriptionsByRequestId.get(requestId)
+    if (subscription) {
+      if (
+        response.kind === 'success' &&
+        response.subscriptionId === requestId &&
+        subscription.phase === 'active'
+      ) {
+        this.settleSubscription(subscription, { reason: 'backend-closed' }, false)
+        return
+      }
+      const error = response.kind === 'plugin-error'
+        ? new BackendPluginError('PLUGIN_ERROR', undefined, {
+            requestId,
+            pluginCode: response.pluginCode,
+          })
+        : new BackendPluginError('PROTOCOL_ERROR', undefined, { requestId })
+      this.settleSubscription(
+        subscription,
+        {
+          reason: response.kind === 'plugin-error' ? 'backend-unavailable' : 'protocol-error',
+          error,
+        },
+        false
+      )
+      return
+    }
+    if (this.ignoredRequestIds.delete(requestId)) return
+    throw new Error(PROTOCOL_ERROR_MESSAGE)
   }
 
   private async callWithRuntime<Result extends JsonValue>(
@@ -797,18 +1422,19 @@ export class PluginBackendSupervisor {
   }
 
   private successResult(response: BackendWireResponse): BackendHealth {
-    if (response.kind !== 'success') {
+    if (response.kind !== 'success' || response.value === undefined || response.subscriptionId !== undefined) {
       throw new BackendPluginError(response.kind === 'plugin-error' ? 'PLUGIN_ERROR' : 'PROTOCOL_ERROR')
     }
     return { value: response.value, serverInfo: response.serverInfo }
   }
 
-  private clientMeta(): { [key: string]: JsonValue } {
+  private clientMeta(progressToken?: WireRequestId): { [key: string]: JsonValue } {
     const meta: { [key: string]: JsonValue } = {
       'io.modelcontextprotocol/protocolVersion': MCP_PROTOCOL_REVISION,
       'io.modelcontextprotocol/clientCapabilities': { ...this.clientCapabilities },
     }
     if (this.clientInfo) meta['io.modelcontextprotocol/clientInfo'] = { ...this.clientInfo }
+    if (progressToken !== undefined) meta.progressToken = progressToken
     return meta
   }
 
@@ -874,14 +1500,14 @@ export class PluginBackendSupervisor {
     this.sendCancellation(requestId)
   }
 
-  private sendCancellation(requestId: WireRequestId): void {
+  private sendCancellation(requestId: WireRequestId, reason?: string): void {
     try {
       if (!this.child || this.childExited || this.child.stdin.destroyed) return
       this.child.stdin.write(
         encodeFrame({
           jsonrpc: '2.0',
           method: 'notifications/cancelled',
-          params: { requestId },
+          params: { requestId, ...(reason ? { reason } : {}) },
         })
       )
     } catch {
@@ -897,17 +1523,23 @@ export class PluginBackendSupervisor {
     action()
   }
 
-  private rejectPending(error: BackendPluginError): void {
+  private rejectPending(error: BackendPluginError, rememberRequestIds = false): void {
     for (const [requestId, pending] of this.pending) {
       this.pending.delete(requestId)
+      if (rememberRequestIds) this.rememberIgnoredRequestId(requestId)
       pending.cleanup()
       pending.reject(error)
     }
   }
 
   private failProcess(code: 'BACKEND_UNAVAILABLE' | 'PROTOCOL_ERROR', terminate = true): void {
-    if (this.state === 'closed') return
+    if (this.state === 'closed' || this.state === 'restarting') return
     const error = this.failure ?? new BackendPluginError(code)
+    if (code === 'PROTOCOL_ERROR') {
+      this.settleAllSubscriptions({ reason: 'protocol-error', error })
+    } else {
+      this.detachSubscriptionsForRestart()
+    }
     this.failure = error
     this.state = 'failed'
     this.ignoredRequestIds.clear()
@@ -960,7 +1592,11 @@ export class PluginBackendSupervisor {
     let requestId: string
     do {
       requestId = randomUUID()
-    } while (this.pending.has(requestId) || this.ignoredRequestIds.has(requestId))
+    } while (
+      this.pending.has(requestId) ||
+      this.subscriptionsByRequestId.has(requestId) ||
+      this.ignoredRequestIds.has(requestId)
+    )
     return requestId
   }
 
@@ -978,7 +1614,37 @@ export class PluginBackendSupervisor {
 function isAuthenticatedRuntime(value: unknown): value is AuthenticatedBackendRuntime {
   return (
     isRecord(value) &&
-    (value as { [AUTHENTICATED_RUNTIME]?: true })[AUTHENTICATED_RUNTIME] === true
+    AUTHENTICATED_RUNTIMES.has(value) &&
+    (value as { [AUTHENTICATED_RUNTIME]?: true })[AUTHENTICATED_RUNTIME] === true &&
+    typeof (value as { [AUTHENTICATED_AUDIENCE]?: object })[AUTHENTICATED_AUDIENCE] === 'object'
+  )
+}
+
+function isViewRuntime(value: BackendRuntimeContext): boolean {
+  return (
+    typeof value.workspaceId === 'string' &&
+    value.workspaceId.length > 0 &&
+    typeof value.instanceId === 'string' &&
+    value.instanceId.length > 0 &&
+    typeof value.contributionKey === 'string' &&
+    value.contributionKey.length > 0 &&
+    typeof value.hostWindowId === 'string' &&
+    value.hostWindowId.length > 0
+  )
+}
+
+function isApprovedEventList(value: unknown): value is readonly string[] {
+  return Array.isArray(value) &&
+    new Set(value).size === value.length &&
+    value.every((event) => isMethodName(event))
+}
+
+function isAbortSignalLike(value: unknown): value is AbortSignal {
+  return (
+    isRecord(value) &&
+    typeof value.aborted === 'boolean' &&
+    typeof value.addEventListener === 'function' &&
+    typeof value.removeEventListener === 'function'
   )
 }
 

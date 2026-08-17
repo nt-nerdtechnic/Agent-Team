@@ -8,6 +8,7 @@ import {
   parseBackendWireFrame,
   PluginBackendSupervisor,
   type AuthenticatedBackendRuntime,
+  type BackendPluginEvent,
   type BackendPluginLaunchSpec,
   type PluginBackendSupervisorOptions,
   type BackendRuntimeContext,
@@ -21,6 +22,7 @@ const activation: BackendPluginLaunchSpec = {
   entryFile: fixture,
   protocolVersion: 1,
   activation: 'startup',
+  approvedEvents: ['fixture.changed'],
 }
 
 const runtime: BackendRuntimeContext = {
@@ -81,6 +83,374 @@ describe('PluginBackendSupervisor', () => {
     })
   })
 
+  it('acknowledges a subscription before delivering the requested event', async () => {
+    const supervisor = makeSupervisor()
+    supervisors.push(supervisor)
+    await supervisor.start()
+
+    const received: unknown[] = []
+    const subscription = supervisor.clientFor(authenticatedRuntime).subscribe(
+      ['fixture.changed'],
+      (event) => received.push(event)
+    )
+
+    await subscription.acknowledged
+    expect(received).toEqual([])
+
+    await expect(
+      supervisor.clientFor(authenticatedRuntime).call('fixture.emit', {
+        event: 'fixture.changed',
+        payload: { value: 1 },
+      })
+    ).resolves.toEqual({ ok: true })
+
+    await vi.waitFor(() => {
+      expect(received).toEqual([
+        {
+          subscriptionId: subscription.subscriptionId,
+          event: 'fixture.changed',
+          payload: { value: 1 },
+        },
+      ])
+    })
+
+    subscription.dispose()
+  })
+
+  it('rejects events outside the Host-approved package catalog', async () => {
+    const supervisor = makeSupervisor()
+    supervisors.push(supervisor)
+    await supervisor.start()
+
+    expect(() =>
+      supervisor.clientFor(authenticatedRuntime).subscribe(['fixture.other'], () => undefined)
+    ).toThrowError(new BackendPluginError('INVALID_ARGUMENT'))
+  })
+
+  it('rejects malformed subscription options with a stable public error', async () => {
+    const supervisor = makeSupervisor()
+    supervisors.push(supervisor)
+    await supervisor.start()
+
+    const client = supervisor.clientFor(authenticatedRuntime)
+    expect(() =>
+      client.subscribe(['fixture.changed'], () => undefined, {
+        onProgress: 'not-a-listener' as unknown as () => void,
+      })
+    ).toThrowError(new BackendPluginError('INVALID_ARGUMENT'))
+    expect(() =>
+      client.subscribe(['fixture.changed'], () => undefined, {
+        signal: {} as AbortSignal,
+      })
+    ).toThrowError(new BackendPluginError('INVALID_ARGUMENT'))
+  })
+
+  it('fails closed when the child emits before acknowledgment', async () => {
+    const supervisor = makeSupervisor({
+      environment: {
+        NAVIDE_FIXTURE: 'backend-wire',
+        NAVIDE_FIXTURE_EVENT_BEFORE_ACK: '1',
+      },
+    })
+    supervisors.push(supervisor)
+    await supervisor.start()
+
+    const subscription = supervisor.clientFor(authenticatedRuntime).subscribe(
+      ['fixture.changed'],
+      () => undefined
+    )
+
+    await expect(subscription.acknowledged).rejects.toMatchObject({
+      code: 'PROTOCOL_ERROR',
+      message: 'Backend plugin returned an invalid protocol message.',
+    })
+    await expect(subscription.settled).resolves.toMatchObject({ reason: 'protocol-error' })
+  })
+
+  it('fails closed when an event addresses an unknown subscription', async () => {
+    const supervisor = makeSupervisor()
+    supervisors.push(supervisor)
+    await supervisor.start()
+
+    const subscription = supervisor.clientFor(authenticatedRuntime).subscribe(
+      ['fixture.changed'],
+      () => undefined
+    )
+    await subscription.acknowledged
+
+    const error = await supervisor
+      .clientFor(authenticatedRuntime)
+      .call('fixture.forgedevent', { subscriptionId: 'forged-subscription' })
+      .catch((value) => value)
+
+    expect(error).toMatchObject({
+      code: 'PROTOCOL_ERROR',
+      message: 'Backend plugin returned an invalid protocol message.',
+    })
+    await expect(subscription.settled).resolves.toMatchObject({ reason: 'protocol-error' })
+  })
+
+  it('fails closed when a child emits an event outside the requested filter', async () => {
+    const supervisor = makeSupervisor()
+    supervisors.push(supervisor)
+    await supervisor.start()
+
+    const subscription = supervisor.clientFor(authenticatedRuntime).subscribe(
+      ['fixture.changed'],
+      () => undefined
+    )
+    await subscription.acknowledged
+
+    const error = await supervisor
+      .clientFor(authenticatedRuntime)
+      .call('fixture.emit', { event: 'fixture.other', payload: null })
+      .catch((value) => value)
+
+    expect(error).toMatchObject({ code: 'PROTOCOL_ERROR' })
+    await expect(subscription.settled).resolves.toMatchObject({ reason: 'protocol-error' })
+  })
+
+  it('fails closed on an unknown notification or duplicate subscription event keys', async () => {
+    for (const method of ['fixture.unknownnotification', 'fixture.duplicateevent']) {
+      const supervisor = makeSupervisor()
+      supervisors.push(supervisor)
+      await supervisor.start()
+      const subscription = supervisor.clientFor(authenticatedRuntime).subscribe(
+        ['fixture.changed'],
+        () => undefined
+      )
+      await subscription.acknowledged
+
+      const error = await supervisor.clientFor(authenticatedRuntime).call(method, null).catch((value) => value)
+      expect(error).toMatchObject({
+        code: 'PROTOCOL_ERROR',
+        message: 'Backend plugin returned an invalid protocol message.',
+      })
+      await expect(subscription.settled).resolves.toMatchObject({ reason: 'protocol-error' })
+    }
+  })
+
+  it('settles cancellation and view destruction exactly once', async () => {
+    const supervisor = makeSupervisor()
+    supervisors.push(supervisor)
+    await supervisor.start()
+
+    const cancelled = supervisor.clientFor(authenticatedRuntime).subscribe(
+      ['fixture.changed'],
+      () => undefined
+    )
+    await cancelled.acknowledged
+    cancelled.dispose()
+    cancelled.dispose('view-destroyed')
+    await expect(cancelled.settled).resolves.toMatchObject({ reason: 'cancelled' })
+
+    const destroyed = supervisor.clientFor(authenticatedRuntime).subscribe(
+      ['fixture.changed'],
+      () => undefined
+    )
+    await destroyed.acknowledged
+    destroyed.dispose('view-destroyed')
+    destroyed.dispose()
+
+    await expect(destroyed.settled).resolves.toMatchObject({ reason: 'view-destroyed' })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    await expect(
+      supervisor.clientFor(authenticatedRuntime).call('fixture.cancelcount', null)
+    ).resolves.toEqual(2)
+  })
+
+  it('ignores queued acknowledgment, event, and closure after cancel-before-ack', async () => {
+    const supervisor = makeSupervisor({
+      environment: {
+        NAVIDE_FIXTURE: 'backend-wire',
+        NAVIDE_FIXTURE_LATE_ACK_AFTER_CANCEL: '1',
+      },
+    })
+    supervisors.push(supervisor)
+    await supervisor.start()
+
+    const received: BackendPluginEvent[] = []
+    const subscription = supervisor.clientFor(authenticatedRuntime).subscribe(
+      ['fixture.changed'],
+      (event) => received.push(event)
+    )
+    subscription.dispose()
+
+    await expect(subscription.acknowledged).rejects.toMatchObject({ code: 'USER_CANCELLED' })
+    await expect(subscription.settled).resolves.toMatchObject({ reason: 'cancelled' })
+    await expect(
+      supervisor.clientFor(authenticatedRuntime).call('fixture.cancelcount', null)
+    ).resolves.toEqual(1)
+    expect(received).toEqual([])
+  })
+
+  it('settles a subscription timeout and sends one cancellation', async () => {
+    const supervisor = makeSupervisor()
+    supervisors.push(supervisor)
+    await supervisor.start()
+
+    const subscription = supervisor.clientFor(authenticatedRuntime).subscribe(
+      ['fixture.changed'],
+      () => undefined,
+      { timeoutMs: 20 }
+    )
+    await subscription.acknowledged
+
+    await expect(subscription.settled).resolves.toMatchObject({ reason: 'timeout' })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    await expect(
+      supervisor.clientFor(authenticatedRuntime).call('fixture.cancelcount', null)
+    ).resolves.toEqual(1)
+  })
+
+  it('bounds active subscription state', async () => {
+    const supervisor = makeSupervisor()
+    supervisors.push(supervisor)
+    await supervisor.start()
+
+    const client = supervisor.clientFor(authenticatedRuntime)
+    const subscriptions = Array.from({ length: 256 }, () =>
+      client.subscribe(['fixture.changed'], () => undefined)
+    )
+    await Promise.all(subscriptions.map((subscription) => subscription.acknowledged))
+
+    expect(() => client.subscribe(['fixture.changed'], () => undefined)).toThrowError(
+      new BackendPluginError('INVALID_ARGUMENT')
+    )
+
+    subscriptions.forEach((subscription) => subscription.dispose())
+    await Promise.all(subscriptions.map((subscription) => subscription.settled))
+  })
+
+  it('delivers progress only to the owning subscription', async () => {
+    const supervisor = makeSupervisor()
+    supervisors.push(supervisor)
+    await supervisor.start()
+    const progress: unknown[] = []
+    const otherProgress: unknown[] = []
+    const subscription = supervisor.clientFor(authenticatedRuntime).subscribe(
+      ['fixture.changed'],
+      () => undefined,
+      { onProgress: (value) => progress.push(value) }
+    )
+    const other = supervisor.clientFor(authenticatedRuntime).subscribe(
+      ['fixture.changed'],
+      () => undefined,
+      { onProgress: (value) => otherProgress.push(value) }
+    )
+    await subscription.acknowledged
+    await other.acknowledged
+    const subscriptionId = subscription.subscriptionId
+    expect(subscriptionId).toEqual(expect.any(String))
+    if (subscriptionId === undefined) throw new Error('Expected a subscription id.')
+
+    await expect(
+      supervisor.clientFor(authenticatedRuntime).call('fixture.progress', {
+        subscriptionId,
+      })
+    ).resolves.toEqual({ ok: true })
+    expect(progress).toEqual([
+      {
+        progressToken: subscription.subscriptionId,
+        progress: 1,
+        total: 2,
+        message: 'fixture progress',
+      },
+    ])
+    expect(otherProgress).toEqual([])
+    subscription.dispose()
+    other.dispose()
+  })
+
+  it('settles a backend-initiated graceful subscription closure once', async () => {
+    const supervisor = makeSupervisor()
+    supervisors.push(supervisor)
+    await supervisor.start()
+    const subscription = supervisor.clientFor(authenticatedRuntime).subscribe(
+      ['fixture.changed'],
+      () => undefined
+    )
+    await subscription.acknowledged
+    const subscriptionId = subscription.subscriptionId
+    expect(subscriptionId).toEqual(expect.any(String))
+    if (subscriptionId === undefined) throw new Error('Expected a subscription id.')
+
+    await expect(
+      supervisor.clientFor(authenticatedRuntime).call('fixture.close', {
+        subscriptionId,
+      })
+    ).resolves.toEqual({ ok: true })
+    await expect(subscription.settled).resolves.toMatchObject({ reason: 'backend-closed' })
+    await expect(subscription.settled).resolves.toMatchObject({ reason: 'backend-closed' })
+  })
+
+  it('re-establishes only the live subscription after child restart', async () => {
+    const supervisor = makeSupervisor()
+    supervisors.push(supervisor)
+    await supervisor.start()
+    const received: BackendPluginEvent[] = []
+    const subscription = supervisor.clientFor(authenticatedRuntime).subscribe(
+      ['fixture.changed'],
+      (event) => received.push(event)
+    )
+    await subscription.acknowledged
+    const firstSubscriptionId = subscription.subscriptionId
+    await expect(
+      supervisor.clientFor(authenticatedRuntime).call('fixture.emit', {
+        event: 'fixture.changed',
+        payload: { generation: 1 },
+      })
+    ).resolves.toEqual({ ok: true })
+    await vi.waitFor(() => expect(received).toHaveLength(1))
+
+    const cancelled = supervisor.clientFor(authenticatedRuntime).subscribe(
+      ['fixture.changed'],
+      () => undefined
+    )
+    await cancelled.acknowledged
+    cancelled.dispose()
+    await expect(cancelled.settled).resolves.toMatchObject({ reason: 'cancelled' })
+
+    await expect(supervisor.restart()).resolves.toMatchObject({
+      serverInfo: { name: 'fixture.backend', version: '1.0.0' },
+    })
+    expect(subscription.subscriptionId).not.toBe(firstSubscriptionId)
+    await expect(
+      supervisor.clientFor(authenticatedRuntime).call('fixture.emit', {
+        event: 'fixture.changed',
+        payload: { generation: 2 },
+      })
+    ).resolves.toEqual({ ok: true })
+    await vi.waitFor(() => expect(received).toHaveLength(2))
+    expect(received[1].payload).toEqual({ generation: 2 })
+  })
+
+  it('can restart after an unexpected child exit and restore the live subscription', async () => {
+    const supervisor = makeSupervisor()
+    supervisors.push(supervisor)
+    await supervisor.start()
+    const received: BackendPluginEvent[] = []
+    const subscription = supervisor.clientFor(authenticatedRuntime).subscribe(
+      ['fixture.changed'],
+      (event) => received.push(event)
+    )
+    await subscription.acknowledged
+
+    await expect(
+      supervisor.clientFor(authenticatedRuntime).call('fixture.exit', null)
+    ).rejects.toMatchObject({ code: 'BACKEND_UNAVAILABLE' })
+    await expect(supervisor.restart()).resolves.toBeDefined()
+
+    await expect(
+      supervisor.clientFor(authenticatedRuntime).call('fixture.emit', {
+        event: 'fixture.changed',
+        payload: { recovered: true },
+      })
+    ).resolves.toEqual({ ok: true })
+    await vi.waitFor(() => expect(received).toHaveLength(1))
+    expect(received[0].payload).toEqual({ recovered: true })
+  })
+
   it('requires an explicit child environment and does not inherit the host environment', async () => {
     expect(() =>
       new PluginBackendSupervisor(activation, {} as PluginBackendSupervisorOptions)
@@ -139,6 +509,22 @@ describe('PluginBackendSupervisor', () => {
     ).toThrowError(new BackendPluginError('INVALID_RUNTIME', 'Backend runtime is invalid.'))
   })
 
+  it('does not accept a cloned authentication brand or audience', async () => {
+    const supervisor = makeSupervisor()
+    supervisors.push(supervisor)
+    await supervisor.start()
+
+    const forged = { ...authenticatedRuntime } as AuthenticatedBackendRuntime
+    for (const symbol of Object.getOwnPropertySymbols(authenticatedRuntime)) {
+      const descriptor = Object.getOwnPropertyDescriptor(authenticatedRuntime, symbol)
+      if (descriptor) Object.defineProperty(forged, symbol, descriptor)
+    }
+
+    expect(() => supervisor.clientFor(forged)).toThrowError(
+      new BackendPluginError('INVALID_RUNTIME', 'Backend runtime is invalid.')
+    )
+  })
+
   it('preserves a public plugin error without exposing transport details', async () => {
     const supervisor = makeSupervisor()
     supervisors.push(supervisor)
@@ -155,6 +541,7 @@ describe('PluginBackendSupervisor', () => {
       requestId: expect.any(String),
       message: 'Plugin request failed.',
     })
+    expect(error.stack).toBeUndefined()
     expect(String(error)).not.toContain('fixture')
     expect(String(error)).not.toContain('transport')
     expect(String(error)).not.toContain('stack')
