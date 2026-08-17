@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import Engine
@@ -19,6 +19,7 @@ from .models import Extension, ExtensionVersion, Publisher
 from .manifest import ManifestV2, manifest_capabilities
 from .package import PackageError, read_package
 from .repository import RegistryRepository, rating_average
+from .registry_trust import RegistryTrustSigner
 from .schemas import (
     ExtensionDetail,
     ExtensionListResponse,
@@ -50,6 +51,7 @@ class RegistryState:
     storage: StorageBackend
     verifier: SignatureVerifier
     settings: Settings
+    trust_signer: RegistryTrustSigner
 
 
 def _make_verifier(settings: Settings) -> SignatureVerifier:
@@ -65,6 +67,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         storage=LocalStorageBackend(settings.storage_root),
         verifier=_make_verifier(settings),
         settings=settings,
+        trust_signer=RegistryTrustSigner.from_settings(settings),
     )
 
     app = FastAPI(title="Navide Marketplace Registry", version="0.1.0")
@@ -108,9 +111,11 @@ def _version_info(row: ExtensionVersion) -> VersionInfo:
         package_digest=row.package_digest,
         yanked=row.yanked,
         published_at=row.published_at,
-        signed=row.signature is not None,
-        signature=row.signature,
-        trust_tier=row.trust_tier,
+        target=row.target,
+        registry_envelope=row.registry_envelope,
+        registry_signature=row.registry_signature,
+        signed=row.registry_signature is not None,
+        trust_tier=compute_trust_tier(signed=row.registry_signature is not None),
         capabilities=capabilities,
         sensitive_capabilities=sensitive_capabilities(capabilities),
         download_count=row.download_count,
@@ -177,6 +182,12 @@ def _register_routes(app: FastAPI) -> None:
         request: Request,
         package: UploadFile,
         signature: str | None = None,
+        target: str = Query(
+            default="universal",
+            min_length=1,
+            max_length=64,
+            pattern=r"^[a-z0-9][a-z0-9-]*$",
+        ),
         identity: PublisherIdentity = Depends(get_publisher_identity),
         repo: RegistryRepository = Depends(_repo),
     ) -> PublishResponse:
@@ -206,6 +217,13 @@ def _register_routes(app: FastAPI) -> None:
         publisher_name = (
             identity.publisher if identity.authenticated else manifest.publisher
         )
+        block_reason = state.trust_signer.block_reason(
+            publisher_id=publisher_name,
+            package_id=f"{namespace}.{name}",
+            version=manifest.version,
+        )
+        if block_reason is not None:
+            raise HTTPException(status_code=403, detail=block_reason)
         publisher = repo.get_or_create_publisher(publisher_name)
 
         # Signature gate (p3-security): reject a bad signature; allow unsigned
@@ -223,8 +241,6 @@ def _register_routes(app: FastAPI) -> None:
             raise HTTPException(
                 status_code=403, detail="invalid package signature"
             )
-
-        trust_tier = compute_trust_tier(signed=signature is not None)
 
         if isinstance(manifest, ManifestV2):
             display_name = manifest.name
@@ -253,6 +269,20 @@ def _register_routes(app: FastAPI) -> None:
                 ),
             )
 
+        try:
+            registry_envelope, registry_signature = state.trust_signer.sign_envelope(
+                artifact_digest=loaded.digest,
+                package_id=f"{namespace}.{name}",
+                version=manifest.version,
+                target=target,
+                publisher_id=publisher_name,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        # Publisher signatures authenticate a submission only. Client-facing
+        # integrity is established by the registry signature created above.
+        trust_tier = compute_trust_tier(signed=True)
+
         key = _package_key(namespace, name, manifest.version)
         state.storage.put(key, data)
         row = repo.add_version(
@@ -262,6 +292,9 @@ def _register_routes(app: FastAPI) -> None:
             package_digest=loaded.digest,
             package_key=key,
             signature=signature,
+            target=target,
+            registry_envelope=registry_envelope,
+            registry_signature=registry_signature,
             trust_tier=trust_tier,
             assets=[(a.path, a.size, a.content_type) for a in loaded.assets],
         )
@@ -298,6 +331,7 @@ def _register_routes(app: FastAPI) -> None:
         "/api/extensions/{namespace}/{name}", response_model=ExtensionDetail
     )
     def extension_detail(
+        request: Request,
         namespace: str,
         name: str,
         repo: RegistryRepository = Depends(_repo),
@@ -309,14 +343,17 @@ def _register_routes(app: FastAPI) -> None:
         summary = _summary(extension, versions)
         publisher = repo.session.get(Publisher, extension.publisher_id)
         publisher_name = publisher.name if publisher else extension.namespace
-        publisher_key = publisher.public_key if publisher else None
+        trust_metadata, trust_metadata_signature = (
+            request.app.state.registry.trust_signer.signed_metadata()
+        )
         ordered = sorted(
             versions, key=lambda v: v.published_at, reverse=True
         )
         return ExtensionDetail(
             **summary.model_dump(),
             publisher=publisher_name,
-            public_key=publisher_key,
+            trust_metadata=trust_metadata,
+            trust_metadata_signature=trust_metadata_signature,
             versions=[_version_info(v) for v in ordered],
         )
 

@@ -12,31 +12,135 @@
 // main-side, keyed by id, until commit.
 
 import { app, BrowserWindow, ipcMain, type IpcMainInvokeEvent } from 'electron'
+import { dirname, join, resolve } from 'node:path'
 import {
   prepareInstall,
   commitInstall,
   removePlugin,
   type PreparedInstall,
+  type InstallerTrustConfig,
 } from './pluginInstaller'
-import { sensitiveCapabilities, assertRegistryUrlAllowed } from './pluginVerify'
-import { manifestToInstalledPackageSummary } from './installedPlugins'
+import {
+  sensitiveCapabilities,
+  assertRegistryUrlAllowed,
+} from './pluginVerify'
+import type { RegistryPackageEnvelope, RegistryTrustMetadata } from './pluginRegistryTrust'
+import { verifyRegistryTrustMetadata } from './pluginRegistryTrust'
+import {
+  loadOfficialRegistryRootKey,
+  resolveMarketplaceRegistryRoot,
+} from './pluginRegistryRootApproval'
+import {
+  isManifestV2,
+  manifestToActivation,
+  manifestToInstalledPackageSummary,
+  type PluginActivationCatalogEntry,
+} from './installedPlugins'
+import { isValidManifestV2PluginId } from './pluginManifestV2'
+import { PluginPublisherTrustStore } from './pluginPublisherTrust'
+import {
+  readRegistryTrustSnapshot,
+  discoverInstalledRegistryPackageIds,
+  verifyInstalledRegistryPackage,
+  writeRegistryTrustSnapshot,
+  type InstalledTrustDecision,
+} from './pluginInstalledTrust'
 import type { FrontendPluginManager } from './frontendPluginManager'
 
+/** Development-only endpoint. It is intentionally not the official Registry
+ * identity: a local Registry must establish trust through root approval. */
 const DEFAULT_MARKETPLACE_URL = 'http://localhost:8787'
+/** App-shipped Official Registry identity. A normalized match is always
+ * resolved through the independent packaged root pin and cannot be downgraded
+ * by approval. */
+const OFFICIAL_MARKETPLACE_URL = 'https://registry.navide.dev'
 
 /** Resolve the marketplace registry URL, enforcing the transport policy
  *  (production forbids plaintext http except loopback). Throws before any
  *  fetch when the configured URL is disallowed. */
-function marketplaceUrl(): string {
-  const url = process.env['AGENT_TEAM_MARKETPLACE_URL'] ?? DEFAULT_MARKETPLACE_URL
-  assertRegistryUrlAllowed(url, app.isPackaged)
-  return url
+export function resolveConfiguredMarketplace(
+  explicitTrust?: InstallerTrustConfig
+): { registryUrl: string; trust: InstallerTrustConfig } {
+  if (explicitTrust) {
+    const registryUrl = process.env['AGENT_TEAM_MARKETPLACE_URL'] ?? DEFAULT_MARKETPLACE_URL
+    assertRegistryUrlAllowed(registryUrl, app.isPackaged)
+    return {
+      registryUrl,
+      trust: {
+        ...explicitTrust,
+        registryAuthority: explicitTrust.registryAuthority ?? 'self-hosted',
+        officialRegistryUrl: explicitTrust.officialRegistryUrl ?? OFFICIAL_MARKETPLACE_URL,
+      },
+    }
+  }
+  const resolved = resolveMarketplaceRegistryRoot({
+    registryUrlOverride: process.env['AGENT_TEAM_MARKETPLACE_URL'],
+    defaultRegistryUrl: DEFAULT_MARKETPLACE_URL,
+    officialRegistryUrl: OFFICIAL_MARKETPLACE_URL,
+    officialRootPublicKey: loadOfficialRegistryRootKey(process.resourcesPath),
+    approvalFile: process.env['AGENT_TEAM_REGISTRY_ROOT_APPROVAL_FILE'],
+  })
+  assertRegistryUrlAllowed(resolved.registryUrl, app.isPackaged)
+  return {
+    registryUrl: resolved.registryUrl,
+    trust: {
+      pinnedRegistryRootKey: resolved.rootPublicKey,
+      registryAuthority: resolved.authority,
+      officialRegistryUrl: OFFICIAL_MARKETPLACE_URL,
+    },
+  }
 }
 
 interface InstalledSummary {
   id: string
   requires: string[]
   sensitive: string[]
+  provenance?: 'official-registry' | 'developer-local-unpacked'
+  warning?: string
+}
+
+export interface PluginTrustRefreshController {
+  refreshRegistryTrust(): Promise<{
+    decisions: Array<{ pluginId: string; action: 'allow' | 'quarantine'; reason?: string }>
+    activationCatalog: ReturnType<FrontendPluginManager['loadInstalledPlugins']>['activationCatalog']
+  }>
+}
+
+export interface PluginIpcOptions {
+  verifyCommittedInstall?: (
+    pluginDir: string,
+    pluginId: string,
+    trust: InstallerTrustConfig
+  ) => InstalledTrustDecision
+  onActivationChange?: (change: {
+    pluginId: string
+    activation?: PluginActivationCatalogEntry
+  }) => void
+}
+
+function assertPluginRemovalTarget(pluginsRoot: string, value: unknown): string {
+  if (!isValidManifestV2PluginId(value)) throw new Error('invalid plugin id')
+  const root = resolve(pluginsRoot)
+  const target = resolve(root, value)
+  if (dirname(target) !== root) throw new Error('invalid plugin id')
+  return value
+}
+
+function cleanupFailedPluginInstall(
+  manager: FrontendPluginManager,
+  onActivationChange: PluginIpcOptions['onActivationChange'],
+  pluginId: string
+): void {
+  try {
+    manager.removeInstalledPlugin(pluginId)
+  } catch {
+    // Cleanup is best-effort; the install failure remains the reported error.
+  }
+  try {
+    onActivationChange?.({ pluginId })
+  } catch {
+    // Keep manager cleanup and the original install failure from being masked.
+  }
 }
 
 /** Restrict plugin management to the owning WebContents of a live Host window. */
@@ -59,10 +163,15 @@ export function isTrustedPluginManagementSender(
 export function registerPluginIpc(
   manager: FrontendPluginManager,
   pluginsRoot: string,
-  authorizeSender: (event: IpcMainInvokeEvent) => boolean
-): void {
+  authorizeSender: (event: IpcMainInvokeEvent) => boolean,
+  trust?: InstallerTrustConfig,
+  publisherTrust = new PluginPublisherTrustStore(
+    join(pluginsRoot, '.navide-publisher-trust.json')
+  ),
+  options: PluginIpcOptions = {}
+): PluginTrustRefreshController {
   // Packages verified by prepareInstall, awaiting a commit, keyed by plugin id.
-  const prepared = new Map<string, PreparedInstall>()
+  const prepared = new Map<string, { pkg: PreparedInstall; trust: InstallerTrustConfig }>()
 
   const assertAuthorized = (event: IpcMainInvokeEvent): void => {
     if (!authorizeSender(event)) throw new Error('unauthorized plugin management request')
@@ -70,7 +179,15 @@ export function registerPluginIpc(
 
   ipcMain.handle('plugins:listInstalled', (event): InstalledSummary[] => {
     assertAuthorized(event)
-    const summaries = new Map<string, { id: string; requires: string[] }>()
+    const summaries = new Map<
+      string,
+      {
+        id: string
+        requires: string[]
+        provenance?: 'official-registry' | 'developer-local-unpacked'
+        warning?: string
+      }
+    >()
     for (const descriptor of manager.listDescriptors()) {
       summaries.set(descriptor.id, { id: descriptor.id, requires: descriptor.requires })
     }
@@ -79,12 +196,15 @@ export function registerPluginIpc(
       id: summary.id,
       requires: summary.requires,
       sensitive: sensitiveCapabilities(summary.requires),
+      ...(summary.provenance ? { provenance: summary.provenance } : {}),
+      ...(summary.warning ? { warning: summary.warning } : {}),
     }))
   })
 
   ipcMain.handle('plugins:marketplaceSearch', async (event, query?: string) => {
     assertAuthorized(event)
-    const url = new URL('/api/extensions', marketplaceUrl())
+    const { registryUrl } = resolveConfiguredMarketplace(trust)
+    const url = new URL('/api/extensions', registryUrl)
     if (query) url.searchParams.set('q', query)
     const res = await fetch(url)
     if (!res.ok) throw new Error(`marketplace search failed: HTTP ${res.status}`)
@@ -95,16 +215,20 @@ export function registerPluginIpc(
     'plugins:prepareInstall',
     async (event, args: { namespace: string; name: string; version?: string }) => {
       assertAuthorized(event)
-      const base = marketplaceUrl().replace(/\/+$/, '')
+      const marketplace = resolveConfiguredMarketplace(trust)
+      const base = marketplace.registryUrl.replace(/\/+$/, '')
       const detailRes = await fetch(`${base}/api/extensions/${args.namespace}/${args.name}`)
       if (!detailRes.ok) throw new Error(`extension not found: HTTP ${detailRes.status}`)
       const detail = (await detailRes.json()) as {
         latest_version: string | null
-        public_key: string | null
+        trust_metadata: RegistryTrustMetadata
+        trust_metadata_signature: string
         versions: Array<{
           version: string
           package_digest: string
-          signature: string | null
+          target: string
+          registry_envelope: RegistryPackageEnvelope
+          registry_signature: string
           trust_tier: string
           yanked: boolean
         }>
@@ -113,24 +237,22 @@ export function registerPluginIpc(
       const versionRow = detail.versions.find((v) => v.version === wanted && !v.yanked)
       if (!versionRow) throw new Error(`no installable version ${wanted ?? '(latest)'} found`)
 
-      // Feed the registry's signature material into the client-side verification
-      // chain so a validly-signed package can reach `signed-verified`. The wire
-      // is snake_case; `prepareInstall` takes camelCase. Signature is the one on
-      // the SELECTED version row (paired with its `package_digest`); the public
-      // key is publisher-level (detail top-level). Both may be null — an unsigned
-      // package or unregistered key simply resolves to `unsigned` (fail-closed;
-      // a bad-but-present signature still hard-blocks in `verifyPackage`).
+      // The selected Registry envelope and current root-signed trust metadata
+      // are verified against the Host-owned root pin before any install write.
       const result = await prepareInstall({
-        registryUrl: marketplaceUrl(),
+        registryUrl: marketplace.registryUrl,
         namespace: args.namespace,
         name: args.name,
         version: versionRow.version,
         expectedDigest: versionRow.package_digest,
-        signature: versionRow.signature,
-        publicKey: detail.public_key,
+        target: versionRow.target,
+        registryEnvelope: versionRow.registry_envelope,
+        registrySignature: versionRow.registry_signature,
+        trustMetadata: detail.trust_metadata,
+        trustMetadataSignature: detail.trust_metadata_signature,
         claimedTrustTier: versionRow.trust_tier,
-      })
-      prepared.set(result.id, result)
+      }, undefined, marketplace.trust)
+      prepared.set(result.id, { pkg: result, trust: marketplace.trust })
       return {
         id: result.id,
         version: result.version,
@@ -138,37 +260,232 @@ export function registerPluginIpc(
         sensitive: result.sensitive,
         containsBackendExecutable: result.containsBackendExecutable,
         requiresConfirmation: result.requiresConfirmation,
+        publisherId: result.publisherId,
+        requiresPublisherTrust:
+          result.registryEvidence !== undefined &&
+          !result.official &&
+          !publisherTrust.isTrusted(result.publisherId, result.id),
+        requiresRiskConfirmation: result.requiresConfirmation,
       }
     }
   )
 
   ipcMain.handle(
     'plugins:commitInstall',
-    (event, args: { id: string; confirmed?: boolean }) => {
+    (
+      event,
+      args: { id: string; publisherConfirmed?: boolean; riskConfirmed?: boolean }
+    ) => {
       assertAuthorized(event)
-      const pkg = prepared.get(args.id)
-      if (!pkg) throw new Error(`no prepared install for ${args.id}; call prepareInstall first`)
-      if (pkg.requiresConfirmation && args.confirmed !== true) {
-        throw new Error(`install confirmation is required for ${args.id}`)
+      const pending = prepared.get(args.id)
+      if (!pending) throw new Error(`no prepared install for ${args.id}; call prepareInstall first`)
+      const { pkg, trust: preparedTrust } = pending
+      const publisherRequiresTrust =
+        pkg.registryEvidence !== undefined &&
+        !pkg.official &&
+        !publisherTrust.isTrusted(pkg.publisherId, pkg.id)
+      if (publisherRequiresTrust && args.publisherConfirmed !== true) {
+        throw new Error(`publisher trust confirmation is required for ${pkg.publisherId}`)
       }
-      const descriptor = commitInstall(pkg, pluginsRoot)
-      const summary = manifestToInstalledPackageSummary(pkg.manifest)
-      // `official` was earned in prepareInstall (pinned-official-key check); it
-      // is what allows a verified `navide.` install to claim its reserved id.
-      manager.registerInstalledPackage(summary, descriptor, { official: pkg.official })
-      prepared.delete(args.id)
-      return {
-        id: pkg.id,
-        requires: summary.requires,
+      if (pkg.requiresConfirmation && args.riskConfirmed !== true) {
+        throw new Error(`capability and backend risk confirmation is required for ${args.id}`)
+      }
+      // Persist this explicit, package-scoped publisher decision separately
+      // from installation and capability grants. A failed package write does
+      // not retroactively erase the user's publisher decision.
+      if (publisherRequiresTrust) publisherTrust.trust(pkg.publisherId, pkg.id)
+      try {
+        const descriptor = commitInstall(pkg, pluginsRoot)
+        let verifiedArtifactDigest: string | undefined
+        if (pkg.registryEvidence) {
+          const verifyCommitted =
+            options.verifyCommittedInstall ??
+            ((pluginDir: string, pluginId: string, trustConfig: InstallerTrustConfig) =>
+              verifyInstalledRegistryPackage(pluginDir, pluginId, {
+                pinnedRootKey: trustConfig.pinnedRegistryRootKey,
+                snapshot: readRegistryTrustSnapshot(pluginsRoot),
+                registryAuthority: trustConfig.registryAuthority,
+                officialRegistryUrl: trustConfig.officialRegistryUrl,
+                now: trustConfig.now,
+              }))
+          const decision = verifyCommitted(join(pluginsRoot, pkg.id), pkg.id, preparedTrust)
+          if (decision.action === 'quarantine') {
+            prepared.delete(args.id)
+            throw new Error(`installed plugin quarantined: ${decision.reason}`)
+          }
+          verifiedArtifactDigest = decision.artifactDigest
+        }
+        const summary = manifestToInstalledPackageSummary(pkg.manifest)
+        // `official` was earned in prepareInstall (Host-authorized Official
+        // Registry check); it
+        // is what allows a verified `navide.` install to claim its reserved id.
+        options.onActivationChange?.({ pluginId: pkg.id })
+        manager.registerInstalledPackage(summary, descriptor, { official: pkg.official })
+        prepared.delete(args.id)
+        if (pkg.registryEvidence && isManifestV2(pkg.manifest)) {
+          const activation = manifestToActivation(pkg.manifest, join(pluginsRoot, pkg.id))
+          activation.provenance = 'official-registry'
+          activation.artifactDigest = verifiedArtifactDigest
+          if (activation.backend) options.onActivationChange?.({ pluginId: pkg.id, activation })
+        }
+        return {
+          id: pkg.id,
+          requires: summary.requires,
+        }
+      } catch (error) {
+        cleanupFailedPluginInstall(manager, options.onActivationChange, pkg.id)
+        throw error
       }
     }
   )
 
-  ipcMain.handle('plugins:remove', (event, args: { id: string }) => {
+  ipcMain.handle('plugins:remove', (event, args: { id?: unknown } | null) => {
     assertAuthorized(event)
-    prepared.delete(args.id)
-    removePlugin(pluginsRoot, args.id)
-    manager.removeInstalledPlugin(args.id)
+    const id = assertPluginRemovalTarget(pluginsRoot, args?.id)
+    prepared.delete(id)
+    removePlugin(pluginsRoot, id)
+    manager.removeInstalledPlugin(id)
+    options.onActivationChange?.({ pluginId: id })
     return { ok: true }
   })
+
+  return {
+    async refreshRegistryTrust() {
+      const packageIds = discoverInstalledRegistryPackageIds(pluginsRoot)
+      const activeRegistryPackages = new Set(
+        manager
+          .listInstalledPackages()
+          .filter((pkg) => pkg.provenance === 'official-registry')
+          .map((pkg) => pkg.id)
+      )
+      const decisions: Array<{
+        pluginId: string
+        action: 'allow' | 'quarantine'
+        reason?: string
+      }> = []
+      const safePackageIds = new Set(packageIds)
+      for (const pluginId of activeRegistryPackages) {
+        if (safePackageIds.has(pluginId)) continue
+        // A package that disappeared or no longer has a coherent Host-owned
+        // manifest is not a refresh candidate. It is nevertheless an active
+        // Registry package in memory and must be stopped before this refresh
+        // can return, including when there are no network candidates.
+        manager.removeInstalledPlugin(pluginId)
+        options.onActivationChange?.({ pluginId })
+        decisions.push({
+          pluginId,
+          action: 'quarantine',
+          reason:
+            'installed Registry package is missing or has a malformed/identity-mismatched manifest',
+        })
+      }
+      if (packageIds.length === 0) return { decisions, activationCatalog: [] }
+
+      const marketplace = resolveConfiguredMarketplace(trust)
+      const base = marketplace.registryUrl.replace(/\/+$/, '')
+      const fallbackToCachedTrust = () => {
+        const snapshot = readRegistryTrustSnapshot(pluginsRoot)
+        const refreshed = manager.refreshInstalledPluginTrust(pluginsRoot, {
+          pinnedRootKey: marketplace.trust.pinnedRegistryRootKey,
+          snapshot,
+          registryAuthority: marketplace.trust.registryAuthority,
+          officialRegistryUrl: marketplace.trust.officialRegistryUrl,
+          now: marketplace.trust.now,
+        })
+        for (const decision of refreshed) {
+          if (decision.action === 'quarantine') {
+            options.onActivationChange?.({ pluginId: decision.pluginId })
+          }
+        }
+        return refreshed
+      }
+
+      let detail: {
+        trust_metadata: RegistryTrustMetadata
+        trust_metadata_signature: string
+      } | null = null
+      let lastRefreshError: Error | null = null
+      for (const packageId of packageIds) {
+        const [namespace, ...nameParts] = packageId.split('.')
+        if (!namespace || nameParts.length === 0) continue
+        try {
+          const response = await fetch(
+            `${base}/api/extensions/${namespace}/${nameParts.join('.')}`
+          )
+          if (!response.ok) {
+            lastRefreshError = new Error(
+              `trust metadata refresh failed: HTTP ${response.status}`
+            )
+            continue
+          }
+          const candidate = (await response.json()) as {
+            trust_metadata: RegistryTrustMetadata
+            trust_metadata_signature: string
+          }
+          verifyRegistryTrustMetadata(
+            candidate.trust_metadata,
+            candidate.trust_metadata_signature,
+            marketplace.trust.pinnedRegistryRootKey,
+            marketplace.trust.now
+          )
+          detail = candidate
+          break
+        } catch (error) {
+          lastRefreshError = error instanceof Error ? error : new Error(String(error))
+        }
+      }
+      if (!detail) {
+        fallbackToCachedTrust()
+        throw lastRefreshError ?? new Error('trust metadata refresh failed')
+      }
+
+      try {
+        const snapshot = {
+          schemaVersion: 1 as const,
+          metadata: detail.trust_metadata,
+          metadataSignature: detail.trust_metadata_signature,
+        }
+        writeRegistryTrustSnapshot(pluginsRoot, snapshot)
+        const currentTrust = {
+          pinnedRootKey: marketplace.trust.pinnedRegistryRootKey,
+          snapshot,
+          registryAuthority: marketplace.trust.registryAuthority,
+          officialRegistryUrl: marketplace.trust.officialRegistryUrl,
+          now: marketplace.trust.now,
+        }
+        const activeBeforeRefresh = new Set(
+          manager
+            .listInstalledPackages()
+            .filter((pkg) => pkg.provenance === 'official-registry')
+            .map((pkg) => pkg.id)
+        )
+        const refreshedDecisions = manager.refreshInstalledPluginTrust(pluginsRoot, currentTrust)
+        for (const decision of refreshedDecisions) {
+          if (decision.action === 'quarantine') {
+            options.onActivationChange?.({ pluginId: decision.pluginId })
+          }
+        }
+        decisions.push(...refreshedDecisions)
+        const restoreIds = new Set(
+          refreshedDecisions
+            .filter(
+              (decision) => decision.action === 'allow' && !activeBeforeRefresh.has(decision.pluginId)
+            )
+            .map((decision) => decision.pluginId)
+        )
+        const reloaded =
+          restoreIds.size > 0
+            ? manager.loadInstalledPlugins(
+                pluginsRoot,
+                { provenance: 'official-registry', trust: currentTrust },
+                restoreIds
+              )
+            : { activationCatalog: [] }
+        return { decisions, activationCatalog: reloaded.activationCatalog }
+      } catch (error) {
+        fallbackToCachedTrust()
+        throw error
+      }
+    },
+  }
 }

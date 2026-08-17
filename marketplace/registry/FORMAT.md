@@ -64,12 +64,21 @@ needed for discovery — these are an additive superset, not a divergent schema.
 
 ## Signing
 
-A package carries a **detached signature** supplied to `POST /api/publish` as
+There are two deliberately separate signatures:
+
+| Signature | Producer | Purpose | Client trust role |
+|---|---|---|---|
+| Publisher submission signature | Publisher | Authenticates an upload to the Registry and proves namespace ownership at publish time. | None; a publisher-supplied key never becomes a Client trust root. |
+| Registry central signature | Registry signer authorized by root-signed trust metadata | Binds the complete archive digest to immutable package, version, target, publisher, signer, and signing-time identity. | Accepted only after the App verifies current trust metadata with its pre-pinned Registry root. |
+
+A package submission carries a **detached publisher signature** supplied to `POST /api/publish` as
 the `signature` query param (not stored inside the ZIP). It is the **base64
 encoding of an Ed25519 signature over the package's sha256 digest** (the same
 digest the registry computes from the uploaded bytes). The registry verifies it
 against the publisher's registered Ed25519 public key
-(`registry/signing.py :: Ed25519SignatureVerifier`) and records the result as a
-trust tier (`signed-verified` / `unsigned`, see `registry/trust.py`). Produce
-the signature with `navide-plugin sign <package> --key <privkey>`. See the
-README "Security model" section for the publish gate and policy config.
+(`registry/signing.py :: Ed25519SignatureVerifier`). This authenticates the
+submission only; it is not returned as the Client trust contract. Once accepted,
+the registry signs the full artifact digest and immutable listing envelope with
+its registry signer and returns root-signed signer/blocklist metadata. Produce
+the submission signature with `navide-plugin sign <package> --key <privkey>`.
+See the README "Security model" section for the publish gate and policy config.

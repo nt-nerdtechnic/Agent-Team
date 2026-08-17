@@ -10,14 +10,19 @@ from typing import Any
 import pytest
 
 from agent_team_backend.plugins import wiring
+from agent_team_backend.plugins.activation_catalog import (
+    ACTIVATION_CATALOG_DIGEST_ENV,
+    ACTIVATION_CATALOG_PATH_ENV,
+)
 from agent_team_backend.plugins.builtin.navide_plans import plan_mcp, plan_mcp_wiring
 from agent_team_backend.plugins.host import PluginHost
 
 
 @pytest.fixture
 def host(monkeypatch: pytest.MonkeyPatch) -> Iterator[PluginHost]:
-    """A fresh host with the external plugins dir masked off, torn down after."""
-    monkeypatch.delenv(wiring.PLUGINS_DIR_ENV, raising=False)
+    """A fresh host with external activation evidence masked off."""
+    monkeypatch.delenv(ACTIVATION_CATALOG_PATH_ENV, raising=False)
+    monkeypatch.delenv(ACTIVATION_CATALOG_DIGEST_ENV, raising=False)
     host = PluginHost()
     yield host
     wiring.shutdown(host)

@@ -124,9 +124,10 @@ The publish staging directory and final archive obey these rules:
   ancestor collisions, symlinks, and non-regular special files are rejected
   before extraction. A directory entry may have one trailing `/`; that slash
   is removed for canonical comparison and extraction.
-- `.navide-receipt.json`, version selectors, storage snapshots, and
-  active/previous state are Host-owned and must not appear in an author-created
-  archive.
+- `.navide-receipt.json`, `.navide-registry-receipt.json`,
+  `.navide-package.zip`, `.navide-registry-trust.json`, version selectors,
+  activation catalogs, storage snapshots, and active/previous state are
+  Host-owned and must not appear in an author-created archive.
 - Source files, tests, private keys, credentials, caches, `node_modules`, and
   build-system output not referenced by the package must be excluded. The
   packager uses an explicit canonical file list rather than recursively zipping
@@ -134,6 +135,9 @@ The publish staging directory and final archive obey these rules:
 - The detached publisher signature is not stored in the ZIP. It signs the
   digest of the complete archive, so the manifest, frontend, backend, assets,
   and optional documentation are all covered.
+- The normal marketplace installer rejects unsigned Manifest v2 archives.
+  Unsigned local code belongs to the separate Developer Mode path and is not
+  eligible for publishing or automatic updates.
 
 ### Backend source, development, and publish contract
 
@@ -147,7 +151,7 @@ protocol.
 | Source development | Authors may use `.py` files, a virtual environment, and any Python build/test layout. | None. Source layout is not an installed interface. |
 | `navide-plugin dev` | The author-owned development tool may launch the local Python interpreter or a temporary build. It must expose the same protocol-compatible child process used by the packaged backend. | Developer Mode receives a development launch descriptor; this exception is unsigned, local-only, and cannot be published or auto-updated. |
 | `navide-plugin package` | Python, its required modules, and the plugin code are bundled into a target-specific executable by an author-selected tool such as PyInstaller or Nuitka. | `backend.entry` names the resulting executable inside the archive. |
-| Install and runtime | No Python installation, `pip`, virtual environment, source checkout, or author build tool may be required on the user's machine. | The Host verifies and spawns `backend.entry` directly, without a shell, then communicates only through the declared backend protocol. |
+| Install and runtime target | No Python installation, `pip`, virtual environment, source checkout, or author build tool may be required on the user's machine. | The future Electron child-process supervisor will re-verify the Host-approved activation record, spawn `backend.entry` directly without a shell, and communicate only through the declared backend protocol. Issue 05 currently emits a fail-closed activation catalog; it does not spawn third-party v2 backends. |
 
 Manifest validation rejects recognizable source or script suffixes. Package
 validation also rejects empty backend entries, POSIX entries without executable
@@ -693,15 +697,40 @@ unrelated plugins do not restart.
 A backend plugin is native local code. Process isolation limits crash impact;
 it does not restrict filesystem, network, subprocess, or OS access.
 
-- Normal mode runs backend artifacts signed by a trusted publisher key.
-- The official registry is verified by a root key pinned in Navide. A
-  self-hosted registry requires explicit fingerprint trust.
-- Signatures identify the publisher key ID. Trust metadata records active,
+- Normal mode will run only complete artifacts covered by a Registry envelope
+  signature that chains to a Host-pinned Registry root; publisher keys are not
+  Client trust roots in v2.
+- An Official Registry can claim the reserved `navide.` namespace only when
+  the App build provisions an independent Registry root for the exact Official
+  Registry URL and the current root-signed profile is `official`. This build
+  intentionally ships with that production root unprovisioned, so the Official
+  Registry path fails closed until release provisioning supplies it. The
+  publisher namespace key is never reused as a Registry root.
+- A self-hosted Registry must have a durable Host-owned approval that binds its
+  URL, root PEM, and a separately confirmed SPKI SHA-256 fingerprint before
+  Navide contacts it. A self-hosted root remains a separate verification root;
+  even root-signed metadata claiming `registryProfile: "official"` cannot grant
+  Official Registry namespace authority. The informational fingerprint
+  returned by the Registry is never a trust root.
+  The approval document uses the exact fields `schemaVersion`, `registryUrl`,
+  `rootPublicKeyPem`, and `confirmedFingerprint`; unknown or duplicate JSON
+  fields fail closed. The local development default (`http://localhost:8787`)
+  is self-hosted and therefore requires this approval too.
+- Registry envelope signatures identify the Registry signer key ID. Root-signed
+  trust metadata records active,
   rotating, expired, and revoked keys. Rotation has a bounded old/new overlap.
 - Yank prevents new installs; revocation also blocks install, update, activation,
-  and spawn. A newly revoked running plugin is drained, stopped, and quarantined.
-- Developer mode may run unsigned backend artifacts with a persistent warning,
-  but they cannot auto-update.
+  and future backend spawn. A newly revoked running frontend plugin is stopped
+  and quarantined; the later Electron backend supervisor must enforce the same
+  decision before and during backend execution.
+- Developer Mode accepts one explicitly selected local unpacked Manifest v2
+  frontend directory only when `AGENT_TEAM_PLUGIN_DEV=1` and
+  `AGENT_TEAM_PLUGIN_DEV_PATH` names that exact directory. It validates the
+  strict manifest, rejects reserved ids and backend contributions, and records
+  a persistent unsigned/local-only warning. The existing fixed dist-plugins
+  bundles remain Host-owned app-development fixtures, not this package
+  selection path. Developer Mode packages cannot publish, auto-update, execute
+  backend code, or claim Registry provenance.
 
 The package archive signature covers the manifest, frontend, backend, assets,
 and their digests. Each OS/architecture artifact is signed independently.

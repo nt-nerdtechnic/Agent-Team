@@ -1,0 +1,254 @@
+import { generateKeyPairSync, sign } from 'node:crypto'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import {
+  REGISTRY_ARTIFACT_NAME,
+  REGISTRY_RECEIPT_NAME,
+  REGISTRY_TRUST_SNAPSHOT_NAME,
+  assertRegistryTrustSnapshotDoesNotRollback,
+  discoverInstalledRegistryPackageIds,
+  readRegistryTrustSnapshot,
+  registryReceiptFromEvidence,
+  verifyInstalledRegistryPackage,
+  type InstalledRegistryTrustContext,
+} from './pluginInstalledTrust'
+import {
+  canonicalTrustJson,
+  type RegistryPackageEnvelope,
+  type RegistryTrustMetadata,
+} from './pluginRegistryTrust'
+import { sha256Hex } from './pluginVerify'
+import { makeZip } from './zipFixture'
+
+const rootKey = generateKeyPairSync('ed25519')
+const signerKey = generateKeyPairSync('ed25519')
+const rootPem = rootKey.publicKey.export({ type: 'spki', format: 'pem' }).toString()
+const signerPem = signerKey.publicKey.export({ type: 'spki', format: 'pem' }).toString()
+const now = new Date('2026-08-16T12:00:00.000Z')
+
+function signed(value: unknown, privateKey = signerKey.privateKey): string {
+  return sign(null, Buffer.from(canonicalTrustJson(value)), privateKey).toString('base64')
+}
+
+describe('verifyInstalledRegistryPackage', () => {
+  let root: string
+  let pluginDir: string
+  let archive: Uint8Array
+  let envelope: RegistryPackageEnvelope
+  let metadata: RegistryTrustMetadata
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'navide-installed-trust-'))
+    pluginDir = join(root, 'acme.demo')
+    mkdirSync(join(pluginDir, 'frontend'), { recursive: true })
+    const manifest = JSON.stringify({
+      schemaVersion: 2,
+      apiVersion: '^1.0.0',
+      id: 'acme.demo',
+      name: 'Demo',
+      version: '1.0.0',
+      publisher: 'acme',
+      permissions: {},
+      marketplace: { description: 'Demo', license: 'MIT' },
+      contributes: {
+        views: [
+          {
+            id: 'main',
+            kind: 'custom',
+            location: 'main',
+            title: 'Demo',
+            entry: 'frontend/index.html',
+          },
+        ],
+      },
+    })
+    archive = new Uint8Array(
+      makeZip([
+        { name: 'manifest.json', data: manifest },
+        { name: 'frontend/index.html', data: '<!doctype html>' },
+      ])
+    )
+    envelope = {
+      schemaVersion: 1,
+      artifactDigest: sha256Hex(archive),
+      packageId: 'acme.demo',
+      version: '1.0.0',
+      target: 'universal',
+      publisherId: 'acme',
+      keyId: 'registry-test',
+      signedAt: '2026-08-16T11:00:00.000Z',
+    }
+    metadata = {
+      schemaVersion: 1,
+      registryProfile: 'official',
+      rootFingerprint: `sha256:${'1'.repeat(64)}`,
+      generatedAt: '2026-08-16T10:00:00.000Z',
+      expiresAt: '2026-08-17T10:00:00.000Z',
+      signers: [
+        {
+          keyId: 'registry-test',
+          publicKey: signerPem,
+          status: 'active',
+          notBefore: '2026-08-01T00:00:00.000Z',
+          notAfter: '2026-09-01T00:00:00.000Z',
+        },
+      ],
+      blockedPublishers: [],
+      blockedPackages: [],
+    }
+    writeFileSync(join(pluginDir, 'manifest.json'), manifest)
+    writeFileSync(join(pluginDir, 'frontend', 'index.html'), '<!doctype html>')
+    writeFileSync(join(pluginDir, REGISTRY_ARTIFACT_NAME), archive)
+    writeFileSync(
+      join(pluginDir, REGISTRY_RECEIPT_NAME),
+      JSON.stringify(
+        registryReceiptFromEvidence({
+          packageId: 'acme.demo',
+          version: '1.0.0',
+          publisherId: 'acme',
+          target: 'universal',
+          artifactDigest: sha256Hex(archive),
+          envelope,
+          envelopeSignature: signed(envelope),
+        })
+      )
+    )
+  })
+
+  afterEach(() => rmSync(root, { recursive: true, force: true }))
+
+  function context(current = metadata): InstalledRegistryTrustContext {
+    return {
+      pinnedRootKey: rootPem,
+      snapshot: {
+        schemaVersion: 1,
+        metadata: current,
+        metadataSignature: signed(current, rootKey.privateKey),
+      },
+      now,
+    }
+  }
+
+  it('allows activation only after archive, envelope, identity, and extracted content verify', () => {
+    expect(verifyInstalledRegistryPackage(pluginDir, 'acme.demo', context())).toEqual({
+      action: 'allow',
+      artifactDigest: sha256Hex(archive),
+    })
+  })
+
+  it('quarantines an installed package whose extracted content changed', () => {
+    writeFileSync(join(pluginDir, 'frontend', 'index.html'), 'tampered')
+    expect(verifyInstalledRegistryPackage(pluginDir, 'acme.demo', context())).toMatchObject({
+      action: 'quarantine',
+      reason: expect.stringMatching(/modified/),
+    })
+  })
+
+  it('uses current root-signed blocklist metadata instead of install-time trust', () => {
+    const blocked = { ...metadata, blockedPublishers: ['acme'] }
+    expect(verifyInstalledRegistryPackage(pluginDir, 'acme.demo', context(blocked))).toMatchObject({
+      action: 'quarantine',
+      reason: expect.stringMatching(/blocked/),
+    })
+  })
+
+  it('fails closed when current trust metadata is unavailable', () => {
+    expect(
+      verifyInstalledRegistryPackage(pluginDir, 'acme.demo', {
+        pinnedRootKey: rootPem,
+        snapshot: null,
+        now,
+      })
+    ).toMatchObject({ action: 'quarantine', reason: expect.stringMatching(/unavailable/) })
+  })
+
+  it('quarantines a self-hosted receipt under an Official Registry Host config', () => {
+    expect(
+      verifyInstalledRegistryPackage(
+        pluginDir,
+        'acme.demo',
+        {
+          ...context(),
+          registryAuthority: 'official',
+          officialRegistryUrl: 'https://registry.navide.dev',
+        }
+      )
+    ).toMatchObject({
+      action: 'quarantine',
+      reason: expect.stringMatching(/authority/),
+    })
+  })
+
+  it('quarantines a receipt with duplicate package identity keys', () => {
+    const receiptPath = join(pluginDir, REGISTRY_RECEIPT_NAME)
+    const receipt = readFileSync(receiptPath, 'utf8')
+    writeFileSync(receiptPath, receipt.replace('"packageId":"acme.demo"', '"packageId":"acme.demo","packageId":"acme.demo"'))
+
+    expect(verifyInstalledRegistryPackage(pluginDir, 'acme.demo', context())).toMatchObject({
+      action: 'quarantine',
+      reason: expect.stringMatching(/malformed|duplicate JSON object key/),
+    })
+  })
+
+  it('rejects a retained snapshot with duplicate generatedAt keys', () => {
+    const snapshot = context().snapshot
+    if (!snapshot) throw new Error('test snapshot missing')
+    const metadata = JSON.stringify(snapshot.metadata)
+    const duplicateMetadata = metadata.replace(
+      '"generatedAt":"2026-08-16T10:00:00.000Z"',
+      '"generatedAt":"2026-08-16T10:00:00.000Z","generatedAt":"2026-08-16T10:00:00.000Z"'
+    )
+    writeFileSync(
+      join(root, REGISTRY_TRUST_SNAPSHOT_NAME),
+      `{"schemaVersion":1,"metadata":${duplicateMetadata},"metadataSignature":${JSON.stringify(snapshot.metadataSignature)}}`
+    )
+
+    expect(readRegistryTrustSnapshot(root)).toBeNull()
+  })
+
+  it('treats a malformed retained snapshot as repairable during anti-rollback checks', () => {
+    const snapshot = context().snapshot
+    if (!snapshot) throw new Error('test snapshot missing')
+    const metadata = JSON.stringify(snapshot.metadata).replace(
+      '"generatedAt":"2026-08-16T10:00:00.000Z"',
+      '"generatedAt":"2026-08-16T10:00:00.000Z","generatedAt":"2026-08-16T10:00:00.000Z"'
+    )
+    const next = {
+      ...snapshot,
+      metadata: { ...snapshot.metadata, generatedAt: '2026-08-16T11:00:00.000Z' },
+    }
+    expect(() =>
+      assertRegistryTrustSnapshotDoesNotRollback(
+        new TextEncoder().encode(
+          `{"schemaVersion":1,"metadata":${metadata},"metadataSignature":${JSON.stringify(snapshot.metadataSignature)}}`
+        ),
+        next
+      )
+    ).not.toThrow()
+  })
+
+  it('discovers a package only when its directory, manifest, and retained artifact agree', () => {
+    expect(discoverInstalledRegistryPackageIds(root)).toEqual(['acme.demo'])
+  })
+
+  it('does not discover a package with a malformed installed manifest', () => {
+    writeFileSync(join(pluginDir, 'manifest.json'), '{not-json')
+    expect(discoverInstalledRegistryPackageIds(root)).toEqual([])
+  })
+
+  it('does not discover a package whose installed manifest identity differs from its directory', () => {
+    const manifest = JSON.parse(readFileSync(join(pluginDir, 'manifest.json'), 'utf8')) as {
+      id: string
+    }
+    manifest.id = 'other.package'
+    writeFileSync(join(pluginDir, 'manifest.json'), JSON.stringify(manifest))
+    expect(discoverInstalledRegistryPackageIds(root)).toEqual([])
+  })
+
+  it('does not discover a package after its directory is missing', () => {
+    rmSync(pluginDir, { recursive: true, force: true })
+    expect(discoverInstalledRegistryPackageIds(root)).toEqual([])
+  })
+})

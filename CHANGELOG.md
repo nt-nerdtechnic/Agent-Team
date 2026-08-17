@@ -15,6 +15,18 @@ All notable released changes to Navide will be documented in this file. The form
 - Add Meta Muse Code as a spawnable CLI agent, including install detection and one-click install. Resume, log reading and credential switching remain unavailable for it until they are verified against a real installation.
 - Validate Manifest v2 frontend contributions consistently in the App and marketplace registry, including strict view discovery and package-entry checks.
 - Validate, install, list, and remove Manifest v2 backend-only and combined packages from one active package version, and publish the Backend Wire v1 contract corpus.
+- Require a verified publisher signature before a Manifest v2 marketplace
+  package can be installed, including packages whose signed listing metadata
+  has been modified.
+- Stop scanning arbitrary external directories for legacy Python backend
+  plugins; validate only the Host-bound Manifest v2 activation projection while
+  packaged backend process supervision remains fail-closed.
+- Keep Official Registry namespace authority separate from self-hosted root
+  verification, fail closed while the independent production Registry root is
+  unprovisioned, and reject publisher-key reuse as Registry trust.
+- Add an opt-in `AGENT_TEAM_PLUGIN_DEV_PATH` seam for one explicitly selected
+  local Manifest v2 frontend package; reserved ids, backend contributions, and
+  Registry provenance remain unavailable in Developer Mode.
 
 ## [0.1.62] — 2026-07-26 — signed release
 

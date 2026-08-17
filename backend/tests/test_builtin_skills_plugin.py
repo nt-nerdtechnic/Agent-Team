@@ -5,12 +5,17 @@ from collections.abc import Iterator
 import pytest
 
 from agent_team_backend.plugins import wiring
+from agent_team_backend.plugins.activation_catalog import (
+    ACTIVATION_CATALOG_DIGEST_ENV,
+    ACTIVATION_CATALOG_PATH_ENV,
+)
 from agent_team_backend.plugins.host import PluginHost
 
 
 @pytest.fixture
 def host(monkeypatch: pytest.MonkeyPatch) -> Iterator[PluginHost]:
-    monkeypatch.delenv(wiring.PLUGINS_DIR_ENV, raising=False)
+    monkeypatch.delenv(ACTIVATION_CATALOG_PATH_ENV, raising=False)
+    monkeypatch.delenv(ACTIVATION_CATALOG_DIGEST_ENV, raising=False)
     host = PluginHost()
     yield host
     wiring.shutdown(host)

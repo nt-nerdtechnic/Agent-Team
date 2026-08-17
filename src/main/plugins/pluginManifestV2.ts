@@ -10,6 +10,12 @@ const V2_HTTPS_URI_RE = /^https:\/\/[^\s]+$/
 export const V2_VIEW_LOCATIONS = ['top', 'bottom', 'right', 'left', 'main', 'window'] as const
 export const V2_SYSTEM_NAMESPACES = ['fs', 'ui', 'aiCli'] as const
 export const V2_SHELL_MODES = ['allowlist', 'full'] as const
+
+/** Return whether a value is a canonical Manifest v2 package id. */
+export function isValidManifestV2PluginId(value: unknown): value is string {
+  return typeof value === 'string' && V2_ID_RE.test(value)
+}
+
 export type PluginSystemNamespace = (typeof V2_SYSTEM_NAMESPACES)[number]
 export type PluginShellMode = (typeof V2_SHELL_MODES)[number]
 
@@ -248,6 +254,9 @@ export function parseManifestV2(raw: Record<string, unknown>): PluginManifestV2 
   if (!V2_VERSION_RE.test(version)) fail(`manifest version must be semver, got ${version}`)
   const publisher = stringValue(requiredValue(raw, 'publisher', 'manifest'), 'manifest publisher', 1)
   if (!V2_PUBLISHER_RE.test(publisher)) fail('manifest publisher must be lowercase')
+  if (id.split('.', 1)[0] !== publisher) {
+    fail('manifest publisher must match id namespace')
+  }
 
   let engines: { navide: string } | undefined
   if (raw.engines !== undefined) {

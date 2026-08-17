@@ -26,6 +26,19 @@ from .path_policy import (
 
 MANIFEST_NAME = "manifest.json"
 
+# These files are written by the Host after installation and must never be
+# supplied by a package. Store the names in the same portable collision-key
+# form used for archive path validation so case-folded aliases are rejected.
+_HOST_OWNED_ARCHIVE_NAMES = frozenset(
+    {
+        ".navide-receipt.json",
+        ".navide-registry-receipt.json",
+        ".navide-package.zip",
+        ".navide-registry-trust.json",
+        ".navide-backend-activation.json",
+    }
+)
+
 
 class PackageError(ValueError):
     """Raised when an archive is not a valid plugin package."""
@@ -70,6 +83,8 @@ def _validate_archive_entries(
         collision_key = portable_archive_collision_key(path)
         if collision_key is None:
             raise PackageError(f"unsafe archive entry path: {info.filename}")
+        if collision_key in _HOST_OWNED_ARCHIVE_NAMES:
+            raise PackageError(f"archive entry is Host-owned: {path}")
         if collision_key in seen:
             raise PackageError(f"duplicate archive entry: {path}")
         seen.add(collision_key)

@@ -326,6 +326,13 @@ describe('devPlansPluginDescriptor', () => {
     ).not.toThrow()
     expect(mgr.getDescriptor(PLANS_PLUGIN_ID)?.id).toBe('navide.plans')
   })
+
+  it('keeps fixed Host development bundles out of explicit-package inventory', () => {
+    const mgr = new FrontendPluginManager()
+    mgr.registerDeveloperDescriptor(devPlansPluginDescriptor())
+    expect(mgr.getDescriptor(PLANS_PLUGIN_ID)?.id).toBe(PLANS_PLUGIN_ID)
+    expect(mgr.listInstalledPackages()).toEqual([])
+  })
 })
 
 describe('registerDescriptor reserved-id guard', () => {
@@ -518,6 +525,23 @@ describe('loadInstalledPlugins official receipt gate', () => {
     expect(mgr.getDescriptor('navide.mini-ide')).toBeDefined()
   })
 
+  it('does not let a self-hosted Registry context activate a reserved legacy package', () => {
+    writePlugin('navide.mini-ide', officialReceipt('navide.mini-ide'))
+    const mgr = new FrontendPluginManager()
+    const result = mgr.loadInstalledPlugins(root, {
+      provenance: 'official-registry',
+      trust: {
+        pinnedRootKey: officialPem,
+        snapshot: null,
+        registryAuthority: 'self-hosted',
+        officialRegistryUrl: 'https://registry.navide.dev',
+      },
+    })
+    expect(result.loaded).toEqual([])
+    expect(result.errors.join(' ')).toMatch(/App-authorized Official Registry/)
+    expect(mgr.getDescriptor('navide.mini-ide')).toBeUndefined()
+  })
+
   it('refuses a navide. plugin without a receipt', () => {
     writePlugin('navide.mini-ide')
     const mgr = new FrontendPluginManager()
@@ -568,7 +592,9 @@ describe('loadInstalledPlugins official receipt gate', () => {
     writeV2Plugin('frontend-only', { id: 'acme.viewer', frontend: true })
 
     const mgr = new FrontendPluginManager()
-    const { loaded, errors, activationCatalog } = mgr.loadInstalledPlugins(root)
+    const { loaded, errors, activationCatalog } = mgr.loadInstalledPlugins(root, {
+      provenance: 'developer-local-unpacked',
+    })
 
     expect(errors).toEqual([])
     expect([...loaded].sort()).toEqual(['acme.files', 'acme.viewer'])
@@ -590,6 +616,71 @@ describe('loadInstalledPlugins official receipt gate', () => {
     ])
   })
 
+  describe('explicit Developer Mode package selection', () => {
+    it('loads one explicitly selected frontend package only when opted in', () => {
+      writeV2Plugin('viewer', { id: 'acme.viewer', frontend: true })
+      const mgr = new FrontendPluginManager()
+
+      expect(mgr.loadExplicitDeveloperPlugin(join(root, 'viewer'), false)).toMatchObject({
+        loaded: false,
+        error: expect.stringMatching(/opt-in/),
+      })
+      expect(mgr.loadExplicitDeveloperPlugin(join(root, 'viewer'), true)).toEqual({
+        loaded: true,
+        pluginId: 'acme.viewer',
+      })
+      expect(mgr.listInstalledPackages()).toEqual([
+        {
+          id: 'acme.viewer',
+          requires: [],
+          provenance: 'developer-local-unpacked',
+          warning: 'Unsigned local unpacked plugin — Developer Mode only',
+        },
+      ])
+    })
+
+    it('does not scan a selected parent directory', () => {
+      writeV2Plugin('viewer', { id: 'acme.viewer', frontend: true })
+      const mgr = new FrontendPluginManager()
+      expect(mgr.loadExplicitDeveloperPlugin(root, true)).toMatchObject({
+        loaded: false,
+        error: expect.stringMatching(/manifest/),
+      })
+      expect(mgr.listInstalledPackages()).toEqual([])
+    })
+
+    it.each([
+      ['missing path', undefined, /explicit package directory/],
+      ['reserved id', 'navide-spoof', /reserved/],
+      ['backend package', 'backend', /backend/],
+    ])('rejects Developer Mode %s', (_label, selected, expected) => {
+      if (selected === 'navide-spoof') {
+        writeV2Plugin(selected, { id: 'navide.spoof', frontend: true })
+      } else if (selected === 'backend') {
+        writeV2Plugin(selected, { id: 'acme.backend', backend: true })
+      }
+      const mgr = new FrontendPluginManager()
+      const selectedPath = selected === undefined ? undefined : join(root, selected)
+      expect(mgr.loadExplicitDeveloperPlugin(selectedPath, true)).toMatchObject({
+        loaded: false,
+        error: expect.stringMatching(expected),
+      })
+      expect(mgr.listInstalledPackages()).toEqual([])
+    })
+
+    it('rejects invalid manifests before registering a local package', () => {
+      const dir = join(root, 'invalid')
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, 'manifest.json'), '{"schemaVersion":2}')
+      const mgr = new FrontendPluginManager()
+      expect(mgr.loadExplicitDeveloperPlugin(dir, true)).toMatchObject({
+        loaded: false,
+        error: expect.stringMatching(/manifest|invalid/),
+      })
+      expect(mgr.listInstalledPackages()).toEqual([])
+    })
+  })
+
   it('rejects duplicate package identities without blocking unrelated v2 packages', () => {
     writeV2Plugin('files-v1', {
       id: 'acme.files',
@@ -606,7 +697,9 @@ describe('loadInstalledPlugins official receipt gate', () => {
     writeV2Plugin('viewer', { id: 'acme.viewer', frontend: true })
 
     const mgr = new FrontendPluginManager()
-    const { loaded, errors, activationCatalog } = mgr.loadInstalledPlugins(root)
+    const { loaded, errors, activationCatalog } = mgr.loadInstalledPlugins(root, {
+      provenance: 'developer-local-unpacked',
+    })
 
     expect(errors.join(' ')).toMatch(/duplicate plugin packages/)
     expect(errors.join(' ')).toContain(join(root, 'files-v1'))
@@ -623,7 +716,9 @@ describe('loadInstalledPlugins official receipt gate', () => {
     writeV2Plugin('viewer', { id: 'acme.viewer', frontend: true })
 
     const mgr = new FrontendPluginManager()
-    const { loaded, errors, activationCatalog } = mgr.loadInstalledPlugins(root)
+    const { loaded, errors, activationCatalog } = mgr.loadInstalledPlugins(root, {
+      provenance: 'developer-local-unpacked',
+    })
 
     expect(errors.join(' ')).toMatch(/acme\.demo: duplicate plugin packages/)
     expect(errors.join(' ')).toContain(join(root, 'acme.demo'))
@@ -656,11 +751,11 @@ describe('loadInstalledPlugins official receipt gate', () => {
 
     expect(loaded).toEqual([])
     expect(activationCatalog).toEqual([])
-    expect(errors.join(' ')).toMatch(/receipt/)
+    expect(errors.join(' ')).toMatch(/Registry trust context/)
     expect(mgr.listInstalledPackages()).toEqual([])
   })
 
-  it('catalogs a reserved backend-only package after receipt verification', () => {
+  it('does not accept a legacy digest receipt for a v2 reserved package', () => {
     writeV2Plugin('navide-skills', {
       id: 'navide.skills',
       backend: true,
@@ -671,9 +766,29 @@ describe('loadInstalledPlugins official receipt gate', () => {
     const { loaded, errors, activationCatalog } = mgr.loadInstalledPlugins(root)
 
     expect(loaded).toEqual([])
-    expect(errors).toEqual([])
-    expect(activationCatalog.map((entry) => entry.pluginId)).toEqual(['navide.skills'])
-    expect(mgr.listInstalledPackages().map((pkg) => pkg.id)).toEqual(['navide.skills'])
+    expect(errors.join(' ')).toMatch(/Registry trust context/)
+    expect(activationCatalog).toEqual([])
+    expect(mgr.listInstalledPackages()).toEqual([])
+  })
+
+  it('stops and unregisters a v2 frontend when refreshed trust quarantines it', () => {
+    writeV2Plugin('viewer', { id: 'acme.viewer', frontend: true })
+    const mgr = new FrontendPluginManager()
+    const loaded = mgr.loadInstalledPlugins(root, {
+      provenance: 'developer-local-unpacked',
+    })
+    expect(loaded.loaded).toEqual(['acme.viewer'])
+
+    const decisions = mgr.refreshInstalledPluginTrust(root, {
+      pinnedRootKey: officialPem,
+      snapshot: null,
+    })
+
+    expect(decisions).toEqual([
+      expect.objectContaining({ pluginId: 'acme.viewer', action: 'quarantine' }),
+    ])
+    expect(mgr.getDescriptor('acme.viewer')).toBeUndefined()
+    expect(mgr.listInstalledPackages()).toEqual([])
   })
 })
 

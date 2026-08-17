@@ -184,6 +184,8 @@ export interface PluginActivationCatalogEntry {
   packageDir: string
   views: PluginViewLaunchDescriptor[]
   backend?: PluginBackendActivation
+  provenance?: 'official-registry' | 'developer-local-unpacked'
+  artifactDigest?: string
 }
 
 /** Derive every runtime contribution atomically from one validated v2 package. */
@@ -307,6 +309,8 @@ export interface ScannedPlugin {
 export interface InstalledPluginPackageSummary {
   id: string
   requires: string[]
+  provenance?: 'official-registry' | 'developer-local-unpacked'
+  warning?: string
 }
 
 export function manifestToInstalledPackageSummary(

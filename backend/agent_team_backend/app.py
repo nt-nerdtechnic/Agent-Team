@@ -1016,11 +1016,12 @@ async def _start_log_watcher() -> None:
         except Exception as err:  # noqa: BLE001
             log.warning("%s hooks install failed: %s", _key, err)
 
-    # Backend plugin host: discover, load and activate onStartup plugins from
-    # the bundled builtin dir plus AGENT_TEAM_PLUGINS_DIR, then apply what
-    # they registered (HTTP routes, startup hooks). Guarded — plugins must
-    # never block startup; per-plugin/per-hook failures are isolated inside
-    # the wiring layer.
+    # Backend plugin host: load and activate only bundled legacy v1 plugins.
+    # The Host-bound Manifest v2 activation catalog is validated by the wiring
+    # layer, but its packaged binaries await the Electron-owned child-process
+    # supervisor and are never imported into this Python service. Guarded —
+    # plugins must never block startup; per-plugin/per-hook failures are
+    # isolated inside the wiring layer.
     try:
         activated = await asyncio.to_thread(plugin_wiring.startup, plugin_host)
         if activated:

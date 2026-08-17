@@ -53,6 +53,7 @@ export type TrustTier = typeof TRUST_SIGNED | typeof TRUST_UNSIGNED
 /** Machine-readable reason an install was refused; the UI maps these to copy. */
 export type VerifyErrorCode =
   | 'DIGEST_MISMATCH'
+  | 'SIGNATURE_REQUIRED'
   | 'SIGNATURE_INVALID'
   | 'CAP_UNKNOWN'
   | 'ZIP_SLIP'

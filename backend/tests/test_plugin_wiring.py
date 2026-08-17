@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -57,18 +58,76 @@ def _write_plugin(
 # -- plugins_root / discovery ---------------------------------------------
 
 
-def test_plugins_root_env_absent_returns_none(
+def test_startup_does_not_scan_legacy_external_plugins_dir(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv(wiring.PLUGINS_DIR_ENV, raising=False)
-    assert wiring.plugins_root() is None
-    # startup with no env still boots the bundled builtin plugins.
+    external = _write_plugin(
+        tmp_path / "external",
+        _manifest("acme.external", ["onStartup"]),
+    )
+    monkeypatch.setenv("AGENT_TEAM_PLUGINS_DIR", str(external.parent))
+
     host = PluginHost()
     assert wiring.startup(host) == ["navide.plans", "navide.skills"]
+    assert host.get("acme.external") is None
     wiring.shutdown(host)
 
-    monkeypatch.setenv(wiring.PLUGINS_DIR_ENV, "  ")
-    assert wiring.plugins_root() is None
+
+def test_startup_does_not_import_host_approved_v2_backend_binary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package_dir = tmp_path / "acme.binary"
+    entry = package_dir / "backend" / "acme-binary"
+    entry.parent.mkdir(parents=True)
+    entry.write_bytes(b"not a Python module")
+    (package_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 2,
+                "id": "acme.binary",
+                "version": "1.0.0",
+                "backend": {
+                    "entry": "backend/acme-binary",
+                    "protocolVersion": 1,
+                    "activation": "startup",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    catalog = {
+        "schemaVersion": 1,
+        "packages": [
+            {
+                "pluginId": "acme.binary",
+                "packageVersion": "1.0.0",
+                "packageDir": str(package_dir),
+                "provenance": "official-registry",
+                "artifactDigest": "a" * 64,
+                "backend": {
+                    "entryFile": str(entry),
+                    "protocolVersion": 1,
+                    "activation": "startup",
+                },
+            }
+        ],
+    }
+    payload = json.dumps(catalog, separators=(",", ":")).encode()
+    catalog_path = tmp_path / ".navide-backend-activation.json"
+    catalog_path.write_bytes(payload)
+    catalog_path.chmod(0o600)
+    monkeypatch.setenv("AGENT_TEAM_PLUGIN_ACTIVATION_CATALOG", str(catalog_path))
+    monkeypatch.setenv(
+        "AGENT_TEAM_PLUGIN_ACTIVATION_CATALOG_SHA256",
+        hashlib.sha256(payload).hexdigest(),
+    )
+
+    host = PluginHost()
+    assert wiring.startup(host) == ["navide.plans", "navide.skills"]
+    assert host.get("acme.binary") is None
+    wiring.shutdown(host)
 
 
 def test_discover_skips_frontend_only_dirs(tmp_path: Path) -> None:

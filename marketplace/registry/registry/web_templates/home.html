@@ -6,7 +6,7 @@
   <div class="card-head">
     <h3 class="card-title">{{ e.display_name }}</h3>
     {% if e.trust_tier == 'signed-verified' %}
-      <span class="badge badge-signed" title="Signature verified against publisher key">✓ signed</span>
+      <span class="badge badge-signed" title="Signature produced by the registry signer">✓ signed</span>
     {% else %}
       <span class="badge badge-unsigned" title="No verified signature">unsigned</span>
     {% endif %}

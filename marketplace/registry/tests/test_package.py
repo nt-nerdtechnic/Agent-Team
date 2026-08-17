@@ -127,6 +127,13 @@ def test_invalid_manifest_rejected() -> None:
         read_package(build_package(manifest=valid_manifest(version="bad")))
 
 
+def test_v2_publisher_must_own_id_namespace() -> None:
+    manifest = contract_manifest()
+    manifest["publisher"] = "other"
+    with pytest.raises(PackageError, match="publisher must match id namespace"):
+        read_package(build_v2_package(manifest))
+
+
 def test_missing_icon_asset_rejected() -> None:
     with pytest.raises(PackageError, match="icon"):
         read_package(build_package(include_icon=False))
@@ -209,6 +216,23 @@ def test_case_folded_manifest_alias_is_rejected_before_manifest_read() -> None:
     entries.append(("MANIFEST.JSON", json.dumps(valid_manifest()).encode(), None))
     with pytest.raises(PackageError, match="duplicate archive entry"):
         read_package(_zip_with_entries(entries))
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        ".navide-receipt.json",
+        ".navide-registry-receipt.json",
+        ".navide-package.zip",
+        ".navide-registry-trust.json",
+        ".navide-backend-activation.json",
+    ],
+)
+@pytest.mark.parametrize("case_fold", [False, True], ids=["exact", "uppercase-alias"])
+def test_host_owned_archive_name_is_rejected(name: str, case_fold: bool) -> None:
+    archive_name = name.upper() if case_fold else name
+    with pytest.raises(PackageError, match="Host-owned"):
+        read_package(build_package(extra_files={archive_name: b"{}"}))
 
 
 @pytest.mark.parametrize(

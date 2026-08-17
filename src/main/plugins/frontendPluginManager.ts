@@ -47,6 +47,10 @@ import {
   type PluginActivationCatalogEntry,
 } from './installedPlugins'
 import { resolveOfficialPublisherKey } from './pluginVerify'
+import {
+  verifyInstalledRegistryPackage,
+  type InstalledRegistryTrustContext,
+} from './pluginInstalledTrust'
 import { legacyCapabilityPolicy, type PluginCapabilityPolicy } from './pluginPermissions'
 import {
   createWsClient,
@@ -163,6 +167,15 @@ function revealHostWindow(win: BrowserWindow): void {
  *  overwrite — a trusted plugin like `navide.mini-ide`. */
 export function isReservedPluginId(id: string): boolean {
   return id === 'navide.mini-ide' || id.startsWith('navide.')
+}
+
+function hasOfficialRegistryAuthority(trust: InstalledRegistryTrustContext): boolean {
+  return (
+    trust.registryAuthority === 'official' &&
+    trust.officialRegistryUrl !== undefined &&
+    trust.snapshot?.metadata.registryProfile === 'official' &&
+    trust.pinnedRootKey !== null
+  )
 }
 
 /**
@@ -966,8 +979,8 @@ export class FrontendPluginManager {
   /**
    * Register (or replace) an available plugin descriptor. Ids under the
    * reserved `navide.` namespace may only be registered by the host itself
-   * (`opts.builtin`) or by an install whose pinned-official-key verification
-   * passed (`opts.official`); a third-party plugin claiming such an id (e.g.
+   * (`opts.builtin`) or by an install whose App-authorized Official Registry
+   * verification passed (`opts.official`); a third-party plugin claiming such an id (e.g.
    * spoofing `navide.mini-ide` to hijack the trusted mini-IDE) is refused.
    */
   registerDescriptor(
@@ -1020,7 +1033,70 @@ export class FrontendPluginManager {
     return [...this.installedPackages.values()].map((summary) => ({
       id: summary.id,
       requires: [...summary.requires],
+      ...(summary.provenance ? { provenance: summary.provenance } : {}),
+      ...(summary.warning ? { warning: summary.warning } : {}),
     }))
+  }
+
+  /** Register one Host-selected local unpacked development bundle. The fixed
+   * Host call site, not package data, grants the reserved builtin identity.
+   * These fixed app bundles are not the explicit local-package acceptance
+   * path and therefore do not enter the installed-package inventory. */
+  registerDeveloperDescriptor(descriptor: PluginLaunchDescriptor): void {
+    this.registerDescriptor(descriptor, { builtin: true })
+  }
+
+  /**
+   * Load exactly one Host-selected Manifest v2 frontend package for Developer
+   * Mode. This intentionally reads the selected directory only; it never
+   * scans a parent directory or turns an arbitrary package tree into a
+   * registry-like inventory. Backend contributions remain fail-closed.
+   */
+  loadExplicitDeveloperPlugin(
+    packageDir: string | undefined,
+    optedIn = process.env['AGENT_TEAM_PLUGIN_DEV'] === '1'
+  ): { loaded: true; pluginId: string } | { loaded: false; error: string } {
+    if (!optedIn) {
+      return { loaded: false, error: 'Developer Mode explicit package loading requires opt-in' }
+    }
+    if (!packageDir || packageDir.trim().length === 0) {
+      return { loaded: false, error: 'an explicit package directory must be selected' }
+    }
+    const scanned = loadPluginDir(packageDir)
+    if (scanned.error) return { loaded: false, error: scanned.error }
+    const activation = scanned.activation
+    if (!activation || !scanned.packageSummary) {
+      return {
+        loaded: false,
+        error: 'Developer Mode requires a valid Manifest v2 frontend package',
+      }
+    }
+    if (activation.backend) {
+      return { loaded: false, error: 'Developer Mode cannot load backend contributions' }
+    }
+    if (!scanned.descriptor) {
+      return {
+        loaded: false,
+        error: 'Developer Mode requires a valid Manifest v2 frontend package',
+      }
+    }
+    if (isReservedPluginId(activation.pluginId)) {
+      return {
+        loaded: false,
+        error: `Developer Mode cannot claim reserved plugin id '${activation.pluginId}'`,
+      }
+    }
+    const summary: InstalledPluginPackageSummary = {
+      ...scanned.packageSummary,
+      provenance: 'developer-local-unpacked',
+      warning: 'Unsigned local unpacked plugin — Developer Mode only',
+    }
+    try {
+      this.registerInstalledPackage(summary, scanned.descriptor)
+    } catch (error) {
+      return { loaded: false, error: error instanceof Error ? error.message : String(error) }
+    }
+    return { loaded: true, pluginId: activation.pluginId }
   }
 
   /** Replace one installed package's inventory and optional frontend descriptor
@@ -1047,6 +1123,8 @@ export class FrontendPluginManager {
     this.installedPackages.set(summary.id, {
       id: summary.id,
       requires: [...summary.requires],
+      ...(summary.provenance ? { provenance: summary.provenance } : {}),
+      ...(summary.warning ? { warning: summary.warning } : {}),
     })
   }
 
@@ -1067,7 +1145,13 @@ export class FrontendPluginManager {
    * contains only validated, trusted v2 packages whose optional frontend
    * registration succeeded; `loaded` retains its descriptor-only meaning.
    */
-  loadInstalledPlugins(root: string): {
+  loadInstalledPlugins(
+    root: string,
+    source?:
+      | { provenance: 'official-registry'; trust: InstalledRegistryTrustContext }
+      | { provenance: 'developer-local-unpacked' },
+    includePluginIds?: ReadonlySet<string>
+  ): {
     loaded: string[]
     errors: string[]
     activationCatalog: PluginActivationCatalogEntry[]
@@ -1088,17 +1172,68 @@ export class FrontendPluginManager {
       }
       const pluginId = scanned.activation?.pluginId ?? scanned.descriptor?.id
       if (pluginId === undefined || scanned.packageSummary === undefined) continue
+      if (includePluginIds && !includePluginIds.has(pluginId)) continue
+
+      const isV2 = scanned.activation !== undefined
+      if (isV2 && source?.provenance !== 'developer-local-unpacked') {
+        if (source?.provenance !== 'official-registry') {
+          errors.push(`${scanned.dir}: Registry trust context is required for Manifest v2`)
+          continue
+        }
+        const decision = verifyInstalledRegistryPackage(scanned.dir, pluginId, source.trust)
+        if (decision.action === 'quarantine') {
+          errors.push(`${scanned.dir}: quarantined: ${decision.reason ?? 'trust verification failed'}`)
+          continue
+        }
+        scanned.packageSummary.provenance = 'official-registry'
+        if (scanned.activation) {
+          scanned.activation.provenance = 'official-registry'
+          scanned.activation.artifactDigest = decision.artifactDigest
+        }
+      } else if (isV2) {
+        if (isReservedPluginId(pluginId)) {
+          errors.push(
+            `${scanned.dir}: Developer Mode cannot claim reserved plugin id '${pluginId}'`
+          )
+          continue
+        }
+        scanned.packageSummary.provenance = 'developer-local-unpacked'
+        scanned.packageSummary.warning = 'Unsigned local unpacked plugin — Developer Mode only'
+        if (scanned.activation) scanned.activation.provenance = 'developer-local-unpacked'
+      }
 
       // Reserved backend-only packages must pass the same receipt gate as view
       // packages before any contribution can enter the activation catalog.
       let opts: { official?: boolean } = {}
       if (isReservedPluginId(pluginId)) {
-        const check = verifyOfficialInstall(scanned.dir, pluginId, resolveOfficialPublisherKey())
-        if (!check.ok) {
-          errors.push(`${scanned.dir}: ${check.reason}`)
+        if (isV2) {
+          if (
+            source?.provenance === 'official-registry' &&
+            hasOfficialRegistryAuthority(source.trust)
+          ) {
+            opts = { official: true }
+          } else {
+            errors.push(
+              `${scanned.dir}: reserved plugin id '${pluginId}' requires the App-authorized Official Registry`
+            )
+            continue
+          }
+        } else if (
+          source?.provenance === 'official-registry' &&
+          !hasOfficialRegistryAuthority(source.trust)
+        ) {
+          errors.push(
+            `${scanned.dir}: reserved plugin id '${pluginId}' requires the App-authorized Official Registry`
+          )
           continue
+        } else {
+          const check = verifyOfficialInstall(scanned.dir, pluginId, resolveOfficialPublisherKey())
+          if (!check.ok) {
+            errors.push(`${scanned.dir}: ${check.reason}`)
+            continue
+          }
+          opts = { official: true }
         }
-        opts = { official: true }
       }
       approved.push({ scanned, pluginId, packageSummary: scanned.packageSummary, opts })
     }
@@ -1139,6 +1274,52 @@ export class FrontendPluginManager {
       }
     }
     return { loaded, errors, activationCatalog }
+  }
+
+  /** Re-evaluate installed v2 packages after a root-signed trust/blocklist
+   * refresh. A quarantine only stops/unregisters frontend state; it never
+   * deletes the retained package evidence. A future backend supervisor must
+   * consume these same decisions before spawn and when trust changes. */
+  refreshInstalledPluginTrust(
+    root: string,
+    trust: InstalledRegistryTrustContext
+  ): Array<{ pluginId: string; action: 'allow' | 'quarantine'; reason?: string }> {
+    const decisions: Array<{
+      pluginId: string
+      action: 'allow' | 'quarantine'
+      reason?: string
+    }> = []
+    for (const scanned of scanInstalledPlugins(root)) {
+      const pluginId = scanned.activation?.pluginId
+      if (!pluginId) continue
+      const decision = verifyInstalledRegistryPackage(scanned.dir, pluginId, trust)
+      if (
+        decision.action === 'allow' &&
+        isReservedPluginId(pluginId) &&
+        !hasOfficialRegistryAuthority(trust)
+      ) {
+        decisions.push({
+          pluginId,
+          action: 'quarantine',
+          reason: 'reserved plugin id requires the App-authorized Official Registry',
+        })
+        this.destroy(pluginId)
+        this.installedPackages.delete(pluginId)
+        this.descriptors.delete(pluginId)
+        const fallback = this.builtinFallbacks.get(pluginId)
+        if (fallback) this.registerDescriptor(fallback, { builtin: true })
+        continue
+      }
+      decisions.push({ pluginId, ...decision })
+      if (decision.action === 'quarantine') {
+        this.destroy(pluginId)
+        this.installedPackages.delete(pluginId)
+        this.descriptors.delete(pluginId)
+        const fallback = this.builtinFallbacks.get(pluginId)
+        if (fallback) this.registerDescriptor(fallback, { builtin: true })
+      }
+    }
+    return decisions
   }
 
   /** Unregister a descriptor and tear down its view if it is open. Used by the

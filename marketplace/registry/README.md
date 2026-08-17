@@ -47,7 +47,7 @@ uv --project marketplace/registry run pytest marketplace/registry/tests
 | POST | `/api/publishers` | Register/update a publisher's Ed25519 public key + bearer token. Admin-gated by `X-Admin-Token` when `REGISTRY_ADMIN_TOKEN` is set (open in dev). |
 | POST | `/api/publish` | Upload a `.vsix` package (multipart field `package`); requires a `Bearer` publisher token and (in strict mode) a valid `signature`. Validates manifest, verifies signature, stores blob + assets, appends a version with a trust tier. 409 on duplicate, 403 on cross-namespace/bad-signature, 401 on bad/missing token. |
 | GET | `/api/extensions` | Search (`q`) over name/description/categories, newest first, paginated (`offset`, `limit`). |
-| GET | `/api/extensions/{namespace}/{name}` | Extension detail + full version list + publisher. |
+| GET | `/api/extensions/{namespace}/{name}` | Extension detail + full version list, registry envelopes/signatures, and root-signed trust metadata. |
 | GET | `/api/extensions/{namespace}/{name}/{version}/download` | Stream the package blob **and increment** the per-version + aggregate download counters. |
 | POST | `/api/extensions/{namespace}/{name}/{version}/yank` | Soft-yank a version (excluded from latest resolution, still downloadable by exact version). |
 | POST | `/api/extensions/{namespace}/{name}/rating` | Add a `{ "score": 1..5 }` rating; returns the new average + count. Per-user auth/dedup is deferred (see below). |
@@ -86,13 +86,25 @@ deferred.
 
 ## Security model (p3-security + p3-publish)
 
-**Signing.** The registry runs its own plugin-signing chain (independent of
-Apple DevID / macOS notarization). A publisher registers an **Ed25519** public
-key; a package carries a detached **base64 signature over the package's sha256
-digest**. At publish time the signature is verified against the publisher's key
-(`registry/signing.py :: Ed25519SignatureVerifier`). The permissive
-`AcceptingSignatureVerifier` is retained for dev/tests and selected via
-`REGISTRY_VERIFIER=accepting`.
+**Signing.** Publisher Ed25519 signatures authenticate strict-mode submissions,
+but publisher keys are not part of the Client trust contract. After validating
+the publisher, namespace, manifest, and complete archive, the registry signs a
+canonical JSON envelope binding the archive digest, package/version/target,
+publisher, signer `keyId`, and signing time. Extension detail responses include
+that envelope/signature and current signer/blocklist metadata signed by the
+registry root. A Client accepts this metadata only after verifying it with an
+App- or user-pinned root; `rootFingerprint` in a response is informational and
+MUST NOT establish trust.
+
+The default `self-hosted-dev` profile creates persistent owner-only keys and a
+persistent signer lifecycle under `REGISTRY_DATA_DIR/trust/`. Its signed metadata
+is explicitly labelled `self-hosted-dev` and carries the generated root
+fingerprint so an operator can approve that root out of band. It never claims
+Official Registry provenance. The `official` profile never generates trust
+material: startup requires an explicit deployment config whose expected root
+fingerprint must match the configured root key and the root pinned into the App
+build. Registry root and signer private-key files must be regular, non-symlink
+files with owner-only permissions; generated files are created as `0600`.
 
 **Publisher auth + namespace entitlement.** Publish/yank require an
 `Authorization: Bearer <token>` header; the token is matched (sha256) against
@@ -100,10 +112,10 @@ digest**. At publish time the signature is verified against the publisher's key
 namespace** — the `namespace` half of the manifest `id` must equal the
 authenticated publisher (else `403`).
 
-**Trust tier (`registry/trust.py`).** Each version is tagged:
-
-- `signed-verified` — a signature verified against the publisher's key.
-- `unsigned` — no signature (only allowed when `REGISTRY_REQUIRE_SIGNATURE=false`).
+**Trust tier (`registry/trust.py`).** Accepted versions are `signed-verified`
+after the registry signature is created. Permissive dev mode may accept a
+submission without a publisher signature, but it still centrally signs the
+accepted artifact before exposing it to clients.
 
 `manifest.requires` is the declared capability allowlist; `fs` and `terminal`
 are flagged as **sensitive** (filesystem/shell reach). Trust tier + capabilities
@@ -117,7 +129,60 @@ Extensions view to warn users. This is metadata/gating only — no runtime sandb
 | `REGISTRY_VERIFIER` | `ed25519` | `ed25519` (real) or `accepting` (dev). |
 | `REGISTRY_REQUIRE_SIGNATURE` | `true` | Reject unsigned publishes. |
 | `REGISTRY_REQUIRE_AUTH` | `true` | Reject anonymous publish/yank. |
-| `REGISTRY_ADMIN_TOKEN` | _(unset)_ | Gates `POST /api/publishers` when set. |
+| `REGISTRY_ADMIN_TOKEN` | _(unset)_ | Gates `POST /api/publishers` when set; required and non-empty for the `official` profile. |
+| `REGISTRY_TRUST_PROFILE` | `self-hosted-dev` | `self-hosted-dev` for persistent locally generated trust material, or `official` for explicitly provisioned production material. |
+| `REGISTRY_TRUST_CONFIG_FILE` | _(unset)_ | Required with `official`; path to the complete signer, root, rotation, validity, and blocklist policy below. Rejected for the default profile. |
+
+### Official Registry trust deployment
+
+Set `REGISTRY_TRUST_PROFILE=official` and point
+`REGISTRY_TRUST_CONFIG_FILE` at a deployment-owned JSON file:
+
+```json
+{
+  "schemaVersion": 1,
+  "profile": "official",
+  "expectedRootFingerprint": "sha256:<App-build-pinned-SPKI-digest>",
+  "rootPrivateKeyFile": "/run/secrets/navide-registry-root.pem",
+  "signer": {
+    "keyId": "registry-2026-02",
+    "privateKeyFile": "/run/secrets/navide-registry-signer.pem",
+    "status": "active",
+    "notBefore": "2026-08-01T00:00:00Z",
+    "notAfter": "2027-08-01T00:00:00Z"
+  },
+  "trustedSigners": [
+    {
+      "keyId": "registry-2026-01",
+      "publicKeyFile": "/etc/navide/trust/registry-2026-01.pub",
+      "status": "rotating",
+      "notBefore": "2025-08-01T00:00:00Z",
+      "notAfter": "2026-09-01T00:00:00Z"
+    }
+  ],
+  "blockedPublishers": ["compromised-publisher"],
+  "blockedPackages": ["compromised.package", "acme.demo@1.2.3"]
+}
+```
+
+All fields are required and unknown or duplicate JSON keys fail startup. The
+current signer signs newly accepted artifacts. `trustedSigners` publishes prior
+or staged public keys for rotation without granting them access to current
+private signing material. Status is root-signed policy: `active` and
+time-bounded `rotating` signers can validate artifacts, `expired` signers cannot
+create new envelopes, and `revoked` signers fail closed. Package and publisher
+blocklists are part of the same root-signed metadata. Changing the official
+root requires a matching App build pin (or an authorization chain rooted in the
+previous key); a Registry response cannot introduce its own replacement root.
+
+The official profile also rejects verifier, signature, or publisher-auth
+downgrades at startup and requires `REGISTRY_ADMIN_TOKEN`; those controls remain
+configurable for `self-hosted-dev`.
+
+`rootPrivateKeyFile` is needed by this current implementation to refresh trust
+metadata. Production deployment must provide it as protected secret material;
+moving root signing to an offline/HSM-backed publisher can replace this file
+seam later without changing the Client wire contract.
 
 ## Packaging CLI (`navide-plugin`)
 

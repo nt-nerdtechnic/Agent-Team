@@ -11,17 +11,35 @@
 // confirmation (sensitive `fs`/`aiCli`/`shell` capabilities) AFTER verification but
 // BEFORE anything is written to disk.
 
-import { chmodSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { chmodSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { canonicalArchivePath } from './pluginPathPolicy'
+import { canonicalArchivePath, portableArchiveCollisionKey } from './pluginPathPolicy'
 import {
   verifyPackage,
   assertSafeArchiveEntries,
   assertOfficialPublisher,
   isOfficialPluginId,
   resolveOfficialPublisherKey,
+  PluginVerifyError,
+  TRUST_SIGNED,
   type TrustTier,
 } from './pluginVerify'
+import {
+  verifyRegistryPackageTrust,
+  type RegistryAuthority,
+  type RegistryPackageEnvelope,
+  type RegistryTrustMetadata,
+} from './pluginRegistryTrust'
+import {
+  REGISTRY_ARTIFACT_NAME,
+  REGISTRY_RECEIPT_NAME,
+  REGISTRY_TRUST_SNAPSHOT_NAME,
+  assertRegistryTrustSnapshotDoesNotRollback,
+  registryReceiptFromEvidence,
+  writeRegistryTrustSnapshot,
+  type RegistryInstallReceipt,
+  type RegistryTrustSnapshot,
+} from './pluginInstalledTrust'
 import { readZipEntries, readManifestFromEntries, type ZipEntry } from './pluginPackage'
 import {
   parseInstalledManifest,
@@ -52,12 +70,43 @@ export interface InstallRequest {
   publicKey?: string | null
   /** Trust tier the registry recorded (`signed-verified`/`unsigned`). */
   claimedTrustTier?: string | null
+  /** Registry-selected artifact target bound into the signed envelope. */
+  target?: string | null
+  /** Registry-owned signing evidence for Manifest v2 packages. */
+  registryEnvelope?: RegistryPackageEnvelope | null
+  registrySignature?: string | null
+  trustMetadata?: RegistryTrustMetadata | null
+  trustMetadataSignature?: string | null
 }
+
+export interface InstallerTrustConfig {
+  /** Host-owned root pin. It is never accepted from a package or registry response. */
+  pinnedRegistryRootKey: string | null
+  /** Host-derived authority. Registry response metadata cannot upgrade this. */
+  registryAuthority?: RegistryAuthority
+  /** Normalized App-pinned Official Registry URL, when configured. */
+  officialRegistryUrl?: string
+  now?: Date
+}
+
+const DEFAULT_INSTALLER_TRUST: InstallerTrustConfig = {
+  pinnedRegistryRootKey: null,
+  registryAuthority: 'self-hosted',
+}
+
+const HOST_OWNED_ARCHIVE_NAMES = new Set([
+  OFFICIAL_RECEIPT_NAME,
+  REGISTRY_RECEIPT_NAME,
+  REGISTRY_ARTIFACT_NAME,
+  REGISTRY_TRUST_SNAPSHOT_NAME,
+  '.navide-backend-activation.json',
+].map((name) => portableArchiveCollisionKey(name)!))
 
 /** A downloaded, verified package ready to commit to disk. */
 export interface PreparedInstall {
   id: string
   version: string
+  publisherId: string
   manifest: InstalledManifest
   entries: ZipEntry[]
   trustTier: TrustTier
@@ -67,13 +116,21 @@ export interface PreparedInstall {
   /** True when the plugin declares a sensitive capability or contains native
    *  backend code and the UI must obtain confirmation before commit. */
   requiresConfirmation: boolean
-  /** True only for a `navide.` package that passed the pinned-official-key
-   *  check in prepareInstall. Drives the receipt write + trusted registration. */
+  /** True only for a `navide.` package that passed the Host-authorized
+   *  Official Registry gate (or the legacy v1 publisher pin). Drives trusted
+   *  registration without treating a self-hosted Registry as first-party. */
   official: boolean
   /** Verified sha256 hex digest of the package bytes (receipt material). */
   digest: string
   /** Detached signature over the digest, when present (receipt material). */
   signature: string | null
+  /** Host-generated Registry evidence retained for every marketplace v2
+   * package. Never feed this envelope signature into the legacy digest receipt. */
+  registryEvidence?: {
+    artifact: Uint8Array
+    receipt: RegistryInstallReceipt
+    trustSnapshot: RegistryTrustSnapshot
+  }
 }
 
 export class InstallError extends Error {
@@ -89,6 +146,9 @@ export interface InstallerDeps {
   download(url: string): Promise<{ bytes: Uint8Array; digestHeader: string | null }>
   mkdirp(dir: string): void
   writeFile(path: string, data: Uint8Array): void
+  readFile(path: string): Uint8Array | null
+  /** Atomic Host-owned Registry trust snapshot persistence. */
+  writeRegistryTrustSnapshot?: typeof writeRegistryTrustSnapshot
   /** Apply a controlled mode after writing the declared backend executable. */
   chmod(path: string, mode: number): void
   rmrf(dir: string): void
@@ -108,6 +168,14 @@ export const defaultInstallerDeps: InstallerDeps = {
   writeFile(path, data) {
     writeFileSync(path, data)
   },
+  readFile(path) {
+    try {
+      return new Uint8Array(readFileSync(path))
+    } catch {
+      return null
+    }
+  },
+  writeRegistryTrustSnapshot,
   chmod(path, mode) {
     chmodSync(path, mode)
   },
@@ -172,7 +240,8 @@ function assertBackendExecutable(
  */
 export async function prepareInstall(
   req: InstallRequest,
-  deps: InstallerDeps = defaultInstallerDeps
+  deps: InstallerDeps = defaultInstallerDeps,
+  trust: InstallerTrustConfig = DEFAULT_INSTALLER_TRUST
 ): Promise<PreparedInstall> {
   const { bytes, digestHeader } = await deps.download(downloadUrl(req))
 
@@ -208,32 +277,117 @@ export async function prepareInstall(
     )
   }
 
-  const { digest, trustTier, sensitive } = verifyPackage({
+  const v2 = isManifestV2(manifest)
+  const packageVerification = verifyPackage({
     bytes,
     expectedDigest: req.expectedDigest,
-    signature: req.signature,
-    publicKey: req.publicKey,
+    // Publisher keys and signatures are a legacy v1 compatibility path. A v2
+    // package cannot self-supply the key that establishes its own trust.
+    signature: v2 ? null : req.signature,
+    publicKey: v2 ? null : req.publicKey,
     claimedTrustTier: req.claimedTrustTier,
     requires: manifestCapabilities(manifest),
   })
+  let trustTier = packageVerification.trustTier
+  let registryEvidence: PreparedInstall['registryEvidence']
+  let official = false
 
-  // Official-namespace policy: a `navide.` package must be signed by the
-  // pinned official publisher key (throws NOT_OFFICIAL otherwise, including
-  // when no pin is configured — fail-closed).
-  assertOfficialPublisher(manifest.id, req.publicKey, trustTier, resolveOfficialPublisherKey())
+  if (v2) {
+    if (!req.registryEnvelope || !req.trustMetadata || !req.target) {
+      throw new PluginVerifyError(
+        'SIGNATURE_REQUIRED',
+        `plugin '${manifest.id}' is missing registry signing evidence`
+      )
+    }
+    const envelopeSignature = req.registrySignature
+    const trustMetadataSignature = req.trustMetadataSignature
+    if (!envelopeSignature || !trustMetadataSignature) {
+      throw new PluginVerifyError(
+        'SIGNATURE_REQUIRED',
+        `plugin '${manifest.id}' is missing Registry signatures`
+      )
+    }
+    verifyRegistryPackageTrust({
+      envelope: req.registryEnvelope,
+      envelopeSignature,
+      trustMetadata: req.trustMetadata,
+      trustMetadataSignature,
+      pinnedRootKey: trust.pinnedRegistryRootKey,
+      expected: {
+        artifactDigest: packageVerification.digest,
+        packageId: manifest.id,
+        version: manifest.version,
+        target: req.target,
+        publisherId: manifest.publisher,
+      },
+      now: trust.now,
+    })
+    const requestedRegistryUrl = new URL(req.registryUrl).toString().replace(/\/+$/, '')
+    const officialRegistryUrl = trust.officialRegistryUrl
+      ? new URL(trust.officialRegistryUrl).toString().replace(/\/+$/, '')
+      : null
+    official =
+      isOfficialPluginId(manifest.id) &&
+      trust.registryAuthority === 'official' &&
+      officialRegistryUrl !== null &&
+      requestedRegistryUrl === officialRegistryUrl &&
+      req.trustMetadata.registryProfile === 'official'
+    if (isOfficialPluginId(manifest.id) && !official) {
+      throw new PluginVerifyError(
+        'NOT_OFFICIAL',
+        `plugin '${manifest.id}' claims the official 'navide.' namespace but the Host did not authorize the Official Registry`
+      )
+    }
+    trustTier = TRUST_SIGNED
+    registryEvidence = {
+      artifact: bytes,
+      receipt: registryReceiptFromEvidence({
+        packageId: manifest.id,
+        version: manifest.version,
+        publisherId: manifest.publisher,
+        target: req.target,
+        artifactDigest: packageVerification.digest,
+        envelope: req.registryEnvelope,
+        envelopeSignature,
+        registryAuthority: trust.registryAuthority ?? 'self-hosted',
+      }),
+      trustSnapshot: {
+        schemaVersion: 1,
+        metadata: req.trustMetadata,
+        metadataSignature: trustMetadataSignature,
+      },
+    }
+  }
+
+  if (v2 && trustTier !== TRUST_SIGNED) {
+    throw new PluginVerifyError(
+      'SIGNATURE_REQUIRED',
+      `plugin '${manifest.id}' is unsigned; Manifest v2 marketplace installs require a registry signature`
+    )
+  }
+
+  // The v2 Registry envelope binds publisherId to packageId before this point.
+  // Keep the publisher-key check only for the bounded v1 compatibility path.
+  if (!v2) {
+    assertOfficialPublisher(manifest.id, req.publicKey, trustTier, resolveOfficialPublisherKey())
+    official = isOfficialPluginId(manifest.id)
+  }
 
   return {
     id: manifest.id,
     version: manifest.version,
+    publisherId: isManifestV2(manifest) ? manifest.publisher : manifest.id.split('.')[0],
     manifest,
     entries,
     trustTier,
-    sensitive,
+    sensitive: packageVerification.sensitive,
     containsBackendExecutable: backendEntry !== undefined,
-    requiresConfirmation: sensitive.length > 0 || backendEntry !== undefined,
-    official: isOfficialPluginId(manifest.id),
-    digest,
-    signature: req.signature ?? null,
+    requiresConfirmation:
+      packageVerification.sensitive.length > 0 || backendEntry !== undefined,
+    official,
+    digest: packageVerification.digest,
+    signature: v2 ? req.registrySignature ?? null : req.signature ?? null,
+    registryEvidence,
   }
 }
 
@@ -255,14 +409,25 @@ export function commitInstall(
     entry,
     path: canonicalEntryPath(entry),
   }))
-  if (safeEntries.some(({ path }) => path === OFFICIAL_RECEIPT_NAME)) {
-    throw new InstallError(`package must not contain ${OFFICIAL_RECEIPT_NAME}`)
+  const smuggledHostFile = safeEntries.find(({ path }) => {
+    const collisionKey = portableArchiveCollisionKey(path)
+    return collisionKey !== null && HOST_OWNED_ARCHIVE_NAMES.has(collisionKey)
+  })
+  if (smuggledHostFile) {
+    throw new InstallError(`package must not contain ${smuggledHostFile.path}`)
   }
   const backendEntry = assertBackendExecutable(prepared.manifest, prepared.entries)
   const descriptor =
     isManifestV2(prepared.manifest) && prepared.manifest.contributes === undefined
       ? undefined
       : manifestToDescriptor(prepared.manifest, dir)
+  const trustSnapshotPath = join(pluginsRoot, REGISTRY_TRUST_SNAPSHOT_NAME)
+  if (prepared.registryEvidence) {
+    assertRegistryTrustSnapshotDoesNotRollback(
+      deps.readFile(trustSnapshotPath),
+      prepared.registryEvidence.trustSnapshot
+    )
+  }
   deps.rmrf(dir) // idempotent replace (fresh install or update)
   for (const { entry, path } of safeEntries) {
     const target = join(dir, path)
@@ -279,7 +444,16 @@ export function commitInstall(
   // Official installs persist the verified digest + signature so the loader
   // can re-verify against the pinned key on every startup (see
   // `verifyOfficialInstall` in installedPlugins.ts).
-  if (prepared.official && prepared.signature) {
+  if (prepared.registryEvidence) {
+    deps.mkdirp(dir)
+    deps.writeFile(join(dir, REGISTRY_ARTIFACT_NAME), prepared.registryEvidence.artifact)
+    deps.writeFile(
+      join(dir, REGISTRY_RECEIPT_NAME),
+      new TextEncoder().encode(JSON.stringify(prepared.registryEvidence.receipt, null, 2))
+    )
+    const writeTrustSnapshot = deps.writeRegistryTrustSnapshot ?? writeRegistryTrustSnapshot
+    writeTrustSnapshot(pluginsRoot, prepared.registryEvidence.trustSnapshot)
+  } else if (prepared.official && prepared.signature) {
     const receipt: OfficialReceipt = {
       id: prepared.id,
       version: prepared.version,

@@ -191,6 +191,8 @@ class ManifestV2(ManifestV2Model):
     def _check_runtime_surface(self) -> ManifestV2:
         if self.contributes is None and self.backend is None:
             raise ValueError("manifest must declare contributes or backend")
+        if self.publisher != self.namespace:
+            raise ValueError("publisher must match id namespace")
         return self
 
     @property

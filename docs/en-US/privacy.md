@@ -33,9 +33,24 @@ A future portability feature should use explicit local export/import with redact
 | Web search | Search provider | Search query text |
 | Git operations | Configured Git host | Repository data and credentials handled by Git or the host flow |
 | Update checks | GitHub Releases | Application version and normal network metadata |
+| Plugin Registry trust refresh | The selected Official Registry or an explicitly approved self-hosted Registry | The namespace/name of an installed marketplace plugin; no plugin source or archive is sent by the refresh |
 | MCP servers | The configured MCP server and any service it uses | Depends entirely on that server's tools and configuration |
 
 Read each provider's policy before sending private code or regulated data.
+
+While an installed marketplace plugin is present, Navide sends that plugin's
+namespace/name to its selected Registry when the app starts and every 15
+minutes. The request retrieves signed trust metadata so Navide can detect
+revoked publishers or packages and quarantine an installed plugin. The
+destination is the App-pinned Official Registry when the Official URL is used,
+or the exact self-hosted URL and root that the user explicitly approved. This
+refresh does not upload plugin source, package archives, or workspace files.
+
+Navide retains the latest signed trust snapshot locally with the plugin
+installation so restart checks can continue; the Registry controls retention
+of its own request logs. There is no separate refresh toggle today. Removing
+the installed marketplace plugins stops this flow; other external-service
+flows are governed by their own settings and configuration.
 
 ## Credentials
 

@@ -5,8 +5,8 @@ are its declared capability set. This module turns publish-time facts into two
 pieces of trust metadata the Extensions view
 can surface to warn users:
 
-- **trust tier** -- `signed-verified` when a signature verified against the
-  publisher's registered key at publish time; otherwise `unsigned`.
+- **trust tier** -- `signed-verified` when the registry created its artifact
+  signature; otherwise `unsigned` (including pre-migration rows).
 - **sensitive capabilities** -- `fs`, `aiCli`, and `shell` grant filesystem,
   brokered process, or shell reach, so they warrant higher scrutiny. The
   legacy `terminal` label remains sensitive only for the v1 compatibility path.
@@ -26,7 +26,7 @@ SENSITIVE_CAPABILITIES: frozenset[str] = frozenset(
 
 
 def compute_trust_tier(*, signed: bool) -> str:
-    """Trust tier for a version, given whether its signature verified."""
+    """Trust tier for a version, given whether the registry signed it."""
     return TRUST_SIGNED if signed else TRUST_UNSIGNED
 
 

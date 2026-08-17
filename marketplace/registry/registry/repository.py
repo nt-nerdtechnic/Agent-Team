@@ -216,6 +216,9 @@ class RegistryRepository:
         package_digest: str,
         package_key: str,
         signature: str | None,
+        target: str,
+        registry_envelope: dict,
+        registry_signature: str,
         trust_tier: str,
         assets: list[tuple[str, int, str]],
     ) -> ExtensionVersion:
@@ -226,6 +229,9 @@ class RegistryRepository:
             package_digest=package_digest,
             package_key=package_key,
             signature=signature,
+            target=target,
+            registry_envelope=registry_envelope,
+            registry_signature=registry_signature,
             trust_tier=trust_tier,
         )
         self.session.add(record)

@@ -6,8 +6,17 @@ import pytest
 from fastapi.testclient import TestClient
 
 from registry.app import create_app
-from registry.config import VERIFIER_ED25519, VERIFIER_ACCEPTING, Settings
-from registry.signing import generate_keypair, sign_digest
+from registry.config import (
+    TRUST_PROFILE_OFFICIAL,
+    VERIFIER_ED25519,
+    VERIFIER_ACCEPTING,
+    Settings,
+)
+from registry.signing import (
+    generate_keypair,
+    public_key_fingerprint,
+    sign_digest,
+)
 
 
 @pytest.fixture()
@@ -37,6 +46,8 @@ class SignedEnv:
     token: str
     private_pem: str
     public_pem: str
+    registry_signer_public_pem: str
+    root_public_pem: str
 
     def sign(self, digest: str) -> str:
         return sign_digest(self.private_pem, digest)
@@ -44,11 +55,25 @@ class SignedEnv:
 
 @pytest.fixture()
 def signed_env(tmp_path) -> SignedEnv:
+    registry_signer_private_pem, registry_signer_public_pem = generate_keypair()
+    root_private_pem, root_public_pem = generate_keypair()
     settings = Settings(
         data_dir=tmp_path,
         verifier_kind=VERIFIER_ED25519,
         require_signature=True,
         require_auth=True,
+        registry_signer_private_key=registry_signer_private_pem,
+        registry_signer_key_id="registry-2026-01",
+        root_private_key=root_private_pem,
+        trust_profile=TRUST_PROFILE_OFFICIAL,
+        expected_root_fingerprint=public_key_fingerprint(root_public_pem),
+        signer_status="active",
+        admin_token="official-admin-token",
+        blocked_publishers=("blocked-publisher",),
+        blocked_packages=(
+            "blocked.package@1.0.0",
+            "blocked.all",
+        ),
     )
     client = TestClient(create_app(settings))
     private_pem, public_pem = generate_keypair()
@@ -61,6 +86,7 @@ def signed_env(tmp_path) -> SignedEnv:
             "token": token,
             "display_name": "Acme",
         },
+        headers={"X-Admin-Token": "official-admin-token"},
     )
     assert resp.status_code == 201, resp.text
     return SignedEnv(
@@ -69,4 +95,6 @@ def signed_env(tmp_path) -> SignedEnv:
         token=token,
         private_pem=private_pem,
         public_pem=public_pem,
+        registry_signer_public_pem=registry_signer_public_pem,
+        root_public_pem=root_public_pem,
     )

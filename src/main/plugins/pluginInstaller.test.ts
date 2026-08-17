@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { spawnSync } from 'node:child_process'
 import { generateKeyPairSync, sign as edSign, type KeyObject } from 'node:crypto'
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -11,8 +11,15 @@ import {
   removePlugin,
   isUpdateAvailable,
   type InstallerDeps,
+  type InstallerTrustConfig,
 } from './pluginInstaller'
 import { sha256Hex } from './pluginVerify'
+import {
+  canonicalTrustJson,
+  type RegistryPackageEnvelope,
+  type RegistryTrustMetadata,
+} from './pluginRegistryTrust'
+import { REGISTRY_TRUST_SNAPSHOT_NAME } from './pluginInstalledTrust'
 import { makeZip, type ZipFile } from './zipFixture'
 
 const REQ_BASE = {
@@ -80,6 +87,66 @@ function v2Pkg(
   return { bytes: new Uint8Array(zip), digest: sha256Hex(new Uint8Array(zip)) }
 }
 
+const v2RegistryRoot = generateKeyPairSync('ed25519')
+const v2RegistrySigner = generateKeyPairSync('ed25519')
+const V2_NOW = new Date('2026-08-16T12:00:00.000Z')
+const V2_TRUST_CONFIG: InstallerTrustConfig = {
+  pinnedRegistryRootKey: v2RegistryRoot.publicKey
+    .export({ type: 'spki', format: 'pem' })
+    .toString(),
+  now: V2_NOW,
+}
+
+function signCanonical(value: unknown, privateKey: KeyObject): string {
+  return edSign(null, Buffer.from(canonicalTrustJson(value)), privateKey).toString('base64')
+}
+
+function signedV2Request(
+  digest: string,
+  envelopeOverrides: Partial<RegistryPackageEnvelope> = {}
+) {
+  const envelope: RegistryPackageEnvelope = {
+    schemaVersion: 1,
+    artifactDigest: digest,
+    packageId: 'acme.demo',
+    version: '1.0.0',
+    target: 'universal',
+    publisherId: 'acme',
+    keyId: 'registry-2026',
+    signedAt: '2026-08-16T11:00:00.000Z',
+    ...envelopeOverrides,
+  }
+  const trustMetadata: RegistryTrustMetadata = {
+    schemaVersion: 1,
+    registryProfile: 'official',
+    rootFingerprint: `sha256:${'1'.repeat(64)}`,
+    generatedAt: '2026-08-16T10:00:00.000Z',
+    expiresAt: '2026-08-17T10:00:00.000Z',
+    signers: [
+      {
+        keyId: 'registry-2026',
+        publicKey: v2RegistrySigner.publicKey
+          .export({ type: 'spki', format: 'pem' })
+          .toString(),
+        status: 'active',
+        notBefore: '2026-08-01T00:00:00.000Z',
+        notAfter: '2026-09-01T00:00:00.000Z',
+      },
+    ],
+    blockedPublishers: [],
+    blockedPackages: [],
+  }
+  return {
+    ...REQ_BASE,
+    expectedDigest: digest,
+    target: envelope.target,
+    registryEnvelope: envelope,
+    registrySignature: signCanonical(envelope, v2RegistrySigner.privateKey),
+    trustMetadata,
+    trustMetadataSignature: signCanonical(trustMetadata, v2RegistryRoot.privateKey),
+  }
+}
+
 /** Deps that serve a fixed package and capture filesystem writes in a map. */
 function fakeDeps(bytes: Uint8Array, digestHeader: string | null = 'from-header') {
   const writes = new Map<string, Uint8Array>()
@@ -95,6 +162,15 @@ function fakeDeps(bytes: Uint8Array, digestHeader: string | null = 'from-header'
     },
     writeFile(path, data) {
       writes.set(path, data)
+    },
+    readFile(path) {
+      return writes.get(path) ?? null
+    },
+    writeRegistryTrustSnapshot(root, snapshot) {
+      writes.set(
+        join(root, REGISTRY_TRUST_SNAPSHOT_NAME),
+        new TextEncoder().encode(JSON.stringify(snapshot, null, 2))
+      )
     },
     chmod(path, mode) {
       modes.set(path, mode)
@@ -193,11 +269,67 @@ describe('prepareInstall', () => {
   it('accepts a v2 frontend contribution and verifies its entry file', async () => {
     const { bytes, digest } = v2Pkg()
     const { deps } = fakeDeps(bytes, digest)
-    const prepared = await prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
+    const prepared = await prepareInstall(signedV2Request(digest), deps, V2_TRUST_CONFIG)
     expect(prepared.manifest.schemaVersion).toBe(2)
     if (prepared.manifest.schemaVersion !== 2) throw new Error('expected Manifest v2')
     expect(prepared.manifest.permissions).toEqual({})
     expect(prepared.requiresConfirmation).toBe(false)
+  })
+
+  it('rejects an unsigned v2 marketplace package before installation', async () => {
+    const { bytes, digest } = v2Pkg()
+    const { deps, removed, writes } = fakeDeps(bytes, digest)
+
+    await expect(
+      prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
+    ).rejects.toMatchObject({ code: 'SIGNATURE_REQUIRED' })
+    expect(removed).toEqual([])
+    expect(writes.size).toBe(0)
+  })
+
+  it('rejects a signed v2 package whose publisher does not own its id namespace', async () => {
+    const { bytes, digest } = v2Pkg([
+      { name: 'manifest.json', data: manifestV2({ publisher: 'other' }) },
+      { name: 'frontend/left/index.html', data: '<!doctype html>' },
+    ])
+    const { deps, removed, writes } = fakeDeps(bytes, digest)
+
+    await expect(prepareInstall(signedV2Request(digest), deps, V2_TRUST_CONFIG)).rejects.toThrow(
+      /publisher.*namespace/
+    )
+    expect(removed).toEqual([])
+    expect(writes.size).toBe(0)
+  })
+
+  it('rejects a v2 archive whose signed marketplace metadata was modified', async () => {
+    const original = v2Pkg()
+    const changed = v2Pkg([
+      {
+        name: 'manifest.json',
+        data: manifestV2({ marketplace: { description: 'Changed listing', license: 'MIT' } }),
+      },
+      { name: 'frontend/left/index.html', data: '<!doctype html>' },
+    ])
+    const { deps, removed, writes } = fakeDeps(changed.bytes, changed.digest)
+    const signedOriginal = signedV2Request(original.digest)
+    const changedEnvelope = {
+      ...signedOriginal.registryEnvelope,
+      artifactDigest: changed.digest,
+    }
+
+    await expect(
+      prepareInstall(
+        {
+          ...signedOriginal,
+          expectedDigest: changed.digest,
+          registryEnvelope: changedEnvelope,
+        },
+        deps,
+        V2_TRUST_CONFIG
+      )
+    ).rejects.toMatchObject({ code: 'REGISTRY_SIGNATURE_INVALID' })
+    expect(removed).toEqual([])
+    expect(writes.size).toBe(0)
   })
 
   it('rejects a v2 storage permission before installation', async () => {
@@ -228,12 +360,46 @@ describe('prepareInstall', () => {
       { name: 'backend/entry', data: Buffer.from([0x7f, 0x45, 0x4c, 0x46]), unixMode: 0o100755 },
     ])
     const { deps, removed, writes } = fakeDeps(bytes, digest)
-    const prepared = await prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
+    const prepared = await prepareInstall(signedV2Request(digest), deps, V2_TRUST_CONFIG)
     expect(prepared.manifest.schemaVersion).toBe(2)
     if (prepared.manifest.schemaVersion !== 2) throw new Error('expected Manifest v2')
     expect(prepared.manifest.permissions).toEqual({})
     expect(prepared.containsBackendExecutable).toBe(true)
     expect(prepared.requiresConfirmation).toBe(true)
+    expect(removed).toEqual([])
+    expect(writes.size).toBe(0)
+  })
+
+  it('refuses a reserved namespace from an approved self-hosted Registry', async () => {
+    const { bytes, digest } = v2Pkg([
+      {
+        name: 'manifest.json',
+        data: manifestV2({ id: 'navide.spoof', publisher: 'navide' }),
+      },
+      { name: 'frontend/left/index.html', data: '<!doctype html>' },
+    ])
+    const request = signedV2Request(digest, {
+      packageId: 'navide.spoof',
+      publisherId: 'navide',
+    })
+    const { deps, removed, writes } = fakeDeps(bytes, digest)
+
+    await expect(
+      prepareInstall(
+        {
+          ...request,
+          registryUrl: 'https://registry.acme.test',
+          namespace: 'navide',
+          name: 'spoof',
+        },
+        deps,
+        {
+          ...V2_TRUST_CONFIG,
+          registryAuthority: 'self-hosted',
+          officialRegistryUrl: 'https://registry.navide.dev',
+        }
+      )
+    ).rejects.toThrow(/Official Registry|navide.*namespace/i)
     expect(removed).toEqual([])
     expect(writes.size).toBe(0)
   })
@@ -370,7 +536,7 @@ describe('commitInstall', () => {
       { name: 'backend/entry', data: Buffer.from([0x7f, 0x45, 0x4c, 0x46]), unixMode: 0o100755 },
     ])
     const { deps, writes, modes } = fakeDeps(bytes, digest)
-    const prepared = await prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
+    const prepared = await prepareInstall(signedV2Request(digest), deps, V2_TRUST_CONFIG)
 
     expect(commitInstall(prepared, '/plugins', deps)).toBeUndefined()
     expect(writes.has('/plugins/acme.demo/backend/entry')).toBe(true)
@@ -402,7 +568,7 @@ describe('commitInstall', () => {
       }
       const root = mkdtempSync(join(tmpdir(), 'navide-plugin-install-'))
       try {
-        const prepared = await prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
+        const prepared = await prepareInstall(signedV2Request(digest), deps, V2_TRUST_CONFIG)
         commitInstall(prepared, root, deps)
         const installed = join(root, 'acme.demo', 'backend', 'entry')
         expect(statSync(installed).mode & 0o777).toBe(0o700)
@@ -445,7 +611,7 @@ describe('commitInstall', () => {
   it('returns all v2 view contributions from a committed package', async () => {
     const { bytes, digest } = v2Pkg()
     const { deps, writes } = fakeDeps(bytes, digest)
-    const prepared = await prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
+    const prepared = await prepareInstall(signedV2Request(digest), deps, V2_TRUST_CONFIG)
     const desc = commitInstall(prepared, '/plugins', deps)
     if (!desc) throw new Error('expected frontend descriptor')
     expect(desc.views).toEqual([
@@ -456,6 +622,56 @@ describe('commitInstall', () => {
       }),
     ])
     expect(writes.has('/plugins/acme.demo/frontend/left/index.html')).toBe(true)
+    expect(writes.has('/plugins/acme.demo/.navide-package.zip')).toBe(true)
+    expect(writes.has('/plugins/acme.demo/.navide-registry-receipt.json')).toBe(true)
+    expect(writes.has('/plugins/.navide-registry-trust.json')).toBe(true)
+    expect(writes.has('/plugins/acme.demo/.navide-receipt.json')).toBe(false)
+  })
+
+  it('persists a valid Registry trust snapshot through the atomic writer', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'navide-plugin-install-trust-'))
+    try {
+      const { bytes, digest } = v2Pkg()
+      const deps: InstallerDeps = {
+        ...defaultInstallerDeps,
+        async download() {
+          return { bytes, digestHeader: digest }
+        },
+      }
+      const prepared = await prepareInstall(signedV2Request(digest), deps, V2_TRUST_CONFIG)
+
+      commitInstall(prepared, root, deps)
+
+      const snapshotPath = join(root, REGISTRY_TRUST_SNAPSHOT_NAME)
+      expect(JSON.parse(readFileSync(snapshotPath, 'utf8'))).toEqual(
+        prepared.registryEvidence?.trustSnapshot
+      )
+      expect(existsSync(`${snapshotPath}.tmp`)).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a replayed older trust snapshot before replacing an install', async () => {
+    const { bytes, digest } = v2Pkg()
+    const { deps, writes, removed } = fakeDeps(bytes, digest)
+    const prepared = await prepareInstall(signedV2Request(digest), deps, V2_TRUST_CONFIG)
+    writes.set(
+      '/plugins/.navide-registry-trust.json',
+      new TextEncoder().encode(
+        JSON.stringify({
+          schemaVersion: 1,
+          metadata: {
+            ...prepared.registryEvidence!.trustSnapshot.metadata,
+            generatedAt: '2026-08-16T11:00:00.000Z',
+          },
+          metadataSignature: 'previously-verified',
+        })
+      )
+    )
+
+    expect(() => commitInstall(prepared, '/plugins', deps)).toThrow(/older snapshot/)
+    expect(removed).toEqual([])
   })
 
   it('refuses a zip-slip entry before any install side effect', async () => {
@@ -500,7 +716,7 @@ describe('commitInstall', () => {
       { name: 'backend/entry', data: Buffer.from([0x7f, 0x45, 0x4c, 0x46]), unixMode: 0o100755 },
     ])
     const { deps, removed, writes } = fakeDeps(bytes, digest)
-    const prepared = await prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
+    const prepared = await prepareInstall(signedV2Request(digest), deps, V2_TRUST_CONFIG)
     const backend = prepared.entries.find((entry) => entry.path === 'backend/entry')
     if (!backend) throw new Error('expected backend entry')
     backend.executable = false
@@ -627,15 +843,42 @@ describe('official (navide.) install policy', () => {
     expect([...writes.keys()].some((p) => p.endsWith('.navide-receipt.json'))).toBe(false)
   })
 
-  it('refuses a package that smuggles its own .navide-receipt.json', async () => {
+  it.each([
+    '.navide-receipt.json',
+    '.navide-registry-receipt.json',
+    '.navide-package.zip',
+    '.navide-registry-trust.json',
+    '.navide-backend-activation.json',
+  ])('refuses a package that smuggles Host-owned %s', async (hostOwnedName) => {
     const { bytes, digest } = pkg([
       { name: 'manifest.json', data: manifest() },
       { name: 'dist/main.js', data: 'x' },
-      { name: '.navide-receipt.json', data: '{"id":"acme.demo"}' },
+      { name: hostOwnedName, data: '{}' },
     ])
-    const { deps } = fakeDeps(bytes, digest)
+    const { deps, removed, writes } = fakeDeps(bytes, digest)
     const prepared = await prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
     expect(() => commitInstall(prepared, '/plugins', deps)).toThrow(/must not contain/)
+    expect(removed).toEqual([])
+    expect(writes).toEqual(new Map())
+  })
+
+  it.each([
+    '.NAVIDE-RECEIPT.JSON',
+    '.NAVIDE-REGISTRY-RECEIPT.JSON',
+    '.NAVIDE-PACKAGE.ZIP',
+    '.NAVIDE-REGISTRY-TRUST.JSON',
+    '.NAVIDE-BACKEND-ACTIVATION.JSON',
+  ])('refuses a case-folded Host-owned filename %s', async (hostOwnedName) => {
+    const { bytes, digest } = pkg([
+      { name: 'manifest.json', data: manifest() },
+      { name: 'dist/main.js', data: 'x' },
+      { name: hostOwnedName, data: '{}' },
+    ])
+    const { deps, removed, writes } = fakeDeps(bytes, digest)
+    const prepared = await prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
+    expect(() => commitInstall(prepared, '/plugins', deps)).toThrow(/must not contain/)
+    expect(removed).toEqual([])
+    expect(writes).toEqual(new Map())
   })
 })
 
