@@ -133,6 +133,33 @@ Window 内の生きた CLI Pane ではない送信者に通知は届きません
 Pane、プレーンな Terminal、そして外部の MCP Client（こちらは代わりに Poll する
 ための `cli_check_message` があります）です。
 
+### まだ保留中であることの通知
+
+配信に失敗したメッセージはそう伝えます。しかし、ただ送出されないままのメッセージ
+は何も言わず、それを送った Pane は作業を引き渡せたつもりのまま先へ進みます。Queue
+に入って **2 分**が過ぎた時点で、送信側の Pane に通知されます。
+
+```
+[Navide MSG] still held — to: reviewer
+reason: Someone is typing in the target pane — waiting 2 min so far
+（原訊息開頭：Please review src/main.ts and reply with the blocking…）
+```
+
+これは失敗ではなく、何かを諦めたわけでもありません。メッセージは引き続き Queue に
+あり、対象が空けばそのまま送出されます。これが送信者にもたらすのは判断の機会です
+——待ち続ける、別の相手に頼む、あるいはユーザーに伝える——答えが向かってきていると
+思い込む代わりに。
+
+1 つのメッセージから生まれるこの通知は、生涯で**1 通**だけです。1 時間 Busy な
+ままの対象が各送信者に費やさせるのは 1 通だけであり、引用される理由は、その時点で
+Messages パネルが表示しているのと同じ `hold` です。
+
+同じルールは、Window 内の生きた Pane である送信者すべてに、その送り方を問わず適用
+されます。裸行のブロック、別の Pane からの `cli_send`、別の Workspace 宛のメッセー
+ジ、どれでも同じです。Pane *ではない*送信者——外部の MCP Client——に通知は届きません。
+入力する先が存在しないからです。そちらは代わりに `cli_inbox_summary` に尋ね、同じ
+問いへの答えを得ます。
+
 ### Spawn フィードバック通知
 
 うまくいかなかった Spawn Request も、同じ方法で要求元の Pane に報告されます。
@@ -520,6 +547,14 @@ MCP の `cli_send` から、あるいは別の Machine から中継されたも�
 | `remote-ack` | 別の Window へ送信済みで、その報告を待っている |
 | `cancelling` | 別の Window に取り消しを要求し、その答えを待っている |
 
+`cli_send` を通じて入ってきたメッセージは、その Hold を Backend にも報告します。
+そのため送信元の Agent は、見るべき Messages パネルがなくても同じ理由を読み取れます
+——[外部 MCP 制御](external-mcp-control.md)を参照してください。伝わるのは*理由*だけ、
+それが変わったときだけ、しかも Backend が `msg_key` ですでに追跡しているメッセージ
+についてだけです。1 つの Window 内の 2 つの Pane 間のメッセージは他のどこにも知られて
+おらず、何も報告しません。Hold 自体は引き続き In-memory であり、永続化されることは
+ありません。
+
 ### メッセージが失敗した理由
 
 | Reason | 意味 |
@@ -560,5 +595,6 @@ MCP の `cli_send` から、あるいは別の Machine から中継されたも�
 | CLI がどの Channel を提供するか | `backend/agent_team_backend/cli_vendors/<key>.py`（`push_channel`） |
 | その Channel がどの配信 Hold に従うか | `src/renderer/src/agents/<key>.ts`（`pushChannel`） |
 | Install される hook コマンドと、どのイベントが応答を保持するか | `backend/agent_team_backend/claude_hooks.py` |
+| 配信結果と Hold を、MCP の呼び出し元が読む形で | `backend/agent_team_backend/plugins/builtin/navide_plans/plan_mcp.py` |
 | Agent に渡される Protocol テキスト | `src/renderer/src/data/stages.ts` |
 | 配信 Log の UI | `src/renderer/src/components/AgentMessagesPanel.vue` |

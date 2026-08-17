@@ -91,9 +91,10 @@ Plan ウィンドウが Plan を解決する際の基準と同じものです。
 
 | Tool | パラメータ | 動作 |
 |---|---|---|
-| `cli_list_targets` | — | アドレス指定可能な CLI Pane を一覧: `name`、`address`、`workspace_path`、`same_workspace`、`busy` |
-| `cli_send` | `to`, `text` | 別の Pane が Idle になった時点で指示を配信（Busy なら Queue に保留）。`msg_key` を返す |
-| `cli_check_message` | `msg_key` | 一つの `cli_send` の結末: `{status, target, age_seconds, reason?, settled_after_s?}` |
+| `cli_list_targets` | — | アドレス指定可能な CLI Pane を一覧: `name`、`address`、`workspace_path`、`same_workspace`、`busy`、`hold_reason?` |
+| `cli_send` | `to`, `text`, `wait_for_delivery_s=0`（上限 120） | 別の Pane が Idle になった時点で指示を配信（Busy なら Queue に保留）。`msg_key` を返し、待機を指定した場合はその結末も返す |
+| `cli_check_message` | `msg_key` | 一つの `cli_send` の結末: `{status, target, age_seconds, reason?, settled_after_s?, hold?, held_for_s?, stale?}` |
+| `cli_inbox_summary` | — | 自分の送信のうち滞留中または失敗しているもの: `{count, messages: [{msg_key, target, status, age_seconds, stale?, reason?, hold?, held_for_s?, excerpt}]}` |
 | `cli_send_and_wait` | `to`, `text`, `timeout_s=60`（上限 120） | `cli_send` に加えてその Turn の完了まで待機。`cli_wait_idle` の結果に `{ok, target, msg_key}` を付けて返す |
 | `cli_open_agent` | `agent`, `name`, `task`, `workspace_path`（Pane 以外の呼び出し元では必須） | Task 付きで新しい CLI Pane を Spawn。`{ok, name, address}` を返し、Spawn が Advisory の閾値を越えた場合は `advisories` も返す |
 
@@ -113,6 +114,54 @@ Plan ウィンドウが Plan を解決する際の基準と同じものです。
 しない Agent 向けの注意喚起であり、`cli_check_message` が引き続き正式な答えです。
 また、この通知はアドレス指定可能ではないため、これに返信すべきものは何もありません。
 
+**メッセージが入るまで待つ。** Poll がループを閉じるのは Poll を忘れない Agent に
+対してだけで、送って先へ進む Agent は何も知ることができません。
+`wait_for_delivery_s` は、その答えを同じ呼び出しの中に置く仕組みです。`cli_send` は
+その秒数だけメッセージが実際に入るのを待ち、同じ結果の中で何が起きたかを報告します。
+
+| 結末 | 返るもの |
+|---|---|
+| 入った | `status: "delivered"`、`settled_after_s` |
+| ウィンドウが拒否した | `status: "failed"`（別の Machine からの場合は `"rejected"`）、`reason` |
+| 時間切れの時点でまだ待機中 | `status: "queued"`、`waited_s`。受信側ウィンドウが理由を述べた場合は `hold` と `held_for_s` も |
+
+拒否されても `ok` は **true** のままです。理由は `cli_send_and_wait` の
+`target_lost` と同じで、送信は実際に行われ `msg_key` も本物なので、`ok: false` と
+答えると「一度も送っていない」と読まれて再送を招き、作業が二重に発行されてしまう
+からです。有用な範囲は 10〜30 秒です。この待機は呼び出し元自身の Turn を消費し、
+Turn の途中の Pane や入力されている Pane はメッセージをはるかに長く保留しうるから
+です。既定の `0` のままなら、答えは従来と 1 Byte も変わりません。
+
+**メッセージがまだ Queue にある理由。** `hold` は Messages パネルが表示するのと
+同じ理由で、`{key, n?}` の形をとります。`key` は `typing`、`mid-turn`、`behind`、
+`starting`、`settling`、`not-ready`、`gone`、`paused`、`remote-ack` のいずれかで、
+`held_for_s` はその状態が続いている長さです。これは `cli_check_message` と、
+Timeout した `cli_send` の待機に現れ、メッセージが決着したあとや、どのウィンドウも
+理由を報告していない間は現れません。`cli_list_targets` は同じ事実を Pane ごとに
+`hold_reason` として見せ、それが `busy` を説明可能にしています。ただしここから送った
+メッセージがその Pane 宛に Queue されている間だけなので、無いことは何も意味しません。
+
+**Queue に長く留まりすぎたとき。** `queued` のメッセージが **2 分**を超えて待つと
+`stale` が現れます。`cli_check_message` でも、Timeout した `cli_send` の待機でも
+同じです。これは判定ではありません——何も失敗しておらず、何も諦めていません——
+「これは向かっている途中だ」という前提が安全でなくなる地点であり、隣の `hold` と
+併せて読み、待ち続けるか、別の相手に頼むか、ユーザーに何か伝えるかを判断して
+ください。計測の起点は現在の Hold ではなく送信時点です。`mid-turn` と `typing` の
+間を行き来するメッセージは毎回 `held_for_s` を振り出しに戻しますし、この仕組みが
+本来対象としているケース——どのウィンドウも Hold を一度も報告しなかったケース——には、
+読むべき Hold の時計自体がありません。
+
+`cli_inbox_summary` は、尋ねるための `msg_key` を持たない場合の同じ事実です。引数を
+取らず、呼び出し元自身についてだけ答え、現在 stale または失敗している自分の送信を
+すべて返します。60 文字の `excerpt` が付くので、Key を控えていなくてもどのメッセージ
+かが分かります。配信済みのものと、送ったばかりで Queue に入っているものは除かれる
+ため、空のリストは「自分のものは何も滞留していない」を意味し、「何も送っていない」
+ではありません。これは通知が届かない Agent のために存在します。配信失敗通知は送信側
+の Pane が Idle になってからそこへ入力されるため、1 時間 Busy であり続ける Agent は
+一度も目にせず、外部 Client にはそもそも入力する先の Pane がありません。自分の作業の
+合間にこれを呼ぶことが、20 分前に送ったメッセージがまだ Queue に座っていると知る
+方法です。
+
 このテーブルは Backend の**メモリ**であり、Log ではありません。直近 500 件の送信を
 1 時間保持し、Backend の再起動で失われます。未知の `msg_key` は
 `{ok: false, error}` を返し、これは「もう追跡していない」という意味であって
@@ -120,12 +169,24 @@ Plan ウィンドウが Plan を解決する際の基準と同じものです。
 
 `cli_send_and_wait` は、手動の `cli_send` + `cli_wait_idle` の組み合わせが負ける
 競合を処理します。送信した瞬間に対象が Idle であるため、素の待機はメッセージを
-読む前に「すでに Idle」を返してしまうのです。このツールは送信前に対象の最終活動を
-記録し、*それより新しい* Turn だけを答えとして受け入れるため、
-`last_activity.text` は相手の Agent が返答として述べた内容になります。Timeout 時の
-`reason` は `cli_wait_idle` のものに加え、Idle のままメッセージを拾う気配を
-まったく見せなかった対象に対する `never_started` があります。送信自体が拒否された
-場合は `cli_send` の `{ok: false, error}` をそのまま返します。
+読む前に「すでに Idle」を返してしまうのです。このツールはまずメッセージが**入る**
+のを待ち、そのうえで送信前に記録した対象の最終活動より*新しい* Turn だけを答えと
+して受け入れるため、`last_activity.text` は相手の Agent が返答として述べた内容に
+なります。Timeout 時の `reason` は `cli_wait_idle` のものに加え、Idle のまま
+メッセージを拾う気配をまったく見せなかった対象に対する `never_started` があります。
+送信自体が拒否された場合は `cli_send` の `{ok: false, error}` をそのまま返します。
+
+`timeout_s` は両方の段階をカバーします。**最大でもその半分**がメッセージを送り込む
+ために使われ、残りが Turn の完了を待ちます。配信に使われた時間は無駄になりません
+——Pane が空けばメッセージは着地し、それは Idle の待機がどのみち座って待っていた
+はずの時間だからです——とはいえ折り返し地点でまだ保留されているメッセージが残り
+時間で答えを得る見込みは薄く、その Hold の理由は「Timeout、Busy」よりはるかに有用な
+答えです。最後まで届かなかった場合の結果は `source: "not_delivered"` で、
+`delivery_status` を伴います（`queued` なら `hold` / `held_for_s`、`failed` /
+`rejected` なら `reason`）。これは、対象が Idle のままメッセージが保留されていた
+ケースへの修正です。以前の順序では、送信した時点の状態から `idle` と答えてしまい、
+作業が一度も引き渡されていないのに「あなたの作業を終えた」と読めてしまいました。
+`target_lost` と同じく `ok: true` のままです——これを理由に再送しないでください。
 
 待機*中*に対象がアドレス指定可能でなくなった場合 — ウィンドウが閉じた、Pane が
 Kill された — 結果は `{ok: true, idle: false, source: "target_lost", error}` に
@@ -235,6 +296,60 @@ Turn に対する判定ではない唯一のものです。待機が判定に至
 `ui_snapshot` の形は Renderer が決めます（`App.vue` の
 `buildUiActionSnapshot`）。`{workspace, panes: [{id, name?, agentKey,
 workspacePath, status?}], activeTab, settingsOpen, openWorkspaces}` です。
+
+## Tool リストは一度だけ読まれる
+
+MCP Client は接続時に Server の Tool リストを尋ね、Navide の `/plan-mcp` はその後
+それを変更することがありません。つまり **Client がその瞬間に見たものが、そのまま
+持ち続けるもの**になります。
+
+- **CLI Pane** は、その CLI Process の起動時にリストを Snapshot します。Navide が
+  更新されたときすでに動いていた Pane は、もう存在しない Backend と話している状態
+  です。新しい Navide が追加した Tool やパラメータを取り込むには、Pane を開き直して
+  ください。
+- **外部 Client** は、再接続するまでリストを保持します。いずれにせよ Connection URL
+  は再起動をまたぐと変わる（Port は起動時に選ばれる）ため、これは通常それだけで
+  解消します。
+
+アップグレード後、Navide はそれを一度だけ知らせます。ステータスバーの Announcement
+フィードに「MCP tools may have changed」という項目が現れ、置き換えられた Version を
+示します。これは、この Backend が実際に前回とは異なる Version で起動したときにだけ
+現れます。初回インストール時にも、通常の再起動時にも現れません。
+
+### なぜ Navide は Client に通知しないのか
+
+Protocol にはこのための仕組みがあります。Server が `tools.listChanged` Capability を
+宣言し、Tool の集合が変わったときに `notifications/tools/list_changed` を送ると、
+それを扱う Client は Session の途中でリストを読み直します。Navide がこれを使えない
+理由は、互いに独立した 2 つあります。
+
+**Transport に Push する先がありません。** `/plan-mcp` は streamable HTTP を
+Stateless モードで、JSON 応答で動かしています。Transport は Request ごとに構築されて
+破棄され、開いたままの Stream は保持されません。この構成では、Server 発の通知が
+Client へ届く経路がありません。MCP SDK はそれを長命な Stream 宛に送ろうとし、
+見つからず、破棄します。届くようにするには Session 指向のモードで動かす必要があり、
+それはこの Endpoint が意図的に持たない状態です。（2026-07-28 版の仕様は Protocol
+レベルの Session を廃し、これらの通知を Client が開く `subscriptions/listen` Stream
+へ移しました。どちらにせよ開いたままの Stream です。）
+
+**半分の CLI は無視します。** 各 Client 自身のソースまたはドキュメントに対して確認、
+2026-08-17:
+
+| CLI | `list_changed` で Tool リストを読み直すか？ |
+|---|---|
+| Claude Code | する（2.1.0 以降） |
+| GitHub Copilot CLI | する |
+| OpenCode | する |
+| Grok | する |
+| Codex CLI | しない — 通知を Log に記録するだけで何もしない |
+| Cursor（`cursor-agent`） | しない — 更新は `/mcp` による手動操作 |
+| Qwen Code | しない — この Fork は上流の Gemini CLI にある Handler を落としている |
+| Kimi CLI | しない — 通知処理そのものがない |
+
+いずれにせよ通知すべきことは何もありません。`/plan-mcp` の Tool はすべて Import 時
+に登録され、その集合は Backend の実行中に変わらないからです。Pane を開き直すことが
+解決策のすべてであり、だからこそ工学的に回避するのではなくドキュメントに記して
+います。
 
 ## CDP デバッグ（エスケープハッチ）
 

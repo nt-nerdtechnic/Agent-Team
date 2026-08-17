@@ -92,7 +92,8 @@ documents the addresses, the idle gate and the guard rails they share.
 |---|---|---|
 | `cli_list_targets` | — | List addressable CLI panes: `name`, `address`, `workspace_path`, `same_workspace`, `busy`, `hold_reason?` |
 | `cli_send` | `to`, `text`, `wait_for_delivery_s=0` (capped at 120) | Deliver an instruction to another pane once it's idle (queued if busy); returns `msg_key`, and with a wait, what became of it |
-| `cli_check_message` | `msg_key` | What became of one `cli_send`: `{status, target, age_seconds, reason?, settled_after_s?, hold?, held_for_s?}` |
+| `cli_check_message` | `msg_key` | What became of one `cli_send`: `{status, target, age_seconds, reason?, settled_after_s?, hold?, held_for_s?, stale?}` |
+| `cli_inbox_summary` | — | Your own sends that are stuck or failed: `{count, messages: [{msg_key, target, status, age_seconds, stale?, reason?, hold?, held_for_s?, excerpt}]}` |
 | `cli_send_and_wait` | `to`, `text`, `timeout_s=60` (capped at 120) | `cli_send` plus the wait for that turn to finish; returns `cli_wait_idle`'s result plus `{ok, target, msg_key}` |
 | `cli_open_agent` | `agent`, `name`, `task`, `workspace_path` (required for a non-pane caller) | Spawn a new CLI pane with a task; returns `{ok, name, address}`, plus `advisories` when the spawn crossed an advisory threshold |
 
@@ -139,6 +140,28 @@ timed-out `cli_send` wait, and it is absent once the message settles or while
 no window has reported one. `cli_list_targets` surfaces the same fact per pane
 as `hold_reason`, which is what makes `busy` explainable — but only while a
 message sent from here is queued for that pane, so its absence says nothing.
+
+**When it has been queued too long.** `stale` appears on a `queued` message once
+it has been waiting more than **two minutes**, on `cli_check_message` and on a
+timed-out `cli_send` wait alike. It is not a verdict — nothing has failed and
+nothing has given up — it is the point at which "it is on its way" stops being a
+safe assumption, so read `hold` next to it and decide whether to keep waiting,
+address someone else, or say something to the user. It is measured from the send,
+not from the current hold: a message flipping between `mid-turn` and `typing`
+restarts `held_for_s` every time, and the case this exists for — the one where no
+window ever reported a hold at all — has no hold clock to read.
+
+`cli_inbox_summary` is the same fact without a `msg_key` to ask about. It takes
+no arguments, answers about the caller and no one else, and returns every send of
+yours that is currently stale or failed — with a 60-character `excerpt` so a
+message is recognizable without having kept its key. Delivered messages and
+freshly queued ones are left out, so an empty list means "nothing of mine is
+stuck", never "nothing was sent". It exists for the agent a notice cannot reach:
+a delivery-failure notice is typed back into the sending pane once that pane is
+idle, so an agent that stays busy for an hour never sees one, and an external
+client has no pane to type into at all. Calling it between pieces of your own
+work is how you find out that the message you sent twenty minutes ago is still
+sitting in a queue.
 
 That table is backend **memory**, not a log: it holds the last 500 sends for
 one hour and is lost on backend restart. An unknown `msg_key` returns
@@ -281,6 +304,60 @@ argument shape.
 (`buildUiActionSnapshot` in `App.vue`): `{workspace, panes: [{id, name?,
 agentKey, workspacePath, status?}], activeTab, settingsOpen,
 openWorkspaces}`.
+
+## The tool list is read once
+
+An MCP client asks for a server's tool list when it connects, and Navide's
+`/plan-mcp` never changes it afterwards. So **whatever a client saw at that
+moment is what it keeps**:
+
+- A **CLI pane** snapshots the list when its CLI process starts. A pane that was
+  already running when Navide was updated is talking to a backend that no longer
+  exists; reopen the pane to pick up tools or parameters a newer Navide added.
+- An **external client** keeps its list until you reconnect it. The connection
+  URL changes across restarts anyway (the port is picked at launch), so this
+  usually resolves itself.
+
+After an upgrade Navide says so once, in the announcements feed in the status
+bar: a "MCP tools may have changed" entry naming the version it replaced. It
+appears only when this backend actually started at a different version than the
+previous one — never on a first install, and never on an ordinary restart.
+
+### Why Navide does not just tell the clients
+
+The protocol has an answer for this — a server declares the `tools.listChanged`
+capability and then sends `notifications/tools/list_changed` when its tool set
+changes, and a client that handles it re-reads the list mid-session. Navide
+cannot use it, for two independent reasons.
+
+**The transport has nowhere to push.** `/plan-mcp` runs streamable HTTP in
+stateless mode with JSON responses: a transport is built and torn down per
+request, and no stream is held open. A server-initiated notification has no
+route to a client in that configuration — the MCP SDK addresses it to a
+long-lived stream, finds none, and drops it. Making it deliverable would mean
+running the session-oriented mode instead, which is the state this endpoint is
+deliberately built without. (The 2026-07-28 revision of the spec removed
+protocol-level sessions and moved these notifications onto a client-opened
+`subscriptions/listen` stream — a held-open stream either way.)
+
+**Half the CLIs would ignore it.** Verified against each client's own source or
+documentation, 2026-08-17:
+
+| CLI | Re-reads the tool list on `list_changed`? |
+|---|---|
+| Claude Code | Yes, since 2.1.0 |
+| GitHub Copilot CLI | Yes |
+| OpenCode | Yes |
+| Grok | Yes |
+| Codex CLI | No — logs the notification and does nothing |
+| Cursor (`cursor-agent`) | No — refresh is manual, via `/mcp` |
+| Qwen Code | No — the fork dropped the handler upstream Gemini CLI has |
+| Kimi CLI | No — no notification handling at all |
+
+And there is nothing to notify about in any case: every `/plan-mcp` tool is
+registered at import, and the set never changes while the backend runs. Reopening
+the pane is the whole remedy, which is why it is documented rather than
+engineered around.
 
 ## CDP debug (escape hatch)
 

@@ -121,6 +121,29 @@ reason: No pane named “reviewer”
 不是視窗中活著的 CLI Pane 的寄件者不會收到通知：在失敗前就關閉的 Pane、一般
 Terminal，或外部 MCP Client（它有 `cli_check_message` 可以改用輪詢）。
 
+### 仍被保留的通知
+
+投遞失敗的訊息會說出來。單純一直沒送出去的訊息則什麼也沒說，而送出它的 Pane 就一
+直以為工作已經交接出去了。在佇列中待滿**兩分鐘**之後，會通知傳送端 Pane：
+
+```
+[Navide MSG] still held — to: reviewer
+reason: Someone is typing in the target pane — waiting 2 min so far
+（原訊息開頭：Please review src/main.ts and reply with the blocking…）
+```
+
+這不是失敗，也沒有放棄任何東西：訊息仍在佇列中，目標一空下來它仍然會進去。它替寄
+件者換來的是做決定的機會 —— 繼續等、改找別人，或是告訴你 —— 而不是逕自假設答案
+正在路上。
+
+每則訊息一輩子只會產生**一則**這種通知。一個忙碌一小時的目標，對它的每個寄件者都
+只花掉一則通知，而引用的原因就是 Messages 面板在那一刻顯示的同一個 `hold`。
+
+同一條規則涵蓋每一個身為視窗中活著 Pane 的寄件者，不論它是怎麼送的：裸行區塊、來
+自另一個 Pane 的 `cli_send`、寄往另一個 Workspace 的訊息。*不是* Pane 的寄件者
+—— 外部 MCP Client —— 不會收到通知，因為沒有地方可以把它輸入進去；它改問
+`cli_inbox_summary`，那會回答同一個問題。
+
 ### Spawn 回饋通知
 
 沒有順利完成的 spawn 請求會以相同方式，回報給提出請求的那個 Pane：
@@ -450,6 +473,13 @@ hook：這次切換要等到那個 Pane 下一次啟動才對它生效，在那�
 | `remote-ack` | 已送往另一個視窗；正在等它的回報 |
 | `cancelling` | 已向另一個視窗要求撤回；正在等它的回答 |
 
+透過 `cli_send` 進來的訊息也會把它的保留原因一併回報給 Backend，因此送出它的
+Agent 不必有 Messages 面板可看，也能讀到同一個原因 ——
+見[外部 MCP 控制](external-mcp-control.md)。只有*原因*會傳出去，只在它改變時傳，
+而且只針對 Backend 已經以 `msg_key` 追蹤中的訊息；同一個視窗中兩個 Pane 之間的訊
+息別處無人知曉，也不會回報任何東西。保留本身仍然只存在記憶體中，而且仍然絕不持久
+化。
+
 ### 訊息為何失敗
 
 | 原因 | 意義 |
@@ -489,5 +519,6 @@ hook：這次切換要等到那個 Pane 下一次啟動才對它生效，在那�
 | 某個 CLI 提供哪一種通道 | `backend/agent_team_backend/cli_vendors/<key>.py`（`push_channel`） |
 | 該通道仍然要遵守哪些投遞保留 | `src/renderer/src/agents/<key>.ts`（`pushChannel`） |
 | 已安裝的 hook 指令，以及哪個事件會保留它的回應 | `backend/agent_team_backend/claude_hooks.py` |
+| 投遞結果與保留原因，以 MCP 呼叫端讀到的形式 | `backend/agent_team_backend/plugins/builtin/navide_plans/plan_mcp.py` |
 | 交給 Agent 的協定文字 | `src/renderer/src/data/stages.ts` |
 | 投遞記錄 UI | `src/renderer/src/components/AgentMessagesPanel.vue` |

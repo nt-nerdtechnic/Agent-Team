@@ -84,9 +84,10 @@ Tool 都回傳單一物件，因此這個問題只會在 `plan_list` 上出現�
 
 | Tool | 參數 | 功能 |
 |---|---|---|
-| `cli_list_targets` | — | 列出可定址的 CLI Pane：`name`、`address`、`workspace_path`、`same_workspace`、`busy` |
-| `cli_send` | `to`、`text` | 在另一個 Pane 進入 Idle 後遞送一則指令（忙碌則排入佇列）；回傳 `msg_key` |
-| `cli_check_message` | `msg_key` | 某次 `cli_send` 的結果：`{status, target, age_seconds, reason?, settled_after_s?}` |
+| `cli_list_targets` | — | 列出可定址的 CLI Pane：`name`、`address`、`workspace_path`、`same_workspace`、`busy`、`hold_reason?` |
+| `cli_send` | `to`、`text`、`wait_for_delivery_s=0`（上限 120） | 在另一個 Pane 進入 Idle 後遞送一則指令（忙碌則排入佇列）；回傳 `msg_key`，若有等待則一併回傳它的結果 |
+| `cli_check_message` | `msg_key` | 某次 `cli_send` 的結果：`{status, target, age_seconds, reason?, settled_after_s?, hold?, held_for_s?, stale?}` |
+| `cli_inbox_summary` | — | 你自己送出、目前卡住或失敗的訊息：`{count, messages: [{msg_key, target, status, age_seconds, stale?, reason?, hold?, held_for_s?, excerpt}]}` |
 | `cli_send_and_wait` | `to`、`text`、`timeout_s=60`（上限 120） | `cli_send` 再加上等待該回合結束；回傳 `cli_wait_idle` 的結果，外加 `{ok, target, msg_key}` |
 | `cli_open_agent` | `agent`、`name`、`task`、`workspace_path`（非 Pane 呼叫端必填） | 帶著一項任務 Spawn 新的 CLI Pane；回傳 `{ok, name, address}`，若該次 Spawn 跨過 Advisory 門檻則另附 `advisories` |
 
@@ -103,17 +104,67 @@ Tool 都回傳單一物件，因此這個問題只會在 `plan_list` 上出現�
 通知，指出目標與原因。這是給從不輪詢的 Agent 的提醒 —— `cli_check_message`
 仍是權威答案，而且該通知不可定址，因此不該有任何東西去回覆它。
 
+**等訊息真的送進去。** 輪詢只對記得輪詢的 Agent 才閉得起這個環，而送完就走的 Agent
+永遠什麼也學不到。`wait_for_delivery_s` 就是把答案放進同一次呼叫裡的做法：
+`cli_send` 會為此等上那麼久，等訊息真的進去，並在同一份結果中回報發生了什麼。
+
+| 結果 | 回傳什麼 |
+|---|---|
+| 它進去了 | `status: "delivered"`、`settled_after_s` |
+| 視窗拒絕了它 | `status: "failed"`（若來自另一台裝置則是 `"rejected"`）、`reason` |
+| 時間用完時仍在等待 | `status: "queued"`、`waited_s`，若接收端視窗說明了原因則另附 `hold` 與 `held_for_s` |
+
+被拒絕時 `ok` 仍然維持 **true**，理由和 `cli_send_and_wait` 的 `target_lost` 一樣：
+送出已經發生、`msg_key` 也是真的，因此回答 `ok: false` 會被讀成「從未送出」而誘發
+重送，導致同一件工作被派發兩次。10–30 秒是實用的範圍 —— 這段等待花掉的是呼叫端
+自己的回合，而正在跑回合或正被輸入的 Pane 可能把訊息保留得久得多。維持預設值 `0`
+時，答案與過去逐位元組相同。
+
+**訊息為何仍在佇列中。** `hold` 就是 Messages 面板顯示的同一個原因 —— `{key, n?}`，
+其中 `key` 可能是 `typing`、`mid-turn`、`behind`、`starting`、`settling`、
+`not-ready`、`gone`、`paused` 或 `remote-ack` —— 而 `held_for_s` 是它維持這個狀態
+多久了。它會出現在 `cli_check_message`，以及逾時的 `cli_send` 等待上；一旦訊息塵埃
+落定，或在還沒有任何視窗回報過原因時，它就不存在。`cli_list_targets` 以
+`hold_reason` 逐 Pane 呈現同一件事，那正是讓 `busy` 變得可以解釋的東西 —— 但只在
+從這裡送出的某則訊息正為那個 Pane 排隊時才有，所以它不存在並不說明任何事。
+
+**當它排隊太久時。** 一則 `queued` 的訊息等超過**兩分鐘**之後就會出現 `stale`，
+`cli_check_message` 與逾時的 `cli_send` 等待都一樣。它不是判定 —— 沒有東西失敗，
+也沒有東西放棄 —— 它是「它正在路上」不再是安全假設的那個分界點，因此請連同旁邊的
+`hold` 一起讀，再決定要繼續等、改找別人，還是對使用者說點什麼。它是從送出那一刻起
+算的，而不是從目前這個保留起算：在 `mid-turn` 與 `typing` 之間來回跳動的訊息每次
+都會把 `held_for_s` 歸零重數，而這個欄位真正要處理的情況 —— 從頭到尾沒有任何視窗
+回報過保留原因的那一種 —— 根本沒有保留計時可讀。
+
+`cli_inbox_summary` 是同一件事，只是不需要有 `msg_key` 才問得出來。它不接受任何
+參數，只回答關於呼叫端自己的事，並回傳你目前每一則 stale 或失敗的送出 —— 附上
+60 個字元的 `excerpt`，讓你即使沒留著 key 也認得出是哪一則訊息。已送達與剛排進去
+的訊息不會列入，因此空清單代表「我沒有東西卡住」，絕不是「什麼都沒送出」。它的存
+在是為了那種通知碰不到的 Agent：投遞失敗通知要等寄件 Pane 進入 Idle 才會被輸入回
+去，所以連續忙一小時的 Agent 永遠看不到，而外部 Client 根本沒有 Pane 可以輸入。在
+你自己的工作之間呼叫它，就是你發現二十分鐘前送出的那則訊息還躺在佇列裡的方式。
+
 那張表是 Backend 的**記憶體**，不是 Log：它保存最近 500 筆送出記錄一小時，
 Backend 重新啟動就會遺失。未知的 `msg_key` 會回傳 `{ok: false, error}`，
 意思是「不再被追蹤」，不是「從未送出」。
 
 `cli_send_and_wait` 處理的是手動配對 `cli_send` + `cli_wait_idle` 會輸掉的競態 ——
 目標在你送出的當下是 Idle 的，因此單純的等待會在它讀到訊息之前就回報
-「已經 Idle」。它會在送出前記錄目標的最後一次活動，並且只接受*更新*的回合作為
-答案，因此 `last_activity.text` 就是另一個 Agent 的回覆內容。它的 Timeout
-`reason` 沿用 `cli_wait_idle` 的，另外加上 `never_started`，代表目標一直維持
-Idle、從未顯示任何接手該訊息的跡象。若送出當場被拒絕，則原樣回傳 `cli_send` 的
-`{ok: false, error}`。
+「已經 Idle」。它會先等訊息**送進去**，並在送出前記錄目標的最後一次活動，而且只
+接受*更新*的回合作為答案，因此 `last_activity.text` 就是另一個 Agent 的回覆內容。
+它的 Timeout `reason` 沿用 `cli_wait_idle` 的，另外加上 `never_started`，代表目標
+一直維持 Idle、從未顯示任何接手該訊息的跡象。若送出當場被拒絕，則原樣回傳
+`cli_send` 的 `{ok: false, error}`。
+
+`timeout_s` 涵蓋兩個階段：**最多一半**用來把訊息送進去，剩下的才用來等回合。花在
+投遞上的時間並沒有白費 —— Pane 一空下來訊息就會落地，而那本來就是 Idle 等待大半
+會坐等的東西 —— 但在一半時間點上仍被保留的訊息，不太可能在剩下的時間裡得到回答，
+而它的保留原因遠比「逾時，忙碌中」有用得多。當訊息始終沒有抵達時，結果會是
+`source: "not_delivered"`，並帶著 `delivery_status`（`queued` 時附 `hold` /
+`held_for_s`，`failed` / `rejected` 時附 `reason`）。這修正的是「訊息被保留住、目
+標卻閒著」的情況：舊的順序會依訊息被送出時的狀態回答 `idle`，那會被讀成「它把你的
+工作做完了」，但那份工作根本從未交出去。和 `target_lost` 一樣，它維持 `ok: true`
+—— 不要因為它而重送。
 
 如果目標在等待*期間*不再可定址 —— 視窗關閉、Pane 被 Kill —— 結果會是
 `{ok: true, idle: false, source: "target_lost", error}`。它刻意維持 `ok: true`：
@@ -213,6 +264,52 @@ copilot/cursor/kilo/muse/opencode 的 `turn_complete` 是 CLI 自己說回合結
 （`App.vue` 中的 `buildUiActionSnapshot`）：`{workspace, panes: [{id, name?,
 agentKey, workspacePath, status?}], activeTab, settingsOpen,
 openWorkspaces}`。
+
+## Tool 清單只讀一次
+
+MCP Client 會在連線時向 Server 索取一次 Tool 清單，而 Navide 的 `/plan-mcp` 之後
+永遠不會改動它。因此**Client 在那一刻看到什麼，就一直留著什麼**：
+
+- **CLI Pane** 會在它的 CLI Process 啟動時把清單拍成快照。Navide 更新時就已經在跑
+  的 Pane，講話的對象是一個不復存在的 Backend；請重新開啟該 Pane，才能取得較新版
+  Navide 新增的 Tool 或參數。
+- **外部 Client** 會保留它的清單，直到你重新連線為止。反正 Connection URL 會隨著
+  重新啟動而改變（Port 是啟動時挑的），所以這件事通常會自己解決。
+
+升級之後 Navide 會說一次，就在狀態列的公告串流裡：一則「MCP tools may have
+changed」項目，指出它取代的是哪個版本。它只在這次 Backend 確實以不同於上一次的版
+本啟動時才出現 —— 全新安裝時不會，一般重新啟動時也不會。
+
+### 為什麼 Navide 不乾脆通知 Client
+
+協定其實有對應的做法 —— Server 宣告 `tools.listChanged` capability，之後在它的
+Tool 集合改變時送出 `notifications/tools/list_changed`，而會處理它的 Client 就會在
+Session 中途重讀清單。Navide 不能用它，有兩個彼此獨立的原因。
+
+**這個 Transport 沒有地方可以推。** `/plan-mcp` 以 stateless 模式執行 streamable
+HTTP 並回應 JSON：Transport 是每個請求建立又拆掉的，不會有任何 Stream 保持開啟。
+在那種組態下，由 Server 發起的通知沒有路徑可以抵達 Client —— MCP SDK 會把它送往一
+條長壽的 Stream，找不到，然後丟棄。要讓它送得到，就得改跑 Session 導向的模式，而
+那正是這個 Endpoint 刻意不採用的狀態。（2026-07-28 版的規格移除了協定層級的
+Session，並把這些通知移到由 Client 開啟的 `subscriptions/listen` Stream 上 ——
+不論哪一種，都是一條保持開啟的 Stream。）
+
+**有一半的 CLI 會忽略它。** 依各 Client 自己的原始碼或文件查核，2026-08-17：
+
+| CLI | 收到 `list_changed` 會重讀 Tool 清單嗎？ |
+|---|---|
+| Claude Code | 會，自 2.1.0 起 |
+| GitHub Copilot CLI | 會 |
+| OpenCode | 會 |
+| Grok | 會 |
+| Codex CLI | 不會 —— 記錄該通知然後什麼也不做 |
+| Cursor（`cursor-agent`） | 不會 —— 要用 `/mcp` 手動重新整理 |
+| Qwen Code | 不會 —— 這個 fork 拿掉了上游 Gemini CLI 有的處理器 |
+| Kimi CLI | 不會 —— 完全沒有通知處理 |
+
+而且無論如何也沒有什麼好通知的：`/plan-mcp` 的每個 Tool 都在 import 時註冊，而這
+組集合在 Backend 執行期間永遠不變。重新開啟 Pane 就是全部的解法，這也是為什麼它被
+寫成文件，而不是用工程手段繞過。
 
 ## CDP debug（逃生口）
 

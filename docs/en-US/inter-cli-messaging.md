@@ -128,6 +128,33 @@ Senders that are not a live CLI pane in the window get no notice: a pane that
 closed before the failure, a plain terminal, or an external MCP client (which
 has `cli_check_message` to poll instead).
 
+### Still-held notices
+
+A message that fails says so. A message that simply never goes out said nothing
+at all, and the pane that sent it went on assuming the work had been handed
+over. After **two minutes** in a queue, the sending pane is told:
+
+```
+[Navide MSG] still held — to: reviewer
+reason: Someone is typing in the target pane — waiting 2 min so far
+（原訊息開頭：Please review src/main.ts and reply with the blocking…）
+```
+
+This is not a failure and nothing has been given up on: the message is still in
+the queue and still goes in when the target frees up. What it buys the sender is
+the chance to decide — keep waiting, address someone else, or tell you — instead
+of assuming an answer is on its way.
+
+Each message produces **one** of these, ever. A target that stays busy for an
+hour costs each of its senders a single notice, and the reason quoted is the
+same `hold` the Messages panel shows at that moment.
+
+The same rule covers every sender that is a live pane in the window, whichever
+way it sent: a bare-line block, a `cli_send` from another pane, a message
+addressed to another workspace. A sender that is *not* a pane — an external MCP
+client — gets no notice, because there is nothing to type it into; it asks
+`cli_inbox_summary` instead, which answers the same question.
+
 ### Spawn feedback notices
 
 A spawn request that does not work out is reported the same way, to the pane
@@ -516,6 +543,7 @@ it would be told about a failure.
 | `paused` | Delivery is paused for the window |
 | `gone` | Target pane no longer exists |
 | `remote-ack` | Sent to another window; awaiting its report |
+| `cancelling` | Withdrawal asked of another window; awaiting its answer |
 
 A message that came in through `cli_send` reports its hold back to the backend
 as well, so the agent that sent it can read the same reason without a Messages
@@ -524,7 +552,6 @@ the *reason* travels, only when it changes, and only for a message the backend
 is already tracking by `msg_key`; a message between two panes of one window is
 known nowhere else and reports nothing. The hold itself is still in-memory and
 still never persisted.
-| `cancelling` | Withdrawal asked of another window; awaiting its answer |
 
 ### Why a message failed
 
