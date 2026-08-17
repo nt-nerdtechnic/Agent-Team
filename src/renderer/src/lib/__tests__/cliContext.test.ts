@@ -136,6 +136,37 @@ describe('buildPaneStatusReply', () => {
     })
   })
 
+  it('carries awaitingKind so a caller can tell the two waits apart', () => {
+    // The badge merged them; this reply must not. cli_wait_idle returns from a
+    // question and blocks on a permission prompt, and `status` reads
+    // 'awaiting' for both.
+    const question = buildPaneStatusReply(undefined, {
+      displayStatus: 'awaiting',
+      awaitingKind: 'question',
+      buffer: ''
+    })
+    expect(question.status).toBe('awaiting')
+    expect(question.awaitingKind).toBe('question')
+
+    const permission = buildPaneStatusReply(undefined, {
+      displayStatus: 'awaiting',
+      awaitingKind: 'permission',
+      buffer: ''
+    })
+    expect(permission.awaitingKind).toBe('permission')
+  })
+
+  it('omits awaitingKind entirely when the pane is not parked', () => {
+    // null is the normal value for every other status; sending the key with a
+    // null value would make the backend's "field absent" check ambiguous.
+    const reply = buildPaneStatusReply(undefined, {
+      displayStatus: 'running',
+      awaitingKind: null,
+      buffer: ''
+    })
+    expect('awaitingKind' in reply).toBe(false)
+  })
+
   it('caps the buffer to CLI_PASTE_BUFFER_CAP chars, keeping only the tail', () => {
     const long = 'a'.repeat(CLI_PASTE_BUFFER_CAP + 500)
     const reply = buildPaneStatusReply(undefined, { displayStatus: 'idle', buffer: long })

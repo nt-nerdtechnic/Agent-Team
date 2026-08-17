@@ -286,8 +286,14 @@ export type TerminalStatus = 'idle' | 'starting' | 'running' | 'exited' | 'error
  *  parked on the user, which is derived from out-of-band CLI signals. Keep this
  *  the single source: AgentOverviewStatus extends it, and every status-keyed
  *  CSS block and i18n key is written against these exact strings. Adding a
- *  value here is what makes the compiler point at the places that must follow. */
-export type DisplayStatus = TerminalStatus | 'awaiting' | 'question'
+ *  value here is what makes the compiler point at the places that must follow.
+ *
+ *  'awaiting' covers EVERY way a pane can be parked on the user — a permission
+ *  box, an MCP form, or the agent asking a question. They were once two badges
+ *  and the split confused more than it explained: the person reading it only
+ *  needs to know the pane will not move until they answer. Which kind it is
+ *  still matters to code that is not the badge (see `awaitingKind`). */
+export type DisplayStatus = TerminalStatus | 'awaiting'
 
 // Every live useTerminal instance, so the module-level helpers below can reach
 // each pane's scrollback snapshot: the app-exit save (App.vue's beforeunload),
@@ -1415,18 +1421,52 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       awaitingInputAt.value > 0 &&
       lastCleanBurstAt.value < awaitingInputAt.value + AWAITING_SETTLE_MS
     ) return 'awaiting'
-    // QUESTION sits just under AWAITING: both park the pane on the user, but a
-    // permission prompt blocks a tool call the agent already decided to make,
-    // so it is the more urgent of the two. It must outrank every idle path
-    // below — including the authoritative turn end, because a turn that ends
-    // ON a question reports turn_complete and would otherwise read as idle.
+    // A question reports the same badge as a permission prompt — both mean the
+    // pane will not move until the user answers. It is kept a separate signal
+    // rather than folded into awaitingInputAt because the two are raised and
+    // released by different code and mean different things to the messaging
+    // gate; only the BADGE is shared. It must outrank every idle path below —
+    // including the authoritative turn end, because a turn that ends ON a
+    // question reports turn_complete and would otherwise read as idle.
     if (
       questionAt.value > 0 &&
       lastCleanBurstAt.value < questionAt.value + AWAITING_SETTLE_MS
-    ) return 'question'
+    ) return 'awaiting'
     if (turnCompleteAt.value > lastCleanBurstAt.value) return 'idle'
     if (nowTick.value - lastCleanBurstAt.value > IDLE_CONFIRM_MS) return 'idle'
     return runningLatched.value ? 'running' : 'idle'
+  })
+
+  /** Which kind of wait the AWAITING badge is currently reporting, for the
+   *  code that still has to tell them apart. Null whenever the badge is
+   *  something else.
+   *
+   *  The badge merged the two; the messaging gate must not. What this splits on
+   *  is NOT who asked — it is whether a widget is currently on screen eating
+   *  keystrokes:
+   *
+   *   • 'permission' — something is drawn and waiting for a choice. Delivery
+   *     writes to the PTY, so a message injected now is swallowed as that
+   *     widget's answer instead of starting a turn. Raised by markNeedsInput,
+   *     whose callers are the notification hook and the screen watcher, and
+   *     both of those only fire while a box is painted. A Claude
+   *     AskUserQuestion box lands here too, and belongs here: it is a select
+   *     widget, and typing into it is exactly as destructive as answering a
+   *     permission prompt by accident.
+   *   • 'question' — the agent asked something and went back to its ordinary
+   *     prompt, so the pane can take a turn normally. Raised by markQuestion
+   *     (a turn whose text ends on a question). Those panes reached the gate as
+   *     'idle' before any of this existed, and holding them back now would newly
+   *     park them out of dispatch.
+   *
+   *  See messagingHoldKey. Resolved in the same order displayStatus resolves
+   *  them, so a pane with both flags lit reports the more restrictive one. */
+  const awaitingKind = computed<'permission' | 'question' | null>(() => {
+    if (displayStatus.value !== 'awaiting') return null
+    const permission =
+      awaitingInputAt.value > 0 &&
+      lastCleanBurstAt.value < awaitingInputAt.value + AWAITING_SETTLE_MS
+    return permission ? 'permission' : 'question'
   })
   const BUFFER_CAP = 128 * 1024
   const redrawGuard = createRedrawGuard()
@@ -2959,9 +2999,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
    *
    *  Wired further down, where displayStatus is safe to evaluate. */
   function onLeftUserPrompt(now: DisplayStatus, before: DisplayStatus): void {
-    const wasParked = before === 'awaiting' || before === 'question'
-    const stillParked = now === 'awaiting' || now === 'question'
-    if (!wasParked || stillParked) return
+    if (before !== 'awaiting' || now === 'awaiting') return
     if (inputBuffer.trim().length > SINGLE_KEY_ANSWER_MAX) return
     inputBuffer = ''
     syncDraft()
@@ -4035,6 +4073,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     pasteFromClipboard,
     status,
     displayStatus,
+    awaitingKind,
     startingStartedAt,
     startingAgeMs,
     stallReason,

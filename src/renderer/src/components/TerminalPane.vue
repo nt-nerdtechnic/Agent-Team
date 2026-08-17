@@ -241,14 +241,27 @@ watch(() => props.isPreparing, (isPrep) => {
 // alone cannot tell apart from a finished turn.
 const displayStatus = terminal.displayStatus
 
-// 'idle', 'awaiting' and 'question' all look like a quiet pane but mean
-// different things — done, blocked on a permission prompt, or waiting for an
-// answer — so each explains itself on hover. The rest are self-evident from
+// 'idle' and 'awaiting' both look like a quiet pane but mean opposite things —
+// done versus blocked on you — so each explains itself on hover. The badge no
+// longer separates a permission prompt from a question, but the tooltip still
+// names which one it is: the distinction is not worth a second badge, and is
+// worth a sentence once someone stops to ask. The rest are self-evident from
 // the badge text.
+// The badge otherwise prints the raw status word, which reads fine for every
+// state that describes the AGENT ('running', 'idle', 'exited'). 'awaiting'
+// describes the READER instead — it is the one badge that is an instruction —
+// so it gets a translated label, the same exception 'stopped' already makes.
+const statusBadgeKey = computed<string>(() =>
+  displayStatus.value === 'awaiting' ? 'pane.terminal.awaiting-status-badge' : ''
+)
+
 const statusTooltipKey = computed<string>(() => {
   if (displayStatus.value === 'idle') return 'pane.terminal.idle-status-tooltip'
-  if (displayStatus.value === 'awaiting') return 'pane.terminal.awaiting-status-tooltip'
-  if (displayStatus.value === 'question') return 'pane.terminal.question-status-tooltip'
+  if (displayStatus.value === 'awaiting') {
+    return terminal.awaitingKind.value === 'question'
+      ? 'pane.terminal.question-status-tooltip'
+      : 'pane.terminal.awaiting-status-tooltip'
+  }
   return ''
 })
 
@@ -274,6 +287,7 @@ defineExpose({
   focus: terminal.focus,
   status: terminal.status,
   displayStatus,
+  awaitingKind: terminal.awaitingKind,
   startingStartedAt: terminal.startingStartedAt,
   startingAgeMs: terminal.startingAgeMs,
   cancelPendingCreate: terminal.cancelPendingCreate,
@@ -570,7 +584,7 @@ onMounted(() => {
           class="status"
           :data-status="displayStatus"
           :title="statusTooltipKey ? $t(statusTooltipKey) : ''"
-        >{{ displayStatus === 'stopped' ? 'STOP' : displayStatus }}</span>
+        >{{ statusBadgeKey ? $t(statusBadgeKey) : displayStatus === 'stopped' ? 'STOP' : displayStatus }}</span>
         <UsageBadge v-if="agentKey" :agent-key="agentKey" :cli-profiles="cliProfiles" />
       </div>
       <div v-if="subtitle" class="header-sub">{{ subtitle }}</div>
@@ -866,10 +880,6 @@ onMounted(() => {
 .status[data-status='awaiting'] {
   background: color-mix(in srgb, var(--warning-fg) 20%, transparent);
   color: var(--warning-fg);
-}
-.status[data-status='question'] {
-  background: color-mix(in srgb, var(--question-fg) 20%, transparent);
-  color: var(--question-fg);
 }
 .status[data-status='stopped'] {
   background: #000000;

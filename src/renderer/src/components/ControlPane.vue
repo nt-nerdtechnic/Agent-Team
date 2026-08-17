@@ -2447,14 +2447,6 @@ button.icon-btn.muted:hover {
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--warning-fg) 25%, transparent);
   animation: agent-dot-pulse 1.2s ease-in-out infinite;
 }
-/* The agent put a question to the user. Pulses for the same reason awaiting
-   does — nothing moves until someone answers — in its own hue so the two
-   reasons a pane is parked stay tellable apart at 8px. */
-.status-dot[data-state='question'] {
-  background: var(--question-fg);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--question-fg) 25%, transparent);
-  animation: agent-dot-pulse 1.2s ease-in-out infinite;
-}
 /* Cold-restore placeholder: nothing spawned yet — a hollow ring, so it never
    reads as a live-but-quiet pane. */
 .status-dot[data-state='waiting'] {
@@ -2658,10 +2650,6 @@ button.icon-btn.muted:hover {
 .state[data-state='awaiting'] {
   background: color-mix(in srgb, var(--warning-fg) 20%, transparent);
   color: var(--warning-fg);
-}
-.state[data-state='question'] {
-  background: color-mix(in srgb, var(--question-fg) 20%, transparent);
-  color: var(--question-fg);
 }
 .state[data-state='error'] {
   background: var(--danger-deep);

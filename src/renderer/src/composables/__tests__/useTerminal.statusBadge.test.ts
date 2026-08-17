@@ -300,12 +300,15 @@ describe('useTerminal — RUNNING badge vs self-triggered repaints', () => {
     scope.stop()
   })
 
-  it('reports QUESTION once the agent asks something', async () => {
+  it('reports AWAITING once the agent asks something', async () => {
+    // One badge for every way a pane parks on the user; awaitingKind is what
+    // still tells the two apart for the code that needs to know.
     const { result, mock, scope } = await spawnedFake()
     for (let i = 0; i < 5; i++) await chunkThenWait(mock, i, 1_500)
     expect(result.displayStatus.value).toBe('running')
     result.markQuestion()
-    expect(result.displayStatus.value).toBe('question')
+    expect(result.displayStatus.value).toBe('awaiting')
+    expect(result.awaitingKind.value).toBe('question')
     scope.stop()
   })
 
@@ -316,7 +319,8 @@ describe('useTerminal — RUNNING badge vs self-triggered repaints', () => {
     for (let i = 0; i < 5; i++) await chunkThenWait(mock, i, 1_500)
     result.markQuestion()
     await vi.advanceTimersByTimeAsync(30_000)
-    expect(result.displayStatus.value).toBe('question')
+    expect(result.displayStatus.value).toBe('awaiting')
+    expect(result.awaitingKind.value).toBe('question')
     scope.stop()
   })
 
@@ -327,47 +331,88 @@ describe('useTerminal — RUNNING badge vs self-triggered repaints', () => {
     await chunkThenWait(mock, 0, 100)
     result.markTurnComplete()
     result.markQuestion()
-    expect(result.displayStatus.value).toBe('question')
+    expect(result.displayStatus.value).toBe('awaiting')
+    expect(result.awaitingKind.value).toBe('question')
     scope.stop()
   })
 
-  it('lets AWAITING outrank QUESTION when both are raised', async () => {
-    // A permission prompt blocks a tool call the agent already committed to,
-    // so it is the more urgent of the two ways a pane parks on the user.
+  it('reports the permission kind when both waits are raised at once', async () => {
+    // The badge is the same either way, but awaitingKind feeds the messaging
+    // gate: a permission prompt blocks a tool call the agent already committed
+    // to, so a pane holding one must stay out of dispatch even if a question
+    // is also outstanding. The more restrictive kind wins.
     const { result, mock, scope } = await spawnedFake()
     await chunkThenWait(mock, 0, 100)
     result.markQuestion()
     result.markNeedsInput()
     expect(result.displayStatus.value).toBe('awaiting')
+    expect(result.awaitingKind.value).toBe('permission')
     scope.stop()
   })
 
-  it('leaves QUESTION once real output arrives after the settle window', async () => {
+  it('classifies a painted option box as permission, whoever put it there', async () => {
+    // The split is about whether a widget is on screen eating keystrokes, not
+    // about who asked. Claude's AskUserQuestion box reaches markNeedsInput via
+    // the screen watcher, and belongs on the permission side: injecting a
+    // message into a select widget is answered-by-accident either way.
+    //
+    // Regression guard for the merge: before the screen watcher existed these
+    // panes showed 'idle' and took dispatched work, which silently fed the
+    // message to the box as its answer.
+    const { result, mock, scope } = await spawnedFake()
+    await chunkThenWait(mock, 0, 100)
+    result.markNeedsInput()
+    expect(result.displayStatus.value).toBe('awaiting')
+    expect(result.awaitingKind.value).toBe('permission')
+    scope.stop()
+  })
+
+  it('classifies a turn that merely ended on a question as answerable', async () => {
+    // The other side of the same rule: no widget is painted, the pane is back
+    // at its ordinary prompt, so a dispatched message starts a turn normally.
+    const { result, mock, scope } = await spawnedFake()
+    await chunkThenWait(mock, 0, 100)
+    result.markQuestion()
+    expect(result.displayStatus.value).toBe('awaiting')
+    expect(result.awaitingKind.value).toBe('question')
+    scope.stop()
+  })
+
+  it('reports no kind at all when the pane is not parked', async () => {
+    const { result, mock, scope } = await spawnedFake()
+    for (let i = 0; i < 5; i++) await chunkThenWait(mock, i, 1_500)
+    expect(result.displayStatus.value).toBe('running')
+    expect(result.awaitingKind.value).toBeNull()
+    scope.stop()
+  })
+
+  it('leaves the question wait once real output arrives after the settle window', async () => {
     const { result, mock, scope } = await spawnedFake()
     await chunkThenWait(mock, 0, 100)
     result.markQuestion()
     await vi.advanceTimersByTimeAsync(5_000)
-    expect(result.displayStatus.value).toBe('question')
+    expect(result.displayStatus.value).toBe('awaiting')
     await chunkThenWait(mock, 1, 100)
-    expect(result.displayStatus.value).not.toBe('question')
+    expect(result.displayStatus.value).not.toBe('awaiting')
+    expect(result.awaitingKind.value).toBeNull()
     scope.stop()
   })
 
-  it('clears QUESTION on clearQuestion() when the answer comes back', async () => {
+  it('clears the question wait on clearQuestion() when the answer comes back', async () => {
     const { result, mock, scope } = await spawnedFake()
     await chunkThenWait(mock, 0, 100)
     result.markQuestion()
-    expect(result.displayStatus.value).toBe('question')
+    expect(result.displayStatus.value).toBe('awaiting')
     result.clearQuestion()
-    expect(result.displayStatus.value).not.toBe('question')
+    expect(result.displayStatus.value).not.toBe('awaiting')
     scope.stop()
   })
 
-  it('does not carry QUESTION across a respawn', async () => {
+  it('does not carry the question wait across a respawn', async () => {
     const { result, mock, scope } = await spawnedFake()
     await chunkThenWait(mock, 0, 100)
     result.markQuestion()
-    expect(result.displayStatus.value).toBe('question')
+    expect(result.displayStatus.value).toBe('awaiting')
 
     result.status.value = 'exited'
     mock.setResponse('terminal.create', { terminal_session_id: 'sess-2', pid: 43 })
@@ -376,7 +421,7 @@ describe('useTerminal — RUNNING badge vs self-triggered repaints', () => {
     await respawning
     await chunkThenWait(mock, 1, 100)
 
-    expect(result.displayStatus.value).not.toBe('question')
+    expect(result.displayStatus.value).not.toBe('awaiting')
     scope.stop()
   })
 

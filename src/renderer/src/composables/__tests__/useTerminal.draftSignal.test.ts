@@ -313,7 +313,7 @@ describe('useTerminal — draft and keystroke signals', () => {
     await output(mock, 'Which one?')
     terminal.markQuestion()
     await nextTick()
-    expect(terminal.displayStatus.value).toBe('question')
+    expect(terminal.displayStatus.value).toBe('awaiting')
     type('2')
     expect(terminal.hasDraft.value).toBe(true)
 

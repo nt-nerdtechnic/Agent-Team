@@ -362,6 +362,13 @@ export function buildCliPaneBufferReply(
 
 export interface PaneStatusReply {
   status: string
+  /** Which kind of wait an 'awaiting' status is reporting — 'permission' or
+   *  'question'; absent for every other status. The badge merged the two, but
+   *  a caller deciding whether it may send this pane work still has to tell
+   *  them apart, and `status` alone no longer can. cli_wait_idle is the
+   *  consumer that must not regress: a question was always something it
+   *  returned from, a permission prompt never was. */
+  awaitingKind?: string
   buffer: string
   logPath?: string
 }
@@ -373,11 +380,13 @@ export interface PaneStatusReply {
  *  TerminalPane ref yet (still shows a status, but no scrollback). */
 export function buildPaneStatusReply(
   pane: { outputLogFile?: string } | undefined,
-  live: { displayStatus?: string; buffer: string } | null
+  live: { displayStatus?: string; awaitingKind?: string | null; buffer: string } | null
 ): PaneStatusReply {
-  return {
+  const reply: PaneStatusReply = {
     status: live?.displayStatus ?? 'starting',
     buffer: live ? bufferTail(live.buffer, CLI_PASTE_BUFFER_CAP) : '',
     logPath: pane?.outputLogFile || undefined
   }
+  if (live?.awaitingKind) reply.awaitingKind = live.awaitingKind
+  return reply
 }
