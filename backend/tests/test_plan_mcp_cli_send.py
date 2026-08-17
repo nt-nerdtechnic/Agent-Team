@@ -8,6 +8,7 @@ list on their own and route through the same registry.
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -21,9 +22,11 @@ from agent_team_backend.plugins.builtin.navide_plans import plan_mcp, plan_mcp_a
 def _clean_registry() -> Any:
     agent_messaging._reset_for_test()
     plan_mcp._mcp_message_status.clear()
+    plan_mcp._status_waiters.clear()
     yield
     agent_messaging._reset_for_test()
     plan_mcp._mcp_message_status.clear()
+    plan_mcp._status_waiters.clear()
 
 
 def _external_ctx() -> Any:
@@ -497,7 +500,9 @@ async def test_tools_are_registered_without_a_ctx_argument() -> None:
         "cli_send_and_wait",
     }
     # The Context parameter is injected, never asked of the agent.
-    assert set((tools["cli_send"].inputSchema.get("properties") or {})) == {"to", "text"}
+    assert set((tools["cli_send"].inputSchema.get("properties") or {})) == {
+        "to", "text", "wait_for_delivery_s",
+    }
     assert not (tools["cli_list_targets"].inputSchema.get("properties") or {})
     assert set((tools["cli_open_agent"].inputSchema.get("properties") or {})) == {
         "agent", "name", "task", "workspace_path",
@@ -1064,3 +1069,269 @@ async def test_an_unknown_target_still_answers_as_before_with_a_roster_loaded(
     result = await plan_mcp.cli_send("beta/nobody", "hi", _ctx())
     assert result["error_code"] == "unknown-target-in-workspace"
     assert captured == []
+
+
+# ── cli_send(wait_for_delivery_s=…) ─────────────────────────────────────────
+# The pull loop closed: an agent that sends and moves on never learns what
+# became of its message, so these cover the one call that answers in-band.
+
+
+@pytest.mark.asyncio
+async def test_send_without_a_wait_answers_exactly_as_it_always_did(
+    captured: list[dict[str, Any]],
+) -> None:
+    """The default must add nothing: every existing caller parses this shape."""
+    _seed()
+    result = await plan_mcp.cli_send("beta/reviewer", "hi", _ctx())
+
+    assert set(result) == {"ok", "target", "cross_workspace", "msg_key"}
+
+
+@pytest.mark.asyncio
+async def test_send_waits_for_the_delivery_and_reports_it(
+    captured: list[dict[str, Any]],
+) -> None:
+    _seed()
+    keys: list[str] = []
+
+    async def deliver_shortly() -> None:
+        for _ in range(200):
+            if captured:
+                break
+            await asyncio.sleep(0.001)
+        key = captured[0]["payload"]["msg_key"]
+        keys.append(key)
+        while not plan_mcp.record_delivery_result(key, True, ""):
+            await asyncio.sleep(0.001)
+
+    task = asyncio.create_task(deliver_shortly())
+    result = await plan_mcp.cli_send("beta/reviewer", "hi", _ctx(), wait_for_delivery_s=5.0)
+    await task
+
+    assert result["ok"] is True
+    assert result["status"] == "delivered"
+    assert result["msg_key"] == keys[0]
+    assert isinstance(result["settled_after_s"], float)
+    assert "hold" not in result
+
+
+@pytest.mark.asyncio
+async def test_a_refused_delivery_still_answers_ok_so_nobody_resends(
+    captured: list[dict[str, Any]],
+) -> None:
+    """ok:false would read as "never sent" and get the work dispatched twice —
+    the same reasoning target_lost is built on."""
+    _seed()
+
+    async def refuse_shortly() -> None:
+        for _ in range(200):
+            if captured:
+                break
+            await asyncio.sleep(0.001)
+        key = captured[0]["payload"]["msg_key"]
+        while not plan_mcp.record_delivery_result(key, False, '{"key":"pane-closed"}'):
+            await asyncio.sleep(0.001)
+
+    task = asyncio.create_task(refuse_shortly())
+    result = await plan_mcp.cli_send("beta/reviewer", "hi", _ctx(), wait_for_delivery_s=5.0)
+    await task
+
+    assert result["ok"] is True
+    assert result["status"] == "failed"
+    assert result["reason"] == "pane-closed"
+
+
+@pytest.mark.asyncio
+async def test_waiting_out_the_clock_reports_what_is_holding_the_message(
+    captured: list[dict[str, Any]],
+) -> None:
+    """The case the whole feature exists for: still queued, and now the sender
+    knows it is a person typing rather than an agent working."""
+    _seed()
+
+    async def report_the_hold() -> None:
+        for _ in range(200):
+            if captured:
+                break
+            await asyncio.sleep(0.001)
+        key = captured[0]["payload"]["msg_key"]
+        while not plan_mcp.record_message_hold(key, {"key": "typing"}):
+            await asyncio.sleep(0.001)
+
+    task = asyncio.create_task(report_the_hold())
+    result = await plan_mcp.cli_send("beta/reviewer", "hi", _ctx(), wait_for_delivery_s=0.08)
+    await task
+
+    assert result["ok"] is True
+    assert result["status"] == "queued"
+    assert result["hold"] == {"key": "typing"}
+    assert isinstance(result["held_for_s"], float)
+    assert isinstance(result["waited_s"], float)
+
+
+@pytest.mark.asyncio
+async def test_a_wait_returns_at_once_when_the_outcome_is_already_in(
+    captured: list[dict[str, Any]],
+) -> None:
+    """The report can beat the wait to it — the window answers on another
+    request, and nothing orders the two."""
+    _seed()
+    sent = await plan_mcp.cli_send("beta/reviewer", "hi", _ctx())
+    plan_mcp.record_delivery_result(sent["msg_key"], True, "")
+
+    started = time.monotonic()
+    again = await plan_mcp._with_delivery_wait(sent, 30.0)
+
+    assert again["status"] == "delivered"
+    assert time.monotonic() - started < 1.0
+
+
+@pytest.mark.asyncio
+async def test_the_wait_is_capped_at_the_same_two_minutes_as_cli_wait_idle(
+    captured: list[dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[float] = []
+
+    async def record_timeout(_msg_key: str, timeout: float) -> None:
+        seen.append(timeout)
+
+    monkeypatch.setattr(plan_mcp, "_await_delivery", record_timeout)
+    _seed()
+    await plan_mcp.cli_send("beta/reviewer", "hi", _ctx(), wait_for_delivery_s=9999.0)
+
+    assert seen == [plan_mcp._WAIT_IDLE_MAX_TIMEOUT_S]
+
+
+@pytest.mark.asyncio
+async def test_a_negative_wait_is_treated_as_no_wait(
+    captured: list[dict[str, Any]],
+) -> None:
+    _seed()
+    result = await plan_mcp.cli_send("beta/reviewer", "hi", _ctx(), wait_for_delivery_s=-5.0)
+
+    assert set(result) == {"ok", "target", "cross_workspace", "msg_key"}
+
+
+# ── hold reporting (agent_msg.hold_update → cli_check_message) ──────────────
+
+
+@pytest.mark.asyncio
+async def test_check_message_reports_the_hold_the_window_named(
+    captured: list[dict[str, Any]],
+) -> None:
+    _seed()
+    sent = await plan_mcp.cli_send("beta/reviewer", "hi", _ctx())
+    assert plan_mcp.record_message_hold(sent["msg_key"], {"key": "behind", "n": 2}) is True
+
+    result = await plan_mcp.cli_check_message(sent["msg_key"], _ctx())
+
+    assert result["status"] == "queued"
+    assert result["hold"] == {"key": "behind", "n": 2}
+    assert isinstance(result["held_for_s"], float)
+
+
+@pytest.mark.asyncio
+async def test_a_hold_that_changes_replaces_the_one_before_it(
+    captured: list[dict[str, Any]],
+) -> None:
+    _seed()
+    sent = await plan_mcp.cli_send("beta/reviewer", "hi", _ctx())
+    plan_mcp.record_message_hold(sent["msg_key"], {"key": "mid-turn"})
+    plan_mcp.record_message_hold(sent["msg_key"], {"key": "typing"})
+
+    result = await plan_mcp.cli_check_message(sent["msg_key"], _ctx())
+    assert result["hold"] == {"key": "typing"}
+
+
+@pytest.mark.asyncio
+async def test_a_null_hold_means_nothing_is_holding_it_any_more(
+    captured: list[dict[str, Any]],
+) -> None:
+    _seed()
+    sent = await plan_mcp.cli_send("beta/reviewer", "hi", _ctx())
+    plan_mcp.record_message_hold(sent["msg_key"], {"key": "typing"})
+    plan_mcp.record_message_hold(sent["msg_key"], None)
+
+    result = await plan_mcp.cli_check_message(sent["msg_key"], _ctx())
+    assert "hold" not in result
+    assert "held_for_s" not in result
+
+
+@pytest.mark.asyncio
+async def test_delivery_clears_the_hold(captured: list[dict[str, Any]]) -> None:
+    """What was holding a message stopped being true the moment it went in."""
+    _seed()
+    sent = await plan_mcp.cli_send("beta/reviewer", "hi", _ctx())
+    plan_mcp.record_message_hold(sent["msg_key"], {"key": "typing"})
+    plan_mcp.record_delivery_result(sent["msg_key"], True, "")
+
+    result = await plan_mcp.cli_check_message(sent["msg_key"], _ctx())
+    assert result["status"] == "delivered"
+    assert "hold" not in result
+    assert "held_for_s" not in result
+
+
+@pytest.mark.asyncio
+async def test_a_hold_arriving_after_the_delivery_cannot_resurrect_it(
+    captured: list[dict[str, Any]],
+) -> None:
+    """Two reports racing: the hold must not put a delivered message back on
+    "still waiting"."""
+    _seed()
+    sent = await plan_mcp.cli_send("beta/reviewer", "hi", _ctx())
+    plan_mcp.record_delivery_result(sent["msg_key"], True, "")
+
+    assert plan_mcp.record_message_hold(sent["msg_key"], {"key": "typing"}) is False
+    result = await plan_mcp.cli_check_message(sent["msg_key"], _ctx())
+    assert result["status"] == "delivered"
+    assert "hold" not in result
+
+
+def test_a_hold_for_a_key_this_server_never_sent_is_ignored() -> None:
+    # Every window reports for every tracked message it holds, exactly as it
+    # does for deliveries.
+    assert plan_mcp.record_message_hold("someone-elses-key", {"key": "typing"}) is False
+
+
+# ── cli_list_targets hold_reason ───────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_list_targets_explains_a_busy_pane_with_its_hold_reason(
+    captured: list[dict[str, Any]],
+) -> None:
+    """`busy` on its own is frontend-reported and can be stale; the hold is the
+    receiving window's live word for the same pane."""
+    _seed()
+    sent = await plan_mcp.cli_send("beta/reviewer", "hi", _ctx())
+    plan_mcp.record_message_hold(sent["msg_key"], {"key": "typing"})
+
+    result = await plan_mcp.cli_list_targets(_ctx())
+    reviewer = next(t for t in result["targets"] if t["address"] == "beta/reviewer")
+
+    assert reviewer["hold_reason"] == "typing"
+
+
+@pytest.mark.asyncio
+async def test_list_targets_says_nothing_about_a_pane_holding_nothing_of_ours(
+    captured: list[dict[str, Any]],
+) -> None:
+    _seed()
+    result = await plan_mcp.cli_list_targets(_ctx())
+
+    assert all("hold_reason" not in t for t in result["targets"])
+
+
+@pytest.mark.asyncio
+async def test_a_settled_message_stops_explaining_its_target(
+    captured: list[dict[str, Any]],
+) -> None:
+    _seed()
+    sent = await plan_mcp.cli_send("beta/reviewer", "hi", _ctx())
+    plan_mcp.record_message_hold(sent["msg_key"], {"key": "typing"})
+    plan_mcp.record_delivery_result(sent["msg_key"], True, "")
+
+    result = await plan_mcp.cli_list_targets(_ctx())
+    reviewer = next(t for t in result["targets"] if t["address"] == "beta/reviewer")
+
+    assert "hold_reason" not in reviewer

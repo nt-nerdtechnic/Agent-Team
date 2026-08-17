@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
 import base64
 import functools
 import logging
@@ -27,6 +28,7 @@ from uvicorn.protocols.utils import ClientDisconnected
 from . import __version__
 from . import agent_messaging
 from . import hook_drain
+from . import push_delivery
 from .analyzer import DEFAULT_MODEL as ANALYZER_DEFAULT_MODEL
 from .analyzer import (
     classify as _llama_classify,
@@ -684,6 +686,7 @@ def forget_pane_activity(pane_id: str) -> None:
     """Drop a closed pane's entry so the cache tracks live panes only."""
     _pane_activity.pop(pane_id, None)
     hook_drain.forget_pane(pane_id)
+    push_delivery.forget_pane(pane_id)
 
 
 async def _on_log_activity(event: ActivityEvent) -> None:
@@ -936,6 +939,21 @@ def _sanitize_inherited_cli_env() -> None:
 @app.on_event("startup")
 async def _start_log_watcher() -> None:
     _sanitize_inherited_cli_env()
+
+    # Push channels read the user's per-vendor switches through this rather
+    # than importing the settings store, which imports back into here.
+    push_delivery.set_disabled_reader(
+        lambda: set(
+            ui_settings_store.get().get(push_delivery.DISABLED_SETTING_KEY) or []
+        )
+    )
+    # Per-pane watch files hold message text in the clear and belong to panes
+    # that died with the previous process. Only a startup sweep ever removes
+    # the ones a killed backend left behind.
+    try:
+        await asyncio.to_thread(push_delivery.sweep_runtime_files)
+    except Exception as err:  # noqa: BLE001
+        log.warning("push watch-file sweep failed: %s", err)
 
     # One-time data protection on a version upgrade: back up the persisted JSON
     # stores and forward-migrate their schema. Idempotent and best-effort —
@@ -1411,6 +1429,119 @@ async def cli_hook(vendor: str, request: Request) -> Any:
             return JSONResponse({"decision": "block", "reason": blocked_envelope})
         return Response(status_code=200)
     return {"ok": True}
+
+
+#: How long a rewake waiter waits for its session to be attributed to a pane
+#: before giving up. SessionStart fires before the conversation log exists, so a
+#: fresh pane has nothing to match on for a moment; a pane that never resolves
+#: (an external `claude` the user started themselves) simply gets no channel,
+#: and the Stop hook re-arms one later if it ever does.
+_REWAKE_ATTRIBUTION_WAIT_S = 30.0
+
+#: How often a parked waiter checks that the hook is still on the other end.
+#: The hook is a curl the CLI backgrounded, and it dies with the CLI: a user
+#: running `/exit` inside a pane that stays open takes it with them, and nothing
+#: about that reaches the future the request is awaiting.
+_REWAKE_DISCONNECT_POLL_S = 1.0
+
+
+async def _hook_still_connected(request: Request) -> None:
+    """Return once the hook's HTTP connection is gone.
+
+    Polled rather than awaited on an event, because that is all the ASGI
+    contract offers. Cheap: one call a second per parked pane, and the pane
+    count is the number of claude panes open.
+    """
+    while True:
+        if await request.is_disconnected():
+            return
+        await asyncio.sleep(_REWAKE_DISCONNECT_POLL_S)
+
+
+async def _rewake_pane_id(session_id: str) -> str:
+    """The pane this session belongs to, waiting a little for it to be known."""
+    deadline = time.monotonic() + _REWAKE_ATTRIBUTION_WAIT_S
+    while True:
+        pane_id, _, _ = attribution.pane_for_session(session_id)
+        if pane_id or time.monotonic() >= deadline:
+            return pane_id or ""
+        await asyncio.sleep(0.5)
+
+
+async def _announce_push_state(pane_id: str, kind: str, ready: bool) -> None:
+    await broadcast(
+        make_event("agent_msg.push_state", {
+            "pane_id": pane_id, "kind": kind, "ready": ready,
+        })
+    )
+
+
+@app.post("/hooks/claude/rewake")
+async def claude_rewake_hook(request: Request) -> Response:
+    """Park a claude pane's background hook until there is a message for it.
+
+    This is the idle half of Stop-hook delivery. The Stop hook covers a message
+    that lands while the agent is working; a pane sitting idle runs no hook at
+    all, so instead one is left waiting here. Answering it with an envelope
+    makes Claude Code wake the agent and show that text as a system reminder,
+    without anything being typed into the pane.
+
+    The response body IS the protocol: non-empty means "wake, and say this",
+    empty means "nothing to report" and the hook exits without a decision. The
+    wait is bounded well inside the hook's own deadline, so this side is always
+    the one that gives up first — the reverse would resolve a message into a
+    hook that had already gone.
+
+    The waiter is also given up the moment the connection drops. A message
+    handed to a hook that is no longer there would be marked delivered with no
+    agent anywhere near it, and that is exactly what a user running `/exit`
+    inside a pane they leave open produces.
+    """
+    if not secrets.compare_digest(
+        request.query_params.get("t", ""), push_delivery.rewake_token()
+    ):
+        # A request from a previous backend run, or from something that never
+        # went through the installer. Empty body: a hook reading a 403 must
+        # still exit without a decision rather than showing the user an error.
+        return Response(status_code=403)
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001
+        payload = {}
+    session_id = str((payload or {}).get("session_id") or "") if isinstance(payload, dict) else ""
+    pane_id = await _rewake_pane_id(session_id) if session_id else ""
+    if not pane_id:
+        return Response(status_code=200)
+    if push_delivery.register_hook_pane(pane_id, "claude") is None:
+        return Response(status_code=200)
+    armed = push_delivery.arm_hook(pane_id)
+    if armed is None:
+        return Response(status_code=200)
+    request_id, future = armed
+    await _announce_push_state(pane_id, push_delivery.KIND_HOOK, True)
+    envelope = ""
+    try:
+        waiting = asyncio.ensure_future(
+            push_delivery.wait_for_hook(pane_id, request_id, future)
+        )
+        watching = asyncio.ensure_future(_hook_still_connected(request))
+        done, _ = await asyncio.wait(
+            {waiting, watching}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if waiting in done:
+            watching.cancel()
+            envelope = waiting.result() or ""
+        else:
+            # The hook is gone. Drop the waiter BEFORE awaiting anything else,
+            # so a push arriving in between cannot resolve into it.
+            push_delivery.discard_waiter(pane_id, request_id)
+            waiting.cancel()
+    finally:
+        if not push_delivery.is_ready(pane_id):
+            await _announce_push_state(pane_id, push_delivery.KIND_HOOK, False)
+    if not envelope:
+        return Response(status_code=200)
+    return Response(content=envelope, media_type="text/plain; charset=utf-8")
 
 
 @app.websocket("/ws")

@@ -729,6 +729,27 @@ async def main() -> int:
             "裝置名大小寫不同也解析得到（server 原樣存名字，比對規則由本機定）",
             {"error": cased.error},
         )
+        # One assertion guarding two layers, which is why it is here and not
+        # only in test_remote_roster.py — do not remove it as a duplicate.
+        #
+        #   application: an id is opaque and machine-minted, so folding its case
+        #   could only ever make two distinct devices collide.
+        #   storage: the id arrives from the server's directory. A MySQL schema
+        #   on a *_ci collation returns rows for a query that differs only in
+        #   case, and the roster would then answer for a device nobody asked
+        #   for. SQLite is always binary, so a local run cannot see this at all.
+        #
+        # Against the production server this is the check that proves the
+        # deployment's collation, not just this module's comparison.
+        wrong_case_id = DEVICE_B.upper()
+        folded = agent_messaging.parse_remote_target(
+            f"{wrong_case_id}/{WORKSPACE_LABEL}/{PANE_NAME}"
+        )
+        check(
+            folded.address is None,
+            "deviceId 大小寫不同「不」該解析得到（id 精確比對；在 *_ci collation 的 MySQL 上會失敗）",
+            {"queried": wrong_case_id, "resolved": folded.address.device_id if folded.address else None},
+        )
 
         # A device leaving changes no session row, so only presence.changed
         # reports it — without that push the roster would keep saying B is

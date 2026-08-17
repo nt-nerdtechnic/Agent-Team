@@ -180,6 +180,14 @@ def test_update_coerces_an_unknown_status_to_failed(log):
     assert log.tail()[0]["status"] == "failed"
 
 
+def test_update_keeps_a_withdrawn_message_withdrawn(log):
+    """`cancelled` is a status of its own: coercing it to `failed` would make a
+    message the sender took back read as one that went wrong."""
+    log.append([_row("a:1", 100, status="queued")])
+    log.update([{"uid": "a:1", "status": "cancelled"}])
+    assert log.tail()[0]["status"] == "cancelled"
+
+
 def test_clear_keeps_queued_and_delivering_by_default(tmp_path):
     db = Database(tmp_path / "navide.db")
     store = AgentMessageLog(db=db)

@@ -280,6 +280,71 @@ def mcp_document(
 
 
 @dataclass(frozen=True)
+class PushChannel:
+    """How an external process hands this CLI a new instruction without typing
+    it into the pane's PTY.
+
+    Which fields are set selects the mechanism, and a CLI offers exactly one:
+    ``append_path`` (an HTTP server the CLI's own TUI is a client of),
+    ``input_file_flag`` (a file the CLI watches for JSONL commands), or
+    ``hook_wait`` (a background hook the CLI runs, parked on this backend until
+    there is something to say). A CLI with no such surface declares none and
+    every message to it is typed into its input box exactly as before.
+
+    Declarative like ``McpWiring``: the transport is shared orchestration
+    (``push_delivery``), and a vendor module must not import it.
+    """
+
+    #: The push writes the CLI's composer, so the message occupies the input
+    #: box exactly as typing it would and the typing hold still has to protect
+    #: a half-written line. False = the text never reaches the composer, and
+    #: only the CLI-side gates (mid-turn, settling) apply.
+    holds_input_box: bool = True
+
+    # --- an HTTP server the CLI's own TUI drives itself ---
+    port_flag: str = ""              # spawn flag taking a per-pane free port
+    host_flag: str = ""              # spawn flag taking the bind address
+    host: str = "127.0.0.1"
+    append_path: str = ""            # POST {"text": …} — appends to the composer
+    submit_path: str = ""            # POST — submits whatever the composer holds
+    clear_path: str = ""             # POST — empties the composer (compensation)
+    #: Variable carrying a per-pane basic-auth password. Empty means the CLI's
+    #: own TUI cannot authenticate against its own server, so the port has to
+    #: be left open on the loopback interface (verified for opencode 1.15.12:
+    #: setting the password makes its TUI 401 against itself and exit).
+    password_env: str = ""
+    #: Basic-auth user that password belongs to; ignored without password_env.
+    username: str = ""
+
+    # --- a JSONL file the CLI watches ---
+    input_file_flag: str = ""        # spawn flag taking the file path
+    input_file_suffix: str = ".jsonl"
+    #: One record's shape. The CLI reads whole lines only, so a record is
+    #: written with a trailing newline; and the file is append-only for the
+    #: life of the pane, because a watcher that sees it shrink re-reads it from
+    #: the start and would replay every message in it.
+    record_type_key: str = "type"
+    record_type: str = ""
+    record_text_key: str = "text"
+
+    # --- a hook parked on this backend ---
+    #: The channel is armed out of band (by a hook the CLI runs) rather than at
+    #: spawn, so a pane has it only while a waiter is actually parked.
+    hook_wait: bool = False
+
+    # --- what the channel does to the text ---
+    #: Prefix added to the envelope on this channel only. For a channel that
+    #: arrives as something other than a user message — claude's rewake shows it
+    #: as a system reminder — the message has to say what it is, or the agent
+    #: reads it as a note about its own run rather than as work handed to it.
+    reminder_prefix: str = ""
+    #: Longest text this channel carries, 0 for no limit of its own. Past it the
+    #: message is not pushed at all: a channel that truncates would hand the
+    #: agent half an instruction, where the PTY carries the whole thing.
+    max_chars: int = 0
+
+
+@dataclass(frozen=True)
 class VendorSpec:
     """Everything the shared orchestration knows about one CLI vendor.
 
@@ -357,6 +422,12 @@ class VendorSpec:
     # The CLI has a skills mechanism, verified against the binary or its
     # official docs. False = no such feature exists to wire.
     skills_supported: bool = False
+
+    # --- push delivery ---
+    # How an inter-CLI message reaches this CLI without being typed into its
+    # input box. None = it has no such surface (or none is wired yet), and
+    # every message to it goes through the PTY as before.
+    push_channel: PushChannel | None = None
 
     # --- log reading ---
     # () -> LogReader instance for this vendor. None = reader not migrated

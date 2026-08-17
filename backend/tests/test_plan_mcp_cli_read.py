@@ -545,6 +545,28 @@ def _seed_pair() -> None:
     agent_messaging.register("pw", "worker", "/ws/alpha", agent_key="claude")
 
 
+def _deliver_when_sent(
+    broadcasts: list[dict[str, Any]], ok: bool = True, reason: str = ""
+) -> "asyncio.Task[None]":
+    """Play the receiving window: report the outcome as soon as the send is out.
+
+    cli_send_and_wait waits for the message to actually GO IN before it waits
+    for the turn, so a test with no window to report the delivery is testing a
+    message that never arrived — which is its own case, below.
+    """
+
+    async def run() -> None:
+        for _ in range(2000):
+            if broadcasts:
+                break
+            await asyncio.sleep(0.001)
+        key = broadcasts[0]["payload"]["msg_key"]
+        while not plan_mcp.record_delivery_result(key, ok, reason):
+            await asyncio.sleep(0.001)
+
+    return asyncio.create_task(run())
+
+
 @pytest.mark.asyncio
 async def test_send_and_wait_does_not_accept_the_state_it_sent_into(
     monkeypatch: pytest.MonkeyPatch, broadcasts: list[dict[str, Any]]
@@ -557,7 +579,9 @@ async def test_send_and_wait_does_not_accept_the_state_it_sent_into(
     _seed_pair()
     app._record_pane_activity("pw", "turn_complete", "the answer to the PREVIOUS question")
 
+    delivery = _deliver_when_sent(broadcasts)
     result = await plan_mcp.cli_send_and_wait("worker", "a new question", _ctx(), timeout_s=0.1)
+    await delivery
 
     assert result["idle"] is False
     assert result["reason"] == "never_started"
@@ -577,9 +601,11 @@ async def test_send_and_wait_returns_the_turn_that_followed_the_send(
         await asyncio.sleep(0.02)
         app._record_pane_activity("pw", "turn_complete", "fresh")
 
+    delivery = _deliver_when_sent(broadcasts)
     task = asyncio.create_task(worker_replies())
     result = await plan_mcp.cli_send_and_wait("worker", "go", _ctx(), timeout_s=2.0)
     await task
+    await delivery
 
     assert result["ok"] is True
     assert result["idle"] is True
@@ -603,9 +629,11 @@ async def test_send_and_wait_settles_on_quiet_for_a_cli_with_no_turn_complete(
         await asyncio.sleep(0.02)
         app._record_pane_activity("pw", "agent_active", "")
 
+    delivery = _deliver_when_sent(broadcasts)
     task = asyncio.create_task(worker_stirs())
     result = await plan_mcp.cli_send_and_wait("worker", "go", _ctx(), timeout_s=2.0)
     await task
+    await delivery
 
     assert result["idle"] is True
     assert result["source"] == "quiet_period"
@@ -631,3 +659,71 @@ async def test_send_and_wait_refuses_an_empty_text_without_broadcasting(
     assert result["ok"] is False
     assert "empty" in result["error"]
     assert broadcasts == []
+
+
+@pytest.mark.asyncio
+async def test_send_and_wait_no_longer_calls_a_held_message_idle(
+    monkeypatch: pytest.MonkeyPatch, broadcasts: list[dict[str, Any]]
+) -> None:
+    """The gap this closes. The target is idle, so the old order returned
+    "idle, source turn_complete" — read as "it did your work" — while the
+    message was still sitting in the window's queue because someone was typing
+    in that pane. There was no turn, because nothing was ever handed over."""
+    monkeypatch.setattr(plan_mcp, "_WAIT_IDLE_POLL_S", 0.005)
+    _seed_pair()
+    app._record_pane_activity("pw", "turn_complete", "the answer to the PREVIOUS question")
+
+    async def the_window_reports_a_hold_and_nothing_else() -> None:
+        for _ in range(2000):
+            if broadcasts:
+                break
+            await asyncio.sleep(0.001)
+        key = broadcasts[0]["payload"]["msg_key"]
+        while not plan_mcp.record_message_hold(key, {"key": "typing"}):
+            await asyncio.sleep(0.001)
+
+    held = asyncio.create_task(the_window_reports_a_hold_and_nothing_else())
+    result = await plan_mcp.cli_send_and_wait("worker", "go", _ctx(), timeout_s=0.2)
+    await held
+
+    assert result["ok"] is True
+    assert result["idle"] is False
+    assert result["source"] == "not_delivered"
+    assert result["delivery_status"] == "queued"
+    assert result["hold"] == {"key": "typing"}
+    # The stale turn must not be passed off as the reply here either.
+    assert "last_activity" not in result
+
+
+@pytest.mark.asyncio
+async def test_send_and_wait_reports_a_delivery_the_window_refused(
+    monkeypatch: pytest.MonkeyPatch, broadcasts: list[dict[str, Any]]
+) -> None:
+    """A message that bounced has no turn coming, and the reason is the whole
+    answer — waiting out the timeout for it would tell the caller nothing."""
+    monkeypatch.setattr(plan_mcp, "_WAIT_IDLE_POLL_S", 0.005)
+    _seed_pair()
+
+    delivery = _deliver_when_sent(broadcasts, ok=False, reason='{"key":"pane-closed"}')
+    result = await plan_mcp.cli_send_and_wait("worker", "go", _ctx(), timeout_s=2.0)
+    await delivery
+
+    assert result["ok"] is True
+    assert result["idle"] is False
+    assert result["source"] == "not_delivered"
+    assert result["delivery_status"] == "failed"
+    assert result["reason"] == "pane-closed"
+
+
+@pytest.mark.asyncio
+async def test_send_and_wait_still_answers_a_zero_timeout_the_old_way(
+    broadcasts: list[dict[str, Any]]
+) -> None:
+    """With no budget there is no delivery phase to run, so the degenerate
+    call keeps the shape it had."""
+    _seed_pair()
+    result = await plan_mcp.cli_send_and_wait("worker", "go", _ctx(), timeout_s=0.0)
+
+    assert result["ok"] is True
+    assert result["source"] == "timeout"
+    assert result["reason"] == "never_started"

@@ -2518,9 +2518,20 @@ async def ui_settings_get(session: "Session", msg_id: str, msg_type: str, payloa
 async def ui_settings_set(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
 
+    from . import push_delivery
+
     updates = payload.get("updates")
     delta = app.ui_settings_store.set(updates) if isinstance(updates, dict) else {}
     await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
+    if push_delivery.DISABLED_SETTING_KEY in delta:
+        # A pane already running keeps its port and its watch file; what changes
+        # is whether anything is pushed to it. Both directions are announced —
+        # a window told to stop offering a channel would otherwise never start
+        # again when the switch goes back on.
+        for pane_id, kind, ready in push_delivery.apply_switches():
+            await app.broadcast(make_event("agent_msg.push_state", {
+                "pane_id": pane_id, "kind": kind, "ready": ready,
+            }))
     if delta:
         # Other windows (EditorWindow, roles/stages) hold their own ws
         # connections — broadcast the merged delta so their caches
@@ -3712,6 +3723,10 @@ async def _rollback_terminal_create(
             if app._PTY_OWNERS.get(term_id) is session:
                 app._PTY_OWNERS.pop(term_id, None)
             await session.terminals.kill(term_id, force=True)
+        # The push channel was wired before the spawn, so a rolled-back create
+        # would otherwise leave a registered channel — and a watch file — for a
+        # pane that never came to exist.
+        app.push_delivery.forget_pane(transaction["pane_id"])
 
     cleanup_task = transaction.get("cleanup_task")
     if cleanup_task is None:
@@ -3838,6 +3853,15 @@ async def _terminal_create_impl(
             env,
             str(payload.get("cwd") or ""),
         )
+    # Give the pane whatever its push channel needs (a port to serve on, a file
+    # to watch) so a message can later reach it without being typed in. Last,
+    # so the flags it adds cannot be displaced by MCP or skills wiring; a CLI
+    # with no push channel — most of them — is left untouched.
+    push_channel = None
+    if not login_profile_id:
+        payload["command"], push_channel = app.push_delivery.wire_spawn(
+            agent_key, payload["command"], str(payload.get("pane_id") or ""), env
+        )
     if transaction["cancelled"]:
         raise _TerminalCreateCancelled
     # The pane's previous PTY, when this create replaces it (restore/rebuild).
@@ -3949,6 +3973,16 @@ async def _terminal_create_impl(
             switch_lock.release()
     else:
         term = _spawn_and_claim()
+    # Announced only now the PTY exists. Wiring the channel is a spawn-time
+    # decision, but advertising it before the CLI is actually running would tell
+    # the window it can push into a pane that may still fail to start — and a
+    # spawn that rolls back has already dropped the channel again.
+    if push_channel is not None:
+        await app.broadcast(make_event("agent_msg.push_state", {
+            "pane_id": push_channel.pane_id,
+            "kind": push_channel.kind,
+            "ready": True,
+        }))
     # Register the pane with the log-attribution layer so any session
     # file appearing after this point can be attributed back to us.
     # Registry membership == the 12 CLI vendors; the drift test pins the set.
@@ -5509,6 +5543,20 @@ async def agent_msg_register(session: "Session", msg_id: str, msg_type: str, pay
     # A register is also how a rename and a post-reconnect re-mirror arrive, so
     # this is the single point where the remote roster learns about all three.
     server_link.roster_changed()
+    # ...and the single point where a window that reloaded, or reattached to a
+    # PTY it did not spawn, learns the pane still has a push channel. Without
+    # this it would keep typing into a pane it could have pushed to, for as long
+    # as it lives.
+    from . import push_delivery
+
+    state = push_delivery.get(pane_id)
+    if state is not None and push_delivery.is_ready(pane_id):
+        await session.send_json(
+            make_event(
+                "agent_msg.push_state",
+                {"pane_id": pane_id, "kind": state.kind, "ready": True},
+            )
+        )
     await session.send_json(make_response(msg_id, msg_type, entry.to_dict()))
 
 
@@ -5747,6 +5795,121 @@ async def agent_msg_hook_drain_result(
         request_id, {"envelope": str(payload.get("envelope") or "")}
     )
     await session.send_json(make_response(msg_id, msg_type, {"ok": True, "delivered": delivered}))
+
+
+@handler("agent_msg.push")
+async def agent_msg_push(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Hand an envelope to a pane's push channel instead of typing it in.
+
+    The window that owns the pane decides whether to push — it holds the queue,
+    the rate limit and the idle gate — so this only performs the transport and
+    reports whether it landed. A `false` answer is not a failed message: the
+    caller retries the same envelope over the PTY, which is what every pane did
+    before it had a channel at all.
+    """
+    from . import app, push_delivery
+
+    pane_id = str(payload.get("pane_id") or "")
+    text = str(payload.get("text") or "")
+    if not pane_id or not text:
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "agent_msg.push needs pane_id and text")
+        )
+        return
+    state = push_delivery.get(pane_id)
+    ok, reason = await push_delivery.deliver(pane_id, text)
+    if ok:
+        # The pane is about to start a turn on this message, and nothing else
+        # will say so for a while: a CLI that took the text over HTTP or out of
+        # a watched file writes its conversation log at its own pace, and a
+        # rewoken agent has no PTY output yet. Without this the window would
+        # keep calling the pane idle and start typing the next queued message
+        # into a pane already working on this one.
+        app._record_pane_activity(pane_id, "agent_active", "")
+        await app.broadcast(make_event("agent.activity", {
+            "vendor": state.agent_key if state else "",
+            "event_type": "agent_active",
+            "workspace_path": "",
+            "pane_id": pane_id,
+            "stage_id": "",
+            "session_id": "",
+            "cwd": "",
+            "timestamp": "",
+            "detail": f"push:{state.kind if state else ''}",
+            "notification_type": "",
+        }))
+    kind = state.kind if state else ""
+    await session.send_json(
+        make_response(
+            msg_id,
+            msg_type,
+            {
+                "ok": ok,
+                "kind": kind,
+                "reason": reason,
+                # "the pane may still be holding this text": the window must
+                # then re-queue the message rather than typing it in, or the
+                # envelope goes in twice, concatenated.
+                "unclear": (not ok) and push_delivery.leaves_text_behind(kind, reason),
+            },
+        )
+    )
+
+
+@handler("agent_msg.hold_update")
+async def agent_msg_hold_update(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """The receiving window reports why a message is still sitting in its queue.
+
+    Delivery lives in the window, so the reason a message has not gone in yet
+    exists nowhere else — and an MCP caller, which has no Messages panel to
+    look at, could otherwise only see "queued". Sent on a change, never per
+    tick.
+
+    `hold` is {key, n?} or null (nothing holding it any more). Keys this server
+    never minted are ignored, exactly as agent_msg.delivered ignores them.
+    """
+    from .plugins.builtin.navide_plans import plan_mcp
+
+    msg_key = str(payload.get("msg_key") or "")
+    if not msg_key:
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "agent_msg.hold_update needs msg_key")
+        )
+        return
+    hold = payload.get("hold")
+    tracked = plan_mcp.record_message_hold(msg_key, hold if isinstance(hold, dict) else None)
+    await session.send_json(make_response(msg_id, msg_type, {"ok": True, "tracked": tracked}))
+
+
+@handler("agent_msg.cancel")
+async def agent_msg_cancel(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """A sending window withdraws a message whose queue another window owns.
+
+    Relayed, not decided here: the queue lives in the receiving window, so only
+    it knows whether the message is still waiting or already going in. It
+    answers over the ordinary `agent_msg.delivered` path — as cancelled if it
+    dropped the message, and not at all if it was too late, because the
+    delivery that beat this will report its own outcome.
+
+    Not excluding the sender, for the same reason `agent_msg.delivered` does
+    not: a workspace-qualified target can resolve to a pane in the SAME window.
+    """
+    from . import app
+
+    msg_key = str(payload.get("msg_key") or "")
+    if not msg_key:
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "agent_msg.cancel needs msg_key")
+        )
+        return
+    asyncio.create_task(
+        app.broadcast(make_event("agent_msg.cancel", {"msg_key": msg_key}))
+    )
+    await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
 
 
 @handler("agent_msg.delivered")

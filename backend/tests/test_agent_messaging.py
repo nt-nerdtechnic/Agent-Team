@@ -789,6 +789,42 @@ async def test_delivered_handler_broadcasts_result_to_every_window(
 
 
 @pytest.mark.asyncio
+async def test_cancel_handler_relays_the_request_to_every_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The queue lives in the receiving window, so the withdrawal is only
+    relayed — including back to the sender, whose own window may own the
+    target pane."""
+    captured: list[tuple[dict[str, Any], Any]] = []
+
+    async def fake_broadcast(event: dict[str, Any], **kwargs: Any) -> None:
+        captured.append((event, kwargs.get("exclude")))
+
+    monkeypatch.setattr(app, "broadcast", fake_broadcast)
+    session = _session()
+    await app.handle_message(session, {
+        "id": "c1",
+        "type": "agent_msg.cancel",
+        "payload": {"msg_key": "k1"},
+    })
+    await asyncio.sleep(0)
+
+    event, exclude = captured[0]
+    assert event["type"] == "agent_msg.cancel"
+    assert event["payload"] == {"msg_key": "k1"}
+    assert exclude is None
+    assert session.websocket.sent[0]["payload"] == {"ok": True}  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_cancel_handler_needs_a_msg_key() -> None:
+    session = _session()
+    await app.handle_message(session, {"id": "c2", "type": "agent_msg.cancel", "payload": {}})
+
+    assert session.websocket.sent[0]["error"]["code"] == "BAD_REQUEST"  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
 async def test_delivered_handler_also_settles_a_cli_send_for_cli_check_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1042,3 +1078,71 @@ def test_every_resolve_code_has_a_ui_string() -> None:
         )["msg"]
         missing = sorted(c for c in codes if f"reason-{c}" not in strings)
         assert not missing, f"{locale} is missing msg.reason-* for: {missing}"
+
+
+# ── agent_msg.hold_update ───────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_hold_update_hands_the_reason_to_the_mcp_server() -> None:
+    """Delivery lives in the window, so why a message has not gone in yet
+    exists nowhere else — and an MCP caller has no Messages panel to read."""
+    from agent_team_backend.plugins.builtin.navide_plans import plan_mcp
+
+    plan_mcp._record_message_sent("mcp-key", "beta/reviewer")
+    try:
+        session = _session()
+        await app.handle_message(session, {
+            "id": "h1",
+            "type": "agent_msg.hold_update",
+            "payload": {"msg_key": "mcp-key", "hold": {"key": "typing"}},
+        })
+
+        assert session.websocket.sent[0]["payload"]["tracked"] is True  # type: ignore[attr-defined]
+        assert plan_mcp._mcp_message_status["mcp-key"]["hold"] == {"key": "typing"}
+        assert plan_mcp._mcp_message_status["mcp-key"]["hold_since"] is not None
+    finally:
+        plan_mcp._mcp_message_status.clear()
+
+
+@pytest.mark.asyncio
+async def test_hold_update_with_a_null_hold_clears_it() -> None:
+    from agent_team_backend.plugins.builtin.navide_plans import plan_mcp
+
+    plan_mcp._record_message_sent("mcp-key", "beta/reviewer")
+    plan_mcp.record_message_hold("mcp-key", {"key": "typing"})
+    try:
+        session = _session()
+        await app.handle_message(session, {
+            "id": "h2",
+            "type": "agent_msg.hold_update",
+            "payload": {"msg_key": "mcp-key", "hold": None},
+        })
+
+        assert plan_mcp._mcp_message_status["mcp-key"]["hold"] is None
+    finally:
+        plan_mcp._mcp_message_status.clear()
+
+
+@pytest.mark.asyncio
+async def test_hold_update_for_a_key_no_window_owns_is_not_an_error() -> None:
+    """Every window reports for every tracked message it holds, exactly as it
+    does for deliveries — the ones this backend never minted just miss."""
+    session = _session()
+    await app.handle_message(session, {
+        "id": "h3",
+        "type": "agent_msg.hold_update",
+        "payload": {"msg_key": "not-ours", "hold": {"key": "typing"}},
+    })
+
+    sent = session.websocket.sent[0]  # type: ignore[attr-defined]
+    assert sent["error"] is None
+    assert sent["payload"]["tracked"] is False
+
+
+@pytest.mark.asyncio
+async def test_hold_update_needs_a_msg_key() -> None:
+    session = _session()
+    await app.handle_message(session, {"id": "h4", "type": "agent_msg.hold_update", "payload": {}})
+
+    assert session.websocket.sent[0]["error"]["code"] == "BAD_REQUEST"  # type: ignore[attr-defined]

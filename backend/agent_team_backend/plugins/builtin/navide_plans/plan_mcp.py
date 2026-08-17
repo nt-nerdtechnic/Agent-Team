@@ -755,6 +755,25 @@ def _resolve_caller(ctx: Context) -> _Caller:
     return _Caller(kind="pane", pane_id=pane_id)
 
 
+def _target_view(entry: Any, same_workspace: bool) -> dict[str, Any]:
+    """One addressable pane, as cli_list_targets reports it."""
+    view: dict[str, Any] = {
+        "name": entry.name,
+        "address": entry.qualified_name,
+        "workspace_path": entry.workspace_path,
+        "same_workspace": same_workspace,
+        "busy": entry.busy,
+        "offline": entry.offline,
+    }
+    # Absent, not null, when nothing is queued for the pane: a target with no
+    # message in flight has no hold to report, and an explicit null would read
+    # as "nothing is holding it", which is a different claim.
+    hold_reason = _hold_reason_for(entry.qualified_name)
+    if hold_reason:
+        view["hold_reason"] = hold_reason
+    return view
+
+
 @server.tool()
 async def cli_list_targets(ctx: Context) -> dict[str, Any]:
     """List the CLI panes you can send instructions to with cli_send.
@@ -769,6 +788,12 @@ async def cli_list_targets(ctx: Context) -> dict[str, Any]:
 
     `offline` marks a pane whose Navide window has lost its connection: it still
     exists and is expected back, but sending to it fails until it returns.
+
+    `hold_reason` appears on a target that has a cli_send message still waiting
+    to go in, and names what is holding it ("typing", "mid-turn", "starting",
+    "behind", …). It is the same reason the Messages panel shows, and it is
+    what makes `busy` explainable — but it exists only while a message sent
+    from here is queued for that pane, so its absence says nothing.
 
     `remote_targets` appears only when this machine is linked to a Navide-Server
     and that server knows of panes on *other* machines. Those are a separate
@@ -791,30 +816,15 @@ async def cli_list_targets(ctx: Context) -> dict[str, Any]:
     if caller.kind == "pane":
         me_entry = agent_messaging.get(caller.pane_id)
         targets = [
-            {
-                "name": entry.name,
-                "address": entry.qualified_name,
-                "workspace_path": entry.workspace_path,
-                "same_workspace": bool(me_entry and me_entry.workspace_path == entry.workspace_path),
-                "busy": entry.busy,
-                "offline": entry.offline,
-            }
+            _target_view(
+                entry, bool(me_entry and me_entry.workspace_path == entry.workspace_path)
+            )
             for entry in agent_messaging.list_panes()
             if entry.pane_id != caller.pane_id
         ]
         result = {"you": me_entry.qualified_name if me_entry else None, "targets": targets}
     else:
-        targets = [
-            {
-                "name": entry.name,
-                "address": entry.qualified_name,
-                "workspace_path": entry.workspace_path,
-                "same_workspace": False,
-                "busy": entry.busy,
-                "offline": entry.offline,
-            }
-            for entry in agent_messaging.list_panes()
-        ]
+        targets = [_target_view(entry, False) for entry in agent_messaging.list_panes()]
         result = {"you": caller.kind, "targets": targets}
     # Absent, not empty, when there is nothing to say: a machine with no server
     # configured has an empty roster and must see byte-for-byte the answer it
@@ -1030,7 +1040,9 @@ async def _send_to_device(
 
 
 @server.tool()
-async def cli_send(to: str, text: str, ctx: Context) -> dict[str, Any]:
+async def cli_send(
+    to: str, text: str, ctx: Context, wait_for_delivery_s: float = 0.0
+) -> dict[str, Any]:
     """Send an instruction to another CLI pane, in this or another workspace.
 
     `to` is a pane name for a pane in your own workspace, or `<folder>/<pane>`
@@ -1046,6 +1058,24 @@ async def cli_send(to: str, text: str, ctx: Context) -> dict[str, Any]:
     {ok, target, cross_workspace, msg_key} or {ok: false, error, error_code}.
     Pass `msg_key` to cli_check_message to learn whether the receiving window
     actually delivered it.
+
+    `wait_for_delivery_s` (0 by default, capped at 120) is the alternative to
+    remembering to poll: wait that long for the message to actually go in, and
+    answer with what happened. 10-30s is the useful range — the wait costs your
+    own turn, and a pane that is mid-turn or being typed in can hold a message
+    far longer than that. With it set, the answer also carries:
+
+      - `status: "delivered"` and `settled_after_s` — it went in.
+      - `status: "failed"` (or "rejected" for another device) and `reason` —
+        the receiving window refused it. `ok` stays TRUE: the send itself
+        happened and `msg_key` is real, so re-sending on this would dispatch
+        the work twice. Read the reason and decide.
+      - `status: "queued"` with `waited_s`, plus `hold` and `held_for_s` when
+        the receiving window said why — the message is still waiting. `hold.key`
+        is "typing" (someone is at that keyboard), "mid-turn" (the agent is
+        working), "behind" (other messages first), "starting", "settling",
+        "not-ready" or "gone". Nothing was lost; it goes in when the pane frees
+        up, and cli_check_message picks the story up later.
 
     `error_code` "target-offline" is not "unknown-target": the pane exists but
     its Navide window is disconnected. Wait for it to come back and retry —
@@ -1080,6 +1110,7 @@ async def cli_send(to: str, text: str, ctx: Context) -> dict[str, Any]:
     me = caller.pane_id if caller.kind == "pane" else ""
     if caller.kind != "pane" and "/" not in (to or ""):
         return {"ok": False, "error": _QUALIFIED_TARGET_REQUIRED}
+    wait_s = min(max(float(wait_for_delivery_s), 0.0), _WAIT_IDLE_MAX_TIMEOUT_S)
 
     address = agent_messaging.parse_target(to)
     if address.device_id and not agent_messaging.is_local_device(address.device_id):
@@ -1089,7 +1120,7 @@ async def cli_send(to: str, text: str, ctx: Context) -> dict[str, Any]:
         # addressing existed. A configured-but-unreachable server does not come
         # back as None — it answers "link-offline" above.
         if relayed is not None:
-            return relayed
+            return await _with_delivery_wait(relayed, wait_s)
 
     result = agent_messaging.resolve(me, to)
     if result.pane is None:
@@ -1105,7 +1136,7 @@ async def cli_send(to: str, text: str, ctx: Context) -> dict[str, Any]:
         if remote.address is not None:
             relayed = await _send_to_device(remote.address, text, caller=caller, me=me)
             if relayed is not None:
-                return relayed
+                return await _with_delivery_wait(relayed, wait_s)
         return {
             "ok": False,
             "error": result.error or f'unknown target "{to}"',
@@ -1143,12 +1174,15 @@ async def cli_send(to: str, text: str, ctx: Context) -> dict[str, Any]:
         )
     )
     _record_message_sent(msg_key, result.pane.qualified_name)
-    return {
-        "ok": True,
-        "target": result.pane.qualified_name,
-        "cross_workspace": result.cross_workspace,
-        "msg_key": msg_key,
-    }
+    return await _with_delivery_wait(
+        {
+            "ok": True,
+            "target": result.pane.qualified_name,
+            "cross_workspace": result.cross_workspace,
+            "msg_key": msg_key,
+        },
+        wait_s,
+    )
 
 
 # ── Delivery outcome of a cli_send (cli_check_message) ─────────────────────
@@ -1160,6 +1194,10 @@ async def cli_send(to: str, text: str, ctx: Context) -> dict[str, Any]:
 _MESSAGE_STATUS_MAX = 500
 _MESSAGE_STATUS_TTL_S = 3600.0
 _mcp_message_status: dict[str, dict[str, Any]] = {}
+# Calls parked in cli_send(wait_for_delivery_s=…), by the key they are waiting
+# on. One event per waiting call rather than one per key: two agents may wait on
+# the same message, and neither may swallow the other's wake-up.
+_status_waiters: dict[str, list[asyncio.Event]] = {}
 
 
 def _prune_message_status(now: float) -> None:
@@ -1180,7 +1218,87 @@ def _record_message_sent(msg_key: str, target: str) -> None:
         "reason": None,
         "delivered_at": None,
         "created_at": now,
+        # Filled in by the window that owns the target, which is the only place
+        # the delivery gate exists. Stays None for a message that goes out
+        # before any hold was ever reported.
+        "hold": None,
+        "hold_since": None,
     }
+
+
+def record_message_hold(msg_key: str, hold: dict[str, Any] | None) -> bool:
+    """Record why the receiving window has not injected a cli_send message yet.
+
+    The window reports a change, never a heartbeat (see setHold in
+    useAgentMessaging), so this is called once per hold rather than once per
+    pump tick.
+
+    A settled entry is left alone: a hold report that lost a race with the
+    delivery it was overtaken by must not put a delivered message back on
+    "waiting for the pane".
+
+    Returns False for a msg_key this server never sent or has already settled —
+    every window reports for every tracked message it holds, so that is the
+    ordinary case, not an error.
+    """
+    entry = _mcp_message_status.get(msg_key)
+    if entry is None or entry["status"] != "queued":
+        return False
+    key = str((hold or {}).get("key") or "")
+    if not key:
+        entry["hold"] = None
+        entry["hold_since"] = None
+        return True
+    view: dict[str, Any] = {"key": key}
+    n = (hold or {}).get("n")
+    if isinstance(n, (int, float)) and not isinstance(n, bool):
+        view["n"] = int(n)
+    entry["hold"] = view
+    # Timed by this process's own clock rather than the window's: held_for_s is
+    # read next to age_seconds and settled_after_s, and a renderer's wall clock
+    # is neither of those. The report is sent the moment the hold changes, so
+    # the two agree to within one round trip.
+    entry["hold_since"] = time.monotonic()
+    return True
+
+
+def _hold_view(entry: dict[str, Any], now: float) -> dict[str, Any]:
+    """The hold half of a status answer, for a message that is still waiting.
+
+    Empty once the message has settled: what was holding it stopped being true
+    the moment it went in.
+    """
+    hold = entry.get("hold")
+    if entry["status"] != "queued" or not hold:
+        return {}
+    view: dict[str, Any] = {"hold": hold}
+    if entry.get("hold_since") is not None:
+        view["held_for_s"] = round(now - entry["hold_since"], 1)
+    return view
+
+
+def _hold_reason_for(target: str) -> str | None:
+    """The hold key of the oldest still-queued cli_send message for `target`.
+
+    Only messages sent from here are tracked, so a pane whose queue holds
+    nothing of ours simply has no reason to give. Matched on the qualified name
+    the send recorded, which is the address cli_list_targets reports — a pane
+    renamed since then stops matching, and reports nothing rather than a stale
+    reason.
+    """
+    for entry in _mcp_message_status.values():
+        if entry["target"] != target or entry["status"] != "queued":
+            continue
+        hold = entry.get("hold")
+        if hold:
+            return str(hold["key"])
+    return None
+
+
+def _settle_status_waiters(msg_key: str) -> None:
+    """Wake every cli_send parked on this key. Waiters remove themselves."""
+    for event in _status_waiters.get(msg_key, ()):
+        event.set()
 
 
 def _decode_reason(reason: str) -> str:
@@ -1206,7 +1324,15 @@ def record_delivery_result(msg_key: str, ok: bool, reason: str) -> bool:
     entry["status"] = "delivered" if ok else "failed"
     entry["reason"] = _decode_reason(reason) if reason else None
     entry["delivered_at"] = time.monotonic()
+    _clear_hold(entry)
+    _settle_status_waiters(msg_key)
     return True
+
+
+def _clear_hold(entry: dict[str, Any]) -> None:
+    """A settled message is not being held by anything any more."""
+    entry["hold"] = None
+    entry["hold_since"] = None
 
 
 # A remote ack keeps its three-way state instead of collapsing to ok/not-ok:
@@ -1227,7 +1353,70 @@ def record_remote_ack(msg_key: str, state: str, reason: str) -> bool:
     entry["status"] = state if state in _REMOTE_ACK_STATES else "failed"
     entry["reason"] = reason or None
     entry["delivered_at"] = time.monotonic()
+    _clear_hold(entry)
+    _settle_status_waiters(msg_key)
     return True
+
+
+async def _await_delivery(msg_key: str, timeout: float) -> None:
+    """Wait until a message leaves "queued", or the timeout passes.
+
+    Nothing here blocks the event loop: the waiting call is parked on its own
+    event while every other request — including the receiving window's report,
+    which is what wakes it — carries on.
+    """
+    entry = _mcp_message_status.get(msg_key)
+    if entry is None or entry["status"] != "queued":
+        return
+    event = asyncio.Event()
+    _status_waiters.setdefault(msg_key, []).append(event)
+    try:
+        await asyncio.wait_for(event.wait(), timeout)
+    except (asyncio.TimeoutError, TimeoutError):
+        pass
+    finally:
+        waiters = _status_waiters.get(msg_key)
+        if waiters is not None:
+            if event in waiters:
+                waiters.remove(event)
+            if not waiters:
+                del _status_waiters[msg_key]
+
+
+def _delivery_outcome(msg_key: str, waited: float) -> dict[str, Any]:
+    """What waiting for delivery adds to an accepted send's answer."""
+    entry = _mcp_message_status.get(msg_key)
+    if entry is None:
+        # Evicted from the bounded table while we waited. The send itself still
+        # happened, and "queued" is the last thing that was true of it.
+        return {"status": "queued", "waited_s": round(waited, 1)}
+    now = time.monotonic()
+    outcome: dict[str, Any] = {"status": entry["status"]}
+    if entry["status"] == "queued":
+        outcome["waited_s"] = round(waited, 1)
+        outcome.update(_hold_view(entry, now))
+        return outcome
+    if entry["reason"]:
+        outcome["reason"] = entry["reason"]
+    if entry["delivered_at"] is not None:
+        outcome["settled_after_s"] = round(entry["delivered_at"] - entry["created_at"], 1)
+    return outcome
+
+
+async def _with_delivery_wait(sent: dict[str, Any], wait_s: float) -> dict[str, Any]:
+    """Extend an accepted send with the outcome of waiting for it to land.
+
+    Adds nothing at all when the caller did not ask to wait, so the default
+    answer stays exactly the one every existing caller already parses.
+    """
+    if wait_s <= 0 or not sent.get("ok"):
+        return sent
+    msg_key = str(sent.get("msg_key") or "")
+    if not msg_key:
+        return sent
+    started = time.monotonic()
+    await _await_delivery(msg_key, wait_s)
+    return {**sent, **_delivery_outcome(msg_key, time.monotonic() - started)}
 
 
 @server.tool()
@@ -1235,7 +1424,8 @@ async def cli_check_message(msg_key: str, ctx: Context) -> dict[str, Any]:
     """Look up what became of a message you sent with cli_send.
 
     `msg_key` is the value cli_send returned. Returns {ok, msg_key, status,
-    target, age_seconds, reason?, settled_after_s?}. `status` is one of:
+    target, age_seconds, reason?, settled_after_s?, hold?, held_for_s?}.
+    `status` is one of:
 
       - "queued"    — broadcast for delivery; no window has reported back yet.
                       A message held for a busy pane stays here until it is
@@ -1252,6 +1442,14 @@ async def cli_check_message(msg_key: str, ctx: Context) -> dict[str, Any]:
     pending-message queue is at its cap), "inject-failed" (typing it into the
     pane did not take), "pane-closed" (the target went away before delivery),
     "no-report" (the delivery attempt never reported an outcome).
+
+    On a "queued" message, `hold` is why it has not gone in yet — {key, n?},
+    the same reason the Messages panel shows — and `held_for_s` is how long it
+    has been that way. `hold.key` is "typing" (someone is typing in that pane),
+    "mid-turn" (its agent is working), "behind" (`n` messages ahead of it),
+    "starting", "settling", "not-ready", "gone", "paused" or "remote-ack". Both
+    keys are absent once the message settles, and while no window has reported
+    a hold at all — a message queued with no hold is simply on its way in.
 
     Bounds: this is in-memory backend state, not a log. It is lost on backend
     restart, keeps only the last hour, and only the most recent few hundred
@@ -1270,17 +1468,19 @@ async def cli_check_message(msg_key: str, ctx: Context) -> dict[str, Any]:
             "error": f"unknown msg_key {key!r} — it was never sent from here, or it "
             "aged out of the in-memory table (last hour only)",
         }
+    now = time.monotonic()
     status: dict[str, Any] = {
         "ok": True,
         "msg_key": key,
         "status": entry["status"],
         "target": entry["target"],
-        "age_seconds": round(time.monotonic() - entry["created_at"], 1),
+        "age_seconds": round(now - entry["created_at"], 1),
     }
     if entry["reason"]:
         status["reason"] = entry["reason"]
     if entry["delivered_at"] is not None:
         status["settled_after_s"] = round(entry["delivered_at"] - entry["created_at"], 1)
+    status.update(_hold_view(entry, now))
     return status
 
 
@@ -1646,6 +1846,33 @@ async def cli_wait_idle(target: str, ctx: Context, timeout_s: float = 60.0) -> d
 _SEND_AND_WAIT_START_GRACE_S = 10.0
 
 
+def _never_arrived(sent: dict[str, Any], started: float) -> dict[str, Any]:
+    """The message never reached the pane, so there is no turn to wait for.
+
+    The bug this closes: a target that is idle when you send, with the message
+    then held (someone typing in it, a queue ahead of it), used to answer
+    "idle" from the state it was sent into — read as "it finished your work"
+    when the work had not even been handed over.
+
+    `ok` stays true for the same reason target_lost does: the send happened and
+    `msg_key` is real, so answering false would read as "never sent" and invite
+    a resend.
+    """
+    result: dict[str, Any] = {
+        "ok": True,
+        "target": sent["target"],
+        "msg_key": sent["msg_key"],
+        "idle": False,
+        "source": "not_delivered",
+        "delivery_status": sent.get("status", "queued"),
+        "waited_s": round(time.monotonic() - started, 1),
+    }
+    for key in ("reason", "hold", "held_for_s"):
+        if key in sent:
+            result[key] = sent[key]
+    return result
+
+
 @server.tool()
 async def cli_send_and_wait(
     to: str, text: str, ctx: Context, timeout_s: float = 60.0
@@ -1654,12 +1881,13 @@ async def cli_send_and_wait(
 
     cli_send followed by cli_wait_idle, with the race between them handled:
     the target is idle at the moment you send, so a plain wait would return
-    "already idle" before it ever read your message. This one remembers the
-    target's last activity before sending and only accepts a turn NEWER than
-    that as your answer.
+    "already idle" before it ever read your message. This one waits for the
+    message to actually GO IN first, then remembers the target's last activity
+    before sending and only accepts a turn NEWER than that as your answer.
 
     `to`, `text` and addressing are cli_send's. `timeout_s` (capped at 120s)
-    covers the whole thing, not just the wait.
+    covers the whole thing, not just the wait: at most half of it is spent
+    getting the message in, and whatever is left waits for the turn.
 
     On success returns cli_wait_idle's result — {idle: true, source, waited_s,
     last_activity?, ui_status?} — plus {ok: true, target, msg_key}.
@@ -1681,6 +1909,12 @@ async def cli_send_and_wait(
         finish. The send still happened and `msg_key` is still valid; this is
         "delivered, but I can no longer confirm it was finished", NOT a failed
         send — do not resend on it. `error` carries the resolve failure.
+      - "not_delivered" — the message never got into the pane, so there was no
+        turn to wait for. `delivery_status` is "queued" (still waiting, with
+        `hold` and `held_for_s` saying what for — typically someone typing in
+        that pane, or a queue ahead of it), or "failed"/"rejected" with
+        `reason`. A queued message is not lost: it goes in when the pane frees
+        up, and cli_check_message picks the story up. Do NOT resend on this.
 
     On timeout returns {ok: true, idle: false, source: "timeout", reason,
     ...}: `reason` is cli_wait_idle's ("awaiting" / "busy" / "unreachable"),
@@ -1720,9 +1954,18 @@ async def cli_send_and_wait(
 
     started = time.monotonic()
     timeout = min(max(float(timeout_s), 0.0), _WAIT_IDLE_MAX_TIMEOUT_S)
-    sent = await cli_send(to, text, ctx)
+    # Half the budget buys the delivery, the other half the turn it should
+    # produce. Time spent waiting to get in is not lost — the message lands when
+    # the pane frees up, which is most of what the idle wait was going to sit
+    # through anyway — but a message still held at the halfway mark is unlikely
+    # to be answered in what is left, and its hold reason is a far more useful
+    # answer than "timeout, busy".
+    delivery_budget = timeout / 2
+    sent = await cli_send(to, text, ctx, wait_for_delivery_s=delivery_budget)
     if not sent.get("ok"):
         return sent
+    if delivery_budget > 0 and sent.get("status") != "delivered":
+        return _never_arrived(sent, started)
 
     def remaining() -> float:
         return timeout - (time.monotonic() - started)

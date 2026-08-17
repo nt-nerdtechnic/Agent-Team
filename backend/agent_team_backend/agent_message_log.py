@@ -44,7 +44,7 @@ MAX_APPEND_ROWS = MAX_ROWS * 2
 MAX_CONTENT_CHARS = 64 * 1024  # one runaway message must not bloat the db
 _TRUNCATION_MARKER = "…[truncated]"
 
-_STATUSES = ("queued", "delivering", "delivered", "failed")
+_STATUSES = ("queued", "delivering", "delivered", "failed", "cancelled")
 # Message kinds Navide writes itself. NULL means an ordinary agent-sent message,
 # which is what every row written before this column existed is.
 _KINDS = ("notice",)

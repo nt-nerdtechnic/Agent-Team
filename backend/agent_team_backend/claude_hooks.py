@@ -24,6 +24,7 @@ import shlex
 import shutil
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 log = logging.getLogger("agent_team_backend.claude_hooks")
 
@@ -38,6 +39,26 @@ _HOOK_EVENTS: dict[str, str] = {
     "Stop": "stop",
     "Notification": "notification",
 }
+
+#: Events that also arm the background rewake waiter — the hook that lets an
+#: inter-CLI message reach a claude pane that is sitting IDLE, which is the one
+#: moment the Stop hook above cannot cover. SessionStart puts one in place for a
+#: pane that starts idle; Stop re-arms it after every turn, which is what keeps
+#: the channel alive for the rest of the session.
+#:
+#: UserPromptSubmit is deliberately left out. It would re-arm more often, but
+#: exiting 2 on that event normally means "erase the prompt the user just
+#: typed"; asyncRewake is documented to route exit 2 through the wake path
+#: instead, and that has not been verified here. The gain does not justify the
+#: failure mode.
+_REWAKE_EVENTS: tuple[str, ...] = ("SessionStart", "Stop")
+
+#: How long the hook itself allows the parked request to run. Ordered above the
+#: backend's own `push_delivery.HOOK_WAIT_S` and the curl deadline below it, so
+#: the backend is always the one that gives up first: a curl that timed out
+#: while the backend still believed in its waiter would take a message with it.
+_REWAKE_TIMEOUT_S = 2100
+_REWAKE_CURL_TIMEOUT_S = 1860
 
 
 def settings_path() -> Path:
@@ -95,6 +116,43 @@ def _build_curl_command(port_file: str, event_kind: str, endpoint: str = "claude
     )
 
 
+def _build_rewake_command(port_file: str) -> str:
+    """Build the parked-waiter hook.
+
+    Runs as an `asyncRewake` hook, which means Claude Code backgrounds it and
+    reads its exit code rather than its stdout: exiting 2 wakes the agent — even
+    an idle one — and shows the hook's stderr as a system reminder. So the
+    envelope is written to stderr and the exit code is the whole protocol.
+
+    The request blocks until the backend has something to say or gives up, and
+    a backend that is not running (no port file, connection refused) leaves the
+    hook exiting 0, which is "nothing to report" and costs the pane nothing.
+
+    The `t` parameter is a per-run freshness check, not an authorisation
+    boundary: it lives in this settings file, which anything running as this
+    user can read. What it buys is that a hook left over from an earlier
+    backend run — or anything that never went through this installer — is
+    refused rather than parking on someone's pane.
+    """
+    from . import push_delivery
+
+    safe_port_file = shlex.quote(port_file)
+    token = quote(push_delivery.rewake_token(), safe="")
+    return (
+        f"{_AGENT_TEAM_MARKER} kind=rewake\n"
+        f"PORT=$(cat {safe_port_file} 2>/dev/null); "
+        f"[ -n \"$PORT\" ] || exit 0\n"
+        f"BODY=$(curl -fsS -m {_REWAKE_CURL_TIMEOUT_S} -X POST "
+        f"-H 'Content-Type: application/json' "
+        f"-H 'X-Agent-Team-Event: rewake' "
+        f"--data-binary @- "
+        f"\"http://127.0.0.1:$PORT/hooks/claude/rewake?t={token}\" || true)\n"
+        f"[ -n \"$BODY\" ] || exit 0\n"
+        f"printf '%s\\n' \"$BODY\" >&2\n"
+        f"exit 2"
+    )
+
+
 def _is_ours(command: str) -> bool:
     return _AGENT_TEAM_MARKER in command
 
@@ -148,7 +206,8 @@ def install_hooks(port_file: str, settings_file: Path | None = None) -> dict[str
         hooks_section = {}
 
     added = 0
-    for event_name, event_kind in _HOOK_EVENTS.items():
+    for event_name in [*_HOOK_EVENTS, *(e for e in _REWAKE_EVENTS if e not in _HOOK_EVENTS)]:
+        event_kind = _HOOK_EVENTS.get(event_name, "")
         entries = hooks_section.get(event_name)
         if not isinstance(entries, list):
             entries = []
@@ -170,13 +229,24 @@ def install_hooks(port_file: str, settings_file: Path | None = None) -> dict[str
                 # else: drop the empty wrapper
             else:
                 cleaned.append(entry)
-        # Append our entry.
-        cleaned.append({
-            "hooks": [{
+        # Append our entries. The two are separate hook objects on purpose: the
+        # signal hook is synchronous and its answer is read, the rewake waiter
+        # is backgrounded and only its exit code matters, and a single event
+        # (Stop) wants both.
+        ours: list[dict[str, Any]] = []
+        if event_kind:
+            ours.append({
                 "type": "command",
                 "command": _build_curl_command(port_file, event_kind),
-            }],
-        })
+            })
+        if event_name in _REWAKE_EVENTS:
+            ours.append({
+                "type": "command",
+                "command": _build_rewake_command(port_file),
+                "asyncRewake": True,
+                "timeout": _REWAKE_TIMEOUT_S,
+            })
+        cleaned.append({"hooks": ours})
         hooks_section[event_name] = cleaned
         added += 1
 

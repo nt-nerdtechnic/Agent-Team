@@ -40,7 +40,16 @@ from pathlib import Path
 
 import re
 
-from .base import Dep, McpServerConfig, McpValue, McpWiring, SkillsWiring, VendorSpec, command_text
+from .base import (
+    Dep,
+    McpServerConfig,
+    McpValue,
+    McpWiring,
+    PushChannel,
+    SkillsWiring,
+    VendorSpec,
+    command_text,
+)
 from . import _protocols
 from ..usage_common import HTTP_TIMEOUT, _epoch_to_iso, _num, _snapshot, _window, parse_retry_after
 from ..log_readers.base import (
@@ -679,6 +688,30 @@ SPEC = VendorSpec(
             document=(("$schema", "https://opencode.ai/config.json"),),
         ),
         config_env="OPENCODE_CONFIG_CONTENT",
+    ),
+    # The TUI is a client of a server the same process runs, and `/tui/*` drives
+    # that TUI. Bare `opencode` opens no port at all, so the pane is spawned with
+    # one; `--hostname` is passed explicitly rather than relied on as the default
+    # so nothing in the user's setup can widen it past loopback.
+    #
+    # NO PASSWORD, deliberately. Verified against 1.15.12: OPENCODE_SERVER_
+    # PASSWORD protects the server from us but not for us — the CLI's own TUI
+    # does not authenticate against it, so every request it makes to itself
+    # comes back 401 and the pane dies on startup. The port is therefore open to
+    # anything running as this user, which is the cost of the channel and is
+    # documented as such in docs/en-US/inter-cli-messaging.md.
+    #
+    # Verified end to end: append lands in the composer (repeated calls
+    # concatenate), submit starts a real turn and empties it, and `?directory=`
+    # is NOT a workspace gate — a wrong path is accepted just the same, so the
+    # per-pane port is the only isolation there is.
+    push_channel=PushChannel(
+        holds_input_box=True,
+        port_flag="--port",
+        host_flag="--hostname",
+        append_path="/tui/append-prompt",
+        submit_path="/tui/submit-prompt",
+        clear_path="/tui/clear-prompt",
     ),
     # Late-bound (module global at call time) so tests can monkeypatch.
     fetch_usage=lambda home: fetch_opencode(home),

@@ -35,7 +35,16 @@ from ..log_readers.base import (
     user_prompt_text,
 )
 from ..log_readers.base import encode_claude_cwd
-from .base import Dep, McpServerConfig, McpValue, McpWiring, SkillsWiring, VendorSpec, command_text
+from .base import (
+    Dep,
+    McpServerConfig,
+    McpValue,
+    McpWiring,
+    PushChannel,
+    SkillsWiring,
+    VendorSpec,
+    command_text,
+)
 from ..usage_common import (
     HTTP_TIMEOUT,
     _epoch_to_iso,
@@ -751,6 +760,26 @@ SPEC = VendorSpec(
             entry=(("httpUrl", McpValue.URL),),
         ),
         flag="--mcp-config",
+    ),
+    # `--input-file` is registered but absent from `qwen --help` (verified in
+    # 0.21.12's own bundle: "File path for receiving remote input commands
+    # (bidirectional sync). An external process writes JSONL commands; the TUI
+    # watches and processes them"). The TUI polls the file every 500ms and hands
+    # each `submit` record to the SAME queue a typed message goes through, so
+    # nothing reaches the composer and a busy pane simply queues it.
+    #
+    # Two properties of that watcher decide how push_delivery writes the file,
+    # both read out of RemoteInputWatcher in 0.21.12:
+    #   - it consumes only up to the last newline it can see, so a record is
+    #     written as one complete line;
+    #   - it re-reads the file from the start if it ever SHRINKS (or if the
+    #     bytes it already consumed change), so the file is created empty at
+    #     spawn and only ever appended to. Rotating it would replay every
+    #     message in it.
+    push_channel=PushChannel(
+        holds_input_box=False,
+        input_file_flag="--input-file",
+        record_type="submit",
     ),
     install_hooks=_install_hooks,
     # Late-bound on purpose: the module global is looked up at call time, so

@@ -226,6 +226,83 @@ def test_mcp_wiring_declares_exactly_one_surface() -> None:
         assert bool(wiring.url_env_template) == bool(wiring.project_config)
 
 
+def test_push_channel_declares_exactly_one_mechanism() -> None:
+    """Push delivery dispatches on which mechanism field is set, so a spec with
+    two would silently take the first branch and a spec with none would leave
+    the pane registered with a channel that can never carry anything."""
+    for key, spec in registry.VENDORS.items():
+        channel = spec.push_channel
+        if channel is None:
+            continue  # the CLI has no way in but its PTY
+        mechanisms = [
+            name
+            for name in ("append_path", "input_file_flag", "hook_wait")
+            if getattr(channel, name)
+        ]
+        assert len(mechanisms) == 1, (
+            f"{key} declares push mechanisms {mechanisms} — exactly one is dispatched"
+        )
+        if channel.append_path:
+            # A composer that can be appended to has to be submittable, and a
+            # failed submit has to be undoable or the fallback types it twice.
+            assert channel.submit_path and channel.clear_path, key
+            assert channel.port_flag, f"{key} serves HTTP but pins no port"
+            # A password nothing authenticates with locks the CLI out of its own
+            # server (opencode), so the two travel together or not at all.
+            assert bool(channel.password_env) == bool(channel.username), key
+        if channel.input_file_flag:
+            assert channel.record_type, f"{key} writes records with no type"
+
+
+def test_push_channel_matches_the_frontend_agent_spec() -> None:
+    """The two sides declare different halves of one channel: the backend owns
+    the transport, the frontend owns which delivery gates still apply. A vendor
+    wired on one side only is a channel that is either never used or used
+    without its gates."""
+    backend = {
+        key: (
+            "tui-http"
+            if spec.push_channel.append_path
+            else "input-file"
+            if spec.push_channel.input_file_flag
+            else "rewake"
+        )
+        for key, spec in registry.VENDORS.items()
+        if spec.push_channel is not None
+    }
+    frontend: dict[str, str] = {}
+    holds: dict[str, bool] = {}
+    for path in FRONTEND_AGENTS_DIR.glob("*.ts"):
+        if path.stem.startswith("_") or path.stem in {"index", "types"}:
+            continue
+        source = path.read_text(encoding="utf-8")
+        match = re.search(
+            r"pushChannel:\s*\{\s*kind:\s*'([a-z-]+)'"
+            r"(?:\s*,\s*holdsInputBox:\s*(true|false))?",
+            source,
+        )
+        if match is None:
+            continue
+        keys = set(re.findall(r"agentKey: '([a-z]+)'", source))
+        assert len(keys) == 1, f"{path.name} declares agentKeys {sorted(keys)}"
+        key = keys.pop()
+        frontend[key] = match.group(1)
+        holds[key] = match.group(2) == "true"
+
+    assert backend == frontend, (
+        "push channels drifted between cli_vendors/<key>.py and "
+        f"src/renderer/src/agents/<key>.ts: backend={backend} frontend={frontend}"
+    )
+    for key, spec in registry.VENDORS.items():
+        if spec.push_channel is None:
+            continue
+        assert holds[key] == spec.push_channel.holds_input_box, (
+            f"{key}: holdsInputBox disagrees with holds_input_box — the typing "
+            f"hold would be applied to a channel that does not need it, or "
+            f"skipped for one that does"
+        )
+
+
 def test_vendor_modules_import_only_allowed_modules() -> None:
     for path in sorted(VENDORS_DIR.glob("*.py")):
         if path.stem.startswith("_") or path.stem in {"base", "registry"}:
