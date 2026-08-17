@@ -1281,18 +1281,6 @@ input:focus,
 textarea:focus { border-color: var(--accent-emphasis); }
 input:disabled { color: var(--text-muted); background: var(--bg-muted); }
 .skills-search { flex: 0 0 auto; }
-  display: grid;
-  grid-template-columns: 5px minmax(0, 1fr);
-  align-items: center;
-  align-self: stretch;
-  gap: 9px;
-  min-width: 0;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  text-align: left;
-}
 .skills-state { display: flex; flex-direction: column; gap: 4px; padding: 18px 8px; color: var(--text-secondary); font-size: 11px; text-align: center; }
 .skills-state strong { color: var(--text-bright); }
 .skill-editor-title-row { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
