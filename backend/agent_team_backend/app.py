@@ -1504,6 +1504,12 @@ async def claude_rewake_hook(request: Request) -> Response:
         # went through the installer. Empty body: a hook reading a 403 must
         # still exit without a decision rather than showing the user an error.
         return Response(status_code=403)
+    if push_delivery.channel_for("claude") is None:
+        # Answered before the attribution wait below rather than after it: a
+        # switched-off channel, or a `claude` the user started outside Navide,
+        # would otherwise leave a background curl parked here for 30 seconds on
+        # every single Stop, for a pane that is never going to get a waiter.
+        return Response(status_code=200)
     try:
         payload = await request.json()
     except Exception:  # noqa: BLE001

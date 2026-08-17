@@ -29,7 +29,7 @@ import { agentUsesBracketedPaste, migrateTerminalPtyKey, saveAllScrollSnapshots,
 import { useAgentMessaging, encodeReason, isBroadcastTarget, NOTICE_SENDER } from './composables/useAgentMessaging'
 import type { PushOutcome, RouteResult } from './composables/useAgentMessaging'
 import { createMessageLogPersistence } from './composables/useMessageLogPersistence'
-import { VENDORS_WITHOUT_TURN_END, isInjectedMessageText, isTurnInFlight, normalizeMessagingName, parseMessages, parseSpawns, renderSpawnKickoff, renderSpawnNotice } from './lib/agentMessaging'
+import { VENDORS_WITHOUT_TURN_END, isInjectedMessageText, isTurnInFlight, normalizeMessagingName, parseMessages, parseSpawns, pushCooldownMs, renderSpawnKickoff, renderSpawnNotice } from './lib/agentMessaging'
 import {
   evaluateTurnSpawns,
   evaluateSpawnRequest,
@@ -1466,16 +1466,6 @@ function isPaneIdleForMessaging(paneId: string): boolean {
  *  there: a spawn can fail to wire one, and a hook channel exists only while
  *  the CLI has a waiter parked. */
 const pushReadyPanes = new Map<string, string>()
-/** How long a pane's push channel is left alone after one failed to land, so a
- *  channel that is declared but broken costs one attempt per minute instead of
- *  one per pump tick. */
-const PUSH_COOLDOWN_MS = 60_000
-/** The same, for a CLI whose server simply is not listening yet. That is what a
- *  pane looks like for the first seconds of its life, and it fixes itself — so
- *  it is worth a handful of quick retries rather than a minute's silence. */
-const PUSH_RETRY_COOLDOWN_MS = 5_000
-/** Failures that say "not yet" rather than "not working". */
-const PUSH_RETRYABLE_REASONS = new Set(['not-listening'])
 const pushCooldownUntil = new Map<string, number>()
 
 /** pushTarget() dep: the channel that could take a message for this pane right
@@ -1516,10 +1506,7 @@ async function pushDeliverAgentMessage(paneId: string, text: string): Promise<Pu
   } catch {
     /* the backend never answered — treat it as an ordinary refusal */
   }
-  const cooldown = PUSH_RETRYABLE_REASONS.has(reason)
-    ? PUSH_RETRY_COOLDOWN_MS
-    : PUSH_COOLDOWN_MS
-  pushCooldownUntil.set(paneId, Date.now() + cooldown)
+  pushCooldownUntil.set(paneId, Date.now() + pushCooldownMs(reason))
   return unclear ? 'unclear' : 'declined'
 }
 

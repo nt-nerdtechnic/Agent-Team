@@ -177,6 +177,56 @@ async def test_registering_tells_a_reloaded_window_the_channel_is_still_there(
 
 
 @pytest.mark.asyncio
+async def test_switching_a_channel_off_and_on_is_announced_both_ways(
+    broadcasts,
+) -> None:
+    """The switch lives in the generic settings store, so nothing about writing
+    it would reach a running pane on its own. Both directions have to be
+    announced: a window told to stop offering a channel would otherwise never
+    start again when the switch goes back on."""
+    # Wired exactly as the app wires it at startup, so the setting the handler
+    # writes is the one push_delivery reads back.
+    push_delivery.set_disabled_reader(
+        lambda: set(app.ui_settings_store.get().get(push_delivery.DISABLED_SETTING_KEY) or [])
+    )
+    _, state = push_delivery.wire_spawn("qwen", "qwen", "pane-1", {})
+    assert state is not None
+    session = _session()
+
+    async def write(disabled: list[str]) -> list[dict]:
+        broadcasts.clear()
+        await app.handle_message(session, {
+            "id": "m1", "type": "ui.settings.set",
+            "payload": {"updates": {push_delivery.DISABLED_SETTING_KEY: disabled}},
+        })
+        return [e["payload"] for e in broadcasts if e["type"] == "agent_msg.push_state"]
+
+    try:
+        assert await write(["qwen"]) == [
+            {"pane_id": "pane-1", "kind": "input-file", "ready": False}
+        ]
+        assert await write([]) == [
+            {"pane_id": "pane-1", "kind": "input-file", "ready": True}
+        ]
+    finally:
+        push_delivery.set_disabled_reader(None)
+        app.ui_settings_store.set({push_delivery.DISABLED_SETTING_KEY: []})
+
+
+@pytest.mark.asyncio
+async def test_a_settings_write_that_touches_no_channel_announces_nothing(
+    broadcasts,
+) -> None:
+    _arm_hook_pane()
+    session = _session()
+    await app.handle_message(session, {
+        "id": "m1", "type": "ui.settings.set",
+        "payload": {"updates": {"someUnrelatedSetting": "x"}},
+    })
+    assert [e for e in broadcasts if e["type"] == "agent_msg.push_state"] == []
+
+
+@pytest.mark.asyncio
 async def test_registering_says_nothing_for_a_pane_with_no_live_channel(
     broadcasts,
 ) -> None:

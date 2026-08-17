@@ -128,11 +128,11 @@ def _build_rewake_command(port_file: str) -> str:
     a backend that is not running (no port file, connection refused) leaves the
     hook exiting 0, which is "nothing to report" and costs the pane nothing.
 
-    The `t` parameter is a per-run freshness check, not an authorisation
-    boundary: it lives in this settings file, which anything running as this
-    user can read. What it buys is that a hook left over from an earlier
-    backend run — or anything that never went through this installer — is
-    refused rather than parking on someone's pane.
+    The `t` parameter says the hook came from this machine's installer, not
+    that its caller is authorised: it lives in this settings file, which
+    anything running as this user can read. It is kept in the app data
+    directory and survives a backend restart, so a pane that is still running
+    keeps working with the command it was given.
     """
     from . import push_delivery
 
@@ -151,6 +151,20 @@ def _build_rewake_command(port_file: str) -> str:
         f"printf '%s\\n' \"$BODY\" >&2\n"
         f"exit 2"
     )
+
+
+def _rewake_wanted() -> bool:
+    """Whether claude's push channel is switched on right now.
+
+    Read here rather than only at delivery time so switching the channel off
+    actually takes the hook out of the user's settings file, which is what the
+    Settings copy promises. Asked through `channel_for` like everything else,
+    so a channel cannot be half-off — and so an unreadable switch leaves the
+    hook installed, which is that function's own default.
+    """
+    from . import push_delivery
+
+    return push_delivery.channel_for("claude") is not None
 
 
 def _is_ours(command: str) -> bool:
@@ -198,6 +212,11 @@ def install_hooks(port_file: str, settings_file: Path | None = None) -> dict[str
 
     Reads existing settings.json, removes any prior agent-team hook entries
     (by marker), and adds fresh entries. Returns status dict for logging.
+
+    The rewake waiter is the one entry that is conditional: it exists only to
+    serve claude's push channel, so a user who switched that channel off gets
+    it stripped here and not written back. The signal hooks are unaffected —
+    they feed activity detection, which has nothing to do with push delivery.
     """
     path = settings_file or settings_path()
     settings = _read_settings(path)
@@ -205,6 +224,7 @@ def install_hooks(port_file: str, settings_file: Path | None = None) -> dict[str
     if not isinstance(hooks_section, dict):
         hooks_section = {}
 
+    rewake_wanted = _rewake_wanted()
     added = 0
     for event_name in [*_HOOK_EVENTS, *(e for e in _REWAKE_EVENTS if e not in _HOOK_EVENTS)]:
         event_kind = _HOOK_EVENTS.get(event_name, "")
@@ -239,16 +259,23 @@ def install_hooks(port_file: str, settings_file: Path | None = None) -> dict[str
                 "type": "command",
                 "command": _build_curl_command(port_file, event_kind),
             })
-        if event_name in _REWAKE_EVENTS:
+        if event_name in _REWAKE_EVENTS and rewake_wanted:
             ours.append({
                 "type": "command",
                 "command": _build_rewake_command(port_file),
                 "asyncRewake": True,
                 "timeout": _REWAKE_TIMEOUT_S,
             })
-        cleaned.append({"hooks": ours})
-        hooks_section[event_name] = cleaned
-        added += 1
+        if ours:
+            cleaned.append({"hooks": ours})
+            added += 1
+        # An event we contribute nothing to (SessionStart with the rewake
+        # channel off) must not leave an empty wrapper behind, and must not
+        # keep a key we are the only reason for.
+        if cleaned:
+            hooks_section[event_name] = cleaned
+        else:
+            hooks_section.pop(event_name, None)
 
     settings["hooks"] = hooks_section
     try:

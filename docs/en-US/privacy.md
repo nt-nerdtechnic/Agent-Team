@@ -57,6 +57,8 @@ An `opencode` pane's port carries no password, because that CLI's own interface 
 
 A `qwen` pane's file holds the text of each message sent to it in the clear. It is removed when the pane closes, and any file an interrupted backend left behind is removed the next time Navide starts.
 
+A `claude` pane's channel is a hook in that CLI's own settings file instead. It carries a secret Navide keeps in one owner-only file in its application data directory, which marks the hook as one this machine installed; it is not readable by other users and never leaves the machine.
+
 Every one of these is per CLI and can be switched off in Settings → CLI Agents → Push channels, after which messages to those panes are typed into the terminal as before. See [Inter-CLI messaging](inter-cli-messaging.md) for the full trade-off.
 
 ## Context handoffs

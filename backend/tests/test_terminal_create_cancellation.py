@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from agent_team_backend import app
+from agent_team_backend import app, push_delivery
 from agent_team_backend import terminals as terminals_module
 
 
@@ -260,6 +260,95 @@ async def test_terminal_kill_requires_owner_and_clears_owner() -> None:
     )
     assert second.terminals.killed == [(term.id, False)]  # type: ignore[attr-defined]
     assert term.id not in app._PTY_OWNERS
+
+
+# ── the push channel a create wires ─────────────────────────────────────────
+# A push channel is wired into the command before the spawn, but a spawn is not
+# a pane: it can still die, and the create can still be rolled back. What the
+# window is told, and when, has to follow the PTY rather than the wiring.
+
+
+@pytest.fixture()
+def push_events(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """A timeline of PTY creates and push_state broadcasts, in order."""
+    timeline: list[str] = []
+
+    async def fake_broadcast(event, **_kwargs):
+        if event.get("type") == "agent_msg.push_state":
+            timeline.append(f"push_state:{event['payload']['ready']}")
+
+    monkeypatch.setattr(app, "broadcast", fake_broadcast)
+    push_delivery._reset_for_test()
+    yield timeline
+    push_delivery._reset_for_test()
+
+
+def _free_attribution(monkeypatch: pytest.MonkeyPatch) -> BlockingAttribution:
+    attribution = BlockingAttribution()
+    attribution.release.set()
+    monkeypatch.setattr(app, "attribution", attribution)
+    return attribution
+
+
+@pytest.mark.asyncio
+async def test_the_channel_is_announced_only_once_the_pty_exists(
+    push_events: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _free_attribution(monkeypatch)
+    session = make_session()
+    real_create = session.terminals.create  # type: ignore[attr-defined]
+
+    def recording_create(**kwargs: Any):
+        push_events.append("pty")
+        return real_create(**kwargs)
+
+    session.terminals.create = recording_create  # type: ignore[attr-defined]
+
+    await app.handle_message(session, create_message(agent="qwen"))
+
+    assert push_events == ["pty", "push_state:True"]
+
+
+@pytest.mark.asyncio
+async def test_a_spawn_that_never_starts_announces_nothing_and_keeps_no_channel(
+    push_events: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The channel was wired into the command; the PTY then failed. A window
+    told it could push here would push into a pane that does not exist."""
+    _free_attribution(monkeypatch)
+    session = make_session()
+
+    def failing_create(**_kwargs: Any):
+        raise RuntimeError("spawn failed")
+
+    session.terminals.create = failing_create  # type: ignore[attr-defined]
+
+    await app.handle_message(session, create_message(agent="qwen"))
+
+    assert push_events == []
+    # And the rollback dropped the registration, so nothing can be pushed to
+    # the pane id either — the watch file goes with it.
+    assert push_delivery.get("pane-1") is None
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_create_takes_the_channel_with_it(
+    push_events: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    attribution = BlockingAttribution()
+    monkeypatch.setattr(app, "attribution", attribution)
+    session = make_session()
+
+    create_task = asyncio.create_task(
+        app.handle_message(session, create_message(agent="qwen"))
+    )
+    assert await asyncio.to_thread(attribution.started.wait, 2)
+    cancel_task = asyncio.create_task(app.handle_message(session, cancel_message()))
+    await asyncio.sleep(0)
+    attribution.release.set()
+    await asyncio.gather(create_task, cancel_task)
+
+    assert push_delivery.get("pane-1") is None
 
 
 @pytest.mark.asyncio

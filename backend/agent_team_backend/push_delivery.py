@@ -35,6 +35,7 @@ import os
 import secrets
 import shlex
 import socket
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -61,13 +62,17 @@ KIND_HOOK = "rewake"
 #: too without a settings migration.
 DISABLED_SETTING_KEY = "pushChannelsDisabled"
 
-#: Per-run secret the rewake hook command carries back. Not an authorisation
-#: boundary — it sits in ~/.claude/settings.json, which anything running as this
-#: user can read — but it does mean a request from a previous backend run, or
-#: from something that never went through the installer, is refused instead of
-#: parking on a pane. Minted at import so concurrent installs cannot race to
-#: bake different values into different panes.
-_REWAKE_TOKEN = secrets.token_urlsafe(24)
+#: File under the app data dir holding the secret the rewake hook carries back.
+#: Owner-only, minted once and kept: see `rewake_token`.
+REWAKE_TOKEN_FILENAME = "push_rewake_token"
+
+#: Only for a data dir that cannot be written. Keeps a single value for the
+#: process rather than minting one per call, which would refuse every hook.
+_EPHEMERAL_REWAKE_TOKEN = secrets.token_urlsafe(24)
+
+#: Serialises the mint, so two installers starting at once cannot bake
+#: different values into different panes.
+_token_lock = threading.Lock()
 
 #: How long an HTTP push may take before it counts as not having landed. The
 #: server is on loopback and the pane is idle, so this only has to outlast a
@@ -127,9 +132,82 @@ def disabled_agents() -> set[str]:
         return set()
 
 
+def _rewake_token_path() -> Path:
+    return app_data_dir() / REWAKE_TOKEN_FILENAME
+
+
+def _harden(path: Path) -> None:
+    """Tighten a token file a wide umask, or an older version, left readable."""
+    try:
+        if path.stat().st_mode & 0o077:
+            path.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _read_rewake_token(path: Path) -> str:
+    try:
+        token = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    if token:
+        _harden(path)
+    return token
+
+
+def _write_rewake_token(path: Path, token: str) -> None:
+    """Persist the secret, never existing group/world readable even briefly."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(token + "\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def rewake_token() -> str:
-    """Per-run secret the installed rewake hook must present. See _REWAKE_TOKEN."""
-    return _REWAKE_TOKEN
+    """The secret the installed rewake hook must present.
+
+    Kept on disk rather than minted per run, because the hook command is
+    written into the CLI's settings file once and a pane that is already
+    running keeps firing exactly the command it was given. A token that changed
+    with every backend restart would refuse every one of those hooks, and the
+    only symptom is that those panes quietly go back to being typed into until
+    their CLI is restarted.
+
+    Not an authorisation boundary: it ends up in a settings file anything
+    running as this user can read. What it proves is that the caller went
+    through this machine's installer, so a hook command copied from elsewhere —
+    or one aimed at a port this backend now happens to hold — is refused rather
+    than parking on someone's pane.
+
+    Deliberately uncached: tests isolate `AGENT_TEAM_DATA_DIR` per test, and a
+    process-wide cache would leak one test's token into the next.
+    """
+    path = _rewake_token_path()
+    existing = _read_rewake_token(path)
+    if existing:
+        return existing
+    with _token_lock:
+        # Re-read under the lock: a concurrent caller may have just written it.
+        existing = _read_rewake_token(path)
+        if existing:
+            return existing
+        token = secrets.token_urlsafe(24)
+        try:
+            _write_rewake_token(path, token)
+        except OSError as err:
+            log.warning(
+                "could not persist the rewake token (%s); using a per-run one, "
+                "which panes started before this run will not match", err
+            )
+            return _EPHEMERAL_REWAKE_TOKEN
+        return token
 
 
 def channel_for(agent_key: str) -> PushChannel | None:
@@ -350,7 +428,8 @@ def apply_switches() -> list[tuple[str, str, bool]]:
     take the channel away so much as stop using it: nothing is pushed any more,
     and a hook parked on the pane is released empty rather than left holding a
     connection nothing will ever answer. Switching one back on makes the same
-    panes usable again without restarting them.
+    panes usable again without restarting them — except a hook pane, whose
+    released waiter only comes back on the CLI's next Stop or SessionStart.
 
     Returns `(pane_id, kind, ready)` for every registered pane, which is what
     the caller broadcasts — both directions have to be announced or a window

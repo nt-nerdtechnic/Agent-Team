@@ -17,6 +17,9 @@ import {
   renderSpawnNotice,
   reasonToEnglish,
   isInjectedMessageText,
+  pushCooldownMs,
+  PUSH_COOLDOWN_MS,
+  PUSH_RETRY_COOLDOWN_MS,
   MSG_NOTICE_PREFIX,
   MSG_SPAWN_FAILED_PREFIX,
   MSG_SPAWN_PARTIAL_PREFIX,
@@ -538,5 +541,28 @@ describe('parseMessages with qualified targets', () => {
       `${MSG_START} to: Agent-Team/reviewer\nrun the tests\n${MSG_END}`,
     )
     expect(blocks).toEqual([{ target: 'Agent-Team/reviewer', content: 'run the tests' }])
+  })
+})
+
+describe('pushCooldownMs', () => {
+  it('gives a server that is not up yet a handful of quick retries', () => {
+    // A pane looks exactly like this for the first seconds of its life, and it
+    // fixes itself — a minute of silence there loses the channel for nothing.
+    expect(pushCooldownMs('not-listening')).toBe(PUSH_RETRY_COOLDOWN_MS)
+  })
+  it('writes a channel that answered but did not work off for a minute', () => {
+    expect(pushCooldownMs('append-401')).toBe(PUSH_COOLDOWN_MS)
+    expect(pushCooldownMs('submit-500')).toBe(PUSH_COOLDOWN_MS)
+    expect(pushCooldownMs('not-armed')).toBe(PUSH_COOLDOWN_MS)
+    expect(pushCooldownMs('too-long')).toBe(PUSH_COOLDOWN_MS)
+  })
+  it('takes the long cooldown for a reason it does not recognise', () => {
+    // Guessing "it will fix itself" costs a retry every few seconds for as
+    // long as the channel stays broken.
+    expect(pushCooldownMs('')).toBe(PUSH_COOLDOWN_MS)
+    expect(pushCooldownMs('push-request-failed')).toBe(PUSH_COOLDOWN_MS)
+  })
+  it('keeps the quick retry well under the long one', () => {
+    expect(PUSH_RETRY_COOLDOWN_MS).toBeLessThan(PUSH_COOLDOWN_MS)
   })
 })

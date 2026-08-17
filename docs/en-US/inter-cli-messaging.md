@@ -375,11 +375,12 @@ pushed at all and is typed in instead, where all of it arrives. The opening
 line counts towards that cap: the message itself has about 9,800 characters,
 and a longer one simply goes the ordinary way.
 
-The parked request carries a token minted when the backend started. It is a
-freshness check, not an authorisation boundary — it sits in the same settings
-file the hook does, which anything running as you can read — and what it buys
-is that a hook left over from an earlier backend run cannot park on a pane that
-now belongs to a different session.
+The parked request carries a token Navide keeps in its own application data
+directory, readable only by you. It is not an authorisation boundary — it also
+sits in the settings file the hook does, which anything running as you can read
+— and what it buys is that only a hook this machine's Navide installed can park
+on a pane. It is minted once and kept, so restarting the backend does not
+invalidate the hook a running pane already has.
 
 The waiter is put in place when the session starts and renewed at the end of
 every turn. Between those it is a single sleeping process per pane; it is
@@ -432,6 +433,11 @@ it is — but nothing is pushed to it any more, and it needs no restart for that
 to take effect. Claude's channel is a hook in its own settings file: switching
 it off stops Navide using it immediately, and the hook itself is removed the
 next time the backend restarts.
+
+Switching one back on makes the same panes usable again, immediately for every
+channel except claude's: a claude pane's waiter was released when you switched
+it off, and only the pane's next turn end — or its next session start — puts
+another one in place. Until then its messages are typed in.
 
 ---
 

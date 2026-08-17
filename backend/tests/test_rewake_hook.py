@@ -189,6 +189,25 @@ def test_a_request_with_the_wrong_run_token_is_refused(
     assert resp.text == ""
 
 
+def test_a_switched_off_channel_is_declined_before_the_attribution_wait(
+    client: TestClient, events, monkeypatch
+) -> None:
+    """Every claude Stop fires this hook, whether the channel is on or not, and
+    an external `claude` fires it too. Waiting 30 seconds for an attribution
+    that will never be used leaves one background curl parked per turn."""
+    async def never(_session_id: str) -> str:
+        raise AssertionError("the attribution wait was entered")
+
+    monkeypatch.setattr(app_module, "_rewake_pane_id", never)
+    push_delivery.set_disabled_reader(lambda: {"claude"})
+    try:
+        resp = _park(client)
+    finally:
+        push_delivery.set_disabled_reader(None)
+    assert resp.status_code == 200
+    assert resp.text == ""
+
+
 def test_a_hook_that_hangs_up_takes_its_waiter_with_it(
     client: TestClient, events, monkeypatch
 ) -> None:
@@ -289,6 +308,86 @@ def test_uninstall_removes_the_waiter_too(tmp_path) -> None:
     hooks = json.loads(settings.read_text(encoding="utf-8")).get("hooks", {})
     assert _rewake_hooks(hooks, "SessionStart") == []
     assert _rewake_hooks(hooks, "Stop") == []
+
+
+def _signal_hooks(hooks: dict, event: str) -> list[dict]:
+    return [
+        h
+        for entry in hooks.get(event, [])
+        for h in entry.get("hooks", [])
+        if not h.get("asyncRewake")
+    ]
+
+
+def test_switching_the_channel_off_installs_no_waiter(tmp_path, monkeypatch) -> None:
+    """The Settings copy says the hook is removed at the next backend restart,
+    and the installer is the only thing that ever runs at one."""
+    push_delivery.set_disabled_reader(lambda: {"claude"})
+    try:
+        hooks = _installed(tmp_path)
+    finally:
+        push_delivery.set_disabled_reader(None)
+
+    assert _rewake_hooks(hooks, "Stop") == []
+    # Nothing of ours is left on an event we contribute nothing else to.
+    assert "SessionStart" not in hooks
+    # The signal hooks are untouched: they feed activity detection, which has
+    # nothing to do with push delivery.
+    assert _signal_hooks(hooks, "Stop")
+    assert _signal_hooks(hooks, "PreToolUse")
+    assert _signal_hooks(hooks, "Notification")
+
+
+def test_switching_the_channel_off_removes_a_waiter_already_installed(tmp_path) -> None:
+    settings = tmp_path / "settings.json"
+    claude_hooks.install_hooks("/tmp/port", settings_file=settings)
+    push_delivery.set_disabled_reader(lambda: {"claude"})
+    try:
+        claude_hooks.install_hooks("/tmp/port", settings_file=settings)
+    finally:
+        push_delivery.set_disabled_reader(None)
+    hooks = json.loads(settings.read_text(encoding="utf-8"))["hooks"]
+    assert _rewake_hooks(hooks, "Stop") == []
+    assert "SessionStart" not in hooks
+
+    # ...and switching it back on puts it there again at the next restart.
+    claude_hooks.install_hooks("/tmp/port", settings_file=settings)
+    hooks = json.loads(settings.read_text(encoding="utf-8"))["hooks"]
+    assert len(_rewake_hooks(hooks, "Stop")) == 1
+    assert len(_rewake_hooks(hooks, "SessionStart")) == 1
+
+
+def test_a_users_own_session_start_hook_survives_the_channel_being_off(
+    tmp_path,
+) -> None:
+    """Dropping our own entry must not drop the event it shared."""
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps({"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "mine"}]}]}}),
+        encoding="utf-8",
+    )
+    push_delivery.set_disabled_reader(lambda: {"claude"})
+    try:
+        claude_hooks.install_hooks("/tmp/port", settings_file=settings)
+    finally:
+        push_delivery.set_disabled_reader(None)
+    hooks = json.loads(settings.read_text(encoding="utf-8"))["hooks"]
+    commands = [h["command"] for entry in hooks["SessionStart"] for h in entry.get("hooks", [])]
+    assert commands == ["mine"]
+
+
+def test_an_unreadable_switch_leaves_the_waiter_installed(tmp_path) -> None:
+    """An installer must never be the thing that breaks over a setting it
+    could not read; the channel is on by default."""
+    def boom() -> set[str]:
+        raise RuntimeError("store is down")
+
+    push_delivery.set_disabled_reader(boom)
+    try:
+        hooks = _installed(tmp_path)
+    finally:
+        push_delivery.set_disabled_reader(None)
+    assert len(_rewake_hooks(hooks, "Stop")) == 1
 
 
 def test_a_users_own_session_start_hook_survives_installation(tmp_path) -> None:

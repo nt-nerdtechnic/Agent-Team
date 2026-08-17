@@ -352,6 +352,27 @@ export function normalizeMessagingName(raw: string): string | null {
   return name
 }
 
+/** How long a pane's push channel is left alone after a push failed to land,
+ *  so a channel that is declared but broken costs one attempt per minute
+ *  instead of one per pump tick. */
+export const PUSH_COOLDOWN_MS = 60_000
+
+/** The same, for a CLI whose server simply is not listening yet. That is what a
+ *  pane looks like for the first seconds of its life, and it fixes itself — so
+ *  it is worth a handful of quick retries rather than a minute's silence. */
+export const PUSH_RETRY_COOLDOWN_MS = 5_000
+
+/** Failures that say "not yet" rather than "not working". */
+const PUSH_RETRYABLE_REASONS = new Set(['not-listening'])
+
+/** How long to leave a pane's channel alone after a push came back `reason`.
+ *  An unrecognized reason takes the long cooldown: the short one exists for the
+ *  single case known to fix itself, and guessing wrong there costs a pane a
+ *  retry every few seconds for as long as its channel stays broken. */
+export function pushCooldownMs(reason: string): number {
+  return PUSH_RETRYABLE_REASONS.has(reason) ? PUSH_RETRY_COOLDOWN_MS : PUSH_COOLDOWN_MS
+}
+
 /** `base` if free in `taken`, else the first free suffixed variant. A base
  *  already ending in `-<n>` bumps that counter (`X-2` → `X-3`, never `X-2-2`),
  *  and a run of identical counters (`X-2-2-2`, persisted by the old compounding

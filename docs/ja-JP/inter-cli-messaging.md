@@ -378,11 +378,12 @@ Push されず、代わりに入力されます。そちらならすべてが届
 に数えられるため、メッセージ本体に使えるのは約 9,800 文字です。それより長いもの
 は単に通常の経路を通ります。
 
-待機中の Request は、Backend の起動時に発行された Token を伴います。これは鮮度
-チェックであって認可の境界ではありません——hook と同じ Settings File に置かれて
-おり、ユーザーとして動作するものなら何でも読めます——これが買うのは、以前の
-Backend 実行から残った hook が、いまは別の Session に属する Pane に居座れない
-ということです。
+待機中の Request は、Navide が自身の Application Data Directory に保持する Token
+を伴います。この File はユーザー本人しか読めません。これは認可の境界ではありません
+——hook と同じ Settings File にも置かれ、ユーザーとして動作するものなら何でも読める
+からです——これが買うのは、この Machine の Navide が Install した hook だけが Pane
+に居座れるということです。Token は一度だけ発行されて保持されるため、Backend を
+再起動しても、実行中の Pane が持っている hook は無効になりません。
 
 この待機役は Session 開始時に配置され、毎 Turn の終わりに更新されます。その間は
 Pane ごとに 1 つの Sleep している Process です。Pane が閉じたとき、Navide が渡す
@@ -436,6 +437,11 @@ Watch File もそのまま——ですが、もう何も Push されず、その
 claude の Channel は自身の Settings File にある hook です。無効にすると Navide は
 ただちにそれを使うのをやめ、hook 自体は次に Backend が再起動したときに削除され
 ます。
+
+再度有効にすると同じ Pane がまた使えるようになります。claude 以外はただちに有効
+です。claude Pane の待機役は無効にした時点で解放されているため、その Pane の次の
+Turn 終了、あるいは次の Session 開始で初めて新しい待機役が配置されます。それまで、
+そこへのメッセージは入力されます。
 
 ---
 

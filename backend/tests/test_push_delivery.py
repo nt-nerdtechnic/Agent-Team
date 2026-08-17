@@ -625,3 +625,45 @@ async def test_http_push_names_a_server_that_is_not_up_yet() -> None:
         port=port,
     )
     assert await push_delivery.deliver("p1", "hi") == (False, "not-listening")
+
+
+# ── the rewake secret ───────────────────────────────────────────────────────
+# The hook command is written into the CLI's settings file once, and a pane
+# that is already running keeps firing exactly the command it was given. A
+# secret that changed with every backend start would refuse every one of those
+# hooks, and the only symptom is those panes quietly going back to being typed
+# into until their CLI is restarted.
+def test_the_rewake_token_is_minted_once_and_kept() -> None:
+    first = push_delivery.rewake_token()
+    assert first
+    assert push_delivery._rewake_token_path().read_text(encoding="utf-8").strip() == first
+    # Nothing is cached in the process, so a second call is exactly what a
+    # restarted backend does: it reads the file it left behind.
+    assert push_delivery.rewake_token() == first
+
+
+def test_the_rewake_token_file_is_owner_only() -> None:
+    push_delivery.rewake_token()
+    mode = push_delivery._rewake_token_path().stat().st_mode
+    assert mode & 0o077 == 0
+
+
+def test_a_token_file_left_readable_is_tightened_without_changing_it() -> None:
+    """A file written by an older version, or under a wide umask."""
+    token = push_delivery.rewake_token()
+    path = push_delivery._rewake_token_path()
+    path.chmod(0o644)
+    assert push_delivery.rewake_token() == token
+    assert path.stat().st_mode & 0o077 == 0
+
+
+def test_a_data_dir_that_cannot_be_written_still_gives_one_stable_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Minting per call would refuse every hook. One token for the process is
+    the same thing the backend had before the file existed."""
+    def unwritable(*_args: object) -> None:
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(push_delivery, "_write_rewake_token", unwritable)
+    assert push_delivery.rewake_token() == push_delivery.rewake_token() != ""
