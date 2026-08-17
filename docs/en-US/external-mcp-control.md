@@ -90,9 +90,9 @@ documents the addresses, the idle gate and the guard rails they share.
 
 | Tool | Parameters | What it does |
 |---|---|---|
-| `cli_list_targets` | — | List addressable CLI panes: `name`, `address`, `workspace_path`, `same_workspace`, `busy` |
-| `cli_send` | `to`, `text` | Deliver an instruction to another pane once it's idle (queued if busy); returns `msg_key` |
-| `cli_check_message` | `msg_key` | What became of one `cli_send`: `{status, target, age_seconds, reason?, settled_after_s?}` |
+| `cli_list_targets` | — | List addressable CLI panes: `name`, `address`, `workspace_path`, `same_workspace`, `busy`, `hold_reason?` |
+| `cli_send` | `to`, `text`, `wait_for_delivery_s=0` (capped at 120) | Deliver an instruction to another pane once it's idle (queued if busy); returns `msg_key`, and with a wait, what became of it |
+| `cli_check_message` | `msg_key` | What became of one `cli_send`: `{status, target, age_seconds, reason?, settled_after_s?, hold?, held_for_s?}` |
 | `cli_send_and_wait` | `to`, `text`, `timeout_s=60` (capped at 120) | `cli_send` plus the wait for that turn to finish; returns `cli_wait_idle`'s result plus `{ok, target, msg_key}` |
 | `cli_open_agent` | `agent`, `name`, `task`, `workspace_path` (required for a non-pane caller) | Spawn a new CLI pane with a task; returns `{ok, name, address}`, plus `advisories` when the spawn crossed an advisory threshold |
 
@@ -113,18 +113,59 @@ path as an ordinary message. It is a heads-up for an agent that never polls —
 `cli_check_message` stays the authoritative answer, and the notice is not
 addressable, so nothing should reply to it.
 
+**Waiting for the message to land.** Polling only closes the loop for an agent
+that remembers to poll, and one that sends and moves on never learns anything.
+`wait_for_delivery_s` is the in-band answer: `cli_send` waits that long for the
+message to actually go in and reports what happened in the same result.
+
+| Outcome | What comes back |
+|---|---|
+| It went in | `status: "delivered"`, `settled_after_s` |
+| The window refused it | `status: "failed"` (or `"rejected"` from another device), `reason` |
+| Still waiting when the clock ran out | `status: "queued"`, `waited_s`, plus `hold` and `held_for_s` when the receiving window said why |
+
+`ok` stays **true** for a refusal, for the same reason `cli_send_and_wait`'s
+`target_lost` does: the send happened and `msg_key` is real, so answering
+`ok: false` would read as "never sent" and invite a resend that dispatches the
+work twice. 10–30s is the useful range — the wait costs the caller's own turn,
+and a pane that is mid-turn or being typed into can hold a message far longer.
+Left at its default of `0`, the answer is byte-for-byte what it always was.
+
+**Why a message is still queued.** `hold` is the same reason the Messages panel
+shows — `{key, n?}`, where `key` is `typing`, `mid-turn`, `behind`, `starting`,
+`settling`, `not-ready`, `gone`, `paused` or `remote-ack` — and `held_for_s` is
+how long it has been that way. It appears on `cli_check_message` and on a
+timed-out `cli_send` wait, and it is absent once the message settles or while
+no window has reported one. `cli_list_targets` surfaces the same fact per pane
+as `hold_reason`, which is what makes `busy` explainable — but only while a
+message sent from here is queued for that pane, so its absence says nothing.
+
 That table is backend **memory**, not a log: it holds the last 500 sends for
 one hour and is lost on backend restart. An unknown `msg_key` returns
 `{ok: false, error}` and means "not tracked any more", not "never sent".
 
 `cli_send_and_wait` handles the race a manual `cli_send` + `cli_wait_idle`
 pair loses to — the target is idle at the moment you send, so a plain wait
-returns "already idle" before it ever read the message. It records the
-target's last activity before sending and only accepts a *newer* turn as the
-answer, so `last_activity.text` is what the other agent said in reply. Its
-timeout `reason` is `cli_wait_idle`'s, plus `never_started` for a target that
-stayed idle and never showed any sign of picking the message up. A send
-refused outright returns `cli_send`'s `{ok: false, error}` unchanged.
+returns "already idle" before it ever read the message. It waits for the
+message to **go in** first, then records the target's last activity before
+sending and only accepts a *newer* turn as the answer, so `last_activity.text`
+is what the other agent said in reply. Its timeout `reason` is
+`cli_wait_idle`'s, plus `never_started` for a target that stayed idle and never
+showed any sign of picking the message up. A send refused outright returns
+`cli_send`'s `{ok: false, error}` unchanged.
+
+`timeout_s` covers both halves: **at most half of it** goes to getting the
+message in, and whatever is left waits for the turn. Time spent on delivery is
+not lost — the message lands when the pane frees up, which is most of what the
+idle wait would have sat through anyway — but a message still held at the
+halfway mark is unlikely to be answered in what remains, and its hold reason is
+a far more useful answer than "timeout, busy". When it never arrives the result
+is `source: "not_delivered"` with `delivery_status` (`queued` with `hold` /
+`held_for_s`, or `failed` / `rejected` with `reason`). That is the fix for a
+message being held while its target sat idle: the old order answered `idle`
+from the state it was sent into, which reads as "it finished your work" when
+the work was never handed over. Like `target_lost`, it stays `ok: true` — do
+not resend on it.
 
 If the target stops being addressable *during* the wait — its window closed,
 its pane was killed — the result is `{ok: true, idle: false, source:

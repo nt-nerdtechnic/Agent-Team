@@ -49,6 +49,16 @@ Agents run with the current user's operating-system permissions unless the exter
 
 YOLO mode may bypass CLI confirmation or sandbox protections. Use it only in trusted, version-controlled workspaces and review commands and diffs afterward.
 
+## Local ports and files opened for agent CLIs
+
+Some CLIs accept an inter-CLI message through a channel other than their terminal input. Navide gives those panes what that channel needs at launch, all of it on this machine: a loopback-only HTTP port the CLI itself serves (`opencode`, `kilo`), or a per-pane file in the Navide application data directory that the CLI watches. Nothing here leaves the machine.
+
+An `opencode` pane's port carries no password, because that CLI's own interface cannot authenticate against its own server. Any process running as you can therefore drive that pane. A `kilo` pane's port is protected by a per-pane secret passed in its environment.
+
+A `qwen` pane's file holds the text of each message sent to it in the clear. It is removed when the pane closes, and any file an interrupted backend left behind is removed the next time Navide starts.
+
+Every one of these is per CLI and can be switched off in Settings → CLI Agents → Push channels, after which messages to those panes are typed into the terminal as before. See [Inter-CLI messaging](inter-cli-messaging.md) for the full trade-off.
+
 ## Context handoffs
 
 Cross-agent handoffs can include task context and prior-stage output. Automatic secret scrubbing is not yet a complete security boundary. Do not place credentials in prompts, generated plans, logs, or files that may be handed to another agent.

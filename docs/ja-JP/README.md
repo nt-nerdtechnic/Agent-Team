@@ -39,13 +39,14 @@ Navide は Agent 時代のエンジニアリングツールです。一人の人
 | [Adding a CLI Vendor — English](../adding-a-cli-vendor.md) | AI Coding CLI を追加する：2 つの Spec ファイル、登録、CI が強制するチェック |
 | [CLI Extension Guide — English](../en-US/cli-extension-guide.md) | ベンダーごとの統合記録：インストール経路、Resume 構文、Session 保存形式 |
 | [Plugin Development — English](../en-US/plugin-development.md) | フロントエンド View プラグインまたはバックエンドプラグインを開発し、パッケージ化して署名する |
+| [外部 MCP 制御](external-mcp-control.md) | 外部 MCP クライアントを接続して実行中の Navide ウィンドウを操作し、セキュリティモデルを理解する |
 | [Release Guide — English](../en-US/releases.md) | Version、Package、署名、Notarization、公開、Release 復旧を行う |
 
 ## リファレンス
 
 | ドキュメント | 目的 |
 |---|---|
-| [Inter-CLI Messaging — English](../en-US/inter-cli-messaging.md) | CLI Agent 間のアドレス指定、送信、受信、トラブルシューティング |
+| [CLI 間メッセージング](inter-cli-messaging.md) | CLI Agent 間のアドレス指定、送信、受信、トラブルシューティング |
 | [Keyboard Shortcuts — English](../en-US/keybindings.md) | デフォルトの Keyboard Command と操作方法を確認する |
 | [Editor Design — English](../en-US/editor-design.md) | 現在の Editor Architecture と設計方針を理解する |
 | [Historical Milestone Record — English](../en-US/spec.md) | 当初の実装 Milestone 記録を確認する |

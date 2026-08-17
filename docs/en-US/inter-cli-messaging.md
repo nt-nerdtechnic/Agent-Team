@@ -287,8 +287,8 @@ pane is free — because it isn't.
 
 ### What it does not cover
 
-- **Only the moment a turn ends.** A claude pane sitting idle runs no hook, so
-  a message arriving then still waits for the ordinary typed delivery. This is
+- **Only the moment a turn ends.** A claude pane sitting idle runs no Stop
+  hook. That gap is covered separately by the `rewake` channel below; this is
   the path for a message that shows up while the agent is working.
 - **Only claude.** No other CLI has a hook that can block its own stop.
 - **Only when the hook reaches Navide.** Hooks not installed, backend not
@@ -298,6 +298,140 @@ pane is free — because it isn't.
   allowed to stop; whatever is left in its queue goes out by typing. Claude
   Code enforces its own limit at 8 consecutive blocks, and stopping first keeps
   the limit ours to explain.
+
+---
+
+## Push channels
+
+The Stop hook above is one example of a larger idea: some CLIs have a way in
+that is not their input box. Where one exists, Navide uses it and falls back to
+typing when it does not work out.
+
+A push is not a different message. It takes the same queue, the same FIFO
+order, the same rate limit and the same global pause; only the last step
+changes. In the Messages panel the row carries a **via `<channel>`** badge,
+which — like `via hook` — is in-memory only.
+
+### What each channel is worth
+
+| CLI | Channel | What it needs at launch | What "delivered" proves |
+|---|---|---|---|
+| `opencode` | `tui-http` — `POST /tui/append-prompt` then `/tui/submit-prompt` | `--port <free port> --hostname 127.0.0.1` | Both calls answered 2xx: the TUI took the text and submitted it |
+| `kilo` | `tui-http`, same paths | the same, plus `KILO_SERVER_PASSWORD` | as above |
+| `qwen` | `input-file` — one appended JSONL record | `--input-file <per-pane file>` | The line was written. The CLI polls that file twice a second, so this proves it was **written, not read** |
+| `claude` | `rewake` — a background hook parked on Navide, woken with the message | nothing; the installed hook arms it | A hook that was still waiting took the envelope. What the agent then does with it is Claude Code's, not Navide's |
+
+Everything else is typed in, exactly as before.
+
+### Which holds still apply
+
+A channel that writes the CLI's composer occupies the input box just as typing
+would, so it changes how the message gets there and nothing else:
+
+- `tui-http` **still waits for you.** `append-prompt` appends to whatever the
+  composer is holding, so the `typing` hold is unchanged.
+- `tui-http` **still waits for the turn to end.** A message is pushed to an
+  idle pane only.
+
+What it does buy is a single, atomic insertion: no bracketed-paste guards, no
+verified submit, and no chance of interleaving with your own keystrokes at the
+byte level.
+
+A channel that never reaches the composer drops the hold that exists to protect
+it:
+
+- `input-file` **does not wait for you.** The record goes to the CLI's own
+  message queue, the same one a typed message joins after you press Enter, so a
+  half-written line in the pane is in no danger and the `typing` hold does not
+  apply.
+- `input-file` **still waits for the turn to end**, which is a deliberate
+  choice rather than a limit of the mechanism: Qwen merges several queued plain
+  messages into one submission, so pushing into a busy pane could hand the
+  agent two senders' messages as a single turn.
+- `rewake` **does not wait for you** either, and **still waits for the turn to
+  end** — this is the idle half of Stop-hook delivery, and mid-turn is the
+  Stop hook's own job.
+
+### The claude pair: Stop hook and rewake
+
+A claude pane now has two ways in that never touch its input box, and they
+cover opposite moments:
+
+| | Stop hook | rewake |
+|---|---|---|
+| Fires | as a turn ends | while the pane sits idle |
+| Message arrives as | the agent's next instruction | a **system reminder** |
+| Cap | 5 in a row per pane | none of ours |
+
+The difference in how the message *arrives* is the reason a rewake envelope
+carries an extra opening line saying it is another agent's message and should
+be acted on: a system reminder is otherwise read as a note about the agent's
+own run rather than as work handed to it. In the pane's terminal the wake shows
+up under Claude Code's own label, `Stop hook feedback`.
+
+Claude Code caps a hook's output at 10,000 characters — past that it writes the
+rest to a file and shows a preview — so an envelope longer than that is not
+pushed at all and is typed in instead, where all of it arrives. The opening
+line counts towards that cap: the message itself has about 9,800 characters,
+and a longer one simply goes the ordinary way.
+
+The parked request carries a token minted when the backend started. It is a
+freshness check, not an authorisation boundary — it sits in the same settings
+file the hook does, which anything running as you can read — and what it buys
+is that a hook left over from an earlier backend run cannot park on a pane that
+now belongs to a different session.
+
+The waiter is put in place when the session starts and renewed at the end of
+every turn. Between those it is a single sleeping process per pane; it is
+released when the pane closes, when Navide has something to hand it, or after
+30 minutes, and a pane with none simply falls back to typing. `UserPromptSubmit`
+would renew it more often and is deliberately not used: exiting 2 on that event
+normally erases the prompt you just typed.
+
+### The trade-offs, stated plainly
+
+- **An `opencode` pane serves an unauthenticated port.** OpenCode has a
+  `OPENCODE_SERVER_PASSWORD` variable, but its own TUI does not authenticate
+  against its own server: setting one makes every request the CLI makes to
+  itself come back `401` and the pane dies during startup (verified on
+  1.15.12). So the port is left open, bound to `127.0.0.1`. Anything running as
+  you on this machine can drive that pane. Kilo's TUI does read the variable,
+  so a Kilo pane gets a per-pane secret and its port is not open that way.
+- **The port is the only isolation.** OpenCode's `/tui/*` endpoints accept a
+  `?directory=` parameter, but it is not a gate — a request naming a different
+  workspace is served the same. One pane, one port is what keeps panes apart.
+- **The port is picked, not reserved.** Navide asks the kernel for a free port
+  and hands the number to the CLI, which binds it a moment later; in between
+  something else can take it. A pane whose CLI then fails to bind simply has no
+  channel, and every message to it is typed in as before.
+- **A pane launched with a `--port` of your own is left alone.** So is one
+  whose command you wrote yourself and that already carries the flag.
+- **A `qwen` pane's watch file is append-only and lives for the pane.** It is
+  created empty in the Navide application data directory at launch and removed
+  when the pane closes; a file a killed backend left behind is swept on the
+  next start. Every message in it is in the clear until then. It is never
+  rotated or truncated while the pane runs: the CLI's watcher re-reads the file
+  from the beginning if it ever sees it shrink, which would replay every
+  message in it.
+- **A failed push is never a failed message.** The envelope goes back through
+  the ordinary typed path — immediately if the pane is ready for typing,
+  otherwise on a later tick — and the channel is left alone for a minute so a
+  broken one costs a single attempt rather than one per second (a few seconds
+  only when the CLI's server has simply not come up yet, which fixes itself).
+  Nothing is delivered twice: a push that appended but could not submit clears
+  the composer before reporting failure, and because clearing is best effort
+  the message goes back in the queue rather than being typed in on the spot.
+
+### Switching one off
+
+**Settings → CLI Agents → Push channels** lists every CLI that has one. They
+are all on; switching one off means messages to those panes are typed in, which
+is what every pane did before channels existed. A pane already running keeps
+what it was given at launch — its port stays open, its watch file stays where
+it is — but nothing is pushed to it any more, and it needs no restart for that
+to take effect. Claude's channel is a hook in its own settings file: switching
+it off stops Navide using it immediately, and the hook itself is removed the
+next time the backend restarts.
 
 ---
 
@@ -324,14 +458,43 @@ queued — why it has not gone out yet.
 
 - **Pause / Resume** stops and restarts injection for the whole window.
 - **Clear log** drops finished rows and keeps the ones still in flight.
-- **Resend** re-sends a failed row as a brand-new message, re-validating
-  everything from scratch, so it can fail again for a different reason.
-  Delivery-failure notices carry a `system notice` badge and no Resend — a
-  notice only reports another row's failure, and that row has its own.
+- **Withdraw** takes a message back, and appears only while the row is still
+  `queued` — see below.
+- **Resend** re-sends a failed or withdrawn row as a brand-new message,
+  re-validating everything from scratch, so it can fail again for a different
+  reason. Delivery-failure notices carry a `system notice` badge and no Resend —
+  a notice only reports another row's failure, and that row has its own.
 - The log is mirrored into the backend store and restored on reload. Rows
   that were still in flight when the window died come back as failed
   (`window-reloaded`) — queues do not survive a reload, and nothing is
   re-delivered automatically.
+
+### Withdrawing a message
+
+A message can sit in a queue for a long time — the target may be mid-turn, or
+someone may be typing in it — and until it is taken off that queue it can still
+be called back. **Withdraw** on a `queued` row does exactly that: the message
+leaves the queue, the row goes to `Withdrawn`, and nothing is ever typed into
+the target pane. The messages behind it move up.
+
+The cut-off is delivery, not regret. Once a row is `delivering` the envelope is
+being written into the pane and the button is gone; a delivered message cannot
+be unsent, because a CLI agent has already read it.
+
+Withdrawing is not a failure. The sending pane gets no delivery-failure notice —
+there is nothing to tell it, since the send was called off on purpose — and the
+row carries no failure reason, only its `Withdrawn` status. Resend is offered on
+it, and re-sends the text as a brand-new message.
+
+For a message addressed to another workspace's window, Withdraw is a *request*:
+that window owns the queue and answers over the same path it reports delivery
+on. The row shows `cancelling` while it waits, and lands on whichever actually
+happened — withdrawn, or delivered if the message went in first.
+
+This also runs the other way. A message queued for one of your panes — from
+another workspace, from an MCP `cli_send`, or relayed in from another device —
+can be withdrawn from this window's panel, and its sender is told the same way
+it would be told about a failure.
 
 ### Why a message is still queued
 
@@ -346,6 +509,15 @@ queued — why it has not gone out yet.
 | `paused` | Delivery is paused for the window |
 | `gone` | Target pane no longer exists |
 | `remote-ack` | Sent to another window; awaiting its report |
+
+A message that came in through `cli_send` reports its hold back to the backend
+as well, so the agent that sent it can read the same reason without a Messages
+panel to look at — see [External MCP control](external-mcp-control.md). Only
+the *reason* travels, only when it changes, and only for a message the backend
+is already tracking by `msg_key`; a message between two panes of one window is
+known nowhere else and reports nothing. The hold itself is still in-memory and
+still never persisted.
+| `cancelling` | Withdrawal asked of another window; awaiting its answer |
 
 ### Why a message failed
 
@@ -383,6 +555,10 @@ queued — why it has not gone out yet.
 | Handle registry, queues, guard rails, delivery state machine | `src/renderer/src/composables/useAgentMessaging.ts` |
 | Injection, the idle gate, turn-text hook | `src/renderer/src/App.vue` |
 | Stop-hook delivery: asking the owning window inside the hook's timeout | `backend/agent_team_backend/hook_drain.py` |
+| Push channels: spawn wiring and the transports themselves | `backend/agent_team_backend/push_delivery.py` |
+| Which channel a CLI offers | `backend/agent_team_backend/cli_vendors/<key>.py` (`push_channel`) |
+| Which delivery holds that channel still answers to | `src/renderer/src/agents/<key>.ts` (`pushChannel`) |
 | The installed hook command, and which event keeps its response | `backend/agent_team_backend/claude_hooks.py` |
+| Delivery outcome and hold, as an MCP caller reads them | `backend/agent_team_backend/plugins/builtin/navide_plans/plan_mcp.py` |
 | The protocol text handed to agents | `src/renderer/src/data/stages.ts` |
 | The delivery log UI | `src/renderer/src/components/AgentMessagesPanel.vue` |
