@@ -36,6 +36,7 @@ import os
 import re
 import shutil
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -359,14 +360,15 @@ def prepare(
     url: str,
     server_name: str,
     server_label: str = "",
+    legacy_names: Sequence[str] = (),
 ) -> tuple[str, str] | None:
     """Build (or refresh) the pane's shim and return ``(env_var, path)``.
 
     None when the vendor has no shim, the pane id is unusable as a path
     segment, or the filesystem work fails — the caller then spawns unwired.
-    The server's name and display label are the caller's: this module must not
-    import the one that serves the endpoint. Blocking I/O: call off the event
-    loop.
+    The server's name, display label and former names are the caller's: this
+    module must not import the one that serves the endpoint. Blocking I/O:
+    call off the event loop.
     """
     spec = SHIM_SPECS.get(agent_key)
     root = shim_root(agent_key, pane_id)
@@ -409,6 +411,7 @@ def prepare(
             name=server_name,
             label=server_label,
             url=url,
+            drop=legacy_names,
         )
         _write_config(dst, document)
     except OSError as err:

@@ -211,13 +211,13 @@ def test_config_env_merges_instead_of_replacing_mcp_wiring(
     view = tmp_path / "view"
     _skill(view, "alpha")
     monkeypatch.setattr(skills_wiring, "prepare_view", lambda *a, **k: view)
-    env = {"OPENCODE_CONFIG_CONTENT": json.dumps({"mcp": {"navide-plans": {"type": "remote"}}})}
+    env = {"OPENCODE_CONFIG_CONTENT": json.dumps({"mcp": {"user-server": {"type": "remote"}}})}
 
     command = skills_wiring.wire_command("opencode", "opencode", None, "pane", env, "")
 
     document = json.loads(env["OPENCODE_CONFIG_CONTENT"])
     assert command == "opencode"  # the variable carries it, not the command line
-    assert document["mcp"] == {"navide-plans": {"type": "remote"}}
+    assert document["mcp"] == {"user-server": {"type": "remote"}}
     assert document["skills"]["paths"] == [str(view)]
 
 

@@ -26,10 +26,10 @@ def test_write_claude_config_creates_file(tmp_path: Path) -> None:
     # backend's own host credential instead of being bare.
     assert data == {
         "mcpServers": {
-            "navide-plans": {"type": "http", "url": plan_mcp_wiring.plan_mcp_url(4567)}
+            "navide": {"type": "http", "url": plan_mcp_wiring.plan_mcp_url(4567)}
         }
     }
-    assert f"client=host&t={plan_mcp_auth.internal_token()}" in data["mcpServers"]["navide-plans"]["url"]
+    assert f"client=host&t={plan_mcp_auth.internal_token()}" in data["mcpServers"]["navide"]["url"]
 
 
 def test_write_claude_config_updates_stale_port(tmp_path: Path) -> None:
@@ -37,7 +37,7 @@ def test_write_claude_config_updates_stale_port(tmp_path: Path) -> None:
     plan_mcp_wiring.write_claude_config(1111, path)
     plan_mcp_wiring.write_claude_config(2222, path)
     data = json.loads(path.read_text(encoding="utf-8"))
-    assert data["mcpServers"]["navide-plans"]["url"] == plan_mcp_wiring.plan_mcp_url(2222)
+    assert data["mcpServers"]["navide"]["url"] == plan_mcp_wiring.plan_mcp_url(2222)
 
 
 def test_write_claude_config_idempotent(tmp_path: Path) -> None:
@@ -151,7 +151,7 @@ def test_wire_codex_appends_config_override() -> None:
     # No pane id given, so the override URL carries the host credential.
     assert wired == (
         "codex --yolo -c "
-        f"'mcp_servers.navide-plans.url=\"{plan_mcp_wiring.plan_mcp_url(4567)}\"'"
+        f"'mcp_servers.navide.url=\"{plan_mcp_wiring.plan_mcp_url(4567)}\"'"
     )
     assert "client=host" in wired
 
@@ -160,7 +160,7 @@ def test_wire_codex_resume_command() -> None:
     command = ["/bin/zsh", "-lc", "codex resume abc123 --yolo"]
     wired = plan_mcp_wiring.wire_command("codex", command, 4567)
     assert wired[2].startswith("codex resume abc123 --yolo -c ")
-    assert f'mcp_servers.navide-plans.url="{plan_mcp_wiring.plan_mcp_url(4567)}"' in wired[2]
+    assert f'mcp_servers.navide.url="{plan_mcp_wiring.plan_mcp_url(4567)}"' in wired[2]
 
 
 def test_wire_codex_with_pane_id_uses_pane_credential() -> None:
@@ -303,7 +303,7 @@ def test_wire_cursor_writes_project_config_and_env_url(tmp_path: Path) -> None:
     # The file is shared by every pane in the workspace, so it holds a
     # variable reference and the per-pane credential rides in the env.
     assert _cursor_servers(tmp_path) == {
-        "navide-plans": {"url": "${env:NAVIDE_MCP_URL}"}
+        "navide": {"url": "${env:NAVIDE_MCP_URL}"}
     }
     assert env["NAVIDE_MCP_URL"] == plan_mcp_wiring.plan_mcp_url(4567, "p1")
 
@@ -318,9 +318,23 @@ def test_wire_cursor_keeps_user_servers_and_other_keys(tmp_path: Path) -> None:
     plan_mcp_wiring.wire_command("cursor", "cursor-agent", 4567, "p1", {}, str(tmp_path))
     servers = _cursor_servers(tmp_path)
     assert servers["mine"] == {"command": "my-server"}
-    assert servers["navide-plans"]["url"] == "${env:NAVIDE_MCP_URL}"
+    assert servers["navide"]["url"] == "${env:NAVIDE_MCP_URL}"
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["other"] == 1  # unrelated top-level keys survive
+
+
+def test_wire_cursor_drops_the_entry_left_by_a_former_server_name(tmp_path: Path) -> None:
+    path = plan_mcp_wiring.project_config_path("cursor", tmp_path)
+    path.parent.mkdir(parents=True)
+    legacy = plan_mcp_wiring.LEGACY_SERVER_NAMES[0]
+    path.write_text(
+        json.dumps({"mcpServers": {legacy: {"url": "${env:NAVIDE_MCP_URL}"}}}),
+        encoding="utf-8",
+    )
+    plan_mcp_wiring.wire_command("cursor", "cursor-agent", 4567, "p1", {}, str(tmp_path))
+    # Both names resolve to the same live endpoint, so leaving the old one
+    # would have cursor load the server twice.
+    assert _cursor_servers(tmp_path) == {"navide": {"url": "${env:NAVIDE_MCP_URL}"}}
 
 
 def test_wire_cursor_never_clobbers_unparseable_json(tmp_path: Path) -> None:

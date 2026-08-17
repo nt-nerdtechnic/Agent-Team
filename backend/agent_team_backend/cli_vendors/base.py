@@ -21,6 +21,7 @@ modules — those import the registry, and a back-edge would be a cycle.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -241,6 +242,7 @@ def mcp_document(
     name: str,
     label: str = "",
     url: str,
+    drop: Sequence[str] = (),
 ) -> dict[str, Any]:
     """``existing`` with this server's record merged in.
 
@@ -248,6 +250,10 @@ def mcp_document(
     variable) and the server's identity. An ``existing`` of ``{}`` builds the
     document from scratch. Anything already in the container that is not ours
     is kept — a user's own servers are never displaced.
+
+    ``drop`` names records this server used to be called, so a rename does not
+    leave the old entry behind pointing at the same live endpoint: the CLI
+    would load both and every tool would appear twice.
     """
     document = dict(existing)
     for key, value in config.document:
@@ -260,20 +266,24 @@ def mcp_document(
         node = child
     leaf = config.section[-1]
     record = mcp_entry(config, name=name, label=label, url=url)
+    stale = {*drop, name}
     if config.list_key:
         items = node.get(leaf)
         ours = record.get(config.list_key)
         kept = [
             item
             for item in (items if isinstance(items, list) else [])
-            if isinstance(item, dict) and item.get(config.list_key) != ours
+            if isinstance(item, dict)
+            and item.get(config.list_key) != ours
+            and item.get(config.list_key) not in drop
         ]
         kept.append(record)
         node[leaf] = kept
     else:
         servers = node.get(leaf)
+        servers = servers if isinstance(servers, dict) else {}
         node[leaf] = {
-            **(servers if isinstance(servers, dict) else {}),
+            **{key: value for key, value in servers.items() if key not in stale},
             name: record,
         }
     return document

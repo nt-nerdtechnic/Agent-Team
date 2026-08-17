@@ -91,7 +91,7 @@ def test_spawn_wiring_appends_codex_override(host: PluginHost, tmp_path: Path) -
     wired = wiring.apply_spawn_wiring(host, "codex", "codex")
     # No pane id given, so the override URL carries the host credential.
     assert wired == (
-        f"codex -c 'mcp_servers.navide-plans.url=\"{plan_mcp_wiring.plan_mcp_url(4567)}\"'"
+        f"codex -c 'mcp_servers.navide.url=\"{plan_mcp_wiring.plan_mcp_url(4567)}\"'"
     )
 
 

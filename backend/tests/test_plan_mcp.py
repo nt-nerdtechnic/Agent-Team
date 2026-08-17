@@ -630,7 +630,7 @@ async def test_mounted_endpoint_serves_mcp(workspace: Path) -> None:
             )
             assert resp.status_code == 200
             body = resp.json()
-            assert body["result"]["serverInfo"]["name"] == "navide-plans"
+            assert body["result"]["serverInfo"]["name"] == "navide"
     finally:
         await plugin_wiring.run_shutdown_hooks(host)
         app.router.routes[:] = routes_before

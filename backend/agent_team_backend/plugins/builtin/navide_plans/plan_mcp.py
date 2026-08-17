@@ -55,7 +55,7 @@ from agent_team_backend.plan_provisioning import TEMPLATE_FILENAME, ensure_plan_
 PLANS_REL_DIR = ".agent-team/plans"
 
 server = FastMCP(
-    name="navide-plans",
+    name="navide",
     instructions=(
         "Navide plan documents: HTML files under "
         f"{PLANS_REL_DIR}/ in a workspace, which the user reads and approves "

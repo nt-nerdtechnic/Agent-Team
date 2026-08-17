@@ -64,9 +64,14 @@ from agent_team_backend.plugins.builtin.navide_plans import pane_home, plan_mcp_
 
 log = logging.getLogger("agent_team_backend.plugins.builtin.navide_plans.plan_mcp_wiring")
 
-SERVER_NAME = "navide-plans"
-SERVER_LABEL = "Navide Plans"
+SERVER_NAME = "navide"
+SERVER_LABEL = "Navide"
 CLAUDE_CONFIG_FILENAME = "plan-mcp.json"
+
+# Names this server shipped under before. Every config surface we merge into
+# rather than rewrite has to drop them, or a CLI upgraded in place loads the
+# old entry alongside the new one — same endpoint, every tool twice.
+LEGACY_SERVER_NAMES = ("navide-plans",)
 
 # A project config file is written once per workspace and shared by every pane
 # in it, so the pane-specific URL cannot be baked into it. It holds a reference
@@ -169,7 +174,7 @@ def _harden(path: Path) -> None:
 def write_claude_config(port: int, path: Path | None = None) -> Path:
     """Write the claude ``--mcp-config`` file pointing at ``port``.
 
-    The file is wholly app-owned (it contains only the navide-plans entry;
+    The file is wholly app-owned (it contains only our own entry;
     the user's own MCP config is a separate surface we never touch), so this
     is a plain idempotent rewrite: unchanged content is left alone, a stale
     port from a previous run is overwritten. Atomic via os.replace.
@@ -316,12 +321,13 @@ def _exclude_from_git(config_path: Path, start: Path) -> None:
 
 
 def ensure_project_config(agent_key: str, cwd: str | Path) -> bool:
-    """Merge the navide-plans entry into a workspace's project MCP config.
+    """Merge our entry into a workspace's project MCP config.
 
     Returns whether the file ends up carrying our entry. The user's own
     servers are preserved, and a file that does not parse as a JSON object is
     left exactly as it is — a pane losing MCP wiring is a far smaller harm
-    than eating the servers someone hand-wrote.
+    than eating the servers someone hand-wrote. Entries under a name we used
+    to ship under are ours, not the user's, so they are dropped.
     """
     wiring = mcp_wiring(agent_key)
     path = project_config_path(agent_key, cwd)
@@ -369,9 +375,13 @@ def ensure_project_config(agent_key: str, cwd: str | Path) -> bool:
         label=SERVER_LABEL,
         url=wiring.url_env_template % PROJECT_URL_ENV,
     )
-    if servers.get(SERVER_NAME) == entry:
+    stale = [name for name in LEGACY_SERVER_NAMES if name in servers]
+    if not stale and servers.get(SERVER_NAME) == entry:
         return True
-    document[section] = {**servers, SERVER_NAME: entry}
+    document[section] = {
+        **{key: value for key, value in servers.items() if key not in stale},
+        SERVER_NAME: entry,
+    }
     try:
         _write_atomic(path, json.dumps(document, indent=2) + "\n")
     except OSError as err:
@@ -458,6 +468,7 @@ def wire_command(
                 plan_mcp_url(port, pane_id),
                 SERVER_NAME,
                 SERVER_LABEL,
+                LEGACY_SERVER_NAMES,
             )
             if prepared is not None:
                 env_var, root = prepared

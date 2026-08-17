@@ -12,8 +12,8 @@ import pytest
 from agent_team_backend.plugins.builtin.navide_plans import pane_home, plan_mcp_wiring
 
 URL = "http://127.0.0.1:4567/plan-mcp?pane=p1&t=tok"
-SERVER = "navide-plans"
-LABEL = "Navide Plans"
+SERVER = "navide"
+LABEL = "Navide"
 
 
 @pytest.fixture
@@ -78,6 +78,20 @@ def test_kimi_shim_merges_the_users_own_servers(home: Path) -> None:
     assert document["extra"] == 7
     # The user's own file is never written back to.
     assert "navide" not in (real / "mcp.json").read_text(encoding="utf-8")
+
+
+def test_shim_drops_the_entry_left_by_a_former_server_name(home: Path) -> None:
+    real = home / ".kimi-code"
+    real.mkdir()
+    legacy = plan_mcp_wiring.LEGACY_SERVER_NAMES[0]
+    (real / "mcp.json").write_text(
+        json.dumps({"mcpServers": {legacy: {"url": "http://stale"}, "mine": {"command": "x"}}}),
+        encoding="utf-8",
+    )
+    pane_home.prepare("kimi", "p1", URL, SERVER, LABEL, plan_mcp_wiring.LEGACY_SERVER_NAMES)
+    servers = _load(_config(home, "kimi", "p1"))["mcpServers"]
+    # Ours under an old name, so it goes; the user's own is untouched.
+    assert servers == {"mine": {"command": "x"}, SERVER: {"url": URL}}
 
 
 # ---- antigravity: HOME shim, serverUrl, nested config dir ----

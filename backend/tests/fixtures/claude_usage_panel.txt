@@ -53,7 +53,7 @@ general-purpose 5%
 Explore 4%
 MCP servers % of usage
 plugin:playwright:playwright 5%
-navide-plans 1%
+navide 1%
 d to day · w to week
 Usage credits
 Usage credits are off · /usage-credits to turn them on
