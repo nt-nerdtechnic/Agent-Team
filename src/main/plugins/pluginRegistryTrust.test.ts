@@ -1,4 +1,6 @@
 import { generateKeyPairSync, sign } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   canonicalTrustJson,
@@ -179,5 +181,20 @@ describe('verifyRegistryPackageTrust', () => {
         now: new Date(NOW),
       })
     ).toThrow(/trust metadata signature/)
+  })
+})
+
+describe('canonical registry trust JSON', () => {
+  it('uses code-point key ordering shared with the Registry signer', () => {
+    const value = JSON.parse(
+      readFileSync(join(process.cwd(), 'docs/plugin-contracts/canonical-json-parity.json'), 'utf8')
+    )
+
+    expect(Buffer.from(canonicalTrustJson(value), 'utf8')).toEqual(
+      Buffer.from(
+        '{"a":"first","nested":{"a":"inner","z":"last","Ω":"omega"},"z":"last","ä":"umlaut","":"private-use","😀":"emoji"}',
+        'utf8'
+      )
+    )
   })
 })

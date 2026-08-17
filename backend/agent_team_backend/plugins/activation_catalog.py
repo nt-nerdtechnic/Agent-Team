@@ -24,7 +24,14 @@ ACTIVATION_CATALOG_PATH_ENV = "AGENT_TEAM_PLUGIN_ACTIVATION_CATALOG"
 ACTIVATION_CATALOG_DIGEST_ENV = "AGENT_TEAM_PLUGIN_ACTIVATION_CATALOG_SHA256"
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)+$")
-_SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
+# Keep this grammar byte-for-byte aligned with Manifest v2's SemVer 2.0.0
+# validator in marketplace/registry/registry/versions.py.
+_SEMVER_RE = re.compile(
+    r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+    r"(?:-((?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+    r"(?:\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 

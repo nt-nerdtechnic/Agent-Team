@@ -171,11 +171,26 @@ function canonicalValue(value: unknown): unknown {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>)
         .filter(([, item]) => item !== undefined)
-        .sort(([left], [right]) => left.localeCompare(right))
+        .sort(([left], [right]) => compareCanonicalKeys(left, right))
         .map(([key, item]) => [key, canonicalValue(item)])
     )
   }
   return value
+}
+
+function compareCanonicalKeys(left: string, right: string): number {
+  const leftCodePoints = Array.from(left, (character) => character.codePointAt(0)!)
+  const rightCodePoints = Array.from(right, (character) => character.codePointAt(0)!)
+  const comparedLength = Math.min(leftCodePoints.length, rightCodePoints.length)
+
+  for (let index = 0; index < comparedLength; index += 1) {
+    const leftCodePoint = leftCodePoints[index]
+    const rightCodePoint = rightCodePoints[index]
+    if (leftCodePoint !== rightCodePoint) return leftCodePoint < rightCodePoint ? -1 : 1
+  }
+
+  if (leftCodePoints.length === rightCodePoints.length) return 0
+  return leftCodePoints.length < rightCodePoints.length ? -1 : 1
 }
 
 export function canonicalTrustJson(value: unknown): string {

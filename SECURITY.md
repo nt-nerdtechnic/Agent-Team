@@ -44,6 +44,14 @@ Navide is local-first, not universally offline. External coding CLIs, cloud AI p
 - Full Auto can answer agent questions without another user response.
 - Use automation only in trusted, version-controlled workspaces and review resulting commands and diffs.
 
+### Git allowlist boundary
+
+The Manifest v2 Git allowlist only confirms that the top-level executable is
+`git`. It does not restrict Git subcommands or arguments and is not a process
+sandbox. Git's pager, aliases, SSH command configuration, hooks, and similar
+mechanisms may indirectly execute other programs. Therefore
+`shell: "allowlist"` combined with Git remains a high-trust grant.
+
 ### Handoffs and logs
 
 - Cross-agent and cross-stage handoffs can propagate task text, prior output, and accidental secrets.

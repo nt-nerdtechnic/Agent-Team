@@ -5,6 +5,7 @@ import hashlib
 import json
 from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 from cryptography.hazmat.primitives import serialization
@@ -15,12 +16,20 @@ from registry.app import create_app
 from registry.config import Settings, TrustedSignerConfig
 from registry.registry_trust import RegistryTrustSigner
 from registry.signing import (
+    canonical_json,
     generate_keypair,
     load_or_create_private_key,
     public_key_fingerprint,
 )
 from tests.conftest import SignedEnv
 from tests.fixtures import build_package
+
+CANONICAL_PARITY_FIXTURE = (
+    Path(__file__).resolve().parents[3]
+    / "docs"
+    / "plugin-contracts"
+    / "canonical-json-parity.json"
+)
 
 
 def _canonical_json(value: dict) -> bytes:
@@ -36,6 +45,15 @@ def _verify(public_key_pem: str, value: dict, signature: str) -> None:
     public_key = serialization.load_pem_public_key(public_key_pem.encode("ascii"))
     assert isinstance(public_key, Ed25519PublicKey)
     public_key.verify(base64.b64decode(signature), _canonical_json(value))
+
+
+def test_canonical_json_matches_shared_cross_runtime_bytes() -> None:
+    value = json.loads(CANONICAL_PARITY_FIXTURE.read_text(encoding="utf-8"))
+
+    assert canonical_json(value) == (
+        '{"a":"first","nested":{"a":"inner","z":"last","Ω":"omega"},'
+        '"z":"last","ä":"umlaut","":"private-use","😀":"emoji"}'
+    ).encode("utf-8")
 
 
 def test_registry_signs_artifact_envelope_and_root_signs_trust_metadata(

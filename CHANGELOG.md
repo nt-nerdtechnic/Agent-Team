@@ -20,11 +20,12 @@ All notable released changes to Navide will be documented in this file. The form
 - Validate, install, list, and remove Manifest v2 backend-only and combined packages from one active package version, and publish the Backend Wire v1 contract corpus.
 - Add an internal Electron-main Backend Wire v1 supervisor seam with real
   child-process health/unary conformance coverage, explicit child environment
-  isolation, and bounded cancellation tombstones; subscriptions and catalog
-  activation remain deferred.
-- Require a verified publisher signature before a Manifest v2 marketplace
-  package can be installed, including packages whose signed listing metadata
-  has been modified.
+  isolation, bounded cancellation tombstones, and subscription lifecycle
+  conformance; production catalog activation remains deferred.
+- Require a verified Registry signature from a signer authorized by the
+  App-pinned Registry root before a Manifest v2 marketplace package can be
+  installed, including packages whose signed listing metadata has been
+  modified.
 - Stop scanning arbitrary external directories for legacy Python backend
   plugins; validate only the Host-bound Manifest v2 activation projection while
   packaged backend process supervision remains fail-closed.

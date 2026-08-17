@@ -1,8 +1,10 @@
 """Pure Host-side grant and runtime-binding checks for Manifest v2.
 
 This module deliberately does not import a plugin module, spawn a process, or
-read identity from a plugin request. The legacy in-process PluginHost remains a
-separate compatibility path.
+read identity from a plugin request. It is the Issue 03 conformance/test seam,
+not a second production authorization authority; a production bridge must
+reuse Host-owned state and the same contract. The legacy in-process PluginHost
+remains a separate compatibility path.
 """
 
 from __future__ import annotations

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
+import { spawnSync } from 'node:child_process'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   parseManifestJson as parsePublicManifestJson,
   parseManifestV2 as parsePublicManifestV2,
@@ -11,12 +13,13 @@ import {
 } from './pluginManifest'
 import { manifestV2CapabilityPolicy } from './pluginPermissions'
 import { planPublicCapabilityCall } from './pluginCapabilityBroker'
-import { parseBackendWireFrame } from './pluginBackendSupervisor'
+import { parseBackendWireFrame, parseBackendWireHostFrame } from './pluginBackendSupervisor'
 import { readManifestFromEntries, type ZipEntry } from './pluginPackage'
 
 const CONTRACT_FIXTURES = join(process.cwd(), 'docs/plugin-contracts')
 const MANIFEST_FIXTURES = join(CONTRACT_FIXTURES, 'fixtures')
 const WIRE_FIXTURES = join(CONTRACT_FIXTURES, 'backend-wire-fixtures')
+const BACKEND_WIRE_CHILD = fileURLToPath(new URL('./test-fixtures/backend-wire-child.mjs', import.meta.url))
 
 const validManifestFixtures = readdirSync(join(MANIFEST_FIXTURES, 'valid'))
   .filter((name) => name.endsWith('.json'))
@@ -30,9 +33,29 @@ const rawManifestFixtures = readdirSync(join(MANIFEST_FIXTURES, 'invalid-raw'))
 const validWireFixtures = readdirSync(join(WIRE_FIXTURES, 'valid'))
   .filter((name) => name.endsWith('.json'))
   .sort()
+const invalidWireFixtures = readdirSync(join(WIRE_FIXTURES, 'invalid'))
+  .filter((name) => name.endsWith('.json'))
+  .sort()
 const rawWireFixtures = readdirSync(join(WIRE_FIXTURES, 'invalid-raw'))
   .filter((name) => name.endsWith('.json'))
   .sort()
+
+const childToHostWireFixtures = [
+  'application-error-without-id.json',
+  'error-with-server-info.json',
+  'malformed-server-info.json',
+  'missing-result-type.json',
+  'missing-result-value.json',
+  'missing-server-info.json',
+  'subscription-close-missing-id.json',
+]
+const hostToChildWireFixtures = [
+  'missing-mcp-meta.json',
+  'null-request-id.json',
+  'spoofed-runtime-context.json',
+  'unknown-wire-method.json',
+  'wrong-mcp-version.json',
+]
 
 function readFixture(group: string, name: string): string {
   return readFileSync(join(MANIFEST_FIXTURES, group, name), 'utf8')
@@ -176,6 +199,45 @@ describe('B0 capability and Backend Wire contract gate', () => {
   it.each(validWireFixtures)('accepts the valid Backend Wire frame %s at the Host framing seam', (name) => {
     const raw = readFileSync(join(WIRE_FIXTURES, 'valid', name), 'utf8').trimEnd()
     expect(() => parseBackendWireFrame(raw)).not.toThrow()
+  })
+
+  it('classifies every semantic-invalid Backend Wire fixture by direction', () => {
+    expect([...childToHostWireFixtures, ...hostToChildWireFixtures].sort()).toEqual(invalidWireFixtures)
+  })
+
+  it.each(childToHostWireFixtures)('rejects child-to-Host semantic-invalid fixture %s at the Host seam', (name) => {
+    const raw = readFileSync(join(WIRE_FIXTURES, 'invalid', name), 'utf8').trimEnd()
+
+    expect(() => parseBackendWireHostFrame(raw)).toThrow(
+      'Backend plugin returned an invalid protocol message.'
+    )
+  })
+
+  it.each(hostToChildWireFixtures)('returns a stable child protocol error for Host-to-child fixture %s', (name) => {
+    const raw = readFileSync(join(WIRE_FIXTURES, 'invalid', name), 'utf8').trimEnd()
+    const input = JSON.parse(raw) as { id?: unknown }
+    const result = spawnSync(process.execPath, [BACKEND_WIRE_CHILD], {
+      encoding: 'utf8',
+      input: `${raw}\n`,
+      maxBuffer: 1_000_000,
+      timeout: 5_000,
+    })
+    const expected: { jsonrpc: '2.0'; error: { code: -32600; message: 'Invalid request' }; id?: string | number } = {
+      jsonrpc: '2.0',
+      error: { code: -32600, message: 'Invalid request' },
+    }
+    if (
+      (typeof input.id === 'string' && input.id.length > 0) ||
+      (typeof input.id === 'number' && Number.isInteger(input.id))
+    ) {
+      expected.id = input.id
+    }
+
+    expect(result.error).toBeUndefined()
+    expect(result.status).toBe(0)
+    expect(result.stderr).toBe('')
+    expect(result.stdout.trimEnd().split('\n')).toHaveLength(1)
+    expect(JSON.parse(result.stdout.trim())).toEqual(expected)
   })
 
   it.each(rawWireFixtures)('rejects raw Backend Wire input %s at the Host framing seam', (name) => {

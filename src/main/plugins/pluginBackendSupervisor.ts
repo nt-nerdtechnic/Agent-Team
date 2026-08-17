@@ -227,6 +227,8 @@ type BackendWireNotification =
   | EventNotification
   | ProgressNotification
 
+export type BackendWireHostFrame = BackendWireResponse | BackendWireNotification
+
 type SubscriptionPhase = 'pending-ack' | 'active' | 'reconnecting' | 'settled'
 
 interface SubscriptionState {
@@ -669,6 +671,17 @@ function validateNotification(frame: JsonValue): BackendWireNotification {
     }
   }
   throw new Error(PROTOCOL_ERROR_MESSAGE)
+}
+
+/** Host-owned framing and semantic seam for child-to-Host Backend Wire frames. */
+export function parseBackendWireHostFrame(raw: Uint8Array | string): BackendWireHostFrame {
+  const frame = parseBackendWireFrame(raw)
+  try {
+    if (isRecord(frame) && typeof frame.method === 'string') return validateNotification(frame)
+    return validateResponse(frame)
+  } catch {
+    throw new Error(PROTOCOL_ERROR_MESSAGE)
+  }
 }
 
 function sameEventFilter(left: readonly string[], right: readonly string[]): boolean {
@@ -1224,9 +1237,9 @@ export class PluginBackendSupervisor {
         this.failProcess('PROTOCOL_ERROR')
         return
       }
-      let frame: JsonValue
+      let frame: BackendWireHostFrame
       try {
-        frame = parseBackendWireFrame(line)
+        frame = parseBackendWireHostFrame(line)
       } catch {
         this.failProcess('PROTOCOL_ERROR')
         return
@@ -1259,10 +1272,13 @@ export class PluginBackendSupervisor {
     }
   }
 
-  private handleFrame(frame: JsonValue): void {
-    if (isRecord(frame) && typeof frame.method === 'string') {
-      const notification = validateNotification(frame)
-      this.handleNotification(notification)
+  private handleFrame(frame: BackendWireHostFrame): void {
+    if (
+      frame.kind === 'subscription-acknowledged' ||
+      frame.kind === 'event' ||
+      frame.kind === 'progress'
+    ) {
+      this.handleNotification(frame)
       return
     }
     this.handleResponse(frame)
@@ -1330,8 +1346,7 @@ export class PluginBackendSupervisor {
     }
   }
 
-  private handleResponse(frame: JsonValue): void {
-    const response = validateResponse(frame)
+  private handleResponse(response: BackendWireResponse): void {
     const requestId = response.id
     if (requestId === undefined) {
       throw new Error(PROTOCOL_ERROR_MESSAGE)

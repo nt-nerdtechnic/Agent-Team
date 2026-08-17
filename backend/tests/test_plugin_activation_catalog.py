@@ -15,8 +15,18 @@ from agent_team_backend.plugins.activation_catalog import (
     load_activation_catalog,
 )
 
+CONTRACT_FIXTURES = Path(__file__).parents[2] / "docs" / "plugin-contracts" / "fixtures"
 
-def _write_package(root: Path, plugin_id: str = "acme.tools") -> tuple[Path, Path]:
+
+def _fixture_version(group: str, name: str) -> str:
+    return json.loads((CONTRACT_FIXTURES / group / name).read_text(encoding="utf-8"))["version"]
+
+
+def _write_package(
+    root: Path,
+    plugin_id: str = "acme.tools",
+    version: str = "1.2.3",
+) -> tuple[Path, Path]:
     package_dir = root / plugin_id
     backend = package_dir / "backend" / "acme-tools"
     backend.parent.mkdir(parents=True)
@@ -24,7 +34,7 @@ def _write_package(root: Path, plugin_id: str = "acme.tools") -> tuple[Path, Pat
     manifest = {
         "schemaVersion": 2,
         "id": plugin_id,
-        "version": "1.2.3",
+        "version": version,
         "backend": {
             "entry": "backend/acme-tools",
             "protocolVersion": 1,
@@ -35,13 +45,18 @@ def _write_package(root: Path, plugin_id: str = "acme.tools") -> tuple[Path, Pat
     return package_dir, backend
 
 
-def _catalog(package_dir: Path, backend: Path, plugin_id: str = "acme.tools") -> dict:
+def _catalog(
+    package_dir: Path,
+    backend: Path,
+    plugin_id: str = "acme.tools",
+    version: str = "1.2.3",
+) -> dict:
     return {
         "schemaVersion": 1,
         "packages": [
             {
                 "pluginId": plugin_id,
-                "packageVersion": "1.2.3",
+                "packageVersion": version,
                 "packageDir": str(package_dir),
                 "provenance": "official-registry",
                 "artifactDigest": "a" * 64,
@@ -79,6 +94,81 @@ def test_loads_host_bound_official_backend_activation(tmp_path: Path) -> None:
     assert entries[0].package_version == "1.2.3"
     assert entries[0].package_dir == package_dir
     assert entries[0].entry_file == backend
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["frontend-prerelease.json", "frontend-build-metadata.json"],
+)
+def test_accepts_manifest_v2_semver_fixture_versions(fixture_name: str, tmp_path: Path) -> None:
+    version = _fixture_version("valid", fixture_name)
+    package_dir, backend = _write_package(tmp_path, version=version)
+    path, digest = _write_catalog(tmp_path, _catalog(package_dir, backend, version=version))
+
+    entries = load_activation_catalog(
+        {
+            ACTIVATION_CATALOG_PATH_ENV: str(path),
+            ACTIVATION_CATALOG_DIGEST_ENV: digest,
+        }
+    )
+
+    assert [entry.package_version for entry in entries] == [version]
+
+
+@pytest.mark.parametrize(
+    ("fixture_group", "fixture_name"),
+    [
+        ("invalid", "version-leading-zero.json"),
+        ("invalid", "version-prerelease-empty.json"),
+        ("invalid", "version-prerelease-empty-segment.json"),
+        ("invalid", "version-trailing-newline.json"),
+    ],
+)
+def test_rejects_manifest_v2_invalid_semver_fixture_versions(
+    fixture_group: str,
+    fixture_name: str,
+    tmp_path: Path,
+) -> None:
+    version = _fixture_version(fixture_group, fixture_name)
+    package_dir, backend = _write_package(tmp_path, version=version)
+    path, digest = _write_catalog(tmp_path, _catalog(package_dir, backend, version=version))
+
+    with pytest.raises(ActivationCatalogError, match="invalid packageVersion"):
+        load_activation_catalog(
+            {
+                ACTIVATION_CATALOG_PATH_ENV: str(path),
+                ACTIVATION_CATALOG_DIGEST_ENV: digest,
+            }
+        )
+
+
+def test_rejects_entire_catalog_when_one_package_version_is_invalid(tmp_path: Path) -> None:
+    valid_version = _fixture_version("valid", "frontend-prerelease.json")
+    invalid_version = _fixture_version("invalid", "version-leading-zero.json")
+    valid_package, valid_backend = _write_package(tmp_path, version=valid_version)
+    invalid_package, invalid_backend = _write_package(
+        tmp_path,
+        plugin_id="acme.other",
+        version=invalid_version,
+    )
+    data = _catalog(valid_package, valid_backend, version=valid_version)
+    data["packages"].append(
+        _catalog(
+            invalid_package,
+            invalid_backend,
+            plugin_id="acme.other",
+            version=invalid_version,
+        )["packages"][0]
+    )
+    path, digest = _write_catalog(tmp_path, data)
+
+    with pytest.raises(ActivationCatalogError, match="invalid packageVersion"):
+        load_activation_catalog(
+            {
+                ACTIVATION_CATALOG_PATH_ENV: str(path),
+                ACTIVATION_CATALOG_DIGEST_ENV: digest,
+            }
+        )
 
 
 @pytest.mark.parametrize("plugin_id", ["acme.tools.extra", "0.x.y"])

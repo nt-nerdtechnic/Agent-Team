@@ -623,31 +623,35 @@ Host derives `workspaceId` from authenticated runtime binding. There is no
 public `runtime` scope. Workspace events also require a Host-authenticated
 event source for the same workspace; an unbound shared event is dropped.
 
-### Storage partitions
+### Planned storage partitions — deferred to B2
 
-Storage runtime remains deferred and is not opened by Issue 03.
+Storage runtime remains deferred to B2 and is not opened by Issue 03. The
+planned API will accept a partition class in `scope`; it will not accept a
+plugin ID, workspace ID, package version, or storage path.
 
-`storage.get`, `storage.set`, and `storage.delete` accept a partition class in
-`scope`; they do not accept a plugin ID, workspace ID, package version, or
-storage path.
+When implemented:
 
-- `scope: "plugin"` addresses the Host-bound `(pluginId, key)` partition. All
-  live views and the backend of that plugin share it, while another plugin
-  using the same key receives a different value.
-- `scope: "workspace"` addresses the Host-bound
+- `storage.get`, `storage.set`, and `storage.delete` will accept the partition
+  class in `scope`.
+- `scope: "plugin"` will address the Host-bound `(pluginId, key)` partition.
+  All live views and the backend of that plugin will share it, while another
+  plugin using the same key will receive a different value.
+- `scope: "workspace"` will address the Host-bound
   `(pluginId, currentWorkspaceId, key)` partition. Calls without a current
-  workspace binding fail with `WORKSPACE_SCOPE_VIOLATION`; they never fall back
-  to plugin scope.
-- Package updates copy the active Host-managed storage snapshot into an
-  isolated candidate. **Restart Plugin** activates the package and snapshot
-  together; rollback restores the previous package and snapshot together.
-- Raw `ui.settings` is a first-party legacy surface, not plugin storage. Theme,
-  language, workbench layout, terminal runtime state, workspace files, and
-  other domain data do not become accessible through the storage API.
+  workspace binding will fail with `WORKSPACE_SCOPE_VIOLATION`; they will
+  never fall back to plugin scope.
+- Package updates will copy the active Host-managed storage snapshot into an
+  isolated candidate. **Restart Plugin** will activate the package and
+  snapshot together; rollback will restore the previous package and snapshot
+  together.
+- Raw `ui.settings` will remain a first-party legacy surface, not plugin
+  storage. Theme, language, workbench layout, terminal runtime state,
+  workspace files, and other domain data will not become accessible through
+  the storage API.
 
-The Host derives every partition identity from the authenticated runtime
-binding. The `scope` argument only selects one of the two permitted partition
-classes and cannot override identity or authorization.
+The Host will derive every partition identity from the authenticated runtime
+binding. The `scope` argument will only select one of the two permitted
+partition classes and will not override identity or authorization.
 
 The Host derives the authorization scope, workspace root, plugin identity, and
 view identity from the catalog plus authenticated runtime binding. Plugin
@@ -662,8 +666,12 @@ independent permission. The Host shell executable allowlist contains `git`;
 all packages, including `navide.git`, must still declare `shell: "allowlist"`
 and pass the same package-version grant and authenticated binding checks.
 The allowlist matches only the canonical top-level executable name: it does
-not accept wrappers, aliases, or path-qualified replacements, and it defines
-no Git subcommand or argument-pattern policy.
+not accept wrappers, aliases, or path-qualified replacements. It only confirms
+that the top-level executable is `git`; it does not restrict Git subcommands or
+arguments and is not a process sandbox. Git's pager, aliases, SSH command
+configuration, hooks, and similar mechanisms may indirectly execute other
+programs. Therefore `shell: "allowlist"` combined with Git remains a
+high-trust grant.
 
 ### Embedded AI CLI public mapping
 

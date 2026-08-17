@@ -14,6 +14,8 @@ export type PluginCapabilityPolicy =
       kind: 'manifest-v2'
       system: readonly PluginSystemNamespace[]
       shell?: PluginShellMode
+      // Reserved for B1 adapter composition; authorization currently reads
+      // normalized system and shell fields directly.
       grants: readonly PluginPermissionGrant[]
     }
 
