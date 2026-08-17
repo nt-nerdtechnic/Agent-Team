@@ -80,6 +80,21 @@ def test_kimi_shim_merges_the_users_own_servers(home: Path) -> None:
     assert "navide" not in (real / "mcp.json").read_text(encoding="utf-8")
 
 
+def test_shim_refreshes_our_entry_in_place_without_reordering(home: Path) -> None:
+    real = home / ".kimi-code"
+    real.mkdir()
+    (real / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"a": {}, SERVER: {"url": "stale"}, "z": {}}}),
+        encoding="utf-8",
+    )
+    pane_home.prepare("kimi", "p1", URL, SERVER, LABEL, plan_mcp_wiring.LEGACY_SERVER_NAMES)
+    servers = _load(_config(home, "kimi", "p1"))["mcpServers"]
+    # Dropping former names must not turn a refresh into a move-to-end: the
+    # user reads and edits this file too.
+    assert list(servers) == ["a", SERVER, "z"]
+    assert servers[SERVER] == {"url": URL}
+
+
 def test_shim_drops_the_entry_left_by_a_former_server_name(home: Path) -> None:
     real = home / ".kimi-code"
     real.mkdir()
@@ -161,6 +176,20 @@ def test_grok_shim_replaces_our_entry_rather_than_appending(home: Path) -> None:
     pane_home.prepare("grok", "p1", URL + "&again=1", SERVER, LABEL)
     servers = _load(_config(home, "grok", "p1"))["mcp"]["servers"]
     assert [s["id"] for s in servers] == [SERVER]  # not accumulating per spawn
+
+
+def test_grok_shim_drops_a_list_entry_left_by_a_former_server_name(home: Path) -> None:
+    grok = home / ".grok"
+    grok.mkdir()
+    legacy = plan_mcp_wiring.LEGACY_SERVER_NAMES[0]
+    (grok / "user-settings.json").write_text(
+        json.dumps({"mcp": {"servers": [{"id": legacy, "url": "http://stale"}, {"id": "mine"}]}}),
+        encoding="utf-8",
+    )
+    pane_home.prepare("grok", "p1", URL, SERVER, LABEL, plan_mcp_wiring.LEGACY_SERVER_NAMES)
+    servers = _load(_config(home, "grok", "p1"))["mcp"]["servers"]
+    # A list is matched on its key, so the old record has to go by id too.
+    assert [s["id"] for s in servers] == ["mine", SERVER]
 
 
 def test_grok_shim_config_is_not_world_readable(home: Path) -> None:

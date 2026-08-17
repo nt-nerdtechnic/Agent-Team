@@ -266,7 +266,10 @@ def mcp_document(
         node = child
     leaf = config.section[-1]
     record = mcp_entry(config, name=name, label=label, url=url)
-    stale = {*drop, name}
+    # Only the former names are filtered out; an entry already under the
+    # current name is overwritten in place, so a rewrite does not reshuffle
+    # the keys of a file the user also edits.
+    stale = set(drop)
     if config.list_key:
         items = node.get(leaf)
         ours = record.get(config.list_key)
