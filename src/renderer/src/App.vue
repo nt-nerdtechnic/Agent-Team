@@ -914,6 +914,12 @@ interface ActivePane {
    *  expired-login message (see lib/cliLoginExpired); cleared once the login
    *  command is re-sent via the badge click. Not persisted to PaneRecord. */
   loginExpired?: boolean
+  /** Runtime-only continue affordance — lit when this pane was brought back with
+   *  `--resume`. The CLI reloads its transcript but parks at the prompt, so an
+   *  interrupted task is never picked up on its own and nothing in the restore
+   *  path may inject on the user's behalf. Cleared by the first injection or by
+   *  agent activity. Not persisted: a restart re-derives it from the restore. */
+  resumeContinueAvailable?: boolean
   /** Cold-restore metadata retained until the placeholder is explicitly opened. */
   deferredRestore?: DeferredRestoreMetadata
 }
@@ -2403,9 +2409,13 @@ async function injectPane(
   preserveNewlines = false,
   shouldAbort?: () => boolean
 ): Promise<boolean> {
-  if (!panes.value.find((p) => p.id === paneId)?.realized) return false
+  const pane = panes.value.find((p) => p.id === paneId)
+  if (!pane?.realized) return false
   const ref = paneRefs[paneId]
   if (!ref?.sessionId) return false
+  // Anything reaching the prompt ends the parked-after-resume state the continue
+  // button exists for — including this button's own injection.
+  pane.resumeContinueAvailable = false
   return injectText(ref.sessionId, text, logLabel, preserveNewlines, shouldAbort)
 }
 
@@ -3153,6 +3163,41 @@ async function fixPaneLogin(paneId: string): Promise<void> {
     }
   } finally {
     loginFixInFlight.delete(paneId)
+  }
+}
+
+// Panes with an in-flight continue injection, so a second click during the
+// multi-second injectPane await cannot send the prompt twice.
+const continueInFlight = new Set<string>()
+
+/** Continue button clicked on a pane restored via `--resume`. Sends the same
+ *  resume text the loop uses (honouring the user's setting) exactly once — no
+ *  watcher, no re-arm, no done-marker instruction: this is a manual nudge, not
+ *  an unattended loop. injectPane clears the flag, which hides the button; a
+ *  failed injection restores it so the click can be retried. */
+async function continueRestoredPane(paneId: string): Promise<void> {
+  const pane = panes.value.find((p) => p.id === paneId)
+  if (!pane?.resumeContinueAvailable) return
+  if (continueInFlight.has(paneId)) return
+  // Same gate every other unsolicited injection passes: never type over a draft
+  // or into a turn that is still running.
+  if (messagingHoldKey(paneId) !== null) return
+  continueInFlight.add(paneId)
+  await acquireInjectionSlot()
+  try {
+    const ok = await injectPane(
+      paneId,
+      settingsGet(LOOP_RESUME_SETTING_KEY, DEFAULT_LOOP_RESUME),
+      'continue-button',
+      true
+    )
+    if (!ok) {
+      console.warn(`[continue] pane ${paneId}: injection failed`)
+      pane.resumeContinueAvailable = true
+    }
+  } finally {
+    releaseInjectionSlot()
+    continueInFlight.delete(paneId)
   }
 }
 
@@ -4597,6 +4642,9 @@ async function flushPtyLostResumes(): Promise<void> {
     const failure = await rebuildPaneViaResume(paneId, {
       suppressBusyToast: true,
       forceWhenRunning: true,
+      // Nobody asked for this rebuild — the backend went away mid-work. The CLI
+      // returns with its transcript but no instruction to carry on.
+      offerContinue: true,
     })
     if (failure) failed++
     else resumed++
@@ -4631,7 +4679,15 @@ type RebuildFailure =
 
 async function rebuildPaneViaResume(
   paneId: string,
-  opts?: { suppressBusyToast?: boolean; forceWhenRunning?: boolean }
+  opts?: {
+    suppressBusyToast?: boolean
+    forceWhenRunning?: boolean
+    /** The rebuild was forced on the pane rather than asked for — the CLI comes
+     *  back parked at its prompt with work nobody resumed. Offers the continue
+     *  button. Off for a user-invoked rebuild: that one is already an action,
+     *  and its pane does not need a second one on top. */
+    offerContinue?: boolean
+  }
 ): Promise<RebuildFailure | undefined> {
   const pane = panes.value.find((p) => p.id === paneId)
   if (!pane?.realized) return 'missing-pane'
@@ -4789,6 +4845,10 @@ async function rebuildPaneViaResume(
       replacePaneId: paneId, // Atomic swap to prevent layout shift
     })
     if (newId) {
+      if (opts?.offerContinue) {
+        const revived = panes.value.find((p) => p.id === newId)
+        if (revived) revived.resumeContinueAvailable = true
+      }
       if (snap.origin === 'manual') {
         await sendQuiet<ProjectPayload>('manual_pane.spawn', {
           workspace_path: snap.workspacePath,
@@ -6929,6 +6989,12 @@ async function performRealizeRestoredPane(paneId: string, aggregateReconnect = f
     })
     if (!restored) return
     const { paneId: newId } = restored
+    // A resumed CLI has its transcript back but is parked at the prompt, and the
+    // restore path deliberately injects nothing. Offer the one-click continue.
+    if (isResume) {
+      const revived = panes.value.find((p) => p.id === newId)
+      if (revived) revived.resumeContinueAvailable = true
+    }
     if (wasDisconnected) disconnectedPaneIds.value = [...disconnectedPaneIds.value, newId]
     // First output normally clears this state. A restored CLI can be silent
     // indefinitely, so leave the terminal usable after a bounded grace period.
@@ -8159,6 +8225,10 @@ backend.on('agent.activity', (raw) => {
     }
   } else if (ev.event_type === 'agent_active') {
     paneLastActiveAt.set(ev.pane_id, Date.now())
+    // The pane is working again, so it is no longer parked where a restore left
+    // it — retire the continue affordance even if the user never clicked it.
+    const activePane = panes.value.find((p) => p.id === ev.pane_id)
+    if (activePane?.resumeContinueAvailable) activePane.resumeContinueAvailable = false
     // Auto-name from the user's own prompt (readers attach it as text on
     // user-record events; detail is 'user' for most vendors, 'prompt' for
     // kimi/aider, 'user_message' for codex). Arrives before the assistant's
@@ -11976,6 +12046,7 @@ function paneIsCommander(p: ActivePane): boolean {
           :loop-wait-until="p.loopWaitUntil"
           :loop-estimate-reset-at="p.loopEstimateResetAt"
           :login-expired="p.loginExpired"
+          :continue-available="p.resumeContinueAvailable"
           :restoring="p.restoring"
           @set-focus="(ev) => onSetFocus(p.id, ev, stageSurfaceOrderedIds)"
           @first-output="onPaneFirstOutput(p.id)"
@@ -11990,6 +12061,7 @@ function paneIsCommander(p: ActivePane): boolean {
           @toggle-loop="togglePaneLoop(p.id)"
           @loop-resume-now="resumeLoopNow(p.id)"
           @fix-login="fixPaneLogin(p.id)"
+          @continue-resume="continueRestoredPane(p.id)"
           @user-resume="persistPaneStopped(p.id, false)"
           @pty-lost="onPanePtyLost(p.id)"
         />

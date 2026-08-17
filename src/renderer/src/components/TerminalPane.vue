@@ -64,6 +64,10 @@ interface Props {
   /** Runtime-only login-expired badge — lit when the pane's CLI reported an
    *  expired login; clicking it asks App.vue to re-send the login command. */
   loginExpired?: boolean
+  /** Runtime-only continue affordance — lit when this pane came back from a
+   *  restore with `--resume`: the CLI reloaded its transcript but is parked at
+   *  the prompt, so whatever it was doing is never picked up on its own. */
+  continueAvailable?: boolean
   backend: ReturnType<typeof useBackend>
   cliProfiles: ReturnType<typeof useCliProfiles>
   workspacePath?: string
@@ -100,6 +104,9 @@ const emit = defineEmits<{
   /** Login-expired badge clicked — App.vue sends the CLI's login command into
    *  this pane and clears the badge. */
   (e: 'fix-login'): void
+  /** Continue button clicked on a resumed pane — App.vue injects the resume
+   *  prompt once so the interrupted work carries on. */
+  (e: 'continue-resume'): void
   /** The user typed into a STOPped pane (Enter/printable), taking over — App.vue
    *  clears + un-persists the STOP badge. */
   (e: 'user-resume'): void
@@ -244,6 +251,21 @@ const statusTooltipKey = computed<string>(() => {
   if (displayStatus.value === 'question') return 'pane.terminal.question-status-tooltip'
   return ''
 })
+
+// The continue affordance is deliberately narrow: it appears only at a genuine
+// interruption — the pane came back from a restore with its transcript
+// reloaded, the CLI is parked and idle, and the user has not touched it since.
+// A plain finished turn is NOT an interruption; showing it there would put a
+// button under every pane after every reply. The first keystroke retires it for
+// good (the user took over), as does an active loop (already driving the pane).
+const showContinueButton = computed<boolean>(
+  () =>
+    !!props.continueAvailable &&
+    !props.loopActive &&
+    !props.restoring &&
+    displayStatus.value === 'idle' &&
+    (terminal.lastUserKeyAt?.value ?? 0) === 0
+)
 
 defineExpose({
   spawn: terminal.spawn,
@@ -574,9 +596,25 @@ onMounted(() => {
       <span class="disconnected-text">{{ disconnectedNotice }}</span>
     </div>
     <!-- Optional-chained: the pane's tests stub useTerminal with partial objects. -->
-    <div v-if="terminal.optionSelectHint?.value" class="select-hint" aria-live="polite">
+    <div
+      v-if="terminal.optionSelectHint?.value"
+      class="select-hint"
+      :class="{ 'hint-raised': showContinueButton }"
+      aria-live="polite"
+    >
       {{ $t('pane.terminal.option-select-hint', { key: selectModifierLabel }) }}
     </div>
+    <!-- Sibling of .xterm-host, never inside it: everything under the host
+         belongs to xterm's renderer. Same placement as .select-hint. -->
+    <button
+      v-if="showContinueButton"
+      class="continue-btn"
+      type="button"
+      :title="$t('pane.terminal.continue-tooltip')"
+      @click.stop="emit('continue-resume')"
+    >
+      {{ $t('pane.terminal.continue') }}
+    </button>
     <div v-if="isPreparing" class="prep-overlay" aria-live="polite">
       <div class="prep-panel">
         <div class="prep-spinner" />
@@ -881,6 +919,34 @@ onMounted(() => {
   color: var(--text-secondary);
   font-size: 11px;
   pointer-events: none;
+}
+/* Both live in the bottom-right corner; the hint steps up when the button is out. */
+.select-hint.hint-raised {
+  bottom: 38px;
+}
+/* Interruption affordance: a CLI brought back by --resume sits at its prompt
+   with its transcript loaded and nothing telling it to carry on. Small,
+   corner-anchored and short-lived — it retires on the first keystroke — so an
+   uninterrupted pane never carries any extra chrome. */
+.continue-btn {
+  position: absolute;
+  right: 10px;
+  bottom: 8px;
+  z-index: 10;
+  box-sizing: border-box;
+  padding: 4px 10px;
+  border: 1px solid var(--accent-emphasis);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
+  color: var(--accent-bright);
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s;
+}
+.continue-btn:hover {
+  background: var(--accent-subtle);
+  border-color: var(--accent-focus);
 }
 /* Sits over the top of the terminal area rather than covering it: the
    scrollback stays readable and selectable while the backend is away. */
