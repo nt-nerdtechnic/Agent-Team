@@ -70,6 +70,26 @@ function runPnpmOrThrow(args: string[], cwd: string): CommandResult {
   return result
 }
 
+function runNpmOrThrow(args: string[], cwd: string, cacheDirectory: string): CommandResult {
+  const result = spawnSync(join(dirname(process.execPath), 'npm'), args, {
+    cwd,
+    encoding: 'utf8',
+    env: { ...subprocessEnvironment(), npm_config_cache: cacheDirectory },
+    maxBuffer: 16 * 1024 * 1024,
+  })
+  if (result.error) throw result.error
+  if (result.status !== 0) {
+    throw new Error(
+      `npm ${args.join(' ')} failed in ${cwd}\n${result.stdout ?? ''}\n${result.stderr ?? ''}`
+    )
+  }
+  return {
+    status: result.status,
+    stdout: result.stdout ?? '',
+    stderr: result.stderr ?? '',
+  }
+}
+
 function runExternalCli(args: string[], cwd: string): CommandResult {
   const bin = join(cwd, 'node_modules', '.bin', 'navide-plugin')
   const result = spawnSync(bin, args, {
@@ -136,19 +156,20 @@ describe('third-party plugin external workspace', () => {
         const typescriptPackageDirectory = dirname(
           realpathSync(require.resolve('typescript/package.json'))
         )
-        const typescriptPackage = runPnpmOrThrow(
-          ['pack', '--pack-destination', artifacts],
-          typescriptPackageDirectory
+        const typescriptPackage = runNpmOrThrow(
+          ['pack', typescriptPackageDirectory, '--pack-destination', artifacts],
+          repository,
+          join(temporaryRoot, 'npm-cache')
         )
         const typescriptTarball = typescriptPackage.stdout
           .split('\n')
           .map((line) => line.trim())
           .find((line) => line.endsWith('.tgz'))
-        if (!typescriptTarball) throw new Error('pnpm pack did not report a TypeScript tarball')
+        if (!typescriptTarball) throw new Error('npm pack did not report a TypeScript tarball')
         const localTypeScriptTarball = realpathSync(
           typescriptTarball.startsWith('/')
             ? typescriptTarball
-            : join(typescriptPackageDirectory, typescriptTarball)
+            : join(artifacts, typescriptTarball)
         )
 
         cpSync(join(repository, 'examples', 'third-party-files'), externalProject, {
