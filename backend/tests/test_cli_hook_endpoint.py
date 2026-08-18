@@ -238,6 +238,38 @@ def test_stop_hook_does_not_blank_the_turn_text_the_log_reader_recorded(
         app_module._pane_activity.clear()
 
 
+def test_a_reattached_panes_hook_keeps_the_text_recorded_under_its_old_id(
+    client: TestClient, events: list[dict], monkeypatch
+) -> None:
+    """Session attribution answers with the id the PTY was created under, and a
+    pane rebuilt around that PTY answers to a newer one — so the activity cache
+    is filed under the new id while the hook arrives naming the old. The hook
+    re-reads the entry it is about to overwrite, so both ends have to resolve
+    the same way or a reattached pane's turn text is blanked."""
+    from agent_team_backend import agent_messaging
+
+    agent_messaging._reset_for_test()
+    app_module._pane_activity.clear()
+    agent_messaging.register("pw2", "worker", "/ws/alpha", agent_key="claude")
+    agent_messaging.add_aliases("pw2", ["pw"], "/ws/alpha")
+    monkeypatch.setattr(
+        app_module.attribution, "pane_for_session", lambda _sid: ("pw", "/ws/alpha", "")
+    )
+    app_module._record_pane_activity("pw", "turn_complete", "what the agent said")
+    try:
+        client.post(
+            "/hooks/claude",
+            headers={"X-Agent-Team-Event": "stop"},
+            json={"session_id": "s-1", "cwd": "/ws/alpha"},
+        )
+        assert app_module._pane_activity["pw2"]["text"] == "what the agent said"
+        # ...and only ever one entry: a pane must not accumulate one per reload.
+        assert "pw" not in app_module._pane_activity
+    finally:
+        agent_messaging._reset_for_test()
+        app_module._pane_activity.clear()
+
+
 def test_hook_with_no_resolvable_pane_records_nothing(
     client: TestClient, events: list[dict], monkeypatch
 ) -> None:

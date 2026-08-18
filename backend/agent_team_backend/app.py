@@ -666,19 +666,27 @@ def _cap_activity_text(text: str) -> str:
 _pane_activity: dict[str, dict[str, Any]] = {}
 
 
+def _current_pane_id(pane_id: str) -> str:
+    """Where this pane's activity is filed.
+
+    Writers identify the pane through session attribution, which records the id
+    the PTY was created under, while readers (cli_get_status, cli_wait_idle) ask
+    by the id the pane answers to now — a pane rebuilt around a live PTY (window
+    reload, detach) has a newer one. Both go through here, so the two ends
+    cannot drift apart: a read that skipped it would miss what a hook wrote, and
+    a write that skipped it would be invisible to the tools.
+    """
+    return agent_messaging.resolve_alias(pane_id) or pane_id
+
+
 def pane_activity(pane_id: str) -> dict[str, Any] | None:
-    return _pane_activity.get(pane_id)
+    return _pane_activity.get(_current_pane_id(pane_id))
 
 
 def _record_pane_activity(pane_id: str, event_type: str, text: str) -> None:
     if not pane_id:
         return
-    # Both writers here identify the pane through session attribution, which
-    # records the id the PTY was created under — a pane rebuilt around a live
-    # PTY (window reload, detach) answers to a newer one. cli_get_status and
-    # cli_wait_idle look the pane up by its current id, so file the entry there.
-    pane_id = agent_messaging.resolve_alias(pane_id) or pane_id
-    _pane_activity[pane_id] = {
+    _pane_activity[_current_pane_id(pane_id)] = {
         "event_type": event_type,
         # Same cap as the broadcast path — this dict must not become the one
         # place an unbounded turn_complete text is retained.
@@ -1411,7 +1419,7 @@ async def cli_hook(vendor: str, request: Request) -> Any:
         # it — it had to sit out the 10s quiet threshold instead. Hook payloads
         # carry no assistant text, so keep the text the sink already recorded
         # for this same turn rather than blanking it.
-        prior = _pane_activity.get(pane_id)
+        prior = pane_activity(pane_id)
         prior_text = prior["text"] if prior and event_type == "turn_complete" else ""
         _record_pane_activity(pane_id, event_type, prior_text)
     await broadcast(make_event("agent.activity", {

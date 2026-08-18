@@ -308,10 +308,14 @@ def test_hook_drain_counters_follow_the_pane_to_its_new_id() -> None:
 
 
 def test_activity_is_filed_under_the_id_the_status_tools_look_up() -> None:
+    """One entry per pane, filed where cli_get_status / cli_wait_idle look —
+    and readable from either id, so the hook path (which arrives naming the old
+    one) reads back what the log sink wrote rather than a second entry."""
     agent_messaging.register("new", "reviewer", "/ws/alpha", agent_key="claude")
     agent_messaging.add_aliases("new", ["old"], "/ws/alpha")
 
     app._record_pane_activity("old", "turn_complete", "done")
 
-    assert app.pane_activity("new") is not None
-    assert app.pane_activity("old") is None
+    assert list(app._pane_activity) == ["new"]
+    assert app.pane_activity("new") == app.pane_activity("old")
+    assert app.pane_activity("new")["text"] == "done"  # type: ignore[index]
