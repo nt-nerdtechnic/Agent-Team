@@ -47,6 +47,7 @@ The root [README](../../README.md) introduces the product and current distributi
 
 | Document | Purpose |
 |---|---|
+| [Inter-CLI messaging](inter-cli-messaging.md) | Address, send, receive and troubleshoot messages between CLI agents |
 | [Keyboard shortcuts](keybindings.md) | Review default keyboard commands and interaction patterns |
 | [Editor design](editor-design.md) | Understand the current editor architecture and design direction |
 | [Historical milestone record](spec.md) | Review the original implementation milestone record |

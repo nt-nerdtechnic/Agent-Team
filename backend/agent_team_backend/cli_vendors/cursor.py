@@ -1,32 +1,53 @@
 """Cursor CLI (`agent`, legacy `cursor-agent`) conversation store reader.
 
 Layout (root = ~/.cursor/chats — Cursor offers no official env override for
-its data home, so the root is fixed; tests relocate it via Path.home()):
+its data home, so the root is fixed; tests relocate it via Path.home()).
+Sampled 2026-08-16 against a live cursor-agent 2026.08.11-e8db854 session:
 
-  ~/.cursor/chats/<project-hash>/<session-uuid>/store.db   one SQLite db per session
-    meta  table — single row (key '0'), value = hex-encoded JSON
-                  (agentId, latestRootBlobId, lastUsedModel, createdAt; NO cwd)
-    blobs table — content-addressed protobuf blobs (SHA256 keys) with NO
-                  public schema. User input is embedded VERBATIM as UTF-8
-                  inside a blob, so the kickoff's `at-pane:<paneId>` marker is
-                  found by a raw bytes substring scan — the protobuf is never
-                  decoded.
+  ~/.cursor/chats/<project-hash>/<session-uuid>/store.db    one db per session
+  ~/.cursor/chats/<project-hash>/<session-uuid>/meta.json   plain-JSON sidecar
 
-  <project-hash> is community-documented as md5(cwd) hexdigest (NOT confirmed
-  upstream — Cursor is closed source; format knowledge here comes from
-  community reverse engineering, e.g. agentgrep). The hash is used only as a
-  best-effort workspace filter and never gates marker binding (markers are
-  globally unique).
+  store.db has exactly two tables:
+    meta  (key TEXT PRIMARY KEY, value TEXT) — single row (key '0'), value =
+                  hex-encoded JSON (agentId, latestRootBlobId,
+                  blobEncryptionKey, createdAt; NO cwd)
+    blobs (id TEXT PRIMARY KEY, data BLOB) — content-addressed (SHA256 keys)
+                  and MIXED: some rows are plain JSON chat messages
+                  ({"role": "system"|"user"|"assistant", "content": …}), the
+                  rest are protobuf structure nodes with no public schema.
+                  Protobuf rows are NEVER decoded — they fail json.loads and
+                  are skipped, and the marker scan only reads their raw bytes
+                  (user input is embedded verbatim as UTF-8, which is how the
+                  kickoff's `at-pane:<paneId>` marker is found).
+
+  meta.json is the only place the workspace is recorded:
+    {"schemaVersion":1,"createdAtMs":…,"hasConversation":true,
+     "updatedAtMs":…,"cwd":"/abs/path"}
+
+  <project-hash> is md5(cwd) hexdigest — community-documented (agentgrep) and
+  CONFIRMED 2026-08-16 (md5 of the sampled meta.json cwd equals the dir name).
+  Cursor is still closed source, so it stays a best-effort workspace filter
+  and never gates marker binding (markers are globally unique).
 
   ~/.cursor/acp-sessions/<id>/store.db (ACP mode) is intentionally ignored,
   as is ~/.cursor/projects/<slug>/agent-transcripts/*.jsonl — that is Cursor
   IDE data, not the CLI's.
 
-Cursor CLI stores NO token usage locally, so this reader emits no TokenUsage
-events at all (parse_session_file/parse_incremental return empty — the
-minimal legal behaviour for the interface). parse_activity emits a coarse
-`agent_active` whenever the db's mtime/size changes; there is no
-turn_complete signal (the store has no known end-of-turn record).
+Token usage: none is emitted (parse_session_file/parse_incremental return
+empty). The JSON blobs carry no usage, and whatever the store keeps lives in
+the protobuf nodes, which are out of reach. The headless
+`--output-format stream-json` path does report usage per result (sampled:
+inputTokens / outputTokens / cacheReadTokens / cacheWriteTokens, with
+inputTokens EXCLUDING cacheReadTokens — Anthropic's convention, the opposite
+of Meta/OpenAI), but `--print` runs one prompt and exits, so it can never
+observe an interactive pane. Left unimplemented on purpose.
+
+Activity: parse_activity watermarks on blobs.rowid (monotonic per INSERT) and
+turns each new JSON message row into an event — role=user → agent_active,
+role=assistant → turn_complete carrying the reply text. That turn_complete is
+what lets a Cursor pane send inter-CLI messages: the frontend only parses the
+---MSG-START--- protocol out of a turn_complete that has text. Nothing else is
+reported: there is deliberately NO db-write heartbeat (see parse_activity).
 
 Everything here is maximally defensive: any missing table, unexpected
 schema, undecodable value, or sqlite error is tolerated by silently skipping
@@ -50,11 +71,19 @@ import json
 import sys
 import time
 
-from ..log_readers.base import ActivityEvent, IncrementalParseResult, LogReader, TokenUsage
-from .base import Dep, VendorSpec, command_text
+from ..log_readers.base import (
+    ActivityEvent,
+    IncrementalParseResult,
+    LogReader,
+    TokenUsage,
+    join_text_blocks,
+    user_prompt_text,
+)
+from .base import Dep, McpServerConfig, McpValue, McpWiring, SkillsWiring, VendorSpec, command_text
 from ..usage_common import (
     HTTP_TIMEOUT,
     _KEYCHAIN_COOLDOWN_S,
+    _epoch_to_iso,
     _num,
     _snapshot,
     _window,
@@ -65,6 +94,7 @@ from ..usage_common import (
 log = logging.getLogger("agent_team_backend.log_readers.cursor")
 
 _DB_NAME = "store.db"
+_META_NAME = "meta.json"
 
 # Read-only busy wait: long enough to ride out an agent write transaction,
 # short enough not to stall the watcher's drain thread (same as Grok).
@@ -82,9 +112,87 @@ _UUID_RE = re.compile(
 )
 
 # Sentinel prefix persisted inside the watcher-owned per-file seen_keys set
-# (same trick as Kimi's turn state): the last observed mtime/size, so
-# parse_activity emits agent_active only when the db actually changed.
-_STAT_PREFIX = "cursor_stat::"
+# (same trick as Kimi's turn state): the last scanned blobs.rowid.
+_ACTIVITY_PREFIX = "cursor_blob::"
+
+# rowid is monotonic per INSERT; a content-addressed row re-inserted under an
+# existing id lands on a NEW, higher rowid, so the watermark only moves
+# forward. Sampled turns write ~10 blobs each and first sight anchors at the
+# newest row, so one page per pass is never the limiting factor in practice.
+_ACTIVITY_SQL = (
+    "SELECT rowid, id, data FROM blobs WHERE rowid > ? ORDER BY rowid LIMIT ?"
+)
+_MAX_BLOBS_PER_PASS = 512
+
+# Cap on the reply text a turn_complete carries (matches the other readers'
+# intent: enough for the messaging protocol, not a transcript dump).
+_MAX_TURN_TEXT = 8000
+
+# What the user actually typed, inside Cursor's prompt wrapper. Sampled rows:
+#
+#   <timestamp>Sunday, Aug 16, 2026, 10:33 AM (UTC+9)</timestamp>
+#   <user_query>
+#   Reply with exactly: ok
+#   </user_query>
+#
+# The tag does double duty. It recovers the text panes are named from —
+# user_prompt_text drops anything '<'-prefixed, so the raw row always
+# filtered down to '' — and it separates a real prompt from the context
+# Cursor injects as its own `user` row: the first row of a session is
+# ~30k characters of <user_info>/<rules>/<agent_transcripts> and carries no
+# <user_query> at all. Without the distinction that injection would read as
+# the user's opening message and name the pane after it.
+_USER_QUERY_RE = re.compile(r"<user_query>\s*(.*?)\s*</user_query>", re.DOTALL)
+
+# Navide's own session marker, as it reaches the store. Cursor cannot pin a
+# session id at launch, so a fresh pane's marker is TYPED into the TUI as a
+# standalone prompt (App.vue sendSessionMarkerBootstrap pastes
+# `<!-- agent-team-session: at-pane:<paneId> -->` and hits Enter). Cursor wraps
+# it like any other prompt, so it arrives as a perfectly normal <user_query>
+# row — indistinguishable from something the person typed unless matched here.
+# It is Navide talking to itself, never user activity, so a row whose whole
+# body is the marker emits nothing.
+#
+# Anchored on the ENTIRE unwrapped body on purpose: a real prompt that merely
+# mentions `at-pane:` (discussing this very mechanism, forwarding a pane id)
+# is a genuine prompt and must still be reported.
+_MARKER_ONLY_RE = re.compile(
+    r"^(?:<!--\s*agent-team-session:\s*)?"
+    r"at-pane:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    r"(?:\s*-->)?$"
+)
+
+
+def _read_meta_json(session_dir: Path) -> dict:
+    """The plain-JSON sidecar next to store.db ({} when absent/unreadable).
+
+    Unlike the db's own `meta` table this one is not hex-encoded and does
+    carry `cwd`, which makes it the only workspace record Cursor writes.
+    """
+    try:
+        raw = (session_dir / _META_NAME).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _json_message(data) -> dict | None:
+    """A blobs row decoded as a chat message, or None when it is one of the
+    protobuf structure nodes — those are skipped, never decoded."""
+    if isinstance(data, memoryview):
+        data = bytes(data)
+    if not isinstance(data, (bytes, bytearray, str)):
+        return None
+    try:
+        message = json.loads(data)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return message if isinstance(message, dict) else None
 
 
 def cursor_chats_root() -> Path:
@@ -136,9 +244,13 @@ class CursorLogReader(LogReader):
         return path.parent.name
 
     def cwd_from_file(self, path: Path) -> str:
-        """Always '' — store.db's meta JSON carries no cwd, and the
-        <project-hash> dir name is a one-way digest that can't be reversed."""
-        return ""
+        """The workspace recorded in the sibling meta.json ('' when absent).
+
+        store.db itself cannot answer this: its meta JSON has no cwd and the
+        <project-hash> dir name is a one-way digest. meta.json is written by
+        the CLI next to the db and holds the absolute path verbatim.
+        """
+        return str(_read_meta_json(path.parent).get("cwd") or "")
 
     def has_session(self, session_id: str) -> bool:
         """True when <root>/<any-project-hash>/<id>/store.db exists. The
@@ -174,7 +286,9 @@ class CursorLogReader(LogReader):
         except OSError:
             return None
 
-    def _query(self, path: Path, sql: str) -> list[tuple] | None:
+    def _query(
+        self, path: Path, sql: str, params: tuple = ()
+    ) -> list[tuple] | None:
         """Short-lived read-only query. None = db unreadable this cycle
         (missing / busy / locked / missing table / mid-write) — callers
         treat it as no data."""
@@ -182,7 +296,7 @@ class CursorLogReader(LogReader):
             con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
             try:
                 con.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
-                return con.execute(sql).fetchall()
+                return con.execute(sql, params).fetchall()
             finally:
                 con.close()
         except (sqlite3.Error, OSError) as err:
@@ -207,47 +321,155 @@ class CursorLogReader(LogReader):
         lives in parse_activity."""
         return IncrementalParseResult([], dict(checkpoint))
 
-    # ── activity: coarse mtime/size signal only ─────────────────────────────
+    # ── activity: per-message blob scan ─────────────────────────────────────
 
     def parse_activity(
         self, path: Path, seen_keys: set[str]
     ) -> list[ActivityEvent]:
-        """Emit one `agent_active` per observed db mtime/size change.
+        """Turn events from the JSON message blobs — and nothing else.
 
-        The blobs are opaque protobuf, so there is no per-message or
-        end-of-turn record to parse — a write to the store is the only
-        activity signal available, and no turn_complete is ever emitted.
+        There is deliberately no db-write (mtime/size) heartbeat. It used to
+        exist to prove "still working" between turn boundaries, since the
+        writes in between are protobuf structure nodes with no decodable role,
+        but that rationale assumed reader events drive the pane's RUNNING
+        display. They do not: RUNNING comes from raw PTY bytes
+        (useTerminal's lastRawActivityAt), so a pane mid-turn still looks busy
+        with no heartbeat at all.
+
+        What the heartbeat DID drive is the App's paneLastActiveAt — and there
+        it was actively harmful. A live store keeps writing protobuf rows
+        AFTER the turn's last assistant row (sampled: rowids 20/23 and 32
+        follow assistant rows 19 and 30). A pass that observed only those
+        would emit a bare agent_active stamped LATER than the turn_complete,
+        and completion.ts's turnCompleteDone requires
+        turnCompleteAt >= lastActiveAt — so the pane would never read as done:
+        no notification, and an unattended loop stalls forever waiting for
+        loopContinueReady.
         """
         session_id = self.session_id_from_path(path)
         if not session_id:
             return []
-        try:
-            stat = path.stat()
-        except OSError:
-            return []
-        token = f"{stat.st_mtime_ns}:{stat.st_size}"
+        cwd = self.cwd_from_file(path)
+        return self._blob_activity(path, session_id, cwd, seen_keys)
+
+    def _store_epoch(self, path: Path) -> float:
+        """Epoch seconds to stamp this pass's events with.
+
+        blobs has no time column at all, so there is no per-message timestamp
+        to read; the closest real one is meta.json's `updatedAtMs`, which the
+        CLI rewrites as part of each turn's commit (so consecutive turns get
+        distinct values). The scan clock is the only fallback.
+
+        The db's own mtime is NOT usable, tempting as it looks: store.db runs
+        in WAL mode, and a WAL commit lands in store.db-wal without touching
+        the main file's mtime or size (measured: 30 consecutive commits, no
+        change; only close/checkpoint moves it). Falling back to it would
+        stamp every turn of a session with the session's start time, and past
+        60s isReplayedTurnComplete would then silently discard all of them —
+        killing done notifications, pipeline sentinels and the inter-CLI
+        messaging this reader exists for.
+        """
+        updated = _num(_read_meta_json(path.parent).get("updatedAtMs"))
+        if updated:
+            return updated / 1000
+        return time.time()
+
+    def _blob_activity(
+        self, path: Path, session_id: str, cwd: str, seen_keys: set[str]
+    ) -> list[ActivityEvent]:
+        """One event per new JSON message blob, watermarked on blobs.rowid."""
         prev = next(
-            (k[len(_STAT_PREFIX):] for k in seen_keys if k.startswith(_STAT_PREFIX)),
+            (
+                k[len(_ACTIVITY_PREFIX):]
+                for k in seen_keys
+                if k.startswith(_ACTIVITY_PREFIX)
+            ),
             None,
         )
-        if prev == token:
-            return []
-        seen_keys.difference_update(
-            {k for k in seen_keys if k.startswith(_STAT_PREFIX)}
-        )
-        seen_keys.add(_STAT_PREFIX + token)
-        return [
-            ActivityEvent(
-                vendor="cursor",
-                event_type="agent_active",
-                cwd="",
-                session_id=session_id,
-                file_path=str(path),
-                dedup_key=f"stat:{token}",
-                timestamp=str(int(stat.st_mtime)),
-                detail="db-write",
+
+        def remember(row_id: int) -> None:
+            seen_keys.difference_update(
+                {k for k in seen_keys if k.startswith(_ACTIVITY_PREFIX)}
             )
-        ]
+            seen_keys.add(_ACTIVITY_PREFIX + str(row_id))
+
+        newest = self._query(path, "SELECT COALESCE(MAX(rowid), 0) FROM blobs")
+        if newest is None:
+            return []  # unreadable this cycle: no data, no state change
+        top = int(newest[0][0] or 0)
+        if prev is None:
+            # First sight: what is already stored is history, not activity
+            # happening now. A backend restart re-sees every session db, and
+            # replaying those turns would resend their messages.
+            remember(top)
+            return []
+        watermark = int(prev)
+        if top < watermark:
+            # The store shrank (session db recreated, vacuumed, replaced):
+            # re-anchor rather than rescan, so old turns are never replayed.
+            remember(top)
+            return []
+        rows = self._query(path, _ACTIVITY_SQL, (watermark, _MAX_BLOBS_PER_PASS))
+        if not rows:
+            return []
+        remember(int(rows[-1][0]))
+
+        base = self._store_epoch(path)
+        out: list[ActivityEvent] = []
+
+        def stamp() -> str:
+            # One pass can carry several events, and meta.json gives the whole
+            # pass a single time. Nudge each event 1ms past the previous one:
+            # App.vue's onTurnCompleteForMessaging admits a turn only when
+            # eventMs > paneMsgProcessedAt (STRICTLY greater), so two turns
+            # sharing an identical stamp would lose the second one's
+            # ---MSG--- block. Still plain ISO-8601 — an unparseable stamp
+            # reads as always-fresh and resends a delivered turn.
+            return _epoch_to_iso(base + len(out) * 0.001) or ""
+
+        for _row_id, blob_id, data in rows:
+            message = _json_message(data)
+            if message is None:
+                continue  # protobuf structure node — never decoded
+            role = str(message.get("role") or "")
+            content = message.get("content")
+            # Dedup on the content-addressed id, not the rowid: a row
+            # re-inserted under the same id is the same message.
+            key = f"blob:{blob_id}"
+            if role == "assistant":
+                # A new assistant message IS the end of a turn. Only the
+                # "text" parts are the reply — "reasoning" parts are the
+                # model's thinking and must never be sent to another CLI.
+                out.append(ActivityEvent(
+                    vendor="cursor", event_type="turn_complete", cwd=cwd,
+                    session_id=session_id, file_path=str(path), dedup_key=key,
+                    timestamp=stamp(), detail="assistant",
+                    text=join_text_blocks(content, "text")[:_MAX_TURN_TEXT],
+                ))
+            elif role == "user":
+                # "user" is the cross-end contract detail panes are named
+                # from, so it has to carry what the person typed. Unwrap
+                # Cursor's <user_query> first (see _USER_QUERY_RE): a row
+                # without it is the injected context, not a prompt, and
+                # reporting that as user activity would name the pane after
+                # ~30k characters of rules.
+                query = _USER_QUERY_RE.search(join_text_blocks(content, "text"))
+                if query is None:
+                    continue
+                typed = query.group(1).strip()
+                # Navide's own session marker is typed into the TUI as a
+                # standalone prompt, so it lands in a normal <user_query> row
+                # at spawn time. It is not user activity (see _MARKER_ONLY_RE).
+                if _MARKER_ONLY_RE.match(typed):
+                    continue
+                out.append(ActivityEvent(
+                    vendor="cursor", event_type="agent_active", cwd=cwd,
+                    session_id=session_id, file_path=str(path), dedup_key=key,
+                    timestamp=stamp(), detail="user",
+                    text=user_prompt_text(typed),
+                ))
+            # role=system (the prompt preamble) is not activity.
+        return out
 
     # ── marker binding ──────────────────────────────────────────────────────
 
@@ -256,15 +478,16 @@ class CursorLogReader(LogReader):
     ) -> dict[str, tuple[str, str]]:
         """marker → (session_id, workspace_root) resolved by a raw UTF-8
         bytes substring scan over each session db's blobs (protobuf is never
-        decoded). workspace_root is always '' — the store records no cwd —
-        which keeps Attribution's shared-db workspace gate permissive.
+        decoded). workspace_root is reported as '' even though meta.json now
+        supplies one, which keeps Attribution's shared-db workspace gate
+        permissive — a marker is globally unique, so it needs no corroboration.
         Unreadable dbs / missing tables / non-bytes values are skipped."""
         wanted = {m: m.encode("utf-8") for m in markers if m}
         if not wanted:
             return {}
         found: dict[str, tuple[str, str]] = {}
         sql = (
-            f"SELECT substr(value, 1, {_MAX_BLOB_BYTES}) FROM blobs "
+            f"SELECT substr(data, 1, {_MAX_BLOB_BYTES}) FROM blobs "
             f"LIMIT {_MAX_BLOBS_PER_DB}"
         )
         for db in self.session_files():
@@ -291,11 +514,11 @@ class CursorLogReader(LogReader):
 # gains them via assignment below, keeping the copied class body untouched) --
 
 def _workspace_match(self, usage, ws_path, owner_workspace=None):
-    # Cursor stores NO cwd anywhere. A session already bound to a pane
-    # (marker hit) attributes to that pane's workspace, so the gate can never
-    # drop a marker-bound session; otherwise fall back to the
-    # community-documented md5(cwd) project-hash dir name in the file path
-    # (best-effort — unconfirmed hash).
+    # store.db carries no cwd (only the meta.json sidecar does, and it is not
+    # on the TokenUsage path). A session already bound to a pane (marker hit)
+    # attributes to that pane's workspace, so the gate can never drop a
+    # marker-bound session; otherwise fall back to the md5(cwd) project-hash
+    # dir name in the file path, which the 2026-08-16 sample confirmed.
     if owner_workspace is not None and owner_workspace == ws_path:
         return True
     hash_dir = cursor_project_hash(ws_path)
@@ -305,9 +528,9 @@ def _workspace_match(self, usage, ws_path, owner_workspace=None):
 
 
 def _pane_cwd_match(self, usage, pane_cwd, pane_id):
-    # No cwd in the store; match the md5(cwd) project-hash dir in the file
+    # No cwd inside store.db; match the md5(cwd) project-hash dir in the file
     # path instead. Only the claim fallbacks use this — marker binding never
-    # depends on it (the hash scheme is unconfirmed).
+    # depends on it.
     hash_dir = cursor_project_hash(pane_cwd)
     return bool(hash_dir) and f"/{hash_dir}/" in usage.file_path
 
@@ -544,7 +767,31 @@ def _session_exists(workspace_path: str, session_id: str) -> bool:
 
 SPEC = VendorSpec(
     key="cursor",
+    # Verified 2026-08-15 (docs): .cursor/skills and .agents/skills in the
+    # project, ~/.cursor/skills globally, and no relocation variable at all —
+    # the same corner its MCP wiring is in, so the workspace file is again the
+    # only surface. Its CLI is also documented not to load ~/.agents/skills.
+    skills_supported=True,
+    skills_wiring=SkillsWiring(
+        project_rel=(".cursor", "skills"),
+        # ~/.agents/skills too, per its docs — though its CLI is documented
+        # not to load that root, so the automatic cell is best-effort here.
+        reads_shared_root=True,
+    ),
     label="Cursor CLI",
+    # The one CLI with no spawn-time surface — no MCP flag, no config
+    # variable — so its per-project config file is the only way in. A bare
+    # "url" is read as a remote server (stdio is the shape that names its
+    # transport), and cursor interpolates ${env:...} inside it, which is what
+    # lets one shared file serve panes with different per-pane URLs.
+    mcp_wiring=McpWiring(
+        config=McpServerConfig(
+            section=("mcpServers",),
+            entry=(("url", McpValue.URL),),
+        ),
+        project_config=(".cursor", "mcp.json"),
+        url_env_template="${env:%s}",
+    ),
     # Late-bound (module global at call time) so tests can monkeypatch.
     fetch_usage=lambda home: fetch_cursor(home),
     resume_id_from_command=_resume_id_from_command,

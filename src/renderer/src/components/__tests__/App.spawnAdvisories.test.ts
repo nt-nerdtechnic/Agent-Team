@@ -84,3 +84,72 @@ describe('cli_open_agent advisories forwarding (agent_spawn.result)', () => {
     }
   })
 })
+
+describe('spawn feedback is a system notice, not a message', () => {
+  const fn = block('function sendSpawnFeedback(', '\nasync function handleSpawnRequestsForTurn(')
+
+  it('sends under the reserved handle, as a notice, with no envelope', () => {
+    expect(fn).toContain('messaging.sendMessage(NOTICE_SENDER, parentName, renderSpawnNotice(outcome, detail)')
+    expect(fn).toContain("kind: 'notice'")
+    // An envelope would announce `from: Navide` and ask for a reply to a handle
+    // nothing can address; the notice text is injected verbatim instead.
+    expect(fn).not.toContain('includeReplyHint')
+    expect(fn).not.toContain('renderEnvelope')
+  })
+
+  it('every caller classifies the outcome, so the two prefixes stay accurate', () => {
+    const calls = [...appSource.matchAll(/sendSpawnFeedback\(\s*parentName,\s*'(failed|partial)'/g)]
+    expect(calls.length).toBe(6)
+    // A pane that exists but never got its task must not be reported as a
+    // failed spawn — retrying that one collides with the open pane.
+    expect(calls.filter((c) => c[1] === 'partial').length).toBe(4)
+  })
+
+  it('tells the bare-line SPAWN path apart the same way the MCP path does', () => {
+    // Both paths run the same two steps — create the pane, then inject its task
+    // — so both have the same two ways to fail, and the requester acts on which
+    // one it was: `failed` invites the same request again, `partial` says the
+    // pane is already open and a retry would collide with it.
+    const turn = block('async function handleSpawnRequestsForTurn(', '\n/** Create the pane')
+    expect(turn).toContain("if (spawned.outcome === 'failed')")
+    expect(turn).toContain("} else if (spawned.outcome === 'partial')")
+
+    const spawn = block('async function spawnRequestedPane(', '\n/** The spawn-gate context')
+    // Nothing was created → failed. Created but not kicked off → partial.
+    expect(spawn).toContain("return { outcome: 'failed', name: req.name }")
+    expect(spawn).toContain("return { outcome: kicked ? 'ok' : 'partial', name: childName }")
+  })
+
+  it('reports a kickoff that threw as partial too, not as silence', () => {
+    // kickoffRequestedPane awaits a long chain (bootstrap, dialog dismissal,
+    // quiet wait, injection) behind a `finally` with no catch of its own. A
+    // rejection escaping is the one outcome that tells the requester nothing,
+    // and the pane is open either way — the same verdict the MCP path reaches
+    // through its own .catch.
+    const spawn = block('async function spawnRequestedPane(', '\n/** The spawn-gate context')
+    expect(spawn).toContain('} catch (err) {')
+    expect(spawn).toContain("outcome: 'partial'")
+    expect(spawn).toContain('error: err instanceof Error ? err.message : String(err)')
+
+    const turn = block('async function handleSpawnRequestsForTurn(', '\n/** Create the pane')
+    expect(turn).toContain("} else if (spawned.outcome === 'partial' && spawned.error) {")
+    expect(turn).toContain('任務注入出錯：${spawned.error}')
+  })
+
+  it('never leaves a spawn turn rejecting into the window', () => {
+    // Every outcome inside handleSpawnRequestsForTurn is reported as a notice,
+    // so a bare `void` on the call would turn any throw into both silence and
+    // an unhandled rejection.
+    expect(appSource).toContain('void handleSpawnRequestsForTurn(paneId, senderName, text).catch(')
+    expect(appSource).toContain("code: 'spawn.turn-failed'")
+  })
+
+  it('names the pane that actually exists, not the name that was asked for', () => {
+    // A concurrent spawn may have taken the requested name and pushed this one
+    // to a suffix; "check pane X" has to name the pane the requester can find.
+    const spawn = block('async function spawnRequestedPane(', '\n/** The spawn-gate context')
+    expect(spawn).toContain('const childName = pane?.messagingName ?? req.name')
+    const turn = block('async function handleSpawnRequestsForTurn(', '\n/** Create the pane')
+    expect(turn).toContain('pane「${spawned.name}」已開啟')
+  })
+})

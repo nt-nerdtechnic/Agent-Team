@@ -30,6 +30,7 @@ const captured = vi.hoisted(() => ({
   clearedSelection: 0,
   dataHandler: undefined as ((data: string) => void) | undefined,
   selection: '',
+  selectionHandler: undefined as (() => void) | undefined,
 }))
 
 vi.mock('@xterm/xterm', () => {
@@ -43,6 +44,13 @@ vi.mock('@xterm/xterm', () => {
     clearedSelection = 0
     getSelection(): string {
       return captured.selection
+    }
+    hasSelection(): boolean {
+      return !!captured.selection
+    }
+    onSelectionChange(handler: () => void): { dispose(): void } {
+      captured.selectionHandler = handler
+      return { dispose: (): void => { captured.selectionHandler = undefined } }
     }
     get modes(): { mouseTrackingMode: string; bracketedPasteMode: boolean } {
       return { mouseTrackingMode: 'none', bracketedPasteMode: captured.bracketedPasteMode }
@@ -107,6 +115,9 @@ describe('useTerminal — manual paste', () => {
     captured.clearedSelection = 0
     captured.dataHandler = undefined
     captured.selection = ''
+    captured.selectionHandler = undefined
+    vi.useRealTimers()
+    delete (window as unknown as { agentTeam?: unknown }).agentTeam
     localStorage.clear() // drop the persisted PTY id so the next spawn is fresh
   })
 
@@ -149,6 +160,9 @@ describe('useTerminal — manual paste', () => {
       .join('')
   }
 
+  /** Lets the chunk sends (and the failure report hanging off them) settle. */
+  const settle = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
+
   /** The clipboard diagnostics useTerminal forwards into backend.log. */
   function clipboardDiags(
     mock: ReturnType<typeof createMockBackend>
@@ -189,6 +203,33 @@ describe('useTerminal — manual paste', () => {
     paste('just one line')
     expect(pastedData(mock)).toBe('just one line')
     scope.stop()
+  })
+
+  // Published for App.vue's injectText, which writes to the PTY without going
+  // through xterm and so has no other way to learn what the program on the
+  // other end asked for. Same source this file's own bracketing decisions use.
+  describe('isBracketedPasteActive', () => {
+    it('reports mode 2004 off', async () => {
+      const { scope, terminal } = await spawnedTerminal('claude')
+      expect(terminal.isBracketedPasteActive()).toBe(false)
+      scope.stop()
+    })
+
+    it('reports mode 2004 on', async () => {
+      captured.bracketedPasteMode = true
+      const { scope, terminal } = await spawnedTerminal('claude')
+      expect(terminal.isBracketedPasteActive()).toBe(true)
+      scope.stop()
+    })
+
+    it('follows the mode changing under it, rather than caching the first read', async () => {
+      // A claude pane dropping into `!` shell mode turns 2004 off mid-session.
+      const { scope, terminal } = await spawnedTerminal('claude')
+      expect(terminal.isBracketedPasteActive()).toBe(false)
+      captured.bracketedPasteMode = true
+      expect(terminal.isBracketedPasteActive()).toBe(true)
+      scope.stop()
+    })
   })
 
   it('scrolls to the bottom and drops the selection, as xterm would', async () => {
@@ -324,6 +365,181 @@ describe('useTerminal — manual paste', () => {
       focusTerminal(true)
       scope.stop()
       expect(window.__navideTerminalSelection?.()).toBe('')
+    })
+  })
+
+  // The diagnostic log answers a bug report after the fact; it does nothing for
+  // the person watching the pane. Every failure is also handed to the pane so
+  // it can say so — reported, not shown here, because this composable owns
+  // neither i18n nor the toast host.
+  describe('reports clipboard failures to the pane', () => {
+    async function withFailureReports(): Promise<{
+      failures: Array<{ reason: string, chars: number }>
+      result: ReturnType<typeof useTerminal>
+      scope: { stop: () => void }
+      mock: ReturnType<typeof createMockBackend>
+    }> {
+      const failures: Array<{ reason: string, chars: number }> = []
+      const mock = createMockBackend()
+      mock.setResponse('terminal.create', { terminal_session_id: 'sess-1', pid: 42 })
+      const { result, scope } = withScope(() =>
+        useTerminal('pane-1', mock.backend, {
+          onClipboardFailure: (reason, chars) => { failures.push({ reason, chars }) }
+        })
+      )
+      result.mount(document.createElement('div'))
+      await result.spawn({ command: 'bash', cwd: '/tmp', agentKey: 'claude' })
+      return { failures, result, scope, mock }
+    }
+
+    it('reports a gated paste, with how much was discarded', async () => {
+      const { failures, result, scope } = await withFailureReports()
+      result.setDisableStdin(true)
+      paste('must not reach the pty')
+      expect(failures).toEqual([{ reason: 'preparing', chars: 22 }])
+      scope.stop()
+    })
+
+    it('reports a ⌘V that found nothing on the clipboard', async () => {
+      const { failures, scope } = await withFailureReports()
+      paste('')
+      expect(failures).toEqual([{ reason: 'empty', chars: 0 }])
+      scope.stop()
+    })
+
+    it('reports a paste into a pane with no live session', async () => {
+      const failures: Array<{ reason: string, chars: number }> = []
+      const mock = createMockBackend()
+      const { result, scope } = withScope(() =>
+        useTerminal('pane-1', mock.backend, {
+          onClipboardFailure: (reason, chars) => { failures.push({ reason, chars }) }
+        })
+      )
+      result.mount(document.createElement('div'))
+      result.pasteFromClipboard('text with nowhere to go')
+      expect(failures).toEqual([{ reason: 'no-session', chars: 23 }])
+      scope.stop()
+    })
+
+    it('says nothing when the paste actually lands', async () => {
+      const { failures, mock, scope } = await withFailureReports()
+      paste('real text')
+      await settle()
+      expect(pastedData(mock)).toBe('real text')
+      expect(failures).toEqual([])
+      scope.stop()
+    })
+
+    // Chunks were sent and forgotten, so a paste could arrive with a hole in
+    // the middle and nothing anywhere would say so. wsClient resolves an
+    // `ok: false` reply rather than rejecting it, which is why the send path
+    // has to inspect the answer rather than just catch.
+    it('reports a paste the backend refused', async () => {
+      const { failures, scope, mock } = await withFailureReports()
+      mock.setResponse('terminal.input', null, {
+        ok: false,
+        error: { code: 'BAD_REQUEST', message: 'no such terminal session' }
+      })
+
+      paste('some text')
+      await settle()
+
+      expect(failures).toEqual([{ reason: 'send-failed', chars: 9 }])
+      scope.stop()
+    })
+  })
+
+  // Edit > Copy used to evaluate that global at ⌘C time, on a 300ms deadline
+  // main lost whenever this renderer was busy painting — and its fallback
+  // copies nothing at all over a terminal. The pane pushes instead, so the read
+  // happens when the selection changes rather than while the user waits.
+  describe('pushes the selection to main for Edit > Copy', () => {
+    let reported: string[]
+
+    /** Installs the preload bridge and starts recording from a clean slate. */
+    function recordPushes(): void {
+      reported = []
+      ;(window as unknown as { agentTeam: unknown }).agentTeam = {
+        reportTerminalSelection: (s: string): void => { reported.push(s) }
+      }
+    }
+    function focusTerminal(focused: boolean): void {
+      captured.textarea!.dispatchEvent(new Event(focused ? 'focus' : 'blur'))
+    }
+
+    it('publishes what is already highlighted when the pane takes focus', async () => {
+      const { scope } = await spawnedTerminal('claude')
+      recordPushes()
+      captured.selection = 'already highlighted'
+      focusTerminal(true)
+      expect(reported).toEqual(['already highlighted'])
+      scope.stop()
+    })
+
+    it('clears the entry when the pane loses focus', async () => {
+      const { scope } = await spawnedTerminal('claude')
+      captured.selection = 'highlighted'
+      focusTerminal(true)
+      recordPushes()
+      focusTerminal(false)
+      expect(reported).toEqual([''])
+      scope.stop()
+    })
+
+    // Immediate, unlike a growing selection: a stale entry would let Copy
+    // return text the user just deselected.
+    it('reports a cleared selection at once, without coalescing', async () => {
+      const { scope } = await spawnedTerminal('claude')
+      captured.selection = 'highlighted'
+      focusTerminal(true)
+      recordPushes()
+      captured.selection = ''
+      captured.selectionHandler!()
+      expect(reported).toEqual([''])
+      scope.stop()
+    })
+
+    // getSelection() joins every selected row, so reading it on each change
+    // would make a drag across a long scrollback pay for the whole range on
+    // every mouse move — the renderer stall this change exists to avoid.
+    it('coalesces a growing selection into a single read', async () => {
+      const { scope } = await spawnedTerminal('claude')
+      captured.selection = 'a'
+      focusTerminal(true)
+      recordPushes()
+      vi.useFakeTimers()
+
+      captured.selection = 'ab'
+      captured.selectionHandler!()
+      captured.selection = 'abc'
+      captured.selectionHandler!()
+      expect(reported).toEqual([]) // still coalescing — nothing read yet
+
+      await vi.advanceTimersByTimeAsync(60)
+      expect(reported).toEqual(['abc']) // one read, of the settled value
+
+      vi.useRealTimers()
+      scope.stop()
+    })
+
+    // Panes in a window share one WebContents, so a background pane reporting
+    // would answer a Copy aimed at the focused one.
+    it('stays silent while this pane does not own focus', async () => {
+      const { scope } = await spawnedTerminal('claude')
+      recordPushes()
+      captured.selection = 'background highlight'
+      captured.selectionHandler!()
+      expect(reported).toEqual([])
+      scope.stop()
+    })
+
+    it('clears the entry when a focused pane is disposed', async () => {
+      const { scope } = await spawnedTerminal('claude')
+      captured.selection = 'highlighted'
+      focusTerminal(true)
+      recordPushes()
+      scope.stop()
+      expect(reported).toEqual([''])
     })
   })
 

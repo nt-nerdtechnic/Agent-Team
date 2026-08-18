@@ -47,7 +47,11 @@ const ordered = computed<RecentWorkspace[]>(() => {
   return [...pinned, ...rest]
 })
 
-function stateBadge(state: string): { icon: string; label: string; cls: string } {
+// How the workspace's last pipeline run ended, mirrored onto the recent entry
+// by the backend's pipeline handlers. Folders that never ran one ('' from older
+// entries, 'idle' from a project that was only ever used to spawn CLI panes)
+// get no badge — a row of identical placeholders is noise, not information.
+function stateBadge(state: string): { icon: string; label: string; cls: string } | null {
   switch (state) {
     case 'completed':
       return { icon: '✓', label: 'completed', cls: 'completed' }
@@ -56,7 +60,7 @@ function stateBadge(state: string): { icon: string; label: string; cls: string }
     case 'aborted':
       return { icon: '⏸', label: 'aborted', cls: 'aborted' }
     default:
-      return { icon: '🔧', label: 'spawn-only', cls: 'spawn' }
+      return null
   }
 }
 
@@ -236,9 +240,13 @@ function ctxCopyPath(): void {
               <div class="r-top">
                 <span class="r-name">{{ item.name }}</span>
                 <span v-if="isOpenElsewhere(item.path)" class="r-open" :title="$t('label.already-open')">{{ $t('label.already-open') }}</span>
-                <span class="r-badge" :class="stateBadge(item.last_known_state).cls">
-                  {{ stateBadge(item.last_known_state).icon }}
-                  {{ stateBadge(item.last_known_state).label }}
+                <span
+                  v-if="stateBadge(item.last_known_state)"
+                  class="r-badge"
+                  :class="stateBadge(item.last_known_state)?.cls"
+                >
+                  {{ stateBadge(item.last_known_state)?.icon }}
+                  {{ stateBadge(item.last_known_state)?.label }}
                 </span>
                 <span v-if="!item.exists" class="r-missing" title="Folder not found">{{ $t('label.missing') }}</span>
                 <span class="r-time">{{ timeAgo(item.last_opened_at) }}</span>

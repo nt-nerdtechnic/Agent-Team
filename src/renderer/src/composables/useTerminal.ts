@@ -11,7 +11,7 @@ import { AGENT_SPECS } from '../agents'
 import { createResizeController, type ResizeController } from './useTerminalResize'
 import { installTerminalZoomShortcuts, terminalFontSize } from './useTerminalFontSize'
 import { getResumeConcurrency } from '../lib/resumeConcurrency'
-import { chunkForPty, shouldOpenMentionMenu } from '../lib/cliContext'
+import { chunkForPty, shouldOpenMentionMenu, stripInputSequences } from '../lib/cliContext'
 import { settingsGet, settingsSet } from '../lib/settings'
 import { extractClipboardImage, saveClipboardImage } from '../lib/clipboardImage'
 import { TERMINAL_CREATE_TIMEOUT_MS } from '../lib/resume-command'
@@ -161,14 +161,95 @@ export function encodeShiftEnter(agentKey?: string): string {
 /** Clipboard bytes per `terminal.input` write, matching App.vue's injectText. */
 const PASTE_CHUNK = 512
 
+/**
+ * Mouse tracking (and focus reporting) a previous session may have left on.
+ *
+ * Stale state here forwards events to the process's stdin before it has had a
+ * chance to re-enable what it actually wants, so it is cleared whenever a pane
+ * rebinds to a PTY.
+ */
+const MOUSE_MODE_RESET = '\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?1004l'
+
+/**
+ * The same reset, plus bracketed paste (DEC 2004) — for a NEW process only.
+ *
+ * Kept separate on purpose. Clearing 2004 was never about stale mouse state: it
+ * rode along in the original reset (a9e7247c, whose comments and message
+ * describe only mouse tracking) and six weeks later produced the "paste gets
+ * cut off" report, because it desynchronises the two ends. The reset is
+ * one-way — xterm forgets, the CLI does not, and having already announced the
+ * mode it never announces it again, so the pane stays wrong until it closes.
+ *
+ * It stays for a resume spawn because there the PTY behind the pane is a fresh
+ * process: a replayed snapshot ends in the OLD session's `?2004h`, and until
+ * the new process announces its own, a paste would wrap text the other end
+ * never asked to be wrapped — a shell would then show a literal "[200~".
+ * Reattaching to a LIVE PTY is the opposite case: the mode the snapshot
+ * restores is the mode the CLI is still in, which is exactly what we want.
+ */
+const MOUSE_MODE_RESET_NEW_PROCESS = `${MOUSE_MODE_RESET}\x1b[?2004l`
+
+/** The alternate-screen ENTER sequence, plus the cursor-home the serializer
+ *  always pairs with it. `?1047h` / `?47h` are the pre-xterm-88 spellings —
+ *  matched for completeness, not because this addon emits them. */
+const ALT_SCREEN_ENTER = /\x1b\[\?(?:1049|1047|47)h(?:\x1b\[H)?/
+
+/**
+ * Remove the alternate-screen ENTER sequence from a snapshot serialized with
+ * `excludeAltBuffer: false`.
+ *
+ * @xterm/addon-serialize renders the normal buffer first and, when the terminal
+ * sits in its alternate buffer, appends a literal `ESC[?1049h ESC[H` followed by
+ * the alt screen. Replaying that verbatim leaves the fresh terminal PARKED in
+ * its alternate buffer (measured: `buffer.active.type === 'alternate'`) — the
+ * user cannot scroll back, the normal history is hidden underneath, and every
+ * later write (mouse reset, the reconnected divider, live output) lands on a
+ * screen that is thrown away. Without the sequence the alt screenful replays as
+ * ordinary normal-buffer lines: scrollable, re-wrappable, the same shape as the
+ * rest of the payload.
+ *
+ * Only the FIRST occurrence is touched. The serializer emits it exactly once,
+ * as the boundary between the two buffers, and no other part of a serialized
+ * payload can reproduce it — buffer cells hold glyphs, never raw ESC, and the
+ * trailing mode section only ever writes 1h/66h/2004h/4h/6h/45h/1004h/7l/mouse.
+ * When the boundary is not at position 0 the normal buffer had content of its
+ * own, so the sequence becomes a line break instead of vanishing, keeping the
+ * restored screen off the end of the last history line.
+ */
+export function stripAltScreenEnter(payload: string): string {
+  const found = ALT_SCREEN_ENTER.exec(payload)
+  if (!found) return payload
+  const rest = payload.slice(found.index + found[0].length)
+  return found.index === 0 ? rest : `${payload.slice(0, found.index)}\r\n${rest}`
+}
+
 /** Set once the "hold ⌥ to select" hint has been shown — it teaches once.
  *  Goes through settings (backend-persisted) rather than localStorage, which
  *  this app has been migrating away from and which plugin bundles don't share. */
 const OPTION_SELECT_HINT_KEY = 'agentTeam.terminal.optionSelectHintSeen'
 
-/** Agents whose TUI keeps bracketed paste on — see pasteFromClipboard(). */
-function agentUsesBracketedPaste(agentKey?: string): boolean {
+/** Agents whose TUI keeps bracketed paste on — see pasteFromClipboard(), and
+ *  App.vue's injectText, which wraps its writes for the same vendors. */
+export function agentUsesBracketedPaste(agentKey?: string): boolean {
   return terminalSpecFor(agentKey)?.bracketedPaste === true
+}
+
+/** A mouse report, which xterm delivers through the SAME data event as a
+ *  keystroke. Without this, a CLI that turned mouse tracking on would make a
+ *  pane look actively typed at for as long as the pointer sits over it. SGR
+ *  (`ESC[<…M/m`) and X10 (`ESC[M…`) are the encodings xterm emits. */
+const MOUSE_REPORT = /^\x1b\[(?:<[\d;]*[Mm]|M)/
+
+/** A focus report (`ESC[I` in, `ESC[O` out), sent when a CLI has focus tracking
+ *  on. Same problem as a mouse report: the terminal is telling the program the
+ *  pointer/focus moved, which is not the user typing. */
+const FOCUS_REPORT = /^\x1b\[[IO]/
+
+/** What the terminal reports on its own rather than what the user typed. Both
+ *  the keystroke clock and the draft buffer read this: neither may be advanced
+ *  by moving the mouse over a pane or clicking into and out of it. */
+function isTerminalReport(data: string): boolean {
+  return MOUSE_REPORT.test(data) || FOCUS_REPORT.test(data)
 }
 
 // ── Edit > Copy bridge ──────────────────────────────────────────────────────
@@ -205,23 +286,77 @@ export type TerminalStatus = 'idle' | 'starting' | 'running' | 'exited' | 'error
  *  parked on the user, which is derived from out-of-band CLI signals. Keep this
  *  the single source: AgentOverviewStatus extends it, and every status-keyed
  *  CSS block and i18n key is written against these exact strings. Adding a
- *  value here is what makes the compiler point at the places that must follow. */
-export type DisplayStatus = TerminalStatus | 'awaiting' | 'question'
+ *  value here is what makes the compiler point at the places that must follow.
+ *
+ *  'awaiting' covers EVERY way a pane can be parked on the user — a permission
+ *  box, an MCP form, or the agent asking a question. They were once two badges
+ *  and the split confused more than it explained: the person reading it only
+ *  needs to know the pane will not move until they answer. Which kind it is
+ *  still matters to code that is not the badge (see `awaitingKind`). */
+export type DisplayStatus = TerminalStatus | 'awaiting'
 
-// The reattach key (`terminal-pty:<resumeKey>`) follows the CLI's session id,
-// but a CLI rewrites its session id on every resume (claude --resume A records
-// a NEW session B). Carry the live PTY id over to the rotated key — otherwise
-// the next restore can't find the running PTY, spawns a second CLI, and the
-// old one lingers detached until the backend janitor reaps it.
+// Every live useTerminal instance, so the module-level helpers below can reach
+// each pane's scrollback snapshot: the app-exit save (App.vue's beforeunload),
+// the session-id rotation, and the orphan-first eviction inside a pane.
+interface TerminalSnapshotHooks {
+  /** The pane's current persistence key (the `terminal-pty:` / `terminal-scroll:` suffix). */
+  currentKey: () => string
+  /** Follow a session-id rotation, so later saves land on the key the next restore reads. */
+  retargetKey: (key: string) => void
+  /** Persist this pane's scrollback right now. */
+  save: () => void
+}
+const _liveTerminals = new Set<TerminalSnapshotHooks>()
+
+/** Persist every live pane's scrollback snapshot.
+ *
+ *  Called from App.vue's `beforeunload`, which is the only notice a hard page
+ *  teardown (⌘R's `role: 'reload'`, app quit) gives — `onScopeDispose` never
+ *  runs there. `beforeunload` cannot await, so this only catches what xterm has
+ *  already parsed; the periodic save inside each pane is what makes the stored
+ *  snapshot complete, and this is the ≤60s catch-up on top of it. */
+export function saveAllScrollSnapshots(): void {
+  for (const hooks of _liveTerminals) {
+    try { hooks.save() } catch { /* one pane must not stop the rest */ }
+  }
+}
+
+/** `terminal-scroll:` keys a live pane still owns. Everything else under that
+ *  prefix is an orphan — no pane will ever write or replay it again. */
+function liveScrollSnapKeys(): Set<string> {
+  const keys = new Set<string>()
+  for (const hooks of _liveTerminals) {
+    const key = hooks.currentKey()
+    if (key) keys.add(`terminal-scroll:${key}`)
+  }
+  return keys
+}
+
+// The persistence key (`terminal-pty:<resumeKey>`, `terminal-scroll:<resumeKey>`)
+// follows the CLI's session id, but a CLI rewrites its session id on every
+// resume (claude --resume A records a NEW session B). Carry both the live PTY id
+// and the scrollback snapshot over to the rotated key — otherwise the next
+// restore can't find the running PTY, spawns a second CLI, and the old one
+// lingers detached until the backend janitor reaps it; and the snapshot, written
+// under the old id but read back under the new one, is invisible history that
+// still competes for the shared localStorage quota.
 export function migrateTerminalPtyKey(oldKey: string, newKey: string): void {
   if (!oldKey || !newKey || oldKey === newKey) return
   try {
-    const pty = localStorage.getItem(`terminal-pty:${oldKey}`)
-    if (pty) {
-      localStorage.setItem(`terminal-pty:${newKey}`, pty)
-      localStorage.removeItem(`terminal-pty:${oldKey}`)
+    for (const prefix of ['terminal-pty:', 'terminal-scroll:']) {
+      const value = localStorage.getItem(prefix + oldKey)
+      if (value == null) continue
+      localStorage.setItem(prefix + newKey, value)
+      localStorage.removeItem(prefix + oldKey)
     }
   } catch { /* ignore */ }
+  // Moving the stored entries is only half the job: the pane that owns them
+  // captured its key at spawn() time and keeps writing to it, so without this
+  // every later save would land back on the dead key — leaving a fresh orphan
+  // behind and freezing the migrated snapshot at the moment of rotation.
+  for (const hooks of _liveTerminals) {
+    if (hooks.currentKey() === oldKey) hooks.retargetKey(newKey)
+  }
 }
 
 // Cached dimensions from any visible terminal. Hidden tabs use these to start
@@ -889,7 +1024,35 @@ interface UseTerminalOptions {
    *  hidden pane keeps paying for display-only upkeep. Read lazily so it tracks
    *  layout changes. Defaults to always on screen. */
   onScreen?: () => boolean
+  /** A copy or paste that came to nothing, for the pane to surface.
+   *
+   *  Reported rather than shown here: this composable deliberately imports
+   *  neither i18n nor useNotify (the pane owns both), the same split onClear
+   *  and onUserResume follow. The diagnostic log line is written regardless —
+   *  it serves a bug report, this serves the person watching the pane. */
+  onClipboardFailure?: (reason: ClipboardFailureReason, chars: number) => void
+  /** The pane's PTY did not survive the disconnect — a backend restart kills
+   *  every PTY, and the ownerless janitor eventually reaps the rest. Reported
+   *  rather than handled here because resuming is the owner's job: only App
+   *  knows the agent, the session id, and how to build the vendor's resume
+   *  command. */
+  onPtyLostWhileDisconnected?: () => void
 }
+
+/** Why a clipboard action produced nothing. One key per user-visible message. */
+export type ClipboardFailureReason =
+  /** Nothing on the clipboard to send (⌘V on an empty one, or a drop that resolved no paths). */
+  | 'empty'
+  /** The pane is still starting and gates stdin; the text was discarded, not queued. */
+  | 'preparing'
+  /** No live session to receive it — never spawned, or the CLI has exited. */
+  | 'no-session'
+  /** A pasted image could not be written to disk, so no path was sent. */
+  | 'image-failed'
+  /** The browser refused the clipboard write, so ⌘C copied nothing. */
+  | 'copy-failed'
+  /** Some of the paste never left: the send queue rejected it, or it timed out. */
+  | 'send-failed'
 
 // Whether this renderer process can create a WebGL context at all, probed once.
 //
@@ -1258,18 +1421,52 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       awaitingInputAt.value > 0 &&
       lastCleanBurstAt.value < awaitingInputAt.value + AWAITING_SETTLE_MS
     ) return 'awaiting'
-    // QUESTION sits just under AWAITING: both park the pane on the user, but a
-    // permission prompt blocks a tool call the agent already decided to make,
-    // so it is the more urgent of the two. It must outrank every idle path
-    // below — including the authoritative turn end, because a turn that ends
-    // ON a question reports turn_complete and would otherwise read as idle.
+    // A question reports the same badge as a permission prompt — both mean the
+    // pane will not move until the user answers. It is kept a separate signal
+    // rather than folded into awaitingInputAt because the two are raised and
+    // released by different code and mean different things to the messaging
+    // gate; only the BADGE is shared. It must outrank every idle path below —
+    // including the authoritative turn end, because a turn that ends ON a
+    // question reports turn_complete and would otherwise read as idle.
     if (
       questionAt.value > 0 &&
       lastCleanBurstAt.value < questionAt.value + AWAITING_SETTLE_MS
-    ) return 'question'
+    ) return 'awaiting'
     if (turnCompleteAt.value > lastCleanBurstAt.value) return 'idle'
     if (nowTick.value - lastCleanBurstAt.value > IDLE_CONFIRM_MS) return 'idle'
     return runningLatched.value ? 'running' : 'idle'
+  })
+
+  /** Which kind of wait the AWAITING badge is currently reporting, for the
+   *  code that still has to tell them apart. Null whenever the badge is
+   *  something else.
+   *
+   *  The badge merged the two; the messaging gate must not. What this splits on
+   *  is NOT who asked — it is whether a widget is currently on screen eating
+   *  keystrokes:
+   *
+   *   • 'permission' — something is drawn and waiting for a choice. Delivery
+   *     writes to the PTY, so a message injected now is swallowed as that
+   *     widget's answer instead of starting a turn. Raised by markNeedsInput,
+   *     whose callers are the notification hook and the screen watcher, and
+   *     both of those only fire while a box is painted. A Claude
+   *     AskUserQuestion box lands here too, and belongs here: it is a select
+   *     widget, and typing into it is exactly as destructive as answering a
+   *     permission prompt by accident.
+   *   • 'question' — the agent asked something and went back to its ordinary
+   *     prompt, so the pane can take a turn normally. Raised by markQuestion
+   *     (a turn whose text ends on a question). Those panes reached the gate as
+   *     'idle' before any of this existed, and holding them back now would newly
+   *     park them out of dispatch.
+   *
+   *  See messagingHoldKey. Resolved in the same order displayStatus resolves
+   *  them, so a pane with both flags lit reports the more restrictive one. */
+  const awaitingKind = computed<'permission' | 'question' | null>(() => {
+    if (displayStatus.value !== 'awaiting') return null
+    const permission =
+      awaitingInputAt.value > 0 &&
+      lastCleanBurstAt.value < awaitingInputAt.value + AWAITING_SETTLE_MS
+    return permission ? 'permission' : 'question'
   })
   const BUFFER_CAP = 128 * 1024
   const redrawGuard = createRedrawGuard()
@@ -1478,7 +1675,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       const name = candidates[idx]
       closeMentionMenu()
       term.focus()
-      if (name) {
+      if (name && inputTransportReady()) {
         void backend.send('terminal.input', {
           terminal_session_id: sessionId.value,
           data: name + ' ',
@@ -1548,11 +1745,15 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       } else if (e.key === 'Backspace') {
         e.preventDefault(); e.stopPropagation()
         closeMentionMenu(); term.focus()
-        void backend.send('terminal.input', { terminal_session_id: sessionId.value, data: '\x7f' })
+        if (inputTransportReady()) {
+          void backend.send('terminal.input', { terminal_session_id: sessionId.value, data: '\x7f' })
+        }
       } else if (e.key.length === 1) {
         e.preventDefault(); e.stopPropagation()
         closeMentionMenu(); term.focus()
-        void backend.send('terminal.input', { terminal_session_id: sessionId.value, data: e.key })
+        if (inputTransportReady()) {
+          void backend.send('terminal.input', { terminal_session_id: sessionId.value, data: e.key })
+        }
       }
     }
 
@@ -1615,19 +1816,70 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // and strand it there whenever the window returns without handing focus back
   // to the textarea, so every later keystroke echoes a frame late.
   let _blurredWithWindow = false
+
+  // ── Edit > Copy: report the selection instead of being asked for it ────────
+  // main used to evaluate a global in this page when the user pressed ⌘C, on a
+  // 300ms deadline (menu.ts). A renderer busy painting CLI output loses that
+  // race, and the fallback copies nothing at all over a terminal — so Copy
+  // silently did nothing exactly when the pane was busiest. Pushing moves that
+  // work to when the selection changes, off the path the user waits on.
+  //
+  // Only the focus owner reports: panes in a window share one WebContents, so
+  // a background pane's stale highlight would otherwise answer a Copy aimed at
+  // this one. Same rule the global it replaces followed.
+  let _selectionPushTimer: ReturnType<typeof setTimeout> | null = null
+  // Long enough to coalesce a drag, far short of the time it takes to let go of
+  // the mouse and reach for ⌘C.
+  const SELECTION_PUSH_DEBOUNCE_MS = 60
+  const _reportSelection = (selection: string): void => {
+    try {
+      window.agentTeam?.reportTerminalSelection?.(selection)
+    } catch { /* no bridge (tests, plugin preload) — Copy keeps its own fallback */ }
+  }
+  const _cancelSelectionPush = (): void => {
+    if (!_selectionPushTimer) return
+    clearTimeout(_selectionPushTimer)
+    _selectionPushTimer = null
+  }
+  const _onSelectionChange = (): void => {
+    if (_focusOwner !== term) return
+    _cancelSelectionPush()
+    // hasSelection() is a boolean; getSelection() joins every selected row. On
+    // each change the latter would make a drag across a long scrollback pay for
+    // the whole range on every mouse move — the very renderer stall this exists
+    // to route around. So clearing reports at once (cheap, and a stale entry
+    // would let Copy return text the user just deselected) while a growing
+    // selection is read once, after the drag settles.
+    if (!term.hasSelection()) {
+      _reportSelection('')
+      return
+    }
+    _selectionPushTimer = setTimeout(() => {
+      _selectionPushTimer = null
+      if (_focusOwner === term) _reportSelection(term.getSelection())
+    }, SELECTION_PUSH_DEBOUNCE_MS)
+  }
+
   // Every path that concludes "this pane no longer holds focus" goes through
   // here, so Edit > Copy ownership can never outlive the keybinding context —
   // a stale owner would answer Copy with an old selection and suppress main's
   // fallback for good.
   const _releaseTerminalFocus = (): void => {
     _ownsTerminalFocus = false
-    if (_focusOwner === term) _focusOwner = null
+    if (_focusOwner === term) {
+      _focusOwner = null
+      _cancelSelectionPush()
+      _reportSelection('') // main must not answer Copy from a pane that lost focus
+    }
     setContext('terminalFocus', false)
   }
   const _onTermFocus = (): void => {
     _blurredWithWindow = false
     _ownsTerminalFocus = true
     _focusOwner = term  // answers Edit > Copy for this window
+    // Publish what is already highlighted, so Copy is right from the first
+    // press rather than only after the next selection change.
+    _reportSelection(term.hasSelection() ? term.getSelection() : '')
     setContext('terminalFocus', true)
   }
   const _onTermBlur = (): void => {
@@ -1659,6 +1911,10 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       _releaseTerminalFocus()
     }
   }
+
+  // Subscribed for the life of the pane; the handler is a no-op unless this
+  // pane owns focus, so background panes cost one comparison per change.
+  const _selectionDisposer = term.onSelectionChange(_onSelectionChange)
 
   // xterm's CompositionHelper latches on compositionstart and only unlatches on
   // compositionend — which macOS does not reliably deliver when the user
@@ -1717,6 +1973,26 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // outrun a human is a held ⌘C, which gates its own line on e.repeat.
   const _clipboardDiag = (message: string, level: 'info' | 'warning' = 'info'): void =>
     diagLog(backend, 'clipboard', message, level)
+
+  /**
+   * Report a clipboard failure to both audiences at once.
+   *
+   * A log line answers "why did that paste vanish?" after the fact; it does
+   * nothing for the person watching the pane as it happens — and "I pasted and
+   * nothing appeared" is exactly the report of someone who was given no
+   * feedback. So the log keeps the detail a maintainer needs (pane, sizes, the
+   * underlying error) and the pane is told the one thing the user needs, which
+   * is that it failed at all. Pairing them in a single call is what stops a
+   * future failure path from being wired to only one of the two.
+   */
+  const _clipboardFailure = (
+    logMessage: string,
+    reason: ClipboardFailureReason,
+    chars = 0
+  ): void => {
+    _clipboardDiag(logMessage, 'warning')
+    opts?.onClipboardFailure?.(reason, chars)
+  }
 
   // Set when a reattached pane is waiting to repaint. We never force_redraw at
   // reattach time: the renderer is mid-reflow then (reload, or a hidden tab
@@ -2012,9 +2288,10 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
             },
             (err) => {
               if (firstPress) {
-                _clipboardDiag(
+                _clipboardFailure(
                   `pane=${paneId} Cmd+C clipboard write rejected (${selection.length} chars): ${String(err)}`,
-                  'warning'
+                  'copy-failed',
+                  selection.length
                 )
               }
             }
@@ -2080,9 +2357,9 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
           // cannot work over a terminal — and until now ⌘V on an empty
           // clipboard returned from here without a trace, which is the exact
           // shape of "I pasted and the text just disappeared".
-          _clipboardDiag(
+          _clipboardFailure(
             `pane=${paneId} paste ignored — the clipboard held neither text nor an image`,
-            'warning'
+            'empty'
           )
           return
         }
@@ -2099,7 +2376,12 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
           // saveClipboardImage resolves null (it never rejects) when the bridge
           // is missing or main declined the media type. The screenshot then
           // silently produced nothing — the same "paste did nothing" symptom.
-          else _clipboardDiag(`pane=${paneId} clipboard image could not be saved — nothing pasted`, 'warning')
+          else {
+            _clipboardFailure(
+              `pane=${paneId} clipboard image could not be saved — nothing pasted`,
+              'image-failed'
+            )
+          }
         })
         return
       }
@@ -2455,7 +2737,19 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // terminal history survives a reload or restart. On next spawn of the same
   // resumeKey, the snapshot is replayed into the fresh xterm instance before
   // the new PTY starts writing — giving instant scrollback access to prior work.
-  const SCROLL_SNAP_MAX = 256 * 1024  // 256 KB rolling cap
+  // Per-pane cap, in characters. localStorage bills in UTF-16, so a cap of N
+  // characters costs 2N bytes of the ~5 MB per-origin quota shared by every
+  // pane: at the old 256 KB cap ten panes exhausted it, and from there each
+  // save evicted a neighbour (measured: 2000 serialized lines ≈ 202 KB). That
+  // was survivable while the only save was at teardown; with the periodic save
+  // below it would turn occasional eviction into constant churn. 64 KB ≈ 128 KB
+  // of quota, so ~40 panes fit — and at the measured ~100 characters per line
+  // it still keeps ~640 lines of history per pane. Chosen over a cap that
+  // scales with the live pane count because the quota is shared with snapshots
+  // of panes that no longer exist (and with other renderer state), so a
+  // computed budget would be confidently wrong; the halving loop in
+  // saveScrollSnapshot already adapts to real pressure.
+  const SCROLL_SNAP_MAX = 64 * 1024
   // Scrollback is measured in lines, not bytes: the payload is produced by
   // serializing xterm's buffer, and the only safe way to shrink it is to
   // serialize fewer lines. Slicing the string would cut through an escape
@@ -2466,6 +2760,11 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // unlike the old raw buffer there is nothing to clear — the content lives in
   // xterm itself, which is still on screen at that point.
   let snapshotDiscarded = false
+  // Set once this pane's xterm has had the snapshot written into it. Both entry
+  // points (tryReattach on a live PTY, _doCreate on a fresh one) read the same
+  // stored payload, and replaying it a second time into the same terminal would
+  // print the history twice.
+  let snapshotReplayed = false
   // Marks a snapshot as a serialized buffer. Snapshots written before this
   // format existed are raw PTY bytes: replaying those is exactly the bug this
   // format was introduced to fix, so an unmarked snapshot is dropped rather
@@ -2484,18 +2783,32 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     } catch { return '' }
   }
   // localStorage quota is shared across every pane's snapshot, and snapshots
-  // of closed panes linger. On overflow, evict another pane's stale snapshot
-  // and retry — dropping old history beats silently losing the newest.
-  function evictLargestOtherSnapshot(selfKey: string): boolean {
-    let victim = ''
-    let victimLen = -1
+  // of closed panes linger. On overflow, evict another snapshot and retry —
+  // dropping old history beats silently losing the newest.
+  //
+  // Orphans go first: a `terminal-scroll:` key no live pane owns is history
+  // nobody can ever replay, while a live pane's snapshot is scrollback the user
+  // may still come back to. Only when there is no orphan left do live panes
+  // start taking from each other (which is what the periodic save would
+  // otherwise make continuous).
+  function evictOtherSnapshot(selfKey: string): boolean {
+    const live = liveScrollSnapKeys()
+    let orphan = ''
+    let orphanLen = -1
+    let owned = ''
+    let ownedLen = -1
     try {
       for (let i = 0; i < localStorage.length; i++) {
         const k = localStorage.key(i)
         if (!k || k === selfKey || !k.startsWith('terminal-scroll:')) continue
         const len = (localStorage.getItem(k) ?? '').length
-        if (len > victimLen) { victim = k; victimLen = len }
+        if (live.has(k)) {
+          if (len > ownedLen) { owned = k; ownedLen = len }
+        } else if (len > orphanLen) {
+          orphan = k; orphanLen = len
+        }
       }
+      const victim = orphan || owned
       if (!victim) return false
       localStorage.removeItem(victim)
       return true
@@ -2505,9 +2818,27 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // TUI's transient full-screen view (vim, a pager) out of the snapshot — only
   // the normal buffer, which holds the conversation, is worth restoring; the
   // CLI repaints its own alt-buffer view when it reattaches.
+  //
+  // A `fullScreenTui` vendor inverts that: its CONVERSATION is
+  // the alt buffer, so excluding it saved an all but empty snapshot and both the
+  // periodic save and the reattach replay were doing nothing for those panes.
+  // Include the alt buffer there and strip the enter sequence, so the screen
+  // replays as normal-buffer lines instead of parking the terminal in the
+  // alternate buffer (see stripAltScreenEnter).
+  //
+  // Ceiling: xterm keeps NO scrollback for the alternate buffer, so this
+  // recovers the LAST SCREENFUL of a running session, never the whole
+  // conversation. History still accumulates across restarts — the replayed
+  // snapshot lands in the normal buffer, which the next save serializes ahead
+  // of the current screen.
   function serializeSnapshot(lines: number): string {
+    const altIsHistory = terminalSpecFor(activeAgentKey)?.fullScreenTui === true
     try {
-      return serializer.serialize({ scrollback: lines, excludeAltBuffer: true })
+      const payload = serializer.serialize({
+        scrollback: lines,
+        excludeAltBuffer: !altIsHistory,
+      })
+      return altIsHistory ? stripAltScreenEnter(payload) : payload
     } catch {
       return ''
     }
@@ -2530,7 +2861,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         localStorage.setItem(key, SNAP_FORMAT + payload)
         return
       } catch {
-        if (evictLargestOtherSnapshot(key)) continue
+        if (evictOtherSnapshot(key)) continue
         if (lines > SCROLL_SNAP_MIN_LINES) {
           lines = Math.floor(lines / 2)
           payload = serializeSnapshot(lines)
@@ -2542,11 +2873,137 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     }
   }
 
+  // ── Periodic snapshot ────────────────────────────────────────────────────────
+  // Teardown is not a reliable save point: a hard page reload (⌘R is Electron's
+  // `role: 'reload'`) and an app restart both drop the renderer without running
+  // onScopeDispose, so the pane came back with nothing to replay. Save while the
+  // pane is idle instead, riding the per-pane status tick above (1s on screen,
+  // 10s off) rather than adding an interval of its own.
+  //
+  // Saving at idle is also MORE faithful than saving at teardown: output is
+  // coalesced for _BACKGROUND_COALESCE_MS before it reaches xterm, and the
+  // teardown path serializes the buffer BEFORE cleanupSession flushes that
+  // pending chunk — so the teardown snapshot is structurally missing its last
+  // ~100ms. After SNAP_QUIET_MS of silence there is nothing left in flight.
+  const SNAP_QUIET_MS = 3_000       // PTY silence (incl. TUI repaints) before saving
+  const SNAP_MIN_GAP_MS = 60_000    // floor on how often a pane rewrites its snapshot
+  let lastSnapSavedAt = 0
+  // lastRawActivityAt as of the last save. Any byte since then — TUI repaint
+  // included — means the buffer may have changed; equal means it cannot have,
+  // so there is nothing to re-serialize. Cheaper and steadier than diffing the
+  // payload, which would cost a 9ms serialize per tick just to find no change.
+  let lastSnapActivityAt = 0
+  function maybeSaveScrollSnapshot(): void {
+    // The session ended: its snapshot was deliberately removed (see the exit
+    // handler). Writing it back here would resurrect a closed session's
+    // scrollback for the next pane that reuses the key.
+    if (snapshotDiscarded) return
+    if (displayStatus.value === 'running') return
+    const raw = lastRawActivityAt.value
+    if (raw === 0) return                      // nothing has ever been rendered
+    if (raw === lastSnapActivityAt) return     // unchanged since the last save
+    const now = Date.now()
+    if (now - raw < SNAP_QUIET_MS) return      // still mid-output / mid-repaint
+    if (now - lastSnapSavedAt < SNAP_MIN_GAP_MS) return
+    saveScrollSnapshot()
+    lastSnapSavedAt = now
+    lastSnapActivityAt = raw
+  }
+  watch(nowTick, maybeSaveScrollSnapshot)
+
+  const _snapshotHooks: TerminalSnapshotHooks = {
+    currentKey: () => persistKey,
+    retargetKey: (key: string) => { persistKey = key },
+    save: saveScrollSnapshot,
+  }
+  _liveTerminals.add(_snapshotHooks)
+
   // Rolling tail of what the user typed on the current line, used to spot the
   // `/clear` command. Lives out here (rather than inside bindSessionHandlers)
   // because the manual-paste path bypasses term.onData and has to feed it too —
   // otherwise pasting "/clear" and pressing Enter stops triggering onClear.
   let inputBuffer = ''
+
+  /** When a real keystroke last reached this pane (mouse reports excluded).
+   *  Zero until the user types. */
+  const lastUserKeyAt = ref(0)
+
+  /** Past this, an unsent line stops counting as a draft. The buffer itself is
+   *  kept (it is also how `/clear` is recognised) — only the claim on delivery
+   *  expires.
+   *
+   *  It exists because the buffer can only be emptied by a key that says so
+   *  (Enter, Backspace, Ctrl+C/U/W, Escape), and there are inputs no such key
+   *  ever follows: a permission prompt or an AskUserQuestion box answered with
+   *  a bare `1`/`y`, which the CLI consumes on the keypress. The transition out
+   *  of those two states clears the buffer below, and this is the backstop for
+   *  every case that transition does not see. A minute is long enough that a
+   *  real half-written line is still protected while someone is thinking about
+   *  it, and the alternative to expiring at all is a pane whose messages never
+   *  arrive again — and which `syncPaneBusy` keeps reporting as busy. */
+  const DRAFT_STALE_MS = 60_000
+
+  /** Longest buffer `onLeftUserPrompt` will throw away. The latch it exists to
+   *  break is a prompt answered with a bare `1`/`2`/`y`/`n`, so anything longer
+   *  than that is a line the user was writing, not an answer the CLI consumed —
+   *  and leaving a prompt is not proof it was answered at all. `idle_prompt` and
+   *  the other resolved Notification types end `awaiting` on their own (see
+   *  cliAwaitingInput's RESOLVED_NOTIFICATION_TYPES), so an unconditional clear
+   *  there would drop a real half-written line and let the next injection submit
+   *  what was left of it. Those longer lines fall to DRAFT_STALE_MS instead. */
+  const SINGLE_KEY_ANSWER_MAX = 2
+
+  const draftPending = ref(false)
+
+  /** True while that line holds something the user has not submitted yet.
+   *
+   *  Published because an unsent draft is not visible to anyone outside this
+   *  composable, and injecting into a pane that has one appends the injected
+   *  text to the draft and submits both together — see App.vue's messaging
+   *  idle gate, which holds delivery on it. */
+  const hasDraft = computed(() =>
+    draftPending.value &&
+    lastUserKeyAt.value > 0 &&
+    // nowTick, not Date.now(): a computed reading the clock directly would be
+    // cached at whatever the first read saw and never expire.
+    nowTick.value - lastUserKeyAt.value < DRAFT_STALE_MS
+  )
+
+  function syncDraft(): void {
+    draftPending.value = inputBuffer.trim() !== ''
+  }
+
+  /** Whether the program on the other end of this PTY has mode 2004 on right
+   *  now, as xterm parsed it off that program's own output.
+   *
+   *  A plain getter, not a ref: xterm mutates `term.modes` outside Vue, so a
+   *  computed would cache the first answer. Published because an injection is
+   *  written straight to the PTY without going through xterm, so App.vue's
+   *  injectText has no other way to know whether guards will be understood —
+   *  and a CLI that dropped to a sub-shell, a bare bash, or a raw login prompt
+   *  turns the mode off while the pane's vendor key still says it uses it. */
+  function isBracketedPasteActive(): boolean {
+    return term.modes.bracketedPasteMode === true
+  }
+
+  /** The other half of the same problem, and the precise one: a prompt answered
+   *  with a single key never reaches Enter, so nothing above empties the buffer
+   *  and the pane stays "being typed at" for good. Leaving `awaiting`/`question`
+   *  is the moment the CLI took that answer, so whatever the line held is gone.
+   *
+   *  Deliberately narrow. Clearing on any turn signal instead would drop a line
+   *  the user really is half-way through writing while the agent works, which is
+   *  the exact case this gate exists for. And someone who answered a prompt and
+   *  kept typing is still covered — lastUserKeyAt holds delivery on its own for
+   *  a few seconds after every keystroke.
+   *
+   *  Wired further down, where displayStatus is safe to evaluate. */
+  function onLeftUserPrompt(now: DisplayStatus, before: DisplayStatus): void {
+    if (before !== 'awaiting' || now === 'awaiting') return
+    if (inputBuffer.trim().length > SINGLE_KEY_ANSWER_MAX) return
+    inputBuffer = ''
+    syncDraft()
+  }
 
   // Spawn-phase input gate. A pane is "preparing" for as long as its CLI is
   // booting (starting → checking-dialog → settling → injecting-role), and the
@@ -2562,12 +3019,44 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   let _stdinGated = false
   let _gatedInput = ''
   const GATED_INPUT_MAX = 4096
+  /** When the held buffer was last written to, for the staleness bound below. */
+  let _gatedInputAt = 0
+  /** Past this, a held buffer is a stale reflex rather than a pending line. */
+  const GATED_INPUT_MAX_AGE_MS = 60_000
+
+  /**
+   * True while the transport can actually carry a keystroke.
+   *
+   * Input must never ride wsClient's send queue. That queue exists so a request
+   * survives a brief reconnect, which is right for a status poll and wrong for
+   * a keystroke: on a fast reconnect it replays the whole burst into the TUI at
+   * once — every Enter and Ctrl-C the user pressed at a pane that looked frozen
+   * — and on a slow one (backoff reaches 30 s, the queue's timeout is 10 s) it
+   * drops them with no error at all, because these sends are fire-and-forget.
+   * Refusing is the honest option; the pane's disconnected overlay is what
+   * tells the user why their typing is going nowhere.
+   */
+  function inputTransportReady(): boolean {
+    return backend.status.value === 'connected'
+  }
 
   /** Replay what the user typed while the pane was still preparing. */
   function _flushGatedInput(): void {
+    if (!_gatedInput) return
+    // Hold the buffer while the transport is down rather than burning it on a
+    // send that cannot leave; the reconnect watcher flushes it.
+    if (!inputTransportReady()) return
+    // …but only while it is still plausibly what the user meant to send. A PTY
+    // survives an ownerless hour, so without an age bound a buffer typed before
+    // a long outage would land minutes later as one burst — every Enter in it
+    // included. That is the same failure the refuse-don't-queue rule exists to
+    // prevent, arriving by the one path allowed to hold input.
+    if (Date.now() - _gatedInputAt > GATED_INPUT_MAX_AGE_MS) {
+      _gatedInput = ''
+      return
+    }
     const pending = _gatedInput
     _gatedInput = ''
-    if (!pending) return
     // A pane that died while preparing has nowhere to replay to; dropping the
     // buffer is the only option left, and sending would clear isStopped for a
     // session that no longer exists.
@@ -2596,45 +3085,78 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   /** Input bookkeeping shared by term.onData and the manual-paste path. */
   function noteUserInput(text: string): void {
     if (isStopped.value) { isStopped.value = false; opts?.onUserResume?.() }
+    // A clipboard paste is the user putting something in the composer they have
+    // not sent yet, so it counts as input for the draft gate exactly like typing.
+    lastUserKeyAt.value = Date.now()
     // Only what follows the last CR is still on the current line — without this
     // a pasted "/clear\n" leaves "/clear" behind and the user's NEXT Enter
     // fires onClear again.
     const lastBreak = text.lastIndexOf('\r')
     if (lastBreak >= 0) inputBuffer = ''
-    inputBuffer += text.slice(lastBreak + 1).replace(/[\x00-\x1f\x7f]/g, '')
+    inputBuffer += stripInputSequences(text.slice(lastBreak + 1))
     if (inputBuffer.length > 100) inputBuffer = inputBuffer.slice(-100)
+    syncDraft()
   }
 
   // Wire input/output/exit handlers for the current sessionId. Shared by a fresh
   // spawn and a reattach so both bind identically.
   function bindSessionHandlers(): void {
     inputBuffer = ''
+    syncDraft()
     inputDisposer = term.onData((data) => {
+      // Before the gates below: a keystroke held back for a preparing pane is
+      // still the user typing, and refusing to send one does not make the
+      // person at the keyboard go away.
+      if (!isTerminalReport(data)) lastUserKeyAt.value = Date.now()
       if (_stdinGated) {
         // Bounded so a pane stuck in preparation cannot grow this forever. Past
         // the cap the oldest keystrokes go, since those are the ones the user
         // has already given up on.
         _gatedInput = (_gatedInput + data).slice(-GATED_INPUT_MAX)
+        _gatedInputAt = Date.now()
         return
       }
+      // Backstop for the disconnected overlay: refuse rather than queue. The
+      // overlay already blocks the pointer, but focus can still be in the
+      // terminal when the socket drops mid-keystroke.
+      if (!inputTransportReady()) return
       if (data === '\r' || data === '\n' || data === '\r\n') {
         if (isStopped.value) { isStopped.value = false; opts?.onUserResume?.() }
         if (inputBuffer.trim() === '/clear' && opts?.onClear) {
           inputBuffer = ''
+          syncDraft()
           opts.onClear()
           return
         }
         inputBuffer = ''
       } else if (data === '\x7f' || data === '\b') {
         inputBuffer = inputBuffer.slice(0, -1)
+      } else if (data === '\x03' || data === '\x15' || data === '\x1b') {
+        // The three ways a composer is emptied without sending it: Ctrl+C,
+        // Ctrl+U, and Escape. Tracked because the draft signal latches
+        // otherwise — the line is gone from the CLI's input box while this
+        // buffer still holds it, and the pane stays "being typed at" until the
+        // user's next Enter.
+        inputBuffer = ''
+      } else if (data === '\x17') {
+        // Ctrl+W deletes back to the previous word boundary rather than
+        // clearing, so mirror that instead of emptying the buffer: treating it
+        // as a clear would call a still-half-written line finished, which is
+        // the failure this whole gate exists to prevent.
+        inputBuffer = inputBuffer.replace(/\s*\S+\s*$/, '')
       } else if (data.length === 1 && data.charCodeAt(0) >= 32) {
         if (isStopped.value) { isStopped.value = false; opts?.onUserResume?.() }
         inputBuffer += data
       } else if (data.length > 1) {
         if (isStopped.value) { isStopped.value = false; opts?.onUserResume?.() }
-        inputBuffer += data.replace(/[\x00-\x1f\x7f]/g, '')
+        // Terminal reports ride this same channel and are not typed text.
+        // Dropping escape sequences is not enough for the mouse ones: X10
+        // encodes the button and coordinates as three PRINTABLE bytes after
+        // `ESC[M`, which would land in the buffer as a draft that never clears.
+        if (!isTerminalReport(data)) inputBuffer += stripInputSequences(data)
       }
       if (inputBuffer.length > 100) inputBuffer = inputBuffer.slice(-100)
+      syncDraft()
 
       // Only the first keystroke of a burst is timed, for the reason the
       // backend's probe does the same: a fast typist re-arming the clock on
@@ -2757,15 +3279,40 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     } catch {
       return false  // backend unreachable; let the caller decide (it will spawn)
     }
-    // PTY is alive — do NOT replay the snapshot here. The snapshot contains
-    // cursor-positioning escape codes written at the prior terminal width;
-    // replaying them into a fresh xterm (which may differ in width) garbles
-    // the TUI layout. The live PTY will repaint cleanly once the reconciler
-    // fires terminal.reattach with the settled cols/rows (~2 s). Snapshot
-    // replay is reserved for _doCreate (PTY dead, falls back to --resume).
+    // PTY is alive. Replay the stored scrollback into this fresh xterm before
+    // rebinding, so the pane comes back with its history rather than blank.
+    //
+    // This used to be skipped, and the reason has expired. The snapshot was raw
+    // PTY bytes back then — absolute cursor moves whose coordinates only hold at
+    // the width they were recorded at, so replaying them at another width
+    // garbled the layout. fab56a5 changed the payload to a SerializeAddon
+    // rendering: glyphs and SGR, no cursor positioning, so it can only re-wrap
+    // at a new width, never land in the wrong cell. That is the same property
+    // the _doCreate replay already relies on, and the `nv1` format marker in
+    // loadScrollSnapshot drops any pre-fab56a5 raw snapshot rather than render
+    // it. What was left instead was a silent loss: a reattached pane showed only
+    // what the CLI repaints on the deferred SIGWINCH — a whole screen for a
+    // full-screen TUI, but just the prompt line for a line-mode CLI (aider) or a
+    // shell, with the conversation above it simply gone.
+    //
+    // The live CLI's repaint (deferred to the reconciler, ~2 s) writes over the
+    // viewport, so it replaces the snapshot's last screenful and leaves the
+    // history above it intact. Ordering matters twice: the write must come
+    // BEFORE the mouse-mode reset below (a serialized buffer ends with the modes
+    // it captured, mouse tracking and bracketed paste among them) and before
+    // bindSessionHandlers, so live output can never interleave into it.
+    if (!snapshotReplayed) {
+      const snap = loadScrollSnapshot()
+      if (snap) {
+        snapshotReplayed = true
+        term.write(snap)
+      }
+    }
     // Reset mouse tracking modes so no stale xterm mouse state forwards events
     // to the process's stdin before it has a chance to re-enable what it needs.
-    term.write('\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?1004l\x1b[?2004l')
+    // Bracketed paste is deliberately NOT reset: the PTY is the same live
+    // process, so the mode the snapshot restores is the mode it is still in.
+    term.write(MOUSE_MODE_RESET)
     sessionId.value = prev
     status.value = 'running'
     if (reattachOpts?.agentKey) activeAgentKey = reattachOpts.agentKey
@@ -2781,6 +3328,12 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // same deferred-redraw pattern as tryReattach: cols/rows 0 skips the immediate
   // SIGWINCH; the reconciler fires it once the width has settled.
   async function reattachAfterReconnect(): Promise<void> {
+    // 'running' is the only state that owns a PTY: `status` goes starting →
+    // running on create and never back, and the idle a user sees is
+    // displayStatus, derived from output silence, not a state of its own. A
+    // pane still in 'starting' may hold a PREVIOUS session id that its
+    // in-flight create is about to replace, so probing on it would reattach to
+    // the wrong PTY.
     if (status.value !== 'running' || !sessionId.value) return
     const id = sessionId.value
     try {
@@ -2795,13 +3348,19 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         term.writeln('\r\n\x1b[33m[session ended while disconnected]\x1b[0m')
         rememberSessionId('')
         cleanupSession()
+        // The PTY is gone for good (a backend restart kills all of them), but
+        // the CLI's own session usually is not: hand the pane to the owner so
+        // it can resume that conversation instead of leaving a dead pane.
+        opts?.onPtyLostWhileDisconnected?.()
         return
       }
     } catch {
       return // WS not ready yet; the next status-change will retry
     }
-    // Reset mouse tracking modes on reconnect for the same reason as tryReattach.
-    term.write('\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?1004l\x1b[?2004l')
+    // Reset mouse tracking modes on reconnect for the same reason as tryReattach
+    // — and leave bracketed paste alone for the same reason too. This path does
+    // not even replay: xterm's view of the mode never stopped being correct.
+    term.write(MOUSE_MODE_RESET)
     cleanupSession()
     bindSessionHandlers()
     pendingReattachRedraw = true
@@ -2812,7 +3371,16 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // output resumes and the TUI repaints at the correct width.
   watch(() => backend.status.value, (newStatus, oldStatus) => {
     if (newStatus === 'connected' && oldStatus !== 'connected') {
-      void reattachAfterReconnect()
+      // Held keys go only AFTER the reattach settles. Flushing alongside it
+      // raced: reattachAfterReconnect yields at its first await, so a synchronous
+      // flush wrote to a PTY this connection had not reclaimed yet — the CLI
+      // echoed into a dropped output stream — or, when the PTY had died, wrote
+      // to a dead session id and emptied the buffer against a send that could
+      // never land. Settling first means the flush sees the real outcome:
+      // reclaimed, or exited and correctly discarded.
+      void reattachAfterReconnect().then(() => {
+        if (!_stdinGated) _flushGatedInput()
+      })
     }
   })
 
@@ -2824,6 +3392,10 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // container is genuinely measurable — i.e. when the tab is shown.
   // A ref so displayStatus can reflect a parked (deferred) spawn as idle.
   const pendingSpawn = shallowRef<SpawnOptions | null>(null)
+  // Registered here rather than beside onLeftUserPrompt itself: watch() runs its
+  // source once to capture the initial value, and displayStatus reads
+  // pendingSpawn — which does not exist until this line.
+  watch(displayStatus, onLeftUserPrompt)
   let activeCreateGeneration: string | null = null
   let pendingCreateCancel: Promise<boolean> | null = null
   const createCancelRequests = new Map<string, Promise<boolean>>()
@@ -2941,15 +3513,19 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // Replay stored scrollback into the fresh xterm so prior history is visible
     // before the new PTY starts writing. Only for resume spawns that have a saved
     // snapshot — fresh spawns (no resumeKey) have no snapshot to replay.
-    if (opts.resumeKey && opts.restoreMode !== 'fresh') {
+    if (opts.resumeKey && opts.restoreMode !== 'fresh' && !snapshotReplayed) {
       // The snapshot is a serialized buffer — glyphs and colours, no cursor
       // positioning — so it renders correctly whatever width this pane now has.
       // It re-wraps; it cannot land in the wrong cell.
       const snap = loadScrollSnapshot()
       if (snap) {
+        snapshotReplayed = true
         term.write(snap)
         // Reset any mouse tracking modes the previous session may have enabled.
-        term.write('\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?1004l\x1b[?2004l')
+        // Bracketed paste goes too, and only here: the snapshot just replayed
+        // the OLD session's `?2004h`, but the process about to start is a new
+        // one that has not asked for it yet.
+        term.write(MOUSE_MODE_RESET_NEW_PROCESS)
         term.write('\r\n\x1b[2m\x1b[38;5;240m─── reconnected ───\x1b[0m\r\n')
       }
     }
@@ -3216,26 +3792,64 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     await createWhenMeasurable()
   }
 
-  function pasteText(text: string): void {
-    if (!sessionId.value || status.value === 'exited' || status.value === 'error') return
+  /** Returns false when nothing was sent, so a caller staging a paste in parts
+   *  can stop rather than send the tail on its own — an Enter that arrives
+   *  without the text it was meant to submit is its own kind of wrong. */
+  function pasteText(text: string): boolean {
+    if (!sessionId.value || status.value === 'exited' || status.value === 'error') return false
+    if (!inputTransportReady()) return false
     void backend.send('terminal.input', {
       terminal_session_id: sessionId.value,
       data: text
     })
+    return true
+  }
+
+  /**
+   * pasteText, but the caller can tell whether the write actually left.
+   *
+   * Rejects on the three ways a chunk goes missing: the session disappeared
+   * mid-paste, the transport refused it (a full send queue or a timeout, both
+   * of which reject), or the backend answered `ok: false` — which wsClient
+   * resolves rather than rejects, so it has to be checked here.
+   */
+  function _sendPasteChunk(text: string): Promise<unknown> {
+    if (!sessionId.value || status.value === 'exited' || status.value === 'error') {
+      return Promise.reject(new Error('session went away mid-paste'))
+    }
+    if (!inputTransportReady()) {
+      return Promise.reject(new Error('backend disconnected mid-paste'))
+    }
+    return backend
+      .send('terminal.input', { terminal_session_id: sessionId.value, data: text })
+      .then((reply) => {
+        if (reply && typeof reply === 'object' && (reply as { ok?: unknown }).ok === false) {
+          throw new Error('backend refused the write')
+        }
+        return reply
+      })
   }
 
   /**
    * Send clipboard text the way programmatic injection already does.
    *
    * xterm's built-in paste writes the whole clipboard in one call and decides
-   * on bracketing from ITS view of DEC mode 2004. That view is wrong in exactly
-   * the case that hurts most: a reattached pane runs a fresh xterm (mode off by
-   * default, and tryReattach explicitly resets it) while the CLI on the other
-   * end is still in bracketed-paste mode. An unbracketed multi-line paste then
-   * reaches the CLI as one Enter per line — the first line submits and the rest
-   * spill into the next prompt, which is the "paste gets cut off" report.
-   * So bracket by what the AGENT supports, and reuse the 512-byte chunking that
-   * App.vue's injectText relies on to keep large pastes off the tty's limits.
+   * on bracketing from ITS view of DEC mode 2004. That view used to be wrong in
+   * exactly the case that hurts most: reattaching reset the mode behind xterm's
+   * back while the CLI on the other end was still in bracketed paste, so an
+   * unbracketed multi-line paste reached it as one Enter per line — the first
+   * line submits, the rest spill into the next prompt. That is the "paste gets
+   * cut off" report, and the reset that caused it is gone from the live-PTY
+   * paths (see MOUSE_MODE_RESET), so xterm's view is now trustworthy there.
+   *
+   * The agent fallback below stays as a belt-and-braces for the one path that
+   * still resets — a resume spawn — and for a CLI that enabled the mode before
+   * this pane was watching. It is limited to multi-line text on purpose: only
+   * multi-line text can be split by stray Enters, and wrapping a single line
+   * for a shell that never asked would show it a literal "[200~".
+   *
+   * Chunking at 512 bytes is the same thing App.vue's injectText does, to keep
+   * large pastes off the tty's write limits.
    */
   function pasteFromClipboard(text: string): void {
     // Both rejections below are silent by design, and that is what made "the
@@ -3245,25 +3859,30 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     if (!text) {
       // Reached from ⌘V on an empty clipboard and from a file drop that
       // resolved no paths, so the wording stays neutral about the source.
-      _clipboardDiag(`pane=${paneId} paste ignored — no text to send`, 'warning')
+      _clipboardFailure(
+        `pane=${paneId} paste ignored — no text to send`,
+        'empty'
+      )
       return
     }
     // The pane gates stdin while it is still preparing, and a paste respects
     // that too. Rejected rather than buffered: a clipboard paste is a discrete
     // action the user can simply repeat once the pane is ready, unlike typing.
     if (_stdinGated) {
-      _clipboardDiag(
+      _clipboardFailure(
         `pane=${paneId} paste dropped — pane still preparing (${text.length} chars discarded)`,
-        'warning'
+        'preparing',
+        text.length
       )
       return
     }
     // Same gate pasteText applies. Checked up front so a paste into a dead pane
     // cannot clear `isStopped` (and fire onUserResume) while sending nothing.
     if (!sessionId.value || status.value === 'exited' || status.value === 'error') {
-      _clipboardDiag(
+      _clipboardFailure(
         `pane=${paneId} paste dropped — pane is ${status.value || 'unspawned'} (${text.length} chars discarded)`,
-        'warning'
+        'no-session',
+        text.length
       )
       return
     }
@@ -3274,19 +3893,43 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // second case is the reattach hole this exists for; restricting it to
     // multi-line text keeps a single-line paste on xterm's own judgement, so a
     // sub-shell that never enabled mode 2004 cannot receive a literal "[200~".
-    const bracketed = term.modes.bracketedPasteMode ||
+    const bracketed = isBracketedPasteActive() ||
       (normalized.includes('\r') && agentUsesBracketedPaste(activeAgentKey))
     const payload = bracketed ? `\x1b[200~${normalized}\x1b[201~` : normalized
     // The rest of what term.onData would have done for us (CoreService's
     // _onUserInput plus this composable's own input bookkeeping).
     noteUserInput(normalized)
-    for (const chunk of chunkForPty(payload, PASTE_CHUNK)) pasteText(chunk)
+    // Sent as one burst rather than awaited chunk by chunk: wsClient writes in
+    // call order, so the PTY still receives them in sequence, and a large paste
+    // does not pay a round trip per 512 bytes. Awaiting the settled results is
+    // what makes a lost chunk visible at all — the send queue rejects once it
+    // is full and every request carries its own timeout, either of which used
+    // to leave a paste truncated in the middle with nothing said. Nothing to
+    // retry from here: the bytes that did land are already in the CLI's input,
+    // so re-sending would duplicate them. Say so and let the user decide.
+    const chunks = chunkForPty(payload, PASTE_CHUNK)
+    void Promise.allSettled(chunks.map((chunk) => _sendPasteChunk(chunk))).then((results) => {
+      const failed = results.filter((r) => r.status === 'rejected').length
+      if (!failed) return
+      _clipboardFailure(
+        `pane=${paneId} paste truncated — ${failed}/${chunks.length} chunk(s) never left`,
+        'send-failed',
+        normalized.length
+      )
+    })
     term.scrollToBottom()
     term.clearSelection()
   }
 
   async function interrupt(): Promise<void> {
     if (!sessionId.value) return
+    // Guarded like every other user input, and for the sharpest case of it: a
+    // frozen-looking pane is exactly when someone hits STOP, so a queued SIGINT
+    // would land on whatever turn the CLI happens to be running once the socket
+    // returns — possibly one started after the reconnect. The flag is set only
+    // once the request is on its way, so the STOP badge cannot advertise an
+    // interrupt that never left.
+    if (!inputTransportReady()) return
     isStopped.value = true
     await backend.send('terminal.interrupt', { terminal_session_id: sessionId.value })
   }
@@ -3370,6 +4013,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     isDisposed = true
     void cancelPendingCreate().catch(() => {})
     saveScrollSnapshot()  // persist scrollback before the pane is torn down
+    _liveTerminals.delete(_snapshotHooks)  // stop answering app-exit saves / key rotations
     cleanupSession()
     clearInterval(tickInterval)
     clearInterval(reconcileInterval)
@@ -3384,7 +4028,12 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     if (mountedEl && _mousePosTracker) mountedEl.removeEventListener('mousemove', _mousePosTracker)
     if (mountedEl && _cmdClickHandler) mountedEl.removeEventListener('mousedown', _cmdClickHandler, { capture: true })
     if (mountedEl && _pasteHandler) mountedEl.removeEventListener('paste', _pasteHandler, true)
-    if (_focusOwner === term) _focusOwner = null
+    _selectionDisposer.dispose()
+    _cancelSelectionPush()
+    if (_focusOwner === term) {
+      _focusOwner = null
+      _reportSelection('') // a disposed pane must not keep answering Copy
+    }
     document.querySelector('.term-file-picker-root')?.remove()
     closeMentionMenu()  // tear down any open @-mention menu (detaches doc listeners)
     term.textarea?.removeEventListener('focus', _onTermFocus)
@@ -3424,6 +4073,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     pasteFromClipboard,
     status,
     displayStatus,
+    awaitingKind,
     startingStartedAt,
     startingAgeMs,
     stallReason,
@@ -3436,6 +4086,9 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     cleanBytesSeen,
     lastActivityAt,
     lastRawActivityAt,
+    hasDraft,
+    lastUserKeyAt,
+    isBracketedPasteActive,
     markTurnComplete,
     markNeedsInput,
     clearNeedsInput,

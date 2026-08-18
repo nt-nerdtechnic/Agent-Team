@@ -111,7 +111,7 @@ import sqlite3
 import sys
 import time
 
-from .base import Dep, VendorSpec, command_text
+from .base import Dep, McpServerConfig, McpValue, McpWiring, SkillsWiring, VendorSpec, command_text
 from ..usage_common import (
     HTTP_TIMEOUT,
     _num,
@@ -1151,7 +1151,34 @@ def _install_hooks(port_file: str) -> Any:
 
 SPEC = VendorSpec(
     key="copilot",
+    # Verified 2026-08-15: `copilot skill list` under a relocated COPILOT_HOME
+    # lists exactly the skills below <home>/skills.
+    skills_supported=True,
+    skills_wiring=SkillsWiring(
+        root_env="COPILOT_HOME",
+        reads_shared_root=True,
+        root_home=(".copilot",),
+        skills_rel=("skills",),
+        # Verified the hard way: with COPILOT_HOME set, copilot stops scanning
+        # ~/.agents/skills, so those skills are linked into the leaf or the
+        # user silently loses them.
+        discovery_home=((".agents", "skills"),),
+    ),
     label="Copilot CLI",
+    # Same inline `mcpServers` document claude takes, under a flag documented
+    # as augmenting ~/.copilot/mcp-config.json for the session and repeatable —
+    # so a user's own --additional-mcp-config is augmented rather than stepped
+    # aside for, and only our own entry means "already wired".
+    mcp_wiring=McpWiring(
+        config=McpServerConfig(
+            section=("mcpServers",),
+            entry=(("type", "http"), ("url", McpValue.URL)),
+        ),
+        flag="--additional-mcp-config",
+        # Quoted: the inline JSON we inject always carries `"navide"`, while a
+        # bare `navide` would also match unrelated argv such as `~/navide-web`.
+        already_wired='"{name}"',
+    ),
     install_hooks=_install_hooks,
     # Late-bound (module global at call time) so tests can monkeypatch.
     fetch_usage=lambda home: fetch_copilot(home),

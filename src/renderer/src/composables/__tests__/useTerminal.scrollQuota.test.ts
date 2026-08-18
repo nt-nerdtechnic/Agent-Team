@@ -82,6 +82,10 @@ vi.mock('@xterm/xterm', () => {
     focus(): void {}
     select(): void {}
     clearSelection(): void {}
+    hasSelection(): boolean { return false }
+    onSelectionChange(_handler: () => void): { dispose: () => void } {
+      return { dispose: (): void => {} }
+    }
     scrollLines(): void {}
     scrollToBottom(): void {}
     dispose(): void {}
@@ -168,6 +172,26 @@ describe('useTerminal — scrollback snapshot under localStorage quota', () => {
     expect(localStorage.getItem(OTHER_KEY)).toBeNull()
     // full history kept
     expect(localStorage.getItem(SELF_KEY)).toHaveLength(SNAP_FORMAT.length + FULL_SIZE)
+  })
+
+  it('evicts an orphaned snapshot before one a live pane still owns', async () => {
+    const scope = await paneWithScrollback()
+    // A pane that is still open: its snapshot is history the user can scroll
+    // back to, so it must outlive the leftovers of panes that are gone.
+    const live = withScope(() => useTerminal('pane-other', createMockBackend().backend))
+    try {
+      store.values.set(OTHER_KEY, 'B'.repeat(30_000))
+      store.values.set('terminal-scroll:pane-ghost', 'C'.repeat(10_000))  // closed pane
+      store.state.quota = 55_000  // room to store the new snapshot after ONE eviction
+
+      scope.stop()
+
+      expect(localStorage.getItem('terminal-scroll:pane-ghost')).toBeNull()
+      expect(localStorage.getItem(OTHER_KEY)).not.toBeNull()
+      expect(localStorage.getItem(SELF_KEY)).toHaveLength(SNAP_FORMAT.length + FULL_SIZE)
+    } finally {
+      live.scope.stop()
+    }
   })
 
   it('serializes fewer lines when there is nothing left to evict', async () => {

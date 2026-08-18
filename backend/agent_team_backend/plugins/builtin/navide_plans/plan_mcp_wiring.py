@@ -6,54 +6,39 @@ Merge-writing user-owned config files was rejected as clobber-prone:
 ``~/.claude.json`` is rewritten wholesale by a running claude CLI (a
 read-modify-write from us can lose its update, and vice versa) and
 ``~/.codex/config.toml`` is user-global and shared into every per-pane
-CODEX_HOME via symlink. Instead, terminal.create appends CLI-native,
-additive spawn-time flags — no user config file is ever modified:
+CODEX_HOME via symlink. Instead, terminal.create uses whatever additive,
+CLI-native spawn-time surface each CLI offers.
 
-- claude: ``--mcp-config <inline JSON>``. The flag takes a literal JSON string
-  as well as a path, and inline is what a spawn actually uses: the URL carries
-  the pane id (see plan_mcp_url), so a file-based config would mean one file
-  per pane left behind in the app data dir. Servers from ``--mcp-config`` load
-  IN ADDITION to the user's own MCP config (we never pass
-  ``--strict-mcp-config``). The written ``<app_data_dir>/plan-mcp.json`` remains
-  as the fallback for a spawn with no pane id.
-- codex: ``-c mcp_servers.navide-plans.url="http://127.0.0.1:<port>/plan-mcp"``
-  — a one-shot TOML override merged over config.toml at process start
-  (``-c`` is a global flag, valid after subcommands like ``codex resume``).
-- copilot: ``--additional-mcp-config <inline JSON>``, same ``{"mcpServers":
-  {...}}`` shape claude takes. The flag is documented as augmenting
-  ``~/.copilot/mcp-config.json`` for the session and may be repeated, so unlike
-  claude there is nothing to step aside for — a user's own servers keep
-  loading alongside ours, and ``--disable-mcp-server navide-plans`` is their
-  opt-out.
-- opencode / kilo: no MCP flag at all, but both read an entire config document
-  out of ``OPENCODE_CONFIG_CONTENT`` / ``KILO_CONFIG_CONTENT`` and deep-merge
-  it over the user's files, so the spawn env carries the wiring instead. A
-  value already present in the spawn env is left alone. Note this reaches only
-  variables Navide itself set — one exported from the user's shell profile is
-  inherited by the CLI process and would be overwritten.
-- qwen: ``--mcp-config <inline JSON>``, same idea as claude but a different
-  server shape — qwen has no ``type`` discriminator and keys a streamable HTTP
-  endpoint as ``httpUrl`` (a plain ``url`` there means SSE). The flag is
-  undocumented in ``qwen --help`` but registered, takes inline JSON or a path,
-  and merges over (rather than replacing) the servers from settings.json.
+Which surface a CLI offers, the flag it spells it with and the config
+vocabulary it reads are that CLI's own business and are declared by its module
+in ``cli_vendors`` (``VendorSpec.mcp_wiring``); this module knows only the four
+mechanisms and does the I/O:
 
-- cursor: the one CLI with no spawn-time surface at all — no MCP flag, no
-  config variable — so it is also the one exception to "no user config file is
-  ever modified". Its per-project ``<cwd>/.cursor/mcp.json`` is merge-written
-  with a single entry whose URL is the literal ``${env:NAVIDE_MCP_URL}``:
-  cursor interpolates ``${env:...}`` inside ``url`` (among other fields), so
-  the file stays constant while the per-pane credential rides in the spawn
-  env, and two panes on one workspace do not fight over it. A file we created
-  is added to ``.git/info/exclude`` so it stays out of the user's git status;
-  one that already existed is left to the user to manage. Unparseable JSON
-  aborts the write rather than clobbering it.
-
-- kimi / grok / antigravity: no flag, no config variable, and a config root
-  that is a fixed path under the home directory. Each pane gets a shim of that
-  directory instead — mirrored by symlink so credentials and sessions stay the
-  user's, with only the MCP config materialised. See pane_home.py; the env var
-  it hands back is ``KIMI_CODE_HOME`` for kimi and ``HOME`` for the two with no
-  config-dir variable of their own.
+- a spawn-time FLAG carrying the config (claude, copilot, qwen) or a one-shot
+  config override (codex). Additive by construction: servers passed this way
+  load in addition to the user's own, and a command that already carries the
+  flag — ours from an earlier pass, or the user's deliberate MCP setup — is
+  left exactly as it is. claude is additionally the one whose flag takes a
+  path, so a spawn with no pane id (and therefore no pane-specific URL) is
+  handed the app-owned ``<app_data_dir>/plan-mcp.json`` instead of an inline
+  document, which is why that file is still written at startup.
+- an ENVIRONMENT VARIABLE carrying a whole config document (opencode, kilo),
+  deep-merged by the CLI over the user's files, so nothing on disk is written
+  and the value dies with the pane. A value already present in the spawn env
+  is left alone. Note this reaches only variables Navide itself set — one
+  exported from the user's shell profile is inherited by the CLI process and
+  would be overwritten.
+- a PROJECT CONFIG FILE in the workspace (cursor), the one exception to "no
+  user config file is ever modified". It is merge-written, and because one
+  file is shared by every pane in the workspace it holds a reference to an
+  environment variable rather than a URL, with the per-pane credential riding
+  in the spawn env. A file we created is added to ``.git/info/exclude`` so it
+  stays out of the user's git status; one that already existed is left to the
+  user to manage. Unparseable JSON aborts the write rather than clobbering it.
+- a CONFIG FILE UNDER THE HOME DIRECTORY and nothing else (kimi, grok,
+  antigravity). Each pane gets a shim of that directory — mirrored by symlink
+  so credentials and sessions stay the user's, with only the MCP config
+  materialised. See pane_home.py.
 
 The port is read from the discovery file written by __main__ before uvicorn
 starts (same mechanism the Claude hooks use). File absent → wiring no-ops,
@@ -73,28 +58,26 @@ from typing import Any
 from urllib.parse import quote
 
 from agent_team_backend.applog import app_data_dir, backend_port_file
+from agent_team_backend.cli_vendors import registry
+from agent_team_backend.cli_vendors.base import McpWiring, mcp_document, mcp_entry
 from agent_team_backend.plugins.builtin.navide_plans import pane_home, plan_mcp_auth
 
 log = logging.getLogger("agent_team_backend.plugins.builtin.navide_plans.plan_mcp_wiring")
 
-SERVER_NAME = "navide-plans"
+SERVER_NAME = "navide"
+SERVER_LABEL = "Navide"
 CLAUDE_CONFIG_FILENAME = "plan-mcp.json"
 
-# CLIs that read a whole config document out of an environment variable. Both
-# deep-merge it over the user's own files, so this adds our server without
-# displacing theirs — no config file is written, and the value dies with the
-# pane. kilo is an opencode fork and takes the identical document.
-INLINE_CONFIG_ENV_VARS = {
-    "opencode": "OPENCODE_CONFIG_CONTENT",
-    "kilo": "KILO_CONFIG_CONTENT",
-}
+# Names this server shipped under before. Every config surface we merge into
+# rather than rewrite has to drop them, or a CLI upgraded in place loads the
+# old entry alongside the new one — same endpoint, every tool twice.
+LEGACY_SERVER_NAMES = ("navide-plans",)
 
-# cursor's project config is written once per workspace and shared by every
-# pane in it, so the pane-specific URL cannot be baked into the file. It holds
-# this variable reference instead and the spawn env carries the real value.
-CURSOR_URL_ENV = "NAVIDE_MCP_URL"
-CURSOR_URL_REF = f"${{env:{CURSOR_URL_ENV}}}"
-CURSOR_CONFIG_RELPATH = Path(".cursor") / "mcp.json"
+# A project config file is written once per workspace and shared by every pane
+# in it, so the pane-specific URL cannot be baked into it. It holds a reference
+# to this variable instead — in whatever syntax the CLI interpolates — and the
+# spawn env carries the real value.
+PROJECT_URL_ENV = "NAVIDE_MCP_URL"
 
 # Minted at import, not on first use: spawn wiring runs in worker threads and
 # concurrent pane restores would otherwise race to initialise it, burning a
@@ -136,6 +119,35 @@ def claude_config_path() -> Path:
     return app_data_dir() / CLAUDE_CONFIG_FILENAME
 
 
+def mcp_wiring(agent_key: str) -> McpWiring | None:
+    """How this CLI takes MCP wiring, or None when it takes none at all."""
+    spec = registry.vendor(agent_key)
+    return spec.mcp_wiring if spec is not None else None
+
+
+def config_document(agent_key: str, url: str) -> dict[str, Any]:
+    """The config document ``agent_key``'s CLI reads, naming this server.
+
+    Every CLI spells the same thing differently (``type: http``, a bare
+    ``httpUrl``, ``type: remote``, a list keyed by ``id``), so the shape comes
+    from the vendor registry and only the identity is this plugin's.
+    """
+    wiring = mcp_wiring(agent_key)
+    if wiring is None or wiring.config is None:
+        return {}
+    return mcp_document(
+        wiring.config, {}, name=SERVER_NAME, label=SERVER_LABEL, url=url
+    )
+
+
+def config_json(agent_key: str, port: int, pane_id: str = "") -> str:
+    """Single-line config document, for the flags and variables that take one
+    literally, so a pane-specific URL needs no per-pane file."""
+    return json.dumps(
+        config_document(agent_key, plan_mcp_url(port, pane_id)), separators=(",", ":")
+    )
+
+
 def backend_port() -> int | None:
     """Current backend port from the discovery file (absent/invalid → None)."""
     try:
@@ -145,28 +157,49 @@ def backend_port() -> int | None:
         return None
 
 
+def _harden(path: Path) -> None:
+    """Tighten a config file left group/world readable by an older version.
+
+    Everything written below is already 0600, but an unchanged-content run
+    returns before rewriting anything, so a file from before that would keep
+    its old mode forever.
+    """
+    try:
+        if path.stat().st_mode & 0o077:
+            path.chmod(0o600)
+    except OSError:
+        pass
+
+
 def write_claude_config(port: int, path: Path | None = None) -> Path:
     """Write the claude ``--mcp-config`` file pointing at ``port``.
 
-    The file is wholly app-owned (it contains only the navide-plans entry;
+    The file is wholly app-owned (it contains only our own entry;
     the user's own MCP config is a separate surface we never touch), so this
     is a plain idempotent rewrite: unchanged content is left alone, a stale
     port from a previous run is overwritten. Atomic via os.replace.
+
+    The URL embeds the host internal token, so the file must never exist
+    group/world readable — see _harden and the 0600 create below.
     """
     path = path or claude_config_path()
-    payload = {
-        "mcpServers": {SERVER_NAME: {"type": "http", "url": plan_mcp_url(port)}}
-    }
-    content = json.dumps(payload, indent=2) + "\n"
+    content = json.dumps(config_document("claude", plan_mcp_url(port)), indent=2) + "\n"
     try:
         if path.read_text(encoding="utf-8") == content:
+            _harden(path)
             return path
     except OSError:
         pass
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     try:
-        tmp.write_text(content, encoding="utf-8")
+        # os.open sets the mode at creation, so the token is never readable
+        # between a default-mode create and a chmod; the explicit chmod covers
+        # a umask that widened it. os.replace carries the mode over.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        os.chmod(tmp, 0o600)
         os.replace(tmp, path)
     except OSError:
         tmp.unlink(missing_ok=True)
@@ -195,56 +228,13 @@ def _append_to_command(command: Any, suffix: str) -> Any:
     return f"{command} {suffix}"
 
 
-def inline_mcp_config(port: int, pane_id: str = "") -> str:
-    """Single-line JSON for the flags that take a literal config (claude's
-    ``--mcp-config``, copilot's ``--additional-mcp-config``), so a pane-specific
-    URL needs no per-pane file. Both CLIs read the same ``mcpServers`` shape."""
-    return json.dumps(
-        {"mcpServers": {SERVER_NAME: {"type": "http", "url": plan_mcp_url(port, pane_id)}}},
-        separators=(",", ":"),
-    )
-
-
-def inline_qwen_config(port: int, pane_id: str = "") -> str:
-    """Single-line JSON for qwen's ``--mcp-config``.
-
-    qwen keys the transport by field rather than a ``type`` discriminator:
-    ``httpUrl`` is streamable HTTP, a plain ``url`` is SSE, ``command`` is
-    stdio (validation rejects an entry carrying none of them). So this is the
-    same ``mcpServers`` map claude takes with the URL under a different key.
-    """
-    return json.dumps(
-        {"mcpServers": {SERVER_NAME: {"httpUrl": plan_mcp_url(port, pane_id)}}},
-        separators=(",", ":"),
-    )
-
-
-def inline_env_config(port: int, pane_id: str = "") -> str:
-    """Single-line JSON for the CLIs configured by an inline-config variable.
-
-    opencode and its fork kilo read the same ``mcp`` map, where a streamable
-    HTTP endpoint is ``type: remote`` (verified against ``opencode mcp list``:
-    a ``mcpServers`` key is rejected outright as an unrecognised key). Both
-    deep-merge this over the user's own config rather than replacing it.
-    """
-    return json.dumps(
-        {
-            "$schema": "https://opencode.ai/config.json",
-            "mcp": {
-                SERVER_NAME: {
-                    "type": "remote",
-                    "url": plan_mcp_url(port, pane_id),
-                    "enabled": True,
-                }
-            },
-        },
-        separators=(",", ":"),
-    )
-
-
-def cursor_config_path(cwd: str | Path) -> Path:
-    """Project MCP config cursor discovers from the pane's working directory."""
-    return Path(cwd) / CURSOR_CONFIG_RELPATH
+def project_config_path(agent_key: str, cwd: str | Path) -> Path | None:
+    """Project MCP config this CLI discovers from the pane's working directory,
+    or None when it has no such surface."""
+    wiring = mcp_wiring(agent_key)
+    if wiring is None or not wiring.project_config:
+        return None
+    return Path(cwd).joinpath(*wiring.project_config)
 
 
 def _write_atomic(path: Path, content: str) -> None:
@@ -330,24 +320,29 @@ def _exclude_from_git(config_path: Path, start: Path) -> None:
         log.warning("could not exclude %s from git: %s", relpath, err)
 
 
-def ensure_cursor_config(cwd: str | Path) -> bool:
-    """Merge the navide-plans entry into a workspace's ``.cursor/mcp.json``.
+def ensure_project_config(agent_key: str, cwd: str | Path) -> bool:
+    """Merge our entry into a workspace's project MCP config.
 
     Returns whether the file ends up carrying our entry. The user's own
     servers are preserved, and a file that does not parse as a JSON object is
-    left exactly as it is — a cursor pane losing MCP wiring is a far smaller
-    harm than eating the servers someone hand-wrote.
+    left exactly as it is — a pane losing MCP wiring is a far smaller harm
+    than eating the servers someone hand-wrote. Entries under a name we used
+    to ship under are ours, not the user's, so they are dropped.
     """
+    wiring = mcp_wiring(agent_key)
+    path = project_config_path(agent_key, cwd)
+    if wiring is None or wiring.config is None or path is None:
+        return False
     root = Path(cwd)
     if not root.is_dir():
         return False
     if root.resolve() == Path.home().resolve():
-        # ~/.cursor/mcp.json is cursor's *global* config, not a project one:
-        # our entry would apply in every project the user opens, and outside
-        # Navide the variable is unset, leaving a server that cannot connect.
-        log.warning("workspace is the home directory — not wiring cursor globally")
+        # A project config under the home directory is the CLI's *global* one,
+        # not a project one: our entry would apply in every project the user
+        # opens, and outside Navide the variable is unset, leaving a server
+        # that cannot connect.
+        log.warning("workspace is the home directory — not wiring %s globally", agent_key)
         return False
-    path = cursor_config_path(root)
     existed = path.exists()
     document: dict[str, Any] = {}
     if existed:
@@ -359,24 +354,34 @@ def ensure_cursor_config(cwd: str | Path) -> bool:
             try:
                 parsed = json.loads(raw)
             except json.JSONDecodeError:
-                log.warning("%s is not valid JSON — leaving cursor unwired", path)
+                log.warning("%s is not valid JSON — leaving %s unwired", path, agent_key)
                 return False
             if not isinstance(parsed, dict):
                 return False
             document = parsed
-    servers = document.get("mcpServers", {})
+    # A project config is a flat map of servers; the URL in it is a reference
+    # to the variable the spawn env carries, in this CLI's own syntax.
+    section = wiring.config.section[-1]
+    servers = document.get(section, {})
     if not isinstance(servers, dict):
         # Present but the wrong shape: whatever it means, it is the user's.
         # Replacing it with a map holding only our server would be exactly the
         # clobber the unparseable-JSON branch above refuses to do.
-        log.warning("%s has a non-object mcpServers — leaving cursor unwired", path)
+        log.warning("%s has a non-object %s — leaving %s unwired", path, section, agent_key)
         return False
-    # No "type": cursor reads a bare url as a remote server, and stdio is the
-    # only shape that names its transport.
-    entry = {"url": CURSOR_URL_REF}
-    if servers.get(SERVER_NAME) == entry:
+    entry = mcp_entry(
+        wiring.config,
+        name=SERVER_NAME,
+        label=SERVER_LABEL,
+        url=wiring.url_env_template % PROJECT_URL_ENV,
+    )
+    stale = [name for name in LEGACY_SERVER_NAMES if name in servers]
+    if not stale and servers.get(SERVER_NAME) == entry:
         return True
-    document["mcpServers"] = {**servers, SERVER_NAME: entry}
+    document[section] = {
+        **{key: value for key, value in servers.items() if key not in stale},
+        SERVER_NAME: entry,
+    }
     try:
         _write_atomic(path, json.dumps(document, indent=2) + "\n")
     except OSError as err:
@@ -397,76 +402,75 @@ def wire_command(
     *,
     claude_config: Path | None = None,
 ) -> Any:
-    """Append Plan-MCP wiring flags to a pane spawn command.
+    """Point a pane spawn at the Plan MCP endpoint, the way its CLI takes it.
 
-    No-op for agents with no known flag, unknown port, empty commands,
-    already-wired commands, a user-supplied ``--mcp-config`` (respect their
-    deliberate MCP setup, esp. with --strict-mcp-config), or (claude, when no
-    pane id is known) a missing config file — a spawn must never break over MCP
-    wiring.
+    A pure dispatcher over ``VendorSpec.mcp_wiring``: which surface each CLI
+    offers is declared there, and each of the four is handled once here.
 
-    With a pane id, claude gets the config inline rather than by path: the URL
-    now differs per pane, and writing one file per pane would leave litter
-    behind in the app data dir. copilot is always inline — it has no
-    file-based fallback to fall back to.
+    No-op for agents that declare no wiring, an unknown port, empty commands,
+    already-wired commands, a flag the user supplied themselves (respect their
+    deliberate MCP setup, esp. with --strict-mcp-config), or a missing fallback
+    config file — a spawn must never break over MCP wiring.
+
+    With a pane id the flag carries the config inline rather than by path: the
+    URL differs per pane, and writing one file per pane would leave litter
+    behind in the app data dir. Only a flag that accepts a path has a fallback
+    to fall back to.
 
     ``env`` is the spawn environment and is mutated in place for the CLIs
     configured by variable; None (or a variable already set) leaves it alone.
-    ``cwd`` is the pane's working directory, needed only by cursor — with no
-    cwd its project config cannot be located and it goes unwired.
+    ``cwd`` is the pane's working directory, needed only for a project config —
+    without it the file cannot be located and the pane goes unwired.
     """
     if port is None:
         return command
     text = _command_text(command)
     if not text.strip():
         return command
-    if agent_key == "claude":
-        if "--mcp-config" in text:
+    wiring = mcp_wiring(agent_key)
+    if wiring is None:
+        return command
+    if wiring.flag:
+        if wiring.already_wired.format(flag=wiring.flag, name=SERVER_NAME) in text:
             return command
-        if pane_id:
-            inline = inline_mcp_config(port, pane_id)
-            return _append_to_command(command, f"--mcp-config {shlex.quote(inline)}")
-        config = claude_config or claude_config_path()
-        if not config.is_file():
-            return command
-        return _append_to_command(command, f"--mcp-config {shlex.quote(str(config))}")
-    if agent_key == "codex":
-        if f"mcp_servers.{SERVER_NAME}" in text:
-            return command
-        override = f'mcp_servers.{SERVER_NAME}.url="{plan_mcp_url(port, pane_id)}"'
-        return _append_to_command(command, f"-c {shlex.quote(override)}")
-    if agent_key == "copilot":
-        if SERVER_NAME in text:
-            return command
-        inline = inline_mcp_config(port, pane_id)
-        return _append_to_command(command, f"--additional-mcp-config {shlex.quote(inline)}")
-    if agent_key == "qwen":
-        if "--mcp-config" in text:
-            return command
-        inline = inline_qwen_config(port, pane_id)
-        return _append_to_command(command, f"--mcp-config {shlex.quote(inline)}")
-    if agent_key == "cursor":
+        if wiring.flag_value:
+            value = wiring.flag_value.format(
+                name=SERVER_NAME, url=plan_mcp_url(port, pane_id)
+            )
+        elif pane_id or not wiring.flag_accepts_path:
+            value = config_json(agent_key, port, pane_id)
+        else:
+            config = claude_config or claude_config_path()
+            if not config.is_file():
+                return command
+            value = str(config)
+        return _append_to_command(command, f"{wiring.flag} {shlex.quote(value)}")
+    if wiring.config_env:
+        if env is not None and wiring.config_env not in env:
+            env[wiring.config_env] = config_json(agent_key, port, pane_id)
+        return command
+    if wiring.project_config:
         # env first: with nowhere to put the URL there is no point writing a
         # config file into the user's repo.
-        if cwd and env is not None and ensure_cursor_config(cwd):
-            env.setdefault(CURSOR_URL_ENV, plan_mcp_url(port, pane_id))
+        if cwd and env is not None and ensure_project_config(agent_key, cwd):
+            env.setdefault(PROJECT_URL_ENV, plan_mcp_url(port, pane_id))
         return command
-    shim = pane_home.SHIM_SPECS.get(agent_key)
-    if shim is not None:
+    if wiring.config_file:
         # No pane id means no shim: the directory is keyed by it, and a shared
         # one would have panes overwriting each other's endpoint. A variable
-        # already set (an account-isolated home) is checked here rather than
-        # via setdefault below, so a spawn we are going to leave alone does no
-        # filesystem work at all.
+        # already set (an account-isolated home) is checked before preparing,
+        # so a spawn we are going to leave alone does no filesystem work at all.
+        shim = pane_home.SHIM_SPECS[agent_key]
         if pane_id and env is not None and shim.env_var not in env:
             prepared = pane_home.prepare(
-                agent_key, pane_id, plan_mcp_url(port, pane_id), SERVER_NAME
+                agent_key,
+                pane_id,
+                plan_mcp_url(port, pane_id),
+                SERVER_NAME,
+                SERVER_LABEL,
+                LEGACY_SERVER_NAMES,
             )
             if prepared is not None:
                 env_var, root = prepared
                 env[env_var] = root
-        return command
-    config_var = INLINE_CONFIG_ENV_VARS.get(agent_key)
-    if config_var is not None and env is not None and config_var not in env:
-        env[config_var] = inline_env_config(port, pane_id)
     return command

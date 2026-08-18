@@ -210,10 +210,82 @@ describe('AgentMessagesPanel', () => {
     m.registerPane('p2', 'codex', 'beta')
     await wrapper.get('[data-act="retry"]').trigger('click')
 
-    expect(rowIds(wrapper)).toEqual(['2', '1'])
-    expect(m.messages.value.map((msg) => msg.status)).toEqual(['failed', 'queued'])
+    // 1 failed, 2 is the failure notice sent back to alpha, 3 is the retry.
+    expect(rowIds(wrapper)).toEqual(['3', '2', '1'])
+    expect(m.messages.value.map((msg) => msg.status)).toEqual(['failed', 'queued', 'queued'])
     // Retrying must not also expand the row it was clicked in.
     expect(wrapper.find('.msg-detail').exists()).toBe(false)
+  })
+
+  it('withdraws a queued message from the row, then offers to resend it', async () => {
+    m.registerPane('p1', 'claude', 'alpha')
+    m.registerPane('p2', 'codex', 'beta') // never idle → the message stays queued
+    m.sendMessage('alpha', 'beta', 'never mind')
+    wrapper = mountPanel()
+
+    await wrapper.get('[data-act="cancel"]').trigger('click')
+
+    expect(wrapper.get('[data-st]').attributes('data-st')).toBe('cancelled')
+    expect(wrapper.find('[data-act="cancel"]').exists()).toBe(false)
+    // Withdrawing must not also expand the row it was clicked in.
+    expect(wrapper.find('.msg-detail').exists()).toBe(false)
+
+    await wrapper.get('[data-act="retry"]').trigger('click')
+    expect(m.messages.value.map((msg) => msg.status)).toEqual(['cancelled', 'queued'])
+  })
+
+  it('offers no Withdraw once a message is on its way in', async () => {
+    let release = (): void => {}
+    deliverGate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    m.registerPane('p1', 'claude', 'alpha')
+    m.registerPane('p2', 'codex', 'beta')
+    idlePanes.add('p2')
+    m.sendMessage('alpha', 'beta', 'in flight')
+    m.pump()
+    await flushPromises()
+    wrapper = mountPanel()
+
+    expect(wrapper.get('[data-st]').attributes('data-st')).toBe('delivering')
+    expect(wrapper.find('[data-act="cancel"]').exists()).toBe(false)
+
+    release()
+    await flushPromises()
+  })
+
+  it('badges a delivery-failure notice and offers no Resend for it', async () => {
+    m.registerPane('p1', 'claude', 'alpha')
+    m.sendMessage('alpha', 'nobody', 'this one failed')
+    wrapper = mountPanel()
+
+    // Row 2 is the notice Navide sent back to alpha; row 1 is the failed send.
+    expect(rowIds(wrapper)).toEqual(['2', '1'])
+    const notice = wrapper.get('[data-msg-id="2"]')
+    expect(notice.get('.msg-notice').text()).toBe(i18n.global.t('msg.notice-badge'))
+    expect(notice.find('[data-act="retry"]').exists()).toBe(false)
+    // The row it is about keeps its own Resend.
+    expect(wrapper.get('[data-msg-id="1"]').find('[data-act="retry"]').exists()).toBe(true)
+  })
+
+  it('keeps the notice badge after a reload, without reading the text', async () => {
+    // `kind` is persisted, so a restored row does not have to be recognized by
+    // its content prefix.
+    m.hydrateLog([
+      {
+        uid: 'oldboot:1',
+        created_at: 10,
+        status: 'failed',
+        sender: 'Navide',
+        recipient: 'alpha',
+        content: 'anything at all',
+        kind: 'notice',
+      },
+    ])
+    wrapper = mountPanel()
+
+    expect(wrapper.get('.msg-notice').text()).toBe(i18n.global.t('msg.notice-badge'))
+    expect(wrapper.find('[data-act="retry"]').exists()).toBe(false)
   })
 
   it('shows only one expanded row at a time', async () => {
@@ -223,7 +295,8 @@ describe('AgentMessagesPanel', () => {
     wrapper = mountPanel()
 
     await wrapper.get('[data-msg-id="1"]').trigger('click')
-    await wrapper.get('[data-msg-id="2"]').trigger('click')
+    // 2 is the failure notice for the first message; 3 is the second send.
+    await wrapper.get('[data-msg-id="3"]').trigger('click')
 
     expect(wrapper.findAll('.msg-detail')).toHaveLength(1)
     expect(wrapper.get('.msg-detail').get('pre').text()).toBe('two')
@@ -253,11 +326,12 @@ describe('AgentMessagesPanel', () => {
     m.sendMessage('alpha', 'nobody', 'this one failed')
     m.sendMessage('alpha', 'beta', 'still queued')
     wrapper = mountPanel()
-    expect(rowIds(wrapper)).toEqual(['2', '1'])
+    // 2 is the failure notice sent back to alpha, itself queued behind the gate.
+    expect(rowIds(wrapper)).toEqual(['3', '2', '1'])
 
     await wrapper.get('[data-act="clear"]').trigger('click')
 
-    expect(rowIds(wrapper)).toEqual(['2'])
+    expect(rowIds(wrapper)).toEqual(['3', '2'])
     expect(wrapper.get('.msg-preview').text()).toBe('still queued')
   })
 

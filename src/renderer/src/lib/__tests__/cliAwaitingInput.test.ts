@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
+  awaitingClearsOnMiss,
   notificationMeansAwaiting,
   notificationEndsAwaiting,
   hasAwaitingPattern,
@@ -19,6 +20,14 @@ describe('notificationMeansAwaiting — Claude hook types', () => {
     expect(notificationMeansAwaiting('permission_prompt')).toBe(true)
     expect(notificationMeansAwaiting('elicitation_dialog')).toBe(true)
     expect(notificationMeansAwaiting('agent_needs_input')).toBe(true)
+  })
+
+  it('covers the blocking types the docs page omits', () => {
+    // Read off the 2.1.233 binary, which carries eleven types to the docs'
+    // nine. Both of these block on the user exactly like the documented
+    // variants they shadow, and missing them reported a stuck pane as idle.
+    expect(notificationMeansAwaiting('worker_permission_prompt')).toBe(true)
+    expect(notificationMeansAwaiting('elicitation_url_dialog')).toBe(true)
   })
 
   it('is false for idle_prompt', () => {
@@ -150,14 +159,55 @@ describe('matchAwaitingInput — codex (full-screen dialog)', () => {
   })
 })
 
-describe('matchAwaitingInput — vendors without a spec', () => {
-  it('never matches for claude (it uses the hook instead)', () => {
-    // claude must have no pattern: the poll watcher clears what it does not
-    // match, so giving claude one would wipe the AWAITING its hook just set.
-    expect(hasAwaitingPattern('claude')).toBe(false)
-    expect(matchAwaitingInput('claude', 'Do you want to proceed? 1. Yes')).toBe(false)
+describe('matchAwaitingInput — claude (hook plus screen)', () => {
+  // claude reads BOTH: the hook is authoritative but cannot see every box, and
+  // the conversation log is structurally too late for the one it misses. The
+  // AskUserQuestion sample below is a real capture — its record only reached
+  // the log 5m16s after the box appeared, in the same batch as the event that
+  // clears it, so the screen is the only signal that arrives while it matters.
+  const QUESTION_BOX = [
+    '  1. Merge them into one state',
+    '  2. Keep them separate',
+    '  3. Type something.',
+    '  4. Chat about this',
+    'Enter to select · Tab/Arrow keys to navigate· Esc to cancel',
+  ].join('\n')
+
+  const PERMISSION_BOX = [
+    'Do you want to make this edit to useTerminal.ts?',
+    '❯ 1. Yes',
+    "  2. Yes, and don't ask again this session",
+    '  3. No, and tell Claude what to do differently (esc)',
+  ].join('\n')
+
+  it('matches the AskUserQuestion box', () => {
+    expect(hasAwaitingPattern('claude')).toBe(true)
+    expect(matchAwaitingInput('claude', QUESTION_BOX)).toBe(true)
   })
 
+  it('matches the permission box', () => {
+    expect(matchAwaitingInput('claude', PERMISSION_BOX)).toBe(true)
+  })
+
+  it('does not match prose that merely reads like a prompt', () => {
+    // The anchors are the widget's own furniture, not the question text: a
+    // sentence about selecting something must not park the pane.
+    expect(matchAwaitingInput('claude', 'Enter to select the approach, then continue.')).toBe(false)
+    expect(matchAwaitingInput('claude', 'Press Esc to cancel if this looks wrong.')).toBe(false)
+    expect(matchAwaitingInput('claude', '> Try "how do I log an error?"')).toBe(false)
+  })
+
+  it('never clears on a miss, unlike a pattern-only vendor', () => {
+    // The screen supplements claude's hook rather than replacing it — an MCP
+    // elicitation paints no option box, so a non-match is not evidence the
+    // wait ended. Clearing there would drop a real one.
+    expect(awaitingClearsOnMiss('claude')).toBe(false)
+    expect(awaitingClearsOnMiss('codex')).toBe(true)
+    expect(awaitingClearsOnMiss('aider')).toBe(true)
+  })
+})
+
+describe('matchAwaitingInput — vendors without a spec', () => {
   it('never matches for an unknown agent key', () => {
     expect(hasAwaitingPattern('not-a-real-cli')).toBe(false)
     expect(matchAwaitingInput('not-a-real-cli', 'anything at all')).toBe(false)

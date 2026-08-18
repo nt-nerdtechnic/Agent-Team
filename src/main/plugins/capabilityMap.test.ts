@@ -32,6 +32,10 @@ const EXPECTED_EXPLICIT: Readonly<Record<string, string>> = {
   'ui.settings_get': 'ui.settings.get',
 }
 
+// Namespaces whose backend WS types are exactly `<ns>.<method>`, so CAP_MAP is
+// an identity map for every entry that is not an EXPECTED_EXPLICIT remap.
+const UNIFORM_NAMESPACES = new Set(['fs', 'git', 'search', 'issues', 'terminal', 'plans'])
+
 describe('resolveWsType', () => {
   it('maps the uniform fs/git/search/issues surface to backend WS types', () => {
     expect(resolveWsType('fs', 'read_file')).toBe('fs.read_file')
@@ -92,11 +96,21 @@ describe('resolveWsType', () => {
     expect(resolveWsType('fs', 'stat_path')).toBe('fs.stat_path')
   })
 
+  it('maps the plan document index (must stay in sync with the plans shim)', () => {
+    // Missing here, the Plans plugin window cannot resolve its plan root or
+    // list any document — the broker answers UNKNOWN while the same UI works
+    // in the main window.
+    expect(resolveWsType('plans', 'resolve_root')).toBe('plans.resolve_root')
+    expect(resolveWsType('plans', 'list_docs')).toBe('plans.list_docs')
+    expect(resolveWsType('plans', 'cache_put')).toBe('plans.cache_put')
+  })
+
   it('returns null for an unmapped (ns, method)', () => {
     expect(resolveWsType('ping', 'ping')).toBeNull()
     expect(resolveWsType('issues', 'nope')).toBeNull()
     expect(resolveWsType('fs', 'nope')).toBeNull()
     expect(resolveWsType('terminal', 'nope')).toBeNull()
+    expect(resolveWsType('plans', 'nope')).toBeNull()
   })
 
   it('every CAP_MAP entry keys on ns.method', () => {
@@ -117,7 +131,7 @@ describe('resolveWsType', () => {
       // terminal is uniform EXCEPT its explicit remaps (run / create_cancel /
       // agent_msg_list).
       if (key in EXPECTED_EXPLICIT) continue
-      if (ns === 'fs' || ns === 'git' || ns === 'search' || ns === 'issues' || ns === 'terminal') {
+      if (UNIFORM_NAMESPACES.has(ns)) {
         expect(value).toBe(key)
       }
     }
@@ -126,9 +140,7 @@ describe('resolveWsType', () => {
   it('has no CAP_MAP entry outside the uniform + explicit surface', () => {
     for (const key of Object.keys(CAP_MAP)) {
       const ns = key.slice(0, key.indexOf('.'))
-      const isUniform =
-        ns === 'fs' || ns === 'git' || ns === 'search' || ns === 'issues' || ns === 'terminal'
-      expect(isUniform || key in EXPECTED_EXPLICIT).toBe(true)
+      expect(UNIFORM_NAMESPACES.has(ns) || key in EXPECTED_EXPLICIT).toBe(true)
     }
   })
 })

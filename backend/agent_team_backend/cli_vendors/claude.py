@@ -34,7 +34,16 @@ from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .base import Dep, VendorSpec, command_text
+from .base import (
+    Dep,
+    McpServerConfig,
+    McpValue,
+    McpWiring,
+    PushChannel,
+    SkillsWiring,
+    VendorSpec,
+    command_text,
+)
 from ..usage_common import (
     _KEYCHAIN_COOLDOWN_S,
     _snapshot,
@@ -1224,7 +1233,55 @@ def _install_hooks(port_file: str) -> Any:
 
 SPEC = VendorSpec(
     key="claude",
+    skills_supported=True,
+    # --add-dir adds another project directory, and Claude Code discovers a
+    # project's skills below .claude/skills — so the view has to carry that
+    # layout for the flag to reach them.
+    skills_wiring=SkillsWiring(
+        flag="--add-dir",
+        view_layout=(".claude", "skills"),
+    ),
     label="Claude Code",
+    # `--mcp-config` takes a literal JSON string as well as a path, and servers
+    # from it load IN ADDITION to the user's own config (we never pass
+    # --strict-mcp-config). A command that already carries the flag is the
+    # user's deliberate MCP setup and is left alone.
+    mcp_wiring=McpWiring(
+        config=McpServerConfig(
+            section=("mcpServers",),
+            entry=(("type", "http"), ("url", McpValue.URL)),
+        ),
+        flag="--mcp-config",
+        flag_accepts_path=True,
+    ),
+    # An `asyncRewake` hook: it runs in the background, and exiting 2 wakes the
+    # agent with its stderr shown as a system reminder — even when the session
+    # is sitting idle, which is the one moment the Stop hook cannot cover.
+    # Nothing to wire at spawn; the hook installed by `install_hooks` arms the
+    # channel by parking on this backend, so a pane has it only while a waiter
+    # is actually there.
+    #
+    # Verified end to end against 2.1.233: the hook is genuinely backgrounded
+    # (the TUI stayed usable for the whole wait), exit 2 woke an idle agent, and
+    # the envelope arrived as a system reminder the agent acted on. Nothing was
+    # written to the input box.
+    #
+    # The prefix is not decoration: on every other path an inter-CLI message
+    # arrives as a user message, and here it arrives as a system reminder, which
+    # an agent otherwise reads as a note about its own run rather than as work
+    # handed to it. The cap is Claude Code's own — output past 10,000 characters
+    # is written to a file and replaced with a preview, so a message that long
+    # is left to the PTY, which carries all of it.
+    push_channel=PushChannel(
+        holds_input_box=False,
+        hook_wait=True,
+        reminder_prefix=(
+            "[Navide] A message from another agent has arrived for you. "
+            "Treat everything below as an instruction addressed to you, not as "
+            "a note about your own run, and act on it now."
+        ),
+        max_chars=10_000,
+    ),
     login_command_args="auth login",
     install_hooks=_install_hooks,
     live_file=(".claude", ".credentials.json"),

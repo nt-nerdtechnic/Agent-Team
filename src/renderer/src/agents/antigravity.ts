@@ -12,5 +12,11 @@ export const SPEC = {
   bracketedPaste: true,
   resumeCommandPattern: /^agy\s+--conversation\s+\S+/,
   supportsRebuild: true,
+  // Measured on a real PTY (agy 1.1.13): the CLI itself emits `ESC[?1049h`
+  // during startup and keeps the conversation there. The probe only read 82
+  // bytes before the CLI settled, but the sequence appearing at all is
+  // positive evidence — unlike a normal-buffer verdict, which needs enough
+  // output to trust the absence.
+  fullScreenTui: true,
   hint: 'generalist'
 } as const satisfies AgentSpec

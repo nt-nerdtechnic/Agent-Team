@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { useBackend } from '../composables/useBackend'
 import type { useRoles } from '../composables/useRoles'
 import type { useStages } from '../composables/useStages'
@@ -17,8 +18,10 @@ import {
   usageRefreshSec,
 } from '../composables/useUsage'
 import {
+  AUTO_RESUME_ON_RECONNECT_SETTING_KEY,
   RESUME_BEHAVIOR_SETTING_KEY,
   RESTORE_SCOPE_SETTING_KEY,
+  normalizeAutoResumeOnReconnect,
   normalizeResumeBehavior,
   normalizeRestoreScope,
   type ResumeBehavior,
@@ -43,6 +46,16 @@ import {
   type DetectedEditor,
 } from '../lib/defaultEditor'
 import { useCliAgentPrefs } from '../composables/useCliAgentPrefs'
+import {
+  ANY as POLICY_ANY,
+  addRule as addPolicyRuleTo,
+  allowsOwnDevices,
+  makeRule as makePolicyRule,
+  readPolicy,
+  removeRuleAt as removePolicyRuleAt,
+  withOwnDevices,
+  type PolicyDocument,
+} from '../lib/panePolicy'
 import { CLI_AGENT_SPECS } from '../agents'
 import {
   LOOP_PROMPT_SETTING_KEY,
@@ -168,6 +181,29 @@ function toggleCliAgent(k: string): void {
   }
   cliDisabled.value = [...set]
 }
+// ── Push channels (which CLIs may be handed a message without typing) ────────
+// A negative list, like cliDisabled above: every declared channel is on until
+// the user says otherwise, so a vendor that gains one later needs no migration.
+// The backend reads the same key and is the only place the switch is applied.
+const PUSH_DISABLED_KEY = 'pushChannelsDisabled'
+const pushDisabled = ref<string[]>(settingsGet<string[]>(PUSH_DISABLED_KEY, []))
+const pushChannelRows = computed(() =>
+  CLI_AGENT_SPECS.filter((s) => s.pushChannel)
+)
+function pushChannelEnabled(k: string): boolean {
+  return !pushDisabled.value.includes(k)
+}
+function togglePushChannel(k: string): void {
+  const set = new Set(pushDisabled.value)
+  // No "keep at least one" rule here, unlike the CLI list: turning every
+  // channel off is a valid choice — messages are simply typed in, which is
+  // what every pane did before channels existed.
+  if (set.has(k)) set.delete(k)
+  else set.add(k)
+  pushDisabled.value = [...set]
+  settingsSet(PUSH_DISABLED_KEY, pushDisabled.value)
+}
+
 const cliDragKey = ref('')
 const cliDragOverKey = ref('')
 function onCliDragStart(e: DragEvent, k: string): void {
@@ -284,6 +320,33 @@ const settingsSearchItems = computed<SettingsSearchItem[]>(() => [
     group: 'General',
     summary: 'Export/import the full settings bundle and inspect where settings are stored.',
     keywords: 'settings management export import bundle config path location scope user workspace 設定管理 匯出 匯入 全集 位置 路徑 層級',
+  },
+  {
+    id: 'general-p2p',
+    tab: 'general',
+    section: 'general-p2p',
+    title: 'Cross-device Messaging / 跨裝置傳訊',
+    group: 'General',
+    summary: 'Link this machine to a Navide-Server so agents can message agents on your other devices.',
+    keywords: 'p2p cross device remote server url access token navide-server connect link relay 跨裝置 遠端 伺服器 網址 權杖 連線 傳訊',
+  },
+  {
+    id: 'general-p2p-policy',
+    tab: 'general',
+    section: 'general-p2p-policy',
+    title: 'Cross-device Authorization / 跨裝置授權',
+    group: 'General',
+    summary: 'Choose which remote devices may send instructions to panes on this machine. Everything is refused until a rule allows it.',
+    keywords: 'policy permission authorization allow rule deny default pane cross device remote rejected 政策 權限 授權 允許 規則 拒絕 跨裝置 被擋',
+  },
+  {
+    id: 'general-p2p-members',
+    tab: 'general',
+    section: 'general-p2p-members',
+    title: 'Team Members / 團隊成員',
+    group: 'General',
+    summary: 'See who belongs to this team space; admins can invite people, change roles and disable access.',
+    keywords: 'team member membership invite token role admin observer revoke disable account seat 團隊 成員 邀請 權杖 角色 管理員 觀察者 停用 撤銷',
   },
   {
     id: 'appearance-language',
@@ -557,6 +620,16 @@ function onRestoreScopeChange(value: string): void {
   settingsSet(RESTORE_SCOPE_SETTING_KEY, restoreScopeModel.value)
 }
 
+// Whether a pane whose PTY died with the backend is resumed automatically once
+// the backend is back. Separate from resumeBehavior above: that one is about
+// opening a workspace, this one about a crash interrupting work in progress.
+const autoResumeOnReconnectModel = ref(
+  normalizeAutoResumeOnReconnect(settingsGet(AUTO_RESUME_ON_RECONNECT_SETTING_KEY, true))
+)
+function onAutoResumeOnReconnectChange(): void {
+  settingsSet(AUTO_RESUME_ON_RECONNECT_SETTING_KEY, autoResumeOnReconnectModel.value)
+}
+
 // Max resume spawns that run terminal.create concurrently (the rest queue).
 // Read live by useTerminal at spawn time; heavy resume bursts otherwise stack
 // on the backend and time out ("request terminal.create timeout").
@@ -819,8 +892,357 @@ const THEME_SWATCHES: Record<string, string[]> = {
   'high-contrast': ['#0a0c10', '#14171c', '#71b7ff', '#4ae168'],
 }
 
-// Close on ESC
-function onKeyDown(e: KeyboardEvent) { if (e.key === 'Escape') emit('close') }
+// ── Cross-device link (Navide-Server) ─────────────────────────────────────────
+// The server URL lives in ui_settings and the access token in the credential
+// vault, but both go out through one backend call so the link reconnects once,
+// with the final pair, instead of dialling on a half-edited configuration.
+interface P2pLinkStatus {
+  state: 'unconfigured' | 'connecting' | 'connected' | 'unreachable' | 'unauthorized'
+  serverUrl: string
+  hasToken: boolean
+  detail: string
+  deviceId: string
+  memberId: string
+}
+/** "Connecting" has to resolve on its own, so the section re-asks while it is
+ *  on screen rather than freezing on whatever the save call answered. */
+const P2P_POLL_MS = 3000
+const p2pServerUrl = ref('')
+/** Write-only. The backend never sends a stored token back, so an empty box
+ *  means "keep what is stored", not "there is none". */
+const p2pTokenInput = ref('')
+const p2pStatus = ref<P2pLinkStatus | null>(null)
+const p2pBusy = ref(false)
+const p2pError = ref('')
+let p2pUrlSeeded = false
+let p2pTimer: ReturnType<typeof setInterval> | null = null
+
+async function loadP2pStatus(): Promise<void> {
+  try {
+    const resp = await props.backend.send<{ status: P2pLinkStatus }>('p2p.link.status', {})
+    if (!resp.ok || !resp.payload?.status) return
+    p2pStatus.value = resp.payload.status
+    // Seeded once: the poll must not overwrite a URL the user is halfway
+    // through typing.
+    if (!p2pUrlSeeded) {
+      p2pServerUrl.value = resp.payload.status.serverUrl
+      p2pUrlSeeded = true
+    }
+  } catch { /* non-fatal — the status line keeps its last value */ }
+}
+
+async function applyP2pLink(payload: Record<string, unknown>): Promise<void> {
+  p2pBusy.value = true
+  p2pError.value = ''
+  try {
+    const resp = await props.backend.send<{ status: P2pLinkStatus }>('p2p.link.configure', payload)
+    if (!resp.ok) {
+      p2pError.value = resp.error?.message ?? 'Failed to apply the cross-device settings'
+      return
+    }
+    p2pTokenInput.value = ''
+    if (resp.payload?.status) p2pStatus.value = resp.payload.status
+  } catch (err) {
+    p2pError.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    p2pBusy.value = false
+  }
+}
+
+async function saveP2pLink(): Promise<void> {
+  const payload: Record<string, unknown> = { serverUrl: p2pServerUrl.value }
+  if (p2pTokenInput.value) payload.token = p2pTokenInput.value
+  await applyP2pLink(payload)
+}
+
+async function clearP2pLink(): Promise<void> {
+  p2pServerUrl.value = ''
+  p2pTokenInput.value = ''
+  await applyP2pLink({ serverUrl: '', token: '' })
+}
+
+const p2pState = computed(() => p2pStatus.value?.state ?? 'unconfigured')
+const p2pDotClass = computed(() => {
+  if (p2pState.value === 'connected') return 'ok'
+  if (p2pState.value === 'unauthorized') return 'err'
+  if (p2pState.value === 'unreachable') return 'warn'
+  return 'idle'
+})
+
+// ── Cross-device authorization (receiver-side pane policy) ───────────────────
+// Who, on another device, may drive a pane on *this* machine. Deny by default
+// with allow-only rules, stored on the server and cached here — so the list is
+// readable while the link is down and writable only while it is up. Panes on
+// one machine never consult it, which is why the whole block only appears once
+// a server is configured.
+const { t } = useI18n()
+interface P2pPolicyDevice { deviceId: string; deviceName: string; paneCount: number }
+interface P2pPolicyState {
+  state: string
+  editable: boolean
+  policy: unknown
+  revision: number | null
+  deviceId: string
+  memberId: string
+  devices: P2pPolicyDevice[]
+}
+const p2pPolicy = ref<P2pPolicyState | null>(null)
+const p2pPolicyBusy = ref(false)
+const p2pPolicyError = ref('')
+const newRuleMemberScope = ref<'mine' | 'any'>('mine')
+const newRuleDeviceId = ref('')
+const newRuleWorkspace = ref('')
+const newRulePaneName = ref('')
+
+const policyDoc = computed<PolicyDocument>(() => readPolicy(p2pPolicy.value?.policy))
+const policyMemberId = computed(() => p2pPolicy.value?.memberId ?? '')
+const policyDevices = computed<P2pPolicyDevice[]>(() => p2pPolicy.value?.devices ?? [])
+const policyEditable = computed(() => p2pPolicy.value?.editable === true && !p2pPolicyBusy.value)
+const policyAllowsOwnDevices = computed(() =>
+  allowsOwnDevices(policyDoc.value, policyMemberId.value)
+)
+
+async function loadP2pPolicy(): Promise<void> {
+  // A save owns the state while it is in flight; a poll landing after it would
+  // put the pre-save rules back on screen for one tick.
+  if (p2pPolicyBusy.value) return
+  try {
+    const resp = await props.backend.send<P2pPolicyState>('p2p.policy.get', {})
+    if (!resp.ok || !resp.payload) return
+    p2pPolicy.value = resp.payload
+  } catch { /* non-fatal — the list keeps its last value */ }
+}
+
+async function saveP2pPolicy(next: PolicyDocument): Promise<boolean> {
+  p2pPolicyBusy.value = true
+  p2pPolicyError.value = ''
+  try {
+    const resp = await props.backend.send<P2pPolicyState>('p2p.policy.set', { policy: next })
+    if (!resp.ok) {
+      p2pPolicyError.value = resp.error?.message ?? 'Failed to save the authorization rules'
+      return false
+    }
+    if (resp.payload) p2pPolicy.value = resp.payload
+    return true
+  } catch (err) {
+    p2pPolicyError.value = err instanceof Error ? err.message : String(err)
+    return false
+  } finally {
+    p2pPolicyBusy.value = false
+  }
+}
+
+async function toggleOwnDevices(input: HTMLInputElement): Promise<void> {
+  if (!policyMemberId.value) return
+  await saveP2pPolicy(withOwnDevices(policyDoc.value, policyMemberId.value, input.checked))
+  // A refused save leaves the computed exactly as it was, and an unchanged
+  // binding re-renders nothing — so the box would keep the click and show a
+  // permission that was never granted.
+  input.checked = policyAllowsOwnDevices.value
+}
+
+async function addP2pPolicyRule(): Promise<void> {
+  const rule = makePolicyRule({
+    memberId: newRuleMemberScope.value === 'mine' ? policyMemberId.value : POLICY_ANY,
+    deviceId: newRuleDeviceId.value || POLICY_ANY,
+    workspace: newRuleWorkspace.value,
+    paneName: newRulePaneName.value,
+  })
+  if (await saveP2pPolicy(addPolicyRuleTo(policyDoc.value, rule))) {
+    newRuleDeviceId.value = ''
+    newRuleWorkspace.value = ''
+    newRulePaneName.value = ''
+  }
+}
+
+async function removeP2pPolicyRule(index: number): Promise<void> {
+  await saveP2pPolicy(removePolicyRuleAt(policyDoc.value, index))
+}
+
+/** Rule fields as the list renders them: `*` becomes the localized "any". */
+function policyFieldLabel(value: string): string {
+  return value === POLICY_ANY ? t('settings.p2p.policy.any') : value
+}
+
+function policyMemberLabel(memberId: string): string {
+  if (memberId === POLICY_ANY) return t('settings.p2p.policy.any-member')
+  if (memberId === policyMemberId.value) return t('settings.p2p.policy.my-account')
+  return memberId
+}
+
+function policyDeviceLabel(deviceId: string): string {
+  if (deviceId === POLICY_ANY) return t('settings.p2p.policy.any-device')
+  const known = policyDevices.value.find((device) => device.deviceId === deviceId)
+  return known?.deviceName || deviceId
+}
+
+// ── Team members ─────────────────────────────────────────────────────────────
+// Who belongs to this team space. The roster and the role both come from the
+// server — `canManage` is the backend's answer, never derived here, because a
+// pane that guessed would offer buttons every request is going to refuse.
+// Invite is deliberately the whole flow: the server mints a one-time token and
+// the admin hands it over out of band, which is why it is shown once, loudly.
+const MEMBER_ROLES = ['admin', 'member', 'observer'] as const
+type MemberRole = (typeof MEMBER_ROLES)[number]
+interface TeamMember {
+  memberId: string
+  displayName?: string
+  email?: string
+  role: MemberRole
+  disabled?: boolean
+}
+interface P2pMembersState {
+  state: string
+  role: string
+  memberId: string
+  canManage: boolean
+  members: TeamMember[]
+}
+interface InviteResult {
+  memberId: string
+  displayName?: string
+  email?: string
+  role?: string
+  token: string
+}
+const p2pMembers = ref<P2pMembersState | null>(null)
+const membersBusy = ref(false)
+const membersError = ref('')
+const membersNotice = ref('')
+/** The one-time invite token, held on screen until the admin says they have it.
+ *  Nothing can bring it back once this is cleared. */
+const memberInvite = ref<InviteResult | null>(null)
+const memberInviteCopied = ref(false)
+const inviteName = ref('')
+const inviteEmail = ref('')
+const inviteRole = ref<MemberRole>('member')
+/** memberId whose disable is waiting for confirmation. */
+const memberRevoking = ref('')
+
+const membersList = computed<TeamMember[]>(() => p2pMembers.value?.members ?? [])
+const membersCanManage = computed(() => p2pMembers.value?.canManage === true && !membersBusy.value)
+const myMemberId = computed(() => p2pMembers.value?.memberId ?? '')
+/** Connected, but signed in as a member or observer: the roster is readable and
+ *  nothing on it is actionable. Distinct from being offline. */
+const membersReadonlyByRole = computed(
+  () => p2pMembers.value?.state === 'connected' && p2pMembers.value?.canManage === false
+)
+
+async function loadP2pMembers(): Promise<void> {
+  // Same reason as the policy poll: a write owns the state while it is in
+  // flight, and a poll landing after it would flash the pre-write roster.
+  if (membersBusy.value) return
+  try {
+    const resp = await props.backend.send<P2pMembersState>('p2p.members.list', {})
+    if (!resp.ok || !resp.payload) return
+    p2pMembers.value = resp.payload
+  } catch { /* non-fatal — the roster keeps its last value */ }
+}
+
+async function membersWrite(
+  type: string,
+  payload: Record<string, unknown>
+): Promise<{ result: Record<string, unknown>; state: P2pMembersState } | null> {
+  membersBusy.value = true
+  membersError.value = ''
+  try {
+    const resp = await props.backend.send<{ result: Record<string, unknown>; state: P2pMembersState }>(type, payload)
+    if (!resp.ok || !resp.payload) {
+      membersError.value = resp.error?.message ?? 'The server refused the change'
+      return null
+    }
+    p2pMembers.value = resp.payload.state
+    return resp.payload
+  } catch (err) {
+    membersError.value = err instanceof Error ? err.message : String(err)
+    return null
+  } finally {
+    membersBusy.value = false
+  }
+}
+
+async function inviteMember(): Promise<void> {
+  membersNotice.value = ''
+  const written = await membersWrite('p2p.members.invite', {
+    displayName: inviteName.value,
+    email: inviteEmail.value,
+    role: inviteRole.value,
+  })
+  if (!written) return
+  inviteName.value = ''
+  inviteEmail.value = ''
+  inviteRole.value = 'member'
+  memberInviteCopied.value = false
+  memberInvite.value = written.result as unknown as InviteResult
+}
+
+async function copyInviteToken(): Promise<void> {
+  const token = memberInvite.value?.token
+  if (!token) return
+  try {
+    await navigator.clipboard.writeText(token)
+    memberInviteCopied.value = true
+  } catch { /* clipboard unavailable — the token is selectable on screen */ }
+}
+
+async function changeMemberRole(member: TeamMember, select: HTMLSelectElement): Promise<void> {
+  const role = select.value as MemberRole
+  membersNotice.value = ''
+  const written = await membersWrite('p2p.members.set_role', {
+    memberId: member.memberId,
+    role,
+  })
+  // A refused change leaves the roster as it was, and the select would keep the
+  // role it was never granted.
+  if (!written) select.value = member.role
+}
+
+async function revokeMember(member: TeamMember): Promise<void> {
+  memberRevoking.value = ''
+  membersNotice.value = ''
+  const written = await membersWrite('p2p.members.revoke', { memberId: member.memberId })
+  if (!written) return
+  const dropped = Number(written.result.droppedConnections ?? 0)
+  membersNotice.value = t('settings.p2p.members.revoked', {
+    name: memberLabel(member),
+    count: Number.isFinite(dropped) ? dropped : 0,
+  })
+}
+
+function memberLabel(member: TeamMember): string {
+  return member.displayName || member.email || member.memberId
+}
+
+/** Whether this row's role select may be touched.
+ *
+ *  The server refuses an admin demoting themselves, so the row is locked here
+ *  too rather than sending a request that is guaranteed to come back an error.
+ *  It is only the last admin's own row: another admin can still change it. */
+function memberRoleLocked(member: TeamMember): boolean {
+  return member.memberId === myMemberId.value
+}
+
+watch(activeTab, (tab) => {
+  if (p2pTimer) { clearInterval(p2pTimer); p2pTimer = null }
+  if (tab !== 'general') return
+  void loadP2pStatus()
+  void loadP2pPolicy()
+  void loadP2pMembers()
+  p2pTimer = setInterval(() => {
+    void loadP2pStatus()
+    void loadP2pPolicy()
+    void loadP2pMembers()
+  }, P2P_POLL_MS)
+}, { immediate: true })
+
+// Close on ESC — except while a one-time invite token is on screen. That token
+// cannot be fetched again, so ESC must not take it away by closing the pane
+// underneath it; the panel has its own dismiss button.
+function onKeyDown(e: KeyboardEvent) {
+  if (e.key !== 'Escape') return
+  if (memberInvite.value) return
+  emit('close')
+}
 onMounted(() => {
   window.addEventListener('keydown', onKeyDown)
   void loadSettingsPaths()
@@ -829,6 +1251,7 @@ onMounted(() => {
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeyDown)
   if (previewTimer) { clearTimeout(previewTimer); previewTimer = null }
+  if (p2pTimer) { clearInterval(p2pTimer); p2pTimer = null }
 })
 
 // ── Analyzer tab local state ──────────────────────────────────────────────────
@@ -2037,6 +2460,24 @@ watch(activeTab, (tab) => {
               </li>
             </ul>
           </section>
+          <section class="ap-section" data-settings-section="cli-agents-push">
+            <h3 class="ap-title">{{ $t('settings.pushChannels.title') }}</h3>
+            <p class="ap-hint">{{ $t('settings.pushChannels.hint') }}</p>
+            <ul class="cli-agent-list">
+              <li v-for="spec in pushChannelRows" :key="spec.agentKey" class="cli-agent-row">
+                <label class="cli-agent-toggle">
+                  <input
+                    type="checkbox"
+                    :checked="pushChannelEnabled(spec.agentKey)"
+                    @change="togglePushChannel(spec.agentKey)"
+                  />
+                  <span class="cli-agent-label">{{ spec.label }}</span>
+                </label>
+                <span class="cli-agent-hint">{{ $t(`settings.pushChannels.cost-${spec.agentKey}`) }}</span>
+              </li>
+            </ul>
+            <p class="ap-hint">{{ $t('settings.pushChannels.restart-note') }}</p>
+          </section>
           <section class="ap-section" data-settings-section="cli-agents-maintenance">
             <CliManagementPanel v-if="activeTab === 'cliAgents'" :backend="props.backend" />
           </section>
@@ -2085,6 +2526,20 @@ watch(activeTab, (tab) => {
                     <option value="tab">{{ $t('settings.appearance.restore-scope-tab') }}</option>
                     <option value="all">{{ $t('settings.appearance.restore-scope-all') }}</option>
                   </select>
+                </template>
+              </SettingRow>
+
+              <SettingRow
+                data-settings-section="general-auto-resume-reconnect"
+                :title="$t('settings.general.auto-resume-reconnect')"
+                :description="$t('settings.general.auto-resume-reconnect-hint')"
+              >
+                <template #control>
+                  <ToggleSwitch
+                    v-model="autoResumeOnReconnectModel"
+                    :aria-label="$t('settings.general.auto-resume-reconnect')"
+                    @update:modelValue="onAutoResumeOnReconnectChange"
+                  />
                 </template>
               </SettingRow>
 
@@ -2270,6 +2725,273 @@ watch(activeTab, (tab) => {
                 </div>
                 <p v-if="settingsBundleSummary" class="summary-ok">{{ settingsBundleSummary }}</p>
                 <p v-if="settingsBundleError" class="err-msg">{{ settingsBundleError }}</p>
+              </div>
+            </SettingsCard>
+          </SettingsSection>
+
+          <SettingsSection :label="$t('settings.p2p.title')">
+            <SettingsCard>
+              <div class="s-fullrow" data-settings-section="general-p2p">
+                <p class="ap-hint">{{ $t('settings.p2p.hint') }}</p>
+                <div class="field">
+                  <label class="lbl" for="p2p-server-url">{{ $t('settings.p2p.server-url') }}</label>
+                  <input
+                    id="p2p-server-url"
+                    v-model="p2pServerUrl"
+                    type="text"
+                    spellcheck="false"
+                    autocomplete="off"
+                    :disabled="p2pBusy"
+                    :placeholder="$t('settings.p2p.server-url-placeholder')"
+                  />
+                </div>
+                <div class="field p2p-field">
+                  <label class="lbl" for="p2p-token">{{ $t('settings.p2p.token') }}</label>
+                  <input
+                    id="p2p-token"
+                    v-model="p2pTokenInput"
+                    type="password"
+                    spellcheck="false"
+                    autocomplete="off"
+                    :disabled="p2pBusy"
+                    :placeholder="p2pStatus?.hasToken ? $t('settings.p2p.token-stored') : $t('settings.p2p.token-placeholder')"
+                  />
+                  <p class="ap-hint">{{ $t('settings.p2p.token-hint') }}</p>
+                </div>
+                <div class="row-g gap p2p-actions">
+                  <button class="ap-reset" :disabled="p2pBusy" @click="saveP2pLink">{{ $t('settings.p2p.save') }}</button>
+                  <button class="ap-reset" :disabled="p2pBusy" @click="clearP2pLink">{{ $t('settings.p2p.clear') }}</button>
+                </div>
+                <p class="p2p-status">
+                  <span class="p2p-dot" :class="p2pDotClass"></span>
+                  <span>{{ $t('settings.p2p.state-' + p2pState) }}</span>
+                </p>
+                <p v-if="p2pStatus?.detail" class="p2p-detail">{{ p2pStatus.detail }}</p>
+                <p v-if="p2pStatus?.deviceId" class="p2p-detail">{{ $t('settings.p2p.device-id') }}: {{ p2pStatus.deviceId }}</p>
+                <p v-if="p2pError" class="err-msg">{{ p2pError }}</p>
+              </div>
+            </SettingsCard>
+
+            <!-- Only meaningful once a server is configured: with no server no
+                 message can arrive from another device, and messages between
+                 panes on this machine never consult this policy. -->
+            <SettingsCard v-if="p2pState !== 'unconfigured'">
+              <div class="s-fullrow" data-settings-section="general-p2p-policy">
+                <h3 class="policy-title">{{ $t('settings.p2p.policy.title') }}</h3>
+                <p class="ap-hint">{{ $t('settings.p2p.policy.hint') }}</p>
+                <p class="policy-deny">{{ $t('settings.p2p.policy.default-deny') }}</p>
+                <p v-if="!p2pPolicy?.editable" class="policy-readonly">{{ $t('settings.p2p.policy.readonly') }}</p>
+
+                <label class="policy-switch">
+                  <input
+                    type="checkbox"
+                    :checked="policyAllowsOwnDevices"
+                    :disabled="!policyEditable || !policyMemberId"
+                    @change="toggleOwnDevices($event.target as HTMLInputElement)"
+                  />
+                  <span>
+                    <span class="policy-switch-label">{{ $t('settings.p2p.policy.own-devices') }}</span>
+                    <span class="ap-hint">{{ $t('settings.p2p.policy.own-devices-hint') }}</span>
+                  </span>
+                </label>
+
+                <p class="policy-section-label">{{ $t('settings.p2p.policy.rules') }}</p>
+                <p v-if="!policyDoc.rules.length" class="policy-empty">{{ $t('settings.p2p.policy.empty') }}</p>
+                <ul v-else class="policy-rules">
+                  <li v-for="(rule, index) in policyDoc.rules" :key="index" class="policy-rule">
+                    <span class="policy-rule-text">
+                      {{ policyMemberLabel(rule.from.memberId) }} · {{ policyDeviceLabel(rule.from.deviceId) }}
+                      →
+                      {{ policyFieldLabel(rule.to.workspace) }} / {{ policyFieldLabel(rule.to.paneName) }}
+                    </span>
+                    <button class="ap-reset" :disabled="!policyEditable" @click="removeP2pPolicyRule(index)">
+                      {{ $t('settings.p2p.policy.remove') }}
+                    </button>
+                  </li>
+                </ul>
+
+                <p class="policy-section-label">{{ $t('settings.p2p.policy.add-title') }}</p>
+                <div class="policy-add">
+                  <div class="field">
+                    <label class="lbl" for="policy-member">{{ $t('settings.p2p.policy.source-member') }}</label>
+                    <select id="policy-member" v-model="newRuleMemberScope" :disabled="!policyEditable || !policyMemberId">
+                      <option value="mine">{{ $t('settings.p2p.policy.my-account') }}</option>
+                      <option value="any">{{ $t('settings.p2p.policy.any-member') }}</option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label class="lbl" for="policy-device">{{ $t('settings.p2p.policy.source-device') }}</label>
+                    <select id="policy-device" v-model="newRuleDeviceId" :disabled="!policyEditable">
+                      <option value="">{{ $t('settings.p2p.policy.any-device') }}</option>
+                      <option v-for="device in policyDevices" :key="device.deviceId" :value="device.deviceId">
+                        {{ device.deviceName || device.deviceId }}
+                      </option>
+                    </select>
+                  </div>
+                  <div class="field">
+                    <label class="lbl" for="policy-workspace">{{ $t('settings.p2p.policy.target-workspace') }}</label>
+                    <input
+                      id="policy-workspace"
+                      v-model="newRuleWorkspace"
+                      type="text"
+                      spellcheck="false"
+                      autocomplete="off"
+                      :disabled="!policyEditable"
+                      :placeholder="$t('settings.p2p.policy.blank-is-any')"
+                    />
+                  </div>
+                  <div class="field">
+                    <label class="lbl" for="policy-pane">{{ $t('settings.p2p.policy.target-pane') }}</label>
+                    <input
+                      id="policy-pane"
+                      v-model="newRulePaneName"
+                      type="text"
+                      spellcheck="false"
+                      autocomplete="off"
+                      :disabled="!policyEditable"
+                      :placeholder="$t('settings.p2p.policy.blank-is-any')"
+                    />
+                  </div>
+                </div>
+                <div class="row-g gap p2p-actions">
+                  <button class="ap-reset" :disabled="!policyEditable" @click="addP2pPolicyRule">
+                    {{ $t('settings.p2p.policy.add') }}
+                  </button>
+                </div>
+                <p v-if="p2pPolicyError" class="err-msg">{{ p2pPolicyError }}</p>
+              </div>
+            </SettingsCard>
+
+            <!-- Who belongs to the team space. Hidden for the same reason the
+                 policy card is: a machine with no server has no team, and the
+                 on-machine path has never had a concept of one. -->
+            <SettingsCard v-if="p2pState !== 'unconfigured'">
+              <div class="s-fullrow" data-settings-section="general-p2p-members">
+                <h3 class="policy-title">{{ $t('settings.p2p.members.title') }}</h3>
+                <p class="ap-hint">{{ $t('settings.p2p.members.hint') }}</p>
+                <p v-if="membersReadonlyByRole" class="policy-readonly">{{ $t('settings.p2p.members.readonly-role') }}</p>
+                <p v-else-if="!p2pMembers?.canManage" class="policy-readonly">{{ $t('settings.p2p.members.readonly-offline') }}</p>
+
+                <p class="policy-section-label">{{ $t('settings.p2p.members.roster') }}</p>
+                <p v-if="!membersList.length" class="policy-empty">{{ $t('settings.p2p.members.empty') }}</p>
+                <ul v-else class="policy-rules">
+                  <li v-for="member in membersList" :key="member.memberId" class="policy-rule member-row">
+                    <div class="member-main">
+                      <span class="policy-rule-text">
+                        {{ memberLabel(member) }}
+                        <span v-if="member.memberId === myMemberId" class="member-tag">{{ $t('settings.p2p.members.you') }}</span>
+                        <span v-if="member.disabled" class="member-tag off">{{ $t('settings.p2p.members.disabled') }}</span>
+                      </span>
+                      <!-- Non-admins see the role as text: the server refuses
+                           every write they could make from a control. -->
+                      <span v-if="!p2pMembers?.canManage" class="member-role-static">
+                        {{ $t('settings.p2p.members.role-' + member.role) }}
+                      </span>
+                      <template v-else>
+                        <select
+                          class="member-role"
+                          :value="member.role"
+                          :aria-label="$t('settings.p2p.members.role')"
+                          :disabled="!membersCanManage || memberRoleLocked(member)"
+                          :title="memberRoleLocked(member) ? $t('settings.p2p.members.self-locked') : ''"
+                          @change="changeMemberRole(member, $event.target as HTMLSelectElement)"
+                        >
+                          <option v-for="role in MEMBER_ROLES" :key="role" :value="role">
+                            {{ $t('settings.p2p.members.role-' + role) }}
+                          </option>
+                        </select>
+                        <button
+                          v-if="!member.disabled"
+                          class="ap-reset"
+                          :disabled="!membersCanManage"
+                          @click="memberRevoking = member.memberId"
+                        >
+                          {{ $t('settings.p2p.members.revoke') }}
+                        </button>
+                      </template>
+                    </div>
+                    <!-- Disabling drops live connections, so it says so before
+                         it happens rather than after. -->
+                    <div v-if="memberRevoking === member.memberId" class="member-confirm">
+                      <p class="member-confirm-text">
+                        {{ $t('settings.p2p.members.revoke-confirm', { name: memberLabel(member) }) }}
+                      </p>
+                      <div class="row-g gap">
+                        <button class="ap-reset danger" :disabled="!membersCanManage" @click="revokeMember(member)">
+                          {{ $t('settings.p2p.members.revoke-do') }}
+                        </button>
+                        <button class="ap-reset" @click="memberRevoking = ''">
+                          {{ $t('settings.p2p.members.revoke-cancel') }}
+                        </button>
+                      </div>
+                    </div>
+                  </li>
+                </ul>
+
+                <template v-if="p2pMembers?.canManage">
+                  <p class="policy-section-label">{{ $t('settings.p2p.members.invite-title') }}</p>
+                  <div class="policy-add">
+                    <div class="field">
+                      <label class="lbl" for="member-name">{{ $t('settings.p2p.members.invite-name') }}</label>
+                      <input
+                        id="member-name"
+                        v-model="inviteName"
+                        type="text"
+                        spellcheck="false"
+                        autocomplete="off"
+                        :disabled="!membersCanManage"
+                        :placeholder="$t('settings.p2p.members.invite-optional')"
+                      />
+                    </div>
+                    <div class="field">
+                      <label class="lbl" for="member-email">{{ $t('settings.p2p.members.invite-email') }}</label>
+                      <input
+                        id="member-email"
+                        v-model="inviteEmail"
+                        type="text"
+                        spellcheck="false"
+                        autocomplete="off"
+                        :disabled="!membersCanManage"
+                        :placeholder="$t('settings.p2p.members.invite-optional')"
+                      />
+                    </div>
+                    <div class="field">
+                      <label class="lbl" for="member-role">{{ $t('settings.p2p.members.role') }}</label>
+                      <select id="member-role" v-model="inviteRole" :disabled="!membersCanManage">
+                        <option v-for="role in MEMBER_ROLES" :key="role" :value="role">
+                          {{ $t('settings.p2p.members.role-' + role) }}
+                        </option>
+                      </select>
+                    </div>
+                  </div>
+                  <div class="row-g gap p2p-actions">
+                    <button class="ap-reset" :disabled="!membersCanManage" @click="inviteMember">
+                      {{ $t('settings.p2p.members.invite') }}
+                    </button>
+                  </div>
+                </template>
+
+                <!-- The one-time token. The server never sends it again, so it
+                     stays on screen until the admin says they have it, and ESC
+                     is ignored while it is up. -->
+                <div v-if="memberInvite" class="member-token">
+                  <p class="member-token-title">
+                    {{ $t('settings.p2p.members.token-title', { name: memberInvite.displayName || memberInvite.email || memberInvite.memberId }) }}
+                  </p>
+                  <p class="member-token-warn">{{ $t('settings.p2p.members.token-once') }}</p>
+                  <code class="member-token-value">{{ memberInvite.token }}</code>
+                  <div class="row-g gap">
+                    <button class="ap-reset" @click="copyInviteToken">
+                      {{ memberInviteCopied ? $t('settings.p2p.members.token-copied') : $t('settings.p2p.members.token-copy') }}
+                    </button>
+                    <button class="ap-reset" @click="memberInvite = null">
+                      {{ $t('settings.p2p.members.token-done') }}
+                    </button>
+                  </div>
+                </div>
+
+                <p v-if="membersNotice" class="summary-ok">{{ membersNotice }}</p>
+                <p v-if="membersError" class="err-msg">{{ membersError }}</p>
               </div>
             </SettingsCard>
           </SettingsSection>
@@ -3158,7 +3880,7 @@ button.tiny {
 /* ── Fields ───────────────────────────────────────────────────────────────── */
 .field { display: flex; flex-direction: column; gap: 4px; }
 .lbl { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-secondary); }
-input[type='text'], input[type='email'], input[type='number'], textarea, select {
+input[type='text'], input[type='email'], input[type='number'], input[type='password'], textarea, select {
   background: var(--bg-subtle);
   border: 1px solid var(--border-default);
   color: var(--text-bright);
@@ -3198,6 +3920,46 @@ button.ghost:hover:not(:disabled) { background: var(--bg-muted); }
 
 /* ── Messages ─────────────────────────────────────────────────────────────── */
 .err-msg { color: var(--danger-fg); font-size: 11px; margin: 0; }
+
+/* Cross-device link */
+.p2p-field { margin-top: 10px; }
+.p2p-field .ap-hint { margin: 4px 0 0; }
+.p2p-actions { margin-top: 12px; }
+.p2p-status { display: flex; align-items: center; margin: 12px 0 0; font-size: 11.5px; color: var(--text-bright); }
+.p2p-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; flex-shrink: 0; }
+.p2p-dot.ok { background: var(--success-fg); }
+.p2p-dot.err { background: var(--danger-fg); }
+.p2p-dot.warn { background: var(--attention-fg); }
+.p2p-dot.idle { background: var(--text-secondary); }
+.p2p-detail { margin: 4px 0 0; font-size: 11px; color: var(--text-secondary); word-break: break-all; }
+
+/* Cross-device authorization (pane policy) */
+.policy-title { margin: 0 0 6px; font-size: 12.5px; color: var(--text-bright); }
+.policy-deny { margin: 8px 0 0; font-size: 11px; color: var(--attention-fg); }
+.policy-readonly { margin: 6px 0 0; font-size: 11px; color: var(--text-secondary); }
+.policy-switch { display: flex; align-items: flex-start; gap: 8px; margin: 12px 0 0; cursor: pointer; }
+.policy-switch input { margin-top: 2px; flex-shrink: 0; }
+.policy-switch-label { display: block; font-size: 12px; color: var(--text-bright); }
+.policy-switch .ap-hint { margin: 2px 0 0; }
+.policy-section-label { margin: 14px 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-secondary); }
+.policy-empty { margin: 0; font-size: 11.5px; color: var(--text-secondary); }
+.policy-rules { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.policy-rule { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 8px; border: 1px solid var(--border-default); border-radius: 5px; background: var(--bg-muted); }
+.policy-rule-text { font-size: 11.5px; color: var(--text-bright); word-break: break-all; }
+.policy-add { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.member-row { flex-direction: column; align-items: stretch; gap: 6px; }
+.member-main { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.member-main .policy-rule-text { flex: 1; min-width: 0; }
+.member-tag { margin-left: 6px; padding: 1px 5px; border-radius: 3px; font-size: 10px; background: var(--bg-default); color: var(--text-secondary); }
+.member-tag.off { color: var(--attention-fg); }
+.member-role-static { font-size: 11.5px; color: var(--text-secondary); flex-shrink: 0; }
+.member-role { flex-shrink: 0; }
+.member-confirm { border-top: 1px solid var(--border-default); padding-top: 6px; display: flex; flex-direction: column; gap: 6px; }
+.member-confirm-text { margin: 0; font-size: 11.5px; color: var(--attention-fg); }
+.member-token { margin: 12px 0 0; padding: 10px; border: 1px solid var(--attention-fg); border-radius: 5px; background: var(--bg-muted); display: flex; flex-direction: column; gap: 8px; }
+.member-token-title { margin: 0; font-size: 12.5px; color: var(--text-bright); }
+.member-token-warn { margin: 0; font-size: 11.5px; color: var(--attention-fg); }
+.member-token-value { display: block; padding: 8px; border-radius: 4px; background: var(--bg-default); font-size: 12px; color: var(--text-bright); word-break: break-all; user-select: all; }
 .hint-msg { color: var(--text-secondary); font-size: 11px; margin: 0; }
 
 /* ── Appearance tab ─────────────────────────────────────────────────────────── */

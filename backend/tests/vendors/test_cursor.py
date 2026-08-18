@@ -1,18 +1,22 @@
-"""CursorLogReader: per-session store.db enumeration + at-pane marker binding.
+"""CursorLogReader: store.db enumeration, at-pane marker binding, turn events.
 
-Fixture layout mirrors the community-documented (agentgrep) Cursor CLI store:
-~/.cursor/chats/<project-hash>/<session-uuid>/store.db, where meta holds one
-hex-encoded JSON row and blobs holds opaque protobuf values with the user's
-text embedded verbatim as UTF-8. The CLI is closed source and stores no token
-usage locally, so the reader emits no TokenUsage — these tests pin the
-defensive marker/enumeration behaviour instead.
+Fixture layout mirrors a live Cursor CLI store sampled 2026-08-16:
+~/.cursor/chats/<project-hash>/<session-uuid>/{store.db,meta.json}, where the
+db's `meta` table holds one hex-encoded JSON row and `blobs (id, data)` mixes
+plain-JSON chat messages with opaque protobuf structure nodes (the user's text
+embedded verbatim as UTF-8). meta.json is the only record of the cwd. The CLI
+stores no token usage locally, so the reader emits no TokenUsage — these tests
+pin the activity/marker/enumeration behaviour instead.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
+import time
+from datetime import datetime
 from pathlib import Path
 
 from agent_team_backend.log_readers import CursorLogReader, TokenUsage
@@ -40,37 +44,70 @@ def _hex_meta(session_id: str) -> str:
     return json.dumps(body).encode("utf-8").hex()
 
 
+#: A protobuf structure node: binary tag/varint junk, including invalid UTF-8.
+_PROTOBUF_BLOB = b"\x0a\x14\x08\x02\x12\xff\xfe some assistant output \x00\x03"
+
+
 def _make_store(
     chats: Path,
     project_hash: str,
     session_id: str,
     *,
     marker_text: str = "",
+    cwd: str = "",
+    updated_at_ms: int = 1786844146562,
 ) -> Path:
     """Create <chats>/<project-hash>/<session-id>/store.db with meta + blobs.
 
-    Blob values are protobuf-ish: binary tag/varint junk (including invalid
-    UTF-8) with the user text embedded verbatim as UTF-8 bytes.
+    Blob values are protobuf-ish (see _PROTOBUF_BLOB) with the user text
+    embedded verbatim as UTF-8 bytes. `cwd` also writes the meta.json sidecar,
+    which is where the real CLI records the workspace.
+
+    WAL is not decoration: the live store runs in WAL mode (confirmed on the
+    2026-08-16 sample, which carries -wal/-shm siblings). Under the CLI's
+    long-lived connection a commit lands in store.db-wal and leaves store.db's
+    own mtime AND size untouched (measured: 30 commits, neither moved), which
+    is why no reader logic here may lean on either. These helpers open and
+    close a connection per write, and closing the last connection checkpoints
+    — so the fixture's own mtime still moves; tests that care force the
+    real-world stale mtime with os.utime rather than trusting the fixture.
     """
     d = chats / project_hash / session_id
     d.mkdir(parents=True)
     db = d / "store.db"
     con = sqlite3.connect(db)
-    con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value BLOB)")
-    con.execute(
-        "INSERT INTO meta VALUES ('0', ?)", (_hex_meta(session_id).encode(),)
-    )
-    con.execute("CREATE TABLE blobs (id TEXT PRIMARY KEY, value BLOB)")
-    con.execute(
-        "INSERT INTO blobs VALUES (?, ?)",
-        ("b" * 64, b"\x0a\x14\x08\x02\x12\xff\xfe some assistant output \x00\x03"),
-    )
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+    con.execute("INSERT INTO meta VALUES ('0', ?)", (_hex_meta(session_id),))
+    con.execute("CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB)")
+    con.execute("INSERT INTO blobs VALUES (?, ?)", ("b" * 64, _PROTOBUF_BLOB))
     if marker_text:
         payload = b"\x0a\x40\x08\x01\x1a" + marker_text.encode("utf-8") + b"\x00\xf3\x28"
         con.execute("INSERT INTO blobs VALUES (?, ?)", ("c" * 64, payload))
     con.commit()
     con.close()
+    if cwd:
+        (d / "meta.json").write_text(json.dumps({
+            "schemaVersion": 1, "createdAtMs": 1786843987031,
+            "hasConversation": True, "updatedAtMs": updated_at_ms, "cwd": cwd,
+        }), encoding="utf-8")
     return db
+
+
+def _append_blobs(db: Path, blob_id_prefix: str, *payloads) -> None:
+    """Append blob rows the way the CLI does: a dict becomes a JSON message
+    blob, bytes stay a raw protobuf structure node."""
+    con = sqlite3.connect(db)
+    for i, payload in enumerate(payloads):
+        data = (
+            json.dumps(payload).encode("utf-8")
+            if isinstance(payload, dict) else payload
+        )
+        con.execute(
+            "INSERT INTO blobs VALUES (?, ?)", (f"{blob_id_prefix}{i}", data)
+        )
+    con.commit()
+    con.close()
 
 
 def _session_sink_usage(db: Path) -> TokenUsage:
@@ -156,10 +193,19 @@ def test_session_id_from_path_only_for_store_db(
     assert reader.session_id_from_path(chats / "x" / "nope" / "store.db") == ""
 
 
-def test_cwd_is_unknowable(tmp_path: Path, monkeypatch) -> None:
+def test_cwd_comes_from_the_meta_json_sidecar(
+    tmp_path: Path, monkeypatch
+) -> None:
     reader = _reader_rooted_at(tmp_path, monkeypatch)
-    db = _make_store(tmp_path / ".cursor" / "chats", "3" * 32, _SID)
-    assert reader.cwd_from_file(db) == ""
+    chats = tmp_path / ".cursor" / "chats"
+    db = _make_store(chats, "3" * 32, _SID, cwd="/work/proj")
+    assert reader.cwd_from_file(db) == "/work/proj"
+    # No sidecar (or an unreadable one) → '' rather than a raise; store.db
+    # itself never records the workspace.
+    bare = _make_store(chats, "7" * 32, _SID2)
+    assert reader.cwd_from_file(bare) == ""
+    (bare.parent / "meta.json").write_text("{not json", encoding="utf-8")
+    assert reader.cwd_from_file(bare) == ""
 
 
 def test_has_session_globs_across_project_hashes(
@@ -287,22 +333,251 @@ def test_md5_hash_dir_matches_workspace_for_unbound_sessions(
 
 # ── activity ─────────────────────────────────────────────────────────────────
 
-def test_activity_emits_once_per_db_change(tmp_path: Path, monkeypatch) -> None:
+def _assistant(text: str, *, reasoning: str = "") -> dict:
+    content = []
+    if reasoning:
+        content.append({"type": "reasoning", "text": reasoning, "signature": "x"})
+    content.append({"type": "text", "text": text})
+    return {"role": "assistant", "content": content, "id": "msg-1"}
+
+
+def _user(text: str) -> dict:
+    return {"role": "user", "content": [{"type": "text", "text": text}]}
+
+
+def _armed(reader, db: Path) -> set[str]:
+    """seen_keys after the first pass: the blob watermark is anchored at the
+    newest row, so only writes made afterwards count as activity."""
+    seen: set[str] = set()
+    reader.parse_activity(db, seen)
+    return seen
+
+
+def test_protobuf_only_writes_report_nothing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """No db-write heartbeat: a write that decodes to no chat message is
+    silent.
+
+    A live store keeps appending protobuf rows AFTER the turn's last assistant
+    row. A heartbeat would turn those into a bare agent_active stamped later
+    than the turn_complete, and turnCompleteDone (completion.ts) requires
+    turnCompleteAt >= lastActiveAt — a pane that can never read as done, so
+    'done' notifications vanish and an unattended loop stalls forever.
+    """
     reader = _reader_rooted_at(tmp_path, monkeypatch)
     db = _make_store(tmp_path / ".cursor" / "chats", "6" * 32, _SID)
 
     seen: set[str] = set()
-    first = reader.parse_activity(db, seen)
-    assert [e.event_type for e in first] == ["agent_active"]
-    assert first[0].session_id == _SID
-    # Unchanged db → no repeat signal.
+    assert reader.parse_activity(db, seen) == []  # first sight anchors only
+    assert reader.parse_activity(db, seen) == []  # unchanged db
+
+    _append_blobs(db, "pb", b"\x0a\x03\x08\x01\x12")
     assert reader.parse_activity(db, seen) == []
-    # A write (size change) → one new agent_active; never turn_complete
-    # (the store has no known end-of-turn record).
+
+    # The trailing-write shape that used to strand the pane: an assistant row
+    # (turn_complete) followed by more protobuf nodes in a LATER pass.
+    _append_blobs(db, "t", _assistant("done"))
+    assert [e.event_type for e in reader.parse_activity(db, seen)] == [
+        "turn_complete"
+    ]
+    _append_blobs(db, "tail", b"\x0a\x02\x08\x09", b"\x0a\x02\x08\x0a")
+    assert reader.parse_activity(db, seen) == []
+
+
+def test_assistant_blob_completes_the_turn_without_reasoning(
+    tmp_path: Path, monkeypatch
+) -> None:
+    reader = _reader_rooted_at(tmp_path, monkeypatch)
+    db = _make_store(
+        tmp_path / ".cursor" / "chats", "6" * 32, _SID, cwd="/work/proj"
+    )
+    seen = _armed(reader, db)
+
+    _append_blobs(
+        db, "t",
+        _user("<timestamp>Sun</timestamp>\n<user_query>\nsay two\n</user_query>"),
+        b"\x0a\x05\x08\x01\x12\x03",          # tool/step node: skipped
+        _assistant("two", reasoning="the user wants exactly 'two'"),
+    )
+    events = reader.parse_activity(db, seen)
+
+    kinds = [(e.event_type, e.detail) for e in events]
+    assert kinds == [
+        ("agent_active", "user"),
+        ("turn_complete", "assistant"),
+    ]
+    turn = events[-1]
+    assert turn.text == "two"          # reasoning parts are excluded
+    assert turn.session_id == _SID     # id = the session dir name
+    assert turn.cwd == "/work/proj"    # from the meta.json sidecar
+    # The timestamp must parse: the frontend dedups messaging turns by it and
+    # treats an unparseable one as always-fresh (resending the turn).
+    assert datetime.fromisoformat(turn.timestamp) is not None
+    # The user event carries what the person typed, unwrapped from Cursor's
+    # <user_query>. Without unwrapping, user_prompt_text drops the whole row
+    # for starting with '<' and panes lose their auto-name.
+    assert events[0].text == "say two"
+
+
+def test_events_in_one_pass_get_strictly_increasing_timestamps(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """meta.json gives a whole pass ONE time, but App.vue's
+    onTurnCompleteForMessaging admits a turn only when
+    eventMs > paneMsgProcessedAt (strictly greater). Identical stamps would
+    silently drop the second turn's ---MSG--- block."""
+    reader = _reader_rooted_at(tmp_path, monkeypatch)
+    db = _make_store(
+        tmp_path / ".cursor" / "chats", "6" * 32, _SID, cwd="/work/proj"
+    )
+    seen = _armed(reader, db)
+
+    _append_blobs(
+        db, "t",
+        _user("<user_query>\nfirst\n</user_query>"),
+        _assistant("one"),
+        _user("<user_query>\nsecond\n</user_query>"),
+        _assistant("two"),
+    )
+    events = reader.parse_activity(db, seen)
+    assert len(events) == 4
+    stamps = [datetime.fromisoformat(e.timestamp) for e in events]
+    assert stamps == sorted(stamps) and len(set(stamps)) == 4
+
+
+def test_injected_context_row_is_not_user_activity(tmp_path: Path, monkeypatch) -> None:
+    """Cursor's own first `user` row is context, not something anyone typed.
+
+    It is ~30k characters of <user_info>/<rules>/<agent_transcripts> and has
+    no <user_query>. Reporting it would name the pane after the rule set.
+    """
+    reader = _reader_rooted_at(tmp_path, monkeypatch)
+    db = _make_store(
+        tmp_path / ".cursor" / "chats", "8" * 32, _SID, cwd="/work/proj"
+    )
+    seen = _armed(reader, db)
+
+    _append_blobs(
+        db, "c",
+        _user("<user_info>\nWorkspace Path: /work/proj\n</user_info>\n<rules>x</rules>"),
+        _user("<timestamp>Sun</timestamp>\n<user_query>\nreal prompt\n</user_query>"),
+    )
+    events = reader.parse_activity(db, seen)
+
+    # Only ONE user event: the <rules> row is skipped.
+    assert [(e.event_type, e.detail) for e in events] == [
+        ("agent_active", "user"),
+    ]
+    assert events[-1].text == "real prompt"
+
+
+def test_marker_only_row_is_not_user_activity(tmp_path: Path, monkeypatch) -> None:
+    """Navide's own session marker is typed into the TUI as a standalone
+    prompt, so Cursor wraps it in a normal <user_query> row. It is the app
+    talking to itself at spawn time, not activity — but a real prompt that
+    merely MENTIONS at-pane: is still the user's and must be reported."""
+    reader = _reader_rooted_at(tmp_path, monkeypatch)
+    db = _make_store(
+        tmp_path / ".cursor" / "chats", "a" * 32, _SID, cwd="/work/proj"
+    )
+    seen = _armed(reader, db)
+    marker = "at-pane:2d215901-c03c-4a4e-852a-0584d14e977d"
+
+    _append_blobs(
+        db, "m",
+        # The exact wire form App.vue's sendSessionMarkerBootstrap pastes.
+        _user(f"<user_query>\n<!-- agent-team-session: {marker} -->\n</user_query>"),
+        # A bare marker (kickoff-appended form, whitespace around it).
+        _user(f"<user_query>\n  {marker}  \n</user_query>"),
+        _user(f"<user_query>\nwhy does {marker} show up in the store?\n</user_query>"),
+    )
+    events = reader.parse_activity(db, seen)
+
+    assert [(e.event_type, e.detail) for e in events] == [
+        ("agent_active", "user"),
+    ]
+    assert events[0].text == f"why does {marker} show up in the store?"
+
+
+def test_activity_watermark_does_not_replay(tmp_path: Path, monkeypatch) -> None:
+    reader = _reader_rooted_at(tmp_path, monkeypatch)
+    db = _make_store(tmp_path / ".cursor" / "chats", "6" * 32, _SID)
+    seen = _armed(reader, db)
+
+    _append_blobs(db, "t", _assistant("one"))
+    assert [e.event_type for e in reader.parse_activity(db, seen)] == [
+        "turn_complete",
+    ]
+    # Same rows again → nothing; only the new blob of the next turn counts.
+    assert reader.parse_activity(db, seen) == []
+    _append_blobs(db, "u", _assistant("two"))
+    second = [e for e in reader.parse_activity(db, seen)
+              if e.event_type == "turn_complete"]
+    assert [e.text for e in second] == ["two"]
+
+
+def test_activity_reanchors_when_the_store_shrinks(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A recreated/vacuumed db leaves the watermark past MAX(rowid). Re-anchor
+    rather than rescan, so old turns are never replayed as new ones."""
+    reader = _reader_rooted_at(tmp_path, monkeypatch)
+    chats = tmp_path / ".cursor" / "chats"
+    db = _make_store(chats, "6" * 32, _SID)
+    seen = _armed(reader, db)
+    _append_blobs(db, "t", _assistant("one"), _assistant("two"))
+    assert len(reader.parse_activity(db, seen)) == 2
+
     con = sqlite3.connect(db)
-    con.execute("INSERT INTO blobs VALUES ('d0', x'0a03080112')")
+    con.execute("DELETE FROM blobs")
+    con.execute("INSERT INTO blobs VALUES ('fresh', ?)",
+                (json.dumps(_assistant("rebuilt")).encode(),))
     con.commit()
     con.close()
-    again = reader.parse_activity(db, seen)
-    assert [e.event_type for e in again] == ["agent_active"]
-    assert again[0].dedup_key != first[0].dedup_key
+
+    # Re-anchored: the surviving row is below the old watermark, so it counts
+    # as history — nothing is reported this pass.
+    assert reader.parse_activity(db, seen) == []
+    _append_blobs(db, "after", _assistant("next"))
+    after = [e for e in reader.parse_activity(db, seen)
+             if e.event_type == "turn_complete"]
+    assert [e.text for e in after] == ["next"]
+
+
+def test_activity_survives_an_unreadable_db(tmp_path: Path, monkeypatch) -> None:
+    """A corrupt or locked store must yield no activity and no raise — and
+    must not move the watermark, so a later readable pass still works."""
+    reader = _reader_rooted_at(tmp_path, monkeypatch)
+    chats = tmp_path / ".cursor" / "chats"
+    d = chats / ("8" * 32) / _SID
+    d.mkdir(parents=True)
+    db = d / "store.db"
+    db.write_bytes(b"this is not sqlite at all")
+
+    seen: set[str] = set()
+    assert reader.parse_activity(db, seen) == []
+    assert not any(k.startswith("cursor_blob::") for k in seen)
+
+
+def test_timestamp_falls_back_to_now_not_the_db_mtime(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """store.db is WAL: a commit lands in store.db-wal and leaves the main
+    file's mtime at the session's start. With meta.json missing or corrupt,
+    an mtime fallback would stamp every turn of the session with that start
+    time — past 60s isReplayedTurnComplete discards them all, silencing done
+    notifications, pipeline sentinels and inter-CLI messaging alike."""
+    reader = _reader_rooted_at(tmp_path, monkeypatch)
+    db = _make_store(tmp_path / ".cursor" / "chats", "6" * 32, _SID)
+    assert not (db.parent / "meta.json").exists()
+    seen = _armed(reader, db)
+
+    _append_blobs(db, "t", _assistant("late reply"))
+    stale = time.time() - 7200
+    os.utime(db, (stale, stale))
+
+    events = reader.parse_activity(db, seen)
+    assert [e.event_type for e in events] == ["turn_complete"]
+    stamped = datetime.fromisoformat(events[0].timestamp).timestamp()
+    assert abs(stamped - time.time()) < 60

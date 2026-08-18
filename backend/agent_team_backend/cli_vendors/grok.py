@@ -37,7 +37,7 @@ import shutil
 import time
 from typing import Any
 
-from .base import Dep, VendorSpec
+from .base import Dep, McpServerConfig, McpValue, McpWiring, SkillsWiring, VendorSpec
 from ..usage_common import _num, _snapshot, _window
 from ..log_readers.base import (
     ActivityEvent,
@@ -579,7 +579,35 @@ async def fetch_grok(home: Path, env: dict | None = None) -> dict:
 
 SPEC = VendorSpec(
     key="grok",
+    # Verified 2026-08-15: grok's own error message points at
+    # ~/.agents/skills/<name>/SKILL.md. It has no dedicated relocation
+    # variable, so this rides the HOME shim its MCP wiring already builds.
+    skills_supported=True,
+    skills_wiring=SkillsWiring(
+        root_env="HOME",
+        reads_shared_root=True,
+        skills_rel=(".agents", "skills"),
+    ),
     label="Grok CLI",
+    # No flag, no config variable, no config-dir variable: the config root is
+    # hardcoded under the home directory. Servers are a LIST under mcp.servers
+    # keyed by id, not a map — and the file they share is the one holding the
+    # BYO API key, which is why the caller cannot simply link it.
+    mcp_wiring=McpWiring(
+        config=McpServerConfig(
+            section=("mcp", "servers"),
+            entry=(
+                ("id", McpValue.NAME),
+                ("label", McpValue.LABEL),
+                ("enabled", True),
+                ("transport", "http"),
+                ("url", McpValue.URL),
+            ),
+            list_key="id",
+        ),
+        config_dir=".grok",
+        config_file=("user-settings.json",),
+    ),
     # Empty, not None: grok has no auth subcommand — its TUI prompts for
     # sign-in on a bare launch — so the flags are stripped and nothing added.
     login_command_args="",

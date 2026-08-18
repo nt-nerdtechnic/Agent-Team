@@ -817,6 +817,105 @@ async def test_set_default_claude_not_gated_by_running_panes(
     assert events[0]["payload"]["forced"] is False
 
 
+async def test_set_default_claude_announces_the_new_account_before_any_poll(
+    store: CliProfilesStore, events: list[dict[str, Any]], vault: FakeVault,
+    monkeypatch: Any,
+) -> None:
+    """The badge must be told the account changed at switch time, not at the
+    end of the next poll: a Claude read boots a whole CLI, so waiting for the
+    poll leaves the outgoing account's numbers on screen for tens of seconds
+    with nothing saying why."""
+    from agent_team_backend import usage_service
+
+    announced: list[str | None] = []
+    refreshed: list[bool] = []
+    monkeypatch.setattr(
+        usage_service.service, "announce_claude_switch",
+        lambda slot_id, reading=True: _record_announce(announced, slot_id, reading),
+    )
+    monkeypatch.setattr(
+        usage_service.service, "request_refresh", lambda: refreshed.append(True)
+    )
+    session = _session()
+    profile = store.create(agent_key="claude", name="Work")
+    vault.slot_secrets[("claude", profile["id"])] = _claude_slot_secret(
+        "good", "rt-work", 4_102_444_800_000
+    )
+
+    await app.handle_message(session, {
+        "id": "an1",
+        "type": "cli_profiles.set_default",
+        "payload": {"agent_key": "claude", "profile_id": profile["id"]},
+    })
+
+    # A usable slot needs no sign-in, so the announcement promises a read.
+    assert announced == [(profile["id"], True)]
+    # The announcement requests the refresh itself — asking twice would be a
+    # second wake for the same cycle.
+    assert refreshed == []
+
+
+async def _record_announce(sink: list, slot_id: str | None, reading: bool) -> None:
+    sink.append((slot_id, reading))
+
+
+async def test_set_default_claude_promises_no_read_when_a_sign_in_is_needed(
+    store: CliProfilesStore, events: list[dict[str, Any]], vault: FakeVault,
+    monkeypatch: Any,
+) -> None:
+    """An empty slot signs the CLI out, so the switch opens a login pane. The
+    badge must not say the account's quota is being read at the same time —
+    nothing is reading it, and the two messages contradict each other."""
+    from agent_team_backend import usage_service
+
+    announced: list[tuple[str | None, bool]] = []
+    monkeypatch.setattr(
+        usage_service.service, "announce_claude_switch",
+        lambda slot_id, reading=True: _record_announce(announced, slot_id, reading),
+    )
+    session = _session()
+    profile = store.create(agent_key="claude", name="Work")
+
+    await app.handle_message(session, {
+        "id": "an3",
+        "type": "cli_profiles.set_default",
+        "payload": {"agent_key": "claude", "profile_id": profile["id"]},
+    })
+
+    assert session.websocket.sent[0]["payload"]["needsLogin"] is True  # type: ignore[attr-defined]
+    assert announced == [(profile["id"], False)]
+
+
+async def test_set_default_non_claude_only_asks_for_a_refresh(
+    store: CliProfilesStore, events: list[dict[str, Any]], vault: FakeVault,
+    monkeypatch: Any,
+) -> None:
+    """The announcement is about Claude's active-slot pointer; other agents
+    have no per-account snapshots to point at, so they keep the plain wake."""
+    from agent_team_backend import usage_service
+
+    announced: list[str | None] = []
+    refreshed: list[bool] = []
+    monkeypatch.setattr(
+        usage_service.service, "announce_claude_switch",
+        lambda slot_id, reading=True: _record_announce(announced, slot_id, reading),
+    )
+    monkeypatch.setattr(
+        usage_service.service, "request_refresh", lambda: refreshed.append(True)
+    )
+    session = _session()
+    profile = store.create(agent_key="codex", name="Work")
+
+    await app.handle_message(session, {
+        "id": "an2",
+        "type": "cli_profiles.set_default",
+        "payload": {"agent_key": "codex", "profile_id": profile["id"]},
+    })
+
+    assert announced == []
+    assert refreshed == [True]
+
+
 async def test_set_default_claude_broadcast_never_forced(
     store: CliProfilesStore, events: list[dict[str, Any]], vault: FakeVault
 ) -> None:
@@ -1505,6 +1604,7 @@ async def test_set_default_reports_needs_login_for_an_empty_slot(
     sent = session.websocket.sent[0]  # type: ignore[attr-defined]
     assert sent["ok"] is True
     assert sent["payload"]["needsLogin"] is True
+    assert sent["payload"]["needsLoginReason"] == "signed-out"
 
 
 async def test_set_default_reports_needs_login_for_an_expired_snapshot(
@@ -1533,6 +1633,9 @@ async def test_set_default_reports_needs_login_for_an_expired_snapshot(
     sent = session.websocket.sent[0]  # type: ignore[attr-defined]
     assert sent["ok"] is True
     assert sent["payload"]["needsLogin"] is True
+    # Told apart from a lost login: parking an account does this to it, and
+    # calling it "signed out" reads as the switch having broken something.
+    assert sent["payload"]["needsLoginReason"] == "expired"
     assert vault.slot_writes == []
     assert json.loads(
         vault.slot_secrets[("claude", profile["id"])]
@@ -1563,6 +1666,7 @@ async def test_set_default_reports_needs_login_for_a_wiped_snapshot(
     sent = session.websocket.sent[0]  # type: ignore[attr-defined]
     assert sent["ok"] is True
     assert sent["payload"]["needsLogin"] is True
+    assert sent["payload"]["needsLoginReason"] == "signed-out"
 
 
 async def test_set_default_reports_no_login_needed_for_a_usable_slot(
@@ -1585,3 +1689,4 @@ async def test_set_default_reports_no_login_needed_for_a_usable_slot(
 
     sent = session.websocket.sent[0]  # type: ignore[attr-defined]
     assert sent["payload"]["needsLogin"] is False
+    assert sent["payload"]["needsLoginReason"] is None

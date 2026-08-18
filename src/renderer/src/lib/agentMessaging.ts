@@ -2,18 +2,47 @@
 // envelope, and content sanitizing. Pure functions — no DOM, no side effects.
 //
 // Wire format (bare lines, never inside a fenced code block):
-//   ---MSG-START--- to: <target messagingName>
+//   ---MSG-START--- to: <target messagingName> [re: <correlationId>]
 //   <content, any number of lines>
 //   ---MSG-END---
+//
+// `re:` is optional and carries back the correlation id the envelope handed
+// out, which is what links a reply to the request it answers. Agents that never
+// echo it (and every message written before it existed) still parse.
 //
 // Parsing runs on structured turn text (ActivityEvent.text), never on the
 // terminal buffer.
 
 import { AGENT_SPECS } from '../agents'
+import enUS from '../i18n/locales/en-US.json'
 
 export const MSG_START = '---MSG-START---'
 export const MSG_END = '---MSG-END---'
-export const MSG_ENVELOPE_PREFIX = '[Navide MSG] from:'
+/** Opening token of everything Navide injects into a pane, whichever form it
+ *  takes. See isInjectedMessageText(). */
+const MSG_INJECTED_PREFIX = '[Navide MSG]'
+export const MSG_ENVELOPE_PREFIX = `${MSG_INJECTED_PREFIX} from:`
+/** First line of a delivery-failure notice. Deliberately distinct from
+ *  MSG_ENVELOPE_PREFIX: an agent must be able to tell "someone messaged me"
+ *  from "my message bounced" by the first line alone. */
+export const MSG_NOTICE_PREFIX = `${MSG_INJECTED_PREFIX} delivery failed`
+/** First line of a still-held notice. Distinct from the failure prefix because
+ *  it reports the opposite state: the message has not gone in and has not been
+ *  given up on either. */
+export const MSG_STALE_PREFIX = `${MSG_INJECTED_PREFIX} still held`
+/** A spawn request that produced no pane. */
+export const MSG_SPAWN_FAILED_PREFIX = `${MSG_INJECTED_PREFIX} spawn failed`
+/** A spawn request whose pane exists but never received its task. Kept separate
+ *  from "failed" because the two call for opposite responses: retrying a failed
+ *  spawn is right, retrying this one collides with the pane already open. */
+export const MSG_SPAWN_PARTIAL_PREFIX = `${MSG_INJECTED_PREFIX} spawn partial`
+
+/** True when a turn's text is something Navide injected rather than something
+ *  the agent wrote — a CLI reader echoes an injection back as a user record,
+ *  and it must never be mistaken for the pane's own content. */
+export function isInjectedMessageText(text: string): boolean {
+  return text.startsWith(MSG_INJECTED_PREFIX)
+}
 
 // Agent-initiated pane spawning (same bare-line wire format):
 //   ---SPAWN-START---
@@ -29,9 +58,15 @@ export interface ParsedAgentMessage {
   target: string
   /** Message body, trimmed. */
   content: string
+  /** Correlation id from the optional `re:` field, identifying the message this
+   *  one answers. Absent when the sender wrote no `re:` — the original format,
+   *  which stays a plain unrelated message. */
+  replyTo?: string
 }
 
-const START_RE = /^---MSG-START---\s*to\s*:\s*(.*?)\s*$/
+// `re:` is split off the target lazily, and only when whitespace precedes it, so
+// a handle that merely contains "re" keeps its whole name as the target.
+const START_RE = /^---MSG-START---\s*to\s*:\s*(.*?)(?:\s+re\s*:\s*(\S+))?\s*$/
 const END_RE = /^---MSG-END---\s*$/
 const FENCE_RE = /^\s*(```|~~~)/
 // Any ---UPPER-CASE--- control-marker token, wherever it appears in a line.
@@ -50,12 +85,16 @@ export function parseMessages(turnText: string): ParsedAgentMessage[] {
   if (!turnText) return out
 
   let inFence = false
-  let current: { target: string; lines: string[] } | null = null
+  let current: { target: string; replyTo?: string; lines: string[] } | null = null
 
   const close = (): void => {
     if (!current) return
     const content = current.lines.join('\n').trim()
-    if (current.target && content) out.push({ target: current.target, content })
+    if (current.target && content) {
+      const parsed: ParsedAgentMessage = { target: current.target, content }
+      if (current.replyTo) parsed.replyTo = current.replyTo
+      out.push(parsed)
+    }
     current = null
   }
 
@@ -72,7 +111,7 @@ export function parseMessages(turnText: string): ParsedAgentMessage[] {
     const start = START_RE.exec(line)
     if (start) {
       close()
-      current = { target: start[1], lines: [] }
+      current = { target: start[1], replyTo: start[2], lines: [] }
       continue
     }
     if (current) {
@@ -181,20 +220,119 @@ export function sanitizeMessageContent(content: string): string {
 /**
  * Wrap a message for injection into the target pane. The reply hint stays on
  * a single line so it can never parse as a bare marker.
+ *
+ * `correlationId` is asked back verbatim in the reply's `re:` field, which is
+ * what lets the reply be matched to this message instead of arriving as an
+ * unrelated one. Omitting it renders exactly the pre-correlation hint.
  */
 export function renderEnvelope(
   sender: string,
   content: string,
-  opts: { includeReplyHint?: boolean } = {},
+  opts: { includeReplyHint?: boolean; correlationId?: string } = {},
 ): string {
   const lines = [`${MSG_ENVELOPE_PREFIX} ${sender}`, sanitizeMessageContent(content)]
   if (opts.includeReplyHint !== false) {
+    const head = opts.correlationId
+      ? `to: ${sender} re: ${opts.correlationId}`
+      : `to: ${sender}`
+    const echo = opts.correlationId ? 're 欄位請原樣帶回，' : ''
     lines.push(
-      `（回覆方式：輸出裸行區塊 ${MSG_START} to: ${sender}，下一行起為訊息內容，` +
-        `最後一行 ${MSG_END}；marker 必須獨立整行且不可放在 code block 內）`,
+      `（回覆方式：輸出裸行區塊 ${MSG_START} ${head}，下一行起為訊息內容，` +
+        `最後一行 ${MSG_END}；${echo}marker 必須獨立整行且不可放在 code block 內）`,
     )
   }
   return lines.join('\n')
+}
+
+/** How much of the bounced message a failure notice quotes back, counted in
+ *  code points so the cut cannot split a surrogate pair (an emoji, or anything
+ *  outside the BMP) into an unpaired half. */
+const NOTICE_EXCERPT_CHARS = 80
+
+/**
+ * English sentence for a `msg.reason-*` key, read from the en-US locale so what
+ * an agent is told cannot drift from what the Messages panel shows. Agents are
+ * always told in English — the panel localizes for the user separately. An
+ * unknown key degrades to the key itself rather than to nothing.
+ */
+export function reasonToEnglish(key: string, params?: Record<string, string | number>): string {
+  return enUsSentence(`reason-${key}`, key, params)
+}
+
+/** English sentence for a `msg.hold-*` key — why a message has not gone out
+ *  yet — read from the same locale, for the same reason. */
+export function holdToEnglish(key: string, params?: Record<string, string | number>): string {
+  return enUsSentence(`hold-${key}`, key, params)
+}
+
+function enUsSentence(
+  localeKey: string,
+  fallback: string,
+  params?: Record<string, string | number>,
+): string {
+  const template = (enUS.msg as Record<string, string>)[localeKey]
+  if (!template) return fallback
+  return template.replace(/\{(\w+)\}/g, (whole, name: string) => {
+    const value = params?.[name]
+    return value === undefined ? whole : String(value)
+  })
+}
+
+/**
+ * Notice injected back into the SENDING pane when its message could not be
+ * delivered, so an agent that talks over the bare-line protocol learns of a
+ * failure it would otherwise only see in the user's Messages panel.
+ *
+ * The excerpt is collapsed to a single line and sanitized: it is the sender's
+ * own text coming back, and it must not re-trigger any marker parser.
+ */
+export function renderFailureNotice(to: string, reasonText: string, content: string): string {
+  const excerpt = Array.from(content.replace(/\s+/g, ' ').trim())
+    .slice(0, NOTICE_EXCERPT_CHARS)
+    .join('')
+  return (
+    `${MSG_NOTICE_PREFIX} — to: ${to}\n` +
+    `reason: ${reasonText}\n` +
+    `（原訊息開頭：${sanitizeMessageContent(excerpt)}）`
+  )
+}
+
+/**
+ * Notice injected back into the SENDING pane when its message has been queued
+ * long enough to be worth looking at, and has still neither gone in nor failed.
+ *
+ * Deliberately not a failure: nothing has given up on the message, and it will
+ * still be delivered when the target frees up. What it buys the sender is the
+ * chance to decide — wait, ask someone else, or tell the user — instead of
+ * assuming the work was handed over minutes ago.
+ */
+export function renderStaleNotice(
+  to: string,
+  holdText: string,
+  minutes: number,
+  content: string,
+): string {
+  const excerpt = Array.from(content.replace(/\s+/g, ' ').trim())
+    .slice(0, NOTICE_EXCERPT_CHARS)
+    .join('')
+  return (
+    `${MSG_STALE_PREFIX} — to: ${to}\n` +
+    `reason: ${holdText} — waiting ${minutes} min so far\n` +
+    `（原訊息開頭：${sanitizeMessageContent(excerpt)}）`
+  )
+}
+
+/**
+ * Notice injected back into the REQUESTING pane about a spawn it asked for.
+ *
+ * Same shape and same delivery path as a failure notice: a leading prefix that
+ * says what happened, and nothing that invites a reply. `detail` is collapsed
+ * onto the prefix line and sanitized, so the whole notice is one unambiguous
+ * line even when it carries an exception message.
+ */
+export function renderSpawnNotice(outcome: 'failed' | 'partial', detail: string): string {
+  const prefix = outcome === 'failed' ? MSG_SPAWN_FAILED_PREFIX : MSG_SPAWN_PARTIAL_PREFIX
+  return `${prefix} — ${sanitizeMessageContent(detail.replace(/\s+/g, ' ').trim())}`
 }
 
 /** Smallest free `<agentKey>-<n>` name not present in `taken`. */
@@ -210,8 +348,10 @@ export function defaultMessagingName(agentKey: string, taken: Iterable<string>):
  *  where silence is the only available signal. See {@link isTurnInFlight}. */
 export const TURN_SILENCE_MS = 20_000
 
-/** CLIs whose logs carry no end-of-turn record at all, so the end of a turn can
- *  only be inferred from silence. Each vendor declares this itself — see
+/** CLIs whose reported turn end cannot be trusted as a boundary, because their
+ *  logs carry no end-of-turn record and the reader synthesizes one from its own
+ *  quiet window. They do emit `turn_complete` — the question is what it is made
+ *  of, not whether it arrives. Each vendor declares this itself — see
  *  `turnEndInferredFromSilence` in agents/types.ts for why the default (trust
  *  the explicit turn-end record) must never be overridden lightly. */
 export const VENDORS_WITHOUT_TURN_END: ReadonlySet<string> = new Set(
@@ -222,10 +362,11 @@ export const VENDORS_WITHOUT_TURN_END: ReadonlySet<string> = new Set(
  * Whether a pane's CLI is still mid-turn, from its activity timestamps.
  *
  * The signal is "activity newer than the last reported turn end". For the
- * vendors in {@link VENDORS_WITHOUT_TURN_END} that alone would latch forever,
- * since their `lastTurnCompleteAt` never advances — those panes would stop
- * accepting inter-CLI messages the moment they did any work — so there, and
- * only there, a long enough silence is taken to mean the turn ended.
+ * vendors in {@link VENDORS_WITHOUT_TURN_END} that signal is unreliable: their
+ * `lastTurnCompleteAt` only advances once their reader's own quiet window has
+ * elapsed, so it can lag arbitrarily far behind the activity it should close —
+ * those panes would stop accepting inter-CLI messages while they sit idle — so
+ * there, and only there, a long enough silence is taken to mean the turn ended.
  */
 export function isTurnInFlight(
   lastActiveAt: number,
@@ -252,6 +393,27 @@ export function normalizeMessagingName(raw: string): string | null {
   const name = raw.trim()
   if (!name || name.includes('\n')) return null
   return name
+}
+
+/** How long a pane's push channel is left alone after a push failed to land,
+ *  so a channel that is declared but broken costs one attempt per minute
+ *  instead of one per pump tick. */
+export const PUSH_COOLDOWN_MS = 60_000
+
+/** The same, for a CLI whose server simply is not listening yet. That is what a
+ *  pane looks like for the first seconds of its life, and it fixes itself — so
+ *  it is worth a handful of quick retries rather than a minute's silence. */
+export const PUSH_RETRY_COOLDOWN_MS = 5_000
+
+/** Failures that say "not yet" rather than "not working". */
+const PUSH_RETRYABLE_REASONS = new Set(['not-listening'])
+
+/** How long to leave a pane's channel alone after a push came back `reason`.
+ *  An unrecognized reason takes the long cooldown: the short one exists for the
+ *  single case known to fix itself, and guessing wrong there costs a pane a
+ *  retry every few seconds for as long as its channel stays broken. */
+export function pushCooldownMs(reason: string): number {
+  return PUSH_RETRYABLE_REASONS.has(reason) ? PUSH_RETRY_COOLDOWN_MS : PUSH_COOLDOWN_MS
 }
 
 /** `base` if free in `taken`, else the first free suffixed variant. A base

@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
-import { useTerminal } from '../composables/useTerminal'
+import { useTerminal, type ClipboardFailureReason } from '../composables/useTerminal'
 import { useTheme } from '../composables/useTheme'
+import { useNotify } from '../composables/useNotify'
 import type { useBackend } from '../composables/useBackend'
 import type { useCliProfiles } from '../composables/useCliProfiles'
 import { extractDropPaths, escapeDraggedPath, stabilizeDroppedPaths } from '../lib/drop'
@@ -63,6 +64,10 @@ interface Props {
   /** Runtime-only login-expired badge — lit when the pane's CLI reported an
    *  expired login; clicking it asks App.vue to re-send the login command. */
   loginExpired?: boolean
+  /** Runtime-only continue affordance — lit when this pane came back from a
+   *  restore with `--resume`: the CLI reloaded its transcript but is parked at
+   *  the prompt, so whatever it was doing is never picked up on its own. */
+  continueAvailable?: boolean
   backend: ReturnType<typeof useBackend>
   cliProfiles: ReturnType<typeof useCliProfiles>
   workspacePath?: string
@@ -99,10 +104,16 @@ const emit = defineEmits<{
   /** Login-expired badge clicked — App.vue sends the CLI's login command into
    *  this pane and clears the badge. */
   (e: 'fix-login'): void
+  /** Continue button clicked on a resumed pane — App.vue injects the resume
+   *  prompt once so the interrupted work carries on. */
+  (e: 'continue-resume'): void
   /** The user typed into a STOPped pane (Enter/printable), taking over — App.vue
    *  clears + un-persists the STOP badge. */
   (e: 'user-resume'): void
   (e: 'first-output'): void
+  /** This pane's PTY did not survive a backend outage — App.vue resumes the
+   *  CLI session so the conversation continues instead of leaving a dead pane. */
+  (e: 'pty-lost'): void
 }>()
 const containerRef = ref<HTMLElement | null>(null)
 const isDragOver = ref(false)
@@ -137,6 +148,36 @@ function onTitleKeydown(e: KeyboardEvent): void {
   if (e.key === 'Escape') { e.preventDefault(); _cancelledTitle = true; editingTitle.value = false }
 }
 
+const { toast: notifyToast } = useNotify()
+
+// How urgent each clipboard failure is. "Try again in a moment" is not the same
+// news as "this pane is dead" or "the copy you think you made did not happen".
+const CLIPBOARD_TOAST_TYPE: Record<ClipboardFailureReason, 'info' | 'error'> = {
+  empty: 'info',
+  preparing: 'info',
+  'no-session': 'error',
+  'image-failed': 'error',
+  'copy-failed': 'error',
+  'send-failed': 'error',
+}
+// These repeat easily — ⌘V a few times while a pane starts and every press
+// reports — and useNotify has no dedupe of its own, so identical toasts would
+// stack up to its cap. One per reason per few seconds says as much.
+const CLIPBOARD_TOAST_GAP_MS = 3000
+const lastClipboardToastAt = new Map<ClipboardFailureReason, number>()
+
+function onClipboardFailure(reason: ClipboardFailureReason, chars: number): void {
+  const now = Date.now()
+  if (now - (lastClipboardToastAt.get(reason) ?? 0) < CLIPBOARD_TOAST_GAP_MS) return
+  lastClipboardToastAt.set(reason, now)
+  // The pane name is in the message because the toast is global: with several
+  // panes open, "paste dropped" alone does not say which one ignored you.
+  notifyToast(
+    i18n.global.t(`pane.terminal.clipboard-${reason}`, { pane: props.title, chars }),
+    { type: CLIPBOARD_TOAST_TYPE[reason] }
+  )
+}
+
 const terminal = useTerminal(props.paneId, props.backend, {
   workspacePath: props.workspacePath,
   onClear: () => emit('rebuild-clean'),
@@ -144,9 +185,47 @@ const terminal = useTerminal(props.paneId, props.backend, {
   mentionCandidates: () => props.mentionCandidates ?? [],
   onScreen: () => props.onScreen ?? true,
   onFirstOutput: () => emit('first-output'),
+  onClipboardFailure,
+  onPtyLostWhileDisconnected: () => emit('pty-lost'),
 })
 const { theme } = useTheme()
 watch(theme, () => terminal.updateXtermTheme())
+
+/**
+ * The banner text while the backend is unreachable, or '' when there is
+ * nothing to say.
+ *
+ * Only panes holding a PTY get it: a pane that never spawned has no work to
+ * lose, and the boot overlay already owns the initial start. The three
+ * messages are genuinely different situations — a transient reconnect, a
+ * crashed backend being respawned within its budget, and a backend that gave
+ * up for good — and the status bar's old single "connecting…" for all three is
+ * what made a dead backend look like a slow one.
+ */
+const disconnectedNotice = computed<string>(() => {
+  // Optional-chained throughout, like the rest of this file: the pane's tests
+  // stub both useTerminal and the backend with partial objects.
+  const status = props.backend?.status?.value
+  if (!status || status === 'connected') return ''
+  // Which panes have something at stake: one holding a PTY ('running'), and one
+  // mid-spawn ('starting'), whose keystrokes the input guard is already
+  // refusing — leaving that one silent was the worse half, since the user got
+  // no feedback at all for keys that went nowhere. A pane that exited or never
+  // spawned has nothing the outage can take, and telling it "typing is paused"
+  // promises a connection it is not waiting for.
+  //
+  // sessionId is the wrong test: it is assigned once and never cleared (not by
+  // cleanupSession, not on exit), so it stays truthy on a pane whose CLI ended
+  // long ago.
+  const paneStatus = terminal.status?.value
+  if (paneStatus !== 'running' && paneStatus !== 'starting') return ''
+  const auto = props.backend?.autoRestart?.value
+  if (auto) {
+    return i18n.global.t('pane.terminal.backend-restarting', { attempt: auto.attempt, max: auto.max })
+  }
+  if (status === 'error') return i18n.global.t('pane.terminal.backend-unavailable')
+  return i18n.global.t('pane.terminal.backend-reconnecting')
+})
 
 watch(() => props.isPreparing, (isPrep) => {
   if (terminal.setDisableStdin) {
@@ -162,16 +241,44 @@ watch(() => props.isPreparing, (isPrep) => {
 // alone cannot tell apart from a finished turn.
 const displayStatus = terminal.displayStatus
 
-// 'idle', 'awaiting' and 'question' all look like a quiet pane but mean
-// different things — done, blocked on a permission prompt, or waiting for an
-// answer — so each explains itself on hover. The rest are self-evident from
+// 'idle' and 'awaiting' both look like a quiet pane but mean opposite things —
+// done versus blocked on you — so each explains itself on hover. The badge no
+// longer separates a permission prompt from a question, but the tooltip still
+// names which one it is: the distinction is not worth a second badge, and is
+// worth a sentence once someone stops to ask. The rest are self-evident from
 // the badge text.
+// The badge otherwise prints the raw status word, which reads fine for every
+// state that describes the AGENT ('running', 'idle', 'exited'). 'awaiting'
+// describes the READER instead — it is the one badge that is an instruction —
+// so it gets a translated label, the same exception 'stopped' already makes.
+const statusBadgeKey = computed<string>(() =>
+  displayStatus.value === 'awaiting' ? 'pane.terminal.awaiting-status-badge' : ''
+)
+
 const statusTooltipKey = computed<string>(() => {
   if (displayStatus.value === 'idle') return 'pane.terminal.idle-status-tooltip'
-  if (displayStatus.value === 'awaiting') return 'pane.terminal.awaiting-status-tooltip'
-  if (displayStatus.value === 'question') return 'pane.terminal.question-status-tooltip'
+  if (displayStatus.value === 'awaiting') {
+    return terminal.awaitingKind.value === 'question'
+      ? 'pane.terminal.question-status-tooltip'
+      : 'pane.terminal.awaiting-status-tooltip'
+  }
   return ''
 })
+
+// The continue affordance is deliberately narrow: it appears only at a genuine
+// interruption — the pane came back from a restore with its transcript
+// reloaded, the CLI is parked and idle, and the user has not touched it since.
+// A plain finished turn is NOT an interruption; showing it there would put a
+// button under every pane after every reply. The first keystroke retires it for
+// good (the user took over), as does an active loop (already driving the pane).
+const showContinueButton = computed<boolean>(
+  () =>
+    !!props.continueAvailable &&
+    !props.loopActive &&
+    !props.restoring &&
+    displayStatus.value === 'idle' &&
+    (terminal.lastUserKeyAt?.value ?? 0) === 0
+)
 
 defineExpose({
   spawn: terminal.spawn,
@@ -180,6 +287,7 @@ defineExpose({
   focus: terminal.focus,
   status: terminal.status,
   displayStatus,
+  awaitingKind: terminal.awaitingKind,
   startingStartedAt: terminal.startingStartedAt,
   startingAgeMs: terminal.startingAgeMs,
   cancelPendingCreate: terminal.cancelPendingCreate,
@@ -190,6 +298,11 @@ defineExpose({
   cleanBytesSeen: terminal.cleanBytesSeen,
   lastActivityAt: terminal.lastActivityAt,
   lastRawActivityAt: terminal.lastRawActivityAt,
+  // The person at the keyboard, for App.vue's messaging idle gate.
+  hasDraft: terminal.hasDraft,
+  lastUserKeyAt: terminal.lastUserKeyAt,
+  // What the CLI on the other end actually asked for, for injectText's guards.
+  isBracketedPasteActive: terminal.isBracketedPasteActive,
   markTurnComplete: terminal.markTurnComplete,
   markNeedsInput: terminal.markNeedsInput,
   clearNeedsInput: terminal.clearNeedsInput,
@@ -471,7 +584,7 @@ onMounted(() => {
           class="status"
           :data-status="displayStatus"
           :title="statusTooltipKey ? $t(statusTooltipKey) : ''"
-        >{{ displayStatus === 'stopped' ? 'STOP' : displayStatus }}</span>
+        >{{ statusBadgeKey ? $t(statusBadgeKey) : displayStatus === 'stopped' ? 'STOP' : displayStatus }}</span>
         <UsageBadge v-if="agentKey" :agent-key="agentKey" :cli-profiles="cliProfiles" />
       </div>
       <div v-if="subtitle" class="header-sub">{{ subtitle }}</div>
@@ -488,10 +601,34 @@ onMounted(() => {
       @dragleave="onTerminalDragLeave"
       @drop.prevent="onTerminalDrop"
     ></div>
+    <!-- Backend down: a frozen pane is indistinguishable from a thinking CLI,
+         and keystrokes are refused while it shows (see inputTransportReady).
+         Deliberately a banner, not a cover: the history stays readable and
+         selectable, since nothing about it stopped being true. -->
+    <div v-if="disconnectedNotice" class="disconnected-banner" role="status" aria-live="polite">
+      <span class="disconnected-dot" />
+      <span class="disconnected-text">{{ disconnectedNotice }}</span>
+    </div>
     <!-- Optional-chained: the pane's tests stub useTerminal with partial objects. -->
-    <div v-if="terminal.optionSelectHint?.value" class="select-hint" aria-live="polite">
+    <div
+      v-if="terminal.optionSelectHint?.value"
+      class="select-hint"
+      :class="{ 'hint-raised': showContinueButton }"
+      aria-live="polite"
+    >
       {{ $t('pane.terminal.option-select-hint', { key: selectModifierLabel }) }}
     </div>
+    <!-- Sibling of .xterm-host, never inside it: everything under the host
+         belongs to xterm's renderer. Same placement as .select-hint. -->
+    <button
+      v-if="showContinueButton"
+      class="continue-btn"
+      type="button"
+      :title="$t('pane.terminal.continue-tooltip')"
+      @click.stop="emit('continue-resume')"
+    >
+      {{ $t('pane.terminal.continue') }}
+    </button>
     <div v-if="isPreparing" class="prep-overlay" aria-live="polite">
       <div class="prep-panel">
         <div class="prep-spinner" />
@@ -744,10 +881,6 @@ onMounted(() => {
   background: color-mix(in srgb, var(--warning-fg) 20%, transparent);
   color: var(--warning-fg);
 }
-.status[data-status='question'] {
-  background: color-mix(in srgb, var(--question-fg) 20%, transparent);
-  color: var(--question-fg);
-}
 .status[data-status='stopped'] {
   background: #000000;
   color: #ffffff;
@@ -796,6 +929,73 @@ onMounted(() => {
   color: var(--text-secondary);
   font-size: 11px;
   pointer-events: none;
+}
+/* Both live in the bottom-right corner; the hint steps up when the button is out. */
+.select-hint.hint-raised {
+  bottom: 38px;
+}
+/* Interruption affordance: a CLI brought back by --resume sits at its prompt
+   with its transcript loaded and nothing telling it to carry on. Small,
+   corner-anchored and short-lived — it retires on the first keystroke — so an
+   uninterrupted pane never carries any extra chrome. */
+.continue-btn {
+  position: absolute;
+  right: 10px;
+  bottom: 8px;
+  z-index: 10;
+  box-sizing: border-box;
+  padding: 4px 10px;
+  border: 1px solid var(--accent-emphasis);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
+  color: var(--accent-bright);
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s;
+}
+.continue-btn:hover {
+  background: var(--accent-subtle);
+  border-color: var(--accent-focus);
+}
+/* Sits over the top of the terminal area rather than covering it: the
+   scrollback stays readable and selectable while the backend is away. */
+.disconnected-banner {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  top: 35px;
+  z-index: 9;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px;
+  border: 1px solid var(--danger-fg);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  pointer-events: none;
+}
+.disconnected-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--danger-fg);
+  animation: disconnected-pulse 1.6s ease-in-out infinite;
+}
+.disconnected-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@keyframes disconnected-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .disconnected-dot { animation: none; }
 }
 .prep-overlay {
   position: absolute;

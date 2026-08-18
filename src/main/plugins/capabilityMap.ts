@@ -52,6 +52,12 @@ const GIT_METHODS = [
 // search capability methods → backend `search.<method>` one-for-one.
 const SEARCH_METHODS = ['find_in_files', 'replace_in_files'] as const
 
+// plans capability methods → backend `plans.<method>` one-for-one: the plan
+// document index the Plans UI drives (git-root resolution for a window opened
+// on a subdirectory, the one-scan document listing, and the parsed-meta cache
+// write-back that keeps a refresh from re-reading every document).
+const PLANS_METHODS = ['resolve_root', 'list_docs', 'cache_put'] as const
+
 // issues capability methods → backend `issues.<method>` one-for-one. GitPane's
 // useIssues drives cloud issues (gh/glab CRUD); the backend handlers already
 // exist, so plugin parity is a pure mapping plus a `requires: ["issues"]` grant.
@@ -102,14 +108,16 @@ const EXPLICIT_CAP_MAP: Readonly<Record<string, string>> = {
 }
 
 /** `(ns, method)` → backend WS message type. The full mini-IDE call surface
- *  (fs / git / search / issues / terminal / chat / ui) the broker dispatches to
- *  the backend. Keep in sync with the shim's `TYPE_TO_CAP`. */
+ *  (fs / git / search / issues / terminal / chat / ui) plus the Plans plugin's
+ *  `plans` surface, dispatched by the broker to the backend. Keep in sync with
+ *  the shim's `TYPE_TO_CAP`. */
 export const CAP_MAP: Readonly<Record<string, string>> = {
   ...uniformNs('fs', FS_METHODS),
   ...uniformNs('git', GIT_METHODS),
   ...uniformNs('search', SEARCH_METHODS),
   ...uniformNs('issues', ISSUES_METHODS),
   ...uniformNs('terminal', TERMINAL_METHODS),
+  ...uniformNs('plans', PLANS_METHODS),
   ...EXPLICIT_CAP_MAP,
 }
 
@@ -150,8 +158,8 @@ export const CAP_EVENTS: Readonly<Record<string, string>> = {
   'ai.review.end': 'chat',
   'ai.review.error': 'chat',
   // Plan documents changed on disk (backend broadcast). Gated on the dedicated
-  // `plans` namespace — event-only, it maps no request types — so the Plans
-  // plugin can live-refresh without being granted broader fs event surface.
+  // `plans` namespace — the same one gating the plans.* request surface — so
+  // the Plans plugin can live-refresh without a broader fs event surface.
   'plans.changed': 'plans',
   // PTY stream + lifecycle (useTerminal inside AiCliDock). These are _active_
   // emits sent to the PTY owner's WS session — the broker's shared transport is

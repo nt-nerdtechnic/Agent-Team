@@ -25,11 +25,13 @@ const planTools: ToolRow[] = [
 
 const cliTools: ToolRow[] = [
   { name: 'cli_list_targets', what: '有哪些 CLI pane 在線上、位址怎麼寫、對方是否忙碌' },
-  { name: 'cli_send', what: '把任意指令送給指定的 pane（同工作區或跨工作區視窗）' },
+  { name: 'cli_send', what: '把任意指令送給指定的 pane（同工作區或跨工作區視窗），回傳查詢用的 msg_key' },
+  { name: 'cli_send_and_wait', what: '送出指令並等對方把這回合做完，順便帶回它最後說了什麼' },
+  { name: 'cli_check_message', what: '用 msg_key 查一則送出的訊息後來如何：排隊中、已送達、或失敗與原因（只留最近一小時）' },
   { name: 'cli_open_agent', what: '開一個新的 CLI pane 並指派任務，完成後它會回報' },
-  { name: 'cli_read_log', what: '讀取另一個 pane 對話紀錄的結尾（預設 200 行）' },
+  { name: 'cli_read_log', what: '讀取另一個 pane 對話紀錄的結尾（預設 200 行），也可帶游標只讀新增的部分' },
   { name: 'cli_get_status', what: '查另一個 pane 是否忙碌、最近一次活動' },
-  { name: 'cli_wait_idle', what: '等到另一個 pane 閒置或逾時（最長 120 秒）' },
+  { name: 'cli_wait_idle', what: '等到另一個 pane 閒置或逾時（最長 120 秒）；逾時會說明是卡在權限提示、還在做事、還是連不上' },
 ]
 
 const uiTools: ToolRow[] = [
@@ -139,6 +141,12 @@ const comparison: CompareRow[] = [
       </div>
       <p class="mh-note">
         詳細用法見本頁的「CLI 互傳訊息」主題。
+        「等對方做完」是盡力而為：多數 CLI（含 Cursor）會自己回報回合結束，
+        Kimi／Grok／Pi／Qwen 是靠 8 秒沒動靜推論的。回傳的 <code>source</code> 就是在講
+        這次的「做完」有多可信，這幾家請當作參考而不是保證。
+        若等待途中對方的視窗被關掉、pane 被砍掉，<code>source</code> 會是
+        <code>target_lost</code>：訊息確實送出去了，只是已經無法確認它做完沒有——
+        這不是送出失敗，不要重送。
       </p>
 
       <h3 class="mh-h3">哪些 CLI 接得到</h3>

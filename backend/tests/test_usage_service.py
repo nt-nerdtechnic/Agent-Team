@@ -3038,3 +3038,244 @@ async def test_a_spawnless_unavailable_keeps_the_short_cooldown(tmp_path, monkey
 
     blocked = svc._blocked_until[("claude", "__default__")]
     assert blocked - before <= us.RATE_LIMIT_COOLDOWN + 1
+
+
+# ── Switch announcement: making the wait visible ────────────────────────────
+
+
+async def _append(sink: list, event: dict) -> None:
+    sink.append(event)
+
+
+async def test_announce_claude_switch_points_at_the_new_account_and_marks_it_reading(
+    tmp_path, monkeypatch
+):
+    """A switch must move the badge onto the incoming account immediately and
+    say its figure is still being read.
+
+    Without this the pointer only moved inside `poll_once`, so every badge kept
+    showing the OUTGOING account's numbers until the next cycle ended — and a
+    Claude cycle boots a whole CLI, so that is tens of seconds of a screen that
+    looks like the switch did nothing."""
+    from agent_team_backend import app
+
+    svc = us.UsageService(cache_path=tmp_path / "usage-cache.json")
+    svc.enabled = True
+    svc._record_claude_snapshot("acct-old", us._snapshot(
+        "claude", "ok", windows=[us._window("session", "Session", 10, None)]))
+    svc._record_claude_snapshot("acct-new", us._snapshot(
+        "claude", "ok", windows=[us._window("session", "Session", 80, None)]))
+    svc._active_claude_slot = "acct-old"
+
+    broadcasts: list[dict] = []
+    monkeypatch.setattr(app, "broadcast", lambda event: _append(broadcasts, event))
+
+    await svc.announce_claude_switch("acct-new")
+
+    assert svc._active_claude_slot == "acct-new"
+    # Broadcast without waiting for a poll — that is what makes it visible.
+    assert len(broadcasts) == 1
+    provider = broadcasts[0]["payload"]["providers"]["claude"]
+    assert provider["windows"][0]["usedPercent"] == 80  # the incoming account
+    assert provider["refreshPending"] is True
+    # The outgoing account is not marked: nothing is being read for it.
+    assert "refreshPending" not in broadcasts[0]["payload"]["accounts"]["claude"]["acct-old"]
+
+
+async def test_announce_claude_switch_of_the_built_in_default_slot(tmp_path, monkeypatch):
+    """`None` is how the built-in Default account is addressed everywhere else;
+    it must land on the same slot id the poller uses, or the badge would point
+    at an account that does not exist."""
+    from agent_team_backend import app
+
+    svc = us.UsageService(cache_path=tmp_path / "usage-cache.json")
+    svc.enabled = True
+    svc._active_claude_slot = "acct-old"
+    monkeypatch.setattr(app, "broadcast", lambda event: _append([], event))
+
+    await svc.announce_claude_switch(None)
+
+    assert svc._active_claude_slot == "__default__"
+    # Never polled, so it gets the same last-good-or-nothing row a parked slot
+    # gets — something has to carry the mark.
+    assert svc.account_snapshots["claude"]["__default__"]["refreshPending"] is True
+
+
+async def test_announce_claude_switch_promises_nothing_while_the_poller_is_off(
+    tmp_path, monkeypatch
+):
+    """With the badge disabled no cycle is coming, so "reading now" would stay
+    on screen forever. The pointer still moves — that part is just bookkeeping."""
+    from agent_team_backend import app
+
+    svc = us.UsageService(cache_path=tmp_path / "usage-cache.json")
+    svc.enabled = False
+    svc._record_claude_snapshot("acct-new", us._snapshot("claude", "ok"))
+    monkeypatch.setattr(app, "broadcast", lambda event: _append([], event))
+
+    await svc.announce_claude_switch("acct-new")
+
+    assert svc._active_claude_slot == "acct-new"
+    assert "refreshPending" not in svc.account_snapshots["claude"]["acct-new"]
+
+
+async def test_the_reading_mark_is_dropped_by_whatever_the_poll_writes(
+    tmp_path, monkeypatch
+):
+    """The mark means "a read is in flight", so it must not outlive the read —
+    including a read that failed. Both outcomes replace the snapshot."""
+    from agent_team_backend import app
+
+    svc = us.UsageService(cache_path=tmp_path / "usage-cache.json")
+    svc.enabled = True
+    monkeypatch.setattr(app, "broadcast", lambda event: _append([], event))
+
+    await svc.announce_claude_switch("acct-new")
+    svc._record_claude_snapshot("acct-new", us._snapshot(
+        "claude", "ok", windows=[us._window("session", "Session", 5, None)]))
+    assert "refreshPending" not in svc.account_snapshots["claude"]["acct-new"]
+
+    await svc.announce_claude_switch("acct-new")
+    svc._record_claude_snapshot("acct-new", us._snapshot("claude", "unavailable"))
+    assert "refreshPending" not in svc.account_snapshots["claude"]["acct-new"]
+
+    await svc.announce_claude_switch("acct-new")
+    svc._record_parked_claude_slot("acct-new")
+    assert "refreshPending" not in svc.account_snapshots["claude"]["acct-new"]
+
+
+async def test_announce_claude_switch_clears_the_read_cooldown(tmp_path, monkeypatch):
+    """The incoming account's own 15-minute cooldown would otherwise hold the
+    read the announcement just promised."""
+    from agent_team_backend import app
+
+    svc = us.UsageService(cache_path=tmp_path / "usage-cache.json")
+    svc.enabled = True
+    svc._blocked_until[("claude", "acct-new")] = time.monotonic() + us.CLAUDE_CLI_READ_INTERVAL
+    monkeypatch.setattr(app, "broadcast", lambda event: _append([], event))
+
+    await svc.announce_claude_switch("acct-new")
+
+    assert svc._blocked_until == {}
+    assert svc._wake.is_set()
+
+
+async def test_a_switch_during_a_poll_does_not_get_undone_by_that_poll(
+    tmp_path, monkeypatch
+):
+    """The cycle that is already running read "who is active" before the switch
+    happened. It must not write that answer back: doing so pointed the badge at
+    the OUTGOING account, wiped the reading mark, and — worst — filed the CLI's
+    figure (which reports whoever is signed in NOW) under the outgoing slot,
+    persisting one account's quota as another's."""
+    from agent_team_backend import app
+
+    store = _isolated_store(tmp_path)
+    one = store.create(agent_key="claude", name="One")
+    two = store.create(agent_key="claude", name="Two")
+    store.set_default("claude", one["id"])
+
+    alive = int(time.time() * 1000 + 3_600_000)
+    vault = _SlotVault({
+        "__default__": _slot_secret("d", "rt-d", alive),
+        one["id"]: _slot_secret("a", "rt-a", alive),
+        two["id"]: _slot_secret("b", "rt-b", alive),
+    })
+    monkeypatch.setattr(us, "_get_profiles_store", lambda: store)
+    monkeypatch.setattr(us, "_get_credential_vault", lambda: vault)
+    monkeypatch.setattr(app, "broadcast", lambda event: _append([], event))
+
+    svc = us.UsageService(cache_path=tmp_path / "usage-cache.json")
+    svc.enabled = True
+
+    switched = asyncio.Event()
+
+    async def fake_claude(home):
+        # The read is in flight — this is when the user switches accounts.
+        store.set_default("claude", two["id"])
+        await svc.announce_claude_switch(two["id"])
+        switched.set()
+        return us._snapshot("claude", "ok",
+                            windows=[us._window("session", "Session", 40, None)])
+
+    monkeypatch.setattr(us, "fetch_claude", fake_claude)
+    for name in ("codex", "kimi", "grok", "antigravity", "opencode", "qwen",
+                 "kilo", "pi", "copilot", "cursor"):
+        monkeypatch.setattr(us, f"fetch_{name}", lambda *a, _p=name, **k: _no_creds(_p))
+
+    payload = await svc.poll_once(tmp_path)
+
+    assert switched.is_set()
+    # The pointer stays where the switch put it.
+    assert svc._active_claude_slot == two["id"]
+    # The mark survives: a read for the new account is still owed.
+    assert payload["accounts"]["claude"][two["id"]]["refreshPending"] is True
+    # And the figure read under the new account's credentials was NOT filed
+    # under the old one, nor persisted as its last good reading.
+    assert svc._last_good.get("claude", {}).get(one["id"]) is None
+    assert not (tmp_path / "usage-cache.json").exists()  # nothing was persisted
+
+
+async def test_an_unresolvable_ledger_clears_a_mark_it_can_never_answer(
+    tmp_path, monkeypatch
+):
+    """With no profiles store the poll can only read `__default__`, so a named
+    slot is neither polled nor re-recorded — its mark would say "reading" for
+    the rest of the session. Nothing is in flight for it, so it is cleared."""
+    from agent_team_backend import app
+
+    monkeypatch.setattr(app, "broadcast", lambda event: _append([], event))
+    monkeypatch.setattr(us, "_get_profiles_store", lambda: None)
+    monkeypatch.setattr(us, "_get_credential_vault", lambda: None)
+
+    async def fake_claude(home):
+        return us._snapshot("claude", "ok",
+                            windows=[us._window("session", "Session", 40, None)])
+
+    monkeypatch.setattr(us, "fetch_claude", fake_claude)
+    for name in ("codex", "kimi", "grok", "antigravity", "opencode", "qwen",
+                 "kilo", "pi", "copilot", "cursor"):
+        monkeypatch.setattr(us, f"fetch_{name}", lambda *a, _p=name, **k: _no_creds(_p))
+
+    svc = us.UsageService(cache_path=tmp_path / "usage-cache.json")
+    svc.enabled = True
+    await svc.announce_claude_switch("acct-b")
+    assert svc.account_snapshots["claude"]["acct-b"]["refreshPending"] is True
+
+    await svc.poll_once(tmp_path)
+
+    assert "refreshPending" not in svc.account_snapshots["claude"]["acct-b"]
+
+
+async def test_announce_without_a_read_moves_the_pointer_but_promises_nothing(
+    tmp_path, monkeypatch
+):
+    """Switching onto an account that has to sign in first opens a login pane;
+    telling the user its quota is being read at the same time is a lie."""
+    from agent_team_backend import app
+
+    svc = us.UsageService(cache_path=tmp_path / "usage-cache.json")
+    svc.enabled = True
+    monkeypatch.setattr(app, "broadcast", lambda event: _append([], event))
+
+    await svc.announce_claude_switch("acct-out", reading=False)
+
+    assert svc._active_claude_slot == "acct-out"
+    assert "refreshPending" not in svc.account_snapshots["claude"]["acct-out"]
+
+
+async def test_a_second_announcement_clears_a_mark_it_no_longer_owns(
+    tmp_path, monkeypatch
+):
+    """Switching to an account that then turns out to need a sign-in must take
+    back the promise made a moment earlier, not leave both on screen."""
+    from agent_team_backend import app
+
+    svc = us.UsageService(cache_path=tmp_path / "usage-cache.json")
+    svc.enabled = True
+    monkeypatch.setattr(app, "broadcast", lambda event: _append([], event))
+
+    await svc.announce_claude_switch("acct-b")
+    assert svc.account_snapshots["claude"]["acct-b"]["refreshPending"] is True
+    await svc.announce_claude_switch("acct-b", reading=False)
+    assert "refreshPending" not in svc.account_snapshots["claude"]["acct-b"]

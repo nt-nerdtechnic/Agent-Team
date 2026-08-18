@@ -7,7 +7,7 @@
 // PlanMarkdownBody. Other HTML docs keep the plain sandboxed FilePreviewPane;
 // plain markdown (no frontmatter meta) falls back to the read-only PlanFileView.
 // Plans only — no file tree, terminal, or git.
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useBackend } from './composables/useBackend'
 import { initSettingsBackend, onSettingsChanged } from './lib/settings'
@@ -17,7 +17,8 @@ import { resolvePlanStore, type PlanCtx, type WriteResult } from './composables/
 import { sanitizePlanSectionHtml } from './editor/planRuntime'
 import PlansPane from './editor/PlansPane.vue'
 import { lastOpenedStorageKey, loadStoredValue, saveStoredChoice } from './editor/plansPaneModel'
-import { isMacPlatform } from './keybindings/parseKey'
+import { useKeybindings, setContext } from './keybindings/useKeybindings'
+import { registerCommand } from './keybindings/commandRegistry'
 import PlanReviewToolbar from './editor/PlanReviewToolbar.vue'
 import PlanFileView from './editor/PlanFileView.vue'
 import PlanMarkdownBody from './editor/PlanMarkdownBody.vue'
@@ -112,10 +113,44 @@ function isMarkdownDoc(relPath: string): boolean {
 // actions, and legacy .plan.md already carry frontmatter from the first read.
 async function probeMarkdownKind(relPath: string): Promise<void> {
   mdKind.value = 'loading'
-  const result = await resolvePlanStore(relPath).readMeta(planCtx(relPath))
+  let result: Awaited<ReturnType<ReturnType<typeof resolvePlanStore>['readMeta']>>
+  try {
+    result = await resolvePlanStore(relPath).readMeta(planCtx(relPath))
+  } catch {
+    // Transport down mid-probe. The rejection used to escape here, leaving the
+    // doc on 'loading' forever with nothing to re-probe it — a markdown plan
+    // opened while the backend was away simply spun for the rest of the
+    // session. Stay on 'loading' (the answer is genuinely unknown; calling it a
+    // plain doc would drop the review toolbar off a real plan) and retry when
+    // the backend is back.
+    pendingMarkdownProbe = relPath
+    return
+  }
+  pendingMarkdownProbe = ''
   if (openDoc.value?.relPath !== relPath) return // superseded by a newer open
   mdKind.value = result ? 'plan' : 'doc'
 }
+
+/** A meta probe that could not reach the backend, retried on reconnect. */
+let pendingMarkdownProbe = ''
+/** A restore-on-open that could not verify the stored plan, same deal. */
+let pendingInitialOpen = ''
+
+watch(
+  () => backend.status.value,
+  (s) => {
+    if (s !== 'connected') return
+    if (pendingMarkdownProbe) {
+      const relPath = pendingMarkdownProbe
+      pendingMarkdownProbe = ''
+      if (openDoc.value?.relPath === relPath) void probeMarkdownKind(relPath)
+    }
+    if (pendingInitialOpen) {
+      pendingInitialOpen = ''
+      if (!openDoc.value) void openInitialDoc()
+    }
+  }
+)
 
 function onOpenFile(payload: { filepath: string; name: string }): void {
   openDoc.value = { relPath: payload.filepath, name: payload.name }
@@ -144,21 +179,31 @@ async function openInitialDoc(): Promise<void> {
     return
   }
   const stored = loadStoredValue(lastOpenedKey)
-  if (!stored || !(await planDocExists(stored))) return
+  if (!stored) return
+  const exists = await planDocExists(stored)
+  if (exists === false) return
+  if (exists === null) {
+    // Could not ask. Treating that as "gone" silently dropped the plan the user
+    // had open and brought the window up empty for no visible reason, so hold
+    // the restore and try again once the backend answers.
+    pendingInitialOpen = stored
+    return
+  }
   // The list was interactive during the existence check; a plan opened in the
   // meantime (click, or a plan:open-doc switch) wins over the restore.
   if (openDoc.value) return
   openRelPath(stored)
 }
 
-async function planDocExists(relPath: string): Promise<boolean> {
+/** true = present, false = definitely absent, null = could not ask. */
+async function planDocExists(relPath: string): Promise<boolean | null> {
   try {
     const res = await backend.send<{ ok: boolean; exists?: boolean }>('fs.stat_path', {
       path: `${planRoot.value}/${relPath}`,
     })
     return res.payload?.exists === true
   } catch {
-    return false
+    return null
   }
 }
 
@@ -258,57 +303,58 @@ async function onSectionDelete(anchor: string): Promise<void> {
   applyBodyWriteResult(result)
 }
 
-// Quick open (⌘P / Ctrl+P). This window runs its own keydown handler rather
-// than the shared keybinding registry, so the chord is matched here — on the
-// platform modifier only, keeping the terminal's own Ctrl+P on macOS, and never
-// while focus sits in the CLI dock, whose PTY owns its keys.
-function isQuickOpenChord(event: KeyboardEvent): boolean {
-  if (event.key.toLowerCase() !== 'p' || event.altKey || event.shiftKey) return false
-  const chord = isMacPlatform() ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey
-  if (!chord) return false
-  return !(event.target as HTMLElement | null)?.closest?.('.ai-dock-panel')
-}
+useKeybindings()
+// Window identity, the same way GitWindowApp declares `gitWindow`: it gates the
+// ESC rule below, which must not fire in the windows that have their own.
+setContext('planWindow', true)
 
-// ESC overlay priority: cancel/close the innermost active overlay before
-// falling through to closing the window. Order: an in-frame section edit
-// (when focus is outside the frame — inside it the runtime handles ESC
-// itself), then the plan list's context menu / rename input, then an unsent
-// review note, then a read-only snapshot; otherwise close the window.
-function onWindowKeydown(event: KeyboardEvent): void {
-  if (isQuickOpenChord(event)) {
-    event.preventDefault()
-    void plansPaneRef.value?.openQuickOpen?.()
-    return
-  }
-  if (event.key !== 'Escape') return
+// Quick open (⌘P), from the shared rule table like every other window. Handlers
+// that return false do not consume the event, which is how the CLI dock keeps
+// its own ⌘P: the PTY owns every key while focus is inside it.
+registerCommand('workbench.action.quickOpen', () => {
+  if (document.activeElement?.closest('.ai-dock-panel')) return false
+  void plansPaneRef.value?.openQuickOpen?.()
+  return undefined
+})
+
+// ⌘⇧W. This window has no unsaved-buffer state of its own — an in-flight
+// section edit is cancelled through ESC below — so it closes outright.
+registerCommand('workbench.action.closeWindow', () => { window.close() })
+// ⇧⌘R. Same reasoning: plans live on disk, so a reload costs nothing but an
+// in-progress section edit, which ESC discards anyway.
+registerCommand('workbench.action.reloadWindow', () => { location.reload() })
+
+// ESC, bound centrally as closeModal on `planWindow` (keybindings/defaults.ts).
+//
+// The priority walk stays here rather than becoming five bindings: each step is
+// internal window state, and only the last one — closing the window — is a
+// decision the user could reasonably want on a different key. That one already
+// has its own command (⌘⇧W above); this is the same action reached by falling
+// through everything nearer.
+//
+// Order: an in-frame section edit (only when focus is outside the frame —
+// inside it the srcdoc runtime handles ESC and it never reaches us), then the
+// plan list's context menu / rename input, then an unsent review note, then a
+// read-only snapshot; otherwise close the window.
+registerCommand('workbench.action.closeModal', () => {
   if (previewRef.value?.isEditing?.()) {
     previewRef.value.cancelEdit()
-    event.preventDefault()
     return
   }
   // Markdown body's inline section edit — same priority as the HTML preview's
   // in-frame edit (only one body is ever mounted).
   if (mdBodyRef.value?.isEditing?.()) {
     mdBodyRef.value.cancelEdit()
-    event.preventDefault()
     return
   }
-  if (plansPaneRef.value?.closeActiveOverlay?.()) {
-    event.preventDefault()
-    return
-  }
-  if (toolbarRef.value?.closeActiveOverlay?.()) {
-    event.preventDefault()
-    return
-  }
+  if (plansPaneRef.value?.closeActiveOverlay?.()) return
+  if (toolbarRef.value?.closeActiveOverlay?.()) return
   if (snapshotPreview.value) {
     closeSnapshotPreview()
-    event.preventDefault()
     return
   }
-  event.preventDefault()
   window.close()
-}
+})
 
 // Pane id for the CLI dock, derived per (surface, workspace): Plan windows for
 // different workspaces coexist, and a shared fixed id would let one window's
@@ -369,7 +415,6 @@ onMounted(() => {
       planPreviewRefresh.value++
     }
   })
-  window.addEventListener('keydown', onWindowKeydown)
   // Auto-open the plan this window was launched for, once the root its path is
   // relative to is known.
   void resolvePlanRoot().then(() => openInitialDoc())
@@ -381,7 +426,6 @@ onUnmounted(() => {
   offThemeSettingsChange?.()
   offPlansChanged?.()
   offPlanOpenDoc?.()
-  window.removeEventListener('keydown', onWindowKeydown)
 })
 </script>
 

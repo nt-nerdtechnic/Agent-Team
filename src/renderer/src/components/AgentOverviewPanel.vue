@@ -205,8 +205,6 @@ function statusLabel(status: AgentOverviewStatus): string {
 .ao-row[data-status='idle'] .ao-dot { background: var(--attention-fg); }
 .ao-row[data-status='awaiting'] .ao-status { color: var(--warning-fg); }
 .ao-row[data-status='awaiting'] .ao-dot { background: var(--warning-fg); }
-.ao-row[data-status='question'] .ao-status { color: var(--question-fg); }
-.ao-row[data-status='question'] .ao-dot { background: var(--question-fg); }
 .ao-row[data-status='stopped'] .ao-status { color: var(--text-secondary); }
 .ao-row[data-status='stopped'] .ao-dot { background: var(--text-disabled); }
 .ao-row[data-status='waiting'] .ao-name { color: var(--text-secondary); }

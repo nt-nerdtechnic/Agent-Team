@@ -11,8 +11,17 @@ from typing import Any
 
 import pytest
 
-from agent_team_backend import app
+from agent_team_backend import agent_messaging, app
 from agent_team_backend.plugins.builtin.navide_plans import plan_mcp, plan_mcp_auth
+
+
+@pytest.fixture(autouse=True)
+def _clean_registry() -> Any:
+    """The timeout messages read the pane registry to say which workspaces have
+    a connected window, so it must not carry over between tests."""
+    agent_messaging._reset_for_test()
+    yield
+    agent_messaging._reset_for_test()
 
 
 def _ctx() -> Any:
@@ -113,24 +122,63 @@ async def test_ui_invoke_global_reports_when_no_window_is_open(
         "ok": False,
         "result": None,
         "error": "no Navide window is open to handle this request",
+        "error_code": "ui_no_window",
     }
     assert broadcasts == []
     assert plan_mcp._ui_invoke_pending.pending == {}
 
 
 @pytest.mark.asyncio
-async def test_ui_invoke_times_out_when_no_window_answers(
+async def test_timeout_with_no_known_window_names_that_failure_and_lists_what_it_sees(
     monkeypatch: pytest.MonkeyPatch, broadcasts: list[dict[str, Any]]
 ) -> None:
+    """The two failures behind a silent deadline need opposite fixes, so they
+    can no longer come back as one blended sentence."""
     monkeypatch.setattr(plan_mcp, "_UI_INVOKE_TIMEOUT_S", 0.05)
+    agent_messaging._reset_for_test()
+    agent_messaging.register("p1", "worker", "/ws/alpha", owner=object())
 
     result = await plan_mcp.ui_invoke("/ws/gamma", "editor.save", _ctx(), None)
 
     assert result["ok"] is False
-    assert "no Navide window owns" in result["error"]
-    assert "timed out" in result["error"]
+    assert result["error_code"] == "ui_no_window_known"
+    # Actionable: the caller can compare its path against what the backend sees.
+    assert "/ws/alpha" in result["error"]
+    assert "connected but did not answer" not in result["error"]
     # The pending entry must not leak once the wait gives up.
     assert plan_mcp._ui_invoke_pending.pending == {}
+
+
+@pytest.mark.asyncio
+async def test_timeout_with_a_connected_window_is_reported_as_an_action_timeout(
+    monkeypatch: pytest.MonkeyPatch, broadcasts: list[dict[str, Any]]
+) -> None:
+    monkeypatch.setattr(plan_mcp, "_UI_INVOKE_TIMEOUT_S", 0.05)
+    agent_messaging._reset_for_test()
+    agent_messaging.register("p1", "worker", "/ws/gamma", owner=object())
+
+    result = await plan_mcp.ui_invoke("/ws/gamma", "editor.save", _ctx(), None)
+
+    assert result["ok"] is False
+    assert result["error_code"] == "ui_action_timeout"
+    assert "is connected for workspace_path" in result["error"]
+    assert "not the problem" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_a_workspace_whose_only_window_is_offline_is_not_counted_as_connected(
+    monkeypatch: pytest.MonkeyPatch, broadcasts: list[dict[str, Any]]
+) -> None:
+    monkeypatch.setattr(plan_mcp, "_UI_INVOKE_TIMEOUT_S", 0.05)
+    agent_messaging._reset_for_test()
+    window = object()
+    agent_messaging.register("p1", "worker", "/ws/gamma", owner=window)
+    agent_messaging.drop_owner(window)
+
+    result = await plan_mcp.ui_invoke("/ws/gamma", "editor.save", _ctx(), None)
+
+    assert result["error_code"] == "ui_no_window_known"
+    assert "/ws/gamma" not in result["error"].split("window for: ")[1]
 
 
 @pytest.mark.asyncio

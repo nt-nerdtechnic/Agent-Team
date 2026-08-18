@@ -44,7 +44,10 @@ MAX_APPEND_ROWS = MAX_ROWS * 2
 MAX_CONTENT_CHARS = 64 * 1024  # one runaway message must not bloat the db
 _TRUNCATION_MARKER = "…[truncated]"
 
-_STATUSES = ("queued", "delivering", "delivered", "failed")
+_STATUSES = ("queued", "delivering", "delivered", "failed", "cancelled")
+# Message kinds Navide writes itself. NULL means an ordinary agent-sent message,
+# which is what every row written before this column existed is.
+_KINDS = ("notice",)
 # Mirrors the frontend's clearMessageLog rule: in-flight messages survive.
 DEFAULT_KEEP_STATUSES = ("queued", "delivering")
 
@@ -61,6 +64,7 @@ _COLUMNS = (
     "remote_workspace",
     "sender_agent",
     "recipient_agent",
+    "kind",
 )
 
 # Upsert: everything but the primary key and ``seq`` is refreshed. Keeping the
@@ -122,6 +126,16 @@ def _add_agent_keys(cur: sqlite3.Cursor) -> None:
     cur.execute("ALTER TABLE agent_message_log ADD COLUMN recipient_agent TEXT")
 
 
+def _add_kind(cur: sqlite3.Cursor) -> None:
+    """v4: who authored a message — Navide itself, or an agent.
+
+    Rows written before this column keep NULL, which reads as "an ordinary
+    message". That is right for every one of them: the only kind is the
+    delivery-failure notice, which did not exist when they were written.
+    """
+    cur.execute("ALTER TABLE agent_message_log ADD COLUMN kind TEXT")
+
+
 def _clamp_content(content: str) -> str:
     if len(content) <= MAX_CONTENT_CHARS:
         return content
@@ -132,6 +146,19 @@ def _clamp_content(content: str) -> str:
 def _coerce_status(value: Any) -> str:
     text = str(value)
     return text if text in _STATUSES else "failed"
+
+
+def _coerce_kind(value: Any) -> str | None:
+    """Only a kind this app writes survives; anything else stores as NULL.
+
+    The panel reads this to decide what a row *is* (it suppresses Resend on a
+    notice), so an unrecognized value must degrade to "ordinary message" rather
+    than reach the UI.
+    """
+    if value is None:
+        return None
+    text = str(value)
+    return text if text in _KINDS else None
 
 
 def _optional_int(value: Any) -> int | None:
@@ -175,6 +202,7 @@ def _normalize(row: Any) -> dict[str, Any] | None:
         "remote_workspace": _optional_text(row.get("remote_workspace")),
         "sender_agent": _optional_text(row.get("sender_agent")),
         "recipient_agent": _optional_text(row.get("recipient_agent")),
+        "kind": _coerce_kind(row.get("kind")),
     }
 
 
@@ -196,6 +224,7 @@ class AgentMessageLog:
         self._db.migrate(_COMPONENT, 1, _create_schema)
         self._db.migrate(_COMPONENT, 2, _add_seq)
         self._db.migrate(_COMPONENT, 3, _add_agent_keys)
+        self._db.migrate(_COMPONENT, 4, _add_kind)
         self._seq = self._read_max_seq()
 
     def _read_max_seq(self) -> int:

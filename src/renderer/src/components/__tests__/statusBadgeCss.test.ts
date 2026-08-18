@@ -28,7 +28,6 @@ const ALL: readonly DisplayStatus[] = [
   'error',
   'stopped',
   'awaiting',
-  'question',
 ]
 
 interface Surface {
@@ -96,20 +95,25 @@ describe('every pane status is styled on every surface that paints one', () => {
     }
   }
 
-  it('styles the two states that mean "waiting on the user" differently', () => {
-    // The whole point of splitting them: a permission prompt and a question
-    // need different reactions, so they must not share a colour.
+  it('gives "waiting on the user" a colour of its own, not idle\'s', () => {
+    // The state that means "nothing moves until you act" must not look like the
+    // one that means "done". Both kinds of wait share this hue on purpose —
+    // they are one badge now — so there is a single rule to check.
     const pane = read('src/renderer/src/components/TerminalPane.vue')
     const awaiting = pane.slice(pane.indexOf(".status[data-status='awaiting']"))
-    const question = pane.slice(pane.indexOf(".status[data-status='question']"))
     expect(awaiting.slice(0, 200)).toContain('--warning-fg')
-    expect(question.slice(0, 200)).toContain('--question-fg')
+    expect(awaiting.slice(0, 200)).not.toContain('--attention-fg')
   })
 
-  it('defines --question-fg as a real token, not a hardcoded colour', () => {
-    // Aliased to --done-fg so it follows each theme's contrast-tuned value;
-    // a literal hex here would be wrong in at least one of the five themes.
-    const tokens = read('src/renderer/src/styles/tokens/semantic.css')
-    expect(tokens).toContain('--question-fg: var(--done-fg)')
+  it('leaves no rule selecting the retired question status', () => {
+    // Merged into 'awaiting'. A leftover selector is dead weight that reads as
+    // a live state to the next person, and --question-fg went with it.
+    for (const surface of SURFACES) {
+      const css = read(surface.file)
+      expect(css, `${surface.name} still selects question`).not.toContain(
+        surface.selector('question')
+      )
+    }
+    expect(read('src/renderer/src/styles/tokens/semantic.css')).not.toContain('--question-fg')
   })
 })

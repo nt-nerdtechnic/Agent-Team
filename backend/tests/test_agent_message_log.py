@@ -11,6 +11,8 @@ from agent_team_backend.agent_message_log import (
     MAX_CONTENT_CHARS,
     MAX_ROWS,
     AgentMessageLog,
+    _add_agent_keys,
+    _add_seq,
     _create_schema,
 )
 from agent_team_backend.db import Database
@@ -178,6 +180,14 @@ def test_update_coerces_an_unknown_status_to_failed(log):
     assert log.tail()[0]["status"] == "failed"
 
 
+def test_update_keeps_a_withdrawn_message_withdrawn(log):
+    """`cancelled` is a status of its own: coercing it to `failed` would make a
+    message the sender took back read as one that went wrong."""
+    log.append([_row("a:1", 100, status="queued")])
+    log.update([{"uid": "a:1", "status": "cancelled"}])
+    assert log.tail()[0]["status"] == "cancelled"
+
+
 def test_clear_keeps_queued_and_delivering_by_default(tmp_path):
     db = Database(tmp_path / "navide.db")
     store = AgentMessageLog(db=db)
@@ -301,12 +311,12 @@ def test_clear_failure_is_swallowed_and_leaves_the_rows_in_place(log, monkeypatc
 def test_a_fresh_database_migrates_straight_to_the_current_schema(tmp_path):
     db = Database(tmp_path / "navide.db")
     AgentMessageLog(db=db)
-    assert db.schema_version("agent_message_log") == 3
+    assert db.schema_version("agent_message_log") == 4
     with db.transaction() as cur:
         columns = {
             r["name"] for r in cur.execute("PRAGMA table_info(agent_message_log)").fetchall()
         }
-    assert {"seq", "sender_agent", "recipient_agent"} <= columns
+    assert {"seq", "sender_agent", "recipient_agent", "kind"} <= columns
 
 
 def test_an_existing_v1_database_upgrades_and_backfills_seq(tmp_path):
@@ -322,7 +332,7 @@ def test_an_existing_v1_database_upgrades_and_backfills_seq(tmp_path):
             )
 
     store = AgentMessageLog(db=db)
-    assert db.schema_version("agent_message_log") == 3
+    assert db.schema_version("agent_message_log") == 4
     with db.transaction() as cur:
         seqs = {
             r["uid"]: r["seq"]
@@ -365,3 +375,90 @@ def test_vendors_round_trip(tmp_path):
 
     assert row["sender_agent"] == "claude"
     assert row["recipient_agent"] == "codex"
+
+
+def test_kind_round_trips_and_defaults_to_null(tmp_path):
+    """A row survives a restart knowing whether Navide or an agent wrote it."""
+    db = Database(tmp_path / "navide.db")
+    AgentMessageLog(db=db).append([
+        _row("a:1", 100) | {"kind": "notice"},
+        _row("a:2", 200),
+    ])
+
+    rows = {r["uid"]: r for r in AgentMessageLog(db=db).tail()}
+
+    assert rows["a:1"]["kind"] == "notice"
+    assert rows["a:2"]["kind"] is None
+
+
+def test_an_unrecognized_kind_is_stored_as_an_ordinary_message(log):
+    """The panel reads `kind` to decide what a row is, so an unknown value
+    degrades to NULL rather than reaching the UI."""
+    log.append([_row("a:1", 100) | {"kind": "spawn-feedback"}, _row("a:2", 200) | {"kind": 7}])
+
+    assert [r["kind"] for r in log.tail()] == [None, None]
+
+
+def test_rows_written_before_v4_have_no_kind(tmp_path):
+    """Additive, like the vendor columns: a pre-v4 row reads back as an ordinary
+    message, which is what every one of them is — the notice did not exist."""
+    db = Database(tmp_path / "navide.db")
+    db.migrate("agent_message_log", 1, _create_schema)
+    with db.transaction() as cur:
+        cur.execute(
+            "INSERT INTO agent_message_log"
+            " (uid, created_at, status, sender, recipient, content)"
+            " VALUES ('old:1', 100, 'delivered', 'alpha', 'beta', 'x')"
+        )
+
+    rows = AgentMessageLog(db=db).tail()
+
+    assert len(rows) == 1
+    assert rows[0]["kind"] is None
+    assert rows[0]["content"] == "x"
+
+
+def test_a_live_v3_database_upgrades_in_place_without_losing_anything(tmp_path):
+    """The upgrade every existing install actually performs.
+
+    The shipped schema is v3, so this is the step a user's own navide.db takes:
+    rows already there must survive untouched, keep their seq order, and read
+    back with the new column empty.
+    """
+    db = Database(tmp_path / "navide.db")
+    db.migrate("agent_message_log", 1, _create_schema)
+    db.migrate("agent_message_log", 2, _add_seq)
+    db.migrate("agent_message_log", 3, _add_agent_keys)
+    with db.transaction() as cur:
+        for seq, (uid, created_at) in enumerate(((("v3:1"), 100), (("v3:2"), 200)), start=1):
+            cur.execute(
+                "INSERT INTO agent_message_log"
+                " (uid, created_at, status, sender, recipient, content, seq, sender_agent)"
+                " VALUES (?, ?, 'delivered', 'alpha', 'beta', ?, ?, 'claude')",
+                (uid, created_at, f"kept {uid}", seq),
+            )
+
+    store = AgentMessageLog(db=db)
+    rows = store.tail()
+
+    assert db.schema_version("agent_message_log") == 4
+    assert [r["uid"] for r in rows] == ["v3:1", "v3:2"]
+    assert [r["content"] for r in rows] == ["kept v3:1", "kept v3:2"]
+    assert [r["sender_agent"] for r in rows] == ["claude", "claude"]
+    assert [r["kind"] for r in rows] == [None, None]
+
+    # And the counter continues from the pre-upgrade rows rather than colliding.
+    store.append([_row("v4:1", 300) | {"kind": "notice"}])
+    assert [r["uid"] for r in AgentMessageLog(db=db).tail()] == ["v3:1", "v3:2", "v4:1"]
+
+
+def test_reopening_an_upgraded_database_does_not_rerun_the_column_step(tmp_path):
+    """ALTER TABLE ADD COLUMN would raise "duplicate column name" on a second
+    run; the version gate is what makes construction idempotent."""
+    db = Database(tmp_path / "navide.db")
+    AgentMessageLog(db=db).append([_row("a:1", 100) | {"kind": "notice"}])
+
+    reopened = AgentMessageLog(db=db)  # must not raise
+
+    assert db.schema_version("agent_message_log") == 4
+    assert [r["kind"] for r in reopened.tail()] == ["notice"]

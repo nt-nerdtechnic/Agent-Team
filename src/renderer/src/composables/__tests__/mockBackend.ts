@@ -21,8 +21,11 @@ export function createMockBackend(initialStatus: BackendStatus = 'connected') {
   const httpUrl = ref('')
   const lastError = ref('')
 
+  const autoRestart = ref<{ attempt: number; max: number; reason: string } | null>(null)
+
   const listeners = new Map<string, Set<(p: unknown) => void>>()
   const responses = new Map<string, WsResponse>()
+  const rejections = new Map<string, Error>()
   const sent: SentRecord[] = []
 
   function on(type: string, cb: (p: unknown) => void): () => void {
@@ -46,9 +49,29 @@ export function createMockBackend(initialStatus: BackendStatus = 'connected') {
     timeoutMs?: number
   ): Promise<WsResponse<T>> {
     sent.push({ type, payload, timeoutMs })
+    const rejection = rejections.get(type)
+    if (rejection) throw rejection
     const preset = responses.get(type)
     if (preset) return preset as WsResponse<T>
     return { id: 't', type, ok: true, payload: null, error: null, timestamp: '' } as WsResponse<T>
+  }
+
+  /**
+   * Make `send(type)` REJECT, the way the real transport does when the socket
+   * is down ('ws not open') or a request times out.
+   *
+   * Without this the mock could only ever resolve, so every `catch` branch in
+   * every composable was unreachable in tests — the disconnected path was
+   * uncovered across the whole renderer, which is exactly the path that only
+   * runs when something has already gone wrong.
+   */
+  function setRejection(type: string, error: Error | string = 'ws not open'): void {
+    rejections.set(type, typeof error === 'string' ? new Error(error) : error)
+  }
+
+  /** Undo setRejection, e.g. to model a reconnect mid-test. */
+  function clearRejection(type: string): void {
+    rejections.delete(type)
   }
 
   function setResponse<T>(
@@ -70,9 +93,9 @@ export function createMockBackend(initialStatus: BackendStatus = 'connected') {
     })
   }
 
-  const backend = { status, wsUrl, httpUrl, lastError, send, on } as unknown as Backend
+  const backend = { status, wsUrl, httpUrl, lastError, autoRestart, send, on } as unknown as Backend
 
-  return { backend, status, emit, setResponse, sent }
+  return { backend, status, autoRestart, emit, setResponse, setRejection, clearRejection, sent }
 }
 
 /** Run a composable inside its own effect scope so `watch`/`onScopeDispose`

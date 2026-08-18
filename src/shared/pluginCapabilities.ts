@@ -12,8 +12,7 @@
 // Drift against 3 is caught by each plugin's capabilityBackend test, which
 // asserts the namespaces it maps against the set below.
 //
-// A plugin may declare MORE than its map uses (navide.plans declares `plans`
-// without mapping any plans.* WS type yet) — a superset is safe. The unsafe
+// A plugin may declare MORE than its map uses — a superset is safe. The unsafe
 // direction is a map reaching a namespace the manifest never granted, which
 // the broker would deny at runtime.
 
@@ -41,7 +40,8 @@ export const MINI_IDE_PLUGIN_REQUIRES: readonly string[] = [
   'issues',
 ]
 
-/** navide.plans — plan documents on disk plus the theme sync. `terminal`
+/** navide.plans — plan documents on disk (`plans` for the document index,
+ *  `fs` for reading and writing them) plus the theme sync. `terminal`
  *  powers the embedded AiCliDock CLI agent panel (interactive PTY). The old
  *  AIChatPane grants (`chat`, `search`, `git`) were dropped with the pane —
  *  the Plans tree sends no git.* call and subscribes no git-gated event

@@ -70,6 +70,18 @@ describe('resolveCliCommand', () => {
     expect(resolveCliCommand({ ...base, agentKey: 'grok', yoloStored: null })).toBe('grok')
   })
 
+  it('gives opencode --auto in YOLO mode (root command accepts it; old builds ignore it)', () => {
+    expect(resolveCliCommand({ ...base, agentKey: 'opencode', yoloStored: null }))
+      .toBe('opencode --auto')
+    expect(resolveCliCommand({ ...base, agentKey: 'opencode', yoloStored: '0' }))
+      .toBe('opencode')
+  })
+
+  it('gives kilo --auto in YOLO mode (OpenCode fork, same root flag)', () => {
+    expect(resolveCliCommand({ ...base, agentKey: 'kilo', yoloStored: null }))
+      .toBe('kilo --auto')
+  })
+
   it('uses the spec default command, not the agent key (no binary override)', () => {
     expect(resolveCliCommand({ ...base, agentKey: 'cursor', yoloStored: '0' }))
       .toBe('agent')

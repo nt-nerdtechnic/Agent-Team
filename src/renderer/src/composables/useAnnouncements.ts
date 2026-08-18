@@ -7,10 +7,11 @@ import type { UpdateState } from '../../../shared/updater'
 /**
  * Announcements centre — the status-bar feed of version news.
  *
- * Two sources, normalised into one list: the curated release notes in
- * whatsNew.ts (everything up to the running version) and the live updater
- * state (a pending update, or a run of failed background checks). Read state is
- * a bounded id set in ui_settings, so it follows the user across windows.
+ * Three sources, normalised into one list: the curated release notes in
+ * whatsNew.ts (everything up to the running version), the live updater state (a
+ * pending update, or a run of failed background checks), and what the backend
+ * reports about its own start. Read state is a bounded id set in ui_settings,
+ * so it follows the user across windows.
  *
  * Module-level singleton state, like useNotify — the status-bar item and the
  * popover read the same feed without prop drilling.
@@ -133,11 +134,43 @@ function updateItems(state: UpdateState | null): Announcement[] {
   return items
 }
 
+/** The version this backend replaced, when it started at a different one than
+ *  the previous run. Reported by the backend on connect; null the rest of the
+ *  time, which is every ordinary start. */
+const backendUpgrade = ref<{ from: string; to: string } | null>(null)
+
+/**
+ * An MCP client reads a server's tool list once, when it connects. So a CLI or
+ * an external client that was talking to the previous backend keeps the tools
+ * it saw then, and nothing about the upgrade tells it otherwise.
+ *
+ * Its own item rather than a line in the release note: the release note says
+ * what changed, this says what the reader has to do about it, and it is only
+ * ever true right after an upgrade.
+ */
+function backendItems(): Announcement[] {
+  const upgrade = backendUpgrade.value
+  if (!upgrade) return []
+  const t = i18n.global.t
+  return [
+    {
+      id: `mcp-tools:${upgrade.to}`,
+      kind: 'update',
+      version: upgrade.to,
+      title: t('announce.mcp-tools-changed'),
+      highlights: [],
+      note: t('announce.mcp-tools-changed-note', { from: upgrade.from }),
+      read: false,
+    },
+  ]
+}
+
 const items: ComputedRef<Announcement[]> = computed(() => {
   // Read the locale so a language switch re-localizes the whole feed.
   const locale = i18n.global.locale.value
   const seen = new Set(readIds.value)
   const merged = [
+    ...backendItems(),
     ...updateItems(updateSource.value?.state.value ?? null),
     ...releaseItems(locale, appVersion.value),
   ]
@@ -170,6 +203,16 @@ function setUpdateSource(state: Ref<UpdateState>): void {
   updateSource.value = { state }
 }
 
+/** Record that this backend started at a different version than the last one.
+ *  Idempotent: the backend reports it on every connect, and a reconnect must
+ *  not resurrect an item the user has already read. */
+function noteBackendUpgrade(from: string, to: string): void {
+  if (!from || !to || from === to) return
+  const current = backendUpgrade.value
+  if (current && current.from === from && current.to === to) return
+  backendUpgrade.value = { from, to }
+}
+
 function load(): void {
   if (loaded) return
   loaded = true
@@ -192,5 +235,6 @@ export function useAnnouncements() {
     markRead,
     markAllRead,
     setUpdateSource,
+    noteBackendUpgrade,
   }
 }

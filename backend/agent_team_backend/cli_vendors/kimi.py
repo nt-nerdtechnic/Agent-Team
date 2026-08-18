@@ -21,7 +21,7 @@ from pathlib import Path
 
 import re
 
-from .base import Dep, VendorSpec, command_text
+from .base import Dep, McpServerConfig, McpValue, McpWiring, SkillsWiring, VendorSpec, command_text
 from ..usage_common import HTTP_TIMEOUT, _epoch_to_iso, _num, _snapshot, _window, parse_retry_after
 from ..log_readers.base import (
     ActivityEvent,
@@ -559,7 +559,29 @@ def _session_exists(workspace_path: str, session_id: str) -> bool:
 
 SPEC = VendorSpec(
     key="kimi",
+    skills_supported=True,
+    # --skills-dir is repeatable but replaces auto-discovery outright, so the
+    # roots kimi would have found itself are passed back alongside ours.
+    skills_wiring=SkillsWiring(
+        flag="--skills-dir",
+        replaces_discovery=True,
+        discovery_home=((".kimi-code", "skills"), (".agents", "skills")),
+        discovery_project=((".agents", "skills"),),
+    ),
     label="Kimi Code",
+    # No flag and no config variable, so the MCP config can only be reached
+    # through the config directory — which kimi, unlike grok and antigravity,
+    # relocates with a variable of its own. A url with no transport field is
+    # read as streamable HTTP.
+    mcp_wiring=McpWiring(
+        config=McpServerConfig(
+            section=("mcpServers",),
+            entry=(("url", McpValue.URL),),
+        ),
+        config_dir=".kimi-code",
+        config_dir_env="KIMI_CODE_HOME",
+        config_file=("mcp.json",),
+    ),
     login_command_args="login",
     live_file=(".kimi-code", "credentials", "kimi-code.json"),
     slot_file="kimi-code.json",

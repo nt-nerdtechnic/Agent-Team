@@ -220,9 +220,26 @@ describe('KeyResolver – defaults integration (new shortcuts)', () => {
       .toBe('editor.action.addSelectionToNextFindMatch')
   })
 
-  it('cmd+p → quickOpen (no when clause)', () => {
-    expect(dr.resolve(mkEvent('p', { metaKey: true }), {})?.command)
-      .toBe('workbench.action.quickOpen')
+  it('mod+p → quickOpen on the platform modifier (no when clause)', () => {
+    // The only 'mod' rule in defaults, because the Plan window matched this
+    // chord itself before it joined the table and Ctrl+P off macOS came with
+    // it. 'mod' resolves at PARSE time, so each platform needs its own
+    // resolver — reusing `dr` would test whatever platform it was built on.
+    const original = navigator.platform
+    const on = (platform: string): KeyResolver => {
+      Object.defineProperty(navigator, 'platform', { value: platform, configurable: true })
+      return new KeyResolver(defaults)
+    }
+    try {
+      expect(on('MacIntel').resolve(mkEvent('p', { metaKey: true }), {})?.command)
+        .toBe('workbench.action.quickOpen')
+      expect(on('Win32').resolve(mkEvent('p', { ctrlKey: true }), {})?.command)
+        .toBe('workbench.action.quickOpen')
+      // macOS keeps Ctrl+P for the terminal, which is why this is not two rules.
+      expect(on('MacIntel').resolve(mkEvent('p', { ctrlKey: true }), {})).toBeNull()
+    } finally {
+      Object.defineProperty(navigator, 'platform', { value: original, configurable: true })
+    }
   })
 
   it('cmd+shift+t → reopenClosedEditor (no when clause)', () => {
@@ -289,6 +306,17 @@ describe('KeyResolver – defaults integration (new shortcuts)', () => {
 
   it('escape does nothing without modalOpen', () => {
     expect(dr.resolve(mkEvent('Escape'), {})).toBeNull()
+  })
+
+  it('escape → closeModal in the Plan window, which has no modalOpen', () => {
+    // Its ESC walks an overlay ladder and ends at closing the window, so the
+    // rule is scoped to the window rather than to a modal being open.
+    expect(dr.resolve(mkEvent('Escape'), { planWindow: true })?.command)
+      .toBe('workbench.action.closeModal')
+  })
+
+  it('escape stays with the CLI dock while the Plan window terminal has focus', () => {
+    expect(dr.resolve(mkEvent('Escape'), { planWindow: true, terminalFocus: true })).toBeNull()
   })
 
   it('ctrl+up → scrollLineUp (editorTextFocus)', () => {
@@ -360,8 +388,41 @@ describe('KeyResolver – defaults integration (new shortcuts)', () => {
     expect(dr.resolve(mkEvent('w', { metaKey: true }), { editorOpen: true, modalOpen: true })).toBeNull()
   })
 
-  it('cmd+w blocked when editorOpen false', () => {
+  it('cmd+w → closeActivePane in the main window (paneStage && !modalOpen)', () => {
+    // Same key, one unit of whatever the window holds: a tab above, the focused
+    // CLI pane here. The two guards are window identities and never both hold.
+    expect(dr.resolve(mkEvent('w', { metaKey: true }), { paneStage: true, modalOpen: false })?.command)
+      .toBe('workbench.action.closeActivePane')
+  })
+
+  it('cmd+w blocked in the main window while a modal is open', () => {
+    expect(dr.resolve(mkEvent('w', { metaKey: true }), { paneStage: true, modalOpen: true })).toBeNull()
+  })
+
+  it('cmd+w does nothing in a window that is neither', () => {
     expect(dr.resolve(mkEvent('w', { metaKey: true }), { editorOpen: false })).toBeNull()
+  })
+
+  it('cmd+r rebuilds one pane, cmd+shift+r reloads the window', () => {
+    // The same two tiers as ⌘W / ⇧⌘W, and the reverse of what the app menu had:
+    // it put reloading the whole renderer on the shorter chord.
+    expect(dr.resolve(mkEvent('r', { metaKey: true }), {})?.command)
+      .toBe('workbench.action.rebuildFocusedPane')
+    expect(dr.resolve(mkEvent('r', { metaKey: true, shiftKey: true }), {})?.command)
+      .toBe('workbench.action.reloadWindow')
+  })
+
+  it('cmd+shift+r stays git.refresh in the Git window', () => {
+    expect(dr.resolve(mkEvent('r', { metaKey: true, shiftKey: true }), { gitWindow: true })?.command)
+      .toBe('git.refresh')
+  })
+
+  it('cmd+shift+r reaches the PTY in the Git window, reloading nothing', () => {
+    // git.refresh yields on terminalFocus. Without the !gitWindow guard on the
+    // reload rule, the chord would fall through and reload the window out from
+    // under the AI dock instead of reaching the CLI.
+    expect(dr.resolve(mkEvent('r', { metaKey: true, shiftKey: true }), { gitWindow: true, terminalFocus: true }))
+      .toBeNull()
   })
 
   it('cmd+shift+s → saveAll (editorOpen)', () => {

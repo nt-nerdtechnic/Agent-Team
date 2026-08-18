@@ -274,6 +274,40 @@ export function chunkForPty(text: string, size: number): string[] {
   return chunks
 }
 
+// PTY-friendly paste: these wrap injected text so a modern CLI TUI accepts it
+// as one paste rather than as a stream of keypresses. Shared by App.vue's
+// injectText / pastePaneContext and by injectionChunks below, so there is one
+// spelling of the guards in the injection path.
+export const BRACKETED_PASTE_START = '\x1b[200~'
+export const BRACKETED_PASTE_END = '\x1b[201~'
+
+/** Split an injection payload into PTY writes.
+ *
+ *  The bracketed-paste guards are emitted as their own chunks and never merged
+ *  into the content: a CLI that receives half of `ESC[200~` prints the rest as
+ *  literal text and never enters paste mode, which is exactly what a size-based
+ *  split of the wrapped string would eventually do.
+ *
+ *  An empty body writes nothing at all. Wrapping it would send a pair of guards
+ *  around no content — two writes where there used to be none, announcing a
+ *  paste that never comes. */
+export function injectionChunks(body: string, size: number, bracketed: boolean): string[] {
+  if (body === '') return []
+  const chunks = chunkForPty(body, size)
+  return bracketed ? [BRACKETED_PASTE_START, ...chunks, BRACKETED_PASTE_END] : chunks
+}
+
+/** Strip what the terminal sends alongside real typing — cursor and function
+ *  keys, mouse and focus reports, bracketed-paste guards — plus the remaining
+ *  control characters, leaving only the text the user is composing.
+ *
+ *  Dropping the WHOLE escape sequence is the point: stripping the ESC byte
+ *  alone leaves "[A" behind for an arrow key and "[<0;10;5M" for a mouse click,
+ *  which a draft/`/clear` tracker then reads as typed text that never clears. */
+export function stripInputSequences(text: string): string {
+  return text.replace(/\x1b(?:\[[0-?]*[ -/]*[@-~]|O.|.?)/g, '').replace(/[\x00-\x1f\x7f]/g, '')
+}
+
 /** Convert a screen-space drop point (reported by the drag source window's
  *  dragend) into this window's client/viewport coordinates. `window.screenX/Y`
  *  is the VIEWPORT's top-left in screen space, so window chrome is already
@@ -328,6 +362,13 @@ export function buildCliPaneBufferReply(
 
 export interface PaneStatusReply {
   status: string
+  /** Which kind of wait an 'awaiting' status is reporting — 'permission' or
+   *  'question'; absent for every other status. The badge merged the two, but
+   *  a caller deciding whether it may send this pane work still has to tell
+   *  them apart, and `status` alone no longer can. cli_wait_idle is the
+   *  consumer that must not regress: a question was always something it
+   *  returned from, a permission prompt never was. */
+  awaitingKind?: string
   buffer: string
   logPath?: string
 }
@@ -339,11 +380,13 @@ export interface PaneStatusReply {
  *  TerminalPane ref yet (still shows a status, but no scrollback). */
 export function buildPaneStatusReply(
   pane: { outputLogFile?: string } | undefined,
-  live: { displayStatus?: string; buffer: string } | null
+  live: { displayStatus?: string; awaitingKind?: string | null; buffer: string } | null
 ): PaneStatusReply {
-  return {
+  const reply: PaneStatusReply = {
     status: live?.displayStatus ?? 'starting',
     buffer: live ? bufferTail(live.buffer, CLI_PASTE_BUFFER_CAP) : '',
     logPath: pane?.outputLogFile || undefined
   }
+  if (live?.awaitingKind) reply.awaitingKind = live.awaitingKind
+  return reply
 }

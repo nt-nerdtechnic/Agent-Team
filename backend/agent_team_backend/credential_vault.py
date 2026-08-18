@@ -91,6 +91,13 @@ DEFAULT_SLOT_ID = "__default__"
 CLAUDE_LIVE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 _SLOT_SERVICE_PREFIX = "Navide CLI account "
 
+# Backend-owned secrets that are not a CLI vendor's credential (the
+# Navide-Server access token is the first). Same storage rules as a slot
+# secret — Keychain on macOS, a 0600 file elsewhere — so there is one place
+# where "how Navide stores a secret" is decided.
+_APP_SECRET_SERVICE_PREFIX = "Navide secret "
+_APP_SECRET_DIRNAME = "__secrets__"
+
 # Secret file name inside a slot directory, per agent.
 _SLOT_FILES = {
 }
@@ -421,6 +428,36 @@ class CredentialVault:
 
     def clear_live(self, agent_key: str) -> None:
         self.write_live(agent_key, LiveCredentials())
+
+    # ---- app secrets (not tied to a CLI vendor or an account slot) ----
+
+    def app_secret_path(self, name: str) -> Path:
+        return self._root / _APP_SECRET_DIRNAME / name
+
+    def read_app_secret(self, name: str) -> str | None:
+        """Read a backend-owned secret, or None when it was never stored."""
+        if self._is_macos:
+            secret = self._keychain_read(_APP_SECRET_SERVICE_PREFIX + name)
+            if secret is not None:
+                return secret
+        return _read_text(self.app_secret_path(name))
+
+    def write_app_secret(self, name: str, secret: str | None) -> None:
+        """Store *secret*, or erase it when None. ``_keychain_write`` refuses a
+        multi-line payload, so a caller serialising JSON must keep it on one
+        line."""
+        if secret is None:
+            if self._is_macos:
+                self._keychain_delete(_APP_SECRET_SERVICE_PREFIX + name)
+            self.app_secret_path(name).unlink(missing_ok=True)
+            return
+        if self._is_macos:
+            self._keychain_write(_APP_SECRET_SERVICE_PREFIX + name, secret)
+            # A leftover file from a run on another platform would shadow the
+            # Keychain item on the next read.
+            self.app_secret_path(name).unlink(missing_ok=True)
+        else:
+            _write_private(self.app_secret_path(name), secret)
 
     def _read_live_oauth_account(self) -> dict | None:
         raw = _read_text(self._claude_config_json())

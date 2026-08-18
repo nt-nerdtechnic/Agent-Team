@@ -212,6 +212,56 @@ describe('UsageBadge – badge rendering', () => {
     expect(wrapper.get('.usage-pop-cached').text()).toContain('rate limited')
   })
 
+  it('says a read is in flight rather than passing the old figure off as new', async () => {
+    // The account just changed. The number on the badge is the incoming
+    // account's PREVIOUS reading and the real one is tens of seconds away —
+    // without saying so the badge looks like the switch did nothing.
+    usage.usageFor.mockReturnValue(
+      snapshot({
+        stale: true,
+        refreshPending: true,
+        lastSuccessAt: '2026-07-25T00:00:00Z',
+        refreshStatus: 'not-measured',
+      }),
+    )
+    wrapper = mountBadge(makeCliProfiles().fake)
+    const badge = wrapper.get('.usage-badge')
+    expect(badge.text()).toContain('70%')
+    expect(badge.text()).toContain('reading')
+    expect(badge.text()).not.toContain('cached')
+    expect(badge.classes()).toContain('pending')
+    expect(badge.attributes('title')).toContain('just became active')
+
+    await openPopover(wrapper)
+    expect(wrapper.get('.usage-pop-pending').text()).toContain('Reading this account')
+  })
+
+  it('stays on screen while a read runs for an account that has no figure yet', async () => {
+    // REGRESSION: switching onto a never-polled account produces a snapshot
+    // with no percent, no staleness and no error. That combination used to
+    // fail every term of `visible`, so the badge unmounted the instant the
+    // user switched — the exact "did that do anything?" reading the pending
+    // state exists to prevent.
+    usage.usageFor.mockReturnValue(
+      snapshot({ status: 'not-measured', refreshPending: true, windows: [] }),
+    )
+    wrapper = mountBadge(makeCliProfiles().fake)
+
+    const badge = wrapper.get('.usage-badge')
+    expect(badge.text()).toContain('reading')
+    expect(badge.text()).not.toContain('⚠')
+    expect(badge.classes()).toContain('pending')
+  })
+
+  it('still warns rather than saying "reading" when the credentials expired', async () => {
+    // A fault the user can act on outranks a wait they only have to sit out.
+    usage.usageFor.mockReturnValue(
+      snapshot({ status: 'expired', refreshPending: true, windows: [] }),
+    )
+    wrapper = mountBadge(makeCliProfiles().fake)
+    expect(wrapper.get('.usage-badge').text()).toBe('⚠')
+  })
+
   it('does not present cached remaining quota after the reset has passed', async () => {
     usage.usageFor.mockReturnValue(
       snapshot({
@@ -345,6 +395,41 @@ describe('UsageBadge – popover account list', () => {
     expect(pcts[1].classes()).toContain('stale')
     expect(pcts[1].text()).toBe('~70%')
     expect(pcts[1].attributes('title')).toContain('Cached')
+  })
+
+  it("tells a row's in-flight read apart from the age of its numbers", async () => {
+    // Both rows are stale; only one is being read. The tooltip on that one has
+    // to explain the wait, not date the figure — dating it says "this is as
+    // good as it gets", which is the opposite of what is happening.
+    usage.usageFor.mockReturnValue(snapshot())
+    usage.accountUsageFor.mockImplementation((_agent, profileId) =>
+      profileId === 'p1'
+        ? snapshot({ stale: true, refreshPending: true })
+        : snapshot({ stale: true, lastSuccessAt: '2026-07-20T00:00:00Z' }),
+    )
+    wrapper = mountBadge(makeCliProfiles({ profiles: [profile('p1', 'Work')] }).fake)
+    await openPopover(wrapper)
+
+    const pcts = wrapper.findAll('.usage-acct-pct')
+    expect(pcts[0].attributes('title')).toContain('Cached')
+    expect(pcts[1].attributes('title')).toContain('just became active')
+  })
+
+  it('marks a mid-read row that has no percent to show', async () => {
+    // The tooltip hangs off the percent span, so an account with no reading of
+    // its own — the one most likely to be mid-read — rendered a blank row.
+    usage.usageFor.mockReturnValue(snapshot())
+    usage.accountUsageFor.mockImplementation((_agent, profileId) =>
+      profileId === 'p1'
+        ? snapshot({ status: 'not-measured', refreshPending: true, windows: [] })
+        : snapshot(),
+    )
+    wrapper = mountBadge(makeCliProfiles({ profiles: [profile('p1', 'Work')] }).fake)
+    await openPopover(wrapper)
+
+    const pcts = wrapper.findAll('.usage-acct-pct')
+    expect(pcts[1].text()).toBe('reading')
+    expect(pcts[1].attributes('title')).toContain('just became active')
   })
 
   it('omits the row percent when a slot has no fetched snapshot', async () => {

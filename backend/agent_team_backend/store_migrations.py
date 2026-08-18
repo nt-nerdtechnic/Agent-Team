@@ -73,6 +73,19 @@ _MIGRATIONS: dict[str, dict[int, Callable[[Any], Any]]] = {
 }
 
 
+# The version transition the last run_startup_migrations() observed, or None
+# when this backend started at the same version as the previous one (or is the
+# first to ever run against this app-data dir). Read by app.py to tell a window
+# connecting after an upgrade that a CLI started before it keeps the MCP tool
+# list it snapshotted then. Not persisted: it describes this process's start.
+_version_change: tuple[str, str] | None = None
+
+
+def version_change() -> tuple[str, str] | None:
+    """(previous version, current version), or None when nothing changed."""
+    return _version_change
+
+
 def run_startup_migrations(
     data_dir: Path | None = None, current_version: str | None = None
 ) -> None:
@@ -90,10 +103,17 @@ def run_startup_migrations(
 
 
 def _run(data_dir: Path | None, current_version: str | None) -> None:
+    global _version_change
+
     base = data_dir or app_data_dir()
     version = current_version or __version__
     marker = base / MARKER_FILE
     last = _read_marker(marker)
+
+    # Assigned on every run, so a same-version start clears what an earlier one
+    # recorded. A missing marker is a first start, not an upgrade — there was no
+    # previous version for anything to have been running against.
+    _version_change = (last, version) if last and last != version else None
 
     if last == version:
         return  # Same version already recorded — nothing to do.

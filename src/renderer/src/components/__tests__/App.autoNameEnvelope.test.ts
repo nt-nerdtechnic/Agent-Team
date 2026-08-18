@@ -8,7 +8,8 @@ import { describe, expect, it } from 'vitest'
 // inter-CLI messages land in a CLI log as ordinary records, and a pane titled
 // with one reads as someone else's instruction. Both auto-name paths in the
 // agent.activity handler (the user-prompt path and the turn_complete fallback)
-// must skip envelope text.
+// must skip anything Navide injected — a forwarded envelope or a delivery
+// failure notice alike.
 const appSource = readFileSync(resolve(process.cwd(), 'src/renderer/src/App.vue'), 'utf8')
 
 function activityHandler(): string {
@@ -30,13 +31,13 @@ describe('auto-naming skips inter-CLI envelopes', () => {
     const body = activityHandler()
     // The user-prompt path and the turn_complete fallback.
     expect(countOf(body, 'setPaneAutoName(')).toBe(2)
-    expect(countOf(body, 'MSG_ENVELOPE_PREFIX')).toBe(2)
+    expect(countOf(body, 'isInjectedMessageText(')).toBe(2)
   })
 
   it('the turn_complete fallback guards its own text', () => {
     const body = activityHandler()
     const fallback = body.slice(body.indexOf('Auto-name fallback'))
-    expect(fallback).toContain('!ev.text.startsWith(MSG_ENVELOPE_PREFIX)')
+    expect(fallback).toContain('!isInjectedMessageText(ev.text)')
     expect(fallback).toContain('setPaneAutoName(')
   })
 })

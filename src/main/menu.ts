@@ -1,4 +1,5 @@
 import { app, clipboard, Menu, webContents, type BrowserWindow, type MenuItemConstructorOptions } from 'electron'
+import { getTerminalSelection } from './terminal-selection-cache'
 
 /**
  * Application menu.
@@ -12,7 +13,7 @@ import { app, clipboard, Menu, webContents, type BrowserWindow, type MenuItemCon
  *     Updates… (platforms without an app menu)
  *   - Window: Pipeline Manager
  *
- * TWO deliberate omissions from the default menu remain, both because native
+ * FOUR deliberate omissions from the default menu remain, all because native
  * accelerators fire before the renderer's key handlers:
  *
  *   - The View submenu's `resetZoom` / `zoomIn` / `zoomOut` roles. Those roles
@@ -20,9 +21,21 @@ import { app, clipboard, Menu, webContents, type BrowserWindow, type MenuItemCon
  *     — chrome, layout, every pane. Zoom in this app is per-pane content zoom
  *     only (xterm font size in useTerminal.ts, Monaco font size in
  *     EditorViewMonaco.vue), so the built-in roles must not exist.
- *   - The View submenu's `forceReload` role, which owns ⇧⌘R. That chord is the
- *     renderer's Rebuild-pane shortcut (keybindings/defaults.ts). `reload` (⌘R)
- *     stays, so a plain reload is still one keystroke away.
+ *   - The View submenu's `forceReload` role, which owns ⇧⌘R.
+ *   - The View submenu's `reload` role, which owns ⌘R. Between them those two
+ *     held both halves of the reload/rebuild pair, and had them backwards: ⌘R
+ *     reloaded the whole renderer — every PTY, every unsaved buffer — while
+ *     rebuilding one pane needed the longer chord. Now ⌘R rebuilds the focused
+ *     pane and ⇧⌘R reloads the window, mirroring ⌘W / ⇧⌘W. Reloading is still
+ *     in the View menu, as a plain item carrying no accelerator of its own.
+ *   - The File submenu's `close` role ON macOS, which owns ⌘W. That key is the
+ *     renderer's closeActiveEditor — close a TAB, not the window. The role won
+ *     every time, so the binding users could see in Settings never ran. Off
+ *     macOS the role stays in the Window menu: there it answers Ctrl+W, which
+ *     no rule claims, and it is the only keyboard way to close a window there.
+ *     The cost on macOS is that closing a window is now the traffic lights or
+ *     ⌘Q — no window-closing key at all, since no rule binds ⌘W outside an
+ *     editor. Accepted deliberately; ⌘W closing a tab is the common case.
  *
  * Installing a menu without them is the only way to drop them: Electron has no
  * API to edit the default menu in place.
@@ -116,6 +129,16 @@ export function installApplicationMenu(
           // this app creates is a BrowserWindow, so the narrowing is safe.
           (win as BrowserWindow | undefined)?.webContents
         if (!target || target.isDestroyed()) return
+        // The page reports its selection as it changes, so the case that used
+        // to lose the race below is now a synchronous read that never runs one.
+        const pushed = getTerminalSelection(target.id)
+        if (pushed) {
+          clipboard.writeText(pushed)
+          return
+        }
+        // Nothing on file: either the page holds no terminal selection, or it
+        // never reports any — a plugin view on a different preload, a window
+        // with no terminal. Ask it directly, exactly as before.
         const startedAt = Date.now()
         let selection: unknown = ''
         // Set when the read threw, so the fallback below does not also report
@@ -214,11 +237,13 @@ export function installApplicationMenu(
               }))
             : [{ label: 'No Recent Workspaces', enabled: false }]
         },
-        { type: 'separator' },
-        // No app menu off macOS — surface the same entries under File.
+        // No app menu off macOS — surface the same entries under File. macOS
+        // gets nothing here: its Settings… live in the app menu, and `close` is
+        // omitted so ⌘W reaches the renderer (see the doc comment above).
         ...(isMac
-          ? [{ role: 'close' } as MenuItemConstructorOptions]
+          ? []
           : [
+              { type: 'separator' } as MenuItemConstructorOptions,
               settingsItem,
               checkUpdatesItem,
               { type: 'separator' } as MenuItemConstructorOptions,
@@ -250,9 +275,19 @@ export function installApplicationMenu(
     },
     {
       label: 'View',
-      // No resetZoom / zoomIn / zoomOut, no forceReload — see the doc comment above.
+      // No resetZoom / zoomIn / zoomOut, no forceReload, no `role: 'reload'` —
+      // see the doc comment above.
       submenu: [
-        { role: 'reload' },
+        // Same action the role performs, minus the accelerator it comes with.
+        // Reloading stays reachable by mouse while ⌘R belongs to the renderer.
+        {
+          label: 'Reload Window',
+          click: (_item, win) => {
+            const target =
+              webContents.getFocusedWebContents() ?? (win as BrowserWindow | undefined)?.webContents
+            if (target && !target.isDestroyed()) target.reload()
+          }
+        },
         { role: 'toggleDevTools' },
         { type: 'separator' },
         { role: 'togglefullscreen' }

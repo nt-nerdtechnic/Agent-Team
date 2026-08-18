@@ -39,12 +39,14 @@ export interface AgentSpec {
    *  inferred from silence.
    *
    *  The test is where the boundary comes from, NOT whether a turn_complete
-   *  event arrives. cursor emits none at all; grok, kimi, pi and qwen do emit
-   *  one, but their readers synthesize it from their own quiet window — the
-   *  same inference one layer down — so the flag is set for all five. A vendor
+   *  event arrives — every vendor's reader emits one. grok, pi and qwen
+   *  synthesize theirs from their own 8-second quiet window, and kimi flushes
+   *  the latest turn on the same timer when no following prompt closes it: the
+   *  same inference one layer down, so the flag is set for all four. A vendor
    *  whose log states the boundary outright leaves it unset even when that
-   *  statement is indirect: opencode reads a `step-finish` reason, antigravity
-   *  a completed step carrying a reply. Both are records, not timers.
+   *  statement is indirect: opencode (and kilo, which reuses its reader) reads
+   *  a `step-finish` reason, antigravity a completed step carrying a reply,
+   *  cursor an assistant row in its store.db. Records, not timers.
    *
    *  Unset MUST be trusted instead of second-guessed: activity is logged per
    *  output line, not as a heartbeat, so a CLI waiting on a long tool call —
@@ -65,11 +67,11 @@ export interface AgentSpec {
   }
   /** Recognizes this CLI parked on the user — a permission/confirmation box or
    *  a direct question — in the pane's RENDERED screen text. Undefined = the
-   *  vendor reports the state out of band (claude uses its Notification hook)
-   *  or its prompt shape has not been identified, and the pane keeps the plain
-   *  idle/running behaviour. Matched against the rendered buffer rather than
-   *  the raw stream so an answered prompt disappears on its own when the TUI
-   *  repaints over it — see lib/cliAwaitingInput.ts. */
+   *  vendor reports the state out of band, or its prompt shape has not been
+   *  identified, and the pane keeps the plain idle/running behaviour. Matched
+   *  against the rendered buffer rather than the raw stream so an answered
+   *  prompt disappears on its own when the TUI repaints over it — see
+   *  lib/cliAwaitingInput.ts. */
   awaitingInput?: {
     /** Matches the live prompt in the last rendered screen lines. Anchor it on
      *  the part that only exists while the prompt is WAITING (its option list
@@ -77,11 +79,40 @@ export interface AgentSpec {
      *  scrollback of line-mode CLIs after the answer. Must not carry /g —
      *  test() is stateful with it and the watcher re-runs on the same text. */
     pattern: RegExp
+    /** Whether a poll that does NOT match should clear the state. True (the
+     *  default) for a vendor whose only signal is this pattern: the match IS
+     *  the state, so losing it means the prompt is gone.
+     *
+     *  False for a vendor that also has a notification hook. There the screen
+     *  is a second, additive source — it catches boxes the hook never reports
+     *  (claude's AskUserQuestion) and covers a hook that failed to reach the
+     *  backend — but it does not see everything the hook does (an MCP
+     *  elicitation paints no option box), so a non-match is not evidence the
+     *  wait ended and must not clear what the hook raised. Nothing leaks: a
+     *  screen-raised wait ages out through the settle window as soon as real
+     *  output lands, and the hook's own release path still runs. */
+    clearsOnMiss?: boolean
   }
   /** This vendor's TUI keeps bracketed paste on. Enables chunked clipboard
    *  paste wrapping AND serves as the default Shift+Enter encoding (bracketed
    *  LF inserts a literal newline without submitting). */
   bracketedPaste?: boolean
+  /** This vendor draws its CONVERSATION in the terminal's alternate screen
+   *  buffer (verified per vendor by probing the PTY / the shipped binary for
+   *  `ESC[?1049h`), so a scrollback snapshot taken with `excludeAltBuffer: true`
+   *  comes back all but empty. Set it and the snapshot includes the alt buffer
+   *  instead — see serializeSnapshot in useTerminal.
+   *
+   *  Ceiling: xterm keeps NO scrollback for the alternate buffer, so what this
+   *  recovers from a running session is the LAST SCREENFUL, never the whole
+   *  conversation. (History does accumulate across restarts, because each
+   *  replayed snapshot lands in the normal buffer the next one serializes.)
+   *
+   *  Leave it unset for anything whose full-screen views are TRANSIENT — a
+   *  plain shell where the user opens vim or a pager, or a line-mode CLI whose
+   *  conversation is already in the normal buffer. Saving a pager's screen as
+   *  "history" is exactly what excludeAltBuffer exists to prevent. */
+  fullScreenTui?: boolean
   /** Explicit Shift+Enter byte sequence when the vendor prefers something
    *  other than the bracketed-paste LF default (codex: CSI-u modified Enter).
    *  There is no vendor-neutral byte sequence for a modified Enter key in a
@@ -96,13 +127,30 @@ export interface AgentSpec {
   /** This vendor's log reader carries turn text that has been validated
    *  against real sessions, so turn-text judging (sentinel detection etc.) is
    *  authoritative and the loose in-buffer scan is skipped. Deliberately
-   *  conservative: copilot, aider, kimi, qwen, pi and grok carry turn text too
-   *  — enough for inter-CLI messaging, which only needs the text — but their
-   *  readers have not been validated against real sessions, and for qwen/pi/
-   *  grok the turn boundary is inferred from silence rather than read from a
-   *  record. They stay unflagged and keep the buffer scan until that
-   *  verification happens. */
+   *  conservative: copilot, aider, kimi, qwen, pi, grok, cursor, muse,
+   *  opencode, kilo and antigravity carry turn text too — enough for inter-CLI
+   *  messaging, which only needs the text — but their readers have not been
+   *  validated against real sessions, and for qwen/pi/grok/kimi the turn
+   *  boundary is inferred from silence rather than read from a record. They
+   *  stay unflagged and keep the buffer scan until that verification happens. */
   verifiedTurnText?: boolean
+  /** This CLI accepts an inter-CLI message through something other than its
+   *  PTY — an HTTP server it runs, a file it watches, a hook it leaves parked.
+   *  Undefined = it has none, and every message to it is typed in.
+   *
+   *  The mechanism itself is the backend's (`push_delivery`); what the frontend
+   *  needs from the spec is which gates still apply, because that differs per
+   *  CLI and only the delivery side can know it. */
+  pushChannel?: {
+    /** Route label recorded on a message delivered this way, matching the
+     *  backend's own kind so the log and the docs agree. */
+    kind: 'tui-http' | 'input-file' | 'rewake'
+    /** The push writes the CLI's composer, so it occupies the input box just
+     *  as typing would and the typing hold still has to protect a half-written
+     *  line. False = the text never reaches the composer, and a pane someone is
+     *  typing in can take a message anyway. */
+    holdsInputBox?: boolean
+  }
   /** Recognizes a saved command as this vendor's resume invocation (so a
    *  restore doesn't replay it as a user-custom base command). Undefined =
    *  the generic `<agentKey> --resume <id>` shape. */

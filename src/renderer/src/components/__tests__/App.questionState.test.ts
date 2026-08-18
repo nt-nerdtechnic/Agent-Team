@@ -54,32 +54,33 @@ describe('agent.activity → QUESTION badge adapter', () => {
   })
 })
 
-// The two whitelists QUESTION had to be added to. It renames panes that were
-// already reaching these gates as 'idle', so leaving it out of either one
-// would newly park those panes — a regression the state was never meant to
-// make. Both are asserted here because both are one-line edits that a future
-// refactor could drop without any test noticing.
-describe('QUESTION does not close gates that were open before it existed', () => {
+// The two gates a question must not close. Those panes were already reaching
+// both as 'idle', so holding them back would newly park them — a regression
+// the state was never meant to make. The badge now merges question into
+// 'awaiting', which is exactly why the messaging gate reads awaitingKind: drop
+// that and the merge silently takes dispatch down with it.
+describe('a question does not close gates that were open before it existed', () => {
   it('passes the inter-CLI messaging gate, like running and idle', () => {
     const start = appSource.indexOf('function messagingHoldKey(')
     expect(start).toBeGreaterThan(-1)
     const gate = appSource.slice(start, appSource.indexOf('\n}', start))
-    expect(gate).toContain("status !== 'question'")
+    // Read from awaitingKind, not the badge — the badge cannot tell them apart.
+    expect(gate).toContain("awaitingKind === 'question'")
     expect(gate).toContain("return 'not-ready'")
-    // AWAITING must stay excluded: that one is a permission prompt, and it was
-    // never allowed through.
+    // A permission prompt must stay excluded: it was never allowed through, and
+    // sharing a badge with the question must not have let it in.
     expect(gate).not.toContain("status !== 'awaiting'")
   })
 
   it('is excluded from plan-dispatch pane reuse, deliberately', () => {
-    // The opposite call, and the one behaviour change this state makes: an
-    // AskUserQuestion box is a select widget, so a dispatched prompt typed
-    // into it would be swallowed as the answer.
+    // The opposite call: dispatch types INTO the pane, and both kinds of wait
+    // are select widgets that would swallow the prompt as their answer. The
+    // whitelist is 'idle' only, so the merge changed nothing here.
     const dispatch = readFileSync(
       resolve(process.cwd(), 'src/renderer/src/lib/planDispatch.ts'),
       'utf8'
     )
     expect(dispatch).toContain("p.status === 'idle'")
-    expect(dispatch).not.toContain("p.status === 'question'")
+    expect(dispatch).not.toContain("p.status === 'awaiting'")
   })
 })

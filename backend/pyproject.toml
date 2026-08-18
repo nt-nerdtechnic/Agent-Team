@@ -1,6 +1,6 @@
 [project]
 name = "agent-team-backend"
-version = "0.1.83"
+version = "0.1.85"
 description = "Python backend for the Navide AI-native engineering environment"
 requires-python = ">=3.12"
 dependencies = [
@@ -14,6 +14,12 @@ dependencies = [
     "send2trash>=2.1.0",
     "uvicorn[standard]>=0.32",
     "watchdog>=4.0",
+    # Outbound WebSocket client for the Navide-Server link (server_link.py).
+    # It already arrives as a transitive dependency of uvicorn[standard], but
+    # that makes its presence and version a side effect of uvicorn's extras —
+    # declared here because we import it directly. >=14 is where
+    # `websockets.connect` became the asyncio client this module uses.
+    "websockets>=14",
 ]
 
 [dependency-groups]

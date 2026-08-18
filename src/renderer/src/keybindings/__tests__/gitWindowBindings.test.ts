@@ -54,7 +54,11 @@ describe('Git window keybinding rules', () => {
       .toBe('workbench.action.showCommands')
     expect(resolver.resolve(keyEvent('a', { metaKey: true, shiftKey: true }), {})?.command)
       .toBe('workbench.action.toggleAIChat')
+    // ⇧⌘R is reloadWindow outside this window now — rebuilding one pane moved
+    // to ⌘R when the menu gave up the `reload` role.
     expect(resolver.resolve(keyEvent('r', { metaKey: true, shiftKey: true }), {})?.command)
+      .toBe('workbench.action.reloadWindow')
+    expect(resolver.resolve(keyEvent('r', { metaKey: true }), {})?.command)
       .toBe('workbench.action.rebuildFocusedPane')
   })
 

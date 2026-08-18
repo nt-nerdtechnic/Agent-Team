@@ -50,10 +50,19 @@ import { AGENT_SPECS } from '../agents'
  *  other types are informational: `idle_prompt` fires every time a turn ends
  *  (the pane is genuinely idle then), and auth_success / elicitation_complete
  *  / elicitation_response all report something that already finished.
+ *
+ *  The docs page lists nine types; the binary carries eleven. The two extra
+ *  ones both block, so they are read off the CLI itself rather than the docs
+ *  (surveyed against 2.1.233: the full set is permission_prompt, idle_prompt,
+ *  auth_success, elicitation_dialog, agent_needs_input, agent_completed,
+ *  elicitation_url_dialog, worker_permission_prompt, push_notification,
+ *  computer_use_enter, computer_use_exit).
  *  Source: https://code.claude.com/docs/en/hooks.md */
 const AWAITING_NOTIFICATION_TYPES: ReadonlySet<string> = new Set([
   'permission_prompt', // Claude wants approval for a tool call
+  'worker_permission_prompt', // the same, raised by a worker rather than the main agent
   'elicitation_dialog', // an MCP server opened a form and is waiting on it
+  'elicitation_url_dialog', // the same, asked as a URL the user has to visit
   'agent_needs_input', // a background session is waiting (Claude Code 2.1.198+)
 ])
 
@@ -121,10 +130,10 @@ export function textEndsOnQuestion(text: string): boolean {
 }
 
 /** Record types a reader attaches the user's own prompt text to. Shared by the
- *  question release below and App.vue's auto-namer, which keys off the same
- *  three spellings ('user' for most vendors, 'prompt' for kimi/aider,
- *  'user_message' for codex). */
-const USER_RECORD_DETAILS: ReadonlySet<string> = new Set(['user', 'prompt', 'user_message'])
+ *  question release below, the session-marker gate, and App.vue's auto-namer,
+ *  which all key off the same three spellings ('user' for most vendors,
+ *  'prompt' for kimi/aider, 'user_message' for codex). */
+export const USER_RECORD_DETAILS: ReadonlySet<string> = new Set(['user', 'prompt', 'user_message'])
 
 /** The reader's name for an assistant message that opened a question box. */
 export const QUESTION_DETAIL = 'assistant:question'
@@ -167,7 +176,7 @@ export function questionActionFor(ev: {
   return null
 }
 
-function awaitingSpecFor(agentKey: string): { pattern: RegExp } | undefined {
+function awaitingSpecFor(agentKey: string): { pattern: RegExp; clearsOnMiss?: boolean } | undefined {
   return AGENT_SPECS.find((s) => s.agentKey === agentKey)?.awaitingInput
 }
 
@@ -192,4 +201,14 @@ export function hasAwaitingPattern(agentKey: string): boolean {
 export function matchAwaitingInput(agentKey: string, screen: string): boolean {
   const spec = awaitingSpecFor(agentKey)
   return spec !== undefined && spec.pattern.test(screen.replace(/\s+/g, ' '))
+}
+
+/** Whether a poll that stopped matching should clear this vendor's AWAITING.
+ *
+ *  True for a pattern-only vendor (the match is the state). False when the
+ *  pattern merely supplements a notification hook, which sees waits the screen
+ *  cannot — clearing there would drop a real one. A vendor with no pattern
+ *  never reaches the watcher at all, so its answer here is irrelevant. */
+export function awaitingClearsOnMiss(agentKey: string): boolean {
+  return awaitingSpecFor(agentKey)?.clearsOnMiss !== false
 }

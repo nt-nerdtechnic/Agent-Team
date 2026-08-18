@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import type { MenuItemConstructorOptions } from 'electron'
+import { setTerminalSelection, forgetTerminalSelection } from './terminal-selection-cache'
 
 // Shared, hoisted capture of the template passed to Menu.buildFromTemplate,
 // plus the clipboard / focused-WebContents doubles Edit > Copy drives.
@@ -27,20 +28,27 @@ import { installApplicationMenu, type AppMenuHooks } from './menu'
 const clipboardWrites = h.clipboardWrites
 
 /** Stand-in for the WebContents that currently holds focus. */
+const FOCUSED_ID = 42
+
 const focused = {
+  id: FOCUSED_ID,
   selection: '',
   throws: false,
   hangs: false,
   copyCalls: 0,
+  evalCalls: 0,
   isDestroyed: (): boolean => false,
   executeJavaScript: async (): Promise<string> => {
+    focused.evalCalls++
     if (focused.throws) throw new Error('no such page')
     // A renderer too busy to service the eval — what a CLI pane painting hard
     // does to Copy's selection race.
     if (focused.hangs) return new Promise<string>(() => {})
     return focused.selection
   },
-  copy: (): void => { focused.copyCalls++ }
+  copy: (): void => { focused.copyCalls++ },
+  reloadCalls: 0,
+  reload: (): void => { focused.reloadCalls++ }
 }
 
 const isMac = process.platform === 'darwin'
@@ -93,6 +101,9 @@ describe('installApplicationMenu', () => {
     focused.throws = false
     focused.hangs = false
     focused.copyCalls = 0
+    focused.evalCalls = 0
+    focused.reloadCalls = 0
+    forgetTerminalSelection(FOCUSED_ID) // module state outlives a single case
     h.focusedWebContents = focused
     installApplicationMenu(hooks)
   })
@@ -179,6 +190,38 @@ describe('installApplicationMenu', () => {
       expect(focused.copyCalls).toBe(0)
     })
 
+    // The pane pushes its selection as it changes, so the case that used to
+    // lose the 300ms race is now a synchronous read that never runs one.
+    describe('prefers what the page already pushed', () => {
+      it('copies the pushed selection without asking the page at all', async () => {
+        setTerminalSelection(FOCUSED_ID, 'pushed from the pane')
+        focused.selection = 'should never be read'
+        await clickCopy()
+        expect(clipboardWrites).toEqual(['pushed from the pane'])
+        expect(focused.evalCalls).toBe(0)
+      })
+
+      // A busy renderer is exactly the case the old path failed on: the eval
+      // never lands in time. With a pushed selection there is nothing to wait
+      // for, so Copy is correct even while the pane is painting.
+      it('copies while the renderer is too busy to answer an eval', async () => {
+        setTerminalSelection(FOCUSED_ID, 'pushed before the pane got busy')
+        focused.hangs = true
+        await clickCopy()
+        expect(clipboardWrites).toEqual(['pushed before the pane got busy'])
+        expect(focused.copyCalls).toBe(0)
+      })
+
+      // Nothing pushed means the page has no terminal selection, or never
+      // reports one (a plugin view on another preload) — ask, as before.
+      it('still asks the page when nothing was pushed', async () => {
+        focused.selection = 'read from the page'
+        await clickCopy()
+        expect(clipboardWrites).toEqual(['read from the page'])
+        expect(focused.evalCalls).toBe(1)
+      })
+    })
+
     it('falls back to the built-in copy when the page reports no selection', async () => {
       focused.selection = ''
       await clickCopy()
@@ -263,6 +306,35 @@ describe('installApplicationMenu', () => {
         expect(warnings.filter((w) => w.includes('[menu] Copy:'))).toEqual([])
       })
     })
+  })
+
+  it.runIf(isMac)('File has no Close Window on macOS (deliberate omission)', () => {
+    // `role: 'close'` owns ⌘W, which fires in the main process ahead of the
+    // renderer's closeActiveEditor. Putting it back silently kills tab-closing
+    // while leaving the binding visible in Settings.
+    const closeRoles = submenuOf('File').filter(
+      (i) => typeof i.role === 'string' && i.role.toLowerCase() === 'close'
+    )
+    expect(closeRoles).toEqual([])
+  })
+
+  it.runIf(!isMac)('Window keeps Close off macOS, where Ctrl+W is free', () => {
+    const closeRoles = submenuOf('Window').filter(
+      (i) => typeof i.role === 'string' && i.role.toLowerCase() === 'close'
+    )
+    expect(closeRoles).toHaveLength(1)
+  })
+
+  it('View reloads through a plain item, never the accelerator-carrying role', () => {
+    const view = submenuOf('View')
+    // `role: 'reload'` would bring ⌘R back with it, and the main process wins
+    // that race — the renderer's rebuild-pane binding would stop firing without
+    // a trace, which is the exact failure this whole area was fixing.
+    expect(view.filter((i) => typeof i.role === 'string' && i.role.toLowerCase() === 'reload')).toEqual([])
+    const reload = itemIn(view, 'Reload Window')
+    expect(reload.accelerator).toBeUndefined()
+    fire(reload)
+    expect(focused.reloadCalls).toBe(1)
   })
 
   it('View still has no webContents zoom roles (deliberate omission)', () => {

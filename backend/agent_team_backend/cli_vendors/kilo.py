@@ -22,7 +22,15 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .base import Dep, VendorSpec, command_text
+from .base import (
+    Dep,
+    McpServerConfig,
+    McpValue,
+    McpWiring,
+    PushChannel,
+    VendorSpec,
+    command_text,
+)
 from .opencode import OpencodeLogReader  # vendor→vendor: sanctioned fork inheritance
 from ..usage_common import (
     HTTP_TIMEOUT,
@@ -309,7 +317,38 @@ def _session_exists(workspace_path: str, session_id: str) -> bool:
 
 SPEC = VendorSpec(
     key="kilo",
+    # Verified 2026-08-15: kilo's bundle carries no SKILL.md handling at all.
+    skills_supported=False,
     label="Kilo Code",
+    # An OpenCode fork: identical config document, its own variable.
+    mcp_wiring=McpWiring(
+        config=McpServerConfig(
+            section=("mcp",),
+            entry=(
+                ("type", "remote"),
+                ("url", McpValue.URL),
+                ("enabled", True),
+            ),
+            document=(("$schema", "https://opencode.ai/config.json"),),
+        ),
+        config_env="KILO_CONFIG_CONTENT",
+    ),
+    # Same `/tui/*` surface as OpenCode, with the authentication reversed.
+    # Verified against 7.4.22: kilo's server refuses an unauthenticated request
+    # outright (401), its own TUI DOES read KILO_SERVER_PASSWORD and keeps
+    # working when one is set, and the basic-auth user it expects is `kilo`
+    # (OpenCode's `opencode` is rejected). So unlike OpenCode this pane gets a
+    # per-pane secret and its port is not open to everything on the machine.
+    push_channel=PushChannel(
+        holds_input_box=True,
+        port_flag="--port",
+        host_flag="--hostname",
+        append_path="/tui/append-prompt",
+        submit_path="/tui/submit-prompt",
+        clear_path="/tui/clear-prompt",
+        password_env="KILO_SERVER_PASSWORD",
+        username="kilo",
+    ),
     login_command_args="auth login",
     # Multi-account (credential swap): the vault parks and restores this exact
     # file — `kilo auth list` prints the path itself, and it is the same tuple

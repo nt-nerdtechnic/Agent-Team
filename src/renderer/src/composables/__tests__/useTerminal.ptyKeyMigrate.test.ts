@@ -45,6 +45,27 @@ describe('migrateTerminalPtyKey', () => {
     expect(localStorage.getItem('terminal-pty:session-b')).toBeNull()
   })
 
+  it('moves the scrollback snapshot alongside the PTY id', () => {
+    // The snapshot is keyed the same way, so without this it is written under
+    // the old session id and read back under the new one: the history is
+    // invisible to the pane that owns it and lingers as an orphan that still
+    // competes for the shared localStorage quota.
+    localStorage.setItem('terminal-pty:session-a', 'pty-1')
+    localStorage.setItem('terminal-scroll:session-a', 'nv1\nHISTORY')
+    migrateTerminalPtyKey('session-a', 'session-b')
+    expect(localStorage.getItem('terminal-scroll:session-b')).toBe('nv1\nHISTORY')
+    expect(localStorage.getItem('terminal-scroll:session-a')).toBeNull()
+  })
+
+  it('moves a snapshot even when the PTY is already gone', () => {
+    // An exited/reaped PTY leaves no `terminal-pty:` entry, but the scrollback
+    // is still worth carrying to the rotated key.
+    localStorage.setItem('terminal-scroll:session-a', 'nv1\nHISTORY')
+    migrateTerminalPtyKey('session-a', 'session-b')
+    expect(localStorage.getItem('terminal-scroll:session-b')).toBe('nv1\nHISTORY')
+    expect(localStorage.getItem('terminal-scroll:session-a')).toBeNull()
+  })
+
   it('chains across repeated rotations', () => {
     localStorage.setItem('terminal-pty:a', 'pty-1')
     migrateTerminalPtyKey('a', 'b')

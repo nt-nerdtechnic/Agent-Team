@@ -53,7 +53,7 @@ from .projects import (
     _KV_KEY as PROJECT_KV_KEY,
 )
 from .recent_workspaces import RECENT_FILE, _KV_KEY as RECENT_KV_KEY
-from .skills_store import SKILLS_DIR, SKILLS_RUNTIME_DIR
+from .skills_store import SKILLS_RUNTIME_DIR
 from .spawn_history import (
     SPAWN_HISTORY_FILE,
     _KV_KEY as SPAWN_HISTORY_KV_KEY,
@@ -72,7 +72,7 @@ MAX_REPORTED_PATHS = 5
 # Mirrors the path built in plugins/builtin/navide_skills/skills_wiring.py; the
 # plugin has no constant to import and importing a plugin from here would be
 # the wrong direction.
-CLAUDE_SKILLS_RUNTIME_DIR = "runtime/claude-managed-skills"
+SKILLS_VIEWS_RUNTIME_DIR = "runtime/skills-views"
 
 MANUAL_LOGS_DIRNAME = "manual"
 PIPELINE_LOG_FILE = "pipeline.log"
@@ -477,7 +477,7 @@ def _appdata_and_electron_groups(
             # dir: git_askpass_helper.py lives beside them and its path is
             # resolved once at import, so removing it breaks every
             # authenticated git operation until the backend restarts.
-            paths=[root / SKILLS_RUNTIME_DIR, root / CLAUDE_SKILLS_RUNTIME_DIR],
+            paths=[root / SKILLS_RUNTIME_DIR, root / SKILLS_VIEWS_RUNTIME_DIR],
             note="Skill projections; rebuilt on the next app start.",
         ),
         errors,
@@ -493,18 +493,6 @@ def _appdata_and_electron_groups(
         ),
         errors,
     )
-    skills = _measured(
-        _Item(
-            "installedSkills",
-            risk="danger",
-            cleanable=True,
-            root=root,
-            paths=[root / SKILLS_DIR],
-            note="Removes every installed skill; they must be reinstalled.",
-        ),
-        errors,
-    )
-
     chromium = _measured(
         _Item(
             "chromiumCache",
@@ -552,7 +540,6 @@ def _appdata_and_electron_groups(
         backups,
         runtime,
         usage_cache,
-        skills,
     ]
     other = _Item(
         "appDataOther",

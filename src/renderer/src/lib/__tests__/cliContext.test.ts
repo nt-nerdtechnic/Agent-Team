@@ -17,6 +17,10 @@ import {
   buildPaneContextPaste,
   buildCliSessionReference,
   chunkForPty,
+  injectionChunks,
+  stripInputSequences,
+  BRACKETED_PASTE_START,
+  BRACKETED_PASTE_END,
   CLI_PASTE_BUFFER_CAP
 } from '../cliContext'
 
@@ -130,6 +134,37 @@ describe('buildPaneStatusReply', () => {
       buffer: 'hello',
       logPath: '/ws/x.log'
     })
+  })
+
+  it('carries awaitingKind so a caller can tell the two waits apart', () => {
+    // The badge merged them; this reply must not. cli_wait_idle returns from a
+    // question and blocks on a permission prompt, and `status` reads
+    // 'awaiting' for both.
+    const question = buildPaneStatusReply(undefined, {
+      displayStatus: 'awaiting',
+      awaitingKind: 'question',
+      buffer: ''
+    })
+    expect(question.status).toBe('awaiting')
+    expect(question.awaitingKind).toBe('question')
+
+    const permission = buildPaneStatusReply(undefined, {
+      displayStatus: 'awaiting',
+      awaitingKind: 'permission',
+      buffer: ''
+    })
+    expect(permission.awaitingKind).toBe('permission')
+  })
+
+  it('omits awaitingKind entirely when the pane is not parked', () => {
+    // null is the normal value for every other status; sending the key with a
+    // null value would make the backend's "field absent" check ambiguous.
+    const reply = buildPaneStatusReply(undefined, {
+      displayStatus: 'running',
+      awaitingKind: null,
+      buffer: ''
+    })
+    expect('awaitingKind' in reply).toBe(false)
   })
 
   it('caps the buffer to CLI_PASTE_BUFFER_CAP chars, keeping only the tail', () => {
@@ -430,6 +465,71 @@ describe('chunkForPty', () => {
   it('preserves the original text when re-joined', () => {
     const text = '🚀 done — 完成\nnext'
     expect(chunkForPty(text, 4).join('')).toBe(text)
+  })
+})
+
+describe('injectionChunks', () => {
+  it('sends each bracketed-paste guard as its own whole chunk', () => {
+    const chunks = injectionChunks('abcdefg', 3, true)
+    expect(chunks[0]).toBe(BRACKETED_PASTE_START)
+    expect(chunks[chunks.length - 1]).toBe(BRACKETED_PASTE_END)
+    expect(chunks.slice(1, -1)).toEqual(['abc', 'def', 'g'])
+  })
+
+  it('never splits a guard across chunks, however small the chunk size', () => {
+    // The guards are 6 code units each: a size-based split of the WRAPPED
+    // string would cut them, and the CLI would print the remainder as text.
+    for (const size of [1, 2, 3, 5, 6, 7]) {
+      const chunks = injectionChunks('hello world', size, true)
+      expect(chunks).toContain(BRACKETED_PASTE_START)
+      expect(chunks).toContain(BRACKETED_PASTE_END)
+      expect(chunks.join('')).toBe(`${BRACKETED_PASTE_START}hello world${BRACKETED_PASTE_END}`)
+    }
+  })
+
+  it('leaves the payload bare for a vendor that does not take bracketed paste', () => {
+    expect(injectionChunks('abcdefg', 3, false)).toEqual(['abc', 'def', 'g'])
+  })
+
+  it('keeps the body byte-identical, surrogate pairs included', () => {
+    const body = 'ship it 🚀 完成'
+    const chunks = injectionChunks(body, 4, true)
+    expect(chunks.slice(1, -1).join('')).toBe(body)
+    for (const chunk of chunks) expect(chunk).not.toMatch(/[\uD800-\uDBFF]$/)
+  })
+
+  it('writes nothing at all for an empty body', () => {
+    // Guards around no content are two PTY writes where there used to be none,
+    // announcing a paste that never arrives.
+    expect(injectionChunks('', 512, true)).toEqual([])
+    expect(injectionChunks('', 512, false)).toEqual([])
+  })
+})
+
+describe('stripInputSequences', () => {
+  it('keeps the text the user actually typed', () => {
+    expect(stripInputSequences('/clear')).toBe('/clear')
+    expect(stripInputSequences('完成 🚀')).toBe('完成 🚀')
+  })
+
+  it('drops a cursor key whole instead of leaving "[A" behind', () => {
+    expect(stripInputSequences('\x1b[A')).toBe('')
+    expect(stripInputSequences('\x1b[1;5D')).toBe('')
+    expect(stripInputSequences('\x1bOP')).toBe('')
+  })
+
+  it('drops mouse and focus reports whole', () => {
+    expect(stripInputSequences('\x1b[<0;10;5M')).toBe('')
+    expect(stripInputSequences('\x1b[<0;10;5m')).toBe('')
+    expect(stripInputSequences('\x1b[I')).toBe('')
+  })
+
+  it('unwraps a bracketed paste to its contents', () => {
+    expect(stripInputSequences('\x1b[200~hello\x1b[201~')).toBe('hello')
+  })
+
+  it('still removes the plain control characters', () => {
+    expect(stripInputSequences('a\x00b\x7fc')).toBe('abc')
   })
 })
 

@@ -42,8 +42,10 @@ vi.mock('../AiCliTerminal.vue', () => ({
           if (term.spawnRuns) status.value = 'running'
         }),
         tryReattach: vi.fn(async () => undefined),
+        // Returns true like the real one, which reports whether the write left.
         pasteText: vi.fn((text: string) => {
           term.pastes.push(text)
+          return true
         }),
         interrupt: vi.fn(async () => undefined),
         kill: vi.fn(async () => undefined),

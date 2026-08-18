@@ -9,13 +9,43 @@ all keep working exactly as before.
 Name uniqueness is per workspace — the same handle may exist in two different
 workspaces, and a bare `to: <name>` still resolves only within the sender's own
 workspace, which is today's behaviour unchanged.
+
+Addresses carry an optional third dimension, the device: `to:
+<device>/<workspace>/<pane>` names a pane on a specific machine. A UUID-shaped
+leading segment is read as a device id here; anything else is only reconsidered
+as a device *after* local resolution has failed, against the remote roster
+(`parse_remote_target`), so no address that resolves on this machine today can
+be re-pointed at another one.
 """
 
 from __future__ import annotations
 
+import logging
 import os
+import re
+import time
 from dataclasses import dataclass
 from typing import Any
+
+from . import device_identity, remote_roster
+
+log = logging.getLogger("agent_team_backend.agent_messaging")
+
+#: How long a disconnected window's panes stay in the registry, flagged offline,
+#: before they are forgotten for good. The renderer's reconnect backoff is
+#: capped at 30s (`reconnectMaxMs` in src/shared/wsClient.ts), so this has to
+#: outlast a couple of those attempts — a window that is merely reloading or
+#: riding out a network blip must not have its panes reported as non-existent.
+OFFLINE_GRACE_S = 90.0
+
+#: A device segment is always a UUID (device_identity mints and validates it as
+#: one), and that is the whole reason `<device>/<workspace>/<pane>` can be told
+#: apart from the two-segment `<workspace>/<pane>` — whose workspace part may
+#: itself contain slashes (`parent/proj/pane`). A leading segment that is not
+#: UUID-shaped is therefore read as workspace, exactly as before.
+_DEVICE_SEGMENT_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
 
 
 @dataclass
@@ -28,6 +58,18 @@ class RegisteredPane:
     #: turn start/end, so it lags reality by one event at worst — good enough to
     #: tell a caller "it is working, your message will wait", not a lock.
     busy: bool = False
+    #: Monotonic timestamp of when the owning window's WS connection dropped, or
+    #: None while it is connected. The pane itself survives that disconnect (its
+    #: PTY is owned by the backend), so the entry is kept and flagged instead of
+    #: deleted — "offline" and "does not exist" need different answers.
+    offline_since: float | None = None
+
+    @property
+    def offline(self) -> bool:
+        return self.offline_since is not None
+
+    def offline_seconds(self) -> int:
+        return 0 if self.offline_since is None else int(time.monotonic() - self.offline_since)
 
     @property
     def workspace_label(self) -> str:
@@ -47,6 +89,7 @@ class RegisteredPane:
             "qualified_name": self.qualified_name,
             "agent_key": self.agent_key,
             "busy": self.busy,
+            "offline": self.offline,
         }
 
 
@@ -63,16 +106,80 @@ class ResolveResult:
     cross_workspace: bool = False
 
 
+@dataclass
+class Address:
+    """A `to:` target broken into its parts — the structured shape used for
+    cross-device addressing.
+
+    `device_id` and `workspace` are empty when the address did not name them,
+    which is what keeps `<workspace>/<pane>` and a bare `<pane>` meaning today
+    what they meant yesterday. `pane_id` is only ever a hint: a detach or a
+    reattach mints a new pane id, so the stable identity is the other three
+    parts and the hint is checked against them before it is trusted.
+    """
+
+    pane_name: str = ""
+    workspace: str = ""
+    device_id: str = ""
+    pane_id: str = ""
+
+    @property
+    def local_target(self) -> str:
+        """The `<workspace>/<pane>` (or bare `<pane>`) string this address
+        resolves as on the device that owns the pane."""
+        return f"{self.workspace}/{self.pane_name}" if self.workspace else self.pane_name
+
+    def to_string(self) -> str:
+        """The address as an agent would have typed it."""
+        return f"{self.device_id}/{self.local_target}" if self.device_id else self.local_target
+
+
 def _resolve_error(code: str, error: str, **params: object) -> ResolveResult:
     return ResolveResult(
         error=error, code=code, params={k: str(v) for k, v in params.items()}
     )
 
 
+def _unknown_device(device: str, to: str) -> ResolveResult:
+    """Reported instead of "unknown target": the address may well be right, it
+    just names a machine this backend cannot look up yet."""
+    return _resolve_error(
+        "unknown-device",
+        f'unknown device "{device}" in target "{to}" — cross-device addressing '
+        f"needs the remote device roster, which is not available yet",
+        device=device,
+        to=to,
+    )
+
+
+@dataclass
+class PaneAlias:
+    """A pane id something outside this process still carries, and the pane it
+    now names.
+
+    A pane id is minted per pane *object*, not per CLI process: reattaching a
+    live PTY (a window reload, a detach, taking a run group back from a detached
+    window) builds a new pane around the same running CLI and mints a new id.
+    Anything that was handed the old id at spawn time — the `?pane=` in the
+    CLI's own /plan-mcp URL above all — keeps quoting it for as long as that
+    process lives. The alias is how the old id keeps resolving to the pane it
+    describes, instead of resolving to nothing.
+
+    ``workspace_path`` is the workspace the alias was accepted for: an id is
+    only ever allowed to follow a pane inside the project it belonged to, so a
+    former id cannot be claimed by a pane in another workspace.
+    """
+
+    pane_id: str
+    workspace_path: str
+
+
 # pane_id -> RegisteredPane
 _PANES: dict[str, RegisteredPane] = {}
 # pane_id -> owning WS connection (opaque; only identity is used)
 _OWNERS: dict[str, Any] = {}
+# superseded pane_id -> the pane that took its place
+_ALIASES: dict[str, PaneAlias] = {}
 
 
 def _normalize_workspace(path: str) -> str:
@@ -96,11 +203,119 @@ def register(
         agent_key=agent_key,
         # A re-register is a rename or a reconnect, not a state change.
         busy=previous.busy if previous else False,
+        # A reconnecting window re-runs agent_msg.register for every pane it
+        # mirrors, which is what clears the offline flag drop_owner set:
+        # offline_since starts at None on the fresh entry.
     )
     _PANES[pane_id] = entry
     if owner is not None:
         _OWNERS[pane_id] = owner
     return entry
+
+
+def add_aliases(pane_id: str, former_pane_ids: list[str], workspace_path: str) -> list[str]:
+    """Record the pane ids this pane used to be known by. Returns those accepted.
+
+    Called from the same register the owning window runs after it rebuilds a
+    pane around a CLI that never stopped running, so the id that CLI was given
+    at spawn time keeps naming it.
+
+    Two rules keep an alias from meaning more than it should. A former id is
+    refused when it is already tied to a *different* workspace — a pane may
+    inherit its own past, never another project's. And a chain is flattened as
+    it grows: reloading twice makes A→B and then B→C, so everything that
+    pointed at B is repointed at C. One lookup always suffices, and forgetting
+    B cannot strand A.
+
+    What is *not* checked is whether the former id still names a live pane of
+    somebody else's, and it cannot be: a detach registers the pane in the child
+    window before the parent lets go of it, so at that moment the id is live,
+    online, and owned by a different window — exactly what a mistaken claim
+    would look like. The declaration is trusted because it comes from a Navide
+    renderer, which is inside the trust boundary; a claim over a pane that is
+    still online is logged so it is at least visible, and the one thing it must
+    not be allowed to do — take a live pane's push channel away — is refused
+    separately (push_delivery.adopt).
+
+    One case is known to reach that warning without a hand-over behind it, and
+    is left as a limitation rather than worked around here: a main window
+    reloading while one of its run groups is detached restores that group's
+    panes (`restoreWorkspacePanes` has no filter for it) before
+    `getDetachedGroups` answers, so for a moment it claims the child window's
+    ids. It cannot be fixed by ordering alone — the main process answers that
+    query with an empty list until it knows the window's workspace — and the
+    window drops those panes as soon as it is told, which retires the aliases
+    with them.
+    """
+    workspace = _normalize_workspace(workspace_path)
+    accepted: list[str] = []
+    for raw in former_pane_ids:
+        former = (raw or "").strip()
+        if not former or former == pane_id:
+            continue
+        known = _PANES.get(former)
+        if known is not None and known.workspace_path != workspace:
+            continue
+        existing = _ALIASES.get(former)
+        if existing is not None and existing.workspace_path != workspace:
+            continue
+        if known is not None and not known.offline:
+            log.warning(
+                "pane %s claims %s as a former id while it is still online "
+                "(same owner: %s) — expected during a detach, otherwise a "
+                "window restored a pane another window owns",
+                pane_id, former, _OWNERS.get(former) is _OWNERS.get(pane_id),
+            )
+        for key in [k for k, alias in _ALIASES.items() if alias.pane_id == former]:
+            if key == pane_id:
+                # The pane is that id again (A→B, then A comes back declaring
+                # B). An alias from an id to itself is not an alias.
+                _ALIASES.pop(key, None)
+                continue
+            _ALIASES[key] = PaneAlias(pane_id=pane_id, workspace_path=workspace)
+        _ALIASES[former] = PaneAlias(pane_id=pane_id, workspace_path=workspace)
+        accepted.append(former)
+    return accepted
+
+
+def is_vacated(pane_id: str) -> bool:
+    """Whether nothing live is still holding this pane id.
+
+    True when the id was unregistered, or when the window that mirrored it is
+    away. Asked before anything is *taken* from a former id rather than merely
+    resolved through it — resolving is additive, moving is not.
+    """
+    entry = _PANES.get(pane_id)
+    return entry is None or entry.offline
+
+
+def resolve_alias(pane_id: str) -> str:
+    """The pane id that superseded ``pane_id``, or "" when none did."""
+    alias = _ALIASES.get(pane_id)
+    return alias.pane_id if alias is not None else ""
+
+
+def current(pane_id: str) -> RegisteredPane | None:
+    """The pane a possibly-superseded id names right now.
+
+    An id that has been superseded is never itself any more, even while its own
+    entry is still in the registry waiting out the offline grace period — the
+    CLI quoting it is attached to the successor, and answering with the old
+    entry would let the pane see itself as somebody else.
+    """
+    purge_expired()
+    alias = _ALIASES.get(pane_id)
+    if alias is not None:
+        return _PANES.get(alias.pane_id)
+    return _PANES.get(pane_id)
+
+
+def _forget_aliases_to(pane_id: str) -> None:
+    """Drop the former ids of a pane that is gone for good. Aliases *keyed* by
+    it are left alone: an id being unregistered right after something else
+    adopted it is exactly what a detach looks like."""
+    for key in [k for k, alias in _ALIASES.items() if alias.pane_id == pane_id]:
+        _ALIASES.pop(key, None)
 
 
 def unregister(pane_id: str, owner: Any = None) -> bool:
@@ -112,20 +327,68 @@ def unregister(pane_id: str, owner: Any = None) -> bool:
         return False
     _PANES.pop(pane_id, None)
     _OWNERS.pop(pane_id, None)
+    _forget_aliases_to(pane_id)
     return True
 
 
 def drop_owner(owner: Any) -> list[str]:
-    """Forget every pane mirrored by a disconnecting window. Returns the dropped
-    pane ids."""
-    dropped = [pane_id for pane_id, own in _OWNERS.items() if own is owner]
-    for pane_id in dropped:
-        unregister(pane_id)
-    return dropped
+    """Flag every pane mirrored by a disconnecting window as offline.
+
+    A dropped WS connection is usually transient — the window reconnects with a
+    backoff capped at 30s and re-registers everything — while the panes it
+    mirrored keep running the whole time. Deleting the entries here made a
+    caller hear "unknown target", i.e. "that pane does not exist", for a pane
+    that was merely unreachable. So the entries survive, marked with the moment
+    the window went away, and are removed only once OFFLINE_GRACE_S has passed
+    without it coming back (see purge_expired).
+
+    The owner mapping is cleared: this connection can never claim the pane
+    again, and leaving it in place would make unregister's owner check reject a
+    later window's cleanup. Returns the pane ids taken offline.
+    """
+    now = time.monotonic()
+    affected = [pane_id for pane_id, own in _OWNERS.items() if own is owner]
+    for pane_id in affected:
+        _OWNERS.pop(pane_id, None)
+        entry = _PANES.get(pane_id)
+        if entry is not None and entry.offline_since is None:
+            entry.offline_since = now
+    return affected
+
+
+def purge_expired() -> list[str]:
+    """Forget offline panes whose grace period has run out.
+
+    Called from every read path rather than from a timer: the registry is only
+    ever consulted synchronously, so a lazy sweep is enough and there is no
+    background task to keep alive. Returns the pane ids removed.
+    """
+    now = time.monotonic()
+    expired = [
+        pane_id
+        for pane_id, entry in _PANES.items()
+        if entry.offline_since is not None and now - entry.offline_since >= OFFLINE_GRACE_S
+    ]
+    for pane_id in expired:
+        _PANES.pop(pane_id, None)
+        _OWNERS.pop(pane_id, None)
+        _forget_aliases_to(pane_id)
+    return expired
 
 
 def get(pane_id: str) -> RegisteredPane | None:
+    purge_expired()
     return _PANES.get(pane_id)
+
+
+def owner(pane_id: str) -> Any | None:
+    """The WS connection of the window mirroring this pane, or None.
+
+    Delivery normally reaches a window by broadcast, but a request that has to
+    be answered inside a hook's timeout cannot afford to ask every window and
+    wait for the right one to speak up — see `hook_drain`.
+    """
+    return _OWNERS.get(pane_id)
 
 
 def set_busy(pane_id: str, busy: bool) -> bool:
@@ -139,7 +402,9 @@ def set_busy(pane_id: str, busy: bool) -> bool:
 
 def list_panes(workspace_path: str | None = None) -> list[RegisteredPane]:
     """Every mirrored pane, or only those in one workspace. Sorted for stable
-    autocomplete ordering."""
+    autocomplete ordering. Includes panes whose window is offline — they carry
+    the flag, so a caller can see them without being told they are gone."""
+    purge_expired()
     entries = list(_PANES.values())
     if workspace_path is not None:
         target = _normalize_workspace(workspace_path)
@@ -168,26 +433,155 @@ def _match_workspaces(ws_part: str) -> list[str]:
     return matched
 
 
+def is_local_device(device: str) -> bool:
+    """Whether a device segment names this machine."""
+    return bool(device) and device == device_identity.device_id()
+
+
+def _split_device_segment(target: str) -> tuple[str, str]:
+    """Split a leading device segment off a target, or return no device.
+
+    Only a UUID-shaped first segment of a three-or-more segment address counts
+    (see _DEVICE_SEGMENT_RE): `parent/proj/pane` has to keep meaning the pane
+    `pane` in the workspace `parent/proj`, which it did before devices existed.
+    """
+    head, sep, rest = target.partition("/")
+    if not sep or "/" not in rest or not _DEVICE_SEGMENT_RE.match(head):
+        return "", target
+    return head, rest
+
+
+def parse_target(to: str) -> Address:
+    """Split a `to:` string into its addressing parts.
+
+    `<device>/<workspace>/<pane>` fills all three, `<workspace>/<pane>` leaves
+    the device empty, and a bare `<pane>` leaves the workspace empty too — the
+    pane name is always the trailing segment, so a workspace part may contain
+    slashes while a pane name may not.
+    """
+    device, rest = _split_device_segment((to or "").strip())
+    workspace, _, pane_name = rest.rpartition("/")
+    return Address(pane_name=pane_name.strip(), workspace=workspace, device_id=device)
+
+
+@dataclass
+class RemoteTarget:
+    """What a second, roster-aware reading of a `to:` string produced.
+
+    All three fields empty means "this names no remote device" — the ordinary
+    answer, and the only one a machine with no server configured ever gets.
+    """
+
+    address: Address | None = None
+    error: str | None = None
+    code: str | None = None
+    params: dict[str, str] | None = None
+
+
+def parse_remote_target(to: str) -> RemoteTarget:
+    """Re-read a target as `<device>/<workspace>/<pane>` against the remote roster.
+
+    **Local addressing wins, always.** This is only ever consulted after the
+    local resolver has already failed on the same string, which is what keeps a
+    device name from silently stealing an address that works today: `two/proj/
+    target` means the pane `target` in the workspace `two/proj` whether or not
+    some machine in the team space is called `two`, because the workspace
+    reading is tried first and, when it succeeds, this function is never called.
+    The reverse order — device names first — would move a working address to
+    another machine the moment a colleague named a laptop after a folder, and
+    the sender would have no way to notice.
+
+    So a name can only ever *add* reachability where the answer used to be an
+    error. Three or more segments are required, matching the rule for id-shaped
+    device segments: a two-segment `folder/pane` stays a workspace address.
+
+    A label naming more than one device is refused rather than guessed —
+    delivering an instruction to the wrong machine is not something the sender
+    can undo after reading about it.
+    """
+    device_part, sep, rest = (to or "").strip().partition("/")
+    if not sep or "/" not in rest:
+        return RemoteTarget()
+    matches = remote_roster.devices_named(device_part)
+    if not matches:
+        return RemoteTarget()
+    if len(matches) > 1:
+        return RemoteTarget(
+            error=f'ambiguous device "{device_part}" ({len(matches)} devices answer '
+            f"to that name) — use the device id shown by cli_list_targets",
+            code="ambiguous-device",
+            params={"device": device_part, "n": str(len(matches))},
+        )
+    workspace, _, pane_name = rest.rpartition("/")
+    return RemoteTarget(
+        address=Address(
+            pane_name=pane_name.strip(), workspace=workspace, device_id=matches[0]
+        )
+    )
+
+
+def _prefer_online(hits: list[RegisteredPane]) -> list[RegisteredPane]:
+    """A connected pane always wins over an offline one at the same address, so
+    the entry a dropped connection left behind cannot shadow — or be mistaken as
+    ambiguous with — a pane that is live under that name right now."""
+    online = [e for e in hits if not e.offline]
+    return online or hits
+
+
+def _accept(entry: RegisteredPane, to: str, *, cross_workspace: bool = False) -> ResolveResult:
+    """Turn a matched pane into a result, refusing it while its window is away.
+
+    Reported separately from "unknown target" because the two demand opposite
+    responses: an unknown target means the address is wrong, an offline one
+    means the address is right and the answer is to wait or retry.
+    """
+    if entry.offline_since is None:
+        return ResolveResult(pane=entry, cross_workspace=cross_workspace)
+    seconds = entry.offline_seconds()
+    return _resolve_error(
+        "target-offline",
+        f'target "{to}" is offline — the Navide window that owns it disconnected '
+        f"{seconds}s ago and may be reconnecting. The pane itself still exists, so "
+        f"retry instead of reopening it; it is forgotten only after "
+        f"{OFFLINE_GRACE_S:.0f}s offline",
+        to=to,
+        seconds=seconds,
+    )
+
+
 def resolve(from_pane_id: str, to: str) -> ResolveResult:
     """Resolve a `to:` target as seen from the sending pane.
 
     A bare `name` only ever looks inside the sender's own workspace — the
     existing single-workspace behaviour. A `folder/name` target selects the
     workspace first; an unknown or ambiguous folder is an error rather than a
-    silent fallback, so a typo can never inject into the wrong project.
+    silent fallback, so a typo can never inject into the wrong project. A
+    `device/folder/name` target aimed at this machine resolves exactly like the
+    `folder/name` it wraps; aimed anywhere else it cannot be resolved here.
     """
     target = (to or "").strip()
     if not target:
         return _resolve_error("empty-target", "empty target")
 
+    device, rest = _split_device_segment(target)
+    if device:
+        if not is_local_device(device):
+            return _unknown_device(device, target)
+        target = rest
+
+    purge_expired()
     sender = _PANES.get(from_pane_id)
 
     if "/" not in target:
         if sender is None:
             return _resolve_error("unknown-target", f'unknown target "{target}"', to=target)
-        for entry in _PANES.values():
-            if entry.workspace_path == sender.workspace_path and entry.name == target:
-                return ResolveResult(pane=entry)
+        local = [
+            entry
+            for entry in _PANES.values()
+            if entry.workspace_path == sender.workspace_path and entry.name == target
+        ]
+        if local:
+            return _accept(_prefer_online(local)[0], target)
         return _resolve_error("unknown-target", f'unknown target "{target}"', to=target)
 
     # From here on the target is workspace-qualified.
@@ -218,7 +612,9 @@ def resolve(from_pane_id: str, to: str) -> ResolveResult:
     # each derives handles from its own local registry — so the same name can
     # legitimately appear twice. Refuse to pick one rather than injecting an
     # instruction into whichever pane happened to register first.
-    hits = [e for e in _PANES.values() if e.workspace_path == workspace and e.name == name]
+    hits = _prefer_online(
+        [e for e in _PANES.values() if e.workspace_path == workspace and e.name == name]
+    )
     if not hits:
         return _resolve_error(
             "unknown-target-in-workspace",
@@ -237,7 +633,43 @@ def resolve(from_pane_id: str, to: str) -> ResolveResult:
         )
     entry = hits[0]
     cross = sender is None or sender.workspace_path != entry.workspace_path
-    return ResolveResult(pane=entry, cross_workspace=cross)
+    return _accept(entry, target, cross_workspace=cross)
+
+
+def _hint_matches(
+    entry: RegisteredPane, address: Address, sender: RegisteredPane | None
+) -> bool:
+    """Whether a cached pane id still sits at the address that produced it."""
+    if entry.name != address.pane_name:
+        return False
+    if not address.workspace:
+        # A bare name never leaves the sender's workspace, hint or not.
+        return sender is not None and entry.workspace_path == sender.workspace_path
+    return entry.workspace_path in _match_workspaces(address.workspace)
+
+
+def resolve_address(from_pane_id: str, address: Address) -> ResolveResult:
+    """Resolve a structured target, treating `pane_id` as a hint only.
+
+    The hint is the fast path: when it still names a pane sitting at the same
+    (workspace, pane name), that pane is the answer without a scan. Otherwise
+    the address is resolved from the stable parts instead, because a detach or
+    a reattach mints a new pane id and a sender's cached hint goes stale — the
+    caller reads the current id back off `result.pane.pane_id` and updates its
+    cache. A hint pointing at a different pane is never followed.
+    """
+    if address.device_id and not is_local_device(address.device_id):
+        return _unknown_device(address.device_id, address.to_string())
+
+    if address.pane_id and address.pane_name:
+        purge_expired()
+        entry = _PANES.get(address.pane_id)
+        sender = _PANES.get(from_pane_id)
+        if entry is not None and _hint_matches(entry, address, sender):
+            cross = sender is None or sender.workspace_path != entry.workspace_path
+            return _accept(entry, address.local_target, cross_workspace=cross)
+
+    return resolve(from_pane_id, address.local_target)
 
 
 def sender_display(from_pane_id: str, fallback: str) -> str:
@@ -250,3 +682,4 @@ def sender_display(from_pane_id: str, fallback: str) -> str:
 def _reset_for_test() -> None:
     _PANES.clear()
     _OWNERS.clear()
+    _ALIASES.clear()

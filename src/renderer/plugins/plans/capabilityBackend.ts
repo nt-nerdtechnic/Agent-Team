@@ -20,7 +20,7 @@
 // host surface is `window.nav`.
 
 import { ref, type Ref } from 'vue'
-import type { BackendStatus, WsResponse } from '../../src/composables/useBackend'
+import type { AutoRestartInfo, BackendStatus, WsResponse } from '../../src/composables/useBackend'
 
 // ── window.nav (injected by src/preload/plugin-preload.ts) ───────────────────
 interface CapabilityResponse {
@@ -55,7 +55,8 @@ export interface CapabilityRef {
 }
 
 /** Build `{ "<ns>.<method>": { ns, method } }` for a namespace whose WS types
- *  are exactly `"<ns>.<method>"` (fs — the uniform namespace the Plans UI uses). */
+ *  are exactly `"<ns>.<method>"` (fs / terminal / plans — the uniform
+ *  namespaces the Plans UI uses). */
 function fromNs(ns: string, methods: readonly string[]): Record<string, CapabilityRef> {
   const out: Record<string, CapabilityRef> = {}
   for (const method of methods) out[`${ns}.${method}`] = { ns, method }
@@ -87,6 +88,14 @@ const TERMINAL_METHODS = [
   'create', 'input', 'log_sent', 'resize', 'interrupt', 'kill', 'reattach', 'redraw',
 ] as const
 
+// plans.* WS types (uniform namespace) — the plan document index:
+// PlanWindowApp resolves the git root its rel_paths are relative to at mount,
+// and PlansPane lists the documents plus writes the meta it parsed back into
+// the backend cache. Without these the plugin window falls back to the raw
+// query-string workspace, which resolves rel_paths against the wrong root when
+// the window is opened on a subdirectory of the project.
+const PLANS_METHODS = ['resolve_root', 'list_docs', 'cache_put'] as const
+
 // Non-uniform WS types: the type string differs from `<ns>.<method>`. Settings
 // persistence (lib/settings.ts theme sync) remaps onto the ui namespace;
 // shell.run rides the terminal namespace (mirrors the mini-IDE shim).
@@ -107,14 +116,15 @@ const EXPLICIT: Record<string, CapabilityRef> = {
  * Pure data so it is trivially unit-testable. A `type` absent here is an
  * explicit "unmapped" (see {@link resolveCapability}).
  *
- * The `plans` namespace carries no request types — it exists solely to gate
- * the `plans.changed` server-push event (see capabilityMap.ts CAP_EVENTS).
- * The `terminal` namespace also gates the terminal.output / terminal.exit
+ * The `plans` namespace gates both the request types above and the
+ * `plans.changed` server-push event (see capabilityMap.ts CAP_EVENTS). The
+ * `terminal` namespace likewise gates the terminal.output / terminal.exit
  * events the embedded AiCliDock's useTerminal subscribes to via `on()`.
  */
 export const TYPE_TO_CAP: Readonly<Record<string, CapabilityRef>> = {
   ...fromNs('fs', FS_METHODS),
   ...fromNs('terminal', TERMINAL_METHODS),
+  ...fromNs('plans', PLANS_METHODS),
   ...EXPLICIT,
 }
 
@@ -175,6 +185,7 @@ export function useBackend(): {
   port: Ref<number>
   pid: Ref<number>
   lastError: Ref<string>
+  autoRestart: Ref<AutoRestartInfo | null>
   send: <T = unknown>(
     type: string,
     payload?: Record<string, unknown>,
@@ -204,6 +215,10 @@ export function useBackend(): {
   const port = ref(0)
   const pid = ref(0)
   const lastError = ref('')
+  // The broker fans out only the status, not main's auto-restart bookkeeping,
+  // so a plugin view can tell that the backend is away but not which respawn
+  // attempt is in flight. Kept as a ref to satisfy the host's shape.
+  const autoRestart = ref<AutoRestartInfo | null>(null)
 
   async function send<T = unknown>(
     type: string,
@@ -245,5 +260,5 @@ export function useBackend(): {
     return Promise.resolve()
   }
 
-  return { status, wsUrl, httpUrl, shell, port, pid, lastError, send, on, restart, stop }
+  return { status, wsUrl, httpUrl, shell, port, pid, lastError, autoRestart, send, on, restart, stop }
 }

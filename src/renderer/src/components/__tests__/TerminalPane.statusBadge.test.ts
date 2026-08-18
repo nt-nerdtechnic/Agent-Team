@@ -12,11 +12,15 @@ import type { DisplayStatus } from '../../composables/useTerminal'
 // and 'idle' once looked identical. useTerminal is mocked out (no xterm, no
 // backend) the same way TerminalPane.loginBadge.test.ts does it.
 
-const mockTerminal = vi.hoisted(() => ({ displayStatus: null as unknown as Ref<string> }))
+const mockTerminal = vi.hoisted(() => ({
+  displayStatus: null as unknown as Ref<string>,
+  awaitingKind: null as unknown as Ref<string | null>,
+}))
 
 vi.mock('../../composables/useTerminal', async () => {
   const { ref } = await import('vue')
   mockTerminal.displayStatus = ref('idle')
+  mockTerminal.awaitingKind = ref(null)
   return {
     useTerminal: () => ({
       mount: vi.fn(),
@@ -24,6 +28,7 @@ vi.mock('../../composables/useTerminal', async () => {
       updateXtermTheme: vi.fn(),
       setDisableStdin: vi.fn(),
       displayStatus: mockTerminal.displayStatus,
+      awaitingKind: mockTerminal.awaitingKind,
       sessionId: { value: '' },
       isAltBuffer: ref(false)
     })
@@ -34,8 +39,9 @@ function tMock(key: string): string {
   return key
 }
 
-function mountPane(status: DisplayStatus): VueWrapper {
+function mountPane(status: DisplayStatus, kind: 'permission' | 'question' | null = null): VueWrapper {
   mockTerminal.displayStatus.value = status
+  mockTerminal.awaitingKind.value = kind
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return mount(TerminalPane as any, {
     props: { paneId: 'pane-1', title: 'Claude', backend: {} },
@@ -52,7 +58,6 @@ const ALL_DISPLAY_STATUSES = [
   'error',
   'stopped',
   'awaiting',
-  'question',
 ] as const satisfies readonly DisplayStatus[]
 
 // Compile-time exhaustiveness: a new displayStatus value that is not listed
@@ -83,9 +88,22 @@ describe('TerminalPane — status pill', () => {
     expect(wrapper!.get('.status').attributes('data-status')).toBe(status)
   })
 
-  it('prints QUESTION for the new state', () => {
-    wrapper = mountPane('question')
-    expect(wrapper!.get('.status').text()).toBe('question')
+  it('prints a translated label for awaiting, not the raw status word', () => {
+    // The one badge that addresses the READER rather than describing the agent,
+    // so it is the one badge that gets translated. Every other status prints
+    // its own name (asserted below via data-status + the stopped case).
+    wrapper = mountPane('awaiting', 'question')
+    expect(wrapper!.get('.status').text()).toBe('pane.terminal.awaiting-status-badge')
+  })
+
+  it('prints the same label whichever kind of wait it is', () => {
+    // The merge, asserted: a permission prompt and a question are one badge.
+    // What separates them is the tooltip below, not the word on the pill.
+    wrapper = mountPane('awaiting', 'permission')
+    const permission = wrapper!.get('.status').text()
+    wrapper!.unmount()
+    wrapper = mountPane('awaiting', 'question')
+    expect(wrapper!.get('.status').text()).toBe(permission)
   })
 
   it('still abbreviates stopped to STOP', () => {
@@ -95,16 +113,16 @@ describe('TerminalPane — status pill', () => {
     expect(wrapper!.get('.status').text()).toBe('STOP')
   })
 
-  it('explains question on hover, with its own copy', () => {
-    // idle / awaiting / question all look like a quiet pane and mean different
-    // things, so each needs a distinct tooltip. Sharing awaiting's would tell
-    // the user to look for a permission prompt that is not there.
-    wrapper = mountPane('question')
+  it('explains which kind of wait it is on hover', () => {
+    // One badge, two reasons. The distinction is not worth a second pill but is
+    // worth a sentence: sharing awaiting's copy would send the user looking for
+    // a permission prompt that is not there.
+    wrapper = mountPane('awaiting', 'question')
     const key = wrapper!.get('.status').attributes('title')
     expect(key).toBe('pane.terminal.question-status-tooltip')
 
     wrapper!.unmount()
-    wrapper = mountPane('awaiting')
+    wrapper = mountPane('awaiting', 'permission')
     expect(wrapper!.get('.status').attributes('title')).toBe(
       'pane.terminal.awaiting-status-tooltip'
     )

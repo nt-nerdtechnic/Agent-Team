@@ -25,11 +25,11 @@ import TokenStatsPanel from './components/TokenStatsPanel.vue'
 import NotificationHost from './components/NotificationHost.vue'
 import Welcome from './components/Welcome.vue'
 import { useNotify } from './composables/useNotify'
-import { migrateTerminalPtyKey, type DisplayStatus } from './composables/useTerminal'
-import { useAgentMessaging, encodeReason, isBroadcastTarget } from './composables/useAgentMessaging'
-import type { RouteResult } from './composables/useAgentMessaging'
+import { agentUsesBracketedPaste, migrateTerminalPtyKey, saveAllScrollSnapshots, type DisplayStatus } from './composables/useTerminal'
+import { useAgentMessaging, encodeReason, isBroadcastTarget, NOTICE_SENDER } from './composables/useAgentMessaging'
+import type { PushOutcome, RouteResult } from './composables/useAgentMessaging'
 import { createMessageLogPersistence } from './composables/useMessageLogPersistence'
-import { MSG_ENVELOPE_PREFIX, VENDORS_WITHOUT_TURN_END, isTurnInFlight, normalizeMessagingName, parseMessages, parseSpawns, renderSpawnKickoff } from './lib/agentMessaging'
+import { VENDORS_WITHOUT_TURN_END, isInjectedMessageText, isTurnInFlight, normalizeMessagingName, parseMessages, parseSpawns, pushCooldownMs, renderSpawnKickoff, renderSpawnNotice } from './lib/agentMessaging'
 import {
   evaluateTurnSpawns,
   evaluateSpawnRequest,
@@ -76,6 +76,7 @@ import {
 } from './data/stages'
 import { i18n } from './i18n'
 import { deriveAutoName } from './lib/autoName'
+import { bootWorkspaceToRecord } from './lib/bootWorkspace'
 import { diagLog } from './lib/diagLog'
 import { findConsecutiveQuestionBlocks, findSentinel } from './lib/buffer'
 import {
@@ -85,7 +86,9 @@ import {
   buildPaneContextPaste,
   shouldMentionOnDrop,
   buildPaneStatusReply,
-  chunkForPty,
+  injectionChunks,
+  BRACKETED_PASTE_START,
+  BRACKETED_PASTE_END,
   screenToClientPoint,
   CLI_CHIP_LINE_CAP,
   CLI_PASTE_LINE_CAP
@@ -148,9 +151,11 @@ import { planPaneCycle, type CycleDirection } from './lib/paneCycle'
 import { parseLegacyRunGroups, resolveActiveTab, resolveManualSpawnGroupId } from './lib/runGroups'
 import {
   ALL_SCOPE_RESTORE_CONCURRENCY,
+  AUTO_RESUME_ON_RECONNECT_SETTING_KEY,
   RESUME_BEHAVIOR_SETTING_KEY,
   RESTORE_SCOPE_SETTING_KEY,
   createWorkspaceRestoreSession,
+  normalizeAutoResumeOnReconnect,
   pendingRestorePaneIds,
   resolveWorkspaceRestoreSession,
   restoreScopeTargetIds,
@@ -179,12 +184,14 @@ import {
 } from './lib/loopPrompt'
 import { loginCommandFor, matchLoginExpired } from './lib/cliLoginExpired'
 import {
+  awaitingClearsOnMiss,
   hasAwaitingPattern,
   matchAwaitingInput,
   notificationEndsAwaiting,
   notificationMeansAwaiting,
   questionActionFor,
 } from './lib/cliAwaitingInput'
+import { markerTurnActionFor } from './lib/sessionMarkerTurn'
 import { entryBelongsToWorkspace, filterWorkspaceEntries, historyEntryLabel, legacyHistoryLogPath, manualLogFileName, updateHistoryCustomName, type HistoryCleanupMode, type HistoryDeletePreview, type HistoryDeleteTarget, type SpawnHistoryEntry, type WorkspaceIdentity } from './lib/spawnHistory'
 import { useKeybindings, registerCommand, setContext } from './keybindings/useKeybindings'
 import { useUiActionBus } from './composables/useUiActionBus'
@@ -518,6 +525,20 @@ const workspaceSelected = ref<boolean>(
 // first window to ask gets the list and shows the restore prompt.
 watch(currentWorkspace, (v) => { window.agentTeam?.reportWorkspace?.(v) }, { immediate: true })
 
+// Record an externally opened folder in Recent once the backend accepts
+// requests — see bootWorkspaceToRecord for which boots qualify.
+const _bootRecordWorkspace = bootWorkspaceToRecord(window.location.search)
+if (_bootRecordWorkspace) {
+  let bootTouched = false
+  const touchBootWorkspace = (): void => {
+    if (bootTouched || backend.status.value !== 'connected') return
+    bootTouched = true
+    void touchRecentWorkspace(_bootRecordWorkspace)
+  }
+  touchBootWorkspace()
+  watch(() => backend.status.value, touchBootWorkspace)
+}
+
 // Feed the native File > Open Recent submenu: push a slim list to main whenever
 // the recent-workspaces cache changes.
 watch(recentWorkspaces, (list) => {
@@ -819,6 +840,12 @@ interface ActivePane {
    *  terminal panes. Persisted to localStorage keyed by pane id so names
    *  survive restart (see persistMessagingName). */
   messagingName?: string
+  /** Pane ids this pane's CLI process was reached under before the pane was
+   *  rebuilt around it (restore that reattached a live PTY, detach, group
+   *  reattach). Mirrored to the backend so the /plan-mcp URL that process was
+   *  spawned with — which carries the id of that moment forever — still
+   *  resolves to this pane. */
+  formerPaneIds?: string[]
   /** Pane id of the parent that spawned this pane via a SPAWN block. Runtime
    *  only — deliberately NOT persisted: after a restart every pane counts as
    *  root (spawn depth 0) again, accepted for the MVP. */
@@ -870,6 +897,11 @@ interface ActivePane {
    *  backend can match the right session file to this pane when several
    *  same-vendor panes share a workspace. */
   sessionMarker?: string
+  /** Runtime-only: the marker was typed into this pane as a standalone prompt
+   *  and the CLI's answer to it has not been seen yet. See sessionMarkerTurn.ts
+   *  — that answer is a turn the user never started, so it must not name the
+   *  pane, chime "done", or be scanned for MSG blocks. */
+  markerReplyPending?: boolean
   /** True once the session-detect overlay's grace window has elapsed. Session
    *  detection itself keeps running (subtitle still says "detecting"); only the
    *  BLOCKING overlay is dropped — detection has preconditions the user may
@@ -889,6 +921,12 @@ interface ActivePane {
    *  expired-login message (see lib/cliLoginExpired); cleared once the login
    *  command is re-sent via the badge click. Not persisted to PaneRecord. */
   loginExpired?: boolean
+  /** Runtime-only continue affordance — lit when this pane was brought back with
+   *  `--resume`. The CLI reloads its transcript but parks at the prompt, so an
+   *  interrupted task is never picked up on its own and nothing in the restore
+   *  path may inject on the user's behalf. Cleared by the first injection or by
+   *  agent activity. Not persisted: a restart re-derives it from the restore. */
+  resumeContinueAvailable?: boolean
   /** Cold-restore metadata retained until the placeholder is explicitly opened. */
   deferredRestore?: DeferredRestoreMetadata
 }
@@ -1343,6 +1381,10 @@ function mirrorMessagingHandle(pane: ActivePane): void {
       name: pane.messagingName,
       workspace_path: pane.workspacePath,
       agent_key: pane.agentKey,
+      // Re-sent on every mirror (rename, reconnect), not only the first: the
+      // backend forgets a pane whose window stayed away too long, and with it
+      // the aliases that pane owned.
+      former_pane_ids: pane.formerPaneIds ?? [],
     })
     .catch(() => { /* local messaging is unaffected */ })
 }
@@ -1352,6 +1394,8 @@ function mirrorMessagingHandle(pane: ActivePane): void {
 function unregisterPaneMessaging(paneId: string, opts: { keepPersisted?: boolean } = {}): void {
   messaging.unregisterPane(paneId)
   paneBusyReported.delete(paneId)
+  pushReadyPanes.delete(paneId)
+  pushCooldownUntil.delete(paneId)
   backend.send('agent_msg.unregister', { pane_id: paneId }).catch(() => { /* best effort */ })
   if (!opts.keepPersisted) dropPersistedMessagingName(paneId)
 }
@@ -1374,26 +1418,57 @@ async function deliverAgentMessage(paneId: string, text: string): Promise<boolea
   return true
 }
 
+/** How long after the last keystroke a pane still counts as being typed at.
+ *
+ *  An injection is a paste plus Enter, so it submits whatever the composer
+ *  holds — including a line the user is still writing. `hasDraft` covers a
+ *  line with text in it; this covers the gaps around it, where the composer is
+ *  momentarily empty but the person is plainly still there (they just cleared
+ *  it, or are pausing between words). Long enough to bridge a normal typing
+ *  pause, short enough that a pane someone glanced at is not parked. */
+const TYPING_HOLD_MS = 4000
+
 /** idleHoldKey() dep: why a message cannot be injected into this pane right
  *  now, as an i18n key suffix under `msg.hold-*`, or null when it can be.
- *  Gate: PTY alive and past startup, not mid role/kickoff injection, latest CLI
- *  signal is "turn ended" (not agent_active), and no activity in the last 2s.
+ *  Gate: PTY alive and past startup, nobody typing into it, not mid role/kickoff
+ *  injection, latest CLI signal is "turn ended" (not agent_active), and no
+ *  activity in the last 2s.
  *
  *  isPaneIdleForMessaging() is derived from this rather than duplicating it, so
  *  the reason shown in the Messages panel cannot drift from the real gate. */
-function messagingHoldKey(paneId: string): string | null {
+function messagingHoldKey(
+  paneId: string,
+  opts: { ignoreTyping?: boolean } = {},
+): string | null {
   const pane = panes.value.find((p) => p.id === paneId)
   if (!pane) return 'gone'
   const status = paneRefs[paneId]?.displayStatus as string | undefined
-  // 'question' passes deliberately. It is a relabelling of panes that were
-  // already reaching this gate as 'idle' (a turn ending on a question, or an
-  // AskUserQuestion box the badge used to show as running-then-idle), so
-  // holding it back would newly park those panes out of inter-CLI dispatch —
-  // a behaviour change the state was never meant to make. AWAITING stays out:
-  // that one is a permission prompt, and it was already excluded.
-  if (status !== 'running' && status !== 'idle' && status !== 'question') return 'not-ready'
+  // A question passes deliberately. Those panes were already reaching this gate
+  // as 'idle' (a turn ending on a question, or an AskUserQuestion box the badge
+  // used to show as running-then-idle), so holding them back would newly park
+  // them out of inter-CLI dispatch — a behaviour change the state was never
+  // meant to make. A permission prompt stays out: it was already excluded.
+  //
+  // The badge merged the two into 'awaiting', so the split is read from
+  // awaitingKind instead. This gate is exactly why that accessor exists —
+  // do not simplify it back to the badge value.
+  const awaitingKind = paneRefs[paneId]?.awaitingKind as string | null | undefined
+  const parkedOnQuestion = status === 'awaiting' && awaitingKind === 'question'
+  if (status !== 'running' && status !== 'idle' && !parkedOnQuestion) return 'not-ready'
   if (pane.injectionStatus === 'scheduled' || pane.kickoffStatus === 'pending') return 'starting'
   const now = Date.now()
+  // Ahead of the CLI-side reasons on purpose: those describe what the agent is
+  // doing, this one describes the person at the keyboard, and a half-typed line
+  // is lost the same way whether the agent is mid-turn or idle.
+  // `ignoreTyping` is for a push channel whose text never reaches the composer:
+  // there is no Enter to submit a half-written line with, so the person at the
+  // keyboard has nothing to lose by a message arriving now.
+  if (!opts.ignoreTyping) {
+    const typist = paneRefs[paneId]
+    const hasDraft = typist?.hasDraft as boolean | undefined
+    const lastKey = (typist?.lastUserKeyAt as number | undefined) ?? 0
+    if (hasDraft || (lastKey > 0 && now - lastKey < TYPING_HOLD_MS)) return 'typing'
+  }
   const lastActive = paneLastActiveAt.get(paneId) ?? 0
   const inFlight = isTurnInFlight(lastActive, paneTurnCompleteAt.get(paneId) ?? 0, now, {
     inferEndFromSilence: VENDORS_WITHOUT_TURN_END.has(pane.agentKey),
@@ -1408,6 +1483,55 @@ function isPaneIdleForMessaging(paneId: string): boolean {
   return messagingHoldKey(paneId) === null
 }
 
+/** Panes whose CLI currently has a push channel, by the backend's kind label.
+ *  Announced by the backend because only it knows whether a channel is really
+ *  there: a spawn can fail to wire one, and a hook channel exists only while
+ *  the CLI has a waiter parked. */
+const pushReadyPanes = new Map<string, string>()
+const pushCooldownUntil = new Map<string, number>()
+
+/** pushTarget() dep: the channel that could take a message for this pane right
+ *  now, or null. Applies the gates that channel still answers to — every
+ *  CLI-side one, and the typing hold only for a channel that writes the
+ *  composer — so the composable can treat a non-null answer as "go". */
+function pushTargetForMessaging(paneId: string): { kind: string } | null {
+  const kind = pushReadyPanes.get(paneId)
+  if (!kind) return null
+  const pane = panes.value.find((p) => p.id === paneId)
+  const channel = pane
+    ? agentSpecs.find((s) => s.agentKey === pane.agentKey)?.pushChannel
+    : undefined
+  if (!channel) return null
+  if ((pushCooldownUntil.get(paneId) ?? 0) > Date.now()) return null
+  if (messagingHoldKey(paneId, { ignoreTyping: !channel.holdsInputBox }) !== null) return null
+  return { kind }
+}
+
+/** pushDeliver() dep: hand the envelope to the backend, which owns every push
+ *  transport. A refusal is not a failed message — the composable still gets it
+ *  out, by typing — so it only costs this pane a cooldown.
+ *
+ *  `unclear` is the backend saying the CLI may still be holding our text: the
+ *  message must go back in the queue rather than be typed in on top of itself.
+ */
+async function pushDeliverAgentMessage(paneId: string, text: string): Promise<PushOutcome> {
+  let reason = 'push-request-failed'
+  let unclear = false
+  try {
+    const resp = await backend.send<{ ok?: boolean; reason?: string; unclear?: boolean }>(
+      'agent_msg.push',
+      { pane_id: paneId, text },
+    )
+    if (resp.ok && resp.payload?.ok) return 'landed'
+    reason = resp.payload?.reason || resp.error?.message || reason
+    unclear = !!resp.payload?.unclear
+  } catch {
+    /* the backend never answered — treat it as an ordinary refusal */
+  }
+  pushCooldownUntil.set(paneId, Date.now() + pushCooldownMs(reason))
+  return unclear ? 'unclear' : 'declined'
+}
+
 // Per-pane timestamp of the last turn_complete whose text was scanned for MSG
 // blocks — the hook and the watcher can deliver the same turn twice.
 const paneMsgProcessedAt = new Map<string, number>()
@@ -1420,15 +1544,28 @@ function onTurnCompleteForMessaging(paneId: string, text: string, timestamp: str
     if (fresh) {
       if (!Number.isNaN(eventMs)) paneMsgProcessedAt.set(paneId, eventMs)
       for (const msg of parseMessages(text)) {
+        // `replyTo` is the correlation id this agent echoed back from the
+        // envelope it is answering; absent for a message that starts a thread.
         if (isBroadcastTarget(msg.target)) {
-          messaging.sendBroadcast(senderName, msg.content)
+          messaging.sendBroadcast(senderName, msg.content, { replyTo: msg.replyTo })
         } else {
-          messaging.sendMessage(senderName, msg.target, msg.content)
+          messaging.sendMessage(senderName, msg.target, msg.content, { replyTo: msg.replyTo })
         }
       }
       // Same turn-complete path handles SPAWN blocks (freshness-deduped above,
       // so a turn replayed by both the hook and the watcher spawns only once).
-      void handleSpawnRequestsForTurn(paneId, senderName, text)
+      // Caught rather than left to `void`: every outcome inside is reported to
+      // the requester as a notice, so a rejection escaping to the window would
+      // be the one path that says nothing at all — and it would do it as an
+      // unhandled rejection.
+      void handleSpawnRequestsForTurn(paneId, senderName, text).catch((err) => {
+        recordDiagnostic({
+          level: 'error',
+          code: 'spawn.turn-failed',
+          message: err instanceof Error ? err.message : String(err),
+          paneId,
+        })
+      })
     }
   }
   // A turn ending is exactly when this pane's queue can flush.
@@ -1436,12 +1573,19 @@ function onTurnCompleteForMessaging(paneId: string, text: string, timestamp: str
 }
 
 // ── Agent-initiated pane spawning (SPAWN blocks) ────────────────────────────
-const SPAWN_FEEDBACK_SENDER = 'Navide'
-
-/** Feedback to the requesting pane through the ordinary messaging queue (idle
- *  gate, delivery log) — no reply hint, Navide is not an addressable pane. */
-function sendSpawnFeedback(parentName: string, text: string): void {
-  messaging.sendMessage(SPAWN_FEEDBACK_SENDER, parentName, text, { includeReplyHint: false })
+/** Feedback to the requesting pane, as a system notice: the ordinary messaging
+ *  queue (idle gate, delivery log, Navide's own rate-limit pair) carrying text
+ *  that is injected verbatim. Identical treatment to a delivery-failure notice,
+ *  and for the same reason — an envelope would announce a sender named Navide
+ *  and ask for a reply to a handle nothing can address. */
+function sendSpawnFeedback(
+  parentName: string,
+  outcome: 'failed' | 'partial',
+  detail: string,
+): void {
+  messaging.sendMessage(NOTICE_SENDER, parentName, renderSpawnNotice(outcome, detail), {
+    kind: 'notice',
+  })
 }
 
 async function handleSpawnRequestsForTurn(
@@ -1456,15 +1600,31 @@ async function handleSpawnRequestsForTurn(
   const results = evaluateTurnSpawns(requests, spawnGateContextFor(parentPaneId))
   for (const result of results) {
     if (!result.ok) {
-      sendSpawnFeedback(parentName, `SPAWN 失敗：${result.reason}`)
+      sendSpawnFeedback(parentName, 'failed', result.reason)
       continue
     }
     for (const advisory of result.advisories ?? []) {
       recordDiagnostic({ level: 'warn', code: 'spawn.advisory', message: advisory, paneId: parentPaneId })
     }
-    const ok = await spawnRequestedPane(parent, parentName, result)
-    if (!ok) {
-      sendSpawnFeedback(parentName, `SPAWN 失敗：pane「${result.name}」啟動或任務注入失敗`)
+    // `failed` and `partial` ask for opposite responses (see renderSpawnNotice),
+    // so which one this is matters: reporting a pane that exists as `failed`
+    // invites the same request again, and the retry collides with the pane
+    // sitting right there.
+    const spawned = await spawnRequestedPane(parent, parentName, result)
+    if (spawned.outcome === 'failed') {
+      sendSpawnFeedback(parentName, 'failed', `pane「${result.name}」啟動失敗`)
+    } else if (spawned.outcome === 'partial' && spawned.error) {
+      sendSpawnFeedback(
+        parentName,
+        'partial',
+        `pane「${spawned.name}」已開啟，但任務注入出錯：${spawned.error}`,
+      )
+    } else if (spawned.outcome === 'partial') {
+      sendSpawnFeedback(
+        parentName,
+        'partial',
+        `pane「${spawned.name}」已開啟，但任務注入失敗，請自行確認`,
+      )
     }
   }
 }
@@ -1630,19 +1790,40 @@ async function kickoffRequestedPane(
 
 /** Spawn + kick off a pane requested by a SPAWN block. Mirrors
  *  dispatchPlanToPane's create path: the kickoff is injected directly because
- *  scheduleInjection never injects a roleless manual pane's kickoffPrompt. */
+ *  scheduleInjection never injects a roleless manual pane's kickoffPrompt.
+ *
+ *  Reports which half failed, not just that something did: once the pane
+ *  exists, a kickoff that never lands is `partial` — the same verdict the MCP
+ *  spawn path reports — and `name` is the handle the pane actually took, which
+ *  a concurrent spawn may have pushed to a suffix.
+ *
+ *  A kickoff that THROWS is the same verdict as one that returns false: the
+ *  pane is open either way. kickoffRequestedPane runs a long chain of awaits
+ *  (bootstrap, dialog dismissal, quiet wait, injection) with only a `finally`
+ *  of its own, so letting a rejection escape here would leave the requester
+ *  with no notice at all — the one outcome that tells it nothing. */
 async function spawnRequestedPane(
   parent: ActivePane,
   parentName: string,
   req: { agentKey: string; name: string; task: string },
-): Promise<boolean> {
+): Promise<{ outcome: 'ok' | 'failed' | 'partial'; name: string; error?: string }> {
   const paneId = await createRequestedPane(parent, req)
-  if (!paneId) return false
+  if (!paneId) return { outcome: 'failed', name: req.name }
   const pane = panes.value.find((p) => p.id === paneId)
+  const childName = pane?.messagingName ?? req.name
   notifyRestore.toast(
-    i18n.global.t('msg.spawn-toast', { parent: parentName, child: pane?.messagingName ?? req.name }),
+    i18n.global.t('msg.spawn-toast', { parent: parentName, child: childName }),
   )
-  return await kickoffRequestedPane(paneId, parentName, req.task)
+  try {
+    const kicked = await kickoffRequestedPane(paneId, parentName, req.task)
+    return { outcome: kicked ? 'ok' : 'partial', name: childName }
+  } catch (err) {
+    return {
+      outcome: 'partial',
+      name: childName,
+      error: err instanceof Error ? err.message : String(err),
+    }
+  }
 }
 
 /** The spawn-gate context for a pane in this window. Shared by the SPAWN block
@@ -1766,12 +1947,13 @@ async function handleMcpSpawnRequest(ev: {
   void kickoffRequestedPane(paneId, parentName, gate.task)
     .then((ok) => {
       if (!ok) {
-        sendSpawnFeedback(parentName, `pane「${childName}」已開啟，但任務注入失敗，請自行確認`)
+        sendSpawnFeedback(parentName, 'partial', `pane「${childName}」已開啟，但任務注入失敗，請自行確認`)
       }
     })
     .catch((err) => {
       sendSpawnFeedback(
         parentName,
+        'partial',
         `pane「${childName}」已開啟，但任務注入出錯：${err instanceof Error ? err.message : String(err)}`,
       )
     })
@@ -1825,6 +2007,7 @@ async function routeRemoteMessage(args: {
   to: string
   content: string
   msgKey: string
+  replyTo?: string
 }): Promise<RouteResult> {
   const resp = await backend.send<{
     ok?: boolean
@@ -1842,6 +2025,9 @@ async function routeRemoteMessage(args: {
       to: args.to,
       content: args.content,
       msg_key: args.msgKey,
+      // Only for a reply: the backend passes it through to the deliver event so
+      // the window that handed out the id can link the two rows.
+      ...(args.replyTo ? { reply_to: args.replyTo } : {}),
     },
     // Generous: the handler broadcasts the delivery BEFORE it replies, so a
     // timeout here would report failure for a message the target already got.
@@ -1890,6 +2076,8 @@ onMounted(() => {
     deliver: deliverAgentMessage,
     isPaneIdle: isPaneIdleForMessaging,
     idleHoldKey: messagingHoldKey,
+    pushTarget: pushTargetForMessaging,
+    pushDeliver: pushDeliverAgentMessage,
     routeRemote: routeRemoteMessage,
     reportDelivery: (msgKey, ok, reason) => {
       backend
@@ -1900,6 +2088,14 @@ onMounted(() => {
           reason: reason ? encodeReason(reason) : '',
         })
         .catch(() => { /* the sender's log entry just stays queued */ })
+    },
+    // Not caught here: a rejection is how the composable learns the request
+    // never left, and puts the row back to plain waiting.
+    requestRemoteCancel: (msgKey) => backend.send('agent_msg.cancel', { msg_key: msgKey }),
+    reportHold: (msgKey, hold) => {
+      backend
+        .send('agent_msg.hold_update', { msg_key: msgKey, hold: hold ?? null })
+        .catch(() => { /* an MCP caller just sees the message as queued */ })
     },
     persistAppend: msgLog.persistAppend,
     persistUpdate: msgLog.persistUpdate,
@@ -1916,11 +2112,18 @@ onMounted(() => {
   void refreshRemoteMessagingTargets()
   _remoteTargetsTimer = window.setInterval(() => void refreshRemoteMessagingTargets(), 10_000)
   window.addEventListener('beforeunload', msgLog.flushOnExit)
+  // A hard teardown (⌘R's `role: 'reload'`, app quit) never runs a pane's
+  // onScopeDispose, so this is the last chance to catch the ≤60s of scrollback
+  // the panes' own periodic save has not written yet. Like flushOnExit it
+  // cannot await, so it only stores what xterm has already parsed — the
+  // periodic save is what makes the snapshot faithful.
+  window.addEventListener('beforeunload', saveAllScrollSnapshots)
 })
 onUnmounted(() => {
   window.clearInterval(_msgPumpTimer)
   window.clearInterval(_remoteTargetsTimer)
   window.removeEventListener('beforeunload', msgLog.flushOnExit)
+  window.removeEventListener('beforeunload', saveAllScrollSnapshots)
   void msgLog.flush()
 })
 
@@ -1936,8 +2139,13 @@ onUnmounted(() => {
 // regex there would dominate the output path. Unlike the login-expired watcher
 // this consumes nothing it matched: the prompt is a STATE, re-asserted every
 // tick while it is on screen and cleared the moment it is not. Panes whose
-// vendor has no pattern are skipped entirely, so claude's hook-set AWAITING is
-// never cleared here.
+// vendor has no pattern are skipped entirely.
+//
+// Clearing is per vendor (awaitingClearsOnMiss). For a pattern-only vendor the
+// match IS the state, so a miss ends it. claude also has a Notification hook
+// and its pattern is additive — it catches the AskUserQuestion box the hook
+// never reports — so a miss there is not evidence the wait ended and must not
+// clear what the hook raised.
 const AWAITING_SCREEN_LINES = 25
 
 function pollAwaitingPanes(): void {
@@ -1952,7 +2160,7 @@ function pollAwaitingPanes(): void {
     try {
       const screen = ref.readScreenTail(AWAITING_SCREEN_LINES) as unknown as string
       if (matchAwaitingInput(pane.agentKey, screen)) ref.markNeedsInput?.()
-      else ref.clearNeedsInput?.()
+      else if (awaitingClearsOnMiss(pane.agentKey)) ref.clearNeedsInput?.()
     } catch {
       /* leave this pane's badge as-is and carry on with the rest */
     }
@@ -2010,12 +2218,6 @@ onUnmounted(() => {
 })
 watch(panes, syncViews, { deep: true, immediate: true })
 
-// PTY-friendly paste: wraps text with bracketed-paste escape sequences so
-// modern CLIs (Claude Code / Codex / Antigravity TUI) accept it as a single paste
-// rather than interpreting embedded newlines as submit signals.
-const BRACKETED_PASTE_START = '\x1b[200~'
-const BRACKETED_PASTE_END = '\x1b[201~'
-
 // Flatten multi-line prompts so they survive any CLI input mode (raw / cooked
 // / bracketed-paste-off-during-init). Embedded newlines would otherwise hit
 // the agent's Enter handler and submit fragments. We preserve paragraph
@@ -2070,20 +2272,34 @@ async function injectText(
   // Send in modest chunks to avoid hitting any tty input-buffer limits and to
   // give the CLI's render loop a chance to keep up.
   const CHUNK = 512
-  const payload = preserveNewlines
-    // Bracketed-paste so the TUI treats embedded newlines as literal chars
-    // instead of Enter keypresses (Claude Code / Codex / Antigravity all support it).
-    ? BRACKETED_PASTE_START + text + BRACKETED_PASTE_END
-    : flattenForInjection(text)
+  const body = preserveNewlines ? text : flattenForInjection(text)
+  // Bracketed paste for every injection the vendor can take it, not just the
+  // multi-line ones: it is what makes the write land as a paste the TUI inserts
+  // whole, instead of a stream of keypresses interleaved with whatever the user
+  // is typing at the same moment. Multi-line text is wrapped regardless — there
+  // the guards are what stop embedded newlines from submitting fragments, which
+  // is worse than a vendor showing a literal "[200~".
+  //
+  // The vendor key alone is not enough for the single-line case: it says which
+  // CLI the pane was started with, not what is reading the PTY right now. A
+  // claude pane dropped into `!` shell mode, fallen back to bash, or sitting on
+  // a raw login prompt has mode 2004 off, and a login-fix or nudge written into
+  // that would arrive as a literal "[200~". So ask xterm what the program on the
+  // other end last declared — the same source pasteFromClipboard trusts.
+  const bracketed = preserveNewlines
+    || (agentUsesBracketedPaste(panes.value.find((p) => p.id === paneId)?.agentKey)
+        && paneId !== undefined
+        && paneRefs[paneId]?.isBracketedPasteActive?.() === true)
+  const chunks = injectionChunks(body, CHUNK, bracketed)
   const sendChunks = async (): Promise<boolean> => {
-    for (let i = 0; i < payload.length; i += CHUNK) {
+    for (let i = 0; i < chunks.length; i++) {
       try {
         await backend.send('terminal.input', {
           terminal_session_id: sessionId,
-          data: payload.slice(i, i + CHUNK)
+          data: chunks[i]
         })
       } catch (err) {
-        console.error(`[injectText] content send failed at ${i}/${payload.length}:`, err)
+        console.error(`[injectText] content send failed at chunk ${i + 1}/${chunks.length}:`, err)
         return false
       }
     }
@@ -2214,9 +2430,13 @@ async function injectPane(
   preserveNewlines = false,
   shouldAbort?: () => boolean
 ): Promise<boolean> {
-  if (!panes.value.find((p) => p.id === paneId)?.realized) return false
+  const pane = panes.value.find((p) => p.id === paneId)
+  if (!pane?.realized) return false
   const ref = paneRefs[paneId]
   if (!ref?.sessionId) return false
+  // Anything reaching the prompt ends the parked-after-resume state the continue
+  // button exists for — including this button's own injection.
+  pane.resumeContinueAvailable = false
   return injectText(ref.sessionId, text, logLabel, preserveNewlines, shouldAbort)
 }
 
@@ -2387,8 +2607,9 @@ async function injectPaneContextSources(
 async function pastePaneContext(targetPaneId: string, text: string): Promise<void> {
   const targetSessionId = paneRefs[targetPaneId]?.sessionId as string | undefined
   if (!targetSessionId) return // target has no live PTY
-  const payload = BRACKETED_PASTE_START + text + BRACKETED_PASTE_END
-  for (const chunk of chunkForPty(payload, 512)) {
+  // Guards as their own writes (see injectionChunks): chunking the wrapped
+  // string splits one of them as soon as the text is long enough.
+  for (const chunk of injectionChunks(text, 512, true)) {
     try {
       await backend.send('terminal.input', { terminal_session_id: targetSessionId, data: chunk })
     } catch (err) {
@@ -2966,6 +3187,41 @@ async function fixPaneLogin(paneId: string): Promise<void> {
   }
 }
 
+// Panes with an in-flight continue injection, so a second click during the
+// multi-second injectPane await cannot send the prompt twice.
+const continueInFlight = new Set<string>()
+
+/** Continue button clicked on a pane restored via `--resume`. Sends the same
+ *  resume text the loop uses (honouring the user's setting) exactly once — no
+ *  watcher, no re-arm, no done-marker instruction: this is a manual nudge, not
+ *  an unattended loop. injectPane clears the flag, which hides the button; a
+ *  failed injection restores it so the click can be retried. */
+async function continueRestoredPane(paneId: string): Promise<void> {
+  const pane = panes.value.find((p) => p.id === paneId)
+  if (!pane?.resumeContinueAvailable) return
+  if (continueInFlight.has(paneId)) return
+  // Same gate every other unsolicited injection passes: never type over a draft
+  // or into a turn that is still running.
+  if (messagingHoldKey(paneId) !== null) return
+  continueInFlight.add(paneId)
+  await acquireInjectionSlot()
+  try {
+    const ok = await injectPane(
+      paneId,
+      settingsGet(LOOP_RESUME_SETTING_KEY, DEFAULT_LOOP_RESUME),
+      'continue-button',
+      true
+    )
+    if (!ok) {
+      console.warn(`[continue] pane ${paneId}: injection failed`)
+      pane.resumeContinueAvailable = true
+    }
+  } finally {
+    releaseInjectionSlot()
+    continueInFlight.delete(paneId)
+  }
+}
+
 
 // Dispatch a cloud issue into a running agent pane as a task (one-way: no
 // write-back to the issue). Reuses the pipeline-kickoff injection path.
@@ -3529,6 +3785,10 @@ interface SpawnInternal {
   /** Persisted messaging name carried through a restore so inter-CLI messaging
    *  addresses survive restart. */
   preferredMessagingName?: string
+  /** Pane ids the CLI this pane may reattach to was reachable under before.
+   *  Only ever the immediate predecessor is needed — the backend flattens the
+   *  chain, so A→B→C leaves both A and B pointing at C. */
+  formerPaneIds?: string[]
   /** Parent pane id for an agent-requested spawn (SPAWN block). Runtime-only
    *  lineage for the spawn-depth/quota gate; never persisted. */
   spawnedBy?: string
@@ -3592,6 +3852,9 @@ async function sendSessionMarkerBootstrap(pane: ActivePane, tag: string): Promis
       terminal_session_id: ref.sessionId as string,
       data: '\r'
     })
+    // The marker is a real prompt, so the CLI will answer it. Arm the gate that
+    // keeps that answer from being treated as a turn the user asked for.
+    pane.markerReplyPending = true
     pipelineLog(`${tag} ✓ session marker sent for resume capture`)
     return true
   } catch (err) {
@@ -3708,6 +3971,7 @@ async function spawnPane(opts: SpawnInternal): Promise<string | null> {
     profileId: opts.profileId || undefined,
     sessionMarker: sessionMarker || undefined,
     spawnedBy: opts.spawnedBy,
+    formerPaneIds: opts.formerPaneIds?.length ? [...opts.formerPaneIds] : undefined,
   }
   // If this spawn carries its kickoff directly (fallback path), embed the
   // marker now. Pre-spawned panes get it at activateStage injection time.
@@ -4217,6 +4481,36 @@ async function onReinject(paneId: string): Promise<void> {
   syncViews()
 }
 
+/**
+ * ⌘W's close: kill the focused pane, asking first only while a turn is running.
+ *
+ * The ✕ button calls onKill outright, which is right for a deliberate mouse
+ * click but not for a key you can hit one-handed while typing into the very CLI
+ * it would kill. `force: true` gives no second chance, so a running turn gets
+ * the same prompt Rebuild already shows for interrupting one. An idle pane
+ * closes without ceremony — matching the button, and the common case.
+ */
+async function closeFocusedPane(paneId: string): Promise<void> {
+  const paneRef = paneRefs[paneId]
+  const busy = paneBusyForRebuild(
+    paneRef?.displayStatus as string | undefined,
+    paneRef?.status as string | undefined,
+    paneRef?.startingAgeMs as number | null | undefined
+  )
+  if (busy === 'running') {
+    const ok = await notifyRestore.confirm(
+      i18n.global.t('pane.terminal.close-running-confirm-body'),
+      {
+        title: i18n.global.t('pane.terminal.close-running-confirm-title'),
+        confirmText: i18n.global.t('pane.terminal.close-running-confirm-confirm'),
+        cancelText: i18n.global.t('pane.terminal.rebuild-running-confirm-cancel')
+      }
+    )
+    if (!ok) return
+  }
+  await onKill(paneId)
+}
+
 async function onKill(paneId: string, opts: { markRemoved?: boolean, force?: boolean, keepInList?: boolean } = {}): Promise<void> {
   const markRemoved = opts.markRemoved ?? true
   const force = opts.force ?? true
@@ -4320,6 +4614,81 @@ const rebuildableAllPaneCount = computed(
   () => panes.value.filter((p) => p.realized && paneCanRebuild(p)).length
 )
 
+// Panes report a lost PTY one at a time, as each one's reattach probe answers.
+// Batching turns N toasts into one and lets a single concurrency limit apply to
+// the whole wave instead of every pane racing to spawn at once.
+const PTY_LOST_BATCH_MS = 1200
+const pendingPtyLostPanes = new Set<string>()
+let ptyLostFlushTimer: number | null = null
+
+/**
+ * A pane's PTY did not survive a backend outage (TerminalPane `pty-lost`).
+ *
+ * The PTY itself is unrecoverable — a backend restart kills every one of them —
+ * but the CLI's own session is a file on disk that usually outlives it, so the
+ * conversation can be picked up with the vendor's resume command. That is
+ * exactly what the Rebuild button already does, so this reuses
+ * rebuildPaneViaResume rather than growing a second resume path.
+ */
+function onPanePtyLost(paneId: string): void {
+  if (!normalizeAutoResumeOnReconnect(settingsGet(AUTO_RESUME_ON_RECONNECT_SETTING_KEY, true))) return
+  // Decide visibility now rather than at flush time. The debounce window is
+  // exactly when someone staring at a frozen app clicks around, and in the
+  // sidebar/spotlight layouts onScreenPaneIds is only the focused pane — read
+  // 1.2 s later it would resume whichever pane they had landed on instead of
+  // the ones that actually lost their PTY.
+  if (!onScreenPaneIds.value.has(paneId)) return
+  pendingPtyLostPanes.add(paneId)
+  if (ptyLostFlushTimer !== null) window.clearTimeout(ptyLostFlushTimer)
+  ptyLostFlushTimer = window.setTimeout(() => { void flushPtyLostResumes() }, PTY_LOST_BATCH_MS)
+}
+
+/**
+ * Resume the batch of panes that lost their PTY.
+ *
+ * Scope is deliberately the panes the user can currently see. Respawning every
+ * restorable pane would spend real memory (and, on metered plans, real quota)
+ * continuing work nobody is looking at; the rest keep their dead pane and
+ * resume on the next explicit Rebuild, which is the same deal cold restore
+ * already offers. `forceWhenRunning` is safe here precisely because the PTY is
+ * already gone — there is no in-flight turn left to interrupt, and no user
+ * standing by to answer a confirm.
+ */
+async function flushPtyLostResumes(): Promise<void> {
+  ptyLostFlushTimer = null
+  // Visibility was already decided when each pane reported in (see
+  // onPanePtyLost); panes closed or rebuilt since then fall out in
+  // rebuildPaneViaResume's own 'missing-pane' check.
+  const ids = [...pendingPtyLostPanes]
+  pendingPtyLostPanes.clear()
+  if (!ids.length) return
+  let resumed = 0
+  let failed = 0
+  await runWithConcurrency(ids, ALL_SCOPE_RESTORE_CONCURRENCY, async (paneId) => {
+    const failure = await rebuildPaneViaResume(paneId, {
+      suppressBusyToast: true,
+      forceWhenRunning: true,
+      // Nobody asked for this rebuild — the backend went away mid-work. The CLI
+      // returns with its transcript but no instruction to carry on.
+      offerContinue: true,
+    })
+    if (failure) failed++
+    else resumed++
+  })
+  if (resumed > 0) {
+    notifyRestore.toast(
+      i18n.global.t('pane.terminal.session-resumed', { count: resumed }),
+      { type: 'success' }
+    )
+  }
+  if (failed > 0) {
+    notifyRestore.toast(
+      i18n.global.t('pane.terminal.session-resume-failed', { count: failed }),
+      { type: 'error', duration: 8000 }
+    )
+  }
+}
+
 /** Failure outcomes of `rebuildPaneViaResume` — success resolves undefined.
  *  Existing batch callers only compare `=== 'busy'`; the other tokens let
  *  the account-switch restart aggregate silent failures into one toast. */
@@ -4336,7 +4705,15 @@ type RebuildFailure =
 
 async function rebuildPaneViaResume(
   paneId: string,
-  opts?: { suppressBusyToast?: boolean; forceWhenRunning?: boolean }
+  opts?: {
+    suppressBusyToast?: boolean
+    forceWhenRunning?: boolean
+    /** The rebuild was forced on the pane rather than asked for — the CLI comes
+     *  back parked at its prompt with work nobody resumed. Offers the continue
+     *  button. Off for a user-invoked rebuild: that one is already an action,
+     *  and its pane does not need a second one on top. */
+    offerContinue?: boolean
+  }
 ): Promise<RebuildFailure | undefined> {
   const pane = panes.value.find((p) => p.id === paneId)
   if (!pane?.realized) return 'missing-pane'
@@ -4494,6 +4871,10 @@ async function rebuildPaneViaResume(
       replacePaneId: paneId, // Atomic swap to prevent layout shift
     })
     if (newId) {
+      if (opts?.offerContinue) {
+        const revived = panes.value.find((p) => p.id === newId)
+        if (revived) revived.resumeContinueAvailable = true
+      }
       if (snap.origin === 'manual') {
         await sendQuiet<ProjectPayload>('manual_pane.spawn', {
           workspace_path: snap.workspacePath,
@@ -4568,12 +4949,19 @@ provide(
   createCliAccountSwitchHandler(cliProfilesApi, {
     confirm: (message, opts) => notifyRestore.confirm(message, opts),
     agentLabel: (agentKey) => agentSpecs.find((s) => s.agentKey === agentKey)?.label ?? agentKey,
-    // The account we just switched to cannot authenticate (empty slot, or a
-    // token too old to refresh). It is the active account now, so this is a
-    // live login — the poller harvests it back into the slot. The toast says
-    // why a login pane appeared on its own.
-    startLogin: (agentKey) => {
-      notifyRestore.toast(i18n.global.t('cli-account.needs-login'), { type: 'info' })
+    // The account we just switched to cannot authenticate. It is the active
+    // account now, so this is a live login — the poller harvests it back into
+    // the slot. The toast says why a login pane appeared on its own, and an
+    // aged-out token is told apart from a lost login: the first is what
+    // parking an account normally does to it, and calling that "signed out"
+    // reads as the switch having broken something.
+    startLogin: (agentKey, reason) => {
+      notifyRestore.toast(
+        i18n.global.t(
+          reason === 'expired' ? 'cli-account.needs-login-expired' : 'cli-account.needs-login'
+        ),
+        { type: 'info' }
+      )
       void onCliLoginSpawn(agentKey)
     }
   })
@@ -5004,6 +5392,7 @@ async function onMenuAction(action: string): Promise<void> {
     // Same folder already open in another window → focus it instead of
     // duplicating (two windows on one folder means conflicting PTY/git ops).
     if (await window.agentTeam?.focusWorkspaceWindow?.(picked)) return
+    void touchRecentWorkspace(picked) // bump to front of recents
     if (!currentWorkspace.value) {
       // Welcome is showing — open in place via Welcome's @select handler.
       onWorkspaceSelected(picked)
@@ -5108,6 +5497,19 @@ registerCommand('workbench.action.newWindow', async () => {
   // Always open a fresh Welcome window — do not inherit the current workspace.
   await api?.openMainWindow?.({})
 })
+// ⌘⇧W. Goes through window.close() rather than any shortcut of its own, so the
+// window's existing close handling (confirm-before-quit, PTY teardown) runs
+// exactly as it does when the traffic lights are used.
+registerCommand('workbench.action.closeWindow', () => { window.close() })
+// ⌘W. The pane-level counterpart, so this window has the same two tiers the
+// Mini IDE does (⌘W a unit, ⌘⇧W the container). ⌘W was an empty key here
+// before: closeActiveEditor guards on `editorOpen`, which this window never
+// sets. Declines when nothing is focused so the keystroke is left alone.
+registerCommand('workbench.action.closeActivePane', () => {
+  const paneId = focusPaneId.value
+  if (!paneId) return false
+  return closeFocusedPane(paneId)
+})
 registerCommand('workbench.action.openSettings', () => { showSettings.value = true })
 registerCommand('workbench.action.openSettingsAccounts', () => openSettingsAccounts())
 registerCommand('workbench.action.openPipelineManager', () => { openPipelineManager() })
@@ -5154,6 +5556,10 @@ registerCommand('workbench.action.openPlans', async () => {
 registerCommand('workbench.action.rebuildFocusedPane', async () => {
   if (effectiveFocusPaneId.value) await rebuildPaneViaResume(effectiveFocusPaneId.value)
 })
+// ⇧⌘R. No prompt: every CLI lives in a backend PTY that outlives the renderer,
+// so a reload here reconnects and restores the panes rather than losing them.
+// The Mini IDE, whose unsaved buffers only exist in the renderer, guards its own.
+registerCommand('workbench.action.reloadWindow', () => { location.reload() })
 // Ctrl+Tab / Ctrl+Shift+Tab — see cycleFocusedPane near the grid pagination
 // state. 'paneStage' marks this as the window that owns the CLI pane grid; the
 // keybinding rules gate on it so plugin windows keep their editor-tab behavior.
@@ -5250,7 +5656,11 @@ registerCommand('ui.pane.getStatus', (args) => {
   return buildPaneStatusReply(
     pane,
     ref
-      ? { displayStatus: ref.displayStatus as string | undefined, buffer: readPaneShareText(ref, CLI_CHIP_LINE_CAP) }
+      ? {
+          displayStatus: ref.displayStatus as string | undefined,
+          awaitingKind: ref.awaitingKind as string | null | undefined,
+          buffer: readPaneShareText(ref, CLI_CHIP_LINE_CAP),
+        }
       : null,
   )
 })
@@ -5710,6 +6120,12 @@ async function spawnRestoredPane(opts: RestoredPaneSpawnOptions): Promise<Restor
     sessionKnownOnDisk: opts.sessionKnownOnDisk,
     freshSessionId: opts.freshSessionId,
     preferredMessagingName: persistedMessagingName(saved.pane_id),
+    // Every restore path lands here, and any of them may reattach a PTY that
+    // never stopped running — its CLI still quotes the pane id it was spawned
+    // with. Passed whether or not the reattach takes: a pane that respawned
+    // instead has a CLI holding the NEW id, so the alias names nothing and
+    // costs nothing.
+    formerPaneIds: [saved.pane_id],
     replacePaneId: opts.replacePaneId,
     restoring: opts.restoring,
   })
@@ -6609,6 +7025,12 @@ async function performRealizeRestoredPane(paneId: string, aggregateReconnect = f
     })
     if (!restored) return
     const { paneId: newId } = restored
+    // A resumed CLI has its transcript back but is parked at the prompt, and the
+    // restore path deliberately injects nothing. Offer the one-click continue.
+    if (isResume) {
+      const revived = panes.value.find((p) => p.id === newId)
+      if (revived) revived.resumeContinueAvailable = true
+    }
     if (wasDisconnected) disconnectedPaneIds.value = [...disconnectedPaneIds.value, newId]
     // First output normally clears this state. A restored CLI can be silent
     // indefinitely, so leave the terminal usable after a bounded grace period.
@@ -7770,7 +8192,7 @@ const sessionGhostHealGate = createGhostHealGate(async (paneId, pinnedSessionId)
 // is working; turn_complete = its turn ended. We timestamp both per pane; the
 // completion logic reads these instead of guessing from the TUI buffer.
 backend.on('agent.activity', (raw) => {
-  const ev = raw as { event_type?: string; pane_id?: string; vendor?: string; session_id?: string; detail?: string; text?: string; timestamp?: string; notification_type?: string }
+  const ev = raw as { event_type?: string; pane_id?: string; vendor?: string; session_id?: string; detail?: string; text?: string; timestamp?: string; notification_type?: string; superseded?: boolean }
   if (!ev?.pane_id) return
   // QUESTION badge: "the agent asked you something and is waiting". Decided in
   // one place for both event types because both carry a half of it — the turn
@@ -7781,11 +8203,31 @@ backend.on('agent.activity', (raw) => {
   const questionAction = questionActionFor(ev)
   if (questionAction === 'raise') paneRefs[ev.pane_id]?.markQuestion?.()
   else if (questionAction === 'clear') paneRefs[ev.pane_id]?.clearQuestion?.()
+  // Session-marker gate: sendSessionMarkerBootstrap typed Navide's own marker
+  // into this pane as a standalone prompt, so the CLI answers it with an
+  // ordinary assistant message that every marker-camp reader reports as a full
+  // turn_complete. Drop that turn's user-visible effects — it is not work the
+  // user asked for. Bookkeeping (badge, timestamps, queue pump) still runs:
+  // the pane really did go idle. See sessionMarkerTurn.ts for why this needs
+  // no time window and cannot swallow a genuine first turn.
+  let markerReply = false
+  const markerPane = panes.value.find((p) => p.id === ev.pane_id)
+  if (markerPane?.markerReplyPending) {
+    const action = markerTurnActionFor(ev)
+    if (action) markerPane.markerReplyPending = undefined
+    markerReply = action === 'suppress'
+  }
   if (ev.event_type === 'turn_complete') {
-    paneTurnCompleteAt.set(ev.pane_id, Date.now())
+    // `superseded`: the CLI's log describes a turn its Stop hook blocked, so
+    // the agent took a queued message instead of stopping and is working on it
+    // now (see the backend's hook_drain). The turn's text below is real and
+    // still wanted — only "the pane is free" is not, so only the two things
+    // that say so are skipped: the idle timestamp the delivery queue and the
+    // unattended loop both read, and the finished notification.
+    if (!ev.superseded) paneTurnCompleteAt.set(ev.pane_id, Date.now())
     // Badge: authoritative turn end → drop the RUNNING hysteresis latch now.
     paneRefs[ev.pane_id]?.markTurnComplete?.()
-    scheduleDoneNotify(ev.pane_id, ev.timestamp ?? '')
+    if (!markerReply && !ev.superseded) scheduleDoneNotify(ev.pane_id, ev.timestamp ?? '')
     // Judge THIS turn's own text (not a retained map): an empty-text
     // turn_complete (Claude Stop hook, thinking-only record, Codex cross-batch)
     // must never be judged against a previous turn's text.
@@ -7801,14 +8243,16 @@ backend.on('agent.activity', (raw) => {
     // ends its turn for real every time, so only the TEXT reveals the spin.
     noteLoopTurnProgress(ev.pane_id, ev.text ?? '', ev.timestamp ?? '')
     // Inter-CLI messaging: scan this turn's text for MSG blocks, then pump.
-    onTurnCompleteForMessaging(ev.pane_id, ev.text ?? '', ev.timestamp ?? '')
+    // A marker reply is scanned as empty text — nothing in it was addressed to
+    // anyone — but the pump still runs, since the pane is now idle.
+    onTurnCompleteForMessaging(ev.pane_id, markerReply ? '' : (ev.text ?? ''), ev.timestamp ?? '')
     // Auto-name fallback: for vendors whose readers can't surface the user's
     // prompt text, name a still-unnamed pane from its first completed turn's
     // text. Set-once via setPaneAutoName; deliberately independent of
     // judgeTurnText and the sentinel paths — it only reads ev.text.
     // Envelope guard mirrors the agent_active path: a reader that echoes the
     // injected inter-CLI message back as turn text must not title the pane.
-    if (ev.text && !ev.text.startsWith(MSG_ENVELOPE_PREFIX)) {
+    if (ev.text && !markerReply && !isInjectedMessageText(ev.text)) {
       const pane = panes.value.find((p) => p.id === ev.pane_id)
       if (pane && !pane.customName && !pane.nameLocked && !pane.autoName) {
         setPaneAutoName(ev.pane_id, deriveAutoName(ev.text))
@@ -7817,6 +8261,10 @@ backend.on('agent.activity', (raw) => {
     }
   } else if (ev.event_type === 'agent_active') {
     paneLastActiveAt.set(ev.pane_id, Date.now())
+    // The pane is working again, so it is no longer parked where a restore left
+    // it — retire the continue affordance even if the user never clicked it.
+    const activePane = panes.value.find((p) => p.id === ev.pane_id)
+    if (activePane?.resumeContinueAvailable) activePane.resumeContinueAvailable = false
     // Auto-name from the user's own prompt (readers attach it as text on
     // user-record events; detail is 'user' for most vendors, 'prompt' for
     // kimi/aider, 'user_message' for codex). Arrives before the assistant's
@@ -7826,7 +8274,7 @@ backend.on('agent.activity', (raw) => {
     if (
       (ev.detail === 'user' || ev.detail === 'prompt' || ev.detail === 'user_message') &&
       ev.text &&
-      !ev.text.startsWith(MSG_ENVELOPE_PREFIX)
+      !isInjectedMessageText(ev.text)
     ) {
       setPaneAutoName(ev.pane_id, deriveAutoName(ev.text))
       requestLlmPaneName(ev.pane_id, ev.text)
@@ -7994,6 +8442,7 @@ backend.on('agent_msg.deliver', (raw) => {
     content?: string
     cross_workspace?: boolean
     rate_limit?: boolean
+    reply_to?: string
   }
   if (!ev?.msg_key || !ev.target_pane_id || !ev.content) return
   // The broadcast reaches the sending window too. When the sender is one of our
@@ -8021,6 +8470,9 @@ backend.on('agent_msg.deliver', (raw) => {
     // Senders that bypassed sendMessage (the MCP tools) carry no rate-limit
     // accounting of their own.
     rateLimit: !!ev.rate_limit,
+    // Set when this message answers one this window sent; an id we never handed
+    // out (or an older backend that drops the field) leaves the row unlinked.
+    replyTo: ev.reply_to,
   })
   if (!accepted || !ev.cross_workspace) return
   // The instruction came from another project — say so, since nothing else in
@@ -8058,10 +8510,73 @@ backend.on('agent_spawn.request', (raw) => {
   })
 })
 
+// A claude pane's Stop hook is holding its agent open while the backend asks
+// whether anything is queued for it. Answering with an envelope hands that text
+// to the agent as its next instruction — no injection, so no input box, no
+// typing hold, and no idle gate. Answering with '' lets the turn end normally.
+// Sent to this window alone (the backend knows who owns the pane), and the hook
+// gives up quickly, so reply on the spot rather than awaiting anything.
+backend.on('agent_msg.hook_drain', (raw) => {
+  const ev = raw as { request_id?: string; pane_id?: string }
+  if (!ev?.request_id) return
+  const paneId = ev.pane_id ?? ''
+  const envelope = (paneId && panes.value.some((p) => p.id === paneId))
+    ? messaging.drainForHook(paneId)
+    : null
+  // The message is only reserved until the backend confirms the hook was still
+  // waiting for it. `delivered: false` means it gave up first and Claude has
+  // already stopped, so the reservation is released and the message goes back
+  // to waiting for the ordinary typed delivery — the alternative is a row
+  // marked delivered that no agent ever saw.
+  backend
+    .send<{ delivered?: boolean }>(
+      'agent_msg.hook_drain_result',
+      { request_id: ev.request_id, envelope: envelope ?? '' },
+      // Answered as soon as the socket carries it; a bound here only stops a
+      // dropped reply from holding the reservation for the default timeout.
+      5000,
+    )
+    .then((resp) => {
+      if (envelope) messaging.settleHookDrain(paneId, !!resp.ok && !!resp.payload?.delivered)
+    })
+    .catch(() => { if (envelope) messaging.settleHookDrain(paneId, false) })
+})
+
+// A pane's CLI gained or lost the way in that does not go through its PTY.
+// Broadcast to every window; only the one that owns the pane has anything to
+// record, and a pane that closes drops its entry with the rest of its state.
+backend.on('agent_msg.push_state', (raw) => {
+  const ev = raw as { pane_id?: string; kind?: string; ready?: boolean }
+  if (!ev?.pane_id) return
+  if (ev.ready && ev.kind) {
+    pushReadyPanes.set(ev.pane_id, ev.kind)
+    pushCooldownUntil.delete(ev.pane_id)
+  } else {
+    pushReadyPanes.delete(ev.pane_id)
+  }
+})
+
+// A sending window withdrew a message before it went in. Every window sees the
+// request; only the one holding that message in a queue has anything to drop,
+// and it reports the cancellation back over the ordinary delivery-report path.
+backend.on('agent_msg.cancel', (raw) => {
+  const ev = raw as { msg_key?: string }
+  if (!ev?.msg_key) return
+  messaging.cancelRemoteInbound(ev.msg_key)
+})
+
 backend.on('agent_msg.delivery_result', (raw) => {
   const ev = raw as { msg_key?: string; ok?: boolean; reason?: string }
   if (!ev?.msg_key) return
   messaging.resolveRemoteDelivery(ev.msg_key, !!ev.ok, ev.reason || '')
+})
+
+// This backend started at a different version than the one before it, so any
+// MCP client still connected from then is holding that backend's tool list.
+backend.on('app.version_changed', (raw) => {
+  const ev = raw as { from?: string; to?: string }
+  if (!ev?.from || !ev.to) return
+  announcements.noteBackendUpgrade(ev.from, ev.to)
 })
 
 backend.on('session.detected', (raw) => {
@@ -8074,8 +8589,11 @@ backend.on('session.detected', (raw) => {
   // The CLI rotated its session id (e.g. claude --resume records a NEW id).
   // The reattach key follows pinnedSessionId — carry the live PTY id to the
   // new key so the next restore reattaches instead of spawning a second CLI
-  // beside the still-running one.
-  migrateTerminalPtyKey(pane.pinnedSessionId ?? '', sessionId)
+  // beside the still-running one. Falling back to the pane id covers the
+  // FIRST binding: a pane that has not detected a session yet is keyed by
+  // pane.id, so passing '' here would no-op and strand both the PTY entry
+  // and the scrollback snapshot under a key nothing reads again.
+  migrateTerminalPtyKey(pane.pinnedSessionId || pane.id, sessionId)
   pane.pinnedSessionId = sessionId
   pane.sessionOnDisk = true
   // The detected id IS the pane's real session — a restore-pinned placeholder
@@ -10991,6 +11509,19 @@ function dualFocusStyle(paneId: string): Record<string, string> {
 }
 
 const backendUrl = computed(() => backend.httpUrl.value)
+/** Status-bar label for the backend pill.
+ *
+ *  It used to read "connecting…" for every non-connected state, which made a
+ *  backend that had died and given up look identical to one that was a second
+ *  away — the pill is the only always-visible indicator once the boot overlay
+ *  is gone, so that difference is the whole point of showing it. */
+const backendPillLabel = computed(() => {
+  if (backend.status.value === 'connected') return 'backend'
+  const auto = backend.autoRestart.value
+  if (auto) return `restarting ${auto.attempt}/${auto.max}…`
+  if (backend.status.value === 'error') return 'backend down'
+  return 'connecting…'
+})
 // Frozen at bundle time. Shown as the build-time row of the clock popover, so a
 // stale dev build is still identifiable — it is deliberately NOT a clock.
 const buildTag = typeof __APP_BUILD__ === 'string' ? __APP_BUILD__ : 'dev'
@@ -11559,6 +12090,7 @@ function paneIsCommander(p: ActivePane): boolean {
           :loop-wait-until="p.loopWaitUntil"
           :loop-estimate-reset-at="p.loopEstimateResetAt"
           :login-expired="p.loginExpired"
+          :continue-available="p.resumeContinueAvailable"
           :restoring="p.restoring"
           @set-focus="(ev) => onSetFocus(p.id, ev, stageSurfaceOrderedIds)"
           @first-output="onPaneFirstOutput(p.id)"
@@ -11573,7 +12105,9 @@ function paneIsCommander(p: ActivePane): boolean {
           @toggle-loop="togglePaneLoop(p.id)"
           @loop-resume-now="resumeLoopNow(p.id)"
           @fix-login="fixPaneLogin(p.id)"
+          @continue-resume="continueRestoredPane(p.id)"
           @user-resume="persistPaneStopped(p.id, false)"
+          @pty-lost="onPanePtyLost(p.id)"
         />
         <RestoredPanePlaceholder
           v-else
@@ -11920,7 +12454,7 @@ function paneIsCommander(p: ActivePane): boolean {
           @keydown.enter="togglePopover('backend')"
         >
           <span class="sb-dot" />
-          {{ backend.status.value === 'connected' ? 'backend' : 'connecting…' }}
+          {{ backendPillLabel }}
           <span v-if="backendUrl" class="sb-url">· {{ backendUrl }}</span>
         </span>
         <span
@@ -12706,7 +13240,6 @@ function paneIsCommander(p: ActivePane): boolean {
 .spotlight-thumb-badge[data-status="error"]    { background: var(--danger-subtle); color: var(--danger-fg); border: 1px solid var(--danger-emphasis); }
 .spotlight-thumb-badge[data-status="stopped"]  { background: #000000; color: #ffffff; border: 1px solid #3f3f46; }
 .spotlight-thumb-badge[data-status="awaiting"] { background: color-mix(in srgb, var(--warning-fg) 20%, transparent); color: var(--warning-fg); border: 1px solid color-mix(in srgb, var(--warning-fg) 45%, transparent); }
-.spotlight-thumb-badge[data-status="question"] { background: color-mix(in srgb, var(--question-fg) 20%, transparent); color: var(--question-fg); border: 1px solid color-mix(in srgb, var(--question-fg) 45%, transparent); }
 .spotlight-thumb-badge[data-status="exited"]   { background: var(--bg-muted); color: var(--text-primary); border: 1px solid var(--border-default); }
 .spotlight-thumb-loop {
   font-size: 9px;
@@ -12842,7 +13375,6 @@ function paneIsCommander(p: ActivePane): boolean {
 .meeting-badge[data-status="starting"] { background: var(--status-starting-subtle); color: var(--status-starting-fg); border: 1px solid var(--status-starting-emphasis); }
 .meeting-badge[data-status="error"]    { background: var(--danger-subtle); color: var(--danger-bright); border: 1px solid var(--danger-emphasis); }
 .meeting-badge[data-status="awaiting"] { background: color-mix(in srgb, var(--warning-fg) 20%, transparent); color: var(--warning-fg); border: 1px solid color-mix(in srgb, var(--warning-fg) 45%, transparent); }
-.meeting-badge[data-status="question"] { background: color-mix(in srgb, var(--question-fg) 20%, transparent); color: var(--question-fg); border: 1px solid color-mix(in srgb, var(--question-fg) 45%, transparent); }
 .meeting-badge[data-status="exited"]   { background: var(--bg-muted); color: var(--text-primary); border: 1px solid var(--border-default); }
 .meeting-loop {
   font-size: 10px;

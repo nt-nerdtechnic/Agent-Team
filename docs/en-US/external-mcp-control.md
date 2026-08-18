@@ -84,11 +84,118 @@ object, so this only bites on `plan_list`.
 
 ### CLI panes — messaging and spawning
 
+These tools feed the same delivery queue an agent reaches by printing a
+bare-line `---MSG-START---` block; [Inter-CLI messaging](inter-cli-messaging.md)
+documents the addresses, the idle gate and the guard rails they share.
+
 | Tool | Parameters | What it does |
 |---|---|---|
-| `cli_list_targets` | — | List addressable CLI panes: `name`, `address`, `workspace_path`, `same_workspace`, `busy` |
-| `cli_send` | `to`, `text` | Deliver an instruction to another pane once it's idle (queued if busy) |
+| `cli_list_targets` | — | List addressable CLI panes: `name`, `address`, `workspace_path`, `same_workspace`, `busy`, `hold_reason?` |
+| `cli_send` | `to`, `text`, `wait_for_delivery_s=0` (capped at 120) | Deliver an instruction to another pane once it's idle (queued if busy); returns `msg_key`, and with a wait, what became of it |
+| `cli_check_message` | `msg_key` | What became of one `cli_send`: `{status, target, age_seconds, reason?, settled_after_s?, hold?, held_for_s?, stale?}` |
+| `cli_inbox_summary` | — | Your own sends that are stuck or failed: `{count, messages: [{msg_key, target, status, age_seconds, stale?, reason?, hold?, held_for_s?, excerpt}]}` |
+| `cli_send_and_wait` | `to`, `text`, `timeout_s=60` (capped at 120) | `cli_send` plus the wait for that turn to finish; returns `cli_wait_idle`'s result plus `{ok, target, msg_key}` |
 | `cli_open_agent` | `agent`, `name`, `task`, `workspace_path` (required for a non-pane caller) | Spawn a new CLI pane with a task; returns `{ok, name, address}`, plus `advisories` when the spawn crossed an advisory threshold |
+
+`cli_send` returns once the message is *accepted* for delivery, not once the
+other agent read it. `cli_check_message` closes that loop: `status` is
+`queued` (broadcast, no window has reported back — a message held for a busy
+pane stays here until it is actually injected), `delivered`, or `failed`.
+On `failed`, `reason` is the receiving window's verdict: `rate-limit` (too
+many messages between the same pair too quickly), `queue-full` (the target's
+pending-message queue is at its cap), `inject-failed` (typing it into the
+pane did not take), `pane-closed` (the target went away before delivery), or
+`no-report` (the attempt never reported an outcome).
+
+A failure is also pushed at the sending pane without being asked for: Navide
+writes a `[Navide MSG] delivery failed` notice naming the target and the
+reason into that pane once it is idle, through the same queue and injection
+path as an ordinary message. It is a heads-up for an agent that never polls —
+`cli_check_message` stays the authoritative answer, and the notice is not
+addressable, so nothing should reply to it.
+
+**Waiting for the message to land.** Polling only closes the loop for an agent
+that remembers to poll, and one that sends and moves on never learns anything.
+`wait_for_delivery_s` is the in-band answer: `cli_send` waits that long for the
+message to actually go in and reports what happened in the same result.
+
+| Outcome | What comes back |
+|---|---|
+| It went in | `status: "delivered"`, `settled_after_s` |
+| The window refused it | `status: "failed"` (or `"rejected"` from another device), `reason` |
+| Still waiting when the clock ran out | `status: "queued"`, `waited_s`, plus `hold` and `held_for_s` when the receiving window said why |
+
+`ok` stays **true** for a refusal, for the same reason `cli_send_and_wait`'s
+`target_lost` does: the send happened and `msg_key` is real, so answering
+`ok: false` would read as "never sent" and invite a resend that dispatches the
+work twice. 10–30s is the useful range — the wait costs the caller's own turn,
+and a pane that is mid-turn or being typed into can hold a message far longer.
+Left at its default of `0`, the answer is byte-for-byte what it always was.
+
+**Why a message is still queued.** `hold` is the same reason the Messages panel
+shows — `{key, n?}`, where `key` is `typing`, `mid-turn`, `behind`, `starting`,
+`settling`, `not-ready`, `gone`, `paused` or `remote-ack` — and `held_for_s` is
+how long it has been that way. It appears on `cli_check_message` and on a
+timed-out `cli_send` wait, and it is absent once the message settles or while
+no window has reported one. `cli_list_targets` surfaces the same fact per pane
+as `hold_reason`, which is what makes `busy` explainable — but only while a
+message sent from here is queued for that pane, so its absence says nothing.
+
+**When it has been queued too long.** `stale` appears on a `queued` message once
+it has been waiting more than **two minutes**, on `cli_check_message` and on a
+timed-out `cli_send` wait alike. It is not a verdict — nothing has failed and
+nothing has given up — it is the point at which "it is on its way" stops being a
+safe assumption, so read `hold` next to it and decide whether to keep waiting,
+address someone else, or say something to the user. It is measured from the send,
+not from the current hold: a message flipping between `mid-turn` and `typing`
+restarts `held_for_s` every time, and the case this exists for — the one where no
+window ever reported a hold at all — has no hold clock to read.
+
+`cli_inbox_summary` is the same fact without a `msg_key` to ask about. It takes
+no arguments, answers about the caller and no one else, and returns every send of
+yours that is currently stale or failed — with a 60-character `excerpt` so a
+message is recognizable without having kept its key. Delivered messages and
+freshly queued ones are left out, so an empty list means "nothing of mine is
+stuck", never "nothing was sent". It exists for the agent a notice cannot reach:
+a delivery-failure notice is typed back into the sending pane once that pane is
+idle, so an agent that stays busy for an hour never sees one, and an external
+client has no pane to type into at all. Calling it between pieces of your own
+work is how you find out that the message you sent twenty minutes ago is still
+sitting in a queue.
+
+That table is backend **memory**, not a log: it holds the last 500 sends for
+one hour and is lost on backend restart. An unknown `msg_key` returns
+`{ok: false, error}` and means "not tracked any more", not "never sent".
+
+`cli_send_and_wait` handles the race a manual `cli_send` + `cli_wait_idle`
+pair loses to — the target is idle at the moment you send, so a plain wait
+returns "already idle" before it ever read the message. It waits for the
+message to **go in** first, then records the target's last activity before
+sending and only accepts a *newer* turn as the answer, so `last_activity.text`
+is what the other agent said in reply. Its timeout `reason` is
+`cli_wait_idle`'s, plus `never_started` for a target that stayed idle and never
+showed any sign of picking the message up. A send refused outright returns
+`cli_send`'s `{ok: false, error}` unchanged.
+
+`timeout_s` covers both halves: **at most half of it** goes to getting the
+message in, and whatever is left waits for the turn. Time spent on delivery is
+not lost — the message lands when the pane frees up, which is most of what the
+idle wait would have sat through anyway — but a message still held at the
+halfway mark is unlikely to be answered in what remains, and its hold reason is
+a far more useful answer than "timeout, busy". When it never arrives the result
+is `source: "not_delivered"` with `delivery_status` (`queued` with `hold` /
+`held_for_s`, or `failed` / `rejected` with `reason`). That is the fix for a
+message being held while its target sat idle: the old order answered `idle`
+from the state it was sent into, which reads as "it finished your work" when
+the work was never handed over. Like `target_lost`, it stays `ok: true` — do
+not resend on it.
+
+If the target stops being addressable *during* the wait — its window closed,
+its pane was killed — the result is `{ok: true, idle: false, source:
+"target_lost", error}`. It stays `ok: true` deliberately: the send already
+happened and the `msg_key` is still valid, so reporting a failure there would
+read as "never sent" and invite a resend, dispatching the work twice. Read it
+as "delivered, but I can no longer confirm it was finished".
 
 Spawning is not capped. A pane may spawn any number of children, a workspace
 may hold any number of CLI panes, and a spawn chain may run any depth — past
@@ -102,22 +209,53 @@ recorded as diagnostics, readable via `ui_diagnostics`.
 
 | Tool | Parameters | What it does |
 |---|---|---|
-| `cli_read_log` | `target`, `tail_lines=200` | Tail of the pane's conversation log (≤512KB and ≤`tail_lines` lines) |
+| `cli_read_log` | `target`, `tail_lines=200`, `since?` | Tail of the pane's conversation log (≤512KB and ≤`tail_lines` lines); returns `next_cursor` and `rotated` |
 | `cli_get_status` | `target` | `{busy, agent_key, last_activity?, ui?}` — `ui` mirrors `ui.pane.getStatus` when the owning window answers |
-| `cli_wait_idle` | `target`, `timeout_s=60` (capped at 120) | Blocks until the pane is idle or the timeout passes |
+| `cli_wait_idle` | `target`, `timeout_s=60` (capped at 120) | Blocks until the pane is idle or the timeout passes; returns `{idle, source, waited_s, last_activity?, ui_status?}`, plus `reason` on timeout |
+
+`cli_read_log`'s `since` reads incrementally: pass back the `next_cursor` from
+your previous call to get only what the pane has said since then, instead of
+re-reading the same tail. The cursor is a byte offset into an append-only
+capture file, so it stops meaning anything if that file is truncated or
+replaced — the call then returns a plain tail with `rotated: true`, which is a
+fresh start rather than new output.
+
+`cli_wait_idle`'s `last_activity` is what `cli_get_status` reports under the
+same key, so a caller that waited out a turn also gets what the turn said
+without a second call; `ui_status` is the owning window's own word for the
+pane, present only when a probe reached it during the wait. On timeout,
+`reason` separates three failures that look alike but aren't: `awaiting` (the
+pane is parked on a permission prompt, waiting on a **human** — answer it in
+the UI), `busy` (it really is still working; wait longer), and `unreachable`
+(the window that owns the pane stopped answering, so nothing in the result is
+current).
 
 **Capability boundary — idle/completion detection.** Most CLIs' log readers
 emit a `turn_complete` event carrying the finished turn's text: **aider,
-antigravity, claude, codex, copilot, grok, kilo, kimi, muse, opencode, pi,
-qwen**. For those, `cli_wait_idle` and `cli_get_status`'s
-`last_activity.type` resolve on the precise turn-complete signal. For the
-remaining CLIs (cursor, which reports only that its store was written, and
-plain terminal panes), there is no such signal —
+antigravity, claude, codex, copilot, cursor, grok, kilo, kimi, muse,
+opencode, pi, qwen**. For those, `cli_wait_idle` and `cli_get_status`'s
+`last_activity.type` resolve on the precise turn-complete signal — with one
+qualification: **grok, kimi, pi, qwen** have no end-of-turn record of their
+own and synthesize `turn_complete` from 8 seconds of silence in the log, so
+for those four the event is itself an inference, and a long enough pause
+mid-turn can end the wait early. For a plain terminal pane there is no such
+signal at all —
 `cli_wait_idle` falls back to inferring idleness from a 10-second quiet
 period with no new activity (`source: "quiet_period"` in the response), and
 `cli_get_status`'s `last_activity` may only ever report `"agent_active"`.
 Treat a quiet-period-based idle result as a heuristic, not a guarantee the
 CLI has actually finished.
+
+This is also why `source` is the field to read on a `cli_send_and_wait`
+result: the shape is identical whichever CLI produced it, but the confidence
+is not. `turn_complete` from aider/antigravity/claude/codex/copilot/cursor/
+kilo/muse/opencode is the CLI's own word that the turn ended; the same value
+from grok/kimi/pi/qwen is the 8-second-silence inference above; and
+`quiet_period` — the only outcome available for a plain terminal pane —
+means nothing reported an end of turn at all, so check the content
+rather than trusting the signal. `target_lost` is the fourth value and the
+only one that is not a verdict on the turn: it says the pane went away before
+the wait could reach one.
 
 ### UI action bus
 
@@ -166,6 +304,108 @@ argument shape.
 (`buildUiActionSnapshot` in `App.vue`): `{workspace, panes: [{id, name?,
 agentKey, workspacePath, status?}], activeTab, settingsOpen,
 openWorkspaces}`.
+
+## A pane's id outlives its pane
+
+A CLI pane's connection URL is written once, when the pane spawns, and the CLI
+process keeps it for as long as it runs. The `pane=<id>` in it is that pane's id
+at that moment — and a pane id belongs to the pane, not to the process inside
+it. Reloading a window, detaching a run group, or taking one back from a
+detached window rebuilds the pane around the same running CLI and gives it a new
+id, leaving the URL naming the old one.
+
+That old id still works. The window records where it went, so a call carrying it
+is answered as the pane the process is actually attached to: the same workspace
+the `plan_*` tools default to, the same `you` in `cli_list_targets`, the same
+identity `cli_send` checks a bare name and a self-send against. Reloading twice
+does not break the chain — each hop is flattened onto the current pane — and an
+id is never allowed to follow a pane into another workspace.
+
+A pane's [push channel](inter-cli-messaging.md#push-channels) mostly follows the
+same way, with one exception. A window reload keeps it, and so does a run group
+coming back from a detached window. A **detach** does not: the window handing
+the pane over releases it — and its channel with it — before the receiving
+window claims the pane, so a detached pane is typed into as it was before
+channels existed, until its CLI is restarted. A Claude pane is unaffected: its
+hook re-arms itself at the next turn end.
+
+Which id superseded which is something a Navide window declares, and it is taken
+at its word — during a detach the id being claimed is still live and owned by
+the window letting go of it, so a claim over a live pane cannot be told apart
+from a legitimate hand-over and is logged rather than refused. The one
+irreversible consequence is refused separately: a pane a connected window still
+mirrors never gives up its push channel, whoever asks.
+
+One case is known to log that warning without a hand-over behind it: a main
+window reloading while one of its run groups is detached restores that group's
+panes before it learns the group is somewhere else, and briefly claims the child
+window's ids. It corrects itself the moment the window is told, and the child's
+push channel is never taken.
+
+What is still refused is an id that names nothing at all: the pane was closed,
+or the window that owned it has been gone long enough to be forgotten. There is
+no identity left to act as, so every tool on the endpoint answers `this pane's
+id is stale`, and reopening the pane is the remedy. (That is a different word
+from the `stale` flag on a queued message above, which only says a message has
+been waiting more than two minutes.)
+
+This is not the same problem as the tool *list* below. The list is a snapshot
+the client took when it connected and Navide has no way to refresh it; the id is
+resolved by Navide on every call.
+
+## The tool list is read once
+
+An MCP client asks for a server's tool list when it connects, and Navide's
+`/plan-mcp` never changes it afterwards. So **whatever a client saw at that
+moment is what it keeps**:
+
+- A **CLI pane** snapshots the list when its CLI process starts. A pane that was
+  already running when Navide was updated is talking to a backend that no longer
+  exists; reopen the pane to pick up tools or parameters a newer Navide added.
+- An **external client** keeps its list until you reconnect it. The connection
+  URL changes across restarts anyway (the port is picked at launch), so this
+  usually resolves itself.
+
+After an upgrade Navide says so once, in the announcements feed in the status
+bar: a "MCP tools may have changed" entry naming the version it replaced. It
+appears only when this backend actually started at a different version than the
+previous one — never on a first install, and never on an ordinary restart.
+
+### Why Navide does not just tell the clients
+
+The protocol has an answer for this — a server declares the `tools.listChanged`
+capability and then sends `notifications/tools/list_changed` when its tool set
+changes, and a client that handles it re-reads the list mid-session. Navide
+cannot use it, for two independent reasons.
+
+**The transport has nowhere to push.** `/plan-mcp` runs streamable HTTP in
+stateless mode with JSON responses: a transport is built and torn down per
+request, and no stream is held open. A server-initiated notification has no
+route to a client in that configuration — the MCP SDK addresses it to a
+long-lived stream, finds none, and drops it. Making it deliverable would mean
+running the session-oriented mode instead, which is the state this endpoint is
+deliberately built without. (The 2026-07-28 revision of the spec removed
+protocol-level sessions and moved these notifications onto a client-opened
+`subscriptions/listen` stream — a held-open stream either way.)
+
+**Half the CLIs would ignore it.** Verified against each client's own source or
+documentation, 2026-08-17:
+
+| CLI | Re-reads the tool list on `list_changed`? |
+|---|---|
+| Claude Code | Yes, since 2.1.0 |
+| GitHub Copilot CLI | Yes |
+| OpenCode | Yes |
+| Grok | Yes |
+| Codex CLI | No — logs the notification and does nothing |
+| Cursor (`cursor-agent`) | No — refresh is manual, via `/mcp` |
+| Qwen Code | No — the fork dropped the handler upstream Gemini CLI has |
+| Kimi CLI | No — no notification handling at all |
+
+And there is nothing to notify about in any case: every `/plan-mcp` tool is
+registered at import, and the set never changes while the backend runs. Reopening
+the pane is the whole remedy, which is why it is documented rather than
+engineered around.
 
 ## CDP debug (escape hatch)
 

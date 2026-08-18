@@ -20,7 +20,7 @@
 // host surface is `window.nav`.
 
 import { ref, type Ref } from 'vue'
-import type { BackendStatus, WsResponse } from '../../src/composables/useBackend'
+import type { AutoRestartInfo, BackendStatus, WsResponse } from '../../src/composables/useBackend'
 
 // ── window.nav (injected by src/preload/plugin-preload.ts) ───────────────────
 interface CapabilityResponse {
@@ -226,6 +226,7 @@ export function useBackend(): {
   port: Ref<number>
   pid: Ref<number>
   lastError: Ref<string>
+  autoRestart: Ref<AutoRestartInfo | null>
   send: <T = unknown>(
     type: string,
     payload?: Record<string, unknown>,
@@ -255,6 +256,10 @@ export function useBackend(): {
   const port = ref(0)
   const pid = ref(0)
   const lastError = ref('')
+  // The broker fans out only the status, not main's auto-restart bookkeeping,
+  // so a plugin view can tell that the backend is away but not which respawn
+  // attempt is in flight. Kept as a ref to satisfy the host's shape.
+  const autoRestart = ref<AutoRestartInfo | null>(null)
 
   async function send<T = unknown>(
     type: string,
@@ -295,5 +300,5 @@ export function useBackend(): {
     return Promise.resolve()
   }
 
-  return { status, wsUrl, httpUrl, shell, port, pid, lastError, send, on, restart, stop }
+  return { status, wsUrl, httpUrl, shell, port, pid, lastError, autoRestart, send, on, restart, stop }
 }

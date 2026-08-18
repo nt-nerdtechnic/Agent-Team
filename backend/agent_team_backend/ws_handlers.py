@@ -22,7 +22,14 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from pydantic import ValidationError
 
-from . import agent_messaging, executions_service, storage_service
+from . import (
+    agent_messaging,
+    executions_service,
+    pane_policy,
+    remote_roster,
+    server_link,
+    storage_service,
+)
 from .cli_vendors.registry import VENDORS as CLI_VENDORS
 from .cli_vendors.registry import vendor as cli_vendor
 from .ipc import make_error, make_event, make_response
@@ -37,6 +44,7 @@ from .plan_index import resolve_plan_root
 from .profiles_store import SUPPORTED_AGENT_KEYS as PROFILE_AGENT_KEYS
 from .skills_store import (
     SkillConflictError,
+    SkillConsentRequired,
     SkillNotFoundError,
     SkillValidationError,
     SkillsStoreError,
@@ -45,6 +53,7 @@ from .spawn_history import canonical_workspace_path, filter_foreign_entries
 
 if TYPE_CHECKING:
     from .app import Session
+    from .projects import Project
 
 Handler = Callable[["Session", str, str, dict], Awaitable[None]]
 
@@ -1754,20 +1763,22 @@ def _running_regular_terminals(agent_key: str) -> list[str]:
     return running
 
 
-def _slot_needs_login(agent_key: str, slot_id: str) -> bool:
-    """True when restoring this slot leaves the CLI unable to authenticate, so
-    the caller should start a sign-in right after the switch.
+def _slot_login_reason(agent_key: str, slot_id: str) -> str | None:
+    """Why restoring this slot leaves the CLI unable to authenticate, or None
+    when it can. The caller starts a sign-in for any reason it returns.
 
-    Three cases: the slot holds no secret at all (restore() then CLEARS the live
-    credentials — an empty slot signs the user out), claude's snapshot was wiped
-    in place by Claude Code (both tokens emptied after an ``invalid_grant``, so
-    it restores as a non-credential), or claude's snapshot sat
-    parked long enough for its access token to expire. Nothing renews a parked
-    slot — the CLI is the only refresher — so the expired token goes live and
-    Claude Code renews it from the restored refresh token on its next run;
-    offering a sign-in is the fallback for when that refresh token is dead too.
-    A claude login with no OAuth block (long-lived token) carries nothing to
-    judge, so it counts as usable. Blocking reads (Keychain) — thread it."""
+    Two shapes, and the difference is worth telling the user. ``signed-out``:
+    the slot holds no secret at all (restore() then CLEARS the live credentials
+    — an empty slot signs the user out), or claude's snapshot was wiped in place
+    by Claude Code (both tokens emptied after an ``invalid_grant``, so it
+    restores as a non-credential). ``expired``: claude's snapshot sat parked
+    long enough for its access token to expire. Nothing renews a parked slot —
+    the CLI is the only refresher — so the expired token goes live and Claude
+    Code renews it from the restored refresh token on its next run; offering a
+    sign-in is the fallback for when that refresh token is dead too, which is
+    why this case must not be announced as "signed out". A claude login with no
+    OAuth block (long-lived token) carries nothing to judge, so it counts as
+    usable. Blocking reads (Keychain) — thread it."""
     from . import app
     from .credential_vault import _claude_credential_is_wiped
     from .usage_service import claude_token_expired, parse_claude_credentials
@@ -1775,17 +1786,19 @@ def _slot_needs_login(agent_key: str, slot_id: str) -> bool:
     try:
         creds = app.credential_vault.read_slot(agent_key, slot_id)
     except Exception:  # noqa: BLE001 — a read failure must not invent a logout
-        return False
+        return None
     if creds.secret is None:
-        return True
+        return "signed-out"
     if agent_key != "claude":
-        return False
+        return None
     # A wiped blob parses as "no OAuth block to judge", which the expiry check
     # below would pass as usable — catch it before that.
     if _claude_credential_is_wiped(creds.secret):
-        return True
+        return "signed-out"
     oauth = parse_claude_credentials(creds.secret)
-    return oauth is not None and claude_token_expired(oauth)
+    if oauth is not None and claude_token_expired(oauth):
+        return "expired"
+    return None
 
 
 @handler("cli_profiles.set_default")
@@ -1923,8 +1936,8 @@ async def cli_profiles_set_default(session: "Session", msg_id: str, msg_type: st
         # live: an empty or dead-token slot signs the CLI out, and the caller
         # opens a sign-in instead of leaving the user at a "not logged in"
         # prompt they have to resolve by hand.
-        needs_login = await vault_to_thread(
-            _slot_needs_login, agent_key, profile_id or DEFAULT_SLOT_ID
+        login_reason = await vault_to_thread(
+            _slot_login_reason, agent_key, profile_id or DEFAULT_SLOT_ID
         )
 
         try:
@@ -1952,7 +1965,14 @@ async def cli_profiles_set_default(session: "Session", msg_id: str, msg_type: st
             )
             return
         await session.send_json(
-            make_response(msg_id, msg_type, {"defaults": defaults, "needsLogin": needs_login})
+            make_response(msg_id, msg_type, {
+                "defaults": defaults,
+                "needsLogin": login_reason is not None,
+                # Which of the two is on screen decides whether the sign-in
+                # pane reads as "you were logged out" or "this needs
+                # re-authenticating" — the latter is routine after parking.
+                "needsLoginReason": login_reason,
+            })
         )
     # `forced` is what makes every window restart its panes of this agent. A
     # hot-swap agent's panes must never be restarted, so the flag stays False
@@ -1966,7 +1986,22 @@ async def cli_profiles_set_default(session: "Session", msg_id: str, msg_type: st
     # to re-fetch now so the badge reflects the switch immediately.
     from .usage_service import service
 
-    service.request_refresh()
+    if agent_key == "claude":
+        # A Claude read boots a whole CLI, so "immediately" is tens of seconds
+        # away. Announce the new active account and mark it as being read, or
+        # the badge sits on the outgoing account's numbers with no sign why.
+        # An account that has to sign in first gets the pointer but not the
+        # promise: "reading its quota" next to a login pane is a contradiction.
+        try:
+            await service.announce_claude_switch(profile_id, reading=login_reason is None)
+        except Exception:  # noqa: BLE001
+            # The switch itself already succeeded and was answered. Letting this
+            # escape would send a second, contradictory frame for a message the
+            # caller has resolved; the worst real cost is a badge that waits for
+            # the next poll, which is where it was before this announcement.
+            log.exception("usage: failed to announce the claude account switch")
+    else:
+        service.request_refresh()
 
 
 # ── Agent session / orphans (agent.*) ───────────────────────────────────────
@@ -2146,9 +2181,10 @@ async def _run_skill_operation(
     *args: Any,
     name: str = "",
     expected_revision: Any = None,
+    kwargs: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     try:
-        return await asyncio.to_thread(operation, *args)
+        return await asyncio.to_thread(operation, *args, **(kwargs or {}))
     except SkillNotFoundError as err:
         await session.send_json(
             make_error(
@@ -2170,6 +2206,17 @@ async def _run_skill_operation(
             pass
         await session.send_json(
             make_error(msg_id, msg_type, "SKILL_CONFLICT", str(err), details)
+        )
+    except SkillConsentRequired as err:
+        # Not a failure: the UI asks the user, then retries with consent=True.
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "SKILL_CONSENT_REQUIRED",
+                str(err),
+                {"root": err.root},
+            )
         )
     except SkillValidationError as err:
         await session.send_json(
@@ -2230,6 +2277,7 @@ async def skills_create(session: "Session", msg_id: str, msg_type: str, payload:
         name,
         payload.get("description", ""),
         name=name,
+        kwargs={"consent": payload.get("consent") is True},
     )
     if result is not None:
         await session.send_json(make_response(msg_id, msg_type, result))
@@ -2272,6 +2320,92 @@ async def skills_set_enabled(
         name,
         payload.get("enabled"),
         name=name,
+    )
+    if result is not None:
+        await session.send_json(make_response(msg_id, msg_type, result))
+
+
+@handler("skills.set_targets")
+async def skills_set_targets(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Restrict one skill to a set of agents; a null ``agents`` means all."""
+    from . import app
+
+    name = payload.get("name", "")
+    agents = payload.get("agents")
+    result = await _run_skill_operation(
+        session,
+        msg_id,
+        msg_type,
+        app.skills_store.set_targets,
+        name,
+        agents,
+        name=name,
+    )
+    if result is not None:
+        await session.send_json(make_response(msg_id, msg_type, result))
+
+
+def _set_native_targets_op(store: Any, real_path: str, agents: Any) -> dict[str, Any]:
+    store.set_native_targets(real_path, agents)
+    return {"ok": True}
+
+
+@handler("skills.set_native_targets")
+async def skills_set_native_targets(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Deliver a CLI's own skill to other agents; keyed by real path, opt-in."""
+    from . import app
+
+    real_path = payload.get("real_path", "")
+    agents = payload.get("agents")
+    result = await _run_skill_operation(
+        session,
+        msg_id,
+        msg_type,
+        _set_native_targets_op,
+        app.skills_store,
+        real_path,
+        agents,
+    )
+    if result is not None:
+        await session.send_json(make_response(msg_id, msg_type, result))
+
+
+@handler("skills.migrate_native")
+async def skills_migrate_native(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Move a CLI's own skill into ~/.agents/skills, leaving a link behind.
+
+    Consent is per item and never remembered: it must arrive on every call."""
+    from . import app
+
+    real_path = payload.get("real_path", "")
+    result = await _run_skill_operation(
+        session,
+        msg_id,
+        msg_type,
+        app.skills_store.migrate_native,
+        real_path,
+        kwargs={"consent": payload.get("consent") is True},
+    )
+    if result is not None:
+        await session.send_json(make_response(msg_id, msg_type, result))
+
+
+@handler("skills.restore_native")
+async def skills_restore_native(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Undo a migration: the skill goes back where it came from."""
+    from . import app
+
+    name = payload.get("name", "")
+    result = await _run_skill_operation(
+        session, msg_id, msg_type, app.skills_store.restore_native, name, name=name
     )
     if result is not None:
         await session.send_json(make_response(msg_id, msg_type, result))
@@ -2380,13 +2514,61 @@ async def ui_settings_get(session: "Session", msg_id: str, msg_type: str, payloa
     )
 
 
+async def _reinstall_claude_hooks() -> None:
+    """Re-run claude's hook installer after its push-channel switch moved.
+
+    Claude's channel is not something Navide holds — it is an entry in the
+    user's own settings file, written by the installer, which otherwise runs
+    only at startup. Without this the entry would appear or disappear a backend
+    restart late, and switching the channel back on would promise a waiter that
+    has no hook to come from. Same call the startup installer makes; the
+    installer itself decides whether the rewake entry belongs, so both
+    directions are this one call.
+
+    A pane already running fired up with whatever the file said then, so this
+    reaches the next CLI start, not the panes open now. Failure is logged and
+    swallowed: the setting was already written, and the old behaviour — the
+    hook settling at the next restart — is what a failure falls back to.
+    """
+    from . import app
+    from .applog import backend_port_file
+
+    spec = CLI_VENDORS.get("claude")
+    if spec is None or spec.install_hooks is None:
+        return
+    try:
+        result = await asyncio.to_thread(spec.install_hooks, str(backend_port_file()))
+        app.log.info("claude hooks reinstalled after a push-channel switch: %s", result)
+    except Exception as err:  # noqa: BLE001
+        app.log.warning("claude hooks reinstall failed: %s", err)
+
+
 @handler("ui.settings.set")
 async def ui_settings_set(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
 
+    from . import push_delivery
+
     updates = payload.get("updates")
+    touches_channels = (
+        isinstance(updates, dict) and push_delivery.DISABLED_SETTING_KEY in updates
+    )
+    claude_was_off = (
+        "claude" in push_delivery.disabled_agents() if touches_channels else False
+    )
     delta = app.ui_settings_store.set(updates) if isinstance(updates, dict) else {}
     await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
+    if push_delivery.DISABLED_SETTING_KEY in delta:
+        # A pane already running keeps its port and its watch file; what changes
+        # is whether anything is pushed to it. Both directions are announced —
+        # a window told to stop offering a channel would otherwise never start
+        # again when the switch goes back on.
+        for pane_id, kind, ready in push_delivery.apply_switches():
+            await app.broadcast(make_event("agent_msg.push_state", {
+                "pane_id": pane_id, "kind": kind, "ready": ready,
+            }))
+        if ("claude" in push_delivery.disabled_agents()) != claude_was_off:
+            await _reinstall_claude_hooks()
     if delta:
         # Other windows (EditorWindow, roles/stages) hold their own ws
         # connections — broadcast the merged delta so their caches
@@ -2395,6 +2577,273 @@ async def ui_settings_set(session: "Session", msg_id: str, msg_type: str, payloa
             make_event("ui.settings_changed", {"settings": delta}),
             exclude=session,
         )
+
+
+# ── Cross-device link (p2p.*) ───────────────────────────────────────────────
+# The Navide-Server URL lives in ui_settings and its access token in the
+# credential vault, so a settings pane that wrote them through the generic
+# handlers would need two round trips in the right order — and would still not
+# make the link dial, because server_link.start() only runs at boot. These two
+# handlers exist so the whole configuration is one write followed by one
+# reconnect, and so the token only ever travels toward the vault.
+@handler("p2p.link.status")
+async def p2p_link_status(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    await session.send_json(
+        make_response(msg_id, msg_type, {"status": await server_link.status()})
+    )
+
+
+@handler("p2p.link.configure")
+async def p2p_link_configure(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Persist the server URL and/or the access token, then reconnect.
+
+    Both fields are optional and absence means "leave it alone", so the UI can
+    save a new URL without making the user retype a token it is never allowed
+    to show them. An empty string is not absence: it is how the user clears a
+    field, which is what takes the link back to doing nothing at all.
+    """
+    from . import app
+
+    url = payload.get("serverUrl")
+    token = payload.get("token")
+    if url is not None and not isinstance(url, str):
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "serverUrl must be a string")
+        )
+        return
+    if token is not None and not isinstance(token, str):
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "token must be a string")
+        )
+        return
+
+    delta: dict = {}
+    if url is not None:
+        cleaned = url.strip()
+        delta = app.ui_settings_store.set(
+            {server_link.SERVER_URL_SETTING: cleaned or None}
+        )
+    if token is not None:
+        try:
+            await vault_to_thread(server_link.set_access_token, token)
+        except Exception as err:  # noqa: BLE001
+            await session.send_json(
+                make_error(msg_id, msg_type, "P2P_TOKEN_WRITE_FAILED", str(err))
+            )
+            return
+
+    await server_link.reconfigure()
+    await session.send_json(
+        make_response(msg_id, msg_type, {"status": await server_link.status()})
+    )
+    if delta:
+        # Same reason as ui.settings.set: other windows cache ui_settings. The
+        # sender is not excluded because it wrote through this handler rather
+        # than through its own settings cache, so it needs the delta too.
+        await app.broadcast(make_event("ui.settings_changed", {"settings": delta}))
+
+
+# The receiver-side pane policy: who, on another device, may drive a pane on
+# this machine. It lives on the server (only this device or an admin may write
+# it) and is cached here, so the two handlers below are a read that always
+# answers and a write that only a connected link can carry. Neither touches the
+# on-machine path — panes on one machine have never consulted this policy.
+@handler("p2p.policy.get")
+async def p2p_policy_get(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    await session.send_json(make_response(msg_id, msg_type, await _policy_payload()))
+
+
+@handler("p2p.policy.set")
+async def p2p_policy_set(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Replace this device's pane policy with the one the editor composed.
+
+    The whole document is written at once because that is the server's only
+    write: it stores the policy verbatim and never merges. The editor therefore
+    sends back the rules it was shown plus its edit.
+    """
+    policy = payload.get("policy")
+    problem = pane_policy.validate(policy)
+    if problem:
+        await session.send_json(make_error(msg_id, msg_type, "BAD_REQUEST", problem))
+        return
+
+    reply = await server_link.set_policy(policy)
+    if reply is None:
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "P2P_NOT_CONFIGURED",
+                "no navide-server is configured, so this device has no policy to write",
+            )
+        )
+        return
+    if not reply.get("ok"):
+        error = reply.get("error") if isinstance(reply.get("error"), dict) else {}
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                str(error.get("code") or "P2P_POLICY_WRITE_FAILED"),
+                str(error.get("message") or "the navide-server rejected the policy"),
+            )
+        )
+        return
+    await session.send_json(make_response(msg_id, msg_type, await _policy_payload()))
+
+
+async def _policy_payload() -> dict:
+    """The policy plus the devices a rule could name, in one answer.
+
+    The device list comes from the cached session directory rather than a
+    device registry, because that directory is all the server sends — and a
+    rule naming a device that has never had a pane grants nothing anyone could
+    have used. It is a convenience for the picker, never a constraint: the
+    policy is written with ids, so an id typed by hand works the same.
+    """
+    state = await server_link.policy_state()
+    state["devices"] = remote_roster.list_devices()
+    return state
+
+
+# Team membership: who belongs to this team space, and what they may do. It
+# lives entirely on the server — this device asks and the server decides, so
+# these handlers add no authorization of their own beyond keeping obviously
+# malformed requests off the wire. The read answers for every role; the three
+# writes are admin-only and come back as the server's refusal for anyone else.
+# None of them touches the on-machine path, which has no concept of a member.
+#
+# Deliberately absent: delete. The server has no such request — ``revoke``
+# disables a member and drops their connections, and the row stays.
+MEMBER_ROLES = ("admin", "member", "observer")
+
+
+@handler("p2p.members.list")
+async def p2p_members_list(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    await session.send_json(make_response(msg_id, msg_type, await server_link.members_state()))
+
+
+async def _members_write(
+    session: "Session", msg_id: str, msg_type: str, remote_type: str, remote_payload: dict
+) -> None:
+    """Carry one membership write and answer with its result plus fresh state.
+
+    The refreshed state rides along so the pane never has to choose between
+    showing a stale roster and firing a second request: ``members_request``
+    re-reads on success, so by the time this runs the cache already holds the
+    change.
+    """
+    reply = await server_link.members_request(remote_type, remote_payload)
+    if reply is None:
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                "P2P_NOT_CONFIGURED",
+                "no navide-server is configured, so this machine has no team",
+            )
+        )
+        return
+    if not reply.get("ok"):
+        error = reply.get("error") if isinstance(reply.get("error"), dict) else {}
+        await session.send_json(
+            make_error(
+                msg_id,
+                msg_type,
+                str(error.get("code") or "P2P_MEMBERS_WRITE_FAILED"),
+                str(error.get("message") or "the navide-server rejected the change"),
+            )
+        )
+        return
+    result = reply.get("payload")
+    await session.send_json(
+        make_response(
+            msg_id,
+            msg_type,
+            {
+                "result": result if isinstance(result, dict) else {},
+                "state": await server_link.members_state(),
+            },
+        )
+    )
+
+
+@handler("p2p.members.invite")
+async def p2p_members_invite(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Mint a member and their one-time invite token.
+
+    The token comes back in ``result.token`` and *only* there: the server filters
+    it out of every later roster read, so a UI that loses it has no way to ask
+    for it again — the member has to be revoked and re-invited.
+    """
+    remote: dict = {}
+    for field in ("email", "displayName"):
+        value = payload.get(field)
+        if value is not None and not isinstance(value, str):
+            await session.send_json(
+                make_error(msg_id, msg_type, "BAD_REQUEST", f"{field} must be a string")
+            )
+            return
+        if isinstance(value, str) and value.strip():
+            remote[field] = value.strip()
+    role = payload.get("role")
+    if role is not None:
+        if role not in MEMBER_ROLES:
+            await session.send_json(
+                make_error(
+                    msg_id,
+                    msg_type,
+                    "BAD_REQUEST",
+                    f"role must be one of {', '.join(MEMBER_ROLES)}",
+                )
+            )
+            return
+        remote["role"] = role
+    await _members_write(session, msg_id, msg_type, "team.members.invite", remote)
+
+
+@handler("p2p.members.set_role")
+async def p2p_members_set_role(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    member_id = payload.get("memberId")
+    role = payload.get("role")
+    if not isinstance(member_id, str) or not member_id.strip():
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "memberId is required")
+        )
+        return
+    if role not in MEMBER_ROLES:
+        await session.send_json(
+            make_error(
+                msg_id, msg_type, "BAD_REQUEST", f"role must be one of {', '.join(MEMBER_ROLES)}"
+            )
+        )
+        return
+    await _members_write(
+        session,
+        msg_id,
+        msg_type,
+        "team.members.set_role",
+        {"memberId": member_id.strip(), "role": role},
+    )
+
+
+@handler("p2p.members.revoke")
+async def p2p_members_revoke(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """Disable a member and drop the connections they currently hold.
+
+    ``result.droppedConnections`` is the second half and the reason this is not
+    just a flag flip: disabling only refused the *next* auth.hello, so a device
+    already signed in kept working until it happened to reconnect.
+    """
+    member_id = payload.get("memberId")
+    if not isinstance(member_id, str) or not member_id.strip():
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "memberId is required")
+        )
+        return
+    await _members_write(
+        session, msg_id, msg_type, "team.members.revoke", {"memberId": member_id.strip()}
+    )
 
 
 # ── Settings bundle / metadata (settings.*) ─────────────────────────────────
@@ -3451,6 +3900,10 @@ async def _rollback_terminal_create(
             if app._PTY_OWNERS.get(term_id) is session:
                 app._PTY_OWNERS.pop(term_id, None)
             await session.terminals.kill(term_id, force=True)
+        # The push channel was wired before the spawn, so a rolled-back create
+        # would otherwise leave a registered channel — and a watch file — for a
+        # pane that never came to exist.
+        app.push_delivery.forget_pane(transaction["pane_id"])
 
     cleanup_task = transaction.get("cleanup_task")
     if cleanup_task is None:
@@ -3577,6 +4030,15 @@ async def _terminal_create_impl(
             env,
             str(payload.get("cwd") or ""),
         )
+    # Give the pane whatever its push channel needs (a port to serve on, a file
+    # to watch) so a message can later reach it without being typed in. Last,
+    # so the flags it adds cannot be displaced by MCP or skills wiring; a CLI
+    # with no push channel — most of them — is left untouched.
+    push_channel = None
+    if not login_profile_id:
+        payload["command"], push_channel = app.push_delivery.wire_spawn(
+            agent_key, payload["command"], str(payload.get("pane_id") or ""), env
+        )
     if transaction["cancelled"]:
         raise _TerminalCreateCancelled
     # The pane's previous PTY, when this create replaces it (restore/rebuild).
@@ -3688,6 +4150,16 @@ async def _terminal_create_impl(
             switch_lock.release()
     else:
         term = _spawn_and_claim()
+    # Announced only now the PTY exists. Wiring the channel is a spawn-time
+    # decision, but advertising it before the CLI is actually running would tell
+    # the window it can push into a pane that may still fail to start — and a
+    # spawn that rolls back has already dropped the channel again.
+    if push_channel is not None:
+        await app.broadcast(make_event("agent_msg.push_state", {
+            "pane_id": push_channel.pane_id,
+            "kind": push_channel.kind,
+            "ready": True,
+        }))
     # Register the pane with the log-attribution layer so any session
     # file appearing after this point can be attributed back to us.
     # Registry membership == the 12 CLI vendors; the drift test pins the set.
@@ -4660,11 +5132,45 @@ async def project_log_event(session: "Session", msg_id: str, msg_type: str, payl
 
 
 # ── Pipeline execution (pipeline.*) ──────────────────────────────────────────
+def _mirror_pipeline_state(project: "Project") -> None:
+    """Copy a pipeline's state onto its recent-workspaces entry.
+
+    The store keeps last_known_state/task purely so Welcome can badge a folder
+    with how its last run ended; nothing else writes them, so without this every
+    entry falls through to the 'spawn-only' default. Called from the handlers
+    that move Project.state (start / resume / complete / abort) — the backend is
+    the authority, and mirroring here also survives the window being closed
+    right after a run.
+    """
+    from . import app
+
+    try:
+        app.recent_workspaces_store.touch(
+            project.workspace_path,
+            state=project.state,
+            task=project.task_description,
+        )
+        recent = app.recent_workspaces_store.list()
+    except Exception:  # noqa: BLE001 — a badge must not fail a pipeline
+        # Callers are the start/complete/abort handlers, which had no dependency
+        # on the recent store before this. A store failure here would answer
+        # their request with an error for a run that actually succeeded, so it
+        # stays local: the badge falls back to whatever it showed before.
+        app.log.exception("recent-workspaces: failed to mirror pipeline state")
+        return
+    asyncio.create_task(
+        app.broadcast(
+            make_event("workspace.recent_changed", {"recent": recent, "reason": "pipeline"})
+        )
+    )
+
+
 @handler("pipeline.resume")
 async def pipeline_resume(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     from . import app
 
     project, resume_index = app.project_store.resume_pipeline(payload["workspace_path"])
+    _mirror_pipeline_state(project)
     resp = app._project_payload(project)
     resp["resume_index"] = resume_index
     await session.send_json(make_response(msg_id, msg_type, resp))
@@ -4683,6 +5189,7 @@ async def pipeline_start(session: "Session", msg_id: str, msg_type: str, payload
         pipeline_id=payload.get("pipeline_id", "") or app.stages_store.get_active_pipeline_id(),
     )
     app._register_workspace_and_backfill(project.workspace_path)
+    _mirror_pipeline_state(project)
     # Start a fresh token-stats run for this workspace.
     log_name = project.log_file_name or ""
     run_dir = log_name.rsplit("/", 1)[0] if "/" in log_name else ""
@@ -4788,6 +5295,7 @@ async def pipeline_complete(session: "Session", msg_id: str, msg_type: str, payl
     from . import app
 
     project = app.project_store.complete_pipeline(payload["workspace_path"])
+    _mirror_pipeline_state(project)
     app.tokens_store.end_run(project.workspace_path)
     asyncio.create_task(
         app.broadcast(make_event("tokens.changed", app.tokens_store.snapshot(project.workspace_path)))
@@ -4804,6 +5312,7 @@ async def pipeline_abort(session: "Session", msg_id: str, msg_type: str, payload
     project = app.project_store.abort_pipeline(
         payload["workspace_path"], reason=payload.get("reason", "user")
     )
+    _mirror_pipeline_state(project)
     app.tokens_store.end_run(project.workspace_path)
     asyncio.create_task(
         app.broadcast(make_event("tokens.changed", app.tokens_store.snapshot(project.workspace_path)))
@@ -5208,6 +5717,35 @@ async def agent_msg_register(session: "Session", msg_id: str, msg_type: str, pay
         agent_key=str(payload.get("agent_key") or ""),
         owner=session,
     )
+    # The ids this same CLI process was known by before the window rebuilt its
+    # pane around it (reload, detach, group reattach). They stay resolvable, so
+    # a CLI still quoting the id baked into its /plan-mcp URL at spawn time is
+    # answered as the pane it is actually attached to.
+    former_pane_ids = [str(x) for x in (payload.get("former_pane_ids") or [])]
+    aliased = agent_messaging.add_aliases(pane_id, former_pane_ids, workspace_path)
+    # A register is also how a rename and a post-reconnect re-mirror arrive, so
+    # this is the single point where the remote roster learns about all three.
+    server_link.roster_changed()
+    # ...and the single point where a window that reloaded, or reattached to a
+    # PTY it did not spawn, learns the pane still has a push channel. Without
+    # this it would keep typing into a pane it could have pushed to, for as long
+    # as it lives.
+    from . import push_delivery
+
+    # A pane whose window reloaded keeps the channel its CLI was launched with,
+    # and that channel is filed under the pane id the launch used. Move it onto
+    # the id the pane answers to now, or the pane would be typed into for the
+    # rest of its life despite having a working push channel. Only an id nobody
+    # live is holding gives it up — see push_delivery.adopt.
+    push_delivery.adopt(pane_id, aliased)
+    state = push_delivery.get(pane_id)
+    if state is not None and push_delivery.is_ready(pane_id):
+        await session.send_json(
+            make_event(
+                "agent_msg.push_state",
+                {"pane_id": pane_id, "kind": state.kind, "ready": True},
+            )
+        )
     await session.send_json(make_response(msg_id, msg_type, entry.to_dict()))
 
 
@@ -5220,6 +5758,7 @@ async def agent_msg_unregister(session: "Session", msg_id: str, msg_type: str, p
         # so drop its cached activity instead of leaking one entry per pane.
         from . import app
         app.forget_pane_activity(pane_id)
+        server_link.roster_changed()
     await session.send_json(make_response(msg_id, msg_type, {"ok": True, "removed": removed}))
 
 
@@ -5229,6 +5768,8 @@ async def agent_msg_set_busy(session: "Session", msg_id: str, msg_type: str, pay
     cli_list_targets can tell a caller that a target is working."""
     pane_id = str(payload.get("pane_id") or "")
     changed = bool(pane_id) and agent_messaging.set_busy(pane_id, bool(payload.get("busy")))
+    if changed:
+        server_link.roster_changed()
     await session.send_json(make_response(msg_id, msg_type, {"ok": True, "changed": changed}))
 
 
@@ -5332,6 +5873,10 @@ async def agent_msg_route(session: "Session", msg_id: str, msg_type: str, payloa
     to = str(payload.get("to") or "")
     content = str(payload.get("content") or "")
     msg_key = str(payload.get("msg_key") or "")
+    # Correlation id the sender echoed back when this message is a reply. Carried
+    # through untouched so the window that handed it out can link the two rows;
+    # absent for a message that starts a thread.
+    reply_to = str(payload.get("reply_to") or "")
     if not from_pane_id or not to or not msg_key:
         await session.send_json(
             make_error(
@@ -5380,26 +5925,24 @@ async def agent_msg_route(session: "Session", msg_id: str, msg_type: str, payloa
     from_display = agent_messaging.sender_display(
         from_pane_id, str(payload.get("from_name") or "")
     )
-    asyncio.create_task(
-        app.broadcast(
-            make_event(
-                "agent_msg.deliver",
-                {
-                    "msg_key": msg_key,
-                    "target_pane_id": result.pane.pane_id,
-                    "target_workspace_path": result.pane.workspace_path,
-                    "target_name": result.pane.name,
-                    "target_agent_key": result.pane.agent_key,
-                    "from_pane_id": from_pane_id,
-                    "from_display": from_display,
-                    "from_workspace_path": sender.workspace_path if sender else "",
-                    "from_agent_key": sender.agent_key if sender else "",
-                    "cross_workspace": result.cross_workspace,
-                    "content": content,
-                },
-            )
-        )
-    )
+    deliver_payload: dict[str, Any] = {
+        "msg_key": msg_key,
+        "target_pane_id": result.pane.pane_id,
+        "target_workspace_path": result.pane.workspace_path,
+        "target_name": result.pane.name,
+        "target_agent_key": result.pane.agent_key,
+        "from_pane_id": from_pane_id,
+        "from_display": from_display,
+        "from_workspace_path": sender.workspace_path if sender else "",
+        "from_agent_key": sender.agent_key if sender else "",
+        "cross_workspace": result.cross_workspace,
+        "content": content,
+    }
+    # Only present for a reply, so a sender that never sends one keeps seeing the
+    # exact payload it saw before.
+    if reply_to:
+        deliver_payload["reply_to"] = reply_to
+    asyncio.create_task(app.broadcast(make_event("agent_msg.deliver", deliver_payload)))
     await session.send_json(
         make_response(
             msg_id,
@@ -5416,6 +5959,148 @@ async def agent_msg_route(session: "Session", msg_id: str, msg_type: str, payloa
     )
 
 
+@handler("agent_msg.hook_drain_result")
+async def agent_msg_hook_drain_result(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """A window's answer to `agent_msg.hook_drain`, handed to the Stop hook that
+    is holding a claude pane open while it waits.
+
+    An empty `envelope` is a valid answer — it means the pane's queue had
+    nothing deliverable — and is what lets the hook return promptly instead of
+    sitting out its timeout.
+    """
+    from . import hook_drain
+
+    request_id = str(payload.get("request_id") or "")
+    if not request_id:
+        await session.send_json(
+            make_error(
+                msg_id, msg_type, "BAD_REQUEST", "agent_msg.hook_drain_result needs request_id"
+            )
+        )
+        return
+    delivered = hook_drain.resolve_drain(
+        request_id, {"envelope": str(payload.get("envelope") or "")}
+    )
+    await session.send_json(make_response(msg_id, msg_type, {"ok": True, "delivered": delivered}))
+
+
+@handler("agent_msg.push")
+async def agent_msg_push(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """Hand an envelope to a pane's push channel instead of typing it in.
+
+    The window that owns the pane decides whether to push — it holds the queue,
+    the rate limit and the idle gate — so this only performs the transport and
+    reports whether it landed. A `false` answer is not a failed message: the
+    caller retries the same envelope over the PTY, which is what every pane did
+    before it had a channel at all.
+    """
+    from . import app, push_delivery
+
+    pane_id = str(payload.get("pane_id") or "")
+    text = str(payload.get("text") or "")
+    if not pane_id or not text:
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "agent_msg.push needs pane_id and text")
+        )
+        return
+    state = push_delivery.get(pane_id)
+    ok, reason = await push_delivery.deliver(pane_id, text)
+    if ok:
+        # The pane is about to start a turn on this message, and nothing else
+        # will say so for a while: a CLI that took the text over HTTP or out of
+        # a watched file writes its conversation log at its own pace, and a
+        # rewoken agent has no PTY output yet. Without this the window would
+        # keep calling the pane idle and start typing the next queued message
+        # into a pane already working on this one.
+        app._record_pane_activity(pane_id, "agent_active", "")
+        await app.broadcast(make_event("agent.activity", {
+            "vendor": state.agent_key if state else "",
+            "event_type": "agent_active",
+            "workspace_path": "",
+            "pane_id": pane_id,
+            "stage_id": "",
+            "session_id": "",
+            "cwd": "",
+            "timestamp": "",
+            "detail": f"push:{state.kind if state else ''}",
+            "notification_type": "",
+        }))
+    kind = state.kind if state else ""
+    await session.send_json(
+        make_response(
+            msg_id,
+            msg_type,
+            {
+                "ok": ok,
+                "kind": kind,
+                "reason": reason,
+                # "the pane may still be holding this text": the window must
+                # then re-queue the message rather than typing it in, or the
+                # envelope goes in twice, concatenated.
+                "unclear": (not ok) and push_delivery.leaves_text_behind(kind, reason),
+            },
+        )
+    )
+
+
+@handler("agent_msg.hold_update")
+async def agent_msg_hold_update(
+    session: "Session", msg_id: str, msg_type: str, payload: dict
+) -> None:
+    """The receiving window reports why a message is still sitting in its queue.
+
+    Delivery lives in the window, so the reason a message has not gone in yet
+    exists nowhere else — and an MCP caller, which has no Messages panel to
+    look at, could otherwise only see "queued". Sent on a change, never per
+    tick.
+
+    `hold` is {key, n?} or null (nothing holding it any more). Keys this server
+    never minted are ignored, exactly as agent_msg.delivered ignores them.
+    """
+    from .plugins.builtin.navide_plans import plan_mcp
+
+    msg_key = str(payload.get("msg_key") or "")
+    if not msg_key:
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "agent_msg.hold_update needs msg_key")
+        )
+        return
+    hold = payload.get("hold")
+    tracked = plan_mcp.record_message_hold(msg_key, hold if isinstance(hold, dict) else None)
+    await session.send_json(make_response(msg_id, msg_type, {"ok": True, "tracked": tracked}))
+
+
+@handler("agent_msg.cancel")
+async def agent_msg_cancel(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
+    """A sending window withdraws a message whose queue another window owns.
+
+    Relayed, not decided here: the queue lives in the receiving window, so only
+    it knows whether the message is still waiting or already going in. It
+    answers over the ordinary `agent_msg.delivered` path — as cancelled if it
+    dropped the message, and not at all if it was too late, because the
+    delivery that beat this will report its own outcome.
+
+    Not excluding the sender, for the same reason `agent_msg.delivered` does
+    not: a workspace-qualified target can resolve to a pane in the SAME window.
+    """
+    from . import app
+
+    msg_key = str(payload.get("msg_key") or "")
+    if not msg_key:
+        await session.send_json(
+            make_error(msg_id, msg_type, "BAD_REQUEST", "agent_msg.cancel needs msg_key")
+        )
+        return
+    asyncio.create_task(
+        app.broadcast(make_event("agent_msg.cancel", {"msg_key": msg_key}))
+    )
+    await session.send_json(make_response(msg_id, msg_type, {"ok": True}))
+
+
 @handler("agent_msg.delivered")
 async def agent_msg_delivered(session: "Session", msg_id: str, msg_type: str, payload: dict) -> None:
     """The receiving window reports the outcome so the sending window's message
@@ -5427,6 +6112,7 @@ async def agent_msg_delivered(session: "Session", msg_id: str, msg_type: str, pa
     matching msg_key ignore the event.
     """
     from . import app
+    from .plugins.builtin.navide_plans import plan_mcp
 
     msg_key = str(payload.get("msg_key") or "")
     if not msg_key:
@@ -5434,6 +6120,18 @@ async def agent_msg_delivered(session: "Session", msg_id: str, msg_type: str, pa
             make_error(msg_id, msg_type, "BAD_REQUEST", "agent_msg.delivered needs msg_key")
         )
         return
+    # A message that came from cli_send has no window of its own to keep the
+    # outcome for, so the MCP server records it for cli_check_message. Ignores
+    # every key it did not mint.
+    plan_mcp.record_delivery_result(
+        msg_key, bool(payload.get("ok", False)), str(payload.get("reason") or "")
+    )
+    # A message relayed in from another device is acked back to the server from
+    # here — this is the only place the receiving window's verdict is observed.
+    # Ignores every key that did not arrive over the link.
+    server_link.note_delivery_result(
+        msg_key, bool(payload.get("ok", False)), str(payload.get("reason") or "")
+    )
     asyncio.create_task(
         app.broadcast(
             make_event(

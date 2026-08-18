@@ -103,9 +103,9 @@ Disambiguation: this is NOT xAI's official "Grok Build" CLI
 | Resume | `grok --session latest` or `grok -s <session-id>` — flag-based, fits the default `resume-command.ts` shape |
 | Pin id at launch | Not documented → assume marker-based binding (layer 3) needed |
 | Session storage | Project-level `.grok/` + user-level `~/.grok/` — exact session file path/format not documented (open question 2) |
-| Config | Project `.grok/settings.json` (model, mcpServers), user `~/.grok/user-settings.json`; instructions via `AGENTS.md` / `AGENTS.override.md` |
+| Config | Project `.grok/settings.json` (model), user `~/.grok/user-settings.json`; instructions via `AGENTS.md` / `AGENTS.override.md` |
 | Model | `grok models` to list; `GROK_MODEL` env or settings; defaults like `grok-4.3` |
-| MCP | Supported (`/mcps` in TUI or `mcpServers` in settings) |
+| MCP | Supported — user-level `~/.grok/user-settings.json` under `mcp.servers` (a **list**; each entry needs `id`, `label`, `transport`, `url`). The README's project-level `.grok/settings.json` `mcpServers` is not read by v1.1.7. |
 
 Spec entry (verified — no permission flag needed):
 

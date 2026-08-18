@@ -36,7 +36,6 @@ const ALL_STATUSES = [
   'running',
   'idle',
   'awaiting',
-  'question',
   'starting',
   'stopped',
   'exited',

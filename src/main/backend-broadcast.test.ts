@@ -44,6 +44,29 @@ describe('BackendBroadcastTracker', () => {
     expect(tracker.takePending(1)).toBeUndefined()
   })
 
+  // The focus gate exists to keep a transient blip from flashing everywhere at
+  // once. A backend that has given up is not transient: an unfocused window
+  // that is not told keeps reconnect-looping against a dead port until the user
+  // happens to click on it.
+  it('sends an urgent payload immediately even to an unfocused window', () => {
+    const tracker = new BackendBroadcastTracker<string>()
+    expect(tracker.dispatch(1, false, 'error', true)).toEqual({ immediate: true })
+    expect(tracker.takePending(1)).toBeUndefined()
+  })
+
+  it('an urgent payload also clears a stale pending entry', () => {
+    const tracker = new BackendBroadcastTracker<string>()
+    tracker.dispatch(1, false, 'starting')
+    tracker.dispatch(1, false, 'error', true)
+    expect(tracker.takePending(1)).toBeUndefined()
+  })
+
+  it('still queues a non-urgent payload for an unfocused window', () => {
+    const tracker = new BackendBroadcastTracker<string>()
+    expect(tracker.dispatch(1, false, 'starting', false)).toEqual({ immediate: false })
+    expect(tracker.takePending(1)).toBe('starting')
+  })
+
   it('forget drops a pending entry (e.g. window closed)', () => {
     const tracker = new BackendBroadcastTracker<string>()
     tracker.dispatch(1, false, 'ready')

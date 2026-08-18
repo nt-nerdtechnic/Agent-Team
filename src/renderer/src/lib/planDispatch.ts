@@ -83,10 +83,12 @@ export interface ReusablePaneCandidate {
  * session, and currently 'idle' (the existing displayStatus signal: process
  * alive, agent finished its last turn, sitting at the interactive prompt).
  *
- * A whitelist, so 'question' is excluded and meant to be: that pane is holding
- * an open question, and on Claude an AskUserQuestion box is a select widget —
- * a dispatched prompt typed into it would be swallowed as the answer instead
- * of starting a turn. Spawning a fresh pane is the correct fallback.
+ * A whitelist, so 'awaiting' is excluded and meant to be: that pane is parked
+ * on the user, and whether it holds a permission box or a question, both are
+ * select widgets on Claude — a dispatched prompt typed into one would be
+ * swallowed as the answer instead of starting a turn. Spawning a fresh pane is
+ * the correct fallback. (Unlike inter-CLI messaging, which does let a question
+ * through, this one types into the box itself, so neither kind is safe.)
  */
 export function pickReusablePane<T extends ReusablePaneCandidate>(
   panes: T[],

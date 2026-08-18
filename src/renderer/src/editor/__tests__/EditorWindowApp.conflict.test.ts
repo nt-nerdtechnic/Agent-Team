@@ -9,6 +9,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import { defineComponent, h, ref } from 'vue'
 import EditorWindowApp from '../../EditorWindowApp.vue'
+import { registerCommand } from '../../keybindings/useKeybindings'
 import { i18n } from '../../i18n'
 
 i18n.global.locale.value = 'en-US'
@@ -206,5 +207,63 @@ describe('EditorWindowApp – conflict tabs know when the merge is gone', () => 
     listeners.get('git.changed')?.({ workspace_path: WS })
     await flushPromises()
     expect(sends.calls.some((c) => c.type === 'git.list_conflicts')).toBe(false)
+  })
+})
+
+// ⌘W reached this window for the first time when main/menu.ts stopped
+// installing the `close` role on macOS — until then the menu closed the whole
+// window and the rule never ran. onAppKeydown's old bubble-phase handler
+// declined while a text input had focus; the command has to do the same, or
+// ⌘W in the find box closes the tab out from under it.
+describe('EditorWindowApp – closeActiveEditor yields to a focused text input', () => {
+  /** The last handler registered for a command — one per mount. */
+  function handlerFor(id: string): (() => unknown) | undefined {
+    const calls = vi.mocked(registerCommand).mock.calls.filter(([cid]) => cid === id)
+    return calls.at(-1)?.[1] as (() => unknown) | undefined
+  }
+
+  it('declines, so the keystroke still reaches the input', async () => {
+    const wrapper = await mountApp()
+    await openConflict(wrapper, 'src/c.ts')
+    const input = document.createElement('input')
+    document.body.appendChild(input)
+    input.focus()
+    try {
+      // Exactly `false` is the dispatcher's "not handled" signal: it is what
+      // keeps preventDefault() from firing.
+      expect(handlerFor('workbench.action.closeActiveEditor')!()).toBe(false)
+      await flushPromises()
+      expect(pane(wrapper).exists()).toBe(true)
+    } finally {
+      input.remove()
+    }
+  })
+
+  it('still closes the tab when focus is anywhere else', async () => {
+    const wrapper = await mountApp()
+    await openConflict(wrapper, 'src/c.ts')
+    expect(pane(wrapper).exists()).toBe(true)
+    expect(handlerFor('workbench.action.closeActiveEditor')!()).not.toBe(false)
+    await flushPromises()
+    expect(pane(wrapper).exists()).toBe(false)
+  })
+
+  it('still runs from the command palette, which dispatches after it closes', async () => {
+    // The palette lists this command (PALETTE_COMMANDS) and runs it as
+    // `closePalette(); Promise.resolve().then(() => executeCommand(id))` — the
+    // close lands first, so its search box is detached and focus has fallen
+    // back to <body> before the guard above looks. A detached input is never
+    // document.activeElement, so the guard cannot strand the palette entry.
+    const wrapper = await mountApp()
+    await openConflict(wrapper, 'src/c.ts')
+    const paletteInput = document.createElement('input')
+    document.body.appendChild(paletteInput)
+    paletteInput.focus()
+    paletteInput.remove()
+    expect(document.activeElement?.tagName).not.toBe('INPUT')
+
+    expect(handlerFor('workbench.action.closeActiveEditor')!()).not.toBe(false)
+    await flushPromises()
+    expect(pane(wrapper).exists()).toBe(false)
   })
 })

@@ -32,14 +32,27 @@ const remaining = computed(() => remainingPercent(snap.value))
 const tier = computed(() => (remaining.value === null ? 'ok' : remainingTier(remaining.value)))
 const expired = computed(() => snap.value?.status === 'expired')
 const cached = computed(() => snap.value?.stale === true)
+// The account just changed and its figure is being read right now. Reading
+// Claude's panel boots a whole CLI, so this state can last the better part of
+// a minute — without saying so, the badge looks like the switch did nothing.
+const pending = computed(() => snap.value?.refreshPending === true)
 // Claude's quota needs its CLI; without the binary there is nothing to read and
 // no cached figure to fall back to either, so the badge would render nothing at
 // all and the one actionable failure would be invisible.
 const cliMissing = computed(
   () => snap.value?.status === 'cli-missing' || snap.value?.refreshStatus === 'cli-missing'
 )
+// `pending` belongs here: switching onto an account with no reading of its own
+// leaves a snapshot with no percent, no staleness and no error, which would
+// unmount the badge outright — vanishing mid-switch is the very "did that do
+// anything?" reading the pending state exists to prevent.
 const visible = computed(
-  () => remaining.value !== null || expired.value || cached.value || cliMissing.value
+  () =>
+    remaining.value !== null ||
+    expired.value ||
+    cached.value ||
+    cliMissing.value ||
+    pending.value
 )
 
 // Account-switch block: only shown when this agent has ≥1 extra profile.
@@ -260,6 +273,13 @@ function acctStale(profileId: string | null): boolean {
   return accountUsageFor(props.agentKey, profileId)?.stale === true
 }
 
+// A row can be mid-read with no percent at all (an account that has never been
+// measured). Without its own branch that row renders blank, so the wait is
+// invisible on the surface the switch was made from.
+function acctPending(profileId: string | null): boolean {
+  return accountUsageFor(props.agentKey, profileId)?.refreshPending === true
+}
+
 // An account with no stored credentials keeps whatever quota was last cached
 // for it, so the row would advertise a number for something that cannot run.
 // Say it is signed out instead — switching to it starts a sign-in, not work.
@@ -269,6 +289,9 @@ function acctSignedOut(profileId: string | null): boolean {
 
 function acctTitle(profileId: string | null): string {
   const s = accountUsageFor(props.agentKey, profileId)
+  // A read in flight outranks the age of what is on screen: it is the reason
+  // the number has not moved yet.
+  if (s?.refreshPending === true) return t('usage.reading-tooltip')
   if (s?.stale !== true) return ''
   return t('usage.cached-account-tooltip', {
     time: formatResetAbsolute(s.lastSuccessAt ?? s.fetchedAt),
@@ -281,18 +304,20 @@ function acctTitle(profileId: string | null): string {
     v-if="visible"
     ref="badgeRef"
     class="usage-badge"
-    :class="[tier, { cached }]"
+    :class="[tier, { cached, pending }]"
     :title="
       open
         ? ''
         : $t(
-          expired
-            ? 'usage.expired-tooltip'
-            : cliMissing
-              ? 'usage.cli-missing-tooltip'
-              : cached
-                ? 'usage.cached-tooltip'
-                : 'usage.badge-tooltip'
+          pending
+            ? 'usage.reading-tooltip'
+            : expired
+              ? 'usage.expired-tooltip'
+              : cliMissing
+                ? 'usage.cli-missing-tooltip'
+                : cached
+                  ? 'usage.cached-tooltip'
+                  : 'usage.badge-tooltip'
         )
     "
     @mouseenter="onEnter"
@@ -301,8 +326,15 @@ function acctTitle(profileId: string | null): string {
   >
     <template v-if="remaining !== null">
       {{ formatRemaining(remaining) }}
-      <small v-if="cached">{{ $t('usage.cached-short') }}</small>
+      <small v-if="pending">{{ $t('usage.reading-short') }}</small>
+      <small v-else-if="cached">{{ $t('usage.cached-short') }}</small>
     </template>
+    <!-- No number to show yet, but a read is running: say that rather than
+         warn, which would report a fault where there is only a wait. A real
+         fault still wins — it is the one the user can act on. -->
+    <template v-else-if="pending && !expired && !cliMissing">{{
+      $t('usage.reading-short')
+    }}</template>
     <template v-else>⚠</template>
   </span>
   <Teleport to="body">
@@ -320,6 +352,7 @@ function acctTitle(profileId: string | null): string {
       </div>
       <div v-if="expired" class="usage-pop-expired">{{ $t('usage.expired-tooltip') }}</div>
       <div v-if="cliMissing" class="usage-pop-missing">{{ $t('usage.cli-missing-tooltip') }}</div>
+      <div v-if="pending" class="usage-pop-pending">{{ $t('usage.reading-now') }}</div>
       <div v-if="cached" class="usage-pop-cached">
         {{ $t('usage.cached-at', { time: formatResetAbsolute(snap.lastSuccessAt ?? snap.fetchedAt) }) }}
         · {{ $t('usage.refresh-status', { status: refreshStatusLabel(snap.refreshStatus) }) }}
@@ -371,6 +404,12 @@ function acctTitle(profileId: string | null): string {
               :title="acctTitle(null)"
               >{{ acctStale(null) ? '~' : '' }}{{ acctPct(null) }}</span
             >
+            <span
+              v-else-if="acctPending(null)"
+              class="usage-acct-pct stale"
+              :title="acctTitle(null)"
+              >{{ $t('usage.reading-short') }}</span
+            >
             <span v-if="switching === ''" class="usage-acct-spin" aria-hidden="true" />
             <span v-else-if="activeProfileId === ''" class="usage-acct-tick">✓</span>
           </button>
@@ -397,6 +436,12 @@ function acctTitle(profileId: string | null): string {
               :class="[acctTier(p.id), { stale: acctStale(p.id) }]"
               :title="acctTitle(p.id)"
               >{{ acctStale(p.id) ? '~' : '' }}{{ acctPct(p.id) }}</span
+            >
+            <span
+              v-else-if="acctPending(p.id)"
+              class="usage-acct-pct stale"
+              :title="acctTitle(p.id)"
+              >{{ $t('usage.reading-short') }}</span
             >
             <span v-if="switching === p.id" class="usage-acct-spin" aria-hidden="true" />
             <span v-else-if="activeProfileId === p.id" class="usage-acct-tick">✓</span>
@@ -441,6 +486,12 @@ function acctTitle(profileId: string | null): string {
 .usage-badge.cached {
   border-style: dashed;
 }
+/* A read is in flight: the number shown is an earlier one, so keep the dashed
+   "not current" cue rather than let it pass for the new account's figure. */
+.usage-badge.pending {
+  border-style: dashed;
+  opacity: 0.85;
+}
 .usage-badge small {
   margin-left: 2px;
   font-size: 8px;
@@ -481,6 +532,11 @@ function acctTitle(profileId: string | null): string {
 .usage-pop-cached,
 .usage-pop-missing {
   color: var(--attention-fg);
+  margin-bottom: 6px;
+}
+.usage-pop-pending {
+  color: var(--accent-fg);
+  font-weight: 600;
   margin-bottom: 6px;
 }
 .usage-row {

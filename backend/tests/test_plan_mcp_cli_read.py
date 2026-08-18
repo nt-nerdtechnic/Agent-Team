@@ -3,6 +3,7 @@ state through the Plan MCP server (Phase C)."""
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -133,6 +134,96 @@ async def test_read_log_fails_for_an_unknown_target(tmp_path: Path) -> None:
     assert "unknown target" in result["error"]
 
 
+# ── cli_read_log: incremental reads (P3-1) ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_read_log_since_a_cursor_returns_only_what_was_appended(
+    tmp_path: Path,
+) -> None:
+    """Without a cursor a caller re-reads the same tail every time and cannot
+    tell what the other agent said since it last looked."""
+    _seed_pane(tmp_path)
+    log = tmp_path / "conv.log"
+    log.write_text("old1\nold2\n", encoding="utf-8")
+    app.project_store.record_manual_pane_spawn(
+        str(tmp_path), pane_id="pw", agent="claude", output_log_file=str(log)
+    )
+
+    first = await plan_mcp.cli_read_log("worker", _ctx())
+    assert first["next_cursor"] == log.stat().st_size
+    assert first["rotated"] is False
+
+    with log.open("a", encoding="utf-8") as f:
+        f.write("new1\nnew2\n")
+
+    second = await plan_mcp.cli_read_log("worker", _ctx(), since=first["next_cursor"])
+
+    assert second["text"] == "new1\nnew2"
+    assert second["truncated"] is False
+    assert second["next_cursor"] == log.stat().st_size
+
+
+@pytest.mark.asyncio
+async def test_read_log_since_the_end_returns_nothing_new(tmp_path: Path) -> None:
+    _seed_pane(tmp_path)
+    log = tmp_path / "conv.log"
+    log.write_text("only\n", encoding="utf-8")
+    app.project_store.record_manual_pane_spawn(
+        str(tmp_path), pane_id="pw", agent="claude", output_log_file=str(log)
+    )
+
+    first = await plan_mcp.cli_read_log("worker", _ctx())
+    again = await plan_mcp.cli_read_log("worker", _ctx(), since=first["next_cursor"])
+
+    assert again["text"] == ""
+    assert again["next_cursor"] == first["next_cursor"]
+
+
+@pytest.mark.asyncio
+async def test_read_log_since_a_cursor_past_the_end_restarts_and_says_so(
+    tmp_path: Path,
+) -> None:
+    """A truncated or replaced capture file leaves the cursor pointing at
+    nothing; silently returning an empty read would look like "said nothing"."""
+    _seed_pane(tmp_path)
+    log = tmp_path / "conv.log"
+    log.write_text("a much longer first life of this file\n", encoding="utf-8")
+    app.project_store.record_manual_pane_spawn(
+        str(tmp_path), pane_id="pw", agent="claude", output_log_file=str(log)
+    )
+    stale_cursor = log.stat().st_size
+    log.write_text("short\n", encoding="utf-8")
+
+    result = await plan_mcp.cli_read_log("worker", _ctx(), since=stale_cursor)
+
+    assert result["rotated"] is True
+    assert result["text"] == "short"
+    assert result["next_cursor"] == log.stat().st_size
+
+
+@pytest.mark.asyncio
+async def test_read_log_since_still_honours_the_byte_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(plan_mcp, "_LOG_TAIL_MAX_BYTES", 100)
+    _seed_pane(tmp_path)
+    log = tmp_path / "conv.log"
+    log.write_text("seed\n", encoding="utf-8")
+    app.project_store.record_manual_pane_spawn(
+        str(tmp_path), pane_id="pw", agent="claude", output_log_file=str(log)
+    )
+    cursor = log.stat().st_size
+    with log.open("a", encoding="utf-8") as f:
+        f.write("\n".join(f"line{i:04d}" for i in range(200)) + "\n")
+
+    result = await plan_mcp.cli_read_log("worker", _ctx(), since=cursor, tail_lines=500)
+
+    assert result["truncated"] is True
+    assert len(result["text"].encode("utf-8")) <= 100
+    assert result["text"].endswith("line0199")
+
+
 # ── cli_get_status ───────────────────────────────────────────────────────
 
 
@@ -212,7 +303,12 @@ async def test_wait_idle_returns_immediately_on_turn_complete() -> None:
 
     result = await plan_mcp.cli_wait_idle("alpha/worker", _ctx(pane_id="other"))
 
-    assert result == {"idle": True, "source": "turn_complete", "waited_s": 0.0}
+    assert result["idle"] is True
+    assert result["source"] == "turn_complete"
+    assert result["waited_s"] == 0.0
+    # The fast path answers from recorded activity alone: an idle pane must not
+    # cost a round-trip to its window.
+    assert "ui_status" not in result
 
 
 @pytest.mark.asyncio
@@ -293,15 +389,19 @@ async def test_wait_idle_keeps_waiting_while_the_window_reports_running(
 
     assert result["idle"] is False
     assert result["source"] == "timeout"
+    # The window answered, and answered "still working" — a different failure
+    # from a window that stopped answering at all.
+    assert result["reason"] == "busy"
 
 
 @pytest.mark.asyncio
-async def test_wait_idle_stops_probing_a_window_that_does_not_answer(
+async def test_wait_idle_backs_off_then_gives_up_on_a_window_that_does_not_answer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # With no window listening every probe would burn the full _ui_request
-    # timeout, so the first failure has to be the last probe.
-    monkeypatch.setattr(plan_mcp, "_WAIT_IDLE_POLL_S", 0.01)
+    # With no window listening every probe burns the full _ui_request timeout,
+    # so retries have to back off — but a single missed deadline is not proof
+    # the window is gone, so one failure must not be the last probe either.
+    monkeypatch.setattr(plan_mcp, "_WAIT_IDLE_POLL_S", 0.001)
     monkeypatch.setattr(plan_mcp, "_WAIT_IDLE_UI_PROBE_EVERY", 1)
     agent_messaging.register("pw", "worker", "/ws/alpha")
     agent_messaging.register("other", "caller", "/ws/somewhere-else")
@@ -315,10 +415,92 @@ async def test_wait_idle_stops_probing_a_window_that_does_not_answer(
 
     monkeypatch.setattr(plan_mcp, "_ui_request", _no_window)
 
-    result = await plan_mcp.cli_wait_idle("alpha/worker", _ctx(pane_id="other"), timeout_s=0.08)
+    result = await plan_mcp.cli_wait_idle("alpha/worker", _ctx(pane_id="other"), timeout_s=0.5)
 
     assert result["source"] == "timeout"
-    assert calls == 1
+    # It retried, and it stopped: never more than the failure budget.
+    assert calls == plan_mcp._WAIT_IDLE_UI_MAX_FAILURES
+    assert result["reason"] == "unreachable"
+
+
+@pytest.mark.asyncio
+async def test_wait_idle_keeps_probing_a_window_that_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One missed deadline used to disable probing for the rest of the wait,
+    leaving only the unreliable busy flag."""
+    monkeypatch.setattr(plan_mcp, "_WAIT_IDLE_POLL_S", 0.001)
+    monkeypatch.setattr(plan_mcp, "_WAIT_IDLE_UI_PROBE_EVERY", 1)
+    agent_messaging.register("pw", "worker", "/ws/alpha")
+    agent_messaging.register("other", "caller", "/ws/somewhere-else")
+    agent_messaging.set_busy("pw", True)
+    app._record_pane_activity("pw", "agent_active", "")
+    calls = 0
+
+    async def _flaky_window(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {"ok": False, "error": "no reply"}
+        return {"ok": True, "result": {"status": "idle", "buffer": ""}}
+
+    monkeypatch.setattr(plan_mcp, "_ui_request", _flaky_window)
+
+    result = await plan_mcp.cli_wait_idle("alpha/worker", _ctx(pane_id="other"), timeout_s=0.5)
+
+    assert result["idle"] is True
+    assert result["source"] == "ui_status"
+
+
+# ── cli_wait_idle: what it returns (P2-1 / P2-2) ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_wait_idle_returns_what_the_finished_turn_said() -> None:
+    """Knowing the pane is idle without knowing what it did forced a second
+    cli_get_status call for the text that was already in hand."""
+    agent_messaging.register("pw", "worker", "/ws/alpha")
+    agent_messaging.register("other", "caller", "/ws/somewhere-else")
+    app._record_pane_activity("pw", "turn_complete", "tests pass")
+
+    result = await plan_mcp.cli_wait_idle("alpha/worker", _ctx(pane_id="other"))
+
+    assert result["last_activity"]["type"] == "turn_complete"
+    assert result["last_activity"]["text"] == "tests pass"
+
+
+@pytest.mark.asyncio
+async def test_wait_idle_omits_last_activity_when_the_pane_recorded_none() -> None:
+    agent_messaging.register("pw", "worker", "/ws/alpha")
+    agent_messaging.register("other", "caller", "/ws/somewhere-else")
+
+    result = await plan_mcp.cli_wait_idle("alpha/worker", _ctx(pane_id="other"))
+
+    assert result["idle"] is True
+    assert "last_activity" not in result
+
+
+@pytest.mark.asyncio
+async def test_wait_idle_timeout_says_the_pane_is_parked_on_a_human(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """"awaiting" is deliberately not idle — the pane is waiting on a permission
+    prompt — but the caller still has to be able to tell that apart from work."""
+    monkeypatch.setattr(plan_mcp, "_WAIT_IDLE_POLL_S", 0.001)
+    agent_messaging.register("pw", "worker", "/ws/alpha")
+    agent_messaging.register("other", "caller", "/ws/somewhere-else")
+    agent_messaging.set_busy("pw", True)
+
+    async def _awaiting_window(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {"ok": True, "result": {"status": "awaiting", "buffer": ""}}
+
+    monkeypatch.setattr(plan_mcp, "_ui_request", _awaiting_window)
+
+    result = await plan_mcp.cli_wait_idle("alpha/worker", _ctx(pane_id="other"), timeout_s=0.05)
+
+    assert result["idle"] is False
+    assert result["reason"] == "awaiting"
+    assert result["ui_status"] == "awaiting"
 
 
 @pytest.mark.asyncio
@@ -342,3 +524,206 @@ async def test_wait_idle_distinguishes_a_pane_that_never_started(
 
     assert result["idle"] is True
     assert result["source"] == "never_started"
+
+
+# ── cli_send_and_wait ────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def broadcasts(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+
+    async def fake_broadcast(event: dict[str, Any], **_kwargs: Any) -> None:
+        events.append(event)
+
+    monkeypatch.setattr(app, "broadcast", fake_broadcast)
+    return events
+
+
+def _seed_pair() -> None:
+    agent_messaging.register("pa", "caller", "/ws/alpha")
+    agent_messaging.register("pw", "worker", "/ws/alpha", agent_key="claude")
+
+
+def _deliver_when_sent(
+    broadcasts: list[dict[str, Any]], ok: bool = True, reason: str = ""
+) -> "asyncio.Task[None]":
+    """Play the receiving window: report the outcome as soon as the send is out.
+
+    cli_send_and_wait waits for the message to actually GO IN before it waits
+    for the turn, so a test with no window to report the delivery is testing a
+    message that never arrived — which is its own case, below.
+    """
+
+    async def run() -> None:
+        for _ in range(2000):
+            if broadcasts:
+                break
+            await asyncio.sleep(0.001)
+        key = broadcasts[0]["payload"]["msg_key"]
+        while not plan_mcp.record_delivery_result(key, ok, reason):
+            await asyncio.sleep(0.001)
+
+    return asyncio.create_task(run())
+
+
+@pytest.mark.asyncio
+async def test_send_and_wait_does_not_accept_the_state_it_sent_into(
+    monkeypatch: pytest.MonkeyPatch, broadcasts: list[dict[str, Any]]
+) -> None:
+    """The race this tool exists for: the target is idle when you send, so a
+    plain wait returns "already idle" — with the PREVIOUS turn's text — before
+    it has read a word of your message."""
+    monkeypatch.setattr(plan_mcp, "_WAIT_IDLE_POLL_S", 0.005)
+    monkeypatch.setattr(plan_mcp, "_SEND_AND_WAIT_START_GRACE_S", 0.02)
+    _seed_pair()
+    app._record_pane_activity("pw", "turn_complete", "the answer to the PREVIOUS question")
+
+    delivery = _deliver_when_sent(broadcasts)
+    result = await plan_mcp.cli_send_and_wait("worker", "a new question", _ctx(), timeout_s=0.1)
+    await delivery
+
+    assert result["idle"] is False
+    assert result["reason"] == "never_started"
+    # And it must not pass the stale turn off as the reply.
+    assert "last_activity" not in result
+
+
+@pytest.mark.asyncio
+async def test_send_and_wait_returns_the_turn_that_followed_the_send(
+    monkeypatch: pytest.MonkeyPatch, broadcasts: list[dict[str, Any]]
+) -> None:
+    monkeypatch.setattr(plan_mcp, "_WAIT_IDLE_POLL_S", 0.005)
+    _seed_pair()
+    app._record_pane_activity("pw", "turn_complete", "stale")
+
+    async def worker_replies() -> None:
+        await asyncio.sleep(0.02)
+        app._record_pane_activity("pw", "turn_complete", "fresh")
+
+    delivery = _deliver_when_sent(broadcasts)
+    task = asyncio.create_task(worker_replies())
+    result = await plan_mcp.cli_send_and_wait("worker", "go", _ctx(), timeout_s=2.0)
+    await task
+    await delivery
+
+    assert result["ok"] is True
+    assert result["idle"] is True
+    assert result["source"] == "turn_complete"
+    assert result["last_activity"]["text"] == "fresh"
+    assert result["target"] == "alpha/worker"
+    assert result["msg_key"] == broadcasts[0]["payload"]["msg_key"]
+
+
+@pytest.mark.asyncio
+async def test_send_and_wait_settles_on_quiet_for_a_cli_with_no_turn_complete(
+    monkeypatch: pytest.MonkeyPatch, broadcasts: list[dict[str, Any]]
+) -> None:
+    """cursor and friends never emit turn_complete, so the only completion
+    available is silence — and `source` has to say so."""
+    monkeypatch.setattr(plan_mcp, "_WAIT_IDLE_POLL_S", 0.005)
+    monkeypatch.setattr(plan_mcp, "_WAIT_IDLE_QUIET_S", 0.0)
+    _seed_pair()
+
+    async def worker_stirs() -> None:
+        await asyncio.sleep(0.02)
+        app._record_pane_activity("pw", "agent_active", "")
+
+    delivery = _deliver_when_sent(broadcasts)
+    task = asyncio.create_task(worker_stirs())
+    result = await plan_mcp.cli_send_and_wait("worker", "go", _ctx(), timeout_s=2.0)
+    await task
+    await delivery
+
+    assert result["idle"] is True
+    assert result["source"] == "quiet_period"
+
+
+@pytest.mark.asyncio
+async def test_send_and_wait_returns_a_refused_send_unchanged(
+    broadcasts: list[dict[str, Any]],
+) -> None:
+    agent_messaging.register("pa", "caller", "/ws/alpha")
+    result = await plan_mcp.cli_send_and_wait("nope", "go", _ctx(), timeout_s=0.1)
+    assert result["ok"] is False
+    assert "unknown target" in result["error"]
+    assert broadcasts == []
+
+
+@pytest.mark.asyncio
+async def test_send_and_wait_refuses_an_empty_text_without_broadcasting(
+    broadcasts: list[dict[str, Any]],
+) -> None:
+    _seed_pair()
+    result = await plan_mcp.cli_send_and_wait("worker", "   ", _ctx(), timeout_s=0.1)
+    assert result["ok"] is False
+    assert "empty" in result["error"]
+    assert broadcasts == []
+
+
+@pytest.mark.asyncio
+async def test_send_and_wait_no_longer_calls_a_held_message_idle(
+    monkeypatch: pytest.MonkeyPatch, broadcasts: list[dict[str, Any]]
+) -> None:
+    """The gap this closes. The target is idle, so the old order returned
+    "idle, source turn_complete" — read as "it did your work" — while the
+    message was still sitting in the window's queue because someone was typing
+    in that pane. There was no turn, because nothing was ever handed over."""
+    monkeypatch.setattr(plan_mcp, "_WAIT_IDLE_POLL_S", 0.005)
+    _seed_pair()
+    app._record_pane_activity("pw", "turn_complete", "the answer to the PREVIOUS question")
+
+    async def the_window_reports_a_hold_and_nothing_else() -> None:
+        for _ in range(2000):
+            if broadcasts:
+                break
+            await asyncio.sleep(0.001)
+        key = broadcasts[0]["payload"]["msg_key"]
+        while not plan_mcp.record_message_hold(key, {"key": "typing"}):
+            await asyncio.sleep(0.001)
+
+    held = asyncio.create_task(the_window_reports_a_hold_and_nothing_else())
+    result = await plan_mcp.cli_send_and_wait("worker", "go", _ctx(), timeout_s=0.2)
+    await held
+
+    assert result["ok"] is True
+    assert result["idle"] is False
+    assert result["source"] == "not_delivered"
+    assert result["delivery_status"] == "queued"
+    assert result["hold"] == {"key": "typing"}
+    # The stale turn must not be passed off as the reply here either.
+    assert "last_activity" not in result
+
+
+@pytest.mark.asyncio
+async def test_send_and_wait_reports_a_delivery_the_window_refused(
+    monkeypatch: pytest.MonkeyPatch, broadcasts: list[dict[str, Any]]
+) -> None:
+    """A message that bounced has no turn coming, and the reason is the whole
+    answer — waiting out the timeout for it would tell the caller nothing."""
+    monkeypatch.setattr(plan_mcp, "_WAIT_IDLE_POLL_S", 0.005)
+    _seed_pair()
+
+    delivery = _deliver_when_sent(broadcasts, ok=False, reason='{"key":"pane-closed"}')
+    result = await plan_mcp.cli_send_and_wait("worker", "go", _ctx(), timeout_s=2.0)
+    await delivery
+
+    assert result["ok"] is True
+    assert result["idle"] is False
+    assert result["source"] == "not_delivered"
+    assert result["delivery_status"] == "failed"
+    assert result["reason"] == "pane-closed"
+
+
+@pytest.mark.asyncio
+async def test_send_and_wait_still_answers_a_zero_timeout_the_old_way(
+    broadcasts: list[dict[str, Any]]
+) -> None:
+    """With no budget there is no delivery phase to run, so the degenerate
+    call keeps the shape it had."""
+    _seed_pair()
+    result = await plan_mcp.cli_send_and_wait("worker", "go", _ctx(), timeout_s=0.0)
+
+    assert result["ok"] is True
+    assert result["source"] == "timeout"
+    assert result["reason"] == "never_started"

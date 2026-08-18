@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import secrets
 import base64
 import functools
 import logging
@@ -19,13 +20,15 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import ValidationError
 from uvicorn.protocols.utils import ClientDisconnected
 
 from . import __version__
 from . import agent_messaging
+from . import hook_drain
+from . import push_delivery
 from .analyzer import DEFAULT_MODEL as ANALYZER_DEFAULT_MODEL
 from .analyzer import (
     classify as _llama_classify,
@@ -81,7 +84,7 @@ from .recent_workspaces import RecentWorkspacesStore
 from .roles_store import RolesStore
 from .stages_store import StagesStore
 from .db import DB_FILENAME, Database, WorkspaceDatabases
-from .store_migrations import run_startup_migrations
+from .store_migrations import run_startup_migrations, version_change
 from .terminals import TerminalService
 from .tokens_store import TokensStore
 from .ui_settings import UiSettingsStore
@@ -92,6 +95,7 @@ from . import issue_service
 from . import fs_service
 from . import pty_registry
 from . import search_service
+from . import server_link
 from . import editor_service
 from . import onboarding_deps
 from . import plan_history
@@ -662,14 +666,27 @@ def _cap_activity_text(text: str) -> str:
 _pane_activity: dict[str, dict[str, Any]] = {}
 
 
+def _current_pane_id(pane_id: str) -> str:
+    """Where this pane's activity is filed.
+
+    Writers identify the pane through session attribution, which records the id
+    the PTY was created under, while readers (cli_get_status, cli_wait_idle) ask
+    by the id the pane answers to now — a pane rebuilt around a live PTY (window
+    reload, detach) has a newer one. Both go through here, so the two ends
+    cannot drift apart: a read that skipped it would miss what a hook wrote, and
+    a write that skipped it would be invisible to the tools.
+    """
+    return agent_messaging.resolve_alias(pane_id) or pane_id
+
+
 def pane_activity(pane_id: str) -> dict[str, Any] | None:
-    return _pane_activity.get(pane_id)
+    return _pane_activity.get(_current_pane_id(pane_id))
 
 
 def _record_pane_activity(pane_id: str, event_type: str, text: str) -> None:
     if not pane_id:
         return
-    _pane_activity[pane_id] = {
+    _pane_activity[_current_pane_id(pane_id)] = {
         "event_type": event_type,
         # Same cap as the broadcast path — this dict must not become the one
         # place an unbounded turn_complete text is retained.
@@ -681,6 +698,8 @@ def _record_pane_activity(pane_id: str, event_type: str, text: str) -> None:
 def forget_pane_activity(pane_id: str) -> None:
     """Drop a closed pane's entry so the cache tracks live panes only."""
     _pane_activity.pop(pane_id, None)
+    hook_drain.forget_pane(pane_id)
+    push_delivery.forget_pane(pane_id)
 
 
 async def _on_log_activity(event: ActivityEvent) -> None:
@@ -703,12 +722,25 @@ async def _on_log_activity(event: ActivityEvent) -> None:
         if attributed.workspace_path is None:
             # External session — skip; no pane to deliver to.
             return
-        _record_pane_activity(attributed.pane_id or "", event.event_type, event.text)
+        pane_id = attributed.pane_id or ""
+        # A turn a Stop hook blocked is still written to the conversation log,
+        # and its reader reports it as a turn end — after the hook already said
+        # the agent is working on the message it was handed. Flagged rather than
+        # relabelled: everything this event carries (the turn's text, and the
+        # MSG blocks, sentinels and pane name derived from it) is real and still
+        # wanted. Only "the pane is free now" is wrong, so only that is dropped.
+        superseded = event.event_type == "turn_complete" and hook_drain.turn_end_is_superseded(
+            pane_id
+        )
+        _record_pane_activity(
+            pane_id, "agent_active" if superseded else event.event_type, event.text
+        )
         await broadcast(make_event("agent.activity", {
             "vendor": event.vendor,
             "event_type": event.event_type,
+            "superseded": superseded,
             "workspace_path": attributed.workspace_path,
-            "pane_id": attributed.pane_id or "",
+            "pane_id": pane_id,
             "stage_id": attributed.stage_id or "",
             "session_id": event.session_id,
             "cwd": event.cwd,
@@ -921,6 +953,21 @@ def _sanitize_inherited_cli_env() -> None:
 async def _start_log_watcher() -> None:
     _sanitize_inherited_cli_env()
 
+    # Push channels read the user's per-vendor switches through this rather
+    # than importing the settings store, which imports back into here.
+    push_delivery.set_disabled_reader(
+        lambda: set(
+            ui_settings_store.get().get(push_delivery.DISABLED_SETTING_KEY) or []
+        )
+    )
+    # Per-pane watch files hold message text in the clear and belong to panes
+    # that died with the previous process. Only a startup sweep ever removes
+    # the ones a killed backend left behind.
+    try:
+        await asyncio.to_thread(push_delivery.sweep_runtime_files)
+    except Exception as err:  # noqa: BLE001
+        log.warning("push watch-file sweep failed: %s", err)
+
     # One-time data protection on a version upgrade: back up the persisted JSON
     # stores and forward-migrate their schema. Idempotent and best-effort —
     # run_startup_migrations never raises, so it can't block startup. File I/O
@@ -999,6 +1046,12 @@ async def _start_log_watcher() -> None:
     _credential_watcher = CredentialWatcher(reconcile_live_account)
     _credential_watcher.start()
 
+    # Navide-Server control-plane link: dials out to the configured server and
+    # publishes this machine's pane roster so agents on other devices can
+    # address it. Does nothing at all when no server URL / access token is
+    # configured, which is every single-machine install.
+    await server_link.start()
+
     # Start MCP servers in the background so they're ready for the first pipeline run.
     asyncio.create_task(mcp_manager.startup())
 
@@ -1055,6 +1108,7 @@ async def _stop_log_watcher() -> None:
         _git_watcher.stop()
     if _credential_watcher is not None:
         _credential_watcher.stop()
+    await server_link.stop()
     await mcp_manager.shutdown()
     try:
         await plugin_wiring.run_shutdown_hooks(plugin_host)
@@ -1292,7 +1346,7 @@ _HOOK_VENDORS = frozenset(
 
 
 @app.post("/hooks/{vendor}")
-async def cli_hook(vendor: str, request: Request) -> dict[str, Any]:
+async def cli_hook(vendor: str, request: Request) -> Any:
     """Receive a CLI hook payload.
 
     Hook commands installed by `claude_hooks` / `qwen_hooks` / `copilot_hooks`
@@ -1344,6 +1398,31 @@ async def cli_hook(vendor: str, request: Request) -> dict[str, Any]:
     # lookup bypasses it. Race (stop before JSONL claimed the session) → empty
     # pane_id, and the JSONL path's matching event supplies it shortly.
     pane_id, ws_path, stage_id = attribution.pane_for_session(session_id)
+    # Stop-hook delivery: a claude pane with a message waiting is told to keep
+    # going and act on it, instead of stopping and being typed at afterwards.
+    # Only claude, because only its Stop hook can block — and only its hook
+    # command forwards this response body to the CLI's stdin-reading parser.
+    blocked_envelope = ""
+    if vendor == "claude" and event_kind == "stop":
+        blocked_envelope = await hook_drain.drain_for_stop_hook(
+            pane_id or "", stop_hook_active=bool(payload.get("stop_hook_active"))
+        )
+        if blocked_envelope:
+            # The turn did not end: Claude picks the message up as its next
+            # instruction. Reporting turn_complete here would make the frontend
+            # call the pane idle and start injecting the NEXT queued message
+            # over stdin, into a pane that is already working.
+            event_type = "agent_active"
+    if pane_id:
+        # The log-reader sink is not the only writer of _pane_activity any
+        # more: for the hook vendors the Stop hook is the earliest and most
+        # reliable end-of-turn signal there is, and cli_wait_idle could not see
+        # it — it had to sit out the 10s quiet threshold instead. Hook payloads
+        # carry no assistant text, so keep the text the sink already recorded
+        # for this same turn rather than blanking it.
+        prior = pane_activity(pane_id)
+        prior_text = prior["text"] if prior and event_type == "turn_complete" else ""
+        _record_pane_activity(pane_id, event_type, prior_text)
     await broadcast(make_event("agent.activity", {
         "vendor": vendor,
         "event_type": event_type,
@@ -1353,10 +1432,140 @@ async def cli_hook(vendor: str, request: Request) -> dict[str, Any]:
         "session_id": session_id,
         "cwd": cwd,
         "timestamp": "",
-        "detail": f"hook:{event_kind}",
+        "detail": "hook:stop-blocked" if blocked_envelope else f"hook:{event_kind}",
         "notification_type": notification_type,
     }))
+    if vendor == "claude" and event_kind == "stop":
+        # This body is read by Claude Code as the Stop hook's own output, so it
+        # is either a valid decision object or nothing at all: an unrecognized
+        # object on a hook's stdout is reported to the user as a hook error.
+        if blocked_envelope:
+            return JSONResponse({"decision": "block", "reason": blocked_envelope})
+        return Response(status_code=200)
     return {"ok": True}
+
+
+#: How long a rewake waiter waits for its session to be attributed to a pane
+#: before giving up. SessionStart fires before the conversation log exists, so a
+#: fresh pane has nothing to match on for a moment; a pane that never resolves
+#: (an external `claude` the user started themselves) simply gets no channel,
+#: and the Stop hook re-arms one later if it ever does.
+_REWAKE_ATTRIBUTION_WAIT_S = 30.0
+
+#: How often a parked waiter checks that the hook is still on the other end.
+#: The hook is a curl the CLI backgrounded, and it dies with the CLI: a user
+#: running `/exit` inside a pane that stays open takes it with them, and nothing
+#: about that reaches the future the request is awaiting.
+_REWAKE_DISCONNECT_POLL_S = 1.0
+
+
+async def _hook_still_connected(request: Request) -> None:
+    """Return once the hook's HTTP connection is gone.
+
+    Polled rather than awaited on an event, because that is all the ASGI
+    contract offers. Cheap: one call a second per parked pane, and the pane
+    count is the number of claude panes open.
+    """
+    while True:
+        if await request.is_disconnected():
+            return
+        await asyncio.sleep(_REWAKE_DISCONNECT_POLL_S)
+
+
+async def _rewake_pane_id(session_id: str) -> str:
+    """The pane this session belongs to, waiting a little for it to be known."""
+    deadline = time.monotonic() + _REWAKE_ATTRIBUTION_WAIT_S
+    while True:
+        pane_id, _, _ = attribution.pane_for_session(session_id)
+        if pane_id or time.monotonic() >= deadline:
+            return pane_id or ""
+        await asyncio.sleep(0.5)
+
+
+async def _announce_push_state(pane_id: str, kind: str, ready: bool) -> None:
+    await broadcast(
+        make_event("agent_msg.push_state", {
+            "pane_id": pane_id, "kind": kind, "ready": ready,
+        })
+    )
+
+
+@app.post("/hooks/claude/rewake")
+async def claude_rewake_hook(request: Request) -> Response:
+    """Park a claude pane's background hook until there is a message for it.
+
+    This is the idle half of Stop-hook delivery. The Stop hook covers a message
+    that lands while the agent is working; a pane sitting idle runs no hook at
+    all, so instead one is left waiting here. Answering it with an envelope
+    makes Claude Code wake the agent and show that text as a system reminder,
+    without anything being typed into the pane.
+
+    The response body IS the protocol: non-empty means "wake, and say this",
+    empty means "nothing to report" and the hook exits without a decision. The
+    wait is bounded well inside the hook's own deadline, so this side is always
+    the one that gives up first — the reverse would resolve a message into a
+    hook that had already gone.
+
+    The waiter is also given up the moment the connection drops. A message
+    handed to a hook that is no longer there would be marked delivered with no
+    agent anywhere near it, and that is exactly what a user running `/exit`
+    inside a pane they leave open produces.
+    """
+    if not secrets.compare_digest(
+        request.query_params.get("t", ""), push_delivery.rewake_token()
+    ):
+        # A request from a previous backend run, or from something that never
+        # went through the installer. Empty body: a hook reading a 403 must
+        # still exit without a decision rather than showing the user an error.
+        return Response(status_code=403)
+    if push_delivery.channel_for("claude") is None:
+        # Answered before the attribution wait below rather than after it: a
+        # switched-off channel, or a `claude` the user started outside Navide,
+        # would otherwise leave a background curl parked here for 30 seconds on
+        # every single Stop, for a pane that is never going to get a waiter.
+        return Response(status_code=200)
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001
+        payload = {}
+    session_id = str((payload or {}).get("session_id") or "") if isinstance(payload, dict) else ""
+    pane_id = await _rewake_pane_id(session_id) if session_id else ""
+    # Session attribution answers with the id the PTY was created under; the
+    # window pushes to the id the pane answers to now. Park the waiter on the
+    # latter or a reattached pane would never be woken.
+    pane_id = agent_messaging.resolve_alias(pane_id) or pane_id
+    if not pane_id:
+        return Response(status_code=200)
+    if push_delivery.register_hook_pane(pane_id, "claude") is None:
+        return Response(status_code=200)
+    armed = push_delivery.arm_hook(pane_id)
+    if armed is None:
+        return Response(status_code=200)
+    request_id, future = armed
+    await _announce_push_state(pane_id, push_delivery.KIND_HOOK, True)
+    envelope = ""
+    try:
+        waiting = asyncio.ensure_future(
+            push_delivery.wait_for_hook(pane_id, request_id, future)
+        )
+        watching = asyncio.ensure_future(_hook_still_connected(request))
+        done, _ = await asyncio.wait(
+            {waiting, watching}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if waiting in done:
+            watching.cancel()
+            envelope = waiting.result() or ""
+        else:
+            # The hook is gone. Drop the waiter BEFORE awaiting anything else,
+            # so a push arriving in between cannot resolve into it.
+            push_delivery.discard_waiter(pane_id, request_id)
+            waiting.cancel()
+    finally:
+        if not push_delivery.is_ready(pane_id):
+            await _announce_push_state(pane_id, push_delivery.KIND_HOOK, False)
+    if not envelope:
+        return Response(status_code=200)
+    return Response(content=envelope, media_type="text/plain; charset=utf-8")
 
 
 @app.websocket("/ws")
@@ -1365,6 +1574,17 @@ async def ws(websocket: WebSocket) -> None:
     log.info("ws client connected")
     session = Session(websocket)
     _SESSIONS.add(session)
+    # An MCP client reads this backend's tool list once, when it connects, so a
+    # CLI that was already talking to the previous backend keeps the tools it
+    # saw then. Told to the window rather than logged: only the window can put
+    # it in front of the person who has to reopen the pane. Sent on every
+    # connect because a window may open at any point after startup; the feed
+    # dedupes it by id.
+    changed = version_change()
+    if changed is not None:
+        await session.send_json(
+            make_event("app.version_changed", {"from": changed[0], "to": changed[1]})
+        )
     try:
         while True:
             if session.dead:
@@ -1395,9 +1615,12 @@ async def ws(websocket: WebSocket) -> None:
         orphaned = [tid for tid, owner in _PTY_OWNERS.items() if owner is session]
         for tid in orphaned:
             del _PTY_OWNERS[tid]
-        # Forget the messaging handles this window mirrored, so a closed window's
-        # panes stop showing up as cross-workspace targets.
+        # Flag the messaging handles this window mirrored as offline. They are
+        # kept for a grace period rather than dropped: the window is usually
+        # just reconnecting, and a deleted entry told callers the pane did not
+        # exist. See agent_messaging.drop_owner.
         agent_messaging.drop_owner(session)
+        server_link.roster_changed()
         # PTYs survive this disconnect so the frontend can reattach after a
         # transient network outage. They are killed only when the user explicitly
         # closes a pane (terminal.kill) or the whole app process exits.
