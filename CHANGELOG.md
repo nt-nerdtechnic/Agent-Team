@@ -25,6 +25,8 @@ All notable released changes to Navide will be documented in this file. The form
 - Answer the same question for an MCP caller: `cli_check_message` and a timed-out `cli_send` wait now carry `stale` once a message has been queued more than two minutes, and the new `cli_inbox_summary` tool lists every send of your own that is currently stale or failed, with an excerpt of each. It takes no arguments and answers about the caller only — the pull half of delivery feedback, for an agent that stays too busy to be told.
 - Say once, in the announcements feed, that a CLI pane or external MCP client left over from the previous version is holding that version's MCP tool list and needs reopening. Shown only when the backend actually started at a different version than the run before it.
 
+- Show at a glance whether a tab's agents are working: each run-group tab in the tab bar now carries a small dot — green while any CLI in that tab is running or starting, amber once every one of them has stopped, grey for a tab with no panes. A pane waiting on you counts as stopped: the dot answers one question only, and the pane badge still says which kind of stop it is. It reuses the colours the pane badges already use, says the same thing on hover and to a screen reader, and never animates.
+
 ### Changed
 
 - Rename the built-in MCP server from `navide-plans` to `navide`: tools now appear as `mcp__navide__*`, and a per-tool "always allow" saved for the old prefix will be asked once more. Stale `navide-plans` entries Navide itself wrote (Cursor project config, per-pane shim configs) are replaced in place; anything you added yourself is left alone.
