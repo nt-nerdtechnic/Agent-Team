@@ -9,7 +9,7 @@ import pytest
 
 from agent_team_backend.log_readers.attribution import Attribution
 from agent_team_backend.log_readers.claude import encode_claude_cwd
-from agent_team_backend.log_readers.base import TokenUsage
+from agent_team_backend.log_readers.base import TokenUsage, activity_high_water
 from agent_team_backend.log_readers.qwen import QwenLogReader
 
 _SID = "1f0b9d5e-2f4a-4c0e-9b7d-3a5c8e9f0a1b"
@@ -386,6 +386,87 @@ def test_parse_activity_reparse_does_not_reemit(fake_qwen_root: Path) -> None:
     _write_jsonl(f, [_user("u1"), _assistant("a1")])
     assert len(reader.parse_activity(f, seen)) == 2
     assert reader.parse_activity(f, seen) == []
+
+
+# ── activity: the seen_keys bag stays O(1) ───────────────────────────────────
+# seen_keys lives as long as the chat file, so a walk of a long log must leave
+# one high-water mark in it, not a key per line (GitHub #23).
+
+def _long_chat(f: Path, turns: int) -> int:
+    """Write `turns` user/assistant pairs; return the line count."""
+    records: list[dict] = []
+    for i in range(turns):
+        records.append(_user(f"u{i}", f"ask {i}"))
+        records.append(_assistant_saying(f"a{i}", f"reply {i}"))
+    _write_jsonl(f, records)
+    return len(records)
+
+
+def test_parse_activity_seen_keys_stay_constant_size(fake_qwen_root: Path) -> None:
+    reader = QwenLogReader()
+    f = _chat_file(fake_qwen_root)
+    lines = _long_chat(f, 250)
+    seen: set[str] = set()
+
+    reader.parse_activity(f, seen)
+
+    assert [k for k in seen if k.startswith("act:")] == []
+    assert len([k for k in seen if k.startswith("act_hw::")]) == 1
+    assert activity_high_water(seen) == lines
+
+
+def test_parse_activity_long_chat_reparse_does_not_reemit(
+    fake_qwen_root: Path,
+) -> None:
+    reader = QwenLogReader()
+    f = _chat_file(fake_qwen_root)
+    _long_chat(f, 250)
+    seen: set[str] = set()
+
+    assert reader.parse_activity(f, seen) != []
+    assert reader.parse_activity(f, seen) == []
+
+
+def test_parse_activity_appended_line_keeps_its_dedup_key(
+    fake_qwen_root: Path,
+) -> None:
+    reader = QwenLogReader()
+    f = _chat_file(fake_qwen_root)
+    lines = _long_chat(f, 3)
+    seen: set[str] = set()
+    reader.parse_activity(f, seen)
+
+    with f.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(_assistant_saying("a99", "one more")) + "\n")
+    fresh = reader.parse_activity(f, seen)
+
+    assert [(e.event_type, e.detail) for e in fresh] == [
+        ("agent_active", "assistant"),
+    ]
+    assert fresh[0].dedup_key == f"act:{lines + 1}"
+    assert activity_high_water(seen) == lines + 1
+
+
+def test_parse_activity_turn_and_text_sentinels_coexist_with_the_mark(
+    fake_qwen_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Turn state and the pending reply share the bag with the mark; the
+    cross-poll idle flush above depends on none of them evicting the others."""
+    reader = QwenLogReader()
+    seen: set[str] = set()
+    f = _chat_file(fake_qwen_root)
+    _write_jsonl(f, [_user("u1", "go"), _assistant_saying("a1", "ready")])
+    reader.parse_activity(f, seen)
+
+    assert len([k for k in seen if k.startswith("act_hw::")]) == 1
+    assert [k for k in seen if k.startswith("qwen_text::")] == ["qwen_text::ready"]
+    assert len([k for k in seen if k.startswith("qwen_turn::")]) == 1
+
+    _go_quiet(f, monkeypatch)
+    completes = [
+        e for e in reader.parse_activity(f, seen) if e.event_type == "turn_complete"
+    ]
+    assert [(e.detail, e.text) for e in completes] == [("idle", "ready")]
 
 
 # ─────────────────────────── attribution binding ─────────────────────────────

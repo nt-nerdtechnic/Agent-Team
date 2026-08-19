@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from agent_team_backend.cli_vendors.kimi import KimiLogReader
+from agent_team_backend.log_readers.base import activity_high_water
 
 _SID = "session_4d4a11fe-b08a-46df-9f86-685589531e65"
 
@@ -403,3 +404,88 @@ def test_parse_activity_reparse_does_not_reemit(fake_kimi_home: Path) -> None:
     first = reader.parse_activity(wire, seen)
     assert any(e.event_type == "turn_complete" for e in first)
     assert reader.parse_activity(wire, seen) == []
+
+
+# ── parse_activity: the seen_keys bag stays O(1) ─────────────────────────────
+# seen_keys lives as long as wire.jsonl, which grows one usage.record per
+# agentic step, so the walk must leave one high-water mark in it rather than a
+# key per line (GitHub #23).
+
+def _long_wire(wire: Path, turns: int) -> int:
+    """Write `turns` prompt + two-step turns; return the line count."""
+    records: list[dict] = []
+    for i in range(turns):
+        t = (i + 1) * 10
+        records.append(_prompt(f"ask {i}", time=t))
+        records.append(_text_part(f"reply {i}", time=t + 1))
+        records.append(_usage(10, 0, 5, time=t + 2))
+    _write_jsonl(wire, records)
+    return len(records)
+
+
+def test_parse_activity_seen_keys_stay_constant_size(fake_kimi_home: Path) -> None:
+    reader = KimiLogReader()
+    wire = _session(fake_kimi_home, "/x")
+    lines = _long_wire(wire, 200)
+    seen: set[str] = set()
+
+    reader.parse_activity(wire, seen)
+
+    assert [k for k in seen if k.startswith("act:")] == []
+    assert len([k for k in seen if k.startswith("act_hw::")]) == 1
+    assert activity_high_water(seen) == lines
+
+
+def test_parse_activity_long_wire_reparse_does_not_reemit(
+    fake_kimi_home: Path,
+) -> None:
+    reader = KimiLogReader()
+    wire = _session(fake_kimi_home, "/x")
+    _long_wire(wire, 200)
+    seen: set[str] = set()
+
+    assert reader.parse_activity(wire, seen) != []
+    assert reader.parse_activity(wire, seen) == []
+
+
+def test_parse_activity_appended_line_keeps_its_dedup_key(
+    fake_kimi_home: Path,
+) -> None:
+    reader = KimiLogReader()
+    wire = _session(fake_kimi_home, "/x")
+    lines = _long_wire(wire, 3)
+    seen: set[str] = set()
+    reader.parse_activity(wire, seen)
+
+    with wire.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(_usage(20, 0, 8, time=1000)) + "\n")
+    fresh = reader.parse_activity(wire, seen)
+
+    assert [(e.event_type, e.detail) for e in fresh] == [("agent_active", "usage")]
+    assert fresh[0].dedup_key == f"act:{lines + 1}"
+    assert activity_high_water(seen) == lines + 1
+
+
+def test_parse_activity_turn_and_text_sentinels_coexist_with_the_mark(
+    fake_kimi_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Turn state and the pending reply live in the same bag as the mark; the
+    cross-poll delivery above depends on none of them evicting the others."""
+    reader = KimiLogReader()
+    seen: set[str] = set()
+    wire = _session(fake_kimi_home, "/x")
+    _write_jsonl(wire, [_prompt(time=1_000_000), _text_part("ready", time=1_000_001)])
+    import agent_team_backend.cli_vendors.kimi as kimi_mod
+
+    monkeypatch.setattr(kimi_mod.time, "time", lambda: 1_000.5)
+    reader.parse_activity(wire, seen)
+
+    assert len([k for k in seen if k.startswith("act_hw::")]) == 1
+    assert [k for k in seen if k.startswith("kimi_text::")] == ["kimi_text::ready"]
+    assert len([k for k in seen if k.startswith("kimi_turn::")]) == 1
+
+    monkeypatch.setattr(kimi_mod.time, "time", lambda: 1_100.0)
+    completes = [
+        e for e in reader.parse_activity(wire, seen) if e.event_type == "turn_complete"
+    ]
+    assert [(e.detail, e.text) for e in completes] == [("idle", "ready")]

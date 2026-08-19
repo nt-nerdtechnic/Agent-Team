@@ -35,8 +35,10 @@ from ..log_readers.base import (
     IncrementalParseResult,
     LogReader,
     TokenUsage,
+    activity_high_water,
     join_text_blocks,
     read_jsonl_tail,
+    set_activity_high_water,
     user_prompt_text,
 )
 
@@ -358,18 +360,27 @@ class CodexLogReader(LogReader):
             fh = path.open(encoding="utf-8")
         except OSError:
             return out
+
+        # Every rtype branch below — including the malformed-JSON one and the
+        # `else` catch-all — used to mark its line seen, and the walk is a
+        # dense ascending scan from line 1, so one high-water mark says exactly
+        # what the per-line keys said without growing with the rollout. See
+        # log_readers.base.
+        high_water = activity_high_water(seen_keys)
+        last_line = high_water
+
         with fh:
             for line_no, raw in enumerate(fh, 1):
                 raw = raw.strip()
                 if not raw:
                     continue
-                key = f"act:{line_no}"
-                if key in seen_keys:
+                if line_no <= high_water:
                     continue
+                last_line = line_no
+                key = f"act:{line_no}"
                 try:
                     rec = json.loads(raw)
                 except json.JSONDecodeError:
-                    seen_keys.add(key)
                     continue
 
                 rtype = rec.get("type")
@@ -377,12 +388,10 @@ class CodexLogReader(LogReader):
                     payload = rec.get("payload") or {}
                     if isinstance(payload, dict):
                         cwd = str(payload.get("cwd") or cwd)
-                    seen_keys.add(key)
                     continue
 
                 ts = str(rec.get("timestamp") or "")
                 if rtype == "assistant":
-                    seen_keys.add(key)
                     out.append(ActivityEvent(
                         vendor="codex", event_type="agent_active",
                         cwd=cwd, session_id=session_id, file_path=str(path),
@@ -399,7 +408,6 @@ class CodexLogReader(LogReader):
                         if text:
                             last_text = text
                             text_changed = True
-                    seen_keys.add(key)
                 elif rtype == "event_msg":
                     payload = rec.get("payload") or {}
                     ptype = str(payload.get("type") or "") if isinstance(payload, dict) else ""
@@ -408,7 +416,6 @@ class CodexLogReader(LogReader):
                         if msg_text:
                             last_text = msg_text
                             text_changed = True
-                    seen_keys.add(key)
                     # Turn text rides only on turn_complete (the event the
                     # frontend judges). The one exception: a user_message's
                     # typed prompt rides on its own agent_active event so the
@@ -435,8 +442,7 @@ class CodexLogReader(LogReader):
                         # empty-text boundary can't reuse it.
                         last_text = ""
                         text_changed = True
-                else:
-                    seen_keys.add(key)
+        set_activity_high_water(seen_keys, last_line)
         if text_changed:
             _write_last_text(seen_keys, last_text)
         return out

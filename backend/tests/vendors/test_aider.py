@@ -23,6 +23,7 @@ from agent_team_backend.log_readers.aider import (
     pane_history_name,
 )
 from agent_team_backend.log_readers.attribution import Attribution
+from agent_team_backend.log_readers.base import activity_high_water
 
 _SECTION_1 = """# aider chat started at 2026-07-27 10:00:00
 
@@ -315,6 +316,86 @@ def test_activity_turn_text_survives_split_poll_batches(tmp_path: Path) -> None:
     second = reader.parse_activity(p, seen)
     assert [e.event_type for e in second] == ["turn_complete"]
     assert "Half an answer." in second[0].text
+
+
+def _long_history(tmp_path: Path, turns: int) -> Path:
+    """A history file with `turns` complete prompt/answer/usage cycles."""
+    body = "".join(
+        f"#### ask {i}\n\nanswer {i}\n\n"
+        "> Tokens: 100 sent, 50 received. Cost: $0.01 message.\n\n"
+        for i in range(turns)
+    )
+    return _history(
+        tmp_path / "ws", "# aider chat started at 2026-07-28 21:30:45\n\n" + body
+    )
+
+
+def test_activity_seen_keys_stay_constant_size(tmp_path: Path) -> None:
+    """seen_keys lives as long as the watched file, so a walk of a long
+    history must leave ONE high-water mark in it, not a key per line
+    (GitHub #23)."""
+    reader = AiderLogReader()
+    p = _long_history(tmp_path, 120)
+    seen: set[str] = set()
+
+    reader.parse_activity(p, seen)
+
+    assert [k for k in seen if k.startswith("act:")] == []
+    assert len([k for k in seen if k.startswith("act_hw::")]) == 1
+    line_count = len(p.read_text(encoding="utf-8").splitlines())
+    assert line_count > 500
+    assert activity_high_water(seen) == line_count
+
+
+def test_activity_high_water_stops_a_reparse(tmp_path: Path) -> None:
+    reader = AiderLogReader()
+    p = _long_history(tmp_path, 120)
+    seen: set[str] = set()
+
+    assert reader.parse_activity(p, seen) != []
+    assert reader.parse_activity(p, seen) == []
+
+
+def test_activity_appended_lines_keep_their_dedup_keys(tmp_path: Path) -> None:
+    """Incremental delivery still works, and the keys the frontend dedups on
+    are still line-relative."""
+    reader = AiderLogReader()
+    p = _long_history(tmp_path, 3)
+    seen: set[str] = set()
+    reader.parse_activity(p, seen)
+    line_count = len(p.read_text(encoding="utf-8").splitlines())
+
+    with p.open("a", encoding="utf-8") as fh:
+        fh.write("#### one more question\n")
+    fresh = reader.parse_activity(p, seen)
+
+    assert [(e.event_type, e.detail) for e in fresh] == [("agent_active", "prompt")]
+    assert fresh[0].dedup_key == f"act:{line_count + 1}"
+    assert fresh[0].text == "one more question"
+    assert activity_high_water(seen) == line_count + 1
+
+
+def test_activity_pending_text_sentinel_coexists_with_the_mark(
+    tmp_path: Path,
+) -> None:
+    """The pending-turn text lives in the same bag as prefixed sentinels; the
+    high-water mark must neither evict it nor be evicted by it."""
+    reader = AiderLogReader()
+    ws = tmp_path / "ws"
+    p = _history(
+        ws, "# aider chat started at 2026-07-28 21:30:45\n\n#### go\n\nHalf an answer.\n"
+    )
+    seen: set[str] = set()
+    reader.parse_activity(p, seen)
+    assert [k for k in seen if k.startswith("aider_text::")]
+    assert len([k for k in seen if k.startswith("act_hw::")]) == 1
+
+    with p.open("a", encoding="utf-8") as fh:
+        fh.write("\n> Tokens: 100 sent, 50 received. Cost: $0.01 message.\n")
+    done = reader.parse_activity(p, seen)
+
+    assert [e.event_type for e in done] == ["turn_complete"]
+    assert "Half an answer." in done[0].text
 
 
 # ── per-pane history files ───────────────────────────────────────────────────

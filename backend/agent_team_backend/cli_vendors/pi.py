@@ -52,8 +52,10 @@ from ..log_readers.base import (
     IncrementalParseResult,
     LogReader,
     TokenUsage,
+    activity_high_water,
     join_text_blocks,
     read_jsonl_tail,
+    set_activity_high_water,
     user_prompt_text,
 )
 
@@ -455,15 +457,22 @@ class PiLogReader(LogReader):
         except OSError:
             return out
 
+        # Every line that passes the seen test is marked right there, before
+        # the JSON parse or any of the entry-type filters can skip it, and the
+        # walk is a dense ascending scan from line 1 — so a single high-water
+        # mark replaces the per-line keys exactly. See log_readers.base.
+        high_water = activity_high_water(seen_keys)
+        last_line = high_water
+
         with fh:
             for line_no, raw in enumerate(fh, 1):
                 raw = raw.strip()
                 if not raw:
                     continue
-                key = f"act:{line_no}"
-                if key in seen_keys:
+                if line_no <= high_water:
                     continue
-                seen_keys.add(key)
+                last_line = line_no
+                key = f"act:{line_no}"
                 try:
                     rec = json.loads(raw)
                 except json.JSONDecodeError:
@@ -518,6 +527,7 @@ class PiLogReader(LogReader):
                     state["flushed"] = True
                     last_text = ""
 
+        set_activity_high_water(seen_keys, last_line)
         _write_sentinel(
             seen_keys, _STATE_PREFIX, json.dumps(state) if state is not None else ""
         )

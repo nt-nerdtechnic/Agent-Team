@@ -28,6 +28,7 @@ from uvicorn.protocols.utils import ClientDisconnected
 from . import __version__
 from . import agent_messaging
 from . import hook_drain
+from . import mem_probe
 from . import push_delivery
 from .analyzer import DEFAULT_MODEL as ANALYZER_DEFAULT_MODEL
 from .analyzer import (
@@ -572,6 +573,7 @@ _OWNERLESS_SWEEP_INTERVAL_SEC = 5 * 60.0
 # terminal_session_id → monotonic time it was first seen ownerless.
 _OWNERLESS_SINCE: dict[str, float] = {}
 _ownerless_sweeper_task: "asyncio.Task[None] | None" = None
+_mem_probe_task: "asyncio.Task[None] | None" = None
 
 
 async def _sweep_ownerless_ptys_once(now: float | None = None) -> list[str]:
@@ -1014,6 +1016,11 @@ async def _start_log_watcher() -> None:
     global _ownerless_sweeper_task
     _ownerless_sweeper_task = asyncio.create_task(_ownerless_pty_janitor())
 
+    # Watch the pymalloc arena high-water mark. Silent until it steps up, so
+    # a retained-memory report can name the event instead of only the total.
+    global _mem_probe_task
+    _mem_probe_task = asyncio.create_task(mem_probe.probe_loop())
+
     global _log_watcher
     _log_watcher = LogWatcher(
         sink=_on_log_token_usage,
@@ -1089,6 +1096,8 @@ async def _stop_log_watcher() -> None:
     global _log_watcher, _git_watcher, _credential_watcher
     if _ownerless_sweeper_task is not None:
         _ownerless_sweeper_task.cancel()
+    if _mem_probe_task is not None:
+        _mem_probe_task.cancel()
     # PTY children are detached process groups (start_new_session=True); they
     # must be killed here or they outlive the app as CPU-spinning orphans.
     # Guarded so a sweep failure never skips the watcher/MCP teardown below.

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from agent_team_backend.cli_vendors.codex import CodexLogReader
+from agent_team_backend.log_readers.base import activity_high_water
 
 
 def _write_jsonl(path: Path, records: list[dict]) -> None:
@@ -355,3 +356,96 @@ def test_parse_activity_user_message_carries_prompt_text(
         ("user_message", "p" * 500),
         ("agent_message", ""),
     ]
+
+
+# ── parse_activity: the seen_keys bag stays O(1) ─────────────────────────────
+# It lives as long as the rollout does, so a walk must leave one high-water
+# mark in it, never a key per line (GitHub #23).
+
+def _long_rollout(path: Path, turns: int) -> int:
+    """Write `turns` user/assistant/token_count cycles; return the line count."""
+    records: list[dict] = [
+        {"timestamp": "2026-07-22T13:25:24Z", "type": "session_meta",
+         "payload": {"cwd": "/tmp/demo"}},
+    ]
+    for i in range(turns):
+        records.append({
+            "timestamp": f"2026-07-22T13:25:{i % 60:02d}Z", "type": "event_msg",
+            "payload": {"type": "user_message", "message": f"ask {i}"},
+        })
+        records.append({
+            "timestamp": f"2026-07-22T13:26:{i % 60:02d}Z", "type": "event_msg",
+            "payload": {"type": "agent_message", "message": f"reply {i}"},
+        })
+        records.append(_token_count_event(100, 0, 50, 0))
+    _write_jsonl(path, records)
+    return len(records)
+
+
+def test_parse_activity_seen_keys_stay_constant_size(
+    fake_codex_session: Path,
+) -> None:
+    reader = CodexLogReader()
+    lines = _long_rollout(fake_codex_session, 200)
+    seen: set[str] = set()
+
+    reader.parse_activity(fake_codex_session, seen)
+
+    assert [k for k in seen if k.startswith("act:")] == []
+    assert len([k for k in seen if k.startswith("act_hw::")]) == 1
+    assert activity_high_water(seen) == lines
+
+
+def test_parse_activity_reparse_does_not_reemit(fake_codex_session: Path) -> None:
+    reader = CodexLogReader()
+    _long_rollout(fake_codex_session, 200)
+    seen: set[str] = set()
+
+    assert reader.parse_activity(fake_codex_session, seen) != []
+    assert reader.parse_activity(fake_codex_session, seen) == []
+
+
+def test_parse_activity_appended_line_keeps_its_dedup_key(
+    fake_codex_session: Path,
+) -> None:
+    reader = CodexLogReader()
+    lines = _long_rollout(fake_codex_session, 3)
+    seen: set[str] = set()
+    reader.parse_activity(fake_codex_session, seen)
+
+    with fake_codex_session.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({
+            "timestamp": "2026-07-22T13:30:00Z", "type": "event_msg",
+            "payload": {"type": "user_message", "message": "one more"},
+        }) + "\n")
+    fresh = reader.parse_activity(fake_codex_session, seen)
+
+    assert [(e.event_type, e.detail) for e in fresh] == [
+        ("agent_active", "user_message"),
+    ]
+    assert fresh[0].dedup_key == f"act:{lines + 1}"
+    assert activity_high_water(seen) == lines + 1
+
+
+def test_parse_activity_last_text_sentinel_coexists_with_the_mark(
+    fake_codex_session: Path,
+) -> None:
+    """The persisted assistant text shares the bag with the mark; neither may
+    evict the other (the split-batch delivery above depends on it)."""
+    reader = CodexLogReader()
+    _write_jsonl(fake_codex_session, [
+        {"timestamp": "2026-07-22T13:26:00Z", "type": "event_msg",
+         "payload": {"type": "agent_message", "message": "Reply body"}},
+    ])
+    seen: set[str] = set()
+    reader.parse_activity(fake_codex_session, seen)
+
+    assert seen == {"act_hw::1", "__lasttext__:Reply body"}
+
+    with fake_codex_session.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(_token_count_event(100, 0, 50, 0)) + "\n")
+    turns = [
+        e for e in reader.parse_activity(fake_codex_session, seen)
+        if e.event_type == "turn_complete"
+    ]
+    assert [e.text for e in turns] == ["Reply body"]

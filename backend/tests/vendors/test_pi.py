@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from agent_team_backend.log_readers.attribution import Attribution
-from agent_team_backend.log_readers.base import TokenUsage
+from agent_team_backend.log_readers.base import TokenUsage, activity_high_water
 from agent_team_backend.cli_vendors.pi import (
     PiLogReader,
     encode_pi_cwd,
@@ -526,6 +526,91 @@ def test_parse_activity_reparse_does_not_reemit(fake_pi_root: Path) -> None:
     _write_jsonl(f, [_header(), _user("aa000001"), _assistant("aa000002")])
     assert len(reader.parse_activity(f, seen)) == 2
     assert reader.parse_activity(f, seen) == []
+
+
+# ── activity: the seen_keys bag stays O(1) ───────────────────────────────────
+# seen_keys lives as long as the session file, so a walk of a long log must
+# leave one high-water mark in it, not a key per line (GitHub #23).
+
+def _long_log(f: Path, turns: int) -> int:
+    """Write `turns` user/assistant pairs after the header; return line count."""
+    records: list[dict] = [_header()]
+    for i in range(turns):
+        records.append(_user(f"aa{2 * i:06d}", content=f"ask {i}"))
+        records.append(_assistant_saying(f"aa{2 * i + 1:06d}", f"reply {i}"))
+    _write_jsonl(f, records)
+    return len(records)
+
+
+def test_parse_activity_seen_keys_stay_constant_size(fake_pi_root: Path) -> None:
+    reader = PiLogReader()
+    f = _session_file(fake_pi_root)
+    lines = _long_log(f, 250)
+    seen: set[str] = set()
+
+    reader.parse_activity(f, seen)
+
+    assert [k for k in seen if k.startswith("act:")] == []
+    assert len([k for k in seen if k.startswith("act_hw::")]) == 1
+    assert activity_high_water(seen) == lines
+
+
+def test_parse_activity_long_log_reparse_does_not_reemit(
+    fake_pi_root: Path,
+) -> None:
+    reader = PiLogReader()
+    f = _session_file(fake_pi_root)
+    _long_log(f, 250)
+    seen: set[str] = set()
+
+    assert reader.parse_activity(f, seen) != []
+    assert reader.parse_activity(f, seen) == []
+
+
+def test_parse_activity_appended_line_keeps_its_dedup_key(
+    fake_pi_root: Path,
+) -> None:
+    reader = PiLogReader()
+    f = _session_file(fake_pi_root)
+    lines = _long_log(f, 3)
+    seen: set[str] = set()
+    reader.parse_activity(f, seen)
+
+    with f.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(_assistant_saying("bb000001", "one more")) + "\n")
+    fresh = reader.parse_activity(f, seen)
+
+    assert [(e.event_type, e.detail) for e in fresh] == [
+        ("agent_active", "assistant"),
+    ]
+    assert fresh[0].dedup_key == f"act:{lines + 1}"
+    assert activity_high_water(seen) == lines + 1
+
+
+def test_parse_activity_turn_and_text_sentinels_coexist_with_the_mark(
+    fake_pi_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Turn state and the pending reply share the bag with the mark; the
+    cross-poll idle flush above depends on none of them evicting the others."""
+    reader = PiLogReader()
+    seen: set[str] = set()
+    f = _session_file(fake_pi_root)
+    _write_jsonl(f, [
+        _header(),
+        _user("aa000001", content="go"),
+        _assistant_saying("aa000002", "ready", "aa000001"),
+    ])
+    reader.parse_activity(f, seen)
+
+    assert len([k for k in seen if k.startswith("act_hw::")]) == 1
+    assert [k for k in seen if k.startswith("pi_text::")] == ["pi_text::ready"]
+    assert len([k for k in seen if k.startswith("pi_turn::")]) == 1
+
+    _go_quiet(f, monkeypatch)
+    completes = [
+        e for e in reader.parse_activity(f, seen) if e.event_type == "turn_complete"
+    ]
+    assert [(e.detail, e.text) for e in completes] == [("idle", "ready")]
 
 
 # ─────────────────────────── attribution binding ─────────────────────────────

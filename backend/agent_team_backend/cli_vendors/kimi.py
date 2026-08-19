@@ -28,8 +28,10 @@ from ..log_readers.base import (
     IncrementalParseResult,
     LogReader,
     TokenUsage,
+    activity_high_water,
     join_text_blocks,
     read_jsonl_tail,
+    set_activity_high_water,
     user_prompt_text,
 )
 
@@ -331,25 +333,32 @@ class KimiLogReader(LogReader):
         except OSError:
             return out
 
+        # Every rtype branch below — turn.prompt, usage.record, the loop-event
+        # one, turn.cancel and the `else` catch-all — marked its line seen, as
+        # did the malformed-JSON path, and the walk is a dense ascending scan
+        # from line 1. One high-water mark therefore carries the same
+        # information without growing with wire.jsonl. See log_readers.base.
+        high_water = activity_high_water(seen_keys)
+        last_line = high_water
+
         with fh:
             for line_no, raw in enumerate(fh, 1):
                 raw = raw.strip()
                 if not raw:
                     continue
-                key = f"act:{line_no}"
-                if key in seen_keys:
+                if line_no <= high_water:
                     continue
+                last_line = line_no
+                key = f"act:{line_no}"
                 try:
                     rec = json.loads(raw)
                 except json.JSONDecodeError:
-                    seen_keys.add(key)
                     continue
 
                 rtype = rec.get("type")
                 ts = _ts(rec.get("time"))
                 tms = _int(rec.get("time"))
                 if rtype == "turn.prompt":
-                    seen_keys.add(key)
                     # A new prompt closes the previous turn (if still open).
                     if state is not None and not state.get("flushed"):
                         out.append(_complete(
@@ -368,7 +377,6 @@ class KimiLogReader(LogReader):
                         text=user_prompt_text(join_text_blocks(rec.get("input"), "text")),
                     ))
                 elif rtype == "usage.record":
-                    seen_keys.add(key)
                     if state is not None:
                         state["last_ms"] = max(int(state.get("last_ms") or 0), tms)
                     out.append(ActivityEvent(
@@ -377,7 +385,6 @@ class KimiLogReader(LogReader):
                         dedup_key=key, timestamp=ts, detail="usage",
                     ))
                 elif rtype == "context.append_loop_event":
-                    seen_keys.add(key)
                     # The assistant's visible reply: content.part carries both
                     # `think` and `text` parts, and only the latter is what the
                     # user (and the messaging protocol) sees. Later parts in a
@@ -390,7 +397,6 @@ class KimiLogReader(LogReader):
                             if text:
                                 last_text = _cap_text(text)
                 elif rtype == "turn.cancel":
-                    seen_keys.add(key)
                     if state is not None and not state.get("flushed"):
                         out.append(_complete(
                             int(state["idx"]),
@@ -398,8 +404,6 @@ class KimiLogReader(LogReader):
                         ))
                         state["flushed"] = True
                         last_text = ""
-                else:
-                    seen_keys.add(key)
 
             # The latest (still-open) turn has no following prompt; flush it once
             # the file has gone quiet long enough to treat the turn as finished.
@@ -412,6 +416,7 @@ class KimiLogReader(LogReader):
                     state["flushed"] = True
                     last_text = ""
 
+        set_activity_high_water(seen_keys, last_line)
         _write_turn_state(seen_keys, state)
         _write_last_text(seen_keys, last_text)
         return out

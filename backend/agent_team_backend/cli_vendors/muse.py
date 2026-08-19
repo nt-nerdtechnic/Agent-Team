@@ -126,7 +126,9 @@ from ..log_readers.base import (
     IncrementalParseResult,
     LogReader,
     TokenUsage,
+    activity_high_water,
     read_jsonl_tail,
+    set_activity_high_water,
     user_prompt_text,
 )
 from .base import Dep, SkillsWiring, VendorSpec, command_text
@@ -544,15 +546,22 @@ class MuseLogReader(LogReader):
         except OSError:
             return out
 
+        # The line is marked the moment it passes the seen test, before any
+        # parse or branch can skip it, and the walk is a dense ascending scan
+        # from line 1 — so one high-water mark holds exactly what the per-line
+        # keys held, and does not grow with the session. See log_readers.base.
+        high_water = activity_high_water(seen_keys)
+        last_line = high_water
+
         with fh:
             for line_no, raw in enumerate(fh, 1):
                 raw = raw.strip()
                 if not raw:
                     continue
-                key = f"act:{line_no}"
-                if key in seen_keys:
+                if line_no <= high_water:
                     continue
-                seen_keys.add(key)
+                last_line = line_no
+                key = f"act:{line_no}"
                 try:
                     rec = json.loads(raw)
                 except json.JSONDecodeError:
@@ -603,6 +612,7 @@ class MuseLogReader(LogReader):
                     ))
                     last_text = ""
 
+        set_activity_high_water(seen_keys, last_line)
         _write_sentinel(seen_keys, _TEXT_PREFIX, last_text)
         return out
 
