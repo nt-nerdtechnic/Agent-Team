@@ -107,10 +107,12 @@ scaffolding, or development server.
 The repository example at `examples/third-party-files/` is copied into a
 temporary project outside the Navide workspace for the release smoke test. Its
 package manifest declares SemVer ranges for the three public packages. The
-smoke test replaces those ranges, including the TypeScript toolchain, with
-local packed tarballs and installs them with `pnpm --offline` only to test the
-packed-package boundary; the example itself contains no `workspace:` or
-private feature dependency.
+smoke test replaces only those three public package ranges with local packed
+tarballs and installs them with `pnpm --offline` in an isolated temporary
+store. It uses the repository's installed TypeScript and Vite CLI entries for
+the external project's typecheck and build; it does not install TypeScript or
+Vite tarballs offline. The example itself contains no `workspace:` or private
+feature dependency.
 
 From the external project, the supported workflow is:
 

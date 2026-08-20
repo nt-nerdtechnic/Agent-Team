@@ -1,7 +1,6 @@
-import { defineConfig } from 'vite'
 import { resolve } from 'node:path'
 
-export default defineConfig({
+export default {
   build: {
     outDir: resolve(import.meta.dirname, 'dist/package/frontend'),
     emptyOutDir: true,
@@ -16,4 +15,4 @@ export default defineConfig({
       },
     },
   },
-})
+}
