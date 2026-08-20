@@ -68,6 +68,10 @@ Please review src/main.ts and reply with the blocking issues only.
 
 Parser が適用するルール:
 
+- `to:` は `---MSG-START---` と**同じ行**に置かなければなりません。Marker だけが
+  1 行を占め、`to:` を次の行に書いた場合、ブロックは開きません。その一連のテキス
+  トはただの文字列として破棄され、Queue にも入らず、失敗通知も出ず、送信側にも受
+  信側にも痕跡が一切残りません。
 - `to:` フィールドは、任意指定の `re:` フィールドまでのすべてを取ります。
 - `---MSG-END---` の欠落は許容されます。ブロックは次の `---MSG-START---` か、
   Turn の終わりで閉じます。
@@ -113,7 +117,7 @@ Rebased onto main — please re-run the suite.
 ```
 [Navide MSG] from: builder-1
 Please review src/main.ts and reply with the blocking issues only.
-（回覆方式：輸出裸行區塊 ---MSG-START--- to: builder-1 re: 4f2a…，下一行起為訊息內容，最後一行 ---MSG-END---；re 欄位請原樣帶回，marker 必須獨立整行且不可放在 code block 內）
+（回覆方式：第一行完整寫成 ---MSG-START--- to: builder-1 re: 4f2a…，下一行起為訊息內容，最後一行寫 ---MSG-END---；to: 必須與 ---MSG-START--- 同一行，不可換行；re 欄位請原樣帶回，三行都要頂格，不可縮排，也不可放進 code block）
 ```
 
 最初の行は常に送信者を示します。末尾のヒントは、Protocol を教わっていない Pane
@@ -188,7 +192,9 @@ Messages パネルが表示しているのと同じ `hold` です。
 します。
 
 成功した Spawn は何も送りません。新しい Pane 自身が、通常の MSG ブロックで親に
-報告します。
+報告します。その報告は子 Agent 自身の出力であって、Navide の保証ではありません。
+親が実行中であれば Turn が落ち着くまで Queue で待ち、子 Agent が書式どおりに出力
+しなければまったく届きません。
 
 どちらも配信失敗とまったく同じ System Notice です。Navide が書いたものであり、
 `Navide` を宛先にできるものは存在せず、返信すべきではありません。Messages
@@ -214,6 +220,11 @@ task: Review the diff on this branch and report blocking issues.
 超えても呼び出しは成功し、要求元にはそのコストが伝えられます。不正な Request
 （未知の Agent Key、名前の欠落や重複、空の Task）は、問題を示す
 [Spawn フィードバック通知](#spawn-フィードバック通知)として返ってきます。
+
+親への報告は子 Agent 自身の出力であり、Navide が保証するものではありません。親の
+Turn が落ち着くまで Queue で待ち、書式を無視する子 Agent は報告しません。Spawn し
+た Pane が本当に完了したことを確かめるには、`cli_get_status` / `cli_wait_idle` で
+自分で状態を確認してください。
 
 ---
 

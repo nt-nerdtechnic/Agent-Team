@@ -62,6 +62,10 @@ parser, which is what keeps a code sample containing these markers inert.)
 
 Rules the parser applies:
 
+- `to:` must sit on the **same line** as `---MSG-START---`. A marker alone on
+  its own line, with `to:` on the next one, never opens a block — the whole
+  passage is discarded as ordinary text: nothing is queued, no failure notice
+  is sent, and neither side sees any trace of it.
 - The `to:` field takes everything up to the optional `re:` field.
 - A missing `---MSG-END---` is tolerated: the block closes at the next
   `---MSG-START---` or at the end of the turn.
@@ -107,7 +111,7 @@ A delivered message is typed into the target pane like this:
 ```
 [Navide MSG] from: builder-1
 Please review src/main.ts and reply with the blocking issues only.
-（回覆方式：輸出裸行區塊 ---MSG-START--- to: builder-1 re: 4f2a…，下一行起為訊息內容，最後一行 ---MSG-END---；re 欄位請原樣帶回，marker 必須獨立整行且不可放在 code block 內）
+（回覆方式：第一行完整寫成 ---MSG-START--- to: builder-1 re: 4f2a…，下一行起為訊息內容，最後一行寫 ---MSG-END---；to: 必須與 ---MSG-START--- 同一行，不可換行；re 欄位請原樣帶回，三行都要頂格，不可縮排，也不可放進 code block）
 ```
 
 The first line always identifies the sender. The trailing hint is what teaches
@@ -182,7 +186,9 @@ again. `spawn partial` means the pane **is** open and only its task never
 landed; spawning it again would collide with the pane already there.
 
 A successful spawn sends nothing: the new pane reports to its parent itself,
-with an ordinary MSG block.
+with an ordinary MSG block. That report is the child agent's own output, not a
+guarantee from Navide — it waits in the queue while the parent is mid-turn, and
+never arrives at all if the child does not print the block in the right format.
 
 Both of these are system notices, exactly like a delivery failure — Navide
 wrote them, nothing can address `Navide`, and they should not be replied to.
@@ -209,6 +215,11 @@ field to the end of the block. Spawning is not capped — past advisory
 thresholds the call still succeeds and the requester is told what it costs. A
 malformed request (unknown agent key, missing or taken name, empty task) comes
 back as a [spawn feedback notice](#spawn-feedback-notices) naming the problem.
+
+The report back is the child's own output, not something Navide guarantees: it
+queues until the parent's turn settles, and a child that ignores the format
+never reports at all. To be sure a spawned pane has finished, check its state
+yourself with `cli_get_status` / `cli_wait_idle`.
 
 ---
 

@@ -60,6 +60,9 @@ Please review src/main.ts and reply with the blocking issues only.
 
 Parser 套用的規則：
 
+- `to:` 必須與 `---MSG-START---` 在**同一行**。marker 單獨佔一行、`to:` 寫在下一
+  行時，區塊不會開啟 —— 整段會被當成普通文字丟棄：不進佇列、沒有失敗通知，兩邊
+  都看不到任何痕跡。
 - `to:` 欄位取到選用的 `re:` 欄位之前的所有內容。
 - 缺少 `---MSG-END---` 是可以容忍的：區塊會在下一個 `---MSG-START---` 或該回合
   結束時關閉。
@@ -102,7 +105,7 @@ Rebased onto main — please re-run the suite.
 ```
 [Navide MSG] from: builder-1
 Please review src/main.ts and reply with the blocking issues only.
-（回覆方式：輸出裸行區塊 ---MSG-START--- to: builder-1 re: 4f2a…，下一行起為訊息內容，最後一行 ---MSG-END---；re 欄位請原樣帶回，marker 必須獨立整行且不可放在 code block 內）
+（回覆方式：第一行完整寫成 ---MSG-START--- to: builder-1 re: 4f2a…，下一行起為訊息內容，最後一行寫 ---MSG-END---；to: 必須與 ---MSG-START--- 同一行，不可換行；re 欄位請原樣帶回，三行都要頂格，不可縮排，也不可放進 code block）
 ```
 
 第一行一律標明寄件者。結尾的提示是用來教會從未拿到協定的 Pane 該怎麼回答；它只有
@@ -168,6 +171,8 @@ Pane —— 修正請求後再試一次。`spawn partial` 表示 Pane **確實**
 任務沒有送到；再 spawn 一次會和已經在那裡的 Pane 相撞。
 
 成功的 spawn 不會送出任何東西：新 Pane 會自己以一般的 MSG 區塊向它的 parent 回報。
+那份回報是子 Agent 自己的輸出，不是 Navide 的保證 —— parent 正在執行中時它會排隊等
+到告一段落，子 Agent 沒照格式輸出時則完全不會送達。
 
 這兩者都是系統通知，和投遞失敗完全一樣 —— 是 Navide 寫的，沒有任何東西能對
 `Navide` 定址，也不該去回覆它們。在 Messages 面板中它們會帶著 `system notice`
@@ -192,6 +197,10 @@ task: Review the diff on this branch and report blocking issues.
 區塊結尾。Spawn 沒有上限 —— 超過 Advisory 門檻之後呼叫仍然會成功，並會告訴請求者
 它的代價。格式錯誤的請求（未知的 agent key、缺少或已被使用的名稱、空白的任務）會
 以指出問題所在的 [Spawn 回饋通知](#spawn-回饋通知)回來。
+
+這份回報是子 Agent 自己的輸出，不是 Navide 的保證：parent 還在執行時它會排隊等到
+告一段落，子 Agent 沒照格式輸出就完全不會回報。要確定 spawn 出來的 Pane 真的做完
+了，請自己用 `cli_get_status` / `cli_wait_idle` 查它的狀態。
 
 ---
 
