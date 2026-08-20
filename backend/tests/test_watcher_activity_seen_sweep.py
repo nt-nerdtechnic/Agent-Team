@@ -85,6 +85,20 @@ def test_deleted_file_forgets_both_maps(tmp_path: Path) -> None:
     assert gone not in w._scan_mtimes
 
 
+def test_first_sweep_runs_before_monotonic_uptime_window(tmp_path: Path) -> None:
+    """The first sweep must not depend on how long the runner has been up."""
+    cold = tmp_path / "cold.jsonl"
+    cold.write_text("{}\n")
+    _age(cold, _ACTIVITY_SEEN_COLD_S + 60)
+
+    w = _watcher()
+    w._activity_seen[str(cold)] = {"act:1"}
+
+    w._sweep_activity_seen(1.0)
+
+    assert str(cold) not in w._activity_seen
+
+
 def test_sweep_is_rate_limited(tmp_path: Path) -> None:
     """Stat'ing every tracked transcript is not a per-rescan-cycle cost."""
     cold = tmp_path / "cold.jsonl"
@@ -94,11 +108,15 @@ def test_sweep_is_rate_limited(tmp_path: Path) -> None:
     w = _watcher()
     w._activity_seen[str(cold)] = {"act:1"}
 
-    # First call lands inside the initial window and must not sweep.
-    w._sweep_activity_seen(_ACTIVITY_SEEN_SWEEP_S / 2)
+    first_sweep_at = 1.0
+    w._sweep_activity_seen(first_sweep_at)
+    assert str(cold) not in w._activity_seen
+
+    w._activity_seen[str(cold)] = {"act:2"}
+    w._sweep_activity_seen(first_sweep_at + _ACTIVITY_SEEN_SWEEP_S / 2)
     assert str(cold) in w._activity_seen
 
-    w._sweep_activity_seen(_ACTIVITY_SEEN_SWEEP_S)
+    w._sweep_activity_seen(first_sweep_at + _ACTIVITY_SEEN_SWEEP_S)
     assert str(cold) not in w._activity_seen
 
 
