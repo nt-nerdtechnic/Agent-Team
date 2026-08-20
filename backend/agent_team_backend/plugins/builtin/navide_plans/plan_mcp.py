@@ -115,8 +115,12 @@ server = FastMCP(
         "\n"
         "Delegating to a new agent: cli_open_agent opens a fresh CLI pane and "
         "hands it a task. Use it when work is better done in parallel or by a "
-        "different CLI than yours; the new pane reports back to you by message "
-        "when it finishes, so you do not poll it. There is no hard cap on child "
+        "different CLI than yours; the new pane is asked to report back to you "
+        "by message when it finishes, but that report is the child's own "
+        "output rather than something Navide guarantees — it waits until you "
+        "are between turns, and it never arrives at all if the child does not "
+        "write the block, so poll cli_get_status / cli_wait_idle whenever you "
+        "need to be sure. There is no hard cap on child "
         "panes, workspace CLI panes, or spawn-chain depth, but going well past "
         "sane advisory thresholds gets logged as a diagnostic warning (readable "
         "via ui_diagnostics) rather than refused.\n"
@@ -124,8 +128,9 @@ server = FastMCP(
         "Checking on another pane: cli_read_log reads the tail of a pane's "
         "conversation log, cli_get_status reports whether it is busy and its "
         "last known activity, and cli_wait_idle blocks until it goes idle or a "
-        "timeout passes — useful for an external caller, which gets no "
-        "cli_open_agent completion message to poll instead."
+        "timeout passes — the reliable way to learn a pane is done, and the "
+        "only way for an external caller, which gets no completion message at "
+        "all."
     ),
 )
 
@@ -885,10 +890,12 @@ async def cli_open_agent(
 
     This returns once the pane exists, which takes a few seconds. Its CLI then
     boots and receives the task in the background — if that part fails you are
-    told by message. For a pane caller, the new pane also reports its result to
-    you by message when it finishes, so you never need to poll it — an external
-    or host caller gets no such message and should poll cli_get_status /
-    cli_wait_idle instead.
+    told by message. For a pane caller, the new pane is asked to report its
+    result to you by message when it finishes — but that report is the child
+    agent's own output, not a guarantee from Navide: it is held until you are
+    between turns, and nothing arrives if the child never writes the block.
+    Poll cli_get_status / cli_wait_idle whenever you need to be sure. An
+    external or host caller gets no such message at all and must poll.
 
     Use the returned name, not the one you asked for: a concurrent request may
     have taken that name, in which case yours gets a suffix.

@@ -198,13 +198,16 @@ export function parseSpawns(turnText: string): ParsedSpawnRequest[] {
 /**
  * Kickoff prompt for a SPAWN-created pane: the task followed by a report-back
  * instruction pointing at the parent's messaging name. The instruction stays
- * on a single line so it can never parse as a bare marker.
+ * on a single line so it can never parse as a bare marker, and it spells out
+ * that `to:` shares the marker's line — writing it on the next line is the one
+ * mistake that makes the whole block vanish without a trace.
  */
 export function renderSpawnKickoff(task: string, parentName: string): string {
   return (
     `${task}\n\n` +
-    `（任務完成後回報方式：輸出裸行區塊 ${MSG_START} to: ${parentName}，下一行起為結果回報，` +
-    `最後一行 ${MSG_END}；marker 必須獨立整行且不可放在 code block 內）`
+    `（任務完成後回報方式：第一行完整寫成 ${MSG_START} to: ${parentName}，下一行起為結果回報，` +
+    `最後一行寫 ${MSG_END}；to: 必須與 ${MSG_START} 同一行，不可換行；` +
+    `三行都要頂格，不可縮排，也不可放進 code block）`
   )
 }
 
@@ -219,7 +222,10 @@ export function sanitizeMessageContent(content: string): string {
 
 /**
  * Wrap a message for injection into the target pane. The reply hint stays on
- * a single line so it can never parse as a bare marker.
+ * a single line so it can never parse as a bare marker, and it states outright
+ * that `to:` belongs on the marker's own line: START_RE only matches the two
+ * together, so a reply that breaks them apart is dropped silently — no queue
+ * entry, no failure notice, nothing for either side to see.
  *
  * `correlationId` is asked back verbatim in the reply's `re:` field, which is
  * what lets the reply be matched to this message instead of arriving as an
@@ -237,8 +243,9 @@ export function renderEnvelope(
       : `to: ${sender}`
     const echo = opts.correlationId ? 're 欄位請原樣帶回，' : ''
     lines.push(
-      `（回覆方式：輸出裸行區塊 ${MSG_START} ${head}，下一行起為訊息內容，` +
-        `最後一行 ${MSG_END}；${echo}marker 必須獨立整行且不可放在 code block 內）`,
+      `（回覆方式：第一行完整寫成 ${MSG_START} ${head}，下一行起為訊息內容，` +
+        `最後一行寫 ${MSG_END}；to: 必須與 ${MSG_START} 同一行，不可換行；` +
+        `${echo}三行都要頂格，不可縮排，也不可放進 code block）`,
     )
   }
   return lines.join('\n')

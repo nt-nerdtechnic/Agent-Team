@@ -189,7 +189,8 @@ const troubleshooting: TroubleRow[] = [
           <li><strong>送出指令</strong> — 把任意文字送給指定的 pane。</li>
           <li>
             <strong>開新 agent 並派工</strong> — 請 Navide 開一個新的 CLI pane、指定用哪家 CLI、
-            給它任務。新 pane 完成後會用訊息回報給呼叫者，不需要輪詢。
+            給它任務。新 pane 完成後應該會用訊息回報給呼叫者，但那是子 agent 自己輸出的，
+            不是 Navide 的保證：呼叫者忙碌時會排隊，子 agent 沒照格式輸出時則不會送達。
           </li>
         </ul>
         <p class="cmh-note">
@@ -207,7 +208,8 @@ const troubleshooting: TroubleRow[] = [
 幫我跑一下 pnpm test:run，把失敗清單回報給我
 ---MSG-END---</pre>
         <p class="cmh-note">
-          marker 必須獨立成行、頂格，而且不可以放在 markdown 的程式碼區塊裡，否則不會被辨識。
+          to: 必須與 ---MSG-START--- 寫在同一行——換到下一行整個區塊就會失效，而且不會有任何錯誤提示。
+          三行都要頂格、不可縮排，也不可以放在 markdown 的程式碼區塊裡，否則不會被辨識。
           流程的 slot 在開場時就會被告知這個協定；手動開的 pane 不會，
           但你可以把上面這段直接貼給它——前提是那個 CLI 在下表裡支援輸出協定。
         </p>

@@ -82,6 +82,20 @@ ${MSG_END}`
     expect(parseMessages(text)).toEqual([])
   })
 
+  it('opens nothing when to: is on the line after the marker', () => {
+    // The one mistake that costs a whole message: a bare ---MSG-START--- line
+    // matches no target, so the block never opens and every following line is
+    // read as ordinary prose. Nothing is queued and nothing fails, which is
+    // why renderEnvelope/renderSpawnKickoff spell out that to: shares the
+    // marker's line. Relaxing this without reading that history would let a
+    // marker quoted inside a message truncate the message it sits in.
+    const text = `${MSG_START}
+to: codex-1
+content
+${MSG_END}`
+    expect(parseMessages(text)).toEqual([])
+  })
+
   it('drops blocks with empty target or empty content', () => {
     const noTarget = `${MSG_START} to:
 content
@@ -224,6 +238,11 @@ describe('renderSpawnKickoff', () => {
     const hint = kickoff.split('\n').at(-1) as string
     expect(hint).toContain(`${MSG_START} to: boss-1`)
     expect(hint).toContain(MSG_END)
+    // Demonstrating the shape is not enough — the rule is stated outright,
+    // because "marker 必須獨立整行" alone reads as "put the marker on a line
+    // by itself" and sends to: to the next line.
+    expect(hint).toContain('to: 必須與')
+    expect(hint).toContain('同一行')
     // The instruction must never itself parse as a bare MSG marker line.
     expect(parseMessages(kickoff)).toEqual([])
   })
@@ -264,6 +283,10 @@ describe('renderEnvelope', () => {
     expect(env).not.toContain('---REPORT-START---')
     const hint = lines[lines.length - 1]
     expect(hint).toContain('MSG-START')
+    // States the same-line rule rather than only showing it; see the
+    // 'opens nothing when to: is on the line after the marker' case above.
+    expect(hint).toContain('to: 必須與')
+    expect(hint).toContain('同一行')
     // Hint must never itself be a parseable bare marker line.
     expect(parseMessages(env)).toEqual([])
   })
