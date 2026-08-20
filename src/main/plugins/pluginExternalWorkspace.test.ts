@@ -116,7 +116,10 @@ function packInstalledPackage(
   packageDirectory: string,
   artifacts: string
 ): string {
-  const result = runPnpmOrThrow(['pack', '--pack-destination', artifacts], packageDirectory)
+  const result = runPnpmOrThrow(
+    ['pack', '--config.package-manager-strict=false', '--pack-destination', artifacts],
+    packageDirectory
+  )
   const tarball = result.stdout
     .split('\n')
     .map((line) => line.trim())
