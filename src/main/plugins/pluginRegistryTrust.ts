@@ -1,5 +1,7 @@
 import { createPublicKey, verify as cryptoVerify } from 'node:crypto'
 import { assertExactTrustFields, requireTrustObject } from './pluginTrustJson'
+import { assertPluginTargetCompatible, currentPluginHostTarget } from './pluginTarget'
+import { isValidManifestV2PluginId } from './pluginManifestV2'
 
 export type RegistryAuthority = 'official' | 'self-hosted'
 
@@ -97,6 +99,9 @@ export function assertRegistryPackageEnvelopeShape(
   ]) {
     requiredString(envelope[field], `${label}.${field}`)
   }
+  if (!isValidManifestV2PluginId(envelope.packageId)) {
+    throw new Error(`${label}.packageId is invalid`)
+  }
 }
 
 /** Validate the exact root-signed metadata shape. Unknown nested fields are
@@ -159,6 +164,9 @@ export function assertRegistryTrustMetadataShape(
     const blocked = requireTrustObject(value, `${label}.blockedPackages[${index}]`)
     assertExactTrustFields(blocked, `${label}.blockedPackages[${index}]`, ['packageId'], ['version'])
     requiredString(blocked.packageId, `${label}.blockedPackages[${index}].packageId`)
+    if (!isValidManifestV2PluginId(blocked.packageId)) {
+      throw new Error(`${label}.blockedPackages[${index}].packageId is invalid`)
+    }
     if (blocked.version !== undefined) {
       requiredString(blocked.version, `${label}.blockedPackages[${index}].version`)
     }
@@ -228,6 +236,8 @@ export interface VerifyRegistryPackageTrustInput {
     RegistryPackageEnvelope,
     'artifactDigest' | 'packageId' | 'version' | 'target' | 'publisherId'
   >
+  /** Host-derived target; the Registry response cannot choose this value. */
+  expectedHostTarget?: string
   now?: Date
 }
 
@@ -320,6 +330,10 @@ export function verifyRegistryPackageTrust(
   if (input.envelope.schemaVersion !== 1) {
     throw new RegistryTrustError('TRUST_METADATA_INVALID', 'unsupported registry trust schema')
   }
+  assertPluginTargetCompatible(
+    input.envelope.target,
+    input.expectedHostTarget ?? currentPluginHostTarget()
+  )
   if (!input.envelopeSignature) {
     throw new RegistryTrustError('SIGNATURE_REQUIRED', 'registry package signature is required')
   }

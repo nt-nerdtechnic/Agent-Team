@@ -19,8 +19,17 @@ async function activate(context: PluginContext): Promise<void> {
   try {
     await context.capabilities.invoke('shell.run', { command: 'git status' })
   } catch (error) {
-    if (!(error instanceof PluginError)) throw error
-    lastRun.deniedCode = error.code
+    const code =
+      error instanceof PluginError
+        ? error.code
+        : error &&
+            typeof error === 'object' &&
+            'code' in error &&
+            typeof error.code === 'string'
+          ? (error.code as PluginError['code'])
+          : null
+    if (!code) throw error
+    lastRun.deniedCode = code
   }
 
   if (typeof document === 'undefined') return

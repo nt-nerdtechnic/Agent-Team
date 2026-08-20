@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .signing import read_private_key_file
+from .manifest_v2 import PACKAGE_ID_BODY_PATTERN
 
 ENV_DATA_DIR = "REGISTRY_DATA_DIR"
 DEFAULT_DATA_DIR = ".registry-data"
@@ -26,7 +27,7 @@ TRUST_PROFILE_OFFICIAL = "official"
 TRUST_PROFILE_SELF_HOSTED_DEV = "self-hosted-dev"
 SIGNER_STATUSES = {"active", "rotating", "expired", "revoked"}
 PUBLISHER_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-PACKAGE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9-]*(?:@[^@\s]+)?$")
+PACKAGE_PATTERN = re.compile(rf"^{PACKAGE_ID_BODY_PATTERN}(?:@[^@\s]+)?$")
 
 # Verifier kinds.
 VERIFIER_ED25519 = "ed25519"

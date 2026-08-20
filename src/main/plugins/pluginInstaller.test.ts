@@ -1,7 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { spawnSync } from 'node:child_process'
 import { generateKeyPairSync, sign as edSign, type KeyObject } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -11,6 +18,7 @@ import {
   removePlugin,
   isUpdateAvailable,
   type InstallerDeps,
+  type InstallRequest,
   type InstallerTrustConfig,
 } from './pluginInstaller'
 import { sha256Hex } from './pluginVerify'
@@ -20,6 +28,7 @@ import {
   type RegistryTrustMetadata,
 } from './pluginRegistryTrust'
 import { REGISTRY_TRUST_SNAPSHOT_NAME } from './pluginInstalledTrust'
+import { PLUGIN_QUARANTINE_DIR } from './pluginInstallPaths'
 import { makeZip, type ZipFile } from './zipFixture'
 
 const REQ_BASE = {
@@ -27,6 +36,7 @@ const REQ_BASE = {
   namespace: 'acme',
   name: 'demo',
   version: '1.0.0',
+  provenance: 'developer-local-unpacked' as const,
 }
 
 function manifest(overrides: Record<string, unknown> = {}): string {
@@ -138,6 +148,7 @@ function signedV2Request(
   }
   return {
     ...REQ_BASE,
+    provenance: 'official-registry' as const,
     expectedDigest: digest,
     target: envelope.target,
     registryEnvelope: envelope,
@@ -183,6 +194,18 @@ function fakeDeps(bytes: Uint8Array, digestHeader: string | null = 'from-header'
 }
 
 describe('prepareInstall', () => {
+  it('rejects an install request without explicit provenance', async () => {
+    const { bytes, digest } = pkg()
+    const { deps } = fakeDeps(bytes, digest)
+    const request = {
+      ...REQ_BASE,
+      expectedDigest: digest,
+      provenance: undefined,
+    } as unknown as InstallRequest
+
+    await expect(prepareInstall(request, deps)).rejects.toThrow(/explicit install provenance/)
+  })
+
   it('verifies and returns manifest + entries for a good package', async () => {
     const { bytes, digest } = pkg()
     const { deps } = fakeDeps(bytes, digest)
@@ -276,12 +299,55 @@ describe('prepareInstall', () => {
     expect(prepared.requiresConfirmation).toBe(false)
   })
 
+  it('fails closed for a Registry v1 package without central trust evidence', async () => {
+    const { bytes, digest } = pkg()
+    const { deps, removed, writes } = fakeDeps(bytes, digest)
+    await expect(
+      prepareInstall(
+        { ...REQ_BASE, provenance: 'official-registry', expectedDigest: digest },
+        deps,
+        V2_TRUST_CONFIG
+      )
+    ).rejects.toMatchObject({ code: 'SIGNATURE_REQUIRED' })
+    expect(removed).toEqual([])
+    expect(writes.size).toBe(0)
+  })
+
+  it('keeps Registry v1 compatibility only with valid central trust evidence', async () => {
+    const { bytes, digest } = pkg()
+    const { deps } = fakeDeps(bytes, digest)
+    const prepared = await prepareInstall(signedV2Request(digest), deps, V2_TRUST_CONFIG)
+    expect(prepared.manifest).not.toHaveProperty('schemaVersion')
+    expect(prepared.provenance).toBe('official-registry')
+    expect(prepared.registryEvidence).toBeDefined()
+    expect(prepared.trustTier).toBe('signed-verified')
+  })
+
+  it.each([
+    ['matching host', 'darwin-arm64', true],
+    ['wrong OS', 'linux-arm64', false],
+    ['wrong architecture', 'darwin-x64', false],
+  ])('checks exact Registry target compatibility: %s', async (_label, target, compatible) => {
+    const { bytes, digest } = v2Pkg()
+    const { deps } = fakeDeps(bytes, digest)
+    const request = signedV2Request(digest, { target })
+    const promise = prepareInstall(request, deps, {
+      ...V2_TRUST_CONFIG,
+      expectedTarget: 'darwin-arm64',
+    })
+    if (compatible) {
+      await expect(promise).resolves.toBeDefined()
+    } else {
+      await expect(promise).rejects.toThrow(/not compatible with host target/)
+    }
+  })
+
   it('rejects an unsigned v2 marketplace package before installation', async () => {
     const { bytes, digest } = v2Pkg()
     const { deps, removed, writes } = fakeDeps(bytes, digest)
 
     await expect(
-      prepareInstall({ ...REQ_BASE, expectedDigest: digest }, deps)
+      prepareInstall({ ...REQ_BASE, provenance: 'official-registry', expectedDigest: digest }, deps)
     ).rejects.toMatchObject({ code: 'SIGNATURE_REQUIRED' })
     expect(removed).toEqual([])
     expect(writes.size).toBe(0)
@@ -342,7 +408,7 @@ describe('prepareInstall', () => {
     const storageDigest = sha256Hex(storageBytes)
     const { deps, removed, writes } = fakeDeps(storageBytes, storageDigest)
     await expect(
-      prepareInstall({ ...REQ_BASE, expectedDigest: storageDigest }, deps)
+      prepareInstall({ ...REQ_BASE, provenance: 'official-registry', expectedDigest: storageDigest }, deps)
     ).rejects.toThrow(/storage/)
     expect(removed).toEqual([])
     expect(writes.size).toBe(0)
@@ -652,6 +718,88 @@ describe('commitInstall', () => {
     }
   })
 
+  it('keeps only one explicit previous package after successful updates', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'navide-plugin-previous-retention-'))
+    const install = async (content: string): Promise<void> => {
+      const { bytes, digest } = pkg([
+        { name: 'manifest.json', data: manifest() },
+        { name: 'dist/main.js', data: content },
+      ])
+      const deps: InstallerDeps = {
+        ...defaultInstallerDeps,
+        async download() {
+          return { bytes, digestHeader: digest }
+        },
+      }
+      const prepared = await prepareInstall(
+        { ...REQ_BASE, expectedDigest: digest },
+        deps
+      )
+      commitInstall(prepared, root, deps)
+    }
+
+    try {
+      await install('first')
+      await install('second')
+      await install('third')
+
+      expect(readFileSync(join(root, 'acme.demo', 'dist/main.js'), 'utf8')).toBe('third')
+      expect(readdirSync(join(root, PLUGIN_QUARANTINE_DIR))).toEqual([
+        'acme.demo.previous',
+      ])
+      expect(
+        readFileSync(
+          join(root, PLUGIN_QUARANTINE_DIR, 'acme.demo.previous', 'dist/main.js'),
+          'utf8'
+        )
+      ).toBe('second')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps rejected package evidence separate from the normal previous package', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'navide-plugin-rejected-evidence-'))
+    const { bytes, digest } = v2Pkg()
+    const initialDeps: InstallerDeps = {
+      ...defaultInstallerDeps,
+      async download() {
+        return { bytes, digestHeader: digest }
+      },
+    }
+
+    try {
+      const initial = await prepareInstall(
+        signedV2Request(digest),
+        initialDeps,
+        V2_TRUST_CONFIG
+      )
+      commitInstall(initial, root, initialDeps)
+
+      const rejectedDeps: InstallerDeps = {
+        ...initialDeps,
+        writeRegistryTrustSnapshot() {
+          throw new Error('test rejected package')
+        },
+      }
+      const replacement = await prepareInstall(
+        signedV2Request(digest),
+        rejectedDeps,
+        V2_TRUST_CONFIG
+      )
+      expect(() => commitInstall(replacement, root, rejectedDeps)).toThrow(
+        'test rejected package'
+      )
+
+      const quarantineEntries = readdirSync(join(root, PLUGIN_QUARANTINE_DIR))
+      expect(quarantineEntries.some((entry) => entry.startsWith('acme.demo.failed.'))).toBe(true)
+      expect(quarantineEntries).not.toContain('acme.demo.previous')
+      expect(existsSync(join(root, 'acme.demo', 'manifest.json'))).toBe(true)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('rejects a replayed older trust snapshot before replacing an install', async () => {
     const { bytes, digest } = v2Pkg()
     const { deps, writes, removed } = fakeDeps(bytes, digest)
@@ -733,6 +881,7 @@ describe('official (navide.) install policy', () => {
     namespace: 'navide',
     name: 'mini-ide',
     version: '1.0.0',
+    provenance: 'developer-local-unpacked' as const,
   }
 
   function officialPkg(): { bytes: Uint8Array; digest: string } {

@@ -66,7 +66,7 @@ def test_load_settings_reads_complete_official_trust_configuration(
                     }
                 ],
                 "blockedPublishers": ["blocked-publisher"],
-                "blockedPackages": ["blocked.package@1.0.0"],
+                "blockedPackages": ["blocked.tools.linter@1.0.0"],
             }
         ),
         encoding="utf-8",
@@ -86,8 +86,48 @@ def test_load_settings_reads_complete_official_trust_configuration(
     assert settings.root_private_key == root_private
     assert [entry.key_id for entry in settings.trusted_signers] == ["registry-2026-01"]
     assert settings.blocked_publishers == ("blocked-publisher",)
-    assert settings.blocked_packages == ("blocked.package@1.0.0",)
+    assert settings.blocked_packages == ("blocked.tools.linter@1.0.0",)
     assert settings.admin_token == "official-admin-token"
+
+
+def test_blocked_package_id_contract_fails_closed(monkeypatch, tmp_path) -> None:
+    signer_private, _ = generate_keypair()
+    root_private, _ = generate_keypair()
+    signer_path = tmp_path / "signer.pem"
+    root_path = tmp_path / "root.pem"
+    signer_path.write_text(signer_private, encoding="ascii")
+    root_path.write_text(root_private, encoding="ascii")
+    signer_path.chmod(0o600)
+    root_path.chmod(0o600)
+    config_path = tmp_path / "official-trust.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "profile": "official",
+                "expectedRootFingerprint": public_key_fingerprint(
+                    public_key_from_private(root_private)
+                ),
+                "rootPrivateKeyFile": str(root_path),
+                "signer": {
+                    "keyId": "registry-2026-02",
+                    "privateKeyFile": str(signer_path),
+                    "status": "active",
+                    "notBefore": "2026-08-01T00:00:00Z",
+                    "notAfter": "2027-08-01T00:00:00Z",
+                },
+                "trustedSigners": [],
+                "blockedPublishers": [],
+                "blockedPackages": ["acme..tools"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("REGISTRY_TRUST_PROFILE", "official")
+    monkeypatch.setenv("REGISTRY_TRUST_CONFIG_FILE", str(config_path))
+
+    with pytest.raises(ValueError, match="blockedPackages"):
+        load_settings()
 
 
 def test_official_registry_rejects_root_that_does_not_match_app_pin(

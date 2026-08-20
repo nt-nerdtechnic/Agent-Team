@@ -59,7 +59,9 @@ function trust(overrides: Partial<RegistryTrustMetadata> = {}): RegistryTrustMet
 function verify(
   envelopeValue = envelope(),
   trustValue = trust(),
-  envelopeSignature = signature(envelopeValue)
+  envelopeSignature = signature(envelopeValue),
+  expectedHostTarget?: string,
+  expectedPackageId = 'acme.demo'
 ) {
   return verifyRegistryPackageTrust({
     envelope: envelopeValue,
@@ -69,11 +71,12 @@ function verify(
     pinnedRootKey: rootPublicKey,
     expected: {
       artifactDigest: 'a'.repeat(64),
-      packageId: 'acme.demo',
+      packageId: expectedPackageId,
       version: '1.0.0',
-      target: 'universal',
+      target: envelopeValue.target,
       publisherId: 'acme',
     },
+    ...(expectedHostTarget ? { expectedHostTarget } : {}),
     now: new Date(NOW),
   })
 }
@@ -135,6 +138,32 @@ describe('verifyRegistryPackageTrust', () => {
         trust({ blockedPackages: [{ packageId: 'acme.demo', version: '1.0.0' }] })
       )
     ).toThrow(/package.*blocked/)
+  })
+
+  it('binds universal and exact targets to the Host runtime', () => {
+    expect(verify(envelope({ target: 'universal' }), trust(), undefined, 'darwin-arm64')).toBeDefined()
+    expect(verify(envelope({ target: 'darwin-arm64' }), trust(), undefined, 'darwin-arm64')).toBeDefined()
+    expect(() => verify(envelope({ target: 'linux-x64' }), trust(), undefined, 'darwin-arm64')).toThrow(
+      /not compatible with host target/
+    )
+    expect(() => verify(envelope({ target: 'darwin-x64' }), trust(), undefined, 'darwin-arm64')).toThrow(
+      /not compatible with host target/
+    )
+  })
+
+  it('rejects invalid multi-segment blocklist and envelope package ids', () => {
+    expect(() => verify(
+      envelope({ packageId: 'acme.tools.linter' }),
+      trust(),
+      undefined,
+      undefined,
+      'acme.tools.linter'
+    )).not.toThrow()
+    expect(() => verify(
+      envelope(),
+      trust({ blockedPackages: [{ packageId: 'acme..linter' }] })
+    )).toThrow(/packageId is invalid/)
+    expect(() => verify(envelope({ packageId: 'acme..linter' }))).toThrow(/packageId is invalid/)
   })
 
   it('rejects expired or forged root-signed trust metadata', () => {

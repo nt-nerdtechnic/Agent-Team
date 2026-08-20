@@ -12,6 +12,8 @@ from .path_policy import canonical_html_path, canonical_package_path
 from .versions import _V2_VERSION_RE
 
 _V2_CATEGORY_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
+PACKAGE_ID_BODY_PATTERN = r"[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)+"
+PACKAGE_ID_RE = re.compile(rf"^{PACKAGE_ID_BODY_PATTERN}$")
 _V2_DISPLAY_TEXT_RE = r"^[^\r\n<>]+$"
 V2_SYSTEM_NAMESPACES: frozenset[str] = frozenset({"fs", "ui", "aiCli"})
 V2_SHELL_MODES: frozenset[str] = frozenset({"allowlist", "full"})
@@ -177,7 +179,7 @@ class ManifestV2Permissions(ManifestV2Model):
 class ManifestV2(ManifestV2Model):
     schemaVersion: Literal[2]
     apiVersion: str = Field(pattern=r"^[~^]?\d+\.\d+\.\d+$")
-    id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)+$")
+    id: str = Field(pattern=PACKAGE_ID_RE.pattern)
     name: str = Field(min_length=1, max_length=80, pattern=_V2_DISPLAY_TEXT_RE)
     version: str = Field(pattern=_V2_VERSION_RE.pattern)
     publisher: str = Field(pattern=r"^[a-z0-9][a-z0-9-]*$")

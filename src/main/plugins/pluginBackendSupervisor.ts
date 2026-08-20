@@ -175,9 +175,26 @@ export interface PluginBackendSupervisorOptions {
 }
 
 interface PendingRequest {
+  readonly generation: ChildGeneration
   readonly resolve: (response: BackendWireResponse) => void
   readonly reject: (error: BackendPluginError) => void
   readonly cleanup: () => void
+}
+
+interface ChildGeneration {
+  readonly id: number
+  readonly child: ChildProcessWithoutNullStreams
+  exited: boolean
+  stdoutBuffer: Buffer
+  readonly exitPromise: Promise<void>
+  resolveExit?: () => void
+  terminationTask?: Promise<void>
+  listeners: {
+    stdout: (chunk: Buffer | string) => void
+    stderr: (chunk: Buffer | string) => void
+    error: () => void
+    exit: () => void
+  }
 }
 
 interface SuccessResponse {
@@ -248,6 +265,7 @@ interface SubscriptionState {
   timeoutTimer?: ReturnType<typeof setTimeout>
   abortListener?: () => void
   phase: SubscriptionPhase
+  generation?: ChildGeneration
   requestId?: WireRequestId
   progressToken?: WireRequestId
   settledOnce: boolean
@@ -755,9 +773,8 @@ export class PluginBackendSupervisor {
   private readonly maxFrameBytes: number
   private readonly onStderr?: (chunk: string) => void
   private state: SupervisorState = 'idle'
-  private child?: ChildProcessWithoutNullStreams
-  private childExited = false
-  private stdoutBuffer = Buffer.alloc(0)
+  private currentGeneration?: ChildGeneration
+  private nextGenerationId = 0
   private readonly pending = new Map<WireRequestId, PendingRequest>()
   private readonly subscriptions = new Set<SubscriptionState>()
   private readonly subscriptionsByRequestId = new Map<WireRequestId, SubscriptionState>()
@@ -767,9 +784,6 @@ export class PluginBackendSupervisor {
   private restartTask?: Promise<BackendHealth>
   private health?: BackendHealth
   private failure?: BackendPluginError
-  private exitPromise?: Promise<void>
-  private resolveExit?: () => void
-  private terminationTask?: Promise<void>
   private readonly activation: BackendPluginLaunchSpec
 
   constructor(
@@ -883,15 +897,16 @@ export class PluginBackendSupervisor {
   }
 
   async close(): Promise<void> {
-    if (this.state === 'closed' && !this.child) return
+    if (this.state === 'closed' && !this.currentGeneration) return
     this.state = 'closed'
     this.rejectPending(new BackendPluginError('PLUGIN_STOPPING'))
     this.settleAllSubscriptions({ reason: 'plugin-stopping', error: new BackendPluginError('PLUGIN_STOPPING') })
     this.ignoredRequestIds.clear()
-    const child = this.child
-    if (!child) return
-    await this.requestTermination(false)
-    this.child = undefined
+    const generation = this.currentGeneration
+    if (!generation) return
+    await this.requestTermination(generation, false)
+    this.disposeGeneration(generation)
+    if (this.currentGeneration === generation) this.currentGeneration = undefined
   }
 
   private subscribeWithRuntime(
@@ -984,17 +999,23 @@ export class PluginBackendSupervisor {
 
   private issueSubscription(state: SubscriptionState): void {
     if (state.settledOnce || this.state !== 'ready') return
+    const generation = this.currentGeneration
+    if (!generation) {
+      this.failProcess(undefined, 'BACKEND_UNAVAILABLE')
+      return
+    }
     const requestId = this.nextRequestId()
+    state.generation = generation
     state.requestId = requestId
     state.progressToken = requestId
     state.phase = 'pending-ack'
     this.subscriptionsByRequestId.set(requestId, state)
     this.subscriptionsByProgressToken.set(requestId, state)
     try {
-      if (!this.child || this.childExited || this.child.stdin.destroyed || this.child.stdin.writableEnded) {
+      if (generation.exited || generation.child.stdin.destroyed || generation.child.stdin.writableEnded) {
         throw new Error('closed')
       }
-      this.child.stdin.write(
+      generation.child.stdin.write(
         encodeFrame({
           jsonrpc: '2.0',
           id: requestId,
@@ -1007,7 +1028,7 @@ export class PluginBackendSupervisor {
         })
       )
     } catch {
-      this.failProcess('BACKEND_UNAVAILABLE')
+      this.failProcess(generation, 'BACKEND_UNAVAILABLE')
     }
   }
 
@@ -1047,14 +1068,16 @@ export class PluginBackendSupervisor {
     state.settledOnce = true
     state.phase = 'settled'
     const requestId = state.requestId
+    const generation = state.generation
     if (requestId !== undefined) {
       this.subscriptionsByRequestId.delete(requestId)
       this.subscriptionsByProgressToken.delete(requestId)
       if (sendCancellation) {
         this.rememberIgnoredRequestId(requestId)
-        this.sendCancellation(requestId, result.reason)
+        this.sendCancellation(requestId, result.reason, generation)
       }
     }
+    state.generation = undefined
     if (state.timeoutTimer !== undefined) clearTimeout(state.timeoutTimer)
     if (state.abortListener && state.signal) {
       state.signal.removeEventListener('abort', state.abortListener)
@@ -1098,6 +1121,7 @@ export class PluginBackendSupervisor {
       }
       state.requestId = undefined
       state.progressToken = undefined
+      state.generation = undefined
       state.phase = 'reconnecting'
     }
   }
@@ -1136,11 +1160,15 @@ export class PluginBackendSupervisor {
     this.state = 'restarting'
     this.rejectPending(new BackendPluginError('BACKEND_UNAVAILABLE'), true)
     this.detachSubscriptionsForRestart()
-    await this.requestTermination(true)
+    const generation = this.currentGeneration
+    if (generation) await this.requestTermination(generation, true)
     if ((this.state as SupervisorState) === 'closed') {
       throw new BackendPluginError('PLUGIN_STOPPING')
     }
-    this.child = undefined
+    if (generation) {
+      this.disposeGeneration(generation)
+      if (this.currentGeneration === generation) this.currentGeneration = undefined
+    }
     this.failure = undefined
     this.state = 'starting'
     this.startTask = this.startInternal()
@@ -1184,7 +1212,10 @@ export class PluginBackendSupervisor {
         ? value
         : new BackendPluginError('BACKEND_UNAVAILABLE')
       if (this.state !== 'closed' && this.state !== 'failed') {
-        this.failProcess(error.code === 'PROTOCOL_ERROR' ? 'PROTOCOL_ERROR' : 'BACKEND_UNAVAILABLE')
+        this.failProcess(
+          this.currentGeneration,
+          error.code === 'PROTOCOL_ERROR' ? 'PROTOCOL_ERROR' : 'BACKEND_UNAVAILABLE'
+        )
       }
       throw error
     }
@@ -1197,63 +1228,91 @@ export class PluginBackendSupervisor {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...this.environment },
     }
+    let child: ChildProcessWithoutNullStreams
     try {
-      this.child = this.spawnProcess(this.activation.entryFile, options)
+      child = this.spawnProcess(this.activation.entryFile, options)
     } catch {
       throw new BackendPluginError('BACKEND_UNAVAILABLE')
     }
-    if (!this.child?.stdin || !this.child.stdout || !this.child.stderr) {
+    if (!child?.stdin || !child.stdout || !child.stderr) {
       throw new BackendPluginError('BACKEND_UNAVAILABLE')
     }
-    this.childExited = false
-    this.stdoutBuffer = Buffer.alloc(0)
-    this.terminationTask = undefined
-    this.exitPromise = new Promise<void>((resolve) => {
-      this.resolveExit = resolve
-    })
-    this.child.stdout.on('data', (chunk: Buffer | string) => this.onStdout(chunk))
-    this.child.stderr.on('data', (chunk: Buffer | string) => this.onStderrChunk(chunk))
-    this.child.on('error', () => this.failProcess('BACKEND_UNAVAILABLE'))
-    this.child.on('exit', () => this.onChildExit())
+    let resolveExit!: () => void
+    const generation: ChildGeneration = {
+      id: ++this.nextGenerationId,
+      child,
+      exited: false,
+      stdoutBuffer: Buffer.alloc(0),
+      exitPromise: new Promise<void>((resolve) => {
+        resolveExit = resolve
+      }),
+      resolveExit: undefined,
+      listeners: undefined as never,
+    }
+    generation.resolveExit = resolveExit
+    generation.listeners = {
+      stdout: (chunk) => this.onStdout(generation, chunk),
+      stderr: (chunk) => this.onStderrChunk(generation, chunk),
+      error: () => this.failProcess(generation, 'BACKEND_UNAVAILABLE'),
+      exit: () => this.onChildExit(generation),
+    }
+    this.currentGeneration = generation
+    child.stdout.on('data', generation.listeners.stdout)
+    child.stderr.on('data', generation.listeners.stderr)
+    child.on('error', generation.listeners.error)
+    child.on('exit', generation.listeners.exit)
   }
 
-  private onStdout(chunk: Buffer | string): void {
-    if (this.state === 'closed' || this.state === 'failed') return
+  private disposeGeneration(generation: ChildGeneration): void {
+    generation.child.stdout.removeListener('data', generation.listeners.stdout)
+    generation.child.stderr.removeListener('data', generation.listeners.stderr)
+    generation.child.removeListener('error', generation.listeners.error)
+    generation.child.removeListener('exit', generation.listeners.exit)
+  }
+
+  private onStdout(generation: ChildGeneration, chunk: Buffer | string): void {
+    if (
+      this.currentGeneration !== generation ||
+      this.state === 'closed' ||
+      this.state === 'failed' ||
+      this.state === 'restarting'
+    ) return
     const bytes = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk
-    this.stdoutBuffer = Buffer.concat([this.stdoutBuffer, bytes])
-    if (this.stdoutBuffer.length > this.maxFrameBytes && !this.stdoutBuffer.includes(0x0a)) {
-      this.failProcess('PROTOCOL_ERROR')
+    generation.stdoutBuffer = Buffer.concat([generation.stdoutBuffer, bytes])
+    if (generation.stdoutBuffer.length > this.maxFrameBytes && !generation.stdoutBuffer.includes(0x0a)) {
+      this.failProcess(generation, 'PROTOCOL_ERROR')
       return
     }
     while (true) {
-      const newline = this.stdoutBuffer.indexOf(0x0a)
+      const newline = generation.stdoutBuffer.indexOf(0x0a)
       if (newline < 0) {
-        if (this.stdoutBuffer.length > this.maxFrameBytes) this.failProcess('PROTOCOL_ERROR')
+        if (generation.stdoutBuffer.length > this.maxFrameBytes) this.failProcess(generation, 'PROTOCOL_ERROR')
         return
       }
-      const line = this.stdoutBuffer.subarray(0, newline)
-      this.stdoutBuffer = this.stdoutBuffer.subarray(newline + 1)
+      const line = generation.stdoutBuffer.subarray(0, newline)
+      generation.stdoutBuffer = generation.stdoutBuffer.subarray(newline + 1)
       if (line.length > this.maxFrameBytes || line.includes(0x0d)) {
-        this.failProcess('PROTOCOL_ERROR')
+        this.failProcess(generation, 'PROTOCOL_ERROR')
         return
       }
       let frame: BackendWireHostFrame
       try {
         frame = parseBackendWireHostFrame(line)
       } catch {
-        this.failProcess('PROTOCOL_ERROR')
+        this.failProcess(generation, 'PROTOCOL_ERROR')
         return
       }
       try {
-        this.handleFrame(frame)
+        this.handleFrame(generation, frame)
       } catch {
-        this.failProcess('PROTOCOL_ERROR')
+        this.failProcess(generation, 'PROTOCOL_ERROR')
         return
       }
     }
   }
 
-  private onStderrChunk(chunk: Buffer | string): void {
+  private onStderrChunk(generation: ChildGeneration, chunk: Buffer | string): void {
+    if (this.currentGeneration !== generation || this.state === 'closed' || this.state === 'restarting') return
     if (!this.onStderr) return
     try {
       this.onStderr(typeof chunk === 'string' ? chunk : chunk.toString('utf8'))
@@ -1262,29 +1321,34 @@ export class PluginBackendSupervisor {
     }
   }
 
-  private onChildExit(): void {
-    this.childExited = true
+  private onChildExit(generation: ChildGeneration): void {
+    if (generation.exited) return
+    generation.exited = true
+    generation.resolveExit?.()
+    generation.resolveExit = undefined
+    this.disposeGeneration(generation)
+    if (this.currentGeneration !== generation) return
     this.ignoredRequestIds.clear()
-    this.resolveExit?.()
-    this.resolveExit = undefined
     if (this.state !== 'closed' && this.state !== 'failed' && this.state !== 'restarting') {
-      this.failProcess(this.stdoutBuffer.length > 0 ? 'PROTOCOL_ERROR' : 'BACKEND_UNAVAILABLE', false)
+      this.failProcess(generation, generation.stdoutBuffer.length > 0 ? 'PROTOCOL_ERROR' : 'BACKEND_UNAVAILABLE', false)
     }
   }
 
-  private handleFrame(frame: BackendWireHostFrame): void {
+  private handleFrame(generation: ChildGeneration, frame: BackendWireHostFrame): void {
+    if (this.currentGeneration !== generation) return
     if (
       frame.kind === 'subscription-acknowledged' ||
       frame.kind === 'event' ||
       frame.kind === 'progress'
     ) {
-      this.handleNotification(frame)
+      this.handleNotification(generation, frame)
       return
     }
-    this.handleResponse(frame)
+    this.handleResponse(generation, frame)
   }
 
-  private handleNotification(notification: BackendWireNotification): void {
+  private handleNotification(generation: ChildGeneration, notification: BackendWireNotification): void {
+    if (this.currentGeneration !== generation) return
     if (notification.kind === 'subscription-acknowledged') {
       const state = this.subscriptionsByRequestId.get(notification.subscriptionId)
       if (!state) {
@@ -1292,6 +1356,7 @@ export class PluginBackendSupervisor {
         throw new Error(PROTOCOL_ERROR_MESSAGE)
       }
       if (
+        state.generation !== generation ||
         state.phase !== 'pending-ack' ||
         !sameEventFilter(state.events, notification.events)
       ) {
@@ -1310,7 +1375,7 @@ export class PluginBackendSupervisor {
         if (this.ignoredRequestIds.has(notification.subscriptionId)) return
         throw new Error(PROTOCOL_ERROR_MESSAGE)
       }
-      if (state.phase !== 'active' || !state.events.includes(notification.event)) {
+      if (state.generation !== generation || state.phase !== 'active' || !state.events.includes(notification.event)) {
         throw new Error(PROTOCOL_ERROR_MESSAGE)
       }
       try {
@@ -1329,7 +1394,10 @@ export class PluginBackendSupervisor {
       if (this.ignoredRequestIds.has(notification.progressToken)) return
       throw new Error(PROTOCOL_ERROR_MESSAGE)
     }
-    if (state.phase !== 'pending-ack' && state.phase !== 'active') {
+    if (
+      state.generation !== generation ||
+      (state.phase !== 'pending-ack' && state.phase !== 'active')
+    ) {
       throw new Error(PROTOCOL_ERROR_MESSAGE)
     }
     if (state.onProgress) {
@@ -1346,13 +1414,15 @@ export class PluginBackendSupervisor {
     }
   }
 
-  private handleResponse(response: BackendWireResponse): void {
+  private handleResponse(generation: ChildGeneration, response: BackendWireResponse): void {
+    if (this.currentGeneration !== generation) return
     const requestId = response.id
     if (requestId === undefined) {
       throw new Error(PROTOCOL_ERROR_MESSAGE)
     }
     const pending = this.pending.get(requestId)
     if (pending) {
+      if (pending.generation !== generation) return
       if (response.kind === 'success') {
         this.settle(requestId, () => pending.resolve(response))
         return
@@ -1379,6 +1449,7 @@ export class PluginBackendSupervisor {
 
     const subscription = this.subscriptionsByRequestId.get(requestId)
     if (subscription) {
+      if (subscription.generation !== generation) return
       if (
         response.kind === 'success' &&
         response.subscriptionId === requestId &&
@@ -1458,7 +1529,8 @@ export class PluginBackendSupervisor {
     options: BackendPluginCallOptions
   ): Promise<BackendWireResponse> {
     const requestId = isRecord(frame) && isRequestId(frame.id) ? frame.id : undefined
-    if (requestId === undefined || !this.child || this.childExited) {
+    const generation = this.currentGeneration
+    if (requestId === undefined || !generation || generation.exited) {
       return Promise.reject(new BackendPluginError('BACKEND_UNAVAILABLE'))
     }
     const timeoutMs = options.timeoutMs ?? this.callTimeoutMs
@@ -1481,6 +1553,7 @@ export class PluginBackendSupervisor {
         options.signal?.removeEventListener('abort', abort)
       }
       const pending: PendingRequest = {
+        generation,
         resolve: (response) => {
           if (settled) return
           settled = true
@@ -1497,10 +1570,12 @@ export class PluginBackendSupervisor {
       }
       this.pending.set(requestId, pending)
       try {
-        if (this.child?.stdin.destroyed || this.child?.stdin.writableEnded) throw new Error('closed')
-        this.child?.stdin.write(encodeFrame(frame))
+        if (generation.exited || generation.child.stdin.destroyed || generation.child.stdin.writableEnded) {
+          throw new Error('closed')
+        }
+        generation.child.stdin.write(encodeFrame(frame))
       } catch {
-        this.failProcess('BACKEND_UNAVAILABLE')
+        this.failProcess(generation, 'BACKEND_UNAVAILABLE')
       }
     })
   }
@@ -1512,13 +1587,22 @@ export class PluginBackendSupervisor {
     this.rememberIgnoredRequestId(requestId)
     pending.cleanup()
     pending.reject(new BackendPluginError(code, undefined, { requestId }))
-    this.sendCancellation(requestId)
+    this.sendCancellation(requestId, undefined, pending.generation)
   }
 
-  private sendCancellation(requestId: WireRequestId, reason?: string): void {
+  private sendCancellation(
+    requestId: WireRequestId,
+    reason?: string,
+    generation?: ChildGeneration
+  ): void {
     try {
-      if (!this.child || this.childExited || this.child.stdin.destroyed) return
-      this.child.stdin.write(
+      if (
+        !generation ||
+        this.currentGeneration !== generation ||
+        generation.exited ||
+        generation.child.stdin.destroyed
+      ) return
+      generation.child.stdin.write(
         encodeFrame({
           jsonrpc: '2.0',
           method: 'notifications/cancelled',
@@ -1547,7 +1631,12 @@ export class PluginBackendSupervisor {
     }
   }
 
-  private failProcess(code: 'BACKEND_UNAVAILABLE' | 'PROTOCOL_ERROR', terminate = true): void {
+  private failProcess(
+    generation: ChildGeneration | undefined,
+    code: 'BACKEND_UNAVAILABLE' | 'PROTOCOL_ERROR',
+    terminate = true
+  ): void {
+    if (generation && this.currentGeneration !== generation) return
     if (this.state === 'closed' || this.state === 'restarting') return
     const error = this.failure ?? new BackendPluginError(code)
     if (code === 'PROTOCOL_ERROR') {
@@ -1559,13 +1648,15 @@ export class PluginBackendSupervisor {
     this.state = 'failed'
     this.ignoredRequestIds.clear()
     this.rejectPending(error)
-    if (terminate && this.child && !this.childExited) void this.requestTermination(code === 'PROTOCOL_ERROR')
+    if (terminate && generation && !generation.exited) {
+      void this.requestTermination(generation, code === 'PROTOCOL_ERROR')
+    }
   }
 
-  private requestTermination(force: boolean): Promise<void> {
-    if (!this.child || this.childExited) return Promise.resolve()
-    if (this.terminationTask && !force) return this.terminationTask
-    const child = this.child
+  private requestTermination(generation: ChildGeneration, force: boolean): Promise<void> {
+    if (generation.exited) return Promise.resolve()
+    if (generation.terminationTask && !force) return generation.terminationTask
+    const child = generation.child
     const task = (async (): Promise<void> => {
       if (force) {
         try {
@@ -1585,21 +1676,21 @@ export class PluginBackendSupervisor {
           /* already closed */
         }
       }
-      if (await waitForExit(this.exitPromise ?? Promise.resolve(), this.shutdownTimeoutMs)) return
+      if (await waitForExit(generation.exitPromise, this.shutdownTimeoutMs)) return
       try {
         child.kill('SIGTERM')
       } catch {
         /* already gone */
       }
-      if (await waitForExit(this.exitPromise ?? Promise.resolve(), this.shutdownTimeoutMs)) return
+      if (await waitForExit(generation.exitPromise, this.shutdownTimeoutMs)) return
       try {
         child.kill('SIGKILL')
       } catch {
         /* already gone */
       }
-      await waitForExit(this.exitPromise ?? Promise.resolve(), this.shutdownTimeoutMs)
+      await waitForExit(generation.exitPromise, this.shutdownTimeoutMs)
     })()
-    this.terminationTask = task
+    generation.terminationTask = task
     return task
   }
 

@@ -33,8 +33,10 @@ All notable released changes to Navide will be documented in this file. The form
   verification, fail closed while the independent production Registry root is
   unprovisioned, and reject publisher-key reuse as Registry trust.
 - Add an opt-in `AGENT_TEAM_PLUGIN_DEV_PATH` seam for one explicitly selected
-  local Manifest v2 frontend package; reserved ids, backend contributions, and
-  Registry provenance remain unavailable in Developer Mode.
+  local Manifest v1 or v2 frontend package. Manifest v1 is bounded local
+  compatibility only: it remains unsigned, local-only, and cannot claim
+  Registry provenance; reserved ids and backend contributions remain
+  unavailable in Developer Mode.
 - Tell a CLI agent when its inter-CLI message could not be delivered: a `[Navide MSG] delivery failed` notice naming the target and the reason is written back into the sending pane, through the same queue and idle gate as any other message.
 - Deliver an inter-CLI message to a Claude pane through its Stop hook when its turn ends with one waiting: the message becomes the agent's next instruction instead of being typed in, so it never occupies the input box or waits behind whatever you are writing. Capped at 5 in a row per pane; anything else — an idle pane, another CLI, hooks not installed — still arrives the usual way, unchanged.
 

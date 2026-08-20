@@ -14,6 +14,7 @@ import {
   resolveConfiguredMarketplace,
 } from './plugins/pluginIpc'
 import { readRegistryTrustSnapshot } from './plugins/pluginInstalledTrust'
+import { currentPluginHostTarget } from './plugins/pluginTarget'
 import {
   projectBackendPluginActivationCatalog,
   writeBackendPluginActivationCatalog,
@@ -458,6 +459,7 @@ const installedPluginTrust = {
   snapshot: readRegistryTrustSnapshot(pluginsRoot()),
   registryAuthority: installedRegistryAuthority,
   officialRegistryUrl: installedOfficialRegistryUrl,
+  expectedTarget: currentPluginHostTarget(),
 }
 const installedPluginLoad = frontendPluginManager.loadInstalledPlugins(pluginsRoot(), {
   provenance: 'official-registry',
@@ -2323,11 +2325,13 @@ app.whenReady().then(async () => {
       )
     }
     const explicitPackageDir = process.env['AGENT_TEAM_PLUGIN_DEV_PATH']
-    const explicitResult = frontendPluginManager.loadExplicitDeveloperPlugin(explicitPackageDir)
-    if (!explicitResult.loaded) {
-      console.warn(
-        `[main] AGENT_TEAM_PLUGIN_DEV_PATH was not loaded: ${explicitResult.error}`
-      )
+    if (explicitPackageDir !== undefined) {
+      const explicitResult = frontendPluginManager.loadExplicitDeveloperPlugin(explicitPackageDir)
+      if (!explicitResult.loaded) {
+        console.warn(
+          `[main] AGENT_TEAM_PLUGIN_DEV_PATH was not loaded: ${explicitResult.error}`
+        )
+      }
     }
   }
   appMenuHooks = {

@@ -639,6 +639,28 @@ describe('loadInstalledPlugins official receipt gate', () => {
       ])
     })
 
+    it('loads a legacy v1 sideload only with explicit local provenance', () => {
+      writePlugin('legacy', undefined)
+      const manifestPath = join(root, 'legacy', 'manifest.json')
+      writeFileSync(
+        manifestPath,
+        JSON.stringify({ id: 'acme.legacy', version: '1.0.0', entry: 'index.html', requires: [] })
+      )
+      const mgr = new FrontendPluginManager()
+      expect(mgr.loadExplicitDeveloperPlugin(join(root, 'legacy'), true)).toEqual({
+        loaded: true,
+        pluginId: 'acme.legacy',
+      })
+      expect(mgr.listInstalledPackages()).toEqual([
+        {
+          id: 'acme.legacy',
+          requires: [],
+          provenance: 'developer-local-unpacked',
+          warning: 'Unsigned local unpacked plugin — Developer Mode only',
+        },
+      ])
+    })
+
     it('does not scan a selected parent directory', () => {
       writeV2Plugin('viewer', { id: 'acme.viewer', frontend: true })
       const mgr = new FrontendPluginManager()

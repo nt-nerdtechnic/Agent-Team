@@ -11,7 +11,8 @@
 // confirmation (sensitive `fs`/`aiCli`/`shell` capabilities) AFTER verification but
 // BEFORE anything is written to disk.
 
-import { chmodSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
+import { chmodSync, mkdirSync, readFileSync, writeFileSync, rmSync, renameSync, existsSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { canonicalArchivePath, portableArchiveCollisionKey } from './pluginPathPolicy'
 import {
@@ -53,6 +54,12 @@ import {
 } from './installedPlugins'
 import { compareSemver } from './pluginManifestV2'
 import type { PluginLaunchDescriptor } from './frontendPluginManager'
+import { currentPluginHostTarget } from './pluginTarget'
+import {
+  PLUGIN_QUARANTINE_DIR,
+  PLUGIN_QUARANTINE_MARKER,
+  PLUGIN_STAGING_DIR,
+} from './pluginInstallPaths'
 
 /** What a caller must supply to install a specific marketplace version. The
  *  trusted `expectedDigest` and (optional) signature material come from the
@@ -77,6 +84,8 @@ export interface InstallRequest {
   registrySignature?: string | null
   trustMetadata?: RegistryTrustMetadata | null
   trustMetadataSignature?: string | null
+  /** Install provenance selected by the Host, never inferred from schemaVersion. */
+  provenance: 'official-registry' | 'developer-local-unpacked'
 }
 
 export interface InstallerTrustConfig {
@@ -87,6 +96,8 @@ export interface InstallerTrustConfig {
   /** Normalized App-pinned Official Registry URL, when configured. */
   officialRegistryUrl?: string
   now?: Date
+  /** Host-derived exact target used for Registry artifact compatibility. */
+  expectedTarget?: string
 }
 
 const DEFAULT_INSTALLER_TRUST: InstallerTrustConfig = {
@@ -100,7 +111,10 @@ const HOST_OWNED_ARCHIVE_NAMES = new Set([
   REGISTRY_ARTIFACT_NAME,
   REGISTRY_TRUST_SNAPSHOT_NAME,
   '.navide-backend-activation.json',
+  PLUGIN_QUARANTINE_MARKER,
 ].map((name) => portableArchiveCollisionKey(name)!))
+
+export { PLUGIN_QUARANTINE_DIR, PLUGIN_STAGING_DIR } from './pluginInstallPaths'
 
 /** A downloaded, verified package ready to commit to disk. */
 export interface PreparedInstall {
@@ -124,13 +138,14 @@ export interface PreparedInstall {
   digest: string
   /** Detached signature over the digest, when present (receipt material). */
   signature: string | null
-  /** Host-generated Registry evidence retained for every marketplace v2
+  /** Host-generated Registry evidence retained for every Registry v1/v2
    * package. Never feed this envelope signature into the legacy digest receipt. */
   registryEvidence?: {
     artifact: Uint8Array
     receipt: RegistryInstallReceipt
     trustSnapshot: RegistryTrustSnapshot
   }
+  provenance: 'official-registry' | 'developer-local-unpacked'
 }
 
 export class InstallError extends Error {
@@ -152,6 +167,9 @@ export interface InstallerDeps {
   /** Apply a controlled mode after writing the declared backend executable. */
   chmod(path: string, mode: number): void
   rmrf(dir: string): void
+  /** Atomic directory move used by the production install transaction. */
+  rename?(from: string, to: string): void
+  pathExists?(path: string): boolean
 }
 
 /** Default deps: global `fetch` (Electron main / Node 18+) + `node:fs`. */
@@ -181,6 +199,12 @@ export const defaultInstallerDeps: InstallerDeps = {
   },
   rmrf(dir) {
     rmSync(dir, { recursive: true, force: true })
+  },
+  rename(from, to) {
+    renameSync(from, to)
+  },
+  pathExists(path) {
+    return existsSync(path)
   },
 }
 
@@ -278,6 +302,14 @@ export async function prepareInstall(
   }
 
   const v2 = isManifestV2(manifest)
+  const provenance = req.provenance
+  if (provenance !== 'official-registry' && provenance !== 'developer-local-unpacked') {
+    throw new InstallError(`plugin '${manifest.id}' is missing explicit install provenance`)
+  }
+  const publisherId = v2 ? manifest.publisher : manifest.publisher ?? manifest.id.split('.')[0]
+  if (provenance === 'official-registry' && (!manifest.publisher || manifest.publisher !== manifest.id.split('.')[0])) {
+    throw new InstallError(`Registry package '${manifest.id}' has no valid publisher identity`)
+  }
   const packageVerification = verifyPackage({
     bytes,
     expectedDigest: req.expectedDigest,
@@ -292,7 +324,7 @@ export async function prepareInstall(
   let registryEvidence: PreparedInstall['registryEvidence']
   let official = false
 
-  if (v2) {
+  if (provenance === 'official-registry') {
     if (!req.registryEnvelope || !req.trustMetadata || !req.target) {
       throw new PluginVerifyError(
         'SIGNATURE_REQUIRED',
@@ -318,8 +350,9 @@ export async function prepareInstall(
         packageId: manifest.id,
         version: manifest.version,
         target: req.target,
-        publisherId: manifest.publisher,
+        publisherId,
       },
+      expectedHostTarget: trust.expectedTarget ?? currentPluginHostTarget(),
       now: trust.now,
     })
     const requestedRegistryUrl = new URL(req.registryUrl).toString().replace(/\/+$/, '')
@@ -344,7 +377,7 @@ export async function prepareInstall(
       receipt: registryReceiptFromEvidence({
         packageId: manifest.id,
         version: manifest.version,
-        publisherId: manifest.publisher,
+        publisherId,
         target: req.target,
         artifactDigest: packageVerification.digest,
         envelope: req.registryEnvelope,
@@ -359,16 +392,16 @@ export async function prepareInstall(
     }
   }
 
-  if (v2 && trustTier !== TRUST_SIGNED) {
+  if (provenance === 'official-registry' && trustTier !== TRUST_SIGNED) {
     throw new PluginVerifyError(
       'SIGNATURE_REQUIRED',
-      `plugin '${manifest.id}' is unsigned; Manifest v2 marketplace installs require a registry signature`
+      `plugin '${manifest.id}' is unsigned; Registry installs require a verified Registry signature`
     )
   }
 
   // The v2 Registry envelope binds publisherId to packageId before this point.
   // Keep the publisher-key check only for the bounded v1 compatibility path.
-  if (!v2) {
+  if (provenance !== 'official-registry' && !v2) {
     assertOfficialPublisher(manifest.id, req.publicKey, trustTier, resolveOfficialPublisherKey())
     official = isOfficialPluginId(manifest.id)
   }
@@ -376,7 +409,7 @@ export async function prepareInstall(
   return {
     id: manifest.id,
     version: manifest.version,
-    publisherId: isManifestV2(manifest) ? manifest.publisher : manifest.id.split('.')[0],
+    publisherId,
     manifest,
     entries,
     trustTier,
@@ -388,6 +421,7 @@ export async function prepareInstall(
     digest: packageVerification.digest,
     signature: v2 ? req.registrySignature ?? null : req.signature ?? null,
     registryEvidence,
+    provenance,
   }
 }
 
@@ -398,11 +432,58 @@ export async function prepareInstall(
  * launch descriptor when the package contributes views; backend-only packages
  * return undefined and are discovered through the activation catalog.
  */
-export function commitInstall(
+export interface InstallTransaction {
+  descriptor: PluginLaunchDescriptor | undefined
+  rollback(): void
+  finalize(): void
+}
+
+function writePreparedPackage(
+  prepared: PreparedInstall,
+  targetDir: string,
+  backendEntry: string | undefined,
+  safeEntries: readonly { entry: ZipEntry; path: string }[],
+  deps: InstallerDeps
+): void {
+  for (const { entry, path } of safeEntries) {
+    const target = join(targetDir, path)
+    if (entry.type === 'directory') {
+      deps.mkdirp(target)
+    } else if (entry.type === 'regular') {
+      deps.mkdirp(dirname(target))
+      deps.writeFile(target, entry.data)
+      if (path === backendEntry) deps.chmod(target, 0o700)
+    } else {
+      throw new InstallError(`archive entry is not a regular file: ${entry.path}`)
+    }
+  }
+  if (prepared.registryEvidence) {
+    deps.mkdirp(targetDir)
+    deps.writeFile(join(targetDir, REGISTRY_ARTIFACT_NAME), prepared.registryEvidence.artifact)
+    deps.writeFile(
+      join(targetDir, REGISTRY_RECEIPT_NAME),
+      new TextEncoder().encode(JSON.stringify(prepared.registryEvidence.receipt, null, 2))
+    )
+  } else if (prepared.official && prepared.signature) {
+    const receipt: OfficialReceipt = {
+      id: prepared.id,
+      version: prepared.version,
+      digest: prepared.digest,
+      signature: prepared.signature,
+    }
+    deps.mkdirp(targetDir)
+    deps.writeFile(
+      join(targetDir, OFFICIAL_RECEIPT_NAME),
+      new TextEncoder().encode(JSON.stringify(receipt, null, 2))
+    )
+  }
+}
+
+export function commitInstallTransaction(
   prepared: PreparedInstall,
   pluginsRoot: string,
   deps: InstallerDeps = defaultInstallerDeps
-): PluginLaunchDescriptor | undefined {
+): InstallTransaction {
   const dir = join(pluginsRoot, prepared.id)
   assertSafeArchiveEntries(prepared.entries)
   const safeEntries = prepared.entries.map((entry) => ({
@@ -428,45 +509,123 @@ export function commitInstall(
       prepared.registryEvidence.trustSnapshot
     )
   }
-  deps.rmrf(dir) // idempotent replace (fresh install or update)
-  for (const { entry, path } of safeEntries) {
-    const target = join(dir, path)
-    if (entry.type === 'directory') {
-      deps.mkdirp(target)
-    } else if (entry.type === 'regular') {
-      deps.mkdirp(dirname(target))
-      deps.writeFile(target, entry.data)
-      if (path === backendEntry) deps.chmod(target, 0o700)
+  const previousSnapshot = deps.readFile(trustSnapshotPath)
+  const atomic = deps.rename !== undefined && deps.pathExists !== undefined
+  const stagingRoot = join(pluginsRoot, PLUGIN_STAGING_DIR)
+  const stagingDir = join(stagingRoot, `${prepared.id}.${randomUUID()}`)
+  const quarantineRoot = join(pluginsRoot, PLUGIN_QUARANTINE_DIR)
+  const previousDirExists = atomic && deps.pathExists!(dir)
+  const backupDir = previousDirExists
+    ? join(quarantineRoot, `${prepared.id}.previous`)
+    : undefined
+  let previousDirMoved = false
+  let committed = false
+  let rolledBack = false
+  let finalized = false
+
+  const restoreSnapshot = (): void => {
+    if (!prepared.registryEvidence) return
+    const currentSnapshot = deps.readFile(trustSnapshotPath)
+    const unchanged =
+      (currentSnapshot === null && previousSnapshot === null) ||
+      (currentSnapshot !== null &&
+        previousSnapshot !== null &&
+        Buffer.from(currentSnapshot).equals(Buffer.from(previousSnapshot)))
+    if (unchanged) return
+    if (previousSnapshot) deps.writeFile(trustSnapshotPath, previousSnapshot)
+    else deps.rmrf(trustSnapshotPath)
+  }
+  const quarantinePath = (path: string, label: string): void => {
+    if (!atomic || !deps.rename || !deps.pathExists || !deps.pathExists(path)) return
+    const target = join(quarantineRoot, `${prepared.id}.${label}.${randomUUID()}`)
+    try {
+      deps.mkdirp(quarantineRoot)
+      deps.rename(path, target)
+    } catch {
+      // Preserve the failed package if the forensic move itself fails. The
+      // marker keeps it out of every activation and Registry-refresh scan.
+      try {
+        deps.writeFile(
+          join(path, PLUGIN_QUARANTINE_MARKER),
+          new TextEncoder().encode(JSON.stringify({ label, packageId: prepared.id }))
+        )
+      } catch {
+        // The original failure remains authoritative; do not delete evidence.
+      }
+    }
+  }
+
+  try {
+    const targetDir = atomic ? stagingDir : dir
+    if (atomic) deps.mkdirp(stagingRoot)
+    else deps.rmrf(dir)
+    writePreparedPackage(prepared, targetDir, backendEntry, safeEntries, deps)
+
+    if (atomic) {
+      if (previousDirExists && backupDir) {
+        deps.mkdirp(quarantineRoot)
+        if (deps.pathExists!(backupDir)) deps.rmrf(backupDir)
+        deps.rename!(dir, backupDir)
+        previousDirMoved = true
+      }
+      deps.rename!(stagingDir, dir)
+      committed = true
+    }
+    if (prepared.registryEvidence) {
+      const writeTrustSnapshot = deps.writeRegistryTrustSnapshot ?? writeRegistryTrustSnapshot
+      writeTrustSnapshot(pluginsRoot, prepared.registryEvidence.trustSnapshot)
+    }
+  } catch (error) {
+    if (atomic) {
+      if (committed) quarantinePath(dir, 'failed')
+      quarantinePath(stagingDir, 'staging-failed')
+      if (previousDirMoved && backupDir && deps.pathExists!(backupDir) && !deps.pathExists!(dir)) {
+        deps.rename!(backupDir, dir)
+      }
+      restoreSnapshot()
     } else {
-      throw new InstallError(`archive entry is not a regular file: ${entry.path}`)
+      deps.rmrf(dir)
     }
+    throw error
   }
-  // Official installs persist the verified digest + signature so the loader
-  // can re-verify against the pinned key on every startup (see
-  // `verifyOfficialInstall` in installedPlugins.ts).
-  if (prepared.registryEvidence) {
-    deps.mkdirp(dir)
-    deps.writeFile(join(dir, REGISTRY_ARTIFACT_NAME), prepared.registryEvidence.artifact)
-    deps.writeFile(
-      join(dir, REGISTRY_RECEIPT_NAME),
-      new TextEncoder().encode(JSON.stringify(prepared.registryEvidence.receipt, null, 2))
-    )
-    const writeTrustSnapshot = deps.writeRegistryTrustSnapshot ?? writeRegistryTrustSnapshot
-    writeTrustSnapshot(pluginsRoot, prepared.registryEvidence.trustSnapshot)
-  } else if (prepared.official && prepared.signature) {
-    const receipt: OfficialReceipt = {
-      id: prepared.id,
-      version: prepared.version,
-      digest: prepared.digest,
-      signature: prepared.signature,
-    }
-    deps.mkdirp(dir)
-    deps.writeFile(
-      join(dir, OFFICIAL_RECEIPT_NAME),
-      new TextEncoder().encode(JSON.stringify(receipt, null, 2))
-    )
+
+  return {
+    descriptor,
+    rollback: (): void => {
+      if (rolledBack || finalized) return
+      rolledBack = true
+      if (atomic) {
+        if (committed) quarantinePath(dir, 'failed')
+        quarantinePath(stagingDir, 'staging-failed')
+        if (backupDir && deps.pathExists!(backupDir) && !deps.pathExists!(dir)) {
+          deps.rename!(backupDir, dir)
+        }
+      } else {
+        deps.rmrf(dir)
+      }
+      restoreSnapshot()
+    },
+    finalize: (): void => {
+      if (rolledBack || finalized) return
+      finalized = true
+      // Keep one explicitly named normal previous package for bounded recovery.
+      // Rejected packages use different forensic labels and remain untouched;
+      // neither category is in the scan path.
+    },
   }
-  return descriptor
+}
+
+/** Commit a verified package immediately. IPC uses commitInstallTransaction so
+ * post-write verification, manager registration, and consent persistence can
+ * finish before finalize(). */
+export function commitInstall(
+  prepared: PreparedInstall,
+  pluginsRoot: string,
+  deps: InstallerDeps = defaultInstallerDeps
+): PluginLaunchDescriptor | undefined {
+  const transaction = commitInstallTransaction(prepared, pluginsRoot, deps)
+  transaction.finalize()
+  return transaction.descriptor
 }
 
 /** Remove an installed plugin's directory. Idempotent. */

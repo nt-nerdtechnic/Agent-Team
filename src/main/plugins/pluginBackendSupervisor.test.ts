@@ -1,5 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { EventEmitter } from 'node:events'
 import { fileURLToPath } from 'node:url'
+import { PassThrough } from 'node:stream'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   BackendPluginError,
@@ -42,12 +44,51 @@ function makeSupervisor(
   return new PluginBackendSupervisor(activation, {
     ...overrides,
     environment: overrides.environment ?? { NAVIDE_FIXTURE: 'backend-wire' },
-    spawnProcess: (entryFile, options) =>
+    spawnProcess: overrides.spawnProcess ?? ((entryFile, options) =>
       spawn(process.execPath, [entryFile], {
         ...options,
         env: options.env,
-      }) as ChildProcessWithoutNullStreams,
+      }) as ChildProcessWithoutNullStreams),
   })
+}
+
+function makeControlledChild(generation: number): ChildProcessWithoutNullStreams {
+  const child = new EventEmitter()
+  const stdin = new PassThrough()
+  const stdout = new PassThrough()
+  const stderr = new PassThrough()
+  let exited = false
+  stdin.on('data', (chunk: Buffer) => {
+    for (const line of chunk.toString('utf8').trim().split('\n')) {
+      if (!line) continue
+      const frame = JSON.parse(line) as { id?: string | number; method?: string }
+      if (frame.id === undefined) continue
+      stdout.write(
+        `${JSON.stringify({
+          jsonrpc: '2.0',
+          id: frame.id,
+          result: {
+            resultType: 'complete',
+            value: { generation },
+            _meta: { 'io.modelcontextprotocol/serverInfo': { name: 'controlled', version: '1.0.0' } },
+          },
+        })}\n`
+      )
+    }
+  })
+  const kill = (): boolean => {
+    if (exited) return true
+    exited = true
+    queueMicrotask(() => child.emit('exit', 0, null))
+    return true
+  }
+  return Object.assign(child, {
+    stdin,
+    stdout,
+    stderr,
+    kill,
+    pid: generation,
+  }) as unknown as ChildProcessWithoutNullStreams
 }
 
 describe('PluginBackendSupervisor', () => {
@@ -449,6 +490,38 @@ describe('PluginBackendSupervisor', () => {
     ).resolves.toEqual({ ok: true })
     await vi.waitFor(() => expect(received).toHaveLength(1))
     expect(received[0].payload).toEqual({ recovered: true })
+  })
+
+  it('ignores late events from a previous child generation', async () => {
+    const children: ChildProcessWithoutNullStreams[] = []
+    const stderr: string[] = []
+    const supervisor = makeSupervisor({
+      onStderr: (chunk) => stderr.push(chunk),
+      spawnProcess: () => {
+        const child = makeControlledChild(children.length + 1)
+        children.push(child)
+        return child
+      },
+    })
+    supervisors.push(supervisor)
+
+    await supervisor.start()
+    await expect(
+      supervisor.clientFor(authenticatedRuntime).call('fixture.echo', null)
+    ).resolves.toEqual({ generation: 1 })
+    await supervisor.restart()
+
+    const previous = children[0]
+    ;(previous.stdout as unknown as PassThrough).write(
+      '{"jsonrpc":"2.0","id":"late-old-response","error":{"code":-32600,"message":"late"}}\n'
+    )
+    ;(previous.stderr as unknown as PassThrough).write('late old stderr')
+    previous.emit('exit', 0, null)
+
+    await expect(
+      supervisor.clientFor(authenticatedRuntime).call('fixture.echo', null)
+    ).resolves.toEqual({ generation: 2 })
+    expect(stderr).toEqual([])
   })
 
   it('requires an explicit child environment and does not inherit the host environment', async () => {

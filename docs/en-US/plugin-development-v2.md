@@ -786,11 +786,13 @@ it does not restrict filesystem, network, subprocess, or OS access.
   and future backend spawn. A newly revoked running frontend plugin is stopped
   and quarantined; the later Electron backend supervisor must enforce the same
   decision before and during backend execution.
-- Developer Mode accepts one explicitly selected local unpacked Manifest v2
-  frontend directory only when `AGENT_TEAM_PLUGIN_DEV=1` and
-  `AGENT_TEAM_PLUGIN_DEV_PATH` names that exact directory. It validates the
-  strict manifest, rejects reserved ids and backend contributions, and records
-  a persistent unsigned/local-only warning. The existing fixed dist-plugins
+- Developer Mode accepts one explicitly selected local unpacked Manifest v1 or
+  Manifest v2 frontend directory only when `AGENT_TEAM_PLUGIN_DEV=1` and
+  `AGENT_TEAM_PLUGIN_DEV_PATH` names that exact directory. Manifest v1 is a
+  bounded local compatibility path: it remains unsigned and local-only, must
+  be explicitly selected by the user, and cannot obtain Registry provenance.
+  Both versions reject reserved ids and backend contributions and record a
+  persistent unsigned/local-only warning. The existing fixed dist-plugins
   bundles remain Host-owned app-development fixtures, not this package
   selection path. Developer Mode packages cannot publish, auto-update, execute
   backend code, or claim Registry provenance.

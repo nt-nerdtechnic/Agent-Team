@@ -12,7 +12,7 @@ import {
 } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { planPublicCapabilityCall } from './pluginCapabilityBroker'
@@ -70,26 +70,6 @@ function runPnpmOrThrow(args: string[], cwd: string): CommandResult {
   return result
 }
 
-function runNpmOrThrow(args: string[], cwd: string, cacheDirectory: string): CommandResult {
-  const result = spawnSync(join(dirname(process.execPath), 'npm'), args, {
-    cwd,
-    encoding: 'utf8',
-    env: { ...subprocessEnvironment(), npm_config_cache: cacheDirectory },
-    maxBuffer: 16 * 1024 * 1024,
-  })
-  if (result.error) throw result.error
-  if (result.status !== 0) {
-    throw new Error(
-      `npm ${args.join(' ')} failed in ${cwd}\n${result.stdout ?? ''}\n${result.stderr ?? ''}`
-    )
-  }
-  return {
-    status: result.status,
-    stdout: result.stdout ?? '',
-    stderr: result.stderr ?? '',
-  }
-}
-
 function runExternalCli(args: string[], cwd: string): CommandResult {
   const bin = join(cwd, 'node_modules', '.bin', 'navide-plugin')
   const result = spawnSync(bin, args, {
@@ -108,6 +88,63 @@ function runExternalCli(args: string[], cwd: string): CommandResult {
 
 function writeManifest(directory: string, manifest: unknown): void {
   writeFileSync(join(directory, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`)
+}
+
+function resolveInstalledPackageDirectory(
+  repository: string,
+  packageName: string,
+  require: NodeRequire
+): string {
+  try {
+    return dirname(realpathSync(require.resolve(`${packageName}/package.json`)))
+  } catch {
+    const pnpmStore = join(repository, 'node_modules', '.pnpm')
+    const packageDirectory = readdirSync(pnpmStore).find((entry) =>
+      entry.startsWith(`${packageName.replace('/', '+')}@`)
+    )
+    if (!packageDirectory) {
+      throw new Error(`Could not locate installed package ${packageName}`)
+    }
+    return dirname(
+      realpathSync(join(pnpmStore, packageDirectory, 'node_modules', packageName, 'package.json'))
+    )
+  }
+}
+
+function packInstalledPackage(
+  packageName: string,
+  packageDirectory: string,
+  artifacts: string
+): string {
+  const result = runPnpmOrThrow(['pack', '--pack-destination', artifacts], packageDirectory)
+  const tarball = result.stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line.endsWith('.tgz'))
+  if (!tarball) throw new Error(`pnpm pack did not report a tarball for ${packageName}`)
+  return realpathSync(tarball.startsWith('/') ? tarball : join(artifacts, tarball))
+}
+
+function normalizePnpmStorePath(versionedStorePath: string): string {
+  const versionDirectory = basename(versionedStorePath)
+  if (!/^v\d+$/.test(versionDirectory)) {
+    throw new Error(`pnpm store path must end with a version directory: ${versionedStorePath}`)
+  }
+  return dirname(versionedStorePath)
+}
+
+describe('pnpm store path normalization', () => {
+  it('removes the pnpm version directory before passing --store-dir', () => {
+    expect(normalizePnpmStorePath('/Users/test/Library/pnpm/store/v11')).toBe(
+      '/Users/test/Library/pnpm/store'
+    )
+  })
+})
+
+function installedPnpmStorePath(repository: string): string {
+  const storePath = runPnpmOrThrow(['store', 'path'], repository).stdout.trim()
+  if (!storePath) throw new Error('pnpm store path returned an empty path')
+  return normalizePnpmStorePath(storePath)
 }
 
 describe('third-party plugin external workspace', () => {
@@ -153,24 +190,23 @@ describe('third-party plugin external workspace', () => {
         }
 
         const require = createRequire(import.meta.url)
-        const typescriptPackageDirectory = dirname(
-          realpathSync(require.resolve('typescript/package.json'))
-        )
-        const typescriptPackage = runNpmOrThrow(
-          ['pack', typescriptPackageDirectory, '--pack-destination', artifacts],
+        const typescriptPackageDirectory = resolveInstalledPackageDirectory(
           repository,
-          join(temporaryRoot, 'npm-cache')
+          'typescript',
+          require
         )
-        const typescriptTarball = typescriptPackage.stdout
-          .split('\n')
-          .map((line) => line.trim())
-          .find((line) => line.endsWith('.tgz'))
-        if (!typescriptTarball) throw new Error('npm pack did not report a TypeScript tarball')
-        const localTypeScriptTarball = realpathSync(
-          typescriptTarball.startsWith('/')
-            ? typescriptTarball
-            : join(artifacts, typescriptTarball)
+        const typescriptTarball = packInstalledPackage(
+          'typescript',
+          typescriptPackageDirectory,
+          artifacts
         )
+        const vitePackageDirectory = resolveInstalledPackageDirectory(repository, 'vite', require)
+        const viteTarball = packInstalledPackage(
+          'vite',
+          vitePackageDirectory,
+          artifacts
+        )
+        const pnpmStorePath = installedPnpmStorePath(repository)
 
         cpSync(join(repository, 'examples', 'third-party-files'), externalProject, {
           recursive: true,
@@ -183,7 +219,8 @@ describe('third-party plugin external workspace', () => {
         for (const packageName of Object.keys(packageTarballs)) {
           externalPackageJson.dependencies[packageName] = `file:${packageTarballs[packageName]}`
         }
-        externalPackageJson.devDependencies.typescript = `file:${localTypeScriptTarball}`
+        externalPackageJson.devDependencies.typescript = `file:${typescriptTarball}`
+        externalPackageJson.devDependencies.vite = `file:${viteTarball}`
         writeFileSync(externalPackageJsonPath, `${JSON.stringify(externalPackageJson, null, 2)}\n`)
 
         expect(JSON.stringify(externalPackageJson)).not.toContain('workspace:')
@@ -191,12 +228,18 @@ describe('third-party plugin external workspace', () => {
         expect(
           Object.values(externalPackageJson.dependencies).every((value) => value.startsWith('file:'))
         ).toBe(true)
-        expect(
-          Object.values(externalPackageJson.devDependencies).every((value) => value.startsWith('file:'))
-        ).toBe(true)
+        expect(externalPackageJson.devDependencies.typescript).toBe(`file:${typescriptTarball}`)
+        expect(externalPackageJson.devDependencies.vite).toBe(`file:${viteTarball}`)
 
         runPnpmOrThrow(
-          ['install', '--offline', '--ignore-scripts', '--lockfile=false'],
+          [
+            'install',
+            '--offline',
+            '--ignore-scripts',
+            '--lockfile=false',
+            '--store-dir',
+            pnpmStorePath,
+          ],
           externalProject
         )
         runPnpmOrThrow(['run', 'typecheck'], externalProject)
@@ -223,6 +266,13 @@ describe('third-party plugin external workspace', () => {
           id: 'acme.files',
           permissions: { system: ['fs'] },
         })
+        const builtEntry = readFileSync(
+          join(externalProject, 'dist', 'package', 'frontend', 'main.js'),
+          'utf8'
+        )
+        expect(builtEntry).not.toMatch(/(?:from|import)\s*['"](?:@|[A-Za-z])/)
+        expect(readFileSync(join(externalProject, 'dist', 'package', 'frontend', 'index.html'), 'utf8'))
+          .toContain('./main.js')
 
         const validationRoot = join(temporaryRoot, 'validation-cases')
         cpSync(join(externalProject, 'dist', 'package'), validationRoot, { recursive: true })
@@ -322,6 +372,7 @@ describe('third-party plugin external workspace', () => {
         const pluginModule = await import(
           `${pathToFileURL(join(externalProject, 'dist', 'package', 'frontend', 'main.js')).href}?smoke=1`
         )
+        expect(pluginModule.plugin).toBeDefined()
         const HostPluginError = contractsModule.PluginError as new (
           code: string,
           message: string

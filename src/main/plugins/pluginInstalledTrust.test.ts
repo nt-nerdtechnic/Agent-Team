@@ -138,6 +138,64 @@ describe('verifyInstalledRegistryPackage', () => {
     })
   })
 
+  it('revalidates a retained Registry v1 package after restart', () => {
+    const legacyDir = join(root, 'acme.legacy')
+    mkdirSync(legacyDir, { recursive: true })
+    const legacyManifest = JSON.stringify({
+      id: 'acme.legacy',
+      version: '1.0.0',
+      publisher: 'acme',
+      requires: ['git'],
+      entry: 'index.html',
+    })
+    const legacyArchive = new Uint8Array(
+      makeZip([
+        { name: 'manifest.json', data: legacyManifest },
+        { name: 'index.html', data: '<!doctype html>' },
+      ])
+    )
+    const legacyEnvelope: RegistryPackageEnvelope = {
+      ...envelope,
+      packageId: 'acme.legacy',
+      publisherId: 'acme',
+      artifactDigest: sha256Hex(legacyArchive),
+    }
+    writeFileSync(join(legacyDir, 'manifest.json'), legacyManifest)
+    writeFileSync(join(legacyDir, 'index.html'), '<!doctype html>')
+    writeFileSync(join(legacyDir, REGISTRY_ARTIFACT_NAME), legacyArchive)
+    writeFileSync(
+      join(legacyDir, REGISTRY_RECEIPT_NAME),
+      JSON.stringify(
+        registryReceiptFromEvidence({
+          packageId: 'acme.legacy',
+          version: '1.0.0',
+          publisherId: 'acme',
+          target: 'universal',
+          artifactDigest: sha256Hex(legacyArchive),
+          envelope: legacyEnvelope,
+          envelopeSignature: signed(legacyEnvelope),
+        })
+      )
+    )
+
+    expect(verifyInstalledRegistryPackage(legacyDir, 'acme.legacy', context())).toMatchObject({
+      action: 'allow',
+    })
+    writeFileSync(join(legacyDir, REGISTRY_ARTIFACT_NAME), Buffer.from('tampered artifact'))
+    expect(verifyInstalledRegistryPackage(legacyDir, 'acme.legacy', context()).action).toBe('quarantine')
+    writeFileSync(join(legacyDir, REGISTRY_ARTIFACT_NAME), legacyArchive)
+    writeFileSync(join(legacyDir, 'manifest.json'), legacyManifest.replace('acme.legacy', 'acme.other'))
+    expect(verifyInstalledRegistryPackage(legacyDir, 'acme.legacy', context()).action).toBe('quarantine')
+    writeFileSync(join(legacyDir, 'manifest.json'), legacyManifest)
+    expect(
+      verifyInstalledRegistryPackage(
+        legacyDir,
+        'acme.legacy',
+        context({ ...metadata, blockedPublishers: ['acme'] })
+      ).action
+    ).toBe('quarantine')
+  })
+
   it('quarantines an installed package whose extracted content changed', () => {
     writeFileSync(join(pluginDir, 'frontend', 'index.html'), 'tampered')
     expect(verifyInstalledRegistryPackage(pluginDir, 'acme.demo', context())).toMatchObject({

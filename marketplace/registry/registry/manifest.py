@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from .manifest_v1 import (
     KNOWN_CAPABILITIES,
+    LEGACY_CAPABILITY_ORDER,
     LEGACY_KNOWN_CAPABILITIES,
     CommandContribution,
     Contributes,
@@ -94,10 +95,27 @@ def manifest_capabilities(
     permissions = manifest.get("permissions")
     if isinstance(permissions, dict):
         system = permissions.get("system")
-        capabilities = [str(value) for value in system] if isinstance(system, list) else []
+        if isinstance(system, list):
+            capabilities = [str(value) for value in system]
+            if permissions.get("shell") is not None:
+                capabilities.append("shell")
+            return capabilities
+
+        # Bounded read-only adapter for legacy DB rows written before
+        # permissions became namespaced. The legacy lists lived inside the
+        # stored permissions object; strict manifest parsing never accepts
+        # this shape and all new writes continue to use the canonical v2
+        # object.
+        legacy_namespaces = [
+            key
+            for key in LEGACY_CAPABILITY_ORDER
+            if isinstance(permissions.get(key), list)
+        ]
+        if legacy_namespaces:
+            return legacy_namespaces
         if permissions.get("shell") is not None:
-            capabilities.append("shell")
-        return capabilities
+            return ["shell"]
+        return []
     requires = manifest.get("requires", [])
     if isinstance(requires, list):
         return [str(value) for value in requires]

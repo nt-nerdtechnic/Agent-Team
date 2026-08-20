@@ -1047,7 +1047,7 @@ export class FrontendPluginManager {
   }
 
   /**
-   * Load exactly one Host-selected Manifest v2 frontend package for Developer
+   * Load exactly one Host-selected frontend package for Developer
    * Mode. This intentionally reads the selected directory only; it never
    * scans a parent directory or turns an arbitrary package tree into a
    * registry-like inventory. Backend contributions remain fail-closed.
@@ -1065,25 +1065,27 @@ export class FrontendPluginManager {
     const scanned = loadPluginDir(packageDir)
     if (scanned.error) return { loaded: false, error: scanned.error }
     const activation = scanned.activation
-    if (!activation || !scanned.packageSummary) {
+    const descriptor = scanned.descriptor
+    const pluginId = activation?.pluginId ?? descriptor?.id
+    if (!pluginId || !scanned.packageSummary) {
       return {
         loaded: false,
-        error: 'Developer Mode requires a valid Manifest v2 frontend package',
+        error: 'Developer Mode requires a valid frontend package',
       }
     }
-    if (activation.backend) {
+    if (activation?.backend) {
       return { loaded: false, error: 'Developer Mode cannot load backend contributions' }
     }
-    if (!scanned.descriptor) {
+    if (!descriptor) {
       return {
         loaded: false,
-        error: 'Developer Mode requires a valid Manifest v2 frontend package',
+        error: 'Developer Mode requires a valid frontend package',
       }
     }
-    if (isReservedPluginId(activation.pluginId)) {
+    if (isReservedPluginId(pluginId)) {
       return {
         loaded: false,
-        error: `Developer Mode cannot claim reserved plugin id '${activation.pluginId}'`,
+        error: `Developer Mode cannot claim reserved plugin id '${pluginId}'`,
       }
     }
     const summary: InstalledPluginPackageSummary = {
@@ -1092,11 +1094,11 @@ export class FrontendPluginManager {
       warning: 'Unsigned local unpacked plugin — Developer Mode only',
     }
     try {
-      this.registerInstalledPackage(summary, scanned.descriptor)
+      this.registerInstalledPackage(summary, descriptor)
     } catch (error) {
       return { loaded: false, error: error instanceof Error ? error.message : String(error) }
     }
-    return { loaded: true, pluginId: activation.pluginId }
+    return { loaded: true, pluginId }
   }
 
   /** Replace one installed package's inventory and optional frontend descriptor
@@ -1142,7 +1144,7 @@ export class FrontendPluginManager {
    * Scan an installed-plugins root and register a descriptor for every valid
    * plugin found. A directory with an invalid manifest is skipped and returned
    * in `errors` rather than aborting the scan. The returned activation catalog
-   * contains only validated, trusted v2 packages whose optional frontend
+   * contains only validated, trusted package contributions whose optional frontend
    * registration succeeded; `loaded` retains its descriptor-only meaning.
    */
   loadInstalledPlugins(
@@ -1175,9 +1177,11 @@ export class FrontendPluginManager {
       if (includePluginIds && !includePluginIds.has(pluginId)) continue
 
       const isV2 = scanned.activation !== undefined
-      if (isV2 && source?.provenance !== 'developer-local-unpacked') {
-        if (source?.provenance !== 'official-registry') {
-          errors.push(`${scanned.dir}: Registry trust context is required for Manifest v2`)
+      if (source?.provenance === 'official-registry') {
+        if (isReservedPluginId(pluginId) && !hasOfficialRegistryAuthority(source.trust)) {
+          errors.push(
+            `${scanned.dir}: reserved plugin id '${pluginId}' requires the App-authorized Official Registry`
+          )
           continue
         }
         const decision = verifyInstalledRegistryPackage(scanned.dir, pluginId, source.trust)
@@ -1190,7 +1194,7 @@ export class FrontendPluginManager {
           scanned.activation.provenance = 'official-registry'
           scanned.activation.artifactDigest = decision.artifactDigest
         }
-      } else if (isV2) {
+      } else if (source?.provenance === 'developer-local-unpacked') {
         if (isReservedPluginId(pluginId)) {
           errors.push(
             `${scanned.dir}: Developer Mode cannot claim reserved plugin id '${pluginId}'`
@@ -1200,17 +1204,17 @@ export class FrontendPluginManager {
         scanned.packageSummary.provenance = 'developer-local-unpacked'
         scanned.packageSummary.warning = 'Unsigned local unpacked plugin — Developer Mode only'
         if (scanned.activation) scanned.activation.provenance = 'developer-local-unpacked'
+      } else if (isV2) {
+        errors.push(`${scanned.dir}: Registry trust context is required for Manifest v2`)
+        continue
       }
 
       // Reserved backend-only packages must pass the same receipt gate as view
       // packages before any contribution can enter the activation catalog.
       let opts: { official?: boolean } = {}
       if (isReservedPluginId(pluginId)) {
-        if (isV2) {
-          if (
-            source?.provenance === 'official-registry' &&
-            hasOfficialRegistryAuthority(source.trust)
-          ) {
+        if (source?.provenance === 'official-registry') {
+          if (hasOfficialRegistryAuthority(source.trust)) {
             opts = { official: true }
           } else {
             errors.push(
@@ -1218,14 +1222,6 @@ export class FrontendPluginManager {
             )
             continue
           }
-        } else if (
-          source?.provenance === 'official-registry' &&
-          !hasOfficialRegistryAuthority(source.trust)
-        ) {
-          errors.push(
-            `${scanned.dir}: reserved plugin id '${pluginId}' requires the App-authorized Official Registry`
-          )
-          continue
         } else {
           const check = verifyOfficialInstall(scanned.dir, pluginId, resolveOfficialPublisherKey())
           if (!check.ok) {
@@ -1276,13 +1272,14 @@ export class FrontendPluginManager {
     return { loaded, errors, activationCatalog }
   }
 
-  /** Re-evaluate installed v2 packages after a root-signed trust/blocklist
+  /** Re-evaluate installed Registry packages after a root-signed trust/blocklist
    * refresh. A quarantine only stops/unregisters frontend state; it never
    * deletes the retained package evidence. A future backend supervisor must
    * consume these same decisions before spawn and when trust changes. */
   refreshInstalledPluginTrust(
     root: string,
-    trust: InstalledRegistryTrustContext
+    trust: InstalledRegistryTrustContext,
+    includePluginIds?: ReadonlySet<string>
   ): Array<{ pluginId: string; action: 'allow' | 'quarantine'; reason?: string }> {
     const decisions: Array<{
       pluginId: string
@@ -1290,8 +1287,9 @@ export class FrontendPluginManager {
       reason?: string
     }> = []
     for (const scanned of scanInstalledPlugins(root)) {
-      const pluginId = scanned.activation?.pluginId
+      const pluginId = scanned.activation?.pluginId ?? scanned.descriptor?.id
       if (!pluginId) continue
+      if (includePluginIds && !includePluginIds.has(pluginId)) continue
       const decision = verifyInstalledRegistryPackage(scanned.dir, pluginId, trust)
       if (
         decision.action === 'allow' &&

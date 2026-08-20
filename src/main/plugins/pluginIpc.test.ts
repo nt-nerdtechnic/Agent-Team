@@ -137,11 +137,12 @@ function buildBackendPkg(): { bytes: Uint8Array; digest: string } {
   return { bytes, digest: sha256Hex(bytes) }
 }
 
-function buildLegacyPkg(): { bytes: Uint8Array; digest: string } {
+function buildLegacyPkg(requires: string[] = []): { bytes: Uint8Array; digest: string } {
   const manifest = JSON.stringify({
     id: 'acme.demo',
     version: '1.0.0',
-    requires: [],
+    publisher: 'acme',
+    requires,
     entry: 'dist/main.js',
   })
   const bytes = new Uint8Array(
@@ -768,11 +769,44 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
       const listHandler = handlers.get('plugins:listInstalled')
       const removeHandler = handlers.get('plugins:remove')
       if (!listHandler || !removeHandler) throw new Error('inventory handlers not registered')
-      expect(listHandler(null)).toEqual([{ id: 'acme.demo', requires: [], sensitive: [] }])
+      expect(listHandler(null)).toEqual([{
+        id: 'acme.demo',
+        requires: [],
+        sensitive: [],
+        provenance: 'official-registry',
+      }])
 
       expect(removeHandler(null, { id: 'acme.demo' })).toEqual({ ok: true })
       expect(listHandler(null)).toEqual([])
       expect(existsSync(join(root, 'acme.demo'))).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('requires publisher consent for a Registry v1 package even with legacy non-sensitive requires', async () => {
+    const { bytes, digest } = buildLegacyPkg(['git'])
+    installFetch(signedDetail(digest), bytes, digest)
+    const root = mkdtempSync(join(tmpdir(), 'navide-v1-publisher-consent-'))
+    try {
+      const manager = new FrontendPluginManager()
+      const prepareHandler = register(root, manager)
+      const prepared = (await prepareHandler(null, {
+        namespace: 'acme',
+        name: 'demo',
+      })) as { requiresPublisherTrust: boolean; requiresConfirmation: boolean }
+      expect(prepared.requiresPublisherTrust).toBe(true)
+      expect(prepared.requiresConfirmation).toBe(false)
+      const commitHandler = handlers.get('plugins:commitInstall')
+      if (!commitHandler) throw new Error('commitInstall handler not registered')
+      expect(() => commitHandler(null, { id: 'acme.demo' })).toThrow(/publisher trust confirmation/)
+      expect(commitHandler(null, { id: 'acme.demo', publisherConfirmed: true })).toEqual({
+        id: 'acme.demo',
+        requires: ['git'],
+      })
+      expect(manager.listInstalledPackages()).toEqual([
+        { id: 'acme.demo', requires: ['git'], provenance: 'official-registry' },
+      ])
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -898,7 +932,7 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
         })
       },
     ],
-  ] as const)('clears stale state when %s fails after a replacement starts', async (_label, injectFailure) => {
+  ] as const)('restores the previous install when %s fails after a replacement starts', async (_label, injectFailure) => {
     const { bytes, digest } = buildBackendPkg()
     installFetch(signedDetail(digest), bytes, digest)
     const root = mkdtempSync(join(tmpdir(), 'navide-install-failure-'))
@@ -924,7 +958,7 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
         })
       ).toEqual({ id: 'acme.demo', requires: [] })
       expect(manager.listInstalledPackages()).toEqual([
-        { id: 'acme.demo', requires: [] },
+        { id: 'acme.demo', requires: [], provenance: 'official-registry' },
       ])
       expect(active.has('acme.demo')).toBe(true)
 
@@ -939,18 +973,23 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
           riskConfirmed: true,
         })
       ).toThrow(/test .* failure/)
-      expect(manager.listInstalledPackages()).toEqual([])
-      expect(active.has('acme.demo')).toBe(false)
-      expect(projectBackendPluginActivationCatalog([...active.values()])).toEqual({
-        schemaVersion: 1,
-        packages: [],
-      })
+      expect(manager.listInstalledPackages()).toEqual([
+        { id: 'acme.demo', requires: [], provenance: 'official-registry' },
+      ])
+      expect(active.has('acme.demo')).toBe(true)
+      expect(projectBackendPluginActivationCatalog([...active.values()]).packages).toEqual([
+        expect.objectContaining({
+          pluginId: 'acme.demo',
+          packageDir: join(root, 'acme.demo'),
+          artifactDigest: digest,
+        }),
+      ])
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
   })
 
-  it('clears stale state when post-commit verification throws after a replacement starts', async () => {
+  it('restores the previous install when post-commit verification throws after a replacement starts', async () => {
     const { bytes, digest } = buildBackendPkg()
     installFetch(signedDetail(digest), bytes, digest)
     const root = mkdtempSync(join(tmpdir(), 'navide-post-commit-failure-'))
@@ -993,12 +1032,17 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
           riskConfirmed: true,
         })
       ).toThrow(/test post-commit verification failure/)
-      expect(manager.listInstalledPackages()).toEqual([])
-      expect(active.has('acme.demo')).toBe(false)
-      expect(projectBackendPluginActivationCatalog([...active.values()])).toEqual({
-        schemaVersion: 1,
-        packages: [],
-      })
+      expect(manager.listInstalledPackages()).toEqual([
+        { id: 'acme.demo', requires: [], provenance: 'official-registry' },
+      ])
+      expect(active.has('acme.demo')).toBe(true)
+      expect(projectBackendPluginActivationCatalog([...active.values()]).packages).toEqual([
+        expect.objectContaining({
+          pluginId: 'acme.demo',
+          packageDir: join(root, 'acme.demo'),
+          artifactDigest: digest,
+        }),
+      ])
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -1116,7 +1160,7 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
         commitHandler(null, { id: 'acme.demo', publisherConfirmed: true })
       ).toEqual({ id: 'acme.demo', requires: [] })
       expect(manager.listInstalledPackages()).toEqual([
-        { id: 'acme.demo', requires: [] },
+        { id: 'acme.demo', requires: [], provenance: 'official-registry' },
       ])
     } finally {
       if (previousUrl === undefined) delete process.env['AGENT_TEAM_MARKETPLACE_URL']
@@ -1189,7 +1233,38 @@ describe('plugins:prepareInstall wire → verifier mapping', () => {
         })
       ).toThrow(/installed package file was modified/)
       expect(manager.listInstalledPackages()).toEqual([])
-      expect(existsSync(join(root, 'acme.demo', '.navide-package.zip'))).toBe(true)
+      expect(existsSync(join(root, 'acme.demo', '.navide-package.zip'))).toBe(false)
+      expect(existsSync(join(root, '.navide-quarantine'))).toBe(true)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('does not resurrect a package when trust expires after prepare', async () => {
+    const { bytes, digest } = buildPkg()
+    installFetch(signedDetail(digest), bytes, digest)
+    const root = mkdtempSync(join(tmpdir(), 'navide-expired-after-prepare-'))
+    const installTrust: InstallerTrustConfig = { ...TRUST_CONFIG, now: new Date(FIXED_NOW) }
+    try {
+      const manager = new FrontendPluginManager()
+      const controller = registerPluginIpc(manager, root, () => true, installTrust)
+      const prepareHandler = handlers.get('plugins:prepareInstall')
+      const commitHandler = handlers.get('plugins:commitInstall')
+      if (!prepareHandler || !commitHandler) throw new Error('install handlers not registered')
+      await prepareHandler(null, { namespace: 'acme', name: 'demo' })
+      installTrust.now = new Date('2026-08-18T12:00:00.000Z')
+      expect(() =>
+        commitHandler(null, { id: 'acme.demo', publisherConfirmed: true })
+      ).toThrow(/expired/)
+      expect(manager.listInstalledPackages()).toEqual([])
+      expect(existsSync(join(root, 'acme.demo'))).toBe(false)
+
+      await expect(controller.refreshRegistryTrust()).resolves.toMatchObject({
+        decisions: [],
+        activationCatalog: [],
+      })
+      expect(manager.listInstalledPackages()).toEqual([])
+      expect(existsSync(join(root, 'acme.demo'))).toBe(false)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

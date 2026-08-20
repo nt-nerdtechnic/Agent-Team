@@ -10,7 +10,7 @@
 // This loader covers third-party installs; bundled builtin directories are
 // validated through the same `loadPluginDir` path.
 
-import { closeSync, lstatSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs'
+import { closeSync, existsSync, lstatSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'node:fs'
 import { TextDecoder } from 'node:util'
 import { join } from 'node:path'
 import { verifyEd25519 } from './pluginVerify'
@@ -26,6 +26,11 @@ import {
   type PluginManifestV2,
 } from './pluginManifest'
 import type { PluginLaunchDescriptor, PluginViewLaunchDescriptor } from './frontendPluginManager'
+import {
+  PLUGIN_QUARANTINE_DIR,
+  PLUGIN_QUARANTINE_MARKER,
+  PLUGIN_STAGING_DIR,
+} from './pluginInstallPaths'
 
 export {
   assertManifestFiles,
@@ -314,11 +319,13 @@ export interface InstalledPluginPackageSummary {
 }
 
 export function manifestToInstalledPackageSummary(
-  manifest: InstalledManifest
+  manifest: InstalledManifest,
+  provenance?: InstalledPluginPackageSummary['provenance']
 ): InstalledPluginPackageSummary {
   return {
     id: manifest.id,
     requires: manifestCapabilities(manifest),
+    ...(provenance ? { provenance } : {}),
   }
 }
 
@@ -368,9 +375,11 @@ export function scanInstalledPlugins(root: string): ScannedPlugin[] {
   }
   const out: ScannedPlugin[] = []
   for (const name of names) {
+    if (name === PLUGIN_QUARANTINE_DIR || name === PLUGIN_STAGING_DIR) continue
     const dir = join(root, name)
     try {
       if (!statSync(dir).isDirectory()) continue
+      if (existsSync(join(dir, PLUGIN_QUARANTINE_MARKER))) continue
     } catch {
       continue
     }

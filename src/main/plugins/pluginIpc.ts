@@ -12,10 +12,11 @@
 // main-side, keyed by id, until commit.
 
 import { app, BrowserWindow, ipcMain, type IpcMainInvokeEvent } from 'electron'
+import { readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import {
   prepareInstall,
-  commitInstall,
+  commitInstallTransaction,
   removePlugin,
   type PreparedInstall,
   type InstallerTrustConfig,
@@ -23,6 +24,7 @@ import {
 import {
   sensitiveCapabilities,
   assertRegistryUrlAllowed,
+  sha256Hex,
 } from './pluginVerify'
 import type { RegistryPackageEnvelope, RegistryTrustMetadata } from './pluginRegistryTrust'
 import { verifyRegistryTrustMetadata } from './pluginRegistryTrust'
@@ -32,6 +34,7 @@ import {
 } from './pluginRegistryRootApproval'
 import {
   isManifestV2,
+  loadPluginDir,
   manifestToActivation,
   manifestToInstalledPackageSummary,
   type PluginActivationCatalogEntry,
@@ -39,12 +42,14 @@ import {
 import { isValidManifestV2PluginId } from './pluginManifestV2'
 import { PluginPublisherTrustStore } from './pluginPublisherTrust'
 import {
+  REGISTRY_ARTIFACT_NAME,
   readRegistryTrustSnapshot,
   discoverInstalledRegistryPackageIds,
   verifyInstalledRegistryPackage,
   writeRegistryTrustSnapshot,
   type InstalledTrustDecision,
 } from './pluginInstalledTrust'
+import { currentPluginHostTarget } from './pluginTarget'
 import type { FrontendPluginManager } from './frontendPluginManager'
 
 /** Development-only endpoint. It is intentionally not the official Registry
@@ -70,6 +75,7 @@ export function resolveConfiguredMarketplace(
         ...explicitTrust,
         registryAuthority: explicitTrust.registryAuthority ?? 'self-hosted',
         officialRegistryUrl: explicitTrust.officialRegistryUrl ?? OFFICIAL_MARKETPLACE_URL,
+        expectedTarget: explicitTrust.expectedTarget ?? currentPluginHostTarget(),
       },
     }
   }
@@ -87,6 +93,7 @@ export function resolveConfiguredMarketplace(
       pinnedRegistryRootKey: resolved.rootPublicKey,
       registryAuthority: resolved.authority,
       officialRegistryUrl: OFFICIAL_MARKETPLACE_URL,
+      expectedTarget: currentPluginHostTarget(),
     },
   }
 }
@@ -171,7 +178,7 @@ export function registerPluginIpc(
   options: PluginIpcOptions = {}
 ): PluginTrustRefreshController {
   // Packages verified by prepareInstall, awaiting a commit, keyed by plugin id.
-  const prepared = new Map<string, { pkg: PreparedInstall; trust: InstallerTrustConfig }>()
+  const prepared = new Map<string, { pkg: PreparedInstall }>()
 
   const assertAuthorized = (event: IpcMainInvokeEvent): void => {
     if (!authorizeSender(event)) throw new Error('unauthorized plugin management request')
@@ -251,8 +258,9 @@ export function registerPluginIpc(
         trustMetadata: detail.trust_metadata,
         trustMetadataSignature: detail.trust_metadata_signature,
         claimedTrustTier: versionRow.trust_tier,
+        provenance: 'official-registry',
       }, undefined, marketplace.trust)
-      prepared.set(result.id, { pkg: result, trust: marketplace.trust })
+      prepared.set(result.id, { pkg: result })
       return {
         id: result.id,
         version: result.version,
@@ -279,7 +287,11 @@ export function registerPluginIpc(
       assertAuthorized(event)
       const pending = prepared.get(args.id)
       if (!pending) throw new Error(`no prepared install for ${args.id}; call prepareInstall first`)
-      const { pkg, trust: preparedTrust } = pending
+      const { pkg } = pending
+      // Re-resolve Host-owned trust at commit time. Prepare-time evidence is
+      // retained for the transaction, but expiry, root approval, and target
+      // policy must not be frozen across the renderer confirmation round trip.
+      const commitTrust = resolveConfiguredMarketplace(trust).trust
       const publisherRequiresTrust =
         pkg.registryEvidence !== undefined &&
         !pkg.official &&
@@ -291,11 +303,32 @@ export function registerPluginIpc(
         throw new Error(`capability and backend risk confirmation is required for ${args.id}`)
       }
       // Persist this explicit, package-scoped publisher decision separately
-      // from installation and capability grants. A failed package write does
-      // not retroactively erase the user's publisher decision.
-      if (publisherRequiresTrust) publisherTrust.trust(pkg.publisherId, pkg.id)
+      // from installation and capability grants only after the package has
+      // passed post-write verification and manager registration.
+      const previousSummary = manager.listInstalledPackages().find((item) => item.id === pkg.id)
+      const previousDescriptor = manager.getDescriptor(pkg.id)
+      const previousActivation =
+        previousSummary?.provenance === 'official-registry'
+          ? loadPluginDir(join(pluginsRoot, pkg.id)).activation
+          : undefined
+      const previousArtifactDigest = previousActivation
+        ? (() => {
+            try {
+              return sha256Hex(
+                new Uint8Array(
+                  readFileSync(join(pluginsRoot, pkg.id, REGISTRY_ARTIFACT_NAME))
+                )
+              )
+            } catch {
+              return undefined
+            }
+          })()
+        : undefined
+      let transaction: ReturnType<typeof commitInstallTransaction> | undefined
+      let publisherConsentPersisted = false
       try {
-        const descriptor = commitInstall(pkg, pluginsRoot)
+        transaction = commitInstallTransaction(pkg, pluginsRoot)
+        const descriptor = transaction.descriptor
         let verifiedArtifactDigest: string | undefined
         if (pkg.registryEvidence) {
           const verifyCommitted =
@@ -306,34 +339,75 @@ export function registerPluginIpc(
                 snapshot: readRegistryTrustSnapshot(pluginsRoot),
                 registryAuthority: trustConfig.registryAuthority,
                 officialRegistryUrl: trustConfig.officialRegistryUrl,
+                expectedTarget: trustConfig.expectedTarget ?? currentPluginHostTarget(),
                 now: trustConfig.now,
               }))
-          const decision = verifyCommitted(join(pluginsRoot, pkg.id), pkg.id, preparedTrust)
+          const decision = verifyCommitted(join(pluginsRoot, pkg.id), pkg.id, commitTrust)
           if (decision.action === 'quarantine') {
             prepared.delete(args.id)
             throw new Error(`installed plugin quarantined: ${decision.reason}`)
           }
           verifiedArtifactDigest = decision.artifactDigest
         }
-        const summary = manifestToInstalledPackageSummary(pkg.manifest)
+        const summary = manifestToInstalledPackageSummary(pkg.manifest, pkg.provenance)
+        let activation: PluginActivationCatalogEntry | undefined
+        if (pkg.registryEvidence && isManifestV2(pkg.manifest)) {
+          activation = manifestToActivation(pkg.manifest, join(pluginsRoot, pkg.id))
+          activation.provenance = 'official-registry'
+          activation.artifactDigest = verifiedArtifactDigest
+        }
         // `official` was earned in prepareInstall (Host-authorized Official
         // Registry check); it
         // is what allows a verified `navide.` install to claim its reserved id.
         options.onActivationChange?.({ pluginId: pkg.id })
         manager.registerInstalledPackage(summary, descriptor, { official: pkg.official })
-        prepared.delete(args.id)
-        if (pkg.registryEvidence && isManifestV2(pkg.manifest)) {
-          const activation = manifestToActivation(pkg.manifest, join(pluginsRoot, pkg.id))
-          activation.provenance = 'official-registry'
-          activation.artifactDigest = verifiedArtifactDigest
-          if (activation.backend) options.onActivationChange?.({ pluginId: pkg.id, activation })
+        if (publisherRequiresTrust) {
+          publisherTrust.trust(pkg.publisherId, pkg.id)
+          publisherConsentPersisted = true
         }
+        if (activation?.backend) options.onActivationChange?.({ pluginId: pkg.id, activation })
+        transaction.finalize()
+        prepared.delete(args.id)
         return {
           id: pkg.id,
           requires: summary.requires,
         }
       } catch (error) {
+        if (publisherConsentPersisted) {
+          try {
+            publisherTrust.revoke(pkg.publisherId, pkg.id)
+          } catch {
+            // Preserve the original install failure if consent cleanup fails.
+          }
+        }
+        try {
+          transaction?.rollback()
+        } catch {
+          // Preserve the original install failure if quarantine/rollback fails.
+        }
         cleanupFailedPluginInstall(manager, options.onActivationChange, pkg.id)
+        if (previousSummary) {
+          try {
+            manager.registerInstalledPackage(
+              previousSummary,
+              previousDescriptor,
+              { official: previousSummary.provenance === 'official-registry' }
+            )
+            if (previousSummary.provenance === 'official-registry') {
+              if (previousActivation && previousArtifactDigest) {
+                const activation = {
+                  ...previousActivation,
+                  provenance: 'official-registry' as const,
+                  artifactDigest: previousArtifactDigest,
+                }
+                options.onActivationChange?.({ pluginId: pkg.id, activation })
+              }
+            }
+          } catch {
+            // Preserve the original install failure if a manager restoration
+            // itself cannot be completed.
+          }
+        }
         throw error
       }
     }
@@ -390,8 +464,9 @@ export function registerPluginIpc(
           snapshot,
           registryAuthority: marketplace.trust.registryAuthority,
           officialRegistryUrl: marketplace.trust.officialRegistryUrl,
+          expectedTarget: marketplace.trust.expectedTarget ?? currentPluginHostTarget(),
           now: marketplace.trust.now,
-        })
+        }, new Set([...packageIds, ...activeRegistryPackages]))
         for (const decision of refreshed) {
           if (decision.action === 'quarantine') {
             options.onActivationChange?.({ pluginId: decision.pluginId })
@@ -451,6 +526,7 @@ export function registerPluginIpc(
           snapshot,
           registryAuthority: marketplace.trust.registryAuthority,
           officialRegistryUrl: marketplace.trust.officialRegistryUrl,
+          expectedTarget: marketplace.trust.expectedTarget ?? currentPluginHostTarget(),
           now: marketplace.trust.now,
         }
         const activeBeforeRefresh = new Set(
@@ -459,7 +535,11 @@ export function registerPluginIpc(
             .filter((pkg) => pkg.provenance === 'official-registry')
             .map((pkg) => pkg.id)
         )
-        const refreshedDecisions = manager.refreshInstalledPluginTrust(pluginsRoot, currentTrust)
+        const refreshedDecisions = manager.refreshInstalledPluginTrust(
+          pluginsRoot,
+          currentTrust,
+          new Set([...packageIds, ...activeBeforeRefresh])
+        )
         for (const decision of refreshedDecisions) {
           if (decision.action === 'quarantine') {
             options.onActivationChange?.({ pluginId: decision.pluginId })

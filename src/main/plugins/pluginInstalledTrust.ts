@@ -1,4 +1,5 @@
 import {
+  existsSync,
   lstatSync,
   mkdirSync,
   readFileSync,
@@ -11,8 +12,6 @@ import { join, relative, sep } from 'node:path'
 import {
   parseInstalledManifest,
   parseManifestJson,
-  isManifestV2,
-  type PluginManifestV2,
 } from './pluginManifest'
 import { readManifestFromEntries, readZipEntries } from './pluginPackage'
 import {
@@ -28,6 +27,9 @@ import {
   readHostTrustJsonObject,
   requireTrustObject,
 } from './pluginTrustJson'
+import { currentPluginHostTarget } from './pluginTarget'
+import type { InstalledManifest } from './pluginManifest'
+import { PLUGIN_QUARANTINE_MARKER } from './pluginInstallPaths'
 
 export const REGISTRY_RECEIPT_NAME = '.navide-registry-receipt.json'
 export const REGISTRY_ARTIFACT_NAME = '.navide-package.zip'
@@ -57,6 +59,8 @@ export interface InstalledRegistryTrustContext {
   snapshot: RegistryTrustSnapshot | null
   registryAuthority?: RegistryAuthority
   officialRegistryUrl?: string
+  /** Host-derived target expected during every load/refresh revalidation. */
+  expectedTarget?: string
   now?: Date
 }
 
@@ -143,19 +147,17 @@ function parseTrustSnapshot(raw: Record<string, unknown>): RegistryTrustSnapshot
   return raw as unknown as RegistryTrustSnapshot
 }
 
-function archiveManifest(bytes: Uint8Array): PluginManifestV2 {
+function archiveManifest(bytes: Uint8Array): InstalledManifest {
   const entries = readZipEntries(bytes)
   assertSafeArchiveEntries(entries)
   const manifest = parseInstalledManifest(readManifestFromEntries(entries))
-  if (!isManifestV2(manifest)) throw new Error('retained Registry artifact is not Manifest v2')
   return manifest
 }
 
-function installedManifest(pluginDir: string): PluginManifestV2 {
+function installedManifest(pluginDir: string): InstalledManifest {
   const manifest = parseInstalledManifest(
     parseManifestJson(readFileSync(join(pluginDir, 'manifest.json'), 'utf8'))
   )
-  if (!isManifestV2(manifest)) throw new Error('installed Registry package is not Manifest v2')
   return manifest
 }
 
@@ -213,11 +215,12 @@ export function verifyInstalledRegistryPackage(
     const archiveBytes = new Uint8Array(readFileSync(join(pluginDir, REGISTRY_ARTIFACT_NAME)))
     const digest = sha256Hex(archiveBytes)
     const manifest = archiveManifest(archiveBytes)
+    const publisherId = manifest.publisher ?? manifest.id.split('.')[0]
     if (
       receipt.packageId !== expectedPackageId ||
       receipt.packageId !== manifest.id ||
       receipt.version !== manifest.version ||
-      receipt.publisherId !== manifest.publisher ||
+      receipt.publisherId !== publisherId ||
       receipt.artifactDigest !== digest
     ) {
       throw new Error('Registry receipt identity does not match the retained artifact')
@@ -233,8 +236,9 @@ export function verifyInstalledRegistryPackage(
         packageId: manifest.id,
         version: manifest.version,
         target: receipt.target,
-        publisherId: manifest.publisher,
+        publisherId,
       },
+      expectedHostTarget: trust.expectedTarget ?? currentPluginHostTarget(),
       now: trust.now,
     })
     if (receipt.registryAuthority !== (trust.registryAuthority ?? 'self-hosted')) {
@@ -252,7 +256,7 @@ export function verifyInstalledRegistryPackage(
 
 /** Discover refresh candidates from retained Host evidence without treating
  * the package as active or trusted. The identity must agree across the direct
- * child directory, Host receipt, and validated retained v2 manifest. */
+ * child directory, Host receipt, and validated retained v1/v2 manifest. */
 export function discoverInstalledRegistryPackageIds(pluginsRoot: string): string[] {
   const packageIds = new Set<string>()
   let entries: Dirent[]
@@ -265,6 +269,7 @@ export function discoverInstalledRegistryPackageIds(pluginsRoot: string): string
     if (!entry.isDirectory()) continue
     const pluginDir = join(pluginsRoot, entry.name)
     try {
+      if (existsSync(join(pluginDir, PLUGIN_QUARANTINE_MARKER))) continue
       const receipt = parseReceipt(pluginDir)
       const installed = installedManifest(pluginDir)
       const manifest = archiveManifest(
@@ -275,7 +280,8 @@ export function discoverInstalledRegistryPackageIds(pluginsRoot: string): string
         installed.id !== entry.name ||
         manifest.id !== entry.name ||
         installed.version !== manifest.version ||
-        installed.publisher !== manifest.publisher
+        (installed.publisher ?? installed.id.split('.')[0]) !==
+          (manifest.publisher ?? manifest.id.split('.')[0])
       ) {
         continue
       }

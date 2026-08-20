@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from registry.manifest import ManifestError, parse_manifest
+from registry.manifest import ManifestError, manifest_capabilities, parse_manifest
+from registry.trust import sensitive_capabilities
 from registry.versions import latest_version, version_key
 from tests.fixtures import contract_manifest, valid_manifest
 
@@ -202,6 +203,48 @@ def test_all_client_capabilities_accepted() -> None:
     all_caps = ["fs", "git", "terminal", "search", "chat", "ui", "issues"]
     m = parse_manifest(valid_manifest(requires=all_caps))
     assert m.requires == all_caps
+
+
+def test_legacy_registry_metadata_permissions_are_adapted_for_reading_only() -> None:
+    legacy_row = contract_manifest()
+    legacy_row["permissions"] = {
+        "git": ["read"],
+        "terminal": ["run"],
+        "fs": ["read"],
+        "ui": ["openInEditor"],
+        "search": ["query"],
+        "chat": ["send"],
+        "issues": ["read"],
+        "plans": ["read"],
+    }
+    assert manifest_capabilities(legacy_row) == [
+        "fs",
+        "git",
+        "terminal",
+        "search",
+        "chat",
+        "ui",
+        "issues",
+        "plans",
+    ]
+    assert sensitive_capabilities(manifest_capabilities(legacy_row)) == ["fs", "terminal"]
+    with pytest.raises(ManifestError):
+        parse_manifest(legacy_row)
+
+
+def test_stored_v2_metadata_does_not_read_legacy_keys_with_canonical_system() -> None:
+    row = contract_manifest()
+    row["permissions"] = {"system": ["ui"], "fs": ["read"], "git": ["read"]}
+    assert manifest_capabilities(row) == ["ui"]
+
+
+def test_v2_metadata_does_not_fall_back_to_legacy_permission_keys() -> None:
+    row = {
+        "schemaVersion": 2,
+        "permissions": {"system": ["ui"]},
+        "fs": ["read"],
+    }
+    assert manifest_capabilities(row) == ["ui"]
 
 
 def test_bad_activation_event_rejected() -> None:
