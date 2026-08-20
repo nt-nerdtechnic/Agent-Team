@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
+import { i18n } from '../../i18n'
 import StageTabBar, { type TabItem } from '../StageTabBar.vue'
 
 // Coverage for run-group tab drag-reorder on the StageTabBar. Tab drags carry
@@ -10,9 +11,9 @@ import StageTabBar, { type TabItem } from '../StageTabBar.vue'
 // existing 'move-pane' behavior; self-drops are ignored.
 
 const tabs: TabItem[] = [
-  { key: 'rg-1', label: 'Claude', count: 2, type: 'stage' },
-  { key: 'rg-2', label: 'Codex', count: 1, type: 'stage' },
-  { key: 'manual', label: '手動', count: 1, type: 'manual' }
+  { key: 'rg-1', label: 'Claude', count: 2, type: 'stage', status: 'active' },
+  { key: 'rg-2', label: 'Codex', count: 1, type: 'stage', status: 'idle' },
+  { key: 'manual', label: '手動', count: 1, type: 'manual', status: 'idle' }
 ]
 
 /** DragEvent stand-in: happy-dom has no DataTransfer, so dispatch a plain
@@ -35,7 +36,7 @@ describe('StageTabBar – tab drag-reorder', () => {
   let wrapper: VueWrapper
 
   beforeEach(() => {
-    wrapper = mount(StageTabBar, { props: { tabs, modelValue: 'rg-1' } })
+    wrapper = mount(StageTabBar, { props: { tabs, modelValue: 'rg-1' }, global: { plugins: [i18n] } })
   })
 
   afterEach(() => {
@@ -108,7 +109,8 @@ describe('StageTabBar – tab drag-reorder', () => {
 describe('StageTabBar – rebuild all', () => {
   it('emits rebuild-all from the refresh control', async () => {
     const wrapper = mount(StageTabBar, {
-      props: { tabs, modelValue: 'rg-1', canRebuildAll: true }
+      props: { tabs, modelValue: 'rg-1', canRebuildAll: true },
+      global: { plugins: [i18n] }
     })
 
     await wrapper.get('.tab-rebuild-all-btn').trigger('click')
@@ -119,7 +121,8 @@ describe('StageTabBar – rebuild all', () => {
 
   it('disables the refresh control when no pane can rebuild or a batch is running', async () => {
     const wrapper = mount(StageTabBar, {
-      props: { tabs, modelValue: 'rg-1', canRebuildAll: false }
+      props: { tabs, modelValue: 'rg-1', canRebuildAll: false },
+      global: { plugins: [i18n] }
     })
     const button = wrapper.get<HTMLButtonElement>('.tab-rebuild-all-btn')
 

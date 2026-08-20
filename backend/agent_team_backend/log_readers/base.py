@@ -172,6 +172,51 @@ def encode_claude_cwd(cwd: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "-", cwd.rstrip("/"))
 
 
+# ── activity dedup: line-scan high-water mark ─────────────────────────────
+#
+# parse_activity's `seen_keys` is a per-file bag the watcher keeps for the life
+# of the file (see LogWatcher._activity_seen). Readers that scan a text log from
+# line 1 in ascending order used to put one `act:{line_no}` key in it per line,
+# which meant the bag grew forever with the transcript: measured 2026-08-18,
+# 452,693 live keys two minutes into a startup scan, pinning 481 MB of pymalloc
+# arenas the interpreter can never hand back (GitHub #23). Those keys carry no
+# information a single integer doesn't — after a scan to line N the set holds
+# exactly lines 1..N — so such readers record one sentinel instead.
+#
+# Only valid for a strictly ascending, dense line counter where every line the
+# reader does not skip *before* the seen test is marked. A reader keyed on db
+# row ids, byte offsets, per-session sequence numbers, or one that deliberately
+# leaves a malformed line unmarked so a later poll re-reads it, must keep exact
+# per-item keys.
+_ACTIVITY_HW_PREFIX = "act_hw::"
+
+
+def activity_high_water(seen_keys: set[str]) -> int:
+    """Highest line already parsed out of this file, or 0 for a fresh scan."""
+    for k in seen_keys:
+        if k.startswith(_ACTIVITY_HW_PREFIX):
+            try:
+                return int(k[len(_ACTIVITY_HW_PREFIX):])
+            except ValueError:
+                return 0
+    return 0
+
+
+def set_activity_high_water(seen_keys: set[str], line_no: int) -> None:
+    """Record progress through `line_no`, replacing any earlier mark.
+
+    Never moves backwards: a truncated or rewritten file leaves the old mark
+    standing, which is exactly what the per-line keys used to do.
+    """
+    current = activity_high_water(seen_keys)
+    if line_no <= current:
+        return
+    seen_keys.difference_update(
+        {k for k in seen_keys if k.startswith(_ACTIVITY_HW_PREFIX)}
+    )
+    seen_keys.add(f"{_ACTIVITY_HW_PREFIX}{line_no}")
+
+
 class LogReader(ABC):
     """Abstract reader for one CLI vendor's local conversation logs.
 

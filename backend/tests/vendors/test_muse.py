@@ -21,7 +21,7 @@ import pytest
 from agent_team_backend.cli_vendors.muse import SPEC, MuseLogReader
 from agent_team_backend.cli_vendors.registry import VENDORS, vendor
 from agent_team_backend.log_readers.attribution import Attribution
-from agent_team_backend.log_readers.base import TokenUsage
+from agent_team_backend.log_readers.base import TokenUsage, activity_high_water
 
 # The session DIRECTORY's name — the only id `muse resume` accepts.
 _SID = "b3ef50f0-e347-4887-a498-c7c16c3aa11e"
@@ -580,6 +580,86 @@ def test_non_turn_intake_records_are_not_user_prompts(
     })
     _write_jsonl(f, [_metadata(), cancel])
     assert MuseLogReader().parse_activity(f, set()) == []
+
+
+# ── activity: the seen_keys bag stays O(1) ───────────────────────────────────
+# seen_keys lives as long as session.jsonl, so a walk must leave one
+# high-water mark in it, not a key per line (GitHub #23).
+
+def _long_session(f: Path, turns: int) -> int:
+    """Write `turns` intake/assistant/terminal cycles; return the line count."""
+    records: list[dict] = [_metadata()]
+    for i in range(turns):
+        base = 10 * (i + 1)
+        records.append(_intake(f"ask {i}", seq=base))
+        records.append(_assistant(f"reply {i}", base + 1))
+        records.append(_terminal(base + 2))
+    _write_jsonl(f, records)
+    return len(records)
+
+
+def test_activity_seen_keys_stay_constant_size(fake_muse_root: Path) -> None:
+    reader = MuseLogReader()
+    f = _session_file(fake_muse_root)
+    lines = _long_session(f, 200)
+    seen: set[str] = set()
+
+    reader.parse_activity(f, seen)
+
+    assert [k for k in seen if k.startswith("act:")] == []
+    assert len([k for k in seen if k.startswith("act_hw::")]) == 1
+    assert activity_high_water(seen) == lines
+
+
+def test_activity_long_session_reparse_does_not_reemit(
+    fake_muse_root: Path,
+) -> None:
+    reader = MuseLogReader()
+    f = _session_file(fake_muse_root)
+    _long_session(f, 200)
+    seen: set[str] = set()
+
+    assert reader.parse_activity(f, seen) != []
+    assert reader.parse_activity(f, seen) == []
+
+
+def test_activity_appended_line_keeps_its_dedup_keys(fake_muse_root: Path) -> None:
+    reader = MuseLogReader()
+    f = _session_file(fake_muse_root)
+    lines = _long_session(f, 3)
+    seen: set[str] = set()
+    reader.parse_activity(f, seen)
+
+    _append_jsonl(f, [_intake("one more", seq=900)])
+    fresh = reader.parse_activity(f, seen)
+
+    assert [(e.event_type, e.detail) for e in fresh] == [("agent_active", "user")]
+    assert fresh[0].dedup_key == f"act:{lines + 1}"
+    assert fresh[0].text == "one more"
+    assert activity_high_water(seen) == lines + 1
+
+
+def test_activity_text_sentinel_coexists_with_the_mark(
+    fake_muse_root: Path,
+) -> None:
+    """The carried assistant text shares the bag with the mark; the split-read
+    delivery above depends on neither evicting the other."""
+    reader = MuseLogReader()
+    seen: set[str] = set()
+    f = _session_file(fake_muse_root)
+    _write_jsonl(f, [_metadata(), _intake("hi"), _assistant("the answer", 32)])
+    reader.parse_activity(f, seen)
+
+    assert len([k for k in seen if k.startswith("act_hw::")]) == 1
+    assert [k for k in seen if k.startswith("muse_text::")] == [
+        "muse_text::the answer"
+    ]
+
+    _append_jsonl(f, [_terminal(41)])
+    turns = [
+        e for e in reader.parse_activity(f, seen) if e.event_type == "turn_complete"
+    ]
+    assert [e.text for e in turns] == ["the answer"]
 
 
 # ───────────────────────────── attribution binding ───────────────────────────

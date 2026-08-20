@@ -1,12 +1,18 @@
 <script setup lang="ts">
 import { ref, nextTick } from 'vue'
+import { useI18n } from 'vue-i18n'
 import RebuildIcon from './RebuildIcon.vue'
+import type { TabRunState } from '../lib/tabStatus'
 
 export interface TabItem {
   key: string
   label: string
   count: number
   type: 'stage' | 'manual'
+  /** Rolled-up state of the panes in this tab, shown as the leading dot.
+   *  Required rather than optional so the compiler points at every caller
+   *  that builds a TabItem when the vocabulary changes. */
+  status: TabRunState
 }
 
 const props = withDefaults(defineProps<{
@@ -31,6 +37,14 @@ const emit = defineEmits<{
   (e: 'detach', key: string, x: number, y: number): void
   (e: 'rebuild-all'): void
 }>()
+
+const { t } = useI18n()
+
+/** Hover text for the status dot. Kept on the dot rather than the whole tab so
+ *  it does not shadow the ✕ button's own title. */
+function statusTitle(status: TabRunState): string {
+  return t(`stageTab.status-${status}`)
+}
 
 const actionMenu = ref<{ show: boolean; key: string; x: number; y: number }>({ show: false, key: '', x: 0, y: 0 })
 
@@ -95,7 +109,8 @@ function onTabDragEnd(e: DragEvent, tab: TabItem): void {
 
 const editingKey = ref<string | null>(null)
 const editingName = ref('')
-const inputRef = ref<HTMLInputElement | null>(null)
+// A ref inside v-for collects into an ARRAY, so this is not a bare element.
+const inputRef = ref<HTMLInputElement | HTMLInputElement[] | null>(null)
 let _cancelledRename = false
 
 async function startRename(tab: TabItem): Promise<void> {
@@ -104,7 +119,8 @@ async function startRename(tab: TabItem): Promise<void> {
   editingKey.value = tab.key
   editingName.value = tab.label
   await nextTick()
-  inputRef.value?.select()
+  const input = Array.isArray(inputRef.value) ? inputRef.value[0] : inputRef.value
+  input?.select()
 }
 
 function commitRename(key: string): void {
@@ -138,6 +154,12 @@ function onRenameKeydown(e: KeyboardEvent, key: string): void {
         @dragleave="dragOverKey = (dragOverKey === tab.key ? null : dragOverKey)"
         @drop.prevent="onTabDrop($event, tab.key)"
       >
+        <span
+          class="tab-dot"
+          :data-state="tab.status"
+          :title="statusTitle(tab.status)"
+          :aria-label="statusTitle(tab.status)"
+        />
         <template v-if="editingKey === tab.key">
           <input
             ref="inputRef"
@@ -243,6 +265,19 @@ function onRenameKeydown(e: KeyboardEvent, key: string): void {
   background: var(--accent-subtle);
   border-bottom-color: var(--accent-focus);
 }
+
+/* Two colours plus grey, no animation: a pulsing dot per tab is exactly the
+   pattern that cost measurable WindowServer time before. Colours are the same
+   tokens the pane badges use, so idle means the same thing everywhere. */
+.tab-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--border-default);
+}
+.tab-dot[data-state='active'] { background: var(--success-fg); }
+.tab-dot[data-state='idle'] { background: var(--attention-emphasis); }
 
 .tab-close {
   display: inline-flex;

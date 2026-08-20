@@ -55,6 +55,8 @@ from ..log_readers.base import (
     IncrementalParseResult,
     LogReader,
     TokenUsage,
+    activity_high_water,
+    set_activity_high_water,
     user_prompt_text,
 )
 
@@ -504,23 +506,30 @@ class AiderLogReader(LogReader):
                 dedup_key=dedup_key, detail=detail, text=text,
             )
 
+        # Unlike the JSONL readers, this walk never skips a line outright: a
+        # seen line still has to update `section` and `prev_prompt`, so only
+        # the emitting work is gated on `is_new`. Every line of the file was
+        # marked seen — section headers included, blanks included — so the
+        # line number of the last one walked is the whole of what the per-line
+        # keys recorded. See log_readers.base.
+        high_water = activity_high_water(seen_keys)
+        last_line = high_water
+
         with fh:
             for line_no, raw in enumerate(fh, 1):
                 line = raw.rstrip("\r\n")
                 key = f"act:{line_no}"
+                is_new = line_no > high_water
+                last_line = line_no
                 m = _SECTION_RE.match(line)
                 if m:
                     # Header must update the section even when already seen —
                     # every walk restarts from line 1.
                     section = _slug(m, ns)
-                    if key not in seen_keys:
-                        seen_keys.add(key)
+                    if is_new:
                         pending = ""
                     prev_prompt = False
                     continue
-                is_new = key not in seen_keys
-                if is_new:
-                    seen_keys.add(key)
                 if not line.strip():
                     continue
                 if line.startswith("#### "):
@@ -551,6 +560,7 @@ class AiderLogReader(LogReader):
                         out.append(_event("agent_active", key, "output"))
                         emitted_output = True
 
+        set_activity_high_water(seen_keys, last_line)
         _write_pending_text(seen_keys, pending)
         return out
 

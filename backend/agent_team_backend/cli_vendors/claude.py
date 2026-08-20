@@ -54,8 +54,10 @@ from ..log_readers.base import (
     IncrementalParseResult,
     LogReader,
     TokenUsage,
+    activity_high_water,
     join_text_blocks,
     read_jsonl_tail,
+    set_activity_high_water,
     user_prompt_text,
 )
 
@@ -367,18 +369,25 @@ class ClaudeLogReader(LogReader):
         except OSError:
             return out
 
+        # Every non-blank line below marks itself seen on every branch, and the
+        # scan is a dense ascending walk from line 1, so one high-water mark is
+        # equivalent to the per-line keys this used to leave in seen_keys — and
+        # does not grow with the transcript. See log_readers.base.
+        high_water = activity_high_water(seen_keys)
+        last_line = high_water
+
         with fh:
             for line_no, raw in enumerate(fh, 1):
                 raw = raw.strip()
                 if not raw:
                     continue
-                key = f"act:{line_no}"
-                if key in seen_keys:
+                if line_no <= high_water:
                     continue
+                last_line = line_no
+                key = f"act:{line_no}"
                 try:
                     rec = json.loads(raw)
                 except json.JSONDecodeError:
-                    seen_keys.add(key)
                     continue
 
                 rtype = rec.get("type")
@@ -390,7 +399,6 @@ class ClaudeLogReader(LogReader):
                     # knows the agent is producing content. Text rides only on
                     # turn_complete (the sole event the frontend judges), so a
                     # tool-heavy turn doesn't broadcast its text on every line.
-                    seen_keys.add(key)
                     out.append(ActivityEvent(
                         vendor="claude",
                         event_type="agent_active",
@@ -422,7 +430,6 @@ class ClaudeLogReader(LogReader):
                             detail=stop_reason, text=_assistant_text(msg),
                         ))
                 elif rtype in ("tool_use", "user"):
-                    seen_keys.add(key)
                     # Real human prompts (same test as first_user_prompts:
                     # plain-string content, non-empty, not a "<...>" wrapper)
                     # carry their text so the frontend can name the pane.
@@ -440,9 +447,7 @@ class ClaudeLogReader(LogReader):
                         dedup_key=key, timestamp=ts,
                         detail=str(rtype), text=text,
                     ))
-                else:
-                    # Mark seen so we don't re-evaluate this line later.
-                    seen_keys.add(key)
+        set_activity_high_water(seen_keys, last_line)
         return out
 
 

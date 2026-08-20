@@ -1900,6 +1900,11 @@
     "id-exists": "ID already exists",
     "backend-start-failed": "Backend failed to start"
   },
+  "stageTab": {
+    "status-active": "Some CLIs in this tab are running",
+    "status-idle": "Every CLI in this tab is idle",
+    "status-empty": "This tab has no panes"
+  },
   "status": {
     "not-git-repo": "Not a Git repository",
     "merge-aborted": "Merge aborted — conflicts cancelled."

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from pathlib import Path
@@ -32,6 +33,19 @@ from watchdog.observers import Observer
 from .base import ActivityEvent, LogReader, TokenSinkResult, TokenUsage
 
 log = logging.getLogger("agent_team_backend.log_readers.watcher")
+
+# A file's activity dedup set holds one short key per line ever parsed from it
+# (see LogReader.parse_activity). It used to live for the whole process, so a
+# full-corpus scan pinned that memory permanently — and because those keys are
+# allocated interleaved with the transient json.loads garbage of the same scan,
+# they scatter across every pymalloc arena and stop CPython returning any of
+# them (an arena is only ever munmap'd once it is completely empty).
+# Measured 2026-08-18 on a zero-pane startup scan of 5209 transcripts:
+# 452,693 retained keys, ~47 MB of live strings/sets, holding 481 MB of arenas.
+# A file nothing has appended to in a week has no live pane left to notify, so
+# dropping its set costs only a replay that is already what every restart does.
+_ACTIVITY_SEEN_COLD_S = 7 * 24 * 3600.0
+_ACTIVITY_SEEN_SWEEP_S = 600.0
 
 TokenSink = Callable[[TokenUsage], Awaitable[TokenSinkResult | None]]
 ActivitySink = Callable[[ActivityEvent], Awaitable[None]]
@@ -122,11 +136,14 @@ class LogWatcher:
         self._checkpoint_provider = checkpoint_provider or self._local_checkpoint
         self._checkpoint_sink = checkpoint_sink or self._advance_local_checkpoint
         self._readers: list[LogReader] = []
-        # Activity dedup is in-memory only (lifetime-bound). On restart, we
-        # only emit *new* activity since the last seen line, but we don't try
-        # to "replay" history — old events have no semantic value to a
-        # newly-started watcher anyway.
+        # Activity dedup is in-memory only. On restart, we only emit *new*
+        # activity since the last seen line, but we don't try to "replay"
+        # history — old events have no semantic value to a newly-started
+        # watcher anyway. Per-file sets are dropped once the file goes cold
+        # (_sweep_activity_seen); it used to be lifetime-bound, which is how
+        # it became the backend's largest retained structure.
         self._activity_seen: dict[str, set[str]] = {}
+        self._activity_seen_swept_at = 0.0
         self._scan_mtimes: dict[str, float] = {}
         self._queue: asyncio.Queue[tuple[Path | None, str]] = asyncio.Queue()
         self._pending_token_paths: dict[tuple[str, str], Path] = {}
@@ -444,6 +461,39 @@ class LogWatcher:
                         files.append(p)
         return files
 
+    def _sweep_activity_seen(self, now: float) -> None:
+        """Drop the activity dedup set of every file that is gone or cold.
+
+        Runs at most every _ACTIVITY_SEEN_SWEEP_S off the rescan loop; `now`
+        is loop-monotonic, the mtime cutoff is wall-clock.
+
+        _scan_mtimes is only forgotten for files that are gone. A cold file
+        that still exists keeps its mtime entry so _files_to_scan does not
+        immediately re-enqueue it and rebuild the set we just dropped.
+        """
+        if now - self._activity_seen_swept_at < _ACTIVITY_SEEN_SWEEP_S:
+            return
+        self._activity_seen_swept_at = now
+        cutoff = time.time() - _ACTIVITY_SEEN_COLD_S
+        dropped = 0
+        keys = 0
+        for path in list(self._activity_seen):
+            try:
+                mtime: float | None = Path(path).stat().st_mtime
+            except OSError:
+                mtime = None
+            if mtime is not None and mtime >= cutoff:
+                continue
+            keys += len(self._activity_seen.pop(path, ()))
+            dropped += 1
+            if mtime is None:
+                self._scan_mtimes.pop(path, None)
+        if dropped:
+            log.info(
+                "activity dedup sweep: dropped %d file(s), %d key(s); %d file(s) still tracked",
+                dropped, keys, len(self._activity_seen),
+            )
+
     def _files_to_scan(self) -> list[Path]:
         """Backfill candidates whose mtime changed since the last sweep.
 
@@ -482,6 +532,8 @@ class LogWatcher:
                 self._watch_new_dirs()
                 for path in self._files_to_scan():
                     self._queue.put_nowait((path, ""))
+                if self._loop is not None:
+                    self._sweep_activity_seen(self._loop.time())
             except Exception as err:  # noqa: BLE001
                 log.warning("rescan sweep failed: %s", err)
             if first_scan:

@@ -1900,6 +1900,11 @@
     "id-exists": "ID 已存在",
     "backend-start-failed": "後端啟動失敗"
   },
+  "stageTab": {
+    "status-active": "這個分組有 CLI 正在執行",
+    "status-idle": "這個分組全部閒置",
+    "status-empty": "這個分組沒有 pane"
+  },
   "status": {
     "not-git-repo": "非 Git 儲存庫",
     "merge-aborted": "合併已中止 — 衝突已取消。"

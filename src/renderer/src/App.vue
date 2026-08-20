@@ -37,6 +37,7 @@ import {
   spawnAdvisoriesFor,
 } from './lib/agentSpawnGate'
 import StageTabBar, { type TabItem } from './components/StageTabBar.vue'
+import { rollupTabStatus, sameRenderedTabs } from './lib/tabStatus'
 import { useBackend } from './composables/useBackend'
 import { useTheme } from './composables/useTheme'
 import { useSettings } from './composables/useSettings'
@@ -10414,20 +10415,34 @@ async function deleteRunGroup(id: string): Promise<void> {
   _saveRunGroups()
 }
 
-const stageTabs = computed<TabItem[]>(() => {
-  // Count panes per persisted RunGroup; panes without runGroupId are surfaced
-  // through the synthetic "手動" tab, even when no real RunGroup remains.
-  const groupCounts: Record<string, number> = {}
-  let unassignedCount = 0
+/** A tab's structure, without the status dot: the pane ids are carried so the
+ *  dot can be rolled up in a second, cheaper computed.
+ *
+ *  The split is deliberate. Tab STRUCTURE changes only when panes or run groups
+ *  change; the status dot changes every 400 ms with paneViews. Consumers that
+ *  drive layout — tabFilteredPaneIds and everything downstream of it — depend on
+ *  the structure alone, so a ticking status never re-runs pane filtering or grid
+ *  sizing. Merging the two would make a quiet window recompute its whole grid
+ *  2.5 times a second. */
+type StageTabShape = Omit<TabItem, 'status'> & { paneIds: string[] }
+
+const stageTabShapes = computed<StageTabShape[]>(() => {
+  // Group panes by their persisted RunGroup; panes without runGroupId are
+  // surfaced through the synthetic "手動" tab, even when no real RunGroup
+  // remains.
+  const groupPaneIds = new Map<string, string[]>()
+  const unassignedPaneIds: string[] = []
   for (const p of panes.value) {
     if (p.runGroupId) {
-      groupCounts[p.runGroupId] = (groupCounts[p.runGroupId] ?? 0) + 1
+      const list = groupPaneIds.get(p.runGroupId)
+      if (list) list.push(p.id)
+      else groupPaneIds.set(p.runGroupId, [p.id])
     } else {
-      unassignedCount++
+      unassignedPaneIds.push(p.id)
     }
   }
 
-  const tabs: TabItem[] = []
+  const shapes: StageTabShape[] = []
   for (const group of runGroups.value) {
     // Detached child window shows ONLY its own group; a main window hides any
     // group it has handed off to a detached child. Both filters are inert for a
@@ -10437,16 +10452,52 @@ const stageTabs = computed<TabItem[]>(() => {
     } else if (detachedGroupIds.value.has(group.id)) {
       continue
     }
-    tabs.push({ key: group.id, label: group.name, count: groupCounts[group.id] ?? 0, type: 'stage' })
+    const paneIds = groupPaneIds.get(group.id) ?? []
+    shapes.push({ key: group.id, label: group.name, count: paneIds.length, type: 'stage', paneIds })
   }
-  if (!isDetachedWindow && unassignedCount > 0) {
-    tabs.push({ key: 'manual', label: '手動', count: unassignedCount, type: 'manual' })
+  if (!isDetachedWindow && unassignedPaneIds.length > 0) {
+    shapes.push({
+      key: 'manual',
+      label: '手動',
+      count: unassignedPaneIds.length,
+      type: 'manual',
+      paneIds: unassignedPaneIds
+    })
   }
-  return tabs
+  return shapes
+})
+
+// Previous stageTabs result, returned unchanged when a status tick produced an
+// identical tab bar. See sameRenderedTabs.
+let _lastStageTabs: TabItem[] = []
+
+const stageTabs = computed<TabItem[]>(() => {
+  // Status is read the way the agent overview reads it: paneViews (a 400 ms
+  // snapshot of each pane's live displayStatus) with disconnectedPaneIds
+  // winning over it, because a pane whose backend session is gone can still be
+  // sitting on a stale 'running'.
+  const disconnected = new Set(disconnectedPaneIds.value)
+  const statusById = new Map(paneViews.value.map((v) => [v.id, v.status as string]))
+  const realizedById = new Map(panes.value.map((p) => [p.id, p.realized]))
+  const next = stageTabShapes.value.map(({ paneIds, ...tab }) => ({
+    ...tab,
+    status: rollupTabStatus(
+      paneIds.map((id) =>
+        disconnected.has(id)
+          ? 'disconnected'
+          : (statusById.get(id) ?? (realizedById.get(id) ? 'starting' : 'waiting'))
+      )
+    )
+  }))
+  if (sameRenderedTabs(_lastStageTabs, next)) return _lastStageTabs
+  _lastStageTabs = next
+  return next
 })
 
 const tabFilteredPaneIds = computed<Set<string>>(() => {
-  if (stageTabs.value.length === 0) {
+  // Structure, not stageTabs: this drives pane visibility and grid sizing, and
+  // must not re-run when a status dot ticks.
+  if (stageTabShapes.value.length === 0) {
     return new Set(panes.value.map((p) => p.id))
   }
   if (activeTab.value === 'manual') {
