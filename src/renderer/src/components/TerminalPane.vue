@@ -159,6 +159,7 @@ const CLIPBOARD_TOAST_TYPE: Record<ClipboardFailureReason, 'info' | 'error'> = {
   'image-failed': 'error',
   'copy-failed': 'error',
   'send-failed': 'error',
+  'send-failed-all': 'error',
 }
 // These repeat easily — ⌘V a few times while a pane starts and every press
 // reports — and useNotify has no dedupe of its own, so identical toasts would

@@ -444,7 +444,48 @@ describe('useTerminal — manual paste', () => {
       paste('some text')
       await settle()
 
-      expect(failures).toEqual([{ reason: 'send-failed', chars: 9 }])
+      expect(failures).toEqual([{ reason: 'send-failed-all', chars: 9 }])
+      scope.stop()
+    })
+
+    // The ack shares one socket, and one per-session send lock, with the PTY
+    // output firehose, so a pane whose CLI is repainting can leave the answer
+    // minutes behind the write it acknowledges. The bytes are in the PTY —
+    // terminals.write runs in the handler's first line — so calling that a
+    // lost paste sent the user hunting for text that had already arrived.
+    it('stays quiet when the ack is merely late on a live socket', async () => {
+      const { failures, scope, mock } = await withFailureReports()
+      mock.setRejection('terminal.input', new Error('request terminal.input timeout'))
+
+      paste('some text')
+      await settle()
+
+      expect(mock.backend.status.value).toBe('connected')
+      expect(failures).toEqual([])
+      scope.stop()
+    })
+
+    it('reports a lost paste when the socket itself went down', async () => {
+      const { failures, scope, mock } = await withFailureReports()
+      mock.setRejection('terminal.input', new Error('WebSocket closed'))
+      mock.status.value = 'disconnected'
+
+      paste('some text')
+      await settle()
+
+      expect(failures).toEqual([{ reason: 'send-failed-all', chars: 9 }])
+      scope.stop()
+    })
+
+    // 10s was the wsClient default, and a busy pane blew through it routinely.
+    it('gives the ack far longer than the wsClient default', async () => {
+      const { scope, mock } = await withFailureReports()
+      paste('some text')
+      await settle()
+
+      const input = mock.sent.filter((r) => r.type === 'terminal.input')
+      expect(input).not.toHaveLength(0)
+      for (const r of input) expect(r.timeoutMs).toBeGreaterThan(10_000)
       scope.stop()
     })
   })

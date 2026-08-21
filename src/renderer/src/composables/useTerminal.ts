@@ -162,6 +162,27 @@ export function encodeShiftEnter(agentKey?: string): string {
 const PASTE_CHUNK = 512
 
 /**
+ * How long a paste chunk waits for its `terminal.input` ack.
+ *
+ * Deliberately far above wsClient's 10s default. The ack shares one socket —
+ * and one per-session send lock — with the PTY output firehose, so a CLI mid
+ * flood (an agent repainting a full-screen TUI can push megabytes in seconds)
+ * pushes the ack minutes behind the write it acknowledges. At 10s that was
+ * reported as a lost paste on every busy pane; the write itself runs in the
+ * handler's first line, long before the ack gets its turn.
+ */
+const PASTE_ACK_TIMEOUT_MS = 60_000
+
+/** Why a paste chunk never got a positive ack. */
+type PasteChunkFailure =
+  /** No socket to write to — the bytes genuinely never left the renderer. */
+  | 'transport'
+  /** The backend answered, and the answer was no. */
+  | 'refused'
+  /** Written to the socket, but the ack did not come back in time. */
+  | 'timeout'
+
+/**
  * Mouse tracking (and focus reporting) a previous session may have left on.
  *
  * Stale state here forwards events to the process's stdin before it has had a
@@ -1051,8 +1072,10 @@ export type ClipboardFailureReason =
   | 'image-failed'
   /** The browser refused the clipboard write, so ⌘C copied nothing. */
   | 'copy-failed'
-  /** Some of the paste never left: the send queue rejected it, or it timed out. */
+  /** Some of the paste never left: the transport was down, or the backend refused it. */
   | 'send-failed'
+  /** Every chunk failed the same way — nothing of this paste reached the pane. */
+  | 'send-failed-all'
 
 // Whether this renderer process can create a WebGL context at all, probed once.
 //
@@ -3813,20 +3836,30 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
    * of which reject), or the backend answered `ok: false` — which wsClient
    * resolves rather than rejects, so it has to be checked here.
    */
-  function _sendPasteChunk(text: string): Promise<unknown> {
+  function _sendPasteChunk(text: string): Promise<PasteChunkFailure | null> {
     if (!sessionId.value || status.value === 'exited' || status.value === 'error') {
-      return Promise.reject(new Error('session went away mid-paste'))
+      return Promise.resolve('transport')
     }
     if (!inputTransportReady()) {
-      return Promise.reject(new Error('backend disconnected mid-paste'))
+      return Promise.resolve('transport')
     }
     return backend
-      .send('terminal.input', { terminal_session_id: sessionId.value, data: text })
+      .send('terminal.input',
+        { terminal_session_id: sessionId.value, data: text },
+        PASTE_ACK_TIMEOUT_MS)
       .then((reply) => {
         if (reply && typeof reply === 'object' && (reply as { ok?: unknown }).ok === false) {
-          throw new Error('backend refused the write')
+          return 'refused' as const
         }
-        return reply
+        return null
+      })
+      .catch(() => {
+        // Everything wsClient rejects with lands here, and the two cases are
+        // not the same news. A closed socket means the bytes never left; a
+        // deadline that expired on a socket that is still up means only that
+        // the ack is late — the backend writes to the PTY before it answers,
+        // so the paste is in the CLI's input either way.
+        return inputTransportReady() ? ('timeout' as const) : ('transport' as const)
       })
   }
 
@@ -3908,12 +3941,27 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // retry from here: the bytes that did land are already in the CLI's input,
     // so re-sending would duplicate them. Say so and let the user decide.
     const chunks = chunkForPty(payload, PASTE_CHUNK)
-    void Promise.allSettled(chunks.map((chunk) => _sendPasteChunk(chunk))).then((results) => {
-      const failed = results.filter((r) => r.status === 'rejected').length
-      if (!failed) return
+    void Promise.all(chunks.map((chunk) => _sendPasteChunk(chunk))).then((outcomes) => {
+      const lost = outcomes.filter((o) => o === 'transport' || o === 'refused').length
+      const late = outcomes.filter((o) => o === 'timeout').length
+      // A late ack is not a lost chunk: the backend writes the bytes into the
+      // PTY in the handler's first line and only then queues its answer behind
+      // whatever output is saturating the socket. Telling the user their paste
+      // vanished when it did not is the worse error of the two, so this is
+      // logged for the record and left off the screen.
+      if (late && !lost) {
+        _clipboardDiag(
+          `pane=${paneId} paste ack late — ${late}/${chunks.length} chunk(s) ` +
+          `un-acked after ${PASTE_ACK_TIMEOUT_MS}ms (bytes were written)`,
+          'warning'
+        )
+        return
+      }
+      if (!lost) return
       _clipboardFailure(
-        `pane=${paneId} paste truncated — ${failed}/${chunks.length} chunk(s) never left`,
-        'send-failed',
+        `pane=${paneId} paste truncated — ${lost}/${chunks.length} chunk(s) never left` +
+        (late ? ` (${late} more un-acked)` : ''),
+        lost === chunks.length ? 'send-failed-all' : 'send-failed',
         normalized.length
       )
     })
