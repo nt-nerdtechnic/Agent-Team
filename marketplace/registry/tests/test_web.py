@@ -85,8 +85,8 @@ def test_detail_renders_readme_versions_and_trust(client: TestClient) -> None:
     assert "<h1>Hello</h1>" in html
     # Version list present.
     assert "1.0.0" in html and "1.2.0" in html
-    # Trust badge present (unsigned in dev posture).
-    assert "unsigned" in html
+    # Accepted artifacts are centrally signed even in permissive dev posture.
+    assert "signed" in html
     assert "badge" in html
 
 

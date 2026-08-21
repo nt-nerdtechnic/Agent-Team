@@ -5,6 +5,10 @@ import { join } from 'node:path'
 import { app } from 'electron'
 import { registerPendingBackend, releasePendingBackend } from './backend-pending'
 import { killProcessTree } from './process-tree'
+import {
+  writeBackendPluginActivationCatalog,
+  type BackendPluginActivationCatalogFile,
+} from './plugins/pluginBackendActivationCatalog'
 
 export interface BackendHandle {
   host: string
@@ -97,14 +101,34 @@ export function guardStdioStreams(): void {
   process.stderr.on('error', () => {})
 }
 
-export async function startBackend(healthCheckTimeoutMs = 45_000): Promise<BackendHandle> {
+export function bindBackendPluginActivationCatalog(
+  base: NodeJS.ProcessEnv,
+  catalog: BackendPluginActivationCatalogFile
+): NodeJS.ProcessEnv {
+  const env = { ...base }
+  delete env.AGENT_TEAM_PLUGINS_DIR
+  env.AGENT_TEAM_PLUGIN_ACTIVATION_CATALOG = catalog.path
+  env.AGENT_TEAM_PLUGIN_ACTIVATION_CATALOG_SHA256 = catalog.sha256
+  return env
+}
+
+export async function startBackend(
+  healthCheckTimeoutMs = 45_000,
+  approvedPluginCatalog?: BackendPluginActivationCatalogFile
+): Promise<BackendHandle> {
   guardStdioStreams()
   const port = await findFreePort()
   const host = '127.0.0.1'
 
   // Electron strips PATH on macOS when launched from Finder/Dock.
   // Use a login shell to recover the full user PATH (nvm, fnm, volta, brew…).
-  const env = { ...process.env }
+  const catalog =
+    approvedPluginCatalog ??
+    writeBackendPluginActivationCatalog(
+      join(app.getPath('userData'), 'plugins', '.navide-backend-activation.json'),
+      { schemaVersion: 1, packages: [] }
+    )
+  const env = bindBackendPluginActivationCatalog(process.env, catalog)
   let userShell = process.env.SHELL ?? '/bin/zsh'
   if (process.platform === 'darwin') {
     const { shell, path: loginPath } = await getLoginShellEnv()
@@ -130,11 +154,9 @@ export async function startBackend(healthCheckTimeoutMs = 45_000): Promise<Backe
   }
   resolvedUserPath = env.PATH ?? null
 
-  // Backend plugin discovery scans the same directory the frontend installs
-  // plugins into (see pluginsRoot in index.ts; honour a pre-set value).
-  if (!env.AGENT_TEAM_PLUGINS_DIR) {
-    env.AGENT_TEAM_PLUGINS_DIR = join(app.getPath('userData'), 'plugins')
-  }
+  // External Manifest v2 packages are never discovered by directory scan.
+  // Python consumes only the exact-byte Host-approved catalog bound above;
+  // bundled v1 plugins remain an explicit backend-owned compatibility path.
 
   let proc: ChildProcess
   if (app.isPackaged) {

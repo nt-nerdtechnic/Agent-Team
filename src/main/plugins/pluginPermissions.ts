@@ -1,26 +1,45 @@
+import type {
+  PluginManifestV2Permissions,
+  PluginShellMode,
+  PluginSystemNamespace,
+} from './pluginManifestV2'
+
 export type PluginPermissionGrant =
-  | { permission: 'fs'; access: 'read' }
-  | { permission: 'ui'; access: 'openInEditor' | 'openExternal' }
+  | { permission: 'system'; namespace: PluginSystemNamespace }
+  | { permission: 'shell'; mode: PluginShellMode }
 
 export type PluginCapabilityPolicy =
   | { kind: 'legacy'; requires: readonly string[] }
-  | { kind: 'manifest-v2'; grants: readonly PluginPermissionGrant[] }
+  | {
+      kind: 'manifest-v2'
+      system: readonly PluginSystemNamespace[]
+      shell?: PluginShellMode
+      // Reserved for B1 adapter composition; authorization currently reads
+      // normalized system and shell fields directly.
+      grants: readonly PluginPermissionGrant[]
+    }
+
+export type ManifestV2CapabilityPolicy = Extract<
+  PluginCapabilityPolicy,
+  { kind: 'manifest-v2' }
+>
 
 export function legacyCapabilityPolicy(requires: readonly string[]): PluginCapabilityPolicy {
   return { kind: 'legacy', requires: [...requires] }
 }
 
 export function manifestV2CapabilityPolicy(
-  permissions: Readonly<Record<string, readonly string[]>>
-): PluginCapabilityPolicy {
+  permissions: PluginManifestV2Permissions
+): ManifestV2CapabilityPolicy {
   const grants: PluginPermissionGrant[] = []
-  for (const [permission, accesses] of Object.entries(permissions)) {
-    for (const access of accesses) {
-      if (permission === 'fs' && access === 'read') grants.push({ permission, access })
-      else if (permission === 'ui' && (access === 'openInEditor' || access === 'openExternal')) {
-        grants.push({ permission, access })
-      }
-    }
+  for (const namespace of permissions.system ?? []) {
+    grants.push({ permission: 'system', namespace })
   }
-  return { kind: 'manifest-v2', grants }
+  if (permissions.shell) grants.push({ permission: 'shell', mode: permissions.shell })
+  return {
+    kind: 'manifest-v2',
+    system: [...(permissions.system ?? [])],
+    ...(permissions.shell ? { shell: permissions.shell } : {}),
+    grants,
+  }
 }

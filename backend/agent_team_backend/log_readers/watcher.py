@@ -143,7 +143,7 @@ class LogWatcher:
         # (_sweep_activity_seen); it used to be lifetime-bound, which is how
         # it became the backend's largest retained structure.
         self._activity_seen: dict[str, set[str]] = {}
-        self._activity_seen_swept_at = 0.0
+        self._activity_seen_swept_at: float | None = None
         self._scan_mtimes: dict[str, float] = {}
         self._queue: asyncio.Queue[tuple[Path | None, str]] = asyncio.Queue()
         self._pending_token_paths: dict[tuple[str, str], Path] = {}
@@ -471,9 +471,11 @@ class LogWatcher:
         that still exists keeps its mtime entry so _files_to_scan does not
         immediately re-enqueue it and rebuild the set we just dropped.
         """
-        if now - self._activity_seen_swept_at < _ACTIVITY_SEEN_SWEEP_S:
+        if (
+            self._activity_seen_swept_at is not None
+            and now - self._activity_seen_swept_at < _ACTIVITY_SEEN_SWEEP_S
+        ):
             return
-        self._activity_seen_swept_at = now
         cutoff = time.time() - _ACTIVITY_SEEN_COLD_S
         dropped = 0
         keys = 0
@@ -488,6 +490,7 @@ class LogWatcher:
             dropped += 1
             if mtime is None:
                 self._scan_mtimes.pop(path, None)
+        self._activity_seen_swept_at = now
         if dropped:
             log.info(
                 "activity dedup sweep: dropped %d file(s), %d key(s); %d file(s) still tracked",

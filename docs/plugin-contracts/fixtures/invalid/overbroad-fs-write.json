@@ -5,7 +5,7 @@
   "name": "Filesystem writer",
   "version": "1.0.0",
   "publisher": "acme",
-  "permissions": { "fs": ["write"] },
+  "permissions": { "system": ["fs", "storage"] },
   "marketplace": { "description": "Request filesystem write access.", "license": "MIT" },
   "contributes": {
     "views": [{ "id": "main", "kind": "custom", "location": "window", "title": "Main", "entry": "frontend/index.html" }]

@@ -8,7 +8,17 @@ import { startBackend, getResolvedUserPath, type BackendHandle } from './backend
 import { abandonPendingBackends } from './backend-pending'
 import { installApplicationMenu, type AppMenuHooks, type RecentMenuEntry } from './menu'
 import { openNoopPluginView, openFsProbePluginView, openMiniIdePluginView, devMiniIdePluginDescriptor, openPlansPluginView, devPlansPluginDescriptor, openGitPluginView, devGitPluginDescriptor, registerBundledMiniIde, registerBundledPlans, registerBundledGit, frontendPluginManager } from './plugins/frontendPluginManager'
-import { registerPluginIpc } from './plugins/pluginIpc'
+import {
+  isTrustedPluginManagementSender,
+  registerPluginIpc,
+  resolveConfiguredMarketplace,
+} from './plugins/pluginIpc'
+import { readRegistryTrustSnapshot } from './plugins/pluginInstalledTrust'
+import { currentPluginHostTarget } from './plugins/pluginTarget'
+import {
+  projectBackendPluginActivationCatalog,
+  writeBackendPluginActivationCatalog,
+} from './plugins/pluginBackendActivationCatalog'
 import { registerStorageIpc } from './storage-ipc'
 import { lockPageZoom } from './web-contents-zoom'
 import { installContextMenu, registerTerminalContextMenu } from './context-menu'
@@ -431,8 +441,106 @@ app.on('browser-window-created', (_event, win) => {
 // Extensions view: install/update/remove third-party plugins. Verified packages
 // are written under userData/plugins and scanned back on next launch.
 const pluginsRoot = (): string => join(app.getPath('userData'), 'plugins')
-registerPluginIpc(frontendPluginManager, pluginsRoot())
-frontendPluginManager.loadInstalledPlugins(pluginsRoot())
+let installedRegistryRootKey: string | null = null
+let installedRegistryAuthority: 'official' | 'self-hosted' = 'self-hosted'
+let installedOfficialRegistryUrl: string | undefined
+try {
+  const configuredMarketplace = resolveConfiguredMarketplace()
+  installedRegistryRootKey = configuredMarketplace.trust.pinnedRegistryRootKey
+  installedRegistryAuthority = configuredMarketplace.trust.registryAuthority ?? 'self-hosted'
+  installedOfficialRegistryUrl = configuredMarketplace.trust.officialRegistryUrl
+} catch (error) {
+  console.warn(
+    `[main] marketplace Registry root is not approved; installed v2 plugins remain quarantined: ${error instanceof Error ? error.message : String(error)}`
+  )
+}
+const installedPluginTrust = {
+  pinnedRootKey: installedRegistryRootKey,
+  snapshot: readRegistryTrustSnapshot(pluginsRoot()),
+  registryAuthority: installedRegistryAuthority,
+  officialRegistryUrl: installedOfficialRegistryUrl,
+  expectedTarget: currentPluginHostTarget(),
+}
+const installedPluginLoad = frontendPluginManager.loadInstalledPlugins(pluginsRoot(), {
+  provenance: 'official-registry',
+  trust: installedPluginTrust,
+})
+let approvedInstalledPluginActivations = installedPluginLoad.activationCatalog
+for (const error of installedPluginLoad.errors) {
+  console.warn(`[main] installed plugin quarantined: ${error}`)
+}
+const pluginTrustRefresh = registerPluginIpc(
+  frontendPluginManager,
+  pluginsRoot(),
+  (event) => isTrustedPluginManagementSender(event, mainWindows),
+  undefined,
+  undefined,
+  {
+    onActivationChange: ({ pluginId, activation }) => {
+      approvedInstalledPluginActivations = approvedInstalledPluginActivations.filter(
+        (entry) => entry.pluginId !== pluginId
+      )
+      if (activation) approvedInstalledPluginActivations.push(activation)
+    },
+  }
+)
+async function refreshInstalledPluginTrust(): Promise<void> {
+  try {
+    const refreshed = await pluginTrustRefresh.refreshRegistryTrust()
+    const { decisions } = refreshed
+    if (refreshed.activationCatalog.length > 0) {
+      const restoredIds = new Set(
+        refreshed.activationCatalog.map((entry) => entry.pluginId)
+      )
+      approvedInstalledPluginActivations = [
+        ...approvedInstalledPluginActivations.filter(
+          (entry) => !restoredIds.has(entry.pluginId)
+        ),
+        ...refreshed.activationCatalog,
+      ]
+    }
+    const quarantined = new Set(
+      decisions
+        .filter((decision) => decision.action === 'quarantine')
+        .map((decision) => decision.pluginId)
+    )
+    if (quarantined.size > 0) {
+      approvedInstalledPluginActivations = approvedInstalledPluginActivations.filter(
+        (entry) => !quarantined.has(entry.pluginId)
+      )
+      for (const decision of decisions) {
+        if (decision.action === 'quarantine') {
+          console.warn(
+            `[main] installed plugin quarantined after trust refresh: ${decision.pluginId}: ${decision.reason ?? 'trust verification failed'}`
+          )
+        }
+      }
+    }
+  } catch (error) {
+    // The refresh controller re-evaluates cached trust before surfacing a
+    // network/HTTP failure. Keep the backend activation catalog aligned with
+    // any packages it quarantined during that fail-closed pass.
+    const stillInstalled = new Set(
+      frontendPluginManager.listInstalledPackages().map((pkg) => pkg.id)
+    )
+    approvedInstalledPluginActivations = approvedInstalledPluginActivations.filter((entry) =>
+      stillInstalled.has(entry.pluginId)
+    )
+    console.warn(
+      `[main] Registry trust refresh failed closed: ${error instanceof Error ? error.message : String(error)}`
+    )
+  }
+}
+app.whenReady().then(() => {
+  void refreshInstalledPluginTrust()
+  const timer = setInterval(() => void refreshInstalledPluginTrust(), 15 * 60 * 1000)
+  timer.unref()
+})
+const approvedBackendPluginCatalog = () =>
+  writeBackendPluginActivationCatalog(
+    join(pluginsRoot(), '.navide-backend-activation.json'),
+    projectBackendPluginActivationCatalog(approvedInstalledPluginActivations)
+  )
 
 // Storage usage & cleanup: clears only Electron-owned caches (Chromium HTTP/
 // code/GPU caches, electron-updater downloads). Never user state.
@@ -601,7 +709,10 @@ ipcMain.handle('backend:restart', async () => {
       await b.stop()
     }
     try {
-      backend = await startBackend(readHealthCheckTimeoutSec(healthTimeoutPath()) * 1000)
+      backend = await startBackend(
+        readHealthCheckTimeoutSec(healthTimeoutPath()) * 1000,
+        approvedBackendPluginCatalog()
+      )
       backendLastError = null
       watchBackendCrash(backend)
       console.log(`[main] backend restarted at ${backend.host}:${backend.port}`)
@@ -2176,6 +2287,10 @@ app.whenReady().then(async () => {
   if (!gotSingleInstanceLock) return
   // The plugin-view dev entry is opt-in via AGENT_TEAM_PLUGIN_DEV=1 so the
   // default menu / UI is unchanged for every normal launch (dev or packaged).
+  // This mode keeps the fixed first-party dist-plugins bundles available for
+  // local app development. An optional explicit package path is a separate
+  // Host-owned seam; it never scans an arbitrary parent directory or carries
+  // Registry provenance.
   const pluginDevEnabled = process.env['AGENT_TEAM_PLUGIN_DEV'] === '1'
   if (pluginDevEnabled) {
     // Dev-only: register the locally built mini-IDE (dist-plugins/mini-ide) so
@@ -2183,7 +2298,7 @@ app.whenReady().then(async () => {
     // installed copy for this run (registerDescriptor replaces by id).
     const devDescriptor = devMiniIdePluginDescriptor()
     if (existsSync(devDescriptor.entryFile)) {
-      frontendPluginManager.registerDescriptor(devDescriptor, { builtin: true })
+      frontendPluginManager.registerDeveloperDescriptor(devDescriptor)
     } else {
       console.warn(
         '[main] AGENT_TEAM_PLUGIN_DEV=1 but mini-IDE dev bundle is missing — run `pnpm run build:mini-ide`'
@@ -2193,7 +2308,7 @@ app.whenReady().then(async () => {
     // same gate and override semantics as the mini-IDE above.
     const devPlansDescriptor = devPlansPluginDescriptor()
     if (existsSync(devPlansDescriptor.entryFile)) {
-      frontendPluginManager.registerDescriptor(devPlansDescriptor, { builtin: true })
+      frontendPluginManager.registerDeveloperDescriptor(devPlansDescriptor)
     } else {
       console.warn(
         '[main] AGENT_TEAM_PLUGIN_DEV=1 but Plans dev bundle is missing — run `pnpm run build:plans`'
@@ -2203,11 +2318,20 @@ app.whenReady().then(async () => {
     // gate and override semantics as the mini-IDE / Plans above.
     const devGitDescriptor = devGitPluginDescriptor()
     if (existsSync(devGitDescriptor.entryFile)) {
-      frontendPluginManager.registerDescriptor(devGitDescriptor, { builtin: true })
+      frontendPluginManager.registerDeveloperDescriptor(devGitDescriptor)
     } else {
       console.warn(
         '[main] AGENT_TEAM_PLUGIN_DEV=1 but Git dev bundle is missing — run `pnpm run build:git`'
       )
+    }
+    const explicitPackageDir = process.env['AGENT_TEAM_PLUGIN_DEV_PATH']
+    if (explicitPackageDir !== undefined) {
+      const explicitResult = frontendPluginManager.loadExplicitDeveloperPlugin(explicitPackageDir)
+      if (!explicitResult.loaded) {
+        console.warn(
+          `[main] AGENT_TEAM_PLUGIN_DEV_PATH was not loaded: ${explicitResult.error}`
+        )
+      }
     }
   }
   appMenuHooks = {
@@ -2307,7 +2431,10 @@ app.whenReady().then(async () => {
   // begin loading until the backend had fully spawned. The renderer shows its
   // boot overlay and connects once the backend is ready (broadcastBackendChanged);
   // it already tolerates a not-yet-ready backend (same path as a restart).
-  backendStarting = startBackend(readHealthCheckTimeoutSec(healthTimeoutPath()) * 1000)
+  backendStarting = startBackend(
+    readHealthCheckTimeoutSec(healthTimeoutPath()) * 1000,
+    approvedBackendPluginCatalog()
+  )
     .then((b) => {
       backend = b
       backendLastError = null

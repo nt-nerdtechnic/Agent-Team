@@ -72,6 +72,11 @@ class ExtensionVersion(SQLModel, table=True):
     """Storage key for the package blob."""
     signature: str | None = None
     """Detached Ed25519 signature (base64) over the package digest, if signed."""
+    target: str = Field(default="universal", index=True)
+    registry_envelope: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    """Immutable artifact identity envelope signed by the registry."""
+    registry_signature: str | None = None
+    """Detached Ed25519 signature over canonical registry_envelope JSON."""
     trust_tier: str = Field(default="unsigned", index=True)
     """Trust tier computed at publish: 'signed-verified' or 'unsigned' (see trust.py)."""
     download_count: int = Field(default=0)

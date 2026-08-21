@@ -1,7 +1,7 @@
 """Wire the plugin host into backend startup/shutdown.
 
-Discovers backend plugin directories (the bundled ``builtin/`` dir plus
-``AGENT_TEAM_PLUGINS_DIR``), loads them into a :class:`PluginHost`, activates
+Discovers bundled backend plugin directories, loads them into a
+:class:`PluginHost`, activates
 the ones declaring ``onStartup``, and tears everything down on shutdown. Also
 applies what activated plugins registered on their context: HTTP routes,
 startup/shutdown hooks, and pane spawn-command transformers. Pure-function
@@ -13,27 +13,18 @@ from __future__ import annotations
 
 import inspect
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
 from ..applog import backend_port_file
+from .activation_catalog import ActivationCatalogError, load_activation_catalog
 from .host import PluginHost
 
 log = logging.getLogger("agent_team_backend.plugins.wiring")
 
-PLUGINS_DIR_ENV = "AGENT_TEAM_PLUGINS_DIR"
-
-
 def builtin_plugins_root() -> Path:
     """Bundled builtin plugins directory (ships inside the package)."""
     return Path(__file__).parent / "builtin"
-
-
-def plugins_root() -> Path | None:
-    """Plugins root directory from the environment (absent/empty -> None)."""
-    raw = os.environ.get(PLUGINS_DIR_ENV, "").strip()
-    return Path(raw) if raw else None
 
 
 def discover_backend_plugin_dirs(root: Path) -> list[Path]:
@@ -58,25 +49,15 @@ def discover_backend_plugin_dirs(root: Path) -> list[Path]:
 def startup(host: PluginHost, root: Path | None = None) -> list[str]:
     """Load every discovered plugin and activate the ``onStartup`` ones.
 
-    With no explicit ``root``, scans the bundled builtin dir first, then the
-    external ``AGENT_TEAM_PLUGINS_DIR`` (env absent -> builtin only). An
-    explicit ``root`` scans exactly that directory. Per-plugin failures are
+    With no explicit ``root``, scans only the bundled builtin directory. An
+    explicit ``root`` scans exactly that directory and exists for focused
+    tests of the legacy v1 loader; application startup never passes an
+    installed-plugins root. Per-plugin failures are
     logged and isolated; a plugin whose activation fails is unloaded again so
     no half-started state lingers. Returns the ids of the plugins successfully
     activated.
     """
-    if root is not None:
-        roots = [root]
-    else:
-        roots = [builtin_plugins_root()]
-        external = plugins_root()
-        if external is None:
-            log.info(
-                "%s not set; skipping external backend plugin discovery",
-                PLUGINS_DIR_ENV,
-            )
-        else:
-            roots.append(external)
+    roots = [root] if root is not None else [builtin_plugins_root()]
     activated: list[str] = []
     for directory in (d for r in roots for d in discover_backend_plugin_dirs(r)):
         try:
@@ -102,6 +83,19 @@ def startup(host: PluginHost, root: Path | None = None) -> list[str]:
                 )
             continue
         activated.append(plugin_id)
+
+    if root is None:
+        try:
+            approved_v2 = load_activation_catalog()
+        except ActivationCatalogError as err:
+            log.warning("external backend activation catalog rejected: %s", err)
+        else:
+            for entry in approved_v2:
+                log.info(
+                    "approved v2 backend %s@%s awaits the Electron child-process supervisor",
+                    entry.plugin_id,
+                    entry.package_version,
+                )
     return activated
 
 

@@ -39,6 +39,7 @@ Navide は Agent 時代のエンジニアリングツールです。一人の人
 | [Adding a CLI Vendor — English](../adding-a-cli-vendor.md) | AI Coding CLI を追加する：2 つの Spec ファイル、登録、CI が強制するチェック |
 | [CLI Extension Guide — English](../en-US/cli-extension-guide.md) | ベンダーごとの統合記録：インストール経路、Resume 構文、Session 保存形式 |
 | [Plugin Development — English](../en-US/plugin-development.md) | フロントエンド View プラグインまたはバックエンドプラグインを開発し、パッケージ化して署名する |
+| [Plugin Development v2 — English](../en-US/plugin-development-v2.md) | 公開 Contracts、SDK、UI Package、外部 Frontend Package Workflow を使用する |
 | [外部 MCP 制御](external-mcp-control.md) | 外部 MCP クライアントを接続して実行中の Navide ウィンドウを操作し、セキュリティモデルを理解する |
 | [Release Guide — English](../en-US/releases.md) | Version、Package、署名、Notarization、公開、Release 復旧を行う |
 

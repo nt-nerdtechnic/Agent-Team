@@ -48,8 +48,23 @@ def test_publish_manifest_v2_maps_marketplace_metadata(client: TestClient) -> No
         "Browse workspace files in workbench regions or a separate window."
     )
     assert detail["categories"] == ["productivity"]
-    assert detail["versions"][0]["capabilities"] == ["fs", "ui"]
-    assert detail["versions"][0]["sensitive_capabilities"] == ["fs"]
+    assert detail["versions"][0]["capabilities"] == ["fs", "ui", "shell"]
+    assert detail["versions"][0]["sensitive_capabilities"] == ["fs", "shell"]
+
+
+def test_publish_query_and_download_support_multi_segment_package_ids(client: TestClient) -> None:
+    manifest = contract_manifest()
+    manifest["id"] = "acme.tools.linter"
+    manifest["publisher"] = "acme"
+    package = build_v2_package(manifest)
+    response = _publish(client, package)
+    assert response.status_code == 201
+    assert response.json()["name"] == "tools.linter"
+
+    detail = client.get("/api/extensions/acme/tools.linter").json()
+    assert detail["identity"] == "acme.tools.linter"
+    version = str(manifest["version"])
+    assert client.get(f"/api/extensions/acme/tools.linter/{version}/download").content == package
 
 
 def test_publish_rejects_malformed(client: TestClient) -> None:

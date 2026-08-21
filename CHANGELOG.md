@@ -6,9 +6,37 @@ All notable released changes to Navide will be documented in this file. The form
 
 ### Added
 
+- Add the public Plugin Platform v2 contracts, SDK CLI, UI package boundary,
+  and an external-workspace frontend package smoke workflow with fail-closed
+  capability-denial coverage.
+- Enforce Manifest v2 coarse `system` namespace and `shell` grants through the
+  Host capability catalog, authenticated workspace binding, package-version
+  approval, and fail-closed AI CLI/shell request planning.
+- Allow the canonical `git` executable through Manifest v2 `shell.run`
+  allowlist mode without adding a Git permission or first-party bypass.
 - Configurable lazy CLI restore: resume one CLI, the first Grid page, or the active tab when opening a workspace; preserve manual-tab grouping and recover uniquely attributable missing Claude conversations on realization.
 - Add Meta Muse Code as a spawnable CLI agent, including install detection and one-click install. Resume, log reading and credential switching remain unavailable for it until they are verified against a real installation.
 - Validate Manifest v2 frontend contributions consistently in the App and marketplace registry, including strict view discovery and package-entry checks.
+- Validate, install, list, and remove Manifest v2 backend-only and combined packages from one active package version, and publish the Backend Wire v1 contract corpus.
+- Add an internal Electron-main Backend Wire v1 supervisor seam with real
+  child-process health/unary conformance coverage, explicit child environment
+  isolation, bounded cancellation tombstones, and subscription lifecycle
+  conformance; production catalog activation remains deferred.
+- Require a verified Registry signature from a signer authorized by the
+  App-pinned Registry root before a Manifest v2 marketplace package can be
+  installed, including packages whose signed listing metadata has been
+  modified.
+- Stop scanning arbitrary external directories for legacy Python backend
+  plugins; validate only the Host-bound Manifest v2 activation projection while
+  packaged backend process supervision remains fail-closed.
+- Keep Official Registry namespace authority separate from self-hosted root
+  verification, fail closed while the independent production Registry root is
+  unprovisioned, and reject publisher-key reuse as Registry trust.
+- Add an opt-in `AGENT_TEAM_PLUGIN_DEV_PATH` seam for one explicitly selected
+  local Manifest v1 or v2 frontend package. Manifest v1 is bounded local
+  compatibility only: it remains unsigned, local-only, and cannot claim
+  Registry provenance; reserved ids and backend contributions remain
+  unavailable in Developer Mode.
 - Tell a CLI agent when its inter-CLI message could not be delivered: a `[Navide MSG] delivery failed` notice naming the target and the reason is written back into the sending pane, through the same queue and idle gate as any other message.
 - Deliver an inter-CLI message to a Claude pane through its Stop hook when its turn ends with one waiting: the message becomes the agent's next instruction instead of being typed in, so it never occupies the input box or waits behind whatever you are writing. Capped at 5 in a row per pane; anything else — an idle pane, another CLI, hooks not installed — still arrives the usual way, unchanged.
 

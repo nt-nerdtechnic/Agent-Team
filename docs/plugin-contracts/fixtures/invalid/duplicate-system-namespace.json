@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 2,
+  "apiVersion": "^1.0.0",
+  "id": "acme.duplicate-system",
+  "name": "Duplicate system grant",
+  "version": "1.0.0",
+  "publisher": "acme",
+  "permissions": { "system": ["fs", "fs"] },
+  "marketplace": { "description": "Duplicate namespace.", "license": "MIT" },
+  "contributes": {
+    "views": [{ "id": "main", "kind": "custom", "location": "main", "title": "Main", "entry": "frontend/index.html" }]
+  }
+}

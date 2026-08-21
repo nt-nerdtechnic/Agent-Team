@@ -6,8 +6,8 @@
   "version": "1.0.0",
   "publisher": "acme",
   "permissions": {
-    "fs": ["read"],
-    "ui": ["openInEditor", "openExternal"]
+    "system": ["fs", "ui"],
+    "shell": "allowlist"
   },
   "marketplace": {
     "description": "Browse workspace files in workbench regions or a separate window.",

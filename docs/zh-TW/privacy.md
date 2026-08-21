@@ -33,9 +33,24 @@ Navide 不營運專案 Telemetry 服務，也不要求建立 Navide 帳號。
 | Web Search | Search Provider | 搜尋查詢文字 |
 | Git Operation | 設定的 Git Host | Repository 資料，以及由 Git 或 Host Flow 處理的憑證 |
 | Update Check | GitHub Releases | 應用程式版本與一般網路 Metadata |
+| Plugin Registry Trust Refresh | 所選的 Official Registry，或明確核准的 self-hosted Registry | 已安裝 marketplace plugin 的 namespace/name；Refresh 不會傳送 Plugin Source 或 Archive |
 | MCP Server | 設定的 MCP Server 與它使用的服務 | 完全取決於該 Server 的 Tool 與設定 |
 
 傳送私人程式碼或受規範資料前，請先閱讀各 Provider 政策。
+
+只要仍有已安裝的 marketplace plugin，Navide 會在 App 啟動時及每 15
+分鐘，將該 Plugin 的 namespace/name 傳送給所選的 Registry。這個 Request
+用來取得已簽署的 Trust Metadata，讓 Navide 偵測遭撤銷的 Publisher 或
+Package，並隔離已安裝的 Plugin。目的地由設定的 Registry URL 決定：使用
+Official URL 時，會使用 App Pin 的 Official Registry；使用 self-hosted URL
+時，則只使用使用者明確核准的 URL 與 Root。這個 Refresh 不會上傳 Plugin
+Source、Package Archive 或 Workspace File。
+
+Navide 會在 Plugin Installation 旁的本機資料中保留最新的已簽署 Trust
+Snapshot，讓重新啟動後仍能進行檢查；Registry 自己的 Request Log 則由該
+Registry 決定保存方式。目前沒有獨立的 Refresh 開關；移除已安裝的
+marketplace plugin 後，這項資料流就會停止，其他外部服務資料流仍由各自的
+設定控制。
 
 ## 憑證
 

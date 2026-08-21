@@ -1,0 +1,29 @@
+{
+  "name": "@navide/plugin-sdk",
+  "version": "1.0.0",
+  "description": "Framework-neutral activation and capability-call SDK for Navide plugins.",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "files": [
+    "dist",
+    "bin"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "navide-plugin": "bin/navide-plugin.mjs"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "peerDependencies": {
+    "@navide/plugin-contracts": "^1.0.0"
+  }
+}

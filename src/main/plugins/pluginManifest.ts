@@ -1,3 +1,4 @@
+import { manifestReferencedFiles as publicManifestReferencedFiles } from '../../../packages/plugin-contracts/src/index'
 import { InstalledPluginError } from './pluginManifestErrors'
 import { parseManifestJson } from './pluginManifestJson'
 import { parseManifestV1, type LegacyInstalledManifest } from './pluginManifestV1'
@@ -9,7 +10,11 @@ import {
 } from './pluginPermissions'
 
 export type { LegacyInstalledManifest } from './pluginManifestV1'
-export type { PluginManifestV2, PluginManifestV2View } from './pluginManifestV2'
+export type {
+  PluginManifestV2,
+  PluginManifestV2Permissions,
+  PluginManifestV2View,
+} from './pluginManifestV2'
 export { InstalledPluginError } from './pluginManifestErrors'
 export { parseManifestJson } from './pluginManifestJson'
 
@@ -38,7 +43,11 @@ export function isManifestV2(manifest: InstalledManifest): manifest is PluginMan
 
 /** Namespace projection retained for legacy broker/install callers. */
 export function manifestCapabilities(manifest: InstalledManifest): string[] {
-  return isManifestV2(manifest) ? Object.keys(manifest.permissions) : manifest.requires
+  if (!isManifestV2(manifest)) return manifest.requires
+  return [
+    ...(manifest.permissions.system ?? []),
+    ...(manifest.permissions.shell ? ['shell'] : []),
+  ]
 }
 
 export function manifestCapabilityPolicy(manifest: InstalledManifest): PluginCapabilityPolicy {
@@ -49,14 +58,7 @@ export function manifestCapabilityPolicy(manifest: InstalledManifest): PluginCap
 
 export function manifestReferencedFiles(manifest: InstalledManifest): string[] {
   if (!isManifestV2(manifest)) return []
-  const paths = new Set<string>()
-  for (const view of manifest.contributes?.views ?? []) {
-    paths.add(view.entry)
-    if (view.icon) paths.add(view.icon)
-  }
-  if (manifest.marketplace.icon) paths.add(manifest.marketplace.icon)
-  if (manifest.backend?.entry) paths.add(manifest.backend.entry)
-  return [...paths]
+  return publicManifestReferencedFiles(manifest)
 }
 
 export function assertManifestFiles(manifest: InstalledManifest, availablePaths: Iterable<string>): void {

@@ -36,10 +36,10 @@ def test_signed_publish_accepted_and_trusted(signed_env: SignedEnv) -> None:
     assert version["trust_tier"] == "signed-verified"
     assert version["capabilities"] == ["fs", "ui"]
     assert version["sensitive_capabilities"] == ["fs"]
-    # The detail API must expose the signing material so the client can
-    # re-verify and reach `signed-verified` itself (not just trust the tier).
-    assert version["signature"] == sig
-    assert detail["public_key"] == signed_env.public_pem
+    # Client trust is rooted in registry metadata, never the publisher key.
+    assert version["registry_signature"]
+    assert version["registry_envelope"]["publisherId"] == "acme"
+    assert "public_key" not in detail
 
 
 def test_unsigned_publish_rejected_when_required(signed_env: SignedEnv) -> None:
@@ -94,6 +94,7 @@ def test_owner_can_yank_nonowner_cannot(signed_env: SignedEnv) -> None:
     signed_env.client.post(
         "/api/publishers",
         json={"name": "beta", "token": "tok-beta"},
+        headers={"X-Admin-Token": "official-admin-token"},
     )
     intruder = signed_env.client.post(
         "/api/extensions/acme/hello/1.0.0/yank",
@@ -131,3 +132,20 @@ def test_registration_admin_gate(tmp_path) -> None:
     )
     assert allowed.status_code == 201
     assert allowed.json()["has_token"] is True
+
+
+def test_official_profile_keeps_publisher_registration_admin_gated(
+    signed_env: SignedEnv,
+) -> None:
+    denied = signed_env.client.post(
+        "/api/publishers",
+        json={"name": "beta", "token": "tok-beta"},
+    )
+    assert denied.status_code == 401
+
+    wrong = signed_env.client.post(
+        "/api/publishers",
+        json={"name": "beta", "token": "tok-beta"},
+        headers={"X-Admin-Token": "wrong-admin-token"},
+    )
+    assert wrong.status_code == 401

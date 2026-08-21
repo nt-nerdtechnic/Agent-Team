@@ -1,8 +1,8 @@
 <script setup lang="ts">
 // Extensions view (minimal): lists installed plugins with their trust/capability
 // badges and lets the user search the marketplace and install. Sensitive
-// capabilities (fs/terminal) trigger a confirmation dialog after the package is
-// downloaded + verified (prepareInstall) but before it is written (commitInstall).
+// capabilities and native backend executables trigger the existing confirmation
+// dialog after verification but before the package is written.
 //
 // All privileged work is brokered through the main process via
 // `window.agentTeam.plugins`; this component holds no secrets and never touches
@@ -16,10 +16,12 @@ const results = ref<MarketplaceExtension[]>([])
 const query = ref('')
 const busy = ref(false)
 const error = ref('')
-// A prepared, verified install awaiting a sensitive-capability confirmation.
+// A prepared, verified install awaiting the existing install-risk confirmation.
 const pendingConfirm = ref<{ ext: MarketplaceExtension; prepared: PreparedInstallSummary } | null>(
   null
 )
+const pendingStep = ref<'publisher' | 'risk' | null>(null)
+const publisherConfirmed = ref(false)
 
 async function refreshInstalled(): Promise<void> {
   if (!plugins) return
@@ -46,12 +48,17 @@ async function install(ext: MarketplaceExtension): Promise<void> {
   error.value = ''
   try {
     const prepared = await plugins.prepareInstall({ namespace: ext.namespace, name: ext.name })
-    if (prepared.requiresConfirmation) {
+    const requiresPublisherTrust = prepared.requiresPublisherTrust === true
+    const requiresRiskConfirmation =
+      prepared.requiresRiskConfirmation ?? prepared.requiresConfirmation
+    if (requiresPublisherTrust || requiresRiskConfirmation) {
       // Hold for the trust dialog — nothing is written until the user confirms.
       pendingConfirm.value = { ext, prepared }
+      pendingStep.value = requiresPublisherTrust ? 'publisher' : 'risk'
+      publisherConfirmed.value = false
       return
     }
-    await commit(prepared.id)
+    await commit(prepared.id, {})
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
   } finally {
@@ -59,18 +66,30 @@ async function install(ext: MarketplaceExtension): Promise<void> {
   }
 }
 
-async function commit(id: string): Promise<void> {
+async function commit(
+  id: string,
+  approval: { publisherConfirmed?: boolean; riskConfirmed?: boolean }
+): Promise<void> {
   if (!plugins) return
-  await plugins.commitInstall(id)
+  await plugins.commitInstall(id, approval)
   pendingConfirm.value = null
+  pendingStep.value = null
   await refreshInstalled()
 }
 
-async function confirmSensitive(): Promise<void> {
+async function confirmPublisher(): Promise<void> {
   if (!pendingConfirm.value) return
+  publisherConfirmed.value = true
+  if (
+    pendingConfirm.value.prepared.requiresRiskConfirmation ??
+    pendingConfirm.value.prepared.requiresConfirmation
+  ) {
+    pendingStep.value = 'risk'
+    return
+  }
   busy.value = true
   try {
-    await commit(pendingConfirm.value.prepared.id)
+    await commit(pendingConfirm.value.prepared.id, { publisherConfirmed: true })
   } catch (err) {
     error.value = err instanceof Error ? err.message : String(err)
   } finally {
@@ -78,8 +97,25 @@ async function confirmSensitive(): Promise<void> {
   }
 }
 
-function cancelSensitive(): void {
+async function confirmRisk(): Promise<void> {
+  if (!pendingConfirm.value) return
+  busy.value = true
+  try {
+    await commit(pendingConfirm.value.prepared.id, {
+      publisherConfirmed: publisherConfirmed.value,
+      riskConfirmed: true,
+    })
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    busy.value = false
+  }
+}
+
+function cancelInstall(): void {
   pendingConfirm.value = null
+  pendingStep.value = null
+  publisherConfirmed.value = false
 }
 
 async function remove(id: string): Promise<void> {
@@ -104,6 +140,7 @@ onMounted(refreshInstalled)
             sensitive: {{ p.sensitive.join(', ') }}
           </span>
           <span class="ext-requires">{{ p.requires.join(', ') }}</span>
+          <span v-if="p.warning" class="ext-badge ext-dev-warning">{{ p.warning }}</span>
           <button class="ext-remove" @click="remove(p.id)">Remove</button>
         </li>
         <li v-if="!installed.length" class="ext-empty">No plugins installed.</li>
@@ -127,8 +164,22 @@ onMounted(refreshInstalled)
 
     <div v-if="pendingConfirm" class="ext-trust-dialog" role="dialog" aria-modal="true">
       <div class="ext-trust-body">
-        <h4>Confirm sensitive install</h4>
-        <p>
+        <h4 v-if="pendingStep === 'publisher'">Trust publisher</h4>
+        <h4 v-else>Confirm plugin permissions</h4>
+        <p v-if="pendingStep === 'publisher'" class="ext-publisher-risk">
+          Trust publisher <strong>{{ pendingConfirm.prepared.publisherId }}</strong> for
+          <strong>{{ pendingConfirm.prepared.id }}</strong>. A valid Registry signature proves
+          package integrity, not that you want to run this publisher's code.
+        </p>
+        <p
+          v-if="pendingStep === 'risk' && pendingConfirm.prepared.containsBackendExecutable"
+          class="ext-backend-risk"
+        >
+          <strong>{{ pendingConfirm.ext.namespace }}.{{ pendingConfirm.ext.name }}</strong>
+          contains a native backend executable that can run with your user account's
+          operating-system permissions.
+        </p>
+        <p v-if="pendingStep === 'risk' && pendingConfirm.prepared.sensitive.length">
           <strong>{{ pendingConfirm.ext.namespace }}.{{ pendingConfirm.ext.name }}</strong>
           requests sensitive capabilities:
           <strong>{{ pendingConfirm.prepared.sensitive.join(', ') }}</strong>.
@@ -145,8 +196,11 @@ onMounted(refreshInstalled)
           </span>
         </p>
         <div class="ext-trust-actions">
-          <button class="ext-confirm" @click="confirmSensitive">Install anyway</button>
-          <button class="ext-cancel" @click="cancelSensitive">Cancel</button>
+          <button v-if="pendingStep === 'publisher'" class="ext-confirm-publisher" @click="confirmPublisher">
+            Trust publisher
+          </button>
+          <button v-else class="ext-confirm-risk" @click="confirmRisk">Confirm and install</button>
+          <button class="ext-cancel" @click="cancelInstall">Cancel</button>
         </div>
       </div>
     </div>
@@ -189,6 +243,10 @@ onMounted(refreshInstalled)
   font-size: 12px;
 }
 .ext-badge.ext-sensitive {
+  color: #c77400;
+  font-size: 11px;
+}
+.ext-badge.ext-dev-warning {
   color: #c77400;
   font-size: 11px;
 }

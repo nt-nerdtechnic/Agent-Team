@@ -6,23 +6,24 @@ import re
 
 from pydantic import BaseModel, Field, field_validator
 
-KNOWN_CAPABILITIES: frozenset[str] = frozenset(
-    {
-        "fs",
-        "git",
-        "terminal",
-        "search",
-        "chat",
-        "ui",
-        "issues",
-        "plans",
-    }
+from .manifest_v2 import PACKAGE_ID_RE
+
+LEGACY_CAPABILITY_ORDER: tuple[str, ...] = (
+    "fs",
+    "git",
+    "terminal",
+    "search",
+    "chat",
+    "ui",
+    "issues",
+    "plans",
 )
+KNOWN_CAPABILITIES: frozenset[str] = frozenset(LEGACY_CAPABILITY_ORDER)
 # Keep the named alias for callers that distinguish the legacy compatibility
 # model from the broader manifest module facade.
 LEGACY_KNOWN_CAPABILITIES: frozenset[str] = KNOWN_CAPABILITIES
 
-_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9-]*$")
+_ID_RE = PACKAGE_ID_RE
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 _ACTIVATION_RE = re.compile(r"^(onStartup|onView:.+|onCommand:.+)$")
 

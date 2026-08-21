@@ -1,5 +1,6 @@
 # ─── Node / Electron ────────────────────────────────────────────────────────
-node_modules/
+node_modules
+.registry-data/
 .pnpm-store/
 out/
 dist/

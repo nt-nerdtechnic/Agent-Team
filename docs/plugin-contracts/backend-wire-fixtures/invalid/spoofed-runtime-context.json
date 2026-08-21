@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":"req-1","method":"navide/call","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}},"name":"plans.list","arguments":{},"runtime":{"pluginId":"navide.plans","packageVersion":"1.0.0","workspaceId":null,"instanceId":null,"contributionKey":null,"hostWindowId":null},"pluginId":"acme.spoof"}}

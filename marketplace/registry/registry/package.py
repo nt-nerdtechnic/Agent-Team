@@ -26,6 +26,19 @@ from .path_policy import (
 
 MANIFEST_NAME = "manifest.json"
 
+# These files are written by the Host after installation and must never be
+# supplied by a package. Store the names in the same portable collision-key
+# form used for archive path validation so case-folded aliases are rejected.
+_HOST_OWNED_ARCHIVE_NAMES = frozenset(
+    {
+        ".navide-receipt.json",
+        ".navide-registry-receipt.json",
+        ".navide-package.zip",
+        ".navide-registry-trust.json",
+        ".navide-backend-activation.json",
+    }
+)
+
 
 class PackageError(ValueError):
     """Raised when an archive is not a valid plugin package."""
@@ -70,6 +83,8 @@ def _validate_archive_entries(
         collision_key = portable_archive_collision_key(path)
         if collision_key is None:
             raise PackageError(f"unsafe archive entry path: {info.filename}")
+        if collision_key in _HOST_OWNED_ARCHIVE_NAMES:
+            raise PackageError(f"archive entry is Host-owned: {path}")
         if collision_key in seen:
             raise PackageError(f"duplicate archive entry: {path}")
         seen.add(collision_key)
@@ -82,7 +97,9 @@ def _validate_archive_entries(
         validated.append((info, path, kind))
     for path in regular_paths:
         if path in ancestor_paths:
-            raise PackageError(f"archive path collides with regular file ancestor: {path}")
+            raise PackageError(
+                f"archive path collides with regular file ancestor: {path}"
+            )
     return validated
 
 
@@ -99,6 +116,17 @@ def _archive_entry_type(info: zipfile.ZipInfo) -> str:
     ):
         return "directory"
     return "regular"
+
+
+def _archive_entry_is_executable(info: zipfile.ZipInfo) -> bool:
+    if info.create_system != 3:
+        return False
+    mode = (info.external_attr >> 16) & 0xFFFF
+    return stat.S_IFMT(mode) in (0, stat.S_IFREG) and bool(mode & 0o111)
+
+
+def _starts_with_executable_shebang(data: bytes) -> bool:
+    return data.startswith(b"#!") or data.startswith(b"\xef\xbb\xbf#!")
 
 
 def _has_zip64_end_of_central_directory(data: bytes) -> bool:
@@ -150,12 +178,16 @@ def read_package(data: bytes) -> LoadedPackage:
         infos = zf.infolist()
         validated_entries = _validate_archive_entries(infos)
         entry_types = {path: kind for _info, path, kind in validated_entries}
-        regular_names = {path for path, kind in entry_types.items() if kind == "regular"}
+        regular_names = {
+            path for path, kind in entry_types.items() if kind == "regular"
+        }
         if MANIFEST_NAME not in regular_names:
             raise PackageError(f"archive is missing {MANIFEST_NAME} at its root")
 
         manifest_info = next(
-            info for info, path, kind in validated_entries if path == MANIFEST_NAME and kind == "regular"
+            info
+            for info, path, kind in validated_entries
+            if path == MANIFEST_NAME and kind == "regular"
         )
         try:
             manifest_bytes = zf.read(manifest_info)
@@ -190,6 +222,25 @@ def read_package(data: bytes) -> LoadedPackage:
                     raise PackageError(
                         f"manifest referenced file '{path}' is not present in the archive"
                     )
+            if manifest.backend is not None:
+                backend_path = manifest.backend.entry
+                backend_info = next(
+                    info
+                    for info, path, kind in validated_entries
+                    if path == backend_path and kind == "regular"
+                )
+                backend_data = zf.read(backend_info)
+                if not backend_data:
+                    raise PackageError(f"backend entry is empty: {backend_path}")
+                if not _archive_entry_is_executable(backend_info):
+                    raise PackageError(
+                        f"backend entry is not marked executable: {backend_path}"
+                    )
+                if _starts_with_executable_shebang(backend_data):
+                    raise PackageError(
+                        "backend entry must be a packaged executable, "
+                        f"not a raw script: {backend_path}"
+                    )
         elif manifest.icon and entry_types.get(manifest.icon) != "regular":
             raise PackageError(
                 f"manifest.icon '{manifest.icon}' is not present in the archive"
@@ -199,10 +250,7 @@ def read_package(data: bytes) -> LoadedPackage:
         for info, path, kind in validated_entries:
             if kind != "regular" or path == MANIFEST_NAME:
                 continue
-            content_type = (
-                mimetypes.guess_type(path)[0]
-                or "application/octet-stream"
-            )
+            content_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
             assets.append(
                 AssetRef(
                     path=path,

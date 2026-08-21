@@ -12,15 +12,15 @@ class VersionInfo(BaseModel):
     package_digest: str
     yanked: bool
     published_at: datetime
+    target: str
+    registry_envelope: dict
+    registry_signature: str | None
     signed: bool
-    signature: str | None = None
-    """Detached Ed25519 signature (base64) over the package digest, when signed.
-    Enables the client to re-verify and reach the `signed-verified` trust tier."""
     trust_tier: str
     capabilities: list[str]
     """Declared v2 permission namespaces or legacy `manifest.requires`."""
     sensitive_capabilities: list[str]
-    """Subset of `capabilities` flagged for elevated scrutiny (fs/terminal)."""
+    """Subset of `capabilities` flagged for elevated scrutiny (fs/aiCli/shell)."""
     download_count: int
     """Downloads recorded for this specific version."""
 
@@ -44,9 +44,8 @@ class ExtensionSummary(BaseModel):
 
 class ExtensionDetail(ExtensionSummary):
     publisher: str
-    public_key: str | None = None
-    """Publisher's registered Ed25519 public key (PEM), for client-side
-    signature verification. One key per publisher; None when unregistered."""
+    trust_metadata: dict
+    trust_metadata_signature: str
     versions: list[VersionInfo]
 
 

@@ -12,8 +12,13 @@ import {
   terminalSessionsFromResponse,
   isCallAllowed,
   isEventAllowed,
+  planPublicCapabilityCall,
+  isPublicCapabilityEventAllowed,
+  shellTopLevelExecutables,
+  type HostCapabilityContext,
   type CapabilityCall,
 } from './pluginCapabilityBroker'
+import { HOST_SHELL_EXECUTABLE_ALLOWLIST } from './pluginCapabilityCatalog'
 import { manifestV2CapabilityPolicy } from './pluginPermissions'
 import type { WsResponse } from '../../shared/wsClient'
 
@@ -194,14 +199,14 @@ describe('planCapabilityCall', () => {
 
 describe('Manifest v2 access-aware policy', () => {
   const policy = manifestV2CapabilityPolicy({
-    fs: ['read'],
-    ui: ['openExternal'],
+    system: ['fs', 'ui'],
   })
 
-  it('keeps the issue 01 runtime surface fail-closed except for ping', () => {
+  it('projects only declared first-level namespaces', () => {
     expect(isCallAllowed(policy, 'ping', 'ping')).toBe(true)
-    expect(isCallAllowed(policy, 'fs', 'read_file')).toBe(false)
-    expect(isCallAllowed(policy, 'ui', 'open_external')).toBe(false)
+    expect(isCallAllowed(policy, 'fs', 'read_file')).toBe(true)
+    expect(isCallAllowed(policy, 'ui', 'open_external')).toBe(true)
+    expect(isCallAllowed(policy, 'aiCli', 'startSession')).toBe(false)
   })
 
   it('does not turn a deferred storage declaration into a runtime surface', () => {
@@ -209,9 +214,262 @@ describe('Manifest v2 access-aware policy', () => {
     expect(isCallAllowed(policy, 'storage', 'delete')).toBe(false)
   })
 
-  it('does not expose legacy first-party events to v2 plugins', () => {
+  it('does not route v2 events without authenticated Host context', () => {
     expect(isEventAllowed(policy, 'git.changed')).toBe(false)
     expect(isEventAllowed(policy, 'ui.settings_changed')).toBe(false)
+    expect(isEventAllowed(policy, 'workspace.filesChanged')).toBe(false)
+  })
+})
+
+describe('Issue 03/04 public Host planner', () => {
+  const policy = manifestV2CapabilityPolicy({ system: ['aiCli'], shell: 'allowlist' })
+  const binding = {
+    pluginId: 'acme.ai-cli',
+    packageVersion: '1.0.0',
+    workspaceId: 'workspace-1',
+    instanceId: 'instance-1',
+    audience: 'audience-1',
+  } as const
+  const context = (overrides: Partial<HostCapabilityContext> = {}): HostCapabilityContext => ({
+    publisherEligible: true,
+    userGrant: { packageVersion: '1.0.0', system: ['aiCli'], shell: 'allowlist' },
+    runtimeBinding: binding,
+    aiCliProfiles: ['codex'],
+    sessionBindings: new Map(),
+    ...overrides,
+  })
+  const call = (overrides: Partial<CapabilityCall> = {}): CapabilityCall => ({
+    pluginId: 'acme.ai-cli',
+    ns: 'aiCli',
+    method: 'startSession',
+    args: { profileId: 'codex', cols: 100, rows: 30 },
+    reqId: 'req-1',
+    ...overrides,
+  })
+
+  it('returns a Host-owned plan only after grant, eligibility, binding, and schema checks', () => {
+    expect(planPublicCapabilityCall(call(), policy, context())).toMatchObject({
+      kind: 'allow',
+      plan: { kind: 'public', address: 'aiCli.startSession', scope: 'workspace', runtime: binding },
+    })
+  })
+
+  it('fails closed without a workspace or package-version grant', () => {
+    expect(planPublicCapabilityCall(call(), policy, context({ runtimeBinding: { ...binding, workspaceId: null } }))).toMatchObject({
+      kind: 'deny',
+      response: { error: { code: 'WORKSPACE_SCOPE_VIOLATION' } },
+    })
+    expect(planPublicCapabilityCall(call(), policy, context({ userGrant: null }))).toMatchObject({
+      kind: 'deny',
+      response: { error: { code: 'CAPABILITY_DENIED' } },
+    })
+  })
+
+  it('does not treat first-party eligibility as an automatic grant', () => {
+    expect(planPublicCapabilityCall(call(), policy, context({ publisherEligible: false }))).toMatchObject({
+      kind: 'deny',
+      response: { error: { code: 'CAPABILITY_DENIED' } },
+    })
+  })
+
+  it('requires a Host-allowlisted AI CLI profile', () => {
+    expect(
+      planPublicCapabilityCall(
+        call({ args: { profileId: 'unregistered', cols: 100, rows: 30 } }),
+        policy,
+        context()
+      )
+    ).toMatchObject({ kind: 'deny', response: { error: { code: 'CAPABILITY_DENIED' } } })
+  })
+
+  it('denies shell.run when the shell declaration is omitted', () => {
+    const noShellPolicy = manifestV2CapabilityPolicy({ system: ['fs'] })
+    expect(
+      planPublicCapabilityCall(
+        call({ ns: 'shell', method: 'run', args: { command: 'git status' } }),
+        noShellPolicy,
+        context({ userGrant: { packageVersion: '1.0.0', system: ['fs'] } })
+      )
+    ).toMatchObject({ kind: 'deny', response: { error: { code: 'CAPABILITY_DENIED' } } })
+  })
+
+  it('records Git as the only Host-maintained shell executable', () => {
+    expect(HOST_SHELL_EXECUTABLE_ALLOWLIST).toEqual(['git'])
+    expect(
+      planPublicCapabilityCall(
+        call({ ns: 'shell', method: 'run', args: { command: 'git status' } }),
+        policy,
+        context()
+      )
+    ).toMatchObject({ kind: 'allow', plan: { address: 'shell.run', shellMode: 'allowlist' } })
+  })
+
+  it('gives an official Git package no identity-based shell bypass', () => {
+    const officialBinding = { ...binding, pluginId: 'navide.git' }
+    const officialCall = call({
+      pluginId: 'navide.git',
+      ns: 'shell',
+      method: 'run',
+      args: { command: 'git status' },
+    })
+    expect(
+      planPublicCapabilityCall(
+        officialCall,
+        manifestV2CapabilityPolicy({}),
+        context({ runtimeBinding: officialBinding })
+      )
+    ).toMatchObject({ kind: 'deny', response: { error: { code: 'CAPABILITY_DENIED' } } })
+    expect(
+      planPublicCapabilityCall(
+        officialCall,
+        policy,
+        context({ runtimeBinding: officialBinding, userGrant: null })
+      )
+    ).toMatchObject({ kind: 'deny', response: { error: { code: 'CAPABILITY_DENIED' } } })
+  })
+
+  it.each([
+    ['unknown executable', 'curl https://example.com'],
+    ['wrapper', 'env git status'],
+    ['absolute path substitution', '/usr/bin/git status'],
+    ['relative path substitution', './git status'],
+    ['command substitution', 'git $(echo status)'],
+    ['redirection', 'git status > output.txt'],
+    ['alias', 'g status'],
+    ['unallowlisted pipeline segment', 'git status | cat'],
+    ['unallowlisted command-chain segment', 'git status && echo done'],
+  ])('fails closed for %s', (_case, command) => {
+    expect(
+      planPublicCapabilityCall(
+        call({ ns: 'shell', method: 'run', args: { command } }),
+        policy,
+        context()
+      )
+    ).toMatchObject({ kind: 'deny', response: { error: { code: 'CAPABILITY_DENIED' } } })
+  })
+
+  it('rejects Plugin-supplied identity and raw execution fields', () => {
+    const result = planPublicCapabilityCall(
+      call({ args: { profileId: 'codex', cols: 100, rows: 30, workspaceId: 'spoofed', executable: '/bin/sh' } }),
+      policy,
+      context()
+    )
+    expect(result).toMatchObject({ kind: 'deny', response: { error: { code: 'INVALID_ARGUMENT' } } })
+  })
+
+  it('checks every top-level executable in a shell pipeline or chain', () => {
+    expect(shellTopLevelExecutables('git status && echo ok | git diff')).toEqual(['git', 'echo', 'git'])
+    expect(
+      planPublicCapabilityCall(
+        call({ ns: 'shell', method: 'run', args: { command: 'git status && rm -rf .' } }),
+        policy,
+        context()
+      )
+    ).toMatchObject({ kind: 'deny', response: { error: { code: 'CAPABILITY_DENIED' } } })
+  })
+
+  it('rejects shell expansion and redirection before allowlist evaluation', () => {
+    expect(shellTopLevelExecutables('git $(echo unsafe)')).toBeNull()
+    expect(shellTopLevelExecutables('git > output.txt')).toBeNull()
+    expect(shellTopLevelExecutables('./git status')).toBeNull()
+    expect(
+      planPublicCapabilityCall(
+        call({ ns: 'shell', method: 'run', args: { command: 'git $(/bin/sh -c unsafe)' } }),
+        policy,
+        context()
+      )
+    ).toMatchObject({ kind: 'deny', response: { error: { code: 'CAPABILITY_DENIED' } } })
+  })
+
+  it('requires a separate high-risk confirmation for full shell mode', () => {
+    const fullPolicy = manifestV2CapabilityPolicy({ shell: 'full' })
+    const fullContext = context({
+      publisherEligible: false,
+      userGrant: { packageVersion: '1.0.0', system: [], shell: 'full' },
+    })
+    const denied = planPublicCapabilityCall(
+      call({ ns: 'shell', method: 'run', args: { command: 'arbitrary --command' } }),
+      fullPolicy,
+      fullContext
+    )
+    expect(denied).toMatchObject({ kind: 'deny', response: { error: { code: 'CAPABILITY_DENIED' } } })
+    expect(
+      planPublicCapabilityCall(
+        call({ ns: 'shell', method: 'run', args: { command: 'arbitrary --command' } }),
+        fullPolicy,
+        context({
+          publisherEligible: false,
+          userGrant: { packageVersion: '1.0.0', system: [], shell: 'full', highRiskShellConfirmed: true },
+        })
+      )
+    ).toMatchObject({ kind: 'allow', plan: { address: 'shell.run', shellMode: 'full' } })
+  })
+
+  it('routes AI CLI events only to the authenticated session audience', () => {
+    const session = { ...binding, instanceId: 'instance-1', audience: 'audience-1' }
+    const allowed = context({ sessionBindings: new Map([['session-1', session]]) })
+    expect(
+      isPublicCapabilityEventAllowed(policy, 'aiCli.output', { sessionId: 'session-1', data: 'ok' }, allowed)
+    ).toBe(true)
+    expect(
+      isPublicCapabilityEventAllowed(
+        policy,
+        'aiCli.output',
+        { sessionId: 'session-1', data: 'ok', exitCode: 0 },
+        allowed
+      )
+    ).toBe(false)
+    expect(
+      isPublicCapabilityEventAllowed(
+        policy,
+        'aiCli.output',
+        { sessionId: 'session-1', data: 'ok' },
+        context({ runtimeBinding: { ...binding, audience: 'other-audience' }, sessionBindings: new Map([['session-1', session]]) })
+      )
+    ).toBe(false)
+  })
+
+  it('requires the package-version grant before routing public events', () => {
+    expect(
+      isPublicCapabilityEventAllowed(
+        policy,
+        'aiCli.output',
+        { sessionId: 'session-1', data: 'ok' },
+        context({
+          userGrant: null,
+          sessionBindings: new Map([['session-1', binding]]),
+        })
+      )
+    ).toBe(false)
+  })
+
+  it('requires a Host-bound workspace source for workspace events', () => {
+    const filesPolicy = manifestV2CapabilityPolicy({ system: ['fs'] })
+    const filesContext = context({
+      userGrant: { packageVersion: '1.0.0', system: ['fs'] },
+    })
+    const payload = { changes: [{ path: 'README.md', kind: 'changed' }] }
+    expect(isPublicCapabilityEventAllowed(filesPolicy, 'workspace.filesChanged', payload, filesContext)).toBe(
+      false
+    )
+    expect(
+      isPublicCapabilityEventAllowed(
+        filesPolicy,
+        'workspace.filesChanged',
+        payload,
+        filesContext,
+        { ...binding, pluginId: 'host', instanceId: null, audience: null }
+      )
+    ).toBe(true)
+    expect(
+      isPublicCapabilityEventAllowed(
+        filesPolicy,
+        'workspace.filesChanged',
+        payload,
+        filesContext,
+        { ...binding, pluginId: 'host', workspaceId: 'other-workspace', instanceId: null, audience: null }
+      )
+    ).toBe(false)
   })
 })
 

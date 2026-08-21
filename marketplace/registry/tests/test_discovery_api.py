@@ -22,14 +22,16 @@ def _publish_ext(client: TestClient, ident: str, **manifest_kw):
     return _publish(client, build_package(manifest=manifest))
 
 
-def test_detail_omits_signing_material_when_unsigned(client: TestClient) -> None:
-    # An unsigned publish (no signature, publisher has no registered key) must
-    # surface null signing material — the client then resolves it to `unsigned`.
+def test_detail_uses_registry_signing_even_without_publisher_signature(
+    client: TestClient,
+) -> None:
+    # Permissive dev mode may accept an unsigned publisher submission, but the
+    # artifact exposed to clients is still signed by the registry.
     _publish(client, build_package())
     detail = client.get("/api/extensions/acme/hello").json()
-    assert detail["public_key"] is None
-    assert detail["versions"][0]["signature"] is None
-    assert detail["versions"][0]["signed"] is False
+    assert "public_key" not in detail
+    assert detail["versions"][0]["registry_signature"]
+    assert detail["versions"][0]["signed"] is True
 
 
 def test_download_increments_per_version_and_aggregate(client: TestClient) -> None:

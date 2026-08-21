@@ -4,14 +4,16 @@ import {
   PluginVerifyError,
 } from './pluginVerify'
 import { InstalledPluginError } from './pluginManifestErrors'
+import { isValidManifestV2PluginId } from './pluginManifestV2'
 
-const ID_RE = /^[a-z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9-]*$/
 const SEMVER_RE = /^\d+\.\d+\.\d+$/
 
 export type LegacyInstalledManifest = {
   schemaVersion?: never
   id: string
   version: string
+  /** Registry v1 packages may carry the publisher identity; old local files may not. */
+  publisher?: string
   requires: string[]
   entry: string
 }
@@ -19,7 +21,7 @@ export type LegacyInstalledManifest = {
 /** Parse the pre-schemaVersion internal manifest format. */
 export function parseManifestV1(raw: Record<string, unknown>): LegacyInstalledManifest {
   const id = raw.id
-  if (typeof id !== 'string' || !ID_RE.test(id)) {
+  if (typeof id !== 'string' || !isValidManifestV2PluginId(id)) {
     throw new InstalledPluginError(
       `manifest id must be '<publisher>.<name>' lowercase, got ${String(id)}`
     )
@@ -50,5 +52,9 @@ export function parseManifestV1(raw: Record<string, unknown>): LegacyInstalledMa
     if (error instanceof PluginVerifyError) throw new InstalledPluginError(error.message)
     throw error
   }
-  return { id, version, requires, entry }
+  const publisher = raw.publisher
+  if (publisher !== undefined && (typeof publisher !== 'string' || publisher.length === 0)) {
+    throw new InstalledPluginError(`manifest ${id} has an invalid publisher`)
+  }
+  return { id, version, ...(publisher !== undefined ? { publisher } : {}), requires, entry }
 }

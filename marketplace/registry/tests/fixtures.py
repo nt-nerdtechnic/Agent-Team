@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import stat
 import zipfile
 from pathlib import Path
 
@@ -75,6 +76,8 @@ def build_v2_package(
     manifest: dict | None = None,
     *,
     omit_paths: set[str] | None = None,
+    backend_mode: int = stat.S_IFREG | 0o755,
+    backend_data: bytes = b"\x7fELF-test-backend",
 ) -> bytes:
     """Build a package containing every file referenced by a v2 manifest."""
     manifest = manifest if manifest is not None else contract_manifest()
@@ -93,13 +96,27 @@ def build_v2_package(
             if isinstance(view.get("icon"), str):
                 paths.add(view["icon"])
     backend = manifest.get("backend", {})
+    backend_entry: str | None = None
     if isinstance(backend, dict) and isinstance(backend.get("entry"), str):
-        paths.add(backend["entry"])
+        backend_entry = backend["entry"]
+        paths.add(backend_entry)
 
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("manifest.json", json.dumps(manifest))
         zf.writestr("README.md", b"# Contract fixture\n")
         for path in sorted(paths - omitted):
-            zf.writestr(path, b"<!doctype html>\n" if path.endswith(".html") else b"asset")
+            info = zipfile.ZipInfo(path)
+            info.create_system = 3
+            info.external_attr = (
+                backend_mode if path == backend_entry else stat.S_IFREG | 0o644
+            ) << 16
+            data = (
+                backend_data
+                if path == backend_entry
+                else b"<!doctype html>\n"
+                if path.endswith(".html")
+                else b"asset"
+            )
+            zf.writestr(info, data)
     return buffer.getvalue()

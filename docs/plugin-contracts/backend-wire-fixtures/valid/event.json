@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","method":"notifications/navide/event","params":{"_meta":{"io.modelcontextprotocol/subscriptionId":"listen-1"},"event":"plans.changed","payload":{"planId":"p-1"}}}

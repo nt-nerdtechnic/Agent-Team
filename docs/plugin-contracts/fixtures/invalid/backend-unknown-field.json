@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 2,
+  "apiVersion": "^1.0.0",
+  "id": "acme.backend-language",
+  "name": "Backend Language",
+  "version": "1.0.0",
+  "publisher": "acme",
+  "permissions": {},
+  "marketplace": { "description": "Reject backend implementation metadata.", "license": "MIT" },
+  "backend": {
+    "entry": "backend/acme-language",
+    "protocolVersion": 1,
+    "activation": "startup",
+    "language": "python"
+  }
+}

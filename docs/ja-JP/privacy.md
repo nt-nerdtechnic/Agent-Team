@@ -33,9 +33,25 @@ Navide は Project Telemetry Service を運営せず、Navide Account を必要�
 | Web Search | Search Provider | Search Query Text |
 | Git Operation | 設定された Git Host | Repository Data と、Git または Host Flow が扱う Credential |
 | Update Check | GitHub Releases | Application Version と通常の Network Metadata |
+| Plugin Registry Trust Refresh | 選択した Official Registry、または明示的に承認した self-hosted Registry | インストール済み marketplace plugin の namespace/name。Refresh では Plugin Source や Archive を送信しない |
 | MCP Server | 設定された MCP Server と、それが利用する Service | Server の Tool と Configuration に全面的に依存 |
 
 Private Code や規制対象 Data を送信する前に、各 Provider の Policy を確認してください。
+
+インストール済みの marketplace plugin がある間、Navide は Application 起動時と
+15 分ごとに、その Plugin の namespace/name を選択した Registry へ送信します。
+これは、署名済みの Trust Metadata を取得し、Revoke された Publisher や Package を
+検出してインストール済み Plugin を隔離するためです。送信先は設定した Registry URL
+で決まります。Official URL を使う場合は App に Pin された Official Registry を、
+self-hosted URL を使う場合はユーザーが明示的に承認した URL と Root だけを使います。
+この Refresh で Plugin Source、Package Archive、Workspace File を Upload することは
+ありません。
+
+Navide は、再起動後の Check に使うため、最新の署名済み Trust Snapshot を Plugin
+Installation とともにローカルに保持します。Registry 自身の Request Log の保持は、
+その Registry の管理に委ねられます。現在、Refresh 専用の無効化設定はありません。
+インストール済みの marketplace plugin をすべて削除すると、この Data Flow は停止
+します。その他の外部 Service の Data Flow は、それぞれの設定に従います。
 
 ## 認証情報
 

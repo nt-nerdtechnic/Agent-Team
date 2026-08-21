@@ -203,10 +203,19 @@ def deactivate():
 | `register_spawn_transformer(fn)` | Rewrite an agent's spawn command: `(agent_key, command, port, pane_id, env) -> command`. `env` is the spawn environment, mutated in place for CLIs configured by variable rather than by flag. Declaring fewer positional parameters keeps the older shapes working. |
 | `clear_registrations()` | Drop registrations on deactivate |
 
-Place the directory under `plugins/builtin/` to ship it with the service, or
-install it into the directory named by `AGENT_TEAM_PLUGINS_DIR`. Discovery is
-automatic — no wiring changes are needed. Each plugin loads inside its own
-try/except, so a failing plugin never blocks service startup.
+This Python import shape is now restricted to Navide's bundled
+`plugins/builtin/` directory. The service no longer scans
+`AGENT_TEAM_PLUGINS_DIR`: an installed or locally created directory containing
+`plugin.json` and `backend.py` cannot enter backend startup. Each bundled plugin
+still loads inside its own try/except, so a failing builtin never blocks service
+startup.
+
+Installed Manifest v2 backend contributions instead reach the service through
+a Host-generated activation catalog bound to the backend child process by an
+exact SHA-256 digest. The Python service validates that projection but does not
+import or spawn its packaged executable yet. Electron's child-process
+supervisor must land before third-party or Developer Mode v2 backends can run;
+until then those entries remain fail-closed.
 
 `navide_plans` is the reference implementation: it registers a route, startup
 and shutdown hooks, and a spawn transformer.
@@ -397,7 +406,9 @@ signature material always yields `unsigned` — a registry cannot raise a
 package's trust tier by asserting one.
 
 **Reserved namespace.** Plugin ids beginning with `navide.` are reserved for
-first-party plugins and are pinned to an official publisher key. Use your own
+first-party plugins. Marketplace packages may claim them only through the
+App-authorized Official Registry path; an approved self-hosted Registry cannot
+upgrade its authority by returning `registryProfile: "official"`. Use your own
 publisher prefix.
 
 **Two-phase install.** `prepareInstall` downloads, cross-checks the digest,
@@ -445,11 +456,46 @@ instance you are targeting. There is no public Navide registry yet, so
 third-party distribution today means running your own instance or installing
 from a local package.
 
+The local endpoint is not the Official Registry identity and does not inherit
+the App-shipped root pin. Before Navide contacts a self-hosted Registry, set
+`AGENT_TEAM_REGISTRY_ROOT_APPROVAL_FILE` to a Host-owned JSON file that binds
+the exact Registry URL to a separately confirmed root key fingerprint:
+
+```json
+{
+  "schemaVersion": 1,
+  "registryUrl": "http://localhost:8787",
+  "rootPublicKeyPem": "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n",
+  "confirmedFingerprint": "sha256:<64 lowercase hex characters>"
+}
+```
+
+Unknown fields, duplicate JSON keys, a URL mismatch, or a fingerprint mismatch
+fail closed. `AGENT_TEAM_MARKETPLACE_URL` selects a non-default self-hosted URL;
+the approval file must name that normalized URL. The Registry response's
+informational `rootFingerprint` never replaces this out-of-band approval.
+
+The Official Registry root is provisioned separately from the publisher key.
+Packaged releases must include an independent Ed25519 public key at
+`resources/official-registry-root.pem`; the Host reads only
+`process.resourcesPath/resources/official-registry-root.pem`. A missing or
+malformed resource, or a resource that reuses the publisher key, leaves the
+Official Registry path unavailable. The Registry response and runtime
+environment variables cannot provide or replace this packaged pin.
+
 ## Local development
 
 Set `AGENT_TEAM_PLUGIN_DEV=1` to expose the plugin dev menu, which registers dev
 descriptors pointing at local build output and adds entries for the `noop` and
 `fs_probe` probe plugins.
+
+To load one local unpacked Manifest v2 frontend package, also set
+`AGENT_TEAM_PLUGIN_DEV_PATH` to that exact package directory. Developer Mode
+validates only the selected directory, requires a strict frontend package,
+rejects reserved ids and backend contributions, and shows a persistent unsigned
+local-only warning. It does not scan a parent directory or grant Registry
+provenance, publishing, or auto-update behavior. The fixed `dist-plugins`
+bundles remain Host-owned development fixtures.
 
 `noop` verifies the IPC bridge end to end with a `ping` call. `fs_probe`
 demonstrates a real capability call plus event subscription. Both are minimal

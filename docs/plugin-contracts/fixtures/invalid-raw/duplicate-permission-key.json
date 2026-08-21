@@ -6,8 +6,8 @@
   "version": "1.0.0",
   "publisher": "acme",
   "permissions": {
-    "ui": ["openInEditor"],
-    "ui": ["openExternal"]
+    "system": ["fs"],
+    "system": ["ui"]
   },
   "marketplace": { "description": "Attempt to overwrite a permission key.", "license": "MIT" },
   "backend": { "entry": "backend/acme-plugin", "protocolVersion": 1, "activation": "startup" }

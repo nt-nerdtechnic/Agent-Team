@@ -1,11 +1,22 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs'
+import {
+  chmodSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+  rmSync,
+  symlinkSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   parseInstalledManifest,
   parseManifestJson,
   manifestToDescriptor,
+  manifestToActivation,
+  buildActivationCatalog,
   loadPluginDir,
   scanInstalledPlugins,
   InstalledPluginError,
@@ -20,6 +31,16 @@ const VALID_V2_FIXTURES = readdirSync(join(CONTRACT_FIXTURES, 'valid'))
 const INVALID_V2_FIXTURES = readdirSync(join(CONTRACT_FIXTURES, 'invalid'))
   .filter((name) => name.endsWith('.json'))
   .sort()
+const ISSUE_02_FIXTURES = [
+  ['valid', 'backend-only-skills.json'],
+  ['valid', 'combined-files.json'],
+  ['invalid', 'backend-raw-script.json'],
+  ['invalid', 'backend-raw-script-uppercase.json'],
+  ['invalid', 'backend-unknown-activation.json'],
+  ['invalid', 'backend-unknown-field.json'],
+  ['invalid', 'backend-unknown-protocol.json'],
+  ['invalid', 'metadata-only.json'],
+] as const
 
 function readFixture(group: string, name: string): string {
   return readFileSync(join(CONTRACT_FIXTURES, group, name), 'utf8')
@@ -65,6 +86,10 @@ describe('parseInstalledManifest', () => {
 })
 
 describe('Manifest v2 contract corpus', () => {
+  it.each(ISSUE_02_FIXTURES)('uses empty permissions in %s/%s', (group, name) => {
+    expect(JSON.parse(readFixture(group, name)).permissions).toEqual({})
+  })
+
   it.each(VALID_V2_FIXTURES)(
     'accepts valid fixture %s',
     (name) => {
@@ -153,7 +178,7 @@ describe('Manifest v2 contract corpus', () => {
 
   it('rejects duplicate object keys before manifest validation', () => {
     expect(() => parseManifestJson(readFixture('invalid-raw', 'duplicate-permission-key.json'))).toThrow(
-      /duplicate JSON object key: ui/
+      /duplicate JSON object key: system/
     )
   })
 
@@ -168,13 +193,15 @@ describe('Manifest v2 contract corpus', () => {
       JSON.parse(readFixture('valid', 'frontend-multi-view.json'))
     )
     const descriptor = manifestToDescriptor(manifest, '/plugins/acme.files')
-    expect(descriptor.requires).toEqual(['fs', 'ui'])
+    expect(descriptor.requires).toEqual(['fs', 'ui', 'shell'])
     expect(descriptor.capabilityPolicy).toEqual({
       kind: 'manifest-v2',
+      system: ['fs', 'ui'],
+      shell: 'allowlist',
       grants: [
-        { permission: 'fs', access: 'read' },
-        { permission: 'ui', access: 'openInEditor' },
-        { permission: 'ui', access: 'openExternal' },
+        { permission: 'system', namespace: 'fs' },
+        { permission: 'system', namespace: 'ui' },
+        { permission: 'shell', mode: 'allowlist' },
       ],
     })
     expect(descriptor.views).toHaveLength(6)
@@ -184,6 +211,65 @@ describe('Manifest v2 contract corpus', () => {
       location: 'left',
       entryFile: '/plugins/acme.files/frontend/left/index.html',
     })
+  })
+
+  it('derives backend-only and combined activation entries from one package version', () => {
+    const backendOnly = parseInstalledManifest(
+      JSON.parse(readFixture('valid', 'backend-only-skills.json'))
+    )
+    const combined = parseInstalledManifest(
+      JSON.parse(readFixture('valid', 'combined-files.json'))
+    )
+    if (backendOnly.schemaVersion !== 2 || combined.schemaVersion !== 2) {
+      throw new Error('expected Manifest v2 fixtures')
+    }
+
+    expect(manifestToActivation(backendOnly, '/plugins/navide.skills')).toEqual({
+      pluginId: 'navide.skills',
+      packageVersion: '1.0.0',
+      packageDir: '/plugins/navide.skills',
+      views: [],
+      backend: {
+        entryFile: '/plugins/navide.skills/backend/navide-skills',
+        protocolVersion: 1,
+        activation: 'startup',
+      },
+    })
+    const combinedActivation = manifestToActivation(combined, '/plugins/acme.files')
+    expect(combinedActivation.packageVersion).toBe('1.0.0')
+    expect(combinedActivation.views[0]).toMatchObject({
+      contributionKey: 'acme.files.left',
+      entryFile: '/plugins/acme.files/frontend/left/index.html',
+    })
+    expect(combinedActivation.backend?.entryFile).toBe(
+      '/plugins/acme.files/backend/acme-files'
+    )
+  })
+
+  it('rejects an activation catalog containing two active versions of one package', () => {
+    const manifest = parseInstalledManifest(
+      JSON.parse(readFixture('valid', 'combined-files.json'))
+    )
+    if (manifest.schemaVersion !== 2) throw new Error('expected Manifest v2 fixture')
+    const otherVersion = { ...manifest, version: '2.0.0' }
+    const first = manifestToActivation(manifest, '/plugins/acme.files/1.0.0')
+    const second = manifestToActivation(otherVersion, '/plugins/acme.files/2.0.0')
+
+    expect(() => buildActivationCatalog([first, second])).toThrow(/multiple active versions/)
+  })
+
+  it('rejects an activation catalog containing one package version twice', () => {
+    const manifest = parseInstalledManifest(
+      JSON.parse(readFixture('valid', 'combined-files.json'))
+    )
+    if (manifest.schemaVersion !== 2) throw new Error('expected Manifest v2 fixture')
+
+    expect(() =>
+      buildActivationCatalog([
+        manifestToActivation(manifest, '/plugins/acme.files/first'),
+        manifestToActivation(manifest, '/plugins/acme.files/second'),
+      ])
+    ).toThrow(/appears more than once/)
   })
 })
 
@@ -260,6 +346,48 @@ describe('loadPluginDir', () => {
         entryFile: join(root, 'frontend', 'left', 'index.html'),
       }),
     ])
+  })
+
+  it('loads a backend-only v2 package into the activation catalog', () => {
+    const manifest = JSON.parse(readFixture('valid', 'backend-only-skills.json'))
+    mkdirSync(join(root, 'backend'), { recursive: true })
+    writeFileSync(join(root, 'manifest.json'), JSON.stringify(manifest))
+    const backendPath = join(root, 'backend', 'navide-skills')
+    writeFileSync(backendPath, Buffer.from([0x7f, 0x45, 0x4c, 0x46]))
+    chmodSync(backendPath, 0o700)
+
+    const loaded = loadPluginDir(root)
+    expect(loaded.error).toBeUndefined()
+    expect(loaded.descriptor).toBeUndefined()
+    expect(loaded.activation).toMatchObject({
+      pluginId: 'navide.skills',
+      packageVersion: '1.0.0',
+      views: [],
+      backend: { protocolVersion: 1, activation: 'startup' },
+    })
+  })
+
+  it.each([
+    ['non-executable', Buffer.from([0x7f, 0x45, 0x4c, 0x46]), 0o600, /not executable/],
+    ['empty', Buffer.alloc(0), 0o700, /empty/],
+    ['shebang', Buffer.from('#!/bin/sh\n'), 0o700, /must not be a script/],
+    [
+      'BOM plus shebang',
+      Buffer.from([0xef, 0xbb, 0xbf, 0x23, 0x21, 0x0a]),
+      0o700,
+      /must not be a script/,
+    ],
+  ])('rejects a %s backend during disk loading', (_label, content, mode, error) => {
+    const manifest = JSON.parse(readFixture('valid', 'backend-only-skills.json'))
+    mkdirSync(join(root, 'backend'), { recursive: true })
+    writeFileSync(join(root, 'manifest.json'), JSON.stringify(manifest))
+    const backendPath = join(root, 'backend', 'navide-skills')
+    writeFileSync(backendPath, content)
+    chmodSync(backendPath, mode)
+
+    const loaded = loadPluginDir(root)
+    expect(loaded.error).toMatch(error)
+    expect(loaded.activation).toBeUndefined()
   })
 
   it('returns an error (never throws) for a missing or invalid manifest', () => {

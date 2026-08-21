@@ -1,5 +1,20 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { waitForHealth } from './backend'
+import { bindBackendPluginActivationCatalog, waitForHealth } from './backend'
+
+describe('backend plugin activation environment', () => {
+  it('replaces directory discovery with a path and exact-byte digest binding', () => {
+    expect(
+      bindBackendPluginActivationCatalog(
+        { AGENT_TEAM_PLUGINS_DIR: '/unsafe-scan', KEEP: 'yes' },
+        { path: '/state/catalog.json', sha256: 'a'.repeat(64) }
+      )
+    ).toEqual({
+      KEEP: 'yes',
+      AGENT_TEAM_PLUGIN_ACTIVATION_CATALOG: '/state/catalog.json',
+      AGENT_TEAM_PLUGIN_ACTIVATION_CATALOG_SHA256: 'a'.repeat(64),
+    })
+  })
+})
 
 // waitForHealth is the low-level poller startBackend() delegates to; testing it
 // directly (rather than startBackend, which spawns a real child process and

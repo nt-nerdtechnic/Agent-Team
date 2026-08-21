@@ -1,0 +1,12 @@
+{
+  "z": "last",
+  "ä": "umlaut",
+  "a": "first",
+  "nested": {
+    "Ω": "omega",
+    "a": "inner",
+    "z": "last"
+  },
+  "": "private-use",
+  "😀": "emoji"
+}

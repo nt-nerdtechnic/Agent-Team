@@ -1,20 +1,28 @@
 # Plugin Developer Spec v2
 
-> **Status: target draft, not implemented.** The current runtime uses manifest
+> **Status: target draft; Issue 03 contract enforcement is implemented.** The current runtime uses manifest
 > v1 and is documented in [Plugin development guide](plugin-development.md).
 > This document is the author-facing contract that the v2 migration must
 > implement before third-party publishing opens.
 >
-> The issue 01 implementation currently validates the manifest and discovers
-> custom-view metadata only. Capability execution, user-gesture authorization,
-> events, and storage are deferred to their owning follow-up issues.
+> Issue 03 adds strict Manifest v2 grant parsing, catalog validation, and the
+> Host authorization/planning seam. Actual backend child-process lifecycle
+> remains deferred to its owning follow-up issue. Issue 03 completes the
+> parser, catalog, authorization planner, and Host enforcement seams.
+> Production execution adapters and persisted consent wiring remain disabled
+> and belong to the later runtime integration issue.
+>
+> Issue 06 adds the public package boundary and the external frontend workflow.
+> The checked-in SDK CLI currently supports `validate` and frontend-only
+> `package`; `init`, `dev`, backend packaging, signing, publishing, and runtime
+> transport remain deferred to their owning issues.
 >
 > **Migration decision:** Plan B (the B0-B9 checkpoint path) was approved on
 > 2026-08-13. Plans A and C are not active implementation alternatives.
 
 ## What is public
 
-Third-party plugins may depend only on these published npm packages:
+Third-party plugins may depend only on these public package names:
 
 - `@navide/plugin-contracts`: manifest types, capability addresses, payloads,
   error codes, and JSON Schema exports.
@@ -27,10 +35,14 @@ first-party implementation. A bundled plugin such as `navide.git` can use them;
 a third-party plugin cannot. They are not compatibility promises or examples of
 the public dependency graph.
 
-The packages will be published to npm with normal SemVer 2.0.0 versions. Third-party
-projects must use registry versions, never `workspace:` dependencies. The v2
-release gate requires a public package tarball smoke test from a directory
-outside the Navide workspace.
+The package manifests declare public npm publication metadata and use normal
+SemVer 2.0.0 versions, but registry publication is future work outside Issue
+06. The package implementations live under
+`packages/plugin-{contracts,sdk,ui}/` and have no dependency on
+`packages/features/*`. Third-party projects must use registry versions in a
+published workflow, never `workspace:` dependencies. The Issue 06 release
+gate packs those public packages and installs the tarballs in a directory
+outside the Navide workspace; it does not publish to npm.
 
 ## Recommended source project
 
@@ -62,9 +74,10 @@ acme-files/
 ```json
 {
   "scripts": {
-    "build": "vite build",
-    "check": "navide-plugin validate manifest.json",
-    "dev": "navide-plugin dev"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/stage-package.mjs",
+    "check": "navide-plugin validate dist/package",
+    "package": "navide-plugin package dist/package --out dist/acme-files.vsix"
   },
   "dependencies": {
     "@navide/plugin-contracts": "^1.0.0",
@@ -74,12 +87,48 @@ acme-files/
 }
 ```
 
-The SDK distribution must include a `navide-plugin` executable with `init`,
-`validate`, `dev`, and `package` commands. `init` generates this layout;
-`validate` checks the same schema and capability catalog as the Host;
-`dev` registers an unpacked directory and prints renderer/backend logs; and
-`package` creates the canonical signed archive input. These commands are a v2
-release requirement, not current v1 behavior.
+The Issue 06 SDK distribution includes a `navide-plugin` executable with these
+commands:
+
+```text
+navide-plugin validate <directory>
+navide-plugin package <directory> [--out <file>]
+```
+
+`validate` rejects duplicate JSON keys, unknown manifest fields, unsafe paths,
+symlinks, missing referenced files, and files outside the frontend/assets
+package boundary. `package` emits a deterministic `.vsix` ZIP with a root
+`manifest.json`; it rejects manifests containing backend contributions. The
+CLI has no Host transport, process execution, signing, registry publishing,
+scaffolding, or development server.
+
+## Issue 06 external workspace workflow
+
+The repository example at `examples/third-party-files/` is copied into a
+temporary project outside the Navide workspace for the release smoke test. Its
+package manifest declares SemVer ranges for the three public packages. The
+smoke test replaces only those three public package ranges with local packed
+tarballs and installs them with `pnpm --offline` in an isolated temporary
+store. It uses the repository's installed TypeScript and Vite CLI entries for
+the external project's typecheck and build; it does not install TypeScript or
+Vite tarballs offline. The example itself contains no `workspace:` or private
+feature dependency.
+
+From the external project, the supported workflow is:
+
+```text
+pnpm install
+pnpm run typecheck
+pnpm run build
+pnpm run check
+pnpm run package
+```
+
+The example declares the `fs` system namespace and successfully invokes
+`fs.readFile`. It also attempts `shell.run` without declaring `shell`; the Host
+authorization seam rejects that call with `CAPABILITY_DENIED`. The example
+does not implement backend wire handling, subscriptions, Git transport, or
+any later package lifecycle.
 
 ## Normative publish artifact
 
@@ -119,11 +168,13 @@ The publish staging directory and final archive obey these rules:
 - All archive entry names are relative POSIX paths. Absolute paths, empty,
   `.`, or `..` segments, backslashes, duplicate canonical entries, regular-file
   ancestor collisions, symlinks, and non-regular special files are rejected
-  before extraction. A directory entry may have one trailing `/`; that slash
-  is removed for canonical comparison and extraction.
-- `.navide-receipt.json`, version selectors, storage snapshots, and
-  active/previous state are Host-owned and must not appear in an author-created
-  archive.
+  before extraction. Each entry name is at most 1024 characters. A directory
+  entry may have one trailing `/`; that slash is removed for canonical
+  comparison and extraction.
+- `.navide-receipt.json`, `.navide-registry-receipt.json`,
+  `.navide-package.zip`, `.navide-registry-trust.json`, version selectors,
+  activation catalogs, storage snapshots, and active/previous state are
+  Host-owned and must not appear in an author-created archive.
 - Source files, tests, private keys, credentials, caches, `node_modules`, and
   build-system output not referenced by the package must be excluded. The
   packager uses an explicit canonical file list rather than recursively zipping
@@ -131,6 +182,9 @@ The publish staging directory and final archive obey these rules:
 - The detached publisher signature is not stored in the ZIP. It signs the
   digest of the complete archive, so the manifest, frontend, backend, assets,
   and optional documentation are all covered.
+- The normal marketplace installer rejects unsigned Manifest v2 archives.
+  Unsigned local code belongs to the separate Developer Mode path and is not
+  eligible for publishing or automatic updates.
 
 ### Backend source, development, and publish contract
 
@@ -144,7 +198,14 @@ protocol.
 | Source development | Authors may use `.py` files, a virtual environment, and any Python build/test layout. | None. Source layout is not an installed interface. |
 | `navide-plugin dev` | The author-owned development tool may launch the local Python interpreter or a temporary build. It must expose the same protocol-compatible child process used by the packaged backend. | Developer Mode receives a development launch descriptor; this exception is unsigned, local-only, and cannot be published or auto-updated. |
 | `navide-plugin package` | Python, its required modules, and the plugin code are bundled into a target-specific executable by an author-selected tool such as PyInstaller or Nuitka. | `backend.entry` names the resulting executable inside the archive. |
-| Install and runtime | No Python installation, `pip`, virtual environment, source checkout, or author build tool may be required on the user's machine. | The Host verifies and spawns `backend.entry` directly, without a shell, then communicates only through the declared backend protocol. |
+| Install and runtime target | No Python installation, `pip`, virtual environment, source checkout, or author build tool may be required on the user's machine. | The Electron main process now has an internal Issue 07 conformance seam that can spawn an approved entry directly without a shell and communicate through Backend Wire v1. Approved catalog startup wiring and the complete plugin lifecycle remain later runtime work; Issue 05 still emits the fail-closed activation catalog but does not activate third-party v2 backends. |
+
+Manifest validation rejects recognizable source or script suffixes. Package
+validation also rejects empty backend entries, POSIX entries without executable
+metadata, and extensionless executable files whose contents begin with a
+shebang. The installer writes the declared backend entry with owner-only `0700`
+mode. These checks prove archive executable intent; binary-format and exact
+OS/architecture validation remain part of the canonical artifact work in B8.
 
 The same publish rule applies to every implementation language: Go or Rust may
 compile directly; Node.js requires a distributable executable that does not
@@ -209,6 +270,10 @@ The profile deliberately adopts only these MCP conventions:
 - stdout contains protocol frames only. Human-readable logs use stderr.
 - Closing stdin is the graceful shutdown signal. The Host waits for a bounded
   period before terminating a process that does not exit.
+- The Host supplies an explicit environment map for each backend process. The
+  child does not inherit the Electron main process environment; invalid keys,
+  non-string values, and NUL characters reject activation. Timed-out or
+  cancelled request IDs are retained only for bounded late-response handling.
 
 Navide does **not** initially implement MCP `server/discover`, tools, resources,
 prompts, Multi Round-Trip Requests, MCP authorization, or the full MCP
@@ -259,28 +324,38 @@ backend calls that have no such binding.
 {"jsonrpc":"2.0","id":"req-1","method":"navide/call","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"navide-host","version":"0.2.0"}},"name":"plans.list","arguments":{"filter":"open"},"runtime":{"pluginId":"navide.plans","packageVersion":"1.0.0","workspaceId":"ws-1","instanceId":"view-1","contributionKey":"navide.plans.left","hostWindowId":"window-1"}}}
 ```
 
-A successful call response includes MCP's required `resultType` discriminator
-and a `value`; the final response that gracefully closes a subscription may
-omit `value`. A failed protocol request uses standard JSON-RPC/MCP protocol
-codes and may omit `id` when the request ID could not be read. A handled Plugin
-error uses application error code `1000` and the original request ID; its stable public
-`PluginError` string is placed in `error.data.code`. Internal stack traces,
-Python exceptions, transport details, and Host routes never cross the SDK
-Interface.
+A successful call response includes MCP's required `resultType` discriminator,
+a `value`, and `_meta.io.modelcontextprotocol/serverInfo` with the backend
+implementation name and version. Navide requires this MCP result metadata even
+though the base protocol makes it optional. The final response that gracefully
+closes a subscription may omit `value`, but it carries both `serverInfo` and the
+subscription ID. A failed protocol request uses the standard JSON-RPC/MCP error
+envelope, which has no result `_meta`, and may omit `id` when the request ID
+could not be read. A handled Plugin error uses application error code `1000`
+and the original request ID; its stable public `PluginError` string is placed in
+`error.data.code`. Internal stack traces, Python exceptions, transport details,
+and Host routes never cross the SDK Interface.
 
 ```json
-{"jsonrpc":"2.0","id":"req-1","result":{"resultType":"complete","value":[{"id":"plan-1"}]}}
+{"jsonrpc":"2.0","id":"req-1","result":{"resultType":"complete","value":[{"id":"plan-1"}],"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"navide.plans","version":"1.0.0"}}}}
 {"jsonrpc":"2.0","id":"req-2","error":{"code":1000,"message":"Workspace is unavailable","data":{"code":"WORKSPACE_SCOPE_VIOLATION"}}}
 ```
 
-Issue 02 must publish the normative backend wire schema and its
-accepted/rejected fixture corpus before backend-only or combined packages are
-enabled. Until that blocking contract is merged, the examples in this section
-are design guidance rather than an installable backend contract. Future AI
-integration is a separate adapter: it
-may expose an explicit allowlist of schema-described package methods as MCP
-tools. No package method is AI-callable by default, and adopting this wire
-profile does not itself create a tool catalog.
+The normative Backend Wire v1 schema and accepted/rejected fixture corpus are
+published under `docs/plugin-contracts/` and validated together with the
+Manifest v2 corpus. This contract enables backend-only and combined package
+description and installation. Issue 07 adds a private Electron-main
+supervisor/stdio conformance seam for health and unary calls; it is not a
+public SDK surface and does not activate the installed catalog. Future AI
+integration is a separate adapter: it may
+expose an explicit allowlist of schema-described package methods as MCP tools.
+No package method is AI-callable by default, and adopting this wire profile
+does not itself create a tool catalog.
+
+After installation, frontend-only, backend-only, and combined packages appear
+in the Extensions installed list and can be removed there. Package inventory is
+independent of frontend view descriptors, so a backend-only package remains
+manageable even though it contributes no view.
 
 The exact OS/architecture identifiers, archive size limits, and deterministic
 ZIP metadata are B8 decisions. Until they are published, examples must not be
@@ -301,8 +376,7 @@ The normative schema is
   "publisher": "acme",
   "engines": { "navide": ">=0.2.0" },
   "permissions": {
-    "fs": ["read"],
-    "ui": ["openInEditor", "openExternal"]
+    "system": ["fs", "ui"]
   },
   "marketplace": {
     "description": "Browse workspace files in the left workbench region.",
@@ -359,7 +433,7 @@ does not have a second manifest:
   "version": "1.0.0",
   "publisher": "acme",
   "permissions": {
-    "fs": ["read"]
+    "system": ["fs"]
   },
   "marketplace": {
     "description": "Browse workspace files and maintain an index.",
@@ -401,11 +475,12 @@ The version axes are independent:
 | `engines.navide` | Optional product/runtime requirement | Only when the plugin needs a particular Navide product feature |
 | `backend.protocolVersion` | Navide child-process wire profile; `1` freezes the MCP 2026-07-28-aligned conventions above | Only when adopting another supported Navide wire profile |
 
-`permissions` is a map from a public permission ID to its requested access
-values. Each ID appears at most once because duplicate JSON object keys are
-rejected before schema validation. The manifest never declares scope: the
-capability catalog assigns scope to each access, and the Host derives the
-runtime workspace, plugin, and view identity from its authenticated binding.
+`permissions` contains one coarse `system` namespace array and an optional
+`shell` mode. Each key appears at most once because duplicate JSON object keys
+are rejected before schema validation. The manifest never declares scope: the
+capability catalog assigns scope to each catalog entry, and the Host derives
+the runtime workspace, plugin, and view identity from its authenticated
+binding.
 
 The top-level `name` is the display name; it is plain display text with 1–80
 Unicode code points and no newlines or angle brackets.
@@ -499,6 +574,10 @@ export declare function definePlugin(
 ): PluginDefinition
 ```
 
+Issue 06 implements `definePlugin` as a transport-free definition factory. It
+does not open a preload channel, send `ready`, or provide a runtime adapter;
+those responsibilities remain with the later Host integration.
+
 `instanceId` is a Host-generated opaque JSON string. Do not parse, construct,
 persist, or use it as authorization input. The SDK sends `ready` only after the
 `activate` promise resolves. `reportProgress` is diagnostic and does not extend
@@ -515,132 +594,125 @@ The normative method/event catalog is
 defines its address, request/result or event schema, required permission,
 scope, visibility, and possible public errors.
 
-The issue 01 manifest parser only validates these declarative permission
-values. A permission declaration is not user consent, an install-time grant,
-or runtime authorization; issue 01 does not show v2 grant UI or execute v2
-capability calls. The table describes the target catalog mapping for the
-follow-up runtime contract:
+Manifest v2 uses one coarse system namespace array and one shell mode:
 
-| Permission | Target catalog methods/events | Scope |
+```json
+{
+  "permissions": {
+    "system": ["fs", "ui", "aiCli"],
+    "shell": "allowlist"
+  }
+}
+```
+
+`system` accepts only `fs`, `ui`, and `aiCli`. It is not a map of methods or
+read/write accesses: declaring `fs` allows catalog validation to consider the
+filesystem methods, but does not bypass method schemas, scope checks, or Host
+policy. `shell` accepts only `allowlist` or `full`; omission denies
+`shell.run`. Storage, `git`, `terminal`, raw PTY, and arbitrary process access
+are not Manifest v2 permissions.
+
+| Namespace/address | Catalog methods/events | Scope |
 |---|---|---|
-| `fs:read` | `fs.readFile`, `fs.listDirectory`, `fs.glob`, `fs.stat`, `workspace.filesChanged` | Current workspace only |
-| `ui:openInEditor` | `ui.openInEditor` | Current workspace only |
-| `ui:openExternal` | `ui.openExternal` | HTTPS only; future runtime requires an active user gesture |
+| `system:fs` | `fs.readFile`, `fs.listDirectory`, `fs.glob`, `fs.stat`, `workspace.filesChanged` | `workspace` |
+| `system:ui` | `ui.openInEditor` | `workspace` |
+| `system:ui` | `ui.openExternal` | `plugin` (HTTPS; Host user-gesture gate) |
+| `system:aiCli` | `aiCli.startSession`, `cancelStart`, `reattachSession`, `sendInput`, `resizeSession`, `redrawSession`, `interruptSession`, `stopSession`, `output`, `exited` | `workspace` |
+| `shell` | `shell.run` | `workspace` |
 
-Storage permissions are reserved for issues 03 and 16. They are not accepted
-by the current issue 01 manifest contract; the storage design below is a
-future target and is not an available runtime surface.
+`workspace` is a resource boundary, not raw workspace filesystem access. The
+Host derives `workspaceId` from authenticated runtime binding. There is no
+public `runtime` scope. Workspace events also require a Host-authenticated
+event source for the same workspace; an unbound shared event is dropped.
 
-### Storage partitions
+### Planned storage partitions — deferred to B2
 
-`storage.get`, `storage.set`, and `storage.delete` accept a partition class in
-`scope`; they do not accept a plugin ID, workspace ID, package version, or
-storage path.
+Storage runtime remains deferred to B2 and is not opened by Issue 03. The
+planned API will accept a partition class in `scope`; it will not accept a
+plugin ID, workspace ID, package version, or storage path.
 
-- `scope: "plugin"` addresses the Host-bound `(pluginId, key)` partition. All
-  live views and the backend of that plugin share it, while another plugin
-  using the same key receives a different value.
-- `scope: "workspace"` addresses the Host-bound
+When implemented:
+
+- `storage.get`, `storage.set`, and `storage.delete` will accept the partition
+  class in `scope`.
+- `scope: "plugin"` will address the Host-bound `(pluginId, key)` partition.
+  All live views and the backend of that plugin will share it, while another
+  plugin using the same key will receive a different value.
+- `scope: "workspace"` will address the Host-bound
   `(pluginId, currentWorkspaceId, key)` partition. Calls without a current
-  workspace binding fail with `WORKSPACE_SCOPE_VIOLATION`; they never fall back
-  to plugin scope.
-- Package updates copy the active Host-managed storage snapshot into an
-  isolated candidate. **Restart Plugin** activates the package and snapshot
-  together; rollback restores the previous package and snapshot together.
-- Raw `ui.settings` is a first-party legacy surface, not plugin storage. Theme,
-  language, workbench layout, terminal runtime state, workspace files, and
-  other domain data do not become accessible through the storage API.
+  workspace binding will fail with `WORKSPACE_SCOPE_VIOLATION`; they will
+  never fall back to plugin scope.
+- Package updates will copy the active Host-managed storage snapshot into an
+  isolated candidate. **Restart Plugin** will activate the package and
+  snapshot together; rollback will restore the previous package and snapshot
+  together.
+- Raw `ui.settings` will remain a first-party legacy surface, not plugin
+  storage. Theme, language, workbench layout, terminal runtime state,
+  workspace files, and other domain data will not become accessible through
+  the storage API.
 
-The Host derives every partition identity from the authenticated runtime
-binding. The `scope` argument only selects one of the two permitted partition
-classes and cannot override identity or authorization.
+The Host will derive every partition identity from the authenticated runtime
+binding. The `scope` argument will only select one of the two permitted
+partition classes and will not override identity or authorization.
 
 The Host derives the authorization scope, workspace root, plugin identity, and
-view identity from the catalog plus authenticated runtime binding. Paths are
-workspace-relative and plugins cannot supply an authorization root. `git`,
-terminal/PTY, search, chat, issues, plans, and raw settings remain `firstParty`;
-their presence in current Navide code does not make them public. `firstParty`
-is catalog eligibility, not an implicit grant: bundled plugins must still
-declare every required access in their manifest and receive a package-version
-grant. The Git access groups and exact method mapping are a B0 contract
-blocker. The proposal awaiting author approval uses `git.read`,
-`git.workingTreeWrite`, `git.historyWrite`, `git.repositoryAdmin`,
-`git.remoteNetwork`, `git.issueRead`, and `git.issueWrite`. The internal
-`issues.*` transport namespace does not become a separate manifest permission:
-`issues.provider`, `issues.list`, and `issues.get` map to `git.issueRead`;
-`issues.create`, `issues.comment`, and `issues.set_state` map to
-`git.issueWrite`. `navide.git` does not request terminal access, but the
-embedded `AiCliDock` remains a core B3/B4 feature. It uses the proposed
-first-party `aiCli.startSession` and `aiCli.controlSession` accesses. The Host,
-not the plugin, selects an allowlisted configured AI CLI profile and binds its
-executable, arguments, working directory, environment, credentials, workspace,
-session, and event audience. The plugin cannot supply a raw command, shell,
-executable, environment, or workspace root. Terminal permissions remain a
-separate B0 decision for Plans and miniIDE only. Until the remaining mappings
-are approved and published, Manifest v2 cannot validly express the permissions
-required by `navide.git`, and the Host must not bypass permission checks based
-on the package ID.
+view identity from the catalog plus authenticated runtime binding. Plugin
+requests cannot supply or override any of those values. Every declared method
+must pass catalog/request validation, publisher eligibility where required, the
+explicit package-version user grant, and authenticated binding checks before an
+execution plan is returned.
 
-The same B0 decision must cover every legacy namespace, not only Git and
-Terminal. The current proposal is:
+First-party identity affects eligibility only. It never grants a namespace,
+selects a package version, or bypasses the user grant. Git is not an
+independent permission. The Host shell executable allowlist contains `git`;
+all packages, including `navide.git`, must still declare `shell: "allowlist"`
+and pass the same package-version grant and authenticated binding checks.
+The allowlist matches only the canonical top-level executable name: it does
+not accept wrappers, aliases, or path-qualified replacements. It only confirms
+that the top-level executable is `git`; it does not restrict Git subcommands or
+arguments and is not a process sandbox. Git's pager, aliases, SSH command
+configuration, hooks, and similar mechanisms may indirectly execute other
+programs. Therefore `shell: "allowlist"` combined with Git remains a
+high-trust grant.
 
-| Legacy transport surface | Manifest v2 disposition |
+### Embedded AI CLI public mapping
+
+`AiCliDock` currently consumes the generic terminal transport. The public
+catalog exposes only the Host-mediated AI CLI addresses below:
+
+| Public address | Meaning |
 | --- | --- |
-| filesystem reads | `fs.read` |
-| filesystem mutations | first-party `fs.write` |
-| `search.find_in_files` / `search.replace_in_files` | `fs.read` / `fs.write`; no `search` permission |
-| Git repository operations and `issues.*` | the `git` access groups above; no `issues` permission |
-| command and PTY operations | proposed `terminal.runCommand` / `terminal.interactiveSession` for the miniIDE general Terminal surface only |
-| embedded AI CLI in Git, Plans, or miniIDE | `aiCli.startSession` / `aiCli.controlSession`; Host-managed allowlisted profiles only, with no raw terminal parameters |
-| editor AI, code review, and commit-message generation | proposed first-party `ai.editorAssist`, `ai.codeReview`, and `ai.generateCommitMessage` |
-| plugin preferences | `storage.read/write`; raw `ui.settings` is not a v2 permission |
-| `plans.changed` | same-package backend event routing after B5/B6; no Host capability permission |
+| `aiCli.startSession` | Start a Host-selected, allowlisted profile |
+| `aiCli.cancelStart` | Cancel a Host-owned start request |
+| `aiCli.reattachSession` | Reattach to an already Host-bound session |
+| `aiCli.sendInput` | Send input to an owned session |
+| `aiCli.resizeSession` | Resize an owned session |
+| `aiCli.redrawSession` | Redraw an owned session |
+| `aiCli.interruptSession` | Interrupt an owned session |
+| `aiCli.stopSession` | Stop an owned session |
+| `aiCli.output` / `aiCli.exited` | Directed output and exit events |
 
-The existing public `ui.openInEditor` and `ui.openExternal` accesses remain.
-The bundled Git window additionally needs proposed first-party
-`ui.revealPath`, `ui.openWorkspace`, and `ui.pickFolder` accesses. Legacy
-`chat.settings_get/set` must not expose provider credentials or be copied into
-plugin storage; B0 needs a safe Host AI-configuration port before the AI access
-groups can be finalized. This entire mapping remains blocking and must not be
-partially promoted into the schema or catalog.
-
-### Embedded AI CLI legacy-to-v2 mapping
-
-`AiCliDock` currently consumes the generic terminal transport. B3/B4 keeps the
-dock but replaces each address as follows:
-
-| Legacy address | Required access | Target address |
-| --- | --- | --- |
-| `terminal.create` | `aiCli.startSession` | `aiCli.startSession` |
-| `terminal.create.cancel` | `aiCli.startSession` | `aiCli.cancelStart` |
-| `terminal.reattach` | `aiCli.startSession` | `aiCli.reattachSession` |
-| `terminal.input` | `aiCli.controlSession` | `aiCli.sendInput` |
-| `terminal.log_sent` | none | no public target; the Host derives audit metadata from accepted input |
-| `terminal.resize` | `aiCli.controlSession` | `aiCli.resizeSession` |
-| `terminal.redraw` | `aiCli.controlSession` | `aiCli.redrawSession` |
-| `terminal.interrupt` | `aiCli.controlSession` | `aiCli.interruptSession` |
-| `terminal.kill` | `aiCli.controlSession` | `aiCli.stopSession` |
-| `terminal.output` | `aiCli.controlSession` | `aiCli.output` |
-| `terminal.exit` | `aiCli.controlSession` | `aiCli.exited` |
-
-`aiCli.startSession` accepts an allowlisted `profileId` and terminal display
-dimensions. The Host derives the command, arguments, working directory,
-environment, credentials, workspace, pane metadata, and event audience. It
-returns an opaque Host-generated session ID. Every control call validates that
-session against the authenticated plugin, workspace, and view audience.
+`aiCli.startSession` accepts only an allowlisted `profileId` and terminal
+display dimensions. The Host derives the command, arguments, working directory,
+environment, credentials, workspace, pane metadata, session ID, view instance,
+and event audience. Every control call validates the opaque session against the
+authenticated plugin, package version, workspace, view instance, and audience.
+Directed output and exit events are delivered only to the authenticated
+audience that created or reattached the session.
 `shell.run`, raw command/executable/arguments/environment/working-directory
 parameters, and PID control have no `aiCli` mapping and must fail closed.
+The Host executor also applies the catalog's active user-gesture requirement
+for `ui.openExternal` before opening a URL.
 Filesystem calls used by the dock's `@`-file picker remain authorized by
-`fs.read`; they are not absorbed into the AI CLI permission.
+the public `system:fs` catalog; they are not absorbed into the AI CLI
+permission.
 
-Before install, Navide normalizes the permission map into `(permissionId,
-access)` pairs, resolves each pair's scope through the catalog, and shows a
-plain-language explanation. Installation needs an explicit confirmation;
-denial cancels installation. An update that adds an access pair remains staged
-until the user confirms the delta. Removing access needs no new prompt. Runtime
-calls are checked against the confirmed package-version grant; there is no
-prompt-on-first-use except `ui.openExternal`, which additionally requires the
-initiating user gesture.
+Before install, Navide shows the declared system namespaces and shell mode,
+resolves their catalog scope, and asks for an explicit package-version grant.
+An update that adds a namespace or changes shell mode remains staged until the
+user confirms the delta. Runtime calls are checked against that confirmed
+package-version grant; `full` shell additionally requires a separate high-risk
+confirmation. There is no package-ID auto-grant.
 
 The legacy `git.changed` event is unusually authorized by `fs`. The v2 public
 replacement is `workspace.filesChanged`; third-party code must not subscribe to
@@ -690,15 +762,42 @@ unrelated plugins do not restart.
 A backend plugin is native local code. Process isolation limits crash impact;
 it does not restrict filesystem, network, subprocess, or OS access.
 
-- Normal mode runs backend artifacts signed by a trusted publisher key.
-- The official registry is verified by a root key pinned in Navide. A
-  self-hosted registry requires explicit fingerprint trust.
-- Signatures identify the publisher key ID. Trust metadata records active,
+- Normal mode will run only complete artifacts covered by a Registry envelope
+  signature that chains to a Host-pinned Registry root; publisher keys are not
+  Client trust roots in v2.
+- An Official Registry can claim the reserved `navide.` namespace only when
+  the App build provisions an independent Registry root for the exact Official
+  Registry URL and the current root-signed profile is `official`. This build
+  intentionally ships with that production root unprovisioned, so the Official
+  Registry path fails closed until release provisioning supplies it. The
+  publisher namespace key is never reused as a Registry root.
+- A self-hosted Registry must have a durable Host-owned approval that binds its
+  URL, root PEM, and a separately confirmed SPKI SHA-256 fingerprint before
+  Navide contacts it. A self-hosted root remains a separate verification root;
+  even root-signed metadata claiming `registryProfile: "official"` cannot grant
+  Official Registry namespace authority. The informational fingerprint
+  returned by the Registry is never a trust root.
+  The approval document uses the exact fields `schemaVersion`, `registryUrl`,
+  `rootPublicKeyPem`, and `confirmedFingerprint`; unknown or duplicate JSON
+  fields fail closed. The local development default (`http://localhost:8787`)
+  is self-hosted and therefore requires this approval too.
+- Registry envelope signatures identify the Registry signer key ID. Root-signed
+  trust metadata records active,
   rotating, expired, and revoked keys. Rotation has a bounded old/new overlap.
 - Yank prevents new installs; revocation also blocks install, update, activation,
-  and spawn. A newly revoked running plugin is drained, stopped, and quarantined.
-- Developer mode may run unsigned backend artifacts with a persistent warning,
-  but they cannot auto-update.
+  and future backend spawn. A newly revoked running frontend plugin is stopped
+  and quarantined; the later Electron backend supervisor must enforce the same
+  decision before and during backend execution.
+- Developer Mode accepts one explicitly selected local unpacked Manifest v1 or
+  Manifest v2 frontend directory only when `AGENT_TEAM_PLUGIN_DEV=1` and
+  `AGENT_TEAM_PLUGIN_DEV_PATH` names that exact directory. Manifest v1 is a
+  bounded local compatibility path: it remains unsigned and local-only, must
+  be explicitly selected by the user, and cannot obtain Registry provenance.
+  Both versions reject reserved ids and backend contributions and record a
+  persistent unsigned/local-only warning. The existing fixed dist-plugins
+  bundles remain Host-owned app-development fixtures, not this package
+  selection path. Developer Mode packages cannot publish, auto-update, execute
+  backend code, or claim Registry provenance.
 
 The package archive signature covers the manifest, frontend, backend, assets,
 and their digests. Each OS/architecture artifact is signed independently.
@@ -716,18 +815,17 @@ internal v1 loader/adapter. It is not the third-party API support policy.
 
 ## Development and publishing flow
 
-1. Run `navide-plugin init` and choose a frontend, backend, or combined package.
-2. Declare the smallest permissions and run `navide-plugin validate`.
-3. Run `navide-plugin dev`; Navide Developer Mode loads the unpacked directory,
-   displays an unsigned-code warning when needed, and streams scoped logs.
-4. Run the generated unit tests with an in-memory SDK adapter. Test denied,
-   cancelled, timeout, and multi-instance behavior before manual UI checks.
-5. Run `navide-plugin package`. Inspect the canonical file list, signed
-   marketplace metadata, and digest.
-6. Sign with a registered publisher key and upload the OS/architecture artifact.
-7. The registry revalidates strict JSON parsing, schema, SPDX license,
-   capability/catalog parity, marketplace asset paths, archive safety, digest,
-   signature, key status, and compatibility before accepting a release.
+Issue 06 supports the following external frontend workflow:
 
-Third-party publishing stays closed until the SDK packages, CLI, schema parity,
-trust operations, example plugin, and outside-workspace smoke test all exist.
+1. Install the three public packages from their SemVer registry ranges.
+2. Declare the smallest permissions and run `navide-plugin validate <directory>`.
+3. Run the plugin project's `typecheck` and `build` scripts to create a
+   frontend-only staging directory.
+4. Run `navide-plugin package <directory> --out <file>` and inspect the root
+   manifest and explicit frontend/assets file list.
+5. Run the outside-workspace smoke test with an in-memory Host adapter. It
+   covers one declared capability success and one undeclared capability denial.
+
+`navide-plugin init`, `navide-plugin dev`, backend executable packaging,
+signing, registry publishing, and target-specific artifact lifecycle are later
+contracts. This issue deliberately does not implement them.

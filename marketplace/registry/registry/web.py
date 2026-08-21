@@ -30,7 +30,7 @@ from .manifest import manifest_capabilities, manifest_icon
 from .models import Extension, ExtensionVersion, Publisher
 from .repository import RegistryRepository, rating_average
 from .storage import StorageError
-from .trust import sensitive_capabilities
+from .trust import compute_trust_tier, sensitive_capabilities
 from .versions import version_key
 
 # Package assets are third-party uploads served on the marketplace origin, so a
@@ -82,7 +82,11 @@ def _card(extension: Extension, versions: list[ExtensionVersion]) -> dict:
         "rating_count": extension.rating_count,
         "featured": extension.featured,
         "latest_version": latest.version if latest else None,
-        "trust_tier": latest.trust_tier if latest else "unsigned",
+        "trust_tier": (
+            compute_trust_tier(signed=latest.registry_signature is not None)
+            if latest
+            else "unsigned"
+        ),
         "sensitive_capabilities": sensitive_capabilities(caps),
     }
 
@@ -169,8 +173,10 @@ def create_web_router() -> APIRouter:
             version_views = [
                 {
                     "version": v.version,
-                    "trust_tier": v.trust_tier,
-                    "signed": v.signature is not None,
+                    "trust_tier": compute_trust_tier(
+                        signed=v.registry_signature is not None
+                    ),
+                    "signed": v.registry_signature is not None,
                     "yanked": v.yanked,
                     "published_at": v.published_at,
                     "download_count": v.download_count,

@@ -34,6 +34,7 @@ function mockPlugins(overrides: Record<string, unknown> = {}) {
         version: '1.0.0',
         trustTier: 'unsigned',
         sensitive: [],
+        containsBackendExecutable: false,
         requiresConfirmation: false,
       }),
     commitInstall: vi.fn().mockResolvedValue({ id: 'acme.demo', requires: [] }),
@@ -62,6 +63,24 @@ describe('ExtensionsPane', () => {
     expect(row.find('.ext-sensitive').text()).toContain('fs, terminal')
   })
 
+  it('shows and removes a backend-only package with no capabilities', async () => {
+    const listInstalled = vi
+      .fn()
+      .mockResolvedValueOnce([{ id: 'acme.backend', requires: [], sensitive: [] }])
+      .mockResolvedValueOnce([])
+    const api = mockPlugins({ listInstalled })
+    wrapper = mount(ExtensionsPane)
+    await flushPromises()
+
+    expect(wrapper.get('[data-id="acme.backend"]').text()).toContain('acme.backend')
+    await wrapper.get('[data-id="acme.backend"] .ext-remove').trigger('click')
+    await flushPromises()
+
+    expect(api.remove).toHaveBeenCalledWith('acme.backend')
+    expect(wrapper.find('[data-id="acme.backend"]').exists()).toBe(false)
+    expect(wrapper.get('.ext-empty').text()).toContain('No plugins installed')
+  })
+
   it('searches the marketplace and installs a non-sensitive plugin directly', async () => {
     const api = mockPlugins()
     wrapper = mount(ExtensionsPane)
@@ -75,7 +94,7 @@ describe('ExtensionsPane', () => {
     await flushPromises()
     expect(api.prepareInstall).toHaveBeenCalledWith({ namespace: 'acme', name: 'demo' })
     // Non-sensitive → commit runs without a confirmation dialog.
-    expect(api.commitInstall).toHaveBeenCalledWith('acme.demo')
+    expect(api.commitInstall).toHaveBeenCalledWith('acme.demo', {})
     expect(wrapper.find('.ext-trust-dialog').exists()).toBe(false)
   })
 
@@ -86,6 +105,7 @@ describe('ExtensionsPane', () => {
         version: '1.0.0',
         trustTier: 'unsigned',
         sensitive: ['fs'],
+        containsBackendExecutable: false,
         requiresConfirmation: true,
       }),
     })
@@ -100,10 +120,69 @@ describe('ExtensionsPane', () => {
     expect(wrapper.find('.ext-trust-dialog').exists()).toBe(true)
     expect(api.commitInstall).not.toHaveBeenCalled()
 
-    await wrapper.get('.ext-confirm').trigger('click')
+    await wrapper.get('.ext-confirm-risk').trigger('click')
     await flushPromises()
-    expect(api.commitInstall).toHaveBeenCalledWith('acme.demo')
+    expect(api.commitInstall).toHaveBeenCalledWith('acme.demo', {
+      publisherConfirmed: false,
+      riskConfirmed: true,
+    })
     expect(wrapper.find('.ext-trust-dialog').exists()).toBe(false)
+  })
+
+  it('keeps publisher consent separate from capability and backend risk approval', async () => {
+    const api = mockPlugins({
+      prepareInstall: vi.fn().mockResolvedValue({
+        id: 'acme.demo',
+        version: '1.0.0',
+        publisherId: 'acme',
+        trustTier: 'signed-verified',
+        sensitive: ['fs'],
+        containsBackendExecutable: false,
+        requiresConfirmation: true,
+        requiresPublisherTrust: true,
+        requiresRiskConfirmation: true,
+      }),
+    })
+    wrapper = mount(ExtensionsPane)
+    await flushPromises()
+    await wrapper.get('.ext-search button').trigger('click')
+    await flushPromises()
+    await wrapper.get('.ext-install').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('.ext-publisher-risk').text()).toContain('acme')
+    expect(api.commitInstall).not.toHaveBeenCalled()
+    await wrapper.get('.ext-confirm-publisher').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.ext-backend-risk').exists()).toBe(false)
+    expect(wrapper.text()).toContain('requests sensitive capabilities')
+    expect(api.commitInstall).not.toHaveBeenCalled()
+
+    await wrapper.get('.ext-confirm-risk').trigger('click')
+    await flushPromises()
+    expect(api.commitInstall).toHaveBeenCalledWith('acme.demo', {
+      publisherConfirmed: true,
+      riskConfirmed: true,
+    })
+  })
+
+  it('keeps the Developer Mode local-unpacked warning visible in inventory', async () => {
+    mockPlugins({
+      listInstalled: vi.fn().mockResolvedValue([
+        {
+          id: 'acme.local',
+          requires: [],
+          sensitive: [],
+          provenance: 'developer-local-unpacked',
+          warning: 'Unsigned local unpacked plugin — Developer Mode only',
+        },
+      ]),
+    })
+    wrapper = mount(ExtensionsPane)
+    await flushPromises()
+    expect(wrapper.get('[data-id="acme.local"] .ext-dev-warning').text()).toContain(
+      'Developer Mode only'
+    )
   })
 
   it('shows an unsigned warning (never a verified badge) for an unsigned install', async () => {
@@ -113,6 +192,7 @@ describe('ExtensionsPane', () => {
         version: '1.0.0',
         trustTier: 'unsigned',
         sensitive: ['fs'],
+        containsBackendExecutable: false,
         requiresConfirmation: true,
       }),
     })
@@ -137,6 +217,7 @@ describe('ExtensionsPane', () => {
         version: '1.0.0',
         trustTier: 'signed-verified',
         sensitive: ['fs'],
+        containsBackendExecutable: false,
         requiresConfirmation: true,
       }),
     })
@@ -159,6 +240,7 @@ describe('ExtensionsPane', () => {
         version: '1.0.0',
         trustTier: 'unsigned',
         sensitive: ['fs'],
+        containsBackendExecutable: false,
         requiresConfirmation: true,
       }),
     })
@@ -173,6 +255,37 @@ describe('ExtensionsPane', () => {
     await flushPromises()
     expect(api.commitInstall).not.toHaveBeenCalled()
     expect(wrapper.find('.ext-trust-dialog').exists()).toBe(false)
+  })
+
+  it('warns about a backend executable even when permissions are empty', async () => {
+    const api = mockPlugins({
+      prepareInstall: vi.fn().mockResolvedValue({
+        id: 'acme.demo',
+        version: '1.0.0',
+        trustTier: 'signed-verified',
+        sensitive: [],
+        containsBackendExecutable: true,
+        requiresConfirmation: true,
+      }),
+    })
+    wrapper = mount(ExtensionsPane)
+    await flushPromises()
+    await wrapper.get('.ext-search button').trigger('click')
+    await flushPromises()
+    await wrapper.get('.ext-install').trigger('click')
+    await flushPromises()
+
+    const dialog = wrapper.get('.ext-trust-dialog')
+    expect(dialog.get('.ext-backend-risk').text()).toContain('native backend executable')
+    expect(dialog.text()).not.toContain('requests sensitive capabilities')
+    expect(api.commitInstall).not.toHaveBeenCalled()
+
+    await dialog.get('.ext-confirm-risk').trigger('click')
+    await flushPromises()
+    expect(api.commitInstall).toHaveBeenCalledWith('acme.demo', {
+      publisherConfirmed: false,
+      riskConfirmed: true,
+    })
   })
 
   it('removes an installed plugin', async () => {

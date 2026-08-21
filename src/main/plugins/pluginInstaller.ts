@@ -8,20 +8,39 @@
 // whole flow can be driven in tests without a real registry or disk.
 //
 // Install is split into prepare → commit so the UI can interpose a trust
-// confirmation (sensitive `fs`/`terminal` capabilities) AFTER verification but
+// confirmation (sensitive `fs`/`aiCli`/`shell` capabilities) AFTER verification but
 // BEFORE anything is written to disk.
 
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { chmodSync, mkdirSync, readFileSync, writeFileSync, rmSync, renameSync, existsSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
-import { canonicalArchivePath } from './pluginPathPolicy'
+import { canonicalArchivePath, portableArchiveCollisionKey } from './pluginPathPolicy'
 import {
   verifyPackage,
   assertSafeArchiveEntries,
   assertOfficialPublisher,
   isOfficialPluginId,
   resolveOfficialPublisherKey,
+  PluginVerifyError,
+  TRUST_SIGNED,
   type TrustTier,
 } from './pluginVerify'
+import {
+  verifyRegistryPackageTrust,
+  type RegistryAuthority,
+  type RegistryPackageEnvelope,
+  type RegistryTrustMetadata,
+} from './pluginRegistryTrust'
+import {
+  REGISTRY_ARTIFACT_NAME,
+  REGISTRY_RECEIPT_NAME,
+  REGISTRY_TRUST_SNAPSHOT_NAME,
+  assertRegistryTrustSnapshotDoesNotRollback,
+  registryReceiptFromEvidence,
+  writeRegistryTrustSnapshot,
+  type RegistryInstallReceipt,
+  type RegistryTrustSnapshot,
+} from './pluginInstalledTrust'
 import { readZipEntries, readManifestFromEntries, type ZipEntry } from './pluginPackage'
 import {
   parseInstalledManifest,
@@ -35,6 +54,12 @@ import {
 } from './installedPlugins'
 import { compareSemver } from './pluginManifestV2'
 import type { PluginLaunchDescriptor } from './frontendPluginManager'
+import { currentPluginHostTarget } from './pluginTarget'
+import {
+  PLUGIN_QUARANTINE_DIR,
+  PLUGIN_QUARANTINE_MARKER,
+  PLUGIN_STAGING_DIR,
+} from './pluginInstallPaths'
 
 /** What a caller must supply to install a specific marketplace version. The
  *  trusted `expectedDigest` and (optional) signature material come from the
@@ -52,26 +77,75 @@ export interface InstallRequest {
   publicKey?: string | null
   /** Trust tier the registry recorded (`signed-verified`/`unsigned`). */
   claimedTrustTier?: string | null
+  /** Registry-selected artifact target bound into the signed envelope. */
+  target?: string | null
+  /** Registry-owned signing evidence for Manifest v2 packages. */
+  registryEnvelope?: RegistryPackageEnvelope | null
+  registrySignature?: string | null
+  trustMetadata?: RegistryTrustMetadata | null
+  trustMetadataSignature?: string | null
+  /** Install provenance selected by the Host, never inferred from schemaVersion. */
+  provenance: 'official-registry' | 'developer-local-unpacked'
 }
+
+export interface InstallerTrustConfig {
+  /** Host-owned root pin. It is never accepted from a package or registry response. */
+  pinnedRegistryRootKey: string | null
+  /** Host-derived authority. Registry response metadata cannot upgrade this. */
+  registryAuthority?: RegistryAuthority
+  /** Normalized App-pinned Official Registry URL, when configured. */
+  officialRegistryUrl?: string
+  now?: Date
+  /** Host-derived exact target used for Registry artifact compatibility. */
+  expectedTarget?: string
+}
+
+const DEFAULT_INSTALLER_TRUST: InstallerTrustConfig = {
+  pinnedRegistryRootKey: null,
+  registryAuthority: 'self-hosted',
+}
+
+const HOST_OWNED_ARCHIVE_NAMES = new Set([
+  OFFICIAL_RECEIPT_NAME,
+  REGISTRY_RECEIPT_NAME,
+  REGISTRY_ARTIFACT_NAME,
+  REGISTRY_TRUST_SNAPSHOT_NAME,
+  '.navide-backend-activation.json',
+  PLUGIN_QUARANTINE_MARKER,
+].map((name) => portableArchiveCollisionKey(name)!))
+
+export { PLUGIN_QUARANTINE_DIR, PLUGIN_STAGING_DIR } from './pluginInstallPaths'
 
 /** A downloaded, verified package ready to commit to disk. */
 export interface PreparedInstall {
   id: string
   version: string
+  publisherId: string
   manifest: InstalledManifest
   entries: ZipEntry[]
   trustTier: TrustTier
   sensitive: string[]
-  /** True when the plugin declares a sensitive capability and the UI must
-   *  obtain a second confirmation before {@link commitInstall}. */
+  /** True when the verified package contains a declared backend executable. */
+  containsBackendExecutable: boolean
+  /** True when the plugin declares a sensitive capability or contains native
+   *  backend code and the UI must obtain confirmation before commit. */
   requiresConfirmation: boolean
-  /** True only for a `navide.` package that passed the pinned-official-key
-   *  check in prepareInstall. Drives the receipt write + trusted registration. */
+  /** True only for a `navide.` package that passed the Host-authorized
+   *  Official Registry gate (or the legacy v1 publisher pin). Drives trusted
+   *  registration without treating a self-hosted Registry as first-party. */
   official: boolean
   /** Verified sha256 hex digest of the package bytes (receipt material). */
   digest: string
   /** Detached signature over the digest, when present (receipt material). */
   signature: string | null
+  /** Host-generated Registry evidence retained for every Registry v1/v2
+   * package. Never feed this envelope signature into the legacy digest receipt. */
+  registryEvidence?: {
+    artifact: Uint8Array
+    receipt: RegistryInstallReceipt
+    trustSnapshot: RegistryTrustSnapshot
+  }
+  provenance: 'official-registry' | 'developer-local-unpacked'
 }
 
 export class InstallError extends Error {
@@ -87,7 +161,15 @@ export interface InstallerDeps {
   download(url: string): Promise<{ bytes: Uint8Array; digestHeader: string | null }>
   mkdirp(dir: string): void
   writeFile(path: string, data: Uint8Array): void
+  readFile(path: string): Uint8Array | null
+  /** Atomic Host-owned Registry trust snapshot persistence. */
+  writeRegistryTrustSnapshot?: typeof writeRegistryTrustSnapshot
+  /** Apply a controlled mode after writing the declared backend executable. */
+  chmod(path: string, mode: number): void
   rmrf(dir: string): void
+  /** Atomic directory move used by the production install transaction. */
+  rename?(from: string, to: string): void
+  pathExists?(path: string): boolean
 }
 
 /** Default deps: global `fetch` (Electron main / Node 18+) + `node:fs`. */
@@ -104,8 +186,25 @@ export const defaultInstallerDeps: InstallerDeps = {
   writeFile(path, data) {
     writeFileSync(path, data)
   },
+  readFile(path) {
+    try {
+      return new Uint8Array(readFileSync(path))
+    } catch {
+      return null
+    }
+  },
+  writeRegistryTrustSnapshot,
+  chmod(path, mode) {
+    chmodSync(path, mode)
+  },
   rmrf(dir) {
     rmSync(dir, { recursive: true, force: true })
+  },
+  rename(from, to) {
+    renameSync(from, to)
+  },
+  pathExists(path) {
+    return existsSync(path)
   },
 }
 
@@ -123,6 +222,40 @@ function canonicalEntryPath(entry: ZipEntry): string {
   return path
 }
 
+function startsWithExecutableShebang(data: Uint8Array): boolean {
+  const offset = data[0] === 0xef && data[1] === 0xbb && data[2] === 0xbf ? 3 : 0
+  return data[offset] === 0x23 && data[offset + 1] === 0x21
+}
+
+/** Validate the narrow Issue 02 POSIX executable contract. Exact binary
+ * format and OS/architecture validation remain owned by Issue 27. */
+function assertBackendExecutable(
+  manifest: InstalledManifest,
+  entries: readonly ZipEntry[]
+): string | undefined {
+  if (!isManifestV2(manifest) || !manifest.backend) return undefined
+  const backendPath = manifest.backend.entry
+  const entry = entries.find(
+    (candidate) =>
+      candidate.type === 'regular' && canonicalEntryPath(candidate) === backendPath
+  )
+  if (!entry) {
+    throw new InstallError(`backend entry is missing or not a regular file: ${backendPath}`)
+  }
+  if (entry.data.length === 0) {
+    throw new InstallError(`backend entry is empty: ${backendPath}`)
+  }
+  if (!entry.executable) {
+    throw new InstallError(`backend entry is not marked executable: ${backendPath}`)
+  }
+  if (startsWithExecutableShebang(entry.data)) {
+    throw new InstallError(
+      `backend entry must be a packaged executable, not a raw script: ${backendPath}`
+    )
+  }
+  return backendPath
+}
+
 /**
  * Download + fully verify a package WITHOUT writing anything. Runs the digest,
  * signature, and capability-scope checks, cross-checks the identity, and reads
@@ -131,7 +264,8 @@ function canonicalEntryPath(entry: ZipEntry): string {
  */
 export async function prepareInstall(
   req: InstallRequest,
-  deps: InstallerDeps = defaultInstallerDeps
+  deps: InstallerDeps = defaultInstallerDeps,
+  trust: InstallerTrustConfig = DEFAULT_INSTALLER_TRUST
 ): Promise<PreparedInstall> {
   const { bytes, digestHeader } = await deps.download(downloadUrl(req))
 
@@ -154,12 +288,7 @@ export async function prepareInstall(
       .filter((entry) => entry.type === 'regular')
       .map((entry) => canonicalEntryPath(entry))
   )
-  if (isManifestV2(manifest) && (manifest.contributes?.views.length ?? 0) === 0) {
-    throw new InstallError(
-      'frontend installer requires at least one custom view contribution'
-    )
-  }
-
+  const backendEntry = assertBackendExecutable(manifest, entries)
   const expectedId = `${req.namespace}.${req.name}`
   if (manifest.id !== expectedId) {
     throw new InstallError(
@@ -172,87 +301,331 @@ export async function prepareInstall(
     )
   }
 
-  const { digest, trustTier, sensitive } = verifyPackage({
+  const v2 = isManifestV2(manifest)
+  const provenance = req.provenance
+  if (provenance !== 'official-registry' && provenance !== 'developer-local-unpacked') {
+    throw new InstallError(`plugin '${manifest.id}' is missing explicit install provenance`)
+  }
+  const publisherId = v2 ? manifest.publisher : manifest.publisher ?? manifest.id.split('.')[0]
+  if (provenance === 'official-registry' && (!manifest.publisher || manifest.publisher !== manifest.id.split('.')[0])) {
+    throw new InstallError(`Registry package '${manifest.id}' has no valid publisher identity`)
+  }
+  const packageVerification = verifyPackage({
     bytes,
     expectedDigest: req.expectedDigest,
-    signature: req.signature,
-    publicKey: req.publicKey,
+    // Publisher keys and signatures are a legacy v1 compatibility path. A v2
+    // package cannot self-supply the key that establishes its own trust.
+    signature: v2 ? null : req.signature,
+    publicKey: v2 ? null : req.publicKey,
     claimedTrustTier: req.claimedTrustTier,
     requires: manifestCapabilities(manifest),
   })
+  let trustTier = packageVerification.trustTier
+  let registryEvidence: PreparedInstall['registryEvidence']
+  let official = false
 
-  // Official-namespace policy: a `navide.` package must be signed by the
-  // pinned official publisher key (throws NOT_OFFICIAL otherwise, including
-  // when no pin is configured — fail-closed).
-  assertOfficialPublisher(manifest.id, req.publicKey, trustTier, resolveOfficialPublisherKey())
+  if (provenance === 'official-registry') {
+    if (!req.registryEnvelope || !req.trustMetadata || !req.target) {
+      throw new PluginVerifyError(
+        'SIGNATURE_REQUIRED',
+        `plugin '${manifest.id}' is missing registry signing evidence`
+      )
+    }
+    const envelopeSignature = req.registrySignature
+    const trustMetadataSignature = req.trustMetadataSignature
+    if (!envelopeSignature || !trustMetadataSignature) {
+      throw new PluginVerifyError(
+        'SIGNATURE_REQUIRED',
+        `plugin '${manifest.id}' is missing Registry signatures`
+      )
+    }
+    verifyRegistryPackageTrust({
+      envelope: req.registryEnvelope,
+      envelopeSignature,
+      trustMetadata: req.trustMetadata,
+      trustMetadataSignature,
+      pinnedRootKey: trust.pinnedRegistryRootKey,
+      expected: {
+        artifactDigest: packageVerification.digest,
+        packageId: manifest.id,
+        version: manifest.version,
+        target: req.target,
+        publisherId,
+      },
+      expectedHostTarget: trust.expectedTarget ?? currentPluginHostTarget(),
+      now: trust.now,
+    })
+    const requestedRegistryUrl = new URL(req.registryUrl).toString().replace(/\/+$/, '')
+    const officialRegistryUrl = trust.officialRegistryUrl
+      ? new URL(trust.officialRegistryUrl).toString().replace(/\/+$/, '')
+      : null
+    official =
+      isOfficialPluginId(manifest.id) &&
+      trust.registryAuthority === 'official' &&
+      officialRegistryUrl !== null &&
+      requestedRegistryUrl === officialRegistryUrl &&
+      req.trustMetadata.registryProfile === 'official'
+    if (isOfficialPluginId(manifest.id) && !official) {
+      throw new PluginVerifyError(
+        'NOT_OFFICIAL',
+        `plugin '${manifest.id}' claims the official 'navide.' namespace but the Host did not authorize the Official Registry`
+      )
+    }
+    trustTier = TRUST_SIGNED
+    registryEvidence = {
+      artifact: bytes,
+      receipt: registryReceiptFromEvidence({
+        packageId: manifest.id,
+        version: manifest.version,
+        publisherId,
+        target: req.target,
+        artifactDigest: packageVerification.digest,
+        envelope: req.registryEnvelope,
+        envelopeSignature,
+        registryAuthority: trust.registryAuthority ?? 'self-hosted',
+      }),
+      trustSnapshot: {
+        schemaVersion: 1,
+        metadata: req.trustMetadata,
+        metadataSignature: trustMetadataSignature,
+      },
+    }
+  }
+
+  if (provenance === 'official-registry' && trustTier !== TRUST_SIGNED) {
+    throw new PluginVerifyError(
+      'SIGNATURE_REQUIRED',
+      `plugin '${manifest.id}' is unsigned; Registry installs require a verified Registry signature`
+    )
+  }
+
+  // The v2 Registry envelope binds publisherId to packageId before this point.
+  // Keep the publisher-key check only for the bounded v1 compatibility path.
+  if (provenance !== 'official-registry' && !v2) {
+    assertOfficialPublisher(manifest.id, req.publicKey, trustTier, resolveOfficialPublisherKey())
+    official = isOfficialPluginId(manifest.id)
+  }
 
   return {
     id: manifest.id,
     version: manifest.version,
+    publisherId,
     manifest,
     entries,
     trustTier,
-    sensitive,
-    requiresConfirmation: sensitive.length > 0,
-    official: isOfficialPluginId(manifest.id),
-    digest,
-    signature: req.signature ?? null,
+    sensitive: packageVerification.sensitive,
+    containsBackendExecutable: backendEntry !== undefined,
+    requiresConfirmation:
+      packageVerification.sensitive.length > 0 || backendEntry !== undefined,
+    official,
+    digest: packageVerification.digest,
+    signature: v2 ? req.registrySignature ?? null : req.signature ?? null,
+    registryEvidence,
+    provenance,
   }
 }
 
 /**
  * Write a prepared, verified package into `<pluginsRoot>/<id>/`, replacing any
  * previous install of the same id (so update reuses this path). The archive is
- * revalidated before the existing directory is removed. Returns the launch
- * descriptor the loader registers.
+ * revalidated before the existing directory is removed. Returns the frontend
+ * launch descriptor when the package contributes views; backend-only packages
+ * return undefined and are discovered through the activation catalog.
  */
-export function commitInstall(
+export interface InstallTransaction {
+  descriptor: PluginLaunchDescriptor | undefined
+  rollback(): void
+  finalize(): void
+}
+
+function writePreparedPackage(
   prepared: PreparedInstall,
-  pluginsRoot: string,
-  deps: InstallerDeps = defaultInstallerDeps
-): PluginLaunchDescriptor {
-  const dir = join(pluginsRoot, prepared.id)
-  assertSafeArchiveEntries(prepared.entries)
-  const safeEntries = prepared.entries.map((entry) => ({
-    entry,
-    path: canonicalEntryPath(entry),
-  }))
-  if (safeEntries.some(({ path }) => path === OFFICIAL_RECEIPT_NAME)) {
-    throw new InstallError(`package must not contain ${OFFICIAL_RECEIPT_NAME}`)
-  }
-  // Resolve the frontend descriptor before any replacement writes. Backend-only
-  // v2 packages are valid registry artifacts but are not loadable by this
-  // frontend installer yet; reject them without leaving a partial install.
-  const descriptor = manifestToDescriptor(prepared.manifest, dir)
-  deps.rmrf(dir) // idempotent replace (fresh install or update)
+  targetDir: string,
+  backendEntry: string | undefined,
+  safeEntries: readonly { entry: ZipEntry; path: string }[],
+  deps: InstallerDeps
+): void {
   for (const { entry, path } of safeEntries) {
-    const target = join(dir, path)
+    const target = join(targetDir, path)
     if (entry.type === 'directory') {
       deps.mkdirp(target)
     } else if (entry.type === 'regular') {
       deps.mkdirp(dirname(target))
       deps.writeFile(target, entry.data)
+      if (path === backendEntry) deps.chmod(target, 0o700)
     } else {
       throw new InstallError(`archive entry is not a regular file: ${entry.path}`)
     }
   }
-  // Official installs persist the verified digest + signature so the loader
-  // can re-verify against the pinned key on every startup (see
-  // `verifyOfficialInstall` in installedPlugins.ts).
-  if (prepared.official && prepared.signature) {
+  if (prepared.registryEvidence) {
+    deps.mkdirp(targetDir)
+    deps.writeFile(join(targetDir, REGISTRY_ARTIFACT_NAME), prepared.registryEvidence.artifact)
+    deps.writeFile(
+      join(targetDir, REGISTRY_RECEIPT_NAME),
+      new TextEncoder().encode(JSON.stringify(prepared.registryEvidence.receipt, null, 2))
+    )
+  } else if (prepared.official && prepared.signature) {
     const receipt: OfficialReceipt = {
       id: prepared.id,
       version: prepared.version,
       digest: prepared.digest,
       signature: prepared.signature,
     }
-    deps.mkdirp(dir)
+    deps.mkdirp(targetDir)
     deps.writeFile(
-      join(dir, OFFICIAL_RECEIPT_NAME),
+      join(targetDir, OFFICIAL_RECEIPT_NAME),
       new TextEncoder().encode(JSON.stringify(receipt, null, 2))
     )
   }
-  return descriptor
+}
+
+export function commitInstallTransaction(
+  prepared: PreparedInstall,
+  pluginsRoot: string,
+  deps: InstallerDeps = defaultInstallerDeps
+): InstallTransaction {
+  const dir = join(pluginsRoot, prepared.id)
+  assertSafeArchiveEntries(prepared.entries)
+  const safeEntries = prepared.entries.map((entry) => ({
+    entry,
+    path: canonicalEntryPath(entry),
+  }))
+  const smuggledHostFile = safeEntries.find(({ path }) => {
+    const collisionKey = portableArchiveCollisionKey(path)
+    return collisionKey !== null && HOST_OWNED_ARCHIVE_NAMES.has(collisionKey)
+  })
+  if (smuggledHostFile) {
+    throw new InstallError(`package must not contain ${smuggledHostFile.path}`)
+  }
+  const backendEntry = assertBackendExecutable(prepared.manifest, prepared.entries)
+  const descriptor =
+    isManifestV2(prepared.manifest) && prepared.manifest.contributes === undefined
+      ? undefined
+      : manifestToDescriptor(prepared.manifest, dir)
+  const trustSnapshotPath = join(pluginsRoot, REGISTRY_TRUST_SNAPSHOT_NAME)
+  if (prepared.registryEvidence) {
+    assertRegistryTrustSnapshotDoesNotRollback(
+      deps.readFile(trustSnapshotPath),
+      prepared.registryEvidence.trustSnapshot
+    )
+  }
+  const previousSnapshot = deps.readFile(trustSnapshotPath)
+  const atomic = deps.rename !== undefined && deps.pathExists !== undefined
+  const stagingRoot = join(pluginsRoot, PLUGIN_STAGING_DIR)
+  const stagingDir = join(stagingRoot, `${prepared.id}.${randomUUID()}`)
+  const quarantineRoot = join(pluginsRoot, PLUGIN_QUARANTINE_DIR)
+  const previousDirExists = atomic && deps.pathExists!(dir)
+  const backupDir = previousDirExists
+    ? join(quarantineRoot, `${prepared.id}.previous`)
+    : undefined
+  let previousDirMoved = false
+  let committed = false
+  let rolledBack = false
+  let finalized = false
+
+  const restoreSnapshot = (): void => {
+    if (!prepared.registryEvidence) return
+    const currentSnapshot = deps.readFile(trustSnapshotPath)
+    const unchanged =
+      (currentSnapshot === null && previousSnapshot === null) ||
+      (currentSnapshot !== null &&
+        previousSnapshot !== null &&
+        Buffer.from(currentSnapshot).equals(Buffer.from(previousSnapshot)))
+    if (unchanged) return
+    if (previousSnapshot) deps.writeFile(trustSnapshotPath, previousSnapshot)
+    else deps.rmrf(trustSnapshotPath)
+  }
+  const quarantinePath = (path: string, label: string): void => {
+    if (!atomic || !deps.rename || !deps.pathExists || !deps.pathExists(path)) return
+    const target = join(quarantineRoot, `${prepared.id}.${label}.${randomUUID()}`)
+    try {
+      deps.mkdirp(quarantineRoot)
+      deps.rename(path, target)
+    } catch {
+      // Preserve the failed package if the forensic move itself fails. The
+      // marker keeps it out of every activation and Registry-refresh scan.
+      try {
+        deps.writeFile(
+          join(path, PLUGIN_QUARANTINE_MARKER),
+          new TextEncoder().encode(JSON.stringify({ label, packageId: prepared.id }))
+        )
+      } catch {
+        // The original failure remains authoritative; do not delete evidence.
+      }
+    }
+  }
+
+  try {
+    const targetDir = atomic ? stagingDir : dir
+    if (atomic) deps.mkdirp(stagingRoot)
+    else deps.rmrf(dir)
+    writePreparedPackage(prepared, targetDir, backendEntry, safeEntries, deps)
+
+    if (atomic) {
+      if (previousDirExists && backupDir) {
+        deps.mkdirp(quarantineRoot)
+        if (deps.pathExists!(backupDir)) deps.rmrf(backupDir)
+        deps.rename!(dir, backupDir)
+        previousDirMoved = true
+      }
+      deps.rename!(stagingDir, dir)
+      committed = true
+    }
+    if (prepared.registryEvidence) {
+      const writeTrustSnapshot = deps.writeRegistryTrustSnapshot ?? writeRegistryTrustSnapshot
+      writeTrustSnapshot(pluginsRoot, prepared.registryEvidence.trustSnapshot)
+    }
+  } catch (error) {
+    if (atomic) {
+      if (committed) quarantinePath(dir, 'failed')
+      quarantinePath(stagingDir, 'staging-failed')
+      if (previousDirMoved && backupDir && deps.pathExists!(backupDir) && !deps.pathExists!(dir)) {
+        deps.rename!(backupDir, dir)
+      }
+      restoreSnapshot()
+    } else {
+      deps.rmrf(dir)
+    }
+    throw error
+  }
+
+  return {
+    descriptor,
+    rollback: (): void => {
+      if (rolledBack || finalized) return
+      rolledBack = true
+      if (atomic) {
+        if (committed) quarantinePath(dir, 'failed')
+        quarantinePath(stagingDir, 'staging-failed')
+        if (backupDir && deps.pathExists!(backupDir) && !deps.pathExists!(dir)) {
+          deps.rename!(backupDir, dir)
+        }
+      } else {
+        deps.rmrf(dir)
+      }
+      restoreSnapshot()
+    },
+    finalize: (): void => {
+      if (rolledBack || finalized) return
+      finalized = true
+      // Keep one explicitly named normal previous package for bounded recovery.
+      // Rejected packages use different forensic labels and remain untouched;
+      // neither category is in the scan path.
+    },
+  }
+}
+
+/** Commit a verified package immediately. IPC uses commitInstallTransaction so
+ * post-write verification, manager registration, and consent persistence can
+ * finish before finalize(). */
+export function commitInstall(
+  prepared: PreparedInstall,
+  pluginsRoot: string,
+  deps: InstallerDeps = defaultInstallerDeps
+): PluginLaunchDescriptor | undefined {
+  const transaction = commitInstallTransaction(prepared, pluginsRoot, deps)
+  transaction.finalize()
+  return transaction.descriptor
 }
 
 /** Remove an installed plugin's directory. Idempotent. */

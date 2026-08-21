@@ -16,6 +16,7 @@ import {
   planCapabilityCall,
   backendResponseToCapability,
   isEventAllowed,
+  isPublicCapabilityEventAllowed,
   buildError,
   buildSuccess,
   CASTABLE_WS_TYPES,
@@ -25,16 +26,31 @@ import {
   HOST_CAPABILITIES,
   type CapabilityCall,
   type CapabilityResponse,
+  type AuthenticatedRuntimeBinding,
+  type HostCapabilityContext,
+  type PublicCapabilityExecutionPlan,
   type TerminalOutputBatcher,
 } from './pluginCapabilityBroker'
-import { CAP_EVENTS, eventNamespace } from './capabilityMap'
+import { CAP_EVENTS } from './capabilityMap'
+import { PUBLIC_CAPABILITY_EVENT_ADDRESSES } from './pluginCapabilityCatalog'
 import {
   GIT_PLUGIN_REQUIRES,
   MINI_IDE_PLUGIN_REQUIRES,
   PLANS_PLUGIN_REQUIRES,
 } from '../../shared/pluginCapabilities'
-import { loadPluginDir, scanInstalledPlugins, verifyOfficialInstall } from './installedPlugins'
+import {
+  buildActivationCatalog,
+  loadPluginDir,
+  scanInstalledPlugins,
+  verifyOfficialInstall,
+  type InstalledPluginPackageSummary,
+  type PluginActivationCatalogEntry,
+} from './installedPlugins'
 import { resolveOfficialPublisherKey } from './pluginVerify'
+import {
+  verifyInstalledRegistryPackage,
+  type InstalledRegistryTrustContext,
+} from './pluginInstalledTrust'
 import { legacyCapabilityPolicy, type PluginCapabilityPolicy } from './pluginPermissions'
 import {
   createWsClient,
@@ -51,6 +67,8 @@ export interface PluginLaunchDescriptor {
   requires: string[]
   /** Access-aware policy for Manifest v2; omitted descriptors retain V1 behavior. */
   capabilityPolicy?: PluginCapabilityPolicy
+  /** Host-authenticated v2 grant/binding context; never serialized to a plugin. */
+  capabilityContext?: HostCapabilityContext
   /** Dev-server URL for the plugin entry (used when running under electron-vite dev). */
   devUrl: string
   /** Absolute file path to the built plugin entry (packaged / built runs). */
@@ -89,6 +107,7 @@ interface RunningPlugin {
   id: string
   requires: string[]
   capabilityPolicy: PluginCapabilityPolicy
+  capabilityContext: HostCapabilityContext | null
   view: WebContentsView
   hostWindow: BrowserWindow
   /** Query string the entry was last loaded with (drives reload-on-change). */
@@ -150,6 +169,15 @@ export function isReservedPluginId(id: string): boolean {
   return id === 'navide.mini-ide' || id.startsWith('navide.')
 }
 
+function hasOfficialRegistryAuthority(trust: InstalledRegistryTrustContext): boolean {
+  return (
+    trust.registryAuthority === 'official' &&
+    trust.officialRegistryUrl !== undefined &&
+    trust.snapshot?.metadata.registryProfile === 'official' &&
+    trust.pinnedRootKey !== null
+  )
+}
+
 /**
  * Manages the lifecycle of frontend plugin views and brokers their capability
  * calls. A single instance owns all plugin views across every host window.
@@ -168,6 +196,9 @@ export class FrontendPluginManager {
    *  mini-IDE is registered here as the first built-in; third-party installs are
    *  added by {@link loadInstalledPlugins} / {@link registerDescriptor}. */
   private readonly descriptors = new Map<string, PluginLaunchDescriptor>()
+  /** Validated packages installed under userData/plugins, including packages
+   *  with no frontend descriptor. */
+  private readonly installedPackages = new Map<string, InstalledPluginPackageSummary>()
   /** Host-bundled builtin descriptors kept as fallbacks: removing a marketplace
    *  override of a bundled plugin reverts to the bundled copy instead of
    *  leaving the surface unavailable (see {@link removeInstalledPlugin}). */
@@ -180,6 +211,10 @@ export class FrontendPluginManager {
   /** Last transport status, replayed to late-loading plugin views so their
    *  useBackend shims start from real liveness instead of assuming it. */
   private wsStatus: WsClientStatus = 'disconnected'
+  /** Host-owned executor seam for cataloged v2 plans. */
+  private publicCapabilityHandler:
+    | ((plan: PublicCapabilityExecutionPlan) => unknown | Promise<unknown>)
+    | null = null
   /** `terminal_session_id` → owning pluginId. Registered from terminal.create /
    *  terminal.reattach responses ({@link noteTerminalRoutes}); terminal.output
    *  and terminal.exit are delivered to the owner only, falling back to the
@@ -215,8 +250,28 @@ export class FrontendPluginManager {
 
       // Enforce scoping + route. A denied namespace is rejected here and never
       // reaches the backend; `ping`/unknown resolve in-process.
-      const plan = planCapabilityCall(call, plugin.capabilityPolicy)
+      const plan = planCapabilityCall(
+        call,
+        plugin.capabilityPolicy,
+        plugin.capabilityContext ?? undefined
+      )
       if (plan.kind === 'respond') return plan.response
+
+      if (plan.kind === 'public') {
+        const handler = this.publicCapabilityHandler
+        if (!handler) {
+          return buildError(
+            call.reqId,
+            'BACKEND_UNAVAILABLE',
+            'public capability broker is not connected'
+          )
+        }
+        try {
+          return buildSuccess(call.reqId, await handler(plan))
+        } catch {
+          return buildError(call.reqId, 'INTERNAL_ERROR', 'public capability failed')
+        }
+      }
 
       // Host-implemented capability (ui.open_in_editor): main services it
       // directly — no backend round-trip.
@@ -315,6 +370,27 @@ export class FrontendPluginManager {
 
   setOpenInEditorHandler(fn: (params: Record<string, string>) => boolean | Promise<boolean>): void {
     this.openInEditorHandler = fn
+  }
+
+  /** Install the Host-owned execution adapter for an already-authorized v2
+   * plan. The adapter receives no raw shell, PTY, executable, or transport
+   * handle from the Plugin. */
+  setPublicCapabilityHandler(
+    fn: ((plan: PublicCapabilityExecutionPlan) => unknown | Promise<unknown>) | null
+  ): void {
+    this.publicCapabilityHandler = fn
+  }
+
+  /** Host-only event ingress for cataloged public events. A workspace event
+   * must carry the authenticated Host source binding; unbound backend fan-out
+   * is intentionally dropped by {@link dispatchEvent}. */
+  dispatchPublicCapabilityEvent(
+    event: string,
+    payload: unknown,
+    sourceBinding: AuthenticatedRuntimeBinding
+  ): void {
+    if (!PUBLIC_CAPABILITY_EVENT_ADDRESSES.includes(event)) return
+    this.dispatchEvent(event, payload, sourceBinding)
   }
 
   /** Main-registered handlers for the shell-level host capabilities
@@ -454,7 +530,7 @@ export class FrontendPluginManager {
         WebSocketImpl: NodeWebSocket as unknown as WsConstructor,
         onStatus: (s) => this.dispatchBackendStatus(s),
       })
-      for (const event of Object.keys(CAP_EVENTS)) {
+      for (const event of new Set([...Object.keys(CAP_EVENTS), ...PUBLIC_CAPABILITY_EVENT_ADDRESSES])) {
         client.on(event, (payload) => this.dispatchEvent(event, payload))
       }
       client.connect(this.backendWsUrl)
@@ -468,7 +544,11 @@ export class FrontendPluginManager {
    *  per-session micro-batcher instead of going out per event, and
    *  terminal.exit flushes that batch first (ordering barrier) then retires the
    *  session's route. */
-  private dispatchEvent(event: string, payload: unknown): void {
+  private dispatchEvent(
+    event: string,
+    payload: unknown,
+    sourceBinding?: AuthenticatedRuntimeBinding
+  ): void {
     if (event === 'terminal.output') {
       const sessionId = terminalSessionIdOf(payload)
       if (sessionId) {
@@ -484,10 +564,19 @@ export class FrontendPluginManager {
         return
       }
     }
-    const ns = eventNamespace(event)
-    if (!ns) return
     for (const plugin of this.running.values()) {
-      if (isEventAllowed(plugin.capabilityPolicy, event)) {
+      const allowed =
+        plugin.capabilityPolicy.kind === 'manifest-v2'
+          ? plugin.capabilityContext !== null &&
+            isPublicCapabilityEventAllowed(
+              plugin.capabilityPolicy,
+              event,
+              payload,
+              plugin.capabilityContext,
+              sourceBinding
+            )
+          : isEventAllowed(plugin.capabilityPolicy, event)
+      if (allowed) {
         this.emit(plugin.id, event, payload)
       }
     }
@@ -572,7 +661,15 @@ export class FrontendPluginManager {
       console.debug(`[plugin] cast dropped: malformed call from ${pluginId}`)
       return 'malformed'
     }
-    const plan = planCapabilityCall(call, plugin.capabilityPolicy)
+    const plan = planCapabilityCall(
+      call,
+      plugin.capabilityPolicy,
+      plugin.capabilityContext ?? undefined
+    )
+    if (plan.kind === 'public') {
+      console.debug(`[plugin] cast dropped: ${pluginId} public capabilities are request/response only`)
+      return 'not-castable'
+    }
     if (plan.kind === 'host') {
       console.debug(
         `[plugin] cast dropped: ${pluginId} ${call.ns}.${call.method} is a host capability (not castable)`
@@ -639,6 +736,7 @@ export class FrontendPluginManager {
         // through to a fresh create; loadEntry on a dead webContents would brick.
         this.destroy(descriptor.id)
       } else {
+        existing.capabilityContext = descriptor.capabilityContext ?? existing.capabilityContext
         const query = descriptor.query ?? ''
         const prevQuery = existing.query
         existing.query = query
@@ -711,6 +809,7 @@ export class FrontendPluginManager {
       id: descriptor.id,
       requires: descriptor.requires,
       capabilityPolicy: descriptor.capabilityPolicy ?? legacyCapabilityPolicy(descriptor.requires),
+      capabilityContext: descriptor.capabilityContext ?? null,
       view,
       hostWindow,
       query: descriptor.query ?? '',
@@ -880,8 +979,8 @@ export class FrontendPluginManager {
   /**
    * Register (or replace) an available plugin descriptor. Ids under the
    * reserved `navide.` namespace may only be registered by the host itself
-   * (`opts.builtin`) or by an install whose pinned-official-key verification
-   * passed (`opts.official`); a third-party plugin claiming such an id (e.g.
+   * (`opts.builtin`) or by an install whose App-authorized Official Registry
+   * verification passed (`opts.official`); a third-party plugin claiming such an id (e.g.
    * spoofing `navide.mini-ide` to hijack the trusted mini-IDE) is refused.
    */
   registerDescriptor(
@@ -897,14 +996,14 @@ export class FrontendPluginManager {
   }
 
   /**
-   * Register a host-bundled builtin descriptor. If a descriptor for the id is
-   * already registered (an officially-verified marketplace install scanned
-   * before this call), the installed copy stays active and the builtin is only
+   * Register a host-bundled builtin descriptor. If an officially-verified
+   * marketplace package for the id was scanned first, its frontend descriptor
+   * or backend-only inventory entry takes precedence. The builtin is only
    * remembered as the fallback {@link removeInstalledPlugin} reverts to.
    */
   registerBuiltin(descriptor: PluginLaunchDescriptor): void {
     this.builtinFallbacks.set(descriptor.id, descriptor)
-    if (!this.descriptors.has(descriptor.id)) {
+    if (!this.installedPackages.has(descriptor.id) && !this.descriptors.has(descriptor.id)) {
       this.registerDescriptor(descriptor, { builtin: true })
     }
   }
@@ -914,9 +1013,121 @@ export class FrontendPluginManager {
     return this.descriptors.get(id)
   }
 
+  /** Inject a Host-authenticated grant/binding after package approval. This is
+   * deliberately separate from registerDescriptor/official eligibility so a
+   * first-party identity can never become an automatic capability grant. */
+  setCapabilityContext(pluginId: string, context: HostCapabilityContext | null): void {
+    const descriptor = this.descriptors.get(pluginId)
+    if (descriptor) this.descriptors.set(pluginId, { ...descriptor, capabilityContext: context ?? undefined })
+    const running = this.running.get(pluginId)
+    if (running) running.capabilityContext = context
+  }
+
   /** All registered (installed + built-in) descriptors. */
   listDescriptors(): PluginLaunchDescriptor[] {
     return [...this.descriptors.values()]
+  }
+
+  /** All validated packages installed from disk, including backend-only packages. */
+  listInstalledPackages(): InstalledPluginPackageSummary[] {
+    return [...this.installedPackages.values()].map((summary) => ({
+      id: summary.id,
+      requires: [...summary.requires],
+      ...(summary.provenance ? { provenance: summary.provenance } : {}),
+      ...(summary.warning ? { warning: summary.warning } : {}),
+    }))
+  }
+
+  /** Register one Host-selected local unpacked development bundle. The fixed
+   * Host call site, not package data, grants the reserved builtin identity.
+   * These fixed app bundles are not the explicit local-package acceptance
+   * path and therefore do not enter the installed-package inventory. */
+  registerDeveloperDescriptor(descriptor: PluginLaunchDescriptor): void {
+    this.registerDescriptor(descriptor, { builtin: true })
+  }
+
+  /**
+   * Load exactly one Host-selected frontend package for Developer
+   * Mode. This intentionally reads the selected directory only; it never
+   * scans a parent directory or turns an arbitrary package tree into a
+   * registry-like inventory. Backend contributions remain fail-closed.
+   */
+  loadExplicitDeveloperPlugin(
+    packageDir: string | undefined,
+    optedIn = process.env['AGENT_TEAM_PLUGIN_DEV'] === '1'
+  ): { loaded: true; pluginId: string } | { loaded: false; error: string } {
+    if (!optedIn) {
+      return { loaded: false, error: 'Developer Mode explicit package loading requires opt-in' }
+    }
+    if (!packageDir || packageDir.trim().length === 0) {
+      return { loaded: false, error: 'an explicit package directory must be selected' }
+    }
+    const scanned = loadPluginDir(packageDir)
+    if (scanned.error) return { loaded: false, error: scanned.error }
+    const activation = scanned.activation
+    const descriptor = scanned.descriptor
+    const pluginId = activation?.pluginId ?? descriptor?.id
+    if (!pluginId || !scanned.packageSummary) {
+      return {
+        loaded: false,
+        error: 'Developer Mode requires a valid frontend package',
+      }
+    }
+    if (activation?.backend) {
+      return { loaded: false, error: 'Developer Mode cannot load backend contributions' }
+    }
+    if (!descriptor) {
+      return {
+        loaded: false,
+        error: 'Developer Mode requires a valid frontend package',
+      }
+    }
+    if (isReservedPluginId(pluginId)) {
+      return {
+        loaded: false,
+        error: `Developer Mode cannot claim reserved plugin id '${pluginId}'`,
+      }
+    }
+    const summary: InstalledPluginPackageSummary = {
+      ...scanned.packageSummary,
+      provenance: 'developer-local-unpacked',
+      warning: 'Unsigned local unpacked plugin — Developer Mode only',
+    }
+    try {
+      this.registerInstalledPackage(summary, descriptor)
+    } catch (error) {
+      return { loaded: false, error: error instanceof Error ? error.message : String(error) }
+    }
+    return { loaded: true, pluginId }
+  }
+
+  /** Replace one installed package's inventory and optional frontend descriptor
+   *  together. A backend-only update therefore cannot retain an older view. */
+  registerInstalledPackage(
+    summary: InstalledPluginPackageSummary,
+    descriptor?: PluginLaunchDescriptor,
+    opts: { official?: boolean } = {}
+  ): void {
+    if (descriptor && descriptor.id !== summary.id) {
+      throw new Error(
+        `installed package id '${summary.id}' does not match descriptor id '${descriptor.id}'`
+      )
+    }
+    if (!opts.official && isReservedPluginId(summary.id)) {
+      throw new Error(
+        `refusing to register reserved plugin id '${summary.id}' without official verification`
+      )
+    }
+
+    this.destroy(summary.id)
+    this.descriptors.delete(summary.id)
+    if (descriptor) this.registerDescriptor(descriptor, opts)
+    this.installedPackages.set(summary.id, {
+      id: summary.id,
+      requires: [...summary.requires],
+      ...(summary.provenance ? { provenance: summary.provenance } : {}),
+      ...(summary.warning ? { warning: summary.warning } : {}),
+    })
   }
 
   /**
@@ -932,43 +1143,181 @@ export class FrontendPluginManager {
   /**
    * Scan an installed-plugins root and register a descriptor for every valid
    * plugin found. A directory with an invalid manifest is skipped and returned
-   * in `errors` rather than aborting the scan. Pure parse/validation lives in
-   * `installedPlugins`; this only wires it to the registry.
+   * in `errors` rather than aborting the scan. The returned activation catalog
+   * contains only validated, trusted package contributions whose optional frontend
+   * registration succeeded; `loaded` retains its descriptor-only meaning.
    */
-  loadInstalledPlugins(root: string): { loaded: string[]; errors: string[] } {
+  loadInstalledPlugins(
+    root: string,
+    source?:
+      | { provenance: 'official-registry'; trust: InstalledRegistryTrustContext }
+      | { provenance: 'developer-local-unpacked' },
+    includePluginIds?: ReadonlySet<string>
+  ): {
+    loaded: string[]
+    errors: string[]
+    activationCatalog: PluginActivationCatalogEntry[]
+  } {
     const loaded: string[] = []
     const errors: string[] = []
+    const approved: Array<{
+      scanned: ReturnType<typeof scanInstalledPlugins>[number]
+      pluginId: string
+      packageSummary: InstalledPluginPackageSummary
+      opts: { official?: boolean }
+    }> = []
+
     for (const scanned of scanInstalledPlugins(root)) {
-      if (scanned.descriptor) {
-        // A reserved `navide.` id must prove its install receipt still verifies
-        // against the pinned official key before it may register (fail-closed:
-        // no receipt / no pin / bad signature → skipped, reported as an error).
-        let opts: { official?: boolean } = {}
-        if (isReservedPluginId(scanned.descriptor.id)) {
-          const check = verifyOfficialInstall(
-            scanned.dir,
-            scanned.descriptor.id,
-            resolveOfficialPublisherKey()
+      if (scanned.error) {
+        errors.push(`${scanned.dir}: ${scanned.error}`)
+        continue
+      }
+      const pluginId = scanned.activation?.pluginId ?? scanned.descriptor?.id
+      if (pluginId === undefined || scanned.packageSummary === undefined) continue
+      if (includePluginIds && !includePluginIds.has(pluginId)) continue
+
+      const isV2 = scanned.activation !== undefined
+      if (source?.provenance === 'official-registry') {
+        if (isReservedPluginId(pluginId) && !hasOfficialRegistryAuthority(source.trust)) {
+          errors.push(
+            `${scanned.dir}: reserved plugin id '${pluginId}' requires the App-authorized Official Registry`
           )
+          continue
+        }
+        const decision = verifyInstalledRegistryPackage(scanned.dir, pluginId, source.trust)
+        if (decision.action === 'quarantine') {
+          errors.push(`${scanned.dir}: quarantined: ${decision.reason ?? 'trust verification failed'}`)
+          continue
+        }
+        scanned.packageSummary.provenance = 'official-registry'
+        if (scanned.activation) {
+          scanned.activation.provenance = 'official-registry'
+          scanned.activation.artifactDigest = decision.artifactDigest
+        }
+      } else if (source?.provenance === 'developer-local-unpacked') {
+        if (isReservedPluginId(pluginId)) {
+          errors.push(
+            `${scanned.dir}: Developer Mode cannot claim reserved plugin id '${pluginId}'`
+          )
+          continue
+        }
+        scanned.packageSummary.provenance = 'developer-local-unpacked'
+        scanned.packageSummary.warning = 'Unsigned local unpacked plugin — Developer Mode only'
+        if (scanned.activation) scanned.activation.provenance = 'developer-local-unpacked'
+      } else if (isV2) {
+        errors.push(`${scanned.dir}: Registry trust context is required for Manifest v2`)
+        continue
+      }
+
+      // Reserved backend-only packages must pass the same receipt gate as view
+      // packages before any contribution can enter the activation catalog.
+      let opts: { official?: boolean } = {}
+      if (isReservedPluginId(pluginId)) {
+        if (source?.provenance === 'official-registry') {
+          if (hasOfficialRegistryAuthority(source.trust)) {
+            opts = { official: true }
+          } else {
+            errors.push(
+              `${scanned.dir}: reserved plugin id '${pluginId}' requires the App-authorized Official Registry`
+            )
+            continue
+          }
+        } else {
+          const check = verifyOfficialInstall(scanned.dir, pluginId, resolveOfficialPublisherKey())
           if (!check.ok) {
             errors.push(`${scanned.dir}: ${check.reason}`)
             continue
           }
           opts = { official: true }
         }
-        try {
-          this.registerDescriptor(scanned.descriptor, opts)
-          loaded.push(scanned.descriptor.id)
-        } catch (err) {
-          // A reserved-id spoof (or other registration refusal) is reported and
-          // skipped, never aborting the rest of the scan.
-          errors.push(`${scanned.dir}: ${err instanceof Error ? err.message : String(err)}`)
+      }
+      approved.push({ scanned, pluginId, packageSummary: scanned.packageSummary, opts })
+    }
+
+    // A plugin identity may be supplied by either a legacy descriptor or a v2
+    // activation. Reject duplicates before registering either contribution so
+    // a v1 frontend cannot combine with a v2 backend from another directory.
+    const packageGroups = new Map<string, typeof approved>()
+    for (const entry of approved) {
+      const group = packageGroups.get(entry.pluginId) ?? []
+      group.push(entry)
+      packageGroups.set(entry.pluginId, group)
+    }
+    const uniqueApproved: typeof approved = []
+    for (const [pluginId, entries] of packageGroups) {
+      if (entries.length === 1) {
+        uniqueApproved.push(entries[0])
+        continue
+      }
+      const directories = entries.map(({ scanned }) => scanned.dir).join(', ')
+      errors.push(`${pluginId}: duplicate plugin packages found in ${directories}`)
+    }
+
+    const activations = uniqueApproved.flatMap(({ scanned }) =>
+      scanned.activation ? [scanned.activation] : []
+    )
+    let activationCatalog = buildActivationCatalog(activations)
+
+    for (const { scanned, packageSummary, opts } of uniqueApproved) {
+      try {
+        this.registerInstalledPackage(packageSummary, scanned.descriptor, opts)
+        if (scanned.descriptor) loaded.push(scanned.descriptor.id)
+      } catch (err) {
+        errors.push(`${scanned.dir}: ${err instanceof Error ? err.message : String(err)}`)
+        if (scanned.activation) {
+          activationCatalog = activationCatalog.filter((entry) => entry !== scanned.activation)
         }
-      } else if (scanned.error) {
-        errors.push(`${scanned.dir}: ${scanned.error}`)
       }
     }
-    return { loaded, errors }
+    return { loaded, errors, activationCatalog }
+  }
+
+  /** Re-evaluate installed Registry packages after a root-signed trust/blocklist
+   * refresh. A quarantine only stops/unregisters frontend state; it never
+   * deletes the retained package evidence. A future backend supervisor must
+   * consume these same decisions before spawn and when trust changes. */
+  refreshInstalledPluginTrust(
+    root: string,
+    trust: InstalledRegistryTrustContext,
+    includePluginIds?: ReadonlySet<string>
+  ): Array<{ pluginId: string; action: 'allow' | 'quarantine'; reason?: string }> {
+    const decisions: Array<{
+      pluginId: string
+      action: 'allow' | 'quarantine'
+      reason?: string
+    }> = []
+    for (const scanned of scanInstalledPlugins(root)) {
+      const pluginId = scanned.activation?.pluginId ?? scanned.descriptor?.id
+      if (!pluginId) continue
+      if (includePluginIds && !includePluginIds.has(pluginId)) continue
+      const decision = verifyInstalledRegistryPackage(scanned.dir, pluginId, trust)
+      if (
+        decision.action === 'allow' &&
+        isReservedPluginId(pluginId) &&
+        !hasOfficialRegistryAuthority(trust)
+      ) {
+        decisions.push({
+          pluginId,
+          action: 'quarantine',
+          reason: 'reserved plugin id requires the App-authorized Official Registry',
+        })
+        this.destroy(pluginId)
+        this.installedPackages.delete(pluginId)
+        this.descriptors.delete(pluginId)
+        const fallback = this.builtinFallbacks.get(pluginId)
+        if (fallback) this.registerDescriptor(fallback, { builtin: true })
+        continue
+      }
+      decisions.push({ pluginId, ...decision })
+      if (decision.action === 'quarantine') {
+        this.destroy(pluginId)
+        this.installedPackages.delete(pluginId)
+        this.descriptors.delete(pluginId)
+        const fallback = this.builtinFallbacks.get(pluginId)
+        if (fallback) this.registerDescriptor(fallback, { builtin: true })
+      }
+    }
+    return decisions
   }
 
   /** Unregister a descriptor and tear down its view if it is open. Used by the
@@ -977,6 +1326,7 @@ export class FrontendPluginManager {
    *  (recorded by {@link registerBuiltin}) so the surface keeps working. */
   removeInstalledPlugin(id: string): void {
     this.destroy(id)
+    this.installedPackages.delete(id)
     this.descriptors.delete(id)
     const fallback = this.builtinFallbacks.get(id)
     if (fallback) this.registerDescriptor(fallback, { builtin: true })

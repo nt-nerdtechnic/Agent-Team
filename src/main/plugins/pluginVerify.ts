@@ -10,37 +10,41 @@
 //                    verification blocks the install. Unsigned packages are not
 //                    blocked (their trust tier is surfaced to the user instead).
 //   3. capabilities— every declared `requires` namespace MUST be a known
-//                    capability; an unknown namespace is a scope-escalation and
+//                    declared capability namespace; an unknown namespace is a scope-escalation and
 //                    is rejected (namespace over-reach).
 // Zip-slip path-traversal defence lives here too (`assertSafeEntryPath`) and is
 // applied by the unpack shell before any bytes hit disk.
 //
 // Mirrors the registry's own chain: `signing.py` signs/verifies a base64
 // Ed25519 signature over the ascii-encoded sha256 *hex* digest; `trust.py`
-// flags `fs`/`terminal` as sensitive. Kept in sync deliberately.
+// flags `fs`/`aiCli`/`shell` as sensitive for v2; `terminal` remains sensitive
+// only for the legacy compatibility path. Kept in sync deliberately.
 
 import { createHash, createPublicKey, timingSafeEqual, verify as cryptoVerify } from 'node:crypto'
 import {
-  canonicalArchivePath,
-  portableArchiveCollisionKey,
+  validatePortableArchiveEntries,
+  type PortableArchiveEntry,
 } from './pluginPathPolicy'
 
 /** Capability namespaces the host can authorize. Mirror of the backend
  *  `manifest.KNOWN_CAPABILITIES` for the current runtime contract. */
 export const KNOWN_CAPABILITIES: readonly string[] = [
   'fs',
+  'ui',
+  'aiCli',
+  'shell',
+  // Legacy v1 namespaces remain parseable only through the compatibility path.
   'git',
   'terminal',
   'search',
   'chat',
-  'ui',
   'issues',
   'plans',
 ]
 
-/** Capabilities that grant filesystem / shell reach and warrant a second
- *  confirmation before install. Mirror of the registry `trust.py`. */
-export const SENSITIVE_CAPABILITIES: readonly string[] = ['fs', 'terminal']
+/** Capabilities that grant filesystem / brokered process / shell reach and
+ *  warrant a second confirmation before install. Mirror of the registry. */
+export const SENSITIVE_CAPABILITIES: readonly string[] = ['fs', 'aiCli', 'shell', 'terminal']
 
 export const TRUST_SIGNED = 'signed-verified'
 export const TRUST_UNSIGNED = 'unsigned'
@@ -49,6 +53,7 @@ export type TrustTier = typeof TRUST_SIGNED | typeof TRUST_UNSIGNED
 /** Machine-readable reason an install was refused; the UI maps these to copy. */
 export type VerifyErrorCode =
   | 'DIGEST_MISMATCH'
+  | 'SIGNATURE_REQUIRED'
   | 'SIGNATURE_INVALID'
   | 'CAP_UNKNOWN'
   | 'ZIP_SLIP'
@@ -181,7 +186,7 @@ export function assertOfficialPublisher(
   }
 }
 
-/** Subset of declared capabilities flagged sensitive (fs/terminal). */
+/** Subset of declared capabilities flagged sensitive. */
 export function sensitiveCapabilities(requires: readonly string[]): string[] {
   return requires.filter((c) => SENSITIVE_CAPABILITIES.includes(c))
 }
@@ -224,9 +229,6 @@ export function assertSafeEntryPath(name: string): void {
 export function assertSafeArchiveEntries(
   entries: readonly { path: string; type?: 'regular' | 'directory' | 'symlink' | 'special' }[]
 ): void {
-  const seen = new Set<string>()
-  const regularPaths = new Set<string>()
-  const ancestorPaths = new Set<string>()
   for (const entry of entries) {
     if (entry.type !== undefined && entry.type !== 'regular' && entry.type !== 'directory') {
       throw new PluginVerifyError(
@@ -234,36 +236,24 @@ export function assertSafeArchiveEntries(
         `archive entry is not a regular file or directory: ${entry.path}`
       )
     }
-    const kind = entry.type === 'directory' ? 'directory' : 'regular'
-    const canonical = canonicalArchivePath(entry.path, kind)
-    if (canonical === null) {
-      throw new PluginVerifyError('ZIP_SLIP', `unsafe archive entry path: ${entry.path}`)
-    }
-    const collisionKey = portableArchiveCollisionKey(canonical)
-    if (collisionKey === null) {
-      throw new PluginVerifyError('ZIP_SLIP', `unsafe archive entry path: ${entry.path}`)
-    }
-    if (seen.has(collisionKey)) {
-      throw new PluginVerifyError(
-        'ZIP_DUPLICATE',
-        `duplicate archive entry path: ${entry.path}`
-      )
-    }
-    seen.add(collisionKey)
-    if (kind === 'regular') regularPaths.add(collisionKey)
-    const segments = collisionKey.split('/')
-    for (let index = 1; index < segments.length; index += 1) {
-      ancestorPaths.add(segments.slice(0, index).join('/'))
-    }
   }
-  for (const path of regularPaths) {
-    if (ancestorPaths.has(path)) {
-      throw new PluginVerifyError(
-        'ZIP_DUPLICATE',
-        `archive path collides with regular file ancestor: ${path}`
-      )
-    }
+
+  const portableEntries: PortableArchiveEntry[] = entries.map((entry) => ({
+    path: entry.path,
+    type: entry.type === 'directory' ? 'directory' : 'regular',
+  }))
+  const issue = validatePortableArchiveEntries(portableEntries)
+  if (!issue) return
+  if (issue.kind === 'unsafe-path') {
+    throw new PluginVerifyError('ZIP_SLIP', `unsafe archive entry path: ${issue.path}`)
   }
+  if (issue.kind === 'duplicate') {
+    throw new PluginVerifyError('ZIP_DUPLICATE', `duplicate archive entry path: ${issue.path}`)
+  }
+  throw new PluginVerifyError(
+    'ZIP_DUPLICATE',
+    `archive path collides with regular file ancestor: ${issue.path}`
+  )
 }
 
 /**

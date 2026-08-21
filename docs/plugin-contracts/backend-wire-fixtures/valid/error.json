@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","id":"req-1","error":{"code":1000,"message":"Backend unavailable","data":{"code":"BACKEND_UNAVAILABLE","details":{"retryable":true}}}}

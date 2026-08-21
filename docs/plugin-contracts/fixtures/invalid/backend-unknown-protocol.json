@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 2,
+  "apiVersion": "^1.0.0",
+  "id": "acme.future-wire",
+  "name": "Future Wire",
+  "version": "1.0.0",
+  "publisher": "acme",
+  "permissions": {},
+  "marketplace": { "description": "Reject an unknown backend wire profile.", "license": "MIT" },
+  "backend": { "entry": "backend/acme-wire", "protocolVersion": 2, "activation": "startup" }
+}

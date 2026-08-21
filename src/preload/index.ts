@@ -56,6 +56,8 @@ export interface InstalledPluginSummary {
   id: string
   requires: string[]
   sensitive: string[]
+  provenance?: 'official-registry' | 'developer-local-unpacked'
+  warning?: string
 }
 
 export interface MarketplaceExtension {
@@ -83,7 +85,11 @@ export interface PreparedInstallSummary {
   version: string
   trustTier: 'signed-verified' | 'unsigned'
   sensitive: string[]
+  containsBackendExecutable: boolean
   requiresConfirmation: boolean
+  publisherId: string
+  requiresPublisherTrust: boolean
+  requiresRiskConfirmation: boolean
 }
 
 const pendingEditorOpenFiles: Record<string, string>[] = []
@@ -512,8 +518,11 @@ contextBridge.exposeInMainWorld('agentTeam', {
       name: string
       version?: string
     }): Promise<PreparedInstallSummary> => ipcRenderer.invoke('plugins:prepareInstall', args),
-    commitInstall: (id: string): Promise<{ id: string; requires: string[] }> =>
-      ipcRenderer.invoke('plugins:commitInstall', { id }),
+    commitInstall: (
+      id: string,
+      approval: { publisherConfirmed?: boolean; riskConfirmed?: boolean } = {}
+    ): Promise<{ id: string; requires: string[] }> =>
+      ipcRenderer.invoke('plugins:commitInstall', { id, ...approval }),
     remove: (id: string): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke('plugins:remove', { id }),
   },

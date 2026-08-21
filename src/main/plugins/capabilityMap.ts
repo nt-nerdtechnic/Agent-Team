@@ -68,7 +68,8 @@ const ISSUES_METHODS = ['provider', 'list', 'get', 'create', 'comment', 'set_sta
 // (spawn/reattach lifecycle, keystroke input, resize/redraw, interrupt/kill).
 // `create_cancel` is the one non-uniform member (WS type
 // `terminal.create.cancel`) and lives in EXPLICIT_CAP_MAP; `run` (one-shot
-// shell.run) stays an EXPLICIT remap as before.
+// shell.run) stays an EXPLICIT remap as before. This is legacy v1
+// compatibility only; v2 exposes shell.run directly and never terminal.
 const TERMINAL_METHODS = [
   'create', 'input', 'log_sent', 'resize', 'interrupt', 'kill', 'reattach', 'redraw',
 ] as const

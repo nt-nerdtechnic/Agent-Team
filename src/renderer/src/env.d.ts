@@ -264,7 +264,10 @@ declare global {
           name: string
           version?: string
         }) => Promise<PreparedInstallSummary>
-        commitInstall: (id: string) => Promise<{ id: string; requires: string[] }>
+        commitInstall: (
+          id: string,
+          approval?: { publisherConfirmed?: boolean; riskConfirmed?: boolean }
+        ) => Promise<{ id: string; requires: string[] }>
         remove: (id: string) => Promise<{ ok: boolean }>
       }
     }
@@ -274,6 +277,8 @@ declare global {
     id: string
     requires: string[]
     sensitive: string[]
+    provenance?: 'official-registry' | 'developer-local-unpacked'
+    warning?: string
   }
 
   interface MarketplaceExtension {
@@ -301,7 +306,11 @@ declare global {
     version: string
     trustTier: 'signed-verified' | 'unsigned'
     sensitive: string[]
+    containsBackendExecutable: boolean
     requiresConfirmation: boolean
+    publisherId: string
+    requiresPublisherTrust: boolean
+    requiresRiskConfirmation: boolean
   }
 }
 
