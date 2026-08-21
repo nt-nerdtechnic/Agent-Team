@@ -115,6 +115,8 @@ const props = defineProps<{
   tabRequest?: number
   confirmBeforeClose?: boolean
   confirmBeforeClosePane?: boolean
+  idleReclaimEnabled?: boolean
+  idleReclaimMinutes?: string
 }>()
 const emit = defineEmits<{
   (e: 'close'): void
@@ -122,6 +124,8 @@ const emit = defineEmits<{
   (e: 'cli-login', agentKey: string, loginProfileId?: string): void
   (e: 'update:confirmBeforeClose', v: boolean): void
   (e: 'update:confirmBeforeClosePane', v: boolean): void
+  (e: 'update:idleReclaimEnabled', v: boolean): void
+  (e: 'update:idleReclaimMinutes', v: string): void
 }>()
 const confirmBeforeCloseModel = computed({
   get: () => props.confirmBeforeClose ?? true,
@@ -133,6 +137,17 @@ const confirmBeforeClosePaneModel = computed({
   get: () => props.confirmBeforeClosePane ?? true,
   set: (v: boolean) => emit('update:confirmBeforeClosePane', v),
 })
+// Reclaiming an idle CLI frees the memory it is sitting on and leaves the
+// click-to-resume placeholder behind, so the row reads as a memory setting
+// rather than as a way of closing panes.
+const idleReclaimEnabledModel = computed({
+  get: () => props.idleReclaimEnabled ?? true,
+  set: (v: boolean) => emit('update:idleReclaimEnabled', v),
+})
+const idleReclaimMinutesModel = computed(() => props.idleReclaimMinutes ?? '180')
+function onIdleReclaimMinutesChange(v: string): void {
+  emit('update:idleReclaimMinutes', v)
+}
 
 // ── Tab ───────────────────────────────────────────────────────────────────────
 type Tab = 'mcp' | 'skills' | 'analyzer' | 'cliAgents' | 'general' | 'updates' | 'appearance' | 'accounts' | 'extensions' | 'storage' | 'keybindings' | 'help'
@@ -2517,6 +2532,38 @@ watch(activeTab, (tab) => {
                     v-model="confirmBeforeClosePaneModel"
                     :aria-label="$t('settings.general.confirm-close-pane')"
                   />
+                </template>
+              </SettingRow>
+
+              <SettingRow
+                data-settings-section="general-idle-reclaim"
+                :title="$t('settings.general.idle-reclaim')"
+                :description="$t('settings.general.idle-reclaim-hint')"
+              >
+                <template #control>
+                  <ToggleSwitch
+                    v-model="idleReclaimEnabledModel"
+                    :aria-label="$t('settings.general.idle-reclaim')"
+                  />
+                </template>
+              </SettingRow>
+
+              <SettingRow
+                v-if="idleReclaimEnabledModel"
+                data-settings-section="general-idle-reclaim-after"
+                :title="$t('settings.general.idle-reclaim-after')"
+                :description="$t('settings.general.idle-reclaim-after-hint')"
+              >
+                <template #control>
+                  <select
+                    :value="idleReclaimMinutesModel"
+                    @change="onIdleReclaimMinutesChange(($event.target as HTMLSelectElement).value)"
+                  >
+                    <option value="30">{{ $t('settings.general.idle-reclaim-30m') }}</option>
+                    <option value="60">{{ $t('settings.general.idle-reclaim-1h') }}</option>
+                    <option value="180">{{ $t('settings.general.idle-reclaim-3h') }}</option>
+                    <option value="480">{{ $t('settings.general.idle-reclaim-8h') }}</option>
+                  </select>
                 </template>
               </SettingRow>
 

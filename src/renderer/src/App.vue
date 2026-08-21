@@ -80,6 +80,7 @@ import { i18n } from './i18n'
 import { deriveAutoName } from './lib/autoName'
 import { bootWorkspaceToRecord } from './lib/bootWorkspace'
 import { diagLog } from './lib/diagLog'
+import { reclaimBlockedBy, idleReclaimThresholdMs, type ReclaimCandidate } from './lib/idleReclaim'
 import { findConsecutiveQuestionBlocks, findSentinel } from './lib/buffer'
 import {
   buildCliPaneBufferReply,
@@ -635,6 +636,14 @@ const dontConfirmCloseAgain = ref<boolean>(false)
 // Only the ⌘W path reads this — the ✕ button is a deliberate mouse click and
 // still closes outright. A running pane always asks, setting or not.
 const confirmBeforeClosePane = makeStickyBool('agentTeam.confirmClosePane', true)
+// Hand a long-idle CLI's memory back to the machine. Each idle claude holds
+// ~230-330MB it never releases (GPU slabs the process allocates and keeps, see
+// the memory diagnosis) — with a dozen panes open that is most of a 32GB
+// machine, and the pane sitting on it has not been touched in hours. Reclaiming
+// returns it to the same cold-restore placeholder a restart would show, so the
+// conversation is one click away rather than gone.
+const idleReclaimEnabled = makeStickyBool('agentTeam.idleReclaim', true)
+const idleReclaimMinutes = makeStickyStr('agentTeam.idleReclaimMinutes', '180')
 // Push the "confirm before quit" config to main so the native dialog stays in
 // sync with the shared setting and the current locale.
 function pushQuitConfirmConfig(): void {
@@ -10122,6 +10131,156 @@ function truncate(s: string, n: number): string {
 const layoutMode = ref<LayoutMode>('grid')
 const focusPaneId = ref<string | null>(null)
 const minimizedPanes = ref(new Set<string>())
+
+// ── Idle CLI reclaim ─────────────────────────────────────────────────────────
+// A CLI that has been idle for hours still holds every byte it ever allocated.
+// The ownerless-PTY janitor in the backend cannot help here: these panes have a
+// window, so they have an owner. This is the other half — an owned pane whose
+// owner stopped using it.
+//
+// Reclaiming is deliberately NOT closing. The pane keeps its place, its name and
+// its saved record, and drops back to the cold-restore placeholder the app shows
+// for every pane after a restart. Clicking it runs the same realize path, which
+// resumes the conversation from the CLI's own transcript.
+
+/** How often the sweep runs. Well under any sensible threshold. */
+const IDLE_RECLAIM_SWEEP_MS = 60_000
+
+/** The live pane, flattened into what the reclaim decision reads.
+ *
+ *  Agent output and user keystrokes are both folded into lastTouchedAt because
+ *  either one alone is wrong: a pane the user is reading (scrolling a long
+ *  answer, never typing) has old keystrokes, and a pane the user just typed
+ *  into has no output of its own yet. */
+function reclaimCandidate(pane: ActivePane): ReclaimCandidate {
+  const ref = paneRefs[pane.id]
+  const activity = (ref?.lastActivityAt as unknown as number) ?? 0
+  const key = (ref?.lastUserKeyAt as unknown as number) ?? 0
+  return {
+    realized: pane.realized,
+    restoring: !!pane.restoring,
+    focused: focusPaneId.value === pane.id,
+    resumeSessionId: paneResumeSessionId(pane),
+    rebuilding: paneRebuilding(pane),
+    loopActive: !!pane.loopActive,
+    preparationStatus: pane.preparationStatus as unknown as string,
+    injectionStatus: pane.injectionStatus as unknown as string,
+    spawnReportPending: !!pane.spawnReportPending,
+    hasRef: !!ref,
+    displayStatus: (ref?.displayStatus as unknown as string) ?? '',
+    hasDraft: !!(ref?.hasDraft as unknown as boolean),
+    lastTouchedAt: Math.max(activity, key),
+  }
+}
+
+function paneReclaimable(pane: ActivePane, now: number): boolean {
+  return reclaimBlockedBy(
+    reclaimCandidate(pane), idleReclaimThresholdMs(idleReclaimMinutes.value), now
+  ) === null
+}
+
+/** The saved record a placeholder needs, rebuilt from the live pane.
+ *
+ *  Mirrors the shape cold restore reads back from the backend (see the
+ *  placeholder built in the restore path) so the realize path cannot tell the
+ *  two apart. */
+function projectPaneFromActive(pane: ActivePane): ProjectPane {
+  const stageIndex = stagesApi.stages.value.findIndex((st) => st.id === pane.stageId)
+  return {
+    pane_id: pane.id,
+    agent: pane.agentKey,
+    role: pane.roleKey as string,
+    command: pane.command || undefined,
+    session_id: paneResumeSessionId(pane),
+    session_home_id: pane.sessionHomeId,
+    profile_id: pane.profileId,
+    spawn_status: 'spawned',
+    run_group_id: pane.runGroupId,
+    origin: pane.origin,
+    stage_id: pane.stageId as string,
+    stage_index: stageIndex >= 0 ? stageIndex : undefined,
+    slot_label: pane.slotLabel,
+    kickoff_status: pane.kickoffStatus,
+    custom_name: pane.customName,
+    name_locked: pane.nameLocked,
+    auto_name: pane.autoName,
+    auto_name_source: pane.autoNameSource,
+    is_minimized: minimizedPanes.value.has(pane.id),
+    output_log_file: pane.outputLogFile,
+  }
+}
+
+/** Kill one idle pane's CLI and leave the placeholder in its seat. */
+async function reclaimIdlePane(paneId: string): Promise<boolean> {
+  const pane = panes.value.find((p) => p.id === paneId)
+  if (!pane) return false
+  const saved = projectPaneFromActive(pane)
+  // Spawn history records a pane's removal unconditionally, and this is not a
+  // removal — the pane is still there, still resumable. Restored after the kill
+  // rather than by teaching onKill a new flag, so no other caller's history
+  // behaviour changes.
+  const histEntry = spawnHistory.value.find((e) => e.paneId === paneId)
+  const alreadyRemoved = !!histEntry?.removedAt
+  // markRemoved: false — the backend record is what the placeholder resumes
+  // from; unspawning it would make this a real close on the next restart.
+  // keepInList: true — the pane keeps its seat, name and group.
+  // force: false — a graceful signal lets the CLI finish writing its transcript,
+  // which is the thing the resume depends on.
+  await onKill(paneId, { markRemoved: false, keepInList: true, force: false })
+  if (histEntry && !alreadyRemoved) histEntry.removedAt = undefined
+  // onKill leaves the pane object in place; turn it back into the placeholder
+  // the cold-restore path builds.
+  const stillThere = panes.value.find((p) => p.id === paneId)
+  if (!stillThere) return false
+  stillThere.realized = false
+  stillThere.restoring = false
+  stillThere.preparationStatus = 'starting'
+  stillThere.injectionStatus = 'pending'
+  stillThere.skipRoleInjection = true
+  stillThere.resumeContinueAvailable = undefined
+  stillThere.deferredRestore = {
+    saved,
+    workspacePath: pane.workspacePath,
+    batch: {
+      workspacePath: pane.workspacePath,
+      records: [saved],
+      savedClaims: [saved],
+      usedFreshSessionIds: new Set<string>(),
+    },
+  }
+  syncViews()
+  return true
+}
+
+let _idleReclaimTimer: number | null = null
+
+async function sweepIdlePanes(): Promise<void> {
+  if (!idleReclaimEnabled.value) return
+  const now = Date.now()
+  const due = panes.value.filter((p) => paneReclaimable(p, now)).map((p) => p.id)
+  if (due.length === 0) return
+  let reclaimed = 0
+  for (const paneId of due) {
+    // Re-checked per pane: the sweep awaits a kill between candidates, and the
+    // user can focus or type into the next one while it runs.
+    const pane = panes.value.find((p) => p.id === paneId)
+    if (!pane || !paneReclaimable(pane, Date.now())) continue
+    if (await reclaimIdlePane(paneId)) reclaimed++
+  }
+  if (reclaimed === 0) return
+  pipelineLog(`♻ reclaimed ${reclaimed} idle CLI pane(s) — click to resume`)
+  notifyRestore.toast(
+    i18n.global.t('pane.terminal.idle-reclaimed', { count: reclaimed }),
+    { type: 'info' }
+  )
+}
+
+onMounted(() => {
+  _idleReclaimTimer = window.setInterval(() => { void sweepIdlePanes() }, IDLE_RECLAIM_SWEEP_MS)
+})
+onUnmounted(() => {
+  if (_idleReclaimTimer !== null) clearInterval(_idleReclaimTimer)
+})
 // Multi-select set for batch context-menu actions (Cmd/Ctrl/Shift-click a pane
 // header). Pruned to live pane ids by the panes watcher; a plain click clears it.
 const selectedPaneIds = ref(new Set<string>())
@@ -12069,6 +12228,8 @@ function paneIsCommander(p: ActivePane): boolean {
       :tab-request="settingsTabRequest"
       v-model:confirm-before-close="confirmBeforeClose"
       v-model:confirm-before-close-pane="confirmBeforeClosePane"
+      v-model:idle-reclaim-enabled="idleReclaimEnabled"
+      v-model:idle-reclaim-minutes="idleReclaimMinutes"
       @close="showSettings = false; settingsInitialTab = 'general'"
       @reopen-onboarding="() => { showSettings = false; reopenOnboarding() }"
       @cli-login="onCliLoginSpawn"
