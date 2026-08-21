@@ -3,7 +3,7 @@ requires-python = ">=3.12"
 
 [[package]]
 name = "agent-team-backend"
-version = "0.1.85"
+version = "0.1.86"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
