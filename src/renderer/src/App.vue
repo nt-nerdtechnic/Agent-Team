@@ -5517,6 +5517,12 @@ registerCommand('workbench.action.openPipelineManager', () => { openPipelineMana
 registerCommand('workbench.action.openDebug', () => { openDebugModal() })
 registerCommand('workbench.action.closeModal', () => {
   if (previewLogOpen.value) previewLogOpen.value = false
+  else if (cliInstallRequest.value) closeCliInstall()
+  else if (reconnectPickerOpen.value) reconnectPickerOpen.value = false
+  else if (whatsNewEntry.value) dismissWhatsNew()
+  // Dismissing the restore prompt IS a decision (persists 'cancelled') — but
+  // it is the same one the component's own footer Cancel and Esc handler make.
+  else if (showRestoreScopeModal.value) settleRestoreScope(null)
   else if (showSettings.value) showSettings.value = false
   else if (showDebug.value) showDebug.value = false
   else if (showPipelineManager.value) {
@@ -5729,7 +5735,15 @@ async function buildUiActionSnapshot(): Promise<{
 }
 useUiActionBus({ backend, currentWorkspace, buildSnapshot: buildUiActionSnapshot })
 
-watch([showSettings, showCompletionModal, showRestoreScopeModal, showPipelineManager, showDebug, showHistory], ([s, c, r, p, d, h]) => setContext('modalOpen', s || c || r || p || d || h || previewLogOpen.value))
+// Single source of truth for the 'modalOpen' keybinding context. Hoisted so
+// the watches below can share it; only ever CALLED after setup completes, so
+// referencing refs declared later in the file is safe.
+function mainModalOpen(): boolean {
+  return showSettings.value || showCompletionModal.value || showRestoreScopeModal.value ||
+    showPipelineManager.value || showDebug.value || showHistory.value || previewLogOpen.value ||
+    reconnectPickerOpen.value || !!cliInstallRequest.value || !!whatsNewEntry.value
+}
+watch([showSettings, showCompletionModal, showRestoreScopeModal, showPipelineManager, showDebug, showHistory], () => setContext('modalOpen', mainModalOpen()))
 
 /** The sidebar agent list shows panes from every tab; focusing one that lives
  *  in another tab must also activate that tab, or the pane stays v-show-hidden. */
@@ -5771,7 +5785,7 @@ const previewLogContent = ref<string>('')
 const previewLogTitle = ref<string>('')
 const previewLogOpen = ref<boolean>(false)
 watch(previewLogOpen, (open) => {
-  setContext('modalOpen', open || showSettings.value || showCompletionModal.value || showRestoreScopeModal.value || showPipelineManager.value || showDebug.value || showHistory.value)
+  setContext('modalOpen', mainModalOpen())
   if (!open) {
     // Drop the (possibly multi-MB) log text once the preview closes so it
     // doesn't linger in memory and doesn't flash stale content on reopen.
@@ -8705,6 +8719,12 @@ const cliInstallRequest = ref<{
 } | null>(null)
 /** Dep ids the user switched the prompt off for, mirrored from the backend. */
 const cliInstallPromptDismissed = ref<Set<string>>(new Set())
+
+// These three dialogs count as modals for the keybinding context too (⌘W/Esc
+// close them; pane shortcuts stay off behind them). Declared down here because
+// the watch's SOURCES must already exist — the callback itself shares
+// mainModalOpen with the sibling watches above.
+watch([reconnectPickerOpen, cliInstallRequest, whatsNewEntry], () => setContext('modalOpen', mainModalOpen()))
 
 function promptCliInstall(agentKey: string, agentLabel: string, paneId?: string): void {
   if (cliInstallRequest.value) return

@@ -16,6 +16,10 @@ export const defaults: KeybindingRule[] = [
   // No !terminalFocus: a focused CLI pane is exactly when you want this, and ⌘W
   // means nothing to a PTY (Ctrl+W is the one shells use).
   { key: 'cmd+w',       command: 'workbench.action.closeActivePane', when: 'paneStage && !modalOpen' },
+  // While a modal is open the two rules above are guarded off; the modal itself
+  // is then the unit ⌘W closes. Same handler as Escape, so nested layers close
+  // first. No !terminalFocus (unlike Esc): ⌘W means nothing to an embedded PTY.
+  { key: 'cmd+w',       command: 'workbench.action.closeModal', when: 'modalOpen' },
   // Closing a WINDOW, not a tab. ⌘W used to do this through the menu's `close`
   // role, which was dropped so the rule above could have the key (main/menu.ts);
   // this restores the capability on a chord no role claims. Every window that

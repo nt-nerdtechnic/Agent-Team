@@ -63,15 +63,21 @@ describe('onFocusHistoryPane', () => {
 
 describe('Agent History keybinding context', () => {
   it('feeds showHistory into every modalOpen context write', () => {
+    // Every write goes through the single source of truth…
     const writes = appSource
       .split('\n')
       .filter((line) => line.includes("setContext('modalOpen'"))
     expect(writes.length).toBeGreaterThan(0)
     for (const line of writes) {
-      expect(line, `modalOpen write must include showHistory: ${line.trim()}`).toContain(
-        'showHistory'
+      expect(line, `modalOpen write must use mainModalOpen: ${line.trim()}`).toContain(
+        'mainModalOpen()'
       )
     }
+    // …and that source accounts for the history modal.
+    const fnStart = appSource.indexOf('function mainModalOpen(')
+    expect(fnStart).toBeGreaterThan(-1)
+    const fnBody = appSource.slice(fnStart, appSource.indexOf('\n}', fnStart))
+    expect(fnBody).toContain('showHistory.value')
   })
 
   it('closes the history modal on Escape, peeling nested layers first', () => {

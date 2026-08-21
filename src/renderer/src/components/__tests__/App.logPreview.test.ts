@@ -60,10 +60,14 @@ describe('Log preview modal ESC handling', () => {
   })
 
   it('feeds previewLogOpen into the modalOpen context so Escape is armed', () => {
-    const watchLine = appSource
-      .split('\n')
-      .find((line) => line.includes("setContext('modalOpen'") && line.includes('previewLogOpen'))
-    expect(watchLine).toBeTruthy()
+    // The preview-open watch writes the context through the single source of
+    // truth, and that source accounts for previewLogOpen.
+    const watchBlock = block('watch(previewLogOpen, (open) => {', '})')
+    expect(watchBlock).toContain("setContext('modalOpen', mainModalOpen())")
+    const fnStart = appSource.indexOf('function mainModalOpen(')
+    expect(fnStart).toBeGreaterThan(-1)
+    const fnBody = appSource.slice(fnStart, appSource.indexOf('\n}', fnStart))
+    expect(fnBody).toContain('previewLogOpen.value')
   })
 })
 

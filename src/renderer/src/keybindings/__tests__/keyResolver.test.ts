@@ -384,8 +384,9 @@ describe('KeyResolver – defaults integration (new shortcuts)', () => {
       .toBe('workbench.action.closeActiveEditor')
   })
 
-  it('cmd+w blocked when modalOpen', () => {
-    expect(dr.resolve(mkEvent('w', { metaKey: true }), { editorOpen: true, modalOpen: true })).toBeNull()
+  it('cmd+w → closeModal when modalOpen (instead of closing a tab)', () => {
+    expect(dr.resolve(mkEvent('w', { metaKey: true }), { editorOpen: true, modalOpen: true })?.command)
+      .toBe('workbench.action.closeModal')
   })
 
   it('cmd+w → closeActivePane in the main window (paneStage && !modalOpen)', () => {
@@ -395,8 +396,9 @@ describe('KeyResolver – defaults integration (new shortcuts)', () => {
       .toBe('workbench.action.closeActivePane')
   })
 
-  it('cmd+w blocked in the main window while a modal is open', () => {
-    expect(dr.resolve(mkEvent('w', { metaKey: true }), { paneStage: true, modalOpen: true })).toBeNull()
+  it('cmd+w → closeModal in the main window while a modal is open', () => {
+    expect(dr.resolve(mkEvent('w', { metaKey: true }), { paneStage: true, modalOpen: true })?.command)
+      .toBe('workbench.action.closeModal')
   })
 
   it('cmd+w does nothing in a window that is neither', () => {

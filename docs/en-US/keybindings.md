@@ -21,7 +21,7 @@ rules the editor writes.
 |----------|--------|
 | `⌘S` | Save current file |
 | `⌘⇧S` | Save all |
-| `⌘W` | Close active editor |
+| `⌘W` | Close active editor; close the focused CLI pane in the main window; close the open modal while one is open |
 | `⌘⇧W` | Close the current window |
 | `⌘K ⌘W` | Close all editors |
 | `⌘O` | Open file |
@@ -44,7 +44,7 @@ rules the editor writes.
 | `⌘R` / `⌘⇧B` | Rebuild the focused pane (resume) |
 | `⌘⇧R` | Reload the window (Git window: refresh) |
 | `⌘⇧L` | Open Debug (backend log, shell, AI) — outside the Mini IDE, where this chord belongs to the editor |
-| `Escape` | Close modal dialog |
+| `Escape` / `⌘W` | Close modal dialog (⌘W also works with focus in an embedded terminal, where Escape belongs to the CLI) |
 
 ### Quick Open
 
