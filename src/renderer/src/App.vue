@@ -630,6 +630,11 @@ const autoAnswerEnabled = makeStickyBool('agentTeam.autoAnswer', false)
 // Confirm before closing a workspace or quitting the app. Default ON.
 const confirmBeforeClose = makeStickyBool('agentTeam.confirmClose', true)
 const dontConfirmCloseAgain = ref<boolean>(false)
+// Confirm before ⌘W closes an idle CLI pane. Default ON: the key is one-handed
+// and sits next to keys you press while typing into the very pane it kills.
+// Only the ⌘W path reads this — the ✕ button is a deliberate mouse click and
+// still closes outright. A running pane always asks, setting or not.
+const confirmBeforeClosePane = makeStickyBool('agentTeam.confirmClosePane', true)
 // Push the "confirm before quit" config to main so the native dialog stays in
 // sync with the shared setting and the current locale.
 function pushQuitConfirmConfig(): void {
@@ -4576,13 +4581,17 @@ async function onReinject(paneId: string): Promise<void> {
 }
 
 /**
- * ⌘W's close: kill the focused pane, asking first only while a turn is running.
+ * ⌘W's close: kill the focused pane, asking first.
  *
  * The ✕ button calls onKill outright, which is right for a deliberate mouse
  * click but not for a key you can hit one-handed while typing into the very CLI
- * it would kill. `force: true` gives no second chance, so a running turn gets
- * the same prompt Rebuild already shows for interrupting one. An idle pane
- * closes without ceremony — matching the button, and the common case.
+ * it would kill. `force: true` gives no second chance, so ⌘W confirms on both
+ * paths — but they are not the same prompt:
+ *
+ * - Running: destroying work in progress. Always asks, no opt-out.
+ * - Idle: nothing is lost but the pane and its scrollback. Asks by default,
+ *   with a "don't ask again" the user can tick (or restore under Settings →
+ *   General). `confirmBeforeClosePane` holds that choice.
  */
 async function closeFocusedPane(paneId: string): Promise<void> {
   const paneRef = paneRefs[paneId]
@@ -4601,6 +4610,21 @@ async function closeFocusedPane(paneId: string): Promise<void> {
       }
     )
     if (!ok) return
+  } else if (confirmBeforeClosePane.value) {
+    const ok = await notifyRestore.confirm(
+      i18n.global.t('pane.terminal.close-idle-confirm-body'),
+      {
+        title: i18n.global.t('pane.terminal.close-idle-confirm-title'),
+        confirmText: i18n.global.t('pane.terminal.close-running-confirm-confirm'),
+        cancelText: i18n.global.t('pane.terminal.rebuild-running-confirm-cancel'),
+        checkboxLabel: i18n.global.t('confirm-close.dont-show-again')
+      }
+    )
+    if (!ok) return
+    // Only a confirmed close records the opt-out, matching the workspace-close
+    // dialog: cancelling means "not this pane", which says nothing about the
+    // next one.
+    if (notifyRestore.dialogCheckbox.value) confirmBeforeClosePane.value = false
   }
   await onKill(paneId)
 }
@@ -12044,6 +12068,7 @@ function paneIsCommander(p: ActivePane): boolean {
       :initial-tab="settingsInitialTab"
       :tab-request="settingsTabRequest"
       v-model:confirm-before-close="confirmBeforeClose"
+      v-model:confirm-before-close-pane="confirmBeforeClosePane"
       @close="showSettings = false; settingsInitialTab = 'general'"
       @reopen-onboarding="() => { showSettings = false; reopenOnboarding() }"
       @cli-login="onCliLoginSpawn"

@@ -2,7 +2,7 @@
 import { nextTick, ref, watch } from 'vue'
 import { useNotify } from '../composables/useNotify'
 
-const { toasts, dialog, promptValue, dismissToast, resolveDialog } = useNotify()
+const { toasts, dialog, promptValue, dialogCheckbox, dismissToast, resolveDialog } = useNotify()
 
 const toastIcon = { success: '✓', error: '✕', info: 'ℹ' } as const
 
@@ -56,6 +56,10 @@ watch(dialog, async (d) => {
             @keydown.enter.stop.prevent="resolveDialog(true)"
             @keydown.esc.stop.prevent="resolveDialog(false)"
           />
+          <label v-if="dialog.checkboxLabel" class="dialog-check">
+            <input v-model="dialogCheckbox" type="checkbox" />
+            <span>{{ dialog.checkboxLabel }}</span>
+          </label>
         </div>
         <footer>
           <button
@@ -226,6 +230,18 @@ header strong {
 .prompt-input:focus {
   outline: none;
   border-color: var(--accent-fg);
+}
+.dialog-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+.dialog-check input {
+  cursor: pointer;
 }
 footer {
   display: flex;

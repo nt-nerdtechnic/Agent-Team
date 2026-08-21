@@ -141,4 +141,38 @@ describe('useNotify', () => {
     n.resolveDialog(true)
     await expect(second).resolves.toBe('')
   })
+
+  // ── Confirm opt-out checkbox ──────────────────────────────────────────────
+  it('confirm carries a checkbox label only when asked for one', async () => {
+    const plain = n.confirm('Sure?')
+    expect(n.dialog.value?.checkboxLabel).toBeUndefined()
+    n.resolveDialog(true)
+    await plain
+
+    const opt = n.confirm('Sure?', { checkboxLabel: "Don't ask again" })
+    expect(n.dialog.value?.checkboxLabel).toBe("Don't ask again")
+    n.resolveDialog(true)
+    await opt
+  })
+
+  it('exposes the ticked state after the promise settles', async () => {
+    const p = n.confirm('Sure?', { checkboxLabel: 'Skip next time' })
+    n.dialogCheckbox.value = true
+    n.resolveDialog(true)
+    await expect(p).resolves.toBe(true)
+    // Read after the await — that is how the caller sees it.
+    expect(n.dialogCheckbox.value).toBe(true)
+  })
+
+  it('resets the checkbox for each confirm so a stale tick never carries over', async () => {
+    const first = n.confirm('First?', { checkboxLabel: 'Skip next time' })
+    n.dialogCheckbox.value = true
+    n.resolveDialog(true)
+    await first
+
+    const second = n.confirm('Second?', { checkboxLabel: 'Skip next time' })
+    expect(n.dialogCheckbox.value).toBe(false)
+    n.resolveDialog(true)
+    await second
+  })
 })

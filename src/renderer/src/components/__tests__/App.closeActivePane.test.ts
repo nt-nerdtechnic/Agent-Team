@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-// ⌘W in the main window closes the focused CLI pane.
+// ⌘W in the main window closes the focused CLI pane, after confirming.
 //
 // The key was dead here until now: closeActiveEditor guards on `editorOpen`,
 // which this window never sets, so the main window had ⌘⇧W (close the window)
@@ -44,13 +44,42 @@ describe('App ⌘W closes the focused pane', () => {
     expect(closeFn).toContain('if (!ok) return')
   })
 
-  it('closes an idle pane without a prompt, like the ✕ button', () => {
-    // The confirm sits inside the `running` branch only — an idle pane falls
-    // straight through to onKill. If this ever wraps the whole function,
-    // closing a finished pane becomes a two-step affair.
-    const beforeKill = closeFn.slice(0, closeFn.lastIndexOf('await onKill(paneId)'))
-    expect(beforeKill.match(/notifyRestore\.confirm/g) ?? []).toHaveLength(1)
+  it('asks before closing an idle pane too, unless the user opted out', () => {
+    // ⌘W is one-handed and sits next to keys pressed while typing into the very
+    // pane it kills, so an idle close is a prompt as well — gated on the
+    // setting, which is the only thing the opt-out flips.
+    expect(closeFn).toContain('else if (confirmBeforeClosePane.value)')
+    expect(closeFn).toContain('close-idle-confirm-body')
+    expect(closeFn).toContain("checkboxLabel: i18n.global.t('confirm-close.dont-show-again')")
     expect(closeFn).toContain('await onKill(paneId)')
+  })
+
+  it('records the opt-out only after a confirmed close', () => {
+    // Cancelling means "not this pane" and must not silently disable the
+    // prompt — same rule the workspace-close dialog follows.
+    const optOut = 'if (notifyRestore.dialogCheckbox.value) confirmBeforeClosePane.value = false'
+    expect(closeFn).toContain(optOut)
+    const idleBranch = closeFn.slice(closeFn.indexOf('else if (confirmBeforeClosePane.value)'))
+    expect(idleBranch.indexOf('if (!ok) return')).toBeLessThan(idleBranch.indexOf(optOut))
+  })
+
+  it('leaves the ✕ button closing outright', () => {
+    // The mouse path is deliberate; only the keystroke gained a prompt.
+    expect(appSource).toContain('@click="onKill(paneCtxMenu!.paneId); closePaneCtxMenu()"')
+  })
+
+  it('keeps the opt-out reversible in Settings', () => {
+    // A tick that cannot be undone trades one trap for a worse one.
+    const settings = readFileSync(
+      resolve(process.cwd(), 'src/renderer/src/components/SettingsModal.vue'), 'utf8'
+    )
+    expect(settings).toContain('data-settings-section="general-confirm-close-pane"')
+    expect(settings).toContain('confirmBeforeClosePaneModel')
+    expect(appSource).toContain('v-model:confirm-before-close-pane="confirmBeforeClosePane"')
+  })
+
+  it('persists the preference under a stable settings key', () => {
+    expect(appSource).toContain("makeStickyBool('agentTeam.confirmClosePane', true)")
   })
 
   it('has the confirm strings in every shipped locale', () => {
@@ -63,9 +92,15 @@ describe('App ⌘W closes the focused pane', () => {
         'close-running-confirm-title',
         'close-running-confirm-body',
         'close-running-confirm-confirm',
+        'close-idle-confirm-title',
+        'close-idle-confirm-body',
       ]) {
         expect(terminal[key], `${locale} is missing ${key}`).toBeTruthy()
       }
+      for (const key of ['confirm-close-pane', 'confirm-close-pane-hint']) {
+        expect(dict.settings.general[key], `${locale} is missing settings.general.${key}`).toBeTruthy()
+      }
+      expect(dict['confirm-close']['dont-show-again'], `${locale} is missing the opt-out label`).toBeTruthy()
     }
   })
 })

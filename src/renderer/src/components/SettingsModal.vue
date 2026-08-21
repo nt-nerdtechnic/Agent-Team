@@ -114,16 +114,24 @@ const props = defineProps<{
   /** Bumped by the caller to re-assert initialTab even when its value is unchanged. */
   tabRequest?: number
   confirmBeforeClose?: boolean
+  confirmBeforeClosePane?: boolean
 }>()
 const emit = defineEmits<{
   (e: 'close'): void
   (e: 'reopen-onboarding'): void
   (e: 'cli-login', agentKey: string, loginProfileId?: string): void
   (e: 'update:confirmBeforeClose', v: boolean): void
+  (e: 'update:confirmBeforeClosePane', v: boolean): void
 }>()
 const confirmBeforeCloseModel = computed({
   get: () => props.confirmBeforeClose ?? true,
   set: (v: boolean) => emit('update:confirmBeforeClose', v),
+})
+// The same toggle the ⌘W dialog's "don't show again" flips — this row is how a
+// user who ticked it gets the prompt back.
+const confirmBeforeClosePaneModel = computed({
+  get: () => props.confirmBeforeClosePane ?? true,
+  set: (v: boolean) => emit('update:confirmBeforeClosePane', v),
 })
 
 // ── Tab ───────────────────────────────────────────────────────────────────────
@@ -2496,6 +2504,19 @@ watch(activeTab, (tab) => {
               >
                 <template #control>
                   <ToggleSwitch v-model="confirmBeforeCloseModel" :aria-label="$t('confirm-close.setting-label')" />
+                </template>
+              </SettingRow>
+
+              <SettingRow
+                data-settings-section="general-confirm-close-pane"
+                :title="$t('settings.general.confirm-close-pane')"
+                :description="$t('settings.general.confirm-close-pane-hint')"
+              >
+                <template #control>
+                  <ToggleSwitch
+                    v-model="confirmBeforeClosePaneModel"
+                    :aria-label="$t('settings.general.confirm-close-pane')"
+                  />
                 </template>
               </SettingRow>
 

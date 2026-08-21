@@ -290,6 +290,8 @@
       "close-running-confirm-title": "CLI 正在執行中",
       "close-running-confirm-body": "關閉這個 pane 會結束進行中的回合並捨棄對話。確定要關閉嗎？",
       "close-running-confirm-confirm": "關閉 pane",
+      "close-idle-confirm-title": "關閉這個 pane？",
+      "close-idle-confirm-body": "關閉後這個 CLI 會結束，終端機內容也會消失。確定要關閉嗎？",
       "minimize-tooltip": "縮到側邊欄",
       "drag-to-tab-tooltip": "拖曳到上方 tab 可移動到其他分頁",
       "commander-tooltip": "全域管理者 — 跨階段協調,決定 ---STAGE-DONE---",
@@ -626,6 +628,8 @@
     "general": {
       "auto-resume-reconnect": "後端重啟後自動接回工作階段",
       "auto-resume-reconnect-hint": "後端崩潰時會一併帶走所有 CLI 行程。開啟後，後端恢復時會自動接回目前看得見的 pane 的對話，不必逐一手動重建。",
+      "confirm-close-pane": "關閉 pane 前確認",
+      "confirm-close-pane-hint": "用 ⌘W 關閉 CLI pane 前先跳出確認。執行中的 pane 一律會確認，不受此設定影響。",
       "default-editor": "預設編輯器",
       "default-editor-hint": "Navide 開啟檔案與資料夾的去向。Diff 檢視一律使用 Mini-IDE。",
       "default-editor-not-installed": "未安裝",

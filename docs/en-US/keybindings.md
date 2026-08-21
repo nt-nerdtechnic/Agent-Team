@@ -21,7 +21,7 @@ rules the editor writes.
 |----------|--------|
 | `⌘S` | Save current file |
 | `⌘⇧S` | Save all |
-| `⌘W` | Close active editor; close the focused CLI pane in the main window; close the open modal while one is open |
+| `⌘W` | Close active editor; close the focused CLI pane in the main window (confirms first — a running pane always asks, an idle one asks unless the user ticked "don't show again", restorable under Settings → General); close the open modal while one is open |
 | `⌘⇧W` | Close the current window |
 | `⌘K ⌘W` | Close all editors |
 | `⌘O` | Open file |

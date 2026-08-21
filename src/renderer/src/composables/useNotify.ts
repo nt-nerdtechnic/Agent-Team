@@ -24,6 +24,10 @@ export interface DialogState {
   cancelText: string
   /** Prompt only: placeholder for the text field. */
   placeholder?: string
+  /** Confirm only: label for an opt-out checkbox rendered under the message.
+   *  Absent means no checkbox. Its state is read from `dialogCheckbox` after
+   *  the promise settles. */
+  checkboxLabel?: string
   /** alert/confirm resolve with a boolean; prompt with the entered string (or
    *  null when cancelled). */
   resolve: (value: boolean | string | null) => void
@@ -34,6 +38,10 @@ const toasts = ref<Toast[]>([])
 const dialog = ref<DialogState | null>(null)
 /** Live value of the prompt text field, bound by NotificationHost via v-model. */
 const promptValue = ref('')
+/** Live value of a confirm's opt-out checkbox, bound by NotificationHost via
+ *  v-model. Reset on every confirm, so a caller reads it only for the dialog it
+ *  just awaited. */
+const dialogCheckbox = ref(false)
 let seq = 0
 const _toastTimers = new Map<number, ReturnType<typeof setTimeout>>()
 const MAX_TOASTS = 6
@@ -96,16 +104,24 @@ function alert(
 // ── Confirm (blocking, yes/no → Promise<boolean>) ──────────────────────────
 function confirm(
   message: string,
-  opts: { title?: string; confirmText?: string; cancelText?: string } = {}
+  opts: {
+    title?: string
+    confirmText?: string
+    cancelText?: string
+    /** Renders an opt-out checkbox; read `dialogCheckbox.value` after awaiting. */
+    checkboxLabel?: string
+  } = {}
 ): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
     supersedeDialog()
+    dialogCheckbox.value = false
     dialog.value = {
       kind: 'confirm',
       title: opts.title ?? 'Confirm',
       message,
       confirmText: opts.confirmText ?? 'OK',
       cancelText: opts.cancelText ?? 'Cancel',
+      checkboxLabel: opts.checkboxLabel,
       resolve: resolve as (v: boolean | string | null) => void
     }
   })
@@ -151,6 +167,7 @@ export function useNotify() {
     toasts: readonly(toasts),
     dialog: readonly(dialog),
     promptValue,
+    dialogCheckbox,
     toast,
     dismissToast,
     alert,

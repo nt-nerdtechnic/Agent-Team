@@ -290,6 +290,8 @@
       "close-running-confirm-title": "CLI is running",
       "close-running-confirm-body": "Closing this pane will end the in-progress turn and discard the conversation. Close anyway?",
       "close-running-confirm-confirm": "Close pane",
+      "close-idle-confirm-title": "Close this pane?",
+      "close-idle-confirm-body": "Closing ends this CLI and discards its terminal history. Close it?",
       "minimize-tooltip": "Minimize to sidebar",
       "drag-to-tab-tooltip": "Drag onto a tab above to move this pane to another tab",
       "commander-tooltip": "Global Manager — coordinates across stages, decides ---STAGE-DONE---",
@@ -626,6 +628,8 @@
     "general": {
       "auto-resume-reconnect": "Resume sessions after a backend restart",
       "auto-resume-reconnect-hint": "When the backend crashes it takes every CLI process with it. Turn this on to resume the visible panes' conversations automatically once it comes back, instead of rebuilding each one by hand.",
+      "confirm-close-pane": "Confirm before closing a pane",
+      "confirm-close-pane-hint": "Ask before ⌘W closes a CLI pane. A pane with a turn in progress always asks, regardless of this setting.",
       "default-editor": "Default editor",
       "default-editor-hint": "Where Navide opens files and folders. Diff views always use the Mini-IDE.",
       "default-editor-not-installed": "not installed",
