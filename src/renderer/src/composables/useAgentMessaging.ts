@@ -98,7 +98,7 @@ export interface AgentMessage {
    *  from producing another one, and it is what the log panel reads to suppress
    *  Resend — so unlike `hold` it is persisted: after a reload the panel must
    *  still know what a row is without parsing its text. */
-  kind?: 'notice'
+  kind?: 'notice' | 'fallback'
   /** Failure reason when status === 'failed'. */
   reason?: MessageReason
   /** Why this message has not been injected yet, while status === 'queued'. */
@@ -145,7 +145,7 @@ export interface PersistedMessageRow {
   recipient_agent?: string
   /** See AgentMessage.kind. Absent on rows written before the column existed,
    *  which is exactly right — every one of them is an ordinary message. */
-  kind?: 'notice'
+  kind?: 'notice' | 'fallback'
 }
 
 /** A status patch for an already-persisted row. */
@@ -349,7 +349,7 @@ function fromPersistedRow(row: PersistedMessageRow): AgentMessage {
   if (row.remote_workspace) m.remoteWorkspace = row.remote_workspace
   if (row.sender_agent) m.fromAgent = row.sender_agent
   if (row.recipient_agent) m.toAgent = row.recipient_agent
-  if (row.kind === 'notice') m.kind = row.kind
+  if (row.kind === 'notice' || row.kind === 'fallback') m.kind = row.kind
   return m
 }
 
@@ -704,7 +704,7 @@ export interface SendOptions {
   /** Correlation id the sender echoed back, when this message is a reply. */
   replyTo?: string
   /** Internal: marks a Navide-authored notice. See notifySenderOfFailure(). */
-  kind?: 'notice'
+  kind?: 'notice' | 'fallback'
 }
 
 /**

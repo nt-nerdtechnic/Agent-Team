@@ -1593,6 +1593,86 @@ async def cli_inbox_summary(ctx: Context) -> dict[str, Any]:
     return {"ok": True, "count": len(messages), "messages": messages}
 
 
+# How much of an incoming message cli_pending_incoming quotes back. Larger than
+# the outgoing excerpt: you wrote the ones cli_inbox_summary lists and only need
+# to recognize them, while these you have never seen, and the whole point is to
+# judge whether to break off what you are doing.
+_INCOMING_EXCERPT_CHARS = 200
+
+
+@server.tool()
+async def cli_pending_incoming(ctx: Context, limit: int = 20) -> dict[str, Any]:
+    """List the messages waiting to be delivered *to you*.
+
+    The mirror of cli_inbox_summary, which asks only about what you sent. This
+    asks what is queued for you and has not gone in yet — which, while you are
+    working, is everything anyone has sent you: a message is typed into a pane
+    only between turns, so an agent that stays busy is precisely the one that
+    cannot be told. Until this existed there was no way to find out; the queue
+    lives in the receiving window, and nothing offered the recipient's view of
+    it.
+
+    Call it between pieces of your own work when something may be waiting on
+    you — after dispatching a task with cli_open_agent, or during a long run
+    someone might need to interrupt. A non-empty answer is grounds to wrap up
+    the turn you are in, which is what lets the message land.
+
+    Returns {ok, count, messages: [{uid, sender, status, age_seconds, kind?,
+    excerpt}]}, oldest first. `status` is "queued" (waiting for you to be
+    between turns) or "delivering" (going in right now). `kind` marks a message
+    Navide wrote rather than an agent: "notice" is delivery feedback about your
+    own send, "fallback" is a spawned pane's turn forwarded because it ended
+    without writing a report.
+
+    Read from the persisted message log, so unlike cli_inbox_summary this
+    survives a backend restart. Two limits are worth knowing: the log is
+    written by the receiving window a moment after a message is queued, so
+    something sent in the last second may not be listed yet; and messages are
+    matched by your current messaging name, so anything queued for a name you
+    have since been renamed away from is not yours to see. An empty list means
+    nothing is waiting — it never means nothing was sent.
+    """
+    from agent_team_backend import agent_messaging, app
+
+    try:
+        caller = _resolve_caller(ctx)
+    except CallerUnknown as err:
+        return {"ok": False, "error": str(err)}
+    if caller.kind != "pane":
+        return {
+            "ok": False,
+            "error": (
+                "only a Navide CLI pane has an inbox — a host or external caller "
+                "has no messaging name for anything to be addressed to."
+            ),
+        }
+    # _resolve_caller has just rejected a stale pane id, so this is set; the
+    # guard is here for the type, not for a reachable state.
+    me = agent_messaging.get(caller.pane_id)
+    if me is None:
+        return {"ok": False, "error": "this pane is no longer registered for messaging"}
+    rows = await asyncio.to_thread(
+        app.agent_message_log.pending_incoming, me.name, max(1, min(int(limit), 200))
+    )
+    now_ms = time.time() * 1000.0
+    messages: list[dict[str, Any]] = []
+    for row in rows:
+        excerpt = "".join(list(" ".join(str(row.get("content") or "").split()))[
+            :_INCOMING_EXCERPT_CHARS
+        ])
+        message: dict[str, Any] = {
+            "uid": row.get("uid", ""),
+            "sender": row.get("sender", ""),
+            "status": row.get("status", ""),
+            "age_seconds": round(max(0.0, now_ms - float(row.get("created_at") or now_ms)) / 1000.0, 1),
+            "excerpt": excerpt,
+        }
+        if row.get("kind"):
+            message["kind"] = row["kind"]
+        messages.append(message)
+    return {"ok": True, "count": len(messages), "messages": messages}
+
+
 # ── Reading another pane (cli_read_log / cli_get_status / cli_wait_idle) ────
 
 # Bounds one read of an arbitrarily large conversation log. The cost here is

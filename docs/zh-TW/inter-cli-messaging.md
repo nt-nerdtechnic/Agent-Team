@@ -60,9 +60,13 @@ Please review src/main.ts and reply with the blocking issues only.
 
 Parser 套用的規則：
 
-- `to:` 必須與 `---MSG-START---` 在**同一行**。marker 單獨佔一行、`to:` 寫在下一
-  行時，區塊不會開啟 —— 整段會被當成普通文字丟棄：不進佇列、沒有失敗通知，兩邊
-  都看不到任何痕跡。
+- `to:` 可以與 `---MSG-START---` 在**同一行**，也可以寫在單獨佔一行的 marker 的
+  **正下方**。兩種形式都會開啟區塊。每則送達訊息附帶的提示教的是同一行的寫法，那
+  也是該寫的那一種；另一種之所以也被接受，是因為「marker 必須自成一整行」和
+  「marker 要獨佔一行」讀起來一樣自然，而以那種方式寫出來的區塊過去會被當成普通文
+  字丟棄：不進佇列、沒有失敗通知，兩邊都看不到任何痕跡。
+- Navide *讀不懂*的 marker 現在也不再沉默：一個回合開了區塊卻沒有解析出任何區塊
+  時，會收到一則[格式通知](#無法辨識的格式通知)。
 - `to:` 欄位取到選用的 `re:` 欄位之前的所有內容。
 - 缺少 `---MSG-END---` 是可以容忍的：區塊會在下一個 `---MSG-START---` 或該回合
   結束時關閉。
@@ -154,6 +158,52 @@ reason: Someone is typing in the target pane — waiting 2 min so far
 —— 外部 MCP Client —— 不會收到通知，因為沒有地方可以把它輸入進去；它改問
 `cli_inbox_summary`，那會回答同一個問題。
 
+### 無法辨識的格式通知
+
+一個回合印出了單獨成行的 `---MSG-START---`，卻完全沒有解析出區塊時，寫下它的那個
+Pane 會被告知：
+
+```
+[Navide MSG] message not recognized — 這個 turn 出現了 ---MSG-START---，但沒有解析出任何訊息，因此沒有送出、也沒有排進佇列。
+```
+
+這是本頁其餘部分無法回報的唯一一種失敗。這裡的其他內容描述的都是一則存在的訊息
+—— 已排隊、被保留、失敗了 —— 所以才回報得出來。從未解析成功的區塊沒有產生任何訊
+息：沒有佇列項目、沒有記錄列，沒有東西可以重送或撤回。寄件者看到的是一個普通的回
+合，而收件者就只是始終沒等到消息。
+
+只有寫下它的那個 Pane 會被告知，因為只有它知道那個回合原本想送什麼。它只在該回合
+**完全沒有**產生任何區塊時才觸發 —— 一個回合中若有一個區塊解析成功、另一個沒有，
+它會保持安靜。
+
+### 問問看有什麼在等你
+
+以上每一則通知都是被輸入到某個 Pane 裡的，也就是說它只有在那個 Pane 位於回合之間
+時才會抵達。正埋首於一件長工作的 Agent，恰恰就是那個什麼都通知不到的對象 —— 而在
+`cli_pending_incoming` 之前，它也沒有辦法主動問。`cli_inbox_summary` 回答的是
+*「我送出去的到了沒？」*；沒有任何東西回答*「有沒有什麼在等我？」*
+
+```
+cli_pending_incoming()
+→ {ok, count, messages: [{uid, sender, status, age_seconds, kind?, excerpt}]}
+```
+
+最舊的排在前面。`status` 是 `queued`（等你進入回合之間）或 `delivering`（正在進
+去）。`kind` 標示這是 Navide 寫的、而不是某個 Agent 寫的訊息 —— `notice` 是關於你
+自己送出的那則訊息的投遞回饋，`fallback` 則是你 spawn 出來的 Pane 的
+[代轉回報](#spawn-一個-pane)。
+
+在自己的工作告一段落之間呼叫它 —— 用 `cli_open_agent` 派出任務之後，或是在一段可
+能有人需要打斷你的長時間執行途中。答案不是空的，就足以構成把手上這個回合收尾的理
+由，而那正是讓訊息進得來的條件。
+
+有兩個限制值得知道。這份記錄是由接收端視窗在訊息排進佇列後片刻才寫下的，所以最後
+一秒才送出的東西可能還沒被列出來。而訊息是以你**當前**的 messaging 名稱比對的，因
+此排給某個你後來已經改掉的名字的訊息，不屬於你看得到的範圍。和
+`cli_inbox_summary` 不同，這一個讀的是持久化的記錄，所以它撐得過 Backend 重啟。只
+有 CLI Pane 有收件匣：Host 或外部呼叫端沒有 messaging 名稱可以被定址，得到的會是
+錯誤，而不是一份空清單。
+
 ### Spawn 回饋通知
 
 沒有順利完成的 spawn 請求會以相同方式，回報給提出請求的那個 Pane：
@@ -170,9 +220,9 @@ reason: Someone is typing in the target pane — waiting 2 min so far
 Pane —— 修正請求後再試一次。`spawn partial` 表示 Pane **確實**開啟了，只是它的
 任務沒有送到；再 spawn 一次會和已經在那裡的 Pane 相撞。
 
-成功的 spawn 不會送出任何東西：新 Pane 會自己以一般的 MSG 區塊向它的 parent 回報。
-那份回報是子 Agent 自己的輸出，不是 Navide 的保證 —— parent 正在執行中時它會排隊等
-到告一段落，子 Agent 沒照格式輸出時則完全不會送達。
+成功的 spawn 本身不會送出任何東西：新 Pane 會自己以一般的 MSG 區塊向它的 parent
+回報。那份回報是子 Agent 自己的輸出 —— 但一個回合結束時沒寫回報的子 Agent，現在不
+會再讓 parent 空手而回。見下方的[代轉回報](#代轉回報)。
 
 這兩者都是系統通知，和投遞失敗完全一樣 —— 是 Navide 寫的，沒有任何東西能對
 `Navide` 定址，也不該去回覆它們。在 Messages 面板中它們會帶著 `system notice`
@@ -198,9 +248,32 @@ task: Review the diff on this branch and report blocking issues.
 它的代價。格式錯誤的請求（未知的 agent key、缺少或已被使用的名稱、空白的任務）會
 以指出問題所在的 [Spawn 回饋通知](#spawn-回饋通知)回來。
 
-這份回報是子 Agent 自己的輸出，不是 Navide 的保證：parent 還在執行時它會排隊等到
-告一段落，子 Agent 沒照格式輸出就完全不會回報。要確定 spawn 出來的 Pane 真的做完
-了，請自己用 `cli_get_status` / `cli_wait_idle` 查它的狀態。
+### 代轉回報
+
+這份回報是子 Agent 自己的輸出，不是 Navide 寫的。Navide 保證的是 parent 一定會聽到
+**某個東西**：在子 Agent 收到任務後結束的第一個回合，會發生兩件事之一。
+
+- 子 Agent 對它的 parent 定址了 —— 它自己的回報會送出，其他什麼都不會送。
+- 它沒有 —— 那個回合的輸出會被代為轉交，並加上標示，讓它絕不可能被誤認成當初要
+  的那份回報：
+
+```
+[Navide MSG] fallback report — 這個 pane 的 turn 結束時沒有輸出 ---MSG-START--- 區塊，以下是它這個 turn 的最後輸出，由 Navide 代為轉交，不是它自己寫的回報：
+…
+```
+
+和上面那些通知不同，這是一則有真實寄件者（也就是子 Agent）的普通訊息，所以它可以
+被回覆、也可以被重送。它在訊息記錄與 `cli_pending_incoming` 中帶著
+`kind: fallback`。
+
+**每個 Pane 一輩子只有一次。** 不論那第一個回合走的是哪一條路，這筆債都算清了，所
+以持續工作的子 Agent 不會變成一連串的回報。廣播算作回報，因為 parent 就是它涵蓋的
+Pane 之一。若 parent 在子 Agent 工作期間就關閉了，或該回合沒有值得轉交的文字，就什
+麼都不會送。長回合保留的是尾巴而不是開頭：一個原本要當回報的回合，結尾正是它的結
+論。
+
+以上這些都不會讓那份回報變成完成訊號。要確定 spawn 出來的 Pane 真的做完了，請自己
+用 `cli_get_status` / `cli_wait_idle` 查它的狀態。
 
 ---
 
@@ -217,6 +290,29 @@ kickoff 注入中途、它的 CLI 已回報回合結束，而且已經安靜約 
 入。停在權限提示上的 Pane 被刻意排除；停在提問上的 Pane 則不排除。對於 Log 中沒
 有回合結束記錄的 Vendor，「回合結束」改以夠長的靜默來推論，所以那些 Pane 會比其
 他 Pane 稍晚才接受訊息。
+
+**除非該 CLI 自己會把輸入排隊。** 最後兩個條件 —— 回合已經結束，以及約 2 秒的安靜
+視窗 —— 存在的目的是等一個邊界。宣告了 `acceptsMidTurnInput` 的 Vendor 自己就提供
+了那個邊界：在回合中途寫進去的文字會落進該 CLI 自己的佇列，並在它的下一個回合被取
+用，走的正是使用者在回合中途打字時走的同一條路。對那些 Pane 而言，訊息一到就進去。
+今天只有 `claude` 一家，而且這必須維持成逐家實測出來的結論，不能當成預設 ——
+`qwen` 會把好幾則排隊的訊息合併成一次送出，所以在那裡做回合中途投遞，會把兩個寄件
+者併進同一個回合。
+
+這正是填掉了訊息方向過去造成的落差：來自忙碌 Pane 的回覆要花 **78 秒**，而送進閒置
+Pane 的訊息只要 2 秒，因為回覆得等 parent 閒下來，而 parent 一直沒有。
+
+有三件事是刻意*不*豁免的：
+
+- **打字保留。** 它保護的是鍵盤前的人，而且不論那個 CLI 拿排隊的輸入怎麼辦，寫到
+  一半的一行照樣會不見。
+- **忙碌狀態。** 該 Pane 在回合執行期間，對 `cli_wait_idle` 與 `cli_list_targets`
+  仍然回報自己忙碌：一個 Pane 願意接受什麼，和它正在做什麼，是兩個不同的問題。
+- **Push 通道。** 這個豁免只適用於打字注入這條路。claude 的 rewake hook 是
+  Stop-hook 投遞的 idle 那一半，而回合中途本來就歸 Stop hook 管，而 Stop hook 反正
+  就是在回合邊界觸發的 —— 所以這裡沒有延遲可省；而把 envelope 交給一個為了別的事件
+  而停泊的 waiter，只會把訊息標記成已送達給一個根本沒有據此行動的 CLI。回合中途的
+  訊息一律用打字送進去。
 
 **投遞也會等你。** 注入以 Enter 收尾，因此它會把輸入框裡的東西一併送出 —— 包含
 你還在寫的那一行。輸入行中有未送出文字，或在最近幾秒內收到過按鍵的 Pane，會被以
@@ -482,8 +578,8 @@ hook：這次切換要等到那個 Pane 下一次啟動才對它生效，在那�
 | `busy` / `not-ready` | 目標 Pane 不在可以接受輸入的狀態 |
 | `starting` | 目標 Pane 仍在啟動中 |
 | `typing` | 有人正在目標 Pane 中打字 |
-| `mid-turn` | 目標 Agent 正在工作 |
-| `settling` | 目標剛剛安靜下來；正在等它穩定 |
+| `mid-turn` | 目標 Agent 正在工作（對會在回合中途把輸入排隊的 Vendor 絕不會回報這個） |
+| `settling` | 目標剛剛安靜下來；正在等它穩定（同樣的豁免） |
 | `paused` | 這個視窗的投遞已暫停 |
 | `gone` | 目標 Pane 已不存在 |
 | `remote-ack` | 已送往另一個視窗；正在等它的回報 |
@@ -534,6 +630,8 @@ Agent 不必有 Messages 面板可看，也能讀到同一個原因 ——
 | Push 通道：spawn 接線與傳輸機制本身 | `backend/agent_team_backend/push_delivery.py` |
 | 某個 CLI 提供哪一種通道 | `backend/agent_team_backend/cli_vendors/<key>.py`（`push_channel`） |
 | 該通道仍然要遵守哪些投遞保留 | `src/renderer/src/agents/<key>.ts`（`pushChannel`） |
+| 某個 CLI 是否會在回合中途把輸入排隊 | `src/renderer/src/agents/<key>.ts`（`acceptsMidTurnInput`） |
+| 收件者眼中的佇列 | `backend/agent_team_backend/agent_message_log.py`（`pending_incoming`） |
 | 已安裝的 hook 指令，以及哪個事件會保留它的回應 | `backend/agent_team_backend/claude_hooks.py` |
 | 投遞結果與保留原因，以 MCP 呼叫端讀到的形式 | `backend/agent_team_backend/plugins/builtin/navide_plans/plan_mcp.py` |
 | 交給 Agent 的協定文字 | `src/renderer/src/data/stages.ts` |

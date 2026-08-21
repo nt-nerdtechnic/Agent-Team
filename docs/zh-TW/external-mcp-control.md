@@ -88,6 +88,7 @@ Tool 都回傳單一物件，因此這個問題只會在 `plan_list` 上出現�
 | `cli_send` | `to`、`text`、`wait_for_delivery_s=0`（上限 120） | 在另一個 Pane 進入 Idle 後遞送一則指令（忙碌則排入佇列）；回傳 `msg_key`，若有等待則一併回傳它的結果 |
 | `cli_check_message` | `msg_key` | 某次 `cli_send` 的結果：`{status, target, age_seconds, reason?, settled_after_s?, hold?, held_for_s?, stale?}` |
 | `cli_inbox_summary` | — | 你自己送出、目前卡住或失敗的訊息：`{count, messages: [{msg_key, target, status, age_seconds, stale?, reason?, hold?, held_for_s?, excerpt}]}` |
+| `cli_pending_incoming` | `limit=20`（上限 200） | **僅限 CLI Pane。** 目前排給*你*、還沒送進來的訊息：`{count, messages: [{uid, sender, status, age_seconds, kind?, excerpt}]}` |
 | `cli_send_and_wait` | `to`、`text`、`timeout_s=60`（上限 120） | `cli_send` 再加上等待該回合結束；回傳 `cli_wait_idle` 的結果，外加 `{ok, target, msg_key}` |
 | `cli_open_agent` | `agent`、`name`、`task`、`workspace_path`（非 Pane 呼叫端必填） | 帶著一項任務 Spawn 新的 CLI Pane；回傳 `{ok, name, address}`，若該次 Spawn 跨過 Advisory 門檻則另附 `advisories` |
 
@@ -147,6 +148,20 @@ Tool 都回傳單一物件，因此這個問題只會在 `plan_list` 上出現�
 那張表是 Backend 的**記憶體**，不是 Log：它保存最近 500 筆送出記錄一小時，
 Backend 重新啟動就會遺失。未知的 `msg_key` 會回傳 `{ok: false, error}`，
 意思是「不再被追蹤」，不是「從未送出」。
+
+`cli_pending_incoming` 是它的鏡像 —— 目前排給*你*、還沒進來的訊息，最舊的排在前
+面，`status` 是 `queued` 或 `delivering`，而由 Navide 而非某個 Agent 寫的訊息會帶
+著 `notice` 或 `fallback` 的 `kind`。**它是本節中唯一外部 Client 用不了的工具。**
+這裡其他每一個工具都是對某個 Pane*做事*；這一個問的是呼叫端自己的收件匣，而只有
+CLI Pane 才有收件匣：Host 或外部呼叫端沒有 messaging 名稱可以被定址，所以這個呼叫
+回來的是 `{ok: false, error}`，不是一份空清單。沒有東西能對你定址，也就沒有東西會
+在等你。想從外部得到類似畫面的外部 Client，請改讀 `cli_list_targets` 中某個 Pane 的
+`hold_reason`，或用 `cli_check_message` / `cli_inbox_summary` 追蹤自己送出的訊息。
+
+和上面那張送出記錄的表不同，這一個讀的是持久化的訊息記錄，所以它撐得過 Backend 重
+啟。有兩個限制：這份記錄是由接收端視窗在訊息排進佇列後片刻才寫下的，所以最後一秒才
+送出的東西可能還沒被列出來；而訊息是以該 Pane **當前**的 messaging 名稱比對的，因此
+排給某個它後來已經改掉的名字的訊息不會被回傳。
 
 `cli_send_and_wait` 處理的是手動配對 `cli_send` + `cli_wait_idle` 會輸掉的競態 ——
 目標在你送出的當下是 Idle 的，因此單純的等待會在它讀到訊息之前就回報

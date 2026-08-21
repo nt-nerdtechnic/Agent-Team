@@ -26,6 +26,11 @@ import {
   defaultMessagingName,
   normalizeMessagingName,
   uniqueMessagingName,
+  hasUnparsedMessageAttempt,
+  renderFormatNotice,
+  MSG_FORMAT_PREFIX,
+  MSG_FALLBACK_PREFIX,
+  renderFallbackReport,
 } from '../agentMessaging'
 
 describe('parseMessages', () => {
@@ -82,18 +87,33 @@ ${MSG_END}`
     expect(parseMessages(text)).toEqual([])
   })
 
-  it('opens nothing when to: is on the line after the marker', () => {
-    // The one mistake that costs a whole message: a bare ---MSG-START--- line
-    // matches no target, so the block never opens and every following line is
-    // read as ordinary prose. Nothing is queued and nothing fails, which is
-    // why renderEnvelope/renderSpawnKickoff spell out that to: shares the
-    // marker's line. Relaxing this without reading that history would let a
-    // marker quoted inside a message truncate the message it sits in.
+  it('opens a block when to: is on the line after the marker', () => {
+    // This used to cost a whole message: a bare ---MSG-START--- line matched no
+    // target, the block never opened, and nothing was queued and nothing
+    // failed. renderEnvelope/renderSpawnKickoff spell out that to: shares the
+    // marker's line, but "the marker must be a whole line" reads just as easily
+    // as "the marker gets a line to itself", so the hint invited the one shape
+    // that vanished. Both forms parse now; the cost is booked in the test
+    // below, and what the parser still cannot read is reported as a notice
+    // (see hasUnparsedMessageAttempt) rather than swallowed.
     const text = `${MSG_START}
 to: codex-1
 content
 ${MSG_END}`
-    expect(parseMessages(text)).toEqual([])
+    expect(parseMessages(text)).toEqual([{ target: 'codex-1', content: 'content' }])
+  })
+
+  it('lets an unfenced bare marker quoted mid-body truncate its own message', () => {
+    // The price of the rule above, kept explicit. Forwarded content cannot do
+    // this — sanitizeMessageContent breaks every marker token it carries — so
+    // this needs an agent writing a bare marker into its own prose, unfenced.
+    // The same hazard has always applied to the same-line form.
+    const text = `${MSG_START} to: codex-1
+before
+${MSG_START}
+after
+${MSG_END}`
+    expect(parseMessages(text)).toEqual([{ target: 'codex-1', content: 'before' }])
   })
 
   it('drops blocks with empty target or empty content', () => {
@@ -587,5 +607,147 @@ describe('pushCooldownMs', () => {
   })
   it('keeps the quick retry well under the long one', () => {
     expect(PUSH_RETRY_COOLDOWN_MS).toBeLessThan(PUSH_COOLDOWN_MS)
+  })
+})
+
+describe('parseMessages with the marker alone on its line', () => {
+  it('reads `to:` from the line directly below a bare marker', () => {
+    const text = `${MSG_START}
+to: codex-1
+第一行
+第二行
+${MSG_END}`
+    expect(parseMessages(text)).toEqual([{ target: 'codex-1', content: '第一行\n第二行' }])
+  })
+
+  it('reads a `re:` field off that same line', () => {
+    const text = `${MSG_START}
+to: codex-1 re: abc123:7
+done
+${MSG_END}`
+    expect(parseMessages(text)).toEqual([
+      { target: 'codex-1', content: 'done', replyTo: 'abc123:7' },
+    ])
+  })
+
+  it('accepts an indented `to:` under a bare marker', () => {
+    const text = `${MSG_START}
+   to: codex-1
+done
+${MSG_END}`
+    expect(parseMessages(text)).toEqual([{ target: 'codex-1', content: 'done' }])
+  })
+
+  it('drops a bare marker that names no target', () => {
+    const text = `${MSG_START}
+just some prose
+${MSG_END}`
+    expect(parseMessages(text)).toEqual([])
+  })
+
+  it('keeps a later well-formed block when an earlier bare marker is targetless', () => {
+    const text = `${MSG_START}
+prose, not a target
+${MSG_START} to: b-2
+hi b
+${MSG_END}`
+    expect(parseMessages(text)).toEqual([{ target: 'b-2', content: 'hi b' }])
+  })
+
+  it('still ignores a bare marker inside a fenced code block', () => {
+    const text = ['```', MSG_START, 'to: codex-1', 'nope', MSG_END, '```'].join('\n')
+    expect(parseMessages(text)).toEqual([])
+  })
+
+  it('leaves a body line that merely looks like a `to:` field as content', () => {
+    const text = `${MSG_START} to: codex-1
+to: someone else
+body
+${MSG_END}`
+    expect(parseMessages(text)).toEqual([
+      { target: 'codex-1', content: 'to: someone else\nbody' },
+    ])
+  })
+})
+
+describe('hasUnparsedMessageAttempt', () => {
+  it('is false for a turn with no marker at all', () => {
+    expect(hasUnparsedMessageAttempt('just a normal answer')).toBe(false)
+    expect(hasUnparsedMessageAttempt('')).toBe(false)
+  })
+
+  it('is true for a marker line that produced no block', () => {
+    const text = `${MSG_START} to:
+no target above`
+    expect(parseMessages(text)).toEqual([])
+    expect(hasUnparsedMessageAttempt(text)).toBe(true)
+  })
+
+  it('is false when the only marker sits inside a fence', () => {
+    const text = ['```', `${MSG_START} to: codex-1`, 'nope', MSG_END, '```'].join('\n')
+    expect(hasUnparsedMessageAttempt(text)).toBe(false)
+  })
+
+  it('does not fire on the reply hint, which keeps the marker mid-line', () => {
+    const hint = renderEnvelope('codex-1', 'hello', { correlationId: 'k1' })
+    expect(hasUnparsedMessageAttempt(hint)).toBe(false)
+  })
+
+  it('does not fire on the spawn kickoff hint either', () => {
+    expect(hasUnparsedMessageAttempt(renderSpawnKickoff('do it', 'parent-1'))).toBe(false)
+  })
+})
+
+describe('renderFormatNotice', () => {
+  it('leads with the format prefix so it reads as a Navide notice', () => {
+    expect(renderFormatNotice().startsWith(MSG_FORMAT_PREFIX)).toBe(true)
+  })
+
+  it('cannot re-trigger the parser when injected back', () => {
+    expect(parseMessages(renderFormatNotice())).toEqual([])
+    expect(hasUnparsedMessageAttempt(renderFormatNotice())).toBe(false)
+  })
+
+  it('is recognized as Navide-injected text', () => {
+    expect(isInjectedMessageText(renderFormatNotice())).toBe(true)
+  })
+})
+
+describe('renderFallbackReport', () => {
+  it('labels the turn as a stand-in, not the pane\'s own report', () => {
+    const out = renderFallbackReport('分析完成，結論是 A 比 B 快兩倍。')
+    expect(out.startsWith(MSG_FALLBACK_PREFIX)).toBe(true)
+    expect(out).toContain('分析完成，結論是 A 比 B 快兩倍。')
+  })
+
+  it('returns nothing for a turn with nothing worth forwarding', () => {
+    expect(renderFallbackReport('')).toBe('')
+    expect(renderFallbackReport('   \n\n  ')).toBe('')
+  })
+
+  it('keeps the tail when a turn runs long, because that is where a report ends', () => {
+    const long = 'x'.repeat(2000) + 'CONCLUSION'
+    const out = renderFallbackReport(long)
+    expect(out).toContain('CONCLUSION')
+    expect(out).toContain('…')
+    expect(Array.from(out).length).toBeLessThan(Array.from(long).length)
+  })
+
+  it('does not cut a surrogate pair in half', () => {
+    const out = renderFallbackReport('🙂'.repeat(2000))
+    expect(out).not.toContain('\uFFFD')
+    expect(out.includes('\uD83D') && !out.includes('🙂')).toBe(false)
+  })
+
+  it('defuses markers carried in the forwarded turn', () => {
+    // The turn is forwarded verbatim into another pane; a live marker inside it
+    // would re-open a block there.
+    const out = renderFallbackReport(`結果如下\n${MSG_START} to: someone\nhijack\n${MSG_END}`)
+    expect(parseMessages(out)).toEqual([])
+    expect(hasUnparsedMessageAttempt(out)).toBe(false)
+  })
+
+  it('is recognized as Navide-injected text', () => {
+    expect(isInjectedMessageText(renderFallbackReport('done'))).toBe(true)
   })
 })

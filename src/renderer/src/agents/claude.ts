@@ -47,8 +47,16 @@ export const SPEC = {
   //
   // This is the idle half of Stop-hook delivery, not a replacement for it: the
   // Stop hook covers a message that arrives while the agent is working, and the
-  // mid-turn hold below leaves that where it belongs.
+  // push gate keeps this channel out of mid-turn even though acceptsMidTurnInput
+  // lifts that hold for the typed path (see pushTargetForMessaging).
   pushChannel: { kind: 'rewake', holdsInputBox: false },
+  // Measured against the running CLI: text written to its PTY during a turn is
+  // queued by Claude itself and picked up at the next boundary — the same path
+  // a person typing mid-turn uses, and it lands the same way. Holding messages
+  // back until the pane fell idle was what made a reply from a busy pane take
+  // 78s where the other direction took 2s; the queue this lifts into is the
+  // CLI's own, so nothing is racing the turn in flight.
+  acceptsMidTurnInput: true,
   // Claude has a Notification hook, and it stays the authoritative signal —
   // but it cannot cover every box that parks the pane on the user, so the
   // screen is read as well and whichever fires first wins:

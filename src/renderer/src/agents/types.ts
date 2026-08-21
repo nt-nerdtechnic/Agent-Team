@@ -151,6 +151,20 @@ export interface AgentSpec {
      *  typing in can take a message anyway. */
     holdsInputBox?: boolean
   }
+  /** This CLI takes typed input while a turn is still running: the text lands
+   *  in its own queue and is picked up at the next boundary, instead of being
+   *  lost or corrupting the turn in flight. Undefined = it does not, and a
+   *  message waits for the turn to end.
+   *
+   *  Only the turn-boundary holds (`mid-turn`, `settling`) are lifted by this.
+   *  The typing hold is a different question — it protects the person at the
+   *  keyboard, not the agent — and still applies.
+   *
+   *  Declare it per vendor and only from a real measurement. It is not a
+   *  conservatism to be cleaned up: qwen aggregates several queued messages
+   *  into one submission, so delivering mid-turn there merges two senders'
+   *  messages into a single turn (see agents/qwen.ts). */
+  acceptsMidTurnInput?: boolean
   /** Recognizes a saved command as this vendor's resume invocation (so a
    *  restore doesn't replay it as a user-custom base command). Undefined =
    *  the generic `<agentKey> --resume <id>` shape. */

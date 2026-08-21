@@ -95,6 +95,7 @@ Plan ウィンドウが Plan を解決する際の基準と同じものです。
 | `cli_send` | `to`, `text`, `wait_for_delivery_s=0`（上限 120） | 別の Pane が Idle になった時点で指示を配信（Busy なら Queue に保留）。`msg_key` を返し、待機を指定した場合はその結末も返す |
 | `cli_check_message` | `msg_key` | 一つの `cli_send` の結末: `{status, target, age_seconds, reason?, settled_after_s?, hold?, held_for_s?, stale?}` |
 | `cli_inbox_summary` | — | 自分の送信のうち滞留中または失敗しているもの: `{count, messages: [{msg_key, target, status, age_seconds, stale?, reason?, hold?, held_for_s?, excerpt}]}` |
+| `cli_pending_incoming` | `limit=20`（上限 200） | **CLI Pane 専用。** *自分宛*に Queue され、まだ入っていないもの: `{count, messages: [{uid, sender, status, age_seconds, kind?, excerpt}]}` |
 | `cli_send_and_wait` | `to`, `text`, `timeout_s=60`（上限 120） | `cli_send` に加えてその Turn の完了まで待機。`cli_wait_idle` の結果に `{ok, target, msg_key}` を付けて返す |
 | `cli_open_agent` | `agent`, `name`, `task`, `workspace_path`（Pane 以外の呼び出し元では必須） | Task 付きで新しい CLI Pane を Spawn。`{ok, name, address}` を返し、Spawn が Advisory の閾値を越えた場合は `advisories` も返す |
 
@@ -166,6 +167,23 @@ Timeout した `cli_send` の待機に現れ、メッセージが決着したあ
 1 時間保持し、Backend の再起動で失われます。未知の `msg_key` は
 `{ok: false, error}` を返し、これは「もう追跡していない」という意味であって
 「一度も送っていない」という意味ではありません。
+
+`cli_pending_incoming` はその鏡像です。*自分宛*に Queue されているものを古い順に返し、
+`status` は `queued` か `delivering`、Agent ではなく Navide が書いたメッセージには
+`notice` または `fallback` の `kind` が付きます。**これは本節で唯一、外部 Client が
+使えないツールです。** ここにある他のすべては Pane に*対して*働きかけますが、これは
+呼び出し元自身の Inbox を尋ねるものであり、Inbox を持つのは CLI Pane だけです。Host や
+外部の呼び出し元には宛先になれる Messaging 名がないため、この呼び出しは空のリストでは
+なく `{ok: false, error}` を返します。自分を宛先にできるものが存在しない以上、自分を
+待っているものも存在しません。外部から同じ景色を得たい Client は、`cli_list_targets`
+で Pane の `hold_reason` を読むか、`cli_check_message` / `cli_inbox_summary` で自分の
+送信を追ってください。
+
+上の送信テーブルと違い、こちらは永続化されたメッセージ Log を読むため、Backend の
+再起動を越えて残ります。制限が 2 つあります。Log はメッセージが Queue に入った少し後に
+受信側の Window が書き込むため、直前の 1 秒間に送られたものはまだ載っていないことが
+あります。またメッセージはその Pane の**現在の** Messaging 名で照合されるため、その後
+に改名して離れた名前宛に Queue されているものは返りません。
 
 `cli_send_and_wait` は、手動の `cli_send` + `cli_wait_idle` の組み合わせが負ける
 競合を処理します。送信した瞬間に対象が Idle であるため、素の待機はメッセージを

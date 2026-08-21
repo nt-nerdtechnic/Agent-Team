@@ -462,3 +462,68 @@ def test_reopening_an_upgraded_database_does_not_rerun_the_column_step(tmp_path)
 
     assert db.schema_version("agent_message_log") == 4
     assert [r["kind"] for r in reopened.tail()] == ["notice"]
+
+
+# ── pending_incoming: the recipient's view of the queue ─────────────────────
+
+
+def test_pending_incoming_returns_only_undelivered_messages_for_that_recipient(log):
+    log.append(
+        [
+            _row("a", 1000, recipient="me", status="queued"),
+            _row("b", 2000, recipient="me", status="delivering"),
+            _row("c", 3000, recipient="me", status="delivered"),
+            _row("d", 4000, recipient="me", status="failed"),
+            _row("e", 5000, recipient="someone-else", status="queued"),
+        ]
+    )
+    assert [r["uid"] for r in log.pending_incoming("me")] == ["a", "b"]
+
+
+def test_pending_incoming_is_oldest_first(log):
+    log.append(
+        [
+            _row("old", 1000, recipient="me", status="queued"),
+            _row("new", 9000, recipient="me", status="queued"),
+        ]
+    )
+    assert [r["uid"] for r in log.pending_incoming("me")] == ["old", "new"]
+
+
+def test_pending_incoming_limit_keeps_the_newest(log):
+    log.append([_row(str(i), 1000 + i, recipient="me", status="queued") for i in range(5)])
+    assert [r["uid"] for r in log.pending_incoming("me", limit=2)] == ["3", "4"]
+
+
+def test_pending_incoming_matches_the_name_exactly(log):
+    # A pane renamed since a message was queued reports nothing rather than
+    # someone else's mail.
+    log.append([_row("a", 1000, recipient="reviewer", status="queued")])
+    assert log.pending_incoming("review") == []
+    assert log.pending_incoming("reviewer-2") == []
+    assert [r["uid"] for r in log.pending_incoming("reviewer")] == ["a"]
+
+
+def test_pending_incoming_carries_the_kind_through(log):
+    log.append(
+        [
+            _row("n", 1000, recipient="me", status="queued", kind="notice"),
+            _row("f", 2000, recipient="me", status="queued", kind="fallback"),
+            _row("p", 3000, recipient="me", status="queued"),
+        ]
+    )
+    rows = {r["uid"]: r["kind"] for r in log.pending_incoming("me")}
+    assert rows == {"n": "notice", "f": "fallback", "p": None}
+
+
+def test_pending_incoming_ignores_an_empty_recipient(log):
+    log.append([_row("a", 1000, recipient="", status="queued")])
+    assert log.pending_incoming("") == []
+
+
+def test_pending_incoming_survives_a_broken_database(tmp_path):
+    broken = AgentMessageLog(db=Database(tmp_path / "navide.db"))
+    broken.append([_row("a", 1000, recipient="me", status="queued")])
+    with broken._db.transaction() as cur:
+        cur.execute("DROP TABLE agent_message_log")
+    assert broken.pending_incoming("me") == []

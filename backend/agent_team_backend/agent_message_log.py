@@ -47,7 +47,12 @@ _TRUNCATION_MARKER = "…[truncated]"
 _STATUSES = ("queued", "delivering", "delivered", "failed", "cancelled")
 # Message kinds Navide writes itself. NULL means an ordinary agent-sent message,
 # which is what every row written before this column existed is.
-_KINDS = ("notice",)
+#
+# "fallback" is a spawned pane's turn forwarded by Navide because the pane ended
+# it without writing the report it was asked for. Unlike a notice it is an
+# ordinary message in every other respect — it has a real sender and can be
+# resent — so only the label is Navide's.
+_KINDS = ("notice", "fallback")
 # Mirrors the frontend's clearMessageLog rule: in-flight messages survive.
 DEFAULT_KEEP_STATUSES = ("queued", "delivering")
 
@@ -354,6 +359,40 @@ class AgentMessageLog:
                 return 0
 
     # ───────────────────────── Reading ──────────────────────────────
+    def pending_incoming(self, recipient: str, limit: int = MAX_ROWS) -> list[dict[str, Any]]:
+        """Messages addressed to `recipient` that have not been delivered yet.
+
+        The recipient's view of the queue, which nothing else here offers: every
+        other read is the sender's. An agent deep in its own work is exactly the
+        one that cannot be typed into, so "is anything waiting for me?" had no
+        answer at all — the queue itself lives in the receiving window's memory,
+        and this table was only ever read back as one flat tail.
+
+        Matched on the recipient's messaging name, which is what the renderer
+        wrote: a pane renamed since a message was queued stops matching it, and
+        reports nothing rather than someone else's mail.
+
+        "delivering" counts as pending on purpose — it means the injection is in
+        flight, not that it landed.
+        """
+        recipient = str(recipient or "")
+        if not recipient:
+            return []
+        limit = max(1, min(int(limit), MAX_ROWS))
+        with self._lock:
+            try:
+                with self._db.transaction() as cur:
+                    found = cur.execute(
+                        f"SELECT {', '.join(_COLUMNS)} FROM agent_message_log"
+                        " WHERE recipient = ? AND status IN ('queued', 'delivering')"
+                        " ORDER BY created_at DESC, seq DESC LIMIT ?",
+                        (recipient, limit),
+                    ).fetchall()
+            except sqlite3.Error as err:
+                log.warning("agent message log pending read failed: %s", err)
+                return []
+        return [dict(row) for row in reversed(found)]
+
     def tail(self, limit: int = MAX_ROWS) -> list[dict[str, Any]]:
         """The most recent rows, newest last — the renderer's array order.
 

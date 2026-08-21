@@ -6,6 +6,12 @@
 //   <content, any number of lines>
 //   ---MSG-END---
 //
+// The `to:` field is also accepted on the line directly below a marker that
+// sits alone on its own line. Both hints tell agents to keep the two together,
+// but "the marker must be a whole line" reads just as easily as "the marker
+// gets a line to itself", and a block split that way used to parse as nothing
+// at all — see parseMessages().
+//
 // `re:` is optional and carries back the correlation id the envelope handed
 // out, which is what links a reply to the request it answers. Agents that never
 // echo it (and every message written before it existed) still parse.
@@ -36,6 +42,14 @@ export const MSG_SPAWN_FAILED_PREFIX = `${MSG_INJECTED_PREFIX} spawn failed`
  *  from "failed" because the two call for opposite responses: retrying a failed
  *  spawn is right, retrying this one collides with the pane already open. */
 export const MSG_SPAWN_PARTIAL_PREFIX = `${MSG_INJECTED_PREFIX} spawn partial`
+/** A turn that opened a message block Navide could not read. Its own prefix
+ *  because it reports a failure with no message attached to it: nothing was
+ *  queued, so there is nothing to retry or cancel — only a turn to rewrite. */
+export const MSG_FORMAT_PREFIX = `${MSG_INJECTED_PREFIX} message not recognized`
+/** A spawned pane's turn that ended without the report it was asked for,
+ *  forwarded by Navide in its place. Its own prefix because the parent must be
+ *  able to tell a stand-in from the child's own words before acting on it. */
+export const MSG_FALLBACK_PREFIX = `${MSG_INJECTED_PREFIX} fallback report`
 
 /** True when a turn's text is something Navide injected rather than something
  *  the agent wrote — a CLI reader echoes an injection back as a user record,
@@ -67,6 +81,16 @@ export interface ParsedAgentMessage {
 // `re:` is split off the target lazily, and only when whitespace precedes it, so
 // a handle that merely contains "re" keeps its whole name as the target.
 const START_RE = /^---MSG-START---\s*to\s*:\s*(.*?)(?:\s+re\s*:\s*(\S+))?\s*$/
+/** The marker alone on its line — the `to:` field is then read from the line
+ *  directly below it. */
+const START_BARE_RE = /^---MSG-START---\s*$/
+/** A `to:` field standing on its own line. Only ever applied to the line
+ *  directly after a bare marker, so a message body that happens to open with
+ *  "to: someone" keeps that line as content. */
+const TO_LINE_RE = /^\s*to\s*:\s*(.*?)(?:\s+re\s*:\s*(\S+))?\s*$/
+/** Any line that opens a message block, in either accepted form. Used to tell
+ *  "wrote nothing" apart from "wrote something unreadable". */
+const START_ANY_RE = /^---MSG-START---/
 const END_RE = /^---MSG-END---\s*$/
 const FENCE_RE = /^\s*(```|~~~)/
 // Any ---UPPER-CASE--- control-marker token, wherever it appears in a line.
@@ -75,6 +99,7 @@ const MARKER_TOKEN_RE = /-{3}([A-Z][A-Z0-9-]*)-{3}/g
 /**
  * Extract messaging blocks from one turn's assistant text.
  * - Markers must sit on bare lines (no leading whitespace).
+ * - `to:` may share the marker's line or stand on the line directly below it.
  * - Content inside fenced code blocks (``` / ~~~) is ignored.
  * - Tolerant of a missing MSG-END: the block closes at the next MSG-START or
  *   at end of text.
@@ -85,7 +110,14 @@ export function parseMessages(turnText: string): ParsedAgentMessage[] {
   if (!turnText) return out
 
   let inFence = false
-  let current: { target: string; replyTo?: string; lines: string[] } | null = null
+  let current: {
+    target: string
+    replyTo?: string
+    lines: string[]
+    /** Set on a bare marker: the next line is read as the `to:` field rather
+     *  than as content, whatever it turns out to be. */
+    awaitingTo?: boolean
+  } | null = null
 
   const close = (): void => {
     if (!current) return
@@ -99,6 +131,21 @@ export function parseMessages(turnText: string): ParsedAgentMessage[] {
   }
 
   for (const line of turnText.split('\n')) {
+    // Ahead of the fence check: this line is the bare marker's `to:` field, and
+    // it is claimed on position alone. A block that opens and never names a
+    // target keeps target '' and close() drops it, exactly as a malformed
+    // same-line marker always has.
+    if (current?.awaitingTo) {
+      current.awaitingTo = false
+      const to = TO_LINE_RE.exec(line)
+      if (to) {
+        current.target = to[1].trim()
+        if (to[2]) current.replyTo = to[2]
+        continue
+      }
+      // Not a `to:` line — fall through so it is still read as content, or as
+      // whatever marker it turns out to be.
+    }
     if (FENCE_RE.test(line)) {
       inFence = !inFence
       if (current) current.lines.push(line)
@@ -114,6 +161,11 @@ export function parseMessages(turnText: string): ParsedAgentMessage[] {
       current = { target: start[1], replyTo: start[2], lines: [] }
       continue
     }
+    if (START_BARE_RE.test(line)) {
+      close()
+      current = { target: '', lines: [], awaitingTo: true }
+      continue
+    }
     if (current) {
       if (END_RE.test(line)) close()
       else current.lines.push(line)
@@ -121,6 +173,43 @@ export function parseMessages(turnText: string): ParsedAgentMessage[] {
   }
   close()
   return out
+}
+
+/**
+ * Whether a turn opened a message block on a bare line outside any fence.
+ *
+ * Paired with an empty parseMessages() result it identifies the one failure
+ * this protocol cannot otherwise report: the agent wrote a block, no block came
+ * out, and because nothing was ever queued there is no log row, no failure
+ * notice, and no symptom on either side — the sender believes it replied and
+ * the recipient simply never hears back. Callers turn the pair into a notice
+ * aimed at the only party that can fix it.
+ *
+ * Deliberately looser than the parser (a leading marker token is enough): the
+ * point is to catch shapes the parser rejects, including ones not yet known.
+ */
+export function hasUnparsedMessageAttempt(turnText: string): boolean {
+  if (!turnText) return false
+  let inFence = false
+  for (const line of turnText.split('\n')) {
+    if (FENCE_RE.test(line)) {
+      inFence = !inFence
+      continue
+    }
+    if (!inFence && START_ANY_RE.test(line)) return true
+  }
+  return false
+}
+
+/** Notice text for {@link hasUnparsedMessageAttempt}: what was wrong and the
+ *  one shape that always works. No excerpt of the attempt — it would carry the
+ *  broken markers back into a pane that is about to write markers again. */
+export function renderFormatNotice(): string {
+  return (
+    `${MSG_FORMAT_PREFIX} — 這個 turn 出現了 ${MSG_START}，但沒有解析出任何訊息，` +
+    `因此沒有送出、也沒有排進佇列。正確格式：第一行 ${MSG_START} to: <對方名稱>，` +
+    `下一行起為內容，最後一行 ${MSG_END}；三行都要頂格，不可縮排，也不可放進 code block。`
+  )
 }
 
 export interface ParsedSpawnRequest {
@@ -340,6 +429,37 @@ export function renderStaleNotice(
 export function renderSpawnNotice(outcome: 'failed' | 'partial', detail: string): string {
   const prefix = outcome === 'failed' ? MSG_SPAWN_FAILED_PREFIX : MSG_SPAWN_PARTIAL_PREFIX
   return `${prefix} — ${sanitizeMessageContent(detail.replace(/\s+/g, ' ').trim())}`
+}
+
+/** How much of a turn a fallback report carries back, counted in code points so
+ *  the cut cannot split a surrogate pair. The tail is kept rather than the
+ *  head: a turn that was going to be a report ends with its conclusion. */
+const FALLBACK_REPORT_CHARS = 1200
+
+/**
+ * Stand-in report for a spawned pane whose turn ended without a message block.
+ *
+ * The parent was promised a report it can wait for, and until now the only
+ * thing standing between that promise and silence was the child agent
+ * remembering a wire format — miss the marker and the parent waits forever with
+ * nothing to see. This degrades that into a delivered message the parent can
+ * read and judge, labelled so it is never mistaken for the child's own report.
+ *
+ * Returns '' when the turn carried nothing worth forwarding, which is the
+ * caller's signal to send nothing at all.
+ */
+export function renderFallbackReport(turnText: string): string {
+  const body = sanitizeMessageContent(turnText.trim())
+  if (!body) return ''
+  const points = Array.from(body)
+  const tail =
+    points.length > FALLBACK_REPORT_CHARS
+      ? `…${points.slice(points.length - FALLBACK_REPORT_CHARS).join('')}`
+      : body
+  return (
+    `${MSG_FALLBACK_PREFIX} — 這個 pane 的 turn 結束時沒有輸出 ${MSG_START} 區塊，` +
+    `以下是它這個 turn 的最後輸出，由 Navide 代為轉交，不是它自己寫的回報：\n\n${tail}`
+  )
 }
 
 /** Smallest free `<agentKey>-<n>` name not present in `taken`. */

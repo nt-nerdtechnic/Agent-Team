@@ -62,10 +62,16 @@ parser, which is what keeps a code sample containing these markers inert.)
 
 Rules the parser applies:
 
-- `to:` must sit on the **same line** as `---MSG-START---`. A marker alone on
-  its own line, with `to:` on the next one, never opens a block — the whole
-  passage is discarded as ordinary text: nothing is queued, no failure notice
-  is sent, and neither side sees any trace of it.
+- `to:` may sit on the **same line** as `---MSG-START---`, or on the line
+  **directly below** a marker that stands alone. Both forms open a block. The
+  hint every delivered message carries teaches the same-line form, and that is
+  the one to write; the other is accepted because "the marker must be a whole
+  line" reads just as easily as "the marker gets a line to itself", and a block
+  written that way used to be discarded as ordinary text with nothing queued,
+  no failure notice, and no trace on either side.
+- A marker Navide *cannot* read is no longer silent either: a turn that opens a
+  block and produces none gets a
+  [format notice](#unrecognized-format-notices) back.
 - The `to:` field takes everything up to the optional `re:` field.
 - A missing `---MSG-END---` is tolerated: the block closes at the next
   `---MSG-START---` or at the end of the turn.
@@ -167,6 +173,57 @@ addressed to another workspace. A sender that is *not* a pane — an external MC
 client — gets no notice, because there is nothing to type it into; it asks
 `cli_inbox_summary` instead, which answers the same question.
 
+### Unrecognized-format notices
+
+A turn that printed `---MSG-START---` on a bare line and produced no block at
+all gets told so, in the pane that wrote it:
+
+```
+[Navide MSG] message not recognized — 這個 turn 出現了 ---MSG-START---，但沒有解析出任何訊息，因此沒有送出、也沒有排進佇列。
+```
+
+This is the one failure the rest of this page cannot report. Everything else
+here describes a message that exists — queued, held, failed — and can therefore
+be reported on. A block that never parsed produced no message: no queue entry,
+no log row, nothing to retry or cancel. The sender saw a normal turn and the
+recipient simply never heard back.
+
+Only the writing pane is told, because it is the only party that knows what the
+turn meant to send. It fires only when the turn produced **no** blocks at all —
+a turn where one block parsed and another did not stays quiet.
+
+### Asking what is waiting for you
+
+Every notice above is typed into a pane, which means it arrives only once that
+pane is between turns. An agent deep in a long piece of work is exactly the one
+that cannot be told anything — and, before `cli_pending_incoming`, had no way
+to ask either. `cli_inbox_summary` answers *"did what I sent get through?"*;
+nothing answered *"is anything waiting for me?"*
+
+```
+cli_pending_incoming()
+→ {ok, count, messages: [{uid, sender, status, age_seconds, kind?, excerpt}]}
+```
+
+Oldest first. `status` is `queued` (waiting for you to be between turns) or
+`delivering` (going in right now). `kind` marks a message Navide wrote rather
+than an agent — `notice` for delivery feedback about your own send, `fallback`
+for a [stand-in report](#spawning-a-pane) from a pane you spawned.
+
+Call it between pieces of your own work when something may be waiting on you —
+after dispatching a task with `cli_open_agent`, or during a long run someone
+might need to interrupt. A non-empty answer is grounds to wrap up the turn you
+are in, which is what lets the message land.
+
+Two limits are worth knowing. The log is written by the receiving window a
+moment after a message is queued, so something sent in the last second may not
+be listed yet. And messages are matched by your **current** messaging name, so
+anything queued for a name you have since been renamed away from is not yours
+to see. Unlike `cli_inbox_summary` this reads the persisted log, so it survives
+a backend restart. Only a CLI pane has an inbox: a host or external caller has
+no messaging name for anything to be addressed to, and gets an error rather
+than an empty list.
+
 ### Spawn feedback notices
 
 A spawn request that does not work out is reported the same way, to the pane
@@ -185,10 +242,10 @@ responses. `spawn failed` means no pane was created — fix the request and try
 again. `spawn partial` means the pane **is** open and only its task never
 landed; spawning it again would collide with the pane already there.
 
-A successful spawn sends nothing: the new pane reports to its parent itself,
-with an ordinary MSG block. That report is the child agent's own output, not a
-guarantee from Navide — it waits in the queue while the parent is mid-turn, and
-never arrives at all if the child does not print the block in the right format.
+A successful spawn sends nothing of its own: the new pane reports to its parent
+itself, with an ordinary MSG block. That report is the child agent's own
+output — but a child that ends its turn without writing one no longer leaves the
+parent with nothing. See [stand-in reports](#stand-in-reports) below.
 
 Both of these are system notices, exactly like a delivery failure — Navide
 wrote them, nothing can address `Navide`, and they should not be replied to.
@@ -216,10 +273,34 @@ thresholds the call still succeeds and the requester is told what it costs. A
 malformed request (unknown agent key, missing or taken name, empty task) comes
 back as a [spawn feedback notice](#spawn-feedback-notices) naming the problem.
 
-The report back is the child's own output, not something Navide guarantees: it
-queues until the parent's turn settles, and a child that ignores the format
-never reports at all. To be sure a spawned pane has finished, check its state
-yourself with `cli_get_status` / `cli_wait_idle`.
+### Stand-in reports
+
+The report back is the child's own output, not something Navide composes. What
+Navide does guarantee is that the parent hears **something**: on the first turn
+the child ends after its task went in, one of two things happens.
+
+- The child addressed its parent — its own report goes, and nothing else does.
+- It did not — that turn's output is forwarded in its place, labelled so it can
+  never be mistaken for the report that was asked for:
+
+```
+[Navide MSG] fallback report — 這個 pane 的 turn 結束時沒有輸出 ---MSG-START--- 區塊，以下是它這個 turn 的最後輸出，由 Navide 代為轉交，不是它自己寫的回報：
+…
+```
+
+Unlike the notices above this is an ordinary message with a real sender — the
+child — so it can be replied to and resent. It carries `kind: fallback` in the
+message log and in `cli_pending_incoming`.
+
+**Once per pane, ever.** The debt is settled by that first turn whichever way it
+goes, so a child that keeps working cannot turn into a stream of reports. A
+broadcast counts as a report, because the parent is one of the panes it reaches.
+Nothing is sent if the parent closed while the child worked, or if the turn
+carried no text worth forwarding. The tail of a long turn is kept rather than
+the head: a turn that was going to be a report ends with its conclusion.
+
+None of this makes the report a completion signal. To be sure a spawned pane has
+finished, check its state yourself with `cli_get_status` / `cli_wait_idle`.
 
 ---
 
@@ -240,6 +321,35 @@ on a permission prompt is deliberately excluded; a pane sitting on a question
 is not. For the vendors whose logs carry no end-of-turn record, "the turn
 ended" is inferred from a long enough silence instead, so those panes accept a
 message a little later than the rest.
+
+**Except where the CLI queues input itself.** The last two conditions — the
+turn having ended, and the ~2s quiet window — exist to wait for a boundary. A
+vendor that declares `acceptsMidTurnInput` supplies that boundary itself: text
+written to it mid-turn lands in the CLI's own queue and is picked up at its next
+turn, the same path a person typing mid-turn uses. For those panes a message
+goes in when it arrives. Today that is `claude` alone, and it must stay a
+measured claim per vendor rather than a default — `qwen` aggregates several
+queued messages into one submission, so delivering mid-turn there would merge
+two senders into a single turn.
+
+This is what closes the gap the direction of a message used to make: a reply
+from a pane that was busy took **78s** where a message into an idle one took
+2s, because the reply waited for the parent to fall idle and the parent never
+did.
+
+Three things are deliberately *not* exempted:
+
+- **The typing hold.** It protects the person at the keyboard, and a
+  half-written line is lost the same way whatever the CLI does with queued
+  input.
+- **The busy state.** The pane still reports itself busy to `cli_wait_idle` and
+  `cli_list_targets` while its turn runs: what a pane will accept and what it is
+  doing are different questions.
+- **Push channels.** The exemption is for the typed path only. claude's rewake
+  hook is the idle half of Stop-hook delivery and mid-turn belongs to the Stop
+  hook, which fires at the turn boundary anyway — so there is no latency to win,
+  and handing an envelope to a waiter parked for some other event would mark it
+  delivered to a CLI that never acted on it. A mid-turn message is typed in.
 
 **Delivery also waits for you.** An injection ends in Enter, so it would submit
 whatever the composer is holding — including a line you are still writing. A
@@ -557,8 +667,8 @@ it would be told about a failure.
 | `busy` / `not-ready` | Target pane is not in a state that accepts input |
 | `starting` | Target pane is still starting up |
 | `typing` | Someone is typing in the target pane |
-| `mid-turn` | Target agent is working |
-| `settling` | Target just went quiet; waiting for it to settle |
+| `mid-turn` | Target agent is working (never reported for a vendor that queues input mid-turn) |
+| `settling` | Target just went quiet; waiting for it to settle (same exemption) |
 | `paused` | Delivery is paused for the window |
 | `gone` | Target pane no longer exists |
 | `remote-ack` | Sent to another window; awaiting its report |
@@ -611,6 +721,8 @@ still never persisted.
 | Push channels: spawn wiring and the transports themselves | `backend/agent_team_backend/push_delivery.py` |
 | Which channel a CLI offers | `backend/agent_team_backend/cli_vendors/<key>.py` (`push_channel`) |
 | Which delivery holds that channel still answers to | `src/renderer/src/agents/<key>.ts` (`pushChannel`) |
+| Whether a CLI queues input mid-turn | `src/renderer/src/agents/<key>.ts` (`acceptsMidTurnInput`) |
+| The recipient's view of the queue | `backend/agent_team_backend/agent_message_log.py` (`pending_incoming`) |
 | The installed hook command, and which event keeps its response | `backend/agent_team_backend/claude_hooks.py` |
 | Delivery outcome and hold, as an MCP caller reads them | `backend/agent_team_backend/plugins/builtin/navide_plans/plan_mcp.py` |
 | The protocol text handed to agents | `src/renderer/src/data/stages.ts` |

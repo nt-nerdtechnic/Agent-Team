@@ -29,7 +29,8 @@ import { agentUsesBracketedPaste, migrateTerminalPtyKey, saveAllScrollSnapshots,
 import { useAgentMessaging, encodeReason, isBroadcastTarget, NOTICE_SENDER } from './composables/useAgentMessaging'
 import type { PushOutcome, RouteResult } from './composables/useAgentMessaging'
 import { createMessageLogPersistence } from './composables/useMessageLogPersistence'
-import { VENDORS_WITHOUT_TURN_END, isInjectedMessageText, isTurnInFlight, normalizeMessagingName, parseMessages, parseSpawns, pushCooldownMs, renderSpawnKickoff, renderSpawnNotice } from './lib/agentMessaging'
+import type { ParsedAgentMessage } from './lib/agentMessaging'
+import { VENDORS_WITHOUT_TURN_END, hasUnparsedMessageAttempt, isInjectedMessageText, isTurnInFlight, normalizeMessagingName, parseMessages, parseSpawns, pushCooldownMs, renderFallbackReport, renderFormatNotice, renderSpawnKickoff, renderSpawnNotice } from './lib/agentMessaging'
 import {
   evaluateTurnSpawns,
   evaluateSpawnRequest,
@@ -851,6 +852,14 @@ interface ActivePane {
    *  only — deliberately NOT persisted: after a restart every pane counts as
    *  root (spawn depth 0) again, accepted for the MVP. */
   spawnedBy?: string
+  /** Messaging handle of the parent this pane owes a report to, and whether
+   *  that report is still outstanding. Set together when a spawn kickoff lands
+   *  and cleared by the first turn that ends — by the pane's own report if it
+   *  wrote one, by a fallback report if it did not. Runtime only, alongside
+   *  spawnedBy: a pane that outlives a restart is nobody's child any more, and
+   *  a report owed to a parent that no longer exists cannot be delivered. */
+  spawnedByName?: string
+  spawnReportPending?: boolean
   roleKey: RoleKey
   stageId: StageId
   /** Human-readable slot label, e.g. "Architecture" or "UI/UX".
@@ -1479,9 +1488,32 @@ function messagingHoldKey(
   return null
 }
 
-/** isPaneIdle() dep. See messagingHoldKey() for the gate itself. */
+/** Whether this pane reports itself busy to the backend registry, and whether
+ *  an unsolicited injection may be typed into it. See messagingHoldKey() for
+ *  the gate itself. Deliberately NOT the delivery gate — see deliveryHoldKey.
+ */
 function isPaneIdleForMessaging(paneId: string): boolean {
   return messagingHoldKey(paneId) === null
+}
+
+/** The gate a *message* passes, which is messagingHoldKey() minus the two
+ *  turn-boundary holds for a CLI that queues input mid-turn.
+ *
+ *  Kept apart from messagingHoldKey() because that answer has two other
+ *  consumers who need the unexempted one: the busy state mirrored into the
+ *  backend registry (a mid-turn pane is busy, whatever it will accept — that is
+ *  what cli_wait_idle and cli_list_targets report), and the continue button
+ *  (which types into the composer, so it must never land mid-turn).
+ *
+ *  `typing` is never lifted here: it protects the person at the keyboard, and a
+ *  half-written line is lost the same way whatever the CLI does with queued
+ *  input. */
+function deliveryHoldKey(paneId: string, opts: { ignoreTyping?: boolean } = {}): string | null {
+  const key = messagingHoldKey(paneId, opts)
+  if (key !== 'mid-turn' && key !== 'settling') return key
+  const agentKey = panes.value.find((p) => p.id === paneId)?.agentKey
+  const spec = agentSpecs.find((s) => s.agentKey === agentKey)
+  return spec?.acceptsMidTurnInput === true ? null : key
 }
 
 /** Panes whose CLI currently has a push channel, by the backend's kind label.
@@ -1504,6 +1536,12 @@ function pushTargetForMessaging(paneId: string): { kind: string } | null {
     : undefined
   if (!channel) return null
   if ((pushCooldownUntil.get(paneId) ?? 0) > Date.now()) return null
+  // messagingHoldKey, not deliveryHoldKey: a push channel is not the typed
+  // path and does not inherit its mid-turn exemption. claude's rewake hook is
+  // the idle half of Stop-hook delivery — mid-turn belongs to the Stop hook,
+  // which fires at the turn boundary anyway. Handing an envelope to a waiter
+  // parked for some other event would mark it delivered to a CLI that never
+  // acted on it; a mid-turn message is typed in instead.
   if (messagingHoldKey(paneId, { ignoreTyping: !channel.holdsInputBox }) !== null) return null
   return { kind }
 }
@@ -1537,6 +1575,38 @@ async function pushDeliverAgentMessage(paneId: string, text: string): Promise<Pu
 // blocks — the hook and the watcher can deliver the same turn twice.
 const paneMsgProcessedAt = new Map<string, number>()
 
+/** Close out the report a spawned pane owes its parent, on the first turn that
+ *  ends after its task went in.
+ *
+ *  cli_open_agent tells the caller the new pane will report back. Nothing
+ *  enforced that: the report is the child's own output, so a missed marker made
+ *  it vanish and left the parent waiting on something that would never arrive.
+ *  One turn, one outcome — the child's own report if it addressed the parent,
+ *  otherwise that turn's output forwarded under a fallback label. Either way
+ *  the debt is settled once and never fires again, so a child that keeps
+ *  working cannot turn into a stream of reports.
+ */
+function settleSpawnReport(
+  paneId: string,
+  senderName: string,
+  text: string,
+  parsed: ParsedAgentMessage[],
+): void {
+  const pane = panes.value.find((p) => p.id === paneId)
+  const parentName = pane?.spawnedByName
+  if (!pane?.spawnReportPending || !parentName) return
+  pane.spawnReportPending = false
+  // It reported itself — nothing to stand in for. Broadcasts count: the parent
+  // is one of the panes a broadcast reaches.
+  if (parsed.some((m) => isBroadcastTarget(m.target) || m.target === parentName)) return
+  // The parent may have closed while the child worked; there is nowhere to send
+  // and no failure worth reporting to a pane that did not ask for this.
+  if (!panes.value.some((p) => p.messagingName === parentName)) return
+  const report = renderFallbackReport(text)
+  if (!report) return
+  messaging.sendMessage(senderName, parentName, report, { kind: 'fallback' })
+}
+
 function onTurnCompleteForMessaging(paneId: string, text: string, timestamp: string): void {
   const senderName = panes.value.find((p) => p.id === paneId)?.messagingName
   if (senderName && text && !isReplayedTurnComplete(timestamp, Date.now(), TURN_TEXT_REPLAY_TOLERANCE_MS)) {
@@ -1544,7 +1614,16 @@ function onTurnCompleteForMessaging(paneId: string, text: string, timestamp: str
     const fresh = Number.isNaN(eventMs) || eventMs > (paneMsgProcessedAt.get(paneId) ?? 0)
     if (fresh) {
       if (!Number.isNaN(eventMs)) paneMsgProcessedAt.set(paneId, eventMs)
-      for (const msg of parseMessages(text)) {
+      const parsed = parseMessages(text)
+      // A turn that opened a block and produced none is the protocol's one
+      // invisible failure: nothing queued, so no log row and no failure notice
+      // would otherwise exist. Told to the writing pane, which is the only one
+      // that knows what it meant to send. Injected text is excluded — a reader
+      // echoing our own notice back must not answer itself.
+      if (parsed.length === 0 && !isInjectedMessageText(text) && hasUnparsedMessageAttempt(text)) {
+        messaging.sendMessage(NOTICE_SENDER, senderName, renderFormatNotice(), { kind: 'notice' })
+      }
+      for (const msg of parsed) {
         // `replyTo` is the correlation id this agent echoed back from the
         // envelope it is answering; absent for a message that starts a thread.
         if (isBroadcastTarget(msg.target)) {
@@ -1553,6 +1632,7 @@ function onTurnCompleteForMessaging(paneId: string, text: string, timestamp: str
           messaging.sendMessage(senderName, msg.target, msg.content, { replyTo: msg.replyTo })
         }
       }
+      settleSpawnReport(paneId, senderName, text, parsed)
       // Same turn-complete path handles SPAWN blocks (freshness-deduped above,
       // so a turn replayed by both the hook and the watcher spawns only once).
       // Caught rather than left to `void`: every outcome inside is reported to
@@ -1782,7 +1862,20 @@ async function kickoffRequestedPane(
     }
     await waitForQuiet(paneId, 1000, 8000)
     if (!paneAlive(paneId)) return false
-    return await injectPane(paneId, renderSpawnKickoff(task, parentName), 'agent-spawn', true)
+    const kicked = await injectPane(paneId, renderSpawnKickoff(task, parentName), 'agent-spawn', true)
+    // Arm the fallback report only once the task is really in: a kickoff that
+    // never landed leaves a pane with nothing to report on. `parentName` is
+    // only a messaging handle when a live pane answers to it — the MCP path
+    // falls back to a pane id, and a standalone caller passes a workspace path,
+    // neither of which anything can be delivered to.
+    if (kicked && panes.value.some((p) => p.messagingName === parentName)) {
+      const live = panes.value.find((p) => p.id === paneId)
+      if (live) {
+        live.spawnedByName = parentName
+        live.spawnReportPending = true
+      }
+    }
+    return kicked
   } finally {
     const live = panes.value.find((p) => p.id === paneId)
     if (live?.kickoffStatus === 'pending') live.kickoffStatus = 'none'
@@ -2075,8 +2168,8 @@ onMounted(() => {
   messaging.configureMessaging({
     now: () => Date.now(),
     deliver: deliverAgentMessage,
-    isPaneIdle: isPaneIdleForMessaging,
-    idleHoldKey: messagingHoldKey,
+    isPaneIdle: (paneId: string) => deliveryHoldKey(paneId) === null,
+    idleHoldKey: deliveryHoldKey,
     pushTarget: pushTargetForMessaging,
     pushDeliver: pushDeliverAgentMessage,
     routeRemote: routeRemoteMessage,

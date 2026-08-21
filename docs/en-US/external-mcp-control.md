@@ -94,6 +94,7 @@ documents the addresses, the idle gate and the guard rails they share.
 | `cli_send` | `to`, `text`, `wait_for_delivery_s=0` (capped at 120) | Deliver an instruction to another pane once it's idle (queued if busy); returns `msg_key`, and with a wait, what became of it |
 | `cli_check_message` | `msg_key` | What became of one `cli_send`: `{status, target, age_seconds, reason?, settled_after_s?, hold?, held_for_s?, stale?}` |
 | `cli_inbox_summary` | — | Your own sends that are stuck or failed: `{count, messages: [{msg_key, target, status, age_seconds, stale?, reason?, hold?, held_for_s?, excerpt}]}` |
+| `cli_pending_incoming` | `limit=20` (capped at 200) | **CLI panes only.** What is queued *for you* and has not gone in yet: `{count, messages: [{uid, sender, status, age_seconds, kind?, excerpt}]}` |
 | `cli_send_and_wait` | `to`, `text`, `timeout_s=60` (capped at 120) | `cli_send` plus the wait for that turn to finish; returns `cli_wait_idle`'s result plus `{ok, target, msg_key}` |
 | `cli_open_agent` | `agent`, `name`, `task`, `workspace_path` (required for a non-pane caller) | Spawn a new CLI pane with a task; returns `{ok, name, address}`, plus `advisories` when the spawn crossed an advisory threshold |
 
@@ -166,6 +167,25 @@ sitting in a queue.
 That table is backend **memory**, not a log: it holds the last 500 sends for
 one hour and is lost on backend restart. An unknown `msg_key` returns
 `{ok: false, error}` and means "not tracked any more", not "never sent".
+
+`cli_pending_incoming` is its mirror — what is queued *for you*, oldest first,
+with `status` either `queued` or `delivering` and a `kind` of `notice` or
+`fallback` on the messages Navide wrote rather than an agent. **It is the one
+tool in this section an external client cannot use.** Everything else here acts
+*on* a pane; this one asks about the caller's own inbox, and only a CLI pane has
+one: a host or external caller has no messaging name for anything to be
+addressed to, so the call comes back `{ok: false, error}` rather than an empty
+list. Nothing can be addressed to you, so nothing can be waiting for you. An
+external client that wants the same picture from the outside reads a pane's
+`hold_reason` in `cli_list_targets`, or follows its own sends with
+`cli_check_message` / `cli_inbox_summary`.
+
+Unlike the send table above, this one reads the persisted message log, so it
+survives a backend restart. Two limits apply: the log is written by the
+receiving window a moment after a message is queued, so something sent in the
+last second may not be listed yet, and messages are matched by the pane's
+**current** messaging name, so anything queued for a name it has since been
+renamed away from is not returned.
 
 `cli_send_and_wait` handles the race a manual `cli_send` + `cli_wait_idle`
 pair loses to — the target is idle at the moment you send, so a plain wait
