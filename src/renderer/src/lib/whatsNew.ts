@@ -36,6 +36,66 @@ export const WHATS_NEW_CHROME = {
 
 export const WHATS_NEW: WhatsNewEntry[] = [
   {
+    version: '0.1.86',
+    title: {
+      'zh-TW': '階段分頁狀態燈號、⌘W 彈窗關閉優化、剪貼簿貼上防禦與 Dev 正式版隔離',
+      'en-US': 'Stage Tab Status Dots, ⌘W Modal Close, Paste Timeout Defense & Dev/Prod Isolation',
+    },
+    highlights: [
+      {
+        'zh-TW':
+          'StageTabBar 狀態燈號：頂部階段標籤新增彩色動態狀態燈號與 Tooltip，即時匯總該階段所有 Agent 的運行、提問等待或錯誤狀態。',
+        'en-US':
+          'Stage Tab Status Dots: stage tabs show live color status dots and tooltips summarizing running, awaiting question, or error states across all agents in that stage.',
+      },
+      {
+        'zh-TW':
+          '⌘W 彈窗關閉與防誤觸確認：按 ⌘W 優先關閉最上層 Modal 彈窗；關閉閒置 CLI 面板前新增防誤觸確認與「不再詢問」選項。',
+        'en-US':
+          '⌘W Modal Close & Pane Protection: ⌘W prioritizes closing open modals; closing idle panes includes a confirmation dialog with a "Don\'t ask again" option.',
+      },
+      {
+        'zh-TW':
+          '剪貼簿貼上防禦與逾時延長：延長 Paste ACK 逾時至 60 秒，避免 Agent 高負載輸出時誤報貼上遺失，精準區分逾時與真實傳輸中斷。',
+        'en-US':
+          'Paste Timeout Defense: extends paste ACK timeout to 60s to prevent false paste failure warnings during heavy terminal bursts.',
+      },
+      {
+        'zh-TW':
+          'Dev 與正式版全域隔離：Dev 模式主動保護正式版全域 Hooks 與日誌流，避免多實例搶佔端口與背景卡死。',
+        'en-US':
+          'Dev & Production Isolation: dev mode preserves production hooks and bounds startup scans so dev and production can run side-by-side without interference.',
+      },
+      {
+        'zh-TW':
+          'Manifest v2 外掛架構升級：支援 Combined 前後端外掛規範、發布者信任驗證、Shell Broker 與能力授權機制。',
+        'en-US':
+          'Manifest v2 Plugin Architecture: full support for combined frontend/backend plugins, publisher trust validation, and Shell Broker capability grants.',
+      },
+    ],
+  },
+  {
+    version: '0.1.85',
+    title: {
+      'zh-TW': '外掛平台 Manifest v2 升級、發布者信任驗證與 Shell Broker 安全授權',
+      'en-US': 'Manifest v2 Plugin Platform, Publisher Trust & Shell Broker Capability Grants',
+    },
+    highlights: [
+      {
+        'zh-TW':
+          'Manifest v2 外掛架構：支援前後端組合（Combined）與後端專用外掛規範，外掛與主程式版本嚴格解耦。',
+        'en-US':
+          'Manifest v2 Plugin Platform: supports combined frontend/backend plugins and backend-only manifests decoupled from core versions.',
+      },
+      {
+        'zh-TW':
+          '發布者信任與能力授權：引進外掛發布者金鑰簽署與 Shell Broker 權限授權，確保外掛環境執行安全。',
+        'en-US':
+          'Publisher Trust & Capability Grants: introduces publisher signature checks and Shell Broker capability grants for hermetic plugin execution.',
+      },
+    ],
+  },
+  {
     version: '0.1.84',
     title: {
       'zh-TW': 'CLI 互傳訊息：投遞失敗回報、Claude Stop hook 直送、打字時暫緩投遞',
