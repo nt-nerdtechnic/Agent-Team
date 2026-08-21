@@ -376,78 +376,80 @@ class ClaudeLogReader(LogReader):
         high_water = activity_high_water(seen_keys)
         last_line = high_water
 
-        with fh:
-            for line_no, raw in enumerate(fh, 1):
-                raw = raw.strip()
-                if not raw:
-                    continue
-                if line_no <= high_water:
-                    continue
-                last_line = line_no
-                key = f"act:{line_no}"
-                try:
-                    rec = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
+        try:
+            with fh:
+                for line_no, raw in enumerate(fh, 1):
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    if line_no <= high_water:
+                        continue
+                    last_line = line_no
+                    key = f"act:{line_no}"
+                    try:
+                        rec = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
 
-                rtype = rec.get("type")
-                ts = str(rec.get("timestamp") or "")
-                if rtype == "assistant":
-                    msg = rec.get("message") or {}
-                    stop_reason = str(msg.get("stop_reason") or "")
-                    # Mark every assistant line as activity so the watcher
-                    # knows the agent is producing content. Text rides only on
-                    # turn_complete (the sole event the frontend judges), so a
-                    # tool-heavy turn doesn't broadcast its text on every line.
-                    out.append(ActivityEvent(
-                        vendor="claude",
-                        event_type="agent_active",
-                        cwd=cwd, session_id=session_id, file_path=str(path),
-                        dedup_key=key, timestamp=ts,
-                        detail="assistant",
-                    ))
-                    # AskUserQuestion parks the turn on the user without ending
-                    # it, so it produces no turn_complete. Emit a distinct
-                    # detail the frontend can raise QUESTION on; the matching
-                    # tool_result arrives as a plain `user` event and releases
-                    # it. Separate dedup key so it rides alongside the
-                    # `assistant` event above rather than replacing it.
-                    if _asks_user_question(msg):
+                    rtype = rec.get("type")
+                    ts = str(rec.get("timestamp") or "")
+                    if rtype == "assistant":
+                        msg = rec.get("message") or {}
+                        stop_reason = str(msg.get("stop_reason") or "")
+                        # Mark every assistant line as activity so the watcher
+                        # knows the agent is producing content. Text rides only on
+                        # turn_complete (the sole event the frontend judges), so a
+                        # tool-heavy turn doesn't broadcast its text on every line.
                         out.append(ActivityEvent(
                             vendor="claude",
                             event_type="agent_active",
                             cwd=cwd, session_id=session_id, file_path=str(path),
-                            dedup_key=f"q:{line_no}", timestamp=ts,
-                            detail="assistant:question",
+                            dedup_key=key, timestamp=ts,
+                            detail="assistant",
                         ))
-                    # end_turn = clean finish, not a tool_use pause.
-                    if stop_reason == "end_turn":
+                        # AskUserQuestion parks the turn on the user without ending
+                        # it, so it produces no turn_complete. Emit a distinct
+                        # detail the frontend can raise QUESTION on; the matching
+                        # tool_result arrives as a plain `user` event and releases
+                        # it. Separate dedup key so it rides alongside the
+                        # `assistant` event above rather than replacing it.
+                        if _asks_user_question(msg):
+                            out.append(ActivityEvent(
+                                vendor="claude",
+                                event_type="agent_active",
+                                cwd=cwd, session_id=session_id, file_path=str(path),
+                                dedup_key=f"q:{line_no}", timestamp=ts,
+                                detail="assistant:question",
+                            ))
+                        # end_turn = clean finish, not a tool_use pause.
+                        if stop_reason == "end_turn":
+                            out.append(ActivityEvent(
+                                vendor="claude",
+                                event_type="turn_complete",
+                                cwd=cwd, session_id=session_id, file_path=str(path),
+                                dedup_key=f"turn:{line_no}", timestamp=ts,
+                                detail=stop_reason, text=_assistant_text(msg),
+                            ))
+                    elif rtype in ("tool_use", "user"):
+                        # Real human prompts (same test as first_user_prompts:
+                        # plain-string content, non-empty, not a "<...>" wrapper)
+                        # carry their text so the frontend can name the pane.
+                        # tool_result lists / command wrappers stay text-less.
+                        text = ""
+                        if rtype == "user":
+                            msg = rec.get("message")
+                            content = msg.get("content") if isinstance(msg, dict) else None
+                            if isinstance(content, str):
+                                text = user_prompt_text(content)
                         out.append(ActivityEvent(
                             vendor="claude",
-                            event_type="turn_complete",
+                            event_type="agent_active",
                             cwd=cwd, session_id=session_id, file_path=str(path),
-                            dedup_key=f"turn:{line_no}", timestamp=ts,
-                            detail=stop_reason, text=_assistant_text(msg),
+                            dedup_key=key, timestamp=ts,
+                            detail=str(rtype), text=text,
                         ))
-                elif rtype in ("tool_use", "user"):
-                    # Real human prompts (same test as first_user_prompts:
-                    # plain-string content, non-empty, not a "<...>" wrapper)
-                    # carry their text so the frontend can name the pane.
-                    # tool_result lists / command wrappers stay text-less.
-                    text = ""
-                    if rtype == "user":
-                        msg = rec.get("message")
-                        content = msg.get("content") if isinstance(msg, dict) else None
-                        if isinstance(content, str):
-                            text = user_prompt_text(content)
-                    out.append(ActivityEvent(
-                        vendor="claude",
-                        event_type="agent_active",
-                        cwd=cwd, session_id=session_id, file_path=str(path),
-                        dedup_key=key, timestamp=ts,
-                        detail=str(rtype), text=text,
-                    ))
-        set_activity_high_water(seen_keys, last_line)
+        finally:
+            set_activity_high_water(seen_keys, last_line)
         return out
 
 

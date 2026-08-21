@@ -369,82 +369,84 @@ class CodexLogReader(LogReader):
         high_water = activity_high_water(seen_keys)
         last_line = high_water
 
-        with fh:
-            for line_no, raw in enumerate(fh, 1):
-                raw = raw.strip()
-                if not raw:
-                    continue
-                if line_no <= high_water:
-                    continue
-                last_line = line_no
-                key = f"act:{line_no}"
-                try:
-                    rec = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
+        try:
+            with fh:
+                for line_no, raw in enumerate(fh, 1):
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    if line_no <= high_water:
+                        continue
+                    last_line = line_no
+                    key = f"act:{line_no}"
+                    try:
+                        rec = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
 
-                rtype = rec.get("type")
-                if rtype == "session_meta":
-                    payload = rec.get("payload") or {}
-                    if isinstance(payload, dict):
-                        cwd = str(payload.get("cwd") or cwd)
-                    continue
+                    rtype = rec.get("type")
+                    if rtype == "session_meta":
+                        payload = rec.get("payload") or {}
+                        if isinstance(payload, dict):
+                            cwd = str(payload.get("cwd") or cwd)
+                        continue
 
-                ts = str(rec.get("timestamp") or "")
-                if rtype == "assistant":
-                    out.append(ActivityEvent(
-                        vendor="codex", event_type="agent_active",
-                        cwd=cwd, session_id=session_id, file_path=str(path),
-                        dedup_key=key, timestamp=ts, detail="assistant",
-                    ))
-                elif rtype == "response_item":
-                    payload = rec.get("payload") or {}
-                    if (
-                        isinstance(payload, dict)
-                        and payload.get("role") == "assistant"
-                        and payload.get("type") == "message"
-                    ):
-                        text = join_text_blocks(payload.get("content"), "output_text")
-                        if text:
-                            last_text = text
-                            text_changed = True
-                elif rtype == "event_msg":
-                    payload = rec.get("payload") or {}
-                    ptype = str(payload.get("type") or "") if isinstance(payload, dict) else ""
-                    if ptype == "agent_message":
-                        msg_text = str(payload.get("message") or "")
-                        if msg_text:
-                            last_text = msg_text
-                            text_changed = True
-                    # Turn text rides only on turn_complete (the event the
-                    # frontend judges). The one exception: a user_message's
-                    # typed prompt rides on its own agent_active event so the
-                    # frontend can name the pane from the first user text.
-                    # "<...>"-wrapped records are injected instruction/context
-                    # stubs, not typed prompts.
-                    text = ""
-                    if ptype == "user_message":
-                        text = user_prompt_text(str(payload.get("message") or ""))
-                    out.append(ActivityEvent(
-                        vendor="codex", event_type="agent_active",
-                        cwd=cwd, session_id=session_id, file_path=str(path),
-                        dedup_key=key, timestamp=ts, detail=ptype, text=text,
-                    ))
-                    # token_count typically fires once per turn end in Codex.
-                    if ptype == "token_count":
+                    ts = str(rec.get("timestamp") or "")
+                    if rtype == "assistant":
                         out.append(ActivityEvent(
-                            vendor="codex", event_type="turn_complete",
+                            vendor="codex", event_type="agent_active",
                             cwd=cwd, session_id=session_id, file_path=str(path),
-                            dedup_key=f"turn:{line_no}", timestamp=ts,
-                            detail="token_count", text=last_text,
+                            dedup_key=key, timestamp=ts, detail="assistant",
                         ))
-                        # Turn consumed the text; reset so the next turn's
-                        # empty-text boundary can't reuse it.
-                        last_text = ""
-                        text_changed = True
-        set_activity_high_water(seen_keys, last_line)
-        if text_changed:
-            _write_last_text(seen_keys, last_text)
+                    elif rtype == "response_item":
+                        payload = rec.get("payload") or {}
+                        if (
+                            isinstance(payload, dict)
+                            and payload.get("role") == "assistant"
+                            and payload.get("type") == "message"
+                        ):
+                            text = join_text_blocks(payload.get("content"), "output_text")
+                            if text:
+                                last_text = text
+                                text_changed = True
+                    elif rtype == "event_msg":
+                        payload = rec.get("payload") or {}
+                        ptype = str(payload.get("type") or "") if isinstance(payload, dict) else ""
+                        if ptype == "agent_message":
+                            msg_text = str(payload.get("message") or "")
+                            if msg_text:
+                                last_text = msg_text
+                                text_changed = True
+                        # Turn text rides only on turn_complete (the event the
+                        # frontend judges). The one exception: a user_message's
+                        # typed prompt rides on its own agent_active event so the
+                        # frontend can name the pane from the first user text.
+                        # "<...>"-wrapped records are injected instruction/context
+                        # stubs, not typed prompts.
+                        text = ""
+                        if ptype == "user_message":
+                            text = user_prompt_text(str(payload.get("message") or ""))
+                        out.append(ActivityEvent(
+                            vendor="codex", event_type="agent_active",
+                            cwd=cwd, session_id=session_id, file_path=str(path),
+                            dedup_key=key, timestamp=ts, detail=ptype, text=text,
+                        ))
+                        # token_count typically fires once per turn end in Codex.
+                        if ptype == "token_count":
+                            out.append(ActivityEvent(
+                                vendor="codex", event_type="turn_complete",
+                                cwd=cwd, session_id=session_id, file_path=str(path),
+                                dedup_key=f"turn:{line_no}", timestamp=ts,
+                                detail="token_count", text=last_text,
+                            ))
+                            # Turn consumed the text; reset so the next turn's
+                            # empty-text boundary can't reuse it.
+                            last_text = ""
+                            text_changed = True
+        finally:
+            set_activity_high_water(seen_keys, last_line)
+            if text_changed:
+                _write_last_text(seen_keys, last_text)
         return out
 
 

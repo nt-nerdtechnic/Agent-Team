@@ -464,74 +464,76 @@ class PiLogReader(LogReader):
         high_water = activity_high_water(seen_keys)
         last_line = high_water
 
-        with fh:
-            for line_no, raw in enumerate(fh, 1):
-                raw = raw.strip()
-                if not raw:
-                    continue
-                if line_no <= high_water:
-                    continue
-                last_line = line_no
-                key = f"act:{line_no}"
-                try:
-                    rec = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(rec, dict) or rec.get("type") != "message":
-                    continue
-                msg = rec.get("message")
-                role = str(msg.get("role") or "") if isinstance(msg, dict) else ""
-                if role in ("user", "assistant"):
-                    # User message content is either a plain string or text
-                    # blocks; carry it so the frontend can name the pane.
-                    text = ""
-                    entry_ts = str(rec.get("timestamp") or "")
-                    if role == "user":
-                        # A new message closes the previous turn (if open).
-                        if state is not None and not state.get("flushed"):
-                            out.append(_complete(state, "boundary"))
-                            last_text = ""
-                        idx = (int(state["idx"]) + 1) if state is not None else 0
-                        state = {"idx": idx, "flushed": False, "ts": entry_ts}
-                        text = user_prompt_text(
-                            join_text_blocks(msg.get("content"), "text")
-                        )
-                    else:
-                        # An assistant entry with no preceding user message (a
-                        # resumed session joined mid-turn) still opens a turn.
-                        if state is None or state.get("flushed"):
+        try:
+            with fh:
+                for line_no, raw in enumerate(fh, 1):
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    if line_no <= high_water:
+                        continue
+                    last_line = line_no
+                    key = f"act:{line_no}"
+                    try:
+                        rec = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(rec, dict) or rec.get("type") != "message":
+                        continue
+                    msg = rec.get("message")
+                    role = str(msg.get("role") or "") if isinstance(msg, dict) else ""
+                    if role in ("user", "assistant"):
+                        # User message content is either a plain string or text
+                        # blocks; carry it so the frontend can name the pane.
+                        text = ""
+                        entry_ts = str(rec.get("timestamp") or "")
+                        if role == "user":
+                            # A new message closes the previous turn (if open).
+                            if state is not None and not state.get("flushed"):
+                                out.append(_complete(state, "boundary"))
+                                last_text = ""
                             idx = (int(state["idx"]) + 1) if state is not None else 0
                             state = {"idx": idx, "flushed": False, "ts": entry_ts}
-                        state["ts"] = entry_ts
-                        reply = join_text_blocks(msg.get("content"), "text").strip()
-                        if reply:
-                            last_text = _cap_text(reply)
-                    out.append(ActivityEvent(
-                        vendor="pi",
-                        event_type="agent_active",
-                        cwd=cwd, session_id=session_id, file_path=str(path),
-                        dedup_key=key,
-                        timestamp=str(rec.get("timestamp") or ""),
-                        detail=role, text=text,
-                    ))
+                            text = user_prompt_text(
+                                join_text_blocks(msg.get("content"), "text")
+                            )
+                        else:
+                            # An assistant entry with no preceding user message (a
+                            # resumed session joined mid-turn) still opens a turn.
+                            if state is None or state.get("flushed"):
+                                idx = (int(state["idx"]) + 1) if state is not None else 0
+                                state = {"idx": idx, "flushed": False, "ts": entry_ts}
+                            state["ts"] = entry_ts
+                            reply = join_text_blocks(msg.get("content"), "text").strip()
+                            if reply:
+                                last_text = _cap_text(reply)
+                        out.append(ActivityEvent(
+                            vendor="pi",
+                            event_type="agent_active",
+                            cwd=cwd, session_id=session_id, file_path=str(path),
+                            dedup_key=key,
+                            timestamp=str(rec.get("timestamp") or ""),
+                            detail=role, text=text,
+                        ))
 
-            # The latest turn has no following message; flush it once the file
-            # has stopped being written to for long enough to call it finished.
-            if state is not None and not state.get("flushed"):
-                try:
-                    quiet_for = time.time() - path.stat().st_mtime
-                except OSError:
-                    quiet_for = 0.0
-                if quiet_for >= _TURN_IDLE_SECONDS:
-                    out.append(_complete(state, "idle"))
-                    state["flushed"] = True
-                    last_text = ""
+                # The latest turn has no following message; flush it once the file
+                # has stopped being written to for long enough to call it finished.
+                if state is not None and not state.get("flushed"):
+                    try:
+                        quiet_for = time.time() - path.stat().st_mtime
+                    except OSError:
+                        quiet_for = 0.0
+                    if quiet_for >= _TURN_IDLE_SECONDS:
+                        out.append(_complete(state, "idle"))
+                        state["flushed"] = True
+                        last_text = ""
 
-        set_activity_high_water(seen_keys, last_line)
-        _write_sentinel(
-            seen_keys, _STATE_PREFIX, json.dumps(state) if state is not None else ""
-        )
-        _write_sentinel(seen_keys, _TEXT_PREFIX, last_text)
+        finally:
+            set_activity_high_water(seen_keys, last_line)
+            _write_sentinel(
+                seen_keys, _STATE_PREFIX, json.dumps(state) if state is not None else ""
+            )
+            _write_sentinel(seen_keys, _TEXT_PREFIX, last_text)
         return out
 
 

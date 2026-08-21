@@ -341,84 +341,86 @@ class KimiLogReader(LogReader):
         high_water = activity_high_water(seen_keys)
         last_line = high_water
 
-        with fh:
-            for line_no, raw in enumerate(fh, 1):
-                raw = raw.strip()
-                if not raw:
-                    continue
-                if line_no <= high_water:
-                    continue
-                last_line = line_no
-                key = f"act:{line_no}"
-                try:
-                    rec = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
+        try:
+            with fh:
+                for line_no, raw in enumerate(fh, 1):
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    if line_no <= high_water:
+                        continue
+                    last_line = line_no
+                    key = f"act:{line_no}"
+                    try:
+                        rec = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
 
-                rtype = rec.get("type")
-                ts = _ts(rec.get("time"))
-                tms = _int(rec.get("time"))
-                if rtype == "turn.prompt":
-                    # A new prompt closes the previous turn (if still open).
-                    if state is not None and not state.get("flushed"):
-                        out.append(_complete(
-                            int(state["idx"]), int(state.get("last_ms") or 0),
-                            "boundary",
+                    rtype = rec.get("type")
+                    ts = _ts(rec.get("time"))
+                    tms = _int(rec.get("time"))
+                    if rtype == "turn.prompt":
+                        # A new prompt closes the previous turn (if still open).
+                        if state is not None and not state.get("flushed"):
+                            out.append(_complete(
+                                int(state["idx"]), int(state.get("last_ms") or 0),
+                                "boundary",
+                            ))
+                            last_text = ""
+                        idx = (int(state["idx"]) + 1) if state is not None else 0
+                        state = {"idx": idx, "last_ms": tms, "flushed": False}
+                        # The prompt's text blocks carry the user's words; the
+                        # frontend names the pane from the first user text.
+                        out.append(ActivityEvent(
+                            vendor="kimi", event_type="agent_active",
+                            cwd=cwd, session_id=session_id, file_path=str(path),
+                            dedup_key=key, timestamp=ts, detail="prompt",
+                            text=user_prompt_text(join_text_blocks(rec.get("input"), "text")),
                         ))
-                        last_text = ""
-                    idx = (int(state["idx"]) + 1) if state is not None else 0
-                    state = {"idx": idx, "last_ms": tms, "flushed": False}
-                    # The prompt's text blocks carry the user's words; the
-                    # frontend names the pane from the first user text.
-                    out.append(ActivityEvent(
-                        vendor="kimi", event_type="agent_active",
-                        cwd=cwd, session_id=session_id, file_path=str(path),
-                        dedup_key=key, timestamp=ts, detail="prompt",
-                        text=user_prompt_text(join_text_blocks(rec.get("input"), "text")),
-                    ))
-                elif rtype == "usage.record":
-                    if state is not None:
-                        state["last_ms"] = max(int(state.get("last_ms") or 0), tms)
-                    out.append(ActivityEvent(
-                        vendor="kimi", event_type="agent_active",
-                        cwd=cwd, session_id=session_id, file_path=str(path),
-                        dedup_key=key, timestamp=ts, detail="usage",
-                    ))
-                elif rtype == "context.append_loop_event":
-                    # The assistant's visible reply: content.part carries both
-                    # `think` and `text` parts, and only the latter is what the
-                    # user (and the messaging protocol) sees. Later parts in a
-                    # turn replace earlier ones — the closing part is the reply.
-                    event = rec.get("event")
-                    if isinstance(event, dict) and event.get("type") == "content.part":
-                        part = event.get("part")
-                        if isinstance(part, dict) and part.get("type") == "text":
-                            text = str(part.get("text") or "").strip()
-                            if text:
-                                last_text = _cap_text(text)
-                elif rtype == "turn.cancel":
-                    if state is not None and not state.get("flushed"):
+                    elif rtype == "usage.record":
+                        if state is not None:
+                            state["last_ms"] = max(int(state.get("last_ms") or 0), tms)
+                        out.append(ActivityEvent(
+                            vendor="kimi", event_type="agent_active",
+                            cwd=cwd, session_id=session_id, file_path=str(path),
+                            dedup_key=key, timestamp=ts, detail="usage",
+                        ))
+                    elif rtype == "context.append_loop_event":
+                        # The assistant's visible reply: content.part carries both
+                        # `think` and `text` parts, and only the latter is what the
+                        # user (and the messaging protocol) sees. Later parts in a
+                        # turn replace earlier ones — the closing part is the reply.
+                        event = rec.get("event")
+                        if isinstance(event, dict) and event.get("type") == "content.part":
+                            part = event.get("part")
+                            if isinstance(part, dict) and part.get("type") == "text":
+                                text = str(part.get("text") or "").strip()
+                                if text:
+                                    last_text = _cap_text(text)
+                    elif rtype == "turn.cancel":
+                        if state is not None and not state.get("flushed"):
+                            out.append(_complete(
+                                int(state["idx"]),
+                                max(int(state.get("last_ms") or 0), tms), "cancel",
+                            ))
+                            state["flushed"] = True
+                            last_text = ""
+
+                # The latest (still-open) turn has no following prompt; flush it once
+                # the file has gone quiet long enough to treat the turn as finished.
+                if state is not None and not state.get("flushed"):
+                    now_ms = int(time.time() * 1000)
+                    if now_ms - int(state.get("last_ms") or 0) >= _TURN_IDLE_MS:
                         out.append(_complete(
-                            int(state["idx"]),
-                            max(int(state.get("last_ms") or 0), tms), "cancel",
+                            int(state["idx"]), int(state.get("last_ms") or 0), "idle",
                         ))
                         state["flushed"] = True
                         last_text = ""
 
-            # The latest (still-open) turn has no following prompt; flush it once
-            # the file has gone quiet long enough to treat the turn as finished.
-            if state is not None and not state.get("flushed"):
-                now_ms = int(time.time() * 1000)
-                if now_ms - int(state.get("last_ms") or 0) >= _TURN_IDLE_MS:
-                    out.append(_complete(
-                        int(state["idx"]), int(state.get("last_ms") or 0), "idle",
-                    ))
-                    state["flushed"] = True
-                    last_text = ""
-
-        set_activity_high_water(seen_keys, last_line)
-        _write_turn_state(seen_keys, state)
-        _write_last_text(seen_keys, last_text)
+        finally:
+            set_activity_high_water(seen_keys, last_line)
+            _write_turn_state(seen_keys, state)
+            _write_last_text(seen_keys, last_text)
         return out
 
 

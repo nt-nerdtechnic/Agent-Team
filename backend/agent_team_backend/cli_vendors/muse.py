@@ -553,67 +553,69 @@ class MuseLogReader(LogReader):
         high_water = activity_high_water(seen_keys)
         last_line = high_water
 
-        with fh:
-            for line_no, raw in enumerate(fh, 1):
-                raw = raw.strip()
-                if not raw:
-                    continue
-                if line_no <= high_water:
-                    continue
-                last_line = line_no
-                key = f"act:{line_no}"
-                try:
-                    rec = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(rec, dict):
-                    continue
-                ts = _iso_from_micros(rec.get("recorded_at"))
+        try:
+            with fh:
+                for line_no, raw in enumerate(fh, 1):
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    if line_no <= high_water:
+                        continue
+                    last_line = line_no
+                    key = f"act:{line_no}"
+                    try:
+                        rec = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(rec, dict):
+                        continue
+                    ts = _iso_from_micros(rec.get("recorded_at"))
 
-                prompt = _turn_prompt(rec)
-                if prompt is not None:
-                    # detail="user" is part of the cross-end contract: the
-                    # frontend names a pane from the first user-prompt event.
-                    out.append(ActivityEvent(
-                        vendor="muse", event_type="agent_active",
-                        cwd=cwd, session_id=session_id, file_path=str(path),
-                        dedup_key=key, timestamp=ts, detail="user",
-                        text=user_prompt_text(prompt),
-                    ))
-                    continue
+                    prompt = _turn_prompt(rec)
+                    if prompt is not None:
+                        # detail="user" is part of the cross-end contract: the
+                        # frontend names a pane from the first user-prompt event.
+                        out.append(ActivityEvent(
+                            vendor="muse", event_type="agent_active",
+                            cwd=cwd, session_id=session_id, file_path=str(path),
+                            dedup_key=key, timestamp=ts, detail="user",
+                            text=user_prompt_text(prompt),
+                        ))
+                        continue
 
-                event = _run_event(rec)
-                if event is None:
-                    continue
-                kind = str(event.get("kind") or "")
+                    event = _run_event(rec)
+                    if event is None:
+                        continue
+                    kind = str(event.get("kind") or "")
 
-                if kind == "assistant_message_committed":
-                    reply = str(event.get("text") or "").strip()
-                    if reply:
-                        last_text = _cap_text(reply)
+                    if kind == "assistant_message_committed":
+                        reply = str(event.get("text") or "").strip()
+                        if reply:
+                            last_text = _cap_text(reply)
 
-                if kind in _ACTIVE_EVENT_KINDS:
-                    out.append(ActivityEvent(
-                        vendor="muse", event_type="agent_active",
-                        cwd=cwd, session_id=session_id, file_path=str(path),
-                        dedup_key=key, timestamp=ts, detail=kind,
-                    ))
+                    if kind in _ACTIVE_EVENT_KINDS:
+                        out.append(ActivityEvent(
+                            vendor="muse", event_type="agent_active",
+                            cwd=cwd, session_id=session_id, file_path=str(path),
+                            dedup_key=key, timestamp=ts, detail=kind,
+                        ))
 
-                if kind == "terminal":
-                    # Any terminal value ends the turn — the pane is idle
-                    # again whether the run completed or failed — and the
-                    # value itself rides in `detail`.
-                    out.append(ActivityEvent(
-                        vendor="muse", event_type="turn_complete",
-                        cwd=cwd, session_id=session_id, file_path=str(path),
-                        dedup_key=f"turn:{line_no}", timestamp=ts,
-                        detail=str(event.get("terminal") or ""),
-                        text=last_text,
-                    ))
-                    last_text = ""
+                    if kind == "terminal":
+                        # Any terminal value ends the turn — the pane is idle
+                        # again whether the run completed or failed — and the
+                        # value itself rides in `detail`.
+                        out.append(ActivityEvent(
+                            vendor="muse", event_type="turn_complete",
+                            cwd=cwd, session_id=session_id, file_path=str(path),
+                            dedup_key=f"turn:{line_no}", timestamp=ts,
+                            detail=str(event.get("terminal") or ""),
+                            text=last_text,
+                        ))
+                        last_text = ""
 
-        set_activity_high_water(seen_keys, last_line)
-        _write_sentinel(seen_keys, _TEXT_PREFIX, last_text)
+        finally:
+            set_activity_high_water(seen_keys, last_line)
+            _write_sentinel(seen_keys, _TEXT_PREFIX, last_text)
         return out
 
     # ---- attribution/watch hooks (see log_readers.base.LogReader) --------

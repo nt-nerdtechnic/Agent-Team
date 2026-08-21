@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from agent_team_backend.cli_vendors.claude import ClaudeLogReader
 from agent_team_backend.log_readers.base import (
     activity_high_water,
@@ -159,3 +161,69 @@ def test_claude_malformed_line_is_not_retried(tmp_path: Path) -> None:
     reader.parse_activity(path, seen)
     assert activity_high_water(seen) == 1
     assert reader.parse_activity(path, seen) == []
+
+
+# ── a walk that dies mid-file must keep the ground it covered ────────────
+
+def _long_line(i: int) -> str:
+    """~500 bytes, so a few dozen lines exceed TextIOWrapper's read chunk and
+    are really yielded before a later chunk can fail to decode."""
+    return json.dumps({
+        "type": "assistant",
+        "timestamp": f"2026-08-18T00:00:{i % 60:02d}Z",
+        "message": {"stop_reason": "end_turn",
+                    "content": [{"type": "text", "text": f"turn {i} " + "x" * 420}]},
+    }) + "\n"
+
+
+def _truncated_utf8_transcript(tmp_path: Path, good_lines: int) -> Path:
+    """`good_lines` complete records, then a record whose last byte sequence
+    is cut in half — what a poll sees when the CLI is mid-write."""
+    p = tmp_path / "partial.jsonl"
+    with p.open("wb") as fh:
+        for i in range(good_lines):
+            fh.write(_long_line(i).encode("utf-8"))
+        # '好' is 3 bytes; write only the first two.
+        fh.write(b'{"type": "user", "message": {"content": "' + "好".encode()[:2])
+    return p
+
+
+def test_partial_write_keeps_the_progress_the_walk_made(tmp_path: Path) -> None:
+    """A transcript the CLI is still writing decodes into the reader's line
+    iterator and raises. The mark must already carry the lines that were
+    parsed: without it the next poll restarts at line 1 and re-emits every
+    `agent_active` / `turn_complete` in the file — turn text and MSG blocks
+    included — at a pane that is live and attributed by then.
+    """
+    reader = ClaudeLogReader()
+    path = _truncated_utf8_transcript(tmp_path, good_lines=60)
+    seen: set[str] = set()
+
+    with pytest.raises(UnicodeDecodeError):
+        reader.parse_activity(path, seen)
+
+    covered = activity_high_water(seen)
+    assert covered > 0, "the walk's progress was thrown away with the exception"
+    assert covered <= 60
+
+
+def test_partial_write_does_not_re_emit_once_the_line_lands(tmp_path: Path) -> None:
+    """The poll after the CLI finishes the record emits the tail only."""
+    reader = ClaudeLogReader()
+    path = _truncated_utf8_transcript(tmp_path, good_lines=60)
+    seen: set[str] = set()
+    with pytest.raises(UnicodeDecodeError):
+        reader.parse_activity(path, seen)
+    covered = activity_high_water(seen)
+    assert covered > 0
+
+    # The CLI completes its write: the file is valid UTF-8 again.
+    with path.open("wb") as fh:
+        for i in range(61):
+            fh.write(_long_line(i).encode("utf-8"))
+
+    events = reader.parse_activity(path, seen)
+
+    replayed = [e for e in events if int(e.dedup_key.split(":")[-1]) <= covered]
+    assert replayed == [], f"re-emitted {len(replayed)} already-parsed line(s)"
+    assert events, "expected the lines past the mark to be delivered"

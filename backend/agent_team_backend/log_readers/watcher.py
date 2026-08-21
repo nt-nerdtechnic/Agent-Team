@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from pathlib import Path
@@ -34,17 +33,19 @@ from .base import ActivityEvent, LogReader, TokenSinkResult, TokenUsage
 
 log = logging.getLogger("agent_team_backend.log_readers.watcher")
 
-# A file's activity dedup set holds one short key per line ever parsed from it
-# (see LogReader.parse_activity). It used to live for the whole process, so a
+# A file's activity dedup set used to hold one short key per line ever parsed
+# from it (see LogReader.parse_activity), for the whole process lifetime, so a
 # full-corpus scan pinned that memory permanently — and because those keys are
 # allocated interleaved with the transient json.loads garbage of the same scan,
 # they scatter across every pymalloc arena and stop CPython returning any of
 # them (an arena is only ever munmap'd once it is completely empty).
 # Measured 2026-08-18 on a zero-pane startup scan of 5209 transcripts:
 # 452,693 retained keys, ~47 MB of live strings/sets, holding 481 MB of arenas.
-# A file nothing has appended to in a week has no live pane left to notify, so
-# dropping its set costs only a replay that is already what every restart does.
-_ACTIVITY_SEEN_COLD_S = 7 * 24 * 3600.0
+# A file that is gone can never be scanned again, so its set is pure garbage.
+# A file that still exists keeps its set however old it looks: resuming an old
+# session is a first-class flow here, and a resumed transcript with no dedup
+# state replays every historical turn — text, turn_complete and all — at a pane
+# that is already registered and attributed.
 _ACTIVITY_SEEN_SWEEP_S = 600.0
 
 TokenSink = Callable[[TokenUsage], Awaitable[TokenSinkResult | None]]
@@ -462,38 +463,39 @@ class LogWatcher:
         return files
 
     def _sweep_activity_seen(self, now: float) -> None:
-        """Drop the activity dedup set of every file that is gone or cold.
+        """Forget the activity dedup set of every file that no longer exists.
 
         Runs at most every _ACTIVITY_SEEN_SWEEP_S off the rescan loop; `now`
-        is loop-monotonic, the mtime cutoff is wall-clock.
+        is loop-monotonic.
 
-        _scan_mtimes is only forgotten for files that are gone. A cold file
-        that still exists keeps its mtime entry so _files_to_scan does not
-        immediately re-enqueue it and rebuild the set we just dropped.
+        Only deleted files are forgotten. A file that still exists keeps its
+        set no matter how long it has been idle: dropping it does not free a
+        session, it arms one. The next append re-enqueues the file, the reader
+        starts from line 1 with an empty set, and every historical
+        `agent_active` / `turn_complete` — carrying turn text and MSG blocks —
+        is broadcast again, this time to a live, attributed pane. A restart
+        replays too, but a restart also resets the frontend; this does not.
+        The per-file sets are bounded by the readers' high-water marks (see
+        log_readers.base), so retaining them is cheap.
         """
         if (
             self._activity_seen_swept_at is not None
             and now - self._activity_seen_swept_at < _ACTIVITY_SEEN_SWEEP_S
         ):
             return
-        cutoff = time.time() - _ACTIVITY_SEEN_COLD_S
         dropped = 0
         keys = 0
         for path in list(self._activity_seen):
-            try:
-                mtime: float | None = Path(path).stat().st_mtime
-            except OSError:
-                mtime = None
-            if mtime is not None and mtime >= cutoff:
+            if Path(path).exists():
                 continue
             keys += len(self._activity_seen.pop(path, ()))
             dropped += 1
-            if mtime is None:
-                self._scan_mtimes.pop(path, None)
+            self._scan_mtimes.pop(path, None)
         self._activity_seen_swept_at = now
         if dropped:
             log.info(
-                "activity dedup sweep: dropped %d file(s), %d key(s); %d file(s) still tracked",
+                "activity dedup sweep: dropped %d deleted file(s), %d key(s); "
+                "%d file(s) still tracked",
                 dropped, keys, len(self._activity_seen),
             )
 
