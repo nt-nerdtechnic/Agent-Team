@@ -986,6 +986,14 @@ async def check_team_members() -> None:
             "auth.hello 回帶 role=admin（成員管理按鈕出不出現由它決定）",
             {"role": link_admin.member_role, "memberId": link_admin.member_id},
         )
+        # open_link returns at auth.hello, but the connect-time refreshes
+        # (policy -> directory -> members) are still in flight; over a real
+        # WAN each is a round trip, so give the fetch time to land. The
+        # assertion still proves the same thing: a link that never fetches
+        # would stay None past any wait.
+        await until(
+            lambda: link_admin.members_snapshot() is not None, "connect-time roster fetch"
+        )
         check(
             link_admin.members_snapshot() is not None,
             "連線建立時就抓過一次 team.members.list（快取不是「從未抓過」）",

@@ -1752,12 +1752,6 @@ async function closeEditorWindow(): Promise<void> {
       { title: 'Close Editor', confirmText: 'Close' }
     )
     if (!ok) return
-  } else {
-    const ok = await confirm('Close the editor window?', {
-      title: 'Close Editor',
-      confirmText: 'Close',
-    })
-    if (!ok) return
   }
   // Inside the plugin view there is no window to close — ask the host to hide
   // the view. The residual `?window=editor` window still closes itself.
