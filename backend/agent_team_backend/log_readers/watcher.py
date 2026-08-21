@@ -304,6 +304,7 @@ class LogWatcher:
 
     async def _drain_loop(self) -> None:
         """Process session/activity immediately and defer only token ingestion."""
+        processed = 0
         while True:
             try:
                 path, replay_workspace = await self._queue.get()
@@ -325,6 +326,9 @@ class LogWatcher:
                 # parsing. Even an unclaimed replay path must reach the token
                 # pass so its backfill count can complete.
                 self._queue_token_path(path, replay_workspace)
+                processed += 1
+                if processed % 10 == 0:
+                    await asyncio.sleep(0)
 
     async def _token_loop(self) -> None:
         """Commit coalesced token paths at most once per configured interval."""
@@ -443,7 +447,14 @@ class LogWatcher:
         (legacy).
         """
         provider = self._workspace_provider
-        workspaces = list(provider()) if provider else []
+        if provider is not None:
+            workspaces = list(provider())
+            if not workspaces:
+                # When a workspace provider is configured but has no open workspaces
+                # yet (e.g. startup with empty project list), skip full-disk scans.
+                return []
+        else:
+            workspaces = []
         if not workspaces:
             files: list[Path] = []
             for reader in self._readers:

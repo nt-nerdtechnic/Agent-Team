@@ -225,6 +225,27 @@ def install_hooks(port_file: str, settings_file: Path | None = None) -> dict[str
         hooks_section = {}
 
     rewake_wanted = _rewake_wanted()
+    # If this is a dev backend instance and the existing settings already point
+    # to a live production hook (non-dev port file), preserve the production
+    # hook so launching dev never breaks the running production app.
+    is_dev_port = "-dev" in port_file
+    if is_dev_port and any(
+        isinstance(e, dict)
+        and any(
+            isinstance(h, dict)
+            and _is_ours(str(h.get("command", "")))
+            and "-dev" not in str(h.get("command", ""))
+            for h in e.get("hooks", [])
+            if isinstance(h, dict)
+        )
+        for entries in hooks_section.values()
+        if isinstance(entries, list)
+        for e in entries
+        if isinstance(e, dict)
+    ):
+        log.info("dev backend skipping hook install: production hook is active")
+        return {"status": "skipped", "reason": "production hook active"}
+
     added = 0
     for event_name in [*_HOOK_EVENTS, *(e for e in _REWAKE_EVENTS if e not in _HOOK_EVENTS)]:
         event_kind = _HOOK_EVENTS.get(event_name, "")

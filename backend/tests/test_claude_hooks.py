@@ -76,3 +76,28 @@ def test_qwens_stop_hook_keeps_discarding_the_response(tmp_path) -> None:
     _received, stdout = _run_hook(tmp_path, "stop", b'{"ok":true}', endpoint="qwen")
 
     assert stdout == ""
+
+
+def test_dev_instance_does_not_overwrite_production_hook(tmp_path) -> None:
+    from agent_team_backend.claude_hooks import install_hooks
+
+    settings_file = tmp_path / "settings.json"
+    prod_port_file = tmp_path / "production" / "backend.port"
+    prod_port_file.parent.mkdir(parents=True, exist_ok=True)
+    prod_port_file.write_text("50000", encoding="utf-8")
+
+    # Install production hook
+    install_hooks(str(prod_port_file), settings_file=settings_file)
+    initial_content = settings_file.read_text(encoding="utf-8")
+    assert str(prod_port_file) in initial_content
+
+    # Attempt to install dev hook (port_file containing -dev)
+    dev_port_file = tmp_path / "Agent-Team-dev" / "backend-port"
+    dev_port_file.parent.mkdir(parents=True, exist_ok=True)
+    dev_port_file.write_text("60000", encoding="utf-8")
+
+    res = install_hooks(str(dev_port_file), settings_file=settings_file)
+    assert res.get("status") == "skipped"
+    # Settings file remains pointing to production port file
+    assert settings_file.read_text(encoding="utf-8") == initial_content
+

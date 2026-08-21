@@ -90,6 +90,24 @@ def install_hooks(port_file: str, settings_file: Path | None = None) -> dict[str
     if not isinstance(hooks_section, dict):
         hooks_section = {}
 
+    is_dev_port = "-dev" in port_file
+    if is_dev_port and any(
+        isinstance(e, dict)
+        and any(
+            isinstance(h, dict)
+            and _is_ours(str(h.get("command", "")))
+            and "-dev" not in str(h.get("command", ""))
+            for h in e.get("hooks", [])
+            if isinstance(h, dict)
+        )
+        for entries in hooks_section.values()
+        if isinstance(entries, list)
+        for e in entries
+        if isinstance(e, dict)
+    ):
+        log.info("dev backend skipping qwen hook install: production hook is active")
+        return {"installed": False, "path": str(path), "reason": "production hook active"}
+
     added = 0
     for event_name, event_kind in _HOOK_EVENTS.items():
         entries = hooks_section.get(event_name)
