@@ -17,7 +17,8 @@ export default defineConfig({
       'src/renderer/src/**/*.{test,spec}.ts',
       'src/renderer/plugins/**/*.{test,spec}.ts',
       'src/main/**/*.{test,spec}.ts',
-      'src/shared/**/*.{test,spec}.ts'
+      'src/shared/**/*.{test,spec}.ts',
+      'packages/features/git/src/**/*.{test,spec}.ts'
     ],
     // Playwright E2E lives in e2e/ and is run by `test:e2e`, not Vitest.
     exclude: ['e2e/**', 'node_modules/**'],

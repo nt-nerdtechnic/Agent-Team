@@ -13,6 +13,7 @@
     "noEmit": true
   },
   "include": [
+    "packages/features/git/src/**/*.ts",
     "src/renderer/src/**/*.ts",
     "src/renderer/src/**/*.vue",
     "src/renderer/src/**/*.d.ts",
