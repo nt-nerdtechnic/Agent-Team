@@ -1614,8 +1614,15 @@ async def ws(websocket: WebSocket) -> None:
             task = asyncio.create_task(handle_message(session, msg))
             session._handler_tasks.add(task)
             task.add_done_callback(session._handler_tasks.discard)
-    except WebSocketDisconnect:
-        log.info("ws client disconnected")
+    except WebSocketDisconnect as exc:
+        # Record who hung up. Without the code these lines cannot distinguish a
+        # frontend watchdog close (4001, see wsClient.startPing) from uvicorn
+        # timing out its own ping (1006/1011) or a window simply closing (1001).
+        log.info(
+            "ws client disconnected code=%s reason=%s",
+            exc.code,
+            exc.reason or "-",
+        )
     finally:
         # Peer is gone: silence any in-flight sends before cancelling tasks.
         session.dead = True

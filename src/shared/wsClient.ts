@@ -31,7 +31,7 @@ export type WsClientStatus = 'connecting' | 'connected' | 'disconnected' | 'erro
 interface WsLike {
   readyState: number
   send(data: string): void
-  close(): void
+  close(code?: number, reason?: string): void
   addEventListener(type: string, cb: (ev: unknown) => void): void
 }
 /** Constructor shape the client needs. Exported so a caller injecting a
@@ -56,6 +56,9 @@ export interface WsClientOptions {
   pingTimeoutMs?: number
   /** Consecutive ping failures before the socket is force-closed. Default 3. */
   pingFailureThreshold?: number
+  /** How many ping failures may be excused while inbound frames still arrive
+   *  (see `startPing`). 0 disables the reprieve. Default 4. */
+  pingGraceLimit?: number
   /** Bound on the reconnect send queue. Default 200. */
   maxSendQueue?: number
   /** Reconnect backoff base / cap (ms). Defaults 1500 / 30000. */
@@ -97,6 +100,7 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
   const pingIntervalMs = opts.pingIntervalMs ?? 15_000
   const pingTimeoutMs = opts.pingTimeoutMs ?? 8_000
   const pingFailureThreshold = opts.pingFailureThreshold ?? 3
+  const pingGraceLimit = opts.pingGraceLimit ?? 4
   const maxSendQueue = opts.maxSendQueue ?? 200
   const reconnectBaseMs = opts.reconnectBaseMs ?? 1_500
   const reconnectMaxMs = opts.reconnectMaxMs ?? 30_000
@@ -109,6 +113,8 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
   let pingTimer: ReturnType<typeof setInterval> | null = null
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   let reconnectAttempts = 0
+  /** When the socket last delivered a frame — proof of life for `startPing`. */
+  let lastInboundAt = 0
 
   interface PendingEntry { resolve: (resp: WsResponse) => void; reject: (err: Error) => void }
   const pending = new Map<string, PendingEntry>()
@@ -234,15 +240,32 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
     // fails. Three consecutive ping failures force a close so the reconnect
     // path takes over immediately. The threshold stays above 2 so a
     // busy-but-alive connection with late pongs isn't misread as wedged.
+    //
+    // Failure count alone still misreads a saturated backend as a dead one:
+    // every send on a session serialises behind one lock, so a pong queues
+    // behind whatever 64 KB terminal chunk is in flight, and a few busy panes
+    // can hold it past the timeout three times running. Inbound frames still
+    // arriving prove the socket is alive, so those failures are excused --
+    // but only `pingGraceLimit` times, because a backend whose receive loop is
+    // wedged can keep pushing PTY output while answering nothing.
     let pingFailures = 0
+    let graceUsed = 0
     pingTimer = setInterval(() => {
       rawSend('ping', { t: Date.now() }, pingTimeoutMs, false)
-        .then(() => { pingFailures = 0 })
+        .then(() => { pingFailures = 0; graceUsed = 0 })
         .catch((err) => {
+          if (Date.now() - lastInboundAt < pingTimeoutMs && graceUsed < pingGraceLimit) {
+            graceUsed++
+            console.warn('[wsClient] pong late, frames still arriving', err)
+            return
+          }
           console.warn('[wsClient] ping failed', err)
           if (++pingFailures >= pingFailureThreshold) {
             pingFailures = 0
-            try { sock.close() } catch { /* close handler reconnects */ }
+            graceUsed = 0
+            // Close with a private code so backend.log can name the culprit
+            // instead of showing an indistinguishable disconnect.
+            try { sock.close(4001, 'ping watchdog') } catch { /* close handler reconnects */ }
           }
         })
     }, pingIntervalMs)
@@ -262,11 +285,14 @@ export function createWsClient(opts: WsClientOptions = {}): WsClient {
       if (socket !== sock) return // superseded by a reset/reconnect swap
       setStatus('connected')
       reconnectAttempts = 0
+      // Don't let a previous socket's traffic vouch for this one.
+      lastInboundAt = Date.now()
       flushSendQueue(sock)
       startPing(sock)
     })
 
     sock.addEventListener('message', (ev) => {
+      lastInboundAt = Date.now()
       const data = (ev as { data?: unknown }).data
       let msg: WsResponse
       try {

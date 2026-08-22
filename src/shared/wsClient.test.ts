@@ -29,10 +29,20 @@ class FakeWebSocket {
 
   send(data: string): void { this.sent.push(data) }
 
-  close(): void {
+  closeCode?: number
+  closeReason?: string
+
+  close(code?: number, reason?: string): void {
     this.closed = true
+    this.closeCode = code
+    this.closeReason = reason
     this.readyState = FakeWebSocket.CLOSED
     this.fire('close', {})
+  }
+
+  /** A server-pushed event, as `terminal.output` arrives. */
+  push(type: string): void {
+    this.fire('message', { data: JSON.stringify({ id: '', type, payload: {}, timestamp: '' }) })
   }
 
   fire(type: string, ev: unknown): void {
@@ -176,6 +186,39 @@ describe('createWsClient', () => {
       await vi.advanceTimersByTimeAsync(15_000) // ping interval → sends a ping
       await vi.advanceTimersByTimeAsync(8_000) // ping timeout → failure
     }
+    expect(sock.closed).toBe(true)
+    // The code is what lets backend.log attribute the disconnect.
+    expect(sock.closeCode).toBe(4001)
+  })
+
+  /** Drive one ping cycle; `withTraffic` delivers a frame while it is in flight. */
+  async function pingCycle(sock: FakeWebSocket, withTraffic: boolean): Promise<void> {
+    await vi.advanceTimersByTimeAsync(15_000) // ping interval → sends a ping
+    await vi.advanceTimersByTimeAsync(4_000)
+    if (withTraffic) sock.push('terminal.output')
+    await vi.advanceTimersByTimeAsync(4_000) // ping timeout → failure
+  }
+
+  it('excuses late pongs while the socket is still delivering frames', async () => {
+    const c = makeClient()
+    c.connect(URL)
+    const sock = FakeWebSocket.instances[0]
+    sock.open()
+    // A backend saturated by terminal output answers pings late but keeps
+    // pushing frames. Closing here would be a false positive.
+    for (let i = 0; i < 3; i++) await pingCycle(sock, true)
+    expect(sock.closed).toBe(false)
+  })
+
+  it('still closes once the grace allowance runs out', async () => {
+    const c = makeClient()
+    c.connect(URL)
+    const sock = FakeWebSocket.instances[0]
+    sock.open()
+    // Four excused cycles, then the failure count starts climbing again and
+    // three more close it: a receive loop that is wedged rather than merely
+    // busy keeps pushing output while answering nothing.
+    for (let i = 0; i < 7; i++) await pingCycle(sock, true)
     expect(sock.closed).toBe(true)
   })
 })
