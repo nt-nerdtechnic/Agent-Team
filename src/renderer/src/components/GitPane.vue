@@ -8,6 +8,7 @@ import { useIssues } from '../composables/useIssues'
 import type { IssueDetail } from '../composables/useIssues'
 import { useGitAccounts } from '../composables/useGitAccounts'
 import type { useBackend } from '../composables/useBackend'
+import type { GitTransport } from '../../../../packages/features/git/src'
 import { useNotify } from '../composables/useNotify'
 import { computeGraph, laneColor } from '../lib/git-graph'
 import { guardedDiscard } from '../lib/discardConfirm'
@@ -17,6 +18,7 @@ const props = defineProps<{
   workspacePath: string
   analyzerModel?: string
   backend: ReturnType<typeof useBackend>
+  gitTransport: GitTransport
   // When embedded in the editor window, "open in editor" opens in-place via the
   // `open-file` event instead of spawning a separate editor window.
   embedded?: boolean
@@ -71,7 +73,7 @@ const {
   cloneRepo, connectToRemote, addToGitignore, checkIgnore, abortOperation, stashApply,
   pullRebase, pushForce,
   credentialPrompt, showCredentialPrompt, submitCredential, cancelCredential,
-} = useGit(() => props.workspacePath, props.backend)
+} = useGit(() => props.workspacePath, props.gitTransport)
 
 const {
   provider: issueProvider, issues, selectedIssue,

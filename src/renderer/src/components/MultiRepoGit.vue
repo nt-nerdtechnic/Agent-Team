@@ -4,6 +4,7 @@ import { defineAsyncComponent } from 'vue'
 import type { useBackend } from '../composables/useBackend'
 import type { Issue, IssueDetail, IssueProvider, IssueHandlerMode } from '../composables/useIssues'
 import { useRepoDiscovery } from '../composables/useRepoDiscovery'
+import { createHostGitTransport } from '../composables/hostGitTransport'
 import { useI18n } from 'vue-i18n'
 
 const GitPane = defineAsyncComponent(() => import('./GitPane.vue'))
@@ -33,7 +34,8 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 
-const { repositories } = useRepoDiscovery(() => props.workspacePath, props.backend)
+const gitTransport = createHostGitTransport(props.backend)
+const { repositories } = useRepoDiscovery(() => props.workspacePath, gitTransport)
 
 // When root is not a git repo, inject it as the first tab so init/connect features remain accessible.
 const allTabs = computed(() => {
@@ -191,6 +193,7 @@ function repoLabel(relPath: string): string {
     :workspace-path="workspacePath"
     :analyzer-model="analyzerModel"
     :backend="backend"
+    :git-transport="gitTransport"
     :embedded="embedded"
     :dispatch-targets="dispatchTargets"
     :available-agents="availableAgents"
@@ -243,6 +246,7 @@ function repoLabel(relPath: string): string {
           :workspace-path="repo.abs_path"
           :analyzer-model="analyzerModel"
           :backend="backend"
+          :git-transport="gitTransport"
           :embedded="embedded"
           :dispatch-targets="dispatchTargets"
           :available-agents="availableAgents"

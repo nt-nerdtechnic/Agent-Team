@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useBackend } from './composables/useBackend'
+import { createHostGitTransport } from './composables/hostGitTransport'
 import ExplorerPane from './components/ExplorerPane.vue'
 import SearchPane from './components/SearchPane.vue'
 import GitPane from './components/GitPane.vue'
@@ -62,6 +63,7 @@ const initialBranchDiffBase = params.get('branch_diff_base') ?? ''
 const initialBranchDiffCompare = params.get('branch_diff_compare') ?? ''
 
 const backend = useBackend()
+const gitTransport = createHostGitTransport(backend)
 // Hook the settings cache to this window's own ws connection: flushes writes
 // (sidebar/panel widths) and receives ui.settings_changed broadcasts from the
 // main window (theme changes — see the onSettingsChanged subscription below).
@@ -1994,6 +1996,7 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
         v-show="sidebarView === 'git'"
         :workspace-path="workspacePath"
         :backend="backend"
+        :git-transport="gitTransport"
         embedded
         @open-file="openFile"
         @open-diff="openDiff"

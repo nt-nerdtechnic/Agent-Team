@@ -1,6 +1,6 @@
 import { ref, computed, watch, onScopeDispose } from 'vue'
-import type { useBackend } from './useBackend'
 import { settingsGet, settingsSet } from '../lib/settings'
+import type { GitRequestType, GitTransport } from '../../../../packages/features/git/src'
 
 export interface GitFileEntry {
   path: string
@@ -187,9 +187,9 @@ const emptyStatus = (): GitStatus => ({
 
 export function useGit(
   workspacePath: () => string,
-  backend: ReturnType<typeof useBackend>,
+  transport: GitTransport,
 ) {
-  const { send, on } = backend
+  const { send, on } = transport
 
   const gitStatus = ref<GitStatus>(emptyStatus())
   // Nested git repos found by scanning downward when the root is NOT a repo.
@@ -230,7 +230,7 @@ export function useGit(
   const gitError = ref('')
   function clearGitError(): void { gitError.value = '' }
   async function runWrite(
-    type: string,
+    type: GitRequestType,
     payload: Record<string, unknown>,
   ): Promise<{ ok: boolean; error?: string }> {
     gitError.value = ''
@@ -1527,7 +1527,7 @@ export function useGit(
   // the backend GitWatcher via git.status. loadLog is also re-called so that
   // windows that open before the WS is ready (e.g. miniIDE) get their history.
   const _stopReconnect = watch(
-    () => backend.status.value,
+    () => transport.status.value,
     (s) => {
       if (s === 'connected' && workspacePath()) {
         void loadStatus()

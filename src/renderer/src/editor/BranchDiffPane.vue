@@ -2,6 +2,7 @@
 import { ref, watch, computed } from 'vue'
 import { parseHunks, toSideBySide, type Hunk, type SideRow } from '../lib/git-diff'
 import type { useBackend } from '../composables/useBackend'
+import { createHostGitTransport } from '../composables/hostGitTransport'
 import { useGit } from '../composables/useGit'
 import ReviewPane from '../components/ReviewPane.vue'
 
@@ -42,7 +43,7 @@ function startReviewDrag(e: MouseEvent) {
   window.addEventListener('mousemove', onMove)
   window.addEventListener('mouseup', onUp)
 }
-const { gitStatus, gitBranches } = useGit(() => props.workspacePath, props.backend)
+const { gitStatus, gitBranches } = useGit(() => props.workspacePath, createHostGitTransport(props.backend))
 
 interface FileDiff {
   filename: string

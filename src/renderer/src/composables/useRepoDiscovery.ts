@@ -1,6 +1,6 @@
 import { ref, watch, onScopeDispose } from 'vue'
-import type { useBackend } from './useBackend'
 import type { DiscoveredRepo, GitStatus } from './useGit'
+import type { GitTransport } from '../../../../packages/features/git/src'
 
 export interface RepoBadge {
   branch: string
@@ -13,9 +13,9 @@ export interface DiscoveredRepoWithBadge extends DiscoveredRepo {
 
 export function useRepoDiscovery(
   workspacePath: () => string,
-  backend: ReturnType<typeof useBackend>,
+  transport: GitTransport,
 ) {
-  const { send, on } = backend
+  const { send, on } = transport
   const repositories = ref<DiscoveredRepoWithBadge[]>([])
 
   async function refresh(): Promise<void> {
