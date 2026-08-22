@@ -10,7 +10,7 @@ It is not another chat panel inside the traditional IDE. Navide is being built a
 
 English | [繁體中文](README.zh-TW.md) | [日本語](README.ja-JP.md)
 
-[Download v0.1.86](https://github.com/nt-nerdtechnic/Navide/releases/tag/v0.1.86) | [Getting started](docs/en-US/getting-started.md) | [Documentation](docs/en-US/README.md) | [Roadmap](docs/en-US/roadmap.md)
+[Download v0.1.87](https://github.com/nt-nerdtechnic/Navide/releases/tag/v0.1.87) | [Getting started](docs/en-US/getting-started.md) | [Documentation](docs/en-US/README.md) | [Roadmap](docs/en-US/roadmap.md)
 
 [![Latest release](https://img.shields.io/github/v/release/nt-nerdtechnic/Navide?sort=semver&label=release&logo=github)](https://github.com/nt-nerdtechnic/Navide/releases/latest)
 [![Electron](https://img.shields.io/badge/Electron-33-47848F?logo=electron)](https://www.electronjs.org/)
@@ -115,10 +115,10 @@ Read [Privacy and Data Flows](docs/en-US/privacy.md) and the [Security Policy](S
 
 ## Try Navide
 
-Navide supports macOS 13+ on Apple silicon. The v0.1.86 release is signed with a Developer ID certificate and notarized by Apple:
+Navide supports macOS 13+ on Apple silicon. The v0.1.87 release is signed with a Developer ID certificate and notarized by Apple:
 
-- [Download DMG](https://github.com/nt-nerdtechnic/Navide/releases/download/v0.1.86/Navide-0.1.86-arm64.dmg)
-- [Download ZIP](https://github.com/nt-nerdtechnic/Navide/releases/download/v0.1.86/Navide-0.1.86-arm64.zip)
+- [Download DMG](https://github.com/nt-nerdtechnic/Navide/releases/download/v0.1.87/Navide-0.1.87-arm64.dmg)
+- [Download ZIP](https://github.com/nt-nerdtechnic/Navide/releases/download/v0.1.87/Navide-0.1.87-arm64.zip)
 
 Copy Navide to Applications and open it normally — no Gatekeeper workaround is needed. In-app auto-update is available from this release onward.
 
