@@ -3,8 +3,8 @@ import { join, relative, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 const rendererRoot = resolve(process.cwd(), 'src/renderer/src')
-// GitWindowApp is bundled as the navide.git plugin. Its useBackend import is
-// aliased to the capability-backed shim, so Issue 12 owns that composition.
+// GitWindowApp is bundled as the navide.git plugin, so Issue 12 owns that
+// composition rather than the Host entry router.
 const issue12OwnedSources = new Set(['GitWindowApp.vue'])
 
 function collectProductionSources(directory: string): string[] {

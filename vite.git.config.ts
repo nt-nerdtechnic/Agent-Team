@@ -6,11 +6,9 @@ import { GIT_PLUGIN_REQUIRES } from './src/shared/pluginCapabilities'
 
 // ── Git plugin bundle ────────────────────────────────────────────────────────
 // A SEPARATE Vite build from the core renderer (electron.vite.config.ts),
-// mirroring vite.mini-ide.config.ts / vite.plans.config.ts. The separation is
-// load-bearing: it lets this bundle alias `composables/useBackend` to the
-// `capabilityBackend` shim WITHOUT touching the core renderer, which keeps its
-// real WebSocket-backed `useBackend`. (A shared build can't diverge a module
-// per entry — GitWindowApp is one module in the graph.)
+// mirroring vite.mini-ide.config.ts / vite.plans.config.ts. It emits the
+// standalone navide.git plugin artifact consumed by the plugin loader; the
+// composition root constructs the SDK adapter and injects named ports.
 //
 // Output: dist-plugins/git — shipped inside the app package as the bundled
 // builtin copy (electron-builder `extraResources` → resources/plugins/git;
@@ -26,7 +24,6 @@ const APP_VERSION: string = JSON.parse(
 // rather than nested. Imports reach outside this root into src/ — fine for a
 // build (no dev-server fs restriction).
 const pluginRoot = resolve(__dirname, 'src/renderer/plugins/git')
-const capabilityBackend = resolve(pluginRoot, 'capabilityBackend')
 const outDir = resolve(__dirname, 'dist-plugins/git')
 
 // Emit manifest.json into the bundle so the SAME output serves as the app's
@@ -64,15 +61,6 @@ export default defineConfig({
   // WebContentsView (no dev server here — this entry is always loadFile'd).
   base: './',
   plugins: [vue(), emitManifest()],
-  resolve: {
-    // Redirect the Git UI's `useBackend` to the capability shim — for THIS
-    // bundle only. Covers every relative form the tree uses:
-    //   ./composables/useBackend  ../composables/useBackend
-    //   ../../composables/useBackend  ./useBackend  ../useBackend
-    alias: [
-      { find: /^(?:\.\.?\/)+(?:composables\/)?useBackend$/, replacement: capabilityBackend },
-    ],
-  },
   define: {
     __APP_BUILD__: JSON.stringify(`v${APP_VERSION} plugin`),
   },

@@ -36,6 +36,13 @@ function collectImportGraph(entry: string): Map<string, string> {
 }
 
 describe('plugin Git production composition', () => {
+  it('does not substitute the Git transport at build time', () => {
+    const buildConfig = readFileSync(resolve(repositoryRoot, 'vite.git.config.ts'), 'utf8')
+
+    expect(buildConfig).not.toContain('capabilityBackend')
+    expect(buildConfig).not.toContain('useBackend')
+  })
+
   it('constructs the SDK adapter at mount and injects named ports into GitWindowApp', () => {
     const mountSource = readFileSync(resolve(pluginRoot, 'mount.ts'), 'utf8')
     const appSource = readFileSync(resolve(repositoryRoot, 'src/renderer/src/GitWindowApp.vue'), 'utf8')

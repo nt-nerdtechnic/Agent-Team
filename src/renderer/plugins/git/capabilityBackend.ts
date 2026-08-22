@@ -12,10 +12,9 @@
 //     → main broker enforces manifest.requires + dispatches to the backend WS
 //     ← CapabilityResponse, remapped to the WsResponse shape caller code expects
 //
-// The plugin composition root consumes this shim to create one SDK-bound
-// facade, then passes named feature ports to GitWindowApp. The legacy Vite
-// alias remains for the Issue 11 compatibility surface until Issue 13; the
-// Git domain itself does not import this module or observe its generic facade.
+// The plugin composition root consumes this facade to create one SDK-bound
+// capability surface, then passes named feature ports to GitWindowApp. The Git
+// domain itself does not import this module or observe its generic facade.
 // This module is Vue-aware (it owns the reactive `status` ref) but must stay
 // free of any `electron`/`window.agentTeam` reference — a plugin's only host
 // surface is `window.nav`.
@@ -223,11 +222,10 @@ function errorWsResponse<T>(type: string, code: string, message: string): WsResp
   return { id: '', type, ok: false, payload: null, error: { code, message }, timestamp: nowIso() }
 }
 
-// ── The useBackend-compatible shim ───────────────────────────────────────────
+// ── Plugin capability facade ─────────────────────────────────────────────────
 /**
- * Compatibility shim for the plugin composition root. It retains the legacy
- * backend-shaped vocabulary only at the capability boundary; feature code is
- * composed with named ports before GitWindowApp is mounted.
+ * Provides the plugin composition root with a capability-backed, backend-shaped
+ * facade. Feature code receives named ports before GitWindowApp is mounted.
  */
 export function useBackend(): {
   status: Ref<BackendStatus>
