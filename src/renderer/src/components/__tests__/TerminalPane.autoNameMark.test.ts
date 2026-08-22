@@ -3,6 +3,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import type { Ref } from 'vue'
 import TerminalPane from '../TerminalPane.vue'
+import { createTerminalDockStub } from '../../ports/__tests__/terminalDock.stub'
 
 // Coverage for the auto-name marker: a pane whose title the app wrote for the
 // user carries a ◦ next to it, so a name nobody chose is recognisable without
@@ -34,7 +35,13 @@ function tMock(key: string): string {
 function mountPane(props: Record<string, unknown>): VueWrapper {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return mount(TerminalPane as any, {
-    props: { paneId: 'pane-1', title: 'Fix login redirect', backend: {}, cliProfiles: {}, ...props },
+    props: {
+      paneId: 'pane-1',
+      title: 'Fix login redirect',
+      terminalPort: createTerminalDockStub(),
+      cliProfiles: {},
+      ...props,
+    },
     global: { mocks: { $t: tMock } }
   })
 }

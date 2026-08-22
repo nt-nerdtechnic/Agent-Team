@@ -1,9 +1,9 @@
 import type { Ref, ShallowRef } from 'vue'
 import type { Terminal } from '@xterm/xterm'
 import type { FitAddon } from '@xterm/addon-fit'
-import type { useBackend } from './useBackend'
+import type { PortResponse } from '../ports/response'
 
-type BackendSend = ReturnType<typeof useBackend>['send']
+type ResizeRequest = (sessionId: string, cols: number, rows: number) => Promise<PortResponse>
 
 export interface ResizeController {
   applyFit(): void
@@ -24,7 +24,8 @@ export function createResizeController(
   sessionId: Ref<string>,
   containerRef: ShallowRef<HTMLElement | null>,
   lastRawActivityAt: Ref<number>,
-  send: BackendSend,
+  sendResizeRequest: ResizeRequest,
+  sendRedrawRequest: ResizeRequest,
   getPendingSpawn: () => boolean,
   onCreateWhenMeasurable: () => void,
 ): ResizeController {
@@ -58,11 +59,7 @@ export function createResizeController(
 
   function sendResize(cols: number, rows: number): Promise<boolean> {
     if (!sessionId.value) return Promise.resolve(false)
-    return send('terminal.resize', {
-      terminal_session_id: sessionId.value,
-      cols,
-      rows,
-    }).then((resp) => {
+    return sendResizeRequest(sessionId.value, cols, rows).then((resp) => {
       if (resp?.ok) {
         _ackedCols = cols; _ackedRows = rows
         return true
@@ -185,11 +182,7 @@ export function createResizeController(
       // resume, the freshly reprinted transcript). Per user decision
       // (2026-06-23): never clear history — accept any reflow residue, repaint
       // the current frame via the SIGWINCH redraw below instead.
-      void send('terminal.redraw', {
-        terminal_session_id: sessionId.value,
-        cols: term.cols,
-        rows: term.rows,
-      })
+      void sendRedrawRequest(sessionId.value, term.cols, term.rows)
     }, RESIZE_REDRAW_SETTLE_MS)
   }
 

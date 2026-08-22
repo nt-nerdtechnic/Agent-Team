@@ -26,7 +26,7 @@ const measurable = vi.hoisted(() => ({ cbs: [] as Array<() => void> }))
 
 vi.mock('../useTerminalResize', () => ({
   createResizeController: (...args: unknown[]) => {
-    measurable.cbs.push(args[7] as () => void)
+    measurable.cbs.push(args[8] as () => void)
     return ctrl
   },
 }))

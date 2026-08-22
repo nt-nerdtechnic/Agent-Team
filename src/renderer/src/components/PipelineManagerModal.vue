@@ -5,6 +5,7 @@
 // host app, so this component only owns the pipeline/stage/role UI.
 import { computed, ref, watch } from 'vue'
 import type { useBackend } from '../composables/useBackend'
+import type { TerminalDockPort } from '../ports/terminalDock'
 import { useNotify } from '../composables/useNotify'
 import AiCliDock from './AiCliDock.vue'
 import type { useRoles, Role } from '../composables/useRoles'
@@ -17,6 +18,7 @@ import { aiTerminalPaneId } from '../lib/aiCliContext'
 
 const props = defineProps<{
   backend: ReturnType<typeof useBackend>
+  terminalPort: TerminalDockPort
   rolesApi: ReturnType<typeof useRoles>
   pipelinesApi: ReturnType<typeof usePipelines>
   /** Workspace the embedded CLI dock spawns in; empty = no workspace open. */
@@ -877,7 +879,7 @@ function buildAiContext(): string {
       :pane-id="aiPaneId"
       origin="pipeline-manager"
       :workspace-path="aiWorkspace"
-      :backend="backend"
+      :terminal-port="terminalPort"
       :build-context="buildAiContext"
     />
     </div><!-- end main-row -->

@@ -41,7 +41,8 @@ describe('createResizeController — requestResizeRedraw gates', () => {
       sessionId,
       shallowRef<HTMLElement | null>(null),
       lastRawActivityAt,
-      mock.backend.send,
+      (id, cols, rows) => mock.terminalPort.resize(id, cols, rows),
+      (id, cols, rows) => mock.terminalPort.redraw(id, cols, rows),
       () => false,
       () => {}
     )

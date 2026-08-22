@@ -2,6 +2,7 @@
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useBackend } from './composables/useBackend'
 import { createHostGitTransport } from './composables/hostGitTransport'
+import { createHostGitSettingsPort, createHostGitSurfacePorts, createHostKeybindingsPort, createHostTerminalDockPort } from './composables/hostSurfacePorts'
 import ExplorerPane from './components/ExplorerPane.vue'
 import SearchPane from './components/SearchPane.vue'
 import GitPane from './components/GitPane.vue'
@@ -9,6 +10,7 @@ import EditorPane from './editor/EditorPane.vue'
 import DiffPane from './editor/DiffPane.vue'
 import BranchDiffPane from './editor/BranchDiffPane.vue'
 import ConflictPane from './editor/ConflictPane.vue'
+import ReviewPane from './components/ReviewPane.vue'
 import NotificationHost from './components/NotificationHost.vue'
 // Shared right-side AI CLI terminal shell (rail toggle + resize + embedded
 // PTY terminal), same panel the Git/Plan windows embed.
@@ -19,7 +21,7 @@ import PlanFileView from './editor/PlanFileView.vue'
 import FilePreviewPane from './editor/FilePreviewPane.vue'
 import { previewKind, isMarkdownFile } from './editor/previewTypes'
 import { rebindTabs } from './editor/tabRebind'
-import { useKeybindings, registerCommand, setContext, executeCommand } from './keybindings/useKeybindings'
+import { initKeybindingsPort, useKeybindings, registerCommand, setContext, executeCommand } from './keybindings/useKeybindings'
 import { useTheme, BUILTIN_THEMES } from './composables/useTheme'
 import { initSettingsBackend, settingsGet, settingsSet, onSettingsChanged } from './lib/settings'
 import { useNotify } from './composables/useNotify'
@@ -64,10 +66,13 @@ const initialBranchDiffCompare = params.get('branch_diff_compare') ?? ''
 
 const backend = useBackend()
 const gitTransport = createHostGitTransport(backend)
+const surfacePorts = createHostGitSurfacePorts(backend, gitTransport)
+const terminalPort = createHostTerminalDockPort(backend)
 // Hook the settings cache to this window's own ws connection: flushes writes
 // (sidebar/panel widths) and receives ui.settings_changed broadcasts from the
 // main window (theme changes — see the onSettingsChanged subscription below).
-initSettingsBackend(backend)
+initSettingsBackend(createHostGitSettingsPort(backend))
+initKeybindingsPort(createHostKeybindingsPort())
 const { confirm, toast } = useNotify()
 
 // ── Sidebar resize ────────────────────────────────────────────────────────────
@@ -1995,8 +2000,12 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
       <GitPane
         v-show="sidebarView === 'git'"
         :workspace-path="workspacePath"
-        :backend="backend"
         :git-transport="gitTransport"
+        :file-access="surfacePorts.fileAccess"
+        :ui="surfacePorts.paneUi"
+        :issue-port="surfacePorts.issues"
+        :credentials="surfacePorts.credentials"
+        :accounts="surfacePorts.accounts"
         embedded
         @open-file="openFile"
         @open-diff="openDiff"
@@ -2127,7 +2136,8 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
             :staged="f.staged!"
             :commit="f.commit"
             :name="f.name"
-            :backend="backend"
+            :git-transport="gitTransport"
+            :file-access="surfacePorts.fileAccess"
             @open-file="openFile"
           />
           <ConflictPane
@@ -2136,7 +2146,8 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
             :workspace-path="workspacePath"
             :filepath="f.filepath!"
             :name="f.name"
-            :backend="backend"
+            :git-transport="gitTransport"
+            :file-access="surfacePorts.fileAccess"
             :merge-aborted="mergeAbortedFor(f.filepath!)"
             @resolved="closeFile(tabKey(f))"
           />
@@ -2146,10 +2157,25 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
             :workspace-path="fileWs(f)"
             :base="f.base!"
             :compare="f.compare ?? ''"
-            :backend="backend"
+            :git-transport="gitTransport"
+            :branch-diff="surfacePorts.branchDiff"
+            :credentials="surfacePorts.credentials"
             @open-file="(p) => openFile({ ...p, wsPath: f.wsPath })"
             @ask-ai-fix="(text) => pasteToCli(text)"
-          />
+          >
+            <template #review="{ workspacePath: reviewWorkspacePath, gitStatus: reviewGitStatus, gitBranches: reviewGitBranches, close, openFile: reviewOpenFile, askAiFix }">
+              <ReviewPane
+                :workspace-path="reviewWorkspacePath"
+                :backend="backend"
+                :git-status="reviewGitStatus"
+                :git-branches="reviewGitBranches"
+                :hide-header="true"
+                @close="close"
+                @open-file="reviewOpenFile"
+                @ask-ai-fix="askAiFix"
+              />
+            </template>
+          </BranchDiffPane>
         </template>
         <div v-if="!openFiles.length" class="ide-empty">
           Open a file from the Explorer or Search pane on the left
@@ -2199,7 +2225,7 @@ if (workspacePath && initialDiffFile) openDiff({ filepath: initialDiffFile, stag
       :pane-id="AI_PANE_ID"
       origin="mini-ide"
       :workspace-path="workspacePath"
-      :backend="backend"
+      :terminal-port="terminalPort"
       :build-context="buildEditorContext"
     />
     </div><!-- end ide-body -->

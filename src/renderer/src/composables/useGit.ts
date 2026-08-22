@@ -1,6 +1,7 @@
 import { ref, computed, watch, onScopeDispose } from 'vue'
 import { settingsGet, settingsSet } from '../lib/settings'
 import type { GitRequestType, GitTransport } from '../../../../packages/features/git/src'
+import type { GitCredentialPort } from '../ports/gitSurface'
 
 export interface GitFileEntry {
   path: string
@@ -188,6 +189,7 @@ const emptyStatus = (): GitStatus => ({
 export function useGit(
   workspacePath: () => string,
   transport: GitTransport,
+  credentialPort: GitCredentialPort = {},
 ) {
   const { send, on } = transport
 
@@ -924,8 +926,8 @@ export function useGit(
   // Declared with `function` so it hoists above every remote-op caller below.
   async function withCredential<T extends Record<string, unknown>>(ws: string, payload: T): Promise<T> {
     try {
-      const res = await window.agentTeam?.gitAccounts?.getCredential(ws)
-      if (res?.ok && res.credential) return { ...payload, credential: res.credential }
+      const credential = await credentialPort.getCredential?.(ws)
+      if (credential) return { ...payload, credential }
     } catch {
       /* fall back to interactive askpass */
     }

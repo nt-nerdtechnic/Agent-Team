@@ -10,6 +10,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useBackend } from './composables/useBackend'
+import { createHostGitSettingsPort, createHostKeybindingsPort, createHostTerminalDockPort } from './composables/hostSurfacePorts'
 import { initSettingsBackend, onSettingsChanged } from './lib/settings'
 import { useTheme } from './composables/useTheme'
 import { useNotify } from './composables/useNotify'
@@ -17,7 +18,7 @@ import { resolvePlanStore, type PlanCtx, type WriteResult } from './composables/
 import { sanitizePlanSectionHtml } from './editor/planRuntime'
 import PlansPane from './editor/PlansPane.vue'
 import { lastOpenedStorageKey, loadStoredValue, saveStoredChoice } from './editor/plansPaneModel'
-import { useKeybindings, setContext } from './keybindings/useKeybindings'
+import { initKeybindingsPort, useKeybindings, setContext } from './keybindings/useKeybindings'
 import { registerCommand } from './keybindings/commandRegistry'
 import PlanReviewToolbar from './editor/PlanReviewToolbar.vue'
 import PlanFileView from './editor/PlanFileView.vue'
@@ -40,9 +41,11 @@ const initialRelPath = params.get('rel_path') ?? ''
 const lastOpenedKey = lastOpenedStorageKey(workspacePath)
 
 const backend = useBackend()
+const terminalPort = createHostTerminalDockPort(backend)
 // Hook the settings cache to this window's own ws connection so theme changes
 // made in other windows arrive as ui.settings_changed broadcasts.
-initSettingsBackend(backend)
+initSettingsBackend(createHostGitSettingsPort(backend))
+initKeybindingsPort(createHostKeybindingsPort())
 
 // Plan documents live in the project root, which is the workspace itself
 // unless the workspace is a subdirectory of the repository holding them (see
@@ -559,7 +562,7 @@ onUnmounted(() => {
       :pane-id="AI_PANE_ID"
       origin="plan-window"
       :workspace-path="workspacePath"
-      :backend="backend"
+      :terminal-port="terminalPort"
       :build-context="buildPlanContext"
     />
     <NotificationHost />

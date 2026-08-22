@@ -1,5 +1,12 @@
 import { createApp, type Component } from 'vue'
 import { i18n } from './i18n'
+import { readHostBootstrapSettings } from './lib/settingsBootstrap'
+
+// Publish the Host snapshot before a lazy renderer root imports lib/settings.
+// The settings module only reads this generic value, so plugin bundles do not
+// inherit the Host preload bridge just to obtain initial UI preferences.
+;(globalThis as typeof globalThis & { __navideSettingsBootstrap?: Record<string, unknown> }).__navideSettingsBootstrap =
+  readHostBootstrapSettings()
 
 // Theme token layers — order matters: primitives → semantic roles → theme overrides.
 import './styles/tokens/base.css'

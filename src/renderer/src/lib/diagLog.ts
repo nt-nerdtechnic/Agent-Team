@@ -12,21 +12,21 @@
 // site. Anything sent here costs a WebSocket round-trip, so send only what a
 // person reading the log would want to see.
 
-type DiagBackend = {
-  send: (type: string, payload: Record<string, unknown>) => Promise<unknown>
+export interface DiagnosticPort {
+  diagnostic?(category: string, message: string, level: 'info' | 'warning'): void
 }
 
 /** Fire-and-forget: a diagnostic must never delay or break the path it observes. */
 export function diagLog(
-  backend: DiagBackend,
+  backend: DiagnosticPort | undefined,
   category: string,
   message: string,
   level: 'info' | 'warning' = 'info'
 ): void {
   try {
-    void backend.send('client.diagnostic', { category, message, level }).catch(() => {})
+    backend?.diagnostic?.(category, message, level)
   } catch {
-    /* backend not connected — a dropped diagnostic is not worth an exception */
+    /* the diagnostic sink is best-effort and must not break the observed path */
   }
 }
 
@@ -43,7 +43,7 @@ export function diagLog(
  * so throttling never makes the log understate the problem.
  */
 export function createThrottledDiag(
-  backend: DiagBackend,
+  backend: DiagnosticPort | undefined,
   category: string,
   minIntervalMs: number
 ): (message: string, level?: 'info' | 'warning') => void {

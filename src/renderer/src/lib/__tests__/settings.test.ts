@@ -14,11 +14,18 @@ import {
   MIGRATED_LOCALSTORAGE_KEYS,
   PURGED_LOCALSTORAGE_KEYS,
 } from '../settings'
+import { readHostBootstrapSettings } from '../settingsBootstrap'
 
 function stubBootstrap(raw: string | undefined): void {
   window.agentTeam = (raw === undefined
     ? undefined
     : { getBootstrapSettings: () => raw }) as unknown as typeof window.agentTeam
+  const globalKey = globalThis as typeof globalThis & { __navideSettingsBootstrap?: Record<string, unknown> }
+  if (raw === undefined) {
+    delete globalKey.__navideSettingsBootstrap
+  } else {
+    globalKey.__navideSettingsBootstrap = readHostBootstrapSettings()
+  }
 }
 
 /** Advance fake timers and let the awaited send() chains settle. */
@@ -39,6 +46,7 @@ describe('lib/settings', () => {
   afterEach(() => {
     vi.useRealTimers()
     localStorage.clear()
+    delete (globalThis as typeof globalThis & { __navideSettingsBootstrap?: unknown }).__navideSettingsBootstrap
   })
 
   describe('bootstrap seeding', () => {

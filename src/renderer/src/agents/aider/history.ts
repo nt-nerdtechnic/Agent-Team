@@ -11,7 +11,7 @@
 // resolves to (nearest ancestor of the pane cwd containing `.git`, else the
 // cwd) — that is the only place the log reader looks.
 
-import { shellEscape } from '../../lib/drop'
+import { shellEscape } from '../../lib/shellEscape'
 
 /** Aider's default, pane-agnostic history file — the one every pane shared
  *  before per-pane files existed. */

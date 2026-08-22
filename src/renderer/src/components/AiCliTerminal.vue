@@ -7,11 +7,11 @@
 import { onMounted, ref, watch } from 'vue'
 import { useTerminal } from '../composables/useTerminal'
 import { useTheme } from '../composables/useTheme'
-import type { useBackend } from '../composables/useBackend'
+import type { TerminalDockPort } from '../ports/terminalDock'
 
 const props = defineProps<{
   paneId: string
-  backend: ReturnType<typeof useBackend>
+  terminalPort: TerminalDockPort
   workspacePath?: string
   /** Names offered by the @-mention menu. Read lazily on every `@` keystroke,
    *  so the host can keep refreshing the list behind this prop. */
@@ -19,7 +19,7 @@ const props = defineProps<{
 }>()
 
 const containerRef = ref<HTMLElement | null>(null)
-const terminal = useTerminal(props.paneId, props.backend, {
+const terminal = useTerminal(props.paneId, props.terminalPort, {
   workspacePath: props.workspacePath,
   mentionCandidates: () => props.mentionCandidates ?? [],
 })

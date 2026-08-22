@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { nextTick, ref, watch } from 'vue'
 import type { GitCredentialPrompt } from '../composables/useGit'
-import { useGitAccounts } from '../composables/useGitAccounts'
+import type { GitCredentialAccountPort } from '../ports/gitSurface'
 
 const props = defineProps<{
   show: boolean
   prompt: GitCredentialPrompt | null
   // When provided, offers "Save as account & bind this workspace".
   workspacePath?: string
+  accountPort: GitCredentialAccountPort
 }>()
 
 const emit = defineEmits<{
@@ -20,7 +21,7 @@ const usernameInputRef = ref<HTMLInputElement | null>(null)
 const passwordInputRef = ref<HTMLInputElement | null>(null)
 
 // Optional "save as account" flow (safeStorage-backed).
-const gitAccounts = useGitAccounts()
+const gitAccounts = props.accountPort
 const saveAsAccount = ref(false)
 const saveLabel = ref('')
 
@@ -37,7 +38,7 @@ watch(() => props.show, (visible) => {
   saveLabel.value = ''
   step.value = props.prompt?.usernameRequestId ? 'username' : 'password'
   void nextTick(() => {
-    if (props.workspacePath) void gitAccounts.refresh()
+    if (props.workspacePath) void gitAccounts.refresh?.()
     ;(step.value === 'username' ? usernameInputRef.value : passwordInputRef.value)?.focus()
   })
 })
@@ -53,7 +54,7 @@ async function onSubmit(): Promise<void> {
   if (saveAsAccount.value && props.workspacePath && props.prompt) {
     const { host, username, password } = props.prompt
     if (username && password) {
-      const ok = await gitAccounts.addAccount({
+      const ok = await gitAccounts.addAccount?.({
         label: saveLabel.value.trim() || `${host} (${username})`,
         host,
         username,
@@ -63,7 +64,7 @@ async function onSubmit(): Promise<void> {
         const created = gitAccounts.accounts.value.find(
           (a) => a.host === host && a.username === username
         )
-        if (created) await gitAccounts.bind(props.workspacePath, created.id)
+        if (created) await gitAccounts.bind?.(props.workspacePath, created.id)
       }
     }
   }

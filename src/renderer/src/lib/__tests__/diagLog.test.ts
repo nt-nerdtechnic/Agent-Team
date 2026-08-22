@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { createThrottledDiag, diagLog } from '../diagLog'
 
-// The renderer forwards its latency observations to backend.log through this
-// bridge. Two properties matter: it must never throw into the path it observes,
+// The renderer forwards its latency observations through a named diagnostic
+// port. Two properties matter: it must never throw into the path it observes,
 // and the probes that sit on a per-keystroke path must not add a message per
 // keystroke to a connection that is already the suspect.
 
@@ -11,9 +11,9 @@ function mockBackend() {
   return {
     sent,
     backend: {
-      send: (type: string, payload: Record<string, unknown>) => {
-        sent.push({ type, payload })
-        return Promise.resolve()
+      diagnostic: (category: string, message: string, level: 'info' | 'warning') => {
+        const payload = { category, message, level }
+        sent.push({ type: 'client.diagnostic', payload })
       },
     },
   }
@@ -37,15 +37,9 @@ describe('diagLog', () => {
     })
   })
 
-  it('swallows a backend that refuses to send', () => {
-    const backend = { send: () => { throw new Error('not connected') } }
+  it('swallows a diagnostic sink that refuses to report', () => {
+    const backend = { diagnostic: () => { throw new Error('not connected') } }
     expect(() => diagLog(backend, 'ime', 'x')).not.toThrow()
-  })
-
-  it('swallows a send that rejects later', async () => {
-    const backend = { send: () => Promise.reject(new Error('ws closed')) }
-    expect(() => diagLog(backend, 'ime', 'x')).not.toThrow()
-    await Promise.resolve()
   })
 })
 

@@ -18,20 +18,3 @@ export function extractClipboardImage(dt: DataTransfer | null): File | null {
   }
   return null
 }
-
-/**
- * Writes `image` to disk via main and returns its path, or null when the
- * bridge is unavailable or main declined the media type — callers fall back to
- * pasting nothing, which is what happened before this path existed.
- */
-export async function saveClipboardImage(image: File): Promise<string | null> {
-  const save = window.agentTeam?.saveClipboardImage
-  if (!save) return null
-  try {
-    const bytes = new Uint8Array(await image.arrayBuffer())
-    const res = await save({ bytes, mediaType: image.type })
-    return res?.ok && res.path ? res.path : null
-  } catch {
-    return null
-  }
-}

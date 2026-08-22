@@ -10,6 +10,7 @@ import { i18n } from '../../i18n'
 import { createMockBackend } from '../../composables/__tests__/mockBackend'
 import { useRoles, type Role } from '../../composables/useRoles'
 import { usePipelines } from '../../composables/usePipelines'
+import { createTerminalDockStub } from '../../ports/__tests__/terminalDock.stub'
 
 // The dock owns a real PTY terminal (xterm); the roles tab never touches it.
 vi.mock('../AiCliDock.vue', () => ({
@@ -68,6 +69,7 @@ describe('PipelineManagerModal — roles tab', () => {
     const w = mount(PipelineManagerModal, {
       props: {
         backend: mock.backend,
+        terminalPort: createTerminalDockStub(),
         rolesApi,
         pipelinesApi,
         workspacePath: '/tmp/ws',

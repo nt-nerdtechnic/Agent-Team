@@ -1,5 +1,5 @@
 import { ref, watch, onScopeDispose } from 'vue'
-import type { useBackend } from './useBackend'
+import type { IssuePort } from '../ports/gitSurface'
 
 // Cloud issues for the current repo. The backend auto-detects the host from the
 // origin remote (GitHub via `gh`, GitLab via `glab`) and normalizes both into
@@ -53,10 +53,8 @@ const emptyProvider = (): IssueProviderInfo => ({
 
 export function useIssues(
   workspacePath: () => string,
-  backend: ReturnType<typeof useBackend>,
+  issuePort: IssuePort,
 ) {
-  const { send } = backend
-
   const provider = ref<IssueProviderInfo>(emptyProvider())
   const issues = ref<Issue[]>([])
   const selectedIssue = ref<IssueDetail | null>(null)
@@ -78,7 +76,7 @@ export function useIssues(
     if (!ws) { provider.value = emptyProvider(); return false }
     isLoadingProvider.value = true
     try {
-      const resp = await send<IssueProviderInfo>('issues.provider', { workspace_path: ws })
+      const resp = await issuePort.provider(ws)
       if (resp.ok && resp.payload && workspacePath() === ws) {
         provider.value = resp.payload
         return true
@@ -98,9 +96,7 @@ export function useIssues(
     isLoadingIssues.value = true
     issuesError.value = ''
     try {
-      const resp = await send<{ ok: boolean; provider: IssueProvider; issues: Issue[]; error?: string }>(
-        'issues.list', { workspace_path: ws, limit: 30 }, 30_000,
-      )
+      const resp = await issuePort.list(ws, 30)
       if (workspacePath() !== ws) return
       const r = resp.payload
       if (resp.ok && r?.ok) {
@@ -145,9 +141,7 @@ export function useIssues(
     issuesError.value = ''
     selectedIssue.value = null
     try {
-      const resp = await send<{ ok: boolean; issue: IssueDetail; error?: string }>(
-        'issues.get', { workspace_path: ws, number }, 30_000,
-      )
+      const resp = await issuePort.get(ws, number)
       if (workspacePath() !== ws) return
       const r = resp.payload
       if (resp.ok && r?.ok) selectedIssue.value = r.issue
@@ -168,9 +162,7 @@ export function useIssues(
     isSubmitting.value = true
     issuesError.value = ''
     try {
-      const resp = await send<{ ok: boolean; url?: string; error?: string }>(
-        'issues.create', { workspace_path: ws, title, body }, 30_000,
-      )
+      const resp = await issuePort.create(ws, title, body)
       const r = resp.payload ?? { ok: false, error: 'no response' }
       if (r.ok) await loadIssues()
       else issuesError.value = r.error || 'create failed'
@@ -191,9 +183,7 @@ export function useIssues(
     isSubmitting.value = true
     issuesError.value = ''
     try {
-      const resp = await send<{ ok: boolean; error?: string }>(
-        'issues.comment', { workspace_path: ws, number, body }, 30_000,
-      )
+      const resp = await issuePort.comment(ws, number, body)
       const r = resp.payload ?? { ok: false, error: 'no response' }
       if (r.ok) await openIssue(number)
       else issuesError.value = r.error || 'comment failed'
@@ -213,9 +203,7 @@ export function useIssues(
     isSubmitting.value = true
     issuesError.value = ''
     try {
-      const resp = await send<{ ok: boolean; error?: string }>(
-        'issues.set_state', { workspace_path: ws, number, state }, 30_000,
-      )
+      const resp = await issuePort.setState(ws, number, state)
       const r = resp.payload ?? { ok: false, error: 'no response' }
       if (r.ok) {
         await loadIssues()

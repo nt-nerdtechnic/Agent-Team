@@ -1,5 +1,6 @@
 import { onMounted, onUnmounted } from 'vue'
 import type { KeybindingRule } from './types'
+import type { KeybindingsPort } from '../ports/keybindings'
 import { defaults } from './defaults'
 import { KeyResolver } from './keyResolver'
 import { executeCommand, registerCommand } from './commandRegistry'
@@ -9,14 +10,11 @@ import { parseUserRules, sanitizeUserRules, serializeUserRules } from './customi
 export type { KeybindingRule }
 export { registerCommand, executeCommand, setContext, getContext }
 
-interface KeybindingsBridge {
-  readKeybindings?: () => Promise<{ ok: boolean; content?: string; error?: string }>
-  writeKeybindings?: (content: string) => Promise<{ ok: boolean; error?: string }>
-  onKeybindingsChanged?: (cb: (content: string) => void) => void
-}
+let keybindingsPort: KeybindingsPort = {}
 
-function bridge(): KeybindingsBridge | undefined {
-  return (window as Window & { agentTeam?: KeybindingsBridge }).agentTeam
+/** Bind the window-specific keybinding persistence port at its composition root. */
+export function initKeybindingsPort(port: KeybindingsPort): void {
+  keybindingsPort = port
 }
 
 let _userRules: KeybindingRule[] = []
@@ -95,11 +93,11 @@ function handleKeydown(e: KeyboardEvent): void {
 }
 
 async function loadUserRulesFromIPC(): Promise<void> {
-  const api = bridge()
-  if (!api?.readKeybindings) return
+  const read = keybindingsPort.read
+  if (!read) return
   const version = _rulesVersion
   try {
-    const result = await api.readKeybindings()
+    const result = await read()
     if (_rulesVersion !== version) return // superseded by a save or a broadcast
     if (result?.ok && result.content) {
       setUserRules(parseUserRules(result.content).rules)
@@ -119,10 +117,10 @@ async function loadUserRulesFromIPC(): Promise<void> {
 // pushed to the Mini IDE / Git / Plan windows too — without it those windows
 // would keep the shipped defaults until they were reopened.
 function subscribeToChanges(): void {
-  const api = bridge()
-  if (_changeSubscribed || !api?.onKeybindingsChanged) return
+  const onChanged = keybindingsPort.onChanged
+  if (_changeSubscribed || !onChanged) return
   _changeSubscribed = true
-  api.onKeybindingsChanged((content: string) => {
+  onChanged((content: string) => {
     setUserRules(parseUserRules(content).rules)
   })
 }
@@ -180,13 +178,13 @@ export async function saveUserRules(
   rules: KeybindingRule[],
 ): Promise<{ ok: boolean; error?: string }> {
   setUserRules(rules)
-  const api = bridge()
-  if (!api?.writeKeybindings) return { ok: false, error: 'keybindings bridge unavailable' }
+  const write = keybindingsPort.write
+  if (!write) return { ok: false, error: 'keybindings bridge unavailable' }
   try {
     // Persist what actually took effect, not what was handed in: setUserRules
     // may have dropped a rule that would strand a protected command, and a file
     // holding rules the app silently ignores is worse than no file.
-    return await api.writeKeybindings(serializeUserRules(_userRules))
+    return await write(serializeUserRules(_userRules))
   } catch (e) {
     return { ok: false, error: String(e) }
   }

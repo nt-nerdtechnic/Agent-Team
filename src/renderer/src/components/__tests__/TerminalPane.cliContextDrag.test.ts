@@ -2,6 +2,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import TerminalPane from '../TerminalPane.vue'
+import { createTerminalDockStub } from '../../ports/__tests__/terminalDock.stub'
 
 // Coverage for the header dragstart payload: alongside the pane-reorder id
 // ('application/x-pane-id'), the drag must carry 'application/x-cli-context'
@@ -37,7 +38,13 @@ function dragStartEvent(): Event & { dataTransfer: { setData: ReturnType<typeof 
 function mountPane(props: Record<string, unknown>): VueWrapper {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return mount(TerminalPane as any, {
-    props: { paneId: 'pane-1', title: 'Claude', backend: {}, ...props },
+    props: {
+      paneId: 'pane-1',
+      title: 'Claude',
+      terminalPort: createTerminalDockStub(),
+      cliProfiles: {},
+      ...props,
+    },
     global: { mocks: { $t: (key: string) => key } }
   })
 }

@@ -40,6 +40,7 @@ import {
 import StageTabBar, { type TabItem } from './components/StageTabBar.vue'
 import { rollupTabStatus, sameRenderedTabs } from './lib/tabStatus'
 import { useBackend } from './composables/useBackend'
+import { createHostGitSettingsPort, createHostKeybindingsPort, createHostTerminalDockPort } from './composables/hostSurfacePorts'
 import { useTheme } from './composables/useTheme'
 import { useSettings } from './composables/useSettings'
 import { useRoles } from './composables/useRoles'
@@ -196,7 +197,7 @@ import {
 } from './lib/cliAwaitingInput'
 import { markerTurnActionFor } from './lib/sessionMarkerTurn'
 import { entryBelongsToWorkspace, filterWorkspaceEntries, historyEntryLabel, legacyHistoryLogPath, manualLogFileName, updateHistoryCustomName, type HistoryCleanupMode, type HistoryDeletePreview, type HistoryDeleteTarget, type SpawnHistoryEntry, type WorkspaceIdentity } from './lib/spawnHistory'
-import { useKeybindings, registerCommand, setContext } from './keybindings/useKeybindings'
+import { initKeybindingsPort, useKeybindings, registerCommand, setContext } from './keybindings/useKeybindings'
 import { useUiActionBus } from './composables/useUiActionBus'
 import { releaseAnnouncementId, useAnnouncements } from './composables/useAnnouncements'
 import { useStatusBarPopover } from './composables/useStatusBarPopover'
@@ -217,9 +218,11 @@ const ClockPanel = defineAsyncComponent(() => import('./components/ClockPanel.vu
 const AgentOverviewPanel = defineAsyncComponent(() => import('./components/AgentOverviewPanel.vue'))
 
 const backend = useBackend()
+const terminalPort = createHostTerminalDockPort(backend)
 // Hook the settings cache to the ws: reconciles + flushes queued writes once
 // connected, and applies ui.settings_changed broadcasts from other windows.
-initSettingsBackend(backend)
+initSettingsBackend(createHostGitSettingsPort(backend))
+initKeybindingsPort(createHostKeybindingsPort())
 // Per-CLI quota badges: configure the backend poller and mirror its
 // usage.changed broadcasts (read by TerminalPane's UsageBadge).
 initUsage(backend)
@@ -3652,7 +3655,7 @@ function setPrepStatus(pane: ActivePane, next: ActivePane['preparationStatus']):
   if (next === 'ready' || next === 'failed') prepStageEnteredAt.delete(pane.id)
   else prepStageEnteredAt.set(pane.id, now)
   diagLog(
-    backend,
+    terminalPort,
     'pane-prep',
     `pane=${pane.id.slice(0, 8)} agent=${pane.agentKey} ${prev}->${next}${spent}`
   )
@@ -12239,6 +12242,7 @@ function paneIsCommander(p: ActivePane): boolean {
       ref="pmRef"
       :open="showPipelineManager"
       :backend="backend"
+      :terminal-port="terminalPort"
       :roles-api="rolesApi"
       :pipelines-api="pipelinesApi"
       :workspace-path="currentWorkspace"
@@ -12249,6 +12253,7 @@ function paneIsCommander(p: ActivePane): boolean {
       v-if="debugEverOpened"
       :open="showDebug"
       :backend="backend"
+      :terminal-port="terminalPort"
       :workspace-path="currentWorkspace"
       @close="showDebug = false"
     />
@@ -12432,7 +12437,7 @@ function paneIsCommander(p: ActivePane): boolean {
           :rebuilding="paneRebuilding(p)"
           :is-preparing="paneShowsPrepOverlay(p)"
           :preparing-label="panePreparationLabel(p)"
-          :backend="backend"
+          :terminal-port="terminalPort"
           :cli-profiles="cliProfilesApi"
           :workspace-path="p.workspacePath"
           :mention-candidates="mentionCandidatesFor(p.id)"

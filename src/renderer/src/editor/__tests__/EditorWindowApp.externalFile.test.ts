@@ -108,6 +108,7 @@ vi.mock('../../composables/useTheme', () => ({
 const commands = vi.hoisted(() => new Map<string, () => unknown>())
 
 vi.mock('../../keybindings/useKeybindings', () => ({
+  initKeybindingsPort: vi.fn(),
   useKeybindings: vi.fn(),
   registerCommand: vi.fn((id: string, fn: () => unknown) => { commands.set(id, fn) }),
   setContext: vi.fn(),

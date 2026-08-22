@@ -3,7 +3,7 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useTerminal, type ClipboardFailureReason } from '../composables/useTerminal'
 import { useTheme } from '../composables/useTheme'
 import { useNotify } from '../composables/useNotify'
-import type { useBackend } from '../composables/useBackend'
+import type { TerminalDockPort } from '../ports/terminalDock'
 import type { useCliProfiles } from '../composables/useCliProfiles'
 import { extractDropPaths, escapeDraggedPath, stabilizeDroppedPaths } from '../lib/drop'
 import { CLI_CONTEXT_MIME, PANE_BATCH_MIME, PANE_ID_MIME, resolveCliDropSources, writeCliPaneDragPayload } from '../lib/cliContext'
@@ -68,7 +68,7 @@ interface Props {
    *  restore with `--resume`: the CLI reloaded its transcript but is parked at
    *  the prompt, so whatever it was doing is never picked up on its own. */
   continueAvailable?: boolean
-  backend: ReturnType<typeof useBackend>
+  terminalPort: TerminalDockPort
   cliProfiles: ReturnType<typeof useCliProfiles>
   workspacePath?: string
   /** Messaging names of the OTHER CLI panes (self excluded), for the
@@ -179,7 +179,7 @@ function onClipboardFailure(reason: ClipboardFailureReason, chars: number): void
   )
 }
 
-const terminal = useTerminal(props.paneId, props.backend, {
+const terminal = useTerminal(props.paneId, props.terminalPort, {
   workspacePath: props.workspacePath,
   onClear: () => emit('rebuild-clean'),
   onUserResume: () => emit('user-resume'),
@@ -206,7 +206,7 @@ watch(theme, () => terminal.updateXtermTheme())
 const disconnectedNotice = computed<string>(() => {
   // Optional-chained throughout, like the rest of this file: the pane's tests
   // stub both useTerminal and the backend with partial objects.
-  const status = props.backend?.status?.value
+  const status = props.terminalPort?.status?.value
   if (!status || status === 'connected') return ''
   // Which panes have something at stake: one holding a PTY ('running'), and one
   // mid-spawn ('starting'), whose keystrokes the input guard is already
@@ -220,7 +220,7 @@ const disconnectedNotice = computed<string>(() => {
   // long ago.
   const paneStatus = terminal.status?.value
   if (paneStatus !== 'running' && paneStatus !== 'starting') return ''
-  const auto = props.backend?.autoRestart?.value
+  const auto = props.terminalPort?.autoRestart?.value
   if (auto) {
     return i18n.global.t('pane.terminal.backend-restarting', { attempt: auto.attempt, max: auto.max })
   }
@@ -358,7 +358,7 @@ const selectModifierLabel = isMacPlatform() ? '⌥ Option' : 'Shift'
 // xterm's selection lives outside the DOM, so main cannot read it from the
 // context-menu params — pass it along with the request.
 function onTerminalContextMenu(): void {
-  window.agentTeam?.showTerminalContextMenu?.(terminal.getSelection())
+  props.terminalPort.showContextMenu?.(terminal.getSelection())
 }
 
 async function onTerminalDrop(e: DragEvent): Promise<void> {
@@ -457,7 +457,7 @@ function onHeaderDragEnd(e: DragEvent): void {
   // drag; main drops the release when it lands inside this window's own
   // bounds, which covers the common cancel-in-place case.)
   if (e.dataTransfer?.dropEffect !== 'none') return
-  window.agentTeam?.cliPaneDragEnd?.(props.paneId, e.screenX, e.screenY, headerDragBatch())
+  props.terminalPort.reportDragEnd?.(props.paneId, e.screenX, e.screenY, headerDragBatch())
 }
 
 function onHeaderDragOver(e: DragEvent): void {

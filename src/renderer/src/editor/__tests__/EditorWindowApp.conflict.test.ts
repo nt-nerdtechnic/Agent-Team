@@ -96,6 +96,7 @@ vi.mock('../../composables/useTheme', () => ({
 }))
 
 vi.mock('../../keybindings/useKeybindings', () => ({
+  initKeybindingsPort: vi.fn(),
   useKeybindings: vi.fn(),
   registerCommand: vi.fn(),
   setContext: vi.fn(),

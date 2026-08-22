@@ -2,9 +2,8 @@
 // GitWindowApp — the standalone Git client surface, "Editorial Calm" design.
 //
 // Runs inside the isolated `navide.git` plugin WebContentsView (see
-// src/renderer/plugins/git/). It reuses the existing `useGit` composable
-// unchanged; the plugin build aliases its `useBackend` to the capability shim,
-// so every git.* call is brokered over the host's shared WebSocket.
+// src/renderer/plugins/git/). The plugin mount injects the feature-owned
+// transports and ports; this surface never reaches into the Host backend.
 //
 // Layout: a calm, borderless reading surface. Toolbar (wordmark → repo crumb →
 // ghost sync actions + one primary). Sidebar: view nav on top, then GitPane's
@@ -15,15 +14,13 @@
 // card where the checkbox IS the stage state (check to stage, uncheck to
 // unstage) — plus a floating commit composer card. Bottom: shared DiffPane
 // detail. History (GitHistoryModal) and branch comparison (BranchDiffPane)
-// keep their own views. "Open in editor" routes through the `ui.open_in_editor`
-// host capability to the mini-IDE (OS default app when not installed); the
-// worktree/remote shell actions ride the other ui.* host capabilities. All
-// colors map to semantic tokens so the five app themes translate the design.
+// keep their own views. Editor, worktree, and remote hand-offs use the injected
+// UI port, so this surface stays independent of the concrete host transport.
+// All colors map to semantic tokens so the five app themes translate the design.
 
-import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted, inject } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useKeybindings, registerCommand, setContext } from './keybindings/useKeybindings'
-import { useBackend } from './composables/useBackend'
 import {
   useGit,
   type BlameEntry,
@@ -34,7 +31,17 @@ import {
 import { useIssues } from './composables/useIssues'
 import { useNotify } from './composables/useNotify'
 import { useTheme } from './composables/useTheme'
-import { initSettingsBackend, settingsGet, onSettingsChanged } from './lib/settings'
+import { settingsGet, onSettingsChanged } from './lib/settings'
+import {
+  GIT_BRANCH_DIFF_KEY,
+  GIT_ACCOUNTS_KEY,
+  GIT_CREDENTIALS_KEY,
+  GIT_FILE_ACCESS_KEY,
+  GIT_ISSUES_KEY,
+  GIT_TRANSPORT_KEY,
+  GIT_UI_KEY,
+} from './ports/gitSurface'
+import { TERMINAL_DOCK_KEY } from './ports/terminalDock'
 import GitHistoryModal from './components/GitHistoryModal.vue'
 import GitCredentialModal from './components/GitCredentialModal.vue'
 import NotificationHost from './components/NotificationHost.vue'
@@ -52,14 +59,20 @@ import { aiTerminalPaneId, bracketedPaste } from './lib/aiCliContext'
 const workspacePath = new URLSearchParams(window.location.search).get('workspace_path') ?? ''
 
 const { t } = useI18n()
-const backend = useBackend()
-// Hook the settings cache to the brokered ui.settings surface so theme changes
-// made in other windows arrive live (ui.settings_changed is ui-gated and the
-// manifest requires `ui`), and analyzerModel reconciles for AI commit messages.
-initSettingsBackend(backend)
+const gitTransport = inject(GIT_TRANSPORT_KEY)!
+const fileAccess = inject(GIT_FILE_ACCESS_KEY)!
+const uiPort = inject(GIT_UI_KEY)!
+const branchDiff = inject(GIT_BRANCH_DIFF_KEY)!
+const credentialPort = inject(GIT_CREDENTIALS_KEY)!
+const accountPort = inject(GIT_ACCOUNTS_KEY)!
+const issuePort = inject(GIT_ISSUES_KEY)!
+const terminalPort = inject(TERMINAL_DOCK_KEY)!
+if (!gitTransport || !fileAccess || !uiPort || !branchDiff || !credentialPort || !accountPort || !issuePort || !terminalPort) {
+  throw new Error('Git plugin ports were not provided by the composition root')
+}
 const { loadTheme } = useTheme()
 const notify = useNotify()
-const git = useGit(() => workspacePath, backend)
+const git = useGit(() => workspacePath, gitTransport, credentialPort)
 
 const {
   gitStatus,
@@ -173,7 +186,7 @@ const {
   ensureLoaded: ensureIssuesLoaded, refresh: refreshIssues,
   openIssue, closeDetail: closeIssueDetail,
   createIssue, addComment, setState: setIssueState
-} = useIssues(() => workspacePath, backend)
+} = useIssues(() => workspacePath, issuePort)
 
 // ── View state ───────────────────────────────────────────────────────────────
 type CenterView = 'history' | 'status' | 'branchdiff'
@@ -305,41 +318,43 @@ function runMenuItem(item: MenuItem): void {
   item.action()
 }
 
-// ── Host capabilities (mini-IDE / shell hand-offs) ───────────────────────────
+// ── UI hand-offs (mini-IDE / shell actions) ──────────────────────────────────
 const analyzerModel = ref(settingsGet('agentTeam.analyzerModel', ''))
 
-/** Route a file to the mini-IDE through the `ui.open_in_editor` host
- *  capability; the main process falls back to the OS default application when
- *  the mini-IDE plugin is not installed/available. */
+/** Route a file through the injected UI port; the composition decides where it
+ *  opens when the mini-IDE is not installed or available. */
 async function openInEditor(filepath: string): Promise<void> {
   if (!filepath) return
-  const resp = await backend.send('ui.open_in_editor', {
-    workspace_path: workspacePath,
-    filepath
-  })
-  if (!resp.ok)
-    notify.toast(resp.error?.message || t('label.could-not-open-editor'), { type: 'error' })
+  try {
+    await uiPort.openInEditor({ workspacePath, filepath })
+  } catch (err) {
+    notify.toast(err instanceof Error ? err.message : t('label.could-not-open-editor'), { type: 'error' })
+  }
 }
 async function openExternal(url: string): Promise<void> {
   if (!url) return
-  const resp = await backend.send('ui.open_external', { url })
-  if (!resp.ok) notify.toast(resp.error?.message || t('label.could-not-open-url'), { type: 'error' })
+  try {
+    await uiPort.openExternal(url)
+  } catch (err) {
+    notify.toast(err instanceof Error ? err.message : t('label.could-not-open-url'), { type: 'error' })
+  }
 }
 async function revealPath(path: string): Promise<void> {
-  const resp = await backend.send('ui.reveal_path', { path })
-  if (!resp.ok)
-    notify.toast(resp.error?.message || t('label.could-not-reveal-path'), { type: 'error' })
+  try {
+    await uiPort.revealPath(path)
+  } catch (err) {
+    notify.toast(err instanceof Error ? err.message : t('label.could-not-reveal-path'), { type: 'error' })
+  }
 }
 async function pickFolder(defaultPath?: string): Promise<string | null> {
-  const resp = await backend.send<{ ok: boolean; path: string | null }>('ui.pick_folder', {
-    ...(defaultPath ? { default_path: defaultPath } : {})
-  })
-  return resp.ok ? (resp.payload?.path ?? null) : null
+  try { return await uiPort.pickFolder(defaultPath) } catch { return null }
 }
 async function onOpenWorktree(path: string): Promise<void> {
-  const resp = await backend.send('ui.open_workspace', { workspace_path: path })
-  if (!resp.ok)
-    notify.toast(resp.error?.message || t('label.could-not-open-workspace'), { type: 'error' })
+  try {
+    await uiPort.openWorkspace(path)
+  } catch (err) {
+    notify.toast(err instanceof Error ? err.message : t('label.could-not-open-workspace'), { type: 'error' })
+  }
 }
 
 // ── AI CLI dock (embedded PTY agent panel) ───────────────────────────────────
@@ -523,17 +538,14 @@ async function sendPromptToAgent(prompt: string): Promise<{ ok: boolean; error?:
  *  opening the panel so the user sees the agent working. The agent's edits
  *  arrive back through the existing git.changed refresh; nothing to wire here. */
 async function onResolveWithAgent(path: string): Promise<void> {
-  const resp = await backend.send<{ ok: boolean; content: string; error?: string }>('fs.read_file', {
-    workspace_path: workspacePath,
-    rel_path: path
-  })
-  if (!resp.ok || !resp.payload?.ok || typeof resp.payload.content !== 'string') {
-    const detail = resp.payload?.error || resp.error?.message
+  const resp = await fileAccess.readFile(workspacePath, path)
+  if (!resp.ok || typeof resp.content !== 'string') {
+    const detail = resp.error
     notify.toast(detail || t('label.resolve-agent-read-failed', { path }), { type: 'error' })
     return
   }
   aiDockOpen.value = true
-  const sent = await sendPromptToAgent(buildConflictPrompt(path, resp.payload.content))
+  const sent = await sendPromptToAgent(buildConflictPrompt(path, resp.content))
   if (!sent.ok) {
     notify.toast(sent.error || t('label.operation-failed'), { type: 'error' })
     return
@@ -1386,8 +1398,8 @@ async function pickCloneDir(): Promise<void> {
   if (picked) cloneDir.value = picked
 }
 
-/** A clone lands outside this window's workspace, so the result opens in a new
- *  workspace window through the `ui.open_workspace` host capability. */
+/** A clone lands outside this window's workspace, so the injected UI port opens
+ *  the result in a workspace window. */
 async function onCloneRepo(): Promise<void> {
   if (!canClone.value) return
   isCloning.value = true
@@ -1418,8 +1430,8 @@ const busy = computed(
 // Same wiring as the Mini IDE window: install the shared capture-phase
 // dispatcher, flag this window with a `when` context so the git.* rules in
 // keybindings/defaults.ts only resolve here, then register the handlers.
-// User overrides never load in a plugin view (plugin-preload exposes no
-// `agentTeam`), so what defaults.ts declares is what this window gets.
+// The plugin composition supplies an intentionally empty persistence port, so
+// this view uses the shipped defaults unless a later composition opts in.
 useKeybindings()
 setContext('gitWindow', true)
 
@@ -1898,7 +1910,6 @@ registerCommand('git.focusAgent', () => {
           <GitHistoryModal
             show
             inline
-            :backend="backend"
             :workspace-path="workspacePath"
             :git-log="gitLog"
             :log-scope="logScope"
@@ -1941,8 +1952,9 @@ registerCommand('git.focusAgent', () => {
               :workspace-path="workspacePath"
               :base="diffBase"
               :compare="diffCompare"
-              :backend="backend"
-              hide-ai-review
+              :git-transport="gitTransport"
+              :branch-diff="branchDiff"
+              :credentials="credentialPort"
             />
             <div v-else class="empty-hint">{{ $t('hint.pick-two-branches') }}</div>
           </div>
@@ -2100,7 +2112,8 @@ registerCommand('git.focusAgent', () => {
                 :filepath="externalDiff.name"
                 :staged="externalDiff.staged"
                 :name="externalDiff.name"
-                :backend="backend"
+                :git-transport="gitTransport"
+                :file-access="fileAccess"
                 :commit="externalDiff.commit || undefined"
                 @open-file="(p) => openInEditor(p.filepath)"
               />
@@ -2113,7 +2126,8 @@ registerCommand('git.focusAgent', () => {
                 :workspace-path="workspacePath"
                 :filepath="externalDiff.name"
                 :name="externalDiff.name"
-                :backend="backend"
+                :git-transport="gitTransport"
+                :file-access="fileAccess"
                 :merge-aborted="!detailIsConflict"
                 @resolved="onConflictResolved"
               />
@@ -2201,7 +2215,7 @@ registerCommand('git.focusAgent', () => {
         :pane-id="AI_PANE_ID"
         origin="git-window"
         :workspace-path="workspacePath"
-        :backend="backend"
+        :terminal-port="terminalPort"
         :build-context="buildGitContext"
       />
     </div>
@@ -2228,6 +2242,7 @@ registerCommand('git.focusAgent', () => {
       :show="showCredentialPrompt"
       :prompt="credentialPrompt"
       :workspace-path="workspacePath"
+      :account-port="accountPort"
       @submit="submitCredential"
       @cancel="cancelCredential"
     />

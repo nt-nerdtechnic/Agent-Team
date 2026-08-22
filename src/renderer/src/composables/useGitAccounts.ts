@@ -1,4 +1,5 @@
 import { ref } from 'vue'
+import type { GitAccountInput, GitAccountPublic } from '../ports/gitSurface'
 
 // The gitAccounts IPC surface and its DTOs are declared on Window in env.d.ts,
 // but those DTO interfaces are module-scoped there (not exported / not global),
@@ -6,20 +7,7 @@ import { ref } from 'vue'
 // shapes here; they are structurally identical to the IPC types.
 type GitAccountsApi = NonNullable<NonNullable<Window['agentTeam']>['gitAccounts']>
 
-export interface GitAccountPublic {
-  id: string
-  label: string
-  host: string
-  username: string
-  tokenLast4: string
-}
-
-export interface GitAccountInput {
-  label: string
-  host: string
-  username: string
-  token: string
-}
+export type { GitAccountInput, GitAccountPublic }
 
 /**
  * Renderer-side wrapper around the safeStorage-backed git-accounts store

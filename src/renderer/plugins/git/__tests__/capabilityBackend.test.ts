@@ -213,4 +213,26 @@ describe('useBackend shim one-way input casts', () => {
     expect(callCapability).toHaveBeenCalledWith('terminal', 'input', { data: 'x' })
     expect(resp.ok).toBe(true)
   })
+
+  it('returns a timeout envelope when the capability broker misses the deadline', async () => {
+    installNav(true)
+    callCapability.mockReturnValue(new Promise(() => {}))
+    vi.useFakeTimers()
+    try {
+      const backend = useBackend()
+      const responsePromise = backend.send('git.status', { workspace_path: '/workspace' }, 25)
+      await vi.advanceTimersByTimeAsync(24)
+      expect(callCapability).toHaveBeenCalledWith('git', 'status', { workspace_path: '/workspace' })
+
+      await vi.advanceTimersByTimeAsync(1)
+      const response = await responsePromise
+      expect(response.ok).toBe(false)
+      expect(response.error).toEqual({
+        code: 'TIMEOUT',
+        message: "capability call 'git.status' timed out after 25ms",
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

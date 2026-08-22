@@ -8,6 +8,7 @@ import { nextTick, ref, type Ref } from 'vue'
 import { i18n } from '../../i18n'
 import { CLI_AGENT_SPECS } from '../../agents'
 import { bracketedPaste } from '../../lib/aiCliContext'
+import type { TerminalDockPort } from '../../ports/terminalDock'
 
 i18n.global.locale.value = 'en-US'
 
@@ -52,7 +53,7 @@ vi.mock('../AiCliTerminal.vue', async () => {
     __esModule: true,
     default: defineComponent({
       name: 'AiCliTerminal',
-      props: { paneId: String, backend: Object, workspacePath: String },
+      props: { paneId: String, terminalPort: Object, workspacePath: String },
       inheritAttrs: false,
       setup(_, { expose }) {
         expose({
@@ -71,20 +72,12 @@ vi.mock('../AiCliTerminal.vue', async () => {
 
 import AiCliDock from '../AiCliDock.vue'
 
-function makeBackend(status = 'connected') {
+function makeTerminalPort(status = 'connected'): TerminalDockPort {
   return {
     status: ref(status),
-    wsUrl: ref(''),
-    httpUrl: ref(''),
     shell: ref(''),
-    port: ref(0),
-    pid: ref(0),
-    lastError: ref(''),
-    send: vi.fn(async () => ({ payload: { ok: true } })),
-    on: vi.fn(() => () => {}),
-    restart: vi.fn(async () => undefined),
-    stop: vi.fn(async () => undefined),
-  } as unknown as InstanceType<typeof AiCliDock>['$props']['backend']
+    autoRestart: ref(null),
+  } as unknown as TerminalDockPort
 }
 
 const mounted: VueWrapper[] = []
@@ -93,7 +86,7 @@ function mountDock(props: Record<string, unknown> = {}): VueWrapper {
     props: {
       widthKey: 'test-cli-panel-width',
       workspacePath: '/tmp/ws',
-      backend: makeBackend(),
+      terminalPort: makeTerminalPort(),
       paneId: 'ab12cd34-test-cli-dock',
       origin: 'test-window',
       ...props,
@@ -154,11 +147,11 @@ describe('AiCliDock — eager terminal mount + keep-alive toggle', () => {
   })
 
   it('defers the reattach until the backend connects, then runs it exactly once', async () => {
-    const backend = makeBackend('connecting')
-    const wrapper = mountDock({ backend })
+    const terminalPort = makeTerminalPort('connecting')
+    const wrapper = mountDock({ terminalPort })
     await flushPromises()
     expect(termSpies.tryReattach).not.toHaveBeenCalled()
-    ;(backend as unknown as { status: Ref<string> }).status.value = 'connected'
+    ;(terminalPort as unknown as { status: Ref<string> }).status.value = 'connected'
     await flushPromises()
     expect(termSpies.tryReattach).toHaveBeenCalledTimes(1)
     // Panel toggles do not re-run it (once per window life).
@@ -282,7 +275,7 @@ describe('AiCliDock — agent picker persistence', () => {
 
 describe('AiCliDock — start guards and spawn path', () => {
   it('disables Start while the backend is not connected', async () => {
-    const wrapper = mountDock({ backend: makeBackend('disconnected') })
+    const wrapper = mountDock({ terminalPort: makeTerminalPort('disconnected') })
     await openDock(wrapper)
     expect(
       (wrapper.find('.ai-cli-btn.primary').element as HTMLButtonElement).disabled

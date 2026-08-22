@@ -4,6 +4,7 @@ import { mount, type VueWrapper } from '@vue/test-utils'
 import type { Ref } from 'vue'
 import TerminalPane from '../TerminalPane.vue'
 import type { DisplayStatus } from '../../composables/useTerminal'
+import { createTerminalDockStub } from '../../ports/__tests__/terminalDock.stub'
 
 // The pane-header status pill — the badge the user actually reads. Every value
 // displayStatus can report has to reach it with its own data-status hook,
@@ -44,7 +45,12 @@ function mountPane(status: DisplayStatus, kind: 'permission' | 'question' | null
   mockTerminal.awaitingKind.value = kind
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return mount(TerminalPane as any, {
-    props: { paneId: 'pane-1', title: 'Claude', backend: {} },
+    props: {
+      paneId: 'pane-1',
+      title: 'Claude',
+      terminalPort: createTerminalDockStub(),
+      cliProfiles: {},
+    },
     global: { mocks: { $t: tMock } }
   })
 }

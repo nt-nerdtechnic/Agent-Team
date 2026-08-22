@@ -2,6 +2,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import TerminalPane from '../TerminalPane.vue'
+import { createTerminalDockStub } from '../../ports/__tests__/terminalDock.stub'
 
 // A copy or paste that comes to nothing writes a diagnostic line, which serves
 // a later bug report. The pane also has to tell the person who just pressed
@@ -58,7 +59,12 @@ vi.mock('../../i18n', () => ({
 function mountPane(): VueWrapper {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return mount(TerminalPane as any, {
-    props: { paneId: 'pane-1', title: 'Claude', backend: {}, cliProfiles: {} },
+    props: {
+      paneId: 'pane-1',
+      title: 'Claude',
+      terminalPort: createTerminalDockStub(),
+      cliProfiles: {},
+    },
     global: { mocks: { $t: (key: string) => key } }
   })
 }

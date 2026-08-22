@@ -3,6 +3,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import type { Ref } from 'vue'
 import TerminalPane from '../TerminalPane.vue'
+import { createTerminalDockStub } from '../../ports/__tests__/terminalDock.stub'
 
 // Coverage for the continue button: a pane brought back by --resume parks at its
 // prompt with nothing telling it to carry on, so the button appears there and
@@ -47,7 +48,13 @@ function tMock(key: string): string {
 function mountPane(props: Record<string, unknown>): VueWrapper {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return mount(TerminalPane as any, {
-    props: { paneId: 'pane-1', title: 'Claude', backend: {}, ...props },
+    props: {
+      paneId: 'pane-1',
+      title: 'Claude',
+      terminalPort: createTerminalDockStub(),
+      cliProfiles: {},
+      ...props,
+    },
     global: { mocks: { $t: tMock } }
   })
 }

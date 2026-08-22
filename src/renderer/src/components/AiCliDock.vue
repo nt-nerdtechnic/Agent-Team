@@ -29,7 +29,7 @@ import { useI18n } from 'vue-i18n'
 import { settingsGet, settingsSet } from '../lib/settings'
 import { CLI_AGENT_SPECS } from '../agents'
 import { bracketedPaste, resolveCliCommand } from '../lib/aiCliContext'
-import type { useBackend } from '../composables/useBackend'
+import type { TerminalDockPort } from '../ports/terminalDock'
 import AiCliTerminal from './AiCliTerminal.vue'
 
 const props = withDefaults(
@@ -38,7 +38,7 @@ const props = withDefaults(
     widthKey: string
     /** Workspace the CLI spawns in; empty shows the no-workspace empty state. */
     workspacePath: string
-    backend: ReturnType<typeof useBackend>
+    terminalPort: TerminalDockPort
     /** Pane id, unique per (surface, workspace) — derive it with
      *  aiTerminalPaneId(). The first 8 chars MUST be hex: aider's per-pane
      *  chat-history file name is derived from paneId.slice(0, 8) and the
@@ -160,7 +160,7 @@ let reattachAttempted = false
 const reattaching = ref(false)
 async function maybeReattach(): Promise<void> {
   if (reattachAttempted) return
-  if (props.backend.status.value !== 'connected') return
+  if (props.terminalPort.status.value !== 'connected') return
   if (!props.workspacePath) return
   reattachAttempted = true
   reattaching.value = true
@@ -174,7 +174,7 @@ async function maybeReattach(): Promise<void> {
   finally { reattaching.value = false }
 }
 watch(
-  [() => props.backend.status.value, () => props.workspacePath],
+  [() => props.terminalPort.status.value, () => props.workspacePath],
   () => void maybeReattach(),
   { immediate: true }
 )
@@ -187,11 +187,9 @@ watch(
 // mentions go one way: from here out to the main window's panes.
 const mentionTargets = ref<string[]>([])
 async function refreshMentionTargets(): Promise<void> {
-  if (props.backend.status.value !== 'connected') return
+  if (props.terminalPort.status.value !== 'connected') return
   try {
-    const resp = await props.backend.send<{
-      panes?: Array<{ pane_id?: string; qualified_name?: string }>
-    }>('agent_msg.list', {})
+    const resp = await props.terminalPort.listAgentPanes()
     mentionTargets.value = (resp.payload?.panes ?? [])
       .filter((p) => p.qualified_name && p.pane_id !== props.paneId)
       .map((p) => p.qualified_name as string)
@@ -199,7 +197,7 @@ async function refreshMentionTargets(): Promise<void> {
     mentionTargets.value = []
   }
 }
-watch(() => props.backend.status.value, () => void refreshMentionTargets(), { immediate: true })
+watch(() => props.terminalPort.status.value, () => void refreshMentionTargets(), { immediate: true })
 const mentionPollTimer = setInterval(() => void refreshMentionTargets(), 10_000)
 onUnmounted(() => clearInterval(mentionPollTimer))
 
@@ -214,10 +212,10 @@ async function start(): Promise<void> {
   // Also require a live connection: a create queued while disconnected would
   // race the connect-time tryReattach and double-bind output handlers.
   if (!term || !props.workspacePath || starting.value || active.value || reattaching.value) return
-  if (props.backend.status.value !== 'connected') return
+  if (props.terminalPort.status.value !== 'connected') return
   starting.value = true
   try {
-    const shell = props.backend.shell.value || 'bash'
+    const shell = props.terminalPort.shell.value || 'bash'
     const command = resolveCliCommand({
       agentKey: agentKey.value,
       paneId: props.paneId,
@@ -337,7 +335,7 @@ defineExpose({ start, stop, interrupt, pasteText, injectNow, toggle, terminal: t
       </select>
       <button
         class="ai-cli-btn primary"
-        :disabled="!workspacePath || starting || reattaching || backend.status.value !== 'connected'"
+        :disabled="!workspacePath || starting || reattaching || terminalPort.status.value !== 'connected'"
         :title="workspacePath ? 'Spawn the CLI in ' + workspacePath : 'No workspace available'"
         @click="start"
       >{{ starting ? 'Starting…' : reattaching ? 'Reattaching…' : 'Start' }}</button>
@@ -358,7 +356,7 @@ defineExpose({ start, stop, interrupt, pasteText, injectNow, toggle, terminal: t
       :key="paneId"
       ref="termRef"
       :pane-id="paneId"
-      :backend="backend"
+      :terminal-port="terminalPort"
       :workspace-path="workspacePath"
       :mention-candidates="mentionTargets"
       class="ai-cli-term"

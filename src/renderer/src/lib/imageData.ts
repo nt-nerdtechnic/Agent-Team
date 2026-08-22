@@ -1,4 +1,4 @@
-import type { useBackend } from '../composables/useBackend'
+import type { GitFileAccessPort } from '../ports/gitSurface'
 
 /**
  * Load an image file as a base64 `data:` URL via the backend `fs.read_image`
@@ -8,16 +8,12 @@ import type { useBackend } from '../composables/useBackend'
  * Returns '' on any failure so callers can fall back to a placeholder.
  */
 export async function loadImageDataUrl(
-  backend: ReturnType<typeof useBackend>,
+  fileAccess: GitFileAccessPort,
   workspacePath: string,
   relPath: string,
 ): Promise<string> {
   try {
-    const resp = await backend.send<{ ok: boolean; data_url?: string }>('fs.read_image', {
-      workspace_path: workspacePath,
-      rel_path: relPath,
-    })
-    return resp.ok && resp.payload?.ok ? (resp.payload.data_url ?? '') : ''
+    return await fileAccess.readImage(workspacePath, relPath)
   } catch {
     return ''
   }

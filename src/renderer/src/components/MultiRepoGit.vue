@@ -5,6 +5,7 @@ import type { useBackend } from '../composables/useBackend'
 import type { Issue, IssueDetail, IssueProvider, IssueHandlerMode } from '../composables/useIssues'
 import { useRepoDiscovery } from '../composables/useRepoDiscovery'
 import { createHostGitTransport } from '../composables/hostGitTransport'
+import { createHostGitSurfacePorts } from '../composables/hostSurfacePorts'
 import { useI18n } from 'vue-i18n'
 
 const GitPane = defineAsyncComponent(() => import('./GitPane.vue'))
@@ -35,6 +36,7 @@ const emit = defineEmits<{
 const { t } = useI18n()
 
 const gitTransport = createHostGitTransport(props.backend)
+const surfacePorts = createHostGitSurfacePorts(props.backend, gitTransport)
 const { repositories } = useRepoDiscovery(() => props.workspacePath, gitTransport)
 
 // When root is not a git repo, inject it as the first tab so init/connect features remain accessible.
@@ -192,8 +194,12 @@ function repoLabel(relPath: string): string {
     v-if="!isMulti"
     :workspace-path="workspacePath"
     :analyzer-model="analyzerModel"
-    :backend="backend"
     :git-transport="gitTransport"
+    :file-access="surfacePorts.fileAccess"
+    :ui="surfacePorts.paneUi"
+    :issue-port="surfacePorts.issues"
+    :credentials="surfacePorts.credentials"
+    :accounts="surfacePorts.accounts"
     :embedded="embedded"
     :dispatch-targets="dispatchTargets"
     :available-agents="availableAgents"
@@ -245,8 +251,12 @@ function repoLabel(relPath: string): string {
           v-show="activeRepo === repo.abs_path"
           :workspace-path="repo.abs_path"
           :analyzer-model="analyzerModel"
-          :backend="backend"
           :git-transport="gitTransport"
+          :file-access="surfacePorts.fileAccess"
+          :ui="surfacePorts.paneUi"
+          :issue-port="surfacePorts.issues"
+          :credentials="surfacePorts.credentials"
+          :accounts="surfacePorts.accounts"
           :embedded="embedded"
           :dispatch-targets="dispatchTargets"
           :available-agents="availableAgents"

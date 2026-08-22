@@ -1,13 +1,13 @@
 import { watch } from 'vue'
-import type { useBackend } from '../composables/useBackend'
+import type { GitSettingsPort } from '../ports/gitSurface'
 
 // Renderer-side facade over the backend-owned UI settings KV store
 // (ui_settings.json, see backend/agent_team_backend/ui_settings.py). Exposes a
 // localStorage-like synchronous API backed by an in-memory cache:
 //
-// - The cache is seeded synchronously at module load from the main process's
-//   bootstrap snapshot (window.agentTeam.getBootstrapSettings), so values are
-//   available before first paint — no flash.
+// - The Host entrypoint publishes its bootstrap snapshot before lazy-loading a
+//   renderer root; the cache reads that generic snapshot at module load, so
+//   values are available before first paint — no Host bridge is bundled here.
 // - Writes update the cache immediately and are debounce-batched (500 ms) into
 //   a single `ui.settings.set` message; a null value on the wire deletes the
 //   key (settingsRemove semantics).
@@ -17,7 +17,7 @@ import type { useBackend } from '../composables/useBackend'
 // - `ui.settings_changed` broadcasts (writes from other windows — the backend
 //   excludes the sender) are merged into the cache for multi-window sync.
 
-type Backend = ReturnType<typeof useBackend>
+type Backend = GitSettingsPort
 
 export const SETTINGS_FLUSH_DEBOUNCE_MS = 500
 
@@ -100,20 +100,16 @@ export const PURGED_LOCALSTORAGE_PREFIXES: readonly string[] = [
 
 const MIGRATION_FLAG = '__migrated'
 
-function seedFromBootstrap(): Record<string, unknown> {
-  try {
-    const raw = window.agentTeam?.getBootstrapSettings?.() ?? '{}'
-    const parsed: unknown = JSON.parse(raw)
-    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>
-    }
-  } catch (err) {
-    console.warn('[settings] bootstrap parse failed; starting empty', err)
-  }
-  return {}
+function initialSettings(): Record<string, unknown> {
+  const value = (globalThis as typeof globalThis & {
+    __navideSettingsBootstrap?: unknown
+  }).__navideSettingsBootstrap
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
 }
 
-const cache: Record<string, unknown> = seedFromBootstrap()
+const cache: Record<string, unknown> = initialSettings()
 
 // Keys written locally but not yet acknowledged by the backend. A null value
 // marks a pending delete. Survives disconnects — flushed on reconnect.
@@ -183,14 +179,13 @@ export function settingsRemove(key: string): void {
   scheduleFlush()
 }
 
-/** Hook the module to the window's WebSocket backend (call once, e.g. right
- *  after useBackend() in App.vue). Subscribes to `ui.settings_changed`
- *  broadcasts and, on every (re)connect, reconciles the cache via
- *  `ui.settings.get` and flushes writes queued while offline. */
+/** Hook the module to a composed settings port (call once from each window's
+ *  composition root). Subscribes to settings-change broadcasts and, on every
+ *  (re)connect, reconciles the cache and flushes writes queued while offline. */
 export function initSettingsBackend(b: Backend): void {
   if (backend) return
   backend = b
-  offSettingsChanged = b.on('ui.settings_changed', (raw) => {
+  offSettingsChanged = b.onChanged((raw) => {
     const delta = (raw as { settings?: unknown } | null)?.settings
     if (delta === null || typeof delta !== 'object') return
     const changed: string[] = []
@@ -215,8 +210,7 @@ export function initSettingsBackend(b: Backend): void {
 
 async function reconcile(b: Backend): Promise<void> {
   try {
-    const resp = await b.send<{ settings?: Record<string, unknown> }>('ui.settings.get', {})
-    const server = resp.ok ? resp.payload?.settings : undefined
+    const server = await b.getAll()
     if (server && typeof server === 'object') {
       // The backend file is authoritative, except for local writes that
       // haven't been flushed yet — those take precedence and flush below.
@@ -258,8 +252,7 @@ async function flushPending(): Promise<void> {
   for (const [key, value] of pending) updates[key] = value
   pending.clear()
   try {
-    const resp = await b.send('ui.settings.set', { updates })
-    if (!resp.ok) throw new Error(resp.error?.message ?? 'ui.settings.set failed')
+    await b.setMany(updates)
     // The batch that carried the migration flag was acked — the store now owns
     // the data, so the legacy localStorage copies can finally be deleted.
     if (MIGRATION_FLAG in updates) removeMigratedLocalCopies()
@@ -351,5 +344,5 @@ export function __resetSettingsForTest(): void {
   pending.clear()
   changeListeners.clear()
   for (const key of Object.keys(cache)) delete cache[key]
-  Object.assign(cache, seedFromBootstrap())
+  Object.assign(cache, initialSettings())
 }

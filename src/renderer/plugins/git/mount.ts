@@ -1,18 +1,33 @@
-// Git plugin entry.
+// Git plugin composition root.
 //
-// Mounts GitWindowApp.vue inside the isolated plugin WebContentsView. It boots
-// like the core windows (src/renderer/src/main.ts): the same theme-token CSS
-// layers and i18n, then `createApp(GitWindowApp).mount('#app')`.
-//
-// The one difference is invisible to the app source: the plugin build aliases
-// `composables/useBackend` to `./capabilityBackend`, so every `send`/`on` inside
-// GitWindowApp and useGit is routed through `window.nav` (the host capability
-// broker) instead of a direct WebSocket. GitWindowApp reads its
-// `workspace_path` from `window.location.search`, which the host sets when it
-// loads this entry — no injection needed here.
+// The isolated plugin view receives one already-authenticated capability
+// closure from the SDK shim. All feature ports are built here and injected into
+// the shared Git surface; GitWindowApp and its domain components never see the
+// capability backend, IPC/WebSocket details, or Host routes.
 
 import { createApp } from 'vue'
 import { i18n } from '../../src/i18n'
+import { useBackend } from './capabilityBackend'
+import { createPluginGitTransport, type PluginGitSdk } from './sdkGitTransport'
+import {
+  createPluginCapabilitySdk,
+  createPluginKeybindingsPort,
+  createPluginGitSurfacePorts,
+  createPluginGitSettingsPort,
+  createPluginTerminalDockPort,
+} from './pluginSurfacePorts'
+import {
+  GIT_ACCOUNTS_KEY,
+  GIT_BRANCH_DIFF_KEY,
+  GIT_CREDENTIALS_KEY,
+  GIT_FILE_ACCESS_KEY,
+  GIT_ISSUES_KEY,
+  GIT_TRANSPORT_KEY,
+  GIT_UI_KEY,
+} from '../../src/ports/gitSurface'
+import { TERMINAL_DOCK_KEY } from '../../src/ports/terminalDock'
+import { initSettingsBackend, seedSettings } from '../../src/lib/settings'
+import { initKeybindingsPort } from '../../src/keybindings/useKeybindings'
 
 // Theme token layers — order matters: primitives → semantic roles → themes.
 import '../../src/styles/tokens/base.css'
@@ -23,7 +38,6 @@ import '../../src/styles/tokens/themes/light.css'
 import '../../src/styles/tokens/themes/high-contrast.css'
 
 import GitWindowApp from '../../src/GitWindowApp.vue'
-import { seedSettings } from '../../src/lib/settings'
 
 // Zero-flash initial theme: the host passes the current app theme as `?theme=`
 // (the plugin origin has no `window.agentTeam.getBootstrapSettings`, so the
@@ -37,11 +51,34 @@ if (initialTheme) {
   seedSettings({ 'agent-team:theme': JSON.stringify(initialTheme) })
 }
 
-// Announce readiness to the host broker (mirrors the plans/mini-ide plugins).
-// Local cast instead of relying on the `Window.nav` global augmentation — see
-// the note in ./capabilityBackend.ts.
+const backend = useBackend()
+const capabilitySdk = createPluginCapabilitySdk(backend)
+const gitSdk: PluginGitSdk = {
+  status: capabilitySdk.status,
+  request: capabilitySdk.request,
+  subscribe: capabilitySdk.subscribe,
+}
+const gitTransport = createPluginGitTransport(gitSdk)
+const surfacePorts = createPluginGitSurfacePorts(capabilitySdk, gitTransport)
+const settingsPort = createPluginGitSettingsPort(capabilitySdk)
+const terminalPort = createPluginTerminalDockPort(capabilitySdk)
+
+// Hook shared settings to the same authenticated ui capability closure before
+// the app reads any cached setting.
+initSettingsBackend(settingsPort)
+initKeybindingsPort(createPluginKeybindingsPort())
+
+// Announce readiness only after the SDK-backed composition has been created.
 ;(window as unknown as { nav?: { ready?: () => void } }).nav?.ready?.()
 
 const app = createApp(GitWindowApp)
 app.use(i18n)
+app.provide(GIT_TRANSPORT_KEY, surfacePorts.gitTransport)
+app.provide(GIT_FILE_ACCESS_KEY, surfacePorts.fileAccess)
+app.provide(GIT_UI_KEY, surfacePorts.ui)
+app.provide(GIT_BRANCH_DIFF_KEY, surfacePorts.branchDiff)
+app.provide(GIT_CREDENTIALS_KEY, surfacePorts.credentials)
+app.provide(GIT_ACCOUNTS_KEY, surfacePorts.accounts)
+app.provide(GIT_ISSUES_KEY, surfacePorts.issues)
+app.provide(TERMINAL_DOCK_KEY, terminalPort)
 app.mount('#app')

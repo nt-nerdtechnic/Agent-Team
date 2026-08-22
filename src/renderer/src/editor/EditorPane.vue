@@ -8,6 +8,7 @@ import { languageForFile, normalizeLanguage } from './languageDetect'
 import type { Range, Position } from './types'
 import { diagnosticsStore, diagnosticsKey } from './diagnostics'
 import { loadImageDataUrl } from '../lib/imageData'
+import { createHostGitFileAccessPort } from '../composables/hostSurfacePorts'
 
 const props = defineProps<{
   workspacePath: string
@@ -26,6 +27,8 @@ const props = defineProps<{
   revealAt?: number
   revealSeq?: number
 }>()
+
+const fileAccess = createHostGitFileAccessPort(props.backend)
 
 const emit = defineEmits<{
   (e: 'dirty', value: boolean): void
@@ -198,7 +201,7 @@ async function load(): Promise<void> {
         // Fetch image bytes as a data URL (a raw file:// src is blocked by
         // webSecurity from the dev http origin). Empty result → placeholder.
         if (isImageFile.value) {
-          imageDataUrl.value = await loadImageDataUrl(props.backend, props.workspacePath, props.relPath)
+          imageDataUrl.value = await loadImageDataUrl(fileAccess, props.workspacePath, props.relPath)
         }
         return
       }

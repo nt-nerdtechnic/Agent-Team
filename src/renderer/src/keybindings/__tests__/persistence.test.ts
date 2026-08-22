@@ -8,6 +8,7 @@ import { mount, type VueWrapper } from '@vue/test-utils'
 import {
   _resetKeybindingsState,
   getUserRules,
+  initKeybindingsPort,
   isKeyCaptureActive,
   onUserRulesChanged,
   saveUserRules,
@@ -53,6 +54,14 @@ beforeEach(() => {
   _resetRegistry()
   _resetKeybindingsState()
   installBridge()
+  initKeybindingsPort({
+    read: () => bridge.readKeybindings(),
+    write: (content) => bridge.writeKeybindings(content),
+    onChanged: (callback) => {
+      bridge.onKeybindingsChanged(callback)
+      return () => {}
+    },
+  })
   setContext('editorOpen', false)
   setContext('terminalFocus', false)
   setContext('modalOpen', false)
@@ -64,6 +73,7 @@ afterEach(() => {
   wrapper?.unmount()
   wrapper = undefined
   delete (window as unknown as { agentTeam?: Bridge }).agentTeam
+  initKeybindingsPort({})
 })
 
 describe('saveUserRules', () => {
@@ -90,6 +100,7 @@ describe('saveUserRules', () => {
 
   it('still applies locally when no bridge is available', async () => {
     delete (window as unknown as { agentTeam?: Bridge }).agentTeam
+    initKeybindingsPort({})
     const result = await saveUserRules([{ key: 'cmd+alt+s', command: 'editor.action.save' }])
     expect(result.ok).toBe(false)
     expect(getUserRules()).toHaveLength(1)

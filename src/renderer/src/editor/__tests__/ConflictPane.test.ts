@@ -2,9 +2,8 @@
 // ConflictPane — the hand-rolled three-way merge view shared by the mini-IDE
 // and the Git window. These tests cover the merge-stage side channel added on
 // top of the marker parsing: the common-ancestor ("Base") toggle and the
-// binary-conflict bail-out. The backend is a plain stub, because the pane
-// takes it as a prop (that is what lets the Git window mount it without
-// pulling Monaco in).
+// binary-conflict bail-out. The transport and file access are plain stubs,
+// which keeps the test at the pane's named-port seam.
 import { describe, it, expect, vi } from 'vitest'
 import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import { ref } from 'vue'
@@ -47,7 +46,6 @@ function makeBackend(content: string, stages: StageStub | null) {
   const sent: { type: string; payload: Record<string, unknown> }[] = []
   const send = vi.fn(async (type: string, payload: Record<string, unknown> = {}) => {
     sent.push({ type, payload })
-    if (type === 'fs.read_file') return { ok: true, payload: { ok: true, content } }
     if (type === 'git.conflict_stages') {
       return {
         ok: true,
@@ -67,20 +65,36 @@ function makeBackend(content: string, stages: StageStub | null) {
     }
     return { ok: true, payload: { ok: true } }
   })
-  return { backend: { status: ref('connected'), send }, sent }
+  const fileAccess = {
+    readFile: vi.fn(async (workspacePath: string, relPath: string) => {
+      sent.push({ type: 'fs.read_file', payload: { workspace_path: workspacePath, rel_path: relPath } })
+      return { ok: true, content }
+    }),
+    writeFile: vi.fn(async (workspacePath: string, relPath: string, nextContent: string) => {
+      sent.push({ type: 'fs.write_file', payload: { workspace_path: workspacePath, rel_path: relPath, content: nextContent } })
+      return { ok: true }
+    }),
+    readImage: vi.fn(async () => ''),
+  }
+  return {
+    gitTransport: { status: ref('connected'), send, on: vi.fn(() => () => {}) },
+    fileAccess,
+    sent,
+  }
 }
 
 async function mountPane(content: string, stages: StageStub | null): Promise<{
   wrapper: VueWrapper
   sent: { type: string; payload: Record<string, unknown> }[]
 }> {
-  const { backend, sent } = makeBackend(content, stages)
+  const { gitTransport, fileAccess, sent } = makeBackend(content, stages)
   const wrapper = mount(ConflictPane, {
     props: {
       workspacePath: '/ws',
       filepath: 'src/a.ts',
       name: 'a.ts',
-      backend: backend as never,
+      gitTransport: gitTransport as never,
+      fileAccess,
     },
     global: { plugins: [i18n] },
   })
@@ -156,9 +170,9 @@ describe('ConflictPane — merge stages', () => {
   })
 
   it('writes the base side when "Accept Base" is applied', async () => {
-    const { backend, sent } = makeBackend(DIFF3_STYLE, { has_base: true, base: 'base line\n' })
+    const { gitTransport, fileAccess, sent } = makeBackend(DIFF3_STYLE, { has_base: true, base: 'base line\n' })
     const wrapper = mount(ConflictPane, {
-      props: { workspacePath: '/ws', filepath: 'src/a.ts', name: 'a.ts', backend: backend as never },
+      props: { workspacePath: '/ws', filepath: 'src/a.ts', name: 'a.ts', gitTransport: gitTransport as never, fileAccess },
       global: { plugins: [i18n] },
     })
     await flushPromises()
@@ -183,13 +197,14 @@ describe('ConflictPane — merge stages', () => {
   })
 
   it('disables the panel when the parent reports the merge is gone', async () => {
-    const { backend } = makeBackend(MERGE_STYLE, { has_base: true, base: 'base\n' })
+    const { gitTransport, fileAccess } = makeBackend(MERGE_STYLE, { has_base: true, base: 'base\n' })
     const wrapper = mount(ConflictPane, {
       props: {
         workspacePath: '/ws',
         filepath: 'src/a.ts',
         name: 'a.ts',
-        backend: backend as never,
+        gitTransport: gitTransport as never,
+        fileAccess,
         mergeAborted: true,
       },
       global: { plugins: [i18n] },

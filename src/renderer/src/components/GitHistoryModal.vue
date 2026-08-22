@@ -2,7 +2,6 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { computeGraph, laneColor } from '../lib/git-graph'
 import { useNotify } from '../composables/useNotify'
-import type { useBackend } from '../composables/useBackend'
 import type { GitCommit, GitCommitDetail, DiffBlameHunk } from '../composables/useGit'
 
 // The full-history dialog reuses the parent GitPane's single useGit instance
@@ -17,7 +16,6 @@ const props = defineProps<{
   show: boolean
   // Inline component mode: render inside container without Teleport or popup header.
   inline?: boolean
-  backend: ReturnType<typeof useBackend>
   workspacePath: string
   gitLog: GitCommit[]
   logScope: 'all' | 'current'

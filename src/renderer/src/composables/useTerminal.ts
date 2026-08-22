@@ -5,7 +5,6 @@ import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { SerializeAddon } from '@xterm/addon-serialize'
 import { WebglAddon } from '@xterm/addon-webgl'
 import '@xterm/xterm/css/xterm.css'
-import type { useBackend } from './useBackend'
 import { bufferTail, createRedrawGuard, dropTuiNoise, stripAnsi } from '../lib/buffer'
 import { AGENT_SPECS } from '../agents'
 import { createResizeController, type ResizeController } from './useTerminalResize'
@@ -13,7 +12,7 @@ import { installTerminalZoomShortcuts, terminalFontSize } from './useTerminalFon
 import { getResumeConcurrency } from '../lib/resumeConcurrency'
 import { chunkForPty, shouldOpenMentionMenu, stripInputSequences } from '../lib/cliContext'
 import { settingsGet, settingsSet } from '../lib/settings'
-import { extractClipboardImage, saveClipboardImage } from '../lib/clipboardImage'
+import { extractClipboardImage } from '../lib/clipboardImage'
 import { TERMINAL_CREATE_TIMEOUT_MS } from '../lib/resume-command'
 import { setContext } from '../keybindings/contextService'
 import { createThrottledDiag, diagLog } from '../lib/diagLog'
@@ -22,11 +21,10 @@ import {
   isTerminalCrashLoopOpen,
   recordTerminalExit,
   terminalCrashKey,
-  type TerminalExitDetails,
-  type TerminalStartupProbe,
 } from '../lib/spawnHistory'
 
 import type { ITheme } from '@xterm/xterm'
+import type { TerminalDockPort, TerminalSpawnOptions } from '../ports/terminalDock'
 
 // Per-app-theme xterm palettes. CSS vars can't be used directly because
 // getPropertyValue returns the raw `var(--gray-12)` token, not the resolved hex.
@@ -109,29 +107,7 @@ function readXtermTheme(): ITheme {
   return XTERM_THEMES[id] ?? XTERM_THEMES['dark-github']
 }
 
-export interface SpawnOptions {
-  command: string | string[]
-  cwd: string
-  env?: Record<string, string>
-  agentKey?: string
-  metadata?: Record<string, unknown>
-  outputLogFile?: string  // if set, backend writes ANSI-stripped output to this path
-  // Stable CLI session id (e.g. claude --session-id). Used as the reattach
-  // persistence key so a PTY can be rebound after a reload — the paneId is
-  // regenerated on restore and would never match. Falls back to paneId if absent.
-  resumeKey?: string
-  // True when the command resumes a prior session (reprints the conversation),
-  // so the PTY must be created at the real measured width. A fresh spawn is
-  // empty and may be created immediately even while hidden (see createWhenMeasurable).
-  isResume?: boolean
-  // If 'fresh', ignores the localStorage scrollback snapshot even if resuming.
-  restoreMode?: 'memory-resume' | 'fresh'
-  // If true, prevents reattaching to an existing PTY (useful for explicit rebuilds).
-  skipReattach?: boolean
-  // CLI account profile id for an isolated LOGIN pane: the backend runs the
-  // CLI inside that profile's login home (see credential_vault login homes).
-  loginProfileId?: string
-}
+export type SpawnOptions = TerminalSpawnOptions
 
 /** Historic aliases some call sites passed before agent keys were canonical. */
 function terminalSpecFor(agentKey?: string): (typeof AGENT_SPECS)[number] | undefined {
@@ -465,11 +441,6 @@ const BARE_URL_RE = new RegExp(
   'gi'
 )
 
-type _AgentApi = {
-  openEditorWindow?: (a: Record<string, unknown>) => Promise<unknown>
-  openPlansWindow?: (a: { workspace_path: string; rel_path?: string }) => Promise<unknown>
-}
-
 // A plan doc reference embedded in CLI prose ("計畫已建立：.agent-team/plans/x.html
 // （stage:…"). Extract just the ASCII plan rel-path, matching isHtmlPlanDoc's shape
 // (top-level, non-'_' name under .agent-team/plans/). Because the class is
@@ -544,17 +515,20 @@ export function htmlReportRoute(
  *  the mini-IDE adds a tab instead of reloading onto a different workspace and
  *  losing every open tab. Without a pane workspace there is nothing to stay
  *  on, so the file's own directory becomes the workspace (previous behaviour). */
-function openInEditor(absPath: string, line: number | undefined, workspacePath?: string): void {
-  const api = (window as Window & { agentTeam?: _AgentApi }).agentTeam
-  if (!api?.openEditorWindow) return
+function openInEditor(
+  terminalPort: TerminalDockPort,
+  absPath: string,
+  line: number | undefined,
+  workspacePath?: string,
+): void {
   const slash = absPath.lastIndexOf('/')
   const dir = slash > 0 ? absPath.slice(0, slash) : '/'
   const root = workspacePath?.replace(/\/+$/, '')
   const inWorkspace = !!root && absPath.startsWith(`${root}/`)
-  void api.openEditorWindow({
-    workspace_path: root || dir,
+  void terminalPort.openFile({
+    workspacePath: root || dir,
     filepath: inWorkspace ? absPath.slice(root.length + 1) : absPath.slice(slash + 1),
-    ...(root && !inWorkspace ? { file_ws: dir } : {}),
+    ...(root && !inWorkspace ? { fileWorkspace: dir } : {}),
     ...(line !== undefined ? { line } : {}),
   })
 }
@@ -564,11 +538,10 @@ function openInEditor(absPath: string, line: number | undefined, workspacePath?:
 // picker keeps displaying the '~' form. Home is fetched once over IPC and
 // cached for the sync display path.
 let _homeDir = ''
-async function fetchHomeDir(): Promise<string> {
+async function fetchHomeDir(terminalPort: TerminalDockPort): Promise<string> {
   if (_homeDir) return _homeDir
   try {
-    const api = (window as Window & { agentTeam?: { getHomeDir?: () => Promise<string> } }).agentTeam
-    _homeDir = (await api?.getHomeDir?.()) || ''
+    _homeDir = (await terminalPort.getHomeDirectory?.()) ?? ''
   } catch { /* ignore — '~' links just fall back to fuzzy search */ }
   return _homeDir
 }
@@ -1184,7 +1157,7 @@ function releaseResumeSpawnSlot(): void {
   _resumeSpawnActive--
 }
 
-export function useTerminal(paneId: string, backend: ReturnType<typeof useBackend>, opts?: UseTerminalOptions) {
+export function useTerminal(paneId: string, terminalPort: TerminalDockPort, opts?: UseTerminalOptions) {
   installTerminalZoomShortcuts()
   installTerminalSelectionGlobal()
 
@@ -1699,10 +1672,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       closeMentionMenu()
       term.focus()
       if (name && inputTransportReady()) {
-        void backend.send('terminal.input', {
-          terminal_session_id: sessionId.value,
-          data: name + ' ',
-        })
+        void terminalPort.input(sessionId.value, name + ' ')
       }
     }
 
@@ -1769,13 +1739,13 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         e.preventDefault(); e.stopPropagation()
         closeMentionMenu(); term.focus()
         if (inputTransportReady()) {
-          void backend.send('terminal.input', { terminal_session_id: sessionId.value, data: '\x7f' })
+          void terminalPort.input(sessionId.value, '\x7f')
         }
       } else if (e.key.length === 1) {
         e.preventDefault(); e.stopPropagation()
         closeMentionMenu(); term.focus()
         if (inputTransportReady()) {
-          void backend.send('terminal.input', { terminal_session_id: sessionId.value, data: e.key })
+          void terminalPort.input(sessionId.value, e.key)
         }
       }
     }
@@ -1856,7 +1826,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   const SELECTION_PUSH_DEBOUNCE_MS = 60
   const _reportSelection = (selection: string): void => {
     try {
-      window.agentTeam?.reportTerminalSelection?.(selection)
+      terminalPort.reportSelection?.(selection)
     } catch { /* no bridge (tests, plugin preload) — Copy keeps its own fallback */ }
   }
   const _cancelSelectionPush = (): void => {
@@ -1927,7 +1897,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       if (document.activeElement !== term.textarea) {
         // Typing now goes nowhere the user can see until they click the pane,
         // which is indistinguishable from "the terminal became laggy".
-        diagLog(backend, 'focus', `pane=${paneId} window returned but the terminal could not retake focus`, 'warning')
+        diagLog(terminalPort, 'focus', `pane=${paneId} window returned but the terminal could not retake focus`, 'warning')
         _releaseTerminalFocus()
       }
     } else if (active !== term.textarea) {
@@ -1962,7 +1932,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // latch turns out to fire constantly, the log says so through the suppressed
   // count instead of adding a WebSocket message per key to an already slow one.
   const DIAG_THROTTLE_MS = 5000
-  const _imeDiag = createThrottledDiag(backend, 'ime', DIAG_THROTTLE_MS)
+  const _imeDiag = createThrottledDiag(terminalPort, 'ime', DIAG_THROTTLE_MS)
   const _onCompositionStart = (): void => { _compositionStartedAt = Date.now() }
   const _onCompositionEnd = (): void => {
     const held = _compositionStartedAt ? Date.now() - _compositionStartedAt : 0
@@ -1995,7 +1965,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   // what a "the paste vanished" report needs to answer. The one path that can
   // outrun a human is a held ⌘C, which gates its own line on e.repeat.
   const _clipboardDiag = (message: string, level: 'info' | 'warning' = 'info'): void =>
-    diagLog(backend, 'clipboard', message, level)
+    diagLog(terminalPort, 'clipboard', message, level)
 
   /**
    * Report a clipboard failure to both audiences at once.
@@ -2065,11 +2035,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // raise SIGWINCH, so nudge the agent explicitly via force_redraw.
     if (sized && pendingReattachRedraw) {
       pendingReattachRedraw = false
-      void backend.send('terminal.reattach', {
-        terminal_session_ids: [sessionId.value],
-        cols: term.cols,
-        rows: term.rows,
-      })
+      void terminalPort.reattach([sessionId.value], term.cols, term.rows)
     }
   }, RECONCILE_MS)
 
@@ -2394,7 +2360,14 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         // Sent unquoted: the generated name has no spaces, so the shell is
         // happy and an agent scanning for a readable path is not tripped up by
         // quotes it may not strip.
-        void saveClipboardImage(image).then((path) => {
+        if (!terminalPort.saveClipboardImage) {
+          _clipboardFailure(
+            `pane=${paneId} clipboard image could not be saved — image support is unavailable`,
+            'image-failed'
+          )
+          return
+        }
+        void terminalPort.saveClipboardImage(image).then((path) => {
           if (path) pasteFromClipboard(path)
           // saveClipboardImage resolves null (it never rejects) when the bridge
           // is missing or main declined the media type. The screenshot then
@@ -2530,7 +2503,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
           row.appendChild(nameSpan)
           row.appendChild(dirSpan)
           row.addEventListener('mouseenter', () => { selectedIdx = i; renderList() })
-          row.addEventListener('mousedown', (e) => { e.preventDefault(); close(); openInEditor(item.abs, lineNum, wsPath) })
+          row.addEventListener('mousedown', (e) => { e.preventDefault(); close(); openInEditor(terminalPort, item.abs, lineNum, wsPath) })
           itemList.appendChild(row)
         })
       }
@@ -2556,9 +2529,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         let items: PickerItem[] = []
         if (q.trim() && wsPath) {
           try {
-            const r = await backend.send<{ files: string[] }>('fs.list_files_flat', {
-              workspace_path: wsPath, query: q, max_results: 20,
-            })
+            const r = await terminalPort.listFiles(wsPath, q, 20)
             items = (r.ok && r.payload?.files ? r.payload.files : []).map((rel) => {
               const parts = rel.split('/')
               const name = parts.pop() ?? rel
@@ -2590,7 +2561,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         } else if (e.key === 'Enter') {
           e.preventDefault()
           const item = currentItems[selectedIdx]
-          if (item) { close(); openInEditor(item.abs, lineNum, wsPath) }
+          if (item) { close(); openInEditor(terminalPort, item.abs, lineNum, wsPath) }
         }
       })
 
@@ -2623,11 +2594,10 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       // A URL under the click routes straight to the default browser — checked
       // before file paths, since a URL's path segment also matches FILE_LINK_RE.
       const urlMatch = findUrlLinkMatchAt(group.fullText, clickPos, group.heuristicBreaks)
-      const openExternal = window.agentTeam?.openExternal
-      if (urlMatch && openExternal) {
+      if (urlMatch) {
         event.preventDefault()
         event.stopPropagation()
-        void openExternal(urlMatch.href)
+        void terminalPort.openExternal(urlMatch.href)
         return
       }
 
@@ -2656,12 +2626,9 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       // pane's own (resolve base intentionally unchanged) — a plan path that
       // belongs to a different workspace falls through to the picker as before.
       const planRel = extractPlanDocRelPath(pieceRaw) ?? extractPlanDocRelPath(match.text)
-      if (planRel && wsPath) {
-        const agentApi = (window as Window & { agentTeam?: _AgentApi }).agentTeam
-        if (agentApi?.openPlansWindow) {
-          void agentApi.openPlansWindow({ workspace_path: wsPath, rel_path: planRel })
-          return
-        }
+      if (planRel && wsPath && terminalPort.openPlan) {
+        void terminalPort.openPlan({ workspacePath: wsPath, relPath: planRel })
+        return
       }
 
       const statOk = async (abs: string | undefined): Promise<boolean> => {
@@ -2669,12 +2636,12 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         try {
           // Short timeout: a busy/disconnected backend must not stall the
           // picker from opening — unverified just means fuzzy-search fallback.
-          const r = await backend.send<{ exists: boolean }>('fs.stat_path', { path: abs }, 1500)
+          const r = await terminalPort.statPath(abs, 1500)
           return !!(r.ok && r.payload?.exists)
         } catch { return false }
       }
       void (async () => {
-        const home = await fetchHomeDir()
+        const home = await fetchHomeDir(terminalPort)
         const resolveAbs = (fp: string): string | undefined => {
           const expanded = expandHomePath(fp, home)
           return expanded.startsWith('/')
@@ -2704,9 +2671,8 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         // window (same surface as plan docs), not as source in the mini-IDE.
         if (okIdx >= 0) {
           const reportRoute = htmlReportRoute(absList[okIdx]!, wsPath)
-          const agentApi = (window as Window & { agentTeam?: _AgentApi }).agentTeam
-          if (reportRoute && agentApi?.openPlansWindow) {
-            void agentApi.openPlansWindow(reportRoute)
+          if (reportRoute && terminalPort.openPlan) {
+            void terminalPort.openPlan({ workspacePath: reportRoute.workspace_path, relPath: reportRoute.rel_path })
             return
           }
         }
@@ -3060,7 +3026,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
    * tells the user why their typing is going nowhere.
    */
   function inputTransportReady(): boolean {
-    return backend.status.value === 'connected'
+    return terminalPort.status.value === 'connected'
   }
 
   /** Replay what the user typed while the pane was still preparing. */
@@ -3085,10 +3051,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // session that no longer exists.
     if (!sessionId.value || status.value === 'exited' || status.value === 'error') return
     noteUserInput(pending)
-    void backend.send('terminal.input', {
-      terminal_session_id: sessionId.value,
-      data: pending
-    })
+    void terminalPort.input(sessionId.value, pending)
   }
 
   // Renderer half of the input round-trip. The pane has no local echo, so the
@@ -3103,7 +3066,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   const ECHO_ROUNDTRIP_MAX_MS = 3000
   // Throttled for the reason above, and more sharply relevant here: sustained
   // lag would otherwise mean one diagnostic per keystroke.
-  const _echoDiag = createThrottledDiag(backend, 'echo', 5000)
+  const _echoDiag = createThrottledDiag(terminalPort, 'echo', 5000)
 
   /** Input bookkeeping shared by term.onData and the manual-paste path. */
   function noteUserInput(text: string): void {
@@ -3186,10 +3149,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       // every key would never let the lag they are feeling accumulate.
       if (!_keystrokeSentAt && data.length <= 16) _keystrokeSentAt = Date.now()
 
-      void backend.send('terminal.input', {
-        terminal_session_id: sessionId.value,
-        data
-      })
+      void terminalPort.input(sessionId.value, data)
 
       // @-mention trigger. Capture the line BEFORE the '@' echoes (onData fires
       // before the PTY round-trips the echo, so readLineBeforeCursor still shows
@@ -3203,8 +3163,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       }
     })
 
-    outputUnsub = backend.on('terminal.output', (raw) => {
-      const payload = raw as { terminal_session_id: string; data: string }
+    outputUnsub = terminalPort.onOutput((payload) => {
       if (payload.terminal_session_id !== sessionId.value) return
       if (_keystrokeSentAt) {
         const roundTrip = Date.now() - _keystrokeSentAt
@@ -3222,8 +3181,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       }
     })
 
-    exitUnsub = backend.on('terminal.exit', (raw) => {
-      const payload = raw as TerminalExitDetails & { terminal_session_id: string }
+    exitUnsub = terminalPort.onExit((payload) => {
       if (payload.terminal_session_id !== sessionId.value) return
       const crashState = activeCrashKey && activeAgentKey && activeAgentKey !== 'terminal'
         ? recordTerminalExit(activeCrashKey, payload)
@@ -3290,11 +3248,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       // force_redraw). The repaint is deferred to the reconciler, which fires it
       // once the width has settled — forcing it now would repaint the live agent
       // at the renderer's transient mid-reflow width (narrow).
-      const resp = await backend.send<{ alive: string[]; dead: string[] }>('terminal.reattach', {
-        terminal_session_ids: [prev],
-        cols: 0,
-        rows: 0,
-      })
+      const resp = await terminalPort.reattach([prev], 0, 0)
       if (!resp.ok || !resp.payload || !resp.payload.alive.includes(prev)) {
         rememberSessionId('')  // stale id — fall through to a fresh spawn
         return false
@@ -3360,11 +3314,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     if (status.value !== 'running' || !sessionId.value) return
     const id = sessionId.value
     try {
-      const resp = await backend.send<{ alive: string[]; dead: string[] }>('terminal.reattach', {
-        terminal_session_ids: [id],
-        cols: 0,
-        rows: 0,
-      })
+      const resp = await terminalPort.reattach([id], 0, 0)
       if (!resp.ok || !resp.payload || !resp.payload.alive.includes(id)) {
         // PTY died while disconnected — mark exited so the user sees it
         status.value = 'exited'
@@ -3392,7 +3342,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
 
   // When the backend WS reconnects while we have a live session, reattach so
   // output resumes and the TUI repaints at the correct width.
-  watch(() => backend.status.value, (newStatus, oldStatus) => {
+  watch(() => terminalPort.status.value, (newStatus, oldStatus) => {
     if (newStatus === 'connected' && oldStatus !== 'connected') {
       // Held keys go only AFTER the reattach settles. Flushing alongside it
       // raced: reattachAfterReconnect yields at its first await, so a synchronous
@@ -3430,10 +3380,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   function requestCreateCancel(generation: string): Promise<boolean> {
     const existing = createCancelRequests.get(generation)
     if (existing) return existing
-    const request = backend.send('terminal.create.cancel', {
-      pane_id: paneId,
-      create_generation: generation,
-    }).then((response) => response.ok, () => false)
+    const request = terminalPort.cancelCreate(paneId, generation).then((response) => response.ok, () => false)
     createCancelRequests.set(generation, request)
     return request
   }
@@ -3572,14 +3519,10 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
       if (activeCreateGeneration !== createGeneration || isDisposed) return
       stallReason.value = null  // past every silent exit — the create is going out
       createInFlight = true
-      const resp = await backend.send<{
-        terminal_session_id: string
-        pid: number
-        startup_probe?: TerminalStartupProbe | null
-      }>('terminal.create', {
-        pane_id: paneId,
-        create_generation: createGeneration,
-        agent_key: opts.agentKey ?? null,
+      const resp = await terminalPort.create({
+        paneId,
+        createGeneration,
+        agentKey: opts.agentKey ?? null,
         command: opts.command,
         cwd: opts.cwd,
         env: opts.env ?? null,
@@ -3589,9 +3532,9 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
         cols: term.cols || 80,
         rows: term.rows || 24,
         metadata: opts.metadata ?? null,
-        output_log_file: opts.outputLogFile ?? null,
-        login_profile_id: opts.loginProfileId ?? null,
-        replaces_terminal_id: replacesPtyId || null,
+        outputLogFile: opts.outputLogFile ?? null,
+        loginProfileId: opts.loginProfileId ?? null,
+        replacesTerminalId: replacesPtyId || null,
       }, TERMINAL_CREATE_TIMEOUT_MS)
       // A cancellation or replacement can land while the RPC is in flight.
       // The backend cancellation owns rollback; a late result must never bind
@@ -3736,7 +3679,8 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     sessionId,
     containerRef,
     lastRawActivityAt,
-    backend.send,
+    (sessionId, cols, rows) => terminalPort.resize(sessionId, cols, rows),
+    (sessionId, cols, rows) => terminalPort.redraw(sessionId, cols, rows),
     () => !!pendingSpawn.value,
     () => { void createWhenMeasurable() },
   )
@@ -3821,10 +3765,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
   function pasteText(text: string): boolean {
     if (!sessionId.value || status.value === 'exited' || status.value === 'error') return false
     if (!inputTransportReady()) return false
-    void backend.send('terminal.input', {
-      terminal_session_id: sessionId.value,
-      data: text
-    })
+    void terminalPort.input(sessionId.value, text)
     return true
   }
 
@@ -3843,10 +3784,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     if (!inputTransportReady()) {
       return Promise.resolve('transport')
     }
-    return backend
-      .send('terminal.input',
-        { terminal_session_id: sessionId.value, data: text },
-        PASTE_ACK_TIMEOUT_MS)
+    return terminalPort.input(sessionId.value, text, PASTE_ACK_TIMEOUT_MS)
       .then((reply) => {
         if (reply && typeof reply === 'object' && (reply as { ok?: unknown }).ok === false) {
           return 'refused' as const
@@ -3979,16 +3917,13 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
     // interrupt that never left.
     if (!inputTransportReady()) return
     isStopped.value = true
-    await backend.send('terminal.interrupt', { terminal_session_id: sessionId.value })
+    await terminalPort.interrupt(sessionId.value)
   }
 
   async function kill(opts?: { force?: boolean }): Promise<void> {
     if (!sessionId.value) return
     rememberSessionId('')  // explicit kill — never reattach to this PTY
-    await backend.send('terminal.kill', {
-      terminal_session_id: sessionId.value,
-      force: opts?.force ?? false
-    })
+    await terminalPort.kill(sessionId.value, opts?.force ?? false)
   }
 
   function fitTerminal(opts?: { redrawAfterSettle?: boolean }): void {
@@ -4018,11 +3953,7 @@ export function useTerminal(paneId: string, backend: ReturnType<typeof useBacken
    */
   function redraw(): void {
     if (!sessionId.value) return
-    void backend.send('terminal.redraw', {
-      terminal_session_id: sessionId.value,
-      cols: term.cols,
-      rows: term.rows,
-    })
+    void terminalPort.redraw(sessionId.value, term.cols, term.rows)
   }
 
   // Hard reset: drop the entire scrollback (including any corrupt frames frozen

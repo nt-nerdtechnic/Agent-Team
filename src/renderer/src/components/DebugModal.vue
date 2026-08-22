@@ -24,6 +24,7 @@ import {
   type LogLevel,
 } from '../lib/debugLog'
 import type { useBackend } from '../composables/useBackend'
+import type { TerminalDockPort } from '../ports/terminalDock'
 import AiCliTerminal from './AiCliTerminal.vue'
 
 const logLevelList = LOG_LEVELS
@@ -32,6 +33,7 @@ const getLineLevel = logLineLevel
 const props = defineProps<{
   open: boolean
   backend: ReturnType<typeof useBackend>
+  terminalPort: TerminalDockPort
   /** Workspace the AI tab spawns in; falls back to the log directory. */
   workspacePath: string
 }>()
@@ -546,7 +548,7 @@ onUnmounted(() => stopTail())
               :key="shellPaneId"
               ref="shellRef"
               :pane-id="shellPaneId"
-              :backend="backend"
+              :terminal-port="terminalPort"
               :workspace-path="logDir"
             />
           </div>
@@ -587,7 +589,7 @@ onUnmounted(() => stopTail())
               :key="aiPaneId"
               ref="aiRef"
               :pane-id="aiPaneId"
-              :backend="backend"
+              :terminal-port="terminalPort"
               :workspace-path="aiWorkspace"
             />
           </div>

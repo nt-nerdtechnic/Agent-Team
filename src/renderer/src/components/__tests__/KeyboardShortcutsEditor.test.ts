@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, type VueWrapper } from '@vue/test-utils'
 import { i18n } from '../../i18n'
 import KeyboardShortcutsEditor from '../KeyboardShortcutsEditor.vue'
-import { _resetKeybindingsState, getUserRules, isKeyCaptureActive } from '../../keybindings/useKeybindings'
+import { _resetKeybindingsState, getUserRules, initKeybindingsPort, isKeyCaptureActive } from '../../keybindings/useKeybindings'
 import { NATIVE_MENU_KEYS, TERMINAL_KEYS } from '../../keybindings/externalKeys'
 
 interface Bridge {
@@ -48,11 +48,20 @@ beforeEach(() => {
     onKeybindingsChanged: vi.fn(),
   }
   ;(window as unknown as { agentTeam: Bridge }).agentTeam = bridge
+  initKeybindingsPort({
+    read: () => bridge.readKeybindings(),
+    write: (content) => bridge.writeKeybindings(content),
+    onChanged: (callback) => {
+      bridge.onKeybindingsChanged(callback)
+      return () => {}
+    },
+  })
 })
 
 afterEach(() => {
   wrapper?.unmount()
   delete (window as unknown as { agentTeam?: Bridge }).agentTeam
+  initKeybindingsPort({})
 })
 
 describe('rendering', () => {
